@@ -452,6 +452,8 @@ class GfsWebSocketClient:
             "moment_delete_certs",
             # v_68 — a follower's sealed reaction to a local author.
             "moment_reaction",
+            # v_69 — an author's encrypted reaction totals.
+            "incoming_public_moment_counts",
         ):
             if self._on_moment_public is None:
                 log.debug(

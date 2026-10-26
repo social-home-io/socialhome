@@ -955,6 +955,50 @@ Anything that lets the GFS read who reacted, with what, or to which moment
 anyone but the author's household, is a §2-principle change requiring a new
 sign-off.
 
+### Decision: everyone sees the full reaction count — totals only (v_69)
+
+Owner decision 10, 2026-10-25 (the owner was told: counts are totals only —
+never who reacted — sent at checkpoints, only on change). Only a moment's
+author household holds every reaction to it, so it re-broadcasts the
+totals to the households that hold the moment — over the mesh and through
+the GFSs its public moments go to
+([`protocol/momentum.md`](./protocol/momentum.md#reaction-totals-v_69),
+[`protocol/momentum_public.md`](./protocol/momentum_public.md#reaction-totals-through-the-gfs-v_69)).
+What this tells whom:
+
+1. **Holders learn totals, including reactions from audiences they can't
+   see.** A household holding the moment learns how many people reacted
+   with which emoji (the 8 most used, and the total) — counting reactions
+   from people it doesn't know: the mesh learns how much GFS followers
+   reacted, and GFS followers how much the author's paired households did.
+   Never who, never which household. Encrypted on every hop (hop-encrypted
+   on the mesh, sealed under the moment's item key through a GFS); a
+   household that doesn't hold (or relay) the moment never gets them.
+2. **Residual — a small count plus timing can hint at who.** A total of 1,
+   or a change of 1 between two checkpoints, combined with what a household
+   already knows (who it showed the moment to, when someone said they
+   liked it) can point at a person. Fixed checkpoints (+10 min, +6 h /
+   +3 h, +3 d / +24 h), never per reaction, blunt the timing; they don't
+   remove it for a moment with very few reactions.
+3. **Residual — the GFS learns that totals changed.** It reads no count: it
+   pushes an opaque envelope of fixed fields. It does learn that moment M's
+   totals changed before checkpoint *k* — an update arrived — and so, over
+   a moment's life, roughly whether it drew reactions early or late. It is
+   not told how many, which emoji, or from whom.
+4. **Nothing travels further than the moment did.** Totals go only to
+   households that hold the moment (or relayed it), under the same hide
+   list, guardian blocks and relay policy; a protected account's totals go
+   to paired households only and are never relayed; a GFS pushes them only
+   to followers that are connected and asked for them, and never queues
+   them.
+5. **No new key.** The mesh totals are signed with the author household's
+   existing identity key (a new `moment-counts:v1:` domain); the GFS totals
+   ride the existing moment envelope and key.
+
+Anything that sends who reacted, sends totals per reaction rather than at
+checkpoints, or lets the GFS read a count is a §2-principle change requiring
+a new sign-off.
+
 ## No third-party fetches from user content
 
 Viewing content never makes the viewer's browser contact a host the

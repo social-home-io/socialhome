@@ -100,15 +100,22 @@ class SingleTargetSender:
         payload: dict,
         *,
         space_id: str | None = None,
+        outbox_key: str | None = None,
     ) -> None:
         """Deliver ``event_type``/``payload`` to ``instance_id``, fail-soft.
 
         ``space_id`` is only forwarded when set, so the call shape matches
         the pre-mixin code exactly for the common (non-space) senders.
+        ``outbox_key`` (also only when set) makes the queued send
+        latest-only per (peer, key) — see ``FederationService.send_event``.
         """
         if self._federation is None:  # pragma: no cover — defensive
             return
-        extra = {"space_id": space_id} if space_id is not None else {}
+        extra: dict[str, str] = {}
+        if space_id is not None:
+            extra["space_id"] = space_id
+        if outbox_key is not None:
+            extra["outbox_key"] = outbox_key
         try:
             await self._federation.send_event(
                 to_instance_id=instance_id,

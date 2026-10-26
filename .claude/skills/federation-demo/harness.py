@@ -49,7 +49,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -9510,6 +9510,27 @@ def cmd_verify() -> None:
             )
         else:
             print("  v_68 GFS signs moment_reactions ✓")
+    # v_69 — everyone sees the full reaction count. The mesh event goes only
+    # to v_69 peers (``peer_supports``); the GFS path is gated on the signed
+    # ``moment_counts``. Step 3c-bis carries c's totals to d two hops away,
+    # ``gfs-moment-profile`` a's totals to e through the GFS.
+    if int(_Cap.MIN_FOR_MOMENT_REACTION_COUNTS) != 69 or _OURS < 69:
+        failures.append(
+            "MIN_FOR_MOMENT_REACTION_COUNTS moved off v_69 (or OURS fell below "
+            "it) — totals would reach households that drop the event"
+        )
+    else:
+        print("  v_69 reaction totals gate in place ✓")
+    if state.get("gfs") and _gfs_alive(state):
+        s, info = _request(f"http://127.0.0.1:{GFS_PORT}/gfs/info")
+        caps = (info or {}).get("capabilities") or {} if s == 200 else {}
+        if caps.get("moment_counts") is not True:
+            failures.append(
+                f"GFS /gfs/info does not sign moment_counts (HTTP {s}, "
+                f"caps={sorted(caps)!r})"
+            )
+        else:
+            print("  v_69 GFS signs moment_counts ✓")
     gmld = state.get("gfs_moment_late_delete")
     if gmld:
         held = _rows(
@@ -10078,6 +10099,8 @@ def cmd_verify() -> None:
     #     reaches the author.
     if carol_moment and "d" in state.get("instances", {}):
         failures.extend(_verify_routed_moment_reaction(state, carol_moment["id"]))
+        # v_69 — c's totals reach b (paired) and d (two hops, relayed).
+        failures.extend(_verify_moment_totals(state, carol_moment["id"]))
     else:
         print("  (v_67 routed-reaction check skipped — c's moment rate-limited or no d)")
 
@@ -11399,6 +11422,17 @@ def cmd_verify() -> None:
                 )
             else:
                 print("  v_68 a holds e's reaction that came through the GFS ✓")
+            # v_69 — and e holds a's totals for it, through the GFS.
+            totals = _rows(
+                "e",
+                "SELECT reaction_summary FROM moments WHERE id = ?",
+                (gmp["moment_id"],),
+            )
+            got = json.loads(totals[0][0]) if totals and totals[0][0] else None
+            if not got or got.get("counts", {}).get(gmp["reaction"]) != 1:
+                failures.append(f"e: a's totals through the GFS are {got!r}")
+            else:
+                print("  v_69 e holds a's reaction totals that came through the GFS ✓")
 
     # 14. Log audit — scan each backend's stdout/stderr for unhandled
     #    exceptions, ERROR-level lines, federation-pipeline rejects.
@@ -14949,6 +14983,95 @@ def _verify_routed_moment_reaction(state: dict, moment_id: str) -> list[str]:
     return failures
 
 
+def _backdate_moment(label: str, moment_id: str, *, minutes: int) -> None:
+    """Move ``moment_id``'s ``created_at`` on its author household ``label``
+    *minutes* into the past, so the v_69 totals checkpoint at +10 min comes
+    due at the household's next minute tick instead of in ten minutes. The
+    one documented write besides the home-coordinate seed: it changes only
+    when the moment counts as made, never what was signed or sent."""
+    import sqlite3
+
+    when = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    conn = sqlite3.connect(_instance_dir(label) / "socialhome.db", timeout=10)
+    try:
+        conn.execute("UPDATE moments SET created_at=? WHERE id=?", (when, moment_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _verify_moment_totals(state: dict, moment_id: str) -> list[str]:
+    """v_69: d reacts 🔥 to c's moment (it reaches c two hops back, v_67);
+    c's +10 min checkpoint is brought forward and its signed totals must
+    reach b (paired with c) and d (two hops away, relayed by a v_69 relay),
+    and d's API must show them."""
+    failures: list[str] = []
+    d = state["instances"]["d"]
+    d_url = f"http://127.0.0.1:{d['port']}"
+    s, _ = _request(
+        f"{d_url}/api/moments/{moment_id}/reaction",
+        token=d["token"],
+        method="PUT",
+        body={"emoji": "🔥"},
+    )
+    _must("moment react 🔥(d)", s, _)
+    deadline = time.time() + 30
+    held: list[tuple] = []
+    while time.time() < deadline:
+        held = _rows(
+            "c",
+            "SELECT emoji FROM moment_reactions WHERE moment_id=? AND reactor_user_id=?",
+            (moment_id, d.get("user_id")),
+        )
+        if held == [("🔥",)]:
+            break
+        time.sleep(1)
+    else:
+        return [f"c: d's 🔥 on {moment_id!r} never arrived (row={held!r})"]
+    want = _rows(
+        "c", "SELECT COUNT(*) FROM moment_reactions WHERE moment_id=?", (moment_id,)
+    )[0][0]
+    _backdate_moment("c", moment_id, minutes=11)
+
+    def _totals(label: str) -> dict | None:
+        rows = _rows(
+            label, "SELECT reaction_summary FROM moments WHERE id=?", (moment_id,)
+        )
+        return json.loads(rows[0][0]) if rows and rows[0][0] else None
+
+    deadline = time.time() + 120
+    got: dict[str, dict | None] = {}
+    while time.time() < deadline:
+        got = {label: _totals(label) for label in ("b", "d")}
+        if all(t and t.get("total") == want for t in got.values()):
+            break
+        time.sleep(2)
+    else:
+        refused = [
+            line.strip()[:200]
+            for label in ("b", "d")
+            for line in _log_lines_matching(label, "moment_reactions_counted")
+            if "refusing" in line
+        ]
+        return [
+            f"c's totals for {moment_id!r} (total {want}) did not reach b and d: "
+            f"{got!r}" + (f"; refused: {refused[-1]}" if refused else "")
+        ]
+    s, detail = _request(f"{d_url}/api/moments/{moment_id}", token=d["token"])
+    m = (detail or {}).get("moment") or {}
+    if s != 200 or m.get("reaction_count") != want or m.get("reaction_totals_at") is None:
+        failures.append(
+            f"d: c's moment shows reaction_count={m.get('reaction_count')!r} "
+            f"totals_at={m.get('reaction_totals_at')!r}, expected {want} from c"
+        )
+    else:
+        print(
+            f"  v_69 c's signed reaction totals ({want}) reach b and d two hops "
+            "away; d's API shows them ✓"
+        )
+    return failures
+
+
 def _rows(label: str, sql: str, params: tuple = ()) -> list[tuple]:
     """Run a read-only query against ``label``'s SQLite DB.
 
@@ -18357,6 +18480,33 @@ def _gfs_moment_reaction(state: dict, moment_id: str, author_uid: str) -> None:
             want = [(emoji,)]
         _must(f"gfs-moment-profile: e {what}", s, body, ok=(200, 204))
         _wait(want, what)
+    # v_69 — a's totals reach e through the GFS: the moment's +10 min
+    # checkpoint is brought forward (the moment is backdated on a), a's
+    # minute tick seals the totals under today's step and the GFS pushes them
+    # to e (connected, declared ``ops: ["counts"]``) — never queued.
+    _backdate_moment("a", moment_id, minutes=11)
+    deadline = time.monotonic() + 120
+    totals = None
+    while time.monotonic() < deadline:
+        rows = _rows("e", "SELECT reaction_summary FROM moments WHERE id = ?", (moment_id,))
+        totals = json.loads(rows[0][0]) if rows and rows[0][0] else None
+        if totals and totals.get("counts") == {"🔥": 1} and totals.get("total") == 1:
+            break
+        time.sleep(2)
+    else:
+        sent = _log_lines_matching("a", "moment totals")
+        raise SystemExit(
+            f"gfs-moment-profile: e holds totals {totals!r} for a's moment, "
+            f"expected 🔥 1; a: {sent[-2:]!r}"
+        )
+    s, detail = _request(f"{e_url}/api/moments/{moment_id}", token=e["token"])
+    m = (detail or {}).get("moment") or {}
+    if s != 200 or m.get("reaction_count") != 1 or m.get("reaction_totals_at") is None:
+        raise SystemExit(
+            f"gfs-moment-profile: e's API shows reaction_count="
+            f"{m.get('reaction_count')!r} totals_at={m.get('reaction_totals_at')!r}"
+        )
+    print("  v_69 a's reaction totals reached e through the GFS, sealed ✓")
     for secret in ("👏", "🔥", e_user or "-", moment_id):
         if _gfs_log_lines_matching(secret, offset=gfs_off):
             raise SystemExit(f"gfs-moment-profile: the GFS log names {secret!r}")

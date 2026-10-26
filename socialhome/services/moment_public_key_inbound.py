@@ -49,6 +49,7 @@ from ..federation.keywrap_seal import SUPPORTED_KEM_SUITES, open_keywrap
 from ..moment_public_seal import (
     DELIVERY_FIELDS,
     MAX_RATCHET_STEPS,
+    MOMENT_OP_COUNTS,
     SUPPORTED_MOMENT_SEAL_SUITES,
     UnsupportedMomentSealSuite,
     is_wire_int,
@@ -76,6 +77,11 @@ OWN_MOMENT_SUITES: dict[str, list[str]] = {
     "kem": sorted(SUPPORTED_KEM_SUITES),
     "seal": sorted(SUPPORTED_MOMENT_SEAL_SUITES),
 }
+
+#: v_69 — the extra frames this household takes, declared (as ``ops``) only
+#: to a GFS that proved ``moment_counts``: reaction totals of the moments it
+#: holds, pushed while it is connected.
+OWN_MOMENT_OPS: tuple[str, ...] = (MOMENT_OP_COUNTS,)
 
 #: A follower asks one author for a key at most this often.
 REQUEST_EVERY_S: float = 60.0

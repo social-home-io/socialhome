@@ -1764,6 +1764,21 @@ and a media descriptor whose picture blob the GFS serves. The GFS log since
 the request must not contain ``k``, and the GFS's ``/moments/{user}`` page
 shows the profile only — not the moment's text.
 
+**Reaction totals (v_69).** After d's routed reaction (3c-bis), d reacts
+🔥 again; once c holds it the harness backdates c's moment by 11 minutes
+(``_backdate_moment`` — the only write besides the home-coordinate seed; it
+changes when the moment counts as made, nothing signed) so c's +10 min
+checkpoint comes due at its next minute tick. b (paired) and d (two hops,
+relayed) must then hold c's signed totals (``moments.reaction_summary``,
+total = c's ``moment_reactions`` count) within 120 s, and d's
+``GET /api/moments/{id}`` must show that ``reaction_count`` with a
+``reaction_totals_at``. In ``gfs-moment-profile`` the same is done for a's
+public moment after e's 🔥: e must hold ``{"🔥": 1}`` from a through the GFS
+(sealed, ``incoming_public_moment_counts``), with the GFS log and database
+still free of the emoji. ``verify`` pins ``MIN_FOR_MOMENT_REACTION_COUNTS``
+at v_69, requires the GFS's signed ``moment_counts``, and re-checks e's
+totals (13z).
+
 **Reactions through the GFS (v_68).** e keeps a's key-wrap key from the
 signed moment (``moment_public_follows.followed_keywrap_pk``, with its
 ``followed_keywrap_suite``) and its

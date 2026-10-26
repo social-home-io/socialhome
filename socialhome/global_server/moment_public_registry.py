@@ -43,6 +43,18 @@ reaches households on EVERY node:
 * ``follow_changed`` / ``moment_key_request`` to the author's household are
   forwarded (audience ``instance``) when its socket is on another node.
 
+**Reaction totals (v_69).** An author household's encrypted totals for one
+of its public moments (``POST /gfs/moments/counts``, the same 8-field
+envelope, today's key step) are pushed as ``incoming_public_moment_counts``
+to the follower households that declared ``ops: ["counts"]`` and are
+connected — here, and on the other nodes (cluster audience
+``count_followers``) — and **never queued**: a follower offline now gets the
+next checkpoint, or keeps its own count. Budgets, cluster-wide:
+:data:`COUNTS_PER_HOUSEHOLD_PER_MINUTE` per author household (each node its
+share) and :data:`COUNTS_PER_MOMENT_PER_DAY` per moment (every node counts
+the updates it is forwarded too). The GFS reads no count; it learns that a
+public moment's totals changed before a checkpoint.
+
 This module *only* wires the data model + push primitives. The HTTP
 routes live in ``routes/moments_public.py`` and the WS frame handler
 hooks live in the GFS WS endpoint.
@@ -59,12 +71,15 @@ import orjson
 
 from ..moment_public_seal import (
     FRAME_MOMENT,
+    FRAME_MOMENT_COUNTS,
     FRAME_MOMENT_DELETE,
     FRAME_MOMENT_REACTION,
+    MOMENT_OP_COUNTS,
     MOMENT_SEAL_SUITE_AESGCM256,
     RATCHET_STEP_S,
 )
 from .cluster_relay import (
+    AUDIENCE_COUNT_FOLLOWERS,
     AUDIENCE_FOLLOWERS,
     AUDIENCE_INSTANCE,
     typed_frame,
@@ -151,6 +166,19 @@ REACTION_SEEN_TTL_S: float = 600.0
 REACTION_SEEN_MAX: int = 50_000
 
 
+#: v_69 — reaction-total updates one author household may post a minute,
+#: across the cluster (each node allows its :func:`~.public.node_share`). An
+#: author household sends at most three per public moment, at fixed
+#: checkpoints and only on change; ten a minute is a burst of ten moments
+#: reaching a checkpoint together.
+COUNTS_PER_HOUSEHOLD_PER_MINUTE: int = 10
+
+#: v_69 — updates of one moment a day, across the cluster: every node counts
+#: the ones it took AND the ones it was forwarded, so the cap holds whichever
+#: node a post lands on. The author sends at +10 min, +3 h and +24 h.
+COUNTS_PER_MOMENT_PER_DAY: int = 3
+
+
 def envelope_step_current(key_gen: int, key_step: int, now: float) -> bool:
     """Whether *now* falls in the day of the envelope's key step (± the
     slack). ``key_gen`` is the generation's mint time and a step lasts one
@@ -164,6 +192,17 @@ def envelope_step_current(key_gen: int, key_step: int, now: float) -> bool:
         <= now
         <= start + RATCHET_STEP_S + MOMENT_STEP_SLACK_S
     )
+
+
+def suites_take_counts(raw: str | None) -> bool:
+    """Whether a follower household's declared suites (JSON) say it opens
+    public moments AND takes reaction totals (``ops`` names ``counts``,
+    v_69)."""
+    if not suites_can_open(raw):
+        return False
+    assert raw is not None
+    ops = orjson.loads(raw).get("ops")
+    return isinstance(ops, list) and MOMENT_OP_COUNTS in ops
 
 
 def suites_can_open(raw: str | None) -> bool:
@@ -186,6 +225,9 @@ class MomentPublicRegistry:
 
     __slots__ = (
         "_cluster",
+        "_counts_household",
+        "_counts_moment",
+        "_counts_seen",
         "_fan_out_fwd",
         "_follows",
         "_instances",
@@ -250,6 +292,16 @@ class MomentPublicRegistry:
         )
         self._reaction_seen = SeenPayloadCache(
             ttl_s=REACTION_SEEN_TTL_S, cap=REACTION_SEEN_MAX
+        )
+        #: v_69 — reaction totals: per author household a minute, per moment a
+        #: day (cluster-wide, see :meth:`note_forwarded_counts`), and the
+        #: updates pushed or forwarded lately (a retried post is a no-op).
+        self._counts_household = SlidingWindowCounter(COUNTS_PER_HOUSEHOLD_PER_MINUTE)
+        self._counts_moment = SlidingWindowCounter(
+            COUNTS_PER_MOMENT_PER_DAY, max_keys=MOMENT_SEEN_MAX, window_s=86_400.0
+        )
+        self._counts_seen = SeenPayloadCache(
+            ttl_s=MOMENT_SEEN_TTL_S, cap=MOMENT_SEEN_MAX
         )
         self._tasks: set[asyncio.Task] = set()
 
@@ -517,6 +569,76 @@ class MomentPublicRegistry:
             author, within_s=ENVELOPE_QUEUE_TTL_SECONDS
         )
         return [instance_id for instance_id in missed if instance_id in recent]
+
+    # ── Reaction totals (v_69) ──────────────────────────────────────────
+
+    @property
+    def counts_seen_cache(self) -> SeenPayloadCache:
+        """The totals updates this node pushed or forwarded — the cluster
+        relay dedupes ``count_followers`` items in it."""
+        return self._counts_seen
+
+    async def counts_audience_targets(self, author_user_id: str) -> list[str]:
+        """The follower households of *author_user_id* that open its moments
+        and declared ``ops: ["counts"]`` (on any of their follows) — the
+        cluster audience resolver for ``count_followers``."""
+        able: dict[str, bool] = {}
+        for f in await self._follows.followers_of(author_user_id):
+            able[f.follower_instance_id] = able.get(
+                f.follower_instance_id, False
+            ) or suites_take_counts(f.moment_suites)
+        return [instance_id for instance_id, ok in able.items() if ok]
+
+    def note_forwarded_counts(self, frame: dict) -> None:
+        """Charge the per-moment budget for a totals update another node
+        took (its forwarded frame), so the day's cap is cluster-wide."""
+        envelope = frame.get("payload")
+        if not isinstance(envelope, dict):
+            return
+        author, moment_id = envelope.get("author_user_id"), envelope.get("moment_id")
+        if isinstance(author, str) and isinstance(moment_id, str):
+            self._counts_moment.allow(f"{author}|{moment_id}")
+
+    async def relay_counts(self, *, sender: str, envelope: dict[str, Any]) -> str:
+        """Push an author household's encrypted totals (already checked:
+        the shape, the author's own household, today's step) to the able
+        followers connected here, and forward them once to the other nodes —
+        never queued. ``"accepted"`` (also for a retried post: the same bytes
+        are not pushed twice and spend nothing) or ``"rate_limited"``."""
+        author = str(envelope["author_user_id"])
+        forwarded = typed_frame(FRAME_MOMENT_COUNTS, {"payload": envelope})
+        digest = SeenPayloadCache.digest(forwarded)
+        if self._counts_seen.seen(digest):
+            return "accepted"
+        moment_key = f"{author}|{envelope['moment_id']}"
+        nodes = self._cluster.live_node_count() if self._cluster is not None else 1
+        if self._counts_moment.exhausted(moment_key) or not (
+            self._counts_household.allow(
+                sender, limit=node_share(COUNTS_PER_HOUSEHOLD_PER_MINUTE, nodes)
+            )
+        ):
+            return "rate_limited"
+        self._counts_moment.allow(moment_key)
+        self._counts_seen.record(digest)
+        push = {"type": FRAME_MOMENT_COUNTS, "payload": envelope}
+        delivered = 0
+        targets = await self.counts_audience_targets(author)
+        for instance_id in targets:
+            if await self._ws_registry.send(instance_id, push):
+                delivered += 1
+        if self._fan_out_fwd is not None:
+            # Never queued (``queue_for`` empty, and the frame type is
+            # ephemeral): an offline follower gets the next checkpoint.
+            self._fan_out_fwd.forward(
+                kind=AUDIENCE_COUNT_FOLLOWERS, key=author, frame=forwarded
+            )
+        log.info(
+            "moment_public.counts: author=%s able=%d delivered_here=%d",
+            author,
+            len(targets),
+            delivered,
+        )
+        return "accepted"
 
     # ── Key routing (v_62) ──────────────────────────────────────────────
 

@@ -48,9 +48,11 @@ from ..domain.moment import (
     Moment,
     MomentOwnSaveError,
     MomentReactionInvalidError,
+    MomentReactionTotals,
     MomentSaveUnavailableError,
     SavedMoment,
     is_valid_moment_reaction,
+    merged_reaction_view,
 )
 from ..federation.owner_bound_id import MOMENT_KIND, mint_owner_bound_id
 from ..media.cleanup import unlink_unreferenced
@@ -88,6 +90,18 @@ def _has_expired(moment: Moment) -> bool:
     if expires.tzinfo is None:
         expires = expires.replace(tzinfo=UTC)
     return expires <= datetime.now(UTC)
+
+
+def _reacted_at_ms(value: str) -> int:
+    """A ``moment_reactions.reacted_at`` (naive UTC, seconds or ms) in Unix
+    milliseconds; ``0`` when it doesn't parse."""
+    try:
+        when = datetime.fromisoformat(value)
+    except ValueError:
+        return 0
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return int(when.timestamp() * 1000)
 
 
 def _expiry_key(value: str) -> datetime:
@@ -609,6 +623,51 @@ class MomentService:
             out[m.id] = (
                 m.id in saved,
                 await self.can_save(m, viewer_user_id, _cache=cache),
+            )
+        return out
+
+    async def reaction_totals(
+        self,
+        moments: list[Moment],
+        *,
+        viewer_user_id: str,
+        reach: dict[str, str],
+    ) -> dict[str, MomentReactionTotals]:
+        """What the API shows of each moment's reactions (v_69).
+
+        A moment from another household whose reactions reach its author
+        (``reach`` ``author``) shows the totals its author's household last
+        sent, when it sent any — plus the viewer's own reaction if made since
+        (it can't be in them yet). Everything else — the viewer's own
+        household's moments (all reactions are here), a moment whose
+        reactions stay here, or no totals yet — shows the reactions held
+        here. Always the viewer's own emoji, from the rows here."""
+        ids = [m.id for m in moments]
+        if not ids:
+            return {}
+        local = await self._moments.reaction_tallies(ids)
+        mine = await self._moments.my_reactions(ids, viewer_user_id)
+        summaries = await self._moments.get_reaction_summaries(
+            [
+                m.id
+                for m in moments
+                if m.received_via != "self"
+                and reach.get(m.id, REACTION_REACH_AUTHOR) == REACTION_REACH_AUTHOR
+            ]
+        )
+        out: dict[str, MomentReactionTotals] = {}
+        for m in moments:
+            own = mine.get(m.id)
+            counts, total, rev = merged_reaction_view(
+                summary=summaries.get(m.id),
+                local=local.get(m.id, {}),
+                mine=(own[0], _reacted_at_ms(own[1])) if own is not None else None,
+            )
+            out[m.id] = MomentReactionTotals(
+                counts=counts,
+                total=total,
+                totals_rev=rev,
+                my_reaction=own[0] if own is not None else None,
             )
         return out
 

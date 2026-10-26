@@ -16,6 +16,7 @@ import pytest
 from socialhome.global_server import cluster_relay as mod
 from socialhome.global_server.cluster_relay import (
     AUDIENCE_CHANNEL,
+    AUDIENCE_COUNT_FOLLOWERS,
     AUDIENCE_FOLLOWERS,
     AUDIENCE_INSTANCE,
     AUDIENCE_SPACE,
@@ -707,3 +708,38 @@ async def test_a_kind_with_its_own_seen_cache_dedupes_in_it():
     await svc.apply([moment])
     await _settle(svc)
     assert len(registry.sent) == 1
+
+
+async def test_an_observer_sees_each_new_item_of_its_kind_once():
+    """v_69: the node a totals update was forwarded to charges it against
+    the cluster-wide per-moment budget — once, not per copy."""
+    registry, relay = _Registry({_A}), _Relay()
+    svc = _fan_out(registry=registry, relay=relay)
+    seen: list[dict] = []
+
+    async def _resolve(key: str) -> list[str]:
+        return [_A]
+
+    svc.register_audience(AUDIENCE_COUNT_FOLLOWERS, _resolve, observe=seen.append)
+    frame = {"event_type": "incoming_public_moment_counts", "payload": {"n": 1}}
+    item = _item(frame, kind=AUDIENCE_COUNT_FOLLOWERS, key="u-author")
+    await svc.apply([item])
+    await svc.apply([item])
+    await _settle(svc)
+    assert seen == [frame]
+    assert registry.sent == [
+        (_A, {"type": "incoming_public_moment_counts", "payload": {"n": 1}})
+    ]
+
+
+def test_a_totals_frame_is_never_queued():
+    item = _item(
+        {"event_type": "incoming_public_moment_counts", "payload": {}},
+        kind=AUDIENCE_COUNT_FOLLOWERS,
+        key="u-author",
+        queue=True,
+    )
+    assert item.queueable is False
+    assert mod.ForwardedRelay.from_wire(item.to_wire()) == item
+    bad = {**item.to_wire(), "frame": {"event_type": "incoming_public_moment"}}
+    assert mod.ForwardedRelay.from_wire(bad) is None

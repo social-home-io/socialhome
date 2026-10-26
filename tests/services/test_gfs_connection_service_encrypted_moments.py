@@ -85,3 +85,16 @@ async def test_reactions_need_their_own_proof(env):
     assert await svc.moment_reactions_supported("nope") is False
     svc._forget_listing("g1")
     assert "g1" not in svc._moment_reactions
+
+
+async def test_totals_need_their_own_proof(env):
+    """v_69: reaction totals (and an ``ops`` declaration) go only to a
+    server that proved ``moment_counts``."""
+    svc = await _svc(env)
+    svc._encrypted_moments["g1"] = True
+    assert await svc.moment_counts_supported("g1") is False
+    svc._moment_counts["g1"] = True
+    assert await svc.moment_counts_supported("g1") is True
+    assert await svc.moment_counts_supported("nope") is False
+    svc._forget_listing("g1")
+    assert "g1" not in svc._moment_counts

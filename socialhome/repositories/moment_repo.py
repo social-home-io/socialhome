@@ -41,10 +41,12 @@ from ..domain.moment import (
     Moment,
     MomentReaction,
     MomentReactionRoute,
+    MomentReactionSummary,
     MomentTombstone,
     SavedMoment,
     extract_hashtags,
     normalize_hashtag,
+    reaction_counts_valid,
 )
 from .base import row_to_dict, rows_to_dicts
 from .cp_repo import GUARDIAN_BLOCK_COUNTERPARTS_SQL
@@ -312,6 +314,26 @@ class AbstractMomentRepo(Protocol):
     async def get_reaction_routes(
         self, moment_ids: list[str]
     ) -> dict[str, MomentReactionRoute]: ...
+
+    # Reaction totals (v_69) -----------------------------------------------
+    async def set_reaction_summary(
+        self,
+        moment_id: str,
+        summary: MomentReactionSummary,
+        *,
+        author_user_id: str,
+        origin_instance_id: str,
+    ) -> bool: ...
+    async def get_reaction_summaries(
+        self, moment_ids: list[str]
+    ) -> dict[str, MomentReactionSummary]: ...
+    async def reaction_tallies(
+        self, moment_ids: list[str]
+    ) -> dict[str, dict[str, int]]: ...
+    async def my_reactions(
+        self, moment_ids: list[str], viewer_user_id: str
+    ) -> dict[str, tuple[str, str]]: ...
+    async def list_own_live_since(self, since_iso: str) -> list[Moment]: ...
 
     # Engagement counters --------------------------------------------------
     async def count_engagement_for(
@@ -840,6 +862,108 @@ class SqliteMomentRepo:
                     out[row["id"]] = route
         return out
 
+    # ── Reaction totals (v_69) ─────────────────────────────────────────
+
+    async def set_reaction_summary(
+        self,
+        moment_id: str,
+        summary: MomentReactionSummary,
+        *,
+        author_user_id: str,
+        origin_instance_id: str,
+    ) -> bool:
+        """Keep *summary* — the author household's newest totals — on a live
+        moment from another household (``received_via`` household or gfs,
+        the column's CHECK) whose stored author and origin are the ones
+        named, only when its ``rev`` is newer than the one held. Returns
+        whether it was kept; one statement, so two copies racing can't
+        roll a newer one back."""
+        text = orjson.dumps(
+            {
+                "rev": summary.rev,
+                "counts": dict(summary.counts),
+                "total": summary.total,
+            }
+        ).decode()
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE moments SET reaction_summary=? WHERE id=?"
+            " AND author_user_id=? AND origin_instance_id=?"
+            " AND received_via IN ('household', 'gfs') AND deleted_at IS NULL"
+            " AND (reaction_summary IS NULL"
+            "      OR json_extract(reaction_summary, '$.rev') < ?)",
+            (text, moment_id, author_user_id, origin_instance_id, summary.rev),
+        )
+        return changed > 0
+
+    async def get_reaction_summaries(
+        self, moment_ids: list[str]
+    ) -> dict[str, MomentReactionSummary]:
+        """The kept totals of each live moment in *moment_ids* that has
+        them (an unreadable value is skipped)."""
+        out: dict[str, MomentReactionSummary] = {}
+        for start in range(0, len(moment_ids), 500):
+            chunk = moment_ids[start : start + 500]
+            marks = ",".join("?" * len(chunk))
+            rows = await self._db.fetchall(
+                f"SELECT id, reaction_summary FROM moments WHERE id IN ({marks})"
+                " AND reaction_summary IS NOT NULL AND deleted_at IS NULL",
+                tuple(chunk),
+            )
+            for row in rows:
+                summary = _summary_from_json(row["reaction_summary"])
+                if summary is not None:
+                    out[row["id"]] = summary
+        return out
+
+    async def reaction_tallies(
+        self, moment_ids: list[str]
+    ) -> dict[str, dict[str, int]]:
+        """``{moment_id: {emoji: n}}`` of the reactions held here (moments
+        without any are left out)."""
+        out: dict[str, dict[str, int]] = {}
+        for start in range(0, len(moment_ids), 500):
+            chunk = moment_ids[start : start + 500]
+            marks = ",".join("?" * len(chunk))
+            rows = await self._db.fetchall(
+                "SELECT moment_id, emoji, COUNT(*) AS n FROM moment_reactions"
+                f" WHERE moment_id IN ({marks}) GROUP BY moment_id, emoji",
+                tuple(chunk),
+            )
+            for row in rows:
+                out.setdefault(row["moment_id"], {})[row["emoji"]] = int(row["n"])
+        return out
+
+    async def my_reactions(
+        self, moment_ids: list[str], viewer_user_id: str
+    ) -> dict[str, tuple[str, str]]:
+        """``{moment_id: (emoji, reacted_at)}`` of *viewer_user_id*'s own
+        reactions among *moment_ids*."""
+        out: dict[str, tuple[str, str]] = {}
+        for start in range(0, len(moment_ids), 500):
+            chunk = moment_ids[start : start + 500]
+            marks = ",".join("?" * len(chunk))
+            rows = await self._db.fetchall(
+                "SELECT moment_id, emoji, reacted_at FROM moment_reactions"
+                f" WHERE reactor_user_id=? AND moment_id IN ({marks})",
+                (viewer_user_id, *chunk),
+            )
+            for row in rows:
+                out[row["moment_id"]] = (row["emoji"], str(row["reacted_at"]))
+        return out
+
+    async def list_own_live_since(self, since_iso: str) -> list[Moment]:
+        """Every live moment written on this household (``received_via =
+        'self'``) created at or after *since_iso* and not yet expired —
+        what the v_69 totals scheduler looks at."""
+        rows = await self._db.fetchall(
+            "SELECT * FROM moments WHERE received_via='self'"
+            " AND deleted_at IS NULL AND datetime(created_at) >= datetime(?)"
+            " AND datetime(expires_at) > datetime('now')"
+            " ORDER BY created_at ASC",
+            (since_iso,),
+        )
+        return [m for m in (_row_to_moment(d) for d in rows_to_dicts(rows)) if m]
+
     async def list_reactions(self, moment_id: str) -> list[MomentReaction]:
         rows = await self._db.fetchall(
             "SELECT moment_id, reactor_user_id, emoji, reacted_at "
@@ -1250,6 +1374,23 @@ def _route_from_json(text: object) -> MomentReactionRoute | None:
         )
     except orjson.JSONDecodeError, KeyError, TypeError:
         return None
+
+
+def _summary_from_json(text: object) -> MomentReactionSummary | None:
+    """A stored ``reaction_summary`` as :class:`MomentReactionSummary`, or
+    ``None`` when it doesn't parse into one."""
+    try:
+        data = orjson.loads(str(text))
+        rev, counts, total = data["rev"], data["counts"], data["total"]
+    except orjson.JSONDecodeError, KeyError, TypeError:
+        return None
+    if not isinstance(rev, int) or not reaction_counts_valid(counts, total):
+        return None
+    return MomentReactionSummary(
+        rev=rev,
+        counts=tuple(sorted(counts.items(), key=lambda p: (-p[1], p[0]))),
+        total=total,
+    )
 
 
 def _row_to_moment(row: dict | None) -> Moment | None:

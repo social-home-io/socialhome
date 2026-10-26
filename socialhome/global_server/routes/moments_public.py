@@ -20,6 +20,8 @@ Three surfaces:
     household asks the author's household for its current key (v_62).
   - ``POST /gfs/moments/users/{user_id}/react`` — a follower household's
     sealed reaction, pushed to the author's household only (v_68).
+  - ``POST /gfs/moments/counts`` — an author household's encrypted reaction
+    totals, pushed live to followers that take them (v_69).
 * **Public discovery** ``GET /gfs/moments/users`` (JSON, w/ ``?q=``),
   ``GET /gfs/moments/users/{user_id}`` (per-user JSON),
   ``GET /gfs/moments/users/{user_id}/picture`` (avatar bytes).
@@ -48,6 +50,7 @@ from ...moment_public_media import MAX_BLOB_BYTES
 from ...moment_public_seal import (
     DELIVERY_FIELDS,
     ENVELOPE_FIELDS,
+    KNOWN_MOMENT_OPS,
     MAX_CIPHERTEXT_CHARS,
     MAX_MOMENT_ID_CHARS,
     MAX_REACT_BODY_BYTES,
@@ -116,15 +119,28 @@ _MAX_SEALED_KEY_CHARS = 1024
 _MAX_SUITES = 8
 _MAX_SUITE_CHARS = 64
 
+#: v_69 — body cap of ``POST /gfs/moments/counts``: a totals envelope is
+#: ~1 KB (eight emoji at most); room for that, never a moment.
+_MAX_COUNTS_BYTES = 4096
+
 
 def _suites_json(raw: object) -> str | None | web.Response:
     """The follow body's ``moment_suites`` (v_62) as canonical JSON —
-    ``None`` when absent (an older household), a 422 when malformed."""
+    ``None`` when absent (an older household), a 422 when malformed. v_69:
+    ``ops`` — the extra frames the household takes — may name only
+    :data:`~socialhome.moment_public_seal.KNOWN_MOMENT_OPS`."""
     if raw is None:
         return None
-    if not isinstance(raw, dict) or set(raw) - {"kem", "seal"}:
+    if not isinstance(raw, dict) or set(raw) - {"kem", "seal", "ops"}:
+        return web.json_response({"error": "moment_suites_invalid"}, status=422)
+    ops = raw.get("ops")
+    if ops is not None and (
+        not isinstance(ops, list) or not all(o in KNOWN_MOMENT_OPS for o in ops)
+    ):
         return web.json_response({"error": "moment_suites_invalid"}, status=422)
     out: dict[str, list[str]] = {}
+    if ops:
+        out["ops"] = sorted(set(ops))
     for kind in ("kem", "seal"):
         names = raw.get(kind, [])
         if (
@@ -546,6 +562,51 @@ class GfsMomentReactView(GfsBaseView):
         )
         if outcome == "not_following":
             return web.json_response({"error": "not_following"}, status=403)
+        if outcome == "rate_limited":
+            resp = web.json_response({"error": "rate_limited"}, status=429)
+            resp.headers["Retry-After"] = "60"
+            return resp
+        return web.json_response({"accepted": True}, status=202)
+
+
+class GfsMomentCountsView(GfsBaseView):
+    """``POST /gfs/moments/counts`` — an author household's encrypted
+    reaction totals for one of its public moments (v_69).
+
+    Exactly the 8 envelope fields (:data:`ENVELOPE_FIELDS`) — the totals are
+    inside the ciphertext, which this server can't open. Signed by the
+    household the author registered from, sealed under today's key step;
+    ≤ 10 a minute per household and ≤ 3 a day per moment, cluster-wide.
+    Pushed to connected followers that declared ``ops: ["counts"]`` only —
+    never queued. ``202`` (also for a retried post), ``403`` from another
+    household, ``409`` for an earlier day's step, ``429`` past a budget."""
+
+    async def post(self) -> web.Response:
+        result = await _rtc_authenticate(
+            self, keep_signature=True, max_bytes=_MAX_COUNTS_BYTES
+        )
+        if isinstance(result, web.Response):
+            return result
+        body, sender = result
+        moment_id = body.get("moment_id")
+        if (
+            set(body) != ENVELOPE_FIELDS
+            or not isinstance(body.get("ciphertext"), str)
+            or not isinstance(body.get("seal_suite"), str)
+            or not isinstance(moment_id, str)
+            or not 0 < len(moment_id) <= MAX_MOMENT_ID_CHARS
+            or not is_wire_int(body.get("key_gen"))
+            or not is_wire_int(body.get("key_step"))
+        ):
+            return web.json_response({"error": "encryption_required"}, status=422)
+        registry = self.svc(K.gfs_moment_public_registry_key)
+        if not await registry.is_author_household(
+            str(body.get("author_user_id") or ""), sender
+        ):
+            return web.json_response({"error": "instance_mismatch"}, status=403)
+        if not envelope_step_current(body["key_gen"], body["key_step"], time.time()):
+            return web.json_response({"error": "stale_envelope"}, status=409)
+        outcome = await registry.relay_counts(sender=sender, envelope=body)
         if outcome == "rate_limited":
             resp = web.json_response({"error": "rate_limited"}, status=429)
             resp.headers["Retry-After"] = "60"

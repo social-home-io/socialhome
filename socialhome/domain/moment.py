@@ -289,6 +289,100 @@ class MomentGfsReactionTarget:
     keywrap_suite: str
 
 
+#: v_69 — most emoji a reaction-totals update names (the most used first;
+#: the rest still count in ``total``).
+MOMENT_COUNTS_MAX_EMOJIS: int = 8
+
+#: v_69 — highest ``total`` (and per-emoji count) a totals update may carry:
+#: far above any household's reach, low enough to stay a small JSON integer.
+MOMENT_COUNTS_MAX_TOTAL: int = 1_000_000
+
+
+@dataclass(slots=True, frozen=True)
+class MomentReactionSummary:
+    """A moment's reaction totals as its author's household last sent them
+    (v_69, ``moments.reaction_summary``): per-emoji counts (at most
+    :data:`MOMENT_COUNTS_MAX_EMOJIS`, the most used first), the total over
+    every emoji, and ``rev`` — the author's send time in Unix milliseconds,
+    which only ever grows. Totals only — never who reacted."""
+
+    rev: int
+    counts: tuple[tuple[str, int], ...]
+    total: int
+
+
+def summarize_reactions(
+    tally: dict[str, int], *, max_emojis: int = MOMENT_COUNTS_MAX_EMOJIS
+) -> tuple[dict[str, int], int]:
+    """``(counts, total)`` of a moment's ``{emoji: n}`` *tally*: the
+    *max_emojis* most used emoji (ties by emoji, so the same tally always
+    gives the same bytes) and the total over all of them."""
+    ranked = sorted(
+        ((e, n) for e, n in tally.items() if n > 0), key=lambda p: (-p[1], p[0])
+    )
+    return dict(ranked[:max_emojis]), sum(n for _, n in ranked)
+
+
+def reaction_counts_valid(counts: object, total: object) -> bool:
+    """Whether *counts* / *total* are a well-formed totals update: at most
+    :data:`MOMENT_COUNTS_MAX_EMOJIS` entries, each one emoji
+    (:func:`is_valid_moment_reaction`) with a count of 1 … *total*, the
+    counts summing to at most *total*, and *total* a whole number in 0 …
+    :data:`MOMENT_COUNTS_MAX_TOTAL`."""
+    if (
+        not isinstance(total, int)
+        or isinstance(total, bool)
+        or not 0 <= total <= MOMENT_COUNTS_MAX_TOTAL
+    ):
+        return False
+    if not isinstance(counts, dict) or len(counts) > MOMENT_COUNTS_MAX_EMOJIS:
+        return False
+    seen = 0
+    for emoji, n in counts.items():
+        if not is_valid_moment_reaction(emoji):
+            return False
+        if not isinstance(n, int) or isinstance(n, bool) or not 1 <= n <= total:
+            return False
+        seen += n
+    return seen <= total
+
+
+@dataclass(slots=True, frozen=True)
+class MomentReactionTotals:
+    """One moment's reactions as the API shows them to one viewer (v_69):
+    per-emoji ``counts`` and their ``total``; ``totals_rev`` when they are
+    the author household's totals (``None``: the reactions held here); the
+    viewer's own emoji."""
+
+    counts: dict[str, int]
+    total: int
+    totals_rev: int | None
+    my_reaction: str | None
+
+
+def merged_reaction_view(
+    *,
+    summary: MomentReactionSummary | None,
+    local: dict[str, int],
+    mine: tuple[str, int] | None,
+) -> tuple[dict[str, int], int, int | None]:
+    """What the API shows for one moment: ``(counts, total, totals_rev)``.
+
+    Without a *summary* (the author's household sent none, or reactions here
+    don't reach it): the reactions held here (*local*). With one: its totals,
+    plus the viewer's own reaction (*mine* = ``(emoji, reacted_at_ms)``) when
+    it was made after the summary was sent — it can't be in it yet.
+    ``totals_rev`` is the summary's ``rev`` (``None`` for local counts)."""
+    if summary is None:
+        return dict(local), sum(local.values()), None
+    counts = dict(summary.counts)
+    total = summary.total
+    if mine is not None and mine[1] > summary.rev:
+        counts[mine[0]] = counts.get(mine[0], 0) + 1
+        total += 1
+    return counts, total, summary.rev
+
+
 #: Cap on how many tags survive per moment. Twitter is generous on
 #: tags-in-a-tweet but most quality timelines stay below 5; clamp here
 #: so a tag-spam moment doesn't inflate the trending list.

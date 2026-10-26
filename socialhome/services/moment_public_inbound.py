@@ -44,6 +44,12 @@ handler:
    ``moment_reaction`` frame — a follower's sealed reaction to a local
    author — to the reaction router (:mod:`.moment_reaction_router`), which
    opens and checks it like a routed one.
+10. Takes an author's encrypted reaction totals (v_69,
+    ``incoming_public_moment_counts``): verified like any envelope, opened
+    only with a step key already held — a follower without it drops the
+    update and asks for no key (no request storm) — and kept on the moment
+    held here (:meth:`~.moment_reaction_counts.MomentReactionCounts
+    .apply_totals`: that author and origin, live, newer ``rev`` only).
 """
 
 from __future__ import annotations
@@ -57,7 +63,12 @@ from typing import TYPE_CHECKING, Any
 from cryptography.exceptions import InvalidTag
 
 from ..domain.events import MomentCreated, MomentDeleted
-from ..domain.moment import MOMENT_MAX_LIFETIME_DAYS, Moment, clamp_moment_expiry
+from ..domain.moment import (
+    MOMENT_MAX_LIFETIME_DAYS,
+    Moment,
+    clamp_moment_expiry,
+    reaction_counts_valid,
+)
 from ..domain.moment_public import (
     MomentPublicFollow,
     public_author_bio,
@@ -72,6 +83,8 @@ from ..moment_public_seal import (
     AUTHOR_KEYWRAP_PK_FIELD,
     AUTHOR_KEYWRAP_SUITE_FIELD,
     ENVELOPE_FIELDS,
+    FRAME_MOMENT_COUNTS,
+    MOMENT_OP_COUNTS,
     UnsupportedMomentSealSuite,
     is_wire_int,
     item_key,
@@ -87,6 +100,7 @@ if TYPE_CHECKING:
     from ..repositories.moment_repo import AbstractMomentRepo
     from .moment_public_key_inbound import MomentPublicKeyInbound
     from .moment_public_media_inbound import MomentPublicMediaInbound
+    from .moment_reaction_counts import MomentReactionCounts
     from .moment_reaction_router import MomentReactionRouter
 
 log = logging.getLogger(__name__)
@@ -127,6 +141,7 @@ _OPS: dict[str, str] = {
 class MomentPublicInbound:
     __slots__ = (
         "_bus",
+        "_counts",
         "_follows",
         "_held",
         "_keys",
@@ -160,6 +175,11 @@ class MomentPublicInbound:
         #: v_68 — opens a follower's sealed reaction to a local author.
         #: Unwired: ``moment_reaction`` frames are dropped.
         self._reactions: MomentReactionRouter | None = None
+        #: v_69 — keeps an author's reaction totals. Unwired: dropped.
+        self._counts: MomentReactionCounts | None = None
+
+    def attach_counts(self, counts: MomentReactionCounts) -> None:
+        self._counts = counts
 
     def attach_media(self, media: MomentPublicMediaInbound) -> None:
         self._media = media
@@ -182,6 +202,9 @@ class MomentPublicInbound:
         elif ftype == "moment_reaction":
             if self._reactions is not None:
                 await self._reactions.on_gfs_reaction(frame, gfs_id=gfs_id)
+        elif ftype == FRAME_MOMENT_COUNTS:
+            if self._counts is not None:
+                await self._on_counts(payload, gfs_id=gfs_id)
         else:
             log.debug("moment_public.inbound: ignoring frame type=%r", ftype)
 
@@ -252,6 +275,82 @@ class MomentPublicInbound:
             )
         else:
             await self._on_delete(body, outer_instance_id=str(env["instance_id"]))
+
+    async def _on_counts(self, env: Any, *, gfs_id: str) -> bool:
+        """An author's encrypted reaction totals (v_69). Kept only when the
+        envelope verifies against the followed author's pinned key, opens
+        under a step key this household already holds, names ``op:
+        "counts"`` for that author, was sent lately (``sent_at``) and the
+        moment is held here — by that author and household, live, older
+        totals only. Without the step key it is dropped quietly: totals are
+        not worth asking the author for a key (no request storm), the next
+        moment brings it. Returns whether the totals were kept."""
+        assert self._counts is not None
+        if not isinstance(env, dict) or set(env) != ENVELOPE_FIELDS:
+            log.info("moment_public.inbound: counts refused — not an envelope")
+            return False
+        author = str(env.get("author_user_id") or "")
+        gen, step = env.get("key_gen"), env.get("key_step")
+        if not is_wire_int(gen) or not is_wire_int(step):
+            return False
+        assert isinstance(gen, int) and isinstance(step, int)
+        follow = await self._follow_of(env, gfs_id=gfs_id)
+        if not verify_wire(env, follow.followed_instance_pk if follow else None):
+            log.warning(
+                "moment_public.inbound: signature failed for counts by author %s",
+                author,
+            )
+            return False
+        key = await self._keys.key_for(author, gen, step)
+        if key is None:
+            log.debug(
+                "moment_public.inbound: no key for counts by author %s — dropped",
+                author,
+            )
+            return False
+        try:
+            body = open_body(step_key=key, envelope=env)
+        except (InvalidTag, ValueError, TypeError, UnsupportedMomentSealSuite) as exc:
+            log.warning(
+                "moment_public.inbound: counts by author %s don't open: %s",
+                author,
+                type(exc).__name__,
+            )
+            return False
+        if body.get("op") != MOMENT_OP_COUNTS or body.get("author_user_id") != author:
+            log.warning(
+                "moment_public.inbound: sealed counts by author %s name another "
+                "operation or author — dropped",
+                author,
+            )
+            return False
+        refusal = self._send_time_refusal(author, MOMENT_OP_COUNTS, body)
+        rev, counts, total = body.get("rev"), body.get("counts"), body.get("total")
+        if refusal is None and (
+            not is_wire_int(rev)
+            or not reaction_counts_valid(counts, total)
+            or int(rev) > (time.time() + SENT_AT_MAX_SKEW_S) * 1000  # type: ignore[arg-type]
+        ):
+            refusal = "malformed totals"
+        if refusal is not None:
+            log.info(
+                "moment_public.inbound: counts by author %s refused — %s",
+                author,
+                refusal,
+            )
+            return False
+        assert isinstance(rev, int) and isinstance(counts, dict)
+        assert isinstance(total, int)
+        return await self._counts.apply_totals(
+            moment_id=str(env["moment_id"]),
+            author_user_id=author,
+            # The household that signed the envelope — the stored row must
+            # name it as the moment's origin.
+            origin_instance_id=str(env["instance_id"]),
+            rev=rev,
+            counts=counts,
+            total=total,
+        )
 
     async def _on_delete_certs(self, certs: Any, *, gfs_id: str) -> int:
         """Apply the delete certificates (v_66) of one ``moment_delete_certs``

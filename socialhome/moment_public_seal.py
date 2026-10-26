@@ -47,6 +47,17 @@ Wire shapes (every one suite-tagged; receivers refuse unknown suites):
   whether it is an add or a removal (timing can hint at the moment —
   ``docs/principles.md``).
 
+* **Reaction totals (v_69)** ``POST /gfs/moments/counts`` with exactly the
+  envelope fields above — the sealed body is ``{op: "counts",
+  author_user_id, rev, counts, total, sent_at}`` (per-emoji counts, never
+  who), under the item key of *today's* step for that moment (followers keep
+  only the newest step, as for a delete). Sent by the author's household
+  only, at fixed checkpoints and only when the totals changed, to a GFS that
+  proves ``moment_counts``; the GFS pushes it as
+  ``{type: "incoming_public_moment_counts", payload: <envelope>}`` to
+  connected followers that declared ``ops: ["counts"]`` — never queued. A
+  follower without that step's key drops it (it asks for no key).
+
 Pure and dependency-light (only ``cryptography``, ``orjson`` + :mod:`socialhome.crypto`,
 like :mod:`socialhome.authority_sig`), so the content-blind GFS process can
 import the wire shapes without the household stack.
@@ -108,6 +119,16 @@ ENVELOPE_FIELDS: frozenset[str] = frozenset(
 FRAME_MOMENT: str = "incoming_public_moment"
 FRAME_MOMENT_DELETE: str = "incoming_public_moment_delete"
 MOMENT_FRAME_TYPES: frozenset[str] = frozenset({FRAME_MOMENT, FRAME_MOMENT_DELETE})
+
+#: v_69 — the frame an author's encrypted reaction totals reach a connected
+#: follower household under (``{"type": ..., "payload": <envelope>}``), and
+#: the ``op`` its sealed body names. Never queued for an offline household.
+FRAME_MOMENT_COUNTS: str = "incoming_public_moment_counts"
+MOMENT_OP_COUNTS: str = "counts"
+
+#: v_69 — the ``ops`` a follower household may declare (``moment_suites``):
+#: extra frames it takes. A GFS refuses a declaration naming others.
+KNOWN_MOMENT_OPS: frozenset[str] = frozenset({MOMENT_OP_COUNTS})
 
 #: v_68 — the WebSocket frame type a follower household's sealed reaction
 #: reaches the author's household under: ``{"type": ..., "from_instance":
@@ -408,14 +429,17 @@ __all__ = [
     "AUTHOR_KEYWRAP_SUITE_FIELD",
     "DELIVERY_FIELDS",
     "ENVELOPE_FIELDS",
+    "FRAME_MOMENT_COUNTS",
     "FRAME_MOMENT_REACTION",
     "KEY_SUITE_AESGCM_256",
+    "KNOWN_MOMENT_OPS",
     "MAX_CIPHERTEXT_CHARS",
     "MAX_MOMENT_ID_CHARS",
     "MAX_RATCHET_STEPS",
     "MAX_REACT_BODY_BYTES",
     "MAX_REACT_SEALED_CHARS",
     "MOMENT_KEY_BYTES",
+    "MOMENT_OP_COUNTS",
     "MOMENT_SEAL_SUITE_AESGCM256",
     "RATCHET_STEP_S",
     "REACT_BODY_FIELDS",

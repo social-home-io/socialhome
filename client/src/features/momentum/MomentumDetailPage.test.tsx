@@ -254,6 +254,47 @@ describe('MomentumDetailPage reaction reach (v_67)', () => {
     expect(getAllByRole('button', { name: /React/ }).length).toBeGreaterThan(0)
   })
 
+  it('shows the author household totals where they reach it (v_69)', async () => {
+    const detail: MomentDetail = {
+      moment: moment('m-amaka', 'ru-amaka', {
+        reactions_reach: 'author',
+        reaction_count: 12,
+        reaction_counts: { '🔥': 9, '👏': 3 },
+        reaction_totals_at: Date.now() - 60_000,
+        my_reaction: '👏',
+      }),
+      replies: [],
+      // Only this household's own reaction is held here.
+      reactions: [{ moment_id: 'm-amaka', reactor_user_id: 'me', emoji: '👏', reacted_at: '' }],
+    }
+    vi.mocked(api.get).mockImplementation(async (path: string) =>
+      path === '/api/moments/m-amaka' ? detail : [])
+    const { findByTestId, container } = render(<MomentumDetailPage />)
+    const note = await findByTestId('moment-reaction-totals')
+    expect(note.textContent).toContain('Reactions from everyone')
+    const counts = container.querySelector('.sh-momentum-reaction-counts')!
+    expect(counts.textContent).toContain('🔥 9')
+    expect(counts.textContent).toContain('👏 3')
+    expect(container.textContent).not.toContain(NOTE)
+  })
+
+  it('keeps the household note and local counts where reactions stay here', async () => {
+    const detail: MomentDetail = {
+      moment: moment('m-amaka', 'ru-amaka', {
+        reactions_reach: 'household',
+        reaction_counts: { '👏': 1 },
+        reaction_totals_at: null,
+      }),
+      replies: [],
+      reactions: [],
+    }
+    vi.mocked(api.get).mockImplementation(async (path: string) =>
+      path === '/api/moments/m-amaka' ? detail : [])
+    const { findByText, queryByTestId } = render(<MomentumDetailPage />)
+    await findByText(NOTE)
+    expect(queryByTestId('moment-reaction-totals')).toBeNull()
+  })
+
   it('says nothing where the reaction reaches the author', async () => {
     const detail: MomentDetail = {
       moment: moment('m-amaka', 'ru-amaka', { reactions_reach: 'author' }),

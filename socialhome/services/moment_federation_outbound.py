@@ -26,6 +26,14 @@ local actor's instance fans on the bus path. The relay path is
 explicit (not bus-driven) and runs from inside the inbound handler
 before it republishes anything.
 
+**Reaction totals (v_69).** Only the author's household holds every
+reaction, so it sends a moment's totals (``MOMENT_REACTIONS_COUNTED``,
+:mod:`socialhome.moment_counts`) at fixed checkpoints
+(:class:`~socialhome.services.moment_reaction_counts.MomentReactionCounts`
+decides when; :meth:`fan_counts` sends). Relays pass them on through
+:meth:`relay_inbound` like a create — once per (moment, ``rev``), only when
+they hold or relayed the moment, only to v_69 peers.
+
 **Reactions further away (v_67).** A reaction is unicast to the author's
 household when it is this one or a paired one. Otherwise the
 :class:`~socialhome.services.moment_reaction_router.MomentReactionRouter`
@@ -37,6 +45,7 @@ token to every create it relays (per peer).
 from __future__ import annotations
 
 import logging
+import time
 from collections import OrderedDict
 from collections.abc import Callable
 from time import monotonic
@@ -80,9 +89,23 @@ log = logging.getLogger(__name__)
 #: (until a restart or the size cap drops the entry: bounded and harmless).
 RELAY_SEEN_TTL_S: float = MOMENT_RELAY_MAX_AGE_HOURS * 3600.0
 
-#: Most moments remembered at once (oldest dropped first) — ~100 bytes
-#: each, so a few MB at worst.
-RELAY_SEEN_MAX: int = 20_000
+#: Most entries remembered at once (oldest dropped first) — ~100 bytes
+#: each, so a few MB at worst. A relayed create takes two (its seen key and,
+#: v_69, its origin), a relayed totals update one per rev.
+RELAY_SEEN_MAX: int = 50_000
+
+#: v_69 — a household relays a moment's totals only while they are this
+#: fresh (by their signed ``rev``): a day of outbox retries plus clock skew.
+#: Older totals are a replay and go no further (a receiver still refuses
+#: anything not newer than what it holds).
+COUNTS_RELAY_MAX_AGE_MS: int = 25 * 3600 * 1000
+
+
+def counts_outbox_key(moment_id: str) -> str:
+    """The latest-only outbox key of a moment's totals: a newer update
+    replaces one still queued for an offline peer (local, never on the
+    wire)."""
+    return f"moment-counts:{moment_id}"
 
 
 class MomentFederationOutbound(
@@ -132,7 +155,8 @@ class MomentFederationOutbound(
         #: closer to the origin, which reaches further — is relayed on.
         #: Bounded by :data:`RELAY_SEEN_MAX` and :data:`RELAY_SEEN_TTL_S`;
         #: lost on restart (a copy arriving after one is relayed once more).
-        self._relayed: OrderedDict[tuple[str, str], tuple[int, float]] = OrderedDict()
+        #: v_69 totals are remembered per (type, moment id, rev).
+        self._relayed: OrderedDict[tuple[str, ...], tuple[int, float]] = OrderedDict()
 
     def attach_reaction_router(self, router: MomentReactionRouter) -> None:
         """Wire the v_67 reaction router (key-wrap key on creates, return
@@ -267,6 +291,31 @@ class MomentFederationOutbound(
             },
         )
 
+    # ── Reaction totals (v_69) ─────────────────────────────────────────
+
+    async def fan_counts(self, payload: dict, *, author_user_id: str) -> int:
+        """Send a signed ``MOMENT_REACTIONS_COUNTED`` *payload* (hop 1) for a
+        moment *author_user_id* wrote here to every confirmed v_69 peer —
+        under the same hide list, guardian blocks and relay policy as the
+        moment itself. Latest-only per (peer, moment) in the outbox. Returns
+        how many peers it was handed to (0 when the policy holds it back)."""
+        moment_id = str(payload.get("moment_id") or "")
+        if not await self._policy_allows(
+            source_instance_id=self._federation.own_instance_id,
+            author_user_id=author_user_id,
+            target_id=moment_id,
+        ):
+            return 0
+        return await self._fan_to_peers(
+            event_type=FederationEventType.MOMENT_REACTIONS_COUNTED,
+            payload=payload,
+            origin_instance_id=self._federation.own_instance_id,
+            exclude_instances=set(),
+            author_user_id=author_user_id,
+            min_version=FederationCapability.MIN_FOR_MOMENT_REACTION_COUNTS,
+            outbox_key=counts_outbox_key(moment_id),
+        )
+
     # ── Relay (called by the inbound handler when hop_count < 3) ───────
 
     async def relay_inbound(
@@ -275,6 +324,8 @@ class MomentFederationOutbound(
         event_type: FederationEventType,
         payload: dict,
         from_instance: str,
+        holds_moment: bool = False,
+        now_ms: int | None = None,
     ) -> None:
         """Re-broadcast an inbound moment envelope to *our* paired peers,
         bumping ``hop_count`` and excluding both the original origin
@@ -284,6 +335,12 @@ class MomentFederationOutbound(
         (v_65) when it is a create signed more than
         :data:`MOMENT_RELAY_MAX_AGE_HOURS` ago. The inbound handler only
         calls this for a delete that changed something here.
+
+        v_69 — a ``MOMENT_REACTIONS_COUNTED`` (totals) is relayed once per
+        (moment, ``rev``) — the seen key carries the rev — only when this
+        household holds the moment from the mesh (*holds_moment*) or relayed
+        its create, only while its ``rev`` is younger than
+        :data:`COUNTS_RELAY_MAX_AGE_MS` (*now_ms*), and only to v_69 peers.
         """
         # No-redistribute rule for §Momentum-public: a moment that
         # arrived through a GFS public fan-out must not bleed back into
@@ -313,7 +370,16 @@ class MomentFederationOutbound(
                 MOMENT_RELAY_MAX_AGE_HOURS,
             )
             return
-        seen_key = (event_type.value, str(payload.get("moment_id") or ""))
+        moment_id = str(payload.get("moment_id") or "")
+        seen_key: tuple[str, ...] = (event_type.value, moment_id)
+        min_version: int | None = None
+        outbox_key: str | None = None
+        if event_type == FederationEventType.MOMENT_REACTIONS_COUNTED:
+            if not self._counts_relayable(payload, moment_id, holds_moment, now_ms):
+                return
+            seen_key = (event_type.value, moment_id, str(payload.get("rev")))
+            min_version = FederationCapability.MIN_FOR_MOMENT_REACTION_COUNTS
+            outbox_key = counts_outbox_key(moment_id)
         if not self._relay_is_new(seen_key, hop):
             return
         origin = str(payload.get("origin_instance_id") or "")
@@ -328,6 +394,10 @@ class MomentFederationOutbound(
         ):
             return
         self._remember_relay(seen_key, hop)
+        if event_type == FederationEventType.MOMENT_CREATED and origin:
+            # v_69: which origin's create this was — totals for the moment
+            # are passed on only when signed by that same origin.
+            self._remember_relay(("origin", moment_id, origin), hop)
         next_payload = dict(payload)
         next_payload["hop_count"] = hop + 1
         router = self._reaction_router
@@ -349,11 +419,44 @@ class MomentFederationOutbound(
             exclude_instances={from_instance},
             author_user_id=str(payload.get("author_user_id") or "") or None,
             payload_for=payload_for,
+            min_version=min_version,
+            outbox_key=outbox_key,
         )
+
+    def _counts_relayable(
+        self,
+        payload: dict,
+        moment_id: str,
+        holds_moment: bool,
+        now_ms: int | None,
+    ) -> bool:
+        """v_69: totals go on only from a household that holds the moment
+        from the mesh or relayed its create (a household that never passed
+        the moment on has nobody downstream who holds it), and only while
+        fresh."""
+        origin = str(payload.get("origin_instance_id") or "")
+        if not holds_moment and not self._relayed_create(moment_id, origin):
+            log.debug(
+                "moment relay: totals for %s — moment neither held nor relayed",
+                moment_id,
+            )
+            return False
+        rev = payload.get("rev")
+        now = int(time.time() * 1000) if now_ms is None else now_ms
+        if not isinstance(rev, int) or rev < now - COUNTS_RELAY_MAX_AGE_MS:
+            log.debug("moment relay: totals for %s too old — not relayed", moment_id)
+            return False
+        return True
+
+    def _relayed_create(self, moment_id: str, origin: str) -> bool:
+        """Whether this household relayed *moment_id*'s create, as *origin*'s
+        moment, lately (the seen-map entry still lives)."""
+        held = self._relayed.get(("origin", moment_id, origin))
+        return held is not None and monotonic() - held[1] <= RELAY_SEEN_TTL_S
 
     # ── Relay seen-map ─────────────────────────────────────────────────
 
-    def _relay_is_new(self, key: tuple[str, str], hop: int) -> bool:
+    def _relay_is_new(self, key: tuple[str, ...], hop: int) -> bool:
         """Whether a copy arriving at ``hop`` is worth relaying: never
         relayed (or the entry aged out), or relayed only from further
         away — a closer copy, relayed on, reaches more hops."""
@@ -366,7 +469,7 @@ class MomentFederationOutbound(
             return True
         return hop < relayed_hop
 
-    def _remember_relay(self, key: tuple[str, str], hop: int) -> None:
+    def _remember_relay(self, key: tuple[str, ...], hop: int) -> None:
         self._relayed[key] = (hop, monotonic())
         self._relayed.move_to_end(key)
         while len(self._relayed) > RELAY_SEEN_MAX:
@@ -406,10 +509,14 @@ class MomentFederationOutbound(
         author_user_id: str | None = None,
         min_version: int | None = None,
         payload_for: Callable[[str], dict] | None = None,
-    ) -> None:
+        outbox_key: str | None = None,
+    ) -> int:
+        """Send to every confirmed peer but *exclude_instances* and the
+        origin; returns how many it was handed to."""
         # ``confirmed_peers`` already drops our own instance + null ids;
         # the relay/origin skip set adds the origin + the immediate sender.
         skip = exclude_instances | {origin_instance_id}
+        sent = 0
         hidden_per_peer: dict[str, frozenset[str]] = {}
         for peer in await self.confirmed_peers():
             instance_id = peer.id
@@ -435,7 +542,10 @@ class MomentFederationOutbound(
                 instance_id,
                 event_type,
                 payload if payload_for is None else payload_for(instance_id),
+                outbox_key=outbox_key,
             )
+            sent += 1
+        return sent
 
     async def _is_local_user(self, user_id: str) -> bool:
         return await self._home_or_none(user_id) == self._federation.own_instance_id

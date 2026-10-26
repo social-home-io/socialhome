@@ -19,6 +19,7 @@ from socialhome.global_server.moment_public_registry import (
     MomentPublicRegistry,
     envelope_step_current,
     suites_can_open,
+    suites_take_counts,
 )
 from socialhome.global_server.repositories import (
     SqliteGfsFederationRepo,
@@ -338,6 +339,21 @@ def test_suites_can_open():
     assert suites_can_open('{"kem":["x25519"],"seal":["aesgcm-256"]}')
     for raw in (None, "", "nope", "[]", '{"seal":"aesgcm-256"}', '{"seal":["x"]}'):
         assert not suites_can_open(raw)
+
+
+def test_suites_take_counts():
+    """v_69: totals go only to a household that opens moments AND declared
+    ``ops: ["counts"]``."""
+    assert suites_take_counts(
+        '{"kem":["x25519"],"ops":["counts"],"seal":["aesgcm-256"]}'
+    )
+    for raw in (
+        None,
+        '{"kem":["x25519"],"seal":["aesgcm-256"]}',
+        '{"kem":["x25519"],"ops":"counts","seal":["aesgcm-256"]}',
+        '{"ops":["counts"],"seal":["x"]}',
+    ):
+        assert not suites_take_counts(raw)
 
 
 async def test_without_a_mailbox_keys_reach_only_online_followers(gfs_setup):

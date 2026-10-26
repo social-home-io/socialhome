@@ -529,7 +529,9 @@ blocked peer's process:
   `HIGHLIGHT_FRAME_VIEWED`, `HIGHLIGHT_FRAME_REACTED`,
   `HIGHLIGHT_FRAME_REACTION_REMOVED`
 - `MOMENT_CREATED`, `MOMENT_DELETED`, `MOMENT_REACTED`,
-  `MOMENT_REACTION_REMOVED`
+  `MOMENT_REACTION_REMOVED`, `MOMENT_REACTIONS_COUNTED` (v_69 — the
+  author's totals, sent and relayed under the same per-pair gate as the
+  moment)
 
 `MOMENT_REACTION_ROUTED` (v_67) is not on the list: it is only ever sent
 toward an origin household this one is **not** paired with (so there is no

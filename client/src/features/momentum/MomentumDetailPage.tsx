@@ -33,7 +33,7 @@ import {
 } from '@/store/householdUsers'
 import { t, isOne, formatLocale } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
-import { relativeChatTime } from '@/utils/relativeTime'
+import { relativeChatTime, relativeDocsTime } from '@/utils/relativeTime'
 import { ws } from '@/ws'
 import type { Moment, MomentDetail } from '@/types'
 import { renderHashtagged } from './hashtags'
@@ -180,14 +180,24 @@ export default function MomentumDetailPage() {
     }
   }
 
-  const myReaction = detail.value.reactions.find(
+  const myReaction = m.my_reaction ?? detail.value.reactions.find(
     r => r.reactor_user_id === me,
   )?.emoji
-  // Roll up other reactions into a count map for the chip row.
-  const counts: Record<string, number> = {}
-  for (const r of detail.value.reactions) {
-    counts[r.emoji] = (counts[r.emoji] || 0) + 1
+  // v_69: the server's per-emoji counts — the author household's totals
+  // (everyone's reactions) where it sent them, else the reactions held
+  // here. An older server sends none: roll up the reactions held here.
+  let counts: Record<string, number> = {}
+  if (m.reaction_counts) {
+    counts = m.reaction_counts
+  } else {
+    for (const r of detail.value.reactions) {
+      counts[r.emoji] = (counts[r.emoji] || 0) + 1
+    }
   }
+  const totalsAt = !isAuthor && m.reactions_reach !== 'household'
+    && typeof m.reaction_totals_at === 'number'
+    ? new Date(m.reaction_totals_at).toISOString()
+    : null
 
   const renderRow = (mm: Moment) => {
     const replyMine = mm.author_user_id === me
@@ -389,6 +399,13 @@ export default function MomentumDetailPage() {
         {!isAuthor && m.reactions_reach === 'household' && (
           <p class="sh-muted sh-momentum-reactions-note">
             {t('moment.detail.reactions_household_only')}
+          </p>
+        )}
+        {/* v_69: the counts above are everyone's, as the author's
+            household last counted them. */}
+        {totalsAt !== null && (
+          <p class="sh-muted sh-momentum-reactions-note" data-testid="moment-reaction-totals">
+            {t('moment.detail.reactions_totals', { time: relativeDocsTime(totalsAt) })}
           </p>
         )}
       </section>

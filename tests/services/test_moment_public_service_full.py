@@ -579,6 +579,9 @@ class _Caps:
     async def encrypted_moments_supported(self, gfs_id: str) -> bool:
         return gfs_id == "g1"
 
+    async def moment_counts_supported(self, gfs_id: str) -> bool:
+        return False
+
 
 async def test_unfollow_lets_the_key_store_forget_the_author(repos):
     svc = _make_service(repos, session=_StubSession(body={}))
@@ -688,3 +691,47 @@ async def test_deregister_marks_the_authors_key_for_rotation(repos):
     svc.attach_key_outbound(marks)  # type: ignore[arg-type]
     await svc.deregister(user_id="u1", gfs_id="g1")
     assert marks.marked == [("u1", "a registration ended")]
+
+
+class _CountsCaps(_Caps):
+    def __init__(self) -> None:
+        self.counts = False
+
+    async def moment_counts_supported(self, gfs_id: str) -> bool:
+        return self.counts and gfs_id == "g1"
+
+
+async def test_ops_are_declared_only_to_a_server_that_takes_them(repos):
+    """v_69: ``ops: ["counts"]`` rides a follow or a declaration only to a
+    server that proved ``moment_counts`` (an older one refuses the key) —
+    and once a server proves it, the household declares again, with it."""
+    caps = _CountsCaps()
+    sess = _StubSession(body={"updated": 1}, status=200)
+    svc = _make_service(repos, session=sess)
+    svc.attach_capabilities(caps)  # type: ignore[arg-type]
+    await repos["follows"].upsert(
+        follower_user_id="u1",
+        followed_user_id="u-remote",
+        gfs_id="g1",
+        followed_instance_pk="ab" * 32,
+        followed_username="bob",
+        followed_display_name="Bob",
+    )
+    assert await svc.declare_suites("g1") is True
+    assert "ops" not in sess.posts[-1][1]["moment_suites"]
+    assert await svc.declare_suites("g1") is False
+    caps.counts = True  # the server upgraded
+    assert await svc.declare_suites("g1") is True
+    assert sess.posts[-1][1]["moment_suites"]["ops"] == ["counts"]
+    assert await svc.declare_suites("g1") is False
+    assert len(sess.posts) == 2
+
+
+async def test_a_follow_declares_ops_where_the_server_takes_them(repos):
+    caps = _CountsCaps()
+    caps.counts = True
+    sess = _StubSession(body=_follow_reply())
+    svc = _make_service(repos, session=sess)
+    svc.attach_capabilities(caps)  # type: ignore[arg-type]
+    await svc.follow(follower_user_id="u1", gfs_id="g1", followed_user_id="u-remote")
+    assert sess.posts[0][1]["moment_suites"]["ops"] == ["counts"]

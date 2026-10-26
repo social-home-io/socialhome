@@ -479,6 +479,31 @@ Every suite is tagged and an unknown one is refused. The PQ path is the
 existing one: `x25519+mlkem768` for the seal, `ed25519+mldsa65` for the
 reaction signature; the return tokens are symmetric (AES-256).
 
+**Moment reaction totals (v_69)** (`socialhome/moment_counts.py`,
+`services/moment_reaction_counts.py`) — only a moment's author household
+holds every reaction to it, so it re-broadcasts the totals (per-emoji counts
+and the total, never who). On the mesh, `MOMENT_REACTIONS_COUNTED` is
+relayed like a create, so every household must be able to check the counts
+against the author's household, not the relay that handed them over. A new
+**signature domain**, no new key: the origin household's Ed25519 identity key
+signs `b"moment-counts:v1:" + canonical_utf8_bytes({moment_id,
+author_user_id, origin_instance_id, rev, counts, total, origin_identity_pk,
+counts_sig_suite[, no_relay]})` — every field but `hop_count` (each relay
+bumps it) and `counts_sig`. Suite `counts_sig_suite: "ed25519"`
+(`COUNTS_SIG_SUITE_ED25519`, `SUPPORTED_COUNTS_SIG_SUITES`,
+`UnsupportedCountsSigSuite`); an unknown suite is refused, never verified
+under a default. The receiver verifies against the key it pins for the
+origin, or — for a household it isn't paired with — the shipped
+`origin_identity_pk` provided it derives to `origin_instance_id` (§4.1.2).
+`no_relay` (a protected account's moment) is inside the signed bytes, so a
+relay can neither strip nor add it. The domain prefix keeps the bytes
+disjoint from `moment-origin:` / `moment-reaction:` and every other
+identity-key signature. Through a GFS the totals ride the existing
+public-moment envelope (`op: "counts"`, AES-256-GCM under the moment's item
+key of today's step, the author household's `sign_wire` signature) — no new
+key or suite there. The PQ path: an `"ed25519+mldsa65"` sibling constant with
+both signatures in parallel, the wire shape unchanged.
+
 **Link-preview author signature (GFS public relay)**
 (`services/space_public_author.py`) — a public/global space post's
 author-built link card rides inside the encrypted relay inner, but outside
@@ -1321,6 +1346,10 @@ grows naturally.
 - Wire: every outbound envelope emits the `signatures` map with the
   per-peer suite's algorithms. Every inbound envelope is rejected
   unless every entry verifies.
+- Moment signatures: `origin_sig_suite` (v_35), `reaction_sig_suite`
+  (v_67) and `counts_sig_suite` (v_69) follow the same contract — each a
+  `*_SUITE_ED25519` constant, a `SUPPORTED_*` frozenset and an
+  `Unsupported*` error, ready for the hybrid sibling.
 - User identity: the per-user binding's `user_sig_suite` follows the
   same suite contract. The PQ migration is wire-additive — grow
   `SUPPORTED_USER_SIG_SUITES` with a sibling

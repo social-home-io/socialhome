@@ -48,6 +48,7 @@ from .channels import GfsChannelService, build_channel_rate_limit
 from .cluster import ClusterService
 from .cluster_relay import (
     AUDIENCE_CHANNEL,
+    AUDIENCE_COUNT_FOLLOWERS,
     AUDIENCE_FOLLOWERS,
     AUDIENCE_SPACE,
     ClusterRelayFanOut,
@@ -444,6 +445,15 @@ class GfsApp:
             AUDIENCE_FOLLOWERS,
             moment_public.audience_targets,
             seen=moment_public.seen_cache,
+        )
+        # v_69 — an author's reaction totals: live to connected followers
+        # that declared ``ops: ["counts"]``; every node charges the
+        # per-moment budget for the ones it is forwarded.
+        cluster_fan_out.register_audience(
+            AUDIENCE_COUNT_FOLLOWERS,
+            moment_public.counts_audience_targets,
+            seen=moment_public.counts_seen_cache,
+            observe=moment_public.note_forwarded_counts,
         )
         # Trusted-mode member publish (v_49): writer-cert-authorized items
         # fanned out through the same push-or-queue path as envelopes.

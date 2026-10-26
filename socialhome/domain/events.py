@@ -2447,6 +2447,19 @@ class MomentReactionChanged(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class MomentReactionTotalsUpdated(DomainEvent):
+    """v_69 — the author's household sent newer reaction totals for a moment
+    held here (``moments.reaction_summary``). Counts only, never who: the
+    realtime layer tells the household's open views to refresh."""
+
+    moment_id: str
+    author_user_id: str
+    #: How the moment landed here (``household`` / ``gfs``).
+    received_via: str = "household"
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class UserFollowed(DomainEvent):
     follower_user_id: str
     followed_user_id: str
