@@ -384,6 +384,13 @@ export default function MomentumDetailPage() {
             </Button>
           )}
         </div>
+        {/* v_67: no route to the author's household — say where a
+            reaction goes before it is made. */}
+        {!isAuthor && m.reactions_reach === 'household' && (
+          <p class="sh-muted sh-momentum-reactions-note">
+            {t('moment.detail.reactions_household_only')}
+          </p>
+        )}
       </section>
 
       {ended && (

@@ -422,6 +422,52 @@ A GFS keeps it 30 days for followers that were away; both the GFS and the
 follower verify it against a key they already pin. No new key, format or
 suite; an unknown `origin_sig_suite` is refused.
 
+**Routed moment reactions (v_67)** (`federation/moment_reaction_route.py`,
+`services/moment_reaction_router.py`) — a reaction from a household two or
+three hops from a moment's author travels back along the path the moment
+came. Built only from keys households already hold:
+
+* **Origin key-wrap key on the create.** `MOMENT_CREATED` carries
+  `origin_keywrap_pk` / `origin_keywrap_sig` / `origin_keywrap_suite` (the
+  `keywrap_wire_fields` shape, prefixed) *outside* the origin signature —
+  inside it would change the `moment-origin:v1:` bytes and older verifiers
+  would refuse the moment. A receiver keeps it only when
+  `verify_keywrap_binding` holds against `origin_identity_pk`, which must
+  equal the pinned key (when paired) and derive to `origin_instance_id`; a
+  relay can neither swap in its own key-wrap key nor bind one with its own
+  identity. An unknown `origin_keywrap_suite` is ignored (no route), never
+  defaulted.
+* **Return tokens.** A relay forwarding a create to its peer X appends
+  `rt = b64url(nonce ‖ AES-256-GCM(k, exp_u64 ‖ prev_hop_id))` with
+  `k = HKDF-SHA256(routing_secret, info="moment-return:v1")` — the existing,
+  never-transmitted `instance_identity.routing_secret`, so no new key is
+  stored — and AAD `"moment-return:v1|" + moment_id + "|" + X`;
+  `exp` = the moment's clamped `expires_at`. Suite
+  `rt_suite: "aesgcm-256"` (`RETURN_TOKEN_SUITE_AESGCM_256`,
+  `SUPPORTED_RETURN_TOKEN_SUITES`, `UnsupportedReturnTokenSuite`). Tokens
+  sit outside the origin signature like `hop_count`; tampering only breaks
+  delivery (each relay authenticates its own token).
+* **The sealed reaction.** The reactor's household signs
+  `{kind: "moment_reaction", moment_id, author_user_id,
+  origin_instance_id, reactor_user_id, reactor_instance_id,
+  reactor_identity_pk, reactor_anchor, emoji (null = removed),
+  occurred_at_ms, reaction_sig_suite: "ed25519"}` with its Ed25519 identity
+  key over `b"moment-reaction:v1:" + canonical_bytes(…)` (`reaction_sig`;
+  `REACTION_SIG_SUITE_ED25519`, `SUPPORTED_REACTION_SIG_SUITES`,
+  `UnsupportedReactionSigSuite`), frames it `u16 length ‖ JSON ‖ zeros` to a
+  1 KB bucket (an add and a removal seal to the same size) and seals it to
+  the origin's key-wrap key with the static key-wrap seal
+  (`kem_suite: "x25519"`). The origin accepts it only when
+  `derive_instance_id(reactor_identity_pk) == reactor_instance_id` (and the
+  key equals the pinned one when paired),
+  `derive_user_id(reactor_identity_pk, reactor_anchor) == reactor_user_id`
+  and the signature verifies. Relays see only the hop-encrypted
+  `{moment_id, origin_instance_id, rt, rt_suite, sealed}`.
+
+Every suite is tagged and an unknown one is refused. The PQ path is the
+existing one: `x25519+mlkem768` for the seal, `ed25519+mldsa65` for the
+reaction signature; the return tokens are symmetric (AES-256).
+
 **Link-preview author signature (GFS public relay)**
 (`services/space_public_author.py`) — a public/global space post's
 author-built link card rides inside the encrypted relay inner, but outside
@@ -1198,6 +1244,8 @@ decryption.
   - `instance_id = base32(SHA256(identity_pk)[:20]).lower()`
   - `space_id    = base32(SHA256(space_pk)[:20]).lower()`
   - `user_id     = base32(SHA256(instance_pk ‖ 0x00 ‖ username)[:20]).lower()`
+- Moment return-token key (v_67, never sent, nothing stored):
+  - `k = HKDF-SHA256(routing_secret, salt=None, info=b"moment-return:v1")`
 - Public highlight link secret (the `#k=` fragment, never sent to a server):
   - `link_secret = HKDF-SHA256(identity_seed, salt="", info=b"sh-highlight-link:v1" ‖ 0x00 ‖ highlight_id ‖ 0x00 ‖ token)`
   - Nothing is stored for it, so it is bound to the **long-term identity

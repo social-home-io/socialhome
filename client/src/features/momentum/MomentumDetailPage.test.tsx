@@ -236,3 +236,34 @@ describe('MomentumDetailPage save', () => {
     currentUser.value = null
   })
 })
+
+describe('MomentumDetailPage reaction reach (v_67)', () => {
+  const NOTE = 'Reactions here are seen in your household only.'
+
+  it('says a reaction stays in the household where it cannot reach the author', async () => {
+    const detail: MomentDetail = {
+      moment: moment('m-amaka', 'ru-amaka', { reactions_reach: 'household' }),
+      replies: [],
+      reactions: [],
+    }
+    vi.mocked(api.get).mockImplementation(async (path: string) =>
+      path === '/api/moments/m-amaka' ? detail : [])
+    const { findByText, getAllByRole } = render(<MomentumDetailPage />)
+    await findByText(NOTE)
+    // React is still offered.
+    expect(getAllByRole('button', { name: /React/ }).length).toBeGreaterThan(0)
+  })
+
+  it('says nothing where the reaction reaches the author', async () => {
+    const detail: MomentDetail = {
+      moment: moment('m-amaka', 'ru-amaka', { reactions_reach: 'author' }),
+      replies: [],
+      reactions: [],
+    }
+    vi.mocked(api.get).mockImplementation(async (path: string) =>
+      path === '/api/moments/m-amaka' ? detail : [])
+    const { findByText, container } = render(<MomentumDetailPage />)
+    await findByText('hello from m-amaka')
+    expect(container.textContent).not.toContain(NOTE)
+  })
+})

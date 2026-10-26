@@ -1509,8 +1509,14 @@ class FederationService:
         event_type: FederationEventType,
         payload: dict,
         space_id: str | None = None,
+        outbox_key: str | None = None,
     ) -> DeliveryResult:
         """Encrypt, sign, and deliver a federation event to a peer.
+
+        ``outbox_key`` makes the send latest-only per (peer, key) like the
+        state events of :func:`supersede_key` — for a sender whose key can't
+        be read off the payload (v_67: a routed reaction's reactor is sealed
+        inside it). Local only, never on the wire.
 
         Steps (§24.11 §1-§8):
 
@@ -1568,10 +1574,12 @@ class FederationService:
         # at most one queued row per person (and space) for this peer.
         # A moment's delete is keyed by who signed it, so the outbox can cap
         # how many it keeps 30 days per relayed origin (adversarial review F2).
-        state_key = supersede_key(
-            event_type, space_id=space_id, payload=payload
-        ) or moment_delete_key(
-            event_type, payload, own_instance_id=self._own_instance_id
+        state_key = (
+            outbox_key
+            or supersede_key(event_type, space_id=space_id, payload=payload)
+            or moment_delete_key(
+                event_type, payload, own_instance_id=self._own_instance_id
+            )
         )
         state_ticket = self._claim_state_send(to_instance_id, state_key)
 

@@ -187,3 +187,15 @@ async def test_derive_local_user_id_without_identity_raises(db):
     """Deriving from a missing key must fail loudly, never fall back."""
     with pytest.raises(RuntimeError, match="instance_identity not initialised"):
         await derive_local_user_id(db, "alice")
+
+
+# ── routing_secret: carried for the v_67 return-token key ─────────────────
+
+
+async def test_routing_secret_is_minted_and_read_back(db, key_manager):
+    """v_67 derives its moment return-token key from the existing routing
+    secret, so the same value must come back on every start."""
+    first = await ensure_instance_identity(db, key_manager)
+    assert len(bytes.fromhex(first.routing_secret)) == 32
+    again = await ensure_instance_identity(db, key_manager)
+    assert again.routing_secret == first.routing_secret

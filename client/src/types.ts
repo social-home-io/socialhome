@@ -275,6 +275,10 @@ export interface Moment {
   /** Save is offered: only where the author's delete can still reach this
    *  copy (never on your own moments — they're already under Yours). */
   can_save?:          boolean
+  /** Where the caller's reaction reaches (v_67): ``author`` — the author's
+   *  household gets it; ``household`` — it is seen in this household only
+   *  (no route to the author). */
+  reactions_reach?:   'author' | 'household'
   /** When the caller saved it — set on ``?scope=saved`` items only; the
    *  Saved list pages on it. */
   saved_at?:          string

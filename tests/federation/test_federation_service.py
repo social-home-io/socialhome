@@ -686,6 +686,22 @@ async def test_an_offline_peer_queues_one_online_status_per_person():
 
 
 @pytest.mark.asyncio
+async def test_an_outbox_key_queues_one_routed_reaction_per_person():
+    """v_67: a routed reaction's reactor is sealed, so its sender names the
+    latest-only key itself — local only, never on the wire."""
+    svc, outbox_repo, inst = await _offline_peer_service(_failing_http())
+    for emoji in ("👏", "🔥", None):
+        await svc.send_event(
+            to_instance_id=inst.id,
+            event_type=FederationEventType.MOMENT_REACTION_ROUTED,
+            payload={"moment_id": "m", "sealed": {"emoji": emoji}},
+            outbox_key="moment-reaction:m:u1",
+        )
+    (row,) = outbox_repo.enqueued
+    assert row["supersede_key"] == "moment-reaction:m:u1"
+
+
+@pytest.mark.asyncio
 async def test_a_dm_queued_for_an_offline_peer_is_never_superseded():
     svc, outbox_repo, inst = await _offline_peer_service(_failing_http())
     for i in range(3):

@@ -210,6 +210,16 @@ That single command runs the full sequence:
      for c, so it landed on the derived-key path — and that no household's
      log shows the legacy window ("unsigned moment from pre-v_35") or a
      relayed-moment refusal ("relayed by … — refusing (moment=").
+   - **v_67 routed moment reactions.** d (not paired with c) holds c's
+     relayed moment with a reaction route (``moments.reaction_route``: c's
+     key-wrap key and the relay's return token); its ``GET
+     /api/moments/{id}`` says ``reactions_reach: "author"``. d reacts 👏 —
+     after the 3 s debounce the reaction is sealed to c's key-wrap key and
+     handed to the relay d got the moment from, which opens its token and
+     passes it to c. ``verify`` asserts c's ``moment_reactions`` holds d's
+     reaction within 30 s (naming any ``refusing`` log line if not), then
+     that d's removal reaches c too. Pins ``MIN_FOR_ROUTED_MOMENT_REACTIONS``
+     at v_67.
    - **v_49 writer certificates.** Every confirmed peer must advertise
      ``OURS`` = 49 (the check above), and — when the ``gfs-invite-link``
      chain has run — the link-joined household **e** must hold a writer

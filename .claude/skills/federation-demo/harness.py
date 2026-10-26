@@ -9465,6 +9465,18 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_66 late moment deletes gate in place ✓")
+    # v_67 — reactions reach authors further away. Gated on
+    # ``peer_supports(via, MIN_FOR_ROUTED_MOMENT_REACTIONS)``; the OURS
+    # round-trip above proves every pair is at >= v_67, and step 3c-bis
+    # carries d's reaction to c's moment two hops back.
+    if int(_Cap.MIN_FOR_ROUTED_MOMENT_REACTIONS) != 67 or _OURS < 67:
+        failures.append(
+            "MIN_FOR_ROUTED_MOMENT_REACTIONS moved off v_67 (or OURS fell below "
+            "it) — a reaction would be routed to a neighbour that can't open "
+            "its return token"
+        )
+    else:
+        print("  v_67 routed moment reactions gate in place ✓")
     if state.get("gfs") and _gfs_alive(state):
         s, info = _request(f"http://127.0.0.1:{GFS_PORT}/gfs/info")
         caps = (info or {}).get("capabilities") or {} if s == 200 else {}
@@ -10037,6 +10049,18 @@ def cmd_verify() -> None:
             )
     else:
         print("  (v_35 relayed-moment check skipped — c's moment rate-limited or no d)")
+
+    # 3c-bis. v_67 — a reaction reaches an author two hops away. d is not
+    #     paired with c; c's moment reached d through a relay (b or a), which
+    #     appended its return token. d reacts: the reaction is sealed to c's
+    #     key-wrap key, handed to the relay d got the moment from, which
+    #     opens its token and passes it to c. c must hold d's reaction (and
+    #     drop it again when d takes it back); d's API must say the reaction
+    #     reaches the author.
+    if carol_moment and "d" in state.get("instances", {}):
+        failures.extend(_verify_routed_moment_reaction(state, carol_moment["id"]))
+    else:
+        print("  (v_67 routed-reaction check skipped — c's moment rate-limited or no d)")
 
     # 3c-ter. Deletes stick. c replies to its own moment (replies are exempt
     #     from the 15-min rate limit, so verify can re-run), the reply relays
@@ -14818,6 +14842,76 @@ def _accept_remote_invite(state: dict, joiner: str, space_id: str) -> None:
         method="POST",
     )
     _must(f"{joiner}: accept invite", s, body, ok=(204,))
+
+
+def _verify_routed_moment_reaction(state: dict, moment_id: str) -> list[str]:
+    """v_67: d (not paired with c) reacts to c's relayed moment; the
+    reaction must reach c two hops back, and its removal too."""
+    failures: list[str] = []
+    d = state["instances"]["d"]
+    d_url = f"http://127.0.0.1:{d['port']}"
+    route = _rows("d", "SELECT reaction_route FROM moments WHERE id=?", (moment_id,))
+    if not route or not route[0][0]:
+        return [
+            f"d: no reaction route kept for c's relayed moment {moment_id!r} "
+            f"(row={route!r}) — a relay added no return token or c's key-wrap "
+            "key did not verify"
+        ]
+    s, detail = _request(f"{d_url}/api/moments/{moment_id}", token=d["token"])
+    reach = ((detail or {}).get("moment") or {}).get("reactions_reach")
+    if s != 200 or reach != "author":
+        failures.append(
+            f"d: c's moment says reactions_reach={reach!r} (HTTP {s}) — "
+            "expected 'author' along the route"
+        )
+    d_user = d.get("user_id")
+
+    def _c_reaction() -> list[tuple]:
+        return _rows(
+            "c",
+            "SELECT emoji FROM moment_reactions WHERE moment_id=? AND reactor_user_id=?",
+            (moment_id, d_user),
+        )
+
+    s, _ = _request(
+        f"{d_url}/api/moments/{moment_id}/reaction",
+        token=d["token"],
+        method="PUT",
+        body={"emoji": "👏"},
+    )
+    _must("moment react(d)", s, _)
+    deadline = time.time() + 30
+    while time.time() < deadline and _c_reaction() != [("👏",)]:
+        time.sleep(1)
+    if _c_reaction() != [("👏",)]:
+        _bad = [
+            line
+            for label in ("a", "b", "c")
+            for line in _log_lines_matching(label, "moment_reaction_routed")
+            if "refusing" in line
+        ]
+        failures.append(
+            f"c: d's reaction to {moment_id!r} never arrived two hops back "
+            f"(row={_c_reaction()!r}"
+            + (f", refused: {_bad[-1].strip()[:200]}" if _bad else "")
+            + ")"
+        )
+        return failures
+    print("  d's reaction reaches c two hops away (v_67 routed, sealed) ✓")
+    s, _ = _request(
+        f"{d_url}/api/moments/{moment_id}/reaction",
+        token=d["token"],
+        method="DELETE",
+    )
+    _must("moment unreact(d)", s, _)
+    deadline = time.time() + 30
+    while time.time() < deadline and _c_reaction():
+        time.sleep(1)
+    if _c_reaction():
+        failures.append(f"c: d's removed reaction to {moment_id!r} is still there")
+    else:
+        print("  d's removal reaches c too ✓")
+    return failures
 
 
 def _rows(label: str, sql: str, params: tuple = ()) -> list[tuple]:

@@ -786,3 +786,152 @@ async def test_a_delete_is_not_age_gated(stack):
 
 def test_the_seen_map_remembers_as_long_as_a_create_relays():
     assert outbound_mod.RELAY_SEEN_TTL_S == 48 * 3600.0
+
+
+# ── v_67: reactions further away ─────────────────────────────────────────
+
+
+class _FakeRouter:
+    def __init__(self, direct: str | None) -> None:
+        self.direct = direct
+        self.queued: list[dict] = []
+        self.stamped: list[str] = []
+        self.direct_moment_ids: list[str | None] = []
+
+    def origin_keywrap_fields(self) -> dict:
+        return {"origin_keywrap_pk": "kw", "origin_keywrap_suite": "x25519"}
+
+    def stamp_relayed_create(
+        self, payload, *, received_hop, from_instance, to_instance
+    ):
+        self.stamped.append(to_instance)
+        return {**payload, "rt": [f"tok-for-{to_instance}"]}
+
+    async def direct_target(self, author_user_id, *, moment_id=None):
+        self.direct_moment_ids.append(moment_id)
+        return self.direct
+
+    async def queue_reaction(self, **kwargs):
+        self.queued.append(kwargs)
+        return True
+
+
+async def test_a_create_carries_the_origin_key_wrap_key_outside_its_signature(stack):
+    out, fed, fed_repo, user_repo = stack
+    out.attach_reaction_router(_FakeRouter(None))
+    user_repo.get_instance_for_user = AsyncMock(return_value="self")
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-a")])
+    await out._on_created(_create_event())
+    payload = fed.send_event.call_args.kwargs["payload"]
+    assert payload["origin_keywrap_pk"] == "kw"
+    # The origin signature still verifies: the new fields are outside it.
+    assert verify_moment_origin(
+        identity_pk=_KEY.public_key,
+        event_type=FederationEventType.MOMENT_CREATED,
+        payload=payload,
+    )
+
+
+async def test_a_no_relay_create_carries_no_key_wrap_key(stack):
+    out, fed, fed_repo, user_repo = stack
+    out.attach_reaction_router(_FakeRouter(None))
+    cp = MagicMock()
+    cp.is_protected = AsyncMock(return_value=True)
+    cp.guardian_blocks_household = AsyncMock(return_value=False)
+    out._child_protection = cp
+    fed.peer_supports = AsyncMock(return_value=True)
+    user_repo.get_instance_for_user = AsyncMock(return_value="self")
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-a")])
+    await out._on_created(_create_event())
+    payload = fed.send_event.call_args.kwargs["payload"]
+    assert NO_RELAY_FIELD in payload and "origin_keywrap_pk" not in payload
+
+
+async def test_a_relayed_create_gets_a_token_per_peer(stack):
+    out, fed, fed_repo, _ = stack
+    router = _FakeRouter(None)
+    out.attach_reaction_router(router)
+    fed_repo.list_social_instances = AsyncMock(
+        return_value=[_peer("peer-b"), _peer("peer-c")]
+    )
+    await out.relay_inbound(
+        event_type=FederationEventType.MOMENT_CREATED,
+        payload={
+            "moment_id": "m-1",
+            "author_user_id": "uid-far",
+            "origin_instance_id": "peer-origin",
+            "occurred_at": _ago(),
+            "hop_count": 1,
+        },
+        from_instance="peer-origin",
+    )
+    sent = {
+        c.kwargs["to_instance_id"]: c.kwargs["payload"]
+        for c in fed.send_event.call_args_list
+    }
+    assert sent["peer-b"]["rt"] == ["tok-for-peer-b"]
+    assert sent["peer-c"]["rt"] == ["tok-for-peer-c"]
+    assert sorted(router.stamped) == ["peer-b", "peer-c"]
+
+
+async def test_a_relayed_delete_gets_no_token(stack):
+    out, fed, fed_repo, _ = stack
+    router = _FakeRouter(None)
+    out.attach_reaction_router(router)
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-b")])
+    await out.relay_inbound(
+        event_type=FederationEventType.MOMENT_DELETED,
+        payload={
+            "moment_id": "m-1",
+            "author_user_id": "uid-far",
+            "origin_instance_id": "peer-origin",
+            "occurred_at": _ago(),
+            "hop_count": 1,
+        },
+        from_instance="peer-origin",
+    )
+    assert router.stamped == []
+    assert "rt" not in fed.send_event.call_args.kwargs["payload"]
+
+
+async def test_a_reaction_to_a_far_author_is_routed(stack):
+    out, fed, _fed_repo, user_repo = stack
+    router = _FakeRouter(None)
+    out.attach_reaction_router(router)
+    user_repo.get_instance_for_user = AsyncMock(return_value="self")
+    await out._on_reaction_changed(
+        MomentReactionChanged(
+            moment_id="m-1",
+            reactor_user_id="uid-reactor",
+            author_user_id="uid-far",
+            emoji="👏",
+        )
+    )
+    fed.send_event.assert_not_called()
+    assert router.queued[0]["moment_id"] == "m-1"
+    assert router.queued[0]["emoji"] == "👏"
+
+
+async def test_a_reaction_to_a_paired_author_keeps_the_direct_path(stack):
+    out, fed, _fed_repo, user_repo = stack
+    router = _FakeRouter("peer-author")
+    out.attach_reaction_router(router)
+    user_repo.get_instance_for_user = AsyncMock(return_value="self")
+    out._visibility_repo = _FakeVisibilityRepo()
+    await out._on_reaction_changed(
+        MomentReactionChanged(
+            moment_id="m-1",
+            reactor_user_id="uid-reactor",
+            author_user_id="uid-author",
+            emoji="👏",
+        )
+    )
+    assert router.queued == []
+    # The moment is named so a paired origin is found even without a roster
+    # row for its author (#1178 F1).
+    assert router.direct_moment_ids == ["m-1"]
+    assert fed.send_event.call_args.kwargs["to_instance_id"] == "peer-author"
+    assert (
+        fed.send_event.call_args.kwargs["event_type"]
+        is FederationEventType.MOMENT_REACTED
+    )

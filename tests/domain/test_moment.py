@@ -10,16 +10,23 @@ from __future__ import annotations
 import unicodedata
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from socialhome.domain.moment import (
     MOMENT_DEFAULT_RETENTION_DAYS,
     MOMENT_MAX_HASHTAG_LEN,
     MOMENT_MAX_HASHTAGS_PER_POST,
     MOMENT_MAX_LIFETIME_DAYS,
     MOMENT_MIN_RETENTION_DAYS,
+    MOMENT_REACTION_MAX_EMOJI_BYTES,
     MOMENT_RELAY_MAX_AGE_HOURS,
+    REACTION_REACH_AUTHOR,
+    REACTION_REACH_HOUSEHOLD,
+    MomentReactionInvalidError,
     MomentTombstone,
     clamp_moment_expiry,
     extract_hashtags,
+    is_valid_moment_reaction,
     moment_too_old_to_relay,
     normalize_hashtag,
 )
@@ -137,3 +144,25 @@ def test_retention_bounds():
     assert MOMENT_MIN_RETENTION_DAYS == 1
     assert MOMENT_DEFAULT_RETENTION_DAYS == 7
     assert MOMENT_MAX_LIFETIME_DAYS == 30
+
+
+# ── v_67: a reaction is one emoji of ≤ 32 bytes ───────────────────────────
+
+
+@pytest.mark.parametrize("emoji", ["❤️", "🔥", "👏", "👩‍👩‍👧‍👦", "🇬🇧", "1️⃣", "👍🏽"])
+def test_a_reaction_is_one_emoji(emoji):
+    assert len(emoji.encode()) <= MOMENT_REACTION_MAX_EMOJI_BYTES
+    assert is_valid_moment_reaction(emoji)
+
+
+@pytest.mark.parametrize(
+    "emoji", ["", "a", "hello", "❤️❤️", "🔥 ", None, 5, "🔥" * 9, "<b>"]
+)
+def test_anything_else_is_no_reaction(emoji):
+    assert not is_valid_moment_reaction(emoji)
+
+
+def test_reaction_error_and_reach_values():
+    assert MomentReactionInvalidError.status == 422
+    assert MomentReactionInvalidError.code == "INVALID_REACTION"
+    assert (REACTION_REACH_AUTHOR, REACTION_REACH_HOUSEHOLD) == ("author", "household")

@@ -42,7 +42,13 @@ from ..app_keys import (
     report_service_key,
     user_service_key,
 )
-from ..domain.moment import Moment, MomentReaction, SavedMoment
+from ..domain.moment import (
+    REACTION_REACH_AUTHOR,
+    Moment,
+    MomentReaction,
+    SavedMoment,
+    is_valid_moment_reaction,
+)
 from ..domain.report import (
     DuplicateReportError,
     ReportRateLimitedError,
@@ -77,6 +83,7 @@ def _moment_dict(
     media_status: str | None = None,
     author: PersonSummary | None = None,
     save: tuple[bool, bool] | None = None,
+    reach: str = REACTION_REACH_AUTHOR,
 ) -> dict:
     saved_by_me, can_save = save if save is not None else (False, False)
     base: dict = {
@@ -101,6 +108,9 @@ def _moment_dict(
         # offered (only where the author's delete can still reach the copy).
         "saved_by_me": saved_by_me,
         "can_save": can_save,
+        # v_67: ``author`` when a reaction reaches the author's household,
+        # ``household`` when it is seen in this household only.
+        "reactions_reach": reach,
     }
     if counts is not None:
         base["reaction_count"] = counts.get("reaction_count", 0)
@@ -166,6 +176,7 @@ async def _moment_list(
         [m.id for m in moments], viewer_user_id=viewer_user_id
     )
     saves = await svc.save_flags(moments, viewer_user_id=viewer_user_id)
+    reach = await svc.reaction_reach(moments)
     statuses = await _video_statuses(view, moments)
     authors = await view.named_people(
         (m.author_user_id for m in moments), gfs_via=_gfs_via(moments)
@@ -178,6 +189,7 @@ async def _moment_list(
             media_status=_moment_status(statuses, m),
             author=authors[m.author_user_id],
             save=saves.get(m.id),
+            reach=reach.get(m.id, REACTION_REACH_AUTHOR),
         )
         if saved_at is not None:
             item["saved_at"] = saved_at[m.id]
@@ -391,6 +403,7 @@ class MomentDetailView(BaseView):
         ids = [moment.id, *[r.id for r in replies]]
         counts = await svc.count_engagement(ids, viewer_user_id=ctx.user_id)
         saves = await svc.save_flags([moment, *replies], viewer_user_id=ctx.user_id)
+        reach = await svc.reaction_reach([moment, *replies])
         statuses = await _video_statuses(self, [moment, *replies])
         authors = await self.named_people(
             (m.author_user_id for m in (moment, *replies)),
@@ -406,6 +419,7 @@ class MomentDetailView(BaseView):
                         media_status=_moment_status(statuses, moment),
                         author=authors[moment.author_user_id],
                         save=saves.get(moment.id),
+                        reach=reach.get(moment.id, REACTION_REACH_AUTHOR),
                     ),
                     "replies": [
                         _moment_dict(
@@ -414,6 +428,7 @@ class MomentDetailView(BaseView):
                             media_status=_moment_status(statuses, r),
                             author=authors[r.author_user_id],
                             save=saves.get(r.id),
+                            reach=reach.get(r.id, REACTION_REACH_AUTHOR),
                         )
                         for r in replies
                     ],
@@ -447,6 +462,8 @@ class MomentReactionView(BaseView):
         emoji = str(body.get("emoji") or "").strip()
         if not emoji:
             return error_response(422, "UNPROCESSABLE", "emoji is required.")
+        if not is_valid_moment_reaction(emoji):
+            return error_response(422, "INVALID_REACTION", "A reaction is one emoji.")
         svc = self.svc(moment_service_key)
         moment_id = self.match("id")
         await svc.react(moment_id, reactor_user_id=ctx.user_id, emoji=emoji)

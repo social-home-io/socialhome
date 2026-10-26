@@ -20333,8 +20333,20 @@ h2 + .sh-settings-subcard {
 .sh-momentum-row-chips {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: var(--sh-space-md);
   margin-top: var(--sh-space-xs);
+}
+/* Tap targets on the inbox card: ≥ 36 px tall. */
+.sh-momentum-row-chips .sh-momentum-chip {
+  min-height: 36px;
+}
+/* "Only your household sees reactions" — visible on touch, wraps in German. */
+.sh-momentum-row-reach {
+  margin: 2px 0 0;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 .sh-momentum-chip {
   display: inline-flex;
@@ -20515,6 +20527,10 @@ h2 + .sh-settings-subcard {
   gap: var(--sh-space-xs);
   align-items: center;
   flex-wrap: wrap;
+}
+.sh-momentum-reactions-note {
+  margin: var(--sh-space-xs) 0 0;
+  font-size: 0.85rem;
 }
 .sh-momentum-reaction-btn {
   font-size: 1.2rem;

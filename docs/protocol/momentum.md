@@ -15,15 +15,20 @@ to a thread root.
 ## Event types
 
 `MOMENT_CREATED`, `MOMENT_DELETED`, `MOMENT_REACTED`,
-`MOMENT_REACTION_REMOVED`.
+`MOMENT_REACTION_REMOVED`, `MOMENT_REACTION_ROUTED` (v_67 — a reaction
+carried back to an author further away, [below](#routed-reactions-v_67)).
 
 Plaintext fields on every envelope: `event_type`, `from_instance`,
 `to_instance`, `moment_id`, `origin_instance_id`, `hop_count`. Routing
 data only — everything else (`content`, `media_url`, `media_type`,
 `duration_ms`, `parent_moment_id`, `expires_at`, `author_user_id`,
-`reactor_user_id`, `emoji`, and the v_35 origin signature
-`origin_identity_pk` / `origin_sig` / `origin_sig_suite`) lives inside the
-encrypted payload (§25.8.21).
+`reactor_user_id`, `emoji`, the v_35 origin signature
+`origin_identity_pk` / `origin_sig` / `origin_sig_suite`, and the v_67
+`origin_keywrap_*` fields and return tokens `rt` / `rt_suite`) lives inside
+the encrypted payload (§25.8.21). A `MOMENT_REACTION_ROUTED` carries only
+`moment_id`, `origin_instance_id`, `rt`, `rt_suite` and an opaque `sealed`
+reaction — who reacted and with what is sealed end to end to the origin
+household; the relays between see neither.
 
 ## Retention
 
@@ -308,7 +313,25 @@ couple two trust models and leak block-list shape to peers.
   [`capabilities.md`](./capabilities.md) (v_36).
 * **Reactions** (`MOMENT_REACTED` / `_REMOVED`) are honoured only for a
   moment authored here, from a reactor homed on the sending household;
-  the published author is the stored one.
+  the published author is the stored one. A reaction is exactly one emoji
+  of ≤ 32 bytes (`is_valid_moment_reaction`) — refused otherwise, here, on
+  the route (`422 INVALID_REACTION`), in the service and inside a routed
+  reaction.
+* **Routed reactions** (`MOMENT_REACTION_ROUTED`, v_67) are honoured at the
+  origin only when the seal opens with this household's key-wrap key; the
+  reactor's household key derives to `reactor_instance_id` (and equals the
+  pinned key when that household is paired here); its signature verifies
+  under a known `reaction_sig_suite`;
+  `derive_user_id(reactor_identity_pk, reactor_anchor) == reactor_user_id`;
+  the moment is authored here, live and before its `expires_at`; the
+  reactor is not one of ours, not blocked by the author, not separated by a
+  guardian block and its household is not banned; the author is not a
+  protected account (its moments are `no_relay`); the reaction is at most
+  25 h old (5 min of clock skew ahead) and not a replay (a 25 h digest
+  cache). A relay forwards one only when its own return token opens (this
+  moment, handed back by the neighbour it was minted for, not expired) to a
+  confirmed v_67 household. Everything else is refused at WARNING
+  (`tests/protocol/test_moment_reaction_routed.py`).
 * Refused events are logged at WARNING and never relayed
   (`tests/protocol/test_moment_scope.py`).
 
@@ -389,6 +412,106 @@ peer can't make every viewer's browser load a tracker; the text of the
 moment still lands. The relay forwards the original payload unchanged.
 The same rule applies to public moments received through the GFS.
 
+## Routed reactions (v_67)
+
+Owner decision 9, sign-off 2 (2026-10-25). A moment reaches households up to
+three hops from its author, but a reaction used to go back only to an
+author's household **paired** with the reactor's (the household had to hold
+the author in its roster); anyone further away reacted into the void. Now a
+reaction goes back along the path the moment came.
+
+* **The origin ships its key-wrap key.** Every `MOMENT_CREATED` an origin
+  fans out (not a `no_relay` one) carries `origin_keywrap_pk` /
+  `origin_keywrap_sig` / `origin_keywrap_suite` — its existing static
+  X25519 key-wrap key, outside the origin signature, bound to its identity
+  key (`verify_keywrap_binding`), ~200 B.
+* **Each relay leaves a return token.** A v_67 relay forwarding a create to
+  its peer X appends a token only it can open, naming the household it got
+  the moment from, valid for that moment, from X, until the moment's
+  expiry ([`crypto.md`](../crypto.md)). Only when every relay before it did
+  (`len(rt) == hop − 1`); otherwise it strips the incomplete chain.
+* **The receiver keeps the route.** A household that stores a relayed
+  moment keeps `{kw, via, rt, rt_suite}` in `moments.reaction_route`
+  (migration 0125) when the key-wrap key is bound and the chain is complete
+  — on the first copy, a closer copy, or a later copy when none was kept.
+  Saves, `mark_public` and re-saves keep it; a tombstone drops it (trigger).
+* **A reaction goes back hop by hop.** When the author's household is this
+  one or a paired one — found from the roster, **or the moment's
+  `origin_instance_id` is a confirmed peer** (an author with no roster row
+  yet, e.g. one first seen at hop 2) — the direct `MOMENT_REACTED` path is
+  used as before, under the per-pair hide list: a person hidden from that
+  household reaches it by neither path. Only an origin this household is
+  not paired with is routed to. Otherwise, after a 3 s debounce (the latest state per moment and person;
+  the outbox keeps one queued per peer), the reactor's household signs the
+  reaction, pads it to 1 KB and seals it to the origin's key-wrap key, and
+  sends `MOMENT_REACTION_ROUTED` to the stored `via` neighbour — only when
+  that neighbour `peer_supports` v_67. Each relay opens its own (last)
+  token, pops it and forwards to the household it names (a confirmed v_67
+  peer); when that is the origin, the origin gets it with no tokens left.
+  Relays keep no state.
+* **The origin applies it** after the checks under [Authority](#authority):
+  adds and removals in `occurred_at` order, to the millisecond, against
+  the stored `reacted_at` **and** the stored removal: a removal deletes the
+  reaction row and keeps a watermark in `moment_reaction_removals`
+  (migration 0125), so an add that is older — late, or a replay after a
+  restart wiped the in-memory replay cache — never brings it back, and an
+  identical replay of the newest change is a no-op. A reactor the origin doesn't know shows
+  as "Someone" — no new column.
+* **Degraded.** No complete route (an older origin or relay on the path, a
+  moment that came through a GFS, a first neighbour below v_67): the
+  reaction stays in the reactor's household, as before. Every API item
+  carries `reactions_reach` — `author` or `household` — and the SPA keeps
+  React on every card and says "Reactions here are seen in your household
+  only" where they can't reach.
+* **Rate limits.** A relay takes ≤ 60 routed reactions a minute from one
+  downstream neighbour and ≤ 10 a minute per (neighbour, moment); the
+  origin ≤ 60 a minute per reactor household (and the per-neighbour 60 on
+  what it is handed). The per-neighbour limit runs before any crypto; the
+  per-reactor-household one is charged only for a reaction that passed
+  every other check, so a relay re-sending one genuine sealed reaction (a
+  replay) cannot use up that household's budget.
+* **Known follow-ups (not fixed in v_67).** `hop_count` sits outside the
+  origin signature, so a paired neighbour can claim a shorter hop and
+  become the stored `via` for a moment (the route is replaced by a closer
+  copy) and then silently drop the reactions it should carry back; and one
+  misbehaving downstream neighbour can fill a relay's 60-a-minute budget at
+  the origin for everyone behind that relay. Both cost availability of
+  reactions only — never their privacy or integrity.
+* **Privacy residual (signed off 2026-10-25).** A relay learns that its
+  direct neighbour — or that neighbour's part of the mesh — reacted to
+  moment M: not who, not with what (the seal is one size), and not who else
+  is beyond. No household learns any non-adjacent part of the pairing graph
+  ([`principles.md`](../principles.md)).
+
+**Cost.** One reaction is at most 3 envelopes of ~1.6 KB (hop-encrypted
+sealed reaction + up to two tokens) — the same order as the create it
+answers. A sparse mesh averaging 2 hops: 60 reactions to one popular moment
+≈ 120 envelopes ≈ 200 KB in total, spread over the households on the path;
+coalescing caps a person who toggles at one per 3 s. A fully connected mesh
+uses the direct path (one envelope). Every create grows by ~200 B (key-wrap
+key + binding) plus ~110 B per relay token. Worst case per relay: 60
+reactions a minute from each neighbour — bounded, and each is one
+forwarded envelope.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Origin A<br/>(author)
+    participant B as Relay B<br/>(paired with A, C)
+    participant C as Reactor C<br/>(not paired with A)
+
+    A->>B: MOMENT_CREATED hop=1, origin_sig,<br/>origin_keywrap_pk/sig/suite
+    Note over B: store; relay on, appending<br/>rt_B = AESGCM(k_B, exp ‖ "A")<br/>AAD "moment-return:v1|M|C"
+    B->>C: MOMENT_CREATED hop=2, rt=[rt_B]
+    Note over C: verify origin_sig + key-wrap binding<br/>keep route {kw, via=B, rt=[rt_B]}
+    Note over C: person reacts 👏 — 3 s debounce,<br/>sign with C's identity key,<br/>pad 1 KB, seal to A's key-wrap key
+    C->>B: MOMENT_REACTION_ROUTED {M, origin=A, rt=[rt_B], sealed}
+    Note over B: open rt_B (AAD names C, not expired)<br/>→ prev = A = origin; rate limits
+    B->>A: MOMENT_REACTION_ROUTED {M, origin=A, rt=[], sealed}
+    Note over A: open seal, verify C's key → id → user id,<br/>signature, moment live + authored here,<br/>not blocked / banned / no_relay, ≤ 25 h, not replayed
+    A->>A: apply in occurred_at order<br/>publish MomentReactionChanged → author notified
+```
+
 ## Mermaid sequence — local author posts a moment
 
 ```mermaid
@@ -457,16 +580,21 @@ instance.
   plain text (no FK) so federated remote-author rows live alongside
   local rows. `0057_moment_tombstone.sql` adds `moments.deleted_at`
   (delete tombstones). `0124_moment_saves.sql` adds `moment_saves`
-  (saved moments, decision 6b).
+  (saved moments, decision 6b). `0125_moment_reaction_route.sql` adds
+  `moments.reaction_route` (v_67).
 - Domain: `socialhome/domain/moment.py` (caps + dataclasses);
   events at `socialhome/domain/events.py`.
 - Repo: `socialhome/repositories/moment_repo.py`.
 - Service: `socialhome/services/moment_service.py`.
 - Outbound federation:
   ``socialhome/services/moment_federation_outbound.py``.
+- Routed reactions (v_67): wire + crypto
+  ``socialhome/federation/moment_reaction_route.py``; reactor / relay /
+  origin ``socialhome/services/moment_reaction_router.py``.
 - Inbound federation: handler block in
   ``socialhome/services/federation_inbound_service.py`` (registered
-  by ``attach_to`` for the four ``MOMENT_*`` event types). Calls
+  by ``attach_to`` for the four ``MOMENT_*`` event types;
+  ``MOMENT_REACTION_ROUTED`` is registered by ``MomentReactionRouter``). Calls
   ``moment_outbound.relay_inbound`` for the 3-hop relay step.
 - Realtime push:
   ``socialhome/services/realtime_service.py`` — broadcasts

@@ -76,9 +76,11 @@ from ..domain.link_preview import card_survives_edit
 from ..domain.mention import Mention
 from ..domain.moment import (
     MOMENT_MAX_LIFETIME_DAYS,
+    MOMENT_REACTION_MAX_EMOJI_BYTES,
     Moment,
     MomentTombstone,
     clamp_moment_expiry,
+    is_valid_moment_reaction,
 )
 from ..domain.picture_hash import clean_picture_hash
 from ..domain.post import (
@@ -184,6 +186,7 @@ if TYPE_CHECKING:
     from ..repositories.user_repo import AbstractUserRepo
     from .dm_group_service import DmGroupService
     from .moment_federation_outbound import MomentFederationOutbound
+    from .moment_reaction_router import MomentReactionRouter
     from .relay_policy import RelayPolicy
 
 log = logging.getLogger(__name__)
@@ -383,6 +386,7 @@ class FederationInboundService(ProtectionGateMixin):
         "_media_dir",
         "_mentions",
         "_moment_outbound",
+        "_moment_reaction_router",
         "_moment_repo",
         "_pending",
         "_pending_parents",
@@ -437,6 +441,8 @@ class FederationInboundService(ProtectionGateMixin):
         self._highlight_audience: HighlightAudienceCheck | None = None
         self._moment_repo = moment_repo
         self._moment_outbound = moment_outbound
+        #: v_67 — keeps a relayed moment's reaction route (wired by app).
+        self._moment_reaction_router: MomentReactionRouter | None = None
         # v_3 DM media: receiver writes the embedded preview here on
         # ``DM_MESSAGE``, then the full bytes from ``DM_MEDIA_BLOB``.
         # ``realtime`` is the WS publisher — we push
@@ -511,6 +517,10 @@ class FederationInboundService(ProtectionGateMixin):
         #: cross-household group leaves it instead of taking it down.
         self._groups: DmGroupService | None = None
         self._child_protection = None
+
+    def attach_moment_reaction_router(self, router: MomentReactionRouter) -> None:
+        """v_67: keep the reaction route a relayed ``MOMENT_CREATED`` carries."""
+        self._moment_reaction_router = router
 
     def attach_groups(self, groups: DmGroupService) -> None:
         """Wire the group-membership authority (built with the DM stack)."""
@@ -4015,8 +4025,12 @@ class FederationInboundService(ProtectionGateMixin):
         if held is not None:
             if hop_count < held.hop_count:
                 await self._moment_repo.save(moment)
+                await self._keep_reaction_route(event, moment, replace=True)
+            else:
+                await self._keep_reaction_route(event, moment, replace=False)
         elif wants_local:
             await self._moment_repo.save(moment)
+            await self._keep_reaction_route(event, moment, replace=True)
             # Look up the parent's author so the local notification
             # handler can ping them when the inbound moment is a reply.
             if moment.parent_moment_id is not None:
@@ -4050,6 +4064,29 @@ class FederationInboundService(ProtectionGateMixin):
             payload=p,
             from_instance=event.from_instance,
         )
+
+    async def _keep_reaction_route(
+        self, event: FederationEvent, moment: Moment, *, replace: bool
+    ) -> None:
+        """v_67: keep how a reaction gets back to this relayed moment's
+        origin — on the stored copy, on a closer one (``replace``), or on a
+        later copy at the same distance when none was kept yet. Only a
+        complete route (origin key bound to its identity, one token per
+        relay) is ever kept; an incomplete one never replaces a kept one."""
+        router = self._moment_reaction_router
+        if router is None or self._moment_repo is None:
+            return
+        route = await router.route_from_create(
+            event.payload,
+            from_instance=event.from_instance,
+            origin_instance_id=moment.origin_instance_id,
+            hop_count=moment.hop_count,
+        )
+        if route is None:
+            return
+        if not replace and (await self._moment_repo.get_reaction_routes([moment.id])):
+            return
+        await self._moment_repo.set_reaction_route(moment.id, route)
 
     async def _on_moment_deleted(self, event: FederationEvent) -> None:
         if self._moment_repo is None:
@@ -4159,6 +4196,17 @@ class FederationInboundService(ProtectionGateMixin):
             return
         author_user_id = moment.author_user_id
         emoji = None if removed else (p.get("emoji") or None)
+        if emoji is not None and not is_valid_moment_reaction(emoji):
+            log.warning(
+                "%s from %s: emoji is not one emoji of ≤ %d bytes — refusing"
+                " (moment=%s user=%s)",
+                event.event_type,
+                event.from_instance,
+                MOMENT_REACTION_MAX_EMOJI_BYTES,
+                moment_id,
+                reactor_user_id,
+            )
+            return
         if removed or emoji is None:
             await self._moment_repo.clear_reaction(moment_id, reactor_user_id)
             published_emoji: str | None = None

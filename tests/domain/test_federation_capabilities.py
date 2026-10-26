@@ -8,7 +8,7 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 66
+    assert fc.OURS == 67
 
 
 def test_local_community_area_capability_threshold():
@@ -29,6 +29,7 @@ def test_local_community_area_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
     assert fc.features_missing_below(59) == [
         "Names for a space's followers",
@@ -38,6 +39,7 @@ def test_local_community_area_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
     assert fc.features_missing_below(60) == [
         "Names for new followers right away",
@@ -46,6 +48,7 @@ def test_local_community_area_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
     assert fc.features_missing_below(61) == [
         "Public moments encrypted from the GFS",
@@ -53,24 +56,32 @@ def test_local_community_area_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
     assert fc.features_missing_below(62) == [
         "Photos and videos in public moments",
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
     assert fc.features_missing_below(63) == [
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
     assert fc.features_missing_below(64) == [
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
-    assert fc.features_missing_below(65) == ["Deletes reach every copy of a moment"]
-    assert fc.features_missing_below(66) == []
+    assert fc.features_missing_below(65) == [
+        "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
+    ]
+    assert fc.features_missing_below(66) == ["Reactions reach authors further away"]
+    assert fc.features_missing_below(67) == []
     assert fc.CAPABILITY_FEATURE_KEYS[59] == "local_communities"
 
 
@@ -94,6 +105,7 @@ def test_member_picture_reset_sync_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
     assert fc.features_missing_below(58) == [
         "Local communities",
@@ -104,6 +116,7 @@ def test_member_picture_reset_sync_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[58] == "synced_picture_resets"
 
@@ -128,6 +141,7 @@ def test_multi_gfs_publish_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
     assert "Posting to every GFS a space is listed on" not in (
         fc.features_missing_below(57)
@@ -156,6 +170,7 @@ def test_sync_series_rows_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[56] == "synced_recurring_events"
 
@@ -179,6 +194,7 @@ def test_space_chat_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
     assert fc.features_missing_below(55) == [
         "Recurring events in space catch-up",
@@ -192,6 +208,7 @@ def test_space_chat_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
     assert fc.space_features_missing_below(54) == [
         "Chat in spaces",
@@ -226,6 +243,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
     assert fc.features_missing_below(54) == [
         "Chat in spaces",
@@ -240,6 +258,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
 
 
@@ -266,6 +285,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
     assert fc.features_missing_below(53) == [
         "Turning on the GFS fallback for an existing connection",
@@ -281,6 +301,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
 
 
@@ -306,6 +327,7 @@ def test_forwarded_invite_link_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
 
 
@@ -350,6 +372,7 @@ def test_space_authority_rotation_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
@@ -372,6 +395,7 @@ def test_space_authority_rotation_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
 
 
@@ -412,6 +436,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
 
 
@@ -938,6 +963,7 @@ def test_forwarded_role_change_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
 
 
@@ -973,6 +999,7 @@ def test_host_sequenced_pages_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
 
 
@@ -1002,6 +1029,7 @@ def test_member_gfs_publish_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
 
 
@@ -1030,6 +1058,7 @@ def test_strict_member_publish_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
 
 
@@ -1058,6 +1087,7 @@ def test_private_channels_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
 
 
@@ -1129,6 +1159,7 @@ _PINNED_FEATURE_KEYS = {
     64: "public_moment_sent_at",
     65: "follower_moment_retention",
     66: "late_moment_deletes",
+    67: "routed_moment_reactions",
 }
 
 
@@ -1181,6 +1212,7 @@ def test_space_author_profile_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
     assert fc.space_feature_keys_missing_below(59) == ["follower_author_names"]
     assert fc.CAPABILITY_FEATURE_KEYS[60] == "follower_author_names"
@@ -1202,6 +1234,7 @@ def test_follower_profile_bundle_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[61] == "follower_names_on_join"
 
@@ -1221,6 +1254,7 @@ def test_encrypted_public_moments_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[62] == "encrypted_public_moments"
 
@@ -1238,6 +1272,7 @@ def test_encrypted_moment_media_capability_threshold():
         "Time-stamped public moments",
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[63] == "public_moment_media"
 
@@ -1265,6 +1300,7 @@ def test_long_lived_moments_capability_threshold():
     assert fc.features_missing_below(64) == [
         "Choose how long followers keep your moments",
         "Deletes reach every copy of a moment",
+        "Reactions reach authors further away",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[65] == "follower_moment_retention"
 
@@ -1279,5 +1315,18 @@ def test_late_moment_deletes_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_LATE_MOMENT_DELETES not in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert fc.features_missing_below(65) == ["Deletes reach every copy of a moment"]
+    assert fc.features_missing_below(65)[0] == "Deletes reach every copy of a moment"
     assert fc.CAPABILITY_FEATURE_KEYS[66] == "late_moment_deletes"
+
+
+def test_routed_moment_reactions_capability_threshold():
+    """v_67 — reactions reach authors further away: a reactor sends a
+    sealed ``MOMENT_REACTION_ROUTED`` only to a neighbour at this version.
+    Labelled, not space-scoped."""
+    assert fc.FederationCapability.MIN_FOR_ROUTED_MOMENT_REACTIONS == 67
+    assert fc.FederationCapability.MIN_FOR_ROUTED_MOMENT_REACTIONS <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_ROUTED_MOMENT_REACTIONS not in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert fc.features_missing_below(66) == ["Reactions reach authors further away"]
+    assert fc.CAPABILITY_FEATURE_KEYS[67] == "routed_moment_reactions"

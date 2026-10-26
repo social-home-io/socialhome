@@ -225,6 +225,13 @@ function MomentRow({
     ? m.content.slice(0, CONTENT_TRUNCATE_AT) + '…'
     : m.content
 
+  // v_67: a reaction that can't reach the author's household stays here —
+  // React is still offered, and says so.
+  // A visible line under the chips (not a hover title) so touch users see
+  // it too; the React chip is described by it.
+  const householdOnly = !mine && m.reactions_reach === 'household'
+  const reachNoteId = `sh-moment-reach-${m.id}`
+
   return (
     <li class="sh-momentum-row" onClick={onOpen}>
       <Avatar name={authorName} src={authorPicture} size={36} />
@@ -337,6 +344,7 @@ function MomentRow({
             type="button"
             class="sh-momentum-chip"
             aria-label={t('moment.detail.react_aria', { emoji: DEFAULT_REACTION })}
+            aria-describedby={householdOnly ? reachNoteId : undefined}
             disabled={mine}
             onClick={mine ? undefined : onReact}
           >
@@ -344,6 +352,11 @@ function MomentRow({
           </button>
           {!mine && <MomentSaveToggle moment={m} variant="chip" />}
         </div>
+        {householdOnly && (
+          <p id={reachNoteId} class="sh-muted sh-momentum-row-reach">
+            {t('moment.detail.reactions_household_only')}
+          </p>
+        )}
       </div>
     </li>
   )

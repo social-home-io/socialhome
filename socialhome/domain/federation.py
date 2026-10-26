@@ -469,6 +469,10 @@ class FederationEventType(str, enum.Enum):
     MOMENT_DELETED = "moment_deleted"
     MOMENT_REACTED = "moment_reacted"
     MOMENT_REACTION_REMOVED = "moment_reaction_removed"
+    # v_67 — a reaction sealed to the origin household's key-wrap key,
+    # carried back hop by hop along the moment's return tokens to an author
+    # the reactor's household is not paired with.
+    MOMENT_REACTION_ROUTED = "moment_reaction_routed"
 
     # ── Public Momentum (§Momentum-public) — GFS → author back-channel for
     # follower bookkeeping. The public moment itself rides as a WS frame

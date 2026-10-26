@@ -168,3 +168,28 @@ describe('MomentumInboxTab save chip', () => {
     await waitFor(() => expect(api.put).toHaveBeenCalledWith('/api/moments/m-ok/save', {}))
   })
 })
+
+describe('MomentumInboxTab reaction reach (v_67)', () => {
+  it('still offers React where a reaction stays here, and says so', async () => {
+    vi.mocked(api.get).mockImplementation(async (path: string) => (path === '/api/moments'
+      ? [
+          moment('m-far', 'ru-amaka', { reactions_reach: 'author' }),
+          moment('m-home', 'ru-chidi', { reactions_reach: 'household' }),
+        ]
+      : []))
+    const { container } = render(<MomentumInboxTab />)
+    await waitFor(() => expect(container.textContent).toContain('hello from m-home'))
+    const rows = [...container.querySelectorAll('.sh-momentum-row')]
+    const react = (row: Element) => row.querySelectorAll('.sh-momentum-chip')[1] as HTMLButtonElement
+    expect(react(rows[0]).disabled).toBe(false)
+    expect(rows[0].querySelector('.sh-momentum-row-reach')).toBeNull()
+    expect(react(rows[0]).getAttribute('aria-describedby')).toBeNull()
+    expect(react(rows[1]).disabled).toBe(false)
+    // A visible cue — not only a hover title — for touch and keyboard users,
+    // and the React chip is described by it (#1178 review).
+    const note = rows[1].querySelector('.sh-momentum-row-reach')!
+    expect(note.textContent).toBe('Reactions here are seen in your household only.')
+    expect(react(rows[1]).getAttribute('aria-describedby')).toBe(note.id)
+    expect(react(rows[1]).getAttribute('title')).toBeNull()
+  })
+})

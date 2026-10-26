@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from socialhome.domain.moment import Moment, MomentTombstone
+from socialhome.domain.moment import Moment, MomentReactionRoute, MomentTombstone
 from socialhome.repositories.moment_repo import SqliteMomentRepo
 
 
@@ -1170,3 +1170,90 @@ async def test_list_saved_media_and_clear_saved_media(db, repo):
     assert await repo.clear_saved_media("m-1", "u-me") is True
     one = await repo.get("m-1")
     assert (one.media_url, one.content) == (None, "hello")
+
+
+# ── v_67: reaction routes and ordered reactions ───────────────────────────
+
+
+def _route(via: str = "peer-b") -> MomentReactionRoute:
+    return MomentReactionRoute(
+        keywrap_pk="ab" * 32, via=via, tokens=("t1",), token_suite="aesgcm-256"
+    )
+
+
+async def test_reaction_route_round_trips_and_survives_resaves(db, repo):
+    relayed = replace(_moment(id="m-r"), received_via="household", hop_count=2)
+    await repo.save(relayed)
+    await repo.set_reaction_route("m-r", _route())
+    assert await repo.get_reaction_routes(["m-r", "m-none"]) == {"m-r": _route()}
+    # A re-save (a closer copy, mark_public, a save) keeps it.
+    await repo.save(replace(relayed, hop_count=1))
+    await repo.mark_public("m-r")
+    assert (await repo.get_reaction_routes(["m-r"]))["m-r"] == _route()
+    assert await repo.get_reaction_routes([]) == {}
+
+
+async def test_reaction_route_only_on_a_relayed_live_moment(db, repo):
+    await repo.save(_moment(id="m-own"))  # received_via='self'
+    await repo.set_reaction_route("m-own", _route())
+    assert await repo.get_reaction_routes(["m-own"]) == {}
+    relayed = replace(_moment(id="m-r"), received_via="household")
+    await repo.save(relayed)
+    await repo.set_reaction_route("m-r", _route())
+    await repo.delete("m-r")  # tombstone
+    assert await repo.get_reaction_routes(["m-r"]) == {}
+    row = await db.fetchone("SELECT reaction_route FROM moments WHERE id='m-r'", ())
+    assert row[0] is None
+
+
+async def test_an_unreadable_route_is_skipped(db, repo):
+    await repo.save(replace(_moment(id="m-r"), received_via="household"))
+    await db.enqueue(
+        "UPDATE moments SET reaction_route=? WHERE id='m-r'", ('{"kw": "x"}',)
+    )
+    assert await repo.get_reaction_routes(["m-r"]) == {}
+
+
+async def test_apply_reaction_at_orders_by_time(db, repo):
+    await repo.save(_moment(id="m-1"))
+    at = "2026-10-26 {}:00:00".format
+    assert await repo.apply_reaction_at("m-1", "u-r", "👏", reacted_at=at(10))
+    # Older add loses; newer one wins.
+    assert not await repo.apply_reaction_at("m-1", "u-r", "🔥", reacted_at=at("09"))
+    assert await repo.apply_reaction_at("m-1", "u-r", "😂", reacted_at=at(11))
+    assert [r.emoji for r in await repo.list_reactions("m-1")] == ["😂"]
+    # Older removal loses; newer one deletes.
+    assert not await repo.apply_reaction_at("m-1", "u-r", None, reacted_at=at(10))
+    assert await repo.apply_reaction_at("m-1", "u-r", None, reacted_at=at(12))
+    assert await repo.list_reactions("m-1") == []
+    assert not await repo.apply_reaction_at("m-1", "u-r", None, reacted_at=at(13))
+    # Never on a moment that isn't live.
+    assert not await repo.apply_reaction_at("m-ghost", "u-r", "👏", reacted_at=at(13))
+
+
+async def test_apply_reaction_at_keeps_a_removal_watermark(db, repo):
+    """#1178 F3: a removal is remembered on disk, so an older add — late or
+    replayed after a restart — never brings the reaction back, and the
+    watermark never counts as a reaction."""
+    await repo.save(_moment(id="m-1"))
+    at = "2026-10-26 10:00:00.{:03d}".format
+    assert await repo.apply_reaction_at("m-1", "u-r", "👏", reacted_at=at(100))
+    assert await repo.apply_reaction_at("m-1", "u-r", None, reacted_at=at(500))
+    # A removal that arrives before its add still wins over that add.
+    assert not await repo.apply_reaction_at("m-1", "u-x", None, reacted_at=at(900))
+    for reactor in ("u-r", "u-x"):
+        assert not await repo.apply_reaction_at(
+            "m-1", reactor, "👏", reacted_at=at(100)
+        )
+    assert await repo.list_reactions("m-1") == []
+    counts = await repo.count_engagement_for(["m-1"], viewer_user_id="u-r")
+    assert counts["m-1"]["reaction_count"] == 0
+    assert counts["m-1"].get("my_reaction") is None
+    # Milliseconds order two changes in one second; an identical replay of
+    # the newest is a no-op.
+    assert await repo.apply_reaction_at("m-1", "u-r", "🔥", reacted_at=at(600))
+    assert not await repo.apply_reaction_at("m-1", "u-r", "🔥", reacted_at=at(600))
+    assert not await repo.apply_reaction_at("m-1", "u-r", "😂", reacted_at=at(550))
+    assert [r.emoji for r in await repo.list_reactions("m-1")] == ["🔥"]
+    rows = await db.fetchall("SELECT reactor_user_id FROM moment_reaction_removals", ())
+    assert [r[0] for r in rows] == ["u-x"]

@@ -24,6 +24,7 @@ from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.moment import (
     Moment,
     MomentOwnSaveError,
+    MomentReactionInvalidError,
     MomentSaveUnavailableError,
 )
 from socialhome.federation.owner_bound_id import (
@@ -481,8 +482,34 @@ async def test_get_unknown_moment_raises(stack):
 async def test_react_with_empty_emoji_rejected(stack):
     a = await stack.provision("alice")
     m = await stack.moment_svc.create_moment(author_user_id=a.user_id, content="hi")
-    with pytest.raises(ValueError):
+    with pytest.raises(MomentReactionInvalidError):
         await stack.moment_svc.react(m.id, reactor_user_id=a.user_id, emoji="")
+
+
+@pytest.mark.parametrize("emoji", ["hello", "❤️❤️", "x" * 40, "🔥" * 9])
+async def test_react_takes_one_emoji_of_at_most_32_bytes(stack, emoji):
+    """The same bound every inbound path holds a reaction to (v_67)."""
+    a = await stack.provision("alice")
+    m = await stack.moment_svc.create_moment(author_user_id=a.user_id, content="hi")
+    with pytest.raises(MomentReactionInvalidError):
+        await stack.moment_svc.react(m.id, reactor_user_id=a.user_id, emoji=emoji)
+    await stack.moment_svc.react(m.id, reactor_user_id=a.user_id, emoji="👩‍👩‍👧‍👦")
+    assert [r.emoji for r in await stack.moment_svc.list_reactions(m.id)] == [
+        "👩‍👩‍👧‍👦"
+    ]
+
+
+async def test_reaction_reach_defaults_to_author_until_wired(stack):
+    a = await stack.provision("alice")
+    m = await stack.moment_svc.create_moment(author_user_id=a.user_id, content="hi")
+    assert await stack.moment_svc.reaction_reach([m]) == {m.id: "author"}
+
+    class _Reach:
+        async def reach_for(self, moments):
+            return {x.id: "household" for x in moments}
+
+    stack.moment_svc.attach_reaction_reach(_Reach())
+    assert await stack.moment_svc.reaction_reach([m]) == {m.id: "household"}
 
 
 async def test_invalid_media_type_rejected(stack):
