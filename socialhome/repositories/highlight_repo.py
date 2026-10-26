@@ -111,6 +111,7 @@ class AbstractHighlightRepo(Protocol):
         highlight_id: str,
         viewer_user_id: str,
     ) -> int: ...
+    async def count_viewers(self, highlight_id: str) -> int: ...
     async def set_reaction(
         self,
         frame_id: str,
@@ -432,6 +433,20 @@ class SqliteHighlightRepo:
             WHERE f.highlight_id = ? AND v.frame_id IS NULL
             """,
             (viewer_user_id, highlight_id),
+        )
+        return int(row["c"]) if row is not None else 0
+
+    async def count_viewers(self, highlight_id: str) -> int:
+        """How many people watched at least one frame — the author's
+        "seen by N" (people, not frame views)."""
+        row = await self._db.fetchone(
+            """
+            SELECT COUNT(DISTINCT v.viewer_user_id) AS c
+            FROM highlight_frame_views v
+            JOIN highlight_frames f ON f.id = v.frame_id
+            WHERE f.highlight_id = ?
+            """,
+            (highlight_id,),
         )
         return int(row["c"]) if row is not None else 0
 

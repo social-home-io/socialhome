@@ -41,6 +41,7 @@ import { getLandingPath } from '@/utils/preferences'
 import { isMuteActive } from '@/utils/mute'
 import { t } from '@/i18n/i18n'
 import type { FeedPost } from '@/types'
+import type { ComponentChildren } from 'preact'
 import { confirmDialog } from '@/components/confirm'
 
 export type FeedTab = 'feed' | 'chat'
@@ -64,7 +65,13 @@ export function feedTabFromUrl(url: string | undefined): FeedTab {
   return new URLSearchParams(q).get('tab') === 'chat' ? 'chat' : 'feed'
 }
 
-export default function FeedPage() {
+interface FeedPageProps {
+  /** Shown above the Feed tab's composer — the Home landing passes its
+   *  "today" card (``LandingDispatch``). */
+  lead?: ComponentChildren
+}
+
+export default function FeedPage({ lead }: FeedPageProps = {}) {
   // ``useLocation`` is ``undefined`` outside a router (unit tests that
   // render the page bare) — every read is optional.
   const loc = useLocation() as ReturnType<typeof useLocation> | undefined
@@ -162,7 +169,7 @@ export default function FeedPage() {
           onSelectTab={onSelectTab}
         />
       )}
-      {active === 'chat' ? <HouseholdChatTab /> : <FeedTabBody />}
+      {active === 'chat' ? <HouseholdChatTab /> : <>{lead}<FeedTabBody /></>}
     </div>
   )
 }

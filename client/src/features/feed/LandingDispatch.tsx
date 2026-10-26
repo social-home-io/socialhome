@@ -4,7 +4,8 @@
  * Looks at the caller's ``landing_path`` preference:
  *   - ``/`` (default) → render :mod:`WelcomePage` — the warm
  *     "open the door" landing.
- *   - ``/feed``       → render the household feed inline.
+ *   - ``/feed``       → render the household feed inline, with Home's
+ *     "today" card above the composer (the welcome page has its own).
  *   - ``/dashboard``  → redirect to :mod:`DashboardPage` via preact-iso
  *
  * The welcome page has no sidebar entry on purpose — it's only ever
@@ -16,6 +17,7 @@ import { useLocation } from 'preact-iso'
 import { getLandingPath } from '@/utils/preferences'
 import FeedPage, { feedTabFromUrl } from './FeedPage'
 import WelcomePage from '@/features/welcome/WelcomePage'
+import { HomeTodayCard } from '@/features/welcome/HomeTodayCard'
 
 export default function LandingDispatch() {
   const { route, url } = useLocation()
@@ -30,6 +32,6 @@ export default function LandingDispatch() {
   }, [choice])
 
   if (choice === '/dashboard') return null  // about to redirect
-  if (choice === '/feed')      return <FeedPage />
+  if (choice === '/feed')      return <FeedPage lead={<HomeTodayCard />} />
   return <WelcomePage />
 }

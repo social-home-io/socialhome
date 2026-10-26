@@ -59,4 +59,15 @@ describe('FeedPage', () => {
     await new Promise(r => setTimeout(r, 0))
     expect(pageTitle.value).toBe('Casa Vizeli')
   })
+
+  it('shows the Home lead (the "today" card) above the composer', async () => {
+    const mod = await import('./FeedPage')
+    const FeedPage = mod.default
+    const { container, findByTestId } = render(<FeedPage lead={<section data-testid="lead" />} />)
+    const lead = await findByTestId('lead')
+    await new Promise(r => setTimeout(r, 0))
+    const body = container.querySelector('.sh-feed, .sh-post--skeleton')
+    expect(body).not.toBeNull()
+    expect(lead.compareDocumentPosition(body!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
 })

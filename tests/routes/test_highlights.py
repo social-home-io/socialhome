@@ -1075,3 +1075,46 @@ async def test_a_paired_households_highlight_reads_paired(client):
     for h in await _shapes(client, "h-amaka", _auth(client)):
         assert h["audience_label"] == "paired"
         assert "audience" not in h
+
+
+# ─── What the Today rows need (seen_by, video poster) ─────────────────────
+
+
+async def test_the_inbox_tells_only_the_author_how_many_watched(client):
+    """``seen_by`` is the author's "seen by N": people, not frame views,
+    and absent from every viewer's row."""
+    bob_uid, bob = await _local_user(client, "bob")
+    carol_uid, carol = await _local_user(client, "carol")
+    highlight_id, frame_id = await _highlight_for(client, [bob_uid, carol_uid])
+
+    async def _row(headers: dict) -> dict:
+        r = await client.get("/api/highlights", headers=headers)
+        assert r.status == 200
+        return next(x for x in await r.json() if x["highlight"]["id"] == highlight_id)
+
+    assert (await _row(_auth(client)))["seen_by"] == 0
+    for headers in (bob, carol, bob):
+        r = await client.post(
+            f"/api/highlights/frames/{frame_id}/view", headers=headers
+        )
+        assert r.status in (200, 204), await r.text()
+    assert (await _row(_auth(client)))["seen_by"] == 2
+    assert "seen_by" not in await _row(bob)
+
+
+async def test_a_video_frame_carries_a_signed_poster(client):
+    """Rows show a still of a video, not a 🎬: the ``.webp`` sibling of
+    the transcoded ``.webm``, signed like ``media_url``. Image frames
+    carry none."""
+    _hid, frame_id, fn = await _create_video_frame(client)
+    r = await client.post(
+        "/api/highlights/frames",
+        json={"frame_type": "image", "media_url": "/api/media/pic.webp"},
+        headers=_auth(client),
+    )
+    image_frame_id = (await r.json())["frame"]["id"]
+    frames = {f["id"]: f for f in await _list_frames(client)}
+    poster = frames[frame_id]["thumbnail_url"]
+    assert poster.split("?", 1)[0].endswith(fn.replace(".webm", ".webp"))
+    assert "sig=" in poster
+    assert "thumbnail_url" not in frames[image_frame_id]

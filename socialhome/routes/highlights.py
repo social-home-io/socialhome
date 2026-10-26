@@ -63,7 +63,7 @@ from ..domain.user import PersonSummary
 from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..security import error_response
 from .base import BaseView
-from .media_status import READY, media_filename
+from .media_status import READY, media_filename, video_poster_path
 
 # ─── Serialisation helpers ────────────────────────────────────────────────
 
@@ -123,6 +123,11 @@ def _frame_dict(frame: HighlightFrame, *, media_status: str | None = None) -> di
     # ``media_status`` so the SPA shows a "Processing…" placeholder.
     if frame.frame_type is HighlightFrameType.VIDEO:
         out["media_status"] = media_status if media_status is not None else READY
+        # The still a row shows instead of a 🎬: the ``.webp`` poster the
+        # upload minted next to the ``.webm`` (signed by ``_sign_payload``).
+        poster = video_poster_path(frame.media_url)
+        if poster is not None:
+            out["thumbnail_url"] = poster
     return out
 
 
@@ -246,20 +251,22 @@ class HighlightsCollectionView(BaseView):
         statuses = await _frame_statuses(self, all_frames)
         out: list[dict] = []
         for row in rows:
-            out.append(
-                {
-                    "highlight": _highlight_dict(
-                        row["highlight"],
-                        ctx.user_id,
-                        author=authors[row["highlight"].author_user_id],
-                    ),
-                    "frames": [
-                        _frame_dict(f, media_status=_frame_status(statuses, f))
-                        for f in row["frames"]
-                    ],
-                    "unseen_count": row["unseen_count"],
-                }
-            )
+            item: dict = {
+                "highlight": _highlight_dict(
+                    row["highlight"],
+                    ctx.user_id,
+                    author=authors[row["highlight"].author_user_id],
+                ),
+                "frames": [
+                    _frame_dict(f, media_status=_frame_status(statuses, f))
+                    for f in row["frames"]
+                ],
+                "unseen_count": row["unseen_count"],
+            }
+            # The author's "seen by N" — never on a viewer's row.
+            if row["seen_by"] is not None:
+                item["seen_by"] = row["seen_by"]
+            out.append(item)
         return self._json(_sign_payload(self.request, out))
 
 

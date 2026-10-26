@@ -6,7 +6,7 @@ import {
   PostCardSkeleton,
   FeedSkeleton,
   DmInboxSkeleton,
-  HighlightsRingSkeleton,
+  HighlightRowsSkeleton,
   CalendarSkeleton,
   MonthGridSkeleton,
   SpaceListSkeleton,
@@ -73,9 +73,10 @@ describe('Page-shaped skeletons', () => {
     expect(container.querySelectorAll('.sh-dm-inbox-row').length).toBe(5)
   })
 
-  it('HighlightsRingSkeleton renders 5 ring placeholders', () => {
-    const { container } = render(<HighlightsRingSkeleton />)
-    expect(container.querySelectorAll('.sh-highlight-ring').length).toBe(5)
+  it('HighlightRowsSkeleton renders the status card and 3 rows', () => {
+    const { container } = render(<HighlightRowsSkeleton />)
+    expect(container.querySelector('.sh-hl-status')).not.toBeNull()
+    expect(container.querySelectorAll('.sh-hl-row').length).toBe(3)
   })
 
   it('MonthGridSkeleton renders a 35-cell month grid', () => {

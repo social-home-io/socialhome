@@ -467,6 +467,12 @@ await check('router-keeps-prefix', async () => {
   await go('/momentum')
   await go('/momentum/yours')
   await history(() => page.goBack(), '/momentum')
+  // Highlights tabs are links (/highlights, /highlights/archive): the tab
+  // URL keeps the prefix through a reload and Back.
+  await go('/highlights')
+  await go('/highlights/archive')
+  await history(() => page.reload({ waitUntil: 'load' }), '/highlights/archive')
+  await history(() => page.goBack(), '/highlights')
   return { problems: [], seen }
 })
 

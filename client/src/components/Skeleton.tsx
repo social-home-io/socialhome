@@ -118,21 +118,28 @@ export function DmInboxSkeleton() {
 }
 
 
-/** Stand-in for the Highlights inbox: + tile + 5 rings. */
-export function HighlightsRingSkeleton() {
+/** Stand-in for Highlights › Today: the status card and three rows. */
+export function HighlightRowsSkeleton() {
   return (
-    <div class="sh-highlights-page sh-highlights-page--skeleton" aria-busy="true">
-      <header class="sh-highlights-header">
-        <Skeleton shape="line" width={120} height={20} />
-      </header>
-      <div class="sh-highlight-rings">
-        {[0, 1, 2, 3, 4].map(i => (
-          <div key={i} class="sh-highlight-ring">
-            <Skeleton shape="circle" width={64} height={64} />
-            <Skeleton shape="line" width={56} height={10} class="sh-skeleton-spaced" />
-          </div>
-        ))}
+    <div class="sh-highlights-page sh-hl-today sh-hl-today--skeleton" aria-busy="true">
+      <div class="sh-hl-status">
+        <Skeleton shape="rect" width={110} height={48} />
+        <div class="sh-hl-status__body">
+          <Skeleton shape="line" width="45%" height={16} />
+          <Skeleton shape="line" width="80%" height={12} class="sh-skeleton-spaced" />
+        </div>
       </div>
+      <ul class="sh-hl-rows">
+        {[0, 1, 2].map(i => (
+          <li key={i} class="sh-hl-row">
+            <Skeleton shape="circle" width={48} height={48} />
+            <span class="sh-hl-row__body">
+              <Skeleton shape="line" width="50%" height={14} />
+              <Skeleton shape="line" width="80%" height={12} class="sh-skeleton-spaced" />
+            </span>
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }

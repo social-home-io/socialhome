@@ -311,6 +311,30 @@ async def test_your_own_highlight_is_never_unseen(db, svc):
     assert theirs["unseen_count"] == 2
 
 
+async def test_only_the_author_learns_how_many_people_watched(db, svc):
+    """``seen_by`` (people, not frame views) is the author's status line;
+    a viewer's row carries ``None`` — how many others watched is not
+    theirs to know."""
+    service, _ = svc
+    await _seed_user(db, "u1", "pascal")
+    await _seed_user(db, "u2", "anna")
+    await _seed_user(db, "u3", "maria")
+    for name in ("a", "b"):
+        _, frame = await service.create_or_append_frame(
+            author_user_id="u1",
+            frame_type=HighlightFrameType.IMAGE,
+            media_url=f"/api/media/{name}.webp",
+        )
+    (own,) = await service.list_visible("u1")
+    assert own["seen_by"] == 0
+    await service.mark_frame_viewed(frame_id=frame.id, viewer_user_id="u2")
+    await service.mark_frame_viewed(frame_id=frame.id, viewer_user_id="u3")
+    (own,) = await service.list_visible("u1")
+    assert own["seen_by"] == 2
+    (theirs,) = await service.list_visible("u2")
+    assert theirs["seen_by"] is None
+
+
 # ── A day's audience is never silently widened ────────────────────────────
 
 

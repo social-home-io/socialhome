@@ -1,29 +1,33 @@
 /**
- * HighlightsInboxTab — recent rings + per-author list (§Highlights).
+ * HighlightsInboxTab — Highlights › Today (§Highlights, r3 design).
  *
- * Renders a horizontal "rings" row at the top (avatars circled with a
- * terracotta glow when the viewer has unseen frames) plus a per-author
- * grouped list below. Tapping a ring or row entry routes to
- * :class:`HighlightViewerPage` with that highlight id.
+ * Rows, not rings (owner decision 8 — rings are the glance on Home):
  *
- * Authors get a "+ New" tile leading to :class:`HighlightComposerPage`.
+ * - **Your status card** first: today's frames, "seen by N", who sees
+ *   it, Watch / Add frames — or "Share a highlight" when you shared
+ *   nothing in the last 24 hours.
+ * - **New**: people with frames you haven't watched. **Seen**: the rest.
+ *   One row per person, however many highlight days they have (bug 15),
+ *   built by :func:`todayView`. A row: avatar, name, the time of the
+ *   newest frame (one format: "09:40" / "Yesterday 17:10"), how many
+ *   frames, the audience chip (``audience_label``, never the ids), an
+ *   "ends in 2 hours" warning, and still thumbnails (a video's poster).
+ * - Today is the last 24 hours; older highlights are in the Archive
+ *   (a link at the end).
  *
- * Audience filtering happens server-side; this tab just renders the
- * inbox the API returns. The host :class:`HighlightsPage` switches
- * between this and :class:`HighlightArchiveTab`.
+ * Loading → row placeholders; a failed first load → ``LoadErrorState``
+ * with Try again; a failed refresh keeps the list (``StaleNotice``);
+ * nothing today → an empty state with Share and the Archive.
  */
-import { useEffect } from 'preact/hooks'
+import { useEffect, useId, useState } from 'preact/hooks'
 import { signal } from '@preact/signals'
-import { useLocation } from 'preact-iso'
 import { api } from '@/api'
-import { HighlightsRingSkeleton } from '@/components/Skeleton'
+import { HighlightRowsSkeleton } from '@/components/Skeleton'
 import { Avatar } from '@/components/Avatar'
-import { Button } from '@/components/Button'
-import { openHighlightQuickShare } from '@/components/HighlightQuickShareDialog'
 import { LoadErrorState, StaleNotice } from '@/components/LoadErrorState'
 import { INITIAL_LOAD, clockTime, loadFailed, loadSucceeded, type LoadStatus } from '@/utils/loadStatus'
+import { localSinceTime, relativeFutureTime } from '@/utils/relativeTime'
 import { currentUser } from '@/store/auth'
-import { openPerson } from '@/components/PersonSheet'
 import { blockedUserIds, loadBlocks } from '@/store/blocks'
 import {
   namedPersonLabel,
@@ -31,9 +35,10 @@ import {
   loadHouseholdUsers,
 } from '@/store/householdUsers'
 import { ws } from '@/ws'
-import type { HighlightInboxItem } from '@/types'
+import type { HighlightFrame, HighlightInboxItem } from '@/types'
 import { addBase } from '@/baseUrl'
-import { t, isOne, formatLocale } from '@/i18n/i18n'
+import { t, isOne } from '@/i18n/i18n'
+import { audienceChip, todayView, type AudienceIcon, type TodayPerson } from './today'
 
 const inbox = signal<HighlightInboxItem[]>([])
 const loading = signal<boolean>(true)
@@ -51,29 +56,202 @@ function fetchInbox(initial: boolean): Promise<void> {
     .finally(() => { if (initial) loading.value = false })
 }
 
+// ── Small pieces ────────────────────────────────────────────────────────
 
-function humaniseDate(iso: string): string {
-  // Highlights list groups by ``highlight_date`` (YYYY-MM-DD UTC). For a
-  // friendlier inbox we surface "Today" / "Yesterday" / weekday for
-  // the recent past, and a fully spelled-out date otherwise.
-  const today = new Date()
-  const todayStr = today.toISOString().slice(0, 10)
-  if (iso === todayStr) return t('highlight.inbox.today')
-  const yest = new Date(today)
-  yest.setUTCDate(yest.getUTCDate() - 1)
-  if (iso === yest.toISOString().slice(0, 10)) return t('highlight.inbox.yesterday')
-  const dt = new Date(iso + 'T00:00:00Z')
-  if (Number.isNaN(dt.getTime())) return iso
-  return dt.toLocaleDateString(formatLocale(), {
-    weekday: 'long',
-    month: 'short',
-    day: 'numeric',
-  })
+const SVG = {
+  viewBox: '0 0 24 24', fill: 'none', stroke: 'currentColor', 'stroke-width': 2,
+  'stroke-linecap': 'round', 'stroke-linejoin': 'round', 'aria-hidden': 'true', focusable: 'false',
+} as const
+
+const CHIP_ICON: Record<AudienceIcon, preact.JSX.Element> = {
+  households: (
+    <svg {...SVG} width={14} height={14}>
+      <circle cx="9" cy="8" r="3" /><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6" />
+      <circle cx="17" cy="9" r="2.5" /><path d="M17 14c2.5 0 4 1.8 4 4.5" />
+    </svg>
+  ),
+  home: (
+    <svg {...SVG} width={14} height={14}><path d="M4 11l8-7 8 7v9H4z" /><path d="M10 20v-5h4v5" /></svg>
+  ),
+  lock: (
+    <svg {...SVG} width={14} height={14}><rect x="5" y="11" width="14" height="10" rx="2" /><path d="M8 11V8a4 4 0 0 1 8 0v3" /></svg>
+  ),
+  people: (
+    <svg {...SVG} width={14} height={14}>
+      <circle cx="8" cy="8" r="3" /><circle cx="16" cy="8" r="3" />
+      <path d="M2 20c0-3 2.7-5 6-5M22 20c0-3-2.7-5-6-5M9 20c0-2.5 1.3-4 3-4s3 1.5 3 4" />
+    </svg>
+  ),
 }
 
+const ICON = {
+  eye: (<svg {...SVG} width={16} height={16}><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z" /><circle cx="12" cy="12" r="3" /></svg>),
+  clock: (<svg {...SVG} width={16} height={16}><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 2" /></svg>),
+  play: (<svg {...SVG} width={18} height={18}><path d="M7 4l13 8-13 8z" fill="currentColor" /></svg>),
+  plus: (<svg {...SVG} width={18} height={18}><path d="M12 5v14M5 12h14" /></svg>),
+  chevron: (<svg {...SVG} width={20} height={20} class="sh-flip-rtl"><path d="M9 6l6 6-6 6" /></svg>),
+}
+
+/** The audience chip — a short label on its own wrap line. */
+export function AudienceChip({ person, mine }: { person: TodayPerson; mine: boolean }) {
+  const chip = audienceChip(person.highlight, mine)
+  return (
+    <span class="sh-hl-chip">
+      {CHIP_ICON[chip.icon]}
+      <span class="sr-only">{t('highlight.chip.aria', { who: chip.text })}</span>
+      <span aria-hidden="true">{chip.text}</span>
+    </span>
+  )
+}
+
+/** One frame as a still: the picture, a video's poster with a play
+ *  glyph, or a neutral tile when there is no poster (yet). */
+function FrameThumb({ frame }: { frame: HighlightFrame }) {
+  const [broken, setBroken] = useState(false)
+  const isVideo = frame.frame_type === 'video'
+  const src = isVideo ? frame.thumbnail_url : frame.media_url
+  return (
+    <span class={isVideo ? 'sh-hl-thumb sh-hl-thumb--video' : 'sh-hl-thumb'}>
+      {src && !broken && (
+        <img src={src} alt="" loading="lazy" onError={() => setBroken(true)} />
+      )}
+      {isVideo && <span class="sh-hl-thumb__play">{ICON.play}</span>}
+    </span>
+  )
+}
+
+function frameCount(frames: readonly HighlightFrame[]): string {
+  const n = frames.length
+  const allVideo = n > 0 && frames.every(f => f.frame_type === 'video')
+  const key = allVideo ? 'highlight.today.videos' : 'highlight.frames'
+  return t(isOne(n) ? `${key}_one` : key, { n: String(n) })
+}
+
+function personName(p: TodayPerson): string {
+  return namedPersonLabel(p.authorId, p.highlight.author)
+}
+
+function PersonRow({ person }: { person: TodayPerson }) {
+  const name = personName(person)
+  const isNew = person.unseen > 0
+  return (
+    <li>
+      <a class="sh-hl-row" href={addBase(`/highlights/${person.openId}`)}>
+        <span class={isNew ? 'sh-hl-ring sh-hl-ring--new' : 'sh-hl-ring'}>
+          <Avatar name={name} src={namedPersonPicture(person.authorId, person.highlight.author)} size={44} />
+        </span>
+        <span class="sh-hl-row__body">
+          <span class="sh-hl-row__name"><bdi dir="auto">{name}</bdi></span>
+          <span class="sh-hl-row__meta">
+            <span class="sh-hl-row__facts">
+              <bdi><time dateTime={person.lastAt}>{localSinceTime(person.lastAt)}</time></bdi>
+              {' · '}{frameCount(person.frames)}
+              {isNew && (
+                <span class="sr-only">
+                  {', '}{t(isOne(person.unseen) ? 'highlight.today.new_count_one' : 'highlight.today.new_count',
+                    { n: String(person.unseen) })}
+                </span>
+              )}
+            </span>
+            {person.endsAt && (
+              <span class="sh-hl-ends">
+                {ICON.clock}
+                {t('highlight.today.ends', { when: relativeFutureTime(person.endsAt) })}
+              </span>
+            )}
+            <AudienceChip person={person} mine={false} />
+          </span>
+        </span>
+        <span class="sh-hl-row__thumbs" aria-hidden="true">
+          {person.frames.slice(0, 3).reverse().map(f => <FrameThumb key={f.id} frame={f} />)}
+        </span>
+        <span class="sh-hl-row__chev" aria-hidden="true">{ICON.chevron}</span>
+      </a>
+    </li>
+  )
+}
+
+function Section({ kind, title, people }: { kind: 'new' | 'seen'; title: string; people: TodayPerson[] }) {
+  const id = useId()
+  if (people.length === 0) return null
+  return (
+    <section class="sh-hl-section" aria-labelledby={id} data-section={kind}>
+      <div class="sh-hl-section__head">
+        <h2 id={id}>{title}</h2>
+        {kind === 'new' && (
+          <span class="sh-hl-section__meta">
+            {t(isOne(people.length) ? 'highlight.today.people_one' : 'highlight.today.people',
+              { n: String(people.length) })}
+          </span>
+        )}
+      </div>
+      <ul class="sh-hl-rows">
+        {people.map(p => <PersonRow key={p.authorId} person={p} />)}
+      </ul>
+    </section>
+  )
+}
+
+function StatusCard({ mine }: { mine: TodayPerson | null }) {
+  const id = useId()
+  return (
+    <section class={mine ? 'sh-hl-status' : 'sh-hl-status sh-hl-status--none'} aria-labelledby={id}>
+      {mine && (
+        <span class="sh-hl-status__thumbs" aria-hidden="true">
+          {mine.frames.slice(0, 3).reverse().map(f => <FrameThumb key={f.id} frame={f} />)}
+        </span>
+      )}
+      <div class="sh-hl-status__body">
+        <h2 id={id} class="sh-hl-status__title">{t('highlight.today.yours_title')}</h2>
+        {mine ? (
+          <p class="sh-hl-row__meta">
+            <span class="sh-hl-row__facts">
+              <bdi><time dateTime={mine.lastAt}>{localSinceTime(mine.lastAt)}</time></bdi>
+              {' · '}{frameCount(mine.frames)}{' · '}
+              <span class="sh-hl-seen">
+                {ICON.eye}
+                {mine.seenBy
+                  ? t(isOne(mine.seenBy) ? 'highlight.today.seen_by_one' : 'highlight.today.seen_by',
+                    { n: String(mine.seenBy) })
+                  : t('highlight.today.not_seen')}
+              </span>
+            </span>
+            {mine.endsAt && (
+              <span class="sh-hl-ends">
+                {ICON.clock}
+                {t('highlight.today.ends', { when: relativeFutureTime(mine.endsAt) })}
+              </span>
+            )}
+            <AudienceChip person={mine} mine />
+          </p>
+        ) : (
+          <>
+            <p class="sh-hl-status__line">{t('highlight.today.none_title')}</p>
+            <p class="sh-muted sh-hl-status__line">{t('highlight.today.none_body')}</p>
+          </>
+        )}
+      </div>
+      <div class="sh-hl-status__actions">
+        {mine ? (
+          <>
+            <a class="sh-btn sh-btn--secondary sh-hl-btn" href={addBase(`/highlights/${mine.openId}`)}>
+              {ICON.play}{t('highlight.today.watch')}
+            </a>
+            <a class="sh-btn sh-btn--secondary sh-hl-btn" href={addBase('/highlights/new')}>
+              {ICON.plus}{t('highlight.today.add_frames')}
+            </a>
+          </>
+        ) : (
+          <a class="sh-btn sh-btn--primary sh-hl-btn" href={addBase('/highlights/new')}>
+            {ICON.plus}{t('highlight.today.share')}
+          </a>
+        )}
+      </div>
+    </section>
+  )
+}
 
 export default function HighlightsInboxTab() {
-  const loc = useLocation()
   const me = currentUser.value?.user_id
 
   useEffect(() => {
@@ -93,150 +271,61 @@ export default function HighlightsInboxTab() {
     return () => { dispose.forEach(d => d()) }
   }, [])
 
-  if (loading.value) return <HighlightsRingSkeleton />
+  if (loading.value) return <HighlightRowsSkeleton />
 
-  // Belt + braces: the server already strips blocked authors. The
-  // local hide makes a same-tab "Block @bob" land in the rings list
-  // without a refresh — the next /api/highlights fetch confirms it.
-  const blocked = blockedUserIds.value
-  const items = inbox.value.filter(i => !blocked.has(i.highlight.author_user_id))
-
-  // Build a "rings" row: my own + everyone else's, grouped by author.
-  const myItems = items.filter(i => i.highlight.author_user_id === me)
-  const peerItems = items.filter(i => i.highlight.author_user_id !== me)
-
-  const ring = (item: HighlightInboxItem) => {
-    const cls = item.unseen_count > 0
-      ? 'sh-highlight-ring sh-highlight-ring--unseen'
-      : 'sh-highlight-ring'
-    const onClick = () => loc.route(`/highlights/${item.highlight.id}`)
-    const isMine = item.highlight.author_user_id === me
-    const name = namedPersonLabel(item.highlight.author_user_id, item.highlight.author)
-    const picture = namedPersonPicture(item.highlight.author_user_id, item.highlight.author)
+  if (status.value.failed) {
     return (
-      <div key={item.highlight.id} class="sh-highlight-ring-wrap">
-        <button
-          type="button"
-          class={cls}
-          onClick={onClick}
-          aria-label={t('highlight.inbox.open_aria', { name })}
-        >
-          <span class="sh-highlight-ring-avatar">
-            <Avatar name={name} src={picture} size={56} />
-          </span>
-          <span class="sh-highlight-ring-label">
-            {isMine ? t('highlight.inbox.yours') : name}
-          </span>
-        </button>
-        {!isMine && (
-          <button
-            type="button"
-            class="sh-highlight-ring-overflow"
-            aria-label={t('highlight.more_actions', { name })}
-            onClick={(ev) => {
-              ev.stopPropagation()
-              openPerson(item.highlight.author_user_id, {
-                person: { display_name: name, picture_url: picture },
-              })
-            }}
-          >
-            ⋯
-          </button>
-        )}
-      </div>
-    )
-  }
-
-  return (
-    <div class="sh-highlights-page">
-      <section class="sh-highlight-rings" aria-label={t('highlight.inbox.recent_aria')}>
-        <button
-          type="button"
-          class="sh-highlight-ring sh-highlight-ring--new"
-          onClick={() => openHighlightQuickShare()}
-          aria-label={t('highlight.inbox.new_aria')}
-        >
-          <span class="sh-highlight-ring-avatar">
-            <span class="sh-highlight-ring-plus" aria-hidden="true">+</span>
-          </span>
-          <span class="sh-highlight-ring-label">{t('highlight.inbox.new')}</span>
-        </button>
-        {myItems.map(ring)}
-        {peerItems.map(ring)}
-      </section>
-
-      {status.value.failed && (
+      <div class="sh-highlights-page sh-hl-today">
         <LoadErrorState
           message={t('highlight.inbox.load_failed_title')}
           detail={t('load.household_quiet')}
           retryLabel={t('load.try_again')}
+          headingLevel={2}
           onRetry={() => void fetchInbox(false)}
         />
-      )}
+      </div>
+    )
+  }
+
+  // Belt + braces: the server already strips blocked authors. The local
+  // hide makes a same-tab "Block @bob" land without a refresh.
+  const blocked = blockedUserIds.value
+  const items = inbox.value.filter(i => !blocked.has(i.highlight.author_user_id))
+  const view = todayView(items, me)
+  const nobody = view.fresh.length === 0 && view.seen.length === 0
+
+  return (
+    <div class="sh-highlights-page sh-hl-today">
       {status.value.staleSince !== null && (
         <StaleNotice
           message={t('highlight.inbox.stale', { time: clockTime(status.value.staleSince) })}
           onRetry={() => void fetchInbox(false)}
         />
       )}
-
-      {!status.value.failed && items.length === 0 && (
-        <div class="sh-empty-state">
-          <div aria-hidden="true">🌅</div>
-          <h3>{t('highlight.inbox.empty_title')}</h3>
-          <p>
-            {t('highlight.inbox.empty_body')}
-          </p>
-          <Button onClick={() => openHighlightQuickShare()}>
-            {t('highlight.inbox.share_first')}
-          </Button>
-        </div>
-      )}
-
-      {items.length > 0 && (
-        <section class="sh-highlight-list" aria-label={t('highlight.inbox.all_aria')}>
-          {items.map(item => {
-            const first = item.frames[0]
-            const isMine = item.highlight.author_user_id === me
-            const name = isMine
-              ? t('highlight.inbox.you')
-              : namedPersonLabel(item.highlight.author_user_id, item.highlight.author)
-            return (
-              <a
-                key={item.highlight.id}
-                href={addBase(`/highlights/${item.highlight.id}`)}
-                class="sh-highlight-row"
-              >
-                {first && first.frame_type === 'image' && (
-                  <img
-                    src={first.media_url}
-                    alt=""
-                    loading="lazy"
-                    class="sh-highlight-row-thumb"
-                  />
-                )}
-                {first && first.frame_type === 'video' && (
-                  <span class="sh-highlight-row-thumb sh-highlight-row-thumb--video">
-                    🎬
-                  </span>
-                )}
-                {!first && (
-                  <span class="sh-highlight-row-thumb sh-highlight-row-thumb--empty" />
-                )}
-                <span class="sh-highlight-row-meta">
-                  <strong>{name}</strong>
-                  <span class="sh-muted">
-                    {humaniseDate(item.highlight.highlight_date)} ·{' '}
-                    {t(isOne(item.frames.length) ? 'highlight.frames_one' : 'highlight.frames', { n: String(item.frames.length) })}
-                  </span>
-                </span>
-                {item.unseen_count > 0 && (
-                  <span class="sh-highlight-row-unseen">{item.unseen_count}</span>
-                )}
+      {(view.mine || !nobody) && <StatusCard mine={view.mine} />}
+      {nobody ? (
+        <div class="sh-empty-state sh-hl-empty">
+          <h2>{t('highlight.today.empty_title')}</h2>
+          <p>{t('highlight.today.empty_body')}</p>
+          <div class="sh-empty-state__cta-row">
+            {!view.mine && (
+              <a class="sh-btn sh-btn--primary sh-hl-btn" href={addBase('/highlights/new')}>
+                {ICON.plus}{t('highlight.today.share')}
               </a>
-            )
-          })}
-        </section>
+            )}
+            <a class="sh-btn sh-btn--secondary sh-hl-btn" href={addBase('/highlights/archive')}>
+              {t('highlight.today.open_archive')}
+            </a>
+          </div>
+        </div>
+      ) : (
+        <>
+          <Section kind="new" title={t('highlight.today.section_new')} people={view.fresh} />
+          <Section kind="seen" title={t('highlight.today.section_seen')} people={view.seen} />
+          <a class="sh-hl-archive-link" href={addBase('/highlights/archive')}>
+            {t('highlight.today.archive_link')}{ICON.chevron}
+          </a>
+        </>
       )}
     </div>
   )

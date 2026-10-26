@@ -13,6 +13,9 @@
  *   3. Anything I missed? → catch-up tray with the most recent post
  *      from a followed space + chips for unread DMs / notifications.
  *
+ * Right under the greeting sits the "today" card (:mod:`HomeTodayCard`):
+ * highlight rings + "Momentum · N new", hidden when nothing is new.
+ *
  * Card components + helpers are shared with :mod:`DashboardPage`
  * via :mod:`./cards` so the corner-light here and the full corner
  * read as the same surface, just with more rooms.
@@ -39,6 +42,7 @@ import {
   type WelcomeBundle,
 } from './cards'
 import { TodayScheduleCard } from './TodayScheduleCard'
+import { HomeTodayCard } from './HomeTodayCard'
 import { activeTimetables, lessonCount } from './schedule'
 
 const EMPTY: WelcomeBundle = {
@@ -148,6 +152,8 @@ export default function WelcomePage() {
         <h1 class="sh-welcome-hero__greeting">{heroGreeting}</h1>
         <p class="sh-welcome-hero__sub">{heroSub}</p>
       </header>
+
+      <HomeTodayCard />
 
       {allClear ? (
         <AllClearCard />

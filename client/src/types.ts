@@ -193,6 +193,10 @@ export interface HighlightFrame {
   /** Video frames only. Milliseconds. */
   duration_ms: number | null
   created_at: string
+  /** Video frames only: background transcode state (absent = ready). */
+  media_status?: 'processing' | 'failed' | 'ready'
+  /** Video frames only: the signed ``.webp`` poster next to the ``.webm``. */
+  thumbnail_url?: string
 }
 
 /** Per-author per-day highlight aggregate. */
@@ -227,6 +231,9 @@ export interface HighlightInboxItem {
   highlight: Highlight
   frames: HighlightFrame[]
   unseen_count: number
+  /** Your own highlight only: how many people watched at least one
+   *  frame. Absent on everyone else's. */
+  seen_by?: number
 }
 
 /** A single Momentum post (§Momentum) — household broadcast that fans
