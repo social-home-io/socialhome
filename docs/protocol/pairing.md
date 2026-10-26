@@ -531,11 +531,17 @@ blocked peer's process:
 - `MOMENT_CREATED`, `MOMENT_DELETED`, `MOMENT_REACTED`,
   `MOMENT_REACTION_REMOVED`
 
-`MOMENT_REACTION_ROUTED` (v_67) is not on the list: the reactor is sealed
-end to end to the moment's origin household — a household this one is
-**not** paired with, so it has no per-pair hide list — and the relays it
-passes see neither who reacted nor with what. Reacting is the person's own
-act toward that author.
+`MOMENT_REACTION_ROUTED` (v_67) is not on the list: it is only ever sent
+toward an origin household this one is **not** paired with (so there is no
+per-pair hide list to apply), sealed end to end to that origin, and the
+relays it passes see neither who reacted nor with what. Reacting is the
+person's own act toward that author. When the origin **is** a confirmed
+peer — even if the author has no roster row here yet, e.g. a moment first
+seen at hop 2 through another neighbour — the reaction takes the direct
+`MOMENT_REACTED` path and the hide list above applies: a person hidden from
+that household reaches it by neither path
+(`tests/protocol/test_moment_reaction_routed.py`,
+`test_reactor_hidden_from_a_paired_origin_sends_nothing`).
 
 **Receiver-side backstop**. `MomentFederationOutbound` runs a 3-hop
 relay (`relay_inbound`) — a household that's *not* the originator

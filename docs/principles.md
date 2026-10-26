@@ -901,6 +901,11 @@ What each household on the way learns, and what it doesn't:
    moment carries no key-wrap key and its origin refuses routed reactions;
    a moment that came through a GFS has no route — its reactions stay in
    the household.
+6. **Never around a per-pair hide list.** A reaction is routed only toward
+   an origin household this one is not paired with. When the origin is a
+   confirmed peer — even one whose author is not on the roster yet — the
+   direct path is used and a person hidden from that household reaches it
+   by neither path ([`protocol/pairing.md`](./protocol/pairing.md)).
 
 Anything that lets a relay read the reaction, lets a token name more than
 one neighbour, or routes reactions through a GFS is a §2-principle change

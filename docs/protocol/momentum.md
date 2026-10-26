@@ -436,8 +436,12 @@ reaction goes back along the path the moment came.
   — on the first copy, a closer copy, or a later copy when none was kept.
   Saves, `mark_public` and re-saves keep it; a tombstone drops it (trigger).
 * **A reaction goes back hop by hop.** When the author's household is this
-  one or a paired one, the direct `MOMENT_REACTED` path is used as before.
-  Otherwise, after a 3 s debounce (the latest state per moment and person;
+  one or a paired one — found from the roster, **or the moment's
+  `origin_instance_id` is a confirmed peer** (an author with no roster row
+  yet, e.g. one first seen at hop 2) — the direct `MOMENT_REACTED` path is
+  used as before, under the per-pair hide list: a person hidden from that
+  household reaches it by neither path. Only an origin this household is
+  not paired with is routed to. Otherwise, after a 3 s debounce (the latest state per moment and person;
   the outbox keeps one queued per peer), the reactor's household signs the
   reaction, pads it to 1 KB and seals it to the origin's key-wrap key, and
   sends `MOMENT_REACTION_ROUTED` to the stored `via` neighbour — only when
@@ -446,9 +450,12 @@ reaction goes back along the path the moment came.
   peer); when that is the origin, the origin gets it with no tokens left.
   Relays keep no state.
 * **The origin applies it** after the checks under [Authority](#authority):
-  adds and removals in `occurred_at` order against the stored `reacted_at`
-  (a removal deletes the row; an older add arriving after it loses, held in
-  a bounded in-memory watermark). A reactor the origin doesn't know shows
+  adds and removals in `occurred_at` order, to the millisecond, against
+  the stored `reacted_at` **and** the stored removal: a removal deletes the
+  reaction row and keeps a watermark in `moment_reaction_removals`
+  (migration 0125), so an add that is older — late, or a replay after a
+  restart wiped the in-memory replay cache — never brings it back, and an
+  identical replay of the newest change is a no-op. A reactor the origin doesn't know shows
   as "Someone" — no new column.
 * **Degraded.** No complete route (an older origin or relay on the path, a
   moment that came through a GFS, a first neighbour below v_67): the
@@ -459,7 +466,17 @@ reaction goes back along the path the moment came.
 * **Rate limits.** A relay takes ≤ 60 routed reactions a minute from one
   downstream neighbour and ≤ 10 a minute per (neighbour, moment); the
   origin ≤ 60 a minute per reactor household (and the per-neighbour 60 on
-  what it is handed).
+  what it is handed). The per-neighbour limit runs before any crypto; the
+  per-reactor-household one is charged only for a reaction that passed
+  every other check, so a relay re-sending one genuine sealed reaction (a
+  replay) cannot use up that household's budget.
+* **Known follow-ups (not fixed in v_67).** `hop_count` sits outside the
+  origin signature, so a paired neighbour can claim a shorter hop and
+  become the stored `via` for a moment (the route is replaced by a closer
+  copy) and then silently drop the reactions it should carry back; and one
+  misbehaving downstream neighbour can fill a relay's 60-a-minute budget at
+  the origin for everyone behind that relay. Both cost availability of
+  reactions only — never their privacy or integrity.
 * **Privacy residual (signed off 2026-10-25).** A relay learns that its
   direct neighbour — or that neighbour's part of the mesh — reacted to
   moment M: not who, not with what (the seal is one size), and not who else

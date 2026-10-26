@@ -51,3 +51,71 @@ WHEN NEW.deleted_at IS NOT NULL AND NEW.reaction_route IS NOT NULL
 BEGIN
     UPDATE moments SET reaction_route = NULL WHERE id = NEW.id;
 END;
+
+-- Removal watermarks (#1178 review, F3). A routed reaction can arrive out
+-- of order, and a relay can replay one: the origin applies adds and
+-- removals in the order they were made (``occurred_at``, kept to the
+-- millisecond). A removal deletes the ``moment_reactions`` row, so without
+-- this table nothing on disk remembers it, and after a restart (the replay
+-- cache is in memory) a replayed older add would bring the reaction back.
+--
+--   moment_reaction_removals  one row per (moment, reactor) whose latest
+--                             routed change was a removal: when it was
+--                             made (``YYYY-MM-DD HH:MM:SS.mmm`` UTC, the
+--                             ``reacted_at`` shape with milliseconds).
+--
+-- Audit (CLAUDE.md "audit before a migration"):
+--   (1) Every reader of ``moment_reactions`` — ``list_reactions``,
+--       ``count_engagement_for`` (counts + ``my_reaction``), the
+--       notification path (``MomentReactionChanged`` published only when
+--       ``apply_reaction_at`` changed a row), ``_tombstone_rows`` — reads
+--       that table only; a watermark in its own table never shows as a
+--       reaction. Neither table is in the backup (moments are ephemeral)
+--       nor in the data export.
+--   (2) Alternatives rejected:
+--       * keep the removed row with ``emoji`` NULL — ``emoji`` is NOT NULL
+--         since 0001, so that is a table rebuild, and every reader above
+--         would have to learn to skip it;
+--       * keep removals in memory (as before) — lost on restart, the bug;
+--       * a longer-lived replay cache on disk — would store every sealed
+--         reaction's digest instead of one row per removed reaction.
+--   (3) Smallest change: one small table, no backfill (0125 is unreleased).
+--       Its rows go with their moment: ``ON DELETE CASCADE`` on prune, the
+--       trigger below on a tombstone, and a reaction row replaces its
+--       watermark (the two never coexist — a database invariant, not a
+--       service convention).
+
+CREATE TABLE IF NOT EXISTS moment_reaction_removals (
+    moment_id        TEXT NOT NULL REFERENCES moments(id) ON DELETE CASCADE,
+    reactor_user_id  TEXT NOT NULL,
+    removed_at       TEXT NOT NULL,
+    PRIMARY KEY (moment_id, reactor_user_id)
+) WITHOUT ROWID;
+
+CREATE TRIGGER IF NOT EXISTS trg_moments_drop_reaction_removals_on_tombstone
+AFTER UPDATE OF deleted_at ON moments
+WHEN NEW.deleted_at IS NOT NULL
+BEGIN
+    DELETE FROM moment_reaction_removals WHERE moment_id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_moment_reactions_replace_removal_on_insert
+AFTER INSERT ON moment_reactions
+BEGIN
+    DELETE FROM moment_reaction_removals
+     WHERE moment_id = NEW.moment_id AND reactor_user_id = NEW.reactor_user_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_moment_reactions_replace_removal_on_update
+AFTER UPDATE ON moment_reactions
+BEGIN
+    DELETE FROM moment_reaction_removals
+     WHERE moment_id = NEW.moment_id AND reactor_user_id = NEW.reactor_user_id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_moment_reaction_removals_drop_reaction
+AFTER INSERT ON moment_reaction_removals
+BEGIN
+    DELETE FROM moment_reactions
+     WHERE moment_id = NEW.moment_id AND reactor_user_id = NEW.reactor_user_id;
+END;

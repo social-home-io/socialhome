@@ -12,7 +12,9 @@ path the moment came — the wire shapes and crypto are in
   receiver that stores the moment keeps the complete route
   (:meth:`route_from_create`, ``moments.reaction_route``).
 * **Reactor.** A reaction to a moment whose author is not on this or a paired
-  household (:meth:`queue_reaction`) is coalesced per (moment, person) for
+  household — and whose origin is not a paired household either, else the
+  direct path and its hide list apply (:meth:`direct_target`) —
+  (:meth:`queue_reaction`) is coalesced per (moment, person) for
   :data:`DEBOUNCE_S`, signed by this household, sealed to the origin's
   key-wrap key and sent as ``MOMENT_REACTION_ROUTED`` to the neighbour the
   moment came from — only when the route is complete and that neighbour is
@@ -136,8 +138,11 @@ def _epoch_s(iso: str) -> int | None:
 
 
 def _reacted_at(ms: int) -> str:
-    """``occurred_at_ms`` in the ``moment_reactions.reacted_at`` shape."""
-    return datetime.fromtimestamp(ms / 1000, UTC).strftime("%Y-%m-%d %H:%M:%S")
+    """``occurred_at_ms`` in the ``moment_reactions.reacted_at`` shape, to
+    the millisecond (``YYYY-MM-DD HH:MM:SS.mmm`` UTC) so two changes in one
+    second keep their order (#1178 F3)."""
+    when = datetime.fromtimestamp(ms // 1000, UTC).replace(tzinfo=None)
+    return f"{when:%Y-%m-%d %H:%M:%S}.{ms % 1000:03d}"
 
 
 class MomentReactionRouter(ProtectionGateMixin):
@@ -157,7 +162,6 @@ class MomentReactionRouter(ProtectionGateMixin):
         "_limiter",
         "_moments",
         "_pending",
-        "_removed",
         "_seen",
         "_tasks",
         "_token_key",
@@ -197,10 +201,6 @@ class MomentReactionRouter(ProtectionGateMixin):
         self._tasks: dict[tuple[str, str], asyncio.Task[None]] = {}
         #: sha256 of every sealed reaction taken at the origin → when (ms).
         self._seen: OrderedDict[bytes, int] = OrderedDict()
-        #: (moment id, reactor) → occurred_at_ms of the newest removal taken
-        #: at the origin — a removal deletes the row, so an older add that
-        #: arrives after it must still lose.
-        self._removed: OrderedDict[tuple[str, str], int] = OrderedDict()
 
     # ── Wiring ─────────────────────────────────────────────────────────
 
@@ -342,22 +342,38 @@ class MomentReactionRouter(ProtectionGateMixin):
 
     # ── Reactor side ───────────────────────────────────────────────────
 
-    async def direct_target(self, author_user_id: str) -> str | None:
+    async def direct_target(
+        self, author_user_id: str, *, moment_id: str | None = None
+    ) -> str | None:
         """The author's household when a reaction reaches it directly — this
-        household or a confirmed peer (the pre-v_67 path) — else ``None``."""
+        household or a confirmed peer (the pre-v_67 path) — else ``None``.
+
+        With *moment_id*, a moment whose author is not on our roster (it came
+        in at hop 2, or the roster lags) still goes direct when its origin is
+        a confirmed peer: the routed path is for unpaired origins only, so the
+        per-pair hide list always applies to a paired origin (#1178 F1)."""
+        origin: str | None = None
+        if moment_id is not None:
+            moment = await self._moments.get(moment_id)
+            origin = moment.origin_instance_id if moment is not None else None
+        return await self._direct(author_user_id, origin)
+
+    async def _direct(self, author_user_id: str, origin: str | None) -> str | None:
         try:
             home = await self._users.get_instance_for_user(author_user_id)
         except Exception:  # pragma: no cover — defensive
             log.debug("moment-reaction-router: home lookup failed", exc_info=True)
-            return None
-        if home is None:
-            return None
+            home = None
         if home == self._federation.own_instance_id:
             return home
-        peer = await self._federation_repo.get_instance(home)
-        if peer is None or peer.status is not PairingStatus.CONFIRMED:
-            return None
-        return home
+        for candidate in dict.fromkeys(h for h in (home, origin) if h):
+            if await self._is_confirmed(candidate):
+                return candidate
+        return None
+
+    async def _is_confirmed(self, instance_id: str) -> bool:
+        peer = await self._federation_repo.get_instance(instance_id)
+        return peer is not None and peer.status is PairingStatus.CONFIRMED
 
     async def _routable_via(self, peer_id: str) -> bool:
         """A confirmed social peer that ``peer_supports`` v_67 — one that
@@ -395,20 +411,19 @@ class MomentReactionRouter(ProtectionGateMixin):
         routes = await self._moments.get_reaction_routes(
             [m.id for m in items if m.received_via == "household" and m.hop_count > 1]
         )
-        direct: dict[str, bool] = {}
+        direct: dict[tuple[str, str], bool] = {}
         via_ok: dict[str, bool] = {}
         out: dict[str, str] = {}
         for m in items:
             if m.received_via == "self":
                 out[m.id] = REACTION_REACH_AUTHOR
                 continue
-            if m.author_user_id not in direct:
-                direct[m.author_user_id] = (
-                    await self.direct_target(m.author_user_id) is not None
-                )
+            who = (m.author_user_id, m.origin_instance_id)
+            if who not in direct:
+                direct[who] = await self._direct(*who) is not None
             reach = REACTION_REACH_HOUSEHOLD
             route = routes.get(m.id)
-            if direct[m.author_user_id]:
+            if direct[who]:
                 reach = REACTION_REACH_AUTHOR
             elif route is not None and self._route_usable(m, route):
                 if route.via not in via_ok:
@@ -447,6 +462,10 @@ class MomentReactionRouter(ProtectionGateMixin):
     ) -> tuple[Moment, MomentReactionRoute] | None:
         moment = await self._moments.get(moment_id)
         if moment is None or moment.received_via != "household":
+            return None
+        if await self._is_confirmed(moment.origin_instance_id):
+            # A paired origin is reached directly, under the hide list —
+            # never routed past it (#1178 F1).
             return None
         route = (await self._moments.get_reaction_routes([moment_id])).get(moment_id)
         if route is None or not self._route_usable(moment, route):
@@ -661,12 +680,6 @@ class MomentReactionRouter(ProtectionGateMixin):
         pinned = await self._federation.peer_identity_public_key(reactor_home)
         if pinned is not None and pinned.hex() != inner["reactor_identity_pk"]:
             return "reactor key differs from the key pinned for its household"
-        if not self._limiter.is_allowed(
-            f"r:{reactor_home}",
-            limit=ORIGIN_PER_REACTOR_PER_MIN,
-            window_s=_WINDOW_S,
-        ):
-            return "reactor household over its rate"
         now = self._clock_ms()
         occurred = int(inner["occurred_at_ms"])
         if (
@@ -675,7 +688,7 @@ class MomentReactionRouter(ProtectionGateMixin):
         ):
             return "reaction too old or in the future"
         digest = hashlib.sha256(sealed["ciphertext"].encode()).digest()
-        if not self._remember_seen(digest, now):
+        if self._was_seen(digest, now):
             return "replayed reaction"
         moment = await self._moments.get(moment_id)
         if moment is None or moment.origin_instance_id != own:
@@ -697,6 +710,17 @@ class MomentReactionRouter(ProtectionGateMixin):
             return "a guardian block separates them"
         if await self._is_protected(moment.author_user_id):
             return "moment is for paired households only (no_relay)"
+        # The reactor household's budget is charged only for a reaction that
+        # passed every other check: a relay re-sending one genuine sealed
+        # reaction (a replay) must not starve that household's real ones
+        # (#1178 F2). The per-neighbour limit ran before any crypto.
+        if not self._limiter.is_allowed(
+            f"r:{reactor_home}",
+            limit=ORIGIN_PER_REACTOR_PER_MIN,
+            window_s=_WINDOW_S,
+        ):
+            return "reactor household over its rate"
+        self._remember_seen(digest, now)
         return None
 
     async def _apply(self, inner: dict[str, Any]) -> None:
@@ -704,20 +728,12 @@ class MomentReactionRouter(ProtectionGateMixin):
         reactor = str(inner["reactor_user_id"])
         emoji = inner["emoji"]
         occurred = int(inner["occurred_at_ms"])
-        key = (moment_id, reactor)
-        removed_at = self._removed.get(key)
-        if removed_at is not None and occurred < removed_at:
-            log.info(
-                "routed reaction to %s from %s is older than its removal — ignored",
-                moment_id,
-                reactor,
-            )
-            return
+        # Ordered by when it was made against the stored reaction *and* the
+        # stored removal (both on disk), so neither a late add nor a replay
+        # after a restart undoes a newer change (#1178 F3).
         changed = await self._moments.apply_reaction_at(
             moment_id, reactor, emoji, reacted_at=_reacted_at(occurred)
         )
-        if emoji is None:
-            self._remember_removal(key, occurred)
         if not changed:
             return
         moment = await self._moments.get(moment_id)
@@ -734,22 +750,22 @@ class MomentReactionRouter(ProtectionGateMixin):
 
     # ── Bounded in-memory caches ───────────────────────────────────────
 
-    def _remember_seen(self, digest: bytes, now_ms: int) -> bool:
+    def _was_seen(self, digest: bytes, now_ms: int) -> bool:
+        """Whether *digest* was taken inside the replay window (expired and
+        overflowing entries are dropped first)."""
         while self._seen:
             oldest, at = next(iter(self._seen.items()))
             if at >= now_ms - MAX_REACTION_AGE_MS and len(self._seen) < SEEN_MAX:
                 break
             del self._seen[oldest]
-        if digest in self._seen:
+        return digest in self._seen
+
+    def _remember_seen(self, digest: bytes, now_ms: int) -> bool:
+        """Record *digest* as taken; ``False`` when it already was."""
+        if self._was_seen(digest, now_ms):
             return False
         self._seen[digest] = now_ms
         return True
-
-    def _remember_removal(self, key: tuple[str, str], occurred_ms: int) -> None:
-        self._removed[key] = max(occurred_ms, self._removed.get(key, 0))
-        self._removed.move_to_end(key)
-        while len(self._removed) > SEEN_MAX:
-            self._removed.popitem(last=False)
 
     @staticmethod
     def _refuse(event: FederationEvent, reason: str, *, reactor: str = "") -> None:

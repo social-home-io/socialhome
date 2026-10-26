@@ -1229,3 +1229,31 @@ async def test_apply_reaction_at_orders_by_time(db, repo):
     assert not await repo.apply_reaction_at("m-1", "u-r", None, reacted_at=at(13))
     # Never on a moment that isn't live.
     assert not await repo.apply_reaction_at("m-ghost", "u-r", "👏", reacted_at=at(13))
+
+
+async def test_apply_reaction_at_keeps_a_removal_watermark(db, repo):
+    """#1178 F3: a removal is remembered on disk, so an older add — late or
+    replayed after a restart — never brings the reaction back, and the
+    watermark never counts as a reaction."""
+    await repo.save(_moment(id="m-1"))
+    at = "2026-10-26 10:00:00.{:03d}".format
+    assert await repo.apply_reaction_at("m-1", "u-r", "👏", reacted_at=at(100))
+    assert await repo.apply_reaction_at("m-1", "u-r", None, reacted_at=at(500))
+    # A removal that arrives before its add still wins over that add.
+    assert not await repo.apply_reaction_at("m-1", "u-x", None, reacted_at=at(900))
+    for reactor in ("u-r", "u-x"):
+        assert not await repo.apply_reaction_at(
+            "m-1", reactor, "👏", reacted_at=at(100)
+        )
+    assert await repo.list_reactions("m-1") == []
+    counts = await repo.count_engagement_for(["m-1"], viewer_user_id="u-r")
+    assert counts["m-1"]["reaction_count"] == 0
+    assert counts["m-1"].get("my_reaction") is None
+    # Milliseconds order two changes in one second; an identical replay of
+    # the newest is a no-op.
+    assert await repo.apply_reaction_at("m-1", "u-r", "🔥", reacted_at=at(600))
+    assert not await repo.apply_reaction_at("m-1", "u-r", "🔥", reacted_at=at(600))
+    assert not await repo.apply_reaction_at("m-1", "u-r", "😂", reacted_at=at(550))
+    assert [r.emoji for r in await repo.list_reactions("m-1")] == ["🔥"]
+    rows = await db.fetchall("SELECT reactor_user_id FROM moment_reaction_removals", ())
+    assert [r[0] for r in rows] == ["u-x"]

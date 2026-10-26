@@ -349,6 +349,30 @@ async def test_direct_target(router):
     assert await router.r.direct_target("u-unknown") is None
 
 
+async def test_direct_target_falls_back_to_a_paired_origin(router):
+    # #1178 F1: no roster row for the author, but the moment's origin is a
+    # confirmed peer — the direct path (with its hide list), never a route.
+    router.moments.rows["m"] = _moment("m", origin_instance_id="peer-o")
+    router.moments.rows["m-far"] = _moment("m-far", origin_instance_id="far")
+    router.repo.peers["peer-o"] = _peer("peer-o")
+    assert await router.r.direct_target("u-far", moment_id="m") == "peer-o"
+    assert await router.r.direct_target("u-far", moment_id="m-far") is None
+    assert await router.r.direct_target("u-far", moment_id="m-gone") is None
+    assert await router.r.reach_for([router.moments.rows["m"]]) == {"m": "author"}
+
+
+async def test_a_paired_origin_is_never_routed(router):
+    anna = _local_user(router)
+    router.repo.peers["peer-via"] = _peer("peer-via")
+    router.repo.peers["origin"] = _peer("origin")
+    router.moments.rows["m"] = _moment("m")
+    router.moments.routes["m"] = _route()
+    assert not await router.r.queue_reaction(
+        moment_id="m", reactor_user_id=anna, emoji="👏", occurred_at=datetime.now(UTC)
+    )
+    assert router.fed.sent == []
+
+
 async def test_reach_for(router):
     router.users.homes["u-paired"] = "peer-p"
     router.repo.peers["peer-p"] = _peer("peer-p")
@@ -538,12 +562,3 @@ def test_seen_cache_is_bounded_and_expires(router, monkeypatch):
     assert not router.r._remember_seen(bytes([4]), now)
     # Past the window everything is forgotten.
     assert router.r._remember_seen(bytes([4]), now + mrr.MAX_REACTION_AGE_MS + 1)
-
-
-def test_removal_watermark_is_bounded(router, monkeypatch):
-    monkeypatch.setattr(mrr, "SEEN_MAX", 2)
-    for i in range(4):
-        router.r._remember_removal((f"m{i}", "u"), i)
-    assert len(router.r._removed) == 2
-    router.r._remember_removal(("m3", "u"), 1)
-    assert router.r._removed[("m3", "u")] == 3

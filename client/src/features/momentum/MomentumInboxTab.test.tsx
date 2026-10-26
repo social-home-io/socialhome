@@ -182,9 +182,14 @@ describe('MomentumInboxTab reaction reach (v_67)', () => {
     const rows = [...container.querySelectorAll('.sh-momentum-row')]
     const react = (row: Element) => row.querySelectorAll('.sh-momentum-chip')[1] as HTMLButtonElement
     expect(react(rows[0]).disabled).toBe(false)
-    expect(react(rows[0]).getAttribute('title')).toBeNull()
+    expect(rows[0].querySelector('.sh-momentum-row-reach')).toBeNull()
+    expect(react(rows[0]).getAttribute('aria-describedby')).toBeNull()
     expect(react(rows[1]).disabled).toBe(false)
-    expect(react(rows[1]).getAttribute('title')).toBe('Reactions here are seen in your household only.')
-    expect(react(rows[1]).getAttribute('aria-label')).toContain('seen in your household only')
+    // A visible cue — not only a hover title — for touch and keyboard users,
+    // and the React chip is described by it (#1178 review).
+    const note = rows[1].querySelector('.sh-momentum-row-reach')!
+    expect(note.textContent).toBe('Reactions here are seen in your household only.')
+    expect(react(rows[1]).getAttribute('aria-describedby')).toBe(note.id)
+    expect(react(rows[1]).getAttribute('title')).toBeNull()
   })
 })

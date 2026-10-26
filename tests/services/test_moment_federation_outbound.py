@@ -796,6 +796,7 @@ class _FakeRouter:
         self.direct = direct
         self.queued: list[dict] = []
         self.stamped: list[str] = []
+        self.direct_moment_ids: list[str | None] = []
 
     def origin_keywrap_fields(self) -> dict:
         return {"origin_keywrap_pk": "kw", "origin_keywrap_suite": "x25519"}
@@ -806,7 +807,8 @@ class _FakeRouter:
         self.stamped.append(to_instance)
         return {**payload, "rt": [f"tok-for-{to_instance}"]}
 
-    async def direct_target(self, author_user_id):
+    async def direct_target(self, author_user_id, *, moment_id=None):
+        self.direct_moment_ids.append(moment_id)
         return self.direct
 
     async def queue_reaction(self, **kwargs):
@@ -925,6 +927,9 @@ async def test_a_reaction_to_a_paired_author_keeps_the_direct_path(stack):
         )
     )
     assert router.queued == []
+    # The moment is named so a paired origin is found even without a roster
+    # row for its author (#1178 F1).
+    assert router.direct_moment_ids == ["m-1"]
     assert fed.send_event.call_args.kwargs["to_instance_id"] == "peer-author"
     assert (
         fed.send_event.call_args.kwargs["event_type"]

@@ -740,36 +740,57 @@ class SqliteMomentRepo:
         *,
         reacted_at: str,
     ) -> bool:
-        """Apply a reaction made at *reacted_at* (``YYYY-MM-DD HH:MM:SS``
-        UTC, the column's own shape) only when it is not older than the one
-        stored — reactions routed from far away (v_67) can arrive out of
-        order. ``emoji is None`` removes it. Returns whether anything
-        changed; one transaction."""
+        """Apply a reaction made at *reacted_at* (``YYYY-MM-DD
+        HH:MM:SS.mmm`` UTC, the column's shape with milliseconds) only when
+        it is newer than both the stored reaction and the stored removal —
+        reactions routed from far away (v_67) can arrive out of order or be
+        replayed. ``emoji is None`` removes it and keeps a removal watermark
+        (``moment_reaction_removals``, migration 0125) so an older add can
+        never bring it back, even after a restart. Returns whether a
+        reaction row changed; one transaction, live moments only."""
 
         def _run(conn) -> bool:
-            row = conn.execute(
-                "SELECT reacted_at FROM moment_reactions"
-                " WHERE moment_id=? AND reactor_user_id=?",
-                (moment_id, reactor_user_id),
-            ).fetchone()
-            if row is not None and str(row[0]) > reacted_at:
+            if (
+                conn.execute(
+                    "SELECT 1 FROM moments WHERE id=? AND deleted_at IS NULL",
+                    (moment_id,),
+                ).fetchone()
+                is None
+            ):
                 return False
+            key = (moment_id, reactor_user_id)
+            stored = conn.execute(
+                "SELECT emoji, reacted_at FROM moment_reactions"
+                " WHERE moment_id=? AND reactor_user_id=?",
+                key,
+            ).fetchone()
+            removed = conn.execute(
+                "SELECT removed_at FROM moment_reaction_removals"
+                " WHERE moment_id=? AND reactor_user_id=?",
+                key,
+            ).fetchone()
+            marks = [str(r[-1]) for r in (stored, removed) if r is not None]
+            if marks and reacted_at <= max(marks):
+                return False  # not newer than what we hold: older, or a replay
             if emoji is None:
-                cur = conn.execute(
-                    "DELETE FROM moment_reactions"
-                    " WHERE moment_id=? AND reactor_user_id=?",
-                    (moment_id, reactor_user_id),
+                # The trigger drops the reaction row along with the insert.
+                conn.execute(
+                    "INSERT INTO moment_reaction_removals(moment_id,"
+                    " reactor_user_id, removed_at) VALUES(?, ?, ?)"
+                    " ON CONFLICT(moment_id, reactor_user_id) DO UPDATE SET"
+                    " removed_at=excluded.removed_at",
+                    (*key, reacted_at),
                 )
-                return cur.rowcount > 0
-            cur = conn.execute(
+                return stored is not None
+            # The triggers drop the removal watermark along with the upsert.
+            conn.execute(
                 "INSERT INTO moment_reactions(moment_id, reactor_user_id, emoji,"
-                " reacted_at) SELECT ?, ?, ?, ? WHERE EXISTS(SELECT 1 FROM"
-                " moments WHERE id=? AND deleted_at IS NULL)"
+                " reacted_at) VALUES(?, ?, ?, ?)"
                 " ON CONFLICT(moment_id, reactor_user_id) DO UPDATE SET"
                 " emoji=excluded.emoji, reacted_at=excluded.reacted_at",
-                (moment_id, reactor_user_id, emoji, reacted_at, moment_id),
+                (*key, emoji, reacted_at),
             )
-            return cur.rowcount > 0
+            return stored is None or stored[0] != emoji
 
         return await self._db.transact(_run)
 

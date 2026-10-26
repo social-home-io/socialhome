@@ -237,7 +237,9 @@ class MomentFederationOutbound(
         # moment's return tokens (v_67), or the reaction stays here.
         router = self._reaction_router
         if router is not None:
-            target = await router.direct_target(event.author_user_id)
+            target = await router.direct_target(
+                event.author_user_id, moment_id=event.moment_id
+            )
             if target is None:
                 await router.queue_reaction(
                     moment_id=event.moment_id,

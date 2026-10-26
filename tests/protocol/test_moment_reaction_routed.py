@@ -717,3 +717,86 @@ async def test_existing_reaction_path_refuses_an_oversized_emoji(env):
         },
     )
     assert await _reactions(db) == []
+
+
+# ── Review fixes (#1178): hide list, replays and restarts ─────────────────
+
+
+async def test_reactor_uses_the_direct_path_to_a_paired_origin(env):
+    """F1: the origin is paired but the author is not on our roster (it came
+    in at hop 2) — the reaction goes straight to the origin, never routed."""
+    app, db, sent, _own, anna, _router, _client = env
+    await _seed_peer(db, ORIGIN, ORIGIN_KEY.public_key, V67)
+    await _held_far_moment(app, db, via=NEIGHBOUR)
+    await app[moment_service_key].react("m-far", reactor_user_id=anna, emoji="👏")
+    await asyncio.sleep(0.05)
+    assert [s for s in sent if s[1] is FET.MOMENT_REACTION_ROUTED] == []
+    direct = [s for s in sent if s[1] is FET.MOMENT_REACTED]
+    assert [(to, p["reactor_user_id"]) for to, _e, p in direct] == [(ORIGIN, anna)]
+
+
+async def test_reactor_hidden_from_a_paired_origin_sends_nothing(env):
+    """F1: a person hidden from the (paired) origin household reaches it
+    neither directly nor along the route."""
+    app, db, sent, _own, anna, _router, _client = env
+    await _seed_peer(db, ORIGIN, ORIGIN_KEY.public_key, V67)
+    await db.enqueue(
+        "INSERT INTO peer_user_visibility(instance_id, user_id, visible)"
+        " VALUES(?, ?, 0)",
+        (ORIGIN, anna),
+    )
+    await _held_far_moment(app, db, via=NEIGHBOUR)
+    await app[moment_service_key].react("m-far", reactor_user_id=anna, emoji="👏")
+    await asyncio.sleep(0.05)
+    assert [s for s in sent if s[1] is FET.MOMENT_REACTION_ROUTED] == []
+    assert [s for s in sent if s[0] == ORIGIN] == []
+
+
+async def test_replays_do_not_drain_the_reactor_households_budget(env):
+    """F2: a relay re-sending one genuine sealed reaction is refused as a
+    replay and does not use up the reactor household's rate."""
+    app, db, _sent, own, anna, _router, _c = env
+    genuine = _routed(app, own, _inner(own, anna, emoji="👏", at_ms=_now_ms(-30)))
+    for _ in range(60):
+        await _dispatch(app, FET.MOMENT_REACTION_ROUTED, genuine)
+    fresh = _inner(own, anna, emoji="🔥", at_ms=_now_ms(-1))
+    await _dispatch(
+        app, FET.MOMENT_REACTION_ROUTED, _routed(app, own, fresh), from_instance=OTHER
+    )
+    assert await _reactions(db) == [("m-anna", RITA, "🔥")]
+
+
+def _restart(router) -> None:
+    """What an origin restart forgets: every in-memory cache."""
+    router._seen.clear()
+    removed = getattr(router, "_removed", None)
+    if removed is not None:
+        removed.clear()
+
+
+async def test_a_replayed_add_does_not_bring_back_a_removal_after_a_restart(env):
+    """F3: the removal is kept on disk, so an older add replayed after the
+    origin restarted (its replay cache gone) stays removed."""
+    app, db, _sent, own, anna, router, _c = env
+    add = _routed(app, own, _inner(own, anna, emoji="👏", at_ms=_now_ms(-60)))
+    await _dispatch(app, FET.MOMENT_REACTION_ROUTED, add)
+    removal = _inner(own, anna, emoji=None, at_ms=_now_ms(-30))
+    await _dispatch(app, FET.MOMENT_REACTION_ROUTED, _routed(app, own, removal))
+    assert await _reactions(db) == []
+    _restart(router)
+    await _dispatch(app, FET.MOMENT_REACTION_ROUTED, add)  # identical bytes
+    assert await _reactions(db) == []
+
+
+async def test_reactions_in_the_same_second_keep_their_order_after_a_restart(env):
+    """F3: ``reacted_at`` keeps milliseconds, so an add replayed after a
+    restart does not tie with — and overwrite — a newer one that second."""
+    app, db, _sent, own, anna, router, _c = env
+    base = (_now_ms(-60) // 1000) * 1000
+    first = _routed(app, own, _inner(own, anna, emoji="🔥", at_ms=base + 100))
+    await _dispatch(app, FET.MOMENT_REACTION_ROUTED, first)
+    second = _inner(own, anna, emoji="😂", at_ms=base + 700)
+    await _dispatch(app, FET.MOMENT_REACTION_ROUTED, _routed(app, own, second))
+    _restart(router)
+    await _dispatch(app, FET.MOMENT_REACTION_ROUTED, first)  # identical bytes
+    assert await _reactions(db) == [("m-anna", RITA, "😂")]
