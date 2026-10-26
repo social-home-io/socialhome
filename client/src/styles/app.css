@@ -20386,7 +20386,7 @@ span.sh-hlv__who { cursor: default; }
 }
 .sh-hlc-strip__remove:focus-visible,
 .sh-hlc-strip__pick:focus-visible {
-  outline: 3px solid var(--sh-primary);
+  outline: 3px solid var(--sh-focus-ring);
   outline-offset: -3px;
 }
 .sh-hlc-strip__add {
@@ -20400,11 +20400,17 @@ span.sh-hlv__who { cursor: default; }
   cursor: pointer;
 }
 .sh-hlc-strip__add:focus-within {
-  outline: 3px solid var(--sh-primary);
+  outline: 3px solid var(--sh-focus-ring);
   outline-offset: 2px;
 }
 .sh-hlc-strip__add--off { opacity: 0.5; cursor: not-allowed; }
 .sh-hlc-strip__plus { font-size: 1.75rem; line-height: 1; }
+.sh-hlc-strip__add > span:not(.sh-hlc-strip__plus) {
+  padding-inline: 4px;
+  font-size: var(--sh-font-size-sm);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
 .sh-hlc-strip__posted {
   display: flex;
   flex-direction: column;
@@ -20494,6 +20500,8 @@ span.sh-hlv__who { cursor: default; }
   overflow-wrap: anywhere;
 }
 .sh-hlc-pick__sub:empty { display: none; }
+/* Muted ink on the tinted selected row is 4.2:1 in dark — full ink there. */
+.sh-hlc-pick__row--on .sh-hlc-pick__sub { color: var(--sh-text); }
 .sh-hlc-pick__warn { color: var(--sh-text); font-weight: 600; }
 .sh-hlc-pick__choose {
   display: flex;
@@ -20595,6 +20603,7 @@ span.sh-hlv__who { cursor: default; }
   .sh-hlc-strip__tile,
   .sh-hlc-strip__add,
   .sh-hlc-strip__posted { flex-basis: 76px; height: 134px; }
+  .sh-hlc-strip__add > span:not(.sh-hlc-strip__plus) { font-size: var(--sh-font-size-xs); }
 }
 @media (max-width: 768px) {
   /* Above the fixed tab bar. */

@@ -4243,7 +4243,7 @@
   "highlight.composer.audience_choose": "Haushalte oder Personen auswählen…",
   "highlight.composer.choose_households": "Haushalte",
   "highlight.composer.choose_people": "Personen",
-  "highlight.composer.pick_one": "Wähle mindestens eine Auswahl",
+  "highlight.composer.pick_one": "Wähle mindestens einen Haushalt oder eine Person",
   "highlight.composer.default_sub": "Deine Standardeinstellung (Einstellungen)",
   "highlight.composer.retention": "Bleibt {n} Tage (deine Einstellung), dann wird es überall gelöscht. Bilder, die du heute noch hinzufügst, gehen an dieselben Leute.",
   "highlight.composer.retention_one": "Bleibt {n} Tag (deine Einstellung), dann wird es überall gelöscht. Bilder, die du heute noch hinzufügst, gehen an dieselben Leute.",

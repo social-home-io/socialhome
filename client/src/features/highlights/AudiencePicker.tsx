@@ -52,7 +52,7 @@ export function AudiencePicker(props: Props) {
     ?? id
 
   const chooseSub = picked.length === 0
-    ? <span class="sh-hlc-pick__warn">{t('highlight.composer.pick_one')}</span>
+    ? <span class={value.mode === 'choose' ? 'sh-hlc-pick__warn' : undefined}>{t('highlight.composer.pick_one')}</span>
     : nameList(picked.map(nameOf))
 
   const row = (mode: AudienceMode, title: string, sub: ComponentChildren) => (
