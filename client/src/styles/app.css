@@ -20489,8 +20489,8 @@ h2 + .sh-settings-subcard {
 .sh-momentum-composer-media .sh-composer-remove-attach {
   width: 36px;
   height: 36px;
-  right: auto;
-  inset-inline-end: 6px;
+  /* start auto, end 6px: overrides the shared rule's corner both ways. */
+  inset-inline: auto 6px;
 }
 @media (max-width: 640px) {
   /* Phones: a smaller preview keeps where-it-goes and the public row
