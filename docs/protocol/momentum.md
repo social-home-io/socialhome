@@ -598,7 +598,10 @@ totals once it sent any — `reaction_count`, `reaction_counts` and
 (`my_reaction`, from the rows here), added to the totals when made after
 them. Everywhere else — this household's own moments (every reaction is
 here), a moment whose reactions stay here (`reactions_reach: "household"`
-keeps its note), or no totals yet — the reactions held here.
+keeps its note), or no totals yet — the reactions held here. Known edge:
+a viewer who takes a reaction back and makes one again after the totals were
+sent is counted once more until the next checkpoint (the totals say nothing
+about who, so the overlay can't tell).
 
 ```mermaid
 sequenceDiagram
