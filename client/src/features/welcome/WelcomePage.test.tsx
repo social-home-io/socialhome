@@ -27,6 +27,10 @@ vi.mock('@/store/pageTitle', () => ({
   useTitle: () => {},
 }))
 
+vi.mock('./HomeTodayCard', () => ({
+  HomeTodayCard: () => <section data-testid="home-today" />,
+}))
+
 import WelcomePage from './WelcomePage'
 import { setLocale } from '@/i18n/i18n'
 import { api } from '@/api'
@@ -94,6 +98,14 @@ describe('WelcomePage', () => {
     expect(wsTypes).not.toContain('notification.created')
     expect(wsTypes).not.toContain('notification.read_changed')
     expect(wsTypes.filter(t => t.startsWith('calendar.event.'))).toEqual([])
+  })
+
+  it('the "today" card sits right under the greeting, on an all-clear day too', async () => {
+    apiMock.get.mockResolvedValue(bundle({}))
+    const { container } = render(<WelcomePage />)
+    await waitFor(() => expect(container.querySelector('[data-testid="home-today"]')).not.toBeNull())
+    const hero = container.querySelector('.sh-welcome-hero')!
+    expect(hero.nextElementSibling?.getAttribute('data-testid')).toBe('home-today')
   })
 
   it('greets the user by first name', async () => {

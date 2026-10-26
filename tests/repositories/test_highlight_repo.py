@@ -589,3 +589,35 @@ async def test_get_readable_never_waives_blocks_or_expiry(db, repo):
     gone = await _one(repo, "u3", HighlightAudience.ALL_PAIRED, days=-1)
     assert await repo.get_readable(gone.id, "u1", require_audience=False) is None
     assert await repo.get_readable(gone.id, "u3") is None
+
+
+async def test_count_viewers_counts_each_person_once(db, repo):
+    """``seen_by`` ("seen by N") counts people, not frame views: a person who watched
+    every frame is one viewer."""
+    await _seed_user(db, "u1", "pascal")
+    await _seed_user(db, "u2", "maria")
+    await _seed_user(db, "u3", "anna")
+    highlight = await repo.find_or_create_today(
+        author_user_id="u1",
+        audience_kind=HighlightAudience.ALL_PAIRED,
+        audience=(),
+        highlight_date="2026-05-03",
+        expires_at=_expires(),
+    )
+    f1 = await repo.append_frame(
+        highlight_id=highlight.id,
+        frame_type=HighlightFrameType.IMAGE,
+        media_url="/api/media/a.webp",
+    )
+    f2 = await repo.append_frame(
+        highlight_id=highlight.id,
+        frame_type=HighlightFrameType.IMAGE,
+        media_url="/api/media/b.webp",
+    )
+    assert await repo.count_viewers(highlight.id) == 0
+    await repo.mark_viewed(f1.id, "u2")
+    await repo.mark_viewed(f2.id, "u2")
+    assert await repo.count_viewers(highlight.id) == 1
+    await repo.mark_viewed(f2.id, "u3")
+    assert await repo.count_viewers(highlight.id) == 2
+    assert await repo.count_viewers("no-such-highlight") == 0

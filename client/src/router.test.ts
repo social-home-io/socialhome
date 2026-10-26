@@ -16,7 +16,7 @@ describe('router', () => {
     //   /setup           — first-boot wizard (platform/v2)
     //   /friends         — connected-people dashboard under Browse
     //   /highlights, /highlights/new, /highlights/:highlightId — Highlights pillar (§Highlights)
-    //   /highlights/archive — month-grid history browser (§Highlights)
+    //   /highlights/archive — the Archive tab of the Highlights page (§Highlights)
     //   /momentum, /momentum/new, /momentum/:id, /momentum/:id/reply,
     //     /momentum/archive, /momentum/yours — Momentum pillar (§Momentum)
     //   /organize        — replaces standalone /tasks /shopping /stickies

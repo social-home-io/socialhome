@@ -6,6 +6,7 @@ import { useEffect } from 'preact/hooks'
 import { basePath } from '@/baseUrl'
 import { t } from '@/i18n/i18n'
 import { isAuthed, currentUser, loadCurrentUser, token } from '@/store/auth'
+import { noteRoute } from '@/store/momentumSeen'
 import { instanceConfig, loadInstanceConfig } from '@/store/instance'
 import { usesIngressAuth } from '@/platform'
 import { isGuardian, loadGuardian } from '@/store/guardian'
@@ -322,7 +323,11 @@ export function App() {
           <ConfirmDialogHost />
         </>}>
           <RouteProgress />
-          <Router onLoadStart={routeLoadStart} onLoadEnd={routeLoadEnd}>
+          <Router
+            onLoadStart={routeLoadStart}
+            onLoadEnd={routeLoadEnd}
+            onRouteChange={(url: string) => noteRoute(url, currentUser.value?.user_id)}
+          >
             {Object.entries(routes).map(([path, Component]) => {
               // preact-iso's ``lazy()`` returns an AsyncComponent with
               // a ``.preload`` property; TypeScript's JSX checker

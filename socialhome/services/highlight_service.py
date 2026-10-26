@@ -454,9 +454,12 @@ class HighlightService:
         """Return the inbox view: highlights visible to *viewer_user_id*.
 
         Each entry is a dict ready for the route layer to serialise:
-        ``{highlight, frames, unseen_count}`` — frames are
-        :class:`HighlightFrame` instances, ``unseen_count`` is an ``int``.
-        Sorted newest-first by ``highlight_date``.
+        ``{highlight, frames, unseen_count, seen_by}`` — frames are
+        :class:`HighlightFrame` instances, ``unseen_count`` is an ``int``,
+        ``seen_by`` is how many people watched it on the author's own
+        highlight and ``None`` on anyone else's (a viewer doesn't learn
+        how many others watched). Sorted newest-first by
+        ``highlight_date``.
         """
         highlights = await self._highlights.list_visible_to(viewer_user_id)
         out: list[dict[str, Any]] = []
@@ -465,9 +468,10 @@ class HighlightService:
             # Your own highlight is never unseen: authors' views are not
             # recorded (``mark_frame_viewed``), so counting them would
             # keep the "new" ring and badge on your own highlight forever.
+            is_author = highlight.author_user_id == viewer_user_id
             unseen = (
                 0
-                if highlight.author_user_id == viewer_user_id
+                if is_author
                 else await self._highlights.count_unseen_frames(
                     highlight.id, viewer_user_id
                 )
@@ -477,6 +481,11 @@ class HighlightService:
                     "highlight": highlight,
                     "frames": frames,
                     "unseen_count": unseen,
+                    "seen_by": (
+                        await self._highlights.count_viewers(highlight.id)
+                        if is_author
+                        else None
+                    ),
                 }
             )
         return out
