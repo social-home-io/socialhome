@@ -269,6 +269,15 @@ export interface Moment {
   /** Who wrote it, as the server names them for the caller — a friend
    *  on another household included (``GET /api/moments``). */
   author?: Omit<PersonSummary, 'user_id'>
+  /** The caller saved it (decision 6b): it stays with them past its
+   *  expiry until its author deletes it. */
+  saved_by_me?:       boolean
+  /** Save is offered: only where the author's delete can still reach this
+   *  copy (never on your own moments — they're already under Yours). */
+  can_save?:          boolean
+  /** When the caller saved it — set on ``?scope=saved`` items only; the
+   *  Saved list pages on it. */
+  saved_at?:          string
 }
 
 /** Author-side public-Momentum registration row. */

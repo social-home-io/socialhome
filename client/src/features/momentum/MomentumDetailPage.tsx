@@ -37,6 +37,7 @@ import { relativeChatTime } from '@/utils/relativeTime'
 import { ws } from '@/ws'
 import type { Moment, MomentDetail } from '@/types'
 import { renderHashtagged } from './hashtags'
+import { MomentSaveToggle } from './MomentSaveToggle'
 
 const QUICK_REACTIONS = ['❤️', '🔥', '😂', '😮', '😢', '👏'] as const
 
@@ -127,8 +128,9 @@ export default function MomentumDetailPage() {
   if (!detail.value) return null
   const m = detail.value.moment
   const isAuthor = m.author_user_id === me
-  // Past its expiry only its author still sees it (kept under Yours,
-  // decision 6a): replies close and the share link has ended.
+  // Past its expiry only its author (kept under Yours, decision 6a) or
+  // someone who saved it (decision 6b) still sees it: replies close and
+  // the share link has ended.
   const ended = Date.parse(m.expires_at) <= Date.now()
 
   const react = async (emoji: string) => {
@@ -385,7 +387,9 @@ export default function MomentumDetailPage() {
       </section>
 
       {ended && (
-        <p class="sh-muted sh-momentum-detail-ended">{t('moment.detail.archived')}</p>
+        <p class="sh-muted sh-momentum-detail-ended">
+          {t(isAuthor ? 'moment.detail.archived' : 'moment.detail.saved_ended')}
+        </p>
       )}
       <footer class="sh-momentum-detail-actions">
         {!ended && (
@@ -393,6 +397,7 @@ export default function MomentumDetailPage() {
             💬 {t('highlight.viewer.reply')}
           </Button>
         )}
+        {!isAuthor && <MomentSaveToggle key={m.id} moment={m} />}
         {!isAuthor && (
           <Button variant="ghost" onClick={report}>🚩 {t('report.action')}</Button>
         )}

@@ -23,6 +23,8 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
+from .errors import CodedError
+
 #: Hard caps. Composer + service both enforce.
 MOMENT_MAX_CONTENT_LEN: int = 1_000
 MOMENT_MAX_VIDEO_MS: int = 15_000
@@ -175,6 +177,39 @@ class MomentArchiveUsage:
 
     used_bytes: int
     cap_bytes: int
+
+
+@dataclass(slots=True, frozen=True)
+class SavedMoment:
+    """One person's save of a moment (decision 6b): *user_id* keeps
+    *moment* past its expiry until its author deletes it. ``saved_at`` is
+    UTC ISO 8601 — the Saved list pages on it, newest first."""
+
+    moment: Moment
+    user_id: str
+    saved_at: str
+
+
+class MomentOwnSaveError(CodedError):
+    """A person tried to save their own moment — it already stays in their
+    archive (decision 6a)."""
+
+    status = 422
+    code = "OWN_MOMENT"
+    detail = "Your own moments already stay in your archive."
+
+
+class MomentSaveUnavailableError(CodedError):
+    """Save is offered only where the author's delete can still reach the
+    copy: a household that keeps deletes queued (v_66+) or a GFS that keeps
+    delete certificates (``moment_delete_log``)."""
+
+    status = 422
+    code = "SAVE_UNAVAILABLE"
+    detail = (
+        "This moment can't be saved: its author's household or server "
+        "can't reach a saved copy with a later delete."
+    )
 
 
 @dataclass(slots=True, frozen=True)

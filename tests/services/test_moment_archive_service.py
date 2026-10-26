@@ -161,3 +161,69 @@ async def test_without_a_media_dir_nothing_is_measured(db):
     )
     assert (await svc.usage_for("u-me")).used_bytes == 0
     assert await svc.enforce_caps() == 0
+
+
+# ── Saved moments count toward the saver's cap (decision 6b) ─────────────
+
+
+async def _save(db, user_id: str, moment_id: str, *, days_ago: int) -> None:
+    await db.enqueue(
+        "INSERT OR IGNORE INTO users(user_id, username, display_name) VALUES(?, ?, ?)",
+        (user_id, user_id, user_id),
+    )
+    await db.enqueue(
+        "INSERT INTO moment_saves(user_id, moment_id, saved_at) VALUES(?, ?, ?)",
+        (
+            user_id,
+            moment_id,
+            (datetime.now(UTC) - timedelta(days=days_ago)).isoformat(),
+        ),
+    )
+
+
+async def test_usage_counts_saved_pictures_of_others(db, stack):
+    await stack.add(_moment("m-own", days_ago=1, media="o.webp"), 100)
+    await stack.add(
+        _moment("m-peer", author="u-peer", days_ago=1, media="p.webp", via="household"),
+        40,
+    )
+    # A housemate's moment counts toward its author's archive, not mine.
+    await stack.add(_moment("m-mia", author="u-mia", days_ago=1, media="h.webp"), 7)
+    await _save(db, "u-me", "m-peer", days_ago=0)
+    await _save(db, "u-me", "m-mia", days_ago=0)
+    assert (await stack.svc.usage_for("u-me")).used_bytes == 140
+    assert (await stack.svc.usage_for("u-mia")).used_bytes == 7
+
+
+async def test_past_the_cap_oldest_kept_goes_first_saved_or_own(db, stack):
+    """One oldest-first order per person: an own moment by when it was
+    written, a saved one by when it was saved. A saved picture loses its
+    file like an own one (the text stays) — unless someone else saved it
+    too, then it stays for them."""
+    await stack.svc.set_cap_bytes(1000, actor_is_admin=True)
+    await stack.add(_moment("m-own-old", days_ago=30, media="1.webp"), 400)
+    await stack.add(
+        _moment(
+            "m-saved", author="u-peer", days_ago=25, media="2.webp", via="household"
+        ),
+        400,
+    )
+    await stack.add(
+        _moment(
+            "m-shared", author="u-peer", days_ago=40, media="3.webp", via="household"
+        ),
+        400,
+    )
+    await stack.add(_moment("m-own-new", days_ago=10, media="4.webp"), 400)
+    await _save(db, "u-me", "m-shared", days_ago=35)
+    await _save(db, "u-bob", "m-shared", days_ago=34)
+    await _save(db, "u-me", "m-saved", days_ago=20)
+    # u-me: 1600 bytes over a 1000 cap. Oldest kept: m-shared (35 d, but
+    # Bob keeps it too → skipped), m-own-old (30 d), m-saved (20 d).
+    assert await stack.svc.enforce_caps() == 2
+    assert (await stack.moments.get("m-own-old")).media_url is None
+    saved = await stack.moments.get("m-saved")
+    assert (saved.media_url, saved.content) == (None, "text of m-saved")
+    assert not (stack.media_dir / "2.webp").exists()
+    assert (await stack.moments.get("m-shared")).media_url == "api/media/3.webp"
+    assert (await stack.moments.get("m-own-new")).media_url == "api/media/4.webp"

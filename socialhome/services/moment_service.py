@@ -15,23 +15,38 @@ and :class:`PreferencesService` to enforce the spec rules:
 The service publishes :class:`MomentCreated` / :class:`MomentDeleted`
 / :class:`MomentReactionChanged` on the bus so federation outbound +
 realtime push pick them up.
+
+**Saves (decision 6b).** A person keeps someone else's moment past its
+expiry by saving it — until its author deletes it. Saving is offered only
+where that delete can still reach the copy (:meth:`MomentService.can_save`):
+a housemate's moment (a local delete), a mesh moment whose origin household
+is a paired v_66+ peer (it keeps a delete queued 30 days and sends it to
+every paired household), or a GFS-delivered
+moment whose GFS proved ``moment_delete_log`` (it keeps the signed delete
+certificate 30 days). Your own moments are already archived (decision 6a)
+and are never "saved". Saves are local: nothing goes on the wire.
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from ..domain.events import (
     MomentCreated,
     MomentDeleted,
     MomentReactionChanged,
 )
+from ..domain.federation import InstanceSource, PairingStatus
+from ..domain.federation_capabilities import FederationCapability
 from ..domain.moment import (
     MOMENT_MAX_CONTENT_LEN,
     MOMENT_MAX_VIDEO_MS,
     Moment,
+    MomentOwnSaveError,
+    MomentSaveUnavailableError,
+    SavedMoment,
 )
 from ..federation.owner_bound_id import MOMENT_KIND, mint_owner_bound_id
 from ..media.cleanup import unlink_unreferenced
@@ -43,6 +58,7 @@ if TYPE_CHECKING:
     import pathlib
 
     from ..infrastructure.event_bus import EventBus
+    from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.moment_repo import AbstractMomentRepo
     from ..repositories.user_repo import AbstractUserRepo
 
@@ -91,6 +107,13 @@ class MomentNotFoundError(KeyError):
         return NOT_FOUND_MESSAGE
 
 
+class GfsDeleteLog(Protocol):
+    """``GfsConnectionService.moment_delete_log_supported`` — whether a GFS
+    keeps public moments' delete certificates (``moment_delete_log``)."""
+
+    async def moment_delete_log_supported(self, gfs_id: str) -> bool: ...
+
+
 class MomentRateLimitError(Exception):
     """Raised when an author tries to post a top-level moment within
     :data:`MOMENT_RATE_WINDOW` of their last one. Mapped to HTTP 429
@@ -103,6 +126,8 @@ class MomentService:
 
     __slots__ = (
         "_bus",
+        "_federation_repo",
+        "_gfs_delete_log",
         "_media_dir",
         "_media_refs",
         "_moments",
@@ -119,6 +144,8 @@ class MomentService:
         own_instance_id: str = "",
         media_dir: pathlib.Path | None = None,
         media_refs: AbstractMediaReferenceRepo | None = None,
+        federation_repo: AbstractFederationRepo | None = None,
+        gfs_delete_log: GfsDeleteLog | None = None,
     ) -> None:
         self._moments = moment_repo
         self._users = user_repo
@@ -128,6 +155,10 @@ class MomentService:
         # expiry once no other row references it.
         self._media_dir = media_dir
         self._media_refs = media_refs
+        # The save gates (decision 6b). Unset = fail closed: no mesh or
+        # GFS copy is savable.
+        self._federation_repo = federation_repo
+        self._gfs_delete_log = gfs_delete_log
 
     def attach_instance_id(self, own_instance_id: str) -> None:
         """Late binding for the instance id (set after federation
@@ -442,6 +473,123 @@ class MomentService:
             limit=limit,
         )
         return [{"tag": tag, "count": n} for tag, n in rows]
+
+    # ── Saves (decision 6b) ────────────────────────────────────────────
+
+    async def save_moment(self, moment_id: str, *, user_id: str) -> None:
+        """*user_id* keeps *moment_id* past its expiry until its author
+        deletes it. Idempotent. The caller must be able to read it (else
+        the unknown-id 404); never their own (:class:`MomentOwnSaveError`);
+        only where the author's delete can reach the copy
+        (:class:`MomentSaveUnavailableError`, see :meth:`can_save`)."""
+        moment = await self.get_for_viewer(moment_id, user_id)
+        if moment.author_user_id == user_id:
+            raise MomentOwnSaveError()
+        if await self._moments.saved_ids(user_id, [moment_id]):
+            return
+        if not await self.can_save(moment, user_id):
+            raise MomentSaveUnavailableError()
+        if not await self._moments.add_save(user_id, moment_id):
+            # Deleted between the read and the write.
+            raise MomentNotFoundError(moment_id)
+
+    async def unsave_moment(self, moment_id: str, *, user_id: str) -> None:
+        """Forget *user_id*'s save of *moment_id*. Needs no read (a save of
+        a moment now hidden by a block can still be removed) and is a no-op
+        for an id they never saved — it says nothing about the moment."""
+        await self._moments.remove_save(user_id, moment_id)
+
+    async def list_saved(
+        self,
+        *,
+        user_id: str,
+        before: str | None = None,
+        limit: int = 50,
+    ) -> list[SavedMoment]:
+        """*user_id*'s saved moments they may still read, newest save first,
+        ``before`` = the ``saved_at`` cursor of the previous page."""
+        return await self._moments.list_saved(
+            user_id,
+            before=before,
+            limit=limit,
+            max_hops=await self._max_hops(user_id),
+        )
+
+    async def can_save(
+        self,
+        moment: Moment,
+        viewer_user_id: str,
+        *,
+        _cache: dict[tuple[str, str], bool] | None = None,
+    ) -> bool:
+        """Whether *viewer_user_id* may save *moment*: offered only where
+        its author's delete can still reach this copy.
+
+        * written here (``received_via='self'``): a housemate's yes (a local
+          delete tombstones it); the viewer's own no (already archived);
+        * from a household (``'household'``): only when its origin is a
+          household we are paired with (a social peer — it sends its
+          moments' deletes to us directly) on v_66+
+          (``MIN_FOR_LATE_MOMENT_DELETES`` — the ``peer_supports`` rule: it
+          keeps the delete queued 30 days). A friend-of-friend origin with
+          no pairing here, or one we only share a space with, is not
+          offered: its delete reaches us only through relays we can't
+          vouch for;
+        * through a GFS (``'gfs'``): only when that GFS proved
+          ``moment_delete_log`` (it keeps the signed delete certificate 30
+          days for followers that reconnect).
+        """
+        if moment.deleted_at is not None or moment.author_user_id == viewer_user_id:
+            return False
+        if moment.received_via == "self":
+            return True
+        cache = _cache if _cache is not None else {}
+        if moment.received_via == "household":
+            key = ("peer", moment.origin_instance_id)
+            if key not in cache:
+                cache[key] = await self._origin_keeps_deletes(moment.origin_instance_id)
+            return cache[key]
+        if moment.received_via == "gfs" and moment.received_via_gfs_id:
+            key = ("gfs", moment.received_via_gfs_id)
+            if key not in cache:
+                cache[key] = self._gfs_delete_log is not None and (
+                    await self._gfs_delete_log.moment_delete_log_supported(
+                        moment.received_via_gfs_id
+                    )
+                )
+            return cache[key]
+        return False
+
+    async def _origin_keeps_deletes(self, instance_id: str) -> bool:
+        """A paired (social) household on v_66+: it sends us its moments'
+        deletes and keeps them queued 30 days."""
+        if self._federation_repo is None or not instance_id:
+            return False
+        peer = await self._federation_repo.get_instance(instance_id)
+        return (
+            peer is not None
+            and peer.status is PairingStatus.CONFIRMED
+            and peer.source is not InstanceSource.SPACE_SESSION
+            and peer.proto_version >= FederationCapability.MIN_FOR_LATE_MOMENT_DELETES
+        )
+
+    async def save_flags(
+        self, moments: list[Moment], *, viewer_user_id: str
+    ) -> dict[str, tuple[bool, bool]]:
+        """``{moment_id: (saved_by_me, can_save)}`` for a page of moments —
+        one saves query, one gate lookup per origin household / GFS. For a
+        moment already saved, ``can_save`` says whether saving would be
+        offered now; the SPA shows "Saved" either way, so a save can always
+        be removed."""
+        saved = await self._moments.saved_ids(viewer_user_id, [m.id for m in moments])
+        cache: dict[tuple[str, str], bool] = {}
+        out: dict[str, tuple[bool, bool]] = {}
+        for m in moments:
+            out[m.id] = (
+                m.id in saved,
+                await self.can_save(m, viewer_user_id, _cache=cache),
+            )
+        return out
 
     # ── Retention scheduler hook ───────────────────────────────────────
 

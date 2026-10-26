@@ -19,6 +19,15 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe("Today's highlight is for other people. New frames go to the same people as today's highlight.")
   })
 
+  it('translates the two refusals of saving a moment', () => {
+    expect(apiErrorMessage(422, '/api/moments/m1/save', {
+      code: 'OWN_MOMENT', detail: 'Your own moments already stay in your archive.',
+    })).toBe('Your own moments already stay under Yours.')
+    expect(apiErrorMessage(422, '/api/moments/m1/save', {
+      code: 'SAVE_UNAVAILABLE', detail: 'This moment can\'t be saved.',
+    })).toContain("This moment can't be saved")
+  })
+
   it('translates the GFS fallback refusal for a household not paired directly', () => {
     expect(apiErrorMessage(409, '/api/pairing/connections/p1', {
       code: 'GFS_RELAY_NOT_ALLOWED',

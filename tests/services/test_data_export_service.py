@@ -247,3 +247,31 @@ async def test_export_leaves_out_deleted_stickies_and_gallery_rows(env):
     assert [r["id"] for r in out.tables["stickies"]] == ["st-live"]
     assert [r["id"] for r in out.tables["gallery_albums"]] == ["al-live"]
     assert [r["id"] for r in out.tables["gallery_items"]] == ["it-live"]
+
+
+# ─── Saved moments (decision 6b) ───────────────────────────────────────
+
+
+async def test_export_includes_the_users_moment_saves_only(env):
+    """Which moments a person saved (ids + when) is theirs to export; the
+    moments themselves are other people's and stay out."""
+    db, svc = env
+    await db.enqueue(
+        "INSERT INTO moments(id, author_user_id, content, origin_instance_id,"
+        " expires_at) VALUES('m1', 'u-peer', 'hi', 'peer', datetime('now', '+1 day'))"
+    )
+    for uid in ("alice-id", "bob-id"):
+        await db.enqueue(
+            "INSERT INTO moment_saves(user_id, moment_id, saved_at)"
+            " VALUES(?, 'm1', '2026-10-25T10:00:00+00:00')",
+            (uid,),
+        )
+    out = await svc.export_for_user("alice-id")
+    assert out.tables["moment_saves"] == [
+        {
+            "user_id": "alice-id",
+            "moment_id": "m1",
+            "saved_at": "2026-10-25T10:00:00+00:00",
+        }
+    ]
+    assert "moments" not in out.tables

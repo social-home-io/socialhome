@@ -36,6 +36,7 @@ import { currentUser } from '@/store/auth'
 import { ws } from '@/ws'
 import type { Moment } from '@/types'
 import { renderHashtagged } from './hashtags'
+import { MomentSaveToggle } from './MomentSaveToggle'
 import { t, isOne, formatLocale } from '@/i18n/i18n'
 
 const moments = signal<Moment[]>([])
@@ -341,6 +342,7 @@ function MomentRow({
           >
             {DEFAULT_REACTION} {m.reaction_count > 0 ? m.reaction_count : ''}
           </button>
+          {!mine && <MomentSaveToggle moment={m} variant="chip" />}
         </div>
       </div>
     </li>

@@ -225,6 +225,7 @@ from .moments import (
     MomentHashtagsView,
     MomentReactionView,
     MomentReportView,
+    MomentSaveView,
     MomentShareLinkView,
 )
 from .moments_public import (
@@ -1081,6 +1082,10 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_view(
         "/api/moments/{id}/reaction",
         MomentReactionView,
+    )
+    app.router.add_view(
+        "/api/moments/{id}/save",
+        MomentSaveView,
     )
     app.router.add_view(
         "/api/moments/{id}/report",

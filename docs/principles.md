@@ -841,8 +841,8 @@ This is plaintext the GFS stores. What bounds it:
 ### Sign-off: "delete removes saved copies" is best effort (v_66)
 
 Owner sign-off 3, 2026-10-25 (decision 6c). When an author deletes a moment,
-every copy is removed — the follower's, and (next release) one a person
-saved past the moment's expiry — **as far as the delete can reach**:
+every copy is removed — the follower's, and one a person saved past the
+moment's expiry (decision 6b) — **as far as the delete can reach**:
 
 * **30-day horizon.** The mesh keeps a delete queued 30 days per hop and a
   GFS keeps its certificate 30 days. A household away longer, or reachable
@@ -856,7 +856,15 @@ saved past the moment's expiry — **as far as the delete can reach**:
   longer reach — unpaired, its GFS gone, banned — gets no delete. A
   household that ignores deletes (modified software) is outside what any
   protocol can enforce; a copy someone already has can be kept by them.
-* **The next release** adds dropping saved copies on unfollow / unpair.
+* **Save only where a delete can reach.** Saving is offered only for a
+  housemate's moment, a mesh moment whose origin is a paired v_66+
+  household, or a moment from a GFS that keeps delete certificates — never
+  a friend-of-friend copy whose delete would depend on relays. A tombstone
+  drops every save of the moment in the same transaction.
+* **Saved copies go on unfollow / unpair.** When a person's last follow of
+  an author goes, their saves of that author's moments go; when this
+  household unpairs a household, every save of a moment from it goes — that
+  household's later deletes could no longer reach the copy.
 
 Any change that extends a copy's life past what a delete can reach, keeps
 certificates longer than 30 days, or puts content into a certificate is a

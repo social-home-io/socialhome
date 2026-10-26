@@ -71,7 +71,67 @@ encrypted payload (§25.8.21).
   it — at most 200 per tick: the text stays, ``media_url`` is cleared and
   the file is removed once no other row references it. A moment others can
   still see keeps its picture. Nobody is notified; the Yours tab says it
-  up front.
+  up front. Saved moments count toward the saver's cap too (below).
+
+## Archive & saves
+
+Your own moments are archived (above). **Someone else's moment you keep by
+saving it** (decision 6b, sign-offs 3 + 5, 2026-10-25): a saved moment stays
+with you past its end until its author deletes it. Saves are **local
+only** — nothing goes on the wire, no household or GFS learns who saved
+what, and no protocol version changes.
+
+* **Storage.** One ``moment_saves`` row per (person, moment) — migration
+  ``0124``. While any save of a moment exists the retention prune and its
+  media sweep skip the row; the file stays because the row still names it.
+* **Who reads it.** The saver alone can open a saved moment past the 24 h
+  window and past ``expires_at`` (``get_readable``); block, guardian-block,
+  protected-account (§CP.R — never a GFS-delivered moment) and
+  ``max_hops`` filters still apply, so a blocked author's saved moment is
+  hidden (and back on unblock). Replies still close at expiry.
+* **Offered only where a delete can still reach the copy** — the server
+  enforces it (``422 SAVE_UNAVAILABLE``) and returns ``can_save`` per item
+  so the SPA hides the button otherwise:
+  * a housemate's moment (a local delete tombstones it);
+  * a mesh moment whose origin is a household **we are paired with**
+    (a social peer, not a space-session seat) on **v_66+**
+    (``MIN_FOR_LATE_MOMENT_DELETES``): it sends us its deletes and keeps
+    them queued 30 days. A friend-of-friend origin (no pairing here) is not
+    offered — its delete reaches us only through relays we can't vouch for;
+  * a GFS-delivered moment whose GFS proved ``moment_delete_log``: it keeps
+    the signed delete certificate 30 days for followers that reconnect.
+  Your own moments are never "saved" (``422 OWN_MOMENT``) — they are already
+  under Yours. A protected account's moments can be saved like any moment,
+  and a protected viewer saves within the protected filters (sign-off 5).
+* **Deletes remove saves.** A tombstone — any path: the author's
+  ``MOMENT_DELETED`` over the mesh, a GFS delete certificate, a local
+  author or admin delete, ``USER_REMOVED`` — drops every save of the
+  moment in the same transaction (trigger
+  ``trg_moment_saves_drop_on_tombstone``). A replayed create brings back
+  neither the moment nor the save.
+* **Unfollow and unpair drop saved copies** (sign-off 3). When a person's
+  last follow of an author goes (``user_follows`` or
+  ``moment_public_follows``; removing a GFS connection cascades its
+  follows) their saves of that author's moments go — triggers in ``0124``.
+  When this household unpairs a household — locally, by the peer's
+  ``UNPAIR``, or as an unpair tombstone — every save of a moment that came
+  from it (``received_via = 'household'`` and that ``origin_instance_id``)
+  goes (``PeerUnpairService``). A moment records only its origin, not the
+  relaying peer; since saving needs a paired origin, the origin is the
+  household it came through.
+* **Media cap.** Saved files count toward the saver's per-person archive
+  cap (a file several people saved counts for each; a housemate's moment
+  counts toward its author's archive instead). Past the cap one
+  oldest-first order applies per person — an own moment by when it was
+  written, a saved one by when it was saved — and a saved moment past its
+  expiry loses its media like an own one (the text stays), only when no one
+  else here saved it.
+* **API.** ``PUT`` / ``DELETE /api/moments/{id}/save``,
+  ``GET /api/moments/archive?scope=saved`` (newest save first, ``before`` =
+  ``saved_at``); every moment item carries ``saved_by_me`` and
+  ``can_save``. The SPA: a 🔖 Save / Saved toggle on inbox rows and the
+  moment's page (``aria-pressed``), and Yours › Saved.
+* Protocol test: ``tests/protocol/test_moment_saves.py`` (security).
 
 ## Hashtags
 
@@ -396,7 +456,8 @@ instance.
   `moment_reactions`, `user_follows`. ``moments.author_user_id`` is
   plain text (no FK) so federated remote-author rows live alongside
   local rows. `0057_moment_tombstone.sql` adds `moments.deleted_at`
-  (delete tombstones).
+  (delete tombstones). `0124_moment_saves.sql` adds `moment_saves`
+  (saved moments, decision 6b).
 - Domain: `socialhome/domain/moment.py` (caps + dataclasses);
   events at `socialhome/domain/events.py`.
 - Repo: `socialhome/repositories/moment_repo.py`.

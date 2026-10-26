@@ -15,7 +15,17 @@ from socialhome.domain.events import (
     MomentDeleted,
     MomentReactionChanged,
 )
-from socialhome.domain.moment import Moment
+from socialhome.domain.federation import (
+    InstanceSource,
+    PairingStatus,
+    RemoteInstance,
+)
+from socialhome.domain.federation_capabilities import FederationCapability
+from socialhome.domain.moment import (
+    Moment,
+    MomentOwnSaveError,
+    MomentSaveUnavailableError,
+)
 from socialhome.federation.owner_bound_id import (
     MOMENT_KIND,
     OwnerBinding,
@@ -673,3 +683,234 @@ async def test_a_reply_never_outlives_its_thread(stack):
         author_user_id=b.user_id, content="b", parent_moment_id=root.id
     )
     assert round(_lifetime_days(short), 3) == 1
+
+
+# ── Saves (decision 6b) ───────────────────────────────────────────────────
+
+
+def _peer(iid: str, *, version: int, source=InstanceSource.MANUAL) -> RemoteInstance:
+    return RemoteInstance(
+        id=iid,
+        display_name=iid,
+        remote_identity_pk="aa" * 32,
+        key_self_to_remote="enc",
+        key_remote_to_self="enc",
+        remote_inbox_url=f"https://{iid}/wh",
+        local_inbox_id=f"wh-{iid}",
+        status=PairingStatus.CONFIRMED,
+        source=source,
+        proto_version=version,
+    )
+
+
+class _Gates:
+    """Fake save gates: the paired households (``get_instance``) and which
+    GFSs keep delete certificates."""
+
+    def __init__(self, *, peers=(), gfss=()):
+        self.peers = {p.id: p for p in peers}
+        self.gfss = set(gfss)
+        self.peer_calls: list[str] = []
+
+    async def get_instance(self, instance_id: str):
+        self.peer_calls.append(instance_id)
+        return self.peers.get(instance_id)
+
+    async def moment_delete_log_supported(self, gfs_id: str) -> bool:
+        return gfs_id in self.gfss
+
+
+def _svc(stack, gates: _Gates) -> MomentService:
+    return MomentService(
+        stack.moment_repo,
+        SqliteUserRepo(stack.db),
+        stack.bus,
+        federation_repo=gates,  # type: ignore[arg-type]
+        gfs_delete_log=gates,
+    )
+
+
+async def _received(
+    stack, mid: str, *, author: str, via: str, origin="inst-b", gfs=None
+):
+    if gfs is not None:
+        await stack.db.enqueue(
+            "INSERT OR IGNORE INTO gfs_connections(id, gfs_instance_id,"
+            " display_name, public_key, inbox_url, status, paired_at)"
+            " VALUES(?, ?, ?, ?, 'https://gfs.example', 'active', datetime('now'))",
+            (gfs, gfs, gfs, "aa" * 32),
+        )
+    now = datetime.now(UTC)
+    m = Moment(
+        id=mid,
+        author_user_id=author,
+        content="hi",
+        media_url=None,
+        media_type=None,
+        duration_ms=None,
+        parent_moment_id=None,
+        origin_instance_id=origin,
+        created_at=now.isoformat(),
+        expires_at=(now + timedelta(days=7)).isoformat(),
+        received_via=via,
+        received_via_gfs_id=gfs,
+    )
+    await stack.moment_repo.save(m)
+    return m
+
+
+_V66 = FederationCapability.MIN_FOR_LATE_MOMENT_DELETES
+
+
+async def test_save_needs_a_paired_household_that_keeps_deletes(stack):
+    me = await stack.provision("me")
+    await _received(stack, "m-new", author="u-b", via="household", origin="inst-new")
+    await _received(stack, "m-old", author="u-b", via="household", origin="inst-old")
+    await _received(stack, "m-fof", author="u-c", via="household", origin="inst-far")
+    await _received(stack, "m-seat", author="u-d", via="household", origin="inst-seat")
+    svc = _svc(
+        stack,
+        _Gates(
+            peers=[
+                _peer("inst-new", version=_V66),
+                _peer("inst-old", version=_V66 - 1),
+                # Only shares a space with us: it never sends us its moments'
+                # deletes.
+                _peer("inst-seat", version=_V66, source=InstanceSource.SPACE_SESSION),
+            ]
+        ),
+    )
+    await svc.save_moment("m-new", user_id=me.user_id)
+    for mid in ("m-old", "m-fof", "m-seat"):
+        with pytest.raises(MomentSaveUnavailableError):
+            await svc.save_moment(mid, user_id=me.user_id)
+    saved = await svc.list_saved(user_id=me.user_id)
+    assert [s.moment.id for s in saved] == ["m-new"]
+
+
+async def test_save_without_federation_is_never_offered_for_household_copies(stack):
+    me = await stack.provision("me")
+    await _received(stack, "m-1", author="u-b", via="household")
+    with pytest.raises(MomentSaveUnavailableError):
+        await stack.moment_svc.save_moment("m-1", user_id=me.user_id)
+
+
+async def test_save_needs_a_gfs_that_keeps_delete_certificates(stack):
+    me = await stack.provision("me")
+    svc = _svc(stack, _Gates(gfss={"g-new"}))
+    await _received(stack, "m-g-new", author="u-far", via="gfs", gfs="g-new")
+    await _received(stack, "m-g-old", author="u-far", via="gfs", gfs="g-old")
+    await svc.save_moment("m-g-new", user_id=me.user_id)
+    with pytest.raises(MomentSaveUnavailableError):
+        await svc.save_moment("m-g-old", user_id=me.user_id)
+    # A GFS row without its server id can't be vouched for either.
+    m = await _received(stack, "m-g-none", author="u-far", via="gfs")
+    assert await svc.can_save(m, me.user_id) is False
+
+
+async def test_own_moment_is_not_saved_a_housemates_is(stack):
+    me = await stack.provision("me")
+    mia = await stack.provision("mia")
+    mine = await stack.moment_svc.create_moment(author_user_id=me.user_id, content="a")
+    hers = await stack.moment_svc.create_moment(author_user_id=mia.user_id, content="b")
+    with pytest.raises(MomentOwnSaveError):
+        await stack.moment_svc.save_moment(mine.id, user_id=me.user_id)
+    await stack.moment_svc.save_moment(hers.id, user_id=me.user_id)
+    flags = await stack.moment_svc.save_flags([mine, hers], viewer_user_id=me.user_id)
+    assert flags[mine.id] == (False, False)
+    assert flags[hers.id] == (True, True)
+
+
+async def test_save_of_an_unreadable_moment_is_the_unknown_id_404(stack):
+    me = await stack.provision("me")
+    await _received(stack, "m-1", author="u-b", via="household", origin="inst-b")
+    svc = _svc(stack, _Gates(peers=[_peer("inst-b", version=_V66)]))
+    await stack.db.enqueue(
+        "INSERT INTO user_blocks(blocker_user_id, blocked_user_id) VALUES(?, ?)",
+        (me.user_id, "u-b"),
+    )
+    with pytest.raises(MomentNotFoundError):
+        await svc.save_moment("m-1", user_id=me.user_id)
+    with pytest.raises(MomentNotFoundError):
+        await svc.save_moment("m-nope", user_id=me.user_id)
+
+
+async def test_a_protected_viewer_saves_within_the_protected_filters(stack):
+    """Sign-off 5: a protected account saves like anyone, but never a
+    GFS-delivered moment (it can't read one)."""
+    kid = await stack.provision("kid")
+    await stack.db.enqueue(
+        "UPDATE users SET child_protection_enabled=1 WHERE user_id=?", (kid.user_id,)
+    )
+    svc = _svc(stack, _Gates(peers=[_peer("inst-b", version=_V66)], gfss={"g1"}))
+    await _received(stack, "m-paired", author="u-b", via="household", origin="inst-b")
+    await _received(stack, "m-gfs", author="u-far", via="gfs", gfs="g1")
+    await svc.save_moment("m-paired", user_id=kid.user_id)
+    with pytest.raises(MomentNotFoundError):
+        await svc.save_moment("m-gfs", user_id=kid.user_id)
+
+
+async def test_a_protected_accounts_moment_can_be_saved(stack):
+    """Sign-off 5: a child's moment is saved like any moment."""
+    me = await stack.provision("me")
+    kid = await stack.provision("kid")
+    await stack.db.enqueue(
+        "UPDATE users SET child_protection_enabled=1 WHERE user_id=?", (kid.user_id,)
+    )
+    m = await stack.moment_svc.create_moment(author_user_id=kid.user_id, content="hi")
+    await stack.moment_svc.save_moment(m.id, user_id=me.user_id)
+    assert [
+        s.moment.id for s in await stack.moment_svc.list_saved(user_id=me.user_id)
+    ] == [m.id]
+
+
+async def test_save_flags_cache_one_lookup_per_origin(stack):
+    me = await stack.provision("me")
+    gates = _Gates(peers=[_peer("inst-b", version=_V66)])
+    svc = _svc(stack, gates)
+    rows = [
+        await _received(stack, f"m-{i}", author="u-b", via="household")
+        for i in range(3)
+    ]
+    await svc.save_moment("m-1", user_id=me.user_id)
+    gates.peer_calls.clear()
+    flags = await svc.save_flags(rows, viewer_user_id=me.user_id)
+    assert flags == {"m-0": (False, True), "m-1": (True, True), "m-2": (False, True)}
+    assert gates.peer_calls == ["inst-b"]
+
+
+async def test_unsave_is_idempotent_and_needs_no_read(stack):
+    me = await stack.provision("me")
+    await _received(stack, "m-1", author="u-b", via="household")
+    svc = _svc(stack, _Gates(peers=[_peer("inst-b", version=_V66)]))
+    await svc.save_moment("m-1", user_id=me.user_id)
+    await svc.unsave_moment("m-1", user_id=me.user_id)
+    await svc.unsave_moment("m-1", user_id=me.user_id)
+    await svc.unsave_moment("m-unknown", user_id=me.user_id)
+    assert await svc.list_saved(user_id=me.user_id) == []
+
+
+async def test_a_saved_moment_outlives_expiry_until_the_author_deletes(stack):
+    me = await stack.provision("me")
+    await _received(stack, "m-1", author="u-b", via="household")
+    gates = _Gates(peers=[_peer("inst-b", version=_V66)])
+    svc = _svc(stack, gates)
+    await svc.save_moment("m-1", user_id=me.user_id)
+    await stack.db.enqueue(
+        "UPDATE moments SET expires_at=? WHERE id='m-1'",
+        ((datetime.now(UTC) - timedelta(days=1)).isoformat(),),
+    )
+    assert await svc.expire_due() == 0
+    assert (await svc.get_for_viewer("m-1", me.user_id)).id == "m-1"
+    # Already saved: saving again is fine, even if the household went quiet.
+    gates.peers.clear()
+    await svc.save_moment("m-1", user_id=me.user_id)
+    await stack.moment_repo.tombstone(
+        "m-1",
+        author_user_id="u-b",
+        origin_instance_id="inst-b",
+        expires_at=(datetime.now(UTC) + timedelta(days=30)).isoformat(),
+    )
+    assert await svc.list_saved(user_id=me.user_id) == []
+    with pytest.raises(MomentNotFoundError):
+        await svc.get_for_viewer("m-1", me.user_id)

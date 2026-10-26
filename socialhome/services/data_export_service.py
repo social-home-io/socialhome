@@ -65,6 +65,9 @@ EXPORTABLE_QUERIES: tuple[tuple[str, str], ...] = (
     ("feed_posts", "WHERE author = ?"),
     ("feed_comments", "WHERE author = ?"),
     ("saved_posts", "WHERE user_id = ?"),
+    # Which moments the subject saved (decision 6b) — ids and when; the
+    # moments themselves are other people's content.
+    ("moment_saves", "WHERE user_id = ?"),
     ("space_post_comments", "WHERE author = ?"),
     # The subject's own submissions to space moderation queues (§4.3) —
     # pending, decided or expired; content NULLed by the 7-day purge.

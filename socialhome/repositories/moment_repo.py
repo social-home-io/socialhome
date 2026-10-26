@@ -9,6 +9,11 @@ Manages two tables:
   ``conversation_messages.sender_user_id``).
 * ``moment_reactions`` — one row per (moment_id, reactor_user_id),
   holding the current emoji.
+* ``moment_saves`` — one row per (user_id, moment_id): a person keeps
+  someone's moment past its expiry (decision 6b). The database drops a
+  save when the moment is deleted or the person unfollows its author
+  (migration 0124's triggers);
+  :meth:`SqliteMomentRepo.drop_saves_from_origin` drops them on unpair.
 
 A delete never drops the ``moments`` row: it becomes a **tombstone**
 (content, media, tags and reactions wiped, ``deleted_at`` set) that lives
@@ -26,6 +31,7 @@ non-followers, and apply the
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
@@ -33,6 +39,7 @@ from ..domain.moment import (
     Moment,
     MomentReaction,
     MomentTombstone,
+    SavedMoment,
     extract_hashtags,
     normalize_hashtag,
 )
@@ -58,10 +65,22 @@ _NOT_GFS_FOR_PROTECTED_SQL = """
 #: copy at the signed ``expires_at`` as before; nothing on the wire changes.
 _OWN_ARCHIVED_SQL = "(m.received_via = 'self' AND m.deleted_at IS NULL)"
 
+#: Somebody here saved the moment (decision 6b). A tombstone never has a
+#: save (migration 0124 drops them on delete).
+_SAVED_BY_ANYONE_SQL = (
+    "EXISTS (SELECT 1 FROM moment_saves AS s WHERE s.moment_id = m.id)"
+)
+
 #: What :meth:`SqliteMomentRepo.prune_expired` removes: every row past its
-#: ``expires_at`` except a live moment kept in its author's archive. A
-#: tombstone (own or not) still goes at expiry.
-_PRUNABLE_SQL = "datetime(m.expires_at) < datetime('now') AND NOT " + _OWN_ARCHIVED_SQL
+#: ``expires_at`` except a live moment kept in its author's archive or
+#: saved by someone here (kept, with its file, while any save of it
+#: exists). A tombstone (own or not) still goes at expiry.
+_PRUNABLE_SQL = (
+    "datetime(m.expires_at) < datetime('now') AND NOT "
+    + _OWN_ARCHIVED_SQL
+    + " AND NOT "
+    + _SAVED_BY_ANYONE_SQL
+)
 
 #: The viewer follows the moment's author — on a paired household
 #: (``user_follows``) or through a GFS (``moment_public_follows``): both are
@@ -108,25 +127,63 @@ _VISIBLE_SQL = f"""
 #: but the trailing hop cap).
 _VISIBLE_VIEWER_BINDS = _VISIBLE_SQL.count("?") - 1
 
+#: A moment the viewer saved (decision 6b): readable past the 24 h window
+#: and past its expiry, for them only — still never across a personal or
+#: guardian block (§CP.F2), never a GFS-delivered one for a protected
+#: account (§CP.R), within the viewer's ``max_hops``. Binds the viewer
+#: :data:`_SAVED_VIEWER_BINDS` times, then the hop cap.
+_SAVED_READABLE_SQL = f"""
+    EXISTS (
+        SELECT 1 FROM moment_saves AS s
+         WHERE s.moment_id = m.id AND s.user_id = ?
+    )
+    AND {_NOT_GFS_FOR_PROTECTED_SQL}
+    AND m.author_user_id NOT IN (
+        SELECT blocked_user_id FROM user_blocks WHERE blocker_user_id = ?
+    )
+    AND m.author_user_id NOT IN ({GUARDIAN_BLOCK_COUNTERPARTS_SQL})
+    AND m.deleted_at IS NULL
+    AND m.hop_count <= ?
+"""
+
+#: How many times :data:`_SAVED_READABLE_SQL` binds the viewer.
+_SAVED_VIEWER_BINDS = _SAVED_READABLE_SQL.count("?") - 1
+
 #: What one viewer may read: their own live moment (one written here also
-#: past its expiry — :data:`_OWN_ARCHIVED_SQL`), or anything the inbox
-#: shows them (:data:`_VISIBLE_SQL`). The detail read, a thread's replies
-#: and its reply count share it, so none shows what the inbox hides.
-#: Bind with :func:`_readable_params`.
+#: past its expiry — :data:`_OWN_ARCHIVED_SQL`), anything the inbox shows
+#: them (:data:`_VISIBLE_SQL`), or a moment they saved
+#: (:data:`_SAVED_READABLE_SQL`). The detail read uses it, so it never
+#: shows what the inbox and the Saved list hide. Bind with
+#: :func:`_readable_params`.
 _READABLE_SQL = f"""
     (
       (m.author_user_id = ? AND m.deleted_at IS NULL
        AND ({_OWN_ARCHIVED_SQL} OR datetime(m.expires_at) > datetime('now')))
       OR ({_VISIBLE_SQL})
+      OR ({_SAVED_READABLE_SQL})
     )
 """
 
 
+def _capped_hops(max_hops: int) -> int:
+    """``max_hops`` clamped to the wire cap [1, 3] (below 1 would hide even
+    the viewer's own)."""
+    return max(1, min(int(max_hops), 3))
+
+
+def _saved_params(viewer_user_id: str, max_hops: int) -> tuple:
+    """Bindings for :data:`_SAVED_READABLE_SQL`."""
+    return (*(viewer_user_id,) * _SAVED_VIEWER_BINDS, _capped_hops(max_hops))
+
+
 def _readable_params(viewer_user_id: str, max_hops: int) -> tuple:
-    """Bindings for :data:`_READABLE_SQL`; ``max_hops`` clamped to the
-    wire cap [1, 3] (below 1 would hide even the viewer's own)."""
-    capped_hops = max(1, min(int(max_hops), 3))
-    return (viewer_user_id, *(viewer_user_id,) * _VISIBLE_VIEWER_BINDS, capped_hops)
+    """Bindings for :data:`_READABLE_SQL`."""
+    return (
+        viewer_user_id,
+        *(viewer_user_id,) * _VISIBLE_VIEWER_BINDS,
+        _capped_hops(max_hops),
+        *_saved_params(viewer_user_id, max_hops),
+    )
 
 
 #: What one viewer may read of a *thread*: the inbox rule without its
@@ -269,6 +326,24 @@ class AbstractMomentRepo(Protocol):
         self, author_user_id: str | None = None
     ) -> list[Moment]: ...
     async def clear_media(self, moment_id: str) -> bool: ...
+
+    # Saves (decision 6b) -------------------------------------------------
+    async def add_save(self, user_id: str, moment_id: str) -> bool: ...
+    async def remove_save(self, user_id: str, moment_id: str) -> None: ...
+    async def saved_ids(self, user_id: str, moment_ids: list[str]) -> set[str]: ...
+    async def list_saved(
+        self,
+        user_id: str,
+        *,
+        before: str | None = None,
+        limit: int = 50,
+        max_hops: int = 3,
+    ) -> list[SavedMoment]: ...
+    async def list_saved_media(
+        self, user_id: str | None = None
+    ) -> list[SavedMoment]: ...
+    async def clear_saved_media(self, moment_id: str, user_id: str) -> bool: ...
+    async def drop_saves_from_origin(self, instance_id: str) -> int: ...
 
 
 class SqliteMomentRepo:
@@ -867,13 +942,143 @@ class SqliteMomentRepo:
         )
         return changed > 0
 
+    # ── Saves (decision 6b) ────────────────────────────────────────────
+
+    async def add_save(self, user_id: str, moment_id: str) -> bool:
+        """*user_id* keeps *moment_id*. ``True`` iff the save exists
+        afterwards — a repeat keeps the first ``saved_at``; an unknown id or
+        a tombstone is never saved (``False``). The caller checks that the
+        person may read the moment and that a delete can reach it."""
+        await self._db.enqueue(
+            "INSERT OR IGNORE INTO moment_saves(user_id, moment_id, saved_at)"
+            " SELECT ?, id, ? FROM moments WHERE id = ? AND deleted_at IS NULL",
+            (user_id, datetime.now(UTC).isoformat(), moment_id),
+        )
+        return bool(await self.saved_ids(user_id, [moment_id]))
+
+    async def remove_save(self, user_id: str, moment_id: str) -> None:
+        """Forget *user_id*'s save of *moment_id* (no-op when absent). The
+        row then goes at the next prune if it is past expiry and nobody
+        else keeps it."""
+        await self._db.enqueue(
+            "DELETE FROM moment_saves WHERE user_id = ? AND moment_id = ?",
+            (user_id, moment_id),
+        )
+
+    async def saved_ids(self, user_id: str, moment_ids: list[str]) -> set[str]:
+        """Which of *moment_ids* *user_id* saved — one query per page."""
+        if not moment_ids:
+            return set()
+        placeholders = ",".join("?" for _ in moment_ids)
+        rows = await self._db.fetchall(
+            "SELECT moment_id FROM moment_saves"
+            f" WHERE user_id = ? AND moment_id IN ({placeholders})",
+            (user_id, *moment_ids),
+        )
+        return {r["moment_id"] for r in rows}
+
+    async def list_saved(
+        self,
+        user_id: str,
+        *,
+        before: str | None = None,
+        limit: int = 50,
+        max_hops: int = 3,
+    ) -> list[SavedMoment]:
+        """*user_id*'s saved moments they may still read
+        (:data:`_SAVED_READABLE_SQL`), newest save first. ``before`` is the
+        ``saved_at`` of the last row of the previous page."""
+        limit = max(1, min(int(limit), 100))
+        rows = await self._db.fetchall(
+            f"""
+            SELECT m.*, sv.saved_at AS sv_saved_at
+              FROM moment_saves AS sv
+              JOIN moments AS m ON m.id = sv.moment_id
+             WHERE sv.user_id = ?
+               AND {_SAVED_READABLE_SQL}
+               AND (? IS NULL OR sv.saved_at < ?)
+             ORDER BY sv.saved_at DESC
+             LIMIT ?
+            """,
+            (user_id, *_saved_params(user_id, max_hops), before, before, limit),
+        )
+        return _saved_rows(rows_to_dicts(rows), user_id)
+
+    async def list_saved_media(self, user_id: str | None = None) -> list[SavedMoment]:
+        """Saves of moments that hold a file and weren't written here — one
+        saver's, or (``None``) everyone's — grouped by saver, oldest save
+        first: the order the per-person archive cap drops saved pictures
+        in. A housemate's moment counts toward its author's archive, not the
+        saver's, so it is left out."""
+        rows = await self._db.fetchall(
+            """
+            SELECT m.*, sv.user_id AS sv_user_id, sv.saved_at AS sv_saved_at
+              FROM moment_saves AS sv
+              JOIN moments AS m ON m.id = sv.moment_id
+             WHERE m.received_via != 'self' AND m.media_url IS NOT NULL
+               AND m.deleted_at IS NULL
+               AND (? IS NULL OR sv.user_id = ?)
+             ORDER BY sv.user_id ASC, sv.saved_at ASC
+            """,
+            (user_id, user_id),
+        )
+        return _saved_rows(rows_to_dicts(rows))
+
+    async def clear_saved_media(self, moment_id: str, user_id: str) -> bool:
+        """Drop the file reference of a moment *user_id* saved (its text
+        stays) — only past its expiry (others who still see it keep the
+        picture) and only when no one else here saved it (one person's cap
+        never takes another's picture). ``True`` iff a row changed; the
+        caller removes the file once nothing references it."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE moments AS m SET media_url = NULL, media_type = NULL,"
+            " duration_ms = NULL"
+            " WHERE m.id = ? AND m.received_via != 'self'"
+            " AND m.media_url IS NOT NULL AND m.deleted_at IS NULL"
+            " AND datetime(m.expires_at) < datetime('now')"
+            " AND EXISTS (SELECT 1 FROM moment_saves"
+            "  WHERE moment_id = m.id AND user_id = ?)"
+            " AND NOT EXISTS (SELECT 1 FROM moment_saves"
+            "  WHERE moment_id = m.id AND user_id != ?)",
+            (moment_id, user_id, user_id),
+        )
+        return changed > 0
+
+    async def drop_saves_from_origin(self, instance_id: str) -> int:
+        """Drop every save of a moment that came from the household
+        *instance_id* over the mesh (``received_via = 'household'``, by its
+        ``origin_instance_id``) — on unpair (sign-off 3): that household's
+        later deletes can no longer reach the copy. A moment stores only
+        its origin, not the peer that relayed it; saving is offered only
+        when the origin itself is a paired household, so the origin is the
+        household it came through. Returns how many saves went."""
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM moment_saves WHERE moment_id IN ("
+            " SELECT id FROM moments"
+            "  WHERE origin_instance_id = ? AND received_via = 'household')",
+            (instance_id,),
+        )
+
+
+def _saved_rows(rows: list[dict], user_id: str | None = None) -> list[SavedMoment]:
+    """``SELECT m.*, sv_saved_at[, sv_user_id]`` rows → :class:`SavedMoment`."""
+    out: list[SavedMoment] = []
+    for row in rows:
+        saved_at = str(row.pop("sv_saved_at"))
+        saver = str(row.pop("sv_user_id", None) or user_id or "")
+        moment = _row_to_moment(row)
+        if moment is not None:
+            out.append(SavedMoment(moment=moment, user_id=saver, saved_at=saved_at))
+    return out
+
 
 def _tombstone_rows(conn, where: str, params: tuple) -> int:
     """Wipe the live moments matching ``where`` down to tombstones.
 
     Runs inside :meth:`AsyncDatabase.transact`. Keeps the id, author, origin
     and ``expires_at`` (what a tombstone must remember); drops content,
-    media, tags and reactions; detaches replies (``parent_moment_id`` →
+    media, tags, reactions and every save (migration 0124's trigger, in this
+    same transaction); detaches replies (``parent_moment_id`` →
     NULL, as the old hard delete's ``ON DELETE SET NULL`` did). Returns the
     number of live moments tombstoned. ``where`` is a fixed column
     predicate from this module, never caller input.

@@ -1543,9 +1543,11 @@ class FederationCapability:
 
     #: v_66 — a moment's delete reaches every copy, even later: 30-day
     #: outbox retries on the mesh, signed delete certificates kept 30 days on
-    #: a GFS that proved ``moment_delete_log``. Nothing is gated on it
-    #: between households (the GFS capability gates the certificate); it
-    #: names the version that keeps deletes queued and reads certificates.
+    #: a GFS that proved ``moment_delete_log``. Nothing on the wire is gated
+    #: on it (the GFS capability gates the certificate); it names the
+    #: version that keeps deletes queued and reads certificates — and so,
+    #: locally, the paired origin household whose moments a person may save
+    #: (decision 6b, ``MomentService.can_save``).
     MIN_FOR_LATE_MOMENT_DELETES = 66
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
