@@ -1,9 +1,9 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { render, waitFor } from '@testing-library/preact'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/preact'
 import type { MomentBoot } from './moment_link'
-import { PublicMomentViewer } from './public_moment'
+import { MomentVideo, PublicMomentViewer } from './public_moment'
 import { b64urlDecode } from './stream_seal'
 
 const V = JSON.parse(
@@ -43,7 +43,11 @@ beforeEach(() => {
   URL.revokeObjectURL = vi.fn()
 })
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+})
 
 describe('PublicMomentViewer', () => {
   it('opens the moment and its picture from ciphertext only', async () => {
@@ -83,5 +87,82 @@ describe('PublicMomentViewer', () => {
       <PublicMomentViewer boot={{ ...BOOT, itemKey: new Uint8Array(32) }} />,
     )
     await waitFor(() => expect(container.textContent).toContain('incomplete or damaged'))
+  })
+
+  it('says a moment the GFS answers 410 for is no longer available', async () => {
+    const real = globalThis.fetch as unknown as (u: string, i?: RequestInit) => Promise<Response>
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) =>
+      url.endsWith(V.share_id) ? new Response('', { status: 410 }) : real(url, init)))
+    const { container } = render(<PublicMomentViewer boot={BOOT} />)
+    await waitFor(() => expect(container.textContent).toContain('no longer available'))
+    expect(container.querySelector('button')).toBeNull()
+  })
+
+  it.each([
+    ['a server error', () => new Response('', { status: 502 })],
+    ['a rate limit', () => new Response('', { status: 429 })],
+    ['no network', () => { throw new TypeError('Failed to fetch') }],
+  ])('on %s says it can’t reach the GFS — not that the link is broken — and retries', async (_n, fail) => {
+    const real = globalThis.fetch as unknown as (u: string, i?: RequestInit) => Promise<Response>
+    let down = true
+    vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) =>
+      down ? fail() : real(url, init)))
+    const { container } = render(<PublicMomentViewer boot={BOOT} />)
+    await waitFor(() => expect(container.textContent).toContain('Can’t reach gfs.example.org'))
+    expect(container.textContent).toContain('The link itself looks fine.')
+    expect(container.textContent).not.toMatch(/incomplete|no longer available/)
+    const button = screen.getByRole('button', { name: 'Try again' })
+    await waitFor(() => expect(document.activeElement).toBe(button))
+    down = false
+    fireEvent.click(button)
+    await waitFor(() => expect(container.textContent).toContain('Bees swarmed the plum tree'))
+  })
+
+  it('a link naming a blob the GFS refuses outright is incomplete, not unreachable', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 400 })))
+    const { container } = render(<PublicMomentViewer boot={BOOT} />)
+    await waitFor(() => expect(container.textContent).toContain('incomplete or damaged'))
+    expect(container.querySelector('button')).toBeNull()
+  })
+})
+
+describe('MomentVideo', () => {
+  beforeEach(() => {
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
+  })
+
+  it('starts muted so autoplay works, with Pause and Unmute buttons instead of native controls', () => {
+    const { container } = render(<MomentVideo src="blob:v" poster={null} />)
+    const video = container.querySelector('video')!
+    expect(video.hasAttribute('autoplay')).toBe(true)
+    expect(video.hasAttribute('playsinline')).toBe(true)
+    expect(video.hasAttribute('muted')).toBe(true)
+    expect(video.muted).toBe(true)
+    expect(video.hasAttribute('controls')).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Unmute' }))
+    expect(video.muted).toBe(false)
+    // One video: nothing to step through.
+    expect(screen.queryByRole('button', { name: 'Next' })).toBeNull()
+  })
+
+  it('follows the video: Play once it pauses or ends, and the keyboard toggles it', () => {
+    const pause = vi.spyOn(HTMLMediaElement.prototype, 'pause')
+    const play = vi.spyOn(HTMLMediaElement.prototype, 'play')
+    const { container } = render(<MomentVideo src="blob:v" poster={null} />)
+    const video = container.querySelector('video')!
+    fireEvent(video, new Event('play'))
+    fireEvent.click(screen.getByRole('button', { name: 'Pause' }))
+    expect(pause).toHaveBeenCalled()
+    fireEvent(video, new Event('pause'))
+    expect(screen.getByRole('button', { name: 'Play' })).toBeTruthy()
+    play.mockClear()
+    fireEvent.keyDown(document.body, { key: 'k' })
+    expect(play).toHaveBeenCalled()
+    fireEvent(video, new Event('play'))
+    fireEvent(video, new Event('ended'))
+    expect(screen.getByRole('button', { name: 'Play' })).toBeTruthy()
+    fireEvent.keyDown(document.body, { key: 'm' })
+    expect(video.muted).toBe(false)
   })
 })

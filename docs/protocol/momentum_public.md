@@ -1291,8 +1291,20 @@ never sends to a server:
   SHA-256 address, and opens them in the browser with WebCrypto
   (`client/gfs/moment_seal.ts`; a golden vector,
   `tests/fixtures/moment_share_vector.json`, pins the TypeScript and Python
-  shapes together). A missing blob reads "no longer available"; anything that
-  doesn't open reads "incomplete or damaged". Nothing is shown in the clear.
+  shapes together). Nothing is shown in the clear. Only the GFS is ever
+  asked here, never the household, so the page can tell its failures apart
+  without becoming a presence oracle:
+  * a missing or expired blob (`404` / `410`): "This moment is no longer
+    available";
+  * no answer from the GFS (no network, `5xx`, `408`, `429`): "Can't reach
+    <GFS host>. Check your connection. The link itself looks fine.", with
+    *Try again*;
+  * anything that doesn't open, or any other refusal: "This link is
+    incomplete or damaged".
+
+  A video starts muted (so the browser lets it autoplay) under the
+  highlight viewer's control bar: pause / play and mute / unmute,
+  Space / K / M (see highlights_public.md, "Playback controls").
 * **The GFS a link names always holds the moment's file.** A GFS that
   didn't take it at publish (registered later, or refused it then) gets it
   when the link is made: sealed again under the same item key — a new blob,

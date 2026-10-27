@@ -58,5 +58,6 @@ html[data-page=doc] #root{display:block;height:auto;min-height:100vh;}
 .page-person .page-cta{margin:16px 0 4px;}
 .page-status{padding:40px 16px;text-align:center;color:var(--ink-soft);}
 .page .highlight-error{color:var(--ink);}
-.page .viewer-retry{color:var(--ink);border-color:var(--hair);}
+.page .viewer-retry{color:var(--ink);border-color:var(--hair);background:transparent;}
+.page .viewer-retry:hover{border-color:var(--ink);background:transparent;}
 .page .viewer-retry:focus-visible{outline-color:var(--focus);}

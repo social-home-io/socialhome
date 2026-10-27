@@ -9,7 +9,7 @@
 @font-face{font-family:'SH Color Emoji';src:local('Apple Color Emoji'),local('Segoe UI Emoji'),local('Noto Color Emoji');unicode-range:U+200D,U+20E3,U+2194-2199,U+21A9-21AA,U+231A-231B,U+2328,U+23CF,U+23E9-23F3,U+23F8-23FA,U+24C2,U+25AA-25AB,U+25B6,U+25C0,U+25FB-25FE,U+2600-27BF,U+2934-2935,U+2B05-2B07,U+2B1B-2B1C,U+2B50,U+2B55,U+3030,U+303D,U+3297,U+3299,U+FE0F,U+1F000-1FAFF,U+E0020-E007F;font-display:swap;}
 html,body{margin:0;padding:0;background:#111;color:#eee;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'SH Color Emoji',system-ui,sans-serif;height:100%;}
 #root{height:100vh;display:flex;}
-.highlight-viewer{display:flex;flex-direction:column;width:100%;}
+.highlight-viewer{display:flex;flex-direction:column;width:100%;max-width:560px;margin:0 auto;}
 .highlight-author{display:flex;align-items:center;gap:12px;padding:12px 12px 0;}
 .highlight-author-pic{width:48px;height:48px;border-radius:50%;flex:none;object-fit:cover;background:#333;}
 .highlight-author-initials{display:flex;align-items:center;justify-content:center;font-weight:600;color:#ddd;}
@@ -17,7 +17,7 @@ html,body{margin:0;padding:0;background:#111;color:#eee;font-family:-apple-syste
 .highlight-author-name{margin:0;font-weight:600;overflow-wrap:anywhere;}
 .highlight-author-bio{margin:2px 0 0;color:#bbb;font-size:.9em;line-height:1.4;overflow-wrap:anywhere;}
 .progress{display:flex;gap:4px;padding:12px;}
-.progress .seg{flex:1;height:3px;background:rgba(255,255,255,.2);border-radius:2px;}
+.progress .seg{flex:1;height:3px;background:rgba(255,255,255,.2);border-radius:2px;position:relative;overflow:hidden;}
 .progress .seg.done{background:rgba(255,255,255,.6);}
 .progress .seg.active{background:#fff;}
 .stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;padding:0 12px;position:relative;}
@@ -25,8 +25,8 @@ html,body{margin:0;padding:0;background:#111;color:#eee;font-family:-apple-syste
 .caption{position:absolute;bottom:24px;padding:8px 14px;background:rgba(0,0,0,.5);border-radius:8px;max-width:80%;}
 .highlight-error,.highlight-end{padding:24px;text-align:center;width:100%;align-self:center;}
 .highlight-error p{margin:0 0 16px;}
-.viewer-retry{min-height:40px;padding:8px 18px;border-radius:999px;border:1px solid rgba(255,255,255,.35);background:transparent;color:#eee;font:inherit;cursor:pointer;}
-.viewer-retry:hover{border-color:#fff;}
+.viewer-retry{min-height:44px;padding:10px 22px;border-radius:999px;border:1px solid #fff;background:#fff;color:#111;font:inherit;font-weight:600;cursor:pointer;}
+.viewer-retry:hover{background:#ddd;border-color:#ddd;}
 .viewer-retry:focus-visible{outline:2px solid #fff;outline-offset:2px;}
 .status{color:#aaa;font-size:.9em;text-align:center;}
 .highlight-transport{margin:8px 12px 12px;color:#aaa;font-size:.8em;text-align:center;}
@@ -34,3 +34,21 @@ html,body{margin:0;padding:0;background:#111;color:#eee;font-family:-apple-syste
 .highlight-incomplete p{margin:0;}
 .highlight-end>p{margin:0;}
 .moment-text{margin:12px;white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.5;}
+.viewer-title{font-weight:600;font-size:1.15em;}
+.viewer-note{color:#aaa;font-size:.85em;}
+.highlight-error .viewer-note{margin:12px 0 0;}
+.viewer-controls{display:flex;align-items:center;justify-content:center;gap:12px;padding:12px 12px 0;}
+.viewer-ctl{display:inline-flex;align-items:center;justify-content:center;width:48px;height:48px;padding:0;border-radius:50%;border:1px solid rgba(255,255,255,.35);background:rgba(255,255,255,.08);color:#fff;cursor:pointer;}
+.viewer-ctl:hover{border-color:#fff;}
+.viewer-ctl-main{width:56px;height:56px;background:#fff;border-color:#fff;color:#111;}
+.viewer-ctl:focus-visible,.viewer-link:focus-visible{outline:2px solid #fff;outline-offset:3px;}
+[dir=rtl] .viewer-flip{transform:scaleX(-1);}
+.progress .seg.active.filling{background:rgba(255,255,255,.2);}
+.seg-fill{position:absolute;inset:0;background:#fff;transform-origin:left center;animation:viewer-fill linear forwards;}
+[dir=rtl] .seg-fill{transform-origin:right center;}
+@keyframes viewer-fill{from{transform:scaleX(0);}to{transform:scaleX(1);}}
+@media (prefers-reduced-motion:reduce){.seg-fill{animation:none;}}
+.highlight-transport-row{display:flex;flex-wrap:wrap;align-items:center;justify-content:center;gap:0 6px;margin:4px 12px 8px;color:#aaa;font-size:.8em;}
+.highlight-transport-row .highlight-transport{margin:0;}
+.viewer-link{min-height:44px;padding:0 4px;border:0;background:none;color:#eee;font:inherit;text-decoration:underline;text-underline-offset:2px;cursor:pointer;}
+.highlight-transport-info{margin:0 16px 12px;color:#ccc;font-size:.85em;text-align:center;line-height:1.45;}
