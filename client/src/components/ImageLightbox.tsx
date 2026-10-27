@@ -17,6 +17,7 @@ import { signal } from '@preact/signals'
 import { showToast } from './Toast'
 import { t, formatLocale } from '@/i18n/i18n'
 import { safeHref } from '@/utils/safeHref'
+import { formatDayKey } from '@/utils/calendar'
 
 export interface LightboxItem {
   id?:            string
@@ -202,11 +203,16 @@ export function ImageLightbox() {
           {item.caption && <strong>{item.caption}</strong>}
           {item.taken_at && (
             <time class="sh-muted">
-              {new Date(item.taken_at).toLocaleDateString(formatLocale(), {
-                year:  'numeric',
-                month: 'short',
-                day:   'numeric',
-              })}
+              {/* ``taken_at`` is the camera's calendar day (``YYYY-MM-DD``):
+                * labelled as that day in every time zone, never as UTC
+                * midnight shifted to the day before west of UTC. */}
+              {/^\d{4}-\d{2}-\d{2}$/.test(item.taken_at)
+                ? formatDayKey(item.taken_at, { year: 'numeric', month: 'short', day: 'numeric' })
+                : new Date(item.taken_at).toLocaleDateString(formatLocale(), {
+                  year:  'numeric',
+                  month: 'short',
+                  day:   'numeric',
+                })}
             </time>
           )}
           {state.items.length > 1 && (
