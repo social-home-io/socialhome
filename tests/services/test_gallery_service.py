@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import io
 import pathlib
 
 import pytest
+from PIL import Image
 
 from socialhome.config import Config
 from socialhome.crypto import (
@@ -34,6 +36,7 @@ from socialhome.services.gallery_service import (
     GalleryNotFoundError,
     GalleryPermissionError,
     GalleryService,
+    _extract_exif_date_sync,
 )
 from socialhome.services.media_transcode_service import MediaTranscodeService
 
@@ -762,3 +765,138 @@ async def test_a_follower_creates_no_album_and_uploads_nothing(env):
         )
     # A follower still reads the space gallery.
     assert (await env.get_album(a.id, actor_user_id="e-id")).id == a.id
+
+
+# ─── EXIF "taken at" date ────────────────────────────────────────────────
+
+#: EXIF tag ids, spelled out so the tests read like the EXIF spec.
+_EXIF_IFD = 0x8769
+_GPS_IFD = 0x8825
+_DATETIME = 0x0132
+_DATETIME_ORIGINAL = 0x9003
+_DATETIME_DIGITIZED = 0x9004
+_OFFSET_TIME_ORIGINAL = 0x9011
+
+
+def _image_bytes(
+    *,
+    fmt: str = "JPEG",
+    exif_ifd: dict[int, str] | None = None,
+    base: dict[int, str] | None = None,
+    gps: bool = False,
+) -> bytes:
+    """A real image file whose EXIF carries the given tags.
+
+    ``exif_ifd`` lands in the Exif sub-IFD (0x8769) — where cameras and
+    phones write DateTimeOriginal — and ``base`` in IFD0.
+    """
+    exif = Image.Exif()
+    for tag, value in (base or {}).items():
+        exif[tag] = value
+    if exif_ifd:
+        sub = exif.get_ifd(_EXIF_IFD)
+        for tag, value in exif_ifd.items():
+            sub[tag] = value
+    if gps:
+        exif.get_ifd(_GPS_IFD).update({1: "N", 2: (52.0, 22.0, 1.0)})
+    buf = io.BytesIO()
+    Image.new("RGB", (16, 16), (10, 20, 30)).save(buf, format=fmt, exif=exif.tobytes())
+    return buf.getvalue()
+
+
+def test_a_camera_jpeg_dates_from_the_exif_sub_ifd():
+    data = _image_bytes(exif_ifd={_DATETIME_ORIGINAL: "2024:05:17 21:45:03"})
+    # The tag really sits in the sub-IFD, not in IFD0 — the camera shape.
+    with Image.open(io.BytesIO(data)) as img:
+        assert _DATETIME_ORIGINAL not in img.getexif()
+    assert _extract_exif_date_sync(data) == "2024-05-17"
+
+
+def test_a_heic_photo_dates_from_the_exif_sub_ifd():
+    data = _image_bytes(
+        fmt="HEIF", exif_ifd={_DATETIME_ORIGINAL: "2023:12:31 08:00:00"}
+    )
+    with Image.open(io.BytesIO(data)) as img:
+        assert img.format == "HEIF"
+    assert _extract_exif_date_sync(data) == "2023-12-31"
+
+
+def test_digitized_answers_when_original_is_missing():
+    data = _image_bytes(exif_ifd={_DATETIME_DIGITIZED: "2022:02:03 10:11:12"})
+    assert _extract_exif_date_sync(data) == "2022-02-03"
+
+
+def test_original_wins_over_digitized_and_the_file_date():
+    data = _image_bytes(
+        exif_ifd={
+            _DATETIME_ORIGINAL: "2021:06:01 12:00:00",
+            _DATETIME_DIGITIZED: "2021:06:02 12:00:00",
+        },
+        base={_DATETIME: "2025:01:01 00:00:00"},
+    )
+    assert _extract_exif_date_sync(data) == "2021-06-01"
+
+
+def test_the_ifd0_file_date_is_the_last_fallback():
+    data = _image_bytes(base={_DATETIME: "2020:07:04 09:30:00"})
+    assert _extract_exif_date_sync(data) == "2020-07-04"
+
+
+def test_the_camera_day_is_kept_whatever_its_offset():
+    """A late-evening shot stays on the photographer's calendar day: the
+    offset would move it to the next day in UTC, so it is not applied."""
+    data = _image_bytes(
+        exif_ifd={
+            _DATETIME_ORIGINAL: "2024:05:17 23:30:00",
+            _OFFSET_TIME_ORIGINAL: "-07:00",
+        }
+    )
+    assert _extract_exif_date_sync(data) == "2024-05-17"
+
+
+def test_no_exif_gives_no_date():
+    assert _extract_exif_date_sync(_image_bytes()) is None
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["0000:00:00 00:00:00", "    :  :     :  :  ", "2024:13:40 10:00:00", "garbage"],
+)
+def test_a_malformed_date_gives_no_date(value):
+    data = _image_bytes(exif_ifd={_DATETIME_ORIGINAL: value})
+    assert _extract_exif_date_sync(data) is None
+
+
+def test_a_malformed_original_falls_through_to_a_valid_digitized():
+    data = _image_bytes(
+        exif_ifd={
+            _DATETIME_ORIGINAL: "0000:00:00 00:00:00",
+            _DATETIME_DIGITIZED: "2019:09:09 09:09:09",
+        }
+    )
+    assert _extract_exif_date_sync(data) == "2019-09-09"
+
+
+def test_bytes_that_are_no_image_give_no_date():
+    assert _extract_exif_date_sync(b"not an image") is None
+
+
+async def test_an_uploaded_camera_photo_keeps_its_day_and_no_exif(env):
+    """End to end: the day is read before ImageProcessor strips EXIF; the
+    stored files carry no EXIF at all (no time, no GPS)."""
+    album = await env.create_album(space_id=None, owner_user_id="a-id", name="Trip")
+    data = _image_bytes(exif_ifd={_DATETIME_ORIGINAL: "2024:05:17 21:45:03"}, gps=True)
+    item = await env.upload_item(
+        album.id,
+        data=data,
+        content_type="image/jpeg",
+        caption=None,
+        uploader_user_id="a-id",
+    )
+    assert item.taken_at == "2024-05-17"
+    media_dir = pathlib.Path(env._media_dir)
+    for url in (item.url, item.thumbnail_url):
+        stored = (media_dir / url.rsplit("/", 1)[1]).read_bytes()
+        with Image.open(io.BytesIO(stored)) as img:
+            assert not img.getexif()
+            assert "exif" not in img.info
