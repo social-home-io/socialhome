@@ -183,6 +183,9 @@
   "space.create.discovery": "Section heading: settings that help strangers find a public space (category, minimum age).",
   "space.category.general": "Discovery category for a public space. Short; shown in a dropdown and on space cards.",
   "space.category.local": "Discovery category: spaces about a town or neighborhood.",
+  "space.category.community": "Discovery category: clubs, groups and volunteering that are not tied to one place (unlike space.category.local).",
+  "space.category.non_profit": "Discovery category: associations, charities, registered clubs (German Verein, French association).",
+  "space.category.politics_activism": "Discovery category: civic groups, campaigns, political discussion.",
 
   "space.members.count": "Member list heading for 0 or 2+ members. {n} = number. Singular form is space.members.count_one.",
   "space.members.count_one": "Member list heading for exactly one member (French also uses it for 0). {n} = number.",

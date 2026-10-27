@@ -46,16 +46,26 @@ function category(value: string, label: () => string): { value: string; readonly
 }
 
 export const SPACE_CATEGORIES: { value: string; readonly label: string }[] = [
-  category('general',          () => t('space.category.general')),
-  category('hobby_crafts',     () => t('space.category.hobby_crafts')),
-  category('sports_outdoors',  () => t('space.category.sports_outdoors')),
-  category('gaming',           () => t('space.category.gaming')),
-  category('music_arts',       () => t('space.category.music_arts')),
-  category('food_drink',       () => t('space.category.food_drink')),
-  category('tech',             () => t('space.category.tech')),
-  category('local',            () => t('space.category.local')),
-  category('family_parenting', () => t('space.category.family_parenting')),
-  category('learning',         () => t('space.category.learning')),
+  category('general',           () => t('space.category.general')),
+  category('local',             () => t('space.category.local')),
+  category('community',         () => t('space.category.community')),
+  category('non_profit',        () => t('space.category.non_profit')),
+  category('family_parenting',  () => t('space.category.family_parenting')),
+  category('learning',          () => t('space.category.learning')),
+  category('books_writing',     () => t('space.category.books_writing')),
+  category('hobby_crafts',      () => t('space.category.hobby_crafts')),
+  category('music_arts',        () => t('space.category.music_arts')),
+  category('food_drink',        () => t('space.category.food_drink')),
+  category('sports_outdoors',   () => t('space.category.sports_outdoors')),
+  category('health_wellbeing',  () => t('space.category.health_wellbeing')),
+  category('nature_garden',     () => t('space.category.nature_garden')),
+  category('pets_animals',      () => t('space.category.pets_animals')),
+  category('travel',            () => t('space.category.travel')),
+  category('gaming',            () => t('space.category.gaming')),
+  category('tech',              () => t('space.category.tech')),
+  category('faith_spirituality',() => t('space.category.faith_spirituality')),
+  category('politics_activism', () => t('space.category.politics_activism')),
+  category('work_career',       () => t('space.category.work_career')),
 ]
 
 /** Map any value (unknown/legacy/empty/null) to a display label; default General. */

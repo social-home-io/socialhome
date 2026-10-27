@@ -24,8 +24,11 @@ export const WEBSITE = 'https://social-home.io'
 const HEX = /^#(?:[0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i
 const DATA_IMAGE = /^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/
 const CATEGORIES = new Set([
-  'general', 'hobby_crafts', 'sports_outdoors', 'gaming', 'music_arts',
-  'food_drink', 'tech', 'local', 'family_parenting', 'learning',
+  'general', 'local', 'community', 'non_profit', 'family_parenting',
+  'learning', 'books_writing', 'hobby_crafts', 'music_arts', 'food_drink',
+  'sports_outdoors', 'health_wellbeing', 'nature_garden', 'pets_animals',
+  'travel', 'gaming', 'tech', 'faith_spirituality', 'politics_activism',
+  'work_career',
 ])
 
 /** Longest strings shown (the GFS caps them lower; this is the backstop). */

@@ -37,7 +37,7 @@ import qrcode  # type: ignore[import-untyped]
 from aiohttp import web
 
 from ..domain.media_constraints import SPACE_IMAGE_DATA_URI_MAX_CHARS
-from ..domain.space import SPACE_CATEGORIES
+from ..domain.space import SPACE_CATEGORIES, normalize_category
 from ..gfs_proof import PROOF_ROUTE
 from ..rate_limiter import client_bucket
 from . import app_keys as K
@@ -648,15 +648,25 @@ _COPY_WIDGET_CSS = """
 #: ``services.space_service``) — a label tweak is a one-liner here.
 CATEGORY_LABELS: list[tuple[str, str]] = [
     ("general", "General"),
-    ("hobby_crafts", "Hobby & crafts"),
-    ("sports_outdoors", "Sports & outdoors"),
-    ("gaming", "Gaming"),
-    ("music_arts", "Music & arts"),
-    ("food_drink", "Food & drink"),
-    ("tech", "Tech"),
     ("local", "Local / neighborhood"),
+    ("community", "Community"),
+    ("non_profit", "Non-profit"),
     ("family_parenting", "Family & parenting"),
     ("learning", "Learning"),
+    ("books_writing", "Books & writing"),
+    ("hobby_crafts", "Hobby & crafts"),
+    ("music_arts", "Music & arts"),
+    ("food_drink", "Food & drink"),
+    ("sports_outdoors", "Sports & outdoors"),
+    ("health_wellbeing", "Health & wellbeing"),
+    ("nature_garden", "Nature & garden"),
+    ("pets_animals", "Pets & animals"),
+    ("travel", "Travel"),
+    ("gaming", "Gaming"),
+    ("tech", "Tech"),
+    ("faith_spirituality", "Faith & spirituality"),
+    ("politics_activism", "Politics & activism"),
+    ("work_career", "Work & career"),
 ]
 _CATEGORY_LABEL_MAP: dict[str, str] = dict(CATEGORY_LABELS)
 
@@ -677,6 +687,7 @@ def _render_landing(
     spaces: list[dict] | None,
     search: str,
     category: str,
+    listed_categories: set[str],
     base_url: str,
 ) -> tuple[str, str]:
     """The ``GET /`` page as ``(html, css)`` — ``css`` is the exact text of
@@ -706,7 +717,11 @@ def _render_landing(
         """)
     rows_html = "\n".join(rows) or ('<li class="muted">No active spaces yet.</li>')
     cat_tabs = [f'<a href="/" class="{"active" if not category else ""}">All</a>']
+    # One tab per category with an active space (20 tabs would bury the
+    # list on a phone), plus the selected one so "All" can be found back.
     for value, label in CATEGORY_LABELS:
+        if value not in listed_categories and value != category:
+            continue
         active = "active" if category == value else ""
         cat_tabs.append(
             f'<a href="/?category={value}" class="{active}">{_escape(label)}</a>'
@@ -1272,6 +1287,7 @@ async def handle_landing(request: web.Request) -> web.Response:
     active_spaces = (
         await fed_repo.list_spaces(status="active") if cfg.landing_space_list else []
     )
+    listed_categories = {normalize_category(sp.category) for sp in active_spaces}
     items: list[dict] = []
     for sp in active_spaces:
         if search:
@@ -1305,6 +1321,7 @@ async def handle_landing(request: web.Request) -> web.Response:
         spaces=items if cfg.landing_space_list else None,
         search=search,
         category=category,
+        listed_categories=listed_categories,
         base_url=cfg.base_url,
     )
     return html_response(html, inline_styles=[css])
