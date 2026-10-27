@@ -1,32 +1,74 @@
-/* Service worker for push notifications (§23.33).
+/* Service worker for push notifications (§23.33, §25.3).
+ *
+ * Payload (``socialhome/services/push_service.py`` ``PushPayload``):
+ * ``{title, click_url?, tag?, space_id?, icon_url?}`` — title only, never a
+ * body. ``url`` is still read as a fallback for ``click_url``.
  *
  * URL resolution under HA Supervisor ingress
  * ------------------------------------------
  * The worker is registered with a relative URL so its scope tracks the
  * document base. Under ingress that is ``/api/hassio_ingress/<token>/``;
- * outside ingress it is ``/``. Any URL we open or fetch from inside the
- * worker is resolved against ``registration.scope`` so notifications open
- * the add-on, not HA Core.
+ * outside ingress it is ``/``. Any URL we open from inside the worker is
+ * resolved against ``registration.scope`` so notifications open Social
+ * Home, not HA Core — and a link that would leave the scope opens the app
+ * root instead.
  */
 function resolveInScope(target) {
-  // Strip a leading slash so server-supplied paths like ``/feed`` resolve
+  const scope = self.registration.scope
+  // Strip leading slashes so server-supplied paths like ``/feed`` resolve
   // **inside** the worker's scope rather than escaping to the origin root.
   const rel = String(target || '').replace(/^\/+/, '')
-  return new URL(rel, self.registration.scope).href
+  let url
+  try {
+    url = new URL(rel, scope).href
+  } catch {
+    return scope
+  }
+  return url.startsWith(scope) ? url : scope
 }
 
 self.addEventListener('push', (event) => {
-  const data = event.data ? event.data.json() : {}
+  let data = {}
+  try {
+    data = (event.data && event.data.json()) || {}
+  } catch {
+    data = {}
+  }
   const title = data.title || 'Social Home'
   const options = {
     body: data.body || '',
-    data: { url: resolveInScope(data.url || '') },
+    data: { url: resolveInScope(data.click_url || data.url || '') },
+  }
+  if (data.tag) {
+    // One notification per item on the device: a repeat (a DM burst)
+    // replaces the previous one quietly instead of stacking up.
+    options.tag = String(data.tag)
+    options.renotify = false
   }
   event.waitUntil(self.registration.showNotification(title, options))
 })
 
+async function openOrFocus(url) {
+  const scope = self.registration.scope
+  const windows = await self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+  const ours = windows.filter((c) => typeof c.url === 'string' && c.url.startsWith(scope))
+  const exact = ours.find((c) => c.url === url)
+  if (exact) return exact.focus()
+  const open = ours[0]
+  if (open) {
+    try {
+      await open.focus()
+      await open.navigate(url)
+      return
+    } catch {
+      // An uncontrolled window can't be navigated — open a fresh one.
+    }
+  }
+  return self.clients.openWindow(url)
+}
+
 self.addEventListener('notificationclick', (event) => {
   event.notification.close()
-  const url = event.notification.data?.url || self.registration.scope
-  event.waitUntil(clients.openWindow(url))
+  const url = (event.notification.data && event.notification.data.url) || self.registration.scope
+  event.waitUntil(openOrFocus(url))
 })

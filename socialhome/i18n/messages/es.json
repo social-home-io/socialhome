@@ -263,5 +263,12 @@
   "dashboard.display.found_title": "Encontrados en esta red",
   "dashboard.display.found_looking": "Buscando Social Home en esta red…",
   "dashboard.display.found_none": "Aún no se ha encontrado ninguno. ¿Usas la Home Assistant App? Escribe su dirección abajo.",
-  "dashboard.display.claim_sealed": "Esta solicitud de conexión no se puede abrir en este panel. Vuelve a pulsar Conectar en Social Home."
+  "dashboard.display.claim_sealed": "Esta solicitud de conexión no se puede abrir en este panel. Vuelve a pulsar Conectar en Social Home.",
+  "notification.push.task_assigned": "Te asignaron una tarea",
+  "notification.push.task_deadline": "Una tarea vence hoy",
+  "notification.push.task_completed": "Se completó una tarea",
+  "notification.push.calendar_created": "Nuevo evento",
+  "notification.push.calendar_updated": "Se modificó un evento",
+  "notification.push.calendar_cancelled": "Se canceló un evento",
+  "notification.push.calendar_reminder": "Recordatorio de evento"
 }

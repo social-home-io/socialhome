@@ -273,5 +273,12 @@
   "dashboard.display.found_title": "Found on this network",
   "dashboard.display.found_looking": "Looking for Social Home on this network…",
   "dashboard.display.found_none": "None found yet. Using the Home Assistant App? Type its address below.",
-  "dashboard.display.claim_sealed": "This connect request can't be opened on this panel. Press Connect in Social Home again."
+  "dashboard.display.claim_sealed": "This connect request can't be opened on this panel. Press Connect in Social Home again.",
+  "notification.push.task_assigned": "You were assigned a task",
+  "notification.push.task_deadline": "A task is due today",
+  "notification.push.task_completed": "A task was completed",
+  "notification.push.calendar_created": "New event",
+  "notification.push.calendar_updated": "An event was changed",
+  "notification.push.calendar_cancelled": "An event was cancelled",
+  "notification.push.calendar_reminder": "Event reminder"
 }

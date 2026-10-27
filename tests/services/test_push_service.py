@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import threading
+
+import orjson
+
 from socialhome.repositories.push_subscription_repo import PushSubscription
+from socialhome.services import push_service as push_mod
 from socialhome.services.push_service import (
     PushPayload,
     PushService,
@@ -166,6 +171,120 @@ async def test_notify_missed_call_payload_shape():
     body = _json.loads(p.to_json())
     assert "body" not in body
     assert body["title"] == "Missed call"
+
+
+# ─── Real send path (pywebpush) runs off the event loop ─────────────────
+
+
+def _sub(sid: str, user_id: str = "alice") -> PushSubscription:
+    return PushSubscription(
+        id=sid,
+        user_id=user_id,
+        endpoint=f"https://push.example/{sid}",
+        p256dh="p",
+        auth_secret="a",
+    )
+
+
+class _FakeWebPushError(Exception):
+    def __init__(self, status: int) -> None:
+        super().__init__(f"status {status}")
+        self.response = type("R", (), {"status_code": status})()
+
+
+async def test_webpush_runs_in_a_worker_thread_not_the_event_loop(monkeypatch):
+    """pywebpush's ``webpush()`` is a blocking HTTP call — it must run via
+    ``asyncio.to_thread`` so a slow push service never stalls the loop."""
+    loop_thread = threading.get_ident()
+    seen: list[tuple[int, dict]] = []
+
+    def fake_webpush(**kwargs):
+        seen.append((threading.get_ident(), kwargs))
+
+    monkeypatch.setattr(push_mod, "_PYWEBPUSH_AVAILABLE", True)
+    monkeypatch.setattr(push_mod, "webpush", fake_webpush)
+    repo = _MemRepo()
+    await repo.save(_sub("s1"))
+    svc = PushService(sub_repo=repo, vapid=_vapid(), contact_email="op@x")
+    n = await svc.push_to_user("alice", PushPayload(title="Hi", click_url="/dms"))
+    assert n == 1
+    [(thread_id, kwargs)] = seen
+    assert thread_id != loop_thread
+    assert kwargs["subscription_info"]["endpoint"] == "https://push.example/s1"
+    assert orjson.loads(kwargs["data"]) == {"title": "Hi", "click_url": "/dms"}
+    assert kwargs["vapid_claims"] == {"sub": "mailto:op@x"}
+
+
+async def test_push_to_user_sends_to_every_device_concurrently(monkeypatch):
+    """Two devices are sent to in parallel: each fake send waits on a
+    two-party barrier, which only trips when both run at the same time."""
+    barrier = threading.Barrier(2, timeout=5)
+
+    def fake_webpush(**kwargs):
+        barrier.wait()
+
+    monkeypatch.setattr(push_mod, "_PYWEBPUSH_AVAILABLE", True)
+    monkeypatch.setattr(push_mod, "webpush", fake_webpush)
+    repo = _MemRepo()
+    await repo.save(_sub("s1"))
+    await repo.save(_sub("s2"))
+    svc = PushService(sub_repo=repo, vapid=_vapid())
+    assert await svc.push_to_user("alice", PushPayload(title="Hi")) == 2
+
+
+async def test_push_to_users_sends_to_recipients_concurrently(monkeypatch):
+    barrier = threading.Barrier(2, timeout=5)
+
+    def fake_webpush(**kwargs):
+        barrier.wait()
+
+    monkeypatch.setattr(push_mod, "_PYWEBPUSH_AVAILABLE", True)
+    monkeypatch.setattr(push_mod, "webpush", fake_webpush)
+    repo = _MemRepo()
+    await repo.save(_sub("s1", "alice"))
+    await repo.save(_sub("s2", "bob"))
+    svc = PushService(sub_repo=repo, vapid=_vapid())
+    assert await svc.push_to_users(["alice", "bob"], PushPayload(title="Hi")) == 2
+
+
+async def test_dead_subscription_is_removed(monkeypatch):
+    def fake_webpush(**kwargs):
+        raise _FakeWebPushError(410)
+
+    monkeypatch.setattr(push_mod, "_PYWEBPUSH_AVAILABLE", True)
+    monkeypatch.setattr(push_mod, "webpush", fake_webpush)
+    monkeypatch.setattr(push_mod, "WebPushException", _FakeWebPushError)
+    repo = _MemRepo()
+    await repo.save(_sub("s1"))
+    svc = PushService(sub_repo=repo, vapid=_vapid())
+    assert await svc.push_to_user("alice", PushPayload(title="Hi")) == 0
+    assert repo.subs == {}
+
+
+async def test_transient_push_failure_keeps_the_subscription(monkeypatch):
+    def fake_webpush(**kwargs):
+        raise _FakeWebPushError(500)
+
+    monkeypatch.setattr(push_mod, "_PYWEBPUSH_AVAILABLE", True)
+    monkeypatch.setattr(push_mod, "webpush", fake_webpush)
+    monkeypatch.setattr(push_mod, "WebPushException", _FakeWebPushError)
+    repo = _MemRepo()
+    await repo.save(_sub("s1"))
+    svc = PushService(sub_repo=repo, vapid=_vapid())
+    assert await svc.push_to_user("alice", PushPayload(title="Hi")) == 0
+    assert "s1" in repo.subs
+
+
+async def test_unexpected_push_error_is_swallowed(monkeypatch):
+    def fake_webpush(**kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(push_mod, "_PYWEBPUSH_AVAILABLE", True)
+    monkeypatch.setattr(push_mod, "webpush", fake_webpush)
+    repo = _MemRepo()
+    await repo.save(_sub("s1"))
+    svc = PushService(sub_repo=repo, vapid=_vapid())
+    assert await svc.push_to_user("alice", PushPayload(title="Hi")) == 0
 
 
 # ─── load_or_create_vapid ─────────────────────────────────────────────────

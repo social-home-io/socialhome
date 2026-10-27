@@ -21,6 +21,7 @@ they are generated automatically on first start.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,6 +37,11 @@ from ..repositories.push_subscription_repo import (
 )
 
 log = logging.getLogger(__name__)
+
+#: Upper bound on Web Push requests in flight at once, per service. Each
+#: send is a blocking HTTPS call on a worker thread, so this also caps how
+#: many of the default executor's threads one fan-out can hold.
+MAX_CONCURRENT_SENDS: int = 8
 
 try:  # pragma: no cover
     from pywebpush import WebPushException, webpush
@@ -98,7 +104,7 @@ class PushService:
         to contact the operator if their endpoint is being abused.
     """
 
-    __slots__ = ("_contact_email", "_sub_repo", "_vapid")
+    __slots__ = ("_contact_email", "_send_slots", "_sub_repo", "_vapid")
 
     def __init__(
         self,
@@ -110,6 +116,7 @@ class PushService:
         self._sub_repo = sub_repo
         self._vapid = vapid
         self._contact_email = contact_email
+        self._send_slots = asyncio.Semaphore(MAX_CONCURRENT_SENDS)
 
     @property
     def vapid_public_key(self) -> str:
@@ -117,24 +124,29 @@ class PushService:
         return self._vapid.public_b64url
 
     async def push_to_user(self, user_id: str, payload: PushPayload) -> int:
-        """Push to every subscription of *user_id*. Returns delivery count."""
+        """Push to every subscription of *user_id*. Returns delivery count.
+
+        A user's devices are sent to concurrently (bounded by
+        :data:`MAX_CONCURRENT_SENDS`), so one slow push endpoint doesn't
+        hold up the others.
+        """
         subs = await self._sub_repo.list_for_user(user_id)
-        delivered = 0
-        for sub in subs:
-            ok = await self._push_one(sub, payload)
-            if ok:
-                delivered += 1
-        return delivered
+        if not subs:
+            return 0
+        results = await asyncio.gather(*(self._push_one(s, payload) for s in subs))
+        return sum(1 for ok in results if ok)
 
     async def push_to_users(
         self,
         user_ids: list[str] | set[str],
         payload: PushPayload,
     ) -> int:
-        delivered = 0
-        for uid in user_ids:
-            delivered += await self.push_to_user(uid, payload)
-        return delivered
+        """Push to every user in *user_ids* concurrently. Returns the total
+        delivery count."""
+        counts = await asyncio.gather(
+            *(self.push_to_user(uid, payload) for uid in user_ids)
+        )
+        return sum(counts)
 
     async def notify_missed_call(
         self,
@@ -166,27 +178,34 @@ class PushService:
                 sub.endpoint[:40],
             )
             return True
-        try:  # pragma: no cover
-            webpush(
-                subscription_info={
-                    "endpoint": sub.endpoint,
-                    "keys": {"p256dh": sub.p256dh, "auth": sub.auth_secret},
-                },
-                data=payload.to_json(),
-                vapid_private_key=self._vapid.private_pem,
-                vapid_claims={"sub": f"mailto:{self._contact_email}"},
-            )
+        try:
+            # ``webpush()`` is a blocking HTTPS request (plus payload
+            # encryption) — run it on a worker thread, never on the loop.
+            async with self._send_slots:
+                await asyncio.to_thread(self._send_sync, sub, payload.to_json())
             return True
-        except WebPushException as exc:  # pragma: no cover
+        except WebPushException as exc:
             status = getattr(getattr(exc, "response", None), "status_code", None)
             if status in (404, 410):
                 # Subscription is dead — clean it out.
                 await self._sub_repo.delete_by_endpoint(sub.endpoint)
             log.warning("push: failed status=%s endpoint=%s", status, sub.endpoint[:40])
             return False
-        except Exception as exc:  # pragma: no cover
+        except Exception as exc:
             log.warning("push: unexpected error: %s", exc, exc_info=True)
             return False
+
+    def _send_sync(self, sub: PushSubscription, data: str) -> None:
+        """Blocking pywebpush send — only ever called via ``asyncio.to_thread``."""
+        webpush(
+            subscription_info={
+                "endpoint": sub.endpoint,
+                "keys": {"p256dh": sub.p256dh, "auth": sub.auth_secret},
+            },
+            data=data,
+            vapid_private_key=self._vapid.private_pem,
+            vapid_claims={"sub": f"mailto:{self._contact_email}"},
+        )
 
 
 # ─── VAPID key persistence ────────────────────────────────────────────────

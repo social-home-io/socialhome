@@ -263,5 +263,12 @@
   "dashboard.display.found_title": "In diesem Netzwerk gefunden",
   "dashboard.display.found_looking": "Suche Social Home in diesem Netzwerk…",
   "dashboard.display.found_none": "Noch keins gefunden. Nutzt du die Home Assistant App? Gib ihre Adresse unten ein.",
-  "dashboard.display.claim_sealed": "Diese Verbindungsanfrage lässt sich auf diesem Panel nicht öffnen. Tippe in Social Home erneut auf Verbinden."
+  "dashboard.display.claim_sealed": "Diese Verbindungsanfrage lässt sich auf diesem Panel nicht öffnen. Tippe in Social Home erneut auf Verbinden.",
+  "notification.push.task_assigned": "Dir wurde eine Aufgabe zugewiesen",
+  "notification.push.task_deadline": "Eine Aufgabe ist heute fällig",
+  "notification.push.task_completed": "Eine Aufgabe wurde erledigt",
+  "notification.push.calendar_created": "Neuer Termin",
+  "notification.push.calendar_updated": "Ein Termin wurde geändert",
+  "notification.push.calendar_cancelled": "Ein Termin wurde abgesagt",
+  "notification.push.calendar_reminder": "Terminerinnerung"
 }

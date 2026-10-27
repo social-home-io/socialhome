@@ -54,7 +54,7 @@ sequenceDiagram
     B->>B: persist, pick the recipient's<br/>push subscriptions
     B->>WP: Web Push (VAPID-signed,<br/>encrypted to the subscription)<br/>title only
     WP->>D: push notification
-    Note over D: tapping it opens the SPA,<br/>which reads the message<br/>from its own household
+    Note over D: tapping it opens the SPA at the<br/>conversation (click_url), which reads<br/>the message from its own household
 ```
 
 In `ha` / `haos` mode the platform's push provider
@@ -86,9 +86,29 @@ are the household's own (`webrtc_turn_*`, see `docs/operations/turn.md`).
 
 A notification carries the title only. The body is omitted for DMs,
 location messages and any other user-generated content. Other kinds get a
-title like "New post in Family" with nothing the person wrote. The content
-is read when the person opens the notification, from their own household,
-over an authenticated request.
+title like "New post in Family" with nothing the person wrote. A title
+that would embed something a person wrote (a task title, an event name)
+is swapped for a generic one on the push ("You were assigned a task",
+"New event", in the recipient's language); the in-app notification keeps
+the full text (`_PUSH_SAFE_TITLES` in
+`socialhome/services/notification_service.py`). The content is read when
+the person opens the notification, from their own household, over an
+authenticated request.
+
+Each in-app notification sends one push per device. The Web Push payload
+is `{title, click_url?, tag?}`:
+
+- `click_url` is the notification's in-app link. The service worker
+  (`client/public/sw.js`) resolves it against its own scope (the HA
+  ingress prefix under `haos`, `/` otherwise) and never outside it, then
+  focuses an open Social Home window and moves it there, or opens one.
+- `tag` is `<type>:<link>` (or `<type>:<notification id>` without a link).
+  A repeat on the same item, such as a burst of messages in one chat,
+  replaces the notification on the device without alerting again;
+  different items never replace each other.
+
+The household sends Web Push on a worker thread, a few devices at a time,
+so a slow push service never stalls the server.
 
 ## Subscription lifecycle
 

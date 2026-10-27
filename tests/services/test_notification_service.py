@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from collections import Counter
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.calendar import Calendar, CalendarEvent
 from socialhome.domain.conversation import (
     MUTED_FOREVER,
     Conversation,
@@ -17,21 +19,34 @@ from socialhome.domain.conversation import (
     SystemChatScope,
 )
 from socialhome.domain.events import (
+    AppChallengeReceived,
+    BazaarBidPlaced,
+    BazaarListingExpired,
+    BazaarOfferAccepted,
+    BazaarOfferRejected,
+    CalendarEventCreated,
+    CalendarEventDeleted,
+    CalendarEventUpdated,
     CommentAdded,
     CommentUpdated,
+    DmContactRequested,
     DmMessageCreated,
     DmMessageDeleted,
     DmMessageUpdated,
+    EventReminderDue,
     HighlightFrameReactionChanged,
     MomentCreated,
     PostEdited,
     SpaceAdminSeedsRetiredAfterRestore,
     SpaceConfigChanged,
     SpaceJoinRequested,
+    SpaceLocationFeatureEnabled,
     SpaceMemberJoined,
     SpacePostCreated,
     SpaceRemoteSeatLive,
     TaskAssigned,
+    TaskCompleted,
+    TaskDeadlineDue,
 )
 from socialhome.domain.mention import Mention, MentionType
 from socialhome.domain.post import Comment, CommentType, Post, PostType
@@ -600,7 +615,7 @@ class _CapturingPush:
     """Fake PushService for assert-pushed tests.
 
     Captures both fan-out shapes:
-    * ``push_to_users(ids, payload)`` — used by ``_fan_push``.
+    * ``push_to_users(ids, payload)`` — the bulk shape (missed calls).
     * ``push_to_user(id, payload)``  — used by ``_save_notif`` for
       the per-row Web Push fan-out.
 
@@ -1192,7 +1207,9 @@ async def test_task_deadline_triggers_push(stack):
     await stack.bus.publish(evt)
     assert fake.calls
     _, payload = fake.calls[-1]
-    assert "Pay bills" in payload.title
+    # §25.3: the task title stays on the bell row, never on the push.
+    assert "Pay bills" not in payload.title
+    assert payload.title == "A task is due today"
 
 
 # ─── Bazaar + DM contact handlers ─────────────────────────────────────────
@@ -2644,7 +2661,7 @@ async def test_unavailable_warning_pushes_once_per_household(stack):
     await remote.remove(space.id, "inst-remote", "u-r1")
     await _seat_remote(stack, remote, space.id, "u-r1")
     await _seat_remote(stack, remote, space.id, "u-o1", inst="inst-other")
-    pushes = [p for p in spy.pushed if p[1] == "moderation_unavailable"]
+    pushes = [p for p in spy.pushed if p[1].startswith("moderation_unavailable:")]
     assert len(pushes) == 2  # inst-remote once, inst-other once
     notes = [
         n
@@ -2683,7 +2700,7 @@ async def test_unavailable_warning_keeps_a_row_stored_with_the_old_link(stack):
         if n.type == "moderation_unavailable"
     ]
     assert [n.link_url for n in notes] == [legacy]
-    assert not [p for p in spy.pushed if p[1] == "moderation_unavailable"]
+    assert not [p for p in spy.pushed if p[1].startswith("moderation_unavailable:")]
 
 
 class _VersionedInstances:
@@ -3170,3 +3187,301 @@ async def test_a_member_joining_still_rings_the_followers(stack):
     assert [n.title for n in await _member_joined_bells(stack, fern)] == [
         "bob joined Garden"
     ]
+
+
+# ─── Web Push: one push per bell, content-free titles, collapse tag ────────
+
+
+class _CapturingAdapter:
+    """Fake platform adapter recording the HA / standalone push title."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str]] = []
+
+    async def send_push(self, user, title, body, data=None) -> None:
+        self.sent.append((user.user_id, title))
+
+
+def _task(title: str, *assignees: str, created_by: str = "other") -> Task:
+    now = datetime.now(UTC)
+    return Task(
+        id="t1",
+        list_id="l1",
+        title=title,
+        status=TaskStatus.TODO,
+        position=0,
+        created_by=created_by,
+        created_at=now,
+        updated_at=now,
+        assignees=assignees,
+    )
+
+
+async def _space_with(stack, owner: str, *members) -> str:
+    kp = generate_identity_keypair()
+    space_svc = SpaceService(
+        _space_repo(stack.db),
+        SqliteSpacePostRepo(stack.db),
+        stack.notif_svc._users,
+        stack.bus,
+        own_instance_id=derive_instance_id(kp.public_key),
+    )
+    space = await space_svc.create_space(owner_username=owner, name="FamSpace")
+    for m in members:
+        await space_svc.add_member(space.id, actor_username=owner, user_id=m.user_id)
+    return space.id
+
+
+async def _fire_single_push_case(stack, push, case: str) -> set[str]:
+    """Publish the event behind *case*; return who should get one push."""
+    a = await stack.provision_user("anna", is_admin=True)
+    b = await stack.provision_user("bob")
+    match case:
+        case "task_deadline":
+            await stack.bus.publish(
+                TaskDeadlineDue(
+                    task=_task("Pay", a.user_id, b.user_id), due_date=date.today()
+                )
+            )
+            return {a.user_id, b.user_id}
+        case "dm_contact_requested":
+            await stack.bus.publish(
+                DmContactRequested(
+                    requester_user_id=a.user_id,
+                    requester_display_name="anna",
+                    recipient_user_id=b.user_id,
+                )
+            )
+        case "app_challenge":
+            await stack.bus.publish(
+                AppChallengeReceived(
+                    app_id="chess",
+                    session_id="s1",
+                    to_user_id=b.user_id,
+                    from_display="anna",
+                )
+            )
+        case "bazaar_bid_placed":
+            await stack.bus.publish(
+                BazaarBidPlaced(
+                    listing_post_id="L-1",
+                    seller_user_id=b.user_id,
+                    bidder_user_id=a.user_id,
+                    amount=200,
+                    new_end_time="2099-01-01T00:00:00+00:00",
+                )
+            )
+        case "bazaar_offer_accepted":
+            await stack.bus.publish(
+                BazaarOfferAccepted(
+                    listing_post_id="L-1",
+                    seller_user_id=a.user_id,
+                    buyer_user_id=b.user_id,
+                    price=200,
+                )
+            )
+        case "bazaar_offer_rejected":
+            await stack.bus.publish(
+                BazaarOfferRejected(
+                    listing_post_id="L-1",
+                    seller_user_id=a.user_id,
+                    bidder_user_id=b.user_id,
+                    bid_id="bid-1",
+                )
+            )
+        case "bazaar_listing_sold":
+            await stack.bus.publish(
+                BazaarListingExpired(
+                    listing_post_id="L-1",
+                    seller_user_id=b.user_id,
+                    final_status="sold",
+                )
+            )
+        case "space_location_enabled":
+            c = await stack.provision_user("carol")
+            space_id = await _space_with(stack, "anna", b, c)
+            push.calls.clear()  # the joins above ring (and push) on their own
+            await stack.bus.publish(
+                SpaceLocationFeatureEnabled(
+                    space_id=space_id, space_name="FamSpace", actor_user_id=a.user_id
+                )
+            )
+            return {b.user_id, c.user_id}
+    return {b.user_id}
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "task_deadline",
+        "dm_contact_requested",
+        "app_challenge",
+        "bazaar_bid_placed",
+        "bazaar_offer_accepted",
+        "bazaar_offer_rejected",
+        "bazaar_listing_sold",
+        "space_location_enabled",
+    ],
+)
+async def test_each_notification_pushes_exactly_once_per_recipient(stack, case):
+    """Regression: these handlers pushed once via ``_save_notif`` and again
+    via an extra fan-out, so the phone buzzed twice for one bell."""
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    expected = await _fire_single_push_case(stack, push, case)
+    pushed = Counter(uid for uids, _ in push.calls for uid in uids)
+    assert pushed == Counter(dict.fromkeys(expected, 1))
+
+
+_SECRET = "Biopsy results"
+
+
+async def _fire_content_case(stack, case: str):
+    """Publish an event whose bell title embeds user content (*_SECRET*).
+    Returns the recipient."""
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    match case:
+        case "task_assigned":
+            await stack.bus.publish(
+                TaskAssigned(task=_task(_SECRET, b.user_id), assigned_to=b.user_id)
+            )
+        case "task_deadline":
+            await stack.bus.publish(
+                TaskDeadlineDue(task=_task(_SECRET, b.user_id), due_date=date.today())
+            )
+        case "task_completed":
+            await stack.bus.publish(
+                TaskCompleted(
+                    task=_task(_SECRET, a.user_id, b.user_id), completed_by=a.user_id
+                )
+            )
+        case "calendar_event_created":
+            await stack.calendar_repo.save_calendar(
+                Calendar(
+                    id="cal-bob",
+                    name="Bob",
+                    color="#4A90E2",
+                    owner_username=b.username,
+                    calendar_type="personal",
+                )
+            )
+            await stack.bus.publish(
+                CalendarEventCreated(
+                    event=CalendarEvent(
+                        id="e1",
+                        calendar_id="cal-bob",
+                        summary=_SECRET,
+                        created_by=a.user_id,
+                        start=datetime(2026, 5, 1, 10, tzinfo=UTC),
+                        end=datetime(2026, 5, 1, 11, tzinfo=UTC),
+                    )
+                )
+            )
+        case "calendar_event_updated":
+
+            async def list_rsvps(_event_id):
+                return [SimpleNamespace(user_id=b.user_id, status="going")]
+
+            stack.notif_svc.attach_calendar_repo(SimpleNamespace(list_rsvps=list_rsvps))
+            await stack.bus.publish(
+                CalendarEventUpdated(
+                    event=CalendarEvent(
+                        id="e1",
+                        calendar_id="sp-1",
+                        summary=_SECRET,
+                        created_by=a.user_id,
+                        start=datetime(2026, 5, 1, 10, tzinfo=UTC),
+                        end=datetime(2026, 5, 1, 11, tzinfo=UTC),
+                    ),
+                    material_changes=("start",),
+                )
+            )
+        case "calendar_event_cancelled":
+            await stack.bus.publish(
+                CalendarEventDeleted(
+                    event_id="e1",
+                    summary=_SECRET,
+                    space_id="sp-1",
+                    notify_user_ids=(b.user_id,),
+                )
+            )
+        case "calendar_reminder":
+            await stack.bus.publish(
+                EventReminderDue(
+                    event_id="e1",
+                    user_id=b.user_id,
+                    occurrence_at="2026-05-01T10:00:00+00:00",
+                    minutes_before=60,
+                    summary=_SECRET,
+                    space_id="sp-1",
+                )
+            )
+    return b
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "task_assigned",
+        "task_deadline",
+        "task_completed",
+        "calendar_event_created",
+        "calendar_event_updated",
+        "calendar_event_cancelled",
+        "calendar_reminder",
+    ],
+)
+async def test_push_title_never_carries_user_content(stack, case):
+    """§25.3: a task title or event summary is user content. It stays on the
+    in-app bell row but never rides a push (lock screen, push service)."""
+    push = _CapturingPush()
+    adapter = _CapturingAdapter()
+    stack.notif_svc.attach_push_service(push)
+    stack.notif_svc.attach_platform_adapter(adapter)
+    recipient = await _fire_content_case(stack, case)
+    rows = await stack.notif_repo.list(recipient.user_id, limit=10)
+    assert [n.type for n in rows] == [case]
+    assert _SECRET in rows[0].title  # the bell keeps the full text
+    assert [uids for uids, _ in push.calls] == [[recipient.user_id]]
+    web_title = push.calls[0][1].title
+    assert web_title
+    assert _SECRET not in web_title
+    assert _SECRET not in push.calls[0][1].to_json()
+    assert adapter.sent == [(recipient.user_id, web_title)]
+
+
+async def test_push_tag_collapses_repeats_of_the_same_item_only(stack):
+    """The push ``tag`` is the bell type plus its link: a burst in one DM
+    thread replaces itself on the device, another thread does not."""
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    for conv, mid in (("c-1", "m-1"), ("c-1", "m-2"), ("c-2", "m-3")):
+        await stack.bus.publish(_dm_event(conv, a, [b], mid=mid))
+    tags = [p.tag for _, p in push.calls]
+    assert tags == [
+        "dm_message:/dms/c-1",
+        "dm_message:/dms/c-1",
+        "dm_message:/dms/c-2",
+    ]
+    assert [p.click_url for _, p in push.calls] == ["/dms/c-1", "/dms/c-1", "/dms/c-2"]
+
+
+async def test_push_tag_without_a_link_is_per_notification(stack):
+    """A bell with no link gets a tag unique to its row, so two different
+    task assignments never silently replace each other on the device."""
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    b = await stack.provision_user("bob")
+    await stack.bus.publish(
+        TaskAssigned(task=_task("A", b.user_id), assigned_to=b.user_id)
+    )
+    await stack.bus.publish(
+        TaskAssigned(task=_task("B", b.user_id), assigned_to=b.user_id)
+    )
+    rows = await stack.notif_repo.list(b.user_id, limit=10)
+    tags = {p.tag for _, p in push.calls}
+    assert tags == {f"task_assigned:{n.id}" for n in rows}
+    assert len(tags) == 2
