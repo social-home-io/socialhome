@@ -199,3 +199,53 @@ async def test_read_by_link_requires_auth(client):
         "/api/notifications/read-by-link", json={"links": ["/post/p1"]}
     )
     assert resp.status == 401
+
+
+async def test_list_pages_with_before_cursor(client):
+    """``before`` walks the list page by page, newest first, no row twice.
+
+    The Notifications page's "Show older" passes the oldest loaded row's
+    ``created_at`` as ``before``; each page holds only the caller's rows.
+    """
+    db = client.app[_db_key]
+    for i in range(5):
+        await db.enqueue(
+            "INSERT INTO notifications(id, user_id, type, title, created_at)"
+            " VALUES(?,?,?,?,?)",
+            (
+                f"bob-{i}",
+                client._bob_uid,
+                "post_created",
+                f"row {i}",
+                f"2026-10-27T10:0{i}:00.000000+00:00",
+            ),
+        )
+    await db.enqueue(
+        "INSERT INTO notifications(id, user_id, type, title, created_at)"
+        " VALUES(?,?,?,?,?)",
+        (
+            "pascal-x",
+            client._admin_uid,
+            "post_created",
+            "not bob's",
+            "2026-10-27T10:02:30.000000+00:00",
+        ),
+    )
+    seen: list[str] = []
+    before: str | None = None
+    for _ in range(5):  # bounded: an ignored cursor must fail, not hang
+        params = {"limit": "2"}
+        if before is not None:
+            # Encoded like the SPA's encodeURIComponent: the "+" of the
+            # UTC offset must survive the query string.
+            params["before"] = before
+        resp = await client.get(
+            "/api/notifications", params=params, headers=_auth(client._bob_token)
+        )
+        assert resp.status == 200
+        page = await resp.json()
+        seen.extend(n["id"] for n in page)
+        if len(page) < 2:
+            break
+        before = page[-1]["created_at"]
+    assert seen == ["bob-4", "bob-3", "bob-2", "bob-1", "bob-0"]

@@ -3,15 +3,16 @@
  *
  * Two surfaces in one component:
  *
- * 1. A persistent 5-tab bar pinned to the bottom of the viewport on
- *    touch viewports (≤768px). Covers the most-trafficked routes
- *    (Feed / Spaces / DMs / Notifs) plus a "More" tab.
+ * 1. A persistent 4-tab bar pinned to the bottom of the viewport on
+ *    touch viewports (≤768px): Home / Spaces / Chats plus a "More"
+ *    tab. Notifications live behind the top-bar bell, which carries
+ *    the unread count and opens the page on phones.
  *
  * 2. The "More" tab is a button (not a link) that toggles a slide-
  *    in drawer containing the full :class:`SideNav` — so every
  *    surface the desktop sidebar reaches (Calendar, Tasks, Shopping,
  *    Pages, Stickies, Friends, etc.) stays one tap away on mobile.
- *    Without this drawer the 4 routes covered by the bar would be
+ *    Without this drawer the 3 routes covered by the bar would be
  *    the only thing reachable from a phone.
  *
  * Marks the active tab with both ``aria-current="page"`` (assistive
@@ -61,8 +62,9 @@ const TABS: readonly Tab[] = [
   { href: '/dms',           emoji: '✉️', label: () => t('nav.chats'),
     matches: (p) => p === '/dms' || p.startsWith('/dms/'),
     badge: () => dmUnreadTotal.value },
-  { href: '/notifications', emoji: '🔔', label: () => t('nav.notifications_short'),
-    matches: (p) => p.startsWith('/notifications') },
+  // No Notifications tab: the top-bar bell is the one entry, with its
+  // count, on every screen (it links to /notifications on phones). The
+  // freed slot stays empty on purpose.
 ]
 
 /** Drawer-open signal — exported so other surfaces (the topbar burger

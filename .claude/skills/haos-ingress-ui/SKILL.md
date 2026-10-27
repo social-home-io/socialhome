@@ -102,6 +102,7 @@ python .claude/skills/haos-ingress-ui/harness.py up --out /tmp/haos-ingress-ui
 | `ws-under-prefix-and-live` | the WebSocket doesn't open at `<prefix>/api/ws` through the proxy, or bob's new post doesn't appear live on alice's feed |
 | `ws-nested-route-cold-load` | a cold load of `<prefix>/dms/<id>` hands `new WebSocket` a relative URL (Firefox resolves it against the page, `<prefix>/dms/api/ws`, ignoring `<base href>` — Chrome doesn't, so the raw constructor argument is asserted), the socket opens outside `<prefix>/api/ws`, or bob's DM doesn't appear live |
 | `router-keeps-prefix` | in-app link clicks, reload, back, back, forward don't land on `<prefix>/spaces`, `/calendar`, `/calendar`, `/spaces`, `/`, `/spaces`; then the Momentum tab links `/momentum` → `/momentum/yours` and Back to `/momentum` |
+| `notifications-bell` | on a phone the bottom bar still has a Notifications tab, or the top-bar bell isn't a link to `<prefix>/notifications` (or isn't `aria-current="page"` there); on desktop the bell's panel has no "See all notifications" link to `<prefix>/notifications` |
 | `media-load-and-upload` | feed images aren't loaded from under the prefix, or the gallery's raw-XHR upload posts elsewhere / fails |
 | `iframe-embed` | the app doesn't boot inside the HA-like iframe, or in-iframe navigation moves the top frame |
 | `ingress-401-auth-failed` | with no `X-Remote-User-*` the SPA shows anything but IngressAuthFailed: a password field, or any toast (there was no session to expire) |

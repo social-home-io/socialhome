@@ -23,16 +23,25 @@ const wrap = (ui: any) => (
 describe('MobileNav', () => {
   afterEach(() => { dmUnreadTotal.value = 0 })
 
-  it('renders 5 bottom tabs (4 link tabs + 1 More button)', () => {
+  it('renders 4 bottom tabs: Home, Spaces, Chats + the More button', () => {
     const { container } = render(wrap(<MobileNav />))
     // Only the bottom-bar tabs — the drawer hosts the full SideNav,
     // whose many links would otherwise inflate the count.
     const bar = container.querySelector('.sh-mobile-nav')!
     const tabs = bar.querySelectorAll('.sh-mobile-tab')
-    expect(tabs.length).toBe(5)
-    // 4 are anchor links, 1 is a button (the "More" toggle).
-    expect(bar.querySelectorAll('a.sh-mobile-tab').length).toBe(4)
+    expect(tabs.length).toBe(4)
+    // 3 are anchor links, 1 is a button (the "More" toggle).
+    expect(bar.querySelectorAll('a.sh-mobile-tab').length).toBe(3)
     expect(bar.querySelectorAll('button.sh-mobile-tab').length).toBe(1)
+    expect([...tabs].map(t => t.querySelector('.sh-mobile-tab__label')!.textContent))
+      .toEqual(['Home', 'Spaces', 'Chats', 'More'])
+  })
+
+  it('has no Notifications tab: the top-bar bell is the one entry (D2)', () => {
+    const { container } = render(wrap(<MobileNav />))
+    const bar = container.querySelector('.sh-mobile-nav')!
+    expect(bar.querySelector('a[href$="/notifications"]')).toBeNull()
+    expect(bar.textContent).not.toMatch(/Alerts|Notifications/)
   })
 
   it('the closed drawer is inert + aria-hidden, and the More button controls it', () => {
@@ -246,7 +255,7 @@ describe('MobileNav — links under the HA ingress prefix', () => {
     const hrefs = [...bar.querySelectorAll('a.sh-mobile-tab')].map(a => a.getAttribute('href'))
     expect(hrefs).toEqual([
       '/api/hassio_ingress/tok/', '/api/hassio_ingress/tok/spaces',
-      '/api/hassio_ingress/tok/dms', '/api/hassio_ingress/tok/notifications',
+      '/api/hassio_ingress/tok/dms',
     ])
   })
 })

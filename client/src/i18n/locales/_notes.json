@@ -283,7 +283,6 @@
   "nav.chats": "Sidebar and bottom-tab link to direct messages. Short (≤ 10 chars).",
   "nav.corner": "Sidebar link to the user's personal dashboard ('my corner'). Short.",
   "nav.home": "Bottom tab on phones that opens the welcome page. ≤ 8 chars.",
-  "nav.notifications_short": "Bottom tab on phones for notifications. Must fit a narrow tab: ≤ 9 chars.",
   "nav.more": "Bottom tab on phones that opens the full menu. ≤ 8 chars.",
   "nav.drawer_close": "Screen-reader label for the ✕ button at the top of the phone menu drawer.",
   "nav.unread": "Screen-reader label on an unread badge. {count} = number.",
@@ -572,5 +571,10 @@
   "moment.sharing.default_on": "Switch label in Settings › Privacy › Public sharing; off by default. Keep it identical to the wording quoted in moment.sharing.intro.",
   "highlight.archive.day_today": "Day heading in Highlights › Archive. {date} is the weekday and date from Intl in the UI language, e.g. \"Sunday, October 25\" / \"Sonntag, 25. Oktober\".",
   "highlight.archive.retention": "Under the Archive. {n} = the viewer's own retention setting in days (1–90). Each author picks their own, so never promise a fixed number.",
-  "highlight.archive.only_mine": "Toggle button on the Archive: show only your own highlights."
+  "highlight.archive.only_mine": "Toggle button on the Archive: show only your own highlights.",
+  "notifications.title": "The feature's one name, the same in the bell, this page, Settings and push: Notifications / Mitteilungen / Meldingen / Notifications / Notificaciones (glossary). Never Alerts, Hinweise, Benachrichtigungen, Alertes or Avisos.",
+  "welcome.chip.alerts": "Home-screen chip after a count (\"18 notifications\"). Use the feature's one name (notifications.title), lower-case where your language allows.",
+  "notifications.unread": "Read out by screen readers before an unread notification's sentence (\"Unread, Ben commented on your post\"). Not shown on screen.",
+  "notifications.see_all": "Link at the bottom of the bell's panel that opens the Notifications page.",
+  "notifications.show_older": "Button under the list that loads the next, older notifications."
 }
