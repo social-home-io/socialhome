@@ -566,5 +566,8 @@
   "person.follow_gfs_hint": "Person sheet, under 'Follow' for someone known only from a GFS. {gfs} is the GFS's name. Must say plainly that the GFS learns about the follow.",
   "person.follow_gfs_also": "Shown when the person is paired but also still followed through a GFS; the 'Stop' button next to it ends the GFS follow.",
   "moment.discover.follow_note": "Under the Discover list. {gfs} is the GFS's name. Must say plainly that the GFS learns who your household follows.",
-  "moment.sharing.default_on": "Switch label in Settings › Privacy › Public sharing; off by default. Keep it identical to the wording quoted in moment.sharing.intro."
+  "moment.sharing.default_on": "Switch label in Settings › Privacy › Public sharing; off by default. Keep it identical to the wording quoted in moment.sharing.intro.",
+  "highlight.archive.day_today": "Day heading in Highlights › Archive. {date} is the weekday and date from Intl in the UI language, e.g. \"Sunday, October 25\" / \"Sonntag, 25. Oktober\".",
+  "highlight.archive.retention": "Under the Archive. {n} = the viewer's own retention setting in days (1–90). Each author picks their own, so never promise a fixed number.",
+  "highlight.archive.only_mine": "Toggle button on the Archive: show only your own highlights."
 }

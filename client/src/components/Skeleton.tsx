@@ -145,21 +145,32 @@ export function HighlightRowsSkeleton() {
 }
 
 
-/** Stand-in for a month grid (the Highlights archive): a heading row
- *  and 5×7 day cells. */
-export function MonthGridSkeleton() {
+/** Stand-in for Highlights › Archive: the filter bar and two days of
+ *  rows (heading, name, frame strip). */
+export function HighlightArchiveSkeleton() {
   return (
-    <div class="sh-calendar sh-calendar--skeleton" aria-busy="true">
-      <div class="sh-skeleton-calendar-controls">
-        <Skeleton shape="rect" width={80} height={28} />
-        <Skeleton shape="line" width={160} height={18} />
-        <Skeleton shape="rect" width={80} height={28} />
+    <div class="sh-highlights-page sh-hl-arch sh-hl-arch--skeleton" aria-busy="true">
+      <div class="sh-hl-arch-bar">
+        <Skeleton shape="rect" width={150} height={40} />
+        <Skeleton shape="rect" width={100} height={40} />
       </div>
-      <div class="sh-skeleton-calendar-grid" aria-hidden="true">
-        {Array.from({ length: 35 }).map((_, i) => (
-          <Skeleton key={i} shape="rect" width="100%" height={64} class="sh-skeleton-calendar-day" />
-        ))}
-      </div>
+      {[0, 1].map(d => (
+        <div key={d} class="sh-hl-arch-day">
+          <Skeleton shape="line" width={220} height={20} />
+          <ul class="sh-hl-rows">
+            {[0, 1].map(i => (
+              <li key={i} class="sh-hl-arch-row">
+                <Skeleton shape="line" width="40%" height={14} />
+                <span class="sh-hl-arch-strip">
+                  {[0, 1, 2].map(f => (
+                    <Skeleton key={f} shape="rect" width={60} height={80} class="sh-hl-arch-skel-frame" />
+                  ))}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
     </div>
   )
 }

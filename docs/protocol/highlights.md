@@ -356,7 +356,11 @@ A frame whose `media_url` is not a local media reference
 - Frontend: `client/src/features/highlights/` (4 pages — inbox, viewer,
   composer, archive; the composer is the one way to post — every entry
   point opens `/highlights/new` — with the lock card and the "Change for
-  all of today…" sheet), `client/src/components/HighlightShareCard.tsx`, and
+  all of today…" sheet; the archive is a list of days in the viewer's
+  local time, built client-side from `GET /api/highlights` — every
+  highlight still inside its author's retention, 1–90 days — with a
+  month select bounded to months that have highlights and "Only mine"),
+  `client/src/components/HighlightShareCard.tsx`, and
   `client/src/components/HighlightPickerDialog.tsx` for sharing into a feed.
   The viewer's own Share (`viewerSheets.tsx`) asks first when the feed or
   space reaches more people than the highlight's audience

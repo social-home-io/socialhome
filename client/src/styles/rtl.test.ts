@@ -4,7 +4,7 @@
  * jsdom does no layout, so these pin the CSS / markup that keeps RTL
  * mirrored:
  *
- * - Space, calendar, member, Momentum and chrome rules use logical properties
+ * - Space, calendar, member, Momentum, Highlights and chrome rules use logical properties
  *   (``margin-inline-start``, ``inset-inline-end``, ``text-align: start``…),
  *   so card stripes, tape, popovers and the drawer flip with ``dir``.
  * - ``.sh-flip-rtl`` mirrors drawn SVG arrows only. ‹ › « » are
@@ -21,7 +21,7 @@ const css = readFileSync(join(__dirname, 'app.css'), 'utf8')
 const SRC = join(__dirname, '..')
 
 /** Rules whose selectors name these blocks must mirror in RTL. */
-const SCOPED = /\.sh-(?:space|spaces|ss|member|cal|calendar|event|moderation|subscribed|sidenav|mobile-drawer|mobile-nav|post-overflow-wrap|momentum|moment|hlc)(?:[-_\s.:>+~,[]|$)/
+const SCOPED = /\.sh-(?:space|spaces|ss|member|cal|calendar|event|moderation|subscribed|sidenav|mobile-drawer|mobile-nav|post-overflow-wrap|momentum|moment|hl|hlc)(?:[-_\s.:>+~,[]|$)/
 
 /** Physical inline-axis properties (``left: 50%`` + translate centring is
  *  direction-neutral, so it is allowed). */

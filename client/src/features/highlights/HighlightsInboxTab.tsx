@@ -19,7 +19,7 @@
  * with Try again; a failed refresh keeps the list (``StaleNotice``);
  * nothing today → an empty state with Share and the Archive.
  */
-import { useEffect, useId, useState } from 'preact/hooks'
+import { useEffect, useId } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { HighlightRowsSkeleton } from '@/components/Skeleton'
@@ -35,11 +35,12 @@ import {
   loadHouseholdUsers,
 } from '@/store/householdUsers'
 import { ws } from '@/ws'
-import type { HighlightFrame, HighlightInboxItem } from '@/types'
+import type { HighlightInboxItem } from '@/types'
 import { addBase } from '@/baseUrl'
 import { t, isOne } from '@/i18n/i18n'
-import { audienceChip, todayView, type TodayPerson } from './today'
-import { CHIP_ICON, SVG } from './icons'
+import { todayView, type TodayPerson } from './today'
+import { SVG } from './icons'
+import { AudienceChip, FrameThumb, frameCount } from './rowParts'
 
 const inbox = signal<HighlightInboxItem[]>([])
 const loading = signal<boolean>(true)
@@ -65,41 +66,6 @@ const ICON = {
   play: (<svg {...SVG} width={18} height={18}><path d="M7 4l13 8-13 8z" fill="currentColor" /></svg>),
   plus: (<svg {...SVG} width={18} height={18}><path d="M12 5v14M5 12h14" /></svg>),
   chevron: (<svg {...SVG} width={20} height={20} class="sh-flip-rtl"><path d="M9 6l6 6-6 6" /></svg>),
-}
-
-/** The audience chip — a short label on its own wrap line. */
-export function AudienceChip({ person, mine }: { person: TodayPerson; mine: boolean }) {
-  const chip = audienceChip(person.highlight, mine)
-  return (
-    <span class="sh-hl-chip">
-      {CHIP_ICON[chip.icon]}
-      <span class="sr-only">{t('highlight.chip.aria', { who: chip.text })}</span>
-      <span aria-hidden="true">{chip.text}</span>
-    </span>
-  )
-}
-
-/** One frame as a still: the picture, a video's poster with a play
- *  glyph, or a neutral tile when there is no poster (yet). */
-function FrameThumb({ frame }: { frame: HighlightFrame }) {
-  const [broken, setBroken] = useState(false)
-  const isVideo = frame.frame_type === 'video'
-  const src = isVideo ? frame.thumbnail_url : frame.media_url
-  return (
-    <span class={isVideo ? 'sh-hl-thumb sh-hl-thumb--video' : 'sh-hl-thumb'}>
-      {src && !broken && (
-        <img src={src} alt="" loading="lazy" onError={() => setBroken(true)} />
-      )}
-      {isVideo && <span class="sh-hl-thumb__play">{ICON.play}</span>}
-    </span>
-  )
-}
-
-function frameCount(frames: readonly HighlightFrame[]): string {
-  const n = frames.length
-  const allVideo = n > 0 && frames.every(f => f.frame_type === 'video')
-  const key = allVideo ? 'highlight.today.videos' : 'highlight.frames'
-  return t(isOne(n) ? `${key}_one` : key, { n: String(n) })
 }
 
 function personName(p: TodayPerson): string {
@@ -134,7 +100,7 @@ function PersonRow({ person }: { person: TodayPerson }) {
                 {t('highlight.today.ends', { when: relativeFutureTime(person.endsAt) })}
               </span>
             )}
-            <AudienceChip person={person} mine={false} />
+            <AudienceChip highlight={person.highlight} mine={false} />
           </span>
         </span>
         <span class="sh-hl-row__thumbs" aria-hidden="true">
@@ -197,7 +163,7 @@ function StatusCard({ mine }: { mine: TodayPerson | null }) {
                 {t('highlight.today.ends', { when: relativeFutureTime(mine.endsAt) })}
               </span>
             )}
-            <AudienceChip person={mine} mine />
+            <AudienceChip highlight={mine.highlight} mine />
           </p>
         ) : (
           <>
