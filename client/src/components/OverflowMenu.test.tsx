@@ -28,14 +28,18 @@ describe('OverflowMenu', () => {
   })
 
   it('opens on click, focuses the checked item, and moves with the arrow keys', () => {
-    const { getByRole, getAllByRole } = render(
+    const { getByRole } = render(
       <OverflowMenu label="More" items={items()}>⋯</OverflowMenu>,
     )
     const trigger = getByRole('button', { name: 'More' })
     expect(trigger.getAttribute('aria-expanded')).toBe('false')
     fireEvent.click(trigger)
     expect(trigger.getAttribute('aria-expanded')).toBe('true')
-    const opts = getAllByRole(/menuitem/)
+    // Every menu item, plain or radio, in document order (a RegExp role
+    // matcher is no longer accepted by @testing-library's types).
+    const opts = Array.from(document.querySelectorAll<HTMLElement>(
+      ':is([role="menuitem"], [role="menuitemradio"])',
+    ))
     // Opens on the checked choice (Migros), like a native select.
     expect(document.activeElement).toBe(opts[1])
     fireEvent.keyDown(opts[1], { key: 'ArrowDown' })
