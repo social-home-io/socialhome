@@ -21,7 +21,7 @@ dependencies = [
     "orjson==3.13.0",
     "cryptography==50.0.2",
     "aiofiles==25.1.0",
-    "pillow==12.3.0",
+    "pillow==13.0.0",
     # HEIC support — registers an ``Image.open`` handler for HEIC/HEIF
     # bytes so iPhone + modern-Android (Samsung One UI 6+, Pixel
     # HEIF-on) camera photos can be uploaded. Without this, the magic-
