@@ -20,6 +20,7 @@ from socialhome.domain.calendar import (
 from socialhome.domain.errors import InvalidMediaRefError
 from socialhome.domain.events import (
     CalendarEventCreated,
+    CalendarEventDeleted,
     CalendarEventUpdated,
 )
 from socialhome.domain.space import (
@@ -3305,3 +3306,79 @@ async def test_space_all_day_without_tz_names_the_day_sent(space_cal_env):
     assert ev.tz == "Europe/Zurich"
     assert ev.start == datetime(2026, 10, 19, 22, 0, tzinfo=UTC)
     assert ev.end == datetime(2026, 10, 20, 22, 0, tzinfo=UTC)
+
+
+# ─── Event moved / cancelled: who hears of it (live finding #3) ─────────
+
+
+async def _event_with_answers(env):
+    """A space event created by alice with an answer of every kind."""
+    now = (datetime.now(UTC) + timedelta(days=2)).replace(microsecond=0)
+    event = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Flea market",
+        start=now.isoformat(),
+        end=(now + timedelta(hours=2)).isoformat(),
+        created_by="uid-alice",
+    )
+    for uid, status in (
+        ("uid-alice", RSVPStatus.GOING),
+        ("uid-going", RSVPStatus.GOING),
+        ("uid-maybe", RSVPStatus.MAYBE),
+        ("uid-wait", RSVPStatus.WAITLIST),
+        ("uid-no", RSVPStatus.DECLINED),
+    ):
+        await env.space_cal_repo.upsert_rsvp(
+            CalendarRSVP(
+                event_id=event.id,
+                user_id=uid,
+                status=status,
+                updated_at=now.isoformat(),
+                occurrence_at=event.start.isoformat(),
+            ),
+            space_id="sp-cal",
+        )
+    seen: list = []
+
+    async def _capture(evt):
+        seen.append(evt)
+
+    env.bus.subscribe(CalendarEventUpdated, _capture)
+    env.bus.subscribe(CalendarEventDeleted, _capture)
+    return event, now, seen
+
+
+async def test_delete_event_names_its_actor_and_everyone_still_coming(space_cal_env):
+    """Regression: the cancel cohort left out ``maybe`` and named no actor,
+    so the person who cancelled was told of their own change."""
+    env = space_cal_env
+    event, _now, seen = await _event_with_answers(env)
+    await env.space_cal_svc.delete_event(
+        event.id, actor_user_id="uid-alice", space_id="sp-cal"
+    )
+    (deleted,) = [e for e in seen if isinstance(e, CalendarEventDeleted)]
+    assert deleted.actor_user_id == "uid-alice"
+    assert deleted.summary == "Flea market"
+    assert set(deleted.notify_user_ids) == {
+        "uid-alice",
+        "uid-going",
+        "uid-maybe",
+        "uid-wait",
+    }
+
+
+async def test_update_event_names_its_actor_and_material_changes(space_cal_env):
+    env = space_cal_env
+    event, now, seen = await _event_with_answers(env)
+    later = now + timedelta(hours=3)
+    await env.space_cal_svc.update_event(
+        event.id,
+        actor_user_id="uid-alice",
+        space_id="sp-cal",
+        start=later.isoformat(),
+        end=(later + timedelta(hours=1)).isoformat(),
+        description="bring cash",
+    )
+    (updated,) = [e for e in seen if isinstance(e, CalendarEventUpdated)]
+    assert updated.actor_user_id == "uid-alice"
+    assert updated.material_changes == ("start", "end")

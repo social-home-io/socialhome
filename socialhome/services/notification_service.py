@@ -39,10 +39,11 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from ..domain.calendar import RSVPStatus
 from ..domain.conversation import ConversationType, SystemChatScope, mute_active
 from ..domain.events import (
     AppChallengeReceived,
@@ -1607,56 +1608,39 @@ class NotificationService(ProtectionGateMixin):
         self,
         event: CalendarEventDeleted,
     ) -> None:
-        """Phase D: cancellation push to RSVPed members.
+        """Phase D: tell this household's people who were coming that the
+        event is cancelled.
 
-        Receives the pre-delete snapshot from
-        :meth:`SpaceCalendarService.delete_event`. The cohort
-        (``notify_user_ids``) was captured before the FK CASCADE
-        wiped the RSVP rows.
+        ``notify_user_ids`` is the cohort captured before the FK CASCADE
+        wiped the RSVP rows — by :meth:`SpaceCalendarService.delete_event`
+        for a local cancel, by the inbound ``SPACE_CALENDAR_EVENT_DELETED``
+        handler for one made in another household.
         """
-        if not event.notify_user_ids:
-            return
-        title = self._t(
-            "notification.calendar.cancelled",
-            locale=None,
+        await self._tell_still_coming(
+            event.notify_user_ids,
+            actor_user_id=event.actor_user_id,
+            ntype="calendar_event_cancelled",
+            key="notification.calendar.cancelled",
             fallback="Event cancelled: {summary}",
             summary=event.summary or "(removed)",
+            link_url=(
+                space_calendar_link(event.space_id)
+                if event.space_id
+                else HOUSEHOLD_CALENDAR_LINK
+            ),
         )
-        for uid in event.notify_user_ids:
-            recipient = await self._users.get_by_user_id(uid)
-            if recipient is None:
-                continue
-            localized = (
-                self._t(
-                    "notification.calendar.cancelled",
-                    locale=self._locale(recipient),
-                    fallback="Event cancelled: {summary}",
-                    summary=event.summary or "(removed)",
-                )
-                or title
-            )
-            await self._save_notif(
-                new_notification(
-                    user_id=uid,
-                    type="calendar_event_cancelled",
-                    title=localized,
-                    link_url=(
-                        space_calendar_link(event.space_id)
-                        if event.space_id
-                        else HOUSEHOLD_CALENDAR_LINK
-                    ),
-                )
-            )
 
     async def on_calendar_event_updated(
         self,
         event: CalendarEventUpdated,
     ) -> None:
-        """Phase D: push only when material fields change.
+        """Phase D: tell this household's people who are coming when the
+        event moves — only on material changes.
 
         Material = start / end / summary / capacity-down. Cosmetic
         updates (description, attendees, rrule, all_day) stay silent so
-        members don't get notification spam from incidental edits.
+        members don't get notification spam from incidental edits. Fires
+        for a local edit and for one made in another household alike.
         """
         if not event.material_changes:
             return
@@ -1671,19 +1655,6 @@ class NotificationService(ProtectionGateMixin):
                 exc_info=True,
             )
             return
-        cohort = {
-            r.user_id
-            for r in rsvps
-            if r.status
-            in (
-                "going",
-                "waitlist",
-                "requested",
-                "maybe",
-            )
-        }
-        if not cohort:
-            return
         # A space event's ``calendar_id`` is the space id; anything else
         # is a personal calendar on the household calendar page.
         link = (
@@ -1691,22 +1662,57 @@ class NotificationService(ProtectionGateMixin):
             if await self._spaces.get(cal_event.calendar_id) is not None
             else HOUSEHOLD_CALENDAR_LINK
         )
-        for uid in cohort:
+        await self._tell_still_coming(
+            [r.user_id for r in rsvps if r.status in RSVPStatus.STILL_COMING],
+            actor_user_id=event.actor_user_id,
+            ntype="calendar_event_updated",
+            key="notification.calendar.updated",
+            fallback="Event updated: {summary}",
+            summary=cal_event.summary,
+            link_url=link,
+        )
+
+    async def _tell_still_coming(
+        self,
+        cohort: Iterable[str],
+        *,
+        actor_user_id: str | None,
+        ntype: str,
+        key: str,
+        fallback: str,
+        summary: str,
+        link_url: str,
+    ) -> None:
+        """One bell per person in *cohort* who lives in this household.
+
+        The cohort holds every household's answers (RSVPs federate), so
+        each household tells its own people and nobody is told twice — a
+        person with answers for several occurrences included. Never the
+        person who made the change (the gate lets one's own action through,
+        so that is checked here); :meth:`_save_notif` keeps out anyone who
+        blocked them or whom a guardian block separates from them.
+        """
+        withheld = await self._withheld_from(actor_user_id) if actor_user_id else None
+        for uid in dict.fromkeys(cohort):
+            if uid == actor_user_id:
+                continue
             recipient = await self._users.get_by_user_id(uid)
             if recipient is None:
-                continue
+                continue  # another household's person: their household tells them
             await self._save_notif(
                 new_notification(
                     user_id=uid,
-                    type="calendar_event_updated",
+                    type=ntype,
                     title=self._t(
-                        "notification.calendar.updated",
+                        key,
                         locale=self._locale(recipient),
-                        fallback="Event updated: {summary}",
-                        summary=cal_event.summary,
+                        fallback=fallback,
+                        summary=summary,
                     ),
-                    link_url=link,
-                )
+                    link_url=link_url,
+                ),
+                actor_user_id=actor_user_id,
+                withheld=withheld,
             )
 
     async def on_event_reminder_due(self, event: EventReminderDue) -> None:

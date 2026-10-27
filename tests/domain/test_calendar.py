@@ -17,6 +17,7 @@ from socialhome.domain.calendar import (
     RSVPStatus,
     all_day_covers,
     is_occurrence_id,
+    material_changes,
 )
 
 
@@ -244,3 +245,42 @@ def test_day_span_counts_and_covers_whole_days():
     assert span.covers(date(2026, 10, 26)) and span.covers(date(2026, 10, 31))
     assert not span.covers(date(2026, 11, 1))
     assert DaySpan(date(2026, 10, 26), date(2026, 10, 26)).day_count == 1
+
+
+def _ev(**kw) -> CalendarEvent:
+    base = {
+        "id": "e",
+        "calendar_id": "sp",
+        "summary": "Flea market",
+        "start": datetime(2026, 5, 1, 10, tzinfo=UTC),
+        "end": datetime(2026, 5, 1, 11, tzinfo=UTC),
+        "created_by": "u",
+        "capacity": 10,
+    }
+    return CalendarEvent(**{**base, **kw})
+
+
+@pytest.mark.parametrize(
+    ("after", "expected"),
+    [
+        ({}, ()),
+        ({"description": "bring cash", "location": "Hall"}, ()),
+        ({"capacity": 20}, ()),
+        ({"capacity": None}, ()),
+        ({"capacity": 5}, ("capacity_down",)),
+        ({"summary": "Bake sale"}, ("summary",)),
+        (
+            {
+                "start": datetime(2026, 5, 2, 10, tzinfo=UTC),
+                "end": datetime(2026, 5, 2, 11, tzinfo=UTC),
+            },
+            ("start", "end"),
+        ),
+    ],
+)
+def test_material_changes_are_what_people_coming_must_hear(after, expected):
+    assert material_changes(_ev(), _ev(**after)) == expected
+
+
+def test_still_coming_is_every_answer_but_declined():
+    assert RSVPStatus.STILL_COMING == RSVPStatus.ALL - {RSVPStatus.DECLINED}

@@ -261,6 +261,34 @@ class RSVPStatus:
     #: transitions on capped events).
     USER_SETTABLE = frozenset({GOING, MAYBE, DECLINED})
 
+    #: Answers that still plan to come — or might: the people told when the
+    #: event moves or is cancelled. ``DECLINED`` is not among them.
+    STILL_COMING = frozenset({GOING, MAYBE, REQUESTED, WAITLIST})
+
+
+def material_changes(before: CalendarEvent, after: CalendarEvent) -> tuple[str, ...]:
+    """The changes from *before* to *after* that people coming must hear of.
+
+    ``summary``, ``start`` and ``end``, plus ``capacity_down`` when a cap
+    shrinks (it can push people onto the waitlist). A raised cap promotes on
+    its own and the other fields (description, attendees, rrule, all-day,
+    cover, location) are cosmetic: an empty tuple means nobody is told.
+    """
+    changes: list[str] = []
+    if before.summary != after.summary:
+        changes.append("summary")
+    if before.start != after.start:
+        changes.append("start")
+    if before.end != after.end:
+        changes.append("end")
+    if (
+        before.capacity is not None
+        and after.capacity is not None
+        and after.capacity < before.capacity
+    ):
+        changes.append("capacity_down")
+    return tuple(changes)
+
 
 @dataclass(slots=True, frozen=True)
 class CalendarRSVP:

@@ -8,9 +8,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from socialhome.domain.calendar import CalendarRSVP
 from socialhome.domain.events import (
     CalendarEventCreated,
     CalendarEventDeleted,
+    CalendarEventUpdated,
     GalleryAlbumCreated,
     GalleryAlbumDeleted,
     GalleryAlbumUpdated,
@@ -1658,7 +1660,10 @@ async def test_calendar_saved_missing_end_drops(repos, handlers):
 
 
 async def test_calendar_deleted(repos, handlers):
-    repos["calendar"]._events["e-1"] = ("sp-1", SimpleNamespace(created_by="u-author"))
+    repos["calendar"]._events["e-1"] = (
+        "sp-1",
+        SimpleNamespace(created_by="u-author", summary="Picnic"),
+    )
     await handlers._on_calendar_deleted(
         _event(
             FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
@@ -1678,7 +1683,10 @@ async def test_calendar_deleted_publishes_space_scoped_bus_event(bus, repos, han
         seen.append(evt)
 
     bus.subscribe(CalendarEventDeleted, _capture)
-    repos["calendar"]._events["e-1"] = ("sp-1", SimpleNamespace(created_by="u-author"))
+    repos["calendar"]._events["e-1"] = (
+        "sp-1",
+        SimpleNamespace(created_by="u-author", summary="Picnic"),
+    )
     await handlers._on_calendar_deleted(
         _event(
             FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
@@ -1716,6 +1724,86 @@ async def test_calendar_inbound_publishes_bus_event(bus, repos, handlers):
     )
     assert len(received) == 1
     assert received[0].event.id == "e-fed"
+
+
+async def test_calendar_inbound_edit_publishes_updated_with_actor_and_changes(
+    bus, repos, handlers
+):
+    """Regression (live finding #3): an edit made in another household
+    published nothing locally, so this household's people who were coming
+    never heard the event moved. It now publishes ``CalendarEventUpdated``
+    with the material changes and the payload's actor."""
+    received: list = []
+
+    async def _capture(evt):
+        received.append(evt)
+
+    bus.subscribe(CalendarEventUpdated, _capture)
+    base = {
+        "id": "e-fed",
+        "calendar_id": "sp-1",
+        "summary": "Flea market",
+        "created_by": "u-remote",
+        "actor_user_id": "u-remote",
+        "start": "2026-09-01T18:00:00+00:00",
+        "end": "2026-09-01T20:00:00+00:00",
+    }
+    await handlers._on_calendar_saved(
+        _event(FederationEventType.SPACE_CALENDAR_EVENT_CREATED, base, space_id="sp-1")
+    )
+    assert received == []  # a create is CalendarEventCreated, not an update
+    await handlers._on_calendar_saved(
+        _event(
+            FederationEventType.SPACE_CALENDAR_EVENT_UPDATED,
+            {**base, "start": "2026-09-01T19:00:00+00:00", "description": "cash"},
+            space_id="sp-1",
+        )
+    )
+    (updated,) = received
+    assert updated.event.id == "e-fed"
+    assert updated.material_changes == ("start",)
+    assert updated.actor_user_id == "u-remote"
+
+
+async def test_calendar_inbound_delete_carries_the_still_coming_cohort(
+    bus, repos, handlers
+):
+    """Regression (live finding #3): the inbound cancel published no cohort,
+    so nobody here was told. The cohort is captured before the RSVP rows go
+    with the event; a declined answer is not in it."""
+    seen: list = []
+
+    async def _capture(evt):
+        seen.append(evt)
+
+    bus.subscribe(CalendarEventDeleted, _capture)
+    repos["calendar"]._events["e-1"] = (
+        "sp-1",
+        SimpleNamespace(created_by="u-author", summary="Picnic"),
+    )
+    for uid, status in (
+        ("u-going", "going"),
+        ("u-maybe", "maybe"),
+        ("u-no", "declined"),
+    ):
+        repos["calendar"].rsvps[("e-1", uid, "occ")] = CalendarRSVP(
+            event_id="e-1",
+            user_id=uid,
+            status=status,
+            updated_at="2026-09-01T00:00:00+00:00",
+            occurrence_at="occ",
+        )
+    await handlers._on_calendar_deleted(
+        _event(
+            FederationEventType.SPACE_CALENDAR_EVENT_DELETED,
+            {"id": "e-1", "actor_user_id": "u-author"},
+            space_id="sp-1",
+        )
+    )
+    (deleted,) = seen
+    assert deleted.summary == "Picnic"
+    assert deleted.actor_user_id == "u-author"
+    assert set(deleted.notify_user_ids) == {"u-going", "u-maybe"}
 
 
 # ─── RSVP federation (Phase A) ─────────────────────────────────────────

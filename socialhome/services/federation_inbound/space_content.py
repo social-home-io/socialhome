@@ -47,10 +47,12 @@ from ...domain.calendar import (
     CalendarRSVP,
     RSVPStatus,
     coerce_capacity,
+    material_changes,
 )
 from ...domain.events import (
     CalendarEventCreated,
     CalendarEventDeleted,
+    CalendarEventUpdated,
     GalleryAlbumCreated,
     GalleryAlbumDeleted,
     GalleryAlbumUpdated,
@@ -1477,6 +1479,19 @@ class SpaceContentInboundHandlers:
         # arrivals too. The bridge guards against duplicates by linked_event_id.
         if is_new:
             await self._bus.publish(CalendarEventCreated(event=ev))
+        elif existing is not None:
+            # An edit made in another household: tell this household's
+            # people who are coming when it moved (the notification
+            # service's RSVP cohort), refresh their personal-calendar mirrors,
+            # the feed card and open calendars — the same subscribers a local
+            # edit reaches. ``existing`` is held in this space (checked above).
+            await self._bus.publish(
+                CalendarEventUpdated(
+                    event=ev,
+                    material_changes=material_changes(existing[1], ev),
+                    actor_user_id=payload_actor(event),
+                )
+            )
         # Drain any RSVPs that arrived ahead of this event.
         try:
             await self._calendar_repo.flush_pending_rsvps(event_id, space_id=space_id)
@@ -1515,6 +1530,17 @@ class SpaceContentInboundHandlers:
             row_owner=existing[1].created_by,
         ):
             return
+        # Who is still coming, captured before the RSVP rows CASCADE away
+        # with the event: this household's people among them hear of the
+        # cancellation (every household tells its own — nothing new on the
+        # wire).
+        notify = tuple(
+            dict.fromkeys(
+                r.user_id
+                for r in await self._calendar_repo.list_rsvps(event_id)
+                if r.status in RSVPStatus.STILL_COMING
+            )
+        )
         if not await self._calendar_repo.delete_event(
             event_id, space_id=space_id, deleted_by=payload_actor(event) or ""
         ):
@@ -1527,7 +1553,13 @@ class SpaceContentInboundHandlers:
         # space's members (without it RealtimeService fans it out to
         # the whole household).
         await self._bus.publish(
-            CalendarEventDeleted(event_id=event_id, space_id=space_id)
+            CalendarEventDeleted(
+                event_id=event_id,
+                summary=existing[1].summary,
+                space_id=space_id,
+                notify_user_ids=notify,
+                actor_user_id=payload_actor(event),
+            )
         )
 
     # ─── RSVPs (per-occurrence) ──────────────────────────────────────────
