@@ -47,15 +47,25 @@ if TYPE_CHECKING:
 SPACE_CATEGORIES: frozenset[str] = frozenset(
     {
         "general",
-        "hobby_crafts",
-        "sports_outdoors",
-        "gaming",
-        "music_arts",
-        "food_drink",
-        "tech",
         "local",
+        "community",
+        "non_profit",
         "family_parenting",
         "learning",
+        "books_writing",
+        "hobby_crafts",
+        "music_arts",
+        "food_drink",
+        "sports_outdoors",
+        "health_wellbeing",
+        "nature_garden",
+        "pets_animals",
+        "travel",
+        "gaming",
+        "tech",
+        "faith_spirituality",
+        "politics_activism",
+        "work_career",
     }
 )
 

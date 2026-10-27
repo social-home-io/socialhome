@@ -37,6 +37,8 @@ describe('guessPreset', () => {
     expect(guessPreset('X', 'family_parenting')).toBe('family')
     expect(guessPreset('X', 'local')).toBe('neighbours')
     expect(guessPreset('X', 'gaming')).toBe('club')
+    expect(guessPreset('X', 'non_profit')).toBe('club')
+    expect(guessPreset('X', 'community')).toBe('club')
     expect(guessPreset('X', 'general')).toBeNull()
   })
 })

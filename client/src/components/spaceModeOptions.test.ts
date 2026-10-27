@@ -35,13 +35,18 @@ describe('spaceModeOptions', () => {
       .toBe('Households in the area join right away. Near the edge, an admin decides.')
   })
 
-  it('has ten discovery categories starting with general', () => {
+  it('has twenty discovery categories starting with general', () => {
     expect(SPACE_CATEGORIES[0]).toEqual({ value: 'general', label: 'General' })
-    expect(SPACE_CATEGORIES).toHaveLength(10)
+    expect(SPACE_CATEGORIES).toHaveLength(20)
     expect(SPACE_CATEGORIES.map(c => c.value)).toEqual([
-      'general', 'hobby_crafts', 'sports_outdoors', 'gaming', 'music_arts',
-      'food_drink', 'tech', 'local', 'family_parenting', 'learning',
+      'general', 'local', 'community', 'non_profit', 'family_parenting',
+      'learning', 'books_writing', 'hobby_crafts', 'music_arts', 'food_drink',
+      'sports_outdoors', 'health_wellbeing', 'nature_garden', 'pets_animals',
+      'travel', 'gaming', 'tech', 'faith_spirituality', 'politics_activism',
+      'work_career',
     ])
+    // Every one has a real English label (no raw key leaking through).
+    for (const c of SPACE_CATEGORIES) expect(c.label).not.toMatch(/^space\./)
   })
 
   it('categoryLabel maps known values and falls back to General', () => {

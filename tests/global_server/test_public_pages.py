@@ -302,15 +302,75 @@ async def test_landing_no_filter_shows_all_active(client):
 
 
 async def test_landing_renders_category_tabs(client):
-    """The filter row renders an All tab + a per-category tab, and the
-    ``.filters`` row uses ``flex-wrap`` so 10 tabs wrap on narrow screens."""
+    """The filter row renders an All tab + a tab per category that has an
+    active space, and wraps (``flex-wrap``) on narrow screens."""
+    fed_repo = client._app[gfs_fed_repo_key]
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="o.home",
+            display_name="O",
+            public_key="aa" * 32,
+            status="active",
+        )
+    )
+    for sid, cat, status in (
+        ("sp-g", "gaming", "active"),
+        ("sp-h", "hobby_crafts", "active"),
+        ("sp-n", "non_profit", "active"),
+        ("sp-p", "travel", "pending"),
+    ):
+        await fed_repo.upsert_space(
+            GlobalSpace(
+                space_id=sid,
+                owning_instance="o.home",
+                name=f"Space {sid}",
+                status=status,
+                category=cat,
+            )
+        )
     resp = await client.get("/")
     text = await resp.text()
     assert 'href="/?category=gaming"' in text
+    assert 'href="/?category=non_profit"' in text
     # Assert a tab *label* that isn't also a plausible space name — the
     # HTML-escaped "Hobby & crafts" only appears as a filter tab.
     assert "Hobby &amp; crafts" in text
     assert "flex-wrap" in text
+    # No chip for a category without an active space (pending doesn't count).
+    assert 'href="/?category=travel"' not in text
+    assert 'href="/?category=tech"' not in text
+
+
+async def test_landing_keeps_the_selected_category_tab_without_spaces(client):
+    resp = await client.get("/?category=community")
+    text = await resp.text()
+    assert '<a href="/?category=community" class="active">Community</a>' in text
+    assert 'href="/?category=gaming"' not in text
+
+
+async def test_landing_shows_new_category_labels(client):
+    fed_repo = client._app[gfs_fed_repo_key]
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="o.home",
+            display_name="O",
+            public_key="aa" * 32,
+            status="active",
+        )
+    )
+    await fed_repo.upsert_space(
+        GlobalSpace(
+            space_id="sp-c",
+            owning_instance="o.home",
+            name="Repair Café",
+            status="active",
+            category="community",
+        )
+    )
+    resp = await client.get("/?category=community")
+    text = await resp.text()
+    assert "Repair Café" in text
+    assert "· Community</div>" in text
 
 
 async def test_landing_unknown_category_shows_all_with_all_tab_active(client):

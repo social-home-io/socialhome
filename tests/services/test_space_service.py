@@ -6048,19 +6048,29 @@ async def test_remote_admin_invite_missing_params_noop(stack):
 # ---------------------------------------------------------------------------
 
 
-def test_space_categories_has_ten_values():
+def test_space_categories_has_twenty_values():
     assert SPACE_CATEGORIES == frozenset(
         {
             "general",
-            "hobby_crafts",
-            "sports_outdoors",
-            "gaming",
-            "music_arts",
-            "food_drink",
-            "tech",
             "local",
+            "community",
+            "non_profit",
             "family_parenting",
             "learning",
+            "books_writing",
+            "hobby_crafts",
+            "music_arts",
+            "food_drink",
+            "sports_outdoors",
+            "health_wellbeing",
+            "nature_garden",
+            "pets_animals",
+            "travel",
+            "gaming",
+            "tech",
+            "faith_spirituality",
+            "politics_activism",
+            "work_career",
         }
     )
 

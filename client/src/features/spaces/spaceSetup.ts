@@ -102,7 +102,10 @@ export function guessPreset(name: string, category?: string | null): SetupPreset
     case 'family_parenting': return 'family'
     case 'local': return 'neighbours'
     case 'hobby_crafts': case 'sports_outdoors': case 'gaming': case 'music_arts':
-    case 'food_drink': case 'tech': case 'learning':
+    case 'food_drink': case 'tech': case 'learning': case 'community':
+    case 'non_profit': case 'books_writing': case 'health_wellbeing':
+    case 'nature_garden': case 'pets_animals': case 'travel':
+    case 'faith_spirituality': case 'politics_activism': case 'work_career':
       return 'club'
     default: return null
   }
