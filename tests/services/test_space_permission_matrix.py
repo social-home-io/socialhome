@@ -99,6 +99,7 @@ GATED_METHODS: frozenset[str] = frozenset(
         "require_reader",
         "mark_feed_read",
         "list_feed",
+        "read_post",
         "list_comments",
         # A non-member reads only a public/global space's landing fields.
         "read_space",
@@ -477,6 +478,12 @@ async def stack(tmp_dir):
         (
             "list_feed",
             lambda s: s.space_svc.list_feed(s.space.id, viewer_user_id=s.bob.user_id),
+        ),
+        (
+            "read_post",
+            lambda s: s.space_svc.read_post(
+                s.space.id, "post-x", viewer_user_id=s.bob.user_id
+            ),
         ),
         (
             "list_comments",
