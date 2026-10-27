@@ -2,28 +2,40 @@
 
 from __future__ import annotations
 
+import ast
+import re
 from datetime import UTC, datetime
 from pathlib import Path
+from string import Formatter
+from types import SimpleNamespace
 
+import orjson
 import pytest
 
 import socialhome.i18n as i18n_pkg
+import socialhome.infrastructure.calendar_reminder_scheduler as calendar_reminder_scheduler_module
+import socialhome.services.notification_service as notification_service_module
 from socialhome.crypto import (
     derive_instance_id,
     generate_identity_keypair,
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import (
+    CommentAdded,
+    DmMessageCreated,
     HighlightFrameReactionChanged,
     MomentCreated,
     MomentReactionChanged,
     PostCreated,
+    RemoteSpaceDissolved,
     RemoteSpaceInviteAccepted,
     SpaceAdminSeedsRetiredAfterRestore,
+    SpaceLocationFeatureEnabled,
+    SpacePostModerated,
     TaskAssigned,
     UserFollowed,
 )
-from socialhome.domain.post import Post, PostType
+from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import (
     JoinMode,
     Space,
@@ -39,7 +51,9 @@ from socialhome.repositories.notification_repo import SqliteNotificationRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.notification_service import (
-    _PUSH_SAFE_TITLES,
+    _PUSH_AS_IS,
+    _PUSH_GENERIC,
+    _PUSH_TITLES,
     NotificationService,
 )
 
@@ -305,11 +319,13 @@ class _PushCapture:
 
 
 async def test_content_free_push_titles_are_translated(tmp_dir):
-    """Every generic push title ships in every locale, and the push for a
-    task assigned to a German speaker reads German, without the task title."""
+    """Every who-and-where push title ships in every locale, and the push
+    for a task assigned to a German speaker reads German — who assigned it,
+    without the task title."""
     shipped = Catalog.from_directory(Path(i18n_pkg.__file__).parent / "messages")
+    variants = [v for vs in _PUSH_TITLES.values() for v in vs] + [_PUSH_GENERIC]
     for locale in ("en", "de", "es", "fr", "nl"):
-        for key, _fallback in _PUSH_SAFE_TITLES.values():
+        for key, _fallback in variants:
             assert shipped.gettext(key, locale=locale) != key, (locale, key)
     db = AsyncDatabase(tmp_dir / "p.db", batch_timeout_ms=10)
     await db.startup()
@@ -317,6 +333,10 @@ async def test_content_free_push_titles_are_translated(tmp_dir):
         await db.enqueue(
             "INSERT INTO users(username, user_id, display_name, locale)"
             " VALUES('bob', 'b-id', 'Bob', 'de')",
+        )
+        await db.enqueue(
+            "INSERT INTO users(username, user_id, display_name, locale)"
+            " VALUES('alice', 'a-id', 'Alice', 'en')",
         )
         bus = EventBus()
         svc = NotificationService(
@@ -346,7 +366,7 @@ async def test_content_free_push_titles_are_translated(tmp_dir):
                 assigned_to="b-id",
             )
         )
-        assert push.titles == ["Dir wurde eine Aufgabe zugewiesen"]
+        assert push.titles == ["Alice hat dir eine Aufgabe zugewiesen"]
     finally:
         await db.shutdown()
 
@@ -409,3 +429,337 @@ async def test_invite_answers_name_who_and_where_in_the_inviters_language(tmp_di
         ]
     finally:
         await db.shutdown()
+
+
+# ─── Every title speaks the recipient's language ───────────────────────
+
+_MESSAGES = Path(i18n_pkg.__file__).parent / "messages"
+_LOCALES = ("en", "de", "es", "fr", "nl")
+_SOURCES = (
+    Path(notification_service_module.__file__),
+    Path(calendar_reminder_scheduler_module.__file__),
+)
+#: Keys the service builds at runtime (``f"notification.{…}.{x}"``):
+#: their constant prefix → every value it is completed with.
+_DYNAMIC_KEYS = {
+    "notification.space.feature.": ("pages", "tasks", "stickies", "calendar"),
+    "notification.space.moderation.": ("approved", "rejected", "expired"),
+}
+_KEY = re.compile(r"^notification\.[a-z_]+(\.[a-z_]+)*$")
+_PUSH_TITLES_ALL = [v for vs in _PUSH_TITLES.values() for v in vs] + [_PUSH_GENERIC]
+
+
+def _catalogs() -> dict[str, dict[str, str]]:
+    return {
+        loc: orjson.loads((_MESSAGES / f"{loc}.json").read_bytes()) for loc in _LOCALES
+    }
+
+
+def _fields(text: str) -> set[str]:
+    return {f for _, f, _, _ in Formatter().parse(text) if f}
+
+
+def _notification_keys() -> set[str]:
+    """Every catalog key the notification code can look up."""
+    keys: set[str] = set()
+    for source in _SOURCES:
+        for node in ast.walk(ast.parse(source.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                if _KEY.match(node.value):
+                    keys.add(node.value)
+            elif isinstance(node, ast.JoinedStr):
+                head = node.values[0]
+                if (
+                    isinstance(head, ast.Constant)
+                    and isinstance(head.value, str)
+                    and head.value.startswith("notification.")
+                ):
+                    assert head.value in _DYNAMIC_KEYS, (
+                        f"new runtime-built key {head.value}…: list its values "
+                        "in _DYNAMIC_KEYS"
+                    )
+                    keys.update(head.value + v for v in _DYNAMIC_KEYS[head.value])
+    return keys
+
+
+def test_every_notification_key_ships_in_every_locale():
+    """Each key the notification service uses exists in all five catalogs,
+    with the same placeholders as English — none falls back to English."""
+    catalogs = _catalogs()
+    keys = _notification_keys()
+    assert len(keys) > 60  # the walk found the service's keys
+    missing = [
+        (loc, k) for k in sorted(keys) for loc in _LOCALES if k not in catalogs[loc]
+    ]
+    assert missing == []
+    mismatched = [
+        (loc, k)
+        for k in sorted(keys)
+        for loc in _LOCALES
+        if _fields(catalogs[loc][k]) != _fields(catalogs["en"][k])
+    ]
+    assert mismatched == []
+
+
+def test_every_fallback_matches_its_english_catalog_entry():
+    """A ``_t(key, fallback=…)`` fallback has the same placeholders as the
+    English catalog entry, so a row reads right before or without the
+    catalog."""
+    catalogs = _catalogs()
+    tree = ast.parse(_SOURCES[0].read_text(encoding="utf-8"))
+    pairs: list[tuple[str, str]] = list(_PUSH_TITLES_ALL)
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "_t"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+        ):
+            for kw in node.keywords:
+                if kw.arg == "fallback" and isinstance(kw.value, ast.Constant):
+                    pairs.append((node.args[0].value, kw.value.value))
+    assert len(pairs) > 40
+    bad = [(k, f) for k, f in pairs if _fields(f) != _fields(catalogs["en"].get(k, ""))]
+    assert bad == []
+
+
+def _has_literal_text(node: ast.AST) -> bool:
+    """Whether *node* builds text from an English literal — an f-string or
+    a non-empty string constant — outside a catalog lookup."""
+    if (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"_t", "_someone", "_content_free_title"}
+    ):
+        return False
+    if isinstance(node, ast.JoinedStr):
+        return True
+    if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value:
+        return True
+    return any(_has_literal_text(child) for child in ast.iter_child_nodes(node))
+
+
+def test_no_title_is_built_from_a_literal_english_string():
+    """A stored title or body never comes from an English literal: every
+    one goes through the catalog in the recipient's language. (Regression:
+    "{name} messaged you", "commented on a post", "Your post was
+    moderated", "“{space}” was dissolved", "Location sharing turned on…",
+    the household calendar's "{summary} — in N min".)"""
+    offenders: list[str] = []
+    for source in _SOURCES:
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            values: list[ast.AST] = []
+            if (
+                isinstance(node, ast.keyword)
+                and node.arg in {"title", "body"}
+                or isinstance(node, ast.Assign)
+                and any(
+                    isinstance(t, ast.Name) and t.id in {"title", "body"}
+                    for t in node.targets
+                )
+            ):
+                values.append(node.value)
+            offenders += [
+                f"{source.name}:{v.lineno}" for v in values if _has_literal_text(v)
+            ]
+    assert offenders == []
+
+
+def test_the_literal_title_check_catches_a_literal():
+    """The check above does fire on the shapes it bans."""
+    for code in (
+        'new_notification(title=f"{name} messaged you")',
+        'new_notification(title="Your post was moderated")',
+    ):
+        call = ast.parse(code).body[0].value
+        assert _has_literal_text(call.keywords[0].value), code
+    assert _has_literal_text(ast.parse('name + " joined"').body[0].value)
+    assert not _has_literal_text(
+        ast.parse('self._t("k", locale=loc, fallback="{a} posted", a=n)').body[0].value
+    )
+
+
+def _created_types() -> set[str]:
+    """Every notification type the service writes."""
+    tree = ast.parse(_SOURCES[0].read_text(encoding="utf-8"))
+    types: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.keyword) and node.arg in {
+            "type",
+            "ntype",
+            "generic_type",
+        }:
+            if isinstance(node.value, ast.Constant) and node.value.value:
+                types.add(node.value.value)
+            elif isinstance(node.value, ast.JoinedStr):
+                head = node.value.values[0]
+                assert isinstance(head, ast.Constant)
+                assert head.value == "bazaar_listing_", head.value
+                types |= {"bazaar_listing_sold", "bazaar_listing_expired"}
+        elif (
+            isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Tuple)
+            and isinstance(node.targets[0].elts[0], ast.Name)
+            and node.targets[0].elts[0].id == "ntype"
+            and isinstance(node.value, ast.Tuple)
+            and isinstance(node.value.elts[0], ast.Constant)
+        ):
+            types.add(node.value.elts[0].value)
+    return types
+
+
+def test_every_type_decides_what_its_push_says():
+    """D11: each type the service creates either pushes its bell title (it
+    names only people, spaces and chats) or has a who-and-where push title
+    — never both, never neither."""
+    created = _created_types()
+    assert {"dm_message", "space_mention", "space_here", "moment_reacted"} <= created
+    assert not (_PUSH_AS_IS & _PUSH_TITLES.keys())
+    assert created - _PUSH_AS_IS - _PUSH_TITLES.keys() == set()
+
+
+# ─── The formerly English-only titles, in German ───────────────────────
+
+
+@pytest.fixture
+async def de_env(tmp_dir):
+    """Bob (de) and Alice (en) in the space "Crew"; the shipped catalog."""
+    db = AsyncDatabase(tmp_dir / "de.db", batch_timeout_ms=10)
+    await db.startup()
+    for row in (("bob", "b-id", "Bob", "de"), ("alice", "a-id", "Alice", "en")):
+        await db.enqueue(
+            "INSERT INTO users(username, user_id, display_name, locale)"
+            " VALUES(?, ?, ?, ?)",
+            row,
+        )
+    spaces = SqliteSpaceRepo(db)
+    await spaces.save(
+        Space(
+            id="sp1",
+            name="Crew",
+            owner_instance_id="iid",
+            owner_username="alice",
+            identity_public_key="00" * 32,
+            config_sequence=0,
+            features=SpaceFeatures(),
+            space_type=SpaceType.PRIVATE,
+            join_mode=JoinMode.INVITE_ONLY,
+        )
+    )
+    for uid, role in (("a-id", SpaceRole.OWNER), ("b-id", SpaceRole.MEMBER)):
+        await spaces.save_member(
+            SpaceMember(
+                space_id="sp1",
+                user_id=uid,
+                role=role.value,
+                joined_at="2026-01-01 00:00:00",
+            )
+        )
+    bus = EventBus()
+    repo = SqliteNotificationRepo(db)
+    users = SqliteUserRepo(db)
+    svc = NotificationService(
+        repo, users, spaces, bus, i18n=Catalog.from_directory(_MESSAGES)
+    )
+    svc.wire()
+    yield SimpleNamespace(bus=bus, repo=repo, svc=svc, users=users)
+    await db.shutdown()
+
+
+async def _bob_titles(env) -> list[str]:
+    return [n.title for n in await env.repo.list("b-id")]
+
+
+async def test_a_household_comment_reads_german(de_env):
+    await de_env.bus.publish(
+        CommentAdded(
+            post_id="p1",
+            comment=Comment(
+                id="c1",
+                post_id="p1",
+                author="a-id",
+                type=CommentType.TEXT,
+                created_at=datetime(2026, 4, 15, tzinfo=UTC),
+                content="secret",
+            ),
+        )
+    )
+    assert await _bob_titles(de_env) == ["Alice hat einen Beitrag kommentiert"]
+
+
+@pytest.mark.parametrize(
+    ("message_type", "expected"),
+    [
+        ("text", "Alice hat dir geschrieben"),
+        ("location", "Alice hat einen Ort geteilt"),
+    ],
+)
+async def test_a_chat_message_reads_german(de_env, message_type, expected):
+    await de_env.bus.publish(
+        DmMessageCreated(
+            conversation_id="c1",
+            message_id="m1",
+            sender_user_id="a-id",
+            sender_display_name="Alice",
+            recipient_user_ids=("b-id",),
+            content="secret",
+            message_type=message_type,
+        )
+    )
+    assert await _bob_titles(de_env) == [expected]
+
+
+async def test_space_notices_read_german(de_env):
+    await de_env.bus.publish(
+        SpacePostModerated(
+            space_id="sp1",
+            post=Post(
+                id="p1",
+                author="b-id",
+                type=PostType.TEXT,
+                content="secret",
+                created_at=datetime(2026, 4, 15, tzinfo=UTC),
+            ),
+            moderated_by="a-id",
+        )
+    )
+    await de_env.bus.publish(
+        SpaceLocationFeatureEnabled(
+            space_id="sp1", space_name="Crew", actor_user_id="a-id"
+        )
+    )
+    assert sorted(await _bob_titles(de_env)) == [
+        "Dein Beitrag in Crew wurde moderiert",
+        "Standortfreigabe in Crew eingeschaltet",
+    ]
+
+
+async def test_a_dissolved_space_reads_german(de_env):
+    await de_env.bus.publish(RemoteSpaceDissolved(space_id="sp1"))
+    notes = await de_env.repo.list("b-id")
+    assert [(n.title, n.body) for n in notes] == [
+        (
+            "„Crew“ wurde aufgelöst",
+            (
+                "Der Eigentümer hat den Space aufgelöst. Deine Kopie ist jetzt ein "
+                "schreibgeschütztes Archiv."
+            ),
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("minutes", "expected"),
+    [(7, "Elternabend – in 7 Min."), (0, "Elternabend – jetzt")],
+)
+async def test_an_upcoming_event_reads_german(de_env, minutes, expected):
+    bob = await de_env.users.get_by_user_id("b-id")
+    await de_env.svc.notify_upcoming_event(
+        bob, event_id="e1", summary="Elternabend", minutes=minutes
+    )
+    notes = await de_env.repo.list("b-id")
+    assert [(n.type, n.title, n.link_url) for n in notes] == [
+        ("calendar_reminder", expected, "/calendar?event=e1")
+    ]

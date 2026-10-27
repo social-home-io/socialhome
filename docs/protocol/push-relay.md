@@ -85,15 +85,31 @@ are the household's own (`webrtc_turn_*`, see `docs/operations/turn.md`).
 ## Push privacy (§25.3)
 
 A notification carries the title only. The body is omitted for DMs,
-location messages and any other user-generated content. Other kinds get a
-title like "New post in Family" with nothing the person wrote. A title
-that would embed something a person wrote (a task title, an event name)
-is swapped for a generic one on the push ("You were assigned a task",
-"New event", in the recipient's language); the in-app notification keeps
-the full text (`_PUSH_SAFE_TITLES` in
-`socialhome/services/notification_service.py`). The content is read when
-the person opens the notification, from their own household, over an
-authenticated request.
+location messages and any other user-generated content.
+
+**A push says who and where, nothing else** (owner decision D11). It may
+name people, spaces and chats — these are labels. It never carries message
+text, post or comment text, a task title, an event name, a moment caption
+or a reaction emoji. So the lock screen shows "Anna in Weekend plans",
+"Ahmed assigned you a task in Familie Alpha", "Chloé changed an event
+you're going to" or "Ben reacted to your moment". An invite can come from
+a household the person never paired with, so its push never names the
+space ("Zoë invited you to a space"); the app shows which one.
+
+Every notification type decides in one place what its push says
+(`socialhome/services/notification_service.py`): `_PUSH_AS_IS` lists the
+types whose title already names only people, spaces and chats, and
+`_PUSH_TITLES` gives every other type a who-and-where title, most specific
+variant first (with the space, with the person, neither). A type in
+neither table pushes a generic "New notification". A test fails when a new
+type is in neither table.
+
+Every title, in the app and on the push, is written in the recipient's
+own language from the backend catalog (`socialhome/i18n/messages/`; en,
+de, nl, fr, es). The in-app notification keeps the full text (for example
+"You were assigned: Steuererklärung"). The content is read when the person
+opens the notification, from their own household, over an authenticated
+request.
 
 Each in-app notification sends one push per device. The Web Push payload
 is `{title, click_url?, tag?}`:

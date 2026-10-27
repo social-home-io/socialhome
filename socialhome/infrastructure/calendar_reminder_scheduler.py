@@ -19,11 +19,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import secrets
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
-
-from ..domain.notification import Notification
 
 if TYPE_CHECKING:
     from ..repositories.calendar_repo import AbstractCalendarRepo
@@ -131,17 +128,10 @@ class CalendarReminderScheduler:
                 if event.start < now or event.start > horizon:
                     continue
                 minutes = int((event.start - now).total_seconds() // 60)
-                when = "now" if minutes <= 0 else f"in {minutes} min"
-                title = f"{event.summary} — {when}"
-                note = Notification(
-                    id=secrets.token_urlsafe(10),
-                    user_id=user.user_id,
-                    type="calendar_reminder",
-                    title=title,
-                    created_at=now.isoformat(),
-                    link_url=f"/calendar?event={event.id}",
+                # The service words it in the user's language.
+                await self._notif_service.notify_upcoming_event(
+                    user, event_id=event.id, summary=event.summary, minutes=minutes
                 )
-                await self._notif_service._save_notif(note)
                 self._fired.add(key)
                 fired += 1
         return fired

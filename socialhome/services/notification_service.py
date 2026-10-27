@@ -42,6 +42,7 @@ import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from string import Formatter
 
 from ..domain.calendar import RSVPStatus
 from ..domain.conversation import ConversationType, SystemChatScope, mute_active
@@ -155,24 +156,115 @@ class _SeatPrefs:
 HOUSEHOLD_CHAT_LINK = "/?tab=chat"
 
 
-#: §25.3 — bell types whose title embeds user content (a task title, an
-#: event summary). Their push carries this content-free title (catalog key,
-#: English fallback) instead; the in-app bell row keeps the full text.
-_PUSH_SAFE_TITLES: dict[str, tuple[str, str]] = {
-    "task_assigned": ("notification.push.task_assigned", "You were assigned a task"),
-    "task_deadline": ("notification.push.task_deadline", "A task is due today"),
-    "task_completed": ("notification.push.task_completed", "A task was completed"),
-    "calendar_event_created": ("notification.push.calendar_created", "New event"),
+#: §25.3 / D11 — what a push (lock screen, push service, HA Companion) may
+#: say: **who and where only** — names of people, spaces and chats. Never
+#: message text, a task title, an event name, an emoji or post text.
+#:
+#: Bell types whose in-app title embeds such content push one of these
+#: titles instead (the bell row keeps its full text). Each entry lists
+#: variants, most specific first, as ``(catalog key, English fallback)``;
+#: :meth:`NotificationService._push_title` takes the first whose
+#: placeholders the handler's ``push_params`` fill.
+_PUSH_TITLES: dict[str, tuple[tuple[str, str], ...]] = {
+    "task_assigned": (
+        (
+            "notification.push.task_assigned_in",
+            "{name} assigned you a task in {space_name}",
+        ),
+        ("notification.push.task_assigned_by", "{name} assigned you a task"),
+        ("notification.push.task_assigned", "You were assigned a task"),
+    ),
+    "task_deadline": (("notification.push.task_deadline", "A task is due today"),),
+    "task_completed": (
+        (
+            "notification.push.task_completed_in",
+            "{name} completed a task in {space_name}",
+        ),
+        ("notification.push.task_completed_by", "{name} completed a task"),
+        ("notification.push.task_completed", "A task was completed"),
+    ),
+    "calendar_event_created": (
+        (
+            "notification.push.calendar_created_in",
+            "{name} added an event in {space_name}",
+        ),
+        (
+            "notification.push.calendar_created_by",
+            "{name} added an event to your calendar",
+        ),
+        ("notification.push.calendar_created", "New event"),
+    ),
     "calendar_event_updated": (
-        "notification.push.calendar_updated",
-        "An event was changed",
+        (
+            "notification.push.calendar_updated_by",
+            "{name} changed an event you're going to",
+        ),
+        ("notification.push.calendar_updated", "An event was changed"),
     ),
     "calendar_event_cancelled": (
-        "notification.push.calendar_cancelled",
-        "An event was cancelled",
+        (
+            "notification.push.calendar_cancelled_by",
+            "{name} cancelled an event you're going to",
+        ),
+        ("notification.push.calendar_cancelled", "An event was cancelled"),
     ),
-    "calendar_reminder": ("notification.push.calendar_reminder", "Event reminder"),
+    "calendar_reminder": (("notification.push.calendar_reminder", "Event reminder"),),
+    "moment_reacted": (
+        ("notification.push.moment_reacted", "{name} reacted to your moment"),
+    ),
+    "highlight_reacted": (
+        ("notification.push.highlight_reacted", "{name} reacted to your highlight"),
+    ),
+    # An invite can come from a household the recipient never paired with,
+    # so its push never names the space (D11); the app shows which one.
+    "space_invite": (
+        ("notification.push.space_invite", "{name} invited you to a space"),
+    ),
 }
+
+#: The push title when no variant of a :data:`_PUSH_TITLES` entry fits.
+_PUSH_GENERIC: tuple[str, str] = ("notification.push.generic", "New notification")
+
+#: Bell types whose title already names only people, spaces and chats (or
+#: nothing at all): their push carries the bell title as is. Every type the
+#: service creates is in exactly one of this set and :data:`_PUSH_TITLES`
+#: (a test walks the module), so a new type must decide.
+_PUSH_AS_IS: frozenset[str] = frozenset(
+    {
+        "post_created",
+        "comment_added",
+        "space_post_created",
+        "space_comment_added",
+        "space_mention",
+        "space_here",
+        "dm_message",
+        "dm_mention",
+        "dm_contact_requested",
+        "app_challenge",
+        "bazaar_bid_placed",
+        "bazaar_offer_accepted",
+        "bazaar_offer_rejected",
+        "bazaar_listing_sold",
+        "bazaar_listing_expired",
+        "moderation_pending",
+        "space_report",
+        "moderation_unavailable",
+        "moderation_decided",
+        "post_moderated",
+        "space_member_joined",
+        "space_dissolved",
+        "space_admins_reconfirm",
+        "space_join_requested",
+        "space_join_approved",
+        "space_ownership_transferred",
+        "space_join_denied",
+        "space_remote_invite_accepted",
+        "space_remote_invite_declined",
+        "moment_replied",
+        "user_followed",
+        "space_location_enabled",
+    }
+)
 
 
 def _conversation_link(
@@ -352,6 +444,7 @@ class NotificationService(ProtectionGateMixin):
         withheld: frozenset[str] | None = None,
         dedupe_by_link: bool = False,
         push: bool = True,
+        push_params: dict[str, str | None] | None = None,
     ):
         """The one gate every notification passes, then persist + publish
         ``NotificationCreated`` + fire title-only pushes to every registered
@@ -372,6 +465,9 @@ class NotificationService(ProtectionGateMixin):
 
         Per §25.3 we never put the body on the wire; subscribers
         translate the title and tap-open the app to see the full row.
+        The push title follows D11 (who and where only, see
+        :meth:`_push_title`); ``push_params`` names the people and the
+        space a content-free push title may mention.
 
         ``dedupe_by_link=True`` collapses bursts: if an unread row
         already exists for the same ``(user_id, type, link_url)`` it's
@@ -412,7 +508,7 @@ class NotificationService(ProtectionGateMixin):
             return saved  # in-app only (a repeat the user was already told)
         if self._push is None and self._adapter is None:
             return saved
-        title = self._push_title(saved, user)
+        title = self._push_title(saved, user, push_params)
         # One tag per bell item: a repeat (a DM burst bumping one row) replaces
         # itself on the device; a different item never silently replaces it.
         tag = f"{saved.type}:{saved.link_url or saved.id}"
@@ -438,19 +534,46 @@ class NotificationService(ProtectionGateMixin):
                 log.debug("platform push fan-out failed: %s", exc, exc_info=True)
         return saved
 
-    def _push_title(self, saved, user) -> str:
-        """The title a push carries for *saved* (§25.3).
+    def _push_title(
+        self, saved, user, params: dict[str, str | None] | None = None
+    ) -> str:
+        """The title a push carries for *saved* (§25.3, D11: who and where).
 
         A bell whose title embeds user content — a task title, an event
-        summary — pushes a generic, content-free title in the recipient's
-        language instead; the in-app row keeps the full text. Every other
-        title names only people and spaces and goes out as is.
+        summary, a reaction emoji — pushes the first :data:`_PUSH_TITLES`
+        variant whose placeholders *params* fill, in the recipient's
+        language; the in-app row keeps the full text. A type in
+        :data:`_PUSH_AS_IS` names only people, spaces and chats and goes
+        out as is. Anything else (a type nobody classified) pushes the
+        generic title — never its bell text.
         """
-        generic = _PUSH_SAFE_TITLES.get(saved.type)
-        if generic is None:
+        if saved.type in _PUSH_AS_IS:
             return saved.title
-        key, fallback = generic
-        return self._t(key, locale=self._locale(user), fallback=fallback)
+        return self._content_free_title(saved.type, self._locale(user), params)
+
+    def _content_free_title(
+        self, ntype: str, locale: str | None, params: dict[str, str | None] | None
+    ) -> str:
+        """*ntype*'s who-and-where title (:data:`_PUSH_TITLES`) in *locale*:
+        the first variant whose placeholders *params* fill, else the
+        generic one."""
+        filled = {k: v for k, v in (params or {}).items() if v}
+        for key, fallback in _PUSH_TITLES.get(ntype, ()):
+            fields = {f for _, f, _, _ in Formatter().parse(fallback) if f}
+            if fields <= filled.keys():
+                return self._t(
+                    key,
+                    locale=locale,
+                    fallback=fallback,
+                    **{f: filled[f] for f in fields},
+                )
+        key, fallback = _PUSH_GENERIC
+        return self._t(key, locale=locale, fallback=fallback)
+
+    def _someone(self, locale: str | None) -> str:
+        """ "Someone" in the recipient's language — for a person this
+        household holds no name for."""
+        return self._t("notification.someone", locale=locale, fallback="Someone")
 
     def _t(self, key: str, *, locale: str | None, fallback: str, **fmt) -> str:
         if self._i18n is None:
@@ -574,7 +697,7 @@ class NotificationService(ProtectionGateMixin):
         author_id = event.post.author
         users = await self._users.list_active()
         author = await self._users.get_by_user_id(author_id)
-        name = author.display_name if author else "Someone"
+        name = author.display_name if author else None
         blocked = await self._withheld_from(author_id)
         for user in users:
             if user.user_id == author_id or user.user_id in blocked:
@@ -587,7 +710,7 @@ class NotificationService(ProtectionGateMixin):
                         "notification.post.created",
                         locale=self._locale(user),
                         fallback="{author} posted",
-                        author=name,
+                        author=name or self._someone(self._locale(user)),
                     ),
                     link_url=household_post_link(event.post.id),
                 ),
@@ -618,7 +741,7 @@ class NotificationService(ProtectionGateMixin):
         # keep this simple: notify everyone except the commenter. Slightly
         # noisy, but the post author is always notified.
         commenter = await self._users.get_by_user_id(commenter_id)
-        name = commenter.display_name if commenter else "Someone"
+        name = commenter.display_name if commenter else None
         users = await self._users.list_active()
         blocked = await self._withheld_from(commenter_id)
         for user in users:
@@ -628,7 +751,12 @@ class NotificationService(ProtectionGateMixin):
                 new_notification(
                     user_id=user.user_id,
                     type="comment_added",
-                    title=f"{name} commented on a post",
+                    title=self._t(
+                        "notification.comment.added",
+                        locale=self._locale(user),
+                        fallback="{author} commented on a post",
+                        author=name or self._someone(self._locale(user)),
+                    ),
                     link_url=household_post_link(event.post_id, event.comment.id),
                 ),
                 actor_user_id=commenter_id,
@@ -686,19 +814,24 @@ class NotificationService(ProtectionGateMixin):
         ):
             return
         recipient = await self._users.get_by_user_id(event.assigned_to)
+        locale = self._locale(recipient)
         await self._save_notif(
             new_notification(
                 user_id=event.assigned_to,
                 type="task_assigned",
                 title=self._t(
                     "notification.task.assigned",
-                    locale=self._locale(recipient),
+                    locale=locale,
                     fallback="You were assigned: {title}",
                     title=event.task.title,
                 ),
                 link_url=task_link(event.task, event.space_id),
             ),
             actor_user_id=assigner,
+            push_params={
+                "name": await self._person_name(assigner, locale) if assigner else None,
+                "space_name": await self._space_name(event.space_id),
+            },
         )
 
     async def on_task_deadline_due(self, event: TaskDeadlineDue) -> None:
@@ -766,17 +899,10 @@ class NotificationService(ProtectionGateMixin):
         """
         if not event.recipient_user_ids:
             return
-        # A shared location says so in the title — never where (§25.3:
-        # no coordinates, no label, no body).
-        if event.message_type == "location":
-            title = f"{event.sender_display_name} shared a location"
-        else:
-            title = f"{event.sender_display_name} messaged you"
         prefs = await self._seat_prefs(event.conversation_id)
         link = _conversation_link(
             event.conversation_id, prefs.system_scope, prefs.space_id
         )
-        system_chat = prefs.system_scope is not None
         muted = prefs.muted
         mentioned = (
             {m.user_id for m in event.mentions if m.user_id} if prefs.group else set()
@@ -814,7 +940,8 @@ class NotificationService(ProtectionGateMixin):
                     local,
                     sender_id=event.sender_user_id,
                     withheld=blocked,
-                    sender_name=event.sender_display_name,
+                    sender_name=event.sender_display_name
+                    or self._someone(self._locale(local)),
                     chat_name=self._chat_name(prefs, local),
                     link=link,
                 )
@@ -823,17 +950,7 @@ class NotificationService(ProtectionGateMixin):
                 new_notification(
                     user_id=recipient_id,
                     type="dm_message",
-                    title=(
-                        self._t(
-                            "notification.household_chat.message",
-                            locale=self._locale(local),
-                            fallback="{author} in {chat_name}",
-                            author=event.sender_display_name,
-                            chat_name=self._chat_name(prefs, local),
-                        )
-                        if system_chat
-                        else title
-                    ),
+                    title=self._dm_title(event, prefs, local),
                     link_url=link,
                 ),
                 actor_user_id=event.sender_user_id,
@@ -856,6 +973,35 @@ class NotificationService(ProtectionGateMixin):
             if await self._convos.count_unread(event.conversation_id, local.username):
                 continue
             await self.mark_read_for_dm(user_id, event.conversation_id)
+
+    def _dm_title(self, event: DmMessageCreated, prefs: _SeatPrefs, recipient) -> str:
+        """A chat message's bell (and push) title: who, and in which chat —
+        never the text. A shared location says so — never where (§25.3: no
+        coordinates, no label, no body)."""
+        locale = self._locale(recipient)
+        author = event.sender_display_name or self._someone(locale)
+        if event.message_type == "location":
+            return self._t(
+                "notification.dm.location",
+                locale=locale,
+                fallback="{author} shared a location",
+                author=author,
+            )
+        chat_name = self._chat_name(prefs, recipient)
+        if chat_name:  # a system chat or a named group
+            return self._t(
+                "notification.household_chat.message",
+                locale=locale,
+                fallback="{author} in {chat_name}",
+                author=author,
+                chat_name=chat_name,
+            )
+        return self._t(
+            "notification.dm.message",
+            locale=locale,
+            fallback="{author} messaged you",
+            author=author,
+        )
 
     def _chat_name(self, prefs: _SeatPrefs, recipient) -> str | None:
         """The name a bell gives the conversation: the group's own, or for
@@ -891,9 +1037,6 @@ class NotificationService(ProtectionGateMixin):
         )
         allowed = set(event.recipient_user_ids)
         blocked = await self._withheld_from(event.sender_user_id)
-        name = event.sender_display_name or await self._display_name(
-            event.sender_user_id
-        )
         for user_id in {m.user_id for m in event.new_mentions if m.user_id}:
             if (
                 user_id == event.sender_user_id
@@ -914,7 +1057,8 @@ class NotificationService(ProtectionGateMixin):
                 local,
                 sender_id=event.sender_user_id,
                 withheld=blocked,
-                sender_name=name,
+                sender_name=event.sender_display_name
+                or await self._person_name(event.sender_user_id, self._locale(local)),
                 chat_name=self._chat_name(prefs, local),
                 link=link,
             )
@@ -966,14 +1110,14 @@ class NotificationService(ProtectionGateMixin):
         remote = await self._users.get_remote(user_id)
         if remote is not None and remote.display_name:
             return remote.display_name
-        return self._t("notification.someone", locale=locale, fallback="Someone")
+        return self._someone(locale)
 
-    async def _display_name(self, user_id: str) -> str:
-        local = await self._users.get_by_user_id(user_id)
-        if local is not None:
-            return local.display_name
-        remote = await self._users.get_remote(user_id)
-        return remote.display_name if remote and remote.display_name else "Someone"
+    async def _space_name(self, space_id: str | None) -> str | None:
+        """The name of *space_id* (``None`` for none, or one not held)."""
+        if not space_id:
+            return None
+        space = await self._spaces.get(space_id)
+        return space.name if space is not None else None
 
     async def _seat_prefs(self, conversation_id: str) -> _SeatPrefs:
         """This conversation's per-member bell settings, read once per
@@ -1145,7 +1289,7 @@ class NotificationService(ProtectionGateMixin):
         title = self._t(
             "notification.app.challenge",
             locale=self._locale(recipient),
-            fallback="♟ {name} challenged you to chess",
+            fallback="{name} challenged you to chess",
             name=event.from_display,
         )
         await self._save_notif(
@@ -1328,7 +1472,7 @@ class NotificationService(ProtectionGateMixin):
             if author
             else remote_author.display_name
             if remote_author and remote_author.display_name
-            else "Someone"
+            else None
         )
         mentioned = {m.user_id for m in mentions if m.user_id}
         here = any(m.type is MentionType.HERE for m in mentions) and (
@@ -1369,7 +1513,7 @@ class NotificationService(ProtectionGateMixin):
                         key,
                         locale=self._locale(recipient),
                         fallback=fallback,
-                        author=name,
+                        author=name or self._someone(self._locale(recipient)),
                         space_name=space.name,
                     ),
                     link_url=link,
@@ -1677,6 +1821,11 @@ class NotificationService(ProtectionGateMixin):
                         link_url=HOUSEHOLD_CALENDAR_LINK,
                     ),
                     actor_user_id=cal_event.created_by,
+                    push_params={
+                        "name": await self._person_name(
+                            cal_event.created_by, self._locale(owner)
+                        )
+                    },
                 )
                 return
         # Space-calendar branch — ``calendar_id`` is the space_id.
@@ -1709,6 +1858,12 @@ class NotificationService(ProtectionGateMixin):
                 ),
                 actor_user_id=cal_event.created_by,
                 withheld=blocked,
+                push_params={
+                    "name": await self._person_name(
+                        cal_event.created_by, self._locale(recipient)
+                    ),
+                    "space_name": space.name,
+                },
             )
 
     async def on_calendar_event_deleted(
@@ -1729,7 +1884,7 @@ class NotificationService(ProtectionGateMixin):
             ntype="calendar_event_cancelled",
             key="notification.calendar.cancelled",
             fallback="Event cancelled: {summary}",
-            summary=event.summary or "(removed)",
+            summary=event.summary,
             link_url=(
                 space_calendar_link(event.space_id)
                 if event.space_id
@@ -1787,10 +1942,14 @@ class NotificationService(ProtectionGateMixin):
         ntype: str,
         key: str,
         fallback: str,
-        summary: str,
+        summary: str | None,
         link_url: str,
     ) -> None:
         """One bell per person in *cohort* who lives in this household.
+
+        The bell names the event (*summary*); one without a name (an old
+        delete that carried none) reads like its push. The push names only
+        who made the change (D11).
 
         The cohort holds every household's answers (RSVPs federate), so
         each household tells its own people and nobody is told twice — a
@@ -1806,20 +1965,26 @@ class NotificationService(ProtectionGateMixin):
             recipient = await self._users.get_by_user_id(uid)
             if recipient is None:
                 continue  # another household's person: their household tells them
+            locale = self._locale(recipient)
+            name = (
+                await self._person_name(actor_user_id, locale)
+                if actor_user_id
+                else None
+            )
+            if summary:
+                title = self._t(key, locale=locale, fallback=fallback, summary=summary)
+            else:
+                title = self._content_free_title(ntype, locale, {"name": name})
             await self._save_notif(
                 new_notification(
                     user_id=uid,
                     type=ntype,
-                    title=self._t(
-                        key,
-                        locale=self._locale(recipient),
-                        fallback=fallback,
-                        summary=summary,
-                    ),
+                    title=title,
                     link_url=link_url,
                 ),
                 actor_user_id=actor_user_id,
                 withheld=withheld,
+                push_params={"name": name},
             )
 
     async def on_event_reminder_due(self, event: EventReminderDue) -> None:
@@ -1842,6 +2007,39 @@ class NotificationService(ProtectionGateMixin):
             actor_user_id=None,  # the user's own reminder
         )
 
+    async def notify_upcoming_event(
+        self, user, *, event_id: str, summary: str, minutes: int
+    ) -> None:
+        """The household calendar's "starts soon" bell for *user*
+        (:class:`CalendarReminderScheduler`): "{summary} — in {minutes} min",
+        or "— now" once it starts, in their language. The push says only
+        "Event reminder" (D11)."""
+        locale = self._locale(user)
+        if minutes <= 0:
+            title = self._t(
+                "notification.calendar.starting_now",
+                locale=locale,
+                fallback="{summary} — now",
+                summary=summary,
+            )
+        else:
+            title = self._t(
+                "notification.calendar.starting_soon",
+                locale=locale,
+                fallback="{summary} — in {minutes} min",
+                summary=summary,
+                minutes=minutes,
+            )
+        await self._save_notif(
+            new_notification(
+                user_id=user.user_id,
+                type="calendar_reminder",
+                title=title,
+                link_url=f"{HOUSEHOLD_CALENDAR_LINK}?event={event_id}",
+            ),
+            actor_user_id=None,  # the clock
+        )
+
     async def on_task_completed(self, event: TaskCompleted) -> None:
         """Notify task assignees when a task is completed.
 
@@ -1854,6 +2052,7 @@ class NotificationService(ProtectionGateMixin):
         members: set[str] | None = None
         if event.space_id is not None:
             members = set(await self._spaces.list_local_member_user_ids(event.space_id))
+        space_name = await self._space_name(event.space_id)
         for uid in getattr(task, "assignees", ()):
             if uid == completed_by:
                 continue
@@ -1878,6 +2077,7 @@ class NotificationService(ProtectionGateMixin):
                 ),
                 actor_user_id=completed_by,
                 withheld=blocked,
+                push_params={"name": name, "space_name": space_name},
             )
 
     async def on_space_post_moderated(
@@ -1887,11 +2087,29 @@ class NotificationService(ProtectionGateMixin):
         """Notify the post author that their post was moderated (a remote
         author is skipped by the gate — their household tells them)."""
         post = event.post
+        recipient = await self._users.get_by_user_id(post.author)
+        if recipient is None:
+            return  # a remote author: their household tells them
+        space_name = await self._space_name(event.space_id)
+        locale = self._locale(recipient)
+        if space_name:
+            title = self._t(
+                "notification.space.post.moderated",
+                locale=locale,
+                fallback="Your post in {space_name} was moderated",
+                space_name=space_name,
+            )
+        else:
+            title = self._t(
+                "notification.post.moderated",
+                locale=locale,
+                fallback="Your post was moderated",
+            )
         await self._save_notif(
             new_notification(
                 user_id=post.author,
                 type="post_moderated",
-                title="Your post was moderated",
+                title=title,
                 link_url=f"/spaces/{event.space_id}",
             ),
             actor_user_id=None,  # a decision about your own content
@@ -1957,16 +2175,37 @@ class NotificationService(ProtectionGateMixin):
         space = await self._spaces.get(event.space_id)
         if space is None:
             return
-        if space.archived_reason == "removed":
-            title = f"You're no longer a member of “{space.name}”"
-            body = "Your copy is now a read-only archive."
-        else:
-            title = f"“{space.name}” was dissolved"
-            body = (
-                "The space's owner dissolved it. Your copy is now a read-only archive."
-            )
+        removed = space.archived_reason == "removed"
         members = await self._spaces.list_members(event.space_id)
         for member in members:
+            locale = self._locale(await self._users.get_by_user_id(member.user_id))
+            if removed:
+                title = self._t(
+                    "notification.space.removed",
+                    locale=locale,
+                    fallback="You're no longer a member of “{space_name}”",
+                    space_name=space.name,
+                )
+                body = self._t(
+                    "notification.space.removed.body",
+                    locale=locale,
+                    fallback="Your copy is now a read-only archive.",
+                )
+            else:
+                title = self._t(
+                    "notification.space.dissolved",
+                    locale=locale,
+                    fallback="“{space_name}” was dissolved",
+                    space_name=space.name,
+                )
+                body = self._t(
+                    "notification.space.dissolved.body",
+                    locale=locale,
+                    fallback=(
+                        "The space's owner dissolved it. Your copy is now a "
+                        "read-only archive."
+                    ),
+                )
             await self._save_notif(
                 new_notification(
                     user_id=member.user_id,
@@ -2246,6 +2485,7 @@ class NotificationService(ProtectionGateMixin):
         if _beyond_the_circle(author, event.received_via, event.hop_count):
             return
         locale = self._locale(author)
+        name = await self._person_name(event.reactor_user_id, locale)
         await self._save_notif(
             new_notification(
                 user_id=event.author_user_id,
@@ -2254,12 +2494,13 @@ class NotificationService(ProtectionGateMixin):
                     "notification.moment.reacted",
                     locale=locale,
                     fallback="{name} reacted {emoji} to your moment",
-                    name=await self._person_name(event.reactor_user_id, locale),
+                    name=name,
                     emoji=event.emoji,
                 ),
                 link_url=f"/momentum/{event.moment_id}",
             ),
             actor_user_id=event.reactor_user_id,
+            push_params={"name": name},  # never the emoji (D11)
         )
 
     async def on_moment_created(self, event: MomentCreated) -> None:
@@ -2325,6 +2566,7 @@ class NotificationService(ProtectionGateMixin):
         if author is None:
             return
         locale = self._locale(author)
+        name = await self._person_name(event.reactor_user_id, locale)
         await self._save_notif(
             new_notification(
                 user_id=event.author_user_id,
@@ -2333,12 +2575,13 @@ class NotificationService(ProtectionGateMixin):
                     "notification.highlight.reacted",
                     locale=locale,
                     fallback="{name} reacted {emoji} to your highlight",
-                    name=await self._person_name(event.reactor_user_id, locale),
+                    name=name,
                     emoji=event.emoji,
                 ),
                 link_url=f"/highlights/{event.highlight_id}",
             ),
             actor_user_id=event.reactor_user_id,
+            push_params={"name": name},  # never the emoji (D11)
         )
 
     async def on_user_followed(self, event: UserFollowed) -> None:
@@ -2396,7 +2639,12 @@ class NotificationService(ProtectionGateMixin):
                 new_notification(
                     user_id=m.user_id,
                     type="space_location_enabled",
-                    title=f"Location sharing turned on in {event.space_name}",
+                    title=self._t(
+                        "notification.space.location_enabled",
+                        locale=self._locale(recipient),
+                        fallback="Location sharing turned on in {space_name}",
+                        space_name=event.space_name,
+                    ),
                     link_url="/settings#privacy",
                 ),
                 actor_user_id=event.actor_user_id,

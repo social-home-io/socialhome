@@ -37,6 +37,7 @@ from socialhome.domain.events import (
     EventReminderDue,
     HighlightFrameReactionChanged,
     MomentCreated,
+    MomentReactionChanged,
     PostEdited,
     RemoteSpaceInviteDeclined,
     SpaceAdminSeedsRetiredAfterRestore,
@@ -3453,6 +3454,202 @@ async def test_push_title_never_carries_user_content(stack, case):
     assert _SECRET not in web_title
     assert _SECRET not in push.calls[0][1].to_json()
     assert adapter.sent == [(recipient.user_id, web_title)]
+
+
+_EMOJI = "🍆"
+
+
+async def _fire_who_where_case(stack, push, adapter, case: str):
+    """Publish the event behind *case* — its bell embeds *_SECRET* or
+    *_EMOJI* — and return the recipient. ``anna`` is the actor, ``bob`` the
+    recipient, ``FamSpace`` the space of the ``*_space`` cases."""
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    space_id = None
+    if case.endswith("_space"):
+        space_id = await _space_with(stack, "anna", b)
+        push.calls.clear()  # the join above rings on its own
+        adapter.sent.clear()
+    secret_task = _task(_SECRET, b.user_id, created_by=a.user_id)
+    start = datetime(2026, 5, 1, 10, tzinfo=UTC)
+    secret_event = CalendarEvent(
+        id="e1",
+        calendar_id=space_id or "cal-bob",
+        summary=_SECRET,
+        created_by=a.user_id,
+        start=start,
+        end=start + timedelta(hours=1),
+    )
+    match case:
+        case "task_assigned" | "task_assigned_space":
+            await stack.bus.publish(
+                TaskAssigned(
+                    task=secret_task,
+                    assigned_to=b.user_id,
+                    assigned_by=a.user_id,
+                    space_id=space_id,
+                )
+            )
+        case "task_assigned_by_nobody":
+            await stack.bus.publish(
+                TaskAssigned(
+                    task=_task(_SECRET, b.user_id, created_by=""),
+                    assigned_to=b.user_id,
+                )
+            )
+        case "task_completed" | "task_completed_space":
+            await stack.bus.publish(
+                TaskCompleted(
+                    task=_task(_SECRET, a.user_id, b.user_id),
+                    completed_by=a.user_id,
+                    space_id=space_id,
+                )
+            )
+        case "calendar_event_created":
+            await stack.calendar_repo.save_calendar(
+                Calendar(
+                    id="cal-bob",
+                    name="Bob",
+                    color="#4A90E2",
+                    owner_username=b.username,
+                    calendar_type="personal",
+                )
+            )
+            await stack.bus.publish(CalendarEventCreated(event=secret_event))
+        case "calendar_event_created_space":
+            await stack.bus.publish(CalendarEventCreated(event=secret_event))
+        case "calendar_event_updated":
+
+            async def list_rsvps(_event_id):
+                return [SimpleNamespace(user_id=b.user_id, status="going")]
+
+            stack.notif_svc.attach_calendar_repo(SimpleNamespace(list_rsvps=list_rsvps))
+            await stack.bus.publish(
+                CalendarEventUpdated(
+                    event=secret_event,
+                    material_changes=("start",),
+                    actor_user_id=a.user_id,
+                )
+            )
+        case "calendar_event_cancelled":
+            await stack.bus.publish(
+                CalendarEventDeleted(
+                    event_id="e1",
+                    summary=_SECRET,
+                    space_id="sp-1",
+                    notify_user_ids=(b.user_id,),
+                    actor_user_id=a.user_id,
+                )
+            )
+        case "moment_reacted":
+            await stack.bus.publish(
+                MomentReactionChanged(
+                    moment_id="m1",
+                    reactor_user_id=a.user_id,
+                    author_user_id=b.user_id,
+                    emoji=_EMOJI,
+                )
+            )
+        case "highlight_reacted":
+            await stack.bus.publish(
+                HighlightFrameReactionChanged(
+                    highlight_id="h1",
+                    frame_id="f1",
+                    reactor_user_id=a.user_id,
+                    author_user_id=b.user_id,
+                    emoji=_EMOJI,
+                )
+            )
+    return b
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ("task_assigned", "anna assigned you a task"),
+        ("task_assigned_space", "anna assigned you a task in FamSpace"),
+        ("task_assigned_by_nobody", "You were assigned a task"),
+        ("task_completed", "anna completed a task"),
+        ("task_completed_space", "anna completed a task in FamSpace"),
+        ("calendar_event_created", "anna added an event to your calendar"),
+        ("calendar_event_created_space", "anna added an event in FamSpace"),
+        ("calendar_event_updated", "anna changed an event you're going to"),
+        ("calendar_event_cancelled", "anna cancelled an event you're going to"),
+        ("moment_reacted", "anna reacted to your moment"),
+        ("highlight_reacted", "anna reacted to your highlight"),
+    ],
+)
+async def test_push_title_says_who_and_where(stack, case, expected):
+    """D11: a push names who did it and in which space — never the task
+    title, the event name or the reaction emoji, which the bell row keeps."""
+    push = _CapturingPush()
+    adapter = _CapturingAdapter()
+    stack.notif_svc.attach_push_service(push)
+    stack.notif_svc.attach_platform_adapter(adapter)
+    recipient = await _fire_who_where_case(stack, push, adapter, case)
+    rows = await stack.notif_repo.list(recipient.user_id, limit=10)
+    assert len(rows) == 1
+    assert _SECRET in rows[0].title or _EMOJI in rows[0].title
+    assert [(uids, p.title) for uids, p in push.calls] == [
+        ([recipient.user_id], expected)
+    ]
+    assert adapter.sent == [(recipient.user_id, expected)]
+
+
+async def test_bell_rows_without_content_push_their_own_title(stack):
+    """A type whose title names only people and spaces pushes it as is."""
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    await stack.bus.publish(
+        AppChallengeReceived(
+            app_id="chess",
+            session_id="s1",
+            to_user_id=b.user_id,
+            from_user_id=a.user_id,
+            from_display="anna",
+        )
+    )
+    assert [p.title for _, p in push.calls] == ["anna challenged you to chess"]
+
+
+async def test_an_invite_push_never_names_the_space(stack):
+    """D11: an invite can come from a household the recipient never paired
+    with, so its push says who, never which space."""
+    b = await stack.provision_user("bob")
+    note = new_notification(
+        user_id=b.user_id, type="space_invite", title="Zoë invited you to Salon"
+    )
+    title = stack.notif_svc._push_title(note, b, {"name": "Zoë", "space_name": "Salon"})
+    assert title == "Zoë invited you to a space"
+
+
+async def test_an_unclassified_type_pushes_the_generic_title(stack):
+    """A type in neither push table never pushes its bell text."""
+    b = await stack.provision_user("bob")
+    note = new_notification(user_id=b.user_id, type="brand_new", title=_SECRET)
+    assert stack.notif_svc._push_title(note, b) == "New notification"
+    # A who-and-where type without the names it needs falls back the same.
+    note = new_notification(user_id=b.user_id, type="moment_reacted", title=_SECRET)
+    assert stack.notif_svc._push_title(note, b) == "New notification"
+
+
+async def test_a_cancel_without_a_name_reads_like_its_push(stack):
+    """An old delete that carried no event name: the bell says who cancelled
+    an event you're going to — never "(removed)"."""
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    await stack.bus.publish(
+        CalendarEventDeleted(
+            event_id="e1",
+            space_id="sp-1",
+            notify_user_ids=(b.user_id,),
+            actor_user_id=a.user_id,
+        )
+    )
+    rows = await stack.notif_repo.list(b.user_id, limit=10)
+    assert [n.title for n in rows] == ["anna cancelled an event you're going to"]
 
 
 async def test_push_tag_collapses_repeats_of_the_same_item_only(stack):
