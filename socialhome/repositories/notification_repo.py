@@ -1,8 +1,11 @@
 """Notification repository — per-user notification centre (§17.2).
 
-Rows are stored in the ``notifications`` table. Each user is capped at the
-most recent ``MAX_PER_USER`` entries (default 200, §17.2) — excess rows are
-pruned on insert so the table can never grow without bound.
+Rows are stored in the ``notifications`` table. Each user is capped at
+``MAX_PER_USER`` entries (default 500, §17.2) — excess rows are pruned on
+insert so the table can never grow without bound. The prune drops read
+rows first, then the oldest unread ones, and never an unread action item
+(:data:`~socialhome.domain.notification.ACTION_ITEM_TYPES`); the 90-day
+purge spares unread action items too.
 
 The service layer produces notification rows; this repo only persists and
 queries them. Push delivery, bell-badge counts, mark-read flows all sit on
@@ -17,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
+from ..domain.notification import ACTION_ITEM_TYPES, Notification
 from ._spec import Spec, spec_to_sql
 from .base import row_to_dict, rows_to_dicts
 
@@ -34,13 +38,14 @@ _NOTIFICATION_COLS: frozenset[str] = frozenset(
 )
 
 
-#: Per-user cap (§17.2). Rows older than this are pruned when new ones land.
-MAX_PER_USER: int = 200
+#: Per-user cap (§17.2). Rows beyond it are pruned when new ones land —
+#: read rows first, unread action items never.
+MAX_PER_USER: int = 500
 
-
-# Domain dataclass lives in ``socialhome/domain/notification.py``;
-# re-exported here so existing repo-level imports keep working.
-from ..domain.notification import Notification
+#: ``type IN (...)`` placeholders + values for the action-item types,
+#: in a fixed order so the statements stay cacheable.
+_ACTION_TYPES: tuple[str, ...] = tuple(sorted(ACTION_ITEM_TYPES))
+_ACTION_IN = "(" + ",".join("?" * len(_ACTION_TYPES)) + ")"
 
 
 @runtime_checkable
@@ -65,6 +70,13 @@ class AbstractNotificationRepo(Protocol):
         link_url: str,
         type: str | None = None,
     ) -> int: ...
+    async def list_unread(self, user_id: str) -> builtins.list[Notification]: ...
+    async def mark_read_ids(
+        self, user_id: str, notification_ids: builtins.list[str]
+    ) -> int: ...
+    async def mark_read_for_everyone(
+        self, *, link_url: str, type: str
+    ) -> builtins.list[str]: ...
     async def count_unread(self, user_id: str) -> int: ...
     async def delete_old(self, older_than_days: int = 90) -> int: ...
 
@@ -92,10 +104,13 @@ class SqliteNotificationRepo:
         self._cap = int(max_per_user)
 
     async def save(self, note: Notification) -> Notification:
-        """Insert a notification and prune the oldest if the user cap is exceeded.
+        """Insert a notification and prune if the user cap is exceeded.
 
         The prune-on-insert happens in the same write queue batch as the
-        insert, so the per-user invariant holds continuously.
+        insert, so the per-user invariant holds continuously. It drops
+        read rows first (oldest first), then the oldest unread ones, and
+        never an unread action item — a pending request must not vanish
+        under a flood of news.
         """
         await self._db.enqueue(
             """
@@ -114,20 +129,25 @@ class SqliteNotificationRepo:
                 note.created_at,
             ),
         )
-        # Keep at most ``cap`` rows per user. Subquery picks the oldest rows
-        # beyond the cap, outer DELETE removes them. This runs cheaply
-        # against the per-user index.
+        # Keep at most ``cap`` rows per user: delete as many rows as the
+        # user is over, read ones before unread ones, oldest first, unread
+        # action items never. ``max(0, …)`` because a negative LIMIT means
+        # "no limit" in SQLite.
         await self._db.enqueue(
-            """
+            f"""
             DELETE FROM notifications
              WHERE id IN (
                  SELECT id FROM notifications
                   WHERE user_id = ?
-                  ORDER BY created_at DESC
-                  LIMIT -1 OFFSET ?
+                    AND NOT (read_at IS NULL AND type IN {_ACTION_IN})
+                  ORDER BY (read_at IS NULL) ASC, created_at ASC
+                  LIMIT max(
+                      0,
+                      (SELECT COUNT(*) FROM notifications WHERE user_id = ?) - ?
+                  )
              )
             """,
-            (note.user_id, self._cap),
+            (note.user_id, *_ACTION_TYPES, note.user_id, self._cap),
         )
         return note
 
@@ -312,6 +332,49 @@ class SqliteNotificationRepo:
             )
         return count
 
+    async def list_unread(self, user_id: str) -> builtins.list[Notification]:
+        """Every unread row of ``user_id`` (bounded by the per-user cap)."""
+        return await self.find(
+            Spec(
+                where=[("user_id", "=", user_id), ("read_at", "IS", None)],
+                order_by=[("created_at", "DESC")],
+            )
+        )
+
+    async def mark_read_ids(
+        self, user_id: str, notification_ids: builtins.list[str]
+    ) -> int:
+        """Mark the given rows of ``user_id`` read; returns how many flipped.
+        A row of another user is never touched."""
+        if not notification_ids:
+            return 0
+        marks = ",".join("?" * len(notification_ids))
+        return await self._db.enqueue_rowcount(
+            "UPDATE notifications SET read_at = datetime('now') "
+            f"WHERE user_id=? AND read_at IS NULL AND id IN ({marks})",
+            (user_id, *notification_ids),
+        )
+
+    async def mark_read_for_everyone(
+        self, *, link_url: str, type: str
+    ) -> builtins.list[str]:
+        """Mark every unread ``type`` row at ``link_url`` read, whoever it
+        belongs to — an action item one admin handled is handled for all.
+        Returns the users whose rows flipped (to tell their devices)."""
+        rows = await self._db.fetchall(
+            "SELECT DISTINCT user_id FROM notifications "
+            "WHERE link_url=? AND type=? AND read_at IS NULL",
+            (link_url, type),
+        )
+        user_ids = [r["user_id"] for r in rows]
+        if user_ids:
+            await self._db.enqueue(
+                "UPDATE notifications SET read_at = datetime('now') "
+                "WHERE link_url=? AND type=? AND read_at IS NULL",
+                (link_url, type),
+            )
+        return user_ids
+
     async def count_unread(self, user_id: str) -> int:
         return int(
             await self._db.fetchval(
@@ -325,6 +388,9 @@ class SqliteNotificationRepo:
     async def delete_old(self, older_than_days: int = 90) -> int:
         """Delete notifications older than N days. Returns purge count.
 
+        An unread action item stays whatever its age: it is still
+        waiting for someone (it goes once handled, then ages out).
+
         Shape invariant: ``cutoff`` and ``notifications.created_at`` are
         both tz-aware ISO 8601 — every ``save()`` caller supplies a
         ``created_at``, so the SQL's naive ``COALESCE(?, datetime('now'))``
@@ -333,16 +399,11 @@ class SqliteNotificationRepo:
         lexicographically and "T" (0x54) sorts above " " (0x20).
         """
         cutoff = (datetime.now(UTC) - _timedelta_days(older_than_days)).isoformat()
-        count = await self._db.fetchval(
-            "SELECT COUNT(*) FROM notifications WHERE created_at < ?",
-            (cutoff,),
-            default=0,
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM notifications WHERE created_at < ? "
+            f"AND NOT (read_at IS NULL AND type IN {_ACTION_IN})",
+            (cutoff, *_ACTION_TYPES),
         )
-        await self._db.enqueue(
-            "DELETE FROM notifications WHERE created_at < ?",
-            (cutoff,),
-        )
-        return int(count)
 
     # ── Per-space notification preferences ─────────────────────────────
 

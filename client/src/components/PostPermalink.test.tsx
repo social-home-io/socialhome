@@ -11,6 +11,11 @@ vi.mock('preact-iso', () => ({
 }))
 vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
 vi.mock('@/ws', () => ({ ws: { on: () => () => undefined } }))
+const markSeen = vi.hoisted(() => vi.fn())
+vi.mock('@/store/notifications', async (orig) => ({
+  ...(await orig<typeof import('@/store/notifications')>()),
+  markSeen,
+}))
 
 import { api } from '@/api'
 import { currentUser } from '@/store/auth'
@@ -47,6 +52,7 @@ const status = (n: number) => Object.assign(new Error(`HTTP ${n}`), { status: n 
 
 beforeEach(() => {
   route.mockReset()
+  markSeen.mockReset()
   vi.mocked(api.get).mockReset()
   vi.mocked(api.post).mockReset()
   currentUser.value = { user_id: 'u-me', username: 'me', display_name: 'Me', is_admin: false } as never
@@ -144,5 +150,40 @@ describe('PostPermalink', () => {
       <PostPermalink postId="p1" spaceId={null} commentId="c-gone" backPath="/feed" />,
     )
     await findByText('That comment is no longer available.')
+  })
+})
+
+describe('PostPermalink reads its notifications', () => {
+  it('a household post on screen marks its notifications seen', async () => {
+    serve({
+      '/api/feed/posts/p1': post('p1'),
+      '/api/feed/posts/p1/comments': [],
+    })
+    const { findByText } = render(
+      <PostPermalink postId="p1" spaceId={null} commentId="c1" backPath="/feed" />,
+    )
+    await findByText('post p1')
+    expect(markSeen).toHaveBeenCalledWith('/post/p1')
+  })
+
+  it('a space post marks the space link with ?post=', async () => {
+    serve({
+      '/api/spaces/s1/posts/p1': post('p1'),
+      '/api/spaces/s1/posts/p1/comments': [],
+    })
+    const { findByText } = render(
+      <PostPermalink postId="p1" spaceId="s1" backPath="/spaces/s1" />,
+    )
+    await findByText('post p1')
+    expect(markSeen).toHaveBeenCalledWith('/spaces/s1?post=p1')
+  })
+
+  it('a post that never showed marks nothing seen', async () => {
+    serve({ '/api/feed/posts/p1': status(404) })
+    const { findByText } = render(
+      <PostPermalink postId="p1" spaceId={null} backPath="/feed" />,
+    )
+    await findByText('This post is no longer available')
+    expect(markSeen).not.toHaveBeenCalled()
   })
 })

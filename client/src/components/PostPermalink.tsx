@@ -20,6 +20,7 @@ import { CommentThreadSkeleton, PostCardSkeleton } from '@/components/Skeleton'
 import { showToast } from '@/components/Toast'
 import { mergePostEdit } from '@/store/feed'
 import { loadHouseholdUsers } from '@/store/householdUsers'
+import { markSeen, postLink } from '@/store/notifications'
 import { t } from '@/i18n/i18n'
 import type { Comment, FeedPost } from '@/types'
 import { ws } from '@/ws'
@@ -82,6 +83,9 @@ export function PostPermalink({ postId, spaceId, commentId = null, backPath }: P
         if (cancelled) return
         setPost(p as FeedPost)
         void loadComments()
+        // The post is on screen: its notifications (and its comments')
+        // read as read on every device.
+        markSeen(postLink(postId, spaceId))
       })
       .catch((err: unknown) => {
         if (!cancelled) setFailure(isGone(err) ? 'gone' : 'failed')

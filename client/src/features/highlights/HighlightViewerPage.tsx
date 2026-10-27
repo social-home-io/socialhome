@@ -38,6 +38,7 @@ import { openReport } from '@/components/ReportDialog'
 import { openPerson } from '@/components/PersonSheet'
 import { currentUser } from '@/store/auth'
 import { loadHouseholdUsers, namedPersonLabel, namedPersonPicture } from '@/store/householdUsers'
+import { markSeen } from '@/store/notifications'
 import { localSinceTime } from '@/utils/relativeTime'
 import type { Highlight, HighlightFrame, HighlightInboxItem } from '@/types'
 import { ws } from '@/ws'
@@ -135,7 +136,12 @@ export default function HighlightViewerPage() {
       api.get(`/api/highlights/${highlightId}${via}`)
         .then((d: HighlightDetail) => {
           detail.value = d
-          if (initial) loading.value = false
+          if (initial) {
+            loading.value = false
+            // The highlight is on screen: its reaction notifications read
+            // as read on every device.
+            markSeen(`/highlights/${highlightId}`)
+          }
         })
         .catch((err: unknown) => {
           if (initial) {

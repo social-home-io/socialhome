@@ -8,6 +8,7 @@ import pytest
 
 from socialhome.domain.events import (
     DmMessageCreated,
+    NotificationCreated,
     PostCreated,
     SpacePostCreated,
     TaskAssigned,
@@ -172,3 +173,20 @@ async def test_system_chat_message_is_not_a_dm_for_ha(env):
         )
     )
     assert adapter.calls == []
+
+
+async def test_notification_new_fires_once_not_on_a_bumped_row(env):
+    """A chat burst bumps one unread row; automations used to hear
+    ``socialhome.notification_new`` for every message of the burst."""
+    bus, adapter = env
+    for bumped in (False, True):
+        await bus.publish(
+            NotificationCreated(
+                user_id="u1",
+                notification_id="n1",
+                type="dm_message",
+                title="t",
+                bumped=bumped,
+            )
+        )
+    assert [et for et, _ in adapter.calls] == ["socialhome.notification_new"]

@@ -53,6 +53,7 @@ import {
   namedPersonPicture,
 } from '@/store/householdUsers'
 import { loadRegistrations, registrations } from '@/store/momentPublic'
+import { markSeen } from '@/store/notifications'
 import { useTitle } from '@/store/pageTitle'
 import type { Moment, MomentDetail } from '@/types'
 import { getMomentsPreferences, momentRetentionLabel } from '@/utils/preferences'
@@ -197,6 +198,9 @@ export default function MomentumDetailPage() {
   useEffect(() => {
     if (!shown || settledRef.current === momentId) return
     settledRef.current = momentId
+    // The moment is on screen: its reaction and reply notifications read
+    // as read on every device.
+    markSeen(`/momentum/${momentId}`)
     if (pickedId) {
       const el = document.getElementById(`moment-reply-${pickedId}`)
       if (el) {

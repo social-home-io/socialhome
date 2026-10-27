@@ -31,6 +31,7 @@ import { OnlinePill } from './OnlinePill'
 import { showToast } from './Toast'
 import { t, isOne } from '@/i18n/i18n'
 import { posts as feedPosts } from '@/store/feed'
+import { markSeen, postLink } from '@/store/notifications'
 import { resolveAvatar, resolveDisplayName } from '@/utils/avatar'
 import { personHint } from '@/utils/personHint'
 import { restoreFocus } from '@/utils/focus'
@@ -53,6 +54,9 @@ export function openCommentOverlay(
   spaceId: string | null = null,
 ): void {
   overlay.value = { post, spaceId }
+  // The post and its comments are on screen now: its notifications read
+  // as read, the same as opening its own page.
+  markSeen(postLink(post.id, spaceId))
 }
 
 export function closeCommentOverlay(): void {

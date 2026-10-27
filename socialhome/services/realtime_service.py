@@ -2203,6 +2203,8 @@ class RealtimeService:
                 "notif_type": event.type,
                 "title": event.title,
                 "link_url": event.link_url,
+                # A refreshed unread row: move it up, don't count it again.
+                "bumped": event.bumped,
             },
         )
 

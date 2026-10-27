@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from socialhome.repositories.notification_repo import (
@@ -213,4 +215,121 @@ async def test_set_and_get_space_notif_level(env):
     assert (
         await env.notif_repo.get_space_notif_level(user_id="uid-u2", space_id="sp-n2")
         == "mentions"
+    )
+
+
+# ── Retention keeps work that is still waiting ────────────────────────
+
+
+async def _user(env, uid: str = "uid-r") -> str:
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        (uid, uid, uid),
+    )
+    return uid
+
+
+async def _save(env, uid, *, type="test", stamp: str, read: bool = False):
+    note = new_notification(user_id=uid, type=type, title=f"{type} {stamp}")
+    note = replace(note, created_at=stamp)
+    await env.notif_repo.save(note)
+    if read:
+        await env.notif_repo.mark_read(note.id, uid)
+    return note
+
+
+async def test_cap_prune_drops_read_rows_before_unread_ones(env):
+    """The cap used to drop the oldest rows, unread included: a burst of
+    news silently erased things the user never saw while older read rows
+    stayed."""
+    uid = await _user(env)
+    unread_old = await _save(env, uid, stamp="2026-01-01T00:00:00+00:00")
+    for i in range(9):
+        await _save(env, uid, stamp=f"2026-02-0{i + 1}T00:00:00+00:00", read=True)
+    # 10 rows (the cap); one more lands.
+    await _save(env, uid, stamp="2026-03-01T00:00:00+00:00")
+    ids = {n.id for n in await env.notif_repo.list(uid, limit=50)}
+    assert len(ids) == 10
+    assert unread_old.id in ids  # the oldest *read* row went instead
+
+
+async def test_cap_prune_never_drops_an_unread_action_item(env):
+    """A pending join request must not vanish under a flood of unread news."""
+    uid = await _user(env)
+    request = await _save(
+        env, uid, type="space_join_requested", stamp="2026-01-01T00:00:00+00:00"
+    )
+    for i in range(15):
+        await _save(env, uid, stamp=f"2026-02-{i + 10}T00:00:00+00:00")
+    notes = await env.notif_repo.list(uid, limit=50)
+    assert len(notes) == 10
+    assert request.id in {n.id for n in notes}
+
+
+async def test_cap_prune_drops_a_read_action_item_like_any_row(env):
+    uid = await _user(env)
+    handled = await _save(
+        env,
+        uid,
+        type="moderation_pending",
+        stamp="2026-01-01T00:00:00+00:00",
+        read=True,
+    )
+    for i in range(10):
+        await _save(env, uid, stamp=f"2026-02-{i + 10}T00:00:00+00:00")
+    assert handled.id not in {n.id for n in await env.notif_repo.list(uid, limit=50)}
+
+
+async def test_delete_old_keeps_unread_action_items(env):
+    """The 90-day purge spares a request nobody has handled yet."""
+    uid = await _user(env)
+    old = "2020-01-01T00:00:00+00:00"
+    waiting = await _save(env, uid, type="space_report", stamp=old)
+    handled = await _save(env, uid, type="space_report", stamp=old, read=True)
+    news = await _save(env, uid, stamp=old)
+    purged = await env.notif_repo.delete_old(older_than_days=90)
+    left = {n.id for n in await env.notif_repo.list(uid, limit=50)}
+    assert purged == 2
+    assert waiting.id in left
+    assert handled.id not in left and news.id not in left
+
+
+async def test_list_unread_and_mark_read_ids_touch_only_the_owner(env):
+    uid = await _user(env)
+    other = await _user(env, "uid-o")
+    mine = await _save(env, uid, stamp="2026-01-01T00:00:00+00:00")
+    read = await _save(env, uid, stamp="2026-01-02T00:00:00+00:00", read=True)
+    theirs = await _save(env, other, stamp="2026-01-03T00:00:00+00:00")
+    assert [n.id for n in await env.notif_repo.list_unread(uid)] == [mine.id]
+    assert await env.notif_repo.mark_read_ids(uid, [mine.id, read.id, theirs.id]) == 1
+    assert await env.notif_repo.count_unread(uid) == 0
+    assert await env.notif_repo.count_unread(other) == 1
+    assert await env.notif_repo.mark_read_ids(uid, []) == 0
+
+
+async def test_mark_read_for_everyone_returns_who_flipped(env):
+    a = await _user(env, "uid-a")
+    b = await _user(env, "uid-b")
+    c = await _user(env, "uid-c")
+    link = "/spaces/s1/moderation"
+    for uid in (a, b):
+        n = new_notification(
+            user_id=uid, type="space_join_requested", title="t", link_url=link
+        )
+        await env.notif_repo.save(n)
+    other = new_notification(
+        user_id=c, type="moderation_pending", title="t", link_url=link
+    )
+    await env.notif_repo.save(other)
+    flipped = await env.notif_repo.mark_read_for_everyone(
+        link_url=link, type="space_join_requested"
+    )
+    assert sorted(flipped) == ["uid-a", "uid-b"]
+    assert await env.notif_repo.count_unread(a) == 0
+    assert await env.notif_repo.count_unread(c) == 1  # another type stays
+    assert (
+        await env.notif_repo.mark_read_for_everyone(
+            link_url=link, type="space_join_requested"
+        )
+        == []
     )

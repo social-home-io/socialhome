@@ -65,12 +65,14 @@ from ..domain.events import (
     MomentCreated,
     MomentReactionChanged,
     NotificationCreated,
+    NotificationReadChanged,
     PostCreated,
     PostEdited,
     RemoteSpaceDissolved,
     RemoteSpaceInviteAccepted,
     RemoteSpaceInviteDeclined,
     ReportFiled,
+    ReportResolved,
     SpaceAdminSeedsRetiredAfterRestore,
     SpaceConfigChanged,
     SpaceJoinApproved,
@@ -115,9 +117,11 @@ from .notification_links import (
     HOUSEHOLD_CALENDAR_LINK,
     bazaar_listing_link,
     household_post_link,
+    link_target,
     space_about_link,
     space_calendar_link,
     space_members_link,
+    space_moderation_link,
     space_post_link,
     task_link,
 )
@@ -233,6 +237,7 @@ class NotificationService(ProtectionGateMixin):
         "_personal_calendar_repo",
         "_push",
         "_remote_members",
+        "_reports",
         "_spaces",
         "_users",
         "_ws_manager",
@@ -285,6 +290,13 @@ class NotificationService(ProtectionGateMixin):
         # limits that warning to households below v_43 (federated
         # moderation). Without it every new household warns.
         self._instances = None
+        # Reports — optional; it tells when a space's last open report was
+        # handled, so every authority's "New report" row reads as read.
+        self._reports = None
+
+    def attach_report_repo(self, report_repo) -> None:
+        """Wire the report repo (``on_report_resolved``)."""
+        self._reports = report_repo
 
     def attach_remote_member_repo(self, remote_member_repo) -> None:
         """Wire the remote-seat mirror (``on_remote_seat_live``)."""
@@ -381,6 +393,9 @@ class NotificationService(ProtectionGateMixin):
             saved = await self._notifs.save_or_bump_unread(note)
         else:
             saved = await self._notifs.save(note)
+        # A bump hands back the unread row it refreshed (its own id): the
+        # badge already counts it and the device already buzzed for it.
+        bumped = saved.id != note.id
         await self._bus.publish(
             NotificationCreated(
                 user_id=saved.user_id,
@@ -388,8 +403,11 @@ class NotificationService(ProtectionGateMixin):
                 type=saved.type,
                 title=saved.title,
                 link_url=saved.link_url,
+                bumped=bumped,
             )
         )
+        if bumped:
+            return saved  # one unread row, one push (§D8 re-buzz is later)
         if not push:
             return saved  # in-app only (a repeat the user was already told)
         if self._push is None and self._adapter is None:
@@ -469,9 +487,13 @@ class NotificationService(ProtectionGateMixin):
         self._bus.subscribe(SpacePostCreated, self.on_space_post_created)
         self._bus.subscribe(SpaceModerationQueued, self.on_moderation_queued)
         self._bus.subscribe(ReportFiled, self.on_report_filed)
+        self._bus.subscribe(ReportResolved, self.on_report_resolved)
         self._bus.subscribe(SpaceModerationApproved, self.on_moderation_decided)
         self._bus.subscribe(SpaceModerationRejected, self.on_moderation_decided)
         self._bus.subscribe(SpaceModerationExpired, self.on_moderation_decided)
+        self._bus.subscribe(SpaceModerationApproved, self.on_moderation_item_handled)
+        self._bus.subscribe(SpaceModerationRejected, self.on_moderation_item_handled)
+        self._bus.subscribe(SpaceModerationExpired, self.on_moderation_item_handled)
         self._bus.subscribe(SpaceRemoteSeatLive, self.on_remote_seat_live)
         self._bus.subscribe(DmMessageCreated, self.on_dm_message_created)
         self._bus.subscribe(DmMessageDeleted, self.on_dm_message_deleted)
@@ -493,6 +515,8 @@ class NotificationService(ProtectionGateMixin):
         self._bus.subscribe(SpaceJoinRequested, self.on_space_join_requested)
         self._bus.subscribe(SpaceJoinApproved, self.on_space_join_approved)
         self._bus.subscribe(SpaceJoinDenied, self.on_space_join_denied)
+        self._bus.subscribe(SpaceJoinApproved, self.on_join_request_handled)
+        self._bus.subscribe(SpaceJoinDenied, self.on_join_request_handled)
         self._bus.subscribe(SpaceConfigChanged, self.on_space_ownership_transferred)
         self._bus.subscribe(
             RemoteSpaceInviteAccepted,
@@ -1001,7 +1025,90 @@ class NotificationService(ProtectionGateMixin):
             flipped += await self._notifs.mark_read_by_link(
                 user_id=user_id, link_url=link, type=ntype
             )
+        if flipped:
+            await self._announce_unread(user_id)
         return flipped
+
+    async def mark_read_by_links(self, user_id: str, links: list[str]) -> int:
+        """The user saw these pages: every unread row of theirs that opens
+        one of them reads as read, on every device. Returns how many flipped.
+
+        Rows match on :func:`link_target` — the page, not the part it picks
+        out — so viewing ``/post/p`` reads "commented" rows that point at
+        ``/post/p?comment=c`` too, while viewing a space's feed
+        (``/spaces/s``) leaves its posts' rows (``/spaces/s?post=p``) alone.
+        """
+        targets = {link_target(link) for link in links}
+        ids = [
+            n.id
+            for n in await self._notifs.list_unread(user_id)
+            if n.link_url is not None and link_target(n.link_url) in targets
+        ]
+        flipped = await self._notifs.mark_read_ids(user_id, ids)
+        if flipped:
+            await self._announce_unread(user_id)
+        return flipped
+
+    async def _announce_unread(self, user_id: str) -> None:
+        """Tell every device of ``user_id`` its unread count now."""
+        await self._bus.publish(
+            NotificationReadChanged(
+                user_id=user_id,
+                unread_count=await self._notifs.count_unread(user_id),
+            )
+        )
+
+    async def _resolve_for_everyone(self, *, link_url: str, type: str) -> None:
+        """An action item was handled: its rows read as read for every
+        recipient, and each of their devices hears the new count."""
+        for user_id in await self._notifs.mark_read_for_everyone(
+            link_url=link_url, type=type
+        ):
+            await self._announce_unread(user_id)
+
+    # ── Action items: handled by one, handled for all ─────────────────
+    #
+    # The rows point at the space's review queue, not at one request, so
+    # they resolve once the queue they announce is empty — an admin who
+    # approved one of two requests still sees the other one waiting.
+
+    async def on_join_request_handled(
+        self, event: SpaceJoinApproved | SpaceJoinDenied
+    ) -> None:
+        """No join request left in the space: every admin's "wants to join"
+        rows read as read."""
+        if await self._spaces.list_pending_join_requests(event.space_id):
+            return
+        await self._resolve_for_everyone(
+            link_url=space_moderation_link(event.space_id),
+            type="space_join_requested",
+        )
+
+    async def on_moderation_item_handled(
+        self,
+        event: SpaceModerationApproved
+        | SpaceModerationRejected
+        | SpaceModerationExpired,
+    ) -> None:
+        """Nothing left to review in the space: every moderator's "pending
+        review" rows read as read."""
+        space_id = event.item.space_id
+        if await self._spaces.count_pending(space_id):
+            return
+        await self._resolve_for_everyone(
+            link_url=space_moderation_link(space_id), type="moderation_pending"
+        )
+
+    async def on_report_resolved(self, event: ReportResolved) -> None:
+        """No open report left in the space: every authority's "New report"
+        rows read as read."""
+        if not event.space_id or self._reports is None:
+            return
+        if await self._reports.count_pending_in_space(event.space_id):
+            return
+        await self._resolve_for_everyone(
+            link_url=space_moderation_link(event.space_id), type="space_report"
+        )
 
     async def on_dm_contact_requested(self, event: DmContactRequested) -> None:
         """A user wants to start a DM — notify the recipient + push."""
@@ -1309,7 +1416,7 @@ class NotificationService(ProtectionGateMixin):
                             fallback="New content pending review in {space_name}",
                             space_name=space.name,
                         ),
-                        link_url=f"/spaces/{event.item.space_id}/moderation",
+                        link_url=space_moderation_link(event.item.space_id),
                     ),
                     # A duty, not news about a person: the title names
                     # nobody, and blocking a submitter must not hide the
@@ -1364,7 +1471,7 @@ class NotificationService(ProtectionGateMixin):
                         fallback="New report in {space_name}",
                         space_name=space.name,
                     ),
-                    link_url=f"/spaces/{event.space_id}/moderation",
+                    link_url=space_moderation_link(event.space_id),
                 ),
                 actor_user_id=None,  # a duty; the reporter stays unnamed
             )
@@ -1937,7 +2044,7 @@ class NotificationService(ProtectionGateMixin):
                         name=name,
                         space_name=space.name,
                     ),
-                    link_url=f"/spaces/{event.space_id}/moderation",
+                    link_url=space_moderation_link(event.space_id),
                 ),
                 actor_user_id=event.user_id,
                 withheld=blocked,

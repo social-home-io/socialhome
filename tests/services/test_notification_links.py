@@ -67,7 +67,20 @@ def test_space_links():
     assert links.space_calendar_link("s1") == "/spaces/s1/calendar"
     assert links.space_about_link("s1") == "/spaces/s1/about"
     assert links.space_members_link("s1") == "/spaces/s1/settings/members"
+    assert links.space_moderation_link("s1") == "/spaces/s1/moderation"
     assert links.HOUSEHOLD_CALENDAR_LINK == "/calendar"
+
+
+def test_link_target_drops_only_the_picked_out_part():
+    """Viewing a page reads rows that pick a part of it out (a comment, a
+    moment reply), never rows for another page under the same path."""
+    assert links.link_target("/post/p1?comment=c1") == "/post/p1"
+    assert links.link_target("/post/p1") == "/post/p1"
+    assert links.link_target("/momentum/m1?reply=r1") == "/momentum/m1"
+    assert links.link_target("/spaces/s1?post=p1&comment=c1") == "/spaces/s1?post=p1"
+    # The space's feed is not one of its posts.
+    assert links.link_target("/spaces/s1?post=p1") != links.link_target("/spaces/s1")
+    assert links.link_target("/bazaar?listing=L1") == "/bazaar?listing=L1"
 
 
 def test_query_values_are_encoded():
