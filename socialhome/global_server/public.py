@@ -2,7 +2,8 @@
 
 Server-side-rendered HTML. No JS framework, no build step. Three routes:
 
-* ``GET /``          — landing page (hero + pairing QR + spaces list).
+* ``GET /``          — landing page (hero + pairing QR + spaces list, the
+  list unless ``[server] landing_space_list = false``).
 * ``GET /spaces/{slug}`` — per-space public page.
 * ``GET /join/{gfs_token}`` — invite-link landing: the space's public name
   next to the ``socialhome://invite#<blob>`` code + QR a visitor copies into
@@ -673,19 +674,20 @@ def _render_landing(
     token: str,
     pair_code: str,
     pair_qr_data_uri: str,
-    spaces: list[dict],
+    spaces: list[dict] | None,
     search: str,
     category: str,
     base_url: str,
 ) -> tuple[str, str]:
     """The ``GET /`` page as ``(html, css)`` — ``css`` is the exact text of
-    its one ``<style>``, for the CSP hash."""
+    its one ``<style>``, for the CSP hash. ``spaces=None`` leaves the
+    spaces section out (``[server] landing_space_list = false``)."""
     rows = []
     # Per-card accent stripe: a class + a rule in the page's hashed
     # ``<style>``, not a ``style=`` attribute (the public-page CSP refuses
     # those). ``css_color`` keeps owner-supplied text out of the CSS.
     accent_rules = []
-    for i, sp in enumerate(spaces):
+    for i, sp in enumerate(spaces or ()):
         accent = css_color(sp.get("accent_color"), "#ce5d3e")
         accent_rules.append(
             f"    .card.accent-{i} {{ border-left: 6px solid {accent}; }}"
@@ -711,6 +713,25 @@ def _render_landing(
         )
     cat_tabs_html = "\n        ".join(cat_tabs)
     accent_css = "\n".join(accent_rules)
+    spaces_html = (
+        f"""
+    <section>
+      <h2>Spaces</h2>
+      <form method="get" action="/">
+        <input name="search" type="search"
+               placeholder="Search spaces…" value="{_escape(search)}" />
+      </form>
+      <div class="filters">
+        {cat_tabs_html}
+      </div>
+      <ul>
+        {rows_html}
+      </ul>
+    </section>
+"""
+        if spaces is not None
+        else ""
+    )
     header_html = (
         f'<img src="{_escape(header_image_url)}" alt="" class="hero-image" />'
         if header_image_url
@@ -867,21 +888,7 @@ def _render_landing(
       </div>
     </section>
     {_COPY_BUTTON_SCRIPT_TAG}
-
-    <section>
-      <h2>Spaces</h2>
-      <form method="get" action="/">
-        <input name="search" type="search"
-               placeholder="Search spaces…" value="{_escape(search)}" />
-      </form>
-      <div class="filters">
-        {cat_tabs_html}
-      </div>
-      <ul>
-        {rows_html}
-      </ul>
-    </section>
-
+{spaces_html}
     <section>
       <h2>What is Social Home?</h2>
       <p>Social Home is a privacy-first, self-hosted social network.
@@ -1261,7 +1268,10 @@ async def handle_landing(request: web.Request) -> web.Response:
     # Normalize unknown categories to "" so garbage input lights up the
     # "All" tab and shows every space (consistent with the filter below).
     category = category if category in SPACE_CATEGORIES else ""
-    active_spaces = await fed_repo.list_spaces(status="active")
+    # Operator switch: no list means no directory query either.
+    active_spaces = (
+        await fed_repo.list_spaces(status="active") if cfg.landing_space_list else []
+    )
     items: list[dict] = []
     for sp in active_spaces:
         if search:
@@ -1292,7 +1302,7 @@ async def handle_landing(request: web.Request) -> web.Response:
         token=token,
         pair_code=pair_code,
         pair_qr_data_uri=qr_data,
-        spaces=items,
+        spaces=items if cfg.landing_space_list else None,
         search=search,
         category=category,
         base_url=cfg.base_url,

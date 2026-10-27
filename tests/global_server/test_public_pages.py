@@ -137,6 +137,41 @@ async def test_landing_lists_active_spaces_only(client):
     assert "Pending Space" not in text
 
 
+async def test_landing_hides_the_space_list_when_turned_off(tmp_dir):
+    cfg = replace(_config(tmp_dir), landing_space_list=False)
+    app = create_gfs_app(cfg)
+    async with TestClient(TestServer(app)) as tc:
+        fed_repo = app[gfs_fed_repo_key]
+        await fed_repo.upsert_instance(
+            ClientInstance(
+                instance_id="o.home",
+                display_name="O",
+                public_key="aa" * 32,
+                status="active",
+            )
+        )
+        await fed_repo.upsert_space(
+            GlobalSpace(
+                space_id="sp-active",
+                owning_instance="o.home",
+                name="Active Space",
+                status="active",
+            )
+        )
+        resp = await tc.get("/?search=Active")
+        assert resp.status == 200
+        text = await resp.text()
+        # The pairing section stays; the directory is gone entirely.
+        assert 'src="data:image/png;base64,' in text
+        assert "Active Space" not in text
+        assert "Search spaces" not in text
+        assert "<h2>Spaces</h2>" not in text
+        assert 'href="/?category=' not in text
+        # The space's own page still answers.
+        page = await tc.get("/spaces/sp-active")
+        assert page.status == 200
+
+
 async def test_landing_search_filters(client):
     app = client._app
     fed_repo = app[gfs_fed_repo_key]
