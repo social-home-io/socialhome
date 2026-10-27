@@ -41,9 +41,8 @@ class _FakeNotifService:
     def __init__(self) -> None:
         self.saved = []
 
-    async def _save_notif(self, note):
-        self.saved.append(note)
-        return note
+    async def notify_upcoming_event(self, user, *, event_id, summary, minutes):
+        self.saved.append((user.user_id, event_id, summary, minutes))
 
 
 def _user(username: str) -> User:
@@ -93,11 +92,11 @@ async def test_tick_fires_in_window_event_only(scheduler):
     fired = await sched.tick_once()
     assert fired == 1
     assert len(notif.saved) == 1
-    note = notif.saved[0]
-    assert note.type == "calendar_reminder"
-    assert "Event in-window" in note.title
-    assert note.link_url == "/calendar?event=in-window"
-    assert note.user_id == "alice-id"
+    # The service words (and translates) the bell; the scheduler hands it
+    # the event and how many minutes are left.
+    user_id, event_id, summary, minutes = notif.saved[0]
+    assert (user_id, event_id, summary) == ("alice-id", "in-window", "Event in-window")
+    assert 3 <= minutes <= 5
 
 
 async def test_tick_is_idempotent_per_event(scheduler):
