@@ -28,6 +28,11 @@ itself is the persistence layer; push is fire-and-forget on top.
 
 Body is intentionally omitted for privacy-sensitive events (DMs,
 location, UGC content) per §25.3.
+
+Every row passes one audience gate, :meth:`NotificationService._save_notif`:
+the recipient is a local user, and never someone who blocked the actor or
+whom a guardian block (§CP.F2) separates from them. Each call names its
+``actor_user_id`` (``None`` only for a notice nobody caused).
 """
 
 from __future__ import annotations
@@ -189,6 +194,17 @@ _FEATURE_FALLBACK: dict[str, str] = {
 }
 
 
+def _beyond_the_circle(recipient, received_via: str | None, hop_count: int) -> bool:
+    """§CP.R (decision 14): whether something that reached a **protected**
+    *recipient* came from beyond its circle — its household and paired
+    households — i.e. relayed over the mesh (hop ≥ 2) or by a GFS. Such a
+    thing never reaches a protected account as a notification naming a
+    stranger. Always ``False`` for an unprotected recipient."""
+    if not getattr(recipient, "child_protection_enabled", False):
+        return False
+    return received_via == "gfs" or hop_count > 1
+
+
 class NotificationService(ProtectionGateMixin):
     """Creates notification-centre entries in response to domain events.
 
@@ -316,10 +332,30 @@ class NotificationService(ProtectionGateMixin):
         self._ws_manager = ws_manager
 
     async def _save_notif(
-        self, note, *, dedupe_by_link: bool = False, push: bool = True
+        self,
+        note,
+        *,
+        actor_user_id: str | None = None,
+        withheld: frozenset[str] | None = None,
+        dedupe_by_link: bool = False,
+        push: bool = True,
     ):
-        """Persist + publish ``NotificationCreated`` + fire title-only
-        pushes to every registered surface (Web Push + HA mobile app).
+        """The one gate every notification passes, then persist + publish
+        ``NotificationCreated`` + fire title-only pushes to every registered
+        surface (Web Push + HA mobile app). Returns the saved row, or
+        ``None`` when the gate refused it.
+
+        The gate — so a new type inherits it rather than copying it:
+
+        * the recipient is a **local user** — a remote or unknown id never
+          gets a row (``notifications.user_id`` FKs into ``users``; a
+          failing insert used to abort the rest of a fan-out);
+        * ``actor_user_id`` is who caused it (a poster, assigner, joiner,
+          bidder…; ``None`` only for a notice nobody caused, such as a
+          deadline or an expiry). A recipient who blocked the actor, or
+          whom a guardian block (§CP.F2) separates from the actor, gets
+          nothing. A fan-out that already holds :meth:`_withheld_from` for
+          the actor passes it as ``withheld`` to spare a lookup per row.
 
         Per §25.3 we never put the body on the wire; subscribers
         translate the title and tap-open the app to see the full row.
@@ -330,6 +366,16 @@ class NotificationService(ProtectionGateMixin):
         five-message burst from one peer shows up as one bell entry
         until the recipient opens the thread.
         """
+        user = await self._users.get_by_user_id(note.user_id)
+        if user is None:
+            return None  # not a local user: their own household tells them
+        if actor_user_id and actor_user_id != note.user_id:
+            if withheld is not None:
+                hidden = note.user_id in withheld
+            else:
+                hidden = await self._hidden_from(note.user_id, actor_user_id)
+            if hidden:
+                return None
         if dedupe_by_link:
             saved = await self._notifs.save_or_bump_unread(note)
         else:
@@ -347,11 +393,6 @@ class NotificationService(ProtectionGateMixin):
             return saved  # in-app only (a repeat the user was already told)
         if self._push is None and self._adapter is None:
             return saved
-        try:
-            user = await self._users.get_by_user_id(saved.user_id)
-        except Exception as exc:
-            log.debug("push recipient lookup failed: %s", exc, exc_info=True)
-            return saved
         title = self._push_title(saved, user)
         # One tag per bell item: a repeat (a DM burst bumping one row) replaces
         # itself on the device; a different item never silently replaces it.
@@ -366,7 +407,7 @@ class NotificationService(ProtectionGateMixin):
             except Exception as exc:
                 log.debug("web push fan-out failed: %s", exc, exc_info=True)
         # Platform adapter (HA mobile app / standalone inbox).
-        if self._adapter is not None and user is not None:
+        if self._adapter is not None:
             try:
                 await self._adapter.send_push(
                     user,
@@ -524,7 +565,9 @@ class NotificationService(ProtectionGateMixin):
                         author=name,
                     ),
                     link_url=household_post_link(event.post.id),
-                )
+                ),
+                actor_user_id=author_id,
+                withheld=blocked,
             )
 
     async def on_comment_added(self, event: CommentAdded) -> None:
@@ -562,7 +605,9 @@ class NotificationService(ProtectionGateMixin):
                     type="comment_added",
                     title=f"{name} commented on a post",
                     link_url=household_post_link(event.post_id, event.comment.id),
-                )
+                ),
+                actor_user_id=commenter_id,
+                withheld=blocked,
             )
 
     async def on_post_edited(self, event: PostEdited) -> None:
@@ -601,12 +646,14 @@ class NotificationService(ProtectionGateMixin):
         )
 
     async def on_task_assigned(self, event: TaskAssigned) -> None:
-        """Notify the assignee (unless they assigned themselves).
+        """Notify the assignee (unless they assigned themselves, or they
+        blocked whoever assigned them).
 
         A space task only notifies a current local member of that space —
         the title must never reach a non-member (defence in depth behind
         the service-level assignee check)."""
-        if event.task.created_by == event.assigned_to:
+        assigner = event.assigned_by or event.task.created_by
+        if assigner == event.assigned_to:
             return
         if (
             event.space_id is not None
@@ -625,11 +672,14 @@ class NotificationService(ProtectionGateMixin):
                     title=event.task.title,
                 ),
                 link_url=task_link(event.task, event.space_id),
-            )
+            ),
+            actor_user_id=assigner,
         )
 
     async def on_task_deadline_due(self, event: TaskDeadlineDue) -> None:
-        """Notify every assignee that a task is due today."""
+        """Notify every assignee that a task is due today — a reminder
+        nobody caused, so no actor; a remote assignee is skipped by the
+        gate (their own household reminds them)."""
         for assignee_id in event.task.assignees:
             recipient = await self._users.get_by_user_id(assignee_id)
             title = self._t(
@@ -645,7 +695,8 @@ class NotificationService(ProtectionGateMixin):
                     title=title,
                     # The deadline sweep reads household tasks only.
                     link_url=task_link(event.task),
-                )
+                ),
+                actor_user_id=None,
             )
 
     async def on_dm_message_created(self, event: DmMessageCreated) -> None:
@@ -736,6 +787,8 @@ class NotificationService(ProtectionGateMixin):
             if is_mentioned:
                 await self._save_dm_mention(
                     local,
+                    sender_id=event.sender_user_id,
+                    withheld=blocked,
                     sender_name=event.sender_display_name,
                     chat_name=self._chat_name(prefs, local),
                     link=link,
@@ -758,6 +811,8 @@ class NotificationService(ProtectionGateMixin):
                     ),
                     link_url=link,
                 ),
+                actor_user_id=event.sender_user_id,
+                withheld=blocked,
                 dedupe_by_link=True,
             )
 
@@ -832,13 +887,22 @@ class NotificationService(ProtectionGateMixin):
                 continue
             await self._save_dm_mention(
                 local,
+                sender_id=event.sender_user_id,
+                withheld=blocked,
                 sender_name=name,
                 chat_name=self._chat_name(prefs, local),
                 link=link,
             )
 
     async def _save_dm_mention(
-        self, recipient, *, sender_name: str, chat_name: str | None, link: str
+        self,
+        recipient,
+        *,
+        sender_id: str,
+        withheld: frozenset[str],
+        sender_name: str,
+        chat_name: str | None,
+        link: str,
     ) -> None:
         if chat_name:
             title = self._t(
@@ -862,6 +926,8 @@ class NotificationService(ProtectionGateMixin):
                 title=title,
                 link_url=link,
             ),
+            actor_user_id=sender_id,
+            withheld=withheld,
             dedupe_by_link=True,
         )
 
@@ -938,8 +1004,6 @@ class NotificationService(ProtectionGateMixin):
 
     async def on_dm_contact_requested(self, event: DmContactRequested) -> None:
         """A user wants to start a DM — notify the recipient + push."""
-        if await self._hidden_from(event.recipient_user_id, event.requester_user_id):
-            return
         recipient = await self._users.get_by_user_id(event.recipient_user_id)
         title = self._t(
             "notification.dm.contact_requested",
@@ -953,7 +1017,8 @@ class NotificationService(ProtectionGateMixin):
                 type="dm_contact_requested",
                 title=title,
                 link_url="/dms",
-            )
+            ),
+            actor_user_id=event.requester_user_id,
         )
 
     async def on_app_challenge_received(
@@ -981,7 +1046,8 @@ class NotificationService(ProtectionGateMixin):
                 type="app_challenge",
                 title=title,
                 link_url=f"/apps/{event.app_id}",
-            )
+            ),
+            actor_user_id=event.from_user_id,
         )
 
     async def on_bazaar_bid_placed(self, event: BazaarBidPlaced) -> None:
@@ -1000,7 +1066,8 @@ class NotificationService(ProtectionGateMixin):
                 type="bazaar_bid_placed",
                 title=title,
                 link_url=bazaar_listing_link(event.listing_post_id),
-            )
+            ),
+            actor_user_id=event.bidder_user_id,
         )
 
     async def on_bazaar_offer_accepted(
@@ -1020,7 +1087,8 @@ class NotificationService(ProtectionGateMixin):
                 type="bazaar_offer_accepted",
                 title=title,
                 link_url=bazaar_listing_link(event.listing_post_id),
-            )
+            ),
+            actor_user_id=event.seller_user_id,
         )
 
     async def on_bazaar_offer_rejected(
@@ -1039,7 +1107,8 @@ class NotificationService(ProtectionGateMixin):
                 type="bazaar_offer_rejected",
                 title=title,
                 link_url=bazaar_listing_link(event.listing_post_id),
-            )
+            ),
+            actor_user_id=event.seller_user_id,
         )
 
     async def on_bazaar_listing_expired(
@@ -1066,7 +1135,8 @@ class NotificationService(ProtectionGateMixin):
                 type=f"bazaar_listing_{event.final_status}",
                 title=title,
                 link_url=bazaar_listing_link(event.listing_post_id),
-            )
+            ),
+            actor_user_id=None,  # the listing's own clock
         )
 
     async def on_space_post_created(self, event: SpacePostCreated) -> None:
@@ -1195,7 +1265,9 @@ class NotificationService(ProtectionGateMixin):
                         space_name=space.name,
                     ),
                     link_url=link,
-                )
+                ),
+                actor_user_id=author_id,
+                withheld=blocked,
             )
 
     def _take_here_slot(self, space_id: str, author_id: str) -> bool:
@@ -1237,7 +1309,11 @@ class NotificationService(ProtectionGateMixin):
                             space_name=space.name,
                         ),
                         link_url=f"/spaces/{event.item.space_id}/moderation",
-                    )
+                    ),
+                    # A duty, not news about a person: the title names
+                    # nobody, and blocking a submitter must not hide the
+                    # queue from its moderators.
+                    actor_user_id=None,
                 )
 
     async def on_report_filed(self, event: ReportFiled) -> None:
@@ -1288,7 +1364,8 @@ class NotificationService(ProtectionGateMixin):
                         space_name=space.name,
                     ),
                     link_url=f"/spaces/{event.space_id}/moderation",
-                )
+                ),
+                actor_user_id=None,  # a duty; the reporter stays unnamed
             )
 
     async def on_remote_seat_live(self, event: SpaceRemoteSeatLive) -> None:
@@ -1372,6 +1449,7 @@ class NotificationService(ProtectionGateMixin):
                     ),
                     link_url=link,
                 ),
+                actor_user_id=None,
                 dedupe_by_link=True,
                 push=not told,
             )
@@ -1425,7 +1503,8 @@ class NotificationService(ProtectionGateMixin):
                     space_name=space.name,
                 ),
                 link_url=f"/spaces/{item.space_id}",
-            )
+            ),
+            actor_user_id=None,  # a decision about your own content
         )
 
     async def on_calendar_event_created(
@@ -1488,7 +1567,8 @@ class NotificationService(ProtectionGateMixin):
                             summary=cal_event.summary,
                         ),
                         link_url=HOUSEHOLD_CALENDAR_LINK,
-                    )
+                    ),
+                    actor_user_id=cal_event.created_by,
                 )
                 return
         # Space-calendar branch — ``calendar_id`` is the space_id.
@@ -1500,6 +1580,7 @@ class NotificationService(ProtectionGateMixin):
         if space is None:
             return
         members = await self._spaces.list_members(cal_event.calendar_id)
+        blocked = await self._withheld_from(cal_event.created_by)
         for member in members:
             if member.user_id == cal_event.created_by:
                 continue
@@ -1517,7 +1598,9 @@ class NotificationService(ProtectionGateMixin):
                         summary=cal_event.summary,
                     ),
                     link_url=space_calendar_link(cal_event.calendar_id),
-                )
+                ),
+                actor_user_id=cal_event.created_by,
+                withheld=blocked,
             )
 
     async def on_calendar_event_deleted(
@@ -1642,7 +1725,8 @@ class NotificationService(ProtectionGateMixin):
                     summary=event.summary,
                 ),
                 link_url=space_calendar_link(event.space_id),
-            )
+            ),
+            actor_user_id=None,  # the user's own reminder
         )
 
     async def on_task_completed(self, event: TaskCompleted) -> None:
@@ -1652,9 +1736,8 @@ class NotificationService(ProtectionGateMixin):
         of the space and links to the space's tasks tab."""
         task = event.task
         completed_by = event.completed_by
-        completer = await self._users.get_by_user_id(completed_by)
-        name = completer.display_name if completer else "Someone"
         link_url = task_link(task, event.space_id)
+        blocked = await self._withheld_from(completed_by)
         members: set[str] | None = None
         if event.space_id is not None:
             members = set(await self._spaces.list_local_member_user_ids(event.space_id))
@@ -1664,6 +1747,9 @@ class NotificationService(ProtectionGateMixin):
             if members is not None and uid not in members:
                 continue
             recipient = await self._users.get_by_user_id(uid)
+            if recipient is None or uid in blocked:
+                continue
+            name = await self._person_name(completed_by, self._locale(recipient))
             await self._save_notif(
                 new_notification(
                     user_id=uid,
@@ -1676,14 +1762,17 @@ class NotificationService(ProtectionGateMixin):
                         title=task.title,
                     ),
                     link_url=link_url,
-                )
+                ),
+                actor_user_id=completed_by,
+                withheld=blocked,
             )
 
     async def on_space_post_moderated(
         self,
         event: SpacePostModerated,
     ) -> None:
-        """Notify the post author that their post was moderated."""
+        """Notify the post author that their post was moderated (a remote
+        author is skipped by the gate — their household tells them)."""
         post = event.post
         await self._save_notif(
             new_notification(
@@ -1691,7 +1780,8 @@ class NotificationService(ProtectionGateMixin):
                 type="post_moderated",
                 title="Your post was moderated",
                 link_url=f"/spaces/{event.space_id}",
-            )
+            ),
+            actor_user_id=None,  # a decision about your own content
         )
 
     async def on_space_member_joined(self, event: SpaceMemberJoined) -> None:
@@ -1704,9 +1794,8 @@ class NotificationService(ProtectionGateMixin):
         space = await self._spaces.get(event.space_id)
         if space is None:
             return
-        joiner = await self._users.get_by_user_id(event.user_id)
-        name = joiner.display_name if joiner else event.user_id
         members = await self._spaces.list_members(event.space_id)
+        blocked = await self._withheld_from(event.user_id)
         # A follower's reduced roster lists the members, never another
         # follower (owner decision 13): a follower joining is news to the
         # members only.
@@ -1716,7 +1805,14 @@ class NotificationService(ProtectionGateMixin):
                 continue
             if not followers_too and member.role not in WRITER_ROLES:
                 continue
+            if member.user_id in blocked:
+                continue
             recipient = await self._users.get_by_user_id(member.user_id)
+            if recipient is None:
+                continue
+            # A remote joiner is named by the name this household holds,
+            # never by their raw user id.
+            name = await self._person_name(event.user_id, self._locale(recipient))
             await self._save_notif(
                 new_notification(
                     user_id=member.user_id,
@@ -1729,7 +1825,9 @@ class NotificationService(ProtectionGateMixin):
                         space_name=space.name,
                     ),
                     link_url=f"/spaces/{event.space_id}",
-                )
+                ),
+                actor_user_id=event.user_id,
+                withheld=blocked,
             )
 
     async def on_remote_space_dissolved(self, event: RemoteSpaceDissolved) -> None:
@@ -1767,6 +1865,7 @@ class NotificationService(ProtectionGateMixin):
                 # A re-broadcast of SPACE_DISSOLVED (fresh msg_id) must not
                 # re-notify every member; the (user_id, type, link_url) tuple
                 # is stable for this one-time notice.
+                actor_user_id=None,
                 dedupe_by_link=True,
             )
 
@@ -1796,6 +1895,7 @@ class NotificationService(ProtectionGateMixin):
                     body=None,
                     link_url=f"/spaces/{event.space_id}",
                 ),
+                actor_user_id=None,
                 dedupe_by_link=True,
             )
 
@@ -1807,13 +1907,19 @@ class NotificationService(ProtectionGateMixin):
         space = await self._spaces.get(event.space_id)
         if space is None:
             return
-        requester = await self._users.get_by_user_id(event.user_id)
-        name = requester.display_name if requester else event.user_id
         members = await self._spaces.list_members(event.space_id)
+        blocked = await self._withheld_from(event.user_id)
         for member in members:
             if member.role not in SETTINGS_AUTHORITY_ROLES:
                 continue
+            if member.user_id in blocked:
+                continue
             recipient = await self._users.get_by_user_id(member.user_id)
+            if recipient is None:
+                continue
+            # A remote applicant is named by the name this household holds,
+            # never by their raw user id.
+            name = await self._person_name(event.user_id, self._locale(recipient))
             await self._save_notif(
                 new_notification(
                     user_id=member.user_id,
@@ -1826,7 +1932,9 @@ class NotificationService(ProtectionGateMixin):
                         space_name=space.name,
                     ),
                     link_url=f"/spaces/{event.space_id}/moderation",
-                )
+                ),
+                actor_user_id=event.user_id,
+                withheld=blocked,
             )
 
     async def on_space_join_approved(
@@ -1856,7 +1964,8 @@ class NotificationService(ProtectionGateMixin):
                     space_name=space.name,
                 ),
                 link_url=f"/spaces/{event.space_id}",
-            )
+            ),
+            actor_user_id=None,  # an answer to your own request
         )
 
     async def on_space_ownership_transferred(
@@ -1889,7 +1998,8 @@ class NotificationService(ProtectionGateMixin):
                     space_name=space.name,
                 ),
                 link_url=f"/spaces/{event.space_id}/settings",
-            )
+            ),
+            actor_user_id=None,  # the space is yours now, whoever handed it
         )
 
     async def on_space_join_denied(
@@ -1918,61 +2028,83 @@ class NotificationService(ProtectionGateMixin):
                 # The title can't name the space (lock screen, §25.3): the
                 # space's landing page says which one.
                 link_url=space_about_link(event.space_id),
-            )
+            ),
+            actor_user_id=None,  # an answer to your own request
         )
 
     async def on_remote_invite_accepted(
         self,
         event: RemoteSpaceInviteAccepted,
     ) -> None:
-        """§D1b — inviter learns the remote user accepted. Title-only."""
-        space = await self._spaces.get(event.space_id)
-        if space is None:
-            return
-        members = await self._spaces.list_members(event.space_id)
-        # Narrow to space admins: members with role admin|owner.
-        for m in members:
-            if m.role not in SETTINGS_AUTHORITY_ROLES:
-                continue
-            recipient = await self._users.get_by_user_id(m.user_id)
-            await self._save_notif(
-                new_notification(
-                    user_id=m.user_id,
-                    type="space_remote_invite_accepted",
-                    title=self._t(
-                        "notification.space.remote_invite.accepted",
-                        locale=self._locale(recipient),
-                        fallback="Your invite was accepted.",
-                    ),
-                    link_url=f"/spaces/{event.space_id}",
-                )
-            )
+        """§D1b — the inviter (only) learns the remote person accepted:
+        "{name} accepted your invite to {space_name}"."""
+        await self._tell_inviter(
+            event,
+            ntype="space_remote_invite_accepted",
+            key="notification.space.remote_invite.accepted",
+            fallback="{name} accepted your invite to {space_name}",
+            link=f"/spaces/{event.space_id}",
+            display_name=event.invitee_display_name,
+        )
 
     async def on_remote_invite_declined(
         self,
         event: RemoteSpaceInviteDeclined,
     ) -> None:
+        """§D1b — the inviter (only) learns the remote person declined."""
+        await self._tell_inviter(
+            event,
+            ntype="space_remote_invite_declined",
+            key="notification.space.remote_invite.declined",
+            fallback="{name} declined your invite to {space_name}",
+            # Members settings: the invites, to try someone else.
+            link=space_members_link(event.space_id),
+            display_name=None,
+        )
+
+    async def _tell_inviter(
+        self,
+        event: RemoteSpaceInviteAccepted | RemoteSpaceInviteDeclined,
+        *,
+        ntype: str,
+        key: str,
+        fallback: str,
+        link: str,
+        display_name: str | None,
+    ) -> None:
+        """An invite answer goes to the person who sent the invitation —
+        never to every admin — while they still hold a seat in the space.
+        The title names the invitee (the name their accept carried, else
+        the one this household holds, else "Someone"; never the raw id)
+        and the space."""
+        inviter = event.inviter_user_id
+        if not inviter:
+            return
         space = await self._spaces.get(event.space_id)
         if space is None:
             return
-        members = await self._spaces.list_members(event.space_id)
-        for m in members:
-            if m.role not in SETTINGS_AUTHORITY_ROLES:
-                continue
-            recipient = await self._users.get_by_user_id(m.user_id)
-            await self._save_notif(
-                new_notification(
-                    user_id=m.user_id,
-                    type="space_remote_invite_declined",
-                    title=self._t(
-                        "notification.space.remote_invite.declined",
-                        locale=self._locale(recipient),
-                        fallback="Your invite was declined.",
-                    ),
-                    # Members settings: the invites, to try someone else.
-                    link_url=space_members_link(event.space_id),
-                )
-            )
+        if await self._spaces.get_member(event.space_id, inviter) is None:
+            return  # they left the space: nothing of theirs to come back to
+        recipient = await self._users.get_by_user_id(inviter)
+        if recipient is None:
+            return
+        locale = self._locale(recipient)
+        name = display_name or await self._person_name(event.invitee_user_id, locale)
+        await self._save_notif(
+            new_notification(
+                user_id=inviter,
+                type=ntype,
+                title=self._t(
+                    key,
+                    locale=locale,
+                    fallback=fallback,
+                    name=name,
+                    space_name=space.name,
+                ),
+                link_url=link,
+            ),
+            actor_user_id=event.invitee_user_id,
+        )
 
     # ── Momentum (§Momentum) ──────────────────────────────────────────
 
@@ -1985,16 +2117,21 @@ class NotificationService(ProtectionGateMixin):
         Cleared reactions (``emoji is None``) intentionally don't fire
         a notification — the author already saw the original. Self-
         reactions are silent. The recipient must live on this instance.
+
+        §CP.R (decision 14), the same gate as a reply: a protected account
+        sees moments from its household and paired households only — a
+        reaction relayed from further away (mesh hop ≥ 2, or a GFS) never
+        reaches it as a notification naming a stranger.
         """
         if event.emoji is None:
             return
         if event.reactor_user_id == event.author_user_id:
             return
-        if await self._hidden_from(event.author_user_id, event.reactor_user_id):
-            return
         author = await self._users.get_by_user_id(event.author_user_id)
         if author is None:
             return  # remote author — their instance fires the local notif
+        if _beyond_the_circle(author, event.received_via, event.hop_count):
+            return
         locale = self._locale(author)
         await self._save_notif(
             new_notification(
@@ -2008,7 +2145,8 @@ class NotificationService(ProtectionGateMixin):
                     emoji=event.emoji,
                 ),
                 link_url=f"/momentum/{event.moment_id}",
-            )
+            ),
+            actor_user_id=event.reactor_user_id,
         )
 
     async def on_moment_created(self, event: MomentCreated) -> None:
@@ -2024,14 +2162,10 @@ class NotificationService(ProtectionGateMixin):
             return
         if event.parent_author_user_id == event.author_user_id:
             return  # author replied to their own thread
-        if await self._hidden_from(event.parent_author_user_id, event.author_user_id):
-            return
         recipient = await self._users.get_by_user_id(event.parent_author_user_id)
         if recipient is None:
             return  # parent author lives on a peer instance
-        if recipient.child_protection_enabled and (
-            event.received_via == "gfs" or event.hop_count > 1
-        ):
+        if _beyond_the_circle(recipient, event.received_via, event.hop_count):
             # §CP.R (decision 14): a protected account sees moments from its
             # household and paired households only — a reply from further
             # away never reaches it, not as a notification naming its author.
@@ -2051,7 +2185,8 @@ class NotificationService(ProtectionGateMixin):
                 link_url=(
                     f"/momentum/{event.parent_moment_id}?reply={event.moment_id}"
                 ),
-            )
+            ),
+            actor_user_id=event.author_user_id,
         )
 
     # ── Highlights (§Highlights) ──────────────────────────────────────
@@ -2073,8 +2208,6 @@ class NotificationService(ProtectionGateMixin):
             return
         if event.reactor_user_id == event.author_user_id:
             return
-        if await self._hidden_from(event.author_user_id, event.reactor_user_id):
-            return
         author = await self._users.get_by_user_id(event.author_user_id)
         if author is None:
             return
@@ -2091,14 +2224,13 @@ class NotificationService(ProtectionGateMixin):
                     emoji=event.emoji,
                 ),
                 link_url=f"/highlights/{event.highlight_id}",
-            )
+            ),
+            actor_user_id=event.reactor_user_id,
         )
 
     async def on_user_followed(self, event: UserFollowed) -> None:
         """Notify the followed user when someone starts following them."""
         if event.follower_user_id == event.followed_user_id:
-            return
-        if await self._hidden_from(event.followed_user_id, event.follower_user_id):
             return
         recipient = await self._users.get_by_user_id(event.followed_user_id)
         if recipient is None:
@@ -2115,7 +2247,8 @@ class NotificationService(ProtectionGateMixin):
                     name=await self._person_name(event.follower_user_id, locale),
                 ),
                 link_url="/momentum",
-            )
+            ),
+            actor_user_id=event.follower_user_id,
         )
 
     # ── Space location feature (§23.8.6) ──────────────────────────────
@@ -2124,22 +2257,35 @@ class NotificationService(ProtectionGateMixin):
         self,
         event: SpaceLocationFeatureEnabled,
     ) -> None:
-        """Nudge every space member (except the actor) to opt in.
+        """Nudge the space's members (except the actor) to opt in.
 
         Fired only on the OFF→ON transition — see
         :class:`SpaceService.update_config`. The link points at the
         Personal Settings → Privacy → 'Space location sharing' panel
         so members can discover and manage their per-space sharing in
         one place.
+
+        Never to a follower (a subscriber can't share location in the
+        space) nor to a protected account (§CP: nothing nudges a child to
+        share where they are).
         """
         members = await self._spaces.list_members(event.space_id)
-        user_ids = [m.user_id for m in members if m.user_id != event.actor_user_id]
-        for uid in user_ids:
+        blocked = await self._withheld_from(event.actor_user_id)
+        for m in members:
+            if m.user_id == event.actor_user_id or m.role not in WRITER_ROLES:
+                continue
+            recipient = await self._users.get_by_user_id(m.user_id)
+            if recipient is None or recipient.child_protection_enabled:
+                continue
+            if await self._is_protected(m.user_id):
+                continue
             await self._save_notif(
                 new_notification(
-                    user_id=uid,
+                    user_id=m.user_id,
                     type="space_location_enabled",
                     title=f"Location sharing turned on in {event.space_name}",
                     link_url="/settings#privacy",
-                )
+                ),
+                actor_user_id=event.actor_user_id,
+                withheld=blocked,
             )

@@ -892,7 +892,9 @@ class MomentReactionRouter(ProtectionGateMixin):
             )
             return
         assert inner is not None
-        await self._apply(inner)
+        # A routed reaction came over the mesh: its reactor's household is
+        # not paired with ours (§CP.R reads this on the event).
+        await self._apply(inner, received_via="household", hop_count=2)
 
     async def on_gfs_reaction(self, frame: dict[str, Any], *, gfs_id: str) -> None:
         """A ``moment_reaction`` frame (v_68): a follower household's sealed
@@ -929,7 +931,7 @@ class MomentReactionRouter(ProtectionGateMixin):
             )
             return
         assert inner is not None
-        await self._apply(inner)
+        await self._apply(inner, received_via="gfs")
 
     async def _open_checked(
         self,
@@ -1035,7 +1037,13 @@ class MomentReactionRouter(ProtectionGateMixin):
         self._remember_seen(digest, now)
         return None
 
-    async def _apply(self, inner: dict[str, Any]) -> None:
+    async def _apply(
+        self,
+        inner: dict[str, Any],
+        *,
+        received_via: str,
+        hop_count: int = 1,
+    ) -> None:
         moment_id = str(inner["moment_id"])
         reactor = str(inner["reactor_user_id"])
         emoji = inner["emoji"]
@@ -1062,6 +1070,8 @@ class MomentReactionRouter(ProtectionGateMixin):
                 reactor_user_id=reactor,
                 author_user_id=moment.author_user_id,
                 emoji=emoji,
+                received_via=received_via,
+                hop_count=hop_count,
             )
         )
 

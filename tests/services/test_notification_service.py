@@ -3757,7 +3757,10 @@ async def test_invite_declined_bell_opens_the_members_settings(stack):
     _space_svc, space, u = await _mention_space(stack)
     await stack.bus.publish(
         RemoteSpaceInviteDeclined(
-            space_id=space.id, instance_id="inst-r", invitee_user_id="u-r"
+            space_id=space.id,
+            instance_id="inst-r",
+            invitee_user_id="u-r",
+            inviter_user_id=u["anna"].user_id,
         )
     )
     assert await _links(stack, u["anna"], "space_remote_invite_declined") == [

@@ -400,6 +400,8 @@ async def test_moment_reacted_persists_and_publishes(db, bus, inbound):
     rs = await svc._moment_repo.list_reactions("m-fed-1")
     assert [r.emoji for r in rs] == ["🔥"]
     assert len(captured) == 1 and captured[0].emoji == "🔥"
+    # Straight from the reactor's paired household (§CP.R: inside the circle).
+    assert (captured[0].received_via, captured[0].hop_count) == ("household", 1)
 
 
 async def test_moment_reaction_removed_clears(db, bus, inbound):

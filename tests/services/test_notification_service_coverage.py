@@ -1,5 +1,5 @@
 """Coverage fill for NotificationService — bazaar events, remote invite
-accepted/declined, space join denied."""
+accepted/declined (inviter only), space join denied."""
 
 from __future__ import annotations
 
@@ -135,13 +135,14 @@ async def _seed_space_with_admin(stack, *, sid="sp1"):
     return sid, admin
 
 
-async def test_remote_invite_accepted_notifies_admins(stack):
+async def test_remote_invite_accepted_notifies_the_inviter(stack):
     sid, admin = await _seed_space_with_admin(stack)
     await stack.notif_svc.on_remote_invite_accepted(
         RemoteSpaceInviteAccepted(
             space_id=sid,
             instance_id="peer",
             invitee_user_id="u-remote",
+            inviter_user_id=admin.user_id,
         )
     )
     notifs = await stack.notif_repo.list(admin.user_id, limit=10)
@@ -154,19 +155,32 @@ async def test_remote_invite_accepted_unknown_space_noop(stack):
             space_id="ghost-space",
             instance_id="peer",
             invitee_user_id="u",
+            inviter_user_id="anyone",
         )
     )
     # No crash; no notifications anywhere.
     assert (await stack.notif_repo.list("anyone", limit=10)) == []
 
 
-async def test_remote_invite_declined_notifies_admins(stack):
+async def test_remote_invite_answer_without_an_inviter_rings_nobody(stack):
+    """An event that names no inviter never falls back to every admin."""
+    sid, admin = await _seed_space_with_admin(stack, sid="sp0")
+    await stack.notif_svc.on_remote_invite_accepted(
+        RemoteSpaceInviteAccepted(
+            space_id=sid, instance_id="peer", invitee_user_id="u-remote"
+        )
+    )
+    assert await stack.notif_repo.list(admin.user_id, limit=10) == []
+
+
+async def test_remote_invite_declined_notifies_the_inviter(stack):
     sid, admin = await _seed_space_with_admin(stack, sid="sp2")
     await stack.notif_svc.on_remote_invite_declined(
         RemoteSpaceInviteDeclined(
             space_id=sid,
             instance_id="peer",
             invitee_user_id="u-remote",
+            inviter_user_id=admin.user_id,
         )
     )
     notifs = await stack.notif_repo.list(admin.user_id, limit=10)
@@ -179,14 +193,19 @@ async def test_remote_invite_declined_unknown_space_noop(stack):
             space_id="ghost",
             instance_id="peer",
             invitee_user_id="u",
+            inviter_user_id="anyone",
         )
     )
 
 
-async def test_remote_invite_skips_non_admin_members(stack):
+async def test_remote_invite_answer_skips_other_admins_and_members(stack):
     sid, admin = await _seed_space_with_admin(stack, sid="sp3")
-    # Add a non-admin member whom we should skip.
+    other_admin = await _user(stack, "otheradmin")
     member = await _user(stack, "member")
+    await stack.db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES(?, ?, 'admin')",
+        (sid, other_admin.user_id),
+    )
     await stack.db.enqueue(
         "INSERT INTO space_members(space_id, user_id, role) VALUES(?, ?, 'member')",
         (sid, member.user_id),
@@ -196,10 +215,9 @@ async def test_remote_invite_skips_non_admin_members(stack):
             space_id=sid,
             instance_id="peer",
             invitee_user_id="u-remote",
+            inviter_user_id=admin.user_id,
         )
     )
-    admin_notifs = await stack.notif_repo.list(admin.user_id, limit=10)
-    member_notifs = await stack.notif_repo.list(member.user_id, limit=10)
-    assert admin_notifs  # admin got it
-    # member did not
-    assert not any(n.type == "space_remote_invite_accepted" for n in member_notifs)
+    assert await stack.notif_repo.list(admin.user_id, limit=10)
+    assert await stack.notif_repo.list(other_admin.user_id, limit=10) == []
+    assert await stack.notif_repo.list(member.user_id, limit=10) == []

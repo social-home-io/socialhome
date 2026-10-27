@@ -83,6 +83,7 @@ def _invitation(
     remote_user_id="u1",
     status="pending",
     expires_at=None,
+    invited_by="u-inviter",
 ):
     """A ``space_invitations`` row as ``get_invitation_by_token`` returns it.
 
@@ -96,6 +97,7 @@ def _invitation(
         "space_id": space_id,
         "remote_instance_id": remote_instance_id,
         "remote_user_id": remote_user_id,
+        "invited_by": invited_by,
         "status": status,
         "expires_at": expires_at,
     }
@@ -230,7 +232,12 @@ async def test_accept_happy_path(handler):
     await handler.h._on_accept(ev)
     handler.remote_members.add.assert_awaited_once()
     handler.space_repo.update_invitation_status.assert_awaited_with(42, "accepted")
-    assert any(isinstance(e, RemoteSpaceInviteAccepted) for e in handler.bus.events)
+    (accepted,) = [
+        e for e in handler.bus.events if isinstance(e, RemoteSpaceInviteAccepted)
+    ]
+    # The bell goes to the one who sent the invitation, naming the invitee.
+    assert accepted.inviter_user_id == "u-inviter"
+    assert accepted.invitee_display_name == "Bob"
 
 
 def _local_community(owner="host-self"):
@@ -462,7 +469,11 @@ async def test_decline_happy_path(handler):
     )
     await handler.h._on_decline(ev)
     handler.space_repo.update_invitation_status.assert_awaited_with(5, "declined")
-    assert any(isinstance(e, RemoteSpaceInviteDeclined) for e in handler.bus.events)
+    (declined,) = [
+        e for e in handler.bus.events if isinstance(e, RemoteSpaceInviteDeclined)
+    ]
+    assert declined.inviter_user_id == "u-inviter"
+    assert declined.invitee_user_id == "u1"
 
 
 async def test_member_removed_missing_fields_noops(handler):

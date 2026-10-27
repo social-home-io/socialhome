@@ -497,6 +497,9 @@ class TaskAssigned(DomainEvent):
     #: Set for a space task — consumers gate delivery on membership.
     space_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
+    #: Who assigned them (the creator on create, the editor on update) — a
+    #: recipient who blocked them hears nothing. ``None``: the creator.
+    assigned_by: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -1574,12 +1577,18 @@ class RemoteJoinRequestDenied(DomainEvent):
 @dataclass(slots=True, frozen=True)
 class RemoteSpaceInviteAccepted(DomainEvent):
     """Local record that a remote user accepted our private-space invite
-    (§D1b). Drives notifications + UI refresh on the host."""
+    (§D1b). Drives notifications + UI refresh on the host.
+
+    ``inviter_user_id`` is the local admin who sent the invitation (the
+    invitation row's ``invited_by``) — the only person the bell goes to.
+    ``invitee_display_name`` is the name the accept carried, if any."""
 
     space_id: str
     instance_id: str
     invitee_user_id: str
     occurred_at: datetime = field(default_factory=_now)
+    inviter_user_id: str = ""
+    invitee_display_name: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -1684,6 +1693,7 @@ class RemoteSpaceInviteDeclined(DomainEvent):
     instance_id: str
     invitee_user_id: str
     occurred_at: datetime = field(default_factory=_now)
+    inviter_user_id: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -2407,6 +2417,9 @@ class AppChallengeReceived(DomainEvent):
     session_id: str
     to_user_id: str
     from_display: str
+    #: The challenger's user id — never shown, only checked against the
+    #: recipient's personal and guardian blocks (``None``: not known).
+    from_user_id: str | None = None
 
 
 # ─── Momentum (§Momentum) ─────────────────────────────────────────────────
@@ -2466,6 +2479,12 @@ class MomentReactionChanged(DomainEvent):
 
     ``emoji is None`` ⇒ cleared. The reactor's home instance federates
     this back to the author's instance for the live counter update.
+
+    ``received_via`` / ``hop_count`` say how far the reaction came, like
+    :class:`MomentCreated`: ``None`` / 1 for this household, ``household``
+    / 1 for a paired one, ``household`` / ≥ 2 for one relayed over the
+    mesh, ``gfs`` for one a GFS carried. §CP.R: a protected author hears
+    only of reactions from its own circle.
     """
 
     moment_id: str
@@ -2473,6 +2492,8 @@ class MomentReactionChanged(DomainEvent):
     author_user_id: str
     emoji: str | None
     occurred_at: datetime = field(default_factory=_now)
+    received_via: str | None = None
+    hop_count: int = 1
 
 
 @dataclass(slots=True, frozen=True)

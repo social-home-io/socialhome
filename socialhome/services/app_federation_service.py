@@ -313,6 +313,7 @@ class AppFederationService:
                         session_id=session_id,
                         to_user_id=target["user_ref"],
                         from_display=from_display,
+                        from_user_id=actor_user_id,
                     )
                 )
             return session_id
@@ -875,6 +876,7 @@ class AppFederationService:
                                 session_id=session_id,
                                 to_user_id=recipient.user_id,
                                 from_display=from_display,
+                                from_user_id=initiator.user_id,
                             )
                         )
                 return
