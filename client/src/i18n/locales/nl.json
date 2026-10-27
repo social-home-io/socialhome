@@ -2300,7 +2300,6 @@
   "nav.personal": "Persoonlijk",
   "nav.parent_control": "Ouderlijk toezicht",
   "nav.home": "Start",
-  "nav.notifications_short": "Meldingen",
   "nav.more": "Meer",
   "nav.unread": "{count} ongelezen",
   "nav.sidebar": "Zijbalk",
@@ -5382,5 +5381,9 @@
   "post.permalink.comments_aria": "Reacties",
   "post.permalink.comment_gone": "Die reactie is niet meer beschikbaar.",
   "tasks.link_gone": "Die taak is niet meer beschikbaar.",
-  "bazaar.listing_gone": "Die aanbieding is niet meer beschikbaar."
+  "bazaar.listing_gone": "Die aanbieding is niet meer beschikbaar.",
+  "notifications.unread": "Ongelezen",
+  "notifications.see_all": "Alle meldingen bekijken",
+  "notifications.show_older": "Oudere tonen",
+  "notifications.load_older_failed": "Kon oudere meldingen niet laden: {error}"
 }

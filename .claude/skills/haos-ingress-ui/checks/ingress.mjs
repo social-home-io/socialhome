@@ -499,6 +499,43 @@ await check('router-keeps-prefix', async () => {
   return { problems: [], seen }
 })
 
+// 4b. The bell is the one way to Notifications: on a phone the top-bar
+//     bell is a link to <prefix>/notifications (no bottom-bar tab); on
+//     desktop the panel's "See all notifications" link goes there.
+await check('notifications-bell', async () => {
+  const problems = []
+  const want = PREFIX + '/notifications'
+  const { ctx, page: m } = await newPage('mobile')
+  try {
+    await m.goto(APP, { waitUntil: 'load' })
+    await settled(m)
+    const tab = await m.evaluate(() => !!document.querySelector('.sh-mobile-nav a[href$="/notifications"]'))
+    if (tab) problems.push('mobile: the bottom bar still has a Notifications tab')
+    const href = await m.evaluate(() => document.querySelector('.sh-topbar a.sh-notif-btn')?.getAttribute('href') ?? null)
+    if (href !== want) problems.push(`mobile: top-bar bell href is ${href}, want ${want}`)
+    await m.evaluate(() => document.querySelector('.sh-topbar a.sh-notif-btn')?.click())
+    await step(`mobile bell → ${want}`, m.waitForFunction(w => location.pathname === w, {}, want))
+    await settled(m)
+    const current = await m.evaluate(() => document.querySelector('.sh-topbar a.sh-notif-btn')?.getAttribute('aria-current'))
+    if (current !== 'page') problems.push(`mobile: bell on the page has aria-current=${current}, want page`)
+    await m.screenshot({ path: path.join(SHOTS, 'notifications-bell-mobile.png') })
+  } finally {
+    await ctx.close()
+    activePage = page
+  }
+  await page.goto(APP, { waitUntil: 'load' })
+  await settled(page)
+  await page.evaluate(() => document.querySelector('.sh-topbar button.sh-notif-btn')?.click())
+  await step('the desktop bell panel', page.waitForSelector('.sh-notif-panel[role="dialog"] a.sh-notif-see-all'))
+  const seeAll = await page.evaluate(() => document.querySelector('a.sh-notif-see-all').getAttribute('href'))
+  if (seeAll !== want) problems.push(`desktop: "See all" href is ${seeAll}, want ${want}`)
+  await page.screenshot({ path: path.join(SHOTS, 'notifications-bell-desktop.png') })
+  await page.evaluate(() => document.querySelector('a.sh-notif-see-all').click())
+  await step(`"See all" → ${want}`, page.waitForFunction(w => location.pathname === w, {}, want))
+  await settled(page)
+  return { problems }
+})
+
 // 5. Media: feed images load through the prefix; a gallery upload (raw
 //    XHR, not the api client) posts under the prefix and renders.
 await check('media-load-and-upload', async () => {

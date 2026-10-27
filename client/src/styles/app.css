@@ -8611,31 +8611,70 @@ button.sh-shopping-item__text:focus-visible {
   transform: rotate(6deg);
   pointer-events: none;
 }
+.sh-notif-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.sh-notif-rows__item { border-bottom: 1px dashed var(--sh-border); }
+.sh-notif-rows__item:last-child { border-bottom: none; }
+/* One row = one link (or one button when there's nothing to open):
+ * the whole row is the tap target and the keyboard stop, and its
+ * accessible name is the sentence. */
 .sh-notif-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--sh-space-md);
+  width: 100%;
+  min-height: 44px;
+  margin: 2px 0;
   padding: var(--sh-space-sm) var(--sh-space-sm) var(--sh-space-sm) var(--sh-space-md);
   background: transparent;
   border: none;
-  border-bottom: 1px dashed var(--sh-border);
-  border-left: 3px solid transparent;
+  border-inline-start: 3px solid transparent;
   border-radius: var(--sh-radius-sm);
+  color: var(--sh-text-muted);
+  font: inherit;
+  text-align: start;
+  text-decoration: none;
   cursor: pointer;
   transition: background var(--sh-transition-fast);
 }
-.sh-notif-row:last-child { border-bottom: none; }
 .sh-notif-row:hover {
   background: color-mix(in srgb, var(--sh-bg) 60%, transparent);
 }
+.sh-notif-row:focus-visible { outline-offset: -2px; }
+/* Unread: the filled dot (shape), heavier ink (weight) and the edge +
+ * tint, never colour alone. Screen readers hear "Unread". */
 .sh-notif-row--unread {
-  border-left-color: var(--sh-primary);
+  border-inline-start-color: var(--sh-primary);
   background: color-mix(in srgb, var(--sh-primary) 5%, transparent);
+  color: var(--sh-text);
 }
-.sh-notif-icon { font-size: var(--sh-font-size-lg); color: var(--sh-primary-text); }
-.sh-notif-content { flex: 1; min-width: 0; }
-.sh-notif-title { font-weight: 600; }
+.sh-notif-icon {
+  flex: none;
+  font-size: var(--sh-font-size-sm);
+  line-height: 1.6;
+  color: var(--sh-primary-text);
+}
+.sh-notif-content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+.sh-notif-title { font-weight: 400; }
+.sh-notif-row--unread .sh-notif-title,
+.sh-notif--unread .sh-notif-title { font-weight: 700; }
 .sh-notif-body { color: var(--sh-text-muted); font-size: var(--sh-font-size-sm); }
+.sh-notif-more {
+  display: flex;
+  justify-content: center;
+  padding: var(--sh-space-md) 0 var(--sh-space-sm);
+  border-top: 1px dashed var(--sh-border);
+}
 .sh-notif-time {
   font: 500 calc(var(--sh-font-size-xs) - 1px) / 1.2
         ui-monospace, Menlo, Consolas, monospace;
@@ -15248,7 +15287,11 @@ a.sh-link-preview-link:focus-visible {
   box-shadow: var(--sh-shadow-pinned);
   overflow-y: auto;
   z-index: var(--sh-z-dropdown);
+  /* The bell sets 1.25rem for its glyph; the panel reads at body size. */
+  font-size: var(--sh-font-size-sm);
+  line-height: 1.45;
 }
+.sh-notif-glyph { font-size: 1.125rem; line-height: 1; }
 .sh-notif-header {
   padding: var(--sh-space-sm) var(--sh-space-md);
   border-bottom: 1px dashed var(--sh-border);
@@ -15260,11 +15303,27 @@ a.sh-link-preview-link:focus-visible {
   background: var(--sh-bg-tertiary);
   z-index: 1;
 }
+.sh-notif-heading {
+  margin: 0;
+  font-size: var(--sh-font-size-base);
+  font-weight: 700;
+}
 .sh-notif-list { display: flex; flex-direction: column; }
+.sh-notif-empty { margin: 0; padding: var(--sh-space-md); }
 .sh-notif-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
   padding: var(--sh-space-sm) var(--sh-space-md);
+  background: transparent;
+  border: none;
   border-bottom: 1px dashed var(--sh-border);
-  border-left: 3px solid transparent;
+  border-inline-start: 3px solid transparent;
+  color: var(--sh-text-muted);
+  font: inherit;
+  text-align: start;
+  text-decoration: none;
   cursor: pointer;
   transition: background var(--sh-transition-fast);
 }
@@ -15272,14 +15331,32 @@ a.sh-link-preview-link:focus-visible {
 .sh-notif-item:hover {
   background: color-mix(in srgb, var(--sh-bg) 60%, transparent);
 }
+.sh-notif-item:focus-visible { outline-offset: -2px; }
 .sh-notif--unread {
   background: color-mix(in srgb, var(--sh-primary) 5%, transparent);
-  border-left-color: var(--sh-primary);
+  border-inline-start-color: var(--sh-primary);
+  color: var(--sh-text);
 }
+.sh-notif-see-all {
+  display: block;
+  position: sticky;
+  bottom: 0;
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-top: 1px dashed var(--sh-border);
+  background: var(--sh-bg-tertiary);
+  color: var(--sh-primary-text);
+  font-weight: 600;
+  text-align: center;
+  text-decoration: none;
+}
+.sh-notif-see-all:hover { text-decoration: underline; }
+.sh-notif-see-all:focus-visible { outline-offset: -2px; }
 .sh-notif-btn {
+  position: relative;
   background: transparent;
   border: none;
   color: var(--sh-primary-text);
+  text-decoration: none;
   cursor: pointer;
   font-size: var(--sh-font-size-xs);
   font-weight: 600;
@@ -15296,11 +15373,8 @@ a.sh-link-preview-link:focus-visible {
 @media (pointer: coarse) {
   .sh-notif-bell { width: var(--sh-tap-target); height: var(--sh-tap-target); }
 }
-.sh-notif-link {
-  color: var(--sh-primary-text);
-  padding: 0 var(--sh-space-xs);
-  text-decoration: none;
-}
+/* On /notifications the phone bell is the current page. */
+.sh-notif-btn.sh-active { background: var(--sh-bg-secondary); }
 
 /* QuickSwitcher (⌘K) */
 .sh-switcher-overlay {

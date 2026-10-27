@@ -1,25 +1,44 @@
 /**
- * NotificationBell — top-bar bell + dropdown panel (§23.3).
+ * NotificationBell — top-bar bell (§23.3).
  *
  * Backed by ``store/notifications`` — the WS-driven signal store
  * whose ``unreadCount`` and ``recent`` already update live on
- * ``notification.new`` frames. This component just renders that
- * state and hydrates a fuller list on panel open.
+ * ``notification.new`` frames.
  *
- * Items with a ``link_url`` render as anchors. For DMs the link
- * targets ``/dms/{conversation_id}`` and the conversation read route
- * auto-clears the row server-side, so a tap reads as "follow the
- * link, the badge will clear itself".
+ * Two shapes, one entry point with a count on every screen:
+ *
+ * - **Phones** (the bottom-bar breakpoint, ≤ 768 px): the bell is a
+ *   link to the Notifications page. There is no Notifications tab in
+ *   the bottom bar, and no dropdown (a 380 px panel can't fit beside
+ *   the "You" button on a 390 px screen). On the page the bell is
+ *   ``aria-current="page"``; tapping it again scrolls back to the top.
+ * - **Desktop**: a button that opens a ``dialog`` panel. Focus moves
+ *   to the first row; Escape closes it and hands focus back to the
+ *   bell. The panel is nudged inside the viewport if it would spill
+ *   past either edge, and ends with "See all notifications".
+ *
+ * Each row is one link (or one button when it has no target) whose
+ * accessible name is the sentence; an unread row says "Unread" to
+ * screen readers and is set in a heavier weight, not by colour alone.
  */
-import { useEffect, useRef } from 'preact/hooks'
+import { useEffect, useLayoutEffect, useRef } from 'preact/hooks'
 import { signal } from '@preact/signals'
+import { useLocation } from 'preact-iso'
 import { api } from '@/api'
 import { recent, unreadCount } from '@/store/notifications'
 import type { Notification } from '@/types'
-import { appHref } from '@/baseUrl'
+import { addBase, appHref } from '@/baseUrl'
+import { useMediaQuery } from '@/hooks/useMediaQuery'
 import { formatLocale, isOne, t } from '@/i18n/i18n'
 
-const panelOpen = signal(false)
+/** Same breakpoint as the bottom tab bar (``.sh-mobile-nav``). */
+export const PHONE_QUERY = '(max-width: 768px)'
+/** Gap kept between the panel and the viewport edge. */
+const EDGE_GAP = 8
+const PANEL_ID = 'sh-notif-panel'
+const HEADING_ID = 'sh-notif-panel-title'
+
+export const panelOpen = signal(false)
 /** Full notifications list — populated when the panel opens.
  *  Falls back to the store's lighter ``recent`` projection while
  *  loading. */
@@ -55,8 +74,52 @@ export function stopNotificationPolling() {
   }
 }
 
-export function NotificationBell() {
+function bellLabel(): string {
+  const n = unreadCount.value
+  return n > 0
+    ? t(isOne(n) ? 'notifications.bell_aria_unread_one' : 'notifications.bell_aria_unread',
+      { n: String(n) })
+    : t('notifications.title')
+}
+
+function Badge() {
+  const n = unreadCount.value
+  if (n <= 0) return null
+  return (
+    <span class="sh-notif-badge" aria-hidden="true">{n > 99 ? '99+' : n}</span>
+  )
+}
+
+/** The phone bell: a link to the page, never a dropdown. */
+function PhoneBell() {
+  const loc = useLocation()
+  const onPage = (loc?.path ?? '') === '/notifications'
+  return (
+    <div class="sh-notif-bell">
+      <a
+        class={`sh-notif-btn${onPage ? ' sh-active' : ''}`}
+        href={addBase('/notifications')}
+        aria-label={bellLabel()}
+        aria-current={onPage ? 'page' : undefined}
+        onClick={(e) => {
+          // Already there: a second tap goes back to the newest rows
+          // instead of reloading the route.
+          if (!onPage) return
+          e.preventDefault()
+          window.scrollTo({ top: 0, behavior: 'smooth' })
+        }}
+      >
+        <span class="sh-notif-glyph" aria-hidden="true">🔔</span>
+        <Badge />
+      </a>
+    </div>
+  )
+}
+
+function DesktopBell() {
   const wrapRef = useRef<HTMLDivElement | null>(null)
+  const btnRef = useRef<HTMLButtonElement | null>(null)
+  const panelRef = useRef<HTMLDivElement | null>(null)
 
   // Hydrate the panel list once on mount so first-tap is instant.
   useEffect(() => {
@@ -65,22 +128,24 @@ export function NotificationBell() {
     }).catch(() => { /* noop */ })
   }, [])
 
-  // Close the panel on outside click + Escape so the user doesn't
-  // have to bounce back to the bell button to dismiss it. Only armed
-  // while the panel is open.
+  const close = (refocus: boolean) => {
+    panelOpen.value = false
+    if (refocus) btnRef.current?.focus()
+  }
+
+  // Close on outside click and Escape. Escape hands focus back to the
+  // bell so a keyboard user isn't dropped on <body>.
   useEffect(() => {
     if (!panelOpen.value) return
     const onPointer = (ev: MouseEvent | TouchEvent) => {
       const root = wrapRef.current
-      if (!root) return
-      if (root.contains(ev.target as Node)) return
-      panelOpen.value = false
+      if (!root || root.contains(ev.target as Node)) return
+      close(false)
     }
     const onKey = (ev: KeyboardEvent) => {
-      if (ev.key === 'Escape') {
-        ev.preventDefault()
-        panelOpen.value = false
-      }
+      if (ev.key !== 'Escape') return
+      ev.preventDefault()
+      close(true)
     }
     document.addEventListener('mousedown', onPointer)
     document.addEventListener('touchstart', onPointer, { passive: true })
@@ -90,6 +155,24 @@ export function NotificationBell() {
       document.removeEventListener('touchstart', onPointer)
       document.removeEventListener('keydown', onKey)
     }
+  }, [panelOpen.value])
+
+  // Keep the panel inside the viewport: anchored to the bell's right
+  // edge it spilled off the left side whenever the bell sat less than
+  // a panel-width from the left (narrow windows, zoomed text). Then
+  // move focus into it.
+  useLayoutEffect(() => {
+    const panel = panelRef.current
+    if (!panelOpen.value || !panel) return
+    panel.style.transform = ''
+    const rect = panel.getBoundingClientRect()
+    const vw = document.documentElement.clientWidth || window.innerWidth
+    let shift = 0
+    if (rect.left < EDGE_GAP) shift = EDGE_GAP - rect.left
+    else if (rect.right > vw - EDGE_GAP) shift = vw - EDGE_GAP - rect.right
+    if (shift !== 0) panel.style.transform = `translateX(${Math.round(shift)}px)`
+    const first = panel.querySelector<HTMLElement>('.sh-notif-item, .sh-notif-see-all')
+    first?.focus({ preventScroll: true })
   }, [panelOpen.value])
 
   const togglePanel = async () => {
@@ -111,23 +194,22 @@ export function NotificationBell() {
     }))
   }
 
-  const handleItemClick = async (n: Notification | { notification_id: string }) => {
+  const handleItemClick = async (n: Notification) => {
     // Optimistic decrement — tapping an unread item flips it read,
     // and the destination page (e.g. DM thread) typically clears the
     // server-side row too via its read hook. The next /unread-count
     // poll reconciles any divergence.
-    const id = 'id' in n ? n.id : n.notification_id
-    const isUnread = 'read_at' in n
-      ? !n.read_at
-      : true  // store-projected items are unread by definition
+    const isUnread = !n.read_at
     if (isUnread && unreadCount.value > 0) {
       unreadCount.value = unreadCount.value - 1
     }
     if (isUnread) {
-      try { await api.post(`/api/notifications/${id}/read`) }
+      fullList.value = fullList.value.map(x =>
+        x.id === n.id ? { ...x, read_at: new Date().toISOString() } : x)
+      try { await api.post(`/api/notifications/${n.id}/read`) }
       catch { /* best-effort */ }
     }
-    panelOpen.value = false
+    if (n.link_url) panelOpen.value = false
   }
 
   // The displayed list: prefer the hydrated full list (carries
@@ -146,43 +228,60 @@ export function NotificationBell() {
       }) as Notification)
 
   return (
-    <div class="sh-notif-bell" ref={wrapRef}>
+    <div
+      class="sh-notif-bell"
+      ref={wrapRef}
+      onFocusOut={(e) => {
+        // Tabbing past the last row leaves the panel: close it rather
+        // than leave an open popup behind the focus.
+        const next = e.relatedTarget as Node | null
+        if (panelOpen.value && next && !wrapRef.current?.contains(next)) close(false)
+      }}
+    >
       <button
+        ref={btnRef}
         type="button"
         class="sh-notif-btn"
         onClick={togglePanel}
-        aria-label={
-          unreadCount.value > 0
-            ? t(isOne(unreadCount.value) ? 'notifications.bell_aria_unread_one' : 'notifications.bell_aria_unread',
-              { n: String(unreadCount.value) })
-            : t('notifications.title')
-        }
+        aria-label={bellLabel()}
+        aria-haspopup="dialog"
+        aria-expanded={panelOpen.value}
+        aria-controls={PANEL_ID}
       >
-        🔔
-        {unreadCount.value > 0 && (
-          <span class="sh-notif-badge">
-            {unreadCount.value > 99 ? '99+' : unreadCount.value}
-          </span>
-        )}
+        <span class="sh-notif-glyph" aria-hidden="true">🔔</span>
+        <Badge />
       </button>
       {panelOpen.value && (
-        <div class="sh-notif-panel">
+        <div
+          ref={panelRef}
+          id={PANEL_ID}
+          class="sh-notif-panel"
+          role="dialog"
+          aria-labelledby={HEADING_ID}
+        >
           <div class="sh-notif-header">
-            <h4>{t('notifications.title')}</h4>
+            <h2 id={HEADING_ID} class="sh-notif-heading">{t('notifications.title')}</h2>
             {unreadCount.value > 0 && (
-              <button class="sh-link" onClick={markAllRead}>{t('notifications.mark_all_read')}</button>
+              <button type="button" class="sh-link" onClick={markAllRead}>
+                {t('notifications.mark_all_read')}
+              </button>
             )}
           </div>
           <div class="sh-notif-list">
             {items.length === 0 && (
-              <p class="sh-muted">{t('notifications.bell_empty')}</p>
+              <p class="sh-notif-empty sh-muted">{t('notifications.bell_empty')}</p>
             )}
             {items.map(n => {
-              const cls = `sh-notif-item ${n.read_at ? '' : 'sh-notif--unread'}`
+              const unread = !n.read_at
+              const cls = `sh-notif-item${unread ? ' sh-notif--unread' : ''}`
               const inner = (
                 <>
-                  <div class="sh-notif-title">{n.title}</div>
-                  <time class="sh-notif-time">
+                  {unread && (
+                    <><span class="sr-only">{t('notifications.unread')},</span>{' '}</>
+                  )}
+                  <span class="sh-notif-title">{n.title}</span>
+                  {' '}
+                  <time class="sh-notif-time" dateTime={n.created_at}>
                     {new Date(n.created_at).toLocaleString(formatLocale())}
                   </time>
                 </>
@@ -200,14 +299,31 @@ export function NotificationBell() {
                 )
               }
               return (
-                <div key={n.id} class={cls}>
+                <button
+                  key={n.id}
+                  type="button"
+                  class={cls}
+                  onClick={() => void handleItemClick(n)}
+                >
                   {inner}
-                </div>
+                </button>
               )
             })}
           </div>
+          <a
+            class="sh-notif-see-all"
+            href={addBase('/notifications')}
+            onClick={() => { panelOpen.value = false }}
+          >
+            {t('notifications.see_all')}
+          </a>
         </div>
       )}
     </div>
   )
+}
+
+export function NotificationBell() {
+  const phone = useMediaQuery(PHONE_QUERY)
+  return phone ? <PhoneBell /> : <DesktopBell />
 }

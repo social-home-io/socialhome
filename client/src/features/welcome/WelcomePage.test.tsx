@@ -171,7 +171,7 @@ describe('WelcomePage', () => {
     expect(titles.some(t => t.includes('Today'))).toBe(false)
   })
 
-  it('renders the catch-up card with chips for unread DMs and alerts', async () => {
+  it('renders the catch-up card with chips for unread DMs and notifications', async () => {
     apiMock.get.mockResolvedValueOnce(bundle({
       unread_notifications: 5,
       unread_conversations: 2,
@@ -180,9 +180,9 @@ describe('WelcomePage', () => {
     await waitFor(() => {
       expect(container.querySelector('.sh-welcome-card--catchup')).not.toBeNull()
     })
-    // Chips render with the count + the noun ("messages" / "alerts").
+    // Chips render with the count + the noun ("messages" / "notifications").
     expect(container.textContent).toContain('5')
-    expect(container.textContent).toContain('alerts')
+    expect(container.textContent).toContain('notifications')
     expect(container.textContent).toContain('2')
     expect(container.textContent).toContain('messages')
   })
@@ -301,11 +301,11 @@ describe('WelcomePage', () => {
       expect(container.querySelector('.sh-welcome-hero__greeting')!.textContent)
         .toBe('Guten Morgen, Pascal')
       expect(container.querySelector('.sh-welcome-hero__sub')!.textContent)
-        .toBe('Sonntag, 4. Oktober · 1 Nachricht · 3 Hinweise ungelesen')
+        .toBe('Sonntag, 4. Oktober · 1 Nachricht · 3 Mitteilungen ungelesen')
       const card = container.querySelector('.sh-welcome-card--catchup')!
       expect(card.querySelector('.sh-welcome-card__title')!.textContent).toContain('Nachholen')
       const chips = [...card.querySelectorAll('.sh-welcome-chip')].map(c => c.textContent)
-      expect(chips).toEqual(['💬1Nachricht', '🔔3Hinweise'])
+      expect(chips).toEqual(['💬1Nachricht', '🔔3Mitteilungen'])
     })
 
     it('says all clear in German', async () => {
