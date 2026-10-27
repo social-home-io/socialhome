@@ -111,11 +111,19 @@ change. Unticked, the sheet says anyone with the link can still watch it.
 
 `HighlightService.change_audience` updates the row and publishes
 `HighlightAudienceChanged` (old and new audience, the day's frames).
-**Appending a frame and changing the audience are serialized per author**
-(an `asyncio.Lock` held from reading today's row to publishing the event),
-so a frame is always addressed with the audience it is stored under — a
-frame racing a narrowing never reaches the household that just dropped
-out, and one racing a widening reaches the new household. Locally, members
+**Appending a frame, changing the audience and deleting are serialized per
+author** (an `asyncio.Lock` held from reading today's row to queueing the
+event), so a frame is always addressed with the audience it is stored under
+— a frame racing a narrowing never reaches the household that just dropped
+out, and one racing a widening reaches the new household. The lock covers
+only that: the events are **published after it is released, one at a time
+in the order they were queued** (`services/ordered_publisher.py`), so a
+removal is never overtaken by an older frame and a frame never by an older
+change. A household that doesn't answer (the direct send waits ~10 s before
+the outbox takes over) therefore holds up neither the author's next frame
+nor a change: a write queued behind an event still being sent returns at
+once, and its event follows that one. A lone write still returns after its
+event is published. On shutdown the queue is published for up to 15 s. Locally, members
 outside the new audience lose it at once — every read goes through
 `_IN_AUDIENCE_SQL` on the row. The outbound compares the per-household
 slices before and after (`HighlightFederationOutbound._audience_per_target`)
@@ -195,8 +203,8 @@ sequenceDiagram
     participant E as Emil's HFS<br/>(new)
 
     U->>SA: PATCH /api/highlights/{id}/audience<br/>{audience_kind, audience}
-    SA->>SA: author lock: author? today?<br/>v_70 gate (narrowing)? set_audience
-    SA->>Out: HighlightAudienceChanged<br/>(old, new, frames)
+    SA->>SA: author lock: author? today?<br/>v_70 gate (narrowing)? set_audience,<br/>queue the event
+    SA->>Out: HighlightAudienceChanged<br/>(old, new, frames) — after the lock,<br/>in the author's publish order
     Out->>Out: per-household slices before / after
     Out->>Out: drop D's queued envelopes<br/>for the highlight
     Out->>D: HIGHLIGHT_DELETED (expires_at)

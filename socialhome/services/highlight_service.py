@@ -60,6 +60,7 @@ from ..domain.post import Post, PostType
 from ..media.cleanup import unlink_unreferenced
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from .inbound_media_store import require_local_media_ref
+from .ordered_publisher import OrderedPublisher
 from .space_member_guard import seat_of
 from .user_preferences import parse_highlights_preferences
 
@@ -114,6 +115,7 @@ class HighlightService:
         "_media_dir",
         "_media_refs",
         "_posts",
+        "_publisher",
         "_space_posts",
         "_spaces",
         "_users",
@@ -143,12 +145,17 @@ class HighlightService:
         self._posts = post_repo
         self._space_posts = space_post_repo
         self._spaces = space_repo
-        # One lock per local author: appending a frame and changing today's
-        # audience each read the audience, write, and publish the event the
-        # federation outbound addresses from it — interleaved, a frame would
-        # go out under the audience it was not stored under (#1191 review).
-        # Bounded by the household's own members; never a remote author.
+        # One lock per local author: appending a frame, changing today's
+        # audience and deleting each read the audience, write, and decide
+        # the event the federation outbound addresses from it — interleaved,
+        # a frame would go out under the audience it was not stored under
+        # (#1191 review). The lock covers only that: the event is queued
+        # under it and published after it is released, in the order queued
+        # (``OrderedPublisher``), so a slow household holds up neither the
+        # author's next frame nor a change (F15). Bounded by the household's
+        # own members; never a remote author.
         self._author_locks: dict[str, asyncio.Lock] = {}
+        self._publisher = OrderedPublisher(bus)
         self._audience_gate: AudienceChangeGate | None = None
 
     def attach_audience_gate(self, gate: AudienceChangeGate) -> None:
@@ -156,6 +163,14 @@ class HighlightService:
         household it removes people from understands the v_70 removal
         rules (``HighlightFederationOutbound.may_change_audience``)."""
         self._audience_gate = gate
+
+    async def flush_published(self) -> None:
+        """Wait until every queued author event is published (tests)."""
+        await self._publisher.flush()
+
+    async def stop(self, timeout: float = 15.0) -> None:
+        """Shutdown: publish what is queued, for at most *timeout* seconds."""
+        await self._publisher.stop(timeout)
 
     def _author_lock(self, author_user_id: str) -> asyncio.Lock:
         lock = self._author_locks.get(author_user_id)
@@ -304,9 +319,10 @@ class HighlightService:
         highlight_date = now.strftime("%Y-%m-%d")
         expires_at = (now + timedelta(days=prefs.retention_days)).isoformat()
 
-        # Read → append → publish under the author's lock, so the event
-        # carries the audience the frame is stored under (see
-        # :meth:`change_audience`).
+        # Read → append → queue the event under the author's lock, so the
+        # event carries the audience the frame is stored under and goes out
+        # in the order it was stored (see :meth:`change_audience`). It is
+        # published after the lock is released.
         async with self._author_lock(author_user_id):
             highlight = await self._highlights.find_or_create_today(
                 author_user_id=author_user_id,
@@ -345,7 +361,8 @@ class HighlightService:
                 duration_ms=duration_ms,
             )
 
-            await self._bus.publish(
+            published = self._publisher.enqueue(
+                author_user_id,
                 HighlightFrameAdded(
                     highlight_id=highlight.id,
                     frame_id=frame.id,
@@ -361,8 +378,9 @@ class HighlightService:
                     caption_emoji=caption_emoji,
                     duration_ms=duration_ms,
                     expires_at=highlight.expires_at or expires_at,
-                )
+                ),
             )
+        await _announced(published)
         return highlight, frame
 
     # ── Change for all of today (owner decision 1) ─────────────────────
@@ -420,7 +438,8 @@ class HighlightService:
             if updated is None:  # pragma: no cover — deleted mid-request
                 raise HighlightNotFoundError(NOT_FOUND_MESSAGE)
             frames = await self._highlights.list_frames(highlight.id)
-            await self._bus.publish(
+            published = self._publisher.enqueue(
+                actor_user_id,
                 HighlightAudienceChanged(
                     highlight_id=highlight.id,
                     author_user_id=highlight.author_user_id,
@@ -431,8 +450,9 @@ class HighlightService:
                     audience_kind=kind.value,
                     audience=ids,
                     frames=tuple(frames),
-                )
+                ),
             )
+        await _announced(published)
         return updated
 
     async def reach_of(
@@ -543,20 +563,27 @@ class HighlightService:
         frame_id: str,
         actor_user_id: str,
     ) -> None:
-        frame, highlight = await self._require_readable_frame(frame_id, actor_user_id)
-        if highlight.author_user_id != actor_user_id:
-            raise HighlightForbiddenError("only the author can delete their frame")
-        await self._highlights.delete_frame(frame_id)
-        await unlink_unreferenced(self._media_dir, self._media_refs, [frame.media_url])
-        await self._bus.publish(
-            HighlightFrameRemoved(
-                highlight_id=highlight.id,
-                frame_id=frame_id,
-                author_user_id=highlight.author_user_id,
-                audience_kind=highlight.audience_kind.value,
-                audience=highlight.audience,
+        # Under the author's lock and in the author's publish order: the
+        # removal goes out after every frame / change queued before it.
+        async with self._author_lock(actor_user_id):
+            frame, highlight = await self._require_readable_frame(
+                frame_id, actor_user_id
             )
-        )
+            if highlight.author_user_id != actor_user_id:
+                raise HighlightForbiddenError("only the author can delete their frame")
+            await self._highlights.delete_frame(frame_id)
+            published = self._publisher.enqueue(
+                actor_user_id,
+                HighlightFrameRemoved(
+                    highlight_id=highlight.id,
+                    frame_id=frame_id,
+                    author_user_id=highlight.author_user_id,
+                    audience_kind=highlight.audience_kind.value,
+                    audience=highlight.audience,
+                ),
+            )
+        await unlink_unreferenced(self._media_dir, self._media_refs, [frame.media_url])
+        await _announced(published)
 
     async def delete_highlight(
         self,
@@ -564,26 +591,33 @@ class HighlightService:
         highlight_id: str,
         actor_user_id: str,
     ) -> None:
-        highlight = await self._require_readable(highlight_id, actor_user_id)
-        if highlight.author_user_id != actor_user_id:
-            raise HighlightForbiddenError("only the author can delete their highlight")
-        # Collect frame media before the cascade delete so we can drop the
-        # files too (deleting the highlight row cascades the frame rows).
-        frame_urls = (
-            [f.media_url for f in await self._highlights.list_frames(highlight_id)]
-            if self._media_dir is not None
-            else []
-        )
-        await self._highlights.delete_highlight(highlight_id)
-        await unlink_unreferenced(self._media_dir, self._media_refs, frame_urls)
-        await self._bus.publish(
-            HighlightRemoved(
-                highlight_id=highlight.id,
-                author_user_id=highlight.author_user_id,
-                audience_kind=highlight.audience_kind.value,
-                audience=highlight.audience,
+        # Under the author's lock and in the author's publish order: the
+        # removal is never overtaken by a frame or change decided before it.
+        async with self._author_lock(actor_user_id):
+            highlight = await self._require_readable(highlight_id, actor_user_id)
+            if highlight.author_user_id != actor_user_id:
+                raise HighlightForbiddenError(
+                    "only the author can delete their highlight"
+                )
+            # Collect frame media before the cascade delete so we can drop the
+            # files too (deleting the highlight row cascades the frame rows).
+            frame_urls = (
+                [f.media_url for f in await self._highlights.list_frames(highlight_id)]
+                if self._media_dir is not None
+                else []
             )
-        )
+            await self._highlights.delete_highlight(highlight_id)
+            published = self._publisher.enqueue(
+                actor_user_id,
+                HighlightRemoved(
+                    highlight_id=highlight.id,
+                    author_user_id=highlight.author_user_id,
+                    audience_kind=highlight.audience_kind.value,
+                    audience=highlight.audience,
+                ),
+            )
+        await unlink_unreferenced(self._media_dir, self._media_refs, frame_urls)
+        await _announced(published)
 
     # ── Read ───────────────────────────────────────────────────────────
 
@@ -801,5 +835,13 @@ __all__ = [
 
 # Used by tests / CLI to mint deterministic ids when needed; main code
 # uses uuid4 inside the repos.
+async def _announced(published: asyncio.Future[None] | None) -> None:
+    """After the author's lock: wait for the event when it was the author's
+    only one (a lone write stays synchronous); behind an earlier event still
+    being published, return now — it follows that one (F15)."""
+    if published is not None:
+        await asyncio.shield(published)
+
+
 def _new_id() -> str:
     return uuid.uuid4().hex

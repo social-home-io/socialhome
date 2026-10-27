@@ -131,6 +131,9 @@ class _Net:
         self.author_instance = author_instance
 
     async def deliver(self) -> list[tuple[str, FederationEventType, dict]]:
+        # Events are published in order, off the author's lock: what was
+        # decided goes out before the batch is taken.
+        await self.author[highlight_service_key].flush_published()
         batch, self.sent[:] = list(self.sent), []
         for to, event_type, payload in batch:
             app = self.receivers[to][0]
@@ -555,3 +558,43 @@ async def test_an_id_stamped_for_another_author_is_refused(net):
     await net.deliver()
     assert await net.held(DORA_HOME, highlight.id) == (0, 0)
     assert await net.held(BOB_HOME, highlight.id) == (1, 1)
+
+
+# ── F15: a slow household never holds up the author ──────────────────────
+
+
+async def test_a_slow_household_does_not_hold_up_the_next_frame_or_change(
+    net, monkeypatch
+):
+    """Dora's household doesn't answer: the direct send of frame 1 to it
+    hangs (as before the outbox fallback, ~10 s per household). The
+    author's next frame and an audience change are stored and return at
+    once; the envelopes still go out in order — Dora's household gets the
+    frames, then the removal, and holds nothing."""
+    dora_answers = asyncio.Event()
+    sent = net.sent
+
+    async def _slow(self, *, to_instance_id, event_type, payload, **_kw) -> None:
+        if self is not net.author[federation_service_key]:
+            return
+        if to_instance_id == DORA_HOME:
+            await dora_answers.wait()
+        sent.append((to_instance_id, event_type, payload))
+
+    monkeypatch.setattr(FederationService, "send_event", _slow)
+    first = asyncio.create_task(net.post_frame(1, "all_paired", []))
+    await asyncio.sleep(0.05)
+    highlight, _ = await asyncio.wait_for(net.post_frame(2, "all_paired", []), 2)
+    await asyncio.wait_for(net.change(highlight.id, "households", [BOB_HOME]), 2)
+    assert [ev for to, ev, _ in sent if to == DORA_HOME] == []
+
+    dora_answers.set()
+    await first
+    batch = await net.deliver()
+    assert [ev for to, ev, _ in batch if to == DORA_HOME] == [
+        FET.HIGHLIGHT_CREATED,
+        FET.HIGHLIGHT_FRAME_APPENDED,
+        FET.HIGHLIGHT_DELETED,
+    ]
+    assert await net.held(DORA_HOME, highlight.id) == (0, 0)
+    assert await net.held(BOB_HOME, highlight.id) == (1, 2)
