@@ -109,9 +109,11 @@ function narrowUnit(n: number, unit: 'minute' | 'hour' | 'day'): string {
   }
 }
 
-/** ``0:04`` — whole seconds, rounded (a 3.6 s clip is 0:04, not 0:03). */
+/** ``0:03`` — whole seconds, cut off like the browser's own player counts
+ *  (a 3.6 s clip is 0:03 on the chip and in the controls). A clip under a
+ *  second still says 0:01, never 0:00. */
 export function clipLength(ms: number): string {
-  const s = Math.max(1, Math.round(ms / 1000))
+  const s = Math.max(1, Math.floor(ms / 1000))
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
 

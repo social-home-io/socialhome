@@ -162,9 +162,11 @@ always derived from the *current* content.
 
 * ``GET /api/moments/archive?tag=<name>`` filters to a single tag.
 * ``GET /api/moments/hashtags`` returns the trending tags inside the
-  viewer's visibility window — block-aware and follow-aware via the
+  viewer's visibility window — block-, follow- and hop-aware via the
   same filter as ``list_visible_to`` so a blocked author's tag never
-  surfaces.
+  surfaces. A count is the number of top-level moments the tag view
+  (``GET /api/moments?top_level=1&tag=<name>``) lists; replies are not
+  counted.
 
 ## Rate limit
 

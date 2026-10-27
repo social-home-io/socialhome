@@ -14,7 +14,7 @@ vi.mock('@/components/ReportDialog', () => ({ openReport }))
 
 import { api } from '@/api'
 import type { Moment } from '@/types'
-import { MomentCard, reactionMode } from './MomentCard'
+import { MomentCard, clipLength, reactionMode } from './MomentCard'
 
 const ME = 'uid-me'
 
@@ -228,11 +228,21 @@ describe('MomentCard', () => {
       media_thumbnail_url: 'api/media/v.webp?sig=s', duration_ms: 3_600, media_status: 'ready',
     }))
     expect(container.querySelector('video')).toBeNull()
-    const play = getByRole('button', { name: 'Play video, 0:04' })
+    const play = getByRole('button', { name: 'Play video, 0:03' })
     expect(play.querySelector('img')?.getAttribute('src')).toBe('api/media/v.webp?sig=s')
-    expect(play.textContent).toContain('0:04')
+    expect(play.textContent).toContain('0:03')
     fireEvent.click(play)
     const video = container.querySelector('video')!
     expect(video.hasAttribute('controls')).toBe(true)
+  })
+})
+
+describe('clipLength', () => {
+  it('counts whole seconds down like the native player, never 0:00', () => {
+    expect(clipLength(3_600)).toBe('0:03')
+    expect(clipLength(3_000)).toBe('0:03')
+    expect(clipLength(59_999)).toBe('0:59')
+    expect(clipLength(61_500)).toBe('1:01')
+    expect(clipLength(400)).toBe('0:01')
   })
 })

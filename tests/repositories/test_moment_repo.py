@@ -240,6 +240,24 @@ async def test_list_top_hashtags_counts_and_orders(db, repo):
     assert rows == [("alpha", 2), ("beta", 2)]
 
 
+async def test_list_top_hashtags_counts_only_what_the_tag_view_shows(db, repo):
+    """The tag view lists top-level moments within the viewer's hop
+    cap, so a trending count never includes replies or rows past it."""
+    await repo.save(_moment(id="m-root", content="#herbst leaves"))
+    await repo.save(
+        _moment(
+            id="m-reply", author="u-x", content="#herbst too", parent_moment_id="m-root"
+        )
+    )
+    await repo.save(
+        replace(_moment(id="m-far", author="u-far", content="#herbst"), hop_count=3)
+    )
+    assert await repo.list_top_hashtags("u-me") == [("herbst", 2)]
+    assert await repo.list_top_hashtags("u-me", max_hops=2) == [("herbst", 1)]
+    shown = await repo.list_visible_to("u-me", tag="herbst", top_level=True, max_hops=2)
+    assert [m.id for m in shown] == ["m-root"]
+
+
 async def test_list_top_hashtags_respects_blocks(db, repo):
     """A blocked author's tags don't pollute the trending row."""
     await repo.save(_moment(id="m-bad", author="u-bad", content="#spam everywhere"))

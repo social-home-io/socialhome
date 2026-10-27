@@ -3144,6 +3144,10 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
   color: var(--sh-text);
   transition: background var(--sh-transition-fast), border-color var(--sh-transition-fast), transform var(--sh-transition-fast);
 }
+/* A post's reaction chips are ≥ 36 px tall on every pointer, like the
+ * add chip and Comment beside them (the chat bubble's chips below stay
+ * compact on a fine pointer). */
+.sh-reactions .sh-reaction-chip { min-height: 36px; }
 .sh-reaction-chip:hover {
   background: var(--sh-primary-soft);
   border-color: var(--sh-primary);
@@ -3207,6 +3211,7 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
 .sh-post-latest-comment {
   display: block;
   width: 100%;
+  min-height: 36px;
   text-align: left;
   margin: var(--sh-space-xs) 0 0;
   padding: var(--sh-space-xs) var(--sh-space-sm);
@@ -17535,8 +17540,10 @@ ul.sh-ha-users { list-style: none; margin: 0; padding: 0; }
 .sh-protected-notice__text .sh-link {
   color: var(--sh-primary-on-soft);
   font-size: var(--sh-font-size-sm);
-  display: inline-block;
-  padding: var(--sh-space-xs) 0;
+  /* A real ≥ 36 px tap target wherever the notice stands in. */
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
 }
 /* Muted ink on the chosen landing-page option's hearth tint is ~4.2:1
  * in dark; pull it toward the full ink. */
@@ -21571,12 +21578,6 @@ span.sh-hlv__who { cursor: default; }
   overflow-wrap: anywhere;
 }
 .sh-momentum-discover__note { margin: 0; font-size: var(--sh-font-size-sm); }
-/* A protected account's notice: its link is a real tap target here. */
-.sh-momentum-discover .sh-protected-notice .sh-link {
-  display: inline-flex;
-  align-items: center;
-  min-height: 36px;
-}
 .sh-momentum-discover-list {
   list-style: none;
   padding: 0;

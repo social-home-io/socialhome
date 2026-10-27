@@ -366,6 +366,7 @@ class AbstractMomentRepo(Protocol):
         viewer_user_id: str,
         *,
         limit: int = 20,
+        max_hops: int = 3,
     ) -> list[tuple[str, int]]: ...
 
     # Retention -----------------------------------------------------------
@@ -1116,39 +1117,32 @@ class SqliteMomentRepo:
         viewer_user_id: str,
         *,
         limit: int = 20,
+        max_hops: int = 3,
     ) -> list[tuple[str, int]]:
         """Return ``[(tag, n), …]`` of the most-used tags inside the
         viewer's visible window.
 
-        The aggregation re-applies the same visibility filter as
-        :meth:`list_visible_to` so a tag from a blocked author or a
-        moment past the viewer's retention window doesn't pollute the
-        trending list. Sorted by count desc, then alphabetically so
-        the order is stable for equal counts.
+        Counts exactly what the tag view lists — :meth:`list_visible_to`
+        with ``top_level`` and the viewer's ``max_hops``: the same
+        visibility filter (blocks, retention, hop cap) and top-level
+        moments only, so a tag with "3" opens a list of three moments,
+        not one root and its two replies. Sorted by count desc, then
+        alphabetically so the order is stable for equal counts.
         """
         limit = max(1, min(int(limit), 50))
+        capped_hops = max(1, min(int(max_hops), 3))
         rows = await self._db.fetchall(
             f"""
             SELECT mh.tag AS tag, COUNT(*) AS n
               FROM moment_hashtags AS mh
               JOIN moments AS m ON m.id = mh.moment_id
-             WHERE {_PROTECTED_CIRCLE_SQL}
-               AND m.author_user_id NOT IN (
-                 SELECT blocked_user_id FROM user_blocks
-                  WHERE blocker_user_id = ?
-             )
-               AND m.author_user_id NOT IN ({GUARDIAN_BLOCK_COUNTERPARTS_SQL})
-               AND (
-                 (julianday('now') - julianday(m.created_at)) * 24 < 24
-                 OR {_FOLLOWS_AUTHOR_SQL}
-               )
-               AND datetime(m.expires_at) > datetime('now')
-               AND m.deleted_at IS NULL
+             WHERE {_VISIBLE_SQL}
+               AND m.parent_moment_id IS NULL
              GROUP BY mh.tag
              ORDER BY n DESC, mh.tag ASC
              LIMIT ?
             """,
-            (viewer_user_id,) * _VISIBLE_VIEWER_BINDS + (limit,),
+            (*(viewer_user_id,) * _VISIBLE_VIEWER_BINDS, capped_hops, limit),
         )
         return [(r["tag"], int(r["n"])) for r in rows]
 

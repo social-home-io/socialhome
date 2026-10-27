@@ -519,13 +519,14 @@ class MomentService:
     ) -> list[dict]:
         """Trending tags inside the viewer's visibility window.
 
-        The repo aggregates with the same block + retention filter as
-        :meth:`list_inbox`, so a blocked author or an out-of-window
-        moment doesn't pollute the chip row.
+        The repo counts what the tag view lists (:meth:`list_inbox` with
+        ``top_level``): the same block / retention / hop filter, roots
+        only — so a tag's count matches the moments it opens.
         """
         rows = await self._moments.list_top_hashtags(
             viewer_user_id,
             limit=limit,
+            max_hops=await self._max_hops(viewer_user_id),
         )
         return [{"tag": tag, "count": n} for tag, n in rows]
 
