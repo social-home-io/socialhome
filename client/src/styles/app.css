@@ -20224,102 +20224,398 @@ span.sh-hlv__who { cursor: default; }
   flex: 1 1 auto;
 }
 
-/* Composer */
-.sh-highlight-composer {
-  max-width: 600px;
-}
-.sh-highlight-composer-preview {
-  width: 100%;
-  border-radius: var(--sh-radius-md);
-  margin-bottom: var(--sh-space-sm);
-}
-.sh-highlight-composer-emoji-row {
-  display: flex;
-  gap: var(--sh-space-xs);
-  flex-wrap: wrap;
-}
-.sh-highlight-composer-emoji-btn {
-  background: var(--sh-bg-secondary);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-full);
-  width: 40px; height: 40px;
-  font-size: 1.2rem;
-  cursor: pointer;
-}
-.sh-highlight-composer-emoji-btn--active {
-  border-color: var(--sh-primary);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--sh-primary) 30%, transparent);
-}
-/* Per-frame staged-frame cards in the multi-pick composer. Each card
- * is a thumbnail + caption textarea + emoji-pick button row, stacked
- * vertically so a 30-frame highlight is still scannable on mobile. */
-.sh-highlight-frames {
-  list-style: none;
-  margin: 0;
-  padding: 0;
+/* Composer (``HighlightComposerPage``) — one page, strip first on phones.
+ * Desktop: the preview (9:16, 260 px) on the inline-start side, the
+ * strip, order, caption and audience beside it. Phones: the strip on top,
+ * the preview capped at 240×320 below it, the rest underneath. Every
+ * control is ≥ 36 px; logical properties only, so RTL mirrors. */
+.sh-hlc {
+  max-width: 880px;
   display: flex;
   flex-direction: column;
   gap: var(--sh-space-sm);
 }
-.sh-highlight-frame {
-  display: flex;
-  gap: var(--sh-space-sm);
-  padding: var(--sh-space-sm);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  background: var(--sh-bg);
+.sh-hlc__back {
+  align-self: flex-start;
+  gap: var(--sh-space-xs);
+  color: var(--sh-text-muted);
+  text-decoration: none;
 }
-.sh-highlight-frame-thumb {
-  flex: 0 0 88px;
-  width: 88px;
-  height: 88px;
-  border-radius: var(--sh-radius-sm);
+.sh-hlc__title {
+  margin: 0;
+  font-family: var(--sh-font-family-display);
+  font-size: var(--sh-font-size-xl, 1.5rem);
+  line-height: 1.2;
+}
+.sh-hlc__body {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  gap: var(--sh-space-lg);
+  align-items: start;
+}
+.sh-hlc__preview .sh-mediadrop { min-height: 240px; }
+.sh-hlc__stage {
+  position: relative;
+  aspect-ratio: 9 / 16;
+  width: 100%;
+  border-radius: var(--sh-radius-lg, 16px);
   overflow: hidden;
-  background: var(--sh-bg-secondary);
+  background: #111;
 }
-/* Video frames need room for the native ``controls`` overlay so the
- * user can actually play the staged clip — bump to a 16:9 strip. */
-.sh-highlight-frame-thumb--video {
-  flex: 0 0 200px;
-  width: 200px;
-  height: 112px;
-}
-.sh-highlight-frame-thumb img,
-.sh-highlight-frame-thumb video {
+.sh-hlc__stage img,
+.sh-hlc__stage video {
   width: 100%;
   height: 100%;
   object-fit: cover;
   display: block;
 }
-.sh-highlight-frame-body {
-  flex: 1 1 auto;
+.sh-hlc__stage-caption {
+  position: absolute;
+  inset-inline: 0;
+  inset-block-end: 0;
+  margin: 0;
+  padding: var(--sh-space-xl) var(--sh-space-sm) var(--sh-space-sm);
+  color: #fff;
+  background: linear-gradient(to bottom, transparent, rgba(0, 0, 0, 0.75));
+  overflow-wrap: anywhere;
+}
+.sh-hlc__preparing {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sh-space-md);
+  text-align: center;
+  color: #fff;
+  background: #2b2540;
+}
+.sh-hlc__side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-md);
+  min-width: 0;
+}
+/* Frame strip: numbered tiles, a 36 px ✕, the day's posted frames as one
+ * stack, "+ Add" last. Scrolls sideways inside itself, never the page. */
+.sh-hlc-strip {
+  display: flex;
+  gap: var(--sh-space-sm);
+  overflow-x: auto;
+  padding-block: 2px;
+  scrollbar-width: thin;
+}
+.sh-hlc-strip__tile,
+.sh-hlc-strip__add,
+.sh-hlc-strip__posted {
+  position: relative;
+  flex: 0 0 84px;
+  height: 148px;
+  border-radius: var(--sh-radius-md);
+}
+.sh-hlc-strip__tile {
+  border: 2px solid var(--sh-text);
+  overflow: hidden;
+  background: var(--sh-bg-secondary);
+  cursor: grab;
+}
+.sh-hlc-strip__tile--on {
+  border-color: var(--sh-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--sh-primary) 35%, transparent);
+}
+.sh-hlc-strip__pick {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+}
+.sh-hlc-strip__pick img,
+.sh-hlc-strip__pick video {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  pointer-events: none;
+}
+.sh-hlc-strip__preparing {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  height: 100%;
+  padding: var(--sh-space-xs);
+  font-size: var(--sh-font-size-xs);
+  line-height: 1.3;
+  text-align: center;
+  color: #fff;
+  background: linear-gradient(to bottom, #6f7fbf, #2b2540);
+}
+.sh-hlc-strip__num {
+  position: absolute;
+  inset-block-start: 6px;
+  inset-inline-start: 6px;
+  min-width: 24px;
+  height: 24px;
+  padding-inline: 6px;
+  border-radius: var(--sh-radius-full);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--sh-font-size-sm);
+  font-weight: 600;
+  color: #fff;
+  background: rgba(20, 20, 24, 0.82);
+  pointer-events: none;
+}
+.sh-hlc-strip__remove {
+  position: absolute;
+  inset-block-start: 2px;
+  inset-inline-end: 2px;
+  width: 36px;
+  height: 36px;
+  border: 0;
+  border-radius: var(--sh-radius-full);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.85rem;
+  color: #fff;
+  background: rgba(20, 20, 24, 0.82);
+  cursor: pointer;
+}
+.sh-hlc-strip__remove:focus-visible,
+.sh-hlc-strip__pick:focus-visible {
+  outline: 3px solid var(--sh-focus-ring);
+  outline-offset: -3px;
+}
+.sh-hlc-strip__add {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sh-space-xs);
+  border: 2px dashed var(--sh-border-strong, var(--sh-border));
+  color: var(--sh-text-muted);
+  cursor: pointer;
+}
+.sh-hlc-strip__add:focus-within {
+  outline: 3px solid var(--sh-focus-ring);
+  outline-offset: 2px;
+}
+.sh-hlc-strip__add--off { opacity: 0.5; cursor: not-allowed; }
+.sh-hlc-strip__plus { font-size: 1.75rem; line-height: 1; }
+.sh-hlc-strip__add > span:not(.sh-hlc-strip__plus) {
+  padding-inline: 4px;
+  font-size: var(--sh-font-size-sm);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+.sh-hlc-strip__posted {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sh-space-sm);
+  border: 1px solid var(--sh-border);
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+  text-align: center;
+}
+.sh-hlc-strip__stack {
+  width: 36px;
+  height: 52px;
+  border-radius: 6px;
+  background: var(--sh-bg-secondary);
+  box-shadow: 4px -4px 0 -1px var(--sh-border), 8px -8px 0 -2px var(--sh-border);
+  border: 1px solid var(--sh-border);
+}
+.sh-hlc__order {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sh-space-sm);
+}
+.sh-hlc__order .sh-btn { min-height: 36px; }
+.sh-hlc__hint { margin: calc(-1 * var(--sh-space-sm)) 0 0; font-size: var(--sh-font-size-xs); }
+.sh-hlc__label { font-weight: 600; }
+.sh-hlc__caption {
   display: flex;
   flex-direction: column;
   gap: var(--sh-space-xs);
-  min-width: 0;
 }
-.sh-highlight-frame-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  font-size: var(--sh-font-size-sm);
-  color: var(--sh-text-muted);
-}
-.sh-highlight-frame-remove {
-  font-size: 1rem;
-  line-height: 1;
-}
-.sh-highlight-frame-caption-row {
+.sh-hlc__caption-row {
   display: flex;
   align-items: flex-start;
   gap: var(--sh-space-xs);
 }
-.sh-highlight-frame-caption-row textarea {
+.sh-hlc__caption-row textarea {
   flex: 1 1 auto;
+  min-width: 0;
+  min-height: 2.75rem;
   resize: vertical;
-  min-height: 2.5rem;
+  font: inherit;
+}
+.sh-hlc__audience {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+}
+.sh-hlc__audience > legend {
+  padding: 0;
+  margin-block-end: var(--sh-space-sm);
+  font-size: var(--sh-font-size-md, 1.05rem);
+}
+.sh-hlc__retention { margin: 0; font-size: var(--sh-font-size-sm); }
+/* Audience picker rows: the whole row is the radio's label. */
+.sh-hlc-pick {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+}
+.sh-hlc-pick__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  min-height: 52px;
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg);
+  cursor: pointer;
+}
+.sh-hlc-pick__row--on {
+  border-color: var(--sh-primary);
+  background: var(--sh-primary-soft, color-mix(in srgb, var(--sh-primary) 10%, var(--sh-bg)));
+}
+.sh-hlc-pick__row input { flex-shrink: 0; width: 18px; height: 18px; margin: 0; }
+.sh-hlc-pick__text { display: flex; flex-direction: column; min-width: 0; }
+.sh-hlc-pick__title { font-weight: 600; }
+.sh-hlc-pick__sub {
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-text-muted);
+  overflow-wrap: anywhere;
+}
+.sh-hlc-pick__sub:empty { display: none; }
+/* Muted ink on the tinted selected row is 4.2:1 in dark — full ink there. */
+.sh-hlc-pick__row--on .sh-hlc-pick__sub { color: var(--sh-text); }
+.sh-hlc-pick__warn { color: var(--sh-text); font-weight: 600; }
+.sh-hlc-pick__choose {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+  padding-inline-start: var(--sh-space-lg);
+}
+.sh-hlc-pick__kinds { display: flex; gap: var(--sh-space-xs); flex-wrap: wrap; }
+.sh-hlc-pick__kind {
+  min-height: 36px;
+  padding: 0 var(--sh-space-md);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-full);
+  background: var(--sh-bg);
+  color: var(--sh-text);
+  font: inherit;
+  cursor: pointer;
+}
+.sh-hlc-pick__kind[aria-pressed='true'] {
+  border-color: var(--sh-primary);
+  background: var(--sh-primary-soft, color-mix(in srgb, var(--sh-primary) 10%, var(--sh-bg)));
+  font-weight: 600;
+}
+.sh-hlc-pick__list { display: flex; flex-direction: column; gap: 2px; }
+.sh-hlc-pick__check {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  min-height: 36px;
+  cursor: pointer;
+}
+.sh-hlc-pick__check input { flex-shrink: 0; width: 18px; height: 18px; margin: 0; }
+/* Appending: today's audience, locked, and the one way to change it. */
+.sh-hlc-lock {
+  display: flex;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-md);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg);
+}
+.sh-hlc-lock__icon { line-height: 1.5; }
+.sh-hlc-lock__text {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--sh-space-xs);
+  min-width: 0;
+}
+.sh-hlc-lock__text p { margin: 0; }
+.sh-hlc-lock__who { font-weight: 600; overflow-wrap: anywhere; }
+.sh-hlc-lock .sh-btn { margin-block-start: var(--sh-space-xs); min-height: 36px; }
+/* The sticky action bar: status, Cancel, Share / Add. */
+.sh-hlc__bar {
+  position: sticky;
+  inset-block-end: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-md);
+  margin-block-start: var(--sh-space-md);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg);
+  box-shadow: 0 -6px 18px -12px rgba(26, 24, 20, 0.35);
+}
+.sh-hlc__status {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+}
+.sh-hlc__cancel { padding-inline: var(--sh-space-sm); }
+.sh-hlc__bar .sh-btn { min-height: 44px; }
+/* The "Change for all of today…" sheet. */
+.sh-hlc-change__summary {
+  margin-block-start: var(--sh-space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
+}
+.sh-hlc-change__summary p { margin: 0; overflow-wrap: anywhere; }
+.sh-hlc-change__error { color: var(--sh-danger); margin-block: var(--sh-space-sm) 0; }
+/* "Also remove the public link" — a full-width tap target in the summary. */
+.sh-hlc-change__unlink { min-height: 44px; }
+@media (max-width: 720px) {
+  /* Strip first: the side column's children join the page flow and the
+   * strip moves above the preview. */
+  .sh-hlc__body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--sh-space-md);
+  }
+  .sh-hlc__side { display: contents; }
+  .sh-hlc__side > * { order: 1; }
+  .sh-hlc__side > .sh-hlc-strip { order: -1; }
+  .sh-hlc__preview { order: 0; width: 100%; }
+  /* 9:16 inside the 240×320 cap. */
+  .sh-hlc__stage { width: 180px; max-height: 320px; margin-inline: auto; }
+  .sh-hlc-strip__tile,
+  .sh-hlc-strip__add,
+  .sh-hlc-strip__posted { flex-basis: 76px; height: 134px; }
+  .sh-hlc-strip__add > span:not(.sh-hlc-strip__plus) { font-size: var(--sh-font-size-xs); }
+}
+@media (max-width: 768px) {
+  /* Above the fixed tab bar. */
+  .sh-hlc__bar {
+    inset-block-end: calc(var(--sh-mobile-nav-height) + env(safe-area-inset-bottom, 0px) + var(--sh-space-xs));
+    gap: var(--sh-space-sm);
+  }
 }
 
+/* Settings › Highlights default-audience picker. */
 .sh-highlight-composer-audience {
   display: flex;
   flex-direction: column;
@@ -20342,15 +20638,6 @@ span.sh-hlv__who { cursor: default; }
 }
 /* A long name wraps; the box keeps its size. */
 .sh-highlight-composer-audience-row input { flex-shrink: 0; }
-.sh-highlight-composer-advanced-toggle {
-  align-self: flex-start;
-  background: none;
-  border: none;
-  color: var(--sh-primary-text);
-  cursor: pointer;
-  padding: 4px 0;
-  min-height: 36px;
-}
 /* Text links that act as controls (the composer's Cancel, the drop
  * zone's "choose media…"): a 36 px tall hit area around the words. */
 .sh-tap-link {
@@ -20840,47 +21127,6 @@ span.sh-hlv__who { cursor: default; }
   /* Phones: a smaller preview keeps where-it-goes and the public row
    * on the same screen as the picture. */
   .sh-momentum-composer-media .sh-momentum-composer-preview { max-height: 220px; }
-}
-
-/* HighlightQuickShareDialog — single-frame composer, streamlined.
- * Form layout matches the moments dialog so the two surfaces feel
- * cousins. The preview cap is the same as the multi-frame storyboard
- * thumbnail (360px tall) so a user dropping a portrait orientation
- * doesn't blow the dialog up. */
-.sh-highlight-quick-share {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sh-space-md);
-}
-.sh-highlight-quick-preview {
-  max-width: 100%;
-  max-height: 360px;
-  border-radius: var(--sh-radius-sm);
-}
-.sh-highlight-quick-caption {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sh-space-xs);
-}
-.sh-highlight-quick-caption textarea {
-  width: 100%;
-  font: inherit;
-  padding: var(--sh-space-sm);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  resize: vertical;
-}
-.sh-highlight-quick-audience-note {
-  margin: 0;
-  font-size: var(--sh-font-size-xs);
-}
-/* Escalation link in the actions row — sits left of the Cancel /
- * Share buttons (the ``.sh-form-actions`` ``justify-content:
- * flex-end`` would otherwise push it tight against them). ``mr: auto``
- * shoves it to the leading edge. */
-.sh-highlight-quick-escalate {
-  margin-right: auto;
-  font-size: var(--sh-font-size-sm);
 }
 
 /* Detail */

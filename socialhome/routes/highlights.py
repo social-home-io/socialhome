@@ -12,6 +12,8 @@ Routes:
 * ``GET    /api/highlights``                              — list visible highlights
 * ``GET    /api/highlights/{id}``                         — highlight detail
 * ``DELETE /api/highlights/{id}``                         — delete whole highlight
+* ``GET    /api/highlights/{id}/audience``                — audience + where else it opens
+* ``PATCH  /api/highlights/{id}/audience``                — change for all of today
 * ``DELETE /api/highlights/frames/{id}``                  — delete one frame
 * ``POST   /api/highlights/frames/{id}/view``             — mark viewed
 * ``PUT    /api/highlights/frames/{id}/reaction``         — set / change reaction
@@ -355,6 +357,68 @@ class HighlightDetailView(BaseView):
         return web.json_response({}, status=204)
 
 
+class HighlightAudienceView(BaseView):
+    """``GET / PATCH /api/highlights/{id}/audience`` — who sees today's
+    highlight, and change it for every frame of it (owner decision 1).
+
+    ``GET`` (author only) answers ``{audience_kind, audience, published,
+    shared: {household, spaces: [{id, name}]}}`` — where else it opens
+    outside the audience, so the change sheet never overpromises.
+
+    Author only (a reader gets 403, anyone else the unknown-id 404), today's
+    highlight only (409 ``HIGHLIGHT_NOT_TODAY``); ``users`` with nobody
+    picked is 422 ``HIGHLIGHT_AUDIENCE_EMPTY``. Body ``{audience_kind,
+    audience}``; answers ``{highlight}`` as the author sees it.
+    """
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        if ctx is None or ctx.user_id is None:
+            return error_response(401, "UNAUTHENTICATED", "auth required")
+        highlight, reach = await self.svc(highlight_service_key).reach_of(
+            highlight_id=self.match("id"), actor_user_id=ctx.user_id
+        )
+        return self._json(
+            {
+                "audience_kind": highlight.audience_kind.value,
+                "audience": list(highlight.audience),
+                "published": reach.published,
+                "shared": {
+                    "household": reach.shared_household,
+                    "spaces": [
+                        {"id": space_id, "name": name}
+                        for space_id, name in reach.shared_spaces
+                    ],
+                },
+            }
+        )
+
+    async def patch(self) -> web.Response:
+        ctx = self.user
+        if ctx is None or ctx.user_id is None:
+            return error_response(401, "UNAUTHENTICATED", "auth required")
+        body = await self.body()
+        try:
+            kind = HighlightAudience(str(body.get("audience_kind")))
+        except ValueError:
+            return error_response(
+                400,
+                "BAD_REQUEST",
+                "audience_kind must be all_paired, households or users",
+            )
+        ids_raw = body.get("audience") or []
+        if not isinstance(ids_raw, list):
+            return error_response(400, "BAD_REQUEST", "audience must be a list")
+        svc = self.svc(highlight_service_key)
+        highlight = await svc.change_audience(
+            highlight_id=self.match("id"),
+            actor_user_id=ctx.user_id,
+            audience_kind=kind,
+            audience=tuple(str(x) for x in ids_raw if isinstance(x, str)),
+        )
+        return self._json({"highlight": _highlight_dict(highlight, ctx.user_id)})
+
+
 class HighlightFrameDetailView(BaseView):
     """``DELETE /api/highlights/frames/{id}`` — author removes a frame."""
 
@@ -523,6 +587,7 @@ class HighlightReportView(BaseView):
 
 
 __all__ = [
+    "HighlightAudienceView",
     "HighlightDetailView",
     "HighlightDmReplyView",
     "HighlightFrameDetailView",

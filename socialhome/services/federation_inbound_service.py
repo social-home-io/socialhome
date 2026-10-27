@@ -3609,10 +3609,77 @@ class FederationInboundService(ProtectionGateMixin):
         frame = self._frame_from_payload(highlight.id, p)
         if not await self._highlight_write_binds(event, highlight, frame):
             return
-        await self._highlight_repo.save_highlight(highlight)
+        applied = await self._highlight_audience_in_order(event, highlight)
+        if applied is None:
+            return
+        await self._highlight_repo.save_highlight(applied)
         if frame is not None:
             await self._highlight_repo.save_frame(frame)
-            await self._publish_frame_added(highlight, frame, is_first=True, p=p)
+            await self._publish_frame_added(applied, frame, is_first=True, p=p)
+
+    async def _highlight_audience_in_order(
+        self, event: FederationEvent, highlight: Highlight
+    ) -> Highlight | None:
+        """v_70: the highlight row to store for a CREATED (or a lazily
+        created parent), ordered by the author's ``occurred_at``.
+
+        ``None`` — refuse the envelope — when it is no newer than a removal
+        we applied (a frame still in flight when the author took the
+        highlight away from this household must not bring it back). An
+        envelope older than the newest audience we applied keeps the stored
+        audience (a re-sent older slice must not roll it back). Otherwise
+        the envelope's audience is stamped as the newest. An envelope
+        without a parseable ``occurred_at`` is ordered against nothing,
+        except that it never outlives a recorded removal.
+        """
+        if self._highlight_repo is None:  # pragma: no cover — callers gate
+            return None
+        at = _occurred_at(event.payload)
+        stamp = await self._highlight_repo.get_stamp(highlight.id)
+        if stamp is not None and stamp.author_user_id != highlight.author_user_id:
+            # The id is stamped for another author (it outlives the row
+            # ``_highlight_write_binds`` checks against) — never theirs.
+            log.warning(
+                "%s from %s: highlight id %s is stamped for another author — refusing",
+                event.event_type,
+                event.from_instance,
+                highlight.id,
+            )
+            return None
+        if stamp is not None and stamp.removed_at is not None:
+            removed = _parse_stamp(stamp.removed_at)
+            if at is None or removed is None or at <= removed:
+                log.info(
+                    "%s from %s for highlight %s: no newer than its removal "
+                    "here — refused",
+                    event.event_type,
+                    event.from_instance,
+                    highlight.id,
+                )
+                return None
+        if at is None:
+            return highlight
+        applied_at = (
+            _parse_stamp(stamp.audience_at)
+            if stamp is not None and stamp.audience_at is not None
+            else None
+        )
+        if applied_at is not None and at < applied_at:
+            stored = await self._highlight_repo.get_highlight(highlight.id)
+            if stored is None:
+                return None
+            return replace(
+                highlight,
+                audience_kind=stored.audience_kind,
+                audience=stored.audience,
+            )
+        await self._highlight_repo.stamp_audience(
+            highlight.id,
+            highlight.author_user_id,
+            at.astimezone(UTC).isoformat(),
+            highlight.expires_at or "",
+        )
+        return highlight
 
     async def _highlight_write_binds(
         self,
@@ -3712,6 +3779,10 @@ class FederationInboundService(ProtectionGateMixin):
         if not await self._highlight_write_binds(event, None, frame):
             return
         if lazy_parent:
+            parent = await self._highlight_audience_in_order(event, highlight)
+            if parent is None:
+                return
+            highlight = parent
             await self._highlight_repo.save_highlight(highlight)
         await self._highlight_repo.save_frame(frame)
         await self._publish_frame_added(highlight, frame, is_first=False, p=p)
@@ -3759,13 +3830,40 @@ class FederationInboundService(ProtectionGateMixin):
             return
         highlight = await self._highlight_repo.get_highlight(highlight_id)
         if highlight is None:
+            await self._remember_unheld_removal(event, highlight_id)
             return
         if not await self._authority_matches(
             event.from_instance, highlight.author_user_id
         ):
             log.warning("HIGHLIGHT_DELETED authority mismatch: dropped")
             return
+        # v_70: a removal older than the newest audience we applied was
+        # overtaken (the author narrowed, then widened again) — stale.
+        at = _occurred_at(p)
+        stamp = await self._highlight_repo.get_stamp(highlight_id)
+        applied_at = (
+            _parse_stamp(stamp.audience_at)
+            if stamp is not None and stamp.audience_at is not None
+            else None
+        )
+        if at is not None and applied_at is not None and at < applied_at:
+            log.info(
+                "HIGHLIGHT_DELETED from %s for highlight %s: older than its "
+                "audience here — refused",
+                event.from_instance,
+                highlight_id,
+            )
+            return
         await self._highlight_repo.delete_highlight(highlight_id)
+        if at is not None:
+            # Remembered until the highlight would have expired, so an
+            # envelope sent before this removal can't recreate it.
+            await self._highlight_repo.stamp_removed(
+                highlight_id,
+                highlight.author_user_id,
+                at.astimezone(UTC).isoformat(),
+                highlight.expires_at or "",
+            )
         await self._bus.publish(
             HighlightRemoved(
                 highlight_id=highlight_id,
@@ -3773,6 +3871,35 @@ class FederationInboundService(ProtectionGateMixin):
                 audience_kind=highlight.audience_kind.value,
                 audience=highlight.audience,
             )
+        )
+
+    async def _remember_unheld_removal(
+        self, event: FederationEvent, highlight_id: str
+    ) -> None:
+        """v_70: a removal for a highlight we don't hold yet — its CREATED
+        is still on the way (queued or in flight). Remember it, so that
+        envelope is refused when it lands. Only from the author's own
+        household, and only until the expiry the removal names — capped at
+        the longest retention, so a made-up id can't pin a row for long."""
+        if self._highlight_repo is None:  # pragma: no cover — callers gate
+            return
+        p = event.payload
+        author = str(p.get("author_user_id") or "")
+        at = _occurred_at(p)
+        expires = _parse_stamp(p.get("expires_at"))
+        if not author or at is None or expires is None:
+            return
+        if not await self._authority_matches(event.from_instance, author):
+            return
+        stamp = await self._highlight_repo.get_stamp(highlight_id)
+        if stamp is not None and stamp.author_user_id != author:
+            return
+        latest = datetime.now(UTC) + timedelta(days=HIGHLIGHT_STAMP_MAX_DAYS)
+        await self._highlight_repo.stamp_removed(
+            highlight_id,
+            author,
+            at.astimezone(UTC).isoformat(),
+            min(expires, latest).astimezone(UTC).isoformat(),
         )
 
     # ── Highlight back-channel handlers ────────────────────────────────────
@@ -4867,3 +4994,25 @@ def _edit_stamp(event: FederationEvent) -> str | None:
         getattr(event, "timestamp", None)
     )
     return stamp_to_db(stamp) if stamp is not None else None
+
+
+#: The longest a removal for a highlight we never held is remembered: the
+#: longest retention an author can pick (Settings › Highlights, 1–90 days).
+HIGHLIGHT_STAMP_MAX_DAYS: int = 90
+
+
+def _parse_stamp(raw: object) -> datetime | None:
+    """A tz-aware ISO-8601 stamp, or ``None`` (naive or unparseable)."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        when = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return when if when.tzinfo is not None else None
+
+
+def _occurred_at(payload: dict) -> datetime | None:
+    """The author's ``occurred_at`` on a highlight envelope (v_70 orders
+    audience upserts and removals by it)."""
+    return _parse_stamp(payload.get("occurred_at"))

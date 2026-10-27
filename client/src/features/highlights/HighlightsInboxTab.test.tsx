@@ -176,6 +176,18 @@ describe('HighlightsInboxTab when a load fails', () => {
     expect(container.querySelector('[role="alert"]')).toBeNull()
   })
 
+  it('refetches when an author changes who sees today’s highlight', async () => {
+    let rows: HighlightInboxItem[] = [amaka]
+    vi.mocked(api.get).mockImplementation(async (path: string) =>
+      (path === '/api/highlights' ? rows : []))
+    const { container } = render(<HighlightsInboxTab />)
+    await waitFor(() => expect(container.textContent).toContain('Amaka Okafor'))
+    // Amaka narrowed it: this viewer is no longer in the audience.
+    rows = []
+    wsHandlers.get('highlight.audience_changed')!()
+    await waitFor(() => expect(container.textContent).not.toContain('Amaka Okafor'))
+  })
+
   it('a failed refresh keeps the list and says from when it is', async () => {
     let fail = false
     vi.mocked(api.get).mockImplementation(async (path: string) => {

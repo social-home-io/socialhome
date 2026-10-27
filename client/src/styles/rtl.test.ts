@@ -21,7 +21,7 @@ const css = readFileSync(join(__dirname, 'app.css'), 'utf8')
 const SRC = join(__dirname, '..')
 
 /** Rules whose selectors name these blocks must mirror in RTL. */
-const SCOPED = /\.sh-(?:space|spaces|ss|member|cal|calendar|event|moderation|subscribed|sidenav|mobile-drawer|mobile-nav|post-overflow-wrap|momentum|moment)(?:[-_\s.:>+~,[]|$)/
+const SCOPED = /\.sh-(?:space|spaces|ss|member|cal|calendar|event|moderation|subscribed|sidenav|mobile-drawer|mobile-nav|post-overflow-wrap|momentum|moment|hlc)(?:[-_\s.:>+~,[]|$)/
 
 /** Physical inline-axis properties (``left: 50%`` + translate centring is
  *  direction-neutral, so it is allowed). */

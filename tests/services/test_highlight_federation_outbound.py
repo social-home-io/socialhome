@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from socialhome.domain.events import (
+    HighlightAudienceChanged,
     HighlightFrameAdded,
     HighlightFrameReactionChanged,
     HighlightFrameRemoved,
@@ -26,6 +27,7 @@ from socialhome.domain.events import (
     HighlightRemoved,
 )
 from socialhome.domain.federation import FederationEventType, RemoteInstance
+from socialhome.domain.highlight import HighlightFrame, HighlightFrameType
 from socialhome.services.highlight_federation_outbound import (
     HighlightFederationOutbound,
 )
@@ -73,6 +75,8 @@ def stack():
     federation = MagicMock()
     federation.own_instance_id = "self"
     federation.send_event = AsyncMock()
+    federation.drop_queued_with_key_prefix = AsyncMock(return_value=0)
+    federation.peer_supports = AsyncMock(return_value=True)
     federation_repo = MagicMock()
     user_repo = MagicMock()
     bus = MagicMock()  # not used in unit tests; .wire() is exercised separately
@@ -544,3 +548,389 @@ async def test_protected_authors_content_skips_a_blocked_persons_household(stack
 
 async def _FIRE(out, author):
     await out._on_frame_added(_frame_event(author=author, is_first=True))
+
+
+# ─── Change for all of today (HighlightAudienceChanged) ──────────────────
+
+
+def _hl_frames(n: int) -> tuple[HighlightFrame, ...]:
+    return tuple(
+        HighlightFrame(
+            id=f"f-{i}",
+            highlight_id="s-1",
+            sequence=i,
+            frame_type=HighlightFrameType.VIDEO if i == 2 else HighlightFrameType.IMAGE,
+            media_url=f"/api/media/{i}.webp",
+            caption_text=f"caption {i}",
+            duration_ms=4000 if i == 2 else None,
+        )
+        for i in range(1, n + 1)
+    )
+
+
+def _audience_event(
+    old_kind: str,
+    old: tuple[str, ...],
+    kind: str,
+    new: tuple[str, ...],
+    *,
+    frames: int = 3,
+    author: str = "uid-author",
+) -> HighlightAudienceChanged:
+    return HighlightAudienceChanged(
+        highlight_id="s-1",
+        author_user_id=author,
+        highlight_date="2026-05-05",
+        expires_at="2026-06-04T00:00:00Z",
+        old_audience_kind=old_kind,
+        old_audience=old,
+        audience_kind=kind,
+        audience=new,
+        frames=_hl_frames(frames),
+    )
+
+
+_HOMES = {
+    "uid-author": "self",
+    "uid-housemate": "self",
+    "uid-bob": "peer-bob",
+    "uid-bea": "peer-bob",
+    "uid-dora": "peer-dora",
+}
+
+
+def _sent(fed) -> list[tuple[str, FederationEventType, dict]]:
+    return [
+        (c.kwargs["to_instance_id"], c.kwargs["event_type"], c.kwargs["payload"])
+        for c in fed.send_event.call_args_list
+    ]
+
+
+@pytest.fixture
+def audience_stack(stack):
+    out, fed, fed_repo, user_repo = stack
+
+    async def _home(uid):
+        return _HOMES.get(uid)
+
+    user_repo.get_instance_for_user = AsyncMock(side_effect=_home)
+    fed_repo.list_social_instances = AsyncMock(
+        return_value=[_peer("peer-bob"), _peer("peer-dora")],
+    )
+    return out, fed
+
+
+async def test_narrowing_deletes_at_dropped_households_only(audience_stack):
+    """All paired → Bob's household: Dora's drops out (one small
+    HIGHLIGHT_DELETED, no audience, no frames); Bob's stays but its slice
+    changed (kind), so it gets the highlight re-sent with its own slice."""
+    out, fed = audience_stack
+    await out._on_audience_changed(
+        _audience_event("all_paired", (), "households", ("peer-bob",))
+    )
+    sent = _sent(fed)
+    assert [(to, ev) for to, ev, _ in sent if to == "peer-dora"] == [
+        ("peer-dora", FederationEventType.HIGHLIGHT_DELETED)
+    ]
+    deleted = next(p for to, _, p in sent if to == "peer-dora")
+    # v_70: ``expires_at`` bounds how long the receiver remembers it.
+    assert set(deleted) == {
+        "highlight_id",
+        "author_user_id",
+        "expires_at",
+        "occurred_at",
+    }
+    bob = [(ev, p) for to, ev, p in sent if to == "peer-bob"]
+    assert [ev for ev, _ in bob] == [FederationEventType.HIGHLIGHT_CREATED]
+    assert bob[0][1]["audience_kind"] == "households"
+    assert bob[0][1]["audience"] == ["peer-bob"]
+    # Re-sent as the first frame of the day so an older receiver re-upserts.
+    assert bob[0][1]["frame_id"] == "f-1"
+
+
+async def test_narrowing_people_within_a_household_regates_it(audience_stack):
+    """Bob + Bea → only Bea: Bob's household stays and gets the trimmed
+    list (Bea only); Dora's drops out."""
+    out, fed = audience_stack
+    await out._on_audience_changed(
+        _audience_event(
+            "users",
+            ("uid-bob", "uid-bea", "uid-dora", "uid-housemate"),
+            "users",
+            ("uid-bea", "uid-housemate"),
+        )
+    )
+    sent = _sent(fed)
+    assert {(to, ev) for to, ev, _ in sent} == {
+        ("peer-bob", FederationEventType.HIGHLIGHT_CREATED),
+        ("peer-dora", FederationEventType.HIGHLIGHT_DELETED),
+    }
+    created = next(p for to, ev, p in sent if to == "peer-bob")
+    assert created["audience"] == ["uid-bea"]
+
+
+async def test_an_unchanged_slice_sends_nothing(audience_stack):
+    """Dropping only a housemate changes nothing any peer stores."""
+    out, fed = audience_stack
+    await out._on_audience_changed(
+        _audience_event("users", ("uid-bob", "uid-housemate"), "users", ("uid-bob",))
+    )
+    assert _sent(fed) == []
+
+
+async def test_widening_sends_the_day_only_to_new_households(audience_stack):
+    """Bob's household → all paired: Dora's is new and gets the day
+    (CREATED with frame 1, then APPENDED for each later frame, in order);
+    Bob's only gets its slice re-sent (kind changed), not the frames."""
+    out, fed = audience_stack
+    await out._on_audience_changed(
+        _audience_event("households", ("peer-bob",), "all_paired", (), frames=3)
+    )
+    sent = _sent(fed)
+    dora = [(ev, p) for to, ev, p in sent if to == "peer-dora"]
+    assert [ev for ev, _ in dora] == [
+        FederationEventType.HIGHLIGHT_CREATED,
+        FederationEventType.HIGHLIGHT_FRAME_APPENDED,
+        FederationEventType.HIGHLIGHT_FRAME_APPENDED,
+    ]
+    assert [p["frame_id"] for _, p in dora] == ["f-1", "f-2", "f-3"]
+    assert [p["sequence"] for _, p in dora] == [1, 2, 3]
+    assert all(p["audience"] == [] for _, p in dora)
+    assert all(p["audience_kind"] == "all_paired" for _, p in dora)
+    assert dora[1][1]["frame_type"] == "video"
+    assert dora[1][1]["duration_ms"] == 4000
+    assert dora[2][1]["caption_text"] == "caption 3"
+    bob = [ev for to, ev, _ in sent if to == "peer-bob"]
+    assert bob == [FederationEventType.HIGHLIGHT_CREATED]
+
+
+async def test_widening_people_on_a_household_already_in_regates(audience_stack):
+    """Bea → Bea + Bob: same household, wider slice — one re-sent CREATED,
+    never the frames again."""
+    out, fed = audience_stack
+    await out._on_audience_changed(
+        _audience_event("users", ("uid-bea",), "users", ("uid-bea", "uid-bob"))
+    )
+    sent = _sent(fed)
+    assert [(to, ev) for to, ev, _ in sent] == [
+        ("peer-bob", FederationEventType.HIGHLIGHT_CREATED)
+    ]
+    assert sorted(sent[0][2]["audience"]) == ["uid-bea", "uid-bob"]
+
+
+async def test_a_new_household_with_no_frames_left_gets_nothing(audience_stack):
+    out, fed = audience_stack
+    await out._on_audience_changed(
+        _audience_event("households", (), "households", ("peer-dora",), frames=0)
+    )
+    assert _sent(fed) == []
+
+
+async def test_a_kept_household_with_no_frames_left_is_regated(audience_stack):
+    """No frames left: the re-sent CREATED carries no frame, only the
+    highlight row's new audience."""
+    out, fed = audience_stack
+    await out._on_audience_changed(
+        _audience_event(
+            "users", ("uid-bob", "uid-bea"), "users", ("uid-bea",), frames=0
+        )
+    )
+    [(to, ev, payload)] = _sent(fed)
+    assert (to, ev) == ("peer-bob", FederationEventType.HIGHLIGHT_CREATED)
+    assert "frame_id" not in payload
+    assert payload["audience"] == ["uid-bea"]
+
+
+async def test_hidden_households_get_nothing(stack):
+    out, fed, fed_repo, user_repo = stack
+
+    async def _home(uid):
+        return _HOMES.get(uid)
+
+    user_repo.get_instance_for_user = AsyncMock(side_effect=_home)
+    fed_repo.list_social_instances = AsyncMock(
+        return_value=[_peer("peer-bob"), _peer("peer-dora")],
+    )
+    out._visibility_repo = _FakeVisibilityRepo({"peer-dora": frozenset({"uid-author"})})
+    await out._on_audience_changed(_audience_event("households", (), "all_paired", ()))
+    assert {to for to, _, _ in _sent(fed)} == {"peer-bob"}
+
+
+async def test_a_remote_authors_change_is_never_re_fanned(audience_stack):
+    out, fed = audience_stack
+    await out._on_audience_changed(
+        _audience_event("all_paired", (), "households", (), author="uid-bob")
+    )
+    assert _sent(fed) == []
+
+
+# ─── #1191 review: queued envelopes, removals, the v_70 gate ─────────────
+
+
+def _keys(fed) -> dict[tuple[str, FederationEventType, str | None], str | None]:
+    return {
+        (
+            c.kwargs["to_instance_id"],
+            c.kwargs["event_type"],
+            c.kwargs["payload"].get("frame_id"),
+        ): c.kwargs.get("outbox_key")
+        for c in fed.send_event.call_args_list
+    }
+
+
+async def test_every_frame_envelope_is_keyed_per_frame(stack):
+    """Each frame is queued under its own key — a later frame never replaces
+    an earlier one, and a re-send of the same frame replaces its older
+    slice."""
+    out, fed, fed_repo, user_repo = stack
+    user_repo.get_instance_for_user = AsyncMock(return_value="self")
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-a")])
+    await out._on_frame_added(_frame_event(is_first=True))
+    assert fed.send_event.call_args.kwargs["outbox_key"] == "highlight:s-1:frame:f-1"
+
+
+async def test_a_removal_drops_what_is_still_queued_for_the_highlight_first(
+    audience_stack,
+):
+    """Dora's household drops out: its queued envelopes for the highlight
+    are dropped before the removal is sent, so none lands after it."""
+    out, fed = audience_stack
+    order: list[str] = []
+
+    async def _drop(iid, prefix):
+        order.append(f"drop {iid} {prefix}")
+        return 0
+
+    async def _send(**kw):
+        order.append(f"send {kw['to_instance_id']} {kw['event_type'].value}")
+
+    fed.drop_queued_with_key_prefix.side_effect = _drop
+    fed.send_event.side_effect = _send
+    await out._on_audience_changed(
+        _audience_event("all_paired", (), "households", ("peer-bob",))
+    )
+    dora = [o for o in order if "peer-dora" in o]
+    assert dora == [
+        "drop peer-dora highlight:s-1:",
+        f"send peer-dora {FederationEventType.HIGHLIGHT_DELETED.value}",
+    ]
+    assert _keys(fed)[("peer-dora", FederationEventType.HIGHLIGHT_DELETED, None)] == (
+        "highlight:s-1:removed"
+    )
+    # Bob's household stays: nothing of its queue is dropped, and its
+    # re-sent first frame replaces a queued older slice by key.
+    assert not any(o.startswith("drop peer-bob") for o in order)
+    assert _keys(fed)[("peer-bob", FederationEventType.HIGHLIGHT_CREATED, "f-1")] == (
+        "highlight:s-1:frame:f-1"
+    )
+
+
+async def test_a_new_household_drops_a_queued_removal_before_the_day(
+    audience_stack,
+):
+    """Widening again: a removal still queued for Dora's household from an
+    earlier narrowing must not land after the day it now gets."""
+    out, fed = audience_stack
+    await out._on_audience_changed(
+        _audience_event("households", ("peer-bob",), "all_paired", ())
+    )
+    fed.drop_queued_with_key_prefix.assert_awaited_once_with(
+        "peer-dora", "highlight:s-1:"
+    )
+
+
+async def test_a_removal_is_not_held_back_by_a_guardian_block(stack):
+    """§CP.F2 keeps a protected account's content from a household — never
+    the removal of what it already holds."""
+    out, fed, fed_repo, user_repo = stack
+    out.attach_child_protection(_HouseholdBlockCp())
+    homes = {"uid-kid": "self", "uid-x": "peer-ok"}
+
+    async def _home(uid):
+        return homes.get(uid)
+
+    user_repo.get_instance_for_user = AsyncMock(side_effect=_home)
+    fed_repo.list_social_instances = AsyncMock(
+        return_value=[_peer("peer-ok"), _peer("peer-blocked")],
+    )
+    await out._on_audience_changed(
+        _audience_event("all_paired", (), "households", ("peer-ok",), author="uid-kid")
+    )
+    assert ("peer-blocked", FederationEventType.HIGHLIGHT_DELETED) in {
+        (to, ev) for to, ev, _ in _sent(fed)
+    }
+
+
+async def test_a_deleted_highlight_reaches_a_guardian_blocked_household(stack):
+    out, fed, fed_repo, user_repo = stack
+    out.attach_child_protection(_HouseholdBlockCp())
+    user_repo.get_instance_for_user = AsyncMock(return_value="self")
+    fed_repo.list_social_instances = AsyncMock(return_value=[_peer("peer-blocked")])
+    await out._on_highlight_removed(
+        HighlightRemoved(
+            highlight_id="s-1",
+            author_user_id="uid-kid",
+            audience_kind="all_paired",
+            audience=(),
+        )
+    )
+    call = fed.send_event.call_args.kwargs
+    assert call["event_type"] is FederationEventType.HIGHLIGHT_DELETED
+    assert call["outbox_key"] == "highlight:s-1:removed"
+    fed.drop_queued_with_key_prefix.assert_awaited_once_with(
+        "peer-blocked", "highlight:s-1:"
+    )
+
+
+async def test_a_removal_skips_a_household_the_author_is_hidden_from(
+    audience_stack,
+):
+    """Hiding sent USER_REMOVED there (every highlight of theirs is gone);
+    a removal would only name someone that household no longer knows."""
+    out, fed = audience_stack
+    out._visibility_repo = _FakeVisibilityRepo({"peer-dora": frozenset({"uid-author"})})
+    await out._on_audience_changed(
+        _audience_event("all_paired", (), "households", ("peer-bob",))
+    )
+    assert "peer-dora" not in {to for to, _, _ in _sent(fed)}
+
+
+@pytest.mark.parametrize(
+    ("old_kind", "old", "kind", "new", "asked"),
+    [
+        # Dora's household drops out.
+        ("all_paired", (), "households", ("peer-bob",), {"peer-dora"}),
+        # Bob's household stays but keeps only Bea.
+        ("users", ("uid-bob", "uid-bea"), "users", ("uid-bea",), {"peer-bob"}),
+        # Household-wide → picked people: Bob's household loses everyone else.
+        ("households", ("peer-bob",), "users", ("uid-bob",), {"peer-bob"}),
+    ],
+)
+async def test_a_narrowing_waits_for_households_below_v70(
+    audience_stack, old_kind, old, kind, new, asked
+):
+    out, fed = audience_stack
+    fed.peer_supports = AsyncMock(return_value=False)
+    assert not await out.may_change_audience(old_kind, old, kind, new)
+    assert {c.args[0] for c in fed.peer_supports.call_args_list} == asked
+    assert all(c.kwargs["min_version"] == 70 for c in fed.peer_supports.call_args_list)
+    fed.peer_supports = AsyncMock(return_value=True)
+    assert await out.may_change_audience(old_kind, old, kind, new)
+
+
+@pytest.mark.parametrize(
+    ("old_kind", "old", "kind", "new"),
+    [
+        ("households", ("peer-bob",), "all_paired", ()),
+        ("users", ("uid-bob",), "users", ("uid-bob", "uid-bea", "uid-dora")),
+        ("users", ("uid-bob",), "households", ("peer-bob",)),
+        ("all_paired", (), "households", ("peer-bob", "peer-dora")),
+    ],
+)
+async def test_widening_is_never_gated_on_version(
+    audience_stack, old_kind, old, kind, new
+):
+    out, fed = audience_stack
+    fed.peer_supports = AsyncMock(return_value=False)
+    assert await out.may_change_audience(old_kind, old, kind, new)
+    fed.peer_supports.assert_not_awaited()

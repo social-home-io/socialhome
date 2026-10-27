@@ -121,6 +121,7 @@ export function HomeTodayCard() {
       ws.on('highlight.frame_added', load),
       ws.on('highlight.frame_removed', load),
       ws.on('highlight.removed', load),
+      ws.on('highlight.audience_changed', load),
       ws.on('moment.created', load),
       ws.on('moment.deleted', load),
     ]

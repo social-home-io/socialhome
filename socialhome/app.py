@@ -1982,6 +1982,11 @@ def _wire_federation_stack(
     highlight_federation_outbound.wire()
     # A remote view / reaction counts only from someone the highlight reached.
     inbound_service.attach_highlight_audience(highlight_federation_outbound)
+    # v_70: a narrowing waits until every household it removes people from
+    # keeps the removal (HIGHLIGHT_AUDIENCE_PEER_TOO_OLD).
+    app[K.highlight_service_key].attach_audience_gate(
+        highlight_federation_outbound.may_change_audience
+    )
 
     # §11 URL rotation fan-out. Triggered by
     # PATCH /api/ha/integration/federation-base when the HA integration
@@ -2602,6 +2607,11 @@ def _build_middleware(config: Config, limiter: RateLimiter):
             # Sensitive surfaces — tighter than the 60/min default.
             "/api/me/tokens": (10, 60),  # API token create
             "/api/feed/posts": (30, 60),  # household posting
+            # Changing who sees today's highlight: each change can send the
+            # day's frames (≤ 30) to every household it adds, so at most 6
+            # changes an hour per author — ≤ 6 × 30 envelopes per added
+            # household an hour, one author's own action.
+            "PATCH /api/highlights/*/audience": (6, 3600),
             # Composer live link card — each call may make the household
             # fetch a page (the service adds its own per-member and
             # household fetch budget on top).

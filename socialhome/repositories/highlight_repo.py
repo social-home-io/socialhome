@@ -30,6 +30,7 @@ from ..domain.highlight import (
     HighlightFrameReaction,
     HighlightFrameType,
     HighlightFrameView,
+    HighlightStamp,
 )
 from .base import dump_json, load_json, row_to_dict, rows_to_dicts
 from .cp_repo import GUARDIAN_BLOCK_COUNTERPARTS_SQL
@@ -83,6 +84,12 @@ class AbstractHighlightRepo(Protocol):
         duration_ms: int | None = None,
     ) -> HighlightFrame: ...
     async def get_highlight(self, highlight_id: str) -> Highlight | None: ...
+    async def set_audience(
+        self,
+        highlight_id: str,
+        audience_kind: HighlightAudience,
+        audience: builtins.tuple[str, ...],
+    ) -> Highlight | None: ...
     async def get_frame(self, frame_id: str) -> HighlightFrame | None: ...
     async def list_frames(self, highlight_id: str) -> builtins.list[HighlightFrame]: ...
     async def list_visible_to(
@@ -143,6 +150,13 @@ class AbstractHighlightRepo(Protocol):
     async def prune_expired(self) -> int: ...
     async def prune_over_max(self, author_user_id: str, max_count: int) -> int: ...
     async def save_highlight(self, highlight: Highlight) -> Highlight: ...
+    async def get_stamp(self, highlight_id: str) -> HighlightStamp | None: ...
+    async def stamp_audience(
+        self, highlight_id: str, author_user_id: str, at: str, expires_at: str
+    ) -> None: ...
+    async def stamp_removed(
+        self, highlight_id: str, author_user_id: str, at: str, expires_at: str
+    ) -> None: ...
     async def save_frame(self, frame: HighlightFrame) -> HighlightFrame: ...
     async def list_authors_with_highlights(self) -> builtins.list[str]: ...
 
@@ -235,6 +249,21 @@ class SqliteHighlightRepo:
             (highlight_id,),
         )
         return _row_to_highlight(row_to_dict(row))
+
+    async def set_audience(
+        self,
+        highlight_id: str,
+        audience_kind: HighlightAudience,
+        audience: tuple[str, ...],
+    ) -> Highlight | None:
+        """Point the whole highlight at a new audience ("Change for all of
+        today"). Only the audience moves; the updated row, or ``None`` for
+        an unknown id."""
+        await self._db.enqueue(
+            "UPDATE highlights SET audience_kind=?, audience_json=? WHERE id=?",
+            (audience_kind.value, dump_json(list(audience)), highlight_id),
+        )
+        return await self.get_highlight(highlight_id)
 
     async def list_visible_to(self, viewer_user_id: str) -> list[Highlight]:
         # The receiver dropped envelopes outside the audience already, so
@@ -583,6 +612,10 @@ class SqliteHighlightRepo:
         ids = await self._expired_ids()
         for sid in ids:
             await self._db.enqueue("DELETE FROM highlights WHERE id=?", (sid,))
+        # A stamp goes when the highlight it stamps would have expired.
+        await self._db.enqueue(
+            "DELETE FROM highlight_stamps WHERE datetime(expires_at) < datetime('now')"
+        )
         return len(ids)
 
     async def prune_over_max(
@@ -620,6 +653,60 @@ class SqliteHighlightRepo:
             ),
         )
         return highlight
+
+    # ── Receiver stamps (v_70, migration 0128) ──────────────────────────
+
+    async def get_stamp(self, highlight_id: str) -> HighlightStamp | None:
+        row = await self._db.fetchone(
+            "SELECT * FROM highlight_stamps WHERE highlight_id=?", (highlight_id,)
+        )
+        d = row_to_dict(row)
+        if d is None:
+            return None
+        return HighlightStamp(
+            highlight_id=d["highlight_id"],
+            author_user_id=d["author_user_id"],
+            expires_at=d["expires_at"],
+            audience_at=d.get("audience_at"),
+            removed_at=d.get("removed_at"),
+        )
+
+    async def stamp_audience(
+        self, highlight_id: str, author_user_id: str, at: str, expires_at: str
+    ) -> None:
+        """Record *at* as the newest audience applied (the caller compared)."""
+        await self._db.enqueue(
+            """
+            INSERT INTO highlight_stamps(
+                highlight_id, author_user_id, audience_at, expires_at
+            ) VALUES(?,?,?,?)
+            ON CONFLICT(highlight_id) DO UPDATE SET
+                audience_at = excluded.audience_at,
+                expires_at  = excluded.expires_at
+            """,
+            (highlight_id, author_user_id, at, expires_at),
+        )
+
+    async def stamp_removed(
+        self, highlight_id: str, author_user_id: str, at: str, expires_at: str
+    ) -> None:
+        """Record *at* as the removal, unless a later one is already kept
+        (UTC ISO-8601 strings, so they order as text)."""
+        await self._db.enqueue(
+            """
+            INSERT INTO highlight_stamps(
+                highlight_id, author_user_id, removed_at, expires_at
+            ) VALUES(?,?,?,?)
+            ON CONFLICT(highlight_id) DO UPDATE SET
+                removed_at = CASE
+                    WHEN highlight_stamps.removed_at IS NULL
+                      OR excluded.removed_at > highlight_stamps.removed_at
+                    THEN excluded.removed_at
+                    ELSE highlight_stamps.removed_at
+                END
+            """,
+            (highlight_id, author_user_id, at, expires_at),
+        )
 
     async def save_frame(self, frame: HighlightFrame) -> HighlightFrame:
         await self._db.enqueue(

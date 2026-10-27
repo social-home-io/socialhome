@@ -60,6 +60,9 @@ from .post_repo import (  # reuse the household post helpers verbatim
 class AbstractSpacePostRepo(Protocol):
     async def save(self, space_id: str, post: Post) -> Post | None: ...
     async def get(self, post_id: str) -> tuple[str, Post] | None: ...
+    async def list_highlight_share_spaces(
+        self, highlight_id: str, author: str
+    ) -> list[str]: ...
     async def get_by_linked_event_id(
         self,
         event_id: str,
@@ -287,6 +290,19 @@ class SqliteSpacePostRepo:
             ),
         )
         return post if changed else None
+
+    async def list_highlight_share_spaces(
+        self, highlight_id: str, author: str
+    ) -> list[str]:
+        """The spaces where *author* shared *highlight_id* and the post is
+        still up (the change sheet names them)."""
+        rows = await self._db.fetchall(
+            "SELECT DISTINCT space_id FROM space_posts"
+            " WHERE linked_highlight_id=? AND author=?"
+            " AND type='highlight_share' AND deleted=0 ORDER BY space_id",
+            (highlight_id, author),
+        )
+        return [str(r["space_id"]) for r in rows]
 
     async def get(self, post_id: str) -> tuple[str, Post] | None:
         """Return ``(space_id, post)`` — space id lives only on the row."""

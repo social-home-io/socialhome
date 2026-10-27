@@ -9521,6 +9521,39 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_69 reaction totals gate in place ✓")
+    # v_70 — a highlight taken away stays away. A narrowing waits for every
+    # household it takes people from to be at v_70; the OURS round-trip above
+    # proves every pair is. ``highlight-audience`` narrows a's highlight away
+    # from c and widens it back.
+    if int(_Cap.MIN_FOR_HIGHLIGHT_AUDIENCE_CHANGE) != 70 or _OURS < 70:
+        failures.append(
+            "MIN_FOR_HIGHLIGHT_AUDIENCE_CHANGE moved off v_70 (or OURS fell "
+            "below it) — a narrowing could reach households that forget it"
+        )
+    else:
+        print("  v_70 highlight audience change gate in place ✓")
+    hla = state.get("highlight_audience")
+    if hla:
+        stamps = _rows(
+            "c",
+            "SELECT removed_at, audience_at FROM highlight_stamps"
+            " WHERE highlight_id = ?",
+            (hla["highlight_id"],),
+        )
+        if hla["caption"] not in _highlight_captions(state, "c"):
+            failures.append(
+                "highlight-audience: c lost a's re-widened highlight "
+                f"({hla['caption']!r})"
+            )
+        elif not stamps or not stamps[0][0] or not stamps[0][1] or not (
+            stamps[0][1] > stamps[0][0]
+        ):
+            failures.append(
+                "highlight-audience: c's stamp doesn't order the re-widen after "
+                f"the removal ({stamps!r})"
+            )
+        else:
+            print("  v_70 c removed, remembered and re-got a's highlight ✓")
     if state.get("gfs") and _gfs_alive(state):
         s, info = _request(f"http://127.0.0.1:{GFS_PORT}/gfs/info")
         caps = (info or {}).get("capabilities") or {} if s == 200 else {}
@@ -12378,6 +12411,123 @@ def cmd_sync_https_fallback() -> None:
 
 
 @_offline_step
+def cmd_highlight_audience() -> None:
+    """Change for all of today (v_70, #1191): a narrows today's highlight to
+    b's household — c deletes it and remembers the removal; a frame posted
+    under the narrowed audience reaches b only; widening back gives c the
+    whole day again.
+
+    Ends where it started (``all_paired``), so later steps that post a's
+    frames for everyone (``replay``) still join today's highlight.
+    """
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' first")
+    a = state["instances"]["a"]
+    b = state["instances"]["b"]
+    a_url = f"http://127.0.0.1:{a['port']}"
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+    def _todays(label: str) -> dict | None:
+        info = state["instances"][label]
+        s, hls = _request(
+            f"http://127.0.0.1:{info['port']}/api/highlights", token=info["token"]
+        )
+        _must(f"highlights({label})", s, hls)
+        for row in hls:
+            h = row["highlight"]
+            if h["author_user_id"] == a["user_id"] and h["highlight_date"] == today:
+                return row
+        return None
+
+    mine = _todays("a")
+    if mine is None or mine["highlight"].get("audience_kind") != "all_paired":
+        s, resp = _request(
+            f"{a_url}/api/highlights/frames",
+            token=a["token"],
+            method="POST",
+            body={
+                "media_url": _upload_demo_image(a_url, token=a["token"], label="hl-aud"),
+                "frame_type": "image",
+                "caption_text": "[a] highlight-audience first frame",
+                "audience_kind": "all_paired",
+            },
+        )
+        _must("highlight-audience first frame(a)", s, resp, ok=(201,))
+        mine = _todays("a")
+    if mine is None:
+        raise SystemExit("highlight-audience: a has no highlight today")
+    hid = mine["highlight"]["id"]
+
+    def _wait(what: str, check, bound: float = 30.0) -> None:
+        deadline = time.monotonic() + bound
+        while time.monotonic() < deadline:
+            if check():
+                print(f"  {what} ✓")
+                return
+            time.sleep(1)
+        raise SystemExit(f"highlight-audience: {what} — not within {bound:.0f}s")
+
+    _wait("c holds a's highlight before the change", lambda: _todays("c") is not None)
+
+    # 1. Narrow to b's household: c drops out and keeps the removal.
+    s, resp = _request(
+        f"{a_url}/api/highlights/{hid}/audience",
+        token=a["token"],
+        method="PATCH",
+        body={"audience_kind": "households", "audience": [b["instance_id"]]},
+    )
+    _must("highlight-audience narrow(a)", s, resp, ok=(200,))
+    _wait("c deleted it after the narrowing", lambda: _todays("c") is None)
+    _wait(
+        "c remembers the removal (highlight_stamps.removed_at)",
+        lambda: bool(
+            _rows(
+                "c",
+                "SELECT 1 FROM highlight_stamps WHERE highlight_id = ?"
+                " AND removed_at IS NOT NULL",
+                (hid,),
+            )
+        ),
+    )
+
+    # 2. A frame under the narrowed audience reaches b only.
+    caption = f"[a] highlight-audience b only {time.time_ns()}"
+    s, resp = _request(
+        f"{a_url}/api/highlights/frames",
+        token=a["token"],
+        method="POST",
+        body={
+            "media_url": _upload_demo_image(a_url, token=a["token"], label="hl-aud-b"),
+            "frame_type": "image",
+            "caption_text": caption,
+            "audience_kind": "households",
+            "audience": [b["instance_id"]],
+        },
+    )
+    _must("highlight-audience narrowed frame(a)", s, resp, ok=(201,))
+    _wait("b got the narrowed frame", lambda: caption in _highlight_captions(state, "b"))
+    if _todays("c") is not None:
+        raise SystemExit("highlight-audience: c holds the highlight after narrowing")
+    print("  c never got the narrowed frame ✓")
+
+    # 3. Widen back: c gets the whole day again, the new frame included.
+    s, resp = _request(
+        f"{a_url}/api/highlights/{hid}/audience",
+        token=a["token"],
+        method="PATCH",
+        body={"audience_kind": "all_paired", "audience": []},
+    )
+    _must("highlight-audience widen(a)", s, resp, ok=(200,))
+    _wait(
+        "c holds the whole day again after widening",
+        lambda: caption in _highlight_captions(state, "c"),
+    )
+    state["highlight_audience"] = {"highlight_id": hid, "caption": caption}
+    _save(state)
+    print("highlight-audience: ok")
+
+
 def cmd_replay() -> None:
     """Federation outbox redelivery — kill Carol, post from Alpha, restart.
 
@@ -19032,6 +19182,12 @@ def main() -> None:
         # d holds nothing. Late in the chain: it seats d as a follower in
         # the space the earlier steps assert member counts on.
         cmd_space_chat()
+        # ``highlight-audience`` (v_70): a narrows today's highlight to b's
+        # household — c deletes it and remembers the removal, a narrowed
+        # frame reaches b only — then widens back and c gets the day again.
+        # Before ``replay``: it ends at all_paired, which replay's frame
+        # names.
+        cmd_highlight_audience()
         # ``replay`` exercises the §24 outbox redelivery path by
         # killing Carol, posting a highlight from Alpha, restarting
         # Carol, and asserting the queued envelope flushes after the

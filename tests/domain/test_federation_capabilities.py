@@ -8,7 +8,7 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 69
+    assert fc.OURS == 70
 
 
 def test_local_community_area_capability_threshold():
@@ -32,6 +32,7 @@ def test_local_community_area_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.features_missing_below(59) == [
         "Names for a space's followers",
@@ -44,6 +45,7 @@ def test_local_community_area_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.features_missing_below(60) == [
         "Names for new followers right away",
@@ -55,6 +57,7 @@ def test_local_community_area_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.features_missing_below(61) == [
         "Public moments encrypted from the GFS",
@@ -65,6 +68,7 @@ def test_local_community_area_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.features_missing_below(62) == [
         "Photos and videos in public moments",
@@ -74,6 +78,7 @@ def test_local_community_area_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.features_missing_below(63) == [
         "Time-stamped public moments",
@@ -82,6 +87,7 @@ def test_local_community_area_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.features_missing_below(64) == [
         "Choose how long followers keep your moments",
@@ -89,24 +95,32 @@ def test_local_community_area_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.features_missing_below(65) == [
         "Deletes reach every copy of a moment",
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.features_missing_below(66) == [
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.features_missing_below(67) == [
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
-    assert fc.features_missing_below(68) == ["Everyone sees the full reaction count"]
-    assert fc.features_missing_below(69) == []
+    assert fc.features_missing_below(68) == [
+        "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
+    ]
+    assert fc.features_missing_below(69) == ["A highlight taken away stays away"]
+    assert fc.features_missing_below(70) == []
     assert fc.CAPABILITY_FEATURE_KEYS[59] == "local_communities"
 
 
@@ -133,6 +147,7 @@ def test_member_picture_reset_sync_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.features_missing_below(58) == [
         "Local communities",
@@ -146,6 +161,7 @@ def test_member_picture_reset_sync_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[58] == "synced_picture_resets"
 
@@ -173,6 +189,7 @@ def test_multi_gfs_publish_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert "Posting to every GFS a space is listed on" not in (
         fc.features_missing_below(57)
@@ -204,6 +221,7 @@ def test_sync_series_rows_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[56] == "synced_recurring_events"
 
@@ -230,6 +248,7 @@ def test_space_chat_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.features_missing_below(55) == [
         "Recurring events in space catch-up",
@@ -246,6 +265,7 @@ def test_space_chat_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.space_features_missing_below(54) == [
         "Chat in spaces",
@@ -283,6 +303,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.features_missing_below(54) == [
         "Chat in spaces",
@@ -300,6 +321,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
 
 
@@ -329,6 +351,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.features_missing_below(53) == [
         "Turning on the GFS fallback for an existing connection",
@@ -347,6 +370,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
 
 
@@ -375,6 +399,7 @@ def test_forwarded_invite_link_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
 
 
@@ -422,6 +447,7 @@ def test_space_authority_rotation_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
@@ -447,6 +473,7 @@ def test_space_authority_rotation_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
 
 
@@ -490,6 +517,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
 
 
@@ -1019,6 +1047,7 @@ def test_forwarded_role_change_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
 
 
@@ -1057,6 +1086,7 @@ def test_host_sequenced_pages_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
 
 
@@ -1089,6 +1119,7 @@ def test_member_gfs_publish_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
 
 
@@ -1120,6 +1151,7 @@ def test_strict_member_publish_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
 
 
@@ -1151,6 +1183,7 @@ def test_private_channels_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
 
 
@@ -1225,6 +1258,7 @@ _PINNED_FEATURE_KEYS = {
     67: "routed_moment_reactions",
     68: "gfs_moment_reactions",
     69: "moment_reaction_counts",
+    70: "highlight_audience_change",
 }
 
 
@@ -1280,6 +1314,7 @@ def test_space_author_profile_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.space_feature_keys_missing_below(59) == ["follower_author_names"]
     assert fc.CAPABILITY_FEATURE_KEYS[60] == "follower_author_names"
@@ -1304,6 +1339,7 @@ def test_follower_profile_bundle_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[61] == "follower_names_on_join"
 
@@ -1326,6 +1362,7 @@ def test_encrypted_public_moments_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[62] == "encrypted_public_moments"
 
@@ -1346,6 +1383,7 @@ def test_encrypted_moment_media_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[63] == "public_moment_media"
 
@@ -1376,6 +1414,7 @@ def test_long_lived_moments_capability_threshold():
         "Reactions reach authors further away",
         "Reactions reach authors you follow through a GFS",
         "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[65] == "follower_moment_retention"
 
@@ -1431,5 +1470,22 @@ def test_moment_reaction_counts_capability_threshold():
     assert fc.FederationCapability.MIN_FOR_MOMENT_REACTION_COUNTS not in (
         fc.SPACE_SCOPED_MIN_VERSIONS
     )
-    assert fc.features_missing_below(68) == ["Everyone sees the full reaction count"]
+    assert fc.features_missing_below(68) == [
+        "Everyone sees the full reaction count",
+        "A highlight taken away stays away",
+    ]
     assert fc.CAPABILITY_FEATURE_KEYS[69] == "moment_reaction_counts"
+
+
+def test_highlight_audience_change_capability_threshold():
+    """v_70 — a highlight taken away stays away: the receiver remembers a
+    removal and the newest audience by the author's ``occurred_at``; a
+    narrowing waits for every household it takes people from. Labelled, not
+    space-scoped."""
+    assert fc.FederationCapability.MIN_FOR_HIGHLIGHT_AUDIENCE_CHANGE == 70
+    assert fc.FederationCapability.MIN_FOR_HIGHLIGHT_AUDIENCE_CHANGE <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_HIGHLIGHT_AUDIENCE_CHANGE not in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert fc.features_missing_below(69) == ["A highlight taken away stays away"]
+    assert fc.CAPABILITY_FEATURE_KEYS[70] == "highlight_audience_change"

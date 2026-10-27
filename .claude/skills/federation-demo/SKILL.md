@@ -565,6 +565,16 @@ That single command runs the full sequence:
    ``replay``: it seats **d** as a follower in **b**'s space, which the
    earlier steps assert member counts on.
 
+9z. ``highlight-audience`` (v_70, "Change for all of today") — **a**
+   narrows today's highlight to **b**'s household
+   (``PATCH /api/highlights/{id}/audience``): **c** deletes it and keeps a
+   ``highlight_stamps.removed_at`` row; a frame **a** posts under the
+   narrowed audience reaches **b** and never **c**; widening back to all
+   paired gives **c** the whole day again (``audience_at`` later than
+   ``removed_at``). ``verify`` pins ``MIN_FOR_HIGHLIGHT_AUDIENCE_CHANGE`` =
+   70 and re-checks **c**'s highlight and stamp. In ``all`` it runs right
+   before ``replay`` and ends at ``all_paired``, which replay's frame names.
+
 10. ``replay`` — outbox redelivery resilience. Kills **c**, has **a**
    post one ``audience_kind=all_paired`` highlight while **c** is
    offline, restarts **c**, waits across the second outbox-backoff

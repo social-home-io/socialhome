@@ -57,6 +57,45 @@ class HighlightAudienceMismatchError(CodedError):
     )
 
 
+class HighlightNotTodayError(CodedError):
+    """Only today's highlight can change who sees it.
+
+    An earlier day's highlight keeps the audience it was posted with: its
+    frames are history, and re-sending a whole archive to newly added
+    households is not what "change for all of today" promises.
+    """
+
+    status = 409
+    code = "HIGHLIGHT_NOT_TODAY"
+    detail = "Only today's highlight can change who sees it."
+
+
+class HighlightAudiencePeerTooOldError(CodedError):
+    """A narrowing would remove people at a household that can't yet be
+    trusted to keep them out (proto < v_70).
+
+    An older household applies a removal but keeps no record of it, so a
+    frame envelope still in flight to it — or a re-sent older audience —
+    would put the highlight back. Widening needs no such guarantee and is
+    never refused for it.
+    """
+
+    status = 409
+    code = "HIGHLIGHT_AUDIENCE_PEER_TOO_OLD"
+    detail = (
+        "Some paired households need to update Social Home before people "
+        "there can be removed from today's highlight."
+    )
+
+
+class HighlightAudienceEmptyError(CodedError):
+    """``users`` audience with nobody picked — it would reach no one."""
+
+    status = 422
+    code = "HIGHLIGHT_AUDIENCE_EMPTY"
+    detail = "Pick at least one person."
+
+
 def same_audience(
     kind_a: HighlightAudience,
     ids_a: tuple[str, ...],
@@ -117,6 +156,32 @@ class Highlight:
     #: ISO-8601 UTC of the original publish call. Persisted so the SPA
     #: can show "published 12 minutes ago" without an extra GFS round-trip.
     public_published_at: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class HighlightStamp:
+    """What a receiving household remembers about a remote highlight's
+    audience (v_70, migration 0128): the author's ``occurred_at`` of the
+    newest audience it applied and of the newest removal. Both stamps are
+    the author household's clock, compared only with each other."""
+
+    highlight_id: str
+    author_user_id: str
+    expires_at: str
+    audience_at: str | None = None
+    removed_at: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class HighlightReach:
+    """Where else the author's highlight can be opened, outside its
+    audience — what the "Change for all of today" sheet must say before a
+    narrowing (#1191 review): a public link, a share in the household feed,
+    shares in spaces (``(space_id, name)``)."""
+
+    published: bool
+    shared_household: bool
+    shared_spaces: tuple[tuple[str, str], ...] = ()
 
 
 def audience_label(highlight: Highlight, viewer_user_id: str) -> HighlightAudienceLabel:

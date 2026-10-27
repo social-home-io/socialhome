@@ -1070,7 +1070,24 @@ from __future__ import annotations
 #:   showing the reactions it holds; an older GFS proves no capability and
 #:   gets nothing (its followers keep their own counts). Labelled "Everyone
 #:   sees the full reaction count".
-OURS: int = 69
+#: * **v_70** (2026-10-26) — **a highlight taken away stays away**
+#:   ("Change for all of today", #1191). The author can change who sees
+#:   today's highlight; households that drop out get ``HIGHLIGHT_DELETED``
+#:   (now with ``expires_at``), households that stay with a new slice get
+#:   ``HIGHLIGHT_CREATED`` re-sent. A v_70 receiver remembers both by the
+#:   author's ``occurred_at`` (``highlight_stamps``, migration 0128): a
+#:   CREATED / FRAME_APPENDED no newer than a removal is refused — also for
+#:   a highlight it never held — an older re-sent audience never replaces a
+#:   newer one, and a removal older than the newest audience is stale. The
+#:   sender drops a household's queued envelopes for the highlight before a
+#:   removal (outbox key prefix), which also protects older receivers from
+#:   outbox reordering. **Fallback**: a change that takes people away from a
+#:   household below v_70 (it drops out, or keeps fewer of its people) is
+#:   refused with 409 ``HIGHLIGHT_AUDIENCE_PEER_TOO_OLD`` — the author waits
+#:   for that household to update; widening is sent to every version (an
+#:   older household simply gets the frames). Labelled "A highlight taken
+#:   away stays away".
+OURS: int = 70
 
 
 class FederationCapability:
@@ -1620,6 +1637,13 @@ class FederationCapability:
     #: and the follower's declared ``ops``, never on ``peer_supports``.
     MIN_FOR_MOMENT_REACTION_COUNTS = 69
 
+    #: v_70 — a highlight taken away stays away: the receiver remembers a
+    #: removal and the newest audience by the author's ``occurred_at``
+    #: (``highlight_stamps``). A change of today's highlight audience that
+    #: takes people away from a household below this version is refused
+    #: (409 ``HIGHLIGHT_AUDIENCE_PEER_TOO_OLD``); widening is never gated.
+    MIN_FOR_HIGHLIGHT_AUDIENCE_CHANGE = 70
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1881,6 +1905,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_MOMENT_REACTION_COUNTS,
         "Everyone sees the full reaction count",
     ),
+    (
+        FederationCapability.MIN_FOR_HIGHLIGHT_AUDIENCE_CHANGE,
+        "A highlight taken away stays away",
+    ),
 ]
 
 
@@ -1961,6 +1989,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_ROUTED_MOMENT_REACTIONS: "routed_moment_reactions",
     FederationCapability.MIN_FOR_GFS_MOMENT_REACTIONS: "gfs_moment_reactions",
     FederationCapability.MIN_FOR_MOMENT_REACTION_COUNTS: "moment_reaction_counts",
+    FederationCapability.MIN_FOR_HIGHLIGHT_AUDIENCE_CHANGE: "highlight_audience_change",
 }
 
 

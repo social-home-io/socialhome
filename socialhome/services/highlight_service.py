@@ -26,14 +26,17 @@ and tries to mutate it gets :class:`HighlightForbiddenError`.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import orjson
 
 from ..domain.events import (
+    HighlightAudienceChanged,
     HighlightFrameAdded,
     HighlightFrameReactionChanged,
     HighlightFrameRemoved,
@@ -43,10 +46,14 @@ from ..domain.events import (
 from ..domain.highlight import (
     Highlight,
     HighlightAudience,
+    HighlightAudienceEmptyError,
     HighlightAudienceMismatchError,
+    HighlightAudiencePeerTooOldError,
     HighlightFrame,
     HighlightFrameReplySnapshot,
     HighlightFrameType,
+    HighlightNotTodayError,
+    HighlightReach,
     same_audience,
 )
 from ..domain.post import Post, PostType
@@ -89,10 +96,19 @@ class HighlightFrameLimitError(ValueError):
     """The author's per-day frame cap has been reached."""
 
 
+#: ``(old_kind, old_ids, new_kind, new_ids) -> may it change?`` — see
+#: :meth:`HighlightService.attach_audience_gate`.
+AudienceChangeGate = Callable[
+    [str, tuple[str, ...], str, tuple[str, ...]], Awaitable[bool]
+]
+
+
 class HighlightService:
     """Personal highlights: create / view / react / share / expire."""
 
     __slots__ = (
+        "_audience_gate",
+        "_author_locks",
         "_bus",
         "_highlights",
         "_media_dir",
@@ -127,6 +143,25 @@ class HighlightService:
         self._posts = post_repo
         self._space_posts = space_post_repo
         self._spaces = space_repo
+        # One lock per local author: appending a frame and changing today's
+        # audience each read the audience, write, and publish the event the
+        # federation outbound addresses from it — interleaved, a frame would
+        # go out under the audience it was not stored under (#1191 review).
+        # Bounded by the household's own members; never a remote author.
+        self._author_locks: dict[str, asyncio.Lock] = {}
+        self._audience_gate: AudienceChangeGate | None = None
+
+    def attach_audience_gate(self, gate: AudienceChangeGate) -> None:
+        """Wire the check a narrowing must pass before it is stored: every
+        household it removes people from understands the v_70 removal
+        rules (``HighlightFederationOutbound.may_change_audience``)."""
+        self._audience_gate = gate
+
+    def _author_lock(self, author_user_id: str) -> asyncio.Lock:
+        lock = self._author_locks.get(author_user_id)
+        if lock is None:
+            lock = self._author_locks[author_user_id] = asyncio.Lock()
+        return lock
 
     # ── Read gate ──────────────────────────────────────────────────────
 
@@ -269,62 +304,164 @@ class HighlightService:
         highlight_date = now.strftime("%Y-%m-%d")
         expires_at = (now + timedelta(days=prefs.retention_days)).isoformat()
 
-        highlight = await self._highlights.find_or_create_today(
-            author_user_id=author_user_id,
-            audience_kind=kind,
-            audience=ids,
-            highlight_date=highlight_date,
-            expires_at=expires_at,
-        )
-        # A day's frames share one audience. A frame asked for different
-        # people never joins (and so silently widens or narrows) today's
-        # highlight — refused before anything is written.
-        if explicit and not same_audience(
-            highlight.audience_kind, highlight.audience, kind, ids
-        ):
-            raise HighlightAudienceMismatchError(
-                params={
-                    "audience_kind": highlight.audience_kind.value,
-                    "audience_count": len(highlight.audience),
-                }
-            )
-
-        # Cap frames per highlight per day.
-        existing = await self._highlights.list_frames(highlight.id)
-        is_first = len(existing) == 0
-        if len(existing) >= MAX_FRAMES_PER_HIGHLIGHT:
-            raise HighlightFrameLimitError(
-                f"highlight already has {MAX_FRAMES_PER_HIGHLIGHT} frames today"
-            )
-
-        frame = await self._highlights.append_frame(
-            highlight_id=highlight.id,
-            frame_type=ftype,
-            media_url=media_url,
-            caption_text=caption_text,
-            caption_emoji=caption_emoji,
-            duration_ms=duration_ms,
-        )
-
-        await self._bus.publish(
-            HighlightFrameAdded(
-                highlight_id=highlight.id,
-                frame_id=frame.id,
+        # Read → append → publish under the author's lock, so the event
+        # carries the audience the frame is stored under (see
+        # :meth:`change_audience`).
+        async with self._author_lock(author_user_id):
+            highlight = await self._highlights.find_or_create_today(
                 author_user_id=author_user_id,
-                highlight_date=highlight.highlight_date,
-                sequence=frame.sequence,
-                is_first_frame=is_first,
-                audience_kind=highlight.audience_kind.value,
-                audience=highlight.audience,
-                frame_type=ftype.value,
+                audience_kind=kind,
+                audience=ids,
+                highlight_date=highlight_date,
+                expires_at=expires_at,
+            )
+            # A day's frames share one audience. A frame asked for different
+            # people never joins (and so silently widens or narrows) today's
+            # highlight — refused before anything is written.
+            if explicit and not same_audience(
+                highlight.audience_kind, highlight.audience, kind, ids
+            ):
+                raise HighlightAudienceMismatchError(
+                    params={
+                        "audience_kind": highlight.audience_kind.value,
+                        "audience_count": len(highlight.audience),
+                    }
+                )
+
+            # Cap frames per highlight per day.
+            existing = await self._highlights.list_frames(highlight.id)
+            is_first = len(existing) == 0
+            if len(existing) >= MAX_FRAMES_PER_HIGHLIGHT:
+                raise HighlightFrameLimitError(
+                    f"highlight already has {MAX_FRAMES_PER_HIGHLIGHT} frames today"
+                )
+
+            frame = await self._highlights.append_frame(
+                highlight_id=highlight.id,
+                frame_type=ftype,
                 media_url=media_url,
                 caption_text=caption_text,
                 caption_emoji=caption_emoji,
                 duration_ms=duration_ms,
-                expires_at=highlight.expires_at or expires_at,
             )
-        )
+
+            await self._bus.publish(
+                HighlightFrameAdded(
+                    highlight_id=highlight.id,
+                    frame_id=frame.id,
+                    author_user_id=author_user_id,
+                    highlight_date=highlight.highlight_date,
+                    sequence=frame.sequence,
+                    is_first_frame=is_first,
+                    audience_kind=highlight.audience_kind.value,
+                    audience=highlight.audience,
+                    frame_type=ftype.value,
+                    media_url=media_url,
+                    caption_text=caption_text,
+                    caption_emoji=caption_emoji,
+                    duration_ms=duration_ms,
+                    expires_at=highlight.expires_at or expires_at,
+                )
+            )
         return highlight, frame
+
+    # ── Change for all of today (owner decision 1) ─────────────────────
+
+    async def change_audience(
+        self,
+        *,
+        highlight_id: str,
+        actor_user_id: str,
+        audience_kind: HighlightAudience | str,
+        audience: tuple[str, ...] | list[str],
+    ) -> Highlight:
+        """Point today's highlight — every frame of it — at a new audience.
+
+        Author only, today's highlight only (the UTC day the composer
+        appends to). Publishes :class:`HighlightAudienceChanged` with the
+        audience before and after and the day's frames; the federation
+        outbound turns that into removals for households that drop out and
+        the day's frames for households that are new. Local viewers outside
+        the new audience lose it at read time (``_IN_AUDIENCE_SQL``).
+        People who already watched keep what they saw — nothing can undo a
+        view. The same audience again is a no-op (nothing published).
+        """
+        kind = (
+            audience_kind
+            if isinstance(audience_kind, HighlightAudience)
+            else HighlightAudience(audience_kind)
+        )
+        # Dedup, keep the order picked; all_paired names nobody.
+        ids = (
+            ()
+            if kind is HighlightAudience.ALL_PAIRED
+            else tuple(dict.fromkeys(i for i in audience if i))
+        )
+        # Under the author's lock (the only one who may change it): a frame
+        # being appended right now is addressed either before the change or
+        # after it, never with the audience the change just replaced.
+        async with self._author_lock(actor_user_id):
+            highlight = await self._require_readable(highlight_id, actor_user_id)
+            if highlight.author_user_id != actor_user_id:
+                raise HighlightForbiddenError(
+                    "only the author can change who sees their highlight"
+                )
+            if highlight.highlight_date != datetime.now(UTC).strftime("%Y-%m-%d"):
+                raise HighlightNotTodayError()
+            if kind is HighlightAudience.USERS and not ids:
+                raise HighlightAudienceEmptyError()
+            if same_audience(highlight.audience_kind, highlight.audience, kind, ids):
+                return highlight
+            if self._audience_gate is not None and not await self._audience_gate(
+                highlight.audience_kind.value, highlight.audience, kind.value, ids
+            ):
+                raise HighlightAudiencePeerTooOldError()
+            updated = await self._highlights.set_audience(highlight.id, kind, ids)
+            if updated is None:  # pragma: no cover — deleted mid-request
+                raise HighlightNotFoundError(NOT_FOUND_MESSAGE)
+            frames = await self._highlights.list_frames(highlight.id)
+            await self._bus.publish(
+                HighlightAudienceChanged(
+                    highlight_id=highlight.id,
+                    author_user_id=highlight.author_user_id,
+                    highlight_date=highlight.highlight_date,
+                    expires_at=highlight.expires_at or "",
+                    old_audience_kind=highlight.audience_kind.value,
+                    old_audience=highlight.audience,
+                    audience_kind=kind.value,
+                    audience=ids,
+                    frames=tuple(frames),
+                )
+            )
+        return updated
+
+    async def reach_of(
+        self, *, highlight_id: str, actor_user_id: str
+    ) -> tuple[Highlight, HighlightReach]:
+        """Author only: the highlight and where else the highlight opens, outside its audience
+        — a public link, a live share in the household feed or in spaces.
+        A narrowing doesn't touch any of these; the change sheet says so."""
+        highlight = await self._require_readable(highlight_id, actor_user_id)
+        if highlight.author_user_id != actor_user_id:
+            raise HighlightForbiddenError("only the author can see where it is shared")
+        household = (
+            await self._posts.has_highlight_share(highlight.id, actor_user_id)
+            if self._posts is not None
+            else False
+        )
+        spaces: list[tuple[str, str]] = []
+        if self._space_posts is not None and self._spaces is not None:
+            for space_id in await self._space_posts.list_highlight_share_spaces(
+                highlight.id, actor_user_id
+            ):
+                space = await self._spaces.get(space_id)
+                if space is not None and not space.dissolved:
+                    spaces.append((space_id, space.name))
+        return highlight, HighlightReach(
+            published=highlight.public_gfs_id is not None,
+            shared_household=household,
+            shared_spaces=tuple(spaces),
+        )
 
     # ── View / react ───────────────────────────────────────────────────
 

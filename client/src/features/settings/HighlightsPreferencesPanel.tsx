@@ -5,9 +5,9 @@
  * Instant save, like a space's settings: every pick is written at once
  * (``preferences_json.highlights``, no migration) and a status line says
  * whether it took. "Who sees a new highlight" saves the kind AND the
- * chosen household / people ids, so a new day's first frame — in the full
- * composer and in quick share — starts from exactly them. The composers
- * still send the audience they show with every frame (#1159).
+ * chosen household / people ids, so a new day's first frame in the composer
+ * starts from exactly them ("chosen" with nobody picked: the composer asks).
+ * The composer still sends the audience it shows with every frame (#1159).
  */
 import { useEffect } from 'preact/hooks'
 import { signal, useSignal } from '@preact/signals'

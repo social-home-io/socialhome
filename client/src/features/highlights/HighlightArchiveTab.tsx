@@ -126,6 +126,7 @@ export default function HighlightArchiveTab() {
       ws.on('highlight.frame_added',   () => { void fetchInbox(false) }),
       ws.on('highlight.frame_removed', () => { void fetchInbox(false) }),
       ws.on('highlight.removed',       () => { void fetchInbox(false) }),
+      ws.on('highlight.audience_changed', () => { void fetchInbox(false) }),
     ]
     return () => { dispose.forEach(d => d()) }
   }, [])

@@ -66,6 +66,9 @@ class AbstractOutboxRepo(Protocol):
     ) -> str | None: ...
 
     async def drop_superseded(self, instance_id: str, supersede_key: str) -> int: ...
+    async def drop_pending_with_key_prefix(
+        self, instance_id: str, prefix: str
+    ) -> int: ...
     async def list_due(self, limit: int = 50) -> list[OutboxEntry]: ...
     async def mark_delivered(self, entry_id: str) -> None: ...
     async def mark_failed(self, entry_id: str) -> None: ...
@@ -230,6 +233,20 @@ class SqliteOutboxRepo:
                 (instance_id, prefix, prefix + "\uffff"),
                 default=0,
             )
+        )
+
+    async def drop_pending_with_key_prefix(self, instance_id: str, prefix: str) -> int:
+        """Delete ``instance_id``'s PENDING rows whose key starts with
+        *prefix*; return how many (a range over
+        ``idx_federation_outbox_supersede``, read first like
+        :meth:`drop_superseded`)."""
+        if not await self.count_pending_with_key_prefix(instance_id, prefix):
+            return 0
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM federation_outbox WHERE instance_id=?"
+            " AND supersede_key >= ? AND supersede_key < ?"
+            " AND status='pending'",
+            (instance_id, prefix, prefix + "\uffff"),
         )
 
     async def drop_superseded(self, instance_id: str, supersede_key: str) -> int:

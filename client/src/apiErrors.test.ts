@@ -19,6 +19,21 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe("Today's highlight is for other people. New frames go to the same people as today's highlight.")
   })
 
+  it('translates the two refusals of changing today\'s highlight audience', () => {
+    expect(apiErrorMessage(409, '/api/highlights/h1/audience', {
+      code: 'HIGHLIGHT_NOT_TODAY', detail: "Only today's highlight can change who sees it.",
+    })).toBe("Only today's highlight can change who sees it. An earlier day keeps its people.")
+    expect(apiErrorMessage(422, '/api/highlights/h1/audience', {
+      code: 'HIGHLIGHT_AUDIENCE_EMPTY', detail: 'Pick at least one person.',
+    })).toBe('Pick at least one household or person.')
+    expect(apiErrorMessage(409, '/api/highlights/h1/audience', {
+      code: 'HIGHLIGHT_AUDIENCE_PEER_TOO_OLD', detail: 'Some paired households need to update.',
+    })).toBe(
+      "Some paired households need to update Social Home before you can take today's highlight away"
+      + ' from people there. Adding people works now.',
+    )
+  })
+
   it('translates the two refusals of saving a moment', () => {
     expect(apiErrorMessage(422, '/api/moments/m1/save', {
       code: 'OWN_MOMENT', detail: 'Your own moments already stay in your archive.',

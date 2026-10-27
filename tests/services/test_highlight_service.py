@@ -10,14 +10,18 @@ import pytest
 
 from socialhome.domain.errors import InvalidMediaRefError
 from socialhome.domain.events import (
+    HighlightAudienceChanged,
     HighlightFrameAdded,
     HighlightFrameReactionChanged,
     HighlightFrameViewed,
 )
 from socialhome.domain.highlight import (
     HighlightAudience,
+    HighlightAudienceEmptyError,
     HighlightAudienceMismatchError,
+    HighlightAudiencePeerTooOldError,
     HighlightFrameType,
+    HighlightNotTodayError,
 )
 from socialhome.domain.post import Post, PostType
 from socialhome.infrastructure.event_bus import EventBus
@@ -937,3 +941,207 @@ async def test_concurrent_first_frames_never_fail_with_a_500(db, svc):
     )
     assert all(isinstance(r, tuple) for r in same), same
     assert same[0][0].id == same[1][0].id
+
+
+# ─── Change for all of today (owner decision 1) ─────────────────────────
+
+
+async def _audience_changes(bus) -> list:
+    captured: list[HighlightAudienceChanged] = []
+    bus.subscribe(HighlightAudienceChanged, lambda e: captured.append(e))
+    return captured
+
+
+async def test_the_author_changes_todays_audience_for_every_frame(db, svc):
+    service, bus = svc
+    await _seed_user(db, "u1", "pascal")
+    highlight, first = await _first_frame(service, HighlightAudience.ALL_PAIRED)
+    _, second = await _first_frame(service, HighlightAudience.ALL_PAIRED)
+    captured = await _audience_changes(bus)
+
+    changed = await service.change_audience(
+        highlight_id=highlight.id,
+        actor_user_id="u1",
+        audience_kind=HighlightAudience.USERS,
+        audience=("u-anna",),
+    )
+    assert changed.audience_kind is HighlightAudience.USERS
+    assert changed.audience == ("u-anna",)
+    stored = await service._highlights.get_highlight(highlight.id)
+    assert stored.audience == ("u-anna",)
+    [event] = captured
+    assert (event.old_audience_kind, event.old_audience) == ("all_paired", ())
+    assert (event.audience_kind, event.audience) == ("users", ("u-anna",))
+    assert [f.id for f in event.frames] == [first.id, second.id]
+    assert event.highlight_date == highlight.highlight_date
+    assert event.expires_at == highlight.expires_at
+    # Later frames name the new audience and join today's highlight.
+    again, frame = await _first_frame(service, HighlightAudience.USERS, ("u-anna",))
+    assert again.id == highlight.id and frame.sequence == 3
+
+
+async def test_all_paired_drops_picked_ids(db, svc):
+    service, _ = svc
+    await _seed_user(db, "u1", "pascal")
+    highlight, _ = await _first_frame(service, HighlightAudience.USERS, ("u-anna",))
+    changed = await service.change_audience(
+        highlight_id=highlight.id,
+        actor_user_id="u1",
+        audience_kind="all_paired",
+        audience=("u-anna",),
+    )
+    assert changed.audience_kind is HighlightAudience.ALL_PAIRED
+    assert changed.audience == ()
+
+
+async def test_the_same_audience_changes_nothing(db, svc):
+    service, bus = svc
+    await _seed_user(db, "u1", "pascal")
+    highlight, _ = await _first_frame(service, HighlightAudience.USERS, ("a", "b"))
+    captured = await _audience_changes(bus)
+    same = await service.change_audience(
+        highlight_id=highlight.id,
+        actor_user_id="u1",
+        audience_kind=HighlightAudience.USERS,
+        audience=("b", "a"),
+    )
+    assert same.audience == ("a", "b")
+    assert captured == []
+
+
+async def test_nobody_picked_is_refused(db, svc):
+    service, bus = svc
+    await _seed_user(db, "u1", "pascal")
+    highlight, _ = await _first_frame(service, HighlightAudience.ALL_PAIRED)
+    captured = await _audience_changes(bus)
+    with pytest.raises(HighlightAudienceEmptyError) as exc:
+        await service.change_audience(
+            highlight_id=highlight.id,
+            actor_user_id="u1",
+            audience_kind=HighlightAudience.USERS,
+            audience=(),
+        )
+    assert exc.value.status == 422
+    assert captured == []
+    # "Your household only" is households with none listed — allowed.
+    own = await service.change_audience(
+        highlight_id=highlight.id,
+        actor_user_id="u1",
+        audience_kind=HighlightAudience.HOUSEHOLDS,
+        audience=(),
+    )
+    assert own.audience_kind is HighlightAudience.HOUSEHOLDS
+
+
+async def test_only_the_author_changes_the_audience(db, svc):
+    service, bus = svc
+    await _seed_user(db, "u1", "pascal")
+    await _seed_user(db, "u2", "anna")
+    await _seed_user(db, "u3", "lena")
+    highlight, _ = await _first_frame(service, HighlightAudience.USERS, ("u2",))
+    captured = await _audience_changes(bus)
+    # Anna can read it: she is told no. Lena can't: the unknown-id 404.
+    with pytest.raises(HighlightForbiddenError):
+        await service.change_audience(
+            highlight_id=highlight.id,
+            actor_user_id="u2",
+            audience_kind=HighlightAudience.ALL_PAIRED,
+            audience=(),
+        )
+    with pytest.raises(HighlightNotFoundError):
+        await service.change_audience(
+            highlight_id=highlight.id,
+            actor_user_id="u3",
+            audience_kind=HighlightAudience.ALL_PAIRED,
+            audience=(),
+        )
+    stored = await service._highlights.get_highlight(highlight.id)
+    assert stored.audience == ("u2",)
+    assert captured == []
+
+
+async def test_an_earlier_days_highlight_keeps_its_audience(db, svc):
+    service, bus = svc
+    await _seed_user(db, "u1", "pascal")
+    highlight, _ = await _first_frame(service, HighlightAudience.USERS, ("u-anna",))
+    yesterday = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y-%m-%d")
+    await db.enqueue(
+        "UPDATE highlights SET highlight_date=? WHERE id=?", (yesterday, highlight.id)
+    )
+    captured = await _audience_changes(bus)
+    with pytest.raises(HighlightNotTodayError) as exc:
+        await service.change_audience(
+            highlight_id=highlight.id,
+            actor_user_id="u1",
+            audience_kind=HighlightAudience.ALL_PAIRED,
+            audience=(),
+        )
+    assert exc.value.status == 409
+    assert exc.value.code == "HIGHLIGHT_NOT_TODAY"
+    assert captured == []
+
+
+async def test_a_change_the_gate_refuses_stores_and_sends_nothing(db, svc):
+    """v_70: a narrowing that would take people away from a household too
+    old to keep the removal is refused before anything is written."""
+    service, bus = svc
+    await _seed_user(db, "u1", "pascal")
+    highlight, _ = await _first_frame(service, HighlightAudience.ALL_PAIRED)
+    captured = await _audience_changes(bus)
+    asked: list[tuple] = []
+
+    async def _gate(old_kind, old, kind, new) -> bool:
+        asked.append((old_kind, old, kind, new))
+        return False
+
+    service.attach_audience_gate(_gate)
+    with pytest.raises(HighlightAudiencePeerTooOldError) as exc:
+        await service.change_audience(
+            highlight_id=highlight.id,
+            actor_user_id="u1",
+            audience_kind=HighlightAudience.HOUSEHOLDS,
+            audience=("peer-b",),
+        )
+    assert exc.value.status == 409
+    assert asked == [("all_paired", (), "households", ("peer-b",))]
+    stored = await service._highlights.get_highlight(highlight.id)
+    assert stored.audience_kind is HighlightAudience.ALL_PAIRED
+    assert captured == []
+
+
+async def test_a_frame_and_a_change_never_interleave(db, svc):
+    """Appending a frame and changing the audience serialize per author: the
+    frame's event names the audience it is stored under."""
+    service, bus = svc
+    await _seed_user(db, "u1", "pascal")
+    highlight, _ = await _first_frame(service, HighlightAudience.ALL_PAIRED)
+    order: list[str] = []
+    gate_open = asyncio.Event()
+
+    async def _slow_gate(*_a) -> bool:
+        order.append("change: gate")
+        await gate_open.wait()
+        return True
+
+    service.attach_audience_gate(_slow_gate)
+    frames: list[HighlightFrameAdded] = []
+    bus.subscribe(HighlightFrameAdded, lambda e: frames.append(e))
+    change = asyncio.create_task(
+        service.change_audience(
+            highlight_id=highlight.id,
+            actor_user_id="u1",
+            audience_kind=HighlightAudience.HOUSEHOLDS,
+            audience=("peer-b",),
+        )
+    )
+    await asyncio.sleep(0)
+    append = asyncio.create_task(
+        _first_frame(service, HighlightAudience.HOUSEHOLDS, ("peer-b",))
+    )
+    await asyncio.sleep(0.01)
+    assert frames == []  # the frame waits for the change
+    gate_open.set()
+    await change
+    await append
+    [event] = frames
+    assert (event.audience_kind, event.audience) == ("households", ("peer-b",))

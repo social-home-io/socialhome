@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from .calendar import CalendarEvent
+    from .highlight import HighlightFrame
     from .mention import Mention
     from .post import Comment, Post
     from .space import SpaceModerationItem
@@ -2237,6 +2238,30 @@ class HighlightRemoved(DomainEvent):
     author_user_id: str
     audience_kind: str
     audience: tuple[str, ...]
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class HighlightAudienceChanged(DomainEvent):
+    """The author changed who sees today's highlight — every frame of it.
+
+    Carries the audience before and after, plus the day's frames, so the
+    federation outbound can tell each household what changed for it
+    (removed, re-gated, or the whole day for the first time) without a
+    repo read, and :class:`RealtimeService` can tell local viewers to
+    refetch.
+    """
+
+    highlight_id: str
+    author_user_id: str
+    highlight_date: str
+    expires_at: str
+    old_audience_kind: str
+    old_audience: tuple[str, ...]
+    audience_kind: str
+    audience: tuple[str, ...]
+    #: Today's frames in ``sequence`` order (≤ ``MAX_FRAMES_PER_HIGHLIGHT``).
+    frames: tuple[HighlightFrame, ...]
     occurred_at: datetime = field(default_factory=_now)
 
 
