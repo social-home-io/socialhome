@@ -186,6 +186,32 @@ async def test_cleanup_stops_the_routed_handler(tmp_dir):
     assert handler._deferred_retransmits == {}
 
 
+async def test_cleanup_publishes_queued_highlight_events(tmp_dir, monkeypatch):
+    """``_on_cleanup`` lets the highlight service publish what it already
+    queued (published off the author's lock) before the federation client
+    and the database go away."""
+    from socialhome.services.highlight_service import HighlightService
+
+    stopped: list[float] = []
+
+    async def _stop(self, timeout: float = 15.0) -> None:
+        stopped.append(timeout)
+
+    monkeypatch.setattr(HighlightService, "stop", _stop)
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+    )
+    app = create_app(cfg)
+    async with TestClient(TestServer(app)) as tc:
+        await tc.get("/healthz")
+        assert stopped == []
+    assert stopped == [15.0]
+
+
 async def test_create_app_without_config_uses_env_defaults():
     """create_app(None) falls back to Config.from_env() — doesn't raise."""
     import os

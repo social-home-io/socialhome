@@ -14,6 +14,7 @@ from socialhome.domain.events import (
     HighlightFrameAdded,
     HighlightFrameReactionChanged,
     HighlightFrameViewed,
+    HighlightRemoved,
 )
 from socialhome.domain.highlight import (
     HighlightAudience,
@@ -1145,3 +1146,94 @@ async def test_a_frame_and_a_change_never_interleave(db, svc):
     await append
     [event] = frames
     assert (event.audience_kind, event.audience) == ("households", ("peer-b",))
+
+
+async def test_a_second_frame_does_not_wait_for_a_slow_publish(db, svc):
+    """F15: the first frame's event is still being handled (federation is
+    trying a household that doesn't answer). The author's next frame is
+    stored and returns at once, and its event follows the first one."""
+    service, bus = svc
+    await _seed_user(db, "u1", "pascal")
+    release = asyncio.Event()
+    seen: list[int] = []
+
+    async def _slow_household(e: HighlightFrameAdded) -> None:
+        if e.sequence == 1:
+            await release.wait()
+        seen.append(e.sequence)
+
+    bus.subscribe(HighlightFrameAdded, _slow_household)
+    first = asyncio.create_task(_first_frame(service, HighlightAudience.ALL_PAIRED))
+    await asyncio.sleep(0.01)
+    assert not first.done()  # a lone frame still returns once announced
+    _, second = await asyncio.wait_for(
+        _first_frame(service, HighlightAudience.ALL_PAIRED), timeout=1
+    )
+    assert second.sequence == 2
+    assert seen == []
+    release.set()
+    await first
+    await service.flush_published()
+    assert seen == [1, 2]
+
+
+async def test_a_change_and_a_delete_do_not_wait_and_keep_their_order(db, svc):
+    """An audience change and a delete behind a slow frame publish return
+    at once; the events still go out frame → change → removal."""
+    service, bus = svc
+    await _seed_user(db, "u1", "pascal")
+    highlight, _ = await _first_frame(service, HighlightAudience.ALL_PAIRED)
+    release = asyncio.Event()
+    order: list[str] = []
+
+    async def _slow_frame(e: HighlightFrameAdded) -> None:
+        await release.wait()
+        order.append(f"frame {e.sequence}")
+
+    bus.subscribe(HighlightFrameAdded, _slow_frame)
+    bus.subscribe(
+        HighlightAudienceChanged, lambda e: order.append(f"change {e.audience_kind}")
+    )
+    bus.subscribe(HighlightRemoved, lambda e: order.append("removed"))
+    second = asyncio.create_task(_first_frame(service, HighlightAudience.ALL_PAIRED))
+    await asyncio.sleep(0.01)
+    await asyncio.wait_for(
+        service.change_audience(
+            highlight_id=highlight.id,
+            actor_user_id="u1",
+            audience_kind=HighlightAudience.HOUSEHOLDS,
+            audience=("peer-b",),
+        ),
+        timeout=1,
+    )
+    await asyncio.wait_for(
+        service.delete_highlight(highlight_id=highlight.id, actor_user_id="u1"),
+        timeout=1,
+    )
+    assert order == []
+    release.set()
+    await second
+    await service.flush_published()
+    assert order == ["frame 2", "change households", "removed"]
+
+
+async def test_stop_publishes_what_is_queued(db, svc):
+    """Shutdown sends the events already decided before the app goes."""
+    service, bus = svc
+    await _seed_user(db, "u1", "pascal")
+    release = asyncio.Event()
+    seen: list[int] = []
+
+    async def _slow(e: HighlightFrameAdded) -> None:
+        if e.sequence == 1:
+            await release.wait()
+        seen.append(e.sequence)
+
+    bus.subscribe(HighlightFrameAdded, _slow)
+    first = asyncio.create_task(_first_frame(service, HighlightAudience.ALL_PAIRED))
+    await asyncio.sleep(0.01)
+    await _first_frame(service, HighlightAudience.ALL_PAIRED)
+    asyncio.get_running_loop().call_later(0.02, release.set)
+    await service.stop(timeout=5)
+    await first
+    assert seen == [1, 2]

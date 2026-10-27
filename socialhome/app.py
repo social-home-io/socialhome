@@ -5323,7 +5323,11 @@ def create_app(config: Config | None = None) -> web.Application:
 
     async def _on_cleanup(app: web.Application) -> None:
         log.info("socialhome: shutting down")
-        # First: the dashboard listener reads the database.
+        # Highlight events already decided (frames, audience changes,
+        # deletes) are published off the author's lock; send them while
+        # the federation client and the database are still up.
+        await app[K.highlight_service_key].stop()
+        # Then the dashboard listener (it reads the database).
         await dashboard.controller.stop()
         # Before the adapter closes its HA client.
         await household_zone_sync.stop()
