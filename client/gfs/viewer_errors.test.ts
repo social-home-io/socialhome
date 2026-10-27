@@ -35,7 +35,28 @@ describe('humanizeViewerError', () => {
     }
   })
 
-  it('passes other messages through unchanged', () => {
-    expect(humanizeViewerError('Failed to fetch')).toBe('Failed to fetch')
+  it('says "couldn’t connect" when the network failed, never the browser’s words', () => {
+    for (const raw of [
+      'Failed to fetch', // Chromium
+      'NetworkError when attempting to fetch resource.', // Firefox
+      'Load failed', // Safari
+      'The operation timed out.',
+      'HTTP 408',
+    ]) {
+      expect(humanizeViewerError(raw)).toBe('Couldn’t connect.')
+    }
+  })
+
+  it('never shows raw error text: anything else is the one neutral message', () => {
+    for (const raw of ['HTTP 500', 'HTTP 502', 'HTTP 400', 'HTTP 403', 'decrypt failed', 'TypeError: x is undefined']) {
+      expect(humanizeViewerError(raw)).toBe(UNAVAILABLE_COPY)
+    }
+  })
+
+  it('only ever answers with a translated message', () => {
+    const known = new Set<string>(Object.values(LOCALES.en))
+    for (const raw of [null, '', 'HTTP 503', 'HTTP 500', 'HTTP 429', 'Failed to fetch', 'boom']) {
+      expect(known.has(humanizeViewerError(raw))).toBe(true)
+    }
   })
 })

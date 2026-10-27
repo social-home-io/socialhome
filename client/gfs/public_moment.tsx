@@ -26,7 +26,7 @@ import { CONTENT_TYPES, openBlob, openShare, type ShareBody } from './moment_sea
 import { pinnedEndpoint, pinnedRequestInit } from './pinned_link'
 import { PlaybackControls, usePlaybackKeys } from './viewer_playback'
 import { ViewerError } from './viewer_retry'
-import { t } from './viewer_i18n'
+import { locale, t } from './viewer_i18n'
 
 type State =
   | { status: 'loading' }
@@ -109,10 +109,12 @@ export async function loadMoment(boot: MomentBoot): Promise<{
   return { body, media, poster }
 }
 
+/* In the page's language (the one its words are in), not the browser's
+ * default locale: a German page says "21.10.2026, 08:00". */
 function when(iso: string | undefined): string {
   if (!iso) return ''
   const d = new Date(iso)
-  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString(undefined, {
+  return Number.isNaN(d.getTime()) ? '' : d.toLocaleString(locale(), {
     dateStyle: 'medium',
     timeStyle: 'short',
   })

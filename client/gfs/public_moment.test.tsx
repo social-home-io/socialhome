@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/pr
 import type { MomentBoot } from './moment_link'
 import { MomentVideo, PublicMomentViewer } from './public_moment'
 import { b64urlDecode } from './stream_seal'
+import { locale, setLocale } from './viewer_i18n'
 
 const V = JSON.parse(
   readFileSync(join(__dirname, '..', '..', 'tests', 'fixtures', 'moment_share_vector.json'), 'utf8'),
@@ -65,6 +66,21 @@ describe('PublicMomentViewer', () => {
       expect(c.init?.credentials).toBe('omit')
       expect(c.init?.referrerPolicy).toBe('no-referrer')
       expect(c.url).not.toContain(V.item_key_b64url)
+    }
+  })
+
+  it('writes the date in the page’s language, not the browser’s', async () => {
+    const before = locale()
+    // The browser says en-US; the page was picked for a German visitor.
+    setLocale('de')
+    try {
+      const { container } = render(<PublicMomentViewer boot={BOOT} />)
+      await waitFor(() => expect(container.textContent).toContain('Bees swarmed the plum tree'))
+      const german = new Intl.DateTimeFormat('de', { dateStyle: 'medium', timeStyle: 'short' })
+        .format(new Date(V.body.created_at))
+      expect(container.textContent).toContain(german)
+    } finally {
+      setLocale(before)
     }
   })
 
