@@ -176,6 +176,11 @@ class Capability(StrEnum):
     #: Admin › Settings shows it read-only; without it the household sets
     #: its home itself (standalone).
     HOME_LOCATION_SYNC = "home_location_sync"
+    #: Adapter forwards events to the platform's automation engine
+    #: (``HaBridgeService`` → Home Assistant's event bus), so Settings →
+    #: Notifications offers the per-person opt-in to send one's
+    #: notifications there (D14; ha + haos).
+    AUTOMATION_EVENTS = "automation_events"
 
 
 # ── Provider Protocols ───────────────────────────────────────────────────────

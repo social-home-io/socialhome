@@ -37,6 +37,7 @@ import {
   currentPushSubscription, disableWebPush, enableWebPush, webPushSupported,
 } from '@/utils/webPush'
 import { UsernameEditor } from './UsernameEditor'
+import { HaAutomationsSwitch } from './HaAutomationsSwitch'
 import { ProfileTab, resetProfileDraft, useProfileLeaveGuard } from './ProfileTab'
 import { SecuritySettings } from '@/components/SecuritySettings'
 import { ChatNotifChoices } from '@/features/dms/ChatNotifChoices'
@@ -637,6 +638,7 @@ function NotificationsTab() {
             : t('settings.notifications.unsupported')}
       </p>
       {isHomeAssistant() && <HaNotifyServiceRow />}
+      <HaAutomationsSwitch />
       <HouseholdChatNotifs />
     </section>
   )

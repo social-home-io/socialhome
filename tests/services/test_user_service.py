@@ -13,6 +13,10 @@ from socialhome.crypto import (
     generate_identity_keypair,
 )
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.child_protection import (
+    AccountProtectedError,
+    ProtectedCapability,
+)
 from socialhome.domain.events import UserStatusChanged
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
@@ -142,6 +146,67 @@ async def test_patch_preferences(stack):
     u2 = await stack.user_svc.patch_preferences("pascal", {"theme": None, "tz": "UTC"})
     prefs2 = json.loads(u2.preferences_json)
     assert "theme" not in prefs2 and prefs2["tz"] == "UTC"
+
+
+class _FakeProtection:
+    """Just enough of :class:`ChildProtectionService` for the §CP gate."""
+
+    def __init__(self, protected: set[str]) -> None:
+        self.protected = protected
+
+    def register_gate(self, _gate) -> None:
+        pass
+
+    async def require_unrestricted(self, user_id, capability):
+        if user_id in self.protected:
+            raise AccountProtectedError(capability)
+
+
+async def test_opting_into_ha_automations(stack):
+    """An unprotected account may turn the HA event-bus opt-in on and off."""
+    await stack.provision_user("pascal")
+    stack.user_svc.attach_child_protection(_FakeProtection(set()))
+    u = await stack.user_svc.patch_preferences("pascal", {"ha_automation_events": True})
+    assert json.loads(u.preferences_json)["ha_automation_events"] is True
+    u = await stack.user_svc.patch_preferences(
+        "pascal", {"ha_automation_events": False}
+    )
+    assert json.loads(u.preferences_json)["ha_automation_events"] is False
+
+
+async def test_protected_account_cannot_opt_into_ha_automations(stack):
+    """D14: a child-protected account is refused by the server, not just
+    hidden in the UI; nothing is saved."""
+    kid = await stack.provision_user("kid")
+    stack.user_svc.attach_child_protection(_FakeProtection({kid.user_id}))
+    with pytest.raises(AccountProtectedError) as exc:
+        await stack.user_svc.patch_preferences(
+            "kid", {"ha_automation_events": True, "theme": "dark"}
+        )
+    assert exc.value.capability is ProtectedCapability.HA_AUTOMATIONS
+    assert json.loads((await stack.user_svc.get("kid")).preferences_json) == {}
+    # Turning it off stays allowed.
+    u = await stack.user_svc.patch_preferences("kid", {"ha_automation_events": False})
+    assert json.loads(u.preferences_json)["ha_automation_events"] is False
+
+
+async def test_ha_automations_opt_in_must_be_a_boolean(stack):
+    await stack.provision_user("pascal")
+    with pytest.raises(ValueError):
+        await stack.user_svc.patch_preferences(
+            "pascal", {"ha_automation_events": "yes"}
+        )
+
+
+async def test_becoming_protected_drops_the_ha_automations_opt_in(stack):
+    """§CP.R retroactive: an opt-in made before protection is removed."""
+    u = await stack.provision_user("kid")
+    await stack.user_svc.patch_preferences(
+        "kid", {"ha_automation_events": True, "theme": "dark"}
+    )
+    await stack.user_svc.on_account_protected(u.user_id)
+    prefs = json.loads((await stack.user_svc.get("kid")).preferences_json)
+    assert prefs == {"theme": "dark"}
 
 
 async def test_set_status(stack):

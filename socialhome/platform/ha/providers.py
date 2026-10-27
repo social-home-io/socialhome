@@ -15,6 +15,7 @@ access ``adapter._client`` (only available after the adapter's
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from collections.abc import AsyncIterable
@@ -307,9 +308,36 @@ def _resolve_notify_service(user: Any) -> str | None:
     return svc.strip()
 
 
+#: Prefix of the Companion ``tag`` Social Home sets (see
+#: :func:`companion_tag`).
+COMPANION_TAG_PREFIX = "socialhome-"
+
+
+def companion_tag(tag: str) -> str:
+    """The Companion ``tag`` for Social Home's push *tag*.
+
+    Companion contract (companion.home-assistant.io/docs/notifications/
+    notifications-basic, "Replacing"): "All subsequent notifications will
+    take the place of a notification with the same tag"; ``clear_notification``
+    removes one by tag. On iOS the push relay turns ``data.tag`` into the
+    ``apns-collapse-id`` header (home-assistant/mobile-apps-fcm-push
+    ``functions/ios.js`` @ 72200467), which Apple caps at 64 bytes — a raw
+    ``type:link_url`` tag can be longer, so it is hashed to a fixed 43
+    characters. Same input, same tag: a repeat replaces itself.
+    """
+    digest = hashlib.sha256(tag.encode("utf-8")).hexdigest()[:32]
+    return f"{COMPANION_TAG_PREFIX}{digest}"
+
+
 class HaPushProvider:
     """Deliver to the user's HA Companion app via their configured notify
-    service (``preferences.ha_notify_service``). No-op when unset."""
+    service (``preferences.ha_notify_service``). No-op when unset.
+
+    ``data`` is Social Home's platform-neutral push data — ``{"url": <SPA
+    path>, "tag": <str>}`` — and becomes the Companion keys this provider
+    knows the contract for (:meth:`_companion_data`); anything else is
+    dropped rather than forwarded to HA unverified.
+    """
 
     __slots__ = ("_adapter",)
 
@@ -332,6 +360,7 @@ class HaPushProvider:
             )
             return
         body: dict = {"title": title, "message": message}
+        data = await self._companion_data(data)
         suffix = value[len("notify.") :] if value.startswith("notify.") else ""
         if (
             suffix.startswith("mobile_app_")
@@ -406,6 +435,35 @@ class HaPushProvider:
                 domain,
                 service,
             )
+
+    async def _companion_data(self, data: dict | None) -> dict | None:
+        """Map Social Home's push *data* to the Companion app's keys.
+
+        Contract — companion.home-assistant.io/docs/notifications/
+        notifications-basic (verified against the push relay,
+        home-assistant/mobile-apps-fcm-push ``functions/ios.js`` /
+        ``android.js`` @ 72200467):
+
+        * ``url`` (iOS) / ``clickAction`` (Android) — what a tap opens; a
+          relative URL opens on the HA server in HA's frontend, a full URL
+          as is. The adapter decides which one reaches Social Home
+          (``companion_click_url``); without one, no URL is sent.
+        * ``tag`` — a later push with the same tag replaces the earlier
+          one (:func:`companion_tag`).
+        """
+        if not data:
+            return None
+        out: dict[str, str] = {}
+        tag = data.get("tag")
+        if isinstance(tag, str) and tag:
+            out["tag"] = companion_tag(tag)
+        path = data.get("url")
+        if isinstance(path, str) and path.startswith("/"):
+            click = await self._adapter.companion_click_url(path)
+            if click:
+                out["url"] = click
+                out["clickAction"] = click
+        return out or None
 
     async def list_notify_targets(self) -> list[dict]:
         """User-selectable notify targets for the profile dropdown, as

@@ -9,6 +9,7 @@ from socialhome.platform.adapter import Capability, DashboardHostPort
 from socialhome.platform.ha.displays import HaDisplayDirectory
 from socialhome.platform.ha.zones import HaZoneSource
 from socialhome.platform.ha_home_location import HaHomeLocationSource
+from socialhome.platform.haos import adapter as haos_adapter_module
 from socialhome.platform.haos.adapter import HaosAdapter
 from socialhome.platform.haos.supervisor import AddonInfo
 from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
@@ -640,3 +641,62 @@ async def test_display_directory_wired_with_its_capability():
     adapter = _build_haos_adapter()
     assert isinstance(adapter.displays, HaDisplayDirectory)
     assert Capability.HA_DISPLAY_DISCOVERY in adapter.capabilities
+
+
+# ─── Automation events + Companion push tap URL ────────────────────────────
+
+
+def test_capabilities_include_automation_events():
+    """D14: the SPA offers the HA automation opt-in only with this."""
+    assert Capability.AUTOMATION_EVENTS in _build_haos_adapter().capabilities
+
+
+async def test_companion_click_url_is_the_app_panel():
+    """A relative Companion URL opens in HA's frontend; HA registers the
+    App's panel at ``/<slug>`` (``addon_panel._register_panel``)."""
+    sv = _FakeSupervisor(_addon_info(slug="a0d7b954_socialhome", ingress_panel=True))
+    adapter = _build_haos_adapter(supervisor_client=sv)
+    assert await adapter.companion_click_url("/dms/c1") == "/a0d7b954_socialhome"
+    # Cached: one Supervisor read per TTL, not per push.
+    assert await adapter.companion_click_url("/post/p1") == "/a0d7b954_socialhome"
+    assert sv.calls == 1
+
+
+async def test_companion_click_url_none_without_the_sidebar_panel():
+    """No panel registered in HA → no URL (the tap opens the Companion app)
+    rather than one HA answers with "not found"."""
+    sv = _FakeSupervisor(_addon_info(slug="local_socialhome", ingress_panel=False))
+    adapter = _build_haos_adapter(supervisor_client=sv)
+    assert await adapter.companion_click_url("/dms/c1") is None
+
+
+async def test_companion_click_url_rereads_after_the_ttl(monkeypatch):
+    """An admin can turn the sidebar panel on without restarting the App."""
+    sv = _FakeSupervisor(
+        _addon_info(slug="local_socialhome", ingress_panel=False),
+        _addon_info(slug="local_socialhome", ingress_panel=True),
+    )
+    adapter = _build_haos_adapter(supervisor_client=sv)
+    clock = [1000.0]
+    monkeypatch.setattr(haos_adapter_module.time, "monotonic", lambda: clock[0])
+    assert await adapter.companion_click_url("/") is None
+    clock[0] += 301
+    assert await adapter.companion_click_url("/") == "/local_socialhome"
+
+
+async def test_companion_click_url_supervisor_failure_is_not_cached(caplog):
+    sv = _FakeSupervisor(
+        RuntimeError("down"),
+        None,
+        _addon_info(slug="local_socialhome", ingress_panel=True),
+    )
+    adapter = _build_haos_adapter(supervisor_client=sv)
+    with caplog.at_level("WARNING"):
+        assert await adapter.companion_click_url("/") is None
+    assert any("push tap URL" in r.getMessage() for r in caplog.records)
+    assert await adapter.companion_click_url("/") is None
+    assert await adapter.companion_click_url("/") == "/local_socialhome"
+
+
+async def test_companion_click_url_before_startup_is_none():
+    assert await _build_haos_adapter().companion_click_url("/") is None

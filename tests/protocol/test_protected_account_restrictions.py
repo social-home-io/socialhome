@@ -358,6 +358,28 @@ async def test_protected_account_can_still_sign_in(hh):
     assert r.status == 200
 
 
+# ─── Home Assistant automations (D14) ───────────────────────────────────
+
+
+async def test_opt_into_ha_automations(hh):
+    """Server-enforced, not just hidden in the SPA: a protected account's
+    notifications never reach Home Assistant's event bus."""
+    on = {"preferences": {"ha_automation_events": True}}
+    await _assert_protected(
+        await hh.patch("/api/me", json=on, headers=_h("kid-tok")),
+        "ha_automations",
+    )
+    kid = await (await hh.get("/api/me", headers=_h("kid-tok"))).json()
+    assert "ha_automation_events" not in (kid.get("preferences_json") or "")
+    # Turning it off is always allowed.
+    off = {"preferences": {"ha_automation_events": False}}
+    r = await hh.patch("/api/me", json=off, headers=_h("kid-tok"))
+    assert r.status == 200, await r.text()
+    r = await hh.patch("/api/me", json=on, headers=_h("bob-tok"))
+    assert r.status == 200, await r.text()
+    assert '"ha_automation_events":true' in (await r.json())["preferences_json"]
+
+
 # ─── calendar feeds ─────────────────────────────────────────────────────
 
 

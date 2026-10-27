@@ -81,6 +81,14 @@ class AddonInfo:
     ingress_port: int
     network: Mapping[str, int | None] | None = None
     host_network: bool = False
+    #: The App's slug and whether its sidebar panel is on — together they
+    #: name the Home Assistant frontend path that opens Social Home
+    #: (``/<slug>``, see :meth:`HaosAdapter.companion_click_url`).
+    #: ``APIApps.info_data`` sets ``ATTR_SLUG`` to ``app.slug`` and
+    #: ``ATTR_INGRESS_PANEL`` to ``app.ingress_panel``
+    #: (home-assistant/supervisor ``supervisor/api/apps.py`` @ e22b2829).
+    slug: str | None = None
+    ingress_panel: bool = False
 
     @classmethod
     def from_response(cls, data: dict | None) -> AddonInfo | None:
@@ -97,6 +105,8 @@ class AddonInfo:
             ingress_port=int(port),
             network=_parse_network(data.get("network")),
             host_network=data.get("host_network") is True,
+            slug=str(data["slug"]) if data.get("slug") else None,
+            ingress_panel=data.get("ingress_panel") is True,
         )
 
     def declares(self, container_port: str) -> bool:

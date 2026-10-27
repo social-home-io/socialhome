@@ -23,6 +23,7 @@ HaPushProvider / HaSTTProvider / HaAIProvider / HaEventSink) with
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
@@ -59,6 +60,10 @@ if TYPE_CHECKING:
 
 
 log = logging.getLogger(__name__)
+
+#: How long the App's HA panel path (``/<slug>`` or none) is reused for
+#: push tap URLs before Supervisor is asked again.
+_PANEL_PATH_TTL_S = 300.0
 
 
 class HaIngressAuthProvider:
@@ -126,6 +131,7 @@ class HaosAdapter(PlatformAdapter):
         "_ice_sync",
         "_instance_config",
         "_options",
+        "_panel_path",
         "_supervisor_client",
         "_supervisor_token",
         "_supervisor_url",
@@ -161,6 +167,8 @@ class HaosAdapter(PlatformAdapter):
         self._db: Any | None = None
         self._instance_config: AbstractInstanceConfigRepo | None = None
         self._dashboard_host_port: DashboardHostPort | None = None
+        # (monotonic read time, HA frontend panel path or None)
+        self._panel_path: tuple[float, str | None] | None = None
 
         # HAOS-specific auth — ingress header trust, no bearer fallback.
         self.auth = HaIngressAuthProvider(self)
@@ -188,6 +196,7 @@ class HaosAdapter(PlatformAdapter):
             Capability.HOME_LOCATION_SYNC,  # ``self.home_location`` reads HA's home
             Capability.HA_DISPLAY_DISCOVERY,  # ``self.displays`` lists HA's panels
             Capability.INGRESS,  # always — that's the haos invariant
+            Capability.AUTOMATION_EVENTS,  # HaBridgeService → HA's event bus
             # No MDNS_ADVERTISE: the App container sits on the Supervisor's
             # bridge network (no ``host_network``), so an mDNS announcement
             # would never reach the LAN. Panels find the App through Home
@@ -277,6 +286,53 @@ class HaosAdapter(PlatformAdapter):
                 info.host_port(container_port)
             )
         return self._dashboard_host_port
+
+    async def companion_click_url(self, path: str) -> str | None:
+        """Where a tap on a Companion push opens: the App's sidebar panel.
+
+        Companion contract (companion.home-assistant.io/docs/notifications/
+        notifications-basic, "Opening a URL"): a relative ``url`` /
+        ``clickAction`` opens on the Home Assistant server that sent the
+        push, inside HA's own frontend — so the SPA path *path* alone would
+        hit a route HA doesn't have. Home Assistant registers the App's
+        ingress panel at ``frontend_url_path=<app slug>``
+        (home-assistant/core ``components/hassio/addon_panel.py``
+        ``_register_panel`` @ 137e56f1) only while the panel is enabled
+        (``HassIOAddonPanel.post`` refuses a disabled one), so the answer is
+        ``/<slug>`` when ``ingress_panel`` is on, else ``None`` (no URL —
+        the tap opens the Companion app).
+
+        *path* itself is not appended: the panel's iframe always loads the
+        App's ``ingress_url`` root (home-assistant/frontend
+        ``src/panels/app/ha-panel-app.ts`` @ 31604396), and Social Home
+        does not read the route tail HA posts to the iframe.
+
+        Cached for :data:`_PANEL_PATH_TTL_S` — an admin can toggle the
+        sidebar panel without restarting the App. A failed Supervisor read
+        is not cached and answers ``None``.
+        """
+        del path  # see docstring: the panel always opens at the App's root
+        now = time.monotonic()
+        if self._panel_path is not None and now - self._panel_path[0] < (
+            _PANEL_PATH_TTL_S
+        ):
+            return self._panel_path[1]
+        if self._supervisor_client is None:
+            return None
+        try:
+            info = await self._supervisor_client.get_self_info()
+        except Exception as exc:  # defensive — a push must still go out
+            log.warning(
+                "haos_adapter: App info for the push tap URL failed: %s",
+                exc,
+                exc_info=True,
+            )
+            return None
+        if info is None:
+            return None  # get_self_info already logged at WARNING
+        panel = f"/{info.slug}" if info.slug and info.ingress_panel else None
+        self._panel_path = (now, panel)
+        return panel
 
     async def dashboard_lan_host(self) -> str | None:
         """The Home Assistant host's primary LAN IPv4, read from
@@ -459,7 +515,12 @@ class HaosAdapter(PlatformAdapter):
                 exc,
                 exc_info=True,
             )
-        self._ha_bridge = HaBridgeService(app[K.event_bus_key], self)
+        self._ha_bridge = HaBridgeService(
+            app[K.event_bus_key],
+            self,
+            users=app.get(K.user_repo_key),
+            child_protection=app.get(K.child_protection_service_key),
+        )
         self._ha_bridge.wire()
         # Read HA Core's time_zone once at startup and mirror it into
         # preferences.tz so calendar events created without an

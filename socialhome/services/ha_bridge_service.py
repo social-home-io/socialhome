@@ -18,12 +18,22 @@ The bridge intentionally publishes a *narrow* set of events: the ones a
 user might reasonably automate on. Bursty internal events (reaction
 changes, every comment) are skipped — they would flood the HA event bus
 and add noise. If a user later needs more, the list can be extended.
+
+``socialhome.notification_new`` is personal (D14): it fires only for a
+person who opted in (``preferences_json["ha_automation_events"]``, Settings
+→ Notifications), never for a protected account, and carries no title or
+text — ``{user_id, username, notification_id, type, link_url}``. HA keeps
+fired events in its database and shows them to anyone with admin,
+logbook or automation access (HA REST API, ``POST /api/events/<type>``:
+"Fires an event. The optional body is the event data … Events are stored
+in the database, so be mindful of what you fire" —
+https://contributors.home-assistant.io/core/internals/rest-api/).
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..domain.events import (
     BazaarBidPlaced,
@@ -42,6 +52,11 @@ from ..domain.events import (
     UserStatusChanged,
 )
 from ..infrastructure.event_bus import EventBus
+from .user_preferences import parse_ha_automation_events
+
+if TYPE_CHECKING:
+    from ..repositories.user_repo import AbstractUserRepo
+    from .child_protection_service import ChildProtectionService
 
 log = logging.getLogger(__name__)
 
@@ -57,13 +72,28 @@ class HaBridgeService:
         Any object that exposes ``async fire_event(event_type, data)``.
         ``HomeAssistantAdapter`` matches that shape; other adapters can
         too if they want HA compatibility.
+    users:
+        Looks up a notification's recipient for their opt-in. Without it
+        no ``socialhome.notification_new`` fires (fail closed).
+    child_protection:
+        A protected account never reaches HA's event bus, whatever its
+        preferences say.
     """
 
-    __slots__ = ("_adapter", "_bus")
+    __slots__ = ("_adapter", "_bus", "_child_protection", "_users")
 
-    def __init__(self, bus: EventBus, ha_adapter) -> None:
+    def __init__(
+        self,
+        bus: EventBus,
+        ha_adapter,
+        *,
+        users: AbstractUserRepo | None = None,
+        child_protection: ChildProtectionService | None = None,
+    ) -> None:
         self._bus = bus
         self._adapter = ha_adapter
+        self._users = users
+        self._child_protection = child_protection
 
     def wire(self) -> None:
         self._bus.subscribe(PostCreated, self._on_post_created)
@@ -219,22 +249,47 @@ class HaBridgeService:
     async def _on_notification_created(self, event: NotificationCreated) -> None:
         if event.bumped:
             return  # the same unread row again: automations heard it once
+        user = await self._opted_in_user(event.user_id)
+        if user is None:
+            return
+        # D14: no title, no text — they name people and carry chat, task
+        # and event content. An automation gets what it needs to react
+        # (who, what kind, which row) and the link to open.
         await self._fire(
             "socialhome.notification_new",
             {
                 "user_id": event.user_id,
+                "username": user.username,
                 "notification_id": event.notification_id,
                 "type": event.type,
-                "title": event.title,
+                "link_url": event.link_url,
             },
         )
 
     # ─── Internals ────────────────────────────────────────────────────────
 
+    async def _opted_in_user(self, user_id: str):
+        """The recipient when they opted into HA automation events and are
+        not a protected account; ``None`` otherwise (D14)."""
+        if self._users is None:
+            return None
+        user = await self._users.get_by_user_id(user_id)
+        if user is None or not parse_ha_automation_events(user.preferences_json):
+            return None
+        if self._child_protection is not None and (
+            await self._child_protection.is_protected(user_id)
+        ):
+            return None
+        return user
+
     async def _fire(self, event_type: str, data: dict[str, Any]) -> None:
         try:
-            await self._adapter.fire_event(event_type, data)
+            ok = await self._adapter.fire_event(event_type, data)
         except Exception as exc:  # defensive
-            log.debug(
+            log.warning(
                 "ha_bridge: fire_event %s failed: %s", event_type, exc, exc_info=True
             )
+            return
+        if ok is False:
+            # POST /api/events/<type> answered non-2xx or was unreachable.
+            log.warning("ha_bridge: Home Assistant did not accept event %s", event_type)

@@ -23,6 +23,7 @@ export type ProtectedCapability =
   | 'public_links'
   | 'api_tokens'
   | 'calendar_feeds'
+  | 'ha_automations'
 
 /** Whether the signed-in account may not use *capability*. Reactive —
  *  reads the ``currentUser`` signal, so a render that calls it updates

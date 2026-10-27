@@ -51,6 +51,7 @@ from ..repositories.profile_picture_repo import (
 )
 from ..repositories.user_repo import AbstractUserRepo
 from .protection_gate import ProtectionGateMixin
+from .user_preferences import HA_AUTOMATION_EVENTS_KEY, parse_ha_automation_events
 
 log = logging.getLogger(__name__)
 
@@ -590,10 +591,21 @@ class UserService(ProtectionGateMixin):
 
         Unknown keys are allowed — the frontend owns the schema. ``None``
         values explicitly remove a key.
+
+        One key is the server's: :data:`HA_AUTOMATION_EVENTS_KEY` (D14) must
+        be a boolean, and turning it on is refused for a protected account
+        (:attr:`ProtectedCapability.HA_AUTOMATIONS`) — nothing is saved then.
         """
         user = await self._repo.get(username)
         if user is None:
             raise KeyError(f"user {username!r} not found")
+        ha_opt_in = patch.get(HA_AUTOMATION_EVENTS_KEY)
+        if ha_opt_in is not None and not isinstance(ha_opt_in, bool):
+            raise ValueError(f"{HA_AUTOMATION_EVENTS_KEY} must be true or false")
+        if ha_opt_in is True:
+            await self._require_unrestricted(
+                user.user_id, ProtectedCapability.HA_AUTOMATIONS
+            )
         try:
             prefs = orjson.loads(user.preferences_json or "{}")
         except orjson.JSONDecodeError:
@@ -714,8 +726,14 @@ class UserService(ProtectionGateMixin):
 
     async def on_account_protected(self, user_id: str) -> None:
         """§CP.R retroactive: revoke the personal API tokens the account
-        created before protection. Its sign-in sessions keep working."""
+        created before protection, and drop its Home Assistant automation
+        opt-in (D14). Its sign-in sessions keep working."""
         await self._repo.revoke_personal_api_tokens(user_id)
+        user = await self._repo.get_by_user_id(user_id)
+        if user is not None and parse_ha_automation_events(user.preferences_json):
+            await self.patch_preferences(
+                user.username, {HA_AUTOMATION_EVENTS_KEY: None}
+            )
 
     async def revoke_api_token(self, token_id: str) -> None:
         """Revoke any user's token — the admin path (``/api/admin/tokens``)."""

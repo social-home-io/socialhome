@@ -3202,9 +3202,11 @@ class _CapturingAdapter:
 
     def __init__(self) -> None:
         self.sent: list[tuple[str, str]] = []
+        self.data: list[dict | None] = []
 
     async def send_push(self, user, title, body, data=None) -> None:
         self.sent.append((user.user_id, title))
+        self.data.append(data)
 
 
 def _task(title: str, *assignees: str, created_by: str = "other") -> Task:
@@ -3650,6 +3652,19 @@ async def test_a_cancel_without_a_name_reads_like_its_push(stack):
     )
     rows = await stack.notif_repo.list(b.user_id, limit=10)
     assert [n.title for n in rows] == ["anna cancelled an event you're going to"]
+
+
+async def test_platform_push_carries_the_same_tag_and_link(stack):
+    """The HA Companion push gets the Web Push tag too, so a repeat replaces
+    itself on the phone (the HA provider maps it to Companion's ``tag``)."""
+    adapter = _CapturingAdapter()
+    stack.notif_svc.attach_platform_adapter(adapter)
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    await stack.bus.publish(_dm_event("c-1", a, [b], mid="m-1"))
+    assert adapter.data == [
+        {"type": "dm_message", "url": "/dms/c-1", "tag": "dm_message:/dms/c-1"}
+    ]
 
 
 async def test_push_tag_collapses_repeats_of_the_same_item_only(stack):

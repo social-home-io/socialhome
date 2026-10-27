@@ -47,6 +47,10 @@ export const supportsZoneSync = (): boolean => hasCapability('zone_sync')
  *  Assistant's own location) — shown read-only, changed there; without it
  *  an admin sets it in Admin › Settings. */
 export const homeLocationFromPlatform = (): boolean => hasCapability('home_location_sync')
+/** The platform forwards events to its automation engine (Home Assistant's
+ *  event bus), so Settings → Notifications offers the per-person opt-in to
+ *  send one's notifications there (D14). */
+export const supportsAutomationEvents = (): boolean => hasCapability('automation_events')
 
 // ── Mode-shaped accessors (intent over raw string compares) ──────────────
 

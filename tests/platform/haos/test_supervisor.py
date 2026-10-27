@@ -98,8 +98,28 @@ async def test_push_discovery_true_on_2xx(client, sv_server):
 async def test_get_self_info_returns_typed_addon_info(client, sv_server):
     _, captured = sv_server
     info = await client.get_self_info()
-    assert info == AddonInfo(hostname="local-social-home", ingress_port=8099)
+    assert info == AddonInfo(
+        hostname="local-social-home", ingress_port=8099, slug="local_social_home"
+    )
     assert captured["self_info_header"] == "Bearer sv-token"
+
+
+async def test_get_self_info_reads_slug_and_ingress_panel(client, sv_server):
+    """``slug`` + ``ingress_panel`` name the HA frontend panel a push tap
+    opens (``APIApps.info_data``: ``ATTR_SLUG`` / ``ATTR_INGRESS_PANEL``)."""
+    _, captured = sv_server
+    captured["self_info_response"] = {
+        "result": "ok",
+        "data": {
+            "slug": "a0d7b954_socialhome",
+            "hostname": "a0d7b954-socialhome",
+            "ingress_port": 8099,
+            "ingress_panel": True,
+        },
+    }
+    info = await client.get_self_info()
+    assert info.slug == "a0d7b954_socialhome"
+    assert info.ingress_panel is True
 
 
 async def test_get_self_info_returns_none_when_response_missing_fields(
