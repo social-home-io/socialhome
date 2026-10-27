@@ -426,6 +426,7 @@ class TaskService(BusPublisherMixin):
                     TaskAssigned(
                         task=saved,
                         assigned_to=user_id,
+                        assigned_by=created_by,
                     )
                 )
         return saved
@@ -553,6 +554,7 @@ class TaskService(BusPublisherMixin):
                     TaskAssigned(
                         task=saved,
                         assigned_to=user_id,
+                        assigned_by=actor_user_id,
                     )
                 )
 
@@ -1204,6 +1206,7 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
                     TaskAssigned(
                         task=saved,
                         assigned_to=user_id,
+                        assigned_by=created_by,
                         space_id=space_id,
                     )
                 )
@@ -1316,6 +1319,7 @@ class SpaceTaskService(BusPublisherMixin, ContentAccessMixin):
                     TaskAssigned(
                         task=saved,
                         assigned_to=user_id,
+                        assigned_by=actor_user_id,
                         space_id=space_id,
                     )
                 )

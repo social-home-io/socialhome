@@ -649,6 +649,10 @@ async def test_origin_applies_and_announces(router):
     assert len(router.moments.applied) == 1
     assert isinstance(router.bus.events[0], MomentReactionChanged)
     assert router.bus.events[0].author_user_id == "u-anna"
+    # §CP.R: a routed reaction says it came over the mesh, from beyond the
+    # paired circle — the notification gate reads it.
+    assert router.bus.events[0].received_via == "household"
+    assert router.bus.events[0].hop_count == 2
 
 
 async def test_copies_of_a_taken_reaction_are_bounded_per_neighbour(
@@ -868,6 +872,7 @@ async def test_the_author_applies_a_gfs_frame(router):
     await router.r.on_gfs_reaction(_gfs_frame(), gfs_id="g1")
     assert len(router.moments.applied) == 1
     assert isinstance(router.bus.events[0], MomentReactionChanged)
+    assert router.bus.events[0].received_via == "gfs"
 
 
 async def test_the_author_refuses_a_bad_gfs_frame(router, caplog):

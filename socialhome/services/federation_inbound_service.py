@@ -4352,6 +4352,8 @@ class FederationInboundService(ProtectionGateMixin):
                 reactor_user_id=reactor_user_id,
                 author_user_id=author_user_id,
                 emoji=published_emoji,
+                # Straight from the reactor's (paired) household.
+                received_via="household",
             )
         )
 

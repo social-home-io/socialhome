@@ -716,6 +716,10 @@ class PrivateSpaceInviteHandler:
                 space_id=invite["space_id"],
                 instance_id=event.from_instance,
                 invitee_user_id=invitee_user_id,
+                inviter_user_id=str(invite["invited_by"] or ""),
+                invitee_display_name=(
+                    str(invitee_display) if invitee_display else None
+                ),
             )
         )
 
@@ -827,7 +831,8 @@ class PrivateSpaceInviteHandler:
             RemoteSpaceInviteDeclined(
                 space_id=invite["space_id"],
                 instance_id=event.from_instance,
-                invitee_user_id=str(p.get("invitee_user_id") or ""),
+                invitee_user_id=invitee_user_id,
+                inviter_user_id=str(invite["invited_by"] or ""),
             )
         )
 

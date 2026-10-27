@@ -1517,6 +1517,8 @@ async def test_local_loopback_open_publishes_challenge_for_target_only():
     ev = challenges[0]
     assert ev.to_user_id == "u-bob"
     assert ev.from_display == "Alice"
+    # Never shown; the bell checks it against blocks and guardian blocks.
+    assert ev.from_user_id == "u-alice"
     assert ev.app_id == "chess"
     assert ev.session_id == session_id
     # The initiator is never the recipient of a challenge.
@@ -1562,6 +1564,7 @@ async def test_inbound_resolved_open_publishes_challenge():
     ev = challenges[0]
     assert ev.to_user_id == "u-bob"
     assert ev.from_display == "Carol Remote"
+    assert ev.from_user_id == "ru-carol"
     assert ev.session_id == "sess-1"
 
 

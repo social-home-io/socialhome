@@ -18,6 +18,7 @@ from socialhome.domain.events import (
     MomentCreated,
     MomentReactionChanged,
     PostCreated,
+    RemoteSpaceInviteAccepted,
     SpaceAdminSeedsRetiredAfterRestore,
     TaskAssigned,
     UserFollowed,
@@ -346,5 +347,65 @@ async def test_content_free_push_titles_are_translated(tmp_dir):
             )
         )
         assert push.titles == ["Dir wurde eine Aufgabe zugewiesen"]
+    finally:
+        await db.shutdown()
+
+
+async def test_invite_answers_name_who_and_where_in_the_inviters_language(tmp_dir):
+    """An invite answer says who answered and which space — in every locale,
+    and in the inviter's own language."""
+    shipped = Catalog.from_directory(Path(i18n_pkg.__file__).parent / "messages")
+    for locale in ("en", "de", "es", "fr", "nl"):
+        for key in (
+            "notification.space.remote_invite.accepted",
+            "notification.space.remote_invite.declined",
+        ):
+            msg = shipped.gettext(key, locale=locale, name="Zoe", space_name="Crew")
+            assert "Zoe" in msg and "Crew" in msg, (locale, key)
+    db = AsyncDatabase(tmp_dir / "inv.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        await db.enqueue(
+            "INSERT INTO users(username, user_id, display_name, locale)"
+            " VALUES('bob', 'b-id', 'Bob', 'de')",
+        )
+        bus = EventBus()
+        spaces = SqliteSpaceRepo(db)
+        await spaces.save(
+            Space(
+                id="sp1",
+                name="Crew",
+                owner_instance_id="iid",
+                owner_username="bob",
+                identity_public_key="00" * 32,
+                config_sequence=0,
+                features=SpaceFeatures(),
+                space_type=SpaceType.PRIVATE,
+                join_mode=JoinMode.INVITE_ONLY,
+            )
+        )
+        await spaces.save_member(
+            SpaceMember(
+                space_id="sp1",
+                user_id="b-id",
+                role=SpaceRole.OWNER.value,
+                joined_at="2026-01-01 00:00:00",
+            )
+        )
+        repo = SqliteNotificationRepo(db)
+        NotificationService(repo, SqliteUserRepo(db), spaces, bus, i18n=shipped).wire()
+        await bus.publish(
+            RemoteSpaceInviteAccepted(
+                space_id="sp1",
+                instance_id="peer",
+                invitee_user_id="u-zoe",
+                inviter_user_id="b-id",
+                invitee_display_name="Zoe",
+            )
+        )
+        notes = await repo.list("b-id")
+        assert [n.title for n in notes] == [
+            "Zoe hat deine Einladung zu Crew angenommen"
+        ]
     finally:
         await db.shutdown()
