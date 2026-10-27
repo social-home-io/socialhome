@@ -1,10 +1,11 @@
-import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, fireEvent, waitFor } from '@testing-library/preact'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { render, fireEvent, waitFor, within } from '@testing-library/preact'
 
 vi.mock('@/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), delete: vi.fn() },
 }))
-vi.mock('preact-iso', () => ({ useLocation: () => ({ route: vi.fn() }) }))
+const loc = vi.hoisted(() => ({ url: '/highlights/archive', route: vi.fn() }))
+vi.mock('preact-iso', () => ({ useLocation: () => loc }))
 vi.mock('@/components/Toast', () => ({ showToast: vi.fn() }))
 const wsHandlers = vi.hoisted(() => new Map<string, () => void>())
 vi.mock('@/ws', () => ({
@@ -12,121 +13,189 @@ vi.mock('@/ws', () => ({
 }))
 
 import { api } from '@/api'
-import HighlightArchiveTab, { buildMonthGrid } from './HighlightArchiveTab'
+import { currentUser } from '@/store/auth'
+import type { HighlightFrame, HighlightInboxItem } from '@/types'
+import HighlightArchiveTab from './HighlightArchiveTab'
 
-describe('buildMonthGrid', () => {
-  // October 2026 opens on a Thursday and has 31 days.
-  it('Monday start: Mon-first header, three leading blanks', () => {
-    const g = buildMonthGrid(2026, 9, 0)
-    expect(g.weekdayLabels).toEqual(['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'])
-    expect(g.cells.slice(0, 3)).toEqual([null, null, null])
-    expect(g.cells[3]?.date).toBe('2026-10-01')
-  })
+const NOW = new Date('2026-10-25T12:00:00Z')
+const D = 24 * 3_600_000
 
-  it('Sunday start: Sun-first header, four leading blanks', () => {
-    const g = buildMonthGrid(2026, 9, 6)
-    expect(g.weekdayLabels).toEqual(['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'])
-    expect(g.cells.slice(0, 4)).toEqual([null, null, null, null])
-    expect(g.cells[4]?.date).toBe('2026-10-01')
-  })
+function frame(id: string, hid: string, at: string, extra: Partial<HighlightFrame> = {}): HighlightFrame {
+  return {
+    id, highlight_id: hid, sequence: 1, frame_type: 'image',
+    media_url: `api/media/${id}.webp?sig=x`, caption_text: null, caption_emoji: null,
+    duration_ms: null, created_at: at, ...extra,
+  }
+}
 
-  it('a month opening on Sunday has no lead under Sunday start and six under Monday start', () => {
-    // 1 Nov 2026 is a Sunday.
-    expect(buildMonthGrid(2026, 10, 6).cells[0]?.date).toBe('2026-11-01')
-    const mon = buildMonthGrid(2026, 10, 0)
-    expect(mon.cells.slice(0, 6).every(c => c === null)).toBe(true)
-    expect(mon.cells[6]?.date).toBe('2026-11-01')
-  })
+function item(
+  id: string, author: string, name: string, frames: HighlightFrame[],
+  extra: { seen_by?: number; expires?: string; label?: string } = {},
+): HighlightInboxItem {
+  return {
+    highlight: {
+      id, author_user_id: author, highlight_date: frames[0].created_at.slice(0, 10),
+      audience_kind: 'all_paired', audience_label: extra.label ?? 'paired',
+      created_at: frames[0].created_at,
+      expires_at: extra.expires ?? new Date(NOW.getTime() + 20 * D).toISOString(),
+      author: { display_name: name, picture_url: null },
+    },
+    frames,
+    unseen_count: 0,
+    ...(extra.seen_by === undefined ? {} : { seen_by: extra.seen_by }),
+  } as unknown as HighlightInboxItem
+}
 
-  it('pads to whole weeks (min 5 rows) so a 6-row month is not clipped', () => {
-    // Nov 2026 under Monday start: 6 lead + 30 days = 36 → 6 rows.
-    const g = buildMonthGrid(2026, 10, 0)
-    expect(g.cells.length).toBe(42)
-    expect(g.cells.filter(c => c !== null).length).toBe(30)
-    // Feb 2027 under Monday start: Mon 1 Feb, 28 days → pad to 35.
-    expect(buildMonthGrid(2027, 1, 0).cells.length).toBe(35)
+const mine = item('m1', 'me', 'Anna', [
+  frame('a1', 'm1', '2026-10-25T08:00:00Z'), frame('a2', 'm1', '2026-10-25T09:00:00Z'),
+], { seen_by: 3 })
+const hilde = item('o1', 'ru-hilde', 'Oma Hilde', [frame('h1', 'o1', '2026-10-15T10:00:00Z')],
+  { expires: new Date(NOW.getTime() + 4 * D).toISOString() })
+const sept = item('s1', 'ru-thomas', 'Thomas', [frame('t1', 's1', '2026-09-30T10:00:00Z')],
+  { label: 'just_you' })
+
+function serve(rows: () => HighlightInboxItem[]) {
+  vi.mocked(api.get).mockReset().mockImplementation(async (path: string) => {
+    if (path !== '/api/highlights') return []
+    return rows()
   })
+}
+
+beforeEach(() => {
+  process.env.TZ = 'UTC'
+  vi.useFakeTimers({ toFake: ['Date'] })
+  vi.setSystemTime(NOW)
+  loc.url = '/highlights/archive'
+  loc.route.mockReset()
+  currentUser.value = {
+    user_id: 'me', username: 'anna', display_name: 'Anna',
+    preferences_json: JSON.stringify({ highlights: { retention_days: 7 } }),
+  } as unknown as typeof currentUser.value
+})
+afterEach(() => {
+  vi.useRealTimers()
+  currentUser.value = null
 })
 
+describe('HighlightArchiveTab', () => {
+  it('lists days, not a month grid', async () => {
+    serve(() => [hilde, mine])
+    const { container, findByRole } = render(<HighlightArchiveTab />)
+    await findByRole('heading', { name: 'Sunday, October 25 · today' })
+    expect(container.querySelector('[role="grid"]')).toBeNull()
+    const days = [...container.querySelectorAll('h2')].map(h => h.textContent)
+    expect(days).toEqual(['Sunday, October 25 · today', 'Thursday, October 15'])
+  })
 
-describe('HighlightArchiveTab authors', () => {
-  afterEach(() => { vi.useRealTimers() })
+  it('a row opens the viewer by its link alone — one history entry (bug 22)', async () => {
+    serve(() => [mine])
+    const { findByRole } = render(<HighlightArchiveTab />)
+    const link = await findByRole('link', { name: /You/ })
+    expect(link.getAttribute('href')).toBe('/highlights/m1')
+    fireEvent.click(link)
+    // The router handles the click; the row must not push a second entry.
+    expect(loc.route).not.toHaveBeenCalled()
+  })
+
+  it('your row says how many frames and who saw it; others say when they end', async () => {
+    serve(() => [hilde, mine])
+    const { findByRole } = render(<HighlightArchiveTab />)
+    const own = await findByRole('link', { name: /You/ })
+    expect(own.textContent).toContain('2 frames')
+    expect(own.textContent).toContain('seen by 3')
+    expect(own.querySelectorAll('.sh-hl-thumb')).toHaveLength(2)
+    const other = await findByRole('link', { name: /Oma Hilde/ })
+    expect(other.textContent).toContain('ends in 4 days')
+    expect(other.textContent).not.toContain('seen by')
+  })
+
+  it('offers only months that have highlights and keeps the pick in the URL', async () => {
+    serve(() => [mine, sept])
+    const { findByRole, queryByRole } = render(<HighlightArchiveTab />)
+    const select = await findByRole('combobox', { name: 'Month' }) as HTMLSelectElement
+    expect([...select.options].map(o => o.textContent)).toEqual(['October 2026', 'September 2026'])
+    expect(queryByRole('link', { name: /Thomas/ })).toBeNull()
+    fireEvent.change(select, { target: { value: '2026-09' } })
+    expect(loc.route).toHaveBeenCalledWith('/highlights/archive?month=2026-09', true)
+  })
+
+  it('shows the month from the URL', async () => {
+    loc.url = '/highlights/archive?month=2026-09'
+    serve(() => [mine, sept])
+    const { findByRole, queryByRole } = render(<HighlightArchiveTab />)
+    expect(await findByRole('link', { name: /Thomas/ })).toBeTruthy()
+    expect(queryByRole('link', { name: /You/ })).toBeNull()
+  })
+
+  it('Only mine is a toggle in the URL', async () => {
+    serve(() => [mine, hilde])
+    const { findByRole } = render(<HighlightArchiveTab />)
+    const toggle = await findByRole('button', { name: 'Only mine' })
+    expect(toggle.getAttribute('aria-pressed')).toBe('false')
+    fireEvent.click(toggle)
+    expect(loc.route).toHaveBeenCalledWith('/highlights/archive?mine=1', true)
+  })
+
+  it('Only mine with nothing of yours offers a way back', async () => {
+    loc.url = '/highlights/archive?mine=1'
+    serve(() => [hilde])
+    const { findByRole } = render(<HighlightArchiveTab />)
+    await findByRole('heading', { name: 'None of your highlights are in the archive' })
+    expect((await findByRole('button', { name: 'Only mine' })).getAttribute('aria-pressed')).toBe('true')
+    fireEvent.click(await findByRole('button', { name: "Show everyone's" }))
+    expect(loc.route).toHaveBeenCalledWith('/highlights/archive', true)
+  })
+
+  it('says honestly how long highlights stay, with your own setting', async () => {
+    serve(() => [mine])
+    const { findByText } = render(<HighlightArchiveTab />)
+    const note = await findByText(/Each person decides how long their highlights stay/)
+    expect(note.textContent).toContain('Yours stay 7 days.')
+    const link = within(note.closest('p')!).getByRole('link', { name: 'Change in Settings' })
+    expect(link.getAttribute('href')).toBe('/settings#highlights')
+  })
+
+  it('groups by the viewer\'s local day (B23)', async () => {
+    // 23:30 UTC on the 24th is Sunday the 25th in Berlin.
+    process.env.TZ = 'Europe/Berlin'
+    serve(() => [item('b1', 'ru-b', 'Bert', [frame('b1f', 'b1', '2026-10-24T23:30:00Z')])])
+    const { findByRole } = render(<HighlightArchiveTab />)
+    await findByRole('heading', { name: 'Sunday, October 25 · today' })
+  })
 
   it('names a friend from another household by the server\'s author, with their picture', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] })
-    vi.setSystemTime(new Date('2026-05-15T12:00:00Z'))
-    vi.mocked(api.get).mockResolvedValue([{
-      highlight: {
-        id: 'h1', author_user_id: 'ru-amaka', highlight_date: '2026-05-04',
-        audience_kind: 'all_paired', audience: [],
-        created_at: '2026-05-04T08:00:00Z', expires_at: '2026-06-04T08:00:00Z',
-        author: {
-          display_name: 'Amaka Okafor',
-          picture_url: 'api/users/ru-amaka/picture?v=1&sig=s',
-        },
-      },
-      frames: [],
-      unseen_count: 0,
-    }])
+    serve(() => [item('h1', 'ru-amaka', 'Amaka Okafor', [frame('f', 'h1', '2026-10-20T10:00:00Z')])])
     const { container, findByRole } = render(<HighlightArchiveTab />)
-    fireEvent.click(await findByRole('button', { name: /May 4, 2026/ }))
-    await waitFor(() => expect(
-      container.querySelector('.sh-highlight-archive-tile-meta strong')!.textContent,
-    ).toBe('Amaka Okafor'))
-    expect(container.textContent).not.toContain('Someone')
+    const row = await findByRole('link', { name: /Amaka Okafor/ })
     expect(container.textContent).not.toContain('ru-amaka')
-    const img = container.querySelector('.sh-highlight-archive-tile-meta img')
-    expect(img?.getAttribute('src')).toBe('api/users/ru-amaka/picture?v=1&sig=s')
-  })
-})
-
-
-describe('HighlightArchiveTab day keys west of UTC', () => {
-  const prevTz = process.env.TZ
-  afterEach(() => {
-    process.env.TZ = prevTz
-    vi.useRealTimers()
+    expect(row.querySelector('img.sh-avatar, .sh-avatar img, img')).toBeTruthy()
   })
 
-  it('labels the month and the selected day with the day key, not the day before', async () => {
-    // ``highlight_date`` is a UTC ``YYYY-MM-DD`` key. Read as UTC
-    // midnight in Los Angeles that instant is still the previous
-    // evening — the header must not show 3 May / April.
-    process.env.TZ = 'America/Los_Angeles'
-    vi.useFakeTimers({ toFake: ['Date'] })
-    vi.setSystemTime(new Date('2026-05-15T12:00:00Z'))
-    vi.mocked(api.get).mockResolvedValue([{
-      highlight: {
-        id: 'h1', author_user_id: 'u1', highlight_date: '2026-05-04',
-        audience_kind: 'all_paired', audience: [],
-        created_at: '2026-05-04T08:00:00Z', expires_at: '2026-06-04T08:00:00Z',
-      },
-      frames: [],
-      unseen_count: 0,
-    }])
-    const { container, findByRole } = render(<HighlightArchiveTab />)
-    const day = await findByRole('button', { name: /May 4, 2026/ })
-    expect(container.querySelector('h2')!.textContent).toBe('May 2026')
-    fireEvent.click(day)
-    await waitFor(() => expect(
-      container.querySelector('.sh-highlight-archive-day-panel h3')!.textContent,
-    ).toBe('Monday, May 4, 2026'))
+  it('nothing at all is the empty state, not an empty month', async () => {
+    serve(() => [])
+    const { findByRole, queryByRole } = render(<HighlightArchiveTab />)
+    await findByRole('heading', { name: 'No highlights in the archive yet' })
+    expect(queryByRole('combobox')).toBeNull()
   })
-})
 
-describe('HighlightArchiveTab when a load fails', () => {
-  it('a failed load is an alert with Try again instead of an empty month', async () => {
+  it('a failed load is an alert with Try again instead of an empty list', async () => {
     let fail = true
-    vi.mocked(api.get).mockReset().mockImplementation(async () => {
-      if (fail) throw new Error('offline')
-      return []
-    })
+    serve(() => { if (fail) throw new Error('offline'); return [mine] })
     const { findByRole, container } = render(<HighlightArchiveTab />)
     expect((await findByRole('alert')).textContent).toContain("Couldn't load highlights")
-    expect(container.querySelector('.sh-highlight-archive-grid')).toBeNull()
     fail = false
     fireEvent.click(await findByRole('button', { name: 'Try again' }))
-    await waitFor(() => expect(container.querySelector('.sh-highlight-archive-grid')).not.toBeNull())
+    await findByRole('link', { name: /You/ })
     expect(container.querySelector('[role="alert"]')).toBeNull()
+  })
+
+  it('refreshes on a live highlight frame', async () => {
+    let rows = [hilde]
+    serve(() => rows)
+    const { findByRole } = render(<HighlightArchiveTab />)
+    await findByRole('link', { name: /Oma Hilde/ })
+    rows = [hilde, mine]
+    wsHandlers.get('highlight.frame_added')!()
+    await waitFor(async () => expect(await findByRole('link', { name: /You/ })).toBeTruthy())
   })
 })

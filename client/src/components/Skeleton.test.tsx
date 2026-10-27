@@ -8,7 +8,7 @@ import {
   DmInboxSkeleton,
   HighlightRowsSkeleton,
   CalendarSkeleton,
-  MonthGridSkeleton,
+  HighlightArchiveSkeleton,
   SpaceListSkeleton,
   BazaarSkeleton,
   CommentThreadSkeleton,
@@ -79,9 +79,11 @@ describe('Page-shaped skeletons', () => {
     expect(container.querySelectorAll('.sh-hl-row').length).toBe(3)
   })
 
-  it('MonthGridSkeleton renders a 35-cell month grid', () => {
-    const { container } = render(<MonthGridSkeleton />)
-    expect(container.querySelectorAll('.sh-skeleton-calendar-day').length).toBe(35)
+  it('HighlightArchiveSkeleton renders two days of rows, no month grid', () => {
+    const { container } = render(<HighlightArchiveSkeleton />)
+    expect(container.querySelectorAll('.sh-hl-arch-day').length).toBe(2)
+    expect(container.querySelectorAll('.sh-hl-arch-row').length).toBe(4)
+    expect(container.querySelector('[role="grid"]')).toBeNull()
   })
 
   it('CalendarSkeleton renders Upcoming rows (the default view)', () => {

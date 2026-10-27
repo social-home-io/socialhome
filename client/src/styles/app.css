@@ -2152,19 +2152,6 @@ textarea { min-height: 80px; resize: vertical; line-height: 1.5; }
 
 /* Calendar / spaces / bazaar / tasks skeleton helpers — keep the
    layouts close to the rendered shape so the swap is in-place. */
-.sh-skeleton-calendar-grid {
-  display: grid;
-  grid-template-columns: repeat(7, 1fr);
-  gap: var(--sh-space-xs);
-  margin-top: var(--sh-space-md);
-}
-.sh-skeleton-calendar-day {
-  display: block;
-}
-.sh-skeleton-calendar-controls {
-  display: flex; align-items: center; justify-content: space-between; gap: var(--sh-space-sm);
-  padding: var(--sh-space-sm);
-}
 
 .sh-bazaar--skeleton .sh-bazaar-card--skeleton {
   display: flex;
@@ -19550,6 +19537,104 @@ a.sh-hl-row:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-off
 .sh-hl-archive-link:hover { text-decoration: underline; }
 .sh-hl-today--skeleton { pointer-events: none; }
 
+/* Archive (``HighlightArchiveTab``) — a list of days: month select +
+   Only mine, a local-time day heading, one row per person with a frame
+   strip. Logical properties only. */
+.sh-hl-arch { gap: var(--sh-space-lg); padding-block-start: var(--sh-space-md); }
+.sh-hl-arch--skeleton { pointer-events: none; }
+.sh-hl-arch-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sh-space-sm);
+}
+.sh-hl-arch-month select {
+  width: auto;
+  min-height: 40px;
+  padding-inline: 12px 32px;
+  border-radius: var(--sh-radius-full);
+  font: inherit;
+  font-size: var(--sh-font-size-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+.sh-hl-arch-toggle {
+  min-height: 40px;
+  padding-inline: 14px;
+  border: 1px solid var(--sh-border-strong);
+  border-radius: var(--sh-radius-full);
+  background: var(--sh-bg);
+  color: var(--sh-text);
+  font: inherit;
+  font-size: var(--sh-font-size-sm);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.sh-hl-arch-toggle:hover { border-color: var(--sh-text-muted); }
+.sh-hl-arch-toggle.is-on {
+  background: var(--sh-primary-soft);
+  border-color: var(--sh-primary);
+  color: var(--sh-primary-on-soft);
+  font-weight: 600;
+}
+.sh-hl-arch-toggle:focus-visible,
+.sh-hl-arch-month select:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: 1px; }
+.sh-hl-arch-day { display: flex; flex-direction: column; gap: var(--sh-space-sm); }
+.sh-hl-arch-day__title {
+  margin: 0;
+  font-family: var(--sh-font-family-display);
+  font-size: var(--sh-font-size-lg);
+}
+.sh-hl-arch-row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
+  padding: var(--sh-space-sm) var(--sh-space-md) var(--sh-space-md);
+  color: inherit;
+  text-decoration: none;
+}
+a.sh-hl-arch-row:hover { background: var(--sh-bg-secondary); }
+a.sh-hl-arch-row:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: -2px; }
+.sh-hl-arch-row__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  min-width: 0;
+}
+.sh-hl-arch-row__name {
+  min-width: 0;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sh-hl-arch-row__ends { display: inline-flex; align-items: center; gap: 4px; }
+.sh-hl-arch-strip {
+  display: flex;
+  gap: 6px;
+  margin-block-start: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+.sh-hl-arch-strip__item { position: relative; display: inline-flex; flex-shrink: 0; }
+.sh-hl-arch-strip .sh-hl-thumb { width: 64px; height: 88px; }
+.sh-hl-arch-strip__more {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  border-radius: var(--sh-radius-sm);
+  background: rgb(0 0 0 / 0.55);
+  color: #fff;
+  font-weight: 700;
+}
+.sh-hl-arch-note { margin: 0; font-size: var(--sh-font-size-sm); }
+.sh-hl-arch-note a { display: inline-flex; align-items: center; min-height: 36px; font-weight: 600; }
+@media (max-width: 400px) {
+  .sh-hl-arch-strip { gap: 4px; }
+  .sh-hl-arch-strip .sh-hl-thumb { width: 56px; height: 76px; }
+}
+
 /* Home's "today" card: highlight rings + "Momentum · N new". */
 .sh-home-today {
   display: flex;
@@ -20065,164 +20150,6 @@ span.sh-hlv__who { cursor: default; }
 .sh-hlv-seen { list-style: none; margin: 0; padding: 0; }
 .sh-hlv-seen__row + .sh-hlv-seen__row { box-shadow: 0 -1px 0 rgba(255, 255, 255, 0.08); }
 .sh-hlv-seen__emoji { font-size: 1.4rem; line-height: 1; }
-
-/* Highlight archive — month-grid browser at /highlights/archive. Reuses
- * the same 5×7 layout as the calendar route: day cells with highlights
- * carry the most-recent first-frame thumbnail and a +N chip when
- * the day has more than one highlight. */
-.sh-highlight-archive {
-  max-width: 920px;
-  margin: 0 auto;
-  display: flex;
-  flex-direction: column;
-  gap: var(--sh-space-md);
-}
-.sh-highlight-archive-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--sh-space-sm);
-}
-.sh-highlight-archive-grid {
-  display: grid;
-  grid-template-columns: repeat(7, 1fr);
-  gap: var(--sh-space-xs);
-}
-.sh-highlight-archive-dow {
-  font-size: var(--sh-font-size-xs);
-  color: var(--sh-text-muted);
-  text-align: center;
-  padding: 2px 0;
-}
-.sh-highlight-archive-day {
-  position: relative;
-  aspect-ratio: 1 / 1;
-  background: var(--sh-bg-secondary);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-sm);
-  padding: 0;
-  overflow: hidden;
-  display: flex;
-  align-items: flex-start;
-  justify-content: flex-start;
-  font-family: inherit;
-  font-size: inherit;
-  color: var(--sh-text);
-  cursor: default;
-}
-.sh-highlight-archive-day--has {
-  cursor: pointer;
-  background: var(--sh-bg);
-}
-.sh-highlight-archive-day--has:hover {
-  border-color: var(--sh-primary);
-}
-.sh-highlight-archive-day:focus-visible {
-  outline: 2px solid var(--sh-focus-ring);
-  outline-offset: 2px;
-}
-.sh-highlight-archive-day--today {
-  outline: 2px solid var(--sh-primary);
-  outline-offset: -2px;
-}
-.sh-highlight-archive-day--selected {
-  border-color: var(--sh-primary);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--sh-primary) 30%, transparent);
-}
-.sh-highlight-archive-day--pad {
-  background: transparent;
-  border: 1px dashed var(--sh-border);
-}
-.sh-highlight-archive-day-num {
-  position: absolute;
-  top: 4px;
-  left: 6px;
-  font-size: var(--sh-font-size-xs);
-  font-weight: 600;
-  color: var(--sh-text);
-  background: rgba(255, 255, 255, 0.85);
-  border-radius: var(--sh-radius-sm);
-  padding: 0 4px;
-  z-index: 1;
-}
-.sh-theme-dark .sh-highlight-archive-day-num {
-  background: rgba(0, 0, 0, 0.55);
-}
-.sh-highlight-archive-day-thumb {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-.sh-highlight-archive-day-thumb--video {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 1.25rem;
-  background: var(--sh-bg-tertiary);
-}
-.sh-highlight-archive-day-more {
-  position: absolute;
-  bottom: 4px;
-  right: 6px;
-  font-size: var(--sh-font-size-xs);
-  font-weight: 600;
-  background: var(--sh-bg);
-  border-radius: var(--sh-radius-full);
-  padding: 0 6px;
-  z-index: 1;
-}
-.sh-highlight-archive-day-panel {
-  display: flex;
-  flex-direction: column;
-  gap: var(--sh-space-sm);
-  padding: var(--sh-space-md);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-md);
-  background: var(--sh-bg);
-}
-.sh-highlight-archive-day-list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--sh-space-xs);
-}
-.sh-highlight-archive-tile {
-  display: flex;
-  align-items: center;
-  gap: var(--sh-space-sm);
-  padding: var(--sh-space-xs);
-  border-radius: var(--sh-radius-sm);
-  text-decoration: none;
-  color: inherit;
-  transition: background var(--sh-transition-fast);
-}
-.sh-highlight-archive-tile:hover {
-  background: var(--sh-bg-secondary);
-}
-.sh-highlight-archive-tile-thumb {
-  flex: 0 0 64px;
-  width: 64px;
-  height: 64px;
-  border-radius: var(--sh-radius-sm);
-  object-fit: cover;
-  background: var(--sh-bg-secondary);
-}
-.sh-highlight-archive-tile-thumb--video {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 1.5rem;
-}
-.sh-highlight-archive-tile-meta {
-  display: flex;
-  align-items: center;
-  gap: var(--sh-space-sm);
-  flex: 1 1 auto;
-}
 
 /* Composer (``HighlightComposerPage``) — one page, strip first on phones.
  * Desktop: the preview (9:16, 260 px) on the inline-start side, the
@@ -21569,9 +21496,6 @@ span.sh-hlv__who { cursor: default; }
   }
   .sh-highlight-ring-label {
     max-width: 64px;
-  }
-  .sh-highlight-archive-day-num {
-    font-size: 0.75rem;
   }
 }
 
