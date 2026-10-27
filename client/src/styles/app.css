@@ -3278,6 +3278,67 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
 }
 .sh-comment-item:hover { background: var(--sh-bg-secondary); }
 .sh-comment-item--skeleton:hover { background: transparent; }
+/* The comment a notification pointed at (``?comment=``) — the
+ * moment-reply pattern: a soft tint and an accent edge. */
+.sh-comment-item--picked,
+.sh-comment-item--picked:hover {
+  background: var(--sh-primary-soft);
+  box-shadow: inset 3px 0 0 var(--sh-primary);
+}
+[dir='rtl'] .sh-comment-item--picked { box-shadow: inset -3px 0 0 var(--sh-primary); }
+.sh-comment-item:focus { outline: none; }
+.sh-comment-item:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: -2px; }
+
+/* One post with its comments — the page a post / comment notification
+ * opens (``/post/{id}``, a space's ``?post={id}``). */
+.sh-post-permalink {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-md);
+  padding-top: var(--sh-space-sm);
+  min-width: 0;
+}
+.sh-post-permalink__back {
+  display: inline-flex;
+  align-items: center;
+  align-self: flex-start;
+  gap: 6px;
+  min-height: 40px;
+  padding-inline: 4px 10px;
+  margin-inline-start: -4px;
+  border-radius: var(--sh-radius-md);
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+  font-weight: 600;
+  text-decoration: none;
+}
+.sh-post-permalink__back .sh-flip-rtl { display: inline-block; }
+.sh-post-permalink__back:hover { color: var(--sh-text); background: var(--sh-bg-secondary); }
+.sh-post-permalink__back:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: 2px; }
+.sh-post-permalink__comments {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-sm);
+  background: var(--sh-bg);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  min-width: 0;
+}
+/* The card is the thread's frame: no second rule above it. */
+.sh-post-permalink__comments > .sh-comments {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+.sh-post-permalink__note {
+  margin: 0;
+  padding-block: var(--sh-space-sm);
+  padding-inline: var(--sh-space-md);
+  border: 1px dashed var(--sh-border-strong);
+  border-radius: var(--sh-radius-md);
+  font-size: var(--sh-font-size-sm);
+}
 .sh-comment-body {
   flex: 1;
   min-width: 0;

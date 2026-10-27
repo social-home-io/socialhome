@@ -2,13 +2,14 @@ import { describe, it, expect } from 'vitest'
 import { routes } from './router'
 
 describe('router', () => {
-  it('defines 45 routes', () => {
+  it('defines 46 routes', () => {
     // Routes added / removed across recent passes:
     //   /dms/:id/calls   — per-conversation call history
     //   /calls/:callId   — in-call page
     //   /join            — space invite deep link (§23.62)
     //   /parent          — parent dashboard (§CP)
     //   /feed            — explicit household-feed route (§23 dashboard)
+    //   /post/:id        — a household post's permalink (notification target)
     //   /spaces/:id/settings/:section? — space settings, one page, a URL per section
     //   /spaces/:id/about — public-style space landing (parallel to GFS)
     //   /spaces/browse   — redirects to the Spaces page's Discover
@@ -23,7 +24,7 @@ describe('router', () => {
     //                      (3 routes collapsed into 1 hub).
     //   /apps            — Social Home Apps browse/install page (§Apps)
     //   /apps/:appId     — sandboxed AppHost iframe launcher (§Apps)
-    expect(Object.keys(routes).length).toBe(45)
+    expect(Object.keys(routes).length).toBe(46)
   })
 
   it('a space and its sections are ONE route, after the fixed space sub-pages', () => {

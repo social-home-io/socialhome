@@ -8344,6 +8344,18 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         limit = max(1, min(int(limit), 50))
         return await self._posts.list_feed(space_id, before=before, limit=limit)
 
+    async def read_post(
+        self, space_id: str, post_id: str, *, viewer_user_id: str
+    ) -> Post:
+        """One live post of ``space_id`` for its permalink (a notification
+        opens it). The feed's read gate (any seat, 403 otherwise); a post
+        that is deleted or belongs to another space is ``KeyError`` (404)."""
+        await self.require_reader(space_id, viewer_user_id)
+        post = await self.get_space_post(space_id, post_id)
+        if post is None or post.deleted:
+            raise KeyError(f"space post {post_id!r} not found")
+        return post
+
     async def get_space(self, space_id: str) -> Space | None:
         """Public read of a space row (``None`` when missing). Used by
         sibling services (e.g. :class:`BazaarService`) that need to read

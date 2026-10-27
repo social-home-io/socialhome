@@ -6,6 +6,8 @@ const MomentumPage = lazy(() => import('@/features/momentum/MomentumPage'))
 export const routes: Record<string, ReturnType<typeof lazy>> = {
   '/':               lazy(() => import('@/features/feed/LandingDispatch')),
   '/feed':           lazy(() => import('@/features/feed/FeedPage')),
+  // One household post with its comments — a notification's target.
+  '/post/:id':       lazy(() => import('@/features/feed/PostPermalinkPage')),
   '/spaces':         lazy(() => import('@/features/spaces/SpaceListPage')),
   '/spaces/browse':  lazy(() => import('@/features/spaces/SpaceBrowseRedirect')),
   '/spaces/:id/about': lazy(() => import('@/features/spaces/SpacePublicDetailPage')),

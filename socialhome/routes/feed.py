@@ -2,6 +2,7 @@
 
 GET    /api/feed                                   — list feed posts
 POST   /api/feed/posts                             — create a post
+GET    /api/feed/posts/{id}                        — one post (its permalink)
 PATCH  /api/feed/posts/{id}                        — edit a post
 DELETE /api/feed/posts/{id}                        — delete a post
 POST   /api/feed/posts/{id}/reactions              — add a reaction
@@ -83,6 +84,28 @@ def _stamp_video_poster(request: web.Request, payload: dict, media_url) -> None:
     )
 
 
+def _post_payload(request: web.Request, post, statuses: dict[str, str]):
+    """One post as the SPA reads it: signed media, and for a video its
+    live ``media_status`` (from *statuses*, the batched transcode read)
+    plus a signed poster."""
+    payload = _serialise_signed(request, post)
+    if isinstance(payload, dict) and post.type is PostType.VIDEO:
+        fn = media_filename(post.media_url)
+        payload["media_status"] = statuses.get(fn, READY) if fn else READY
+        _stamp_video_poster(request, payload, post.media_url)
+    return payload
+
+
+def _video_files(posts) -> list[str]:
+    """The media file names of the video posts among *posts*."""
+    return [
+        fn
+        for post in posts
+        if post.type is PostType.VIDEO
+        and (fn := media_filename(post.media_url)) is not None
+    ]
+
+
 def _coerce_datetimes(d: dict) -> dict:
     """Convert datetime values to ISO strings and frozensets to sorted lists."""
     out: dict = {}
@@ -137,26 +160,18 @@ class FeedCollectionView(BaseView):
         # Video posts transcode in the background — surface a live
         # ``media_status`` so the SPA renders a "Processing…" placeholder
         # until the ``.webm`` exists. One batched repo read per request.
-        video_fns = [
-            fn
-            for post, _ in pairs
-            if post.type is PostType.VIDEO
-            and (fn := media_filename(post.media_url)) is not None
-        ]
-        statuses = await self.svc(media_transcode_repo_key).status_for(video_fns)
+        statuses = await self.svc(media_transcode_repo_key).status_for(
+            _video_files(post for post, _ in pairs)
+        )
         out: list[object] = []
         for post, latest in pairs:
-            payload = _serialise_signed(self.request, post)
+            payload = _post_payload(self.request, post, statuses)
             if isinstance(payload, dict):
                 payload["latest_comment"] = (
                     _serialise_signed(self.request, latest)
                     if latest is not None
                     else None
                 )
-                if post.type is PostType.VIDEO:
-                    fn = media_filename(post.media_url)
-                    payload["media_status"] = statuses.get(fn, READY) if fn else READY
-                    _stamp_video_poster(self.request, payload, post.media_url)
             out.append(payload)
         return web.json_response(out)
 
@@ -211,7 +226,19 @@ def _extract_location(body: dict) -> LocationData | None:
 
 
 class PostDetailView(BaseView):
-    """PATCH/DELETE /api/feed/posts/{id} — edit or delete a post."""
+    """GET/PATCH/DELETE /api/feed/posts/{id} — read, edit or delete a post.
+
+    GET is the post's permalink (a notification opens it): 404 once the
+    post is deleted, or when the viewer blocked its author."""
+
+    async def get(self) -> web.Response:
+        post = await self.svc(feed_service_key).read_post(
+            self.match("id"), viewer_user_id=self.user.user_id
+        )
+        statuses = await self.svc(media_transcode_repo_key).status_for(
+            _video_files([post])
+        )
+        return web.json_response(_post_payload(self.request, post, statuses))
 
     async def patch(self) -> web.Response:
         ctx = self.user

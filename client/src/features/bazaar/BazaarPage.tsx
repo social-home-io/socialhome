@@ -11,12 +11,14 @@
  * frame so the grid updates live — no manual refresh needed.
  */
 import { useEffect } from 'preact/hooks'
+import { useLocation } from 'preact-iso'
 import { t, tValue } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { ws } from '@/ws'
 import { Button } from '@/components/Button'
+import { showToast } from '@/components/Toast'
 import { ProtectedNotice, isRestricted } from '@/components/ProtectedNotice'
 import { BazaarSkeleton } from '@/components/Skeleton'
 import { BazaarPostBody, formatBazaarAmount } from '@/components/BazaarPostBody'
@@ -63,9 +65,26 @@ async function reloadSaved() {
   )
 }
 
+/** ``?listing={post_id}`` (a notification's link): open that listing.
+ *  One that is gone, or not visible to the viewer, says so. */
+async function openLinkedListing(postId: string) {
+  selected.value = null
+  try {
+    selected.value = await api.get(`/api/bazaar/${encodeURIComponent(postId)}`) as BazaarListing
+  } catch {
+    showToast(t('bazaar.listing_gone'), 'info')
+  }
+}
+
 export default function BazaarPage() {
   useTitle(t('nav.bazaar'))
   const me = currentUser.value?.user_id
+  const loc = useLocation() as ReturnType<typeof useLocation> | undefined
+  const linkedListing = loc?.query?.listing ?? null
+
+  useEffect(() => {
+    if (linkedListing) void openLinkedListing(linkedListing)
+  }, [linkedListing])
 
   useEffect(() => {
     void Promise.all([

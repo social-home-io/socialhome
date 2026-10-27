@@ -27,6 +27,7 @@
  * (``features/tasks/scope.ts``); the default is the household.
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
+import { useLocation } from 'preact-iso'
 import { Button } from '@/components/Button'
 import { showToast } from '@/components/Toast'
 import { confirmDialog } from '@/components/confirm'
@@ -113,6 +114,24 @@ function focusTask(id: string) {
   })
 }
 
+/** ``?list={id}&task={id}`` — a task a link (a notification) points at.
+ *  Selects that list once the lists are loaded; ``listGone`` when the
+ *  list isn't one this viewer has (deleted, or never theirs). */
+function useLinkedTask(
+  store: { activeListId: { value: string | null } },
+  visibleLists: readonly TaskListEntry[],
+  listsState: string,
+): { listId: string | null; taskId: string | null; listGone: boolean } {
+  const loc = useLocation() as ReturnType<typeof useLocation> | undefined
+  const listId = loc?.query?.list ?? null
+  const taskId = loc?.query?.task ?? null
+  const known = !!listId && visibleLists.some(l => l.id === listId)
+  useEffect(() => {
+    if (known && listId) store.activeListId.value = listId
+  }, [listId, known]) // eslint-disable-line react-hooks/exhaustive-deps
+  return { listId, taskId, listGone: !!listId && listsState === 'ready' && !known }
+}
+
 export default function TaskPage() {
   useTitle(t('tasks.title'))
   return <TasksView />
@@ -147,6 +166,7 @@ export function TasksView() {
   const activeId = visibleLists.some(l => l.id === chosen) ? chosen : visibleLists[0]?.id ?? null
   const activeList = visibleLists.find(l => l.id === activeId) ?? null
   const [view, setView] = useTaskView(activeId)
+  const linked = useLinkedTask(store, visibleLists, listsLoad.state)
 
   const tasksLoad = useLoad(
     () => (activeId ? store.loadList(activeId) : Promise.resolve()),
@@ -157,6 +177,24 @@ export function TasksView() {
       onRecovered: () => requestAnimationFrame(() => addRef.current?.focus()),
     },
   )
+
+  // A task a link pointed at (a notification): open it, once its list
+  // is on screen. Gone (deleted, or not visible here) → say so.
+  const linkSettled = useRef<string | null>(null)
+  useEffect(() => {
+    const id = linked.taskId
+    if (!id || linkSettled.current === id) return
+    if (linked.listGone) {
+      linkSettled.current = id
+      showToast(t('tasks.link_gone'), 'info')
+      return
+    }
+    if (activeId !== linked.listId || tasksLoad.state !== 'ready') return
+    linkSettled.current = id
+    const task = store.findTask(id)
+    if (task) setEditing(task)
+    else showToast(t('tasks.link_gone'), 'info')
+  }, [linked.taskId, linked.listGone, activeId, tasksLoad.state]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const drag = useDragBuckets<TaskStatus>({
     mime: DRAG_TASK_MIME,

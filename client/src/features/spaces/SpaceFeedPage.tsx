@@ -20,6 +20,7 @@ import { SpaceLocationCard } from '@/components/SpaceLocationCard'
 import { SpaceMemberList } from '@/components/SpaceMemberList'
 import GalleryPage from '@/features/gallery/GalleryPage'
 import { PostCard } from '@/components/PostCard'
+import { PostPermalink } from '@/components/PostPermalink'
 import { Composer, type ComposerExtras } from '@/components/Composer'
 import { contentWrite } from '@/utils/contentWrite'
 import { PendingReviewStrip } from '@/components/PendingReviewStrip'
@@ -237,6 +238,10 @@ export default function SpaceFeedPage() {
   // ``/spaces/:id/:section`` the rest — Refresh and Back keep it.
   const parsedSection = parseSpaceSection(params.section)
   const section = parsedSection ?? 'feed'
+  // ``?post={id}`` (a notification's link): the Feed shows that post
+  // alone with its comments (``?comment={cid}`` picked out).
+  const focusPost = section === 'feed' ? (query?.post ?? null) : null
+  const feedList = section === 'feed' && !focusPost
   const loc = useLocation() as ReturnType<typeof useLocation> | undefined
 
   // Apply the space's custom theme (§23 customization). The hook
@@ -604,7 +609,7 @@ export default function SpaceFeedPage() {
       />
       {/* The hero and "Needs you" open the Feed only: the other sections
        *  are tools, and the top bar already names the space. */}
-      {s && section === 'feed' && (
+      {s && feedList && (
         <SpaceHero
           name={s.name}
           emoji={s.emoji ?? null}
@@ -621,7 +626,7 @@ export default function SpaceFeedPage() {
           links={quickLinks}
         />
       )}
-      {s && section === 'feed' && canModerateQueue && (
+      {s && feedList && canModerateQueue && (
         <SpaceNeedsYou
           spaceId={spaceId}
           attention={attention?.spaceId === spaceId ? attention : null}
@@ -632,7 +637,7 @@ export default function SpaceFeedPage() {
         />
       )}
       {/* A new space asks its owner once what it's for (owner decision 3). */}
-      {s && section === 'feed' && viewerRole.value === 'owner' && !s.archived
+      {s && feedList && viewerRole.value === 'owner' && !s.archived
         && isSetupPending(spaceId) && (
         <SpaceSetupCard
           spaceId={spaceId}
@@ -642,7 +647,7 @@ export default function SpaceFeedPage() {
           onDone={() => { void loadSpaceHeader(spaceId) }}
         />
       )}
-      {s && section === 'feed' && settingsAuthority && !s.archived && membersShown === 1 && (
+      {s && feedList && settingsAuthority && !s.archived && membersShown === 1 && (
         <SpaceInviteFirst spaceId={spaceId} role={viewerRole.value} />
       )}
 
@@ -651,7 +656,18 @@ export default function SpaceFeedPage() {
                        canModerate={canModerate} archived={s?.archived === true} />
       )}
 
-      {section === 'feed' && (
+      {/* A post a link pointed at (``?post=``, a notification): that post
+       *  alone with its comments, a way back to the whole feed. */}
+      {focusPost && (
+        <PostPermalink
+          postId={focusPost}
+          spaceId={spaceId}
+          commentId={query?.comment ?? null}
+          backPath={spaceSectionPath(spaceId, 'feed')}
+        />
+      )}
+
+      {feedList && (
         <div class="sh-feed sh-space-feed-content">
           {viewerRole.value === 'subscriber' ? (
             <div class="sh-subscriber-banner" role="status">

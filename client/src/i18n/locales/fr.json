@@ -5371,5 +5371,16 @@
   "error.join_request_sent": "Votre demande a été envoyée aux admins.",
   "join_requests.near_edge": "Près de la limite",
   "join_requests.near_edge_hint": "Son domicile est près de la limite de votre zone — peut-être juste en dehors. C'est vous qui décidez.",
-  "space.join_landing.requested_title": "Demande envoyée"
+  "space.join_landing.requested_title": "Demande envoyée",
+  "page_title.post": "Publication",
+  "post.permalink.back": "Retour au fil",
+  "post.permalink.gone_title": "Cette publication n’est plus disponible",
+  "post.permalink.gone_body": "Elle a été supprimée, ou vous ne pouvez plus la voir.",
+  "post.permalink.failed_title": "Impossible de charger cette publication",
+  "post.permalink.failed_body": "Vérifiez votre connexion et réessayez.",
+  "post.permalink.react_failed": "Échec de la réaction : {error}",
+  "post.permalink.comments_aria": "Commentaires",
+  "post.permalink.comment_gone": "Ce commentaire n’est plus disponible.",
+  "tasks.link_gone": "Cette tâche n’est plus disponible.",
+  "bazaar.listing_gone": "Cette annonce n’est plus disponible."
 }

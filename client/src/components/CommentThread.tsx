@@ -51,6 +51,9 @@ interface CommentThreadProps {
   onReply: (parentId: string | null, content: string) => Promise<void>
   onDelete?: (commentId: string) => Promise<void> | void
   onEdit?: (commentId: string, content: string) => Promise<void>
+  /** The comment a link pointed at (``?comment=``): picked out. Every
+   *  comment carries ``id="comment-{id}"`` so the page can scroll to it. */
+  pickedId?: string | null
 }
 
 const replyTo = signal<string | null>(null)
@@ -116,7 +119,7 @@ function mentionAria(id: string, spaceId?: string | null) {
 }
 
 export function CommentThread(
-  { comments, spaceId, postId, onReply, onDelete, onEdit }: CommentThreadProps,
+  { comments, spaceId, postId, onReply, onDelete, onEdit, pickedId = null }: CommentThreadProps,
 ) {
   // Same 2-second cooldown the DM thread uses (DmThreadPage). The
   // server already throttles to 1 emit / sec internally; the client
@@ -187,14 +190,14 @@ export function CommentThread(
       {topLevel.map(c => (
         <div key={c.id} class="sh-comment">
           <CommentItem comment={c} spaceId={spaceId}
-            onDelete={onDelete} onEdit={onEdit}
+            onDelete={onDelete} onEdit={onEdit} picked={c.id === pickedId}
             onReplyClick={() =>
               replyTo.value = replyTo.value === c.id ? null : c.id} />
           {replies(c.id).length > 0 && (
             <div class="sh-comment-replies">
               {replies(c.id).map(r => (
                 <CommentItem key={r.id} comment={r} spaceId={spaceId}
-                  onDelete={onDelete} onEdit={onEdit} indent />
+                  onDelete={onDelete} onEdit={onEdit} indent picked={r.id === pickedId} />
               ))}
             </div>
           )}
@@ -261,14 +264,22 @@ export function CommentThread(
   )
 }
 
-function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent }: {
+function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent, picked }: {
   comment: Comment
   spaceId?: string | null
   onDelete?: (id: string) => Promise<void> | void
   onEdit?: (id: string, content: string) => Promise<void>
   onReplyClick?: () => void
   indent?: boolean
+  picked?: boolean
 }) {
+  // The row's anchor: ``id`` to scroll to, focusable for the jump, and
+  // marked when a link pointed at it.
+  const rowProps = {
+    id: `comment-${comment.id}`,
+    tabIndex: -1,
+    class: `sh-comment-item ${indent ? 'sh-comment--indent' : ''}${picked ? ' sh-comment-item--picked' : ''}`,
+  }
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(comment.content ?? '')
   const [saving, setSaving] = useState(false)
@@ -289,7 +300,7 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent 
 
   if (comment.content === null || comment.deleted) {
     return (
-      <div class={`sh-comment-item ${indent ? 'sh-comment--indent' : ''}`}>
+      <div {...rowProps}>
         <em class="sh-muted">(deleted)</em>
       </div>
     )
@@ -307,7 +318,7 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent 
       }
     }
     return (
-      <div class={`sh-comment-item ${indent ? 'sh-comment--indent' : ''}`}>
+      <div {...rowProps}>
         <Avatar name={authorName} src={avatarUrl} size={28} />
         <div class="sh-comment-body">
           <div class="sh-comment-bubble sh-comment-bubble--editing">
@@ -346,7 +357,7 @@ function CommentItem({ comment, spaceId, onDelete, onEdit, onReplyClick, indent 
 
   const hint = () => personHint(spaceId, comment.author)
   return (
-    <div class={`sh-comment-item ${indent ? 'sh-comment--indent' : ''}`}>
+    <div {...rowProps}>
       <PersonButton userId={comment.author} hint={hint}
         class="sh-person-btn--avatar" decorative>
         <Avatar name={authorName} src={avatarUrl} size={28} />

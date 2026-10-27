@@ -621,3 +621,56 @@ async def test_saved_video_post_media_status_processing(client):
     r = await client.get("/api/feed/saved", headers=_auth(client._admin_token))
     post = next(p for p in await r.json() if p["id"] == post_id)
     assert post["media_status"] == "processing"
+
+
+async def test_get_post_is_its_permalink(client):
+    """GET /api/feed/posts/{id} returns the one post (a bell opens it)."""
+    r = await client.post(
+        "/api/feed/posts",
+        json={"type": "text", "content": "permalink me"},
+        headers=_auth(client._admin_token),
+    )
+    post_id = (await r.json())["id"]
+    resp = await client.get(
+        f"/api/feed/posts/{post_id}", headers=_auth(client._bob_token)
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert (body["id"], body["content"]) == (post_id, "permalink me")
+
+
+async def test_get_post_deleted_or_unknown_is_404(client):
+    r = await client.post(
+        "/api/feed/posts",
+        json={"type": "text", "content": "gone soon"},
+        headers=_auth(client._admin_token),
+    )
+    post_id = (await r.json())["id"]
+    await client.delete(
+        f"/api/feed/posts/{post_id}", headers=_auth(client._admin_token)
+    )
+    for pid in (post_id, "no-such-post"):
+        resp = await client.get(
+            f"/api/feed/posts/{pid}", headers=_auth(client._bob_token)
+        )
+        assert resp.status == 404, pid
+
+
+async def test_get_post_of_a_blocked_author_is_404(client):
+    """The permalink hides what the feed hides: a blocked author's post."""
+    r = await client.post(
+        "/api/feed/posts",
+        json={"type": "text", "content": "from pascal"},
+        headers=_auth(client._admin_token),
+    )
+    post_id = (await r.json())["id"]
+    r = await client.post(
+        "/api/blocks",
+        json={"user_id": client._admin_uid},
+        headers=_auth(client._bob_token),
+    )
+    assert r.status in (200, 201, 204), await r.text()
+    resp = await client.get(
+        f"/api/feed/posts/{post_id}", headers=_auth(client._bob_token)
+    )
+    assert resp.status == 404

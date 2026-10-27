@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from collections import Counter
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
@@ -37,8 +38,10 @@ from socialhome.domain.events import (
     HighlightFrameReactionChanged,
     MomentCreated,
     PostEdited,
+    RemoteSpaceInviteDeclined,
     SpaceAdminSeedsRetiredAfterRestore,
     SpaceConfigChanged,
+    SpaceJoinDenied,
     SpaceJoinRequested,
     SpaceLocationFeatureEnabled,
     SpaceMemberJoined,
@@ -348,7 +351,8 @@ async def test_space_post_mentions_only_level_end_to_end(stack):
     ]
     assert [n.type for n in notes] == ["space_mention"]
     assert notes[0].title == "anna mentioned you in M"
-    assert notes[0].link_url == f"/spaces/{space.id}"
+    post = (await space_svc.list_feed(space.id, viewer_user_id=u["anna"].user_id))[0]
+    assert notes[0].link_url == f"/spaces/{space.id}?post={post.id}"
 
 
 async def test_space_post_mention_replaces_generic_for_level_all(stack):
@@ -1630,7 +1634,7 @@ async def test_space_task_assigned_skips_a_non_member(stack):
     assert [n.type for n in got] == ["task_assigned"]
 
 
-async def test_space_task_completed_links_to_the_space_tasks_tab(stack):
+async def test_space_task_completed_links_to_the_task_in_the_space(stack):
     from socialhome.domain.events import TaskCompleted
 
     alice = await stack.provision_user("alice-stc")
@@ -1647,11 +1651,11 @@ async def test_space_task_completed_links_to_the_space_tasks_tab(stack):
         )
     )
     notifs = await stack.notif_repo.list(bob.user_id, limit=10)
-    assert [n.link_url for n in notifs] == ["/spaces/sp-tc/tasks"]
+    assert [n.link_url for n in notifs] == ["/spaces/sp-tc/tasks?list=sl1&task=st1"]
     assert await stack.notif_repo.list(outsider.user_id, limit=10) == []
 
 
-async def test_household_task_completed_keeps_the_tasks_link(stack):
+async def test_household_task_completed_links_to_the_task_in_organize(stack):
     from socialhome.domain.events import TaskCompleted
 
     alice = await stack.provision_user("alice-htc")
@@ -1663,7 +1667,7 @@ async def test_household_task_completed_keeps_the_tasks_link(stack):
         )
     )
     notifs = await stack.notif_repo.list(bob.user_id, limit=10)
-    assert [n.link_url for n in notifs] == ["/tasks/sl1"]
+    assert [n.link_url for n in notifs] == ["/organize?list=sl1&task=st1"]
 
 
 # ─── SpacePostModerated handler ───────────────────────────────────────
@@ -3471,17 +3475,291 @@ async def test_push_tag_collapses_repeats_of_the_same_item_only(stack):
 
 async def test_push_tag_without_a_link_is_per_notification(stack):
     """A bell with no link gets a tag unique to its row, so two different
-    task assignments never silently replace each other on the device."""
+    bells never silently replace each other on the device."""
     push = _CapturingPush()
     stack.notif_svc.attach_push_service(push)
     b = await stack.provision_user("bob")
-    await stack.bus.publish(
-        TaskAssigned(task=_task("A", b.user_id), assigned_to=b.user_id)
-    )
-    await stack.bus.publish(
-        TaskAssigned(task=_task("B", b.user_id), assigned_to=b.user_id)
-    )
+    for title in ("A", "B"):
+        await stack.notif_svc._save_notif(
+            new_notification(
+                user_id=b.user_id, type="task_assigned", title=title, link_url=None
+            )
+        )
     rows = await stack.notif_repo.list(b.user_id, limit=10)
     tags = {p.tag for _, p in push.calls}
     assert tags == {f"task_assigned:{n.id}" for n in rows}
     assert len(tags) == 2
+
+
+async def test_push_tag_of_a_task_bell_names_the_task(stack):
+    """A task bell links to its task, so two different tasks keep two
+    pushes on the device (the tag follows the link)."""
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    b = await stack.provision_user("bob")
+    for tid in ("t1", "t2"):
+        task = copy.replace(_task("A", b.user_id), id=tid)
+        await stack.bus.publish(TaskAssigned(task=task, assigned_to=b.user_id))
+    tags = {p.tag for _, p in push.calls}
+    assert tags == {
+        "task_assigned:/organize?list=l1&task=t1",
+        "task_assigned:/organize?list=l1&task=t2",
+    }
+
+
+# ─── Links: every bell opens the exact thing ──────────────────────────
+
+
+async def _links(stack, user, ntype: str) -> list[str | None]:
+    return [
+        n.link_url
+        for n in await stack.notif_repo.list(user.user_id, limit=50)
+        if n.type == ntype
+    ]
+
+
+class _Rsvps:
+    """Calendar repo stub: one RSVP cohort for every event."""
+
+    def __init__(self, *user_ids: str) -> None:
+        self._rows = [SimpleNamespace(user_id=u, status="going") for u in user_ids]
+
+    async def list_rsvps(self, _event_id: str):
+        return self._rows
+
+
+async def test_household_post_bell_opens_the_post_permalink(stack):
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    post = await stack.feed_svc.create_post(
+        author_user_id=a.user_id, type=PostType.TEXT, content="hi"
+    )
+    assert await _links(stack, b, "post_created") == [f"/post/{post.id}"]
+
+
+async def test_household_comment_bell_opens_the_post_with_the_comment(stack):
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    post = await stack.feed_svc.create_post(
+        author_user_id=a.user_id, type=PostType.TEXT, content="hi"
+    )
+    comment = await stack.feed_svc.add_comment(
+        post.id, author_user_id=b.user_id, content="yes"
+    )
+    assert await _links(stack, a, "comment_added") == [
+        f"/post/{post.id}?comment={comment.id}"
+    ]
+
+
+async def test_space_post_bell_opens_the_post_in_the_space(stack):
+    space_svc, space, u = await _mention_space(stack, "bob")
+    post = await space_svc.create_post(
+        space.id, author_user_id=u["anna"].user_id, type=PostType.TEXT, content="hi"
+    )
+    assert await _links(stack, u["bob"], "space_post_created") == [
+        f"/spaces/{space.id}?post={post.id}"
+    ]
+
+
+async def test_space_comment_bell_opens_the_post_with_the_comment(stack):
+    space_svc, space, u = await _mention_space(stack, "bob")
+    post = await space_svc.create_post(
+        space.id, author_user_id=u["bob"].user_id, type=PostType.TEXT, content="hi"
+    )
+    comment = await space_svc.add_comment(
+        post.id, author_user_id=u["anna"].user_id, content="nice"
+    )
+    assert await _links(stack, u["bob"], "space_comment_added") == [
+        f"/spaces/{space.id}?post={post.id}&comment={comment.id}"
+    ]
+
+
+async def test_space_mention_bell_opens_the_post(stack):
+    space_svc, space, u = await _mention_space(stack, "bob")
+    post = await space_svc.create_post(
+        space.id,
+        author_user_id=u["anna"].user_id,
+        type=PostType.TEXT,
+        content="lunch, @bob?",
+    )
+    assert await _links(stack, u["bob"], "space_mention") == [
+        f"/spaces/{space.id}?post={post.id}"
+    ]
+
+
+async def test_calendar_feed_card_rings_no_second_bell(stack):
+    """The feed card the calendar bridge mints for a space event is a
+    post, but the event already rang ``calendar_event_created``: the
+    card rings nobody (one bell per event)."""
+    _space_svc, space, u = await _mention_space(stack, "bob")
+    event = CalendarEvent(
+        id="ev-card",
+        calendar_id=space.id,
+        summary="Ride",
+        created_by=u["anna"].user_id,
+        start=datetime(2026, 5, 1, 9, tzinfo=UTC),
+        end=datetime(2026, 5, 1, 12, tzinfo=UTC),
+    )
+    await stack.bus.publish(CalendarEventCreated(event=event))
+    card = Post(
+        id="card-1",
+        author=u["anna"].user_id,
+        type=PostType.EVENT,
+        created_at=datetime.now(UTC),
+        content="Ride",
+        linked_event_id="ev-card",
+    )
+    await stack.bus.publish(SpacePostCreated(space_id=space.id, post=card))
+    bells = await stack.notif_repo.list(u["bob"].user_id, limit=50)
+    kinds = _CONTENT_TYPES | {"calendar_event_created"}
+    assert [(n.type, n.link_url) for n in bells if n.type in kinds] == [
+        ("calendar_event_created", f"/spaces/{space.id}/calendar")
+    ]
+
+
+async def test_task_assigned_bell_opens_the_task(stack):
+    b = await stack.provision_user("bob")
+    await stack.bus.publish(
+        TaskAssigned(task=_task("Bins", b.user_id), assigned_to=b.user_id)
+    )
+    assert await _links(stack, b, "task_assigned") == ["/organize?list=l1&task=t1"]
+
+
+async def test_space_task_assigned_bell_opens_the_task_in_the_space(stack):
+    member = await stack.provision_user("member-tl")
+    await _space_task_env(stack, "sp-tl", [member.user_id])
+    await stack.bus.publish(
+        TaskAssigned(task=_space_task(), assigned_to=member.user_id, space_id="sp-tl")
+    )
+    assert await _links(stack, member, "task_assigned") == [
+        "/spaces/sp-tl/tasks?list=sl1&task=st1"
+    ]
+
+
+async def test_task_deadline_bell_opens_the_task(stack):
+    b = await stack.provision_user("bob")
+    await stack.bus.publish(
+        TaskDeadlineDue(task=_task("Bins", b.user_id), due_date=date(2026, 5, 1))
+    )
+    assert await _links(stack, b, "task_deadline") == ["/organize?list=l1&task=t1"]
+
+
+def _bid(s: str, b: str):
+    return BazaarBidPlaced(
+        listing_post_id="L-1",
+        seller_user_id=s,
+        bidder_user_id=b,
+        amount=1,
+        new_end_time="2099-01-01T00:00:00+00:00",
+    )
+
+
+def _accepted(s: str, b: str):
+    return BazaarOfferAccepted(
+        listing_post_id="L-1", seller_user_id=b, buyer_user_id=s, price=1
+    )
+
+
+def _rejected(s: str, b: str):
+    return BazaarOfferRejected(
+        listing_post_id="L-1", seller_user_id=b, bidder_user_id=s, bid_id="x"
+    )
+
+
+def _sold(s: str, _b: str):
+    return BazaarListingExpired(
+        listing_post_id="L-1", seller_user_id=s, final_status="sold"
+    )
+
+
+@pytest.mark.parametrize("make", [_bid, _accepted, _rejected, _sold])
+async def test_bazaar_bells_open_the_listing(stack, make):
+    s = await stack.provision_user("sam")
+    b = await stack.provision_user("bea")
+    await stack.bus.publish(make(s.user_id, b.user_id))
+    rows = await stack.notif_repo.list(s.user_id, limit=10)
+    assert [n.link_url for n in rows] == ["/bazaar?listing=L-1"]
+
+
+async def test_space_calendar_bells_open_the_space_calendar(stack):
+    """Created / updated / reminder bells of a space event open the
+    space's Calendar, never the household one."""
+    _space_svc, space, u = await _mention_space(stack, "bob")
+    stack.notif_svc.attach_calendar_repo(_Rsvps(u["bob"].user_id))
+    event = CalendarEvent(
+        id="ev-up",
+        calendar_id=space.id,
+        summary="Ride",
+        created_by=u["anna"].user_id,
+        start=datetime(2026, 5, 1, 9, tzinfo=UTC),
+        end=datetime(2026, 5, 1, 12, tzinfo=UTC),
+    )
+    await stack.bus.publish(CalendarEventCreated(event=event))
+    await stack.bus.publish(
+        CalendarEventUpdated(event=event, material_changes=("start",))
+    )
+    await stack.bus.publish(
+        EventReminderDue(
+            event_id="ev-up",
+            user_id=u["bob"].user_id,
+            occurrence_at="2026-05-01T09:00:00+00:00",
+            minutes_before=30,
+            summary="Ride",
+            space_id=space.id,
+        )
+    )
+    await stack.bus.publish(
+        CalendarEventDeleted(
+            event_id="ev-up",
+            summary="Ride",
+            space_id=space.id,
+            notify_user_ids=(u["bob"].user_id,),
+        )
+    )
+    link = f"/spaces/{space.id}/calendar"
+    for ntype in (
+        "calendar_event_created",
+        "calendar_event_updated",
+        "calendar_reminder",
+        "calendar_event_cancelled",
+    ):
+        assert await _links(stack, u["bob"], ntype) == [link], ntype
+
+
+async def test_personal_calendar_update_bell_opens_the_household_calendar(stack):
+    b = await stack.provision_user("bob")
+    stack.notif_svc.attach_calendar_repo(_Rsvps(b.user_id))
+    event = CalendarEvent(
+        id="ev-p",
+        calendar_id="cal-personal",
+        summary="Dentist",
+        created_by="someone",
+        start=datetime(2026, 5, 1, 9, tzinfo=UTC),
+        end=datetime(2026, 5, 1, 10, tzinfo=UTC),
+    )
+    await stack.bus.publish(
+        CalendarEventUpdated(event=event, material_changes=("start",))
+    )
+    assert await _links(stack, b, "calendar_event_updated") == ["/calendar"]
+
+
+async def test_join_denied_bell_opens_the_space_landing(stack):
+    b = await stack.provision_user("bob")
+    await stack.bus.publish(
+        SpaceJoinDenied(
+            space_id="sp-x", user_id=b.user_id, request_id="r1", denied_by="anna"
+        )
+    )
+    assert await _links(stack, b, "space_join_denied") == ["/spaces/sp-x/about"]
+
+
+async def test_invite_declined_bell_opens_the_members_settings(stack):
+    _space_svc, space, u = await _mention_space(stack)
+    await stack.bus.publish(
+        RemoteSpaceInviteDeclined(
+            space_id=space.id, instance_id="inst-r", invitee_user_id="u-r"
+        )
+    )
+    assert await _links(stack, u["anna"], "space_remote_invite_declined") == [
+        f"/spaces/{space.id}/settings/members"
+    ]

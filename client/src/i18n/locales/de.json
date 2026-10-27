@@ -5371,5 +5371,16 @@
   "error.join_request_sent": "Deine Anfrage wurde an die Admins gesendet.",
   "join_requests.near_edge": "Nahe am Rand",
   "join_requests.near_edge_hint": "Das Zuhause liegt nahe am Rand eures Gebiets – vielleicht knapp außerhalb. Du entscheidest.",
-  "space.join_landing.requested_title": "Anfrage gesendet"
+  "space.join_landing.requested_title": "Anfrage gesendet",
+  "page_title.post": "Beitrag",
+  "post.permalink.back": "Zurück zum Feed",
+  "post.permalink.gone_title": "Dieser Beitrag ist nicht mehr verfügbar",
+  "post.permalink.gone_body": "Er wurde gelöscht, oder du kannst ihn nicht mehr sehen.",
+  "post.permalink.failed_title": "Dieser Beitrag konnte nicht geladen werden",
+  "post.permalink.failed_body": "Prüfe deine Verbindung und versuch es noch einmal.",
+  "post.permalink.react_failed": "Reaktion fehlgeschlagen: {error}",
+  "post.permalink.comments_aria": "Kommentare",
+  "post.permalink.comment_gone": "Dieser Kommentar ist nicht mehr verfügbar.",
+  "tasks.link_gone": "Diese Aufgabe ist nicht mehr verfügbar.",
+  "bazaar.listing_gone": "Dieses Angebot ist nicht mehr verfügbar."
 }

@@ -269,6 +269,16 @@ class FeedService:
     async def get_post(self, post_id: str) -> Post:
         return await self._require_post(post_id)
 
+    async def read_post(self, post_id: str, *, viewer_user_id: str) -> Post:
+        """One live post for its permalink (``GET /api/feed/posts/{id}``).
+
+        A deleted post, or one by an author the viewer blocked, is
+        ``KeyError`` (404) — the permalink hides what the feed hides."""
+        post = await self._require_post(post_id)
+        if await self._users.is_blocked(viewer_user_id, post.author):
+            raise KeyError(f"post {post_id!r} not found")
+        return post
+
     async def list_feed(
         self,
         *,

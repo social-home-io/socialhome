@@ -5371,5 +5371,16 @@
   "error.join_request_sent": "Je verzoek is naar de beheerders gestuurd.",
   "join_requests.near_edge": "Dicht bij de rand",
   "join_requests.near_edge_hint": "Hun huis ligt dicht bij de rand van je gebied — misschien net erbuiten. Jij beslist.",
-  "space.join_landing.requested_title": "Verzoek verstuurd"
+  "space.join_landing.requested_title": "Verzoek verstuurd",
+  "page_title.post": "Bericht",
+  "post.permalink.back": "Terug naar de feed",
+  "post.permalink.gone_title": "Dit bericht is niet meer beschikbaar",
+  "post.permalink.gone_body": "Het is verwijderd, of je kunt het niet meer zien.",
+  "post.permalink.failed_title": "Kon dit bericht niet laden",
+  "post.permalink.failed_body": "Controleer je verbinding en probeer het opnieuw.",
+  "post.permalink.react_failed": "Reageren met een emoji mislukt: {error}",
+  "post.permalink.comments_aria": "Reacties",
+  "post.permalink.comment_gone": "Die reactie is niet meer beschikbaar.",
+  "tasks.link_gone": "Die taak is niet meer beschikbaar.",
+  "bazaar.listing_gone": "Die aanbieding is niet meer beschikbaar."
 }
