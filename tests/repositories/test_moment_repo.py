@@ -6,6 +6,7 @@ import unicodedata
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
+import orjson
 import pytest
 
 from socialhome.domain.moment import (
@@ -1219,33 +1220,82 @@ def _route(via: str = "peer-b") -> MomentReactionRoute:
 async def test_reaction_route_round_trips_and_survives_resaves(db, repo):
     relayed = replace(_moment(id="m-r"), received_via="household", hop_count=2)
     await repo.save(relayed)
-    await repo.set_reaction_route("m-r", _route())
-    assert await repo.get_reaction_routes(["m-r", "m-none"]) == {"m-r": _route()}
+    assert await repo.add_reaction_route("m-r", _route(), keep=2)
+    assert await repo.get_reaction_routes(["m-r", "m-none"]) == {"m-r": (_route(),)}
     # A re-save (a closer copy, mark_public, a save) keeps it.
     await repo.save(replace(relayed, hop_count=1))
     await repo.mark_public("m-r")
-    assert (await repo.get_reaction_routes(["m-r"]))["m-r"] == _route()
+    assert (await repo.get_reaction_routes(["m-r"]))["m-r"] == (_route(),)
     assert await repo.get_reaction_routes([]) == {}
+
+
+async def test_reaction_routes_are_first_come_from_distinct_neighbours(db, repo):
+    """#1178 F13: up to *keep* routes, one per neighbour, never displaced."""
+    await repo.save(replace(_moment(id="m-r"), received_via="household"))
+    assert await repo.add_reaction_route("m-r", _route("peer-b"), keep=2)
+    same_via = replace(_route("peer-b"), tokens=("t-other",))
+    assert not await repo.add_reaction_route("m-r", same_via, keep=2)
+    assert await repo.add_reaction_route("m-r", _route("peer-c"), keep=2)
+    assert not await repo.add_reaction_route("m-r", _route("peer-d"), keep=2)
+    assert (await repo.get_reaction_routes(["m-r"]))["m-r"] == (
+        _route("peer-b"),
+        _route("peer-c"),
+    )
+
+
+async def test_a_stale_route_gives_its_slot_to_a_new_one(db, repo):
+    """#1197 review: routes via a neighbour the caller names in *replace*
+    are dropped first, so the new route takes their slot."""
+    await repo.save(replace(_moment(id="m-r"), received_via="household"))
+    for via in ("peer-b", "peer-c"):
+        assert await repo.add_reaction_route("m-r", _route(via), keep=2)
+    assert not await repo.add_reaction_route("m-r", _route("peer-d"), keep=2)
+    assert await repo.add_reaction_route(
+        "m-r", _route("peer-d"), keep=2, replace={"peer-b"}
+    )
+    assert (await repo.get_reaction_routes(["m-r"]))["m-r"] == (
+        _route("peer-c"),
+        _route("peer-d"),
+    )
+
+
+async def test_a_route_stored_as_one_object_still_reads(db, repo):
+    """Rows written before #1178 F13 hold one ``{kw, via, rt, rt_suite}``."""
+    await repo.save(replace(_moment(id="m-r"), received_via="household"))
+    one = {"kw": "ab" * 32, "via": "peer-b", "rt": ["t1"], "rt_suite": "aesgcm-256"}
+    await db.enqueue(
+        "UPDATE moments SET reaction_route=? WHERE id='m-r'",
+        (orjson.dumps(one).decode(),),
+    )
+    assert await repo.get_reaction_routes(["m-r"]) == {"m-r": (_route(),)}
+    assert await repo.add_reaction_route("m-r", _route("peer-c"), keep=2)
+    assert (await repo.get_reaction_routes(["m-r"]))["m-r"] == (
+        _route(),
+        _route("peer-c"),
+    )
 
 
 async def test_reaction_route_only_on_a_relayed_live_moment(db, repo):
     await repo.save(_moment(id="m-own"))  # received_via='self'
-    await repo.set_reaction_route("m-own", _route())
+    assert not await repo.add_reaction_route("m-own", _route(), keep=2)
     assert await repo.get_reaction_routes(["m-own"]) == {}
     relayed = replace(_moment(id="m-r"), received_via="household")
     await repo.save(relayed)
-    await repo.set_reaction_route("m-r", _route())
+    await repo.add_reaction_route("m-r", _route(), keep=2)
     await repo.delete("m-r")  # tombstone
     assert await repo.get_reaction_routes(["m-r"]) == {}
+    assert not await repo.add_reaction_route("m-r", _route("peer-c"), keep=2)
     row = await db.fetchone("SELECT reaction_route FROM moments WHERE id='m-r'", ())
     assert row[0] is None
 
 
-async def test_an_unreadable_route_is_skipped(db, repo):
+@pytest.mark.parametrize(
+    "stored",
+    ['{"kw": "x"}', '[{"kw": "x"}, 3]', '{"rt": "t", "kw": 1}', '"text"'],
+)
+async def test_an_unreadable_route_is_skipped(db, repo, stored):
     await repo.save(replace(_moment(id="m-r"), received_via="household"))
-    await db.enqueue(
-        "UPDATE moments SET reaction_route=? WHERE id='m-r'", ('{"kw": "x"}',)
-    )
+    await db.enqueue("UPDATE moments SET reaction_route=? WHERE id='m-r'", (stored,))
     assert await repo.get_reaction_routes(["m-r"]) == {}
 
 

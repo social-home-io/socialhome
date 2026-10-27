@@ -31,6 +31,7 @@ non-followers, and apply the
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
@@ -323,12 +324,17 @@ class AbstractMomentRepo(Protocol):
     ) -> bool: ...
 
     # Reaction routes (v_67) -----------------------------------------------
-    async def set_reaction_route(
-        self, moment_id: str, route: MomentReactionRoute
-    ) -> None: ...
+    async def add_reaction_route(
+        self,
+        moment_id: str,
+        route: MomentReactionRoute,
+        *,
+        keep: int,
+        replace: Collection[str] = (),
+    ) -> bool: ...
     async def get_reaction_routes(
         self, moment_ids: list[str]
-    ) -> dict[str, MomentReactionRoute]: ...
+    ) -> dict[str, tuple[MomentReactionRoute, ...]]: ...
 
     # Reaction totals (v_69) -----------------------------------------------
     async def set_reaction_summary(
@@ -882,36 +888,53 @@ class SqliteMomentRepo:
 
     # ── Reaction routes (v_67) ─────────────────────────────────────────
 
-    async def set_reaction_route(
-        self, moment_id: str, route: MomentReactionRoute
-    ) -> None:
-        """Keep how a reaction to *moment_id* gets back to its origin. Only
-        on a live moment that arrived from another household (the column's
-        CHECK); a tombstone never keeps one (migration 0125's trigger)."""
-        await self._db.enqueue(
-            "UPDATE moments SET reaction_route=? WHERE id=?"
-            " AND received_via='household' AND deleted_at IS NULL",
-            (
-                orjson.dumps(
-                    {
-                        "kw": route.keywrap_pk,
-                        "via": route.via,
-                        "rt": list(route.tokens),
-                        "rt_suite": route.token_suite,
-                    }
-                ).decode(),
-                moment_id,
-            ),
-        )
+    async def add_reaction_route(
+        self,
+        moment_id: str,
+        route: MomentReactionRoute,
+        *,
+        keep: int,
+        replace: Collection[str] = (),
+    ) -> bool:
+        """Add *route* to the routes kept for *moment_id* — unless one via
+        the same neighbour is kept already or *keep* are (first come, first
+        kept: a later copy never displaces one, #1178 F13). Kept routes via
+        a neighbour in *replace* — one the caller found can no longer carry
+        a reaction — are dropped first, so *route* may take their slot
+        (#1197 review). Only on a live
+        moment that arrived from another household (the column's CHECK); a
+        tombstone never keeps one (migration 0125's trigger). One
+        transaction, so two copies arriving together can't overwrite each
+        other. Returns whether it was added."""
+
+        def _run(conn) -> bool:
+            row = conn.execute(
+                "SELECT reaction_route FROM moments WHERE id=?"
+                " AND received_via='household' AND deleted_at IS NULL",
+                (moment_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            stored = list(_routes_from_json(row[0])) if row[0] is not None else []
+            kept = [r for r in stored if r.via not in replace]
+            if len(kept) >= keep or any(r.via == route.via for r in kept):
+                return False
+            conn.execute(
+                "UPDATE moments SET reaction_route=? WHERE id=?",
+                (_routes_to_json([*kept, route]), moment_id),
+            )
+            return True
+
+        return await self._db.transact(_run)
 
     async def get_reaction_routes(
         self, moment_ids: list[str]
-    ) -> dict[str, MomentReactionRoute]:
-        """The stored route of each live moment in *moment_ids* that has
-        one (an unreadable row is skipped)."""
+    ) -> dict[str, tuple[MomentReactionRoute, ...]]:
+        """The stored routes of each live moment in *moment_ids* that has
+        any, in the order they were kept (unreadable entries are skipped)."""
         if not moment_ids:
             return {}
-        out: dict[str, MomentReactionRoute] = {}
+        out: dict[str, tuple[MomentReactionRoute, ...]] = {}
         for start in range(0, len(moment_ids), 500):
             chunk = moment_ids[start : start + 500]
             marks = ",".join("?" * len(chunk))
@@ -921,9 +944,9 @@ class SqliteMomentRepo:
                 tuple(chunk),
             )
             for row in rows:
-                route = _route_from_json(row["reaction_route"])
-                if route is not None:
-                    out[row["id"]] = route
+                routes = _routes_from_json(row["reaction_route"])
+                if routes:
+                    out[row["id"]] = routes
         return out
 
     # ── Reaction totals (v_69) ─────────────────────────────────────────
@@ -1415,11 +1438,11 @@ def _tombstone_rows(conn, where: str, params: tuple) -> int:
     return len(ids)
 
 
-def _route_from_json(text: object) -> MomentReactionRoute | None:
-    """A stored ``reaction_route`` as :class:`MomentReactionRoute`, or
-    ``None`` when it doesn't parse into one."""
+def _route_from_dict(data: object) -> MomentReactionRoute | None:
+    """One stored route ``{kw, via, rt, rt_suite}``, or ``None``."""
+    if not isinstance(data, dict):
+        return None
     try:
-        data = orjson.loads(str(text))
         tokens = data["rt"]
         if not isinstance(tokens, list) or not all(isinstance(t, str) for t in tokens):
             return None
@@ -1429,8 +1452,34 @@ def _route_from_json(text: object) -> MomentReactionRoute | None:
             tokens=tuple(tokens),
             token_suite=str(data["rt_suite"]),
         )
-    except orjson.JSONDecodeError, KeyError, TypeError:
+    except KeyError, TypeError:
         return None
+
+
+def _routes_from_json(text: object) -> tuple[MomentReactionRoute, ...]:
+    """A stored ``reaction_route`` as its routes: a JSON list of
+    ``{kw, via, rt, rt_suite}`` (#1178 F13), or one such object as first
+    written (0125). Unreadable entries are skipped."""
+    try:
+        data = orjson.loads(str(text))
+    except orjson.JSONDecodeError:
+        return ()
+    items = data if isinstance(data, list) else [data]
+    return tuple(r for r in map(_route_from_dict, items) if r is not None)
+
+
+def _routes_to_json(routes: list[MomentReactionRoute]) -> str:
+    return orjson.dumps(
+        [
+            {
+                "kw": r.keywrap_pk,
+                "via": r.via,
+                "rt": list(r.tokens),
+                "rt_suite": r.token_suite,
+            }
+            for r in routes
+        ]
+    ).decode()
 
 
 def _summary_from_json(text: object) -> MomentReactionSummary | None:
