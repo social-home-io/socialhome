@@ -67,6 +67,13 @@ from socialhome.federation.moment_reaction_route import (
     verify_reaction,
 )
 from socialhome.moment_origin import sign_moment_origin
+from socialhome.services.moment_reaction_router import (
+    ORIGIN_FAILURES_PER_NEIGHBOUR_PER_MIN,
+    RELAY_MIXED_PER_MIN,
+    RELAY_MIXED_PER_MOMENT_PER_MIN,
+    RELAY_PER_MOMENT_PER_MIN,
+    RELAY_PER_NEIGHBOUR_PER_MIN,
+)
 
 pytestmark = pytest.mark.security
 
@@ -82,6 +89,7 @@ ORIGIN_KW = generate_x25519_keypair()
 NEIGHBOUR = "peer-neighbour"  # paired, v_67 — hands reactions to us
 OTHER = "peer-other"  # paired, v_67 — another neighbour
 OLD = "peer-old"  # paired, v_66
+THIRD = "peer-third"  # paired, v_67 — a third neighbour
 EXPIRES = (datetime.now(UTC) + timedelta(days=5)).isoformat()
 
 
@@ -137,6 +145,7 @@ async def env(aiohttp_client, tmp_dir, monkeypatch):
     await _seed_peer(db, NEIGHBOUR, generate_identity_keypair().public_key, V67)
     await _seed_peer(db, OTHER, generate_identity_keypair().public_key, V67)
     await _seed_peer(db, OLD, generate_identity_keypair().public_key, V67 - 1)
+    await _seed_peer(db, THIRD, generate_identity_keypair().public_key, V67)
     await db.enqueue(
         "INSERT INTO moments(id, author_user_id, content, origin_instance_id,"
         " expires_at, received_via) VALUES(?,?,?,?,?,'self')",
@@ -543,20 +552,22 @@ async def test_relay_refuses_a_token_that_is_not_its_own(env, make, caplog):
 
 
 async def test_relay_rate_limits_a_neighbour_and_a_moment(env):
+    """One token: the neighbour may be a relay — ≤ 30 a minute on one moment
+    and ≤ 180 in all (#1178 F14: 3× one household's own rate)."""
     app, _db, sent, _own, _anna, router, _c = env
     token = _token(router)
-    for _ in range(15):
+    for _ in range(RELAY_MIXED_PER_MOMENT_PER_MIN + 5):
         await _dispatch(app, FET.MOMENT_REACTION_ROUTED, _relay_payload(token))
-    assert len(sent) == 10  # ≤ 10 a minute on one moment from one neighbour
-    for i in range(60):
+    assert len(sent) == RELAY_MIXED_PER_MOMENT_PER_MIN
+    for i in range(RELAY_MIXED_PER_MIN):
         mid = f"m-{i}"
         await _dispatch(
             app,
             FET.MOMENT_REACTION_ROUTED,
             _relay_payload(_token(router, moment_id=mid), moment_id=mid),
         )
-    # ≤ 60 a minute from one neighbour in all: the 15 above counted too.
-    assert len(sent) == 10 + (60 - 15)
+    # The 35 above counted towards the neighbour's total too.
+    assert len(sent) == RELAY_MIXED_PER_MIN - 5
 
 
 # ── Create: only a bound key-wrap key and a complete chain are kept ───────
@@ -827,3 +838,165 @@ async def test_reactions_in_the_same_second_keep_their_order_after_a_restart(env
     _restart(router)
     await _dispatch(app, FET.MOMENT_REACTION_ROUTED, first)  # identical bytes
     assert await _reactions(db) == [("m-anna", RITA, "😂")]
+
+
+# ── F13 (#1178 review): a neighbour can't capture a moment's route ────────
+
+
+async def _routed_targets(app, sent, anna) -> list[str]:
+    await app[moment_service_key].react("m-far", reactor_user_id=anna, emoji="👏")
+    await asyncio.sleep(0.05)
+    return [to for to, et, _p in sent if et is FET.MOMENT_REACTION_ROUTED]
+
+
+@pytest.mark.parametrize(
+    "liar_first", [False, True], ids=["honest copy first", "liar's copy first"]
+)
+async def test_a_neighbour_claiming_a_shorter_hop_cannot_capture_the_route(
+    env, liar_first
+):
+    """F13: ``hop_count`` is outside the origin signature, so a paired
+    neighbour can hand over its copy claiming fewer hops than the real path.
+    Its route no longer replaces — or keeps out — the honest one: the
+    reaction goes along both and the origin dedupes, so a neighbour that
+    drops everything it should carry back no longer silences the reactor."""
+    app, _db, sent, _own, anna, _router, _c = env
+    honest = _far_create(
+        "m-far", hop=3, kw_fields=_origin_kw_fields(), tokens=["tok-1", "tok-2"]
+    )
+    liar = _far_create("m-far", hop=2, kw_fields=_origin_kw_fields(), tokens=["tok-x"])
+    copies = [(liar, OTHER), (honest, NEIGHBOUR)]
+    for payload, via in copies if liar_first else reversed(copies):
+        await _dispatch(app, FET.MOMENT_CREATED, payload, from_instance=via)
+    assert sorted(await _routed_targets(app, sent, anna)) == sorted([NEIGHBOUR, OTHER])
+    by_via = {to: p for to, et, p in sent if et is FET.MOMENT_REACTION_ROUTED}
+    assert by_via[NEIGHBOUR]["rt"] == ["tok-1", "tok-2"]
+    assert by_via[OTHER]["rt"] == ["tok-x"]
+    # One seal along both paths: the origin takes the first, dedupes the other.
+    assert by_via[NEIGHBOUR]["sealed"] == by_via[OTHER]["sealed"]
+
+
+async def test_a_reaction_takes_at_most_two_routes(env):
+    """F13 cost bound: routes from the first two distinct neighbours are
+    kept; a third copy adds none, so one reaction travels ≤ 2 paths."""
+    app, _db, sent, _own, anna, _router, _c = env
+    for via, tok in ((NEIGHBOUR, "tok-1"), (OTHER, "tok-2"), (THIRD, "tok-3")):
+        await _dispatch(
+            app,
+            FET.MOMENT_CREATED,
+            _far_create("m-far", hop=2, kw_fields=_origin_kw_fields(), tokens=[tok]),
+            from_instance=via,
+        )
+    assert sorted(await _routed_targets(app, sent, anna)) == sorted([NEIGHBOUR, OTHER])
+
+
+async def test_the_second_copy_of_a_reaction_is_a_quiet_no_op_at_the_origin(
+    env, caplog
+):
+    """F13: the same sealed reaction along two routes lands once; the second
+    copy is expected, so it is neither a WARNING nor a failure charged to
+    the neighbour that carried it (F14)."""
+    app, db, _sent, own, anna, router, _c = env
+    payload = _routed(app, own, _inner(own, anna))
+    await _dispatch(app, FET.MOMENT_REACTION_ROUTED, payload, from_instance=NEIGHBOUR)
+    with caplog.at_level("WARNING"):
+        await _dispatch(app, FET.MOMENT_REACTION_ROUTED, payload, from_instance=OTHER)
+    assert await _reactions(db) == [("m-anna", RITA, "👏")]
+    assert "refusing" not in caplog.text
+    assert router._limiter.has_room(f"f:{OTHER}", limit=1, window_s=60)
+
+
+# ── F14 (#1178 review): junk through a relay doesn't starve its honest ────
+
+
+def _junk(own: str) -> dict:
+    """What a misbehaving household behind a relay sends: well formed, but a
+    seal that doesn't open at the origin."""
+    return {
+        "moment_id": "m-anna",
+        "origin_instance_id": own,
+        "rt": [],
+        "rt_suite": RETURN_TOKEN_SUITE_AESGCM_256,
+        "sealed": seal_reaction(
+            origin_keywrap_pub=generate_x25519_keypair().public_key,
+            inner={"kind": "moment_reaction"},
+        ),
+    }
+
+
+async def test_junk_through_a_relay_does_not_starve_its_honest_reactions(env):
+    """F14: a relay forwards sealed reactions it can't open, at up to its
+    per-neighbour rate. One household sending junk at that full rate through
+    relay R no longer uses up R's budget at the origin: failures are charged
+    to a bucket of their own, and an honest reaction R carries next lands."""
+    app, db, _sent, own, anna, _router, _c = env
+    for _ in range(RELAY_MIXED_PER_MIN):
+        await _dispatch(app, FET.MOMENT_REACTION_ROUTED, _junk(own))
+    await _dispatch(
+        app, FET.MOMENT_REACTION_ROUTED, _routed(app, own, _inner(own, anna))
+    )
+    assert await _reactions(db) == [("m-anna", RITA, "👏")]
+
+
+async def test_the_origin_still_bounds_junk_from_one_neighbour(env):
+    """F14: failures have a ceiling per delivering neighbour, so a neighbour
+    can't make the origin open seals without bound."""
+    app, _db, _sent, own, _anna, router, _c = env
+    for _ in range(ORIGIN_FAILURES_PER_NEIGHBOUR_PER_MIN + 1):
+        await _dispatch(app, FET.MOMENT_REACTION_ROUTED, _junk(own))
+    assert not router._limiter.has_room(
+        f"f:{NEIGHBOUR}", limit=ORIGIN_FAILURES_PER_NEIGHBOUR_PER_MIN, window_s=60
+    )
+
+
+def _source_payload(router, moment_id: str = "m-far") -> dict:
+    """A two-token envelope whose last token is ours — what a reactor three
+    hops from the origin hands its first relay."""
+    return {
+        **_relay_payload("x", origin="peer-elsewhere", moment_id=moment_id),
+        "rt": ["tok-near-origin", _token(router, moment_id=moment_id)],
+    }
+
+
+async def test_a_relay_holds_one_households_own_reactions_to_the_source_rate(env):
+    """F14: an envelope with two tokens can only come from the reactor's own
+    household (no relay sits beyond two), so a relay holds it to the source
+    rate — ≤ 10 a minute on one moment, ≤ 60 in all."""
+    app, _db, sent, _own, _anna, router, _c = env
+    payload = _source_payload(router)
+    for _ in range(RELAY_PER_MOMENT_PER_MIN + 5):
+        await _dispatch(app, FET.MOMENT_REACTION_ROUTED, payload)
+    assert len(sent) == RELAY_PER_MOMENT_PER_MIN
+    for i in range(RELAY_PER_NEIGHBOUR_PER_MIN):
+        await _dispatch(
+            app, FET.MOMENT_REACTION_ROUTED, _source_payload(router, f"m-{i}")
+        )
+    # The 15 on m-far counted towards the 60 too.
+    assert len(sent) == RELAY_PER_NEIGHBOUR_PER_MIN - 5
+
+
+async def test_junk_behind_a_downstream_relay_does_not_starve_it(env):
+    """F14 one hop further out: downstream relay R2 hands us a far
+    household's junk at the full source rate (≤ 10 a minute on a moment,
+    ≤ 60 in all). R2's honest reactions after it — on the same moment and on
+    another — still go through: an envelope with one token may come from a
+    relay carrying several households, so it gets a wider budget."""
+    app, _db, sent, _own, _anna, router, _c = env
+    token = _token(router)
+    for _ in range(RELAY_PER_MOMENT_PER_MIN):  # junk on m-far…
+        await _dispatch(app, FET.MOMENT_REACTION_ROUTED, _relay_payload(token))
+    for i in range(RELAY_PER_NEIGHBOUR_PER_MIN - RELAY_PER_MOMENT_PER_MIN):
+        mid = f"m-{i}"  # …and on others, up to the source rate in all
+        await _dispatch(
+            app,
+            FET.MOMENT_REACTION_ROUTED,
+            _relay_payload(_token(router, moment_id=mid), moment_id=mid),
+        )
+    sent.clear()
+    await _dispatch(app, FET.MOMENT_REACTION_ROUTED, _relay_payload(token))
+    await _dispatch(
+        app,
+        FET.MOMENT_REACTION_ROUTED,
+        _relay_payload(_token(router, moment_id="m-new"), moment_id="m-new"),
+    )
+    assert len(sent) == 2

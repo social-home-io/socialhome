@@ -4159,12 +4159,10 @@ class FederationInboundService(ProtectionGateMixin):
         if held is not None:
             if hop_count < held.hop_count:
                 await self._moment_repo.save(moment)
-                await self._keep_reaction_route(event, moment, replace=True)
-            else:
-                await self._keep_reaction_route(event, moment, replace=False)
+            await self._keep_reaction_route(event, moment)
         elif wants_local:
             await self._moment_repo.save(moment)
-            await self._keep_reaction_route(event, moment, replace=True)
+            await self._keep_reaction_route(event, moment)
             # Look up the parent's author so the local notification
             # handler can ping them when the inbound moment is a reply.
             if moment.parent_moment_id is not None:
@@ -4201,27 +4199,23 @@ class FederationInboundService(ProtectionGateMixin):
         )
 
     async def _keep_reaction_route(
-        self, event: FederationEvent, moment: Moment, *, replace: bool
+        self, event: FederationEvent, moment: Moment
     ) -> None:
         """v_67: keep how a reaction gets back to this relayed moment's
-        origin — on the stored copy, on a closer one (``replace``), or on a
-        later copy at the same distance when none was kept yet. Only a
-        complete route (origin key bound to its identity, one token per
-        relay) is ever kept; an incomplete one never replaces a kept one."""
+        origin — the router keeps the complete routes of the first copies
+        from distinct neighbours (#1178 F13: a closer-claimed copy never
+        displaces one, since ``hop_count`` is outside the origin
+        signature)."""
         router = self._moment_reaction_router
-        if router is None or self._moment_repo is None:
+        if router is None:
             return
-        route = await router.route_from_create(
+        await router.keep_route_from_create(
+            moment.id,
             event.payload,
             from_instance=event.from_instance,
             origin_instance_id=moment.origin_instance_id,
             hop_count=moment.hop_count,
         )
-        if route is None:
-            return
-        if not replace and (await self._moment_repo.get_reaction_routes([moment.id])):
-            return
-        await self._moment_repo.set_reaction_route(moment.id, route)
 
     async def _on_moment_deleted(self, event: FederationEvent) -> None:
         if self._moment_repo is None:
