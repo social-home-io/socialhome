@@ -13,7 +13,9 @@ Loaded with layered precedence:
    ``GFS_WRITE_BATCH_WINDOW_MS`` — the DB write-coalescing window;
    ``GFS_OPEN_SIGNUP`` — ``true``/``false``, the ``[policy] open_signup``
    switch; ``GFS_PUBLIC_VIEWER_BASE_URL`` — the pinned viewer the public
-   pages redirect to, empty for the pages this server renders itself)
+   pages redirect to, empty for the pages this server renders itself;
+   ``GFS_LANDING_SPACE_LIST`` — ``true``/``false``, whether ``GET /``
+   lists the active spaces)
    — override the matching ``[server]`` key when set, so an orchestrator can retarget a
    single value (e.g. a per-instance port) without rewriting the file.
    This mirrors :class:`socialhome.config.Config` (env > file > defaults).
@@ -143,6 +145,13 @@ class GfsConfig:
     #: (:mod:`.public_viewer`, :mod:`.link_preview`); empty — or not an
     #: ``https://`` base — keeps the pages this server renders itself.
     public_viewer_base_url: str = PROJECT_PINNED_VIEWER_URL
+    #: Whether the landing page (``GET /``) lists the active spaces, with
+    #: their search box and category filter (``[server]
+    #: landing_space_list``, ``GFS_LANDING_SPACE_LIST``). Off keeps the
+    #: page to the hero and the pairing QR. Each space's own page
+    #: (``/spaces/{id}``) and the household directory (``GET /gfs/spaces``)
+    #: are untouched — this only hides the public list.
+    landing_space_list: bool = True
 
     # [branding] — start values; admin portal overrides via DB.
     server_name: str = "My Global Server"
@@ -270,6 +279,7 @@ class GfsConfig:
             public_viewer_base_url=str(
                 server.get("public_viewer_base_url", PROJECT_PINNED_VIEWER_URL)
             ).strip(),
+            landing_space_list=bool(server.get("landing_space_list", True)),
             source_path=str(p),
         )
         if not cfg.base_url:
@@ -434,6 +444,11 @@ class GfsConfig:
             public_viewer_base_url=env.get(
                 "GFS_PUBLIC_VIEWER_BASE_URL", self.public_viewer_base_url
             ).strip(),
+            landing_space_list=(
+                env["GFS_LANDING_SPACE_LIST"].strip().lower() in ("1", "true", "yes")
+                if "GFS_LANDING_SPACE_LIST" in env
+                else self.landing_space_list
+            ),
             turn_url=env.get("GFS_TURN_URL", self.turn_url),
             turn_secret=env.get("GFS_TURN_SECRET", self.turn_secret),
             turn_ttl_seconds=(
@@ -616,6 +631,11 @@ write_batch_window_ms = 5
 # localhost). Set "" to keep rendering those pages on this server instead.
 # Env override: GFS_PUBLIC_VIEWER_BASE_URL.
 public_viewer_base_url = "https://viewer.social-home.io"
+# List the active spaces (with search and category filter) on the landing
+# page. false keeps the page to the welcome text and the pairing QR code; each
+# space's own page and the directory households read stay as they are.
+# Env override: GFS_LANDING_SPACE_LIST=false.
+landing_space_list = true
 
 [branding]
 server_name       = "My Global Server"

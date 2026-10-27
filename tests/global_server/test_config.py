@@ -698,3 +698,34 @@ def test_public_viewer_env_overrides_the_file(tmp_dir, monkeypatch):
 
 def test_the_example_config_names_the_project_viewer():
     assert f'public_viewer_base_url = "{PROJECT_PINNED_VIEWER_URL}"' in EXAMPLE_TOML
+
+
+def test_landing_space_list_is_on_by_default(tmp_dir):
+    p = Path(tmp_dir) / "g.toml"
+    p.write_text('[server]\nbase_url = "https://gfs.example.org"\n')
+    assert GfsConfig.from_toml(p).landing_space_list is True
+    assert GfsConfig().landing_space_list is True
+
+
+def test_landing_space_list_can_be_turned_off_in_toml(tmp_dir):
+    p = Path(tmp_dir) / "g.toml"
+    p.write_text(
+        '[server]\nbase_url = "https://gfs.example.org"\nlanding_space_list = false\n'
+    )
+    assert GfsConfig.from_toml(p).landing_space_list is False
+
+
+def test_landing_space_list_env_overrides_the_file(tmp_dir, monkeypatch):
+    p = Path(tmp_dir) / "g.toml"
+    p.write_text(
+        '[server]\nbase_url = "https://gfs.example.org"\nlanding_space_list = false\n'
+    )
+    monkeypatch.setenv("GFS_LANDING_SPACE_LIST", "true")
+    assert GfsConfig.load(p).landing_space_list is True
+    monkeypatch.setenv("GFS_LANDING_SPACE_LIST", "0")
+    assert GfsConfig.load(p).landing_space_list is False
+
+
+def test_the_example_config_documents_the_landing_space_list():
+    assert "landing_space_list = true\n" in EXAMPLE_TOML
+    assert "GFS_LANDING_SPACE_LIST" in EXAMPLE_TOML
