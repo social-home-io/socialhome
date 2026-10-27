@@ -95,6 +95,30 @@ describe('ImageLightbox', () => {
     })
   })
 
+  describe('taken-at date', () => {
+    beforeEach(() => { closeLightbox() })
+
+    it('shows the camera\'s own day, also for a viewer west of UTC', () => {
+      // ``taken_at`` is a date-only key (``YYYY-MM-DD``, the camera's
+      // calendar day). Parsed as a Date it is UTC midnight, which a viewer
+      // in Los Angeles saw as the day before (16 May).
+      const tz = process.env.TZ
+      process.env.TZ = 'America/Los_Angeles'
+      try {
+        openLightbox({
+          items: [{ url: '/api/media/p.webp', item_type: 'photo', taken_at: '2024-05-17' }],
+          index: 0,
+        })
+        const { container } = render(<ImageLightbox />)
+        const time = container.querySelector('time')
+        expect(time?.textContent).toContain('17')
+        expect(time?.textContent).not.toContain('16')
+      } finally {
+        process.env.TZ = tz
+      }
+    })
+  })
+
   describe('Copy reference button', () => {
     beforeEach(() => {
       closeLightbox()
