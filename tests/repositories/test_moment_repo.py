@@ -1225,6 +1225,22 @@ async def test_reaction_routes_are_first_come_from_distinct_neighbours(db, repo)
     )
 
 
+async def test_a_stale_route_gives_its_slot_to_a_new_one(db, repo):
+    """#1197 review: routes via a neighbour the caller names in *replace*
+    are dropped first, so the new route takes their slot."""
+    await repo.save(replace(_moment(id="m-r"), received_via="household"))
+    for via in ("peer-b", "peer-c"):
+        assert await repo.add_reaction_route("m-r", _route(via), keep=2)
+    assert not await repo.add_reaction_route("m-r", _route("peer-d"), keep=2)
+    assert await repo.add_reaction_route(
+        "m-r", _route("peer-d"), keep=2, replace={"peer-b"}
+    )
+    assert (await repo.get_reaction_routes(["m-r"]))["m-r"] == (
+        _route("peer-c"),
+        _route("peer-d"),
+    )
+
+
 async def test_a_route_stored_as_one_object_still_reads(db, repo):
     """Rows written before #1178 F13 hold one ``{kw, via, rt, rt_suite}``."""
     await repo.save(replace(_moment(id="m-r"), received_via="household"))

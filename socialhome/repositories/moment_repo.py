@@ -31,6 +31,7 @@ non-followers, and apply the
 
 from __future__ import annotations
 
+from collections.abc import Collection
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
@@ -324,7 +325,12 @@ class AbstractMomentRepo(Protocol):
 
     # Reaction routes (v_67) -----------------------------------------------
     async def add_reaction_route(
-        self, moment_id: str, route: MomentReactionRoute, *, keep: int
+        self,
+        moment_id: str,
+        route: MomentReactionRoute,
+        *,
+        keep: int,
+        replace: Collection[str] = (),
     ) -> bool: ...
     async def get_reaction_routes(
         self, moment_ids: list[str]
@@ -882,11 +888,19 @@ class SqliteMomentRepo:
     # ── Reaction routes (v_67) ─────────────────────────────────────────
 
     async def add_reaction_route(
-        self, moment_id: str, route: MomentReactionRoute, *, keep: int
+        self,
+        moment_id: str,
+        route: MomentReactionRoute,
+        *,
+        keep: int,
+        replace: Collection[str] = (),
     ) -> bool:
         """Add *route* to the routes kept for *moment_id* — unless one via
         the same neighbour is kept already or *keep* are (first come, first
-        kept: a later copy never displaces one, #1178 F13). Only on a live
+        kept: a later copy never displaces one, #1178 F13). Kept routes via
+        a neighbour in *replace* — one the caller found can no longer carry
+        a reaction — are dropped first, so *route* may take their slot
+        (#1197 review). Only on a live
         moment that arrived from another household (the column's CHECK); a
         tombstone never keeps one (migration 0125's trigger). One
         transaction, so two copies arriving together can't overwrite each
@@ -900,7 +914,8 @@ class SqliteMomentRepo:
             ).fetchone()
             if row is None:
                 return False
-            kept = list(_routes_from_json(row[0])) if row[0] is not None else []
+            stored = list(_routes_from_json(row[0])) if row[0] is not None else []
+            kept = [r for r in stored if r.via not in replace]
             if len(kept) >= keep or any(r.via == route.via for r in kept):
                 return False
             conn.execute(

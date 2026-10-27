@@ -128,7 +128,7 @@ class _Moments:
         self.routes: dict[
             str, MomentReactionRoute | tuple[MomentReactionRoute, ...]
         ] = {}
-        self.added: list[tuple[str, MomentReactionRoute, int]] = []
+        self.added: list[tuple[str, MomentReactionRoute, int, frozenset]] = []
         self.applied: list[tuple] = []
 
     async def get(self, moment_id):
@@ -142,8 +142,8 @@ class _Moments:
                 out[i] = r if isinstance(r, tuple) else (r,)
         return out
 
-    async def add_reaction_route(self, moment_id, route, *, keep):
-        self.added.append((moment_id, route, keep))
+    async def add_reaction_route(self, moment_id, route, *, keep, replace=()):
+        self.added.append((moment_id, route, keep, frozenset(replace)))
         return True
 
     async def apply_reaction_at(self, moment_id, reactor, emoji, *, reacted_at):
@@ -508,14 +508,46 @@ async def test_keep_route_from_create_keeps_up_to_max_routes(router):
         (
             "m",
             MomentReactionRoute(kw.public_key.hex(), "b", ("tok",), "aesgcm-256"),
-            mrr.MAX_ROUTES,
+            mrr.MAX_KEPT_ROUTES,
+            frozenset(),
         )
     ]
 
 
-async def test_a_reaction_goes_along_every_usable_route_up_to_the_cap(router):
-    """#1178 F13: one seal, sent along up to two routes through distinct
-    v_67 neighbours; an unusable route is skipped for the next one."""
+async def test_keep_route_from_create_gives_a_stale_routes_slot_away(router):
+    """#1197 review: kept routes whose neighbour is no longer a confirmed
+    v_67 peer are handed to the repo to replace; usable ones, and the
+    sender's own, are not."""
+    origin = generate_identity_keypair()
+    kw = generate_x25519_keypair()
+    payload = {
+        "origin_identity_pk": origin.public_key.hex(),
+        **origin_keywrap_fields(
+            kw.public_key,
+            b64url_encode(sign_ed25519(origin.private_key, kw.public_key)),
+        ),
+        "rt": ["tok"],
+        "rt_suite": "aesgcm-256",
+    }
+    router.repo.peers["peer-ok"] = _peer("peer-ok")
+    router.repo.peers["peer-old"] = _peer("peer-old", version=66)
+    router.moments.routes["m"] = (
+        _route(via="peer-ok"),
+        _route(via="peer-old"),
+        _route(via="peer-gone"),  # unpaired: no row any more
+        _route(via="b"),  # the sender itself
+    )
+    oid = derive_instance_id(origin.public_key)
+    await router.r.keep_route_from_create(
+        "m", payload, from_instance="b", origin_instance_id=oid, hop_count=2
+    )
+    assert router.moments.added[-1][3] == frozenset({"peer-old", "peer-gone"})
+
+
+async def test_a_reaction_goes_along_two_usable_routes_picked_per_reaction(router):
+    """#1178 F13, #1197 review: one seal, sent along two of the usable routes
+    through distinct v_67 neighbours, picked per reaction by the router's
+    random source; an unusable route is never picked."""
     anna = _local_user(router)
     for pid in ("peer-a", "peer-b", "peer-c"):
         router.repo.peers[pid] = _peer(pid)
@@ -526,15 +558,24 @@ async def test_a_reaction_goes_along_every_usable_route_up_to_the_cap(router):
         _route(via="peer-a", tokens=("t-a",)),
         _route(via="peer-a", tokens=("t-a2",)),  # same neighbour — skipped
         _route(via="peer-b", tokens=("t-b",)),
-        _route(via="peer-c", tokens=("t-c",)),  # over the cap
+        _route(via="peer-c", tokens=("t-c",)),
     )
+    picked: list[list] = []
+
+    class _Pick:
+        def sample(self, population, k):
+            picked.append([r.via for r in population])
+            return [population[2], population[0]][:k]
+
+    router.r._rng = _Pick()
     assert await router.r.queue_reaction(
         moment_id="m", reactor_user_id=anna, emoji="👏", occurred_at=datetime.now(UTC)
     )
     await asyncio.sleep(0.05)
+    assert picked == [["peer-a", "peer-b", "peer-c"]]
     assert [(s["to_instance_id"], s["payload"]["rt"]) for s in router.fed.sent] == [
+        ("peer-c", ["t-c"]),
         ("peer-a", ["t-a"]),
-        ("peer-b", ["t-b"]),
     ]
     sealed = {str(s["payload"]["sealed"]) for s in router.fed.sent}
     assert len(sealed) == 1  # one seal: the origin dedupes the copies
@@ -608,6 +649,26 @@ async def test_origin_applies_and_announces(router):
     assert len(router.moments.applied) == 1
     assert isinstance(router.bus.events[0], MomentReactionChanged)
     assert router.bus.events[0].author_user_id == "u-anna"
+
+
+async def test_copies_of_a_taken_reaction_are_bounded_per_neighbour(
+    router, caplog, monkeypatch
+):
+    """#1197 review: copies of a reaction already taken are dropped on their
+    digest, quietly within the replay bucket and at WARNING over it."""
+    monkeypatch.setattr(mrr, "ORIGIN_REPLAYS_PER_NEIGHBOUR_PER_MIN", 1)
+    router.users.local["u-anna"] = SimpleNamespace(user_id="u-anna")
+    router.moments.rows["m-own"] = _moment(
+        "m-own", author_user_id="u-anna", origin_instance_id=OWN, received_via="self"
+    )
+    event = _routed_event(router)
+    await router.r._on_routed(event)
+    with caplog.at_level("WARNING"):
+        await router.r._on_routed(event)
+        assert "refusing" not in caplog.text
+        await router.r._on_routed(event)
+    assert "over its replay rate" in caplog.text
+    assert len(router.moments.applied) == 1
 
 
 async def test_malformed_routed_payloads_are_refused(router, caplog):

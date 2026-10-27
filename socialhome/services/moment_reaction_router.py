@@ -17,9 +17,10 @@ path the moment came — the wire shapes and crypto are in
   (:meth:`queue_reaction`) is coalesced per (moment, person) for
   :data:`DEBOUNCE_S`, signed by this household, sealed to the origin's
   key-wrap key and sent as ``MOMENT_REACTION_ROUTED`` to the neighbours the
-  moment came from — along each kept route (≤ :data:`MAX_ROUTES`, from
-  distinct neighbours, #1178 F13) that is complete and whose neighbour is
-  v_67 (``peer_supports``). Otherwise the reaction stays in this household,
+  moment came from — along :data:`MAX_ROUTES` of the kept routes (≤
+  :data:`MAX_KEPT_ROUTES`, from distinct neighbours, picked per reaction;
+  #1178 F13, #1197 review) that are complete and whose neighbour is a
+  confirmed v_67 peer (``peer_supports``). Otherwise the reaction stays in this household,
   as before, and the API says so (:meth:`reach_for`).
 * **Relay and origin.** :meth:`_on_routed` either opens its own return token
   and passes the reaction one hop back, or — at the origin — opens the seal
@@ -50,6 +51,7 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import random
 import time
 from collections import OrderedDict
 from collections.abc import Callable, Iterable
@@ -128,28 +130,33 @@ MAX_REACTION_SKEW_MS: int = 300 * 1000
 #: so a replay inside the window is refused (and one outside is too old).
 SEEN_MAX: int = 50_000
 
-#: A reaction is kept to at most this many routes — the first copies of the
-#: moment from distinct neighbours — and sent along each (#1178 F13): a
-#: neighbour that claims a shorter hop than it is (``hop_count`` is outside
-#: the origin signature) and drops what it should carry back no longer
-#: silences the reactor while an honest route exists. ≤ 2× the envelopes;
-#: the origin dedupes by its replay digest.
+#: A moment keeps up to :data:`MAX_KEPT_ROUTES` routes — the first copies
+#: of it from distinct neighbours — and each reaction goes along
+#: :data:`MAX_ROUTES` of the usable ones, picked afresh at random per
+#: reaction (#1178 F13, #1197 review): a neighbour that claims a shorter hop
+#: than it is (``hop_count`` is outside the origin signature) can't capture
+#: the route, and a relay that drops and sits on two of the kept paths still
+#: misses the reactions sent around it. There is no delivery feedback, so the
+#: pick is random rather than "avoid what failed". A kept route whose
+#: neighbour is no longer a confirmed v_67 peer gives its slot to the next
+#: copy that arrives. ≤ 2 envelopes per reaction; the origin dedupes by its
+#: replay digest.
 MAX_ROUTES: int = 2
+MAX_KEPT_ROUTES: int = 3
 
-#: Relay limits on what one downstream neighbour hands over (#1178 F14),
-#: tiered by how many return tokens it carries — the only thing a relay can
-#: tell about where an envelope comes from:
-#:
-#: * **two tokens** — no relay sits beyond two, so it is the reactor
-#:   household's own reaction (the *source* rate): 60 a minute, 10 a minute
-#:   on one moment;
-#: * **one token** — the neighbour may be a relay carrying several
-#:   households' reactions (*mixed*): 3× that, so one household behind it
-#:   sending junk at the full source rate leaves room for the others.
-RELAY_PER_NEIGHBOUR_PER_MIN: int = 60
-RELAY_PER_MOMENT_PER_MIN: int = 10
-RELAY_MIXED_PER_MIN: int = 3 * RELAY_PER_NEIGHBOUR_PER_MIN
-RELAY_MIXED_PER_MOMENT_PER_MIN: int = 3 * RELAY_PER_MOMENT_PER_MIN
+#: Relay limits on what one downstream neighbour hands over (#1178 F14,
+#: #1197 review). Every envelope from it counts against one budget: 180 a
+#: minute, 30 a minute on one moment — 3× one household's own rate, since
+#: a one-token envelope may come from a relay carrying several households'
+#: reactions, so one household behind it sending junk at the full source
+#: rate leaves room for the others. Inside that budget, envelopes carrying
+#: **two tokens** — no relay sits beyond two, so they are the neighbour's
+#: own reactions (the *source* rate) — are held to 60 a minute and 10 a
+#: minute on one moment. An envelope the relay refuses is not charged.
+RELAY_SOURCE_PER_MIN: int = 60
+RELAY_SOURCE_PER_MOMENT_PER_MIN: int = 10
+RELAY_PER_NEIGHBOUR_PER_MIN: int = 3 * RELAY_SOURCE_PER_MIN
+RELAY_PER_MOMENT_PER_MIN: int = 3 * RELAY_SOURCE_PER_MOMENT_PER_MIN
 #: The origin takes this many reactions a minute per reactor household —
 #: charged only for a reaction that passed every check and changed
 #: something (#1178 F2).
@@ -162,6 +169,13 @@ ORIGIN_PER_REACTOR_PER_MIN: int = 60
 #: (#1178 F14).
 ORIGIN_PER_NEIGHBOUR_PER_MIN: int = 1200
 ORIGIN_FAILURES_PER_NEIGHBOUR_PER_MIN: int = 600
+#: A sealed reaction the origin already took — the expected second copy
+#: (:data:`MAX_ROUTES`) or a relay's replay — is turned away on its digest
+#: before any crypto and charged here, never to the seal backstop above, so
+#: replays of one genuine seal can't use up a neighbour's room for honest
+#: reactions (#1197 review). Over it the copies are still dropped, only
+#: logged at WARNING.
+ORIGIN_REPLAYS_PER_NEIGHBOUR_PER_MIN: int = 600
 #: v_68 — ``moment_reaction`` frames opened a minute per GFS connection,
 #: before any crypto (each reactor household is then held to
 #: :data:`ORIGIN_PER_REACTOR_PER_MIN` after every check). A GFS already
@@ -193,6 +207,12 @@ def _epoch_s(iso: str) -> int | None:
     return int(when.timestamp())
 
 
+def _seal_digest(sealed: dict[str, str]) -> bytes:
+    """The replay digest of a sealed reaction — over its ciphertext, so it
+    is known before the seal is opened."""
+    return hashlib.sha256(sealed["ciphertext"].encode()).digest()
+
+
 def _reacted_at(ms: int) -> str:
     """``occurred_at_ms`` in the ``moment_reactions.reacted_at`` shape, to
     the millisecond (``YYYY-MM-DD HH:MM:SS.mmm`` UTC) so two changes in one
@@ -219,6 +239,7 @@ class MomentReactionRouter(ProtectionGateMixin):
         "_limiter",
         "_moments",
         "_pending",
+        "_rng",
         "_seen",
         "_tasks",
         "_token_key",
@@ -237,6 +258,7 @@ class MomentReactionRouter(ProtectionGateMixin):
         debounce_s: float = DEBOUNCE_S,
         clock_ms: Callable[[], int] = _now_ms,
         monotonic: Callable[[], float] = time.monotonic,
+        rng: random.Random | None = None,
     ) -> None:
         self._bus = bus
         self._federation = federation_service
@@ -250,6 +272,8 @@ class MomentReactionRouter(ProtectionGateMixin):
         self._debounce_s = debounce_s
         self._clock_ms = clock_ms
         self._limiter = RateLimiter(monotonic=monotonic)
+        #: Picks which kept routes a reaction takes (:data:`MAX_ROUTES`).
+        self._rng = rng if rng is not None else random.SystemRandom()
         self._keywrap_priv: bytes | None = None
         self._keywrap_pub: bytes | None = None
         self._keywrap_sig = ""
@@ -413,11 +437,13 @@ class MomentReactionRouter(ProtectionGateMixin):
         hop_count: int,
     ) -> bool:
         """Keep the complete route a received copy of a stored moment
-        carries, beside up to :data:`MAX_ROUTES` − 1 others from distinct
-        neighbours. First come, first kept: a copy claiming fewer hops never
-        displaces a kept route — ``hop_count`` is outside the origin
-        signature, so a neighbour could claim one to capture the route and
-        drop reactions (#1178 F13). Returns whether it was kept."""
+        carries, beside up to :data:`MAX_KEPT_ROUTES` − 1 others from
+        distinct neighbours. First come, first kept: a copy claiming fewer
+        hops never displaces a usable route — ``hop_count`` is outside the
+        origin signature, so a neighbour could claim one to capture the
+        route and drop reactions (#1178 F13). A kept route whose neighbour
+        is no longer a confirmed v_67 peer can't carry anything, so it gives
+        its slot to this copy (#1197 review). Returns whether it was kept."""
         route = await self.route_from_create(
             payload,
             from_instance=from_instance,
@@ -426,7 +452,15 @@ class MomentReactionRouter(ProtectionGateMixin):
         )
         if route is None:
             return False
-        return await self._moments.add_reaction_route(moment_id, route, keep=MAX_ROUTES)
+        kept = (await self._moments.get_reaction_routes([moment_id])).get(moment_id, ())
+        stale = {
+            r.via
+            for r in kept
+            if r.via != from_instance and not await self._routable_via(r.via)
+        }
+        return await self._moments.add_reaction_route(
+            moment_id, route, keep=MAX_KEPT_ROUTES, replace=stale
+        )
 
     # ── Reactor side ───────────────────────────────────────────────────
 
@@ -563,9 +597,10 @@ class MomentReactionRouter(ProtectionGateMixin):
     async def _usable_target(
         self, moment_id: str
     ) -> tuple[Moment, list[ReactionTarget]] | None:
-        """The moment and where a reaction to it goes — its GFS, or up to
-        :data:`MAX_ROUTES` usable routes through distinct v_67 neighbours —
-        or ``None`` when it stays here."""
+        """The moment and where a reaction to it can go — its GFS, or every
+        usable kept route through distinct v_67 neighbours (a route whose
+        neighbour unpaired or is older is skipped) — or ``None`` when it
+        stays here."""
         moment = await self._moments.get(moment_id)
         if moment is None or moment.received_via not in ("household", "gfs"):
             return None
@@ -582,8 +617,6 @@ class MomentReactionRouter(ProtectionGateMixin):
         usable: list[ReactionTarget] = []
         vias: set[str] = set()
         for route in kept:
-            if len(usable) >= MAX_ROUTES:
-                break
             if (
                 route.via not in vias
                 and self._route_usable(moment, route)
@@ -625,6 +658,10 @@ class MomentReactionRouter(ProtectionGateMixin):
         if found is None:
             return
         moment, targets = found
+        if len(targets) > MAX_ROUTES:
+            # A fresh pick per reaction: a relay that drops and sits on some
+            # of the kept paths misses the reactions sent around it.
+            targets = self._rng.sample(targets, MAX_ROUTES)
         first = targets[0]
         if (
             isinstance(first, MomentGfsReactionTarget)
@@ -730,6 +767,24 @@ class MomentReactionRouter(ProtectionGateMixin):
             # Before any crypto: the neighbour's failures so far, and the
             # backstop on seals opened (#1178 F14). Its accepted reactions
             # never use up the failures' room.
+            if self._was_seen(_seal_digest(p["sealed"]), self._clock_ms()):
+                # Already taken: the reaction's other route (#1178 F13) or a
+                # replay. Turned away before any crypto, charged to replays
+                # only — never to the room honest reactions have (#1197).
+                if self._limiter.is_allowed(
+                    f"p:{neighbour}",
+                    limit=ORIGIN_REPLAYS_PER_NEIGHBOUR_PER_MIN,
+                    window_s=_WINDOW_S,
+                ):
+                    log.debug(
+                        "%s from %s: already taken (moment=%s)",
+                        event.event_type,
+                        neighbour,
+                        moment_id,
+                    )
+                else:
+                    self._refuse(event, "neighbour over its replay rate")
+                return
             if not self._limiter.has_room(
                 f"f:{neighbour}",
                 limit=ORIGIN_FAILURES_PER_NEIGHBOUR_PER_MIN,
@@ -743,26 +798,28 @@ class MomentReactionRouter(ProtectionGateMixin):
                 return
             await self._accept_at_origin(event, moment_id, p["sealed"])
             return
-        # Two tokens: the neighbour is the reactor's own household (the
-        # source rate); one: it may be a relay carrying several (#1178 F14).
-        source = len(tokens) >= 2
-        tier = "s" if source else "x"
-        if not self._limiter.is_allowed(
-            f"n:{tier}:{neighbour}",
-            limit=RELAY_PER_NEIGHBOUR_PER_MIN if source else RELAY_MIXED_PER_MIN,
-            window_s=_WINDOW_S,
-        ):
-            self._refuse(event, "neighbour over its routed-reaction rate")
-            return
-        if not self._limiter.is_allowed(
-            f"m:{tier}:{neighbour}:{moment_id}",
-            limit=(
-                RELAY_PER_MOMENT_PER_MIN if source else RELAY_MIXED_PER_MOMENT_PER_MIN
-            ),
-            window_s=_WINDOW_S,
-        ):
-            self._refuse(event, "neighbour over its per-moment rate")
-            return
+        # One budget per neighbour; two tokens (the neighbour's own
+        # reactions) also hold to the source rate inside it (#1178 F14,
+        # #1197). Checked in full before anything is charged.
+        buckets = [
+            (f"rn:{neighbour}", RELAY_PER_NEIGHBOUR_PER_MIN, "routed-reaction"),
+            (f"rm:{neighbour}:{moment_id}", RELAY_PER_MOMENT_PER_MIN, "per-moment"),
+        ]
+        if len(tokens) >= 2:
+            buckets += [
+                (f"rs:{neighbour}", RELAY_SOURCE_PER_MIN, "routed-reaction"),
+                (
+                    f"rsm:{neighbour}:{moment_id}",
+                    RELAY_SOURCE_PER_MOMENT_PER_MIN,
+                    "per-moment",
+                ),
+            ]
+        for key, limit, what in buckets:
+            if not self._limiter.has_room(key, limit=limit, window_s=_WINDOW_S):
+                self._refuse(event, f"neighbour over its {what} rate")
+                return
+        for key, limit, _what in buckets:
+            self._limiter.is_allowed(key, limit=limit, window_s=_WINDOW_S)
         await self._forward(event, moment_id, origin, tokens)
 
     async def _forward(
@@ -813,8 +870,8 @@ class MomentReactionRouter(ProtectionGateMixin):
     ) -> None:
         inner, reason = await self._open_checked(sealed, moment_id=moment_id)
         if reason == _ALREADY_TAKEN:
-            # The same reaction along its other route (#1178 F13) — or a
-            # replay; either way already applied, nothing to charge.
+            # Two copies opened at once — the digest check in ``_on_routed``
+            # turns later ones away before any crypto. Already applied.
             log.debug(
                 "%s from %s: already taken (moment=%s)",
                 event.event_type,
@@ -936,7 +993,7 @@ class MomentReactionRouter(ProtectionGateMixin):
             or occurred > now + MAX_REACTION_SKEW_MS
         ):
             return "reaction too old or in the future"
-        digest = hashlib.sha256(sealed["ciphertext"].encode()).digest()
+        digest = _seal_digest(sealed)
         if self._was_seen(digest, now):
             return _ALREADY_TAKEN
         moment = await self._moments.get(moment_id)
@@ -1053,15 +1110,17 @@ class MomentReactionRouter(ProtectionGateMixin):
 
 __all__ = [
     "DEBOUNCE_S",
+    "MAX_KEPT_ROUTES",
     "MAX_REACTION_AGE_MS",
     "MAX_ROUTES",
     "ORIGIN_FAILURES_PER_NEIGHBOUR_PER_MIN",
     "ORIGIN_PER_GFS_PER_MIN",
     "ORIGIN_PER_NEIGHBOUR_PER_MIN",
     "ORIGIN_PER_REACTOR_PER_MIN",
-    "RELAY_MIXED_PER_MIN",
-    "RELAY_MIXED_PER_MOMENT_PER_MIN",
+    "ORIGIN_REPLAYS_PER_NEIGHBOUR_PER_MIN",
     "RELAY_PER_MOMENT_PER_MIN",
     "RELAY_PER_NEIGHBOUR_PER_MIN",
+    "RELAY_SOURCE_PER_MIN",
+    "RELAY_SOURCE_PER_MOMENT_PER_MIN",
     "MomentReactionRouter",
 ]

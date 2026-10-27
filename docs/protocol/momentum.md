@@ -368,7 +368,9 @@ couple two trust models and leak block-list shape to peers.
   confirmed v_67 household. Everything else is refused at WARNING
   (`tests/protocol/test_moment_reaction_routed.py`) — except a second copy
   of a reaction already taken (its other route, #1178 F13, or a replay),
-  which is dropped at DEBUG and charged to nobody. A reaction that came
+  which is dropped on its digest before any crypto, at DEBUG, and charged
+  only to the delivering neighbour's replay bucket (≤ 600 a minute, then
+  WARNING) — never to the room its honest reactions have. A reaction that came
   through a GFS (`moment_reaction` frame, v_68) gets the same checks plus:
   the household the GFS authenticated is the reactor's own, and the moment
   is public ([`momentum_public.md`](momentum_public.md#reactions-through-the-gfs-v_68),
@@ -471,15 +473,18 @@ reaction goes back along the path the moment came.
   the moment from, valid for that moment, from X, until the moment's
   expiry ([`crypto.md`](../crypto.md)). Only when every relay before it did
   (`len(rt) == hop − 1`); otherwise it strips the incomplete chain.
-* **The receiver keeps up to two routes.** A household that stores a
+* **The receiver keeps up to three routes.** A household that stores a
   relayed moment keeps a route `{kw, via, rt, rt_suite}` in
   `moments.reaction_route` (migration 0125; a JSON list since #1178 F13,
   one object on rows written before) when the key-wrap key is bound and
-  the chain is complete — from the first two copies through **distinct
+  the chain is complete — from the first three copies through **distinct
   neighbours**, first come, first kept. A copy that claims fewer hops never
-  displaces a kept route: `hop_count` is outside the origin signature, so
+  displaces a usable route: `hop_count` is outside the origin signature, so
   a neighbour could claim a shorter hop than it is just to become the
-  route and then drop what it should carry back. Saves, `mark_public` and
+  route and then drop what it should carry back. A kept route whose
+  neighbour is no longer a confirmed v_67 peer (it unpaired, or is older)
+  can carry nothing, so it is skipped when sending and gives its slot to
+  the next copy that arrives (#1197 review). Saves, `mark_public` and
   re-saves keep the routes; a tombstone drops them (trigger).
 * **A reaction goes back hop by hop.** When the author's household is this
   one or a paired one — found from the roster, **or the moment's
@@ -490,11 +495,15 @@ reaction goes back along the path the moment came.
   not paired with is routed to. Otherwise, after a 3 s debounce (the latest state per moment and person;
   the outbox keeps one queued per peer), the reactor's household signs the
   reaction, pads it to 1 KB and seals it to the origin's key-wrap key once,
-  and sends that same `MOMENT_REACTION_ROUTED` along **every** kept route
-  (at most two) whose `via` neighbour `peer_supports` v_67 — so one
-  neighbour that drops reactions no longer silences the reactor while an
-  honest route exists. The origin takes the first copy and drops the
-  other quietly (its replay digest; no WARNING, nothing charged). Each relay opens its own (last)
+  and sends that same `MOMENT_REACTION_ROUTED` along **two** of the kept
+  routes whose `via` neighbour is a confirmed peer that `peer_supports`
+  v_67 — all of them when there are two or fewer, otherwise two picked at
+  random afresh for each reaction. There is no delivery feedback, so the
+  reactor can't learn which path drops; picking per reaction means a relay
+  that drops and sits on some of the kept paths still misses the reactions
+  sent around it. The origin takes the first copy and drops the other on
+  its replay digest, before opening it (no WARNING, charged only to a
+  replay bucket). Each relay opens its own (last)
   token, pops it and forwards to the household it names (a confirmed v_67
   peer); when that is the origin, the origin gets it with no tokens left.
   Relays keep no state.
@@ -519,60 +528,83 @@ reaction goes back along the path the moment came.
   React on every card and says "Reactions here are seen in your household
   only" where they can't reach.
 * **Rate limits** (#1178 F14: one misbehaving household behind a relay
-  must not use up the room of everyone else behind it). A relay can't open
-  what it forwards, so it limits by the one thing it can see — how many
-  return tokens an envelope still carries:
-  * **two tokens** — no relay sits beyond two, so the neighbour is the
-    reactor's own household: ≤ 60 a minute, ≤ 10 a minute per moment (the
-    *source* rate);
-  * **one token** — the neighbour may be a relay carrying several
-    households' reactions: ≤ 180 a minute, ≤ 30 per moment (3× the source
-    rate), so one household behind it sending junk at the full source rate
-    leaves the others room.
+  must not use up the room of everyone else behind it). A relay holds
+  every envelope from one downstream neighbour to **one** budget: ≤ 180 a
+  minute and ≤ 30 a minute per moment — 3× one household's own rate, since
+  the neighbour may be a relay carrying several households' reactions, so
+  one household behind it sending junk at the full source rate leaves the
+  others room. Inside that budget, envelopes still carrying **two** return
+  tokens — no relay sits beyond two, so they are the neighbour's own
+  reactions — are held to the *source* rate: ≤ 60 a minute, ≤ 10 per
+  moment. Those are the real totals: one neighbour gets ≤ 180 forwards a
+  minute however its envelopes mix, and an envelope the relay refuses is
+  not charged (#1197 review). A reactor two hops from the origin hands its
+  relay one-token envelopes, so the source sub-limit covers only reactors
+  three hops out; the 180 covers everyone.
 
-  The origin keeps three budgets. Before any crypto, per neighbour handing
-  reactions over: ≤ 1200 seals opened a minute (the crypto backstop — each
-  costs about what that neighbour's envelope already did in the §24.11
-  pipeline), and ≤ 600 **failures** a minute — a reaction that doesn't
-  open, verify or pass a check is charged to the neighbour's failure
-  bucket, never to the room its good reactions have, so junk through relay
-  R (≤ 180 a minute from any one household) doesn't stop R's honest
-  reactions. After every check: ≤ 60 a minute per reactor household,
-  charged only for a reaction that changed something, so a relay
-  re-sending one genuine sealed reaction (a replay) cannot use up that
-  household's budget.
-* **Residual availability limits.** A reactor whose *every* kept route
-  runs through a neighbour that drops reactions still reaches nobody (it
-  can't tell — the UI says `author`); and four households behind one relay
-  sending junk at the one-token rate (or ten at the source rate) can still
-  fill that relay's failure budget at the origin for the minute. Both cost
-  availability of reactions only — never their privacy or integrity.
+  The origin keeps four budgets. Before any crypto, per neighbour handing
+  reactions over: a copy of a reaction it already took (the expected second
+  copy, or a replay) is recognised on its replay digest — a hash over the
+  ciphertext, no seal opened — and charged only to a **replay** bucket
+  (≤ 600 a minute; over it, logged at WARNING; either way dropped). Every
+  other envelope counts against ≤ 1200 seals opened a minute (the crypto
+  backstop — each costs about what that neighbour's envelope already did
+  in the §24.11 pipeline), and ≤ 600 **failures** a minute — a reaction
+  that doesn't open, verify or pass a check is charged to the neighbour's
+  failure bucket, never to the room its good reactions have, so junk
+  through relay R (≤ 180 a minute from any one neighbour of R) doesn't stop
+  R's honest reactions, and neither do replays of one genuine seal. After
+  every check: ≤ 60 a minute per reactor household, charged only for a
+  reaction that changed something, so a replay cannot use up that
+  household's budget either.
+* **Residual availability limits.** A dropping relay **anywhere on the
+  path** — the first neighbour or one further on — loses what it should
+  carry back. While a reactor keeps three routes and the dropper sits on
+  only one, every reaction still gets through on the other picked route;
+  when it sits on two of the three (e.g. upstream of two of the reactor's
+  neighbours), about one reaction in three takes only those two and is
+  lost (each one independently, so a lost removal can leave a stale
+  reaction); when it sits on every kept route, nothing gets through. The
+  reactor can't tell — there is no delivery feedback, and the UI says
+  `author`. And four neighbours of one relay sending junk at its limit can
+  still fill that relay's failure budget at the origin for the minute.
+  All of this costs availability of reactions only — never their privacy
+  or integrity.
 * **Privacy residual (signed off 2026-10-25).** A relay learns that its
   direct neighbour — or that neighbour's part of the mesh — reacted to
   moment M: not who, not with what (the seal is one size), and not who else
   is beyond. No household learns any non-adjacent part of the pairing graph
-  ([`principles.md`](../principles.md)). With two kept routes (#1178 F13)
-  the relays on both paths learn this, and the origin sees the same sealed
-  reaction arrive from up to two of its neighbours — the same kind of
-  fact it had for one ("this reactor's household is in that neighbour's
-  part of the mesh"), never which households are in between.
+  ([`principles.md`](../principles.md)). With several kept routes (#1178
+  F13) the relays on every path used learn this; the origin sees one sealed
+  reaction arrive from up to two of its neighbours (a household's
+  reactions from up to three) and so learns the reactor's household is
+  within two relays of each — the same kind of fact it had for one ("this
+  reactor's household is in that neighbour's part of the mesh"), never
+  which households are in between. Relays on different paths that collude
+  can link the two copies of one reaction (the same ciphertext): they learn
+  their neighbours' parts of the mesh share a reactor household — not who,
+  not with what.
 
-**Cost.** One reaction is at most 3 envelopes of ~1.6 KB per route
-(hop-encrypted sealed reaction + up to two tokens) and goes along at most
-two routes: ≤ 6 envelopes, ~10 KB — the same order as the create it
-answers. Most reactions have one route (a moment usually reaches a
-household through one neighbour first, and a second copy only adds a route
-when it comes through another); the second at most doubles the cost. A
-sparse mesh averaging 2 hops: 60 reactions to one popular moment ≈ 120–240
-envelopes ≈ 200–400 KB in total, spread over the households on the paths;
-coalescing caps a person who toggles at one per 3 s. A fully connected mesh
-uses the direct path (one envelope). Every create grows by ~200 B (key-wrap
-key + binding) plus ~110 B per relay token; each stored moment keeps ≤ 2
-routes (≤ ~0.7 KB). Worst case per relay: 60 reactions a minute from each
-neighbour that is a reactor's own household, 180 from one that may be a
-relay — bounded, each one forwarded envelope, nothing stored. Worst case at
-the origin: ≤ 1200 seal opens a minute per neighbour, about the crypto the
-same envelopes already cost in the §24.11 pipeline.
+**Cost.** One reaction is one envelope of ~1.6 KB per hop of a route
+(hop-encrypted sealed reaction + up to two tokens; ≤ 3 hops) and goes
+along at most two routes: ≤ 6 envelopes, ~10 KB — the same order as the
+create it answers. Two routes is the **typical** case, not the exception:
+any reactor with two or more neighbours that hold the moment keeps two (up
+to three) routes, so expect 2× the envelopes of a single path. The origin
+opens only the first copy — the second is dropped on its digest before
+any crypto (two copies arriving at the very same moment may both be
+opened; the second is then dropped too). A sparse mesh averaging 2 hops:
+60 reactions to one popular moment ≈ 240 envelopes ≈ 400 KB in total (120
+/ 200 KB where a reactor has only one route), spread over the households
+on the paths; coalescing caps a person who toggles at one per 3 s. A fully
+connected mesh uses the direct path (one envelope). Every create grows by
+~200 B (key-wrap key + binding) plus ~110 B per relay token; each stored
+moment keeps ≤ 3 routes (≤ ~1 KB). Worst case per relay: 180 forwarded
+envelopes a minute from each neighbour, ≤ 60 of them its own reactions —
+bounded, each one forwarded envelope, nothing stored. Worst case at the
+origin per neighbour a minute: ≤ 1200 seal opens, about the crypto the
+same envelopes already cost in the §24.11 pipeline, plus ≤ 600 replay
+digests (a hash each).
 
 ```mermaid
 sequenceDiagram

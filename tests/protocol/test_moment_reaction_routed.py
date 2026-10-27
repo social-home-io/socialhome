@@ -31,9 +31,11 @@ rules these tests encode, against the real application registry and SQLite:
 from __future__ import annotations
 
 import asyncio
+import random
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
+import orjson
 import pytest
 
 from socialhome.app import create_app
@@ -67,12 +69,16 @@ from socialhome.federation.moment_reaction_route import (
     verify_reaction,
 )
 from socialhome.moment_origin import sign_moment_origin
+from socialhome.services import moment_reaction_router as mrr
 from socialhome.services.moment_reaction_router import (
+    MAX_KEPT_ROUTES,
+    MAX_ROUTES,
     ORIGIN_FAILURES_PER_NEIGHBOUR_PER_MIN,
-    RELAY_MIXED_PER_MIN,
-    RELAY_MIXED_PER_MOMENT_PER_MIN,
+    ORIGIN_PER_NEIGHBOUR_PER_MIN,
     RELAY_PER_MOMENT_PER_MIN,
     RELAY_PER_NEIGHBOUR_PER_MIN,
+    RELAY_SOURCE_PER_MIN,
+    RELAY_SOURCE_PER_MOMENT_PER_MIN,
 )
 
 pytestmark = pytest.mark.security
@@ -90,6 +96,7 @@ NEIGHBOUR = "peer-neighbour"  # paired, v_67 — hands reactions to us
 OTHER = "peer-other"  # paired, v_67 — another neighbour
 OLD = "peer-old"  # paired, v_66
 THIRD = "peer-third"  # paired, v_67 — a third neighbour
+FOURTH = "peer-fourth"  # paired, v_67 — a fourth neighbour
 EXPIRES = (datetime.now(UTC) + timedelta(days=5)).isoformat()
 
 
@@ -146,6 +153,7 @@ async def env(aiohttp_client, tmp_dir, monkeypatch):
     await _seed_peer(db, OTHER, generate_identity_keypair().public_key, V67)
     await _seed_peer(db, OLD, generate_identity_keypair().public_key, V67 - 1)
     await _seed_peer(db, THIRD, generate_identity_keypair().public_key, V67)
+    await _seed_peer(db, FOURTH, generate_identity_keypair().public_key, V67)
     await db.enqueue(
         "INSERT INTO moments(id, author_user_id, content, origin_instance_id,"
         " expires_at, received_via) VALUES(?,?,?,?,?,'self')",
@@ -556,18 +564,18 @@ async def test_relay_rate_limits_a_neighbour_and_a_moment(env):
     and ≤ 180 in all (#1178 F14: 3× one household's own rate)."""
     app, _db, sent, _own, _anna, router, _c = env
     token = _token(router)
-    for _ in range(RELAY_MIXED_PER_MOMENT_PER_MIN + 5):
+    for _ in range(RELAY_PER_MOMENT_PER_MIN + 5):
         await _dispatch(app, FET.MOMENT_REACTION_ROUTED, _relay_payload(token))
-    assert len(sent) == RELAY_MIXED_PER_MOMENT_PER_MIN
-    for i in range(RELAY_MIXED_PER_MIN):
+    assert len(sent) == RELAY_PER_MOMENT_PER_MIN
+    for i in range(RELAY_PER_NEIGHBOUR_PER_MIN):
         mid = f"m-{i}"
         await _dispatch(
             app,
             FET.MOMENT_REACTION_ROUTED,
             _relay_payload(_token(router, moment_id=mid), moment_id=mid),
         )
-    # The 35 above counted towards the neighbour's total too.
-    assert len(sent) == RELAY_MIXED_PER_MIN - 5
+    # The 30 forwarded above counted towards the total; the 5 refused did not.
+    assert len(sent) == RELAY_PER_NEIGHBOUR_PER_MIN
 
 
 # ── Create: only a bound key-wrap key and a complete chain are kept ───────
@@ -876,20 +884,6 @@ async def test_a_neighbour_claiming_a_shorter_hop_cannot_capture_the_route(
     assert by_via[NEIGHBOUR]["sealed"] == by_via[OTHER]["sealed"]
 
 
-async def test_a_reaction_takes_at_most_two_routes(env):
-    """F13 cost bound: routes from the first two distinct neighbours are
-    kept; a third copy adds none, so one reaction travels ≤ 2 paths."""
-    app, _db, sent, _own, anna, _router, _c = env
-    for via, tok in ((NEIGHBOUR, "tok-1"), (OTHER, "tok-2"), (THIRD, "tok-3")):
-        await _dispatch(
-            app,
-            FET.MOMENT_CREATED,
-            _far_create("m-far", hop=2, kw_fields=_origin_kw_fields(), tokens=[tok]),
-            from_instance=via,
-        )
-    assert sorted(await _routed_targets(app, sent, anna)) == sorted([NEIGHBOUR, OTHER])
-
-
 async def test_the_second_copy_of_a_reaction_is_a_quiet_no_op_at_the_origin(
     env, caplog
 ):
@@ -930,7 +924,7 @@ async def test_junk_through_a_relay_does_not_starve_its_honest_reactions(env):
     relay R no longer uses up R's budget at the origin: failures are charged
     to a bucket of their own, and an honest reaction R carries next lands."""
     app, db, _sent, own, anna, _router, _c = env
-    for _ in range(RELAY_MIXED_PER_MIN):
+    for _ in range(RELAY_PER_NEIGHBOUR_PER_MIN):
         await _dispatch(app, FET.MOMENT_REACTION_ROUTED, _junk(own))
     await _dispatch(
         app, FET.MOMENT_REACTION_ROUTED, _routed(app, own, _inner(own, anna))
@@ -964,15 +958,15 @@ async def test_a_relay_holds_one_households_own_reactions_to_the_source_rate(env
     rate — ≤ 10 a minute on one moment, ≤ 60 in all."""
     app, _db, sent, _own, _anna, router, _c = env
     payload = _source_payload(router)
-    for _ in range(RELAY_PER_MOMENT_PER_MIN + 5):
+    for _ in range(RELAY_SOURCE_PER_MOMENT_PER_MIN + 5):
         await _dispatch(app, FET.MOMENT_REACTION_ROUTED, payload)
-    assert len(sent) == RELAY_PER_MOMENT_PER_MIN
-    for i in range(RELAY_PER_NEIGHBOUR_PER_MIN):
+    assert len(sent) == RELAY_SOURCE_PER_MOMENT_PER_MIN
+    for i in range(RELAY_SOURCE_PER_MIN):
         await _dispatch(
             app, FET.MOMENT_REACTION_ROUTED, _source_payload(router, f"m-{i}")
         )
-    # The 15 on m-far counted towards the 60 too.
-    assert len(sent) == RELAY_PER_NEIGHBOUR_PER_MIN - 5
+    # The 10 forwarded on m-far counted towards the 60; the 5 refused did not.
+    assert len(sent) == RELAY_SOURCE_PER_MIN
 
 
 async def test_junk_behind_a_downstream_relay_does_not_starve_it(env):
@@ -983,9 +977,9 @@ async def test_junk_behind_a_downstream_relay_does_not_starve_it(env):
     relay carrying several households, so it gets a wider budget."""
     app, _db, sent, _own, _anna, router, _c = env
     token = _token(router)
-    for _ in range(RELAY_PER_MOMENT_PER_MIN):  # junk on m-far…
+    for _ in range(RELAY_SOURCE_PER_MOMENT_PER_MIN):  # junk on m-far…
         await _dispatch(app, FET.MOMENT_REACTION_ROUTED, _relay_payload(token))
-    for i in range(RELAY_PER_NEIGHBOUR_PER_MIN - RELAY_PER_MOMENT_PER_MIN):
+    for i in range(RELAY_SOURCE_PER_MIN - RELAY_SOURCE_PER_MOMENT_PER_MIN):
         mid = f"m-{i}"  # …and on others, up to the source rate in all
         await _dispatch(
             app,
@@ -1000,3 +994,116 @@ async def test_junk_behind_a_downstream_relay_does_not_starve_it(env):
         _relay_payload(_token(router, moment_id="m-new"), moment_id="m-new"),
     )
     assert len(sent) == 2
+
+
+# ── #1197 review: a dropping relay, stale routes, tier sums, replays ──────
+
+
+async def _kept_vias(db, moment_id: str = "m-far") -> list[str]:
+    stored = await _route_of(db, moment_id)
+    return [r["via"] for r in orjson.loads(stored or "[]")]
+
+
+async def _copy_from(app, via: str, tok: str) -> None:
+    await _dispatch(
+        app,
+        FET.MOMENT_CREATED,
+        _far_create("m-far", hop=2, kw_fields=_origin_kw_fields(), tokens=[tok]),
+        from_instance=via,
+    )
+
+
+@pytest.mark.parametrize("gone", ["older than v_67", "unpaired"])
+async def test_a_kept_route_its_neighbour_can_no_longer_carry_gives_way(env, gone):
+    """A kept route whose neighbour is no longer a confirmed v_67 peer can't
+    carry a reaction; it no longer holds its slot — the next copy of the
+    moment from another neighbour takes it."""
+    app, db, _sent, _own, _anna, _router, _c = env
+    stale = OLD if gone == "older than v_67" else NEIGHBOUR
+    for via, tok in ((stale, "tok-s"), (OTHER, "tok-o"), (THIRD, "tok-t")):
+        await _copy_from(app, via, tok)
+    if gone == "unpaired":
+        await db.enqueue(
+            "UPDATE remote_instances SET status='unpairing' WHERE id=?", (stale,)
+        )
+    await _copy_from(app, FOURTH, "tok-f")
+    assert sorted(await _kept_vias(db)) == sorted([OTHER, THIRD, FOURTH])
+
+
+async def test_one_dropping_relay_cannot_take_every_reaction(env):
+    """Up to three routes are kept, from distinct neighbours, and each
+    reaction goes along two of them picked afresh — so a relay that sits on
+    two of the paths (and drops) can't block every reaction, and a reaction
+    never costs more than two envelopes."""
+    app, db, sent, _own, anna, router, _c = env
+    for via, tok in ((NEIGHBOUR, "tok-1"), (OTHER, "tok-2"), (THIRD, "tok-3")):
+        await _copy_from(app, via, tok)
+    await _copy_from(app, FOURTH, "tok-4")  # all three slots are taken
+    assert len(await _kept_vias(db)) == MAX_KEPT_ROUTES == 3
+    router._rng = random.Random(1197)
+    picks: list[frozenset[str]] = []
+    for i in range(30):
+        sent.clear()
+        await router._send_routed("m-far", anna, "👏", _now_ms(i))
+        targets = [to for to, et, _p in sent if et is FET.MOMENT_REACTION_ROUTED]
+        assert len(targets) == len(set(targets)) == MAX_ROUTES
+        picks.append(frozenset(targets))
+    # Every pair of kept routes is skipped by some reaction: whichever two
+    # paths one relay sits on, the third carried a reaction around it.
+    assert len(set(picks)) == 3
+    assert FOURTH not in set().union(*picks)
+
+
+async def test_one_neighbour_is_held_to_one_relay_rate(env):
+    """Two-token (source) and one-token envelopes from one neighbour share
+    one budget — ≤ 180 a minute in all, the source traffic ≤ 60 of it."""
+    app, _db, sent, _own, _anna, router, _c = env
+    for i in range(RELAY_SOURCE_PER_MIN + 10):
+        await _dispatch(
+            app, FET.MOMENT_REACTION_ROUTED, _source_payload(router, f"s-{i}")
+        )
+    assert len(sent) == RELAY_SOURCE_PER_MIN
+    for i in range(RELAY_PER_NEIGHBOUR_PER_MIN + 10):
+        mid = f"x-{i}"
+        await _dispatch(
+            app,
+            FET.MOMENT_REACTION_ROUTED,
+            _relay_payload(_token(router, moment_id=mid), moment_id=mid),
+        )
+    assert len(sent) == RELAY_PER_NEIGHBOUR_PER_MIN
+
+
+async def test_one_neighbour_is_held_to_one_rate_per_moment(env):
+    """…and on one moment ≤ 30 a minute in all, the source traffic ≤ 10."""
+    app, _db, sent, _own, _anna, router, _c = env
+    for _ in range(RELAY_SOURCE_PER_MOMENT_PER_MIN + 5):
+        await _dispatch(app, FET.MOMENT_REACTION_ROUTED, _source_payload(router))
+    token = _token(router)
+    for _ in range(RELAY_PER_MOMENT_PER_MIN + 5):
+        await _dispatch(app, FET.MOMENT_REACTION_ROUTED, _relay_payload(token))
+    assert len(sent) == RELAY_PER_MOMENT_PER_MIN
+
+
+async def test_replays_do_not_fill_the_neighbour_backstop(env, monkeypatch):
+    """A relay replaying one genuine sealed reaction is turned away on its
+    digest before any crypto, in a bucket of its own: neither the seal
+    backstop nor the failures fill, and its honest reaction still lands."""
+    app, db, _s, own, anna, router, _c = env
+    payload = _routed(app, own, _inner(own, anna))
+    await _dispatch(app, FET.MOMENT_REACTION_ROUTED, payload)
+    opened = 0
+    real_open = mrr.open_reaction
+
+    def _counting_open(**kw):
+        nonlocal opened
+        opened += 1
+        return real_open(**kw)
+
+    monkeypatch.setattr(mrr, "open_reaction", _counting_open)
+    for _ in range(ORIGIN_PER_NEIGHBOUR_PER_MIN):
+        await _dispatch(app, FET.MOMENT_REACTION_ROUTED, payload)
+    assert opened == 0
+    assert router._limiter.has_room(f"f:{NEIGHBOUR}", limit=1, window_s=60)
+    honest = _routed(app, own, _inner(own, anna, emoji="🔥", at_ms=_now_ms(1)))
+    await _dispatch(app, FET.MOMENT_REACTION_ROUTED, honest)
+    assert await _reactions(db) == [("m-anna", RITA, "🔥")]

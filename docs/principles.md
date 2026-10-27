@@ -891,12 +891,17 @@ What each household on the way learns, and what it doesn't:
    by the neighbour it was minted for. A reactor holds its neighbours'
    tokens as opaque bytes; the origin sees only the neighbour that
    delivered and the reactor's household, which signs the reaction. Since
-   #1178 F13 a reactor sends the same sealed reaction along up to two
-   routes (the first copies of the moment from two distinct neighbours),
-   so a neighbour that drops reactions can't silence it: the relays on
-   both paths learn item 1, and the origin may see the reaction delivered
-   by two of its neighbours — the same kind of fact, never the households
-   in between.
+   #1178 F13 a reactor keeps up to three routes (the first copies of the
+   moment from three distinct neighbours) and sends each reaction, sealed
+   once, along two of them picked afresh per reaction, so a neighbour — or
+   a relay further on — that drops reactions can't silence it: the relays
+   on every path used learn item 1, and the origin may see one reaction
+   delivered by two of its neighbours (and that household's reactions by
+   up to three) — so it learns the reactor's household is within two
+   relays of each of them. Relays on different paths that collude can link
+   the two copies of one reaction (the same ciphertext) — the same kind of
+   fact again: that their neighbours' parts of the mesh share a reactor
+   household, never who, with what, or the households in between.
 3. **The origin learns the reactor's household and user id** — as it does
    for a paired reactor today — and nothing about the path. It decides on
    the signed reaction alone (its own key, the reactor's key, the moment).
