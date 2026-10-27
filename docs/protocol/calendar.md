@@ -217,16 +217,29 @@ offset) reminders. `SpaceCalendarReminderScheduler` polls fire_at on a
 30 s cadence and emits `EventReminderDue` events; the notification
 service translates each into a push + an in-app row.
 
-`CalendarEventDeleted` snapshots the cohort of "still-attending"
-RSVPs (`going` / `waitlist` / `requested`) before the FK CASCADE wipes
-them. The notification service uses that snapshot to push "Event
-cancelled: …" to affected members.
+`CalendarEventDeleted` snapshots the cohort of people still coming
+(`going` / `maybe` / `waitlist` / `requested` — `RSVPStatus.STILL_COMING`)
+before the FK CASCADE wipes their RSVPs. The notification service uses
+that snapshot to push "Event cancelled: …" to them.
 
 `CalendarEventUpdated` carries `material_changes` — a tuple of field
 names that changed (`summary`, `start`, `end`, or `capacity_down`).
 The push handler skips cosmetic-only updates (description, attendees,
 rrule, all_day, capacity_up) so members don't get notification spam
 from incidental edits.
+
+**Every household tells its own people.** RSVPs federate, so each
+member household holds the whole cohort; no message beyond the
+`SPACE_CALENDAR_EVENT_UPDATED` / `_DELETED` it already receives is
+needed. The household that made the change raises the two events from
+`SpaceCalendarService`; every other household raises the same events
+from its inbound handler (the material changes diffed against the row
+it held, the cohort read before the delete). Each then notifies only its
+**local** users in the cohort — once each, however many occurrences they
+answered — never the person who made the change (the payload's
+`actor_user_id`), nor anyone who blocked them or whom a guardian block
+separates from them. Push titles stay generic (§25.3); the event summary
+is on the in-app row only.
 
 ## Personal-calendar mirror for "going" RSVPs
 

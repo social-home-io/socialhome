@@ -770,6 +770,9 @@ class CalendarEventUpdated(DomainEvent):
     #: update was cosmetic-only (e.g. attendees list reorder) — push
     #: notifications skip it.
     material_changes: tuple[str, ...] = ()
+    #: Who made the change — never told about it themselves. ``None`` when
+    #: the path doesn't know (a personal-calendar edit, an older peer).
+    actor_user_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -782,11 +785,14 @@ class CalendarEventDeleted(DomainEvent):
     #: hand (e.g. inbound federation only carries the id).
     summary: str | None = None
     space_id: str | None = None
-    #: Phase D: user_ids to notify (RSVPed `going` / `waitlist` /
-    #: `requested` at deletion time). Captured pre-delete since the
-    #: ``ON DELETE CASCADE`` FK on `space_calendar_rsvps` wipes the rows
-    #: before subscribers run.
+    #: Phase D: user_ids to notify (RSVPed `going` / `maybe` / `waitlist` /
+    #: `requested` at deletion time — :data:`RSVPStatus.STILL_COMING`).
+    #: Captured pre-delete since the ``ON DELETE CASCADE`` FK on
+    #: `space_calendar_rsvps` wipes the rows before subscribers run. Every
+    #: household's answers are in it; only this household's people are told.
     notify_user_ids: tuple[str, ...] = ()
+    #: Who cancelled it — never told about it themselves.
+    actor_user_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 

@@ -555,13 +555,9 @@ async def test_every_save_notif_call_names_its_actor():
     ``_save_notif`` call in the service passes ``actor_user_id`` (``None``
     for a notice nobody caused, e.g. a deadline or an expiry)."""
     tree = ast.parse(textwrap.dedent(inspect.getsource(ns_module)))
-    # The RSVP cohort's update / cancel bells are being reworked in their own
-    # change (each household tells its own cohort, the actor excluded); they
-    # join this rule there.
-    pending = {"on_calendar_event_deleted", "on_calendar_event_updated"}
     missing = []
     for fn in ast.walk(tree):
-        if not isinstance(fn, ast.AsyncFunctionDef) or fn.name in pending:
+        if not isinstance(fn, ast.AsyncFunctionDef):
             continue
         for node in ast.walk(fn):
             if (

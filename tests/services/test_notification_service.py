@@ -3766,3 +3766,140 @@ async def test_invite_declined_bell_opens_the_members_settings(stack):
     assert await _links(stack, u["anna"], "space_remote_invite_declined") == [
         f"/spaces/{space.id}/settings/members"
     ]
+
+
+# ─── Event moved / cancelled: the people coming, never the actor ────────
+
+
+def _moved_event(created_by: str) -> CalendarEvent:
+    return CalendarEvent(
+        id="e-moved",
+        calendar_id="sp-1",
+        summary="Flea market",
+        created_by=created_by,
+        start=datetime(2026, 5, 1, 10, tzinfo=UTC),
+        end=datetime(2026, 5, 1, 11, tzinfo=UTC),
+    )
+
+
+async def _change_cohort(stack):
+    """anna changes the event; bob is going (two occurrences), carl maybe,
+    dora declined, eve never answered, and a remote member is going too."""
+    users = {
+        n: await stack.provision_user(n) for n in ("anna", "bob", "carl", "dora", "eve")
+    }
+    rsvps = [
+        SimpleNamespace(user_id=users["anna"].user_id, status="going"),
+        SimpleNamespace(user_id=users["bob"].user_id, status="going"),
+        SimpleNamespace(user_id=users["bob"].user_id, status="going"),
+        SimpleNamespace(user_id=users["carl"].user_id, status="maybe"),
+        SimpleNamespace(user_id=users["dora"].user_id, status="declined"),
+        SimpleNamespace(user_id="u-remote", status="going"),
+    ]
+
+    async def list_rsvps(_event_id):
+        return rsvps
+
+    stack.notif_svc.attach_calendar_repo(SimpleNamespace(list_rsvps=list_rsvps))
+    return users, rsvps
+
+
+async def _bell_counts(stack, users, ntype: str) -> dict[str, int]:
+    out = {}
+    for name, u in users.items():
+        rows = await stack.notif_repo.list(u.user_id, limit=50)
+        n = sum(1 for row in rows if row.type == ntype)
+        if n:
+            out[name] = n
+    return out
+
+
+async def test_event_moved_tells_going_and_maybe_never_the_person_who_moved_it(stack):
+    """Regression (live finding #3): the mover got "Event updated" about
+    their own change. The going / maybe people hear once each; declined,
+    unanswered and another household's people are not told here."""
+    users, _ = await _change_cohort(stack)
+    await stack.bus.publish(
+        CalendarEventUpdated(
+            event=_moved_event(users["anna"].user_id),
+            material_changes=("start",),
+            actor_user_id=users["anna"].user_id,
+        )
+    )
+    assert await _bell_counts(stack, users, "calendar_event_updated") == {
+        "bob": 1,
+        "carl": 1,
+    }
+
+
+async def test_event_cancelled_tells_going_and_maybe_never_the_person_who_cancelled(
+    stack,
+):
+    """Regression (live finding #3): the canceller got "Event cancelled"
+    about their own change."""
+    users, rsvps = await _change_cohort(stack)
+    await stack.bus.publish(
+        CalendarEventDeleted(
+            event_id="e-moved",
+            summary="Flea market",
+            space_id="sp-1",
+            notify_user_ids=tuple(
+                r.user_id for r in rsvps if r.status in ("going", "maybe")
+            ),
+            actor_user_id=users["anna"].user_id,
+        )
+    )
+    assert await _bell_counts(stack, users, "calendar_event_cancelled") == {
+        "bob": 1,
+        "carl": 1,
+    }
+
+
+async def test_event_change_skips_someone_who_blocked_the_actor(stack):
+    users, _ = await _change_cohort(stack)
+    await stack.notif_svc._users.block(users["bob"].user_id, users["anna"].user_id)
+    await stack.bus.publish(
+        CalendarEventUpdated(
+            event=_moved_event(users["anna"].user_id),
+            material_changes=("summary",),
+            actor_user_id=users["anna"].user_id,
+        )
+    )
+    await stack.bus.publish(
+        CalendarEventDeleted(
+            event_id="e-moved",
+            summary="Flea market",
+            space_id="sp-1",
+            notify_user_ids=(users["bob"].user_id, users["carl"].user_id),
+            actor_user_id=users["anna"].user_id,
+        )
+    )
+    assert await _bell_counts(stack, users, "calendar_event_updated") == {"carl": 1}
+    assert await _bell_counts(stack, users, "calendar_event_cancelled") == {"carl": 1}
+
+
+async def test_event_change_skips_a_guardian_block_on_the_actor(stack):
+    users, _ = await _change_cohort(stack)
+    anna = users["anna"].user_id
+    stack.notif_svc.attach_child_protection(_BlockingCP(anna, users["carl"].user_id))
+    await stack.bus.publish(
+        CalendarEventUpdated(
+            event=_moved_event(anna), material_changes=("end",), actor_user_id=anna
+        )
+    )
+    assert await _bell_counts(stack, users, "calendar_event_updated") == {"bob": 1}
+
+
+async def test_event_change_without_a_known_actor_tells_the_whole_cohort(stack):
+    """A path that names no actor still tells everyone coming."""
+    users, _ = await _change_cohort(stack)
+    await stack.bus.publish(
+        CalendarEventUpdated(
+            event=_moved_event(users["anna"].user_id), material_changes=("start",)
+        )
+    )
+    assert await _bell_counts(stack, users, "calendar_event_updated") == {
+        "anna": 1,
+        "bob": 1,
+        "carl": 1,
+    }

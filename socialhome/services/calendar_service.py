@@ -29,6 +29,7 @@ from ..domain.calendar import (
     EventReminder,
     RsvpPastError,
     RSVPStatus,
+    material_changes,
     validate_capacity,
 )
 from ..domain.child_protection import ProtectedCapability
@@ -1764,16 +1765,9 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         # CASCADE-delete with the event.
         rsvps = await self._repo.list_rsvps(event_id)
         notify = tuple(
-            {
-                r.user_id
-                for r in rsvps
-                if r.status
-                in (
-                    RSVPStatus.GOING,
-                    RSVPStatus.WAITLIST,
-                    RSVPStatus.REQUESTED,
-                )
-            }
+            dict.fromkeys(
+                r.user_id for r in rsvps if r.status in RSVPStatus.STILL_COMING
+            )
         )
         # The event keeps a tombstone naming who authorised the delete (the
         # approver of a reviewed one) — §25.6 ``calendar_deleted``.
@@ -1787,6 +1781,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
                 summary=existing.summary,
                 space_id=space_id,
                 notify_user_ids=notify,
+                actor_user_id=actor_user_id,
             )
         )
         await self._publish_federation_event_deleted(
@@ -1969,29 +1964,13 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
             evt_type=FederationEventType.SPACE_CALENDAR_EVENT_UPDATED,
             actor_user_id=actor_user_id,
         )
-        # Compute *material* field changes — Phase D: only these
-        # trigger update push notifications. Cosmetic changes (description,
-        # attendees, rrule, all_day) are silent.
-        changes: list[str] = []
-        if existing.summary != updated.summary:
-            changes.append("summary")
-        if existing.start != updated.start:
-            changes.append("start")
-        if existing.end != updated.end:
-            changes.append("end")
-        # Capacity going *down* is material (it kicks people out / changes
-        # waitlist semantics). Capacity going up is silent — promotion
-        # happens automatically.
-        if (
-            existing.capacity is not None
-            and new_capacity is not None
-            and new_capacity < existing.capacity
-        ):
-            changes.append("capacity_down")
+        # Phase D: only *material* changes (start / end / summary /
+        # capacity-down) tell the people coming; cosmetic ones are silent.
         await self._emit(
             CalendarEventUpdated(
                 event=updated,
-                material_changes=tuple(changes),
+                material_changes=material_changes(existing, updated),
+                actor_user_id=actor_user_id,
             )
         )
         # Capacity raised — promote from waitlist to fill new seats.
