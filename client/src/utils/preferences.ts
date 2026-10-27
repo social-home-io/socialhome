@@ -59,6 +59,11 @@ interface Preferences {
    *  Companion app (e.g. ``notify.mobile_app_pascals_iphone``). Empty /
    *  absent disables HA-app push for the user (§25.3). */
   ha_notify_service?: string
+  /** ha / haos only — opt-in (off by default) to fire this user's
+   *  notifications on Home Assistant's event bus for automations; the
+   *  event carries the type, ids and link, never the text. Refused by the
+   *  server for a protected account (D14). */
+  ha_automation_events?: boolean
   /** First day of the week for calendar-style views. Absent = follow
    *  the browser locale (see ``utils/week.ts``). */
   week_start?: 'mon' | 'sun' | null

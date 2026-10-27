@@ -18,30 +18,82 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.post import Post, PostType
 from socialhome.domain.task import Task, TaskStatus
-from socialhome.domain.user import UserStatus
+from socialhome.domain.user import User, UserStatus
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.ha_bridge_service import HaBridgeService
 
 
 class _FakeAdapter:
-    def __init__(self, *, fail: bool = False):
+    def __init__(self, *, fail: bool = False, refuse: bool = False):
         self.calls: list[tuple[str, dict]] = []
         self.fail = fail
+        self.refuse = refuse
 
     async def fire_event(self, event_type, data):
         if self.fail:
             raise RuntimeError("boom")
+        if self.refuse:
+            return False
         self.calls.append((event_type, data))
         return True
+
+
+class _FakeUsers:
+    """``get_by_user_id`` over a fixed set of users."""
+
+    def __init__(self, *users: User) -> None:
+        self._by_id = {u.user_id: u for u in users}
+
+    async def get_by_user_id(self, user_id):
+        return self._by_id.get(user_id)
+
+
+class _FakeProtection:
+    def __init__(self, protected: set[str] | None = None) -> None:
+        self.protected = protected or set()
+
+    async def is_protected(self, user_id):
+        return user_id in self.protected
+
+
+def _user(user_id: str, username: str, *, opted_in: bool) -> User:
+    prefs = '{"ha_automation_events": true}' if opted_in else "{}"
+    return User(
+        user_id=user_id,
+        username=username,
+        display_name=username.title(),
+        preferences_json=prefs,
+    )
+
+
+ANNA = _user("u-anna", "anna", opted_in=True)
+BEN = _user("u-ben", "ben", opted_in=False)
+KID = _user("u-kid", "kid", opted_in=True)
 
 
 @pytest.fixture
 def env():
     bus = EventBus()
     adapter = _FakeAdapter()
-    svc = HaBridgeService(bus, adapter)
+    svc = HaBridgeService(
+        bus,
+        adapter,
+        users=_FakeUsers(ANNA, BEN, KID),
+        child_protection=_FakeProtection({KID.user_id}),
+    )
     svc.wire()
     return bus, adapter
+
+
+def _notif(user_id: str, **kw) -> NotificationCreated:
+    return NotificationCreated(
+        user_id=user_id,
+        notification_id=kw.pop("notification_id", "n1"),
+        type=kw.pop("type", "dm_message"),
+        title=kw.pop("title", "Carla: see you at 6"),
+        link_url=kw.pop("link_url", "/dms/c1"),
+        **kw,
+    )
 
 
 def _post():
@@ -180,13 +232,67 @@ async def test_notification_new_fires_once_not_on_a_bumped_row(env):
     ``socialhome.notification_new`` for every message of the burst."""
     bus, adapter = env
     for bumped in (False, True):
-        await bus.publish(
-            NotificationCreated(
-                user_id="u1",
-                notification_id="n1",
-                type="dm_message",
-                title="t",
-                bumped=bumped,
-            )
-        )
+        await bus.publish(_notif(ANNA.user_id, bumped=bumped))
     assert [et for et, _ in adapter.calls] == ["socialhome.notification_new"]
+
+
+async def test_notification_new_carries_no_title_or_text(env):
+    """D14: type, ids and link only - never the title (it names people and
+    carries chat / task / event text) and never a body."""
+    bus, adapter = env
+    await bus.publish(_notif(ANNA.user_id))
+    assert adapter.calls == [
+        (
+            "socialhome.notification_new",
+            {
+                "user_id": "u-anna",
+                "username": "anna",
+                "notification_id": "n1",
+                "type": "dm_message",
+                "link_url": "/dms/c1",
+            },
+        )
+    ]
+
+
+async def test_notification_new_only_for_people_who_opted_in(env):
+    """D14: off by default - a person who never opted in is not on HA's bus."""
+    bus, adapter = env
+    await bus.publish(_notif(BEN.user_id))
+    assert adapter.calls == []
+
+
+async def test_notification_new_never_for_a_protected_account(env):
+    """D14: a protected account is skipped even with an opt-in on record
+    (e.g. set before protection, or written around the API)."""
+    bus, adapter = env
+    await bus.publish(_notif(KID.user_id))
+    assert adapter.calls == []
+
+
+async def test_notification_new_unknown_user_is_skipped(env):
+    bus, adapter = env
+    await bus.publish(_notif("u-gone"))
+    assert adapter.calls == []
+
+
+async def test_notification_new_without_user_lookup_fails_closed():
+    """A bridge built without a user directory can't check the opt-in, so
+    it fires nothing rather than everything."""
+    bus = EventBus()
+    adapter = _FakeAdapter()
+    HaBridgeService(bus, adapter).wire()
+    await bus.publish(_notif(ANNA.user_id))
+    assert adapter.calls == []
+
+
+async def test_refused_fire_is_logged_at_warning(caplog):
+    """CLAUDE.md: an HA call failure is diagnosable, not silent."""
+    bus = EventBus()
+    HaBridgeService(bus, _FakeAdapter(refuse=True)).wire()
+    with caplog.at_level("WARNING", logger="socialhome.services.ha_bridge_service"):
+        await bus.publish(PostCreated(post=_post()))
+    assert any(
+        "socialhome.post_created" in r.getMessage() and r.levelname == "WARNING"
+        for r in caplog.records
+    )

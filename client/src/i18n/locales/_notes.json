@@ -337,6 +337,7 @@
   "settings.momentum.days": "A duration in a dropdown and inside moment.yours.intro ({period}). {n} is a number of days (3, 7, 14, 30).",
   "moment.yours.intro": "{period} is a duration such as '7 days' (settings.momentum.days), the person's own choice in Settings.",
   "settings.ha_notify.help": "{code} is replaced by the literal code 'notify.mobile_app_…'. 'Developer Tools → Actions' are Home Assistant menu names — use HA's own translation of them.",
+  "settings.ha_automations.hint": "'Automations' and 'logbook' are Home Assistant features — use HA's own translation of them (de Automationen / Logbuch, nl automatiseringen / logboek, fr automatisations / journal, es automatizaciones / registro).",
   "settings.language.help": "{link} is replaced by the link text from settings.language.contribute.",
   "dashboard.bazaar.ending_soon": "Label under a count of listings that end within the next 24 hours. Keep very short.",
   "calendar.page.owner_you": "Small chip naming whose calendar an event is on — here, the viewer's own.",

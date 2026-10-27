@@ -9,7 +9,9 @@ from socialhome.domain.highlight import HighlightAudience
 from socialhome.services.user_preferences import (
     DEFAULT_HIGHLIGHTS_MAX_COUNT,
     DEFAULT_HIGHLIGHTS_RETENTION_DAYS,
+    HA_AUTOMATION_EVENTS_KEY,
     MAX_TIMETABLE_HOME_PINS,
+    parse_ha_automation_events,
     parse_highlights_preferences,
     parse_moment_preferences,
     parse_timetable_home_pins,
@@ -125,3 +127,25 @@ def test_moment_preferences_keep_max_hops_beside_retention():
     blob = orjson.dumps({"moments": {"max_hops": 1, "follower_retention_days": 14}})
     prefs = parse_moment_preferences(blob.decode())
     assert (prefs.max_hops, prefs.follower_retention_days) == (1, 14)
+
+
+# ─── Home Assistant automation opt-in (D14) ──────────────────────────────
+
+
+def test_ha_automation_events_off_by_default():
+    assert parse_ha_automation_events(None) is False
+    assert parse_ha_automation_events("") is False
+    assert parse_ha_automation_events("{}") is False
+
+
+def test_ha_automation_events_on_only_for_literal_true():
+    on = orjson.dumps({HA_AUTOMATION_EVENTS_KEY: True}).decode()
+    assert parse_ha_automation_events(on) is True
+    for junk in ("yes", 1, "true", None, False, [True]):
+        blob = orjson.dumps({HA_AUTOMATION_EVENTS_KEY: junk}).decode()
+        assert parse_ha_automation_events(blob) is False
+
+
+def test_ha_automation_events_tolerates_bad_json():
+    assert parse_ha_automation_events("{not json") is False
+    assert parse_ha_automation_events("[1, 2]") is False

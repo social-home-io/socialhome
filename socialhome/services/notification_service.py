@@ -528,7 +528,7 @@ class NotificationService(ProtectionGateMixin):
                     user,
                     title,
                     "",
-                    data={"type": saved.type, "url": saved.link_url},
+                    data={"type": saved.type, "url": saved.link_url, "tag": tag},
                 )
             except Exception as exc:
                 log.debug("platform push fan-out failed: %s", exc, exc_info=True)

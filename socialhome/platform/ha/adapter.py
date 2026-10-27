@@ -138,6 +138,7 @@ class HaAdapter(PlatformAdapter):
             Capability.ZONE_SYNC,  # ``self.zones`` reads HA's zones
             Capability.HOME_LOCATION_SYNC,  # ``self.home_location`` reads HA's home
             Capability.HA_DISPLAY_DISCOVERY,  # ``self.displays`` lists HA's panels
+            Capability.AUTOMATION_EVENTS,  # HaBridgeService → HA's event bus
             # Local password auth — the wizard sets a password for the
             # picked HA owner so the user can log in via /api/auth/token
             # in addition to X-Remote-User-Name and HA bearer tokens.
@@ -258,6 +259,22 @@ class HaAdapter(PlatformAdapter):
             currency=cfg.get("currency", "USD"),
         )
 
+    async def companion_click_url(self, path: str) -> str | None:
+        """Where a tap on a Companion push opens: *path* on Social Home's
+        own public origin.
+
+        Companion contract (companion.home-assistant.io/docs/notifications/
+        notifications-basic, "Opening a URL"): a relative ``url`` /
+        ``clickAction`` opens on the Home Assistant server inside HA's
+        frontend — Social Home is a separate server here, so only an
+        absolute URL ("A full URL like https://example.com") reaches it.
+        ``None`` when the deployment has no public origin
+        (:meth:`get_public_base_url`): the push then carries no URL rather
+        than one that opens a route HA doesn't have.
+        """
+        base = await self.get_public_base_url()
+        return f"{base}{path}" if base else None
+
     async def get_federation_base(self) -> str | None:
         """Return the externally-reachable federation inbox base URL.
 
@@ -341,7 +358,12 @@ class HaAdapter(PlatformAdapter):
                 on_first_attempt=_first_attempt,
             )
             await self._ice_sync.start()
-        self._ha_bridge = HaBridgeService(app[K.event_bus_key], self)
+        self._ha_bridge = HaBridgeService(
+            app[K.event_bus_key],
+            self,
+            users=app.get(K.user_repo_key),
+            child_protection=app.get(K.child_protection_service_key),
+        )
         self._ha_bridge.wire()
         # Mirror HA Core's ``time_zone`` into preferences.tz
         # once at startup, so calendar events created without an

@@ -124,7 +124,32 @@ service they set per-user in Settings → Notifications
 HA names that service after the *device*, not the username, so there is
 no auto-derived default — an unset value skips HA-app push for that user,
 and a configured-but-wrong service is logged at WARNING (not silently
-dropped).
+dropped). The push carries only the Companion keys whose contract is
+verified ([notifications-basic](https://companion.home-assistant.io/docs/notifications/notifications-basic),
+checked against the push relay `home-assistant/mobile-apps-fcm-push`):
+`tag` — the bell's `type:link` tag hashed to `socialhome-<32 hex>`, since
+iOS turns it into `apns-collapse-id` (≤ 64 bytes) — so a repeat replaces
+itself on the phone, and `url` (iOS) / `clickAction` (Android) for the tap.
+A relative URL opens in Home Assistant's own frontend, so the adapter
+decides (`companion_click_url`): `haos` → `/<app slug>`, the App's sidebar
+panel (HA registers it at `frontend_url_path=<slug>` only while
+`ingress_panel` is on; the panel always loads the App's ingress root, so no
+deep path), `ha` → the absolute link on Social Home's public origin
+(`get_public_base_url()`); with neither, no URL is sent.
+
+**Home Assistant automation events.** `services/ha_bridge_service.py:
+HaBridgeService` (wired by both HA adapters, which advertise
+`Capability.AUTOMATION_EVENTS`) fires a narrow set of `socialhome.*`
+events on HA's event bus (`POST /api/events/<type>`; HA stores events in
+its database and shows them to anyone with admin, logbook or automation
+access). `socialhome.notification_new` is personal: it fires only for a
+person who opted in under Settings → Notifications
+(`preferences_json.ha_automation_events`, off by default), never for a
+protected account (refused on `PATCH /api/me` as `ha_automations`, dropped
+when protection starts, and re-checked at fire time), never again for a
+bumped row, and carries no title or text:
+`{user_id, username, notification_id, type, link_url}`. A failed fire is
+logged at WARNING.
 
 Wall panels adopted in Home Assistant are found through the optional
 `DisplayDirectory` Provider (`adapter.displays`; `None` on standalone).

@@ -18,6 +18,9 @@ third-party tool:
   external tool holds).
 * ``calendar_feeds`` — mint a space-calendar subscription link (an
   unauthenticated URL that exposes the account's schedule).
+* ``ha_automations`` — send the account's notifications to Home
+  Assistant automations (the ``socialhome.notification_new`` event on
+  HA's event bus, readable by anyone with HA admin or automation access).
 
 The capability ids are the wire values ``/api/me`` reports and the
 ``ACCOUNT_PROTECTED`` error carries, so the SPA can explain *what* is
@@ -39,6 +42,7 @@ class ProtectedCapability(StrEnum):
     PUBLIC_LINKS = "public_links"
     API_TOKENS = "api_tokens"
     CALENDAR_FEEDS = "calendar_feeds"
+    HA_AUTOMATIONS = "ha_automations"
 
 
 #: Every capability a protected account loses, in display order. One fixed

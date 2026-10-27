@@ -23,6 +23,7 @@ from socialhome.infrastructure.event_bus import EventBus
 from socialhome.platform.adapter import Capability
 from socialhome.platform.ha.adapter import HomeAssistantAdapter
 from socialhome.platform.ha.displays import HaDisplayDirectory
+from socialhome.platform.ha.providers import COMPANION_TAG_PREFIX, companion_tag
 from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
 
 # ─── Fake HaClient ───────────────────────────────────────────────────────
@@ -491,7 +492,7 @@ async def test_send_push_uses_configured_notify_service():
     client = _FakeHaClient(call_service_response=[])
     adapter = _build_adapter(client=client)
     user = _push_user("notify.mobile_app_pascals_iphone")
-    await adapter.send_push(user, "title", "message", data={"x": 1})
+    await adapter.send_push(user, "title", "message", data={"tag": "dm:/dms/c1"})
     assert any(
         c[0] == "call_service"
         and c[1] == "notify"
@@ -500,7 +501,7 @@ async def test_send_push_uses_configured_notify_service():
         == {
             "title": "title",
             "message": "message",
-            "data": {"x": 1},
+            "data": {"tag": companion_tag("dm:/dms/c1")},
         }
         for c in client.calls
     )
@@ -1175,3 +1176,70 @@ async def test_on_startup_releases_the_ice_gate_after_the_first_attempt(
             assert fed.applied == []
         finally:
             await adapter.on_cleanup(app)
+
+
+# ─── Companion push data (tap URL + tag) ─────────────────────────────────
+
+
+def test_capabilities_include_automation_events():
+    adapter = _build_adapter(client=_FakeHaClient())
+    assert Capability.AUTOMATION_EVENTS in adapter.capabilities
+
+
+def test_companion_tag_is_stable_short_and_distinct():
+    """iOS: ``data.tag`` becomes ``apns-collapse-id`` (≤ 64 bytes)."""
+    long_tag = "space_post_created:/spaces/" + "x" * 200
+    assert companion_tag(long_tag) == companion_tag(long_tag)
+    assert len(companion_tag(long_tag).encode()) <= 64
+    assert companion_tag("dm_message:/dms/a") != companion_tag("dm_message:/dms/b")
+    assert companion_tag("x").startswith(COMPANION_TAG_PREFIX)
+
+
+async def _companion_call(adapter, client, data):
+    await adapter.send_push(
+        _push_user("notify.mobile_app_pascals_iphone"), "t", "", data=data
+    )
+    return next(c for c in client.calls if c[0] == "call_service")[3]
+
+
+async def test_send_push_tap_url_is_absolute_on_the_public_origin():
+    """ha mode: Social Home is not HA, so a relative URL would open HA's
+    frontend — the tap gets Social Home's absolute public URL instead,
+    as both ``url`` (iOS) and ``clickAction`` (Android)."""
+    client = _FakeHaClient(call_service_response=[])
+    adapter = _build_adapter(client=client)
+
+    async def _public():
+        return "https://sh.example.org"
+
+    adapter.get_public_base_url = _public
+    body = await _companion_call(
+        adapter, client, {"url": "/dms/c1", "tag": "dm_message:/dms/c1"}
+    )
+    assert body["data"] == {
+        "url": "https://sh.example.org/dms/c1",
+        "clickAction": "https://sh.example.org/dms/c1",
+        "tag": companion_tag("dm_message:/dms/c1"),
+    }
+
+
+async def test_send_push_without_public_origin_sends_no_url():
+    client = _FakeHaClient(call_service_response=[])
+    adapter = _build_adapter(client=client)
+
+    async def _none():
+        return None
+
+    adapter.get_public_base_url = _none
+    body = await _companion_call(adapter, client, {"url": "/dms/c1", "tag": "t"})
+    assert body["data"] == {"tag": companion_tag("t")}
+
+
+async def test_send_push_drops_unknown_data_keys():
+    """Only keys whose Companion contract is verified reach HA."""
+    client = _FakeHaClient(call_service_response=[])
+    adapter = _build_adapter(client=client)
+    body = await _companion_call(
+        adapter, client, {"type": "dm_message", "url": "not-a-path", "x": 1}
+    )
+    assert "data" not in body

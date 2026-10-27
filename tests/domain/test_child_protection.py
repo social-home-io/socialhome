@@ -28,6 +28,7 @@ def test_capability_wire_values_are_stable():
         "public_links",
         "api_tokens",
         "calendar_feeds",
+        "ha_automations",
     ]
 
 
