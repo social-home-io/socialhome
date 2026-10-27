@@ -36,6 +36,7 @@ from socialhome.domain.events import (
     HighlightAudienceChanged,
     HouseholdZonesChanged,
     MomentReactionTotalsUpdated,
+    NotificationCreated,
     PageConflictEmitted,
     PageProposalSettled,
     PeerTransportChanged,
@@ -60,6 +61,7 @@ from socialhome.domain.events import (
     UserStatusChanged,
 )
 from socialhome.domain.mention import Mention, MentionType
+from socialhome.domain.notification import NotificationActor, NotificationParams
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import SpaceMember
 from socialhome.domain.task import Task, TaskStatus
@@ -1019,6 +1021,56 @@ async def test_notification_new_says_when_it_bumped_a_row(env):
         )
     )
     assert any('"bumped":true' in m for m in me.sent)
+
+
+async def test_notification_new_carries_what_who_and_where(env):
+    """0129: the frame names the row's object, space and render params, and
+    says when a read row re-opened."""
+    _svc, bus, ws = env
+    me = _FakeWS()
+    await ws.register("u1", me)
+    params = NotificationParams(
+        actors=(NotificationActor("u2", "Ben"),),
+        actor_count=1,
+        new=1,
+        total=3,
+        space_name="Salon",
+    )
+    await bus.publish(
+        NotificationCreated(
+            user_id="u1",
+            notification_id="n-1",
+            type="space_comment_added",
+            title="Ben commented in Salon",
+            bumped=True,
+            reopened=True,
+            object_key="space_post:p1",
+            space_id="s1",
+            params=params,
+        )
+    )
+    [frame] = [json.loads(m) for m in me.sent if "notification.new" in m]
+    frame = frame.get("data", frame)
+    assert frame["object_key"] == "space_post:p1"
+    assert frame["space_id"] == "s1"
+    assert frame["params"] == params.to_dict()
+    assert (frame["bumped"], frame["reopened"]) == (True, True)
+
+
+async def test_notification_new_without_params_sends_null(env):
+    _svc, bus, ws = env
+    me = _FakeWS()
+    await ws.register("u1", me)
+    await bus.publish(
+        NotificationCreated(user_id="u1", notification_id="n-1", type="x", title="t")
+    )
+    [frame] = [json.loads(m) for m in me.sent if "notification.new" in m]
+    frame = frame.get("data", frame)
+    assert (frame["params"], frame["object_key"], frame["reopened"]) == (
+        None,
+        None,
+        False,
+    )
 
 
 async def test_notification_unread_count_targets_one_user(env):

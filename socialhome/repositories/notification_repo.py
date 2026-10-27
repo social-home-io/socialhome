@@ -7,6 +7,12 @@ rows first, then the oldest unread ones, and never an unread action item
 (:data:`~socialhome.domain.notification.ACTION_ITEM_TYPES`); the 90-day
 purge spares unread action items too.
 
+A row names what it is about (``object_key``, ``space_id``, 0129) and
+carries ``params`` (JSON, :class:`NotificationParams`). The service finds a
+row's group with :meth:`SqliteNotificationRepo.latest_in_group` and
+re-opens it with :meth:`SqliteNotificationRepo.update_group` (D7); visiting,
+deleting or leaving the thing reads / removes rows by key or space.
+
 The service layer produces notification rows; this repo only persists and
 queries them. Push delivery, bell-badge counts, mark-read flows all sit on
 top of the methods here.
@@ -16,11 +22,18 @@ from __future__ import annotations
 
 import builtins
 import uuid
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
+import orjson
+
 from ..db import AsyncDatabase
-from ..domain.notification import ACTION_ITEM_TYPES, Notification
+from ..domain.notification import (
+    ACTION_ITEM_TYPES,
+    Notification,
+    NotificationParams,
+)
 from ._spec import Spec, spec_to_sql
 from .base import row_to_dict, rows_to_dicts
 
@@ -34,6 +47,8 @@ _NOTIFICATION_COLS: frozenset[str] = frozenset(
         "link_url",
         "read_at",
         "created_at",
+        "object_key",
+        "space_id",
     }
 )
 
@@ -51,7 +66,10 @@ _ACTION_IN = "(" + ",".join("?" * len(_ACTION_TYPES)) + ")"
 @runtime_checkable
 class AbstractNotificationRepo(Protocol):
     async def save(self, note: Notification) -> Notification: ...
-    async def save_or_bump_unread(self, note: Notification) -> Notification: ...
+    async def latest_in_group(
+        self, *, user_id: str, type: str, object_key: str, since: str
+    ) -> Notification | None: ...
+    async def update_group(self, note: Notification) -> None: ...
     async def list(
         self,
         user_id: str,
@@ -76,6 +94,19 @@ class AbstractNotificationRepo(Protocol):
     ) -> int: ...
     async def mark_read_for_everyone(
         self, *, link_url: str, type: str
+    ) -> builtins.list[str]: ...
+    async def mark_read_by_object(
+        self, user_id: str, object_keys: Iterable[str]
+    ) -> int: ...
+    async def delete_by_object(
+        self, object_keys: Iterable[str], *, keep_types: Iterable[str] = ()
+    ) -> builtins.list[str]: ...
+    async def delete_by_space(
+        self,
+        space_id: str,
+        *,
+        user_id: str | None = None,
+        keep_types: Iterable[str] = (),
     ) -> builtins.list[str]: ...
     async def count_unread(self, user_id: str) -> int: ...
     async def delete_old(self, older_than_days: int = 90) -> int: ...
@@ -115,8 +146,9 @@ class SqliteNotificationRepo:
         await self._db.enqueue(
             """
             INSERT INTO notifications(
-                id, user_id, type, title, body, link_url, read_at, created_at
-            ) VALUES(?,?,?,?,?,?,?, COALESCE(?, datetime('now')))
+                id, user_id, type, title, body, link_url, read_at, created_at,
+                object_key, space_id, params
+            ) VALUES(?,?,?,?,?,?,?, COALESCE(?, datetime('now')), ?,?,?)
             """,
             (
                 note.id,
@@ -127,6 +159,9 @@ class SqliteNotificationRepo:
                 note.link_url,
                 note.read_at,
                 note.created_at,
+                note.object_key,
+                note.space_id,
+                _params_json(note.params),
             ),
         )
         # Keep at most ``cap`` rows per user: delete as many rows as the
@@ -151,61 +186,45 @@ class SqliteNotificationRepo:
         )
         return note
 
-    async def save_or_bump_unread(self, note: Notification) -> Notification:
-        """Insert ``note``, or — if an unread row already exists with the
-        same ``(user_id, type, link_url)`` — bump that existing row's
-        ``created_at`` + ``title`` in place and return it.
-
-        Caller passes a freshly-minted ``Notification`` (its own ``id``
-        + timestamp); on bump the returned ``Notification`` carries the
-        **existing** row's ``id`` so realtime / push handlers don't
-        re-fire as a "new" notification on the SPA. The bump keeps the
-        title fresh because the sender's display name can change
-        between bursts; body stays ``None`` so §25.3's title-only
-        redaction is preserved.
-
-        Dedupe is **scoped to currently-unread rows only** — a read row
-        with the same key does not absorb a new event. That gives the
-        natural "thread cleared → next message starts a fresh row"
-        behavior the bell wants.
-
-        ``link_url`` is required for dedupe; if ``None``, this falls
-        back to plain :meth:`save` so non-DM call-sites that don't
-        carry a link keep the strict append-only shape.
-        """
-        if note.link_url is None:
-            return await self.save(note)
-        existing = await self._db.fetchone(
+    async def latest_in_group(
+        self, *, user_id: str, type: str, object_key: str, since: str
+    ) -> Notification | None:
+        """The newest ``(user_id, type, object_key)`` row whose last activity
+        (``created_at``) is at or after ``since`` — read or not — else
+        ``None``. The group a new event joins (D7)."""
+        row = await self._db.fetchone(
             """
-            SELECT id FROM notifications
-             WHERE user_id = ?
-               AND type = ?
-               AND link_url = ?
-               AND read_at IS NULL
+            SELECT * FROM notifications
+             WHERE object_key = ? AND user_id = ? AND type = ?
+               AND created_at >= ?
              ORDER BY created_at DESC
              LIMIT 1
             """,
-            (note.user_id, note.type, note.link_url),
+            (object_key, user_id, type, since),
         )
-        if existing is not None:
-            existing_row = row_to_dict(existing)
-            assert existing_row is not None  # fetchone returned a row
-            existing_id = existing_row["id"]
-            await self._db.enqueue(
-                "UPDATE notifications SET created_at=?, title=? WHERE id=?",
-                (note.created_at, note.title, existing_id),
-            )
-            return Notification(
-                id=existing_id,
-                user_id=note.user_id,
-                type=note.type,
-                title=note.title,
-                body=note.body,
-                link_url=note.link_url,
-                read_at=None,
-                created_at=note.created_at,
-            )
-        return await self.save(note)
+        return _row_to_notification(row_to_dict(row))
+
+    async def update_group(self, note: Notification) -> None:
+        """Write a regrouped row back by id: its fresh title, body, link,
+        last activity, read state, space and params."""
+        await self._db.enqueue(
+            """
+            UPDATE notifications
+               SET title = ?, body = ?, link_url = ?, created_at = ?,
+                   read_at = ?, space_id = ?, params = ?
+             WHERE id = ?
+            """,
+            (
+                note.title,
+                note.body,
+                note.link_url,
+                note.created_at,
+                note.read_at,
+                note.space_id,
+                _params_json(note.params),
+                note.id,
+            ),
+        )
 
     async def get(self, notification_id: str) -> Notification | None:
         row = await self._db.fetchone(
@@ -375,6 +394,68 @@ class SqliteNotificationRepo:
             )
         return user_ids
 
+    async def mark_read_by_object(
+        self, user_id: str, object_keys: Iterable[str]
+    ) -> int:
+        """Mark every unread row of ``user_id`` about one of *object_keys*
+        read (any type); returns how many flipped."""
+        keys = list(dict.fromkeys(object_keys))
+        if not keys:
+            return 0
+        marks = ",".join("?" * len(keys))
+        return await self._db.enqueue_rowcount(
+            "UPDATE notifications SET read_at = datetime('now') "
+            f"WHERE object_key IN ({marks}) AND user_id = ? AND read_at IS NULL",
+            (*keys, user_id),
+        )
+
+    async def delete_by_object(
+        self, object_keys: Iterable[str], *, keep_types: Iterable[str] = ()
+    ) -> builtins.list[str]:
+        """The things are gone: delete every row about one of *object_keys*,
+        whoever it belongs to, except rows of *keep_types*. Returns the users
+        who lost an **unread** row (their badge moved)."""
+        keys = list(dict.fromkeys(object_keys))
+        if not keys:
+            return []
+        keep = sorted(set(keep_types))
+        where = f"object_key IN ({','.join('?' * len(keys))})"
+        if keep:
+            where += f" AND type NOT IN ({','.join('?' * len(keep))})"
+        return await self._delete_where(where, (*keys, *keep))
+
+    async def delete_by_space(
+        self,
+        space_id: str,
+        *,
+        user_id: str | None = None,
+        keep_types: Iterable[str] = (),
+    ) -> builtins.list[str]:
+        """Delete the rows about things in *space_id* — of ``user_id`` only
+        (they left), or everyone's (the space ended) — except rows of
+        *keep_types*. Returns the users who lost an unread row."""
+        keep = sorted(set(keep_types))
+        where = "space_id = ?"
+        args: list[object] = [space_id]
+        if user_id is not None:
+            where += " AND user_id = ?"
+            args.append(user_id)
+        if keep:
+            where += f" AND type NOT IN ({','.join('?' * len(keep))})"
+            args.extend(keep)
+        return await self._delete_where(where, tuple(args))
+
+    async def _delete_where(
+        self, where: str, args: tuple[object, ...]
+    ) -> builtins.list[str]:
+        rows = await self._db.fetchall(
+            f"SELECT DISTINCT user_id FROM notifications WHERE {where} "
+            "AND read_at IS NULL",
+            args,
+        )
+        await self._db.enqueue(f"DELETE FROM notifications WHERE {where}", args)
+        return [r["user_id"] for r in rows]
+
     async def count_unread(self, user_id: str) -> int:
         return int(
             await self._db.fetchval(
@@ -453,7 +534,25 @@ def _row_to_notification(row: dict | None) -> Notification | None:
         link_url=row.get("link_url"),
         read_at=row.get("read_at"),
         created_at=row["created_at"],
+        object_key=row.get("object_key"),
+        space_id=row.get("space_id"),
+        params=_parse_params(row.get("params")),
     )
+
+
+def _params_json(params: NotificationParams | None) -> str | None:
+    return orjson.dumps(params.to_dict()).decode() if params is not None else None
+
+
+def _parse_params(raw: str | None) -> NotificationParams | None:
+    """A stored ``params`` column (JSON by the 0129 CHECK) — ``None`` for
+    none or an unreadable one, never an error that breaks a list."""
+    if not raw:
+        return None
+    try:
+        return NotificationParams.from_dict(orjson.loads(raw))
+    except orjson.JSONDecodeError:
+        return None
 
 
 # Convenience: build a Notification with a fresh UUID.

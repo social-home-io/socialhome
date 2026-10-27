@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     from .calendar import CalendarEvent
     from .highlight import HighlightFrame
     from .mention import Mention
+    from .notification import NotificationParams
     from .post import Comment, Post
     from .space import SpaceModerationItem
     from .task import Task
@@ -1275,10 +1276,18 @@ class NotificationCreated(DomainEvent):
     re-polling. ``link_url`` rides along so the WS frame can render a
     clickable item in the bell panel without a follow-up fetch.
 
-    ``bumped`` is set when the event refreshed a row that was already
-    unread (a chat burst collapses into one row): the row moves to the
-    top, but the unread count stays the same, no push goes out again and
-    the Home Assistant event bus is not told twice.
+    One row per (user, type, object) while it stays active (D7):
+    ``bumped`` is set when the event refreshed an existing row instead of
+    adding one — it moves to the top and a client never counts it again.
+    ``reopened`` (always with ``bumped``) means that row had been read
+    and is unread again: the unread count grew by one, and a
+    :class:`NotificationReadChanged` with the new count follows.
+    ``silent`` means no push went out and the Home Assistant event bus is
+    not told (a chat burst refreshing its unread row).
+
+    ``object_key`` / ``space_id`` / ``params`` are the row's subject and
+    render params (0129) — ``params`` is a
+    :class:`~socialhome.domain.notification.NotificationParams`.
     """
 
     user_id: str
@@ -1287,6 +1296,11 @@ class NotificationCreated(DomainEvent):
     title: str
     link_url: str | None = None
     bumped: bool = False
+    reopened: bool = False
+    silent: bool = False
+    object_key: str | None = None
+    space_id: str | None = None
+    params: NotificationParams | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 

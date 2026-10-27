@@ -249,3 +249,128 @@ async def test_list_pages_with_before_cursor(client):
             break
         before = page[-1]["created_at"]
     assert seen == ["bob-4", "bob-3", "bob-2", "bob-1", "bob-0"]
+
+
+# ── Who, what and where (0129) ────────────────────────────────────────
+
+
+async def _post(client) -> str:
+    resp = await client.post(
+        "/api/feed/posts",
+        json={"type": "text", "content": "about something"},
+        headers=_auth(client._admin_token),
+    )
+    return (await resp.json())["id"]
+
+
+async def test_list_rows_name_their_object_actor_and_counts(client):
+    post_id = await _post(client)
+    resp = await client.get("/api/notifications", headers=_auth(client._bob_token))
+    [row] = [n for n in await resp.json() if n["type"] == "post_created"]
+    assert row["object_key"] == f"post:{post_id}"
+    assert row["space_id"] is None
+    assert row["params"] == {
+        "actors": [{"id": client._admin_uid, "name": "Pascal"}],
+        "actor_count": 1,
+        "new": 1,
+        "total": 1,
+    }
+    assert (row["new_count"], row["total_count"]) == (1, 1)
+    # The old fields stay.
+    assert row["link_url"] == f"/post/{post_id}"
+    assert row["title"] and row["created_at"] and row["read_at"] is None
+
+
+async def test_comments_on_one_post_share_one_row(client):
+    post_id = await _post(client)
+    for text in ("one", "two"):
+        resp = await client.post(
+            f"/api/feed/posts/{post_id}/comments",
+            json={"content": text},
+            headers=_auth(client._admin_token),
+        )
+        assert resp.status in (200, 201)
+    resp = await client.get("/api/notifications", headers=_auth(client._bob_token))
+    rows = [n for n in await resp.json() if n["type"] == "comment_added"]
+    assert len(rows) == 1
+    assert (rows[0]["new_count"], rows[0]["total_count"]) == (2, 2)
+    count = await client.get(
+        "/api/notifications/unread-count", headers=_auth(client._bob_token)
+    )
+    assert (await count.json())["unread"] == 2  # the post row + the comment row
+
+
+async def test_a_row_from_before_0129_lists_with_nulls(client):
+    db = client.app[_db_key]
+    await db.enqueue(
+        "INSERT INTO notifications(id, user_id, type, title, created_at)"
+        " VALUES('old', ?, 'x', 'Old row', '2026-10-01T00:00:00+00:00')",
+        (client._bob_uid,),
+    )
+    resp = await client.get("/api/notifications", headers=_auth(client._bob_token))
+    [row] = [n for n in await resp.json() if n["id"] == "old"]
+    assert (row["object_key"], row["space_id"], row["params"]) == (None, None, None)
+    assert (row["new_count"], row["total_count"]) == (1, 1)
+
+
+async def test_read_by_object_reads_every_row_about_the_thing(client):
+    post_id = await _post(client)
+    await client.post(
+        f"/api/feed/posts/{post_id}/comments",
+        json={"content": "hi"},
+        headers=_auth(client._admin_token),
+    )
+    other = await _post(client)
+    resp = await client.post(
+        "/api/notifications/read-by-object",
+        json={"object_keys": [f"post:{post_id}"]},
+        headers=_auth(client._bob_token),
+    )
+    assert resp.status == 200
+    assert (await resp.json()) == {"ok": True, "marked": 2}
+    resp = await client.get("/api/notifications", headers=_auth(client._bob_token))
+    unread = [n["object_key"] for n in await resp.json() if n["read_at"] is None]
+    assert unread == [f"post:{other}"]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"object_keys": []},
+        {"object_keys": "post:p1"},
+        {"object_keys": ["p1"]},
+        {"object_keys": [1]},
+        {"object_keys": ["post:p"] * 21},
+        {"object_keys": ["post:" + "a" * 300]},
+        ["post:p1"],
+    ],
+)
+async def test_read_by_object_rejects_a_malformed_body(client, body):
+    resp = await client.post(
+        "/api/notifications/read-by-object",
+        json=body,
+        headers=_auth(client._bob_token),
+    )
+    assert resp.status == 422
+
+
+async def test_read_by_object_requires_auth(client):
+    resp = await client.post(
+        "/api/notifications/read-by-object", json={"object_keys": ["post:p1"]}
+    )
+    assert resp.status == 401
+
+
+async def test_deleting_a_post_takes_its_rows_away(client):
+    post_id = await _post(client)
+    resp = await client.delete(
+        f"/api/feed/posts/{post_id}", headers=_auth(client._admin_token)
+    )
+    assert resp.status in (200, 204)
+    resp = await client.get("/api/notifications", headers=_auth(client._bob_token))
+    assert [n for n in await resp.json() if n["object_key"] == f"post:{post_id}"] == []
+    count = await client.get(
+        "/api/notifications/unread-count", headers=_auth(client._bob_token)
+    )
+    assert (await count.json())["unread"] == 0

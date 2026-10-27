@@ -505,13 +505,15 @@ async def test_presence_by_username_without_user_lookup_fails_closed():
     assert adapter.calls == []
 
 
-async def test_notification_new_fires_once_not_on_a_bumped_row(env):
-    """A chat burst bumps one unread row; automations used to hear
-    ``socialhome.notification_new`` for every message of the burst."""
+async def test_notification_new_fires_once_not_on_a_silent_repeat(env):
+    """A chat burst bumps one unread row silently; automations used to hear
+    ``socialhome.notification_new`` for every message of the burst. A bump
+    that still pushes (a second comment on a post) or a re-opened read row
+    is news again."""
     bus, adapter = env
-    for bumped in (False, True):
-        await bus.publish(_notif(ANNA.user_id, bumped=bumped))
-    assert [et for et, _ in adapter.calls] == ["socialhome.notification_new"]
+    for bumped, silent in ((False, False), (True, True), (True, False)):
+        await bus.publish(_notif(ANNA.user_id, bumped=bumped, silent=silent))
+    assert [et for et, _ in adapter.calls] == ["socialhome.notification_new"] * 2
 
 
 # ─── Household events ────────────────────────────────────────────────────

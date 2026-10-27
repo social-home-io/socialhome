@@ -181,13 +181,22 @@ async def test_a_dm_burst_pushes_once_and_says_it_bumped(env):
     assert len({e.notification_id for e in env.created}) == 1
 
 
-async def test_a_dm_after_reading_starts_a_fresh_row_and_pushes(env):
+async def test_a_dm_after_reading_reopens_the_row_and_pushes(env):
+    """D7: the conversation keeps one row; a message after reading re-opens
+    it (unread again, to the top), pushes like a new one, and every device
+    hears the new count."""
     anna, bob = await env.user("anna"), await env.user("bob")
     await env.bus.publish(_dm(anna, bob))
     await env.svc.mark_read_for_dm(bob.user_id, "c1")
+    env.read_changed.clear()
     await env.bus.publish(_dm(anna, bob))
-    assert [e.bumped for e in env.created] == [False, False]
+    assert [(e.bumped, e.reopened, e.silent) for e in env.created] == [
+        (False, False, False),
+        (True, True, False),
+    ]
+    assert env.created[0].notification_id == env.created[1].notification_id
     assert len(env.push.sent) == 2
+    assert [(e.user_id, e.unread_count) for e in env.read_changed] == [(bob.user_id, 1)]
 
 
 # ── 3. Visiting a page reads the rows that open it ────────────────────

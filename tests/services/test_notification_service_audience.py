@@ -46,6 +46,7 @@ from socialhome.domain.events import (
     TaskCompleted,
     TaskDeadlineDue,
 )
+from socialhome.domain.notification import NotificationSubject
 from socialhome.domain.post import Post, PostType
 from socialhome.domain.task import Task, TaskStatus
 from socialhome.domain.user import RemoteUser
@@ -370,6 +371,7 @@ async def test_a_direct_save_for_an_unknown_user_id_is_refused(stack):
 
     saved = await stack.notif_svc._save_notif(
         new_notification(user_id="u-nobody", type="x", title="t", link_url=None),
+        about=NotificationSubject("post:p1"),
         actor_user_id=None,
     )
     assert saved is None

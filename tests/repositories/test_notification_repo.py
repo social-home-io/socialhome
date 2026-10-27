@@ -6,6 +6,8 @@ from dataclasses import replace
 
 import pytest
 
+from socialhome.domain.notification import NotificationActor, NotificationParams
+from socialhome.repositories._spec import Spec
 from socialhome.repositories.notification_repo import (
     SqliteNotificationRepo,
     new_notification,
@@ -75,84 +77,6 @@ async def test_notification_mark_read(env):
     assert (await env.notif_repo.get(n1.id)).is_read
     assert not (await env.notif_repo.get(n2.id)).is_read
     assert await env.notif_repo.count_unread(uid) == 1
-
-
-async def test_save_or_bump_unread_collapses_same_link(env):
-    """Two ``save_or_bump_unread`` calls with the same
-    ``(user_id, type, link_url)`` produce exactly one row, with the
-    second call's ``created_at`` + ``title`` overwriting the first."""
-    await env.db.enqueue(
-        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
-        ("notif_user_b", "uid-notif-b", "NotifUserB"),
-    )
-    uid = "uid-notif-b"
-    first = new_notification(
-        user_id=uid,
-        type="dm_message",
-        title="Alice messaged you",
-        link_url="/dms/c-1",
-    )
-    second = new_notification(
-        user_id=uid,
-        type="dm_message",
-        title="Alice messaged you",
-        link_url="/dms/c-1",
-    )
-    saved_first = await env.notif_repo.save_or_bump_unread(first)
-    saved_second = await env.notif_repo.save_or_bump_unread(second)
-    # Same id back — the second call returned the bumped first row.
-    assert saved_second.id == saved_first.id
-    # Only one row in the user's list.
-    rows = await env.notif_repo.list(uid, limit=50)
-    assert len([r for r in rows if r.link_url == "/dms/c-1"]) == 1
-
-
-async def test_save_or_bump_unread_does_not_span_read(env):
-    """A read row with the same key does not absorb a new event —
-    the next ``save_or_bump_unread`` creates a fresh unread row."""
-    await env.db.enqueue(
-        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
-        ("notif_user_c", "uid-notif-c", "NotifUserC"),
-    )
-    uid = "uid-notif-c"
-    first = new_notification(
-        user_id=uid,
-        type="dm_message",
-        title="A",
-        link_url="/dms/c-1",
-    )
-    saved = await env.notif_repo.save_or_bump_unread(first)
-    await env.notif_repo.mark_read(saved.id, uid)
-    second = new_notification(
-        user_id=uid,
-        type="dm_message",
-        title="B",
-        link_url="/dms/c-1",
-    )
-    saved_second = await env.notif_repo.save_or_bump_unread(second)
-    # Different id this time — the read row didn't absorb.
-    assert saved_second.id != saved.id
-    rows = await env.notif_repo.list(uid, limit=50)
-    assert len([r for r in rows if r.link_url == "/dms/c-1"]) == 2
-    unread = [r for r in rows if r.read_at is None]
-    assert len(unread) == 1
-
-
-async def test_save_or_bump_unread_falls_back_to_save_when_no_link(env):
-    """Without a ``link_url`` the repo can't dedupe — it falls back to
-    the plain append-only insert path so non-DM call sites keep
-    their existing shape."""
-    await env.db.enqueue(
-        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
-        ("notif_user_d", "uid-notif-d", "NotifUserD"),
-    )
-    uid = "uid-notif-d"
-    for i in range(3):
-        await env.notif_repo.save_or_bump_unread(
-            new_notification(user_id=uid, type="t", title=f"N{i}"),
-        )
-    rows = await env.notif_repo.list(uid, limit=50)
-    assert len(rows) == 3
 
 
 async def test_notification_delete_old(env):
@@ -333,3 +257,159 @@ async def test_mark_read_for_everyone_returns_who_flipped(env):
         )
         == []
     )
+
+
+# ── Subject, groups, by object / by space (0129) ─────────────────────────
+
+
+async def _about(
+    env,
+    uid,
+    key,
+    *,
+    type="comment_added",
+    space_id=None,
+    stamp="2026-10-20T10:00:00+00:00",
+    read=False,
+):
+    note = replace(
+        new_notification(user_id=uid, type=type, title="t"),
+        created_at=stamp,
+        object_key=key,
+        space_id=space_id,
+        params=NotificationParams(
+            actors=(NotificationActor("u-ben", "Ben"),), actor_count=1
+        ),
+    )
+    await env.notif_repo.save(note)
+    if read:
+        await env.notif_repo.mark_read(note.id, uid)
+    return note
+
+
+async def test_save_and_read_back_object_space_and_params(env):
+    uid = await _user(env)
+    note = await _about(env, uid, "space_post:p1", space_id="s1")
+    back = await env.notif_repo.get(note.id)
+    assert (back.object_key, back.space_id) == ("space_post:p1", "s1")
+    assert back.params == note.params
+    # A row from before 0129 reads with no subject.
+    old = new_notification(user_id=uid, type="x", title="old")
+    await env.notif_repo.save(old)
+    back = await env.notif_repo.get(old.id)
+    assert (back.object_key, back.space_id, back.params) == (None, None, None)
+
+
+async def test_unreadable_params_read_as_none(env):
+    uid = await _user(env)
+    note = await _about(env, uid, "post:p1")
+    await env.db.enqueue("UPDATE notifications SET params='[1]' WHERE id=?", (note.id,))
+    assert (await env.notif_repo.get(note.id)).params is None
+
+
+async def test_latest_in_group_matches_user_type_key_and_window(env):
+    uid = await _user(env)
+    other = await _user(env, "uid-o")
+    await _about(env, uid, "post:p1", stamp="2026-10-01T00:00:00+00:00")
+    recent = await _about(
+        env, uid, "post:p1", stamp="2026-10-20T00:00:00+00:00", read=True
+    )
+    await _about(env, uid, "post:p1", type="post_created")
+    await _about(env, other, "post:p1")
+    await _about(env, uid, "post:p2")
+    found = await env.notif_repo.latest_in_group(
+        user_id=uid,
+        type="comment_added",
+        object_key="post:p1",
+        since="2026-10-15T00:00:00+00:00",
+    )
+    assert found.id == recent.id and found.is_read  # read rows count too
+    assert (
+        await env.notif_repo.latest_in_group(
+            user_id=uid,
+            type="comment_added",
+            object_key="post:p1",
+            since="2026-10-21T00:00:00+00:00",
+        )
+        is None
+    )
+
+
+async def test_update_group_rewrites_the_row(env):
+    uid = await _user(env)
+    note = await _about(env, uid, "post:p1", read=True)
+    params = NotificationParams(
+        actors=(NotificationActor("u-anna", "Anna"),), actor_count=1, total=2
+    )
+    await env.notif_repo.update_group(
+        replace(
+            note,
+            title="Anna commented",
+            link_url="/post/p1?comment=c2",
+            created_at="2026-10-21T00:00:00+00:00",
+            read_at=None,
+            params=params,
+        )
+    )
+    back = await env.notif_repo.get(note.id)
+    assert back.title == "Anna commented"
+    assert back.link_url == "/post/p1?comment=c2"
+    assert back.created_at == "2026-10-21T00:00:00+00:00"
+    assert not back.is_read and back.params == params
+    assert await env.notif_repo.count_unread(uid) == 1
+
+
+async def test_mark_read_by_object_touches_only_the_owner_and_keys(env):
+    uid = await _user(env)
+    other = await _user(env, "uid-o")
+    await _about(env, uid, "post:p1")
+    await _about(env, uid, "post:p1", type="post_created")
+    keep = await _about(env, uid, "post:p2")
+    await _about(env, other, "post:p1")
+    assert await env.notif_repo.mark_read_by_object(uid, ["post:p1", "post:p1"]) == 2
+    assert [n.id for n in await env.notif_repo.list_unread(uid)] == [keep.id]
+    assert await env.notif_repo.count_unread(other) == 1
+    assert await env.notif_repo.mark_read_by_object(uid, []) == 0
+
+
+async def test_delete_by_object_spares_kept_types_and_names_unread_owners(env):
+    a = await _user(env, "uid-a")
+    b = await _user(env, "uid-b")
+    await _about(env, a, "space_post:p1")
+    await _about(env, b, "space_post:p1", read=True)
+    decision = await _about(env, a, "space_post:p1", type="post_moderated")
+    other = await _about(env, a, "space_post:p2")
+    touched = await env.notif_repo.delete_by_object(
+        ["space_post:p1"], keep_types=["post_moderated"]
+    )
+    assert touched == ["uid-a"]  # b's row was read: their badge didn't move
+    left = {n.id for n in await env.notif_repo.list(a, limit=50)}
+    assert left == {decision.id, other.id}
+    assert await env.notif_repo.list(b, limit=50) == []
+    assert await env.notif_repo.delete_by_object([]) == []
+
+
+async def test_delete_by_space_for_one_user_or_everyone(env):
+    a = await _user(env, "uid-a")
+    b = await _user(env, "uid-b")
+    await _about(env, a, "space_post:p1", space_id="s1")
+    await _about(env, b, "space_post:p1", space_id="s1")
+    ended = await _about(env, a, "space:s1", type="space_dissolved", space_id="s1")
+    elsewhere = await _about(env, a, "space_post:p9", space_id="s2")
+    assert await env.notif_repo.delete_by_space("s1", user_id=b) == ["uid-b"]
+    assert await env.notif_repo.count_unread(b) == 0
+    assert await env.notif_repo.count_unread(a) == 3
+    touched = await env.notif_repo.delete_by_space("s1", keep_types=["space_dissolved"])
+    assert touched == ["uid-a"]
+    left = {n.id for n in await env.notif_repo.list(a, limit=50)}
+    assert left == {ended.id, elsewhere.id}
+
+
+async def test_find_filters_on_object_key_and_space(env):
+    uid = await _user(env)
+    note = await _about(env, uid, "post:p1", space_id="s1")
+    await _about(env, uid, "post:p2")
+    found = await env.notif_repo.find(
+        Spec(where=[("object_key", "=", "post:p1"), ("space_id", "=", "s1")])
+    )
+    assert [n.id for n in found] == [note.id]
