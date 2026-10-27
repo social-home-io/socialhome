@@ -37,7 +37,10 @@ from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.notification_repo import SqliteNotificationRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
-from socialhome.services.notification_service import NotificationService
+from socialhome.services.notification_service import (
+    _PUSH_SAFE_TITLES,
+    NotificationService,
+)
 
 
 @pytest.fixture
@@ -284,5 +287,64 @@ async def test_moment_notifications_name_the_person_and_are_translated(tmp_dir):
             "notification.user.followed", locale="de", name=someone
         )
         assert not any("ru-unknown" in t for t in titles.values())
+    finally:
+        await db.shutdown()
+
+
+# ─── Content-free push titles (§25.3) ───────────────────────────────────
+
+
+class _PushCapture:
+    def __init__(self) -> None:
+        self.titles: list[str] = []
+
+    async def push_to_user(self, user_id, payload) -> int:
+        self.titles.append(payload.title)
+        return 1
+
+
+async def test_content_free_push_titles_are_translated(tmp_dir):
+    """Every generic push title ships in every locale, and the push for a
+    task assigned to a German speaker reads German, without the task title."""
+    shipped = Catalog.from_directory(Path(i18n_pkg.__file__).parent / "messages")
+    for locale in ("en", "de", "es", "fr", "nl"):
+        for key, _fallback in _PUSH_SAFE_TITLES.values():
+            assert shipped.gettext(key, locale=locale) != key, (locale, key)
+    db = AsyncDatabase(tmp_dir / "p.db", batch_timeout_ms=10)
+    await db.startup()
+    try:
+        await db.enqueue(
+            "INSERT INTO users(username, user_id, display_name, locale)"
+            " VALUES('bob', 'b-id', 'Bob', 'de')",
+        )
+        bus = EventBus()
+        svc = NotificationService(
+            SqliteNotificationRepo(db),
+            SqliteUserRepo(db),
+            SqliteSpaceRepo(db),
+            bus,
+            i18n=shipped,
+        )
+        push = _PushCapture()
+        svc.attach_push_service(push)
+        svc.wire()
+        now = datetime.now(UTC)
+        await bus.publish(
+            TaskAssigned(
+                task=Task(
+                    id="t1",
+                    list_id="l1",
+                    title="Steuererklärung",
+                    status=TaskStatus.TODO,
+                    position=0,
+                    created_by="a-id",
+                    created_at=now,
+                    updated_at=now,
+                    assignees=("b-id",),
+                ),
+                assigned_to="b-id",
+            )
+        )
+        assert push.titles == ["Dir wurde eine Aufgabe zugewiesen"]
     finally:
         await db.shutdown()

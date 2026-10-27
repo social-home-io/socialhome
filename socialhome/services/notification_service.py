@@ -134,6 +134,26 @@ class _SeatPrefs:
 HOUSEHOLD_CHAT_LINK = "/?tab=chat"
 
 
+#: §25.3 — bell types whose title embeds user content (a task title, an
+#: event summary). Their push carries this content-free title (catalog key,
+#: English fallback) instead; the in-app bell row keeps the full text.
+_PUSH_SAFE_TITLES: dict[str, tuple[str, str]] = {
+    "task_assigned": ("notification.push.task_assigned", "You were assigned a task"),
+    "task_deadline": ("notification.push.task_deadline", "A task is due today"),
+    "task_completed": ("notification.push.task_completed", "A task was completed"),
+    "calendar_event_created": ("notification.push.calendar_created", "New event"),
+    "calendar_event_updated": (
+        "notification.push.calendar_updated",
+        "An event was changed",
+    ),
+    "calendar_event_cancelled": (
+        "notification.push.calendar_cancelled",
+        "An event was cancelled",
+    ),
+    "calendar_reminder": ("notification.push.calendar_reminder", "Event reminder"),
+}
+
+
 def _conversation_link(
     conversation_id: str,
     scope: SystemChatScope | None,
@@ -314,60 +334,52 @@ class NotificationService(ProtectionGateMixin):
         )
         if not push:
             return saved  # in-app only (a repeat the user was already told)
+        if self._push is None and self._adapter is None:
+            return saved
+        try:
+            user = await self._users.get_by_user_id(saved.user_id)
+        except Exception as exc:
+            log.debug("push recipient lookup failed: %s", exc, exc_info=True)
+            return saved
+        title = self._push_title(saved, user)
+        # One tag per bell item: a repeat (a DM burst bumping one row) replaces
+        # itself on the device; a different item never silently replaces it.
+        tag = f"{saved.type}:{saved.link_url or saved.id}"
         # Web Push (browsers that registered via pywebpush).
         if self._push is not None:
             try:
                 await self._push.push_to_user(
                     saved.user_id,
-                    PushPayload(
-                        title=saved.title,
-                        click_url=saved.link_url,
-                        tag=saved.type,
-                    ),
+                    PushPayload(title=title, click_url=saved.link_url, tag=tag),
                 )
             except Exception as exc:
                 log.debug("web push fan-out failed: %s", exc, exc_info=True)
         # Platform adapter (HA mobile app / standalone inbox).
-        if self._adapter is not None:
+        if self._adapter is not None and user is not None:
             try:
-                user = await self._users.get_by_user_id(saved.user_id)
-                if user is not None:
-                    await self._adapter.send_push(
-                        user,
-                        saved.title,
-                        "",
-                        data={"type": saved.type, "url": saved.link_url},
-                    )
+                await self._adapter.send_push(
+                    user,
+                    title,
+                    "",
+                    data={"type": saved.type, "url": saved.link_url},
+                )
             except Exception as exc:
                 log.debug("platform push fan-out failed: %s", exc, exc_info=True)
         return saved
 
-    async def _fan_push(
-        self,
-        user_ids,
-        *,
-        title: str,
-        click_url: str | None = None,
-        tag: str | None = None,
-        space_id: str | None = None,
-    ) -> None:
-        """Send a minimal Web Push payload to each user in *user_ids*.
+    def _push_title(self, saved, user) -> str:
+        """The title a push carries for *saved* (§25.3).
 
-        §25.3: only the title travels in the payload — body is always
-        omitted. We treat push failures as best-effort and never raise.
+        A bell whose title embeds user content — a task title, an event
+        summary — pushes a generic, content-free title in the recipient's
+        language instead; the in-app row keeps the full text. Every other
+        title names only people and spaces and goes out as is.
         """
-        if self._push is None:
-            return
-        payload = PushPayload(
-            title=title,
-            click_url=click_url,
-            tag=tag,
-            space_id=space_id,
-        )
-        try:
-            await self._push.push_to_users(list(user_ids), payload)
-        except Exception as exc:
-            log.debug("push fan-out failed: %s", exc, exc_info=True)
+        generic = _PUSH_SAFE_TITLES.get(saved.type)
+        if generic is None:
+            return saved.title
+        key, fallback = generic
+        return self._t(key, locale=self._locale(user), fallback=fallback)
 
     def _t(self, key: str, *, locale: str | None, fallback: str, **fmt) -> str:
         if self._i18n is None:
@@ -618,20 +630,13 @@ class NotificationService(ProtectionGateMixin):
                     title=title,
                 )
             )
-        if event.task.assignees:
-            await self._fan_push(
-                event.task.assignees,
-                title=(f"Task due today: {event.task.title}"),
-                tag="task_deadline",
-                click_url=f"/tasks/{event.task.id}",
-            )
 
     async def on_dm_message_created(self, event: DmMessageCreated) -> None:
         """Create an in-app notification row + push for each recipient.
 
         §25.3: titles only — body never on the wire. ``_save_notif``
         already drives the push fan-out (Web Push + platform adapter)
-        so we don't need to call ``_fan_push`` separately.
+        — one push per bell row, never a second fan-out.
 
         Bell rows are **collapsed per conversation** via
         ``dedupe_by_link=True``: a burst of N messages from one peer
@@ -933,12 +938,6 @@ class NotificationService(ProtectionGateMixin):
                 link_url="/dms",
             )
         )
-        await self._fan_push(
-            [event.recipient_user_id],
-            title=title,
-            tag=f"dm-contact:{event.requester_user_id}",
-            click_url="/dms",
-        )
 
     async def on_app_challenge_received(
         self,
@@ -967,12 +966,6 @@ class NotificationService(ProtectionGateMixin):
                 link_url=f"/apps/{event.app_id}",
             )
         )
-        await self._fan_push(
-            [event.to_user_id],
-            title=title,
-            tag=f"app-challenge:{event.app_id}:{event.session_id}",
-            click_url=f"/apps/{event.app_id}",
-        )
 
     async def on_bazaar_bid_placed(self, event: BazaarBidPlaced) -> None:
         """Notify the seller that a bid landed (or was raised)."""
@@ -991,12 +984,6 @@ class NotificationService(ProtectionGateMixin):
                 title=title,
                 link_url=f"/bazaar/{event.listing_post_id}",
             )
-        )
-        await self._fan_push(
-            [event.seller_user_id],
-            title=title,
-            tag=f"bazaar-bid:{event.listing_post_id}",
-            click_url=f"/bazaar/{event.listing_post_id}",
         )
 
     async def on_bazaar_offer_accepted(
@@ -1018,12 +1005,6 @@ class NotificationService(ProtectionGateMixin):
                 link_url=f"/bazaar/{event.listing_post_id}",
             )
         )
-        await self._fan_push(
-            [event.buyer_user_id],
-            title=title,
-            tag=f"bazaar-accept:{event.listing_post_id}",
-            click_url=f"/bazaar/{event.listing_post_id}",
-        )
 
     async def on_bazaar_offer_rejected(
         self,
@@ -1042,12 +1023,6 @@ class NotificationService(ProtectionGateMixin):
                 title=title,
                 link_url=f"/bazaar/{event.listing_post_id}",
             )
-        )
-        await self._fan_push(
-            [event.bidder_user_id],
-            title=title,
-            tag=f"bazaar-reject:{event.listing_post_id}",
-            click_url=f"/bazaar/{event.listing_post_id}",
         )
 
     async def on_bazaar_listing_expired(
@@ -1075,12 +1050,6 @@ class NotificationService(ProtectionGateMixin):
                 title=title,
                 link_url=f"/bazaar/{event.listing_post_id}",
             )
-        )
-        await self._fan_push(
-            [event.seller_user_id],
-            title=title,
-            tag=f"bazaar-closed:{event.listing_post_id}",
-            click_url=f"/bazaar/{event.listing_post_id}",
         )
 
     async def on_space_post_created(self, event: SpacePostCreated) -> None:
@@ -2138,9 +2107,3 @@ class NotificationService(ProtectionGateMixin):
                     link_url="/settings#privacy",
                 )
             )
-        await self._fan_push(
-            user_ids,
-            title=f"Location sharing turned on in {event.space_name}",
-            click_url="/settings#privacy",
-            space_id=event.space_id,
-        )

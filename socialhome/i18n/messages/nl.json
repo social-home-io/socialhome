@@ -263,5 +263,12 @@
   "dashboard.display.found_title": "Gevonden op dit netwerk",
   "dashboard.display.found_looking": "Social Home zoeken op dit netwerk…",
   "dashboard.display.found_none": "Nog niets gevonden. Gebruik je de Home Assistant App? Typ het adres hieronder.",
-  "dashboard.display.claim_sealed": "Dit verbindingsverzoek kan op dit paneel niet worden geopend. Druk in Social Home opnieuw op Verbinden."
+  "dashboard.display.claim_sealed": "Dit verbindingsverzoek kan op dit paneel niet worden geopend. Druk in Social Home opnieuw op Verbinden.",
+  "notification.push.task_assigned": "Je hebt een taak gekregen",
+  "notification.push.task_deadline": "Een taak verloopt vandaag",
+  "notification.push.task_completed": "Een taak is afgerond",
+  "notification.push.calendar_created": "Nieuw evenement",
+  "notification.push.calendar_updated": "Een evenement is gewijzigd",
+  "notification.push.calendar_cancelled": "Een evenement is geannuleerd",
+  "notification.push.calendar_reminder": "Herinnering aan evenement"
 }

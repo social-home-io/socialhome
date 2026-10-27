@@ -263,5 +263,12 @@
   "dashboard.display.found_title": "Trouvés sur ce réseau",
   "dashboard.display.found_looking": "Recherche de Social Home sur ce réseau…",
   "dashboard.display.found_none": "Aucun trouvé pour l'instant. Tu utilises la Home Assistant App ? Saisis son adresse ci-dessous.",
-  "dashboard.display.claim_sealed": "Cette demande de connexion ne peut pas être ouverte sur cet écran. Appuie à nouveau sur Connecter dans Social Home."
+  "dashboard.display.claim_sealed": "Cette demande de connexion ne peut pas être ouverte sur cet écran. Appuie à nouveau sur Connecter dans Social Home.",
+  "notification.push.task_assigned": "Une tâche vous a été assignée",
+  "notification.push.task_deadline": "Une tâche est due aujourd'hui",
+  "notification.push.task_completed": "Une tâche a été terminée",
+  "notification.push.calendar_created": "Nouvel événement",
+  "notification.push.calendar_updated": "Un événement a été modifié",
+  "notification.push.calendar_cancelled": "Un événement a été annulé",
+  "notification.push.calendar_reminder": "Rappel d'événement"
 }
