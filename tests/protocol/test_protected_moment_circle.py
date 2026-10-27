@@ -193,9 +193,11 @@ async def test_trending_tags_count_circle_moments_only(hh):
     kid = {t["tag"]: t["count"] for t in (await r.json())["hashtags"]}
     r = await hh.get("/api/moments/hashtags", headers=_h("admin-tok"))
     adult = {t["tag"]: t["count"] for t in (await r.json())["hashtags"]}
-    # m-home, m-hop1 and the paired reply.
-    assert kid == {"fun": 3}
-    assert adult == {"fun": 9}
+    # Counts are top-level moments only, like the tag view lists them
+    # (replies are never counted): m-home and m-hop1 for the kid; all five
+    # roots for the adult.
+    assert kid == {"fun": 2}
+    assert adult == {"fun": 5}
 
 
 async def test_saves_from_before_protection_stay_hidden(hh):

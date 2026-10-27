@@ -85,6 +85,13 @@ describe('MomentumYoursTab', () => {
     where.url = '/momentum/yours'
   })
 
+  it('does not repeat the Yours tab as a visible heading (screen readers keep it)', async () => {
+    serve(() => [mine('m1', HOUR)])
+    const { findByText, getByRole } = render(<MomentumYoursTab />)
+    await findByText('text m1')
+    expect(getByRole('heading', { level: 2, name: 'Your moments' }).classList.contains('sr-only')).toBe(true)
+  })
+
   it('switches between your posts and the moments you saved', async () => {
     serve(() => [mine('m1', HOUR)])
     const { findByText, getByRole } = render(<MomentumYoursTab />)

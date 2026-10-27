@@ -236,7 +236,9 @@ export default function MomentumYoursTab() {
   const header = (
     <>
       {show === 'posted' && <PublicSharingRow />}
-      <h2>{t('moment.yours.heading')}</h2>
+      {/* The active "Yours" tab already labels this view; the heading
+          stays for screen-reader heading navigation only. */}
+      <h2 class="sr-only">{t('moment.yours.heading')}</h2>
       <SegmentedSwitch<YoursShow>
         options={SHOWS}
         value={show}

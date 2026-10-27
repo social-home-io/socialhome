@@ -1170,6 +1170,33 @@ async def test_beyond_the_viewers_max_hops_is_hidden(client):
     assert await _get(client, "m-far") == await _unknown_404(client)
 
 
+async def test_trending_tag_counts_match_the_tag_view(client):
+    """A tag's count is the number of moments its tag view lists: top-level
+    only (no replies) and within the viewer's ``max_hops``."""
+    h = _auth(client._tok)
+    await client._db.enqueue(
+        "UPDATE users SET preferences_json=? WHERE user_id=?",
+        ('{"moments": {"max_hops": 1}}', client._uid),
+    )
+    r = await client.post("/api/moments", json={"content": "#herbst walk"}, headers=h)
+    root_id = (await r.json())["id"]
+    await client.post(
+        "/api/moments",
+        json={"content": "#herbst yes", "parent_moment_id": root_id},
+        headers=h,
+    )
+    await _moment_row(client, "m-far", "uid-bob", hop_count=2)
+    await client._db.enqueue(
+        "INSERT INTO moment_hashtags(moment_id, tag) VALUES('m-far', 'herbst')"
+    )
+    r = await client.get("/api/moments/hashtags", headers=h)
+    counts = {row["tag"]: row["count"] for row in (await r.json())["hashtags"]}
+    r = await client.get(
+        "/api/moments", params={"top_level": "1", "tag": "herbst"}, headers=h
+    )
+    assert counts == {"herbst": len(await r.json())} == {"herbst": 1}
+
+
 async def test_every_moment_action_for_a_non_reader_is_the_same_404(client):
     """React, clear, delete and reply on a moment the caller can't read get
     the unknown-id 404 and change nothing."""
