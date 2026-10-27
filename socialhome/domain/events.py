@@ -1274,6 +1274,11 @@ class NotificationCreated(DomainEvent):
     The frontend bell uses this to bump its unread badge without
     re-polling. ``link_url`` rides along so the WS frame can render a
     clickable item in the bell panel without a follow-up fetch.
+
+    ``bumped`` is set when the event refreshed a row that was already
+    unread (a chat burst collapses into one row): the row moves to the
+    top, but the unread count stays the same, no push goes out again and
+    the Home Assistant event bus is not told twice.
     """
 
     user_id: str
@@ -1281,6 +1286,7 @@ class NotificationCreated(DomainEvent):
     type: str
     title: str
     link_url: str | None = None
+    bumped: bool = False
     occurred_at: datetime = field(default_factory=_now)
 
 

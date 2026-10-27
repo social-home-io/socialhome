@@ -21,12 +21,16 @@ reply does (``/momentum/{id}?reply={reply_id}``):
 
 from __future__ import annotations
 
-from urllib.parse import urlencode
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 from ..domain.task import Task
 
 #: The household calendar page (personal calendars).
 HOUSEHOLD_CALENDAR_LINK = "/calendar"
+
+#: Query keys that pick a part *inside* the page out (a comment, a moment
+#: reply) — the page itself, and so what a visit reads, is the same.
+_PICK_OUT_PARAMS: frozenset[str] = frozenset({"comment", "reply"})
 
 
 def _with_query(path: str, **params: str | None) -> str:
@@ -67,6 +71,24 @@ def space_about_link(space_id: str) -> str:
     return f"/spaces/{space_id}/about"
 
 
+def space_moderation_link(space_id: str) -> str:
+    """The space's review queue (join requests, posts, reports)."""
+    return f"/spaces/{space_id}/moderation"
+
+
 def space_members_link(space_id: str) -> str:
     """The space's settings, Members section (invites and requests)."""
     return f"/spaces/{space_id}/settings/members"
+
+
+def link_target(link: str) -> str:
+    """The page ``link`` opens, without the part it picks out.
+
+    ``/post/p?comment=c`` and ``/post/p`` are the same page, so viewing
+    the post reads both; ``/spaces/s?post=p`` is not the space's feed
+    (``/spaces/s``) — that post is a page of its own. Clearing a
+    notification by visit compares these targets.
+    """
+    parts = urlsplit(link)
+    kept = [(k, v) for k, v in parse_qsl(parts.query) if k not in _PICK_OUT_PARAMS]
+    return f"{parts.path}?{urlencode(kept)}" if kept else parts.path

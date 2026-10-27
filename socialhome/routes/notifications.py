@@ -4,9 +4,19 @@ from __future__ import annotations
 
 from aiohttp import web
 
-from ..app_keys import event_bus_key, notification_repo_key
+from ..app_keys import (
+    event_bus_key,
+    notification_repo_key,
+    notification_service_key,
+)
 from ..domain.events import NotificationReadChanged
+from ..security import error_response
 from .base import BaseView
+
+#: Pages one "I saw these" call may name (a page view names one or two).
+MAX_READ_LINKS = 20
+#: Longest page path accepted (a notification link is far shorter).
+MAX_LINK_LENGTH = 512
 
 
 class NotificationCollectionView(BaseView):
@@ -77,3 +87,37 @@ class NotificationReadAllView(BaseView):
             )
         )
         return web.json_response({"ok": True})
+
+
+class NotificationReadByLinkView(BaseView):
+    """``POST /api/notifications/read-by-link`` — the caller saw these pages.
+
+    Body ``{"links": ["/post/p1", "/spaces/s1?post=p2", …]}``: every unread
+    notification of the caller that opens one of them reads as read (a
+    ``?comment=`` / ``?reply=`` it picks out counts as the same page), and
+    every device of theirs gets the new unread count. The SPA calls it once
+    the page has shown the thing. Returns ``{ok, marked}``.
+    """
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        data = await self.body()
+        links = data.get("links") if isinstance(data, dict) else None
+        if (
+            not isinstance(links, list)
+            or not 1 <= len(links) <= MAX_READ_LINKS
+            or not all(
+                isinstance(link, str)
+                and link.startswith("/")
+                and len(link) <= MAX_LINK_LENGTH
+                for link in links
+            )
+        ):
+            return error_response(
+                422,
+                "UNPROCESSABLE",
+                f"links must be 1-{MAX_READ_LINKS} paths starting with '/'.",
+            )
+        svc = self.svc(notification_service_key)
+        marked = await svc.mark_read_by_links(ctx.user_id, links)
+        return web.json_response({"ok": True, "marked": marked})

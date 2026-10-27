@@ -25,6 +25,11 @@ const openReport = vi.hoisted(() => vi.fn())
 vi.mock('@/components/ReportDialog', () => ({ openReport }))
 const confirmDialog = vi.hoisted(() => vi.fn(async () => true))
 vi.mock('@/components/confirm', () => ({ confirmDialog }))
+const markSeen = vi.hoisted(() => vi.fn())
+vi.mock('@/store/notifications', async (orig) => ({
+  ...(await orig<typeof import('@/store/notifications')>()),
+  markSeen,
+}))
 
 import { api } from '@/api'
 import { showToast } from '@/components/Toast'
@@ -67,6 +72,7 @@ beforeEach(() => {
   where.path = '/momentum/m-amaka'
   where.query = {}
   route.mockReset()
+  markSeen.mockReset()
   openReport.mockReset()
   confirmDialog.mockReset().mockResolvedValue(true)
   vi.mocked(showToast).mockClear()
@@ -498,5 +504,24 @@ describe('MomentumDetailPage replies', () => {
     expect(container.textContent).toContain('hello from r-2')
     expect(container.textContent).not.toContain("isn't here any more")
     expect(queryByRole('textbox', { name: 'Write a reply' })).toBeNull()
+  })
+})
+
+describe('MomentumDetailPage reads its notifications', () => {
+  it('a moment on screen marks its reaction and reply notifications seen', async () => {
+    serve({
+      '/api/moments/m-amaka': { moment: moment('m-amaka', 'ru-amaka'), replies: [], reactions: [] },
+    })
+    const { container } = render(<MomentumDetailPage />)
+    await waitFor(() => expect(container.textContent).toContain('hello from m-amaka'))
+    await waitFor(() => expect(markSeen).toHaveBeenCalledWith('/momentum/m-amaka'))
+  })
+
+  it('a moment that is gone marks nothing seen', async () => {
+    serve({ '/api/moments/m-amaka': notFound() })
+    render(<MomentumDetailPage />)
+    await waitFor(() => expect(vi.mocked(api.get)).toHaveBeenCalled())
+    await new Promise((r) => setTimeout(r, 20))
+    expect(markSeen).not.toHaveBeenCalled()
   })
 })

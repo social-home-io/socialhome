@@ -16,6 +16,11 @@ vi.mock('preact-iso', () => ({
 }))
 vi.mock('@/components/Toast', () => ({ showToast: toastSpy }))
 vi.mock('@/components/confirm', () => ({ confirmDialog: confirmSpy }))
+const markSeen = vi.hoisted(() => vi.fn())
+vi.mock('@/store/notifications', async (orig) => ({
+  ...(await orig<typeof import('@/store/notifications')>()),
+  markSeen,
+}))
 vi.mock('@/ws', () => ({
   ws: {
     on: (type: string, fn: (e: { data: unknown }) => void) => {
@@ -87,6 +92,7 @@ const settle = async () => { await vi.advanceTimersByTimeAsync(0) }
 
 beforeEach(() => {
   wsHandlers.clear()
+  markSeen.mockReset()
   routeSpy.mockReset()
   toastSpy.mockReset()
   confirmSpy.mockReset().mockResolvedValue(true)
@@ -472,5 +478,22 @@ describe('HighlightViewerPage sharing to Feed or a space (S6 / P6)', () => {
     await waitFor(() => expect(api.post).toHaveBeenCalledWith('/api/highlights/h1/share', { scope: 'household' }))
     expect(confirmSpy).not.toHaveBeenCalled()
     expect(toastSpy).toHaveBeenCalledWith('Highlight shared', 'success')
+  })
+})
+
+describe('HighlightViewerPage reads its notifications', () => {
+  it('a highlight on screen marks its reaction notifications seen', async () => {
+    detailBody = { highlight: highlight('uid-me'), frames }
+    route()
+    const { container } = render(<HighlightViewerPage />)
+    await waitFor(() => expect(container.querySelector('.sh-hlv__name')).not.toBeNull())
+    expect(markSeen).toHaveBeenCalledWith('/highlights/h1')
+  })
+
+  it('a highlight that failed to load marks nothing seen', async () => {
+    vi.mocked(api.get).mockRejectedValue(new Error('offline'))
+    render(<HighlightViewerPage />)
+    await waitFor(() => expect(routeSpy).toHaveBeenCalledWith('/highlights', true))
+    expect(markSeen).not.toHaveBeenCalled()
   })
 })

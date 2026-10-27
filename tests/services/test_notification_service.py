@@ -3456,13 +3456,17 @@ async def test_push_title_never_carries_user_content(stack, case):
 
 
 async def test_push_tag_collapses_repeats_of_the_same_item_only(stack):
-    """The push ``tag`` is the bell type plus its link: a burst in one DM
-    thread replaces itself on the device, another thread does not."""
+    """The push ``tag`` is the bell type plus its link: a new message in a
+    thread read in between replaces the earlier push on the device,
+    another thread does not. (A burst into a row still unread does not
+    push again at all.)"""
     push = _CapturingPush()
     stack.notif_svc.attach_push_service(push)
     a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
-    for conv, mid in (("c-1", "m-1"), ("c-1", "m-2"), ("c-2", "m-3")):
+    await stack.bus.publish(_dm_event("c-1", a, [b], mid="m-1"))
+    await stack.notif_svc.mark_read_for_dm(b.user_id, "c-1")
+    for conv, mid in (("c-1", "m-2"), ("c-1", "m-2b"), ("c-2", "m-3")):
         await stack.bus.publish(_dm_event(conv, a, [b], mid=mid))
     tags = [p.tag for _, p in push.calls]
     assert tags == [

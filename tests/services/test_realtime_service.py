@@ -998,6 +998,27 @@ async def test_notification_new_targets_one_user(env):
     )
     assert any("notification.new" in m for m in me.sent)
     assert all("notification.new" not in m for m in other.sent)
+    assert any('"bumped":false' in m for m in me.sent)
+
+
+async def test_notification_new_says_when_it_bumped_a_row(env):
+    """The SPA must not count a refreshed unread row twice: the frame says
+    it is a bump."""
+    from socialhome.domain.events import NotificationCreated
+
+    _svc, bus, ws = env
+    me = _FakeWS()
+    await ws.register("u1", me)
+    await bus.publish(
+        NotificationCreated(
+            user_id="u1",
+            notification_id="n-1",
+            type="dm_message",
+            title="Anna messaged you",
+            bumped=True,
+        )
+    )
+    assert any('"bumped":true' in m for m in me.sent)
 
 
 async def test_notification_unread_count_targets_one_user(env):

@@ -142,3 +142,60 @@ async def test_mark_all_read(client):
     )
     body = await resp2.json()
     assert body["unread"] == 0
+
+
+async def test_read_by_link_reads_the_rows_that_open_the_page(client):
+    """Viewing a post used to leave its notification unread until it was
+    clicked in the bell; the page now says it was seen."""
+    resp = await client.post(
+        "/api/feed/posts",
+        json={"type": "text", "content": "seen on the page"},
+        headers=_auth(client._admin_token),
+    )
+    post_id = (await resp.json())["id"]
+    count = await client.get(
+        "/api/notifications/unread-count", headers=_auth(client._bob_token)
+    )
+    before = (await count.json())["unread"]
+    assert before >= 1
+
+    resp = await client.post(
+        "/api/notifications/read-by-link",
+        json={"links": [f"/post/{post_id}"]},
+        headers=_auth(client._bob_token),
+    )
+    assert resp.status == 200
+    assert (await resp.json()) == {"ok": True, "marked": 1}
+    count = await client.get(
+        "/api/notifications/unread-count", headers=_auth(client._bob_token)
+    )
+    assert (await count.json())["unread"] == before - 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"links": []},
+        {"links": "/post/p1"},
+        {"links": ["post/p1"]},
+        {"links": [1]},
+        {"links": ["/x"] * 21},
+        {"links": ["/" + "a" * 600]},
+        ["/post/p1"],
+    ],
+)
+async def test_read_by_link_rejects_a_malformed_body(client, body):
+    resp = await client.post(
+        "/api/notifications/read-by-link",
+        json=body,
+        headers=_auth(client._bob_token),
+    )
+    assert resp.status == 422
+
+
+async def test_read_by_link_requires_auth(client):
+    resp = await client.post(
+        "/api/notifications/read-by-link", json={"links": ["/post/p1"]}
+    )
+    assert resp.status == 401

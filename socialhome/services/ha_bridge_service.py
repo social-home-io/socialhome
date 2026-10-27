@@ -217,6 +217,8 @@ class HaBridgeService:
         )
 
     async def _on_notification_created(self, event: NotificationCreated) -> None:
+        if event.bumped:
+            return  # the same unread row again: automations heard it once
         await self._fire(
             "socialhome.notification_new",
             {

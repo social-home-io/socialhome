@@ -25,6 +25,7 @@ import { Composer, type ComposerExtras } from '@/components/Composer'
 import { contentWrite } from '@/utils/contentWrite'
 import { PendingReviewStrip } from '@/components/PendingReviewStrip'
 import { useModerationMine } from '@/store/moderationMine'
+import { markSeen } from '@/store/notifications'
 import { itemPreview } from './moderationItems'
 import { openCommentOverlay } from '@/components/CommentOverlay'
 import { SpaceSectionNav, type SpaceMemberSummary } from '@/components/SpaceSectionNav'
@@ -386,6 +387,15 @@ export default function SpaceFeedPage() {
       try { await api.post(`/api/spaces/${spaceId}/feed/read`, {}) } catch { /* a hint */ }
     })()
   }, [spaceId, section, seated, postCount])
+
+  // The feed itself is on screen (not one post picked out of it): the
+  // notifications that open the space — "joined", "you're in", a review
+  // decided — read as read. Its posts' notifications wait until that
+  // post is opened.
+  useEffect(() => {
+    if (!feedList || !seated) return
+    markSeen(`/spaces/${spaceId}`)
+  }, [spaceId, feedList, seated])
 
   // "Needs you" comes with the space detail (``attention``): re-read it
   // on the frames that change it. Leaving Moderation re-reads it too (a
