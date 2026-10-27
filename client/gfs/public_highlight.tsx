@@ -32,7 +32,7 @@
  * bundle small enough to inline in the SSR page if we ever want to.
  */
 import { render } from 'preact'
-import { useEffect, useMemo, useState } from 'preact/hooks'
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { humanizeViewerError } from './viewer_errors'
 import { RetryHost, ViewerError, type RetryControl } from './viewer_retry'
 import {
@@ -50,6 +50,7 @@ import { PublicMomentViewer } from './public_moment'
 import { isPageHash, pageBootFromHash } from './page_link'
 import { PublicPage } from './public_pages'
 import { locale, t } from './viewer_i18n'
+import { PlaybackControls, prefersReducedMotion, usePlaybackKeys } from './viewer_playback'
 
 const CHANNEL_LABEL = 'highlight-public-v1'
 const FRAME_DURATION_MS = 6000
@@ -86,12 +87,13 @@ interface HighlightMeta {
 }
 
 interface ViewerState {
-  status: 'connecting' | 'loading' | 'playing' | 'ended' | 'error'
+  /** ``expired``: the author's own household said so, inside the stream —
+   *  the one "has ended" the page may show (never from a GFS status). */
+  status: 'connecting' | 'loading' | 'playing' | 'ended' | 'expired' | 'error'
   message: string | null
   manifest: FrameMeta[]
   highlight: HighlightMeta | null
   frameUrls: Record<string, string>
-  currentIndex: number
   /** Who shared it — opened from the sealed ``author_profile`` frame. */
   author: AuthorProfile | null
   authorPicture: string | null
@@ -156,6 +158,10 @@ function decodeFrame(buf: Uint8Array): { header: FramingHeader; payload: Uint8Ar
   let header: FramingHeader
   try { header = JSON.parse(headerJson) } catch { return null }
   const payloadLen = view.getUint32(4 + headerLen)
+  // The whole payload, or nothing yet: ``subarray`` would silently cut a
+  // payload whose tail is still in flight (the relay's chunks don't align
+  // to frames), and a cut sealed frame never opens.
+  if (buf.length < 4 + headerLen + 4 + payloadLen) return null
   const payload = buf.subarray(4 + headerLen + 4, 4 + headerLen + 4 + payloadLen)
   return { header, payload }
 }
@@ -165,7 +171,7 @@ function decodeFrame(buf: Uint8Array): { header: FramingHeader; payload: Uint8Ar
  * (the GFS-relay fallback reads a chunked stream whose chunk boundaries
  * don't align to frames). Returns the decoded frame + the unconsumed
  * tail, or null when a whole frame isn't buffered yet. */
-function takeFrame(
+export function takeFrame(
   buf: Uint8Array,
 ): { header: FramingHeader; payload: Uint8Array; rest: Uint8Array } | null {
   const decoded = decodeFrame(buf)
@@ -187,7 +193,6 @@ export function PublicHighlightViewer(
     manifest: [],
     highlight: null,
     frameUrls: {},
-    currentIndex: 0,
     author: null,
     authorPicture: null,
     incomplete: false,
@@ -217,8 +222,19 @@ export function PublicHighlightViewer(
 
     function setStatus(status: ViewerState['status'], message: string | null = null) {
       if (cancelled) return
-      if (status === 'error') failed = true
+      if (status === 'error' || status === 'expired') failed = true
       setState((s) => ({ ...s, status, message }))
+    }
+
+    // An ``error`` frame in the stream. ``expired`` (the household's own
+    // answer for a link it no longer serves: revoked, deleted or past its
+    // day) only ever arrives this way, from the author's household — the
+    // GFS answers every failure with the one neutral 503 and never says
+    // "ended" (see ``viewer_errors.ts``), so a failed request never takes
+    // this path.
+    function streamError(raw: string | null | undefined) {
+      if (raw && /expired/i.test(raw)) setStatus('expired')
+      else setStatus('error', humanizeError(raw))
     }
 
     // The channel or relay closed. Once every frame that did arrive is
@@ -268,7 +284,7 @@ export function PublicHighlightViewer(
     async function openWireFrame(header: FramingHeader, payload: Uint8Array) {
       if (cancelled) return
       if (header.kind === 'error') {
-        setStatus('error', humanizeError(header.error ?? 'unknown'))
+        streamError(header.error ?? 'unknown')
       } else if (header.kind === 'stream_seal' && viewerKey && !opener) {
         opener = await makeStreamOpener(viewerKey.privateKey, header, secret, boot.highlightId)
         if (opener) sawSeal = true
@@ -306,7 +322,7 @@ export function PublicHighlightViewer(
         // Streaming complete. Playback continues from already-buffered urls.
         sawEnd = true
       } else if (header.kind === 'error') {
-        setStatus('error', humanizeError(header.error ?? 'unknown'))
+        streamError(header.error ?? 'unknown')
       }
     }
 
@@ -488,32 +504,27 @@ export function PublicHighlightViewer(
     }
   }, [boot.instanceId, boot.highlightId, boot.token, boot.gfs])
 
-  // Auto-advance once we have a renderable frame.
-  useEffect(() => {
-    if (state.status !== 'playing') return
-    if (state.currentIndex >= state.manifest.length) return
-    const cur = state.manifest[state.currentIndex]
-    if (!state.frameUrls[cur.frame_id]) return
-    const dur = (cur.duration_ms && cur.duration_ms > 0)
-      ? cur.duration_ms : FRAME_DURATION_MS
-    const t = setTimeout(() => {
-      setState((s) => {
-        if (s.currentIndex < s.manifest.length - 1) {
-          return { ...s, currentIndex: s.currentIndex + 1 }
-        }
-        return { ...s, status: 'ended' }
-      })
-    }, dur)
-    return () => clearTimeout(t)
-  }, [state.status, state.currentIndex, state.manifest, state.frameUrls])
-
   if (state.status === 'error') {
+    const message = state.message || t('error.connect')
     return (
       <ViewerError
         class="highlight-error"
-        message={state.message || t('error.connect')}
+        message={message}
+        // The one neutral state (unknown, revoked or offline alike) says
+        // what to do; it never says why.
+        detail={message === t('error.unavailable') ? t('error.unavailable_body') : undefined}
         retry={retry}
       />
+    )
+  }
+
+  if (state.status === 'expired') {
+    // Final: the household said so; trying again would only ask it again.
+    return (
+      <div class="highlight-error" role="alert">
+        <p class="viewer-title">{t('hl.ended')}</p>
+        <p>{t('hl.ended_body')}</p>
+      </div>
     )
   }
 
@@ -533,47 +544,208 @@ export function PublicHighlightViewer(
     )
   }
 
-  const total = state.manifest.length
-  const cur = total > 0 ? state.manifest[state.currentIndex] : null
-  const url = cur ? state.frameUrls[cur.frame_id] : null
-
   return (
     <div class="highlight-viewer">
       {state.author && <AuthorHeader author={state.author} picture={state.authorPicture} />}
-      <div class="progress">
-        {state.manifest.map((_, i) => (
-          <span
-            key={i}
-            class={
-              i < state.currentIndex ? 'seg done' :
-              i === state.currentIndex ? 'seg active' : 'seg'
-            }
-          />
-        ))}
-      </div>
-      <div class="stage">
-        {url && cur && cur.content_type.startsWith('video/') && (
-          <video src={url} autoPlay playsInline />
-        )}
-        {url && cur && !cur.content_type.startsWith('video/') && (
-          <img src={url} alt="" />
-        )}
-        {!url && (
-          <div class="status">
-            {state.incomplete ? t('hl.this_part') : state.message ?? t('hl.buffering')}
-          </div>
-        )}
-        {cur?.caption_text && (
-          <div class="caption">{cur.caption_text}</div>
-        )}
-      </div>
+      {state.status === 'playing' && state.manifest.length > 0 ? (
+        <HighlightPlayer
+          manifest={state.manifest}
+          frameUrls={state.frameUrls}
+          placeholder={state.incomplete ? t('hl.this_part') : state.message ?? t('hl.buffering')}
+          onEnded={() => setState((s) => ({ ...s, status: 'ended' }))}
+        />
+      ) : (
+        <div class="stage">
+          <div class="status" role="status">{state.message ?? t('hl.buffering')}</div>
+        </div>
+      )}
       {state.transport && (
-        <p class="highlight-transport" data-transport={state.transport}>
-          {t(state.transport === 'direct' ? 'hl.via_direct' : 'hl.via_relay')}
-        </p>
+        <TransportNote transport={state.transport} authorName={state.author?.display_name ?? null} />
       )}
       {incomplete}
     </div>
+  )
+}
+
+
+/* The frames, one after another, with the control bar (``viewer_playback``).
+ *
+ * A frame shows for its ``duration_ms`` (default 6 s) of *running* time:
+ * the clock stops while paused, while its file hasn't arrived, and — for a
+ * video — whenever the video isn't actually playing (autoplay still
+ * deciding or refused, buffering). A video starts muted, which is what lets
+ * it autoplay at all. Previous on the first frame starts it over; Next on
+ * the last ends the highlight. The current segment fills smoothly, or, under
+ * ``prefers-reduced-motion``, just lights up (steps, no animation). */
+export function HighlightPlayer({
+  manifest,
+  frameUrls,
+  placeholder,
+  onEnded,
+}: {
+  manifest: FrameMeta[]
+  frameUrls: Record<string, string>
+  placeholder: string
+  onEnded: () => void
+}) {
+  const [index, setIndex] = useState(0)
+  // Bumped by Previous on the first frame: the same frame from the start.
+  const [restart, setRestart] = useState(0)
+  const [paused, setPaused] = useState(false)
+  const [muted, setMuted] = useState(true)
+  const [videoPlaying, setVideoPlaying] = useState(false)
+  const video = useRef<HTMLVideoElement | null>(null)
+  const reducedMotion = useMemo(prefersReducedMotion, [])
+
+  const total = manifest.length
+  const at = Math.min(index, total - 1)
+  const cur = manifest[at]!
+  const url = frameUrls[cur.frame_id] ?? null
+  const isVideo = cur.content_type.startsWith('video/')
+  const hasSound = useMemo(() => manifest.some((f) => f.content_type.startsWith('video/')), [manifest])
+  const dur = cur.duration_ms && cur.duration_ms > 0 ? cur.duration_ms : FRAME_DURATION_MS
+  const running = !!url && !paused && (!isVideo || videoPlaying)
+  const frameKey = `${at}:${restart}`
+
+  // Running time spent on this frame so far; resets for a new frame key.
+  const clock = useRef({ key: '', spent: 0 })
+  const ended = useRef(onEnded)
+  ended.current = onEnded
+
+  const next = () => {
+    if (at < total - 1) {
+      setVideoPlaying(false)
+      setIndex(at + 1)
+    } else {
+      ended.current()
+    }
+  }
+  const prev = () => {
+    setVideoPlaying(false)
+    if (at > 0) setIndex(at - 1)
+    else setRestart((r) => r + 1)
+  }
+  const togglePause = () => setPaused((p) => !p)
+  const toggleMute = () => setMuted((m) => !m)
+  usePlaybackKeys({ togglePause, toggleMute: hasSound ? toggleMute : undefined, prev, next })
+
+  useEffect(() => {
+    if (clock.current.key !== frameKey) clock.current = { key: frameKey, spent: 0 }
+    if (!running) return undefined
+    const startedAt = Date.now()
+    const timer = setTimeout(next, Math.max(0, dur - clock.current.spent))
+    return () => {
+      clearTimeout(timer)
+      clock.current.spent += Date.now() - startedAt
+    }
+    // ``next`` reads ``at`` from this render, which ``frameKey`` covers.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running, frameKey, dur])
+
+  // The video element follows Pause and Mute. Autoplay refused even though
+  // muted (e.g. a battery saver): show Play rather than a frozen frame.
+  useEffect(() => {
+    const v = video.current
+    if (!v) return
+    v.defaultMuted = true // the ``muted`` attribute, for autoplay policies
+    v.muted = muted
+    if (paused) v.pause()
+    else void Promise.resolve(v.play()).catch(() => setPaused(true))
+    // ``muted`` is applied by its own effect below; listing it here would
+    // restart playback on every Mute press.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [paused, frameKey, url])
+
+  useEffect(() => {
+    if (video.current) video.current.muted = muted
+  }, [muted])
+
+  return (
+    <>
+      <div class="progress" aria-hidden="true">
+        {manifest.map((_, i) => {
+          if (i !== at) return <span key={i} class={i < at ? 'seg done' : 'seg'} />
+          if (reducedMotion) return <span key={i} class="seg active" />
+          return (
+            <span key={frameKey} class="seg active filling">
+              <i
+                class="seg-fill"
+                style={{
+                  animationDuration: `${dur}ms`,
+                  animationPlayState: running ? 'running' : 'paused',
+                }}
+              />
+            </span>
+          )
+        })}
+      </div>
+      <div class="stage">
+        {url && isVideo && (
+          <video
+            key={frameKey}
+            ref={video}
+            src={url}
+            autoPlay
+            muted={muted}
+            playsInline
+            onPlaying={() => setVideoPlaying(true)}
+            onPause={() => setVideoPlaying(false)}
+            onWaiting={() => setVideoPlaying(false)}
+            onEnded={next}
+          />
+        )}
+        {url && !isVideo && <img key={frameKey} src={url} alt="" />}
+        {!url && <div class="status">{placeholder}</div>}
+        {cur.caption_text && <div class="caption">{cur.caption_text}</div>}
+      </div>
+      <PlaybackControls
+        paused={paused}
+        muted={hasSound ? muted : null}
+        onTogglePause={togglePause}
+        onToggleMute={toggleMute}
+        onPrev={prev}
+        onNext={next}
+      />
+    </>
+  )
+}
+
+
+/* How the stream reaches this page (#1157), and — behind "What's this?" —
+ * what that means: straight from the author's home, or passed on by the
+ * GFS, sealed to this viewer either way. */
+export function TransportNote({
+  transport,
+  authorName,
+}: {
+  transport: 'direct' | 'relay'
+  authorName: string | null
+}) {
+  const [open, setOpen] = useState(false)
+  const body = transport === 'relay'
+    ? t('hl.via_relay_body')
+    : authorName
+      ? t('hl.via_direct_body', { name: authorName })
+      : t('hl.via_direct_body_anon')
+  return (
+    <>
+    <div class="highlight-transport-row">
+      <p class="highlight-transport" data-transport={transport}>
+        {t(transport === 'direct' ? 'hl.via_direct' : 'hl.via_relay')}
+      </p>
+      <span class="highlight-transport-sep" aria-hidden="true">·</span>
+      <button
+        type="button"
+        class="viewer-link"
+        aria-expanded={open ? 'true' : 'false'}
+        aria-controls="highlight-transport-info"
+        onClick={() => setOpen((o) => !o)}
+      >
+        {t('hl.via_what')}
+      </button>
+    </div>
+    {open && <p id="highlight-transport-info" class="highlight-transport-info">{body}</p>}
+    </>
   )
 }
 
@@ -601,7 +773,7 @@ function AuthorHeader({ author, picture }: { author: AuthorProfile; picture: str
 export function BrokenLink() {
   return (
     <div class="highlight-error" role="alert">
-      <p>{t('link.broken')}</p>
+      <p class="viewer-title">{t('link.broken')}</p>
       <p>{t('link.broken_body')}</p>
     </div>
   )
@@ -612,7 +784,7 @@ export function BrokenLink() {
 export function OutdatedLink() {
   return (
     <div class="highlight-error" role="alert">
-      <p>{t('link.broken')}</p>
+      <p class="viewer-title">{t('link.broken')}</p>
       <p>{t('link.outdated_body')}</p>
     </div>
   )
@@ -620,9 +792,6 @@ export function OutdatedLink() {
 
 
 function humanizeError(msg: string | null | undefined): string {
-  // ``expired`` only arrives inside a stream the author's own household
-  // sent — the GFS itself never says it (see ``viewer_errors.ts``).
-  if (msg && /expired/i.test(msg)) return t('hl.ended')
   if (msg && /unsupported/i.test(msg)) {
     return t('hl.outdated_page')
   }

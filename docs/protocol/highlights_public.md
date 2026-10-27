@@ -170,10 +170,20 @@ probe ([`principles.md`](../principles.md#the-gfs-is-not-an-author-presence-orac
   budget.
 * The landing page itself is sent with `Cache-Control: no-store`, because
   its URL carries the share token.
-* The viewer renders it as "This isn't available right now." in a
-  `role="alert"` region and moves focus to a *Try again* button. It retries
-  on its own after 10 s, 30 s and 60 s, then stops. The old offline page
-  reloaded every 10 s forever, and that page was itself the oracle.
+* The viewer renders it as "This isn't available right now. Try again
+  later, or ask whoever shared it." in a `role="alert"` region and moves
+  focus to a *Try again* button. It retries on its own after 10 s, 30 s and
+  60 s, then stops, and says when the next try comes ("Trying again in
+  30 s"). The old offline page reloaded every 10 s forever, and that page
+  was itself the oracle. The page never says "can't reach the household"
+  or "offline": unknown, revoked and offline get this one state.
+* "This highlight has ended" shows only when the author's household
+  itself answers the stream with an `expired` error frame (a link it no
+  longer serves: revoked, deleted or past its day). That answer comes
+  from the household, never from a GFS status, so it adds nothing to the
+  residual below. It is final: no *Try again*, no automatic retry.
+* "This link is incomplete or damaged" shows only for a fragment that is
+  missing a part or malformed; then nothing is contacted.
 
 **Residual:** success shows that the author's household was connected at
 that moment. That means a `201` offer (answered or not), or a relay that
@@ -268,10 +278,42 @@ presence oracle" above.
 
 The viewer says which path the stream took, under the highlight, for as
 long as it plays: *Direct connection* once the DataChannel opens, or
-*Through the server · still encrypted* once the relay GET answers
-(`.highlight-transport`, `data-transport="direct" | "relay"`). On both
-paths the bytes are sealed to the viewer, so the label is about who carries
-the stream, not who can read it.
+*Through the GFS · still encrypted* once the relay GET answers
+(`.highlight-transport`, `data-transport="direct" | "relay"`). A *What's
+this?* button next to it (`aria-expanded`) opens one sentence: "Direct from
+<author>'s home …" or "… the GFS passes it on. It stays encrypted: only
+this link opens it, not the GFS." On both paths the bytes are sealed to the
+viewer, so the label is about who carries the stream, not who can read it.
+
+The relay body arrives in chunks that don't line up with frames. The
+viewer takes a frame off its buffer only once the whole payload is there
+(`takeFrame`). A frame cut at a chunk boundary would never open, and the
+page would wrongly say the highlight can't be opened.
+
+## Playback controls
+
+Under the stage sits a control bar (`client/gfs/viewer_playback.tsx`):
+previous, pause / play, next, and mute / unmute when any frame is a video.
+Each round button is at least 44 px and has an `aria-label`. The keyboard
+works too: Space or K pauses, ← / → step through the frames (swapped on a
+right-to-left page), M mutes.
+
+* **Video starts muted** (`muted` + `autoplay` + `playsinline`). Browsers
+  only autoplay muted media. An unmuted autoplay that the browser refuses
+  used to leave a still frame while the timer ran on. If even a muted start
+  is refused, the button shows *Play*.
+* **The frame timer counts running time only.** It stops while paused,
+  while the frame's file hasn't arrived, and for a video whenever the video
+  isn't playing (still starting, refused, buffering). It picks up where it
+  stopped.
+* **Progress:** the current segment fills over the frame's duration and
+  pauses with the player. Under `prefers-reduced-motion` it just lights up,
+  stepping from frame to frame with no animation.
+* Previous on the first frame starts it over; Next on the last ends the
+  highlight.
+
+The shared moment page (see momentum_public.md, "Share links") uses the
+same bar for a video, with pause and mute only.
 
 ## DataChannel framing
 

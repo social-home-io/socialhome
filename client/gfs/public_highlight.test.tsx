@@ -425,7 +425,7 @@ describe('how the highlight reaches the viewer', () => {
     vi.unstubAllGlobals()
   })
 
-  it('says it comes through the server, still encrypted, on the relay fallback', async () => {
+  it('says it comes through the GFS, still encrypted, on the relay fallback', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
       const url = String(input)
       if (url.endsWith('/gfs/highlights/ice-servers')) {
@@ -454,9 +454,323 @@ describe('how the highlight reaches the viewer', () => {
     const view = await renderViewer()
     await vi.waitFor(() => {
       const badge = view.container.querySelector('.highlight-transport')
-      expect(badge?.textContent).toBe('Through the server · still encrypted')
+      expect(badge?.textContent).toBe('Through the GFS · still encrypted')
       expect(badge?.getAttribute('data-transport')).toBe('relay')
     }, { timeout: 4000 })
+    view.unmount()
+    vi.unstubAllGlobals()
+  })
+})
+
+
+describe('reading the relayed byte stream', () => {
+  function encoded(header: object, payload: Uint8Array): Uint8Array {
+    const h = new TextEncoder().encode(JSON.stringify(header))
+    const buf = new Uint8Array(4 + h.length + 4 + payload.length)
+    const view = new DataView(buf.buffer)
+    view.setUint32(0, h.length)
+    buf.set(h, 4)
+    view.setUint32(4 + h.length, payload.length)
+    buf.set(payload, 4 + h.length + 4)
+    return buf
+  }
+
+  it('waits for the whole payload when a frame is split across network reads', async () => {
+    document.body.innerHTML = ''
+    const { takeFrame } = await import('./public_highlight')
+    const payload = new Uint8Array(1000).map((_, i) => i % 251)
+    const whole = encoded({ kind: 'sealed' }, payload)
+    // The header and part of the payload have arrived; the rest hasn't.
+    expect(takeFrame(whole.subarray(0, whole.length - 10))).toBeNull()
+    const taken = takeFrame(whole)
+    expect(taken?.payload).toEqual(payload)
+    expect(taken?.rest.length).toBe(0)
+  })
+})
+
+
+describe('the player: controls, muted video, pause, keyboard', () => {
+  beforeEach(() => {
+    document.body.innerHTML = ''
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockResolvedValue(undefined)
+    vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {})
+  })
+
+  afterEach(async () => {
+    const { cleanup } = await import('@testing-library/preact')
+    cleanup()
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+    document.documentElement.removeAttribute('dir')
+  })
+
+  const IMAGES = [
+    { frame_id: 'f1', sequence: 0, content_type: 'image/webp', byte_length: 1, duration_ms: 1000 },
+    { frame_id: 'f2', sequence: 1, content_type: 'image/webp', byte_length: 1, duration_ms: 1000 },
+    { frame_id: 'f3', sequence: 2, content_type: 'image/webp', byte_length: 1, duration_ms: 1000 },
+  ]
+  const URLS = { f1: 'blob:f1', f2: 'blob:f2', f3: 'blob:f3', v1: 'blob:v1' }
+  const VIDEO = [
+    { frame_id: 'v1', sequence: 0, content_type: 'video/mp4', byte_length: 1, duration_ms: 1000 },
+    ...IMAGES.slice(1),
+  ]
+
+  async function renderPlayer(manifest = IMAGES, onEnded = vi.fn()) {
+    const tl = await import('@testing-library/preact')
+    const { HighlightPlayer } = await import('./public_highlight')
+    const view = tl.render(
+      <HighlightPlayer manifest={manifest} frameUrls={URLS} placeholder="Buffering…" onEnded={onEnded} />,
+    )
+    const shown = () => view.container.querySelector('.stage img, .stage video')?.getAttribute('src')
+    const click = (name: string) => tl.fireEvent.click(tl.screen.getByRole('button', { name }))
+    return { ...tl, view, shown, click, onEnded }
+  }
+
+  it('starts a video muted so the browser lets it play, with an Unmute button', async () => {
+    const { view, click, screen } = await renderPlayer(VIDEO)
+    const video = view.container.querySelector('video')!
+    expect(video.hasAttribute('autoplay')).toBe(true)
+    expect(video.hasAttribute('playsinline')).toBe(true)
+    expect(video.muted).toBe(true)
+    expect(video.hasAttribute('muted')).toBe(true)
+    expect(video.hasAttribute('controls')).toBe(false)
+    click('Unmute')
+    expect(video.muted).toBe(false)
+    expect(screen.getByRole('button', { name: 'Mute' })).toBeTruthy()
+  })
+
+  it('has no Mute button for a highlight of pictures only', async () => {
+    const { screen } = await renderPlayer()
+    expect(screen.queryByRole('button', { name: /mute/i })).toBeNull()
+    for (const name of ['Previous', 'Pause', 'Next']) {
+      expect(screen.getByRole('button', { name })).toBeTruthy()
+    }
+  })
+
+  it('holds the frame while paused and goes on from where it stopped', async () => {
+    vi.useFakeTimers()
+    const { shown, click, act } = await renderPlayer()
+    expect(shown()).toBe('blob:f1')
+    await act(() => { vi.advanceTimersByTime(600) })
+    click('Pause')
+    await act(() => { vi.advanceTimersByTime(10_000) })
+    expect(shown()).toBe('blob:f1')
+    click('Play')
+    await act(() => { vi.advanceTimersByTime(300) })
+    expect(shown()).toBe('blob:f1')
+    await act(() => { vi.advanceTimersByTime(150) })
+    expect(shown()).toBe('blob:f2')
+  })
+
+  it('runs a video frame’s timer only while the video plays', async () => {
+    vi.useFakeTimers()
+    const { view, shown, act, fireEvent } = await renderPlayer(VIDEO)
+    // Not playing yet (autoplay still deciding, or blocked): the frame waits.
+    await act(() => { vi.advanceTimersByTime(5000) })
+    expect(shown()).toBe('blob:v1')
+    const video = view.container.querySelector('video')!
+    fireEvent(video, new Event('playing'))
+    await act(() => { vi.advanceTimersByTime(500) })
+    fireEvent(video, new Event('waiting')) // buffering: the timer waits too
+    await act(() => { vi.advanceTimersByTime(5000) })
+    expect(shown()).toBe('blob:v1')
+    fireEvent(video, new Event('playing'))
+    await act(() => { vi.advanceTimersByTime(520) })
+    expect(shown()).toBe('blob:f2')
+  })
+
+  it('pauses the video with the Pause button', async () => {
+    const pause = vi.spyOn(HTMLMediaElement.prototype, 'pause')
+    const { click } = await renderPlayer(VIDEO)
+    click('Pause')
+    expect(pause).toHaveBeenCalled()
+  })
+
+  it('shows Play when the browser refuses to start the video', async () => {
+    vi.spyOn(HTMLMediaElement.prototype, 'play').mockRejectedValue(new Error('NotAllowedError'))
+    const { screen } = await renderPlayer(VIDEO)
+    await vi.waitFor(() => expect(screen.getByRole('button', { name: 'Play' })).toBeTruthy())
+  })
+
+  it('steps with Next / Previous and ends after the last frame', async () => {
+    const { shown, click, onEnded } = await renderPlayer()
+    click('Next')
+    expect(shown()).toBe('blob:f2')
+    click('Previous')
+    expect(shown()).toBe('blob:f1')
+    click('Previous') // restarts the first
+    expect(shown()).toBe('blob:f1')
+    click('Next')
+    click('Next')
+    expect(onEnded).not.toHaveBeenCalled()
+    click('Next')
+    expect(onEnded).toHaveBeenCalledOnce()
+  })
+
+  it('answers the keyboard: Space / K pause, arrows step (mirrored in RTL), M mutes', async () => {
+    const { view, shown, screen, fireEvent } = await renderPlayer(VIDEO)
+    fireEvent.keyDown(document.body, { key: ' ' })
+    expect(screen.getByRole('button', { name: 'Play' })).toBeTruthy()
+    fireEvent.keyDown(document.body, { key: 'k' })
+    expect(screen.getByRole('button', { name: 'Pause' })).toBeTruthy()
+    fireEvent.keyDown(document.body, { key: 'm' })
+    expect(view.container.querySelector('video')!.muted).toBe(false)
+    fireEvent.keyDown(document.body, { key: 'ArrowRight' })
+    expect(shown()).toBe('blob:f2')
+    document.documentElement.setAttribute('dir', 'rtl')
+    fireEvent.keyDown(document.body, { key: 'ArrowLeft' })
+    expect(shown()).toBe('blob:f3')
+    fireEvent.keyDown(document.body, { key: 'ArrowRight' })
+    expect(shown()).toBe('blob:f2')
+  })
+
+  it('fills the current segment smoothly, paused with the player', async () => {
+    const { view, click } = await renderPlayer()
+    const fill = view.container.querySelector('.progress .seg.active .seg-fill') as HTMLElement
+    expect(fill).not.toBeNull()
+    expect(fill.style.animationDuration).toBe('1000ms')
+    expect(fill.style.animationPlayState).toBe('running')
+    click('Pause')
+    expect(fill.style.animationPlayState).toBe('paused')
+  })
+
+  it('steps the progress instead under prefers-reduced-motion', async () => {
+    vi.stubGlobal('matchMedia', (q: string) => ({ matches: q.includes('reduce') }))
+    const { view } = await renderPlayer()
+    expect(view.container.querySelector('.seg-fill')).toBeNull()
+    expect(view.container.querySelector('.progress .seg.active')).not.toBeNull()
+  })
+})
+
+
+describe('the transport label explains itself', () => {
+  beforeEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  it('opens a "What’s this?" note that names whose home it comes from', async () => {
+    const { render, screen, fireEvent } = await import('@testing-library/preact')
+    const { TransportNote } = await import('./public_highlight')
+    const view = render(<TransportNote transport="direct" authorName="Anna Berger" />)
+    expect(view.container.querySelector('.highlight-transport')?.textContent).toBe('Direct connection')
+    const button = screen.getByRole('button', { name: 'What’s this?' })
+    expect(button.getAttribute('aria-expanded')).toBe('false')
+    fireEvent.click(button)
+    expect(button.getAttribute('aria-expanded')).toBe('true')
+    const note = document.getElementById(button.getAttribute('aria-controls')!)
+    expect(note?.textContent).toContain('Direct from Anna Berger’s home')
+    view.unmount()
+  })
+
+  it('says the GFS carries a relayed stream and still can’t read it', async () => {
+    const { render, screen, fireEvent } = await import('@testing-library/preact')
+    const { TransportNote } = await import('./public_highlight')
+    const view = render(<TransportNote transport="relay" authorName={null} />)
+    expect(view.container.querySelector('.highlight-transport')?.textContent)
+      .toBe('Through the GFS · still encrypted')
+    fireEvent.click(screen.getByRole('button', { name: 'What’s this?' }))
+    expect(view.container.textContent).toMatch(/GFS passes it on/)
+    view.unmount()
+  })
+})
+
+
+describe('what the highlight page says when it can’t play', () => {
+  beforeEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  function frame(header: object): ArrayBuffer {
+    const h = new TextEncoder().encode(JSON.stringify(header))
+    const buf = new Uint8Array(4 + h.length + 4)
+    const view = new DataView(buf.buffer)
+    view.setUint32(0, h.length)
+    buf.set(h, 4)
+    view.setUint32(4 + h.length, 0)
+    return buf.buffer
+  }
+
+  async function renderViewer(nextAutoDelayMs: () => number | null = () => null) {
+    const { render } = await import('@testing-library/preact')
+    const { PublicHighlightViewer } = await import('./public_highlight')
+    const { linkSecretFromHash } = await import('./stream_seal')
+    const retry = { manual: vi.fn(), auto: vi.fn(), nextAutoDelayMs }
+    const view = render(
+      <PublicHighlightViewer
+        boot={{
+          instanceId: 'inst-1', highlightId: 'hl-1', token: 'tok-1',
+          gfs: 'https://gfs.example.org',
+        }}
+        secret={linkSecretFromHash(pinnedHash())!}
+        retry={retry}
+      />,
+    )
+    return { view, retry }
+  }
+
+  it('unknown, revoked and offline look the same: neutral, retrying on its own', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      if (String(input).endsWith('/gfs/highlights/ice-servers')) {
+        return new Response(JSON.stringify({ servers: [] }), { status: 200 })
+      }
+      return new Response('{"error":"unavailable"}', { status: 503 })
+    })
+    class FakePc {
+      iceConnectionState = 'new'
+      remoteDescription = null
+      addEventListener() {}
+      createDataChannel() { return {} }
+      async createOffer() { return { type: 'offer', sdp: 'v=0' } }
+      async setLocalDescription() {}
+      close() {}
+    }
+    vi.stubGlobal('RTCPeerConnection', FakePc)
+    const { view } = await renderViewer(() => 30_000)
+    await vi.waitFor(
+      () => expect(view.container.querySelector('[role="alert"]')).not.toBeNull(),
+      { timeout: 4000 },
+    )
+    const text = view.container.textContent ?? ''
+    expect(text).toContain('This isn’t available right now.')
+    expect(text).toContain('Try again later, or ask whoever shared it.')
+    expect(text).toContain('Trying again in 30 s.')
+    expect(text.toLowerCase()).not.toMatch(/reach|offline|online|ended|household/)
+    expect(view.container.querySelector('button.viewer-retry')).not.toBeNull()
+    view.unmount()
+    vi.unstubAllGlobals()
+  })
+
+  it('says it has ended only when the household’s own stream says so, and stops retrying', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input)
+      if (url.endsWith('/gfs/highlights/ice-servers')) {
+        return new Response(JSON.stringify({ servers: [] }), { status: 200 })
+      }
+      if (url.endsWith('/gfs/highlight_rtc/offer')) {
+        return new Response(JSON.stringify({ session_id: 's-1' }), { status: 201 })
+      }
+      return new Response(JSON.stringify({ answer_sdp: null, ice_candidates: [] }), { status: 200 })
+    })
+    const channel: { onopen?: () => void; onmessage?: (ev: { data: ArrayBuffer }) => void } = {}
+    class FakePc {
+      iceConnectionState = 'new'
+      remoteDescription = null
+      addEventListener() {}
+      createDataChannel() { return channel }
+      async createOffer() { return { type: 'offer', sdp: 'v=0' } }
+      async setLocalDescription() {}
+      close() {}
+    }
+    vi.stubGlobal('RTCPeerConnection', FakePc)
+    const { view, retry } = await renderViewer(() => 10_000)
+    await vi.waitFor(() => expect(channel.onmessage).toBeTypeOf('function'), { timeout: 4000 })
+    const { act } = await import('@testing-library/preact')
+    act(() => channel.onopen!())
+    act(() => channel.onmessage!({ data: frame({ kind: 'error', error: 'expired' }) }))
+    await vi.waitFor(() => expect(view.container.textContent).toContain('This highlight has ended.'))
+    expect(view.container.querySelector('button')).toBeNull()
+    expect(view.container.textContent).not.toContain('Trying again')
+    expect(retry.auto).not.toHaveBeenCalled()
     view.unmount()
     vi.unstubAllGlobals()
   })

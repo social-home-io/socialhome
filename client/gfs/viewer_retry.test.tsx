@@ -40,6 +40,23 @@ describe('ViewerError class', () => {
   })
 })
 
+describe('ViewerError copy', () => {
+  it('shows the message as a title, the detail under it, and when it tries again', () => {
+    const retry = { manual: () => {}, auto: () => {}, nextAutoDelayMs: () => 30_000 }
+    render(<ViewerError message="Gone" detail="Ask again later." retry={retry} />)
+    const alert = screen.getByRole('alert')
+    expect(alert.querySelector('.viewer-title')?.textContent).toBe('Gone')
+    expect(alert.textContent).toContain('Ask again later.')
+    expect(alert.textContent).toContain('Trying again in 30 s.')
+  })
+
+  it('says nothing about trying again once the budget is spent', () => {
+    const retry = { manual: () => {}, auto: () => {}, nextAutoDelayMs: () => null }
+    render(<ViewerError message="Gone" retry={retry} />)
+    expect(screen.getByRole('alert').textContent).not.toContain('Trying again')
+  })
+})
+
 describe('RetryHost auto-retry', () => {
   it('retries after 10 s, 30 s and 60 s, then stops', () => {
     expect(AUTO_RETRY_DELAYS_MS).toEqual([10_000, 30_000, 60_000])

@@ -7,8 +7,9 @@
  * ``ViewerError`` is the not-available state: announced to screen readers
  * (``role="alert"``), focus moved to *Try again*, and an automatic retry
  * after 10 s, 30 s and 60 s, then no more (the old offline page
- * refreshed itself every 10 s forever). A manual retry or an unmount
- * cancels the pending timer.
+ * refreshed itself every 10 s forever), saying when the next one comes —
+ * a fixed line, not a countdown a screen reader would re-read. A manual
+ * retry or an unmount cancels the pending timer.
  */
 import type { ComponentChildren } from 'preact'
 import { useEffect, useRef, useState } from 'preact/hooks'
@@ -45,10 +46,13 @@ export function RetryHost({
 
 export function ViewerError({
   message,
+  detail,
   retry,
   class: className,
 }: {
   message: string
+  /** A second line under the message: what to do about it. */
+  detail?: string
   retry: RetryControl
   class?: string
 }) {
@@ -60,8 +64,11 @@ export function ViewerError({
     button.current?.focus({ preventScroll: true })
   }, [])
 
+  // Read once: the budget only moves on a retry, which re-mounts this.
+  const [autoDelay] = useState(retry.nextAutoDelayMs)
+
   useEffect(() => {
-    const delay = retry.nextAutoDelayMs()
+    const delay = autoDelay
     if (delay === null) return undefined
     const timer = setTimeout(retry.auto, delay)
     return () => clearTimeout(timer)
@@ -71,10 +78,14 @@ export function ViewerError({
 
   return (
     <div class={className} role="alert">
-      <p>{message}</p>
+      <p class="viewer-title">{message}</p>
+      {detail && <p>{detail}</p>}
       <button ref={button} type="button" class="viewer-retry" onClick={retry.manual}>
         {t('retry')}
       </button>
+      {autoDelay !== null && (
+        <p class="viewer-note">{t('retry.auto', { seconds: Math.round(autoDelay / 1000) })}</p>
+      )}
     </div>
   )
 }
