@@ -99,3 +99,26 @@ async def test_a_moderator_elsewhere_gets_404_not_403(client):
     r = await client.delete(f"/api/spaces/sp-a/posts/{pid}", headers=mod)
     assert r.status == 404
     assert await _post_row(client, pid) == before
+
+
+async def test_get_a_post_is_its_permalink_in_its_own_space_only(client):
+    """``GET /api/spaces/{id}/posts/{post_id}`` — the feed's shape for
+    one post; 404 under another space and once deleted."""
+    owner = _auth(client._tok)
+    pid = await _two_spaces_with_a_post_in_b(client)
+    r = await client.get(f"/api/spaces/sp-b/posts/{pid}", headers=owner)
+    assert r.status == 200, await r.text()
+    body = await r.json()
+    assert (body["id"], body["content"], body["comment_count"]) == (pid, "b's post", 0)
+    r = await client.get(f"/api/spaces/sp-a/posts/{pid}", headers=owner)
+    assert r.status == 404
+    await client.delete(f"/api/spaces/sp-b/posts/{pid}", headers=owner)
+    r = await client.get(f"/api/spaces/sp-b/posts/{pid}", headers=owner)
+    assert r.status == 404
+
+
+async def test_get_a_post_needs_a_seat(client):
+    pid = await _two_spaces_with_a_post_in_b(client)
+    outsider = await _add_user(client, "outsider", "u-outsider")
+    r = await client.get(f"/api/spaces/sp-b/posts/{pid}", headers=outsider)
+    assert r.status == 403

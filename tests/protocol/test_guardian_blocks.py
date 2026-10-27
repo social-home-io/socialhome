@@ -515,10 +515,12 @@ async def test_space_post_from_a_blocked_author_never_notifies(env):
         headers=_h("bob"),
     )
     assert r.status == 201, await r.text()
+    pid = (await r.json())["id"]
     notified = {
         row["user_id"]
         for row in await env._db.fetchall(
-            "SELECT user_id FROM notifications WHERE link_url=?", (f"/spaces/{sid}",)
+            "SELECT user_id FROM notifications WHERE link_url=?",
+            (f"/spaces/{sid}?post={pid}",),
         )
     }
     assert "u-carol" in notified

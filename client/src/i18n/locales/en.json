@@ -5407,5 +5407,16 @@
   "error.join_request_sent": "Your request was sent to the admins.",
   "join_requests.near_edge": "Near the edge",
   "join_requests.near_edge_hint": "Their home is close to the edge of your area — it may be just outside. You decide.",
-  "space.join_landing.requested_title": "Request sent"
+  "space.join_landing.requested_title": "Request sent",
+  "page_title.post": "Post",
+  "post.permalink.back": "Back to the feed",
+  "post.permalink.gone_title": "This post is no longer available",
+  "post.permalink.gone_body": "It was deleted, or you can no longer see it.",
+  "post.permalink.failed_title": "Couldn't load this post",
+  "post.permalink.failed_body": "Check your connection and try again.",
+  "post.permalink.react_failed": "Couldn't react: {error}",
+  "post.permalink.comments_aria": "Comments",
+  "post.permalink.comment_gone": "That comment is no longer available.",
+  "tasks.link_gone": "That task is no longer available.",
+  "bazaar.listing_gone": "That listing is no longer available."
 }

@@ -86,6 +86,7 @@ from ..domain.events import (
 )
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.mention import Mention, MentionType
+from ..domain.post import PostType
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
     SETTINGS_AUTHORITY_ROLES,
@@ -104,6 +105,16 @@ from ..repositories.notification_repo import (
 )
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
+from .notification_links import (
+    HOUSEHOLD_CALENDAR_LINK,
+    bazaar_listing_link,
+    household_post_link,
+    space_about_link,
+    space_calendar_link,
+    space_members_link,
+    space_post_link,
+    task_link,
+)
 from .protection_gate import ProtectionGateMixin
 from .push_service import PushPayload
 
@@ -512,7 +523,7 @@ class NotificationService(ProtectionGateMixin):
                         fallback="{author} posted",
                         author=name,
                     ),
-                    link_url=f"/post/{event.post.id}",
+                    link_url=household_post_link(event.post.id),
                 )
             )
 
@@ -527,6 +538,7 @@ class NotificationService(ProtectionGateMixin):
                 space_id=event.space_id,
                 author_id=commenter_id,
                 mentions=event.mentions,
+                link=space_post_link(event.space_id, event.post_id, event.comment.id),
                 generic_type="space_comment_added",
                 generic_key="notification.space.comment.added",
                 generic_fallback="{author} commented in {space_name}",
@@ -549,7 +561,7 @@ class NotificationService(ProtectionGateMixin):
                     user_id=user.user_id,
                     type="comment_added",
                     title=f"{name} commented on a post",
-                    link_url=f"/post/{event.post_id}",
+                    link_url=household_post_link(event.post_id, event.comment.id),
                 )
             )
 
@@ -564,6 +576,7 @@ class NotificationService(ProtectionGateMixin):
             space_id=event.space_id,
             author_id=event.post.author,
             mentions=event.new_mentions,
+            link=space_post_link(event.space_id, event.post.id),
             generic_type=None,
             generic_key="notification.space.post.created",
             generic_fallback="{author} posted in {space_name}",
@@ -579,6 +592,7 @@ class NotificationService(ProtectionGateMixin):
             space_id=event.space_id,
             author_id=event.comment.author,
             mentions=event.new_mentions,
+            link=space_post_link(event.space_id, event.post_id, event.comment.id),
             generic_type=None,
             generic_key="notification.space.comment.added",
             generic_fallback="{author} commented in {space_name}",
@@ -610,6 +624,7 @@ class NotificationService(ProtectionGateMixin):
                     fallback="You were assigned: {title}",
                     title=event.task.title,
                 ),
+                link_url=task_link(event.task, event.space_id),
             )
         )
 
@@ -628,6 +643,8 @@ class NotificationService(ProtectionGateMixin):
                     user_id=assignee_id,
                     type="task_deadline",
                     title=title,
+                    # The deadline sweep reads household tasks only.
+                    link_url=task_link(event.task),
                 )
             )
 
@@ -982,7 +999,7 @@ class NotificationService(ProtectionGateMixin):
                 user_id=event.seller_user_id,
                 type="bazaar_bid_placed",
                 title=title,
-                link_url=f"/bazaar/{event.listing_post_id}",
+                link_url=bazaar_listing_link(event.listing_post_id),
             )
         )
 
@@ -1002,7 +1019,7 @@ class NotificationService(ProtectionGateMixin):
                 user_id=event.buyer_user_id,
                 type="bazaar_offer_accepted",
                 title=title,
-                link_url=f"/bazaar/{event.listing_post_id}",
+                link_url=bazaar_listing_link(event.listing_post_id),
             )
         )
 
@@ -1021,7 +1038,7 @@ class NotificationService(ProtectionGateMixin):
                 user_id=event.bidder_user_id,
                 type="bazaar_offer_rejected",
                 title=title,
-                link_url=f"/bazaar/{event.listing_post_id}",
+                link_url=bazaar_listing_link(event.listing_post_id),
             )
         )
 
@@ -1048,7 +1065,7 @@ class NotificationService(ProtectionGateMixin):
                 user_id=event.seller_user_id,
                 type=f"bazaar_listing_{event.final_status}",
                 title=title,
-                link_url=f"/bazaar/{event.listing_post_id}",
+                link_url=bazaar_listing_link(event.listing_post_id),
             )
         )
 
@@ -1058,11 +1075,19 @@ class NotificationService(ProtectionGateMixin):
 
         See :meth:`_notify_space_members` for how the per-member
         :table:`space_notif_prefs` level and ``event.mentions`` combine.
+
+        A calendar event's feed card (``PostType.EVENT`` with a
+        ``linked_event_id``, minted by :class:`CalendarFeedBridge` on every
+        household) rings nobody: the event already rang its own
+        ``calendar_event_created`` bell — one bell per event.
         """
+        if event.post.type is PostType.EVENT and event.post.linked_event_id:
+            return
         await self._notify_space_members(
             space_id=event.space_id,
             author_id=event.post.author,
             mentions=event.mentions,
+            link=space_post_link(event.space_id, event.post.id),
             generic_type="space_post_created",
             generic_key="notification.space.post.created",
             generic_fallback="{author} posted in {space_name}",
@@ -1076,6 +1101,7 @@ class NotificationService(ProtectionGateMixin):
         space_id: str,
         author_id: str,
         mentions: tuple[Mention, ...],
+        link: str,
         generic_type: str | None,
         generic_key: str,
         generic_fallback: str,
@@ -1108,6 +1134,8 @@ class NotificationService(ProtectionGateMixin):
 
         The member list is the local ``space_members`` roster, so a mention can
         only ever reach a member — the resolver never resolves outsiders.
+
+        ``link`` is the post (and comment) every bell of this fan-out opens.
         """
         space = await self._spaces.get(space_id)
         if space is None:
@@ -1166,7 +1194,7 @@ class NotificationService(ProtectionGateMixin):
                         author=name,
                         space_name=space.name,
                     ),
-                    link_url=f"/spaces/{space_id}",
+                    link_url=link,
                 )
             )
 
@@ -1459,7 +1487,7 @@ class NotificationService(ProtectionGateMixin):
                             fallback="New event: {summary}",
                             summary=cal_event.summary,
                         ),
-                        link_url="/calendar",
+                        link_url=HOUSEHOLD_CALENDAR_LINK,
                     )
                 )
                 return
@@ -1488,7 +1516,7 @@ class NotificationService(ProtectionGateMixin):
                         fallback="New event: {summary}",
                         summary=cal_event.summary,
                     ),
-                    link_url="/calendar",
+                    link_url=space_calendar_link(cal_event.calendar_id),
                 )
             )
 
@@ -1530,9 +1558,9 @@ class NotificationService(ProtectionGateMixin):
                     type="calendar_event_cancelled",
                     title=localized,
                     link_url=(
-                        f"/spaces/{event.space_id}/calendar"
+                        space_calendar_link(event.space_id)
                         if event.space_id
-                        else "/calendar"
+                        else HOUSEHOLD_CALENDAR_LINK
                     ),
                 )
             )
@@ -1573,6 +1601,13 @@ class NotificationService(ProtectionGateMixin):
         }
         if not cohort:
             return
+        # A space event's ``calendar_id`` is the space id; anything else
+        # is a personal calendar on the household calendar page.
+        link = (
+            space_calendar_link(cal_event.calendar_id)
+            if await self._spaces.get(cal_event.calendar_id) is not None
+            else HOUSEHOLD_CALENDAR_LINK
+        )
         for uid in cohort:
             recipient = await self._users.get_by_user_id(uid)
             if recipient is None:
@@ -1587,7 +1622,7 @@ class NotificationService(ProtectionGateMixin):
                         fallback="Event updated: {summary}",
                         summary=cal_event.summary,
                     ),
-                    link_url=f"/spaces/{cal_event.calendar_id}/calendar",
+                    link_url=link,
                 )
             )
 
@@ -1606,7 +1641,7 @@ class NotificationService(ProtectionGateMixin):
                     fallback="Reminder: {summary}",
                     summary=event.summary,
                 ),
-                link_url=f"/spaces/{event.space_id}/calendar",
+                link_url=space_calendar_link(event.space_id),
             )
         )
 
@@ -1619,11 +1654,9 @@ class NotificationService(ProtectionGateMixin):
         completed_by = event.completed_by
         completer = await self._users.get_by_user_id(completed_by)
         name = completer.display_name if completer else "Someone"
-        if event.space_id is None:
-            link_url = f"/tasks/{task.list_id}"
-            members: set[str] | None = None
-        else:
-            link_url = f"/spaces/{event.space_id}/tasks"
+        link_url = task_link(task, event.space_id)
+        members: set[str] | None = None
+        if event.space_id is not None:
             members = set(await self._spaces.list_local_member_user_ids(event.space_id))
         for uid in getattr(task, "assignees", ()):
             if uid == completed_by:
@@ -1882,7 +1915,9 @@ class NotificationService(ProtectionGateMixin):
                     locale=self._locale(recipient),
                     fallback="Your join request was declined.",
                 ),
-                link_url=None,
+                # The title can't name the space (lock screen, §25.3): the
+                # space's landing page says which one.
+                link_url=space_about_link(event.space_id),
             )
         )
 
@@ -1934,7 +1969,8 @@ class NotificationService(ProtectionGateMixin):
                         locale=self._locale(recipient),
                         fallback="Your invite was declined.",
                     ),
-                    link_url=None,
+                    # Members settings: the invites, to try someone else.
+                    link_url=space_members_link(event.space_id),
                 )
             )
 

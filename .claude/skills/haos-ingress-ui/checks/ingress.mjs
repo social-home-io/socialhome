@@ -223,7 +223,7 @@ async function check(name, fn, { browser = true } = {}) {
 function routeTable(ids) {
   const src = fs.readFileSync(ROUTER_TS, 'utf8')
   const keys = [...src.matchAll(/^\s*'(\/[^']*)'\s*:/gm)].map(m => m[1])
-  const fill = { '/spaces/:id': ids.spaceId, '/dms/:id': ids.dmId }
+  const fill = { '/spaces/:id': ids.spaceId, '/dms/:id': ids.dmId, '/post/:id': ids.postId }
   const walk = []
   const skipped = []
   for (const k of keys) {
@@ -235,6 +235,10 @@ function routeTable(ids) {
     else walk.push(r)
   }
   walk.push('/search?q=hello')
+  // A notification's deep links: a post with its comment picked out, a
+  // space post in the space's Feed.
+  walk.push(`/post/${ids.postId}?comment=${ids.commentId}`)
+  walk.push(`/spaces/${ids.spaceId}?post=${ids.spacePostId}`)
   return { walk, skipped }
 }
 
@@ -295,7 +299,10 @@ await check('setup-seed-content', async () => {
     await asUser('alice', 'POST', `/api/admin/ha-users/${u}/provision`, { json: {} })
     await asUser(u, 'POST', '/api/me/onboarding-complete')
   }
-  await asUser('alice', 'POST', '/api/feed/posts', { json: { type: 'text', content: 'Hello through the ingress proxy' } })
+  const hello = await asUser('alice', 'POST', '/api/feed/posts', { json: { type: 'text', content: 'Hello through the ingress proxy' } })
+  ids.postId = hello.id
+  const reply = await asUser('bob', 'POST', `/api/feed/posts/${ids.postId}/comments`, { json: { content: 'A comment via ingress' } })
+  ids.commentId = reply.id
   const boundary = '----ingress'
   const mp = Buffer.concat([
     Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="x.png"\r\nContent-Type: image/png\r\n\r\n`),
@@ -308,7 +315,8 @@ await check('setup-seed-content', async () => {
   await asUser('bob', 'POST', `/api/conversations/${ids.dmId}/messages`, { json: { content: 'Hi from Bob' } })
   const sp = await asUser('alice', 'POST', '/api/spaces', { json: { name: 'Ingress Space', emoji: '🚪' } })
   ids.spaceId = sp.id || sp.space_id
-  await asUser('alice', 'POST', `/api/spaces/${ids.spaceId}/posts`, { json: { type: 'text', content: 'Space post via ingress' } })
+  const spacePost = await asUser('alice', 'POST', `/api/spaces/${ids.spaceId}/posts`, { json: { type: 'text', content: 'Space post via ingress' } })
+  ids.spacePostId = spacePost.id
   const album = await asUser('alice', 'POST', '/api/gallery/albums', { json: { name: 'Ingress album' } })
   ids.albumId = album.id || album.album_id
   const missing = Object.entries(ids).filter(([, v]) => !v).map(([k]) => `seed returned no ${k}`)

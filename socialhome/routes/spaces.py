@@ -50,7 +50,7 @@ from ..domain.gfs_member_publish import GFS_PUBLISH_MODES
 from ..domain.link_preview import link_preview_to_dict
 from ..domain.local_community import local_area_of, local_area_wire
 from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
-from ..domain.post import LocationData, PostType
+from ..domain.post import LocationData, Post, PostType
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
     INVITE_VIA_INTERNAL,
@@ -2325,109 +2325,111 @@ class SpaceFeedView(BaseView):
 
     async def get(self) -> web.Response:
         svc = self.svc(space_service_key)
-        bot_repo = self.svc(space_bot_repo_key)
-        user_repo = self.svc(user_repo_key)
         space_id = self.match("id")
         before = self.request.query.get("before")
         limit = min(max(int(self.request.query.get("limit", 20)), 1), 50)
         posts = await svc.list_feed(
             space_id, viewer_user_id=self.user.user_id, before=before, limit=limit
         )
+        return web.json_response(await _space_post_payloads(self, posts))
 
-        # Resolve bot personas for any system-author posts in one round-trip
-        # per unique bot_id. The feed is capped at 50 so this is bounded.
-        bot_ids = {
-            p.bot_id
-            for p in posts
-            if p.author == SYSTEM_AUTHOR and p.bot_id is not None
+
+async def _space_post_payloads(view: BaseView, posts: list[Post]) -> list[dict]:
+    """Space posts as the SPA reads them — the feed's shape, which a
+    post's permalink shares (``GET /api/spaces/{id}/posts/{post_id}``)."""
+    bot_repo = view.svc(space_bot_repo_key)
+    user_repo = view.svc(user_repo_key)
+    # Resolve bot personas for any system-author posts in one round-trip
+    # per unique bot_id. The feed is capped at 50 so this is bounded.
+    bot_ids = {
+        p.bot_id for p in posts if p.author == SYSTEM_AUTHOR and p.bot_id is not None
+    }
+    bots_by_id = {}
+    creators_by_user_id: dict[str, str] = {}
+    for bid in bot_ids:
+        b = await bot_repo.get(bid)
+        if b is None:
+            continue
+        bots_by_id[bid] = b
+        if b.created_by not in creators_by_user_id:
+            creator = await user_repo.get_by_user_id(b.created_by)
+            creators_by_user_id[b.created_by] = (
+                creator.display_name if creator else b.created_by
+            )
+
+    # Match the household-feed shape — every type-specific field
+    # the SPA needs to render rich posts (image_urls, location,
+    # file_meta, reactions, linked_event_id, linked_highlight_id,
+    # edited_at) needs to ride along.  The previous shape only
+    # carried ``content`` + ``media_url`` so location / image /
+    # file / event posts in space feeds rendered as bare text.
+    signer = view.request.app.get(media_signer_key)
+    # Video posts transcode in the background — surface a live
+    # ``media_status`` so the SPA renders a "Processing…" placeholder
+    # until the ``.webm`` exists. One batched repo read per request.
+    video_fns = [
+        fn
+        for p in posts
+        if p.type is PostType.VIDEO and (fn := media_filename(p.media_url)) is not None
+    ]
+    statuses = await view.svc(media_transcode_repo_key).status_for(video_fns)
+    out: list[dict] = []
+    for p in posts:
+        payload = {
+            "id": p.id,
+            "author": p.author,
+            "type": p.type.value,
+            "content": p.content,
+            "media_url": p.media_url,
+            "image_urls": list(p.image_urls or ()),
+            "file_meta": (
+                {
+                    "url": p.file_meta.url,
+                    "mime_type": p.file_meta.mime_type,
+                    "original_name": p.file_meta.original_name,
+                    "size_bytes": p.file_meta.size_bytes,
+                }
+                if p.file_meta is not None
+                else None
+            ),
+            "location": (
+                {
+                    "lat": p.location.lat,
+                    "lon": p.location.lon,
+                    "label": p.location.label,
+                }
+                if p.location is not None
+                else None
+            ),
+            "reactions": {
+                emoji: sorted(uids) for emoji, uids in (p.reactions or {}).items()
+            },
+            "comment_count": p.comment_count,
+            "pinned": p.pinned,
+            "edited_at": p.edited_at.isoformat() if p.edited_at else None,
+            "linked_event_id": p.linked_event_id,
+            "linked_highlight_id": p.linked_highlight_id,
+            # ``thumbnail_url`` inside is signed by the pass below.
+            "link_preview": link_preview_to_dict(p.link_preview),
+            "created_at": p.created_at.isoformat() if p.created_at else None,
+            "bot": _bot_view(p.bot_id, bots_by_id, creators_by_user_id)
+            if p.author == SYSTEM_AUTHOR
+            else None,
         }
-        bots_by_id = {}
-        creators_by_user_id: dict[str, str] = {}
-        for bid in bot_ids:
-            b = await bot_repo.get(bid)
-            if b is None:
-                continue
-            bots_by_id[bid] = b
-            if b.created_by not in creators_by_user_id:
-                creator = await user_repo.get_by_user_id(b.created_by)
-                creators_by_user_id[b.created_by] = (
-                    creator.display_name if creator else b.created_by
-                )
-
-        # Match the household-feed shape — every type-specific field
-        # the SPA needs to render rich posts (image_urls, location,
-        # file_meta, reactions, linked_event_id, linked_highlight_id,
-        # edited_at) needs to ride along.  The previous shape only
-        # carried ``content`` + ``media_url`` so location / image /
-        # file / event posts in space feeds rendered as bare text.
-        signer = self.request.app.get(media_signer_key)
-        # Video posts transcode in the background — surface a live
-        # ``media_status`` so the SPA renders a "Processing…" placeholder
-        # until the ``.webm`` exists. One batched repo read per request.
-        video_fns = [
-            fn
-            for p in posts
-            if p.type is PostType.VIDEO
-            and (fn := media_filename(p.media_url)) is not None
-        ]
-        statuses = await self.svc(media_transcode_repo_key).status_for(video_fns)
-        out: list[dict] = []
-        for p in posts:
-            payload = {
-                "id": p.id,
-                "author": p.author,
-                "type": p.type.value,
-                "content": p.content,
-                "media_url": p.media_url,
-                "image_urls": list(p.image_urls or ()),
-                "file_meta": (
-                    {
-                        "url": p.file_meta.url,
-                        "mime_type": p.file_meta.mime_type,
-                        "original_name": p.file_meta.original_name,
-                        "size_bytes": p.file_meta.size_bytes,
-                    }
-                    if p.file_meta is not None
-                    else None
-                ),
-                "location": (
-                    {
-                        "lat": p.location.lat,
-                        "lon": p.location.lon,
-                        "label": p.location.label,
-                    }
-                    if p.location is not None
-                    else None
-                ),
-                "reactions": {
-                    emoji: sorted(uids) for emoji, uids in (p.reactions or {}).items()
-                },
-                "comment_count": p.comment_count,
-                "pinned": p.pinned,
-                "edited_at": p.edited_at.isoformat() if p.edited_at else None,
-                "linked_event_id": p.linked_event_id,
-                "linked_highlight_id": p.linked_highlight_id,
-                # ``thumbnail_url`` inside is signed by the pass below.
-                "link_preview": link_preview_to_dict(p.link_preview),
-                "created_at": p.created_at.isoformat() if p.created_at else None,
-                "bot": _bot_view(p.bot_id, bots_by_id, creators_by_user_id)
-                if p.author == SYSTEM_AUTHOR
-                else None,
-            }
-            if p.type is PostType.VIDEO:
-                fn = media_filename(p.media_url)
-                payload["media_status"] = statuses.get(fn, READY) if fn else READY
-                # Signed poster (the ``.webp`` sibling of the ``.webm``
-                # ``media_url``) — set the *unsigned* path so the
-                # ``sign_media_urls_in`` pass below signs it alongside
-                # ``media_url`` (``media_thumbnail_url`` is signable).
-                poster = video_poster_path(p.media_url)
-                if poster is not None:
-                    payload["media_thumbnail_url"] = poster
-            if signer is not None:
-                sign_media_urls_in(payload, signer)
-            out.append(sanitise_for_api(payload))
-        return web.json_response(out)
+        if p.type is PostType.VIDEO:
+            fn = media_filename(p.media_url)
+            payload["media_status"] = statuses.get(fn, READY) if fn else READY
+            # Signed poster (the ``.webp`` sibling of the ``.webm``
+            # ``media_url``) — set the *unsigned* path so the
+            # ``sign_media_urls_in`` pass below signs it alongside
+            # ``media_url`` (``media_thumbnail_url`` is signable).
+            poster = video_poster_path(p.media_url)
+            if poster is not None:
+                payload["media_thumbnail_url"] = poster
+        if signer is not None:
+            sign_media_urls_in(payload, signer)
+        out.append(sanitise_for_api(payload))
+    return out
 
 
 def _bot_view(
@@ -2727,8 +2729,12 @@ class SpacePresenceView(BaseView):
 
 
 class SpacePostItemView(BaseView):
-    """PATCH/DELETE /api/spaces/{id}/posts/{post_id} — edit or delete a
-    single space post.
+    """GET/PATCH/DELETE /api/spaces/{id}/posts/{post_id} — read, edit or
+    delete a single space post.
+
+    GET is the post's permalink (a notification opens it): the feed's
+    shape and read gate (any seat, else 403); 404 once deleted or for a
+    post of another space.
 
     The household-feed twin lives at ``/api/feed/posts/{id}`` and
     routes through ``feed_service``; this view delegates to
@@ -2744,6 +2750,13 @@ class SpacePostItemView(BaseView):
     of another space is 404 and unchanged, whatever the caller's role
     there (the service checks authority on the post's own space).
     """
+
+    async def get(self) -> web.Response:
+        post = await self.svc(space_service_key).read_post(
+            self.match("id"), self.match("post_id"), viewer_user_id=self.user.user_id
+        )
+        (payload,) = await _space_post_payloads(self, [post])
+        return web.json_response(payload)
 
     async def patch(self) -> web.Response:
         ctx = self.user

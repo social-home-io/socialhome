@@ -5398,5 +5398,16 @@
   "error.join_request_sent": "Tu solicitud se envió a los admins.",
   "join_requests.near_edge": "Cerca del límite",
   "join_requests.near_edge_hint": "Su hogar está cerca del límite de tu zona; puede que justo fuera. Tú decides.",
-  "space.join_landing.requested_title": "Solicitud enviada"
+  "space.join_landing.requested_title": "Solicitud enviada",
+  "page_title.post": "Publicación",
+  "post.permalink.back": "Volver a Novedades",
+  "post.permalink.gone_title": "Esta publicación ya no está disponible",
+  "post.permalink.gone_body": "Se eliminó o ya no puedes verla.",
+  "post.permalink.failed_title": "No se pudo cargar esta publicación",
+  "post.permalink.failed_body": "Revisa tu conexión y vuelve a intentarlo.",
+  "post.permalink.react_failed": "No se pudo reaccionar: {error}",
+  "post.permalink.comments_aria": "Comentarios",
+  "post.permalink.comment_gone": "Ese comentario ya no está disponible.",
+  "tasks.link_gone": "Esa tarea ya no está disponible.",
+  "bazaar.listing_gone": "Ese anuncio ya no está disponible."
 }
