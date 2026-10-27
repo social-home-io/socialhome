@@ -11,7 +11,9 @@ Media pipeline matches feed posts:
 
 EXIF: only the date (``YYYY-MM-DD``) is retained as ``taken_at`` —
 no time, no GPS — so the album answers "when was this taken?" without
-leaking precise timestamps or location.
+leaking precise timestamps or location. It is read from the Exif
+sub-IFD (where cameras write it) before the processor strips all EXIF
+from the stored file.
 
 §25.6.2 S-9 describes a thumbnail-only federation projection with an
 on-demand ``gallery_item_full`` fetch; that fetch was never built, so the
@@ -79,21 +81,58 @@ except ImportError:
 log = logging.getLogger(__name__)
 
 
+#: EXIF date-time layout: ``YYYY:MM:DD HH:MM:SS`` (EXIF 2.3 §4.6.5).
+_EXIF_DATETIME_FORMAT = "%Y:%m:%d %H:%M:%S"
+
+
+def _parse_exif_day(value: object) -> str | None:
+    """``YYYY:MM:DD HH:MM:SS`` → ``YYYY-MM-DD``, or ``None`` if malformed.
+
+    Cameras write blanks or ``0000:00:00 00:00:00`` when the clock was
+    never set; those (and any impossible date) are no date at all.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        when = datetime.strptime(value.strip("\x00 "), _EXIF_DATETIME_FORMAT)
+    except ValueError:
+        return None
+    return when.date().isoformat()
+
+
 def _extract_exif_date_sync(data: bytes) -> str | None:
+    """The day a photo was taken, from its EXIF, as ``YYYY-MM-DD``.
+
+    Cameras and phones (JPEG and HEIC alike) write DateTimeOriginal /
+    DateTimeDigitized into the Exif sub-IFD (0x8769), not IFD0 — so the
+    sub-IFD is read first, then IFD0's DateTime (the file's change date)
+    as the last resort. Only date tags are read: never GPS.
+
+    The day is the camera's own calendar day. EXIF date-times are local
+    wall time; OffsetTimeOriginal is deliberately not applied, as moving
+    a late-evening shot into UTC would file it under the next day. No
+    time is kept, so there is no UTC timestamp to store.
+    """
     if not _PIL_AVAILABLE:
         return None
     try:
-        img = Image.open(io.BytesIO(data))
-        exif = img.getexif()
-        if not exif:
-            return None
-        for tag_id, val in exif.items():
-            if ExifTags.TAGS.get(tag_id) == "DateTimeOriginal":
-                parts = str(val).split(" ", 1)[0].replace(":", "-")
-                return parts
+        with Image.open(io.BytesIO(data)) as img:
+            exif = img.getexif()
+            sub = exif.get_ifd(ExifTags.IFD.Exif)
+            candidates = (
+                sub.get(ExifTags.Base.DateTimeOriginal),
+                sub.get(ExifTags.Base.DateTimeDigitized),
+                # Pre-fix lookup: a few writers put DateTimeOriginal in IFD0.
+                exif.get(ExifTags.Base.DateTimeOriginal),
+                exif.get(ExifTags.Base.DateTime),
+            )
     except Exception:
         log.debug("_extract_exif_date_sync: fail-soft error ignored", exc_info=True)
         return None
+    for value in candidates:
+        day = _parse_exif_day(value)
+        if day is not None:
+            return day
     return None
 
 
@@ -609,7 +648,7 @@ class GalleryService:
             await f.write(payload)
 
     async def _extract_exif_date(self, data: bytes) -> str | None:
-        """Pull DateTimeOriginal as ``YYYY-MM-DD`` (day precision only)."""
+        """The EXIF "taken at" day as ``YYYY-MM-DD`` (day precision only)."""
         return await asyncio.to_thread(_extract_exif_date_sync, data)
 
     async def _read_dims(self, path: pathlib.Path) -> tuple[int, int]:
