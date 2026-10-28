@@ -104,6 +104,7 @@ from ..domain.federation_capabilities import FederationCapability
 from ..domain.mention import Mention, MentionType
 from ..domain.notification import (
     GROUP_QUIET_DAYS,
+    HOUSEHOLD_FEED_ID,
     Notification,
     NotificationActor,
     NotificationObject,
@@ -137,11 +138,13 @@ from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .notification_links import (
     HOUSEHOLD_CALENDAR_LINK,
+    HOUSEHOLD_FEED_LINK,
     bazaar_listing_link,
     household_post_link,
     link_target,
     space_about_link,
     space_calendar_link,
+    space_feed_link,
     space_members_link,
     space_moderation_link,
     space_post_link,
@@ -899,7 +902,9 @@ class NotificationService(ProtectionGateMixin):
     async def on_post_created(self, event: PostCreated) -> None:
         """Every active household member except the author gets an in-app
         row — the household feed is "Everything" (D5): no push for a plain
-        new post."""
+        new post. The rows group on the feed, not the post
+        (``feed:household``): a burst of posts is one row that counts them
+        and names who posted, and it opens the feed (``/feed``)."""
         author_id = event.post.author
         users = await self._users.list_active()
         author = await self._users.get_by_user_id(author_id)
@@ -918,9 +923,11 @@ class NotificationService(ProtectionGateMixin):
                         fallback="{author} posted",
                         author=name or self._someone(self._locale(user)),
                     ),
-                    link_url=household_post_link(event.post.id),
+                    link_url=HOUSEHOLD_FEED_LINK,
                 ),
-                about=NotificationSubject.of(NotificationObject.POST, event.post.id),
+                about=NotificationSubject.of(
+                    NotificationObject.FEED, HOUSEHOLD_FEED_ID
+                ),
                 actor_user_id=author_id,
                 actor_name=name,
                 withheld=blocked,
@@ -1797,6 +1804,11 @@ class NotificationService(ProtectionGateMixin):
         """Notify space members (except the author). Space name is included
         in the title for context. Body is omitted per §25.3.
 
+        The plain "new post" row groups on the space's feed
+        (``space_feed:<space_id>``, opening ``/spaces/<id>``): a burst of
+        posts is one row that counts them and names who posted (D5). A
+        mention or an ``@here`` stays about the post itself.
+
         See :meth:`_notify_space_members` for how the per-member
         :table:`space_notif_prefs` level and ``event.mentions`` combine.
 
@@ -1813,6 +1825,7 @@ class NotificationService(ProtectionGateMixin):
             mentions=event.mentions,
             link=space_post_link(event.space_id, event.post.id),
             post_id=event.post.id,
+            generic_feed=True,
             generic_type="space_post_created",
             generic_key="notification.space.post.created",
             generic_fallback="{author} posted in {space_name}",
@@ -1829,6 +1842,7 @@ class NotificationService(ProtectionGateMixin):
         link: str,
         post_id: str,
         comment_id: str | None = None,
+        generic_feed: bool = False,
         generic_type: str | None,
         generic_key: str,
         generic_fallback: str,
@@ -1873,6 +1887,8 @@ class NotificationService(ProtectionGateMixin):
         ``link`` is the post (and comment) every row of this fan-out opens.
         Every row is about the post (``post_id``) — a mention in a comment
         about that comment (``comment_id``), so deleting it drops the row.
+        ``generic_feed`` (a new post): the generic row is about the space's
+        feed instead and opens it — one row for a burst of posts (D5).
         """
         space = await self._spaces.get(space_id)
         if space is None:
@@ -1909,6 +1925,19 @@ class NotificationService(ProtectionGateMixin):
             if comment_id
             else post_about
         )
+        generic_about, generic_link = (
+            (
+                NotificationSubject.of(
+                    NotificationObject.SPACE_FEED,
+                    space_id,
+                    space_id=space_id,
+                    space_name=space.name,
+                ),
+                space_feed_link(space_id),
+            )
+            if generic_feed
+            else (post_about, link)
+        )
         is_comment = comment_id is not None and generic_type is not None
         members = await self._spaces.list_members(space_id)
         blocked = await self._withheld_from(author_id)
@@ -1929,6 +1958,7 @@ class NotificationService(ProtectionGateMixin):
                 else None
             )
             push = True
+            about, row_link = post_about, link
             if member.user_id in mentioned:
                 ntype, key, fallback = "space_mention", mention_key, mention_fallback
             elif reply is not None:
@@ -1944,6 +1974,7 @@ class NotificationService(ProtectionGateMixin):
                 or (is_comment and member.user_id in commenter_ids)
             ):
                 ntype, key, fallback = generic_type, generic_key, generic_fallback
+                about, row_link = generic_about, generic_link
                 push = False  # activity: in the app, never a buzz (D5, D6)
             else:
                 continue
@@ -1959,9 +1990,9 @@ class NotificationService(ProtectionGateMixin):
                         author=name or self._someone(self._locale(recipient)),
                         space_name=space.name,
                     ),
-                    link_url=link,
+                    link_url=row_link,
                 ),
-                about=mention_about if ntype == "space_mention" else post_about,
+                about=mention_about if ntype == "space_mention" else about,
                 actor_user_id=author_id,
                 actor_name=name,
                 withheld=blocked,

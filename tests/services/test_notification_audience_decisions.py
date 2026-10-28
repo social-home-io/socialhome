@@ -40,7 +40,9 @@ from socialhome.domain.events import (
     DmMessageCreated,
     NotificationCreated,
     PostCreated,
+    PostDeleted,
     PostReactionChanged,
+    SpaceMemberLeft,
     SpacePostCreated,
 )
 from socialhome.domain.mention import Mention, MentionType
@@ -619,3 +621,132 @@ async def test_an_event_added_to_your_personal_calendar_pushes_you(s):
     )
     assert [t for t, _ in await _rows(s, bob)] == ["calendar_event_created"]
     assert s.push.to(bob) == ["Anna added an event to your calendar"]
+
+
+# ── D5: new posts group into one row per feed ─────────────────────────
+
+
+async def _burst(s, sid: str | None, authors, count: int, *, start: int = 0):
+    """*count* posts round-robin by *authors* — in space *sid*, or the
+    household feed for ``None``."""
+    for i in range(start, start + count):
+        post = _post(authors[i % len(authors)], f"p{i}")
+        if sid is None:
+            await s.bus.publish(PostCreated(post=post))
+        else:
+            await s.bus.publish(SpacePostCreated(post=post, space_id=sid))
+
+
+async def _feed_rows(s, user, ntype: str):
+    return [n for n in await s.notifs.list(user.user_id, limit=50) if n.type == ntype]
+
+
+@pytest.mark.parametrize(
+    ("sid", "ntype", "key", "link"),
+    [
+        ("home", "space_post_created", "space_feed:home", "/spaces/home"),
+        (None, "post_created", "feed:household", "/feed"),
+    ],
+)
+async def test_d5_grouping_burst_of_25_posts_from_5_authors_is_one_row(
+    s, sid, ntype, key, link
+):
+    bob = await s.user("bob")
+    authors = [await s.user(n) for n in ("anna", "ben", "cleo", "dan", "eve")]
+    if sid is not None:
+        await _space(s, sid, "household", {u: "member" for u in (bob, *authors)})
+    await _burst(s, sid, authors, 25)
+    [row] = await _feed_rows(s, bob, ntype)
+    assert (row.object_key, row.link_url) == (key, link)
+    p = row.params
+    assert (p.new, p.total, p.actor_count) == (25, 25, 5)
+    # Newest first: p24 was Eve's, p23 Dan's …
+    assert [a.name for a in p.actors] == ["Eve", "Dan", "Cleo", "Ben", "Anna"]
+    assert p.space_name == ("Home" if sid else None)
+    assert row.read_at is None
+    assert await s.notifs.count_unread(bob.user_id) == 1
+    assert s.push.to(bob) == []  # "Everything" is in the app, never a buzz
+
+
+async def test_d5_grouping_read_then_next_post_reopens_with_new_1(s):
+    bob, anna, ben = await s.user("bob"), await s.user("anna"), await s.user("ben")
+    await _space(s, "home", "household", {bob: "member", anna: "member", ben: "member"})
+    await _burst(s, "home", [anna, ben], 4)
+    [row] = await _feed_rows(s, bob, "space_post_created")
+    await s.notifs.mark_read(row.id, bob.user_id)
+    await _burst(s, "home", [ben], 1, start=4)
+    [again] = await _feed_rows(s, bob, "space_post_created")
+    assert again.id == row.id and again.read_at is None
+    assert (again.params.new, again.params.total) == (1, 5)
+    assert [a.name for a in again.params.actors] == ["Ben"]
+    assert again.params.actor_count == 1
+
+
+async def test_d5_grouping_seven_quiet_days_start_a_fresh_row(s):
+    bob, anna = await s.user("bob"), await s.user("anna")
+    await _space(s, "home", "household", {bob: "member", anna: "member"})
+    await _burst(s, "home", [anna], 3)
+    [old] = await _feed_rows(s, bob, "space_post_created")
+    await s.db.enqueue(
+        "UPDATE notifications SET created_at=? WHERE id=?",
+        (_ago(8 * 86400).isoformat(), old.id),
+    )
+    await _burst(s, "home", [anna], 1, start=3)
+    rows = await _feed_rows(s, bob, "space_post_created")
+    assert len(rows) == 2
+    fresh = next(n for n in rows if n.id != old.id)
+    assert (fresh.params.new, fresh.params.total) == (1, 1)
+
+
+@pytest.mark.parametrize(("sid", "page"), [("home", "/spaces/home"), (None, "/feed")])
+async def test_d5_grouping_visiting_the_feed_clears_the_row(s, sid, page):
+    bob, anna = await s.user("bob"), await s.user("anna")
+    if sid is not None:
+        await _space(s, sid, "household", {bob: "member", anna: "member"})
+    await _burst(s, sid, [anna], 3)
+    assert await s.notifs.count_unread(bob.user_id) == 1
+    # What the SPA sends once the feed list renders (markSeen).
+    assert await s.svc.mark_read_by_links(bob.user_id, [page]) == 1
+    assert await s.notifs.count_unread(bob.user_id) == 0
+
+
+async def test_d5_grouping_opening_one_post_leaves_the_feed_row(s):
+    """A post's own page is not the feed: it leaves the grouped row."""
+    bob, anna = await s.user("bob"), await s.user("anna")
+    await _space(s, "home", "household", {bob: "member", anna: "member"})
+    await _burst(s, "home", [anna], 2)
+    assert await s.svc.mark_read_by_links(bob.user_id, ["/spaces/home?post=p0"]) == 0
+    assert await s.notifs.count_unread(bob.user_id) == 1
+
+
+@pytest.mark.parametrize("sid", ["home", None])
+async def test_d5_grouping_deleting_one_post_keeps_the_row(s, sid):
+    bob, anna = await s.user("bob"), await s.user("anna")
+    if sid is not None:
+        await _space(s, sid, "household", {bob: "member", anna: "member"})
+    await _burst(s, sid, [anna], 3)
+    await s.bus.publish(PostDeleted(post_id="p1", space_id=sid))
+    [row] = await _feed_rows(s, bob, "space_post_created" if sid else "post_created")
+    assert row.params.total == 3
+    assert await s.notifs.count_unread(bob.user_id) == 1
+
+
+async def test_d5_grouping_leaving_the_space_removes_the_row(s):
+    bob, anna = await s.user("bob"), await s.user("anna")
+    await _space(s, "home", "household", {bob: "member", anna: "member"})
+    await _burst(s, "home", [anna], 3)
+    await s.bus.publish(SpaceMemberLeft(space_id="home", user_id=bob.user_id))
+    assert await _feed_rows(s, bob, "space_post_created") == []
+
+
+async def test_d5_grouping_a_mention_stays_about_the_post(s):
+    bob, anna = await s.user("bob"), await s.user("anna")
+    await _space(s, "home", "household", {bob: "member", anna: "member"})
+    await s.bus.publish(
+        SpacePostCreated(
+            post=_post(anna, "p9"), space_id="home", mentions=(_mention(bob),)
+        )
+    )
+    [row] = await s.notifs.list(bob.user_id)
+    assert row.type == "space_mention"
+    assert (row.object_key, row.link_url) == ("space_post:p9", "/spaces/home?post=p9")
