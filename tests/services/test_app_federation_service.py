@@ -1155,8 +1155,8 @@ async def test_household_fanout_skips_recipients_who_blocked_the_initiator():
 
 
 @pytest.mark.asyncio
-async def test_inbound_binary_always_broadcasts():
-    """Binary path carries no to_user → broadcast-all even with multiple users."""
+async def test_inbound_binary_frame_without_people_broadcasts():
+    """A binary frame naming nobody (older sender) → household fan-out."""
     app = _make_installed_app("chess")
     users = [_make_user("u1", "alice"), _make_user("u2", "bob")]
     svc, _, ws = _make_svc(apps={"chess": app}, users=users)
@@ -1166,6 +1166,50 @@ async def test_inbound_binary_always_broadcasts():
     assert ws.user_calls == []
     assert len(ws.calls) == 1
     assert set(ws.calls[0]["user_ids"]) == {"u1", "u2"}
+
+
+@pytest.mark.asyncio
+async def test_inbound_binary_frame_goes_to_the_addressed_person_and_names_the_sender():
+    """A binary move naming both people is routed and labelled like JSON."""
+    app = _make_installed_app("chess")
+    users = [_make_user("u1", "alice"), _make_user("u2", "bob")]
+    svc, _, ws = _make_svc(
+        apps={"chess": app},
+        users=users,
+        remote_users=[_make_remote_user(remote_username="remote-alice")],
+    )
+
+    await svc.on_inbound_message(
+        "peer-inst-id",
+        "chess",
+        "sess-bin",
+        {"move": "d5"},
+        to_user="bob",
+        from_user="remote-alice",
+    )
+
+    assert ws.calls == []
+    [call] = ws.user_calls
+    assert call["user_id"] == "u2"
+    assert call["payload"]["kind"] == "message"
+    assert call["payload"]["from_user"] == "remote-alice"
+
+
+@pytest.mark.asyncio
+async def test_inbound_binary_frame_from_an_unknown_sender_is_refused():
+    """A binary frame addressed to a person must name a known sender."""
+    app = _make_installed_app("chess")
+    svc, _, ws = _make_svc(
+        apps={"chess": app},
+        users=[_make_user("u2", "bob")],
+        remote_users=[_make_remote_user(remote_username="remote-alice")],
+    )
+
+    await svc.on_inbound_message(
+        "peer-inst-id", "chess", "s", {}, to_user="bob", from_user="mallory"
+    )
+
+    assert ws.calls == [] and ws.user_calls == []
 
 
 # ─── Target authorization (Task 6 — item C) ──────────────────────────────────

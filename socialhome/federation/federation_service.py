@@ -1049,10 +1049,10 @@ class FederationService:
         2. Validate ``app_aead_suite`` against the supported set — no
            default fallback (CLAUDE.md crypto-suite rule).
         3. Decrypt the app payload under the directional receive key.
-        4. Extract ``app_id`` and ``session_id`` from the validated
-           envelope metadata.
-        5. Hand ``(instance_id, app_id, session_id, decoded_payload)``
-           to :meth:`AppFederationService.on_inbound_message`.
+        4. Extract ``app_id``, ``session_id`` and the optional per-user
+           ``to_user`` / ``from_user`` from the validated envelope metadata.
+        5. Hand ``(instance_id, app_id, session_id, decoded_payload)`` plus
+           the routing to :meth:`AppFederationService.on_inbound_message`.
 
         Raises :class:`ValueError` (or
         :class:`~socialhome.federation.app_framing.UnsupportedAppAeadSuite`)
@@ -1099,11 +1099,15 @@ class FederationService:
             raise ValueError(
                 f"app frame missing app_id or session_id: {meta!r}",
             )
+        to_user = meta.get("to_user")
+        from_user = meta.get("from_user")
         await self._app_fed.on_inbound_message(
             instance_id,
             app_id,
             session_id,
             decoded_payload,
+            to_user=to_user if isinstance(to_user, str) and to_user else None,
+            from_user=from_user if isinstance(from_user, str) and from_user else None,
         )
 
     def set_ice_servers(self, servers: list[dict]) -> None:
@@ -2411,19 +2415,18 @@ class FederationService:
         envelope field; both paths place it inside the AES-256-GCM-sealed
         layer.
 
-        ``to_user`` / ``from_user`` are plaintext *routing* fields (a local
-        username on each side, never a name/PII) that let the receiver route
-        the message to the addressed person instead of fanning out to every
-        local user. They ride **only** the JSON ``APP_MESSAGE`` event path:
-        the binary ``fed-app-v1`` frame format (v1) carries no routing slot,
-        so a binary send stays household-scoped and the receiver disambiguates
-        by ``session_id`` (a non-party local user's app ignores an unknown
-        session — harmless). Adding routing to the binary fast path is a
-        deliberate v2 concern (a new frame field would break the signed-bytes
-        contract), so when ``to_user`` is set this method MUST still allow the
-        binary path to run — the JSON fallback only carries it when the binary
-        send doesn't land. APP_SESSION (the challenge/invite that drives
-        notifications) is always JSON and IS per-user routed by the caller.
+        ``to_user`` / ``from_user`` are *routing* fields (a local username on
+        each side, never a name/PII) that let the receiver deliver the message
+        to the addressed person, and tell the app who sent it, instead of
+        fanning out to every local user. Both paths carry them inside the
+        sealed, signed layer: the JSON ``APP_MESSAGE`` payload, or the binary
+        frame's envelope metadata (beside ``app_id`` / ``session_id``; the
+        frame layout is unchanged). A receiver that predates them on the
+        binary path reads the metadata with ``.get`` and ignores them — it
+        keeps the household fan-out it always did, so no capability gate is
+        needed beyond the caller's v_18 gate on supplying them at all.
+        APP_SESSION (the challenge/invite that drives notifications) is always
+        JSON and IS per-user routed by the caller.
         """
         instance = await self._federation_repo.get_instance(to_instance_id)
         if (
@@ -2441,6 +2444,8 @@ class FederationService:
                 app_id=app_id,
                 session_id=session_id,
                 payload=payload,
+                to_user=to_user,
+                from_user=from_user,
             )
             if result is not None:
                 return result
@@ -2451,8 +2456,7 @@ class FederationService:
             "session_id": session_id,
             "data": payload,
         }
-        # Per-user routing fields are plaintext (usernames only) and ride the
-        # JSON path exclusively — the binary frame format has no routing slot.
+        # Per-user routing fields (usernames only), sealed with the payload.
         if to_user is not None:
             event_payload["to_user"] = to_user
         if from_user is not None:
@@ -2470,6 +2474,8 @@ class FederationService:
         app_id: str,
         session_id: str,
         payload: dict,
+        to_user: str | None = None,
+        from_user: str | None = None,
     ) -> DeliveryResult | None:
         """Build + sign the app envelope and ship it as a binary frame.
 
@@ -2505,6 +2511,11 @@ class FederationService:
             # splicing payload_2 under header_1 (signature covers the hash).
             "payload_sha256": payload_sha256,
         }
+        # Per-user routing (v_18+ callers), sealed + signed with the rest.
+        if to_user is not None:
+            metadata["to_user"] = to_user
+        if from_user is not None:
+            metadata["from_user"] = from_user
         encrypted_payload = self._encrypt_payload(_dumps(metadata), session_key)
         msg_id = str(uuid.uuid4())
         timestamp = datetime.now(UTC).isoformat()

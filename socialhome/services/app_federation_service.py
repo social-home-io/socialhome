@@ -26,11 +26,11 @@ remote open sends an ``APP_SESSION`` event and a remote message goes via
 (gated on :data:`FederationCapability.MIN_FOR_APP_USER_ROUTING`) so the peer
 can route to the addressed person.
 
-Inbound routing: when an inbound JSON event carries a non-empty ``to_user``
-that resolves to a local user, :meth:`_deliver` delivers only to that user;
-otherwise (legacy/empty/unresolvable, and the binary ``fed-app-v1`` path which
-carries no routing slot in v1) it falls back to the household fan-out and the
-app's ``session_id`` scopes the semantics for the SPA.
+Inbound routing: when an inbound JSON event or binary ``fed-app-v1`` frame
+carries a non-empty ``to_user``, :meth:`_deliver` delivers only to that local
+user (and names the sender as ``from_user`` on the frame); without one (an
+older sender) it falls back to the household fan-out and the app's
+``session_id`` scopes the semantics for the SPA.
 
 Game invites: an open addressed to one person is kept for them
 (``app_pending_sessions``, local and remote opens alike) until the app takes
@@ -397,10 +397,9 @@ class AppFederationService:
 
         Per-user routing (``to_user`` / ``from_user``) is gated on
         :data:`FederationCapability.MIN_FOR_APP_USER_ROUTING` (v_18) and rides
-        the JSON ``APP_MESSAGE`` path only — the binary fast-path frame format
-        (v1) has no routing slot, so a binary send stays household-scoped and
-        the receiver disambiguates by ``session_id`` (documented v1
-        limitation; see :meth:`FederationService.send_app_message`).
+        both paths, sealed: the JSON ``APP_MESSAGE`` payload or the binary
+        frame's envelope metadata (see
+        :meth:`FederationService.send_app_message`).
         """
         await self._require_enabled(app_id)
         await self._assert_age_allowed(app_id, actor_user_id)
@@ -527,22 +526,27 @@ class AppFederationService:
         app_id: str,
         session_id: str,
         payload: dict,
+        *,
+        to_user: str | None = None,
+        from_user: str | None = None,
     ) -> None:
         """Handle an inbound binary app frame from ``fed-app-v1``.
 
         Called by :meth:`FederationService._app_inbound_handler` after the
         §24.11 pipeline validates the envelope and the payload is decrypted.
+        ``to_user`` / ``from_user`` come from the frame's sealed metadata
+        (v_18+ senders); routed exactly like the JSON ``APP_MESSAGE``. A
+        frame without them (an older sender) keeps the household fan-out and
+        the app disambiguates by ``session_id``.
         """
-        # The binary ``fed-app-v1`` frame format (v1) carries no ``to_user``
-        # routing slot, so binary inbound always uses the household fan-out;
-        # the receiver disambiguates by ``session_id``.
         await self._deliver(
             app_id,
             session_id,
             from_instance=instance_id,
             payload=payload,
             kind="message",
-            to_user=None,
+            to_user=to_user or None,
+            from_user=from_user or None,
         )
 
     # ─── Internal helpers ─────────────────────────────────────────────────────
@@ -941,8 +945,8 @@ class AppFederationService:
             return
 
         # Recipients who blocked the named initiator never get the frame
-        # (same rule as the per-user path). An unnamed initiator (binary
-        # frames carry no routing slot) can't be checked.
+        # (same rule as the per-user path). An unnamed initiator (an older
+        # sender) can't be checked.
         initiator = await self._resolve_remote_initiator(from_instance, from_user)
         if initiator is not None:
             # A named, known sender rides the frame (see the per-user path);

@@ -1360,9 +1360,10 @@ bridges between the federation layer and the SPA:
   `AppContactNotFoundError`, HTTP 403) — the send cannot address anyone
   outside this roster.
 - **Inbound delivery** (both paths): after §24.11 validation and decryption,
-  `_deliver` routes to the addressed user (v_18+ JSON path) or fans the
-  `app.message` WS frame to every local user (legacy / binary path). The
-  binary `fed-app-v1` frame format (v1) carries no routing slot.
+  `_deliver` routes to the addressed user and names the sender (`from_user`)
+  on the `app.message` WS frame (v_18+; the JSON payload or, on the binary
+  `fed-app-v1` path, the frame's sealed envelope metadata), or fans the frame
+  to every local user when an older sender names nobody.
 - **REST:** `GET /api/apps/{app_id}/peers`, `GET /api/apps/{app_id}/contacts`,
   `POST /api/apps/{app_id}/sessions`, `POST /api/apps/{app_id}/messages`.
 
