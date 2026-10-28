@@ -71,8 +71,6 @@ from ..domain.events import (
     CommentAdded,
     CommentDeleted,
     CommentUpdated,
-    DmContactRequestAnswered,
-    DmContactRequested,
     DmConversationCreated,
     DmMessageCreated,
     DmMessageDeleted,
@@ -130,6 +128,7 @@ from ..domain.mention import Mention, MentionType
 from ..domain.notification import (
     GROUP_QUIET_DAYS,
     HOUSEHOLD_FEED_ID,
+    RETIRED_ACTION_TYPES,
     Notification,
     NotificationActor,
     NotificationHandled,
@@ -413,7 +412,6 @@ _PUSH_AS_IS: frozenset[str] = frozenset(
         "poll_result",
         "poll_scheduled",
         "report_answer",
-        "dm_contact_requested",
         "app_challenge",
         "bazaar_bid_placed",
         "bazaar_offer_accepted",
@@ -620,7 +618,6 @@ class NotificationService(ProtectionGateMixin):
         "_bus",
         "_calendar_repo",
         "_child_protection",
-        "_contacts",
         "_convos",
         "_i18n",
         "_instances",
@@ -706,10 +703,8 @@ class NotificationService(ProtectionGateMixin):
         # Runs the handlers off the publisher's path — optional; without
         # it each handler runs inline in the publisher (still batched).
         self._worker: NotificationDeliveryWorker | None = None
-        # Contact requests and game invites — optional; "Needs you" checks
-        # a request to message you / a game invite still waits. Without
-        # them such a row stays pinned until it is answered.
-        self._contacts = None
+        # Game invites — optional; "Needs you" checks a game invite still
+        # waits. Without it such a row stays pinned until it is answered.
         self._apps = None
         # Space author profiles a GFS follower holds — optional; the last
         # place a space's author from a household this one never met is
@@ -742,10 +737,6 @@ class NotificationService(ProtectionGateMixin):
     def attach_pair_inbox(self, inbox) -> None:
         """Wire the auto-pair inbox (:meth:`pending_actions`)."""
         self._pair_inbox = inbox
-
-    def attach_contact_repo(self, contact_repo) -> None:
-        """Wire the DM contact requests (:meth:`pending_actions`)."""
-        self._contacts = contact_repo
 
     def attach_app_repo(self, app_repo) -> None:
         """Wire the app registry and its waiting game invites
@@ -1248,8 +1239,6 @@ class NotificationService(ProtectionGateMixin):
         self._subscribe(BazaarOfferAccepted, self.on_bazaar_offer_accepted)
         self._subscribe(BazaarOfferRejected, self.on_bazaar_offer_rejected)
         self._subscribe(BazaarListingExpired, self.on_bazaar_listing_expired)
-        self._subscribe(DmContactRequested, self.on_dm_contact_requested)
-        self._subscribe(DmContactRequestAnswered, self.on_dm_contact_answered)
         self._subscribe(CalendarEventCreated, self.on_calendar_event_created)
         self._subscribe(CalendarEventDeleted, self.on_calendar_event_deleted)
         self._subscribe(CalendarEventUpdated, self.on_calendar_event_updated)
@@ -2726,29 +2715,11 @@ class NotificationService(ProtectionGateMixin):
     async def _ended_as(self, note: Notification) -> str | None:
         """``None`` while *note*'s request still waits for its recipient,
         else how it ended (:data:`HANDLED_OUTCOMES`)."""
-        if note.type == "dm_contact_requested":
-            return await self._contact_ended_as(note)
+        if note.type in RETIRED_ACTION_TYPES:
+            return "done"
         if note.type == "app_challenge":
             return await self._challenge_ended_as(note)
         return None if await self._still_needs(note) else "done"
-
-    async def _contact_ended_as(self, note: Notification) -> str | None:
-        """A request to message you waits while one from that person is
-        pending and they are still someone this household knows."""
-        kind, _, requester = (note.object_key or "").partition(":")
-        if kind != NotificationObject.CONTACT or not requester:
-            return "done"
-        if self._contacts is None:
-            return None  # nothing to check against: keep it
-        latest = await self._contacts.latest_between(requester, note.user_id)
-        if latest is None:
-            return "done"
-        status = latest.get("status")
-        if status != "pending":
-            return status if status in ("accepted", "declined") else "done"
-        if await self._users.get_remote(requester) is None:
-            return "done"
-        return None
 
     async def _challenge_ended_as(self, note: Notification) -> str | None:
         """A game invite waits while its app is enabled here and the invite
@@ -2813,16 +2784,6 @@ class NotificationService(ProtectionGateMixin):
             return bool(await self._reports.count_pending_in_space(space_id))
         return False
 
-    async def on_dm_contact_answered(self, event: DmContactRequestAnswered) -> None:
-        """The recipient accepted or declined: their row about that person's
-        request leaves the section."""
-        await self._resolve(
-            object_key(NotificationObject.CONTACT, event.requester_user_id),
-            types=("dm_contact_requested",),
-            outcome="accepted" if event.accepted else "declined",
-            user_id=event.recipient_user_id,
-        )
-
     async def on_app_challenge_ended(self, event: AppChallengeEnded) -> None:
         """Game invites stopped waiting (the app took them in, a decline, a
         withdrawal): their rows leave the invitee's section."""
@@ -2835,29 +2796,6 @@ class NotificationService(ProtectionGateMixin):
                 outcome=event.outcome,
                 user_id=event.user_id,
             )
-
-    async def on_dm_contact_requested(self, event: DmContactRequested) -> None:
-        """A user wants to start a DM — notify the recipient + push."""
-        recipient = await self._local_user(event.recipient_user_id)
-        title = self._t(
-            "notification.dm.contact_requested",
-            locale=self._locale(recipient),
-            fallback="{name} wants to message you",
-            name=event.requester_display_name,
-        )
-        await self._save_notif(
-            new_notification(
-                user_id=event.recipient_user_id,
-                type="dm_contact_requested",
-                title=title,
-                link_url="/dms",
-            ),
-            about=NotificationSubject.of(
-                NotificationObject.CONTACT, event.requester_user_id
-            ),
-            actor_user_id=event.requester_user_id,
-            actor_name=event.requester_display_name,
-        )
 
     async def on_app_challenge_received(
         self,

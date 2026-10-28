@@ -579,7 +579,7 @@ async def test_inbound_reaction_from_a_blocked_sender_is_not_stored(env):
     )
 
 
-# ── Follow-ups: unread badges, contact requests, blobs after a restart ──
+# ── Follow-ups: unread badges, blobs after a restart ──
 
 
 async def test_withheld_group_message_is_not_counted_unread(env):
@@ -596,29 +596,6 @@ async def test_withheld_group_message_is_not_counted_unread(env):
     r = await env.get("/api/conversations", headers=_h("kid"))
     rows = {c["id"]: c for c in await r.json()}
     assert rows["g-krc"]["unread"] == 0
-
-
-async def test_contact_request_from_a_blocked_user_is_not_stored(env):
-    await _dispatch(
-        env._app,
-        FET.DM_CONTACT_REQUEST,
-        {
-            "requester_user_id": REX,
-            "requester_display_name": "Rex",
-            "recipient_user_id": "u-kid",
-        },
-    )
-    assert await env._db.fetchone("SELECT 1 FROM dm_contact_requests") is None
-    # Rows are written by the delivery worker, after the request returns:
-    # wait for it, or a "never notified" check passes on an empty table.
-    await env._app[notification_delivery_key].drain()
-    assert (
-        await env._db.fetchone(
-            "SELECT 1 FROM notifications WHERE user_id='u-kid'"
-            " AND type LIKE 'dm_contact%'"
-        )
-        is None
-    )
 
 
 def _forget_in_memory_state(app) -> None:

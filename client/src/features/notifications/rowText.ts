@@ -74,8 +74,6 @@ export const HOUSEHOLD_CHAT_LINK = '/?tab=chat'
  *   notifications.row.space_comment_added_many
  *   notifications.row.space_mention notifications.row.space_mention_many
  *   notifications.row.space_here notifications.row.space_here_many
- *   notifications.row.dm_contact_requested
- *   notifications.row.dm_contact_requested_many
  *   notifications.row.space_member_joined
  *   notifications.row.space_member_joined_many
  *   notifications.row.space_join_requested
@@ -145,7 +143,6 @@ export const ROW_TYPES: Readonly<Record<string, TypeSpec>> = {
   space_comment_added: {},
   space_mention: {},
   space_here: {},
-  dm_contact_requested: {},
   space_member_joined: {},
   space_join_requested: {},
   space_remote_invite_accepted: {},

@@ -21,12 +21,6 @@ vi.mock('@/ws', () => ({
   },
 }))
 
-const route = vi.hoisted(() => vi.fn())
-vi.mock('preact-iso', async (orig) => ({
-  ...(await orig<typeof import('preact-iso')>()),
-  useLocation: () => ({ route, path: '/notifications', url: '/notifications', query: {} }),
-}))
-
 vi.mock('@/store/auth', () => ({
   currentUser: { value: { user_id: 'me', username: 'me', display_name: 'Me', is_admin: true } },
 }))
@@ -214,22 +208,6 @@ describe('NeedsYouSection', () => {
     await act(async () => { review.click() })
     expect(onNavigate).toHaveBeenCalled()
     expect(r.container.querySelector('.sh-needs--compact')).not.toBeNull()
-  })
-
-  it('a request to message you offers Accept, which opens the chat, and Decline', async () => {
-    const req = row('c', {
-      type: 'dm_contact_requested',
-      object_key: 'contact:ru-ben',
-      space_id: null,
-      link_url: '/dms',
-      title: 'Ben wants to message you',
-    })
-    apiPost.mockResolvedValueOnce({ id: 'conv-1', type: 'dm' })
-    const { getByRole } = await mount([req])
-    expect(getByRole('button', { name: 'Decline' })).toBeTruthy()
-    await act(async () => { fireEvent.click(getByRole('button', { name: 'Accept' })) })
-    await waitFor(() => expect(route).toHaveBeenCalledWith('/dms/conv-1'))
-    expect(apiPost).toHaveBeenCalledWith('/api/conversations/contact-requests/ru-ben/accept')
   })
 
   it('a game invite offers Play (the app) and Decline', async () => {

@@ -16,7 +16,6 @@
   "notification.space.remote_invite.accepted": "{name} hat deine Einladung zu {space_name} angenommen",
   "notification.space.remote_invite.declined": "{name} hat deine Einladung zu {space_name} abgelehnt",
   "notification.dm.received": "Neue Nachricht von {sender}",
-  "notification.dm.contact_requested": "{name} möchte dir schreiben",
   "notification.calendar.event_created": "{author} hat einen Termin erstellt: {summary}",
   "notification.bazaar.bid_received": "Neues Gebot für dein Angebot",
   "notification.bazaar.bid_placed": "Neues Gebot für dein Angebot",

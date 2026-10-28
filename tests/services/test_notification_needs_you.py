@@ -24,8 +24,6 @@ from socialhome.domain.events import (
     AppChallengeReceived,
     AutoPairRequestAnswered,
     AutoPairRequestIncoming,
-    DmContactRequestAnswered,
-    DmContactRequested,
     NotificationReadChanged,
     RemoteJoinRequestApproved,
     RemoteJoinRequestDenied,
@@ -46,11 +44,9 @@ from socialhome.domain.space import (
     SpaceRole,
     SpaceType,
 )
-from socialhome.domain.user import RemoteUser
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.app_repo import SqliteAppRepo
-from socialhome.repositories.dm_contact_repo import SqliteDmContactRepo
 from socialhome.repositories.notification_repo import (
     SqliteNotificationRepo,
     new_notification,
@@ -698,79 +694,34 @@ async def test_a_remote_answer_for_no_request_of_ours_is_ignored(env):
     assert await env.notifs.list(kim.user_id, limit=10) == []
 
 
-# ── Someone asking to message you ─────────────────────────────────────
+# ── A request to message you, from before direct chats needed none ──
 
 
-async def _remote_ben(env) -> str:
-    await env.db.enqueue(
-        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
-        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
-        " local_inbox_id, status, source) VALUES('peer-b', 'B', ?, 'k1',"
-        " 'k2', 'https://peer-b/wh', 'wh-peer-b', 'confirmed', 'manual')",
-        ("00" * 32,),
-    )
-    await SqliteUserRepo(env.db).upsert_remote(
-        RemoteUser(
-            user_id="ru-ben",
-            instance_id="peer-b",
-            remote_username="ben",
-            display_name="Ben",
-        )
-    )
-    return "ru-ben"
-
-
-async def _contact_env(env):
+async def test_an_old_request_to_message_you_resolves_and_keeps_its_title(env):
+    """1:1s between paired households need no request, so nothing makes a
+    ``dm_contact_requested`` row any more. One kept from an older build
+    still reads from its stored title and leaves "Needs you" on the next
+    look — never pinned forever."""
     anna = await env.user("anna")
-    ben = await _remote_ben(env)
-    contacts = SqliteDmContactRepo(env.db)
-    env.svc.attach_contact_repo(contacts)
-    await contacts.save_request(from_user_id=ben, to_user_id=anna.user_id)
-    await env.bus.publish(
-        DmContactRequested(
-            requester_user_id=ben,
-            requester_display_name="Ben",
-            recipient_user_id=anna.user_id,
-        )
+    old = new_notification(
+        user_id=anna.user_id,
+        type="dm_contact_requested",
+        title="Ben would like to message you",
+        link_url="/dms",
     )
-    return anna, ben, contacts
-
-
-async def test_a_contact_request_is_pinned_until_answered(env):
-    anna, ben, _ = await _contact_env(env)
-    (row,) = await _rows(env, anna.user_id, "dm_contact_requested")
-    assert row.object_key == object_key(NotificationObject.CONTACT, ben)
-    await env.notifs.mark_all_read(anna.user_id)
-    (pending,) = await env.svc.pending_actions(anna.user_id)
-    assert pending.id == row.id
-
-    env.read_changed.clear()
-    await env.bus.publish(
-        DmContactRequestAnswered(
-            requester_user_id=ben, recipient_user_id=anna.user_id, accepted=True
-        )
+    await env.svc._save_notif(
+        old,
+        about=SimpleNamespace(
+            object_key="contact:ru-ben", space_id=None, space_name=None
+        ),
     )
     (row,) = await _rows(env, anna.user_id, "dm_contact_requested")
-    assert row.params.handled.outcome == "accepted"
-    assert row.params.handled.by is None
-    assert env.read_changed[-1].handled == (row.object_key,)
-    assert await env.svc.pending_actions(anna.user_id) == []
-
-
-async def test_a_contact_request_answered_elsewhere_resolves_on_the_next_look(env):
-    anna, ben, contacts = await _contact_env(env)
-    await contacts.answer_pending(ben, anna.user_id, "declined")
-    assert await env.svc.pending_actions(anna.user_id) == []
-    (row,) = await _rows(env, anna.user_id, "dm_contact_requested")
-    assert row.params.handled.outcome == "declined"
-
-
-async def test_a_contact_request_from_someone_gone_is_not_pending(env):
-    anna, _, _ = await _contact_env(env)
-    await env.db.enqueue("DELETE FROM remote_users WHERE user_id='ru-ben'")
+    assert row.is_pending_action
     assert await env.svc.pending_actions(anna.user_id) == []
     (row,) = await _rows(env, anna.user_id, "dm_contact_requested")
     assert row.params.handled.outcome == "done"
+    assert row.is_read
+    assert row.title == "Ben would like to message you"
 
 
 # ── Game invites ──────────────────────────────────────────────────────

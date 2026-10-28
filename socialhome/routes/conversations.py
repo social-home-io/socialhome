@@ -10,7 +10,6 @@ from aiohttp import web
 
 from ..app_keys import (
     conversation_repo_key,
-    dm_contact_service_key,
     dm_service_key,
     federation_repo_key,
     media_signer_key,
@@ -219,32 +218,6 @@ class ConversationDmView(BaseView):
             other_user_id=user_id,
         )
         return web.json_response({"id": conv.id, "type": conv.type.value}, status=201)
-
-
-class ContactRequestAcceptView(BaseView):
-    """POST /api/conversations/contact-requests/{user_id}/accept — accept
-    the request of ``user_id`` (a person on a paired household) to message
-    you: opens (or finds) the 1:1 with them and answers every pending
-    request from them. ``{id, type}`` of the chat."""
-
-    async def post(self) -> web.Response:
-        conv = await self.svc(dm_contact_service_key).accept(
-            username=self.user.username,
-            requester_user_id=self.match("user_id"),
-        )
-        return self._json({"id": conv.id, "type": conv.type.value})
-
-
-class ContactRequestDeclineView(BaseView):
-    """POST /api/conversations/contact-requests/{user_id}/decline — decline
-    it. Silent: the requester's household is not told."""
-
-    async def post(self) -> web.Response:
-        await self.svc(dm_contact_service_key).decline(
-            username=self.user.username,
-            requester_user_id=self.match("user_id"),
-        )
-        return self._json({"ok": True})
 
 
 def _str_list(value: object) -> list[str]:

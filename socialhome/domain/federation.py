@@ -389,9 +389,8 @@ class FederationEventType(str, enum.Enum):
     #: v_37 — a member household tells the authority that one of its own
     #: seated users left; the authority answers with a new roster.
     DM_GROUP_LEAVE = "dm_group_leave"
-    DM_CONTACT_REQUEST = "dm_contact_request"
-    DM_CONTACT_ACCEPTED = "dm_contact_accepted"
-    DM_CONTACT_DECLINED = "dm_contact_declined"
+    # Retired, never reuse: ``dm_contact_request`` / ``_accepted`` /
+    # ``_declined`` — a 1:1 between paired households needs no request.
     DM_HISTORY_REQUEST = "dm_history_request"
     DM_HISTORY_CHUNK = "dm_history_chunk"
     DM_HISTORY_CHUNK_ACK = "dm_history_chunk_ack"

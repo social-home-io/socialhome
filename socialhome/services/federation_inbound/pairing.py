@@ -24,7 +24,6 @@ from typing import TYPE_CHECKING
 
 from ...crypto import derive_instance_id
 from ...domain.events import (
-    DmContactRequested,
     PairingAborted,
     PairingAcceptReceived,
     PairingIntroReceived,
@@ -40,36 +39,25 @@ from ...domain.federation import (
 from ...federation.pairing_gfs_reach import verified_peer_keywrap
 from ...infrastructure.event_bus import EventBus
 from ...peer_url import InvalidPeerUrlError, validate_peer_url
-from ..protection_gate import ProtectionGateMixin
 
 if TYPE_CHECKING:
     from ...domain.federation import FederationEvent, PairingSession, RemoteInstance
     from ...federation.federation_service import FederationService
-    from ...repositories.dm_contact_repo import AbstractDmContactRepo
     from ...repositories.federation_repo import AbstractFederationRepo
-    from ...repositories.user_repo import AbstractUserRepo
     from ..peer_unpair_service import PeerUnpairService
 
 log = logging.getLogger(__name__)
 
 
-class PairingInboundHandlers(ProtectionGateMixin):
-    """Six pairing-lifecycle inbound handlers registered on one federation
-    service. (Five pairing events + the ``DM_CONTACT_REQUEST`` pre-pairing
-    handshake, which lives in the same family.)
-
-    A contact request from someone a guardian block (§CP.F2) separates from
-    its recipient is not stored.
-    """
+class PairingInboundHandlers:
+    """The pairing-lifecycle inbound handlers, registered on one
+    federation service."""
 
     __slots__ = (
         "_bus",
-        "_child_protection",
-        "_dm_contact_repo",
         "_federation",
         "_peer_unpair",
         "_repo",
-        "_user_repo",
     )
 
     def __init__(
@@ -78,17 +66,10 @@ class PairingInboundHandlers(ProtectionGateMixin):
         bus: EventBus,
         federation_repo: AbstractFederationRepo,
         peer_unpair: PeerUnpairService,
-        dm_contact_repo: AbstractDmContactRepo | None = None,
-        user_repo: AbstractUserRepo | None = None,
     ) -> None:
         self._bus = bus
         self._repo = federation_repo
         self._peer_unpair = peer_unpair
-        self._dm_contact_repo = dm_contact_repo
-        #: Binds a contact request's requester to the sending household.
-        #: Without it no request is accepted (fail closed).
-        self._user_repo = user_repo
-        self._child_protection = None
         #: Set by :meth:`attach_to` — records a mesh-only member's claim.
         self._federation: FederationService | None = None
 
@@ -106,11 +87,6 @@ class PairingInboundHandlers(ProtectionGateMixin):
             FederationEventType.INSTANCE_CAPABILITIES_UPDATED,
             self._on_capabilities_updated,
         )
-        if self._dm_contact_repo is not None:
-            registry.register(
-                FederationEventType.DM_CONTACT_REQUEST,
-                self._on_contact_request,
-            )
 
     async def _on_intro(self, event: FederationEvent) -> None:
         """Target side of §11.9: a peer introduced us to a new instance."""
@@ -444,74 +420,6 @@ class PairingInboundHandlers(ProtectionGateMixin):
             return None
         marker = payload.get("gfs_relay")
         return marker if isinstance(marker, bool) else None
-
-    async def _on_contact_request(self, event: FederationEvent) -> None:
-        """§23.47: pre-pairing DM handshake — a remote user wants to start
-        a conversation with a local user they haven't exchanged keys with
-        yet. Persist a pending row + publish :class:`DmContactRequested`
-        so :class:`NotificationService` can notify the recipient.
-        """
-        if self._dm_contact_repo is None:
-            return
-        p = event.payload
-        requester_user_id = str(
-            p.get("requester_user_id") or p.get("from_user_id") or "",
-        )
-        recipient_user_id = str(
-            p.get("recipient_user_id") or p.get("to_user_id") or "",
-        )
-        raw_name = p.get("requester_display_name")
-        requester_display_name = (
-            _clean_display_name(raw_name) if isinstance(raw_name, str) else ""
-        ) or requester_user_id
-        if not requester_user_id or not recipient_user_id:
-            log.debug("DM_CONTACT_REQUEST missing requester/recipient user id")
-            return
-        # The requester is the sending household's own user — never a local
-        # member, another household's user, or an id we can't place.
-        if (
-            self._user_repo is None
-            or await self._user_repo.get_instance_for_user(requester_user_id)
-            != event.from_instance
-        ):
-            log.warning(
-                "DM_CONTACT_REQUEST from %s refused: requester %s is not homed there",
-                event.from_instance,
-                requester_user_id,
-            )
-            return
-        if await self._guardian_blocked(recipient_user_id, requester_user_id):
-            log.warning(
-                "DM_CONTACT_REQUEST from %s refused: guardian block (%s → %s)",
-                event.from_instance,
-                requester_user_id,
-                recipient_user_id,
-            )
-            return
-        try:
-            await self._dm_contact_repo.save_request(
-                from_user_id=requester_user_id,
-                to_user_id=recipient_user_id,
-            )
-        except Exception as exc:  # pragma: no cover
-            # The recipient's local user row may not exist yet — schema has
-            # an FK to users.user_id. Log + drop rather than raise; the
-            # admin can see this via operator logs.
-            log.warning(
-                "DM_CONTACT_REQUEST persistence failed (%s → %s): %s",
-                requester_user_id,
-                recipient_user_id,
-                exc,
-                exc_info=True,
-            )
-            return
-        await self._bus.publish(
-            DmContactRequested(
-                requester_user_id=requester_user_id,
-                requester_display_name=requester_display_name,
-                recipient_user_id=recipient_user_id,
-            )
-        )
 
 
 def _clean_display_name(raw: str) -> str:

@@ -2,7 +2,7 @@
 
 Marked ``@pytest.mark.security``.
 
-Profile sync, removal, status, online state and contact requests carry a
+Profile sync, removal, status and online state carry a
 bare ``user_id``. The rule these tests encode, against the real
 application registry and SQLite:
 
@@ -28,7 +28,6 @@ from socialhome.app_keys import db_key, event_bus_key, federation_service_key
 from socialhome.config import Config
 from socialhome.crypto import derive_user_id
 from socialhome.domain.events import (
-    DmContactRequested,
     UserCameOnline,
     UserStatusChanged,
     UserWentOffline,
@@ -115,7 +114,6 @@ async def env(aiohttp_client, tmp_dir):
         UserStatusChanged,
         UserCameOnline,
         UserWentOffline,
-        DmContactRequested,
     ):
         bus.subscribe(event_type, published.append)
     return app, db, published
@@ -126,8 +124,6 @@ async def _state(db) -> dict[str, list[tuple]]:
         "remote_users": "SELECT user_id, instance_id, remote_username,"
         " display_name, deprovisioned_at FROM remote_users ORDER BY user_id",
         "pictures": "SELECT user_id, hash FROM user_profile_pictures ORDER BY user_id",
-        "contact_requests": "SELECT from_user_id, to_user_id"
-        " FROM dm_contact_requests ORDER BY 1, 2",
     }
     return {
         name: [tuple(r) for r in await db.fetchall(sql, ())]
@@ -197,16 +193,6 @@ async def test_profile_update_for_a_foreign_user_changes_nothing(
         pytest.param(FET.USER_ONLINE, {"user_id": "u-anna"}, id="online local"),
         pytest.param(FET.USER_ONLINE, {"user_id": "u-dora"}, id="online other"),
         pytest.param(FET.USER_OFFLINE, {"user_id": "u-anna"}, id="offline local"),
-        pytest.param(
-            FET.DM_CONTACT_REQUEST,
-            {"requester_user_id": "u-dora", "recipient_user_id": "u-anna"},
-            id="contact request as other",
-        ),
-        pytest.param(
-            FET.DM_CONTACT_REQUEST,
-            {"requester_user_id": "u-ghost", "recipient_user_id": "u-anna"},
-            id="contact request as unknown",
-        ),
     ],
 )
 async def test_speaking_for_a_foreign_user_changes_and_announces_nothing(
@@ -230,16 +216,7 @@ async def test_the_home_household_updates_and_removes_its_own_user(env):
     assert "u-bob" in {r[0] for r in (await _state(db))["pictures"]}
     await _send(app, FET.USER_STATUS_UPDATED, {"user_id": "u-bob", "emoji": "🎉"})
     await _send(app, FET.USER_ONLINE, {"user_id": "u-bob"})
-    await _send(
-        app,
-        FET.DM_CONTACT_REQUEST,
-        {"requester_user_id": "u-bob", "recipient_user_id": "u-anna"},
-    )
-    assert {type(e) for e in published} == {
-        UserStatusChanged,
-        UserCameOnline,
-        DmContactRequested,
-    }
+    assert {type(e) for e in published} == {UserStatusChanged, UserCameOnline}
     await _send(app, FET.USER_REMOVED, {"user_id": "u-bob"})
     rows = {r[0]: r for r in (await _state(db))["remote_users"]}
     assert rows["u-bob"][4] is not None

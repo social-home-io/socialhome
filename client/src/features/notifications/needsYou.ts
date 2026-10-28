@@ -13,8 +13,7 @@
  *   when the request is flagged after all — the item then turns into
  *   "Review" with the server's reasons. An invite gets "View invite" — the invite
  *   card asks a local community's location consent, so never a one-tap
- *   join — plus Decline. Someone asking to message you gets Accept (opens
- *   the chat) / Decline (silent: they are not told). A game invite gets
+ *   join — plus Decline. A game invite gets
  *   "Play" (opens the app, which takes the invite in) / Decline (their app
  *   hears it). Everything else gets "Review".
  * - **Decline waits 5 s** behind an Undo toast before it is sent (a
@@ -37,7 +36,6 @@ export const NEEDS_YOU_TYPES: ReadonlySet<string> = new Set([
   'space_report',
   'space_invite',
   'pairing_request',
-  'dm_contact_requested',
   'app_challenge',
 ])
 
@@ -55,7 +53,7 @@ export type NeedsYouEntry =
   | { kind: 'single', key: string, row: Notification }
   | { kind: 'group', key: string, spaceId: string, rows: Notification[] }
 
-export type InlineAction = 'decide' | 'invite' | 'contact' | 'game' | 'review'
+export type InlineAction = 'decide' | 'invite' | 'game' | 'review'
 
 function itemKey(n: Notification): string {
   return n.object_key || n.id
@@ -104,7 +102,6 @@ export function flagsOf(n: Notification): readonly string[] {
 /** What an item offers inline (the safety rules above). */
 export function inlineAction(n: Notification): InlineAction {
   if (n.type === 'space_invite') return 'invite'
-  if (n.type === 'dm_contact_requested' && n.object_key?.startsWith('contact:')) return 'contact'
   if (n.type === 'app_challenge' && n.object_key?.startsWith('app_session:')) return 'game'
   if (
     n.type === 'space_join_requested'
@@ -221,42 +218,12 @@ function gameOf(n: Notification): { appId: string, sessionId: string } {
   return { appId: id.slice(0, cut), sessionId: id.slice(cut + 1) }
 }
 
-/**
- * Accept a request to message you now: the server opens (or finds) the
- * chat with them; ``go`` is handed its id to open it. ``null`` when it
- * didn't go through (a toast says why).
- */
-export async function acceptContact(n: Notification): Promise<string | null> {
-  const key = itemKey(n)
-  setActing(key, true)
-  let chat: string | null = null
-  await settle(
-    key,
-    async () => {
-      const conv = await api.post(
-        `/api/conversations/contact-requests/${encodeURIComponent(idOf(n))}/accept`,
-      ) as { id?: unknown }
-      chat = typeof conv?.id === 'string' ? conv.id : null
-    },
-    t('notifications.needs_you.contact_accepted'),
-  )
-  return chat
-}
-
-/** Decline a join request, an invite (looked up by its space), a request
- *  to message you or a game invite. */
+/** Decline a join request, an invite (looked up by its space) or a game
+ *  invite. */
 async function sendDecline(n: Notification): Promise<void> {
   // keepalive: a decline sent as the page closes still arrives.
   if (n.type === 'space_join_requested') {
     await api.post(`/api/spaces/${n.space_id}/join-requests/${idOf(n)}/deny`, undefined, { keepalive: true })
-    return
-  }
-  if (n.type === 'dm_contact_requested') {
-    await api.post(
-      `/api/conversations/contact-requests/${encodeURIComponent(idOf(n))}/decline`,
-      undefined,
-      { keepalive: true },
-    )
     return
   }
   if (n.type === 'app_challenge') {
@@ -285,7 +252,6 @@ async function sendDecline(n: Notification): Promise<void> {
  *  still be undone, once it was sent]. A join request uses the default. */
 const DECLINE_TEXT: Record<string, readonly [string, string]> = {
   space_invite: ['notifications.needs_you.declining_invite', 'notifications.needs_you.invite_declined'],
-  dm_contact_requested: ['notifications.needs_you.declining_contact', 'notifications.needs_you.contact_declined'],
   app_challenge: ['notifications.needs_you.declining_game', 'notifications.needs_you.game_declined'],
 }
 

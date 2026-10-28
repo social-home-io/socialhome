@@ -30,7 +30,6 @@ from socialhome.domain.events import (
     CalendarEventUpdated,
     CommentAdded,
     CommentUpdated,
-    DmContactRequested,
     DmMessageCreated,
     DmMessageDeleted,
     DmMessageUpdated,
@@ -1103,7 +1102,7 @@ async def test_task_deadline_triggers_push(stack):
     assert payload.title == "A task is due today"
 
 
-# ─── Bazaar + DM contact handlers ─────────────────────────────────────────
+# ─── Bazaar handlers ─────────────────────────────────────────────────────
 
 
 async def test_bazaar_bid_placed_notifies_seller(stack):
@@ -1165,26 +1164,6 @@ async def test_bazaar_offer_accepted_notifies_buyer(stack):
     )
     notifs = await stack.notif_repo.list(buyer.user_id, limit=10)
     assert any(n.type == "bazaar_offer_accepted" for n in notifs)
-
-
-async def test_dm_contact_request_notifies_recipient(stack):
-    from socialhome.domain.events import DmContactRequested
-
-    recipient = await stack.provision_user("recipient")
-    fake = _CapturingPush()
-    stack.notif_svc.attach_push_service(fake)
-    await stack.bus.publish(
-        DmContactRequested(
-            requester_user_id="u-other",
-            requester_display_name="Outside Friend",
-            recipient_user_id=recipient.user_id,
-        )
-    )
-    notifs = await stack.notif_repo.list(recipient.user_id, limit=10)
-    assert any(n.type == "dm_contact_requested" for n in notifs)
-    assert fake.calls
-    title = fake.calls[-1][1].title
-    assert "Outside Friend" in title
 
 
 # ─── CalendarEventCreated handler ──────────────────────────────────────
@@ -3182,14 +3161,6 @@ async def _fire_single_push_case(stack, push, case: str) -> set[str]:
                 )
             )
             return {a.user_id, b.user_id}
-        case "dm_contact_requested":
-            await stack.bus.publish(
-                DmContactRequested(
-                    requester_user_id=a.user_id,
-                    requester_display_name="anna",
-                    recipient_user_id=b.user_id,
-                )
-            )
         case "app_challenge":
             await stack.bus.publish(
                 AppChallengeReceived(
@@ -3252,7 +3223,6 @@ async def _fire_single_push_case(stack, push, case: str) -> set[str]:
     "case",
     [
         "task_deadline",
-        "dm_contact_requested",
         "app_challenge",
         "bazaar_bid_placed",
         "bazaar_offer_accepted",
