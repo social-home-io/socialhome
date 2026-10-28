@@ -16742,6 +16742,10 @@ def cmd_space_report() -> None:
        target never appears in d's log after the post landed.
     4. **Alice resolves it on a**: ``SPACE_REPORT_DECIDED`` reaches b and
        b's copy reads ``resolved`` (b's queue is empty).
+    5. **Carol hears back (v_71)**: the host b — not a — sends
+       ``SPACE_REPORT_ANSWERED`` to c only; c's copy reads ``resolved`` and
+       Carol has exactly one ``report_answer`` row ("Your report in Report
+       club was reviewed") naming nobody; d's log never names it.
 
     Beta then demotes Alice; the space stays (its own, so no earlier
     step's assertions change).
@@ -16940,6 +16944,47 @@ def cmd_space_report() -> None:
     if _queue("b"):
         raise SystemExit("space-report: b still lists the resolved report")
     print("  b: resolved by Alice's decision on a (SPACE_REPORT_DECIDED) ✓")
+
+    # v_71: the host b — never a — tells Carol's household c it was
+    # reviewed (SPACE_REPORT_ANSWERED). c closes its copy and Carol gets one
+    # "was reviewed" row naming nobody; d (plain member) is never sent it.
+    def _c_status() -> str | None:
+        rows = _rows(
+            "c",
+            "SELECT status FROM content_reports WHERE space_id=? AND target_id=?",
+            (space_id, post_id),
+        )
+        return rows[0][0] if rows else None
+
+    def _c_answers() -> list:
+        return _rows(
+            "c",
+            "SELECT title, params FROM notifications WHERE user_id=?"
+            " AND type='report_answer' AND space_id=?",
+            (c["user_id"], space_id),
+        )
+
+    _wait_for(
+        "c's copy to be answered (SPACE_REPORT_ANSWERED from b)",
+        lambda: _c_status() == "resolved" and bool(_c_answers()),
+        timeout=60.0,
+    )
+    answers = _c_answers()
+    if len(answers) != 1 or answers[0][0] != "Your report in Report club was reviewed":
+        raise SystemExit(f"space-report: Carol's report_answer rows -> {answers!r}")
+    params = answers[0][1] or ""
+    for who in (a["user_id"], b["user_id"], d["user_id"]):
+        if who in params:
+            raise SystemExit(
+                f"space-report: Carol's answer names {who} (moderator / host / "
+                "subject must stay out of it)"
+            )
+    if _log_contains("d", "space_report_answered", offset=d_log_before):
+        raise SystemExit("space-report: d's log names a SPACE_REPORT_ANSWERED")
+    print(
+        "  c: Carol hears her report was reviewed (SPACE_REPORT_ANSWERED from "
+        "the host b, naming nobody); d never sent it ✓"
+    )
 
     _request(
         f"{b_base}/api/spaces/{space_id}/remote-members/{a['instance_id']}/{a['user_id']}",

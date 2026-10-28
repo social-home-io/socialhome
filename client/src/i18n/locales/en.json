@@ -2140,6 +2140,7 @@
   "capability.gfs_moment_reactions": "Reactions reach authors you follow through a GFS",
   "capability.moment_reaction_counts": "Everyone sees the full reaction count",
   "capability.highlight_audience_change": "A highlight taken away stays away",
+  "capability.remote_report_answers": "Reporters in other households hear their report was reviewed",
   "space.settings_page.moderation.queue_meta": "Posts to review, join requests and reports",
   "space.settings_page.moderation.days": "days",
   "space.settings_page.danger.summary": "Archive, hand over or delete",

@@ -450,6 +450,49 @@ async def test_report_decided_without_report_service_or_roster_noops():
     report_svc.apply_remote_decision.assert_not_awaited()
 
 
+def _answered(**over):
+    p = {
+        "space_id": "sp1",
+        "target_type": "post",
+        "target_id": "p",
+        "reporter_user_id": "r",
+    }
+    p.update(over)
+    return _evt("SPACE_REPORT_ANSWERED", p, space_id="sp1", from_instance="host-1")
+
+
+async def test_report_answered_passes_the_sender_and_the_key(svc):
+    """v_71 — the handler hands the AUTHENTICATED sender to the service,
+    which admits only the space's host (``apply_report_answer``)."""
+    await svc.svc._on_space_report_answered(_answered())
+    kw = svc.report_svc.apply_report_answer.await_args.kwargs
+    assert kw == {
+        "sender": "host-1",
+        "space_id": "sp1",
+        "target_type": "post",
+        "target_id": "p",
+        "reporter_user_id": "r",
+    }
+
+
+async def test_report_answered_without_a_space_or_service_is_dropped(svc):
+    # Routing / payload space disagree, or no space at all.
+    await svc.svc._on_space_report_answered(_answered(space_id="sp-other"))
+    await svc.svc._on_space_report_answered(
+        _evt("SPACE_REPORT_ANSWERED", {"target_id": "p"})
+    )
+    svc.report_svc.apply_report_answer.assert_not_awaited()
+    s = FederationInboundService(
+        bus=_RecordingBus(),  # type: ignore[arg-type]
+        conversation_repo=AsyncMock(),
+        space_post_repo=AsyncMock(),
+        space_repo=AsyncMock(),
+        user_repo=AsyncMock(),
+        report_service=None,
+    )
+    await s._on_space_report_answered(_answered())  # no service: no-op
+
+
 # ── Space membership ────────────────────────────────────────────────
 
 

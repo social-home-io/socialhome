@@ -1836,6 +1836,7 @@
   "capability.gfs_moment_reactions": "Reaktionen erreichen Autoren, denen du über einen GFS folgst",
   "capability.moment_reaction_counts": "Alle sehen die volle Zahl der Reaktionen",
   "capability.highlight_audience_change": "Ein weggenommenes Highlight bleibt weg",
+  "capability.remote_report_answers": "Meldende in anderen Haushalten erfahren, dass ihre Meldung geprüft wurde",
   "space.settings_page.moderation.queue_meta": "Beiträge zum Prüfen, Beitrittsanfragen und Meldungen",
   "space.settings_page.moderation.days": "Tagen",
   "space.settings_page.danger.summary": "Archivieren, übergeben oder löschen",

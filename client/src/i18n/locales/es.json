@@ -1858,6 +1858,7 @@
   "capability.gfs_moment_reactions": "Las reacciones llegan a los autores que sigues a través de un GFS",
   "capability.moment_reaction_counts": "Todos ven el número total de reacciones",
   "capability.highlight_audience_change": "Un highlight retirado no vuelve",
+  "capability.remote_report_answers": "Quien denuncia desde otro hogar sabe que su denuncia fue revisada",
   "space.settings_page.moderation.queue_meta": "Publicaciones por revisar, solicitudes y denuncias",
   "space.settings_page.moderation.days": "días",
   "space.settings_page.danger.summary": "Archivar, ceder o eliminar",
