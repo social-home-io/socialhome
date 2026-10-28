@@ -26,6 +26,7 @@ import { signal } from '@preact/signals'
 import { t } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { api } from '@/api'
+import { addBase } from '@/baseUrl'
 import { ws } from '@/ws'
 import { Button } from '@/components/Button'
 import { NotificationListSkeleton } from '@/components/Skeleton'
@@ -33,8 +34,9 @@ import { showToast } from '@/components/Toast'
 import { loadHouseholdUsers } from '@/store/householdUsers'
 import { unreadCount, type NotificationLite } from '@/store/notifications'
 import type { Notification } from '@/types'
-import { NewPill, NotificationRow, markRowRead, withRead } from './NotificationRow'
+import { NewPill, NotificationRow, markRowRead, rowPlainText, withRead } from './NotificationRow'
 import { NeedsYouSection, pinnedIds } from './NeedsYouSection'
+import { NotificationRowMenu } from './NotificationRowMenu'
 import { createAnnouncer, groupByDay, type NotifFilter } from './rowList'
 
 /** Rows per request — the list endpoint's maximum. */
@@ -254,6 +256,9 @@ export default function NotificationsPage() {
         {anyUnread && (
           <Button variant="secondary" onClick={markAllRead}>{t('notifications.mark_all_read')}</Button>
         )}
+        <a class="sh-btn sh-btn--secondary sh-notif-settings-link" href={addBase('/settings#notifications')}>
+          {t('notifications.settings_link')}
+        </a>
       </div>
       <NewPill count={pending.value.size} onShow={() => void showPending()} />
       <NeedsYouSection />
@@ -271,7 +276,11 @@ export default function NotificationsPage() {
             <ul class="sh-notif-rows">
               {g.rows.map(n => (
                 <li key={n.id} class="sh-notif-rows__item">
-                  <NotificationRow n={n} onOpen={(row) => void open(row)} />
+                  <NotificationRow
+                    n={n}
+                    onOpen={(row) => void open(row)}
+                    menu={<NotificationRowMenu n={n} label={rowPlainText(n)} />}
+                  />
                 </li>
               ))}
             </ul>

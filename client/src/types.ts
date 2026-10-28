@@ -776,7 +776,15 @@ export interface Notification {
   params?: NotifParams | null
   new_count?: number
   total_count?: number
+  /** The Settings kind the row falls under (D4) — its "…" menu turns it
+   *  down. ``null`` for a type no kind files. */
+  kind?: NotifKind | null
 }
+
+/** Settings → Notifications kinds (D4). */
+export type NotifKind =
+  | 'messages' | 'replies' | 'needs_you' | 'plans'
+  | 'about_you' | 'reactions' | 'activity'
 
 export interface ShoppingItem {
   id: string

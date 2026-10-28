@@ -257,19 +257,19 @@ describe('More on a phone: a bottom sheet', () => {
 describe('Your notifications', () => {
   it('shows the level, opens a radio choice, saves the pick and goes back', async () => {
     layout(2000)
-    mockPut.mockResolvedValue({ level: 'muted' })
+    mockPut.mockResolvedValue({ level: 'mentions', default_level: 'all' })
     const onNotifLevel = vi.fn()
     const { getByRole, container } = renderNav({ onNotifLevel })
     fireEvent.click(getByRole('button', { name: /^More/ }))
     const row = getByRole('button', { name: /^Your notifications/ })
-    expect(row.textContent).toContain('All posts')
+    expect(row.textContent).toContain('Everything')
     fireEvent.click(row)
-    const all = getByRole('radio', { name: /^All posts/ }) as HTMLInputElement
+    const all = getByRole('radio', { name: /^Everything/ }) as HTMLInputElement
     expect(all.checked).toBe(true)
     await waitFor(() => expect(document.activeElement).toBe(all))
-    fireEvent.click(getByRole('radio', { name: /^Muted/ }))
-    await waitFor(() => expect(onNotifLevel).toHaveBeenCalledWith('muted'))
-    expect(mockPut).toHaveBeenCalledWith('/api/spaces/s1/notif-prefs', { level: 'muted' })
+    fireEvent.click(getByRole('radio', { name: /^Replies and mentions/ }))
+    await waitFor(() => expect(onNotifLevel).toHaveBeenCalledWith('mentions'))
+    expect(mockPut).toHaveBeenCalledWith('/api/spaces/s1/notif-prefs', { level: 'mentions' })
     await waitFor(() => expect(container.querySelector('[data-row="notifications"]')).toBeTruthy())
   })
 

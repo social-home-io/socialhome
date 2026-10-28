@@ -17,9 +17,14 @@ import { isRestricted } from '@/components/ProtectedNotice'
 import { showToast } from '@/components/Toast'
 import { getPreferences, setPreference } from '@/utils/preferences'
 
+/** Whether this person is offered the switch at all. */
+export function haAutomationsOffered(): boolean {
+  return supportsAutomationEvents() && !isRestricted('ha_automations')
+}
+
 export function HaAutomationsSwitch() {
   const busy = useSignal(false)
-  if (!supportsAutomationEvents() || isRestricted('ha_automations')) return null
+  if (!haAutomationsOffered()) return null
   const on = getPreferences().ha_automation_events === true
 
   const toggle = async () => {

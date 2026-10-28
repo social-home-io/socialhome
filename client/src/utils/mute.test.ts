@@ -4,6 +4,7 @@ import {
   isMuteActive,
   isMutedForever,
   muteDurationLabel,
+  muteTimeLabel,
   mutedLabel,
 } from './mute'
 
@@ -32,6 +33,11 @@ describe('mute helpers', () => {
     const week = mutedLabel('2026-10-06T10:00:00+00:00', NOW)
     expect(week).toMatch(/^Muted until /)
     expect(week).toMatch(/6/)
+  })
+
+  it('muteTimeLabel: the time within a day, day and time beyond', () => {
+    expect(muteTimeLabel('2026-09-29T11:00:00+00:00', NOW)).not.toMatch(/Muted/)
+    expect(muteTimeLabel('2026-10-06T10:00:00+00:00', NOW)).toMatch(/6/)
   })
 
   it('has an English label for every length', () => {

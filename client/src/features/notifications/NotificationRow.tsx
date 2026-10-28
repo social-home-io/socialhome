@@ -19,7 +19,7 @@
  * The whole row is ONE control: a link to the thing (a button when there
  * is nothing to open). Opening it marks it read (:func:`markRowRead`).
  */
-import type { JSX } from 'preact'
+import type { ComponentChildren, JSX } from 'preact'
 import { Avatar } from '@/components/Avatar'
 import { api } from '@/api'
 import { appHref } from '@/baseUrl'
@@ -30,7 +30,7 @@ import { spaceGlyph } from '@/features/spaces/spaceGlyph'
 import { relativeDocsTime } from '@/utils/relativeTime'
 import type { Notification } from '@/types'
 import { currentUser } from '@/store/auth'
-import { countsMeta, handledMeta, rowSentence, type Segment } from './rowText'
+import { countsMeta, handledMeta, plainText, rowSentence, type Segment } from './rowText'
 
 export type GlyphName =
   | 'comment' | 'at' | 'post' | 'heart' | 'person' | 'calendar'
@@ -138,9 +138,12 @@ interface RowProps {
   /** The sentence's element id — inline actions point at it
    *  (``aria-describedby``) so "Approve" says what it approves. */
   titleId?: string
+  /** A control beside the row (its "…" menu) — a sibling of the row's one
+   *  link, never inside it. */
+  menu?: ComponentChildren
 }
 
-export function NotificationRow({ n, onOpen, compact, titleId }: RowProps) {
+export function NotificationRow({ n, onOpen, compact, titleId, menu }: RowProps) {
   const unread = !n.read_at
   const segs = rowSentence(n, spaceOf(n.space_id)?.name)
   // A handled "Needs you" item says how it ended ("Approved by Søren").
@@ -168,7 +171,7 @@ export function NotificationRow({ n, onOpen, compact, titleId }: RowProps) {
     </>
   )
   const onClick = () => { onOpen?.(n) }
-  return n.link_url ? (
+  const row = n.link_url ? (
     <a class={cls} href={appHref(n.link_url)} data-notif-id={n.id} onClick={onClick}>
       {inner}
     </a>
@@ -177,6 +180,19 @@ export function NotificationRow({ n, onOpen, compact, titleId }: RowProps) {
       {inner}
     </button>
   )
+  if (!menu) return row
+  return (
+    <div class="sh-notif-item">
+      {row}
+      <div class="sh-notif-item__menu">{menu}</div>
+    </div>
+  )
+}
+
+/** *n*'s sentence as plain text (its title for a row without params). */
+export function rowPlainText(n: Notification): string {
+  const segs = rowSentence(n, spaceOf(n.space_id)?.name)
+  return segs ? plainText(segs) : n.title
 }
 
 /**

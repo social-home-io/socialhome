@@ -33,11 +33,10 @@ import {
 import { PrivacyPersonRow, privacyPersonName } from './PrivacyPersonRow'
 import { userPreferences } from '@/store/userPreferences'
 import { isHomeAssistant } from '@/platform'
-import {
-  currentPushSubscription, disableWebPush, enableWebPush, webPushSupported,
-} from '@/utils/webPush'
+import { loadNotifSettings } from '@/store/notifSettings'
+import { DeviceBlock, KindsBlock, MutedAndChanged } from './NotificationSettings'
 import { UsernameEditor } from './UsernameEditor'
-import { HaAutomationsSwitch } from './HaAutomationsSwitch'
+import { HaAutomationsSwitch, haAutomationsOffered } from './HaAutomationsSwitch'
 import { ProfileTab, resetProfileDraft, useProfileLeaveGuard } from './ProfileTab'
 import { SecuritySettings } from '@/components/SecuritySettings'
 import { ChatNotifChoices } from '@/features/dms/ChatNotifChoices'
@@ -83,6 +82,7 @@ const HASH_TABS: Record<string, SettingsTab> = {
   '#highlights': 'privacy',
   '#momentum': 'privacy',
   '#public-sharing': 'privacy',
+  '#notifications': 'notifications',
 }
 
 const errText = (err: unknown): string => String((err as Error)?.message ?? err)
@@ -94,8 +94,6 @@ const landingPath = signal<LandingPath>('/')
 const haNotifyService = signal('')
 const haNotifySaving = signal(false)
 const onlineStatusVisible = signal(true)
-const pushEnabled = signal(false)
-const pushBusy = signal(false)
 
 /** Read ``online_status_visible`` from the cached
  *  ``currentUser.preferences_json``. The previous implementation
@@ -582,65 +580,22 @@ function BlockedAccountsPanel() {
 }
 
 function NotificationsTab() {
-  // "Enabled" means this browser holds a live push subscription — not
-  // merely that notification permission was granted once.
-  useEffect(() => {
-    currentPushSubscription()
-      .then((sub) => { pushEnabled.value = sub !== null })
-      .catch(() => { pushEnabled.value = false })
-  }, [])
-
-  const requestPush = async () => {
-    pushBusy.value = true
-    try {
-      if (await enableWebPush()) {
-        pushEnabled.value = true
-        showToast(t('settings.notifications.push_enabled'), 'success')
-      } else {
-        showToast(t('settings.notifications.blocked'), 'info')
-      }
-    } catch (err: unknown) {
-      showToast(t('settings.notifications.enable_failed', { error: errText(err) }), 'error')
-    } finally {
-      pushBusy.value = false
-    }
-  }
-
-  const disablePush = async () => {
-    pushBusy.value = true
-    try {
-      await disableWebPush()
-      pushEnabled.value = false
-      showToast(t('settings.notifications.push_disabled'), 'info')
-    } catch {
-      showToast(t('settings.notifications.disable_failed'), 'error')
-    } finally {
-      pushBusy.value = false
-    }
-  }
-
+  useEffect(() => { void loadNotifSettings() }, [])
   return (
-    <section class="sh-settings-section">
-      <h2>{t('settings.notifications.title')}</h2>
-      <div class="sh-settings-row">
-        <span>{t('settings.notifications.push')}</span>
-        {pushEnabled.value ? (
-          <Button variant="secondary" loading={pushBusy.value} onClick={disablePush}>{t('settings.notifications.disable')}</Button>
-        ) : (
-          <Button loading={pushBusy.value} disabled={!webPushSupported()} onClick={requestPush}>{t('settings.notifications.enable')}</Button>
-        )}
-      </div>
-      <p class="sh-muted">
-        {pushEnabled.value
-          ? t('notifications.push_enabled')
-          : webPushSupported()
-            ? t('notifications.push_disabled')
-            : t('settings.notifications.unsupported')}
-      </p>
-      {isHomeAssistant() && <HaNotifyServiceRow />}
-      <HaAutomationsSwitch />
-      <HouseholdChatNotifs />
-    </section>
+    <>
+      <DeviceBlock>
+        {isHomeAssistant() && <HaNotifyServiceRow />}
+      </DeviceBlock>
+      <KindsBlock />
+      <MutedAndChanged>
+        <HouseholdChatNotifs />
+      </MutedAndChanged>
+      {haAutomationsOffered() && (
+        <section class="sh-settings-section">
+          <HaAutomationsSwitch />
+        </section>
+      )}
+    </>
   )
 }
 
@@ -651,7 +606,8 @@ function HouseholdChatNotifs() {
   const chat = householdChat.value
   if (!chat?.enabled || !chat.conversation_id) return null
   return (
-    <div class="sh-settings-household-chat" data-testid="household-chat-notifs">
+    <div class="sh-settings-subcard sh-settings-household-chat" id="household-chat"
+         data-testid="household-chat-notifs">
       <h3>{t('settings.notifications.household_chat')}</h3>
       <p class="sh-muted">{t('settings.notifications.household_chat_hint')}</p>
       <ChatNotifChoices
@@ -660,6 +616,7 @@ function HouseholdChatNotifs() {
           convId: chat.conversation_id,
           mutedUntil: chat.muted_until,
           level: chat.notif_level ?? 'all',
+          defaultLevel: 'all',
           onMute: (until) => patchHouseholdChat({ muted_until: until }),
           onLevel: (next) => patchHouseholdChat({ notif_level: next }),
         }}
