@@ -72,8 +72,8 @@ class PollFederationOutbound:
         )
 
     async def _on_closed(self, event: PollClosed) -> None:
-        if event.space_id is None:
-            return
+        if event.space_id is None or event.origin_instance_id is not None:
+            return  # household-only, or a peer's close: never echoed back
         await self._fan_out(
             event.space_id,
             FederationEventType.SPACE_POLL_CLOSED,

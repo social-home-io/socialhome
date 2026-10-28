@@ -17,7 +17,8 @@
  *   others"): it counts the things, never the people
  * - ``notifications.row.<type>_none``   nobody caused it (a review queue)
  *
- * ``{space}`` is the space's name. A row without params (written before
+ * ``{space}`` is the place's name: the space's, or a group chat's for a
+ * row about a chat (a missed call, being added). A row without params (written before
  * 0129), of a type with no key, or missing what its sentence needs keeps the
  * server's ``title`` — already in the viewer's language.
  *
@@ -92,6 +93,16 @@ interface TypeSpec {
  *   notifications.row.post_reacted_many notifications.row.post_reacted_many_in
  *   notifications.row.post_reacted_count notifications.row.post_reacted_count_in
  *   notifications.row.space_invite notifications.row.space_invite_many
+ *   notifications.row.call_missed notifications.row.call_missed_many
+ *   notifications.row.call_missed_count notifications.row.call_missed_in
+ *   notifications.row.call_missed_many_in notifications.row.call_missed_count_in
+ *   notifications.row.chat_added notifications.row.chat_added_many
+ *   notifications.row.chat_added_none notifications.row.chat_added_in
+ *   notifications.row.chat_added_many_in notifications.row.chat_added_none_in
+ *   notifications.row.poll_result notifications.row.poll_result_many
+ *   notifications.row.poll_result_in notifications.row.poll_result_many_in
+ *   notifications.row.report_answer_none
+ *   notifications.row.report_answer_none_in
  *   notifications.new_pill notifications.new_pill_one
  *   notifications.live_new notifications.live_new_one
  *   notifications.meta.new_of_total notifications.meta.new_of_total_one
@@ -121,6 +132,12 @@ export const ROW_TYPES: Readonly<Record<string, TypeSpec>> = {
   comment_replied: { count: true, inSpace: true },
   post_reacted: { count: true, inSpace: true },
   space_invite: {},
+  // A chat row's place is the group's name (``params.space_name``).
+  call_missed: { count: true, inSpace: true },
+  chat_added: { none: true, inSpace: true },
+  poll_result: { inSpace: true },
+  // Never who reviewed it or whom it was about.
+  report_answer: { none: true, noActor: true, inSpace: true },
 }
 
 /** Every catalog key the renderer may ask for (the locale tests walk it). */

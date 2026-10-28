@@ -498,7 +498,10 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         local_usernames: list[str],
         remote_members: list[RemoteConversationMember],
         name: str | None,
+        actor_user_id: str | None = None,
     ) -> None:
+        """Commit the group's next roster; ``actor_user_id`` is who added
+        people (their "added you" notification names them)."""
         await self._groups.commit(
             Conversation(
                 id=conv.id,
@@ -509,6 +512,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
             ),
             local_usernames=local_usernames,
             remote_members=remote_members,
+            creator_user_id=actor_user_id,
         )
 
     async def _active_local_usernames(self, conversation_id: str) -> list[str]:
@@ -544,11 +548,13 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         local = await self._active_local_usernames(conversation_id)
         roster = list(dict.fromkeys([*local, *new_local]))
         await self._guard_group_roster(roster, list(seats.values()))
+        actor = await self._require_user(actor_username)
         await self._commit_group(
             conv,
             local_usernames=roster,
             remote_members=list(seats.values()),
             name=conv.name,
+            actor_user_id=actor.user_id,
         )
 
     async def remove_group_member(

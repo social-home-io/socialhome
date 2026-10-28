@@ -319,5 +319,17 @@
   "notification.post.reacted": "{name} reageerde met {emoji} op je bericht",
   "notification.space.post.reacted": "{name} reageerde met {emoji} op je bericht in {space_name}",
   "notification.push.post_reacted": "{name} reageerde op je bericht",
-  "notification.push.post_reacted_in": "{name} reageerde op je bericht in {space_name}"
+  "notification.push.post_reacted_in": "{name} reageerde op je bericht in {space_name}",
+  "notification.call.incoming": "{name} belt",
+  "notification.call.incoming_in": "{name} belt in {chat_name}",
+  "notification.call.missed": "Gemist gesprek van {name}",
+  "notification.call.missed_in": "Gemist gesprek van {name} in {chat_name}",
+  "notification.chat.added": "{name} heeft je toegevoegd aan een groepschat",
+  "notification.chat.added_to": "{name} heeft je toegevoegd aan {chat_name}",
+  "notification.chat.added_none": "Je bent toegevoegd aan een groepschat",
+  "notification.chat.added_to_none": "Je bent toegevoegd aan {chat_name}",
+  "notification.poll.closed": "{name} heeft een peiling gesloten waarop je hebt gestemd",
+  "notification.poll.closed_in": "{name} heeft een peiling in {space_name} gesloten",
+  "notification.report.answered": "Je melding is bekeken",
+  "notification.report.answered_in": "Je melding in {space_name} is bekeken"
 }

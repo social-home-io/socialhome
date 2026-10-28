@@ -206,7 +206,14 @@ for it. The rules (notifications redesign, owner decisions D3 D5 D6 D8 D13):
 - **Reactions** to your post, moment or highlight are one in-app row per
   thing (`post_reacted`, `moment_reacted`, `highlight_reacted`), never a push.
 - **Chats** keep their own badge: a plain message pushes but makes no row;
-  an @-mention in a group (`dm_mention`) does.
+  an @-mention in a group (`dm_mention`), being added to a group
+  (`chat_added`) and a missed call (`call_missed`) do. A ringing call pushes
+  (`call_incoming`, no row); the missed call replaces it on the device. Calls
+  reach the notification service as local `CallRinging` / `CallMissed`
+  events — nothing new on the wire.
+- **Small decisions** about you are rows: a poll you voted in was closed
+  (`poll_result`), a report you filed was reviewed (`report_answer`, naming
+  nobody).
 - **Things done to you push** whatever the space level: tasks, an event
   someone else added to your personal calendar, changes to an event you're
   going to, join requests, answers and decisions.

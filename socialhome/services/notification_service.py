@@ -25,6 +25,11 @@ itself is the persistence layer; push is fire-and-forget on top.
 | DmMessageUpdated     | Only members the edit newly mentions (groups) | "{sender} mentioned you in {chat}"   |
 | SpaceModerationQueued| Space admins                          | "New content pending review in {space}"        |
 | SpaceModeration{Approved,Rejected,Expired} | The submitter     | "Your submission in {space} was approved"…      |
+| CallRinging          | Each local callee (push only, no row) | "{caller} is calling" / "… in {chat}"           |
+| CallMissed           | Each local callee who missed it       | "Missed call from {caller}" / "… in {chat}"     |
+| DmConversationCreated (group) | People added to a group chat | "{name} added you to {chat}"                    |
+| PollClosed           | Local voters (not the author)         | "{author} closed a poll you voted in"…          |
+| ReportResolved       | The local reporter                    | "Your report in {space} was reviewed"           |
 
 Body is intentionally omitted for privacy-sensitive events (DMs,
 location, UGC content) per §25.3.
@@ -56,10 +61,13 @@ from ..domain.events import (
     CalendarEventCreated,
     CalendarEventDeleted,
     CalendarEventUpdated,
+    CallMissed,
+    CallRinging,
     CommentAdded,
     CommentDeleted,
     CommentUpdated,
     DmContactRequested,
+    DmConversationCreated,
     DmMessageCreated,
     DmMessageDeleted,
     DmMessageUpdated,
@@ -72,6 +80,7 @@ from ..domain.events import (
     MomentReactionChanged,
     NotificationCreated,
     NotificationReadChanged,
+    PollClosed,
     PostCreated,
     PostDeleted,
     PostEdited,
@@ -142,6 +151,7 @@ from ..repositories.notification_repo import (
     AbstractNotificationRepo,
     new_notification,
 )
+from ..repositories.poll_repo import AbstractPollRepo
 from ..repositories.post_repo import AbstractPostRepo
 from ..repositories.space_post_repo import AbstractSpacePostRepo
 from ..repositories.space_repo import AbstractSpaceRepo
@@ -178,6 +188,26 @@ CHAT_REALERT_SECONDS = 300
 #: Chat types: their repeats re-alert after :data:`CHAT_REALERT_SECONDS`
 #: of quiet even while unread (D8).
 _CHAT_TYPES: frozenset[str] = frozenset({"dm_message", "dm_mention"})
+
+#: A missed call replaces the ringing push on the device (same tag), so it
+#: always goes out — even as a repeat on a row still unread — or the lock
+#: screen would keep saying someone is calling. The service worker swaps
+#: it in quietly (``renotify: false``): the ring already buzzed.
+_ALWAYS_PUSH_TYPES: frozenset[str] = frozenset({"call_missed"})
+
+#: The types opening a conversation reads (``mark_read_for_dm``).
+_CONVERSATION_TYPES: tuple[str, ...] = (
+    "dm_message",
+    "dm_mention",
+    "call_missed",
+    "chat_added",
+)
+
+
+def _call_tag(link: str) -> str:
+    """The device tag a call's pushes share: the ring (``call_incoming``)
+    and the missed call that replaces it (``call_missed``'s row tag)."""
+    return f"call_missed:{link}"
 
 
 @dataclass(slots=True, frozen=True)
@@ -300,6 +330,11 @@ _PUSH_AS_IS: frozenset[str] = frozenset(
         "space_here",
         "dm_message",
         "dm_mention",
+        "call_incoming",
+        "call_missed",
+        "chat_added",
+        "poll_result",
+        "report_answer",
         "dm_contact_requested",
         "app_challenge",
         "bazaar_bid_placed",
@@ -453,10 +488,12 @@ class NotificationService(ProtectionGateMixin):
         "_notifs",
         "_pair_inbox",
         "_personal_calendar_repo",
+        "_polls",
         "_posts",
         "_push",
         "_remote_members",
         "_reports",
+        "_space_polls",
         "_space_posts",
         "_spaces",
         "_users",
@@ -518,6 +555,10 @@ class NotificationService(ProtectionGateMixin):
         # The auto-pair inbox — optional; "Needs you" checks a pairing
         # request still waits there (it lives in memory and expires).
         self._pair_inbox = None
+        # Household and space polls — optional; they name who voted, so a
+        # closed poll tells its voters (``poll_result``).
+        self._polls: AbstractPollRepo | None = None
+        self._space_polls: AbstractPollRepo | None = None
 
     def attach_post_repos(
         self,
@@ -528,6 +569,15 @@ class NotificationService(ProtectionGateMixin):
         D13 post reactions)."""
         self._posts = post_repo
         self._space_posts = space_post_repo
+
+    def attach_poll_repos(
+        self,
+        poll_repo: AbstractPollRepo | None,
+        space_poll_repo: AbstractPollRepo | None,
+    ) -> None:
+        """Wire the household and space poll repos (``on_poll_closed``)."""
+        self._polls = poll_repo
+        self._space_polls = space_poll_repo
 
     def attach_pair_inbox(self, inbox) -> None:
         """Wire the auto-pair inbox (:meth:`pending_actions`)."""
@@ -707,6 +757,7 @@ class NotificationService(ProtectionGateMixin):
         repeat = (
             group is not None
             and not reopened
+            and saved.type not in _ALWAYS_PUSH_TYPES
             and not (
                 saved.type in _CHAT_TYPES
                 and _quiet_for(group.created_at, CHAT_REALERT_SECONDS)
@@ -883,6 +934,10 @@ class NotificationService(ProtectionGateMixin):
         self._bus.subscribe(DmMessageCreated, self.on_dm_message_created)
         self._bus.subscribe(DmMessageDeleted, self.on_dm_message_deleted)
         self._bus.subscribe(DmMessageUpdated, self.on_dm_message_updated)
+        self._bus.subscribe(DmConversationCreated, self.on_chat_added)
+        self._bus.subscribe(CallRinging, self.on_call_ringing)
+        self._bus.subscribe(CallMissed, self.on_call_missed)
+        self._bus.subscribe(PollClosed, self.on_poll_closed)
         self._bus.subscribe(PostEdited, self.on_post_edited)
         self._bus.subscribe(CommentUpdated, self.on_comment_updated)
         self._bus.subscribe(BazaarBidPlaced, self.on_bazaar_bid_placed)
@@ -1546,8 +1601,9 @@ class NotificationService(ProtectionGateMixin):
         user_id: str,
         conversation_id: str,
     ) -> int:
-        """Mark every unread ``dm_message`` / ``dm_mention`` notification
-        pointing at a conversation as read for one user. Returns the number flipped.
+        """Mark every unread notification about a conversation
+        (:data:`_CONVERSATION_TYPES`: a message, a mention, a missed call,
+        being added) as read for one user. Returns the number flipped.
 
         Called from ``POST /api/conversations/{id}/read`` so the bell
         clears in step with the thread's read-receipt state — opening
@@ -1561,7 +1617,7 @@ class NotificationService(ProtectionGateMixin):
             conv.space_id if conv is not None else None,
         )
         flipped = 0
-        for ntype in ("dm_message", "dm_mention"):
+        for ntype in _CONVERSATION_TYPES:
             flipped += await self._notifs.mark_read_by_link(
                 user_id=user_id, link_url=link, type=ntype
             )
@@ -1754,9 +1810,14 @@ class NotificationService(ProtectionGateMixin):
         )
 
     async def on_report_resolved(self, event: ReportResolved) -> None:
-        """No open report left in the space: every authority's "New report"
-        row says who handled the last one."""
-        if not event.space_id or self._reports is None:
+        """The reporter hears their report was reviewed
+        (:meth:`_tell_reporter`); and once no open report is left in the
+        space, every authority's "New report" row says who handled the
+        last one."""
+        if self._reports is None:
+            return
+        await self._tell_reporter(event)
+        if not event.space_id:
             return
         if await self._reports.count_pending_in_space(event.space_id):
             return
@@ -1766,6 +1827,320 @@ class NotificationService(ProtectionGateMixin):
             outcome="done",
             by_user_id=event.resolved_by,
         )
+
+    async def _tell_reporter(self, event: ReportResolved) -> None:
+        """``report_answer``: "Your report in {space} was reviewed".
+
+        Never says what became of it, who reviewed it or who (or what) it
+        was about — not in the row, not in the push (§25.3): the
+        moderator stays out of it and the reported person is never named.
+        A reporter on another household is not told (their household
+        holds no copy of the decision)."""
+        assert self._reports is not None
+        report = await self._reports.get(event.report_id)
+        if report is None or report.reporter_user_id == event.resolved_by:
+            return
+        recipient = await self._users.get_by_user_id(report.reporter_user_id)
+        if recipient is None:
+            return
+        locale = self._locale(recipient)
+        space_name = await self._space_name(report.space_id)
+        if space_name:
+            title = self._t(
+                "notification.report.answered_in",
+                locale=locale,
+                fallback="Your report in {space_name} was reviewed",
+                space_name=space_name,
+            )
+        else:
+            title = self._t(
+                "notification.report.answered",
+                locale=locale,
+                fallback="Your report was reviewed",
+            )
+        await self._save_notif(
+            new_notification(
+                user_id=recipient.user_id,
+                type="report_answer",
+                title=title,
+                link_url=(
+                    space_feed_link(report.space_id)
+                    if report.space_id
+                    else HOUSEHOLD_FEED_LINK
+                ),
+            ),
+            about=NotificationSubject.of(
+                NotificationObject.REPORT,
+                report.id,
+                space_id=report.space_id,
+                space_name=space_name,
+            ),
+            actor_user_id=None,  # a decision about your own report
+        )
+
+    # ── Calls and group chats ────────────────────────────────────────
+
+    async def _call_parts(
+        self, conversation_id: str
+    ) -> tuple[_SeatPrefs, str, NotificationSubject]:
+        """A call's conversation: its seat settings, its link and what a
+        row about it is about (the chat, its name as the place)."""
+        prefs = await self._seat_prefs(conversation_id)
+        link = _conversation_link(conversation_id, prefs.system_scope, prefs.space_id)
+        return (
+            prefs,
+            link,
+            NotificationSubject.of(
+                NotificationObject.CONVERSATION,
+                conversation_id,
+                space_id=prefs.space_id,
+                space_name=prefs.space_name or prefs.name,
+            ),
+        )
+
+    async def _call_audience(
+        self, caller_user_id: str, callee_user_ids: Iterable[str], prefs: _SeatPrefs
+    ) -> list:
+        """The local people a call reaches: not the caller, not someone a
+        block separates from them, not someone who muted the chat (D9 —
+        a muted chat rings nobody; "Mentions only" still rings, a call is
+        for everyone in it)."""
+        blocked = await self._withheld_from(caller_user_id)
+        out = []
+        for user_id in dict.fromkeys(callee_user_ids):
+            if user_id == caller_user_id or user_id in blocked:
+                continue
+            local = await self._users.get_by_user_id(user_id)
+            if local is None or local.username in prefs.muted:
+                continue
+            out.append(local)
+        return out
+
+    def _call_title(
+        self, caller: str, chat_name: str | None, locale: str | None, *, missed: bool
+    ) -> str:
+        """D11 — who and where: "Anna is calling (in Team)", "Missed call
+        from Anna (in Team)"."""
+        if not missed:
+            if chat_name:
+                return self._t(
+                    "notification.call.incoming_in",
+                    locale=locale,
+                    fallback="{name} is calling in {chat_name}",
+                    name=caller,
+                    chat_name=chat_name,
+                )
+            return self._t(
+                "notification.call.incoming",
+                locale=locale,
+                fallback="{name} is calling",
+                name=caller,
+            )
+        if chat_name:
+            return self._t(
+                "notification.call.missed_in",
+                locale=locale,
+                fallback="Missed call from {name} in {chat_name}",
+                name=caller,
+                chat_name=chat_name,
+            )
+        return self._t(
+            "notification.call.missed",
+            locale=locale,
+            fallback="Missed call from {name}",
+            name=caller,
+        )
+
+    async def on_call_ringing(self, event: CallRinging) -> None:
+        """``call_incoming``: a push — no row — for each local person a call
+        rings: "Anna is calling" / "Anna is calling in Team" (D11).
+
+        Under Messages and calls (D4): Off → nothing. A muted chat rings
+        silently in the app only. The push shares its tag with the missed
+        call (:func:`_call_tag`), so when nobody picks up "Missed call from
+        Anna" replaces it on the device instead of stacking under it."""
+        prefs, link, _ = await self._call_parts(event.conversation_id)
+        for local in await self._call_audience(
+            event.caller_user_id, event.callee_user_ids, prefs
+        ):
+            if (
+                parse_notif_settings(local.preferences_json).delivery(
+                    NotifKind.MESSAGES
+                )
+                is NotifDelivery.OFF
+            ):
+                continue
+            locale = self._locale(local)
+            await self._send_push(
+                local,
+                ntype="call_incoming",
+                title=self._call_title(
+                    await self._person_name(event.caller_user_id, locale),
+                    self._chat_name(prefs, local),
+                    locale,
+                    missed=False,
+                ),
+                link_url=link,
+                tag=_call_tag(link),
+            )
+
+    async def on_call_missed(self, event: CallMissed) -> None:
+        """``call_missed``: a row — one per conversation (D7) — and a push
+        for each local person who missed the call: "Missed call from Anna"
+        (D3: a missed call is about you, so it is in the list although chat
+        messages are not). A muted chat or Messages and calls set to Off
+        gives nothing; opening the chat reads the row."""
+        prefs, link, about = await self._call_parts(event.conversation_id)
+        withheld = await self._withheld_from(event.caller_user_id)
+        for local in await self._call_audience(
+            event.caller_user_id, event.callee_user_ids, prefs
+        ):
+            locale = self._locale(local)
+            caller = await self._person_name(event.caller_user_id, locale)
+            await self._save_notif(
+                new_notification(
+                    user_id=local.user_id,
+                    type="call_missed",
+                    title=self._call_title(
+                        caller, self._chat_name(prefs, local), locale, missed=True
+                    ),
+                    link_url=link,
+                ),
+                about=about,
+                actor_user_id=event.caller_user_id,
+                withheld=withheld,
+            )
+
+    async def on_chat_added(self, event: DmConversationCreated) -> None:
+        """``chat_added``: someone put you in a group chat — "Anna added you
+        to Team" (D3: being added is about you). The person who added you
+        doesn't get one; a roster from another household doesn't say who
+        added you ("You were added to Team"). A 1:1 chat is not "added"."""
+        if event.conversation_type != ConversationType.GROUP_DM.value:
+            return
+        adder = event.creator_user_id or None
+        prefs, link, about = await self._call_parts(event.conversation_id)
+        withheld = await self._withheld_from(adder) if adder else frozenset()
+        for user_id in dict.fromkeys(event.member_user_ids):
+            if user_id == adder:
+                continue
+            local = await self._users.get_by_user_id(user_id)
+            if local is None or local.username in prefs.muted:
+                continue
+            locale = self._locale(local)
+            chat_name = self._chat_name(prefs, local)
+            if adder:
+                name = await self._person_name(adder, locale)
+                title = (
+                    self._t(
+                        "notification.chat.added_to",
+                        locale=locale,
+                        fallback="{name} added you to {chat_name}",
+                        name=name,
+                        chat_name=chat_name,
+                    )
+                    if chat_name
+                    else self._t(
+                        "notification.chat.added",
+                        locale=locale,
+                        fallback="{name} added you to a group chat",
+                        name=name,
+                    )
+                )
+            else:
+                title = (
+                    self._t(
+                        "notification.chat.added_to_none",
+                        locale=locale,
+                        fallback="You were added to {chat_name}",
+                        chat_name=chat_name,
+                    )
+                    if chat_name
+                    else self._t(
+                        "notification.chat.added_none",
+                        locale=locale,
+                        fallback="You were added to a group chat",
+                    )
+                )
+            await self._save_notif(
+                new_notification(
+                    user_id=local.user_id,
+                    type="chat_added",
+                    title=title,
+                    link_url=link,
+                ),
+                about=about,
+                actor_user_id=adder,
+                withheld=withheld,
+            )
+
+    # ── Polls ────────────────────────────────────────────────────────
+
+    async def on_poll_closed(self, event: PollClosed) -> None:
+        """``poll_result``: the author closed a poll — everyone here who
+        voted in it hears so ("Anna closed a poll you voted in", "Anna closed
+        a poll in Familie Alpha"); the row opens the post with the result.
+        Never the question or the winning answer (§25.3). A close from another
+        household (``SPACE_POLL_CLOSED``) tells this household's voters."""
+        repo = self._space_polls if event.space_id else self._polls
+        if repo is None:
+            return
+        voters = await repo.list_voter_ids(event.post_id)
+        author = event.actor_user_id or await repo.get_post_author(event.post_id)
+        if not voters:
+            return
+        space_name = await self._space_name(event.space_id)
+        if event.space_id:
+            link = space_post_link(event.space_id, event.post_id)
+            about = NotificationSubject.of(
+                NotificationObject.SPACE_POST,
+                event.post_id,
+                space_id=event.space_id,
+                space_name=space_name,
+            )
+        else:
+            link = household_post_link(event.post_id)
+            about = NotificationSubject.of(NotificationObject.POST, event.post_id)
+        withheld = await self._withheld_from(author) if author else frozenset()
+        for voter in voters:
+            if voter == author:
+                continue
+            local = await self._users.get_by_user_id(voter)
+            if local is None:
+                continue
+            locale = self._locale(local)
+            name = (
+                await self._person_name(author, locale)
+                if author
+                else self._someone(locale)
+            )
+            title = (
+                self._t(
+                    "notification.poll.closed_in",
+                    locale=locale,
+                    fallback="{name} closed a poll in {space_name}",
+                    name=name,
+                    space_name=space_name,
+                )
+                if space_name
+                else self._t(
+                    "notification.poll.closed",
+                    locale=locale,
+                    fallback="{name} closed a poll you voted in",
+                    name=name,
+                )
+            )
+            await self._save_notif(
+                new_notification(
+                    user_id=local.user_id,
+                    type="poll_result",
+                    title=title,
+                    link_url=link,
+                ),
+                about=about,
+                actor_user_id=author or None,
+                withheld=withheld,
+            )
 
     async def on_space_invite_answered(self, event: SpaceInviteAnswered) -> None:
         """The invitee answered their invite: it leaves their section."""

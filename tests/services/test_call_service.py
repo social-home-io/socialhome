@@ -18,6 +18,7 @@ from socialhome.domain.conversation import (
     RemoteConversationMember,
     SystemChatScope,
 )
+from socialhome.domain.events import CallMissed, CallRinging
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.user import RemoteUser, User
 from socialhome.services.call_service import (
@@ -58,26 +59,17 @@ class _FakeWS:
         self.calls.append((user_id, payload))
 
 
-class _FakePush:
-    def __init__(self):
-        self.missed: list[dict] = []
+class _FakeBus:
+    """Records what the service publishes (``CallRinging`` / ``CallMissed``)."""
 
-    async def notify_missed_call(
-        self,
-        *,
-        recipient_user_ids,
-        caller_user_id,
-        call_id,
-        conversation_id,
-    ):
-        self.missed.append(
-            {
-                "recipients": list(recipient_user_ids),
-                "caller": caller_user_id,
-                "call_id": call_id,
-                "conversation_id": conversation_id,
-            }
-        )
+    def __init__(self):
+        self.events: list = []
+
+    async def publish(self, event):
+        self.events.append(event)
+
+    def of(self, kind):
+        return [e for e in self.events if isinstance(e, kind)]
 
 
 class _FakeUserRepo:
@@ -339,7 +331,7 @@ def env():
     convos.add_conversation("conv-ab", ["alice", "bob"])
     fed = _FakeFederation()
     ws = _FakeWS()
-    push = _FakePush()
+    bus = _FakeBus()
     call_repo = _FakeCallRepo()
     svc = CallSignalingService(
         call_repo=call_repo,
@@ -348,8 +340,8 @@ def env():
         own_identity_seed=_seed(),
         federation_service=fed,
         ws_manager=ws,
+        bus=bus,
     )
-    svc.attach_push_service(push)
     return type(
         "Env",
         (),
@@ -359,7 +351,7 @@ def env():
             "convos": convos,
             "fed": fed,
             "ws": ws,
-            "push": push,
+            "bus": bus,
             "call_repo": call_repo,
         },
     )()
@@ -697,8 +689,101 @@ async def test_gc_expired_marks_missed_and_emits_call_event(env):
         if m.type == "call_event" and json.loads(m.content)["event"] == "missed"
     ]
     assert msgs
-    # And a push was fired to the callee.
-    assert env.push.missed and env.push.missed[0]["recipients"] == ["uid-bob"]
+    # And the callee missed it (NotificationService turns it into a row +
+    # push in their language).
+    (event,) = env.bus.of(CallMissed)
+    assert event.callee_user_ids == ("uid-bob",)
+    assert event.caller_user_id == "uid-alice"
+    assert event.conversation_id == "conv-ab"
+
+
+async def test_initiate_call_publishes_ringing_for_local_callees(env):
+    """The push for an incoming call hangs on ``CallRinging``."""
+    r = await env.svc.initiate_call(
+        caller_user_id="uid-alice",
+        conversation_id="conv-ab",
+        call_type="video",
+        sdp_offer="v=0\r\n",
+    )
+    (event,) = env.bus.of(CallRinging)
+    assert event.call_id == r["call_id"]
+    assert event.caller_user_id == "uid-alice"
+    assert event.callee_user_ids == ("uid-bob",)
+    assert event.call_type == "video"
+    assert env.bus.of(CallMissed) == []
+
+
+async def test_caller_hanging_up_before_an_answer_is_a_missed_call(env):
+    """Nobody picked up and the caller gave up: the callee missed it — a
+    ``missed`` row in the history, a "Missed call" in the thread and
+    ``CallMissed`` for them (which replaces the ringing push)."""
+    r = await env.svc.initiate_call(
+        caller_user_id="uid-alice",
+        conversation_id="conv-ab",
+        call_type="audio",
+        sdp_offer="v=0\r\n",
+    )
+    await env.svc.hangup(call_id=r["call_id"], hanger_user_id="uid-alice")
+    assert (await env.call_repo.get_call(r["call_id"])).status == "missed"
+    assert [
+        json.loads(m.content)["event"]
+        for m in env.convos.messages
+        if m.type == "call_event"
+    ] == ["started", "missed"]
+    (event,) = env.bus.of(CallMissed)
+    assert event.callee_user_ids == ("uid-bob",)
+
+
+async def test_a_declined_call_is_not_missed(env):
+    r = await env.svc.initiate_call(
+        caller_user_id="uid-alice",
+        conversation_id="conv-ab",
+        call_type="audio",
+        sdp_offer="v=0\r\n",
+    )
+    await env.svc.decline(call_id=r["call_id"], decliner_user_id="uid-bob")
+    assert (await env.call_repo.get_call(r["call_id"])).status == "declined"
+    assert env.bus.of(CallMissed) == []
+
+
+async def test_an_answered_call_is_not_missed(env):
+    r = await env.svc.initiate_call(
+        caller_user_id="uid-alice",
+        conversation_id="conv-ab",
+        call_type="audio",
+        sdp_offer="v=0\r\n",
+    )
+    await env.svc.answer_call(
+        call_id=r["call_id"], answerer_user_id="uid-bob", sdp_answer="ans"
+    )
+    await env.svc.hangup(call_id=r["call_id"], hanger_user_id="uid-alice")
+    assert (await env.call_repo.get_call(r["call_id"])).status == "ended"
+    assert env.bus.of(CallMissed) == []
+
+
+async def test_without_a_bus_a_call_still_rings_and_misses():
+    """``bus=None`` publishes nothing and never breaks the call."""
+    users = _FakeUserRepo()
+    users.add_user("alice", "uid-alice")
+    users.add_user("bob", "uid-bob")
+    convos = _FakeConversationRepo()
+    convos.add_conversation("conv-ab", ["alice", "bob"])
+    repo = _FakeCallRepo()
+    svc = CallSignalingService(
+        call_repo=repo,
+        conversation_repo=convos,
+        user_repo=users,
+        own_identity_seed=_seed(),
+        ws_manager=_FakeWS(),
+    )
+    r = await svc.initiate_call(
+        caller_user_id="uid-alice",
+        conversation_id="conv-ab",
+        call_type="audio",
+        sdp_offer="v=0\r\n",
+    )
+    await svc.hangup(call_id=r["call_id"], hanger_user_id="uid-alice")
+    assert (await repo.get_call(r["call_id"])).status == "missed"
 
 
 # ─── join_call ────────────────────────────────────────────────────────────

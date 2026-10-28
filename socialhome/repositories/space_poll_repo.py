@@ -292,6 +292,15 @@ class SqliteSpacePollRepo:
         )
         return [r["option_id"] for r in rows]
 
+    async def list_voter_ids(self, post_id: str) -> list[str]:
+        rows = await self._db.fetchall(
+            "SELECT DISTINCT pv.voter_user_id FROM space_poll_votes pv "
+            "JOIN space_poll_options po ON po.id = pv.option_id "
+            "WHERE po.post_id=? ORDER BY pv.voter_user_id",
+            (post_id,),
+        )
+        return [r["voter_user_id"] for r in rows]
+
     async def list_options_with_counts(
         self,
         post_id: str,

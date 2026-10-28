@@ -59,6 +59,7 @@ from ...domain.events import (
     GalleryItemDeleted,
     GalleryItemUploaded,
     PageDeleted,
+    PollClosed,
     SpaceZoneDeleted,
     SpaceZoneUpserted,
     TaskCreated,
@@ -1720,6 +1721,17 @@ class SpaceContentInboundHandlers:
             log_cross_space_refusal(
                 event, space_id=space_id, what="poll", row_id=post_id
             )
+            return
+        # Local voters hear the poll closed; ``origin_instance_id`` stops
+        # the outbound bridge from echoing the peer's own close back.
+        await self._bus.publish(
+            PollClosed(
+                post_id=post_id,
+                space_id=space_id,
+                actor_user_id=await self._poll_repo.get_post_author(post_id) or "",
+                origin_instance_id=event.from_instance,
+            )
+        )
 
     async def _on_schedule_created(
         self,

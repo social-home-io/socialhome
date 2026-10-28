@@ -319,5 +319,17 @@
   "notification.post.reacted": "{name} reaccionó con {emoji} a tu publicación",
   "notification.space.post.reacted": "{name} reaccionó con {emoji} a tu publicación en {space_name}",
   "notification.push.post_reacted": "{name} reaccionó a tu publicación",
-  "notification.push.post_reacted_in": "{name} reaccionó a tu publicación en {space_name}"
+  "notification.push.post_reacted_in": "{name} reaccionó a tu publicación en {space_name}",
+  "notification.call.incoming": "{name} te está llamando",
+  "notification.call.incoming_in": "{name} está llamando en {chat_name}",
+  "notification.call.missed": "Llamada perdida de {name}",
+  "notification.call.missed_in": "Llamada perdida de {name} en {chat_name}",
+  "notification.chat.added": "{name} te añadió a un chat de grupo",
+  "notification.chat.added_to": "{name} te añadió a {chat_name}",
+  "notification.chat.added_none": "Te añadieron a un chat de grupo",
+  "notification.chat.added_to_none": "Te añadieron a {chat_name}",
+  "notification.poll.closed": "{name} cerró una encuesta en la que votaste",
+  "notification.poll.closed_in": "{name} cerró una encuesta en {space_name}",
+  "notification.report.answered": "Se revisó tu denuncia",
+  "notification.report.answered_in": "Se revisó tu denuncia en {space_name}"
 }

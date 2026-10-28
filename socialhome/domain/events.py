@@ -729,10 +729,17 @@ class PollVoted(DomainEvent):
 
 @dataclass(slots=True, frozen=True)
 class PollClosed(DomainEvent):
-    """Author closed the poll — no more votes accepted."""
+    """Author closed the poll — no more votes accepted.
+
+    ``actor_user_id`` is the author who closed it (empty when unknown).
+    ``origin_instance_id`` is set when the close came from a peer
+    (``SPACE_POLL_CLOSED``): the outbound bridge does not echo it back.
+    """
 
     post_id: str
     space_id: str | None = None
+    actor_user_id: str = ""
+    origin_instance_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -1923,6 +1930,11 @@ class DmConversationCreated(DomainEvent):
     ``member_user_ids`` covers everyone, *including* the creator: their
     other open sessions need the frame too (mobile + desktop on the
     same account is a routine pattern in the household OS).
+
+    For a group it also fires when people are added later: then
+    ``member_user_ids`` are the people just added and ``creator_user_id``
+    is who added them (empty when the roster came from the group's
+    authority household, which does not say who).
     """
 
     conversation_id: str
@@ -1947,6 +1959,37 @@ class DmGroupRosterChanged(DomainEvent):
     conversation_id: str
     name: str | None
     notify_user_ids: tuple[str, ...]
+    occurred_at: datetime = field(default_factory=_now)
+
+
+# ─── Calls (§26) — local only, never federated ──────────────────────────
+
+
+@dataclass(slots=True, frozen=True)
+class CallRinging(DomainEvent):
+    """A call started ringing for local people here (§26.2): a call placed
+    on this household, or a ``CALL_OFFER`` from a peer. Drives the
+    ``call_incoming`` push (no Notifications row)."""
+
+    call_id: str
+    conversation_id: str
+    caller_user_id: str
+    callee_user_ids: tuple[str, ...]
+    call_type: str = "audio"
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class CallMissed(DomainEvent):
+    """Nobody picked up (§26.8): it rang out (the stale-call sweep) or the
+    caller hung up before anyone answered. ``callee_user_ids`` are the
+    people it rang for who neither answered nor declined. Drives the
+    ``call_missed`` row + push."""
+
+    call_id: str
+    conversation_id: str
+    caller_user_id: str
+    callee_user_ids: tuple[str, ...]
     occurred_at: datetime = field(default_factory=_now)
 
 

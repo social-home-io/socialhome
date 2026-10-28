@@ -304,6 +304,19 @@ class FakeCallRepo:
         return [s for s in self.samples if s.call_id == call_id]
 
 
+class FakeBus:
+    """Records what the service publishes (``CallRinging`` / ``CallMissed``)."""
+
+    def __init__(self) -> None:
+        self.events: list = []
+
+    async def publish(self, event) -> None:
+        self.events.append(event)
+
+    def of(self, kind) -> list:
+        return [e for e in self.events if isinstance(e, kind)]
+
+
 def make_call_service(
     *,
     federation: FakeFederation | None = None,
@@ -312,7 +325,7 @@ def make_call_service(
     """Build a ``CallSignalingService`` with fresh fakes + return them.
 
     Returns a ``types.SimpleNamespace`` with ``svc``, ``users``, ``convos``,
-    ``fed``, ``ws``, ``call_repo`` attributes so individual tests can
+    ``fed``, ``ws``, ``call_repo``, ``bus`` attributes so individual tests can
     inspect side effects without threading many arguments.
     """
     from types import SimpleNamespace
@@ -320,6 +333,7 @@ def make_call_service(
     users = FakeUserRepo()
     convos = FakeConversationRepo()
     call_repo = FakeCallRepo()
+    bus = FakeBus()
     fed = federation if federation is not None else FakeFederation()
     wsm = ws if ws is not None else FakeWS()
     seed = generate_identity_keypair().private_key
@@ -330,8 +344,10 @@ def make_call_service(
         own_identity_seed=seed,
         federation_service=fed,
         ws_manager=wsm,
+        bus=bus,
     )
     return SimpleNamespace(
+        bus=bus,
         svc=svc,
         users=users,
         convos=convos,

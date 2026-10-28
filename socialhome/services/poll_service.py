@@ -264,6 +264,7 @@ class PollService(BusPublisherMixin):
             PollClosed(
                 post_id=post_id,
                 space_id=space_id,
+                actor_user_id=actor_user_id,
             )
         )
 

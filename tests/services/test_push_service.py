@@ -123,56 +123,6 @@ def test_vapid_public_key_property():
     assert svc.vapid_public_key == "public-key"
 
 
-async def test_notify_missed_call_fans_out_title_only():
-    """Missed-call push: title-only body (§25.3), deep-links to DM thread."""
-    repo = _MemRepo()
-    svc = PushService(sub_repo=repo, vapid=_vapid())
-    await repo.save(
-        PushSubscription(
-            id="s1",
-            user_id="uid-bob",
-            endpoint="https://x/1",
-            p256dh="p",
-            auth_secret="a",
-        )
-    )
-    delivered = await svc.notify_missed_call(
-        recipient_user_ids=["uid-bob"],
-        caller_user_id="uid-alice",
-        call_id="c1",
-        conversation_id="conv-ab",
-    )
-    assert delivered == 1
-
-
-async def test_notify_missed_call_payload_shape():
-    """Payload must be title-only (no body) + clickthrough to the DM thread."""
-    captured: list[tuple[str, PushPayload]] = []
-
-    class _CapService(PushService):
-        async def push_to_user(self, user_id, payload):  # type: ignore[override]
-            captured.append((user_id, payload))
-            return 1
-
-    svc = _CapService(sub_repo=_MemRepo(), vapid=_vapid())
-    await svc.notify_missed_call(
-        recipient_user_ids=["uid-bob", "uid-charlie"],
-        caller_user_id="uid-alice",
-        call_id="c1",
-        conversation_id="conv-ab",
-    )
-    assert len(captured) == 2
-    _uid, p = captured[0]
-    assert p.title == "Missed call"
-    assert p.tag == "call-missed:c1"
-    assert p.click_url and "conv-ab" in p.click_url
-    import json as _json
-
-    body = _json.loads(p.to_json())
-    assert "body" not in body
-    assert body["title"] == "Missed call"
-
-
 # ─── Real send path (pywebpush) runs off the event loop ─────────────────
 
 

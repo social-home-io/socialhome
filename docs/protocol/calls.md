@@ -274,7 +274,17 @@ from injecting a modified SDP that redirects media to a third party.
 If the callee doesn't answer within 90 s the offerer sends
 `CALL_HANGUP`; both sides record a `type=call_event` message in the
 corresponding DM conversation so the user has a record of the missed
-call.
+call. A caller who hangs up before anyone answered makes the same missed
+call: the row reads `missed` on both sides (the callee's household learns
+it from that `CALL_HANGUP` while its row still rings).
+
+Notifications are local and add nothing to the wire: the callee's
+household turns its own ring into a `call_incoming` push ("Anna is
+calling", tag `call_missed:/dms/<id>`, no row) and a missed call into a
+`call_missed` row + push ("Missed call from Anna") that replaces the ring
+on the device — both in the callee's language, both silent for a muted
+chat or with Messages and calls set to Off (`docs/api.md`,
+`GET /api/notifications`).
 
 ## Call quality metrics
 

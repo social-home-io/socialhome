@@ -3158,6 +3158,8 @@ def create_app(config: Config | None = None) -> web.Application:
     notification_service.attach_personal_calendar_repo(calendar_repo)
     # D6 comment audience + D13 post reactions read the posts.
     notification_service.attach_post_repos(repos.post, repos.space_post)
+    # A closed poll tells the people who voted in it (poll_result).
+    notification_service.attach_poll_repos(repos.poll, repos.space_poll)
 
     # ── Per-user data export (§25.8.7) ──────────────────────────────────
     data_export_service = DataExportService(db)
@@ -4751,9 +4753,10 @@ def create_app(config: Config | None = None) -> web.Application:
             own_identity_seed=identity_seed,
             federation_service=federation_service,
             ws_manager=ws_manager,
+            # Ringing / missed calls → NotificationService (push + row).
+            bus=bus,
         )
         federation_service.attach_call_signaling(call_signaling)
-        call_signaling.attach_push_service(push_service)
         # §CP.F2: guardian blocks hold for calls as for DMs.
         call_signaling.attach_child_protection(child_protection_service)
         app[K.call_signaling_service_key] = call_signaling

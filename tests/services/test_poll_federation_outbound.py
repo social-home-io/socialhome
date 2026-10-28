@@ -99,6 +99,16 @@ async def test_poll_closed_broadcasts(env):
     assert event_type is FederationEventType.SPACE_POLL_CLOSED
 
 
+async def test_a_peers_poll_close_is_not_echoed_back(env):
+    """A close that came in as ``SPACE_POLL_CLOSED`` is republished locally
+    (so voters here hear it) — never broadcast again."""
+    bus, fed = env
+    await bus.publish(
+        PollClosed(post_id="p1", space_id="sp-A", origin_instance_id="peer-a")
+    )
+    assert fed.broadcasts == []
+
+
 async def test_broadcast_failure_is_swallowed():
     bus = EventBus()
     fed = _FakeFed(raise_on_broadcast=True)

@@ -14,7 +14,7 @@ class _Event:
         self.payload = payload
 
 
-# ─── attach_ws_manager / attach_federation / attach_push_service ─────────
+# ─── attach_ws_manager / attach_federation ───────────────────────────────
 
 
 def test_attach_ws_manager_replaces():
@@ -27,12 +27,6 @@ def test_attach_federation_replaces():
     env = make_call_service()
     env.svc.attach_federation(object())
     assert env.svc._federation is not None
-
-
-def test_attach_push_service_replaces():
-    env = make_call_service()
-    env.svc.attach_push_service(object())
-    assert env.svc._push is not None
 
 
 # ─── Empty user_id branch in _fanout_to_user ─────────────────────────────
