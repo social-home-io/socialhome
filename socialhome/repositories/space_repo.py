@@ -14,7 +14,7 @@ What lives here:
 * Invites (``create_invite_token`` / ``consume_invite_token``;
   ``save_invitation`` / ``get_invitation`` / ``update_invitation_status``).
 * Join requests (``save_join_request`` / ``list_pending_join_requests`` /
-  ``update_join_request_status``).
+  ``update_join_request_status`` / ``answer_join_request``).
 * Sidebar pins and personal space aliases.
 * Atomic ``increment_config_sequence``.
 
@@ -432,6 +432,13 @@ class AbstractSpaceRepo(Protocol):
         *,
         reviewed_by: str | None = None,
     ) -> None: ...
+    async def answer_join_request(
+        self,
+        request_id: str,
+        status: str,
+        *,
+        reviewed_by: str | None = None,
+    ) -> bool: ...
     async def list_expired_join_requests(self) -> list[dict]: ...
 
     # ── Sidebar + aliases ──────────────────────────────────────────────
@@ -3005,6 +3012,29 @@ class SqliteSpaceRepo:
             """,
             (status, reviewed_by, request_id),
         )
+
+    async def answer_join_request(
+        self,
+        request_id: str,
+        status: str,
+        *,
+        reviewed_by: str | None = None,
+    ) -> bool:
+        """Answer a *pending* join request — the one atomic step two admins
+        (or two inbound replies) race on. ``True`` when this call moved it
+        out of ``pending``; ``False`` when it was answered already (or is
+        unknown), so the caller sends, seats and announces nothing."""
+        if status not in ("approved", "denied", "expired", "withdrawn"):
+            raise ValueError(f"invalid join request answer {status!r}")
+        changed = await self._db.enqueue_rowcount(
+            """
+            UPDATE space_join_requests
+               SET status=?, reviewed_by=?, reviewed_at=datetime('now')
+             WHERE id=? AND status='pending'
+            """,
+            (status, reviewed_by, request_id),
+        )
+        return changed == 1
 
     async def list_expired_join_requests(self) -> list[dict]:
         rows = await self._db.fetchall(

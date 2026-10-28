@@ -41,6 +41,9 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+#: The states a join request leaves ``pending`` for.
+_JOIN_REQUEST_ANSWERS = frozenset({"approved", "denied", "expired", "withdrawn"})
+
 
 class SpaceInviteInboundHandlers:
     """Register invitation + join-request inbound handlers."""
@@ -261,12 +264,20 @@ class SpaceInviteInboundHandlers:
             ),
         }
         status = status_map.get(event.event_type, "expired")
+        if status not in _JOIN_REQUEST_ANSWERS:
+            log.debug("join request %s: ignoring status %r", request_id, status)
+            return
         reviewed_by = event.payload.get("reviewed_by")
-        await self._space_repo.update_join_request_status(
+        # Only a pending request takes an answer — once. A second answer
+        # for the same request (a replay through another route, or a
+        # withdrawal racing the host's approval) changes nothing and is
+        # not announced again.
+        if not await self._space_repo.answer_join_request(
             request_id,
             status,
             reviewed_by=str(reviewed_by) if reviewed_by else None,
-        )
+        ):
+            return
         if (
             event.event_type == FederationEventType.SPACE_JOIN_REQUEST_APPROVED
             and event.payload.get("invite_token")

@@ -7308,17 +7308,36 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             raise KeyError(f"join request {request_id!r} not found")
         space = await self._require_space(row["space_id"])
         actor_member = await self._require_admin_or_owner(space, actor_username)
-        status = str(row.get("status") or "pending")
-        if status != "pending":
-            reviewer = row.get("reviewed_by")
-            who = await self._users.get_by_user_id(reviewer) if reviewer else None
-            raise JoinRequestHandledError(
-                params={
-                    "status": status,
-                    "by": who.display_name if who is not None else "",
-                }
-            )
+        if str(row.get("status") or "pending") != "pending":
+            raise await self._join_request_handled(row)
         return row, space, actor_member
+
+    async def _join_request_handled(self, row: dict) -> JoinRequestHandledError:
+        """The 409 for an answered request, naming who answered it."""
+        reviewer = row.get("reviewed_by")
+        who = await self._users.get_by_user_id(reviewer) if reviewer else None
+        return JoinRequestHandledError(
+            params={
+                "status": str(row.get("status") or ""),
+                "by": who.display_name if who is not None else "",
+            }
+        )
+
+    async def _answer_join_request(
+        self, request_id: str, status: str, *, reviewed_by: str
+    ) -> None:
+        """Move the request out of ``pending`` — atomically, so of two admins
+        answering at once exactly one wins. Every side effect (seat, invite
+        token, federation answer, domain event) runs after this; the loser
+        gets :class:`JoinRequestHandledError` before any of them."""
+        if await self._spaces.answer_join_request(
+            request_id, status, reviewed_by=reviewed_by
+        ):
+            return
+        row = await self._spaces.get_join_request(request_id)
+        if row is None:
+            raise KeyError(f"join request {request_id!r} not found")
+        raise await self._join_request_handled(row)
 
     async def approve_join_request(
         self,
@@ -7369,10 +7388,8 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 raise SpacePermissionError(
                     "only the space owner can approve an admin grant",
                 )
-            await self._spaces.update_join_request_status(
-                request_id,
-                "approved",
-                reviewed_by=actor.user_id,
+            await self._answer_join_request(
+                request_id, "approved", reviewed_by=actor.user_id
             )
             if remote_instance:
                 await self.set_remote_member_role(
@@ -7421,20 +7438,19 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # carried was never kept. A remote applicant's redeem of the token
         # minted below is seated on this approval
         # (``has_approved_join_request``).
-        await self._spaces.update_join_request_status(
-            request_id,
-            "approved",
-            reviewed_by=actor.user_id,
+        if remote_instance and self._federation is None:
+            raise RuntimeError(
+                "space_service: federation not attached; "
+                "cannot approve remote join request",
+            )
+        await self._answer_join_request(
+            request_id, "approved", reviewed_by=actor.user_id
         )
         if remote_instance:
             # §D2 — cross-household approval. Mint an invite token and
             # federate it back; the applicant's household consumes via
             # the existing POST /api/spaces/join path.
-            if self._federation is None:
-                raise RuntimeError(
-                    "space_service: federation not attached; "
-                    "cannot approve remote join request",
-                )
+            assert self._federation is not None
             expires = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
             token = await self._spaces.create_invite_token(
                 row["space_id"],
@@ -7503,11 +7519,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         r, _space, _seat = await self._pending_join_request(
             request_id, actor_username=actor_username, space_id=space_id
         )
-        await self._spaces.update_join_request_status(
-            request_id,
-            "denied",
-            reviewed_by=actor.user_id,
-        )
+        await self._answer_join_request(request_id, "denied", reviewed_by=actor.user_id)
         remote_instance = r.get("remote_applicant_instance_id")
         if remote_instance and self._federation is not None:
             await self._federation.send_with_mesh_fallback(
