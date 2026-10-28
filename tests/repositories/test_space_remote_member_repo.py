@@ -564,3 +564,21 @@ async def test_reset_member_state_maintains_removed_at(repo):
     await repo.reset_member_state(**kw, member_version=4, tombstoned=True)
     gone = await repo.get_including_tombstones("sp1", "i-a", "u1")
     assert gone.removed_at not in (None, _OLD)
+
+
+async def test_latest_display_name_reads_any_seat_tombstones_included(repo):
+    """The newest named seat names a person, even after they left."""
+    assert await repo.latest_display_name("u1") is None
+    await repo.add(
+        space_id="sp1", instance_id="i-a", user_id="u1", user_pk=None, display_name=None
+    )
+    assert await repo.latest_display_name("u1") is None
+    await repo.add(
+        space_id="sp1",
+        instance_id="i-a",
+        user_id="u1",
+        user_pk=None,
+        display_name="Zoe",
+    )
+    await repo.remove("sp1", "i-a", "u1")
+    assert await repo.latest_display_name("u1") == "Zoe"

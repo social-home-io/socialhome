@@ -58,6 +58,9 @@ class _Spaces:
     async def get(self, space_id: str):
         return None
 
+    async def get_member(self, space_id: str, user_id: str):
+        return None
+
 
 class _Push:
     def __init__(self) -> None:

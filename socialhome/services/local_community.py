@@ -43,7 +43,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
-from ..domain.events import RemoteSpaceJoinRequestReceived
+from ..domain.events import SpaceJoinRequested
 from ..domain.local_community import (
     Eligibility,
     LocalArea,
@@ -319,7 +319,11 @@ async def file_remote_join_request(
         request_id=request_id,
         area_verdict=area_verdict.value if area_verdict is not None else None,
     )
+    # The same event a local request publishes: the admins' bell row
+    # ("{name} wants to join …") and their live list refresh.
     await bus.publish(
-        RemoteSpaceJoinRequestReceived(space_id=space_id, requester_user_id=user_id)
+        SpaceJoinRequested(
+            space_id=space_id, user_id=user_id, request_id=rid, message=message
+        )
     )
     return rid

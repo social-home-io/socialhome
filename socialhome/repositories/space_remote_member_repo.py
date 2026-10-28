@@ -149,6 +149,8 @@ class AbstractSpaceRemoteMemberRepo(Protocol):
         user_id: str,
     ) -> SpaceRemoteMember | None: ...
 
+    async def latest_display_name(self, user_id: str) -> str | None: ...
+
 
 class SqliteSpaceRemoteMemberRepo:
     """SQLite-backed :class:`AbstractSpaceRemoteMemberRepo`."""
@@ -569,6 +571,18 @@ class SqliteSpaceRemoteMemberRepo:
         )
         dicts = rows_to_dicts(rows)
         return _row(dicts[0]) if dicts else None
+
+    async def latest_display_name(self, user_id: str) -> str | None:
+        """The name the newest seat of *user_id* in any space carries
+        (tombstones included — a seat is the only record of a member of a
+        household this one never paired with), or ``None``."""
+        rows = await self._db.fetchall(
+            "SELECT display_name FROM space_remote_members "
+            "WHERE user_id=? AND display_name IS NOT NULL AND display_name<>'' "
+            "ORDER BY joined_at DESC LIMIT 1",
+            (user_id,),
+        )
+        return str(rows[0]["display_name"]) if rows else None
 
 
 def _row(row: dict) -> SpaceRemoteMember:

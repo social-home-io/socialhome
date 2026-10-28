@@ -1650,13 +1650,6 @@ class LocalSpaceInviteCreated(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
-class RemoteSpaceJoinRequestReceived(DomainEvent):
-    space_id: str
-    requester_user_id: str
-    occurred_at: datetime = field(default_factory=_now)
-
-
-@dataclass(slots=True, frozen=True)
 class RemoteJoinRequestApproved(DomainEvent):
     """§D2 — applicant side: our remote join-request was approved. The
     applicant-side federation handler publishes this so the space

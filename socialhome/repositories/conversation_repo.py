@@ -92,6 +92,7 @@ class AbstractConversationRepo(Protocol):
         self,
         conversation_id: str,
     ) -> list[RemoteConversationMember]: ...
+    async def remote_member_display_name(self, user_id: str) -> str | None: ...
     async def apply_group_roster(
         self,
         conversation: Conversation,
@@ -620,6 +621,17 @@ class SqliteConversationRepo:
             )
             for r in rows
         ]
+
+    async def remote_member_display_name(self, user_id: str) -> str | None:
+        """The name the newest group-chat seat of remote person *user_id*
+        carries, or ``None``."""
+        rows = await self._db.fetchall(
+            "SELECT display_name FROM conversation_remote_members "
+            "WHERE user_id=? AND display_name IS NOT NULL AND display_name<>'' "
+            "ORDER BY joined_at DESC LIMIT 1",
+            (user_id,),
+        )
+        return str(rows[0]["display_name"]) if rows else None
 
     async def apply_group_roster(
         self,

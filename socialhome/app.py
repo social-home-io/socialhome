@@ -3179,6 +3179,7 @@ def create_app(config: Config | None = None) -> web.Application:
     )
     notification_service.attach_calendar_repo(space_cal_repo)
     notification_service.attach_remote_member_repo(repos.space_remote_member)
+    notification_service.attach_author_profile_repo(repos.space_author_profile)
     # Only a household below v_43 warns about "Reviewed" (federated moderation).
     notification_service.attach_federation_repo(repos.federation)
     notification_service.attach_report_repo(report_repo)
