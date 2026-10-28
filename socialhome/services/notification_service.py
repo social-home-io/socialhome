@@ -50,9 +50,11 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from string import Formatter
 
+from ..domain.apps import PENDING_SESSION_TTL_SECONDS
 from ..domain.calendar import RSVPStatus
 from ..domain.conversation import ConversationType, SystemChatScope, mute_active
 from ..domain.events import (
+    AppChallengeEnded,
     AppChallengeReceived,
     AutoPairRequestAnswered,
     AutoPairRequestIncoming,
@@ -69,6 +71,7 @@ from ..domain.events import (
     CommentAdded,
     CommentDeleted,
     CommentUpdated,
+    DmContactRequestAnswered,
     DmContactRequested,
     DmConversationCreated,
     DmMessageCreated,
@@ -610,9 +613,11 @@ class NotificationService(ProtectionGateMixin):
 
     __slots__ = (
         "_adapter",
+        "_apps",
         "_bus",
         "_calendar_repo",
         "_child_protection",
+        "_contacts",
         "_convos",
         "_i18n",
         "_instances",
@@ -698,6 +703,11 @@ class NotificationService(ProtectionGateMixin):
         # Runs the handlers off the publisher's path — optional; without
         # it each handler runs inline in the publisher (still batched).
         self._worker: NotificationDeliveryWorker | None = None
+        # Contact requests and game invites — optional; "Needs you" checks
+        # a request to message you / a game invite still waits. Without
+        # them such a row stays pinned until it is answered.
+        self._contacts = None
+        self._apps = None
 
     def attach_post_repos(
         self,
@@ -725,6 +735,15 @@ class NotificationService(ProtectionGateMixin):
     def attach_pair_inbox(self, inbox) -> None:
         """Wire the auto-pair inbox (:meth:`pending_actions`)."""
         self._pair_inbox = inbox
+
+    def attach_contact_repo(self, contact_repo) -> None:
+        """Wire the DM contact requests (:meth:`pending_actions`)."""
+        self._contacts = contact_repo
+
+    def attach_app_repo(self, app_repo) -> None:
+        """Wire the app registry and its waiting game invites
+        (:meth:`pending_actions`)."""
+        self._apps = app_repo
 
     def attach_report_repo(self, report_repo) -> None:
         """Wire the report repo (``on_report_resolved``)."""
@@ -1214,6 +1233,7 @@ class NotificationService(ProtectionGateMixin):
         self._subscribe(BazaarOfferRejected, self.on_bazaar_offer_rejected)
         self._subscribe(BazaarListingExpired, self.on_bazaar_listing_expired)
         self._subscribe(DmContactRequested, self.on_dm_contact_requested)
+        self._subscribe(DmContactRequestAnswered, self.on_dm_contact_answered)
         self._subscribe(CalendarEventCreated, self.on_calendar_event_created)
         self._subscribe(CalendarEventDeleted, self.on_calendar_event_deleted)
         self._subscribe(CalendarEventUpdated, self.on_calendar_event_updated)
@@ -1265,6 +1285,7 @@ class NotificationService(ProtectionGateMixin):
             AppChallengeReceived,
             self.on_app_challenge_received,
         )
+        self._subscribe(AppChallengeEnded, self.on_app_challenge_ended)
         # The thing is gone, or you left its space: so are its rows.
         self._subscribe(PostDeleted, self.on_thing_deleted)
         self._subscribe(CommentDeleted, self.on_thing_deleted)
@@ -2622,16 +2643,65 @@ class NotificationService(ProtectionGateMixin):
         Such a row resolves (``done``) for this user on the way."""
         out: list[Notification] = []
         for note in await self._notifs.list_pending_actions(user_id):
-            if await self._still_needs(note):
+            ended = await self._ended_as(note)
+            if ended is None:
                 out.append(note)
             elif note.object_key:
                 await self._resolve(
                     note.object_key,
                     types=(note.type,),
-                    outcome="done",
+                    outcome=ended,
                     user_id=user_id,
                 )
         return out
+
+    async def _ended_as(self, note: Notification) -> str | None:
+        """``None`` while *note*'s request still waits for its recipient,
+        else how it ended (:data:`HANDLED_OUTCOMES`)."""
+        if note.type == "dm_contact_requested":
+            return await self._contact_ended_as(note)
+        if note.type == "app_challenge":
+            return await self._challenge_ended_as(note)
+        return None if await self._still_needs(note) else "done"
+
+    async def _contact_ended_as(self, note: Notification) -> str | None:
+        """A request to message you waits while one from that person is
+        pending and they are still someone this household knows."""
+        kind, _, requester = (note.object_key or "").partition(":")
+        if kind != NotificationObject.CONTACT or not requester:
+            return "done"
+        if self._contacts is None:
+            return None  # nothing to check against: keep it
+        latest = await self._contacts.latest_between(requester, note.user_id)
+        if latest is None:
+            return "done"
+        status = latest.get("status")
+        if status != "pending":
+            return status if status in ("accepted", "declined") else "done"
+        if await self._users.get_remote(requester) is None:
+            return "done"
+        return None
+
+    async def _challenge_ended_as(self, note: Notification) -> str | None:
+        """A game invite waits while its app is enabled here and the invite
+        is kept for its invitee, younger than the invite TTL."""
+        kind, _, oid = (note.object_key or "").partition(":")
+        app_id, _, session_id = oid.rpartition("/")
+        if kind != NotificationObject.APP_SESSION or not app_id or not session_id:
+            # A row from before one row per invite: the app holds those.
+            return "done"
+        if self._apps is None:
+            return None
+        app = await self._apps.get(app_id)
+        if app is None or not app.enabled:
+            return "done"
+        invite = await self._apps.get_pending_session(app_id, note.user_id, session_id)
+        if invite is None:
+            return "done"
+        cutoff = datetime.now(UTC) - timedelta(seconds=PENDING_SESSION_TTL_SECONDS)
+        if invite.created_at < cutoff.isoformat():
+            return "expired"
+        return None
 
     async def _still_needs(self, note: Notification) -> bool:
         """Does *note*'s request still wait for its recipient?"""
@@ -2674,6 +2744,29 @@ class NotificationService(ProtectionGateMixin):
                 return True
             return bool(await self._reports.count_pending_in_space(space_id))
         return False
+
+    async def on_dm_contact_answered(self, event: DmContactRequestAnswered) -> None:
+        """The recipient accepted or declined: their row about that person's
+        request leaves the section."""
+        await self._resolve(
+            object_key(NotificationObject.CONTACT, event.requester_user_id),
+            types=("dm_contact_requested",),
+            outcome="accepted" if event.accepted else "declined",
+            user_id=event.recipient_user_id,
+        )
+
+    async def on_app_challenge_ended(self, event: AppChallengeEnded) -> None:
+        """Game invites stopped waiting (the app took them in, a decline, a
+        withdrawal): their rows leave the invitee's section."""
+        for session_id in event.session_ids:
+            await self._resolve(
+                object_key(
+                    NotificationObject.APP_SESSION, f"{event.app_id}/{session_id}"
+                ),
+                types=("app_challenge",),
+                outcome=event.outcome,
+                user_id=event.user_id,
+            )
 
     async def on_dm_contact_requested(self, event: DmContactRequested) -> None:
         """A user wants to start a DM — notify the recipient + push."""
@@ -2724,7 +2817,11 @@ class NotificationService(ProtectionGateMixin):
                 title=title,
                 link_url=f"/apps/{event.app_id}",
             ),
-            about=NotificationSubject.of(NotificationObject.APP, event.app_id),
+            # One row per invite: it stays in "Needs you" until that invite
+            # is taken in, declined, withdrawn or expires.
+            about=NotificationSubject.of(
+                NotificationObject.APP_SESSION, f"{event.app_id}/{event.session_id}"
+            ),
             actor_user_id=event.from_user_id,
             actor_name=event.from_display,
         )

@@ -46,6 +46,8 @@ from .apps import (
     AppMessagesView,
     AppPeersView,
     AppPendingSessionsView,
+    AppSessionCancelView,
+    AppSessionDeclineView,
     AppSessionsView,
     AppStoreCollectionView,
     AppStoreItemView,
@@ -128,6 +130,8 @@ from .child_protection import (
     MeProtectionView,
 )
 from .conversations import (
+    ContactRequestAcceptView,
+    ContactRequestDeclineView,
     ConversationCollectionView,
     ConversationDeliveryStatesView,
     ConversationDmView,
@@ -771,6 +775,14 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_view("/api/conversations", ConversationCollectionView)
     app.router.add_view("/api/conversations/dm", ConversationDmView)
     app.router.add_view("/api/conversations/group", ConversationGroupView)
+    app.router.add_view(
+        "/api/conversations/contact-requests/{user_id}/accept",
+        ContactRequestAcceptView,
+    )
+    app.router.add_view(
+        "/api/conversations/contact-requests/{user_id}/decline",
+        ContactRequestDeclineView,
+    )
     app.router.add_view("/api/conversations/{id}/messages", ConversationMessageView)
     app.router.add_view(
         "/api/conversations/{id}/messages/{mid}", ConversationMessageItemView
@@ -1355,6 +1367,12 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_view("/api/apps/{app_id}/contacts", AppContactsView)
     app.router.add_view("/api/apps/{app_id}/peers", AppPeersView)
     app.router.add_view("/api/apps/{app_id}/sessions", AppSessionsView)
+    app.router.add_view(
+        "/api/apps/{app_id}/sessions/{session_id}/decline", AppSessionDeclineView
+    )
+    app.router.add_view(
+        "/api/apps/{app_id}/sessions/{session_id}/cancel", AppSessionCancelView
+    )
     app.router.add_view("/api/apps/{app_id}/pending-sessions", AppPendingSessionsView)
     app.router.add_view("/api/apps/{app_id}/messages", AppMessagesView)
 

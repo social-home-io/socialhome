@@ -45,6 +45,14 @@ interface RpcErrReply {
 
 type RpcReply = RpcOkReply | RpcErrReply
 
+/** One waiting invite, as ``GET /api/apps/{id}/pending-sessions`` lists it. */
+interface PendingSession {
+  session_id: string
+  from_instance: string
+  from_user: string | null
+  payload: unknown
+}
+
 /**
  * Mount the bridge between ``iframe`` and the host.
  *
@@ -157,6 +165,18 @@ export function mountBridge(
           break
         }
 
+        case 'app.cancelSession': {
+          // The challenger withdraws an invite: the invitee's "Needs you"
+          // item goes and their app hears {verb: 'close', reason: 'withdrawn'}.
+          const { sessionId, target } = params ?? {}
+          await api.post(
+            `/api/apps/${encodeURIComponent(appId)}/sessions/${encodeURIComponent(String(sessionId ?? ''))}/cancel`,
+            { target },
+          )
+          reply({ id, ok: true, result: { ok: true } })
+          break
+        }
+
         default:
           reply({
             id,
@@ -183,6 +203,38 @@ export function mountBridge(
     handleRpc(req as RpcRequest)
   }
 
+  /** Invites this mount already handed the app live (no second copy). */
+  const relayed = new Set<string>()
+
+  /**
+   * A game invite reached the app while it is open: the app has it, so
+   * the host takes the waiting invites in (the drain the app does on start)
+   * — its "Needs you" item reads as accepted — and hands the app any it
+   * hasn't seen yet. Best effort: the app drains again on its next start.
+   */
+  async function takeInvitesIn(): Promise<void> {
+    try {
+      const resp = await api.get<{ sessions?: PendingSession[] }>(
+        `/api/apps/${encodeURIComponent(appId)}/pending-sessions`,
+      )
+      for (const s of resp?.sessions ?? []) {
+        if (relayed.has(s.session_id)) continue
+        relayed.add(s.session_id)
+        iframe.contentWindow?.postMessage(
+          {
+            type: 'app:event',
+            kind: 'session',
+            sessionId: s.session_id,
+            fromInstance: s.from_instance,
+            fromUser: s.from_user ?? undefined,
+            payload: s.payload,
+          },
+          '*',
+        )
+      }
+    } catch { /* the app's own drain on its next start picks them up */ }
+  }
+
   // WS relay: push app-specific real-time frames into the iframe.
   // Forwards the full identity so multi-game / multi-friend apps can route
   // a message to the right session and distinguish invites from in-game moves.
@@ -199,6 +251,11 @@ export function mountBridge(
         },
         '*',
       )
+      const payload = evt.data.payload as { verb?: unknown } | undefined
+      if (evt.data.kind === 'session' && payload?.verb === 'open') {
+        relayed.add(String(evt.data.session_id))
+        void takeInvitesIn()
+      }
     }
   })
 

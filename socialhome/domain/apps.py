@@ -11,7 +11,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar
 
-from .errors import WrongTypeError
+from .errors import CodedError, WrongTypeError
+
+#: How long a game invite (a pending app session) waits for its invitee.
+#: Past it the invite is no longer replayed into the app and its "Needs
+#: you" item reads as expired. Correspondence games are slow: days, not
+#: hours.
+PENDING_SESSION_TTL_SECONDS: int = 14 * 24 * 60 * 60  # 14 days
 
 
 class AppError(Exception):
@@ -51,6 +57,15 @@ class AppContactNotFoundError(AppError):
     blocks).  Closes the authorization gap where a crafted ``target`` could
     address an arbitrary user / household the actor has no relationship with.
     """
+
+
+class AppChallengeHandledError(CodedError):
+    """The game invite no longer waits: the app took it in on another
+    device, it was declined a moment ago, withdrawn, or it expired."""
+
+    status = 409
+    code = "APP_CHALLENGE_HANDLED"
+    detail = "game invite already handled"
 
 
 _VALID_MIN_AGES: frozenset[int] = frozenset({0, 13, 16, 18})

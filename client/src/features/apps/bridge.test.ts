@@ -434,6 +434,56 @@ describe('mountBridge', () => {
     )
   })
 
+  it('WS relay: an invite reaching the open app is taken in (its Needs-you item goes) and the rest handed over once', async () => {
+    mockApiGet.mockResolvedValueOnce({
+      sessions: [
+        { session_id: 'sess-live', from_instance: 'peer', from_user: 'alice', payload: { verb: 'open' } },
+        { session_id: 'sess-older', from_instance: 'peer', from_user: 'bob', payload: { verb: 'open' } },
+      ],
+    })
+    wsHandlers['app.message']({
+      data: {
+        app_id: APP_ID,
+        session_id: 'sess-live',
+        from_instance: 'peer',
+        from_user: 'alice',
+        kind: 'session',
+        payload: { verb: 'open' },
+      },
+    })
+    await new Promise<void>(resolve => setTimeout(resolve, 0))
+    expect(mockApiGet).toHaveBeenCalledWith(`/api/apps/${APP_ID}/pending-sessions`)
+    const sent = (iframe.contentWindow!.postMessage as unknown as MockInstance).mock.calls
+      .map(([m]) => (m as { sessionId?: string }).sessionId)
+    // The live one once (from the frame), the older one from the drain.
+    expect(sent).toEqual(['sess-live', 'sess-older'])
+  })
+
+  it('WS relay: a move or a close takes nothing in', () => {
+    wsHandlers['app.message']({
+      data: { app_id: APP_ID, session_id: 's', from_instance: 'p', kind: 'session', payload: { verb: 'close' } },
+    })
+    wsHandlers['app.message']({
+      data: { app_id: APP_ID, session_id: 's', from_instance: 'p', kind: 'message', payload: { verb: 'open' } },
+    })
+    expect(mockApiGet).not.toHaveBeenCalled()
+  })
+
+  it('app.cancelSession: POSTs /sessions/{id}/cancel with the target', async () => {
+    mockApiPost.mockResolvedValueOnce({ ok: true })
+    const handler = captureMessageHandler()
+    const target = { instance_id: 'i', user_ref: 'bob', is_local: false }
+    await handler({
+      source: iframe.contentWindow as unknown as Window,
+      data: { id: 7, method: 'app.cancelSession', params: { sessionId: 's/1', target } },
+    })
+    expect(mockApiPost).toHaveBeenCalledWith(`/api/apps/${APP_ID}/sessions/s%2F1/cancel`, { target })
+    expect(iframe.contentWindow!.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 7, ok: true }),
+      '*',
+    )
+  })
+
   it('WS relay: does NOT forward frames for a different app_id', () => {
     wsHandlers['app.message']({
       data: {

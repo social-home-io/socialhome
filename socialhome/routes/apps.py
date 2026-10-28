@@ -316,6 +316,59 @@ class AppSessionsView(BaseView):
         return self._json({"session_id": session_id}, status=201)
 
 
+def _target(body: dict) -> dict | None:
+    """A ``{instance_id, user_ref, is_local}`` person target, or ``None``."""
+    target = body.get("target")
+    if (
+        not isinstance(target, dict)
+        or not isinstance(target.get("instance_id"), str)
+        or not target["instance_id"]
+        or not isinstance(target.get("user_ref"), str)
+        or not target["user_ref"]
+        or not isinstance(target.get("is_local"), bool)
+    ):
+        return None
+    return target
+
+
+class AppSessionDeclineView(BaseView):
+    """``POST /api/apps/{app_id}/sessions/{session_id}/decline`` — the
+    invitee declines a game invite that waits for them; the challenger's
+    app hears ``{verb: "close", reason: "declined"}``. ``409
+    APP_CHALLENGE_HANDLED`` when it no longer waits."""
+
+    async def post(self) -> web.Response:
+        await self.svc(app_federation_service_key).decline_session(
+            app_id=self.match("app_id"),
+            session_id=self.match("session_id"),
+            actor_user_id=self.user.user_id,
+        )
+        return self._json({"ok": True})
+
+
+class AppSessionCancelView(BaseView):
+    """``POST /api/apps/{app_id}/sessions/{session_id}/cancel`` — the
+    challenger withdraws an invite. Body ``{target}`` — the person the
+    session was opened with."""
+
+    async def post(self) -> web.Response:
+        target = _target(await self.body())
+        if target is None:
+            return error_response(
+                400,
+                "UNPROCESSABLE",
+                "target must have non-empty string instance_id, non-empty "
+                "string user_ref, and a bool is_local.",
+            )
+        await self.svc(app_federation_service_key).cancel_session(
+            app_id=self.match("app_id"),
+            session_id=self.match("session_id"),
+            target=target,
+            actor_user_id=self.user.user_id,
+        )
+        return self._json({"ok": True})
+
+
 class AppPendingSessionsView(BaseView):
     """``GET /api/apps/{app_id}/pending-sessions`` — drain this user's
     replayable session invites (delivered to apps that were closed when the

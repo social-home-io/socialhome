@@ -1168,6 +1168,17 @@ class DmContactRequested(DomainEvent):
     occurred_at: datetime = field(default_factory=_now)
 
 
+@dataclass(slots=True, frozen=True)
+class DmContactRequestAnswered(DomainEvent):
+    """The recipient accepted or declined someone's request to message
+    them — every pending request from that person, at once."""
+
+    requester_user_id: str
+    recipient_user_id: str
+    accepted: bool
+    occurred_at: datetime = field(default_factory=_now)
+
+
 # ─── Shopping list (§23.120) — local household only, no federation ─────
 #
 # The shopping list is intentionally a local-household feature:
@@ -2561,6 +2572,22 @@ class AppChallengeReceived(DomainEvent):
     #: The challenger's user id — never shown, only checked against the
     #: recipient's personal and guardian blocks (``None``: not known).
     from_user_id: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class AppChallengeEnded(DomainEvent):
+    """Game invites stopped waiting for their invitee ``user_id``.
+
+    ``outcome`` (a :data:`~socialhome.domain.notification.HANDLED_OUTCOMES`
+    value): ``accepted`` — the invitee opened the app, which took the
+    invites in; ``declined`` — the invitee declined; ``withdrawn`` — the
+    challenger cancelled. Published by :class:`AppFederationService`.
+    """
+
+    app_id: str
+    user_id: str
+    session_ids: tuple[str, ...]
+    outcome: str
 
 
 # ─── Momentum (§Momentum) ─────────────────────────────────────────────────

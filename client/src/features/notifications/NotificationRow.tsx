@@ -34,13 +34,14 @@ import { countsMeta, handledMeta, plainText, rowSentence, type Segment } from '.
 
 export type GlyphName =
   | 'comment' | 'at' | 'post' | 'heart' | 'person' | 'calendar'
-  | 'task' | 'shield' | 'tag' | 'mail' | 'bell' | 'phone' | 'poll'
+  | 'task' | 'shield' | 'tag' | 'mail' | 'bell' | 'phone' | 'poll' | 'game'
 
 /** The kind of thing a type is about, for its glyph. */
 export function glyphFor(type: string): GlyphName {
   if (type.startsWith('call_')) return 'phone'
   if (type === 'chat_added') return 'comment'
   if (type.startsWith('poll_')) return 'poll'
+  if (type === 'app_challenge') return 'game'
   if (type.includes('react')) return 'heart'
   if (type.includes('mention') || type === 'space_here') return 'at'
   if (type.includes('comment') || type.includes('replied')) return 'comment'
@@ -69,6 +70,7 @@ const GLYPHS: Record<GlyphName, JSX.Element> = {
   bell: <><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" /><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" /></>,
   phone: <path d="M13.832 16.568a1 1 0 0 0 1.213-.303l.355-.465A2 2 0 0 1 17 15h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2A18 18 0 0 1 2 4a2 2 0 0 1 2-2h3a2 2 0 0 1 2 2v3a2 2 0 0 1-.8 1.6l-.468.351a1 1 0 0 0-.292 1.233 14 14 0 0 0 6.392 6.384" />,
   poll: <path d="M3 3v16a2 2 0 0 0 2 2h16M18 17V9M13 17V5M8 17v-3" />,
+  game: <><path d="M6 11h4M8 9v4M15 12h.01M18 10h.01" /><path d="M17.32 5H6.68a4 4 0 0 0-3.978 3.59C2.604 9.416 2 14.456 2 16a3 3 0 0 0 3 3c1 0 1.5-.5 2-1l1.414-1.414A2 2 0 0 1 9.828 16h4.344a2 2 0 0 1 1.414.586L17 18c.5.5 1 1 2 1a3 3 0 0 0 3-3c0-1.545-.604-6.584-.685-7.258A4 4 0 0 0 17.32 5z" /></>,
 }
 
 function Glyph({ name }: { name: GlyphName }) {

@@ -7,9 +7,10 @@ to message a local user they haven't exchanged keys with yet, a
 The admin UI then shows it as pending and the recipient can
 accept/decline.
 
-Kept deliberately tiny — a full contact-list service may grow around
-this table later. For now the surface is just ``save_request`` +
-``list_pending_for``.
+Kept deliberately tiny: :class:`DmContactService` answers a request
+(``answer_pending`` — every pending request from one person to one
+recipient, as one conditional write) and "Needs you" checks it
+(``latest_between``).
 """
 
 from __future__ import annotations
@@ -31,6 +32,12 @@ class AbstractDmContactRepo(Protocol):
     ) -> str: ...
     async def list_pending_for(self, to_user_id: str) -> list[dict]: ...
     async def set_status(self, request_id: str, status: str) -> None: ...
+    async def latest_between(
+        self, from_user_id: str, to_user_id: str
+    ) -> dict | None: ...
+    async def answer_pending(
+        self, from_user_id: str, to_user_id: str, status: str
+    ) -> int: ...
 
 
 class SqliteDmContactRepo:
@@ -80,3 +87,29 @@ class SqliteDmContactRepo:
             (request_id,),
         )
         return row_to_dict(row)
+
+    async def latest_between(self, from_user_id: str, to_user_id: str) -> dict | None:
+        """The newest request from one person to another — a pending one
+        first, so an older answer never hides a request still waiting."""
+        row = await self._db.fetchone(
+            "SELECT * FROM dm_contact_requests "
+            "WHERE from_user_id=? AND to_user_id=? "
+            "ORDER BY status='pending' DESC, created_at DESC, rowid DESC "
+            "LIMIT 1",
+            (from_user_id, to_user_id),
+        )
+        return row_to_dict(row)
+
+    async def answer_pending(
+        self, from_user_id: str, to_user_id: str, status: str
+    ) -> int:
+        """Answer every *pending* request from ``from_user_id`` to
+        ``to_user_id`` — the one atomic step two devices race on. Returns
+        how many it moved: ``0`` means someone answered first."""
+        if status not in ("accepted", "declined"):
+            raise ValueError(f"invalid contact request answer {status!r}")
+        return await self._db.enqueue_rowcount(
+            "UPDATE dm_contact_requests SET status=? "
+            "WHERE from_user_id=? AND to_user_id=? AND status='pending'",
+            (status, from_user_id, to_user_id),
+        )

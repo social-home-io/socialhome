@@ -32,6 +32,17 @@ otherwise (legacy/empty/unresolvable, and the binary ``fed-app-v1`` path which
 carries no routing slot in v1) it falls back to the household fan-out and the
 app's ``session_id`` scopes the semantics for the SPA.
 
+Game invites: an open addressed to one person is kept for them
+(``app_pending_sessions``, local and remote opens alike) until the app takes
+it in (:meth:`drain_pending_sessions` — "accepted"), the invitee declines it
+(:meth:`decline_session`), the challenger withdraws it
+(:meth:`cancel_session`, or an inbound ``APP_SESSION {verb:"close"}`` from
+the household and person that opened it) or it expires
+(:data:`~socialhome.domain.apps.PENDING_SESSION_TTL_SECONDS`). Each end but
+the expiry publishes :class:`AppChallengeEnded`, which takes the "Needs you"
+item down. A decline / withdrawal tells the other side with an
+``APP_SESSION {verb:"close", reason}`` — the existing session-control verb.
+
 Authorization: both outbound entry points call :meth:`_assert_target_allowed`,
 which rejects (``AppContactNotFoundError``) any target that is not in the
 actor's challengeable roster (the same block-aware set as
@@ -49,12 +60,13 @@ from uuid import uuid4
 
 from ..domain.apps import (
     AppAgeRestrictedError,
+    AppChallengeHandledError,
     AppContactNotFoundError,
     AppNotEnabledError,
     AppNotFoundError,
     AppPendingSession,
 )
-from ..domain.events import AppChallengeReceived
+from ..domain.events import AppChallengeEnded, AppChallengeReceived
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 
@@ -302,7 +314,24 @@ class AppFederationService:
             )
             # Raise a bell row + push for the *target only* (not the
             # initiator) — but only if the target survived the age filter.
+            # Keep the invite for them like a remote one, so it waits until
+            # their app takes it in even if it isn't open now.
             if target["user_ref"] in recipients:
+                await self._app_repo.add_pending_session(
+                    AppPendingSession(
+                        app_id=app_id,
+                        user_id=target["user_ref"],
+                        session_id=session_id,
+                        from_instance=own,
+                        from_user=actor_user_id,
+                        payload={
+                            "app_id": app_id,
+                            "session_id": session_id,
+                            "verb": "open",
+                        },
+                        created_at=datetime.now(UTC).isoformat(),
+                    )
+                )
                 initiator = await self._user_repo.get_by_user_id(actor_user_id)
                 from_display = (
                     initiator.display_name if initiator is not None else actor_user_id
@@ -489,6 +518,7 @@ class AppFederationService:
             to_user=to_user,
             from_user=from_user,
             notify_open=(kind == "session" and event.payload.get("verb") == "open"),
+            withdraw=(kind == "session" and event.payload.get("verb") == "close"),
         )
 
     async def on_inbound_message(
@@ -736,6 +766,7 @@ class AppFederationService:
         to_user: str | None = None,
         from_user: str | None = None,
         notify_open: bool = False,
+        withdraw: bool = False,
     ) -> None:
         """Route an inbound app message to local users via WebSocket.
 
@@ -765,6 +796,10 @@ class AppFederationService:
             event also resolves to a single local recipient, raise a bell row +
             push for that recipient. Never set for messages or the legacy
             household fan-out (no specific recipient to notify).
+        withdraw:
+            ``True`` only for an inbound ``APP_SESSION`` *close* addressed to
+            one person: the invite it ends stops waiting — only when the same
+            household and person opened it.
         """
         app = await self._app_repo.get(app_id)
         if app is None or not app.enabled:
@@ -823,6 +858,14 @@ class AppFederationService:
                         session_id,
                     )
                     return
+                if withdraw:
+                    await self._withdrawn(
+                        app_id,
+                        recipient.user_id,
+                        session_id,
+                        from_instance=from_instance,
+                        from_user=from_user,
+                    )
                 if await self._user_repo.is_blocked(
                     recipient.user_id, initiator.user_id
                 ):
@@ -920,5 +963,177 @@ class AppFederationService:
         self, app_id: str, user_id: str
     ) -> list[AppPendingSession]:
         """Return + clear this user's pending session invites for the app
-        (replayed by the app on open)."""
-        return await self._app_repo.drain_pending_sessions(app_id, user_id)
+        (replayed by the app on open). The app took them in: each one's
+        "Needs you" item reads as accepted."""
+        pending = await self._app_repo.drain_pending_sessions(app_id, user_id)
+        if pending:
+            await self._emit(
+                AppChallengeEnded(
+                    app_id=app_id,
+                    user_id=user_id,
+                    session_ids=tuple(p.session_id for p in pending),
+                    outcome="accepted",
+                )
+            )
+        return pending
+
+    # ─── Game invites: decline / withdraw ────────────────────────────────
+
+    async def decline_session(
+        self, *, app_id: str, session_id: str, actor_user_id: str
+    ) -> None:
+        """The invitee declines a game invite that waits for them.
+
+        The invite is removed in one step (a second device, the app taking
+        it in or a withdrawal racing it: the loser gets
+        :class:`AppChallengeHandledError`), its "Needs you" item reads as
+        declined, and the challenger's app hears ``{verb: "close", reason:
+        "declined"}`` — over WebSocket when they are on this household,
+        else as an ``APP_SESSION`` to their household (best effort: the
+        decline stands if that send fails). Nothing is sent for an app that
+        is no longer enabled here."""
+        invite = await self._app_repo.take_pending_session(
+            app_id, actor_user_id, session_id
+        )
+        if invite is None:
+            raise AppChallengeHandledError()
+        await self._emit(
+            AppChallengeEnded(
+                app_id=app_id,
+                user_id=actor_user_id,
+                session_ids=(session_id,),
+                outcome="declined",
+            )
+        )
+        app = await self._app_repo.get(app_id)
+        if app is None or not app.enabled or not invite.from_user:
+            return
+        await self._send_close(
+            app_id=app_id,
+            session_id=session_id,
+            actor_user_id=actor_user_id,
+            to_instance=invite.from_instance,
+            to_user=invite.from_user,
+            reason="declined",
+        )
+
+    async def cancel_session(
+        self, *, app_id: str, session_id: str, target: dict, actor_user_id: str
+    ) -> None:
+        """The challenger withdraws a game invite they sent to *target*.
+
+        ``target`` is the same ``{instance_id, user_ref, is_local}`` the
+        session was opened with. A local invitee's invite stops waiting
+        here (only one this challenger opened); a remote invitee's
+        household gets ``APP_SESSION {verb: "close", reason: "withdrawn"}``
+        and does the same on its side. Either way the invitee's app hears
+        the close."""
+        await self._require_enabled(app_id)
+        await self._assert_target_allowed(actor_user_id, target)
+        own = self._federation.own_instance_id
+        if target.get("is_local"):
+            await self._withdrawn(
+                app_id,
+                target["user_ref"],
+                session_id,
+                from_instance=own,
+                from_user=actor_user_id,
+            )
+        await self._send_close(
+            app_id=app_id,
+            session_id=session_id,
+            actor_user_id=actor_user_id,
+            to_instance=own if target.get("is_local") else target["instance_id"],
+            to_user=target["user_ref"],
+            reason="withdrawn",
+        )
+
+    async def _withdrawn(
+        self,
+        app_id: str,
+        user_id: str,
+        session_id: str,
+        *,
+        from_instance: str,
+        from_user: str | None,
+    ) -> None:
+        """The challenger (``from_instance`` / ``from_user``) ended an
+        invite that waited for ``user_id``: it stops waiting — only when
+        they are who opened it."""
+        if not from_user:
+            return
+        taken = await self._app_repo.take_pending_session(
+            app_id,
+            user_id,
+            session_id,
+            from_instance=from_instance,
+            from_user=from_user,
+        )
+        if taken is not None:
+            await self._emit(
+                AppChallengeEnded(
+                    app_id=app_id,
+                    user_id=user_id,
+                    session_ids=(session_id,),
+                    outcome="withdrawn",
+                )
+            )
+
+    async def _send_close(
+        self,
+        *,
+        app_id: str,
+        session_id: str,
+        actor_user_id: str,
+        to_instance: str,
+        to_user: str,
+        reason: str,
+    ) -> None:
+        """Tell the other side's app the session ended: ``{verb: "close",
+        reason}``. On this household ``to_user`` is a user id and the frame
+        goes over WebSocket; on another household it is their username and
+        rides ``APP_SESSION`` (v_18+ households only — older ones can't
+        address a person, and a close is not worth a household fan-out)."""
+        payload: dict[str, Any] = {
+            "app_id": app_id,
+            "session_id": session_id,
+            "verb": "close",
+            "reason": reason,
+        }
+        own = self._federation.own_instance_id
+        if to_instance == own:
+            recipients = await self._age_filter_recipients(app_id, [to_user])
+            await self._emit_frame(
+                recipients,
+                app_id=app_id,
+                session_id=session_id,
+                from_instance=own,
+                from_user=actor_user_id,
+                kind="session",
+                payload=payload,
+            )
+            return
+        try:
+            if not await self._federation.peer_supports(
+                to_instance,
+                min_version=FederationCapability.MIN_FOR_APP_USER_ROUTING,
+            ):
+                return
+            me = await self._user_repo.get_by_user_id(actor_user_id)
+            payload["to_user"] = to_user
+            payload["from_user"] = me.username if me is not None else actor_user_id
+            await self._federation.send_event(
+                to_instance_id=to_instance,
+                event_type=FederationEventType.APP_SESSION,
+                payload=payload,
+            )
+        except Exception as exc:
+            # The answer stands on this side; the other app just isn't told.
+            log.warning(
+                "app_federation: close (%s) for session %s to %s not sent: %s",
+                reason,
+                session_id,
+                to_instance,
+                exc,
+                exc_info=True,
+            )

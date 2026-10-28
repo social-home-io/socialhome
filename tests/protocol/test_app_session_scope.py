@@ -143,11 +143,11 @@ async def _pending(db) -> list[tuple]:
     return [tuple(r) for r in rows]
 
 
-async def _open(app, *, sender, from_user, session_id="sess-1") -> None:
+async def _open(app, *, sender, from_user, session_id="sess-1", verb="open") -> None:
     payload = {
         "app_id": "chess",
         "session_id": session_id,
-        "verb": "open",
+        "verb": verb,
         "to_user": "bob",
     }
     if from_user is not None:
@@ -197,6 +197,18 @@ async def test_an_early_copy_from_another_household_does_not_suppress_the_invite
     await _open(app, sender=OTHER, from_user="alice")  # not OTHER's user: refused
     await _open(app, sender=PEER, from_user="alice")
     assert await _pending(db) == [("sess-1", "u-bob", PEER, "alice")]
+
+
+async def test_another_household_cannot_withdraw_a_pending_invite(env):
+    """A close only withdraws an invite for the household and person that
+    opened it — another household naming the same session changes nothing."""
+    app, db = env
+    await _open(app, sender=PEER, from_user="alice")
+    await _open(app, sender=OTHER, from_user="eve", verb="close")
+    await _open(app, sender=OTHER, from_user="alice", verb="close")  # not OTHER's
+    assert await _pending(db) == [("sess-1", "u-bob", PEER, "alice")]
+    await _open(app, sender=PEER, from_user="alice", verb="close")
+    assert await _pending(db) == []
 
 
 async def _message(app, *, sender, **fields) -> None:

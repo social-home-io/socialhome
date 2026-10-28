@@ -16,9 +16,15 @@ from typing import Protocol, runtime_checkable
 import orjson
 
 from ..db import AsyncDatabase
-from ..domain.apps import AppKvEntry, AppManifest, AppPendingSession, InstalledApp
+from ..domain.apps import (
+    PENDING_SESSION_TTL_SECONDS,
+    AppKvEntry,
+    AppManifest,
+    AppPendingSession,
+    InstalledApp,
+)
 
-_PENDING_SESSION_TTL_SECONDS = 14 * 24 * 60 * 60  # 14 days
+_PENDING_SESSION_TTL_SECONDS = PENDING_SESSION_TTL_SECONDS
 _PENDING_SESSION_MAX_PER_PAIR = 50
 
 
@@ -56,6 +62,18 @@ class AbstractAppRepo(Protocol):
     async def prune_pending_sessions(
         self, *, max_age_seconds: int = _PENDING_SESSION_TTL_SECONDS
     ) -> int: ...
+    async def get_pending_session(
+        self, app_id: str, user_id: str, session_id: str
+    ) -> AppPendingSession | None: ...
+    async def take_pending_session(
+        self,
+        app_id: str,
+        user_id: str,
+        session_id: str,
+        *,
+        from_instance: str | None = None,
+        from_user: str | None = None,
+    ) -> AppPendingSession | None: ...
 
 
 def _row_to_kv(row) -> AppKvEntry:
@@ -326,3 +344,49 @@ class SqliteAppRepo:
             (cutoff,),
         )
         return int(before)
+
+    async def get_pending_session(
+        self, app_id: str, user_id: str, session_id: str
+    ) -> AppPendingSession | None:
+        """One waiting invite, expired or not (the caller compares
+        ``created_at`` with the TTL)."""
+        row = await self._db.fetchone(
+            """SELECT * FROM app_pending_sessions
+               WHERE app_id = ? AND user_id = ? AND session_id = ?""",
+            (app_id, user_id, session_id),
+        )
+        return _row_to_pending(row) if row is not None else None
+
+    async def take_pending_session(
+        self,
+        app_id: str,
+        user_id: str,
+        session_id: str,
+        *,
+        from_instance: str | None = None,
+        from_user: str | None = None,
+    ) -> AppPendingSession | None:
+        """Remove one waiting invite — the one atomic step a decline, a
+        withdrawal and the app taking it in race on. Returns the invite
+        when this call removed it, ``None`` when it was gone already (or
+        is not from ``from_instance`` / ``from_user`` when they are given:
+        only the household and person who sent it may withdraw it)."""
+        row = await self._db.fetchone(
+            """SELECT * FROM app_pending_sessions
+               WHERE app_id = ? AND user_id = ? AND session_id = ?""",
+            (app_id, user_id, session_id),
+        )
+        if row is None:
+            return None
+        invite = _row_to_pending(row)
+        if from_instance is not None and invite.from_instance != from_instance:
+            return None
+        if from_user is not None and invite.from_user != from_user:
+            return None
+        changed = await self._db.enqueue_rowcount(
+            """DELETE FROM app_pending_sessions
+               WHERE app_id = ? AND user_id = ? AND session_id = ?
+                 AND from_instance = ?""",
+            (app_id, user_id, session_id, invite.from_instance),
+        )
+        return invite if changed == 1 else None
