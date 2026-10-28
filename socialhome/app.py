@@ -356,6 +356,7 @@ from .services.moment_reaction_counts import MomentReactionCounts
 from .services.moment_reaction_gfs import MomentReactionGfs
 from .services.moment_reaction_router import MomentReactionRouter
 from .services.moment_service import MomentService
+from .services.notification_delivery_worker import NotificationDeliveryWorker
 from .services.notification_settings_service import NotificationSettingsService
 from .services.online_status_service import OnlineStatusService
 from .services.page_conflict_service import PageConflictService
@@ -2246,6 +2247,16 @@ def _build_person_summary(
     return people
 
 
+def _build_notification_delivery(
+    notification_service: NotificationService,
+) -> NotificationDeliveryWorker:
+    """The worker that runs notification handlers off the publisher's
+    path — one batched job per event (call before ``wire()``)."""
+    worker = NotificationDeliveryWorker()
+    notification_service.attach_delivery_worker(worker)
+    return worker
+
+
 def _build_notification_settings(
     repos: SimpleNamespace,
     user_service: UserService,
@@ -2884,7 +2895,9 @@ def create_app(config: Config | None = None) -> web.Application:
     space_cal_service.wire()
     shopping_service = ShoppingService(shopping_repo, bus)
 
-    # Wire notification handlers onto the bus
+    # Wire notification handlers onto the bus, each event one job on the
+    # delivery worker (started / drained with the app).
+    notification_delivery = _build_notification_delivery(notification_service)
     notification_service.wire()
 
     # ── WebSocket realtime ────────────────────────────────────────────────
@@ -3675,6 +3688,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.space_service_key] = space_service
     app[K.space_approval_service_key] = space_approval_service
     app[K.notification_service_key] = notification_service
+    app[K.notification_delivery_key] = notification_delivery
     app[K.notification_settings_service_key] = _build_notification_settings(
         repos, user_service, system_chat_policy
     )
@@ -3775,6 +3789,8 @@ def create_app(config: Config | None = None) -> web.Application:
         nonlocal key_manager, federation_service, outbox_processor
         log.info("socialhome: starting up (mode=%s)", config.mode)
         await db.startup()
+        # Notification fan-out runs here from now on, off the publisher.
+        await notification_delivery.start()
 
         # Shared aiohttp client session — every HTTP caller in the app
         # (HA adapter, Supervisor client, federation, GFS, standalone
@@ -5365,6 +5381,9 @@ def create_app(config: Config | None = None) -> web.Application:
         # deletes) are published off the author's lock; send them while
         # the federation client and the database are still up.
         await app[K.highlight_service_key].stop()
+        # Deliver the notifications still queued while the database, the
+        # push session and the platform adapter are up.
+        await notification_delivery.stop()
         # Then the dashboard listener (it reads the database).
         await dashboard.controller.stop()
         # Before the adapter closes its HA client.

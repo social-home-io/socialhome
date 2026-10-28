@@ -45,7 +45,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from string import Formatter
 
@@ -135,7 +136,12 @@ from ..domain.notification import (
     object_key,
     regroup,
 )
-from ..domain.notification_kinds import NotifDelivery, NotifKind, notif_kind
+from ..domain.notification_kinds import (
+    NotifDelivery,
+    NotifKind,
+    SpaceNotifPref,
+    notif_kind,
+)
 from ..domain.post import PostType
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
@@ -145,12 +151,14 @@ from ..domain.space import (
     SpaceFeatureAccess,
     SpaceRole,
 )
+from ..domain.user import User
 from ..i18n import Catalog
-from ..infrastructure.event_bus import EventBus
+from ..infrastructure.event_bus import E, EventBus, Handler
 from ..repositories._spec import Spec
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.notification_repo import (
     AbstractNotificationRepo,
+    GroupKey,
     new_notification,
 )
 from ..repositories.poll_repo import AbstractPollRepo
@@ -158,6 +166,7 @@ from ..repositories.post_repo import AbstractPostRepo
 from ..repositories.space_post_repo import AbstractSpacePostRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
+from .notification_delivery_worker import NotificationDeliveryWorker
 from .notification_links import (
     HOUSEHOLD_CALENDAR_LINK,
     HOUSEHOLD_FEED_LINK,
@@ -241,6 +250,49 @@ class _SeatPrefs:
     space_id: str | None = None
     space_name: str | None = None
 
+
+@dataclass(slots=True, frozen=True)
+class _Pending:
+    """Service-local: one row that passed the gate and waits for its
+    job's batched write (:meth:`NotificationService.run_batched`)."""
+
+    note: Notification
+    about: NotificationSubject
+    user: User
+    actor: NotificationActor | None
+    push: bool
+    push_params: dict[str, str | None] | None
+    flags: tuple[str, ...]
+
+
+@dataclass(slots=True, frozen=True)
+class _DirectPush:
+    """Service-local: a push with no row (a chat message, a ring) that
+    waits its turn in a delivery job."""
+
+    user: User
+    ntype: str
+    title: str
+    link_url: str | None
+    tag: str
+
+
+@dataclass(slots=True)
+class _DeliveryBatch:
+    """Service-local: what one delivery job gathered — rows to write in
+    one go, and the people it already looked up (``None``: not a local
+    user), so a fan-out reads each of them once."""
+
+    items: list[_Pending | _DirectPush] = field(default_factory=list)
+    users: dict[str, User | None] = field(default_factory=dict)
+    names: dict[str, str | None] = field(default_factory=dict)
+    space_prefs: dict[str, dict[str, SpaceNotifPref]] = field(default_factory=dict)
+
+
+#: The batch of the delivery job running in this task, if any.
+_BATCH: ContextVar[_DeliveryBatch | None] = ContextVar(
+    "notification_delivery_batch", default=None
+)
 
 #: Where a household-chat bell / push leads: the feed's Chat tab.
 HOUSEHOLD_CHAT_LINK = "/?tab=chat"
@@ -470,6 +522,64 @@ def _reply_kind(
     return None
 
 
+def _group_since() -> str:
+    """The oldest last activity a row may have and still take a new event
+    into its group (D7: :data:`GROUP_QUIET_DAYS`)."""
+    return (datetime.now(UTC) - timedelta(days=GROUP_QUIET_DAYS)).isoformat()
+
+
+def _grouped(
+    note: Notification,
+    group: Notification | None,
+    about: NotificationSubject,
+    actor: NotificationActor | None,
+    push: bool,
+    flags: tuple[str, ...],
+) -> tuple[Notification, bool, bool]:
+    """``(row to write, reopened, silent)`` for *note* joining *group*.
+
+    No group → *note* starts one. Else (D7) the group's row takes the new
+    title, link and activity, comes back unread, and its params move on
+    (:func:`regroup`); a read row **re-opens**. Silent (D8): a repeat on a
+    row still unread — the badge already counts it and the device already
+    buzzed — unless the type always pushes or a chat went quiet for
+    :data:`CHAT_REALERT_SECONDS`; and anything with ``push`` off."""
+    if group is None:
+        saved = replace(
+            note,
+            object_key=about.object_key,
+            space_id=about.space_id,
+            params=first_params(actor, space_name=about.space_name, flags=flags),
+        )
+        return saved, False, not push
+    saved = replace(
+        group,
+        title=note.title,
+        body=note.body,
+        link_url=note.link_url,
+        created_at=note.created_at,
+        read_at=None,
+        space_id=about.space_id or group.space_id,
+        params=regroup(
+            group.params,
+            actor,
+            reopen=group.is_read,
+            space_name=about.space_name,
+            flags=flags,
+        ),
+    )
+    reopened = group.is_read
+    repeat = (
+        not reopened
+        and saved.type not in _ALWAYS_PUSH_TYPES
+        and not (
+            saved.type in _CHAT_TYPES
+            and _quiet_for(group.created_at, CHAT_REALERT_SECONDS)
+        )
+    )
+    return saved, reopened, repeat or not push
+
+
 def _beyond_the_circle(recipient, received_via: str | None, hop_count: int) -> bool:
     """§CP.R (decision 14): whether something that reached a **protected**
     *recipient* came from beyond its circle — its household and paired
@@ -515,6 +625,7 @@ class NotificationService(ProtectionGateMixin):
         "_spaces",
         "_users",
         "_withdrawals",
+        "_worker",
         "_ws_manager",
     )
 
@@ -580,6 +691,9 @@ class NotificationService(ProtectionGateMixin):
         # closed poll tells its voters (``poll_result``).
         self._polls: AbstractPollRepo | None = None
         self._space_polls: AbstractPollRepo | None = None
+        # Runs the handlers off the publisher's path — optional; without
+        # it each handler runs inline in the publisher (still batched).
+        self._worker: NotificationDeliveryWorker | None = None
 
     def attach_post_repos(
         self,
@@ -599,6 +713,10 @@ class NotificationService(ProtectionGateMixin):
         """Wire the household and space poll repos (``on_poll_closed``)."""
         self._polls = poll_repo
         self._space_polls = space_poll_repo
+
+    def attach_delivery_worker(self, worker: NotificationDeliveryWorker) -> None:
+        """Run the bus handlers on *worker* (call before :meth:`wire`)."""
+        self._worker = worker
 
     def attach_pair_inbox(self, inbox) -> None:
         """Wire the auto-pair inbox (:meth:`pending_actions`)."""
@@ -681,7 +799,9 @@ class NotificationService(ProtectionGateMixin):
         """The one gate every notification passes, then persist + publish
         ``NotificationCreated`` + fire title-only pushes to every registered
         surface (Web Push + HA mobile app). Returns the saved row, or
-        ``None`` when the gate refused it.
+        ``None`` when the gate refused it — and inside a delivery job
+        (:meth:`run_batched`), where the row is written with the rest of
+        the job's rows once its handler is done.
 
         The gate — so a new type inherits it rather than copying it:
 
@@ -728,7 +848,7 @@ class NotificationService(ProtectionGateMixin):
         app by default — a handler never decides that itself, so someone
         who sets them to Push gets the push.
         """
-        user = await self._users.get_by_user_id(note.user_id)
+        user = await self._local_user(note.user_id)
         if user is None:
             return None  # not a local user: their own household tells them
         if actor_user_id and actor_user_id != note.user_id:
@@ -750,53 +870,122 @@ class NotificationService(ProtectionGateMixin):
             if actor_user_id
             else None
         )
-        since = datetime.now(UTC) - timedelta(days=GROUP_QUIET_DAYS)
+        batch = _BATCH.get()
+        if batch is not None:
+            # A delivery job: the row joins the job's one batched write.
+            batch.items.append(
+                _Pending(note, about, user, actor, push, push_params, flags)
+            )
+            return None
         group = await self._notifs.latest_in_group(
             user_id=note.user_id,
             type=note.type,
             object_key=about.object_key,
-            since=since.isoformat(),
+            since=_group_since(),
         )
+        saved, reopened, silent = _grouped(note, group, about, actor, push, flags)
         if group is None:
-            saved = replace(
-                note,
-                object_key=about.object_key,
-                space_id=about.space_id,
-                params=first_params(actor, space_name=about.space_name, flags=flags),
-            )
             await self._notifs.save(saved)
         else:
-            saved = replace(
-                group,
-                title=note.title,
-                body=note.body,
-                link_url=note.link_url,
-                created_at=note.created_at,
-                read_at=None,
-                space_id=about.space_id or group.space_id,
-                params=regroup(
-                    group.params,
-                    actor,
-                    reopen=group.is_read,
-                    space_name=about.space_name,
-                    flags=flags,
-                ),
-            )
             await self._notifs.update_group(saved)
-        bumped = group is not None
-        reopened = group is not None and group.is_read
-        # D8: a repeat on a row still unread — the badge already counts it
-        # and the device already buzzed for it — unless a chat went quiet.
-        repeat = (
-            group is not None
-            and not reopened
-            and saved.type not in _ALWAYS_PUSH_TYPES
-            and not (
-                saved.type in _CHAT_TYPES
-                and _quiet_for(group.created_at, CHAT_REALERT_SECONDS)
-            )
+        await self._publish_created(
+            saved, bumped=group is not None, reopened=reopened, silent=silent
         )
-        silent = repeat or not push
+        if reopened:
+            await self._announce_unread(saved.user_id)
+        if not silent:
+            await self._push_row(saved, user, push_params)
+        return saved
+
+    async def run_batched(self, handler: Handler[E], event: E) -> None:
+        """Run one bus handler as **one delivery job** (the
+        :class:`~socialhome.services.notification_delivery_worker.NotificationDeliveryWorker`
+        runs it off the publisher's path).
+
+        Every row the handler saves passes :meth:`_save_notif`'s gate as it
+        goes, but is written when the handler is done: one group lookup and
+        one transaction for the whole fan-out (:meth:`_flush`), then the
+        ``NotificationCreated`` frames and the pushes in the order the
+        handler made them. The people a fan-out names are looked up once
+        (:meth:`_prefetch_users`). Grouping (D7) and silent repeats (D8)
+        come out exactly as one save at a time would make them. A handler
+        that fails still writes what it gathered before failing."""
+        if _BATCH.get() is not None:
+            await handler(event)
+            return
+        batch = _DeliveryBatch()
+        token = _BATCH.set(batch)
+        try:
+            await handler(event)
+        finally:
+            _BATCH.reset(token)
+            await self._flush(batch)
+
+    async def _flush(self, batch: _DeliveryBatch) -> None:
+        """Write one job's rows (:meth:`run_batched`): one group lookup and
+        one transaction, then the ``NotificationCreated`` frames, the new
+        unread counts of re-opened rows, and the pushes — each in the order
+        the handler made them."""
+        rows = [i for i in batch.items if isinstance(i, _Pending)]
+        groups: dict[GroupKey, Notification] = (
+            await self._notifs.latest_in_groups(
+                {(p.note.user_id, p.note.type, p.about.object_key) for p in rows},
+                since=_group_since(),
+            )
+            if rows
+            else {}
+        )
+        fresh: dict[str, Notification] = {}
+        changed: dict[str, Notification] = {}
+        done: dict[int, tuple[Notification, bool, bool, bool]] = {}
+        for item in rows:
+            key = (item.note.user_id, item.note.type, item.about.object_key)
+            group = groups.get(key)
+            saved, reopened, silent = _grouped(
+                item.note, group, item.about, item.actor, item.push, item.flags
+            )
+            # A second event for the same group in this job joins the row
+            # the first one made, as it would one save at a time.
+            groups[key] = saved
+            if group is None or saved.id in fresh:
+                fresh[saved.id] = saved
+            else:
+                changed[saved.id] = saved
+            done[id(item)] = (saved, group is not None, reopened, silent)
+        failed = await self._notifs.save_batch(
+            list(fresh.values()), list(changed.values())
+        )
+        landed = {k: v for k, v in done.items() if v[0].id not in failed}
+        for saved, bumped, reopened, silent in landed.values():
+            await self._publish_created(
+                saved, bumped=bumped, reopened=reopened, silent=silent
+            )
+        reopened_users = list(
+            dict.fromkeys(v[0].user_id for v in landed.values() if v[2])
+        )
+        if reopened_users:
+            counts = await self._notifs.count_unread_many(reopened_users)
+            for user_id in reopened_users:
+                await self._bus.publish(
+                    NotificationReadChanged(
+                        user_id=user_id, unread_count=counts.get(user_id, 0)
+                    )
+                )
+        for entry in batch.items:
+            if isinstance(entry, _DirectPush):
+                await self._push_now(
+                    entry.user,
+                    ntype=entry.ntype,
+                    title=entry.title,
+                    link_url=entry.link_url,
+                    tag=entry.tag,
+                )
+            elif (row := landed.get(id(entry))) is not None and not row[3]:
+                await self._push_row(row[0], entry.user, entry.push_params)
+
+    async def _publish_created(
+        self, saved: Notification, *, bumped: bool, reopened: bool, silent: bool
+    ) -> None:
         await self._bus.publish(
             NotificationCreated(
                 user_id=saved.user_id,
@@ -812,11 +1001,14 @@ class NotificationService(ProtectionGateMixin):
                 params=saved.params,
             )
         )
-        if reopened:
-            await self._announce_unread(saved.user_id)
-        if silent:
-            return saved
-        await self._send_push(
+
+    async def _push_row(
+        self,
+        saved: Notification,
+        user: User,
+        push_params: dict[str, str | None] | None,
+    ) -> None:
+        await self._push_now(
             user,
             ntype=saved.type,
             title=self._push_title(saved, user, push_params),
@@ -825,7 +1017,6 @@ class NotificationService(ProtectionGateMixin):
             # a different item never silently replaces it.
             tag=_push_tag(saved),
         )
-        return saved
 
     async def _heard(
         self, user, ntype: str, about: NotificationSubject
@@ -857,6 +1048,19 @@ class NotificationService(ProtectionGateMixin):
         return settings.delivery(kind) if kind is not None else NotifDelivery.PUSH
 
     async def _send_push(
+        self, user, *, ntype: str, title: str, link_url: str | None, tag: str
+    ) -> None:
+        """A push with no row (a chat message, a ring). In a delivery job it
+        waits its turn behind the rows saved before it (:meth:`_flush`), so
+        pushes leave in the order the handler made them."""
+        push = _DirectPush(user, ntype, title, link_url, tag)
+        batch = _BATCH.get()
+        if batch is not None:
+            batch.items.append(push)
+            return
+        await self._push_now(user, ntype=ntype, title=title, link_url=link_url, tag=tag)
+
+    async def _push_now(
         self, user, *, ntype: str, title: str, link_url: str | None, tag: str
     ) -> None:
         """One title-only push to every surface *user* registered: Web Push
@@ -955,102 +1159,115 @@ class NotificationService(ProtectionGateMixin):
             getattr(user, "locale", None) or None
         )
 
+    def _subscribe(self, event_type: type[E], handler: Handler[E]) -> None:
+        """Subscribe *handler* as one delivery job per event
+        (:meth:`run_batched`) — on the delivery worker when one is
+        attached, so the publisher only queues the event and returns."""
+
+        async def job(event: E) -> None:
+            await self.run_batched(handler, event)
+
+        job.__qualname__ = getattr(handler, "__qualname__", repr(handler))
+        self._bus.subscribe(
+            event_type,
+            self._worker.deferred(job) if self._worker is not None else job,
+        )
+
     def wire(self) -> None:
         """Register all event handlers on the bus. Idempotent (but
         calling twice subscribes twice — callers should call once).
+        Attach the delivery worker first (:meth:`attach_delivery_worker`).
         """
-        self._bus.subscribe(PostCreated, self.on_post_created)
-        self._bus.subscribe(CommentAdded, self.on_comment_added)
-        self._bus.subscribe(TaskAssigned, self.on_task_assigned)
-        self._bus.subscribe(TaskDeadlineDue, self.on_task_deadline_due)
-        self._bus.subscribe(SpacePostCreated, self.on_space_post_created)
-        self._bus.subscribe(SpaceModerationQueued, self.on_moderation_queued)
-        self._bus.subscribe(ReportFiled, self.on_report_filed)
-        self._bus.subscribe(ReportResolved, self.on_report_resolved)
-        self._bus.subscribe(SpaceModerationApproved, self.on_moderation_decided)
-        self._bus.subscribe(SpaceModerationRejected, self.on_moderation_decided)
-        self._bus.subscribe(SpaceModerationExpired, self.on_moderation_decided)
-        self._bus.subscribe(SpaceModerationApproved, self.on_moderation_item_handled)
-        self._bus.subscribe(SpaceModerationRejected, self.on_moderation_item_handled)
-        self._bus.subscribe(SpaceModerationExpired, self.on_moderation_item_handled)
-        self._bus.subscribe(SpaceRemoteSeatLive, self.on_remote_seat_live)
-        self._bus.subscribe(DmMessageCreated, self.on_dm_message_created)
-        self._bus.subscribe(DmMessageDeleted, self.on_dm_message_deleted)
-        self._bus.subscribe(DmMessageUpdated, self.on_dm_message_updated)
-        self._bus.subscribe(DmConversationCreated, self.on_chat_added)
-        self._bus.subscribe(CallRinging, self.on_call_ringing)
-        self._bus.subscribe(CallMissed, self.on_call_missed)
-        self._bus.subscribe(CallRingStopped, self.on_call_ring_stopped)
-        self._bus.subscribe(PollClosed, self.on_poll_closed)
-        self._bus.subscribe(PostEdited, self.on_post_edited)
-        self._bus.subscribe(CommentUpdated, self.on_comment_updated)
-        self._bus.subscribe(BazaarBidPlaced, self.on_bazaar_bid_placed)
-        self._bus.subscribe(BazaarOfferAccepted, self.on_bazaar_offer_accepted)
-        self._bus.subscribe(BazaarOfferRejected, self.on_bazaar_offer_rejected)
-        self._bus.subscribe(BazaarListingExpired, self.on_bazaar_listing_expired)
-        self._bus.subscribe(DmContactRequested, self.on_dm_contact_requested)
-        self._bus.subscribe(CalendarEventCreated, self.on_calendar_event_created)
-        self._bus.subscribe(CalendarEventDeleted, self.on_calendar_event_deleted)
-        self._bus.subscribe(CalendarEventUpdated, self.on_calendar_event_updated)
-        self._bus.subscribe(EventReminderDue, self.on_event_reminder_due)
-        self._bus.subscribe(TaskCompleted, self.on_task_completed)
-        self._bus.subscribe(SpacePostModerated, self.on_space_post_moderated)
-        self._bus.subscribe(SpaceMemberJoined, self.on_space_member_joined)
-        self._bus.subscribe(SpaceJoinRequested, self.on_space_join_requested)
-        self._bus.subscribe(SpaceJoinApproved, self.on_space_join_approved)
-        self._bus.subscribe(SpaceJoinDenied, self.on_space_join_denied)
-        self._bus.subscribe(SpaceJoinApproved, self.on_join_request_handled)
-        self._bus.subscribe(SpaceJoinDenied, self.on_join_request_handled)
-        self._bus.subscribe(RemoteJoinRequestApproved, self.on_remote_join_answered)
-        self._bus.subscribe(RemoteJoinRequestDenied, self.on_remote_join_answered)
-        self._bus.subscribe(LocalSpaceInviteCreated, self.on_local_space_invite)
-        self._bus.subscribe(RemoteSpaceInviteReceived, self.on_remote_space_invite)
-        self._bus.subscribe(SpaceInviteAnswered, self.on_space_invite_answered)
-        self._bus.subscribe(AutoPairRequestIncoming, self.on_auto_pair_requested)
-        self._bus.subscribe(AutoPairRequestAnswered, self.on_auto_pair_answered)
-        self._bus.subscribe(SpaceConfigChanged, self.on_space_ownership_transferred)
-        self._bus.subscribe(
+        self._subscribe(PostCreated, self.on_post_created)
+        self._subscribe(CommentAdded, self.on_comment_added)
+        self._subscribe(TaskAssigned, self.on_task_assigned)
+        self._subscribe(TaskDeadlineDue, self.on_task_deadline_due)
+        self._subscribe(SpacePostCreated, self.on_space_post_created)
+        self._subscribe(SpaceModerationQueued, self.on_moderation_queued)
+        self._subscribe(ReportFiled, self.on_report_filed)
+        self._subscribe(ReportResolved, self.on_report_resolved)
+        self._subscribe(SpaceModerationApproved, self.on_moderation_decided)
+        self._subscribe(SpaceModerationRejected, self.on_moderation_decided)
+        self._subscribe(SpaceModerationExpired, self.on_moderation_decided)
+        self._subscribe(SpaceModerationApproved, self.on_moderation_item_handled)
+        self._subscribe(SpaceModerationRejected, self.on_moderation_item_handled)
+        self._subscribe(SpaceModerationExpired, self.on_moderation_item_handled)
+        self._subscribe(SpaceRemoteSeatLive, self.on_remote_seat_live)
+        self._subscribe(DmMessageCreated, self.on_dm_message_created)
+        self._subscribe(DmMessageDeleted, self.on_dm_message_deleted)
+        self._subscribe(DmMessageUpdated, self.on_dm_message_updated)
+        self._subscribe(DmConversationCreated, self.on_chat_added)
+        self._subscribe(CallRinging, self.on_call_ringing)
+        self._subscribe(CallMissed, self.on_call_missed)
+        self._subscribe(CallRingStopped, self.on_call_ring_stopped)
+        self._subscribe(PollClosed, self.on_poll_closed)
+        self._subscribe(PostEdited, self.on_post_edited)
+        self._subscribe(CommentUpdated, self.on_comment_updated)
+        self._subscribe(BazaarBidPlaced, self.on_bazaar_bid_placed)
+        self._subscribe(BazaarOfferAccepted, self.on_bazaar_offer_accepted)
+        self._subscribe(BazaarOfferRejected, self.on_bazaar_offer_rejected)
+        self._subscribe(BazaarListingExpired, self.on_bazaar_listing_expired)
+        self._subscribe(DmContactRequested, self.on_dm_contact_requested)
+        self._subscribe(CalendarEventCreated, self.on_calendar_event_created)
+        self._subscribe(CalendarEventDeleted, self.on_calendar_event_deleted)
+        self._subscribe(CalendarEventUpdated, self.on_calendar_event_updated)
+        self._subscribe(EventReminderDue, self.on_event_reminder_due)
+        self._subscribe(TaskCompleted, self.on_task_completed)
+        self._subscribe(SpacePostModerated, self.on_space_post_moderated)
+        self._subscribe(SpaceMemberJoined, self.on_space_member_joined)
+        self._subscribe(SpaceJoinRequested, self.on_space_join_requested)
+        self._subscribe(SpaceJoinApproved, self.on_space_join_approved)
+        self._subscribe(SpaceJoinDenied, self.on_space_join_denied)
+        self._subscribe(SpaceJoinApproved, self.on_join_request_handled)
+        self._subscribe(SpaceJoinDenied, self.on_join_request_handled)
+        self._subscribe(RemoteJoinRequestApproved, self.on_remote_join_answered)
+        self._subscribe(RemoteJoinRequestDenied, self.on_remote_join_answered)
+        self._subscribe(LocalSpaceInviteCreated, self.on_local_space_invite)
+        self._subscribe(RemoteSpaceInviteReceived, self.on_remote_space_invite)
+        self._subscribe(SpaceInviteAnswered, self.on_space_invite_answered)
+        self._subscribe(AutoPairRequestIncoming, self.on_auto_pair_requested)
+        self._subscribe(AutoPairRequestAnswered, self.on_auto_pair_answered)
+        self._subscribe(SpaceConfigChanged, self.on_space_ownership_transferred)
+        self._subscribe(
             RemoteSpaceInviteAccepted,
             self.on_remote_invite_accepted,
         )
-        self._bus.subscribe(
+        self._subscribe(
             RemoteSpaceInviteDeclined,
             self.on_remote_invite_declined,
         )
-        self._bus.subscribe(RemoteSpaceDissolved, self.on_remote_space_dissolved)
-        self._bus.subscribe(
-            SpaceAdminSeedsRetiredAfterRestore, self.on_admin_seeds_retired
-        )
+        self._subscribe(RemoteSpaceDissolved, self.on_remote_space_dissolved)
+        self._subscribe(SpaceAdminSeedsRetiredAfterRestore, self.on_admin_seeds_retired)
         # Momentum (§Momentum) — reactions, replies, and new follows.
-        self._bus.subscribe(MomentReactionChanged, self.on_moment_reaction_changed)
+        self._subscribe(MomentReactionChanged, self.on_moment_reaction_changed)
         # D13: reactions on posts (household feed and spaces).
-        self._bus.subscribe(PostReactionChanged, self.on_post_reaction_changed)
-        self._bus.subscribe(MomentCreated, self.on_moment_created)
-        self._bus.subscribe(UserFollowed, self.on_user_followed)
+        self._subscribe(PostReactionChanged, self.on_post_reaction_changed)
+        self._subscribe(MomentCreated, self.on_moment_created)
+        self._subscribe(UserFollowed, self.on_user_followed)
         # Highlights — a reaction on your frame (a household member's, or
         # one a paired household's HIGHLIGHT_FRAME_REACTED brought in).
-        self._bus.subscribe(
+        self._subscribe(
             HighlightFrameReactionChanged, self.on_highlight_reaction_changed
         )
         # Space location feature enabled — nudge members to opt in.
-        self._bus.subscribe(
+        self._subscribe(
             SpaceLocationFeatureEnabled,
             self.on_space_location_feature_enabled,
         )
         # Social Home Apps — a challenge (APP_SESSION open) arrived.
-        self._bus.subscribe(
+        self._subscribe(
             AppChallengeReceived,
             self.on_app_challenge_received,
         )
         # The thing is gone, or you left its space: so are its rows.
-        self._bus.subscribe(PostDeleted, self.on_thing_deleted)
-        self._bus.subscribe(CommentDeleted, self.on_thing_deleted)
-        self._bus.subscribe(TaskDeleted, self.on_thing_deleted)
-        self._bus.subscribe(MomentDeleted, self.on_thing_deleted)
-        self._bus.subscribe(HighlightRemoved, self.on_thing_deleted)
-        self._bus.subscribe(SpaceMemberLeft, self.on_space_seat_gone)
-        self._bus.subscribe(RemoteSpaceMemberBanned, self.on_space_seat_gone)
-        self._bus.subscribe(SpaceConfigChanged, self.on_space_dissolved_here)
+        self._subscribe(PostDeleted, self.on_thing_deleted)
+        self._subscribe(CommentDeleted, self.on_thing_deleted)
+        self._subscribe(TaskDeleted, self.on_thing_deleted)
+        self._subscribe(MomentDeleted, self.on_thing_deleted)
+        self._subscribe(HighlightRemoved, self.on_thing_deleted)
+        self._subscribe(SpaceMemberLeft, self.on_space_seat_gone)
+        self._subscribe(RemoteSpaceMemberBanned, self.on_space_seat_gone)
+        self._subscribe(SpaceConfigChanged, self.on_space_dissolved_here)
 
     # ── Blocks ─────────────────────────────────────────────────────────
 
@@ -1078,8 +1295,8 @@ class NotificationService(ProtectionGateMixin):
         (``feed:household``): a burst of posts is one row that counts them
         and names who posted, and it opens the feed (``/feed``)."""
         author_id = event.post.author
-        users = await self._users.list_active()
-        author = await self._users.get_by_user_id(author_id)
+        users = await self._active_users()
+        author = await self._local_user(author_id)
         name = author.display_name if author else None
         blocked = await self._withheld_from(author_id)
         for user in users:
@@ -1139,9 +1356,9 @@ class NotificationService(ProtectionGateMixin):
                 commenter_ids=commenters,
             )
             return
-        commenter = await self._users.get_by_user_id(commenter_id)
+        commenter = await self._local_user(commenter_id)
         name = commenter.display_name if commenter else None
-        users = await self._users.list_active()
+        users = await self._active_users()
         blocked = await self._withheld_from(commenter_id)
         for user in users:
             if user.user_id == commenter_id or user.user_id in blocked:
@@ -1251,7 +1468,7 @@ class NotificationService(ProtectionGateMixin):
             and await self._spaces.get_member(event.space_id, event.assigned_to) is None
         ):
             return
-        recipient = await self._users.get_by_user_id(event.assigned_to)
+        recipient = await self._local_user(event.assigned_to)
         locale = self._locale(recipient)
         space_name = await self._space_name(event.space_id)
         await self._save_notif(
@@ -1284,7 +1501,7 @@ class NotificationService(ProtectionGateMixin):
         nobody caused, so no actor; a remote assignee is skipped by the
         gate (their own household reminds them)."""
         for assignee_id in event.task.assignees:
-            recipient = await self._users.get_by_user_id(assignee_id)
+            recipient = await self._local_user(assignee_id)
             title = self._t(
                 "notification.task.deadline_due",
                 locale=self._locale(recipient),
@@ -1371,7 +1588,7 @@ class NotificationService(ProtectionGateMixin):
             # the sender-side ``DmMessageCreated`` handler from blowing
             # up with a FOREIGN KEY constraint failure for every
             # cross-household DM.
-            local = await self._users.get_by_user_id(recipient_id)
+            local = await self._local_user(recipient_id)
             if local is None:
                 continue
             if local.username in muted:
@@ -1449,7 +1666,7 @@ class NotificationService(ProtectionGateMixin):
         if self._convos is None:
             return
         for user_id in dict.fromkeys(event.recipient_user_ids):
-            local = await self._users.get_by_user_id(user_id)
+            local = await self._local_user(user_id)
             if local is None:
                 continue
             if await self._convos.count_unread(event.conversation_id, local.username):
@@ -1526,7 +1743,7 @@ class NotificationService(ProtectionGateMixin):
                 or user_id in blocked
             ):
                 continue
-            local = await self._users.get_by_user_id(user_id)
+            local = await self._local_user(user_id)
             if local is None or local.username in prefs.muted:
                 continue
             if self._ws_manager is not None and (
@@ -1598,14 +1815,56 @@ class NotificationService(ProtectionGateMixin):
 
     async def _held_name(self, user_id: str) -> str | None:
         """The name this household holds for *user_id* — a local member's,
-        else a known remote person's — or ``None``."""
-        local = await self._users.get_by_user_id(user_id)
+        else a known remote person's — or ``None``. Looked up once per
+        delivery job."""
+        batch = _BATCH.get()
+        if batch is not None and user_id in batch.names:
+            return batch.names[user_id]
+        name: str | None = None
+        local = await self._local_user(user_id)
         if local is not None and local.display_name:
-            return local.display_name
-        remote = await self._users.get_remote(user_id)
-        if remote is not None and remote.display_name:
-            return remote.display_name
-        return None
+            name = local.display_name
+        else:
+            remote = await self._users.get_remote(user_id)
+            if remote is not None and remote.display_name:
+                name = remote.display_name
+        if batch is not None:
+            batch.names[user_id] = name
+        return name
+
+    async def _local_user(self, user_id: str) -> User | None:
+        """The local user *user_id* (``None``: not one of ours) — looked up
+        once per delivery job (:meth:`run_batched`)."""
+        batch = _BATCH.get()
+        if batch is not None and user_id in batch.users:
+            return batch.users[user_id]
+        user = await self._users.get_by_user_id(user_id)
+        if batch is not None:
+            batch.users[user_id] = user
+        return user
+
+    async def _prefetch_users(self, user_ids: Iterable[str]) -> None:
+        """Look a fan-out's people up in **one** read, so its per-recipient
+        :meth:`_local_user` calls cost nothing. Outside a delivery job
+        there is nowhere to keep them, so it does nothing."""
+        batch = _BATCH.get()
+        if batch is None:
+            return
+        wanted = {uid for uid in user_ids if uid not in batch.users}
+        if not wanted:
+            return
+        found = {u.user_id: u for u in await self._users.list_by_ids(wanted)}
+        for uid in wanted:
+            batch.users[uid] = found.get(uid)
+
+    @staticmethod
+    def _remember_users(users: Iterable[User]) -> None:
+        """Keep users a handler already read (``list_active``) for the rest
+        of its delivery job."""
+        batch = _BATCH.get()
+        if batch is not None:
+            for user in users:
+                batch.users.setdefault(user.user_id, user)
 
     async def _space_name(self, space_id: str | None) -> str | None:
         """The name of *space_id* (``None`` for none, or one not held)."""
@@ -1925,7 +2184,7 @@ class NotificationService(ProtectionGateMixin):
         report = await self._reports.get(event.report_id)
         if report is None or report.reporter_user_id == event.resolved_by:
             return
-        recipient = await self._users.get_by_user_id(report.reporter_user_id)
+        recipient = await self._local_user(report.reporter_user_id)
         if recipient is None:
             return
         locale = self._locale(recipient)
@@ -1995,7 +2254,7 @@ class NotificationService(ProtectionGateMixin):
         for user_id in dict.fromkeys(callee_user_ids):
             if user_id == caller_user_id or user_id in blocked:
                 continue
-            local = await self._users.get_by_user_id(user_id)
+            local = await self._local_user(user_id)
             if local is None or local.username in prefs.muted:
                 continue
             out.append(local)
@@ -2120,7 +2379,7 @@ class NotificationService(ProtectionGateMixin):
         for user_id in dict.fromkeys(event.member_user_ids):
             if user_id == adder:
                 continue
-            local = await self._users.get_by_user_id(user_id)
+            local = await self._local_user(user_id)
             if local is None or local.username in prefs.muted:
                 continue
             locale = self._locale(local)
@@ -2201,7 +2460,7 @@ class NotificationService(ProtectionGateMixin):
         for voter in voters:
             if voter == author:
                 continue
-            local = await self._users.get_by_user_id(voter)
+            local = await self._local_user(voter)
             if local is None:
                 continue
             locale = self._locale(local)
@@ -2279,7 +2538,7 @@ class NotificationService(ProtectionGateMixin):
         """Does *note*'s request still wait for its recipient?"""
         kind, _, oid = (note.object_key or "").partition(":")
         if note.type == "pairing_request":
-            user = await self._users.get_by_user_id(note.user_id)
+            user = await self._local_user(note.user_id)
             if user is None or not user.is_admin:
                 return False
             if self._pair_inbox is None:
@@ -2319,7 +2578,7 @@ class NotificationService(ProtectionGateMixin):
 
     async def on_dm_contact_requested(self, event: DmContactRequested) -> None:
         """A user wants to start a DM — notify the recipient + push."""
-        recipient = await self._users.get_by_user_id(event.recipient_user_id)
+        recipient = await self._local_user(event.recipient_user_id)
         title = self._t(
             "notification.dm.contact_requested",
             locale=self._locale(recipient),
@@ -2352,7 +2611,7 @@ class NotificationService(ProtectionGateMixin):
         link points at the app surface so a tap opens it; the SPA's open frame
         (delivered separately over WS) seats the live invite.
         """
-        recipient = await self._users.get_by_user_id(event.to_user_id)
+        recipient = await self._local_user(event.to_user_id)
         title = self._t(
             "notification.app.challenge",
             locale=self._locale(recipient),
@@ -2375,7 +2634,7 @@ class NotificationService(ProtectionGateMixin):
         """Notify the seller that a bid landed (or was raised)."""
         if event.bidder_user_id == event.seller_user_id:
             return
-        recipient = await self._users.get_by_user_id(event.seller_user_id)
+        recipient = await self._local_user(event.seller_user_id)
         title = self._t(
             "notification.bazaar.bid_placed",
             locale=self._locale(recipient),
@@ -2399,7 +2658,7 @@ class NotificationService(ProtectionGateMixin):
         event: BazaarOfferAccepted,
     ) -> None:
         """Notify the buyer that the seller accepted their offer."""
-        recipient = await self._users.get_by_user_id(event.buyer_user_id)
+        recipient = await self._local_user(event.buyer_user_id)
         title = self._t(
             "notification.bazaar.offer_accepted",
             locale=self._locale(recipient),
@@ -2422,7 +2681,7 @@ class NotificationService(ProtectionGateMixin):
         self,
         event: BazaarOfferRejected,
     ) -> None:
-        recipient = await self._users.get_by_user_id(event.bidder_user_id)
+        recipient = await self._local_user(event.bidder_user_id)
         title = self._t(
             "notification.bazaar.offer_rejected",
             locale=self._locale(recipient),
@@ -2446,7 +2705,7 @@ class NotificationService(ProtectionGateMixin):
         event: BazaarListingExpired,
     ) -> None:
         """Notify the seller whenever a listing transitions to sold/expired."""
-        recipient = await self._users.get_by_user_id(event.seller_user_id)
+        recipient = await self._local_user(event.seller_user_id)
         if event.final_status == "sold":
             title = self._t(
                 "notification.bazaar.sold",
@@ -2565,7 +2824,7 @@ class NotificationService(ProtectionGateMixin):
         space = await self._spaces.get(space_id)
         if space is None:
             return
-        author = await self._users.get_by_user_id(author_id)
+        author = await self._local_user(author_id)
         # A post federated from another household names a remote author.
         remote_author = (
             await self._users.get_remote(author_id) if author is None else None
@@ -2611,7 +2870,7 @@ class NotificationService(ProtectionGateMixin):
             else (post_about, link)
         )
         is_comment = comment_id is not None and generic_type is not None
-        members = await self._spaces.list_members(space_id)
+        members = await self._space_members(space_id)
         blocked = await self._withheld_from(author_id)
         for member in members:
             if member.user_id == author_id or member.user_id in blocked:
@@ -2648,7 +2907,7 @@ class NotificationService(ProtectionGateMixin):
                 about, row_link = generic_about, generic_link
             else:
                 continue
-            recipient = await self._users.get_by_user_id(member.user_id)
+            recipient = await self._local_user(member.user_id)
             await self._save_notif(
                 new_notification(
                     user_id=member.user_id,
@@ -2668,14 +2927,46 @@ class NotificationService(ProtectionGateMixin):
                 withheld=blocked,
             )
 
+    async def _space_prefs(
+        self, batch: _DeliveryBatch, space_id: str
+    ) -> dict[str, SpaceNotifPref]:
+        """Every member's choice in *space_id*, read once per job."""
+        prefs = batch.space_prefs.get(space_id)
+        if prefs is None:
+            prefs = await self._notifs.space_notif_prefs_in(space_id)
+            batch.space_prefs[space_id] = prefs
+        return prefs
+
+    async def _space_members(self, space_id: str) -> list:
+        """*space_id*'s local roster, its people looked up in one read for
+        the rest of the delivery job (:meth:`_prefetch_users`)."""
+        members = await self._spaces.list_members(space_id)
+        await self._prefetch_users(m.user_id for m in members)
+        return members
+
+    async def _active_users(self) -> list[User]:
+        """Every active household member, kept for the rest of the delivery
+        job so the gate does not read each of them again."""
+        users = await self._users.list_active()
+        self._remember_users(users)
+        return users
+
     async def _space_level(self, member, space) -> SpaceNotifLevel:
         """*member*'s level in *space*: the one they chose, else the default
         for the space's type and their seat (D5) — "Everything" in a
         household or private space, "Replies and mentions" in a public or
-        global one and wherever they only follow."""
-        chosen = await self._notifs.get_space_notif_level(
-            user_id=member.user_id, space_id=space.id
-        )
+        global one and wherever they only follow.
+
+        In a delivery job the space's choices are read once for all its
+        members (:meth:`_space_prefs`)."""
+        batch = _BATCH.get()
+        if batch is not None:
+            pref = (await self._space_prefs(batch, space.id)).get(member.user_id)
+            chosen = pref.effective(datetime.now(UTC)) if pref else None
+        else:
+            chosen = await self._notifs.get_space_notif_level(
+                user_id=member.user_id, space_id=space.id
+            )
         if chosen:
             try:
                 return SpaceNotifLevel(chosen)
@@ -2698,10 +2989,10 @@ class NotificationService(ProtectionGateMixin):
         space = await self._spaces.get(event.item.space_id)
         if space is None:
             return
-        members = await self._spaces.list_members(event.item.space_id)
+        members = await self._space_members(event.item.space_id)
         for member in members:
             if member.role in CONTENT_AUTHORITY_ROLES:
-                recipient = await self._users.get_by_user_id(member.user_id)
+                recipient = await self._local_user(member.user_id)
                 await self._save_notif(
                     new_notification(
                         user_id=member.user_id,
@@ -2738,7 +3029,7 @@ class NotificationService(ProtectionGateMixin):
         space = await self._spaces.get(event.space_id)
         if space is None or space.dissolved:
             return
-        members = await self._spaces.list_members(event.space_id)
+        members = await self._space_members(event.space_id)
         authority = [m for m in members if m.role in CONTENT_AUTHORITY_ROLES]
         subject = event.subject_user_id
         # The subject reviews a report about themself only as the space's
@@ -2762,7 +3053,7 @@ class NotificationService(ProtectionGateMixin):
                 continue
             if member.user_id == subject and not subject_reviews:
                 continue  # never told about a report on themself
-            recipient = await self._users.get_by_user_id(member.user_id)
+            recipient = await self._local_user(member.user_id)
             await self._save_notif(
                 new_notification(
                     user_id=member.user_id,
@@ -2816,10 +3107,10 @@ class NotificationService(ProtectionGateMixin):
         )
         if len(seats) > 1:
             return  # not the household's first member — already told
-        for member in await self._spaces.list_members(event.space_id):
+        for member in await self._space_members(event.space_id):
             if member.role not in SETTINGS_AUTHORITY_ROLES:
                 continue
-            recipient = await self._users.get_by_user_id(member.user_id)
+            recipient = await self._local_user(member.user_id)
             locale = self._locale(recipient)
             names = ", ".join(
                 self._t(
@@ -2905,7 +3196,7 @@ class NotificationService(ProtectionGateMixin):
             return
         if await self._spaces.get_member(item.space_id, item.submitted_by) is None:
             return  # they left: nothing of theirs to come back to
-        recipient = await self._users.get_by_user_id(item.submitted_by)
+        recipient = await self._local_user(item.submitted_by)
         if recipient is None:
             return
         outcome = item.status.value  # approved | rejected | expired
@@ -3018,14 +3309,14 @@ class NotificationService(ProtectionGateMixin):
         space = await self._spaces.get(cal_event.calendar_id)
         if space is None:
             return
-        members = await self._spaces.list_members(cal_event.calendar_id)
+        members = await self._space_members(cal_event.calendar_id)
         blocked = await self._withheld_from(cal_event.created_by)
         for member in members:
             if member.user_id == cal_event.created_by:
                 continue
             if await self._space_level(member, space) is not SpaceNotifLevel.ALL:
                 continue
-            recipient = await self._users.get_by_user_id(member.user_id)
+            recipient = await self._local_user(member.user_id)
             if recipient is None:
                 continue
             await self._save_notif(
@@ -3160,7 +3451,7 @@ class NotificationService(ProtectionGateMixin):
         for uid in dict.fromkeys(cohort):
             if uid == actor_user_id:
                 continue
-            recipient = await self._users.get_by_user_id(uid)
+            recipient = await self._local_user(uid)
             if recipient is None:
                 continue  # another household's person: their household tells them
             locale = self._locale(recipient)
@@ -3189,7 +3480,7 @@ class NotificationService(ProtectionGateMixin):
 
     async def on_event_reminder_due(self, event: EventReminderDue) -> None:
         """Phase D: deliver the user's chosen reminder."""
-        recipient = await self._users.get_by_user_id(event.user_id)
+        recipient = await self._local_user(event.user_id)
         if recipient is None:
             return
         await self._save_notif(
@@ -3262,7 +3553,7 @@ class NotificationService(ProtectionGateMixin):
                 continue
             if members is not None and uid not in members:
                 continue
-            recipient = await self._users.get_by_user_id(uid)
+            recipient = await self._local_user(uid)
             if recipient is None or uid in blocked:
                 continue
             name = await self._person_name(completed_by, self._locale(recipient))
@@ -3298,7 +3589,7 @@ class NotificationService(ProtectionGateMixin):
         """Notify the post author that their post was moderated (a remote
         author is skipped by the gate — their household tells them)."""
         post = event.post
-        recipient = await self._users.get_by_user_id(post.author)
+        recipient = await self._local_user(post.author)
         if recipient is None:
             return  # a remote author: their household tells them
         space_name = await self._space_name(event.space_id)
@@ -3342,7 +3633,7 @@ class NotificationService(ProtectionGateMixin):
         space = await self._spaces.get(event.space_id)
         if space is None:
             return
-        members = await self._spaces.list_members(event.space_id)
+        members = await self._space_members(event.space_id)
         blocked = await self._withheld_from(event.user_id)
         # A follower's reduced roster lists the members, never another
         # follower (owner decision 13): a follower joining is news to the
@@ -3357,7 +3648,7 @@ class NotificationService(ProtectionGateMixin):
                 continue
             if await self._space_level(member, space) is not SpaceNotifLevel.ALL:
                 continue
-            recipient = await self._users.get_by_user_id(member.user_id)
+            recipient = await self._local_user(member.user_id)
             if recipient is None:
                 continue
             # A remote joiner is named by the name this household holds,
@@ -3405,9 +3696,9 @@ class NotificationService(ProtectionGateMixin):
         # The space's other rows go (the copy is an archive now); the notice
         # below is what stays.
         await self._forget_space(event.space_id)
-        members = await self._spaces.list_members(event.space_id)
+        members = await self._space_members(event.space_id)
         for member in members:
-            locale = self._locale(await self._users.get_by_user_id(member.user_id))
+            locale = self._locale(await self._local_user(member.user_id))
             if removed:
                 title = self._t(
                     "notification.space.removed",
@@ -3462,10 +3753,10 @@ class NotificationService(ProtectionGateMixin):
         seed with nobody and turned delegated admin OFF. Tell the space's
         OWNER (only) to review its admins; turning delegation back on shares
         the seed with the admins seated then."""
-        for member in await self._spaces.list_members(event.space_id):
+        for member in await self._space_members(event.space_id):
             if member.role != SpaceRole.OWNER:
                 continue
-            owner = await self._users.get_by_user_id(member.user_id)
+            owner = await self._local_user(member.user_id)
             await self._save_notif(
                 new_notification(
                     user_id=member.user_id,
@@ -3495,7 +3786,7 @@ class NotificationService(ProtectionGateMixin):
         space = await self._spaces.get(event.space_id)
         if space is None:
             return
-        members = await self._spaces.list_members(event.space_id)
+        members = await self._space_members(event.space_id)
         blocked = await self._withheld_from(event.user_id)
         flags = await self._join_request_flags(space, event.request_id)
         for member in members:
@@ -3503,7 +3794,7 @@ class NotificationService(ProtectionGateMixin):
                 continue
             if member.user_id in blocked:
                 continue
-            recipient = await self._users.get_by_user_id(member.user_id)
+            recipient = await self._local_user(member.user_id)
             if recipient is None:
                 continue
             # A remote applicant is named by the name this household holds,
@@ -3572,7 +3863,7 @@ class NotificationService(ProtectionGateMixin):
         space = await self._spaces.get(event.space_id)
         if space is None:
             return
-        recipient = await self._users.get_by_user_id(event.user_id)
+        recipient = await self._local_user(event.user_id)
         if recipient is None:
             # A §D2 cross-household applicant (or an admin/mod elevation of
             # one): the approved user lives on another household, so there
@@ -3616,7 +3907,7 @@ class NotificationService(ProtectionGateMixin):
         new_owner = str(event.payload.get("new_owner_user_id") or "")
         if not new_owner:
             return
-        recipient = await self._users.get_by_user_id(new_owner)
+        recipient = await self._local_user(new_owner)
         space = await self._spaces.get(event.space_id)
         if recipient is None or space is None:
             return
@@ -3650,7 +3941,7 @@ class NotificationService(ProtectionGateMixin):
         Per §25.3 title-only rule: space name is omitted from the body
         because the notification may surface on a lock screen.
         """
-        recipient = await self._users.get_by_user_id(event.user_id)
+        recipient = await self._local_user(event.user_id)
         if recipient is None:
             # Cross-household applicant — no local user to notify, and a row
             # for a non-local user_id would fail the users FK.
@@ -3687,7 +3978,7 @@ class NotificationService(ProtectionGateMixin):
         if request is None or not request.get("remote_applicant_instance_id"):
             return
         user_id = str(request.get("user_id") or "")
-        recipient = await self._users.get_by_user_id(user_id)
+        recipient = await self._local_user(user_id)
         if recipient is None:
             return
         space_id = str(request.get("space_id") or event.space_id)
@@ -3778,7 +4069,7 @@ class NotificationService(ProtectionGateMixin):
         space_name: str | None,
         name_on_lock_screen: bool,
     ) -> None:
-        recipient = await self._users.get_by_user_id(invitee)
+        recipient = await self._local_user(invitee)
         if recipient is None:
             return
         locale = self._locale(recipient)
@@ -3827,7 +4118,7 @@ class NotificationService(ProtectionGateMixin):
         household: a "Needs you" row for every admin here. It always opens
         the review (Connections) — pairing with a stranger is never one
         tap from a list."""
-        for admin in await self._users.list_active():
+        for admin in await self._active_users():
             if not admin.is_admin:
                 continue
             await self._save_notif(
@@ -3901,7 +4192,7 @@ class NotificationService(ProtectionGateMixin):
             return
         if await self._spaces.get_member(event.space_id, inviter) is None:
             return  # they left the space: nothing of theirs to come back to
-        recipient = await self._users.get_by_user_id(inviter)
+        recipient = await self._local_user(inviter)
         if recipient is None:
             return
         locale = self._locale(recipient)
@@ -3950,7 +4241,7 @@ class NotificationService(ProtectionGateMixin):
             return
         if event.reactor_user_id == event.author_user_id:
             return
-        author = await self._users.get_by_user_id(event.author_user_id)
+        author = await self._local_user(event.author_user_id)
         if author is None:
             return  # remote author — their instance fires the local notif
         if _beyond_the_circle(author, event.received_via, event.hop_count):
@@ -3988,7 +4279,7 @@ class NotificationService(ProtectionGateMixin):
             return
         if event.parent_author_user_id == event.author_user_id:
             return  # author replied to their own thread
-        recipient = await self._users.get_by_user_id(event.parent_author_user_id)
+        recipient = await self._local_user(event.parent_author_user_id)
         if recipient is None:
             return  # parent author lives on a peer instance
         if _beyond_the_circle(recipient, event.received_via, event.hop_count):
@@ -4037,7 +4328,7 @@ class NotificationService(ProtectionGateMixin):
             return
         if event.reactor_user_id == event.author_user_id:
             return
-        author = await self._users.get_by_user_id(event.author_user_id)
+        author = await self._local_user(event.author_user_id)
         if author is None:
             return
         locale = self._locale(author)
@@ -4073,7 +4364,7 @@ class NotificationService(ProtectionGateMixin):
         post = event.post
         if event.reactor_user_id == post.author:
             return
-        author = await self._users.get_by_user_id(post.author)
+        author = await self._local_user(post.author)
         if author is None:
             return
         space_name: str | None = None
@@ -4127,7 +4418,7 @@ class NotificationService(ProtectionGateMixin):
         """Notify the followed user when someone starts following them."""
         if event.follower_user_id == event.followed_user_id:
             return
-        recipient = await self._users.get_by_user_id(event.followed_user_id)
+        recipient = await self._local_user(event.followed_user_id)
         if recipient is None:
             return
         locale = self._locale(recipient)
@@ -4167,12 +4458,12 @@ class NotificationService(ProtectionGateMixin):
         space) nor to a protected account (§CP: nothing nudges a child to
         share where they are).
         """
-        members = await self._spaces.list_members(event.space_id)
+        members = await self._space_members(event.space_id)
         blocked = await self._withheld_from(event.actor_user_id)
         for m in members:
             if m.user_id == event.actor_user_id or m.role not in WRITER_ROLES:
                 continue
-            recipient = await self._users.get_by_user_id(m.user_id)
+            recipient = await self._local_user(m.user_id)
             if recipient is None or recipient.child_protection_enabled:
                 continue
             if await self._is_protected(m.user_id):

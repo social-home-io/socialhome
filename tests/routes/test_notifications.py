@@ -7,6 +7,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.app import create_app
 from socialhome.app_keys import db_key as _db_key
+from socialhome.app_keys import notification_delivery_key
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
 from socialhome.crypto import derive_user_id
@@ -72,6 +73,8 @@ async def _trigger_notification(client):
         json={"type": "text", "content": "notification trigger"},
         headers=_auth(client._admin_token),
     )
+    # The row is written by the delivery worker, after the request returns.
+    await client.app[notification_delivery_key].drain()
 
 
 async def test_list_notifications(client):
@@ -159,6 +162,7 @@ async def test_read_by_link_reads_the_rows_that_open_the_page(client):
         json={"content": "hi"},
         headers=_auth(client._admin_token),
     )
+    await client.app[notification_delivery_key].drain()
     count = await client.get(
         "/api/notifications/unread-count", headers=_auth(client._bob_token)
     )
@@ -294,6 +298,8 @@ async def _post(client) -> str:
         json={"type": "text", "content": "about something"},
         headers=_auth(client._admin_token),
     )
+    # The row is written by the delivery worker, after the request returns.
+    await client.app[notification_delivery_key].drain()
     return (await resp.json())["id"]
 
 
@@ -325,6 +331,8 @@ async def test_comments_on_one_post_share_one_row(client):
             headers=_auth(client._admin_token),
         )
         assert resp.status in (200, 201)
+    # The rows are written by the delivery worker, after the requests return.
+    await client.app[notification_delivery_key].drain()
     resp = await client.get("/api/notifications", headers=_auth(client._bob_token))
     rows = [n for n in await resp.json() if n["type"] == "comment_added"]
     assert len(rows) == 1
@@ -361,6 +369,7 @@ async def test_read_by_object_reads_every_row_about_the_thing(client):
         json={"content": "hi"},
         headers=_auth(client._admin_token),
     )
+    await client.app[notification_delivery_key].drain()
     resp = await client.post(
         "/api/notifications/read-by-object",
         json={"object_keys": [f"post:{post_id}", "feed:household"]},
@@ -414,6 +423,7 @@ async def test_deleting_a_post_takes_its_rows_away(client):
         f"/api/feed/posts/{post_id}", headers=_auth(client._admin_token)
     )
     assert resp.status in (200, 204)
+    await client.app[notification_delivery_key].drain()
     resp = await client.get("/api/notifications", headers=_auth(client._bob_token))
     rows = await resp.json()
     assert [n for n in rows if n["object_key"] == f"post:{post_id}"] == []

@@ -26,7 +26,11 @@ from types import MappingProxyType
 import pytest
 
 from socialhome.app import create_app
-from socialhome.app_keys import db_key, federation_service_key
+from socialhome.app_keys import (
+    db_key,
+    federation_service_key,
+    notification_delivery_key,
+)
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
 from socialhome.domain.federation import FederationEvent, FederationEventType
@@ -351,6 +355,9 @@ async def test_inbound_call_from_a_blocked_remote_caller_never_rings(env):
 
 
 async def _notified(env, **where) -> set[str]:
+    # The rows are written by the delivery worker, after the request returns:
+    # wait for it, or a "never notified" check would pass on an empty table.
+    await env.app[notification_delivery_key].drain()
     col, val = next(iter(where.items()))
     rows = await env._db.fetchall(
         f"SELECT user_id FROM notifications WHERE {col}=?", (val,)

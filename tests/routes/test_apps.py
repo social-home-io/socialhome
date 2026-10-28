@@ -6,7 +6,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from socialhome.app_keys import app_federation_service_key, instance_id_key
+from socialhome.app_keys import (
+    app_federation_service_key,
+    instance_id_key,
+    notification_delivery_key,
+)
 from socialhome.auth import sha256_token_hash
 from socialhome.domain.apps import (
     AppAgeRestrictedError,
@@ -1532,7 +1536,9 @@ async def test_local_challenge_creates_notification(client):
     )
     assert r.status == 201
 
-    # Carol should now have an app_challenge notification row.
+    # Carol should now have an app_challenge notification row (written by
+    # the delivery worker, after the request returns).
+    await client.app[notification_delivery_key].drain()
     notif_r = await client.get(
         "/api/notifications",
         headers=_auth(carol_tok),

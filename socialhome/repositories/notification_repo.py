@@ -21,8 +21,9 @@ top of the methods here.
 from __future__ import annotations
 
 import builtins
+import sqlite3
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
@@ -68,6 +69,79 @@ MAX_PENDING_ACTIONS: int = 100
 _ACTION_TYPES: tuple[str, ...] = tuple(sorted(ACTION_ITEM_TYPES))
 _ACTION_IN = "(" + ",".join("?" * len(_ACTION_TYPES)) + ")"
 
+#: ``(user_id, type, object_key)`` — one notification group (D7).
+GroupKey = tuple[str, str, str]
+
+#: Recipients per :meth:`SqliteNotificationRepo.latest_in_groups` /
+#: :meth:`SqliteNotificationRepo.count_unread_many` statement — far under
+#: SQLite's bound-parameter limit, so a fan-out stays one read per chunk.
+_IN_CHUNK: int = 400
+
+#: The per-user cap prune (§17.2): delete as many rows as the user is over,
+#: read ones before unread ones, oldest first, unread action items never.
+#: ``max(0, …)`` because a negative LIMIT means "no limit" in SQLite.
+_PRUNE_SQL = f"""
+    DELETE FROM notifications
+     WHERE id IN (
+         SELECT id FROM notifications
+          WHERE user_id = ?
+            AND NOT (read_at IS NULL AND type IN {_ACTION_IN})
+          ORDER BY (read_at IS NULL) ASC, created_at ASC
+          LIMIT max(
+              0,
+              (SELECT COUNT(*) FROM notifications WHERE user_id = ?) - ?
+          )
+     )
+"""
+
+_INSERT_SQL = """
+    INSERT INTO notifications(
+        id, user_id, type, title, body, link_url, read_at, created_at,
+        object_key, space_id, params
+    ) VALUES(?,?,?,?,?,?,?, COALESCE(?, datetime('now')), ?,?,?)
+"""
+
+_UPDATE_GROUP_SQL = """
+    UPDATE notifications
+       SET title = ?, body = ?, link_url = ?, created_at = ?,
+           read_at = ?, space_id = ?, params = ?
+     WHERE id = ?
+"""
+
+
+def _insert_args(note: Notification) -> tuple:
+    return (
+        note.id,
+        note.user_id,
+        note.type,
+        note.title,
+        note.body,
+        note.link_url,
+        note.read_at,
+        note.created_at,
+        note.object_key,
+        note.space_id,
+        _params_json(note.params),
+    )
+
+
+def _update_args(note: Notification) -> tuple:
+    return (
+        note.title,
+        note.body,
+        note.link_url,
+        note.created_at,
+        note.read_at,
+        note.space_id,
+        _params_json(note.params),
+        note.id,
+    )
+
+
+def _chunks(items: Sequence, size: int = _IN_CHUNK) -> Iterable[Sequence]:
+    for start in range(0, len(items), size):
+        yield items[start : start + size]
+
 
 @runtime_checkable
 class AbstractNotificationRepo(Protocol):
@@ -76,6 +150,15 @@ class AbstractNotificationRepo(Protocol):
         self, *, user_id: str, type: str, object_key: str, since: str
     ) -> Notification | None: ...
     async def update_group(self, note: Notification) -> None: ...
+    async def latest_in_groups(
+        self, keys: Iterable[GroupKey], *, since: str
+    ) -> dict[GroupKey, Notification]: ...
+    async def save_batch(
+        self,
+        inserts: Sequence[Notification],
+        updates: Sequence[Notification],
+    ) -> frozenset[str]: ...
+    async def count_unread_many(self, user_ids: Iterable[str]) -> dict[str, int]: ...
     async def list(
         self,
         user_id: str,
@@ -150,6 +233,9 @@ class AbstractNotificationRepo(Protocol):
     async def list_space_notif_prefs(
         self, user_id: str
     ) -> builtins.list[tuple[str, SpaceNotifPref]]: ...
+    async def space_notif_prefs_in(
+        self, space_id: str
+    ) -> dict[str, SpaceNotifPref]: ...
 
 
 class SqliteNotificationRepo:
@@ -168,46 +254,9 @@ class SqliteNotificationRepo:
         never an unread action item — a pending request must not vanish
         under a flood of news.
         """
+        await self._db.enqueue(_INSERT_SQL, _insert_args(note))
         await self._db.enqueue(
-            """
-            INSERT INTO notifications(
-                id, user_id, type, title, body, link_url, read_at, created_at,
-                object_key, space_id, params
-            ) VALUES(?,?,?,?,?,?,?, COALESCE(?, datetime('now')), ?,?,?)
-            """,
-            (
-                note.id,
-                note.user_id,
-                note.type,
-                note.title,
-                note.body,
-                note.link_url,
-                note.read_at,
-                note.created_at,
-                note.object_key,
-                note.space_id,
-                _params_json(note.params),
-            ),
-        )
-        # Keep at most ``cap`` rows per user: delete as many rows as the
-        # user is over, read ones before unread ones, oldest first, unread
-        # action items never. ``max(0, …)`` because a negative LIMIT means
-        # "no limit" in SQLite.
-        await self._db.enqueue(
-            f"""
-            DELETE FROM notifications
-             WHERE id IN (
-                 SELECT id FROM notifications
-                  WHERE user_id = ?
-                    AND NOT (read_at IS NULL AND type IN {_ACTION_IN})
-                  ORDER BY (read_at IS NULL) ASC, created_at ASC
-                  LIMIT max(
-                      0,
-                      (SELECT COUNT(*) FROM notifications WHERE user_id = ?) - ?
-                  )
-             )
-            """,
-            (note.user_id, *_ACTION_TYPES, note.user_id, self._cap),
+            _PRUNE_SQL, (note.user_id, *_ACTION_TYPES, note.user_id, self._cap)
         )
         return note
 
@@ -232,24 +281,93 @@ class SqliteNotificationRepo:
     async def update_group(self, note: Notification) -> None:
         """Write a regrouped row back by id: its fresh title, body, link,
         last activity, read state, space and params."""
-        await self._db.enqueue(
-            """
-            UPDATE notifications
-               SET title = ?, body = ?, link_url = ?, created_at = ?,
-                   read_at = ?, space_id = ?, params = ?
-             WHERE id = ?
-            """,
-            (
-                note.title,
-                note.body,
-                note.link_url,
-                note.created_at,
-                note.read_at,
-                note.space_id,
-                _params_json(note.params),
-                note.id,
-            ),
-        )
+        await self._db.enqueue(_UPDATE_GROUP_SQL, _update_args(note))
+
+    async def latest_in_groups(
+        self, keys: Iterable[GroupKey], *, since: str
+    ) -> dict[GroupKey, Notification]:
+        """:meth:`latest_in_group` for many groups at once — a fan-out's
+        lookup in one read per :data:`_IN_CHUNK` recipients, not one per
+        recipient. Groups with no row since ``since`` are left out."""
+        wanted = set(keys)
+        if not wanted:
+            return {}
+        types = sorted({k[1] for k in wanted})
+        objects = sorted({k[2] for k in wanted})
+        users = sorted({k[0] for k in wanted})
+        found: dict[GroupKey, Notification] = {}
+        for chunk in _chunks(users):
+            rows = await self._db.fetchall(
+                f"""
+                SELECT * FROM notifications
+                 WHERE object_key IN ({",".join("?" * len(objects))})
+                   AND user_id IN ({",".join("?" * len(chunk))})
+                   AND type IN ({",".join("?" * len(types))})
+                   AND created_at >= ?
+                 ORDER BY created_at DESC
+                """,
+                (*objects, *chunk, *types, since),
+            )
+            for d in rows_to_dicts(rows):
+                note = _row_to_notification(d)
+                if note is None or note.object_key is None:
+                    continue
+                key = (note.user_id, note.type, note.object_key)
+                if key in wanted and key not in found:
+                    found[key] = note
+        return found
+
+    async def save_batch(
+        self,
+        inserts: Sequence[Notification],
+        updates: Sequence[Notification],
+    ) -> frozenset[str]:
+        """Write a fan-out's new rows and regrouped rows in **one**
+        transaction, then prune every user who got a new row to the cap —
+        the batched form of :meth:`save` + :meth:`update_group`.
+
+        Each row gets its own SAVEPOINT, as the write queue gives each
+        statement: a row that fails (its user deleted a moment ago, so the
+        foreign key no longer holds) is skipped, never the rest. Returns
+        the ids of the rows that did not land."""
+        if not inserts and not updates:
+            return frozenset()
+        cap = self._cap
+
+        def _run(conn: sqlite3.Connection) -> frozenset[str]:
+            failed: set[str] = set()
+            for sql, note, args in (
+                *((_INSERT_SQL, n, _insert_args(n)) for n in inserts),
+                *((_UPDATE_GROUP_SQL, n, _update_args(n)) for n in updates),
+            ):
+                conn.execute("SAVEPOINT notif_row")
+                try:
+                    conn.execute(sql, args)
+                except sqlite3.Error:
+                    conn.execute("ROLLBACK TO notif_row")
+                    failed.add(note.id)
+                conn.execute("RELEASE notif_row")
+            for user_id in dict.fromkeys(n.user_id for n in inserts):
+                conn.execute(_PRUNE_SQL, (user_id, *_ACTION_TYPES, user_id, cap))
+            return frozenset(failed)
+
+        return await self._db.transact(_run)
+
+    async def count_unread_many(self, user_ids: Iterable[str]) -> dict[str, int]:
+        """:meth:`count_unread` for many users in one read per chunk; a
+        user with nothing unread reads ``0``."""
+        ids = sorted(set(user_ids))
+        counts = dict.fromkeys(ids, 0)
+        for chunk in _chunks(ids):
+            rows = await self._db.fetchall(
+                "SELECT user_id, COUNT(*) AS n FROM notifications"
+                f" WHERE user_id IN ({','.join('?' * len(chunk))})"
+                " AND read_at IS NULL GROUP BY user_id",
+                tuple(chunk),
+            )
+            for r in rows:
+                counts[r["user_id"]] = int(r["n"])
+        return counts
 
     async def get(self, notification_id: str) -> Notification | None:
         row = await self._db.fetchone(
@@ -608,6 +726,18 @@ class SqliteNotificationRepo:
         return [
             (r["space_id"], SpaceNotifPref(r["level"], r["muted_until"])) for r in rows
         ]
+
+    async def space_notif_prefs_in(self, space_id: str) -> dict[str, SpaceNotifPref]:
+        """Every choice made in ``space_id``, by user — a fan-out reads its
+        members' levels in one go (:meth:`get_space_notif_pref` each)."""
+        rows = await self._db.fetchall(
+            "SELECT user_id, level, muted_until FROM space_notif_prefs"
+            " WHERE space_id=? AND level IS NOT NULL AND level != ''",
+            (space_id,),
+        )
+        return {
+            r["user_id"]: SpaceNotifPref(r["level"], r["muted_until"]) for r in rows
+        }
 
     async def set_space_notif_level(
         self,

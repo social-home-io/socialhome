@@ -11,6 +11,7 @@ import pytest
 
 from socialhome.app import create_app
 from socialhome.app_keys import db_key as _db_key
+from socialhome.app_keys import notification_delivery_key
 from socialhome.app_keys import space_service_key as _space_svc_key
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
@@ -282,6 +283,8 @@ async def test_notifications_list_and_unread(client):
         json={"type": "text", "content": "hey"},
         headers=_auth(client._admin_token),
     )
+    # Rows are written by the delivery worker, after the request returns.
+    await client.app[notification_delivery_key].drain()
     resp = await client.get(
         "/api/notifications",
         headers=_auth(client._bob_token),
@@ -304,6 +307,8 @@ async def test_notifications_mark_all_read(client):
         json={"type": "text", "content": "trigger"},
         headers=_auth(client._admin_token),
     )
+    # Rows are written by the delivery worker, after the request returns.
+    await client.app[notification_delivery_key].drain()
     resp = await client.post(
         "/api/notifications/read-all",
         headers=_auth(client._bob_token),

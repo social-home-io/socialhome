@@ -17,6 +17,8 @@ filed.
 
 import pytest
 
+from socialhome.app_keys import notification_delivery_key
+
 from .test_space_read_gate import (
     _GUEST,
     _create_space,
@@ -125,6 +127,8 @@ async def test_a_member_asking_again_is_told_already_member(seeded):  # noqa: F8
 
 
 async def _needs_you(client, headers: dict) -> list[dict]:
+    # The rows are written by the delivery worker, after the request returns.
+    await client.app[notification_delivery_key].drain()
     r = await client.get("/api/notifications/needs-you", headers=headers)
     assert r.status == 200, await r.text()
     body = await r.json()

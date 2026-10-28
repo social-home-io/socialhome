@@ -562,3 +562,120 @@ async def test_exists_in_space_since_reads_the_persisted_here_window(env):
     assert not await env.notif_repo.exists_in_space_since(
         type="space_mention", space_id="sp-h", since="2026-10-28T09:00:00+00:00"
     )
+
+
+# ── Batched forms (the delivery worker's one-job writes) ─────────────────
+
+
+async def test_latest_in_groups_matches_each_key_like_latest_in_group(env):
+    uid = await _user(env)
+    other = await _user(env, "uid-o")
+    await _about(env, uid, "post:p1", stamp="2026-10-01T00:00:00+00:00")
+    recent = await _about(env, uid, "post:p1", stamp="2026-10-20T00:00:00+00:00")
+    theirs = await _about(env, other, "post:p2", type="post_created")
+    await _about(env, uid, "post:p2")  # wrong type for the third key
+    keys = [
+        (uid, "comment_added", "post:p1"),
+        (other, "post_created", "post:p2"),
+        (uid, "post_created", "post:p2"),  # nothing there
+    ]
+    since = "2026-10-15T00:00:00+00:00"
+    found = await env.notif_repo.latest_in_groups(keys, since=since)
+    assert {k: n.id for k, n in found.items()} == {
+        keys[0]: recent.id,
+        keys[1]: theirs.id,
+    }
+    for key in keys:  # the same answer as one lookup each
+        one = await env.notif_repo.latest_in_group(
+            user_id=key[0], type=key[1], object_key=key[2], since=since
+        )
+        assert (one.id if one else None) == (found[key].id if key in found else None)
+    assert await env.notif_repo.latest_in_groups([], since=since) == {}
+
+
+async def test_save_batch_writes_inserts_and_updates_in_one_transaction(env):
+    uid = await _user(env)
+    other = await _user(env, "uid-o")
+    old = await _about(env, uid, "post:p1", read=True)
+    calls = 0
+    transact = env.db.transact
+
+    async def counting(fn):
+        nonlocal calls
+        calls += 1
+        return await transact(fn)
+
+    env.db.transact = counting
+    fresh = [
+        replace(new_notification(user_id=u, type="t", title="new"), object_key="k")
+        for u in (uid, other)
+    ]
+    failed = await env.notif_repo.save_batch(
+        fresh, [replace(old, title="bumped", read_at=None)]
+    )
+    assert failed == frozenset() and calls == 1
+    back = await env.notif_repo.get(old.id)
+    assert back.title == "bumped" and not back.is_read
+    landed = {n.id for u in (uid, other) for n in await env.notif_repo.list(u)}
+    assert {n.id for n in fresh} <= landed
+    assert await env.notif_repo.save_batch([], []) == frozenset()
+    assert calls == 1  # nothing to write: no transaction
+
+
+async def test_save_batch_skips_a_failing_row_and_keeps_the_rest(env):
+    uid = await _user(env)
+    ok = new_notification(user_id=uid, type="t", title="ok")
+    gone = new_notification(user_id="uid-deleted", type="t", title="fk fails")
+    failed = await env.notif_repo.save_batch([gone, ok], [])
+    assert failed == frozenset({gone.id})
+    assert [n.id for n in await env.notif_repo.list(uid, limit=50)] == [ok.id]
+
+
+async def test_save_batch_prunes_every_new_rows_user_to_the_cap(env):
+    uid = await _user(env)
+    for i in range(10):  # at the cap (10 in this env), all read
+        await _save(env, uid, stamp=f"2026-02-0{i}T00:00:00+00:00", read=True)
+    batch = [
+        replace(
+            new_notification(user_id=uid, type="t", title=f"n{i}"),
+            created_at=f"2026-03-0{i + 1}T00:00:00+00:00",
+        )
+        for i in range(3)
+    ]
+    await env.notif_repo.save_batch(batch, [])
+    ids = {n.id for n in await env.notif_repo.list(uid, limit=50)}
+    assert len(ids) == 10 and {n.id for n in batch} <= ids
+
+
+async def test_count_unread_many_counts_each_user_and_zero_for_none(env):
+    uid = await _user(env)
+    other = await _user(env, "uid-o")
+    await _save(env, uid, stamp="2026-02-01T00:00:00+00:00")
+    await _save(env, uid, stamp="2026-02-02T00:00:00+00:00")
+    await _save(env, uid, stamp="2026-02-03T00:00:00+00:00", read=True)
+    counts = await env.notif_repo.count_unread_many([uid, other, uid])
+    assert counts == {uid: 2, other: 0}
+    assert counts[uid] == await env.notif_repo.count_unread(uid)
+    assert await env.notif_repo.count_unread_many([]) == {}
+
+
+async def test_space_notif_prefs_in_reads_one_spaces_choices(env):
+    uid = await _user(env)
+    other = await _user(env, "uid-o")
+    for sid in ("sp-1", "sp-2"):
+        await env.db.enqueue(
+            "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+            " identity_public_key) VALUES(?,?,?,?,?)",
+            (sid, sid, "iid", uid, "aabb" * 16),
+        )
+    await env.notif_repo.set_space_notif_level(
+        user_id=uid, space_id="sp-1", level="muted"
+    )
+    await env.notif_repo.set_space_notif_level(
+        user_id=other, space_id="sp-2", level="all"
+    )
+    prefs = await env.notif_repo.space_notif_prefs_in("sp-1")
+    assert prefs == {
+        uid: await env.notif_repo.get_space_notif_pref(user_id=uid, space_id="sp-1")
+    }
+    assert await env.notif_repo.space_notif_prefs_in("sp-none") == {}

@@ -15,7 +15,10 @@ from unittest.mock import patch
 
 import pytest
 
-from socialhome.app_keys import space_moderation_service_key
+from socialhome.app_keys import (
+    notification_delivery_key,
+    space_moderation_service_key,
+)
 from socialhome.services.poll_service import PollService
 from socialhome.services.space_moderation_service import MAX_PENDING_PER_SUBMITTER
 
@@ -199,6 +202,10 @@ async def test_pending_content_is_invisible_to_other_members(client, space):
     for method, path, body in submissions:
         r = await _send(client, method, path, body, space["mem"])
         assert r.status == 202, (path, await r.text())
+    # Bell rows are written by the delivery worker, after the requests
+    # return: wait for them, or "the secret is not in /api/notifications"
+    # passes on an empty table.
+    await client.app[notification_delivery_key].drain()
     end = start + timedelta(days=30)
     reads = [
         f"/api/spaces/{SID}/feed",
