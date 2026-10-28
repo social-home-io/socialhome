@@ -1361,9 +1361,26 @@ async def _team_with_carol(client) -> str:
 
 
 async def _bell(client, token: str) -> list[dict]:
+    """The rows a chat's *messages* made — not the "added you to Team" row
+    creating the group gave each member (see the test below)."""
     r = await client.get("/api/notifications", headers=_auth(token))
     body = await r.json()
-    return body["notifications"] if isinstance(body, dict) else body
+    rows = body["notifications"] if isinstance(body, dict) else body
+    return [n for n in rows if n["type"] != "chat_added"]
+
+
+async def test_creating_a_group_tells_each_member_who_added_them(client):
+    """D3: being added to a group chat is about you — one ``chat_added``
+    row each (not for the creator), opening the chat."""
+    conv_id = await _team_with_carol(client)
+    for token in (client._bob_token, "carol-tok"):
+        r = await client.get("/api/notifications", headers=_auth(token))
+        rows = await r.json()
+        assert [(n["type"], n["title"], n["link_url"]) for n in rows] == [
+            ("chat_added", "Pascal added you to Team", f"/dms/{conv_id}")
+        ]
+    r = await client.get("/api/notifications", headers=_auth(client._admin_token))
+    assert await r.json() == []
 
 
 async def test_notif_prefs_round_trip_and_list_field(client):

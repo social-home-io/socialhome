@@ -370,3 +370,16 @@ def test_a_household_without_an_identity_cannot_mint_group_ids():
     svc = DmGroupService(conversation_repo=None, user_repo=None, bus=EventBus())
     with pytest.raises(RuntimeError):
         svc.mint_conversation_id()
+
+
+async def test_adding_people_names_who_added_them(stack):
+    """``DmConversationCreated`` for people added later names the adder —
+    their "Ben added you to Lunch" notification reads it."""
+    conv = await stack.dm.create_group_dm(
+        creator_username="ann", member_usernames=["ben"], member_user_ids=["u-pat"]
+    )
+    await stack.dm.add_group_members(conv.id, actor_username="ben", usernames=["cid"])
+    created = [e for e in stack.events if isinstance(e, DmConversationCreated)]
+    assert created[0].creator_user_id == await _uid(stack, "ann")
+    assert created[-1].member_user_ids == (await _uid(stack, "cid"),)
+    assert created[-1].creator_user_id == await _uid(stack, "ben")

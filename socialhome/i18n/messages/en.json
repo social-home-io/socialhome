@@ -319,5 +319,17 @@
   "notification.post.reacted": "{name} reacted {emoji} to your post",
   "notification.space.post.reacted": "{name} reacted {emoji} to your post in {space_name}",
   "notification.push.post_reacted": "{name} reacted to your post",
-  "notification.push.post_reacted_in": "{name} reacted to your post in {space_name}"
+  "notification.push.post_reacted_in": "{name} reacted to your post in {space_name}",
+  "notification.call.incoming": "{name} is calling",
+  "notification.call.incoming_in": "{name} is calling in {chat_name}",
+  "notification.call.missed": "Missed call from {name}",
+  "notification.call.missed_in": "Missed call from {name} in {chat_name}",
+  "notification.chat.added": "{name} added you to a group chat",
+  "notification.chat.added_to": "{name} added you to {chat_name}",
+  "notification.chat.added_none": "You were added to a group chat",
+  "notification.chat.added_to_none": "You were added to {chat_name}",
+  "notification.poll.closed": "{name} closed a poll you voted in",
+  "notification.poll.closed_in": "{name} closed a poll in {space_name}",
+  "notification.report.answered": "Your report was reviewed",
+  "notification.report.answered_in": "Your report in {space_name} was reviewed"
 }

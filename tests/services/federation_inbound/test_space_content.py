@@ -18,6 +18,7 @@ from socialhome.domain.events import (
     GalleryAlbumUpdated,
     GalleryItemDeleted,
     GalleryItemUploaded,
+    PollClosed,
     SpaceZoneDeleted,
     SpaceZoneUpserted,
     TaskCreated,
@@ -479,6 +480,9 @@ class _FakePollRepo:
             return False
         self.closed.append(post_id)
         return True
+
+    async def get_post_author(self, post_id):
+        return "u-seller"
 
     async def create_schedule_poll_in_space(
         self, *, space_id, post_id, title, deadline, slots
@@ -1993,7 +1997,13 @@ async def test_poll_vote_missing_field_drops(repos, handlers):
     assert repos["poll"].inserted == []
 
 
-async def test_poll_closed(repos, handlers):
+async def test_poll_closed(repos, handlers, bus):
+    seen: list[PollClosed] = []
+
+    async def _keep(event: PollClosed) -> None:
+        seen.append(event)
+
+    bus.subscribe(PollClosed, _keep)
     await handlers._on_poll_closed(
         _event(
             FederationEventType.SPACE_POLL_CLOSED,
@@ -2002,6 +2012,31 @@ async def test_poll_closed(repos, handlers):
         )
     )
     assert repos["poll"].closed == ["p-1"]
+    # Local voters hear it; the origin keeps the outbound bridge from
+    # echoing the peer's own close back.
+    (event,) = seen
+    assert event.post_id == "p-1"
+    assert event.space_id == "sp-1"
+    assert event.actor_user_id == "u-seller"
+    assert event.origin_instance_id == "peer-a"
+
+
+async def test_refused_poll_close_publishes_nothing(repos, handlers, bus):
+    seen: list[PollClosed] = []
+
+    async def _keep(event: PollClosed) -> None:
+        seen.append(event)
+
+    bus.subscribe(PollClosed, _keep)
+    repos["poll"].post_space["p-b"] = "sp-b"
+    await handlers._on_poll_closed(
+        _event(
+            FederationEventType.SPACE_POLL_CLOSED,
+            {"post_id": "p-b"},
+            space_id="sp-a",
+        )
+    )
+    assert seen == []
 
 
 async def test_poll_handlers_not_registered_without_poll_repo(bus, repos):

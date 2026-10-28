@@ -153,6 +153,8 @@ class NotificationObject(StrEnum):
     SPACE_INVITE = "space_invite"
     #: A household asking to pair (``<request_id>``).
     PAIRING_REQUEST = "pairing_request"
+    #: A report someone filed (``<report_id>``) — its answer.
+    REPORT = "report"
 
 
 #: The id of the household feed's ``feed:<id>`` key — there is one.
@@ -238,7 +240,8 @@ class NotificationParams:
       past the list's bound).
     * ``new`` — events since the row was last read; ``total`` — events
       since the row started.
-    * ``space_name`` — the space's name when it was written.
+    * ``space_name`` — the place's name when it was written: the space's, or
+      for a row about a group chat (a missed call, being added) the chat's.
     * ``flags`` — why a "Needs you" item can't be decided with one tap
       (:data:`JOIN_REQUEST_FLAGS`).
     * ``handled`` — set once a "Needs you" item was handled: it leaves the

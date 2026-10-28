@@ -60,6 +60,9 @@ class _Reports:
     async def count_pending_in_space(self, space_id: str, **_kw) -> int:
         return self.pending.get(space_id, 0)
 
+    async def get(self, report_id: str):
+        return None  # the reporter's row is covered in test_notification_calls
+
 
 class _Push:
     def __init__(self) -> None:

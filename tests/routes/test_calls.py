@@ -199,6 +199,31 @@ async def test_call_lifecycle_initiate_answer_ice_hangup(client):
     assert r.status == 204
 
 
+async def test_a_call_nobody_answered_is_a_missed_call_row_end_to_end(client):
+    """The caller hangs up while it still rings: the callee gets one
+    ``call_missed`` row ("Missed call from …") that opens the chat, and
+    opening the chat reads it."""
+    bob_tok = await _seed_bob(client)
+    r = await client.post(
+        "/api/calls",
+        json={"conversation_id": "conv-ab", "sdp_offer": "v=0\r\n"},
+        headers=_auth(client._tok),
+    )
+    cid = (await r.json())["call_id"]
+    r = await client.post(f"/api/calls/{cid}/hangup", headers=_auth(client._tok))
+    assert r.status == 204
+    r = await client.get("/api/notifications", headers=_auth(bob_tok))
+    rows = await r.json()
+    assert [(n["type"], n["link_url"]) for n in rows] == [
+        ("call_missed", "/dms/conv-ab")
+    ]
+    assert rows[0]["title"].startswith("Missed call from ")
+    r = await client.post("/api/conversations/conv-ab/read", headers=_auth(bob_tok))
+    assert r.status in (200, 204)
+    r = await client.get("/api/notifications/unread-count", headers=_auth(bob_tok))
+    assert (await r.json())["unread"] == 0
+
+
 # ─── Per-route membership guards ─────────────────────────────────────────
 
 

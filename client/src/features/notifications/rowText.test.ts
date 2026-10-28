@@ -194,6 +194,53 @@ describe('rowSentence', () => {
     })
   })
 
+  describe('calls and small decisions (#16)', () => {
+    const plain = (p: NotifParams) => ({ ...p, space_name: null })
+    const sentence = (type: string, p: NotifParams, space_id: string | null = null) => {
+      const segs = rowSentence({ type, title: 'TITLE', params: p, space_id })
+      return segs ? plainText(segs) : 'TITLE'
+    }
+
+    it('call_missed: a 1:1 chat, a named group, several calls grouped on the chat', () => {
+      expect(sentence('call_missed', plain(params(['Anna'])))).toBe('Missed call from Anna')
+      // A group chat's name is the place (no space id).
+      expect(sentence('call_missed', params(['Anna'], { space_name: 'Team' })))
+        .toBe('Missed call from Anna in Team')
+      expect(sentence('call_missed', plain(params(['Anna'], { new: 3, total: 3 }))))
+        .toBe('3 missed calls from Anna')
+      expect(sentence('call_missed', plain(params(['Anna', 'Ben']))))
+        .toBe('Missed calls from Anna and Ben')
+    })
+
+    it('chat_added: who added you, or that you were added', () => {
+      expect(sentence('chat_added', params(['Anna'], { space_name: 'Team' })))
+        .toBe('Anna added you to Team')
+      expect(sentence('chat_added', plain(params(['Anna']))))
+        .toBe('Anna added you to a group chat')
+      expect(sentence('chat_added', params([], { space_name: 'Team' })))
+        .toBe('You were added to Team')
+    })
+
+    it('poll_result names who closed it and where', () => {
+      expect(sentence('poll_result', plain(params(['Anna'])))).toBe('Anna closed a poll you voted in')
+      expect(sentence('poll_result', params(['Anna']), 's1')).toBe('Anna closed a poll in Familie Alpha')
+    })
+
+    it('report_answer names nobody — not the moderator, not whom it was about', () => {
+      expect(sentence('report_answer', plain(params([])))).toBe('Your report was reviewed')
+      expect(sentence('report_answer', params([]), 's1')).toBe('Your report in Familie Alpha was reviewed')
+      expect(sentence('report_answer', params(['Mod']), 's1')).toBe('Your report in Familie Alpha was reviewed')
+    })
+
+    it('in German', async () => {
+      await setLocale('de')
+      expect(sentence('call_missed', plain(params(['Anna'], { new: 2, total: 2 }))))
+        .toBe('2 verpasste Anrufe von Anna')
+      expect(sentence('chat_added', params(['Anna'], { space_name: 'Team' })))
+        .toBe('Anna hat dich zu Team hinzugefügt')
+    })
+  })
+
   it('renders in the viewer\'s language', async () => {
     await setLocale('de')
     expect(render('space_comment_added', params(['Ben', 'Anna'], { actor_count: 5 })))

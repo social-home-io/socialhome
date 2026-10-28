@@ -319,5 +319,17 @@
   "notification.post.reacted": "{name} hat mit {emoji} auf deinen Beitrag reagiert",
   "notification.space.post.reacted": "{name} hat in {space_name} mit {emoji} auf deinen Beitrag reagiert",
   "notification.push.post_reacted": "{name} hat auf deinen Beitrag reagiert",
-  "notification.push.post_reacted_in": "{name} hat in {space_name} auf deinen Beitrag reagiert"
+  "notification.push.post_reacted_in": "{name} hat in {space_name} auf deinen Beitrag reagiert",
+  "notification.call.incoming": "{name} ruft an",
+  "notification.call.incoming_in": "{name} ruft in {chat_name} an",
+  "notification.call.missed": "Verpasster Anruf von {name}",
+  "notification.call.missed_in": "Verpasster Anruf von {name} in {chat_name}",
+  "notification.chat.added": "{name} hat dich zu einem Gruppenchat hinzugefügt",
+  "notification.chat.added_to": "{name} hat dich zu {chat_name} hinzugefügt",
+  "notification.chat.added_none": "Du wurdest zu einem Gruppenchat hinzugefügt",
+  "notification.chat.added_to_none": "Du wurdest zu {chat_name} hinzugefügt",
+  "notification.poll.closed": "{name} hat eine Umfrage beendet, bei der du abgestimmt hast",
+  "notification.poll.closed_in": "{name} hat eine Umfrage in {space_name} beendet",
+  "notification.report.answered": "Deine Meldung wurde geprüft",
+  "notification.report.answered_in": "Deine Meldung in {space_name} wurde geprüft"
 }

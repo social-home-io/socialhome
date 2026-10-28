@@ -148,28 +148,6 @@ class PushService:
         )
         return sum(counts)
 
-    async def notify_missed_call(
-        self,
-        *,
-        recipient_user_ids: list[str] | set[str],
-        caller_user_id: str,
-        call_id: str,
-        conversation_id: str,
-    ) -> int:
-        """Send a missed-call notification (§26.8, §25.3).
-
-        Title-only per the privacy rule; the body is intentionally
-        omitted so no caller name leaks to a locked-screen preview. The
-        ``click_url`` deep-links the service worker to the DM thread so
-        the user can "Call back" in one tap.
-        """
-        payload = PushPayload(
-            title="Missed call",
-            tag=f"call-missed:{call_id}",
-            click_url=f"/dms/{conversation_id}?missed={call_id}",
-        )
-        return await self.push_to_users(recipient_user_ids, payload)
-
     async def _push_one(self, sub: PushSubscription, payload: PushPayload) -> bool:
         if not _PYWEBPUSH_AVAILABLE:  # pragma: no cover
             log.debug(

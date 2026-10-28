@@ -81,6 +81,9 @@ class AbstractPollRepo(Protocol):
         post_id: str,
         voter_user_id: str,
     ) -> list[str]: ...
+    async def list_voter_ids(self, post_id: str) -> list[str]:
+        """Everyone who holds a vote on the poll of ``post_id`` (once each)."""
+        ...
 
     # Schedule-poll metadata ----------------------------------------------
     async def create_schedule_poll(
@@ -323,6 +326,15 @@ class SqlitePollRepo:
             (voter_user_id, post_id),
         )
         return [r["option_id"] for r in rows]
+
+    async def list_voter_ids(self, post_id: str) -> list[str]:
+        rows = await self._db.fetchall(
+            "SELECT DISTINCT pv.voter_user_id FROM poll_votes pv "
+            "JOIN poll_options po ON po.id = pv.option_id "
+            "WHERE po.post_id=? ORDER BY pv.voter_user_id",
+            (post_id,),
+        )
+        return [r["voter_user_id"] for r in rows]
 
     async def list_options_with_counts(
         self,

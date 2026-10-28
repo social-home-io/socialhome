@@ -121,7 +121,6 @@ _KIND_OF_TYPE: dict[str, NotifKind] = {
     # A space you're in now offers location sharing — yours to opt into.
     "space_location_enabled": NotifKind.ABOUT_YOU,
     "report_answer": NotifKind.ABOUT_YOU,
-    "page_decision": NotifKind.ABOUT_YOU,
     "bazaar_bid_placed": NotifKind.ABOUT_YOU,
     "bazaar_offer_accepted": NotifKind.ABOUT_YOU,
     "bazaar_offer_rejected": NotifKind.ABOUT_YOU,

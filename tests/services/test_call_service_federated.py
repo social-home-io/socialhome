@@ -7,6 +7,7 @@ from dataclasses import replace
 import pytest
 
 from socialhome.crypto import generate_identity_keypair
+from socialhome.domain.events import CallMissed, CallRinging
 from socialhome.domain.federation import FederationEventType
 from socialhome.federation.sdp_signing import (
     sign_rtc_offer,
@@ -616,3 +617,67 @@ async def test_inbound_ringing_is_capped_per_callee():
         await env.svc.handle_federated_signal(_offer(call_id=f"c{i}"))
     assert len(env.svc.list_calls_for_user("uid-bob")) == MAX_CALLS_PER_USER
     assert await env.call_repo.get_call(f"c{MAX_CALLS_PER_USER}") is None
+
+
+# ─── Ringing / missed: what the notification service hears ───────────────
+
+
+def _ring(call_id: str = "c1") -> _Event:
+    return _Event(
+        FederationEventType.CALL_OFFER,
+        "remote-inst",
+        {
+            "call_id": call_id,
+            "conversation_id": "conv-ab",
+            "from_user": "uid-alice",
+            "to_user": "uid-bob",
+            "call_type": "video",
+        },
+    )
+
+
+async def test_inbound_offer_rings_the_local_callee():
+    env = _federated_env()
+    await env.svc.handle_federated_signal(_ring())
+    (event,) = env.bus.of(CallRinging)
+    assert event.callee_user_ids == ("uid-bob",)
+    assert event.caller_user_id == "uid-alice"
+    assert event.call_type == "video"
+
+
+async def test_remote_caller_hanging_up_while_it_rings_is_a_missed_call():
+    """The caller on another household gave up before Bob answered: Bob
+    missed it — the row says so and ``CallMissed`` replaces his ring."""
+    env = _federated_env()
+    await env.svc.handle_federated_signal(_ring())
+    await env.svc.handle_federated_signal(
+        _Event(
+            FederationEventType.CALL_HANGUP,
+            "remote-inst",
+            {"call_id": "c1", "hanger_user": "uid-alice"},
+        )
+    )
+    assert (await env.call_repo.get_call("c1")).status == "missed"
+    (event,) = env.bus.of(CallMissed)
+    assert event.callee_user_ids == ("uid-bob",)
+    assert event.caller_user_id == "uid-alice"
+    assert any(
+        m.type == "call_event" and '"missed"' in m.content for m in env.convos.messages
+    )
+
+
+async def test_remote_caller_hanging_up_after_an_answer_is_not_missed():
+    env = _federated_env()
+    await env.svc.handle_federated_signal(_ring())
+    await env.svc.answer_call(
+        call_id="c1", answerer_user_id="uid-bob", sdp_answer="v=0\r\nans\r\n"
+    )
+    await env.svc.handle_federated_signal(
+        _Event(
+            FederationEventType.CALL_HANGUP,
+            "remote-inst",
+            {"call_id": "c1", "hanger_user": "uid-alice"},
+        )
+    )
+    assert (await env.call_repo.get_call("c1")).status == "ended"
+    assert env.bus.of(CallMissed) == []

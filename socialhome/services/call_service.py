@@ -19,8 +19,14 @@ Two transport paths converge here:
 State is persisted to ``call_sessions`` via an injected
 :class:`~socialhome.repositories.call_repo.AbstractCallRepo`. The
 in-memory :class:`CallRecord` remains the hot path for SDP routing.
-Missed calls (ringing > 90 s) leave a ``type='call_event'`` system
-message in the DM thread via the conversation repo (§26.8 line 26445).
+Missed calls (ringing > 90 s, or the caller hung up before anyone
+answered) leave a ``type='call_event'`` system message in the DM thread via
+the conversation repo (§26.8 line 26445).
+
+Notifications ride on two local domain events — :class:`CallRinging` (a
+push for the people it rings) and :class:`CallMissed` (a row + push for
+the people who missed it); :class:`NotificationService` decides who hears
+what (chat mute, Settings → Notifications), in their language.
 
 SDP integrity: every outbound SDP is signed with the instance's Ed25519
 identity key via :func:`federation.sdp_signing.sign_rtc_offer`. Inbound
@@ -42,6 +48,7 @@ import orjson
 
 from ..domain.call import CallQualitySample, CallSession
 from ..domain.conversation import ConversationMessage, ConversationType
+from ..domain.events import CallMissed, CallRinging
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..federation.sdp_signing import (
@@ -50,9 +57,11 @@ from ..federation.sdp_signing import (
     signed_sdp_to_dict,
     verify_rtc_offer,
 )
+from ..infrastructure.event_bus import EventBus
 from ..repositories.call_repo import AbstractCallRepo
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.user_repo import AbstractUserRepo
+from .bus_publisher import BusPublisherMixin
 from .protection_gate import ProtectionGateMixin
 
 log = logging.getLogger(__name__)
@@ -149,7 +158,7 @@ YOU_BLOCKED_CALL_DETAIL = (
 )
 
 
-class CallSignalingService(ProtectionGateMixin):
+class CallSignalingService(BusPublisherMixin, ProtectionGateMixin):
     """Relay backend for WebRTC calls.
 
     Guardian blocks (§CP.F2) hold for calls as for messages: nobody rings,
@@ -179,9 +188,14 @@ class CallSignalingService(ProtectionGateMixin):
     ws_manager:
         Optional :class:`WebSocketManager` for delivering signals to the
         local browser. May be attached after construction.
+    bus:
+        Where :class:`CallRinging` / :class:`CallMissed` go (the
+        notification service turns them into pushes and rows). ``None``
+        publishes nothing.
     """
 
     __slots__ = (
+        "_bus",
         "_call_repo",
         "_calls",
         "_child_protection",
@@ -189,7 +203,6 @@ class CallSignalingService(ProtectionGateMixin):
         "_federation",
         "_own_seed",
         "_per_user",
-        "_push",
         "_user_repo",
         "_ws_manager",
     )
@@ -203,7 +216,9 @@ class CallSignalingService(ProtectionGateMixin):
         own_identity_seed: bytes,
         federation_service=None,
         ws_manager=None,
+        bus: EventBus | None = None,
     ) -> None:
+        self._bus = bus
         self._call_repo = call_repo
         self._conv_repo = conversation_repo
         self._user_repo = user_repo
@@ -212,8 +227,6 @@ class CallSignalingService(ProtectionGateMixin):
         self._ws_manager = ws_manager
         self._calls: dict[str, CallRecord] = {}
         self._per_user: dict[str, set[str]] = {}
-        # Optional push service for missed-call notifications (Phase CH).
-        self._push = None
         self._child_protection = None
 
     def attach_federation(self, federation_service) -> None:
@@ -221,10 +234,6 @@ class CallSignalingService(ProtectionGateMixin):
 
     def attach_ws_manager(self, ws_manager) -> None:
         self._ws_manager = ws_manager
-
-    def attach_push_service(self, push_service) -> None:
-        """Wire :class:`PushService` for missed-call notifications (§26.8)."""
-        self._push = push_service
 
     # ─── Public lifecycle ─────────────────────────────────────────────────
 
@@ -406,6 +415,17 @@ class CallSignalingService(ProtectionGateMixin):
                         exc,
                         exc_info=True,
                     )
+        # Last: the pushes for local callees never hold up a remote ring.
+        if local_callees:
+            await self._emit(
+                CallRinging(
+                    call_id=call_id,
+                    conversation_id=conversation_id,
+                    caller_user_id=caller_user_id,
+                    callee_user_ids=tuple(u.user_id for u in local_callees),
+                    call_type=call_type,
+                )
+            )
 
         return {
             "call_id": call_id,
@@ -697,6 +717,8 @@ class CallSignalingService(ProtectionGateMixin):
         that leg) and ``over`` (the call is finished for them).
         """
         before = record.present
+        # Rung, and neither answered nor declined (yet).
+        unanswered = record.participants - record.answered - record.left
         record.left.add(user_id)
         if user_id == record.caller_user_id:
             record.left |= record.participants - record.answered
@@ -726,6 +748,15 @@ class CallSignalingService(ProtectionGateMixin):
                 ended_at=_now_iso(),
             )
             event = "declined"
+        elif never_answered and user_id == record.caller_user_id:
+            # The caller gave up before anyone picked up: a missed call for
+            # everyone it was still ringing for.
+            session = await self._call_repo.transition(
+                record.call_id,
+                status="missed",
+                ended_at=_now_iso(),
+            )
+            event = "missed"
         else:
             session = await self._call_repo.transition(
                 record.call_id,
@@ -738,6 +769,13 @@ class CallSignalingService(ProtectionGateMixin):
             event = "ended"
         if session is not None:
             await self._emit_call_event_message(session, event=event)
+        if event == "missed":
+            await self._emit_missed(
+                record.call_id,
+                conversation_id=record.conversation_id,
+                caller_user_id=record.caller_user_id,
+                callee_user_ids=unanswered - {record.caller_user_id},
+            )
         self._cleanup_call(record.call_id)
 
     async def join_call(
@@ -1067,7 +1105,17 @@ class CallSignalingService(ProtectionGateMixin):
         )
         for session in missed:
             await self._emit_call_event_message(session, event="missed")
-            await self._emit_missed_call_push(session)
+            # Everyone it rang for, minus whoever declined meanwhile.
+            rang = set(session.participant_user_ids) - {session.initiator_user_id}
+            if not rang and session.callee_user_id:
+                rang = {session.callee_user_id}
+            record = self._calls.get(session.id)
+            await self._emit_missed(
+                session.id,
+                conversation_id=session.conversation_id,
+                caller_user_id=session.initiator_user_id,
+                callee_user_ids=rang - (record.left if record is not None else set()),
+            )
             # Drop the in-memory hot-path record if still present.
             self._cleanup_call(session.id)
         return len(missed)
@@ -1276,6 +1324,15 @@ class CallSignalingService(ProtectionGateMixin):
             # Group call: the callee's client opens its legs to the others.
             ring["participants"] = sorted(record.participants)
         await self._fanout_to_user(callee_user, ring)
+        await self._emit(
+            CallRinging(
+                call_id=call_id,
+                conversation_id=conversation_id,
+                caller_user_id=caller,
+                callee_user_ids=(callee_user,),
+                call_type=call_type,
+            )
+        )
 
     async def _offered_roster(
         self,
@@ -1377,12 +1434,27 @@ class CallSignalingService(ProtectionGateMixin):
                 FederationEventType.CALL_DECLINE,
                 FederationEventType.CALL_BUSY,
             )
-            await self._call_repo.transition(
+            # The caller hung up while it still rang here: a missed call.
+            missed = (
+                not declined
+                and persisted.status == "ringing"
+                and ender == persisted.initiator_user_id
+            )
+            session = await self._call_repo.transition(
                 call_id,
-                status="declined" if declined else "ended",
+                status="declined" if declined else "missed" if missed else "ended",
                 ended_at=_now_iso(),
                 duration_seconds=_duration_since(persisted.connected_at),
             )
+            if missed and session is not None:
+                await self._emit_call_event_message(session, event="missed")
+                await self._emit_missed(
+                    call_id,
+                    conversation_id=session.conversation_id,
+                    caller_user_id=session.initiator_user_id,
+                    callee_user_ids=set(session.participant_user_ids)
+                    - {session.initiator_user_id},
+                )
         if record is None:
             return
         if len(record.participants) > 2:
@@ -1626,28 +1698,31 @@ class CallSignalingService(ProtectionGateMixin):
         except Exception:  # pragma: no cover
             log.debug("call: touching the conversation failed", exc_info=True)
 
-    async def _emit_missed_call_push(self, session: CallSession) -> None:
-        """Fire a missed-call push notification (§25.3 — title only)."""
-        if self._push is None:
+    async def _emit_missed(
+        self,
+        call_id: str,
+        *,
+        conversation_id: str,
+        caller_user_id: str,
+        callee_user_ids: set[str],
+    ) -> None:
+        """Publish :class:`CallMissed` for the people who missed it (the
+        notification service keeps the local ones and asks what they
+        chose). Never fails the call teardown."""
+        missed_by = tuple(sorted(u for u in callee_user_ids if u))
+        if not missed_by:
             return
-        # Callees = every participant except the initiator; for 1:1 DMs
-        # that's a single user_id.
-        recipients = [
-            uid
-            for uid in session.participant_user_ids
-            if uid != session.initiator_user_id
-        ]
-        if not recipients and session.callee_user_id:
-            recipients = [session.callee_user_id]
         try:
-            await self._push.notify_missed_call(
-                recipient_user_ids=recipients,
-                caller_user_id=session.initiator_user_id,
-                call_id=session.id,
-                conversation_id=session.conversation_id,
+            await self._emit(
+                CallMissed(
+                    call_id=call_id,
+                    conversation_id=conversation_id,
+                    caller_user_id=caller_user_id,
+                    callee_user_ids=missed_by,
+                )
             )
-        except Exception as exc:  # pragma: no cover
-            log.debug("missed-call push failed: %s", exc, exc_info=True)
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("missed-call event failed: %s", exc, exc_info=True)
 
     async def _fanout_to_user(self, user_id: str, payload: dict[str, Any]) -> None:
         """Forward an event to all of *user_id*'s WS sessions, if any."""
