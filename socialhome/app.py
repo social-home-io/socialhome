@@ -217,7 +217,6 @@ from .repositories.app_repo import SqliteAppRepo
 from .repositories.auth_audit_log_repo import SqliteAuthAuditLogRepo
 from .repositories.call_repo import SqliteCallRepo
 from .repositories.cp_repo import SqliteCpRepo
-from .repositories.dm_contact_repo import SqliteDmContactRepo
 from .repositories.dm_media_outbox_repo import SqliteDmMediaOutboxRepo
 from .repositories.dm_routing_repo import SqliteDmRoutingRepo
 from .repositories.federation_repo import AbstractFederationRepo
@@ -304,7 +303,6 @@ from .services.corner_service import CornerService
 from .services.dashboard_display_service import DashboardDisplayService
 from .services.dashboard_settings_service import DashboardSettingsService
 from .services.data_export_service import DataExportService
-from .services.dm_contact_service import DmContactService
 from .services.dm_media_sync_service import DmMediaSyncService
 from .services.dm_routing_service import DmRoutingService
 from .services.federation_inbound import (
@@ -1202,7 +1200,6 @@ def _build_repos(db: AsyncDatabase):
         theme=SqliteThemeRepo(db),
         cp=SqliteCpRepo(db),
         dm_routing=SqliteDmRoutingRepo(db),
-        dm_contact=SqliteDmContactRepo(db),
         dm_media_outbox=SqliteDmMediaOutboxRepo(db),
         space_media_outbox=SqliteSpaceMediaOutboxRepo(db),
         app=SqliteAppRepo(db),
@@ -1269,7 +1266,6 @@ def _wire_federation_stack(
     space_task_repo,
     space_calendar_repo,
     calendar_repo,
-    dm_contact_repo,
     space_poll_repo,
     gallery_repo,
     bazaar_repo,
@@ -1584,11 +1580,7 @@ def _wire_federation_stack(
         bus=bus,
         federation_repo=federation_repo,
         peer_unpair=peer_unpair_service,
-        dm_contact_repo=dm_contact_repo,
-        user_repo=user_repo,
     )
-    # §CP.F2: no contact request across a guardian block.
-    pairing_handlers.attach_child_protection(app[K.child_protection_service_key])
     pairing_handlers.attach_to(federation_service)
 
     # Transitive auto-pair coordinator (§11 "simple pairing") —
@@ -2259,13 +2251,6 @@ def _build_notification_delivery(
     return worker
 
 
-def _build_dm_contacts(
-    repos: SimpleNamespace, user_repo, dm_service: DmService, bus: EventBus
-) -> DmContactService:
-    """Accept / decline a request to message someone (§23.47)."""
-    return DmContactService(repos.dm_contact, user_repo, dm_service, bus)
-
-
 def _build_notification_settings(
     repos: SimpleNamespace,
     user_service: UserService,
@@ -2755,7 +2740,6 @@ def create_app(config: Config | None = None) -> web.Application:
     sticky_repo = repos.sticky
     highlight_repo = repos.highlight
     moment_repo = repos.moment
-    dm_contact_repo = repos.dm_contact
     bazaar_repo = repos.bazaar
     push_sub_repo = repos.push_sub
     gallery_repo = repos.gallery
@@ -3182,8 +3166,7 @@ def create_app(config: Config | None = None) -> web.Application:
     # Only a household below v_43 warns about "Reviewed" (federated moderation).
     notification_service.attach_federation_repo(repos.federation)
     notification_service.attach_report_repo(report_repo)
-    # "Needs you" checks a contact request / game invite still waits.
-    notification_service.attach_contact_repo(repos.dm_contact)
+    # "Needs you" checks a game invite still waits.
     notification_service.attach_app_repo(repos.app)
     notification_service.attach_personal_calendar_repo(calendar_repo)
     # D6 comment audience + D13 post reactions read the posts.
@@ -3707,9 +3690,6 @@ def create_app(config: Config | None = None) -> web.Application:
         repos, user_service, system_chat_policy
     )
     app[K.dm_service_key] = dm_service
-    app[K.dm_contact_service_key] = _build_dm_contacts(
-        repos, user_repo, dm_service, bus
-    )
     app[K.report_repo_key] = report_repo
     app[K.report_service_key] = report_service
     app[K.task_service_key] = task_service
@@ -4273,7 +4253,6 @@ def create_app(config: Config | None = None) -> web.Application:
             space_task_repo=space_task_repo,
             space_calendar_repo=space_cal_repo,
             calendar_repo=calendar_repo,
-            dm_contact_repo=dm_contact_repo,
             space_poll_repo=repos.space_poll,
             gallery_repo=repos.gallery,
             bazaar_repo=bazaar_repo,

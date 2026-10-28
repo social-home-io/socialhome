@@ -1155,30 +1155,6 @@ class BazaarBidWithdrawn(DomainEvent):
     occurred_at: datetime = field(default_factory=_now)
 
 
-# ─── DM contact request (§12) ────────────────────────────────────────────
-
-
-@dataclass(slots=True, frozen=True)
-class DmContactRequested(DomainEvent):
-    """A user asked to start a DM with another user."""
-
-    requester_user_id: str
-    requester_display_name: str
-    recipient_user_id: str
-    occurred_at: datetime = field(default_factory=_now)
-
-
-@dataclass(slots=True, frozen=True)
-class DmContactRequestAnswered(DomainEvent):
-    """The recipient accepted or declined someone's request to message
-    them — every pending request from that person, at once."""
-
-    requester_user_id: str
-    recipient_user_id: str
-    accepted: bool
-    occurred_at: datetime = field(default_factory=_now)
-
-
 # ─── Shopping list (§23.120) — local household only, no federation ─────
 #
 # The shopping list is intentionally a local-household feature:

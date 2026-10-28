@@ -1320,7 +1320,6 @@ async def test_the_household_gps_never_reaches_a_link_joined_member(
 NON_SPACE_PROBE_TYPES = [
     FederationEventType.DM_MESSAGE,
     FederationEventType.DM_MESSAGE_DELETED,
-    FederationEventType.DM_CONTACT_REQUEST,
     FederationEventType.USERS_SYNC,
     FederationEventType.USER_UPDATED,
     FederationEventType.USER_IDENTITY_RESOLVE,
@@ -1369,7 +1368,7 @@ async def test_a_link_joined_household_cannot_push_non_space_events(
         assert result.ok is True, "the relay accepts everything by design"
     await gfs.drain()
 
-    assert len(NON_SPACE_PROBE_TYPES) == 20
+    assert len(NON_SPACE_PROBE_TYPES) == 19
     assert dispatched == [], f"host dispatched {dispatched} from a link-joined peer"
 
 

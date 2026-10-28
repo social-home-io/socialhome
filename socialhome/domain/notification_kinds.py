@@ -94,6 +94,7 @@ _KIND_OF_TYPE: dict[str, NotifKind] = {
     "moderation_pending": NotifKind.NEEDS_YOU,
     "space_report": NotifKind.NEEDS_YOU,
     "moderation_unavailable": NotifKind.NEEDS_YOU,
+    # Retired: an old row still files under Needs you (it resolves).
     "dm_contact_requested": NotifKind.NEEDS_YOU,
     "app_challenge": NotifKind.NEEDS_YOU,
     "space_invite": NotifKind.NEEDS_YOU,

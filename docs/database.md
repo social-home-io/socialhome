@@ -134,7 +134,7 @@ anything below contradicts the file, the file wins.
 | `conversation_sender_sequences` | Per-`(conversation, sender)` last-emitted sequence number, used to detect gaps and order out-of-order delivery. |
 | `dm_relay_seen` | Dedup table for `DM_RELAY` envelopes (§12.5.3). Pruned by the DM GC scheduler. |
 | `conversation_delivery_state` | Per-`(message, user)` delivery + read state. |
-| `dm_contact_requests` | Pending DM contact requests (§23.47). |
+| `dm_contact_requests` | Unused since direct chats between paired households need no request: nothing writes or reads it any more; old rows stay (kept rather than dropped, see `docs/protocol/dm.md`) and go out with a person's data export. |
 | `conversation_messages.reply_to_highlight_frame_id` | Highlight-frame reply target (§Highlights). No FK so the message survives retention deletion of the source frame. |
 | `conversation_messages.reply_to_highlight_frame_snapshot` | JSON snapshot frozen at reply-time: `{thumb_url, author_user_id, highlight_date, caption_text?, caption_emoji?}`. Keeps the reply readable after the source frame is purged. |
 | `conversation_messages.file_name` / `mime_type` / `file_size_bytes` | Media-attachment metadata for `type` ∈ {`image`, `video`, `file`}. `mime_type` drives the SPA's render branch (inline `<img>` / `<video>` / file-pill). NULL on non-media or pre-v_3 rows. See [DM media](./protocol/dm-media.md). |

@@ -47,7 +47,7 @@ export function glyphFor(type: string): GlyphName {
   if (type.includes('comment') || type.includes('replied')) return 'comment'
   if (type.endsWith('post_created')) return 'post'
   if (type === 'space_invite') return 'mail'
-  if (/followed|joined|join_|invite|contact_requested|pairing/.test(type)) return 'person'
+  if (/followed|joined|join_|invite|pairing/.test(type)) return 'person'
   if (type.startsWith('calendar')) return 'calendar'
   if (type.startsWith('task')) return 'task'
   if (/moderat|report/.test(type)) return 'shield'

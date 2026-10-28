@@ -22,25 +22,33 @@ from typing import Any
 # (``space.join_request_flags``); imported here for the readers below.
 from .space import JOIN_REQUEST_FLAGS, SpaceRole, SpaceType
 
+#: "Needs you" types nothing creates any more. A row kept from an older
+#: build still reads from its stored title and resolves (``done``) on the
+#: next look, so it never stays pinned. ``dm_contact_requested``: a 1:1
+#: between paired households needs no request.
+RETIRED_ACTION_TYPES: frozenset[str] = frozenset({"dm_contact_requested"})
+
 #: Rows that ask someone to act — the "Needs you" items (D12): a join
 #: request, a space's review queue (posts, reports), an invite to a space,
-#: a household asking to pair, someone asking to message you, a game
-#: invite (a Social Home App challenge). They stay pinned on top until handled —
-#: reading one does not un-pin it. Unread, they survive both the per-user
-#: cap and the age purge — dropping one would lose the only pointer to
-#: work still waiting. Once handled (by anyone) every recipient's row
-#: carries :class:`NotificationHandled`, reads as read and ages out like
-#: any other row.
-ACTION_ITEM_TYPES: frozenset[str] = frozenset(
-    {
-        "space_join_requested",
-        "moderation_pending",
-        "space_report",
-        "space_invite",
-        "pairing_request",
-        "dm_contact_requested",
-        "app_challenge",
-    }
+#: a household asking to pair, a game invite (a Social Home App
+#: challenge), plus the retired ones above. They stay pinned on top until
+#: handled — reading one does not un-pin it. Unread, they survive both the
+#: per-user cap and the age purge — dropping one would lose the only
+#: pointer to work still waiting. Once handled (by anyone) every
+#: recipient's row carries :class:`NotificationHandled`, reads as read and
+#: ages out like any other row.
+ACTION_ITEM_TYPES: frozenset[str] = (
+    frozenset(
+        {
+            "space_join_requested",
+            "moderation_pending",
+            "space_report",
+            "space_invite",
+            "pairing_request",
+            "app_challenge",
+        }
+    )
+    | RETIRED_ACTION_TYPES
 )
 
 #: How a "Needs you" item ended (:attr:`NotificationHandled.outcome`):
@@ -140,8 +148,6 @@ class NotificationObject(StrEnum):
     MODERATION_ITEM = "moderation"
     #: Your followers (``<user_id>``) — new follows group here.
     FOLLOWERS = "followers"
-    #: Someone asking to message you (``<requester user_id>``).
-    CONTACT = "contact"
     #: An installed Social Home App (``<app_id>``) — game invites before
     #: they had a row each.
     APP = "app"

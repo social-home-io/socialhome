@@ -386,9 +386,9 @@ own members). The receiver drops the event with a WARNING when:
   and homed elsewhere — a local member or another household's user.
   Nothing is written, not even the profile picture. The repository
   upsert also never moves a cached user onto another household.
-- `USER_REMOVED`, `USER_STATUS_UPDATED`, `USER_ONLINE` / `USER_IDLE` /
-  `USER_OFFLINE` and `DM_CONTACT_REQUEST` name a user whose home is not
-  the sending household, or a user this household does not know.
+- `USER_REMOVED`, `USER_STATUS_UPDATED` and `USER_ONLINE` / `USER_IDLE` /
+  `USER_OFFLINE` name a user whose home is not the sending household, or
+  a user this household does not know.
 - `PRESENCE_UPDATED` is keyed on `from_instance` by construction.
 
 A user seen for the first time is taken only when its `user_id`

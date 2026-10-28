@@ -130,8 +130,6 @@ from .child_protection import (
     MeProtectionView,
 )
 from .conversations import (
-    ContactRequestAcceptView,
-    ContactRequestDeclineView,
     ConversationCollectionView,
     ConversationDeliveryStatesView,
     ConversationDmView,
@@ -775,14 +773,6 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_view("/api/conversations", ConversationCollectionView)
     app.router.add_view("/api/conversations/dm", ConversationDmView)
     app.router.add_view("/api/conversations/group", ConversationGroupView)
-    app.router.add_view(
-        "/api/conversations/contact-requests/{user_id}/accept",
-        ContactRequestAcceptView,
-    )
-    app.router.add_view(
-        "/api/conversations/contact-requests/{user_id}/decline",
-        ContactRequestDeclineView,
-    )
     app.router.add_view("/api/conversations/{id}/messages", ConversationMessageView)
     app.router.add_view(
         "/api/conversations/{id}/messages/{mid}", ConversationMessageItemView
