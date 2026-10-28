@@ -729,6 +729,23 @@ export interface Message {
   edited_at: string | null
 }
 
+/** One person who acted on a notification row (their name as held then). */
+export interface NotifActor {
+  id: string
+  name: string | null
+}
+
+/** A notification row's render inputs (0129): who acted since it was last
+ *  read, newest first; how many people; events since last read (``new``)
+ *  and in all (``total``); the space's name when it was written. */
+export interface NotifParams {
+  actors: NotifActor[]
+  actor_count: number
+  new: number
+  total: number
+  space_name?: string | null
+}
+
 export interface Notification {
   id: string
   type: string
@@ -737,6 +754,16 @@ export interface Notification {
   link_url: string | null
   read_at: string | null
   created_at: string
+  /** What the row is about (``<kind>:<id>``) — ``null`` on a row from
+   *  before 0129. Opening the row reads every row about it. */
+  object_key?: string | null
+  /** The space the thing lives in. */
+  space_id?: string | null
+  /** Who acted (newest first), the counts and the space's name — the row
+   *  renders its sentence from these (``null`` before 0129). */
+  params?: NotifParams | null
+  new_count?: number
+  total_count?: number
 }
 
 export interface ShoppingItem {

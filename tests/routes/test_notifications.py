@@ -251,6 +251,33 @@ async def test_list_pages_with_before_cursor(client):
     assert seen == ["bob-4", "bob-3", "bob-2", "bob-1", "bob-0"]
 
 
+async def test_list_unread_only(client):
+    """``?unread=1`` lists only the caller's unread rows (the Unread tab)."""
+    db = client.app[_db_key]
+    for i, read_at in enumerate((None, "2026-10-27T11:00:00+00:00", None)):
+        await db.enqueue(
+            "INSERT INTO notifications(id, user_id, type, title, created_at, read_at)"
+            " VALUES(?,?,?,?,?,?)",
+            (
+                f"bob-u{i}",
+                client._bob_uid,
+                "post_created",
+                f"row {i}",
+                f"2026-10-27T10:0{i}:00.000000+00:00",
+                read_at,
+            ),
+        )
+    resp = await client.get(
+        "/api/notifications",
+        params={"unread": "1"},
+        headers=_auth(client._bob_token),
+    )
+    assert resp.status == 200
+    assert [n["id"] for n in await resp.json()] == ["bob-u2", "bob-u0"]
+    resp = await client.get("/api/notifications", headers=_auth(client._bob_token))
+    assert {"bob-u0", "bob-u1", "bob-u2"} <= {n["id"] for n in await resp.json()}
+
+
 # ── Who, what and where (0129) ────────────────────────────────────────
 
 

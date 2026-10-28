@@ -76,6 +76,7 @@ class AbstractNotificationRepo(Protocol):
         *,
         before: str | None = None,
         limit: int = 50,
+        unread_only: bool = False,
     ) -> builtins.list[Notification]: ...
     async def find(self, spec: Spec) -> builtins.list[Notification]: ...
     async def get(self, notification_id: str) -> Notification | None: ...
@@ -242,8 +243,10 @@ class SqliteNotificationRepo:
         *,
         before: str | None = None,
         limit: int = 50,
+        unread_only: bool = False,
     ) -> builtins.list[Notification]:
         """Bespoke per-user listing — kept as the common-case shim.
+        ``unread_only`` keeps the rows not read yet (the page's Unread tab).
 
         For arbitrary filter combinations use :meth:`find` with a
         :class:`Spec`. This method now composes a Spec internally so
@@ -252,6 +255,8 @@ class SqliteNotificationRepo:
         where: list[tuple[str, str, object]] = [("user_id", "=", user_id)]
         if before is not None:
             where.append(("created_at", "<", before))
+        if unread_only:
+            where.append(("read_at", "IS", None))
         spec = Spec(
             where=where,
             order_by=[("created_at", "DESC")],

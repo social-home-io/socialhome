@@ -51,8 +51,11 @@ class NotificationCollectionView(BaseView):
         ctx = self.user
         before = self.request.query.get("before")
         limit = min(max(int(self.request.query.get("limit", 50)), 1), 50)
+        unread_only = self.request.query.get("unread") in ("1", "true")
         repo = self.svc(notification_repo_key)
-        notes = await repo.list(ctx.user_id, before=before, limit=limit)
+        notes = await repo.list(
+            ctx.user_id, before=before, limit=limit, unread_only=unread_only
+        )
         return web.json_response([notification_json(n) for n in notes])
 
 

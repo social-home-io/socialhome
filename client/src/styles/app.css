@@ -8616,24 +8616,92 @@ button.sh-shopping-item__text:focus-visible {
   margin: 0;
   padding: 0;
 }
-.sh-notif-rows__item { border-bottom: 1px dashed var(--sh-border); }
-.sh-notif-rows__item:last-child { border-bottom: none; }
+.sh-notif-rows__item + .sh-notif-rows__item { margin-top: 2px; }
+/* Toolbar: the All | Unread tabs and "Mark all read". Wraps on phones. */
+.sh-notif-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-xs) 0 var(--sh-space-sm);
+}
+.sh-notif-filter {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-full);
+}
+.sh-notif-filter__tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: var(--sh-radius-full);
+  background: transparent;
+  color: var(--sh-text-muted);
+  font: inherit;
+  font-size: var(--sh-font-size-sm);
+  font-weight: 600;
+  cursor: pointer;
+}
+.sh-notif-filter__tab--on { background: var(--sh-text); color: var(--sh-bg); }
+.sh-notif-filter__tab:focus-visible { outline-offset: 2px; }
+.sh-notif-filter__count { font-size: var(--sh-font-size-xs); font-weight: 800; }
+/* Day header: Today / Yesterday / the date. */
+.sh-notif-day__h {
+  margin: 0;
+  padding: var(--sh-space-md) var(--sh-space-sm) var(--sh-space-xs);
+  font-size: var(--sh-font-size-base);
+  font-weight: 600;
+  color: var(--sh-text);
+}
+/* "↑ N new": arrivals wait here, so rows never move under the reader. */
+.sh-notif-newpill {
+  display: flex;
+  justify-content: center;
+  margin: 4px 0;
+  /* Stays in view below the top bar for a reader who scrolled down. */
+  position: sticky;
+  top: calc(var(--sh-topbar-height) + 8px);
+  z-index: 2;
+  pointer-events: none;
+}
+.sh-notif-panel .sh-notif-newpill { top: 48px; }
+@media (max-width: 768px) {
+  .sh-notif-newpill { top: calc(var(--sh-topbar-height-mobile) + 8px); }
+}
+.sh-notif-newpill button {
+  min-height: 36px;
+  padding: 0 16px;
+  border: 0;
+  border-radius: var(--sh-radius-full);
+  background: var(--sh-text);
+  color: var(--sh-bg);
+  font: inherit;
+  font-size: var(--sh-font-size-sm);
+  font-weight: 700;
+  cursor: pointer;
+  box-shadow: var(--sh-shadow-pinned);
+  pointer-events: auto;
+}
+.sh-notif-newpill button:focus-visible { outline-offset: 2px; }
 /* One row = one link (or one button when there's nothing to open):
- * the whole row is the tap target and the keyboard stop, and its
- * accessible name is the sentence. */
+ * avatar + glyph, the sentence, the meta line, the unread dot. */
 .sh-notif-row {
   display: flex;
   align-items: flex-start;
-  gap: var(--sh-space-md);
+  gap: 12px;
   width: 100%;
   min-height: 44px;
-  margin: 2px 0;
-  padding: var(--sh-space-sm) var(--sh-space-sm) var(--sh-space-sm) var(--sh-space-md);
+  padding: 10px var(--sh-space-sm);
   background: transparent;
   border: none;
-  border-inline-start: 3px solid transparent;
-  border-radius: var(--sh-radius-sm);
-  color: var(--sh-text-muted);
+  border-radius: 12px;
+  color: color-mix(in srgb, var(--sh-text) 82%, var(--sh-bg));
   font: inherit;
   text-align: start;
   text-decoration: none;
@@ -8641,34 +8709,88 @@ button.sh-shopping-item__text:focus-visible {
   transition: background var(--sh-transition-fast);
 }
 .sh-notif-row:hover {
-  background: color-mix(in srgb, var(--sh-bg) 60%, transparent);
+  background: color-mix(in srgb, var(--sh-bg-secondary) 70%, transparent);
 }
 .sh-notif-row:focus-visible { outline-offset: -2px; }
-/* Unread: the filled dot (shape), heavier ink (weight) and the edge +
- * tint, never colour alone. Screen readers hear "Unread". */
+/* Unread: the filled dot (shape), heavier ink (weight) and a tint, never
+ * colour alone. Screen readers hear "Unread". */
 .sh-notif-row--unread {
-  border-inline-start-color: var(--sh-primary);
-  background: color-mix(in srgb, var(--sh-primary) 5%, transparent);
+  background: color-mix(in srgb, var(--sh-primary) 6%, transparent);
   color: var(--sh-text);
 }
-.sh-notif-icon {
-  flex: none;
-  font-size: var(--sh-font-size-sm);
-  line-height: 1.6;
-  color: var(--sh-primary-text);
+.sh-notif-av { position: relative; flex: none; display: inline-flex; }
+.sh-notif-av .sh-avatar { flex: none; }
+.sh-notif-av__space,
+.sh-notif-av__sys {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 12px;
+  background: var(--sh-bg-secondary);
+  color: var(--sh-text-muted);
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1;
 }
+.sh-notif-av__sys { border: 1px solid var(--sh-border); border-radius: 50%; }
+.sh-notif-av__sys svg { width: 18px; height: 18px; }
+.sh-notif-av__space img { width: 100%; height: 100%; object-fit: cover; }
+/* The type glyph: a 20 px badge on the avatar's bottom end corner
+ * (logical, so it moves to the left in RTL). */
+.sh-notif-av__glyph {
+  position: absolute;
+  inset-inline-end: -5px;
+  bottom: -5px;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--sh-primary-fill);
+  color: var(--sh-on-primary-fill);
+  box-shadow: 0 0 0 2px var(--sh-bg-tertiary);
+}
+.sh-notif-av__glyph[data-glyph="heart"] { background: var(--sh-danger); color: var(--sh-on-danger-fill); }
+.sh-notif-av__glyph[data-glyph="person"],
+.sh-notif-av__glyph[data-glyph="task"] { background: var(--sh-success); color: var(--sh-on-success-fill); }
+.sh-notif-av__glyph[data-glyph="shield"],
+.sh-notif-av__glyph[data-glyph="calendar"] { background: var(--sh-warning); color: var(--sh-on-warning-fill); }
 .sh-notif-content {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
   overflow-wrap: anywhere;
 }
-.sh-notif-title { font-weight: 400; }
-.sh-notif-row--unread .sh-notif-title,
-.sh-notif--unread .sh-notif-title { font-weight: 700; }
-.sh-notif-body { color: var(--sh-text-muted); font-size: var(--sh-font-size-sm); }
+/* Read: names 600, sentence 400, muted ink. Unread: names 800,
+ * sentence 500, ink. The space reads as a name, not italic. */
+.sh-notif-title { font-weight: 400; line-height: 1.4; }
+.sh-notif-title b { font-weight: 600; }
+.sh-notif-title i { font-style: normal; font-weight: 500; color: var(--sh-text); }
+.sh-notif-row--unread .sh-notif-title { font-weight: 500; }
+.sh-notif-row--unread .sh-notif-title b { font-weight: 800; }
+.sh-notif-row--unread .sh-notif-title i { font-weight: 600; }
+.sh-notif-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 6px;
+  font-size: var(--sh-font-size-xs);
+  color: var(--sh-text-muted);
+}
+.sh-notif-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--sh-primary);
+  visibility: hidden;
+}
+.sh-notif-row--unread .sh-notif-dot { visibility: visible; }
+.sh-notif-row--compact { padding: 8px 10px; gap: 10px; font-size: var(--sh-font-size-sm); }
 .sh-notif-more {
   display: flex;
   justify-content: center;
@@ -8676,10 +8798,7 @@ button.sh-shopping-item__text:focus-visible {
   border-top: 1px dashed var(--sh-border);
 }
 .sh-notif-time {
-  font: 500 calc(var(--sh-font-size-xs) - 1px) / 1.2
-        ui-monospace, Menlo, Consolas, monospace;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  font-size: var(--sh-font-size-xs);
   color: var(--sh-text-muted);
 }
 .sh-notif-badge {
@@ -15308,35 +15427,9 @@ a.sh-link-preview-link:focus-visible {
   font-size: var(--sh-font-size-base);
   font-weight: 700;
 }
-.sh-notif-list { display: flex; flex-direction: column; }
+.sh-notif-list { display: flex; flex-direction: column; gap: 2px; }
 .sh-notif-empty { margin: 0; padding: var(--sh-space-md); }
-.sh-notif-item {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  width: 100%;
-  padding: var(--sh-space-sm) var(--sh-space-md);
-  background: transparent;
-  border: none;
-  border-bottom: 1px dashed var(--sh-border);
-  border-inline-start: 3px solid transparent;
-  color: var(--sh-text-muted);
-  font: inherit;
-  text-align: start;
-  text-decoration: none;
-  cursor: pointer;
-  transition: background var(--sh-transition-fast);
-}
-.sh-notif-item:last-child { border-bottom: none; }
-.sh-notif-item:hover {
-  background: color-mix(in srgb, var(--sh-bg) 60%, transparent);
-}
-.sh-notif-item:focus-visible { outline-offset: -2px; }
-.sh-notif--unread {
-  background: color-mix(in srgb, var(--sh-primary) 5%, transparent);
-  border-inline-start-color: var(--sh-primary);
-  color: var(--sh-text);
-}
+.sh-notif-list { padding: 4px; }
 .sh-notif-see-all {
   display: block;
   position: sticky;
@@ -26940,3 +27033,5 @@ a.sh-spaces-row__main:focus-visible { outline: 2px solid var(--sh-focus-ring); o
   cursor: pointer;
 }
 .sh-moment-replyfield__remove:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: 1px; }
+/* The plain tile already draws the glyph: no second badge on it. */
+.sh-notif-av__sys + .sh-notif-av__glyph { display: none; }

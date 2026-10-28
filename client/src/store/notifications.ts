@@ -9,6 +9,7 @@
 import { signal } from '@preact/signals'
 import { api } from '@/api'
 import { ws } from '@/ws'
+import type { NotifParams } from '@/types'
 
 export interface NotificationLite {
   notification_id: string
@@ -24,6 +25,13 @@ export interface NotificationLite {
   /** The frame refreshed a row that was already unread (a chat burst
    *  collapses into one row): move it up, never count it again. */
   bumped?:         boolean
+  /** The row had been read and came back with new activity. */
+  reopened?:       boolean
+  /** What it is about (``<kind>:<id>``), its space, and what its sentence
+   *  renders from (0129). */
+  object_key?:     string | null
+  space_id?:       string | null
+  params?:         NotifParams | null
 }
 
 export const recent      = signal<NotificationLite[]>([])

@@ -25,11 +25,13 @@ import { useEffect, useLayoutEffect, useRef } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { useLocation } from 'preact-iso'
 import { api } from '@/api'
-import { recent, unreadCount } from '@/store/notifications'
+import { recent, unreadCount, type NotificationLite } from '@/store/notifications'
 import type { Notification } from '@/types'
-import { addBase, appHref } from '@/baseUrl'
+import { addBase } from '@/baseUrl'
 import { useMediaQuery } from '@/hooks/useMediaQuery'
-import { formatLocale, isOne, t } from '@/i18n/i18n'
+import { isOne, t } from '@/i18n/i18n'
+import { ws } from '@/ws'
+import { NewPill, NotificationRow, markRowRead, withRead } from '@/features/notifications/NotificationRow'
 
 /** Same breakpoint as the bottom tab bar (``.sh-mobile-nav``). */
 export const PHONE_QUERY = '(max-width: 768px)'
@@ -43,6 +45,9 @@ export const panelOpen = signal(false)
  *  Falls back to the store's lighter ``recent`` projection while
  *  loading. */
 const fullList = signal<Notification[]>([])
+/** Rows that arrived while the panel was open, behind its "↑ N new" pill
+ *  — the list never reorders under the reader. */
+const panelPending = signal<ReadonlySet<string>>(new Set())
 
 // 30 s polling fallback for the rare case the WS connection is
 // down. Kept as a belt-and-suspenders guard — the WS path is the
@@ -128,6 +133,24 @@ function DesktopBell() {
     }).catch(() => { /* noop */ })
   }, [])
 
+  // While the panel is open a new row waits behind the pill; closed, the
+  // next open refetches anyway.
+  useEffect(() => ws.on('notification.new', (e) => {
+    if (!panelOpen.value) return
+    const f = e.data as unknown as NotificationLite
+    const next = new Set(panelPending.value)
+    next.add(f.notification_id)
+    panelPending.value = next
+  }), [])
+
+  const refresh = async () => {
+    try {
+      const data = await api.get('/api/notifications?limit=20')
+      fullList.value = data as Notification[]
+      panelPending.value = new Set()
+    } catch { /* keep stale list visible */ }
+  }
+
   const close = (refocus: boolean) => {
     panelOpen.value = false
     if (refocus) btnRef.current?.focus()
@@ -171,18 +194,13 @@ function DesktopBell() {
     if (rect.left < EDGE_GAP) shift = EDGE_GAP - rect.left
     else if (rect.right > vw - EDGE_GAP) shift = vw - EDGE_GAP - rect.right
     if (shift !== 0) panel.style.transform = `translateX(${Math.round(shift)}px)`
-    const first = panel.querySelector<HTMLElement>('.sh-notif-item, .sh-notif-see-all')
+    const first = panel.querySelector<HTMLElement>('.sh-notif-row, .sh-notif-see-all')
     first?.focus({ preventScroll: true })
   }, [panelOpen.value])
 
   const togglePanel = async () => {
     panelOpen.value = !panelOpen.value
-    if (panelOpen.value) {
-      try {
-        const data = await api.get('/api/notifications?limit=20')
-        fullList.value = data as Notification[]
-      } catch { /* keep stale list visible */ }
-    }
+    if (panelOpen.value) await refresh()
   }
 
   const markAllRead = async () => {
@@ -195,18 +213,16 @@ function DesktopBell() {
   }
 
   const handleItemClick = async (n: Notification) => {
-    // Optimistic decrement — tapping an unread item flips it read,
-    // and the destination page (e.g. DM thread) typically clears the
-    // server-side row too via its read hook. The next /unread-count
-    // poll reconciles any divergence.
+    // Optimistic decrement — tapping an unread item flips it (and every
+    // row about the same thing) read; the server's unread-count frame
+    // reconciles any divergence.
     const isUnread = !n.read_at
     if (isUnread && unreadCount.value > 0) {
       unreadCount.value = unreadCount.value - 1
     }
     if (isUnread) {
-      fullList.value = fullList.value.map(x =>
-        x.id === n.id ? { ...x, read_at: new Date().toISOString() } : x)
-      try { await api.post(`/api/notifications/${n.id}/read`) }
+      fullList.value = withRead(fullList.value, n)
+      try { await markRowRead(n) }
       catch { /* best-effort */ }
     }
     if (n.link_url) panelOpen.value = false
@@ -225,6 +241,9 @@ function DesktopBell() {
         link_url:   r.link_url ?? null,
         read_at:    null,
         created_at: r.occurred_at ?? new Date().toISOString(),
+        object_key: r.object_key ?? null,
+        space_id:   r.space_id ?? null,
+        params:     r.params ?? null,
       }) as Notification)
 
   return (
@@ -267,48 +286,14 @@ function DesktopBell() {
               </button>
             )}
           </div>
+          <NewPill count={panelPending.value.size} onShow={() => void refresh()} />
           <div class="sh-notif-list">
             {items.length === 0 && (
               <p class="sh-notif-empty sh-muted">{t('notifications.bell_empty')}</p>
             )}
-            {items.map(n => {
-              const unread = !n.read_at
-              const cls = `sh-notif-item${unread ? ' sh-notif--unread' : ''}`
-              const inner = (
-                <>
-                  {unread && (
-                    <><span class="sr-only">{t('notifications.unread')},</span>{' '}</>
-                  )}
-                  <span class="sh-notif-title">{n.title}</span>
-                  {' '}
-                  <time class="sh-notif-time" dateTime={n.created_at}>
-                    {new Date(n.created_at).toLocaleString(formatLocale())}
-                  </time>
-                </>
-              )
-              if (n.link_url) {
-                return (
-                  <a
-                    key={n.id}
-                    href={appHref(n.link_url)}
-                    class={cls}
-                    onClick={() => void handleItemClick(n)}
-                  >
-                    {inner}
-                  </a>
-                )
-              }
-              return (
-                <button
-                  key={n.id}
-                  type="button"
-                  class={cls}
-                  onClick={() => void handleItemClick(n)}
-                >
-                  {inner}
-                </button>
-              )
-            })}
+            {items.map(n => (
+              <NotificationRow key={n.id} n={n} compact onOpen={(row) => void handleItemClick(row)} />
+            ))}
           </div>
           <a
             class="sh-notif-see-all"

@@ -233,6 +233,21 @@ async def test_list_unread_and_mark_read_ids_touch_only_the_owner(env):
     assert await env.notif_repo.mark_read_ids(uid, []) == 0
 
 
+async def test_list_unread_only_pages_through_unread_rows(env):
+    """The page's Unread tab: only rows not read yet, newest first, and the
+    ``before`` cursor still applies."""
+    uid = await _user(env)
+    old = await _save(env, uid, stamp="2026-01-01T00:00:00+00:00")
+    await _save(env, uid, stamp="2026-01-02T00:00:00+00:00", read=True)
+    new = await _save(env, uid, stamp="2026-01-03T00:00:00+00:00")
+    rows = await env.notif_repo.list(uid, unread_only=True)
+    assert [n.id for n in rows] == [new.id, old.id]
+    older = await env.notif_repo.list(
+        uid, unread_only=True, before="2026-01-03T00:00:00+00:00"
+    )
+    assert [n.id for n in older] == [old.id]
+
+
 async def test_mark_read_for_everyone_returns_who_flipped(env):
     a = await _user(env, "uid-a")
     b = await _user(env, "uid-b")

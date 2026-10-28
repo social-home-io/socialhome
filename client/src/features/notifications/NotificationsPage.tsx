@@ -1,29 +1,36 @@
 /**
  * NotificationsPage — notification centre (§23.3).
  *
- * The newest page of rows loads first; "Show older" fetches the next
- * page with the list endpoint's ``before`` cursor (the oldest loaded
- * row's ``created_at``), and moves focus to the first row it added so
- * a keyboard or screen-reader user carries on reading where they were.
+ * Rows sit under day headers (Today / Yesterday / the date) and read as
+ * whole sentences in the viewer's language (:mod:`./rowText`); each row is
+ * ONE control (:class:`NotificationRow`). An All | Unread tab list filters
+ * the list (Unread asks the server for unread rows only, so paging stays
+ * honest).
  *
- * Each row is ONE control: a link to the thing it is about (or a
- * button when there's nothing to open) whose accessible name is the
- * sentence and its time. Activating it marks the row read. Unread rows
- * say "Unread" to screen readers and use a heavier weight plus the
- * dot and edge, so read state never rests on colour alone.
+ * Live arrivals never reorder the list under the reader: a "↑ N new" pill
+ * appears instead, and tapping it loads them on top. One polite live region
+ * outside the list says how many arrived — at most once per 10 s, counts
+ * only, never the sentence.
+ *
+ * The newest page of rows loads first; "Show older" fetches the next page
+ * with the list endpoint's ``before`` cursor (the oldest loaded row's
+ * ``created_at``), and moves focus to the first row it added so a keyboard
+ * or screen-reader user carries on reading where they were.
  */
-import { useEffect } from 'preact/hooks'
-import { t, formatLocale } from '@/i18n/i18n'
-import { useTitle } from '@/store/pageTitle'
+import { useEffect, useRef } from 'preact/hooks'
 import { signal } from '@preact/signals'
+import { t } from '@/i18n/i18n'
+import { useTitle } from '@/store/pageTitle'
 import { api } from '@/api'
 import { ws } from '@/ws'
 import { Button } from '@/components/Button'
 import { NotificationListSkeleton } from '@/components/Skeleton'
 import { showToast } from '@/components/Toast'
-import { relativeDocsTime } from '@/utils/relativeTime'
+import { loadHouseholdUsers } from '@/store/householdUsers'
+import { unreadCount, type NotificationLite } from '@/store/notifications'
 import type { Notification } from '@/types'
-import { appHref } from '@/baseUrl'
+import { NewPill, NotificationRow, markRowRead, withRead } from './NotificationRow'
+import { createAnnouncer, groupByDay, type NotifFilter } from './rowList'
 
 /** Rows per request — the list endpoint's maximum. */
 export const PAGE_SIZE = 50
@@ -33,6 +40,17 @@ const loading = signal(true)
 /** A full page came back last time, so older rows may exist. */
 const hasMore = signal(false)
 const loadingOlder = signal(false)
+export const filter = signal<NotifFilter>('all')
+/** Rows that arrived (or came back) while the list was open, waiting
+ *  behind the "↑ N new" pill. */
+const pending = signal<ReadonlySet<string>>(new Set())
+/** The polite live region's text. */
+const liveText = signal('')
+
+const TAB_IDS: Record<NotifFilter, string> = {
+  all: 'sh-notif-tab-all',
+  unread: 'sh-notif-tab-unread',
+}
 
 /** Put a freshly fetched newest page in front of what's loaded,
  *  keeping any older pages the person already opened. */
@@ -48,11 +66,18 @@ export function mergeNewestPage(
   return { list: [...first, ...tail], hasMore: tail.length > 0 ? prevHasMore : true }
 }
 
-/** Refetch the newest page. Reused by the initial load and by the
- *  ``notification.new`` WS refresh below so a freshly-arrived
- *  notification lands without a manual reload. */
+function listUrl(before?: string): string {
+  let url = `/api/notifications?limit=${PAGE_SIZE}`
+  if (filter.value === 'unread') url += '&unread=1'
+  if (before) url += `&before=${encodeURIComponent(before)}`
+  return url
+}
+
+/** Refetch the newest page (the first load, a filter switch, the pill). */
 function loadNotifications(): Promise<void> {
-  return api.get(`/api/notifications?limit=${PAGE_SIZE}`).then((data: Notification[]) => {
+  const want = filter.value
+  return api.get(listUrl()).then((data: Notification[]) => {
+    if (filter.value !== want) return // switched meanwhile: that load wins
     const merged = mergeNewestPage(data, notifications.value, hasMore.value)
     notifications.value = merged.list
     hasMore.value = merged.hasMore
@@ -66,9 +91,7 @@ async function loadOlder(): Promise<void> {
   loadingOlder.value = true
   const before = list[list.length - 1].created_at
   try {
-    const data: Notification[] = await api.get(
-      `/api/notifications?limit=${PAGE_SIZE}&before=${encodeURIComponent(before)}`,
-    )
+    const data: Notification[] = await api.get(listUrl(before))
     const seen = new Set(list.map(n => n.id))
     const added = data.filter(n => !seen.has(n.id))
     notifications.value = [...list, ...added]
@@ -88,14 +111,95 @@ async function loadOlder(): Promise<void> {
   }
 }
 
+function setFilter(next: NotifFilter): void {
+  if (filter.value === next) return
+  filter.value = next
+  notifications.value = []
+  hasMore.value = false
+  pending.value = new Set()
+  loading.value = true
+  void loadNotifications().catch(() => { loading.value = false })
+}
+
+/** Load what's behind the pill, back to the top, focus the newest row. */
+async function showPending(): Promise<void> {
+  try {
+    await loadNotifications()
+  } catch { /* keep the pill: tapping again retries */ return }
+  pending.value = new Set()
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+  requestAnimationFrame(() => {
+    document.querySelector<HTMLElement>('.sh-notifications-page .sh-notif-row')?.focus({ preventScroll: true })
+  })
+}
+
+function FilterTabs() {
+  const n = unreadCount.value
+  const order: NotifFilter[] = ['all', 'unread']
+  const onKey = (e: KeyboardEvent) => {
+    if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft' && e.key !== 'Home' && e.key !== 'End') return
+    e.preventDefault()
+    const at = order.indexOf(filter.value)
+    const next = e.key === 'Home' ? order[0]
+      : e.key === 'End' ? order[order.length - 1]
+      : order[(at + (e.key === 'ArrowRight' ? 1 : order.length - 1)) % order.length]
+    setFilter(next)
+    document.getElementById(TAB_IDS[next])?.focus()
+  }
+  return (
+    <div class="sh-notif-filter" role="tablist" aria-label={t('notifications.filter.label')} onKeyDown={onKey}>
+      {order.map(f => {
+        const on = filter.value === f
+        return (
+          <button
+            key={f}
+            id={TAB_IDS[f]}
+            type="button"
+            role="tab"
+            aria-selected={on}
+            aria-controls="sh-notif-list"
+            tabIndex={on ? 0 : -1}
+            class={on ? 'sh-notif-filter__tab sh-notif-filter__tab--on' : 'sh-notif-filter__tab'}
+            onClick={() => setFilter(f)}
+          >
+            {t(f === 'all' ? 'notifications.filter.all' : 'notifications.filter.unread')}
+            {f === 'unread' && n > 0 && (
+              <span class="sh-notif-filter__count">{n > 99 ? '99+' : n}</span>
+            )}
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 export default function NotificationsPage() {
   useTitle(t('nav.notifications'))
+  const announcer = useRef<ReturnType<typeof createAnnouncer> | null>(null)
   useEffect(() => {
-    void loadNotifications()
-    // Live refresh on inbound notifications — refetch-on-frame keeps the
-    // page simple and lets the server own ordering / read-state.
-    const offNew = ws.on('notification.new', () => { void loadNotifications() })
-    return () => { offNew() }
+    pending.value = new Set()
+    liveText.value = ''
+    void loadNotifications().catch(() => { loading.value = false })
+    void loadHouseholdUsers()
+    announcer.current = createAnnouncer((text) => { liveText.value = text })
+    const offNew = ws.on('notification.new', (e) => {
+      const f = e.data as unknown as NotificationLite
+      // A repeat on a row still unread changes nothing the badge counts:
+      // no announcement for it, but the pill still offers the fresh text.
+      if (!f.bumped || f.reopened) announcer.current?.arrived(1)
+      if (notifications.value.length === 0 && !loading.value) {
+        void loadNotifications() // nothing to reorder under anyone
+        return
+      }
+      const next = new Set(pending.value)
+      next.add(f.notification_id)
+      pending.value = next
+    })
+    return () => {
+      offNew()
+      announcer.current?.dispose()
+      announcer.current = null
+    }
   }, [])
 
   const markAllRead = async () => {
@@ -109,90 +213,62 @@ export default function NotificationsPage() {
     }
   }
 
-  const markRead = async (id: string) => {
+  const open = async (n: Notification) => {
+    if (n.read_at) return
     // Optimistic: the row reads as read the moment it's opened, even
-    // while the link navigates away.
+    // while the link navigates away. It stays in the Unread view until
+    // the next load, so nothing jumps under the finger.
     const before = notifications.value
-    notifications.value = before.map(n =>
-      n.id === id ? { ...n, read_at: new Date().toISOString() } : n,
-    )
+    notifications.value = withRead(before, n)
     try {
-      await api.post(`/api/notifications/${id}/read`)
+      await markRowRead(n)
     } catch (err: unknown) {
       notifications.value = before
       showToast(t('notifications.mark_failed', { error: String((err as Error)?.message ?? err) }), 'error')
     }
   }
 
-  if (loading.value) return <NotificationListSkeleton />
+  const live = <p class="sr-only" role="status" aria-live="polite">{liveText.value}</p>
+
+  if (loading.value) {
+    return <>{live}<NotificationListSkeleton /></>
+  }
 
   const list = notifications.value
   const anyUnread = list.some(n => !n.read_at)
+  const unreadView = filter.value === 'unread'
 
   return (
     <div class="sh-notifications-page">
-      {anyUnread && (
-        <div class="sh-page-header">
+      {live}
+      <div class="sh-notif-toolbar">
+        <FilterTabs />
+        {anyUnread && (
           <Button variant="secondary" onClick={markAllRead}>{t('notifications.mark_all_read')}</Button>
-        </div>
-      )}
-      {list.length === 0 && (
-        <div class="sh-empty-state">
-          <div aria-hidden="true">🔔</div>
-          <h3>{t('notifications.empty_title')}</h3>
-          <p>{t('notifications.empty_body')}</p>
-        </div>
-      )}
-      {list.length > 0 && (
-        <ul class="sh-notif-rows">
-          {list.map(n => {
-            const unread = !n.read_at
-            const cls = `sh-notif-row${unread ? ' sh-notif-row--unread' : ''}`
-            const inner = (
-              <>
-                <span class="sh-notif-icon" aria-hidden="true">{unread ? '●' : '○'}</span>
-                <span class="sh-notif-content">
-                  {unread && <><span class="sr-only">{t('notifications.unread')},</span>{' '}</>}
-                  <span class="sh-notif-title">{n.title}</span>
-                  {' '}
-                  {n.body && <><span class="sh-notif-body">{n.body}</span>{' '}</>}
-                  <time
-                    class="sh-notif-time"
-                    dateTime={n.created_at}
-                    title={new Date(n.created_at).toLocaleString(formatLocale())}
-                  >
-                    {relativeDocsTime(n.created_at)}
-                  </time>
-                </span>
-              </>
-            )
-            const onActivate = () => { if (unread) void markRead(n.id) }
-            return (
-              <li key={n.id} class="sh-notif-rows__item">
-                {n.link_url ? (
-                  <a
-                    class={cls}
-                    href={appHref(n.link_url)}
-                    data-notif-id={n.id}
-                    onClick={onActivate}
-                  >
-                    {inner}
-                  </a>
-                ) : (
-                  <button
-                    type="button"
-                    class={cls}
-                    data-notif-id={n.id}
-                    onClick={onActivate}
-                  >
-                    {inner}
-                  </button>
-                )}
-              </li>
-            )
-          })}
-        </ul>
-      )}
+        )}
+      </div>
+      <NewPill count={pending.value.size} onShow={() => void showPending()} />
+      <div id="sh-notif-list" role="tabpanel" aria-labelledby={TAB_IDS[filter.value]}>
+        {list.length === 0 && (
+          <div class="sh-empty-state">
+            <div aria-hidden="true">🔔</div>
+            <h3>{t(unreadView ? 'notifications.unread_empty_title' : 'notifications.empty_title')}</h3>
+            <p>{t(unreadView ? 'notifications.unread_empty_body' : 'notifications.empty_body')}</p>
+          </div>
+        )}
+        {groupByDay(list).map(g => (
+          <section key={g.key} class="sh-notif-day" aria-labelledby={`sh-notif-day-${g.key}`}>
+            <h3 class="sh-notif-day__h" id={`sh-notif-day-${g.key}`}>{g.label}</h3>
+            <ul class="sh-notif-rows">
+              {g.rows.map(n => (
+                <li key={n.id} class="sh-notif-rows__item">
+                  <NotificationRow n={n} onOpen={(row) => void open(row)} />
+                </li>
+              ))}
+            </ul>
+          </section>
+        ))}
+      </div>
       {hasMore.value && list.length > 0 && (
         <div class="sh-notif-more">
           <Button
