@@ -123,6 +123,39 @@ describe('rowSentence', () => {
     })
   })
 
+  describe('replies and reactions to your own things (#1214)', () => {
+    const household = (p: NotifParams) => ({ ...p, space_name: null })
+    const sentence = (type: string, p: NotifParams, space_id: string | null = null) => {
+      const segs = rowSentence({ type, title: 'TITLE', params: p, space_id })
+      return segs ? plainText(segs) : 'TITLE'
+    }
+
+    it('post_replied: household feed and space, one / many / count', () => {
+      expect(sentence('post_replied', household(params(['Ben'])))).toBe('Ben commented on your post')
+      expect(sentence('post_replied', params(['Ben', 'Anna']), 's1'))
+        .toBe('Ben and Anna commented on your post in Familie Alpha')
+      expect(sentence('post_replied', household(params(['Ben', 'Anna'], { actor_count: 3, new: 4, total: 4 }))))
+        .toBe('4 new comments on your post from Ben, Anna and 1 other')
+    })
+
+    it('comment_replied', () => {
+      expect(sentence('comment_replied', params(['Ben']), 's1')).toBe('Ben replied to your comment in Familie Alpha')
+      expect(sentence('comment_replied', household(params(['Ben'], { new: 2, total: 2 }))))
+        .toBe('2 replies to your comment from Ben')
+    })
+
+    it('post_reacted counts reactions, grouped', () => {
+      expect(sentence('post_reacted', household(params(['Ben', 'Anna'], { actor_count: 5 }))))
+        .toBe('Ben, Anna and 3 others reacted to your post')
+      expect(sentence('post_reacted', params(['Ben', 'Anna'], { new: 7, total: 7 }), 's1'))
+        .toBe('7 reactions to your post in Familie Alpha from Ben and Anna')
+    })
+
+    it('a space row whose space name is unknown keeps its title', () => {
+      expect(sentence('post_reacted', household(params(['Ben'])), 's1')).toBe('TITLE')
+    })
+  })
+
   it('renders in the viewer\'s language', async () => {
     await setLocale('de')
     expect(render('space_comment_added', params(['Ben', 'Anna'], { actor_count: 5 })))

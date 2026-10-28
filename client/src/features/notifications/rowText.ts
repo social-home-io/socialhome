@@ -43,6 +43,9 @@ interface TypeSpec {
   none?: boolean
   /** Has no ``{actor}`` sentence (only ``_none`` / ``_count``). */
   noActor?: boolean
+  /** Lives in a space or in the household feed: each key has an ``_in``
+   *  sibling naming ``{space}``, used when the row is about a space. */
+  inSpace?: boolean
 }
 
 /**
@@ -77,6 +80,17 @@ interface TypeSpec {
  *   notifications.row.user_followed_many
  *   notifications.row.moderation_pending_none
  *   notifications.row.space_report_none
+ *   notifications.row.post_replied notifications.row.post_replied_in
+ *   notifications.row.post_replied_many notifications.row.post_replied_many_in
+ *   notifications.row.post_replied_count notifications.row.post_replied_count_in
+ *   notifications.row.comment_replied notifications.row.comment_replied_in
+ *   notifications.row.comment_replied_many
+ *   notifications.row.comment_replied_many_in
+ *   notifications.row.comment_replied_count
+ *   notifications.row.comment_replied_count_in
+ *   notifications.row.post_reacted notifications.row.post_reacted_in
+ *   notifications.row.post_reacted_many notifications.row.post_reacted_many_in
+ *   notifications.row.post_reacted_count notifications.row.post_reacted_count_in
  *   notifications.new_pill notifications.new_pill_one
  *   notifications.live_new notifications.live_new_one
  *   notifications.meta.new_of_total notifications.meta.new_of_total_one
@@ -102,6 +116,9 @@ export const ROW_TYPES: Readonly<Record<string, TypeSpec>> = {
   user_followed: {},
   moderation_pending: { none: true, noActor: true },
   space_report: { none: true, noActor: true },
+  post_replied: { count: true, inSpace: true },
+  comment_replied: { count: true, inSpace: true },
+  post_reacted: { count: true, inSpace: true },
 }
 
 /** Every catalog key the renderer may ask for (the locale tests walk it). */
@@ -116,9 +133,12 @@ export function rowKeys(): string[] {
   ]
   for (const [type, spec] of Object.entries(ROW_TYPES)) {
     const base = `notifications.row.${type}`
-    if (!spec.noActor) keys.push(base, `${base}_many`)
-    if (spec.count) keys.push(`${base}_count`)
-    if (spec.none) keys.push(`${base}_none`)
+    const own: string[] = []
+    if (!spec.noActor) own.push(base, `${base}_many`)
+    if (spec.count) own.push(`${base}_count`)
+    if (spec.none) own.push(`${base}_none`)
+    keys.push(...own)
+    if (spec.inSpace) keys.push(...own.map(k => `${k}_in`))
   }
   return keys
 }
@@ -127,6 +147,8 @@ export interface RowInput {
   type: string
   title: string
   params?: NotifParams | null
+  /** The space the row is about, if any (picks an ``_in`` sentence). */
+  space_id?: string | null
 }
 
 const PLACEHOLDER = /\{(\w+)\}/g
@@ -191,6 +213,10 @@ export function rowSentence(row: RowInput, spaceName?: string | null): Segment[]
     key = `${base}_none`
   } else if (Math.max(p.actor_count, actors.length) > 1) key = `${base}_many`
   else key = base
+  if (spec.inSpace && (space || row.space_id)) {
+    if (!space) return null // a space row whose name we don't know: the title names it
+    key = `${key}_in`
+  }
   if (!hasKey(key)) return null
   const template = t(key)
   if (template.includes('{space}') && !space) return null

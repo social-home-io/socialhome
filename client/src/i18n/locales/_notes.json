@@ -587,5 +587,7 @@
   "notifications.live_new": "Read out by screen readers when new notifications arrive. Only the count, never what they say.",
   "notifications.row.post_created_count": "Counts posts, not people: \"25 new posts from Ben, Anna and 3 others\". {count} is 2 or more; {actors} is a list of people (notifications.actors.*).",
   "notifications.row.space_post_created_count": "Counts posts, not people: \"25 new posts in Familie Alpha from Ben, Anna and 3 others\". {count} is 2 or more; {space} is the space name; {actors} is a list of people (notifications.actors.*).",
-  "notifications.row.space_mention": "A notification sentence. {actor} is one person's name, {space} a space name. Whole-sentence keys: the \"_many\" variant takes {actors}, a list of two or more people, so the verb is plural."
+  "notifications.row.space_mention": "A notification sentence. {actor} is one person's name, {space} a space name. Whole-sentence keys: the \"_many\" variant takes {actors}, a list of two or more people, so the verb is plural.",
+  "notifications.row.post_reacted_count": "Counts reactions (emoji), not people: \"7 reactions to your post from Ben, Anna and 2 others\". {count} is 2 or more.",
+  "notifications.row.post_replied_in": "The \"_in\" variants are the same sentence for a post in a space; {space} is the space name."
 }
