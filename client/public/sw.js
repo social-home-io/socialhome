@@ -2,7 +2,8 @@
  *
  * Payload (``socialhome/services/push_service.py`` ``PushPayload``):
  * ``{title, click_url?, tag?, space_id?, icon_url?}`` — title only, never a
- * body. ``url`` is still read as a fallback for ``click_url``.
+ * body. ``url`` is still read as a fallback for ``click_url``. A withdraw
+ * (``{withdraw: [tags]}``) closes earlier notifications instead.
  *
  * URL resolution under HA Supervisor ingress
  * ------------------------------------------
@@ -27,12 +28,34 @@ function resolveInScope(target) {
   return url.startsWith(scope) ? url : scope
 }
 
+/* Withdraw (``{withdraw: [tags], tag}``): the things these notifications
+ * were about were handled elsewhere — read on another device, answered by
+ * another admin, a call picked up. Close them and show nothing.
+ *
+ * The server only sends a withdraw to Chromium-family push services, where
+ * a push that leaves nothing on screen spends a silent-push budget rather
+ * than costing the subscription (Safari revokes it, Firefox spends a quota
+ * — see ``tolerates_silent_push`` in ``push_service.py``). ``tag`` is for
+ * an older worker that doesn't know withdraws; this one ignores it.
+ */
+async function withdraw(tags) {
+  const wanted = new Set(tags.map((t) => String(t)))
+  const shown = await self.registration.getNotifications()
+  for (const n of shown) {
+    if (n.tag && wanted.has(n.tag)) n.close()
+  }
+}
+
 self.addEventListener('push', (event) => {
   let data = {}
   try {
     data = (event.data && event.data.json()) || {}
   } catch {
     data = {}
+  }
+  if (Array.isArray(data.withdraw)) {
+    event.waitUntil(withdraw(data.withdraw))
+    return
   }
   const title = data.title || 'Social Home'
   const options = {

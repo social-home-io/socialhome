@@ -18,7 +18,7 @@ from socialhome.domain.conversation import (
     RemoteConversationMember,
     SystemChatScope,
 )
-from socialhome.domain.events import CallMissed, CallRinging
+from socialhome.domain.events import CallMissed, CallRinging, CallRingStopped
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.user import RemoteUser, User
 from socialhome.services.call_service import (
@@ -732,6 +732,8 @@ async def test_caller_hanging_up_before_an_answer_is_a_missed_call(env):
     ] == ["started", "missed"]
     (event,) = env.bus.of(CallMissed)
     assert event.callee_user_ids == ("uid-bob",)
+    # The missed call replaces the ring — nothing withdraws it.
+    assert env.bus.of(CallRingStopped) == []
 
 
 async def test_a_declined_call_is_not_missed(env):
@@ -744,6 +746,13 @@ async def test_a_declined_call_is_not_missed(env):
     await env.svc.decline(call_id=r["call_id"], decliner_user_id="uid-bob")
     assert (await env.call_repo.get_call(r["call_id"])).status == "declined"
     assert env.bus.of(CallMissed) == []
+    # The ring comes off Bob's devices instead.
+    (stopped,) = env.bus.of(CallRingStopped)
+    assert (stopped.call_id, stopped.conversation_id, stopped.user_ids) == (
+        r["call_id"],
+        "conv-ab",
+        ("uid-bob",),
+    )
 
 
 async def test_an_answered_call_is_not_missed(env):
@@ -759,6 +768,8 @@ async def test_an_answered_call_is_not_missed(env):
     await env.svc.hangup(call_id=r["call_id"], hanger_user_id="uid-alice")
     assert (await env.call_repo.get_call(r["call_id"])).status == "ended"
     assert env.bus.of(CallMissed) == []
+    # Answered (on any device): the ring comes off Bob's other devices.
+    assert [e.user_ids for e in env.bus.of(CallRingStopped)] == [("uid-bob",)]
 
 
 async def test_without_a_bus_a_call_still_rings_and_misses():

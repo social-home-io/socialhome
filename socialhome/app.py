@@ -377,6 +377,7 @@ from .services.profile_federation_outbound import ProfileFederationOutbound
 from .services.profile_sync_service import ProfileSyncService
 from .services.public_space_discovery_service import PublicSpaceDiscoveryService
 from .services.push_service import PushService, load_or_create_vapid
+from .services.push_withdraw_service import PushWithdrawService
 from .services.realtime_service import RealtimeService
 from .services.recovery_kit_service import RecoveryKitService
 from .services.recovery_reconnect_service import RecoveryReconnectService
@@ -2905,6 +2906,10 @@ def create_app(config: Config | None = None) -> web.Application:
     push_service = PushService(sub_repo=push_sub_repo, vapid=vapid)
     # Hook push fan-out into the notification service (§25.3 — title only).
     notification_service.attach_push_service(push_service)
+    # Handled pushes come back off the devices (read, answered, handled).
+    push_withdraw_service = PushWithdrawService(user_repo)
+    push_withdraw_service.attach_push_service(push_service)
+    notification_service.attach_push_withdraw(push_withdraw_service)
     # Let the DM notification path skip recipients with the thread
     # open — see :meth:`NotificationService.on_dm_message_created`.
     notification_service.attach_ws_manager(ws_manager)
@@ -3494,6 +3499,7 @@ def create_app(config: Config | None = None) -> web.Application:
     # HA mode calls ``notify.mobile_app_<user>``, standalone POSTs to
     # ``platform_users.notify_endpoint``.
     notification_service.attach_platform_adapter(platform_adapter)
+    push_withdraw_service.attach_platform_adapter(platform_adapter)
 
     # HA event bridge — only when running on HA. Lets users automate on
     # socialhome.* events from the HA side.
@@ -5051,6 +5057,7 @@ def create_app(config: Config | None = None) -> web.Application:
             federation_repo, window=REPLAY_CACHE_WINDOW
         )
         await replay_cache_scheduler.start()
+        await push_withdraw_service.start()
         if gfs_route_discovery_scheduler is not None:
             await gfs_route_discovery_scheduler.start()
 
@@ -5402,6 +5409,8 @@ def create_app(config: Config | None = None) -> web.Application:
         await highlight_signaling_handler.stop()
         if replay_cache_scheduler is not None:
             await replay_cache_scheduler.stop()
+        # Before the shared HTTP session closes: pending withdraws go out.
+        await push_withdraw_service.stop()
         if gfs_route_discovery_scheduler is not None:
             await gfs_route_discovery_scheduler.stop()
         page_forwarder = app.get(K.page_proposal_forwarder_key)

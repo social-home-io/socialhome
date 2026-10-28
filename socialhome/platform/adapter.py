@@ -257,6 +257,12 @@ class PushProvider(Protocol):
         data: dict | None = None,
     ) -> None: ...
 
+    async def withdraw(self, user: ExternalUser, tags: list[str]) -> None:
+        """Take the pushes sent with these ``data["tag"]`` values off the
+        user's devices (they were handled). Best-effort — never raises; a
+        platform that can't do it does nothing."""
+        ...
+
     async def list_notify_targets(self) -> list[dict]:
         """User-selectable notify targets as ``[{"entity_id", "name"}]``.
 
@@ -534,6 +540,12 @@ class PlatformAdapter(abc.ABC):
         if self.push is None:
             return
         await self.push.send(user, title, message, data)
+
+    async def withdraw_push(self, user: ExternalUser, tags: list[str]) -> None:
+        """Withdraw earlier pushes by tag (:meth:`PushProvider.withdraw`)."""
+        if self.push is None or not tags:
+            return
+        await self.push.withdraw(user, tags)
 
     async def transcribe_audio(
         self,

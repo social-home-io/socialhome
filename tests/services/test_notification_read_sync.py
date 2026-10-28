@@ -16,6 +16,7 @@ import pytest
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import (
+    CallRingStopped,
     DmMessageCreated,
     NotificationCreated,
     NotificationReadChanged,
@@ -36,6 +37,7 @@ from socialhome.repositories.notification_repo import (
 )
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.notification_service import NotificationService
+from socialhome.services.push_withdraw_service import PushWithdrawService
 from socialhome.services.user_service import UserService
 
 
@@ -410,3 +412,199 @@ async def test_the_last_open_report_resolved_clears_report_rows(env):
 
     # A household-level report has no space rows to clear.
     await env.bus.publish(ReportResolved(report_id="r3", resolved_by="z"))
+
+
+# ── 5. What was read or handled comes off the devices ─────────────────
+
+
+class _Withdrawals:
+    """Records what the service asks :class:`PushWithdrawService` to do."""
+
+    def __init__(self) -> None:
+        self.pushed: list[tuple[str, str]] = []
+        self.withdrawn: list[tuple[str, list[str]]] = []
+
+    def note_pushed(self, user_id: str, tag: str) -> None:
+        self.pushed.append((user_id, tag))
+
+    def withdraw(self, user_id: str, tags) -> list[str]:
+        self.withdrawn.append((user_id, list(tags)))
+        return list(tags)
+
+
+@pytest.fixture
+def withdrawals(env) -> _Withdrawals:
+    w = _Withdrawals()
+    env.svc.attach_push_withdraw(w)
+    return w
+
+
+async def test_every_push_is_remembered_by_its_tag(env, withdrawals):
+    anna, bob = await env.user("anna"), await env.user("bob")
+    await _mention(env, anna, bob)
+    await env.bus.publish(_dm(anna, bob, conv="c2"))
+    assert withdrawals.pushed == [
+        (bob.user_id, "dm_mention:/dms/c1"),
+        (bob.user_id, "dm_message:/dms/c2"),
+    ]
+
+
+async def test_reading_one_row_withdraws_its_push(env, withdrawals):
+    bob, cara = await env.user("bob"), await env.user("cara")
+    note = await _row(env, bob.user_id, type="post_created", link="/post/p1")
+    await env.svc.mark_read(bob.user_id, note.id)
+    assert withdrawals.withdrawn == [(bob.user_id, ["post_created:/post/p1"])]
+    assert await env.notifs.count_unread(bob.user_id) == 0
+    assert [(e.user_id, e.unread_count) for e in env.read_changed] == [(bob.user_id, 0)]
+    # Already read, someone else's or unknown: nothing to withdraw.
+    await env.svc.mark_read(bob.user_id, note.id)
+    await env.svc.mark_read(cara.user_id, note.id)
+    await env.svc.mark_read(bob.user_id, "nope")
+    assert len(withdrawals.withdrawn) == 1
+
+
+async def test_a_row_without_a_link_withdraws_by_its_id(env, withdrawals):
+    bob = await env.user("bob")
+    note = new_notification(user_id=bob.user_id, type="poll_result", title="t")
+    await env.notifs.save(note)
+    await env.svc.mark_read(bob.user_id, note.id)
+    assert withdrawals.withdrawn == [(bob.user_id, [f"poll_result:{note.id}"])]
+
+
+async def test_read_all_withdraws_every_unread_rows_push(env, withdrawals):
+    bob = await env.user("bob")
+    await _row(env, bob.user_id, type="post_created", link="/post/p1")
+    await _row(env, bob.user_id, type="task_assigned", link="/tasks/t1")
+    done = await _row(env, bob.user_id, type="post_created", link="/post/p0")
+    await env.notifs.mark_read(done.id, bob.user_id)
+    await env.svc.mark_all_read(bob.user_id)
+    [(user_id, tags)] = withdrawals.withdrawn
+    assert user_id == bob.user_id
+    assert sorted(tags) == ["post_created:/post/p1", "task_assigned:/tasks/t1"]
+    assert await env.notifs.count_unread(bob.user_id) == 0
+    assert [(e.user_id, e.unread_count) for e in env.read_changed] == [(bob.user_id, 0)]
+
+
+async def test_reading_by_link_withdraws_what_flipped(env, withdrawals):
+    bob = await env.user("bob")
+    await _row(env, bob.user_id, type="post_created", link="/post/p1")
+    await _row(env, bob.user_id, type="comment_added", link="/post/p1?comment=c9")
+    await _row(env, bob.user_id, type="post_created", link="/post/p2")
+    await env.svc.mark_read_by_links(bob.user_id, ["/post/p1"])
+    [(_, tags)] = withdrawals.withdrawn
+    assert sorted(tags) == [
+        "comment_added:/post/p1?comment=c9",
+        "post_created:/post/p1",
+    ]
+    # Nothing flipped: nothing to withdraw.
+    await env.svc.mark_read_by_links(bob.user_id, ["/post/p1"])
+    assert len(withdrawals.withdrawn) == 1
+
+
+async def test_reading_by_object_withdraws_what_flipped(env, withdrawals):
+    bob = await env.user("bob")
+    await _row(env, bob.user_id, type="post_reacted", link="/post/p1", key="post:p1")
+    await _row(env, bob.user_id, type="post_created", link="/post/p2", key="post:p2")
+    assert await env.svc.mark_read_by_objects(bob.user_id, ["post:p1"]) == 1
+    assert withdrawals.withdrawn == [(bob.user_id, ["post_reacted:/post/p1"])]
+    assert await env.svc.mark_read_by_objects(bob.user_id, ["post:p1"]) == 0
+    assert len(withdrawals.withdrawn) == 1
+
+
+async def test_opening_a_chat_withdraws_its_message_mention_and_call_pushes(
+    env, withdrawals
+):
+    """A chat message has no row, yet its push must still go: opening the
+    chat withdraws every tag the chat's pushes carry."""
+    bob = await env.user("bob")
+    await env.svc.mark_read_for_dm(bob.user_id, "c1")
+    assert withdrawals.withdrawn == [
+        (
+            bob.user_id,
+            [
+                "dm_message:/dms/c1",
+                "dm_mention:/dms/c1",
+                "call_missed:/dms/c1",
+                "chat_added:/dms/c1",
+            ],
+        )
+    ]
+
+
+async def test_a_handled_request_withdraws_it_from_every_admin(env, withdrawals):
+    a, b = await env.user("adminA"), await env.user("adminB")
+    link = "/spaces/s1/moderation"
+    for admin in (a, b):
+        await _row(
+            env,
+            admin.user_id,
+            type="space_join_requested",
+            link=link,
+            key="join_request:r1",
+        )
+    await _row(env, b.user_id, type="moderation_pending", link=link, key="space:s1")
+    await env.bus.publish(
+        SpaceJoinApproved(
+            space_id="s1", user_id="x", request_id="r1", approved_by=a.user_id
+        )
+    )
+    assert sorted(withdrawals.withdrawn) == sorted(
+        [
+            (a.user_id, [f"space_join_requested:{link}"]),
+            (b.user_id, [f"space_join_requested:{link}"]),
+        ]
+    )
+
+
+async def test_an_answered_call_withdraws_the_ring_not_a_missed_call(env, withdrawals):
+    """The ring shares ``call_missed:<link>`` with the missed call; an
+    answered or declined call takes it off the device instead."""
+    bob, cara = await env.user("bob"), await env.user("cara")
+    await env.bus.publish(
+        CallRingStopped(
+            call_id="k1", conversation_id="c1", user_ids=(bob.user_id, cara.user_id)
+        )
+    )
+    assert withdrawals.withdrawn == [
+        (bob.user_id, ["call_missed:/dms/c1"]),
+        (cara.user_id, ["call_missed:/dms/c1"]),
+    ]
+    assert env.created == []  # no missed-call row
+
+
+async def test_without_a_withdraw_service_reads_still_work(env):
+    bob = await env.user("bob")
+    await _row(env, bob.user_id, type="post_reacted", link="/post/p1", key="post:p1")
+    await env.bus.publish(
+        CallRingStopped(call_id="k1", conversation_id="c1", user_ids=(bob.user_id,))
+    )
+    assert await env.svc.mark_read_by_objects(bob.user_id, ["post:p1"]) == 1
+    await env.svc.mark_all_read(bob.user_id)
+    await env.svc.mark_read_for_dm(bob.user_id, "c1")
+
+
+async def test_a_pushed_chat_message_comes_off_when_read_elsewhere(env):
+    """End to end with the real :class:`PushWithdrawService`: Anna's message
+    buzzed Bob's phone; Bob opens the chat on his laptop; one withdraw push
+    with the message's tag goes to the phone."""
+    anna, bob = await env.user("anna"), await env.user("bob")
+    web = _WebWithdraw()
+    service = PushWithdrawService(env.svc._users)
+    service.attach_push_service(web)
+    env.svc.attach_push_withdraw(service)
+
+    await env.bus.publish(_dm(anna, bob))
+    await env.svc.mark_read_for_dm(bob.user_id, "c1")
+    await env.svc.mark_read_for_dm(bob.user_id, "c1")  # nothing left: no-op
+    await service.flush(bob.user_id)
+
+    assert web.calls == [(bob.user_id, ["dm_message:/dms/c1"])]
+
+
+class _WebWithdraw:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, list[str]]] = []
+
+    async def withdraw_from_user(self, user_id: str, tags: list[str]) -> int:
+        self.calls.append((user_id, tags))
+        return 1

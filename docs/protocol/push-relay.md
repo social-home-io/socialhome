@@ -126,6 +126,80 @@ is `{title, click_url?, tag?}`:
 The household sends Web Push on a worker thread, a few devices at a time,
 so a slow push service never stalls the server.
 
+## Withdrawing a push
+
+A push comes off the person's devices once it no longer needs attention:
+
+| Trigger | Tags withdrawn |
+|---|---|
+| A notification read on any device (`POST /api/notifications/{id}/read`, `read-all`, `read-by-link`, `read-by-object`) | the tag of every row that flipped |
+| A conversation opened (`POST /api/conversations/{id}/read`) | `dm_message:`, `dm_mention:`, `call_missed:` and `chat_added:` + the chat's link (a chat message has no row, so its push is withdrawn by link) |
+| A "Needs you" item handled by another admin (the `handled` list of the `unread_count` frame) | the tag of each recipient's row about it |
+| A ringing call answered (on any device), declined, or its invite withdrawn (`CallRingStopped`) | `call_missed:<chat link>` — the ring's tag |
+
+A call that rings out or that the caller gives up on before anyone answered
+is **not** withdrawn: "Missed call from Anna" replaces the ring under the
+same tag (`CallMissed`).
+
+What it costs:
+
+- **Only what was pushed.** The household remembers, in memory, which tags
+  it pushed to whom (`PushWithdrawService`, at most 200 per person, for 3
+  days). Reading an in-app-only row, a silent repeat or something already
+  withdrawn sends nothing. After a restart older pushes stay on the device
+  until they are swiped away or replaced.
+- **Coalesced.** Withdraws for one person gather for 2 s and go out as one
+  Web Push per device (`{"withdraw": [tags], "tag": first}`; split only past
+  3 000 bytes). Opening a chat, then the bell, then a page within a second
+  or two is one push, not three. A fresh push with the same tag cancels a
+  withdraw still waiting.
+- **No content.** A withdraw has no title and no text, only tags (§25.3).
+
+**Web Push.** The service worker (`client/public/sw.js`) closes the shown
+notifications with those tags (`registration.getNotifications()`) and shows
+nothing. Browsers differ on a push that shows nothing, so the household
+only sends a withdraw where it is safe:
+
+- **Chromium (Chrome, Edge, Samsung Internet, Opera, Brave; push services
+  `fcm.googleapis.com`, `*.notify.windows.com`): sent.** Chromium only
+  counts whether a notification of the site is on screen or a tab of it is
+  visible after the push. If neither, the push spends from a silent-push
+  budget tied to how much the person uses the site; only when that budget
+  is spent does Chromium show its own "This site has been updated in the
+  background" notice, and it removes that notice once a real notification
+  shows. The subscription is never cancelled
+  (`chrome/browser/push_messaging/push_messaging_notification_manager.cc`,
+  `DidCountVisibleNotifications` / `ProcessSilentPush`).
+- **Safari (`web.push.apple.com`): not sent.** WebKit cancels a push
+  subscription after three pushes that show no notification (WebKit bug
+  236863, "Enforce silent push quota"; webkit.org "Meet Web Push").
+- **Firefox (`*.push.services.mozilla.com`): not sent.** A push without a
+  notification spends a quota that only visiting the site refreshes, and an
+  exhausted quota expires the subscription (MDN, Push API).
+
+On Safari and Firefox a handled push stays until it is swiped away or a
+newer push with the same tag replaces it. A "Handled" replacement
+notification was considered and rejected: it would leave something on the
+lock screen for every read, which is the opposite of the goal. The extra
+`tag` field is for a service worker from before withdraws: it shows the
+push as a plain notification under that tag, so it replaces one of the
+withdrawn notifications quietly instead of adding one.
+
+**Home Assistant Companion app.** For a person whose notify target is a
+`notify.mobile_app_*` service, each tag gets a `clear_notification`:
+`{"message": "clear_notification", "data": {"tag": <hashed tag>}}`, the same
+hashed tag the push carried (`companion_tag`), one call per tag, at most 20
+per burst. Contract: companion.home-assistant.io/docs/notifications/
+notifications-basic, "Clearing". The push relay treats it as a command, so
+it never counts toward the 500-a-day limit
+(home-assistant/mobile-apps-fcm-push `functions/android.js`
+`androidMessagesToIgnore`, `functions/ios.js` `clear_notification`, both
+`updateRateLimits = false`, @ 72200467). The docs note the app may need to
+have been used recently for a clear to land. Any other notify target (a
+notify entity, a group, another service) gets nothing: it would show
+"clear_notification" as a message. A failed call is logged as a warning.
+Standalone's `notify_endpoint` webhook has no withdraw.
+
 ## Subscription lifecycle
 
 - `GET /api/push/vapid_public_key`: this household's VAPID public key, for
@@ -139,7 +213,10 @@ so a slow push service never stalls the server.
 ## Implementation
 
 - `socialhome/services/push_service.py`: Web Push sends (VAPID, via the
-  optional `pywebpush`) and subscription bookkeeping.
+  optional `pywebpush`) and subscription bookkeeping; withdraw payloads
+  and which push services get them (`tolerates_silent_push`).
+- `socialhome/services/push_withdraw_service.py`: what was pushed to whom,
+  and the coalesced withdraw.
 - `socialhome/platform/adapter.py` (`PushProvider`) and
   `socialhome/platform/ha/providers.py` (`HaPushProvider`): the platform
   push path.

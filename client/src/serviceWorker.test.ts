@@ -21,20 +21,44 @@ interface FakeClient {
   navigate: ReturnType<typeof vi.fn>
 }
 
-function bootWorker(scope: string, windows: FakeClient[] = []) {
+interface FakeNotification {
+  tag: string
+  close: ReturnType<typeof vi.fn>
+}
+
+function shownNotification(tag: string): FakeNotification {
+  return { tag, close: vi.fn() }
+}
+
+function bootWorker(scope: string, windows: FakeClient[] = [], shown: FakeNotification[] = []) {
   const listeners: Record<string, (event: unknown) => void> = {}
   const showNotification = vi.fn().mockResolvedValue(undefined)
+  const getNotifications = vi.fn().mockResolvedValue(shown)
   const openWindow = vi.fn().mockResolvedValue(null)
   const matchAll = vi.fn().mockResolvedValue(windows)
   const self = {
-    registration: { scope, showNotification },
+    registration: { scope, showNotification, getNotifications },
     clients: { matchAll, openWindow },
     addEventListener: (type: string, fn: (event: unknown) => void) => {
       listeners[type] = fn
     },
   }
   new Function('self', swSource)(self)
-  return { listeners, showNotification, openWindow, matchAll }
+  return { listeners, showNotification, getNotifications, openWindow, matchAll }
+}
+
+async function deliver(sw: ReturnType<typeof bootWorker>, data: unknown) {
+  let pending: Promise<unknown> = Promise.resolve()
+  let waited = false
+  sw.listeners.push({
+    data: { json: () => data },
+    waitUntil: (p: Promise<unknown>) => {
+      waited = true
+      pending = p
+    },
+  })
+  await pending
+  return waited
 }
 
 async function push(sw: ReturnType<typeof bootWorker>, data: unknown) {
@@ -143,6 +167,37 @@ describe('sw.js push under the ingress prefix', () => {
     })
     await pending
     expect(sw.showNotification.mock.calls[0][0]).toBe('Social Home')
+  })
+})
+
+describe('sw.js withdraw (a handled push comes off the device)', () => {
+  it('closes the notifications with the withdrawn tags and shows nothing', async () => {
+    const ring = shownNotification('call_missed:/dms/c-1')
+    const dm = shownNotification('dm_message:/dms/c-1')
+    const other = shownNotification('post_reacted:/post/p1')
+    const sw = bootWorker(INGRESS_SCOPE, [], [ring, dm, other])
+    const waited = await deliver(sw, {
+      withdraw: ['call_missed:/dms/c-1', 'dm_message:/dms/c-1'],
+      tag: 'call_missed:/dms/c-1',
+    })
+    expect(waited).toBe(true)
+    expect(ring.close).toHaveBeenCalled()
+    expect(dm.close).toHaveBeenCalled()
+    expect(other.close).not.toHaveBeenCalled()
+    expect(sw.showNotification).not.toHaveBeenCalled()
+  })
+
+  it('shows nothing when none of the withdrawn notifications is on screen', async () => {
+    const sw = bootWorker(INGRESS_SCOPE, [], [])
+    await deliver(sw, { withdraw: ['task_assigned:/tasks/t1'], tag: 'task_assigned:/tasks/t1' })
+    expect(sw.showNotification).not.toHaveBeenCalled()
+  })
+
+  it('treats a push without a withdraw list as a normal notification', async () => {
+    const sw = bootWorker(INGRESS_SCOPE, [], [shownNotification('x')])
+    await deliver(sw, { title: 'Anna messaged you', tag: 'x', withdraw: 'x' })
+    expect(sw.getNotifications).not.toHaveBeenCalled()
+    expect(sw.showNotification).toHaveBeenCalledTimes(1)
   })
 })
 

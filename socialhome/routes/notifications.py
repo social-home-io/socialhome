@@ -5,11 +5,9 @@ from __future__ import annotations
 from aiohttp import web
 
 from ..app_keys import (
-    event_bus_key,
     notification_repo_key,
     notification_service_key,
 )
-from ..domain.events import NotificationReadChanged
 from ..domain.notification import Notification
 from ..domain.notification_kinds import kind_of
 from ..security import error_response
@@ -94,15 +92,7 @@ class NotificationReadView(BaseView):
     async def post(self) -> web.Response:
         ctx = self.user
         nid = self.match("id")
-        repo = self.svc(notification_repo_key)
-        bus = self.svc(event_bus_key)
-        await repo.mark_read(nid, ctx.user_id)
-        await bus.publish(
-            NotificationReadChanged(
-                user_id=ctx.user_id,
-                unread_count=await repo.count_unread(ctx.user_id),
-            )
-        )
+        await self.svc(notification_service_key).mark_read(ctx.user_id, nid)
         return web.json_response({"ok": True})
 
 
@@ -111,15 +101,7 @@ class NotificationReadAllView(BaseView):
 
     async def post(self) -> web.Response:
         ctx = self.user
-        repo = self.svc(notification_repo_key)
-        bus = self.svc(event_bus_key)
-        await repo.mark_all_read(ctx.user_id)
-        await bus.publish(
-            NotificationReadChanged(
-                user_id=ctx.user_id,
-                unread_count=0,
-            )
-        )
+        await self.svc(notification_service_key).mark_all_read(ctx.user_id)
         return web.json_response({"ok": True})
 
 

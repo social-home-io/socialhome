@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from socialhome.domain.events import CallMissed, CallRingStopped
 from socialhome.domain.federation import FederationEventType
 from socialhome.services.call_service import (
     MAX_CALL_PARTICIPANTS,
@@ -379,3 +380,53 @@ async def test_an_inbound_answer_is_attributed_to_the_named_callee():
         )
     )
     assert len(_frames(env, A, "call.answered")) == 1
+
+
+# ─── the ring comes off the devices it no longer rings on ─────────────────
+
+
+def _stopped(env) -> list[tuple[str, ...]]:
+    return [e.user_ids for e in env.bus.of(CallRingStopped)]
+
+
+async def test_answering_or_declining_stops_only_that_callees_ring():
+    env = _env()
+    cid = await _start(env)
+    await env.svc.answer_call(call_id=cid, answerer_user_id=B, sdp_answer="x")
+    assert _stopped(env) == [(B,)]
+    await env.svc.decline(call_id=cid, decliner_user_id=C)
+    assert _stopped(env) == [(B,), (C,)]
+    assert env.bus.of(CallRingStopped)[0].conversation_id == "trio"
+    assert env.bus.of(CallMissed) == []
+
+
+async def test_the_caller_leaving_after_an_answer_stops_the_others_ring():
+    """Carol's invite is withdrawn (not a missed call): her ring goes."""
+    env = _env()
+    cid = await _start(env)
+    await env.svc.answer_call(call_id=cid, answerer_user_id=B, sdp_answer="x")
+    await env.svc.hangup(call_id=cid, hanger_user_id=A)
+    assert _stopped(env) == [(B,), (C,)]
+    assert env.bus.of(CallMissed) == []
+
+
+async def test_a_call_ending_while_one_still_rings_stops_that_ring():
+    env = _env()
+    cid = await _start(env)
+    await env.svc.answer_call(call_id=cid, answerer_user_id=B, sdp_answer="x")
+    # Bob leaves: alice and carol (still ringing) are left — it rings on.
+    await env.svc.hangup(call_id=cid, hanger_user_id=B)
+    assert _stopped(env) == [(B,)]
+    # Bob answered, so alice giving up is no missed call: carol's ring goes.
+    await env.svc.hangup(call_id=cid, hanger_user_id=A)
+    assert _stopped(env) == [(B,), (C,)]
+    assert env.bus.of(CallMissed) == []
+
+
+async def test_a_missed_call_replaces_the_ring_instead_of_stopping_it():
+    env = _env()
+    cid = await _start(env)
+    await env.svc.hangup(call_id=cid, hanger_user_id=A)
+    assert _stopped(env) == []
+    (missed,) = env.bus.of(CallMissed)
+    assert missed.callee_user_ids == (B, C)

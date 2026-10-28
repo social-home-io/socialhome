@@ -1993,6 +1993,20 @@ class CallMissed(DomainEvent):
     occurred_at: datetime = field(default_factory=_now)
 
 
+@dataclass(slots=True, frozen=True)
+class CallRingStopped(DomainEvent):
+    """A call stopped ringing for these people **without** being missed:
+    they answered it, declined it, or the caller withdrew their invite
+    after someone else picked up. Drives withdrawing the ringing push from
+    their devices (a missed call replaces it via :class:`CallMissed`
+    instead)."""
+
+    call_id: str
+    conversation_id: str
+    user_ids: tuple[str, ...]
+    occurred_at: datetime = field(default_factory=_now)
+
+
 # ─── Page events (drive FTS5 indexing + conflict bookkeeping) ────────────
 
 

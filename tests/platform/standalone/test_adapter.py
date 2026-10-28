@@ -551,3 +551,8 @@ def test_capabilities_include_mdns_advertise(adapter):
     """Standalone runs on the host's network — the dashboard announces
     itself to wall panels over mDNS."""
     assert Capability.MDNS_ADVERTISE in adapter.capabilities
+
+
+async def test_withdraw_push_is_a_no_op(adapter):
+    """The notify_endpoint webhook has no way to take a push back."""
+    assert await adapter.push.withdraw(object(), ["a:/1"]) is None
