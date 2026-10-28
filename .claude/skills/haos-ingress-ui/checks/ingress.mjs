@@ -586,6 +586,73 @@ await check('iframe-embed', async () => {
   return { problems: topPath === '/frame' ? [] : [`the top frame navigated to ${topPath}`] }
 })
 
+// 6b. A Companion push tap: HA opens /<app slug>/<encoded in-app link>
+//     (HaosAdapter.companion_click_url — Python quote(link, safe="/")),
+//     the panel still loads the ingress root and posts the route tail
+//     (home-assistant/properties). The app must land on the link — query
+//     kept — with the top frame untouched; a later route change (a tap
+//     while the panel is open) moves it again; a re-sent route (resize)
+//     must not pull the user back; a tail that isn't an in-app path is
+//     ignored.
+await check('iframe-deep-link', async () => {
+  const problems = []
+  const companionTail = link => encodeURIComponent(link).replace(/%2F/g, '/')
+  const link = `/post/${ids.postId}?comment=${ids.commentId}`
+  const tapUrl = `${PROXY}/frame${companionTail(link)}`
+  const { ctx, page: p } = await newPage('desktop')
+  activePage = p
+  await p.goto(tapUrl, { waitUntil: 'load' })
+  const frame = await (await p.waitForSelector('iframe#app')).contentFrame()
+  const src = await p.$eval('iframe#app', el => el.getAttribute('src'))
+  if (src !== PREFIX + '/') problems.push(`the fake panel's iframe src is ${src}, HA always loads the ingress root`)
+  await step(`the tapped link ${PREFIX}${link} inside the iframe`,
+    frame.waitForFunction(w => location.pathname + location.search === w, {}, `${PREFIX}${link}`))
+  await step('the post page paints', frame.waitForSelector('#main'))
+  await networkIdle(p)
+  await p.screenshot({ path: path.join(SHOTS, 'iframe-deep-link-post.png') })
+  // For the report: the first route replaces the root entry (not asserted —
+  // Chrome counts the parent's entries too).
+  const historyLength = await frame.evaluate(() => history.length)
+
+  // The user moves on inside the app; HA re-sends the same route on resize.
+  await frame.evaluate(() => {
+    const a = [...document.querySelectorAll('a[href]')].find(el => new URL(el.href).pathname.endsWith('/dms') && el.offsetParent !== null)
+    if (!a) throw new Error('no visible /dms link inside the iframe')
+    a.click()
+  })
+  await step(`in-app navigation to ${PREFIX}/dms`, frame.waitForFunction(w => location.pathname === w, {}, PREFIX + '/dms'))
+  // Count the panel messages the iframe has handled: our listener runs after
+  // the app's (registration order), so once it has seen a message the app
+  // has acted on it — no fixed sleep needed for "did not move".
+  await frame.evaluate(() => {
+    window.__haSeen = 0
+    addEventListener('message', e => { if (e.data?.type === 'home-assistant/properties') window.__haSeen += 1 })
+  })
+  const handled = async send => {
+    const before = await frame.evaluate(() => window.__haSeen)
+    await send()
+    await step('the iframe to get the panel route', frame.waitForFunction(n => window.__haSeen > n, {}, before))
+  }
+  await handled(() => p.evaluate(() => window.haResend()))
+  const afterResend = await frame.evaluate(() => location.pathname)
+  if (afterResend !== PREFIX + '/dms') problems.push(`a re-sent panel route pulled the app back to ${afterResend}`)
+
+  // A tap while the panel is open: HA navigates its own URL.
+  await p.evaluate(u => window.haNavigate(u), `/frame${companionTail('/calendar')}`)
+  await step(`warm tap → ${PREFIX}/calendar`, frame.waitForFunction(w => location.pathname === w, {}, PREFIX + '/calendar'))
+
+  // A tail that is not an in-app path never moves the app.
+  await handled(() => p.evaluate(u => window.haNavigate(u), '/frame/%2F%2Fevil.example%2Fx'))
+  const afterEvil = await frame.evaluate(() => location.href)
+  if (!afterEvil.startsWith(PROXY + PREFIX + '/calendar')) problems.push(`a hostile route tail moved the app to ${afterEvil}`)
+
+  const topPath = pathOf(p)
+  if (!topPath.startsWith('/frame')) problems.push(`the top frame navigated to ${topPath}`)
+  await ctx.close()
+  activePage = page
+  return { problems, tapUrl, historyLength }
+})
+
 // 7. No ingress user (Supervisor sent no X-Remote-User-*): the cold-start
 //    /api/me 401s → IngressAuthFailed, never a password form or a
 //    "Session expired" toast (there was no token to expire).
@@ -619,7 +686,7 @@ await browser.close()
 await check('request-audit', async () => {
   const proxyLog = await proxyCtl('/_proxy/log')
   const http = browserRequests.filter(r => /^(https?|wss?):/.test(r.url))
-  const outside = http.filter(r => new URL(r.url).origin === PROXY && !underPrefix(new URL(r.url).pathname) && new URL(r.url).pathname !== '/frame')
+  const outside = http.filter(r => new URL(r.url).origin === PROXY && !underPrefix(new URL(r.url).pathname) && !/^\/frame(\/|$)/.test(new URL(r.url).pathname))
   const foreign = http.filter(r => new URL(r.url).origin !== PROXY)
   const withAuth = http.filter(r => r.authorization)
   const violations = proxyLog.filter(e => e.violation)

@@ -105,6 +105,7 @@ python .claude/skills/haos-ingress-ui/harness.py up --out /tmp/haos-ingress-ui
 | `notifications-bell` | on a phone the bottom bar still has a Notifications tab, or the top-bar bell isn't a link to `<prefix>/notifications` (or isn't `aria-current="page"` there); on desktop the bell's panel has no "See all notifications" link to `<prefix>/notifications` |
 | `media-load-and-upload` | feed images aren't loaded from under the prefix, or the gallery's raw-XHR upload posts elsewhere / fails |
 | `iframe-embed` | the app doesn't boot inside the HA-like iframe, or in-iframe navigation moves the top frame |
+| `iframe-deep-link` | a Companion push tap (`/frame/<encoded link>`, the fake panel standing in for HA's `/<app slug>` — iframe always at the ingress root, route tail posted as `home-assistant/properties` like `ha-panel-app.ts`) doesn't land on `<prefix>/post/<id>?comment=<id>`; a re-sent route (resize) pulls the app back; a warm tap (HA route change) doesn't move it to `/calendar`; a hostile tail (`//evil.example`) moves it; or the top frame navigates |
 | `ingress-401-auth-failed` | with no `X-Remote-User-*` the SPA shows anything but IngressAuthFailed: a password field, or any toast (there was no session to expire) |
 | `request-audit` | over the whole run: any request outside the prefix, any foreign origin, any `Authorization` header, any 5xx through the proxy |
 | `supervisor-contract` | the backend never read `/addons/self/info` or listed HA users over the Core WebSocket, or the fake rejected its Supervisor token |

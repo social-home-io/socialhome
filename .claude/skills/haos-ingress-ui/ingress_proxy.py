@@ -37,8 +37,10 @@ Control endpoints (not part of HA):
   in; ``none`` sends no ``X-Remote-User-*`` (the 401 → IngressAuthFailed
   path).
 * ``GET /_proxy/log`` / ``GET /_proxy/reset`` — the request log.
-* ``GET /frame`` — an HA-like page that embeds the panel in an iframe,
-  the way the HA frontend mounts an ingress panel.
+* ``GET /frame`` / ``GET /frame/<tail>`` — an HA-like App panel page
+  that embeds the panel in an iframe the way the HA frontend mounts an
+  ingress panel, and posts the route tail into it the way HA does
+  (``home-assistant/properties``; see :func:`_frame_page`).
 
 Usage: ``python ingress_proxy.py --port N --backend URL --token T
 --users-url URL``
@@ -126,12 +128,54 @@ def upstream_headers(request: web.Request, state: dict) -> dict[str, str]:
 
 
 def _frame_page(prefix: str) -> str:
+    """HA's App panel, as far as the SPA can tell.
+
+    Mirrors home-assistant/frontend ``src/panels/app/ha-panel-app.ts`` @
+    53dc14f4: the iframe ``src`` is always the ingress root (L146) — never
+    the route tail — and an iframe that posts
+    ``home-assistant/subscribe-properties`` gets
+    ``home-assistant/properties`` at once (L431-441), again on every route
+    change (L74-83) and on resize (L456-460), with ``route = {prefix:
+    "/<panel>", path: <location.pathname after it>}`` (L462-496 +
+    ``src/common/url/route.ts`` ``computeRouteTail``; the query string is
+    not part of HA's ``Route``). ``/frame`` stands in for ``/<app slug>``.
+    ``window.haNavigate(path)`` is HA's own ``navigate()`` (history push +
+    route change), e.g. a Companion tap while the panel is open.
+    """
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><title>Home Assistant</title>
 <link rel="icon" href="data:,"></head>
 <body style="margin:0;display:flex;height:100vh">
 <nav style="width:56px;background:#03a9f4"></nav>
 <iframe id="app" title="Social Home" src="{prefix}/" style="flex:1;border:0"></iframe>
+<script>
+(() => {{
+  const PANEL = "/frame";
+  const iframe = document.getElementById("app");
+  let subscribed = false;
+  window.haPropertiesSent = 0;
+  const route = () => ({{ prefix: PANEL, path: location.pathname.slice(PANEL.length) }});
+  const send = () => {{
+    if (!subscribed || !iframe.contentWindow) return;
+    window.haPropertiesSent += 1;
+    iframe.contentWindow.postMessage(
+      {{ type: "home-assistant/properties", narrow: false, route: route(),
+         safeAreaInsets: {{ top: "", right: "", bottom: "", left: "" }} }},
+      "*"
+    );
+  }};
+  window.addEventListener("message", (ev) => {{
+    if (ev.source !== iframe.contentWindow) return;
+    const {{ type }} = ev.data || {{}};
+    if (type === "home-assistant/subscribe-properties") {{ subscribed = true; send(); }}
+    if (type === "home-assistant/unsubscribe-properties") subscribed = false;
+  }});
+  window.addEventListener("resize", send);
+  window.addEventListener("popstate", send);
+  window.haNavigate = (path) => {{ history.pushState(null, "", path); send(); }};
+  window.haResend = send;
+}})();
+</script>
 </body></html>"""
 
 
@@ -149,7 +193,7 @@ async def control(request: web.Request) -> web.Response:
         case "/_proxy/reset":
             state["log"].clear()
             return web.json_response({"ok": True})
-        case "/frame":
+        case p if p == "/frame" or p.startswith("/frame/"):
             return web.Response(
                 content_type="text/html", text=_frame_page(state["prefix"])
             )
@@ -169,7 +213,11 @@ async def _pipe_ws(
 
 
 async def handler(request: web.Request) -> web.StreamResponse:
-    if request.path.startswith("/_proxy/") or request.path == "/frame":
+    if (
+        request.path.startswith("/_proxy/")
+        or request.path == "/frame"
+        or request.path.startswith("/frame/")
+    ):
         return await control(request)
     state = request.app[STATE_KEY]
     prefix = state["prefix"]

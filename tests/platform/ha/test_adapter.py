@@ -1223,6 +1223,21 @@ async def test_send_push_tap_url_is_absolute_on_the_public_origin():
     }
 
 
+async def test_send_push_tap_url_keeps_query_and_hash():
+    """ha mode opens the absolute URL as is, so the SPA's cold load sees
+    the query / hash a notification link carries."""
+    client = _FakeHaClient(call_service_response=[])
+    adapter = _build_adapter(client=client)
+
+    async def _public():
+        return "https://sh.example.org"
+
+    adapter.get_public_base_url = _public
+    body = await _companion_call(adapter, client, {"url": "/calendar?event=e1#x"})
+    assert body["data"]["url"] == "https://sh.example.org/calendar?event=e1#x"
+    assert body["data"]["clickAction"] == body["data"]["url"]
+
+
 async def test_send_push_without_public_origin_sends_no_url():
     client = _FakeHaClient(call_service_response=[])
     adapter = _build_adapter(client=client)

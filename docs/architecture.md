@@ -136,11 +136,25 @@ admin, a call answered) `PushProvider.withdraw` sends the Companion
 content-free withdraw push their service worker acts on
 ([push-relay.md](protocol/push-relay.md#withdrawing-a-push)).
 A relative URL opens in Home Assistant's own frontend, so the adapter
-decides (`companion_click_url`): `haos` → `/<app slug>`, the App's sidebar
-panel (HA registers it at `frontend_url_path=<slug>` only while
-`ingress_panel` is on; the panel always loads the App's ingress root, so no
-deep path), `ha` → the absolute link on Social Home's public origin
-(`get_public_base_url()`); with neither, no URL is sent.
+decides (`companion_click_url`): `ha` → the absolute link on Social Home's
+public origin (`get_public_base_url()`), which the SPA's cold load routes
+as usual; `haos` → `/<app slug><link>`, inside the App's sidebar panel (HA
+registers it at `frontend_url_path=<slug>` only while `ingress_panel` is
+on); with neither, no URL is sent. HA's App panel always loads the ingress
+root in its iframe, but posts the route after `/<slug>` into it: the SPA
+sends `home-assistant/subscribe-properties` to its parent and gets
+`home-assistant/properties` with `route = {prefix: "/<slug>", path}` at
+once and on every HA route change (home-assistant/frontend
+`src/panels/app/ha-panel-app.ts`). HA's route is the pathname only, so the
+adapter percent-encodes the link's query / hash into the path
+(`/calendar?event=e1` → `/<slug>/calendar%3Fevent%3De1`) and
+`client/src/router/haPanelRoute.ts` decodes it once, accepts only a
+same-app path to a known route (no `//host`, no `\`, no control
+characters — no open redirect), replaces the root entry with it, and
+follows only route *changes* (HA re-sends the same route on resize, which
+must not pull the user back). Limitation: a second tap on the very same
+link while HA already shows that URL is no route change, so HA sends
+nothing and the app stays where the user is.
 
 **Home Assistant automation events.** `services/ha_bridge_service.py:
 HaBridgeService` (wired by both HA adapters, which advertise

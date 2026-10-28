@@ -651,15 +651,43 @@ def test_capabilities_include_automation_events():
     assert Capability.AUTOMATION_EVENTS in _build_haos_adapter().capabilities
 
 
-async def test_companion_click_url_is_the_app_panel():
+async def test_companion_click_url_is_the_app_panel_with_the_in_app_path():
     """A relative Companion URL opens in HA's frontend; HA registers the
-    App's panel at ``/<slug>`` (``addon_panel._register_panel``)."""
+    App's panel at ``/<slug>`` (``addon_panel._register_panel``) and posts
+    the route tail after it to the iframe (``ha-panel-app`` →
+    ``home-assistant/properties``), so the in-app path rides behind it."""
     sv = _FakeSupervisor(_addon_info(slug="a0d7b954_socialhome", ingress_panel=True))
     adapter = _build_haos_adapter(supervisor_client=sv)
-    assert await adapter.companion_click_url("/dms/c1") == "/a0d7b954_socialhome"
+    assert await adapter.companion_click_url("/dms/c1") == "/a0d7b954_socialhome/dms/c1"
     # Cached: one Supervisor read per TTL, not per push.
-    assert await adapter.companion_click_url("/post/p1") == "/a0d7b954_socialhome"
+    assert (
+        await adapter.companion_click_url("/post/p1") == "/a0d7b954_socialhome/post/p1"
+    )
     assert sv.calls == 1
+
+
+async def test_companion_click_url_root_is_the_bare_panel():
+    sv = _FakeSupervisor(_addon_info(slug="local_socialhome", ingress_panel=True))
+    adapter = _build_haos_adapter(supervisor_client=sv)
+    assert await adapter.companion_click_url("/") == "/local_socialhome"
+
+
+async def test_companion_click_url_folds_query_and_hash_into_the_path():
+    """HA's ``Route`` is ``location.pathname`` only — a query or hash after
+    the panel never reaches the iframe — so ``?`` / ``#`` (and anything
+    else outside a path segment) are percent-encoded into the tail; the
+    SPA decodes it once."""
+    sv = _FakeSupervisor(_addon_info(slug="local_socialhome", ingress_panel=True))
+    adapter = _build_haos_adapter(supervisor_client=sv)
+    assert (
+        await adapter.companion_click_url("/calendar?event=e1")
+        == "/local_socialhome/calendar%3Fevent%3De1"
+    )
+    assert (
+        await adapter.companion_click_url("/settings#privacy")
+        == "/local_socialhome/settings%23privacy"
+    )
+    assert await adapter.companion_click_url("/x/100%") == "/local_socialhome/x/100%25"
 
 
 async def test_companion_click_url_none_without_the_sidebar_panel():

@@ -27,6 +27,7 @@ import time
 from collections.abc import Mapping
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any
+from urllib.parse import quote
 
 from ... import app_keys as K
 from ...domain.household_dashboard import DEFAULT_DASHBOARD_PORT
@@ -288,30 +289,50 @@ class HaosAdapter(PlatformAdapter):
         return self._dashboard_host_port
 
     async def companion_click_url(self, path: str) -> str | None:
-        """Where a tap on a Companion push opens: the App's sidebar panel.
+        """Where a tap on a Companion push opens: *path* inside the App's
+        sidebar panel, ``/<slug><percent-encoded path>``.
 
         Companion contract (companion.home-assistant.io/docs/notifications/
         notifications-basic, "Opening a URL"): a relative ``url`` /
         ``clickAction`` opens on the Home Assistant server that sent the
         push, inside HA's own frontend — so the SPA path *path* alone would
         hit a route HA doesn't have. Home Assistant registers the App's
-        ingress panel at ``frontend_url_path=<app slug>``
-        (home-assistant/core ``components/hassio/addon_panel.py``
-        ``_register_panel`` @ 137e56f1) only while the panel is enabled
-        (``HassIOAddonPanel.post`` refuses a disabled one), so the answer is
-        ``/<slug>`` when ``ingress_panel`` is on, else ``None`` (no URL —
-        the tap opens the Companion app).
+        ingress panel at ``frontend_url_path=<app slug>`` with
+        ``config={"addon": <slug>}`` (home-assistant/core
+        ``components/hassio/addon_panel.py`` ``_register_panel`` @ 4f89e04f)
+        only while the panel is enabled (``HassIOAddonPanel.post`` refuses a
+        disabled one), and its ``IndexView.resolve`` serves the frontend for
+        any tail under a registered panel (``components/frontend/
+        __init__.py`` @ 4f89e04f).
 
-        *path* itself is not appended: the panel's iframe always loads the
-        App's ``ingress_url`` root (home-assistant/frontend
-        ``src/panels/app/ha-panel-app.ts`` @ 31604396), and Social Home
-        does not read the route tail HA posts to the iframe.
+        The panel's iframe always loads the App's ``ingress_url`` root
+        (home-assistant/frontend ``src/panels/app/ha-panel-app.ts`` @
+        53dc14f4, L146), but HA posts the route after ``/<slug>`` into it:
+        an iframe that sends ``home-assistant/subscribe-properties`` gets
+        ``home-assistant/properties`` with ``route = {prefix: "/<slug>",
+        path: <tail>}`` at once and on every route change (L74-83,
+        L431-441, L462-496). ``Route.path`` is ``location.pathname`` only
+        (``src/layouts/home-assistant.ts`` ``updateRoute``), so a query or
+        hash after the slug would be lost: *path* is percent-encoded into
+        the tail (``?`` → ``%3F``, ``#`` → ``%23``, ``%`` → ``%25``; ``/``
+        kept) and the SPA (``client/src/router/haPanelRoute.ts``) decodes it
+        once. The Companion apps re-encode the path when they open it
+        (Android ``UrlUtil.buildRelativeUrl`` @ a538288e, iOS
+        ``ConnectionInfo.webviewURL(from:)`` @ dffd2224) — a single decode
+        still yields *path*.
 
-        Cached for :data:`_PANEL_PATH_TTL_S` — an admin can toggle the
-        sidebar panel without restarting the App. A failed Supervisor read
-        is not cached and answers ``None``.
+        ``None`` when the panel is off (no URL — the tap opens the Companion
+        app). The panel lookup is cached for :data:`_PANEL_PATH_TTL_S` — an
+        admin can toggle the sidebar panel without restarting the App. A
+        failed Supervisor read is not cached and answers ``None``.
         """
-        del path  # see docstring: the panel always opens at the App's root
+        panel = await self._panel_url_path()
+        if panel is None or path in ("", "/"):
+            return panel
+        return panel + quote(path, safe="/")
+
+    async def _panel_url_path(self) -> str | None:
+        """``/<slug>`` while the App's sidebar panel is on, else ``None``."""
         now = time.monotonic()
         if self._panel_path is not None and now - self._panel_path[0] < (
             _PANEL_PATH_TTL_S
