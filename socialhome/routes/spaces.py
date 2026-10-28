@@ -50,6 +50,7 @@ from ..domain.gfs_member_publish import GFS_PUBLISH_MODES
 from ..domain.link_preview import link_preview_to_dict
 from ..domain.local_community import local_area_of, local_area_wire
 from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
+from ..domain.notification import SpaceNotifLevel, default_space_notif_level
 from ..domain.post import LocationData, Post, PostType
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
@@ -3371,7 +3372,7 @@ class SpaceLinkDetailView(BaseView):
 # ─── Per-space notification preferences ─────────────────────────────────
 
 
-_NOTIF_LEVELS = frozenset({"all", "mentions", "muted"})
+_NOTIF_LEVELS = frozenset(level.value for level in SpaceNotifLevel)
 
 
 class SpaceChatView(BaseView):
@@ -3449,13 +3450,20 @@ class SpaceNotifPrefsView(BaseView):
         space = await space_repo.get(space_id)
         feature_location = bool(space and space.features.location)
         notif_repo = self.svc(notification_repo_key)
-        level = await notif_repo.get_space_notif_level(
+        chosen = await notif_repo.get_space_notif_level(
             user_id=ctx.user_id,
             space_id=space_id,
+        )
+        # Never chose: the default for the space's type and the seat (D5).
+        level = chosen or (
+            default_space_notif_level(space.space_type, member.role).value
+            if space is not None
+            else SpaceNotifLevel.ALL.value
         )
         return web.json_response(
             {
                 "level": level,
+                "is_default": chosen is None,
                 "feature_location": feature_location,
                 "location_share_enabled": bool(member.location_share_enabled),
                 # A follower is offered no sharing toggle (owner decision 13).

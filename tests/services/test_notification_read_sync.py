@@ -24,6 +24,7 @@ from socialhome.domain.events import (
     SpaceJoinDenied,
     SpaceModerationApproved,
 )
+from socialhome.domain.notification import NotificationObject, NotificationSubject
 from socialhome.domain.space import (
     ModerationStatus,
     SpaceModerationItem,
@@ -149,8 +150,8 @@ def _dm(sender, recipient, conv: str = "c1") -> DmMessageCreated:
 async def test_opening_a_dm_thread_updates_the_badge_on_every_device(env):
     """``mark_read_for_dm`` flipped the rows but published nothing, so
     every other device kept the stale badge until its 30-s poll."""
-    anna, bob = await env.user("anna"), await env.user("bob")
-    await env.bus.publish(_dm(anna, bob))
+    bob = await env.user("bob")
+    await _row(env, bob.user_id, type="dm_mention", link="/dms/c1")
     await _row(env, bob.user_id, type="post_created", link="/post/p1")
     env.read_changed.clear()
 
@@ -168,28 +169,43 @@ async def test_opening_a_dm_thread_with_nothing_unread_stays_quiet(env):
 # ── 2. A bumped row counts, buzzes and rings HA once ──────────────────
 
 
-async def test_a_dm_burst_pushes_once_and_says_it_bumped(env):
-    """Each message of a burst bumped the one unread row and pushed again,
-    and its ``NotificationCreated`` looked new (badge +1 per message)."""
+async def _mention(env, sender, recipient, conv: str = "c1"):
+    """A ``dm_mention`` row through the gate, as the DM handler writes it."""
+    await env.svc._save_notif(
+        new_notification(
+            user_id=recipient.user_id,
+            type="dm_mention",
+            title="mention",
+            link_url=f"/dms/{conv}",
+        ),
+        about=NotificationSubject.of(NotificationObject.CONVERSATION, conv),
+        actor_user_id=sender.user_id,
+    )
+
+
+async def test_a_mention_burst_pushes_once_and_says_it_bumped(env):
+    """D8: each repeat on the one unread row stays silent (no second buzz),
+    and its ``NotificationCreated`` says it bumped (no badge +1)."""
     anna, bob = await env.user("anna"), await env.user("bob")
     for _ in range(3):
-        await env.bus.publish(_dm(anna, bob))
+        await _mention(env, anna, bob)
 
     assert await env.notifs.count_unread(bob.user_id) == 1
     assert len(env.push.sent) == 1
     assert [e.bumped for e in env.created] == [False, True, True]
+    assert [e.silent for e in env.created] == [False, True, True]
     assert len({e.notification_id for e in env.created}) == 1
 
 
-async def test_a_dm_after_reading_reopens_the_row_and_pushes(env):
-    """D7: the conversation keeps one row; a message after reading re-opens
-    it (unread again, to the top), pushes like a new one, and every device
-    hears the new count."""
+async def test_a_mention_after_reading_reopens_the_row_and_pushes(env):
+    """D7 + D8: the conversation keeps one row; a mention after reading
+    re-opens it (unread again, to the top), pushes like a new one, and
+    every device hears the new count."""
     anna, bob = await env.user("anna"), await env.user("bob")
-    await env.bus.publish(_dm(anna, bob))
+    await _mention(env, anna, bob)
     await env.svc.mark_read_for_dm(bob.user_id, "c1")
     env.read_changed.clear()
-    await env.bus.publish(_dm(anna, bob))
+    await _mention(env, anna, bob)
     assert [(e.bumped, e.reopened, e.silent) for e in env.created] == [
         (False, False, False),
         (True, True, False),
@@ -197,6 +213,15 @@ async def test_a_dm_after_reading_reopens_the_row_and_pushes(env):
     assert env.created[0].notification_id == env.created[1].notification_id
     assert len(env.push.sent) == 2
     assert [(e.user_id, e.unread_count) for e in env.read_changed] == [(bob.user_id, 1)]
+
+
+async def test_a_chat_message_makes_no_row(env):
+    """D3: plain chat messages push but never land in Notifications."""
+    anna, bob = await env.user("anna"), await env.user("bob")
+    await env.bus.publish(_dm(anna, bob))
+    assert await env.notifs.count_unread(bob.user_id) == 0
+    assert env.created == []
+    assert [u for u, _ in env.push.sent] == [bob.user_id]
 
 
 # ── 3. Visiting a page reads the rows that open it ────────────────────

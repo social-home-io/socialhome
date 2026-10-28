@@ -110,6 +110,9 @@ class AbstractNotificationRepo(Protocol):
     ) -> builtins.list[str]: ...
     async def count_unread(self, user_id: str) -> int: ...
     async def delete_old(self, older_than_days: int = 90) -> int: ...
+    async def exists_in_space_since(
+        self, *, type: str, space_id: str, since: str
+    ) -> bool: ...
 
     # ── Per-space notification preferences ─────────────────────────────
     async def get_space_notif_level(
@@ -117,7 +120,7 @@ class AbstractNotificationRepo(Protocol):
         *,
         user_id: str,
         space_id: str,
-    ) -> str: ...
+    ) -> str | None: ...
     async def set_space_notif_level(
         self,
         *,
@@ -486,6 +489,19 @@ class SqliteNotificationRepo:
             (cutoff, *_ACTION_TYPES),
         )
 
+    async def exists_in_space_since(
+        self, *, type: str, space_id: str, since: str
+    ) -> bool:
+        """Whether anyone here got a ``type`` row about ``space_id`` whose
+        last activity is at or after ``since`` (an ISO UTC stamp) — the
+        persisted per-space ``@here`` cooldown."""
+        row = await self._db.fetchone(
+            "SELECT 1 FROM notifications"
+            " WHERE type = ? AND space_id = ? AND created_at >= ? LIMIT 1",
+            (type, space_id, since),
+        )
+        return row is not None
+
     # ── Per-space notification preferences ─────────────────────────────
 
     async def get_space_notif_level(
@@ -493,12 +509,16 @@ class SqliteNotificationRepo:
         *,
         user_id: str,
         space_id: str,
-    ) -> str:
+    ) -> str | None:
+        """The level ``user_id`` chose for ``space_id``, or ``None`` when
+        they never chose one — the caller then applies the default for the
+        space's type and their seat
+        (:func:`~socialhome.domain.notification.default_space_notif_level`)."""
         row = await self._db.fetchone(
             "SELECT level FROM space_notif_prefs WHERE user_id=? AND space_id=?",
             (user_id, space_id),
         )
-        return (row["level"] if row else "all") or "all"
+        return (row["level"] or None) if row else None
 
     async def set_space_notif_level(
         self,

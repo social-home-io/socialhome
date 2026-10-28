@@ -389,11 +389,10 @@ async def test_mark_read(client):
     assert resp.status == 200
 
 
-async def test_mark_read_clears_dm_notifications(client):
-    """Opening a thread (POST /read) clears the bell badge for that
-    conversation — the recipient's ``dm_message`` notification rows
-    flip to read so the unread count drops in lockstep."""
-    # Anna sends a DM to Bob.
+async def test_a_dm_leaves_the_notifications_badge_to_chats(client):
+    """D3: a DM counts on Chats only — no Notifications row, so the bell
+    badge stays 0 while the conversation's unread count is 1. Opening the
+    thread (POST /read) still reads an older ``dm_message`` row it left."""
     r = await client.post(
         "/api/conversations/dm",
         json={"username": "bob"},
@@ -405,18 +404,27 @@ async def test_mark_read_clears_dm_notifications(client):
         json={"content": "hi bob"},
         headers=_auth(client._admin_token),
     )
-    # Bob has an unread `dm_message` notification.
     bell = await client.get(
         "/api/notifications/unread-count",
         headers=_auth(client._bob_token),
     )
-    assert (await bell.json())["unread"] >= 1
-    # Bob opens the thread.
+    assert (await bell.json())["unread"] == 0
+    unread = await client.get(
+        f"/api/conversations/{conv_id}/unread",
+        headers=_auth(client._bob_token),
+    )
+    assert (await unread.json())["unread"] == 1
+    # A row from before this release, about the same thread.
+    db = client.app[_db_key]
+    await db.enqueue(
+        "INSERT INTO notifications(id, user_id, type, title, link_url, created_at)"
+        " VALUES('n-old', ?, 'dm_message', 'Pascal messaged you', ?, ?)",
+        (client._bob_uid, f"/dms/{conv_id}", "2026-10-01T00:00:00+00:00"),
+    )
     await client.post(
         f"/api/conversations/{conv_id}/read",
         headers=_auth(client._bob_token),
     )
-    # Bell drops to 0 — the route auto-cleared the dm_message row.
     bell2 = await client.get(
         "/api/notifications/unread-count",
         headers=_auth(client._bob_token),
@@ -996,7 +1004,8 @@ async def test_muted_conversation_counts_unread_but_rings_no_bell(client):
     )
     assert (await bell.json())["unread"] == 0
 
-    # Unmuted again: the next message rings.
+    # Unmuted again: the next message pushes, but (D3) a chat message never
+    # adds a Notifications row — Chats counts it.
     await client.delete(
         f"/api/conversations/{conv_id}/mute", headers=_auth(client._bob_token)
     )
@@ -1005,10 +1014,11 @@ async def test_muted_conversation_counts_unread_but_rings_no_bell(client):
         json={"content": "still there?"},
         headers=_auth(client._admin_token),
     )
+    assert (await _row(client, client._bob_token, conv_id))["unread"] == 2
     bell = await client.get(
         "/api/notifications/unread-count", headers=_auth(client._bob_token)
     )
-    assert (await bell.json())["unread"] == 1
+    assert (await bell.json())["unread"] == 0
 
 
 # ── Video message media_status ─────────────────────────────────────────────
@@ -1415,8 +1425,8 @@ async def test_members_carry_the_mention_token(client):
 
 async def test_group_mention_rings_a_mentions_level_member_end_to_end(client):
     """Bob at level 'mentions': a plain message rings nothing; a message
-    that @-mentions him gives one 'dm_mention' bell; Carol ('all') gets the
-    ordinary bells and no mention bell."""
+    that @-mentions him gives one 'dm_mention' bell; Carol ('all') gets no
+    row at all — plain chat messages only push (D3)."""
     conv_id = await _team_with_carol(client)
     await client.put(
         f"/api/conversations/{conv_id}/notif-prefs",
@@ -1435,8 +1445,7 @@ async def test_group_mention_rings_a_mentions_level_member_end_to_end(client):
     assert [(n["type"], n["title"]) for n in notes] == [
         ("dm_mention", "Pascal mentioned you in Team")
     ]
-    carol = [n["type"] for n in await _bell(client, "carol-tok")]
-    assert "dm_mention" not in carol and "dm_message" in carol
+    assert await _bell(client, "carol-tok") == []
 
 
 # ── Edit / delete a message ────────────────────────────────────────────────

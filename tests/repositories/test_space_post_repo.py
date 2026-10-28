@@ -903,3 +903,16 @@ async def test_sync_pages_since_a_stamp_return_only_rows_changed_after_it(env):
     )
     full, _ = await env.repo.list_sync_page(env.space_id)
     assert {p.id for p in full} == {"p-a", "p-b"}
+
+
+async def test_list_comment_author_ids_names_live_commenters_once(env):
+    """D6: who else commented on a space post — each person once, never
+    someone whose only comment was deleted."""
+    await env.repo.save(env.space_id, _post("sp-who"))
+    for cid, author in (("c1", "uid-bob"), ("c2", "uid-bob"), ("c3", "uid-cleo")):
+        await env.repo.add_comment(
+            _comment(cid, "sp-who", author), space_id=env.space_id
+        )
+    await env.repo.soft_delete_comment("c3", space_id=env.space_id)
+    assert await env.repo.list_comment_author_ids("sp-who") == {"uid-bob"}
+    assert await env.repo.list_comment_author_ids("nope") == set()

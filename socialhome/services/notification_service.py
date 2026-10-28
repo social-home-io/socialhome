@@ -38,8 +38,7 @@ whom a guardian block (§CP.F2) separates from them. Each call names its
 from __future__ import annotations
 
 import logging
-import time
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from string import Formatter
@@ -73,6 +72,7 @@ from ..domain.events import (
     PostCreated,
     PostDeleted,
     PostEdited,
+    PostReactionChanged,
     RemoteSpaceDissolved,
     RemoteSpaceInviteAccepted,
     RemoteSpaceInviteDeclined,
@@ -108,6 +108,8 @@ from ..domain.notification import (
     NotificationActor,
     NotificationObject,
     NotificationSubject,
+    SpaceNotifLevel,
+    default_space_notif_level,
     first_params,
     object_key,
     regroup,
@@ -129,6 +131,8 @@ from ..repositories.notification_repo import (
     AbstractNotificationRepo,
     new_notification,
 )
+from ..repositories.post_repo import AbstractPostRepo
+from ..repositories.space_post_repo import AbstractSpacePostRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .notification_links import (
@@ -148,10 +152,18 @@ from .push_service import PushPayload
 
 log = logging.getLogger(__name__)
 
-#: One @here per author per space per this many seconds pages anyone.
+#: One @here per space per this many seconds pages anyone. Persisted: the
+#: window is read back from the ``space_here`` rows it wrote, so a restart
+#: does not reopen it.
 HERE_COOLDOWN_SECONDS = 600
-#: Cap on remembered (space, author) @here timestamps before pruning.
-_HERE_TRACK_MAX = 10_000
+
+#: D8 — a chat that stayed quiet this long alerts again on its next message
+#: (every other grouped row alerts once until it is read).
+CHAT_REALERT_SECONDS = 300
+
+#: Chat types: their repeats re-alert after :data:`CHAT_REALERT_SECONDS`
+#: of quiet even while unread (D8).
+_CHAT_TYPES: frozenset[str] = frozenset({"dm_message", "dm_mention"})
 
 
 @dataclass(slots=True, frozen=True)
@@ -237,21 +249,14 @@ _PUSH_TITLES: dict[str, tuple[tuple[str, str], ...]] = {
     "space_invite": (
         ("notification.push.space_invite", "{name} invited you to a space"),
     ),
+    "post_reacted": (
+        (
+            "notification.push.post_reacted_in",
+            "{name} reacted to your post in {space_name}",
+        ),
+        ("notification.push.post_reacted", "{name} reacted to your post"),
+    ),
 }
-
-#: Types whose repeat on a still-unread row neither pushes again nor tells
-#: Home Assistant again — the per-row collapse they had before grouping
-#: (a chat burst, a re-broadcast one-time notice). Every other type still
-#: pushes per event until D8 collapses push for all.
-_QUIET_REPEAT_TYPES: frozenset[str] = frozenset(
-    {
-        "dm_message",
-        "dm_mention",
-        "moderation_unavailable",
-        "space_dissolved",
-        "space_admins_reconfirm",
-    }
-)
 
 #: Rows that are a decision about the recipient's own content: they stay
 #: when the thing itself is deleted (the author still learns what happened).
@@ -271,6 +276,8 @@ _PUSH_AS_IS: frozenset[str] = frozenset(
     {
         "post_created",
         "comment_added",
+        "post_replied",
+        "comment_replied",
         "space_post_created",
         "space_comment_added",
         "space_mention",
@@ -329,6 +336,71 @@ _FEATURE_FALLBACK: dict[str, str] = {
 }
 
 
+def _as_utc(stamp: str | datetime | None) -> datetime | None:
+    """*stamp* (a UTC time — ISO, naive SQLite, or a datetime) as an aware
+    datetime; ``None`` when missing or unreadable."""
+    if stamp is None:
+        return None
+    try:
+        when = stamp if isinstance(stamp, datetime) else datetime.fromisoformat(stamp)
+    except ValueError:
+        return None
+    return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
+
+
+def _quiet_for(
+    stamp: str | datetime | None,
+    seconds: int,
+    *,
+    until: str | datetime | None = None,
+) -> bool:
+    """Whether at least *seconds* passed from *stamp* to *until* (default:
+    now). An unreadable stamp counts as quiet, so a doubt alerts rather
+    than swallowing a push."""
+    since = _as_utc(stamp)
+    if since is None:
+        return True
+    end = _as_utc(until) or datetime.now(UTC)
+    return end - since >= timedelta(seconds=seconds)
+
+
+def _reply_kind(
+    user_id: str,
+    *,
+    post_author: str | None,
+    parent_author: str | None,
+    in_space: bool = False,
+) -> tuple[str, str, str] | None:
+    """``(type, catalog key, English fallback)`` when a new comment is a
+    reply *to* ``user_id`` (D6): an answer to their comment, else a comment
+    on their post; ``None`` when it is neither."""
+    if parent_author and user_id == parent_author:
+        if in_space:
+            return (
+                "comment_replied",
+                "notification.space.comment.replied",
+                "{author} replied to your comment in {space_name}",
+            )
+        return (
+            "comment_replied",
+            "notification.comment.replied",
+            "{author} replied to your comment",
+        )
+    if post_author and user_id == post_author:
+        if in_space:
+            return (
+                "post_replied",
+                "notification.space.post.replied",
+                "{author} commented on your post in {space_name}",
+            )
+        return (
+            "post_replied",
+            "notification.post.replied",
+            "{author} commented on your post",
+        )
+    return None
+
+
 def _beyond_the_circle(recipient, received_via: str | None, hop_count: int) -> bool:
     """§CP.R (decision 14): whether something that reached a **protected**
     *recipient* came from beyond its circle — its household and paired
@@ -358,16 +430,16 @@ class NotificationService(ProtectionGateMixin):
         "_bus",
         "_calendar_repo",
         "_child_protection",
-        "_clock",
         "_convos",
-        "_here_last",
         "_i18n",
         "_instances",
         "_notifs",
         "_personal_calendar_repo",
+        "_posts",
         "_push",
         "_remote_members",
         "_reports",
+        "_space_posts",
         "_spaces",
         "_users",
         "_ws_manager",
@@ -394,9 +466,11 @@ class NotificationService(ProtectionGateMixin):
         self._spaces = space_repo
         self._bus = bus
         self._i18n = i18n
-        #: Monotonic clock for the @here cooldown (tests swap it).
-        self._clock: Callable[[], float] = time.monotonic
-        self._here_last: dict[tuple[str, str], float] = {}
+        # Household and space posts — optional; they name a comment's post
+        # author, the comment it answers and who else commented (D6).
+        # Without them a comment is an in-app row for its audience only.
+        self._posts: AbstractPostRepo | None = None
+        self._space_posts: AbstractSpacePostRepo | None = None
         self._push = None  # attach_push_service(PushService)
         self._adapter = None  # attach_platform_adapter(PlatformAdapter)
         self._calendar_repo = None  # attach_calendar_repo(...) Phase D
@@ -423,6 +497,16 @@ class NotificationService(ProtectionGateMixin):
         # Reports — optional; it tells when a space's last open report was
         # handled, so every authority's "New report" row reads as read.
         self._reports = None
+
+    def attach_post_repos(
+        self,
+        post_repo: AbstractPostRepo | None,
+        space_post_repo: AbstractSpacePostRepo | None,
+    ) -> None:
+        """Wire the household and space post repos (D6 comment audience,
+        D13 post reactions)."""
+        self._posts = post_repo
+        self._space_posts = space_post_repo
 
     def attach_report_repo(self, report_repo) -> None:
         """Wire the report repo (``on_report_resolved``)."""
@@ -519,9 +603,13 @@ class NotificationService(ProtectionGateMixin):
         and every device hears the new count. ``actor_name`` is the name
         the row remembers for ``actor_user_id`` (looked up when not given).
 
-        Push stays per event for now (D8 collapses it later): only a repeat
-        of a :data:`_QUIET_REPEAT_TYPES` type on its still-unread row is
-        silent — no second push, no second Home Assistant event.
+        Push (D8): the event that starts or re-opens a row alerts; a repeat
+        on a row still unread is **silent** — no second push, no second
+        Home Assistant event — so one thing buzzes once until it is read. A
+        chat row (:data:`_CHAT_TYPES`) alerts again after
+        :data:`CHAT_REALERT_SECONDS` of quiet. ``push=False`` writes an
+        in-app row only (D5 "Everything" activity, D13 reactions): silent
+        too.
         """
         user = await self._users.get_by_user_id(note.user_id)
         if user is None:
@@ -574,9 +662,17 @@ class NotificationService(ProtectionGateMixin):
             await self._notifs.update_group(saved)
         bumped = group is not None
         reopened = group is not None and group.is_read
-        # A repeat on a row still unread: the badge already counts it, and
-        # for a chat burst the device already buzzed for it.
-        silent = bumped and not reopened and saved.type in _QUIET_REPEAT_TYPES
+        # D8: a repeat on a row still unread — the badge already counts it
+        # and the device already buzzed for it — unless a chat went quiet.
+        repeat = (
+            group is not None
+            and not reopened
+            and not (
+                saved.type in _CHAT_TYPES
+                and _quiet_for(group.created_at, CHAT_REALERT_SECONDS)
+            )
+        )
+        silent = repeat or not push
         await self._bus.publish(
             NotificationCreated(
                 user_id=saved.user_id,
@@ -595,36 +691,41 @@ class NotificationService(ProtectionGateMixin):
         if reopened:
             await self._announce_unread(saved.user_id)
         if silent:
-            return saved  # one unread row, one push (§D8 re-buzz is later)
-        if not push:
-            return saved  # in-app only (a repeat the user was already told)
-        if self._push is None and self._adapter is None:
             return saved
-        title = self._push_title(saved, user, push_params)
-        # One tag per bell item: a repeat (a DM burst bumping one row) replaces
-        # itself on the device; a different item never silently replaces it.
-        tag = f"{saved.type}:{saved.link_url or saved.id}"
-        # Web Push (browsers that registered via pywebpush).
+        await self._send_push(
+            user,
+            ntype=saved.type,
+            title=self._push_title(saved, user, push_params),
+            link_url=saved.link_url,
+            # One tag per bell item: a repeat replaces itself on the device;
+            # a different item never silently replaces it.
+            tag=f"{saved.type}:{saved.link_url or saved.id}",
+        )
+        return saved
+
+    async def _send_push(
+        self, user, *, ntype: str, title: str, link_url: str | None, tag: str
+    ) -> None:
+        """One title-only push to every surface *user* registered: Web Push
+        and the platform adapter (HA mobile app / standalone inbox)."""
         if self._push is not None:
             try:
                 await self._push.push_to_user(
-                    saved.user_id,
-                    PushPayload(title=title, click_url=saved.link_url, tag=tag),
+                    user.user_id,
+                    PushPayload(title=title, click_url=link_url, tag=tag),
                 )
             except Exception as exc:
                 log.debug("web push fan-out failed: %s", exc, exc_info=True)
-        # Platform adapter (HA mobile app / standalone inbox).
         if self._adapter is not None:
             try:
                 await self._adapter.send_push(
                     user,
                     title,
                     "",
-                    data={"type": saved.type, "url": saved.link_url, "tag": tag},
+                    data={"type": ntype, "url": link_url, "tag": tag},
                 )
             except Exception as exc:
                 log.debug("platform push fan-out failed: %s", exc, exc_info=True)
-        return saved
 
     def _push_title(
         self, saved, user, params: dict[str, str | None] | None = None
@@ -747,6 +848,8 @@ class NotificationService(ProtectionGateMixin):
         )
         # Momentum (§Momentum) — reactions, replies, and new follows.
         self._bus.subscribe(MomentReactionChanged, self.on_moment_reaction_changed)
+        # D13: reactions on posts (household feed and spaces).
+        self._bus.subscribe(PostReactionChanged, self.on_post_reaction_changed)
         self._bus.subscribe(MomentCreated, self.on_moment_created)
         self._bus.subscribe(UserFollowed, self.on_user_followed)
         # Highlights — a reaction on your frame (a household member's, or
@@ -794,7 +897,9 @@ class NotificationService(ProtectionGateMixin):
     # ── Handlers ───────────────────────────────────────────────────────
 
     async def on_post_created(self, event: PostCreated) -> None:
-        """Notify every active household member except the author."""
+        """Every active household member except the author gets an in-app
+        row — the household feed is "Everything" (D5): no push for a plain
+        new post."""
         author_id = event.post.author
         users = await self._users.list_active()
         author = await self._users.get_by_user_id(author_id)
@@ -819,14 +924,25 @@ class NotificationService(ProtectionGateMixin):
                 actor_user_id=author_id,
                 actor_name=name,
                 withheld=blocked,
+                push=False,
             )
 
     async def on_comment_added(self, event: CommentAdded) -> None:
-        """Household-feed comment → notify every other active household
-        user. Space comment → the space's members only, honouring their
-        notification level and ``event.mentions`` exactly like a space post
-        (a household user outside the space must not hear about it)."""
+        """Who hears about a new comment (D6).
+
+        With a push: the post's author ("commented on your post",
+        ``post_replied``), the author of the comment it answers ("replied
+        to your comment", ``comment_replied``) and anyone it mentions. In
+        the app only (``comment_added`` / ``space_comment_added``, grouped
+        per post): others who commented on that post, and everyone at
+        "Everything" — the household feed is "Everything" for everyone
+        (D5). Nobody else.
+
+        A space comment goes to the space's members only, per their level
+        (:meth:`_notify_space_members`); a household user outside the space
+        never hears about it."""
         commenter_id = event.comment.author
+        post_author, parent_author, commenters = await self._comment_audience(event)
         if event.space_id is not None:
             await self._notify_space_members(
                 space_id=event.space_id,
@@ -840,11 +956,11 @@ class NotificationService(ProtectionGateMixin):
                 generic_fallback="{author} commented in {space_name}",
                 mention_key="notification.space.comment.mention",
                 mention_fallback="{author} mentioned you in a comment in {space_name}",
+                post_author_id=post_author,
+                parent_author_id=parent_author,
+                commenter_ids=commenters,
             )
             return
-        # The event only carries post_id, not the post author. For v1 we
-        # keep this simple: notify everyone except the commenter. Slightly
-        # noisy, but the post author is always notified.
         commenter = await self._users.get_by_user_id(commenter_id)
         name = commenter.display_name if commenter else None
         users = await self._users.list_active()
@@ -852,15 +968,23 @@ class NotificationService(ProtectionGateMixin):
         for user in users:
             if user.user_id == commenter_id or user.user_id in blocked:
                 continue
+            locale = self._locale(user)
+            ntype, key, fallback = _reply_kind(
+                user.user_id, post_author=post_author, parent_author=parent_author
+            ) or (
+                "comment_added",
+                "notification.comment.added",
+                "{author} commented on a post",
+            )
             await self._save_notif(
                 new_notification(
                     user_id=user.user_id,
-                    type="comment_added",
+                    type=ntype,
                     title=self._t(
-                        "notification.comment.added",
-                        locale=self._locale(user),
-                        fallback="{author} commented on a post",
-                        author=name or self._someone(self._locale(user)),
+                        key,
+                        locale=locale,
+                        fallback=fallback,
+                        author=name or self._someone(locale),
                     ),
                     link_url=household_post_link(event.post_id, event.comment.id),
                 ),
@@ -868,7 +992,34 @@ class NotificationService(ProtectionGateMixin):
                 actor_user_id=commenter_id,
                 actor_name=name,
                 withheld=blocked,
+                push=ntype != "comment_added",
             )
+
+    async def _comment_audience(
+        self, event: CommentAdded
+    ) -> tuple[str | None, str | None, frozenset[str]]:
+        """The people a comment is *for* (D6): its post's author, the author
+        of the comment it answers (``parent_id``) — ``None`` when not known
+        here — and everyone else with a live comment on the post."""
+        repo: AbstractPostRepo | AbstractSpacePostRepo | None = (
+            self._space_posts if event.space_id is not None else self._posts
+        )
+        if repo is None:
+            return None, None, frozenset()
+        post_author: str | None = None
+        if event.space_id is not None and self._space_posts is not None:
+            held = await self._space_posts.get(event.post_id)
+            post_author = held[1].author if held is not None else None
+        elif self._posts is not None:
+            post = await self._posts.get(event.post_id)
+            post_author = post.author if post is not None else None
+        parent_author: str | None = None
+        if event.comment.parent_id:
+            parent = await repo.get_comment(event.comment.parent_id)
+            if parent is not None and not parent.deleted:
+                parent_author = parent.author
+        commenters = frozenset(await repo.list_comment_author_ids(event.post_id))
+        return post_author, parent_author, commenters
 
     async def on_post_edited(self, event: PostEdited) -> None:
         """A space post edit rings only the members it newly @-mentions
@@ -976,18 +1127,19 @@ class NotificationService(ProtectionGateMixin):
             )
 
     async def on_dm_message_created(self, event: DmMessageCreated) -> None:
-        """Create an in-app notification row + push for each recipient.
+        """Push each recipient about a chat message — no Notifications row.
 
-        §25.3: titles only — body never on the wire. ``_save_notif``
-        already drives the push fan-out (Web Push + platform adapter)
-        — one push per bell row, never a second fan-out.
+        D3: Chats keeps its own unread badge, so a plain message never
+        lands in the Notifications list (it would count twice). It still
+        pushes, title only (§25.3): the first unread message of a chat
+        alerts, the rest of the burst stays quiet, and a chat that went
+        quiet for :data:`CHAT_REALERT_SECONDS` alerts again (D8) — read
+        from the conversation itself (:meth:`_chat_alerts`), so nothing is
+        stored and a restart changes nothing.
 
-        Bell rows are **one per conversation** (object ``dm:<id>``, D7): a
-        burst of N messages bumps the one row rather than spamming the
-        bell with N entries, without pushing again while it is unread. The
-        companion :meth:`mark_read_for_dm` reads that row when the
-        recipient opens the thread; the next message re-opens it (and
-        pushes), and a week of quiet starts a fresh one.
+        Being @-mentioned is about *you*: that one still makes a
+        ``dm_mention`` row, one per conversation (D7), which
+        :meth:`mark_read_for_dm` reads when the thread is opened.
 
         Active-viewer suppression: when the recipient already has the
         DM thread open in any of their tabs (the SPA emits
@@ -1071,18 +1223,38 @@ class NotificationService(ProtectionGateMixin):
                     about=about,
                 )
                 continue
-            await self._save_notif(
-                new_notification(
-                    user_id=recipient_id,
-                    type="dm_message",
-                    title=self._dm_title(event, prefs, local),
-                    link_url=link,
-                ),
-                about=about,
-                actor_user_id=event.sender_user_id,
-                actor_name=event.sender_display_name,
-                withheld=blocked,
+            if not await self._chat_alerts(event, local):
+                continue  # the same burst: the device already buzzed
+            await self._send_push(
+                local,
+                ntype="dm_message",
+                title=self._dm_title(event, prefs, local),
+                link_url=link,
+                tag=f"dm_message:{link}",
             )
+
+    async def _chat_alerts(self, event: DmMessageCreated, recipient) -> bool:
+        """D8 for a chat message: alert when it is the first one the
+        recipient has not read, or when the chat was quiet for
+        :data:`CHAT_REALERT_SECONDS` before it. Without the conversation
+        repo every message alerts."""
+        if self._convos is None:
+            return True
+        if (
+            await self._convos.count_unread(event.conversation_id, recipient.username)
+            <= 1
+        ):
+            return True
+        latest = await self._convos.list_messages(event.conversation_id, limit=2)
+        this = next((m for m in latest if m.id == event.message_id), None)
+        previous = next((m for m in latest if m.id != event.message_id), None)
+        # The gap before this message — a catch-up of old messages from a
+        # household that was offline is one burst, not one alert each.
+        return previous is None or _quiet_for(
+            previous.created_at,
+            CHAT_REALERT_SECONDS,
+            until=this.created_at if this is not None else None,
+        )
 
     async def on_dm_message_deleted(self, event: DmMessageDeleted) -> None:
         """A deleted message no longer rings: for each local member it went
@@ -1662,35 +1834,43 @@ class NotificationService(ProtectionGateMixin):
         generic_fallback: str,
         mention_key: str,
         mention_fallback: str,
+        post_author_id: str | None = None,
+        parent_author_id: str | None = None,
+        commenter_ids: frozenset[str] = frozenset(),
     ) -> None:
-        """Fan a space-content bell out to this household's space members.
+        """Fan a space-content row out to this household's space members.
 
-        Per member (never the author, so a self-mention is silent):
+        Per member (never the author, so a self-mention is silent), at their
+        level (:meth:`_space_level` — their choice, else the D5 default):
 
         * ``muted`` → nothing, mentioned or not.
         * mentioned (a resolved ``MentionType.USER`` in *mentions*) → one
-          ``space_mention`` bell ("{author} mentioned you in …") instead of
-          the generic one — never both.
-        * ``mentions`` level and not mentioned → nothing.
-        * otherwise (``all``) → the generic bell.
+          ``space_mention`` row with a push — never also the generic one.
+        * a comment answering their comment / on their post (D6) →
+          ``comment_replied`` / ``post_replied`` with a push, at ``all`` and
+          ``mentions`` alike.
+        * ``@here`` → ``space_here`` with a push, members only — never a
+          follower (subscriber).
+        * otherwise the generic row (``generic_type``) **in the app only**,
+          no push: at ``all``, or — for a comment — at ``mentions`` when they
+          commented on that post too ("also commented").
 
         ``@here`` (a ``MentionType.HERE`` entry — the resolver keeps it only
         when the space allows it and the author is owner/admin by this
-        household's roster): every member at ``all`` / ``mentions`` gets one
-        ``space_here`` bell ("{author} notified everyone in …") instead of the
-        generic one; a member also mentioned directly gets the mention bell
-        only. At most one @here per ``(space, author)`` per
-        :data:`HERE_COOLDOWN_SECONDS` pages anyone — a later one inside the
-        window notifies like a plain post (per-process, spam brake).
+        household's roster) pages at most once per space per
+        :data:`HERE_COOLDOWN_SECONDS`; a later one inside the window
+        notifies like a plain post. The window is read back from the
+        ``space_here`` rows themselves, so it survives a restart.
 
         ``generic_type=None`` (an edit, whose *mentions* are only the newly
-        added ones) → no generic bell for anyone: only the mentioned (and a
-        newly added, still-allowed, not-rate-limited ``@here``) are rung.
+        added ones) → no generic row and no reply row for anyone: only the
+        mentioned (and a newly added, still-allowed, not-rate-limited
+        ``@here``) are rung.
 
         The member list is the local ``space_members`` roster, so a mention can
         only ever reach a member — the resolver never resolves outsiders.
 
-        ``link`` is the post (and comment) every bell of this fan-out opens.
+        ``link`` is the post (and comment) every row of this fan-out opens.
         Every row is about the post (``post_id``) — a mention in a comment
         about that comment (``comment_id``), so deleting it drops the row.
         """
@@ -1711,7 +1891,7 @@ class NotificationService(ProtectionGateMixin):
         )
         mentioned = {m.user_id for m in mentions if m.user_id}
         here = any(m.type is MentionType.HERE for m in mentions) and (
-            self._take_here_slot(space_id, author_id)
+            await self._here_window_open(space_id)
         )
         post_about = NotificationSubject.of(
             NotificationObject.SPACE_POST,
@@ -1729,32 +1909,44 @@ class NotificationService(ProtectionGateMixin):
             if comment_id
             else post_about
         )
+        is_comment = comment_id is not None and generic_type is not None
         members = await self._spaces.list_members(space_id)
         blocked = await self._withheld_from(author_id)
         for member in members:
             if member.user_id == author_id or member.user_id in blocked:
                 continue
-            level = await self._notifs.get_space_notif_level(
-                user_id=member.user_id,
-                space_id=space_id,
+            level = await self._space_level(member, space)
+            if level is SpaceNotifLevel.MUTED:
+                continue
+            reply = (
+                _reply_kind(
+                    member.user_id,
+                    post_author=post_author_id,
+                    parent_author=parent_author_id,
+                    in_space=True,
+                )
+                if is_comment
+                else None
             )
-            if level == "muted":
-                continue
-            is_mentioned = member.user_id in mentioned
-            if level == "mentions" and not (is_mentioned or here):
-                continue
-            if is_mentioned:
+            push = True
+            if member.user_id in mentioned:
                 ntype, key, fallback = "space_mention", mention_key, mention_fallback
-            elif here:
+            elif reply is not None:
+                ntype, key, fallback = reply
+            elif here and member.role in WRITER_ROLES:
                 ntype, key, fallback = (
                     "space_here",
                     "notification.space.here",
                     "{author} notified everyone in {space_name}",
                 )
-            elif generic_type is None:
-                continue
-            else:
+            elif generic_type is not None and (
+                level is SpaceNotifLevel.ALL
+                or (is_comment and member.user_id in commenter_ids)
+            ):
                 ntype, key, fallback = generic_type, generic_key, generic_fallback
+                push = False  # activity: in the app, never a buzz (D5, D6)
+            else:
+                continue
             recipient = await self._users.get_by_user_id(member.user_id)
             await self._save_notif(
                 new_notification(
@@ -1773,25 +1965,32 @@ class NotificationService(ProtectionGateMixin):
                 actor_user_id=author_id,
                 actor_name=name,
                 withheld=blocked,
+                push=push,
             )
 
-    def _take_here_slot(self, space_id: str, author_id: str) -> bool:
-        """Claim this author's @here slot in *space_id*; ``False`` while the
-        previous @here is younger than :data:`HERE_COOLDOWN_SECONDS`."""
-        now = self._clock()
-        key = (space_id, author_id)
-        last = self._here_last.get(key)
-        if last is not None and now - last < HERE_COOLDOWN_SECONDS:
-            return False
-        self._here_last[key] = now
-        if len(self._here_last) > _HERE_TRACK_MAX:
-            # Bounded: drop entries whose window has passed.
-            self._here_last = {
-                k: t
-                for k, t in self._here_last.items()
-                if now - t < HERE_COOLDOWN_SECONDS
-            }
-        return True
+    async def _space_level(self, member, space) -> SpaceNotifLevel:
+        """*member*'s level in *space*: the one they chose, else the default
+        for the space's type and their seat (D5) — "Everything" in a
+        household or private space, "Replies and mentions" in a public or
+        global one and wherever they only follow."""
+        chosen = await self._notifs.get_space_notif_level(
+            user_id=member.user_id, space_id=space.id
+        )
+        if chosen:
+            try:
+                return SpaceNotifLevel(chosen)
+            except ValueError:
+                pass
+        return default_space_notif_level(space.space_type, member.role)
+
+    async def _here_window_open(self, space_id: str) -> bool:
+        """Whether an ``@here`` in *space_id* may page now: nobody here got a
+        ``space_here`` row about the space in the last
+        :data:`HERE_COOLDOWN_SECONDS` (per space, whoever sent it)."""
+        since = datetime.now(UTC) - timedelta(seconds=HERE_COOLDOWN_SECONDS)
+        return not await self._notifs.exists_in_space_since(
+            type="space_here", space_id=space_id, since=since.isoformat()
+        )
 
     async def on_moderation_queued(self, event: SpaceModerationQueued) -> None:
         """Notify everyone who works the queue (owner / admin / moderator)
@@ -2050,11 +2249,15 @@ class NotificationService(ProtectionGateMixin):
           user adding a reminder to their own calendar should never
           notify themselves.
 
+          Something done *to you* ("Plans and tasks"): it pushes.
+
         * **Space calendar.** Space events live in
           ``space_calendar_events`` and don't have a row in
           ``calendars``; their ``calendar_id`` is the
           :class:`Space` id directly. Members of that space (minus the
-          creator) get the bell — same shape as ``SpacePostCreated``.
+          creator) at "Everything" get an in-app row, no push — activity in
+          a space, like a new post (D5); "Replies and mentions" and "Nothing"
+          get none.
 
         The old behavior fanned out to every active household member
         regardless of whose calendar the event lived on, which spammed
@@ -2120,6 +2323,8 @@ class NotificationService(ProtectionGateMixin):
         for member in members:
             if member.user_id == cal_event.created_by:
                 continue
+            if await self._space_level(member, space) is not SpaceNotifLevel.ALL:
+                continue
             recipient = await self._users.get_by_user_id(member.user_id)
             if recipient is None:
                 continue
@@ -2143,12 +2348,7 @@ class NotificationService(ProtectionGateMixin):
                 ),
                 actor_user_id=cal_event.created_by,
                 withheld=blocked,
-                push_params={
-                    "name": await self._person_name(
-                        cal_event.created_by, self._locale(recipient)
-                    ),
-                    "space_name": space.name,
-                },
+                push=False,
             )
 
     async def on_calendar_event_deleted(
@@ -2434,9 +2634,9 @@ class NotificationService(ProtectionGateMixin):
         )
 
     async def on_space_member_joined(self, event: SpaceMemberJoined) -> None:
-        """Tell existing members that a new person joined (§23.52).
-
-        Not for an automatic household seat: everyone in the home is a
+        """Tell existing members that a new person joined (§23.52) — an
+        in-app row for members at "Everything", no push: activity in a space
+        (D5). Not for an automatic household seat: everyone in the home is a
         member of a household space, so "X joined" would be noise."""
         if event.automatic:
             return
@@ -2455,6 +2655,8 @@ class NotificationService(ProtectionGateMixin):
             if not followers_too and member.role not in WRITER_ROLES:
                 continue
             if member.user_id in blocked:
+                continue
+            if await self._space_level(member, space) is not SpaceNotifLevel.ALL:
                 continue
             recipient = await self._users.get_by_user_id(member.user_id)
             if recipient is None:
@@ -2484,6 +2686,7 @@ class NotificationService(ProtectionGateMixin):
                 actor_user_id=event.user_id,
                 actor_name=name,
                 withheld=blocked,
+                push=False,
             )
 
     async def on_remote_space_dissolved(self, event: RemoteSpaceDissolved) -> None:
@@ -2868,7 +3071,7 @@ class NotificationService(ProtectionGateMixin):
             about=NotificationSubject.of(NotificationObject.MOMENT, event.moment_id),
             actor_user_id=event.reactor_user_id,
             actor_name=name,
-            push_params={"name": name},  # never the emoji (D11)
+            push=False,  # D13: reactions are nice to see, never a buzz
         )
 
     async def on_moment_created(self, event: MomentCreated) -> None:
@@ -2956,7 +3159,69 @@ class NotificationService(ProtectionGateMixin):
             ),
             actor_user_id=event.reactor_user_id,
             actor_name=name,
-            push_params={"name": name},  # never the emoji (D11)
+            push=False,  # D13: reactions are nice to see, never a buzz
+        )
+
+    async def on_post_reaction_changed(self, event: PostReactionChanged) -> None:
+        """A reaction on your post — household feed or space: an in-app row
+        grouped per post, no push (D13). A removed reaction, your own, a
+        reactor you blocked and an author on another household (theirs
+        tells them) stay silent; a space post's author must still hold a
+        seat there."""
+        if not event.added or not event.emoji or not event.reactor_user_id:
+            return
+        post = event.post
+        if event.reactor_user_id == post.author:
+            return
+        author = await self._users.get_by_user_id(post.author)
+        if author is None:
+            return
+        space_name: str | None = None
+        if event.space_id is not None:
+            if await self._spaces.get_member(event.space_id, post.author) is None:
+                return
+            space_name = await self._space_name(event.space_id)
+            about = NotificationSubject.of(
+                NotificationObject.SPACE_POST,
+                post.id,
+                space_id=event.space_id,
+                space_name=space_name,
+            )
+            link = space_post_link(event.space_id, post.id)
+        else:
+            about = NotificationSubject.of(NotificationObject.POST, post.id)
+            link = household_post_link(post.id)
+        locale = self._locale(author)
+        name = await self._person_name(event.reactor_user_id, locale)
+        if space_name:
+            title = self._t(
+                "notification.space.post.reacted",
+                locale=locale,
+                fallback="{name} reacted {emoji} to your post in {space_name}",
+                name=name,
+                emoji=event.emoji,
+                space_name=space_name,
+            )
+        else:
+            title = self._t(
+                "notification.post.reacted",
+                locale=locale,
+                fallback="{name} reacted {emoji} to your post",
+                name=name,
+                emoji=event.emoji,
+            )
+        await self._save_notif(
+            new_notification(
+                user_id=post.author,
+                type="post_reacted",
+                title=title,
+                link_url=link,
+            ),
+            about=about,
+            actor_user_id=event.reactor_user_id,
+            actor_name=name,
+            push=False,  # D13: reactions are nice to see, never a buzz
+            push_params={"name": name, "space_name": space_name},
         )
 
     async def on_user_followed(self, event: UserFollowed) -> None:

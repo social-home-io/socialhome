@@ -105,7 +105,8 @@ class PostReactionChanged(DomainEvent):
     #: the member-publish bridge relays a local user's space reaction).
     space_id: str | None = None
     origin_instance_id: str | None = None
-    #: Space posts: who reacted, with which emoji, added or removed.
+    #: Who reacted, with which emoji, added or removed (household and space
+    #: posts).
     reactor_user_id: str = ""
     emoji: str = ""
     added: bool = True

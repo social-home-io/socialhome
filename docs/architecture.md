@@ -159,13 +159,54 @@ off by default) and is not protected (refused on `PATCH /api/me` as
 time). It carries the subject's own `user_id` / `username`, ids, a kind
 and an in-app `link_url` where one exists — never a display name, title,
 summary, message, status text, zone, amount or anyone else's id.
-`notification_new` fires once per push: never again for a silent repeat
-(a chat burst on its still-unread row), but again when a regrouped row
-pushes (another comment on a post, a re-opened read row). The one
+`notification_new` fires only when a row pushes: never for an in-app-only
+row (activity, reactions) or a silent repeat on a row still unread, again
+when a read row re-opens or a chat row re-alerts after five quiet minutes.
+A plain chat message makes no row, so only `dm_received` fires for it. The one
 **household** event is `space_config_changed`
 `{space_id, event_type, sequence}` (a space's settings; no person, no
 change payload), which fires without an opt-in. A failed fire is logged
 at WARNING.
+
+### Who gets notified
+
+`services/notification_service.py:NotificationService` decides every row
+and push from events the household already receives — no notification
+ever crosses the wire, so no federation message or `proto_version` exists
+for it. The rules (notifications redesign, owner decisions D3 D5 D6 D8 D13):
+
+- **A space level** (`space_notif_prefs.level`): `all` ("Everything"),
+  `mentions` ("Replies and mentions"), `muted` ("Nothing"). Someone who
+  never chose one gets the default for the space
+  (`domain/notification.py:default_space_notif_level`): `all` in a
+  household or private space, `mentions` in a public or global space and
+  in any space they only follow (a subscriber seat). The household feed
+  has no level and is always "Everything".
+- **Replies and mentions push.** A comment pushes its post's author
+  (`post_replied`), the author of the comment it answers (`comment_replied`,
+  threads by `parent_id`) and anyone it @-mentions (`space_mention`) — at
+  `all` and `mentions` alike. `@here` (owner / admin, the space allows it)
+  pushes the space's members as `space_here`, never a follower, at most once
+  per space per 10 minutes; the window is read back from the `space_here`
+  rows themselves, so a restart keeps it.
+- **Activity is in the app only.** A new post, a comment that isn't a reply
+  to you, a new member and a new space-calendar event are rows without a
+  push, at `all` only; a comment on a post you commented on also reaches you
+  at `mentions` ("also commented"). Nobody else hears about it.
+- **Reactions** to your post, moment or highlight are one in-app row per
+  thing (`post_reacted`, `moment_reacted`, `highlight_reacted`), never a push.
+- **Chats** keep their own badge: a plain message pushes but makes no row;
+  an @-mention in a group (`dm_mention`) does.
+- **Things done to you push** whatever the space level: tasks, an event
+  someone else added to your personal calendar, changes to an event you're
+  going to, join requests, answers and decisions.
+- **One buzz per thing (D8).** The event that starts a row — or re-opens a
+  read one — pushes; more activity on a row that is still unread updates it
+  silently. A chat re-alerts once it was quiet for five minutes (a plain
+  message: the gap before it in the conversation; a mention row: its last
+  activity).
+
+`muted` silences a space completely, a mention included.
 
 Wall panels adopted in Home Assistant are found through the optional
 `DisplayDirectory` Provider (`adapter.displays`; `None` on standalone).

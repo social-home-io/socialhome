@@ -10,6 +10,7 @@ import pytest
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.errors import InvalidMediaRefError
+from socialhome.domain.events import PostReactionChanged
 from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import FileMeta, Post, PostType
 from socialhome.infrastructure.event_bus import EventBus
@@ -43,6 +44,7 @@ async def stack(tmp_dir):
 
     s = Stack()
     s.db = db
+    s.bus = bus
     s.user_svc = user_svc
     s.feed_svc = feed_svc
 
@@ -182,6 +184,27 @@ async def test_reactions(stack):
     assert r.reactions["👍"] == frozenset({u.user_id})
     r2 = await stack.feed_svc.remove_reaction(p.id, user_id=u.user_id, emoji="👍")
     assert "👍" not in r2.reactions
+
+
+async def test_reaction_events_name_the_reactor_and_emoji(stack):
+    """D13: the post's author can be told who reacted — the household feed's
+    ``PostReactionChanged`` carries the reactor, the emoji and add/remove."""
+    seen: list[PostReactionChanged] = []
+
+    async def _on(ev: PostReactionChanged) -> None:
+        seen.append(ev)
+
+    stack.bus.subscribe(PostReactionChanged, _on)
+    u = await stack.provision_user("pascal")
+    p = await stack.feed_svc.create_post(
+        author_user_id=u.user_id, type=PostType.TEXT, content="x"
+    )
+    await stack.feed_svc.add_reaction(p.id, user_id=u.user_id, emoji="👍")
+    await stack.feed_svc.remove_reaction(p.id, user_id=u.user_id, emoji="👍")
+    assert [(e.reactor_user_id, e.emoji, e.added, e.space_id) for e in seen] == [
+        (u.user_id, "👍", True, None),
+        (u.user_id, "👍", False, None),
+    ]
 
 
 async def test_comments(stack):
