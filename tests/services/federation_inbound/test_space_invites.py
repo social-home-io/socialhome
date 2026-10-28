@@ -64,6 +64,19 @@ class _FakeSpaceRepo:
         self.answered: set[str] = set()
         self.spaces = {"sp-1": _space()}
         self.banned: set[tuple[str, str]] = set()
+        #: Join-request rows by id. ``req-1`` is this household's own copy
+        #: of a request its user sent to ``peer-a``, which hosts ``sp-r``.
+        self.rows: dict[str, dict] = {
+            "req-1": {
+                "id": "req-1",
+                "space_id": "sp-r",
+                "user_id": "u-1",
+                "remote_applicant_instance_id": "peer-a",
+            },
+        }
+
+    async def get_join_request(self, request_id):
+        return self.rows.get(request_id)
 
     async def get(self, space_id):
         return self.spaces.get(space_id)
@@ -344,14 +357,27 @@ async def test_join_request_status_denied(repo, handlers):
     assert repo.join_status == [("req-1", "denied", None)]
 
 
+def _host_copy(repo, request_id="req-in", applicant="peer-b"):
+    """Our (the host's) copy of a request ``applicant`` filed for ``sp-1``."""
+    repo.rows[request_id] = {
+        "id": request_id,
+        "space_id": "sp-1",
+        "user_id": "u-b",
+        "remote_applicant_instance_id": applicant,
+    }
+
+
 async def test_join_request_status_withdrawn(repo, handlers):
+    """The applicant household withdraws its request on the host's copy."""
+    _host_copy(repo)
     await handlers._on_join_request_status(
         _event(
             FederationEventType.SPACE_JOIN_REQUEST_WITHDRAWN,
-            {"request_id": "req-1"},
+            {"request_id": "req-in"},
+            from_instance="peer-b",
         )
     )
-    assert repo.join_status == [("req-1", "withdrawn", None)]
+    assert repo.join_status == [("req-in", "withdrawn", None)]
 
 
 async def test_join_request_status_expired(repo, handlers):
@@ -387,7 +413,7 @@ async def test_a_second_answer_for_one_request_is_not_announced_again(
 
     bus.subscribe(RemoteJoinRequestApproved, _seen)
     bus.subscribe(RemoteJoinRequestDenied, _seen)
-    approved = {"request_id": "req-1", "space_id": "sp-1", "invite_token": "t"}
+    approved = {"request_id": "req-1", "space_id": "sp-r", "invite_token": "t"}
     await handlers._on_join_request_status(
         _event(FederationEventType.SPACE_JOIN_REQUEST_APPROVED, approved)
     )
@@ -419,6 +445,269 @@ async def test_join_request_status_missing_id_is_noop(repo, handlers):
         )
     )
     assert repo.join_status == []
+
+
+# ── who may answer a join request ───────────────────────────────────────
+
+
+@pytest.fixture
+def announced(bus):
+    seen: list = []
+
+    async def _seen(ev) -> None:
+        seen.append(ev)
+
+    bus.subscribe(RemoteJoinRequestApproved, _seen)
+    bus.subscribe(RemoteJoinRequestDenied, _seen)
+    return seen
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        FederationEventType.SPACE_JOIN_REQUEST_APPROVED,
+        FederationEventType.SPACE_JOIN_REQUEST_DENIED,
+        FederationEventType.SPACE_JOIN_REQUEST_EXPIRED,
+    ],
+)
+async def test_the_host_answers_its_request(repo, handlers, announced, event_type):
+    """The host the request went to answers it — whatever transport carried
+    it: direct, the GFS relay (the signed envelope rides sealed) and the
+    mesh (dispatched with the authenticated origin) all arrive with the
+    host as ``from_instance``."""
+    await handlers._on_join_request_status(
+        _event(
+            event_type,
+            {"request_id": "req-1", "space_id": "sp-r", "invite_token": "t"},
+            from_instance="peer-a",
+        )
+    )
+    assert len(repo.join_status) == 1
+    if event_type is FederationEventType.SPACE_JOIN_REQUEST_APPROVED:
+        (ev,) = announced
+        assert isinstance(ev, RemoteJoinRequestApproved)
+        assert (ev.request_id, ev.space_id, ev.invite_token) == ("req-1", "sp-r", "t")
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        FederationEventType.SPACE_JOIN_REQUEST_APPROVED,
+        FederationEventType.SPACE_JOIN_REQUEST_DENIED,
+        FederationEventType.SPACE_JOIN_REQUEST_EXPIRED,
+        FederationEventType.SPACE_JOIN_REQUEST_WITHDRAWN,
+    ],
+)
+async def test_another_paired_household_cannot_answer(
+    repo, handlers, announced, event_type, caplog
+):
+    """A third household that learnt the request id (a fake approval with a
+    token of its choosing, or a denial that strands the person) changes
+    nothing and announces nothing."""
+    with caplog.at_level("WARNING"):
+        await handlers._on_join_request_status(
+            _event(
+                event_type,
+                {"request_id": "req-1", "space_id": "sp-r", "invite_token": "t"},
+                from_instance="peer-c",
+            )
+        )
+    assert repo.join_status == []
+    assert announced == []
+    assert "req-1" in caplog.text and "peer-c" in caplog.text
+    # The host's real answer still lands afterwards.
+    await handlers._on_join_request_status(
+        _event(
+            FederationEventType.SPACE_JOIN_REQUEST_APPROVED,
+            {"request_id": "req-1", "invite_token": "real"},
+            from_instance="peer-a",
+        )
+    )
+    assert repo.join_status == [("req-1", "approved", None)]
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        FederationEventType.SPACE_JOIN_REQUEST_APPROVED,
+        FederationEventType.SPACE_JOIN_REQUEST_DENIED,
+        FederationEventType.SPACE_JOIN_REQUEST_EXPIRED,
+    ],
+)
+async def test_an_applicant_cannot_answer_its_own_request_on_the_host(
+    repo, handlers, announced, event_type
+):
+    """The applicant household knows its request id. Approving it on the
+    host would mark it approved, and ``has_approved_join_request`` then
+    seats that person in a local community on their next redeem — past the
+    admins' review and the area check."""
+    _host_copy(repo)
+    await handlers._on_join_request_status(
+        _event(
+            event_type,
+            {"request_id": "req-in", "space_id": "sp-1", "invite_token": "t"},
+            from_instance="peer-b",
+        )
+    )
+    assert repo.join_status == []
+    assert announced == []
+
+
+async def test_an_applicant_cannot_approve_its_admin_elevation(repo, handlers):
+    """An admin elevation is the seating household's copy even for a space
+    another household owns; its applicant may withdraw it, never approve
+    it (that is the owner's click)."""
+    repo.spaces["sp-r"] = _space("sp-r", owner="peer-owner")
+    repo.rows["req-elev"] = {
+        "id": "req-elev",
+        "space_id": "sp-r",
+        "user_id": "u-b",
+        "remote_applicant_instance_id": "peer-b",
+        "requested_role": "admin",
+    }
+    await handlers._on_join_request_status(
+        _event(
+            FederationEventType.SPACE_JOIN_REQUEST_APPROVED,
+            {"request_id": "req-elev"},
+            from_instance="peer-b",
+        )
+    )
+    assert repo.join_status == []
+    await handlers._on_join_request_status(
+        _event(
+            FederationEventType.SPACE_JOIN_REQUEST_WITHDRAWN,
+            {"request_id": "req-elev"},
+            from_instance="peer-b",
+        )
+    )
+    assert repo.join_status == [("req-elev", "withdrawn", None)]
+
+
+async def test_the_host_cannot_withdraw_the_applicants_request(repo, handlers):
+    await handlers._on_join_request_status(
+        _event(
+            FederationEventType.SPACE_JOIN_REQUEST_WITHDRAWN,
+            {"request_id": "req-1"},
+            from_instance="peer-a",
+        )
+    )
+    assert repo.join_status == []
+
+
+async def test_another_household_cannot_withdraw_a_request_on_the_host(repo, handlers):
+    _host_copy(repo)
+    await handlers._on_join_request_status(
+        _event(
+            FederationEventType.SPACE_JOIN_REQUEST_WITHDRAWN,
+            {"request_id": "req-in"},
+            from_instance="peer-c",
+        )
+    )
+    assert repo.join_status == []
+
+
+async def test_an_answer_naming_another_space_is_ignored(repo, handlers, announced):
+    """The host of ``sp-r`` cannot use this request to announce a seat in a
+    different space."""
+    await handlers._on_join_request_status(
+        _event(
+            FederationEventType.SPACE_JOIN_REQUEST_APPROVED,
+            {"request_id": "req-1", "space_id": "sp-other", "invite_token": "t"},
+            from_instance="peer-a",
+        )
+    )
+    assert repo.join_status == []
+    assert announced == []
+
+
+async def test_an_answer_for_a_request_sent_to_another_host_is_ignored(repo, handlers):
+    """``req-2`` went to ``peer-x``; ``peer-a`` hosting some other space
+    cannot answer it."""
+    repo.rows["req-2"] = {
+        "id": "req-2",
+        "space_id": "sp-x",
+        "user_id": "u-1",
+        "remote_applicant_instance_id": "peer-x",
+    }
+    await handlers._on_join_request_status(
+        _event(
+            FederationEventType.SPACE_JOIN_REQUEST_DENIED,
+            {"request_id": "req-2"},
+            from_instance="peer-a",
+        )
+    )
+    assert repo.join_status == []
+
+
+async def test_no_household_answers_a_local_users_request(repo, handlers):
+    """A request one of our people filed for a space we host has no other
+    party — only our own admins answer it."""
+    repo.rows["req-local"] = {
+        "id": "req-local",
+        "space_id": "sp-1",
+        "user_id": "u-local",
+        "remote_applicant_instance_id": None,
+    }
+    for event_type in (
+        FederationEventType.SPACE_JOIN_REQUEST_APPROVED,
+        FederationEventType.SPACE_JOIN_REQUEST_DENIED,
+        FederationEventType.SPACE_JOIN_REQUEST_WITHDRAWN,
+    ):
+        await handlers._on_join_request_status(
+            _event(event_type, {"request_id": "req-local"}, from_instance="peer-a")
+        )
+    assert repo.join_status == []
+
+
+async def test_an_unknown_request_is_ignored(repo, handlers):
+    await handlers._on_join_request_status(
+        _event(
+            FederationEventType.SPACE_JOIN_REQUEST_APPROVED,
+            {"request_id": "nope"},
+            from_instance="peer-a",
+        )
+    )
+    assert repo.join_status == []
+
+
+async def test_a_reply_via_from_a_relay_is_ignored(repo, handlers):
+    """``REPLY_VIA`` is not sent by anyone today; a relay forwarding one in
+    its own name is not the host, so it changes nothing."""
+    await handlers._on_join_request_status(
+        _event(
+            FederationEventType.SPACE_JOIN_REQUEST_REPLY_VIA,
+            {"request_id": "req-1", "status": "approved"},
+            from_instance="relay-r",
+        )
+    )
+    assert repo.join_status == []
+
+
+async def test_answers_are_refused_before_attach(bus, repo):
+    h = SpaceInviteInboundHandlers(bus=bus, space_repo=repo)
+    await h._on_join_request_status(
+        _event(
+            FederationEventType.SPACE_JOIN_REQUEST_APPROVED,
+            {"request_id": "req-1"},
+            from_instance="peer-a",
+        )
+    )
+    assert repo.join_status == []
+
+
+async def test_a_replayed_host_answer_stays_ignored(repo, handlers, announced):
+    """Pending-only (#1218) still holds behind the sender check."""
+    approved = {"request_id": "req-1", "space_id": "sp-r", "invite_token": "t"}
+    for _ in range(2):
+        await handlers._on_join_request_status(
+            _event(
+                FederationEventType.SPACE_JOIN_REQUEST_APPROVED,
+                approved,
+                from_instance="peer-a",
+            )
+        )
+    assert repo.join_status == [("req-1", "approved", None)]
+    assert len(announced) == 1
 
 
 # ── local communities ───────────────────────────────────────────────────

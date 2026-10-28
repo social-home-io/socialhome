@@ -43,6 +43,13 @@ log = logging.getLogger(__name__)
 
 #: The states a join request leaves ``pending`` for.
 _JOIN_REQUEST_ANSWERS = frozenset({"approved", "denied", "expired", "withdrawn"})
+#: Answers only the household that HOSTS the space gives. They land on the
+#: applicant household's own copy of the request (``request_join_remote``,
+#: or a redeem / accept the host turned into a request).
+_HOST_ANSWERS = frozenset({"approved", "denied", "expired"})
+#: The answer only the APPLICANT household gives. It lands on the host's
+#: copy of a request that household filed.
+_APPLICANT_ANSWERS = frozenset({"withdrawn"})
 
 
 class SpaceInviteInboundHandlers:
@@ -250,6 +257,9 @@ class SpaceInviteInboundHandlers:
         carries an ``invite_token``; we dispatch a domain event so the
         applicant-side service can auto-consume + seat the user as a
         member without requiring the applicant to click anything.
+
+        Only the household entitled to give the answer is heard
+        (:meth:`_authorized_answer_space`).
         """
         request_id = str(event.payload.get("request_id") or "")
         if not request_id:
@@ -266,6 +276,9 @@ class SpaceInviteInboundHandlers:
         status = status_map.get(event.event_type, "expired")
         if status not in _JOIN_REQUEST_ANSWERS:
             log.debug("join request %s: ignoring status %r", request_id, status)
+            return
+        space_id = await self._authorized_answer_space(event, request_id, status)
+        if space_id is None:
             return
         reviewed_by = event.payload.get("reviewed_by")
         # Only a pending request takes an answer — once. A second answer
@@ -285,9 +298,7 @@ class SpaceInviteInboundHandlers:
             await self._bus.publish(
                 RemoteJoinRequestApproved(
                     request_id=request_id,
-                    space_id=str(
-                        event.payload.get("space_id") or event.space_id or "",
-                    ),
+                    space_id=space_id,
                     invite_token=str(event.payload.get("invite_token")),
                 )
             )
@@ -295,8 +306,74 @@ class SpaceInviteInboundHandlers:
             await self._bus.publish(
                 RemoteJoinRequestDenied(
                     request_id=request_id,
-                    space_id=str(
-                        event.payload.get("space_id") or event.space_id or "",
-                    ),
+                    space_id=space_id,
                 )
             )
+
+    async def _authorized_answer_space(
+        self,
+        event: FederationEvent,
+        request_id: str,
+        status: str,
+    ) -> str | None:
+        """The space of the join request ``event`` may answer, or ``None``
+        (logged at WARNING; nothing changes, nothing is announced) when the
+        sender is not the one household entitled to give ``status`` on it.
+
+        Each household's copy of a cross-household request records the
+        OTHER party in ``remote_applicant_instance_id``: the host's copy
+        names the applicant household (``file_remote_join_request``), the
+        applicant's copy names the host it was sent to
+        (``request_join_remote``, or a redeem / accept the host turned into
+        a request). The envelope's ``from_instance`` is what the §24.11
+        pipeline proved by signature — on a direct send, through the GFS
+        relay (the whole signed envelope rides inside the seal) and over the
+        mesh (the routed handler dispatches with the authenticated origin)
+        alike. So:
+
+        * approved / denied / expired come only from the host, onto the
+          applicant's copy;
+        * withdrawn comes only from the applicant household, onto the
+          host's copy.
+
+        The host's copy is told apart by where it is filed: a request for a
+        space this household owns (every ``file_remote_join_request``
+        caller hosts the space), or an admin elevation
+        (``requested_role``, filed by the household that seated the
+        redeemer — the applicant's side never records one).
+
+        Anything else is refused: a third household that learnt the id, an
+        applicant approving its own request on the host, an answer to a
+        local user's request (there is no other party), an answer naming a
+        different space."""
+        row = await self._space_repo.get_join_request(request_id)
+        if row is None:
+            log.debug("join request %s answer: unknown request", request_id)
+            return None
+        space_id = str(row.get("space_id") or "")
+        party = row.get("remote_applicant_instance_id")
+        named = event.payload.get("space_id") or event.space_id
+        space = await self._space_repo.get(space_id) if space_id else None
+        host_copy = bool(row.get("requested_role")) or (
+            space is not None and space.owner_instance_id == self._own_instance_id
+        )
+        if (
+            self._own_instance_id
+            and party
+            and party == event.from_instance
+            and (named is None or str(named) == space_id)
+            and (
+                (status in _HOST_ANSWERS and not host_copy)
+                or (status in _APPLICANT_ANSWERS and host_copy)
+            )
+        ):
+            return space_id
+        log.warning(
+            "join request %s: %s (%s) from %s refused: not the household "
+            "entitled to give that answer",
+            request_id,
+            event.event_type.value,
+            status,
+            event.from_instance,
+        )
+        return None
