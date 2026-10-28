@@ -2184,8 +2184,10 @@ class NotificationService(ProtectionGateMixin):
         Never says what became of it, who reviewed it or who (or what) it
         was about — not in the row, not in the push (§25.3): the
         moderator stays out of it and the reported person is never named.
-        A reporter on another household is not told (their household
-        holds no copy of the decision)."""
+        A reporter on another household is told by their own household
+        once the space's host says the report was reviewed
+        (``SPACE_REPORT_ANSWERED``, v_71: ``ReportService.apply_report_answer``
+        publishes this event with no decider)."""
         assert self._reports is not None
         report = await self._reports.get(event.report_id)
         if report is None or report.reporter_user_id == event.resolved_by:

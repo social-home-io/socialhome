@@ -28,6 +28,12 @@ What this file proves:
 * **Forgeries.** A report naming a reporter seated on another household, a
   banned reporter, a cross-space target, and one delivered to a household
   with no content authority are all dropped, not stored.
+* **The reporter hears back (v_71).** Once a report anna filed is decided
+  — on H or on C — H alone sends ``SPACE_REPORT_ANSWERED`` to A only
+  (never C, never D), carrying the report's key and nothing else; A closes
+  its copy and anna gets one translated "was reviewed" row naming nobody.
+  An answer from anyone but the host, a replay, and a household below
+  v_71 change nothing.
 """
 
 from __future__ import annotations
@@ -41,7 +47,11 @@ from types import MappingProxyType
 import pytest
 
 from socialhome.app import create_app
-from socialhome.app_keys import db_key, federation_service_key
+from socialhome.app_keys import (
+    db_key,
+    federation_service_key,
+    notification_delivery_key,
+)
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
 from socialhome.domain.federation import (
@@ -218,12 +228,19 @@ async def _receive(to: House, event: FederationEvent) -> None:
         await handler(event)
 
 
+_REPORT_TYPES = (
+    FET.SPACE_REPORT,
+    FET.SPACE_REPORT_DECIDED,
+    FET.SPACE_REPORT_ANSWERED,
+)
+
+
 async def _pump(mesh) -> None:
     by_iid = {h.iid: h for h in mesh.values()}
     for iid, sent in list(OUTBOX.items()):
         batch, sent[:] = list(sent), []
         for to, et, payload, _space in batch:
-            if et in (FET.SPACE_REPORT, FET.SPACE_REPORT_DECIDED) and to in by_iid:
+            if et in _REPORT_TYPES and to in by_iid:
                 await _receive(by_iid[to], _event(by_iid[iid], payload, by_iid[to], et))
 
 
@@ -431,3 +448,130 @@ async def test_the_first_fan_out_carries_the_reporters_household(mesh):
     await _file(mesh["A"], target_type="post", target_id="p-1")
     for _to, _et, payload, _space in OUTBOX[mesh["A"].iid]:
         assert payload["reporter_instance_id"] == mesh["A"].iid
+
+
+# ── v_71: the reporter's household hears the report was reviewed ────────
+
+
+async def _at_v71(mesh) -> None:
+    for house in mesh.values():
+        await house.db.enqueue("UPDATE remote_instances SET proto_version=71", ())
+
+
+async def _answer_rows(house: House) -> list[dict]:
+    await house.app[notification_delivery_key].drain()
+    rows = await house.db.fetchall(
+        "SELECT user_id, title, link_url, params FROM notifications"
+        " WHERE type='report_answer'",
+        (),
+    )
+    return [dict(r) for r in rows]
+
+
+def _sent(house: House, et: FederationEventType) -> list[tuple[str, dict, str]]:
+    return [(to, p, sp) for to, e, p, sp in OUTBOX.get(house.iid, []) if e is et]
+
+
+async def _resolve_on(house: House, *, dismissed: bool = False) -> None:
+    rows = await (
+        await house.tc.get(f"/api/spaces/{SID}/reports", headers=house.headers)
+    ).json()
+    r = await house.tc.post(
+        f"/api/spaces/{SID}/reports/{rows[0]['id']}/resolve",
+        json={"dismissed": dismissed},
+        headers=house.headers,
+    )
+    assert r.status == 200, await r.text()
+
+
+async def test_the_host_tells_only_the_reporters_household(mesh):
+    await _at_v71(mesh)
+    await mesh["A"].db.enqueue(
+        "UPDATE users SET locale='de' WHERE user_id=?", (mesh["A"].user_id,)
+    )
+    await _file(mesh["A"], target_type="post", target_id="p-1")
+    await _pump(mesh)
+    await _resolve_on(mesh["H"], dismissed=True)
+    (answer,) = _sent(mesh["H"], FET.SPACE_REPORT_ANSWERED)
+    to, payload, space = answer
+    assert to == mesh["A"].iid  # never C (it got the decision), never D
+    assert space == SID  # the routing field; the rest is sealed
+    # The key A already holds — no verdict, no decider, no category / notes.
+    assert payload == {
+        "space_id": SID,
+        "target_type": "post",
+        "target_id": "p-1",
+        "reporter_user_id": mesh["A"].user_id,
+    }
+    assert {to for to, *_ in _sent(mesh["H"], FET.SPACE_REPORT_DECIDED)} == {
+        mesh["C"].iid
+    }
+    await _pump(mesh)
+    assert await _status(mesh["A"]) == ["resolved"]  # closed: "answered"
+    rows = await _answer_rows(mesh["A"])
+    assert rows == [
+        {
+            "user_id": mesh["A"].user_id,
+            "title": "Deine Meldung in Club wurde geprüft",
+            "link_url": f"/spaces/{SID}",
+            "params": rows[0]["params"],
+        }
+    ]
+    # Names nobody: not the moderator, not the reported author.
+    for who in ("H", "C", "D"):
+        assert mesh[who].user_id not in (rows[0]["params"] or "")
+    assert await _answer_rows(mesh["D"]) == []
+    # A replay of the answer tells nobody again.
+    await _receive(
+        mesh["A"],
+        _event(mesh["H"], payload, mesh["A"], FET.SPACE_REPORT_ANSWERED),
+    )
+    assert len(await _answer_rows(mesh["A"])) == 1
+
+
+async def test_a_moderator_households_decision_is_answered_by_the_host(mesh):
+    await _at_v71(mesh)
+    await _file(mesh["A"], target_type="post", target_id="p-1")
+    await _pump(mesh)
+    await _resolve_on(mesh["C"])
+    assert _sent(mesh["C"], FET.SPACE_REPORT_ANSWERED) == []  # only the host
+    await _pump(mesh)  # C -> H: SPACE_REPORT_DECIDED
+    assert [to for to, *_ in _sent(mesh["H"], FET.SPACE_REPORT_ANSWERED)] == [
+        mesh["A"].iid
+    ]
+    await _pump(mesh)  # H -> A: SPACE_REPORT_ANSWERED
+    assert await _status(mesh["A"]) == ["resolved"]
+    rows = await _answer_rows(mesh["A"])
+    assert [r["title"] for r in rows] == ["Your report in Club was reviewed"]
+
+
+async def test_an_answer_from_anyone_but_the_host_changes_nothing(mesh):
+    await _at_v71(mesh)
+    await _file(mesh["A"], target_type="post", target_id="p-1")
+    forged = {
+        "space_id": SID,
+        "target_type": "post",
+        "target_id": "p-1",
+        "reporter_user_id": mesh["A"].user_id,
+    }
+    for sender in ("C", "D"):  # a moderator household, a plain member one
+        await _receive(
+            mesh["A"],
+            _event(mesh[sender], forged, mesh["A"], FET.SPACE_REPORT_ANSWERED),
+        )
+    # The host naming a report A never filed, or another space.
+    for over in ({"target_id": "p-unknown"}, {"space_id": "sp-other"}):
+        await _receive(
+            mesh["A"],
+            _event(mesh["H"], {**forged, **over}, mesh["A"], FET.SPACE_REPORT_ANSWERED),
+        )
+    assert await _status(mesh["A"]) == ["pending"]
+    assert await _answer_rows(mesh["A"]) == []
+
+
+async def test_a_reporters_household_below_v71_is_sent_no_answer(mesh):
+    await _file(mesh["A"], target_type="post", target_id="p-1")  # all at v_45
+    await _pump(mesh)
+    await _resolve_on(mesh["H"])
+    assert _sent(mesh["H"], FET.SPACE_REPORT_ANSWERED) == []
+    assert await _status(mesh["A"]) == ["pending"]

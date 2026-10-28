@@ -41,7 +41,10 @@ space (host, or ≥1 local content-authority member), the reporter holds a
 live seat on the sending household and is not banned, the target resolves
 into that same space, and the per-space caps leave room. When this
 household stops reviewing a space (demotion, leave, dissolve) the reports
-other households filed there are purged (:meth:`watch_seats`).
+other households filed there are purged (:meth:`watch_seats`). Once a
+report filed on another household is decided, the host alone tells that
+household it was reviewed (``SPACE_REPORT_ANSWERED``, v_71 — no verdict, no
+decider; :meth:`_answer_remote_reporter` / :meth:`apply_report_answer`).
 
 The GFS fraud forward carries only what fraud triage needs: the target
 (the space for space content — public / global spaces only — or the
@@ -1192,3 +1195,151 @@ class ReportService:
                 space_id=existing.space_id,
             )
         )
+        await self._answer_remote_reporter(existing)
+
+    # ── Answering a reporter on another household (v_71) ──────────────
+
+    async def _answer_remote_reporter(self, report: ContentReport) -> None:
+        """The host tells the household a space report came from that it
+        was reviewed (``SPACE_REPORT_ANSWERED``, v_71): one sealed,
+        targeted send to that household only.
+
+        Only the host sends (one sender whichever reviewer decided —
+        a decision on a moderator household reaches the host as
+        ``SPACE_REPORT_DECIDED`` and lands here too). Never to a household
+        that reviews the space itself — ``SPACE_REPORT_DECIDED`` gave it
+        the verdict — and nothing to one below v_71 (its reporter hears
+        nothing, as before). The sealed payload is the report's key, which
+        the reporter's household already holds: no verdict, no decider."""
+        origin = report.reporter_instance_id
+        if (
+            self._federation is None
+            or self._space_repo is None
+            or report.space_id is None
+            or not origin
+            or origin == self._own_instance_id
+        ):
+            return
+        space = await self._space_repo.get(report.space_id)
+        if space is None or space.owner_instance_id != self._own_instance_id:
+            return
+        if origin in await self.reviewer_households(report.space_id):
+            return
+        if not await self._federation.peer_supports(
+            origin, min_version=FederationCapability.MIN_FOR_REMOTE_REPORT_ANSWER
+        ):
+            log.info(
+                "report %s: the reporter's household %s is below v_71 — not "
+                "told it was reviewed",
+                report.id,
+                origin,
+            )
+            return
+        payload = {
+            # Also inside the sealed payload: a mesh-relayed envelope
+            # carries no routing field.
+            "space_id": report.space_id,
+            "target_type": report.target_type.value,
+            "target_id": report.target_id,
+            "reporter_user_id": report.reporter_user_id,
+        }
+        try:
+            result = await self._federation.send_with_mesh_fallback(
+                to_instance_id=origin,
+                event_type=FederationEventType.SPACE_REPORT_ANSWERED,
+                payload=payload,
+                space_id=report.space_id,
+            )
+        except Exception:
+            log.warning(
+                "report %s: telling the reporter's household %s failed",
+                report.id,
+                origin,
+                exc_info=True,
+            )
+            return
+        if not result.ok:
+            log.warning(
+                "report %s: the answer did not reach the reporter's household %s (%s)",
+                report.id,
+                origin,
+                result.error,
+            )
+
+    async def apply_report_answer(
+        self,
+        *,
+        sender: str,
+        space_id: str,
+        target_type: str,
+        target_id: str,
+        reporter_user_id: str,
+    ) -> bool:
+        """The space's host says a report filed here was reviewed
+        (inbound ``SPACE_REPORT_ANSWERED``).
+
+        Admitted only from the space's host as this household stores it,
+        for a PENDING report a local member filed here, and only when this
+        household does not review the space itself (it has the verdict
+        through ``SPACE_REPORT_DECIDED``). The copy is closed — on the
+        reporter's household ``resolved`` means "answered", no verdict
+        and no decider are known here — and :class:`ReportResolved` tells
+        the reporter. A replay changes nothing. Returns ``True`` iff a
+        report was answered."""
+        if self._space_repo is None:
+            return False
+        try:
+            tt = ReportTargetType(target_type)
+        except ValueError:
+            log.warning(
+                "SPACE_REPORT_ANSWERED from %s: bad target type %r — dropped",
+                sender,
+                target_type,
+            )
+            return False
+        space = await self._space_repo.get(space_id)
+        if space is None or space.dissolved:
+            log.warning(
+                "SPACE_REPORT_ANSWERED from %s: space %s is unknown here — dropped",
+                sender,
+                space_id,
+            )
+            return False
+        if sender != space.owner_instance_id:
+            log.warning(
+                "SPACE_REPORT_ANSWERED from %s refused: not the host of %s",
+                sender,
+                space_id,
+            )
+            return False
+        if await self._reviews_here(space):
+            log.info(
+                "SPACE_REPORT_ANSWERED from %s: this household reviews %s — "
+                "the decision is its own; ignored",
+                sender,
+                space_id,
+            )
+            return False
+        report = await self._reports.find_by_key(
+            space_id=space_id,
+            target_type=tt,
+            target_id=target_id,
+            reporter_user_id=reporter_user_id,
+        )
+        if report is None or report.reporter_instance_id is not None:
+            log.warning(
+                "SPACE_REPORT_ANSWERED from %s in %s refused: names no report "
+                "filed here",
+                sender,
+                space_id,
+            )
+            return False
+        if report.status is not ReportStatus.PENDING:
+            return False  # already answered — a replay
+        await self._reports.resolve(
+            report.id, resolved_by=None, status=ReportStatus.RESOLVED
+        )
+        await self._bus.publish(
+            ReportResolved(report_id=report.id, resolved_by="", space_id=space_id)
+        )
+        return True

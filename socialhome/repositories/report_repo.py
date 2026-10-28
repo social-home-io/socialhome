@@ -36,7 +36,7 @@ class AbstractReportRepo(Protocol):
         self,
         report_id: str,
         *,
-        resolved_by: str,
+        resolved_by: str | None,
         status: ReportStatus = ReportStatus.RESOLVED,
     ) -> None: ...
     async def has_open_for_target(
@@ -151,7 +151,7 @@ class SqliteReportRepo:
         self,
         report_id: str,
         *,
-        resolved_by: str,
+        resolved_by: str | None,
         status: ReportStatus = ReportStatus.RESOLVED,
     ) -> None:
         await self._db.enqueue(

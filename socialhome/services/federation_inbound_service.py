@@ -583,6 +583,7 @@ class FederationInboundService(ProtectionGateMixin):
 
         registry.register(FET.SPACE_REPORT, self._on_space_report)
         registry.register(FET.SPACE_REPORT_DECIDED, self._on_space_report_decided)
+        registry.register(FET.SPACE_REPORT_ANSWERED, self._on_space_report_answered)
 
         # Highlights — only registered when a highlight repo is wired in. Tests
         # that instantiate :class:`FederationInboundService` for non-
@@ -2771,6 +2772,30 @@ class FederationInboundService(ProtectionGateMixin):
             reporter_user_id=str(p.get("reporter_user_id") or ""),
             decision=str(p.get("decision") or ""),
             decided_by=decided_by,
+        )
+
+    async def _on_space_report_answered(self, event: FederationEvent) -> None:
+        """The space's host says a report one of our members filed was
+        reviewed (v_71). ``ReportService.apply_report_answer`` admits it
+        only from the host this household stores for the space, for a
+        pending report filed here, and tells the reporter — never who
+        reviewed it or what became of it."""
+        if self._report_service is None:
+            return
+        p = event.payload
+        space_id = resolve_space_id(event)
+        if not space_id:
+            log.warning(
+                "SPACE_REPORT_ANSWERED from %s: no space — dropped",
+                event.from_instance,
+            )
+            return
+        await self._report_service.apply_report_answer(
+            sender=event.from_instance,
+            space_id=space_id,
+            target_type=str(p.get("target_type") or ""),
+            target_id=str(p.get("target_id") or ""),
+            reporter_user_id=str(p.get("reporter_user_id") or ""),
         )
 
     # ── Space membership handlers ──────────────────────────────────────

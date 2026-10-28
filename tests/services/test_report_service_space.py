@@ -1158,3 +1158,192 @@ async def test_host_owners_own_post_report_is_stored_but_not_theirs_to_triage(en
     )
     assert got is not None and got.sole_reviewer_user_id is None
     assert await env.svc.review_space("spA", actor_user_id=env.owner) == []
+
+
+# ── v_71: the host tells a reporter's household it was reviewed ──────────
+
+ANSWERED = FederationEventType.SPACE_REPORT_ANSWERED
+
+
+def _answers(env) -> list[dict]:
+    return [s for s in env.fed.sent if s["type"] is ANSWERED]
+
+
+async def _remote_filed(env, inst="inst-peer", uid="rrep"):
+    """A report a member of another household filed in spA (hosted here)."""
+    await env.remote("spA", inst, uid)
+    report = await _remote_report(
+        env, reporter_instance_id=inst, reporter_user_id=uid, space_id="spA"
+    )
+    assert report is not None
+    env.fed.sent.clear()
+    return report
+
+
+async def test_host_answers_the_reporters_household_once_content_free(env):
+    await env.remote("spA", "inst-plain", "rplain")  # a plain member household
+    report = await _remote_filed(env)
+    await env.svc.resolve_in_space("spA", report.id, actor_user_id=env.mod)
+    (sent,) = _answers(env)
+    assert sent["to"] == "inst-peer"
+    assert sent["space"] == "spA"  # the routing field; the rest is sealed
+    # Only the key the reporter's household already holds — no verdict,
+    # no decider, nothing about the subject.
+    assert sent["payload"] == {
+        "space_id": "spA",
+        "target_type": "post",
+        "target_id": "pA",
+        "reporter_user_id": "rrep",
+    }
+    assert {s["to"] for s in env.fed.sent} == {"inst-peer"}
+
+
+async def test_a_dismiss_or_a_remote_moderators_decision_answers_too(env):
+    await env.remote("spA", "inst-mod", "rmod", role="moderator")
+    await _remote_filed(env)
+    assert await _decide(env, reporter_user_id="rrep") is True
+    assert [s["to"] for s in _answers(env)] == ["inst-peer"]
+    other = await _remote_filed(env, inst="inst-two", uid="rtwo")
+    await env.svc.resolve_in_space(
+        "spA", other.id, actor_user_id=env.mod, dismissed=True
+    )
+    assert [s["to"] for s in _answers(env)] == ["inst-two"]
+
+
+async def test_a_reporters_household_below_v71_is_sent_nothing(env):
+    report = await _remote_filed(env)
+    env.fed.old.add("inst-peer")
+    await env.svc.resolve_in_space("spA", report.id, actor_user_id=env.mod)
+    assert _answers(env) == []
+
+
+async def test_a_reviewer_household_gets_the_decision_not_an_answer(env):
+    report = await _remote_filed(env)
+    await env.remote("spA", "inst-peer", "rboss", role="moderator")
+    await env.svc.resolve_in_space("spA", report.id, actor_user_id=env.mod)
+    assert _answers(env) == []
+    assert [s["type"] for s in env.fed.sent] == [
+        FederationEventType.SPACE_REPORT_DECIDED
+    ]
+
+
+async def test_only_the_host_answers_and_never_for_a_local_reporter(env):
+    # Not the host: a moderator household stores the report, decides it,
+    # and leaves the answer to the host.
+    await env.space("spR", host="inst-host")
+    await env.seat("spR", env.mod, "moderator")
+    await env.post("spR", "pR", env.owner)
+    await env.remote("spR", "inst-peer", "rrep")
+    remote = await _remote_report(env, target_id="pR", space_id="spR")
+    assert remote is not None
+    env.fed.sent.clear()
+    await env.svc.resolve_in_space("spR", remote.id, actor_user_id=env.mod)
+    assert _answers(env) == []
+    # A local reporter hears it from this household (ReportResolved).
+    local, _ = await env.svc.create_report(
+        reporter_user_id=env.member, target_type="post", target_id="pA", category="spam"
+    )
+    env.fed.sent.clear()
+    await env.svc.resolve_in_space("spA", local.id, actor_user_id=env.mod)
+    assert _answers(env) == []
+
+
+async def test_an_undelivered_answer_is_logged_not_raised(env, caplog):
+    report = await _remote_filed(env, inst="inst-down", uid="rdown")
+    await env.svc.resolve_in_space("spA", report.id, actor_user_id=env.mod)
+    assert [s["to"] for s in _answers(env)] == ["inst-down"]
+    assert "did not reach the reporter's household" in caplog.text
+
+
+# ── Receiving the answer on the reporter's household ──────────────────
+
+
+@pytest.fixture
+async def filed_here(env):
+    """``member`` (ours) filed a report in spR, hosted by inst-host, where
+    nobody here reviews."""
+    await env.space("spR", host="inst-host")
+    await env.seat("spR", env.member, "member")
+    await env.remote("spR", "inst-host", "rauthor")
+    await env.post("spR", "pR", "rauthor")
+    report, _ = await env.svc.create_report(
+        reporter_user_id=env.member, target_type="post", target_id="pR", category="spam"
+    )
+    resolved: list[ReportResolved] = []
+
+    async def seen(event: ReportResolved) -> None:
+        resolved.append(event)
+
+    env.bus.subscribe(ReportResolved, seen)
+    return SimpleNamespace(report=report, resolved=resolved)
+
+
+async def _answer(env, **kw):
+    args = {
+        "sender": "inst-host",
+        "space_id": "spR",
+        "target_type": "post",
+        "target_id": "pR",
+        "reporter_user_id": env.member,
+    }
+    args.update(kw)
+    return await env.svc.apply_report_answer(**args)
+
+
+async def test_the_hosts_answer_closes_the_copy_and_tells_the_reporter_once(
+    env, filed_here
+):
+    assert await _answer(env) is True
+    got = await env.svc._reports.get(filed_here.report.id)
+    assert got is not None and got.status.value == "resolved"
+    assert got.resolved_by is None  # nobody's name — none is known here
+    assert [(e.report_id, e.resolved_by, e.space_id) for e in filed_here.resolved] == [
+        (filed_here.report.id, "", "spR")
+    ]
+    # A replay changes nothing and tells nobody again.
+    assert await _answer(env) is False
+    assert len(filed_here.resolved) == 1
+
+
+async def test_an_answer_from_anyone_but_the_host_is_refused(env, filed_here, caplog):
+    assert await _answer(env, sender="inst-peer") is False
+    assert "not the host of spR" in caplog.text
+    assert filed_here.resolved == []
+
+
+async def test_an_answer_naming_no_report_of_ours_is_refused(env, filed_here, caplog):
+    await env.space("spX", host="inst-host")
+    assert await _answer(env, space_id="spX") is False  # wrong space
+    assert await _answer(env, target_id="unknown") is False  # unknown report
+    assert await _answer(env, reporter_user_id=env.owner) is False
+    assert "names no report filed here" in caplog.text
+    assert await _answer(env, target_type="bogus") is False
+    assert "bad target type" in caplog.text
+    assert await _answer(env, space_id="sp-unknown") is False
+    assert "is unknown here" in caplog.text
+    assert filed_here.resolved == []
+
+
+async def test_an_answer_about_another_households_report_is_refused(env, filed_here):
+    """Defence in depth: a copy this household only STORES (filed on
+    another household — kept here while a local moderator reviewed, not yet
+    purged after the demotion) is never "answered" here."""
+    await env.remote("spR", "inst-peer", "rrep")
+    await env.seat("spR", env.mod, "moderator")
+    remote = await _remote_report(env, target_id="pR", space_id="spR")
+    assert remote is not None
+    await env.db.enqueue(
+        "UPDATE space_members SET role='member' WHERE space_id='spR' AND user_id=?",
+        (env.mod,),
+    )
+    assert await _answer(env, reporter_user_id="rrep") is False
+    got = await env.svc._reports.get(remote.id)
+    assert got is not None and got.status.value == "pending"
+    assert filed_here.resolved == []
+
+
+async def test_a_reviewer_household_ignores_an_answer(env, filed_here):
+    await env.seat("spR", env.mod, "moderator")
+    assert await _answer(env) is False
+    got = await env.svc._reports.get(filed_here.report.id)
+    assert got is not None and got.status.value == "pending"

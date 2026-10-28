@@ -318,6 +318,12 @@ is not in (the same 404 body) and nothing is stored — no existence oracle.
   `SPACE_SESSION_ALLOWED_EVENT_TYPES` (a link-joined moderator decides).
   The rows are matched on `(space, target, reporter)` — every household
   holds its own row id.
+- `SPACE_REPORT_ANSWERED` — the **host** → the reporter's household only
+  (v_71+): `{space_id, target_type, target_id, reporter_user_id}`, all
+  inside the sealed payload — the key the reporter's household already
+  holds, **no verdict, no decider**. Reader event; in
+  `SPACE_SESSION_ALLOWED_EVENT_TYPES` (a link-joined reporter's household
+  hears it too). See *Telling the reporter* below.
 
 ### Rules
 
@@ -410,6 +416,9 @@ sequenceDiagram
     C->>C: POST /api/spaces/{id}/reports/{rid}/resolve
     C->>H: SPACE_REPORT_DECIDED {space_id, target, reporter, decision, decided_by} (sealed)
     H->>H: C has content authority? decider seated? not the subject? still pending?
+    H->>A: SPACE_REPORT_ANSWERED {space_id, target, reporter} (sealed, v_71, host only)
+    A->>A: sender is the space's host? A does not review it? a pending report filed here?
+    A-->>A: close the copy, tell the reporter "Your report in {space} was reviewed"
     Note over D: never sent
 ```
 
@@ -419,6 +428,62 @@ file the report for its household admins. A pre-v_45 sender omits
 `space_id` and fans a report out to every member household; a v_45
 receiver derives the space from the target and drops it unless it reviews
 the space.
+
+### Telling the reporter (`SPACE_REPORT_ANSWERED`, v_71)
+
+A reporter on the household that hosts the space, or on a reviewer
+household, hears "Your report in {space_name} was reviewed"
+(`report_answer`, About you) from their own household when the report is
+decided there — never who reviewed it, what became of it or whom it was
+about (§25.3). A reporter on a **plain member household** used to hear
+nothing: their household keeps its own copy of the report (pending) but is
+sent no decision.
+
+- **Sender: the host alone.** When a space report filed on another
+  household is resolved or dismissed on the host — by its own moderator, or
+  by a reviewer household whose `SPACE_REPORT_DECIDED` the host applied —
+  the host sends one `SPACE_REPORT_ANSWERED` to the household the report
+  came from (`content_reports.reporter_instance_id`), and to nobody else.
+  One sender whichever reviewer decided, so the reporter's household hears
+  it once. Not to a household that reviews the space itself (it got the
+  verdict with `SPACE_REPORT_DECIDED`), not for a local reporter (told by
+  the host directly), not to a household below v_71. Delivered like a
+  report: `send_with_mesh_fallback`, sealed under `SPACE_ROUTED` across a
+  relay. Plaintext on the envelope is the routing `space_id`.
+- **Payload**: the report's key — `space_id`, `target_type`, `target_id`,
+  `reporter_user_id` — which the reporter's household already holds. No
+  `decision`, no `decided_by`, no time, no category or notes.
+- **Receiver rules** (each refusal changes nothing; WARNING unless noted):
+  the space is known here and not dissolved; the **sender is the space's
+  host** as this household stores it (`spaces.owner_instance_id`) —
+  anyone else, including a reviewer household, is refused; this household
+  does **not** review the space (INFO — the verdict is its own); the key
+  names a report **a local member filed here** (`reporter_instance_id` is
+  empty — a copy filed on another household is never answered here). A
+  report no longer pending is a replay: nothing changes, nobody is told
+  again.
+- **Effect.** The reporter's household closes its copy as `resolved` —
+  there it means "answered", not the verdict, which it never learns
+  (`resolved_by` stays empty) — which also frees the reporter's pending
+  per-space cap there; then `ReportResolved` gives the reporter the same
+  translated, title-only `report_answer` row and push as a local reporter,
+  naming nobody.
+- **GFS**: never involved — host and reporter's household are space
+  members; the answer is a pairwise sealed send.
+- **Cost.** One sealed envelope (payload ≈ 150 B of JSON, ≲ 1 KB on the
+  wire) to one household per decided report filed on another household —
+  no fan-out. Worst case per space is bounded by the report caps: ≤ 500
+  pending reports per space, ≤ 50 per sending household, 20 filings per
+  reporter a day — clearing a full queue is ≤ 500 envelopes (≈ 0.5 MB)
+  once, each to the one reporter's household. A global space with
+  10 000 followers costs no more: followers who never reported get nothing.
+
+**Compatibility (v_71, `MIN_FOR_REMOTE_REPORT_ANSWER`).** Gated, no
+fallback: a reporter's household below v_71 is sent nothing, and its
+reporter hears nothing, as before. An older host never sends it; a v_71
+reporter's household then keeps its copy pending, as before. Not
+space-scoped (a behind household only keeps its own reporters from hearing
+back).
 
 ### Known residuals (reports)
 
@@ -433,6 +498,13 @@ the space.
   household, and are stored there. A moderator on another household can
   therefore see who reported a member of theirs. Only the anonymous
   sole-owner fallback hides the reporter, and only from the subject.
+- **N6 — the host's "reviewed" is trusted.** The reporter's household
+  believes the space's host when it says a report was reviewed
+  (`SPACE_REPORT_ANSWERED`); a rogue host can close the reporter's copy
+  without anyone looking at it. It learns nothing by doing so (it already
+  holds the report) and could equally drop the report unseen; the remedy is
+  the same as for any rogue host — leave the space.
+
 ## Compatibility
 
 - **v_43** (`MIN_FOR_FEDERATED_MODERATION`). Submissions skip a reviewer

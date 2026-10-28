@@ -1087,7 +1087,21 @@ from __future__ import annotations
 #:   for that household to update; widening is sent to every version (an
 #:   older household simply gets the frames). Labelled "A highlight taken
 #:   away stays away".
-OURS: int = 70
+#: * **v_71** (2026-10-28) — **reporters in other households hear their
+#:   report was reviewed**. When a space report filed by a member of
+#:   another household is resolved or dismissed, the space's **host**
+#:   sends one targeted, sealed :data:`FederationEventType.SPACE_REPORT_ANSWERED`
+#:   to that household only (never to a reviewer household — it has the
+#:   verdict through ``SPACE_REPORT_DECIDED`` — and never to anyone else).
+#:   The sealed payload is the report's key the reporter's household
+#:   already holds (``space_id``, ``target_type``, ``target_id``,
+#:   ``reporter_user_id``) — no verdict, no moderator. The receiver admits
+#:   it only from the space's host, for a pending report it filed itself,
+#:   closes its copy and tells the reporter "Your report in {space} was
+#:   reviewed" (``report_answer``). **Fallback**: a household below v_71 is
+#:   sent nothing — its reporter hears nothing, as before. Labelled
+#:   "Reporters in other households hear their report was reviewed".
+OURS: int = 71
 
 
 class FederationCapability:
@@ -1644,6 +1658,11 @@ class FederationCapability:
     #: (409 ``HIGHLIGHT_AUDIENCE_PEER_TOO_OLD``); widening is never gated.
     MIN_FOR_HIGHLIGHT_AUDIENCE_CHANGE = 70
 
+    #: v_71 — the host tells a reporter's household that the space report
+    #: it filed was reviewed (``SPACE_REPORT_ANSWERED``: no verdict, no
+    #: moderator). A household below it is sent nothing.
+    MIN_FOR_REMOTE_REPORT_ANSWER = 71
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1909,6 +1928,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_HIGHLIGHT_AUDIENCE_CHANGE,
         "A highlight taken away stays away",
     ),
+    (
+        FederationCapability.MIN_FOR_REMOTE_REPORT_ANSWER,
+        "Reporters in other households hear their report was reviewed",
+    ),
 ]
 
 
@@ -1990,6 +2013,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_GFS_MOMENT_REACTIONS: "gfs_moment_reactions",
     FederationCapability.MIN_FOR_MOMENT_REACTION_COUNTS: "moment_reaction_counts",
     FederationCapability.MIN_FOR_HIGHLIGHT_AUDIENCE_CHANGE: "highlight_audience_change",
+    FederationCapability.MIN_FOR_REMOTE_REPORT_ANSWER: "remote_report_answers",
 }
 
 
@@ -2038,6 +2062,9 @@ def feature_keys_missing_below(version: int) -> list[str]:
 #:   spaces; a behind household only keeps its own people out of groups.
 #: * ``MIN_FOR_MOMENT_NO_RELAY`` — moments are household-broadcast posts;
 #:   a behind household only misses a protected account's moments.
+#: * ``MIN_FOR_REMOTE_REPORT_ANSWER`` — a host → reporter's-household note;
+#:   a behind household only keeps its own reporters from hearing back, the
+#:   space works the same for everyone else.
 SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
     {
         FederationCapability.MIN_FOR_SPACE_INVITE_REDEEM,

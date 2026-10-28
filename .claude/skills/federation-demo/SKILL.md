@@ -478,6 +478,10 @@ That single command runs the full sequence:
    queues list it, no household admin queue does, and **d** (plain member)
    stores no row and logs no ``space_report``. Alice resolves it **on a**;
    ``SPACE_REPORT_DECIDED`` reaches **b**, whose copy reads ``resolved``.
+   Then (v_71) the host **b** — not **a** — sends ``SPACE_REPORT_ANSWERED``
+   to **c** only: **c**'s copy reads ``resolved`` and Carol has exactly one
+   ``report_answer`` row ("Your report in Report club was reviewed") naming
+   nobody; **d**'s log never names it.
 
 9c3. ``forwarded-role-change`` (v_47) — **b** hosts a fresh "Roles club"
    with delegated admin authority on, seats **a**, **c** and **d**, and
