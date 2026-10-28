@@ -11,6 +11,16 @@ vi.mock('@/api', () => ({
   },
 }))
 
+const wsHandlers = vi.hoisted(() => ({} as Record<string, (e: { data: Record<string, unknown> }) => void>))
+vi.mock('@/ws', () => ({
+  ws: {
+    on: (type: string, h: (e: { data: Record<string, unknown> }) => void) => {
+      wsHandlers[type] = h
+      return () => { delete wsHandlers[type] }
+    },
+  },
+}))
+
 import { NotificationBell, panelOpen } from './NotificationBell'
 import { unreadCount, recent } from '@/store/notifications'
 
@@ -114,8 +124,8 @@ describe('NotificationBell on desktop', () => {
     const bell = container.querySelector<HTMLButtonElement>('button.sh-notif-btn')!
     bell.focus()
     await act(async () => { bell.click() })
-    await waitFor(() => expect(container.querySelectorAll('.sh-notif-item').length).toBe(2))
-    expect(document.activeElement).toBe(container.querySelector('.sh-notif-item'))
+    await waitFor(() => expect(container.querySelectorAll('.sh-notif-row').length).toBe(2))
+    expect(document.activeElement).toBe(container.querySelector('.sh-notif-row'))
     act(() => {
       document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
     })
@@ -128,8 +138,8 @@ describe('NotificationBell on desktop', () => {
     const { container, getByRole } = mount()
     await waitFor(() => expect(apiGet).toHaveBeenCalled())
     await act(async () => { container.querySelector<HTMLButtonElement>('button.sh-notif-btn')!.click() })
-    await waitFor(() => expect(container.querySelectorAll('.sh-notif-item').length).toBe(2))
-    const [unread, read] = [...container.querySelectorAll<HTMLElement>('.sh-notif-item')]
+    await waitFor(() => expect(container.querySelectorAll('.sh-notif-row').length).toBe(2))
+    const [unread, read] = [...container.querySelectorAll<HTMLElement>('.sh-notif-row')]
     expect(unread.tagName).toBe('A')
     expect(unread.getAttribute('href')).toBe('/post/p1')
     expect(getByRole('link', { name: /^Unread, Ben posted a new update \S/ })).toBe(unread)
@@ -182,12 +192,29 @@ describe('NotificationBell on desktop', () => {
     const { container } = mount()
     await waitFor(() => expect(apiGet).toHaveBeenCalled())
     await act(async () => { container.querySelector<HTMLButtonElement>('button.sh-notif-btn')!.click() })
-    await waitFor(() => expect(container.querySelectorAll('.sh-notif-item').length).toBe(2))
-    const row = container.querySelector<HTMLAnchorElement>('a.sh-notif-item')!
+    await waitFor(() => expect(container.querySelectorAll('.sh-notif-row').length).toBe(2))
+    const row = container.querySelector<HTMLAnchorElement>('a.sh-notif-row')!
     row.addEventListener('click', e => e.preventDefault())
     await act(async () => { row.click() })
     expect(apiPost).toHaveBeenCalledWith('/api/notifications/n1/read')
     expect(unreadCount.value).toBe(2)
+  })
+
+  it('a row that arrives while the panel is open waits behind the "new" pill', async () => {
+    viewport(false)
+    const { container } = mount()
+    await act(async () => { container.querySelector<HTMLButtonElement>('button.sh-notif-btn')!.click() })
+    await waitFor(() => expect(container.querySelectorAll('.sh-notif-row').length).toBe(2))
+    const calls = apiGet.mock.calls.length
+    await act(async () => {
+      wsHandlers['notification.new']({ data: { notification_id: 'n9', notif_type: 'post_created', title: 'X' } })
+    })
+    expect(apiGet.mock.calls.length).toBe(calls)
+    const pill = container.querySelector<HTMLButtonElement>('.sh-notif-panel .sh-notif-newpill button')!
+    expect(pill.textContent).toBe('↑ 1 new')
+    await act(async () => { pill.click() })
+    expect(apiGet.mock.calls.length).toBe(calls + 1)
+    await waitFor(() => expect(container.querySelector('.sh-notif-newpill')).toBeNull())
   })
 })
 

@@ -577,5 +577,15 @@
   "welcome.chip.alerts": "Home-screen chip after a count (\"18 notifications\"). Use the feature's one name (notifications.title), lower-case where your language allows.",
   "notifications.unread": "Read out by screen readers before an unread notification's sentence (\"Unread, Ben commented on your post\"). Not shown on screen.",
   "notifications.see_all": "Link at the bottom of the bell's panel that opens the Notifications page.",
-  "notifications.show_older": "Button under the list that loads the next, older notifications."
+  "notifications.show_older": "Button under the list that loads the next, older notifications.",
+  "notifications.actors.two": "Two people in a notification sentence, e.g. \"Ben and Anna\". {a} and {b} are names (shown in bold).",
+  "notifications.actors.more": "The people in a notification sentence when there are more than two: \"Ben, Anna and 3 others\". {n} is a number of further people (2 or more).",
+  "notifications.actors.more_one": "As notifications.actors.more for exactly one further person: \"Ben, Anna and 1 other\".",
+  "notifications.actors.one_more": "One named person plus a number of people whose name is not known: \"Ben and 3 others\".",
+  "notifications.meta.new_of_total": "Under a notification that came back with new activity after it was read: how many things are new and how many there are in all (\"2 new · 5 in all\").",
+  "notifications.new_pill": "A small button above the list while it is open: tap it to show notifications that arrived meanwhile. An arrow is drawn before it.",
+  "notifications.live_new": "Read out by screen readers when new notifications arrive. Only the count, never what they say.",
+  "notifications.row.post_created_count": "Counts posts, not people: \"25 new posts from Ben, Anna and 3 others\". {count} is 2 or more; {actors} is a list of people (notifications.actors.*).",
+  "notifications.row.space_post_created_count": "Counts posts, not people: \"25 new posts in Familie Alpha from Ben, Anna and 3 others\". {count} is 2 or more; {space} is the space name; {actors} is a list of people (notifications.actors.*).",
+  "notifications.row.space_mention": "A notification sentence. {actor} is one person's name, {space} a space name. Whole-sentence keys: the \"_many\" variant takes {actors}, a list of two or more people, so the verb is plural."
 }
