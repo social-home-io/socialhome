@@ -9,6 +9,7 @@ from socialhome.domain.post import PostType
 from socialhome.domain.space import (
     ACCESS_FEATURES,
     CONTENT_AUTHORITY_ROLES,
+    JOIN_REQUEST_FLAGS,
     MAX_ZONE_NAME_LENGTH,
     MIRRORABLE_REMOTE_ROLES,
     NEW_SPACE_FEATURES,
@@ -21,12 +22,14 @@ from socialhome.domain.space import (
     InvalidSpaceLinkError,
     JoinMode,
     RemoteAdminOutcome,
+    ReviewRequiredError,
     SpaceConfigGapError,
     SpaceFeatureAccess,
     SpaceFeatures,
     SpacePermissionError,
     SpaceRole,
     SpaceZone,
+    join_request_flags,
     mirrorable_remote_role,
     normalize_join_mode,
     normalize_min_age,
@@ -885,3 +888,44 @@ def test_parse_have_seq_keeps_only_a_non_negative_int(wire, parsed):
     """§25.6 (migration 0087): anything but a non-negative int is an absent
     echo — the provider then streams in full."""
     assert parse_have_seq(wire) == parsed
+
+
+# ── join_request_flags: when one tap is not enough ─────────────────────
+
+
+@pytest.mark.parametrize(
+    ("row", "min_age", "paired", "flags"),
+    [
+        ({}, 0, False, ()),
+        ({"area_verdict": "inside"}, 0, False, ()),
+        ({"area_verdict": "edge"}, 0, False, ("edge",)),
+        ({"requested_role": "admin"}, 0, False, ("admin",)),
+        ({"requested_role": "member"}, 0, False, ()),
+        ({}, 16, False, ("age",)),
+        ({"remote_applicant_instance_id": "h"}, 0, False, ("unpaired",)),
+        ({"remote_applicant_instance_id": "h"}, 0, True, ()),
+        (
+            {
+                "area_verdict": "edge",
+                "requested_role": "admin",
+                "remote_applicant_instance_id": "h",
+            },
+            18,
+            False,
+            ("admin", "age", "edge", "unpaired"),
+        ),
+    ],
+)
+def test_join_request_flags(row, min_age, paired, flags):
+    assert join_request_flags(row, min_age=min_age, household_paired=paired) == flags
+    assert set(flags) <= JOIN_REQUEST_FLAGS
+
+
+def test_an_unknown_request_is_never_one_tap():
+    assert join_request_flags(None, min_age=0, household_paired=True) == ("unpaired",)
+
+
+def test_review_required_names_the_flags():
+    err = ReviewRequiredError(("age", "edge"))
+    assert (err.status, err.code) == (409, "REVIEW_REQUIRED")
+    assert err.params == {"flags": "age,edge"}

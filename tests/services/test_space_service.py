@@ -44,6 +44,7 @@ from socialhome.domain.federation import (
     DeliveryResult,
     FederationEvent,
     FederationEventType,
+    PairingStatus,
 )
 from socialhome.domain.federation_capabilities import (
     FederationCapability,
@@ -68,6 +69,7 @@ from socialhome.domain.space import (
     OwnerTransferSelfError,
     PeersTooOldError,
     PrivateGfsOffError,
+    ReviewRequiredError,
     Space,
     SpaceFeatureAccess,
     SpaceFeatures,
@@ -1246,6 +1248,79 @@ async def test_join_request_deny(stack):
     await stack.space_svc.deny_join_request(req_id, actor_username="anna")
     members = await stack.space_repo.list_members(space.id)
     assert bob.user_id not in {m.user_id for m in members}
+
+
+async def _request_space(stack):
+    await stack.provision_user("anna")
+    bob = await stack.provision_user("bob")
+    space = await stack.space_svc.create_space(
+        owner_username="anna",
+        name="Req",
+        join_mode=JoinMode.REQUEST,
+        space_type=SpaceType.PUBLIC,
+    )
+    return space, bob
+
+
+async def test_inline_approve_of_a_plain_request_seats_the_member(stack):
+    space, bob = await _request_space(stack)
+    rid = await stack.space_svc.request_join(space.id, user_id=bob.user_id)
+    member = await stack.space_svc.approve_join_request(
+        rid, actor_username="anna", via="inline"
+    )
+    assert member.user_id == bob.user_id
+
+
+async def test_inline_approve_of_a_flagged_request_changes_nothing(stack):
+    space, bob = await _request_space(stack)
+    rid = await stack.space_repo.save_join_request(
+        space.id, bob.user_id, area_verdict="edge"
+    )
+    with pytest.raises(ReviewRequiredError) as exc:
+        await stack.space_svc.approve_join_request(
+            rid, actor_username="anna", via="inline"
+        )
+    assert exc.value.status == 409
+    assert exc.value.code == "REVIEW_REQUIRED"
+    assert exc.value.params == {"flags": "edge"}
+    assert (await stack.space_repo.get_join_request(rid))["status"] == "pending"
+    # The review page decides it.
+    member = await stack.space_svc.approve_join_request(
+        rid, actor_username="anna", via="review"
+    )
+    assert member.user_id == bob.user_id
+
+
+async def test_inline_approve_rechecks_the_pairing_now(stack):
+    """A remote applicant's household counts as paired only while the pair
+    is confirmed — and as unpaired without a federation repo (fail closed)."""
+    space, _bob = await _request_space(stack)
+    rid = await stack.space_repo.save_join_request(
+        space.id, "remote-kim", remote_applicant_instance_id="kim-house"
+    )
+    row = await stack.space_repo.get_join_request(rid)
+    svc = stack.space_svc
+    svc._federation_repo = None
+    assert await svc._join_request_flags(space, row) == ("unpaired",)
+    peers: dict = {}
+    svc._federation_repo = SimpleNamespace(
+        get_instance=AsyncMock(side_effect=peers.get)
+    )
+    assert await svc._join_request_flags(space, row) == ("unpaired",)
+    peers["kim-house"] = SimpleNamespace(status=PairingStatus.PENDING_RECEIVED)
+    assert await svc._join_request_flags(space, row) == ("unpaired",)
+    peers["kim-house"] = SimpleNamespace(status=PairingStatus.CONFIRMED)
+    assert await svc._join_request_flags(space, row) == ()
+
+
+async def test_an_unknown_approval_source_is_refused(stack):
+    space, bob = await _request_space(stack)
+    rid = await stack.space_svc.request_join(space.id, user_id=bob.user_id)
+    with pytest.raises(ValueError):
+        await stack.space_svc.approve_join_request(
+            rid, actor_username="anna", via="sideways"
+        )
+    assert (await stack.space_repo.get_join_request(rid))["status"] == "pending"
 
 
 async def test_invite_only_rejects_join_request(stack):

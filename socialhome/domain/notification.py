@@ -18,7 +18,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from .space import SpaceRole, SpaceType
+# ``JOIN_REQUEST_FLAGS`` lives with the rule that computes the flags
+# (``space.join_request_flags``); imported here for the readers below.
+from .space import JOIN_REQUEST_FLAGS, SpaceRole, SpaceType
 
 #: Rows that ask someone to act — the "Needs you" items (D12): a join
 #: request, a space's review queue (posts, reports), an invite to a space,
@@ -46,12 +48,6 @@ HANDLED_OUTCOMES: frozenset[str] = frozenset(
     {"approved", "declined", "accepted", "expired", "withdrawn", "done"}
 )
 
-#: Why a join request may not be approved with one tap from the list
-#: (:attr:`NotificationParams.flags`): near the edge of a local community,
-#: from a household this one is not paired with, an admin grant (only the
-#: owner decides), or a space with an age limit. Such a row offers
-#: "Review" — the review page shows what the list can't.
-JOIN_REQUEST_FLAGS: frozenset[str] = frozenset({"edge", "unpaired", "admin", "age"})
 
 #: A row re-opens on new activity for this long after its last one; after
 #: that many quiet days the next event starts a fresh row (D7), so the

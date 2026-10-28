@@ -28,7 +28,7 @@ vi.mock('@/store/auth', () => ({
 import { setLocale } from '@/i18n/i18n'
 import type { Notification } from '@/types'
 import { NeedsYouSection, pinnedIds } from './NeedsYouSection'
-import { acting, needsYou, waitingDeclines } from './needsYou'
+import { acting, mustReview, needsYou, waitingDeclines } from './needsYou'
 
 function frame(type: string, data: Record<string, unknown>) {
   for (const h of wsListeners[type] ?? []) h({ data })
@@ -62,6 +62,7 @@ beforeEach(async () => {
   apiPost.mockReset().mockResolvedValue({})
   needsYou.value = []
   acting.value = new Set()
+  mustReview.value = new Map()
   for (const k of Object.keys(wsListeners)) delete wsListeners[k]
   document.body.innerHTML = ''
 })
@@ -117,6 +118,21 @@ describe('NeedsYouSection', () => {
     expect(getByRole('link', { name: 'Review' }).getAttribute('href')).toBe('/spaces/s1/moderation')
     // It says why it needs a closer look.
     expect(container.querySelector('.sh-needs__why')!.textContent).toBe('Near the edge')
+  })
+
+  it('Approve refused with REVIEW_REQUIRED turns the entry into Review with the server\'s reasons', async () => {
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('x'), {
+      status: 409, code: 'REVIEW_REQUIRED', extra: { params: { flags: 'edge,unpaired' } },
+    }))
+    const { getByRole, queryByRole, container } = await mount([row('a')])
+    await act(async () => { getByRole('button', { name: 'Approve' }).click() })
+    await waitFor(() => expect(queryByRole('button', { name: 'Approve' })).toBeNull())
+    expect(apiPost).toHaveBeenCalledWith('/api/spaces/space-a/join-requests/a/approve', { via: 'inline' })
+    expect(getByRole('link', { name: 'Review' }).getAttribute('href')).toBe('/spaces/s1/moderation')
+    expect(container.querySelector('.sh-needs__why')!.textContent)
+      .toBe("Near the edge · Household you're not paired with")
+    // Decline stays one tap away only on a plain request: here it's Review.
+    expect(queryByRole('button', { name: 'Decline' })).toBeNull()
   })
 
   it('an invite offers View invite (the invite card) and Decline — no one-tap join', async () => {

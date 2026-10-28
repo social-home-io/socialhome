@@ -173,6 +173,8 @@ from ..domain.post import (
 from ..domain.presence import truncate_coord
 from ..domain.space import (
     ACCESS_FEATURES,
+    APPROVE_VIA_INLINE,
+    APPROVE_VIA_REVIEW,
     CONTENT_AUTHORITY_ROLES,
     INVITE_VIA_GFS,
     INVITE_VIA_GFS_LEGACY,
@@ -215,6 +217,7 @@ from ..domain.space import (
     PrivateGfsOffError,
     PublicSpaceLimitError,
     RemoteAdminOutcome,
+    ReviewRequiredError,
     Space,
     SpaceArchivedError,
     SpaceConfigEventType,
@@ -228,6 +231,7 @@ from ..domain.space import (
     SubscriberReadOnlyError,
     UserAlreadyMemberError,
     UserBannedError,
+    join_request_flags,
     mirrorable_remote_role,
     normalize_category,
     normalize_min_age,
@@ -7312,6 +7316,19 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             raise await self._join_request_handled(row)
         return row, space, actor_member
 
+    async def _join_request_flags(self, space: Space, row: dict) -> tuple[str, ...]:
+        """Why *row* may not be approved with one tap — the rule the
+        "Needs you" row was built with (:func:`join_request_flags`), checked
+        again now: the pairing may have ended since. Without a federation
+        repo a remote applicant's household counts as unpaired (fail
+        closed)."""
+        household = row.get("remote_applicant_instance_id")
+        paired = False
+        if household and self._federation_repo is not None:
+            peer = await self._federation_repo.get_instance(str(household))
+            paired = peer is not None and peer.status is PairingStatus.CONFIRMED
+        return join_request_flags(row, min_age=space.min_age, household_paired=paired)
+
     async def _join_request_handled(self, row: dict) -> JoinRequestHandledError:
         """The 409 for an answered request, naming who answered it."""
         reviewer = row.get("reviewed_by")
@@ -7345,6 +7362,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         *,
         actor_username: str,
         space_id: str | None = None,
+        via: str = APPROVE_VIA_REVIEW,
     ) -> SpaceMember | None:
         """Approve a pending join request (of ``space_id``, when given).
 
@@ -7355,12 +7373,25 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         the applicant's household finalises the join with
         :meth:`accept_invite_token`. A request already answered raises
         :class:`JoinRequestHandledError`.
+
+        ``via`` says where the approval came from. A one-tap approval
+        (:data:`APPROVE_VIA_INLINE`, the "Needs you" list) of a request
+        with any :data:`~socialhome.domain.space.JOIN_REQUEST_FLAGS` —
+        worked out here, never taken from the client — raises
+        :class:`ReviewRequiredError` and changes nothing: such a request is
+        decided on the review page (:data:`APPROVE_VIA_REVIEW`).
         """
         actor = await self._users.get(actor_username)
         assert actor is not None
         row, space, actor_member = await self._pending_join_request(
             request_id, actor_username=actor_username, space_id=space_id
         )
+        if via == APPROVE_VIA_INLINE:
+            flags = await self._join_request_flags(space, row)
+            if flags:
+                raise ReviewRequiredError(flags)
+        elif via != APPROVE_VIA_REVIEW:
+            raise ValueError(f"unknown approval source {via!r}")
         remote_instance = row.get("remote_applicant_instance_id")
         # An admin/mod elevation (the applicant is ALREADY a member; an
         # admin link filed this). Approving is the owner's click that runs

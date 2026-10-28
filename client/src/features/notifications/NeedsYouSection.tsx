@@ -32,6 +32,7 @@ import {
   approve,
   declineWithUndo,
   dropHandled,
+  flagsOf,
   flushDeclines,
   inlineAction,
   loadNeedsYou,
@@ -125,7 +126,7 @@ function Actions({ entry, describedBy, onNavigate }: {
     )
   }
   // Why a single request isn't one tap: said next to its Review button.
-  const why = (row?.params?.flags ?? []).filter(f => FLAG_KEYS[f]).map(f => t(FLAG_KEYS[f]))
+  const why = (row ? flagsOf(row) : []).filter(f => FLAG_KEYS[f]).map(f => t(FLAG_KEYS[f]))
   return (
     <div class="sh-needs__actions">
       {why.length > 0 && <span class="sh-needs__why">{why.join(' · ')}</span>}
