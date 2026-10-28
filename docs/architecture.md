@@ -230,6 +230,45 @@ for it. The rules (notifications redesign, owner decisions D3 D5 D6 D8 D13):
 
 `muted` silences a space completely, a mention included.
 
+### Notification delivery (off the publisher's path)
+
+The `EventBus` awaits every subscriber inline, inside the request or
+federation-inbound task that published the event. Notifications used to
+ride that path, so a post to a 200-member space resolved, wrote and pushed
+200 rows — about six database round-trips each — before the poster's
+request (or the inbound pipeline) moved on.
+`services/notification_delivery_worker.py:NotificationDeliveryWorker` takes
+them off it:
+
+- **One job per event.** `NotificationService.wire()` subscribes each
+  handler through the worker, so the publisher only puts the handler and
+  the event on a bounded `asyncio.Queue` (1 000 jobs) and returns — no
+  database work, never one job per recipient.
+- **One batch per job.** The worker runs jobs one at a time, in publish
+  order (a recipient's rows keep the order of their events, and a delete
+  clears what an earlier job wrote), each through
+  `NotificationService.run_batched`. Every row still passes `_save_notif`'s
+  gate as the handler goes; the people a fan-out names are read once
+  (`list_by_ids`, `space_notif_prefs_in`), and the rows are written when
+  the handler is done: one `latest_in_groups` read and one `save_batch`
+  transaction (a SAVEPOINT per row, so one bad row never sinks the rest),
+  then the `NotificationCreated` frames, one `count_unread_many` for
+  re-opened rows, and the pushes — Web Push off the event loop
+  (`PushService`), in the order the handler made them. Grouping (D7) and
+  silent repeats (D8) come out exactly as one save at a time. A space post
+  costs the same eight round-trips for 20 members or 200
+  (`tests/services/test_notification_delivery_worker.py` counts them).
+- **Backpressure, never drops.** A full queue makes the publisher wait for
+  a slot and logs a WARNING if it waits more than five seconds.
+- **Lifecycle.** The `_stop: asyncio.Event` pattern below; started on app
+  startup, stopped first thing on cleanup — the job in hand finishes and
+  what is queued is delivered within ten seconds, while the database, the
+  push session and the platform adapter are still up. Before `start()` and
+  after `stop()` a job runs inline in the publisher, so nothing is lost at
+  the edges (and unit tests without a running app see rows at once).
+  Anything that must read the rows an event wrote — integration tests —
+  awaits `app[notification_delivery_key].drain()` first.
+
 Wall panels adopted in Home Assistant are found through the optional
 `DisplayDirectory` Provider (`adapter.displays`; `None` on standalone).
 Adapters that wire one advertise `Capability.HA_DISPLAY_DISCOVERY`
@@ -886,7 +925,9 @@ GC, auth-audit-log pruning (`auth_audit_cleanup_scheduler.py` drops
 `auth_audit_log` rows older than 90 days hourly, so the append-only trail
 can't be grown without bound by repeated failed logins), and
 notification-feed GC (`notification_cleanup_scheduler.py` drops
-`notifications` rows older than 90 days hourly), and the space moderation
+`notifications` rows older than 90 days hourly), the notification delivery
+worker (`services/notification_delivery_worker.py`, a queue consumer rather
+than a timer — see "Notification delivery" above), and the space moderation
 queue sweep (`moderation_expiry_scheduler.py`, hourly: pending items past
 their 7-day window expire, and decided / expired items lose their content
 7 days later).

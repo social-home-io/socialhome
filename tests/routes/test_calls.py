@@ -7,7 +7,11 @@ endpoints, and the ICE-server config route.
 
 from __future__ import annotations
 
-from socialhome.app_keys import call_signaling_service_key, federation_repo_key
+from socialhome.app_keys import (
+    call_signaling_service_key,
+    federation_repo_key,
+    notification_delivery_key,
+)
 from socialhome.auth import sha256_token_hash
 from socialhome.domain.federation import (
     FederationEventType,
@@ -211,6 +215,8 @@ async def test_a_call_nobody_answered_is_a_missed_call_row_end_to_end(client):
     )
     cid = (await r.json())["call_id"]
     r = await client.post(f"/api/calls/{cid}/hangup", headers=_auth(client._tok))
+    # The row is written by the delivery worker, after the request returns.
+    await client.app[notification_delivery_key].drain()
     assert r.status == 204
     r = await client.get("/api/notifications", headers=_auth(bob_tok))
     rows = await r.json()

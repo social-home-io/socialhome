@@ -11,7 +11,7 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.app import create_app
-from socialhome.app_keys import conversation_repo_key
+from socialhome.app_keys import conversation_repo_key, notification_delivery_key
 from socialhome.app_keys import db_key as _db_key
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
@@ -404,6 +404,9 @@ async def test_a_dm_leaves_the_notifications_badge_to_chats(client):
         json={"content": "hi bob"},
         headers=_auth(client._admin_token),
     )
+    # The delivery worker handles the message after the request returns:
+    # wait for it, or "no row" passes on an empty table.
+    await client.app[notification_delivery_key].drain()
     bell = await client.get(
         "/api/notifications/unread-count",
         headers=_auth(client._bob_token),
@@ -999,6 +1002,7 @@ async def test_muted_conversation_counts_unread_but_rings_no_bell(client):
         headers=_auth(client._admin_token),
     )
     assert (await _row(client, client._bob_token, conv_id))["unread"] == 1
+    await client.app[notification_delivery_key].drain()
     bell = await client.get(
         "/api/notifications/unread-count", headers=_auth(client._bob_token)
     )
@@ -1015,6 +1019,7 @@ async def test_muted_conversation_counts_unread_but_rings_no_bell(client):
         headers=_auth(client._admin_token),
     )
     assert (await _row(client, client._bob_token, conv_id))["unread"] == 2
+    await client.app[notification_delivery_key].drain()
     bell = await client.get(
         "/api/notifications/unread-count", headers=_auth(client._bob_token)
     )
@@ -1363,6 +1368,8 @@ async def _team_with_carol(client) -> str:
 async def _bell(client, token: str) -> list[dict]:
     """The rows a chat's *messages* made — not the "added you to Team" row
     creating the group gave each member (see the test below)."""
+    # Rows are written by the delivery worker, after the request returns.
+    await client.app[notification_delivery_key].drain()
     r = await client.get("/api/notifications", headers=_auth(token))
     body = await r.json()
     rows = body["notifications"] if isinstance(body, dict) else body
@@ -1373,6 +1380,7 @@ async def test_creating_a_group_tells_each_member_who_added_them(client):
     """D3: being added to a group chat is about you — one ``chat_added``
     row each (not for the creator), opening the chat."""
     conv_id = await _team_with_carol(client)
+    await client.app[notification_delivery_key].drain()
     for token in (client._bob_token, "carol-tok"):
         r = await client.get("/api/notifications", headers=_auth(token))
         rows = await r.json()

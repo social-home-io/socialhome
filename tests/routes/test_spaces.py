@@ -10,7 +10,11 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.app import create_app
 from socialhome.app_keys import db_key as _db_key
-from socialhome.app_keys import gfs_connection_service_key, space_service_key
+from socialhome.app_keys import (
+    gfs_connection_service_key,
+    notification_delivery_key,
+    space_service_key,
+)
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
 from socialhome.crypto import derive_user_id
@@ -3440,6 +3444,8 @@ async def test_publish_failure_is_a_sentence_not_an_upstream_dump(
 
 
 async def _bob_content_bells(client) -> list[dict]:
+    # Rows are written by the delivery worker, after the request returns.
+    await client.app[notification_delivery_key].drain()
     r = await client.get("/api/notifications", headers=_auth(client._bob_token))
     assert r.status == 200
     return [
@@ -3583,6 +3589,8 @@ async def test_allow_here_mention_toggle_and_here_end_to_end(client):
         headers=admin,
     )
     assert r.status == 201
+    # Rows are written by the delivery worker, after the request returns.
+    await client.app[notification_delivery_key].drain()
     notes = await (await client.get("/api/notifications", headers=bob)).json()
     bells = [
         (n["type"], n["title"])
@@ -3602,6 +3610,7 @@ async def test_allow_here_mention_toggle_and_here_end_to_end(client):
         headers=bob,
     )
     assert r.status == 201
+    await client.app[notification_delivery_key].drain()
     notes = await (await client.get("/api/notifications", headers=admin)).json()
     assert [
         n["type"]

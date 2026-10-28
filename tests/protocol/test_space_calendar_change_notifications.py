@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 
 from socialhome.app import create_app
-from socialhome.app_keys import db_key
+from socialhome.app_keys import db_key, notification_delivery_key
 from socialhome.domain.federation import FederationEventType
 
 from .test_space_content_authorship import (
@@ -97,8 +97,11 @@ async def env(aiohttp_client, tmp_dir):
     return app, db
 
 
-async def _bells(db, ntype: str) -> dict[str, int]:
-    rows = await db.fetchall(
+async def _bells(app, ntype: str) -> dict[str, int]:
+    # Rows are written by the delivery worker, after the event is handled:
+    # wait for it, or "tells nobody" passes on an empty table.
+    await app[notification_delivery_key].drain()
+    rows = await app[db_key].fetchall(
         "SELECT user_id, COUNT(*) AS n FROM notifications WHERE type=?"
         " GROUP BY user_id",
         (ntype,),
@@ -118,14 +121,14 @@ def _update(**changes) -> dict:
 
 
 async def test_a_remote_move_tells_our_people_who_are_coming(env):
-    app, db = env
+    app, _db = env
     await _deliver(
         app,
         FET.SPACE_CALENDAR_EVENT_UPDATED,
         _update(start="2026-06-10T20:00:00+00:00", end="2026-06-10T21:00:00+00:00"),
         sender=AUTHOR,
     )
-    assert await _bells(db, "calendar_event_updated") == {
+    assert await _bells(app, "calendar_event_updated") == {
         "u-going": 1,
         "u-maybe": 1,
         "u-wait": 1,
@@ -133,14 +136,14 @@ async def test_a_remote_move_tells_our_people_who_are_coming(env):
 
 
 async def test_a_remote_cosmetic_edit_tells_nobody(env):
-    app, db = env
+    app, _db = env
     await _deliver(
         app,
         FET.SPACE_CALENDAR_EVENT_UPDATED,
         _update(description="bring cash"),
         sender=AUTHOR,
     )
-    assert await _bells(db, "calendar_event_updated") == {}
+    assert await _bells(app, "calendar_event_updated") == {}
 
 
 async def test_a_remote_cancel_tells_our_people_who_were_coming(env):
@@ -151,7 +154,7 @@ async def test_a_remote_cancel_tells_our_people_who_were_coming(env):
         {"id": EV, "actor_user_id": ACTOR},
         sender=AUTHOR,
     )
-    assert await _bells(db, "calendar_event_cancelled") == {
+    assert await _bells(app, "calendar_event_cancelled") == {
         "u-going": 1,
         "u-maybe": 1,
         "u-wait": 1,

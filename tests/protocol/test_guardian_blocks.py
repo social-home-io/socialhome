@@ -31,6 +31,7 @@ from socialhome.app_keys import (
     db_key,
     federation_inbound_service_key,
     federation_service_key,
+    notification_delivery_key,
 )
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
@@ -357,6 +358,9 @@ async def test_inbound_dm_from_a_blocked_sender_is_not_stored(env):
         await env._db.fetchone("SELECT 1 FROM conversations WHERE id='c-new'") is None
     )
     assert await _messages(env._db, "c-kr") == []
+    # Rows are written by the delivery worker, after the request returns:
+    # wait for it, or a "never notified" check passes on an empty table.
+    await env._app[notification_delivery_key].drain()
     assert (
         await env._db.fetchone(
             "SELECT 1 FROM notifications WHERE user_id='u-kid' AND type='dm_message'"
@@ -400,6 +404,9 @@ async def test_group_message_reaches_the_others_but_not_the_account(env):
     r = await env.get("/api/conversations/g-krc/messages", headers=_h("kid"))
     assert r.status == 200
     assert await r.json() == []
+    # Rows are written by the delivery worker, after the request returns:
+    # wait for it, or a "never notified" check passes on an empty table.
+    await env._app[notification_delivery_key].drain()
     notified = {
         r["user_id"]
         for r in await env._db.fetchall(
@@ -516,6 +523,9 @@ async def test_space_post_from_a_blocked_author_never_notifies(env):
     )
     assert r.status == 201, await r.text()
     pid = (await r.json())["id"]
+    # Rows are written by the delivery worker, after the request returns:
+    # wait for it, or a "never notified" check passes on an empty table.
+    await env._app[notification_delivery_key].drain()
     notified = {
         row["user_id"]
         for row in await env._db.fetchall(
@@ -599,6 +609,9 @@ async def test_contact_request_from_a_blocked_user_is_not_stored(env):
         },
     )
     assert await env._db.fetchone("SELECT 1 FROM dm_contact_requests") is None
+    # Rows are written by the delivery worker, after the request returns:
+    # wait for it, or a "never notified" check passes on an empty table.
+    await env._app[notification_delivery_key].drain()
     assert (
         await env._db.fetchone(
             "SELECT 1 FROM notifications WHERE user_id='u-kid'"
