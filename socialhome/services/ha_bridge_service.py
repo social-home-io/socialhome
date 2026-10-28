@@ -329,7 +329,7 @@ class HaBridgeService:
             await self._fire_for(user, "socialhome.presence_updated", data)
 
     async def _on_notification_created(self, event: NotificationCreated) -> None:
-        if event.bumped:
+        if event.silent:
             return  # the same unread row again: automations heard it once
         # D14: no title, no text — they name people and carry chat, task
         # and event content. An automation gets what it needs to react

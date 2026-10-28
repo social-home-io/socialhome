@@ -159,7 +159,9 @@ off by default) and is not protected (refused on `PATCH /api/me` as
 time). It carries the subject's own `user_id` / `username`, ids, a kind
 and an in-app `link_url` where one exists — never a display name, title,
 summary, message, status text, zone, amount or anyone else's id.
-`notification_new` never fires again for a bumped row. The one
+`notification_new` fires once per push: never again for a silent repeat
+(a chat burst on its still-unread row), but again when a regrouped row
+pushes (another comment on a post, a re-opened read row). The one
 **household** event is `space_config_changed`
 `{space_id, event_type, sequence}` (a space's settings; no person, no
 change payload), which fires without an opt-in. A failed fire is logged

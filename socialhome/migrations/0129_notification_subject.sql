@@ -1,0 +1,61 @@
+-- 0129 — a notification knows who, what and where (notifications redesign,
+-- D7). Follows 0128.
+--
+--   object_key  what the row is about, ``<kind>:<id>`` — ``post:<id>``,
+--               ``space_post:<id>``, ``task:<id>``, ``event:<id>``,
+--               ``dm:<conversation>``, ``moment:<id>``, ``space:<id>`` …
+--               (``socialhome.domain.notification.NotificationObject``).
+--               One row per (user, type, object) while it stays active: new
+--               activity re-opens that row instead of adding one, and seven
+--               quiet days start a fresh row. Visiting or deleting the thing
+--               reads / removes its rows by this key.
+--   space_id    the space the thing lives in (NULL outside a space). No FK:
+--               a remote space's row and a dissolved space's notice outlive
+--               the ``spaces`` row. Leaving a space removes its rows by this.
+--   params      JSON the client renders from instead of parsing the title:
+--               ``{"actors": [{"id", "name"}…], "actor_count", "new",
+--               "total", "space_name"?}`` — who acted since the row was last
+--               read, how many events are new and in all.
+--
+-- ``title`` stays the server-rendered push / fallback text (older SPAs, the
+-- Home Assistant event, exports), ``link_url`` the click target,
+-- ``created_at`` the last activity (the sort key; a re-open moves it), and
+-- ``read_at`` is unchanged. Older rows keep NULLs and render from ``title``;
+-- they age out within 90 days, so there is no backfill.
+--
+-- CLAUDE.md "audit before a migration":
+--   (1) Audited every path that touches the data. ``notifications`` is defined
+--       only in 0001 (no later migration alters it). Writers:
+--       ``SqliteNotificationRepo.save`` (+ its per-user prune), the DM
+--       ``save_or_bump_unread`` bump (keyed by ``link_url``; this release
+--       generalises it onto ``object_key`` for every type), the mark-read
+--       family (one id, all, by link, by ids, for everyone), ``delete_old``.
+--       All rows come from ``NotificationService._save_notif``. Readers: the
+--       list / unread-count / read-by-link routes, ``_told``, the realtime
+--       ``notification.new`` frame (from ``NotificationCreated``), the Home
+--       Assistant bridge, ``/api/me/corner``, and the whole-table dumps in
+--       ``backup_service`` / ``data_export_service`` (``SELECT *`` — the new
+--       columns ride along). Nothing in a row says which object it is about:
+--       ``link_url`` is a page, not an object (a comment's link picks the
+--       comment out, a space event links the whole calendar), there is no
+--       space column, and the actor exists only inside the rendered title.
+--   (2) Non-migration alternatives, rejected: JSON in ``body`` (it is the
+--       §25.3 redaction field older SPAs render); parsing the object out of
+--       ``link_url`` (lossy — no actors, no counts, a space calendar link
+--       names no event, and keys differ per type); computing groups at read
+--       time from one row per event (the 500-row cap, the cursor and the
+--       unread count all fight the grouping — the 55-row bell this redesign
+--       removes); a separate ``notification_groups`` table (two tables for
+--       one row).
+--   (3) Smallest change: three NULL-defaulted columns, no backfill, no change
+--       to any existing row (``params`` must be valid JSON — a CHECK, NULL
+--       passes), plus one partial index (only rows that carry an
+--       object) for the group lookup, mark-read-by-object and
+--       delete-by-object — all equality on ``object_key`` (+ ``user_id``).
+--       Local only, never federated.
+ALTER TABLE notifications ADD COLUMN object_key TEXT;
+ALTER TABLE notifications ADD COLUMN space_id TEXT;
+ALTER TABLE notifications ADD COLUMN params TEXT
+    CHECK (params IS NULL OR json_valid(params));
+CREATE INDEX IF NOT EXISTS idx_notifications_object
+    ON notifications(object_key, user_id) WHERE object_key IS NOT NULL;

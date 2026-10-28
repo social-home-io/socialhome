@@ -242,6 +242,7 @@ from .notifications import (
     NotificationCollectionView,
     NotificationReadAllView,
     NotificationReadByLinkView,
+    NotificationReadByObjectView,
     NotificationReadView,
     NotificationUnreadCountView,
 )
@@ -806,6 +807,9 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_view("/api/notifications/{id}/read", NotificationReadView)
     app.router.add_view("/api/notifications/read-all", NotificationReadAllView)
     app.router.add_view("/api/notifications/read-by-link", NotificationReadByLinkView)
+    app.router.add_view(
+        "/api/notifications/read-by-object", NotificationReadByObjectView
+    )
 
     # ── Presence ────────────────────────────────────────────────────────
     app.router.add_view("/api/presence", PresenceCollectionView)

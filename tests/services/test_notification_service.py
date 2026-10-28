@@ -53,6 +53,7 @@ from socialhome.domain.events import (
     TaskDeadlineDue,
 )
 from socialhome.domain.mention import Mention, MentionType
+from socialhome.domain.notification import NotificationSubject
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import (
     ContentAction,
@@ -479,6 +480,18 @@ async def test_space_comment_mentions_and_member_scope(stack):
     ]
     assert [n.type for n in carl] == ["space_mention"]
     assert carl[0].title == "bob mentioned you in a comment in M"
+    # The mention is about the comment, the generic bell about the post —
+    # both in the space, its name and the commenter remembered (0129).
+    [anna_row] = [
+        n
+        for n in await stack.notif_repo.list(u["anna"].user_id, limit=50)
+        if n.type == "space_comment_added"
+    ]
+    assert carl[0].object_key.startswith("space_comment:")
+    assert anna_row.object_key == f"space_post:{post.id}"
+    assert {carl[0].space_id, anna_row.space_id} == {space.id}
+    assert anna_row.params.space_name == "M"
+    assert [a.id for a in anna_row.params.actors] == [u["bob"].user_id]
     # erin muted, bob is the commenter, dave outside the space.
     assert await _types(stack, u["erin"]) == []
     assert (await _types(stack, u["bob"])) == before["bob"]
@@ -1015,9 +1028,10 @@ async def test_dm_burst_collapses_to_single_unread_row(stack):
     assert dm_rows[0].read_at is None
 
 
-async def test_dm_dedupe_does_not_span_read_boundary(stack):
-    """Once the recipient opens the thread, the next DM starts a
-    fresh unread row rather than re-using the now-read one."""
+async def test_a_dm_after_the_read_boundary_reopens_the_row(stack):
+    """D7: once the recipient opens the thread, the next DM re-opens the
+    conversation's one row (unread again, one new of two) rather than
+    stacking a second row next to the read one."""
     from socialhome.domain.events import DmMessageCreated
 
     sender = await stack.provision_user("anna-rb")
@@ -1037,7 +1051,7 @@ async def test_dm_dedupe_does_not_span_read_boundary(stack):
     # Open the thread — clears the row.
     await stack.notif_svc.mark_read_for_dm(bob.user_id, "c-rb")
     assert await stack.notif_repo.count_unread(bob.user_id) == 0
-    # New DM after read → new unread row, not a bump of the read one.
+    # New DM after read → the read row re-opens.
     await stack.bus.publish(
         DmMessageCreated(
             conversation_id="c-rb",
@@ -1050,9 +1064,10 @@ async def test_dm_dedupe_does_not_span_read_boundary(stack):
     assert await stack.notif_repo.count_unread(bob.user_id) == 1
     rows = await stack.notif_repo.list(bob.user_id, limit=10)
     dm_rows = [r for r in rows if r.type == "dm_message"]
-    # Two rows total: one read (from the first burst) + one new unread.
-    assert len(dm_rows) == 2
-    assert sum(1 for r in dm_rows if r.read_at is None) == 1
+    assert len(dm_rows) == 1
+    assert dm_rows[0].read_at is None
+    assert (dm_rows[0].params.new, dm_rows[0].params.total) == (1, 2)
+    assert dm_rows[0].object_key == "dm:c-rb"
 
 
 async def test_dm_message_skipped_when_recipient_viewing_thread(stack):
@@ -1453,13 +1468,21 @@ async def test_remote_space_dissolved_notifies_each_member(stack):
     )
     space = await space_svc.create_space(owner_username="alice-rd", name="Crew")
     await space_svc.add_member(space.id, actor_username="alice-rd", user_id=bob.user_id)
+    # An earlier row about the space's content goes with it (0129).
+    await stack.notif_svc._save_notif(
+        new_notification(user_id=bob.user_id, type="space_post_created", title="t"),
+        about=NotificationSubject("space_post:p1", space.id),
+        actor_user_id=alice.user_id,
+    )
 
     await stack.bus.publish(RemoteSpaceDissolved(space_id=space.id))
 
     for user in (alice, bob):
         notes = await stack.notif_repo.list(user.user_id, limit=10)
+        assert [n.type for n in notes] == ["space_dissolved"], user.user_id
         dissolved = [n for n in notes if n.type == "space_dissolved"]
         assert len(dissolved) == 1, user.user_id
+        assert dissolved[0].object_key == f"space:{space.id}"
         assert space.name in dissolved[0].title
         assert dissolved[0].link_url == f"/spaces/{space.id}"
 
@@ -2685,7 +2708,8 @@ async def test_unavailable_warning_pushes_once_per_household(stack):
 async def test_unavailable_warning_keeps_a_row_stored_with_the_old_link(stack):
     """A bell row stored before the link pointed at Members & joining
     (``/settings?household=…``) stays that household's key: its rejoin
-    bumps that row in-app and does not push again or add a second row."""
+    does not push again and keeps that link. (The row predates 0129, so it
+    has no object to regroup on: the rejoin's row is a new one.)"""
     a, space, remote = await _reviewed_space_with_remote(stack)
     spy = _PushSpy()
     stack.notif_svc.attach_push_service(spy)
@@ -2704,7 +2728,8 @@ async def test_unavailable_warning_keeps_a_row_stored_with_the_old_link(stack):
         for n in await stack.notif_repo.list(a.user_id, limit=50)
         if n.type == "moderation_unavailable"
     ]
-    assert [n.link_url for n in notes] == [legacy]
+    assert [n.link_url for n in notes] == [legacy, legacy]
+    assert notes[0].object_key == f"space_household:{space.id}/inst-remote"
     assert not [p for p in spy.pushed if p[1].startswith("moderation_unavailable:")]
 
 
@@ -3699,7 +3724,9 @@ async def test_push_tag_without_a_link_is_per_notification(stack):
         await stack.notif_svc._save_notif(
             new_notification(
                 user_id=b.user_id, type="task_assigned", title=title, link_url=None
-            )
+            ),
+            about=NotificationSubject("task:" + title),
+            actor_user_id=None,
         )
     rows = await stack.notif_repo.list(b.user_id, limit=10)
     tags = {p.tag for _, p in push.calls}
@@ -3924,6 +3951,13 @@ async def test_space_calendar_bells_open_the_space_calendar(stack):
             space_id=space.id,
         )
     )
+    link = f"/spaces/{space.id}/calendar"
+    for ntype in (
+        "calendar_event_created",
+        "calendar_event_updated",
+        "calendar_reminder",
+    ):
+        assert await _links(stack, u["bob"], ntype) == [link], ntype
     await stack.bus.publish(
         CalendarEventDeleted(
             event_id="ev-up",
@@ -3932,14 +3966,7 @@ async def test_space_calendar_bells_open_the_space_calendar(stack):
             notify_user_ids=(u["bob"].user_id,),
         )
     )
-    link = f"/spaces/{space.id}/calendar"
-    for ntype in (
-        "calendar_event_created",
-        "calendar_event_updated",
-        "calendar_reminder",
-        "calendar_event_cancelled",
-    ):
-        assert await _links(stack, u["bob"], ntype) == [link], ntype
+    assert await _links(stack, u["bob"], "calendar_event_cancelled") == [link]
 
 
 async def test_personal_calendar_update_bell_opens_the_household_calendar(stack):
@@ -4081,6 +4108,7 @@ async def test_event_change_skips_someone_who_blocked_the_actor(stack):
             actor_user_id=users["anna"].user_id,
         )
     )
+    assert await _bell_counts(stack, users, "calendar_event_updated") == {"carl": 1}
     await stack.bus.publish(
         CalendarEventDeleted(
             event_id="e-moved",
@@ -4090,7 +4118,8 @@ async def test_event_change_skips_someone_who_blocked_the_actor(stack):
             actor_user_id=users["anna"].user_id,
         )
     )
-    assert await _bell_counts(stack, users, "calendar_event_updated") == {"carl": 1}
+    # The cancellation replaces the event's earlier rows.
+    assert await _bell_counts(stack, users, "calendar_event_updated") == {}
     assert await _bell_counts(stack, users, "calendar_event_cancelled") == {"carl": 1}
 
 

@@ -40,8 +40,8 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from string import Formatter
 
 from ..domain.calendar import RSVPStatus
@@ -56,6 +56,7 @@ from ..domain.events import (
     CalendarEventDeleted,
     CalendarEventUpdated,
     CommentAdded,
+    CommentDeleted,
     CommentUpdated,
     DmContactRequested,
     DmMessageCreated,
@@ -63,15 +64,19 @@ from ..domain.events import (
     DmMessageUpdated,
     EventReminderDue,
     HighlightFrameReactionChanged,
+    HighlightRemoved,
     MomentCreated,
+    MomentDeleted,
     MomentReactionChanged,
     NotificationCreated,
     NotificationReadChanged,
     PostCreated,
+    PostDeleted,
     PostEdited,
     RemoteSpaceDissolved,
     RemoteSpaceInviteAccepted,
     RemoteSpaceInviteDeclined,
+    RemoteSpaceMemberBanned,
     ReportFiled,
     ReportResolved,
     SpaceAdminSeedsRetiredAfterRestore,
@@ -81,6 +86,7 @@ from ..domain.events import (
     SpaceJoinRequested,
     SpaceLocationFeatureEnabled,
     SpaceMemberJoined,
+    SpaceMemberLeft,
     SpaceModerationApproved,
     SpaceModerationExpired,
     SpaceModerationQueued,
@@ -91,10 +97,21 @@ from ..domain.events import (
     TaskAssigned,
     TaskCompleted,
     TaskDeadlineDue,
+    TaskDeleted,
     UserFollowed,
 )
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.mention import Mention, MentionType
+from ..domain.notification import (
+    GROUP_QUIET_DAYS,
+    Notification,
+    NotificationActor,
+    NotificationObject,
+    NotificationSubject,
+    first_params,
+    object_key,
+    regroup,
+)
 from ..domain.post import PostType
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
@@ -221,6 +238,27 @@ _PUSH_TITLES: dict[str, tuple[tuple[str, str], ...]] = {
         ("notification.push.space_invite", "{name} invited you to a space"),
     ),
 }
+
+#: Types whose repeat on a still-unread row neither pushes again nor tells
+#: Home Assistant again — the per-row collapse they had before grouping
+#: (a chat burst, a re-broadcast one-time notice). Every other type still
+#: pushes per event until D8 collapses push for all.
+_QUIET_REPEAT_TYPES: frozenset[str] = frozenset(
+    {
+        "dm_message",
+        "dm_mention",
+        "moderation_unavailable",
+        "space_dissolved",
+        "space_admins_reconfirm",
+    }
+)
+
+#: Rows that are a decision about the recipient's own content: they stay
+#: when the thing itself is deleted (the author still learns what happened).
+_DECISION_TYPES: frozenset[str] = frozenset({"post_moderated", "moderation_decided"})
+
+#: The notice that a space ended — it outlives the space's other rows.
+_SPACE_ENDED_TYPES: frozenset[str] = frozenset({"space_dissolved"})
 
 #: The push title when no variant of a :data:`_PUSH_TITLES` entry fits.
 _PUSH_GENERIC: tuple[str, str] = ("notification.push.generic", "New notification")
@@ -438,14 +476,15 @@ class NotificationService(ProtectionGateMixin):
 
     async def _save_notif(
         self,
-        note,
+        note: Notification,
         *,
+        about: NotificationSubject,
         actor_user_id: str | None = None,
+        actor_name: str | None = None,
         withheld: frozenset[str] | None = None,
-        dedupe_by_link: bool = False,
         push: bool = True,
         push_params: dict[str, str | None] | None = None,
-    ):
+    ) -> Notification | None:
         """The one gate every notification passes, then persist + publish
         ``NotificationCreated`` + fire title-only pushes to every registered
         surface (Web Push + HA mobile app). Returns the saved row, or
@@ -469,11 +508,20 @@ class NotificationService(ProtectionGateMixin):
         :meth:`_push_title`); ``push_params`` names the people and the
         space a content-free push title may mention.
 
-        ``dedupe_by_link=True`` collapses bursts: if an unread row
-        already exists for the same ``(user_id, type, link_url)`` it's
-        bumped in place rather than duplicated. Used today by DMs so a
-        five-message burst from one peer shows up as one bell entry
-        until the recipient opens the thread.
+        ``about`` names the thing the row is about and its space (0129) —
+        required, so a new type can't forget it. One row per (recipient,
+        type, thing) while it stays active (D7): an event for a thing whose
+        row saw activity in the last :data:`GROUP_QUIET_DAYS` days updates
+        that row — fresh title and link, to the top, unread again, the
+        counts and people in its params moved on (:func:`regroup`) — and
+        only after that many quiet days does a fresh row start. A row that
+        was still unread keeps the unread count as is; a read one re-opens
+        and every device hears the new count. ``actor_name`` is the name
+        the row remembers for ``actor_user_id`` (looked up when not given).
+
+        Push stays per event for now (D8 collapses it later): only a repeat
+        of a :data:`_QUIET_REPEAT_TYPES` type on its still-unread row is
+        silent — no second push, no second Home Assistant event.
         """
         user = await self._users.get_by_user_id(note.user_id)
         if user is None:
@@ -485,13 +533,50 @@ class NotificationService(ProtectionGateMixin):
                 hidden = await self._hidden_from(note.user_id, actor_user_id)
             if hidden:
                 return None
-        if dedupe_by_link:
-            saved = await self._notifs.save_or_bump_unread(note)
+        actor = (
+            NotificationActor(
+                actor_user_id, actor_name or await self._held_name(actor_user_id)
+            )
+            if actor_user_id
+            else None
+        )
+        since = datetime.now(UTC) - timedelta(days=GROUP_QUIET_DAYS)
+        group = await self._notifs.latest_in_group(
+            user_id=note.user_id,
+            type=note.type,
+            object_key=about.object_key,
+            since=since.isoformat(),
+        )
+        if group is None:
+            saved = replace(
+                note,
+                object_key=about.object_key,
+                space_id=about.space_id,
+                params=first_params(actor, space_name=about.space_name),
+            )
+            await self._notifs.save(saved)
         else:
-            saved = await self._notifs.save(note)
-        # A bump hands back the unread row it refreshed (its own id): the
-        # badge already counts it and the device already buzzed for it.
-        bumped = saved.id != note.id
+            saved = replace(
+                group,
+                title=note.title,
+                body=note.body,
+                link_url=note.link_url,
+                created_at=note.created_at,
+                read_at=None,
+                space_id=about.space_id or group.space_id,
+                params=regroup(
+                    group.params,
+                    actor,
+                    reopen=group.is_read,
+                    space_name=about.space_name,
+                ),
+            )
+            await self._notifs.update_group(saved)
+        bumped = group is not None
+        reopened = group is not None and group.is_read
+        # A repeat on a row still unread: the badge already counts it, and
+        # for a chat burst the device already buzzed for it.
+        silent = bumped and not reopened and saved.type in _QUIET_REPEAT_TYPES
         await self._bus.publish(
             NotificationCreated(
                 user_id=saved.user_id,
@@ -500,9 +585,16 @@ class NotificationService(ProtectionGateMixin):
                 title=saved.title,
                 link_url=saved.link_url,
                 bumped=bumped,
+                reopened=reopened,
+                silent=silent,
+                object_key=saved.object_key,
+                space_id=saved.space_id,
+                params=saved.params,
             )
         )
-        if bumped:
+        if reopened:
+            await self._announce_unread(saved.user_id)
+        if silent:
             return saved  # one unread row, one push (§D8 re-buzz is later)
         if not push:
             return saved  # in-app only (a repeat the user was already told)
@@ -672,6 +764,15 @@ class NotificationService(ProtectionGateMixin):
             AppChallengeReceived,
             self.on_app_challenge_received,
         )
+        # The thing is gone, or you left its space: so are its rows.
+        self._bus.subscribe(PostDeleted, self.on_thing_deleted)
+        self._bus.subscribe(CommentDeleted, self.on_thing_deleted)
+        self._bus.subscribe(TaskDeleted, self.on_thing_deleted)
+        self._bus.subscribe(MomentDeleted, self.on_thing_deleted)
+        self._bus.subscribe(HighlightRemoved, self.on_thing_deleted)
+        self._bus.subscribe(SpaceMemberLeft, self.on_space_seat_gone)
+        self._bus.subscribe(RemoteSpaceMemberBanned, self.on_space_seat_gone)
+        self._bus.subscribe(SpaceConfigChanged, self.on_space_dissolved_here)
 
     # ── Blocks ─────────────────────────────────────────────────────────
 
@@ -714,7 +815,9 @@ class NotificationService(ProtectionGateMixin):
                     ),
                     link_url=household_post_link(event.post.id),
                 ),
+                about=NotificationSubject.of(NotificationObject.POST, event.post.id),
                 actor_user_id=author_id,
+                actor_name=name,
                 withheld=blocked,
             )
 
@@ -730,6 +833,8 @@ class NotificationService(ProtectionGateMixin):
                 author_id=commenter_id,
                 mentions=event.mentions,
                 link=space_post_link(event.space_id, event.post_id, event.comment.id),
+                post_id=event.post_id,
+                comment_id=event.comment.id,
                 generic_type="space_comment_added",
                 generic_key="notification.space.comment.added",
                 generic_fallback="{author} commented in {space_name}",
@@ -759,7 +864,9 @@ class NotificationService(ProtectionGateMixin):
                     ),
                     link_url=household_post_link(event.post_id, event.comment.id),
                 ),
+                about=NotificationSubject.of(NotificationObject.POST, event.post_id),
                 actor_user_id=commenter_id,
+                actor_name=name,
                 withheld=blocked,
             )
 
@@ -775,6 +882,7 @@ class NotificationService(ProtectionGateMixin):
             author_id=event.post.author,
             mentions=event.new_mentions,
             link=space_post_link(event.space_id, event.post.id),
+            post_id=event.post.id,
             generic_type=None,
             generic_key="notification.space.post.created",
             generic_fallback="{author} posted in {space_name}",
@@ -791,6 +899,8 @@ class NotificationService(ProtectionGateMixin):
             author_id=event.comment.author,
             mentions=event.new_mentions,
             link=space_post_link(event.space_id, event.post_id, event.comment.id),
+            post_id=event.post_id,
+            comment_id=event.comment.id,
             generic_type=None,
             generic_key="notification.space.comment.added",
             generic_fallback="{author} commented in {space_name}",
@@ -815,6 +925,7 @@ class NotificationService(ProtectionGateMixin):
             return
         recipient = await self._users.get_by_user_id(event.assigned_to)
         locale = self._locale(recipient)
+        space_name = await self._space_name(event.space_id)
         await self._save_notif(
             new_notification(
                 user_id=event.assigned_to,
@@ -827,10 +938,16 @@ class NotificationService(ProtectionGateMixin):
                 ),
                 link_url=task_link(event.task, event.space_id),
             ),
+            about=NotificationSubject.of(
+                NotificationObject.TASK,
+                event.task.id,
+                space_id=event.space_id,
+                space_name=space_name,
+            ),
             actor_user_id=assigner,
             push_params={
                 "name": await self._person_name(assigner, locale) if assigner else None,
-                "space_name": await self._space_name(event.space_id),
+                "space_name": space_name,
             },
         )
 
@@ -854,6 +971,7 @@ class NotificationService(ProtectionGateMixin):
                     # The deadline sweep reads household tasks only.
                     link_url=task_link(event.task),
                 ),
+                about=NotificationSubject.of(NotificationObject.TASK, event.task.id),
                 actor_user_id=None,
             )
 
@@ -864,12 +982,12 @@ class NotificationService(ProtectionGateMixin):
         already drives the push fan-out (Web Push + platform adapter)
         — one push per bell row, never a second fan-out.
 
-        Bell rows are **collapsed per conversation** via
-        ``dedupe_by_link=True``: a burst of N messages from one peer
-        bumps a single existing unread row rather than spamming the
-        bell with N entries. The companion :meth:`mark_read_for_dm`
-        clears that row when the recipient opens the thread, so the
-        next message after opening starts a fresh row.
+        Bell rows are **one per conversation** (object ``dm:<id>``, D7): a
+        burst of N messages bumps the one row rather than spamming the
+        bell with N entries, without pushing again while it is unread. The
+        companion :meth:`mark_read_for_dm` reads that row when the
+        recipient opens the thread; the next message re-opens it (and
+        pushes), and a week of quiet starts a fresh one.
 
         Active-viewer suppression: when the recipient already has the
         DM thread open in any of their tabs (the SPA emits
@@ -902,6 +1020,12 @@ class NotificationService(ProtectionGateMixin):
         prefs = await self._seat_prefs(event.conversation_id)
         link = _conversation_link(
             event.conversation_id, prefs.system_scope, prefs.space_id
+        )
+        about = NotificationSubject.of(
+            NotificationObject.CONVERSATION,
+            event.conversation_id,
+            space_id=prefs.space_id,
+            space_name=prefs.space_name,
         )
         muted = prefs.muted
         mentioned = (
@@ -944,6 +1068,7 @@ class NotificationService(ProtectionGateMixin):
                     or self._someone(self._locale(local)),
                     chat_name=self._chat_name(prefs, local),
                     link=link,
+                    about=about,
                 )
                 continue
             await self._save_notif(
@@ -953,9 +1078,10 @@ class NotificationService(ProtectionGateMixin):
                     title=self._dm_title(event, prefs, local),
                     link_url=link,
                 ),
+                about=about,
                 actor_user_id=event.sender_user_id,
+                actor_name=event.sender_display_name,
                 withheld=blocked,
-                dedupe_by_link=True,
             )
 
     async def on_dm_message_deleted(self, event: DmMessageDeleted) -> None:
@@ -1061,6 +1187,12 @@ class NotificationService(ProtectionGateMixin):
                 or await self._person_name(event.sender_user_id, self._locale(local)),
                 chat_name=self._chat_name(prefs, local),
                 link=link,
+                about=NotificationSubject.of(
+                    NotificationObject.CONVERSATION,
+                    event.conversation_id,
+                    space_id=prefs.space_id,
+                    space_name=prefs.space_name,
+                ),
             )
 
     async def _save_dm_mention(
@@ -1072,6 +1204,7 @@ class NotificationService(ProtectionGateMixin):
         sender_name: str,
         chat_name: str | None,
         link: str,
+        about: NotificationSubject,
     ) -> None:
         if chat_name:
             title = self._t(
@@ -1095,22 +1228,28 @@ class NotificationService(ProtectionGateMixin):
                 title=title,
                 link_url=link,
             ),
+            about=about,
             actor_user_id=sender_id,
+            actor_name=sender_name,
             withheld=withheld,
-            dedupe_by_link=True,
         )
 
     async def _person_name(self, user_id: str, locale: str | None) -> str:
         """The name this household holds for *user_id* (a local member or
         a known remote person), else "Someone" in the recipient's language
         — never the raw user id."""
+        return await self._held_name(user_id) or self._someone(locale)
+
+    async def _held_name(self, user_id: str) -> str | None:
+        """The name this household holds for *user_id* — a local member's,
+        else a known remote person's — or ``None``."""
         local = await self._users.get_by_user_id(user_id)
         if local is not None and local.display_name:
             return local.display_name
         remote = await self._users.get_remote(user_id)
         if remote is not None and remote.display_name:
             return remote.display_name
-        return self._someone(locale)
+        return None
 
     async def _space_name(self, space_id: str | None) -> str | None:
         """The name of *space_id* (``None`` for none, or one not held)."""
@@ -1193,6 +1332,79 @@ class NotificationService(ProtectionGateMixin):
             await self._announce_unread(user_id)
         return flipped
 
+    async def mark_read_by_objects(self, user_id: str, object_keys: list[str]) -> int:
+        """The user saw these things (``post:<id>``, ``dm:<id>`` …): every
+        unread row of theirs about one of them reads as read, whatever its
+        type, on every device. Returns how many flipped."""
+        flipped = await self._notifs.mark_read_by_object(user_id, object_keys)
+        if flipped:
+            await self._announce_unread(user_id)
+        return flipped
+
+    # ── The thing is gone: so are its rows ────────────────────────────
+
+    async def on_thing_deleted(
+        self,
+        event: PostDeleted
+        | CommentDeleted
+        | TaskDeleted
+        | MomentDeleted
+        | HighlightRemoved,
+    ) -> None:
+        """A post, space comment, task, moment or highlight was deleted
+        (here or by its household): every row about it goes, for everyone
+        — except a decision about the author's own content
+        (:data:`_DECISION_TYPES`). Recipients who lost an unread row hear
+        their new count."""
+        match event:
+            case PostDeleted(space_id=None):
+                keys = [
+                    object_key(NotificationObject.POST, event.post_id),
+                    object_key(NotificationObject.LISTING, event.post_id),
+                ]
+            case PostDeleted():
+                keys = [object_key(NotificationObject.SPACE_POST, event.post_id)]
+            case CommentDeleted(space_id=None):
+                return  # household comments group on their post
+            case CommentDeleted():
+                keys = [object_key(NotificationObject.SPACE_COMMENT, event.comment_id)]
+            case TaskDeleted():
+                keys = [object_key(NotificationObject.TASK, event.task_id)]
+            case MomentDeleted():
+                keys = [object_key(NotificationObject.MOMENT, event.moment_id)]
+            case HighlightRemoved():
+                keys = [object_key(NotificationObject.HIGHLIGHT, event.highlight_id)]
+        await self._forget(keys)
+
+    async def on_space_seat_gone(
+        self, event: SpaceMemberLeft | RemoteSpaceMemberBanned
+    ) -> None:
+        """Someone here left a space, or was removed or banned from it: their
+        rows about that space go (the space's end notice stays)."""
+        for user_id in await self._notifs.delete_by_space(
+            event.space_id, user_id=event.user_id, keep_types=_SPACE_ENDED_TYPES
+        ):
+            await self._announce_unread(user_id)
+
+    async def on_space_dissolved_here(self, event: SpaceConfigChanged) -> None:
+        """A space this household hosts was dissolved: its rows go for
+        everyone."""
+        if event.event_type != SpaceConfigEventType.DISSOLVED.value:
+            return
+        await self._forget_space(event.space_id)
+
+    async def _forget(
+        self, keys: list[str], *, keep_types: frozenset[str] = _DECISION_TYPES
+    ) -> None:
+        for user_id in await self._notifs.delete_by_object(keys, keep_types=keep_types):
+            await self._announce_unread(user_id)
+
+    async def _forget_space(self, space_id: str) -> None:
+        for user_id in await self._notifs.delete_by_space(
+            space_id, keep_types=_SPACE_ENDED_TYPES
+        ):
+            await self._announce_unread(user_id)
+
     async def _announce_unread(self, user_id: str) -> None:
         """Tell every device of ``user_id`` its unread count now."""
         await self._bus.publish(
@@ -1270,7 +1482,11 @@ class NotificationService(ProtectionGateMixin):
                 title=title,
                 link_url="/dms",
             ),
+            about=NotificationSubject.of(
+                NotificationObject.CONTACT, event.requester_user_id
+            ),
             actor_user_id=event.requester_user_id,
+            actor_name=event.requester_display_name,
         )
 
     async def on_app_challenge_received(
@@ -1299,7 +1515,9 @@ class NotificationService(ProtectionGateMixin):
                 title=title,
                 link_url=f"/apps/{event.app_id}",
             ),
+            about=NotificationSubject.of(NotificationObject.APP, event.app_id),
             actor_user_id=event.from_user_id,
+            actor_name=event.from_display,
         )
 
     async def on_bazaar_bid_placed(self, event: BazaarBidPlaced) -> None:
@@ -1318,6 +1536,9 @@ class NotificationService(ProtectionGateMixin):
                 type="bazaar_bid_placed",
                 title=title,
                 link_url=bazaar_listing_link(event.listing_post_id),
+            ),
+            about=NotificationSubject.of(
+                NotificationObject.LISTING, event.listing_post_id
             ),
             actor_user_id=event.bidder_user_id,
         )
@@ -1340,6 +1561,9 @@ class NotificationService(ProtectionGateMixin):
                 title=title,
                 link_url=bazaar_listing_link(event.listing_post_id),
             ),
+            about=NotificationSubject.of(
+                NotificationObject.LISTING, event.listing_post_id
+            ),
             actor_user_id=event.seller_user_id,
         )
 
@@ -1359,6 +1583,9 @@ class NotificationService(ProtectionGateMixin):
                 type="bazaar_offer_rejected",
                 title=title,
                 link_url=bazaar_listing_link(event.listing_post_id),
+            ),
+            about=NotificationSubject.of(
+                NotificationObject.LISTING, event.listing_post_id
             ),
             actor_user_id=event.seller_user_id,
         )
@@ -1388,6 +1615,9 @@ class NotificationService(ProtectionGateMixin):
                 title=title,
                 link_url=bazaar_listing_link(event.listing_post_id),
             ),
+            about=NotificationSubject.of(
+                NotificationObject.LISTING, event.listing_post_id
+            ),
             actor_user_id=None,  # the listing's own clock
         )
 
@@ -1410,6 +1640,7 @@ class NotificationService(ProtectionGateMixin):
             author_id=event.post.author,
             mentions=event.mentions,
             link=space_post_link(event.space_id, event.post.id),
+            post_id=event.post.id,
             generic_type="space_post_created",
             generic_key="notification.space.post.created",
             generic_fallback="{author} posted in {space_name}",
@@ -1424,6 +1655,8 @@ class NotificationService(ProtectionGateMixin):
         author_id: str,
         mentions: tuple[Mention, ...],
         link: str,
+        post_id: str,
+        comment_id: str | None = None,
         generic_type: str | None,
         generic_key: str,
         generic_fallback: str,
@@ -1458,6 +1691,8 @@ class NotificationService(ProtectionGateMixin):
         only ever reach a member — the resolver never resolves outsiders.
 
         ``link`` is the post (and comment) every bell of this fan-out opens.
+        Every row is about the post (``post_id``) — a mention in a comment
+        about that comment (``comment_id``), so deleting it drops the row.
         """
         space = await self._spaces.get(space_id)
         if space is None:
@@ -1477,6 +1712,22 @@ class NotificationService(ProtectionGateMixin):
         mentioned = {m.user_id for m in mentions if m.user_id}
         here = any(m.type is MentionType.HERE for m in mentions) and (
             self._take_here_slot(space_id, author_id)
+        )
+        post_about = NotificationSubject.of(
+            NotificationObject.SPACE_POST,
+            post_id,
+            space_id=space_id,
+            space_name=space.name,
+        )
+        mention_about = (
+            NotificationSubject.of(
+                NotificationObject.SPACE_COMMENT,
+                comment_id,
+                space_id=space_id,
+                space_name=space.name,
+            )
+            if comment_id
+            else post_about
         )
         members = await self._spaces.list_members(space_id)
         blocked = await self._withheld_from(author_id)
@@ -1518,7 +1769,9 @@ class NotificationService(ProtectionGateMixin):
                     ),
                     link_url=link,
                 ),
+                about=mention_about if ntype == "space_mention" else post_about,
                 actor_user_id=author_id,
+                actor_name=name,
                 withheld=blocked,
             )
 
@@ -1561,6 +1814,12 @@ class NotificationService(ProtectionGateMixin):
                             space_name=space.name,
                         ),
                         link_url=space_moderation_link(event.item.space_id),
+                    ),
+                    about=NotificationSubject.of(
+                        NotificationObject.SPACE,
+                        event.item.space_id,
+                        space_id=event.item.space_id,
+                        space_name=space.name,
                     ),
                     # A duty, not news about a person: the title names
                     # nobody, and blocking a submitter must not hide the
@@ -1616,6 +1875,12 @@ class NotificationService(ProtectionGateMixin):
                         space_name=space.name,
                     ),
                     link_url=space_moderation_link(event.space_id),
+                ),
+                about=NotificationSubject.of(
+                    NotificationObject.SPACE,
+                    event.space_id,
+                    space_id=event.space_id,
+                    space_name=space.name,
                 ),
                 actor_user_id=None,  # a duty; the reporter stays unnamed
             )
@@ -1701,8 +1966,13 @@ class NotificationService(ProtectionGateMixin):
                     ),
                     link_url=link,
                 ),
+                about=NotificationSubject.of(
+                    NotificationObject.SPACE_HOUSEHOLD,
+                    f"{event.space_id}/{event.instance_id}",
+                    space_id=event.space_id,
+                    space_name=space.name,
+                ),
                 actor_user_id=None,
-                dedupe_by_link=True,
                 push=not told,
             )
 
@@ -1755,6 +2025,12 @@ class NotificationService(ProtectionGateMixin):
                     space_name=space.name,
                 ),
                 link_url=f"/spaces/{item.space_id}",
+            ),
+            about=NotificationSubject.of(
+                NotificationObject.MODERATION_ITEM,
+                item.id,
+                space_id=item.space_id,
+                space_name=space.name,
             ),
             actor_user_id=None,  # a decision about your own content
         )
@@ -1820,6 +2096,9 @@ class NotificationService(ProtectionGateMixin):
                         ),
                         link_url=HOUSEHOLD_CALENDAR_LINK,
                     ),
+                    about=NotificationSubject.of(
+                        NotificationObject.EVENT, cal_event.id
+                    ),
                     actor_user_id=cal_event.created_by,
                     push_params={
                         "name": await self._person_name(
@@ -1856,6 +2135,12 @@ class NotificationService(ProtectionGateMixin):
                     ),
                     link_url=space_calendar_link(cal_event.calendar_id),
                 ),
+                about=NotificationSubject.of(
+                    NotificationObject.EVENT,
+                    cal_event.id,
+                    space_id=space.id,
+                    space_name=space.name,
+                ),
                 actor_user_id=cal_event.created_by,
                 withheld=blocked,
                 push_params={
@@ -1878,8 +2163,14 @@ class NotificationService(ProtectionGateMixin):
         for a local cancel, by the inbound ``SPACE_CALENDAR_EVENT_DELETED``
         handler for one made in another household.
         """
+        # The event is gone: its own rows go too (its "new event" row, a
+        # reminder, an earlier change) — the cancellation below replaces them.
+        await self._forget([object_key(NotificationObject.EVENT, event.event_id)])
         await self._tell_still_coming(
             event.notify_user_ids,
+            about=NotificationSubject.of(
+                NotificationObject.EVENT, event.event_id, space_id=event.space_id
+            ),
             actor_user_id=event.actor_user_id,
             ntype="calendar_event_cancelled",
             key="notification.calendar.cancelled",
@@ -1919,13 +2210,20 @@ class NotificationService(ProtectionGateMixin):
             return
         # A space event's ``calendar_id`` is the space id; anything else
         # is a personal calendar on the household calendar page.
+        space = await self._spaces.get(cal_event.calendar_id)
         link = (
             space_calendar_link(cal_event.calendar_id)
-            if await self._spaces.get(cal_event.calendar_id) is not None
+            if space is not None
             else HOUSEHOLD_CALENDAR_LINK
         )
         await self._tell_still_coming(
             [r.user_id for r in rsvps if r.status in RSVPStatus.STILL_COMING],
+            about=NotificationSubject.of(
+                NotificationObject.EVENT,
+                cal_event.id,
+                space_id=space.id if space is not None else None,
+                space_name=space.name if space is not None else None,
+            ),
             actor_user_id=event.actor_user_id,
             ntype="calendar_event_updated",
             key="notification.calendar.updated",
@@ -1938,6 +2236,7 @@ class NotificationService(ProtectionGateMixin):
         self,
         cohort: Iterable[str],
         *,
+        about: NotificationSubject,
         actor_user_id: str | None,
         ntype: str,
         key: str,
@@ -1982,7 +2281,9 @@ class NotificationService(ProtectionGateMixin):
                     title=title,
                     link_url=link_url,
                 ),
+                about=about,
                 actor_user_id=actor_user_id,
+                actor_name=name,
                 withheld=withheld,
                 push_params={"name": name},
             )
@@ -2003,6 +2304,9 @@ class NotificationService(ProtectionGateMixin):
                     summary=event.summary,
                 ),
                 link_url=space_calendar_link(event.space_id),
+            ),
+            about=NotificationSubject.of(
+                NotificationObject.EVENT, event.event_id, space_id=event.space_id
             ),
             actor_user_id=None,  # the user's own reminder
         )
@@ -2037,6 +2341,7 @@ class NotificationService(ProtectionGateMixin):
                 title=title,
                 link_url=f"{HOUSEHOLD_CALENDAR_LINK}?event={event_id}",
             ),
+            about=NotificationSubject.of(NotificationObject.EVENT, event_id),
             actor_user_id=None,  # the clock
         )
 
@@ -2075,7 +2380,14 @@ class NotificationService(ProtectionGateMixin):
                     ),
                     link_url=link_url,
                 ),
+                about=NotificationSubject.of(
+                    NotificationObject.TASK,
+                    task.id,
+                    space_id=event.space_id,
+                    space_name=space_name,
+                ),
                 actor_user_id=completed_by,
+                actor_name=name,
                 withheld=blocked,
                 push_params={"name": name, "space_name": space_name},
             )
@@ -2111,6 +2423,12 @@ class NotificationService(ProtectionGateMixin):
                 type="post_moderated",
                 title=title,
                 link_url=f"/spaces/{event.space_id}",
+            ),
+            about=NotificationSubject.of(
+                NotificationObject.SPACE_POST,
+                post.id,
+                space_id=event.space_id,
+                space_name=space_name,
             ),
             actor_user_id=None,  # a decision about your own content
         )
@@ -2157,7 +2475,14 @@ class NotificationService(ProtectionGateMixin):
                     ),
                     link_url=f"/spaces/{event.space_id}",
                 ),
+                about=NotificationSubject.of(
+                    NotificationObject.SPACE,
+                    event.space_id,
+                    space_id=event.space_id,
+                    space_name=space.name,
+                ),
                 actor_user_id=event.user_id,
+                actor_name=name,
                 withheld=blocked,
             )
 
@@ -2176,6 +2501,9 @@ class NotificationService(ProtectionGateMixin):
         if space is None:
             return
         removed = space.archived_reason == "removed"
+        # The space's other rows go (the copy is an archive now); the notice
+        # below is what stays.
+        await self._forget_space(event.space_id)
         members = await self._spaces.list_members(event.space_id)
         for member in members:
             locale = self._locale(await self._users.get_by_user_id(member.user_id))
@@ -2215,10 +2543,15 @@ class NotificationService(ProtectionGateMixin):
                     link_url=f"/spaces/{event.space_id}",
                 ),
                 # A re-broadcast of SPACE_DISSOLVED (fresh msg_id) must not
-                # re-notify every member; the (user_id, type, link_url) tuple
-                # is stable for this one-time notice.
+                # re-notify every member: it lands on the same row, and a
+                # repeat of this type on an unread row is silent.
+                about=NotificationSubject.of(
+                    NotificationObject.SPACE,
+                    event.space_id,
+                    space_id=event.space_id,
+                    space_name=space.name,
+                ),
                 actor_user_id=None,
-                dedupe_by_link=True,
             )
 
     async def on_admin_seeds_retired(
@@ -2247,8 +2580,10 @@ class NotificationService(ProtectionGateMixin):
                     body=None,
                     link_url=f"/spaces/{event.space_id}",
                 ),
+                about=NotificationSubject.of(
+                    NotificationObject.SPACE, event.space_id, space_id=event.space_id
+                ),
                 actor_user_id=None,
-                dedupe_by_link=True,
             )
 
     async def on_space_join_requested(
@@ -2285,7 +2620,14 @@ class NotificationService(ProtectionGateMixin):
                     ),
                     link_url=space_moderation_link(event.space_id),
                 ),
+                about=NotificationSubject.of(
+                    NotificationObject.SPACE,
+                    event.space_id,
+                    space_id=event.space_id,
+                    space_name=space.name,
+                ),
                 actor_user_id=event.user_id,
+                actor_name=name,
                 withheld=blocked,
             )
 
@@ -2316,6 +2658,12 @@ class NotificationService(ProtectionGateMixin):
                     space_name=space.name,
                 ),
                 link_url=f"/spaces/{event.space_id}",
+            ),
+            about=NotificationSubject.of(
+                NotificationObject.SPACE,
+                event.space_id,
+                space_id=event.space_id,
+                space_name=space.name,
             ),
             actor_user_id=None,  # an answer to your own request
         )
@@ -2351,6 +2699,12 @@ class NotificationService(ProtectionGateMixin):
                 ),
                 link_url=f"/spaces/{event.space_id}/settings",
             ),
+            about=NotificationSubject.of(
+                NotificationObject.SPACE,
+                event.space_id,
+                space_id=event.space_id,
+                space_name=space.name,
+            ),
             actor_user_id=None,  # the space is yours now, whoever handed it
         )
 
@@ -2380,6 +2734,11 @@ class NotificationService(ProtectionGateMixin):
                 # The title can't name the space (lock screen, §25.3): the
                 # space's landing page says which one.
                 link_url=space_about_link(event.space_id),
+            ),
+            # No space name: the requester may not know the space's
+            # household (the push and title don't name it either).
+            about=NotificationSubject.of(
+                NotificationObject.SPACE, event.space_id, space_id=event.space_id
             ),
             actor_user_id=None,  # an answer to your own request
         )
@@ -2455,7 +2814,14 @@ class NotificationService(ProtectionGateMixin):
                 ),
                 link_url=link,
             ),
+            about=NotificationSubject.of(
+                NotificationObject.SPACE,
+                event.space_id,
+                space_id=event.space_id,
+                space_name=space.name,
+            ),
             actor_user_id=event.invitee_user_id,
+            actor_name=name,
         )
 
     # ── Momentum (§Momentum) ──────────────────────────────────────────
@@ -2499,7 +2865,9 @@ class NotificationService(ProtectionGateMixin):
                 ),
                 link_url=f"/momentum/{event.moment_id}",
             ),
+            about=NotificationSubject.of(NotificationObject.MOMENT, event.moment_id),
             actor_user_id=event.reactor_user_id,
+            actor_name=name,
             push_params={"name": name},  # never the emoji (D11)
         )
 
@@ -2539,6 +2907,9 @@ class NotificationService(ProtectionGateMixin):
                 link_url=(
                     f"/momentum/{event.parent_moment_id}?reply={event.moment_id}"
                 ),
+            ),
+            about=NotificationSubject.of(
+                NotificationObject.MOMENT, event.parent_moment_id
             ),
             actor_user_id=event.author_user_id,
         )
@@ -2580,7 +2951,11 @@ class NotificationService(ProtectionGateMixin):
                 ),
                 link_url=f"/highlights/{event.highlight_id}",
             ),
+            about=NotificationSubject.of(
+                NotificationObject.HIGHLIGHT, event.highlight_id
+            ),
             actor_user_id=event.reactor_user_id,
+            actor_name=name,
             push_params={"name": name},  # never the emoji (D11)
         )
 
@@ -2603,6 +2978,9 @@ class NotificationService(ProtectionGateMixin):
                     name=await self._person_name(event.follower_user_id, locale),
                 ),
                 link_url="/momentum",
+            ),
+            about=NotificationSubject.of(
+                NotificationObject.FOLLOWERS, event.followed_user_id
             ),
             actor_user_id=event.follower_user_id,
         )
@@ -2646,6 +3024,12 @@ class NotificationService(ProtectionGateMixin):
                         space_name=event.space_name,
                     ),
                     link_url="/settings#privacy",
+                ),
+                about=NotificationSubject.of(
+                    NotificationObject.SPACE,
+                    event.space_id,
+                    space_id=event.space_id,
+                    space_name=event.space_name,
                 ),
                 actor_user_id=event.actor_user_id,
                 withheld=blocked,

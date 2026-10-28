@@ -2203,8 +2203,15 @@ class RealtimeService:
                 "notif_type": event.type,
                 "title": event.title,
                 "link_url": event.link_url,
-                # A refreshed unread row: move it up, don't count it again.
+                # An existing row came back to the top: move it up, don't
+                # count it again (a re-opened read row's new count follows
+                # as a ``notification.unread_count`` frame).
                 "bumped": event.bumped,
+                "reopened": event.reopened,
+                # What it is about and how to render it (0129).
+                "object_key": event.object_key,
+                "space_id": event.space_id,
+                "params": event.params.to_dict() if event.params else None,
             },
         )
 

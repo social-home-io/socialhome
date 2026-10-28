@@ -10,6 +10,7 @@ from ..app_keys import (
     notification_service_key,
 )
 from ..domain.events import NotificationReadChanged
+from ..domain.notification import Notification
 from ..security import error_response
 from .base import BaseView
 
@@ -17,6 +18,30 @@ from .base import BaseView
 MAX_READ_LINKS = 20
 #: Longest page path accepted (a notification link is far shorter).
 MAX_LINK_LENGTH = 512
+#: Things one "I saw these" call may name.
+MAX_READ_OBJECTS = 20
+#: Longest object key accepted (``<kind>:<id>`` is far shorter).
+MAX_OBJECT_KEY_LENGTH = 256
+
+
+def notification_json(n: Notification) -> dict:
+    """One row as the list returns it. ``object_key`` / ``space_id`` /
+    ``params`` are ``null`` on a row from before 0129; ``new_count`` /
+    ``total_count`` lift the params' counts (1 / 1 for such a row)."""
+    return {
+        "id": n.id,
+        "type": n.type,
+        "title": n.title,
+        "body": n.body,
+        "link_url": n.link_url,
+        "read_at": n.read_at,
+        "created_at": n.created_at,
+        "object_key": n.object_key,
+        "space_id": n.space_id,
+        "params": n.params.to_dict() if n.params else None,
+        "new_count": n.params.new if n.params else 1,
+        "total_count": n.params.total if n.params else 1,
+    }
 
 
 class NotificationCollectionView(BaseView):
@@ -28,20 +53,7 @@ class NotificationCollectionView(BaseView):
         limit = min(max(int(self.request.query.get("limit", 50)), 1), 50)
         repo = self.svc(notification_repo_key)
         notes = await repo.list(ctx.user_id, before=before, limit=limit)
-        return web.json_response(
-            [
-                {
-                    "id": n.id,
-                    "type": n.type,
-                    "title": n.title,
-                    "body": n.body,
-                    "link_url": n.link_url,
-                    "read_at": n.read_at,
-                    "created_at": n.created_at,
-                }
-                for n in notes
-            ]
-        )
+        return web.json_response([notification_json(n) for n in notes])
 
 
 class NotificationUnreadCountView(BaseView):
@@ -120,4 +132,37 @@ class NotificationReadByLinkView(BaseView):
             )
         svc = self.svc(notification_service_key)
         marked = await svc.mark_read_by_links(ctx.user_id, links)
+        return web.json_response({"ok": True, "marked": marked})
+
+
+class NotificationReadByObjectView(BaseView):
+    """``POST /api/notifications/read-by-object`` — the caller saw these things.
+
+    Body ``{"object_keys": ["post:p1", "dm:c1", …]}`` (1–20 keys, each the
+    ``object_key`` a row carries): every unread row of the caller about one
+    of them reads as read, whatever its type, and every device of theirs
+    gets the new unread count. Returns ``{ok, marked}``.
+    """
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        data = await self.body()
+        keys = data.get("object_keys") if isinstance(data, dict) else None
+        if (
+            not isinstance(keys, list)
+            or not 1 <= len(keys) <= MAX_READ_OBJECTS
+            or not all(
+                isinstance(key, str)
+                and ":" in key
+                and len(key) <= MAX_OBJECT_KEY_LENGTH
+                for key in keys
+            )
+        ):
+            return error_response(
+                422,
+                "UNPROCESSABLE",
+                f"object_keys must be 1-{MAX_READ_OBJECTS} '<kind>:<id>' keys.",
+            )
+        svc = self.svc(notification_service_key)
+        marked = await svc.mark_read_by_objects(ctx.user_id, keys)
         return web.json_response({"ok": True, "marked": marked})
