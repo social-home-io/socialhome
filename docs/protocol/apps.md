@@ -177,11 +177,16 @@ legacy/binary events it is broadcast to all local users with the app enabled:
 | `app_id` | `string` | Identifies the installed app. |
 | `session_id` | `string` | Hex UUID that scopes the session — route messages to the correct in-page component using this. |
 | `from_instance` | `string` | Instance ID of the sending household — lets the app show who sent a move or issued an invite. |
-| `from_user` | `string` \| absent | Username of the initiator on the sending household.  Present for v_18+ person-routed events and local-loopback sessions; absent for legacy household-addressed events and binary inbound. |
+| `from_user` | `string` \| absent | Who sent it — the same `user_ref` the app's contact for that person carries, so the app can match and answer them: the local `user_id` for someone in this household, the username on the sending household for someone in another. Present on every same-household frame and on every v_18+ person-routed frame from another household (`APP_SESSION` and `APP_MESSAGE` alike); on the older household fan-out only when the named sender is a known user of `from_instance`; absent on binary `fed-app-v1` inbound (no slot). **What is proven:** `from_instance` is the signature-verified sending household (§24.11); `from_user` is that household's own claim about which of its people sent it — the receiver only checks it names a user it knows of that household (a per-user frame with an unknown sender is refused). A household can speak for its own people, never for another household's. |
 | `kind` | `"session"` \| `"message"` | `"session"` for `APP_SESSION` control events (open/close); `"message"` for `APP_MESSAGE` JSON events and binary `fed-app-v1` data frames. |
 | `payload` | `object` | Application-defined dict. For `APP_SESSION` events this is the full decrypted payload (includes `verb`); for `APP_MESSAGE` events it is the `data` sub-field. |
 
 ### Bridge relay into the iframe
+
+The host (`client/src/features/apps/AppHost.tsx`) mounts the bridge's
+`message` listener in the same render commit that puts the iframe in the page
+(a layout effect), so an app whose cached bundle starts at once still has its
+first request answered — the SDK sends each request once and does not resend.
 
 The SPA host bridge (`client/src/features/apps/bridge.ts`) listens on
 `app.message` WS frames and, after filtering by `app_id`, relays the full
@@ -193,7 +198,7 @@ identity into the sandboxed iframe as a `MessageEvent`:
   kind: 'session' | 'message',   // forwarded from the WS frame
   sessionId: string,              // WS frame's session_id
   fromInstance: string,           // WS frame's from_instance
-  fromUser?: string,              // WS frame's from_user (v_18+ / local loopback; absent for legacy)
+  fromUser?: string,              // WS frame's from_user (absent on legacy / binary inbound)
   payload: object,                // WS frame's payload
 }
 ```
@@ -202,8 +207,8 @@ This lets apps:
 - **Route by session** — use `sessionId` to dispatch a message to the correct
   game or whiteboard component when multiple sessions are open simultaneously.
 - **Show sender identity** — `fromInstance` names the peer household; `fromUser`
-  names the individual who sent the invite or move (available for v_18+ remote
-  and all local-loopback sessions).
+  names the individual who sent the invite or move (every same-household
+  frame and every v_18+ person-routed frame from another household).
 - **Distinguish invites from moves** — `kind === "session"` signals a
   lifecycle event (open/close); `kind === "message"` is in-game data.
 

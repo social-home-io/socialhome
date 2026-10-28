@@ -111,6 +111,41 @@ describe('AppHostInner', () => {
     vi.mocked(mountBridge).mockReturnValue(() => {})
   })
 
+  it('answers a bridge request the app sends as soon as its frame is in the page (cached bundle race)', async () => {
+    // A cached bundle (or arriving from another page) can run the app's
+    // code before a deferred effect fires. Its first request — the SDK
+    // never retries it — must still be answered, so the host listens from
+    // the moment the frame is committed, not after the next paint.
+    const actual = await vi.importActual<typeof import('@/features/apps/bridge')>(
+      '@/features/apps/bridge',
+    )
+    vi.mocked(mountBridge).mockImplementationOnce(actual.mountBridge)
+    const { container } = render(<AppHostInner appId="chess" />)
+
+    // Only microtasks: the runtime resolves and the frame commits, but no
+    // paint / timer has run yet — exactly when a cached app starts.
+    let iframe: HTMLIFrameElement | null = null
+    for (let i = 0; i < 50 && !iframe; i++) {
+      await Promise.resolve()
+      iframe = container.querySelector('iframe')
+    }
+    expect(iframe).not.toBeNull()
+    const appWindow = iframe!.contentWindow!
+    const post = vi.spyOn(appWindow, 'postMessage').mockImplementation(() => {})
+
+    window.dispatchEvent(
+      new MessageEvent('message', {
+        source: appWindow,
+        data: { id: 1, method: 'app.context' },
+      }),
+    )
+
+    expect(post).toHaveBeenCalledWith(
+      { id: 1, ok: true, result: { appId: 'chess', selfUserId: 'u1' } },
+      '*',
+    )
+  })
+
   it('shows age-restricted message and no iframe when getRuntime rejects with 403', async () => {
     vi.mocked(getRuntime).mockRejectedValueOnce(
       new ApiError(403, '/api/apps/locked/runtime', { code: 'FORBIDDEN', detail: 'Age restricted' }),

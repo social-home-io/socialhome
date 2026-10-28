@@ -789,8 +789,11 @@ class AppFederationService:
             unresolvable, fall back to the legacy/best-effort household
             fan-out to every (age-eligible) local user.
         from_user:
-            The remote initiator's username, used to resolve the
-            ``from_display`` label on the published :class:`AppChallengeReceived`.
+            The remote initiator's username. Put on the WS frame as
+            ``from_user`` once it resolves to a known user of
+            ``from_instance`` (always on the per-user path, which refuses an
+            unknown initiator); also resolves the ``from_display`` label on
+            the published :class:`AppChallengeReceived`.
         notify_open:
             ``True`` only for an inbound ``APP_SESSION`` *open* — when the
             event also resolves to a single local recipient, raise a bell row +
@@ -809,7 +812,7 @@ class AppFederationService:
             )
             return
 
-        frame = {
+        frame: dict[str, Any] = {
             "type": "app.message",
             "app_id": app_id,
             "session_id": session_id,
@@ -858,6 +861,12 @@ class AppFederationService:
                         session_id,
                     )
                     return
+                # Name the sender on the frame, like the same-household path:
+                # ``from_instance`` is the signature-proven household and the
+                # initiator just resolved as one of its users. The username
+                # itself is that household's claim (it vouches for its own
+                # people); it is the ``user_ref`` the app answers them by.
+                frame["from_user"] = from_user
                 if withdraw:
                     await self._withdrawn(
                         app_id,
@@ -936,6 +945,9 @@ class AppFederationService:
         # frames carry no routing slot) can't be checked.
         initiator = await self._resolve_remote_initiator(from_instance, from_user)
         if initiator is not None:
+            # A named, known sender rides the frame (see the per-user path);
+            # an unknown name is not passed on.
+            frame["from_user"] = from_user
             user_ids = [
                 uid
                 for uid in user_ids
