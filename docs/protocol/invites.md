@@ -1512,6 +1512,33 @@ filed and no admin is notified. The local route
 `POST /api/spaces/{id}/join-requests` applies the same tier rule to the
 host's own users (see [api.md](../api.md)).
 
+**Who may answer a request.** Both households keep a copy of a
+cross-household request under the same `request_id`, and each copy names
+the *other* party in `remote_applicant_instance_id`: the host's copy names
+the applicant household, the applicant's copy names the host the request
+went to (an "Ask to join", or a redeem / invitation accept the host turned
+into a request). An answer is taken only from that household, in its
+direction, and only while the request is still `pending`:
+
+| Answer | Sender must be | Lands on |
+|---|---|---|
+| `SPACE_JOIN_REQUEST_APPROVED` / `_DENIED` / `_EXPIRED` | the host named on the applicant's copy | the applicant's copy (never a host's copy) |
+| `SPACE_JOIN_REQUEST_WITHDRAWN` | the applicant household named on the host's copy | the host's copy (a space this household owns, or an admin elevation it filed) |
+| `SPACE_JOIN_REQUEST_REPLY_VIA` | as for the `status` it carries | as for that status |
+
+The sender is the envelope's `from_instance`, which the §24.11 pipeline
+proved by signature. That holds on every transport an answer travels
+today: direct, the GFS envelope relay (the whole signed envelope rides
+inside the seal) and the mesh (`SPACE_ROUTED` dispatches the inner event
+with the authenticated origin). A `space_id` in the answer must match the
+request's. Anything else — a third household that learnt the id, an
+applicant approving its own request on the host (which would let
+`has_approved_join_request` seat it in a local community past the admins
+and the area check), an answer to a local user's request, an answer naming
+another space — is dropped with a WARNING naming the sender and the
+request: no state change, no event. A relay forwarding a `_REPLY_VIA` in
+its own name is not the host and is dropped the same way.
+
 ```mermaid
 sequenceDiagram
     autonumber
