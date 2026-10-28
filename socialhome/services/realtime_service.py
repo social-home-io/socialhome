@@ -2219,13 +2219,15 @@ class RealtimeService:
         self,
         event: NotificationReadChanged,
     ) -> None:
-        await self._ws.broadcast_to_user(
-            event.user_id,
-            {
-                "type": "notification.unread_count",
-                "unread_count": event.unread_count,
-            },
-        )
+        frame: dict = {
+            "type": "notification.unread_count",
+            "unread_count": event.unread_count,
+        }
+        if event.handled:
+            # "Needs you" items someone just handled: every device drops
+            # them from the section.
+            frame["handled"] = list(event.handled)
+        await self._ws.broadcast_to_user(event.user_id, frame)
 
     # ─── Bazaar (§9) ─────────────────────────────────────────────────────
 

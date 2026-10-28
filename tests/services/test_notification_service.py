@@ -3561,15 +3561,18 @@ async def test_bell_rows_without_content_push_their_own_title(stack):
     assert [p.title for _, p in push.calls] == ["anna challenged you to chess"]
 
 
-async def test_an_invite_push_never_names_the_space(stack):
+async def test_an_invite_push_names_the_space_only_when_allowed(stack):
     """D11: an invite can come from a household the recipient never paired
-    with, so its push says who, never which space."""
+    with, so its push names the space only when the caller passes it (this
+    household's own invite or a paired household's)."""
     b = await stack.provision_user("bob")
     note = new_notification(
         user_id=b.user_id, type="space_invite", title="Zoë invited you to Salon"
     )
-    title = stack.notif_svc._push_title(note, b, {"name": "Zoë", "space_name": "Salon"})
+    title = stack.notif_svc._push_title(note, b, {"name": "Zoë", "space_name": None})
     assert title == "Zoë invited you to a space"
+    title = stack.notif_svc._push_title(note, b, {"name": "Zoë", "space_name": "Salon"})
+    assert title == "Zoë invited you to Salon"
 
 
 async def test_an_unclassified_type_pushes_the_generic_title(stack):

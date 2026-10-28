@@ -1614,6 +1614,8 @@ def _wire_federation_stack(
     )
     app[K.auto_pair_coordinator_key] = auto_pair_coordinator
     app[K.auto_pair_inbox_key] = auto_pair_inbox
+    # "Needs you" keeps a pairing request pinned only while it waits here.
+    app[K.notification_service_key].attach_pair_inbox(auto_pair_inbox)
     # Cancelling a pairing that was never confirmed (``DELETE
     # /api/pairing/pending/{id}``): closes the handshake, tells the peer
     # with a ``PAIRING_ABORT``, forgets the half-pair — no unpair tombstone.

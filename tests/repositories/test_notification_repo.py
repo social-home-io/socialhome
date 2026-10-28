@@ -6,7 +6,11 @@ from dataclasses import replace
 
 import pytest
 
-from socialhome.domain.notification import NotificationActor, NotificationParams
+from socialhome.domain.notification import (
+    NotificationActor,
+    NotificationHandled,
+    NotificationParams,
+)
 from socialhome.repositories._spec import Spec
 from socialhome.repositories.notification_repo import (
     SqliteNotificationRepo,
@@ -248,32 +252,83 @@ async def test_list_unread_only_pages_through_unread_rows(env):
     assert [n.id for n in older] == [old.id]
 
 
-async def test_mark_read_for_everyone_returns_who_flipped(env):
+async def _action(env, uid, key, *, type="space_join_requested", params=True):
+    note = replace(
+        new_notification(user_id=uid, type=type, title="t"),
+        object_key=key,
+        params=NotificationParams() if params else None,
+    )
+    await env.notif_repo.save(note)
+    return note
+
+
+async def test_resolve_object_marks_every_recipients_row_handled(env):
     a = await _user(env, "uid-a")
     b = await _user(env, "uid-b")
     c = await _user(env, "uid-c")
-    link = "/spaces/s1/moderation"
-    for uid in (a, b):
-        n = new_notification(
-            user_id=uid, type="space_join_requested", title="t", link_url=link
-        )
-        await env.notif_repo.save(n)
-    other = new_notification(
-        user_id=c, type="moderation_pending", title="t", link_url=link
+    na = await _action(env, a, "join_request:r1")
+    nb = await _action(env, b, "join_request:r1", params=False)  # pre-0129 shape
+    await _action(env, c, "join_request:r2")  # another request
+    await _action(env, c, "join_request:r1", type="comment_added")  # another type
+    await env.notif_repo.mark_read(na.id, a)  # read: still resolves
+    handled = NotificationHandled("approved", NotificationActor("uid-s", "Søren"))
+    users = await env.notif_repo.resolve_object(
+        "join_request:r1", types=["space_join_requested"], handled=handled
     )
-    await env.notif_repo.save(other)
-    flipped = await env.notif_repo.mark_read_for_everyone(
-        link_url=link, type="space_join_requested"
+    assert sorted(users) == ["uid-a", "uid-b"]
+    for note in (na, nb):
+        back = await env.notif_repo.get(note.id)
+        assert back.is_read
+        assert back.params.handled == handled
+        assert not back.is_pending_action
+    assert await env.notif_repo.count_unread(c) == 2
+    # The first answer stands: a late duplicate changes nothing.
+    again = await env.notif_repo.resolve_object(
+        "join_request:r1",
+        types=["space_join_requested"],
+        handled=NotificationHandled("declined"),
     )
-    assert sorted(flipped) == ["uid-a", "uid-b"]
-    assert await env.notif_repo.count_unread(a) == 0
-    assert await env.notif_repo.count_unread(c) == 1  # another type stays
+    assert again == []
+    assert (await env.notif_repo.get(na.id)).params.handled.outcome == "approved"
     assert (
-        await env.notif_repo.mark_read_for_everyone(
-            link_url=link, type="space_join_requested"
+        await env.notif_repo.resolve_object(
+            "join_request:r1", types=[], handled=handled
         )
         == []
     )
+
+
+async def test_resolve_object_can_touch_one_recipient_only(env):
+    a = await _user(env, "uid-a")
+    b = await _user(env, "uid-b")
+    na = await _action(env, a, "space_invite:s1", type="space_invite")
+    nb = await _action(env, b, "space_invite:s1", type="space_invite")
+    users = await env.notif_repo.resolve_object(
+        "space_invite:s1",
+        types=["space_invite"],
+        handled=NotificationHandled("declined"),
+        user_id=a,
+    )
+    assert users == [a]
+    assert not (await env.notif_repo.get(na.id)).is_pending_action
+    assert (await env.notif_repo.get(nb.id)).is_pending_action
+
+
+async def test_list_pending_actions_keeps_read_rows_until_handled(env):
+    a = await _user(env, "uid-a")
+    n1 = await _action(env, a, "join_request:r1")
+    n2 = await _action(env, a, "space_invite:s1", type="space_invite")
+    await _action(env, a, "post:p1", type="comment_added")
+    await env.notif_repo.mark_read(n2.id, a)
+    rows = await env.notif_repo.list_pending_actions(a)
+    assert {n.id for n in rows} == {n1.id, n2.id}
+    await env.notif_repo.resolve_object(
+        "join_request:r1",
+        types=["space_join_requested"],
+        handled=NotificationHandled("declined"),
+    )
+    assert [n.id for n in await env.notif_repo.list_pending_actions(a)] == [n2.id]
+    assert len(await env.notif_repo.list_pending_actions(a, limit=0)) == 0
 
 
 # ── Subject, groups, by object / by space (0129) ─────────────────────────

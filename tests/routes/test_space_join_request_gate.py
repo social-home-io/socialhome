@@ -119,3 +119,70 @@ async def test_a_member_asking_again_is_told_already_member(seeded):  # noqa: F8
     r = await _ask(client, sid, hdr["owner"])
     assert r.status == 422
     assert (await r.json())["error"]["code"] == "ALREADY_MEMBER"
+
+
+# ── Answering a request: "Needs you" (D12) ────────────────────────────
+
+
+async def _needs_you(client, headers: dict) -> list[dict]:
+    r = await client.get("/api/notifications/needs-you", headers=headers)
+    assert r.status == 200, await r.text()
+    body = await r.json()
+    assert body["count"] == len(body["items"])
+    return body["items"]
+
+
+async def test_a_request_is_pinned_for_the_admin_until_answered(seeded):  # noqa: F811
+    client, hdr = seeded
+    sid = await _create_space(client, hdr, "public", "request")
+    rid = (await (await _ask(client, sid, hdr["guest"])).json())["request_id"]
+    [item] = await _needs_you(client, hdr["owner"])
+    assert item["type"] == "space_join_requested"
+    assert item["object_key"] == f"join_request:{rid}"
+    assert item["space_id"] == sid
+    assert await _needs_you(client, hdr["guest"]) == []
+
+    r = await client.post(
+        f"/api/spaces/{sid}/join-requests/{rid}/deny", headers=hdr["owner"]
+    )
+    assert r.status == 200, await r.text()
+    assert await _needs_you(client, hdr["owner"]) == []
+    # The timeline row says who handled it.
+    rows = await (await client.get("/api/notifications", headers=hdr["owner"])).json()
+    [row] = [n for n in rows if n["object_key"] == f"join_request:{rid}"]
+    assert row["params"]["handled"]["outcome"] == "declined"
+    assert row["read_at"] is not None
+
+
+async def test_a_second_answer_hears_who_got_there_first(seeded):  # noqa: F811
+    client, hdr = seeded
+    sid = await _create_space(client, hdr, "public", "request")
+    rid = (await (await _ask(client, sid, hdr["guest"])).json())["request_id"]
+    url = f"/api/spaces/{sid}/join-requests/{rid}"
+    assert (await client.post(f"{url}/approve", headers=hdr["owner"])).status == 200
+    r = await client.post(f"{url}/deny", headers=hdr["owner"])
+    assert r.status == 409
+    body = await r.json()
+    assert body["error"]["code"] == "JOIN_REQUEST_HANDLED"
+    assert body["error"]["params"]["status"] == "approved"
+
+
+async def test_nobody_but_an_admin_declines_a_request(seeded):  # noqa: F811
+    """A request id used to be enough to decline (and federate the refusal
+    of) anyone's request."""
+    client, hdr = seeded
+    sid = await _create_space(client, hdr, "public", "request")
+    rid = (await (await _ask(client, sid, hdr["guest"])).json())["request_id"]
+    r = await client.post(
+        f"/api/spaces/{sid}/join-requests/{rid}/deny", headers=hdr["follower"]
+    )
+    assert r.status == 403
+    # Through another space's URL the request does not exist.
+    r = await client.post(
+        f"/api/spaces/sp-glob/join-requests/{rid}/deny", headers=hdr["owner"]
+    )
+    assert r.status == 404
+    row = await client._db.fetchone(
+        "SELECT status FROM space_join_requests WHERE id=?", (rid,)
+    )
+    assert row["status"] == "pending"

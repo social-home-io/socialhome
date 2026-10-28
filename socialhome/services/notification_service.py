@@ -47,6 +47,8 @@ from ..domain.calendar import RSVPStatus
 from ..domain.conversation import ConversationType, SystemChatScope, mute_active
 from ..domain.events import (
     AppChallengeReceived,
+    AutoPairRequestAnswered,
+    AutoPairRequestIncoming,
     BazaarBidPlaced,
     BazaarListingExpired,
     BazaarOfferAccepted,
@@ -64,6 +66,7 @@ from ..domain.events import (
     EventReminderDue,
     HighlightFrameReactionChanged,
     HighlightRemoved,
+    LocalSpaceInviteCreated,
     MomentCreated,
     MomentDeleted,
     MomentReactionChanged,
@@ -73,14 +76,18 @@ from ..domain.events import (
     PostDeleted,
     PostEdited,
     PostReactionChanged,
+    RemoteJoinRequestApproved,
+    RemoteJoinRequestDenied,
     RemoteSpaceDissolved,
     RemoteSpaceInviteAccepted,
     RemoteSpaceInviteDeclined,
+    RemoteSpaceInviteReceived,
     RemoteSpaceMemberBanned,
     ReportFiled,
     ReportResolved,
     SpaceAdminSeedsRetiredAfterRestore,
     SpaceConfigChanged,
+    SpaceInviteAnswered,
     SpaceJoinApproved,
     SpaceJoinDenied,
     SpaceJoinRequested,
@@ -100,6 +107,7 @@ from ..domain.events import (
     TaskDeleted,
     UserFollowed,
 )
+from ..domain.federation import PairingStatus
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.mention import Mention, MentionType
 from ..domain.notification import (
@@ -107,6 +115,7 @@ from ..domain.notification import (
     HOUSEHOLD_FEED_ID,
     Notification,
     NotificationActor,
+    NotificationHandled,
     NotificationObject,
     NotificationSubject,
     SpaceNotifLevel,
@@ -247,9 +256,11 @@ _PUSH_TITLES: dict[str, tuple[tuple[str, str], ...]] = {
     "highlight_reacted": (
         ("notification.push.highlight_reacted", "{name} reacted to your highlight"),
     ),
-    # An invite can come from a household the recipient never paired with,
-    # so its push never names the space (D11); the app shows which one.
+    # An invite can come from a household the recipient never paired with:
+    # its push names the space only for this household's own invite or a
+    # paired household's (D11); otherwise the app shows which one.
     "space_invite": (
+        ("notification.push.space_invite_to", "{name} invited you to {space_name}"),
         ("notification.push.space_invite", "{name} invited you to a space"),
     ),
     "post_reacted": (
@@ -308,6 +319,7 @@ _PUSH_AS_IS: frozenset[str] = frozenset(
         "space_join_denied",
         "space_remote_invite_accepted",
         "space_remote_invite_declined",
+        "pairing_request",
         "moment_replied",
         "user_followed",
         "space_location_enabled",
@@ -437,6 +449,7 @@ class NotificationService(ProtectionGateMixin):
         "_i18n",
         "_instances",
         "_notifs",
+        "_pair_inbox",
         "_personal_calendar_repo",
         "_posts",
         "_push",
@@ -500,6 +513,9 @@ class NotificationService(ProtectionGateMixin):
         # Reports — optional; it tells when a space's last open report was
         # handled, so every authority's "New report" row reads as read.
         self._reports = None
+        # The auto-pair inbox — optional; "Needs you" checks a pairing
+        # request still waits there (it lives in memory and expires).
+        self._pair_inbox = None
 
     def attach_post_repos(
         self,
@@ -510,6 +526,10 @@ class NotificationService(ProtectionGateMixin):
         D13 post reactions)."""
         self._posts = post_repo
         self._space_posts = space_post_repo
+
+    def attach_pair_inbox(self, inbox) -> None:
+        """Wire the auto-pair inbox (:meth:`pending_actions`)."""
+        self._pair_inbox = inbox
 
     def attach_report_repo(self, report_repo) -> None:
         """Wire the report repo (``on_report_resolved``)."""
@@ -571,6 +591,7 @@ class NotificationService(ProtectionGateMixin):
         withheld: frozenset[str] | None = None,
         push: bool = True,
         push_params: dict[str, str | None] | None = None,
+        flags: tuple[str, ...] = (),
     ) -> Notification | None:
         """The one gate every notification passes, then persist + publish
         ``NotificationCreated`` + fire title-only pushes to every registered
@@ -613,6 +634,9 @@ class NotificationService(ProtectionGateMixin):
         :data:`CHAT_REALERT_SECONDS` of quiet. ``push=False`` writes an
         in-app row only (D5 "Everything" activity, D13 reactions): silent
         too.
+
+        ``flags`` say why a "Needs you" item can't be decided with one tap
+        (:data:`~socialhome.domain.notification.JOIN_REQUEST_FLAGS`).
         """
         user = await self._users.get_by_user_id(note.user_id)
         if user is None:
@@ -643,7 +667,7 @@ class NotificationService(ProtectionGateMixin):
                 note,
                 object_key=about.object_key,
                 space_id=about.space_id,
-                params=first_params(actor, space_name=about.space_name),
+                params=first_params(actor, space_name=about.space_name, flags=flags),
             )
             await self._notifs.save(saved)
         else:
@@ -660,6 +684,7 @@ class NotificationService(ProtectionGateMixin):
                     actor,
                     reopen=group.is_read,
                     space_name=about.space_name,
+                    flags=flags,
                 ),
             )
             await self._notifs.update_group(saved)
@@ -836,6 +861,13 @@ class NotificationService(ProtectionGateMixin):
         self._bus.subscribe(SpaceJoinDenied, self.on_space_join_denied)
         self._bus.subscribe(SpaceJoinApproved, self.on_join_request_handled)
         self._bus.subscribe(SpaceJoinDenied, self.on_join_request_handled)
+        self._bus.subscribe(RemoteJoinRequestApproved, self.on_remote_join_answered)
+        self._bus.subscribe(RemoteJoinRequestDenied, self.on_remote_join_answered)
+        self._bus.subscribe(LocalSpaceInviteCreated, self.on_local_space_invite)
+        self._bus.subscribe(RemoteSpaceInviteReceived, self.on_remote_space_invite)
+        self._bus.subscribe(SpaceInviteAnswered, self.on_space_invite_answered)
+        self._bus.subscribe(AutoPairRequestIncoming, self.on_auto_pair_requested)
+        self._bus.subscribe(AutoPairRequestAnswered, self.on_auto_pair_answered)
         self._bus.subscribe(SpaceConfigChanged, self.on_space_ownership_transferred)
         self._bus.subscribe(
             RemoteSpaceInviteAccepted,
@@ -1584,39 +1616,76 @@ class NotificationService(ProtectionGateMixin):
         ):
             await self._announce_unread(user_id)
 
-    async def _announce_unread(self, user_id: str) -> None:
-        """Tell every device of ``user_id`` its unread count now."""
+    async def _announce_unread(
+        self, user_id: str, *, handled: tuple[str, ...] = ()
+    ) -> None:
+        """Tell every device of ``user_id`` its unread count now — and
+        which "Needs you" items just left the section (``handled``)."""
         await self._bus.publish(
             NotificationReadChanged(
                 user_id=user_id,
                 unread_count=await self._notifs.count_unread(user_id),
+                handled=handled,
             )
         )
 
-    async def _resolve_for_everyone(self, *, link_url: str, type: str) -> None:
-        """An action item was handled: its rows read as read for every
-        recipient, and each of their devices hears the new count."""
-        for user_id in await self._notifs.mark_read_for_everyone(
-            link_url=link_url, type=type
+    async def _resolve(
+        self,
+        key: str,
+        *,
+        types: Iterable[str],
+        outcome: str,
+        by_user_id: str | None = None,
+        user_id: str | None = None,
+    ) -> None:
+        """A "Needs you" item was handled: every recipient's row about
+        *key* (or only ``user_id``'s) says how it ended and who ended it,
+        reads as read, and leaves the section on each of their devices."""
+        by = (
+            NotificationActor(by_user_id, await self._held_name(by_user_id))
+            if by_user_id
+            else None
+        )
+        for uid in await self._notifs.resolve_object(
+            key,
+            types=types,
+            handled=NotificationHandled(outcome=outcome, by=by),
+            user_id=user_id,
         ):
-            await self._announce_unread(user_id)
+            await self._announce_unread(uid, handled=(key,))
 
-    # ── Action items: handled by one, handled for all ─────────────────
+    # ── Needs you: handled by one, handled for all (D12) ──────────────
     #
-    # The rows point at the space's review queue, not at one request, so
-    # they resolve once the queue they announce is empty — an admin who
-    # approved one of two requests still sees the other one waiting.
+    # A join request, an invite and a pairing request are each their own
+    # row (``join_request:<id>`` …): answering one resolves exactly that
+    # row for everyone it went to. A space's review queue (posts, reports)
+    # is one row per space — it resolves once the queue it announces is
+    # empty. Rows from before per-request keys (a join request keyed by
+    # its space) resolve the queue way too.
 
     async def on_join_request_handled(
         self, event: SpaceJoinApproved | SpaceJoinDenied
     ) -> None:
-        """No join request left in the space: every admin's "wants to join"
-        rows read as read."""
+        """This request was answered: every admin's row about it says who
+        approved or declined it. Once no request waits in the space, an
+        older space-wide "wants to join" row resolves too."""
+        if isinstance(event, SpaceJoinApproved):
+            approved, by = True, event.approved_by
+        else:
+            approved, by = False, event.denied_by
+        await self._resolve(
+            object_key(NotificationObject.JOIN_REQUEST, event.request_id),
+            types=("space_join_requested",),
+            outcome="approved" if approved else "declined",
+            by_user_id=by,
+        )
         if await self._spaces.list_pending_join_requests(event.space_id):
             return
-        await self._resolve_for_everyone(
-            link_url=space_moderation_link(event.space_id),
-            type="space_join_requested",
+        await self._resolve(
+            object_key(NotificationObject.SPACE, event.space_id),
+            types=("space_join_requested",),
+            outcome="done",
+            by_user_id=by,
         )
 
     async def on_moderation_item_handled(
@@ -1626,24 +1695,110 @@ class NotificationService(ProtectionGateMixin):
         | SpaceModerationExpired,
     ) -> None:
         """Nothing left to review in the space: every moderator's "pending
-        review" rows read as read."""
+        review" row says it was handled (by whoever reviewed the last
+        item)."""
         space_id = event.item.space_id
         if await self._spaces.count_pending(space_id):
             return
-        await self._resolve_for_everyone(
-            link_url=space_moderation_link(space_id), type="moderation_pending"
+        await self._resolve(
+            object_key(NotificationObject.SPACE, space_id),
+            types=("moderation_pending",),
+            outcome="done",
+            by_user_id=event.item.reviewed_by,
         )
 
     async def on_report_resolved(self, event: ReportResolved) -> None:
         """No open report left in the space: every authority's "New report"
-        rows read as read."""
+        row says who handled the last one."""
         if not event.space_id or self._reports is None:
             return
         if await self._reports.count_pending_in_space(event.space_id):
             return
-        await self._resolve_for_everyone(
-            link_url=space_moderation_link(event.space_id), type="space_report"
+        await self._resolve(
+            object_key(NotificationObject.SPACE, event.space_id),
+            types=("space_report",),
+            outcome="done",
+            by_user_id=event.resolved_by,
         )
+
+    async def on_space_invite_answered(self, event: SpaceInviteAnswered) -> None:
+        """The invitee answered their invite: it leaves their section."""
+        await self._resolve(
+            object_key(NotificationObject.SPACE_INVITE, event.space_id),
+            types=("space_invite",),
+            outcome="accepted" if event.accepted else "declined",
+            user_id=event.user_id,
+        )
+
+    async def on_auto_pair_answered(self, event: AutoPairRequestAnswered) -> None:
+        """An admin answered a pairing request: every admin's row says who."""
+        await self._resolve(
+            object_key(NotificationObject.PAIRING_REQUEST, event.request_id),
+            types=("pairing_request",),
+            outcome="approved" if event.approved else "declined",
+            by_user_id=event.by_user_id,
+        )
+
+    async def pending_actions(self, user_id: str) -> list[Notification]:
+        """``user_id``'s "Needs you" items, newest first — each checked
+        against the thing it asks about, so the section never shows work
+        that is gone: a request answered or expired without an event this
+        service heard, a queue emptied, a seat that lost its admin role.
+        Such a row resolves (``done``) for this user on the way."""
+        out: list[Notification] = []
+        for note in await self._notifs.list_pending_actions(user_id):
+            if await self._still_needs(note):
+                out.append(note)
+            elif note.object_key:
+                await self._resolve(
+                    note.object_key,
+                    types=(note.type,),
+                    outcome="done",
+                    user_id=user_id,
+                )
+        return out
+
+    async def _still_needs(self, note: Notification) -> bool:
+        """Does *note*'s request still wait for its recipient?"""
+        kind, _, oid = (note.object_key or "").partition(":")
+        if note.type == "pairing_request":
+            user = await self._users.get_by_user_id(note.user_id)
+            if user is None or not user.is_admin:
+                return False
+            if self._pair_inbox is None:
+                return True  # nothing to check against: keep it
+            return (
+                kind == NotificationObject.PAIRING_REQUEST
+                and self._pair_inbox.get(oid) is not None
+            )
+        if note.type == "space_invite":
+            if kind != NotificationObject.SPACE_INVITE:
+                return False
+            invites = [
+                *await self._spaces.list_pending_local_invites_for(note.user_id),
+                *await self._spaces.list_pending_remote_invites_for(note.user_id),
+            ]
+            return any(str(i.get("space_id")) == oid for i in invites)
+        space_id = note.space_id or (oid if kind == NotificationObject.SPACE else "")
+        if not space_id:
+            return False
+        member = await self._spaces.get_member(space_id, note.user_id)
+        if note.type == "space_join_requested":
+            if member is None or member.role not in SETTINGS_AUTHORITY_ROLES:
+                return False
+            if kind == NotificationObject.JOIN_REQUEST:
+                request = await self._spaces.get_join_request(oid)
+                return request is not None and request.get("status") == "pending"
+            return bool(await self._spaces.list_pending_join_requests(space_id))
+        if member is None or member.role not in CONTENT_AUTHORITY_ROLES:
+            return False
+        if note.type == "moderation_pending":
+            return bool(await self._spaces.count_pending(space_id))
+        if note.type == "space_report":
+            if self._reports is None:
+                return True
+            return bool(await self._reports.count_pending_in_space(space_id))
+        return False
 
     async def on_dm_contact_requested(self, event: DmContactRequested) -> None:
         """A user wants to start a DM — notify the recipient + push."""
@@ -2830,6 +2985,7 @@ class NotificationService(ProtectionGateMixin):
             return
         members = await self._spaces.list_members(event.space_id)
         blocked = await self._withheld_from(event.user_id)
+        flags = await self._join_request_flags(space, event.request_id)
         for member in members:
             if member.role not in SETTINGS_AUTHORITY_ROLES:
                 continue
@@ -2854,16 +3010,47 @@ class NotificationService(ProtectionGateMixin):
                     ),
                     link_url=space_moderation_link(event.space_id),
                 ),
+                # One row per request (D12): answering it resolves exactly
+                # this row for every admin.
                 about=NotificationSubject.of(
-                    NotificationObject.SPACE,
-                    event.space_id,
+                    NotificationObject.JOIN_REQUEST,
+                    event.request_id,
                     space_id=event.space_id,
                     space_name=space.name,
                 ),
                 actor_user_id=event.user_id,
                 actor_name=name,
                 withheld=blocked,
+                flags=flags,
             )
+
+    async def _join_request_flags(self, space, request_id: str) -> tuple[str, ...]:
+        """Why this request needs the review page rather than one tap
+        (:data:`JOIN_REQUEST_FLAGS`): near the edge of a local community,
+        from a household this one is not paired with, an admin grant, or a
+        space with an age limit. An unknown request is flagged ``unpaired``
+        — never one-tap on what this household can't see."""
+        request = await self._spaces.get_join_request(request_id)
+        if request is None:
+            return ("unpaired",)
+        flags: set[str] = set()
+        if request.get("area_verdict") == "edge":
+            flags.add("edge")
+        if request.get("requested_role") == SpaceRole.ADMIN.value:
+            flags.add("admin")
+        if getattr(space, "min_age", 0):
+            flags.add("age")
+        household = request.get("remote_applicant_instance_id")
+        if household and not await self._paired(str(household)):
+            flags.add("unpaired")
+        return tuple(sorted(flags))
+
+    async def _paired(self, instance_id: str) -> bool:
+        """Is *instance_id* a household this one is paired with?"""
+        if not instance_id or self._instances is None:
+            return False
+        peer = await self._instances.get_instance(instance_id)
+        return peer is not None and peer.status is PairingStatus.CONFIRMED
 
     async def on_space_join_approved(
         self,
@@ -2976,6 +3163,178 @@ class NotificationService(ProtectionGateMixin):
             ),
             actor_user_id=None,  # an answer to your own request
         )
+
+    async def on_remote_join_answered(
+        self, event: RemoteJoinRequestApproved | RemoteJoinRequestDenied
+    ) -> None:
+        """§D2 — another household's space answered our member's join
+        request: tell them, from the answer this household already
+        receives (no new federation message). Only the person who asked,
+        and only a request this household filed for them."""
+        request = await self._spaces.get_join_request(event.request_id)
+        if request is None or not request.get("remote_applicant_instance_id"):
+            return
+        user_id = str(request.get("user_id") or "")
+        recipient = await self._users.get_by_user_id(user_id)
+        if recipient is None:
+            return
+        space_id = str(request.get("space_id") or event.space_id)
+        about = NotificationSubject.of(
+            NotificationObject.SPACE, space_id, space_id=space_id
+        )
+        locale = self._locale(recipient)
+        if isinstance(event, RemoteJoinRequestDenied):
+            await self._save_notif(
+                new_notification(
+                    user_id=user_id,
+                    type="space_join_denied",
+                    title=self._t(
+                        "notification.space.join.denied",
+                        locale=locale,
+                        fallback="Your join request was declined.",
+                    ),
+                    link_url=space_about_link(space_id),
+                ),
+                about=about,
+                actor_user_id=None,  # an answer to your own request
+            )
+            return
+        space_name = await self._space_name(space_id)
+        title = (
+            self._t(
+                "notification.space.join.approved_remote",
+                locale=locale,
+                fallback="Your request to join {space_name} was approved",
+                space_name=space_name,
+            )
+            if space_name
+            else self._t(
+                "notification.space.join.approved_remote_unnamed",
+                locale=locale,
+                fallback="Your join request was approved",
+            )
+        )
+        await self._save_notif(
+            new_notification(
+                user_id=user_id,
+                type="space_join_approved",
+                title=title,
+                link_url=f"/spaces/{space_id}",
+            ),
+            about=NotificationSubject.of(
+                NotificationObject.SPACE,
+                space_id,
+                space_id=space_id,
+                space_name=space_name,
+            ),
+            actor_user_id=None,  # an answer to your own request
+        )
+
+    async def on_local_space_invite(self, event: LocalSpaceInviteCreated) -> None:
+        """An admin of this household invited a member here to a space:
+        a "Needs you" row for the invitee. The row opens the invite (where
+        a local community asks for location consent) — never a one-tap
+        join."""
+        space = await self._spaces.get(event.space_id)
+        await self._save_invite(
+            invitee=event.invited_user_id,
+            inviter=event.invited_by,
+            space_id=event.space_id,
+            space_name=space.name if space is not None else None,
+            name_on_lock_screen=True,  # this household's own space
+        )
+
+    async def on_remote_space_invite(self, event: RemoteSpaceInviteReceived) -> None:
+        """Another household invited a member here to a space. Its push
+        names the space only when that household is paired with this one
+        (D11): an invite can come from a stranger."""
+        space = await self._spaces.get(event.space_id)
+        await self._save_invite(
+            invitee=event.invitee_user_id,
+            inviter=event.inviter_user_id,
+            space_id=event.space_id,
+            space_name=event.space_name or (space.name if space else None),
+            name_on_lock_screen=await self._paired(event.inviter_instance_id),
+        )
+
+    async def _save_invite(
+        self,
+        *,
+        invitee: str,
+        inviter: str,
+        space_id: str,
+        space_name: str | None,
+        name_on_lock_screen: bool,
+    ) -> None:
+        recipient = await self._users.get_by_user_id(invitee)
+        if recipient is None:
+            return
+        locale = self._locale(recipient)
+        name = await self._person_name(inviter, locale)
+        title = (
+            self._t(
+                "notification.space.invite.received",
+                locale=locale,
+                fallback="{name} invited you to {space_name}",
+                name=name,
+                space_name=space_name,
+            )
+            if space_name
+            else self._t(
+                "notification.space.invite.received_unnamed",
+                locale=locale,
+                fallback="{name} invited you to a space",
+                name=name,
+            )
+        )
+        await self._save_notif(
+            new_notification(
+                user_id=invitee,
+                type="space_invite",
+                title=title,
+                # The Spaces page holds the invite card: accept (with the
+                # location consent a local community asks for) or decline.
+                link_url="/spaces",
+            ),
+            about=NotificationSubject.of(
+                NotificationObject.SPACE_INVITE,
+                space_id,
+                space_id=space_id,
+                space_name=space_name,
+            ),
+            actor_user_id=inviter,
+            actor_name=name,
+            push_params={
+                "name": name,
+                "space_name": space_name if name_on_lock_screen else None,
+            },
+        )
+
+    async def on_auto_pair_requested(self, event: AutoPairRequestIncoming) -> None:
+        """A household asks to pair with this one, vouched for by a paired
+        household: a "Needs you" row for every admin here. It always opens
+        the review (Connections) — pairing with a stranger is never one
+        tap from a list."""
+        for admin in await self._users.list_active():
+            if not admin.is_admin:
+                continue
+            await self._save_notif(
+                new_notification(
+                    user_id=admin.user_id,
+                    type="pairing_request",
+                    title=self._t(
+                        "notification.pairing.requested",
+                        locale=self._locale(admin),
+                        fallback="{household} wants to pair with your household",
+                        household=event.from_a_display,
+                    ),
+                    link_url="/connections",
+                ),
+                about=NotificationSubject.of(
+                    NotificationObject.PAIRING_REQUEST, event.request_id
+                ),
+                actor_user_id=None,  # a household, not a person
+            )
 
     async def on_remote_invite_accepted(
         self,

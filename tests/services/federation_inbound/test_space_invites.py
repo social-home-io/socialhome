@@ -169,6 +169,11 @@ async def test_invite_persists_and_publishes(bus, repo, handlers):
     )
     assert repo.invitations == [("sp-1", "u-1", "u-admin")]
     assert captured[0].invitee_user_id == "u-1"
+    # The household it came from (its push names the space only if paired).
+    assert (
+        captured[0].inviter_instance_id
+        == _event(FederationEventType.SPACE_INVITE, {}).from_instance
+    )
 
 
 async def test_invite_missing_fields_drops(repo, handlers):
@@ -193,6 +198,8 @@ async def test_invite_via_delegates_to_invite(bus, repo, handlers):
         )
     )
     assert len(repo.invitations) == 1
+    # Relayed: the sending household is unknown, never the relay.
+    assert captured[0].inviter_instance_id == ""
 
 
 async def test_join_request_persists_and_publishes(bus, repo, handlers):

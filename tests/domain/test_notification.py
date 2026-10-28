@@ -9,6 +9,7 @@ from socialhome.domain.notification import (
     MAX_ACTORS,
     Notification,
     NotificationActor,
+    NotificationHandled,
     NotificationObject,
     NotificationParams,
     NotificationSubject,
@@ -28,14 +29,79 @@ def test_is_read_follows_read_at():
     ).is_read
 
 
-def test_action_items_are_the_review_queue_rows():
-    """Join requests, posts waiting for review and reports — the rows the
-    prune keeps while unread and a handling admin resolves for all."""
+def test_action_items_are_the_needs_you_rows():
+    """Join requests, the review queue (posts, reports), invites and
+    pairing requests (D12) — the rows the prune keeps while unread and that
+    stay pinned until handled."""
     assert ACTION_ITEM_TYPES == {
         "space_join_requested",
         "moderation_pending",
         "space_report",
+        "space_invite",
+        "pairing_request",
     }
+
+
+def _note(type: str, params: NotificationParams | None = None) -> Notification:
+    return Notification(
+        id="n", user_id="u", type=type, title="t", created_at="x", params=params
+    )
+
+
+def test_a_needs_you_row_waits_until_handled_not_until_read():
+    assert _note("space_join_requested").is_pending_action
+    read = Notification(
+        id="n",
+        user_id="u",
+        type="space_invite",
+        title="t",
+        created_at="x",
+        read_at="y",
+    )
+    assert read.is_pending_action  # reading it never un-pins it
+    handled = NotificationParams(handled=NotificationHandled("approved"))
+    assert not _note("space_join_requested", handled).is_pending_action
+    assert not _note("comment_added").is_pending_action
+
+
+def test_flags_and_handled_round_trip_through_a_dict():
+    params = NotificationParams(
+        flags=("edge", "unpaired"),
+        handled=NotificationHandled("declined", NotificationActor("u1", "Søren")),
+    )
+    raw = params.to_dict()
+    assert raw["flags"] == ["edge", "unpaired"]
+    assert raw["handled"] == {
+        "outcome": "declined",
+        "by": {"id": "u1", "name": "Søren"},
+    }
+    assert NotificationParams.from_dict(raw) == params
+    # Nothing to say: neither key is written.
+    assert "flags" not in NotificationParams().to_dict()
+    assert "handled" not in NotificationParams().to_dict()
+
+
+def test_unknown_flags_and_outcomes_never_break_a_row():
+    params = NotificationParams.from_dict(
+        {
+            "flags": ["edge", "nonsense", 3, {"x": 1}, "edge"],
+            "handled": {"outcome": "teleported", "by": {"name": "no id"}},
+        }
+    )
+    assert params is not None
+    assert params.flags == ("edge",)
+    assert params.handled == NotificationHandled("done", None)
+    assert NotificationParams.from_dict({"flags": "edge"}).flags == ()
+    assert NotificationHandled.from_dict("approved") is None
+
+
+def test_new_activity_on_a_handled_queue_row_is_pending_again():
+    old = NotificationParams(handled=NotificationHandled("done"), total=2)
+    fresh = regroup(old, None, reopen=True, flags=("age",))
+    assert fresh.handled is None
+    assert fresh.flags == ("age",)
+    assert fresh.total == 3
+    assert regroup(old, None, reopen=False).handled is None
 
 
 # ── Subject, params and regrouping (0129, D7) ────────────────────────────

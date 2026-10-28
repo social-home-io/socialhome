@@ -2958,6 +2958,7 @@ class SpaceJoinRequestDetailView(BaseView):
             member = await svc.approve_join_request(
                 request_id,
                 actor_username=ctx.username,
+                space_id=self.match("id"),
             )
             # ``member`` is None for a §D2 remote applicant (the seat is
             # finalised on the applicant's household) — return the status
@@ -2971,6 +2972,7 @@ class SpaceJoinRequestDetailView(BaseView):
             await svc.deny_join_request(
                 request_id,
                 actor_username=ctx.username,
+                space_id=self.match("id"),
             )
             return web.json_response(
                 {"request_id": request_id, "status": "denied"},

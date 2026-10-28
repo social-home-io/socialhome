@@ -59,6 +59,21 @@ class NotificationCollectionView(BaseView):
         return web.json_response([notification_json(n) for n in notes])
 
 
+class NotificationNeedsYouView(BaseView):
+    """``GET /api/notifications/needs-you`` — the caller's "Needs you"
+    items (D12): requests that wait for them, read or not, newest first,
+    each checked against the request it asks about. ``{items, count}``;
+    the page and the bell pin them on top and group them per space."""
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        svc = self.svc(notification_service_key)
+        items = await svc.pending_actions(ctx.user_id)
+        return web.json_response(
+            {"items": [notification_json(n) for n in items], "count": len(items)}
+        )
+
+
 class NotificationUnreadCountView(BaseView):
     """``GET /api/notifications/unread-count``."""
 

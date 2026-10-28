@@ -21,7 +21,7 @@ from socialhome.crypto import (
     generate_space_keypair,
 )
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import RemoteJoinRequestApproved
+from socialhome.domain.events import RemoteJoinRequestApproved, SpaceInviteAnswered
 from socialhome.domain.federation import (
     DELIVERY_ERROR_MESH_DEFERRED,
     DELIVERY_ERROR_QUEUED,
@@ -284,12 +284,18 @@ async def test_accept_remote_invite_happy(stack):
     )
     await stack.space_repo.save(stub)
 
+    answered: list[SpaceInviteAnswered] = []
+    stack.bus.subscribe(SpaceInviteAnswered, answered.append)
     await stack.svc.accept_remote_invite(
         token="tok-xyz",
         user_id=bob.user_id,
     )
 
     stack.fed_svc.send_with_mesh_fallback.assert_awaited()
+    # The invite leaves the invitee's "Needs you".
+    assert [(a.space_id, a.user_id, a.accepted) for a in answered] == [
+        ("sp-on-the-other-side", bob.user_id, True)
+    ]
     # Regression guard for "host sees raw user_id instead of display
     # name" — the accept envelope MUST carry the invitee's display name
     # so the host's roster renders the human-readable label rather than
@@ -346,11 +352,16 @@ async def test_decline_remote_invite_happy(stack):
         invite_token="tok-decline",
         space_display_hint="S",
     )
+    answered: list[SpaceInviteAnswered] = []
+    stack.bus.subscribe(SpaceInviteAnswered, answered.append)
     await stack.svc.decline_remote_invite(
         token="tok-decline",
         user_id="bob",
     )
     stack.fed_svc.send_with_mesh_fallback.assert_awaited()
+    assert [(a.space_id, a.user_id, a.accepted) for a in answered] == [
+        (space.id, "bob", False)
+    ]
 
 
 # ── remove_remote_member ───────────────────────────────────────────

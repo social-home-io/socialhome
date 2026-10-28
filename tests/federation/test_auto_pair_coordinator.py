@@ -21,7 +21,7 @@ from socialhome.crypto import (
     generate_x25519_keypair,
     sign_ed25519,
 )
-from socialhome.domain.events import PairingConfirmed
+from socialhome.domain.events import AutoPairRequestAnswered, PairingConfirmed
 from socialhome.domain.federation import (
     AutoPairRequestExpiredError,
     FederationEvent,
@@ -637,10 +637,22 @@ async def test_full_auto_pair_handshake(
 
     # C admin approves.
     fed_service.send_event.reset_mock()
+    answered: list[AutoPairRequestAnswered] = []
+    bus.subscribe(AutoPairRequestAnswered, answered.append)
     confirmed = await c_coord.finalize_pending(
         req.request_id,
         own_inbox_base_url="https://c.example/federation/inbox",
+        actor_user_id="admin-c",
     )
+    # Every admin's "Needs you" row hears who approved it.
+    assert answered == [
+        AutoPairRequestAnswered(
+            request_id=req.request_id,
+            approved=True,
+            by_user_id="admin-c",
+            occurred_at=answered[0].occurred_at,
+        )
+    ]
     # Not confirmed until A, having confirmed on its side, talks to us.
     assert confirmed.status is PairingStatus.PENDING_SENT
     # Ack sent to B (the trust relay), not directly to A — A has no
@@ -654,7 +666,7 @@ async def test_full_auto_pair_handshake(
     assert ack_kwargs["payload"]["to_a_id"] == a_id
 
 
-async def test_decline_pending_sends_abort(coord, inbox, fed_service):
+async def test_decline_pending_sends_abort(coord, inbox, fed_service, bus):
     # Enqueue a fake pending request directly via the inbox.
     req = inbox.enqueue(
         from_a_id="a1",
@@ -670,8 +682,13 @@ async def test_decline_pending_sends_abort(coord, inbox, fed_service):
         via_b_display="B",
     )
     fed_service.send_event.reset_mock()
-    await coord.decline_pending(req.request_id, reason="spam")
+    answered: list[AutoPairRequestAnswered] = []
+    bus.subscribe(AutoPairRequestAnswered, answered.append)
+    await coord.decline_pending(req.request_id, reason="spam", actor_user_id="adm")
     fed_service.send_event.assert_awaited_once()
+    assert [(a.request_id, a.approved, a.by_user_id) for a in answered] == [
+        (req.request_id, False, "adm")
+    ]
     kwargs = fed_service.send_event.await_args.kwargs
     assert kwargs["event_type"] == FederationEventType.PAIRING_ABORT
     assert kwargs["payload"]["reason"] == "spam"

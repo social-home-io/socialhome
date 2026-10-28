@@ -194,7 +194,13 @@ async def test_invite_happy_path(handler):
     )
     await handler.h._on_invite(ev)
     handler.space_repo.save_remote_invitation.assert_awaited_once()
-    assert any(isinstance(e, RemoteSpaceInviteReceived) for e in handler.bus.events)
+    [received] = [
+        e for e in handler.bus.events if isinstance(e, RemoteSpaceInviteReceived)
+    ]
+    # The issuing household and the name it gave — for the bell row and
+    # the D11 push rule.
+    assert received.inviter_instance_id == ev.from_instance
+    assert received.space_name == "Board"
 
 
 async def test_invite_missing_fields_noops(handler):

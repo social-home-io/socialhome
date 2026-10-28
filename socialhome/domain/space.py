@@ -1283,6 +1283,18 @@ class InviteExpiredError(CodedError, KeyError):
         return self.detail
 
 
+class JoinRequestHandledError(CodedError):
+    """The join request was already answered (another admin got there
+    first, or it expired / was withdrawn). ``params``: ``status`` (approved
+    / denied / expired / withdrawn) and ``by`` — the name of who answered
+    it, when this household knows them — so the SPA can say "Søren
+    already approved it" instead of an error."""
+
+    status = 409
+    code = "JOIN_REQUEST_HANDLED"
+    detail = "join request already handled"
+
+
 class HouseholdUpgradeRequiredError(SpacePermissionError):
     """A role the target's home household cannot hold yet (v_41
     ``moderator`` on a v_40 peer). The API answers 403 with the stable code
