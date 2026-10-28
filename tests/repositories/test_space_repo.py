@@ -2360,3 +2360,23 @@ async def test_has_approved_join_request(env):
     )
     await env.repo.update_join_request_status(elev, "approved")
     assert not await env.repo.has_approved_join_request("sp-ap", "uid-bob", **kw)
+
+
+async def test_answer_join_request_moves_a_pending_request_once(env):
+    """Two answers racing on one request: exactly one moves it out of
+    ``pending``; the other is told it lost and changes nothing."""
+    await env.repo.save(_space("sp-ans"))
+    rid = await env.repo.save_join_request("sp-ans", "uid-bob")
+    results = await asyncio.gather(
+        env.repo.answer_join_request(rid, "approved", reviewed_by="anna"),
+        env.repo.answer_join_request(rid, "denied", reviewed_by="ben"),
+    )
+    assert sorted(results) == [False, True]
+    row = await env.repo.get_join_request(rid)
+    winner = ("approved", "anna") if results[0] else ("denied", "ben")
+    assert (row["status"], row["reviewed_by"]) == winner
+    # Answered already, unknown, or not an answer at all.
+    assert not await env.repo.answer_join_request(rid, "withdrawn")
+    assert not await env.repo.answer_join_request("missing", "denied")
+    with pytest.raises(ValueError):
+        await env.repo.answer_join_request(rid, "pending")

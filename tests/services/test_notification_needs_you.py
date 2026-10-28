@@ -10,6 +10,7 @@ checks each row against the request it asks about.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -23,6 +24,8 @@ from socialhome.domain.events import (
     RemoteJoinRequestApproved,
     RemoteJoinRequestDenied,
     RemoteSpaceInviteReceived,
+    SpaceJoinApproved,
+    SpaceJoinDenied,
     SpaceJoinRequested,
     SpaceModerationApproved,
 )
@@ -232,6 +235,97 @@ async def test_the_admin_who_lost_the_race_hears_who_won(env):
     with pytest.raises(JoinRequestHandledError):
         await env.space_svc.approve_join_request(rid, actor_username="ben")
     # The decline never went through.
+    assert await env.spaces.get_member(space.id, kim.user_id) is not None
+
+
+class _Federation:
+    """Records what the host sends back to a remote applicant's household."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, dict]] = []
+
+    async def send_with_mesh_fallback(self, *, to_instance_id, event_type, payload):
+        # Yield like a real network send so the racing admin runs meanwhile.
+        await asyncio.sleep(0)
+        self.sent.append((event_type.value, payload))
+
+
+async def _two_admins_and_a_remote_request(env):
+    await env.user("anna")
+    ben = await env.user("ben")
+    space = await _salon(env)
+    await env.space_svc.add_member(
+        space.id, actor_username="anna", user_id=ben.user_id, role=SpaceRole.ADMIN
+    )
+    fed = _Federation()
+    env.space_svc.attach_federation(fed, env.peers, None)
+    rid = await env.spaces.save_join_request(
+        space.id, "u-remote", remote_applicant_instance_id="peer-remote"
+    )
+    answered: list = []
+
+    async def _seen(ev) -> None:
+        answered.append(ev)
+
+    env.bus.subscribe(SpaceJoinApproved, _seen)
+    env.bus.subscribe(SpaceJoinDenied, _seen)
+    return space, rid, fed, answered
+
+
+async def _tokens(env, space_id: str) -> int:
+    return int(
+        await env.db.fetchval(
+            "SELECT COUNT(*) FROM space_invite_tokens WHERE space_id=?", (space_id,)
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "second", ["approve_join_request", "deny_join_request"], ids=["approve", "deny"]
+)
+async def test_two_admins_answering_at_once_only_one_answer_goes_out(env, second):
+    """Both admins click at the same moment. Exactly one answer wins: one
+    federation reply, at most one invite token, one domain event — the
+    other admin hears who answered, and nothing of theirs goes out."""
+    space, rid, fed, answered = await _two_admins_and_a_remote_request(env)
+    results = await asyncio.gather(
+        env.space_svc.approve_join_request(rid, actor_username="anna"),
+        getattr(env.space_svc, second)(rid, actor_username="ben"),
+        return_exceptions=True,
+    )
+    lost = [r for r in results if isinstance(r, BaseException)]
+    assert len(lost) == 1, results
+    assert isinstance(lost[0], JoinRequestHandledError)
+    assert len(fed.sent) == 1
+    assert len(answered) == 1
+    row = await env.spaces.get_join_request(rid)
+    winner = "approved" if isinstance(answered[0], SpaceJoinApproved) else "denied"
+    assert row["status"] == winner
+    assert lost[0].params["status"] == winner
+    assert await _tokens(env, space.id) == (1 if winner == "approved" else 0)
+
+
+async def test_two_local_approvals_at_once_seat_once(env):
+    await env.user("anna")
+    ben, kim = await env.user("ben"), await env.user("kim")
+    space = await _salon(env)
+    await env.space_svc.add_member(
+        space.id, actor_username="anna", user_id=ben.user_id, role=SpaceRole.ADMIN
+    )
+    rid = await env.space_svc.request_join(space.id, user_id=kim.user_id)
+    approved: list = []
+
+    async def _seen(ev) -> None:
+        approved.append(ev)
+
+    env.bus.subscribe(SpaceJoinApproved, _seen)
+    results = await asyncio.gather(
+        env.space_svc.approve_join_request(rid, actor_username="anna"),
+        env.space_svc.approve_join_request(rid, actor_username="ben"),
+        return_exceptions=True,
+    )
+    assert sum(isinstance(r, JoinRequestHandledError) for r in results) == 1
+    assert len(approved) == 1
     assert await env.spaces.get_member(space.id, kim.user_id) is not None
 
 

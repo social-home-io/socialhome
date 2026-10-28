@@ -8,6 +8,8 @@ from datetime import UTC, datetime
 import pytest
 
 from socialhome.domain.events import (
+    RemoteJoinRequestApproved,
+    RemoteJoinRequestDenied,
     RemoteSpaceInviteReceived,
     RemoteSpaceJoinRequestReceived,
 )
@@ -59,6 +61,7 @@ class _FakeSpaceRepo:
         self.join_requests = []
         self.pending: list[dict] = []
         self.join_status = []
+        self.answered: set[str] = set()
         self.spaces = {"sp-1": _space()}
         self.banned: set[tuple[str, str]] = set()
 
@@ -110,8 +113,12 @@ class _FakeSpaceRepo:
     async def list_pending_join_requests(self, space_id):
         return [r for r in self.pending if r["space_id"] == space_id]
 
-    async def update_join_request_status(self, request_id, status, *, reviewed_by=None):
+    async def answer_join_request(self, request_id, status, *, reviewed_by=None):
+        if request_id in self.answered:
+            return False
+        self.answered.add(request_id)
         self.join_status.append((request_id, status, reviewed_by))
+        return True
 
 
 def _event(event_type, payload, *, from_instance="peer-a", space_id=None):
@@ -365,6 +372,43 @@ async def test_join_request_reply_via_uses_status_field(repo, handlers):
         )
     )
     assert repo.join_status == [("req-1", "approved", None)]
+
+
+async def test_a_second_answer_for_one_request_is_not_announced_again(
+    bus, repo, handlers
+):
+    """Two answers for one request (the same approval replayed through
+    another route, or a deny racing it): only the first takes, and only
+    the first is announced to the applicant's household."""
+    seen: list = []
+
+    async def _seen(ev) -> None:
+        seen.append(ev)
+
+    bus.subscribe(RemoteJoinRequestApproved, _seen)
+    bus.subscribe(RemoteJoinRequestDenied, _seen)
+    approved = {"request_id": "req-1", "space_id": "sp-1", "invite_token": "t"}
+    await handlers._on_join_request_status(
+        _event(FederationEventType.SPACE_JOIN_REQUEST_APPROVED, approved)
+    )
+    await handlers._on_join_request_status(
+        _event(FederationEventType.SPACE_JOIN_REQUEST_APPROVED, approved)
+    )
+    await handlers._on_join_request_status(
+        _event(FederationEventType.SPACE_JOIN_REQUEST_DENIED, {"request_id": "req-1"})
+    )
+    assert repo.join_status == [("req-1", "approved", None)]
+    assert [type(e) for e in seen] == [RemoteJoinRequestApproved]
+
+
+async def test_join_request_reply_via_ignores_an_unknown_status(repo, handlers):
+    await handlers._on_join_request_status(
+        _event(
+            FederationEventType.SPACE_JOIN_REQUEST_REPLY_VIA,
+            {"request_id": "req-1", "status": "pending"},
+        )
+    )
+    assert repo.join_status == []
 
 
 async def test_join_request_status_missing_id_is_noop(repo, handlers):
