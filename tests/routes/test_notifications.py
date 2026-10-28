@@ -146,30 +146,37 @@ async def test_mark_all_read(client):
 
 async def test_read_by_link_reads_the_rows_that_open_the_page(client):
     """Viewing a post used to leave its notification unread until it was
-    clicked in the bell; the page now says it was seen."""
+    clicked in the bell; the page now says it was seen. The post's page
+    reads its comments' row, the feed reads the new-posts row (D5)."""
     resp = await client.post(
         "/api/feed/posts",
         json={"type": "text", "content": "seen on the page"},
         headers=_auth(client._admin_token),
     )
     post_id = (await resp.json())["id"]
+    await client.post(
+        f"/api/feed/posts/{post_id}/comments",
+        json={"content": "hi"},
+        headers=_auth(client._admin_token),
+    )
     count = await client.get(
         "/api/notifications/unread-count", headers=_auth(client._bob_token)
     )
     before = (await count.json())["unread"]
-    assert before >= 1
+    assert before >= 2
 
-    resp = await client.post(
-        "/api/notifications/read-by-link",
-        json={"links": [f"/post/{post_id}"]},
-        headers=_auth(client._bob_token),
-    )
-    assert resp.status == 200
-    assert (await resp.json()) == {"ok": True, "marked": 1}
+    for link in (f"/post/{post_id}", "/feed"):
+        resp = await client.post(
+            "/api/notifications/read-by-link",
+            json={"links": [link]},
+            headers=_auth(client._bob_token),
+        )
+        assert resp.status == 200
+        assert (await resp.json()) == {"ok": True, "marked": 1}
     count = await client.get(
         "/api/notifications/unread-count", headers=_auth(client._bob_token)
     )
-    assert (await count.json())["unread"] == before - 1
+    assert (await count.json())["unread"] == before - 2
 
 
 @pytest.mark.parametrize(
@@ -291,10 +298,10 @@ async def _post(client) -> str:
 
 
 async def test_list_rows_name_their_object_actor_and_counts(client):
-    post_id = await _post(client)
+    await _post(client)
     resp = await client.get("/api/notifications", headers=_auth(client._bob_token))
     [row] = [n for n in await resp.json() if n["type"] == "post_created"]
-    assert row["object_key"] == f"post:{post_id}"
+    assert row["object_key"] == "feed:household"  # new posts group per feed
     assert row["space_id"] is None
     assert row["params"] == {
         "actors": [{"id": client._admin_uid, "name": "Pascal"}],
@@ -304,7 +311,7 @@ async def test_list_rows_name_their_object_actor_and_counts(client):
     }
     assert (row["new_count"], row["total_count"]) == (1, 1)
     # The old fields stay.
-    assert row["link_url"] == f"/post/{post_id}"
+    assert row["link_url"] == "/feed"
     assert row["title"] and row["created_at"] and row["read_at"] is None
 
 
@@ -348,9 +355,14 @@ async def test_read_by_object_reads_every_row_about_the_thing(client):
         headers=_auth(client._admin_token),
     )
     other = await _post(client)
+    await client.post(
+        f"/api/feed/posts/{other}/comments",
+        json={"content": "hi"},
+        headers=_auth(client._admin_token),
+    )
     resp = await client.post(
         "/api/notifications/read-by-object",
-        json={"object_keys": [f"post:{post_id}"]},
+        json={"object_keys": [f"post:{post_id}", "feed:household"]},
         headers=_auth(client._bob_token),
     )
     assert resp.status == 200
@@ -390,14 +402,22 @@ async def test_read_by_object_requires_auth(client):
 
 
 async def test_deleting_a_post_takes_its_rows_away(client):
+    """Its comments' row goes; the feed's new-posts row (D5) stays."""
     post_id = await _post(client)
+    await client.post(
+        f"/api/feed/posts/{post_id}/comments",
+        json={"content": "hi"},
+        headers=_auth(client._admin_token),
+    )
     resp = await client.delete(
         f"/api/feed/posts/{post_id}", headers=_auth(client._admin_token)
     )
     assert resp.status in (200, 204)
     resp = await client.get("/api/notifications", headers=_auth(client._bob_token))
-    assert [n for n in await resp.json() if n["object_key"] == f"post:{post_id}"] == []
+    rows = await resp.json()
+    assert [n for n in rows if n["object_key"] == f"post:{post_id}"] == []
+    assert [n["object_key"] for n in rows] == ["feed:household"]
     count = await client.get(
         "/api/notifications/unread-count", headers=_auth(client._bob_token)
     )
-    assert (await count.json())["unread"] == 0
+    assert (await count.json())["unread"] == 1

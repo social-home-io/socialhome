@@ -5,6 +5,7 @@ from __future__ import annotations
 from socialhome.domain.notification import (
     ACTION_ITEM_TYPES,
     GROUP_QUIET_DAYS,
+    HOUSEHOLD_FEED_ID,
     MAX_ACTORS,
     Notification,
     NotificationActor,
@@ -46,6 +47,12 @@ def test_subject_builds_kind_colon_id():
     )
     assert s == NotificationSubject("space_post:p1", "s1", "Salon")
     assert object_key(NotificationObject.CONVERSATION, "c1") == "dm:c1"
+
+
+def test_feed_keys_group_new_posts_per_feed():
+    """D5: one key for the household feed, one per space feed."""
+    assert object_key(NotificationObject.FEED, HOUSEHOLD_FEED_ID) == "feed:household"
+    assert object_key(NotificationObject.SPACE_FEED, "s1") == "space_feed:s1"
 
 
 def test_params_round_trip_through_a_dict():

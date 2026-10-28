@@ -71,6 +71,14 @@ def test_space_links():
     assert links.HOUSEHOLD_CALENDAR_LINK == "/calendar"
 
 
+def test_feed_links_are_the_pages_a_feed_visit_reads():
+    """A grouped new-posts row (D5) opens the feed, and the feed's visit
+    (``markSeen('/spaces/s1')``) matches it."""
+    assert links.space_feed_link("s1") == "/spaces/s1"
+    assert links.link_target(links.space_feed_link("s1")) == "/spaces/s1"
+    assert links.HOUSEHOLD_FEED_LINK == "/feed"
+
+
 def test_link_target_drops_only_the_picked_out_part():
     """Viewing a page reads rows that pick a part of it out (a comment, a
     moment reply), never rows for another page under the same path."""

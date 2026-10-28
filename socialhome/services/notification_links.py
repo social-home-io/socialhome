@@ -17,6 +17,9 @@ reply does (``/momentum/{id}?reply={reply_id}``):
 * ``…?list={list_id}&task={task_id}`` — the task's list, the task
   picked out (household: Organize; space: the Tasks section).
 * ``/bazaar?listing={post_id}`` — the listing opened.
+
+A grouped "new posts" row (D5) opens the feed itself: ``/feed`` for the
+household, ``/spaces/{id}`` for a space.
 """
 
 from __future__ import annotations
@@ -27,6 +30,9 @@ from ..domain.task import Task
 
 #: The household calendar page (personal calendars).
 HOUSEHOLD_CALENDAR_LINK = "/calendar"
+
+#: The household feed — where a grouped "new posts" row leads (D5).
+HOUSEHOLD_FEED_LINK = "/feed"
 
 #: Query keys that pick a part *inside* the page out (a comment, a moment
 #: reply) — the page itself, and so what a visit reads, is the same.
@@ -47,6 +53,12 @@ def household_post_link(post_id: str, comment_id: str | None = None) -> str:
 def space_post_link(space_id: str, post_id: str, comment_id: str | None = None) -> str:
     """A space post, shown in the space's Feed — a comment picked out."""
     return _with_query(f"/spaces/{space_id}", post=post_id, comment=comment_id)
+
+
+def space_feed_link(space_id: str) -> str:
+    """A space's Feed itself — where a grouped "new posts" row leads (D5);
+    the SPA reads it as seen once the feed list renders."""
+    return f"/spaces/{space_id}"
 
 
 def task_link(task: Task, space_id: str | None = None) -> str:

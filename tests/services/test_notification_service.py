@@ -3688,13 +3688,14 @@ class _Rsvps:
         return self._rows
 
 
-async def test_household_post_bell_opens_the_post_permalink(stack):
+async def test_household_post_bell_opens_the_household_feed(stack):
+    """New posts group per feed (D5): the row opens the feed itself."""
     a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
-    post = await stack.feed_svc.create_post(
+    await stack.feed_svc.create_post(
         author_user_id=a.user_id, type=PostType.TEXT, content="hi"
     )
-    assert await _links(stack, b, "post_created") == [f"/post/{post.id}"]
+    assert await _links(stack, b, "post_created") == ["/feed"]
 
 
 async def test_household_comment_bell_opens_the_post_with_the_comment(stack):
@@ -3711,13 +3712,14 @@ async def test_household_comment_bell_opens_the_post_with_the_comment(stack):
     ]
 
 
-async def test_space_post_bell_opens_the_post_in_the_space(stack):
+async def test_space_post_bell_opens_the_space_feed(stack):
+    """New posts group per feed (D5): the row opens the space's feed."""
     space_svc, space, u = await _mention_space(stack, "bob")
-    post = await space_svc.create_post(
+    await space_svc.create_post(
         space.id, author_user_id=u["anna"].user_id, type=PostType.TEXT, content="hi"
     )
     assert await _links(stack, u["bob"], "space_post_created") == [
-        f"/spaces/{space.id}?post={post.id}"
+        f"/spaces/{space.id}"
     ]
 
 

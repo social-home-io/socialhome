@@ -93,6 +93,11 @@ class NotificationObject(StrEnum):
     POST = "post"
     #: A space post (its comments and mentions group on it).
     SPACE_POST = "space_post"
+    #: The household feed (:data:`HOUSEHOLD_FEED_ID`) — its new posts group
+    #: here, one row for a burst (D5).
+    FEED = "feed"
+    #: A space's feed (``<space_id>``) — its new posts group here (D5).
+    SPACE_FEED = "space_feed"
     #: A space comment — a mention in it (deleting the comment drops it).
     SPACE_COMMENT = "space_comment"
     TASK = "task"
@@ -116,6 +121,10 @@ class NotificationObject(StrEnum):
     CONTACT = "contact"
     #: An installed Social Home App (``<app_id>``).
     APP = "app"
+
+
+#: The id of the household feed's ``feed:<id>`` key — there is one.
+HOUSEHOLD_FEED_ID: str = "household"
 
 
 def object_key(kind: NotificationObject, object_id: str) -> str:

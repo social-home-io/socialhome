@@ -193,6 +193,16 @@ for it. The rules (notifications redesign, owner decisions D3 D5 D6 D8 D13):
   to you, a new member and a new space-calendar event are rows without a
   push, at `all` only; a comment on a post you commented on also reaches you
   at `mentions` ("also commented"). Nobody else hears about it.
+- **New posts group per feed (D5).** At `all`, new posts are one in-app
+  row per feed, not one per post: `post_created` is about `feed:household`
+  and opens `/feed`, `space_post_created` about `space_feed:<space_id>` and
+  opens `/spaces/<id>`. Its params count the posts (`new` since read,
+  `total`) and name who posted (newest first, `actor_count`), so a burst
+  reads "25 new posts in Familie Alpha from Ben, Anna and 3 others". The
+  feed's visit (`read-by-link` of the feed page) reads it; the next post
+  re-opens it with `new` 1; 7 quiet days start a fresh row. Deleting one
+  post leaves the row (it is about the feed); leaving the space removes it.
+  A mention or `@here` in a post stays its own row about the post.
 - **Reactions** to your post, moment or highlight are one in-app row per
   thing (`post_reacted`, `moment_reacted`, `highlight_reacted`), never a push.
 - **Chats** keep their own badge: a plain message pushes but makes no row;
