@@ -20,8 +20,12 @@ from typing import Any
 import pytest
 
 from socialhome.domain.apps import (
+    MAX_BUNDLE_DOWNLOAD_BYTES,
+    MAX_BUNDLE_EXTRACTED_BYTES,
+    MAX_BUNDLE_FILES,
     AppAgeRestrictedError,
     AppAlreadyInstalledError,
+    AppBundleTooLargeError,
     AppCatalogEntry,
     AppIntegrityError,
     AppKvEntry,
@@ -32,6 +36,7 @@ from socialhome.domain.apps import (
 )
 from socialhome.domain.events import AppInstalled, AppUninstalled, AppUpdated
 from socialhome.domain.space import SpacePermissionError
+from socialhome.services import app_service as app_service_mod
 from socialhome.services.app_service import AppService
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -1793,3 +1798,108 @@ async def test_update_app_preserves_admin_min_age_when_manifest_is_laxer(
     # The admin gate must NOT be lowered even though the new manifest is laxer.
     assert updated.min_age == 16
     assert (await repo.get("chess")).min_age == 16  # type: ignore[union-attr]
+
+
+# ─── Bundle size limits (zip bomb / OOM / disk fill) ─────────────────────────
+
+
+def _tarball_of(members: list[tuple[str, bytes]]) -> tuple[bytes, str]:
+    """A .tgz with ``manifest.json`` + ``index.html`` + *members*."""
+    buf = io.BytesIO()
+    manifest = json.dumps({"entry": "index.html", "capabilities": []}).encode()
+    with (
+        gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz,
+        tarfile.open(fileobj=gz, mode="w|") as tar,
+    ):
+        for name, data in [
+            ("manifest.json", manifest),
+            ("index.html", b"ok"),
+            *members,
+        ]:
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    raw = buf.getvalue()
+    return raw, hashlib.sha256(raw).hexdigest()
+
+
+def _entry_for(sha: str) -> AppCatalogEntry:
+    return AppCatalogEntry(
+        app_id="chess",
+        name="Chess",
+        latest_version="1.0.0",
+        description="x",
+        icon_url=None,
+        capabilities=(),
+        bundle_url="https://example.com/chess-1.0.0.tgz",
+        bundle_sha256=sha,
+    )
+
+
+def test_bundle_limits_fit_chess_with_headroom() -> None:
+    """Chess 2026.10.28 is 13 169 bytes compressed, 42 444 bytes / 2 files
+    extracted — the limits leave two orders of magnitude of room."""
+    assert MAX_BUNDLE_DOWNLOAD_BYTES >= 100 * 13_169
+    assert MAX_BUNDLE_EXTRACTED_BYTES >= 100 * 42_444
+    assert MAX_BUNDLE_FILES >= 64
+    assert MAX_BUNDLE_EXTRACTED_BYTES >= MAX_BUNDLE_DOWNLOAD_BYTES
+
+
+@pytest.mark.asyncio
+async def test_install_refuses_a_download_over_the_size_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whatever the downloader returns, an oversized bundle is refused
+    before hashing or any disk write."""
+    raw, sha = chess_tarball()
+    monkeypatch.setattr(app_service_mod, "MAX_BUNDLE_DOWNLOAD_BYTES", len(raw) - 1)
+    svc, repo = make_service(tmp_path, [_entry_for(sha)], raw)
+    with pytest.raises(AppBundleTooLargeError) as info:
+        await svc.install("chess", actor_is_admin=True, actor_user_id="admin1")
+    assert info.value.code == "APP_BUNDLE_TOO_LARGE"
+    assert not (tmp_path / "chess").exists()
+    assert await repo.list_installed() == []
+
+
+@pytest.mark.asyncio
+async def test_install_refuses_a_zip_bomb_over_the_extracted_size_limit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A tiny .tgz that inflates past the cap is refused, and the partial
+    directory is removed — nothing past the cap is written."""
+    raw, sha = _tarball_of([("bomb.bin", b"\0" * 200_000)])
+    assert len(raw) < 2_000  # compresses to almost nothing
+    monkeypatch.setattr(app_service_mod, "MAX_BUNDLE_EXTRACTED_BYTES", 100_000)
+    svc, repo = make_service(tmp_path, [_entry_for(sha)], raw)
+    with pytest.raises(AppBundleTooLargeError):
+        await svc.install("chess", actor_is_admin=True, actor_user_id="admin1")
+    assert not (tmp_path / "chess" / "1.0.0").exists()
+    assert await repo.list_installed() == []
+
+
+@pytest.mark.asyncio
+async def test_install_refuses_a_bundle_with_too_many_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw, sha = _tarball_of([(f"f{i}.txt", b"x") for i in range(10)])
+    monkeypatch.setattr(app_service_mod, "MAX_BUNDLE_FILES", 5)
+    svc, repo = make_service(tmp_path, [_entry_for(sha)], raw)
+    with pytest.raises(AppBundleTooLargeError):
+        await svc.install("chess", actor_is_admin=True, actor_user_id="admin1")
+    assert not (tmp_path / "chess" / "1.0.0").exists()
+    assert await repo.list_installed() == []
+
+
+@pytest.mark.asyncio
+async def test_bundle_at_the_limits_still_installs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw, sha = _tarball_of([("a.txt", b"x" * 10)])
+    # manifest + index.html + a.txt: exactly at both caps.
+    total = len(json.dumps({"entry": "index.html", "capabilities": []})) + 2 + 10
+    monkeypatch.setattr(app_service_mod, "MAX_BUNDLE_FILES", 3)
+    monkeypatch.setattr(app_service_mod, "MAX_BUNDLE_EXTRACTED_BYTES", total)
+    monkeypatch.setattr(app_service_mod, "MAX_BUNDLE_DOWNLOAD_BYTES", len(raw))
+    svc, _ = make_service(tmp_path, [_entry_for(sha)], raw)
+    app = await svc.install("chess", actor_is_admin=True, actor_user_id="admin1")
+    assert app.app_id == "chess"

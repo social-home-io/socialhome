@@ -12,22 +12,26 @@ const h = vi.hoisted(() => ({
   catalogLoading: { value: false },
   appsError: { value: null as string | null },
   catalogError: { value: null as string | null },
+  catalogEnabled: { value: true },
   householdHasProtectedMinor: { value: true },
   currentUser: { value: { is_admin: true } as { is_admin: boolean } | null },
   setEnabled: vi.fn().mockResolvedValue(undefined),
   setMinAge: vi.fn().mockResolvedValue(undefined),
   uninstallApp: vi.fn().mockResolvedValue(undefined),
+  showToast: vi.fn(),
 }))
 const {
   installedApps, catalog, updates, updatesChecking,
   appsLoading, catalogLoading, appsError, catalogError,
   householdHasProtectedMinor, currentUser, setEnabled, setMinAge,
+  catalogEnabled, showToast,
 } = h
 
 vi.mock('@/store/apps', () => ({
   installedApps: h.installedApps, catalog: h.catalog, updates: h.updates,
   updatesChecking: h.updatesChecking, appsLoading: h.appsLoading,
   catalogLoading: h.catalogLoading, appsError: h.appsError, catalogError: h.catalogError,
+  catalogEnabled: h.catalogEnabled,
   householdHasProtectedMinor: h.householdHasProtectedMinor,
   loadInstalled: vi.fn(), loadCatalog: vi.fn(), loadUpdates: vi.fn(),
   loadProtectionStatus: vi.fn(),
@@ -36,7 +40,7 @@ vi.mock('@/store/apps', () => ({
 }))
 vi.mock('@/store/auth', () => ({ currentUser: h.currentUser }))
 vi.mock('@/store/pageTitle', () => ({ useTitle: () => {} }))
-vi.mock('@/components/Toast', () => ({ showToast: () => {} }))
+vi.mock('@/components/Toast', () => ({ showToast: h.showToast }))
 vi.mock('@/baseUrl', () => ({ addBase: (p: string) => p, basePath: '/' }))
 const nav = vi.hoisted(() => ({ route: vi.fn() }))
 vi.mock('preact-iso', async (orig) => ({
@@ -85,6 +89,7 @@ beforeEach(() => {
   updatesChecking.value = false
   appsLoading.value = false; catalogLoading.value = false
   appsError.value = null; catalogError.value = null
+  catalogEnabled.value = true
   householdHasProtectedMinor.value = true
   currentUser.value = { is_admin: true }
 })
@@ -104,6 +109,15 @@ describe('AppsPage tabs (admin)', () => {
     // Switch to Catalog.
     fireEvent.click(getByRole('tab', { name: 'Catalog' }))
     expect(getByText('Notes')).toBeTruthy()
+  })
+
+  it('a turned-off catalog says so instead of "No apps available"', () => {
+    catalogEnabled.value = false
+    catalog.value = []
+    const { getByRole, getByText, queryByText } = render(<AppsPage />)
+    fireEvent.click(getByRole('tab', { name: 'Catalog' }))
+    expect(getByText(/The app catalog is turned off on this Social Home/)).toBeTruthy()
+    expect(queryByText('No apps available in the catalog.')).toBeNull()
   })
 
   it('shows "Check for updates" only on the Installed tab', () => {
@@ -167,6 +181,20 @@ describe('AppCard admin overflow menu', () => {
     fireEvent.click(getByRole('menuitem', { name: 'Disable app' }))
     expect(setEnabled).toHaveBeenCalledWith('chess', false)
   })
+
+  it.each([
+    [true, 'Disable app', "Couldn't disable the app."],
+    [false, 'Enable app', "Couldn't enable the app."],
+  ])('a failed toggle (enabled=%s) says what failed, not "Could not update app."',
+    async (enabled, item, message) => {
+      installedApps.value = [makeApp({ enabled })]
+      setEnabled.mockRejectedValueOnce(new Error('API 500'))
+      const { getByRole } = render(<AppsPage />)
+      fireEvent.click(getByRole('button', { name: 'Chess settings' }))
+      fireEvent.click(getByRole('menuitem', { name: item }))
+      await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith(message, 'error'))
+      expect(showToast).not.toHaveBeenCalledWith('Could not update app.', 'error')
+    })
 
   it('hides the minimum-age group when the household has no protected minor', () => {
     householdHasProtectedMinor.value = false

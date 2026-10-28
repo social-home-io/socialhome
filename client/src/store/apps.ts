@@ -45,6 +45,9 @@ export const catalogLoading  = signal(false)
 export const updatesChecking = signal(false)
 export const appsError       = signal<string | null>(null)
 export const catalogError    = signal<string | null>(null)
+/** ``false`` when the operator turned the catalog off (empty
+ *  ``apps_catalog_url``) — the Catalog tab says so instead of "no apps". */
+export const catalogEnabled  = signal(true)
 /** True when at least one household member has child protection enabled —
  *  gates the per-app age-gate admin control (no point configuring a gate
  *  nobody is subject to). Loaded by an admin via ``GET /api/cp/protection``. */
@@ -80,8 +83,11 @@ export async function loadCatalog(): Promise<void> {
   catalogLoading.value = true
   catalogError.value = null
   try {
-    const data = await api.get('/api/apps/catalog') as { apps: CatalogEntry[] }
+    const data = await api.get('/api/apps/catalog') as {
+      apps: CatalogEntry[]; enabled?: boolean
+    }
     catalog.value = data.apps ?? []
+    catalogEnabled.value = data.enabled !== false
   } catch (err: unknown) {
     catalogError.value = (err as Error).message ?? t('apps.catalog_failed')
   } finally {
@@ -152,5 +158,6 @@ export function _resetAppsForTest(): void {
   updatesChecking.value  = false
   appsError.value        = null
   catalogError.value     = null
+  catalogEnabled.value   = true
   householdHasProtectedMinor.value = false
 }

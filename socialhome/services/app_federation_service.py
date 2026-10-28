@@ -47,7 +47,15 @@ Authorization: both outbound entry points call :meth:`_assert_target_allowed`,
 which rejects (``AppContactNotFoundError``) any target that is not in the
 actor's challengeable roster (the same block-aware set as
 :meth:`list_contacts`).  Legacy household-addressed sends (``user_ref == ""``)
-are exempt for back-compat.
+are exempt for back-compat — unless a guardian block of the actor names
+someone homed on that household.
+
+Guardian blocks (§CP.F2, via :class:`ProtectionGateMixin`): like calls and
+DMs, apps never connect two people a guardian block separates — they are
+missing from each other's contacts, an open / move / withdrawal between them
+is refused on the way out, an inbound one is dropped on receipt (per-person
+and household fan-out alike), and an invite that waited from before the
+block is dropped when the app drains it.
 """
 
 from __future__ import annotations
@@ -69,6 +77,7 @@ from ..domain.apps import (
 from ..domain.events import AppChallengeEnded, AppChallengeReceived
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.federation_capabilities import FederationCapability
+from .protection_gate import ProtectionGateMixin
 
 if TYPE_CHECKING:
     from ..domain.events import DomainEvent
@@ -88,7 +97,7 @@ _SEEN_OPEN_SESSIONS_MAX = 4096
 log = logging.getLogger(__name__)
 
 
-class AppFederationService:
+class AppFederationService(ProtectionGateMixin):
     """Bridge between the federation layer and Social Home Apps.
 
     Constructor parameters are injected; no I/O of its own beyond what the
@@ -116,6 +125,7 @@ class AppFederationService:
     __slots__ = (
         "_app_repo",
         "_bus",
+        "_child_protection",
         "_cp_repo",
         "_federation",
         "_federation_repo",
@@ -142,6 +152,7 @@ class AppFederationService:
         self._federation_repo = federation_repo
         self._cp_repo = cp_repo
         self._bus = bus
+        self._child_protection = None
         #: Bounded LRU of inbound ``APP_SESSION`` open ``session_id``s already
         #: handled — guards against a double federation delivery (WebRTC +
         #: HTTPS fallback / retransmit) seating two invites + two notifications
@@ -215,6 +226,9 @@ class AppFederationService:
         blocked_ids = {
             uid for uid, _ in await self._user_repo.list_blocked(self_user_id)
         }
+        # §CP.F2: nobody a guardian block separates from the caller (either
+        # way, local or remote) — same as calls and DMs.
+        blocked_ids |= await self._guardian_block_counterparts(self_user_id)
 
         out: list[dict] = []
 
@@ -669,7 +683,15 @@ class AppFederationService:
         household fan-out on the receiver side already scopes by membership.
         """
         if not target.get("user_ref"):
-            # Legacy household-addressed path (user_ref == "") — exempt.
+            # Legacy household-addressed path (user_ref == "") — exempt from
+            # the roster check, but it reaches everyone there: not across a
+            # guardian block of the actor (§CP.F2).
+            if await self._guardian_blocks_household(
+                actor_user_id, str(target.get("instance_id") or "")
+            ):
+                raise AppContactNotFoundError(
+                    "target is not a contact of the requesting user"
+                )
             return
         contacts = await self.list_contacts(self_user_id=actor_user_id)
         key = (
@@ -881,7 +903,7 @@ class AppFederationService:
                     )
                 if await self._user_repo.is_blocked(
                     recipient.user_id, initiator.user_id
-                ):
+                ) or await self._guardian_blocked(recipient.user_id, initiator.user_id):
                     log.info(
                         "app_federation: dropping inbound %s for blocked initiator "
                         "(recipient=%s initiator=%s session=%s)",
@@ -956,6 +978,15 @@ class AppFederationService:
                 uid
                 for uid in user_ids
                 if not await self._user_repo.is_blocked(uid, initiator.user_id)
+                and not await self._guardian_blocked(uid, initiator.user_id)
+            ]
+        else:
+            # §CP.F2: an unnamed sender could be anyone there — skip a
+            # protected account whose guardian blocked someone on it.
+            user_ids = [
+                uid
+                for uid in user_ids
+                if not await self._guardian_blocks_household(uid, from_instance)
             ]
 
         # Age-gate filter: skip recipients who are protected minors below
@@ -981,7 +1012,17 @@ class AppFederationService:
         """Return + clear this user's pending session invites for the app
         (replayed by the app on open). The app took them in: each one's
         "Needs you" item reads as accepted."""
-        pending = await self._app_repo.drain_pending_sessions(app_id, user_id)
+        drained = await self._app_repo.drain_pending_sessions(app_id, user_id)
+        # §CP.F2: an invite from someone a guardian block separates from
+        # this user since it arrived is not handed to the app.
+        blocked = await self._guardian_block_counterparts(user_id)
+        pending: list[AppPendingSession] = []
+        dropped: list[str] = []
+        for p in drained:
+            if blocked and await self._invite_sender_id(p) in blocked:
+                dropped.append(p.session_id)
+            else:
+                pending.append(p)
         if pending:
             await self._emit(
                 AppChallengeEnded(
@@ -991,7 +1032,28 @@ class AppFederationService:
                     outcome="accepted",
                 )
             )
+        if dropped:
+            await self._emit(
+                AppChallengeEnded(
+                    app_id=app_id,
+                    user_id=user_id,
+                    session_ids=tuple(dropped),
+                    outcome="done",
+                )
+            )
         return pending
+
+    async def _invite_sender_id(self, invite: AppPendingSession) -> str | None:
+        """The user id of who opened *invite*: a local user id as stored, or
+        the ``remote_users`` id of a remote challenger (``None`` unknown)."""
+        if not invite.from_user:
+            return None
+        if invite.from_instance == self._federation.own_instance_id:
+            return invite.from_user
+        remote = await self._user_repo.get_remote_by_member(
+            invite.from_instance, invite.from_user
+        )
+        return remote.user_id if remote is not None else None
 
     # ─── Game invites: decline / withdraw ────────────────────────────────
 
@@ -1023,6 +1085,11 @@ class AppFederationService:
         )
         app = await self._app_repo.get(app_id)
         if app is None or not app.enabled or not invite.from_user:
+            return
+        # §CP.F2: an invite from before a guardian block is still declined
+        # here, but nothing reaches the person on the other side of it.
+        sender = await self._invite_sender_id(invite)
+        if sender is not None and await self._guardian_blocked(actor_user_id, sender):
             return
         await self._send_close(
             app_id=app_id,

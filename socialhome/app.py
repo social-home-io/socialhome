@@ -279,7 +279,11 @@ from .services import (
     UserService,
 )
 from .services.alias_service import AliasResolver, AliasService
-from .services.app_catalog_service import AppCatalogService, release_session
+from .services.app_catalog_service import (
+    AppCatalogService,
+    download_bundle,
+    release_session,
+)
 from .services.app_federation_service import AppFederationService
 from .services.app_service import AppService
 from .services.app_update_scheduler import AppUpdateScheduler
@@ -469,21 +473,6 @@ log = logging.getLogger(__name__)
 MAP_TILE_USER_AGENT: str = (
     f"SocialHome/{__version__} (+https://social-home.io; abuse@social-home.io)"
 )
-
-
-async def _download_bytes(url: str) -> bytes:
-    """GET *url* and return the raw response body.
-
-    Opens a short-lived :class:`aiohttp.ClientSession` per call so it can be
-    used before the shared app session is available (e.g. during catalog
-    fetches in ``AppCatalogService``).  Calls ``raise_for_status()`` so any
-    non-2xx response surfaces as an :class:`aiohttp.ClientResponseError`.
-    The release host's response headers exceed aiohttp's default limit
-    (:func:`release_session`).
-    """
-    async with release_session() as session, session.get(url) as resp:
-        resp.raise_for_status()
-        return await resp.read()
 
 
 async def _deliver_outbox_entry(
@@ -2332,6 +2321,17 @@ def _build_space_chat_federation(
     app[K.space_sync_receiver_key].attach_chat_sink(handlers)
 
 
+def _build_app_catalog(config: Config) -> AppCatalogService | None:
+    """The app catalog reader, or ``None`` when ``apps_catalog_url`` is empty
+    — the documented way to turn the catalog off (``config.py``). With no
+    catalog, browse answers "disabled" and update checks find nothing,
+    instead of fetching an empty URL (a 500)."""
+    url = config.apps_catalog_url.strip()
+    if not url:
+        return None
+    return AppCatalogService(session_factory=release_session, catalog_url=url)
+
+
 def _build_link_previews(
     config: Config, preferences_service: PreferencesService
 ) -> LinkPreviewService:
@@ -3091,12 +3091,9 @@ def create_app(config: Config | None = None) -> web.Application:
     # ── App service (Social Home Apps install / uninstall / enable) ──────
     app_service = AppService(
         repo=repos.app,
-        catalog=AppCatalogService(
-            session_factory=release_session,
-            catalog_url=config.apps_catalog_url,
-        ),
+        catalog=_build_app_catalog(config),
         apps_path=pathlib.Path(config.apps_path),
-        downloader=_download_bytes,
+        downloader=download_bundle,
         bus=bus,
         cp_repo=repos.cp,
     )
@@ -4797,6 +4794,8 @@ def create_app(config: Config | None = None) -> web.Application:
             bus=bus,
         )
         federation_service.attach_apps(app_federation_service)
+        # §CP.F2: guardian blocks hold for app sessions as for calls / DMs.
+        app_federation_service.attach_child_protection(child_protection_service)
         app[K.app_federation_service_key] = app_federation_service
 
         # Stale-call cleanup scheduler (§26.8).

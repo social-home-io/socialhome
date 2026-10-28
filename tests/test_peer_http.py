@@ -267,9 +267,10 @@ _PEER_HTTP_MODULES = (
     "socialhome/services/moment_public_outbound.py",
 )
 
-#: ``app._download_bytes`` fetches an app bundle from the operator-configured
-#: catalog, not from a peer — the one reviewed exception in these modules.
-_ALLOWED_FOLLOWING = {("socialhome/app.py", "_download_bytes")}
+#: Reviewed exceptions in these modules, as ``(path, function)``. None today:
+#: the app bundle download (operator-configured catalog, not a peer; release
+#: assets redirect to a CDN) lives in ``services/app_catalog_service.py``.
+_ALLOWED_FOLLOWING: set[tuple[str, str]] = set()
 
 
 def _following_calls(path: str) -> list[str]:

@@ -6,6 +6,10 @@ Security invariants:
   symlinks, and device/FIFO/block-device members.  Any violation raises
   :class:`AppIntegrityError` and the partially-extracted directory (if any)
   is cleaned up.
+- Bundles are bounded: the download (``MAX_BUNDLE_DOWNLOAD_BYTES``), the
+  unpacked total (``MAX_BUNDLE_EXTRACTED_BYTES``) and the member count
+  (``MAX_BUNDLE_FILES``) — checked before hashing / per member before
+  writing, so a zip bomb never inflates past the cap.
 - Destination directory is checked to be inside ``apps_path`` before
   creation (catalog-supplied ``app_id`` / ``version`` path components are
   untrusted and could contain ``../../`` sequences).
@@ -35,8 +39,13 @@ import orjson
 
 from ..domain.apps import (
     _VALID_MIN_AGES,
+    MAX_BUNDLE_DOWNLOAD_BYTES,
+    MAX_BUNDLE_EXTRACTED_BYTES,
+    MAX_BUNDLE_FILES,
     AppAgeRestrictedError,
     AppAlreadyInstalledError,
+    AppBundleTooLargeError,
+    AppCatalogDisabledError,
     AppCatalogEntry,
     AppIntegrityError,
     AppManifest,
@@ -119,6 +128,12 @@ class AppService(BusPublisherMixin):
         """Return a single installed app by id, or ``None``."""
         return await self._repo.get(app_id)
 
+    @property
+    def catalog_enabled(self) -> bool:
+        """Whether an app catalog is configured (``apps_catalog_url`` is
+        not empty)."""
+        return self._catalog is not None
+
     async def browse_catalog(self) -> list[AppCatalogEntry]:
         """Return the remote catalog entries, or an empty list when no catalog
         is configured."""
@@ -186,13 +201,18 @@ class AppService(BusPublisherMixin):
             :class:`OSError` on unrecoverable I/O errors (callers should
             wrap or re-raise with context).
         """
-        # Download
-        # TODO(PR-followup): MAX_BUNDLE_BYTES cap to prevent zip-bomb / OOM
+        # Download — the production downloader streams under the cap
+        # (``download_bundle``); re-checked here for any downloader.
         result = self._downloader(entry.bundle_url)
         if inspect.isawaitable(result):
             data: bytes = await result
         else:
             data = result
+        if len(data) > MAX_BUNDLE_DOWNLOAD_BYTES:
+            raise AppBundleTooLargeError(
+                f"The app bundle is larger than "
+                f"{MAX_BUNDLE_DOWNLOAD_BYTES // (1024 * 1024)} MiB."
+            )
 
         # SHA-256 verify (CPU-bound) — must happen BEFORE any disk write
         actual_sha = await asyncio.to_thread(self._compute_sha256, data)
@@ -269,7 +289,7 @@ class AppService(BusPublisherMixin):
             )
 
         if self._catalog is None:
-            raise AppIntegrityError("No app catalog configured")
+            raise AppCatalogDisabledError()
 
         # Catalog lookup
         entries = await self.browse_catalog()
@@ -665,6 +685,8 @@ class AppService(BusPublisherMixin):
         - Members with absolute paths (``name.startswith('/')``)
         - Members whose resolved path would escape ``dest`` (``../`` etc.)
         - Non-regular-file / non-directory members (symlinks, devices, FIFOs)
+        - More than ``MAX_BUNDLE_FILES`` members, or member sizes adding up
+          past ``MAX_BUNDLE_EXTRACTED_BYTES`` (:class:`AppBundleTooLargeError`)
 
         After extraction, reads and returns the parsed ``manifest.json`` dict
         so the caller never needs a blocking Path.read_text on the event loop.
@@ -674,9 +696,27 @@ class AppService(BusPublisherMixin):
         *before* writing each file.
         """
         dest_resolved = dest.resolve()
+        max_files = MAX_BUNDLE_FILES
+        max_bytes = MAX_BUNDLE_EXTRACTED_BYTES
+        members = 0
+        unpacked = 0
         try:
             with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-                for member in tar.getmembers():
+                # Lazy iteration (not ``getmembers()``, which would inflate
+                # the whole archive first): each header is checked against
+                # the caps before its data is read or written.
+                for member in tar:
+                    members += 1
+                    if members > max_files:
+                        raise AppBundleTooLargeError(
+                            f"The app bundle has more than {max_files} files."
+                        )
+                    unpacked += max(member.size, 0)
+                    if unpacked > max_bytes:
+                        raise AppBundleTooLargeError(
+                            f"The app bundle unpacks to more than "
+                            f"{max_bytes // (1024 * 1024)} MiB."
+                        )
                     # Reject symlinks, hard links, device files, FIFOs, etc.
                     if not (member.isfile() or member.isdir()):
                         raise AppIntegrityError(

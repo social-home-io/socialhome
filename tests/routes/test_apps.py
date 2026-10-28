@@ -8,6 +8,7 @@ import pytest
 
 from socialhome.app_keys import (
     app_federation_service_key,
+    app_service_key,
     instance_id_key,
     notification_delivery_key,
 )
@@ -15,8 +16,10 @@ from socialhome.auth import sha256_token_hash
 from socialhome.domain.apps import (
     AppAgeRestrictedError,
     AppAlreadyInstalledError,
+    AppBundleTooLargeError,
     AppCatalogEntry,
     AppContactNotFoundError,
+    AppDownloadError,
     AppIntegrityError,
     AppManifest,
     AppNotEnabledError,
@@ -222,6 +225,26 @@ async def test_install_integrity_error_returns_400(client, monkeypatch):
     assert body["error"]["code"] == "UNPROCESSABLE"
 
 
+@pytest.mark.parametrize(
+    ("exc", "status", "code"),
+    [
+        (AppBundleTooLargeError(), 422, "APP_BUNDLE_TOO_LARGE"),
+        (AppDownloadError(), 502, "APP_DOWNLOAD_FAILED"),
+    ],
+)
+async def test_install_oversized_or_undownloadable_bundle_has_a_clear_code(
+    client, monkeypatch, exc, status, code
+):
+    """The admin UI turns these codes into a translated line (apiErrors.ts)
+    instead of a generic failure or a 500."""
+    monkeypatch.setattr(AppService, "install", AsyncMock(side_effect=exc))
+    r = await client.post(
+        "/api/apps", json={"app_id": "chess"}, headers=_auth(client._tok)
+    )
+    assert r.status == status
+    assert (await r.json())["error"]["code"] == code
+
+
 async def test_install_success_returns_201(client, monkeypatch):
     app = _make_installed()
     monkeypatch.setattr(AppService, "install", AsyncMock(return_value=app))
@@ -261,7 +284,25 @@ async def test_admin_can_list_catalog_empty(client, monkeypatch):
     r = await client.get("/api/apps/catalog", headers=_auth(client._tok))
     assert r.status == 200
     body = await r.json()
-    assert body == {"apps": []}
+    assert body == {"apps": [], "enabled": True}
+
+
+async def test_catalog_turned_off_answers_disabled_not_an_error(client):
+    """``apps_catalog_url = ""`` (no catalog service): browse says the
+    catalog is off, update checks find nothing (refresh included) and an
+    install is refused with a stable code — never a 500."""
+    client.app[app_service_key]._catalog = None
+    r = await client.get("/api/apps/catalog", headers=_auth(client._tok))
+    assert r.status == 200
+    assert await r.json() == {"apps": [], "enabled": False}
+    r = await client.get("/api/apps/updates?refresh=1", headers=_auth(client._tok))
+    assert r.status == 200
+    assert await r.json() == {"updates": []}
+    r = await client.post(
+        "/api/apps", json={"app_id": "chess"}, headers=_auth(client._tok)
+    )
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "APP_CATALOG_DISABLED"
 
 
 async def test_admin_can_list_catalog_with_entry(client, monkeypatch):

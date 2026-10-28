@@ -40,6 +40,48 @@ class AppIntegrityError(AppError):
     """Downloaded bundle failed sha256 / manifest / path validation."""
 
 
+#: Bundle limits — a bundle is a catalog download (third-party bytes), so
+#: what it can cost is capped before it is hashed, held or unpacked. Chess
+#: 2026.10.28 is 13 KB compressed and 42 KB / 2 files unpacked; these leave
+#: two orders of magnitude for richer apps while ruling out OOM, a zip bomb
+#: or filling the disk.
+#: Largest bundle download (compressed ``.tgz``) read into memory.
+MAX_BUNDLE_DOWNLOAD_BYTES: int = 8 * 1024 * 1024
+#: Largest total of a bundle's unpacked files (declared tar member sizes).
+MAX_BUNDLE_EXTRACTED_BYTES: int = 32 * 1024 * 1024
+#: Most tar members (files + directories) a bundle may hold.
+MAX_BUNDLE_FILES: int = 256
+
+
+class AppBundleTooLargeError(AppIntegrityError, CodedError):
+    """The bundle is past a :data:`MAX_BUNDLE_DOWNLOAD_BYTES` /
+    :data:`MAX_BUNDLE_EXTRACTED_BYTES` / :data:`MAX_BUNDLE_FILES` limit.
+
+    Still an :class:`AppIntegrityError`, so the install / update cleanup
+    paths remove a partial unpack as for any other bad bundle."""
+
+    status = 422
+    code = "APP_BUNDLE_TOO_LARGE"
+    detail = "The app bundle is over the size limit."
+
+
+class AppCatalogDisabledError(AppIntegrityError, CodedError):
+    """Install asked for while the app catalog is turned off
+    (``apps_catalog_url = ""``)."""
+
+    status = 409
+    code = "APP_CATALOG_DISABLED"
+    detail = "The app catalog is turned off."
+
+
+class AppDownloadError(AppError, CodedError):
+    """The bundle could not be downloaded (timeout, network or HTTP error)."""
+
+    status = 502
+    code = "APP_DOWNLOAD_FAILED"
+    detail = "Could not download the app bundle."
+
+
 class AppQuotaExceededError(AppError):
     """A per-(app, user) storage quota (key count / value size) was exceeded."""
 

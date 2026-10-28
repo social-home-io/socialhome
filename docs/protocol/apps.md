@@ -261,6 +261,17 @@ error.
 - Locally, a session can't be opened with — or a message sent to — a
   household member who blocked the initiator (403 `FORBIDDEN`, the
   same answer as a non-contact), matching what a remote receiver does.
+- Guardian blocks (§CP.F2) hold like they do for calls and DMs, both
+  ways: the two people are missing from each other's contacts, an open,
+  move or withdrawal between them is refused on the way out (403, the
+  non-contact answer), a per-person delivery from a guardian-blocked
+  initiator is dropped on receipt (no frame, no pending invite, no
+  notification), and the whole-household fan-out skips the protected
+  account — for an unnamed sender, whenever its guardian blocked someone
+  on that household. A protected account's household-addressed (pre-v_18)
+  send to a household its guardian blocked someone on is refused. An
+  invite that waited from before the block is dropped when the app
+  drains it (its row resolves `done`).
 - A `close` withdraws a pending invite only when it comes from the
   household and person that opened it; anyone else naming the session
   changes nothing.

@@ -374,6 +374,7 @@
   "highlight.today.section_new": "Section heading on Highlights › Today: people with frames you have not watched.",
   "lightbox.copy_reference": "Copies a short code that shows this photo when pasted into a Page (wiki page). Keep short — it's a button label.",
   "apps.uninstall_body": "{name} = app name (e.g. 'Chess'). French/Spanish: 'app' is feminine.",
+  "apps.catalog_disabled": "Shown to an admin when the operator emptied the catalog setting. Keep 'apps_catalog_url' as is — it is the setting's name.",
   "connections.map.you_pin": "Text inside the small round map pin that marks your own household. Very short (≤ 4 chars).",
   "space.public.hosted_by": "Follows the member count on the space's public page: '5 members · hosted by Miller family'. Lowercase.",
   "space.public.scope_global": "Chip for a space listed in the worldwide directory (via a GFS). Short.",

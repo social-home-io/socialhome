@@ -137,6 +137,9 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   LISTING_NOT_ACTIVE: () => t('error.listing_not_active'),
   // Pictures.
   IMAGE_TOO_LARGE: (_b, p) => t('error.image_too_large', { max_mb: str(p, 'max_mb') }),
+  APP_BUNDLE_TOO_LARGE: () => t('error.app_bundle_too_large'),
+  APP_DOWNLOAD_FAILED: () => t('error.app_download_failed'),
+  APP_CATALOG_DISABLED: () => t('error.app_catalog_disabled'),
   IMAGE_UNREADABLE: () => t('error.image_unreadable'),
   // Connecting to a GFS (QR / pasted code, or onboarding's open sign-up).
   // Our own words for every refusal, never the GFS's (``routes/gfs.py``).

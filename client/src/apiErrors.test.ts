@@ -11,6 +11,19 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe("You can't start a conversation with yourself. Pick someone else.")
   })
 
+  it('names an oversized or undownloadable app bundle, not a generic failure', () => {
+    expect(apiErrorMessage(422, '/api/apps', {
+      code: 'APP_BUNDLE_TOO_LARGE', detail: 'The app bundle is over the size limit.',
+    })).toBe('This app is too big to install.')
+    // A 502 with its code keeps the specific line, not "something went wrong".
+    expect(apiErrorMessage(502, '/api/apps', {
+      code: 'APP_DOWNLOAD_FAILED', detail: 'Could not download the app bundle.',
+    })).toBe("Couldn't download the app. Check the connection and try again.")
+    expect(apiErrorMessage(409, '/api/apps', {
+      code: 'APP_CATALOG_DISABLED', detail: 'The app catalog is turned off.',
+    })).toBe('The app catalog is turned off on this Social Home.')
+  })
+
   it('translates a highlight frame refused for another audience', () => {
     expect(apiErrorMessage(409, '/api/highlights/frames', {
       code: 'HIGHLIGHT_AUDIENCE_MISMATCH',

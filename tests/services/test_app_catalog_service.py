@@ -1,5 +1,6 @@
 """Tests for AppCatalogService."""
 
+import asyncio
 import json
 from typing import Any, Self
 
@@ -7,10 +8,14 @@ import aiohttp
 import pytest
 from aiohttp import web
 
+from socialhome.domain.apps import AppBundleTooLargeError, AppDownloadError
+from socialhome.services import app_catalog_service as catalog_mod
 from socialhome.services.app_catalog_service import (
     CATALOG_TTL_S,
     RELEASE_MAX_FIELD_SIZE,
+    RELEASE_TIMEOUT_S,
     AppCatalogService,
+    download_bundle,
     release_session,
 )
 
@@ -254,3 +259,81 @@ async def test_release_session_bounds_the_header_size():
     assert RELEASE_MAX_FIELD_SIZE >= 32 * 1024
     async with release_session() as session:
         assert session._max_field_size == RELEASE_MAX_FIELD_SIZE
+
+
+# ─── Bundle download: size cap + explicit timeout ────────────────────────────
+
+
+async def test_release_session_has_an_explicit_timeout():
+    """The Install button never spins for aiohttp's 5-minute default."""
+    async with release_session() as session:
+        assert session.timeout.total == RELEASE_TIMEOUT_S
+    assert RELEASE_TIMEOUT_S <= 120
+
+
+@pytest.fixture
+async def bundle_server(aiohttp_server):
+    async def fixed(request: web.Request) -> web.Response:
+        return web.Response(body=b"x" * int(request.query.get("n", "10")))
+
+    async def streamed(request: web.Request) -> web.StreamResponse:
+        # Chunked: no Content-Length to refuse up front.
+        resp = web.StreamResponse()
+        resp.enable_chunked_encoding()
+        await resp.prepare(request)
+        for _ in range(int(request.query.get("chunks", "4"))):
+            await resp.write(b"y" * 1024)
+        await resp.write_eof()
+        return resp
+
+    async def slow(request: web.Request) -> web.Response:
+        await asyncio.sleep(5)
+        return web.Response(body=b"late")
+
+    async def missing(request: web.Request) -> web.Response:
+        return web.Response(status=404)
+
+    app = web.Application()
+    app.router.add_get("/fixed.tgz", fixed)
+    app.router.add_get("/streamed.tgz", streamed)
+    app.router.add_get("/slow.tgz", slow)
+    app.router.add_get("/missing.tgz", missing)
+    return await aiohttp_server(app)
+
+
+async def test_download_bundle_returns_the_body(bundle_server):
+    url = str(bundle_server.make_url("/fixed.tgz?n=10"))
+    assert await download_bundle(url) == b"x" * 10
+
+
+async def test_download_bundle_refuses_a_declared_size_over_the_cap(
+    bundle_server, monkeypatch
+):
+    monkeypatch.setattr(catalog_mod, "MAX_BUNDLE_DOWNLOAD_BYTES", 100)
+    url = str(bundle_server.make_url("/fixed.tgz?n=101"))
+    with pytest.raises(AppBundleTooLargeError):
+        await download_bundle(url)
+
+
+async def test_download_bundle_stops_reading_a_stream_past_the_cap(
+    bundle_server, monkeypatch
+):
+    monkeypatch.setattr(catalog_mod, "MAX_BUNDLE_DOWNLOAD_BYTES", 2048)
+    with pytest.raises(AppBundleTooLargeError):
+        await download_bundle(str(bundle_server.make_url("/streamed.tgz?chunks=4")))
+    # At the cap exactly is fine.
+    body = await download_bundle(str(bundle_server.make_url("/streamed.tgz?chunks=2")))
+    assert len(body) == 2048
+
+
+async def test_download_bundle_times_out_with_a_clear_error(bundle_server, monkeypatch):
+    monkeypatch.setattr(catalog_mod, "RELEASE_TIMEOUT_S", 0.2)
+    with pytest.raises(AppDownloadError) as info:
+        await download_bundle(str(bundle_server.make_url("/slow.tgz")))
+    assert info.value.status == 502
+    assert info.value.code == "APP_DOWNLOAD_FAILED"
+
+
+async def test_download_bundle_http_error_is_a_download_failure(bundle_server):
+    with pytest.raises(AppDownloadError):
+        await download_bundle(str(bundle_server.make_url("/missing.tgz")))

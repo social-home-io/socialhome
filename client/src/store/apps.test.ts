@@ -15,6 +15,7 @@ import {
   setMinAge,
   loadProtectionStatus,
   householdHasProtectedMinor,
+  catalogEnabled,
   _resetAppsForTest,
 } from './apps'
 
@@ -114,6 +115,16 @@ describe('apps store', () => {
     expect(url).toBe('api/apps/catalog')
     expect(catalog.value).toHaveLength(1)
     expect(catalog.value[0].app_id).toBe('c1')
+    expect(catalogEnabled.value).toBe(true)
+  })
+
+  it('loadCatalog marks a turned-off catalog (enabled: false)', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ apps: [], enabled: false }))
+    await loadCatalog()
+    expect(catalogEnabled.value).toBe(false)
+    fetchMock.mockResolvedValueOnce(jsonResponse({ apps: [], enabled: true }))
+    await loadCatalog()
+    expect(catalogEnabled.value).toBe(true)
   })
 
   // ── installApp ──────────────────────────────────────────────────

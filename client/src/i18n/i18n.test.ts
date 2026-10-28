@@ -1,5 +1,10 @@
 import { describe, it, expect, afterEach, vi } from 'vitest'
 import { t, tValue, locale, formatLocale } from './i18n'
+import en from './locales/en.json'
+import de from './locales/de.json'
+import nl from './locales/nl.json'
+import fr from './locales/fr.json'
+import es from './locales/es.json'
 
 describe('i18n', () => {
   it('returns the key for known translations', () => {
@@ -125,5 +130,22 @@ describe('tValue', () => {
   it('translates a known raw value and shows an unknown one as is', () => {
     expect(tValue('calls.state', 'ended')).not.toBe('calls.state.ended')
     expect(tValue('calls.state', 'some_future_state')).toBe('some_future_state')
+  })
+})
+
+describe('glossary: Apps is a name', () => {
+  // ../translations GUIDE: "Apps" (the section) is never translated —
+  // French had "Applis" in the side nav and its error lines.
+  const locales = { en, de, nl, fr, es } as Record<string, Record<string, string>>
+
+  it.each(Object.keys(locales))('%s keeps the Apps section name', (code) => {
+    const strings = locales[code]
+    expect(strings['nav.apps']).toBe('Apps')
+    expect(strings['apps.host.back_to_apps']).toMatch(/\bApps\b/)
+    expect(strings['dashboard.open_apps']).toMatch(/\bApps\b/)
+    const translated = Object.entries(strings)
+      .filter(([, v]) => /\b(applis?|aplis?)\b/i.test(v))
+      .map(([k]) => k)
+    expect(translated).toEqual([])
   })
 })

@@ -21,9 +21,13 @@ from types import MappingProxyType
 import pytest
 
 from socialhome.app import create_app
-from socialhome.app_keys import db_key, federation_service_key
+from socialhome.app_keys import (
+    app_federation_service_key,
+    db_key,
+    federation_service_key,
+)
 from socialhome.config import Config
-from socialhome.domain.apps import AppManifest, InstalledApp
+from socialhome.domain.apps import AppContactNotFoundError, AppManifest, InstalledApp
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.infrastructure.ws_manager import WebSocketManager
 from socialhome.repositories.app_repo import SqliteAppRepo
@@ -250,3 +254,55 @@ async def test_an_addressed_message_reaches_its_user(env):
     app, _ = env
     await _message(app, sender=PEER, from_user="alice", to_user="bob")
     assert frames == ["u-bob"]
+
+
+async def _guardian_block_bob_from_alice(db) -> None:
+    await db.enqueue(
+        "UPDATE users SET child_protection_enabled=1, is_minor=1, declared_age=12"
+        " WHERE user_id='u-bob'",
+        (),
+    )
+    await db.enqueue(
+        "INSERT INTO cp_minor_blocks(minor_user_id, blocked_user_id, blocked_by)"
+        " VALUES(?,?,?)",
+        ("u-bob", "u-alice", "u-carl"),
+    )
+
+
+async def test_a_guardian_blocked_household_user_never_reaches_the_protected_minor(
+    env,
+):
+    """§CP.F2 on the real wiring: a guardian-blocked remote adult's invite and
+    moves reach the protected minor through no path — no frame, no pending
+    invite — while an unblocked sender still gets through."""
+    app, db = env
+    await _guardian_block_bob_from_alice(db)
+    await _open(app, sender=PEER, from_user="alice")
+    await _message(app, sender=PEER, from_user="alice", to_user="bob")
+    assert frames == []
+    assert await _pending(db) == []
+    await _open(app, sender=OTHER, from_user="eve", session_id="sess-2")
+    assert await _pending(db) == [("sess-2", "u-bob", OTHER, "eve")]
+
+
+async def test_a_protected_minor_cannot_open_or_message_a_guardian_blocked_user(
+    env,
+):
+    """Outbound: the protected minor's contact list drops the blocked adult
+    and a crafted target to them is refused before anything is sent."""
+    app, db = env
+    await _guardian_block_bob_from_alice(db)
+    svc = app[app_federation_service_key]
+    refs = {c["user_ref"] for c in await svc.list_contacts(self_user_id="u-bob")}
+    assert "alice" not in refs and "eve" in refs
+    target = {"instance_id": PEER, "user_ref": "alice", "is_local": False}
+    with pytest.raises(AppContactNotFoundError):
+        await svc.open_session(app_id="chess", target=target, actor_user_id="u-bob")
+    with pytest.raises(AppContactNotFoundError):
+        await svc.send_message(
+            app_id="chess",
+            target=target,
+            session_id="s",
+            payload={},
+            actor_user_id="u-bob",
+        )

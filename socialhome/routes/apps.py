@@ -78,6 +78,10 @@ class AppCatalogView(BaseView):
         entries = await svc.browse_catalog()
         return self._json(
             {
+                # ``False`` when the operator turned the catalog off
+                # (``apps_catalog_url = ""``) — the SPA says so instead of
+                # "no apps available".
+                "enabled": svc.catalog_enabled,
                 "apps": [
                     {
                         "app_id": e.app_id,
@@ -88,7 +92,7 @@ class AppCatalogView(BaseView):
                         "capabilities": list(e.capabilities),
                     }
                     for e in entries
-                ]
+                ],
             }
         )
 
