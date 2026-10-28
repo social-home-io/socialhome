@@ -252,3 +252,65 @@ def test_load_or_create_vapid_writes_files_with_strict_perms(tmp_dir):
     priv = (tmp_dir / ".vapid_private.pem").stat()
     # 0o600 — only owner read/write.
     assert priv.st_mode & 0o077 == 0
+
+
+# ─── Withdrawing a push (a handled notification leaves the device) ────────
+
+
+def _sub_at(sid: str, endpoint: str, user_id: str = "alice") -> PushSubscription:
+    return PushSubscription(
+        id=sid, user_id=user_id, endpoint=endpoint, p256dh="p", auth_secret="a"
+    )
+
+
+def test_silent_push_only_where_the_browser_tolerates_it():
+    """Chromium's FCM / WNS spend a silent-push budget; Safari revokes the
+    subscription and Firefox spends a quota — never withdraw there."""
+    tolerates = push_mod.tolerates_silent_push
+    assert tolerates("https://fcm.googleapis.com/fcm/send/abc")
+    assert tolerates("https://android.googleapis.com/gcm/send/abc")
+    assert tolerates("https://wns2-db5p.notify.windows.com/w/?token=x")
+    assert not tolerates("https://web.push.apple.com/QGx")
+    assert not tolerates("https://updates.push.services.mozilla.com/wpush/v2/x")
+    assert not tolerates("https://evil.example/fcm.googleapis.com")
+    assert not tolerates("https://fcm.googleapis.com.evil.example/x")
+    assert not tolerates("not a url")
+    assert not tolerates("http://[::1")
+
+
+def test_withdraw_payload_is_tags_only_and_bounded():
+    [one] = push_mod.withdraw_payloads(["a:/x", "b:/y", "a:/x"])
+    assert orjson.loads(one) == {"withdraw": ["a:/x", "b:/y"], "tag": "a:/x"}
+    many = [f"t{i}:/post/{'p' * 90}{i}" for i in range(100)]
+    payloads = push_mod.withdraw_payloads(many)
+    assert len(payloads) > 1
+    assert all(len(p) <= push_mod.MAX_WITHDRAW_PAYLOAD_BYTES for p in payloads)
+    assert [t for p in payloads for t in orjson.loads(p)["withdraw"]] == many
+    assert push_mod.withdraw_payloads(["x" * 5000]) == []
+
+
+async def test_withdraw_goes_once_per_device_to_chromium_push_services(monkeypatch):
+    sent: list[tuple[str, dict]] = []
+
+    def fake_webpush(**kwargs):
+        sent.append(
+            (kwargs["subscription_info"]["endpoint"], orjson.loads(kwargs["data"]))
+        )
+
+    monkeypatch.setattr(push_mod, "_PYWEBPUSH_AVAILABLE", True)
+    monkeypatch.setattr(push_mod, "webpush", fake_webpush)
+    repo = _MemRepo()
+    await repo.save(_sub_at("s1", "https://fcm.googleapis.com/fcm/send/1"))
+    await repo.save(_sub_at("s2", "https://web.push.apple.com/2"))
+    await repo.save(_sub_at("s3", "https://updates.push.services.mozilla.com/3"))
+    svc = PushService(sub_repo=repo, vapid=_vapid())
+    n = await svc.withdraw_from_user("alice", ["dm_message:/dms/c1", "x:/y"])
+    assert n == 1
+    assert sent == [
+        (
+            "https://fcm.googleapis.com/fcm/send/1",
+            {"withdraw": ["dm_message:/dms/c1", "x:/y"], "tag": "dm_message:/dms/c1"},
+        )
+    ]
+    assert await svc.withdraw_from_user("alice", []) == 0
+    assert await svc.withdraw_from_user("nobody", ["x:/y"]) == 0

@@ -48,7 +48,7 @@ import orjson
 
 from ..domain.call import CallQualitySample, CallSession
 from ..domain.conversation import ConversationMessage, ConversationType
-from ..domain.events import CallMissed, CallRinging
+from ..domain.events import CallMissed, CallRinging, CallRingStopped
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..federation.sdp_signing import (
@@ -481,6 +481,7 @@ class CallSignalingService(BusPublisherMixin, ProtectionGateMixin):
         if answerer_user_id in record.answered:
             raise CallAlreadyAnsweredError(call_id)
         record.answered.add(answerer_user_id)
+        await self._ring_stopped(record, {answerer_user_id})
         if record.status == "ringing":
             record.status = "in_progress"
             await self._call_repo.transition(
@@ -723,6 +724,20 @@ class CallSignalingService(BusPublisherMixin, ProtectionGateMixin):
         if user_id == record.caller_user_id:
             record.left |= record.participants - record.answered
         over = len(record.present) < 2
+        never_answered = record.answered <= {record.caller_user_id}
+        # The caller gave up before anyone picked up: a missed call for
+        # everyone it was still ringing for (``CallMissed`` replaces their
+        # ring). Any other end of a ring withdraws it from the device.
+        missed = over and never_answered and user_id == record.caller_user_id
+        if missed:
+            stopped: set[str] = set()
+        elif over:
+            stopped = unanswered - {record.caller_user_id}
+        else:
+            stopped = {user_id} if declined else set()
+            if user_id == record.caller_user_id:
+                stopped |= unanswered - {record.caller_user_id}
+        await self._ring_stopped(record, stopped)
         frame_type = "call.declined" if declined else "call.ended"
         for other in sorted(before - {user_id}):
             await self._fanout_to_user(
@@ -739,7 +754,6 @@ class CallSignalingService(BusPublisherMixin, ProtectionGateMixin):
         if not over:
             return
         record.status = "ended"
-        never_answered = record.answered <= {record.caller_user_id}
         persisted = await self._call_repo.get_call(record.call_id)
         if declined and never_answered:
             session = await self._call_repo.transition(
@@ -1697,6 +1711,24 @@ class CallSignalingService(BusPublisherMixin, ProtectionGateMixin):
             await self._conv_repo.touch_last_message(session.conversation_id)
         except Exception:  # pragma: no cover
             log.debug("call: touching the conversation failed", exc_info=True)
+
+    async def _ring_stopped(self, record: CallRecord, user_ids: set[str]) -> None:
+        """Publish :class:`CallRingStopped` for the people *record* stopped
+        ringing for without a missed call (the notification side withdraws
+        the ringing push from their devices). Never fails the call."""
+        stopped = tuple(sorted(u for u in user_ids if u))
+        if not stopped:
+            return
+        try:
+            await self._emit(
+                CallRingStopped(
+                    call_id=record.call_id,
+                    conversation_id=record.conversation_id,
+                    user_ids=stopped,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            log.warning("ring-stopped event failed: %s", exc, exc_info=True)
 
     async def _emit_missed(
         self,

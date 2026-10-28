@@ -25,6 +25,7 @@ import asyncio
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import orjson
 from cryptography.hazmat.primitives import serialization
@@ -42,6 +43,69 @@ log = logging.getLogger(__name__)
 #: send is a blocking HTTPS call on a worker thread, so this also caps how
 #: many of the default executor's threads one fan-out can hold.
 MAX_CONCURRENT_SENDS: int = 8
+
+#: The largest withdraw payload, in bytes of JSON. Web Push caps the
+#: encrypted record at 4096 bytes; this leaves room for the encryption
+#: overhead (RFC 8291) with margin.
+MAX_WITHDRAW_PAYLOAD_BYTES: int = 3000
+
+#: Push services whose browser lets a push show nothing (a withdraw only
+#: closes notifications): the Chromium family (Chrome, Edge, Samsung
+#: Internet, Opera, Brave) on FCM / WNS. There a push that leaves no
+#: notification on screen and no tab of the site visible spends from a
+#: silent-push budget tied to site engagement; only once it is spent does
+#: the browser show its own "updated in the background" notice, and the
+#: subscription never ends (chromium
+#: ``chrome/browser/push_messaging/push_messaging_notification_manager.cc``:
+#: ``DidCountVisibleNotifications`` / ``ProcessSilentPush``). Never Apple
+#: (``web.push.apple.com``: WebKit revokes a subscription after three pushes
+#: that show nothing — WebKit bug 236863, "Enforce silent push quota") and
+#: never Mozilla (``*.push.services.mozilla.com``: such pushes spend a quota
+#: refreshed only by visiting the site — MDN "Push API" — and an exhausted
+#: quota expires the subscription).
+_SILENT_PUSH_HOSTS: frozenset[str] = frozenset(
+    {"fcm.googleapis.com", "android.googleapis.com"}
+)
+_SILENT_PUSH_HOST_SUFFIXES: tuple[str, ...] = (".notify.windows.com",)
+
+
+def tolerates_silent_push(endpoint: str) -> bool:
+    """Whether a push that shows nothing is safe for this subscription's
+    browser (:data:`_SILENT_PUSH_HOSTS`): a withdraw only goes where it
+    can't cost the subscription."""
+    try:
+        host = (urlsplit(endpoint).hostname or "").lower()
+    except ValueError:
+        return False
+    return host in _SILENT_PUSH_HOSTS or host.endswith(_SILENT_PUSH_HOST_SUFFIXES)
+
+
+def withdraw_payloads(tags: list[str]) -> list[str]:
+    """The withdraw pushes for *tags*: ``{"withdraw": [...], "tag": first}``,
+    split so none passes :data:`MAX_WITHDRAW_PAYLOAD_BYTES` (a tag that
+    alone would is dropped). No title, no content (§25.3).
+
+    ``tag`` is for a service worker from before withdraws: it shows a push
+    it doesn't understand under that tag, so it quietly replaces one of
+    the notifications being withdrawn instead of adding a new one.
+    """
+    out: list[str] = []
+    batch: list[str] = []
+    for tag in dict.fromkeys(tags):
+        if len(_withdraw_json([tag])) > MAX_WITHDRAW_PAYLOAD_BYTES:
+            continue
+        if batch and len(_withdraw_json([*batch, tag])) > MAX_WITHDRAW_PAYLOAD_BYTES:
+            out.append(_withdraw_json(batch))
+            batch = []
+        batch.append(tag)
+    if batch:
+        out.append(_withdraw_json(batch))
+    return out
+
+
+def _withdraw_json(tags: list[str]) -> str:
+    return orjson.dumps({"withdraw": tags, "tag": tags[0]}).decode()
+
 
 try:  # pragma: no cover
     from pywebpush import WebPushException, webpush
@@ -133,7 +197,35 @@ class PushService:
         subs = await self._sub_repo.list_for_user(user_id)
         if not subs:
             return 0
-        results = await asyncio.gather(*(self._push_one(s, payload) for s in subs))
+        data = payload.to_json()
+        results = await asyncio.gather(
+            *(self._push_one(s, data, label=payload.title) for s in subs)
+        )
+        return sum(1 for ok in results if ok)
+
+    async def withdraw_from_user(self, user_id: str, tags: list[str]) -> int:
+        """Close the notifications *tags* on *user_id*'s devices: one
+        withdraw push per device (more only past
+        :data:`MAX_WITHDRAW_PAYLOAD_BYTES`), to the subscriptions whose
+        browser lets a push show nothing (:func:`tolerates_silent_push`).
+        Returns the delivery count."""
+        if not tags:
+            return 0
+        subs = [
+            s
+            for s in await self._sub_repo.list_for_user(user_id)
+            if tolerates_silent_push(s.endpoint)
+        ]
+        if not subs:
+            return 0
+        payloads = withdraw_payloads(tags)
+        results = await asyncio.gather(
+            *(
+                self._push_one(s, data, label="withdraw")
+                for s in subs
+                for data in payloads
+            )
+        )
         return sum(1 for ok in results if ok)
 
     async def push_to_users(
@@ -148,11 +240,11 @@ class PushService:
         )
         return sum(counts)
 
-    async def _push_one(self, sub: PushSubscription, payload: PushPayload) -> bool:
+    async def _push_one(self, sub: PushSubscription, data: str, *, label: str) -> bool:
         if not _PYWEBPUSH_AVAILABLE:  # pragma: no cover
             log.debug(
                 "push: pywebpush not installed; would send %r to %s",
-                payload.title,
+                label,
                 sub.endpoint[:40],
             )
             return True
@@ -160,7 +252,7 @@ class PushService:
             # ``webpush()`` is a blocking HTTPS request (plus payload
             # encryption) — run it on a worker thread, never on the loop.
             async with self._send_slots:
-                await asyncio.to_thread(self._send_sync, sub, payload.to_json())
+                await asyncio.to_thread(self._send_sync, sub, data)
             return True
         except WebPushException as exc:
             status = getattr(getattr(exc, "response", None), "status_code", None)

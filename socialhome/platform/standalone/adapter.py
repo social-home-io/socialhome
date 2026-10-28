@@ -196,6 +196,12 @@ class StandalonePushProvider:
                 exc,
             )
 
+    async def withdraw(self, user: ExternalUser, tags: list[str]) -> None:
+        """No-op: the ``notify_endpoint`` webhook contract is
+        ``{title, message, data}`` only — it has no way to take a push
+        back, and inventing one would surprise whatever listens there."""
+        return
+
     async def list_notify_targets(self) -> list[dict]:
         """Standalone push posts to a per-user ``notify_endpoint`` — there
         are no platform-selectable notify targets to choose from."""

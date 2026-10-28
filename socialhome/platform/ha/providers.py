@@ -436,6 +436,58 @@ class HaPushProvider:
                 service,
             )
 
+    async def withdraw(self, user: ExternalUser, tags: list[str]) -> None:
+        """Clear these pushes from the user's Companion app: one
+        ``clear_notification`` per tag.
+
+        Contract — companion.home-assistant.io/docs/notifications/
+        notifications-basic, "Clearing": "You can clear an existing
+        notification which has a tag by sending ``clear_notification``"::
+
+            action: notify.mobile_app_<device>
+            data:
+              message: "clear_notification"
+              data:
+                tag: "<tag>"
+
+        One tag per message. The push relay treats it as a command, not a
+        notification: it never counts toward the 500-a-day Companion limit
+        (home-assistant/mobile-apps-fcm-push ``functions/android.js``
+        ``androidMessagesToIgnore`` / ``functions/ios.js`` ``clear_notification``
+        → ``updateRateLimits = false`` @ 72200467). The docs note the app may
+        need to have been used recently for the clear to land.
+
+        Only a ``mobile_app_*`` target gets it: any other notify service
+        (a notify entity, a legacy group, Telegram …) would show the literal
+        text "clear_notification" as a new message.
+        """
+        value = _resolve_notify_service(user)
+        if value is None:
+            return
+        service = value.removeprefix("notify.")
+        if (
+            not service.startswith("mobile_app_")
+            or _VALID_HA_SERVICE.match(service) is None
+        ):
+            return
+        for tag in dict.fromkeys(tags):
+            result = await self._adapter._client.call_service(
+                "notify",
+                service,
+                {
+                    "message": "clear_notification",
+                    "data": {"tag": companion_tag(tag)},
+                },
+            )
+            if result is None:
+                log.warning(
+                    "HA push: clear_notification to %s via notify.%s failed — "
+                    "check the notify service name in Settings → profile.",
+                    getattr(user, "username", "?"),
+                    service,
+                )
+                return
+
     async def _companion_data(self, data: dict | None) -> dict | None:
         """Map Social Home's push *data* to the Companion app's keys.
 

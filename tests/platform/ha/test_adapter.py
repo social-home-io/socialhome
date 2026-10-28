@@ -1243,3 +1243,75 @@ async def test_send_push_drops_unknown_data_keys():
         adapter, client, {"type": "dm_message", "url": "not-a-path", "x": 1}
     )
     assert "data" not in body
+
+
+# ── Withdrawing a push: Companion ``clear_notification`` ───────────────────
+
+
+async def test_withdraw_push_clears_each_tag_on_the_companion_app():
+    """Companion contract (notifications-basic, "Clearing"): message
+    ``clear_notification`` with ``data.tag`` — the same hashed tag the push
+    carried, one call per tag, to the mobile_app legacy service."""
+    client = _FakeHaClient(call_service_response=[])
+    adapter = _build_adapter(client=client)
+    user = _push_user("notify.mobile_app_pascals_iphone")
+    await adapter.withdraw_push(user, ["dm_message:/dms/c1", "call_missed:/dms/c1"])
+    calls = [c for c in client.calls if c[0] == "call_service"]
+    assert [c[1:4] for c in calls] == [
+        (
+            "notify",
+            "mobile_app_pascals_iphone",
+            {
+                "message": "clear_notification",
+                "data": {"tag": companion_tag("dm_message:/dms/c1")},
+            },
+        ),
+        (
+            "notify",
+            "mobile_app_pascals_iphone",
+            {
+                "message": "clear_notification",
+                "data": {"tag": companion_tag("call_missed:/dms/c1")},
+            },
+        ),
+    ]
+
+
+async def test_withdraw_push_accepts_a_bare_mobile_app_name():
+    client = _FakeHaClient(call_service_response=[])
+    adapter = _build_adapter(client=client)
+    await adapter.withdraw_push(_push_user("mobile_app_pixel"), ["a:/1"])
+    [call] = [c for c in client.calls if c[0] == "call_service"]
+    assert call[1:3] == ("notify", "mobile_app_pixel")
+
+
+async def test_withdraw_push_never_reaches_a_non_companion_target():
+    """Any other notify target would show "clear_notification" as text."""
+    for value in (
+        None,
+        "notify.alerts_group",
+        "family_group",
+        "telegram_bot.send",
+        "notify.mobile_app_x/../y",
+    ):
+        client = _FakeHaClient(call_service_response=[])
+        adapter = _build_adapter(client=client)
+        await adapter.withdraw_push(_push_user(value), ["a:/1"])
+        assert not any(c[0] == "call_service" for c in client.calls), value
+
+
+async def test_withdraw_push_without_tags_calls_nothing():
+    client = _FakeHaClient(call_service_response=[])
+    adapter = _build_adapter(client=client)
+    await adapter.withdraw_push(_push_user("notify.mobile_app_p"), [])
+    assert not any(c[0] == "call_service" for c in client.calls)
+
+
+async def test_withdraw_push_failure_is_a_warning(caplog):
+    client = _FakeHaClient(call_service_response=None)
+    adapter = _build_adapter(client=client)
+    with caplog.at_level("WARNING"):
+        await adapter.withdraw_push(_push_user("notify.mobile_app_p"), ["a:/1", "b:/2"])
+    # The first failure stops the burst — the target is wrong for all.
+    assert len([c for c in client.calls if c[0] == "call_service"]) == 1
+    assert any("clear_notification" in r.message for r in caplog.records)

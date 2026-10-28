@@ -27,6 +27,7 @@ itself is the persistence layer; push is fire-and-forget on top.
 | SpaceModeration{Approved,Rejected,Expired} | The submitter     | "Your submission in {space} was approved"…      |
 | CallRinging          | Each local callee (push only, no row) | "{caller} is calling" / "… in {chat}"           |
 | CallMissed           | Each local callee who missed it       | "Missed call from {caller}" / "… in {chat}"     |
+| CallRingStopped      | Callees who answered / declined (no row, the ring push is withdrawn) | —            |
 | DmConversationCreated (group) | People added to a group chat | "{name} added you to {chat}"                    |
 | PollClosed           | Local voters (not the author)         | "{author} closed a poll you voted in"…          |
 | ReportResolved       | The local reporter                    | "Your report in {space} was reviewed"           |
@@ -63,6 +64,7 @@ from ..domain.events import (
     CalendarEventUpdated,
     CallMissed,
     CallRinging,
+    CallRingStopped,
     CommentAdded,
     CommentDeleted,
     CommentUpdated,
@@ -208,6 +210,21 @@ def _call_tag(link: str) -> str:
     """The device tag a call's pushes share: the ring (``call_incoming``)
     and the missed call that replaces it (``call_missed``'s row tag)."""
     return f"call_missed:{link}"
+
+
+def _push_tag(note: Notification) -> str:
+    """The device tag a row's push carries — one per bell item, so a repeat
+    replaces itself and reading it can withdraw it
+    (:class:`~socialhome.services.push_withdraw_service.PushWithdrawService`)."""
+    return f"{note.type}:{note.link_url or note.id}"
+
+
+def _conversation_tags(link: str) -> list[str]:
+    """Every push a conversation's pushes can carry: its rows'
+    (:data:`_CONVERSATION_TYPES`) and the row-less ``dm_message`` push."""
+    return list(
+        dict.fromkeys(f"{t}:{link}" for t in ("dm_message", *_CONVERSATION_TYPES))
+    )
 
 
 @dataclass(slots=True, frozen=True)
@@ -497,6 +514,7 @@ class NotificationService(ProtectionGateMixin):
         "_space_posts",
         "_spaces",
         "_users",
+        "_withdrawals",
         "_ws_manager",
     )
 
@@ -528,6 +546,9 @@ class NotificationService(ProtectionGateMixin):
         self._space_posts: AbstractSpacePostRepo | None = None
         self._push = None  # attach_push_service(PushService)
         self._adapter = None  # attach_platform_adapter(PlatformAdapter)
+        # attach_push_withdraw(PushWithdrawService) — takes a push off the
+        # device once its row is read / its item handled / its ring ends.
+        self._withdrawals = None
         self._calendar_repo = None  # attach_calendar_repo(...) Phase D
         # Personal calendars (per-user). Used by ``on_calendar_event_created``
         # to dispatch the notification audience: a personal-calendar event
@@ -601,6 +622,18 @@ class NotificationService(ProtectionGateMixin):
         replace the previous reference.
         """
         self._push = push_service
+
+    def attach_push_withdraw(self, withdrawals) -> None:
+        """Attach the :class:`PushWithdrawService`: what goes out is
+        remembered, and what was read or handled comes back off the
+        devices."""
+        self._withdrawals = withdrawals
+
+    def _withdraw(self, user_id: str, tags: Iterable[str]) -> None:
+        """Take these pushes off *user_id*'s devices (coalesced; only the
+        ones actually pushed go out)."""
+        if self._withdrawals is not None:
+            self._withdrawals.withdraw(user_id, tags)
 
     def attach_calendar_repo(self, calendar_repo) -> None:
         """Wire :class:`AbstractSpaceCalendarRepo` so update-push handlers
@@ -790,7 +823,7 @@ class NotificationService(ProtectionGateMixin):
             link_url=saved.link_url,
             # One tag per bell item: a repeat replaces itself on the device;
             # a different item never silently replaces it.
-            tag=f"{saved.type}:{saved.link_url or saved.id}",
+            tag=_push_tag(saved),
         )
         return saved
 
@@ -828,6 +861,8 @@ class NotificationService(ProtectionGateMixin):
     ) -> None:
         """One title-only push to every surface *user* registered: Web Push
         and the platform adapter (HA mobile app / standalone inbox)."""
+        if self._withdrawals is not None:
+            self._withdrawals.note_pushed(user.user_id, tag)
         if self._push is not None:
             try:
                 await self._push.push_to_user(
@@ -945,6 +980,7 @@ class NotificationService(ProtectionGateMixin):
         self._bus.subscribe(DmConversationCreated, self.on_chat_added)
         self._bus.subscribe(CallRinging, self.on_call_ringing)
         self._bus.subscribe(CallMissed, self.on_call_missed)
+        self._bus.subscribe(CallRingStopped, self.on_call_ring_stopped)
         self._bus.subscribe(PollClosed, self.on_poll_closed)
         self._bus.subscribe(PostEdited, self.on_post_edited)
         self._bus.subscribe(CommentUpdated, self.on_comment_updated)
@@ -1631,7 +1667,28 @@ class NotificationService(ProtectionGateMixin):
             )
         if flipped:
             await self._announce_unread(user_id)
+        # The chat's pushes — its rows' and the row-less message push —
+        # come off every device, read rows or not.
+        self._withdraw(user_id, _conversation_tags(link))
         return flipped
+
+    async def mark_read(self, user_id: str, notification_id: str) -> None:
+        """One row of *user_id* read (``POST /api/notifications/{id}/read``):
+        every device hears the new count, and its push comes off them."""
+        note = await self._notifs.get(notification_id)
+        await self._notifs.mark_read(notification_id, user_id)
+        await self._announce_unread(user_id)
+        if note is not None and note.user_id == user_id and not note.is_read:
+            self._withdraw(user_id, [_push_tag(note)])
+
+    async def mark_all_read(self, user_id: str) -> None:
+        """Every row of *user_id* read (``POST /api/notifications/read-all``):
+        every device hears the count, and the pushes of what flipped come
+        off them."""
+        unread = await self._notifs.list_unread(user_id)
+        await self._notifs.mark_all_read(user_id)
+        await self._announce_unread(user_id)
+        self._withdraw(user_id, [_push_tag(n) for n in unread])
 
     async def mark_read_by_links(self, user_id: str, links: list[str]) -> int:
         """The user saw these pages: every unread row of theirs that opens
@@ -1643,23 +1700,31 @@ class NotificationService(ProtectionGateMixin):
         (``/spaces/s``) leaves its posts' rows (``/spaces/s?post=p``) alone.
         """
         targets = {link_target(link) for link in links}
-        ids = [
-            n.id
+        seen = [
+            n
             for n in await self._notifs.list_unread(user_id)
             if n.link_url is not None and link_target(n.link_url) in targets
         ]
-        flipped = await self._notifs.mark_read_ids(user_id, ids)
+        flipped = await self._notifs.mark_read_ids(user_id, [n.id for n in seen])
         if flipped:
             await self._announce_unread(user_id)
+            self._withdraw(user_id, [_push_tag(n) for n in seen])
         return flipped
 
     async def mark_read_by_objects(self, user_id: str, object_keys: list[str]) -> int:
         """The user saw these things (``post:<id>``, ``dm:<id>`` …): every
         unread row of theirs about one of them reads as read, whatever its
         type, on every device. Returns how many flipped."""
+        keys = set(object_keys)
+        seen: list[Notification] = (
+            [n for n in await self._notifs.list_unread(user_id) if n.object_key in keys]
+            if self._withdrawals is not None
+            else []
+        )
         flipped = await self._notifs.mark_read_by_object(user_id, object_keys)
         if flipped:
             await self._announce_unread(user_id)
+            self._withdraw(user_id, [_push_tag(n) for n in seen])
         return flipped
 
     # ── The thing is gone: so are its rows ────────────────────────────
@@ -1756,13 +1821,25 @@ class NotificationService(ProtectionGateMixin):
             if by_user_id
             else None
         )
+        kinds = frozenset(types)
+        # The rows about it, to take their pushes off the devices too.
+        about: list[Notification] = (
+            [
+                n
+                for n in await self._notifs.find(Spec(where=[("object_key", "=", key)]))
+                if n.type in kinds
+            ]
+            if self._withdrawals is not None
+            else []
+        )
         for uid in await self._notifs.resolve_object(
             key,
-            types=types,
+            types=kinds,
             handled=NotificationHandled(outcome=outcome, by=by),
             user_id=user_id,
         ):
             await self._announce_unread(uid, handled=(key,))
+            self._withdraw(uid, [_push_tag(n) for n in about if n.user_id == uid])
 
     # ── Needs you: handled by one, handled for all (D12) ──────────────
     #
@@ -1991,6 +2068,17 @@ class NotificationService(ProtectionGateMixin):
                 link_url=link,
                 tag=_call_tag(link),
             )
+
+    async def on_call_ring_stopped(self, event: CallRingStopped) -> None:
+        """The call stopped ringing for these people without being missed
+        (answered — on any device —, declined, invite withdrawn): the
+        ringing push comes off their devices. A missed call never comes
+        here — "Missed call from Anna" replaces the ring instead."""
+        if self._withdrawals is None:
+            return
+        _, link, _ = await self._call_parts(event.conversation_id)
+        for user_id in event.user_ids:
+            self._withdraw(user_id, [_call_tag(link)])
 
     async def on_call_missed(self, event: CallMissed) -> None:
         """``call_missed``: a row — one per conversation (D7) — and a push

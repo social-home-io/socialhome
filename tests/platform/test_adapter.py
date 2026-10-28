@@ -254,6 +254,25 @@ def test_provides_ice_servers_is_not_a_spa_capability():
     assert not any("ice" in str(c).lower() for c in Capability)
 
 
+# ── withdraw_push (delegates to the push provider) ───────────────────────────
+
+
+async def test_withdraw_push_delegates_to_the_provider_and_tolerates_none():
+    seen: list[tuple[object, list[str]]] = []
+
+    class _Push:
+        async def withdraw(self, user, tags):
+            seen.append((user, tags))
+
+    adapter = _MinimalAdapter()
+    adapter.push = None
+    await adapter.withdraw_push("u", ["a:/1"])  # no provider: nothing
+    adapter.push = _Push()
+    await adapter.withdraw_push("u", [])  # no tags: nothing
+    await adapter.withdraw_push("u", ["a:/1"])
+    assert seen == [("u", ["a:/1"])]
+
+
 # ── fixed_dashboard_port (ABC default) ───────────────────────────────────────
 
 

@@ -130,6 +130,11 @@ checked against the push relay `home-assistant/mobile-apps-fcm-push`):
 `tag` — the bell's `type:link` tag hashed to `socialhome-<32 hex>`, since
 iOS turns it into `apns-collapse-id` (≤ 64 bytes) — so a repeat replaces
 itself on the phone, and `url` (iOS) / `clickAction` (Android) for the tap.
+Once a push no longer needs attention (read anywhere, handled by another
+admin, a call answered) `PushProvider.withdraw` sends the Companion
+`clear_notification` for its tag, and Web Push devices on Chromium get a
+content-free withdraw push their service worker acts on
+([push-relay.md](protocol/push-relay.md#withdrawing-a-push)).
 A relative URL opens in Home Assistant's own frontend, so the adapter
 decides (`companion_click_url`): `haos` → `/<app slug>`, the App's sidebar
 panel (HA registers it at `frontend_url_path=<slug>` only while
