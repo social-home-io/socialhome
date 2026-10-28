@@ -1549,3 +1549,101 @@ async def test_local_challenge_creates_notification(client):
     assert "app_challenge" in types, (
         f"expected app_challenge notification, got: {notifs}"
     )
+
+
+# ── Game invites wait in "Needs you" until they end ───────────────────────
+
+
+async def _challenge_carol(client) -> tuple[str, str, dict]:
+    """The admin challenges Carol (on this household): her token, the
+    session id and the target."""
+    await _seed_installed_enabled_app(client._db)
+    carol_tok = await _seed_member(client._db, username="carol", user_id="carol-id")
+    target = {
+        "instance_id": client.app[instance_id_key],
+        "user_ref": "carol-id",
+        "is_local": True,
+    }
+    r = await client.post(
+        "/api/apps/com.example.hello/sessions",
+        json={"target": target},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    session_id = (await r.json())["session_id"]
+    await client.app[notification_delivery_key].drain()
+    return carol_tok, session_id, target
+
+
+async def _needs_you(client, tok: str) -> list[dict]:
+    await client.app[notification_delivery_key].drain()
+    r = await client.get("/api/notifications/needs-you", headers=_auth(tok))
+    assert r.status == 200
+    return (await r.json())["items"]
+
+
+async def test_a_game_invite_waits_in_needs_you_until_declined(client):
+    carol_tok, session_id, _ = await _challenge_carol(client)
+    (item,) = await _needs_you(client, carol_tok)
+    assert item["type"] == "app_challenge"
+    assert item["object_key"] == f"app_session:com.example.hello/{session_id}"
+    assert item["link_url"] == "/apps/com.example.hello"
+
+    url = f"/api/apps/com.example.hello/sessions/{session_id}/decline"
+    r = await client.post(url, headers=_auth(carol_tok))
+    assert r.status == 200
+    assert await _needs_you(client, carol_tok) == []
+    rows = await (
+        await client.get("/api/notifications", headers=_auth(carol_tok))
+    ).json()
+    (row,) = [n for n in rows if n["type"] == "app_challenge"]
+    assert row["params"]["handled"] == {"outcome": "declined", "by": None}
+
+    # A second tap (another device) hears it was handled.
+    r = await client.post(url, headers=_auth(carol_tok))
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "APP_CHALLENGE_HANDLED"
+
+
+async def test_only_the_invitee_can_decline_a_game_invite(client):
+    _, session_id, _ = await _challenge_carol(client)
+    r = await client.post(
+        f"/api/apps/com.example.hello/sessions/{session_id}/decline",
+        headers=_auth(client._tok),  # the challenger
+    )
+    assert r.status == 409
+
+
+async def test_decline_requires_auth(client):
+    r = await client.post("/api/apps/com.example.hello/sessions/s1/decline")
+    assert r.status == 401
+
+
+async def test_opening_the_app_takes_the_invite_in(client):
+    carol_tok, session_id, _ = await _challenge_carol(client)
+    r = await client.get(
+        "/api/apps/com.example.hello/pending-sessions", headers=_auth(carol_tok)
+    )
+    assert [s["session_id"] for s in (await r.json())["sessions"]] == [session_id]
+    assert await _needs_you(client, carol_tok) == []
+
+
+async def test_the_challenger_cancels_a_game_invite(client):
+    carol_tok, session_id, target = await _challenge_carol(client)
+    r = await client.post(
+        f"/api/apps/com.example.hello/sessions/{session_id}/cancel",
+        json={"target": target},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    assert await _needs_you(client, carol_tok) == []
+
+
+async def test_cancel_needs_a_target(client):
+    r = await client.post(
+        "/api/apps/com.example.hello/sessions/s1/cancel",
+        json={"target": {"instance_id": "x"}},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 400
+    assert (await r.json())["error"]["code"] == "UNPROCESSABLE"

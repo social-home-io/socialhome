@@ -11,15 +11,21 @@ checks each row against the request it asks about.
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.apps import AppManifest, AppPendingSession, InstalledApp
 from socialhome.domain.events import (
+    AppChallengeEnded,
+    AppChallengeReceived,
     AutoPairRequestAnswered,
     AutoPairRequestIncoming,
+    DmContactRequestAnswered,
+    DmContactRequested,
     NotificationReadChanged,
     RemoteJoinRequestApproved,
     RemoteJoinRequestDenied,
@@ -40,8 +46,11 @@ from socialhome.domain.space import (
     SpaceRole,
     SpaceType,
 )
+from socialhome.domain.user import RemoteUser
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.repositories.app_repo import SqliteAppRepo
+from socialhome.repositories.dm_contact_repo import SqliteDmContactRepo
 from socialhome.repositories.notification_repo import (
     SqliteNotificationRepo,
     new_notification,
@@ -687,3 +696,197 @@ async def test_a_remote_answer_for_no_request_of_ours_is_ignored(env):
         RemoteJoinRequestDenied(request_id=remote_user, space_id="sp")
     )
     assert await env.notifs.list(kim.user_id, limit=10) == []
+
+
+# ── Someone asking to message you ─────────────────────────────────────
+
+
+async def _remote_ben(env) -> str:
+    await env.db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, status, source) VALUES('peer-b', 'B', ?, 'k1',"
+        " 'k2', 'https://peer-b/wh', 'wh-peer-b', 'confirmed', 'manual')",
+        ("00" * 32,),
+    )
+    await SqliteUserRepo(env.db).upsert_remote(
+        RemoteUser(
+            user_id="ru-ben",
+            instance_id="peer-b",
+            remote_username="ben",
+            display_name="Ben",
+        )
+    )
+    return "ru-ben"
+
+
+async def _contact_env(env):
+    anna = await env.user("anna")
+    ben = await _remote_ben(env)
+    contacts = SqliteDmContactRepo(env.db)
+    env.svc.attach_contact_repo(contacts)
+    await contacts.save_request(from_user_id=ben, to_user_id=anna.user_id)
+    await env.bus.publish(
+        DmContactRequested(
+            requester_user_id=ben,
+            requester_display_name="Ben",
+            recipient_user_id=anna.user_id,
+        )
+    )
+    return anna, ben, contacts
+
+
+async def test_a_contact_request_is_pinned_until_answered(env):
+    anna, ben, _ = await _contact_env(env)
+    (row,) = await _rows(env, anna.user_id, "dm_contact_requested")
+    assert row.object_key == object_key(NotificationObject.CONTACT, ben)
+    await env.notifs.mark_all_read(anna.user_id)
+    (pending,) = await env.svc.pending_actions(anna.user_id)
+    assert pending.id == row.id
+
+    env.read_changed.clear()
+    await env.bus.publish(
+        DmContactRequestAnswered(
+            requester_user_id=ben, recipient_user_id=anna.user_id, accepted=True
+        )
+    )
+    (row,) = await _rows(env, anna.user_id, "dm_contact_requested")
+    assert row.params.handled.outcome == "accepted"
+    assert row.params.handled.by is None
+    assert env.read_changed[-1].handled == (row.object_key,)
+    assert await env.svc.pending_actions(anna.user_id) == []
+
+
+async def test_a_contact_request_answered_elsewhere_resolves_on_the_next_look(env):
+    anna, ben, contacts = await _contact_env(env)
+    await contacts.answer_pending(ben, anna.user_id, "declined")
+    assert await env.svc.pending_actions(anna.user_id) == []
+    (row,) = await _rows(env, anna.user_id, "dm_contact_requested")
+    assert row.params.handled.outcome == "declined"
+
+
+async def test_a_contact_request_from_someone_gone_is_not_pending(env):
+    anna, _, _ = await _contact_env(env)
+    await env.db.enqueue("DELETE FROM remote_users WHERE user_id='ru-ben'")
+    assert await env.svc.pending_actions(anna.user_id) == []
+    (row,) = await _rows(env, anna.user_id, "dm_contact_requested")
+    assert row.params.handled.outcome == "done"
+
+
+# ── Game invites ──────────────────────────────────────────────────────
+
+
+async def _invite_env(env, *, created_at: str | None = None):
+    anna = await env.user("anna")
+    apps = SqliteAppRepo(env.db)
+    env.svc.attach_app_repo(apps)
+    await apps.install(
+        InstalledApp(
+            app_id="chess",
+            name="Chess",
+            version="1",
+            enabled=True,
+            manifest=AppManifest(entry="index.html", icon=None, capabilities=()),
+            bundle_path="apps/chess/1",
+            bundle_sha256="ab" * 32,
+            source_url="https://example/chess.tgz",
+            installed_by=None,
+            installed_at="2026-06-02T00:00:00+00:00",
+        )
+    )
+    for sid in ("s1", "s2"):
+        await apps.add_pending_session(
+            AppPendingSession(
+                app_id="chess",
+                user_id=anna.user_id,
+                session_id=sid,
+                from_instance="peer-b",
+                from_user="ben",
+                payload={"verb": "open"},
+                created_at=created_at or datetime.now(UTC).isoformat(),
+            )
+        )
+        await env.bus.publish(
+            AppChallengeReceived(
+                app_id="chess",
+                session_id=sid,
+                to_user_id=anna.user_id,
+                from_display="Ben",
+            )
+        )
+    return anna, apps
+
+
+def _invite_key(sid: str) -> str:
+    return object_key(NotificationObject.APP_SESSION, f"chess/{sid}")
+
+
+async def test_each_game_invite_is_its_own_pinned_row(env):
+    anna, _ = await _invite_env(env)
+    rows = await _rows(env, anna.user_id, "app_challenge")
+    assert {n.object_key for n in rows} == {_invite_key("s1"), _invite_key("s2")}
+    assert all(n.link_url == "/apps/chess" for n in rows)
+    await env.notifs.mark_all_read(anna.user_id)
+    assert len(await env.svc.pending_actions(anna.user_id)) == 2
+
+
+async def test_a_game_invite_ends_as_it_ended(env):
+    anna, _ = await _invite_env(env)
+    await env.bus.publish(
+        AppChallengeEnded(
+            app_id="chess",
+            user_id=anna.user_id,
+            session_ids=("s1",),
+            outcome="declined",
+        )
+    )
+    await env.bus.publish(
+        AppChallengeEnded(
+            app_id="chess",
+            user_id=anna.user_id,
+            session_ids=("s2",),
+            outcome="withdrawn",
+        )
+    )
+    outcomes = {
+        n.object_key: n.params.handled.outcome
+        for n in await _rows(env, anna.user_id, "app_challenge")
+    }
+    assert outcomes == {_invite_key("s1"): "declined", _invite_key("s2"): "withdrawn"}
+
+
+async def test_an_expired_game_invite_reads_as_expired(env):
+    old = (datetime.now(UTC) - timedelta(days=15)).isoformat()
+    anna, _ = await _invite_env(env, created_at=old)
+    assert await env.svc.pending_actions(anna.user_id) == []
+    assert {
+        n.params.handled.outcome
+        for n in await _rows(env, anna.user_id, "app_challenge")
+    } == {"expired"}
+
+
+async def test_a_game_invite_that_is_gone_or_whose_app_is_off_is_done(env):
+    anna, apps = await _invite_env(env)
+    await apps.take_pending_session("chess", anna.user_id, "s1")
+    (left,) = await env.svc.pending_actions(anna.user_id)
+    assert left.object_key == _invite_key("s2")
+    await apps.set_enabled("chess", enabled=False)
+    assert await env.svc.pending_actions(anna.user_id) == []
+    assert {
+        n.params.handled.outcome
+        for n in await _rows(env, anna.user_id, "app_challenge")
+    } == {"done"}
+
+
+async def test_a_game_invite_row_from_before_one_row_per_invite_is_done(env):
+    anna = await env.user("anna")
+    legacy = new_notification(user_id=anna.user_id, type="app_challenge", title="t")
+    await env.svc._save_notif(
+        legacy,
+        about=SimpleNamespace(
+            object_key=object_key(NotificationObject.APP, "chess"),
+            space_id=None,
+            space_name=None,
+        ),
+    )
+    assert await env.svc.pending_actions(anna.user_id) == []

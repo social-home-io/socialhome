@@ -21,12 +21,14 @@ import pytest
 
 from socialhome.domain.apps import (
     AppAgeRestrictedError,
+    AppChallengeHandledError,
     AppContactNotFoundError,
     AppManifest,
     AppNotEnabledError,
     AppNotFoundError,
     InstalledApp,
 )
+from socialhome.domain.events import AppChallengeEnded
 from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
@@ -144,6 +146,25 @@ class _FakeAppRepo:
             p for p in self.pending if not (p.app_id == app_id and p.user_id == user_id)
         ]
         return drained
+
+    async def get_pending_session(self, app_id, user_id, session_id):
+        for p in self.pending:
+            if (p.app_id, p.user_id, p.session_id) == (app_id, user_id, session_id):
+                return p
+        return None
+
+    async def take_pending_session(
+        self, app_id, user_id, session_id, *, from_instance=None, from_user=None
+    ):
+        p = await self.get_pending_session(app_id, user_id, session_id)
+        if p is None:
+            return None
+        if from_instance is not None and p.from_instance != from_instance:
+            return None
+        if from_user is not None and p.from_user != from_user:
+            return None
+        self.pending.remove(p)
+        return p
 
 
 class _FakeUserRepo:
@@ -2018,3 +2039,297 @@ async def test_open_session_refuses_a_local_target_who_blocked_the_actor():
             actor_user_id="u-bob",
         )
     assert ws.user_calls == []
+
+
+# ─── Game invites: kept, taken in, declined, withdrawn ───────────────────────
+
+
+def _ended(bus: _FakeBus) -> list:
+    return [e for e in bus.published if isinstance(e, AppChallengeEnded)]
+
+
+async def _remote_invite(svc, session_id: str = "sess-1") -> None:
+    await svc.on_inbound_event(
+        _make_event(
+            FederationEventType.APP_SESSION,
+            {
+                "app_id": "chess",
+                "session_id": session_id,
+                "verb": "open",
+                "to_user": "bob",
+                "from_user": "carol",
+            },
+        )
+    )
+
+
+def _carol() -> RemoteUser:
+    return _make_remote_user(
+        user_id="ru-carol", instance_id="peer-inst-id", remote_username="carol"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_local_invite_waits_for_the_invitee_like_a_remote_one():
+    """A challenge to someone on this household is kept for them, so it is
+    still there when they open the app later (and "Needs you" can check it)."""
+    svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[_make_user("u-alice", "alice", "Alice"), _make_user("u-bob", "bob")],
+    )
+    session_id = await svc.open_session(
+        app_id="chess", target=_local_target("u-bob"), actor_user_id="u-alice"
+    )
+    (row,) = svc._app_repo.pending
+    assert (row.user_id, row.session_id) == ("u-bob", session_id)
+    assert (row.from_instance, row.from_user) == ("own-inst-id", "u-alice")
+    assert row.payload == {"app_id": "chess", "session_id": session_id, "verb": "open"}
+
+
+@pytest.mark.asyncio
+async def test_the_app_taking_invites_in_accepts_them():
+    bus = _FakeBus()
+    svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[_make_user("u-bob", "bob", "Bob")],
+        remote_users=[_carol()],
+        bus=bus,
+    )
+    await _remote_invite(svc, "s1")
+    await _remote_invite(svc, "s2")
+    await svc.drain_pending_sessions("chess", "u-bob")
+    (ended,) = _ended(bus)
+    assert (ended.user_id, ended.outcome) == ("u-bob", "accepted")
+    assert set(ended.session_ids) == {"s1", "s2"}
+    # Nothing waited: nothing ends.
+    await svc.drain_pending_sessions("chess", "u-bob")
+    assert len(_ended(bus)) == 1
+
+
+@pytest.mark.asyncio
+async def test_declining_a_remote_invite_tells_the_challengers_app():
+    bus = _FakeBus()
+    svc, fed, _ = _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[_make_user("u-bob", "bob", "Bob")],
+        remote_users=[_carol()],
+        bus=bus,
+    )
+    await _remote_invite(svc)
+    await svc.decline_session(
+        app_id="chess", session_id="sess-1", actor_user_id="u-bob"
+    )
+
+    assert svc._app_repo.pending == []
+    (ended,) = _ended(bus)
+    assert (ended.session_ids, ended.outcome) == (("sess-1",), "declined")
+    (sent,) = fed.sent_events
+    assert sent["to_instance_id"] == "peer-inst-id"
+    assert sent["event_type"] is FederationEventType.APP_SESSION
+    assert sent["payload"] == {
+        "app_id": "chess",
+        "session_id": "sess-1",
+        "verb": "close",
+        "reason": "declined",
+        "to_user": "carol",
+        "from_user": "bob",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_second_decline_loses():
+    """Declined on two devices at once (or after the app took it in): only
+    one wins; the other hears it was handled and nothing more is sent."""
+    svc, fed, _ = _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[_make_user("u-bob", "bob", "Bob")],
+        remote_users=[_carol()],
+    )
+    await _remote_invite(svc)
+    await svc.decline_session(
+        app_id="chess", session_id="sess-1", actor_user_id="u-bob"
+    )
+    with pytest.raises(AppChallengeHandledError):
+        await svc.decline_session(
+            app_id="chess", session_id="sess-1", actor_user_id="u-bob"
+        )
+    assert len(fed.sent_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_decline_that_cant_be_sent_still_stands():
+    bus = _FakeBus()
+    svc, fed, _ = _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[_make_user("u-bob", "bob", "Bob")],
+        remote_users=[_carol()],
+        bus=bus,
+    )
+    await _remote_invite(svc)
+
+    async def _down(**_kw):
+        raise ConnectionError("peer offline")
+
+    fed.send_event = _down  # type: ignore[method-assign]
+    await svc.decline_session(
+        app_id="chess", session_id="sess-1", actor_user_id="u-bob"
+    )
+    assert svc._app_repo.pending == []
+    assert [e.outcome for e in _ended(bus)] == ["declined"]
+
+
+@pytest.mark.asyncio
+async def test_declining_for_a_disabled_app_sends_nothing():
+    svc, fed, _ = _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[_make_user("u-bob", "bob", "Bob")],
+        remote_users=[_carol()],
+    )
+    await _remote_invite(svc)
+    svc._app_repo._apps["chess"] = _make_installed_app("chess", enabled=False)
+    await svc.decline_session(
+        app_id="chess", session_id="sess-1", actor_user_id="u-bob"
+    )
+    assert svc._app_repo.pending == []
+    assert fed.sent_events == []
+
+
+@pytest.mark.asyncio
+async def test_declining_a_local_invite_tells_the_challenger_over_websocket():
+    svc, fed, ws = _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[_make_user("u-alice", "alice", "Alice"), _make_user("u-bob", "bob")],
+    )
+    session_id = await svc.open_session(
+        app_id="chess", target=_local_target("u-bob"), actor_user_id="u-alice"
+    )
+    ws.user_calls.clear()
+    await svc.decline_session(
+        app_id="chess", session_id=session_id, actor_user_id="u-bob"
+    )
+    (call,) = ws.user_calls
+    assert call["user_id"] == "u-alice"
+    assert call["payload"]["kind"] == "session"
+    assert call["payload"]["payload"]["verb"] == "close"
+    assert call["payload"]["payload"]["reason"] == "declined"
+    assert fed.sent_events == []
+
+
+@pytest.mark.asyncio
+async def test_the_challenger_withdraws_a_local_invite():
+    bus = _FakeBus()
+    svc, _, ws = _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[_make_user("u-alice", "alice", "Alice"), _make_user("u-bob", "bob")],
+        bus=bus,
+    )
+    session_id = await svc.open_session(
+        app_id="chess", target=_local_target("u-bob"), actor_user_id="u-alice"
+    )
+    ws.user_calls.clear()
+    await svc.cancel_session(
+        app_id="chess",
+        session_id=session_id,
+        target=_local_target("u-bob"),
+        actor_user_id="u-alice",
+    )
+    assert svc._app_repo.pending == []
+    (ended,) = _ended(bus)
+    assert (ended.user_id, ended.outcome) == ("u-bob", "withdrawn")
+    (call,) = ws.user_calls
+    assert call["user_id"] == "u-bob"
+    assert call["payload"]["payload"]["reason"] == "withdrawn"
+
+
+@pytest.mark.asyncio
+async def test_only_the_challenger_can_withdraw_an_invite():
+    """Someone else naming the same session leaves the invite waiting."""
+    bus = _FakeBus()
+    svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[
+            _make_user("u-alice", "alice", "Alice"),
+            _make_user("u-bob", "bob"),
+            _make_user("u-eve", "eve"),
+        ],
+        bus=bus,
+    )
+    session_id = await svc.open_session(
+        app_id="chess", target=_local_target("u-bob"), actor_user_id="u-alice"
+    )
+    await svc.cancel_session(
+        app_id="chess",
+        session_id=session_id,
+        target=_local_target("u-bob"),
+        actor_user_id="u-eve",
+    )
+    assert len(svc._app_repo.pending) == 1
+    assert _ended(bus) == []
+
+
+@pytest.mark.asyncio
+async def test_the_challenger_withdraws_a_remote_invite():
+    svc, fed, _ = _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[_make_user("u-alice", "alice", "Alice")],
+        remote_users=[_carol()],
+        instances=[_make_remote_instance()],
+    )
+    target = {"instance_id": "peer-inst-id", "user_ref": "carol", "is_local": False}
+    await svc.cancel_session(
+        app_id="chess", session_id="s9", target=target, actor_user_id="u-alice"
+    )
+    (sent,) = fed.sent_events
+    assert sent["payload"]["verb"] == "close"
+    assert sent["payload"]["reason"] == "withdrawn"
+    assert (sent["payload"]["to_user"], sent["payload"]["from_user"]) == (
+        "carol",
+        "alice",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_close_is_not_sent_to_a_household_that_cant_address_a_person():
+    svc, fed, _ = _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[_make_user("u-alice", "alice", "Alice")],
+        remote_users=[_carol()],
+        instances=[_make_remote_instance()],
+        peer_version=17,
+    )
+    target = {"instance_id": "peer-inst-id", "user_ref": "carol", "is_local": False}
+    await svc.cancel_session(
+        app_id="chess", session_id="s9", target=target, actor_user_id="u-alice"
+    )
+    assert fed.sent_events == []
+
+
+@pytest.mark.asyncio
+async def test_an_inbound_close_from_the_challenger_withdraws_the_invite():
+    bus = _FakeBus()
+    svc, _, ws = _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[_make_user("u-bob", "bob", "Bob")],
+        remote_users=[_carol()],
+        bus=bus,
+    )
+    await _remote_invite(svc)
+    await svc.on_inbound_event(
+        _make_event(
+            FederationEventType.APP_SESSION,
+            {
+                "app_id": "chess",
+                "session_id": "sess-1",
+                "verb": "close",
+                "reason": "withdrawn",
+                "to_user": "bob",
+                "from_user": "carol",
+            },
+        )
+    )
+    assert svc._app_repo.pending == []
+    assert [(e.session_ids, e.outcome) for e in _ended(bus)] == [
+        (("sess-1",), "withdrawn")
+    ]
+    # The close still reaches Bob's app.
+    assert ws.user_calls[-1]["payload"]["payload"]["verb"] == "close"

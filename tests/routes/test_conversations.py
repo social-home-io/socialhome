@@ -11,12 +11,18 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from socialhome.app import create_app
-from socialhome.app_keys import conversation_repo_key, notification_delivery_key
+from socialhome.app_keys import (
+    conversation_repo_key,
+    event_bus_key,
+    notification_delivery_key,
+)
 from socialhome.app_keys import db_key as _db_key
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
 from socialhome.crypto import derive_user_id, generate_identity_keypair
 from socialhome.domain.conversation import ConversationMessage, ConversationType
+from socialhome.domain.events import DmContactRequested
+from socialhome.repositories.dm_contact_repo import SqliteDmContactRepo
 from socialhome.routes.conversations import _conversation_row
 from socialhome.services.dm_service import DmService
 
@@ -1762,3 +1768,101 @@ async def test_conversation_row_shows_a_guardian_block_counterpart_by_name_only(
     assert members["u-kid"]["display_name"] == "Kid"
     assert members["u-kid"]["picture_url"] is None
     assert members["u-ann"]["picture_url"]
+
+
+# ── Contact requests: Accept / Decline ────────────────────────────────────
+
+
+async def _brother_asks_bob(client) -> str:
+    """Brother (on a paired household) asks to message Bob — the request
+    and its "Needs you" row, as the inbound handler leaves them."""
+    remote_uid = await _seed_remote_brother(client)
+    await SqliteDmContactRepo(client.app[_db_key]).save_request(
+        from_user_id=remote_uid, to_user_id=client._bob_uid
+    )
+    await client.app[event_bus_key].publish(
+        DmContactRequested(
+            requester_user_id=remote_uid,
+            requester_display_name="Brother",
+            recipient_user_id=client._bob_uid,
+        )
+    )
+    await client.app[notification_delivery_key].drain()
+    return remote_uid
+
+
+async def _needs_you(client) -> list[dict]:
+    await client.app[notification_delivery_key].drain()
+    r = await client.get(
+        "/api/notifications/needs-you", headers=_auth(client._bob_token)
+    )
+    assert r.status == 200
+    return (await r.json())["items"]
+
+
+async def test_accepting_a_contact_request_opens_the_chat(client):
+    remote_uid = await _brother_asks_bob(client)
+    (item,) = await _needs_you(client)
+    assert (item["type"], item["object_key"]) == (
+        "dm_contact_requested",
+        f"contact:{remote_uid}",
+    )
+
+    r = await client.post(
+        f"/api/conversations/contact-requests/{remote_uid}/accept",
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 200
+    body = await r.json()
+    assert body["type"] == "dm"
+    assert await _needs_you(client) == []
+
+    # The chat is Bob's, with Brother seated.
+    r = await client.get(
+        f"/api/conversations/{body['id']}", headers=_auth(client._bob_token)
+    )
+    assert r.status == 200
+    assert remote_uid in {m["user_id"] for m in (await r.json())["members"]}
+
+    # Answered once: a second tap hears how it ended.
+    r = await client.post(
+        f"/api/conversations/contact-requests/{remote_uid}/decline",
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 409
+    err = (await r.json())["error"]
+    assert err["code"] == "CONTACT_REQUEST_HANDLED"
+
+
+async def test_declining_a_contact_request_opens_nothing(client):
+    remote_uid = await _brother_asks_bob(client)
+    r = await client.post(
+        f"/api/conversations/contact-requests/{remote_uid}/decline",
+        headers=_auth(client._bob_token),
+    )
+    assert r.status == 200
+    assert await _needs_you(client) == []
+    r = await client.get("/api/conversations", headers=_auth(client._bob_token))
+    assert await r.json() == []
+    rows = await (
+        await client.get("/api/notifications", headers=_auth(client._bob_token))
+    ).json()
+    (row,) = [n for n in rows if n["type"] == "dm_contact_requested"]
+    assert row["params"]["handled"] == {"outcome": "declined", "by": None}
+
+
+async def test_only_the_recipient_can_answer_a_contact_request(client):
+    remote_uid = await _brother_asks_bob(client)
+    r = await client.post(
+        f"/api/conversations/contact-requests/{remote_uid}/accept",
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 404
+    assert (await r.json())["error"]["code"] == "CONTACT_REQUEST_NOT_FOUND"
+    assert len(await _needs_you(client)) == 1
+
+
+async def test_contact_request_answers_require_auth(client):
+    for verb in ("accept", "decline"):
+        r = await client.post(f"/api/conversations/contact-requests/x/{verb}")
+        assert r.status == 401

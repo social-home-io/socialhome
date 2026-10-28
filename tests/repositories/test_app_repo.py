@@ -370,3 +370,58 @@ async def test_prune_pending_sessions_returns_deleted_count(db):
     assert deleted == 2
     # Nothing left to prune the second time.
     assert await repo.prune_pending_sessions(max_age_seconds=300) == 0
+
+
+@pytest.mark.asyncio
+async def test_get_pending_session_reads_one_invite_expired_or_not(db):
+    repo = SqliteAppRepo(db)
+    uid = await _seed_user(db)
+    await repo.install(_app())
+    old = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+    await repo.add_pending_session(_pending(uid, session_id="old", created_at=old))
+    got = await repo.get_pending_session("chess", uid, "old")
+    assert got is not None and got.created_at == old
+    assert await repo.get_pending_session("chess", uid, "nope") is None
+
+
+@pytest.mark.asyncio
+async def test_take_pending_session_removes_it_once(db):
+    """The one step a decline, a withdrawal and the app taking it in race
+    on: the first wins the row, the second gets ``None``."""
+    repo = SqliteAppRepo(db)
+    uid = await _seed_user(db)
+    await repo.install(_app())
+    await repo.add_pending_session(_pending(uid))
+    taken = await repo.take_pending_session("chess", uid, "sess-1")
+    assert taken is not None and taken.from_user == "alice@remote"
+    assert await repo.take_pending_session("chess", uid, "sess-1") is None
+    assert await repo.get_pending_session("chess", uid, "sess-1") is None
+
+
+@pytest.mark.asyncio
+async def test_take_pending_session_only_for_who_sent_it(db):
+    repo = SqliteAppRepo(db)
+    uid = await _seed_user(db)
+    await repo.install(_app())
+    await repo.add_pending_session(_pending(uid))
+    assert (
+        await repo.take_pending_session(
+            "chess", uid, "sess-1", from_instance="other.example"
+        )
+        is None
+    )
+    assert (
+        await repo.take_pending_session(
+            "chess", uid, "sess-1", from_instance="remote.example", from_user="eve"
+        )
+        is None
+    )
+    assert await repo.get_pending_session("chess", uid, "sess-1") is not None
+    taken = await repo.take_pending_session(
+        "chess",
+        uid,
+        "sess-1",
+        from_instance="remote.example",
+        from_user="alice@remote",
+    )
+    assert taken is not None

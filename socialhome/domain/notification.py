@@ -24,7 +24,8 @@ from .space import JOIN_REQUEST_FLAGS, SpaceRole, SpaceType
 
 #: Rows that ask someone to act — the "Needs you" items (D12): a join
 #: request, a space's review queue (posts, reports), an invite to a space,
-#: a household asking to pair. They stay pinned on top until handled —
+#: a household asking to pair, someone asking to message you, a game
+#: invite (a Social Home App challenge). They stay pinned on top until handled —
 #: reading one does not un-pin it. Unread, they survive both the per-user
 #: cap and the age purge — dropping one would lose the only pointer to
 #: work still waiting. Once handled (by anyone) every recipient's row
@@ -37,6 +38,8 @@ ACTION_ITEM_TYPES: frozenset[str] = frozenset(
         "space_report",
         "space_invite",
         "pairing_request",
+        "dm_contact_requested",
+        "app_challenge",
     }
 )
 
@@ -139,8 +142,12 @@ class NotificationObject(StrEnum):
     FOLLOWERS = "followers"
     #: Someone asking to message you (``<requester user_id>``).
     CONTACT = "contact"
-    #: An installed Social Home App (``<app_id>``).
+    #: An installed Social Home App (``<app_id>``) — game invites before
+    #: they had a row each.
     APP = "app"
+    #: One game invite: an app session someone opened with you
+    #: (``<app_id>/<session_id>``).
+    APP_SESSION = "app_session"
     #: One join request (``<request_id>``) — handled by one admin, handled
     #: for all.
     JOIN_REQUEST = "join_request"

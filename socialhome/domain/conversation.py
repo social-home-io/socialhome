@@ -409,3 +409,24 @@ class DmTooLongError(CodedError, ValueError):
             f"message content exceeds {maximum} chars",
             params={"max": maximum},
         )
+
+
+class ContactRequestNotFoundError(CodedError, LookupError):
+    """No request from that person to message the caller (or the person is
+    no longer known here, so no chat can be opened with them)."""
+
+    status = 404
+    code = "CONTACT_REQUEST_NOT_FOUND"
+    detail = "contact request not found"
+
+
+class ContactRequestHandledError(CodedError):
+    """The request was already answered — on another device, or a moment
+    ago. ``params.status``: ``accepted`` / ``declined``."""
+
+    status = 409
+    code = "CONTACT_REQUEST_HANDLED"
+    detail = "contact request already answered"
+
+    def __init__(self, status: str) -> None:
+        super().__init__(params={"status": status})
