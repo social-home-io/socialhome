@@ -13,6 +13,8 @@ import { toasts } from '@/components/Toast'
 import type { Notification } from '@/types'
 import {
   DECLINE_UNDO_MS,
+  NEEDS_YOU_TYPES,
+  acceptContact,
   acting,
   approve,
   declineWithUndo,
@@ -226,6 +228,76 @@ describe('actions', () => {
     flushDeclines()
     await vi.waitFor(() => expect(toasts.value.map(t => t.message)).toContain('Someone already handled this'))
     expect(apiPost).not.toHaveBeenCalled()
+  })
+})
+
+describe('requests to message you and game invites', () => {
+  const contact = () => row({
+    id: 'c1',
+    type: 'dm_contact_requested',
+    object_key: 'contact:ru-ben/x',
+    space_id: null,
+    link_url: '/dms',
+  })
+  const game = () => row({
+    id: 'g1',
+    type: 'app_challenge',
+    object_key: 'app_session:chess/sess-1',
+    space_id: null,
+    link_url: '/apps/chess',
+  })
+
+  it('a request to message you is pinned and answered inline', () => {
+    expect(NEEDS_YOU_TYPES.has('dm_contact_requested')).toBe(true)
+    expect(inlineAction(contact())).toBe('contact')
+    // A row without its object (before 0129) goes to Review.
+    expect(inlineAction(row({ id: 'c0', type: 'dm_contact_requested', object_key: null }))).toBe('review')
+  })
+
+  it('a game invite is played or declined inline', () => {
+    expect(NEEDS_YOU_TYPES.has('app_challenge')).toBe(true)
+    expect(inlineAction(game())).toBe('game')
+    // One row per app from before one row per invite: Review (the app).
+    expect(inlineAction(row({ id: 'g0', type: 'app_challenge', object_key: 'app:chess' }))).toBe('review')
+  })
+
+  it('Accept opens the chat the server answers with', async () => {
+    apiPost.mockResolvedValueOnce({ id: 'conv-9', type: 'dm' })
+    const c = contact()
+    needsYou.value = [c]
+    expect(await acceptContact(c)).toBe('conv-9')
+    expect(apiPost).toHaveBeenCalledWith('/api/conversations/contact-requests/ru-ben%2Fx/accept')
+    expect(needsYou.value).toEqual([])
+    expect(toasts.value.map(t => t.message)).toContain('Request accepted')
+  })
+
+  it('an Accept that lost the race opens nothing', async () => {
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('409'), { status: 409, extra: { params: { status: 'declined' } } }))
+    const c = contact()
+    needsYou.value = [c]
+    expect(await acceptContact(c)).toBeNull()
+    expect(toasts.value.map(t => t.message)).toContain('Someone already handled this')
+  })
+
+  it('declining a request to message you waits 5 s and then says they are not told', async () => {
+    vi.useFakeTimers()
+    declineWithUndo(contact())
+    expect(toasts.value.map(t => t.message)).toContain('Declining the request…')
+    await vi.advanceTimersByTimeAsync(DECLINE_UNDO_MS + 100)
+    expect(apiPost).toHaveBeenCalledWith(
+      '/api/conversations/contact-requests/ru-ben%2Fx/decline', undefined, { keepalive: true },
+    )
+    expect(toasts.value.map(t => t.message)).toContain('Declined. They aren\'t told.')
+  })
+
+  it('declining a game invite names the app and the session', async () => {
+    declineWithUndo(game())
+    expect(toasts.value.map(t => t.message)).toContain('Declining the game…')
+    flushDeclines()
+    await vi.waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/apps/chess/sessions/sess-1/decline', undefined, { keepalive: true },
+    ))
+    await vi.waitFor(() => expect(toasts.value.map(t => t.message)).toContain('Game declined'))
   })
 })
 

@@ -16,6 +16,7 @@
  * The chip counts pending items, not unread ones.
  */
 import { useEffect, useState } from 'preact/hooks'
+import { useLocation } from 'preact-iso'
 import { appHref } from '@/baseUrl'
 import { Button } from '@/components/Button'
 import { isOne, t } from '@/i18n/i18n'
@@ -28,6 +29,7 @@ import { groupSentence } from './rowText'
 import {
   NEEDS_YOU_CAP,
   NEEDS_YOU_TYPES,
+  acceptContact,
   acting,
   approve,
   declineWithUndo,
@@ -94,6 +96,7 @@ function Actions({ entry, describedBy, onNavigate }: {
   describedBy: string
   onNavigate?: () => void
 }) {
+  const location = useLocation()
   const row = entry.kind === 'single' ? entry.row : null
   const action = row ? inlineAction(row) : 'review'
   if (row && action === 'decide') {
@@ -102,6 +105,44 @@ function Actions({ entry, describedBy, onNavigate }: {
         <Button aria-describedby={describedBy} onClick={() => void approve(row)}>
           {t('notifications.needs_you.approve')}
         </Button>
+        <Button variant="secondary" aria-describedby={describedBy} onClick={() => declineWithUndo(row)}>
+          {t('notifications.needs_you.decline')}
+        </Button>
+      </div>
+    )
+  }
+  if (row && action === 'contact') {
+    return (
+      <div class="sh-needs__actions">
+        <Button
+          aria-describedby={describedBy}
+          onClick={async () => {
+            const chat = await acceptContact(row)
+            if (chat) {
+              onNavigate?.()
+              location.route(`/dms/${encodeURIComponent(chat)}`)
+            }
+          }}
+        >
+          {t('notifications.needs_you.accept')}
+        </Button>
+        <Button variant="secondary" aria-describedby={describedBy} onClick={() => declineWithUndo(row)}>
+          {t('notifications.needs_you.decline')}
+        </Button>
+      </div>
+    )
+  }
+  if (row && action === 'game') {
+    return (
+      <div class="sh-needs__actions">
+        <a
+          class="sh-btn sh-btn--primary"
+          href={appHref(row.link_url || '/apps')}
+          aria-describedby={describedBy}
+          onClick={() => { void markRowRead(row).catch(() => {}); onNavigate?.() }}
+        >
+          {t('notifications.needs_you.play')}
+        </a>
         <Button variant="secondary" aria-describedby={describedBy} onClick={() => declineWithUndo(row)}>
           {t('notifications.needs_you.decline')}
         </Button>

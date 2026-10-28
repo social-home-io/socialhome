@@ -42,6 +42,20 @@ picture / video / file / **voice-note** attachments — see
 `DM_MEMBER_ADDED` is a reserved name with no handler — group membership
 travels only as `DM_GROUP_ROSTER`.
 
+**Contact requests.** An inbound `DM_CONTACT_REQUEST` (the requester must be
+a user of `from_instance`; guardian blocks refuse it) is stored as a pending
+`dm_contact_requests` row and pinned in the recipient's "Needs you"
+(`dm_contact_requested`, one row per requester). The recipient answers it
+with `POST /api/conversations/contact-requests/{user_id}/accept` — which
+opens (or finds) the 1:1 with the requester — or `/decline`; every pending
+request from that person is answered by one conditional write. Neither
+answer is sent: no household sends or handles `DM_CONTACT_ACCEPTED` /
+`DM_CONTACT_DECLINED` (reserved names), so the requester learns of an
+accept only when the recipient writes, and never of a decline. An ignored
+request stays pinned until answered; one whose requester is no longer known
+here resolves on the next look. No household sends `DM_CONTACT_REQUEST`
+yet — paired people message each other directly.
+
 **History pull**
 
 `DM_HISTORY_REQUEST`, `DM_HISTORY_CHUNK`, `DM_HISTORY_CHUNK_ACK`,

@@ -83,10 +83,22 @@ sequenceDiagram
 | `app_id` | yes | Installed app identifier. Must match a locally-enabled app on the receiver or the inbound is silently dropped. |
 | `session_id` | yes | Hex UUID allocated by the initiator.  Scopes all subsequent `APP_MESSAGE` frames for this session. |
 | `verb` | yes | `"open"` / `"accept"` / `"close"`. |
+| `reason` | no | On a `close` this household sends: `"declined"` (the invitee said no) or `"withdrawn"` (the challenger took the invite back). Passed through to the app. |
 | `to_user` | no (v_18+) | The target user's username on the receiving household.  When present and non-empty, the receiver delivers the frame only to that user (instead of fanning out to all local users).  Omitted for sub-v_18 peers — gated on `FederationCapability.MIN_FOR_APP_USER_ROUTING`. |
 | `from_user` | no (v_18+) | The initiator's username on the sending household.  Used by the receiver to show who sent the challenge.  Omitted for sub-v_18 peers. |
 
-**v1 session lifecycle note:** the host initiates `open`; other verbs (`accept`, `close`) are passed through to the app layer — the iframe app owns session lifecycle.  The server does not enforce session state.
+**v1 session lifecycle note:** the host initiates `open`; other verbs (`accept`, `close`) are passed through to the app layer — the iframe app owns the game. The server keeps only the open invite (below).
+
+**Game invite lifecycle.** An open addressed to one person — from another household or from this one — is kept for them in `app_pending_sessions` and is a "Needs you" row (`app_challenge`, `app_session:<app_id>/<session_id>`) until it ends:
+
+| End | How | Row outcome | The other side hears |
+|---|---|---|---|
+| Taken in | The invitee opens the app (or has it open when the invite arrives): `GET /api/apps/{id}/pending-sessions` drains it | `accepted` | — (the game goes on) |
+| Declined | `POST /api/apps/{id}/sessions/{sid}/decline` (Needs you's Decline, after its 5-s undo) | `declined` | `APP_SESSION {verb: "close", reason: "declined"}` to the challenger (v_18+, best effort) |
+| Withdrawn | The challenger's `POST …/sessions/{sid}/cancel` sends `APP_SESSION {verb: "close", reason: "withdrawn"}`; the invitee's household drops the invite only when the close comes from the household **and** person that opened it | `withdrawn` | — |
+| Expired | 14 days (`PENDING_SESSION_TTL_SECONDS`): no longer replayed, pruned hourly; "Needs you" reads it as expired on the next look | `expired` | — |
+
+No new event type or field the older side can't ignore: a household before this change passes the `close` through to the app as before and keeps its invite until the app drains it or it expires. One decline or withdrawal is one `APP_SESSION` (≈ 200 bytes) to one household — never a fan-out.
 
 **Challenge notification (v_18+):** when an inbound `APP_SESSION {verb:"open"}` resolves to a single local recipient via `to_user`, an `AppChallengeReceived` domain event is published. The `NotificationService` subscriber seats a bell row and fires a title-only push notification (§25.3) for the addressed user. Idempotent on `session_id` — a double federation delivery (WebRTC + HTTPS fallback) does not produce two notifications.
 
@@ -237,6 +249,9 @@ error.
 - Locally, a session can't be opened with — or a message sent to — a
   household member who blocked the initiator (403 `FORBIDDEN`, the
   same answer as a non-contact), matching what a remote receiver does.
+- A `close` withdraws a pending invite only when it comes from the
+  household and person that opened it; anyone else naming the session
+  changes nothing.
 - User-visible effect: an invite from a household user this household
   hasn't synced (or one hidden from it) is not shown.
 
