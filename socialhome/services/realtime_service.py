@@ -139,6 +139,7 @@ from ..domain.events import (
     UserWentIdle,
     UserWentOffline,
 )
+from ..domain.notification_kinds import kind_of
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
     SETTINGS_AUTHORITY_ROLES,
@@ -2212,6 +2213,8 @@ class RealtimeService:
                 "object_key": event.object_key,
                 "space_id": event.space_id,
                 "params": event.params.to_dict() if event.params else None,
+                # The Settings kind (D4) for the row's "…" menu.
+                "kind": kind_of(event.type, event.space_id),
             },
         )
 

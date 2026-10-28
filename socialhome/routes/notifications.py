@@ -11,6 +11,7 @@ from ..app_keys import (
 )
 from ..domain.events import NotificationReadChanged
 from ..domain.notification import Notification
+from ..domain.notification_kinds import kind_of
 from ..security import error_response
 from .base import BaseView
 
@@ -41,6 +42,9 @@ def notification_json(n: Notification) -> dict:
         "params": n.params.to_dict() if n.params else None,
         "new_count": n.params.new if n.params else 1,
         "total_count": n.params.total if n.params else 1,
+        # Settings → Notifications kind it falls under (D4) — the row "…"
+        # menu offers to turn that kind down.
+        "kind": kind_of(n.type, n.space_id),
     }
 
 

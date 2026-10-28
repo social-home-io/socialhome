@@ -50,6 +50,9 @@ class AbstractConversationRepo(Protocol):
     async def create(self, conv: Conversation) -> Conversation: ...
     async def get(self, conversation_id: str) -> Conversation | None: ...
     async def list_for_user(self, username: str) -> list[Conversation]: ...
+    async def list_notif_seats(
+        self, username: str
+    ) -> list[tuple[Conversation, str | None, str]]: ...
     async def get_household_chat(self) -> Conversation | None: ...
     async def get_space_chat(self, space_id: str) -> Conversation | None: ...
     async def create_system_chat(
@@ -359,6 +362,36 @@ class SqliteConversationRepo:
             (username,),
         )
         return [c for c in (_row_to_conv(d) for d in rows_to_dicts(rows)) if c]
+
+    async def list_notif_seats(
+        self, username: str
+    ) -> list[tuple[Conversation, str | None, str]]:
+        """``username``'s live seats that may not be at their chat's default
+        — muted (``muted_until`` set, past or not), at a level other than
+        ``all``, or in a system chat (a space chat's default is
+        ``mentions``) — as ``(conversation, muted_until, notif_level)``.
+        The caller compares against each chat's default ("Muted and
+        changed")."""
+        rows = await self._db.fetchall(
+            """
+            SELECT c.*, m.muted_until AS seat_muted_until,
+                   m.notif_level AS seat_notif_level
+              FROM conversations c
+              JOIN conversation_members m ON m.conversation_id = c.id
+             WHERE m.username = ? AND m.deleted_at IS NULL
+               AND (m.muted_until IS NOT NULL OR m.notif_level <> 'all'
+                    OR c.system_scope IS NOT NULL)
+             ORDER BY c.id
+            """,
+            (username,),
+        )
+        out: list[tuple[Conversation, str | None, str]] = []
+        for d in rows_to_dicts(rows):
+            conv = _row_to_conv(d)
+            if conv is not None:
+                level = d.get("seat_notif_level") or "all"
+                out.append((conv, d.get("seat_muted_until"), level))
+        return out
 
     async def get_household_chat(self) -> Conversation | None:
         """The household chat, or ``None`` before it was first created."""

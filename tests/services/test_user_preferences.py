@@ -6,6 +6,7 @@ import orjson
 import pytest
 
 from socialhome.domain.highlight import HighlightAudience
+from socialhome.domain.notification_kinds import NotifDelivery, NotifKind
 from socialhome.services.user_preferences import (
     DEFAULT_HIGHLIGHTS_MAX_COUNT,
     DEFAULT_HIGHLIGHTS_RETENTION_DAYS,
@@ -14,6 +15,7 @@ from socialhome.services.user_preferences import (
     parse_ha_automation_events,
     parse_highlights_preferences,
     parse_moment_preferences,
+    parse_notif_settings,
     parse_timetable_home_pins,
 )
 
@@ -149,3 +151,23 @@ def test_ha_automation_events_on_only_for_literal_true():
 def test_ha_automation_events_tolerates_bad_json():
     assert parse_ha_automation_events("{not json") is False
     assert parse_ha_automation_events("[1, 2]") is False
+
+
+def test_notif_settings_default_on_missing_or_bad_json():
+    for raw in (None, "", "{", "[]"):
+        s = parse_notif_settings(raw)
+        assert s.chosen == {}
+        assert s.delivery(NotifKind.REACTIONS) is NotifDelivery.IN_APP
+
+
+def test_notif_settings_read_the_kinds_and_muted_posts():
+    s = parse_notif_settings(
+        orjson.dumps(
+            {
+                "notif_kinds": {"activity": "push"},
+                "notif_muted_posts": {"post:p1": "2026-10-28T10:00:00+00:00"},
+            }
+        ).decode()
+    )
+    assert s.delivery(NotifKind.ACTIVITY) is NotifDelivery.PUSH
+    assert list(s.muted_posts) == ["post:p1"]

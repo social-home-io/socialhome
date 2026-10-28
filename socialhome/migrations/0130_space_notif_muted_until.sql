@@ -1,0 +1,37 @@
+-- 0130 — "Nothing" for a while in a space (notifications redesign, D9).
+-- Follows 0129.
+--
+-- Spaces and chats share one level vocabulary — Everything / Replies and
+-- mentions / Nothing — and picking Nothing asks "For how long?" (until I
+-- turn it back on, 1 hour, 8 hours, 1 week). Chats already mute for a while
+-- (``conversation_members.muted_until``, 0060); spaces could only mute
+-- forever.
+--
+--   muted_until  UTC ISO 8601. While it is in the future the space reads as
+--                "Nothing"; afterwards ``level`` — the level the person had
+--                before — applies again ("Quiet until 02:15, then back to
+--                Replies and mentions"). NULL: no timed mute (``level`` says
+--                it all, ``muted`` = until they turn it back on).
+--
+-- CLAUDE.md "audit before a migration":
+--   (1) Audited every path that touches the data. ``space_notif_prefs`` is
+--       defined only in 0001 (no later migration alters it). Writer:
+--       ``SqliteNotificationRepo.set_space_notif_level`` (``PUT
+--       /api/spaces/{id}/notif-prefs``). Readers:
+--       ``get_space_notif_level`` (``NotificationService._space_level`` for
+--       every space fan-out, and the GET route) and the per-user
+--       ``data_export_service`` dump (``SELECT *`` — the column rides
+--       along). Cascades on user / space delete are unchanged. Nothing
+--       federates it.
+--   (2) Non-migration alternatives, rejected: a sentinel inside ``level``
+--       (the CHECK allows only all/mentions/muted, and a time is not a
+--       level); ``users.preferences_json`` (the level lives here — splitting
+--       one setting across two stores lets them disagree, and every space
+--       fan-out would parse every member's blob); a scheduler that flips
+--       ``muted`` back (a stored "then back to" level is still needed, and a
+--       missed tick leaves someone muted forever); the "mute forever only"
+--       option (D9 b), which the owner did not pick.
+--   (3) Smallest change: one NULL-defaulted column, no backfill, no index
+--       (every read is by the primary key), no change to any existing row:
+--       an existing ``muted`` row stays muted until turned back on.
+ALTER TABLE space_notif_prefs ADD COLUMN muted_until TEXT;

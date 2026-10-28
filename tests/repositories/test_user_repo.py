@@ -1028,3 +1028,29 @@ async def test_list_blockers_names_everyone_who_blocked_a_person(env):
     await env.user_repo.block(b.user_id, a.user_id)
     assert await env.user_repo.list_blockers(b.user_id) == {a.user_id, c.user_id}
     assert await env.user_repo.list_blockers(a.user_id) == {b.user_id}
+
+
+async def test_touch_preference_entry_moves_only_an_existing_entry(env):
+    """D10: activity on a muted post moves its stamp in one statement — and
+    never brings back a mute that was removed meanwhile."""
+    u = await env.user_svc.provision(username="tina", display_name="Tina")
+    await env.user_svc.patch_preferences(
+        "tina", {"notif_muted_posts": {"post:p1": "old"}, "theme": "dark"}
+    )
+    await env.user_repo.touch_preference_entry(
+        u.user_id, "notif_muted_posts", "post:p1", "new"
+    )
+    await env.user_repo.touch_preference_entry(
+        u.user_id, "notif_muted_posts", "post:gone", "new"
+    )
+    got = await env.user_repo.get("tina")
+    assert '"post:p1":"new"' in got.preferences_json
+    assert "post:gone" not in got.preferences_json
+    assert '"theme":"dark"' in got.preferences_json
+
+
+async def test_touch_preference_entry_refuses_odd_keys(env):
+    with pytest.raises(ValueError):
+        await env.user_repo.touch_preference_entry("u", 'a"b', "c", "v")
+    with pytest.raises(ValueError):
+        await env.user_repo.touch_preference_entry("u", "a", "c d", "v")

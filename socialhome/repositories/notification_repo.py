@@ -35,6 +35,7 @@ from ..domain.notification import (
     NotificationHandled,
     NotificationParams,
 )
+from ..domain.notification_kinds import SpaceNotifPref
 from ._spec import Spec, spec_to_sql
 from .base import row_to_dict, rows_to_dicts
 
@@ -141,7 +142,14 @@ class AbstractNotificationRepo(Protocol):
         user_id: str,
         space_id: str,
         level: str,
+        muted_until: str | None = None,
     ) -> None: ...
+    async def get_space_notif_pref(
+        self, *, user_id: str, space_id: str
+    ) -> SpaceNotifPref | None: ...
+    async def list_space_notif_prefs(
+        self, user_id: str
+    ) -> builtins.list[tuple[str, SpaceNotifPref]]: ...
 
 
 class SqliteNotificationRepo:
@@ -563,15 +571,43 @@ class SqliteNotificationRepo:
         user_id: str,
         space_id: str,
     ) -> str | None:
-        """The level ``user_id`` chose for ``space_id``, or ``None`` when
-        they never chose one — the caller then applies the default for the
-        space's type and their seat
+        """The level that applies for ``user_id`` in ``space_id`` right now
+        — ``muted`` while a timed "Nothing" runs (0130), else the level they
+        chose — or ``None`` when they never chose one; the caller then
+        applies the default for the space's type and their seat
         (:func:`~socialhome.domain.notification.default_space_notif_level`)."""
+        pref = await self.get_space_notif_pref(user_id=user_id, space_id=space_id)
+        if pref is None:
+            return None
+        return pref.effective(datetime.now(UTC)) or None
+
+    async def get_space_notif_pref(
+        self, *, user_id: str, space_id: str
+    ) -> SpaceNotifPref | None:
+        """The stored choice (level + ``muted_until``), ``None`` if never
+        chosen."""
         row = await self._db.fetchone(
-            "SELECT level FROM space_notif_prefs WHERE user_id=? AND space_id=?",
+            "SELECT level, muted_until FROM space_notif_prefs"
+            " WHERE user_id=? AND space_id=?",
             (user_id, space_id),
         )
-        return (row["level"] or None) if row else None
+        if row is None or not row["level"]:
+            return None
+        return SpaceNotifPref(row["level"], row["muted_until"])
+
+    async def list_space_notif_prefs(
+        self, user_id: str
+    ) -> builtins.list[tuple[str, SpaceNotifPref]]:
+        """Every space ``user_id`` chose a level for, as ``(space_id,
+        pref)`` — the "Muted and changed" list."""
+        rows = await self._db.fetchall(
+            "SELECT space_id, level, muted_until FROM space_notif_prefs"
+            " WHERE user_id=? ORDER BY space_id",
+            (user_id,),
+        )
+        return [
+            (r["space_id"], SpaceNotifPref(r["level"], r["muted_until"])) for r in rows
+        ]
 
     async def set_space_notif_level(
         self,
@@ -579,15 +615,20 @@ class SqliteNotificationRepo:
         user_id: str,
         space_id: str,
         level: str,
+        muted_until: str | None = None,
     ) -> None:
+        """Store ``level``; ``muted_until`` (UTC ISO) mutes the space until
+        then, after which ``level`` applies again (D9). Without it any
+        running timed mute ends."""
         await self._db.enqueue(
             """
-            INSERT INTO space_notif_prefs(user_id, space_id, level)
-            VALUES(?, ?, ?)
+            INSERT INTO space_notif_prefs(user_id, space_id, level, muted_until)
+            VALUES(?, ?, ?, ?)
             ON CONFLICT(user_id, space_id) DO UPDATE SET
-                level=excluded.level
+                level=excluded.level,
+                muted_until=excluded.muted_until
             """,
-            (user_id, space_id, level),
+            (user_id, space_id, level, muted_until),
         )
 
 

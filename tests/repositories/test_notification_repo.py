@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -11,6 +12,7 @@ from socialhome.domain.notification import (
     NotificationHandled,
     NotificationParams,
 )
+from socialhome.domain.notification_kinds import SpaceNotifPref
 from socialhome.repositories._spec import Spec
 from socialhome.repositories.notification_repo import (
     SqliteNotificationRepo,
@@ -146,6 +148,53 @@ async def test_set_and_get_space_notif_level(env):
         await env.notif_repo.get_space_notif_level(user_id="uid-u2", space_id="sp-n2")
         == "mentions"
     )
+
+
+async def _space_seat(env, uid: str, sid: str) -> None:
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        (uid, uid, uid),
+    )
+    await env.db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES(?,?,?,?,?)",
+        (sid, sid, "iid", uid, "aabb" * 16),
+    )
+
+
+async def test_a_timed_mute_reads_as_muted_then_the_level_before(env):
+    """D9 (0130): while ``muted_until`` runs the space is muted; after it
+    the stored level — the one from before — applies again."""
+    await _space_seat(env, "uid-t", "sp-t")
+    soon = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    await env.notif_repo.set_space_notif_level(
+        user_id="uid-t", space_id="sp-t", level="mentions", muted_until=soon
+    )
+    assert (
+        await env.notif_repo.get_space_notif_level(user_id="uid-t", space_id="sp-t")
+        == "muted"
+    )
+    pref = await env.notif_repo.get_space_notif_pref(user_id="uid-t", space_id="sp-t")
+    assert pref == SpaceNotifPref("mentions", soon)
+    past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    await env.notif_repo.set_space_notif_level(
+        user_id="uid-t", space_id="sp-t", level="mentions", muted_until=past
+    )
+    assert (
+        await env.notif_repo.get_space_notif_level(user_id="uid-t", space_id="sp-t")
+        == "mentions"
+    )
+    # Picking a level without a time ends the timed mute.
+    await env.notif_repo.set_space_notif_level(
+        user_id="uid-t", space_id="sp-t", level="all"
+    )
+    assert await env.notif_repo.get_space_notif_pref(
+        user_id="uid-t", space_id="sp-t"
+    ) == SpaceNotifPref("all", None)
+    assert await env.notif_repo.list_space_notif_prefs("uid-t") == [
+        ("sp-t", SpaceNotifPref("all", None))
+    ]
+    assert await env.notif_repo.list_space_notif_prefs("nobody") == []
 
 
 # ── Retention keeps work that is still waiting ────────────────────────

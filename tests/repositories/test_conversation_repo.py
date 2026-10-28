@@ -1299,3 +1299,24 @@ async def test_list_for_user_drops_dm_with_blocked_remote_peer(env, seat_user_id
     )
     result = await env.repo.list_for_user("alice")
     assert not any(c.id == "conv-dm-remote" for c in result)
+
+
+async def test_list_notif_seats_lists_seats_off_the_default(env):
+    """Muted and changed: a muted seat, a seat at ``mentions`` and every
+    system-chat seat; a plain seat and a left one are not listed."""
+    await env.repo.create(_conv("c-muted"))
+    await env.repo.create(_conv("c-plain"))
+    await env.repo.create(_conv("c-left"))
+    await env.repo.create(_conv("g-lvl", ConversationType.GROUP_DM))
+    for cid in ("c-muted", "c-plain", "c-left", "g-lvl"):
+        await env.repo.add_member(_member(cid, "alice"))
+    await env.repo.set_muted_until("c-muted", "alice", "2026-09-29T11:00:00+00:00")
+    await env.repo.set_muted_until("c-left", "alice", "2026-09-29T11:00:00+00:00")
+    await env.repo.soft_leave("c-left", "alice")
+    await env.repo.set_notif_level("g-lvl", "alice", "mentions")
+    seats = await env.repo.list_notif_seats("alice")
+    assert [(c.id, until, level) for c, until, level in seats] == [
+        ("c-muted", "2026-09-29T11:00:00+00:00", "all"),
+        ("g-lvl", None, "mentions"),
+    ]
+    assert await env.repo.list_notif_seats("bob") == []

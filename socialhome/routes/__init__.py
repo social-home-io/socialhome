@@ -238,6 +238,11 @@ from .moments_public import (
     MomentPublicRegistrationCollectionView,
     MomentPublicRegistrationDetailView,
 )
+from .notification_settings import (
+    MutedPostsView,
+    MutedPostView,
+    NotificationSettingsView,
+)
 from .notifications import (
     NotificationCollectionView,
     NotificationNeedsYouView,
@@ -503,6 +508,11 @@ def setup_routes(app: web.Application) -> None:
         MePictureRefreshFromHaView,
     )
     app.router.add_view("/api/me/notify-targets", NotifyTargetsView)
+    app.router.add_view("/api/me/notification-settings", NotificationSettingsView)
+    app.router.add_view("/api/me/notification-settings/muted-posts", MutedPostsView)
+    app.router.add_view(
+        "/api/me/notification-settings/muted-posts/{key}", MutedPostView
+    )
     app.router.add_view(
         "/api/me/onboarding-complete",
         MeOnboardingCompleteView,

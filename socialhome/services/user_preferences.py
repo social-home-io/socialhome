@@ -24,6 +24,7 @@ from ..domain.moment import (
     MOMENT_MAX_LIFETIME_DAYS,
     MOMENT_MIN_RETENTION_DAYS,
 )
+from ..domain.notification_kinds import NotifSettings
 
 log = logging.getLogger(__name__)
 
@@ -225,16 +226,37 @@ def parse_ha_automation_events(preferences_json: str | None) -> bool:
     return blob.get(HA_AUTOMATION_EVENTS_KEY) is True
 
 
+#: ``preferences_json`` keys the notification settings own (D4, D10).
+NOTIF_KINDS_KEY = "notif_kinds"
+NOTIF_MUTED_POSTS_KEY = "notif_muted_posts"
+
+
+def parse_notif_settings(preferences_json: str | None) -> NotifSettings:
+    """The person's notification kind choices and muted posts.
+
+    Never raises: bad JSON reads as the defaults (every kind at its
+    default, nothing muted)."""
+    try:
+        blob = orjson.loads(preferences_json) if preferences_json else {}
+    except orjson.JSONDecodeError:
+        log.debug("preferences_json is not valid JSON; default notifications")
+        return NotifSettings()
+    return NotifSettings.from_dict(blob)
+
+
 __all__ = [
     "DEFAULT_HIGHLIGHTS_MAX_COUNT",
     "DEFAULT_HIGHLIGHTS_RETENTION_DAYS",
     "DEFAULT_MOMENT_MAX_HOPS",
     "HA_AUTOMATION_EVENTS_KEY",
     "MAX_TIMETABLE_HOME_PINS",
+    "NOTIF_KINDS_KEY",
+    "NOTIF_MUTED_POSTS_KEY",
     "HighlightsPreferences",
     "MomentPreferences",
     "parse_ha_automation_events",
     "parse_highlights_preferences",
     "parse_moment_preferences",
+    "parse_notif_settings",
     "parse_timetable_home_pins",
 ]
