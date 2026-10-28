@@ -11,7 +11,7 @@ from socialhome.domain.events import (
     RemoteJoinRequestApproved,
     RemoteJoinRequestDenied,
     RemoteSpaceInviteReceived,
-    RemoteSpaceJoinRequestReceived,
+    SpaceJoinRequested,
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.space import JoinMode, Space, SpaceFeatures, SpaceType
@@ -223,12 +223,12 @@ async def test_invite_via_delegates_to_invite(bus, repo, handlers):
 
 
 async def test_join_request_persists_and_publishes(bus, repo, handlers):
-    captured: list[RemoteSpaceJoinRequestReceived] = []
+    captured: list[SpaceJoinRequested] = []
 
     async def _append(e):
         captured.append(e)
 
-    bus.subscribe(RemoteSpaceJoinRequestReceived, _append)
+    bus.subscribe(SpaceJoinRequested, _append)
     await handlers._on_join_request(
         _event(
             FederationEventType.SPACE_JOIN_REQUEST,
@@ -239,7 +239,7 @@ async def test_join_request_persists_and_publishes(bus, repo, handlers):
     assert repo.join_requests == [
         ("sp-1", "u-1", "please let me in", "peer-a", None),
     ]
-    assert captured[0].requester_user_id == "u-1"
+    assert captured[0].user_id == "u-1"
 
 
 async def test_join_request_missing_user_id_drops(repo, handlers):
@@ -291,12 +291,12 @@ async def test_join_request_only_for_a_public_space_we_host(bus, repo, handlers,
     notification for the admins."""
     if space is not None:
         repo.spaces["sp-x"] = space
-    captured: list[RemoteSpaceJoinRequestReceived] = []
+    captured: list[SpaceJoinRequested] = []
 
     async def _append(e):
         captured.append(e)
 
-    bus.subscribe(RemoteSpaceJoinRequestReceived, _append)
+    bus.subscribe(SpaceJoinRequested, _append)
     await handlers._on_join_request(
         _event(
             FederationEventType.SPACE_JOIN_REQUEST, {"user_id": "u-1"}, space_id="sp-x"

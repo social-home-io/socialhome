@@ -29,6 +29,7 @@ import pytest
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.calendar import CalendarEvent
+from socialhome.domain.conversation import RemoteConversationMember
 from socialhome.domain.events import (
     AppChallengeReceived,
     BazaarBidPlaced,
@@ -48,14 +49,23 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.notification import NotificationSubject
 from socialhome.domain.post import Post, PostType
+from socialhome.domain.space_author_profile import SpaceAuthorProfile
 from socialhome.domain.task import Task, TaskStatus
 from socialhome.domain.user import RemoteUser
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.repositories.conversation_repo import SqliteConversationRepo
 from socialhome.repositories.notification_repo import SqliteNotificationRepo
+from socialhome.repositories.space_author_profile_repo import (
+    SqliteSpaceAuthorProfileRepo,
+)
+from socialhome.repositories.space_remote_member_repo import (
+    SqliteSpaceRemoteMemberRepo,
+)
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services import notification_service as ns_module
+from socialhome.services.local_community import file_remote_join_request
 from socialhome.services.notification_service import NotificationService
 from socialhome.services.user_service import UserService
 
@@ -646,3 +656,187 @@ async def test_location_enabled_never_reaches_followers_or_protected_accounts(st
     assert await _types(stack, follower) == []
     assert await _types(stack, kid) == []
     assert await _types(stack, actor) == []
+
+
+# ── 2b. Remote people are named from wherever this household met them ─
+
+
+async def _named_stack(s):
+    """Wire the rosters :meth:`NotificationService._held_name` reads past
+    ``users`` / ``remote_users``: space seats, author profiles, group-chat
+    seats."""
+    seats = SqliteSpaceRemoteMemberRepo(s.db)
+    profiles = SqliteSpaceAuthorProfileRepo(s.db)
+    s.notif_svc.attach_remote_member_repo(seats)
+    s.notif_svc.attach_author_profile_repo(profiles)
+    s.notif_svc._convos = SqliteConversationRepo(s.db)
+    s.seats = seats
+    s.profiles = profiles
+    return s
+
+
+async def _seat(s, sid: str, user_id: str, name: str | None, *, gone=False):
+    await s.seats.add(
+        space_id=sid,
+        instance_id="peer-far",
+        user_id=user_id,
+        user_pk=None,
+        display_name=name,
+    )
+    if gone:
+        await s.seats.remove(sid, "peer-far", user_id)
+
+
+async def _author_profile(s, sid: str, user_id: str, name: str) -> None:
+    await s.profiles.upsert_if_newer(
+        SpaceAuthorProfile(
+            space_id=sid,
+            author_user_id=user_id,
+            author_pk="cd" * 32,
+            display_name=name,
+            bio=None,
+            picture_hash=None,
+            profile_rev="r1",
+            ts=datetime.now(UTC).isoformat(),
+        ),
+        picture_webp=None,
+    )
+
+
+async def _group_seat(s, user_id: str, name: str) -> None:
+    await s.db.enqueue(
+        "INSERT INTO conversations(id, type, name) VALUES('c-grp', 'group_dm', 'G')"
+    )
+    await s.notif_svc._convos.add_remote_member(
+        RemoteConversationMember(
+            conversation_id="c-grp",
+            instance_id="peer-far",
+            remote_username="zed",
+            joined_at=datetime.now(UTC).isoformat(),
+            user_id=user_id,
+            display_name=name,
+        )
+    )
+
+
+async def test_remote_joiner_never_paired_is_named_from_the_space_roster(stack):
+    """A member of a household this one never paired with has no
+    ``remote_users`` row — the space's roster seat is what names them."""
+    s = await _named_stack(stack)
+    anna = await _user(s, "anna")
+    sid = await _space(s, "sp-roster", "Garden", {anna.user_id: "owner"})
+    await _seat(s, sid, "u-far", "Zed")
+    await s.bus.publish(SpaceMemberJoined(space_id=sid, user_id="u-far"))
+    assert await _titles(s, anna, "space_member_joined") == ["Zed joined Garden"]
+
+
+async def test_remote_join_request_is_filed_and_names_the_applicant(stack):
+    """An inbound remote join request rings the admins (it used to ring
+    nobody), named from another space's roster this household holds."""
+    s = await _named_stack(stack)
+    admin = await _user(s, "anna")
+    sid = await _space(s, "sp-req", "Garden", {admin.user_id: "owner"})
+    other = await _space(s, "sp-else", "Book club", {admin.user_id: "owner"})
+    await _seat(s, other, "u-far", "Zed", gone=True)
+    await file_remote_join_request(
+        SqliteSpaceRepo(s.db, key_manager=KeyManager(b"\x0c" * 32)),
+        s.bus,
+        space_id=sid,
+        household_instance_id="peer-far",
+        user_id="u-far",
+        area_verdict=None,
+    )
+    assert await _titles(s, admin, "space_join_requested") == [
+        "Zed wants to join Garden"
+    ]
+
+
+async def test_declined_invite_names_a_person_who_left_the_space_before(stack):
+    """Re-invited after leaving: the space keeps their (tombstoned) seat,
+    which names the decline even though their household is not paired."""
+    s = await _named_stack(stack)
+    anna = await _user(s, "anna")
+    sid = await _space(s, "sp-back", "Garden", {anna.user_id: "owner"})
+    await _seat(s, sid, "u-far", "Zed", gone=True)
+    await s.bus.publish(
+        RemoteSpaceInviteDeclined(
+            space_id=sid,
+            instance_id="peer-far",
+            invitee_user_id="u-far",
+            inviter_user_id=anna.user_id,
+        )
+    )
+    assert await _titles(s, anna, "space_remote_invite_declined") == [
+        "Zed declined your invite to Garden"
+    ]
+
+
+async def test_declined_invite_names_someone_met_in_a_group_chat(stack):
+    s = await _named_stack(stack)
+    anna = await _user(s, "anna")
+    sid = await _space(s, "sp-gc", "Garden", {anna.user_id: "owner"})
+    await _group_seat(s, "u-far", "Zed")
+    await s.bus.publish(
+        RemoteSpaceInviteDeclined(
+            space_id=sid,
+            instance_id="peer-far",
+            invitee_user_id="u-far",
+            inviter_user_id=anna.user_id,
+        )
+    )
+    assert await _titles(s, anna, "space_remote_invite_declined") == [
+        "Zed declined your invite to Garden"
+    ]
+
+
+async def test_space_author_profile_names_an_author_without_a_seat(stack):
+    s = await _named_stack(stack)
+    anna = await _user(s, "anna")
+    sid = await _space(s, "sp-gfs", "Garden", {anna.user_id: "owner"})
+    other = await _space(s, "sp-gfs2", "Book club", {anna.user_id: "owner"})
+    await _author_profile(s, sid, "u-far", "Zed")
+    await _author_profile(s, other, "u-far2", "Yan")
+    await s.bus.publish(SpaceMemberJoined(space_id=sid, user_id="u-far"))
+    assert await _titles(s, anna, "space_member_joined") == ["Zed joined Garden"]
+    # Outside that space, an author profile anywhere still names them.
+    assert await s.notif_svc._held_name("u-far2", space_id=sid) == "Yan"
+
+
+async def test_names_in_a_space_follow_the_member_list_order(stack):
+    """In a space: the per-space name, then the household's, then this
+    space's seat before a seat anywhere else — the order the member list
+    names people in, so the bell and the list agree."""
+    s = await _named_stack(stack)
+    anna = await _user(s, "anna")
+    sid = await _space(s, "sp-ord", "Garden", {anna.user_id: "owner"})
+    other = await _space(s, "sp-ord2", "Book club", {anna.user_id: "owner"})
+    await _seat(s, other, "u-far", "Zed elsewhere")
+    await _seat(s, sid, "u-far", "Zed here")
+    assert await s.notif_svc._held_name("u-far", space_id=sid) == "Zed here"
+    assert await s.notif_svc._held_name("u-far") == "Zed elsewhere"
+    await _remote(s, "u-far", "Zed paired", instance="peer-far")
+    assert await s.notif_svc._held_name("u-far", space_id=sid) == "Zed paired"
+    await s.db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role, space_display_name)"
+        " VALUES(?, 'u-far', 'member', 'Zed in Garden')",
+        (sid,),
+    )
+    assert await s.notif_svc._held_name("u-far", space_id=sid) == "Zed in Garden"
+    assert await s.notif_svc._held_name("u-far", space_id=other) == "Zed paired"
+
+
+async def test_a_local_member_is_never_named_from_another_households_record(stack):
+    s = await _named_stack(stack)
+    anna = await _user(s, "anna")
+    sid = await _space(s, "sp-loc", "Garden", {anna.user_id: "owner"})
+    await _seat(s, sid, anna.user_id, "Not Anna")
+    assert await s.notif_svc._held_name(anna.user_id, space_id=sid) == "Anna"
+
+
+async def test_nobody_holds_a_name_still_reads_someone(stack):
+    s = await _named_stack(stack)
+    anna = await _user(s, "anna")
+    sid = await _space(s, "sp-none", "Garden", {anna.user_id: "owner"})
+    await _seat(s, sid, "u-other", "Zed")
+    await s.bus.publish(SpaceMemberJoined(space_id=sid, user_id="u-nobody-hash"))
+    assert await _titles(s, anna, "space_member_joined") == ["Someone joined Garden"]

@@ -9,7 +9,7 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import RemoteSpaceJoinRequestReceived
+from socialhome.domain.events import SpaceJoinRequested
 from socialhome.domain.local_community import Eligibility, coarse_join_point
 from socialhome.domain.space import (
     HomeNotSetError,
@@ -412,7 +412,7 @@ async def test_a_remote_request_keeps_only_the_verdict():
     async def _on(event):
         seen.append(event)
 
-    bus.subscribe(RemoteSpaceJoinRequestReceived, _on)
+    bus.subscribe(SpaceJoinRequested, _on)
     rid = await file_remote_join_request(
         repo,
         bus,
@@ -428,4 +428,4 @@ async def test_a_remote_request_keeps_only_the_verdict():
     assert kwargs["area_verdict"] == "edge"
     assert kwargs["remote_applicant_instance_id"] == "b"
     assert not any("lat" in k or "lon" in k for k in kwargs)
-    assert seen and seen[0].requester_user_id == "u"
+    assert seen and seen[0].user_id == "u" and seen[0].request_id == "rid-new"

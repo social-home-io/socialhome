@@ -1320,3 +1320,31 @@ async def test_list_notif_seats_lists_seats_off_the_default(env):
         ("g-lvl", None, "mentions"),
     ]
     assert await env.repo.list_notif_seats("bob") == []
+
+
+async def test_remote_member_display_name_is_the_newest_named_seat(env):
+    """A group-chat seat names a remote person no other record names."""
+    for cid, name, at in (("g1", "Carol", "2026-01-01"), ("g2", "Caro", "2026-02-01")):
+        await env.repo.create(_conv(cid, ConversationType.GROUP_DM))
+        await env.repo.add_remote_member(
+            RemoteConversationMember(
+                conversation_id=cid,
+                instance_id="inst-far",
+                remote_username="carol",
+                joined_at=at,
+                user_id="u-carol",
+                display_name=name,
+            )
+        )
+    await env.repo.create(_conv("g3", ConversationType.GROUP_DM))
+    await env.repo.add_remote_member(
+        RemoteConversationMember(
+            conversation_id="g3",
+            instance_id="inst-far",
+            remote_username="carol",
+            joined_at="2026-03-01",
+            user_id="u-carol",
+        )
+    )
+    assert await env.repo.remote_member_display_name("u-carol") == "Caro"
+    assert await env.repo.remote_member_display_name("u-nobody") is None

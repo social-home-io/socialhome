@@ -169,6 +169,7 @@ from ..repositories.notification_repo import (
 )
 from ..repositories.poll_repo import AbstractPollRepo
 from ..repositories.post_repo import AbstractPostRepo
+from ..repositories.space_author_profile_repo import AbstractSpaceAuthorProfileRepo
 from ..repositories.space_post_repo import AbstractSpacePostRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
@@ -291,7 +292,8 @@ class _DeliveryBatch:
 
     items: list[_Pending | _DirectPush] = field(default_factory=list)
     users: dict[str, User | None] = field(default_factory=dict)
-    names: dict[str, str | None] = field(default_factory=dict)
+    #: Keyed by (user id, space id — ``None`` outside a space).
+    names: dict[tuple[str, str | None], str | None] = field(default_factory=dict)
     space_prefs: dict[str, dict[str, SpaceNotifPref]] = field(default_factory=dict)
 
 
@@ -614,6 +616,7 @@ class NotificationService(ProtectionGateMixin):
     __slots__ = (
         "_adapter",
         "_apps",
+        "_author_profiles",
         "_bus",
         "_calendar_repo",
         "_child_protection",
@@ -708,6 +711,10 @@ class NotificationService(ProtectionGateMixin):
         # them such a row stays pinned until it is answered.
         self._contacts = None
         self._apps = None
+        # Space author profiles a GFS follower holds — optional; the last
+        # place a space's author from a household this one never met is
+        # named (:meth:`_held_name`).
+        self._author_profiles: AbstractSpaceAuthorProfileRepo | None = None
 
     def attach_post_repos(
         self,
@@ -748,6 +755,13 @@ class NotificationService(ProtectionGateMixin):
     def attach_report_repo(self, report_repo) -> None:
         """Wire the report repo (``on_report_resolved``)."""
         self._reports = report_repo
+
+    def attach_author_profile_repo(
+        self, author_profiles: AbstractSpaceAuthorProfileRepo
+    ) -> None:
+        """Wire the space author profiles (v_60) — names for a space's
+        authors this household holds no roster seat for."""
+        self._author_profiles = author_profiles
 
     def attach_remote_member_repo(self, remote_member_repo) -> None:
         """Wire the remote-seat mirror (``on_remote_seat_live``)."""
@@ -888,7 +902,9 @@ class NotificationService(ProtectionGateMixin):
             push = False
         actor = (
             NotificationActor(
-                actor_user_id, actor_name or await self._held_name(actor_user_id)
+                actor_user_id,
+                actor_name
+                or await self._held_name(actor_user_id, space_id=about.space_id),
             )
             if actor_user_id
             else None
@@ -1518,7 +1534,11 @@ class NotificationService(ProtectionGateMixin):
             ),
             actor_user_id=assigner,
             push_params={
-                "name": await self._person_name(assigner, locale) if assigner else None,
+                "name": (
+                    await self._person_name(assigner, locale, space_id=event.space_id)
+                    if assigner
+                    else None
+                ),
                 "space_name": space_name,
             },
         )
@@ -1834,30 +1854,78 @@ class NotificationService(ProtectionGateMixin):
             withheld=withheld,
         )
 
-    async def _person_name(self, user_id: str, locale: str | None) -> str:
-        """The name this household holds for *user_id* (a local member or
-        a known remote person), else "Someone" in the recipient's language
-        — never the raw user id."""
-        return await self._held_name(user_id) or self._someone(locale)
+    async def _person_name(
+        self, user_id: str, locale: str | None, *, space_id: str | None = None
+    ) -> str:
+        """The name this household holds for *user_id* (:meth:`_held_name`),
+        else "Someone" in the recipient's language — never the raw user
+        id."""
+        return await self._held_name(user_id, space_id=space_id) or self._someone(
+            locale
+        )
 
-    async def _held_name(self, user_id: str) -> str | None:
-        """The name this household holds for *user_id* — a local member's,
-        else a known remote person's — or ``None``. Looked up once per
-        delivery job."""
+    async def _held_name(
+        self, user_id: str, *, space_id: str | None = None
+    ) -> str | None:
+        """The name this household holds for *user_id*, or ``None``.
+        Looked up once per delivery job.
+
+        The same order the SPA names people in
+        (:class:`~socialhome.services.person_summary_service.PersonSummaryService`),
+        so a bell row and the member list agree. In a space (*space_id*):
+        the person's per-space name, then their household's (a local
+        member, a paired household's person), then the space's roster seat
+        (kept after they left) and the author profile a GFS follower holds.
+        Then wherever else this household met them: a seat in another
+        space, a group-chat seat, an author profile in another space."""
         batch = _BATCH.get()
-        if batch is not None and user_id in batch.names:
-            return batch.names[user_id]
-        name: str | None = None
-        local = await self._local_user(user_id)
-        if local is not None and local.display_name:
-            name = local.display_name
-        else:
-            remote = await self._users.get_remote(user_id)
-            if remote is not None and remote.display_name:
-                name = remote.display_name
+        key = (user_id, space_id)
+        if batch is not None and key in batch.names:
+            return batch.names[key]
+        name = await self._lookup_name(user_id, space_id)
         if batch is not None:
-            batch.names[user_id] = name
+            batch.names[key] = name
         return name
+
+    async def _lookup_name(self, user_id: str, space_id: str | None) -> str | None:
+        if space_id is not None:
+            member = await self._spaces.get_member(space_id, user_id)
+            if member is not None and member.space_display_name:
+                return member.space_display_name
+        local = await self._local_user(user_id)
+        if local is not None:
+            # One of ours: never named from another household's record.
+            return local.display_name or None
+        remote = await self._users.get_remote(user_id)
+        if remote is not None and remote.display_name:
+            return remote.display_name
+        if space_id is not None:
+            if self._remote_members is not None:
+                seat = await self._remote_members.get_including_tombstones(
+                    space_id, "", user_id
+                )
+                if seat is not None and seat.display_name:
+                    return seat.display_name
+            if self._author_profiles is not None:
+                for p in await self._author_profiles.list_for(space_id, [user_id]):
+                    if p.display_name:
+                        return p.display_name
+        if self._remote_members is not None:
+            name = await self._remote_members.latest_display_name(user_id)
+            if name:
+                return name
+        if self._convos is not None:
+            name = await self._convos.remote_member_display_name(user_id)
+            if name:
+                return name
+        if self._author_profiles is not None:
+            for sid in await self._author_profiles.list_spaces_for_author(user_id):
+                if sid == space_id:
+                    continue
+                for p in await self._author_profiles.list_for(sid, [user_id]):
+                    if p.display_name:
+                        return p.display_name
+        return None
 
     async def _local_user(self, user_id: str) -> User | None:
         """The local user *user_id* (``None``: not one of ours) — looked up
@@ -2509,7 +2577,7 @@ class NotificationService(ProtectionGateMixin):
                 )
             else:
                 name = (
-                    await self._person_name(author, locale)
+                    await self._person_name(author, locale, space_id=event.space_id)
                     if author
                     else self._someone(locale)
                 )
@@ -2569,7 +2637,7 @@ class NotificationService(ProtectionGateMixin):
                 continue
             locale = self._locale(local)
             name = (
-                await self._person_name(organiser, locale)
+                await self._person_name(organiser, locale, space_id=event.space_id)
                 if organiser
                 else self._someone(locale)
             )
@@ -3652,7 +3720,7 @@ class NotificationService(ProtectionGateMixin):
                 continue  # another household's person: their household tells them
             locale = self._locale(recipient)
             name = (
-                await self._person_name(actor_user_id, locale)
+                await self._person_name(actor_user_id, locale, space_id=about.space_id)
                 if actor_user_id
                 else None
             )
@@ -3752,7 +3820,9 @@ class NotificationService(ProtectionGateMixin):
             recipient = await self._local_user(uid)
             if recipient is None or uid in blocked:
                 continue
-            name = await self._person_name(completed_by, self._locale(recipient))
+            name = await self._person_name(
+                completed_by, self._locale(recipient), space_id=event.space_id
+            )
             await self._save_notif(
                 new_notification(
                     user_id=uid,
@@ -3849,7 +3919,9 @@ class NotificationService(ProtectionGateMixin):
                 continue
             # A remote joiner is named by the name this household holds,
             # never by their raw user id.
-            name = await self._person_name(event.user_id, self._locale(recipient))
+            name = await self._person_name(
+                event.user_id, self._locale(recipient), space_id=event.space_id
+            )
             await self._save_notif(
                 new_notification(
                     user_id=member.user_id,
@@ -3995,7 +4067,9 @@ class NotificationService(ProtectionGateMixin):
                 continue
             # A remote applicant is named by the name this household holds,
             # never by their raw user id.
-            name = await self._person_name(event.user_id, self._locale(recipient))
+            name = await self._person_name(
+                event.user_id, self._locale(recipient), space_id=event.space_id
+            )
             await self._save_notif(
                 new_notification(
                     user_id=member.user_id,
@@ -4260,7 +4334,7 @@ class NotificationService(ProtectionGateMixin):
         if recipient is None:
             return
         locale = self._locale(recipient)
-        name = await self._person_name(inviter, locale)
+        name = await self._person_name(inviter, locale, space_id=space_id)
         title = (
             self._t(
                 "notification.space.invite.received",
@@ -4383,7 +4457,9 @@ class NotificationService(ProtectionGateMixin):
         if recipient is None:
             return
         locale = self._locale(recipient)
-        name = display_name or await self._person_name(event.invitee_user_id, locale)
+        name = display_name or await self._person_name(
+            event.invitee_user_id, locale, space_id=event.space_id
+        )
         await self._save_notif(
             new_notification(
                 user_id=inviter,
@@ -4570,7 +4646,9 @@ class NotificationService(ProtectionGateMixin):
             about = NotificationSubject.of(NotificationObject.POST, post.id)
             link = household_post_link(post.id)
         locale = self._locale(author)
-        name = await self._person_name(event.reactor_user_id, locale)
+        name = await self._person_name(
+            event.reactor_user_id, locale, space_id=event.space_id
+        )
         if space_name:
             title = self._t(
                 "notification.space.post.reacted",

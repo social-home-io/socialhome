@@ -168,7 +168,9 @@ export function PollUI({
 
   const total = data.total_votes
   const isAuthor = !!authorUserId && authorUserId === currentUserId
-  const closesIn = _formatCountdown(data.closes_at)
+  // A closed poll says so once, in the pill — not "voting ended" next to
+  // "Closed" ("Abstimmung beendet · Beendet") after its deadline.
+  const closesIn = data.closed ? null : _formatCountdown(data.closes_at)
 
   return (
     <div class="sh-poll" role="region" aria-label={t('poll.region')}>
