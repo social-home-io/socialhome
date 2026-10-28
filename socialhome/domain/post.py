@@ -324,6 +324,24 @@ class Poll:
         return sum(1 for v in self.votes if v.option_id == option_id)
 
 
+def poll_deadline_passed(closes_at: str | None, now: datetime) -> bool:
+    """Has a poll's ``closes_at`` (ISO 8601, as stored) passed at *now*?
+
+    A naive stamp is UTC; a missing or unreadable one never passes. *now*
+    is tz-aware. The SQL sweep (``list_due_to_close``) reads the same rule
+    through ``julianday``.
+    """
+    if not closes_at:
+        return False
+    try:
+        at = datetime.fromisoformat(str(closes_at))
+    except ValueError:
+        return False
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=UTC)
+    return at <= now
+
+
 @dataclass(slots=True, frozen=True)
 class PollData:
     """Wire / storage format for a poll embedded in a post."""

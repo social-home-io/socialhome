@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import UTC, datetime
 
 from ..domain.errors import CodedError
 from ..domain.events import (
@@ -20,6 +21,7 @@ from ..domain.events import (
     SchedulePollFinalized,
     SchedulePollResponded,
 )
+from ..domain.post import poll_deadline_passed
 from ..infrastructure.event_bus import EventBus
 from ..repositories.poll_repo import AbstractPollRepo
 from .bus_publisher import BusPublisherMixin
@@ -170,7 +172,9 @@ class PollService(BusPublisherMixin):
         meta = await self._repo.get_meta(post_id)
         if meta is None:
             raise PollNotFoundError(post_id)
-        if meta["closed"]:
+        # Past its deadline a poll is closed, even before the sweep (or,
+        # on a member household, the author's household) marks it so.
+        if meta["closed"] or poll_deadline_passed(meta["closes_at"], datetime.now(UTC)):
             raise PollClosedError(post_id)
         if not await self._repo.option_belongs_to_post(
             option_id=option_id,
@@ -259,7 +263,9 @@ class PollService(BusPublisherMixin):
         author = await self._repo.get_post_author(post_id)
         if author is None or author != actor_user_id:
             raise PermissionError("Only the post author may close this poll")
-        await self._repo.close(post_id)
+        # Closing a closed poll is a no-op: it is announced once.
+        if not await self._repo.close_if_open(post_id):
+            return
         await self._emit(
             PollClosed(
                 post_id=post_id,
@@ -267,6 +273,33 @@ class PollService(BusPublisherMixin):
                 actor_user_id=actor_user_id,
             )
         )
+
+    async def close_due_polls(self, now: datetime | None = None) -> int:
+        """Close this household's polls whose ``closes_at`` has passed.
+
+        Each closes atomically (``closed=0`` → ``1``) and announces
+        :class:`PollClosed` (``at_deadline``) once — for a space poll the
+        outbound bridge sends the one ``SPACE_POLL_CLOSED`` to its member
+        households. Polls written on other households are theirs to
+        close. Returns how many this call closed. Run by
+        :class:`PollDeadlineScheduler`.
+        """
+        at = now or datetime.now(UTC)
+        closed = 0
+        for due in await self._repo.list_due_to_close(at.isoformat()):
+            post_id = due["post_id"]
+            if not await self._repo.close_if_open(post_id):
+                continue  # closed meanwhile (the author, a racing sweep)
+            closed += 1
+            await self._emit(
+                PollClosed(
+                    post_id=post_id,
+                    space_id=due["space_id"],
+                    actor_user_id=due["author"] or "",
+                    at_deadline=True,
+                )
+            )
+        return closed
 
     async def summary(
         self,
@@ -301,7 +334,8 @@ class PollService(BusPublisherMixin):
             "question": meta["question"],
             "options": options,
             "allow_multiple": bool(meta["allow_multiple"]),
-            "closed": bool(meta["closed"]),
+            "closed": bool(meta["closed"])
+            or poll_deadline_passed(meta["closes_at"], datetime.now(UTC)),
             "closes_at": meta["closes_at"],
             "total_votes": total,
             "user_vote": user_vote,

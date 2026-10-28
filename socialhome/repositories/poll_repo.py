@@ -72,6 +72,17 @@ class AbstractPollRepo(Protocol):
     ) -> None: ...
     async def get_post_author(self, post_id: str) -> str | None: ...
     async def close(self, post_id: str) -> None: ...
+    async def close_if_open(self, post_id: str) -> bool:
+        """Close the poll unless it is closed already — atomically. True
+        only for the call that closed it, so it is announced once."""
+        ...
+
+    async def list_due_to_close(self, now_iso: str) -> list[dict]:
+        """Open polls this household closes whose ``closes_at`` is at or
+        before *now_iso*: ``[{post_id, author, space_id}]``. A space poll
+        is this household's to close only when a local user wrote it."""
+        ...
+
     async def list_options_with_counts(
         self,
         post_id: str,
@@ -313,6 +324,29 @@ class SqlitePollRepo:
             "UPDATE polls SET closed=1 WHERE post_id=?",
             (post_id,),
         )
+
+    async def close_if_open(self, post_id: str) -> bool:
+        n = await self._db.enqueue_rowcount(
+            "UPDATE polls SET closed=1 WHERE post_id=? AND closed=0",
+            (post_id,),
+        )
+        return n > 0
+
+    async def list_due_to_close(self, now_iso: str) -> list[dict]:
+        # Household polls are always this household's own.
+        rows = await self._db.fetchall(
+            "SELECT p.post_id, f.author FROM polls p"
+            " JOIN feed_posts f ON f.id = p.post_id"
+            " WHERE p.closed=0 AND p.closes_at IS NOT NULL"
+            " AND f.deleted=0"
+            " AND julianday(p.closes_at) <= julianday(?)"
+            " ORDER BY p.closes_at",
+            (now_iso,),
+        )
+        return [
+            {"post_id": r["post_id"], "author": r["author"], "space_id": None}
+            for r in rows
+        ]
 
     async def list_user_votes(
         self,

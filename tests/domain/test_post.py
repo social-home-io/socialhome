@@ -17,7 +17,26 @@ from socialhome.domain.post import (
     PostType,
     SchedulePoll,
     ScheduleSlot,
+    poll_deadline_passed,
 )
+
+
+@pytest.mark.parametrize(
+    ("closes_at", "passed"),
+    [
+        (None, False),
+        ("", False),
+        ("not a date", False),
+        ("2026-10-28T09:59:59.000Z", True),
+        ("2026-10-28T10:00:00+00:00", True),  # at the deadline: closed
+        ("2026-10-28T12:30:00+02:00", False),  # 10:30 UTC
+        ("2026-10-28T09:00:00", True),  # naive = UTC
+        ("2026-10-28T10:00:01Z", False),
+    ],
+)
+def test_poll_deadline_passed(closes_at, passed):
+    now = datetime(2026, 10, 28, 10, 0, tzinfo=UTC)
+    assert poll_deadline_passed(closes_at, now) is passed
 
 
 def test_post_reaction_add_remove():

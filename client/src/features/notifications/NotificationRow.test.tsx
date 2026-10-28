@@ -102,7 +102,7 @@ describe('glyphFor', () => {
     ['space_post_created', 'post'], ['user_followed', 'person'], ['space_join_requested', 'person'],
     ['calendar_reminder', 'calendar'], ['task_assigned', 'task'], ['space_report', 'shield'],
     ['bazaar_bid_placed', 'tag'], ['dm_contact_requested', 'person'], ['app_challenge', 'bell'],
-    ['call_missed', 'phone'], ['chat_added', 'comment'], ['poll_result', 'poll'],
+    ['call_missed', 'phone'], ['chat_added', 'comment'], ['poll_result', 'poll'], ['poll_scheduled', 'poll'],
     ['report_answer', 'shield'],
   ])('%s → %s', (type, glyph) => {
     expect(glyphFor(type)).toBe(glyph)

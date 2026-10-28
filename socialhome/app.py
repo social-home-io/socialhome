@@ -173,6 +173,7 @@ from .infrastructure.pairing_session_prune_scheduler import (
 from .infrastructure.password_reset_cleanup_scheduler import (
     PasswordResetCleanupScheduler,
 )
+from .infrastructure.poll_deadline_scheduler import PollDeadlineScheduler
 from .infrastructure.post_draft_scheduler import PostDraftCleanupScheduler
 from .infrastructure.replay_cache_scheduler import ReplayCachePruneScheduler
 from .infrastructure.space_retention_scheduler import SpaceRetentionScheduler
@@ -3229,6 +3230,8 @@ def create_app(config: Config | None = None) -> web.Application:
     # ── Poll + schedule-poll service (§9) ──────────────────────────────
     poll_service = PollService(repos.poll, bus)
     space_poll_service = PollService(repos.space_poll, bus)
+    # Polls past their ``closes_at`` close on the household that wrote them.
+    poll_deadline_scheduler = PollDeadlineScheduler((poll_service, space_poll_service))
 
     # ── Bazaar service + expiry scheduler (§9, §23.15) ─────────────────
     # Bazaar listings are space-scoped: the wrapper post lives in
@@ -5223,6 +5226,7 @@ def create_app(config: Config | None = None) -> web.Application:
 
         # Bazaar auction expiry — closes due auctions on a 60-s cadence.
         await bazaar_expiry_scheduler.start()
+        await poll_deadline_scheduler.start()
 
         # Highlights retention — drops expired + over-max highlights per author.
         await highlight_retention_scheduler.start()
@@ -5489,6 +5493,7 @@ def create_app(config: Config | None = None) -> web.Application:
         if space_authority_rotation is not None:
             await space_authority_rotation.stop()
         await bazaar_expiry_scheduler.stop()
+        await poll_deadline_scheduler.stop()
         await highlight_retention_scheduler.stop()
         await moment_retention_scheduler.stop()
         # Cancel any deferred mesh retransmit parked in the routed-envelope

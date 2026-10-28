@@ -60,6 +60,7 @@ from ...domain.events import (
     GalleryItemUploaded,
     PageDeleted,
     PollClosed,
+    RemoteSchedulePollFinalized,
     SpaceZoneDeleted,
     SpaceZoneUpserted,
     TaskCreated,
@@ -82,6 +83,7 @@ from ...domain.post import (
     BazaarMode,
     BazaarStatus,
     Post,
+    poll_deadline_passed,
 )
 from ...domain.space import (
     MODERATION_BLOCK_KEY,
@@ -1714,22 +1716,29 @@ class SpaceContentInboundHandlers:
         post_id = str(event.payload.get("post_id") or "")
         if not post_id:
             return
-        # Only the poll's author closes it (``PollService.close_poll``).
+        # Only the poll's author closes it (``PollService.close_poll``, or
+        # its household's deadline sweep).
         if not await self._post_owner_acts(event, space_id, post_id, what="poll"):
             return
+        meta = await self._poll_repo.get_meta(post_id)
         if not await self._poll_repo.close_in_space(post_id, space_id=space_id):
             log_cross_space_refusal(
                 event, space_id=space_id, what="poll", row_id=post_id
             )
             return
-        # Local voters hear the poll closed; ``origin_instance_id`` stops
-        # the outbound bridge from echoing the peer's own close back.
+        if meta is not None and meta["closed"]:
+            return  # a redelivery: its voters heard it already
+        # Local voters hear the poll closed — "ended" when its deadline had
+        # passed (nobody closed it). ``origin_instance_id`` stops the
+        # outbound bridge from echoing the peer's own close back.
         await self._bus.publish(
             PollClosed(
                 post_id=post_id,
                 space_id=space_id,
                 actor_user_id=await self._poll_repo.get_post_author(post_id) or "",
                 origin_instance_id=event.from_instance,
+                at_deadline=meta is not None
+                and poll_deadline_passed(meta["closes_at"], datetime.now(UTC)),
             )
         )
 
@@ -1856,6 +1865,7 @@ class SpaceContentInboundHandlers:
             event, space_id, post_id, what="schedule poll"
         ):
             return
+        meta = await self._poll_repo.get_schedule_meta(post_id)
         if not await self._poll_repo.finalize_schedule_poll_in_space(
             space_id=space_id,
             post_id=post_id,
@@ -1864,6 +1874,20 @@ class SpaceContentInboundHandlers:
             log_cross_space_refusal(
                 event, space_id=space_id, what="schedule poll", row_id=post_id
             )
+            return
+        if meta is not None and meta["finalized_slot_id"] == slot_id:
+            return  # a redelivery: who answered heard it already
+        # Who answered here hears the time was picked. Not
+        # ``SchedulePollFinalized``: the organiser's household already made
+        # the calendar entry (it reaches us as a calendar event) and federated it.
+        await self._bus.publish(
+            RemoteSchedulePollFinalized(
+                post_id=post_id,
+                space_id=space_id,
+                finalized_by=await self._poll_repo.get_post_author(post_id) or "",
+                origin_instance_id=event.from_instance,
+            )
+        )
 
     # ─── Gallery albums (§23.119, v_33) ──────────────────────────────────
 

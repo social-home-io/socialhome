@@ -19,6 +19,8 @@ from socialhome.domain.events import (
     GalleryItemDeleted,
     GalleryItemUploaded,
     PollClosed,
+    RemoteSchedulePollFinalized,
+    SchedulePollFinalized,
     SpaceZoneDeleted,
     SpaceZoneUpserted,
     TaskCreated,
@@ -459,6 +461,10 @@ class _FakePollRepo:
         self.responses: dict[tuple[str, str], str] = {}
         self.finalized: list[tuple[str, str]] = []
         self.fail_create_schedule = False
+        #: post_id → poll meta (``get_meta``); unknown posts have none.
+        self.meta: dict[str, dict] = {}
+        #: post_id → schedule meta (``get_schedule_meta``).
+        self.schedule_meta: dict[str, dict] = {}
 
     def _post_in(self, post_id, space_id) -> bool:
         return self.post_space.get(post_id, "sp-1") == space_id
@@ -479,7 +485,17 @@ class _FakePollRepo:
         if not self._post_in(post_id, space_id):
             return False
         self.closed.append(post_id)
+        if post_id in self.meta:
+            self.meta[post_id]["closed"] = True
         return True
+
+    async def get_meta(self, post_id):
+        meta = self.meta.get(post_id)
+        return dict(meta) if meta is not None else None
+
+    async def get_schedule_meta(self, post_id):
+        meta = self.schedule_meta.get(post_id)
+        return dict(meta) if meta is not None else None
 
     async def get_post_author(self, post_id):
         return "u-seller"
@@ -518,6 +534,7 @@ class _FakePollRepo:
         if not self._post_in(post_id, space_id) or not self._slot_in(slot_id, space_id):
             return False
         self.finalized.append((post_id, slot_id))
+        self.schedule_meta[post_id] = {"finalized_slot_id": slot_id, "closed": True}
         return True
 
 
@@ -2019,6 +2036,46 @@ async def test_poll_closed(repos, handlers, bus):
     assert event.space_id == "sp-1"
     assert event.actor_user_id == "u-seller"
     assert event.origin_instance_id == "peer-a"
+
+
+async def test_poll_closed_past_its_deadline_says_so(repos, handlers, bus):
+    """The author's household closed it at its deadline: its voters here
+    hear the poll ended (nobody closed it)."""
+    seen: list[PollClosed] = []
+
+    async def _keep(event: PollClosed) -> None:
+        seen.append(event)
+
+    bus.subscribe(PollClosed, _keep)
+    repos["poll"].meta["p-1"] = {
+        "closed": False,
+        "closes_at": "2026-01-01T00:00:00.000Z",
+    }
+    await handlers._on_poll_closed(
+        _event(
+            FederationEventType.SPACE_POLL_CLOSED, {"post_id": "p-1"}, space_id="sp-1"
+        )
+    )
+    (event,) = seen
+    assert event.at_deadline is True
+
+
+async def test_poll_closed_redelivered_tells_voters_once(repos, handlers, bus):
+    seen: list[PollClosed] = []
+
+    async def _keep(event: PollClosed) -> None:
+        seen.append(event)
+
+    bus.subscribe(PollClosed, _keep)
+    repos["poll"].meta["p-1"] = {"closed": False, "closes_at": None}
+    evt = _event(
+        FederationEventType.SPACE_POLL_CLOSED, {"post_id": "p-1"}, space_id="sp-1"
+    )
+    await handlers._on_poll_closed(evt)
+    await handlers._on_poll_closed(evt)
+    assert repos["poll"].closed == ["p-1", "p-1"]
+    (event,) = seen
+    assert event.at_deadline is False  # its author closed it
 
 
 async def test_refused_poll_close_publishes_nothing(repos, handlers, bus):
@@ -3622,6 +3679,67 @@ async def test_schedule_finalized_is_scoped(repos, handlers, caplog):
         )
     )
     assert repos["poll"].finalized == [("p-1", "s-1")]
+
+
+async def test_schedule_finalized_tells_who_answered_without_a_calendar_entry(
+    repos, handlers, bus
+):
+    """A peer's finalise publishes the notification-only event — never
+    ``SchedulePollFinalized``, whose calendar bridge would add a second
+    calendar entry next to the organiser's — once per finalise."""
+    finalized: list[SchedulePollFinalized] = []
+    remote: list[RemoteSchedulePollFinalized] = []
+
+    async def _fin(event: SchedulePollFinalized) -> None:
+        finalized.append(event)
+
+    async def _remote(event: RemoteSchedulePollFinalized) -> None:
+        remote.append(event)
+
+    bus.subscribe(SchedulePollFinalized, _fin)
+    bus.subscribe(RemoteSchedulePollFinalized, _remote)
+    evt = _event(
+        FederationEventType.SPACE_SCHEDULE_FINALIZED,
+        {"post_id": "p-1", "slot_id": "s-1"},
+        space_id="sp-1",
+    )
+    await handlers._on_schedule_finalized(evt)
+    await handlers._on_schedule_finalized(evt)  # redelivered
+    assert finalized == []
+    (event,) = remote
+    assert (event.post_id, event.space_id, event.finalized_by) == (
+        "p-1",
+        "sp-1",
+        "u-seller",
+    )
+    assert event.origin_instance_id == "peer-a"
+    # Picking another time tells them again.
+    await handlers._on_schedule_finalized(
+        _event(
+            FederationEventType.SPACE_SCHEDULE_FINALIZED,
+            {"post_id": "p-1", "slot_id": "s-2"},
+            space_id="sp-1",
+        )
+    )
+    assert len(remote) == 2
+
+
+async def test_refused_schedule_finalize_publishes_nothing(repos, handlers, bus):
+    remote: list[RemoteSchedulePollFinalized] = []
+
+    async def _remote(event: RemoteSchedulePollFinalized) -> None:
+        remote.append(event)
+
+    bus.subscribe(RemoteSchedulePollFinalized, _remote)
+    repos["poll"].post_space["p-b"] = "sp-b"
+    await handlers._on_schedule_finalized(
+        _event(
+            FederationEventType.SPACE_SCHEDULE_FINALIZED,
+            {"post_id": "p-b", "slot_id": "s-1"},
+            space_id="sp-a",
+        )
+    )
+    assert remote == []
 
 
 async def test_gallery_item_saved_cross_space_is_refused(gallery_handlers, caplog):

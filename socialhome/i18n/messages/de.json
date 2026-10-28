@@ -330,6 +330,10 @@
   "notification.chat.added_to_none": "Du wurdest zu {chat_name} hinzugefügt",
   "notification.poll.closed": "{name} hat eine Umfrage beendet, bei der du abgestimmt hast",
   "notification.poll.closed_in": "{name} hat eine Umfrage in {space_name} beendet",
+  "notification.poll.ended": "Eine Umfrage, bei der du abgestimmt hast, ist beendet",
+  "notification.poll.ended_in": "Eine Umfrage in {space_name} ist beendet",
+  "notification.poll.scheduled": "{name} hat den Termin einer Terminumfrage festgelegt, auf die du geantwortet hast",
+  "notification.poll.scheduled_in": "{name} hat in {space_name} einen Termin festgelegt",
   "notification.report.answered": "Deine Meldung wurde geprüft",
   "notification.report.answered_in": "Deine Meldung in {space_name} wurde geprüft"
 }

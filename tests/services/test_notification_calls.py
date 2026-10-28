@@ -6,7 +6,9 @@
 * ``call_missed`` — a row (one per chat, D7) + a push: "Missed call from
   Anna". Both honour the chat mute (D9) and Messages and calls (D4).
 * ``chat_added`` — someone put you in a group chat → a row.
-* ``poll_result`` — a poll you voted in was closed → a row (Plans and tasks).
+* ``poll_result`` — a poll you voted in was closed, or reached its deadline
+  → a row (Plans and tasks).
+* ``poll_scheduled`` — a date poll you answered got its time → a row.
 * ``report_answer`` — a report you filed was reviewed → a row (About you);
   never names the moderator or whom the report was about.
 """
@@ -31,7 +33,9 @@ from socialhome.domain.events import (
     CallRinging,
     DmConversationCreated,
     PollClosed,
+    RemoteSchedulePollFinalized,
     ReportResolved,
+    SchedulePollFinalized,
 )
 from socialhome.domain.notification_kinds import KNOWN_TYPES, NotifKind, notif_kind
 from socialhome.i18n import Catalog
@@ -82,10 +86,14 @@ class _Reports:
 class _Polls:
     def __init__(self, author: str | None = None) -> None:
         self.voters: dict[str, list[str]] = {}
+        self.answers: dict[str, list[dict]] = {}
         self.author = author
 
     async def list_voter_ids(self, post_id: str) -> list[str]:
         return self.voters.get(post_id, [])
+
+    async def list_schedule_responses(self, post_id: str) -> list[dict]:
+        return self.answers.get(post_id, [])
 
     async def get_post_author(self, post_id: str) -> str | None:
         return self.author
@@ -448,6 +456,101 @@ async def test_a_poll_nobody_voted_in_tells_nobody(s):
     anna = await s.user("anna")
     await s.bus.publish(PollClosed(post_id="p9", actor_user_id=anna.user_id))
     assert s.push.sent == []
+
+
+async def test_a_poll_at_its_deadline_has_ended_for_every_voter(s):
+    """Nobody closed it: no actor, and the author hears too if they voted."""
+    anna, bob = await s.user("anna"), await s.user("bob", locale="de")
+    s.polls.voters["p1"] = [anna.user_id, bob.user_id]
+    await s.bus.publish(
+        PollClosed(post_id="p1", actor_user_id=anna.user_id, at_deadline=True)
+    )
+    (row,) = await _rows(s, anna)
+    assert (row.type, row.title, row.object_key) == (
+        "poll_result",
+        "A poll you voted in has ended",
+        "post:p1",
+    )
+    assert row.params.actors == ()
+    (row,) = await _rows(s, bob)
+    assert row.title == "Eine Umfrage, bei der du abgestimmt hast, ist beendet"
+
+
+async def test_a_space_poll_at_its_deadline_names_the_space(s):
+    bob = await s.user("bob")
+    await s.db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key, config_sequence) VALUES(?,?,?,?,?,?)",
+        ("sp1", "Crew", "iid", "anna", "00" * 32, 0),
+    )
+    s.space_polls.voters["p1"] = [bob.user_id, "u-remote"]
+    await s.bus.publish(
+        PollClosed(
+            post_id="p1", space_id="sp1", origin_instance_id="peer", at_deadline=True
+        )
+    )
+    (row,) = await _rows(s, bob)
+    assert row.title == "A poll in Crew has ended"
+    assert row.link_url == "/spaces/sp1?post=p1"
+
+
+# ── poll_scheduled ────────────────────────────────────────────────────
+
+
+async def test_a_picked_time_tells_who_answered_never_the_organiser(s):
+    anna, bob, cid = await s.user("anna"), await s.user("bob"), await s.user("cid")
+    s.polls.answers["p1"] = [
+        {"slot_id": "s1", "user_id": bob.user_id, "availability": "yes"},
+        {"slot_id": "s2", "user_id": bob.user_id, "availability": "no"},
+        {"slot_id": "s1", "user_id": anna.user_id, "availability": "yes"},
+    ]
+    await s.bus.publish(
+        SchedulePollFinalized(
+            post_id="p1",
+            slot_id="s1",
+            slot_date="2026-11-02",
+            start_time=None,
+            end_time=None,
+            title="Dinner",
+            finalized_by=anna.user_id,
+        )
+    )
+    (row,) = await _rows(s, bob)  # one row, however many slots they answered
+    assert (row.type, row.title, row.link_url, row.object_key) == (
+        "poll_scheduled",
+        "Anna picked a time for a date poll you answered",
+        "/post/p1",
+        "post:p1",
+    )
+    assert "Dinner" not in row.title
+    assert s.push.titles(bob) == ["Anna picked a time for a date poll you answered"]
+    assert await _rows(s, anna) == []
+    assert await _rows(s, cid) == []
+
+
+async def test_a_peers_picked_time_tells_who_answered_here(s):
+    anna, bob = await s.user("anna"), await s.user("bob", locale="nl")
+    await s.db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key, config_sequence) VALUES(?,?,?,?,?,?)",
+        ("sp1", "Crew", "iid", "anna", "00" * 32, 0),
+    )
+    s.space_polls.answers["p1"] = [
+        {"slot_id": "s1", "user_id": bob.user_id, "availability": "maybe"},
+        {"slot_id": "s1", "user_id": "u-remote", "availability": "yes"},
+    ]
+    await s.bus.publish(
+        RemoteSchedulePollFinalized(
+            post_id="p1",
+            space_id="sp1",
+            finalized_by=anna.user_id,
+            origin_instance_id="peer",
+        )
+    )
+    (row,) = await _rows(s, bob)
+    assert row.title == "Anna heeft in Crew een tijd gekozen"
+    assert row.link_url == "/spaces/sp1?post=p1"
+    assert notif_kind("poll_scheduled") is NotifKind.PLANS
 
 
 # ── report_answer ─────────────────────────────────────────────────────

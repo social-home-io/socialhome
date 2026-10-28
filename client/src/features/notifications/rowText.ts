@@ -111,6 +111,10 @@ export const HOUSEHOLD_CHAT_LINK = '/?tab=chat'
  *   notifications.row.chat_added_many_in notifications.row.chat_added_none_in
  *   notifications.row.poll_result notifications.row.poll_result_many
  *   notifications.row.poll_result_in notifications.row.poll_result_many_in
+ *   notifications.row.poll_result_none notifications.row.poll_result_none_in
+ *   notifications.row.poll_scheduled notifications.row.poll_scheduled_many
+ *   notifications.row.poll_scheduled_in
+ *   notifications.row.poll_scheduled_many_in
  *   notifications.row.report_answer_none
  *   notifications.row.report_answer_none_in
  *   notifications.row.dm_mention_in notifications.row.dm_mention_many_in
@@ -159,7 +163,9 @@ export const ROW_TYPES: Readonly<Record<string, TypeSpec>> = {
   // A chat row's place is the group's name (``params.space_name``).
   call_missed: { count: true, inSpace: true },
   chat_added: { none: true, inSpace: true },
-  poll_result: { inSpace: true },
+  // Nobody closed it: a poll that reached its deadline ("… has ended").
+  poll_result: { none: true, inSpace: true },
+  poll_scheduled: { inSpace: true },
   // Never who reviewed it or whom it was about.
   report_answer: { none: true, noActor: true, inSpace: true },
   dm_mention: { chat: true },

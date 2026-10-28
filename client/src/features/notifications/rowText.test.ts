@@ -227,6 +227,17 @@ describe('rowSentence', () => {
       expect(sentence('poll_result', params(['Anna']), 's1')).toBe('Anna closed a poll in Familie Alpha')
     })
 
+    it('poll_result with nobody behind it: the poll reached its deadline', () => {
+      expect(sentence('poll_result', plain(params([])))).toBe('A poll you voted in has ended')
+      expect(sentence('poll_result', params([]), 's1')).toBe('A poll in Familie Alpha has ended')
+    })
+
+    it('poll_scheduled names who picked the time and where', () => {
+      expect(sentence('poll_scheduled', plain(params(['Anna']))))
+        .toBe('Anna picked a time for a date poll you answered')
+      expect(sentence('poll_scheduled', params(['Anna']), 's1')).toBe('Anna picked a time in Familie Alpha')
+    })
+
     it('report_answer names nobody — not the moderator, not whom it was about', () => {
       expect(sentence('report_answer', plain(params([])))).toBe('Your report was reviewed')
       expect(sentence('report_answer', params([]), 's1')).toBe('Your report in Familie Alpha was reviewed')

@@ -330,6 +330,10 @@
   "notification.chat.added_to_none": "Je bent toegevoegd aan {chat_name}",
   "notification.poll.closed": "{name} heeft een peiling gesloten waarop je hebt gestemd",
   "notification.poll.closed_in": "{name} heeft een peiling in {space_name} gesloten",
+  "notification.poll.ended": "Een peiling waarop je hebt gestemd is gesloten",
+  "notification.poll.ended_in": "Een peiling in {space_name} is gesloten",
+  "notification.poll.scheduled": "{name} heeft een tijd gekozen in een datumprikker waarop je hebt gereageerd",
+  "notification.poll.scheduled_in": "{name} heeft in {space_name} een tijd gekozen",
   "notification.report.answered": "Je melding is bekeken",
   "notification.report.answered_in": "Je melding in {space_name} is bekeken"
 }
