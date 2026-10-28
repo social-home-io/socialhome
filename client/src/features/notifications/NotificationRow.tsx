@@ -29,7 +29,8 @@ import { spaces } from '@/store/spaces'
 import { spaceGlyph } from '@/features/spaces/spaceGlyph'
 import { relativeDocsTime } from '@/utils/relativeTime'
 import type { Notification } from '@/types'
-import { countsMeta, rowSentence, type Segment } from './rowText'
+import { currentUser } from '@/store/auth'
+import { countsMeta, handledMeta, rowSentence, type Segment } from './rowText'
 
 export type GlyphName =
   | 'comment' | 'at' | 'post' | 'heart' | 'person' | 'calendar'
@@ -41,7 +42,8 @@ export function glyphFor(type: string): GlyphName {
   if (type.includes('mention') || type === 'space_here') return 'at'
   if (type.includes('comment') || type.includes('replied')) return 'comment'
   if (type.endsWith('post_created')) return 'post'
-  if (/followed|joined|join_|invite|contact_requested/.test(type)) return 'person'
+  if (type === 'space_invite') return 'mail'
+  if (/followed|joined|join_|invite|contact_requested|pairing/.test(type)) return 'person'
   if (type.startsWith('calendar')) return 'calendar'
   if (type.startsWith('task')) return 'task'
   if (/moderat|report/.test(type)) return 'shield'
@@ -82,7 +84,7 @@ function spaceOf(spaceId: string | null | undefined) {
   return spaces.value.find(s => s.id === spaceId) ?? null
 }
 
-function RowAvatar({ n, size }: { n: Notification, size: number }) {
+export function RowAvatar({ n, size }: { n: Notification, size: number }) {
   const glyph = glyphFor(n.type)
   const actor = n.params?.actors?.[0]
   const space = spaceOf(n.space_id)
@@ -133,19 +135,23 @@ interface RowProps {
   onOpen?: (n: Notification) => void
   /** Bell panel: a little smaller. */
   compact?: boolean
+  /** The sentence's element id — inline actions point at it
+   *  (``aria-describedby``) so "Approve" says what it approves. */
+  titleId?: string
 }
 
-export function NotificationRow({ n, onOpen, compact }: RowProps) {
+export function NotificationRow({ n, onOpen, compact, titleId }: RowProps) {
   const unread = !n.read_at
   const segs = rowSentence(n, spaceOf(n.space_id)?.name)
-  const meta = countsMeta(n.params)
+  // A handled "Needs you" item says how it ended ("Approved by Søren").
+  const meta = handledMeta(n.params, currentUser.value?.user_id) ?? countsMeta(n.params)
   const cls = `sh-notif-row${unread ? ' sh-notif-row--unread' : ''}${compact ? ' sh-notif-row--compact' : ''}`
   const inner = (
     <>
       <RowAvatar n={n} size={compact ? 36 : 40} />
       <span class="sh-notif-content">
         {unread && <><span class="sr-only">{t('notifications.unread')},</span>{' '}</>}
-        <span class="sh-notif-title">{segs ? <Sentence segs={segs} /> : n.title}</span>
+        <span class="sh-notif-title" id={titleId}>{segs ? <Sentence segs={segs} /> : n.title}</span>
         {' '}
         <span class="sh-notif-meta">
           <time

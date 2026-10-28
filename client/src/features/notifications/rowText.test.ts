@@ -6,7 +6,45 @@ import fr from '@/i18n/locales/fr.json'
 import es from '@/i18n/locales/es.json'
 import { setLocale } from '@/i18n/i18n'
 import type { NotifParams } from '@/types'
-import { ROW_TYPES, actorsPhrase, countsMeta, plainText, rowKeys, rowSentence } from './rowText'
+import {
+  HANDLED_KEYS,
+  ROW_TYPES,
+  actorsPhrase,
+  countsMeta,
+  groupSentence,
+  handledMeta,
+  plainText,
+  rowKeys,
+  rowSentence,
+} from './rowText'
+
+/** The "Needs you" section's own strings (NeedsYouSection / needsYou). */
+const NEEDS_YOU_KEYS = [
+  'notifications.needs_you.title',
+  'notifications.needs_you.count',
+  'notifications.needs_you.count_one',
+  'notifications.needs_you.show_more',
+  'notifications.needs_you.show_more_one',
+  'notifications.needs_you.show_less',
+  'notifications.needs_you.approve',
+  'notifications.needs_you.decline',
+  'notifications.needs_you.review',
+  'notifications.needs_you.view_invite',
+  'notifications.needs_you.group',
+  'notifications.needs_you.group_unnamed',
+  'notifications.needs_you.approved',
+  'notifications.needs_you.declining',
+  'notifications.needs_you.declining_invite',
+  'notifications.needs_you.declined_sent',
+  'notifications.needs_you.invite_declined',
+  'notifications.needs_you.already',
+  'notifications.needs_you.already_anon',
+  'notifications.needs_you.failed',
+  'notifications.needs_you.flag.edge',
+  'notifications.needs_you.flag.unpaired',
+  'notifications.needs_you.flag.admin',
+  'notifications.needs_you.flag.age',
+]
 
 const LOCALES: Record<string, Record<string, string>> = { en, de, nl, fr, es }
 
@@ -35,7 +73,7 @@ afterEach(async () => { await setLocale('en') })
 describe('row catalog', () => {
   it.each(Object.keys(LOCALES))('every key the renderer asks for exists in %s with the same placeholders', (loc) => {
     const cat = LOCALES[loc]
-    for (const key of rowKeys()) {
+    for (const key of [...rowKeys(), ...HANDLED_KEYS, ...NEEDS_YOU_KEYS]) {
       expect(cat[key], `${loc}: ${key}`).toBeTruthy()
       expect(placeholders(cat[key]), `${loc}: ${key}`).toEqual(placeholders(en[key as keyof typeof en]))
     }
@@ -168,6 +206,39 @@ describe('rowSentence', () => {
 describe('actorsPhrase', () => {
   it('is empty without actors', () => {
     expect(actorsPhrase([], 0)).toEqual([])
+  })
+})
+
+describe('Needs you rows', () => {
+  it('an invite names who and where; without the space it keeps its title', () => {
+    expect(render('space_invite', params(['Zoë']))).toBe('Zoë invited you to Familie Alpha')
+    expect(render('space_invite', params(['Zoë'], { space_name: null }), 'Zoë invited you to a space'))
+      .toBe('Zoë invited you to a space')
+  })
+
+  it('a handled item says how it ended and who ended it', () => {
+    const by = { id: 'u-s', name: 'Søren' }
+    expect(handledMeta(params([], { handled: { outcome: 'approved', by } }))).toBe('Approved by Søren')
+    expect(handledMeta(params([], { handled: { outcome: 'declined', by } }))).toBe('Declined by Søren')
+    expect(handledMeta(params([], { handled: { outcome: 'done', by } }))).toBe('Handled by Søren')
+    expect(handledMeta(params([], { handled: { outcome: 'declined', by } }), 'u-s')).toBe('You declined it')
+    expect(handledMeta(params([], { handled: { outcome: 'done', by } }), 'u-s')).toBe('You handled it')
+    expect(handledMeta(params([], { handled: { outcome: 'approved', by: { id: 'x', name: null } } })))
+      .toBe('Approved by Someone')
+    expect(handledMeta(params([], { handled: { outcome: 'accepted', by: null } }))).toBe('Accepted')
+    expect(handledMeta(params([], { handled: { outcome: 'expired', by: null } }))).toBe('Expired')
+    expect(handledMeta(params([], { handled: { outcome: 'done', by: null } }))).toBe('No action needed')
+    expect(handledMeta(params([]))).toBeNull()
+    expect(handledMeta(null)).toBeNull()
+  })
+
+  it('a space group counts its requests and names the space as a place', async () => {
+    const segs = groupSentence(3, 'Salon')
+    expect(plainText(segs)).toBe('3 requests wait for you in Salon')
+    expect(segs.find(s => s.kind === 'place')?.text).toBe('Salon')
+    expect(plainText(groupSentence(2, ' '))).toBe('2 requests wait for you')
+    await setLocale('de')
+    expect(plainText(groupSentence(3, 'Salon'))).toBe('3 Anfragen warten in Salon auf dich')
   })
 })
 

@@ -109,6 +109,7 @@ from ..domain.events import (
     RemoteJoinRequestApproved,
     SpaceAdminAuthorityRevoked,
     SpaceConfigChanged,
+    SpaceInviteAnswered,
     SpaceJoinApproved,
     SpaceJoinDenied,
     SpaceJoinRequested,
@@ -198,6 +199,7 @@ from ..domain.space import (
     InviteOnlyError,
     JoinMode,
     JoinOwner,
+    JoinRequestHandledError,
     JoinRequestSentError,
     LocalAreaDelegatedError,
     LocalAreaPublicOnlyError,
@@ -251,7 +253,6 @@ from ..media.profile_picture import (
     PROFILE_PICTURE_MAX_DIMENSION,
     normalize_profile_picture,
 )
-from ..repositories.base import row_to_dict
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from ..repositories.space_post_repo import AbstractSpacePostRepo
 from ..repositories.space_remote_member_repo import SpaceRemoteMember
@@ -3660,6 +3661,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         await self._spaces.save_member(member)
         await self._spaces.update_invitation_status(invitation_id, "accepted")
         await self._bus.publish(
+            SpaceInviteAnswered(space_id=space.id, user_id=user_id, accepted=True)
+        )
+        await self._bus.publish(
             SpaceMemberJoined(
                 space_id=space.id,
                 user_id=user_id,
@@ -3692,6 +3696,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             await self._spaces.update_invitation_status(
                 invitation_id,
                 "declined",
+            )
+            await self._bus.publish(
+                SpaceInviteAnswered(
+                    space_id=str(row["space_id"]), user_id=user_id, accepted=False
+                )
             )
 
     async def remove_member(
@@ -6598,6 +6607,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             await self._accept_remote_invite_locked(
                 token=token, user_id=user_id, share_location=share_location
             )
+        await self._bus.publish(
+            SpaceInviteAnswered(
+                space_id=str(invite["space_id"]), user_id=user_id, accepted=True
+            )
+        )
 
     async def _accept_remote_invite_locked(
         self, *, token: str, user_id: str, share_location: bool
@@ -6875,6 +6889,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         await self._spaces.update_invitation_status(
             invite["id"],
             "declined",
+        )
+        await self._bus.publish(
+            SpaceInviteAnswered(
+                space_id=str(invite["space_id"]), user_id=user_id, accepted=False
+            )
         )
 
     async def remove_remote_member(
@@ -7276,36 +7295,53 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             out.append(enriched)
         return out
 
+    async def _pending_join_request(
+        self, request_id: str, *, actor_username: str, space_id: str | None
+    ) -> tuple[dict, Space, SpaceMember]:
+        """The join request an admin answers, with its space and the
+        admin's seat. Refuses a request of another space than the one the
+        caller named (404), a caller who is no admin there (403) and a
+        request already answered (409 — two admins racing: the loser hears
+        who won, not an error)."""
+        row = await self._spaces.get_join_request(request_id)
+        if row is None or (space_id is not None and row["space_id"] != space_id):
+            raise KeyError(f"join request {request_id!r} not found")
+        space = await self._require_space(row["space_id"])
+        actor_member = await self._require_admin_or_owner(space, actor_username)
+        status = str(row.get("status") or "pending")
+        if status != "pending":
+            reviewer = row.get("reviewed_by")
+            who = await self._users.get_by_user_id(reviewer) if reviewer else None
+            raise JoinRequestHandledError(
+                params={
+                    "status": status,
+                    "by": who.display_name if who is not None else "",
+                }
+            )
+        return row, space, actor_member
+
     async def approve_join_request(
         self,
         request_id: str,
         *,
         actor_username: str,
+        space_id: str | None = None,
     ) -> SpaceMember | None:
-        """Approve a pending join request.
+        """Approve a pending join request (of ``space_id``, when given).
 
         For local applicants, seats the user as a member and returns the
         :class:`SpaceMember`. For §D2 remote applicants, instead produces
         a short-TTL single-use invite token, fires it back via a
         :data:`SPACE_JOIN_REQUEST_APPROVED` envelope, and returns None —
         the applicant's household finalises the join with
-        :meth:`accept_invite_token`.
+        :meth:`accept_invite_token`. A request already answered raises
+        :class:`JoinRequestHandledError`.
         """
         actor = await self._users.get(actor_username)
         assert actor is not None
-        space_id_row = await self._spaces._db.fetchone(  # type: ignore[attr-defined]
-            """
-            SELECT space_id, user_id,
-                   remote_applicant_instance_id, requested_role
-              FROM space_join_requests WHERE id=?
-            """,
-            (request_id,),
+        row, space, actor_member = await self._pending_join_request(
+            request_id, actor_username=actor_username, space_id=space_id
         )
-        row = row_to_dict(space_id_row)
-        if row is None:
-            raise KeyError(f"join request {request_id!r} not found")
-        space = await self._require_space(row["space_id"])
-        actor_member = await self._require_admin_or_owner(space, actor_username)
         remote_instance = row.get("remote_applicant_instance_id")
         # An admin/mod elevation (the applicant is ALREADY a member; an
         # admin link filed this). Approving is the owner's click that runs
@@ -7458,43 +7494,39 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         request_id: str,
         *,
         actor_username: str,
+        space_id: str | None = None,
     ) -> None:
+        """Decline a pending join request (of ``space_id``, when given) —
+        only an admin or the owner of its space, and only once."""
         actor = await self._users.get(actor_username)
         assert actor is not None
-        # Look up the request first so we can emit the right event.
-        row = await self._spaces._db.fetchone(  # type: ignore[attr-defined]
-            """
-            SELECT space_id, user_id, remote_applicant_instance_id
-              FROM space_join_requests WHERE id=?
-            """,
-            (request_id,),
+        r, _space, _seat = await self._pending_join_request(
+            request_id, actor_username=actor_username, space_id=space_id
         )
-        r = row_to_dict(row)
         await self._spaces.update_join_request_status(
             request_id,
             "denied",
             reviewed_by=actor.user_id,
         )
-        if r is not None:
-            remote_instance = r.get("remote_applicant_instance_id")
-            if remote_instance and self._federation is not None:
-                await self._federation.send_with_mesh_fallback(
-                    to_instance_id=remote_instance,
-                    event_type=FederationEventType.SPACE_JOIN_REQUEST_DENIED,
-                    payload={
-                        "request_id": request_id,
-                        "space_id": r["space_id"],
-                        "reviewed_by": actor.user_id,
-                    },
-                )
-            await self._bus.publish(
-                SpaceJoinDenied(
-                    space_id=r["space_id"],
-                    user_id=r["user_id"],
-                    request_id=request_id,
-                    denied_by=actor.user_id,
-                )
+        remote_instance = r.get("remote_applicant_instance_id")
+        if remote_instance and self._federation is not None:
+            await self._federation.send_with_mesh_fallback(
+                to_instance_id=remote_instance,
+                event_type=FederationEventType.SPACE_JOIN_REQUEST_DENIED,
+                payload={
+                    "request_id": request_id,
+                    "space_id": r["space_id"],
+                    "reviewed_by": actor.user_id,
+                },
             )
+        await self._bus.publish(
+            SpaceJoinDenied(
+                space_id=r["space_id"],
+                user_id=r["user_id"],
+                request_id=request_id,
+                denied_by=actor.user_id,
+            )
+        )
 
     async def request_join_remote(
         self,
@@ -7561,12 +7593,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         :data:`SPACE_JOIN_REQUEST_APPROVED` envelope so the applicant
         becomes a space member without further UI clicks.
         """
-        row = await self._spaces._db.fetchone(  # type: ignore[attr-defined]
-            "SELECT user_id, space_id, remote_applicant_instance_id"
-            " FROM space_join_requests WHERE id=?",
-            (request_id,),
-        )
-        r = row_to_dict(row)
+        r = await self._spaces.get_join_request(request_id)
         if r is None:
             return
         user_id = r.get("user_id")

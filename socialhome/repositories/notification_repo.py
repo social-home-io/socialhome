@@ -32,6 +32,7 @@ from ..db import AsyncDatabase
 from ..domain.notification import (
     ACTION_ITEM_TYPES,
     Notification,
+    NotificationHandled,
     NotificationParams,
 )
 from ._spec import Spec, spec_to_sql
@@ -56,6 +57,10 @@ _NOTIFICATION_COLS: frozenset[str] = frozenset(
 #: Per-user cap (§17.2). Rows beyond it are pruned when new ones land —
 #: read rows first, unread action items never.
 MAX_PER_USER: int = 500
+
+#: The most "Needs you" items one list returns — far more than anyone
+#: works through at once; the section shows 3 and a "Show N more".
+MAX_PENDING_ACTIONS: int = 100
 
 #: ``type IN (...)`` placeholders + values for the action-item types,
 #: in a fixed order so the statements stay cacheable.
@@ -93,9 +98,17 @@ class AbstractNotificationRepo(Protocol):
     async def mark_read_ids(
         self, user_id: str, notification_ids: builtins.list[str]
     ) -> int: ...
-    async def mark_read_for_everyone(
-        self, *, link_url: str, type: str
+    async def resolve_object(
+        self,
+        object_key: str,
+        *,
+        types: Iterable[str],
+        handled: NotificationHandled,
+        user_id: str | None = None,
     ) -> builtins.list[str]: ...
+    async def list_pending_actions(
+        self, user_id: str, *, limit: int = ...
+    ) -> builtins.list[Notification]: ...
     async def mark_read_by_object(
         self, user_id: str, object_keys: Iterable[str]
     ) -> int: ...
@@ -382,25 +395,60 @@ class SqliteNotificationRepo:
             (user_id, *notification_ids),
         )
 
-    async def mark_read_for_everyone(
-        self, *, link_url: str, type: str
+    async def resolve_object(
+        self,
+        object_key: str,
+        *,
+        types: Iterable[str],
+        handled: NotificationHandled,
+        user_id: str | None = None,
     ) -> builtins.list[str]:
-        """Mark every unread ``type`` row at ``link_url`` read, whoever it
-        belongs to — an action item one admin handled is handled for all.
-        Returns the users whose rows flipped (to tell their devices)."""
+        """A "Needs you" item was handled: every still-pending row of one of
+        *types* about *object_key* — whoever it belongs to, or only
+        ``user_id``'s — records *handled* in its params and reads as read,
+        so it leaves every recipient's section at once. A row already
+        handled keeps its first answer. Returns the users whose rows
+        changed (to tell their devices)."""
+        kinds = sorted(set(types))
+        if not kinds:
+            return []
+        marks = ",".join("?" * len(kinds))
+        where = (
+            f"object_key = ? AND type IN ({marks}) "
+            "AND json_extract(COALESCE(params, '{}'), '$.handled') IS NULL"
+        )
+        args: list[object] = [object_key, *kinds]
+        if user_id is not None:
+            where += " AND user_id = ?"
+            args.append(user_id)
         rows = await self._db.fetchall(
-            "SELECT DISTINCT user_id FROM notifications "
-            "WHERE link_url=? AND type=? AND read_at IS NULL",
-            (link_url, type),
+            f"SELECT DISTINCT user_id FROM notifications WHERE {where}", tuple(args)
         )
         user_ids = [r["user_id"] for r in rows]
         if user_ids:
             await self._db.enqueue(
-                "UPDATE notifications SET read_at = datetime('now') "
-                "WHERE link_url=? AND type=? AND read_at IS NULL",
-                (link_url, type),
+                "UPDATE notifications"
+                "   SET params = json_set(COALESCE(params, '{}'), '$.handled',"
+                "                         json(?)),"
+                "       read_at = COALESCE(read_at, datetime('now'))"
+                f" WHERE {where}",
+                (orjson.dumps(handled.to_dict()).decode(), *args),
             )
         return user_ids
+
+    async def list_pending_actions(
+        self, user_id: str, *, limit: int = MAX_PENDING_ACTIONS
+    ) -> builtins.list[Notification]:
+        """``user_id``'s "Needs you" items no one handled yet, read or
+        not, newest first."""
+        rows = await self._db.fetchall(
+            "SELECT * FROM notifications"
+            f" WHERE user_id = ? AND type IN {_ACTION_IN}"
+            "   AND json_extract(COALESCE(params, '{}'), '$.handled') IS NULL"
+            " ORDER BY created_at DESC LIMIT ?",
+            (user_id, *_ACTION_TYPES, int(limit)),
+        )
+        return [n for n in (_row_to_notification(d) for d in rows_to_dicts(rows)) if n]
 
     async def mark_read_by_object(
         self, user_id: str, object_keys: Iterable[str]

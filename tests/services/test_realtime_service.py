@@ -1084,6 +1084,25 @@ async def test_notification_unread_count_targets_one_user(env):
     await bus.publish(NotificationReadChanged(user_id="u1", unread_count=3))
     assert any("notification.unread_count" in m for m in me.sent)
     assert all("notification.unread_count" not in m for m in other.sent)
+    [frame] = [json.loads(m) for m in me.sent if "notification.unread_count" in m]
+    assert "handled" not in frame.get("data", frame)
+
+
+async def test_handled_needs_you_items_ride_the_unread_count_frame(env):
+    """Another admin answered a request: every device drops it from Needs
+    you, even when the count did not move."""
+    from socialhome.domain.events import NotificationReadChanged
+
+    _svc, bus, ws = env
+    me = _FakeWS()
+    await ws.register("u1", me)
+    await bus.publish(
+        NotificationReadChanged(
+            user_id="u1", unread_count=0, handled=("join_request:r1",)
+        )
+    )
+    [frame] = [json.loads(m) for m in me.sent if "notification.unread_count" in m]
+    assert frame.get("data", frame)["handled"] == ["join_request:r1"]
 
 
 async def test_bazaar_bid_placed_broadcast(env):

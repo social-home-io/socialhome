@@ -421,3 +421,16 @@ async def test_deleting_a_post_takes_its_rows_away(client):
         "/api/notifications/unread-count", headers=_auth(client._bob_token)
     )
     assert (await count.json())["unread"] == 1
+
+
+async def test_needs_you_is_empty_without_requests(client):
+    resp = await client.get(
+        "/api/notifications/needs-you", headers=_auth(client._bob_token)
+    )
+    assert resp.status == 200
+    assert await resp.json() == {"items": [], "count": 0}
+
+
+async def test_needs_you_requires_auth(client):
+    resp = await client.get("/api/notifications/needs-you")
+    assert resp.status == 401

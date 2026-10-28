@@ -411,6 +411,7 @@ class AbstractSpaceRepo(Protocol):
         requested_role: str | None = None,
         area_verdict: str | None = None,
     ) -> str: ...
+    async def get_join_request(self, request_id: str) -> dict | None: ...
     async def list_pending_join_requests(self, space_id: str) -> list[dict]: ...
     async def has_approved_join_request(
         self,
@@ -2952,6 +2953,13 @@ class SqliteSpaceRepo:
             ),
         )
         return row is not None
+
+    async def get_join_request(self, request_id: str) -> dict | None:
+        """One join request, whatever its status — ``None`` when unknown."""
+        row = await self._db.fetchone(
+            "SELECT * FROM space_join_requests WHERE id=?", (request_id,)
+        )
+        return row_to_dict(row)
 
     async def list_pending_join_requests(
         self,

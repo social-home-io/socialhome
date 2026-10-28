@@ -564,6 +564,7 @@ class AutoPairInboxApproveView(BaseView):
             inst = await coord.finalize_pending(
                 request_id,
                 own_inbox_base_url=own_base,
+                actor_user_id=ctx.user_id,
             )
         except KeyError:
             return error_response(
@@ -594,6 +595,7 @@ class AutoPairInboxDeclineView(BaseView):
             await coord.decline_pending(
                 request_id,
                 reason=str(body.get("reason") or ""),
+                actor_user_id=ctx.user_id,
             )
         except KeyError:
             return error_response(

@@ -72,7 +72,11 @@ from ..crypto import (
     verify_ed25519,
     x25519_exchange,
 )
-from ..domain.events import AutoPairRequestIncoming, PairingConfirmed
+from ..domain.events import (
+    AutoPairRequestAnswered,
+    AutoPairRequestIncoming,
+    PairingConfirmed,
+)
 from ..domain.federation import (
     AutoPairRequestExpiredError,
     FederationEventType,
@@ -599,6 +603,7 @@ class AutoPairCoordinator:
         request_id: str,
         *,
         own_inbox_base_url: str,
+        actor_user_id: str | None = None,
     ) -> RemoteInstance:
         """C's admin clicked approve — finish the pair instantly.
 
@@ -606,7 +611,8 @@ class AutoPairCoordinator:
         instance (e.g. ``https://c.example/federation/inbox``). C mints
         a per-A inbox URL on top of it — the suffix becomes
         :attr:`RemoteInstance.local_inbox_id` so A's later messages
-        route back to this pairing.
+        route back to this pairing. ``actor_user_id`` is the admin who
+        approved (every admin's "Needs you" row says so).
         """
         req = self._inbox.pop(request_id)
         if req is None:
@@ -695,6 +701,11 @@ class AutoPairCoordinator:
             event_type=FederationEventType.PAIRING_INTRO_AUTO_ACK_VIA,
             payload=ack_payload,
         )
+        await self._bus.publish(
+            AutoPairRequestAnswered(
+                request_id=request_id, approved=True, by_user_id=actor_user_id
+            )
+        )
         return approved
 
     async def decline_pending(
@@ -702,6 +713,7 @@ class AutoPairCoordinator:
         request_id: str,
         *,
         reason: str = "",
+        actor_user_id: str | None = None,
     ) -> None:
         req = self._inbox.pop(request_id)
         if req is None:
@@ -714,6 +726,11 @@ class AutoPairCoordinator:
                 "token": req.token,
                 "reason": reason or "declined_by_target",
             },
+        )
+        await self._bus.publish(
+            AutoPairRequestAnswered(
+                request_id=request_id, approved=False, by_user_id=actor_user_id
+            )
         )
 
     # ── Vouching peer (B) — relay the ack from C to A ──────────────────

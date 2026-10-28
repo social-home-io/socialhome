@@ -32,6 +32,7 @@ import { useMediaQuery } from '@/hooks/useMediaQuery'
 import { isOne, t } from '@/i18n/i18n'
 import { ws } from '@/ws'
 import { NewPill, NotificationRow, markRowRead, withRead } from '@/features/notifications/NotificationRow'
+import { NeedsYouSection, pinnedIds } from '@/features/notifications/NeedsYouSection'
 
 /** Same breakpoint as the bottom tab bar (``.sh-mobile-nav``). */
 export const PHONE_QUERY = '(max-width: 768px)'
@@ -230,8 +231,10 @@ function DesktopBell() {
 
   // The displayed list: prefer the hydrated full list (carries
   // ``read_at`` + ``created_at``); fall back to the store's recent
-  // projection for instant feel right after a WS frame lands.
-  const items = fullList.value.length > 0
+  // projection for instant feel right after a WS frame lands. A request
+  // pinned in "Needs you" shows there, not twice.
+  const pinned = pinnedIds()
+  const all = fullList.value.length > 0
     ? fullList.value
     : recent.value.map(r => ({
         id:         r.notification_id,
@@ -245,6 +248,7 @@ function DesktopBell() {
         space_id:   r.space_id ?? null,
         params:     r.params ?? null,
       }) as Notification)
+  const items = all.filter(n => !pinned.has(n.id))
 
   return (
     <div
@@ -288,7 +292,8 @@ function DesktopBell() {
           </div>
           <NewPill count={panelPending.value.size} onShow={() => void refresh()} />
           <div class="sh-notif-list">
-            {items.length === 0 && (
+            <NeedsYouSection compact onNavigate={() => { panelOpen.value = false }} />
+            {items.length === 0 && pinned.size === 0 && (
               <p class="sh-notif-empty sh-muted">{t('notifications.bell_empty')}</p>
             )}
             {items.map(n => (

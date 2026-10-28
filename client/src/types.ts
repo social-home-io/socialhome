@@ -744,6 +744,18 @@ export interface NotifParams {
   new: number
   total: number
   space_name?: string | null
+  /** A "Needs you" item: why it can't be decided with one tap (``edge``,
+   *  ``unpaired``, ``admin``, ``age``) — it offers "Review" instead. */
+  flags?: string[]
+  /** A "Needs you" item someone handled: how it ended and who ended it
+   *  (``null``: the viewer themself, or nobody). It left the section. */
+  handled?: NotifHandled | null
+}
+
+/** How a "Needs you" item ended. */
+export interface NotifHandled {
+  outcome: 'approved' | 'declined' | 'accepted' | 'expired' | 'withdrawn' | 'done'
+  by: NotifActor | null
 }
 
 export interface Notification {

@@ -543,6 +543,8 @@ class PrivateSpaceInviteHandler:
                 space_id=space_id,
                 inviter_user_id=inviter_user_id,
                 invitee_user_id=invitee_user_id,
+                inviter_instance_id=issuer,
+                space_name=str(display_hint) if display_hint else None,
             )
         )
 

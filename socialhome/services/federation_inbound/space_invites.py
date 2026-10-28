@@ -102,8 +102,12 @@ class SpaceInviteInboundHandlers:
 
     # ─── Invitations ────────────────────────────────────────────────────
 
-    async def _on_invite(self, event: FederationEvent) -> None:
-        """A peer invited a local user to their space."""
+    async def _on_invite(
+        self, event: FederationEvent, *, relayed: bool = False
+    ) -> None:
+        """A peer invited a local user to their space. A *relayed* invite
+        came through an intermediary: its sender's household is not known
+        to be paired with this one (its push never names the space)."""
         space_id = event.space_id or str(event.payload.get("space_id") or "")
         invitee = str(event.payload.get("invitee_user_id") or "")
         inviter = str(event.payload.get("inviter_user_id") or "")
@@ -121,12 +125,13 @@ class SpaceInviteInboundHandlers:
                 space_id=space_id,
                 inviter_user_id=inviter,
                 invitee_user_id=invitee,
+                inviter_instance_id="" if relayed else event.from_instance,
             )
         )
 
     async def _on_invite_via(self, event: FederationEvent) -> None:
         """Relayed invite via an intermediary. Same persistence as _on_invite."""
-        await self._on_invite(event)
+        await self._on_invite(event, relayed=True)
 
     # ─── Join requests ──────────────────────────────────────────────────
 

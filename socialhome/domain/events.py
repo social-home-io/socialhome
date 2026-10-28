@@ -1307,11 +1307,16 @@ class NotificationCreated(DomainEvent):
 
 @dataclass(slots=True, frozen=True)
 class NotificationReadChanged(DomainEvent):
-    """``user_id``'s unread count changed (read / mark-read / dismiss)."""
+    """``user_id``'s unread count changed (read / mark-read / dismiss).
+
+    ``handled`` names the "Needs you" items (their ``object_key``) that
+    someone just handled, so every device of ``user_id`` drops them from
+    the section — even when the count did not move (the row was read)."""
 
     user_id: str
     unread_count: int
     occurred_at: datetime = field(default_factory=_now)
+    handled: tuple[str, ...] = ()
 
 
 # ─── Pairing events (§11.9) ──────────────────────────────────────────────
@@ -1513,6 +1518,18 @@ class AutoPairRequestIncoming(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class AutoPairRequestAnswered(DomainEvent):
+    """An admin approved or declined an :class:`AutoPairRequestIncoming`
+    (``by_user_id``: who, when known) — it left every admin's "Needs
+    you"."""
+
+    request_id: str
+    approved: bool
+    by_user_id: str | None = None
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class PeerUnpaired(DomainEvent):
     """A pairing was torn down — by the peer (inbound ``UNPAIR``) or by
     our own admin (``DELETE /api/pairing/connections/{id}``) — or our admin
@@ -1550,11 +1567,29 @@ class RemoteSpaceMemberBanned(DomainEvent):
 
 @dataclass(slots=True, frozen=True)
 class RemoteSpaceInviteReceived(DomainEvent):
-    """A peer invited a local user to a remote space (§11.2)."""
+    """A peer invited a local user to a remote space (§11.2).
+
+    ``inviter_instance_id`` is the household the invite came from (its
+    push names the space only when that household is paired with this
+    one, D11); ``space_name`` the name the invite carried, if any."""
 
     space_id: str
     inviter_user_id: str
     invitee_user_id: str
+    occurred_at: datetime = field(default_factory=_now)
+    inviter_instance_id: str = ""
+    space_name: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class SpaceInviteAnswered(DomainEvent):
+    """``user_id`` accepted or declined their invite to ``space_id`` (a
+    same-household or a cross-household one) — the invite left their
+    "Needs you"."""
+
+    space_id: str
+    user_id: str
+    accepted: bool
     occurred_at: datetime = field(default_factory=_now)
 
 

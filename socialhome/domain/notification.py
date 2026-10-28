@@ -20,14 +20,38 @@ from typing import Any
 
 from .space import SpaceRole, SpaceType
 
-#: Rows that ask someone to act (a "Needs you" item): a join request, a
-#: post waiting for review, a report. Unread, they survive both the
-#: per-user cap and the age purge — dropping one would lose the only
-#: pointer to work still waiting. Once handled (by anyone) they read
-#: as read for every recipient and age out like any other row.
+#: Rows that ask someone to act — the "Needs you" items (D12): a join
+#: request, a space's review queue (posts, reports), an invite to a space,
+#: a household asking to pair. They stay pinned on top until handled —
+#: reading one does not un-pin it. Unread, they survive both the per-user
+#: cap and the age purge — dropping one would lose the only pointer to
+#: work still waiting. Once handled (by anyone) every recipient's row
+#: carries :class:`NotificationHandled`, reads as read and ages out like
+#: any other row.
 ACTION_ITEM_TYPES: frozenset[str] = frozenset(
-    {"space_join_requested", "moderation_pending", "space_report"}
+    {
+        "space_join_requested",
+        "moderation_pending",
+        "space_report",
+        "space_invite",
+        "pairing_request",
+    }
 )
+
+#: How a "Needs you" item ended (:attr:`NotificationHandled.outcome`):
+#: someone approved or declined a request, the invitee accepted or declined
+#: an invite, the request expired or was withdrawn, or the work is simply
+#: gone ("done": the queue emptied, the request vanished).
+HANDLED_OUTCOMES: frozenset[str] = frozenset(
+    {"approved", "declined", "accepted", "expired", "withdrawn", "done"}
+)
+
+#: Why a join request may not be approved with one tap from the list
+#: (:attr:`NotificationParams.flags`): near the edge of a local community,
+#: from a household this one is not paired with, an admin grant (only the
+#: owner decides), or a space with an age limit. Such a row offers
+#: "Review" — the review page shows what the list can't.
+JOIN_REQUEST_FLAGS: frozenset[str] = frozenset({"edge", "unpaired", "admin", "age"})
 
 #: A row re-opens on new activity for this long after its last one; after
 #: that many quiet days the next event starts a fresh row (D7), so the
@@ -121,6 +145,14 @@ class NotificationObject(StrEnum):
     CONTACT = "contact"
     #: An installed Social Home App (``<app_id>``).
     APP = "app"
+    #: One join request (``<request_id>``) — handled by one admin, handled
+    #: for all.
+    JOIN_REQUEST = "join_request"
+    #: An invite to a space (``<space_id>``) — one open invite per space
+    #: and person.
+    SPACE_INVITE = "space_invite"
+    #: A household asking to pair (``<request_id>``).
+    PAIRING_REQUEST = "pairing_request"
 
 
 #: The id of the household feed's ``feed:<id>`` key — there is one.
@@ -164,6 +196,39 @@ class NotificationActor:
 
 
 @dataclass(slots=True, frozen=True)
+class NotificationHandled:
+    """A "Needs you" item that no longer needs anyone: how it ended
+    (:data:`HANDLED_OUTCOMES`) and who ended it (``None``: the person
+    themself, or nobody — an expiry)."""
+
+    outcome: str
+    by: NotificationActor | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "outcome": self.outcome,
+            "by": {"id": self.by.id, "name": self.by.name} if self.by else None,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: object) -> NotificationHandled | None:
+        """``None`` for none; an unknown outcome reads as ``done``."""
+        if not isinstance(raw, Mapping):
+            return None
+        outcome = raw.get("outcome")
+        by = raw.get("by")
+        actor = (
+            NotificationActor(
+                id=by["id"],
+                name=by["name"] if isinstance(by.get("name"), str) else None,
+            )
+            if isinstance(by, Mapping) and isinstance(by.get("id"), str)
+            else None
+        )
+        return cls(outcome=outcome if outcome in HANDLED_OUTCOMES else "done", by=actor)
+
+
+@dataclass(slots=True, frozen=True)
 class NotificationParams:
     """What a row's client renders from (stored as JSON in ``params``).
 
@@ -174,6 +239,10 @@ class NotificationParams:
     * ``new`` — events since the row was last read; ``total`` — events
       since the row started.
     * ``space_name`` — the space's name when it was written.
+    * ``flags`` — why a "Needs you" item can't be decided with one tap
+      (:data:`JOIN_REQUEST_FLAGS`).
+    * ``handled`` — set once a "Needs you" item was handled: it leaves the
+      section for every recipient ("Handled by Søren").
     """
 
     actors: tuple[NotificationActor, ...] = ()
@@ -181,6 +250,8 @@ class NotificationParams:
     new: int = 1
     total: int = 1
     space_name: str | None = None
+    flags: tuple[str, ...] = ()
+    handled: NotificationHandled | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -191,6 +262,10 @@ class NotificationParams:
         }
         if self.space_name is not None:
             out["space_name"] = self.space_name
+        if self.flags:
+            out["flags"] = list(self.flags)
+        if self.handled is not None:
+            out["handled"] = self.handled.to_dict()
         return out
 
     @classmethod
@@ -209,12 +284,21 @@ class NotificationParams:
             if isinstance(a, Mapping) and isinstance(a.get("id"), str)
         )
         space_name = raw.get("space_name")
+        flags = raw.get("flags")
         return cls(
             actors=actors,
             actor_count=_count(raw.get("actor_count"), len(actors)),
             new=_count(raw.get("new"), 1),
             total=_count(raw.get("total"), 1),
             space_name=space_name if isinstance(space_name, str) else None,
+            flags=tuple(
+                sorted(
+                    {f for f in flags if isinstance(f, str) and f in JOIN_REQUEST_FLAGS}
+                )
+                if isinstance(flags, list)
+                else ()
+            ),
+            handled=NotificationHandled.from_dict(raw.get("handled")),
         )
 
 
@@ -225,13 +309,21 @@ def _count(value: object, default: int) -> int:
 
 
 def first_params(
-    actor: NotificationActor | None, *, space_name: str | None = None
+    actor: NotificationActor | None,
+    *,
+    space_name: str | None = None,
+    flags: tuple[str, ...] = (),
 ) -> NotificationParams:
     """A fresh row's params: one event, by *actor* (``None`` for a notice
     nobody caused)."""
     actors = (actor,) if actor is not None else ()
     return NotificationParams(
-        actors=actors, actor_count=len(actors), new=1, total=1, space_name=space_name
+        actors=actors,
+        actor_count=len(actors),
+        new=1,
+        total=1,
+        space_name=space_name,
+        flags=flags,
     )
 
 
@@ -241,6 +333,7 @@ def regroup(
     *,
     reopen: bool,
     space_name: str | None = None,
+    flags: tuple[str, ...] = (),
 ) -> NotificationParams:
     """*old*'s params after one more event by *actor*.
 
@@ -248,18 +341,22 @@ def regroup(
     and only its actor is named; ``total`` keeps growing. Otherwise the
     event joins the unread ones: ``new`` grows and *actor* moves to the
     front (counted once). A row from before 0129 (*old* ``None``) counts
-    as one earlier event by nobody known."""
+    as one earlier event by nobody known.
+
+    New activity is new work: a "Needs you" row that had been handled is
+    pending again (no ``handled``), with this event's *flags*."""
     if old is None:
         old = NotificationParams()
     space_name = space_name or old.space_name
     if reopen:
-        fresh = first_params(actor, space_name=space_name)
+        fresh = first_params(actor, space_name=space_name, flags=flags)
         return NotificationParams(
             actors=fresh.actors,
             actor_count=fresh.actor_count,
             new=1,
             total=old.total + 1,
             space_name=space_name,
+            flags=flags,
         )
     actors = old.actors
     count = old.actor_count
@@ -273,6 +370,7 @@ def regroup(
         new=old.new + 1,
         total=old.total + 1,
         space_name=space_name,
+        flags=flags,
     )
 
 
@@ -300,3 +398,11 @@ class Notification:
     @property
     def is_read(self) -> bool:
         return self.read_at is not None
+
+    @property
+    def is_pending_action(self) -> bool:
+        """A "Needs you" item still waiting for someone. Reading it does
+        not change that — only handling it does."""
+        return self.type in ACTION_ITEM_TYPES and (
+            self.params is None or self.params.handled is None
+        )

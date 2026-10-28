@@ -8,7 +8,7 @@ read for every admin.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 import pytest
@@ -128,8 +128,11 @@ async def env(tmp_dir):
     await db.shutdown()
 
 
-async def _row(env, user_id: str, *, type: str, link: str):
-    note = new_notification(user_id=user_id, type=type, title=type, link_url=link)
+async def _row(env, user_id: str, *, type: str, link: str, key: str | None = None):
+    note = replace(
+        new_notification(user_id=user_id, type=type, title=type, link_url=link),
+        object_key=key,
+    )
     await env.notifs.save(note)
     return note
 
@@ -297,14 +300,20 @@ async def test_a_visit_reads_only_the_viewers_rows(env):
 # ── 4. Handled by one admin, handled for all ──────────────────────────
 
 
-async def test_the_last_join_request_handled_clears_it_for_every_admin(env):
+async def test_a_handled_join_request_clears_it_for_every_admin(env):
     """Admin A approved the request; admin B's "wants to join" row stayed
     unread forever."""
     a, b = await env.user("adminA"), await env.user("adminB")
     link = "/spaces/s1/moderation"
     for admin in (a, b):
-        await _row(env, admin.user_id, type="space_join_requested", link=link)
-    await _row(env, b.user_id, type="moderation_pending", link=link)
+        await _row(
+            env,
+            admin.user_id,
+            type="space_join_requested",
+            link=link,
+            key="join_request:r1",
+        )
+    await _row(env, b.user_id, type="moderation_pending", link=link, key="space:s1")
 
     await env.bus.publish(
         SpaceJoinApproved(
@@ -320,24 +329,38 @@ async def test_the_last_join_request_handled_clears_it_for_every_admin(env):
     )
 
 
-async def test_a_join_request_handled_while_others_wait_keeps_the_rows(env):
+async def test_a_handled_request_leaves_the_others_waiting(env):
+    """One row per request: answering r1 never touches r2's row — and an
+    older space-wide row stays while any request waits."""
     a = await env.user("adminA")
+    link = "/spaces/s1/moderation"
     await _row(
-        env, a.user_id, type="space_join_requested", link="/spaces/s1/moderation"
+        env, a.user_id, type="space_join_requested", link=link, key="join_request:r2"
     )
+    await _row(env, a.user_id, type="space_join_requested", link=link, key="space:s1")
     env.spaces.join_requests["s1"] = [{"id": "r2"}]
     await env.bus.publish(
         SpaceJoinDenied(space_id="s1", user_id="x", request_id="r1", denied_by="z")
     )
-    assert await env.notifs.count_unread(a.user_id) == 1
+    assert await env.notifs.count_unread(a.user_id) == 2
     assert env.read_changed == []
+
+    env.spaces.join_requests["s1"] = []
+    await env.bus.publish(
+        SpaceJoinDenied(space_id="s1", user_id="x", request_id="r2", denied_by="z")
+    )
+    assert await env.notifs.count_unread(a.user_id) == 0
 
 
 async def test_the_review_queue_emptied_clears_pending_review_rows(env):
     a, b = await env.user("modA"), await env.user("modB")
     for mod in (a, b):
         await _row(
-            env, mod.user_id, type="moderation_pending", link="/spaces/s1/moderation"
+            env,
+            mod.user_id,
+            type="moderation_pending",
+            link="/spaces/s1/moderation",
+            key="space:s1",
         )
     item = SpaceModerationItem(
         id="i1",
@@ -363,7 +386,13 @@ async def test_the_review_queue_emptied_clears_pending_review_rows(env):
 
 async def test_the_last_open_report_resolved_clears_report_rows(env):
     a = await env.user("modA")
-    await _row(env, a.user_id, type="space_report", link="/spaces/s1/moderation")
+    await _row(
+        env,
+        a.user_id,
+        type="space_report",
+        link="/spaces/s1/moderation",
+        key="space:s1",
+    )
     env.reports.pending["s1"] = 1
     await env.bus.publish(
         ReportResolved(report_id="r1", resolved_by="z", space_id="s1")

@@ -91,6 +91,7 @@ interface TypeSpec {
  *   notifications.row.post_reacted notifications.row.post_reacted_in
  *   notifications.row.post_reacted_many notifications.row.post_reacted_many_in
  *   notifications.row.post_reacted_count notifications.row.post_reacted_count_in
+ *   notifications.row.space_invite notifications.row.space_invite_many
  *   notifications.new_pill notifications.new_pill_one
  *   notifications.live_new notifications.live_new_one
  *   notifications.meta.new_of_total notifications.meta.new_of_total_one
@@ -119,6 +120,7 @@ export const ROW_TYPES: Readonly<Record<string, TypeSpec>> = {
   post_replied: { count: true, inSpace: true },
   comment_replied: { count: true, inSpace: true },
   post_reacted: { count: true, inSpace: true },
+  space_invite: {},
 }
 
 /** Every catalog key the renderer may ask for (the locale tests walk it). */
@@ -232,6 +234,63 @@ export function rowSentence(row: RowInput, spaceName?: string | null): Segment[]
 /** The segments as one plain string (an accessible name, a short label). */
 export function plainText(segs: Segment[]): string {
   return segs.map(s => s.text).join('')
+}
+
+/**
+ * How a handled "Needs you" item ended, for its meta line: "Approved by
+ * Søren", "You declined it", "Accepted", "No action needed". *viewerId*
+ * turns the viewer's own answer into "You …". ``null`` while it waits.
+ *
+ * Keys (listed so a grep finds them): notifications.handled.approved_by
+ *   notifications.handled.declined_by notifications.handled.by
+ *   notifications.handled.approved_you notifications.handled.declined_you
+ *   notifications.handled.by_you notifications.handled.accepted
+ *   notifications.handled.declined notifications.handled.expired
+ *   notifications.handled.withdrawn notifications.handled.done
+ */
+export function handledMeta(
+  params: NotifParams | null | undefined,
+  viewerId?: string | null,
+): string | null {
+  const h = params?.handled
+  if (!h) return null
+  const by = h.by
+  const name = by?.name?.trim() || ''
+  const verb = h.outcome === 'approved' || h.outcome === 'declined' ? h.outcome : 'by'
+  if (by && viewerId && by.id === viewerId) {
+    return t(verb === 'by' ? 'notifications.handled.by_you' : `notifications.handled.${verb}_you`)
+  }
+  if (by) {
+    const who = name || t('notifications.someone')
+    return t(verb === 'by' ? 'notifications.handled.by' : `notifications.handled.${verb}_by`, { name: who })
+  }
+  const outcome = ['accepted', 'declined', 'expired', 'withdrawn'].includes(h.outcome) ? h.outcome : 'done'
+  return t(`notifications.handled.${outcome}`)
+}
+
+/** Every key :func:`handledMeta` may ask for (the locale tests walk it). */
+export const HANDLED_KEYS: readonly string[] = [
+  'notifications.handled.approved_by',
+  'notifications.handled.declined_by',
+  'notifications.handled.by',
+  'notifications.handled.approved_you',
+  'notifications.handled.declined_you',
+  'notifications.handled.by_you',
+  'notifications.handled.accepted',
+  'notifications.handled.declined',
+  'notifications.handled.expired',
+  'notifications.handled.withdrawn',
+  'notifications.handled.done',
+]
+
+/** "3 requests wait for you in Salon" — a space's grouped "Needs you"
+ *  entry, as segments (the space as a place). */
+export function groupSentence(count: number, space: string): Segment[] {
+  const name = space.trim()
+  if (!name) return [{ kind: 'text', text: t('notifications.needs_you.group_unnamed', { count: String(count) }) }]
+  return fill(t('notifications.needs_you.group', { count: String(count) }), {
+    space: [{ kind: 'place', text: name }],
+  })
 }
 
 /** "2 new · 5 in all" for a row that came back with new activity after it
