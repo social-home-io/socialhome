@@ -2,22 +2,34 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, act, waitFor } from '@testing-library/preact'
 
 const apiGet = vi.fn()
+const needsYouGet = vi.fn(async (..._a: unknown[]) => ({ items: [] as unknown[], count: 0 }))
 const apiPost = vi.fn()
 vi.mock('@/api', () => ({
   api: {
-    get: (...a: unknown[]) => apiGet(...a),
+    // "Needs you" loads on its own; the tests here queue the list's pages.
+    get: (...a: unknown[]) => String(a[0]).startsWith('/api/notifications/needs-you')
+      ? needsYouGet(...a)
+      : apiGet(...a),
     post: (...a: unknown[]) => apiPost(...a),
     patch: vi.fn().mockResolvedValue({}),
     delete: vi.fn().mockResolvedValue(undefined),
   },
 }))
 
+const wsListeners = vi.hoisted(() => ({} as Record<string, ((e: { data: Record<string, unknown> }) => void)[]>))
 const wsHandlers = vi.hoisted(() => ({} as Record<string, (e: { data: Record<string, unknown> }) => void>))
 vi.mock('@/ws', () => ({
   ws: {
+    // Several components listen to one frame type (the list and "Needs
+    // you"): ``wsHandlers[type]`` calls every live listener.
     on: (type: string, h: (e: { data: Record<string, unknown> }) => void) => {
-      wsHandlers[type] = h
-      return () => { delete wsHandlers[type] }
+      const list = (wsListeners[type] ??= [])
+      list.push(h)
+      wsHandlers[type] = (e) => { for (const f of [...list]) f(e) }
+      return () => {
+        list.splice(list.indexOf(h), 1)
+        if (list.length === 0) delete wsHandlers[type]
+      }
     },
   },
 }))
@@ -201,6 +213,23 @@ describe('NotificationsPage — rows from params', () => {
     expect(apiPost).toHaveBeenCalledWith('/api/notifications/read-by-object', { object_keys: ['space_post:p1'] })
     expect(ra.classList.contains('sh-notif-row--unread')).toBe(false)
     expect(rb.classList.contains('sh-notif-row--unread')).toBe(false)
+  })
+})
+
+describe('NotificationsPage — Needs you', () => {
+  it('a request that waits is pinned above the timeline, not in it', async () => {
+    const rows = page(3)
+    const pinned = { ...rows[1], type: 'space_join_requested', object_key: 'join_request:r1', space_id: 's1', link_url: '/spaces/s1/moderation' }
+    needsYouGet.mockResolvedValueOnce({ items: [pinned], count: 1 })
+    const { container } = await mount([rows[0], pinned, rows[2]])
+    await waitFor(() => expect(container.querySelector('.sh-needs')).not.toBeNull())
+    const section = container.querySelector('.sh-needs')!
+    const list = container.querySelector('#sh-notif-list')!
+    // Pinned on top of the list, its row once.
+    expect(section.compareDocumentPosition(list) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(section.querySelectorAll('.sh-notif-row')).toHaveLength(1)
+    expect([...list.querySelectorAll('[data-notif-id]')].map(e => e.getAttribute('data-notif-id')))
+      .toEqual([rows[0].id, rows[2].id])
   })
 })
 

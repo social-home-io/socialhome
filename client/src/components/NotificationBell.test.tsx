@@ -3,20 +3,32 @@ import { render, act, waitFor } from '@testing-library/preact'
 import { LocationProvider } from 'preact-iso'
 
 const apiGet = vi.fn()
+const needsYouGet = vi.fn(async (..._a: unknown[]) => ({ items: [] as unknown[], count: 0 }))
 const apiPost = vi.fn()
 vi.mock('@/api', () => ({
   api: {
-    get: (...a: unknown[]) => apiGet(...a),
+    // "Needs you" loads on its own; the tests here queue the list's pages.
+    get: (...a: unknown[]) => String(a[0]).startsWith('/api/notifications/needs-you')
+      ? needsYouGet(...a)
+      : apiGet(...a),
     post: (...a: unknown[]) => apiPost(...a),
   },
 }))
 
+const wsListeners = vi.hoisted(() => ({} as Record<string, ((e: { data: Record<string, unknown> }) => void)[]>))
 const wsHandlers = vi.hoisted(() => ({} as Record<string, (e: { data: Record<string, unknown> }) => void>))
 vi.mock('@/ws', () => ({
   ws: {
+    // Several components listen to one frame type (the list and "Needs
+    // you"): ``wsHandlers[type]`` calls every live listener.
     on: (type: string, h: (e: { data: Record<string, unknown> }) => void) => {
-      wsHandlers[type] = h
-      return () => { delete wsHandlers[type] }
+      const list = (wsListeners[type] ??= [])
+      list.push(h)
+      wsHandlers[type] = (e) => { for (const f of [...list]) f(e) }
+      return () => {
+        list.splice(list.indexOf(h), 1)
+        if (list.length === 0) delete wsHandlers[type]
+      }
     },
   },
 }))

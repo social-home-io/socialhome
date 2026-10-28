@@ -8791,6 +8791,69 @@ button.sh-shopping-item__text:focus-visible {
 }
 .sh-notif-row--unread .sh-notif-dot { visibility: visible; }
 .sh-notif-row--compact { padding: 8px 10px; gap: 10px; font-size: var(--sh-font-size-sm); }
+/* "Needs you" (D12): requests that wait for the viewer, pinned on top —
+ * a warm card, each item a tinted tile; the actions sit under the
+ * sentence (indented past the avatar) as siblings of the row link. */
+.sh-needs {
+  margin: 0 0 var(--sh-space-md);
+  padding: 10px 8px 8px;
+  border: 1px solid color-mix(in srgb, var(--sh-warning) 45%, var(--sh-border));
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--sh-warning) 8%, var(--sh-bg));
+}
+.sh-needs__h {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 6px;
+  padding: 0 6px;
+  font-family: inherit;
+  font-size: var(--sh-font-size-xs);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--sh-text);
+}
+.sh-needs__count {
+  min-width: 22px;
+  height: 20px;
+  padding: 0 7px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: var(--sh-radius-full);
+  background: var(--sh-primary-fill);
+  color: var(--sh-on-primary-fill);
+  font-size: var(--sh-font-size-xs);
+  letter-spacing: 0;
+}
+.sh-needs__list { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.sh-needs__item {
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--sh-warning) 10%, var(--sh-bg));
+  padding-bottom: 10px;
+}
+.sh-needs__item > .sh-notif-row { background: transparent; }
+.sh-needs__item > .sh-notif-row:hover { background: color-mix(in srgb, var(--sh-warning) 8%, transparent); }
+.sh-needs__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  /* Line up with the sentence: row padding + avatar + gap. */
+  padding-inline-start: calc(var(--sh-space-sm) + 40px + 12px);
+  padding-inline-end: var(--sh-space-sm);
+}
+.sh-needs__actions .sh-btn { min-height: 36px; padding: 8px 16px; text-decoration: none; }
+.sh-needs--compact .sh-needs__actions { padding-inline-start: calc(10px + 36px + 10px); }
+.sh-needs--compact .sh-needs__actions .sh-btn { min-height: 36px; padding: 6px 14px; }
+.sh-needs__more {
+  display: inline-block;
+  min-height: 36px;
+  margin: 6px 0 0;
+  padding: 8px calc(var(--sh-space-sm) + 40px + 12px - 8px);
+  font-weight: 600;
+}
+.sh-needs--compact .sh-needs__more { padding-inline: calc(10px + 36px + 10px - 8px); }
+.sh-notif-panel .sh-needs { margin: 4px 8px 8px; }
 .sh-notif-more {
   display: flex;
   justify-content: center;

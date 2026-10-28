@@ -7,6 +7,10 @@
  * the list (Unread asks the server for unread rows only, so paging stays
  * honest).
  *
+ * Requests that wait for the viewer sit above it all in "Needs you"
+ * (:class:`NeedsYouSection`) until someone handles them; the timeline
+ * leaves them out until then.
+ *
  * Live arrivals never reorder the list under the reader: a "↑ N new" pill
  * appears instead, and tapping it loads them on top. One polite live region
  * outside the list says how many arrived — at most once per 10 s, counts
@@ -30,6 +34,7 @@ import { loadHouseholdUsers } from '@/store/householdUsers'
 import { unreadCount, type NotificationLite } from '@/store/notifications'
 import type { Notification } from '@/types'
 import { NewPill, NotificationRow, markRowRead, withRead } from './NotificationRow'
+import { NeedsYouSection, pinnedIds } from './NeedsYouSection'
 import { createAnnouncer, groupByDay, type NotifFilter } from './rowList'
 
 /** Rows per request — the list endpoint's maximum. */
@@ -234,8 +239,11 @@ export default function NotificationsPage() {
     return <>{live}<NotificationListSkeleton /></>
   }
 
-  const list = notifications.value
-  const anyUnread = list.some(n => !n.read_at)
+  // A request that waits for the viewer is pinned in "Needs you" above;
+  // the timeline shows it once it was handled.
+  const pinned = pinnedIds()
+  const list = notifications.value.filter(n => !pinned.has(n.id))
+  const anyUnread = notifications.value.some(n => !n.read_at)
   const unreadView = filter.value === 'unread'
 
   return (
@@ -248,6 +256,7 @@ export default function NotificationsPage() {
         )}
       </div>
       <NewPill count={pending.value.size} onShow={() => void showPending()} />
+      <NeedsYouSection />
       <div id="sh-notif-list" role="tabpanel" aria-labelledby={TAB_IDS[filter.value]}>
         {list.length === 0 && (
           <div class="sh-empty-state">
