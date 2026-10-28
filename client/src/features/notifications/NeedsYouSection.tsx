@@ -21,6 +21,7 @@ import { Button } from '@/components/Button'
 import { isOne, t } from '@/i18n/i18n'
 import { spaces } from '@/store/spaces'
 import { ws } from '@/ws'
+import { relativeDocsTime } from '@/utils/relativeTime'
 import type { Notification } from '@/types'
 import { NotificationRow, RowAvatar, Sentence, markRowRead, withRead } from './NotificationRow'
 import { groupSentence } from './rowText'
@@ -79,6 +80,14 @@ function spaceName(spaceId: string, rows: Notification[]): string {
     ?? ''
 }
 
+/** What each flag says next to "Review". */
+const FLAG_KEYS: Record<string, string> = {
+  edge: 'notifications.needs_you.flag.edge',
+  unpaired: 'notifications.needs_you.flag.unpaired',
+  admin: 'notifications.needs_you.flag.admin',
+  age: 'notifications.needs_you.flag.age',
+}
+
 function Actions({ entry, describedBy, onNavigate }: {
   entry: NeedsYouEntry
   describedBy: string
@@ -115,8 +124,11 @@ function Actions({ entry, describedBy, onNavigate }: {
       </div>
     )
   }
+  // Why a single request isn't one tap: said next to its Review button.
+  const why = (row?.params?.flags ?? []).filter(f => FLAG_KEYS[f]).map(f => t(FLAG_KEYS[f]))
   return (
     <div class="sh-needs__actions">
+      {why.length > 0 && <span class="sh-needs__why">{why.join(' · ')}</span>}
       <a
         class="sh-btn sh-btn--secondary"
         href={appHref(reviewHref(entry))}
@@ -137,6 +149,7 @@ function GroupRow({ entry, titleId, compact, onNavigate }: {
 }) {
   const name = spaceName(entry.spaceId, entry.rows)
   const unread = entry.rows.some(r => !r.read_at)
+  const newest = entry.rows.reduce((a, r) => (r.created_at > a ? r.created_at : a), entry.rows[0].created_at)
   // The space's avatar (rounded square): a group has no single actor.
   const face: Notification = {
     ...entry.rows[0],
@@ -154,6 +167,10 @@ function GroupRow({ entry, titleId, compact, onNavigate }: {
         {unread && <><span class="sr-only">{t('notifications.unread')},</span>{' '}</>}
         <span class="sh-notif-title" id={titleId}>
           <Sentence segs={groupSentence(entry.rows.length, name)} />
+        </span>
+        {' '}
+        <span class="sh-notif-meta">
+          <time class="sh-notif-time" dateTime={newest}>{relativeDocsTime(newest)}</time>
         </span>
       </span>
       <span class="sh-notif-dot" aria-hidden="true" />

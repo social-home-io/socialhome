@@ -40,6 +40,10 @@ const NEEDS_YOU_KEYS = [
   'notifications.needs_you.already',
   'notifications.needs_you.already_anon',
   'notifications.needs_you.failed',
+  'notifications.needs_you.flag.edge',
+  'notifications.needs_you.flag.unpaired',
+  'notifications.needs_you.flag.admin',
+  'notifications.needs_you.flag.age',
 ]
 
 const LOCALES: Record<string, Record<string, string>> = { en, de, nl, fr, es }

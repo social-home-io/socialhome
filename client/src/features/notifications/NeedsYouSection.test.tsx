@@ -112,9 +112,11 @@ describe('NeedsYouSection', () => {
   it('a flagged request only offers Review', async () => {
     const r = row('a')
     r.params = { ...r.params!, flags: ['edge'] }
-    const { getByRole, queryByRole } = await mount([r])
+    const { getByRole, queryByRole, container } = await mount([r])
     expect(queryByRole('button', { name: 'Approve' })).toBeNull()
     expect(getByRole('link', { name: 'Review' }).getAttribute('href')).toBe('/spaces/s1/moderation')
+    // It says why it needs a closer look.
+    expect(container.querySelector('.sh-needs__why')!.textContent).toBe('Near the edge')
   })
 
   it('an invite offers View invite (the invite card) and Decline — no one-tap join', async () => {
@@ -133,6 +135,7 @@ describe('NeedsYouSection', () => {
     const items = container.querySelectorAll('.sh-needs__item')
     expect(items).toHaveLength(1)
     expect(items[0].querySelector('.sh-notif-title')!.textContent).toBe('3 requests wait for you in Salon')
+    expect(items[0].querySelector('time')!.getAttribute('datetime')).toBe(one.created_at)
     // The space's avatar, not a person's.
     expect(items[0].querySelector('.sh-notif-av__space')).not.toBeNull()
     expect(getByRole('link', { name: 'Review' }).getAttribute('href')).toBe('/spaces/s1/moderation')

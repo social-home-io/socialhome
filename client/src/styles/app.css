@@ -8842,6 +8842,11 @@ button.sh-shopping-item__text:focus-visible {
   padding-inline-start: calc(var(--sh-space-sm) + 40px + 12px);
   padding-inline-end: var(--sh-space-sm);
 }
+.sh-needs__why {
+  flex-basis: 100%;
+  font-size: var(--sh-font-size-xs);
+  color: var(--sh-text-muted);
+}
 .sh-needs__actions .sh-btn { min-height: 36px; padding: 8px 16px; text-decoration: none; }
 .sh-needs--compact .sh-needs__actions { padding-inline-start: calc(10px + 36px + 10px); }
 .sh-needs--compact .sh-needs__actions .sh-btn { min-height: 36px; padding: 6px 14px; }
