@@ -692,7 +692,8 @@ async def test_dm_to_a_muted_recipient_makes_no_row_and_no_push(stack):
         )
     )
     assert await stack.notif_repo.list(bob.user_id) == []
-    assert len(await stack.notif_repo.list(carol.user_id)) == 1
+    # D3: a chat message pushes, it never makes a Notifications row.
+    assert await stack.notif_repo.list(carol.user_id) == []
     pushed_to = [uid for ids, _ in push.calls for uid in ids]
     assert pushed_to == [carol.user_id]
 
@@ -717,8 +718,7 @@ async def test_dm_after_the_mute_ran_out_notifies_again(stack):
             recipient_user_ids=(bob.user_id,),
         )
     )
-    assert len(await stack.notif_repo.list(bob.user_id)) == 1
-    assert push.calls
+    assert [ids for ids, _ in push.calls] == [[bob.user_id]]
 
 
 async def test_dm_without_a_conversation_repo_never_reads_as_muted(stack):
@@ -730,6 +730,8 @@ async def test_dm_without_a_conversation_repo_never_reads_as_muted(stack):
     svc = NotificationService(
         stack.notif_repo, stack.notif_svc._users, stack.space_repo, EventBus()
     )
+    push = _CapturingPush()
+    svc.attach_push_service(push)
     await svc.on_dm_message_created(
         DmMessageCreated(
             conversation_id="c-norepo",
@@ -739,7 +741,7 @@ async def test_dm_without_a_conversation_repo_never_reads_as_muted(stack):
             recipient_user_ids=(bob.user_id,),
         )
     )
-    assert len(await stack.notif_repo.list(bob.user_id)) == 1
+    assert [ids for ids, _ in push.calls] == [[bob.user_id]]
 
 
 def _m(user) -> Mention:
@@ -796,8 +798,8 @@ async def test_group_mentions_level_only_rings_for_a_mention(stack):
 
 
 async def test_group_mention_at_level_all_replaces_the_message_bell(stack):
-    """Level 'all' + mentioned → the mention bell only, never both; an
-    unmentioned member gets the ordinary message bell."""
+    """Level 'all' + mentioned → the mention row only, never both; an
+    unmentioned member gets the ordinary message push and no row (D3)."""
     anna = await stack.provision_user("anna-a")
     bob = await stack.provision_user("bob-a")
     carl = await stack.provision_user("carl-a")
@@ -809,7 +811,8 @@ async def test_group_mention_at_level_all_replaces_the_message_bell(stack):
     assert (await stack.notif_repo.list(bob.user_id))[0].title == (
         "anna-a mentioned you in a group chat"
     )
-    assert [n.type for n in await stack.notif_repo.list(carl.user_id)] == ["dm_message"]
+    assert await stack.notif_repo.list(carl.user_id) == []
+    assert [ids for ids, _ in push.calls] == [[bob.user_id], [carl.user_id]]
     # §25.3: the push carries the title only.
     for _ids, payload in push.calls:
         assert not getattr(payload, "body", None)
@@ -829,7 +832,8 @@ async def test_group_mention_of_a_muted_member_or_self_is_silent(stack):
 
 
 async def test_one_to_one_mention_is_an_ordinary_message_bell(stack):
-    """In a 1:1 every message is for the other person — no mention bell."""
+    """In a 1:1 every message is for the other person — no mention row, just
+    the message push (D3: no row)."""
     anna = await stack.provision_user("anna-o")
     bob = await stack.provision_user("bob-o")
     await stack.conv_repo.create(
@@ -843,8 +847,11 @@ async def test_one_to_one_mention_is_an_ordinary_message_bell(stack):
                 joined_at=datetime.now(UTC).isoformat(),
             )
         )
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
     await stack.bus.publish(_dm_event("d-1", anna, [bob], mentions=[_m(bob)]))
-    assert [n.type for n in await stack.notif_repo.list(bob.user_id)] == ["dm_message"]
+    assert await stack.notif_repo.list(bob.user_id) == []
+    assert [ids for ids, _ in push.calls] == [[bob.user_id]]
 
 
 async def test_dm_edit_notifies_only_the_newly_mentioned(stack):
@@ -905,12 +912,9 @@ async def test_mark_read_for_dm_also_clears_mention_rows(stack):
     assert await stack.notif_repo.count_unread(bob.user_id) == 0
 
 
-async def test_dm_message_creates_in_app_row_and_push(stack):
-    """A new DM creates an in-app notification row per recipient (so
-    the bell renders an unread badge) AND fires push (§25.3 — title
-    only, no body)."""
-    from socialhome.domain.events import DmMessageCreated
-
+async def test_d3_dm_message_pushes_without_a_row(stack):
+    """D3: a new DM pushes (title only, §25.3) but makes no Notifications
+    row — Chats keeps its own unread badge, so it never counts twice."""
     a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
     fake = _CapturingPush()
@@ -926,24 +930,20 @@ async def test_dm_message_creates_in_app_row_and_push(stack):
         )
     )
 
-    # In-app row landed for the recipient.
-    rows = await stack.notif_repo.list(b.user_id)
-    assert len(rows) == 1
-    assert rows[0].type == "dm_message"
-    assert rows[0].link_url == "/dms/c-1"
-    assert "Anna" in rows[0].title
-
-    # Push went out too — title only, no body.
+    assert await stack.notif_repo.list(b.user_id) == []
     assert fake.calls, "push fan-out was not triggered"
-    _, payload = fake.calls[0]
-    assert "Anna" in payload.title
+    ids, payload = fake.calls[0]
+    assert ids == [b.user_id]
+    assert payload.title == "Anna messaged you"
+    assert payload.click_url == "/dms/c-1"
+    assert payload.tag == "dm_message:/dms/c-1"
     # §25.3: the PushPayload struct has no body field at all.
     assert not hasattr(payload, "body")
 
 
 async def test_dm_location_message_title_only_no_coordinates(stack):
-    """A shared location notifies as "X shared a location" — title only,
-    and no coordinate or label ever reaches the bell row or the push."""
+    """A shared location pushes as "X shared a location" — title only, and
+    no coordinate or label ever reaches the push (or a row: D3)."""
     a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
     fake = _CapturingPush()
@@ -961,28 +961,22 @@ async def test_dm_location_message_title_only_no_coordinates(stack):
         )
     )
 
-    rows = await stack.notif_repo.list(b.user_id)
-    assert len(rows) == 1
-    assert rows[0].title == "Anna shared a location"
+    assert await stack.notif_repo.list(b.user_id) == []
     assert fake.calls
     _, payload = fake.calls[0]
     assert payload.title == "Anna shared a location"
     assert not hasattr(payload, "body")
-    flat = repr(rows[0]) + repr(payload)
     for leak in ("52.3702", "4.8952", "Secret spot"):
-        assert leak not in flat
+        assert leak not in repr(payload)
 
 
-async def test_dm_message_creates_one_row_per_recipient(stack):
-    """Group DMs fan one notification row to each recipient (and push
-    too) so every member gets their own bell badge — bell counts
-    don't get coalesced server-side."""
-    from socialhome.domain.events import DmMessageCreated
-
+async def test_dm_message_pushes_each_recipient(stack):
+    """Group DMs push every recipient on their own."""
     sender = await stack.provision_user("anna")
     bob = await stack.provision_user("bob")
     carol = await stack.provision_user("carol")
-    stack.notif_svc.attach_push_service(_CapturingPush())
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
 
     await stack.bus.publish(
         DmMessageCreated(
@@ -993,91 +987,16 @@ async def test_dm_message_creates_one_row_per_recipient(stack):
             recipient_user_ids=(bob.user_id, carol.user_id),
         )
     )
-    bob_rows = await stack.notif_repo.list(bob.user_id)
-    carol_rows = await stack.notif_repo.list(carol.user_id)
-    assert len(bob_rows) == 1
-    assert len(carol_rows) == 1
-    assert bob_rows[0].link_url == "/dms/c-group"
-
-
-async def test_dm_burst_collapses_to_single_unread_row(stack):
-    """A burst of DMs from the same sender to the same recipient
-    bumps one bell row instead of stacking N entries."""
-    from socialhome.domain.events import DmMessageCreated
-
-    sender = await stack.provision_user("anna-burst")
-    bob = await stack.provision_user("bob-burst")
-    stack.notif_svc.attach_push_service(_CapturingPush())
-
-    for mid in ("m-1", "m-2", "m-3", "m-4", "m-5"):
-        await stack.bus.publish(
-            DmMessageCreated(
-                conversation_id="c-burst",
-                message_id=mid,
-                sender_user_id=sender.user_id,
-                sender_display_name="Anna",
-                recipient_user_ids=(bob.user_id,),
-            )
-        )
-
-    rows = await stack.notif_repo.list(bob.user_id, limit=50)
-    dm_rows = [
-        r for r in rows if r.type == "dm_message" and r.link_url == "/dms/c-burst"
-    ]
-    assert len(dm_rows) == 1
-    assert dm_rows[0].read_at is None
-
-
-async def test_a_dm_after_the_read_boundary_reopens_the_row(stack):
-    """D7: once the recipient opens the thread, the next DM re-opens the
-    conversation's one row (unread again, one new of two) rather than
-    stacking a second row next to the read one."""
-    from socialhome.domain.events import DmMessageCreated
-
-    sender = await stack.provision_user("anna-rb")
-    bob = await stack.provision_user("bob-rb")
-    stack.notif_svc.attach_push_service(_CapturingPush())
-
-    await stack.bus.publish(
-        DmMessageCreated(
-            conversation_id="c-rb",
-            message_id="m-1",
-            sender_user_id=sender.user_id,
-            sender_display_name="Anna",
-            recipient_user_ids=(bob.user_id,),
-        )
-    )
-    assert await stack.notif_repo.count_unread(bob.user_id) == 1
-    # Open the thread — clears the row.
-    await stack.notif_svc.mark_read_for_dm(bob.user_id, "c-rb")
-    assert await stack.notif_repo.count_unread(bob.user_id) == 0
-    # New DM after read → the read row re-opens.
-    await stack.bus.publish(
-        DmMessageCreated(
-            conversation_id="c-rb",
-            message_id="m-2",
-            sender_user_id=sender.user_id,
-            sender_display_name="Anna",
-            recipient_user_ids=(bob.user_id,),
-        )
-    )
-    assert await stack.notif_repo.count_unread(bob.user_id) == 1
-    rows = await stack.notif_repo.list(bob.user_id, limit=10)
-    dm_rows = [r for r in rows if r.type == "dm_message"]
-    assert len(dm_rows) == 1
-    assert dm_rows[0].read_at is None
-    assert (dm_rows[0].params.new, dm_rows[0].params.total) == (1, 2)
-    assert dm_rows[0].object_key == "dm:c-rb"
+    assert [ids for ids, _ in push.calls] == [[bob.user_id], [carol.user_id]]
+    assert {p.click_url for _, p in push.calls} == {"/dms/c-group"}
 
 
 async def test_dm_message_skipped_when_recipient_viewing_thread(stack):
     """When the recipient has the DM thread open in any of their tabs
-    (SPA emits ``dm.active`` over WS), the notification service skips
-    both the bell row AND the push fan-out. The message itself still
-    renders via the regular DM broadcast path; only the notification
-    noise is suppressed.
+    (SPA emits ``dm.active`` over WS), the notification service skips the
+    push. The message itself still renders via the regular DM broadcast
+    path; only the notification noise is suppressed.
     """
-    from socialhome.domain.events import DmMessageCreated
 
     class _FakeWsMgr:
         def __init__(self, active_conv: dict[str, str | None]) -> None:
@@ -1110,75 +1029,27 @@ async def test_dm_message_skipped_when_recipient_viewing_thread(stack):
     )
 
     pushed_to = {uid for user_ids, _ in push.calls for uid in user_ids}
-
-    # Bob (viewing) — no bell row, no push.
-    assert await stack.notif_repo.count_unread(bob.user_id) == 0
     assert bob.user_id not in pushed_to, (
         "push fired for bob even though he had the thread open"
     )
-
-    # Carol (not viewing) — gets the notification as usual.
-    assert await stack.notif_repo.count_unread(carol.user_id) == 1
     assert carol.user_id in pushed_to, "push did not fire for carol who wasn't viewing"
 
 
-async def test_mark_read_for_dm_clears_unread_rows(stack):
-    """``mark_read_for_dm`` flips the (collapsed) ``dm_message`` row
-    for a conversation to read — opening the thread clears the bell
-    in step with the read-receipt update.
-
-    Note: rows are deduped per conversation, so a 2-message burst
-    bumps a single bell row rather than producing two.
-    """
-    from socialhome.domain.events import DmMessageCreated
-
-    sender = await stack.provision_user("anna")
+async def test_mark_read_for_dm_clears_unread_mention_rows(stack):
+    """``mark_read_for_dm`` flips the conversation's (collapsed)
+    ``dm_mention`` row to read — opening the thread clears it in step with
+    the read-receipt update; another conversation's row stays unread."""
+    anna = await stack.provision_user("anna")
     bob = await stack.provision_user("bob")
-    stack.notif_svc.attach_push_service(_CapturingPush())
-
-    # Two messages from Anna to Bob → one (bumped) row.
-    for mid in ("m-1", "m-2"):
+    for cid in ("g-1", "g-2"):
+        await _named_group(stack, cid, cid, anna, bob)
+    for cid, mid in (("g-1", "m-1"), ("g-1", "m-2"), ("g-2", "m-3")):
         await stack.bus.publish(
-            DmMessageCreated(
-                conversation_id="c-1",
-                message_id=mid,
-                sender_user_id=sender.user_id,
-                sender_display_name="Anna",
-                recipient_user_ids=(bob.user_id,),
-            )
-        )
-    assert await stack.notif_repo.count_unread(bob.user_id) == 1
-
-    # Open the thread → the row clears.
-    n = await stack.notif_svc.mark_read_for_dm(bob.user_id, "c-1")
-    assert n == 1
-    assert await stack.notif_repo.count_unread(bob.user_id) == 0
-
-
-async def test_mark_read_for_dm_only_touches_matching_conversation(stack):
-    """A different conversation's notifications stay unread when
-    one specific thread is opened."""
-    from socialhome.domain.events import DmMessageCreated
-
-    sender = await stack.provision_user("anna")
-    bob = await stack.provision_user("bob")
-    stack.notif_svc.attach_push_service(_CapturingPush())
-
-    for cid in ("c-1", "c-2"):
-        await stack.bus.publish(
-            DmMessageCreated(
-                conversation_id=cid,
-                message_id=f"m-{cid}",
-                sender_user_id=sender.user_id,
-                sender_display_name="Anna",
-                recipient_user_ids=(bob.user_id,),
-            )
+            _dm_event(cid, anna, [bob], mentions=[_m(bob)], mid=mid)
         )
     assert await stack.notif_repo.count_unread(bob.user_id) == 2
 
-    cleared = await stack.notif_svc.mark_read_for_dm(bob.user_id, "c-1")
-    assert cleared == 1
-    # The c-2 row stays unread.
+    assert await stack.notif_svc.mark_read_for_dm(bob.user_id, "g-1") == 1
     assert await stack.notif_repo.count_unread(bob.user_id) == 1
 
 
@@ -2370,19 +2241,42 @@ async def test_here_ignored_when_space_toggle_off(stack):
     assert await _here_types(stack, u["bob"]) == ["space_post_created"]
 
 
-async def test_here_is_rate_limited_per_author_per_space(stack):
-    """One @here per author per space per 10 min: a second one inside the
-    window notifies like a plain post; after the window it pages again."""
-    now = [1000.0]
-    stack.notif_svc._clock = lambda: now[0]
+async def _age_here_rows(stack, seconds: int) -> None:
+    """Move every ``space_here`` row *seconds* into the past."""
+    stamp = (datetime.now(UTC) - timedelta(seconds=seconds)).isoformat()
+    await stack.db.enqueue(
+        "UPDATE notifications SET created_at=? WHERE type='space_here'", (stamp,)
+    )
+
+
+async def test_here_is_rate_limited_per_space(stack):
+    """One @here per space per 10 min, whoever sends it: a second one inside
+    the window notifies like a plain post; after the window it pages again."""
     space_svc, space, u = await _here_space(stack, levels={"carl": "mentions"})
+    await stack.db.enqueue(
+        "UPDATE space_members SET role='admin' WHERE space_id=? AND user_id=?",
+        (space.id, u["erin"].user_id),
+    )
     await _post(space_svc, space, u["anna"], "@here one")
-    await _post(space_svc, space, u["anna"], "@here two")
+    await _post(space_svc, space, u["erin"], "@here two")  # another admin
     assert await _here_types(stack, u["bob"]) == ["space_here", "space_post_created"]
     assert await _here_types(stack, u["carl"]) == ["space_here"]
-    now[0] += 601
+    await _age_here_rows(stack, 601)
     await _post(space_svc, space, u["anna"], "@here three")
     assert await _here_types(stack, u["carl"]) == ["space_here", "space_here"]
+
+
+async def test_here_cooldown_survives_a_restart(stack):
+    """The window is read back from the rows it wrote — a fresh service (a
+    restart) still sees it; nothing is kept in memory."""
+    space_svc, space, u = await _here_space(stack)
+    await _post(space_svc, space, u["anna"], "@here one")
+    fresh = NotificationService(
+        stack.notif_repo, SqliteUserRepo(stack.db), stack.space_repo, EventBus()
+    )
+    assert not await fresh._here_window_open(space.id)
+    await _age_here_rows(stack, 601)
+    assert await fresh._here_window_open(space.id)
 
 
 async def test_here_in_comment_notifies_members(stack):
@@ -2460,8 +2354,6 @@ async def test_here_added_on_edit_pages_once_and_stays_rate_limited(stack):
     """@here newly added on edit pages everyone (owner, toggle on); an edit
     that keeps it doesn't re-page; inside the 10-min window a fresh @here
     edit on another post pages nobody."""
-    now = [1000.0]
-    stack.notif_svc._clock = lambda: now[0]
     space_svc, space, u = await _here_space(stack, levels={"carl": "mentions"})
     p1 = await _post(space_svc, space, u["anna"], "dinner")
     await space_svc.edit_post(
@@ -2989,18 +2881,20 @@ async def test_household_chat_bell_names_the_chat_and_opens_the_chat_tab(stack):
     push = _CapturingPush()
     stack.notif_svc.attach_push_service(push)
     await stack.bus.publish(_dm_event(chat_id, anna, [bob, carl], mentions=[_m(bob)]))
+    # D3: the plain message pushes and makes no row.
+    assert await stack.notif_repo.list(carl.user_id) == []
     assert [
-        (n.type, n.title, n.link_url) for n in await stack.notif_repo.list(carl.user_id)
-    ] == [("dm_message", "anna-h in Household chat", "/?tab=chat")]
+        (ids, p.title, p.click_url) for ids, p in push.calls if ids == [carl.user_id]
+    ] == [([carl.user_id], "anna-h in Household chat", "/?tab=chat")]
     assert [
         (n.type, n.title, n.link_url) for n in await stack.notif_repo.list(bob.user_id)
     ] == [("dm_mention", "anna-h mentioned you in Household chat", "/?tab=chat")]
     # §25.3: the push is the title only — never the message.
     for _ids, payload in push.calls:
         assert not getattr(payload, "body", None)
-    # Opening the chat clears its bell (same link).
-    await stack.notif_svc.mark_read_for_dm(carl.user_id, chat_id)
-    assert await stack.notif_repo.count_unread(carl.user_id) == 0
+    # Opening the chat clears its mention row (same link).
+    await stack.notif_svc.mark_read_for_dm(bob.user_id, chat_id)
+    assert await stack.notif_repo.count_unread(bob.user_id) == 0
 
 
 async def test_household_chat_respects_mute_and_level(stack):
@@ -3062,17 +2956,19 @@ async def test_space_chat_bell_names_the_space_and_opens_its_chat(stack):
     stack.notif_svc.attach_push_service(push)
     await stack.bus.publish(_dm_event(chat_id, anna, [bob, carl], mentions=[_m(bob)]))
     link = "/spaces/sp-chat/chat"
+    # D3: the plain message pushes and makes no row.
+    assert await stack.notif_repo.list(carl.user_id) == []
     assert [
-        (n.type, n.title, n.link_url) for n in await stack.notif_repo.list(carl.user_id)
-    ] == [("dm_message", "anna-s in Choir", link)]
+        (p.title, p.click_url) for ids, p in push.calls if ids == [carl.user_id]
+    ] == [("anna-s in Choir", link)]
     assert [
         (n.type, n.title, n.link_url) for n in await stack.notif_repo.list(bob.user_id)
     ] == [("dm_mention", "anna-s mentioned you in Choir", link)]
     # §25.3: the push is the title only — never the message.
     for _ids, payload in push.calls:
         assert not getattr(payload, "body", None)
-    await stack.notif_svc.mark_read_for_dm(carl.user_id, chat_id)
-    assert await stack.notif_repo.count_unread(carl.user_id) == 0
+    await stack.notif_svc.mark_read_for_dm(bob.user_id, chat_id)
+    assert await stack.notif_repo.count_unread(bob.user_id) == 0
 
 
 async def test_space_chat_respects_the_mentions_level(stack):
@@ -3094,7 +2990,9 @@ async def test_a_deleted_message_clears_the_bell_once_nothing_is_unread(stack):
     bob = await stack.provision_user("bob-d")
     carl = await stack.provision_user("carl-d")
     chat_id = await _space_chat(stack, anna, bob, carl)
-    await stack.bus.publish(_dm_event(chat_id, anna, [bob, carl]))
+    await stack.bus.publish(
+        _dm_event(chat_id, anna, [bob, carl], mentions=[_m(bob), _m(carl)])
+    )
     assert await stack.notif_repo.count_unread(bob.user_id) == 1
     # carl still has an unread message in the chat; bob has none.
     await stack.db.enqueue(
@@ -3192,9 +3090,10 @@ async def test_a_follower_joining_rings_no_follower(stack):
     assert await _member_joined_bells(stack, fern) == []
 
 
-async def test_a_member_joining_still_rings_the_followers(stack):
+async def test_a_member_joining_reaches_a_follower_only_at_everything(stack):
     """A follower's reduced roster shows the members, so a new member is
-    news to them too."""
+    news to them too — in the app, and only for a follower who chose
+    "Everything" (D5: following defaults to "Replies and mentions")."""
     await stack.provision_user("anna")
     fern = await stack.provision_user("fern")
     bob = await stack.provision_user("bob")
@@ -3210,6 +3109,13 @@ async def test_a_member_joining_still_rings_the_followers(stack):
         SpaceMember(
             space_id=space.id, user_id=fern.user_id, role="subscriber", joined_at=""
         )
+    )
+    await stack.bus.publish(
+        SpaceMemberJoined(space_id=space.id, user_id=bob.user_id, role="member")
+    )
+    assert await _member_joined_bells(stack, fern) == []
+    await stack.notif_repo.set_space_notif_level(
+        user_id=fern.user_id, space_id=space.id, level="all"
     )
     await stack.bus.publish(
         SpaceMemberJoined(space_id=space.id, user_id=bob.user_id, role="member")
@@ -3599,11 +3505,8 @@ async def _fire_who_where_case(stack, push, adapter, case: str):
         ("task_completed", "anna completed a task"),
         ("task_completed_space", "anna completed a task in FamSpace"),
         ("calendar_event_created", "anna added an event to your calendar"),
-        ("calendar_event_created_space", "anna added an event in FamSpace"),
         ("calendar_event_updated", "anna changed an event you're going to"),
         ("calendar_event_cancelled", "anna cancelled an event you're going to"),
-        ("moment_reacted", "anna reacted to your moment"),
-        ("highlight_reacted", "anna reacted to your highlight"),
     ],
 )
 async def test_push_title_says_who_and_where(stack, case, expected):
@@ -3621,6 +3524,23 @@ async def test_push_title_says_who_and_where(stack, case, expected):
         ([recipient.user_id], expected)
     ]
     assert adapter.sent == [(recipient.user_id, expected)]
+
+
+@pytest.mark.parametrize(
+    "case", ["calendar_event_created_space", "moment_reacted", "highlight_reacted"]
+)
+async def test_activity_and_reactions_are_in_app_only(stack, case):
+    """D5 / D13: a new event in a space (activity) and a reaction make an
+    in-app row and never push — on no surface."""
+    push = _CapturingPush()
+    adapter = _CapturingAdapter()
+    stack.notif_svc.attach_push_service(push)
+    stack.notif_svc.attach_platform_adapter(adapter)
+    recipient = await _fire_who_where_case(stack, push, adapter, case)
+    rows = await stack.notif_repo.list(recipient.user_id, limit=10)
+    assert len(rows) == 1
+    assert push.calls == []
+    assert adapter.sent == []
 
 
 async def test_bell_rows_without_content_push_their_own_title(stack):
@@ -3693,17 +3613,14 @@ async def test_platform_push_carries_the_same_tag_and_link(stack):
 
 
 async def test_push_tag_collapses_repeats_of_the_same_item_only(stack):
-    """The push ``tag`` is the bell type plus its link: a new message in a
-    thread read in between replaces the earlier push on the device,
-    another thread does not. (A burst into a row still unread does not
-    push again at all.)"""
+    """The push ``tag`` is the type plus its link: a later message in the
+    same chat replaces the earlier push on the device, another chat does
+    not."""
     push = _CapturingPush()
     stack.notif_svc.attach_push_service(push)
     a = await stack.provision_user("anna")
     b = await stack.provision_user("bob")
-    await stack.bus.publish(_dm_event("c-1", a, [b], mid="m-1"))
-    await stack.notif_svc.mark_read_for_dm(b.user_id, "c-1")
-    for conv, mid in (("c-1", "m-2"), ("c-1", "m-2b"), ("c-2", "m-3")):
+    for conv, mid in (("c-1", "m-1"), ("c-1", "m-2"), ("c-2", "m-3")):
         await stack.bus.publish(_dm_event(conv, a, [b], mid=mid))
     tags = [p.tag for _, p in push.calls]
     assert tags == [

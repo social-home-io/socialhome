@@ -305,5 +305,13 @@
   "notification.push.moment_reacted": "{name} reaccionó a tu momento",
   "notification.push.highlight_reacted": "{name} reaccionó a tu highlight",
   "notification.push.space_invite": "{name} te invitó a un espacio",
-  "notification.push.generic": "Nueva notificación"
+  "notification.push.generic": "Nueva notificación",
+  "notification.post.replied": "{author} comentó tu publicación",
+  "notification.space.post.replied": "{author} comentó tu publicación en {space_name}",
+  "notification.comment.replied": "{author} respondió a tu comentario",
+  "notification.space.comment.replied": "{author} respondió a tu comentario en {space_name}",
+  "notification.post.reacted": "{name} reaccionó con {emoji} a tu publicación",
+  "notification.space.post.reacted": "{name} reaccionó con {emoji} a tu publicación en {space_name}",
+  "notification.push.post_reacted": "{name} reaccionó a tu publicación",
+  "notification.push.post_reacted_in": "{name} reaccionó a tu publicación en {space_name}"
 }

@@ -234,10 +234,29 @@ async def test_get_notif_prefs_default_is_all(client):
     )
     assert r.status == 200
     body = await r.json()
-    assert body["level"] == "all"
+    assert body["level"] == "all"  # a household space: "Everything" (D5)
+    assert body["is_default"] is True
     # Defaults: feature is off (schema default), member hasn't opted in.
     assert body["feature_location"] is False
     assert body["location_share_enabled"] is False
+
+
+async def test_get_notif_prefs_default_follows_the_space_type(client):
+    """D5: a member who never chose hears "Replies and mentions" in a
+    public space; once they choose, the choice is what GET returns."""
+    await _seed_space(client, role="member")
+    await client._db.enqueue("UPDATE spaces SET space_type='public' WHERE id='sp-cust'")
+    r = await client.get("/api/spaces/sp-cust/notif-prefs", headers=_auth(client._tok))
+    body = await r.json()
+    assert (body["level"], body["is_default"]) == ("mentions", True)
+    await client.put(
+        "/api/spaces/sp-cust/notif-prefs",
+        json={"level": "all"},
+        headers=_auth(client._tok),
+    )
+    r = await client.get("/api/spaces/sp-cust/notif-prefs", headers=_auth(client._tok))
+    body = await r.json()
+    assert (body["level"], body["is_default"]) == ("all", False)
 
 
 async def test_get_notif_prefs_returns_location_state(client):

@@ -175,7 +175,9 @@ async def test_a_row_carries_its_object_actor_and_counts(env):
     assert (row.params.actor_count, row.params.new, row.params.total) == (1, 1, 1)
     [created] = [e for e in env.created if e.user_id == anna.user_id]
     assert (created.object_key, created.params) == ("post:p1", row.params)
-    assert not (created.bumped or created.reopened or created.silent)
+    assert not (created.bumped or created.reopened)
+    # D6: someone else's comment on a post that isn't yours is in-app only.
+    assert created.silent
 
 
 # ── 2. One row per thing, re-opened on new activity ───────────────────
@@ -183,7 +185,7 @@ async def test_a_row_carries_its_object_actor_and_counts(env):
 
 async def test_more_activity_on_an_unread_row_bumps_it(env):
     """Two comments on one post: one row, two new, both people named, the
-    badge still one — and (until D8) a push per comment."""
+    badge still one — and no push (D6: not a reply to Anna)."""
     anna, ben, cleo = (
         await env.user("anna"),
         await env.user("ben"),
@@ -197,9 +199,9 @@ async def test_more_activity_on_an_unread_row_bumps_it(env):
     assert (row.params.new, row.params.total) == (2, 2)
     assert await env.notifs.count_unread(anna.user_id) == 1
     second = [e for e in env.created if e.user_id == anna.user_id][1]
-    assert (second.bumped, second.reopened, second.silent) == (True, False, False)
+    assert (second.bumped, second.reopened, second.silent) == (True, False, True)
     assert second.notification_id == row.id
-    assert [u for u, _ in env.push.sent].count(anna.user_id) == 2
+    assert [u for u, _ in env.push.sent].count(anna.user_id) == 0
     assert not env.read_changed  # the count did not move
 
 
@@ -222,7 +224,7 @@ async def test_activity_on_a_read_row_reopens_it_and_counts_once(env):
     assert (row.params.new, row.params.total) == (1, 3)
     assert await env.notifs.count_unread(anna.user_id) == 1
     [ev] = [e for e in env.created if e.user_id == anna.user_id]
-    assert (ev.bumped, ev.reopened, ev.silent) == (True, True, False)
+    assert (ev.bumped, ev.reopened, ev.silent) == (True, True, True)
     # Every device hears the exact count once (the frame says "bumped", so
     # a client never adds one on top).
     assert [(e.user_id, e.unread_count) for e in env.read_changed] == [

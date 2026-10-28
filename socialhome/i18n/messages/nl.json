@@ -305,5 +305,13 @@
   "notification.push.moment_reacted": "{name} reageerde op je moment",
   "notification.push.highlight_reacted": "{name} reageerde op je highlight",
   "notification.push.space_invite": "{name} heeft je uitgenodigd voor een space",
-  "notification.push.generic": "Nieuwe melding"
+  "notification.push.generic": "Nieuwe melding",
+  "notification.post.replied": "{author} reageerde op je bericht",
+  "notification.space.post.replied": "{author} reageerde op je bericht in {space_name}",
+  "notification.comment.replied": "{author} antwoordde op je reactie",
+  "notification.space.comment.replied": "{author} antwoordde op je reactie in {space_name}",
+  "notification.post.reacted": "{name} reageerde met {emoji} op je bericht",
+  "notification.space.post.reacted": "{name} reageerde met {emoji} op je bericht in {space_name}",
+  "notification.push.post_reacted": "{name} reageerde op je bericht",
+  "notification.push.post_reacted_in": "{name} reageerde op je bericht in {space_name}"
 }

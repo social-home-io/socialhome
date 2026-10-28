@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from .space import SpaceRole, SpaceType
+
 #: Rows that ask someone to act (a "Needs you" item): a join request, a
 #: post waiting for review, a report. Unread, they survive both the
 #: per-user cap and the age purge — dropping one would lose the only
@@ -37,6 +39,50 @@ GROUP_QUIET_DAYS: int = 7
 #: post can't grow the row. Past it, :attr:`NotificationParams.actor_count`
 #: still counts each newcomer.
 MAX_ACTORS: int = 20
+
+
+class SpaceNotifLevel(StrEnum):
+    """How much one person hears from one space (``space_notif_prefs.level``).
+
+    * ``ALL`` ("Everything") — replies and mentions push; every other new
+      post and comment is an in-app row, no push.
+    * ``MENTIONS`` ("Replies and mentions") — only a comment on your post,
+      a reply to your comment, an @-mention of you or an ``@here`` (members
+      only); a comment on a post you commented on is an in-app row.
+    * ``MUTED`` ("Nothing") — nothing, mentioned or not.
+    """
+
+    ALL = "all"
+    MENTIONS = "mentions"
+    MUTED = "muted"
+
+
+#: Space types whose members hear "Everything" unless they chose otherwise
+#: (D5): the household's own spaces and private ones. Strangers' activity in
+#: public and global spaces is the noise, so those default to "Replies and
+#: mentions".
+_EVERYTHING_BY_DEFAULT: frozenset[SpaceType] = frozenset(
+    {SpaceType.HOUSEHOLD, SpaceType.PRIVATE}
+)
+
+
+def default_space_notif_level(
+    space_type: SpaceType | str, role: SpaceRole | str
+) -> SpaceNotifLevel:
+    """The level of someone who never chose one for this space (D5).
+
+    "Everything" in a household or private space; "Replies and mentions" in
+    a public or global one, and in any space they only follow (a
+    subscriber seat)."""
+    if role == SpaceRole.SUBSCRIBER:
+        return SpaceNotifLevel.MENTIONS
+    try:
+        kind = SpaceType(space_type)
+    except ValueError:
+        return SpaceNotifLevel.MENTIONS
+    if kind in _EVERYTHING_BY_DEFAULT:
+        return SpaceNotifLevel.ALL
+    return SpaceNotifLevel.MENTIONS
 
 
 class NotificationObject(StrEnum):

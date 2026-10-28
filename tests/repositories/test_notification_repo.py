@@ -99,7 +99,9 @@ async def test_notification_delete_old(env):
 # ── Per-space notification preferences ─────────────────────────────────────
 
 
-async def test_get_space_notif_level_default_is_all(env):
+async def test_get_space_notif_level_is_none_until_chosen(env):
+    """D5: no row means "never chose" — the service picks the default by
+    space type and seat, so the repo must not invent ``all``."""
     await env.db.enqueue(
         "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
         ("u1", "uid-u1", "U1"),
@@ -112,7 +114,7 @@ async def test_get_space_notif_level_default_is_all(env):
     level = await env.notif_repo.get_space_notif_level(
         user_id="uid-u1", space_id="sp-n"
     )
-    assert level == "all"
+    assert level is None
 
 
 async def test_set_and_get_space_notif_level(env):
@@ -413,3 +415,31 @@ async def test_find_filters_on_object_key_and_space(env):
         Spec(where=[("object_key", "=", "post:p1"), ("space_id", "=", "s1")])
     )
     assert [n.id for n in found] == [note.id]
+
+
+async def test_exists_in_space_since_reads_the_persisted_here_window(env):
+    """The per-space @here cooldown: a ``space_here`` row about the space at
+    or after ``since`` — any user's, any post's."""
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("u1", "uid-u1", "U1"),
+    )
+    note = replace(
+        new_notification(user_id="uid-u1", type="space_here", title="t"),
+        space_id="sp-h",
+        created_at="2026-10-28T10:00:00+00:00",
+    )
+    await env.notif_repo.save(note)
+    kw = {"type": "space_here", "space_id": "sp-h"}
+    assert await env.notif_repo.exists_in_space_since(
+        **kw, since="2026-10-28T09:55:00+00:00"
+    )
+    assert not await env.notif_repo.exists_in_space_since(
+        **kw, since="2026-10-28T10:00:01+00:00"
+    )
+    assert not await env.notif_repo.exists_in_space_since(
+        type="space_here", space_id="other", since="2026-10-28T09:00:00+00:00"
+    )
+    assert not await env.notif_repo.exists_in_space_since(
+        type="space_mention", space_id="sp-h", since="2026-10-28T09:00:00+00:00"
+    )

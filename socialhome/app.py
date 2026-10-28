@@ -3134,6 +3134,8 @@ def create_app(config: Config | None = None) -> web.Application:
     notification_service.attach_federation_repo(repos.federation)
     notification_service.attach_report_repo(report_repo)
     notification_service.attach_personal_calendar_repo(calendar_repo)
+    # D6 comment audience + D13 post reactions read the posts.
+    notification_service.attach_post_repos(repos.post, repos.space_post)
 
     # ── Per-user data export (§25.8.7) ──────────────────────────────────
     data_export_service = DataExportService(db)

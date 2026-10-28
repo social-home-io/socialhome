@@ -801,6 +801,9 @@ bell when:
 | ``MomentCreated`` (with parent)| The parent moment author | ``moment_replied``  |
 | ``UserFollowed``               | The followed user        | ``user_followed``   |
 
+A reaction is an in-app row only, grouped per moment, never a push (D13);
+a reply and a follow push.
+
 A protected parent author is not notified of a reply from outside its
 household and paired households (``hop_count > 1`` or through a GFS) — the
 reply is hidden from it too. Cleared reactions (``emoji is None``) don't fire a new

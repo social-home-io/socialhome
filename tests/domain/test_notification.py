@@ -11,6 +11,8 @@ from socialhome.domain.notification import (
     NotificationObject,
     NotificationParams,
     NotificationSubject,
+    SpaceNotifLevel,
+    default_space_notif_level,
     first_params,
     object_key,
     regroup,
@@ -124,3 +126,31 @@ def test_the_actor_list_is_bounded_but_still_counts():
 
 def test_rows_regroup_for_a_week():
     assert GROUP_QUIET_DAYS == 7
+
+
+# ── D5: the default level by space type ───────────────────────────────
+
+
+def test_d5_household_and_private_spaces_default_to_everything():
+    for space_type in ("household", "private"):
+        assert default_space_notif_level(space_type, "member") is SpaceNotifLevel.ALL
+        assert default_space_notif_level(space_type, "owner") is SpaceNotifLevel.ALL
+
+
+def test_d5_public_and_global_spaces_default_to_replies_and_mentions():
+    for space_type in ("public", "global"):
+        assert (
+            default_space_notif_level(space_type, "admin") is SpaceNotifLevel.MENTIONS
+        )
+
+
+def test_d5_a_followed_space_defaults_to_replies_and_mentions():
+    for space_type in ("household", "private", "public", "global"):
+        assert (
+            default_space_notif_level(space_type, "subscriber")
+            is SpaceNotifLevel.MENTIONS
+        )
+
+
+def test_d5_an_unknown_space_type_errs_quiet():
+    assert default_space_notif_level("galaxy", "member") is SpaceNotifLevel.MENTIONS

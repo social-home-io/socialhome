@@ -177,6 +177,7 @@ class AbstractSpacePostRepo(Protocol):
     async def add_comment(self, comment: Comment, *, space_id: str) -> bool: ...
     async def get_comment(self, comment_id: str) -> Comment | None: ...
     async def list_comments(self, post_id: str) -> list[Comment]: ...
+    async def list_comment_author_ids(self, post_id: str) -> set[str]: ...
     async def list_comments_since(
         self,
         space_id: str,
@@ -773,6 +774,16 @@ class SqliteSpacePostRepo:
             (post_id,),
         )
         return [c for c in (_row_to_space_comment(d) for d in rows_to_dicts(rows)) if c]
+
+    async def list_comment_author_ids(self, post_id: str) -> set[str]:
+        """Everyone with a live (not deleted) comment on ``post_id`` — the
+        people a new comment there is "also commented" news for."""
+        rows = await self._db.fetchall(
+            "SELECT DISTINCT author FROM space_post_comments"
+            " WHERE post_id=? AND deleted=0",
+            (post_id,),
+        )
+        return {str(r["author"]) for r in rows}
 
     async def list_comments_since(
         self,

@@ -283,3 +283,21 @@ async def test_link_preview_round_trip_and_cleared_on_delete(env):
     await env.post_repo.soft_delete("post-lp-1")
     gone = await env.post_repo.get("post-lp-1")
     assert gone is not None and gone.link_preview is None
+
+
+async def test_list_comment_author_ids_names_live_commenters_once(env):
+    """D6: who else commented on a post — each person once, never someone
+    whose only comment was deleted."""
+    alice = await env.user_svc.provision(username="alice", display_name="Alice")
+    bob = await env.user_svc.provision(username="bob", display_name="Bob")
+    cleo = await env.user_svc.provision(username="cleo", display_name="Cleo")
+    post = await env.feed_svc.create_post(
+        author_user_id=alice.user_id, type=PostType.TEXT, content="hi"
+    )
+    for u in (bob, bob, cleo):
+        last = await env.feed_svc.add_comment(
+            post.id, author_user_id=u.user_id, content="x"
+        )
+    await env.feed_svc.delete_comment(last.id, actor_user_id=cleo.user_id)
+    assert await env.post_repo.list_comment_author_ids(post.id) == {bob.user_id}
+    assert await env.post_repo.list_comment_author_ids("nope") == set()

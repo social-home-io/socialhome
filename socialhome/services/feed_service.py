@@ -346,7 +346,11 @@ class FeedService:
     ) -> Post:
         emoji = _normalise_emoji(emoji)
         post = await self._posts.add_reaction(post_id, emoji, user_id)
-        await self._bus.publish(PostReactionChanged(post=post))
+        await self._bus.publish(
+            PostReactionChanged(
+                post=post, reactor_user_id=user_id, emoji=emoji, added=True
+            )
+        )
         return post
 
     async def remove_reaction(
@@ -358,7 +362,11 @@ class FeedService:
     ) -> Post:
         emoji = _normalise_emoji(emoji)
         post = await self._posts.remove_reaction(post_id, emoji, user_id)
-        await self._bus.publish(PostReactionChanged(post=post))
+        await self._bus.publish(
+            PostReactionChanged(
+                post=post, reactor_user_id=user_id, emoji=emoji, added=False
+            )
+        )
         return post
 
     # ── Comments ───────────────────────────────────────────────────────

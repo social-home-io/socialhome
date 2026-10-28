@@ -697,6 +697,9 @@ async def test_a_household_comment_reads_german(de_env):
     ],
 )
 async def test_a_chat_message_reads_german(de_env, message_type, expected):
+    """D3: a chat message makes no Notifications row; its push reads German."""
+    push = _PushCapture()
+    de_env.svc.attach_push_service(push)
     await de_env.bus.publish(
         DmMessageCreated(
             conversation_id="c1",
@@ -708,7 +711,8 @@ async def test_a_chat_message_reads_german(de_env, message_type, expected):
             message_type=message_type,
         )
     )
-    assert await _bob_titles(de_env) == [expected]
+    assert await _bob_titles(de_env) == []
+    assert push.titles == [expected]
 
 
 async def test_space_notices_read_german(de_env):
