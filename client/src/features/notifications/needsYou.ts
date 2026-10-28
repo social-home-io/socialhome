@@ -8,7 +8,10 @@
  *   become one entry ("3 requests wait for you in Salon") with "Review".
  * - **Safe one-tap:** Approve / Decline only on a single join request with
  *   nothing unusual (no ``flags``: near the edge, an unpaired household, an
- *   admin grant, an age limit). An invite gets "View invite" — the invite
+ *   admin grant, an age limit). The server holds the same rule: Approve
+ *   is sent as ``via: inline`` and refused with ``409 REVIEW_REQUIRED``
+ *   when the request is flagged after all — the item then turns into
+ *   "Review" with the server's reasons. An invite gets "View invite" — the invite
  *   card asks a local community's location consent, so never a one-tap
  *   join — plus Decline. Everything else gets "Review".
  * - **Decline waits 5 s** behind an Undo toast before it is sent (a
@@ -82,6 +85,17 @@ export function needsYouEntries(
   return out
 }
 
+/** Items the server refused a one-tap approval of (``409
+ *  REVIEW_REQUIRED``), by item key, with the flags it named. They show
+ *  "Review" from then on, even after a reload of the list. */
+export const mustReview = signal<ReadonlyMap<string, readonly string[]>>(new Map())
+
+/** Why *n* can't be decided with one tap: the server's answer to a refused
+ *  tap, else the row's own flags. */
+export function flagsOf(n: Notification): readonly string[] {
+  return mustReview.value.get(itemKey(n)) ?? n.params?.flags ?? []
+}
+
 /** What an item offers inline (the safety rules above). */
 export function inlineAction(n: Notification): InlineAction {
   if (n.type === 'space_invite') return 'invite'
@@ -89,7 +103,7 @@ export function inlineAction(n: Notification): InlineAction {
     n.type === 'space_join_requested'
     && n.object_key?.startsWith('join_request:')
     && !!n.space_id
-    && (n.params?.flags ?? []).length === 0
+    && flagsOf(n).length === 0
   ) return 'decide'
   return 'review'
 }
@@ -120,6 +134,11 @@ export function dropHandled(keys: readonly string[]): void {
   if (keys.length === 0) return
   const gone = new Set(keys)
   needsYou.value = needsYou.value.filter(n => !gone.has(itemKey(n)))
+  if (keys.some(k => mustReview.value.has(k))) {
+    const next = new Map(mustReview.value)
+    for (const k of keys) next.delete(k)
+    mustReview.value = next
+  }
 }
 
 function setActing(key: string, on: boolean): void {
@@ -143,13 +162,31 @@ function lostRace(err: unknown): boolean {
   return true
 }
 
+/** A one-tap approval the server refused because the request needs the
+ *  review page (``409 REVIEW_REQUIRED``, ``params.flags`` "age,edge"):
+ *  the item stays and turns into "Review", with the server's reasons. */
+function reviewRequired(err: unknown, key: string): boolean {
+  const e = err as { status?: unknown, code?: unknown, extra?: { params?: unknown } } | null
+  if (!e || e.status !== 409 || e.code !== 'REVIEW_REQUIRED') return false
+  const params = (e.extra?.params ?? {}) as Record<string, unknown>
+  const raw = typeof params.flags === 'string' ? params.flags : ''
+  const flags = raw.split(',').map(f => f.trim()).filter(Boolean)
+  const next = new Map(mustReview.value)
+  // An empty list would read as "one tap" again: keep it non-empty.
+  next.set(key, flags.length > 0 ? flags : ['review'])
+  mustReview.value = next
+  showToast(t('notifications.needs_you.review_required'), 'info')
+  return true
+}
+
 async function settle(key: string, send: () => Promise<unknown>, done: string): Promise<void> {
   try {
     await send()
     dropHandled([key])
     showToast(done, 'success')
   } catch (err: unknown) {
-    if (lostRace(err)) dropHandled([key])
+    if (reviewRequired(err, key)) { /* stays, now as "Review" */ }
+    else if (lostRace(err)) dropHandled([key])
     else showToast(t('notifications.needs_you.failed'), 'error')
   } finally {
     setActing(key, false)
@@ -157,13 +194,15 @@ async function settle(key: string, send: () => Promise<unknown>, done: string): 
   }
 }
 
-/** Approve a single join request now. */
+/** Approve a single join request now — as a one-tap (``via: inline``)
+ *  approval, which the server refuses for a request that needs a closer
+ *  look (it works the flags out itself). */
 export function approve(n: Notification): Promise<void> {
   const key = itemKey(n)
   setActing(key, true)
   return settle(
     key,
-    () => api.post(`/api/spaces/${n.space_id}/join-requests/${idOf(n)}/approve`),
+    () => api.post(`/api/spaces/${n.space_id}/join-requests/${idOf(n)}/approve`, { via: 'inline' }),
     t('notifications.needs_you.approved'),
   )
 }

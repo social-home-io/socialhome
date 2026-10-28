@@ -22,6 +22,7 @@ import copy
 import math
 import re
 import unicodedata
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
@@ -1293,6 +1294,61 @@ class JoinRequestHandledError(CodedError):
     status = 409
     code = "JOIN_REQUEST_HANDLED"
     detail = "join request already handled"
+
+
+#: Why a join request may not be approved with one tap from the "Needs
+#: you" list: near the edge of a local community, from a household this one
+#: is not paired with, an admin grant (only the owner decides), or a space
+#: with an age limit. Such a request is decided on the review page, which
+#: shows what the list can't (:func:`join_request_flags`).
+JOIN_REQUEST_FLAGS: frozenset[str] = frozenset({"edge", "unpaired", "admin", "age"})
+
+#: Where an approval of a join request came from: the one-tap button of
+#: the "Needs you" list, or the review page (the default).
+APPROVE_VIA_INLINE = "inline"
+APPROVE_VIA_REVIEW = "review"
+APPROVE_VIAS: frozenset[str] = frozenset({APPROVE_VIA_INLINE, APPROVE_VIA_REVIEW})
+
+
+def join_request_flags(
+    request: Mapping[str, object] | None,
+    *,
+    min_age: int,
+    household_paired: bool,
+) -> tuple[str, ...]:
+    """The :data:`JOIN_REQUEST_FLAGS` of a join request row, sorted.
+
+    ``household_paired`` says whether the applicant's household
+    (``remote_applicant_instance_id``) is a confirmed pair of this one; it
+    is ignored for a local applicant. An unknown request (``None``) is
+    flagged ``unpaired`` — never one tap on what this household can't see.
+    """
+    if request is None:
+        return ("unpaired",)
+    flags: set[str] = set()
+    if request.get("area_verdict") == "edge":
+        flags.add("edge")
+    if request.get("requested_role") == SpaceRole.ADMIN.value:
+        flags.add("admin")
+    if min_age:
+        flags.add("age")
+    if request.get("remote_applicant_instance_id") and not household_paired:
+        flags.add("unpaired")
+    return tuple(sorted(flags))
+
+
+class ReviewRequiredError(CodedError):
+    """A one-tap ("Needs you") approval of a join request that must be
+    decided on the review page. ``params.flags``: the
+    :data:`JOIN_REQUEST_FLAGS` the server found, comma-separated and sorted
+    (``"age,edge"``), so the SPA can say why next to "Review"."""
+
+    status = 409
+    code = "REVIEW_REQUIRED"
+    detail = "this join request must be approved from the review page"
+
+    def __init__(self, flags: tuple[str, ...]) -> None:
+        super().__init__(params={"flags": ",".join(flags)})
 
 
 class HouseholdUpgradeRequiredError(SpacePermissionError):

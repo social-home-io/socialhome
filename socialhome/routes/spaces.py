@@ -53,6 +53,8 @@ from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
 from ..domain.notification import SpaceNotifLevel
 from ..domain.post import LocationData, Post, PostType
 from ..domain.space import (
+    APPROVE_VIA_REVIEW,
+    APPROVE_VIAS,
     CONTENT_AUTHORITY_ROLES,
     INVITE_VIA_INTERNAL,
     INVITE_VIAS,
@@ -2946,7 +2948,11 @@ class SpaceJoinRequestCollectionView(BaseView):
 class SpaceJoinRequestDetailView(BaseView):
     """``POST /api/spaces/{id}/join-requests/{request_id}/{action}``.
 
-    ``action`` must be ``approve`` or ``deny``.
+    ``action`` must be ``approve`` or ``deny``. ``approve`` takes an
+    optional body ``{"via": "inline" | "review"}`` (default ``review``):
+    the "Needs you" one-tap button sends ``inline``, which the service
+    refuses with ``409 REVIEW_REQUIRED`` for a request that needs the
+    review page. Any other ``via`` answers 422.
     """
 
     async def post(self) -> web.Response:
@@ -2955,10 +2961,25 @@ class SpaceJoinRequestDetailView(BaseView):
         action = self.match("action")
         request_id = self.match("request_id")
         if action == "approve":
+            body = await self.body() if self.request.can_read_body else {}
+            via = (
+                body.get("via", APPROVE_VIA_REVIEW) if isinstance(body, dict) else None
+            )
+            if not isinstance(via, str) or via not in APPROVE_VIAS:
+                return web.json_response(
+                    {
+                        "error": {
+                            "code": "UNPROCESSABLE",
+                            "detail": "via must be 'inline' or 'review'",
+                        }
+                    },
+                    status=422,
+                )
             member = await svc.approve_join_request(
                 request_id,
                 actor_username=ctx.username,
                 space_id=self.match("id"),
+                via=via,
             )
             # ``member`` is None for a §D2 remote applicant (the seat is
             # finalised on the applicant's household) — return the status

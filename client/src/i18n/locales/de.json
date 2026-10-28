@@ -5506,6 +5506,7 @@
   "notifications.needs_you.already": "{name} hat das schon erledigt",
   "notifications.needs_you.already_anon": "Jemand hat das schon erledigt",
   "notifications.needs_you.failed": "Das hat nicht geklappt – versuch es noch mal",
+  "notifications.needs_you.review_required": "Sieh dir diese Anfrage zuerst genauer an",
   "notifications.needs_you.flag.edge": "Nahe am Rand",
   "notifications.needs_you.flag.unpaired": "Haushalt, mit dem du nicht gekoppelt bist",
   "notifications.needs_you.flag.admin": "Möchte Admin werden",

@@ -190,3 +190,152 @@ async def test_nobody_but_an_admin_declines_a_request(seeded):  # noqa: F811
         "SELECT status FROM space_join_requests WHERE id=?", (rid,)
     )
     assert row["status"] == "pending"
+
+
+# ── One tap only when nothing needs a closer look ─────────────────────
+#
+# The "Needs you" list approves with ``{"via": "inline"}``. The server
+# works out the request's flags itself (never from the client) and refuses
+# a one-tap approval of a flagged request with ``409 REVIEW_REQUIRED``; the
+# review page (no ``via``, or ``"review"``) still decides it.
+
+#: Per flag: the statement and whether it keys on the space (else the request).
+_FLAG_SQL = {
+    "edge": ("UPDATE space_join_requests SET area_verdict='edge' WHERE id=?", False),
+    "admin": (
+        "UPDATE space_join_requests SET requested_role='admin' WHERE id=?",
+        False,
+    ),
+    "unpaired": (
+        (
+            "UPDATE space_join_requests"
+            " SET remote_applicant_instance_id='inst-stranger' WHERE id=?"
+        ),
+        False,
+    ),
+    "age": ("UPDATE spaces SET min_age=16 WHERE id=?", True),
+}
+
+
+async def _flag(client, flag: str, sid: str, rid: str) -> None:
+    sql, on_space = _FLAG_SQL[flag]
+    await client._db.enqueue(sql, (sid if on_space else rid,))
+
+
+async def _plain(client, hdr: dict) -> tuple[str, str]:
+    """A pending request of the guest with nothing unusual about it."""
+    sid = await _create_space(client, hdr, "public", "request")
+    rid = (await (await _ask(client, sid, hdr["guest"])).json())["request_id"]
+    return sid, rid
+
+
+async def _flagged(client, hdr: dict, flag: str) -> tuple[str, str]:
+    """A pending request of the guest carrying exactly *flag*."""
+    sid, rid = await _plain(client, hdr)
+    await _flag(client, flag, sid, rid)
+    return sid, rid
+
+
+async def _approve(client, hdr: dict, sid: str, rid: str, **kw):
+    return await client.post(
+        f"/api/spaces/{sid}/join-requests/{rid}/approve", headers=hdr["owner"], **kw
+    )
+
+
+async def _status(client, rid: str) -> str:
+    row = await client._db.fetchone(
+        "SELECT status FROM space_join_requests WHERE id=?", (rid,)
+    )
+    return row["status"]
+
+
+@pytest.mark.parametrize("flag", ["edge", "admin", "unpaired", "age"])
+async def test_a_one_tap_approval_of_a_flagged_request_is_refused(seeded, flag):  # noqa: F811
+    client, hdr = seeded
+    sid, rid = await _flagged(client, hdr, flag)
+    r = await _approve(client, hdr, sid, rid, json={"via": "inline"})
+    assert r.status == 409, await r.text()
+    error = (await r.json())["error"]
+    assert error["code"] == "REVIEW_REQUIRED"
+    assert error["params"]["flags"] == flag
+    # Nothing changed: the request still waits for the review page.
+    assert await _status(client, rid) == "pending"
+
+
+async def test_every_flag_is_named(seeded):  # noqa: F811
+    client, hdr = seeded
+    sid, rid = await _flagged(client, hdr, "edge")
+    for flag in ("admin", "age"):
+        await _flag(client, flag, sid, rid)
+    r = await _approve(client, hdr, sid, rid, json={"via": "inline"})
+    assert r.status == 409, await r.text()
+    assert (await r.json())["error"]["params"]["flags"] == "admin,age,edge"
+
+
+async def test_the_flags_come_from_the_server_never_the_client(seeded):  # noqa: F811
+    client, hdr = seeded
+    sid, rid = await _flagged(client, hdr, "edge")
+    r = await _approve(client, hdr, sid, rid, json={"via": "inline", "flags": []})
+    assert r.status == 409, await r.text()
+    assert (await r.json())["error"]["params"]["flags"] == "edge"
+    # A plain request is one tap, whatever flags the client claims.
+    sid, rid = await _plain(client, hdr)
+    r = await _approve(client, hdr, sid, rid, json={"via": "inline", "flags": ["edge"]})
+    assert r.status == 200, await r.text()
+    assert await _status(client, rid) == "approved"
+
+
+async def test_a_plain_request_is_approved_with_one_tap(seeded):  # noqa: F811
+    client, hdr = seeded
+    sid, rid = await _plain(client, hdr)
+    r = await _approve(client, hdr, sid, rid, json={"via": "inline"})
+    assert r.status == 200, await r.text()
+    assert (await r.json())["status"] == "approved"
+    assert await _needs_you(client, hdr["owner"]) == []
+
+
+@pytest.mark.parametrize("body", [None, {}, {"via": "review"}])
+async def test_the_review_page_approves_a_flagged_request(seeded, body):  # noqa: F811
+    client, hdr = seeded
+    sid, rid = await _flagged(client, hdr, "edge")
+    kw = {} if body is None else {"json": body}
+    r = await _approve(client, hdr, sid, rid, **kw)
+    assert r.status == 200, await r.text()
+    assert await _status(client, rid) == "approved"
+
+
+async def test_a_flagged_request_is_still_declined_with_one_tap(seeded):  # noqa: F811
+    """Declining is the safe direction: the list offers it inline for any
+    single request, flagged or not."""
+    client, hdr = seeded
+    sid, rid = await _flagged(client, hdr, "edge")
+    r = await client.post(
+        f"/api/spaces/{sid}/join-requests/{rid}/deny",
+        json={"via": "inline"},
+        headers=hdr["owner"],
+    )
+    assert r.status == 200, await r.text()
+    assert await _status(client, rid) == "denied"
+
+
+@pytest.mark.parametrize("via", ["sideways", 1, None])
+async def test_an_unknown_via_is_refused(seeded, via):  # noqa: F811
+    client, hdr = seeded
+    sid, rid = await _plain(client, hdr)
+    r = await _approve(client, hdr, sid, rid, json={"via": via})
+    assert r.status == 422, await r.text()
+    assert await _status(client, rid) == "pending"
+    r = await _approve(client, hdr, sid, rid, json=["inline"])
+    assert r.status == 422, await r.text()
+    assert await _status(client, rid) == "pending"
+
+
+async def test_an_answered_request_still_hears_who_won_before_the_flags(seeded):  # noqa: F811
+    """The #1218 race answer comes first: a flagged request someone already
+    approved answers ``JOIN_REQUEST_HANDLED``, not ``REVIEW_REQUIRED``."""
+    client, hdr = seeded
+    sid, rid = await _flagged(client, hdr, "edge")
+    assert (await _approve(client, hdr, sid, rid)).status == 200
+    r = await _approve(client, hdr, sid, rid, json={"via": "inline"})
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "JOIN_REQUEST_HANDLED"

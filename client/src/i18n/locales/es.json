@@ -5533,6 +5533,7 @@
   "notifications.needs_you.already": "{name} ya se encargó de esto",
   "notifications.needs_you.already_anon": "Alguien ya se encargó de esto",
   "notifications.needs_you.failed": "No funcionó. Inténtalo de nuevo.",
+  "notifications.needs_you.review_required": "Revisa primero esta solicitud con más detalle",
   "notifications.needs_you.flag.edge": "Cerca del límite",
   "notifications.needs_you.flag.unpaired": "Hogar con el que no estás vinculado",
   "notifications.needs_you.flag.admin": "Quiere ser admin",

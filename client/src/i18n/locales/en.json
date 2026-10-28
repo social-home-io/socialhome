@@ -5542,6 +5542,7 @@
   "notifications.needs_you.already": "{name} already handled this",
   "notifications.needs_you.already_anon": "Someone already handled this",
   "notifications.needs_you.failed": "That didn't work — try again",
+  "notifications.needs_you.review_required": "Have a closer look at this request first",
   "notifications.needs_you.flag.edge": "Near the edge",
   "notifications.needs_you.flag.unpaired": "Household you're not paired with",
   "notifications.needs_you.flag.admin": "Wants the admin role",

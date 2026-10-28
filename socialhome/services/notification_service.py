@@ -150,6 +150,7 @@ from ..domain.space import (
     SpaceConfigEventType,
     SpaceFeatureAccess,
     SpaceRole,
+    join_request_flags,
 )
 from ..domain.user import User
 from ..i18n import Catalog
@@ -3829,24 +3830,15 @@ class NotificationService(ProtectionGateMixin):
 
     async def _join_request_flags(self, space, request_id: str) -> tuple[str, ...]:
         """Why this request needs the review page rather than one tap
-        (:data:`JOIN_REQUEST_FLAGS`): near the edge of a local community,
-        from a household this one is not paired with, an admin grant, or a
-        space with an age limit. An unknown request is flagged ``unpaired``
-        — never one-tap on what this household can't see."""
+        (:func:`~socialhome.domain.space.join_request_flags` — the same rule
+        the approve endpoint enforces on a one-tap approval)."""
         request = await self._spaces.get_join_request(request_id)
-        if request is None:
-            return ("unpaired",)
-        flags: set[str] = set()
-        if request.get("area_verdict") == "edge":
-            flags.add("edge")
-        if request.get("requested_role") == SpaceRole.ADMIN.value:
-            flags.add("admin")
-        if getattr(space, "min_age", 0):
-            flags.add("age")
-        household = request.get("remote_applicant_instance_id")
-        if household and not await self._paired(str(household)):
-            flags.add("unpaired")
-        return tuple(sorted(flags))
+        household = (request or {}).get("remote_applicant_instance_id")
+        return join_request_flags(
+            request,
+            min_age=getattr(space, "min_age", 0),
+            household_paired=bool(household) and await self._paired(str(household)),
+        )
 
     async def _paired(self, instance_id: str) -> bool:
         """Is *instance_id* a household this one is paired with?"""

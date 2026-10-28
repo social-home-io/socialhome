@@ -5506,6 +5506,7 @@
   "notifications.needs_you.already": "{name} heeft dit al afgehandeld",
   "notifications.needs_you.already_anon": "Iemand heeft dit al afgehandeld",
   "notifications.needs_you.failed": "Dat lukte niet. Probeer het opnieuw.",
+  "notifications.needs_you.review_required": "Bekijk deze aanvraag eerst beter",
   "notifications.needs_you.flag.edge": "Vlak bij de rand",
   "notifications.needs_you.flag.unpaired": "Huishouden waarmee je niet gekoppeld bent",
   "notifications.needs_you.flag.admin": "Wil beheerder worden",

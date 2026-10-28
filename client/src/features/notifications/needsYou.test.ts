@@ -17,8 +17,10 @@ import {
   approve,
   declineWithUndo,
   dropHandled,
+  flagsOf,
   flushDeclines,
   inlineAction,
+  mustReview,
   loadNeedsYou,
   needsYou,
   needsYouEntries,
@@ -46,6 +48,7 @@ beforeEach(() => {
   apiPost.mockReset().mockResolvedValue({})
   needsYou.value = []
   acting.value = new Set()
+  mustReview.value = new Map()
   toasts.value = []
 })
 
@@ -106,10 +109,41 @@ describe('actions', () => {
   it('approve posts at once and drops the item', async () => {
     needsYou.value = [row({ id: 'r1' })]
     await approve(needsYou.value[0])
-    expect(apiPost).toHaveBeenCalledWith('/api/spaces/s1/join-requests/r1/approve')
+    expect(apiPost).toHaveBeenCalledWith('/api/spaces/s1/join-requests/r1/approve', { via: 'inline' })
     expect(needsYou.value).toEqual([])
     expect(acting.value.size).toBe(0)
     expect(toasts.value.map(t => t.message)).toContain('Approved')
+  })
+
+  it('a refused one-tap approval (REVIEW_REQUIRED) turns the item into Review with the server\'s reasons', async () => {
+    const r1 = row({ id: 'r1' })
+    needsYou.value = [r1]
+    // The list reloads with the row's own (stale, empty) flags.
+    apiGet.mockResolvedValue({ items: [r1], count: 1 })
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('x'), {
+      status: 409, code: 'REVIEW_REQUIRED', extra: { params: { flags: 'age,edge' } },
+    }))
+    await approve(r1)
+    expect(needsYou.value.map(n => n.id)).toEqual(['r1'])
+    expect(acting.value.size).toBe(0)
+    expect(flagsOf(r1)).toEqual(['age', 'edge'])
+    expect(inlineAction(needsYou.value[0])).toBe('review')
+    const shown = toasts.value.map(t => [t.message, t.type])
+    expect(shown).toContainEqual(['Have a closer look at this request first', 'info'])
+    // Not read as a lost race, nor as an error.
+    expect(shown.map(([, type]) => type)).not.toContain('error')
+    expect(shown.map(([m]) => m)).not.toContain('Someone already handled this')
+    // Once someone handles it (on the review page), the override goes too.
+    dropHandled(['join_request:r1'])
+    expect(mustReview.value.size).toBe(0)
+  })
+
+  it('REVIEW_REQUIRED without named flags still never offers one tap again', async () => {
+    const r1 = row({ id: 'r1' })
+    needsYou.value = [r1]
+    apiPost.mockRejectedValueOnce(Object.assign(new Error('x'), { status: 409, code: 'REVIEW_REQUIRED' }))
+    await approve(r1)
+    expect(inlineAction(r1)).toBe('review')
   })
 
   it('a tap that lost the race hears who won, not an error', async () => {
