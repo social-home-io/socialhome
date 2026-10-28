@@ -388,16 +388,6 @@ class CallSignalingService(BusPublisherMixin, ProtectionGateMixin):
                     "participants": roster,
                 },
             )
-        if local_callees:
-            await self._emit(
-                CallRinging(
-                    call_id=call_id,
-                    conversation_id=conversation_id,
-                    caller_user_id=caller_user_id,
-                    callee_user_ids=tuple(u.user_id for u in local_callees),
-                    call_type=call_type,
-                )
-            )
         # Federate each remote callee.
         if self._federation is not None:
             for remote_instance, remote_user_id in remote_callees:
@@ -425,6 +415,17 @@ class CallSignalingService(BusPublisherMixin, ProtectionGateMixin):
                         exc,
                         exc_info=True,
                     )
+        # Last: the pushes for local callees never hold up a remote ring.
+        if local_callees:
+            await self._emit(
+                CallRinging(
+                    call_id=call_id,
+                    conversation_id=conversation_id,
+                    caller_user_id=caller_user_id,
+                    callee_user_ids=tuple(u.user_id for u in local_callees),
+                    call_type=call_type,
+                )
+            )
 
         return {
             "call_id": call_id,
