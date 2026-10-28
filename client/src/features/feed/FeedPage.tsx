@@ -16,6 +16,7 @@ import { posts, feedLoading, feedHasMore, loadFeed, mergePostEdit } from '@/stor
 import { api } from '@/api'
 import { connectionState, ws } from '@/ws'
 import { loadHouseholdUsers } from '@/store/householdUsers'
+import { markSeen } from '@/store/notifications'
 import { useTitle } from '@/store/pageTitle'
 import { PostCard } from '@/components/PostCard'
 import { Composer } from '@/components/Composer'
@@ -239,7 +240,8 @@ function HouseholdChatTab() {
 function FeedTabBody() {
   useEffect(() => {
     void loadHouseholdUsers()
-    loadFeed()
+    // Once the feed has shown, its "new posts" notification is read.
+    loadFeed().then(() => markSeen('/feed'), () => undefined)
   }, [])
 
   const handleLoadMore = () => {
