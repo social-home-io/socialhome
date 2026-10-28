@@ -14,7 +14,7 @@
  * and MUST go through addBase() so it resolves correctly under HA
  * Supervisor ingress (where the document base is not /).
  */
-import { useEffect, useRef, useState } from 'preact/hooks'
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
 import { useLocation, useRoute } from 'preact-iso'
 import { getRuntime, type AppRuntime } from '@/store/apps'
 import { mountBridge } from '@/features/apps/bridge'
@@ -57,9 +57,15 @@ export function AppHostInner({ appId }: { appId: string }) {
     return () => { cancelled = true }
   }, [appId])
 
-  // Mount the postMessage bridge once the iframe element AND runtime
-  // are both available.
-  useEffect(() => {
+  // Mount the postMessage bridge in the same commit that puts the iframe
+  // in the page — a layout effect, never a plain effect. Preact defers a
+  // plain effect until after the next paint (requestAnimationFrame, or a
+  // timeout in a background tab); a cached bundle can start the app and
+  // post its first request before then, and the SDK does not resend it,
+  // so the app hung and timed out ("Failed to load"). The frame's own
+  // messages arrive as later tasks, so a listener attached during this
+  // commit sees every one of them. Works for every SDK version.
+  useLayoutEffect(() => {
     const el = iframeRef.current
     if (!el || !runtime) return
     const cleanup = mountBridge(el, {

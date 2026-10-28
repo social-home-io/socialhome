@@ -26,7 +26,7 @@ Two transport paths carry app messages; the same `session_id` scopes both:
 
 | Path | Condition | Notes |
 |---|---|---|
-| **`fed-app-v1` binary DataChannel** | peer is CONFIRMED **and** channel is open **and** `peer_supports(MIN_FOR_APP_CHANNEL)` (v_17) | Fast path — no base64 overhead; high-frequency app traffic does not head-of-line-block control envelopes on `fed-v1`. **No `to_user` routing slot** — the binary frame format (v1) carries no per-user routing field. Binary inbound always falls back to the household fan-out; the receiver disambiguates by `session_id` (documented v1 limitation). |
+| **`fed-app-v1` binary DataChannel** | peer is CONFIRMED **and** channel is open **and** `peer_supports(MIN_FOR_APP_CHANNEL)` (v_17) | Fast path — no base64 overhead; high-frequency app traffic does not head-of-line-block control envelopes on `fed-v1`. The frame layout has no routing slot: `to_user` / `from_user` ride the frame's sealed envelope metadata instead (see *Binary path routing* below), routed like the JSON path. A frame without them (older sender) falls back to the household fan-out; the receiver disambiguates by `session_id`. |
 | **`APP_MESSAGE` JSON event over `fed-v1` / HTTPS** | anything else | Fallback — identical encryption and §24.11 validation; lower throughput. Carries `to_user`/`from_user` when the peer is v_18+ (see capability v_18). |
 
 Session control (`APP_SESSION`) always uses the JSON event path regardless of
@@ -57,12 +57,12 @@ sequenceDiagram
 
     Note over A,B: session open; moves/ops follow
 
-    alt fed-app-v1 binary path (v_17+ CONFIRMED direct peer — no per-user routing slot)
-        A->>A: FederationService.send_app_message()<br/>→ encrypt payload (AES-256-GCM)<br/>→ sign envelope<br/>→ build binary frame [u8 type][u32 hlen][header][u32 plen][payload]
+    alt fed-app-v1 binary path (v_17+ CONFIRMED direct peer)
+        A->>A: FederationService.send_app_message()<br/>→ encrypt payload (AES-256-GCM)<br/>→ seal metadata (+ to_user/from_user when peer is v_18+)<br/>→ sign envelope<br/>→ build binary frame [u8 type][u32 hlen][header][u32 plen][payload]
         A->>B: binary frame on fed-app-v1 DataChannel
         B->>B: iter_complete_frames → §24.11 header re-validation<br/>→ decrypt payload → verify payload_sha256
-        B->>B: on_inbound_message() — no to_user slot; household fan-out
-        B->>WS_B_all: app.message WS frame
+        B->>B: on_inbound_message(to_user, from_user from the sealed metadata)
+        B->>WS_B_user: app.message WS frame (routed to to_user, from_user named; else all users)
     else JSON path (sub-v17 or channel unavailable) — carries to_user for v_18+
         A->>A: FederationService.send_app_message()<br/>→ APP_MESSAGE JSON event (+ to_user/from_user when peer is v_18+)<br/>encrypted + Ed25519-signed
         A->>B: APP_MESSAGE event over fed-v1 / HTTPS inbox
@@ -122,16 +122,25 @@ in plaintext for routing.
 | `data` | yes | Application-defined dict.  The receiver's `_deliver` passes it as-is to the `app.message` WS frame's `payload` field. |
 | `to_user` | no (v_18+) | Per-user routing: the target user's username on the receiving household.  When present and non-empty, the receiver delivers the frame only to that user.  Omitted for sub-v_18 peers. |
 | `from_user` | no (v_18+) | The sender's username on the initiating household.  Omitted for sub-v_18 peers. |
+
+On the binary path `to_user` / `from_user` sit in the sealed envelope metadata beside the two binary-only fields below.
+
+| Field | Required | Notes |
+|---|---|---|
 | `app_aead_suite` | yes | Suite used for the binary payload seal (`"aesgcm-256"` today).  **Binary path only** — carried inside the envelope's encrypted metadata.  Receivers reject unknown suites via `UnsupportedAppAeadSuite`; no default fallback. |
 | `payload_sha256` | yes | Base64url SHA-256 of the **plaintext** application payload.  **Binary path only** — carried inside the encrypted envelope metadata.  Binds the binary payload to the signed header; the receiver verifies `sha256(plaintext) == payload_sha256` after decryption. |
 
 All fields are inside the encrypted payload.
 
-**v1 binary limitation:** the `fed-app-v1` binary frame format carries **no**
-`to_user` or `from_user` slot.  Binary inbound messages (`on_inbound_message`)
-always fall back to the household fan-out; the receiver disambiguates sessions
-by `session_id`.  Per-user routing on the binary fast-path is deferred to a
-future frame-format revision.
+**Binary path routing:** the `fed-app-v1` frame layout has no routing slot,
+so `to_user` / `from_user` ride the frame's **sealed envelope metadata**
+(beside `app_id`, `session_id`, `app_aead_suite`, `payload_sha256`) — signed and
+encrypted like the JSON path. A binary frame that carries them is routed and
+checked exactly like a JSON `APP_MESSAGE` (only to the addressed person; an
+unknown sender is refused). A frame without them (an older sender) falls back
+to the household fan-out and the receiver disambiguates by `session_id`. A
+receiver that predates the fields reads the metadata with `.get` and ignores
+them — it keeps the fan-out it always did, so this needs no capability bump.
 
 ## Binary frame format (`fed-app-v1`)
 
@@ -169,7 +178,7 @@ signature.
 The `AppFederationService._deliver` method delivers a frame to addressed local
 WebSocket connections when an inbound app event passes the §24.11 pipeline.
 For v_18+ person-routed events the frame goes only to the addressed user; for
-legacy/binary events it is broadcast to all local users with the app enabled:
+legacy events (an older sender naming nobody) it is broadcast to all local users with the app enabled:
 
 | Field | Type | Notes |
 |---|---|---|
@@ -177,11 +186,16 @@ legacy/binary events it is broadcast to all local users with the app enabled:
 | `app_id` | `string` | Identifies the installed app. |
 | `session_id` | `string` | Hex UUID that scopes the session — route messages to the correct in-page component using this. |
 | `from_instance` | `string` | Instance ID of the sending household — lets the app show who sent a move or issued an invite. |
-| `from_user` | `string` \| absent | Username of the initiator on the sending household.  Present for v_18+ person-routed events and local-loopback sessions; absent for legacy household-addressed events and binary inbound. |
+| `from_user` | `string` \| absent | Who sent it — the same `user_ref` the app's contact for that person carries, so the app can match and answer them: the local `user_id` for someone in this household, the username on the sending household for someone in another. Present on every same-household frame and on every v_18+ person-routed frame from another household (`APP_SESSION` and `APP_MESSAGE` alike); on the older household fan-out only when the named sender is a known user of `from_instance`; absent when the sender named nobody (an older household). **What is proven:** `from_instance` is the signature-verified sending household (§24.11); `from_user` is that household's own claim about which of its people sent it — the receiver only checks it names a user it knows of that household (a per-user frame with an unknown sender is refused). A household can speak for its own people, never for another household's. |
 | `kind` | `"session"` \| `"message"` | `"session"` for `APP_SESSION` control events (open/close); `"message"` for `APP_MESSAGE` JSON events and binary `fed-app-v1` data frames. |
 | `payload` | `object` | Application-defined dict. For `APP_SESSION` events this is the full decrypted payload (includes `verb`); for `APP_MESSAGE` events it is the `data` sub-field. |
 
 ### Bridge relay into the iframe
+
+The host (`client/src/features/apps/AppHost.tsx`) mounts the bridge's
+`message` listener in the same render commit that puts the iframe in the page
+(a layout effect), so an app whose cached bundle starts at once still has its
+first request answered — the SDK sends each request once and does not resend.
 
 The SPA host bridge (`client/src/features/apps/bridge.ts`) listens on
 `app.message` WS frames and, after filtering by `app_id`, relays the full
@@ -193,7 +207,7 @@ identity into the sandboxed iframe as a `MessageEvent`:
   kind: 'session' | 'message',   // forwarded from the WS frame
   sessionId: string,              // WS frame's session_id
   fromInstance: string,           // WS frame's from_instance
-  fromUser?: string,              // WS frame's from_user (v_18+ / local loopback; absent for legacy)
+  fromUser?: string,              // WS frame's from_user (absent when an older sender named nobody)
   payload: object,                // WS frame's payload
 }
 ```
@@ -202,8 +216,8 @@ This lets apps:
 - **Route by session** — use `sessionId` to dispatch a message to the correct
   game or whiteboard component when multiple sessions are open simultaneously.
 - **Show sender identity** — `fromInstance` names the peer household; `fromUser`
-  names the individual who sent the invite or move (available for v_18+ remote
-  and all local-loopback sessions).
+  names the individual who sent the invite or move (every same-household
+  frame and every v_18+ person-routed frame from another household).
 - **Distinguish invites from moves** — `kind === "session"` signals a
   lifecycle event (open/close); `kind === "message"` is in-game data.
 
@@ -211,13 +225,12 @@ This lets apps:
 
 `AppFederationService._deliver` routes inbound app messages:
 
-- **Person-routed (v_18+ JSON path):** when the inbound JSON event carries a
-  non-empty `to_user` that resolves to a local user (by username), the frame
+- **Person-routed (v_18+, JSON or binary):** when the inbound JSON event or
+  binary frame carries a non-empty `to_user` that resolves to a local user (by username), the frame
   is delivered **only to that user**.  For an `APP_SESSION {verb:"open"}`, an
   `AppChallengeReceived` event is also published (→ bell row + §25.3 push).
-- **Legacy / binary household fan-out:** when `to_user` is absent, empty, or
-  unresolvable — including all binary `fed-app-v1` frames, which carry no
-  routing slot — the frame is broadcast to **every local user** whose
+- **Legacy household fan-out:** when `to_user` is absent or empty (an older
+  sender, JSON or binary), the frame is broadcast to **every local user** whose
   WebSocket is open and who passes the app's age gate.  The `session_id`
   scopes the semantics so the SPA can dispatch to the correct component.
 
@@ -241,11 +254,10 @@ error.
   never widened to the whole household.
 - A JSON `APP_SESSION` / `APP_MESSAGE` without `to_user` from a v_18+
   household is refused: those senders always address a person. The
-  whole-household fan-out remains only for older households and for the
-  binary `fed-app-v1` frames (which carry no routing slot); it skips every
-  local user who blocked the named initiator. A binary frame names no
-  initiator, so blocks can't be applied to it (known limitation of the v1
-  frame format).
+  whole-household fan-out remains only for older households and for
+  binary `fed-app-v1` frames from senders that predate binary routing; it
+  skips every local user who blocked the named initiator. A frame that names
+  no initiator can't have blocks applied to it.
 - Locally, a session can't be opened with — or a message sent to — a
   household member who blocked the initiator (403 `FORBIDDEN`, the
   same answer as a non-contact), matching what a remote receiver does.
@@ -267,7 +279,7 @@ error.
   `APP_AEAD_SUITE_AESGCM_256`, `SUPPORTED_APP_AEAD_SUITES`,
   `UnsupportedAppAeadSuite`, `CHANNEL_LABEL = "fed-app-v1"`.
 - `socialhome/federation/federation_service.py` — `FederationService.send_app_message`:
-  selects binary or JSON path; passes `to_user`/`from_user` on the JSON path
+  selects binary or JSON path; passes `to_user`/`from_user` on both paths (sealed)
   when `peer_supports(MIN_FOR_APP_USER_ROUTING)`;
   `_app_inbound_handler` for binary frame dispatch.
 - `socialhome/domain/federation_capabilities.py` — `MIN_FOR_APP_CHANNEL = 17`,

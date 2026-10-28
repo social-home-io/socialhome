@@ -980,6 +980,81 @@ async def test_inbound_routes_to_resolved_user_when_to_user_present():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_type", "body", "kind"),
+    [
+        (FederationEventType.APP_SESSION, {"verb": "open"}, "session"),
+        (FederationEventType.APP_MESSAGE, {"data": {"move": "e2e4"}}, "message"),
+    ],
+)
+async def test_inbound_per_user_frame_names_the_sender(event_type, body, kind):
+    """A remote frame carries ``from_user`` like the same-household one.
+
+    The app needs it to tell which friend a move or invite came from (and to
+    answer them: it is the ``user_ref`` of that friend's contact). It is the
+    sending household's user, proven a user of the signature-checked
+    ``from_instance``.
+    """
+    app = _make_installed_app("chess")
+    users = [_make_user("u1", "alice"), _make_user("u2", "bob")]
+    svc, _, ws = _make_svc(
+        apps={"chess": app},
+        users=users,
+        remote_users=[_make_remote_user(remote_username="remote-alice")],
+    )
+
+    await svc.on_inbound_event(
+        _make_event(
+            event_type,
+            {
+                "app_id": "chess",
+                "session_id": "sess-1",
+                "to_user": "bob",
+                "from_user": "remote-alice",
+                **body,
+            },
+        )
+    )
+
+    [call] = ws.user_calls
+    assert call["user_id"] == "u2"
+    frame = call["payload"]
+    assert frame["kind"] == kind
+    assert frame["from_instance"] == "peer-inst-id"
+    assert frame["from_user"] == "remote-alice"
+
+
+@pytest.mark.asyncio
+async def test_inbound_household_frame_names_only_a_known_sender():
+    """The older-peer fan-out names the sender only when it is a known user.
+
+    A ``from_user`` that is not a user of the sending household is not put
+    on the frame; a frame with no sender named has no ``from_user`` at all.
+    """
+    app = _make_installed_app("chess")
+    users = [_make_user("u1", "alice")]
+    svc, _, ws = _make_svc(
+        apps={"chess": app},
+        users=users,
+        peer_version=17,
+        remote_users=[_make_remote_user(remote_username="remote-alice")],
+    )
+
+    for from_user in ("remote-alice", "nobody", None):
+        payload = {"app_id": "chess", "session_id": "s", "data": {}}
+        if from_user is not None:
+            payload["from_user"] = from_user
+        await svc.on_inbound_event(
+            _make_event(FederationEventType.APP_MESSAGE, payload)
+        )
+
+    known, unknown, unnamed = (c["payload"] for c in ws.calls)
+    assert known["from_user"] == "remote-alice"
+    assert "from_user" not in unknown
+    assert "from_user" not in unnamed
+
+
+@pytest.mark.asyncio
 async def test_inbound_empty_to_user_falls_back_to_broadcast():
     """An empty-string to_user (legacy household open) falls back to broadcast-all."""
     app = _make_installed_app("chess")
@@ -1080,8 +1155,8 @@ async def test_household_fanout_skips_recipients_who_blocked_the_initiator():
 
 
 @pytest.mark.asyncio
-async def test_inbound_binary_always_broadcasts():
-    """Binary path carries no to_user → broadcast-all even with multiple users."""
+async def test_inbound_binary_frame_without_people_broadcasts():
+    """A binary frame naming nobody (older sender) → household fan-out."""
     app = _make_installed_app("chess")
     users = [_make_user("u1", "alice"), _make_user("u2", "bob")]
     svc, _, ws = _make_svc(apps={"chess": app}, users=users)
@@ -1091,6 +1166,50 @@ async def test_inbound_binary_always_broadcasts():
     assert ws.user_calls == []
     assert len(ws.calls) == 1
     assert set(ws.calls[0]["user_ids"]) == {"u1", "u2"}
+
+
+@pytest.mark.asyncio
+async def test_inbound_binary_frame_goes_to_the_addressed_person_and_names_the_sender():
+    """A binary move naming both people is routed and labelled like JSON."""
+    app = _make_installed_app("chess")
+    users = [_make_user("u1", "alice"), _make_user("u2", "bob")]
+    svc, _, ws = _make_svc(
+        apps={"chess": app},
+        users=users,
+        remote_users=[_make_remote_user(remote_username="remote-alice")],
+    )
+
+    await svc.on_inbound_message(
+        "peer-inst-id",
+        "chess",
+        "sess-bin",
+        {"move": "d5"},
+        to_user="bob",
+        from_user="remote-alice",
+    )
+
+    assert ws.calls == []
+    [call] = ws.user_calls
+    assert call["user_id"] == "u2"
+    assert call["payload"]["kind"] == "message"
+    assert call["payload"]["from_user"] == "remote-alice"
+
+
+@pytest.mark.asyncio
+async def test_inbound_binary_frame_from_an_unknown_sender_is_refused():
+    """A binary frame addressed to a person must name a known sender."""
+    app = _make_installed_app("chess")
+    svc, _, ws = _make_svc(
+        apps={"chess": app},
+        users=[_make_user("u2", "bob")],
+        remote_users=[_make_remote_user(remote_username="remote-alice")],
+    )
+
+    await svc.on_inbound_message(
+        "peer-inst-id", "chess", "s", {}, to_user="bob", from_user="mallory"
+    )
+
+    assert ws.calls == [] and ws.user_calls == []
 
 
 # ─── Target authorization (Task 6 — item C) ──────────────────────────────────

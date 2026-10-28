@@ -3030,9 +3030,13 @@ async def test_app_inbound_handler_dispatches_to_app_fed():
     inbound_calls: list[tuple] = []
 
     class _FakeAppFed:
-        async def on_inbound_message(self, instance_id, app_id, session_id, payload):
+        async def on_inbound_message(
+            self, instance_id, app_id, session_id, payload, **routing
+        ):
             inbound_calls.append((instance_id, app_id, session_id, payload))
+            routings.append(routing)
 
+    routings: list[dict] = []
     p.svc_b.attach_apps(_FakeAppFed())
 
     # Build a valid binary-channel frame from A's perspective.
@@ -3053,6 +3057,48 @@ async def test_app_inbound_handler_dispatches_to_app_fed():
     assert app_id == "chess"
     assert session_id == "sess-bin"
     assert payload == {"move": "g1f3"}
+    # No person named by the sender (older shape): household-addressed.
+    assert routings == [{"to_user": None, "from_user": None}]
+
+
+@pytest.mark.asyncio
+async def test_app_binary_frame_carries_the_people_it_is_between():
+    """to_user / from_user ride the binary frame's sealed metadata.
+
+    They sit inside the signed + encrypted envelope metadata (never in a
+    plaintext field), so the receiver can deliver to the addressed person
+    and tell the app who sent the move — same as the JSON path. A receiver
+    that predates them reads the metadata with ``.get`` and ignores them.
+    """
+    p = _paired_app()
+    routings: list[dict] = []
+
+    class _FakeAppFed:
+        async def on_inbound_message(
+            self, instance_id, app_id, session_id, payload, **routing
+        ):
+            routings.append(routing)
+
+    p.svc_b.attach_apps(_FakeAppFed())
+    await p.svc_a.send_app_message(
+        to_instance_id=p.b_id,
+        app_id="chess",
+        session_id="sess-bin",
+        payload={"move": "g1f3"},
+        to_user="bob",
+        from_user="alice",
+    )
+    assert p.cap.app is not None
+    assert p.cap.json_envelopes == []  # the binary path carried it
+    header, payload_bytes = p.cap.app
+    assert "bob" not in orjson.dumps(header).decode()
+    meta = orjson.loads(
+        p.svc_b._encoder.decrypt_payload(header["encrypted_payload"], p.session)
+    )
+    assert (meta["to_user"], meta["from_user"]) == ("bob", "alice")
+
+    await p.svc_b._app_inbound_handler(p.a_id, orjson.dumps(header), payload_bytes)
+    assert routings == [{"to_user": "bob", "from_user": "alice"}]
 
 
 @pytest.mark.asyncio
@@ -3117,7 +3163,9 @@ async def test_app_inbound_handler_rejects_tampered_payload():
     inbound_calls: list[tuple] = []
 
     class _FakeAppFed:
-        async def on_inbound_message(self, instance_id, app_id, session_id, payload):
+        async def on_inbound_message(
+            self, instance_id, app_id, session_id, payload, **routing
+        ):
             inbound_calls.append((instance_id, app_id, session_id, payload))
 
     p.svc_b.attach_apps(_FakeAppFed())
