@@ -14,6 +14,7 @@ from socialhome.services.user_preferences import (
     MAX_TIMETABLE_HOME_PINS,
     parse_ha_automation_events,
     parse_highlights_preferences,
+    parse_locale,
     parse_moment_preferences,
     parse_notif_settings,
     parse_timetable_home_pins,
@@ -171,3 +172,21 @@ def test_notif_settings_read_the_kinds_and_muted_posts():
     )
     assert s.delivery(NotifKind.ACTIVITY) is NotifDelivery.PUSH
     assert list(s.muted_posts) == ["post:p1"]
+
+
+@pytest.mark.parametrize(
+    ("blob", "want"),
+    [
+        ('{"locale": "de"}', "de"),
+        ('{"locale": " nl "}', "nl"),
+        ('{"locale": ""}', None),
+        ('{"locale": 7}', None),
+        ("{}", None),
+        ("[]", None),
+        ("not json", None),
+        (None, None),
+    ],
+)
+def test_parse_locale(blob, want):
+    """The language picked in the app (``PATCH /api/me`` preferences)."""
+    assert parse_locale(blob) == want

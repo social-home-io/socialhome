@@ -147,6 +147,41 @@ async def test_post_created_alice_gets_english(env):
     assert "Bob posted" in alice[0].title
 
 
+async def test_language_picked_in_the_app_wins(env):
+    """The SPA saves the language a person picks as ``preferences.locale``
+    (``PATCH /api/me``) — nothing writes ``users.locale``. A row written
+    for someone who picked German must read German (it rendered in English
+    in the German UI: #1217's screenshots)."""
+    bus, repo, db = env
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, preferences_json)"
+        " VALUES('carl', 'c-id', 'Carl', ?)",
+        (orjson.dumps({"locale": "de"}).decode(),),
+    )
+    # Alice's column says English; her latest pick in the app is German.
+    await db.enqueue(
+        "UPDATE users SET preferences_json=? WHERE username='alice'",
+        (orjson.dumps({"locale": "de"}).decode(),),
+    )
+    p2 = Post(
+        id="p2",
+        author="b-id",
+        type=PostType.TEXT,
+        content="hi",
+        created_at=datetime(2026, 4, 15, tzinfo=UTC),
+    )
+    await bus.publish(PostCreated(post=p2))
+    assert (await repo.list("c-id"))[0].title == "Bob hat gepostet"
+    assert (await repo.list("a-id"))[0].title == "Bob hat gepostet"
+
+
+@pytest.mark.parametrize("prefs", ["{}", "not json", '{"locale": 7}', "[]"])
+def test_locale_falls_back_to_the_column(prefs):
+    user = SimpleNamespace(locale="nl", preferences_json=prefs)
+    assert NotificationService._locale(user) == "nl"
+    assert NotificationService._locale(None) is None
+
+
 async def test_task_assigned_uses_recipient_locale(env):
     bus, repo, _ = env
     now = datetime(2026, 4, 15, tzinfo=UTC)
