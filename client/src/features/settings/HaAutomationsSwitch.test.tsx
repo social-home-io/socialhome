@@ -57,10 +57,10 @@ describe('HaAutomationsSwitch (D14)', () => {
     apiMock.patch.mockResolvedValueOnce({})
     const { getByRole, getByText } = render(<HaAutomationsSwitch />)
     const box = getByRole('checkbox', {
-      name: 'Send my notifications to Home Assistant automations',
+      name: 'Send my notifications and activity to Home Assistant automations',
     }) as HTMLInputElement
     expect(box.checked).toBe(false)
-    expect(getByText(/never what it says/)).toBeTruthy()
+    expect(getByText(/never names, titles or what anything says/)).toBeTruthy()
     fireEvent.click(box)
     await waitFor(() => expect(apiMock.patch).toHaveBeenCalledWith(
       '/api/me', { preferences: { ha_automation_events: true } },

@@ -200,8 +200,10 @@ def parse_timetable_home_pins(preferences_json: str | None) -> tuple[str, ...]:
 
 
 #: ``preferences_json["ha_automation_events"]`` — the person's opt-in to
-#: have their notifications fired on Home Assistant's event bus
-#: (``socialhome.notification_new``) for automations. Off by default (D14):
+#: have their notifications and their own activity fired on Home
+#: Assistant's event bus (``socialhome.notification_new`` and every other
+#: personal event in :mod:`socialhome.services.ha_bridge_service`) for
+#: automations. Off by default (D14):
 #: anyone with HA admin, logbook or automation access sees those events.
 HA_AUTOMATION_EVENTS_KEY = "ha_automation_events"
 

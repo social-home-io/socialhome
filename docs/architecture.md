@@ -142,14 +142,28 @@ HaBridgeService` (wired by both HA adapters, which advertise
 `Capability.AUTOMATION_EVENTS`) fires a narrow set of `socialhome.*`
 events on HA's event bus (`POST /api/events/<type>`; HA stores events in
 its database and shows them to anyone with admin, logbook or automation
-access). `socialhome.notification_new` is personal: it fires only for a
-person who opted in under Settings → Notifications
-(`preferences_json.ha_automation_events`, off by default), never for a
-protected account (refused on `PATCH /api/me` as `ha_automations`, dropped
-when protection starts, and re-checked at fire time), never again for a
-bumped row, and carries no title or text:
-`{user_id, username, notification_id, type, link_url}`. A failed fire is
-logged at WARNING.
+access). Every fired event is classified in `HA_EVENT_SCOPES` (a test
+fails on an unclassified one, and the bridge refuses to fire it). Every
+event that concerns or names a person or carries user content is
+**personal**: `notification_new` (the recipient), `dm_received` (each
+local recipient), `post_created` / `space_post_created` (the author),
+`space_post_moderated` (the author whose post was removed),
+`task_assigned` (the assignee), `task_completed` (who completed it),
+`task_deadline_due` (each assignee), `calendar_event_created` (the
+creator), `calendar_event_deleted` (who deleted it), `bazaar_bid_placed`
+(the seller), `user_status_changed` and `presence_updated` (that person).
+A personal event fires once per subject who is a local account, opted in
+under Settings → Notifications (`preferences_json.ha_automation_events`,
+off by default) and is not protected (refused on `PATCH /api/me` as
+`ha_automations`, dropped when protection starts, and re-checked at fire
+time). It carries the subject's own `user_id` / `username`, ids, a kind
+and an in-app `link_url` where one exists — never a display name, title,
+summary, message, status text, zone, amount or anyone else's id.
+`notification_new` never fires again for a bumped row. The one
+**household** event is `space_config_changed`
+`{space_id, event_type, sequence}` (a space's settings; no person, no
+change payload), which fires without an opt-in. A failed fire is logged
+at WARNING.
 
 Wall panels adopted in Home Assistant are found through the optional
 `DisplayDirectory` Provider (`adapter.displays`; `None` on standalone).

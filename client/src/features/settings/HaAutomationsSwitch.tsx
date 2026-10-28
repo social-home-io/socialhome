@@ -1,7 +1,8 @@
 /**
  * HaAutomationsSwitch — Settings → Notifications: the person's opt-in to
- * have their notifications fired on Home Assistant's event bus
- * (`socialhome.notification_new`) for automations (D14).
+ * have their notifications and their own activity (DMs they get, their
+ * posts, tasks, events, listings, status, presence) fired on Home
+ * Assistant's event bus as `socialhome.*` events for automations (D14).
  *
  * Off by default. Shown only when the platform forwards events to an
  * automation engine (`automation_events` capability — ha + haos) and the
