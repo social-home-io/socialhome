@@ -1,6 +1,7 @@
 import type { ComponentChildren, JSX } from 'preact'
 import { Router } from 'preact-iso'
 import { IngressLocationProvider as LocationProvider } from '@/router/IngressLocationProvider'
+import { HaPanelRoute } from '@/router/haPanelRoute'
 import { useComputed, signal } from '@preact/signals'
 import { useEffect } from 'preact/hooks'
 import { basePath } from '@/baseUrl'
@@ -293,6 +294,9 @@ export function App() {
   return (
     <ErrorBoundary>
       <LocationProvider>
+        {/* Under haos: open the page HA's App panel was asked for (a
+         *  Companion push tap lands on /<slug>/<path>). */}
+        <HaPanelRoute />
         <SkipLink />
         <OfflineIndicator />
         <InstallPrompt />

@@ -52,6 +52,12 @@ export const homeLocationFromPlatform = (): boolean => hasCapability('home_locat
  *  send one's notifications there (D14). */
 export const supportsAutomationEvents = (): boolean => hasCapability('automation_events')
 
+/** Served through Home Assistant ingress (the App's sidebar panel embeds
+ *  the SPA in an iframe), so the panel's route — e.g. where a Companion
+ *  push tap was meant to land — reaches us by postMessage
+ *  (`router/haPanelRoute`). */
+export const servedThroughIngress = (): boolean => hasCapability('ingress')
+
 // ── Mode-shaped accessors (intent over raw string compares) ──────────────
 
 /** Running against Home Assistant in either form (Core REST or add-on). */

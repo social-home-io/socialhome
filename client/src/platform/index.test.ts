@@ -12,6 +12,7 @@ import {
   supportsAi,
   supportsPush,
   supportsZoneSync,
+  servedThroughIngress,
 } from './index'
 
 function set(mode: 'standalone' | 'ha' | 'haos' | null, caps: string[] = []) {
@@ -70,10 +71,16 @@ describe('platform adapter', () => {
     expect(supportsZoneSync()).toBe(false)
   })
 
+  it('servedThroughIngress reads the ingress capability', () => {
+    set('haos', ['ingress']); expect(servedThroughIngress()).toBe(true)
+    set('ha', []); expect(servedThroughIngress()).toBe(false)
+  })
+
   it('all accessors are safe before config loads', () => {
     set(null)
     expect(isHomeAssistant()).toBe(false)
     expect(supportsStt()).toBe(false)
     expect(managesLocalUsers()).toBe(false)
+    expect(servedThroughIngress()).toBe(false)
   })
 })
