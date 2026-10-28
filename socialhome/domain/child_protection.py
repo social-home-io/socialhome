@@ -18,9 +18,10 @@ third-party tool:
   external tool holds).
 * ``calendar_feeds`` — mint a space-calendar subscription link (an
   unauthenticated URL that exposes the account's schedule).
-* ``ha_automations`` — send the account's notifications to Home
-  Assistant automations (the ``socialhome.notification_new`` event on
-  HA's event bus, readable by anyone with HA admin or automation access).
+* ``ha_automations`` — send the account's notifications and activity to
+  Home Assistant automations (``socialhome.notification_new`` and every
+  other personal ``socialhome.*`` event on HA's event bus, readable by
+  anyone with HA admin or automation access).
 
 The capability ids are the wire values ``/api/me`` reports and the
 ``ACCOUNT_PROTECTED`` error carries, so the SPA can explain *what* is
