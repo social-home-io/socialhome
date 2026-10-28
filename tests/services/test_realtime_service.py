@@ -1001,6 +1001,7 @@ async def test_notification_new_targets_one_user(env):
     assert any("notification.new" in m for m in me.sent)
     assert all("notification.new" not in m for m in other.sent)
     assert any('"bumped":false' in m for m in me.sent)
+    assert any('"kind":"activity"' in m for m in me.sent)  # D4
 
 
 async def test_notification_new_says_when_it_bumped_a_row(env):

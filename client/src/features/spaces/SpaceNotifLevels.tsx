@@ -4,38 +4,37 @@
  * per-space bell that used to sit in the space header is gone (owner
  * decision 6). Sharing your location moved to the Map section.
  *
- * Levels (enforced server-side by
- * NotificationService.on_space_post_created):
- *   - all       — every new post in this space pings the bell
- *   - mentions  — only posts that @mention the caller
- *   - muted     — nothing from this space
+ * Levels — one vocabulary with chats (D9; enforced server-side by
+ * NotificationService):
+ *   - all       — "Everything": every new post, in the app
+ *   - mentions  — "Replies and mentions"
+ *   - muted     — "Nothing", for a while or until turned back on
  *
  * ``useSpaceNotifLevel`` reads ``GET /api/spaces/{id}/notif-prefs``;
- * ``SpaceNotifLevelPicker`` is a native radio group (arrow keys move
- * between the choices, as in any radio group) that saves on pick with
+ * ``SpaceNotifLevelPicker`` is the shared :class:`NotifLevelPicker` (a
+ * native radio group; Nothing asks "For how long?") saving with
  * ``PUT …/notif-prefs``.
  */
-import { useEffect, useId, useState } from 'preact/hooks'
+import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
+import { NotifLevelPicker, levelLabel } from '@/components/NotifLevelPicker'
 import { showToast } from '@/components/Toast'
 import { ChatNotifChoices, type ChatNotif } from '@/features/dms/ChatNotifChoices'
 import { t } from '@/i18n/i18n'
 import {
+  getSpaceLevel, setSpaceLevel, type NotifLevel, type SpaceLevelState,
+} from '@/store/notifSettings'
+import {
   claimSpaceChat, loadSpaceChat, patchSpaceChat, spaceChatOf,
 } from '@/store/spaceChat'
+import type { MuteDuration } from '@/utils/mute'
 
-export type NotifLevel = 'all' | 'mentions' | 'muted'
+export type { NotifLevel }
 
 const LEVELS: readonly NotifLevel[] = ['all', 'mentions', 'muted']
 
 /** The level's label, in the UI language — looked up at render time. */
-export function notifLevelLabel(level: NotifLevel): string {
-  switch (level) {
-    case 'all': return t('space.notif.level_all')
-    case 'mentions': return t('space.notif.level_mentions')
-    case 'muted': return t('space.notif.level_muted')
-  }
-}
+export const notifLevelLabel = levelLabel
 
 function isLevel(v: unknown): v is NotifLevel {
   return typeof v === 'string' && (LEVELS as readonly string[]).includes(v)
@@ -71,54 +70,51 @@ interface PickerProps {
 }
 
 export function SpaceNotifLevelPicker({ spaceId, level, onSaved, legend }: PickerProps) {
-  const [saving, setSaving] = useState(false)
-  const name = useId()
+  // The full state — default, a running mute and what comes back after it
+  // — is the picker's own; the parent keeps only the level for its label.
+  const [state, setState] = useState<SpaceLevelState | null>(null)
+  useEffect(() => {
+    let stopped = false
+    getSpaceLevel(spaceId)
+      .then((s) => { if (!stopped) setState(s) })
+      .catch(() => { /* the level from the parent still shows */ })
+    return () => { stopped = true }
+  }, [spaceId])
 
-  const choose = async (next: NotifLevel) => {
-    if (saving || next === level) return
-    setSaving(true)
+  const shown = state ?? { level, muted_until: null, then_level: null }
+
+  const pick = async (next: NotifLevel, duration?: MuteDuration): Promise<boolean> => {
     try {
-      const body = await api.put(
-        `/api/spaces/${spaceId}/notif-prefs`, { level: next },
-      ) as { level?: unknown }
-      const saved = isLevel(body?.level) ? body.level : next
+      const saved = await setSpaceLevel(spaceId, next, duration)
+      setState(saved)
       showToast(
-        saved === 'muted'
+        saved.level === 'muted'
           ? t('space.notif.muted_toast')
-          : saved === 'mentions'
+          : saved.level === 'mentions'
             ? t('space.notif.mentions_toast')
             : t('space.notif.all_toast'),
         'success',
       )
-      onSaved(saved)
+      onSaved(saved.level)
+      return true
     } catch (err: unknown) {
       showToast(t('space.notif.save_failed', { error: (err as Error).message }), 'error')
-    } finally {
-      setSaving(false)
+      return false
     }
   }
 
   return (
-    <fieldset class="sh-space-notif-levels" disabled={saving}>
-      {legend
-        ? <legend class="sh-space-notif-levels__legend">{legend}</legend>
-        : <legend class="sr-only">{t('space.more.notifications')}</legend>}
-      {LEVELS.map((opt) => (
-        <label key={opt} class="sh-space-notif-levels__option">
-          <input
-            type="radio"
-            name={name}
-            value={opt}
-            checked={level === opt}
-            onChange={() => void choose(opt)}
-          />
-          <span class="sh-space-notif-levels__text">
-            <span class="sh-space-notif-levels__title">{notifLevelLabel(opt)}</span>
-            <span class="sh-space-notif-levels__meta">{t(`space.notif.level_${opt}_hint`)}</span>
-          </span>
-        </label>
-      ))}
-    </fieldset>
+    <NotifLevelPicker
+      legend={legend ?? t('space.more.notifications')}
+      legendHidden={!legend}
+      levels={LEVELS}
+      level={shown.level}
+      defaultLevel={state?.default_level ?? null}
+      mutedUntil={shown.muted_until}
+      thenLevel={shown.then_level}
+      hint={(l) => t(`space.notif.level_${l}_hint`)}
+      onPick={pick}
+    />
   )
 }
 
@@ -142,6 +138,7 @@ export function useSpaceChatNotif(spaceId: string, enabled: boolean): SpaceChatN
   return {
     convId: chat.conversation_id,
     mutedUntil: chat.muted_until ?? null,
+    defaultLevel: 'mentions',
     level: chat.notif_level ?? 'mentions',
     onMute: (until) => patchSpaceChat({ muted_until: until }),
     onLevel: (next) => patchSpaceChat({ notif_level: next }),

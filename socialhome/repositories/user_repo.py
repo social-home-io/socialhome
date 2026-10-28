@@ -12,6 +12,7 @@ patching, …) are added here as the services that need them come online.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 import uuid
 from datetime import UTC, datetime
@@ -21,6 +22,9 @@ from ..db import AsyncDatabase
 from ..domain.move_errors import StaleMoveLink
 from ..domain.user import RemoteUser, User, UserStatus
 from .base import bool_col, row_to_dict, rows_to_dicts
+
+#: A preferences key :meth:`SqliteUserRepo.touch_preference_entry` accepts.
+_PLAIN_KEY = re.compile(r"^[A-Za-z0-9_.:\-]{1,160}$")
 
 # ─── Abstract interface ───────────────────────────────────────────────────
 
@@ -40,6 +44,9 @@ class AbstractUserRepo(Protocol):
     async def set_admin(self, username: str, is_admin: bool) -> None: ...
     async def set_last_seen(self, user_id: str, at: str) -> None: ...
     async def set_tz(self, username: str, tz: str) -> None: ...
+    async def touch_preference_entry(
+        self, user_id: str, key: str, sub_key: str, value: str
+    ) -> None: ...
     async def set_user_identity_key(
         self,
         username: str,
@@ -351,6 +358,25 @@ class SqliteUserRepo:
         await self._db.enqueue(
             "UPDATE users SET last_seen_at=? WHERE user_id=?",
             (at, user_id),
+        )
+
+    async def touch_preference_entry(
+        self, user_id: str, key: str, sub_key: str, value: str
+    ) -> None:
+        """Set ``preferences_json[key][sub_key]`` to ``value`` — only when
+        that entry is there already (a concurrent removal wins), in one
+        statement, so nothing else in the blob can be lost to a race.
+
+        Both keys must be plain (letters, digits, ``_ . : -``); anything
+        else raises :class:`ValueError` (they become a JSON path)."""
+        if not (_PLAIN_KEY.match(key) and _PLAIN_KEY.match(sub_key)):
+            raise ValueError("preference keys must be plain")
+        path = f'$."{key}"."{sub_key}"'
+        await self._db.enqueue(
+            "UPDATE users SET preferences_json = json_set(preferences_json, ?, ?)"
+            " WHERE user_id = ? AND json_valid(preferences_json)"
+            " AND json_type(preferences_json, ?) IS NOT NULL",
+            (path, value, user_id, path),
         )
 
     async def set_tz(self, username: str, tz: str) -> None:

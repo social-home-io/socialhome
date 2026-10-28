@@ -1,87 +1,81 @@
 /**
- * ChatNotifChoices — the notification choices of a system chat (a
- * space's chat, the household chat), outside the chat itself.
+ * ChatNotifChoices — the notification choices of a chat outside the chat
+ * itself (a space's chat, the household chat, a group's info).
+ *
+ * The shared :class:`NotifLevelPicker` (D9): Everything / Replies and
+ * mentions / Nothing. A chat's "Nothing" is its mute (``PUT …/mute`` with
+ * a length), so while it lasts the level from before stays stored and
+ * comes back afterwards.
  */
-import { useId, useState } from 'preact/hooks'
-import { Button } from '@/components/Button'
+import { NotifLevelPicker } from '@/components/NotifLevelPicker'
+import { showToast } from '@/components/Toast'
 import { t } from '@/i18n/i18n'
-import type { ConversationNotifLevel } from '@/store/dms'
-import { MUTE_DURATIONS, isMuteActive, muteDurationLabel, mutedLabel, type MuteDuration } from '@/utils/mute'
-import { applyLevel, applyMute } from './ConversationMute'
+import {
+  setConversationMute, setConversationNotifLevel, type ConversationNotifLevel,
+} from '@/store/dms'
+import type { NotifLevel } from '@/store/notifSettings'
+import { isMuteActive, type MuteDuration } from '@/utils/mute'
 
-/** A system chat's notification state and its setters. */
+/** A chat's notification state and its setters. */
 export interface ChatNotif {
   convId: string
   mutedUntil: string | null
   level: ConversationNotifLevel
   onMute: (mutedUntil: string | null) => void
   onLevel: (level: ConversationNotifLevel) => void
+  /** The level a new seat starts at (gets the "Default" tag). */
+  defaultLevel?: ConversationNotifLevel
 }
 
-/** A system chat's level (all / @mentions), as radio cards in the same
- *  style as a space's posts level, and its mute: a labelled "Mute the
- *  chat for…" group while it's on, the muted state and Unmute while it's
- *  muted. Used for a space's chat ("Your notifications") and the
- *  household chat (Settings › Notifications) — neither chat has a bell
- *  of its own. */
-export function ChatNotifChoices({ chat, legend }: { chat: ChatNotif; legend: string }) {
-  const [saving, setSaving] = useState(false)
-  const name = useId()
-  const labelId = useId()
+const GROUP_LEVELS: readonly NotifLevel[] = ['all', 'mentions', 'muted']
+
+/** Save *next* for *chat*: a mute with its length, or a level (ending a
+ *  running mute first). One toast; ``false`` on a failure. */
+export async function pickChatLevel(
+  chat: ChatNotif,
+  next: NotifLevel,
+  duration?: MuteDuration,
+): Promise<boolean> {
+  try {
+    if (next === 'muted') {
+      chat.onMute(await setConversationMute(chat.convId, duration ?? 'forever'))
+      showToast(t('dms.mute.toast_muted'), 'success')
+      return true
+    }
+    if (isMuteActive(chat.mutedUntil)) {
+      chat.onMute(await setConversationMute(chat.convId, null))
+    }
+    if (next !== chat.level) {
+      chat.onLevel(await setConversationNotifLevel(chat.convId, next))
+    }
+    showToast(t(next === 'all' ? 'dms.notif.toast_all' : 'dms.notif.toast_mentions'), 'success')
+    return true
+  } catch {
+    showToast(t('dms.mute.error'), 'error')
+    return false
+  }
+}
+
+export function ChatNotifChoices({ chat, legend, legendHidden }: {
+  chat: ChatNotif
+  legend: string
+  /** A heading above already names it. */
+  legendHidden?: boolean
+}) {
   const muted = isMuteActive(chat.mutedUntil)
-  const pick = async (next: ConversationNotifLevel) => {
-    if (saving || next === chat.level) return
-    setSaving(true)
-    await applyLevel(chat.convId, next, chat.onLevel)
-    setSaving(false)
-  }
-  const mute = async (d: MuteDuration | null) => {
-    if (saving) return
-    setSaving(true)
-    await applyMute(chat.convId, d, chat.onMute)
-    setSaving(false)
-  }
   return (
     <div class="sh-space-chat-notif" data-testid="space-chat-notif">
-      <fieldset class="sh-space-notif-levels" disabled={saving}>
-        <legend class="sh-space-notif-levels__legend">{legend}</legend>
-        {(['all', 'mentions'] as const).map(opt => (
-          <label key={opt} class="sh-space-notif-levels__option">
-            <input type="radio" name={name} value={opt} checked={chat.level === opt}
-                   onChange={() => void pick(opt)} />
-            <span class="sh-space-notif-levels__text">
-              <span class="sh-space-notif-levels__title">
-                {t(opt === 'all' ? 'dms.notif.all' : 'dms.notif.mentions')}
-              </span>
-              <span class="sh-space-notif-levels__meta">
-                {t(opt === 'all' ? 'space.notif.chat_all_hint' : 'space.notif.chat_mentions_hint')}
-              </span>
-            </span>
-          </label>
-        ))}
-      </fieldset>
-      {muted ? (
-        <div class="sh-space-chat-notif__muted" role="status">
-          <span><span aria-hidden="true">🔕 </span>{mutedLabel(chat.mutedUntil as string)}</span>
-          <Button variant="secondary" disabled={saving} onClick={() => void mute(null)}>
-            {t('dms.mute.unmute')}
-          </Button>
-        </div>
-      ) : (
-        <div class="sh-space-chat-notif__mute" role="group" aria-labelledby={labelId}>
-          <span id={labelId} class="sh-space-chat-notif__mute-label">
-            {t('space.notif.mute_chat_for')}
-          </span>
-          <div class="sh-space-chat-notif__chips">
-            {MUTE_DURATIONS.map(d => (
-              <button key={d} type="button" class="sh-chip" disabled={saving}
-                      onClick={() => void mute(d)}>
-                {muteDurationLabel(d)}
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
+      <NotifLevelPicker
+        legend={legend}
+        legendHidden={legendHidden}
+        levels={GROUP_LEVELS}
+        level={muted ? 'muted' : chat.level}
+        defaultLevel={chat.defaultLevel ?? null}
+        mutedUntil={muted ? chat.mutedUntil : null}
+        thenLevel={muted ? chat.level : null}
+        hint={(l) => t(`notif.level.chat_${l}_hint`)}
+        onPick={(next, d) => pickChatLevel(chat, next, d)}
+      />
     </div>
   )
 }

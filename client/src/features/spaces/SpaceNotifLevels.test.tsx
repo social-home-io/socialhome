@@ -40,28 +40,64 @@ describe('useSpaceNotifLevel', () => {
 })
 
 describe('SpaceNotifLevelPicker', () => {
-  it('is a radio group with the current level checked', () => {
-    const { getByRole } = render(<SpaceNotifLevelPicker spaceId="s1" level="mentions" onSaved={vi.fn()} />)
-    expect((getByRole('radio', { name: /^Only @mentions/ }) as HTMLInputElement).checked).toBe(true)
-    expect((getByRole('radio', { name: /^All posts/ }) as HTMLInputElement).checked).toBe(false)
-    expect(getByRole('group', { name: 'Your notifications' })).toBeTruthy()
+  const state = (over: Record<string, unknown> = {}) => ({
+    level: 'mentions', is_default: true, default_level: 'mentions',
+    muted_until: null, then_level: null, ...over,
   })
 
-  it('saves a pick and reports the saved level', async () => {
-    mockPut.mockResolvedValue({ level: 'muted' })
+  it('is a radio group with the current level checked and the default tagged', async () => {
+    mockGet.mockResolvedValue(state())
+    const { getByRole, findByText } = render(
+      <SpaceNotifLevelPicker spaceId="s1" level="mentions" onSaved={vi.fn()} />,
+    )
+    expect((getByRole('radio', { name: /^Replies and mentions/ }) as HTMLInputElement).checked).toBe(true)
+    expect((getByRole('radio', { name: /^Everything/ }) as HTMLInputElement).checked).toBe(false)
+    expect(getByRole('group', { name: 'Your notifications' })).toBeTruthy()
+    expect(await findByText('Default')).toBeTruthy()
+  })
+
+  it('Nothing asks for how long, then saves with the length', async () => {
+    mockGet.mockResolvedValue(state())
+    const until = new Date(Date.now() + 8 * 3600e3).toISOString()
+    mockPut.mockResolvedValue(state({
+      level: 'muted', is_default: false, muted_until: until, then_level: 'mentions',
+    }))
     const onSaved = vi.fn()
-    const { getByRole } = render(<SpaceNotifLevelPicker spaceId="s1" level="all" onSaved={onSaved} />)
-    fireEvent.click(getByRole('radio', { name: /^Muted/ }))
+    const { getByRole, findByRole, findByText } = render(
+      <SpaceNotifLevelPicker spaceId="s1" level="mentions" onSaved={onSaved} />,
+    )
+    fireEvent.click(getByRole('radio', { name: /^Nothing/ }))
+    expect(mockPut).not.toHaveBeenCalled()
+    const ask = await findByRole('group', { name: 'For how long?' })
+    expect(Array.from(ask.querySelectorAll('button')).map(b => b.textContent)).toEqual([
+      'Until I turn it back on', '1 hour', '8 hours', '1 week',
+    ])
+    fireEvent.click(ask.querySelectorAll('button')[2])
     await waitFor(() => expect(onSaved).toHaveBeenCalledWith('muted'))
-    expect(mockPut).toHaveBeenCalledWith('/api/spaces/s1/notif-prefs', { level: 'muted' })
-    expect(toast).toHaveBeenCalledWith(expect.stringContaining('Muted'), 'success')
+    expect(mockPut.mock.calls[0][0]).toBe('/api/spaces/s1/notif-prefs')
+    expect(mockPut.mock.calls[0][1]).toEqual({ level: 'muted', duration: '8h' })
+    expect(await findByText(/^Quiet until .*, then back to Replies and mentions$/)).toBeTruthy()
+  })
+
+  it('Undo on a timed mute brings the level from before back', async () => {
+    const until = new Date(Date.now() + 3600e3).toISOString()
+    mockGet.mockResolvedValue(state({ level: 'muted', muted_until: until, then_level: 'all' }))
+    mockPut.mockResolvedValue(state({ level: 'all', is_default: false }))
+    const onSaved = vi.fn()
+    const { findByRole } = render(
+      <SpaceNotifLevelPicker spaceId="s1" level="muted" onSaved={onSaved} />,
+    )
+    fireEvent.click(await findByRole('button', { name: 'Undo' }))
+    await waitFor(() => expect(onSaved).toHaveBeenCalledWith('all'))
+    expect(mockPut).toHaveBeenCalledWith('/api/spaces/s1/notif-prefs', { level: 'all' })
   })
 
   it('a failed save keeps the level and says so', async () => {
+    mockGet.mockResolvedValue(state({ level: 'all', default_level: 'all' }))
     mockPut.mockRejectedValue(new Error('offline'))
     const onSaved = vi.fn()
     const { getByRole } = render(<SpaceNotifLevelPicker spaceId="s1" level="all" onSaved={onSaved} />)
-    fireEvent.click(getByRole('radio', { name: /^Muted/ }))
+    fireEvent.click(getByRole('radio', { name: /^Replies and mentions/ }))
     await waitFor(() => expect(toast).toHaveBeenCalledWith("Couldn't save: offline", 'error'))
     expect(onSaved).not.toHaveBeenCalled()
   })

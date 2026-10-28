@@ -8,7 +8,9 @@ vi.mock('@/api', () => ({
 
 import type { Notification, Space } from '@/types'
 import { spaces } from '@/store/spaces'
-import { NewPill, NotificationRow, glyphFor, markRowRead, withRead } from './NotificationRow'
+import {
+  NewPill, NotificationRow, glyphFor, markRowRead, rowPlainText, withRead,
+} from './NotificationRow'
 
 function row(extra: Partial<Notification> = {}): Notification {
   return {
@@ -27,6 +29,26 @@ beforeEach(() => {
 })
 
 describe('NotificationRow', () => {
+  it('a menu sits beside the one link, never inside it', () => {
+    const { container, getByRole } = render(
+      <NotificationRow n={row()} menu={<button type="button">More</button>} />,
+    )
+    const link = container.querySelector('a.sh-notif-row')!
+    const more = getByRole('button', { name: 'More' })
+    expect(link.contains(more)).toBe(false)
+    expect(container.querySelector('.sh-notif-item')!.contains(more)).toBe(true)
+  })
+
+  it('without a menu the row is just the link', () => {
+    const { container } = render(<NotificationRow n={row()} />)
+    expect(container.querySelector('.sh-notif-item')).toBeNull()
+  })
+
+  it('rowPlainText reads the sentence, else the title', () => {
+    expect(rowPlainText(row())).toContain('Ben')
+    expect(rowPlainText(row({ params: null, type: 'zzz', title: 'Old row' }))).toBe('Old row')
+  })
+
   it('shows the actor\'s avatar with the type glyph', () => {
     const { container } = render(<NotificationRow n={row()} />)
     expect(container.querySelector('.sh-notif-av .sh-avatar')!.textContent).toBe('BE')

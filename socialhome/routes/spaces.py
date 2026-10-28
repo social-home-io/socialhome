@@ -20,7 +20,7 @@ from ..app_keys import (
     instance_id_key,
     media_signer_key,
     media_transcode_repo_key,
-    notification_repo_key,
+    notification_settings_service_key,
     online_status_service_key,
     presence_service_key,
     profile_picture_repo_key,
@@ -50,7 +50,7 @@ from ..domain.gfs_member_publish import GFS_PUBLISH_MODES
 from ..domain.link_preview import link_preview_to_dict
 from ..domain.local_community import local_area_of, local_area_wire
 from ..domain.media_constraints import PROFILE_PICTURE_MAX_UPLOAD_BYTES
-from ..domain.notification import SpaceNotifLevel, default_space_notif_level
+from ..domain.notification import SpaceNotifLevel
 from ..domain.post import LocationData, Post, PostType
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
@@ -3433,13 +3433,18 @@ class SpaceNotifPrefsView(BaseView):
     """``GET /api/spaces/{id}/notif-prefs`` — caller's per-space prefs.
 
     ``PUT /api/spaces/{id}/notif-prefs`` — set notification level.
-    Body: ``{level: 'all' | 'mentions' | 'muted'}``.
-    Returns ``{level}``.
+    Body: ``{level: 'all' | 'mentions' | 'muted', duration?}`` — ``muted``
+    takes ``duration`` (``1h`` / ``8h`` / ``1w`` / ``forever``, default
+    ``forever``) and keeps the level from before to come back to (D9).
 
-    GET piggy-backs the caller's location-sharing state so the SPA's
-    per-space "@" menu can render the toggle without a second round-trip:
-    ``feature_location`` mirrors the admin-controlled space flag,
-    ``location_share_enabled`` mirrors this member's opt-in.
+    Both return ``{level, is_default, default_level, muted_until,
+    then_level}``: the level that applies now, whether the caller never
+    chose, the default for the space's type and their seat (D5), and while
+    muted, until when (``9999-…`` = until they turn it back on) and the
+    level that comes back. GET also carries the caller's location-sharing
+    state so the SPA's per-space menu can render the toggle without a
+    second round-trip: ``feature_location`` mirrors the admin-controlled
+    space flag, ``location_share_enabled`` mirrors this member's opt-in.
     """
 
     async def get(self) -> web.Response:
@@ -3451,21 +3456,12 @@ class SpaceNotifPrefsView(BaseView):
             return error_response(403, "FORBIDDEN", "Not a space member.")
         space = await space_repo.get(space_id)
         feature_location = bool(space and space.features.location)
-        notif_repo = self.svc(notification_repo_key)
-        chosen = await notif_repo.get_space_notif_level(
-            user_id=ctx.user_id,
-            space_id=space_id,
-        )
-        # Never chose: the default for the space's type and the seat (D5).
-        level = chosen or (
-            default_space_notif_level(space.space_type, member.role).value
-            if space is not None
-            else SpaceNotifLevel.ALL.value
+        choice = await self.svc(notification_settings_service_key).space_choice(
+            ctx.user_id, space_id
         )
         return web.json_response(
             {
-                "level": level,
-                "is_default": chosen is None,
+                **choice,
                 "feature_location": feature_location,
                 "location_share_enabled": bool(member.location_share_enabled),
                 # A follower is offered no sharing toggle (owner decision 13).
@@ -3477,21 +3473,20 @@ class SpaceNotifPrefsView(BaseView):
     async def put(self) -> web.Response:
         ctx = self.user
         space_id = self.match("id")
-        space_repo = self.svc(space_repo_key)
-        if await space_repo.get_member(space_id, ctx.user_id) is None:
+        if await self.svc(space_repo_key).get_member(space_id, ctx.user_id) is None:
             return error_response(403, "FORBIDDEN", "Not a space member.")
         body = await self.body()
         level = str(body.get("level") or "").strip().lower()
-        if level not in _NOTIF_LEVELS:
+        duration = body.get("duration")
+        if level not in _NOTIF_LEVELS or (
+            duration is not None and not isinstance(duration, str)
+        ):
             return error_response(
                 422,
                 "UNPROCESSABLE",
                 "level must be one of 'all','mentions','muted'.",
             )
-        notif_repo = self.svc(notification_repo_key)
-        await notif_repo.set_space_notif_level(
-            user_id=ctx.user_id,
-            space_id=space_id,
-            level=level,
+        choice = await self.svc(notification_settings_service_key).set_space_level(
+            ctx.user_id, space_id, level, duration
         )
-        return web.json_response({"level": level})
+        return web.json_response(choice)

@@ -30,7 +30,7 @@ import {
   type FriendsResponse,
   type Pickable,
 } from '@/components/NewDmDialog'
-import { MuteSection } from './ConversationMute'
+import { ChatNotifChoices } from './ChatNotifChoices'
 import type { ConversationNotifLevel } from '@/store/dms'
 import { t, isOne } from '@/i18n/i18n'
 
@@ -341,13 +341,23 @@ export function GroupInfoDialog({
           )}
 
           {!adding.value && (
-            <MuteSection
-              convId={convId}
-              mutedUntil={mutedUntil}
-              onChange={onMuteChange}
-              level={notifLevel}
-              onLevelChange={onNotifLevelChange}
-            />
+            <section class="sh-groupinfo-mute" aria-labelledby={`sh-mute-${convId}`}>
+              <h3 class="sh-groupinfo-heading" id={`sh-mute-${convId}`}>
+                {t('dms.mute.section')}
+              </h3>
+              <ChatNotifChoices
+                legend={t('dms.mute.section')}
+                legendHidden
+                chat={{
+                  convId,
+                  mutedUntil,
+                  level: notifLevel ?? 'all',
+                  defaultLevel: 'all',
+                  onMute: onMuteChange,
+                  onLevel: (l) => onNotifLevelChange?.(l),
+                }}
+              />
+            </section>
           )}
 
           {!adding.value && (

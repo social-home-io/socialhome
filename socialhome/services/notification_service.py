@@ -124,6 +124,7 @@ from ..domain.notification import (
     object_key,
     regroup,
 )
+from ..domain.notification_kinds import NotifDelivery, NotifKind, notif_kind
 from ..domain.post import PostType
 from ..domain.space import (
     CONTENT_AUTHORITY_ROLES,
@@ -161,6 +162,7 @@ from .notification_links import (
 )
 from .protection_gate import ProtectionGateMixin
 from .push_service import PushPayload
+from .user_preferences import NOTIF_MUTED_POSTS_KEY, parse_notif_settings
 
 log = logging.getLogger(__name__)
 
@@ -632,11 +634,16 @@ class NotificationService(ProtectionGateMixin):
         Home Assistant event — so one thing buzzes once until it is read. A
         chat row (:data:`_CHAT_TYPES`) alerts again after
         :data:`CHAT_REALERT_SECONDS` of quiet. ``push=False`` writes an
-        in-app row only (D5 "Everything" activity, D13 reactions): silent
-        too.
+        in-app row only: silent too.
 
         ``flags`` say why a "Needs you" item can't be decided with one tap
         (:data:`~socialhome.domain.notification.JOIN_REQUEST_FLAGS`).
+
+        What the recipient chose (D4, D10, :meth:`_heard`) comes last: a
+        muted post or a kind set to Off → no row; a kind set to In app → a
+        row, no push. Reactions and activity in spaces (D5, D6, D13) are In
+        app by default — a handler never decides that itself, so someone
+        who sets them to Push gets the push.
         """
         user = await self._users.get_by_user_id(note.user_id)
         if user is None:
@@ -648,6 +655,11 @@ class NotificationService(ProtectionGateMixin):
                 hidden = await self._hidden_from(note.user_id, actor_user_id)
             if hidden:
                 return None
+        heard = await self._heard(user, note.type, about)
+        if heard is NotifDelivery.OFF:
+            return None
+        if heard is NotifDelivery.IN_APP:
+            push = False
         actor = (
             NotificationActor(
                 actor_user_id, actor_name or await self._held_name(actor_user_id)
@@ -730,6 +742,35 @@ class NotificationService(ProtectionGateMixin):
             tag=f"{saved.type}:{saved.link_url or saved.id}",
         )
         return saved
+
+    async def _heard(
+        self, user, ntype: str, about: NotificationSubject
+    ) -> NotifDelivery:
+        """How *user* hears about a *ntype* row about *about* (D4, D10).
+
+        * The post it is about is muted (a row's "Mute this post") →
+          ``OFF``. Activity on it keeps the mute alive: its stamp moves (at
+          most daily) so it lapses only after
+          :data:`~socialhome.domain.notification_kinds.MUTED_POST_QUIET_DAYS`
+          quiet days.
+        * Else the choice for the type's kind (Settings → Notifications) —
+          theirs, or the kind's default: ``PUSH`` (a row and a push),
+          ``IN_APP`` (a row only) or ``OFF``. A type no kind files keeps
+          the handler's own choice (``PUSH``)."""
+        settings = parse_notif_settings(user.preferences_json)
+        now = datetime.now(UTC)
+        key = about.object_key
+        if settings.post_muted(key, now=now):
+            if settings.needs_refresh(key, now=now):
+                try:
+                    await self._users.touch_preference_entry(
+                        user.user_id, NOTIF_MUTED_POSTS_KEY, key, now.isoformat()
+                    )
+                except Exception:
+                    log.debug("muted post refresh failed", exc_info=True)
+            return NotifDelivery.OFF
+        kind = notif_kind(ntype, about.space_id)
+        return settings.delivery(kind) if kind is not None else NotifDelivery.PUSH
 
     async def _send_push(
         self, user, *, ntype: str, title: str, link_url: str | None, tag: str
@@ -963,7 +1004,6 @@ class NotificationService(ProtectionGateMixin):
                 actor_user_id=author_id,
                 actor_name=name,
                 withheld=blocked,
-                push=False,
             )
 
     async def on_comment_added(self, event: CommentAdded) -> None:
@@ -1031,7 +1071,6 @@ class NotificationService(ProtectionGateMixin):
                 actor_user_id=commenter_id,
                 actor_name=name,
                 withheld=blocked,
-                push=ntype != "comment_added",
             )
 
     async def _comment_audience(
@@ -1262,6 +1301,13 @@ class NotificationService(ProtectionGateMixin):
                     about=about,
                 )
                 continue
+            if (
+                parse_notif_settings(local.preferences_json).delivery(
+                    NotifKind.MESSAGES
+                )
+                is NotifDelivery.OFF
+            ):
+                continue  # Messages and calls: Off (D4)
             if not await self._chat_alerts(event, local):
                 continue  # the same burst: the device already buzzed
             await self._send_push(
@@ -2112,7 +2158,6 @@ class NotificationService(ProtectionGateMixin):
                 if is_comment
                 else None
             )
-            push = True
             about, row_link = post_about, link
             if member.user_id in mentioned:
                 ntype, key, fallback = "space_mention", mention_key, mention_fallback
@@ -2130,7 +2175,6 @@ class NotificationService(ProtectionGateMixin):
             ):
                 ntype, key, fallback = generic_type, generic_key, generic_fallback
                 about, row_link = generic_about, generic_link
-                push = False  # activity: in the app, never a buzz (D5, D6)
             else:
                 continue
             recipient = await self._users.get_by_user_id(member.user_id)
@@ -2151,7 +2195,6 @@ class NotificationService(ProtectionGateMixin):
                 actor_user_id=author_id,
                 actor_name=name,
                 withheld=blocked,
-                push=push,
             )
 
     async def _space_level(self, member, space) -> SpaceNotifLevel:
@@ -2534,7 +2577,6 @@ class NotificationService(ProtectionGateMixin):
                 ),
                 actor_user_id=cal_event.created_by,
                 withheld=blocked,
-                push=False,
             )
 
     async def on_calendar_event_deleted(
@@ -2872,7 +2914,6 @@ class NotificationService(ProtectionGateMixin):
                 actor_user_id=event.user_id,
                 actor_name=name,
                 withheld=blocked,
-                push=False,
             )
 
     async def on_remote_space_dissolved(self, event: RemoteSpaceDissolved) -> None:
@@ -3461,7 +3502,6 @@ class NotificationService(ProtectionGateMixin):
             about=NotificationSubject.of(NotificationObject.MOMENT, event.moment_id),
             actor_user_id=event.reactor_user_id,
             actor_name=name,
-            push=False,  # D13: reactions are nice to see, never a buzz
         )
 
     async def on_moment_created(self, event: MomentCreated) -> None:
@@ -3549,7 +3589,6 @@ class NotificationService(ProtectionGateMixin):
             ),
             actor_user_id=event.reactor_user_id,
             actor_name=name,
-            push=False,  # D13: reactions are nice to see, never a buzz
         )
 
     async def on_post_reaction_changed(self, event: PostReactionChanged) -> None:
@@ -3610,7 +3649,6 @@ class NotificationService(ProtectionGateMixin):
             about=about,
             actor_user_id=event.reactor_user_id,
             actor_name=name,
-            push=False,  # D13: reactions are nice to see, never a buzz
             push_params={"name": name, "space_name": space_name},
         )
 

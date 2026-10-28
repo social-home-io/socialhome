@@ -6,8 +6,8 @@
  *   • :func:`MuteButton` — the thread header's bell. Unmuted it opens a
  *     small menu (1 hour / 8 hours / 1 week / until I turn it back on);
  *     muted it shows the bell-slash and one click unmutes.
- *   • :func:`MuteSection` — the Group info dialog's "Notifications" block:
- *     the current state, the same four lengths, or Unmute.
+ *   (Group info uses the shared :class:`NotifLevelPicker` through
+ *   :func:`ChatNotifChoices`.)
  *
  * A mute is the viewer's own and local: messages still arrive and count
  * unread, they just raise no bell row or push. The parent owns
@@ -20,7 +20,6 @@
  * while it lasts.
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
-import { Button } from '@/components/Button'
 import { showToast } from '@/components/Toast'
 import { t } from '@/i18n/i18n'
 import {
@@ -43,8 +42,6 @@ interface Props {
   /** Groups only: the viewer's level, and its setter. */
   level?: ConversationNotifLevel
   onLevelChange?: (level: ConversationNotifLevel) => void
-  /** :func:`MuteSection` only: its heading (default "Notifications"). */
-  heading?: string
 }
 
 const LEVELS: readonly ConversationNotifLevel[] = ['all', 'mentions']
@@ -204,80 +201,5 @@ export function MuteButton({ convId, mutedUntil, onChange, level, onLevelChange 
         </div>
       )}
     </div>
-  )
-}
-
-export function MuteSection({ convId, mutedUntil, onChange, level, onLevelChange, heading }: Props) {
-  const [saving, setSaving] = useState(false)
-  const muted = isMuteActive(mutedUntil)
-  const run = async (duration: MuteDuration | null) => {
-    if (saving) return
-    setSaving(true)
-    await applyMute(convId, duration, onChange)
-    setSaving(false)
-  }
-  const pickLevel = async (next: ConversationNotifLevel) => {
-    if (saving || !onLevelChange || next === level) return
-    setSaving(true)
-    await applyLevel(convId, next, onLevelChange)
-    setSaving(false)
-  }
-  const hasLevels = level !== undefined && onLevelChange !== undefined
-  return (
-    <section class="sh-groupinfo-mute" aria-labelledby={`sh-mute-${convId}`}>
-      <h3 class="sh-groupinfo-heading" id={`sh-mute-${convId}`}>
-        {heading ?? t('dms.mute.section')}
-      </h3>
-      {hasLevels && (
-        <fieldset class="sh-groupinfo-level" disabled={saving}>
-          <legend class="sh-groupinfo-level__legend">{t('dms.notif.heading')}</legend>
-          {LEVELS.map(l => (
-            <label key={l} class="sh-groupinfo-level__option">
-              <input
-                type="radio"
-                name={`sh-level-${convId}`}
-                value={l}
-                checked={l === level}
-                onChange={() => { void pickLevel(l) }}
-              />
-              <span>{levelLabel(l)}</span>
-            </label>
-          ))}
-        </fieldset>
-      )}
-      {muted ? (
-        <div class="sh-groupinfo-mute__row">
-          <span class="sh-groupinfo-mute__state">
-            <span aria-hidden="true">🔕 </span>{mutedLabel(mutedUntil as string)}
-          </span>
-          <Button
-            variant="secondary"
-            disabled={saving}
-            onClick={() => { void run(null) }}
-          >
-            {t('dms.mute.unmute')}
-          </Button>
-        </div>
-      ) : (
-        <>
-          <p class="sh-muted sh-groupinfo-mute__state">
-            {t(hasLevels && level === 'mentions' ? 'dms.mute.on_mentions' : 'dms.mute.on')}
-          </p>
-          <div class="sh-groupinfo-mute__options" role="group" aria-label={t('dms.mute.menu_title')}>
-            {MUTE_DURATIONS.map(d => (
-              <button
-                key={d}
-                type="button"
-                class="sh-chip"
-                disabled={saving}
-                onClick={() => { void run(d) }}
-              >
-                {muteDurationLabel(d)}
-              </button>
-            ))}
-          </div>
-        </>
-      )}
-    </section>
   )
 }

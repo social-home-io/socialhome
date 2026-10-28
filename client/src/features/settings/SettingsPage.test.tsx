@@ -556,29 +556,42 @@ describe('SettingsPage — web push toggle', () => {
     webPushMock.disableWebPush.mockReset().mockResolvedValue(undefined)
   })
 
-  it('shows Disable only when this browser holds a live subscription, and Disable removes it', async () => {
+  it('shows Turn off only when this browser holds a live subscription, and Turn off removes it', async () => {
     webPushMock.currentPushSubscription.mockResolvedValue({ endpoint: 'https://p/x' })
     const { findByRole } = await renderNotificationsTab()
-    fireEvent.click(await findByRole('button', { name: 'Disable' }))
+    fireEvent.click(await findByRole('button', { name: 'Turn off' }))
     await waitFor(() => expect(webPushMock.disableWebPush).toHaveBeenCalledTimes(1))
-    expect(await findByRole('button', { name: 'Enable' })).toBeTruthy()
+    expect(await findByRole('button', { name: 'Turn on' })).toBeTruthy()
   })
 
-  it('Enable subscribes (not just asks for permission)', async () => {
+  it('Turn on subscribes (not just asks for permission)', async () => {
     webPushMock.currentPushSubscription.mockResolvedValue(null)
     const { findByRole } = await renderNotificationsTab()
-    fireEvent.click(await findByRole('button', { name: 'Enable' }))
+    fireEvent.click(await findByRole('button', { name: 'Turn on' }))
     await waitFor(() => expect(webPushMock.enableWebPush).toHaveBeenCalledTimes(1))
-    expect(await findByRole('button', { name: 'Disable' })).toBeTruthy()
+    expect(await findByRole('button', { name: 'Turn off' })).toBeTruthy()
+  })
+
+  it('a browser that blocks the site says how to allow it, with no button', async () => {
+    const before = (globalThis as { Notification?: unknown }).Notification
+    ;(globalThis as { Notification?: unknown }).Notification = { permission: 'denied' }
+    try {
+      const { findByText, queryByRole, getByRole } = await renderNotificationsTab()
+      expect(await findByText('Push is blocked in this browser')).toBeTruthy()
+      expect(getByRole('list', { name: 'How to allow notifications' })).toBeTruthy()
+      expect(queryByRole('button', { name: 'Turn on' })).toBeNull()
+    } finally {
+      ;(globalThis as { Notification?: unknown }).Notification = before
+    }
   })
 
   it('a failed disable keeps the toggle on', async () => {
     webPushMock.currentPushSubscription.mockResolvedValue({ endpoint: 'https://p/x' })
     webPushMock.disableWebPush.mockRejectedValue(new Error('API 500'))
     const { findByRole } = await renderNotificationsTab()
-    fireEvent.click(await findByRole('button', { name: 'Disable' }))
+    fireEvent.click(await findByRole('button', { name: 'Turn off' }))
     await waitFor(() => expect(webPushMock.disableWebPush).toHaveBeenCalled())
-    expect(await findByRole('button', { name: 'Disable' })).toBeTruthy()
+    expect(await findByRole('button', { name: 'Turn off' })).toBeTruthy()
   })
 })
 
@@ -778,8 +791,8 @@ describe('SettingsPage — household chat notifications', () => {
     const { findByTestId, getByRole } = await renderNotificationsTab()
     const block = await findByTestId('household-chat-notifs')
     expect(block.textContent).toContain('Household chat')
-    expect((getByRole('radio', { name: /Only @mentions/ }) as HTMLInputElement).checked).toBe(true)
-    expect(getByRole('group', { name: 'Mute the chat for…' })).toBeTruthy()
+    expect((getByRole('radio', { name: /^Replies and mentions/ }) as HTMLInputElement).checked).toBe(true)
+    expect(getByRole('radio', { name: /^Nothing/ })).toBeTruthy()
   })
 
   it('shows nothing when the household chat is off', async () => {

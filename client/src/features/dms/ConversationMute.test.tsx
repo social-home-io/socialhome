@@ -16,7 +16,7 @@ vi.mock('@/api', () => ({
 vi.mock('@/ws', () => ({ ws: { on: vi.fn(() => () => {}) } }))
 vi.mock('@/components/Toast', () => ({ showToast: (...a: unknown[]) => toast(...a) }))
 
-import { MuteButton, MuteSection } from './ConversationMute'
+import { MuteButton } from './ConversationMute'
 
 beforeEach(() => {
   get.mockReset(); put.mockReset(); del.mockReset(); toast.mockReset()
@@ -94,20 +94,8 @@ describe('MuteButton (thread header)', () => {
   })
 })
 
-describe('MuteSection (Group info)', () => {
-  it('offers the four lengths while unmuted', () => {
-    const { getAllByRole } = render(
-      <MuteSection convId="g1" mutedUntil={null} onChange={vi.fn()} />,
-    )
-    expect(getAllByRole('button').map(b => b.textContent)).toEqual([
-      'For 1 hour', 'For 8 hours', 'For 1 week', 'Until I turn it back on',
-    ])
-  })
-})
-
-
 describe('group notification level (§23.42)', () => {
-  it('header menu offers All / Only @mentions above the lengths; a pick saves it', async () => {
+  it('header menu offers Everything / Replies and mentions above the lengths; a pick saves it', async () => {
     put.mockResolvedValue({ level: 'mentions' })
     const onLevel = vi.fn()
     const { getByLabelText, getAllByRole, queryByRole } = render(
@@ -119,8 +107,8 @@ describe('group notification level (§23.42)', () => {
     fireEvent.click(getByLabelText('Mute notifications'))
     const radios = getAllByRole('menuitemradio')
     expect(radios.map(r => [r.textContent, r.getAttribute('aria-checked')])).toEqual([
-      ['✓All messages', 'true'],
-      ['Only @mentions', 'false'],
+      ['✓Everything', 'true'],
+      ['Replies and mentions', 'false'],
     ])
     // Focus lands on the first choice; the mute lengths are still there.
     expect(document.activeElement).toBe(radios[0])
@@ -157,28 +145,6 @@ describe('group notification level (§23.42)', () => {
     fireEvent.click(getAllByRole('menuitemradio')[1])
     await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.any(String), 'error'))
     expect(onLevel).not.toHaveBeenCalled()
-  })
-
-  it('Group info section: radios switch the level and the state line follows', async () => {
-    put.mockResolvedValue({ level: 'mentions' })
-    const onLevel = vi.fn()
-    const { getByLabelText, getByText, rerender } = render(
-      <MuteSection
-        convId="g1" mutedUntil={null} onChange={vi.fn()}
-        level="all" onLevelChange={onLevel}
-      />,
-    )
-    const only = getByLabelText('Only @mentions') as HTMLInputElement
-    expect((getByLabelText('All messages') as HTMLInputElement).checked).toBe(true)
-    fireEvent.click(only)
-    await waitFor(() => expect(onLevel).toHaveBeenCalledWith('mentions'))
-    rerender(
-      <MuteSection
-        convId="g1" mutedUntil={null} onChange={vi.fn()}
-        level="mentions" onLevelChange={onLevel}
-      />,
-    )
-    expect(getByText(/notified when someone @mentions you/)).toBeTruthy()
   })
 
   it('1:1 surfaces (no level props) show no level choice', () => {

@@ -172,10 +172,10 @@ describe('GroupInfoDialog', () => {
 
   it('mutes the group for a chosen length from the Notifications section', async () => {
     put.mockResolvedValue({ muted_until: '2026-09-29T18:00:00+00:00' })
-    const { getByText, onMuteChange } = await mount({ managedHere: false })
-    expect(getByText('Notifications')).toBeTruthy()
-    expect(getByText(/^On — /)).toBeTruthy()
-    fireEvent.click(getByText('For 8 hours'))
+    const { getByText, getByRole, onMuteChange } = await mount({ managedHere: false })
+    expect(getByRole('heading', { name: 'Notifications' })).toBeTruthy()
+    fireEvent.click(getByRole('radio', { name: /^Nothing/ }))
+    fireEvent.click(getByText('8 hours'))
     await waitFor(() => expect(onMuteChange).toHaveBeenCalledWith('2026-09-29T18:00:00+00:00'))
     expect(put).toHaveBeenCalledWith('/api/conversations/g1/mute', { duration: '8h' })
   })
@@ -184,9 +184,9 @@ describe('GroupInfoDialog', () => {
     const { getByText, queryByText, onMuteChange } = await mount({
       managedHere: true, mutedUntil: '9999-12-31T23:59:59+00:00',
     })
-    expect(getByText('Muted until you turn it back on')).toBeTruthy()
-    expect(queryByText('For 1 hour')).toBeNull()
-    fireEvent.click(getByText('Unmute'))
+    expect(getByText(/Quiet until you turn it back on/)).toBeTruthy()
+    expect(queryByText('1 hour')).toBeNull()
+    fireEvent.click(getByText('Undo'))
     await waitFor(() => expect(onMuteChange).toHaveBeenCalledWith(null))
     expect(del).toHaveBeenCalledWith('/api/conversations/g1/mute')
   })

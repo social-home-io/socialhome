@@ -356,6 +356,7 @@ from .services.moment_reaction_counts import MomentReactionCounts
 from .services.moment_reaction_gfs import MomentReactionGfs
 from .services.moment_reaction_router import MomentReactionRouter
 from .services.moment_service import MomentService
+from .services.notification_settings_service import NotificationSettingsService
 from .services.online_status_service import OnlineStatusService
 from .services.page_conflict_service import PageConflictService
 from .services.page_federation_outbound import PageFederationOutbound
@@ -2244,6 +2245,25 @@ def _build_person_summary(
     return people
 
 
+def _build_notification_settings(
+    repos: SimpleNamespace,
+    user_service: UserService,
+    system_chats: SystemChatPolicy,
+) -> NotificationSettingsService:
+    """Settings → Notifications: the seven kinds, space levels with a
+    duration, muted posts and the "Muted and changed" list."""
+    return NotificationSettingsService(
+        users=repos.user,
+        user_service=user_service,
+        notifs=repos.notification,
+        spaces=repos.space,
+        convos=repos.conversation,
+        posts=repos.post,
+        space_posts=repos.space_post,
+        system_chats=system_chats,
+    )
+
+
 def _build_space_summary(repos: SimpleNamespace) -> SpaceSummaryService:
     """Per-section counts of a space (More's section rows) — read-time
     only, from the sections' own repos."""
@@ -3647,6 +3667,9 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.space_service_key] = space_service
     app[K.space_approval_service_key] = space_approval_service
     app[K.notification_service_key] = notification_service
+    app[K.notification_settings_service_key] = _build_notification_settings(
+        repos, user_service, system_chat_policy
+    )
     app[K.dm_service_key] = dm_service
     app[K.report_repo_key] = report_repo
     app[K.report_service_key] = report_service

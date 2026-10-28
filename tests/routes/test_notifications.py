@@ -310,6 +310,7 @@ async def test_list_rows_name_their_object_actor_and_counts(client):
         "total": 1,
     }
     assert (row["new_count"], row["total_count"]) == (1, 1)
+    assert row["kind"] == "activity"  # Settings → Notifications (D4)
     # The old fields stay.
     assert row["link_url"] == "/feed"
     assert row["title"] and row["created_at"] and row["read_at"] is None

@@ -25992,7 +25992,7 @@ button.sh-page-editor-status {
   outline: 2px solid var(--sh-focus-ring);
   outline-offset: -2px;
 }
-.sh-space-notif-levels__option input { width: 18px; height: 18px; margin: 0; accent-color: var(--sh-primary); }
+.sh-space-notif-levels__option input { flex: none; width: 18px; height: 18px; margin: 0; accent-color: var(--sh-primary); }
 .sh-space-notif-levels__text { display: flex; flex-direction: column; gap: 2px; }
 .sh-space-notif-levels__title { font-weight: 500; }
 .sh-space-notif-levels__meta { color: var(--sh-text-muted); font-size: var(--sh-font-size-sm); }
@@ -27103,3 +27103,206 @@ a.sh-spaces-row__main:focus-visible { outline: 2px solid var(--sh-focus-ring); o
 .sh-moment-replyfield__remove:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: 1px; }
 /* The plain tile already draws the glyph: no second badge on it. */
 .sh-notif-av__sys + .sh-notif-av__glyph { display: none; }
+
+/* ── Notification settings (redesign D4, D9, D10) ─────────────────────── */
+/* The shared level picker: the picked card is tinted, the default is
+ * tagged, Nothing asks "For how long?", a running mute says until when. */
+.sh-level-picker { display: flex; flex-direction: column; gap: var(--sh-space-sm); }
+.sh-space-notif-levels__option--on {
+  background: color-mix(in srgb, var(--sh-primary) 8%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--sh-primary) 45%, transparent);
+}
+.sh-level-picker__default {
+  display: inline-block;
+  margin-inline-start: 8px;
+  padding: 0 7px;
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-full);
+  font-size: var(--sh-font-size-xs);
+  font-weight: 600;
+  color: var(--sh-text-muted);
+  vertical-align: 1px;
+}
+.sh-level-picker__ask {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-block-start: var(--sh-space-sm);
+  border-block-start: 1px dashed var(--sh-border);
+}
+.sh-level-picker__ask-label { font-size: var(--sh-font-size-sm); color: var(--sh-text-muted); }
+.sh-level-picker__chips { display: flex; flex-wrap: wrap; gap: var(--sh-space-xs); }
+.sh-level-picker__chips .sh-chip { min-height: 36px; }
+.sh-level-picker__quiet {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-radius: var(--sh-radius-lg);
+  background: color-mix(in srgb, var(--sh-primary) 8%, var(--sh-bg-secondary));
+  border: 1px solid color-mix(in srgb, var(--sh-primary) 30%, transparent);
+  font-weight: 500;
+}
+.sh-level-picker__quiet-text { flex: 1 1 14em; min-width: 0; }
+
+/* Settings → Notifications: four blocks of rows in one box each. */
+.sh-notif-set h2 { margin-block-end: 2px; }
+.sh-notif-set__lead { margin: 0 0 var(--sh-space-md); }
+.sh-notif-set__box {
+  margin: 0;
+  padding: 0 var(--sh-space-md);
+  list-style: none;
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  background: var(--sh-bg);
+}
+.sh-notif-set__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-md);
+  padding: var(--sh-space-md) 0;
+  border-block-end: 1px dashed var(--sh-border);
+}
+.sh-notif-set__row:last-child { border-block-end: none; }
+.sh-notif-set__text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-wrap: anywhere;
+}
+.sh-notif-set__text > span { color: var(--sh-text-muted); font-size: var(--sh-font-size-sm); }
+.sh-notif-set__empty { margin: 0; color: var(--sh-text-muted); }
+.sh-notif-device__icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg-secondary);
+  color: var(--sh-text-muted);
+}
+.sh-notif-device[data-state="on"] .sh-notif-device__icon {
+  background: color-mix(in srgb, var(--sh-success) 18%, transparent);
+  color: var(--sh-text);
+}
+.sh-notif-device[data-state="blocked"] .sh-notif-device__icon {
+  background: color-mix(in srgb, var(--sh-warning) 22%, transparent);
+  color: var(--sh-text);
+}
+.sh-notif-device__steps {
+  margin: 0 0 var(--sh-space-md);
+  padding-inline-start: calc(40px + var(--sh-space-md) + 1.2em);
+  color: var(--sh-text);
+  font-size: var(--sh-font-size-sm);
+  line-height: 1.6;
+}
+.sh-notif-kind__example { font-style: italic; }
+.sh-notif-kind__choice .sh-segmented__opt { min-height: 36px; padding: 6px 14px; font-size: var(--sh-font-size-sm); }
+.sh-notif-kind__choice .sh-segmented__opt--active,
+.sh-notif-kind__choice .sh-segmented__opt--active:hover {
+  background: var(--sh-text);
+  color: var(--sh-bg);
+}
+.sh-notif-changed__meta { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.sh-notif-changed__state {
+  padding: 1px 8px;
+  border-radius: var(--sh-radius-full);
+  background: var(--sh-bg-secondary);
+  color: var(--sh-text);
+  font-size: var(--sh-font-size-xs);
+  font-weight: 600;
+}
+.sh-notif-changed__state--muted {
+  background: color-mix(in srgb, var(--sh-primary) 14%, transparent);
+  color: var(--sh-primary-on-soft);
+}
+.sh-notif-changed .sh-btn { flex: none; }
+.sh-settings-household-chat { margin-block-start: var(--sh-space-md); }
+/* A phone: the choice wraps under the text, full width. */
+@media (max-width: 640px) {
+  .sh-notif-kind { flex-direction: column; align-items: stretch; gap: var(--sh-space-sm); }
+  .sh-notif-kind__choice { align-self: flex-start; }
+  .sh-notif-set__box { padding: 0 var(--sh-space-sm); }
+  .sh-notif-device__steps { padding-inline-start: 1.4em; }
+}
+
+/* Notifications page: the row's "…" sits beside its one link, never in
+ * it; the toolbar links to Settings › Notifications. */
+.sh-notif-toolbar .sh-notif-settings-link { text-decoration: none; }
+.sh-notif-toolbar > .sh-notif-filter { margin-inline-end: auto; }
+.sh-notif-item { position: relative; }
+.sh-notif-item > .sh-notif-row { padding-inline-end: 48px; }
+.sh-notif-item__menu {
+  position: absolute;
+  inset-inline-end: 4px;
+  inset-block-end: 4px;
+}
+.sh-notif-menu { position: relative; }
+.sh-notif-menu__btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  color: var(--sh-text-muted);
+}
+.sh-notif-menu__btn[aria-expanded="true"],
+.sh-notif-menu__btn:hover { background: var(--sh-bg-secondary); color: var(--sh-text); }
+.sh-notif-menu__panel {
+  position: absolute;
+  inset-block-start: calc(100% + 4px);
+  inset-inline-end: 0;
+  z-index: 30;
+  width: min(340px, calc(100vw - 2 * var(--sh-space-md)));
+  max-height: min(70vh, 520px);
+  overflow-y: auto;
+  padding: 6px;
+  background: var(--sh-bg-tertiary);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  box-shadow:
+    0 1px 0 var(--sh-border),
+    0 18px 36px -22px rgba(26, 24, 20, 0.55);
+}
+.sh-notif-menu__head {
+  padding: 8px 10px 4px;
+  font-size: var(--sh-font-size-xs);
+  font-weight: 700;
+  color: var(--sh-text-muted);
+}
+.sh-notif-menu__item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 8px;
+  width: 100%;
+  min-height: 40px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: var(--sh-radius-sm);
+  background: transparent;
+  color: var(--sh-text);
+  font: inherit;
+  text-align: start;
+  text-decoration: none;
+  cursor: pointer;
+}
+.sh-notif-menu__item:hover,
+.sh-notif-menu__item:focus-visible { background: var(--sh-bg-secondary); }
+.sh-notif-menu__item:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: -2px; }
+.sh-notif-menu__label { font-weight: 500; }
+.sh-notif-menu__sub {
+  flex-basis: 100%;
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-xs);
+}
+.sh-notif-menu__check { inline-size: 1em; color: var(--sh-primary-text); }
+.sh-notif-menu__note {
+  margin: 4px 10px 6px;
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-xs);
+}
+.sh-notif-menu__sep { margin: 4px 6px; border-block-start: 1px solid var(--sh-border); }

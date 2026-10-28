@@ -32,6 +32,19 @@ export function isMutedForever(until: string | null | undefined): boolean {
   return !!until && until.startsWith('9999-')
 }
 
+/** When a mute ends, in the viewer's locale and time zone: the time only
+ *  when it ends within a day ("18:00"), else day and time ("Mon 6 Oct,
+ *  10:00"). */
+export function muteTimeLabel(until: string, now: number = Date.now()): string {
+  const end = new Date(until)
+  return end.getTime() - now < 24 * 3600 * 1000
+    ? end.toLocaleTimeString(formatLocale(), { hour: '2-digit', minute: '2-digit' })
+    : end.toLocaleString(formatLocale(), {
+      weekday: 'short', day: 'numeric', month: 'short',
+      hour: '2-digit', minute: '2-digit',
+    })
+}
+
 /** "Muted" / "Muted until 18:00" / "Muted until Mon 6 Oct, 10:00" — the
  *  viewer's locale and time zone, time only when it ends within a day. */
 export function mutedLabel(
@@ -39,12 +52,5 @@ export function mutedLabel(
   now: number = Date.now(),
 ): string {
   if (isMutedForever(until)) return t('dms.mute.muted_forever')
-  const end = new Date(until)
-  const time = end.getTime() - now < 24 * 3600 * 1000
-    ? end.toLocaleTimeString(formatLocale(), { hour: '2-digit', minute: '2-digit' })
-    : end.toLocaleString(formatLocale(), {
-      weekday: 'short', day: 'numeric', month: 'short',
-      hour: '2-digit', minute: '2-digit',
-    })
-  return t('dms.mute.muted_until', { time })
+  return t('dms.mute.muted_until', { time: muteTimeLabel(until, now) })
 }
