@@ -15,8 +15,12 @@
  * A WAI-ARIA menu button: arrow keys move, Esc closes and gives focus back
  * to "…", a click outside closes. The two sub-lists (a space's level, a
  * chat's mute length) open in place with a Back item.
+ *
+ * The menu stays where it can be seen (:func:`menuPlacement`): on a phone a
+ * row near the bottom opens it upward instead of under the bottom tab bar
+ * or the keyboard, and its height is capped to the room on that side.
  */
-import { useEffect, useRef, useState } from 'preact/hooks'
+import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
 import { addBase } from '@/baseUrl'
 import { ASK_LENGTHS, levelLabel } from '@/components/NotifLevelPicker'
 import { showToast } from '@/components/Toast'
@@ -31,6 +35,7 @@ import { spaces } from '@/store/spaces'
 import type { Notification } from '@/types'
 import { isMutedForever, muteTimeLabel, type MuteDuration } from '@/utils/mute'
 import { kindLabel } from '@/features/settings/NotificationSettings'
+import { visibleBottom } from '@/components/OverflowMenu'
 
 type View = 'main' | 'space' | 'chat'
 
@@ -66,6 +71,39 @@ function spaceName(n: Notification): string | null {
     ?? n.params?.space_name ?? null
 }
 
+/** Gap between the "…" and its menu. */
+const GAP = 4
+/** Margin kept free under the top bar. */
+const EDGE = 8
+/** Never squeeze the menu below this — a few items stay usable. */
+const MIN_ROOM = 120
+
+/** The highest y the menu may reach: under the sticky top bar, inside the
+ *  visual viewport. */
+function visibleTop(): number {
+  const vv = window.visualViewport
+  let top = vv ? vv.offsetTop : 0
+  const bar = document.querySelector('.sh-topbar')?.getBoundingClientRect()
+  if (bar && bar.height > 0 && bar.bottom > top) top = bar.bottom
+  return top + EDGE
+}
+
+/**
+ * Where the menu opens: below the "…" when *menuHeight* fits between it and
+ * the visible bottom (above the bottom tab bar and the keyboard), else on
+ * whichever side has more room. ``maxHeight`` caps it to that side's room.
+ */
+export function menuPlacement(
+  trigger: { top: number, bottom: number },
+  menuHeight: number,
+  area: { top: number, bottom: number },
+): { up: boolean, maxHeight: number } {
+  const below = area.bottom - trigger.bottom - GAP
+  const above = trigger.top - area.top - GAP
+  const up = menuHeight > below && above > below
+  return { up, maxHeight: Math.max(MIN_ROOM, Math.floor(up ? above : below)) }
+}
+
 const DOTS = (
   <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor" aria-hidden="true">
     <circle cx="5" cy="12" r="2" /><circle cx="12" cy="12" r="2" /><circle cx="19" cy="12" r="2" />
@@ -82,6 +120,7 @@ export function NotificationRowMenu({ n, label }: Props) {
   const [open, setOpen] = useState(false)
   const [view, setView] = useState<View>('main')
   const [space, setSpace] = useState<SpaceLevelState | null>(null)
+  const [fit, setFit] = useState<{ up: boolean, maxHeight: number } | null>(null)
   const wrap = useRef<HTMLDivElement | null>(null)
   const trigger = useRef<HTMLButtonElement | null>(null)
   const panel = useRef<HTMLDivElement | null>(null)
@@ -108,10 +147,32 @@ export function NotificationRowMenu({ n, label }: Props) {
     return () => document.removeEventListener('mousedown', onDoc)
   }, [open, n.space_id, place])
 
-  // Focus the first item whenever the menu opens or changes view.
+  // Open where it can be seen, again when the view (and so the height)
+  // changes, the window resizes or the keyboard comes up.
+  useLayoutEffect(() => {
+    if (!open) { setFit(null); return }
+    const measure = () => {
+      const r = trigger.current?.getBoundingClientRect()
+      if (!r) return
+      const h = panel.current?.scrollHeight ?? 0
+      const next = menuPlacement(r, h, { top: visibleTop(), bottom: visibleBottom() })
+      setFit(p => (p && p.up === next.up && p.maxHeight === next.maxHeight ? p : next))
+    }
+    measure()
+    const vv = window.visualViewport
+    window.addEventListener('resize', measure)
+    vv?.addEventListener('resize', measure)
+    return () => {
+      window.removeEventListener('resize', measure)
+      vv?.removeEventListener('resize', measure)
+    }
+  }, [open, view])
+
+  // Focus the first item whenever the menu opens or changes view — without
+  // scrolling the page to it (the menu may just have flipped upward).
   useEffect(() => {
     if (!open) return
-    panel.current?.querySelector<HTMLElement>('[role^="menuitem"]')?.focus()
+    panel.current?.querySelector<HTMLElement>('[role^="menuitem"]')?.focus({ preventScroll: true })
   }, [open, view])
 
   const onKey = (e: KeyboardEvent) => {
@@ -228,7 +289,8 @@ export function NotificationRowMenu({ n, label }: Props) {
       {open && (
         <div
           ref={panel}
-          class="sh-notif-menu__panel"
+          class={`sh-notif-menu__panel${fit?.up ? ' sh-notif-menu__panel--up' : ''}`}
+          style={fit ? { '--sh-notif-menu-room': `${fit.maxHeight}px` } : undefined}
           role="menu"
           aria-label={t('notifications.menu.title')}
         >

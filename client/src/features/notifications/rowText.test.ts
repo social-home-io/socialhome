@@ -83,9 +83,10 @@ describe('row catalog', () => {
     for (const [type, spec] of Object.entries(ROW_TYPES)) {
       const base = `notifications.row.${type}`
       const e = en as Record<string, string>
-      if (!spec.noActor) {
-        expect(e[base]).toContain('{actor}')
-        expect(e[`${base}_many`]).toContain('{actors}')
+      for (const v of spec.chat ? ['_in', '_household'] : ['']) {
+        if (spec.noActor) break
+        expect(e[`${base}${v}`]).toContain('{actor}')
+        expect(e[`${base}_many${v}`]).toContain('{actors}')
       }
       if (spec.count) expect(e[`${base}_count`]).toMatch(/\{count\}.*\{actors\}|\{actors\}.*\{count\}/)
       if (spec.none) expect(e[`${base}_none`]).toBeTruthy()
@@ -247,6 +248,65 @@ describe('rowSentence', () => {
       .toBe('Ben, Anna und 3 weitere haben in Familie Alpha kommentiert')
     expect(render('space_post_created', params(['Ben'], { new: 25, total: 25 })))
       .toBe('25 neue Beiträge in Familie Alpha von Ben')
+  })
+})
+
+describe('chat mentions (dm_mention) speak the viewer\'s language', () => {
+  const chat = (p: NotifParams, extra: { space_id?: string | null, link_url?: string | null } = {}) => {
+    const segs = rowSentence({ type: 'dm_mention', title: 'Ben mentioned you in Weekend plans', params: p, ...extra })
+    return segs ? plainText(segs) : 'TITLE'
+  }
+
+  it('a space chat names the space, in German too (#1217 screenshots)', async () => {
+    expect(chat(params(['Ben']), { space_id: 's1', link_url: '/spaces/s1?tab=chat' }))
+      .toBe('Ben mentioned you in Familie Alpha')
+    await setLocale('de')
+    expect(chat(params(['Ben']), { space_id: 's1', link_url: '/spaces/s1?tab=chat' }))
+      .toBe('Ben hat dich in Familie Alpha erwähnt')
+    expect(chat(params(['Ben', 'Anna']), { space_id: 's1' }))
+      .toBe('Ben und Anna haben dich in Familie Alpha erwähnt')
+  })
+
+  it('the household chat', async () => {
+    const p = params(['Ben'], { space_name: null })
+    expect(chat(p, { link_url: '/?tab=chat' })).toBe('Ben mentioned you in the household chat')
+    await setLocale('de')
+    expect(chat(p, { link_url: '/?tab=chat' })).toBe('Ben hat dich im Haushalts-Chat erwähnt')
+  })
+
+  it('a group chat keeps its title: its name is not in params (the title is written in the viewer\'s language)', () => {
+    expect(chat(params(['Ben'], { space_name: null }), { link_url: '/dms/c1' })).toBe('TITLE')
+  })
+})
+
+describe('notices about you, in the viewer\'s language', () => {
+  const none = (extra: Partial<NotifParams> = {}) => params([], extra)
+  const say = (type: string, p: NotifParams, space_id: string | null = null) => {
+    const segs = rowSentence({ type, title: 'TITLE', params: p, space_id })
+    return segs ? plainText(segs) : 'TITLE'
+  }
+
+  it('renders each one in English and German', async () => {
+    const cases: [string, NotifParams, string | null, string, string][] = [
+      ['space_join_approved', none(), 's1', "You're in: Familie Alpha", 'Du bist dabei: Familie Alpha'],
+      ['space_join_denied', none({ space_name: null }), 's1', 'Your join request was declined', 'Deine Beitrittsanfrage wurde abgelehnt'],
+      ['space_ownership_transferred', none(), 's1', 'You now own Familie Alpha', 'Familie Alpha gehört jetzt dir'],
+      ['space_location_enabled', params(['Ben']), 's1', 'Location sharing turned on in Familie Alpha', 'Standortfreigabe in Familie Alpha eingeschaltet'],
+      ['post_moderated', none(), 's1', 'Your post in Familie Alpha was moderated', 'Dein Beitrag in Familie Alpha wurde moderiert'],
+      ['post_moderated', none({ space_name: null }), null, 'Your post was moderated', 'Dein Beitrag wurde moderiert'],
+      ['bazaar_bid_placed', params(['Ben']), null, 'New bid on your listing', 'Neues Gebot für deine Anzeige'],
+      ['bazaar_offer_accepted', params(['Ben']), null, 'Your offer was accepted', 'Dein Angebot wurde angenommen'],
+      ['bazaar_offer_rejected', params(['Ben']), null, 'Your offer was declined', 'Dein Angebot wurde abgelehnt'],
+      ['app_challenge', params(['Ben']), null, 'Ben challenged you to chess', 'Ben fordert dich zu einer Partie Schach heraus'],
+    ]
+    for (const [type, p, sid, en_] of cases) expect(say(type, p, sid), type).toBe(en_)
+    await setLocale('de')
+    for (const [type, p, sid, , de_] of cases) expect(say(type, p, sid), type).toBe(de_)
+  })
+
+  it('a space notice whose space name is unknown keeps its title', () => {
+    expect(say('space_join_approved', none({ space_name: null }), 's1')).toBe('TITLE')
+    expect(say('post_moderated', none({ space_name: null }), 's1')).toBe('TITLE')
   })
 })
 

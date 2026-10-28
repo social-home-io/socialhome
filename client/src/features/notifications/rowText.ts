@@ -47,12 +47,22 @@ interface TypeSpec {
   /** Lives in a space or in the household feed: each key has an ``_in``
    *  sibling naming ``{space}``, used when the row is about a space. */
   inSpace?: boolean
+  /** A chat row: each key has a ``_household`` sibling (the household
+   *  chat) and an ``_in`` sibling naming ``{space}`` (a space's chat). A
+   *  group chat's name is not in params: that row keeps its title. */
+  chat?: boolean
 }
+
+/** Where a household-chat row leads (the feed's Chat tab; the server's
+ *  ``HOUSEHOLD_CHAT_LINK``). */
+export const HOUSEHOLD_CHAT_LINK = '/?tab=chat'
 
 /**
  * The types the client renders from ``params``. A type left out keeps its
  * title: its sentence names something params don't carry (a task's title,
- * an event's summary, a decision) or nobody at all.
+ * an event's summary, a decision, another household) or its wording
+ * depends on more than params say (a dissolved space vs. one you were
+ * removed from).
  *
  * Keys looked up from this table (listed so a grep finds them):
  *   notifications.row.post_created notifications.row.post_created_many
@@ -103,6 +113,20 @@ interface TypeSpec {
  *   notifications.row.poll_result_in notifications.row.poll_result_many_in
  *   notifications.row.report_answer_none
  *   notifications.row.report_answer_none_in
+ *   notifications.row.dm_mention_in notifications.row.dm_mention_many_in
+ *   notifications.row.dm_mention_household
+ *   notifications.row.dm_mention_many_household
+ *   notifications.row.space_join_approved_none
+ *   notifications.row.space_join_denied_none
+ *   notifications.row.space_ownership_transferred_none
+ *   notifications.row.space_location_enabled_none
+ *   notifications.row.space_admins_reconfirm_none
+ *   notifications.row.post_moderated_none
+ *   notifications.row.post_moderated_none_in
+ *   notifications.row.bazaar_bid_placed_none
+ *   notifications.row.bazaar_offer_accepted_none
+ *   notifications.row.bazaar_offer_rejected_none
+ *   notifications.row.app_challenge notifications.row.app_challenge_many
  *   notifications.new_pill notifications.new_pill_one
  *   notifications.live_new notifications.live_new_one
  *   notifications.meta.new_of_total notifications.meta.new_of_total_one
@@ -138,6 +162,17 @@ export const ROW_TYPES: Readonly<Record<string, TypeSpec>> = {
   poll_result: { inSpace: true },
   // Never who reviewed it or whom it was about.
   report_answer: { none: true, noActor: true, inSpace: true },
+  dm_mention: { chat: true },
+  space_join_approved: { none: true, noActor: true },
+  space_join_denied: { none: true, noActor: true },
+  space_ownership_transferred: { none: true, noActor: true },
+  space_location_enabled: { none: true, noActor: true },
+  space_admins_reconfirm: { none: true, noActor: true },
+  post_moderated: { none: true, noActor: true, inSpace: true },
+  bazaar_bid_placed: { none: true, noActor: true },
+  bazaar_offer_accepted: { none: true, noActor: true },
+  bazaar_offer_rejected: { none: true, noActor: true },
+  app_challenge: {},
 }
 
 /** Every catalog key the renderer may ask for (the locale tests walk it). */
@@ -156,6 +191,10 @@ export function rowKeys(): string[] {
     if (!spec.noActor) own.push(base, `${base}_many`)
     if (spec.count) own.push(`${base}_count`)
     if (spec.none) own.push(`${base}_none`)
+    if (spec.chat) {
+      keys.push(...own.map(k => `${k}_in`), ...own.map(k => `${k}_household`))
+      continue
+    }
     keys.push(...own)
     if (spec.inSpace) keys.push(...own.map(k => `${k}_in`))
   }
@@ -168,6 +207,8 @@ export interface RowInput {
   params?: NotifParams | null
   /** The space the row is about, if any (picks an ``_in`` sentence). */
   space_id?: string | null
+  /** Where the row leads (tells the household chat apart). */
+  link_url?: string | null
 }
 
 const PLACEHOLDER = /\{(\w+)\}/g
@@ -232,7 +273,11 @@ export function rowSentence(row: RowInput, spaceName?: string | null): Segment[]
     key = `${base}_none`
   } else if (Math.max(p.actor_count, actors.length) > 1) key = `${base}_many`
   else key = base
-  if (spec.inSpace && (space || row.space_id)) {
+  if (spec.chat) {
+    if (row.link_url === HOUSEHOLD_CHAT_LINK) key = `${key}_household`
+    else if (space) key = `${key}_in`
+    else return null // a group chat (its name is in the title) or a nameless space
+  } else if (spec.inSpace && (space || row.space_id)) {
     if (!space) return null // a space row whose name we don't know: the title names it
     key = `${key}_in`
   }

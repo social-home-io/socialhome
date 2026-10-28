@@ -226,6 +226,27 @@ def parse_ha_automation_events(preferences_json: str | None) -> bool:
     return blob.get(HA_AUTOMATION_EVENTS_KEY) is True
 
 
+#: ``preferences_json`` key of the language picked in the app.
+LOCALE_KEY = "locale"
+
+
+def parse_locale(preferences_json: str | None) -> str | None:
+    """The language the person picked in the app (the SPA saves it as
+    ``preferences.locale`` through ``PATCH /api/me``), or ``None``.
+
+    Never raises: bad JSON or a non-string value reads as ``None``."""
+    if not isinstance(preferences_json, str):
+        return None
+    try:
+        blob = orjson.loads(preferences_json)
+    except orjson.JSONDecodeError:
+        return None
+    value = blob.get(LOCALE_KEY) if isinstance(blob, dict) else None
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
+
+
 #: ``preferences_json`` keys the notification settings own (D4, D10).
 NOTIF_KINDS_KEY = "notif_kinds"
 NOTIF_MUTED_POSTS_KEY = "notif_muted_posts"
@@ -249,6 +270,7 @@ __all__ = [
     "DEFAULT_HIGHLIGHTS_RETENTION_DAYS",
     "DEFAULT_MOMENT_MAX_HOPS",
     "HA_AUTOMATION_EVENTS_KEY",
+    "LOCALE_KEY",
     "MAX_TIMETABLE_HOME_PINS",
     "NOTIF_KINDS_KEY",
     "NOTIF_MUTED_POSTS_KEY",
@@ -256,6 +278,7 @@ __all__ = [
     "MomentPreferences",
     "parse_ha_automation_events",
     "parse_highlights_preferences",
+    "parse_locale",
     "parse_moment_preferences",
     "parse_notif_settings",
     "parse_timetable_home_pins",

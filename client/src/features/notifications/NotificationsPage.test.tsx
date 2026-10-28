@@ -108,6 +108,23 @@ describe('NotificationsPage rows', () => {
     expect(container.textContent).not.toContain('Mark all read')
   })
 
+  it('toolbar: Mark all read and Settings are icon buttons that keep their names', async () => {
+    const { container, getByRole } = await mount(page(2))
+    const mark = getByRole('button', { name: 'Mark all read' })
+    const settings = getByRole('link', { name: 'Settings' })
+    expect(settings.getAttribute('href')).toBe('/settings#notifications')
+    for (const el of [mark, settings]) {
+      // An icon that stays on a phone, the words that hide there (still
+      // the accessible name) and a tooltip.
+      expect(el.querySelector('svg[aria-hidden="true"]')).not.toBeNull()
+      expect(el.querySelector('.sh-notif-toolbar__text')?.textContent).toBe(el.getAttribute('title'))
+    }
+    // One row, never wrapping: the tabs, then the two actions.
+    const bar = container.querySelector('.sh-notif-toolbar')!
+    expect(bar.querySelector('.sh-notif-toolbar__actions')?.contains(mark)).toBe(true)
+    expect(bar.querySelector('.sh-notif-toolbar__actions')?.contains(settings)).toBe(true)
+  })
+
   it('empty: the caught-up copy, and no "Mark all read"', async () => {
     const { container } = await mount([])
     expect(container.textContent).toContain("You're all caught up")

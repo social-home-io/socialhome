@@ -172,7 +172,7 @@ from .notification_links import (
 )
 from .protection_gate import ProtectionGateMixin
 from .push_service import PushPayload
-from .user_preferences import NOTIF_MUTED_POSTS_KEY, parse_notif_settings
+from .user_preferences import NOTIF_MUTED_POSTS_KEY, parse_locale, parse_notif_settings
 
 log = logging.getLogger(__name__)
 
@@ -910,7 +910,15 @@ class NotificationService(ProtectionGateMixin):
 
     @staticmethod
     def _locale(user) -> str | None:
-        return getattr(user, "locale", None) or None
+        """The language a row / push for *user* is written in: the one they
+        picked in the app (``preferences.locale``, what the SPA saves — it
+        never writes ``users.locale``), else the ``users.locale`` column,
+        else the catalog's default."""
+        if user is None:
+            return None
+        return parse_locale(getattr(user, "preferences_json", None)) or (
+            getattr(user, "locale", None) or None
+        )
 
     def wire(self) -> None:
         """Register all event handlers on the bus. Idempotent (but

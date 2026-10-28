@@ -2,8 +2,8 @@
  * A row's "…" menu: mute this post, change the space's / chat's level,
  * turn the kind down — each with an Undo toast (redesign §4, D4, D9, D10).
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { fireEvent, render, waitFor } from '@testing-library/preact'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { cleanup, fireEvent, render, waitFor } from '@testing-library/preact'
 
 const api = vi.hoisted(() => ({
   get: vi.fn(), put: vi.fn(), patch: vi.fn(), post: vi.fn(), delete: vi.fn(),
@@ -16,7 +16,7 @@ import type { Notification, Space } from '@/types'
 import { spaces } from '@/store/spaces'
 import { notifSettings, type KindSetting } from '@/store/notifSettings'
 import {
-  NotificationRowMenu, chatOf, closestDuration, turnDown,
+  NotificationRowMenu, chatOf, closestDuration, menuPlacement, turnDown,
 } from './NotificationRowMenu'
 
 const ALL: KindSetting['choices'] = ['push', 'in_app', 'off']
@@ -206,5 +206,103 @@ describe('NotificationRowMenu', () => {
     api.get.mockResolvedValue({ kinds: [], changed: [] })
     open(row())
     await waitFor(() => expect(api.get).toHaveBeenCalledWith('/api/me/notification-settings'))
+  })
+})
+
+describe('menuPlacement', () => {
+  const area = { top: 64, bottom: 772 }
+
+  it('opens below the "…" when the menu fits there', () => {
+    expect(menuPlacement({ top: 200, bottom: 236 }, 300, area))
+      .toEqual({ up: false, maxHeight: 772 - 236 - 4 })
+  })
+
+  it('opens upward when it would run under the bottom bar and there is more room above', () => {
+    const p = menuPlacement({ top: 700, bottom: 736 }, 300, area)
+    expect(p.up).toBe(true)
+    expect(p.maxHeight).toBe(700 - 64 - 4)
+  })
+
+  it('stays below when it does not fit either way but below has more room', () => {
+    expect(menuPlacement({ top: 120, bottom: 156 }, 900, area).up).toBe(false)
+  })
+
+  it('caps the height to the room on its side, never below a usable minimum', () => {
+    expect(menuPlacement({ top: 100, bottom: 136 }, 900, { top: 90, bottom: 200 }).maxHeight).toBe(120)
+  })
+})
+
+describe('NotificationRowMenu near the bottom of a phone screen', () => {
+  const rect = (top: number, height: number, left = 300, width = 36) => ({
+    top, bottom: top + height, height, left, right: left + width, width, x: left, y: top,
+    toJSON: () => ({}),
+  }) as DOMRect
+  let nav: HTMLElement | null = null
+  let bar: HTMLElement | null = null
+
+  /** A 390×844 phone: top bar 0–56, bottom tab bar from y 780. */
+  function phone(triggerTop: number) {
+    vi.stubGlobal('innerHeight', 844)
+    vi.stubGlobal('innerWidth', 390)
+    vi.stubGlobal('visualViewport', undefined)
+    nav = document.createElement('nav')
+    nav.className = 'sh-mobile-nav'
+    bar = document.createElement('header')
+    bar.className = 'sh-topbar'
+    document.body.append(nav, bar)
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
+      if (this === nav) return rect(780, 64, 0, 390)
+      if (this === bar) return rect(0, 56, 0, 390)
+      if (this.classList.contains('sh-notif-menu__btn')) return rect(triggerTop, 36)
+      return rect(0, 0)
+    })
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.classList.contains('sh-notif-menu__panel') ? 260 : 0
+    })
+  }
+
+  afterEach(() => {
+    cleanup()
+    nav?.remove(); nav = null
+    bar?.remove(); bar = null
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('a row near the bottom opens its menu upward, above the bottom bar', () => {
+    phone(700)
+    const { container } = open(row())
+    const panel = container.querySelector<HTMLElement>('.sh-notif-menu__panel')!
+    expect(panel.classList.contains('sh-notif-menu__panel--up')).toBe(true)
+    // Room above: from under the top bar (56 + 8) to the "…" (700 − 4).
+    expect(panel.style.getPropertyValue('--sh-notif-menu-room')).toBe(`${700 - 64 - 4}px`)
+  })
+
+  it('a row near the top opens downward and stops above the bottom bar', () => {
+    phone(120)
+    const { container } = open(row())
+    const panel = container.querySelector<HTMLElement>('.sh-notif-menu__panel')!
+    expect(panel.classList.contains('sh-notif-menu__panel--up')).toBe(false)
+    expect(panel.style.getPropertyValue('--sh-notif-menu-room')).toBe(`${780 - 8 - 156 - 4}px`)
+  })
+
+  it('with the keyboard up the visible bottom is the visual viewport', () => {
+    phone(380)
+    nav!.remove()
+    vi.stubGlobal('visualViewport', { height: 450, offsetTop: 0, width: 390, addEventListener: vi.fn(), removeEventListener: vi.fn() })
+    const { container } = open(row())
+    expect(container.querySelector('.sh-notif-menu__panel')!.classList.contains('sh-notif-menu__panel--up')).toBe(true)
+  })
+
+  it('focus lands on the first item without scrolling the page, and Esc gives it back', () => {
+    phone(700)
+    const focus = vi.spyOn(HTMLElement.prototype, 'focus')
+    const view = open(row())
+    const first = view.getAllByRole('menuitem')[0]
+    expect(document.activeElement).toBe(first)
+    const call = focus.mock.calls.find((_, i) => focus.mock.instances[i] === (first as unknown))
+    expect(call?.[0]).toEqual({ preventScroll: true })
+    fireEvent.keyDown(first, { key: 'Escape' })
+    expect(document.activeElement).toBe(view.getByRole('button', { name: 'More for Ben commented on your post' }))
   })
 })
