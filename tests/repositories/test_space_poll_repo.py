@@ -456,3 +456,52 @@ async def test_a_deleted_post_takes_no_schedule_from_the_wire(two_spaces):
         options=[{"id": "o-new", "text": "x"}],
     )
     assert await env.repo.get_meta("post-2") is None
+
+
+# ── closing at the deadline ─────────────────────────────────────────
+
+
+async def test_close_if_open_closes_once(env):
+    await env.repo.create_poll(
+        post_id="post-1",
+        question="Pizza?",
+        closes_at=None,
+        allow_multiple=False,
+        options=[{"id": "o-1", "text": "Yes", "position": 0}],
+    )
+    assert await env.repo.close_if_open("post-1") is True
+    assert await env.repo.close_if_open("post-1") is False
+
+
+async def test_only_polls_a_local_user_wrote_are_due_here(env):
+    """Every member household holds a copy of a space poll; only the
+    author's household closes it (peers take SPACE_POLL_CLOSED only from
+    there)."""
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("alice", "uid-alice", "Alice"),
+    )
+    for post_id, author in (("post-remote", "uid-remote"), ("post-later", "uid-alice")):
+        await env.db.enqueue(
+            "INSERT INTO space_posts(id, space_id, author, type, content)"
+            " VALUES(?,?,?,?,?)",
+            (post_id, "sp-1", author, "poll", "?"),
+        )
+    for post_id, closes_at in (
+        ("post-1", "2026-10-28T09:00:00.000Z"),
+        ("post-remote", "2026-10-28T09:00:00.000Z"),
+        ("post-later", "2026-10-28T11:00:00.000Z"),
+    ):
+        await env.repo.create_poll(
+            post_id=post_id,
+            question="Pizza?",
+            closes_at=closes_at,
+            allow_multiple=False,
+            options=[{"id": f"{post_id}-o", "text": "Yes", "position": 0}],
+        )
+    now = "2026-10-28T10:00:00+00:00"
+    assert await env.repo.list_due_to_close(now) == [
+        {"post_id": "post-1", "author": "uid-alice", "space_id": "sp-1"}
+    ]
+    await env.repo.close("post-1")
+    assert await env.repo.list_due_to_close(now) == []

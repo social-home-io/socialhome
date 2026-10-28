@@ -330,6 +330,10 @@
   "notification.chat.added_to_none": "You were added to {chat_name}",
   "notification.poll.closed": "{name} closed a poll you voted in",
   "notification.poll.closed_in": "{name} closed a poll in {space_name}",
+  "notification.poll.ended": "A poll you voted in has ended",
+  "notification.poll.ended_in": "A poll in {space_name} has ended",
+  "notification.poll.scheduled": "{name} picked a time for a date poll you answered",
+  "notification.poll.scheduled_in": "{name} picked a time in {space_name}",
   "notification.report.answered": "Your report was reviewed",
   "notification.report.answered_in": "Your report in {space_name} was reviewed"
 }

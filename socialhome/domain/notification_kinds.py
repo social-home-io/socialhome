@@ -107,6 +107,7 @@ _KIND_OF_TYPE: dict[str, NotifKind] = {
     "calendar_event_cancelled": NotifKind.PLANS,
     "calendar_reminder": NotifKind.PLANS,
     "poll_result": NotifKind.PLANS,
+    "poll_scheduled": NotifKind.PLANS,
     # About you — answers and decisions about your requests and posts.
     "space_join_approved": NotifKind.ABOUT_YOU,
     "space_join_denied": NotifKind.ABOUT_YOU,

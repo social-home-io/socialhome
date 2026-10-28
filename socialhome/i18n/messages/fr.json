@@ -330,6 +330,10 @@
   "notification.chat.added_to_none": "Vous avez été ajouté à {chat_name}",
   "notification.poll.closed": "{name} a clos un sondage auquel vous avez participé",
   "notification.poll.closed_in": "{name} a clos un sondage dans {space_name}",
+  "notification.poll.ended": "Un sondage auquel vous avez participé est clos",
+  "notification.poll.ended_in": "Un sondage dans {space_name} est clos",
+  "notification.poll.scheduled": "{name} a choisi un créneau pour un sondage de dates auquel vous avez répondu",
+  "notification.poll.scheduled_in": "{name} a choisi un créneau dans {space_name}",
   "notification.report.answered": "Votre signalement a été examiné",
   "notification.report.answered_in": "Votre signalement dans {space_name} a été examiné"
 }

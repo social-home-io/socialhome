@@ -729,10 +729,13 @@ class PollVoted(DomainEvent):
 
 @dataclass(slots=True, frozen=True)
 class PollClosed(DomainEvent):
-    """Author closed the poll — no more votes accepted.
+    """The poll closed — no more votes accepted.
 
-    ``actor_user_id`` is the author who closed it (empty when unknown).
-    ``origin_instance_id`` is set when the close came from a peer
+    ``actor_user_id`` is the author (empty when unknown). ``at_deadline``
+    is set when nobody closed it: its ``closes_at`` passed and the author's
+    household's :class:`PollDeadlineScheduler` (or, on a member household,
+    the peer's ``SPACE_POLL_CLOSED`` for a poll past its deadline) closed
+    it. ``origin_instance_id`` is set when the close came from a peer
     (``SPACE_POLL_CLOSED``): the outbound bridge does not echo it back.
     """
 
@@ -740,6 +743,7 @@ class PollClosed(DomainEvent):
     space_id: str | None = None
     actor_user_id: str = ""
     origin_instance_id: str | None = None
+    at_deadline: bool = False
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -759,6 +763,24 @@ class SchedulePollFinalized(DomainEvent):
     title: str
     finalized_by: str
     space_id: str | None = None
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class RemoteSchedulePollFinalized(DomainEvent):
+    """A peer finalised a space schedule poll (``SPACE_SCHEDULE_FINALIZED``).
+
+    Local only, and deliberately not :class:`SchedulePollFinalized`: that
+    one creates the space calendar entry (``ScheduleCalendarBridge``) and
+    federates, both of which the organiser's household already did. This
+    one only tells this household's people who answered
+    (``poll_scheduled``).
+    """
+
+    post_id: str
+    space_id: str
+    finalized_by: str
+    origin_instance_id: str
     occurred_at: datetime = field(default_factory=_now)
 
 

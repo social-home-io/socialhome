@@ -330,6 +330,10 @@
   "notification.chat.added_to_none": "Te añadieron a {chat_name}",
   "notification.poll.closed": "{name} cerró una encuesta en la que votaste",
   "notification.poll.closed_in": "{name} cerró una encuesta en {space_name}",
+  "notification.poll.ended": "Terminó una encuesta en la que votaste",
+  "notification.poll.ended_in": "Terminó una encuesta en {space_name}",
+  "notification.poll.scheduled": "{name} eligió una fecha para una encuesta de fechas que respondiste",
+  "notification.poll.scheduled_in": "{name} eligió una fecha en {space_name}",
   "notification.report.answered": "Se revisó tu denuncia",
   "notification.report.answered_in": "Se revisó tu denuncia en {space_name}"
 }

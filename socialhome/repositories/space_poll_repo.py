@@ -279,6 +279,37 @@ class SqliteSpacePollRepo:
             (post_id,),
         )
 
+    async def close_if_open(self, post_id: str) -> bool:
+        n = await self._db.enqueue_rowcount(
+            "UPDATE space_polls SET closed=1 WHERE post_id=? AND closed=0",
+            (post_id,),
+        )
+        return n > 0
+
+    async def list_due_to_close(self, now_iso: str) -> list[dict]:
+        # Only the author's household closes a space poll: peers accept
+        # SPACE_POLL_CLOSED only from it, and every member household holds
+        # a copy of the poll — so a poll whose author isn't a local user
+        # waits for its own household's close.
+        rows = await self._db.fetchall(
+            "SELECT sp.post_id, p.author, p.space_id FROM space_polls sp"
+            " JOIN space_posts p ON p.id = sp.post_id"
+            " JOIN users u ON u.user_id = p.author"
+            " WHERE sp.closed=0 AND sp.closes_at IS NOT NULL"
+            " AND p.deleted=0"
+            " AND julianday(sp.closes_at) <= julianday(?)"
+            " ORDER BY sp.closes_at",
+            (now_iso,),
+        )
+        return [
+            {
+                "post_id": r["post_id"],
+                "author": r["author"],
+                "space_id": r["space_id"],
+            }
+            for r in rows
+        ]
+
     async def list_user_votes(
         self,
         post_id: str,

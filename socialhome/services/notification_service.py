@@ -90,6 +90,7 @@ from ..domain.events import (
     PostReactionChanged,
     RemoteJoinRequestApproved,
     RemoteJoinRequestDenied,
+    RemoteSchedulePollFinalized,
     RemoteSpaceDissolved,
     RemoteSpaceInviteAccepted,
     RemoteSpaceInviteDeclined,
@@ -97,6 +98,7 @@ from ..domain.events import (
     RemoteSpaceMemberBanned,
     ReportFiled,
     ReportResolved,
+    SchedulePollFinalized,
     SpaceAdminSeedsRetiredAfterRestore,
     SpaceConfigChanged,
     SpaceInviteAnswered,
@@ -403,6 +405,7 @@ _PUSH_AS_IS: frozenset[str] = frozenset(
         "call_missed",
         "chat_added",
         "poll_result",
+        "poll_scheduled",
         "report_answer",
         "dm_contact_requested",
         "app_challenge",
@@ -1201,6 +1204,8 @@ class NotificationService(ProtectionGateMixin):
         self._subscribe(CallMissed, self.on_call_missed)
         self._subscribe(CallRingStopped, self.on_call_ring_stopped)
         self._subscribe(PollClosed, self.on_poll_closed)
+        self._subscribe(SchedulePollFinalized, self.on_schedule_poll_finalized)
+        self._subscribe(RemoteSchedulePollFinalized, self.on_schedule_poll_finalized)
         self._subscribe(PostEdited, self.on_post_edited)
         self._subscribe(CommentUpdated, self.on_comment_updated)
         self._subscribe(BazaarBidPlaced, self.on_bazaar_bid_placed)
@@ -2432,59 +2437,74 @@ class NotificationService(ProtectionGateMixin):
     # ── Polls ────────────────────────────────────────────────────────
 
     async def on_poll_closed(self, event: PollClosed) -> None:
-        """``poll_result``: the author closed a poll — everyone here who
-        voted in it hears so ("Anna closed a poll you voted in", "Anna closed
-        a poll in Familie Alpha"); the row opens the post with the result.
-        Never the question or the winning answer (§25.3). A close from another
-        household (``SPACE_POLL_CLOSED``) tells this household's voters."""
+        """``poll_result``: a poll closed — everyone here who voted in it
+        hears so; the row opens the post with the result. Never the
+        question or the winning answer (§25.3). A close from another
+        household (``SPACE_POLL_CLOSED``) tells this household's voters.
+
+        Closed by its author: "Anna closed a poll you voted in" / "… a poll
+        in Familie Alpha", not to the author. Past its deadline
+        (``at_deadline``) nobody closed it: "A poll you voted in has ended"
+        / "A poll in Familie Alpha has ended", to every voter — the author
+        included."""
         repo = self._space_polls if event.space_id else self._polls
         if repo is None:
             return
         voters = await repo.list_voter_ids(event.post_id)
-        author = event.actor_user_id or await repo.get_post_author(event.post_id)
         if not voters:
             return
+        author = (
+            ""
+            if event.at_deadline
+            else event.actor_user_id or await repo.get_post_author(event.post_id)
+        )
         space_name = await self._space_name(event.space_id)
-        if event.space_id:
-            link = space_post_link(event.space_id, event.post_id)
-            about = NotificationSubject.of(
-                NotificationObject.SPACE_POST,
-                event.post_id,
-                space_id=event.space_id,
-                space_name=space_name,
-            )
-        else:
-            link = household_post_link(event.post_id)
-            about = NotificationSubject.of(NotificationObject.POST, event.post_id)
+        link, about = self._poll_target(event.post_id, event.space_id, space_name)
         withheld = await self._withheld_from(author) if author else frozenset()
         for voter in voters:
-            if voter == author:
+            if author and voter == author:
                 continue
             local = await self._local_user(voter)
             if local is None:
                 continue
             locale = self._locale(local)
-            name = (
-                await self._person_name(author, locale)
-                if author
-                else self._someone(locale)
-            )
-            title = (
-                self._t(
-                    "notification.poll.closed_in",
-                    locale=locale,
-                    fallback="{name} closed a poll in {space_name}",
-                    name=name,
-                    space_name=space_name,
+            if event.at_deadline:
+                title = (
+                    self._t(
+                        "notification.poll.ended_in",
+                        locale=locale,
+                        fallback="A poll in {space_name} has ended",
+                        space_name=space_name,
+                    )
+                    if space_name
+                    else self._t(
+                        "notification.poll.ended",
+                        locale=locale,
+                        fallback="A poll you voted in has ended",
+                    )
                 )
-                if space_name
-                else self._t(
-                    "notification.poll.closed",
-                    locale=locale,
-                    fallback="{name} closed a poll you voted in",
-                    name=name,
+            else:
+                name = (
+                    await self._person_name(author, locale)
+                    if author
+                    else self._someone(locale)
                 )
-            )
+                title = (
+                    self._t(
+                        "notification.poll.closed_in",
+                        locale=locale,
+                        fallback="{name} closed a poll in {space_name}",
+                        name=name,
+                        space_name=space_name,
+                    )
+                    if space_name
+                    else self._t(
+                        "notification.poll.closed",
+                        locale=locale,
+                        fallback="{name} closed a poll you voted in",
+                        name=name,
+                    )
+                )
             await self._save_notif(
                 new_notification(
                     user_id=local.user_id,
@@ -2496,6 +2516,82 @@ class NotificationService(ProtectionGateMixin):
                 actor_user_id=author or None,
                 withheld=withheld,
             )
+
+    async def on_schedule_poll_finalized(
+        self, event: SchedulePollFinalized | RemoteSchedulePollFinalized
+    ) -> None:
+        """``poll_scheduled``: the organiser picked the time of a date poll
+        — everyone here who answered it hears so ("Anna picked a time for a
+        date poll you answered" / "… a time in Familie Alpha"), never the
+        organiser. Never the title or the time (§25.3): the row opens the
+        post. A peer's finalise (``SPACE_SCHEDULE_FINALIZED``) arrives as
+        :class:`RemoteSchedulePollFinalized` — it never re-runs the
+        calendar bridge."""
+        repo = self._space_polls if event.space_id else self._polls
+        if repo is None:
+            return
+        answered = sorted(
+            {r["user_id"] for r in await repo.list_schedule_responses(event.post_id)}
+        )
+        organiser = event.finalized_by
+        space_name = await self._space_name(event.space_id)
+        link, about = self._poll_target(event.post_id, event.space_id, space_name)
+        withheld = await self._withheld_from(organiser) if organiser else frozenset()
+        for user_id in answered:
+            if user_id == organiser:
+                continue
+            local = await self._local_user(user_id)
+            if local is None:
+                continue
+            locale = self._locale(local)
+            name = (
+                await self._person_name(organiser, locale)
+                if organiser
+                else self._someone(locale)
+            )
+            title = (
+                self._t(
+                    "notification.poll.scheduled_in",
+                    locale=locale,
+                    fallback="{name} picked a time in {space_name}",
+                    name=name,
+                    space_name=space_name,
+                )
+                if space_name
+                else self._t(
+                    "notification.poll.scheduled",
+                    locale=locale,
+                    fallback="{name} picked a time for a date poll you answered",
+                    name=name,
+                )
+            )
+            await self._save_notif(
+                new_notification(
+                    user_id=local.user_id,
+                    type="poll_scheduled",
+                    title=title,
+                    link_url=link,
+                ),
+                about=about,
+                actor_user_id=organiser or None,
+                withheld=withheld,
+            )
+
+    @staticmethod
+    def _poll_target(
+        post_id: str, space_id: str | None, space_name: str | None
+    ) -> tuple[str, NotificationSubject]:
+        """Where a poll row leads and what it is about: its post."""
+        if space_id:
+            return space_post_link(space_id, post_id), NotificationSubject.of(
+                NotificationObject.SPACE_POST,
+                post_id,
+                space_id=space_id,
+                space_name=space_name,
+            )
+        return household_post_link(post_id), NotificationSubject.of(
+            NotificationObject.POST, post_id
+        )
 
     async def on_space_invite_answered(self, event: SpaceInviteAnswered) -> None:
         """The invitee answered their invite: it leaves their section."""

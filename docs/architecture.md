@@ -216,9 +216,10 @@ for it. The rules (notifications redesign, owner decisions D3 D5 D6 D8 D13):
   (`call_incoming`, no row); the missed call replaces it on the device. Calls
   reach the notification service as local `CallRinging` / `CallMissed`
   events — nothing new on the wire.
-- **Small decisions** about you are rows: a poll you voted in was closed
-  (`poll_result`), a report you filed was reviewed (`report_answer`, naming
-  nobody).
+- **Small decisions** about you are rows: a poll you voted in was closed or
+  reached its deadline (`poll_result`), a date poll you answered got its
+  time (`poll_scheduled`), a report you filed was reviewed (`report_answer`,
+  naming nobody).
 - **Things done to you push** whatever the space level: tasks, an event
   someone else added to your personal calendar, changes to an event you're
   going to, join requests, answers and decisions.
@@ -930,7 +931,10 @@ worker (`services/notification_delivery_worker.py`, a queue consumer rather
 than a timer — see "Notification delivery" above), and the space moderation
 queue sweep (`moderation_expiry_scheduler.py`, hourly: pending items past
 their 7-day window expire, and decided / expired items lose their content
-7 days later).
+7 days later), and poll deadlines (`poll_deadline_scheduler.py`, every
+60 s: closes the polls this household wrote whose `closes_at` passed, once
+each — an atomic `closed=0 → 1` update; a space poll's close goes out as the
+one `SPACE_POLL_CLOSED` the author's button would send).
 
 The GFS runs its own periodic maintenance sweep
 (`global_server/maintenance.py`, same `_stop: asyncio.Event` lifecycle as

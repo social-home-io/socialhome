@@ -94,6 +94,24 @@ options when a post of type `poll` is federated;
 `SPACE_POLL_VOTE_CAST` carries one vote; `SPACE_POLL_CLOSED` ends the
 voting window.
 
+Only the author's household closes a poll — by hand, or when its
+`closes_at` passes: `PollDeadlineScheduler`
+(`infrastructure/poll_deadline_scheduler.py`, every 60 s) closes that
+household's due polls with an atomic `closed=0 → 1` update, so each poll
+sends exactly one `SPACE_POLL_CLOSED` to its member households and a
+restart re-finds only polls still open. Member households never close a
+copy themselves (a peer's close is accepted only from the author's
+household), but read a poll past its deadline as closed and refuse votes
+on it. Nothing new on the wire: a member household tells a deadline close
+from a hand close by the poll's own `closes_at`. A redelivered close or
+finalise tells nobody twice.
+
+`SPACE_SCHEDULE_FINALIZED` (a date poll's time picked) tells this
+household's people who answered (`poll_scheduled`) through a local-only
+`RemoteSchedulePollFinalized` event — not `SchedulePollFinalized`, whose
+calendar bridge would add a second entry next to the one the organiser's
+household already created and federated.
+
 Votes are encrypted: the envelope payload includes only the vote's
 `option_id` and the voter's `user_id`, which stay inside the space's
 encrypted payload. GFS cannot tally votes even on public spaces.
@@ -104,7 +122,9 @@ encrypted payload. GFS cannot tally votes even on public spaces.
 - `socialhome/services/comment_service.py` — comment CRUD.
 - `socialhome/services/reaction_service.py` — reaction toggling.
 - `socialhome/services/poll_service.py`,
-  `schedule_poll_service.py` — polls.
+  `schedule_poll_service.py` — polls;
+  `socialhome/infrastructure/poll_deadline_scheduler.py` — closing at
+  `closes_at`.
 - `socialhome/services/federation_inbound/space_content.py` —
   inbound handlers for all of the above.
 - `socialhome/routes/post_routes.py`, `comment_routes.py`,
