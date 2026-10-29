@@ -50,22 +50,28 @@ from ..domain.apps import (
     AppCatalogStatus,
     AppIntegrityError,
     AppManifest,
+    AppNeedsNewerCoreError,
     AppNotEnabledError,
     AppNotFoundError,
     AppQuotaExceededError,
+    AppRequestNotAllowedError,
     InstalledApp,
     app_age_allows,
+    core_version_satisfies,
     is_newer_version,
 )
 from ..domain.events import (
     AppEnabledChanged,
     AppInstalled,
+    AppRequestDismissed,
+    AppRequested,
     AppUninstalled,
     AppUpdated,
 )
 from ..domain.space import SpacePermissionError
 from ..repositories.app_repo import AbstractAppRepo
 from ..repositories.cp_repo import AbstractCpRepo
+from ..repositories.user_repo import AbstractUserRepo
 from .app_catalog_service import AppCatalogService
 from .bus_publisher import BusPublisherMixin
 
@@ -101,14 +107,31 @@ class AppService(BusPublisherMixin):
     bus:
         Optional event bus for publishing :class:`AppInstalled` /
         :class:`AppUpdated` / :class:`AppUninstalled` /
-        :class:`AppEnabledChanged`.  ``None`` silently skips publication.
+        :class:`AppEnabledChanged` / :class:`AppRequested` /
+        :class:`AppRequestDismissed`.  ``None`` silently skips publication.
+    core_version:
+        This Social Home's version — a catalog entry whose
+        ``min_core_version`` is past it can't be installed
+        (:func:`~socialhome.domain.apps.core_version_satisfies`).
+    users:
+        The household's people: who added an app ("Added by Anna") and
+        who an "Ask an admin" request goes to.
     """
 
     # NOTE: SpacePermissionError is intentionally used for admin-gate failures
     # in PR1 (it maps correctly to HTTP 403 via BaseView._map_exc and matches
     # the PR1 plan).  A dedicated AppPermissionError is deferred to PR2.
 
-    __slots__ = ("_apps_path", "_bus", "_catalog", "_cp_repo", "_downloader", "_repo")
+    __slots__ = (
+        "_apps_path",
+        "_bus",
+        "_catalog",
+        "_core_version",
+        "_cp_repo",
+        "_downloader",
+        "_repo",
+        "_users",
+    )
 
     def __init__(
         self,
@@ -119,8 +142,12 @@ class AppService(BusPublisherMixin):
         downloader: Callable[[str], bytes | Awaitable[bytes]],
         bus: EventBus | None = None,
         cp_repo: AbstractCpRepo | None = None,
+        core_version: str = "",
+        users: AbstractUserRepo | None = None,
     ) -> None:
         self._repo = repo
+        self._core_version = core_version
+        self._users = users
         self._catalog = catalog
         self._apps_path = Path(apps_path)
         self._downloader = downloader
@@ -160,11 +187,121 @@ class AppService(BusPublisherMixin):
             return AppCatalogStatus()
         return self._catalog.status
 
+    @property
+    def catalog_source_host(self) -> str | None:
+        """Where the catalog comes from (D6): ``None`` for Social Home's
+        own app list, else the host an operator pointed
+        ``apps_catalog_url`` at — the SPA says "From <host>, set by your
+        server operator" instead of "From Social Home"."""
+        if self._catalog is None:
+            return None
+        return self._catalog.source_host
+
+    def is_compatible(self, entry: AppCatalogEntry) -> bool:
+        """Can this Social Home install *entry*? Not when it needs a newer
+        one (``min_core_version``) or asks for a permission this one
+        doesn't know."""
+        return not entry.unknown_permissions and core_version_satisfies(
+            entry.min_core_version, self._core_version
+        )
+
+    @staticmethod
+    def default_min_age(entry: AppCatalogEntry, manifest: AppManifest) -> int:
+        """The age gate a fresh install starts with: the stricter of the
+        catalog's rating and the bundle manifest's. An admin can change it
+        afterwards (:meth:`set_min_age`)."""
+        return max(entry.min_age or 0, manifest.min_age)
+
+    async def browse_catalog_for(
+        self, *, user_id: str, is_admin: bool, force: bool = False
+    ) -> list[AppCatalogEntry]:
+        """The catalog as *user_id* may see it: everything for an admin;
+        for anyone else, without the apps the age gate keeps them from
+        (D5: a protected account doesn't learn of an app rated above its
+        age — the catalog's rating, as on install)."""
+        entries = await self.browse_catalog(force=force and is_admin)
+        if is_admin:
+            return entries
+        protected, age = await self._protection(user_id)
+        return [
+            e
+            for e in entries
+            if app_age_allows(e.min_age or 0, protected=protected, declared_age=age)
+        ]
+
+    async def _protection(self, user_id: str) -> tuple[bool, int | None]:
+        """(protected, declared age) for *user_id*; unprotected when the
+        child-protection data isn't wired or there is no record."""
+        if self._cp_repo is None:
+            return False, None
+        p = await self._cp_repo.get_user_protection(user_id)
+        if p is None:
+            return False, None
+        return bool(p.get("child_protection_enabled")), p.get("declared_age")
+
+    async def user_names(self, user_ids: set[str]) -> dict[str, str]:
+        """Display names for *user_ids* (who added an app); unknown or
+        gone ids are left out."""
+        if self._users is None or not user_ids:
+            return {}
+        return {
+            u.user_id: u.display_name for u in await self._users.list_by_ids(user_ids)
+        }
+
+    async def request_app(self, app_id: str, *, user_id: str, is_admin: bool) -> None:
+        """ "Ask an admin" (D4): a member asks for a catalog app.
+
+        The request goes to the household's admins — or, for a protected
+        account, to its guardians (admins when it has none) — as one
+        "Needs you" row per decider, grouped per app
+        (:class:`AppRequested`; the notification service writes it). No
+        table: adding the app or "Not now" resolves the rows. Asking
+        again only joins the open row.
+
+        Raises :class:`AppRequestNotAllowedError` for an admin (they add
+        it) or an app already in the household, and
+        :class:`AppNotFoundError` for an app the catalog doesn't have or
+        the age gate keeps from the caller (never confirms it exists)."""
+        if is_admin:
+            raise AppRequestNotAllowedError("Admins add apps themselves.")
+        if await self._repo.get(app_id) is not None:
+            raise AppRequestNotAllowedError("This app is already in the household.")
+        entries = await self.browse_catalog_for(user_id=user_id, is_admin=False)
+        entry = next((e for e in entries if e.app_id == app_id), None)
+        if entry is None:
+            raise AppNotFoundError(f"App {app_id!r} not found in catalog")
+        recipients: list[str] = []
+        protected, _ = await self._protection(user_id)
+        if protected and self._cp_repo is not None:
+            recipients = list(await self._cp_repo.list_guardians(user_id))
+        if not recipients and self._users is not None:
+            recipients = [
+                u.user_id for u in await self._users.list_active() if u.is_admin
+            ]
+        await self._emit(
+            AppRequested(
+                app_id=app_id,
+                name=entry.name,
+                requested_by=user_id,
+                recipients=tuple(r for r in recipients if r != user_id),
+            )
+        )
+
+    async def dismiss_requests(
+        self, app_id: str, *, actor_is_admin: bool, actor_user_id: str
+    ) -> None:
+        """ "Not now": an admin answers every open request for *app_id*
+        (:class:`AppRequestDismissed` resolves the rows for all)."""
+        if not actor_is_admin:
+            raise SpacePermissionError("Only admins may answer app requests")
+        await self._emit(AppRequestDismissed(app_id=app_id, dismissed_by=actor_user_id))
+
     async def list_updates(self, *, force: bool = False) -> list[dict]:
         """Return a list of installed apps that have a newer version in the catalog.
 
         Each entry is a dict with keys ``app_id``, ``name``,
-        ``current_version``, and ``latest_version``. Only a strictly newer
+        ``current_version``, ``latest_version`` and ``compatible`` (this
+        Social Home can install it, :meth:`is_compatible`). Only a strictly newer
         version counts (:func:`~socialhome.domain.apps.is_newer_version`,
         CalVer compared as numbers): a catalog that went back to an older
         release offers no "update".
@@ -197,6 +334,9 @@ class AppService(BusPublisherMixin):
                         "name": app.name,
                         "current_version": app.version,
                         "latest_version": entry.latest_version,
+                        # ``False``: the new version needs a newer Social
+                        # Home — the SPA says so instead of offering it.
+                        "compatible": self.is_compatible(entry),
                     }
                 )
         return updates
@@ -320,6 +460,10 @@ class AppService(BusPublisherMixin):
         entry = next((e for e in entries if e.app_id == app_id), None)
         if entry is None:
             raise AppNotFoundError(f"App {app_id!r} not found in catalog")
+        if not self.is_compatible(entry):
+            raise AppNeedsNewerCoreError(
+                params={"min_core_version": entry.min_core_version or ""}
+            )
 
         manifest, bundle_rel, actual_sha = await self._download_verify_unpack(
             app_id, entry
@@ -336,7 +480,9 @@ class AppService(BusPublisherMixin):
             source_url=entry.bundle_url,
             installed_by=actor_user_id,
             installed_at=datetime.now(UTC).isoformat(),
-            min_age=manifest.min_age,
+            # The catalog's rating is the default (D5); an admin can
+            # change it afterwards.
+            min_age=self.default_min_age(entry, manifest),
         )
         await self._repo.install(app)
         await self._emit(
@@ -411,6 +557,10 @@ class AppService(BusPublisherMixin):
                 entry.latest_version,
             )
             return existing
+        if not self.is_compatible(entry):
+            raise AppNeedsNewerCoreError(
+                params={"min_core_version": entry.min_core_version or ""}
+            )
 
         manifest, bundle_rel, actual_sha = await self._download_verify_unpack(
             app_id, entry
@@ -419,7 +569,7 @@ class AppService(BusPublisherMixin):
         # Preserve admin-configured age gate, but auto-raise when the new
         # manifest declares a higher minimum age (e.g. app upgrades its rating).
         # Never silently LOWER an admin's gate — take the stricter value.
-        new_min_age = max(existing.min_age, manifest.min_age)
+        new_min_age = max(existing.min_age, self.default_min_age(entry, manifest))
         updated = InstalledApp(
             app_id=app_id,
             name=entry.name,

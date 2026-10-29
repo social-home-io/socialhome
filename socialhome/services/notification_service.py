@@ -32,6 +32,7 @@ itself is the persistence layer; push is fire-and-forget on top.
 | PollClosed           | Local voters (not the author)         | "{author} closed a poll you voted in"…          |
 | ReportResolved       | The local reporter                    | "Your report in {space} was reviewed"           |
 | AppInstalled         | Members (not the installer, not the age-gated; once a day per app; in app) | "{name} added {app}" |
+| AppRequested         | Admins (a protected asker's guardians) — Needs you, grouped per app | "{name} asked for {app}" |
 
 Body is intentionally omitted for privacy-sensitive events (DMs,
 location, UGC content) per §25.3.
@@ -63,6 +64,8 @@ from ..domain.events import (
     AppChallengeEnded,
     AppChallengeReceived,
     AppInstalled,
+    AppRequestDismissed,
+    AppRequested,
     AutoPairRequestAnswered,
     AutoPairRequestIncoming,
     BazaarBidPlaced,
@@ -183,6 +186,7 @@ from .notification_delivery_worker import NotificationDeliveryWorker
 from .notification_links import (
     HOUSEHOLD_CALENDAR_LINK,
     HOUSEHOLD_FEED_LINK,
+    app_about_link,
     app_link,
     bazaar_listing_link,
     household_post_link,
@@ -427,6 +431,7 @@ _PUSH_AS_IS: frozenset[str] = frozenset(
         "app_challenge",
         "app_added",
         "app_challenge_declined",
+        "app_request",
         "bazaar_bid_placed",
         "bazaar_offer_accepted",
         "bazaar_offer_rejected",
@@ -1307,6 +1312,9 @@ class NotificationService(ProtectionGateMixin):
         self._subscribe(AppChallengeEnded, self.on_app_challenge_ended)
         self._subscribe(AppInstalled, self.on_app_installed)
         self._subscribe(AppChallengeDeclined, self.on_app_challenge_declined)
+        self._subscribe(AppInstalled, self.on_app_request_answered)
+        self._subscribe(AppRequested, self.on_app_requested)
+        self._subscribe(AppRequestDismissed, self.on_app_request_answered)
         # The thing is gone, or you left its space: so are its rows.
         self._subscribe(PostDeleted, self.on_thing_deleted)
         self._subscribe(CommentDeleted, self.on_thing_deleted)
@@ -2772,6 +2780,12 @@ class NotificationService(ProtectionGateMixin):
                 kind == NotificationObject.PAIRING_REQUEST
                 and self._pair_inbox.get(oid) is not None
             )
+        if note.type == "app_request":
+            # Waits until the app is in the household (an install the
+            # event missed, e.g. during a restart, still ends it).
+            if kind != NotificationObject.APP:
+                return False
+            return self._apps is None or await self._apps.get(oid) is None
         if note.type == "space_invite":
             if kind != NotificationObject.SPACE_INVITE:
                 return False
@@ -2908,6 +2922,73 @@ class NotificationService(ProtectionGateMixin):
             actor_user_id=event.from_user_id,
             actor_name=event.from_display,
         )
+
+    async def on_app_requested(self, event: AppRequested) -> None:
+        """ "Ask an admin" (D4): one "Needs you" row per decider
+        (``event.recipients``: the admins, or a protected asker's
+        guardians), about ``app:<id>`` so every ask for the app joins one
+        row ("Milo and Kiki asked for Chess"), opening the app's detail
+        page where it can be added. Asking again while the row is unread
+        is silent (one buzz per request). Adding the app or "Not now"
+        resolves it (:meth:`on_app_request_answered`)."""
+        asker = await self._local_user(event.requested_by)
+        if asker is None:
+            return
+        about = NotificationSubject.of(
+            NotificationObject.APP, event.app_id, space_name=event.name or None
+        )
+        for recipient_id in event.recipients:
+            recipient = await self._local_user(recipient_id)
+            if recipient is None:
+                continue
+            locale = self._locale(recipient)
+            await self._save_notif(
+                new_notification(
+                    user_id=recipient_id,
+                    type="app_request",
+                    title=self._t(
+                        "notification.app.requested",
+                        locale=locale,
+                        fallback="{name} asked for {app}",
+                        name=asker.display_name,
+                        app=event.name or event.app_id,
+                    ),
+                    link_url=app_about_link(event.app_id),
+                ),
+                about=about,
+                actor_user_id=asker.user_id,
+                actor_name=asker.display_name,
+            )
+
+    async def on_app_request_answered(
+        self, event: AppInstalled | AppRequestDismissed
+    ) -> None:
+        """The app was added ("approved", by the installer) or an admin
+        said "Not now" ("declined"): every decider's request row for it is
+        handled and leaves Needs you on each device."""
+        if isinstance(event, AppInstalled):
+            outcome, by = "approved", event.installed_by or None
+        else:
+            outcome, by = "declined", event.dismissed_by
+        await self._resolve(
+            object_key(NotificationObject.APP, event.app_id),
+            types=("app_request",),
+            outcome=outcome,
+            by_user_id=by,
+        )
+
+    async def pending_app_requests(self, user_id: str) -> frozenset[str]:
+        """The apps *user_id* has asked for that nobody has answered yet
+        — what the Apps page shows as "Asked". Read from the deciders'
+        open ``app_request`` rows (the request has no table of its own)."""
+        rows = await self._notifs.find(Spec(where=[("type", "=", "app_request")]))
+        out: set[str] = set()
+        for n in rows:
+            if not n.is_pending_action or not n.object_key or n.params is None:
+                continue
+            if any(a.id == user_id for a in n.params.actors):
+                out.add(n.object_key.split(":", 1)[1])
+        return frozenset(out)
 
     async def on_app_installed(self, event: AppInstalled) -> None:
         """A new app in the household (D13): "Anna added Chess".

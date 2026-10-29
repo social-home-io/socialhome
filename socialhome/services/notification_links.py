@@ -18,6 +18,7 @@ reply does (``/momentum/{id}?reply={reply_id}``):
   picked out (household: Organize; space: the Tasks section).
 * ``/bazaar?listing={post_id}`` — the listing opened.
 * ``/apps?app={app_id}`` — the app's entry on the Apps page.
+* ``/apps/{app_id}/about`` — the app's detail page (a request for it).
 
 A grouped "new posts" row (D5) opens the feed itself: ``/feed`` for the
 household, ``/spaces/{id}`` for a space.
@@ -97,6 +98,11 @@ def space_members_link(space_id: str) -> str:
 def app_link(app_id: str) -> str:
     """The Apps page with the app's entry picked out."""
     return _with_query("/apps", app=app_id)
+
+
+def app_about_link(app_id: str) -> str:
+    """The app's detail page — what it can do, and where it is added."""
+    return f"/apps/{app_id}/about"
 
 
 def link_target(link: str) -> str:

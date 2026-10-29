@@ -15,6 +15,7 @@ import io
 import json
 import tarfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -30,14 +31,18 @@ from socialhome.domain.apps import (
     AppCatalogStatus,
     AppIntegrityError,
     AppKvEntry,
+    AppNeedsNewerCoreError,
     AppNotEnabledError,
     AppNotFoundError,
     AppQuotaExceededError,
+    AppRequestNotAllowedError,
     InstalledApp,
 )
 from socialhome.domain.events import (
     AppEnabledChanged,
     AppInstalled,
+    AppRequestDismissed,
+    AppRequested,
     AppUninstalled,
     AppUpdated,
 )
@@ -2047,3 +2052,295 @@ async def test_catalog_status_without_a_catalog_is_never_checked(
         repo=_FakeAppRepo(), catalog=None, apps_path=tmp_path, downloader=downloader
     )
     assert svc.catalog_status == AppCatalogStatus()
+
+
+# ─── Catalog v2: compatibility, default age, "Ask an admin" ──────────────────
+
+
+class _People:
+    """The household's people (``AbstractUserRepo`` slice)."""
+
+    def __init__(self, *users: tuple[str, str, bool]) -> None:
+        self._users = [
+            SimpleNamespace(user_id=uid, display_name=name, is_admin=admin)
+            for uid, name, admin in users
+        ]
+
+    async def list_active(self) -> list[Any]:
+        return list(self._users)
+
+    async def list_by_ids(self, user_ids: set[str]) -> list[Any]:
+        return [u for u in self._users if u.user_id in user_ids]
+
+
+class _GuardedCp(_FakeCpRepo):
+    def __init__(self) -> None:
+        super().__init__()
+        self.guardians: dict[str, list[str]] = {}
+
+    async def list_guardians(self, minor_user_id: str) -> list[str]:
+        return self.guardians.get(minor_user_id, [])
+
+
+def _v2_entry(
+    sha: str,
+    *,
+    app_id: str = "chess",
+    min_age: int | None = None,
+    min_core_version: str | None = None,
+    unknown: tuple[str, ...] = (),
+    version: str = "2026.10.29",
+) -> AppCatalogEntry:
+    return AppCatalogEntry(
+        app_id=app_id,
+        name=app_id.title(),
+        latest_version=version,
+        description="d",
+        icon_url=None,
+        capabilities=("storage",),
+        bundle_url=f"https://example.com/{app_id}.tgz",
+        bundle_sha256=sha,
+        permissions=("storage",),
+        unknown_permissions=unknown,
+        min_age=min_age,
+        min_core_version=min_core_version,
+    )
+
+
+def _v2_service(
+    tmp_path: Path,
+    entries: list[AppCatalogEntry],
+    bundle: bytes = b"",
+    *,
+    core_version: str = "2026.10.29",
+    users: _People | None = None,
+    cp_repo: _FakeCpRepo | None = None,
+    bus: _RecordingBus | None = None,
+    repo: _FakeAppRepo | None = None,
+) -> tuple[AppService, _FakeAppRepo]:
+    repo = repo or _FakeAppRepo()
+
+    async def downloader(url: str) -> bytes:
+        return bundle
+
+    svc = AppService(
+        repo=repo,
+        catalog=_StubCatalog(entries),  # type: ignore[arg-type]
+        apps_path=tmp_path,
+        downloader=downloader,
+        bus=bus,  # type: ignore[arg-type]
+        cp_repo=cp_repo,  # type: ignore[arg-type]
+        core_version=core_version,
+        users=users,  # type: ignore[arg-type]
+    )
+    return svc, repo
+
+
+async def test_install_refuses_an_app_that_needs_a_newer_social_home(
+    tmp_path: Path, chess_bundle: tuple[bytes, str]
+) -> None:
+    data, sha = chess_bundle
+    entry = _v2_entry(sha, min_core_version="2026.11.1")
+    svc, repo = _v2_service(tmp_path, [entry], data, core_version="2026.10.29")
+    assert svc.is_compatible(entry) is False
+    with pytest.raises(AppNeedsNewerCoreError) as exc:
+        await svc.install("chess", actor_is_admin=True, actor_user_id="a")
+    assert exc.value.params == {"min_core_version": "2026.11.1"}
+    assert await repo.get("chess") is None
+
+
+async def test_install_refuses_an_app_asking_for_an_unknown_permission(
+    tmp_path: Path, chess_bundle: tuple[bytes, str]
+) -> None:
+    data, sha = chess_bundle
+    svc, _ = _v2_service(tmp_path, [_v2_entry(sha, unknown=("camera",))], data)
+    with pytest.raises(AppNeedsNewerCoreError):
+        await svc.install("chess", actor_is_admin=True, actor_user_id="a")
+
+
+async def test_a_development_build_installs_anything(
+    tmp_path: Path, chess_bundle: tuple[bytes, str]
+) -> None:
+    data, sha = chess_bundle
+    svc, _ = _v2_service(
+        tmp_path,
+        [_v2_entry(sha, min_core_version="2099.1.1")],
+        data,
+        core_version="2026.10.30.dev3+gabc",
+    )
+    app = await svc.install("chess", actor_is_admin=True, actor_user_id="a")
+    assert app.app_id == "chess"
+
+
+@pytest.mark.parametrize(("catalog_age", "expected"), [(13, 13), (None, 0), (0, 0)])
+async def test_install_takes_the_catalog_rating_as_default_min_age(
+    tmp_path: Path,
+    chess_bundle: tuple[bytes, str],
+    catalog_age: int | None,
+    expected: int,
+) -> None:
+    """D5: the catalog's age rating is the install default (the bundle's
+    manifest declares 0 here); an admin can change it afterwards."""
+    data, sha = chess_bundle
+    bus = _RecordingBus()
+    svc, _repo = _v2_service(
+        tmp_path, [_v2_entry(sha, min_age=catalog_age)], data, bus=bus
+    )
+    app = await svc.install("chess", actor_is_admin=True, actor_user_id="a")
+    assert app.min_age == expected
+    installed = [e for e in bus.published if isinstance(e, AppInstalled)]
+    assert installed[0].min_age == expected
+    raised = await svc.set_min_age("chess", min_age=16, actor_is_admin=True)
+    assert raised.min_age == 16
+
+
+async def test_update_refuses_a_version_that_needs_a_newer_social_home(
+    tmp_path: Path, chess_bundle: tuple[bytes, str]
+) -> None:
+    data, sha = chess_bundle
+    repo = await _installed_at(tmp_path, chess_bundle, "2026.10.28")
+    newer = _v2_entry(sha, version="2026.11.2", min_core_version="2026.11.2")
+    svc, _ = _v2_service(tmp_path / "seed", [newer], data, repo=repo)
+    updates = await svc.list_updates()
+    assert updates[0]["compatible"] is False
+    with pytest.raises(AppNeedsNewerCoreError):
+        await svc.update_app("chess", actor_is_admin=True)
+    row = await repo.get("chess")
+    assert row is not None and row.version == "2026.10.28"
+
+
+async def test_update_raises_the_gate_to_the_catalog_rating(
+    tmp_path: Path, chess_bundle: tuple[bytes, str]
+) -> None:
+    data, sha = chess_bundle
+    repo = await _installed_at(tmp_path, chess_bundle, "2026.10.28")
+    newer = _v2_entry(sha, version="2026.11.2", min_age=13)
+    svc, _ = _v2_service(tmp_path / "seed", [newer], data, repo=repo)
+    updated = await svc.update_app("chess", actor_is_admin=True)
+    assert updated.min_age == 13
+
+
+async def test_browse_catalog_for_hides_apps_rated_above_a_protected_age(
+    tmp_path: Path,
+) -> None:
+    """D5: a protected account doesn't learn of an app rated above its
+    age; an adult member and an admin see the whole catalog."""
+    cp = _GuardedCp()
+    cp.add("kid", enabled=True, declared_age=10)
+    entries = [
+        _v2_entry("a" * 64, app_id="chess", min_age=0),
+        _v2_entry("b" * 64, app_id="sketch", min_age=13),
+        _v2_entry("c" * 64, app_id="quiz"),
+    ]
+    svc, _ = _v2_service(tmp_path, entries, cp_repo=cp)
+    kid = await svc.browse_catalog_for(user_id="kid", is_admin=False)
+    assert [e.app_id for e in kid] == ["chess", "quiz"]
+    adult = await svc.browse_catalog_for(user_id="ben", is_admin=False)
+    assert len(adult) == 3
+    admin = await svc.browse_catalog_for(user_id="anna", is_admin=True)
+    assert len(admin) == 3
+
+
+async def test_a_member_cannot_force_a_catalog_refetch(tmp_path: Path) -> None:
+    calls: list[bool] = []
+
+    class _Catalog(_StubCatalog):
+        async def fetch_catalog(self, *, force: bool = False) -> list[AppCatalogEntry]:
+            calls.append(force)
+            return []
+
+    svc = AppService(
+        repo=_FakeAppRepo(),
+        catalog=_Catalog([]),  # type: ignore[arg-type]
+        apps_path=tmp_path,
+        downloader=lambda url: b"",
+    )
+    await svc.browse_catalog_for(user_id="ben", is_admin=False, force=True)
+    await svc.browse_catalog_for(user_id="anna", is_admin=True, force=True)
+    assert calls == [False, True]
+
+
+async def test_user_names_for_added_by(tmp_path: Path) -> None:
+    people = _People(("anna", "Anna", True), ("ben", "Ben", False))
+    svc, _ = _v2_service(tmp_path, [], users=people)
+    assert await svc.user_names({"anna", "gone"}) == {"anna": "Anna"}
+    assert await svc.user_names(set()) == {}
+    bare, _ = _v2_service(tmp_path, [])
+    assert await bare.user_names({"anna"}) == {}
+
+
+async def test_ask_an_admin_goes_to_every_admin(tmp_path: Path) -> None:
+    bus = _RecordingBus()
+    people = _People(
+        ("anna", "Anna", True), ("ben", "Ben", True), ("milo", "Milo", False)
+    )
+    svc, _ = _v2_service(
+        tmp_path, [_v2_entry("a" * 64)], users=people, bus=bus, cp_repo=_GuardedCp()
+    )
+    await svc.request_app("chess", user_id="milo", is_admin=False)
+    (event,) = bus.published
+    assert isinstance(event, AppRequested)
+    assert (event.app_id, event.name, event.requested_by) == ("chess", "Chess", "milo")
+    assert event.recipients == ("anna", "ben")
+
+
+async def test_a_protected_account_asks_its_guardians(tmp_path: Path) -> None:
+    bus = _RecordingBus()
+    cp = _GuardedCp()
+    cp.add("kiki", enabled=True, declared_age=9)
+    cp.guardians["kiki"] = ["mum"]
+    people = _People(("anna", "Anna", True), ("mum", "Mum", False))
+    svc, _ = _v2_service(
+        tmp_path, [_v2_entry("a" * 64)], users=people, bus=bus, cp_repo=cp
+    )
+    await svc.request_app("chess", user_id="kiki", is_admin=False)
+    assert bus.published[0].recipients == ("mum",)
+    # No guardian on record: the admins decide.
+    cp.guardians["kiki"] = []
+    await svc.request_app("chess", user_id="kiki", is_admin=False)
+    assert bus.published[1].recipients == ("anna",)
+
+
+async def test_ask_refuses_what_needs_no_request(
+    tmp_path: Path, chess_bundle: tuple[bytes, str]
+) -> None:
+    data, sha = chess_bundle
+    cp = _GuardedCp()
+    cp.add("kiki", enabled=True, declared_age=9)
+    entries = [_v2_entry(sha), _v2_entry("b" * 64, app_id="sketch", min_age=13)]
+    svc, _ = _v2_service(tmp_path, entries, data, cp_repo=cp, users=_People())
+    with pytest.raises(AppRequestNotAllowedError):
+        await svc.request_app("chess", user_id="anna", is_admin=True)
+    with pytest.raises(AppNotFoundError):
+        await svc.request_app("nope", user_id="ben", is_admin=False)
+    # Rated above the asker's age: as if it didn't exist.
+    with pytest.raises(AppNotFoundError):
+        await svc.request_app("sketch", user_id="kiki", is_admin=False)
+    await svc.install("chess", actor_is_admin=True, actor_user_id="anna")
+    with pytest.raises(AppRequestNotAllowedError):
+        await svc.request_app("chess", user_id="ben", is_admin=False)
+
+
+async def test_not_now_is_for_admins(tmp_path: Path) -> None:
+    bus = _RecordingBus()
+    svc, _ = _v2_service(tmp_path, [], bus=bus)
+    with pytest.raises(SpacePermissionError):
+        await svc.dismiss_requests("chess", actor_is_admin=False, actor_user_id="ben")
+    await svc.dismiss_requests("chess", actor_is_admin=True, actor_user_id="anna")
+    assert bus.published == [
+        AppRequestDismissed(
+            app_id="chess",
+            dismissed_by="anna",
+            occurred_at=bus.published[0].occurred_at,
+        )
+    ]
+
+
+async def test_catalog_source_host(tmp_path: Path) -> None:
+    svc, _ = _v2_service(tmp_path, [])
+    svc._catalog.source_host = "apps.example.org"  # type: ignore[union-attr]
+    assert svc.catalog_source_host == "apps.example.org"
+    bare = AppService(
+        repo=_FakeAppRepo(), catalog=None, apps_path=tmp_path, downloader=lambda u: b""
+    )
+    assert bare.catalog_source_host is None

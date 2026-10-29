@@ -102,6 +102,26 @@ class AppCatalogUnreachableError(AppError, CodedError):
     detail = "Could not reach the app catalog."
 
 
+class AppNeedsNewerCoreError(AppError, CodedError):
+    """Install asked for an app that needs a newer Social Home: its
+    ``min_core_version`` is past this one, or it asks for a permission this
+    one doesn't know (never silently granted)."""
+
+    status = 409
+    code = "APP_NEEDS_NEWER_SOCIAL_HOME"
+    detail = "This app needs a newer Social Home."
+
+
+class AppRequestNotAllowedError(AppError, CodedError):
+    """ "Ask an admin" for an app that can't be asked for: the caller is an
+    admin (they add apps themselves) or the app is already in the
+    household."""
+
+    status = 409
+    code = "APP_REQUEST_NOT_NEEDED"
+    detail = "This app doesn't need a request."
+
+
 class AppQuotaExceededError(AppError):
     """A per-(app, user) storage quota (key count / value size) was exceeded."""
 
@@ -297,9 +317,115 @@ class AppCatalogStatus:
     stale: bool = False
 
 
+#: The plain-word permissions an app can ask for (D2), in the order the
+#: SPA lists them. ``people`` is implied by ``federation`` for a catalog
+#: entry or an install that predates it (federation without picking whom
+#: to play with is useless) — see :func:`app_permissions`.
+APP_PERMISSIONS: tuple[str, ...] = ("storage", "people", "federation")
+_KNOWN_PERMISSIONS: frozenset[str] = frozenset(APP_PERMISSIONS)
+
+
+def app_permissions(declared: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    """The plain-word permissions for *declared* (a manifest's
+    ``capabilities`` or a catalog entry's ``permissions``), in
+    :data:`APP_PERMISSIONS` order, ``people`` implied by ``federation``.
+    Unknown ids are dropped here — :attr:`AppCatalogEntry.unknown_permissions`
+    keeps them so the entry reads "needs a newer Social Home"."""
+    have = set(declared)
+    if "federation" in have:
+        have.add("people")
+    return tuple(p for p in APP_PERMISSIONS if p in have)
+
+
+#: Receiver bounds for catalog schema v2 (r2-proposal §7). A value past a
+#: bound is capped (text) or ignored (anything else) — one bad field never
+#: drops the entry, and a publisher can't inflate what every household
+#: holds and serves.
+#: Largest catalog body read (the whole ``catalog.json``).
+MAX_CATALOG_BYTES: int = 256 * 1024
+CATALOG_NAME_MAX: int = 40
+CATALOG_DESCRIPTION_MAX: int = 300
+#: Most locales kept per ``i18n`` / changelog ``notes`` map, and most
+#: ``languages`` / unknown permission ids kept.
+CATALOG_LOCALES_MAX: int = 12
+CATALOG_CHANGELOG_MAX: int = 5
+CATALOG_CHANGELOG_NOTE_MAX: int = 500
+CATALOG_PUBLISHER_MAX: int = 60
+CATALOG_HOMEPAGE_MAX: int = 300
+#: Largest ``icon_url`` (a ``data:`` URI) kept; a bigger one shows the
+#: placeholder icon.
+CATALOG_ICON_MAX: int = 16 * 1024
+
+#: A locale tag as the catalog keys it (``de``, ``pt-BR``).
+_LOCALE_RE = re.compile(r"[a-z]{2,3}(?:-[A-Za-z0-9]{2,8})?")
+_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+
+
+def _capped(value: object, limit: int) -> str | None:
+    """*value* as a stripped string cut to *limit* characters (an ellipsis
+    marks the cut), or ``None`` when it isn't a non-empty string."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if len(text) > limit:
+        return text[: limit - 1].rstrip() + "…"
+    return text
+
+
+def _locale(value: object) -> str | None:
+    """*value* when it is a locale tag (``de``, ``pt-BR``), else ``None``."""
+    if isinstance(value, str) and _LOCALE_RE.fullmatch(value):
+        return value
+    return None
+
+
+def core_version_satisfies(min_core_version: str | None, core_version: str) -> bool:
+    """Is this Social Home (*core_version*) new enough for an app that
+    needs *min_core_version*?
+
+    No requirement → yes. A core version that isn't a plain release — a
+    development build (``2026.10.12.dev2``, ``0.0.0+unknown``: built from a
+    checkout, ahead of every release) — is never held back either: the
+    gate is about compatibility, and a checkout runs the newest code."""
+    if not min_core_version:
+        return True
+    need = parse_app_version(min_core_version)
+    have = parse_app_version(core_version)
+    if need is None or have is None or have == (0, 0, 0):
+        return True
+    return have >= need
+
+
+@dataclass(slots=True, frozen=True)
+class AppCatalogText:
+    """One locale's name and description of a catalog entry (``i18n``)."""
+
+    locale: str
+    name: str | None
+    description: str | None
+
+
+@dataclass(slots=True, frozen=True)
+class AppChangelogEntry:
+    """One version's "What's new" (``changelog``); ``notes`` per locale."""
+
+    version: str
+    date: str | None
+    notes: tuple[tuple[str, str], ...]
+
+
 @dataclass(slots=True, frozen=True)
 class AppCatalogEntry:
-    """One entry of the remote ``catalog.json``."""
+    """One entry of the remote ``catalog.json``.
+
+    The v1 fields are required as before. The schema-2 fields (``i18n``,
+    ``bundle_size``, ``permissions``, ``min_age``, ``languages``,
+    ``publisher``, ``homepage``, ``min_core_version``, ``changelog``) are
+    optional and bounded (the ``CATALOG_*`` limits): text past a limit is
+    cut, any other bad value reads as unknown — one bad field never drops
+    the entry."""
 
     app_id: str
     name: str
@@ -309,6 +435,20 @@ class AppCatalogEntry:
     capabilities: tuple[str, ...]
     bundle_url: str
     bundle_sha256: str
+    i18n: tuple[AppCatalogText, ...] = ()
+    bundle_size: int | None = None
+    #: Known plain-word permissions (:func:`app_permissions`).
+    permissions: tuple[str, ...] = ()
+    #: Permission ids this Social Home doesn't know — the app needs a
+    #: newer one (never silently granted).
+    unknown_permissions: tuple[str, ...] = ()
+    #: The publisher's age rating, ``None`` when not given (or invalid).
+    min_age: int | None = None
+    languages: tuple[str, ...] = ()
+    publisher: str | None = None
+    homepage: str | None = None
+    min_core_version: str | None = None
+    changelog: tuple[AppChangelogEntry, ...] = ()
 
     _REQUIRED: ClassVar[tuple[str, ...]] = (
         "app_id",
@@ -321,19 +461,150 @@ class AppCatalogEntry:
 
     @classmethod
     def from_dict(cls, data: dict) -> AppCatalogEntry:
+        if not isinstance(data, dict):
+            raise WrongTypeError("catalog entry must be an object")
         missing = [k for k in cls._REQUIRED if not data.get(k)]
         if missing:
             raise ValueError(f"catalog entry missing fields: {missing}")
         caps = data.get("capabilities", [])
         if not isinstance(caps, list):
             raise WrongTypeError("catalog entry capabilities must be a list")
+        capabilities = tuple(str(c) for c in caps)
+        raw_perms = data.get("permissions")
+        if isinstance(raw_perms, list) and all(isinstance(p, str) for p in raw_perms):
+            declared: tuple[str, ...] = tuple(raw_perms)
+        else:
+            # v1 (or a bad list): the manifest capabilities say it.
+            declared = capabilities
+        icon = data.get("icon_url")
+        app_id = str(data["app_id"])
         return cls(
-            app_id=str(data["app_id"]),
-            name=str(data["name"]),
+            app_id=app_id,
+            name=_capped(str(data["name"]), CATALOG_NAME_MAX) or app_id,
             latest_version=str(data["latest_version"]),
-            description=str(data["description"]),
-            icon_url=data.get("icon_url"),
-            capabilities=tuple(str(c) for c in caps),
+            description=_capped(str(data["description"]), CATALOG_DESCRIPTION_MAX)
+            or "",
+            icon_url=icon
+            if isinstance(icon, str) and len(icon) <= CATALOG_ICON_MAX
+            else None,
+            capabilities=capabilities,
             bundle_url=str(data["bundle_url"]),
             bundle_sha256=str(data["bundle_sha256"]),
+            i18n=_parse_i18n(data.get("i18n")),
+            bundle_size=_parse_size(data.get("bundle_size")),
+            permissions=app_permissions(declared),
+            unknown_permissions=tuple(
+                sorted({p[:40] for p in declared if p not in _KNOWN_PERMISSIONS})
+            )[:CATALOG_LOCALES_MAX],
+            min_age=_parse_min_age(data.get("min_age")),
+            languages=_parse_languages(data.get("languages")),
+            publisher=_capped(data.get("publisher"), CATALOG_PUBLISHER_MAX),
+            homepage=_parse_homepage(data.get("homepage")),
+            min_core_version=_parse_core_version(data.get("min_core_version")),
+            changelog=_parse_changelog(data.get("changelog")),
         )
+
+
+def _parse_i18n(raw: object) -> tuple[AppCatalogText, ...]:
+    """``i18n`` → per-locale texts (bad locales / values skipped)."""
+    if not isinstance(raw, dict):
+        return ()
+    out: list[AppCatalogText] = []
+    for key, value in raw.items():
+        if len(out) >= CATALOG_LOCALES_MAX:
+            break
+        locale = _locale(key)
+        if locale is None or not isinstance(value, dict):
+            continue
+        name = _capped(value.get("name"), CATALOG_NAME_MAX)
+        description = _capped(value.get("description"), CATALOG_DESCRIPTION_MAX)
+        if name is None and description is None:
+            continue
+        out.append(AppCatalogText(locale, name, description))
+    return tuple(out)
+
+
+def _parse_size(raw: object) -> int | None:
+    """``bundle_size`` in bytes, within the download cap, else ``None``."""
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None
+    return raw if 0 < raw <= MAX_BUNDLE_DOWNLOAD_BYTES else None
+
+
+def _parse_min_age(raw: object) -> int | None:
+    """``min_age`` when it is one of the ratings the gate knows."""
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return None
+    return raw if raw in _VALID_MIN_AGES else None
+
+
+def _parse_languages(raw: object) -> tuple[str, ...]:
+    """``languages`` → distinct locale tags (at most the locale cap)."""
+    if not isinstance(raw, list):
+        return ()
+    out: list[str] = []
+    for item in raw:
+        if len(out) >= CATALOG_LOCALES_MAX:
+            break
+        locale = _locale(item)
+        if locale is not None and locale not in out:
+            out.append(locale)
+    return tuple(out)
+
+
+def _parse_homepage(raw: object) -> str | None:
+    """``homepage`` when it is a short ``https://`` URL — shown as text,
+    never fetched."""
+    if (
+        not isinstance(raw, str)
+        or not raw.startswith("https://")
+        or len(raw) > CATALOG_HOMEPAGE_MAX
+        or any(c.isspace() for c in raw)
+    ):
+        return None
+    return raw
+
+
+def _parse_core_version(raw: object) -> str | None:
+    """``min_core_version`` when it parses as a version."""
+    if isinstance(raw, str) and parse_app_version(raw) is not None:
+        return raw
+    return None
+
+
+def _parse_changelog(raw: object) -> tuple[AppChangelogEntry, ...]:
+    """``changelog`` → at most :data:`CATALOG_CHANGELOG_MAX` entries with a
+    parseable version; notes per locale, each cut to
+    :data:`CATALOG_CHANGELOG_NOTE_MAX`."""
+    if not isinstance(raw, list):
+        return ()
+    out: list[AppChangelogEntry] = []
+    for item in raw:
+        if len(out) >= CATALOG_CHANGELOG_MAX:
+            break
+        if not isinstance(item, dict):
+            continue
+        version = item.get("version")
+        if not isinstance(version, str) or parse_app_version(version) is None:
+            continue
+        date = item.get("date")
+        raw_notes = item.get("notes")
+        notes: list[tuple[str, str]] = []
+        if isinstance(raw_notes, dict):
+            for key, text in raw_notes.items():
+                if len(notes) >= CATALOG_LOCALES_MAX:
+                    break
+                locale = _locale(key)
+                note = _capped(text, CATALOG_CHANGELOG_NOTE_MAX)
+                if locale is not None and note is not None:
+                    notes.append((locale, note))
+        out.append(
+            AppChangelogEntry(
+                version=version,
+                date=date
+                if isinstance(date, str) and _DATE_RE.fullmatch(date)
+                else None,
+                notes=tuple(notes),
+            )
+        )
+    return tuple(out)

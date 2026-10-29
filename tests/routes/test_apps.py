@@ -269,10 +269,18 @@ async def test_install_success_returns_201(client, monkeypatch):
 # ── GET /api/apps/catalog ────────────────────────────────────────────────
 
 
-async def test_catalog_is_admin_only(client):
+async def test_members_see_the_catalog_but_cannot_force_a_refetch(client, monkeypatch):
+    """D4: members see "More apps" (and can ask for one); only an admin's
+    ``refresh`` reaches the network."""
+    browse = AsyncMock(return_value=[_make_catalog_entry()])
+    monkeypatch.setattr(AppService, "browse_catalog", browse)
     member_tok = await _seed_member(client._db)
-    r = await client.get("/api/apps/catalog", headers=_auth(member_tok))
-    assert r.status == 403
+    r = await client.get("/api/apps/catalog?refresh=1", headers=_auth(member_tok))
+    assert r.status == 200
+    body = await r.json()
+    assert [a["app_id"] for a in body["apps"]] == ["com.example.new"]
+    assert body["apps"][0]["requested"] is False
+    browse.assert_awaited_once_with(force=False)
 
 
 async def test_catalog_requires_auth(client):
@@ -286,7 +294,13 @@ async def test_admin_can_list_catalog_empty(client, monkeypatch):
     r = await client.get("/api/apps/catalog", headers=_auth(client._tok))
     assert r.status == 200
     body = await r.json()
-    assert body == {"apps": [], "enabled": True, "checked_at": None, "stale": False}
+    assert body == {
+        "apps": [],
+        "enabled": True,
+        "source_host": None,
+        "checked_at": None,
+        "stale": False,
+    }
 
 
 async def test_catalog_turned_off_answers_disabled_not_an_error(client):
@@ -299,6 +313,7 @@ async def test_catalog_turned_off_answers_disabled_not_an_error(client):
     assert await r.json() == {
         "apps": [],
         "enabled": False,
+        "source_host": None,
         "checked_at": None,
         "stale": False,
     }
@@ -2002,3 +2017,150 @@ async def test_app_messages_have_their_own_rate_limit_bucket(client):
         assert r.status == 200
     r = await client.get("/api/apps", headers=_auth(client._tok))
     assert r.status == 200
+
+
+# ── Catalog v2 on the wire, "Ask an admin", "Needs a newer Social Home" ──
+
+
+def _v2_catalog_entry() -> AppCatalogEntry:
+    return AppCatalogEntry.from_dict(
+        {
+            "schema": 2,
+            "app_id": "chess",
+            "name": "Chess",
+            "latest_version": "2026.10.29",
+            "description": "Play chess",
+            "capabilities": ["storage", "federation"],
+            "bundle_url": "https://example.com/chess.tgz",
+            "bundle_sha256": "ab" * 32,
+            "bundle_size": 16198,
+            "permissions": ["storage", "people", "federation"],
+            "min_age": 0,
+            "languages": ["en", "de"],
+            "publisher": "Social Home",
+            "i18n": {"de": {"name": "Schach", "description": "Spiel Schach."}},
+            "homepage": "https://github.com/social-home-io/socialhome-apps",
+            "min_core_version": "2099.1.1",
+            "changelog": [
+                {
+                    "version": "2026.10.29",
+                    "date": "2026-10-29",
+                    "notes": {"en": "Keyboard play."},
+                }
+            ],
+        }
+    )
+
+
+async def test_catalog_carries_the_v2_fields(client, monkeypatch):
+    monkeypatch.setattr(
+        AppService, "browse_catalog", AsyncMock(return_value=[_v2_catalog_entry()])
+    )
+    client.app[app_service_key]._core_version = "2026.10.29"
+    r = await client.get("/api/apps/catalog", headers=_auth(client._tok))
+    assert r.status == 200
+    [item] = (await r.json())["apps"]
+    assert item["permissions"] == ["storage", "people", "federation"]
+    assert item["i18n"] == {"de": {"name": "Schach", "description": "Spiel Schach."}}
+    assert item["bundle_size"] == 16198
+    assert item["min_age"] == 0
+    assert item["languages"] == ["en", "de"]
+    assert item["publisher"] == "Social Home"
+    assert item["homepage"] == "https://github.com/social-home-io/socialhome-apps"
+    assert item["min_core_version"] == "2099.1.1"
+    assert item["changelog"] == [
+        {
+            "version": "2026.10.29",
+            "date": "2026-10-29",
+            "notes": {"en": "Keyboard play."},
+        }
+    ]
+    # This Social Home is older than the app needs.
+    assert item["compatible"] is False
+    assert item["requested"] is False
+
+
+async def test_install_of_an_app_needing_a_newer_social_home_is_refused(
+    client, monkeypatch
+):
+    monkeypatch.setattr(
+        AppService, "browse_catalog", AsyncMock(return_value=[_v2_catalog_entry()])
+    )
+    client.app[app_service_key]._core_version = "2026.10.29"
+    r = await client.post(
+        "/api/apps", json={"app_id": "chess"}, headers=_auth(client._tok)
+    )
+    assert r.status == 409
+    body = await r.json()
+    assert body["error"]["code"] == "APP_NEEDS_NEWER_SOCIAL_HOME"
+
+
+async def test_list_apps_names_who_added_it_and_the_permissions(client, monkeypatch):
+    admin_id = (
+        await client._db.fetchone("SELECT user_id FROM users WHERE is_admin=1")
+    )["user_id"]
+    app = InstalledApp(
+        app_id="chess",
+        name="Chess",
+        version="2026.10.29",
+        enabled=True,
+        manifest=AppManifest(
+            entry="index.html", icon=None, capabilities=("storage", "federation")
+        ),
+        bundle_path="chess/2026.10.29",
+        bundle_sha256="ab" * 32,
+        source_url="https://example.com/chess.tgz",
+        installed_by=admin_id,
+        installed_at="2026-10-12T09:00:00+00:00",
+    )
+    monkeypatch.setattr(AppService, "list_visible", AsyncMock(return_value=[app]))
+    r = await client.get("/api/apps", headers=_auth(client._tok))
+    [item] = (await r.json())["apps"]
+    assert item["installed_by_name"]
+    assert item["installed_at"] == "2026-10-12T09:00:00+00:00"
+    # ``people`` is implied by ``federation`` for an older manifest.
+    assert item["permissions"] == ["storage", "people", "federation"]
+
+
+async def test_member_asks_an_admin_and_sees_it_asked(client, monkeypatch):
+    monkeypatch.setattr(
+        AppService, "browse_catalog", AsyncMock(return_value=[_v2_catalog_entry()])
+    )
+    member_tok = await _seed_member(client._db)
+    r = await client.post("/api/apps/chess/requests", headers=_auth(member_tok))
+    assert r.status == 202
+    assert await r.json() == {"requested": True}
+
+    r = await client.get("/api/apps/catalog", headers=_auth(member_tok))
+    [item] = (await r.json())["apps"]
+    assert item["requested"] is True
+
+    # The admin has it in Needs you, and answers "Not now".
+    r = await client.get("/api/notifications/needs-you", headers=_auth(client._tok))
+    items = (await r.json())["items"]
+    assert [i["type"] for i in items] == ["app_request"]
+    assert items[0]["link_url"] == "/apps/chess/about"
+
+    r = await client.delete("/api/apps/chess/requests", headers=_auth(client._tok))
+    assert r.status == 200
+    r = await client.get("/api/apps/catalog", headers=_auth(member_tok))
+    assert (await r.json())["apps"][0]["requested"] is False
+
+
+async def test_ask_an_admin_refusals(client, monkeypatch):
+    monkeypatch.setattr(
+        AppService, "browse_catalog", AsyncMock(return_value=[_v2_catalog_entry()])
+    )
+    member_tok = await _seed_member(client._db)
+    # An admin adds apps themselves.
+    r = await client.post("/api/apps/chess/requests", headers=_auth(client._tok))
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "APP_REQUEST_NOT_NEEDED"
+    # Not in the catalog.
+    r = await client.post("/api/apps/nope/requests", headers=_auth(member_tok))
+    assert r.status == 404
+    # "Not now" is for admins.
+    r = await client.delete("/api/apps/chess/requests", headers=_auth(member_tok))
+    assert r.status == 403
+    r = await client.post("/api/apps/chess/requests")
+    assert r.status == 401

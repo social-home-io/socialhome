@@ -4,6 +4,8 @@ Four resource groups:
 
 * ``AppCollectionView``      — ``GET /api/apps`` (list) + ``POST /api/apps`` (install)
 * ``AppCatalogView``         — ``GET /api/apps/catalog`` (browse remote catalog)
+* ``AppRequestsView``        — ``POST/DELETE /api/apps/{app_id}/requests``
+  ("Ask an admin" / "Not now")
 * ``AppDetailView``          — ``GET /api/apps/{app_id}`` + ``PATCH`` (toggle) + ``DELETE``
 * ``AppStoreCollectionView`` — ``GET /api/apps/{app_id}/store`` (list all KV pairs)
 * ``AppStoreItemView``       — ``GET/PUT/DELETE /api/apps/{app_id}/store/{key}``
@@ -14,9 +16,20 @@ from __future__ import annotations
 import orjson
 from aiohttp import web
 
-from ..app_keys import app_federation_service_key, app_service_key
-from ..domain.apps import AppAgeRestrictedError, AppCatalogStatus, InstalledApp
+from ..app_keys import (
+    app_federation_service_key,
+    app_service_key,
+    notification_service_key,
+)
+from ..domain.apps import (
+    AppAgeRestrictedError,
+    AppCatalogEntry,
+    AppCatalogStatus,
+    InstalledApp,
+    app_permissions,
+)
 from ..security import error_response
+from ..services.app_service import AppService
 from .base import BaseView
 
 # Maximum encoded payload size for app federation messages (256 KiB).
@@ -30,16 +43,65 @@ def _catalog_freshness(status: AppCatalogStatus) -> dict:
     return {"checked_at": status.checked_at, "stale": status.stale}
 
 
-def _serialize(app: InstalledApp) -> dict:
-    """Return a safe, wire-shape dict for an :class:`InstalledApp`."""
+def _serialize(app: InstalledApp, names: dict[str, str] | None = None) -> dict:
+    """Return a safe, wire-shape dict for an :class:`InstalledApp`.
+
+    ``permissions`` are the plain-word ones the household agreed to (the
+    installed manifest; ``people`` implied by ``federation``);
+    ``installed_by_name`` says who added it ("Added by Anna") when
+    *names* holds them."""
     return {
         "app_id": app.app_id,
         "name": app.name,
         "version": app.version,
         "enabled": app.enabled,
         "capabilities": list(app.manifest.capabilities),
+        "permissions": list(app_permissions(app.manifest.capabilities)),
         "icon": app.manifest.icon,
         "min_age": app.min_age,
+        "installed_at": app.installed_at,
+        "installed_by_name": (names or {}).get(app.installed_by or ""),
+    }
+
+
+async def _app_json(svc: AppService, app: InstalledApp) -> dict:
+    """:func:`_serialize` with who added it named."""
+    names = await svc.user_names({app.installed_by} if app.installed_by else set())
+    return _serialize(app, names)
+
+
+def _serialize_entry(
+    entry: AppCatalogEntry, *, compatible: bool, requested: bool
+) -> dict:
+    """A catalog entry on the wire: the v1 fields plus the schema-2 ones
+    (``None`` / empty when the catalog doesn't say). Texts per locale ride
+    as ``i18n`` and the SPA picks the viewer's language (switching
+    language needs no refetch). ``compatible`` — this Social Home can
+    install it; ``requested`` — the caller asked for it and nobody has
+    answered yet."""
+    return {
+        "app_id": entry.app_id,
+        "name": entry.name,
+        "latest_version": entry.latest_version,
+        "description": entry.description,
+        "icon_url": entry.icon_url,
+        "capabilities": list(entry.capabilities),
+        "permissions": list(entry.permissions),
+        "i18n": {
+            t.locale: {"name": t.name, "description": t.description} for t in entry.i18n
+        },
+        "bundle_size": entry.bundle_size,
+        "min_age": entry.min_age,
+        "languages": list(entry.languages),
+        "publisher": entry.publisher,
+        "homepage": entry.homepage,
+        "min_core_version": entry.min_core_version,
+        "changelog": [
+            {"version": c.version, "date": c.date, "notes": dict(c.notes)}
+            for c in entry.changelog
+        ],
+        "compatible": compatible,
+        "requested": requested,
     }
 
 
@@ -50,7 +112,8 @@ class AppCollectionView(BaseView):
         user = self.user
         svc = self.svc(app_service_key)
         apps = await svc.list_visible(user_id=user.user_id, is_admin=user.is_admin)
-        return self._json({"apps": [_serialize(a) for a in apps]})
+        names = await svc.user_names({a.installed_by for a in apps if a.installed_by})
+        return self._json({"apps": [_serialize(a, names) for a in apps]})
 
     async def post(self) -> web.Response:
         user = self.user
@@ -70,42 +133,73 @@ class AppCollectionView(BaseView):
             actor_is_admin=True,
             actor_user_id=user.user_id,
         )
-        return self._json(_serialize(app), status=201)
+        names = await svc.user_names({user.user_id})
+        return self._json(_serialize(app, names), status=201)
 
 
 class AppCatalogView(BaseView):
-    """``GET /api/apps/catalog[?refresh=1]`` — admin-only; ``refresh``
-    re-fetches past the cache (and past the retry pause after a failure)."""
+    """``GET /api/apps/catalog[?refresh=1]`` — every member (D4: members
+    see "More apps" and can ask for one); a protected account doesn't see
+    apps rated above its age (D5). ``refresh`` (admins only — it reaches
+    the network) re-fetches past the cache and the retry pause."""
 
     async def get(self) -> web.Response:
         user = self.user
-        if not user.is_admin:
-            return error_response(403, "FORBIDDEN", "Admin only.")
-
         svc = self.svc(app_service_key)
-        entries = await svc.browse_catalog(
-            force=bool(self.request.query.get("refresh"))
+        entries = await svc.browse_catalog_for(
+            user_id=user.user_id,
+            is_admin=user.is_admin,
+            force=bool(self.request.query.get("refresh")),
         )
+        asked: frozenset[str] = frozenset()
+        if not user.is_admin and entries:
+            asked = await self.svc(notification_service_key).pending_app_requests(
+                user.user_id
+            )
         return self._json(
             {
                 # ``False`` when the operator turned the catalog off
                 # (``apps_catalog_url = ""``) — the SPA says so instead of
                 # "no apps available".
                 "enabled": svc.catalog_enabled,
+                # D6: ``None`` = Social Home's own app list ("From Social
+                # Home"); else the host an operator set.
+                "source_host": svc.catalog_source_host,
                 "apps": [
-                    {
-                        "app_id": e.app_id,
-                        "name": e.name,
-                        "latest_version": e.latest_version,
-                        "description": e.description,
-                        "icon_url": e.icon_url,
-                        "capabilities": list(e.capabilities),
-                    }
+                    _serialize_entry(
+                        e,
+                        compatible=svc.is_compatible(e),
+                        requested=e.app_id in asked,
+                    )
                     for e in entries
                 ],
                 **_catalog_freshness(svc.catalog_status),
             }
         )
+
+
+class AppRequestsView(BaseView):
+    """``POST /api/apps/{app_id}/requests`` — a member asks for a catalog
+    app ("Ask an admin"; a protected account's request goes to its
+    guardians). ``DELETE`` — an admin answers every open request for it
+    with "Not now". The request is the deciders' "Needs you" row; adding
+    the app resolves it too."""
+
+    async def post(self) -> web.Response:
+        user = self.user
+        await self.svc(app_service_key).request_app(
+            self.match("app_id"), user_id=user.user_id, is_admin=user.is_admin
+        )
+        return self._json({"requested": True}, status=202)
+
+    async def delete(self) -> web.Response:
+        user = self.user
+        if not user.is_admin:
+            return error_response(403, "FORBIDDEN", "Admin only.")
+        await self.svc(app_service_key).dismiss_requests(
+            self.match("app_id"), actor_is_admin=True, actor_user_id=user.user_id
+        )
+        return self._json({"ok": True})
 
 
 class AppDetailView(BaseView):
@@ -125,7 +219,7 @@ class AppDetailView(BaseView):
                 await svc.assert_age_allowed(app, user.user_id)
             except AppAgeRestrictedError:
                 return error_response(404, "NOT_FOUND", "App not found.")
-        return self._json(_serialize(app))
+        return self._json(await _app_json(svc, app))
 
     async def patch(self) -> web.Response:
         user = self.user
@@ -168,7 +262,7 @@ class AppDetailView(BaseView):
 
         # app is guaranteed non-None — at least one branch ran.
         assert app is not None
-        return self._json(_serialize(app))
+        return self._json(await _app_json(svc, app))
 
     async def delete(self) -> web.Response:
         user = self.user
@@ -264,7 +358,7 @@ class AppUpdateView(BaseView):
             return error_response(403, "FORBIDDEN", "Admin only.")
         svc = self.svc(app_service_key)
         app = await svc.update_app(self.match("app_id"), actor_is_admin=True)
-        return self._json(_serialize(app))
+        return self._json(await _app_json(svc, app))
 
 
 class AppPeersView(BaseView):

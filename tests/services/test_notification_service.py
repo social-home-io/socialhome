@@ -23,6 +23,8 @@ from socialhome.domain.events import (
     AppChallengeDeclined,
     AppChallengeReceived,
     AppInstalled,
+    AppRequestDismissed,
+    AppRequested,
     BazaarBidPlaced,
     BazaarListingExpired,
     BazaarOfferAccepted,
@@ -55,6 +57,7 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.mention import Mention, MentionType
 from socialhome.domain.notification import NotificationSubject
+from socialhome.domain.notification_kinds import NotifKind, notif_kind
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import (
     ContentAction,
@@ -4296,3 +4299,104 @@ async def test_a_declined_game_for_an_unknown_app_reads_generic(stack):
         if n.type == "app_challenge_declined"
     ]
     assert row.title == "Bob declined your game"
+
+
+# ─── AppRequested: "Milo asked for Chess" ("Ask an admin", D4) ─────────────
+
+
+async def _request_rows(stack, user_id: str):
+    return [
+        n
+        for n in await stack.notif_repo.list(user_id, limit=20)
+        if n.type == "app_request"
+    ]
+
+
+def _asked(user_id: str, *recipients: str) -> AppRequested:
+    return AppRequested(
+        app_id="chess", name="Chess", requested_by=user_id, recipients=recipients
+    )
+
+
+async def test_an_app_request_is_a_needs_you_row_for_each_decider(stack):
+    anna = await stack.provision_user("anna", is_admin=True)
+    ben = await stack.provision_user("ben", is_admin=True)
+    milo = await stack.provision_user("milo")
+    await stack.bus.publish(_asked(milo.user_id, anna.user_id, ben.user_id))
+
+    for admin in (anna, ben):
+        [row] = await _request_rows(stack, admin.user_id)
+        assert row.title == "milo asked for Chess"
+        assert row.object_key == "app:chess"
+        assert row.link_url == "/apps/chess/about"
+        assert row.is_pending_action
+        assert row.params is not None
+        assert row.params.space_name == "Chess"
+        [pending] = await stack.notif_svc.pending_actions(admin.user_id)
+        assert pending.id == row.id
+    assert await _request_rows(stack, milo.user_id) == []
+    assert await stack.notif_svc.pending_app_requests(milo.user_id) == {"chess"}
+
+
+async def test_asks_for_one_app_join_one_row(stack):
+    """ "Milo and Kiki asked for Chess": one row per app, never one per ask."""
+    anna = await stack.provision_user("anna", is_admin=True)
+    milo = await stack.provision_user("milo")
+    kiki = await stack.provision_user("kiki")
+    await stack.bus.publish(_asked(milo.user_id, anna.user_id))
+    await stack.bus.publish(_asked(kiki.user_id, anna.user_id))
+    await stack.bus.publish(_asked(milo.user_id, anna.user_id))
+
+    [row] = await _request_rows(stack, anna.user_id)
+    assert row.params is not None
+    assert [a.id for a in row.params.actors] == [milo.user_id, kiki.user_id]
+    assert row.params.actor_count == 2
+
+
+async def test_adding_the_app_answers_the_request_for_every_decider(stack):
+    anna = await stack.provision_user("anna", is_admin=True)
+    ben = await stack.provision_user("ben", is_admin=True)
+    milo = await stack.provision_user("milo")
+    await stack.bus.publish(_asked(milo.user_id, anna.user_id, ben.user_id))
+    await stack.bus.publish(_installed(ben.user_id))
+
+    for admin in (anna, ben):
+        [row] = await _request_rows(stack, admin.user_id)
+        assert row.params is not None and row.params.handled is not None
+        assert row.params.handled.outcome == "approved"
+        assert row.params.handled.by is not None
+        assert row.params.handled.by.id == ben.user_id
+        assert await stack.notif_svc.pending_actions(admin.user_id) == []
+    assert await stack.notif_svc.pending_app_requests(milo.user_id) == frozenset()
+
+
+async def test_not_now_declines_the_request(stack):
+    anna = await stack.provision_user("anna", is_admin=True)
+    milo = await stack.provision_user("milo")
+    await stack.bus.publish(_asked(milo.user_id, anna.user_id))
+    await stack.bus.publish(
+        AppRequestDismissed(app_id="chess", dismissed_by=anna.user_id)
+    )
+    [row] = await _request_rows(stack, anna.user_id)
+    assert row.params is not None and row.params.handled is not None
+    assert row.params.handled.outcome == "declined"
+    # Asking again opens it again.
+    await stack.bus.publish(_asked(milo.user_id, anna.user_id))
+    [row] = await _request_rows(stack, anna.user_id)
+    assert row.is_pending_action
+
+
+async def test_an_app_request_from_someone_unknown_is_dropped(stack):
+    anna = await stack.provision_user("anna", is_admin=True)
+    await stack.bus.publish(_asked("ghost", anna.user_id))
+    assert await _request_rows(stack, anna.user_id) == []
+
+
+async def test_an_app_request_skips_a_decider_who_is_gone(stack):
+    milo = await stack.provision_user("milo")
+    await stack.bus.publish(_asked(milo.user_id, "ghost"))
+    assert await stack.notif_svc.pending_app_requests(milo.user_id) == frozenset()
+
+
+def test_app_request_is_filed_under_needs_you():
+    assert notif_kind("app_request") is NotifKind.NEEDS_YOU

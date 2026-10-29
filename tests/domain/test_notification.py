@@ -31,9 +31,11 @@ def test_is_read_follows_read_at():
 
 def test_action_items_are_the_needs_you_rows():
     """Join requests, the review queue (posts, reports), invites, pairing
-    requests, requests to message you and game invites (D12) — the rows the
-    prune keeps while unread and that stay pinned until handled."""
+    requests, requests to message you, game invites (D12) and requests for
+    an app (D4) — the rows the prune keeps while unread and that stay
+    pinned until handled."""
     assert ACTION_ITEM_TYPES == {
+        "app_request",
         "space_join_requested",
         "moderation_pending",
         "space_report",

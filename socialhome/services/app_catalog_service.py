@@ -12,12 +12,14 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 import aiohttp
 import orjson
 
 from ..domain.apps import (
     MAX_BUNDLE_DOWNLOAD_BYTES,
+    MAX_CATALOG_BYTES,
     AppBundleTooLargeError,
     AppCatalogEntry,
     AppCatalogStatus,
@@ -49,6 +51,22 @@ RELEASE_MAX_FIELD_SIZE: int = 64 * 1024
 #: explicit, so Install / Update fail with a clear error instead of spinning
 #: for aiohttp's 5-minute default.
 RELEASE_TIMEOUT_S: float = 60.0
+
+#: Social Home's own app list (D6: "From Social Home"). A catalog URL
+#: under this prefix is the project's; any other is an operator's choice
+#: and the SPA names its host ("set by your server operator").
+OFFICIAL_CATALOG_PREFIX: str = (
+    "https://github.com/social-home-io/socialhome-apps/releases/"
+)
+
+
+def catalog_source_host(url: str) -> str | None:
+    """``None`` when *url* is Social Home's own app list, else its host
+    (``apps.example.org``) — what the SPA names as the source."""
+    if url.startswith(OFFICIAL_CATALOG_PREFIX):
+        return None
+    return urlsplit(url).hostname or url
+
 
 #: Read size while streaming a bundle download.
 _DOWNLOAD_CHUNK_BYTES = 64 * 1024
@@ -145,6 +163,12 @@ class AppCatalogService:
         self._failed_ts: float | None = None
 
     @property
+    def source_host(self) -> str | None:
+        """Where the catalog comes from: ``None`` for Social Home's own
+        app list, else the host (:func:`catalog_source_host`)."""
+        return catalog_source_host(self._catalog_url)
+
+    @property
     def last_fetched_monotonic(self) -> float | None:
         """Return the ``time.monotonic()`` timestamp of the last fetch, or ``None``."""
         return self._cache_ts
@@ -200,7 +224,14 @@ class AppCatalogService:
                 session.get(self._catalog_url) as resp,
             ):
                 resp.raise_for_status()
+                # Bounded (r2-proposal §7): a declared length past the cap
+                # is refused before reading, the body after.
+                declared = getattr(resp, "content_length", None)
+                if declared is not None and declared > MAX_CATALOG_BYTES:
+                    raise ValueError(f"catalog is {declared} bytes")
                 raw = await resp.text()
+            if len(raw) > MAX_CATALOG_BYTES:
+                raise ValueError(f"catalog is over {MAX_CATALOG_BYTES} bytes")
             doc = orjson.loads(raw)
             if not isinstance(doc, dict):
                 raise TypeError("catalog is not a JSON object")

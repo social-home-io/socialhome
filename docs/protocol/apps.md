@@ -370,6 +370,58 @@ error.
 
 `tests/protocol/test_app_session_scope.py`.
 
+## Catalog schema v2
+
+Not a federation message: each household fetches `catalog.json` itself
+(`apps_catalog_url`, by default Social Home's own app list on the
+`socialhome-apps` releases) and nothing about it crosses to another
+household. Schema 2 (`"schema": 2`, socialhome-apps 2026.10.29.1) is
+additive — every v1 field keeps its meaning and a v1 catalog still reads.
+Per app it adds `i18n` (`{locale: {name, description}}`), `bundle_size`,
+`permissions` (`storage` / `people` / `federation`), `min_age`,
+`languages`, `publisher`, `homepage`, `min_core_version` and `changelog`
+(`[{version, date, notes: {locale: text}}]`).
+
+Receiver rules (`AppCatalogEntry.from_dict`, `AppCatalogService`) — a
+publisher can't inflate what every household holds, and one bad field
+never drops the entry:
+
+| What | Bound | A bad value |
+|---|---|---|
+| Whole `catalog.json` | ≤ 256 KiB (a declared `Content-Length` past it is refused before reading) | The fetch counts as failed: the held copy is served `stale` |
+| `name` / `i18n.*.name` | ≤ 40 characters | Cut, with "…" |
+| `description` / `i18n.*.description` | ≤ 300 characters | Cut, with "…" |
+| `i18n`, changelog `notes` | ≤ 12 locales; keys are locale tags (`de`, `pt-BR`) | Bad keys or values skipped |
+| `languages` | ≤ 12 distinct locale tags | Bad items skipped |
+| `changelog` | ≤ 5 entries, each with a version that parses (`YYYY.M.D[.N]`); `date` `YYYY-MM-DD`; each note ≤ 500 characters | Bad entries skipped, a bad date dropped |
+| `bundle_size` | integer, 1 byte … the 8 MiB download cap | Unknown |
+| `min_age` | one of 0 / 13 / 16 / 18 | Unknown (the bundle manifest's still applies) |
+| `publisher` | string ≤ 60 characters | Cut / unknown |
+| `homepage` | `https://` URL ≤ 300 characters, no spaces — shown as text, never fetched | Unknown |
+| `min_core_version` | a version that parses | Unknown |
+| `icon_url` | ≤ 16 KiB | The placeholder icon |
+| `permissions` | strings | A non-list falls back to `capabilities` |
+
+- **Permissions** are shown in Social Home's own words — never text from
+  the catalog, so a publisher can't soften "sends invites and moves to
+  other households". `people` is implied by `federation` (an entry or an
+  install from before `people` existed). A permission this Social Home
+  doesn't know is never granted: the entry reads "Needs a newer Social
+  Home" and install answers 409 `APP_NEEDS_NEWER_SOCIAL_HOME`.
+- **`min_core_version`** past this Social Home's release: the same answer,
+  for install and update. A development build (a version that isn't a
+  plain release, such as `2026.10.30.dev3`) is never held back.
+- **`min_age`** is the install's default age gate (the stricter of it and
+  the bundle manifest's); an admin can change it afterwards, and an update
+  never lowers it. A protected account doesn't see catalog apps rated
+  above its age.
+- **Source label** (D6): apps from Social Home's own list say "From Social
+  Home"; with `apps_catalog_url` pointed elsewhere, every app says "From
+  <host>, set by your server operator". Nothing says "verified" — the
+  catalog isn't signed yet (that comes with the first third-party
+  publisher or mirror); `bundle_sha256` over HTTPS and the bundle size
+  caps stay the integrity check.
+
 ## Implementation
 
 - `socialhome/services/app_federation_service.py` — `AppFederationService`:
