@@ -31,6 +31,7 @@ itself is the persistence layer; push is fire-and-forget on top.
 | DmConversationCreated (group) | People added to a group chat | "{name} added you to {chat}"                    |
 | PollClosed           | Local voters (not the author)         | "{author} closed a poll you voted in"…          |
 | ReportResolved       | The local reporter                    | "Your report in {space} was reviewed"           |
+| AppInstalled         | Members (not the installer, not the age-gated; once a day per app; in app) | "{name} added {app}" |
 
 Body is intentionally omitted for privacy-sensitive events (DMs,
 location, UGC content) per §25.3.
@@ -50,12 +51,13 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from string import Formatter
 
-from ..domain.apps import PENDING_SESSION_TTL_SECONDS
+from ..domain.apps import PENDING_SESSION_TTL_SECONDS, app_age_allows
 from ..domain.calendar import RSVPStatus
 from ..domain.conversation import ConversationType, SystemChatScope, mute_active
 from ..domain.events import (
     AppChallengeEnded,
     AppChallengeReceived,
+    AppInstalled,
     AutoPairRequestAnswered,
     AutoPairRequestIncoming,
     BazaarBidPlaced,
@@ -176,6 +178,7 @@ from .notification_delivery_worker import NotificationDeliveryWorker
 from .notification_links import (
     HOUSEHOLD_CALENDAR_LINK,
     HOUSEHOLD_FEED_LINK,
+    app_link,
     bazaar_listing_link,
     household_post_link,
     link_target,
@@ -211,6 +214,10 @@ _CHAT_TYPES: frozenset[str] = frozenset({"dm_message", "dm_mention"})
 #: screen would keep saying someone is calling. The service worker swaps
 #: it in quietly (``renotify: false``): the ring already buzzed.
 _ALWAYS_PUSH_TYPES: frozenset[str] = frozenset({"call_missed"})
+
+#: A new app is announced once a day at most (D13): installing it again
+#: within this long — after an uninstall, by another admin — adds nothing.
+APP_ADDED_QUIET = timedelta(days=1)
 
 #: The types opening a conversation reads (``mark_read_for_dm``).
 _CONVERSATION_TYPES: tuple[str, ...] = (
@@ -413,6 +420,7 @@ _PUSH_AS_IS: frozenset[str] = frozenset(
         "poll_scheduled",
         "report_answer",
         "app_challenge",
+        "app_added",
         "bazaar_bid_placed",
         "bazaar_offer_accepted",
         "bazaar_offer_rejected",
@@ -1291,6 +1299,7 @@ class NotificationService(ProtectionGateMixin):
             self.on_app_challenge_received,
         )
         self._subscribe(AppChallengeEnded, self.on_app_challenge_ended)
+        self._subscribe(AppInstalled, self.on_app_installed)
         # The thing is gone, or you left its space: so are its rows.
         self._subscribe(PostDeleted, self.on_thing_deleted)
         self._subscribe(CommentDeleted, self.on_thing_deleted)
@@ -2850,6 +2859,67 @@ class NotificationService(ProtectionGateMixin):
             actor_user_id=event.from_user_id,
             actor_name=event.from_display,
         )
+
+    async def on_app_installed(self, event: AppInstalled) -> None:
+        """A new app in the household (D13): "Anna added Chess".
+
+        One in-app row per member — never the admin who installed it, and
+        never someone the app's age gate keeps out (:func:`app_age_allows`,
+        the gate the runtime and the app list use: a protected account
+        doesn't learn of an app it can't open). Filed under Activity
+        (``app_added``), In app by default: a row, no push. The row is
+        about ``app:<id>`` and opens the app's entry on the Apps page; the
+        app's name rides as the row's place so the client builds the
+        sentence in the viewer's language. At most one a day per app
+        (:data:`APP_ADDED_QUIET`): a reinstall the same day adds nothing,
+        a later one joins the row like any group (D7)."""
+        installer_id = event.installed_by or None
+        installer = await self._local_user(installer_id) if installer_id else None
+        name = installer.display_name if installer is not None else None
+        blocked = (
+            await self._withheld_from(installer_id) if installer_id else frozenset()
+        )
+        about = NotificationSubject.of(
+            NotificationObject.APP, event.app_id, space_name=event.name or None
+        )
+        audience = [
+            u
+            for u in await self._active_users()
+            if u.user_id != installer_id
+            and u.user_id not in blocked
+            and app_age_allows(
+                event.min_age,
+                protected=bool(u.child_protection_enabled),
+                declared_age=u.declared_age,
+            )
+        ]
+        since = (datetime.now(UTC) - APP_ADDED_QUIET).isoformat()
+        told = await self._notifs.latest_in_groups(
+            [(u.user_id, "app_added", about.object_key) for u in audience],
+            since=since,
+        )
+        for user in audience:
+            if (user.user_id, "app_added", about.object_key) in told:
+                continue
+            locale = self._locale(user)
+            await self._save_notif(
+                new_notification(
+                    user_id=user.user_id,
+                    type="app_added",
+                    title=self._t(
+                        "notification.app.added",
+                        locale=locale,
+                        fallback="{name} added {app}",
+                        name=name or self._someone(locale),
+                        app=event.name or event.app_id,
+                    ),
+                    link_url=app_link(event.app_id),
+                ),
+                about=about,
+                actor_user_id=installer_id,
+                actor_name=name,
+                withheld=blocked,
+            )
 
     async def on_bazaar_bid_placed(self, event: BazaarBidPlaced) -> None:
         """Notify the seller that a bid landed (or was raised)."""

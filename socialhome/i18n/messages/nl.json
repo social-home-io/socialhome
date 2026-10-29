@@ -283,6 +283,7 @@
   "notification.comment.added": "{author} heeft gereageerd op een bericht",
   "notification.dm.message": "{author} heeft je een bericht gestuurd",
   "notification.dm.location": "{author} heeft een locatie gedeeld",
+  "notification.app.added": "{name} heeft {app} toegevoegd",
   "notification.app.challenge": "{name} heeft je uitgenodigd om {app} te spelen",
   "notification.app.challenge_generic": "{name} heeft je uitgenodigd voor een spel",
   "notification.post.moderated": "Je bericht is gemodereerd",

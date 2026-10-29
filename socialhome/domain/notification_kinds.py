@@ -139,6 +139,10 @@ _KIND_OF_TYPE: dict[str, NotifKind] = {
     "space_post_created": NotifKind.ACTIVITY,
     "space_comment_added": NotifKind.ACTIVITY,
     "space_member_joined": NotifKind.ACTIVITY,
+    # A new app in the household (D13: "Anna added Chess"). Household
+    # activity like a new feed post — nothing asked of you, nothing about
+    # you — so it is In app by default: a row, never a buzz.
+    "app_added": NotifKind.ACTIVITY,
 }
 
 #: Every type :func:`notif_kind` knows (for the service's walk test).

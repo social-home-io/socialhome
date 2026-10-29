@@ -54,9 +54,15 @@ from ..domain.apps import (
     AppNotFoundError,
     AppQuotaExceededError,
     InstalledApp,
+    app_age_allows,
     is_newer_version,
 )
-from ..domain.events import AppInstalled, AppUninstalled, AppUpdated
+from ..domain.events import (
+    AppEnabledChanged,
+    AppInstalled,
+    AppUninstalled,
+    AppUpdated,
+)
 from ..domain.space import SpacePermissionError
 from ..repositories.app_repo import AbstractAppRepo
 from ..repositories.cp_repo import AbstractCpRepo
@@ -94,7 +100,8 @@ class AppService(BusPublisherMixin):
         raw bundle bytes.  Injected so unit tests never hit the network.
     bus:
         Optional event bus for publishing :class:`AppInstalled` /
-        :class:`AppUninstalled`.  ``None`` silently skips publication.
+        :class:`AppUpdated` / :class:`AppUninstalled` /
+        :class:`AppEnabledChanged`.  ``None`` silently skips publication.
     """
 
     # NOTE: SpacePermissionError is intentionally used for admin-gate failures
@@ -332,7 +339,14 @@ class AppService(BusPublisherMixin):
             min_age=manifest.min_age,
         )
         await self._repo.install(app)
-        await self._emit(AppInstalled(app_id=app_id, name=entry.name))
+        await self._emit(
+            AppInstalled(
+                app_id=app_id,
+                name=entry.name,
+                installed_by=actor_user_id,
+                min_age=app.min_age,
+            )
+        )
 
         return app
 
@@ -438,6 +452,7 @@ class AppService(BusPublisherMixin):
                 name=entry.name,
                 old_version=existing.version,
                 new_version=entry.latest_version,
+                min_age=new_min_age,
             )
         )
         return updated
@@ -470,7 +485,7 @@ class AppService(BusPublisherMixin):
         elif await aiofiles.os.path.isdir(str(bundle_dir)):
             await asyncio.to_thread(self._rmtree_sync, bundle_dir)
 
-        await self._emit(AppUninstalled(app_id=app_id))
+        await self._emit(AppUninstalled(app_id=app_id, min_age=existing.min_age))
 
     async def set_enabled(
         self,
@@ -496,6 +511,12 @@ class AppService(BusPublisherMixin):
 
         updated = await self._repo.get(app_id)
         assert updated is not None  # just set it
+        if existing.enabled != updated.enabled:
+            await self._emit(
+                AppEnabledChanged(
+                    app_id=app_id, enabled=updated.enabled, min_age=updated.min_age
+                )
+            )
         return updated
 
     # ─── Child protection age gate ───────────────────────────────────────────
@@ -519,10 +540,11 @@ class AppService(BusPublisherMixin):
         p = await self._cp_repo.get_user_protection(user_id)
         if p is None:
             return
-        if not p.get("child_protection_enabled"):
-            return
-        declared = int(p.get("declared_age") or 0)
-        if declared < app.min_age:
+        if not app_age_allows(
+            app.min_age,
+            protected=bool(p.get("child_protection_enabled")),
+            declared_age=p.get("declared_age"),
+        ):
             raise AppAgeRestrictedError(
                 f"This app is restricted to ages {app.min_age}+."
             )

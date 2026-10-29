@@ -101,7 +101,7 @@ describe('glyphFor', () => {
     ['space_comment_added', 'comment'], ['moment_replied', 'comment'],
     ['space_post_created', 'post'], ['user_followed', 'person'], ['space_join_requested', 'person'],
     ['calendar_reminder', 'calendar'], ['task_assigned', 'task'], ['space_report', 'shield'],
-    ['bazaar_bid_placed', 'tag'], ['app_challenge', 'game'],
+    ['bazaar_bid_placed', 'tag'], ['app_challenge', 'game'], ['app_added', 'game'],
     ['call_missed', 'phone'], ['chat_added', 'comment'], ['poll_result', 'poll'], ['poll_scheduled', 'poll'],
     ['report_answer', 'shield'],
   ])('%s → %s', (type, glyph) => {

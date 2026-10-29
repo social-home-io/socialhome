@@ -5552,6 +5552,8 @@
   "notifications.row.bazaar_bid_placed_none": "New bid on your listing",
   "notifications.row.bazaar_offer_accepted_none": "Your offer was accepted",
   "notifications.row.bazaar_offer_rejected_none": "Your offer was declined",
+  "notifications.row.app_added": "{actor} added {space}",
+  "notifications.row.app_added_many": "{actors} added {space}",
   "notifications.row.app_challenge": "{actor} invited you to play {space}",
   "notifications.row.app_challenge_many": "{actors} invited you to play {space}",
   "notifications.needs_you.title": "Needs you",

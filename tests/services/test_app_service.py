@@ -35,7 +35,12 @@ from socialhome.domain.apps import (
     AppQuotaExceededError,
     InstalledApp,
 )
-from socialhome.domain.events import AppInstalled, AppUninstalled, AppUpdated
+from socialhome.domain.events import (
+    AppEnabledChanged,
+    AppInstalled,
+    AppUninstalled,
+    AppUpdated,
+)
 from socialhome.domain.space import SpacePermissionError
 from socialhome.services import app_service as app_service_mod
 from socialhome.services.app_service import AppService
@@ -427,6 +432,9 @@ async def test_install_unpacks_and_records(
     assert isinstance(evt, AppInstalled)
     assert evt.app_id == "chess"
     assert evt.name == "Chess"
+    # Who installed it ("Anna added Chess") and its age gate (who may hear).
+    assert evt.installed_by == "admin1"
+    assert evt.min_age == 0
 
 
 @pytest.mark.asyncio
@@ -552,6 +560,7 @@ async def test_uninstall_removes_row_and_bundle(
     uninstall_events = [e for e in bus.published if isinstance(e, AppUninstalled)]
     assert len(uninstall_events) == 1
     assert uninstall_events[0].app_id == "chess"
+    assert uninstall_events[0].min_age == 0
 
 
 @pytest.mark.asyncio
@@ -609,6 +618,31 @@ async def test_set_enabled_toggles(
     result = await svc.set_enabled("chess", enabled=True, actor_is_admin=True)
     assert result.enabled is True
     assert (await repo.get("chess")).enabled is True  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_set_enabled_publishes_only_when_the_switch_moves(
+    tmp_path: Path,
+    catalog_entry: AppCatalogEntry,
+    chess_bundle: tuple[bytes, str],
+) -> None:
+    """Turning an app off / on tells open pages and tabs; setting the same
+    state again tells nobody."""
+    bundle_bytes, _ = chess_bundle
+    bus = _RecordingBus()
+    svc, _ = make_service(tmp_path, [catalog_entry], bundle_bytes, bus=bus)
+    await svc.install("chess", actor_is_admin=True, actor_user_id="admin1")
+
+    await svc.set_enabled("chess", enabled=True, actor_is_admin=True)  # no-op
+    await svc.set_enabled("chess", enabled=False, actor_is_admin=True)
+    await svc.set_enabled("chess", enabled=False, actor_is_admin=True)  # no-op
+    await svc.set_enabled("chess", enabled=True, actor_is_admin=True)
+
+    changes = [e for e in bus.published if isinstance(e, AppEnabledChanged)]
+    assert [(e.app_id, e.enabled) for e in changes] == [
+        ("chess", False),
+        ("chess", True),
+    ]
 
 
 @pytest.mark.asyncio
@@ -1236,6 +1270,7 @@ async def test_update_app_upgrades_to_new_version(
     assert evt.app_id == "chess"
     assert evt.old_version == "1.0.0"
     assert evt.new_version == "2.0.0"
+    assert evt.min_age == 0
 
 
 @pytest.mark.asyncio

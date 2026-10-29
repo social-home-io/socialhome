@@ -21,6 +21,7 @@ from socialhome.domain.conversation import (
 )
 from socialhome.domain.events import (
     AppChallengeReceived,
+    AppInstalled,
     BazaarBidPlaced,
     BazaarListingExpired,
     BazaarOfferAccepted,
@@ -4102,3 +4103,149 @@ async def test_a_game_invite_for_an_app_the_registry_lacks_reads_generic(stack):
     assert row.title == "Anna invited you to play a game"
     assert row.params is not None
     assert row.params.space_name is None
+
+
+# ─── AppInstalled: "Anna added Chess" (D13) ────────────────────────────────
+
+
+async def _protect(stack, user_id: str, age: int) -> None:
+    await stack.db.enqueue(
+        "UPDATE users SET child_protection_enabled=1, is_minor=1, declared_age=?"
+        " WHERE user_id=?",
+        (age, user_id),
+    )
+
+
+def _installed(installer_id: str, *, min_age: int = 0) -> AppInstalled:
+    return AppInstalled(
+        app_id="chess", name="Chess", installed_by=installer_id, min_age=min_age
+    )
+
+
+async def _app_rows(stack, user_id: str):
+    return [
+        n
+        for n in await stack.notif_repo.list(user_id, limit=20)
+        if n.type == "app_added"
+    ]
+
+
+async def test_app_installed_tells_each_member_but_not_the_installer(stack):
+    anna = await stack.provision_user("anna", is_admin=True)
+    bob = await stack.provision_user("bob")
+    cleo = await stack.provision_user("cleo")
+    await stack.bus.publish(_installed(anna.user_id))
+
+    assert await _app_rows(stack, anna.user_id) == []
+    for member in (bob, cleo):
+        [row] = await _app_rows(stack, member.user_id)
+        assert row.title == "anna added Chess"
+        assert row.object_key == "app:chess"
+        assert row.link_url == "/apps?app=chess"
+        assert row.params is not None
+        assert [a.id for a in row.params.actors] == [anna.user_id]
+        # The client builds the same sentence: the app is the row's place.
+        assert row.params.space_name == "Chess"
+
+
+async def test_app_installed_is_never_pushed_by_default(stack):
+    """Household activity (Activity kind, In app by default): a row, no buzz."""
+    anna = await stack.provision_user("anna", is_admin=True)
+    bob = await stack.provision_user("bob")
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    await stack.bus.publish(_installed(anna.user_id))
+    assert len(await _app_rows(stack, bob.user_id)) == 1
+    assert push.calls == []
+
+
+async def test_app_installed_skips_members_the_age_gate_keeps_out(stack):
+    """A protected account below the app's min_age never learns of it; one
+    at or above it, and an unprotected one, do."""
+    anna = await stack.provision_user("anna", is_admin=True)
+    kid = await stack.provision_user("kid")
+    teen = await stack.provision_user("teen")
+    bob = await stack.provision_user("bob")
+    await _protect(stack, kid.user_id, 9)
+    await _protect(stack, teen.user_id, 16)
+    await stack.bus.publish(_installed(anna.user_id, min_age=13))
+
+    assert await _app_rows(stack, kid.user_id) == []
+    assert len(await _app_rows(stack, teen.user_id)) == 1
+    assert len(await _app_rows(stack, bob.user_id)) == 1
+
+
+async def test_app_installed_without_an_age_gate_reaches_protected_accounts(stack):
+    anna = await stack.provision_user("anna", is_admin=True)
+    kid = await stack.provision_user("kid")
+    await _protect(stack, kid.user_id, 9)
+    await stack.bus.publish(_installed(anna.user_id))
+    assert len(await _app_rows(stack, kid.user_id)) == 1
+
+
+async def test_app_installed_is_announced_once_a_day(stack):
+    """Uninstalled and installed again the same day — by another admin too —
+    adds nothing: the row the member already read stays read."""
+    anna = await stack.provision_user("anna", is_admin=True)
+    ben = await stack.provision_user("ben", is_admin=True)
+    bob = await stack.provision_user("bob")
+    await stack.bus.publish(_installed(anna.user_id))
+    [row] = await _app_rows(stack, bob.user_id)
+    await stack.notif_svc.mark_read(bob.user_id, row.id)
+
+    await stack.bus.publish(_installed(ben.user_id))
+
+    [again] = await _app_rows(stack, bob.user_id)
+    assert again.id == row.id
+    assert again.is_read
+    assert again.params is not None
+    assert [a.id for a in again.params.actors] == [anna.user_id]
+    # Ben installed it the second time: Anna hears of it now.
+    assert len(await _app_rows(stack, anna.user_id)) == 1
+
+
+async def test_app_installed_a_day_later_joins_the_row(stack):
+    """Past the quiet day the row takes the new install like any group (D7)."""
+    anna = await stack.provision_user("anna", is_admin=True)
+    ben = await stack.provision_user("ben", is_admin=True)
+    bob = await stack.provision_user("bob")
+    await stack.bus.publish(_installed(anna.user_id))
+    two_days_ago = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    await stack.db.enqueue(
+        "UPDATE notifications SET created_at=? WHERE type='app_added'",
+        (two_days_ago,),
+    )
+    await stack.bus.publish(_installed(ben.user_id))
+
+    [row] = await _app_rows(stack, bob.user_id)
+    assert row.params is not None
+    assert [a.id for a in row.params.actors] == [ben.user_id, anna.user_id]
+
+
+async def test_app_installed_respects_a_block_on_the_installer(stack):
+    anna = await stack.provision_user("anna", is_admin=True)
+    bob = await stack.provision_user("bob")
+    await stack.user_svc.block(bob.username, anna.user_id)
+    await stack.bus.publish(_installed(anna.user_id))
+    assert await _app_rows(stack, bob.user_id) == []
+
+
+async def test_app_installed_by_nobody_known_still_names_the_app(stack):
+    bob = await stack.provision_user("bob")
+    await stack.bus.publish(AppInstalled(app_id="chess", name="Chess"))
+    [row] = await _app_rows(stack, bob.user_id)
+    assert row.title == "Someone added Chess"
+
+
+def test_app_added_is_filed_under_activity():
+    """Not "About you" (nothing about the member) nor "Needs you" (nothing
+    to do): household activity, In app unless the member chose Push."""
+    from socialhome.domain.notification_kinds import (
+        KIND_DEFAULTS,
+        NotifDelivery,
+        NotifKind,
+        notif_kind,
+    )
+
+    assert notif_kind("app_added") is NotifKind.ACTIVITY
+    assert KIND_DEFAULTS[NotifKind.ACTIVITY] is NotifDelivery.IN_APP

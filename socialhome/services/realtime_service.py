@@ -17,7 +17,12 @@ from dataclasses import asdict, is_dataclass
 from datetime import date, datetime
 from typing import TYPE_CHECKING, Any
 
+from ..domain.apps import app_age_allows
 from ..domain.events import (
+    AppEnabledChanged,
+    AppInstalled,
+    AppUninstalled,
+    AppUpdated,
     AutoPairRequestIncoming,
     BazaarBidPlaced,
     BazaarBidWithdrawn,
@@ -443,6 +448,12 @@ class RealtimeService:
         self._bus.subscribe(StickyUpdated, self._on_sticky_updated)
         self._bus.subscribe(StickyDeleted, self._on_sticky_deleted)
         self._bus.subscribe(CpSpaceAgeGateChanged, self._on_cp_age_gate_changed)
+        # Apps — open Apps pages, the dashboard's Apps card and an open
+        # app tab refresh on these (thin: the SPA refetches /api/apps).
+        self._bus.subscribe(AppInstalled, self._on_app_changed)
+        self._bus.subscribe(AppUpdated, self._on_app_changed)
+        self._bus.subscribe(AppUninstalled, self._on_app_changed)
+        self._bus.subscribe(AppEnabledChanged, self._on_app_changed)
         # Highlights — both local-write and inbound-federation paths publish
         # these on the bus, so the same handler covers "I posted a frame"
         # and "a paired peer's frame just landed". The SPA fetches
@@ -1643,6 +1654,48 @@ class RealtimeService:
                 "space_id": event.space_id,
                 "min_age": event.min_age,
             }
+        )
+
+    # ─── Apps ─────────────────────────────────────────────────────────────
+
+    async def _on_app_changed(
+        self,
+        event: AppInstalled | AppUpdated | AppUninstalled | AppEnabledChanged,
+    ) -> None:
+        """``app.installed`` / ``app.updated`` / ``app.uninstalled`` /
+        ``app.enabled`` / ``app.disabled`` — ``{type, app_id}``, a content-
+        free nudge: open Apps pages and the dashboard's Apps card refetch
+        ``GET /api/apps``, and an open app tab whose app went away or was
+        turned off shows that instead of breaking silently.
+
+        To the household as ``GET /api/apps`` would show the app: admins
+        always (they see every installed app), everyone else only when the
+        app's age gate lets them in (:func:`app_age_allows`) — a protected
+        account never learns of an app it can't use from a frame."""
+        match event:
+            case AppInstalled():
+                change = "installed"
+            case AppUpdated():
+                change = "updated"
+            case AppUninstalled():
+                change = "uninstalled"
+            case AppEnabledChanged(enabled=True):
+                change = "enabled"
+            case AppEnabledChanged():
+                change = "disabled"
+        users = await self._user_repo.list_active()
+        await self._ws.broadcast_to_users(
+            [
+                u.user_id
+                for u in users
+                if u.is_admin
+                or app_age_allows(
+                    event.min_age,
+                    protected=bool(u.child_protection_enabled),
+                    declared_age=u.declared_age,
+                )
+            ],
+            {"type": f"app.{change}", "app_id": event.app_id},
         )
 
     # ─── Pages (§23.72) ───────────────────────────────────────────────────

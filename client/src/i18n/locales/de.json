@@ -5516,6 +5516,8 @@
   "notifications.row.bazaar_bid_placed_none": "Neues Gebot für deine Anzeige",
   "notifications.row.bazaar_offer_accepted_none": "Dein Angebot wurde angenommen",
   "notifications.row.bazaar_offer_rejected_none": "Dein Angebot wurde abgelehnt",
+  "notifications.row.app_added": "{actor} hat {space} hinzugefügt",
+  "notifications.row.app_added_many": "{actors} haben {space} hinzugefügt",
   "notifications.row.app_challenge": "{actor} hat dich eingeladen, {space} zu spielen",
   "notifications.row.app_challenge_many": "{actors} haben dich eingeladen, {space} zu spielen",
   "notifications.needs_you.title": "Wartet auf dich",

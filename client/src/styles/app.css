@@ -22097,6 +22097,15 @@ span.sh-hlv__who { cursor: default; }
   text-overflow: ellipsis;
 }
 .sh-app-card__version { font-size: var(--sh-font-size-xs); }
+/* The app a "new app" notification opened (``/apps?app=``) — the
+ * picked-out pattern: a soft tint and an accent ring. */
+.sh-app-card--picked {
+  background: var(--sh-primary-soft);
+  border-color: var(--sh-primary);
+}
+/* Focus lands here only so a screen reader starts at the app (it is no
+ * tab stop): the accent border already marks it — no second ring. */
+.sh-app-card--picked:focus { outline: none; }
 .sh-app-card__disabled-chip { flex-shrink: 0; }
 .sh-app-card__disabled-hint { font-size: var(--sh-font-size-sm); }
 

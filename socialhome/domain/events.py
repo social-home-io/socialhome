@@ -2489,11 +2489,16 @@ class AppInstalled(DomainEvent):
     """An app bundle was downloaded, verified, unpacked, and recorded.
 
     Published by :class:`AppService.install` after the repo row is committed
-    so subscribers can react to a new app being available.
+    so subscribers can react to a new app being available: the household
+    hears about it ("Anna added Chess") and open Apps pages refresh.
+    ``installed_by`` is the admin who installed it; ``min_age`` the app's
+    age gate — nobody it keeps out learns of the app.
     """
 
     app_id: str
     name: str
+    installed_by: str = ""
+    min_age: int = 0
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -2502,10 +2507,25 @@ class AppUninstalled(DomainEvent):
     """An installed app was removed from disk and the registry.
 
     Published by :class:`AppService.uninstall` after the repo row and bundle
-    directory are gone.
+    directory are gone. ``min_age`` is the gate it had (who was told of it).
     """
 
     app_id: str
+    min_age: int = 0
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class AppEnabledChanged(DomainEvent):
+    """An admin turned an installed app on or off.
+
+    Published by :class:`AppService.set_enabled` when the switch actually
+    moved, so open Apps pages refresh and an open app tab shows "turned
+    off" instead of breaking silently."""
+
+    app_id: str
+    enabled: bool
+    min_age: int = 0
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -2521,6 +2541,7 @@ class AppUpdated(DomainEvent):
     name: str
     old_version: str
     new_version: str
+    min_age: int = 0
     occurred_at: datetime = field(default_factory=_now)
 
 

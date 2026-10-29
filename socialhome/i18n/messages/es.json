@@ -283,6 +283,7 @@
   "notification.comment.added": "{author} comentó una publicación",
   "notification.dm.message": "{author} te escribió",
   "notification.dm.location": "{author} compartió una ubicación",
+  "notification.app.added": "{name} añadió {app}",
   "notification.app.challenge": "{name} te invitó a jugar a {app}",
   "notification.app.challenge_generic": "{name} te invitó a jugar",
   "notification.post.moderated": "Tu publicación fue moderada",
