@@ -22,6 +22,7 @@ import { isGuardian } from '@/store/guardian'
 import { active as activeCalls } from '@/store/calls'
 import { dmUnreadTotal } from '@/store/dms'
 import { spaces, loadSpaces } from '@/store/spaces'
+import { appsNavVisible, loadAppsNav } from '@/store/apps'
 import { toggles } from '@/components/HouseholdToggles'
 import { userPreferences } from '@/store/userPreferences'
 import { Wordmark } from '@/components/Wordmark'
@@ -62,6 +63,9 @@ interface SideNavState {
   isGuardian: boolean
   hasActiveCall: boolean
   dmUnread: number
+  /** Apps belongs in the nav for this member (§2.1): an app they can
+   *  use, or one in "More apps" they could ask for. Admins always. */
+  appsVisible: boolean
   feat_feed: boolean
   feat_calendar: boolean
   feat_timetable: boolean
@@ -75,7 +79,7 @@ interface SideNavState {
   hide_bazaar: boolean
 }
 
-const ALL_ON: Omit<SideNavState, 'isAdmin' | 'isGuardian' | 'hasActiveCall' | 'dmUnread'> = {
+const ALL_ON: Omit<SideNavState, 'isAdmin' | 'isGuardian' | 'hasActiveCall' | 'dmUnread' | 'appsVisible'> = {
   feat_feed: true,
   feat_calendar: true,
   feat_timetable: true,
@@ -149,7 +153,10 @@ const BROWSE_GROUP: SideNavGroup = {
     { key: 'bazaar',  label: () => t('nav.bazaar'), href: '/bazaar',  icon: 'bazaar',
       gate: s => !s.hide_bazaar },
     { key: 'corner',  label: () => t('nav.corner'), href: '/corner',  icon: 'corner' },
-    { key: 'apps',    label: () => t('nav.apps'),   href: '/apps',    icon: 'apps' },
+    // Admins always; a member only with an app they can use or ask for —
+    // a protected account with nothing for its age doesn't see it.
+    { key: 'apps',    label: () => t('nav.apps'),   href: '/apps',    icon: 'apps',
+      gate: s => s.isAdmin || s.appsVisible },
   ],
 }
 
@@ -188,6 +195,13 @@ export function SideNav() {
     if (!spaces.value || spaces.value.length === 0) void loadSpaces()
   }, [])
 
+  // A member's Apps entry depends on what they can use or ask for.
+  const userId = currentUser.value?.user_id
+  const admin = !!currentUser.value?.is_admin
+  useEffect(() => {
+    if (userId && !admin) void loadAppsNav()
+  }, [userId, admin])
+
   // Resolve the active space when the URL points at a specific space
   // page (``/spaces/{id}`` and its sub-routes), excluding ``/spaces``
   // (the listing page) and ``/spaces/browse`` (redirects to Discover).
@@ -213,6 +227,7 @@ export function SideNav() {
       isGuardian: isGuardian.value === true,
       hasActiveCall: activeCalls.value.length > 0,
       dmUnread: dmUnreadTotal.value,
+      appsVisible: appsNavVisible.value === true,
       // Toggles haven't loaded yet → assume everything visible. Avoids
       // a "feature appears" flash once the API responds.
       ...(tg
@@ -253,7 +268,7 @@ export function SideNav() {
     items: SideNavItem[],
     extra?: ComponentChildren,
   ) => {
-    const isActive = items.some(i => i.href === currentPath)
+    const isActive = items.some(i => i.href === currentPath || (i.key === 'apps' && currentPath.startsWith('/apps/')))
       || (group.key === 'browse' && activeSpace !== null)
     const headerId = `sidenav-group-${group.key}`
     return (
@@ -270,7 +285,9 @@ export function SideNav() {
           // even though the deep URL doesn't equal ``/spaces`` exactly.
           const ariaCurrent =
             i.href === currentPath ||
-            (i.key === 'spaces' && activeSpace !== null)
+            (i.key === 'spaces' && activeSpace !== null) ||
+            // An app, or its detail page, is still "Apps".
+            (i.key === 'apps' && currentPath.startsWith('/apps/'))
               ? 'page'
               : undefined
           return (

@@ -1,12 +1,13 @@
 /**
  * Apps store — installed apps, catalog browsing, and update checks.
  *
- * Mirrors ``GET /api/apps`` (installed), ``GET /api/apps/catalog``
- * (admin-only browse surface), and ``GET /api/apps/updates`` (any member,
- * ≤24 h cache; admin ``?refresh=1`` forces a live re-fetch) so the AppsPage
- * can render without a per-render fetch round-trip.
+ * Mirrors ``GET /api/apps`` (installed), ``GET /api/apps/catalog`` (every
+ * member: "More apps" and "Ask an admin", D4), and ``GET /api/apps/updates``
+ * (any member, ≤24 h cache; admin ``?refresh=1`` forces a live re-fetch)
+ * so the Apps page and an app's detail page render without a per-render
+ * fetch round-trip.
  */
-import { signal } from '@preact/signals'
+import { computed, signal } from '@preact/signals'
 import { api } from '@/api'
 import { ws } from '@/ws'
 import { showToast } from '@/components/Toast'
@@ -20,6 +21,22 @@ export interface InstalledApp {
   capabilities: string[]
   icon:         string | null
   min_age:      number
+  /** The plain-word permissions the household agreed to (installed
+   *  manifest; ``people`` implied by ``federation``). */
+  permissions?: AppPermission[]
+  installed_at?: string | null
+  /** Who added it ("Added by Anna"); ``null`` when that person is gone. */
+  installed_by_name?: string | null
+}
+
+/** The three plain-word permissions (D2), in the order they are listed. */
+export type AppPermission = 'storage' | 'people' | 'federation'
+export const APP_PERMISSIONS: readonly AppPermission[] = ['storage', 'people', 'federation']
+
+export interface CatalogChangelogEntry {
+  version: string
+  date:    string | null
+  notes:   Record<string, string>
 }
 
 export interface CatalogEntry {
@@ -29,6 +46,20 @@ export interface CatalogEntry {
   description:  string | null
   icon_url:     string | null
   capabilities: string[]
+  // Catalog schema 2 — absent / null when the catalog doesn't say.
+  permissions?:      AppPermission[]
+  i18n?:             Record<string, { name: string | null, description: string | null }>
+  bundle_size?:      number | null
+  min_age?:          number | null
+  languages?:        string[]
+  publisher?:        string | null
+  homepage?:         string | null
+  min_core_version?: string | null
+  changelog?:        CatalogChangelogEntry[]
+  /** ``false``: needs a newer Social Home — no install offered. */
+  compatible?:       boolean
+  /** The caller asked an admin for it and nobody answered yet. */
+  requested?:        boolean
 }
 
 export interface AppUpdate {
@@ -36,6 +67,8 @@ export interface AppUpdate {
   name:            string
   current_version: string
   latest_version:  string
+  /** ``false``: the new version needs a newer Social Home. */
+  compatible?:     boolean
 }
 
 export const installedApps   = signal<InstalledApp[]>([])
@@ -49,6 +82,11 @@ export const catalogError    = signal<string | null>(null)
 /** ``false`` when the operator turned the catalog off (empty
  *  ``apps_catalog_url``) — the Catalog tab says so instead of "no apps". */
 export const catalogEnabled  = signal(true)
+/** Where the catalog comes from (D6): ``null`` = Social Home's own app
+ *  list ("From Social Home"), else the host an operator set. */
+export const catalogSourceHost = signal<string | null>(null)
+/** Whether the catalog answered at least once in this tab. */
+export const catalogLoaded   = signal(false)
 
 /**
  * How current the app list we hold is — from ``checked_at`` / ``stale`` on
@@ -146,10 +184,13 @@ export async function loadCatalog(force = false): Promise<void> {
   catalogError.value = null
   try {
     const data = await api.get('/api/apps/catalog' + (force ? '?refresh=1' : '')) as {
-      apps: CatalogEntry[]; enabled?: boolean; checked_at?: string | null; stale?: boolean
+      apps: CatalogEntry[]; enabled?: boolean; source_host?: string | null
+      checked_at?: string | null; stale?: boolean
     }
     catalog.value = data.apps ?? []
     catalogEnabled.value = data.enabled !== false
+    catalogSourceHost.value = data.source_host ?? null
+    catalogLoaded.value = true
     catalogFreshness.value = freshnessFrom(data)
   } catch (err: unknown) {
     catalogError.value = (err as Error).message ?? t('apps.catalog_failed')
@@ -184,10 +225,69 @@ export async function updateApp(appId: string): Promise<void> {
   await loadUpdates()
 }
 
-export async function installApp(appId: string): Promise<void> {
+export async function installApp(appId: string): Promise<InstalledApp> {
   const app = await api.post('/api/apps', { app_id: appId }) as InstalledApp
-  installedApps.value = [...installedApps.value, app]
-  showToast(t('apps.installed_toast', { name: app.name }), 'success')
+  installedApps.value = [...installedApps.value.filter(a => a.app_id !== appId), app]
+  showToast(t('apps.added_toast', { name: app.name }), 'success')
+  return app
+}
+
+/** "Ask an admin" (D4): the admins — a protected account's guardians —
+ *  get a Needs-you request. The entry reads "Asked" from then on. */
+export async function requestApp(appId: string): Promise<void> {
+  await api.post(`/api/apps/${encodeURIComponent(appId)}/requests`)
+  catalog.value = catalog.value.map(e => e.app_id === appId ? { ...e, requested: true } : e)
+}
+
+/** "Not now" (admins): every open request for the app is answered. */
+export async function dismissRequests(appId: string): Promise<void> {
+  await api.delete(`/api/apps/${encodeURIComponent(appId)}/requests`)
+}
+
+/** *entry*'s name and description in the viewer's language (``i18n``,
+ *  base language first: ``pt-BR`` → ``pt``), else the catalog's own. */
+export function localized(
+  entry: Pick<CatalogEntry, 'name' | 'description' | 'i18n'>,
+  lang: string,
+): { name: string, description: string } {
+  const texts = entry.i18n ?? {}
+  const base = lang.split('-')[0]
+  const hit = texts[lang] ?? texts[base]
+  return {
+    name: hit?.name || entry.name,
+    description: hit?.description || entry.description || '',
+  }
+}
+
+/**
+ * Does the Apps entry belong in the nav (§2.1)? Admins: always. Anyone
+ * else: when an app is usable for them, or "More apps" has one they could
+ * ask for (the server already leaves out apps rated above a protected
+ * account's age). ``null`` until it is known — the nav leaves it out
+ * rather than flash it.
+ */
+export const appsNavVisible = computed<boolean | null>(() => {
+  if (installedApps.value.length > 0) return true
+  const installed = new Set(installedApps.value.map(a => a.app_id))
+  if (catalog.value.some(e => !installed.has(e.app_id))) return true
+  return navChecked.value ? false : null
+})
+const navChecked = signal(false)
+
+/** Work out :data:`appsNavVisible` for a member: the installed list, and
+ *  the catalog only when nothing is installed. */
+export async function loadAppsNav(): Promise<void> {
+  if (navChecked.value) return
+  await loadInstalled({ quiet: true })
+  if (installedApps.value.length === 0 && !catalogLoaded.value) {
+    try {
+      const data = await api.get('/api/apps/catalog') as { apps?: CatalogEntry[], source_host?: string | null }
+      catalog.value = data.apps ?? []
+      catalogSourceHost.value = data.source_host ?? null
+      catalogLoaded.value = true
+    } catch { /* no catalog: the nav entry stays out */ }
+  }
+  navChecked.value = true
 }
 
 export async function uninstallApp(appId: string): Promise<void> {
@@ -228,6 +328,9 @@ export function _resetAppsForTest(): void {
   appsError.value        = null
   catalogError.value     = null
   catalogEnabled.value   = true
+  catalogSourceHost.value = null
+  catalogLoaded.value    = false
+  navChecked.value       = false
   catalogFreshness.value = { checkedAt: null, stale: false, failed: false }
   householdHasProtectedMinor.value = false
   installedLoaded        = false

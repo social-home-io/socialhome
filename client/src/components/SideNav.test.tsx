@@ -15,6 +15,8 @@ import { userPreferences } from '@/store/userPreferences'
 import { shortcutsHelpOpen } from '@/lib/shortcuts'
 import { SideNav } from './SideNav'
 import { setLocale } from '@/i18n/i18n'
+import { api } from '@/api'
+import { _resetAppsForTest } from '@/store/apps'
 
 const ALL_FEATURES_ON = {
   feat_feed: true, feat_pages: true, feat_tasks: true,
@@ -492,5 +494,43 @@ describe('SideNav — the open space', () => {
     expect(row.textContent).not.toContain('🌐')
     spaces.value = []
     vi.mocked(api.get).mockReset()
+  })
+})
+
+describe('SideNav — Apps visibility (Apps redesign §2.1)', () => {
+  beforeEach(() => {
+    _resetAppsForTest()
+    vi.mocked(api.get).mockReset()
+  })
+
+  it('admins always see Apps, marked current on an app detail page', () => {
+    setUser({ is_admin: true })
+    const { getByText } = renderAt('/apps/chess/about')
+    const link = getByText('Apps').closest('a')!
+    expect(link.getAttribute('aria-current')).toBe('page')
+  })
+
+  it('a member sees Apps when an app is usable for them', async () => {
+    setUser({ is_admin: false })
+    vi.mocked(api.get).mockImplementation(async (url: string) =>
+      url === '/api/apps' ? { apps: [{ app_id: 'chess', name: 'Chess', enabled: true }] } : { apps: [] })
+    const { findByText } = renderAt('/')
+    expect(await findByText('Apps')).toBeTruthy()
+  })
+
+  it('a member with nothing installed sees Apps when More apps has one to ask for', async () => {
+    setUser({ is_admin: false })
+    vi.mocked(api.get).mockImplementation(async (url: string) =>
+      url === '/api/apps/catalog' ? { apps: [{ app_id: 'chess', name: 'Chess' }] } : { apps: [] })
+    const { findByText } = renderAt('/')
+    expect(await findByText('Apps')).toBeTruthy()
+  })
+
+  it('a member (or protected account) with nothing to use or ask for does not see Apps', async () => {
+    setUser({ is_admin: false })
+    vi.mocked(api.get).mockResolvedValue({ apps: [] })
+    const { queryByText } = renderAt('/')
+    await vi.waitFor(() => expect(vi.mocked(api.get)).toHaveBeenCalledWith('/api/apps/catalog'))
+    expect(queryByText('Apps')).toBeNull()
   })
 })

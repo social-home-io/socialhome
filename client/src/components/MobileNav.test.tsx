@@ -193,6 +193,15 @@ describe('MobileNav', () => {
     expect(active?.getAttribute('href')).toBe('/')
   })
 
+  it('on /apps and an app\'s pages, More is where you are (Apps lives in the drawer)', () => {
+    window.history.pushState(null, '', '/apps/chess/about')
+    const { container } = render(wrap(<MobileNav />))
+    const more = container.querySelector('.sh-mobile-tab--more')!
+    expect(more.classList.contains('sh-active')).toBe(true)
+    expect(more.getAttribute('aria-expanded')).toBe('false')
+    window.history.pushState(null, '', '/')
+  })
+
   it('badges the DMs tab with the live unread count', () => {
     dmUnreadTotal.value = 3
     const { container } = render(wrap(<MobileNav />))

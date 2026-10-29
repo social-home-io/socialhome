@@ -38,6 +38,8 @@ export const routes: Record<string, ReturnType<typeof lazy>> = {
   '/bazaar':         lazy(() => import('@/features/bazaar/BazaarPage')),
   '/apps':           lazy(() => import('@/features/apps/AppsPage')),
   '/apps/:appId':    lazy(() => import('@/features/apps/AppHost')),
+  // What an app can do, and where it is added — never launches it.
+  '/apps/:appId/about': lazy(() => import('@/features/apps/AppDetailPage')),
   '/admin':          lazy(() => import('@/features/admin/AdminPage')),
   '/connections':    lazy(() => import('@/features/connections/ConnectionsPage')),
   '/friends':        lazy(() => import('@/features/friends/FriendsPage')),

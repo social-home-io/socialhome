@@ -81,6 +81,17 @@ describe('NeedsYouSection', () => {
     expect(container.querySelector('.sh-needs')).toBeNull()
   })
 
+  it('``only`` keeps the given types (the Apps page: invites and app requests)', async () => {
+    const ask = row('r', {
+      type: 'app_request', title: 'Milo asked for Chess', object_key: 'app:chess',
+      space_id: null, link_url: '/apps/chess/about',
+    })
+    const { container, getByRole } = await mount([row('a'), ask], { only: new Set(['app_challenge', 'app_request']) })
+    expect(container.querySelectorAll('.sh-needs__item')).toHaveLength(1)
+    // An app request is reviewed on the app's detail page.
+    expect(getByRole('link', { name: 'Review' }).getAttribute('href')).toBe('/apps/chess/about')
+  })
+
   it('is a region named by its heading, with a count of pending items', async () => {
     const { getByRole } = await mount([row('a'), row('b')])
     const region = getByRole('region', { name: /Needs you/ })

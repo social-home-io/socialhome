@@ -759,5 +759,12 @@
   "notifications.row.app_challenge": "Someone invited the person to play a game in Apps. {actor} is a name (for someone from another household \"Ben · Familie Okafor\"); {space} is the app's name (e.g. Chess, never translated). \"_many\" takes {actors}.",
   "notifications.row.app_challenge_declined": "The person you invited to a game in Apps said no. {actor} is a name (for someone from another household \"Ben · Familie Okafor\"); {space} is the app's name (e.g. Chess, never translated). \"_many\" takes {actors}.",
   "apps.catalog_stale": "The Apps page couldn't reach the app list (the catalog of apps to install or update), so it shows the list from an earlier check. {time} is a date and time, already formatted (\"29 Oct 2026, 08:15\"). Never say the apps are up to date here.",
-  "apps.catalog_unreachable": "The Apps page couldn't reach the app list (the catalog of apps to install or update) and has no earlier copy."
+  "apps.catalog_unreachable": "The Apps page couldn't reach the app list (the catalog of apps to install or update) and has no earlier copy.",
+  "notifications.row.app_request": "A member asked the admins (or a child asked their grown-ups) to add an app (\"Milo asked for Chess\"). {actor} is the member's name; {space} is the app's name (never translated). \"_many\" takes {actors}.",
+  "apps.consent.title": "Confirmation before an admin adds an app: they agree for everyone in the household. {name} is the app's name.",
+  "apps.add_to_household": "Button: an admin adds an app for the whole household. Prefer this over \"install\" (developer language).",
+  "apps.source.operator": "Where the app list comes from when the server operator changed it. {host} is a web address like apps.example.org. Never say 'verified'.",
+  "apps.perm.people": "One of three permissions an app can ask for, said in plain words. Social Home's own wording, never the app publisher's.",
+  "apps.ask.button_grown_up": "Shown to a child (protected account): the request goes to their guardians. Warm, everyday word for an adult in the family.",
+  "apps.never.line": "One sentence listing what every app can never do (it runs in a sealed box)."
 }

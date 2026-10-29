@@ -48,6 +48,9 @@ interface Props {
   compact?: boolean
   /** A link in the section was followed (the bell closes its panel). */
   onNavigate?: () => void
+  /** Only these row types (the Apps page: game invites and app
+   *  requests); every type when absent. */
+  only?: ReadonlySet<string>
 }
 
 /** Keep the list live while a section is mounted: a new request, or one
@@ -197,15 +200,16 @@ function GroupRow({ entry, titleId, compact, onNavigate }: {
   )
 }
 
-export function NeedsYouSection({ compact, onNavigate }: Props) {
+export function NeedsYouSection({ compact, onNavigate, only }: Props) {
   useNeedsYouLive()
   const [expanded, setExpanded] = useState(false)
-  const entries = needsYouEntries(needsYou.value, acting.value)
+  const rows = only ? needsYou.value.filter(n => only.has(n.type)) : needsYou.value
+  const entries = needsYouEntries(rows, acting.value)
   const pendingCount = entries.reduce((sum, e) => sum + (e.kind === 'group' ? e.rows.length : 1), 0)
   if (entries.length === 0) return null
   const shown = expanded ? entries : entries.slice(0, NEEDS_YOU_CAP)
   const more = entries.length - shown.length
-  const headingId = compact ? 'sh-needs-h-bell' : 'sh-needs-h-page'
+  const headingId = compact ? 'sh-needs-h-bell' : only ? 'sh-needs-h-only' : 'sh-needs-h-page'
 
   const open = (n: Notification) => {
     if (!n.read_at) {
@@ -228,7 +232,7 @@ export function NeedsYouSection({ compact, onNavigate }: Props) {
       </h2>
       <ul class="sh-needs__list">
         {shown.map((entry) => {
-          const titleId = `sh-needs-${compact ? 'b' : 'p'}-${entry.key.replace(/[^\w-]/g, '_')}`
+          const titleId = `sh-needs-${compact ? 'b' : only ? 'o' : 'p'}-${entry.key.replace(/[^\w-]/g, '_')}`
           return (
             <li key={entry.key} class="sh-needs__item">
               {entry.kind === 'single'
