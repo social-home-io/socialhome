@@ -282,7 +282,7 @@ async def test_only_the_sender_withdraws_a_waiting_invite(env):
 async def test_decline_and_the_app_arriving_send_nothing(env):
     app, db = env
     await _session(app, app_id="sketch", session_id="s1")
-    await _session(app, app_id="sketch", session_id="s2")
+    await _session(app, app_id="sketch", session_id="s2", sender=OTHER, from_user="eve")
     assert await app[app_federation_service_key].decline_waiting(
         app_id="sketch", session_id="s1", actor_user_id="u-bob"
     )
@@ -299,7 +299,7 @@ async def test_decline_and_the_app_arriving_send_nothing(env):
         "SELECT session_id, from_instance, from_user, state FROM app_pending_sessions",
         (),
     )
-    assert [tuple(r) for r in pending] == [("s2", PEER, "ben", "invited")]
+    assert [tuple(r) for r in pending] == [("s2", OTHER, "eve", "invited")]
 
 
 async def test_a_rematch_after_uninstall_waits_and_tells_the_sender_nothing(env):
@@ -333,3 +333,33 @@ async def test_a_rematch_after_uninstall_waits_and_tells_the_sender_nothing(env)
     assert await _waiting(db) == [
         ("u-bob", "app_session:chess/rematch-1", "app_missing", None)
     ]
+
+
+async def test_waiting_invites_are_bounded_on_the_receiver(env):
+    """The sender's invite caps don't bind a household that ignores them:
+    the receiver keeps one waiting row per (invitee, app, sender person) —
+    a repeat joins it — and at most five senders' rows per invitee and
+    app; past that an invite is dropped. Nothing goes back either way."""
+    app, db = env
+    for i in range(10):
+        await _session(app, session_id=f"ben-{i}")
+    rows = await _waiting(db)
+    assert [(u, k) for u, k, _, _ in rows] == [("u-bob", "app_session:chess/ben-9")]
+    for i in range(5):
+        await db.enqueue(
+            "INSERT INTO remote_users(user_id, instance_id, remote_username,"
+            " display_name) VALUES(?,?,?,?)",
+            (f"u-p{i}", PEER, f"p{i}", f"P{i}"),
+        )
+        await _session(app, from_user=f"p{i}", session_id=f"p{i}-1")
+    # Ben + four more senders wait; the fifth newcomer (the sixth sender)
+    # is dropped.
+    keys = sorted(k for _, k, _, _ in await _waiting(db))
+    assert len(keys) == 5
+    assert "app_session:chess/p4-1" not in keys
+    # A repeat from a sender already waiting still joins their row.
+    await _session(app, from_user="p0", session_id="p0-2")
+    keys = sorted(k for _, k, _, _ in await _waiting(db))
+    assert "app_session:chess/p0-2" in keys and len(keys) == 5
+    assert sent == []
+    assert frames == []

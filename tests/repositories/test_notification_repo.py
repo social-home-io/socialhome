@@ -480,6 +480,15 @@ async def test_update_group_rewrites_the_row(env):
     assert await env.notif_repo.count_unread(uid) == 1
 
 
+async def test_update_group_moves_the_subject(env):
+    """D10: a waiting game invite moves on to the sender's newest session."""
+    uid = await _user(env)
+    note = await _about(env, uid, "app_session:chess/s1")
+    await env.notif_repo.update_group(replace(note, object_key="app_session:chess/s2"))
+    back = await env.notif_repo.get(note.id)
+    assert back.object_key == "app_session:chess/s2"
+
+
 async def test_mark_read_by_object_touches_only_the_owner_and_keys(env):
     uid = await _user(env)
     other = await _user(env, "uid-o")

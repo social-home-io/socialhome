@@ -2388,30 +2388,31 @@ async def test_an_invite_for_an_app_we_dont_have_waits_and_becomes_playable(
     )
     bob_tok = await _seed_member(client._db)
     await _seed_lakeside_ben(client._db)
+    await _ben_invites_bob(client, "s0")
     await _ben_invites_bob(client, "s1")
-    await _ben_invites_bob(client, "s2")
 
-    items = await _needs_you(client, bob_tok)
-    assert sorted(i["object_key"] for i in items) == [
-        "app_session:chess/s1",
-        "app_session:chess/s2",
-    ]
-    for item in items:
-        assert item["type"] == "app_challenge_waiting"
-        assert item["title"] == "Ben · Lakeside invited you to play Chess"
-        assert item["params"]["flags"] == ["app_missing"]
-        assert item["params"]["space_name"] == "Chess"
-        assert item["link_url"] == "/apps/chess/about"
+    # One row per sender: Ben's second invite joins his row (newest session).
+    [item] = await _needs_you(client, bob_tok)
+    assert item["object_key"] == "app_session:chess/s1"
+    assert item["params"]["total"] == 2
+    assert item["type"] == "app_challenge_waiting"
+    assert item["title"] == "Ben · Lakeside invited you to play Chess"
+    assert item["params"]["flags"] == ["app_missing"]
+    assert item["params"]["space_name"] == "Chess"
+    assert item["link_url"] == "/apps/chess/about"
 
     # Decline without the app: the row reads declined, nothing else.
     r = await client.post("/api/apps/chess/sessions/s1/decline", headers=_auth(bob_tok))
     assert r.status == 200
-    assert [i["object_key"] for i in await _needs_you(client, bob_tok)] == [
-        "app_session:chess/s2"
-    ]
+    assert await _needs_you(client, bob_tok) == []
     # A second tap: the invite no longer waits (and the app isn't here).
     r = await client.post("/api/apps/chess/sessions/s1/decline", headers=_auth(bob_tok))
     assert r.status == 404
+    # A new invite from Ben after the decline waits again.
+    await _ben_invites_bob(client, "s2")
+    assert [i["object_key"] for i in await _needs_you(client, bob_tok)] == [
+        "app_session:chess/s2"
+    ]
 
     # Asking for it is the existing request ("Ask an admin").
     r = await client.post("/api/apps/chess/requests", headers=_auth(bob_tok))

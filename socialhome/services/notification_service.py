@@ -3035,12 +3035,61 @@ class NotificationService(ProtectionGateMixin):
         play {app}" — with "Ask an admin" / "Ask a grown-up" (admins: "See
         {app}") and Decline. ``flags`` say why it waits (``app_missing`` /
         ``app_off``); the app's name (the household's catalog's or its
-        install's) rides as the row's place. One row per invite, about the
-        same ``app_session:<app>/<session>`` a playable one uses, so a
+        install's) rides as the row's place. The row is about the same
+        ``app_session:<app>/<session>`` a playable invite uses, so a
         withdrawal or a decline finds it; it becomes a playable invite once
         the app is here (:meth:`on_app_challenge_received`). Title only
-        on the push (§25.3): the inviter and the app are labels."""
+        on the push (§25.3): the inviter and the app are labels.
+
+        **One row per (invitee, app, sender person).** A further invite
+        from the same person for the same app joins their row (D7): it
+        moves on to the newest session (the one Play takes in once the app
+        is here), its count goes up (``params.total``: "invited you 3
+        times") and nothing buzzes again."""
         recipient = await self._local_user(event.to_user_id)
+        key = object_key(
+            NotificationObject.APP_SESSION, f"{event.app_id}/{event.session_id}"
+        )
+        prefix = object_key(NotificationObject.APP_SESSION, f"{event.app_id}/")
+        mine = [
+            n
+            for n in await self._notifs.find(
+                Spec(
+                    where=[
+                        ("type", "=", "app_challenge_waiting"),
+                        ("user_id", "=", event.to_user_id),
+                    ]
+                )
+            )
+            if n.is_pending_action
+            and (n.object_key or "").startswith(prefix)
+            and n.params is not None
+            and any(a.id == event.from_user_id for a in n.params.actors)
+        ]
+        if mine:
+            row = max(mine, key=lambda n: n.created_at)
+            if row.object_key == key:
+                return  # the same invite again
+            moved = replace(
+                row,
+                object_key=key,
+                created_at=datetime.now(UTC).isoformat(),
+                read_at=None,
+                params=regroup(
+                    row.params,
+                    NotificationActor(event.from_user_id, event.from_display),
+                    reopen=row.is_read,
+                    space_name=event.app_name,
+                    flags=(event.reason,),
+                ),
+            )
+            await self._notifs.update_group(moved)
+            await self._publish_created(
+                moved, bumped=True, reopened=row.is_read, silent=True
+            )
+            if row.is_read:
+                await self._announce_unread(moved.user_id)
+            return
         await self._save_notif(
             new_notification(
                 user_id=event.to_user_id,

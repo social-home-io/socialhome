@@ -104,7 +104,7 @@ _INSERT_SQL = """
 _UPDATE_GROUP_SQL = """
     UPDATE notifications
        SET title = ?, body = ?, link_url = ?, created_at = ?,
-           read_at = ?, space_id = ?, params = ?
+           read_at = ?, space_id = ?, params = ?, object_key = ?
      WHERE id = ?
 """
 
@@ -134,6 +134,7 @@ def _update_args(note: Notification) -> tuple:
         note.read_at,
         note.space_id,
         _params_json(note.params),
+        note.object_key,
         note.id,
     )
 
@@ -280,7 +281,9 @@ class SqliteNotificationRepo:
 
     async def update_group(self, note: Notification) -> None:
         """Write a regrouped row back by id: its fresh title, body, link,
-        last activity, read state, space and params."""
+        last activity, read state, space, params and subject (a game
+        invite that waits for its app moves on to the sender's newest
+        session, D10)."""
         await self._db.enqueue(_UPDATE_GROUP_SQL, _update_args(note))
 
     async def latest_in_groups(

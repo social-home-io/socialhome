@@ -5030,3 +5030,74 @@ async def test_only_the_other_side_can_end_a_game(from_instance, from_user):
     (row,) = svc._app_repo.pending
     assert row.held is None and row.state == "active"
     assert _game_ended(bus) == [] and ws.user_calls == []
+
+
+# ─── D10 bounds: one row per sender person, at most 5 senders ────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_repeat_from_the_same_sender_joins_their_row():
+    """The service hands the newer invite on (the notification service
+    folds it into the sender's row) — it never counts as a new sender."""
+    others = [_waiting_row(session_id=f"o{i}", actor=f"ru-{i}") for i in range(4)]
+    svc, fed, ws, bus, _, _ = _waiting_svc(rows=[_waiting_row(), *others])
+    await svc.on_inbound_event(_open_event("s2"))
+    [w] = _waits(bus)
+    assert (w.session_id, w.from_user_id) == ("s2", "ru-ben")
+    _nothing_sent(fed, ws)
+
+
+@pytest.mark.asyncio
+async def test_a_sixth_sender_is_dropped_silently():
+    rows = [_waiting_row(session_id=f"o{i}", actor=f"ru-{i}") for i in range(5)]
+    svc, fed, ws, bus, _, _ = _waiting_svc(rows=rows)
+    await svc.on_inbound_event(_open_event("s9"))
+    assert _waits(bus) == []
+    _nothing_sent(fed, ws)
+
+
+@pytest.mark.asyncio
+async def test_install_makes_only_the_newest_invite_per_sender_playable():
+    now = datetime.now(UTC)
+    old = _waiting_row(
+        session_id="s1", created_at=(now - timedelta(hours=2)).isoformat()
+    )
+    new = _waiting_row(
+        session_id="s2", created_at=(now - timedelta(hours=1)).isoformat()
+    )
+    svc, _, _, bus, _, _ = _waiting_svc(
+        apps={"chess": _make_installed_app("chess")}, rows=[old, new]
+    )
+    await svc.on_app_usable(_installed())
+    assert [p.session_id for p in svc._app_repo.invites] == ["s2"]
+    [ended] = [e for e in bus.published if isinstance(e, AppChallengeEnded)]
+    assert (ended.session_ids, ended.outcome) == (("s1",), "done")
+
+
+@pytest.mark.asyncio
+async def test_install_keeps_the_newest_five_senders():
+    """Six senders' rows (only possible from before the bound): the oldest
+    sender's ends ``done`` and never becomes playable."""
+    now = datetime.now(UTC)
+    newer = [
+        _waiting_row(
+            session_id=f"n{i}",
+            actor=f"ru-n{i}",
+            created_at=(now - timedelta(minutes=i)).isoformat(),
+        )
+        for i in range(5)
+    ]
+    oldest = _waiting_row(
+        session_id="s1", created_at=(now - timedelta(hours=3)).isoformat()
+    )
+    svc, _, _, bus, _, _ = _waiting_svc(
+        apps={"chess": _make_installed_app("chess")}, rows=[*newer, oldest]
+    )
+    await svc.on_app_usable(_installed())
+    ended = {
+        e.session_ids[0]: e.outcome
+        for e in bus.published
+        if isinstance(e, AppChallengeEnded)
+    }
+    assert ended["s1"] == "done"
+    assert all(p.session_id != "s1" for p in svc._app_repo.invites)

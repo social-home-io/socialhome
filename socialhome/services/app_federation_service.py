@@ -131,6 +131,7 @@ from ..domain.apps import (
     SESSION_VERB_CONTINUE,
     UNINSTALL_GAME_RECENT_SECONDS,
     UNINSTALL_NAMES_MAX,
+    WAITING_SENDERS_MAX,
     AppAgeRestrictedError,
     AppChallengeHandledError,
     AppContactNotFoundError,
@@ -2131,6 +2132,21 @@ class AppFederationService(ProtectionGateMixin):
             name, reason = entry.name or app_id, "app_missing"
         if await self._waiting_row(app_id, recipient.user_id, session_id):
             return  # the same invite again (after a restart): one row
+        senders = {
+            r.params.actors[-1].id
+            for r in await self._waiting_rows(app_id, user_id=recipient.user_id)
+            if r.params is not None
+        }
+        if initiator.user_id not in senders and len(senders) >= WAITING_SENDERS_MAX:
+            # The receiver's bound (a repeat from a sender joins their row).
+            log.debug(
+                "app_federation: invite for app %r dropped — %d senders already "
+                "wait for this person (session=%s)",
+                app_id,
+                len(senders),
+                session_id,
+            )
+            return
         log.info(
             "app_federation: invite for %s app %r waits for its person (session=%s)",
             reason,
@@ -2179,15 +2195,25 @@ class AppFederationService(ProtectionGateMixin):
         return next((e for e in entries if e.app_id == app_id), None)
 
     async def _waiting_rows(
-        self, app_id: str, *, user_id: str | None = None, session_id: str = ""
+        self,
+        app_id: str,
+        *,
+        user_id: str | None = None,
+        session_id: str | None = None,
     ) -> list[Notification]:
-        """The invites that wait for *app_id* (D10) — every person's, or
-        *user_id*'s for *session_id*: open ``app_challenge_waiting`` rows."""
+        """The invites that wait for *app_id* (D10) — every person's,
+        *user_id*'s, or *user_id*'s for *session_id*: open
+        ``app_challenge_waiting`` rows."""
         if self._notifs is None:
             return []
-        if user_id is not None:
-            key = object_key(NotificationObject.APP_SESSION, f"{app_id}/{session_id}")
+        if user_id is not None and session_id is None:
             where: list[tuple[str, str, Any]] = [
+                ("type", "=", WAITING_INVITE_TYPE),
+                ("user_id", "=", user_id),
+            ]
+        elif user_id is not None:
+            key = object_key(NotificationObject.APP_SESSION, f"{app_id}/{session_id}")
+            where = [
                 ("object_key", "=", key),
                 ("user_id", "=", user_id),
             ]
@@ -2268,16 +2294,35 @@ class AppFederationService(ProtectionGateMixin):
         TTL ends ``expired``; one that no longer passes the receiver rules
         (a block since, the age gate of the installed app, the sender
         gone, an app without ``federation``) ends ``done``. Still nothing
-        goes to the sender."""
+        goes to the sender.
+
+        The receiver's bounds hold here too: only the newest invite per
+        (invitee, sender person) becomes playable, and only the newest
+        :data:`WAITING_SENDERS_MAX` senders' per invitee; any other
+        waiting row ends ``done``."""
         if isinstance(event, AppEnabledChanged) and not event.enabled:
             return
         app = await self._app_repo.get(event.app_id)
         if app is None or not app.enabled:
             return
         cutoff = datetime.now(UTC) - timedelta(seconds=PENDING_SESSION_TTL_SECONDS)
-        for row in await self._waiting_rows(app.app_id):
+        rows = sorted(
+            await self._waiting_rows(app.app_id),
+            key=lambda n: n.created_at,
+            reverse=True,
+        )
+        seen: set[tuple[str, str]] = set()
+        senders: dict[str, int] = {}
+        for row in rows:
             session_id = (row.object_key or "").partition("/")[2]
-            outcome = await self._make_playable(app, row, session_id, cutoff)
+            assert row.params is not None  # _waiting_rows keeps rows with actors
+            pair = (row.user_id, row.params.actors[-1].id)
+            if pair in seen or senders.get(row.user_id, 0) >= WAITING_SENDERS_MAX:
+                outcome: str | None = "done"
+            else:
+                seen.add(pair)
+                senders[row.user_id] = senders.get(row.user_id, 0) + 1
+                outcome = await self._make_playable(app, row, session_id, cutoff)
             if outcome is not None:
                 await self._emit(
                     AppChallengeEnded(

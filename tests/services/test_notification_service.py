@@ -4514,13 +4514,19 @@ async def test_an_ask_to_turn_an_app_on_waits_until_it_is_on(stack):
 # ─── D10: a game invite that waits for its app ─────────────────────────────
 
 
-def _waiting(to_user_id: str, *, reason: str = "app_missing", sid: str = "s1"):
+def _waiting(
+    to_user_id: str,
+    *,
+    reason: str = "app_missing",
+    sid: str = "s1",
+    sender: str = "r-ben",
+):
     return AppChallengeWaiting(
         app_id="chess",
         session_id=sid,
         to_user_id=to_user_id,
         from_display="Ben · Lakeside",
-        from_user_id="r-ben",
+        from_user_id=sender,
         app_name="Chess",
         reason=reason,
     )
@@ -4589,7 +4595,7 @@ async def test_a_waiting_invite_becomes_a_playable_one(stack):
 async def test_a_declined_or_withdrawn_waiting_invite_leaves_needs_you(stack):
     milo = await stack.provision_user("milo")
     await stack.bus.publish(_waiting(milo.user_id, sid="s1"))
-    await stack.bus.publish(_waiting(milo.user_id, sid="s2"))
+    await stack.bus.publish(_waiting(milo.user_id, sid="s2", sender="r-eve"))
     for sid, outcome in (("s1", "declined"), ("s2", "withdrawn")):
         await stack.bus.publish(
             AppChallengeEnded(
@@ -4903,3 +4909,37 @@ async def test_the_daily_check_says_nothing_for_an_incompatible_or_stale_catalog
     catalog.entry = _chess_entry("2026.10.28", min_core_version="2099.1.1")
     await svc.check_for_updates()
     assert await stack.notif_svc.pending_actions(anna.user_id) == []
+
+
+async def test_a_repeat_invite_from_the_same_sender_joins_their_row(stack):
+    """D10 bound: one waiting row per (invitee, app, sender person). A
+    further invite moves the row on to the newest session, counts it and
+    doesn't buzz again."""
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    milo = await stack.provision_user("milo")
+    await stack.bus.publish(_waiting(milo.user_id, sid="s1"))
+    pushes = len(push.calls)
+    await stack.bus.publish(_waiting(milo.user_id, sid="s2"))
+    await stack.bus.publish(_waiting(milo.user_id, sid="s3"))
+    [row] = await _rows_of(stack, milo.user_id, "app_challenge_waiting")
+    assert row.object_key == "app_session:chess/s3"
+    assert row.params is not None and row.params.total == 3
+    assert len(push.calls) == pushes
+    # The same invite again changes nothing.
+    await stack.bus.publish(_waiting(milo.user_id, sid="s3"))
+    [row] = await _rows_of(stack, milo.user_id, "app_challenge_waiting")
+    assert row.params is not None and row.params.total == 3
+    # Another sender gets their own row.
+    await stack.bus.publish(
+        AppChallengeWaiting(
+            app_id="chess",
+            session_id="e1",
+            to_user_id=milo.user_id,
+            from_display="Eve",
+            from_user_id="r-eve",
+            app_name="Chess",
+            reason="app_missing",
+        )
+    )
+    assert len(await _rows_of(stack, milo.user_id, "app_challenge_waiting")) == 2

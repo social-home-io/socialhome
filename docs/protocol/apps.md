@@ -150,9 +150,24 @@ one nobody has answered yet. Instead the invite reaches the **person**:
   anyone else's changes nothing.
 - A `continue` (an old game picked up again) for an app that isn't usable
   here is dropped as before — there is no old game here to continue.
-- Cost: 0 envelopes on every path (receive, ask, decline, install); one
-  Needs-you row per invite, bounded by the sender's invite caps
-  (`INVITES_OPEN_MAX` / `INVITES_PER_DAY_MAX`) and the 14-day TTL.
+- **Bounded on the receiver.** The sender's invite caps
+  (`INVITES_OPEN_MAX` / `INVITES_PER_DAY_MAX`) don't bind a household that
+  ignores them, so the receiver keeps **one** waiting row per (invitee,
+  app, sender person): a further invite from the same person for the same
+  app joins it (D7 re-open) — the row moves on to the newest session (the
+  one Play takes in once the app is here), `params.total` counts the
+  invites, and nothing buzzes again. At most `WAITING_SENDERS_MAX` (5)
+  senders' rows wait per invitee and app; a sixth sender's invite is
+  dropped (debug log, no row, nothing sent). Both bounds are applied again
+  when the app arrives: only the newest invite per sender, of the newest
+  five senders, becomes playable; any other row ends `done`. A withdrawal
+  of an older session the row has moved past changes nothing.
+- **Known window.** Waiting invites become playable on the install / turn-on
+  event. If that event is missed (a crash between the install committing and
+  the event), the row keeps saying "isn't in your household yet" until it
+  expires; the person can still decline it.
+- Cost: 0 envelopes on every path (receive, ask, decline, install); at most
+  5 Needs-you rows per invitee and app, each bounded by the 14-day TTL.
 
 `tests/protocol/test_app_invite_waits.py`.
 
