@@ -43,6 +43,7 @@ from .apps import (
     AppCollectionView,
     AppContactsView,
     AppDetailView,
+    AppHeldView,
     AppMessagesView,
     AppPeersView,
     AppSessionAcceptView,
@@ -1367,6 +1368,7 @@ def setup_routes(app: web.Application) -> None:
         "/api/apps/{app_id}/sessions/{session_id}/cancel", AppSessionCancelView
     )
     app.router.add_view("/api/apps/{app_id}/messages", AppMessagesView)
+    app.router.add_view("/api/apps/{app_id}/held", AppHeldView)
 
     # ── Backup (adapter-agnostic) ────────────────────────────────────────
     app.router.add_view("/api/backup/pre_backup", BackupPreView)

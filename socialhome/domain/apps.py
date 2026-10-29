@@ -20,6 +20,16 @@ from .errors import CodedError, WrongTypeError
 #: hours.
 PENDING_SESSION_TTL_SECONDS: int = 14 * 24 * 60 * 60  # 14 days
 
+#: ``app_pending_sessions.state`` (0131): an invite waiting in Needs you…
+SESSION_INVITED: str = "invited"
+#: …or a game being played (Play pressed, or this person invited / moved).
+SESSION_ACTIVE: str = "active"
+
+#: The mailbox (D11) keeps one held message per (app, person, session) —
+#: the latest — up to this size. A bigger message still goes out live, it
+#: just isn't kept for a closed app (live messages may be up to 256 KiB).
+HELD_MESSAGE_MAX_BYTES: int = 64 * 1024
+
 
 class AppError(Exception):
     """Base for app-registry domain errors."""
@@ -235,11 +245,18 @@ class AppKvEntry:
 
 @dataclass(slots=True, frozen=True)
 class AppPendingSession:
-    """A pending app-session invite stored for an offline recipient.
+    """One app session this household knows for one person.
 
-    One row of the ``app_pending_sessions`` table — a generic, app-agnostic
-    stash so an inbound ``APP_SESSION`` invite survives until the recipient
-    next opens the app. ``payload`` is the decoded invite dict.
+    One row of the ``app_pending_sessions`` table — generic and
+    app-agnostic. ``from_instance`` / ``from_user`` name the person on the
+    other side of the game (who invited them, or whom they invited).
+    ``state`` is :data:`SESSION_INVITED` while the invite waits in Needs
+    you (``payload`` is the decoded invite, handed to the app on Play) and
+    :data:`SESSION_ACTIVE` once the game is played. ``held`` is the mailbox
+    (D11): the latest message from the other side the person's app hasn't
+    taken yet — ``{"kind": "message"|"session", "payload": {...}}`` — or
+    ``None``. ``updated_at`` is the last change (``None`` on rows from
+    before the mailbox: read ``created_at``).
     """
 
     app_id: str
@@ -249,6 +266,23 @@ class AppPendingSession:
     from_user: str | None
     payload: dict
     created_at: str
+    state: str = SESSION_INVITED
+    held: dict | None = None
+    updated_at: str | None = None
+
+    @property
+    def last_change(self) -> str:
+        """When the row last changed (UTC ISO 8601)."""
+        return self.updated_at or self.created_at
+
+    def is_with(self, instance_id: str, user_ref: str | None) -> bool:
+        """Whether the other side of this session is *user_ref* on
+        *instance_id* — the only one whose messages it may hold."""
+        return (
+            bool(user_ref)
+            and self.from_instance == instance_id
+            and self.from_user == user_ref
+        )
 
 
 @dataclass(slots=True, frozen=True)

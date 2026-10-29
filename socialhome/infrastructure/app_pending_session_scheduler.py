@@ -1,13 +1,13 @@
 """Periodic pruning for ``app_pending_sessions``.
 
-The ``app_pending_sessions`` table durably stashes inbound app-session
-invites so an offline recipient still sees them next time they open the app.
-Drains clear a (app, user) pair on read, and ``add_pending_session`` caps a
-single pair, but a sender who opens-and-abandons sessions for users who never
-return would otherwise leave TTL-expired rows on disk forever.
+The ``app_pending_sessions`` table durably keeps the app sessions a person
+has — invites waiting in Needs you and games being played, with the latest
+message their app hasn't taken yet (the mailbox, 0131). The repo caps a
+single (app, user) pair, but invites nobody plays and games nobody moves in
+would otherwise stay on disk forever.
 
-This scheduler runs once per ``interval_seconds`` and deletes rows past the
-TTL via the repo's ``prune_pending_sessions``. Hourly is plenty — the volume
+This scheduler runs once per ``interval_seconds`` and deletes rows quiet for
+longer than the TTL via the repo's ``prune_pending_sessions``. Hourly is plenty — the volume
 is tiny and the per-pair cap already bounds the worst case.
 """
 

@@ -58,6 +58,21 @@ missing from each other's contacts, an open / move / withdrawal between them
 is refused on the way out, an inbound one is dropped on receipt (per-person
 and household fan-out alike), and an invite that waited from before the
 block is dropped when the app drains it.
+
+The mailbox (D11): the household keeps, per person and per game it knows
+(``app_pending_sessions``: an invite they got, a game they played or
+sent), the **latest** message from the other side of that game that their
+app hasn't taken yet — a move, a decline, a withdrawal. It is kept whether
+the app is open, closed or turned off (the server can't see whether a tab
+has the app mounted), and handed over when the app next opens
+(:meth:`take_held`), then cleared. A decline also gives the challenger a
+bell row. Nothing more goes over the wire: the mailbox only keeps what was
+sent anyway. A message for a session the household doesn't know for that
+person — or from anyone but its other side — is never kept.
+
+Per move, the sender's session row stands in for the roster scan: a
+message in a game this household knows with that very person needs one
+primary-key read plus the block checks, not the whole contact list.
 """
 
 from __future__ import annotations
@@ -68,8 +83,13 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+import orjson
+
 from ..domain.apps import (
+    HELD_MESSAGE_MAX_BYTES,
     PENDING_SESSION_TTL_SECONDS,
+    SESSION_ACTIVE,
+    SESSION_INVITED,
     AppAgeRestrictedError,
     AppChallengeHandledError,
     AppContactNotFoundError,
@@ -77,12 +97,17 @@ from ..domain.apps import (
     AppNotFoundError,
     AppPendingSession,
 )
-from ..domain.events import AppChallengeEnded, AppChallengeReceived
+from ..domain.events import (
+    AppChallengeDeclined,
+    AppChallengeEnded,
+    AppChallengeReceived,
+)
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from .protection_gate import ProtectionGateMixin
 
 if TYPE_CHECKING:
+    from ..domain.apps import InstalledApp
     from ..domain.events import DomainEvent
     from ..domain.user import RemoteUser
     from ..infrastructure.event_bus import EventBus
@@ -97,6 +122,10 @@ if TYPE_CHECKING:
 #: realistic double-delivery window (WebRTC + HTTPS fallback, retransmits).
 _SEEN_OPEN_SESSIONS_MAX = 4096
 
+#: A game's row has its TTL moved on by the person's own moves at most once
+#: in this long — one write an hour per game, not one per move.
+_TOUCH_EVERY = timedelta(hours=1)
+
 log = logging.getLogger(__name__)
 
 
@@ -107,6 +136,16 @@ def with_household(person: str, household: str | None) -> str:
     if not household or household == person:
         return person
     return f"{person} · {household}"
+
+
+def _is_decline(kind: str, payload: dict) -> bool:
+    """Whether an app frame is the invitee's "no": ``{verb: "close",
+    reason: "declined"}`` on the session channel."""
+    return (
+        kind == "session"
+        and payload.get("verb") == "close"
+        and payload.get("reason") == "declined"
+    )
 
 
 class AppFederationService(ProtectionGateMixin):
@@ -387,6 +426,7 @@ class AppFederationService(ProtectionGateMixin):
                         from_user_id=actor_user_id,
                     )
                 )
+            await self._know_game(app_id, actor_user_id, session_id, own, target)
             return session_id
 
         # Remote — address the peer household; include per-user routing fields
@@ -409,6 +449,9 @@ class AppFederationService(ProtectionGateMixin):
             to_instance_id=target["instance_id"],
             event_type=FederationEventType.APP_SESSION,
             payload=payload,
+        )
+        await self._know_game(
+            app_id, actor_user_id, session_id, target["instance_id"], target
         )
         return session_id
 
@@ -443,17 +486,29 @@ class AppFederationService(ProtectionGateMixin):
         frame's envelope metadata (see
         :meth:`FederationService.send_app_message`).
         """
-        await self._require_enabled(app_id)
-        await self._assert_age_allowed(app_id, actor_user_id)
-        await self._assert_target_allowed(actor_user_id, target)
-        await self._took_in_by_playing(app_id, actor_user_id, session_id)
+        app = await self._require_enabled(app_id)
+        await self._assert_age_allowed(app_id, actor_user_id, app=app)
         own = self._federation.own_instance_id
+        peer_instance = own if target.get("is_local") else str(target["instance_id"])
+        # O(1) per move (C#31): a game this household knows the actor plays
+        # with this very person needs no roster scan — only the checks the
+        # roster would have applied to that one person.
+        known = (
+            await self._app_repo.get_pending_session(app_id, actor_user_id, session_id)
+            if target.get("user_ref")
+            else None
+        )
+        if known is not None and known.is_with(peer_instance, target["user_ref"]):
+            await self._assert_person_allowed(actor_user_id, target)
+        else:
+            await self._assert_target_allowed(actor_user_id, target)
+        await self._mark_played(app_id, actor_user_id, session_id, known, target)
 
         if target.get("is_local"):
             # Local loopback — deliver the message frame to the addressed
             # person and the initiator only, never a fan-out to all local users.
             recipients = await self._age_filter_recipients(
-                app_id, [target["user_ref"], actor_user_id]
+                app_id, [target["user_ref"], actor_user_id], app=app
             )
             await self._emit_frame(
                 recipients,
@@ -464,6 +519,16 @@ class AppFederationService(ProtectionGateMixin):
                 kind="message",
                 payload=payload,
             )
+            if target["user_ref"] in recipients and target["user_ref"] != actor_user_id:
+                await self._hold(
+                    app_id,
+                    target["user_ref"],
+                    session_id,
+                    from_instance=own,
+                    from_user=actor_user_id,
+                    kind="message",
+                    payload=payload,
+                )
             return
 
         # Remote — include per-user routing fields only for v_18+ peers.
@@ -672,15 +737,19 @@ class AppFederationService(ProtectionGateMixin):
         _ = instance_id, remote_username  # reserved for future wiring
         return False
 
-    async def _require_enabled(self, app_id: str) -> None:
-        """Raise :class:`AppNotFoundError` or :class:`AppNotEnabledError`."""
+    async def _require_enabled(self, app_id: str) -> InstalledApp:
+        """The installed, enabled app — else raise :class:`AppNotFoundError`
+        or :class:`AppNotEnabledError`."""
         app = await self._app_repo.get(app_id)
         if app is None:
             raise AppNotFoundError(app_id)
         if not app.enabled:
             raise AppNotEnabledError(app_id)
+        return app
 
-    async def _assert_age_allowed(self, app_id: str, actor_user_id: str) -> None:
+    async def _assert_age_allowed(
+        self, app_id: str, actor_user_id: str, *, app: InstalledApp | None = None
+    ) -> None:
         """Raise :class:`AppAgeRestrictedError` for protected minors below min_age.
 
         Fail-closed: if the app is not found or has no age restriction,
@@ -690,7 +759,8 @@ class AppFederationService(ProtectionGateMixin):
         """
         if self._cp_repo is None:
             return
-        app = await self._app_repo.get(app_id)
+        if app is None:
+            app = await self._app_repo.get(app_id)
         if app is None or app.min_age <= 0:
             return
         p = await self._cp_repo.get_user_protection(actor_user_id)
@@ -752,6 +822,126 @@ class AppFederationService(ProtectionGateMixin):
                 "target is not a contact of the requesting user"
             )
 
+    async def _assert_person_allowed(self, actor_user_id: str, target: dict) -> None:
+        """:meth:`_assert_target_allowed` for one person, without the
+        roster scan: raise :class:`AppContactNotFoundError` unless *target*
+        is someone :meth:`list_contacts` would list for the actor (an
+        active member here, or a known remote user), neither blocked by
+        the actor nor — locally — blocking them, and no guardian block
+        between them. A handful of primary-key reads."""
+        ref = str(target.get("user_ref") or "")
+        refused = AppContactNotFoundError(
+            "target is not a contact of the requesting user"
+        )
+        if target.get("is_local"):
+            user = await self._user_repo.get_by_user_id(ref)
+            if user is None or not user.is_active() or ref == actor_user_id:
+                raise refused
+            other = ref
+            if await self._user_repo.is_blocked(other, actor_user_id):
+                raise refused
+        else:
+            remote = await self._user_repo.get_remote_by_member(
+                str(target.get("instance_id") or ""), ref
+            )
+            if remote is None or remote.deprovisioned_at is not None:
+                raise refused
+            other = remote.user_id
+        if await self._user_repo.is_blocked(
+            actor_user_id, other
+        ) or await self._guardian_blocked(actor_user_id, other):
+            raise refused
+
+    async def _know_game(
+        self,
+        app_id: str,
+        user_id: str,
+        session_id: str,
+        peer_instance: str,
+        target: dict,
+    ) -> None:
+        """*user_id* plays *session_id* with *target*: keep the session
+        known for them (an ``active`` row), so the other side's moves wait
+        in their mailbox and their own moves skip the roster scan. A
+        household-addressed (pre-v_18) session names nobody: not kept."""
+        if not target.get("user_ref"):
+            return
+        now = datetime.now(UTC).isoformat()
+        await self._app_repo.add_active_session(
+            AppPendingSession(
+                app_id=app_id,
+                user_id=user_id,
+                session_id=session_id,
+                from_instance=peer_instance,
+                from_user=str(target["user_ref"]),
+                payload={"app_id": app_id, "session_id": session_id, "verb": "open"},
+                created_at=now,
+                state=SESSION_ACTIVE,
+                updated_at=now,
+            )
+        )
+
+    async def _mark_played(
+        self,
+        app_id: str,
+        user_id: str,
+        session_id: str,
+        known: AppPendingSession | None,
+        target: dict,
+    ) -> None:
+        """*user_id* sent a message in *session_id*: an invite that waited
+        for them is taken in (they play it), a game from before the mailbox
+        becomes known, and a known game's TTL moves on (at most hourly)."""
+        if known is None:
+            own = self._federation.own_instance_id
+            peer = own if target.get("is_local") else str(target["instance_id"])
+            await self._know_game(app_id, user_id, session_id, peer, target)
+            return
+        if known.state == SESSION_INVITED:
+            await self._took_in_by_playing(app_id, user_id, session_id)
+            return
+        now = datetime.now(UTC)
+        if known.last_change < (now - _TOUCH_EVERY).isoformat():
+            await self._app_repo.touch_session(
+                app_id, user_id, session_id, now=now.isoformat()
+            )
+
+    async def _hold(
+        self,
+        app_id: str,
+        user_id: str,
+        session_id: str,
+        *,
+        from_instance: str,
+        from_user: str | None,
+        kind: str,
+        payload: dict,
+    ) -> bool:
+        """The mailbox (D11): keep *payload* as the latest message of
+        *session_id* for *user_id* until their app opens — only for a
+        session known for them whose other side is ``from_instance`` /
+        ``from_user``, and only up to :data:`HELD_MESSAGE_MAX_BYTES`.
+        ``True`` when kept."""
+        if not from_user:
+            return False
+        held = {"kind": kind, "payload": payload}
+        if len(orjson.dumps(held)) > HELD_MESSAGE_MAX_BYTES:
+            log.info(
+                "app_federation: %s for session %s too large to hold — live only",
+                kind,
+                session_id,
+            )
+            return False
+        return await self._app_repo.hold_message(
+            app_id,
+            user_id,
+            session_id,
+            from_instance=from_instance,
+            from_user=from_user,
+            held=held,
+            now=datetime.now(UTC).isoformat(),
+        )
+
     async def _emit_frame(
         self,
         recipient_user_ids: list[str],
@@ -786,7 +976,7 @@ class AppFederationService(ProtectionGateMixin):
             await self._ws.broadcast_to_user(uid, frame)
 
     async def _age_filter_recipients(
-        self, app_id: str, user_ids: list[str]
+        self, app_id: str, user_ids: list[str], *, app: InstalledApp | None = None
     ) -> list[str]:
         """Drop protected minors below the app's ``min_age`` from ``user_ids``.
 
@@ -802,7 +992,8 @@ class AppFederationService(ProtectionGateMixin):
                 seen.add(uid)
                 ordered.append(uid)
 
-        app = await self._app_repo.get(app_id)
+        if app is None:
+            app = await self._app_repo.get(app_id)
         if app is None or app.min_age <= 0 or self._cp_repo is None:
             return ordered
 
@@ -865,9 +1056,16 @@ class AppFederationService(ProtectionGateMixin):
             ``True`` only for an inbound ``APP_SESSION`` *close* addressed to
             one person: the invite it ends stops waiting — only when the same
             household and person opened it.
+
+        The mailbox (D11): a move or a close for one person is also kept
+        as the latest message of that session for them (:meth:`_hold`) —
+        only for a session this household knows for them with that very
+        sender — and that holds while the app is turned off too (no live
+        frame then). An invite to a turned-off app, and anything for the
+        whole household, is dropped as before.
         """
         app = await self._app_repo.get(app_id)
-        if app is None or not app.enabled:
+        if app is None or (not app.enabled and (notify_open or to_user is None)):
             log.debug(
                 "app_federation: dropping inbound for app %r (not installed/enabled)",
                 app_id,
@@ -949,7 +1147,9 @@ class AppFederationService(ProtectionGateMixin):
                         session_id,
                     )
                     return
-                allowed = await self._age_filter_recipients(app_id, [recipient.user_id])
+                allowed = await self._age_filter_recipients(
+                    app_id, [recipient.user_id], app=app
+                )
                 log.info(
                     "app_federation deliver app=%s session=%s kind=%s routed=%s recipients=%d",
                     app_id,
@@ -977,7 +1177,30 @@ class AppFederationService(ProtectionGateMixin):
                                 created_at=datetime.now(UTC).isoformat(),
                             )
                         )
-                    await self._ws.broadcast_to_user(recipient.user_id, frame)
+                    else:
+                        held = await self._hold(
+                            app_id,
+                            recipient.user_id,
+                            session_id,
+                            from_instance=from_instance,
+                            from_user=from_user,
+                            kind=kind,
+                            payload=payload,
+                        )
+                        if held and _is_decline(kind, payload):
+                            await self._emit(
+                                AppChallengeDeclined(
+                                    app_id=app_id,
+                                    session_id=session_id,
+                                    to_user_id=recipient.user_id,
+                                    from_display=await self._remote_open_display(
+                                        from_instance, from_user, remote=initiator
+                                    ),
+                                    from_user_id=initiator.user_id,
+                                )
+                            )
+                    if app.enabled:
+                        await self._ws.broadcast_to_user(recipient.user_id, frame)
                     if notify_open:
                         from_display = await self._remote_open_display(
                             from_instance, from_user, remote=initiator
@@ -1025,7 +1248,7 @@ class AppFederationService(ProtectionGateMixin):
 
         # Age-gate filter: skip recipients who are protected minors below
         # the app's minimum age.  Fast path when the app has no restriction.
-        user_ids = await self._age_filter_recipients(app_id, user_ids)
+        user_ids = await self._age_filter_recipients(app_id, user_ids, app=app)
 
         if not user_ids:
             return
@@ -1053,11 +1276,12 @@ class AppFederationService(ProtectionGateMixin):
         racing it gets :class:`AppChallengeHandledError` — as does an
         invite past its TTL (row ``expired``) or one from someone a
         guardian block separates from the invitee since it arrived (row
-        ``done``)."""
-        await self._require_enabled(app_id)
-        await self._assert_age_allowed(app_id, actor_user_id)
-        invite = await self._app_repo.take_pending_session(
-            app_id, actor_user_id, session_id
+        ``done``). A played invite stays known as an ``active`` game: the
+        other side's moves wait in its mailbox from now on."""
+        app = await self._require_enabled(app_id)
+        await self._assert_age_allowed(app_id, actor_user_id, app=app)
+        invite = await self._app_repo.activate_pending_session(
+            app_id, actor_user_id, session_id, now=datetime.now(UTC).isoformat()
         )
         if invite is None:
             raise AppChallengeHandledError()
@@ -1082,6 +1306,9 @@ class AppFederationService(ProtectionGateMixin):
             )
         )
         if outcome != "accepted":
+            await self._app_repo.delete_pending_session(
+                app_id, actor_user_id, session_id
+            )
             raise AppChallengeHandledError()
         return invite
 
@@ -1091,7 +1318,9 @@ class AppFederationService(ProtectionGateMixin):
         """The invitee sent a message in a game that still waited for them
         (an app that seats live invites itself, before launch contexts):
         they play it, so the invite is accepted and leaves "Needs you"."""
-        taken = await self._app_repo.take_pending_session(app_id, user_id, session_id)
+        taken = await self._app_repo.activate_pending_session(
+            app_id, user_id, session_id, now=datetime.now(UTC).isoformat()
+        )
         if taken is not None:
             await self._emit(
                 AppChallengeEnded(
@@ -1101,6 +1330,28 @@ class AppFederationService(ProtectionGateMixin):
                     outcome="accepted",
                 )
             )
+
+    async def take_held(
+        self, *, app_id: str, actor_user_id: str
+    ) -> list[AppPendingSession]:
+        """The person's app opened: the messages their mailbox kept (D11),
+        the latest per session, oldest first — cleared as they are handed
+        over. Each row's ``held`` is ``{kind, payload}`` and its
+        ``from_instance`` / ``from_user`` name the sender. A message from
+        someone the person blocked, or a guardian block now separates
+        them from, is dropped instead (§CP.F2)."""
+        app = await self._require_enabled(app_id)
+        await self._assert_age_allowed(app_id, actor_user_id, app=app)
+        out: list[AppPendingSession] = []
+        for held in await self._app_repo.take_held(app_id, actor_user_id):
+            sender = await self._invite_sender_id(held)
+            if sender is not None and (
+                await self._user_repo.is_blocked(actor_user_id, sender)
+                or await self._guardian_blocked(actor_user_id, sender)
+            ):
+                continue
+            out.append(held)
+        return out
 
     async def _invite_sender_id(self, invite: AppPendingSession) -> str | None:
         """The user id of who opened *invite*: a local user id as stored, or
@@ -1254,6 +1505,32 @@ class AppFederationService(ProtectionGateMixin):
                 kind="session",
                 payload=payload,
             )
+            # The mailbox: the close waits for their app like a remote one.
+            if (
+                to_user in recipients
+                and await self._hold(
+                    app_id,
+                    to_user,
+                    session_id,
+                    from_instance=own,
+                    from_user=actor_user_id,
+                    kind="session",
+                    payload=payload,
+                )
+                and _is_decline("session", payload)
+            ):
+                me = await self._user_repo.get_by_user_id(actor_user_id)
+                await self._emit(
+                    AppChallengeDeclined(
+                        app_id=app_id,
+                        session_id=session_id,
+                        to_user_id=to_user,
+                        from_display=(
+                            me.display_name if me is not None else actor_user_id
+                        ),
+                        from_user_id=actor_user_id,
+                    )
+                )
             return
         try:
             if not await self._federation.peer_supports(

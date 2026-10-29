@@ -18,6 +18,8 @@ import orjson
 from ..db import AsyncDatabase
 from ..domain.apps import (
     PENDING_SESSION_TTL_SECONDS,
+    SESSION_ACTIVE,
+    SESSION_INVITED,
     AppKvEntry,
     AppManifest,
     AppPendingSession,
@@ -67,6 +69,28 @@ class AbstractAppRepo(Protocol):
         from_instance: str | None = None,
         from_user: str | None = None,
     ) -> AppPendingSession | None: ...
+    async def activate_pending_session(
+        self, app_id: str, user_id: str, session_id: str, *, now: str
+    ) -> AppPendingSession | None: ...
+    async def delete_pending_session(
+        self, app_id: str, user_id: str, session_id: str
+    ) -> None: ...
+    async def add_active_session(self, s: AppPendingSession) -> None: ...
+    async def touch_session(
+        self, app_id: str, user_id: str, session_id: str, *, now: str
+    ) -> None: ...
+    async def hold_message(
+        self,
+        app_id: str,
+        user_id: str,
+        session_id: str,
+        *,
+        from_instance: str,
+        from_user: str,
+        held: dict,
+        now: str,
+    ) -> bool: ...
+    async def take_held(self, app_id: str, user_id: str) -> list[AppPendingSession]: ...
 
 
 def _row_to_kv(row) -> AppKvEntry:
@@ -88,6 +112,9 @@ def _row_to_pending(row) -> AppPendingSession:
         from_user=row["from_user"],
         payload=orjson.loads(row["payload_json"]),
         created_at=str(row["created_at"]),
+        state=str(row["state"]),
+        held=orjson.loads(row["held_json"]) if row["held_json"] else None,
+        updated_at=row["updated_at"],
     )
 
 
@@ -282,7 +309,7 @@ class SqliteAppRepo:
                 WHERE rowid IN (
                     SELECT rowid FROM app_pending_sessions
                      WHERE app_id = ? AND user_id = ?
-                     ORDER BY created_at DESC
+                     ORDER BY COALESCE(updated_at, created_at) DESC
                      LIMIT -1 OFFSET ?
                 )""",
             (s.app_id, s.user_id, _PENDING_SESSION_MAX_PER_PAIR),
@@ -291,7 +318,9 @@ class SqliteAppRepo:
     async def prune_pending_sessions(
         self, *, max_age_seconds: int = _PENDING_SESSION_TTL_SECONDS
     ) -> int:
-        """Delete pending sessions older than the TTL. Returns purge count.
+        """Delete sessions quiet for longer than the TTL — an invite nobody
+        played, a game nobody moved in (and whatever it still held).
+        Returns purge count.
 
         Counts before deleting (aiosqlite's DELETE doesn't surface a row
         count at this revision) — same mechanism as
@@ -299,12 +328,14 @@ class SqliteAppRepo:
         """
         cutoff = (datetime.now(UTC) - timedelta(seconds=max_age_seconds)).isoformat()
         before = await self._db.fetchval(
-            "SELECT COUNT(*) FROM app_pending_sessions WHERE created_at < ?",
+            "SELECT COUNT(*) FROM app_pending_sessions"
+            " WHERE COALESCE(updated_at, created_at) < ?",
             (cutoff,),
             default=0,
         )
         await self._db.enqueue(
-            "DELETE FROM app_pending_sessions WHERE created_at < ?",
+            "DELETE FROM app_pending_sessions"
+            " WHERE COALESCE(updated_at, created_at) < ?",
             (cutoff,),
         )
         return int(before)
@@ -312,8 +343,9 @@ class SqliteAppRepo:
     async def get_pending_session(
         self, app_id: str, user_id: str, session_id: str
     ) -> AppPendingSession | None:
-        """One waiting invite, expired or not (the caller compares
-        ``created_at`` with the TTL)."""
+        """One known session — a waiting invite (expired or not: the
+        caller compares ``created_at`` with the TTL) or a game being
+        played. One primary-key read."""
         row = await self._db.fetchone(
             """SELECT * FROM app_pending_sessions
                WHERE app_id = ? AND user_id = ? AND session_id = ?""",
@@ -331,18 +363,14 @@ class SqliteAppRepo:
         from_user: str | None = None,
     ) -> AppPendingSession | None:
         """Remove one waiting invite — the one atomic step a decline, a
-        withdrawal and the app taking it in race on. Returns the invite
-        when this call removed it, ``None`` when it was gone already (or
-        is not from ``from_instance`` / ``from_user`` when they are given:
-        only the household and person who sent it may withdraw it)."""
-        row = await self._db.fetchone(
-            """SELECT * FROM app_pending_sessions
-               WHERE app_id = ? AND user_id = ? AND session_id = ?""",
-            (app_id, user_id, session_id),
-        )
-        if row is None:
+        withdrawal and Play race on. Returns the invite when this call
+        removed it, ``None`` when it was gone already, is a game already
+        played (``active``), or is not from ``from_instance`` /
+        ``from_user`` when they are given: only the household and person
+        who sent it may withdraw it."""
+        invite = await self.get_pending_session(app_id, user_id, session_id)
+        if invite is None or invite.state != SESSION_INVITED:
             return None
-        invite = _row_to_pending(row)
         if from_instance is not None and invite.from_instance != from_instance:
             return None
         if from_user is not None and invite.from_user != from_user:
@@ -350,7 +378,135 @@ class SqliteAppRepo:
         changed = await self._db.enqueue_rowcount(
             """DELETE FROM app_pending_sessions
                WHERE app_id = ? AND user_id = ? AND session_id = ?
-                 AND from_instance = ?""",
-            (app_id, user_id, session_id, invite.from_instance),
+                 AND from_instance = ? AND state = ?""",
+            (app_id, user_id, session_id, invite.from_instance, SESSION_INVITED),
         )
         return invite if changed == 1 else None
+
+    async def activate_pending_session(
+        self, app_id: str, user_id: str, session_id: str, *, now: str
+    ) -> AppPendingSession | None:
+        """Play: a waiting invite becomes a game being played, in one
+        atomic step like :meth:`take_pending_session` (a decline or a
+        withdrawal racing it wins or loses as a whole). Returns the invite
+        as it waited, ``None`` when it no longer waits. The row stays: it
+        is the session's mailbox from now on."""
+        invite = await self.get_pending_session(app_id, user_id, session_id)
+        if invite is None or invite.state != SESSION_INVITED:
+            return None
+        changed = await self._db.enqueue_rowcount(
+            """UPDATE app_pending_sessions SET state = ?, updated_at = ?
+               WHERE app_id = ? AND user_id = ? AND session_id = ?
+                 AND state = ?""",
+            (SESSION_ACTIVE, now, app_id, user_id, session_id, SESSION_INVITED),
+        )
+        return invite if changed == 1 else None
+
+    async def delete_pending_session(
+        self, app_id: str, user_id: str, session_id: str
+    ) -> None:
+        """Forget one session (an invite played past its TTL, or across a
+        guardian block)."""
+        await self._db.enqueue(
+            """DELETE FROM app_pending_sessions
+               WHERE app_id = ? AND user_id = ? AND session_id = ?""",
+            (app_id, user_id, session_id),
+        )
+
+    async def add_active_session(self, s: AppPendingSession) -> None:
+        """Know a game this person plays (they sent the invite, or made
+        their first move in a game from before the mailbox). A row the
+        session already has is left as it is."""
+        await self._db.enqueue(
+            """INSERT INTO app_pending_sessions
+                 (app_id, user_id, session_id, from_instance, from_user,
+                  payload_json, created_at, state, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(app_id, user_id, session_id) DO NOTHING""",
+            (
+                s.app_id,
+                s.user_id,
+                s.session_id,
+                s.from_instance,
+                s.from_user,
+                orjson.dumps(s.payload).decode(),
+                s.created_at,
+                SESSION_ACTIVE,
+                s.last_change,
+            ),
+        )
+        await self._db.enqueue(
+            """DELETE FROM app_pending_sessions
+                WHERE rowid IN (
+                    SELECT rowid FROM app_pending_sessions
+                     WHERE app_id = ? AND user_id = ?
+                     ORDER BY COALESCE(updated_at, created_at) DESC
+                     LIMIT -1 OFFSET ?
+                )""",
+            (s.app_id, s.user_id, _PENDING_SESSION_MAX_PER_PAIR),
+        )
+
+    async def touch_session(
+        self, app_id: str, user_id: str, session_id: str, *, now: str
+    ) -> None:
+        """A move in the game: it stays known for another TTL."""
+        await self._db.enqueue(
+            """UPDATE app_pending_sessions SET updated_at = ?
+               WHERE app_id = ? AND user_id = ? AND session_id = ?""",
+            (now, app_id, user_id, session_id),
+        )
+
+    async def hold_message(
+        self,
+        app_id: str,
+        user_id: str,
+        session_id: str,
+        *,
+        from_instance: str,
+        from_user: str,
+        held: dict,
+        now: str,
+    ) -> bool:
+        """The mailbox (D11): keep *held* as the latest message of this
+        session for this person, replacing an older one, but only when the
+        session is known for them and its other side is ``from_instance``
+        / ``from_user``. One primary-key write. ``True`` when kept."""
+        changed = await self._db.enqueue_rowcount(
+            """UPDATE app_pending_sessions SET held_json = ?, updated_at = ?
+               WHERE app_id = ? AND user_id = ? AND session_id = ?
+                 AND from_instance = ? AND from_user = ?""",
+            (
+                orjson.dumps(held).decode(),
+                now,
+                app_id,
+                user_id,
+                session_id,
+                from_instance,
+                from_user,
+            ),
+        )
+        return changed == 1
+
+    async def take_held(self, app_id: str, user_id: str) -> list[AppPendingSession]:
+        """The person's app opened: hand over every held message (oldest
+        change first) and clear them. A message held again meanwhile (a
+        newer move) is not cleared: it waits for the next open."""
+        rows = await self._db.fetchall(
+            """SELECT * FROM app_pending_sessions
+               WHERE app_id = ? AND user_id = ? AND held_json IS NOT NULL
+               ORDER BY COALESCE(updated_at, created_at)""",
+            (app_id, user_id),
+        )
+        out: list[AppPendingSession] = []
+        for row in rows:
+            held = _row_to_pending(row)
+            changed = await self._db.enqueue_rowcount(
+                """UPDATE app_pending_sessions SET held_json = NULL
+                   WHERE app_id = ? AND user_id = ? AND session_id = ?
+                     AND held_json IS NOT NULL
+                     AND COALESCE(updated_at, created_at) = ?""",
+                (app_id, user_id, held.session_id, held.last_change),
+            )
+            if changed == 1:
+                out.append(held)
+        return out

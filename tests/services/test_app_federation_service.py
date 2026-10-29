@@ -26,9 +26,10 @@ from socialhome.domain.apps import (
     AppManifest,
     AppNotEnabledError,
     AppNotFoundError,
+    AppPendingSession,
     InstalledApp,
 )
-from socialhome.domain.events import AppChallengeEnded
+from socialhome.domain.events import AppChallengeDeclined, AppChallengeEnded
 from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
@@ -138,6 +139,11 @@ class _FakeAppRepo:
     async def list_installed(self) -> list[InstalledApp]:
         return list(self._apps.values())
 
+    @property
+    def invites(self) -> list:
+        """The rows still waiting as invites (not games being played)."""
+        return [p for p in self.pending if p.state == "invited"]
+
     async def add_pending_session(self, s) -> None:
         self.pending.append(s)
 
@@ -151,7 +157,7 @@ class _FakeAppRepo:
         self, app_id, user_id, session_id, *, from_instance=None, from_user=None
     ):
         p = await self.get_pending_session(app_id, user_id, session_id)
-        if p is None:
+        if p is None or p.state != "invited":
             return None
         if from_instance is not None and p.from_instance != from_instance:
             return None
@@ -159,6 +165,50 @@ class _FakeAppRepo:
             return None
         self.pending.remove(p)
         return p
+
+    def _swap(self, old, new) -> None:
+        self.pending[self.pending.index(old)] = new
+
+    async def activate_pending_session(self, app_id, user_id, session_id, *, now):
+        p = await self.get_pending_session(app_id, user_id, session_id)
+        if p is None or p.state != "invited":
+            return None
+        self._swap(p, dataclasses.replace(p, state="active", updated_at=now))
+        return p
+
+    async def delete_pending_session(self, app_id, user_id, session_id):
+        p = await self.get_pending_session(app_id, user_id, session_id)
+        if p is not None:
+            self.pending.remove(p)
+
+    async def add_active_session(self, s) -> None:
+        if await self.get_pending_session(s.app_id, s.user_id, s.session_id) is None:
+            self.pending.append(dataclasses.replace(s, state="active"))
+
+    async def touch_session(self, app_id, user_id, session_id, *, now):
+        p = await self.get_pending_session(app_id, user_id, session_id)
+        if p is not None:
+            self._swap(p, dataclasses.replace(p, updated_at=now))
+        self.touched = getattr(self, "touched", 0) + 1
+
+    async def hold_message(
+        self, app_id, user_id, session_id, *, from_instance, from_user, held, now
+    ) -> bool:
+        p = await self.get_pending_session(app_id, user_id, session_id)
+        if p is None or (p.from_instance, p.from_user) != (from_instance, from_user):
+            return False
+        self._swap(p, dataclasses.replace(p, held=held, updated_at=now))
+        return True
+
+    async def take_held(self, app_id, user_id):
+        out = [
+            p
+            for p in self.pending
+            if (p.app_id, p.user_id) == (app_id, user_id) and p.held is not None
+        ]
+        for p in out:
+            self._swap(p, dataclasses.replace(p, held=None))
+        return sorted(out, key=lambda p: p.last_change)
 
 
 class _FakeUserRepo:
@@ -1918,8 +1968,8 @@ async def test_inbound_open_persists_pending_session_for_resolved_user():
     await svc.on_inbound_event(_make_event(FederationEventType.APP_SESSION, payload))
 
     repo = svc._app_repo  # type: ignore[attr-defined]
-    assert len(repo.pending) == 1
-    row = repo.pending[0]
+    assert len(repo.invites) == 1
+    row = repo.invites[0]
     assert row.app_id == "chess"
     assert row.user_id == "u-bob"
     assert row.session_id == "sess-1"
@@ -1953,7 +2003,7 @@ async def test_inbound_message_does_not_persist_pending_session():
         },
     )
     await svc.on_inbound_event(event)
-    assert svc._app_repo.pending == []  # type: ignore[attr-defined]
+    assert svc._app_repo.invites == []  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -1984,7 +2034,7 @@ async def test_inbound_open_blocked_initiator_does_not_persist():
         },
     )
     await svc.on_inbound_event(event)
-    assert svc._app_repo.pending == []  # type: ignore[attr-defined]
+    assert svc._app_repo.invites == []  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -1998,7 +2048,7 @@ async def test_legacy_fanout_open_does_not_persist():
         {"app_id": "chess", "session_id": "sess-1", "verb": "open"},
     )
     await svc.on_inbound_event(event)
-    assert svc._app_repo.pending == []  # type: ignore[attr-defined]
+    assert svc._app_repo.invites == []  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -2064,7 +2114,7 @@ async def test_per_user_open_needs_an_initiator_of_the_sending_household(from_us
         payload["from_user"] = from_user
     await svc.on_inbound_event(_make_event(FederationEventType.APP_SESSION, payload))
     assert ws.user_calls == []
-    assert svc._app_repo.pending == []
+    assert svc._app_repo.invites == []
 
 
 @pytest.mark.asyncio
@@ -2093,7 +2143,7 @@ async def test_open_dedup_is_per_sending_household():
                 from_instance=sender,
             )
         )
-    assert [p.from_instance for p in svc._app_repo.pending] == [
+    assert [p.from_instance for p in svc._app_repo.invites] == [
         "other-inst",
         "peer-inst-id",
     ]
@@ -2164,7 +2214,7 @@ async def test_a_local_invite_waits_for_the_invitee_like_a_remote_one():
     session_id = await svc.open_session(
         app_id="chess", target=_local_target("u-bob"), actor_user_id="u-alice"
     )
-    (row,) = svc._app_repo.pending
+    (row,) = svc._app_repo.invites
     assert (row.user_id, row.session_id) == ("u-bob", session_id)
     assert (row.from_instance, row.from_user) == ("own-inst-id", "u-alice")
     assert row.payload == {"app_id": "chess", "session_id": session_id, "verb": "open"}
@@ -2198,7 +2248,7 @@ async def test_play_takes_in_only_that_invite():
         ("s1",),
         "accepted",
     )
-    assert [p.session_id for p in svc._app_repo.pending] == ["s2"]  # type: ignore[attr-defined]
+    assert [p.session_id for p in svc._app_repo.invites] == ["s2"]  # type: ignore[attr-defined]
     # A second tap (another device) hears it was handled; nothing else ends.
     with pytest.raises(AppChallengeHandledError):
         await svc.accept_session(app_id="chess", session_id="s1", actor_user_id="u-bob")
@@ -2218,7 +2268,7 @@ async def test_only_the_invitee_can_play_an_invite():
         await svc.accept_session(
             app_id="chess", session_id=session_id, actor_user_id="u-alice"
         )
-    assert len(svc._app_repo.pending) == 1  # type: ignore[attr-defined]
+    assert len(svc._app_repo.invites) == 1  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -2274,7 +2324,7 @@ async def test_a_move_by_the_invitee_takes_the_invite_in():
     )
     (ended,) = _ended(bus)
     assert (ended.session_ids, ended.outcome) == (("s1",), "accepted")
-    assert [p.session_id for p in svc._app_repo.pending] == ["s2"]  # type: ignore[attr-defined]
+    assert [p.session_id for p in svc._app_repo.invites] == ["s2"]  # type: ignore[attr-defined]
     # Later moves find nothing waiting: nothing more ends.
     await svc.send_message(
         app_id="chess",
@@ -2302,7 +2352,7 @@ async def test_a_move_by_the_challenger_leaves_the_invite_waiting():
         payload={"move": "e2e4"},
         actor_user_id="u-alice",
     )
-    assert [p.user_id for p in svc._app_repo.pending] == ["u-bob"]  # type: ignore[attr-defined]
+    assert [p.user_id for p in svc._app_repo.invites] == ["u-bob"]  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -2319,7 +2369,7 @@ async def test_declining_a_remote_invite_tells_the_challengers_app():
         app_id="chess", session_id="sess-1", actor_user_id="u-bob"
     )
 
-    assert svc._app_repo.pending == []
+    assert svc._app_repo.invites == []
     (ended,) = _ended(bus)
     assert (ended.session_ids, ended.outcome) == (("sess-1",), "declined")
     (sent,) = fed.sent_events
@@ -2373,7 +2423,7 @@ async def test_a_decline_that_cant_be_sent_still_stands():
     await svc.decline_session(
         app_id="chess", session_id="sess-1", actor_user_id="u-bob"
     )
-    assert svc._app_repo.pending == []
+    assert svc._app_repo.invites == []
     assert [e.outcome for e in _ended(bus)] == ["declined"]
 
 
@@ -2389,7 +2439,7 @@ async def test_declining_for_a_disabled_app_sends_nothing():
     await svc.decline_session(
         app_id="chess", session_id="sess-1", actor_user_id="u-bob"
     )
-    assert svc._app_repo.pending == []
+    assert svc._app_repo.invites == []
     assert fed.sent_events == []
 
 
@@ -2432,7 +2482,7 @@ async def test_the_challenger_withdraws_a_local_invite():
         target=_local_target("u-bob"),
         actor_user_id="u-alice",
     )
-    assert svc._app_repo.pending == []
+    assert svc._app_repo.invites == []
     (ended,) = _ended(bus)
     assert (ended.user_id, ended.outcome) == ("u-bob", "withdrawn")
     (call,) = ws.user_calls
@@ -2462,7 +2512,7 @@ async def test_only_the_challenger_can_withdraw_an_invite():
         target=_local_target("u-bob"),
         actor_user_id="u-eve",
     )
-    assert len(svc._app_repo.pending) == 1
+    assert len(svc._app_repo.invites) == 1
     assert _ended(bus) == []
 
 
@@ -2526,7 +2576,7 @@ async def test_an_inbound_close_from_the_challenger_withdraws_the_invite():
             },
         )
     )
-    assert svc._app_repo.pending == []
+    assert svc._app_repo.invites == []
     assert [(e.session_ids, e.outcome) for e in _ended(bus)] == [
         (("sess-1",), "withdrawn")
     ]
@@ -2716,7 +2766,7 @@ async def test_inbound_from_guardian_blocked_remote_never_reaches_protected_mino
         )
     await svc.on_inbound_event(event)
     assert ws.user_calls == [] and ws.calls == []
-    assert svc._app_repo.pending == []  # type: ignore[attr-defined]
+    assert svc._app_repo.invites == []  # type: ignore[attr-defined]
     assert bus.published == []
 
 
@@ -2822,7 +2872,7 @@ async def test_declining_an_invite_from_someone_guardian_blocked_since_tells_the
     await svc.decline_session(app_id="chess", session_id=sid, actor_user_id="u-kid")
     assert fed.sent_events == []
     assert ws.user_calls == []
-    assert svc._app_repo.pending == []  # type: ignore[attr-defined]
+    assert svc._app_repo.invites == []  # type: ignore[attr-defined]
 
 
 # ─── People from other households are named with their household ────────────
@@ -2920,3 +2970,461 @@ async def test_an_invite_from_another_household_names_it():
     )
     (ev,) = [e for e in bus.published if isinstance(e, AppChallengeReceived)]
     assert ev.from_display == "Carol · Familie Okafor"
+
+
+# ─── The mailbox (D11): moves and declines wait for a closed / off app ────
+
+
+def _declined(bus: _FakeBus) -> list:
+    return [e for e in bus.published if isinstance(e, AppChallengeDeclined)]
+
+
+def _mailbox_svc(*, enabled: bool = True, **kw):
+    bus = _FakeBus()
+    svc, fed, ws = _make_svc(
+        apps={"chess": _make_installed_app("chess", enabled=enabled)},
+        users=[_make_user("u-bob", "bob", "Bob"), _make_user("u-ann", "ann", "Ann")],
+        remote_users=[
+            _carol(),
+            _make_remote_user(
+                user_id="ru-dave", instance_id="peer-inst-id", remote_username="dave"
+            ),
+        ],
+        bus=bus,
+        **kw,
+    )
+    return svc, fed, ws, bus
+
+
+async def _played_remote_game(svc, session_id: str = "sess-1") -> None:
+    """Carol (peer-inst-id) invited Bob, and Bob pressed Play."""
+    await _remote_invite(svc, session_id)
+    await svc.accept_session(
+        app_id="chess", session_id=session_id, actor_user_id="u-bob"
+    )
+
+
+async def _inbound_move(
+    svc, data: dict, *, session_id: str = "sess-1", from_user: str = "carol"
+) -> None:
+    await svc.on_inbound_event(
+        _make_event(
+            FederationEventType.APP_MESSAGE,
+            {
+                "app_id": "chess",
+                "session_id": session_id,
+                "data": data,
+                "to_user": "bob",
+                "from_user": from_user,
+            },
+        )
+    )
+
+
+async def _inbound_close(
+    svc, reason: str, *, session_id: str = "sess-1", to_user: str = "bob"
+) -> None:
+    await svc.on_inbound_event(
+        _make_event(
+            FederationEventType.APP_SESSION,
+            {
+                "app_id": "chess",
+                "session_id": session_id,
+                "verb": "close",
+                "reason": reason,
+                "to_user": to_user,
+                "from_user": "carol",
+            },
+        )
+    )
+
+
+def _turn(svc, *, enabled: bool) -> None:
+    svc._app_repo._apps["chess"] = _make_installed_app("chess", enabled=enabled)
+
+
+@pytest.mark.asyncio
+async def test_a_move_for_a_closed_app_waits_and_only_the_latest_is_kept():
+    """L#1: Bob's app isn't open — the household keeps Carol's latest move
+    of that game and hands it over (once) when his app opens."""
+    svc, _, _, _ = _mailbox_svc()
+    await _played_remote_game(svc)
+    await _inbound_move(svc, {"n": 1})
+    await _inbound_move(svc, {"n": 2})
+    (held,) = await svc.take_held(app_id="chess", actor_user_id="u-bob")
+    assert held.session_id == "sess-1"
+    assert (held.from_instance, held.from_user) == ("peer-inst-id", "carol")
+    assert held.held == {"kind": "message", "payload": {"n": 2}}
+    assert await svc.take_held(app_id="chess", actor_user_id="u-bob") == []
+
+
+@pytest.mark.asyncio
+async def test_a_move_while_the_app_is_turned_off_is_held_and_arrives_on():
+    """L#1: Chess is turned off on Bob's household — the move is not live
+    (no frame), but waits and arrives once Chess is back on and opened."""
+    svc, _, ws, _ = _mailbox_svc()
+    await _played_remote_game(svc)
+    _turn(svc, enabled=False)
+    ws.user_calls.clear()
+    await _inbound_move(svc, {"san": "Nf3"})
+    assert ws.user_calls == []
+    with pytest.raises(AppNotEnabledError):
+        await svc.take_held(app_id="chess", actor_user_id="u-bob")
+    _turn(svc, enabled=True)
+    (held,) = await svc.take_held(app_id="chess", actor_user_id="u-bob")
+    assert held.held == {"kind": "message", "payload": {"san": "Nf3"}}
+
+
+@pytest.mark.asyncio
+async def test_an_invite_to_a_turned_off_app_is_still_dropped():
+    svc, _, ws, bus = _mailbox_svc(enabled=False)
+    await _remote_invite(svc)
+    assert svc._app_repo.pending == []
+    assert ws.user_calls == [] and bus.published == []
+
+
+@pytest.mark.asyncio
+async def test_a_move_in_a_game_this_household_does_not_know_is_not_kept():
+    """Only a known session is kept: a message for any other session id
+    is delivered live as before (an older game) and never stored."""
+    svc, _, ws, _ = _mailbox_svc()
+    await _inbound_move(svc, {"n": 1}, session_id="unknown")
+    assert svc._app_repo.pending == []
+    assert [c["user_id"] for c in ws.user_calls] == ["u-bob"]
+    _turn(svc, enabled=False)
+    ws.user_calls.clear()
+    await _inbound_move(svc, {"n": 2}, session_id="unknown")
+    assert ws.user_calls == [] and svc._app_repo.pending == []
+
+
+@pytest.mark.asyncio
+async def test_a_move_from_anyone_but_the_other_side_is_not_kept():
+    svc, _, _, _ = _mailbox_svc()
+    await _played_remote_game(svc)
+    await _inbound_move(svc, {"n": 1}, from_user="dave")
+    assert await svc.take_held(app_id="chess", actor_user_id="u-bob") == []
+
+
+@pytest.mark.asyncio
+async def test_a_message_too_large_to_hold_still_goes_out_live():
+    svc, _, ws, _ = _mailbox_svc()
+    await _played_remote_game(svc)
+    ws.user_calls.clear()
+    await _inbound_move(svc, {"blob": "x" * (64 * 1024)})
+    assert len(ws.user_calls) == 1
+    assert await svc.take_held(app_id="chess", actor_user_id="u-bob") == []
+
+
+@pytest.mark.asyncio
+async def test_a_decline_waits_for_the_challenger_and_rings_the_bell():
+    """L#2: Bob invited Carol; she declines while his app is closed — the
+    close waits in his mailbox and he gets a bell row."""
+    svc, _, _, bus = _mailbox_svc()
+    sid = await svc.open_session(
+        app_id="chess",
+        target=_remote_target("peer-inst-id", "carol"),
+        actor_user_id="u-bob",
+    )
+    await _inbound_close(svc, "declined", session_id=sid)
+    (declined,) = _declined(bus)
+    assert declined.to_user_id == "u-bob"
+    assert declined.from_user_id == "ru-carol"
+    assert declined.session_id == sid and declined.app_id == "chess"
+    (held,) = await svc.take_held(app_id="chess", actor_user_id="u-bob")
+    assert held.held is not None and held.held["kind"] == "session"
+    assert held.held["payload"]["reason"] == "declined"
+
+
+@pytest.mark.asyncio
+async def test_a_decline_for_a_game_never_sent_rings_nothing():
+    """A "decline" naming a session Bob never opened with Carol is not
+    kept and raises no bell row."""
+    svc, _, _, bus = _mailbox_svc()
+    await _inbound_close(svc, "declined", session_id="made-up")
+    assert _declined(bus) == []
+    assert svc._app_repo.pending == []
+
+
+@pytest.mark.asyncio
+async def test_a_withdrawal_after_play_waits_for_the_invitee():
+    """L#3: Bob already pressed Play; Carol cancels — the close waits for
+    Bob's app (his game clears on open), and no bell row."""
+    svc, _, _, bus = _mailbox_svc()
+    await _played_remote_game(svc)
+    bus.published.clear()
+    await _inbound_close(svc, "withdrawn")
+    assert _declined(bus) == [] and _ended(bus) == []
+    (held,) = await svc.take_held(app_id="chess", actor_user_id="u-bob")
+    assert held.held is not None
+    assert held.held["payload"]["reason"] == "withdrawn"
+
+
+@pytest.mark.asyncio
+async def test_a_withdrawal_before_play_still_just_ends_the_invite():
+    svc, _, _, bus = _mailbox_svc()
+    await _remote_invite(svc)
+    await _inbound_close(svc, "withdrawn")
+    assert [e.outcome for e in _ended(bus)] == ["withdrawn"]
+    assert svc._app_repo.pending == []
+
+
+@pytest.mark.asyncio
+async def test_a_move_before_play_waits_with_the_invite():
+    """The challenger may move before the invitee plays: the move waits
+    on the invite's row and the invite still waits in Needs you."""
+    svc, _, _, _ = _mailbox_svc()
+    await _remote_invite(svc)
+    await _inbound_move(svc, {"san": "e4"})
+    assert [p.session_id for p in svc._app_repo.invites] == ["sess-1"]
+    invite = await svc.accept_session(
+        app_id="chess", session_id="sess-1", actor_user_id="u-bob"
+    )
+    assert invite.payload["verb"] == "open"
+    (held,) = await svc.take_held(app_id="chess", actor_user_id="u-bob")
+    assert held.held == {"kind": "message", "payload": {"san": "e4"}}
+
+
+@pytest.mark.asyncio
+async def test_a_local_game_holds_moves_and_a_decline_rings_the_challenger():
+    """Same household: Ann invites Bob; his decline waits in her mailbox
+    with a bell row; in a played game each side's move waits for the other."""
+    svc, _, _, bus = _mailbox_svc()
+    sid = await svc.open_session(
+        app_id="chess", target=_local_target("u-bob"), actor_user_id="u-ann"
+    )
+    await svc.decline_session(app_id="chess", session_id=sid, actor_user_id="u-bob")
+    (declined,) = _declined(bus)
+    assert (declined.to_user_id, declined.from_user_id) == ("u-ann", "u-bob")
+    assert declined.from_display == "Bob"
+    (held,) = await svc.take_held(app_id="chess", actor_user_id="u-ann")
+    assert held.held is not None and held.held["payload"]["reason"] == "declined"
+
+    sid2 = await svc.open_session(
+        app_id="chess", target=_local_target("u-bob"), actor_user_id="u-ann"
+    )
+    await svc.accept_session(app_id="chess", session_id=sid2, actor_user_id="u-bob")
+    await svc.send_message(
+        app_id="chess",
+        target=_local_target("u-bob"),
+        session_id=sid2,
+        payload={"san": "e4"},
+        actor_user_id="u-ann",
+    )
+    await svc.send_message(
+        app_id="chess",
+        target=_local_target("u-ann"),
+        session_id=sid2,
+        payload={"san": "e5"},
+        actor_user_id="u-bob",
+    )
+    (to_bob,) = await svc.take_held(app_id="chess", actor_user_id="u-bob")
+    assert to_bob.held == {"kind": "message", "payload": {"san": "e4"}}
+    (to_ann,) = await svc.take_held(app_id="chess", actor_user_id="u-ann")
+    assert to_ann.held == {"kind": "message", "payload": {"san": "e5"}}
+
+
+@pytest.mark.asyncio
+async def test_a_local_withdrawal_after_play_waits_for_the_invitee():
+    svc, _, _, _ = _mailbox_svc()
+    sid = await svc.open_session(
+        app_id="chess", target=_local_target("u-bob"), actor_user_id="u-ann"
+    )
+    await svc.accept_session(app_id="chess", session_id=sid, actor_user_id="u-bob")
+    await svc.cancel_session(
+        app_id="chess",
+        session_id=sid,
+        target=_local_target("u-bob"),
+        actor_user_id="u-ann",
+    )
+    (held,) = await svc.take_held(app_id="chess", actor_user_id="u-bob")
+    assert held.held is not None and held.held["payload"]["reason"] == "withdrawn"
+
+
+class _CountingUserRepo(_FakeUserRepo):
+    """Counts the roster reads a send would need without a known session."""
+
+    def __init__(self, *a, **kw) -> None:
+        super().__init__(*a, **kw)
+        self.roster_reads = 0
+
+    async def list_all_known_remote(self) -> list[RemoteUser]:
+        self.roster_reads += 1
+        return await super().list_all_known_remote()
+
+
+def _counting_svc(**kw):
+    svc, fed, ws, bus = _mailbox_svc(**kw)
+    old = svc._user_repo
+    svc._user_repo = _CountingUserRepo(
+        old._users,
+        remote_users=old._remote_users,
+        blocked_ids=old._blocked_ids,
+        block_pairs=old._block_pairs,
+    )
+    return svc, fed, ws, bus
+
+
+async def _move(svc, sid: str, target: dict | None = None) -> None:
+    await svc.send_message(
+        app_id="chess",
+        target=target or _remote_target("peer-inst-id", "carol"),
+        session_id=sid,
+        payload={"san": "e4"},
+        actor_user_id="u-bob",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_move_in_a_known_game_skips_the_roster_scan():
+    """C#31: per move, one session lookup — not a scan of every contact."""
+    svc, fed, _, _ = _counting_svc()
+    sid = await svc.open_session(
+        app_id="chess",
+        target=_remote_target("peer-inst-id", "carol"),
+        actor_user_id="u-bob",
+    )
+    before = svc._user_repo.roster_reads
+    for _ in range(3):
+        await _move(svc, sid)
+    assert svc._user_repo.roster_reads == before
+    assert len(fed.sent_app_messages) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_move_to_someone_else_in_a_known_game_takes_the_full_check():
+    svc, _, _, _ = _counting_svc()
+    sid = await svc.open_session(
+        app_id="chess",
+        target=_remote_target("peer-inst-id", "carol"),
+        actor_user_id="u-bob",
+    )
+    before = svc._user_repo.roster_reads
+    await _move(svc, sid, _remote_target("peer-inst-id", "dave"))
+    assert svc._user_repo.roster_reads == before + 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("target", "blocks"),
+    [
+        ({"instance_id": "peer-inst-id", "user_ref": "carol"}, {("u-bob", "ru-carol")}),
+        ({"instance_id": "own-inst-id", "user_ref": "u-ann"}, {("u-bob", "u-ann")}),
+        ({"instance_id": "own-inst-id", "user_ref": "u-ann"}, {("u-ann", "u-bob")}),
+    ],
+)
+async def test_a_known_game_still_refuses_a_blocked_person(target, blocks):
+    svc, fed, ws, _ = _mailbox_svc()
+    is_local = target["instance_id"] == "own-inst-id"
+    target = {**target, "is_local": is_local}
+    sid = await svc.open_session(app_id="chess", target=target, actor_user_id="u-bob")
+    svc._user_repo._block_pairs = blocks
+    ws.user_calls.clear()
+    with pytest.raises(AppContactNotFoundError):
+        await _move(svc, sid, target)
+    assert fed.sent_app_messages == [] and ws.user_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_known_game_refuses_someone_no_longer_known():
+    svc, _, _, _ = _mailbox_svc()
+    sid = await svc.open_session(
+        app_id="chess",
+        target=_remote_target("peer-inst-id", "carol"),
+        actor_user_id="u-bob",
+    )
+    svc._user_repo._remote_users = [
+        dataclasses.replace(_carol(), deprovisioned_at="2026-10-01T00:00:00+00:00")
+    ]
+    with pytest.raises(AppContactNotFoundError):
+        await _move(svc, sid)
+
+
+@pytest.mark.asyncio
+async def test_a_game_from_before_the_mailbox_is_known_after_the_first_move():
+    """No row (a game started before 0131): the first move takes the full
+    check and keeps the game known from then on."""
+    svc, _, _, _ = _counting_svc()
+    await _move(svc, "old-game")
+    (row,) = svc._app_repo.pending
+    assert (row.user_id, row.state) == ("u-bob", "active")
+    assert (row.from_instance, row.from_user) == ("peer-inst-id", "carol")
+    before = svc._user_repo.roster_reads
+    await _move(svc, "old-game")
+    assert svc._user_repo.roster_reads == before
+
+
+@pytest.mark.asyncio
+async def test_own_moves_move_the_game_ttl_on_at_most_hourly():
+    svc, _, _, _ = _mailbox_svc()
+    sid = await svc.open_session(
+        app_id="chess",
+        target=_remote_target("peer-inst-id", "carol"),
+        actor_user_id="u-bob",
+    )
+    await _move(svc, sid)
+    assert getattr(svc._app_repo, "touched", 0) == 0
+    (row,) = svc._app_repo.pending
+    svc._app_repo._swap(
+        row, dataclasses.replace(row, updated_at="2026-01-01T00:00:00+00:00")
+    )
+    await _move(svc, sid)
+    assert svc._app_repo.touched == 1
+
+
+@pytest.mark.asyncio
+async def test_play_keeps_the_game_known_as_active():
+    svc, _, _, _ = _mailbox_svc()
+    await _played_remote_game(svc)
+    (row,) = svc._app_repo.pending
+    assert row.state == "active" and svc._app_repo.invites == []
+
+
+@pytest.mark.asyncio
+async def test_a_guardian_block_keeps_moves_out_of_the_mailbox():
+    """§CP.F2: nothing from someone a guardian block separates is kept —
+    neither on receipt, nor handed over if the block came after."""
+    svc, _, _, _, cp = _guarded_svc(set())
+    now = "2026-10-29T10:00:00+00:00"
+    await svc._app_repo.add_active_session(
+        AppPendingSession(
+            app_id="chess",
+            user_id="u-kid",
+            session_id="g1",
+            from_instance="peer-inst-id",
+            from_user="mallory",
+            payload={},
+            created_at=now,
+        )
+    )
+
+    async def move(n: int) -> None:
+        await svc.on_inbound_event(
+            _make_event(
+                FederationEventType.APP_MESSAGE,
+                {
+                    "app_id": "chess",
+                    "session_id": "g1",
+                    "data": {"n": n},
+                    "to_user": "kid",
+                    "from_user": "mallory",
+                },
+            )
+        )
+
+    cp.pairs = {frozenset({"u-kid", "ru-mallory"})}
+    await move(1)
+    assert svc._app_repo.pending[0].held is None
+    cp.pairs = set()
+    await move(2)
+    assert svc._app_repo.pending[0].held is not None
+    cp.pairs = {frozenset({"u-kid", "ru-mallory"})}
+    assert await svc.take_held(app_id="chess", actor_user_id="u-kid") == []
+
+
+@pytest.mark.asyncio
+async def test_a_blocked_sender_is_not_handed_over():
+    svc, _, _, _ = _mailbox_svc()
+    await _played_remote_game(svc)
+    await _inbound_move(svc, {"n": 1})
+    svc._user_repo._block_pairs = {("u-bob", "ru-carol")}
+    assert await svc.take_held(app_id="chess", actor_user_id="u-bob") == []

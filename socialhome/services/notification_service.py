@@ -51,10 +51,15 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from string import Formatter
 
-from ..domain.apps import PENDING_SESSION_TTL_SECONDS, app_age_allows
+from ..domain.apps import (
+    PENDING_SESSION_TTL_SECONDS,
+    SESSION_INVITED,
+    app_age_allows,
+)
 from ..domain.calendar import RSVPStatus
 from ..domain.conversation import ConversationType, SystemChatScope, mute_active
 from ..domain.events import (
+    AppChallengeDeclined,
     AppChallengeEnded,
     AppChallengeReceived,
     AppInstalled,
@@ -421,6 +426,7 @@ _PUSH_AS_IS: frozenset[str] = frozenset(
         "report_answer",
         "app_challenge",
         "app_added",
+        "app_challenge_declined",
         "bazaar_bid_placed",
         "bazaar_offer_accepted",
         "bazaar_offer_rejected",
@@ -1300,6 +1306,7 @@ class NotificationService(ProtectionGateMixin):
         )
         self._subscribe(AppChallengeEnded, self.on_app_challenge_ended)
         self._subscribe(AppInstalled, self.on_app_installed)
+        self._subscribe(AppChallengeDeclined, self.on_app_challenge_declined)
         # The thing is gone, or you left its space: so are its rows.
         self._subscribe(PostDeleted, self.on_thing_deleted)
         self._subscribe(CommentDeleted, self.on_thing_deleted)
@@ -2744,7 +2751,8 @@ class NotificationService(ProtectionGateMixin):
         if app is None or not app.enabled:
             return "done"
         invite = await self._apps.get_pending_session(app_id, note.user_id, session_id)
-        if invite is None:
+        if invite is None or invite.state != SESSION_INVITED:
+            # Gone, or played: the row stays as the game's mailbox (0131).
             return "done"
         cutoff = datetime.now(UTC) - timedelta(seconds=PENDING_SESSION_TTL_SECONDS)
         if invite.created_at < cutoff.isoformat():
@@ -2805,6 +2813,47 @@ class NotificationService(ProtectionGateMixin):
                 outcome=event.outcome,
                 user_id=event.user_id,
             )
+
+    async def on_app_challenge_declined(self, event: AppChallengeDeclined) -> None:
+        """The person you invited said no — "{name} declined your {app}
+        game" (D11), so the challenger learns it even if they never open
+        the app. A row only, no push: nothing waits on them. Their app
+        hears the close itself (live, or from its mailbox on open)."""
+        recipient = await self._local_user(event.to_user_id)
+        locale = self._locale(recipient)
+        app = await self._apps.get(event.app_id) if self._apps is not None else None
+        app_name = app.name if app is not None and app.name else None
+        if app_name:
+            title = self._t(
+                "notification.app.challenge_declined",
+                locale=locale,
+                fallback="{name} declined your {app} game",
+                name=event.from_display,
+                app=app_name,
+            )
+        else:
+            title = self._t(
+                "notification.app.challenge_declined_generic",
+                locale=locale,
+                fallback="{name} declined your game",
+                name=event.from_display,
+            )
+        await self._save_notif(
+            new_notification(
+                user_id=event.to_user_id,
+                type="app_challenge_declined",
+                title=title,
+                link_url=f"/apps/{event.app_id}",
+            ),
+            about=NotificationSubject.of(
+                NotificationObject.APP_SESSION,
+                f"{event.app_id}/{event.session_id}",
+                space_name=app_name,
+            ),
+            actor_user_id=event.from_user_id,
+            actor_name=event.from_display,
+            push=False,
+        )
 
     async def on_app_challenge_received(
         self,

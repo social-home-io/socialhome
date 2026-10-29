@@ -411,6 +411,33 @@ class AppSessionAcceptView(BaseView):
         )
 
 
+class AppHeldView(BaseView):
+    """``POST /api/apps/{app_id}/held`` — the app opened: hand over what
+    the caller's mailbox kept for it (D11) — the latest undelivered
+    message of each game, oldest first — and clear it. ``kind`` is
+    ``"message"`` (a move) or ``"session"`` (a close: a decline or a
+    withdrawal). A POST: taking them empties the mailbox."""
+
+    async def post(self) -> web.Response:
+        held = await self.svc(app_federation_service_key).take_held(
+            app_id=self.match("app_id"), actor_user_id=self.user.user_id
+        )
+        return self._json(
+            {
+                "messages": [
+                    {
+                        "session_id": h.session_id,
+                        "from_instance": h.from_instance,
+                        "from_user": h.from_user,
+                        "kind": (h.held or {}).get("kind", "message"),
+                        "payload": (h.held or {}).get("payload"),
+                    }
+                    for h in held
+                ]
+            }
+        )
+
+
 class AppMessagesView(BaseView):
     """``POST /api/apps/{app_id}/messages`` — send an app-layer message to a peer."""
 

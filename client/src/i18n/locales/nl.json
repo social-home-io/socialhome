@@ -5520,6 +5520,8 @@
   "notifications.row.app_added_many": "{actors} hebben {space} toegevoegd",
   "notifications.row.app_challenge": "{actor} heeft je uitgenodigd om {space} te spelen",
   "notifications.row.app_challenge_many": "{actors} hebben je uitgenodigd om {space} te spelen",
+  "notifications.row.app_challenge_declined": "{actor} heeft je uitnodiging voor {space} afgewezen",
+  "notifications.row.app_challenge_declined_many": "{actors} hebben je uitnodiging voor {space} afgewezen",
   "notifications.needs_you.title": "Wacht op jou",
   "notifications.needs_you.count": "{n} wachten",
   "notifications.needs_you.count_one": "{n} wacht",

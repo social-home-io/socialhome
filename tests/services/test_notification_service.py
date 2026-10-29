@@ -20,6 +20,7 @@ from socialhome.domain.conversation import (
     SystemChatScope,
 )
 from socialhome.domain.events import (
+    AppChallengeDeclined,
     AppChallengeReceived,
     AppInstalled,
     BazaarBidPlaced,
@@ -4249,3 +4250,49 @@ def test_app_added_is_filed_under_activity():
 
     assert notif_kind("app_added") is NotifKind.ACTIVITY
     assert KIND_DEFAULTS[NotifKind.ACTIVITY] is NotifDelivery.IN_APP
+
+
+# ─── AppChallengeDeclined: "Ben declined your Chess game" (D11) ───────────
+
+
+async def test_a_declined_game_tells_the_challenger_without_a_push(stack):
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    stack.notif_svc.attach_app_repo(_AppRegistry({"chess": "Chess"}))
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    await stack.bus.publish(
+        AppChallengeDeclined(
+            app_id="chess",
+            session_id="s1",
+            to_user_id=a.user_id,
+            from_user_id=b.user_id,
+            from_display="Bob · Familie Okafor",
+        )
+    )
+    (row,) = [
+        n
+        for n in await stack.notif_repo.list(a.user_id, limit=10)
+        if n.type == "app_challenge_declined"
+    ]
+    assert row.title == "Bob · Familie Okafor declined your Chess game"
+    assert row.link_url == "/apps/chess"
+    assert row.params is not None and row.params.space_name == "Chess"
+    # A row only: nothing waits on the challenger.
+    assert push.calls == []
+
+
+async def test_a_declined_game_for_an_unknown_app_reads_generic(stack):
+    stack.notif_svc.attach_app_repo(_AppRegistry({}))
+    a = await stack.provision_user("anna")
+    await stack.bus.publish(
+        AppChallengeDeclined(
+            app_id="gone", session_id="s1", to_user_id=a.user_id, from_display="Bob"
+        )
+    )
+    (row,) = [
+        n
+        for n in await stack.notif_repo.list(a.user_id, limit=10)
+        if n.type == "app_challenge_declined"
+    ]
+    assert row.title == "Bob declined your game"

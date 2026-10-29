@@ -1,0 +1,64 @@
+-- 0131 — Apps mailbox: moves and declines wait for you when the app is
+-- closed or turned off (Apps redesign R3 PR 7, owner decision D11).
+-- Follows 0130.
+--
+-- Until now an inbound app message (a chess move, a decline, a withdrawal)
+-- only went out over WebSocket: if the person's app wasn't open, or the
+-- household had turned the app off, it was lost and the game fell out of
+-- sync for good. The household now keeps the latest undelivered message of
+-- each game for that person until their app opens.
+--
+--   held_json   The latest undelivered frame of the session for this person
+--               (``{"kind": "message"|"session", "payload": {...}}``,
+--               ≤ 64 KiB); NULL when nothing waits. Replaced by a newer
+--               one (latest only), cleared when the app takes it.
+--   state       'invited' — an invite that waits in Needs you (every row
+--               until now); 'active' — a game being played (the invitee
+--               pressed Play, or this person sent the invite / a move).
+--               Rows no longer leave the table on Play.
+--   updated_at  UTC ISO 8601 of the last change (a held message, Play, a
+--               move sent). NULL on rows from before 0131 (reads as
+--               created_at). Active rows are pruned 14 days after it.
+--
+-- CLAUDE.md "audit before a migration":
+--   (1) Audited every path that touches the data. ``app_pending_sessions``
+--       is created by 0025 and only re-touched by 0049's JSON-column list
+--       (payload_json; no shape change). Writers / readers, all in
+--       ``SqliteAppRepo``: ``add_pending_session`` (inbound and local
+--       opens), ``take_pending_session`` (decline / withdraw / Play),
+--       ``get_pending_session`` (NotificationService decides whether a
+--       "Needs you" game row still waits), ``prune_pending_sessions``
+--       (hourly scheduler). ``data_export_service`` / ``backup_service``
+--       dump it with ``SELECT *`` (the new columns ride along). FK cascades
+--       on uninstall (installed_apps) and user deletion are unchanged —
+--       uninstalling an app drops its held messages with it. Nothing about
+--       the table federates.
+--   (2) Non-migration alternatives, rejected:
+--       * a new ``app_mailbox`` table — the same (app, person, session) key,
+--         the same TTL and cascades: a second table for the same rows (the
+--         "existing shape first" rule);
+--       * ``app_kv`` — the app's own quota-accounted key space; the server
+--         writing a move there collides with the app's keys and can't be
+--         told apart from what the app stored;
+--       * notifications — bell rows are not app-readable and are capped /
+--         aged per user, so a move would be lost exactly when it matters;
+--       * holding in memory — a restart or the person opening the app
+--         tomorrow loses it again (the bug this fixes);
+--       * asking the sender to resend — extra federation messages per move
+--         and per re-enable (R2's ``unavailable`` / ``resync``), which D11
+--         rejected.
+--       Reusing ``payload_json`` for the held frame was rejected too: it
+--       holds the invite that Play hands to the app as its launch context,
+--       and the invite must survive a move held before Play.
+--   (3) Smallest change: three added columns. ``held_json`` and
+--       ``updated_at`` are NULL-defaulted; ``state`` defaults to 'invited',
+--       which is exactly what every existing row is (rows were deleted on
+--       Play until now), so nothing is backfilled or rewritten. No index:
+--       every hot read is by the primary key (O(1) per move) or by
+--       (app_id, user_id) — the existing index.
+
+ALTER TABLE app_pending_sessions ADD COLUMN held_json TEXT;
+ALTER TABLE app_pending_sessions
+    ADD COLUMN state TEXT NOT NULL DEFAULT 'invited'
+    CHECK (state IN ('invited', 'active'));
+ALTER TABLE app_pending_sessions ADD COLUMN updated_at TEXT;

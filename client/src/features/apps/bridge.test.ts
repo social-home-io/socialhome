@@ -89,6 +89,16 @@ function captureMessageHandler(): (event: Partial<MessageEvent>) => Promise<void
   }
 }
 
+/** The invite accepts the bridge made (``POST …/sessions/<sid>/accept``). */
+function acceptCalls(): unknown[][] {
+  return mockApiPost.mock.calls.filter(([url]) => String(url).endsWith('/accept'))
+}
+
+/** The mailbox takes the bridge made (``POST …/held``). */
+function heldCalls(): unknown[][] {
+  return mockApiPost.mock.calls.filter(([url]) => String(url).endsWith('/held'))
+}
+
 // ── test suite ─────────────────────────────────────────────────────────────
 
 describe('mountBridge', () => {
@@ -278,7 +288,7 @@ describe('mountBridge', () => {
     const reply = (iframe.contentWindow!.postMessage as ReturnType<typeof vi.fn>).mock.calls[0][0]
     // A ``launch`` key at all: this host opens games from Play (D12).
     expect(reply.result.launch).toEqual({})
-    expect(mockApiPost).not.toHaveBeenCalled()
+    expect(acceptCalls()).toEqual([])
     expect(mockApiGet).not.toHaveBeenCalled()
   })
 
@@ -396,7 +406,7 @@ describe('mountBridge', () => {
     it('accepts only that invite and hands it over as app.context launch', async () => {
       mockApiPost.mockResolvedValueOnce({ session: invite })
       await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 1, method: 'app.context' } })
-      expect(mockApiPost).toHaveBeenCalledTimes(1)
+      expect(acceptCalls()).toHaveLength(1)
       expect(mockApiPost).toHaveBeenCalledWith(`/api/apps/${APP_ID}/sessions/s1/accept`)
       expect(replies()[0].result.launch).toEqual({ sessionId: 's1', invite: asApp })
       // Never the blanket drain.
@@ -410,7 +420,7 @@ describe('mountBridge', () => {
       cleanup()
       cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID, launchSession: 's1' })
       await captureMessageHandler()({ source: iframe.contentWindow as unknown as Window, data: { id: 3, method: 'app.context' } })
-      expect(mockApiPost).toHaveBeenCalledTimes(1)
+      expect(acceptCalls()).toHaveLength(1)
       expect(replies().map(r => r.result)).toEqual([
         { appId: APP_ID, selfUserId: USER_ID, launch: { sessionId: 's1', invite: asApp } },
         [invite],
@@ -430,6 +440,54 @@ describe('mountBridge', () => {
       await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 44, method: 'app.pendingSessions' } })
       expect(replies()[0]).toMatchObject({ id: 44, ok: true, result: [invite] })
       expect(mockApiGet).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('held messages (the mailbox, D11)', () => {
+    const rows = [
+      { session_id: 'g1', from_instance: 'peer', from_user: 'alice', kind: 'message', payload: { san: 'Nf3' } },
+      { session_id: 'g2', from_instance: 'peer', from_user: null, kind: 'session', payload: { verb: 'close', reason: 'declined' } },
+    ]
+    const events = [
+      { kind: 'message', sessionId: 'g1', fromInstance: 'peer', fromUser: 'alice', payload: { san: 'Nf3' } },
+      { kind: 'session', sessionId: 'g2', fromInstance: 'peer', fromUser: undefined, payload: { verb: 'close', reason: 'declined' } },
+    ]
+    const posted = () => (iframe.contentWindow!.postMessage as ReturnType<typeof vi.fn>).mock.calls
+      .map(([m]) => m as Record<string, unknown>)
+
+    it('an app that does not pull gets them as live events right after app.context (older SDKs)', async () => {
+      mockApiPost.mockResolvedValueOnce({ messages: rows })
+      const handler = captureMessageHandler()
+      await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 1, method: 'app.context' } })
+      expect(heldCalls()).toEqual([[`/api/apps/${APP_ID}/held`]])
+      const out = posted()
+      expect(out[0]).toMatchObject({ id: 1, ok: true })
+      expect(out.slice(1)).toEqual(events.map(e => ({ type: 'app:event', ...e })))
+      // Once per frame: a second app.context takes nothing more.
+      await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 2, method: 'app.context' } })
+      expect(heldCalls()).toHaveLength(1)
+      expect(posted()).toHaveLength(4)
+    })
+
+    it('an app that pulls (SDK ≥ 1.3) gets nothing pushed and asks with app.held', async () => {
+      const handler = captureMessageHandler()
+      await handler({
+        source: iframe.contentWindow as unknown as Window,
+        data: { id: 1, method: 'app.context', params: { held: 'pull' } },
+      })
+      expect(heldCalls()).toEqual([])
+      expect(posted()).toHaveLength(1)
+      mockApiPost.mockResolvedValueOnce({ messages: rows })
+      await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 2, method: 'app.held' } })
+      expect(posted()[1]).toEqual({ id: 2, ok: true, result: events })
+      expect(heldCalls()).toHaveLength(1)
+    })
+
+    it('a failed take hands over nothing (what waits stays for the next open)', async () => {
+      mockApiPost.mockRejectedValueOnce(new ApiError(500, 'x'))
+      const handler = captureMessageHandler()
+      await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 1, method: 'app.held' } })
+      expect(posted()[0]).toEqual({ id: 1, ok: true, result: [] })
     })
   })
 

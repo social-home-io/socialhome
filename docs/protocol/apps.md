@@ -93,9 +93,9 @@ sequenceDiagram
 
 | End | How | Row outcome | The other side hears |
 |---|---|---|---|
-| Played | The invitee taps **Play** in Needs you: `POST /api/apps/{id}/sessions/{sid}/accept` takes in that one invite (the app gets it as its [launch context](#launch-context)); or the invitee sends a message in that session (an app that seated the live invite itself). Opening the app accepts nothing | `accepted` | — (the game goes on) |
-| Declined | `POST /api/apps/{id}/sessions/{sid}/decline` (Needs you's Decline, after its 5-s undo) | `declined` | `APP_SESSION {verb: "close", reason: "declined"}` to the challenger (v_18+, best effort) |
-| Withdrawn | The challenger's `POST …/sessions/{sid}/cancel` sends `APP_SESSION {verb: "close", reason: "withdrawn"}`; the invitee's household drops the invite only when the close comes from the household **and** person that opened it | `withdrawn` | — |
+| Played | The invitee taps **Play** in Needs you: `POST /api/apps/{id}/sessions/{sid}/accept` takes in that one invite (the app gets it as its [launch context](#launch-context)); or the invitee sends a message in that session (an app that seated the live invite itself). Opening the app accepts nothing. The row stays, now `active`: it is the game's [mailbox](#mailbox) | `accepted` | — (the game goes on) |
+| Declined | `POST /api/apps/{id}/sessions/{sid}/decline` (Needs you's Decline, after its 5-s undo) | `declined` | `APP_SESSION {verb: "close", reason: "declined"}` to the challenger (v_18+, best effort). Their household keeps it in the challenger's [mailbox](#mailbox) and gives them a bell row, "Ben declined your Chess game" (`app_challenge_declined`, no push) |
+| Withdrawn | The challenger's `POST …/sessions/{sid}/cancel` sends `APP_SESSION {verb: "close", reason: "withdrawn"}`; the invitee's household drops the invite only when the close comes from the household **and** person that opened it. If the invitee already pressed Play, the close waits in their [mailbox](#mailbox) instead, so their app clears the game when it opens | `withdrawn` | — |
 | Expired | 14 days (`PENDING_SESSION_TTL_SECONDS`): no longer replayed, pruned hourly; "Needs you" reads it as expired on the next look | `expired` | — |
 
 No new event type or field the older side can't ignore: a household before this change passes the `close` through to the app as before and keeps its invite until it is played or expires. One decline or withdrawal is one `APP_SESSION` (≈ 200 bytes) to one household — never a fan-out.
@@ -113,6 +113,77 @@ No new event type or field the older side can't ignore: a household before this 
 A new Play while the app is open starts a fresh frame for that game. **Backward compatibility:** the presence of `launch` tells an app that the host works this way; a host from before this change leaves it out and the app keeps its old behaviour (drain `app.pendingSessions`, seat live invites). An app from before this change never reads `launch`: its `app.pendingSessions` call is answered with the launch invite alone (`[]` without Play) — the host never hands out every waiting invite — and a live invite it seats itself is accepted by the invitee's first message in that session. Live `open` frames still reach an open app as news, but accept nothing.
 
 The SDK (`@socialhome/app-sdk` ≥ 1.2) types this as `AppContext.launch?: LaunchContext`. A local open is delivered to the invitee only — never echoed to the challenger, whose app has the session id from `openSession` (the echo raced that reply and read as an invite from themselves).
+
+### Mailbox
+
+**Moves and declines wait for you when the app is closed or turned off (D11).**
+An app message only ever went out as a live `app.message` WebSocket frame: if
+the person's app wasn't open, or the household had turned the app off, the
+move, decline or withdrawal was lost and the game fell out of sync for good.
+Now the receiving household keeps, per person and per game it knows, the
+**latest** message from the other side that their app hasn't taken yet — in
+`app_pending_sessions.held_json` (migration 0131) — and hands it over when the
+app next opens.
+
+- **Which sessions are known.** One row per (app, person, session):
+  `invited` while an invite waits in Needs you, `active` once it is played
+  (Play, or the invitee's first message), for the challenger from the moment
+  they open the session, and — for a game from before this change — from the
+  person's first move in it. `from_instance` / `from_user` name the other side.
+- **What is kept.** An inbound `APP_MESSAGE` / binary frame (`kind:
+  "message"`) or `APP_SESSION {verb: "close"}` (`kind: "session"`) addressed to
+  one person, after every receiver rule below has passed (signature, addressee,
+  named initiator, personal and guardian blocks, age gate) — and only when the
+  session is known for that person **and** its other side is exactly the
+  sending household and person. One primary-key update, replacing what was
+  held. A message for any other session (or from anyone else) is never kept;
+  it still goes out live as before when the app is on. Held messages are
+  ≤ 64 KiB (a larger one goes out live only) — live messages stay ≤ 256 KiB.
+- **Closed or turned off.** The server can't see whether a tab has the app
+  mounted, so it keeps the latest message whether or not it also went out
+  live; an app may receive on open a message it already saw live and dedupes
+  (chess by move-history length). While the app is turned off nothing goes out
+  live and the message is still kept; an invite to a turned-off app is still
+  dropped, and so is anything for the whole household (older senders).
+  Uninstalling drops the mailbox with the rows (FK cascade).
+- **Handing over.** `POST /api/apps/{id}/held` returns
+  `{messages: [{session_id, from_instance, from_user, kind, payload}]}`,
+  oldest change first, and clears them (a message held again meanwhile stays
+  for the next open). One from someone the person blocked, or a guardian
+  block now separates them from, is dropped. The SPA bridge takes it once per
+  frame, after the app's first `app.context`, and posts each one into the
+  iframe as an ordinary `app:event` — so apps on SDK ≤ 1.2 get them through
+  their existing `onMessage` / `onSession` handlers. An app on SDK ≥ 1.3 can
+  instead call `app.context` with params `{held: "pull"}` and fetch them with
+  `app.held` (`sh.federation.held()`) once its own state is loaded; nothing is
+  pushed then.
+- **Decline bell row.** A held decline (`{verb: "close", reason:
+  "declined"}`) also publishes `AppChallengeDeclined`: the challenger gets a
+  bell row "Ben declined your Chess game" (`app_challenge_declined`, About you,
+  no push), so they learn it even if they never open the app.
+- **SDK contract.** *A closed app receives only the latest message of each
+  session.* Send state, not deltas (chess sends the whole game with every
+  move), or resync from your own store on open.
+- **Bounds.** 1 held message per (app, person, session), ≤ 64 KiB; ≤ 50
+  sessions per (app, person) (the oldest go). Rows quiet for 14 days are
+  pruned hourly. Worst case 50 × 64 KiB = 3.2 MB per person per app; chess in
+  practice ~3 KB × a handful of games.
+- **Per move.** Sending in a known game costs one primary-key read of the
+  sender's session row plus the block checks — no scan of every contact
+  (it was one `list_contacts` per move: every local and remote user plus the
+  block list) — and `POST /api/apps/{id}/messages` has its own rate-limit
+  bucket (300 / min / user). The sender's row's TTL moves on at most hourly.
+
+**Traffic math: zero new federation messages.** The mailbox only keeps what
+was already sent: a move is still 1 `APP_MESSAGE` (or binary frame) to 1
+household, a decline / withdrawal still 1 `APP_SESSION` ≈ 200 B to 1
+household. Nothing is re-sent on open, on re-enable, or to say "the app is
+off" (the rejected R2 design answered every move to a turned-off app — up to
+1,440 per game a day — and resent the full state of every game on re-enable).
+Worst realistic case, a household of 6 people with 15 games each
+and the app off for a week: 0 extra envelopes; on the receiving side ≤ 90 rows
+× ≤ 64 KiB on disk. No new event type or field, no capability bump: an older
+household sends and receives exactly what it did, it just doesn't hold.
 
 **Challenge notification (v_18+):** when an inbound `APP_SESSION {verb:"open"}` resolves to a single local recipient via `to_user`, an `AppChallengeReceived` domain event is published. The `NotificationService` subscriber seats a bell row and fires a title-only push notification (§25.3) for the addressed user. Idempotent on `session_id` — a double federation delivery (WebRTC + HTTPS fallback) does not produce two notifications.
 
@@ -289,6 +360,11 @@ error.
 - A `close` withdraws a pending invite only when it comes from the
   household and person that opened it; anyone else naming the session
   changes nothing.
+- The [mailbox](#mailbox) keeps a message only for a session this
+  household knows for the addressee and only from that session's other
+  side (household and person); a "declined" close rings the challenger's
+  bell only from the person they invited. Nothing for a guardian-blocked or
+  blocked sender is kept or handed over.
 - User-visible effect: an invite from a household user this household
   hasn't synced (or one hidden from it) is not shown.
 
@@ -299,7 +375,10 @@ error.
 - `socialhome/services/app_federation_service.py` — `AppFederationService`:
   `list_contacts`, `open_session`, `send_message`, `on_inbound_event`,
   `on_inbound_message`, `_deliver`, `_assert_target_allowed`,
-  `_seen_open_session` (idempotency guard).
+  `_assert_person_allowed` (the per-move check in a known game),
+  `_hold` / `take_held` (the mailbox), `_seen_open_session` (idempotency guard).
+- `socialhome/repositories/app_repo.py` — `hold_message`, `take_held`,
+  `activate_pending_session`, `add_active_session` on `app_pending_sessions`.
 - `socialhome/federation/app_framing.py` — binary frame encode/decode,
   `APP_AEAD_SUITE_AESGCM_256`, `SUPPORTED_APP_AEAD_SUITES`,
   `UnsupportedAppAeadSuite`, `CHANNEL_LABEL = "fed-app-v1"`.
@@ -315,7 +394,8 @@ error.
 - `socialhome/routes/apps.py` — REST endpoints: `GET /api/apps/{app_id}/peers`,
   `GET /api/apps/{app_id}/contacts`, `POST /api/apps/{app_id}/sessions`
   (accepts `target` body; `peer_instance_id` is back-compat),
-  `POST /api/apps/{app_id}/messages` (same `target` shape).
+  `POST /api/apps/{app_id}/messages` (same `target` shape),
+  `POST /api/apps/{app_id}/held` (the mailbox).
 - `attach_apps` in `socialhome/app.py` — registers `APP_SESSION` /
   `APP_MESSAGE` handlers in the event registry and opens the `fed-app-v1`
   DataChannel on the `PeerConnection`.

@@ -147,13 +147,17 @@ async def _pending(db) -> list[tuple]:
     return [tuple(r) for r in rows]
 
 
-async def _open(app, *, sender, from_user, session_id="sess-1", verb="open") -> None:
+async def _open(
+    app, *, sender, from_user, session_id="sess-1", verb="open", reason=None
+) -> None:
     payload = {
         "app_id": "chess",
         "session_id": session_id,
         "verb": verb,
         "to_user": "bob",
     }
+    if reason is not None:
+        payload["reason"] = reason
     if from_user is not None:
         payload["from_user"] = from_user
     handlers = app[federation_service_key]._event_registry.handlers_for(FET.APP_SESSION)
@@ -306,3 +310,77 @@ async def test_a_protected_minor_cannot_open_or_message_a_guardian_blocked_user(
             payload={},
             actor_user_id="u-bob",
         )
+
+
+# ─── The mailbox (D11): only a session's other side fills it ─────────────
+
+
+async def _held(db) -> list[tuple]:
+    rows = await db.fetchall(
+        "SELECT session_id, user_id, held_json FROM app_pending_sessions"
+        " WHERE held_json IS NOT NULL ORDER BY 1",
+        (),
+    )
+    return [tuple(r) for r in rows]
+
+
+async def _bells(db, ntype: str) -> int:
+    return int(
+        await db.fetchval(
+            "SELECT COUNT(*) FROM notifications WHERE type = ?", (ntype,), default=0
+        )
+    )
+
+
+async def test_only_the_other_side_of_a_known_session_fills_the_mailbox(env):
+    """A message is kept for a closed app only in a session this household
+    knows for the addressee, and only from the household and person on
+    its other side — another household (or another person) naming the
+    session id, or a made-up session, stores nothing."""
+    app, db = env
+    await _open(app, sender=PEER, from_user="alice")
+    await _message(app, sender=OTHER, from_user="eve", to_user="bob")
+    await _message(app, sender=PEER, from_user="alice", to_user="bob", session_id="x")
+    assert await _held(db) == []
+    await _message(app, sender=PEER, from_user="alice", to_user="bob")
+    assert [(s, u) for s, u, _ in await _held(db)] == [("sess-1", "u-bob")]
+
+
+async def test_another_household_cannot_fake_a_decline(env):
+    """A decline rings the challenger's bell only from the person they
+    invited: anyone else's "declined" close is neither kept nor shown."""
+    app, db = env
+    sid = await app[app_federation_service_key].open_session(
+        app_id="chess",
+        target={"instance_id": PEER, "user_ref": "alice", "is_local": False},
+        actor_user_id="u-bob",
+    )
+    for sender, user in ((OTHER, "eve"), (OTHER, "alice"), (PEER, "eve")):
+        await _open(
+            app,
+            sender=sender,
+            from_user=user,
+            session_id=sid,
+            verb="close",
+            reason="declined",
+        )
+    assert await _held(db) == []
+    assert await _bells(db, "app_challenge_declined") == 0
+    # The person Bob invited: kept for his app.
+    await _open(
+        app,
+        sender=PEER,
+        from_user="alice",
+        session_id=sid,
+        verb="close",
+        reason="declined",
+    )
+    assert [(s, u) for s, u, _ in await _held(db)] == [(sid, "u-bob")]
+
+
+async def test_a_guardian_blocked_sender_never_fills_the_mailbox(env):
+    app, db = env
+    await _open(app, sender=PEER, from_user="alice")
+    await _guardian_block_bob_from_alice(db)
+    await _message(app, sender=PEER, from_user="alice", to_user="bob")
+    assert await _held(db) == []

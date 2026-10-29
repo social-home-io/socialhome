@@ -1884,3 +1884,121 @@ async def test_cancel_needs_a_target(client):
     )
     assert r.status == 400
     assert (await r.json())["error"]["code"] == "UNPROCESSABLE"
+
+
+# ── POST /api/apps/{app_id}/held — the mailbox (D11) ─────────────────────
+
+
+async def test_held_requires_auth(client):
+    r = await client.post("/api/apps/com.example.hello/held")
+    assert r.status == 401
+
+
+async def test_held_hands_over_the_callers_mailbox(client, fed_svc):
+    """The mailbox is the authed user's — never a request param."""
+    fed_svc.take_held.return_value = [
+        AppPendingSession(
+            app_id="com.example.hello",
+            user_id=client._uid,
+            session_id="sess-1",
+            from_instance="peer.example.com",
+            from_user="alice",
+            payload={"verb": "open"},
+            created_at="2026-06-04T12:00:00+00:00",
+            state="active",
+            held={"kind": "session", "payload": {"verb": "close", "reason": "x"}},
+        )
+    ]
+    r = await client.post(
+        "/api/apps/com.example.hello/held", headers=_auth(client._tok)
+    )
+    assert r.status == 200
+    assert await r.json() == {
+        "messages": [
+            {
+                "session_id": "sess-1",
+                "from_instance": "peer.example.com",
+                "from_user": "alice",
+                "kind": "session",
+                "payload": {"verb": "close", "reason": "x"},
+            }
+        ]
+    }
+    fed_svc.take_held.assert_awaited_once_with(
+        app_id="com.example.hello", actor_user_id=client._uid
+    )
+
+
+async def test_held_for_a_turned_off_app_is_403(client, fed_svc):
+    fed_svc.take_held.side_effect = AppNotEnabledError("com.example.hello")
+    r = await client.post(
+        "/api/apps/com.example.hello/held", headers=_auth(client._tok)
+    )
+    assert r.status == 403
+
+
+async def _held(client, tok: str) -> list[dict]:
+    r = await client.post("/api/apps/com.example.hello/held", headers=_auth(tok))
+    assert r.status == 200
+    return (await r.json())["messages"]
+
+
+async def test_a_move_waits_for_a_closed_app_and_arrives_once(client):
+    """L#1 on one household: the admin moves while Carol's app is closed —
+    her next open gets the latest move, the one after gets nothing."""
+    carol_tok, session_id, target = await _challenge_carol(client)
+    r = await client.post(
+        f"/api/apps/com.example.hello/sessions/{session_id}/accept",
+        headers=_auth(carol_tok),
+    )
+    assert r.status == 200
+    for san in ("e4", "Nf3"):
+        r = await client.post(
+            "/api/apps/com.example.hello/messages",
+            json={"session_id": session_id, "target": target, "payload": {"san": san}},
+            headers=_auth(client._tok),
+        )
+        assert r.status == 200
+    (msg,) = await _held(client, carol_tok)
+    assert msg["session_id"] == session_id
+    assert msg["kind"] == "message"
+    assert msg["payload"] == {"san": "Nf3"}
+    assert msg["from_user"] == client._uid
+    assert await _held(client, carol_tok) == []
+
+
+async def test_a_decline_waits_for_the_challenger_with_a_bell_row(client):
+    """L#2 on one household: Carol declines while the admin's app is
+    closed — a bell row, and the close waits for the admin's app."""
+    carol_tok, session_id, _ = await _challenge_carol(client)
+    r = await client.post(
+        f"/api/apps/com.example.hello/sessions/{session_id}/decline",
+        headers=_auth(carol_tok),
+    )
+    assert r.status == 200
+    await client.app[notification_delivery_key].drain()
+    rows = await (
+        await client.get("/api/notifications", headers=_auth(client._tok))
+    ).json()
+    (row,) = [n for n in rows if n["type"] == "app_challenge_declined"]
+    assert row["object_key"] == f"app_session:com.example.hello/{session_id}"
+    assert row["link_url"] == "/apps/com.example.hello"
+    (msg,) = await _held(client, client._tok)
+    assert msg["kind"] == "session"
+    assert msg["payload"]["reason"] == "declined"
+
+
+async def test_app_messages_have_their_own_rate_limit_bucket(client):
+    """C#31: a quick game's moves no longer share the 60/min ``/api/apps``
+    bucket with the store writes around them."""
+    _carol_tok, session_id, target = await _challenge_carol(client)
+    body = {"session_id": session_id, "target": target, "payload": {"san": "e4"}}
+    for _ in range(70):
+        r = await client.post(
+            "/api/apps/com.example.hello/messages",
+            json=body,
+            headers=_auth(client._tok),
+        )
+        assert r.status == 200
+    r = await client.get("/api/apps", headers=_auth(client._tok))
+    assert r.status == 200
