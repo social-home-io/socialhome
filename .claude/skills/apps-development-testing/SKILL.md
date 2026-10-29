@@ -31,14 +31,16 @@ apps/<app_id>/
 
 ```ts
 import { sh } from '@socialhome/app-sdk'        // null outside a browser; non-null in the iframe
-await sh.context()                               // { appId, selfUserId }  (no token)
+await sh.context()                               // { appId, selfUserId, launch? }  (no token)
 await sh.store.get/set/delete/list(...)          // per-user KV (cleared on uninstall)
 await sh.peers()                                 // [{ instance_id, display_name }] confirmed households
 await sh.federation.openSession(peerInstanceId)  // -> sessionId; peer gets an onSession event
 await sh.federation.send(sessionId, peerInstanceId, payload)
 sh.onMessage(({ sessionId, fromInstance, payload }) => {...})  // in-game messages
-sh.onSession(({ sessionId, fromInstance, payload }) => {...})  // incoming invites
+sh.onSession(({ sessionId, fromInstance, payload }) => {...})  // live invites (news only) + closes
 ```
+
+**Invites are played from Social Home, not the app (D12).** An invite waits in the person's "Needs you"; **Play** opens `/apps/<id>?session=<sid>`, the host accepts that one invite and `sh.context()` returns `launch: { sessionId, invite? }` — start/open that game. Opened any other way, `launch` is `{}` and nothing is accepted. `launch` missing entirely = an older host: fall back to `federation.pendingSessions()` + seating live invites. Two-household check: invite twice, Play the first from Needs you → the app opens that game, and the second invite is still in Needs you. See `docs/protocol/apps.md#launch-context`.
 Route inbound by `sessionId` (supports many concurrent games) and identify the sender by `fromInstance`. The host relays a backend `app.message` WS frame into the iframe; outbound goes over the dedicated `fed-app-v1` channel with an `APP_MESSAGE`/HTTPS fallback.
 
 **The host shows the frame only once the app speaks.** `AppHost` keeps the iframe invisible until the app's first bridge request (`app.ready`, or any RPC such as `sh.context()`): after 8 s it says "taking longer than usual" (Try again), and it gives up with "didn't start" after 20 s, or 5 s after the frame's `load` event if the app never asked anything (a bundle error page, a script that crashed). So call `sh.context()` (or post `{id, method: 'app.ready'}`) as soon as the script runs — an app that does its first RPC late shows a spinner meanwhile.

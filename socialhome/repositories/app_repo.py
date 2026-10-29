@@ -52,13 +52,6 @@ class AbstractAppRepo(Protocol):
     async def kv_delete(self, app_id: str, user_id: str, key: str) -> None: ...
     async def kv_count(self, app_id: str, user_id: str) -> int: ...
     async def add_pending_session(self, s: AppPendingSession) -> None: ...
-    async def drain_pending_sessions(
-        self,
-        app_id: str,
-        user_id: str,
-        *,
-        max_age_seconds: int = _PENDING_SESSION_TTL_SECONDS,
-    ) -> list[AppPendingSession]: ...
     async def prune_pending_sessions(
         self, *, max_age_seconds: int = _PENDING_SESSION_TTL_SECONDS
     ) -> int: ...
@@ -294,35 +287,6 @@ class SqliteAppRepo:
                 )""",
             (s.app_id, s.user_id, _PENDING_SESSION_MAX_PER_PAIR),
         )
-
-    async def drain_pending_sessions(
-        self,
-        app_id: str,
-        user_id: str,
-        *,
-        max_age_seconds: int = _PENDING_SESSION_TTL_SECONDS,
-    ) -> list[AppPendingSession]:
-        # Invariant: callers MUST store ``created_at`` as
-        # ``datetime.now(timezone.utc).isoformat()`` (tz-aware, e.g.
-        # ``…+00:00``). The TTL filter compares ISO strings lexically, which
-        # is only valid when both sides share that shape — a naive
-        # ``datetime('now')`` value (space separator) would sort below the
-        # cutoff and silently drain to nothing. ``add_pending_session`` writes
-        # the matching shape; keep it that way.
-        cutoff = (datetime.now(UTC) - timedelta(seconds=max_age_seconds)).isoformat()
-        rows = await self._db.fetchall(
-            """SELECT * FROM app_pending_sessions
-               WHERE app_id = ? AND user_id = ? AND created_at >= ?
-               ORDER BY created_at ASC""",
-            (app_id, user_id, cutoff),
-        )
-        # Drain everything for the pair — both the fresh rows we return and any
-        # expired ones — in one delete.
-        await self._db.enqueue(
-            "DELETE FROM app_pending_sessions WHERE app_id = ? AND user_id = ?",
-            (app_id, user_id),
-        )
-        return [_row_to_pending(r) for r in rows]
 
     async def prune_pending_sessions(
         self, *, max_age_seconds: int = _PENDING_SESSION_TTL_SECONDS

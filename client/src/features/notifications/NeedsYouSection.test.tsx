@@ -210,7 +210,7 @@ describe('NeedsYouSection', () => {
     expect(r.container.querySelector('.sh-needs--compact')).not.toBeNull()
   })
 
-  it('a game invite offers Play (the app) and Decline', async () => {
+  it('a game invite offers Play (that game) and Decline', async () => {
     const inv = row('g', {
       type: 'app_challenge',
       object_key: 'app_session:chess/s1',
@@ -218,7 +218,8 @@ describe('NeedsYouSection', () => {
       link_url: '/apps/chess',
     })
     const { getByRole, queryByRole } = await mount([inv])
-    expect(getByRole('link', { name: 'Play' }).getAttribute('href')).toBe('/apps/chess')
+    // Play opens the game it is on, not the app's lobby (D12).
+    expect(getByRole('link', { name: 'Play' }).getAttribute('href')).toBe('/apps/chess?session=s1')
     expect(getByRole('button', { name: 'Decline' })).toBeTruthy()
     expect(queryByRole('link', { name: 'Review' })).toBeNull()
   })

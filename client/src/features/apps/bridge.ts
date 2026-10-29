@@ -7,7 +7,20 @@
  *   (``"null"``), so origin-checking is unreliable. Any event whose
  *   source is not our iframe is silently dropped.
  * - The bearer token MUST NEVER be included in any reply. The app
- *   receives only its own data and context (appId, selfUserId).
+ *   receives only its own data and context (appId, selfUserId, launch).
+ *
+ * Launch context (D12, "Play opens the game you were invited to"): the
+ * host opens an app as ``/apps/<id>?session=<sid>`` from "Play" in Needs
+ * you. The bridge then takes in exactly that invite (``POST …/sessions/
+ * <sid>/accept``) the first time the app asks for its context, and hands
+ * it over as ``app.context``'s ``launch`` — ``{sessionId, invite?}``;
+ * ``invite`` is missing when the invite no longer waits (declined on
+ * another device, withdrawn, expired). Opened without ``?session=``,
+ * ``launch`` is ``{}``: nothing is accepted, invites stay in Needs you.
+ * A ``launch`` key at all tells the app this host works this way (older
+ * hosts leave it out). Apps from before launch contexts call
+ * ``app.pendingSessions`` instead: it answers with the launch invite
+ * alone (``[]`` without one) — never every waiting invite.
  * - Replies use target origin ``'*'`` because the iframe's opaque origin
  *   means a specific origin target would always miss.
  */
@@ -18,6 +31,9 @@ import { ws, WsEvent } from '@/ws'
 export interface BridgeContext {
   appId: string
   selfUserId: string
+  /** ``?session=`` the app was opened with ("Play" in Needs you): the
+   *  one invite to take in and hand to the app. */
+  launchSession?: string
   /** Called once, on the app's first bridge request: the app's code runs
    *  and talks to the host — it started. An SDK that posts ``app.ready``
    *  says so explicitly; older ones send ``app.context`` / ``store.*``
@@ -51,12 +67,60 @@ interface RpcErrReply {
 
 type RpcReply = RpcOkReply | RpcErrReply
 
-/** One waiting invite, as ``GET /api/apps/{id}/pending-sessions`` lists it. */
+/** One game invite, as ``POST /api/apps/{id}/sessions/{sid}/accept``
+ *  returns it. */
 interface PendingSession {
   session_id: string
   from_instance: string
   from_user: string | null
   payload: unknown
+}
+
+/** An invite as the app receives it (the SDK's ``AppMessage``). */
+interface AppInvite {
+  sessionId: string
+  fromInstance: string
+  fromUser?: string
+  payload: unknown
+}
+
+/** What ``app.context`` says about why the app was opened. */
+export interface LaunchContext {
+  sessionId?: string
+  invite?: AppInvite
+}
+
+/** Accepts already made, by ``<appId>/<sessionId>``: a retry or a new
+ *  frame for the same Play hands over the same invite instead of asking
+ *  again (the server would answer 409 — it was taken in). */
+const accepted = new Map<string, Promise<AppInvite | null>>()
+
+/** Take in the one invite *sessionId* (once per page). ``null`` when it no
+ *  longer waits — the app then opens that game if it knows it. */
+function acceptOnce(appId: string, sessionId: string): Promise<AppInvite | null> {
+  const key = `${appId}/${sessionId}`
+  let p = accepted.get(key)
+  if (!p) {
+    p = api.post<{ session: PendingSession }>(
+      `/api/apps/${encodeURIComponent(appId)}/sessions/${encodeURIComponent(sessionId)}/accept`,
+    ).then(({ session: s }) => ({
+      sessionId: s.session_id,
+      fromInstance: s.from_instance,
+      fromUser: s.from_user ?? undefined,
+      payload: s.payload,
+    }), () => {
+      // Not cached: a network failure may succeed on Try again.
+      accepted.delete(key)
+      return null
+    })
+    accepted.set(key, p)
+  }
+  return p
+}
+
+/** Tests only. */
+export function _resetAcceptedForTests(): void {
+  accepted.clear()
 }
 
 /**
@@ -70,7 +134,14 @@ export function mountBridge(
   iframe: HTMLIFrameElement,
   ctx: BridgeContext,
 ): () => void {
-  const { appId } = ctx
+  const { appId, launchSession } = ctx
+
+  /** The launch context: the one invite "Play" opened the app for. */
+  async function launch(): Promise<LaunchContext> {
+    if (!launchSession) return {}
+    const invite = await acceptOnce(appId, launchSession)
+    return invite ? { sessionId: launchSession, invite } : { sessionId: launchSession }
+  }
 
   function reply(r: RpcReply): void {
     iframe.contentWindow?.postMessage(r, '*')
@@ -129,7 +200,11 @@ export function mountBridge(
         case 'app.context': {
           // NEVER include a token — the app runs in a sandboxed iframe
           // and must not gain host credentials.
-          reply({ id, ok: true, result: { appId: ctx.appId, selfUserId: ctx.selfUserId } })
+          reply({
+            id,
+            ok: true,
+            result: { appId: ctx.appId, selfUserId: ctx.selfUserId, launch: await launch() },
+          })
           break
         }
 
@@ -161,10 +236,21 @@ export function mountBridge(
         }
 
         case 'app.pendingSessions': {
-          const resp = await api.get<{ sessions: unknown[] }>(
-            `/api/apps/${encodeURIComponent(appId)}/pending-sessions`,
-          )
-          reply({ id, ok: true, result: resp.sessions })
+          // An app from before launch contexts: only the invite "Play"
+          // opened it for — opening the app accepts nothing else.
+          const { invite } = await launch()
+          reply({
+            id,
+            ok: true,
+            result: invite
+              ? [{
+                  session_id: invite.sessionId,
+                  from_instance: invite.fromInstance,
+                  from_user: invite.fromUser ?? null,
+                  payload: invite.payload,
+                }]
+              : [],
+          })
           break
         }
 
@@ -223,38 +309,6 @@ export function mountBridge(
     handleRpc(req as RpcRequest)
   }
 
-  /** Invites this mount already handed the app live (no second copy). */
-  const relayed = new Set<string>()
-
-  /**
-   * A game invite reached the app while it is open: the app has it, so
-   * the host takes the waiting invites in (the drain the app does on start)
-   * — its "Needs you" item reads as accepted — and hands the app any it
-   * hasn't seen yet. Best effort: the app drains again on its next start.
-   */
-  async function takeInvitesIn(): Promise<void> {
-    try {
-      const resp = await api.get<{ sessions?: PendingSession[] }>(
-        `/api/apps/${encodeURIComponent(appId)}/pending-sessions`,
-      )
-      for (const s of resp?.sessions ?? []) {
-        if (relayed.has(s.session_id)) continue
-        relayed.add(s.session_id)
-        iframe.contentWindow?.postMessage(
-          {
-            type: 'app:event',
-            kind: 'session',
-            sessionId: s.session_id,
-            fromInstance: s.from_instance,
-            fromUser: s.from_user ?? undefined,
-            payload: s.payload,
-          },
-          '*',
-        )
-      }
-    } catch { /* the app's own drain on its next start picks them up */ }
-  }
-
   // WS relay: push app-specific real-time frames into the iframe.
   // Forwards the full identity so multi-game / multi-friend apps can route
   // a message to the right session and distinguish invites from in-game moves.
@@ -271,11 +325,7 @@ export function mountBridge(
         },
         '*',
       )
-      const payload = evt.data.payload as { verb?: unknown } | undefined
-      if (evt.data.kind === 'session' && payload?.verb === 'open') {
-        relayed.add(String(evt.data.session_id))
-        void takeInvitesIn()
-      }
+      // A live invite is only news: it waits in Needs you until "Play".
     }
   })
 

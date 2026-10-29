@@ -38,6 +38,7 @@ import {
   loadNeedsYou,
   needsYou,
   needsYouEntries,
+  playHref,
   reviewHref,
   type NeedsYouEntry,
 } from './needsYou'
@@ -113,7 +114,7 @@ function Actions({ entry, describedBy, onNavigate }: {
       <div class="sh-needs__actions">
         <a
           class="sh-btn sh-btn--primary"
-          href={appHref(row.link_url || '/apps')}
+          href={appHref(playHref(row))}
           aria-describedby={describedBy}
           onClick={() => { void markRowRead(row).catch(() => {}); onNavigate?.() }}
         >

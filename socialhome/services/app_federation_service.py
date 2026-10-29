@@ -33,8 +33,10 @@ older sender) it falls back to the household fan-out and the app's
 ``session_id`` scopes the semantics for the SPA.
 
 Game invites: an open addressed to one person is kept for them
-(``app_pending_sessions``, local and remote opens alike) until the app takes
-it in (:meth:`drain_pending_sessions` — "accepted"), the invitee declines it
+(``app_pending_sessions``, local and remote opens alike) until the invitee
+plays it (:meth:`accept_session` — "Play" in "Needs you",
+one invite at a time; or a message they send in that session — "accepted";
+opening the app accepts nothing), the invitee declines it
 (:meth:`decline_session`), the challenger withdraws it
 (:meth:`cancel_session`, or an inbound ``APP_SESSION {verb:"close"}`` from
 the household and person that opened it) or it expires
@@ -62,11 +64,12 @@ from __future__ import annotations
 
 import logging
 from collections import OrderedDict
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from ..domain.apps import (
+    PENDING_SESSION_TTL_SECONDS,
     AppAgeRestrictedError,
     AppChallengeHandledError,
     AppContactNotFoundError,
@@ -302,8 +305,8 @@ class AppFederationService(ProtectionGateMixin):
 
         * ``is_local`` — the target lives on this household; ``user_ref`` is
           a local ``user_id``.  We deliver the ``kind="session"`` open frame
-          straight to the target *and* the initiator over WebSocket — no
-          federation send, no fan-out to every local user.
+          straight to the target over WebSocket — no federation send, no
+          fan-out to every local user, no echo to the initiator.
         * remote — ``instance_id`` is the target household and ``user_ref``
           is the target's remote username on that household.  We send an
           ``APP_SESSION`` event there.
@@ -333,10 +336,11 @@ class AppFederationService(ProtectionGateMixin):
 
         if target.get("is_local"):
             # Local loopback — deliver the open frame to the addressed person
-            # and the initiator only, never a fan-out to all local users.
-            recipients = await self._age_filter_recipients(
-                app_id, [target["user_ref"], actor_user_id]
-            )
+            # only: never a fan-out to all local users, and never an echo to
+            # the initiator — an invite is for the invitee, and the
+            # initiator's app has the session id from this call (an echo
+            # raced that reply and read as an invite from themselves).
+            recipients = await self._age_filter_recipients(app_id, [target["user_ref"]])
             await self._emit_frame(
                 recipients,
                 app_id=app_id,
@@ -442,6 +446,7 @@ class AppFederationService(ProtectionGateMixin):
         await self._require_enabled(app_id)
         await self._assert_age_allowed(app_id, actor_user_id)
         await self._assert_target_allowed(actor_user_id, target)
+        await self._took_in_by_playing(app_id, actor_user_id, session_id)
         own = self._federation.own_instance_id
 
         if target.get("is_local"):
@@ -955,14 +960,12 @@ class AppFederationService(ProtectionGateMixin):
                 )
                 if allowed:
                     if notify_open:
-                        # Persist the invite so it survives until the recipient
-                        # opens the app. Stored UNCONDITIONALLY (not gated on
+                        # Keep the invite until the recipient plays it ("Play"
+                        # in Needs you hands it to the app as the launch
+                        # context). Stored UNCONDITIONALLY (not gated on
                         # whether broadcast_to_user reached any sockets): a live
-                        # SPA socket does not imply the chess app is mounted, so
-                        # the durable invite must always be written — the app
-                        # drains+replays it on open and dedupes by session_id,
-                        # so a redundant replay when already online is harmless.
-                        # The drain's 14-day TTL + prune bound growth.
+                        # SPA socket does not imply the app is mounted. The
+                        # 14-day TTL + hourly prune bound growth.
                         await self._app_repo.add_pending_session(
                             AppPendingSession(
                                 app_id=app_id,
@@ -1037,42 +1040,67 @@ class AppFederationService(ProtectionGateMixin):
         )
         await self._ws.broadcast_to_users(user_ids, frame)
 
-    async def drain_pending_sessions(
-        self, app_id: str, user_id: str
-    ) -> list[AppPendingSession]:
-        """Return + clear this user's pending session invites for the app
-        (replayed by the app on open). The app took them in: each one's
-        "Needs you" item reads as accepted."""
-        drained = await self._app_repo.drain_pending_sessions(app_id, user_id)
-        # §CP.F2: an invite from someone a guardian block separates from
-        # this user since it arrived is not handed to the app.
-        blocked = await self._guardian_block_counterparts(user_id)
-        pending: list[AppPendingSession] = []
-        dropped: list[str] = []
-        for p in drained:
-            if blocked and await self._invite_sender_id(p) in blocked:
-                dropped.append(p.session_id)
-            else:
-                pending.append(p)
-        if pending:
+    async def accept_session(
+        self, *, app_id: str, session_id: str, actor_user_id: str
+    ) -> AppPendingSession:
+        """The invitee plays one game invite ("Play" in Needs you).
+
+        Takes that one invite in — and only it: every other invite keeps
+        waiting in "Needs you" (opening the app accepts nothing). Its row
+        reads as accepted and the invite is returned, so the host can hand
+        the game to the app as its launch context. The same one atomic
+        step as a decline: a second device, a decline or a withdrawal
+        racing it gets :class:`AppChallengeHandledError` — as does an
+        invite past its TTL (row ``expired``) or one from someone a
+        guardian block separates from the invitee since it arrived (row
+        ``done``)."""
+        await self._require_enabled(app_id)
+        await self._assert_age_allowed(app_id, actor_user_id)
+        invite = await self._app_repo.take_pending_session(
+            app_id, actor_user_id, session_id
+        )
+        if invite is None:
+            raise AppChallengeHandledError()
+        outcome = "accepted"
+        cutoff = datetime.now(UTC) - timedelta(seconds=PENDING_SESSION_TTL_SECONDS)
+        if invite.created_at < cutoff.isoformat():
+            outcome = "expired"
+        else:
+            # §CP.F2: an invite from someone a guardian block separates
+            # from this user since it arrived is not handed to the app.
+            sender = await self._invite_sender_id(invite)
+            if sender is not None and await self._guardian_blocked(
+                actor_user_id, sender
+            ):
+                outcome = "done"
+        await self._emit(
+            AppChallengeEnded(
+                app_id=app_id,
+                user_id=actor_user_id,
+                session_ids=(session_id,),
+                outcome=outcome,
+            )
+        )
+        if outcome != "accepted":
+            raise AppChallengeHandledError()
+        return invite
+
+    async def _took_in_by_playing(
+        self, app_id: str, user_id: str, session_id: str
+    ) -> None:
+        """The invitee sent a message in a game that still waited for them
+        (an app that seats live invites itself, before launch contexts):
+        they play it, so the invite is accepted and leaves "Needs you"."""
+        taken = await self._app_repo.take_pending_session(app_id, user_id, session_id)
+        if taken is not None:
             await self._emit(
                 AppChallengeEnded(
                     app_id=app_id,
                     user_id=user_id,
-                    session_ids=tuple(p.session_id for p in pending),
+                    session_ids=(session_id,),
                     outcome="accepted",
                 )
             )
-        if dropped:
-            await self._emit(
-                AppChallengeEnded(
-                    app_id=app_id,
-                    user_id=user_id,
-                    session_ids=tuple(dropped),
-                    outcome="done",
-                )
-            )
-        return pending
 
     async def _invite_sender_id(self, invite: AppPendingSession) -> str | None:
         """The user id of who opened *invite*: a local user id as stored, or

@@ -25,6 +25,7 @@ import {
   loadNeedsYou,
   needsYou,
   needsYouEntries,
+  playHref,
   reviewHref,
   waitingDeclines,
 } from './needsYou'
@@ -251,6 +252,13 @@ describe('game invites', () => {
     expect(inlineAction(game())).toBe('game')
     // One row per app from before one row per invite: Review (the app).
     expect(inlineAction(row({ id: 'g0', type: 'app_challenge', object_key: 'app:chess' }))).toBe('review')
+  })
+
+  it('Play opens that game: the app with its session (D12)', () => {
+    expect(playHref(game())).toBe('/apps/chess?session=sess-1')
+    // An app id with dots, a session id that needs escaping.
+    expect(playHref(row({ id: 'g2', type: 'app_challenge', object_key: 'app_session:com.example.hello/a b', space_id: null })))
+      .toBe('/apps/com.example.hello?session=a%20b')
   })
 
   it('declining a game invite names the app and the session', async () => {

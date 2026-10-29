@@ -696,6 +696,71 @@ await check('app-frame', async () => {
   return { problems, fills }
 })
 
+// 6d. "Play" opens the game you were invited to (D12): Bob invites Alice
+//     twice in the probe app; her Needs you's Play links to
+//     <prefix>/apps/<id>?session=<sid>, the host takes in that one invite
+//     (POST under the prefix) and hands it to the app as its launch
+//     context — and the second invite still waits in Needs you.
+await check('app-play-launch', async () => {
+  const problems = []
+  const appId = 'ingress-probe'
+  // Installed by app-frame; again here when run alone (--only).
+  await asUser('alice', 'POST', '/api/apps', { json: { app_id: appId } }).catch(() => {})
+  const me = await asUser('alice', 'GET', '/api/me')
+  const { contacts } = await asUser('bob', 'GET', `/api/apps/${appId}/contacts`)
+  const alice = contacts.find(c => c.is_local && c.user_ref === me.user_id)
+  if (!alice) throw new Error(`alice is not in bob's ${appId} contacts`)
+  const target = { instance_id: alice.instance_id, user_ref: alice.user_ref, is_local: true }
+  const invite = async () => (await asUser('bob', 'POST', `/api/apps/${appId}/sessions`, { json: { target } })).session_id
+  const waiting = async () => (await asUser('alice', 'GET', '/api/notifications/needs-you')).items
+    .map(n => n.object_key).filter(k => k?.startsWith(`app_session:${appId}/`))
+  const played = {}
+  for (const vp of ['desktop', 'mobile']) {
+    const sid = await invite()
+    const other = await invite()
+    const { ctx, page: p } = await newPage(vp)
+    await p.goto(APP + 'notifications', { waitUntil: 'load' })
+    await step('the Notifications page', settled(p))
+    const want = `${PREFIX}/apps/${appId}?session=${sid}`
+    const sel = `a.sh-btn[href$="?session=${sid}"]`
+    await step(`"${T('notifications.needs_you.play')}" for ${sid}`, p.waitForSelector(sel))
+    const href = await p.$eval(sel, a => a.getAttribute('href'))
+    if (href !== want) problems.push(`[${vp}] Play href is ${href}, want ${want}`)
+    const [accept] = await Promise.all([
+      p.waitForResponse(r => r.url().includes(`/sessions/${sid}/accept`) && r.request().method() === 'POST'),
+      p.click(sel),
+    ])
+    if (!underPrefix(new URL(accept.url()).pathname)) problems.push(`[${vp}] accept POST went to ${accept.url()} (outside the prefix)`)
+    if (accept.status() !== 200) problems.push(`[${vp}] accept POST → ${accept.status()}`)
+    await step('the app frame shown', p.waitForSelector('iframe.sh-app-frame:not(.sh-app-frame--pending)'))
+    const frame = await (await p.$('iframe.sh-app-frame')).contentFrame()
+    await step('the app launched into that game',
+      frame.waitForFunction(t => document.getElementById('out')?.textContent === t, {}, `probe ready ${appId} launch ${sid} invite`))
+    const loc = await p.evaluate(() => location.pathname + location.search)
+    if (loc !== want) problems.push(`[${vp}] the app opened at ${loc}, want ${want}`)
+    if (!underPrefix(new URL(frame.url()).pathname)) problems.push(`[${vp}] app frame loaded ${frame.url()} — outside the prefix`)
+    await p.screenshot({ path: path.join(SHOTS, `app-play-launch-${vp}.png`) })
+    const left = await waiting()
+    if (left.includes(`app_session:${appId}/${sid}`)) problems.push(`[${vp}] the played invite still waits in Needs you`)
+    if (!left.includes(`app_session:${appId}/${other}`)) problems.push(`[${vp}] the other invite left Needs you — Play accepted more than its own`)
+    played[vp] = { sid, other, left }
+    await ctx.close()
+  }
+  // Opening the app without Play accepts nothing.
+  const before = await waiting()
+  const { ctx, page: p } = await newPage('desktop')
+  await p.goto(APP + `apps/${appId}`, { waitUntil: 'load' })
+  await step('the app frame shown (no Play)', p.waitForSelector('iframe.sh-app-frame:not(.sh-app-frame--pending)'))
+  const frame = await (await p.$('iframe.sh-app-frame')).contentFrame()
+  await step('the app ran without a launch',
+    frame.waitForFunction(t => document.getElementById('out')?.textContent === t, {}, `probe ready ${appId}`))
+  await ctx.close()
+  activePage = page
+  const after = await waiting()
+  if (after.length !== before.length) problems.push(`opening the app took ${before.length - after.length} invite(s) out of Needs you`)
+  return { problems, played, waitingAfterOpen: after }
+})
+
 // 7. No ingress user (Supervisor sent no X-Remote-User-*): the cold-start
 //    /api/me 401s → IngressAuthFailed, never a password form or a
 //    "Session expired" toast (there was no token to expire).

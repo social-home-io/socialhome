@@ -84,6 +84,12 @@ describe('under the HA ingress prefix (/api/hassio_ingress/<token>/)', () => {
     expect(mod.appHref('api/calendars/x.ics')).toBe('api/calendars/x.ics')
   })
 
+  it('Play in Needs you keeps the ingress prefix and its ?session= launch context', async () => {
+    const mod = await import('./baseUrl')
+    expect(mod.appHref('/apps/chess?session=s1')).toBe('/api/hassio_ingress/tok/apps/chess?session=s1')
+    expect(mod.stripBase('/api/hassio_ingress/tok/apps/chess')).toBe('/apps/chess')
+  })
+
   it('wsUrl keeps the ingress prefix, even on a nested in-app route', async () => {
     const before = location.pathname
     history.replaceState(null, '', '/api/hassio_ingress/tok/dms/conv-1')

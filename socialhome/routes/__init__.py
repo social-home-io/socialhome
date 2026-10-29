@@ -45,7 +45,7 @@ from .apps import (
     AppDetailView,
     AppMessagesView,
     AppPeersView,
-    AppPendingSessionsView,
+    AppSessionAcceptView,
     AppSessionCancelView,
     AppSessionDeclineView,
     AppSessionsView,
@@ -1361,9 +1361,11 @@ def setup_routes(app: web.Application) -> None:
         "/api/apps/{app_id}/sessions/{session_id}/decline", AppSessionDeclineView
     )
     app.router.add_view(
+        "/api/apps/{app_id}/sessions/{session_id}/accept", AppSessionAcceptView
+    )
+    app.router.add_view(
         "/api/apps/{app_id}/sessions/{session_id}/cancel", AppSessionCancelView
     )
-    app.router.add_view("/api/apps/{app_id}/pending-sessions", AppPendingSessionsView)
     app.router.add_view("/api/apps/{app_id}/messages", AppMessagesView)
 
     # ── Backup (adapter-agnostic) ────────────────────────────────────────

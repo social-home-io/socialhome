@@ -27,6 +27,11 @@
  *
  * The frame stays invisible until the app speaks, so a server error body
  * served in its place (raw JSON / text) is never shown to anyone.
+ *
+ * ``?session=<sid>`` ("Play" in Needs you) is the launch context: the
+ * bridge takes in that one invite and hands it to the app (see bridge.ts).
+ * A new ``?session=`` while the app is open (Play from the bell) starts a
+ * fresh frame, so the app launches into that game.
  */
 import type { ComponentChildren } from 'preact'
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
@@ -62,15 +67,30 @@ type HostState =
   | { kind: 'age' }
   | { kind: 'gone' }
 
+/** The game invite a ``?session=`` names ("Play" in Needs you) — only a
+ *  session id, never markup or a path. */
+export function launchSessionFrom(query: Record<string, string | undefined>): string | undefined {
+  const session = query.session
+  return session && /^[A-Za-z0-9_-]{1,128}$/.test(session) ? session : undefined
+}
+
 export default function AppHost() {
-  const { params } = useRoute()
+  const { params, query } = useRoute()
   const appId = params.appId ?? ''
-  return <AppHostInner appId={appId} />
+  return <AppHostInner appId={appId} sessionId={launchSessionFrom(query)} />
 }
 
 /** Exported for overlay / in-page embedding (AppsPage overlay path). */
-export function AppHostInner({ appId }: { appId: string }) {
+export function AppHostInner({ appId, sessionId }: {
+  appId: string
+  /** The game invite "Play" opened the app for (``?session=``). */
+  sessionId?: string
+}) {
   const [runtime, setRuntime] = useState<AppRuntime | null>(null)
+  /** The ``sessionId`` the current runtime (and frame) was started for:
+   *  until the runtime for a new Play arrives, no frame shows (never the
+   *  previous game's frame under the new key). */
+  const [frameSession, setFrameSession] = useState<string | undefined>(undefined)
   const [state, setState]     = useState<HostState>({ kind: 'loading' })
   /** Bumped by Try again / Turn on: refetch the runtime (a fresh signed
    *  URL) and mount a new frame — a new element, so the retry adds no
@@ -104,13 +124,14 @@ export function AppHostInner({ appId }: { appId: string }) {
     getRuntime(appId).then(rt => {
       if (cancelled) return
       setRuntime(rt)
+      setFrameSession(sessionId)
       setState({ kind: 'starting', slow: false })
     }).catch((err: unknown) => {
       if (cancelled) return
       setState(stateForError(err))
     })
     return () => { cancelled = true }
-  }, [appId, attempt])
+  }, [appId, attempt, sessionId])
 
   // While the app starts: slow after SLOW_MS, failed after FAIL_MS.
   const starting = state.kind === 'starting'
@@ -135,13 +156,14 @@ export function AppHostInner({ appId }: { appId: string }) {
     const cleanup = mountBridge(el, {
       appId: runtime.app_id,
       selfUserId: runtime.self_user_id,
+      launchSession: frameSession,
       onReady: () => {
         clearTimers()
         setState(s => s.kind === 'starting' ? { kind: 'ready' } : s)
       },
     })
     return cleanup
-  }, [runtime]) // iframeRef.current is stable once rendered; runtime changes re-mount
+  }, [runtime, frameSession]) // iframeRef.current is stable once rendered; runtime changes re-mount
 
   function handleFrameLoad() {
     later(LOAD_GRACE_MS, () => setState(s => s.kind === 'starting' ? { kind: 'failed', detail: null } : s))
@@ -191,7 +213,7 @@ export function AppHostInner({ appId }: { appId: string }) {
       </header>
 
       <div class="sh-app-host__stage">
-        {runtime && state.kind !== 'failed' && (
+        {runtime && frameSession === sessionId && state.kind !== 'failed' && (
           /*
            * SECURITY: sandbox="allow-scripts" ONLY.
            * NEVER add allow-same-origin — that collapses the origin
@@ -207,7 +229,7 @@ export function AppHostInner({ appId }: { appId: string }) {
            * speaks, so an error body served in its place never shows.
            */
           <iframe
-            key={attempt}
+            key={`${attempt}:${frameSession ?? ''}`}
             ref={iframeRef}
             class={`sh-app-frame${state.kind === 'ready' ? '' : ' sh-app-frame--pending'}`}
             src={addBase(runtime.entry_url)}
