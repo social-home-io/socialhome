@@ -93,6 +93,9 @@ export function InviteSheet({ appId, appName, request, onDone }: {
     setLoadFailed(false)
     getInvitable(appId).then(r => {
       if (cancelled) return
+      // The list (and a suggested person) appear now and Send may become
+      // live under the finger: the 600 ms count from here.
+      shownAt.current = Date.now()
       setPeople(r.people)
       setCounts(r.invites)
       const s = request.suggest

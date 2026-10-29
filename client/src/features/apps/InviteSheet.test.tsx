@@ -99,6 +99,26 @@ describe('InviteSheet', () => {
     }])
   })
 
+  it('tap-jacking: the 600 ms count from when the list (and a suggestion) appears, not from mount', async () => {
+    h.sendInvite.mockResolvedValue('sess-1')
+    let arrive!: (v: unknown) => void
+    h.getInvitable.mockReturnValue(new Promise(r => { arrive = r }))
+    const onDone = vi.fn()
+    const view = render(<InviteSheet appId="chess" appName="Chess"
+      request={{ purpose: 'play', max: 1, suggest: { instance_id: 'brookside', user_ref: 'ben', is_local: false } }}
+      onDone={onDone} />)
+    // A slow list: it arrives 2 s after the sheet opened, Ben preselected.
+    vi.setSystemTime(Date.now() + 2000)
+    arrive({ people: [BEN, MILO], invites: COUNTS })
+    await view.findByText('Milo')
+    fireEvent.click(view.getByTestId('invite-send'))
+    await Promise.resolve()
+    expect(h.sendInvite).not.toHaveBeenCalled()
+    vi.setSystemTime(Date.now() + SEND_ARM_MS)
+    fireEvent.click(view.getByTestId('invite-send'))
+    await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1))
+  })
+
   it('a suggestion that isn\'t someone the sheet lists selects nobody', async () => {
     const { send } = await open({ purpose: 'play', max: 1, suggest: { instance_id: 'elsewhere', user_ref: 'mallory', is_local: false } })
     expect(send().textContent).toBe('Send invite')
