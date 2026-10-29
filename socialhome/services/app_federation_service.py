@@ -97,6 +97,7 @@ from weakref import WeakValueDictionary
 import orjson
 
 from ..domain.apps import (
+    ACTIVE_SESSION_TTL_SECONDS,
     HELD_MESSAGE_MAX_BYTES,
     INVITES_OPEN_MAX,
     INVITES_PER_DAY_MAX,
@@ -105,6 +106,7 @@ from ..domain.apps import (
     PERMISSION_PEOPLE,
     SESSION_ACTIVE,
     SESSION_MARKS,
+    SESSION_VERB_CONTINUE,
     AppAgeRestrictedError,
     AppChallengeHandledError,
     AppContactNotFoundError,
@@ -112,6 +114,7 @@ from ..domain.apps import (
     AppNotEnabledError,
     AppNotFoundError,
     AppPendingSession,
+    AppSessionTakenError,
     AppSessionUnknownError,
 )
 from ..domain.events import (
@@ -415,7 +418,7 @@ class AppFederationService(ProtectionGateMixin):
         own = self._federation.own_instance_id
         connected = self._ws.connected_users()
         cutoff = (
-            datetime.now(UTC) - timedelta(seconds=PENDING_SESSION_TTL_SECONDS)
+            datetime.now(UTC) - timedelta(seconds=ACTIVE_SESSION_TTL_SECONDS)
         ).isoformat()
         seen: set[tuple[str, str]] = set()
         out: list[dict] = []
@@ -514,15 +517,20 @@ class AppFederationService(ProtectionGateMixin):
     ) -> str:
         """Send one invite (:meth:`_open_session`), one at a time per (app,
         person), so the invite caps hold under parallel requests."""
-        key = (app_id, actor_user_id)
+        async with self._invite_lock(app_id, actor_user_id):
+            return await self._open_session(
+                app_id=app_id, target=target, actor_user_id=actor_user_id
+            )
+
+    def _invite_lock(self, app_id: str, user_id: str) -> asyncio.Lock:
+        """The one lock for *user_id*'s invites in *app_id* (open and
+        continue), kept while anyone holds it."""
+        key = (app_id, user_id)
         lock = self._invite_locks.get(key)
         if lock is None:
             lock = asyncio.Lock()
             self._invite_locks[key] = lock
-        async with lock:
-            return await self._open_session(
-                app_id=app_id, target=target, actor_user_id=actor_user_id
-            )
+        return lock
 
     async def _open_session(
         self,
@@ -634,6 +642,104 @@ class AppFederationService(ProtectionGateMixin):
             app_id, actor_user_id, session_id, target["instance_id"], target
         )
         return session_id
+
+    async def continue_session(
+        self,
+        *,
+        app_id: str,
+        session_id: str,
+        target: dict,
+        actor_user_id: str,
+    ) -> str:
+        """Pick a game this household no longer knows up again (owner
+        decision 2026-10-29) — only through Social Home's sheet ("Continue
+        game with Ben"), so D3 holds: the person confirms who.
+
+        *session_id* is the app's own id for the game (started before the
+        mailbox, or quiet past
+        :data:`~socialhome.domain.apps.ACTIVE_SESSION_TTL_SECONDS`), and
+        *target* one of :meth:`list_invitable`. On this side the session
+        becomes known (an ``active`` row with *target*, marked ``sent`` —
+        it counts towards the invite caps). The other side gets
+        ``APP_SESSION {verb: "continue"}`` and keeps it as an invite in
+        Needs you ("Ben wants to continue your Chess game"): their app
+        hears of it, and of the moves held meanwhile, only after Play.
+
+        Never moves a session id to another opponent: a session this
+        person already knows with someone else (or that waits as an invite)
+        is :class:`AppSessionTakenError`; the same one with *target* is a
+        no-op. The receiving household keeps a continue only for a session
+        id its person has no row for, and only from the person who sent it
+        (see :meth:`_deliver`)."""
+        async with self._invite_lock(app_id, actor_user_id):
+            app = await self._require_enabled(app_id, target)
+            await self._assert_age_allowed(app_id, actor_user_id, app=app)
+            await self._assert_target_allowed(actor_user_id, target, app=app)
+            own = self._federation.own_instance_id
+            is_local = bool(target.get("is_local"))
+            peer = own if is_local else str(target["instance_id"])
+            user_ref = str(target["user_ref"])
+            known = await self._app_repo.get_pending_session(
+                app_id, actor_user_id, session_id
+            )
+            if known is not None:
+                if (
+                    known.state == SESSION_ACTIVE
+                    and known.is_with(peer, user_ref)
+                    and not known.withdrawn
+                ):
+                    return session_id
+                raise AppSessionTakenError()
+            await self._check_invite_caps(app_id, actor_user_id)
+            payload: dict[str, Any] = {
+                "app_id": app_id,
+                "session_id": session_id,
+                "verb": SESSION_VERB_CONTINUE,
+            }
+            if is_local:
+                recipients = await self._age_filter_recipients(
+                    app_id, [user_ref], app=app
+                )
+                theirs = await self._app_repo.get_pending_session(
+                    app_id, user_ref, session_id
+                )
+                # Only a session id they have no row for (no re-pointing).
+                if user_ref in recipients and theirs is None:
+                    await self._app_repo.add_pending_session(
+                        AppPendingSession(
+                            app_id=app_id,
+                            user_id=user_ref,
+                            session_id=session_id,
+                            from_instance=own,
+                            from_user=actor_user_id,
+                            payload=payload,
+                            created_at=datetime.now(UTC).isoformat(),
+                        )
+                    )
+                    me = await self._user_repo.get_by_user_id(actor_user_id)
+                    await self._emit(
+                        AppChallengeReceived(
+                            app_id=app_id,
+                            session_id=session_id,
+                            to_user_id=user_ref,
+                            from_display=(
+                                me.display_name if me is not None else actor_user_id
+                            ),
+                            from_user_id=actor_user_id,
+                            continued=True,
+                        )
+                    )
+            else:
+                me = await self._user_repo.get_by_user_id(actor_user_id)
+                payload["to_user"] = user_ref
+                payload["from_user"] = me.username if me is not None else actor_user_id
+                await self._federation.send_event(
+                    to_instance_id=peer,
+                    event_type=FederationEventType.APP_SESSION,
+                    payload=payload,
+                )
+            await self._know_game(app_id, actor_user_id, session_id, peer, target)
+            return session_id
 
     async def send_message(
         self,
@@ -763,8 +869,10 @@ class AppFederationService(ProtectionGateMixin):
             # fallback / retransmit) so we never seat two invites or raise two
             # notifications for the same challenge.  Scoped to opens — a
             # future ``verb`` ("close") is not a session-creating event.
-            if event.payload.get("verb") == "open" and self._seen_open_session(
-                event.from_instance, str(session_id)
+            verb = event.payload.get("verb")
+            if verb in ("open", SESSION_VERB_CONTINUE) and self._seen_open_session(
+                event.from_instance,
+                str(session_id) if verb == "open" else f"{verb}:{session_id}",
             ):
                 log.debug(
                     "app_federation: duplicate inbound open for session %r — skipping",
@@ -809,7 +917,13 @@ class AppFederationService(ProtectionGateMixin):
             kind=kind,
             to_user=to_user,
             from_user=from_user,
-            notify_open=(kind == "session" and event.payload.get("verb") == "open"),
+            notify_open=(
+                kind == "session"
+                and event.payload.get("verb") in ("open", SESSION_VERB_CONTINUE)
+            ),
+            continued=(
+                kind == "session" and event.payload.get("verb") == SESSION_VERB_CONTINUE
+            ),
             withdraw=(kind == "session" and event.payload.get("verb") == "close"),
         )
 
@@ -1252,9 +1366,16 @@ class AppFederationService(ProtectionGateMixin):
         to_user: str | None = None,
         from_user: str | None = None,
         notify_open: bool = False,
+        continued: bool = False,
         withdraw: bool = False,
     ) -> None:
         """Route an inbound app message to local users via WebSocket.
+
+        ``continued`` (with ``notify_open``): a "continue game" — the sender
+        picked an old game up again. It waits in Needs you like an invite,
+        but only for a session id the recipient has **no** row for: a game
+        they still know, or an invite already waiting, is never re-pointed
+        at another sender (no hijack of a session id).
 
         Silently drops (debug log) if the app is not installed or disabled —
         the peer doesn't need to know we don't have this app.
@@ -1413,6 +1534,23 @@ class AppFederationService(ProtectionGateMixin):
                     "user",
                     len(allowed),
                 )
+                # "Continue game": only for a session id this person has no
+                # row for — never a game they know with someone (or anyone)
+                # else, never a waiting invite re-pointed.
+                if (
+                    allowed
+                    and continued
+                    and await self._app_repo.get_pending_session(
+                        app_id, recipient.user_id, session_id
+                    )
+                ):
+                    log.info(
+                        "app_federation: continue for a known session %s "
+                        "from %s dropped",
+                        session_id,
+                        from_instance,
+                    )
+                    return
                 if allowed:
                     if notify_open:
                         # Keep the invite until the recipient plays it ("Play"
@@ -1479,9 +1617,14 @@ class AppFederationService(ProtectionGateMixin):
                                 to_user_id=recipient.user_id,
                                 from_display=from_display,
                                 from_user_id=initiator.user_id,
+                                continued=continued,
                             )
                         )
                 return
+
+        if continued:
+            # A "continue game" always names one person (never a fan-out).
+            return
 
         # Legacy / best-effort fan-out to every active, age-eligible local user
         # (soft-deleted/inactive accounts are excluded — same as /friends).

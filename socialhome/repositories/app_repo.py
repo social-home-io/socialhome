@@ -17,6 +17,7 @@ import orjson
 
 from ..db import AsyncDatabase
 from ..domain.apps import (
+    ACTIVE_SESSION_TTL_SECONDS,
     PENDING_SESSION_TTL_SECONDS,
     SESSION_ACTIVE,
     SESSION_INVITED,
@@ -27,6 +28,7 @@ from ..domain.apps import (
 )
 
 _PENDING_SESSION_TTL_SECONDS = PENDING_SESSION_TTL_SECONDS
+_ACTIVE_SESSION_TTL_SECONDS = ACTIVE_SESSION_TTL_SECONDS
 _PENDING_SESSION_MAX_PER_PAIR = 50
 
 
@@ -55,8 +57,12 @@ class AbstractAppRepo(Protocol):
     async def kv_count(self, app_id: str, user_id: str) -> int: ...
     async def add_pending_session(self, s: AppPendingSession) -> None: ...
     async def prune_pending_sessions(
-        self, *, max_age_seconds: int = _PENDING_SESSION_TTL_SECONDS
+        self,
+        *,
+        max_age_seconds: int = _PENDING_SESSION_TTL_SECONDS,
+        active_max_age_seconds: int = _ACTIVE_SESSION_TTL_SECONDS,
     ) -> int: ...
+
     async def get_pending_session(
         self, app_id: str, user_id: str, session_id: str
     ) -> AppPendingSession | None: ...
@@ -297,6 +303,7 @@ class SqliteAppRepo:
                -- A game already played or sent (``active``) is never
                -- rewritten by an open reusing its id.
                WHERE app_pending_sessions.from_instance = excluded.from_instance
+                 AND app_pending_sessions.from_user IS excluded.from_user
                  AND app_pending_sessions.state = 'invited'""",
             (
                 s.app_id,
@@ -326,28 +333,32 @@ class SqliteAppRepo:
         )
 
     async def prune_pending_sessions(
-        self, *, max_age_seconds: int = _PENDING_SESSION_TTL_SECONDS
+        self,
+        *,
+        max_age_seconds: int = _PENDING_SESSION_TTL_SECONDS,
+        active_max_age_seconds: int = _ACTIVE_SESSION_TTL_SECONDS,
     ) -> int:
-        """Delete sessions quiet for longer than the TTL — an invite nobody
-        played, a game nobody moved in (and whatever it still held).
+        """Delete sessions quiet for longer than their TTL — an invite
+        nobody played (``max_age_seconds``, 14 days), a game nobody moved in
+        (``active_max_age_seconds``, 90 days), and whatever they still held.
         Returns purge count.
 
         Counts before deleting (aiosqlite's DELETE doesn't surface a row
         count at this revision) — same mechanism as
         ``federation_repo.prune_replay_cache``.
         """
-        cutoff = (datetime.now(UTC) - timedelta(seconds=max_age_seconds)).isoformat()
+        now = datetime.now(UTC)
+        invited_cut = (now - timedelta(seconds=max_age_seconds)).isoformat()
+        active_cut = (now - timedelta(seconds=active_max_age_seconds)).isoformat()
+        where = (
+            " WHERE (state = ? AND COALESCE(updated_at, created_at) < ?)"
+            " OR (state = ? AND COALESCE(updated_at, created_at) < ?)"
+        )
+        args = (SESSION_ACTIVE, active_cut, SESSION_INVITED, invited_cut)
         before = await self._db.fetchval(
-            "SELECT COUNT(*) FROM app_pending_sessions"
-            " WHERE COALESCE(updated_at, created_at) < ?",
-            (cutoff,),
-            default=0,
+            "SELECT COUNT(*) FROM app_pending_sessions" + where, args, default=0
         )
-        await self._db.enqueue(
-            "DELETE FROM app_pending_sessions"
-            " WHERE COALESCE(updated_at, created_at) < ?",
-            (cutoff,),
-        )
+        await self._db.enqueue("DELETE FROM app_pending_sessions" + where, args)
         return int(before)
 
     async def get_pending_session(

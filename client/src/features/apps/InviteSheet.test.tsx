@@ -13,12 +13,14 @@ import { render, fireEvent, waitFor } from '@testing-library/preact'
 const h = vi.hoisted(() => ({
   getInvitable: vi.fn(),
   sendInvite: vi.fn(),
+  continueGame: vi.fn(),
   showToast: vi.fn(),
 }))
 
 vi.mock('@/store/apps', () => ({
   getInvitable: h.getInvitable,
   sendInvite: h.sendInvite,
+  continueGame: h.continueGame,
 }))
 vi.mock('@/components/Toast', () => ({ showToast: h.showToast }))
 
@@ -56,6 +58,7 @@ describe('InviteSheet', () => {
     vi.setSystemTime(new Date('2026-10-29T12:00:00Z'))
     h.getInvitable.mockReset()
     h.sendInvite.mockReset()
+    h.continueGame.mockReset()
     h.showToast.mockReset()
   })
   afterEach(() => { vi.useRealTimers() })
@@ -173,5 +176,56 @@ describe('InviteSheet', () => {
     const view = render(<InviteSheet appId="chess" appName="Chess" request={{ purpose: 'play', max: 1 }} onDone={vi.fn()} />)
     fireEvent.click(await view.findByText('Try again'))
     expect(await view.findByText('Milo')).toBeTruthy()
+  })
+
+  describe('continue an old game', () => {
+    const CONTINUE: PickRequest = {
+      purpose: 'continue', max: 1, sessionId: 'old-game',
+      suggest: { instance_id: 'brookside', user_ref: 'ben', is_local: false },
+    }
+
+    it('names the game and only the person the app gave, and Social Home re-registers it', async () => {
+      h.continueGame.mockResolvedValue('old-game')
+      const { getByRole, queryByText, send, onDone } = await openContinue()
+      expect(getByRole('dialog').textContent).toContain('Continue a game in Chess')
+      expect(queryByText('Milo')).toBeNull() // nobody else is offered
+      expect(send().textContent).toBe('Continue game with Ben')
+      // The same tap-jacking guard.
+      fireEvent.click(send())
+      await Promise.resolve()
+      expect(h.continueGame).not.toHaveBeenCalled()
+      vi.setSystemTime(Date.now() + SEND_ARM_MS)
+      fireEvent.click(send())
+      await waitFor(() => expect(onDone).toHaveBeenCalledTimes(1))
+      expect(h.continueGame).toHaveBeenCalledWith('chess', 'old-game', BEN)
+      expect(h.sendInvite).not.toHaveBeenCalled()
+      expect(onDone.mock.calls[0][0][0].session_id).toBe('old-game')
+    })
+
+    it('someone you can no longer play with: says so, nothing to send', async () => {
+      h.getInvitable.mockResolvedValue({ people: [MILO], invites: COUNTS })
+      const view = render(<InviteSheet appId="chess" appName="Chess" request={CONTINUE} onDone={vi.fn()} />)
+      expect(await view.findByText(/You can't continue this game/)).toBeTruthy()
+      expect((view.getByTestId('invite-send') as HTMLButtonElement).disabled).toBe(true)
+    })
+
+    it('a game already going with someone else reads in plain words', async () => {
+      const err = new ApiError(409, 'x') as ApiError & { code: string }
+      Object.assign(err, { code: 'APP_SESSION_TAKEN' })
+      h.continueGame.mockRejectedValue(err)
+      const { send, findByRole, onDone } = await openContinue()
+      vi.setSystemTime(Date.now() + SEND_ARM_MS)
+      fireEvent.click(send())
+      expect((await findByRole('alert')).textContent).toBe('That game is already going with someone else.')
+      expect(onDone).not.toHaveBeenCalled()
+    })
+
+    async function openContinue() {
+      h.getInvitable.mockResolvedValue({ people: [BEN, MILO], invites: COUNTS })
+      const onDone = vi.fn()
+      const view = render(<InviteSheet appId="chess" appName="Chess" request={CONTINUE} onDone={onDone} />)
+      await view.findByText('Ben')
+      return { ...view, onDone, send: () => view.getByTestId('invite-send') }
+    }
   })
 })

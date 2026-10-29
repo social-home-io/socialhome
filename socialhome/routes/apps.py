@@ -22,8 +22,8 @@ Route                                              Permission
 ``GET /contacts``, ``GET /invitable``              ``people``
 ``GET /peers``                                     ``federation``
 ``POST /sessions``, ``POST /messages``,            ``people`` — and
-``POST /sessions/{sid}/cancel``                    ``federation`` when the
-                                                   target is in another
+``POST /sessions/{sid}/cancel``,                   ``federation`` when the
+``POST /sessions/{sid}/continue``                  target is in another
                                                    household (service)
 ``POST /sessions/{sid}/accept``,                   ``people``
 ``POST /sessions/{sid}/decline``, ``POST /held``
@@ -34,6 +34,8 @@ admin routes (install, update, toggle, catalog) need none.
 """
 
 from __future__ import annotations
+
+import re
 
 import orjson
 from aiohttp import web
@@ -512,6 +514,40 @@ class AppSessionDeclineView(AppPermissionView):
             actor_user_id=self.user.user_id,
         )
         return self._json({"ok": True})
+
+
+#: An app's own session id: what the SPA's ``?session=`` accepts too.
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+class AppSessionContinueView(AppPermissionView):
+    """``POST /api/apps/{app_id}/sessions/{session_id}/continue`` — pick a
+    game this household no longer knows up again with one person, from
+    Social Home's sheet ("Continue game with Ben"; ``people``, and
+    ``federation`` for another household). Body ``{target}``. Returns
+    ``{session_id}``. ``409 APP_SESSION_TAKEN`` when the id is known with
+    someone else; the invite caps apply (``429``)."""
+
+    async def post(self) -> web.Response:
+        await self.require_permission(PERMISSION_PEOPLE)
+        session_id = self.match("session_id")
+        if not _SESSION_ID_RE.fullmatch(session_id):
+            return error_response(400, "UNPROCESSABLE", "Not a session id.")
+        target = _target(await self.body())
+        if target is None:
+            return error_response(
+                400,
+                "UNPROCESSABLE",
+                "target must have non-empty string instance_id, non-empty "
+                "string user_ref, and a bool is_local.",
+            )
+        sid = await self.svc(app_federation_service_key).continue_session(
+            app_id=self.match("app_id"),
+            session_id=session_id,
+            target=target,
+            actor_user_id=self.user.user_id,
+        )
+        return self._json({"session_id": sid})
 
 
 class AppSessionCancelView(AppPermissionView):

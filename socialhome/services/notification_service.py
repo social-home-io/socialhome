@@ -435,6 +435,7 @@ _PUSH_AS_IS: frozenset[str] = frozenset(
         "poll_scheduled",
         "report_answer",
         "app_challenge",
+        "app_challenge_continue",
         "app_added",
         "app_challenge_declined",
         "app_request",
@@ -2752,7 +2753,7 @@ class NotificationService(ProtectionGateMixin):
         else how it ended (:data:`HANDLED_OUTCOMES`)."""
         if note.type in RETIRED_ACTION_TYPES:
             return "done"
-        if note.type == "app_challenge":
+        if note.type in ("app_challenge", "app_challenge_continue"):
             return await self._challenge_ended_as(note)
         return None if await self._still_needs(note) else "done"
 
@@ -2845,7 +2846,7 @@ class NotificationService(ProtectionGateMixin):
                 object_key(
                     NotificationObject.APP_SESSION, f"{event.app_id}/{session_id}"
                 ),
-                types=("app_challenge",),
+                types=("app_challenge", "app_challenge_continue"),
                 outcome=event.outcome,
                 user_id=event.user_id,
             )
@@ -2912,7 +2913,16 @@ class NotificationService(ProtectionGateMixin):
         locale = self._locale(recipient)
         app = await self._apps.get(event.app_id) if self._apps is not None else None
         app_name = app.name if app is not None and app.name else None
-        if app_name:
+        if event.continued:
+            # An old game picked up again: same Play / Decline, own words.
+            title = self._t(
+                "notification.app.continue",
+                locale=locale,
+                fallback="{name} wants to continue your {app} game",
+                name=event.from_display,
+                app=app_name or "",
+            )
+        elif app_name:
             title = self._t(
                 "notification.app.challenge",
                 locale=locale,
@@ -2930,7 +2940,7 @@ class NotificationService(ProtectionGateMixin):
         await self._save_notif(
             new_notification(
                 user_id=event.to_user_id,
-                type="app_challenge",
+                type=("app_challenge_continue" if event.continued else "app_challenge"),
                 title=title,
                 link_url=f"/apps/{event.app_id}",
             ),

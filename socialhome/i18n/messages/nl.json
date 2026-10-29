@@ -286,6 +286,7 @@
   "notification.app.added": "{name} heeft {app} toegevoegd",
   "notification.app.challenge": "{name} heeft je uitgenodigd om {app} te spelen",
   "notification.app.challenge_generic": "{name} heeft je uitgenodigd voor een spel",
+  "notification.app.continue": "{name} wil jullie {app}-partij voortzetten",
   "notification.app.challenge_declined": "{name} heeft je uitnodiging voor {app} afgewezen",
   "notification.app.challenge_declined_generic": "{name} heeft je speluitnodiging afgewezen",
   "notification.app.requested": "{name} wil graag {app}",

@@ -32,10 +32,15 @@ from socialhome.domain.apps import (
     AppNotFoundError,
     AppPendingSession,
     AppPermissionDeniedError,
+    AppSessionTakenError,
     AppSessionUnknownError,
     InstalledApp,
 )
-from socialhome.domain.events import AppChallengeDeclined, AppChallengeEnded
+from socialhome.domain.events import (
+    AppChallengeDeclined,
+    AppChallengeEnded,
+    AppChallengeReceived,
+)
 from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
@@ -3666,7 +3671,7 @@ async def test_contacts_leave_out_a_blocked_person_and_an_old_game():
     svc, _, _, _ = _mailbox_svc(block_pairs={("u-bob", "u-ann")})
     await _know(svc, "u-bob", "s-ann", _local_target("u-ann"))
     await _know(svc, "u-bob", "s-carol", _remote_target("peer-inst-id", "carol"))
-    old = (datetime.now(UTC) - timedelta(days=15)).isoformat()
+    old = (datetime.now(UTC) - timedelta(days=91)).isoformat()
     row = await svc._app_repo.get_pending_session("chess", "u-bob", "s-carol")
     svc._app_repo._swap(row, dataclasses.replace(row, created_at=old, updated_at=old))
     assert await svc.list_contacts(app_id="chess", self_user_id="u-bob") == []
@@ -3978,3 +3983,144 @@ async def test_an_older_households_fan_out_skips_a_protected_child_it_cant_reach
     await svc.on_inbound_message("peer-inst-id", "chess", "s", {"m": 1})
     (call,) = ws.calls
     assert call["user_ids"] == ["u-adult"]
+
+
+# ─── Continue game (owner decision 2026-10-29) ───────────────────────────────
+
+
+async def _continue(svc, sid: str, target: dict | None = None, actor: str = "u-bob"):
+    return await svc.continue_session(
+        app_id="chess",
+        session_id=sid,
+        target=target or _remote_target("peer-inst-id", "carol"),
+        actor_user_id=actor,
+    )
+
+
+async def _inbound_continue(
+    svc, sid: str, from_user: str = "carol", inst: str = "peer-inst-id"
+):
+    await svc.on_inbound_event(
+        _make_event(
+            FederationEventType.APP_SESSION,
+            {
+                "app_id": "chess",
+                "session_id": sid,
+                "verb": "continue",
+                "to_user": "bob",
+                "from_user": from_user,
+            },
+            from_instance=inst,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_active_game_stays_known_for_90_days():
+    svc, _, _, _ = _mailbox_svc()
+    await _know(svc, "u-bob", "g", _remote_target("peer-inst-id", "carol"))
+    old = (datetime.now(UTC) - timedelta(days=60)).isoformat()
+    row = await svc._app_repo.get_pending_session("chess", "u-bob", "g")
+    svc._app_repo._swap(row, dataclasses.replace(row, created_at=old, updated_at=old))
+    contacts = await svc.list_contacts(app_id="chess", self_user_id="u-bob")
+    assert [c["user_ref"] for c in contacts] == ["carol"]
+    await _move(svc, "g")  # still playable after 60 quiet days
+
+
+@pytest.mark.asyncio
+async def test_continue_registers_the_game_and_asks_the_other_side():
+    svc, fed, _, _ = _mailbox_svc()
+    with pytest.raises(AppSessionUnknownError):
+        await _move(svc, "old-game")
+    assert await _continue(svc, "old-game") == "old-game"
+    (sent,) = fed.sent_events
+    assert sent["payload"] == {
+        "app_id": "chess",
+        "session_id": "old-game",
+        "verb": "continue",
+        "to_user": "carol",
+        "from_user": "bob",
+    }
+    row = await svc._app_repo.get_pending_session("chess", "u-bob", "old-game")
+    assert row.state == "active" and row.sent and row.is_with("peer-inst-id", "carol")
+    await _move(svc, "old-game")  # now known
+    # The same again is a no-op: nothing more goes out.
+    await _continue(svc, "old-game")
+    assert len(fed.sent_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_continue_never_moves_a_session_id_to_someone_else():
+    svc, fed, _, _ = _mailbox_svc()
+    await _know(svc, "u-bob", "g", _remote_target("peer-inst-id", "carol"))
+    with pytest.raises(AppSessionTakenError):
+        await _continue(svc, "g", _remote_target("peer-inst-id", "dave"))
+    await _remote_invite(svc, "waiting")  # Carol's invite, not yet played
+    with pytest.raises(AppSessionTakenError):
+        await _continue(svc, "waiting")
+    assert fed.sent_events == []
+
+
+@pytest.mark.asyncio
+async def test_continue_needs_someone_the_sheet_lists_and_counts_as_an_invite():
+    svc, fed, _, _ = _mailbox_svc(blocked_ids={"ru-carol"})
+    with pytest.raises(AppContactNotFoundError):
+        await _continue(svc, "g")
+    svc2, _, _, _ = _mailbox_svc()
+    await _continue(svc2, "g1")
+    assert (await svc2.invite_counts(app_id="chess", user_id="u-bob"))["today"] == 1
+    assert fed.sent_events == []
+
+
+@pytest.mark.asyncio
+async def test_an_inbound_continue_waits_in_needs_you_and_holds_moves_until_play():
+    svc, _, ws, bus = _mailbox_svc()
+    await _inbound_continue(svc, "old-game")
+    (invite,) = svc._app_repo.invites
+    assert invite.payload["verb"] == "continue"
+    (ev,) = [e for e in bus.published if isinstance(e, AppChallengeReceived)]
+    assert ev.continued is True
+    await _inbound_move(svc, {"n": 1}, session_id="old-game")
+    assert ws.user_calls == []  # nothing reaches the app before Play
+    await svc.accept_session(
+        app_id="chess", session_id="old-game", actor_user_id="u-bob"
+    )
+    (held,) = await svc.take_held(app_id="chess", actor_user_id="u-bob")
+    assert held.held["payload"] == {"n": 1}
+    await _move(svc, "old-game")  # Bob answers in the game
+
+
+@pytest.mark.asyncio
+async def test_an_inbound_continue_cannot_hijack_a_known_session():
+    """A continue for a session id the person already has a row for — a
+    game with someone, or an invite waiting from someone — is dropped:
+    nobody (another household, or another person of the same one) can
+    point a session id at themselves."""
+    svc, _, _, bus = _mailbox_svc()
+    await _know(svc, "u-bob", "g", _remote_target("peer-inst-id", "carol"))
+    await _inbound_continue(svc, "g", from_user="dave")
+    await _inbound_continue(svc, "g", from_user="carol")
+    row = await svc._app_repo.get_pending_session("chess", "u-bob", "g")
+    assert row.state == "active" and row.is_with("peer-inst-id", "carol")
+    await _remote_invite(svc, "w")  # Carol's open
+    await _inbound_continue(svc, "w", from_user="dave")
+    invite = await svc._app_repo.get_pending_session("chess", "u-bob", "w")
+    assert invite.from_user == "carol"
+    assert not any(
+        isinstance(e, AppChallengeReceived) and e.continued for e in bus.published
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_local_continue_asks_the_person_here():
+    svc, fed, _, bus = _mailbox_svc()
+    await _continue(svc, "g", _local_target("u-ann"))
+    assert fed.sent_events == []
+    (invite,) = svc._app_repo.invites
+    assert (invite.user_id, invite.from_user, invite.payload["verb"]) == (
+        "u-ann",
+        "u-bob",
+        "continue",
+    )
+    (ev,) = [e for e in bus.published if isinstance(e, AppChallengeReceived)]
+    assert ev.continued and ev.to_user_id == "u-ann"

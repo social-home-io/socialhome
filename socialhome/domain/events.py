@@ -2618,6 +2618,9 @@ class AppChallengeReceived(DomainEvent):
     #: The challenger's user id — never shown, only checked against the
     #: recipient's personal and guardian blocks (``None``: not known).
     from_user_id: str | None = None
+    #: A "continue game" (an old game picked up again through the sheet),
+    #: not a new invite — "Ben wants to continue your Chess game".
+    continued: bool = False
 
 
 @dataclass(slots=True, frozen=True)

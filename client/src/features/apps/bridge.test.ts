@@ -991,4 +991,27 @@ describe('people.pick (the invite sheet)', () => {
     expect(pickRequest({ suggest: { instance_id: 'x', user_ref: '', is_local: false } })).toEqual({ purpose: 'play', max: 1 })
     expect(pickRequest({ suggest: 'ben' })).toEqual({ purpose: 'play', max: 1 })
   })
+
+  it('continue: one game and the one person the app names; anything less is refused', () => {
+    const ben = { instance_id: 'brookside', user_ref: 'ben', is_local: false }
+    expect(pickRequest({ purpose: 'continue', sessionId: 'old-game', suggest: ben, max: 5 }))
+      .toEqual({ purpose: 'continue', max: 1, sessionId: 'old-game', suggest: ben })
+    for (const bad of [
+      { purpose: 'continue', suggest: ben },
+      { purpose: 'continue', sessionId: 'old-game' },
+      { purpose: 'continue', sessionId: '../x', suggest: ben },
+      { purpose: 'continue', sessionId: 7, suggest: ben },
+    ]) {
+      expect(() => pickRequest(bad)).toThrow()
+    }
+  })
+
+  it('an invalid continue is refused without opening a sheet or starting the cooldown', async () => {
+    const handler = mount()
+    await call(handler, 1, { purpose: 'continue', sessionId: 'old-game' })
+    expect(sheets).toEqual([])
+    expect(replies()[0]).toMatchObject({ ok: false, error: { code: 'invalid' } })
+    await call(handler, 2, { max: 1 })
+    expect(sheets).toHaveLength(1)
+  })
 })

@@ -145,7 +145,9 @@ async def env(aiohttp_client, tmp_dir, monkeypatch):
         sent.append((to_instance_id, f"app_message:{app_id}"))
 
     async def _to_user(_self, user_id, payload):
-        frames.append(user_id)
+        # Only what reaches an app (not the bell's own frames).
+        if isinstance(payload, dict) and payload.get("type") == "app.message":
+            frames.append(user_id)
         return 1
 
     monkeypatch.setattr(FederationService, "send_event", _send_event)
@@ -334,3 +336,114 @@ async def test_a_protected_childs_picker_lists_only_people_it_can_message(env):
     assert [r["session_id"] for r in rows] == []
     svc = app[app_federation_service_key]
     assert await svc.list_contacts(app_id="chess", self_user_id="u-bob") == []
+
+
+# ── Continue game (owner decision 2026-10-29) ────────────────────────────
+
+
+async def _continue(client, sid: str, target: dict, who: str = "bob"):
+    """The sheet's "Continue game with …"."""
+    return await client.post(
+        f"{BASE}/sessions/{sid}/continue", json={"target": target}, headers=_auth(who)
+    )
+
+
+async def _inbound(
+    app, sender: str, payload: dict, kind=FederationEventType.APP_SESSION
+):
+    handlers = app[federation_service_key]._event_registry.handlers_for(kind)
+    for handler in handlers:
+        await handler(
+            FederationEvent(
+                msg_id=f"m-{sender}-{payload.get('session_id')}-{payload.get('verb')}",
+                event_type=kind,
+                from_instance=sender,
+                to_instance="us",
+                timestamp=datetime.now(UTC).isoformat(),
+                payload={"app_id": "chess", "to_user": "bob", **payload},
+            )
+        )
+
+
+async def _row(db, sid: str):
+    return await db.fetchone(
+        "SELECT state, from_instance, from_user FROM app_pending_sessions"
+        " WHERE user_id='u-bob' AND session_id=?",
+        (sid,),
+    )
+
+
+async def test_continue_picks_an_unknown_game_up_through_the_sheet_only(env):
+    _, client, db = env
+    # The app alone can't: the game is unknown.
+    assert (await _send(client, "old-game", ALICE)).status == 403
+    r = await _continue(client, "old-game", ALICE)
+    assert r.status == 200 and (await r.json()) == {"session_id": "old-game"}
+    assert sent == [(PEER, "app_session")]
+    assert tuple(await _row(db, "old-game")) == ("active", PEER, "alice")
+    assert (await _send(client, "old-game", ALICE)).status == 200
+    # A bad id never reaches the service.
+    assert (await _continue(client, "bad.id", ALICE)).status == 400
+
+
+async def test_continue_never_moves_a_known_session_to_someone_else(env):
+    app, client, db = env
+    own = app[federation_service_key].own_instance_id
+    carl = {"instance_id": own, "user_ref": "u-carl", "is_local": True}
+    sid = (await (await _invite(client, ALICE)).json())["session_id"]
+    r = await _continue(client, sid, carl)
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "APP_SESSION_TAKEN"
+    assert tuple(await _row(db, sid)) == ("active", PEER, "alice")
+
+
+async def test_a_third_party_cannot_hijack_a_game_with_a_continue(env):
+    """Eve (another paired household) sends ``continue`` for a session id
+    Bob plays with Alice, and for one where Alice's invite waits: both are
+    dropped — the rows still name Alice, nothing reaches Bob, no bell."""
+    app, client, db = env
+    sid = (await (await _invite(client, ALICE)).json())["session_id"]
+    await _inbound(
+        app, SPACE_ONLY, {"session_id": sid, "verb": "continue", "from_user": "eve"}
+    )
+    await _inbound(
+        app, PEER, {"session_id": "waiting", "verb": "open", "from_user": "alice"}
+    )
+    await _inbound(
+        app,
+        SPACE_ONLY,
+        {"session_id": "waiting", "verb": "continue", "from_user": "eve"},
+    )
+    assert tuple(await _row(db, sid)) == ("active", PEER, "alice")
+    assert tuple(await _row(db, "waiting")) == ("invited", PEER, "alice")
+    assert frames == []
+    rows = await db.fetchall("SELECT type FROM notifications WHERE user_id='u-bob'", ())
+    assert "app_challenge_continue" not in {r["type"] for r in rows}
+
+
+async def test_an_inbound_continue_takes_only_the_continuers_moves(env):
+    """Alice continues an old game with Bob: it waits in Needs you; her
+    moves are held, Eve's on the same id never are (nor reach Bob); after
+    Play only Alice's arrive and Bob can answer her."""
+    app, client, db = env
+    await _inbound(
+        app, PEER, {"session_id": "g", "verb": "continue", "from_user": "alice"}
+    )
+    assert tuple(await _row(db, "g")) == ("invited", PEER, "alice")
+    for sender, user in ((PEER, "alice"), (SPACE_ONLY, "eve")):
+        await _inbound(
+            app,
+            sender,
+            {"session_id": "g", "from_user": user, "data": {"by": user}},
+            kind=FederationEventType.APP_MESSAGE,
+        )
+    assert frames == []
+    rows = await db.fetchall("SELECT type FROM notifications WHERE user_id='u-bob'", ())
+    assert "app_challenge_continue" in {r["type"] for r in rows}
+    r = await client.post(f"{BASE}/sessions/g/accept", headers=_auth("bob"))
+    assert r.status == 200
+    held = (await (await client.post(f"{BASE}/held", headers=_auth("bob"))).json())[
+        "messages"
+    ]
+    assert [m["payload"] for m in held] == [{"by": "alice"}]
+    assert (await _send(client, "g", ALICE)).status == 200

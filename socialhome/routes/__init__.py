@@ -50,6 +50,7 @@ from .apps import (
     AppRequestsView,
     AppSessionAcceptView,
     AppSessionCancelView,
+    AppSessionContinueView,
     AppSessionDeclineView,
     AppSessionsView,
     AppStoreCollectionView,
@@ -1370,6 +1371,10 @@ def setup_routes(app: web.Application) -> None:
     )
     app.router.add_view(
         "/api/apps/{app_id}/sessions/{session_id}/cancel", AppSessionCancelView
+    )
+    app.router.add_view(
+        "/api/apps/{app_id}/sessions/{session_id}/continue",
+        AppSessionContinueView,
     )
     app.router.add_view("/api/apps/{app_id}/messages", AppMessagesView)
     app.router.add_view("/api/apps/{app_id}/held", AppHeldView)

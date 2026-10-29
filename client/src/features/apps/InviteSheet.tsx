@@ -27,6 +27,7 @@ import { Button } from '@/components/Button'
 import { Modal } from '@/components/Modal'
 import { showToast } from '@/components/Toast'
 import {
+  continueGame,
   getInvitable,
   sendInvite,
   type InvitablePerson,
@@ -77,10 +78,14 @@ export function InviteSheet({ appId, appName, request, onDone }: {
   const [sending, setSending] = useState(false)
   const [refusal, setRefusal] = useState<Limit>(null)
   const [sendFailed, setSendFailed] = useState(false)
+  const [taken, setTaken] = useState(false)
   /** When the sheet appeared: Send does nothing before SEND_ARM_MS. */
   const shownAt = useRef(Date.now())
   const done = useRef(false)
   const single = request.max <= 1
+  /** "Continue game with Ben": one old game, the one person the app
+   *  names — the person confirms (D3); nobody else is offered. */
+  const continuing = request.purpose === 'continue'
 
   const finish = (out: PickedPerson[]) => {
     if (done.current) return
@@ -96,9 +101,9 @@ export function InviteSheet({ appId, appName, request, onDone }: {
       // The list (and a suggested person) appear now and Send may become
       // live under the finger: the 600 ms count from here.
       shownAt.current = Date.now()
-      setPeople(r.people)
-      setCounts(r.invites)
       const s = request.suggest
+      setPeople(continuing ? r.people.filter(p => !!s && keyOf(p) === keyOf(s)) : r.people)
+      setCounts(r.invites)
       if (s && r.people.some(p => keyOf(p) === keyOf(s))) setPicked([keyOf(s)])
     }).catch(() => {
       if (!cancelled) setLoadFailed(true)
@@ -133,10 +138,13 @@ export function InviteSheet({ appId, appName, request, onDone }: {
     if (sending || chosen.length === 0 || limit) return
     setSending(true)
     setSendFailed(false)
+    setTaken(false)
     const out: PickedPerson[] = []
     try {
       for (const p of chosen) {
-        const session_id = await sendInvite(appId, p)
+        const session_id = continuing && request.sessionId
+          ? await continueGame(appId, request.sessionId, p)
+          : await sendInvite(appId, p)
         out.push({
           instance_id: p.instance_id,
           user_ref: p.user_ref,
@@ -154,11 +162,14 @@ export function InviteSheet({ appId, appName, request, onDone }: {
         return
       }
       if (capped) setRefusal(capped)
+      else if (err instanceof ApiError && err.code === 'APP_SESSION_TAKEN') setTaken(true)
       else setSendFailed(true)
       setSending(false)
       return
     }
-    showToast(out.length === 1
+    showToast(continuing
+      ? t('apps.invite.continued', { name: chosen[0].person_name })
+      : out.length === 1
       ? t('apps.invite.sent_one', { name: chosen[0].person_name })
       : t('apps.invite.sent_many', { count: String(out.length) }))
     finish(out)
@@ -168,7 +179,9 @@ export function InviteSheet({ appId, appName, request, onDone }: {
     ? t('apps.invite.limit_open', { count: String(counts?.max_open ?? 10), name: appName })
     : t('apps.invite.limit_daily', { count: String(counts?.max_per_day ?? 30) })
 
-  const sendLabel = chosen.length === 0
+  const sendLabel = continuing && chosen.length === 1
+    ? t('apps.invite.continue_send', { name: chosen[0].person_name })
+    : chosen.length === 0
     ? t('apps.invite.send')
     : chosen.length === 1
       ? t('apps.invite.send_to', { name: chosen[0].person_name })
@@ -178,10 +191,12 @@ export function InviteSheet({ appId, appName, request, onDone }: {
     <Modal
       open
       onClose={() => finish([])}
-      title={t('apps.invite.title', { name: appName })}
+      title={t(continuing ? 'apps.invite.continue_title' : 'apps.invite.title', { name: appName })}
       class="sh-invite-sheet"
     >
-      <p class="sh-invite-sheet__lead">{t('apps.invite.lead', { name: appName })}</p>
+      <p class="sh-invite-sheet__lead">
+        {t(continuing ? 'apps.invite.continue_lead' : 'apps.invite.lead', { name: appName })}
+      </p>
 
       {people === null && !loadFailed && (
         <p class="sh-invite-sheet__status" role="status">{t('apps.invite.loading')}</p>
@@ -195,12 +210,14 @@ export function InviteSheet({ appId, appName, request, onDone }: {
       )}
 
       {people !== null && people.length === 0 && (
-        <p class="sh-invite-sheet__status">{t('apps.invite.empty')}</p>
+        <p class="sh-invite-sheet__status">
+          {t(continuing ? 'apps.invite.continue_gone' : 'apps.invite.empty')}
+        </p>
       )}
 
       {people !== null && people.length > 0 && (
         <>
-          {people.length >= SEARCH_FROM && (
+          {!continuing && people.length >= SEARCH_FROM && (
             <input
               type="search"
               class="sh-input sh-invite-sheet__search"
@@ -240,13 +257,16 @@ export function InviteSheet({ appId, appName, request, onDone }: {
             })}
           </fieldset>
           {chosen.length === 1 && !limit && (
-            <p class="sh-invite-sheet__hint">{t('apps.invite.hint', { name: chosen[0].person_name })}</p>
+            <p class="sh-invite-sheet__hint">
+              {t(continuing ? 'apps.invite.continue_hint' : 'apps.invite.hint', { name: chosen[0].person_name })}
+            </p>
           )}
         </>
       )}
 
       {limit && <p class="sh-invite-sheet__limit" role="alert">{limitText(limit)}</p>}
       {sendFailed && <p class="sh-invite-sheet__limit" role="alert">{t('apps.invite.send_failed')}</p>}
+      {taken && <p class="sh-invite-sheet__limit" role="alert">{t('apps.invite.taken')}</p>}
 
       <div class="sh-modal-actions sh-invite-sheet__actions">
         <Button variant="secondary" onClick={() => finish([])}>{t('common.cancel')}</Button>

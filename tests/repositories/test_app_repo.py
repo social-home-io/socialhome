@@ -671,3 +671,40 @@ async def test_a_flood_of_invites_never_pushes_out_a_game_or_a_sent_invite(db):
     assert len([r for r in rows if r.state == "invited"]) == 50
     mine = await repo.get_pending_session("chess", uid, "mine")
     assert mine is not None and mine.sent
+
+
+@pytest.mark.asyncio
+async def test_prune_keeps_a_game_90_days_and_an_invite_14(db):
+    """Owner decision 2026-10-29: a game being played stays known 90 days
+    after its last move; a waiting invite still goes after 14."""
+    repo = SqliteAppRepo(db)
+    uid = await _seed_user(db)
+    await repo.install(_app())
+
+    def ago(days: int) -> str:
+        return (datetime.now(UTC) - timedelta(days=days)).isoformat()
+
+    for sid, days in (("game-60", 60), ("game-91", 91)):
+        await repo.add_active_session(
+            dataclasses.replace(
+                _sent(uid, sid), created_at=ago(days), updated_at=ago(days)
+            )
+        )
+    await repo.add_pending_session(_pending(uid, "invite-10", created_at=ago(10)))
+    await repo.add_pending_session(_pending(uid, "invite-15", created_at=ago(15)))
+    assert await repo.prune_pending_sessions() == 2
+    left = sorted(r.session_id for r in await repo.list_sessions("chess", uid))
+    assert left == ["game-60", "invite-10"]
+
+
+@pytest.mark.asyncio
+async def test_an_invite_is_refreshed_only_by_the_same_person(db):
+    """Another person of the same household reusing a waiting invite's
+    session id can't re-point it at themselves."""
+    repo = SqliteAppRepo(db)
+    uid = await _seed_user(db)
+    await repo.install(_app())
+    await repo.add_pending_session(_pending(uid, "w", from_user="alice@remote"))
+    await repo.add_pending_session(_pending(uid, "w", from_user="mallory@remote"))
+    row = await repo.get_pending_session("chess", uid, "w")
+    assert row is not None and row.from_user == "alice@remote"

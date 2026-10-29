@@ -373,6 +373,19 @@ export async function getInvitable(appId: string): Promise<{ people: InvitablePe
   }
 }
 
+/** The sheet's "Continue game with …": pick an old game up again. */
+export async function continueGame(
+  appId: string,
+  sessionId: string,
+  person: Pick<InvitablePerson, 'instance_id' | 'user_ref' | 'is_local'>,
+): Promise<string> {
+  const r = await api.post(
+    `/api/apps/${encodeURIComponent(appId)}/sessions/${encodeURIComponent(sessionId)}/continue`,
+    { target: { instance_id: person.instance_id, user_ref: person.user_ref, is_local: person.is_local } },
+  ) as { session_id: string }
+  return r.session_id
+}
+
 /** The sheet's Send: one invite to one picked person. */
 export async function sendInvite(
   appId: string,

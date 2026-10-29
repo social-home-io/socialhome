@@ -80,6 +80,10 @@ export const PICK_TOO_SOON = 'too_soon'
  *  new session id. */
 export const UNKNOWN_SESSION = 'unknown_session'
 
+/** ``people.pick`` asked for something it can't be (``continue`` without
+ *  the game's ``sessionId`` or the person). */
+export const PICK_INVALID = 'invalid'
+
 /** After a sheet closes, the same app can't open another for this long:
  *  an app can't keep throwing it up under the person's finger. */
 export const PICK_COOLDOWN_MS = 5_000
@@ -97,9 +101,14 @@ export interface PersonRef {
  *  never the app's own text: Social Home writes every line of the sheet,
  *  so an app can't put words in its mouth. */
 export interface PickRequest {
-  purpose: 'play'
-  /** How many people may be picked (1…:data:`PICK_MAX`). */
+  /** ``play`` — invite someone new; ``continue`` — pick up a game Social
+   *  Home no longer knows (``sessionId``) with the person ``suggest``
+   *  names ("Continue game with Ben"). */
+  purpose: 'play' | 'continue'
+  /** How many people may be picked (1…:data:`PICK_MAX`; 1 to continue). */
   max: number
+  /** ``continue`` only: the app's own id for the game. */
+  sessionId?: string
   /** One person to show selected — the person still taps Send, which
    *  names them. Ignored when they aren't someone the sheet lists. */
   suggest?: PersonRef
@@ -194,13 +203,24 @@ function personRef(v: unknown): PersonRef | undefined {
 /** ``people.pick`` params as a :type:`PickRequest` — nothing the app wrote
  *  is shown as text. */
 export function pickRequest(params: unknown): PickRequest {
-  const p = (params ?? {}) as { max?: unknown; suggest?: unknown }
+  const p = (params ?? {}) as { max?: unknown; suggest?: unknown; purpose?: unknown; sessionId?: unknown }
+  const suggest = personRef(p.suggest)
+  if (p.purpose === 'continue') {
+    // One game, one person, both named by the app — the person confirms.
+    const sid = typeof p.sessionId === 'string' && SESSION_ID.test(p.sessionId) ? p.sessionId : null
+    if (!sid || !suggest) {
+      throw new Refused(PICK_INVALID, 'Continuing a game needs its sessionId and the person (suggest).')
+    }
+    return { purpose: 'continue', max: 1, sessionId: sid, suggest }
+  }
   const max = typeof p.max === 'number' && Number.isFinite(p.max) ? Math.floor(p.max) : 1
   const req: PickRequest = { purpose: 'play', max: Math.min(PICK_MAX, Math.max(1, max)) }
-  const suggest = personRef(p.suggest)
   if (suggest) req.suggest = suggest
   return req
 }
+
+/** An app's own session id (what ``?session=`` and the server accept). */
+const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/
 
 /** The permission a game with *target* takes: ``people`` for someone in
  *  this household, ``federation`` for anyone in another one (the same rule
@@ -495,6 +515,7 @@ export function mountBridge(
           if (!ctx.pickPeople) {
             throw new Refused('unavailable', 'This Social Home can\'t show the invite sheet here.')
           }
+          const pickReq = pickRequest(params)
           if (sheetOpen) {
             throw new Refused(PICK_BUSY, 'An invite sheet is already open.')
           }
@@ -505,7 +526,7 @@ export function mountBridge(
           sheetOpen = true
           let picked: PickedPerson[]
           try {
-            picked = await ctx.pickPeople(pickRequest(params))
+            picked = await ctx.pickPeople(pickReq)
           } finally {
             sheetOpen = false
             sheetClosedAt.set(appId, Date.now())

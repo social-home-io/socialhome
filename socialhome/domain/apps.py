@@ -20,6 +20,18 @@ from .errors import CodedError, WrongTypeError
 #: hours.
 PENDING_SESSION_TTL_SECONDS: int = 14 * 24 * 60 * 60  # 14 days
 
+#: How long a game being played (an ``active`` session row) stays known
+#: after its last move or held message (owner decision 2026-10-29): a
+#: correspondence game may rest for weeks. Past it the game can be picked
+#: up again only through Social Home's sheet ("Continue game with Ben").
+ACTIVE_SESSION_TTL_SECONDS: int = 90 * 24 * 60 * 60  # 90 days
+
+#: ``APP_SESSION`` verb: "pick this game up again" — a game this
+#: household no longer knows (from before the mailbox, or quiet past
+#: :data:`ACTIVE_SESSION_TTL_SECONDS`) re-registered through the sheet.
+#: The other side gets it as an invite (Needs you → Play), never silently.
+SESSION_VERB_CONTINUE: str = "continue"
+
 #: ``app_pending_sessions.state`` (0131): an invite waiting in Needs you…
 SESSION_INVITED: str = "invited"
 #: …or a game being played (Play pressed, or this person invited / moved).
@@ -175,6 +187,16 @@ class AppSessionUnknownError(AppError, CodedError):
     status = 403
     code = "APP_SESSION_UNKNOWN"
     detail = "This app can only message games you started or accepted."
+
+
+class AppSessionTakenError(AppError, CodedError):
+    """ "Continue game" for a session id this household already knows for
+    the person with someone else (or still waiting as an invite): a session
+    id is never moved to another opponent. 409."""
+
+    status = 409
+    code = "APP_SESSION_TAKEN"
+    detail = "That game is already known with someone else."
 
 
 class AppInviteLimitError(AppError, CodedError):
