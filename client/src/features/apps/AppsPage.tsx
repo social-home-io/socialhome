@@ -25,6 +25,7 @@ import {
   catalogLoading,
   appsError,
   catalogError,
+  catalogEnabled,
   loadInstalled,
   loadCatalog,
   loadUpdates,
@@ -213,8 +214,10 @@ function AppCard({
     setTogglingEnabled(true)
     try {
       await setEnabled(app.app_id, !app.enabled)
-    } catch (err: unknown) {
-      showToast((err as Error).message ?? t('apps.update_failed'), 'error')
+    } catch {
+      // Say which action failed — "Could not update app." read as if an
+      // update had been attempted.
+      showToast(app.enabled ? t('apps.disable_failed') : t('apps.enable_failed'), 'error')
     } finally {
       setTogglingEnabled(false)
     }
@@ -479,6 +482,14 @@ function CatalogSection() {
       <div class="sh-apps-error" role="alert">
         <p>{error}</p>
         <Button onClick={() => { void loadCatalog() }}>{t('common.retry')}</Button>
+      </div>
+    )
+  }
+
+  if (!catalogEnabled.value) {
+    return (
+      <div class="sh-apps-empty">
+        <p class="sh-muted">{t('apps.catalog_disabled')}</p>
       </div>
     )
   }

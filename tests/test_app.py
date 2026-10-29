@@ -20,6 +20,7 @@ from socialhome.app import (
     MAP_TILE_USER_AGENT,
     SIGNED_MEDIA_GET_LIMIT,
     SIGNED_MEDIA_GET_RULES,
+    _build_app_catalog,
     _build_gfs_relay_inbound,
     _build_gfs_route_discovery,
     _build_gfs_route_resolver,
@@ -541,6 +542,21 @@ async def test_gfs_relay_is_a_noop_without_consumers():
         space_public_inbound=None,
         space_subscriber_key_inbound=None,
     )
+
+
+@pytest.mark.parametrize("url", ["", "   "])
+def test_empty_apps_catalog_url_turns_the_catalog_off(tmp_path, url):
+    """``apps_catalog_url = ""`` is documented as "disables catalog" — no
+    catalog service, rather than one that fetches an empty URL (a 500)."""
+    cfg = Config(data_dir=str(tmp_path), apps_catalog_url=url)
+    assert _build_app_catalog(cfg) is None
+
+
+def test_apps_catalog_url_builds_the_catalog(tmp_path):
+    cfg = Config(data_dir=str(tmp_path), apps_catalog_url=" https://x.test/c.json ")
+    catalog = _build_app_catalog(cfg)
+    assert catalog is not None
+    assert catalog._catalog_url == "https://x.test/c.json"
 
 
 def test_build_link_previews_wires_the_guarded_fetcher(tmp_path):

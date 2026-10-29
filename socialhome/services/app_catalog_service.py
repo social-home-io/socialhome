@@ -15,7 +15,12 @@ from typing import Any
 import aiohttp
 import orjson
 
-from ..domain.apps import AppCatalogEntry
+from ..domain.apps import (
+    MAX_BUNDLE_DOWNLOAD_BYTES,
+    AppBundleTooLargeError,
+    AppCatalogEntry,
+    AppDownloadError,
+)
 
 log = logging.getLogger(__name__)
 
@@ -31,11 +36,59 @@ CATALOG_TTL_S: float = 24 * 60 * 60
 RELEASE_MAX_FIELD_SIZE: int = 64 * 1024
 
 
+#: Whole-request timeout (seconds) for a catalog fetch or bundle download —
+#: explicit, so Install / Update fail with a clear error instead of spinning
+#: for aiohttp's 5-minute default.
+RELEASE_TIMEOUT_S: float = 60.0
+
+#: Read size while streaming a bundle download.
+_DOWNLOAD_CHUNK_BYTES = 64 * 1024
+
+
 def release_session() -> aiohttp.ClientSession:
     """A short-lived session for the app catalog and bundle downloads, with
     room for the release host's long response headers
-    (:data:`RELEASE_MAX_FIELD_SIZE`)."""
-    return aiohttp.ClientSession(max_field_size=RELEASE_MAX_FIELD_SIZE)
+    (:data:`RELEASE_MAX_FIELD_SIZE`) and a :data:`RELEASE_TIMEOUT_S` cap."""
+    return aiohttp.ClientSession(
+        max_field_size=RELEASE_MAX_FIELD_SIZE,
+        timeout=aiohttp.ClientTimeout(total=RELEASE_TIMEOUT_S),
+    )
+
+
+async def download_bundle(url: str) -> bytes:
+    """GET an app bundle from the operator-configured catalog's *url*.
+
+    Bounded: a declared ``Content-Length`` past
+    :data:`~socialhome.domain.apps.MAX_BUNDLE_DOWNLOAD_BYTES` is refused
+    before reading, and the body is streamed and abandoned the moment it
+    passes the cap (a chunked answer declares nothing), so a hostile or
+    broken host can't exhaust memory. The session's
+    :data:`RELEASE_TIMEOUT_S` bounds the time.
+
+    Redirects are followed: release assets redirect to the CDN.
+
+    Raises :class:`AppBundleTooLargeError` past the cap and
+    :class:`AppDownloadError` on a timeout, network or HTTP error.
+    """
+    cap = MAX_BUNDLE_DOWNLOAD_BYTES
+    try:
+        async with release_session() as session, session.get(url) as resp:
+            resp.raise_for_status()
+            if resp.content_length is not None and resp.content_length > cap:
+                raise AppBundleTooLargeError(
+                    f"The app bundle is larger than {cap // (1024 * 1024)} MiB."
+                )
+            buf = bytearray()
+            async for chunk in resp.content.iter_chunked(_DOWNLOAD_CHUNK_BYTES):
+                buf += chunk
+                if len(buf) > cap:
+                    raise AppBundleTooLargeError(
+                        f"The app bundle is larger than {cap // (1024 * 1024)} MiB."
+                    )
+            return bytes(buf)
+    except (aiohttp.ClientError, TimeoutError) as exc:
+        log.warning("app bundle download from %s failed: %r", url, exc)
+        raise AppDownloadError() from exc
 
 
 class AppCatalogService:

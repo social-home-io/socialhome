@@ -2452,3 +2452,288 @@ async def test_an_inbound_close_from_the_challenger_withdraws_the_invite():
     ]
     # The close still reaches Bob's app.
     assert ws.user_calls[-1]["payload"]["payload"]["verb"] == "close"
+
+
+# ─── §CP.F2 guardian blocks (audit #10) ──────────────────────────────────────
+
+
+class _FakeChildProtection:
+    """Guardian blocks as ChildProtectionService answers them: symmetric
+    pairs of user ids (local or remote)."""
+
+    def __init__(
+        self,
+        pairs: set[frozenset[str]] | None = None,
+        *,
+        homes: dict[str, str] | None = None,
+    ) -> None:
+        self.pairs = pairs or set()
+        #: user_id → instance_id for the blocked people (household check).
+        self.homes = homes or {}
+        self.gates: list[object] = []
+
+    def register_gate(self, gate: object) -> None:
+        self.gates.append(gate)
+
+    async def is_protected(self, user_id: str) -> bool:
+        return any(user_id in p for p in self.pairs)
+
+    async def is_guardian_blocked(self, a: str, b: str) -> bool:
+        return frozenset({a, b}) in self.pairs
+
+    async def guardian_block_counterparts(self, user_id: str) -> frozenset[str]:
+        return frozenset(
+            other for p in self.pairs if user_id in p for other in p - {user_id}
+        )
+
+    async def guardian_blocks_household(
+        self, user_id: str | None, instance_id: str
+    ) -> bool:
+        for p in self.pairs:
+            if user_id is not None and user_id not in p:
+                continue
+            if any(self.homes.get(u) == instance_id for u in p):
+                return True
+        return False
+
+
+_KID = _make_user("u-kid", "kid", "Kid")
+_ADULT = _make_user("u-adult", "adult", "Local Adult")
+_REMOTE_ADULT = _make_remote_user(
+    user_id="ru-mallory",
+    instance_id="peer-inst-id",
+    remote_username="mallory",
+    display_name="Mallory",
+)
+
+
+def _guarded_svc(pairs: set[frozenset[str]], **kw):
+    cp = _FakeChildProtection(pairs, homes={"ru-mallory": "peer-inst-id"})
+    bus = _FakeBus()
+    svc, fed, ws = _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[_KID, _ADULT],
+        remote_users=[_REMOTE_ADULT],
+        bus=bus,
+        **kw,
+    )
+    svc.attach_child_protection(cp)  # type: ignore[arg-type]
+    return svc, fed, ws, bus, cp
+
+
+@pytest.mark.asyncio
+async def test_guardian_block_registers_app_federation_as_a_gate():
+    svc, _, _, _, cp = _guarded_svc(set())
+    assert cp.gates == [svc]
+
+
+@pytest.mark.asyncio
+async def test_guardian_blocked_people_are_not_in_each_others_app_contacts():
+    """Neither the protected minor nor the blocked adult (local or remote)
+    sees the other in the app contact picker."""
+    svc, _, _, _, _ = _guarded_svc(
+        {frozenset({"u-kid", "u-adult"}), frozenset({"u-kid", "ru-mallory"})}
+    )
+    kid_refs = {c["user_ref"] for c in await svc.list_contacts(self_user_id="u-kid")}
+    assert kid_refs.isdisjoint({"u-adult", "mallory"})
+    adult_refs = {
+        c["user_ref"] for c in await svc.list_contacts(self_user_id="u-adult")
+    }
+    assert "u-kid" not in adult_refs
+    assert "mallory" in adult_refs  # no block between the two adults
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("actor", "target"),
+    [
+        ("u-adult", {"instance_id": "own-inst-id", "user_ref": "u-kid"}),
+        ("u-kid", {"instance_id": "own-inst-id", "user_ref": "u-adult"}),
+    ],
+)
+async def test_guardian_blocked_local_pair_cannot_challenge_or_message(actor, target):
+    """Local loopback, both directions: no invite, no move, no frame."""
+    svc, _, ws, bus, _ = _guarded_svc({frozenset({"u-kid", "u-adult"})})
+    target = {**target, "is_local": True}
+    with pytest.raises(AppContactNotFoundError):
+        await svc.open_session(app_id="chess", target=target, actor_user_id=actor)
+    with pytest.raises(AppContactNotFoundError):
+        await svc.send_message(
+            app_id="chess",
+            target=target,
+            session_id="s",
+            payload={"m": 1},
+            actor_user_id=actor,
+        )
+    assert ws.user_calls == [] and ws.calls == []
+    assert bus.published == []
+
+
+@pytest.mark.asyncio
+async def test_protected_minor_cannot_challenge_or_message_a_guardian_blocked_remote():
+    """Outbound federated: nothing leaves for the blocked remote adult."""
+    svc, fed, _, _, _ = _guarded_svc({frozenset({"u-kid", "ru-mallory"})})
+    target = {"instance_id": "peer-inst-id", "user_ref": "mallory", "is_local": False}
+    with pytest.raises(AppContactNotFoundError):
+        await svc.open_session(app_id="chess", target=target, actor_user_id="u-kid")
+    with pytest.raises(AppContactNotFoundError):
+        await svc.send_message(
+            app_id="chess",
+            target=target,
+            session_id="s",
+            payload={"m": 1},
+            actor_user_id="u-kid",
+        )
+    assert fed.sent_events == [] and fed.sent_app_messages == []
+
+
+@pytest.mark.asyncio
+async def test_protected_minor_legacy_household_send_refused_across_guardian_block():
+    """A household-addressed (pre-v_18) send would reach everyone there,
+    the blocked adult included — refused like a non-contact."""
+    svc, fed, _, _, _ = _guarded_svc({frozenset({"u-kid", "ru-mallory"})})
+    target = {"instance_id": "peer-inst-id", "user_ref": "", "is_local": False}
+    with pytest.raises(AppContactNotFoundError):
+        await svc.open_session(app_id="chess", target=target, actor_user_id="u-kid")
+    assert fed.sent_events == []
+    # Another household is fine.
+    await svc.open_session(
+        app_id="chess",
+        target={"instance_id": "other-inst", "user_ref": "", "is_local": False},
+        actor_user_id="u-kid",
+    )
+    assert len(fed.sent_events) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("verb", ["open", "message"])
+async def test_inbound_from_guardian_blocked_remote_never_reaches_protected_minor(
+    verb,
+):
+    """Inbound federated JSON: no frame, no pending invite, no bell row."""
+    svc, _, ws, bus, _ = _guarded_svc({frozenset({"u-kid", "ru-mallory"})})
+    if verb == "open":
+        event = _make_event(
+            FederationEventType.APP_SESSION,
+            {
+                "app_id": "chess",
+                "session_id": "sess-g",
+                "verb": "open",
+                "to_user": "kid",
+                "from_user": "mallory",
+            },
+        )
+    else:
+        event = _make_event(
+            FederationEventType.APP_MESSAGE,
+            {
+                "app_id": "chess",
+                "session_id": "sess-g",
+                "data": {"m": 1},
+                "to_user": "kid",
+                "from_user": "mallory",
+            },
+        )
+    await svc.on_inbound_event(event)
+    assert ws.user_calls == [] and ws.calls == []
+    assert svc._app_repo.pending == []  # type: ignore[attr-defined]
+    assert bus.published == []
+
+
+@pytest.mark.asyncio
+async def test_inbound_binary_frame_from_guardian_blocked_remote_is_dropped():
+    svc, _, ws, _, _ = _guarded_svc({frozenset({"u-kid", "ru-mallory"})})
+    await svc.on_inbound_message(
+        "peer-inst-id",
+        "chess",
+        "sess-g",
+        {"m": 1},
+        to_user="kid",
+        from_user="mallory",
+    )
+    assert ws.user_calls == [] and ws.calls == []
+
+
+@pytest.mark.asyncio
+async def test_inbound_household_fanout_skips_guardian_blocked_minor():
+    """Legacy fan-out: a named blocked initiator misses the minor; an
+    unnamed sender from a household a guardian block names misses them too."""
+    svc, _, ws, _, _ = _guarded_svc(
+        {frozenset({"u-kid", "ru-mallory"})}, peer_version=17
+    )
+    await svc.on_inbound_event(
+        _make_event(
+            FederationEventType.APP_MESSAGE,
+            {"app_id": "chess", "session_id": "s", "data": {}, "from_user": "mallory"},
+        )
+    )
+    await svc.on_inbound_event(
+        _make_event(
+            FederationEventType.APP_MESSAGE,
+            {"app_id": "chess", "session_id": "s", "data": {}},
+        )
+    )
+    assert [c["user_ids"] for c in ws.calls] == [["u-adult"], ["u-adult"]]
+
+
+@pytest.mark.asyncio
+async def test_drain_drops_invites_from_someone_guardian_blocked_since():
+    """An invite that arrived before the guardian block is not handed to
+    the protected minor's app when it opens."""
+    svc, _, _, bus, cp = _guarded_svc(set())
+    await svc.on_inbound_event(
+        _make_event(
+            FederationEventType.APP_SESSION,
+            {
+                "app_id": "chess",
+                "session_id": "sess-old",
+                "verb": "open",
+                "to_user": "kid",
+                "from_user": "mallory",
+            },
+        )
+    )
+    await svc.open_session(
+        app_id="chess",
+        target={"instance_id": "own-inst-id", "user_ref": "u-kid", "is_local": True},
+        actor_user_id="u-adult",
+    )
+    cp.pairs = {frozenset({"u-kid", "ru-mallory"}), frozenset({"u-kid", "u-adult"})}
+    bus.published.clear()
+    assert await svc.drain_pending_sessions("chess", "u-kid") == []
+    ended = [e for e in bus.published if isinstance(e, AppChallengeEnded)]
+    assert [e.outcome for e in ended] == ["done"]
+    assert len(ended[0].session_ids) == 2
+
+
+@pytest.mark.asyncio
+async def test_declining_an_invite_from_someone_guardian_blocked_since_tells_them_nothing():
+    """The protected minor can still clear the old invite, but the decline
+    (a signal from them) never reaches the blocked adult, local or remote."""
+    svc, fed, ws, _, cp = _guarded_svc(set())
+    await svc.on_inbound_event(
+        _make_event(
+            FederationEventType.APP_SESSION,
+            {
+                "app_id": "chess",
+                "session_id": "sess-old",
+                "verb": "open",
+                "to_user": "kid",
+                "from_user": "mallory",
+            },
+        )
+    )
+    sid = await svc.open_session(
+        app_id="chess",
+        target={"instance_id": "own-inst-id", "user_ref": "u-kid", "is_local": True},
+        actor_user_id="u-adult",
+    )
+    cp.pairs = {frozenset({"u-kid", "ru-mallory"}), frozenset({"u-kid", "u-adult"})}
+    ws.user_calls.clear()
+    await svc.decline_session(
+        app_id="chess", session_id="sess-old", actor_user_id="u-kid"
+    )
+    await svc.decline_session(app_id="chess", session_id=sid, actor_user_id="u-kid")
+    assert fed.sent_events == []
+    assert ws.user_calls == []
+    assert svc._app_repo.pending == []  # type: ignore[attr-defined]

@@ -1286,6 +1286,12 @@ under `apps_path/<app_id>/<version>/` (`apps_path` / `SH_APPS_PATH`,
 default `<data_dir>/apps` — a dedicated app directory separate from user
 media, so on HAOS it persists at `/data/apps`). A mismatch aborts the
 install — a bundle is never unpacked until its digest is confirmed.
+Bundles are bounded (8 MiB download, 32 MiB / 256 files unpacked, 60 s
+timeout) so a broken or hostile catalog can't exhaust memory or disk, and
+an empty `apps_catalog_url` turns the catalog off instead of failing.
+Bundle responses carry a CSP `sandbox allow-scripts` matching the
+`AppHost` iframe, so the opaque origin holds even when a bundle URL is
+opened outside the frame.
 
 The registry lives in `installed_apps` (see `database.md` → **Apps**)
 with the service/repo pair `AppService` / `SqliteAppRepo`

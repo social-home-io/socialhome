@@ -54,6 +54,11 @@ BUNDLE_TTL_SECONDS: int = 300
 #: Cookie name prefix — the full name is ``{prefix}{app_id}``.
 BUNDLE_COOKIE_PREFIX: str = "sh_app_bundle_"
 
+#: The sandbox flags of the ``AppHost`` iframe (``client/src/features/apps/
+#: AppHost.tsx``) — scripts only, never ``allow-same-origin``. Repeated as the
+#: CSP ``sandbox`` directive so the opaque origin holds without the iframe.
+APP_SANDBOX: str = "allow-scripts"
+
 #: CSP applied to every bundle response.  ``connect-src 'none'`` is the
 #: key security invariant — the sandboxed app may NOT make outbound network
 #: requests that would bypass the SPA's API layer.
@@ -62,12 +67,18 @@ BUNDLE_COOKIE_PREFIX: str = "sh_app_bundle_"
 #: 'none'`` by intercepting fetch events.
 #: ``frame-ancestors 'self'`` is belt-and-suspenders with X-Frame-Options to
 #: prevent embedding by third-party origins.
+#: ``sandbox`` repeats the iframe's flags (:data:`APP_SANDBOX`) on the
+#: response itself: a signed bundle URL opened as a top-level tab (or framed
+#: without the attribute) would otherwise run on the SPA's origin and could
+#: read the bearer token from ``localStorage``. Inside ``AppHost`` the flags
+#: are the same, so the iframe behaves exactly as before.
 APP_CSP: str = (
     "default-src 'none'; script-src 'self' 'unsafe-inline'; "
     "style-src 'self' 'unsafe-inline'; img-src 'self' data:; "
     "font-src 'self' data:; media-src 'self' data:; "
     "connect-src 'none'; worker-src 'none'; base-uri 'none'; "
-    "form-action 'none'; frame-ancestors 'self'"
+    "form-action 'none'; frame-ancestors 'self'; "
+    f"sandbox {APP_SANDBOX}"
 )
 
 
@@ -227,6 +238,13 @@ class AppBundleView(BaseView):
         response.content_type = content_type
         response.headers["Content-Security-Policy"] = APP_CSP
         response.headers["X-Frame-Options"] = "SAMEORIGIN"
+        # A bundle file is only ever what its extension says — never sniffed
+        # into HTML/script — and the signed entry URL never leaks as a
+        # referrer. (No ``Cross-Origin-Resource-Policy``: the sandboxed
+        # iframe's opaque origin would fail ``same-origin`` for its own
+        # sub-resources; no COOP: a CSP sandbox with COOP refuses to load.)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
         response.headers["Cache-Control"] = "private, max-age=60"
 
         # Drop entry cookie BEFORE prepare() so it is included in the

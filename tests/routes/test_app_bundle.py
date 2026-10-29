@@ -18,6 +18,7 @@ sub-resource test and also test manual extraction for explicitness.
 from __future__ import annotations
 
 import pathlib
+import re
 import urllib.parse
 from unittest.mock import AsyncMock
 
@@ -27,7 +28,11 @@ from socialhome.app_keys import config_key, media_signer_key, platform_adapter_k
 from socialhome.domain.apps import AppAgeRestrictedError, AppManifest, InstalledApp
 from socialhome.platform.adapter import Capability
 from socialhome.repositories.app_repo import SqliteAppRepo
-from socialhome.routes.app_bundle import BUNDLE_COOKIE_PREFIX, BUNDLE_TTL_SECONDS
+from socialhome.routes.app_bundle import (
+    APP_SANDBOX,
+    BUNDLE_COOKIE_PREFIX,
+    BUNDLE_TTL_SECONDS,
+)
 from socialhome.services.app_service import AppService
 
 from .conftest import _auth
@@ -199,6 +204,42 @@ async def test_bundle_entry_served_with_valid_sig(client):
     cookie_name = f"{BUNDLE_COOKIE_PREFIX}{_APP_ID}"
     set_cookie = r.headers.get("Set-Cookie", "")
     assert cookie_name in set_cookie
+
+
+async def test_bundle_opened_top_level_still_runs_sandboxed(client):
+    """A signed bundle URL opened as a top-level tab must not run on the SPA
+    origin (where the bearer token sits in localStorage): the response
+    sandboxes itself with exactly the iframe's flags, entry and sub-resource
+    alike, and forbids MIME sniffing."""
+    config_obj = client.app[config_key]
+    _write_bundle(config_obj.apps_path)
+    await _seed_app(client._db)
+    r_runtime = await client.get(
+        f"/api/apps/{_APP_ID}/runtime", headers=_auth(client._tok)
+    )
+    entry_url = (await r_runtime.json())["entry_url"]
+    for url in (entry_url, f"/api/apps/{_APP_ID}/bundle/app.js"):
+        r = await client.get(url)
+        assert r.status == 200
+        directives = [
+            d.strip() for d in r.headers["Content-Security-Policy"].split(";")
+        ]
+        assert f"sandbox {APP_SANDBOX}" in directives
+        assert r.headers.get("X-Content-Type-Options") == "nosniff"
+        assert r.headers.get("Referrer-Policy") == "no-referrer"
+
+
+def test_bundle_sandbox_matches_the_app_host_iframe():
+    """The header's sandbox flags are the iframe's — never wider (that would
+    loosen a top-level open) and never narrower (that would break the app
+    inside the frame)."""
+    host = (
+        pathlib.Path(__file__).resolve().parents[2]
+        / "client/src/features/apps/AppHost.tsx"
+    ).read_text()
+    attrs = re.findall(r'^\s+sandbox="([^"]*)"\s*$', host, re.MULTILINE)
+    assert attrs == [APP_SANDBOX]
+    assert APP_SANDBOX == "allow-scripts"
 
 
 async def test_bundle_rejects_without_sig_or_cookie(client):
