@@ -424,9 +424,11 @@ class BaseView(web.View):
             # mirrors the existing ValueError convention.
             return error_response(400, "UNPROCESSABLE", str(exc))
         except AppAgeRestrictedError as exc:
-            return error_response(403, "FORBIDDEN", str(exc))
+            # Own codes (not FORBIDDEN) so the SPA tells "not for your
+            # account" from "an admin turned this app off".
+            return error_response(403, "APP_AGE_RESTRICTED", str(exc))
         except AppNotEnabledError as exc:
-            return error_response(403, "FORBIDDEN", str(exc))
+            return error_response(403, "APP_NOT_ENABLED", str(exc))
         except AppContactNotFoundError as exc:
             # Authorization gap (Task 6): the actor addressed a person who is
             # not in their challengeable roster. 403 FORBIDDEN matches the

@@ -3312,7 +3312,8 @@ button.sh-mention:hover { text-decoration: underline; text-underline-offset: 2px
   font-weight: 600;
   text-decoration: none;
 }
-.sh-post-permalink__back .sh-flip-rtl { display: inline-block; }
+.sh-post-permalink__back .sh-flip-rtl,
+.sh-app-host__bar .sh-flip-rtl { display: inline-block; }
 .sh-post-permalink__back:hover { color: var(--sh-text); background: var(--sh-bg-secondary); }
 .sh-post-permalink__back:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: 2px; }
 .sh-post-permalink__comments {
@@ -22081,6 +22082,14 @@ span.sh-hlv__who { cursor: default; }
   display: flex;
   flex-direction: column;
 }
+/* App names are headings (one per card) so a screen reader can jump
+ * between apps; they keep the card's body-text size. */
+.sh-app-card__name,
+.sh-catalog-row__name {
+  margin: 0;
+  font-size: var(--sh-font-size-base);
+  line-height: 1.4;
+}
 .sh-app-card__name {
   font-weight: 600;
   white-space: nowrap;
@@ -22091,28 +22100,9 @@ span.sh-hlv__who { cursor: default; }
 .sh-app-card__disabled-chip { flex-shrink: 0; }
 .sh-app-card__disabled-hint { font-size: var(--sh-font-size-sm); }
 
-/* Per-card admin ⋯ menu — reuses .sh-post-overflow / .sh-post-menu. */
+/* Per-card admin ⋯ menu — the shared OverflowMenu (.sh-post-menu). */
 .sh-app-card__menu { flex-shrink: 0; }
-.sh-app-menu { min-width: 200px; }
-.sh-app-menu__label {
-  padding: var(--sh-space-xs) var(--sh-space-md) calc(var(--sh-space-xs) / 2);
-  font-size: var(--sh-font-size-xs);
-  font-weight: 600;
-  color: var(--sh-text-muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-.sh-app-menu__sep {
-  height: 1px;
-  background: var(--sh-border);
-  margin: calc(var(--sh-space-xs) / 2) 0;
-}
-.sh-app-menu__radio {
-  display: flex;
-  align-items: center;
-  gap: var(--sh-space-sm);
-}
-.sh-app-menu__radio-mark { font-size: 0.75em; line-height: 1; }
+.sh-app-menu { min-width: 15rem; }
 .sh-app-card__caps {
   display: flex;
   flex-wrap: wrap;
@@ -22183,11 +22173,39 @@ span.sh-hlv__who { cursor: default; }
 
 /* ───── AppHost — sandboxed iframe launcher (§Apps) ─────────────────────── */
 
-.sh-app-host {
+/* The app takes the whole space under the topbar — full-bleed, like a
+ * chat thread: no page padding, no column cap. The column (topbar +
+ * main) is exactly the viewport tall — on a phone, the viewport above
+ * the fixed bottom tab bar — and the host takes what the topbar leaves,
+ * whatever the topbar's real height. So the app's board fits a 720 px
+ * desktop with no scrolling inside the frame, and a phone shows no
+ * empty band above the tab bar. */
+.sh-content:has(> .sh-main > .sh-app-host) {
   display: flex;
   flex-direction: column;
-  height: 100%;
-  min-height: 0; /* flex children must not overflow */
+  height: 100dvh;
+}
+.sh-main:has(> .sh-app-host) {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  max-width: none;
+}
+.sh-app-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+@media (max-width: 768px) {
+  .sh-content:has(> .sh-main > .sh-app-host) {
+    height: calc(
+      100dvh - var(--sh-mobile-nav-height) - env(safe-area-inset-bottom, 0px)
+    );
+  }
+  .sh-main:has(> .sh-app-host) { padding-bottom: 0; }
 }
 
 .sh-app-host__bar {
@@ -22196,27 +22214,60 @@ span.sh-hlv__who { cursor: default; }
   gap: var(--sh-space-sm);
   padding: var(--sh-space-xs) var(--sh-space-md);
   border-bottom: 1px solid var(--sh-border);
+  background: var(--sh-bg);
   flex-shrink: 0;
 }
 
 .sh-app-host__title {
+  margin: 0;
+  min-width: 0;
+  font-size: var(--sh-font-size-base);
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+/* The frame and the state on top of it share one box. */
+.sh-app-host__stage {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .sh-app-host__status {
+  position: absolute;
+  inset: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: var(--sh-space-sm);
-  padding: var(--sh-space-xl);
-  flex: 1 1 auto;
+  padding: var(--sh-space-xl) var(--sh-space-md);
+  text-align: center;
+  overflow-y: auto;
 }
-
-.sh-app-host__status--error { color: var(--sh-danger); }
+.sh-app-host__status-title {
+  margin: 0;
+  font-size: var(--sh-font-size-lg);
+  line-height: 1.3;
+  max-width: 32ch;
+}
+.sh-app-host__status-body {
+  margin: 0;
+  color: var(--sh-text-muted);
+  max-width: 44ch;
+  line-height: 1.5;
+}
+.sh-app-host__status-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--sh-space-sm);
+  margin-top: var(--sh-space-xs);
+}
 
 /*
  * .sh-app-frame — the sandboxed app iframe.
@@ -22225,16 +22276,18 @@ span.sh-hlv__who { cursor: default; }
  * "allow-scripts" only — never add "allow-same-origin".
  * See AppHost.tsx for the security rationale.
  *
- * Uses min-height so the frame is usable on short viewports while
- * filling the available space in taller ones via flex-grow.
+ * Fills the stage. Until the app's first bridge request it stays
+ * invisible (``--pending``): a server error body served in its place is
+ * never shown, and the loading / slow / failed state sits on top.
  */
 .sh-app-frame {
   border: 0;
   width: 100%;
   flex: 1 1 auto;
-  min-height: 70vh;
+  min-height: 0;
   display: block;
 }
+.sh-app-frame--pending { visibility: hidden; }
 
 @media (max-width: 480px) {
   .sh-apps-grid {
@@ -22242,9 +22295,6 @@ span.sh-hlv__who { cursor: default; }
   }
   .sh-app-host__bar {
     padding: var(--sh-space-xs) var(--sh-space-sm);
-  }
-  .sh-app-frame {
-    min-height: 60vh;
   }
 }
 

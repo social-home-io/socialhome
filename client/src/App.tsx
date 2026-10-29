@@ -9,6 +9,7 @@ import { t } from '@/i18n/i18n'
 import { isAuthed, currentUser, loadCurrentUser, token } from '@/store/auth'
 import { noteRoute } from '@/store/momentumSeen'
 import { noteViewerRoute } from '@/features/highlights/viewerReturn'
+import { noteAppRoute } from '@/features/apps/appReturn'
 import { instanceConfig, loadInstanceConfig } from '@/store/instance'
 import { usesIngressAuth } from '@/platform'
 import { isGuardian, loadGuardian } from '@/store/guardian'
@@ -334,6 +335,7 @@ export function App() {
             onRouteChange={(url: string) => {
               noteRoute(url, currentUser.value?.user_id)
               noteViewerRoute(url)
+              noteAppRoute(url)
             }}
           >
             {Object.entries(routes).map(([path, Component]) => {

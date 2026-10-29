@@ -141,6 +141,8 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   APP_DOWNLOAD_FAILED: () => t('error.app_download_failed'),
   APP_CATALOG_DISABLED: () => t('error.app_catalog_disabled'),
   APP_CATALOG_UNREACHABLE: () => t('error.app_catalog_unreachable'),
+  APP_NOT_ENABLED: () => t('error.app_not_enabled'),
+  APP_AGE_RESTRICTED: () => t('error.app_age_restricted'),
   IMAGE_UNREADABLE: () => t('error.image_unreadable'),
   // Connecting to a GFS (QR / pasted code, or onboarding's open sign-up).
   // Our own words for every refusal, never the GFS's (``routes/gfs.py``).

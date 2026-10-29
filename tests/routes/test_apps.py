@@ -703,7 +703,7 @@ async def test_store_delete(client):
 
 
 async def test_store_on_disabled_app_403(client, monkeypatch):
-    """Store op on a disabled app → 403 FORBIDDEN (AppNotEnabledError)."""
+    """Store op on a disabled app → 403 APP_NOT_ENABLED (AppNotEnabledError)."""
     await _seed_installed_enabled_app(client._db)
     monkeypatch.setattr(
         AppService,
@@ -716,7 +716,7 @@ async def test_store_on_disabled_app_403(client, monkeypatch):
     )
     assert r.status == 403
     body = await r.json()
-    assert body["error"]["code"] == "FORBIDDEN"
+    assert body["error"]["code"] == "APP_NOT_ENABLED"
 
 
 async def test_store_put_missing_value_field_400(client):
@@ -1407,7 +1407,7 @@ async def test_list_apps_minor_filtered_by_age(client, monkeypatch):
 
 
 async def test_age_restricted_error_returns_403(client, monkeypatch):
-    """AppAgeRestrictedError from any service method → 403 FORBIDDEN."""
+    """AppAgeRestrictedError from any service method → 403 APP_AGE_RESTRICTED."""
     monkeypatch.setattr(
         AppService,
         "store_get",
@@ -1422,7 +1422,7 @@ async def test_age_restricted_error_returns_403(client, monkeypatch):
     )
     assert r.status == 403
     body = await r.json()
-    assert body["error"]["code"] == "FORBIDDEN"
+    assert body["error"]["code"] == "APP_AGE_RESTRICTED"
 
 
 # ── GET /api/apps/updates ─────────────────────────────────────────────────

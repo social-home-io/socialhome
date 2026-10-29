@@ -46,6 +46,7 @@ import { Button } from '@/components/Button'
 import { Modal } from '@/components/Modal'
 import { showToast } from '@/components/Toast'
 import { TabHeader } from '@/components/TabHeader'
+import { OverflowMenu, type MenuItem } from '@/components/OverflowMenu'
 import { ApiError } from '@/api'
 import { safeIconSrc } from '@/utils/appIcon'
 import { CatalogFreshnessNote, catalogFreshnessText } from './CatalogFreshnessNote'
@@ -296,7 +297,7 @@ function AppCard({
           <span class="sh-app-card__icon-placeholder" aria-hidden="true">📦</span>
         )}
         <div class="sh-app-card__meta">
-          <span class="sh-app-card__name">{app.name}</span>
+          <h2 class="sh-app-card__name">{app.name}</h2>
           <span class="sh-muted sh-app-card__version">v{app.version}</span>
         </div>
         {isAdmin && !app.enabled && (
@@ -329,14 +330,18 @@ function AppCard({
 
       {update && (
         <div class="sh-app-card__update-row">
-          <span class="sh-chip sh-chip--update" aria-label={t('apps.update_available_aria', { version: update.latest_version })}>
-            {t('apps.update_available', { version: update.latest_version })}
+          {/* The visible chip has an arrow a screen reader would read out
+            * ("right arrow"); it hears the plain sentence instead. */}
+          <span class="sh-chip sh-chip--update">
+            <span aria-hidden="true">{t('apps.update_available', { version: update.latest_version })}</span>
+            <span class="sr-only">{t('apps.update_available_aria', { version: update.latest_version })}</span>
           </span>
           {isAdmin && (
             <Button
               variant="primary"
               loading={updating}
               onClick={() => { void handleUpdate() }}
+              aria-label={t('apps.update_named', { name: app.name })}
             >
               {t('apps.update')}
             </Button>
@@ -350,6 +355,7 @@ function AppCard({
             variant="primary"
             // In-app navigation (the router keeps the ingress prefix).
             onClick={() => route(`/apps/${encodeURIComponent(app.app_id)}`)}
+            aria-label={t('apps.open_named', { name: app.name })}
           >
             {t('apps.open')}
           </Button>
@@ -391,11 +397,13 @@ function boldName(sentence: string, name: string) {
 // ─── Per-card admin overflow menu ─────────────────────────────────────────────
 
 /**
- * The ⋯ menu holding the low-frequency admin settings. Reuses the shared
- * `.sh-post-overflow` / `.sh-post-menu` kebab pattern (same a11y + visuals as
- * PostCard / EventOverflowMenu). The minimum-age choices are
- * `role="menuitemradio"` — the correct ARIA for a single-choice set — rather
- * than a native `<select>` jammed into a popover.
+ * The ⋯ menu holding the low-frequency admin settings. The shared
+ * ``OverflowMenu`` gives it the full menu keyboard model: the first item
+ * (or the checked age) takes focus on open, ArrowUp / ArrowDown / Home /
+ * End / type-ahead move, Escape closes and returns focus to ⋯, and Tab
+ * out of the menu closes it. The minimum-age choices are
+ * ``menuitemradio`` items — each label says what it sets ("Minimum age:
+ * 13+"), since a menu can't hold a group heading.
  */
 function AppCardMenu({
   app,
@@ -412,81 +420,36 @@ function AppCardMenu({
   onSetMinAge: (value: number) => void
   onUninstall: () => void
 }) {
-  const [open, setOpen] = useState(false)
-  const close = () => setOpen(false)
-
+  const items: MenuItem[] = [
+    {
+      key: 'toggle',
+      label: app.enabled ? t('apps.disable') : t('apps.enable'),
+      disabled: togglingEnabled,
+      onSelect: onToggleEnabled,
+    },
+    // Age gate — only when the household actually has a protected minor
+    // (matches #536: no point configuring a gate nobody is subject to).
+    // Admin-authoritative value.
+    ...(householdHasProtectedMinor.value
+      ? minAgeOptions().map((opt): MenuItem => ({
+          key: `age-${opt.value}`,
+          label: t('apps.min_age.option', { age: opt.label }),
+          checked: app.min_age === opt.value,
+          disabled: settingMinAge,
+          onSelect: () => onSetMinAge(opt.value),
+        }))
+      : []),
+    { key: 'uninstall', label: t('apps.uninstall_menu'), danger: true, onSelect: onUninstall },
+  ]
   return (
-    <div class="sh-post-overflow-wrap sh-app-card__menu">
-      <button
-        type="button"
-        class="sh-post-overflow"
-        aria-label={t('apps.settings_aria', { name: app.name })}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        onClick={() => setOpen(v => !v)}
-        // Match PostCard/EventOverflowMenu: a short blur delay lets a click on
-        // a menu item (which steals focus) fire before the menu closes.
-        onBlur={() => setTimeout(close, 120)}
-        onKeyDown={(e) => { if (e.key === 'Escape') close() }}
-      >
-        ⋯
-      </button>
-      {open && (
-        <div class="sh-post-menu sh-app-menu" role="menu" onKeyDown={(e) => { if (e.key === 'Escape') close() }}>
-          <button
-            type="button"
-            role="menuitem"
-            disabled={togglingEnabled}
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => { onToggleEnabled(); close() }}
-          >
-            {app.enabled ? t('apps.disable') : t('apps.enable')}
-          </button>
-
-          {/* Age gate — only when the household actually has a protected
-           *  minor (matches #536: no point configuring a gate nobody is
-           *  subject to). Admin-authoritative value. */}
-          {householdHasProtectedMinor.value && (
-            <>
-              <div class="sh-app-menu__sep" role="separator" />
-              <div class="sh-app-menu__label" id={`minage-label-${app.app_id}`}>
-                {t('apps.min_age.label')}
-              </div>
-              <div role="group" aria-labelledby={`minage-label-${app.app_id}`}>
-                {minAgeOptions().map(opt => (
-                  <button
-                    key={opt.value}
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={app.min_age === opt.value}
-                    disabled={settingMinAge}
-                    class="sh-app-menu__radio"
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => { onSetMinAge(opt.value); close() }}
-                  >
-                    <span class="sh-app-menu__radio-mark" aria-hidden="true">
-                      {app.min_age === opt.value ? '●' : '○'}
-                    </span>
-                    {opt.label}
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
-
-          <div class="sh-app-menu__sep" role="separator" />
-          <button
-            type="button"
-            role="menuitem"
-            class="sh-post-menu-danger"
-            onMouseDown={(e) => e.preventDefault()}
-            onClick={() => { onUninstall(); close() }}
-          >
-            {t('apps.uninstall_menu')}
-          </button>
-        </div>
-      )}
-    </div>
+    <OverflowMenu
+      label={t('apps.settings_aria', { name: app.name })}
+      items={items}
+      wrapClass="sh-app-card__menu"
+      menuClass="sh-app-menu"
+    >
+      ⋯
+    </OverflowMenu>
   )
 }
 
@@ -572,7 +535,7 @@ function CatalogRow({
           <span class="sh-app-card__icon-placeholder" aria-hidden="true">📦</span>
         )}
         <div class="sh-catalog-row__meta">
-          <span class="sh-catalog-row__name">{entry.name}</span>
+          <h2 class="sh-catalog-row__name">{entry.name}</h2>
           <span class="sh-muted">v{entry.latest_version}</span>
         </div>
         {alreadyInstalled ? (
@@ -582,6 +545,7 @@ function CatalogRow({
             variant="primary"
             loading={installing}
             onClick={() => { void handleInstall() }}
+            aria-label={t('apps.install_named', { name: entry.name })}
           >
             {t('apps.install')}
           </Button>

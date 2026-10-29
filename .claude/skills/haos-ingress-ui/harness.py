@@ -252,6 +252,8 @@ class Stack:
                 "SUPERVISOR_TOKEN": SUPERVISOR_TOKEN,
                 "SUPERVISOR_URL": self.supervisor_url,
                 "SH_FAKE_SUPERVISOR_CORE": f"{self.supervisor_url}/core",
+                # The app catalog the `app-frame` check installs from.
+                "SH_APPS_CATALOG_URL": f"{self.supervisor_url}/_apps/catalog.json",
             },
         )
         wait_http(

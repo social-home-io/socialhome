@@ -42,14 +42,27 @@ re-points it here):
 it); ``GET /_users`` returns the user table (the ingress proxy reads it to
 stamp ``X-Remote-User-*`` like the Supervisor does).
 
+It also stands in for the Social Home Apps release (not an HA surface —
+the backend's ``SH_APPS_CATALOG_URL`` points here so the harness can
+install an app without the network): ``GET /_apps/catalog.json`` lists
+one tiny app, ``ingress-probe``, in the shape ``AppCatalogEntry.from_dict``
+reads (socialhome-apps ``scripts/build-catalog.mjs``), and
+``GET /_apps/ingress-probe.tgz`` is its bundle — ``manifest.json`` and
+one fully inlined ``index.html`` (the shape every app must ship: the
+sandboxed frame's opaque origin can't load sub-resources). The probe asks
+the host for ``app.context`` over the bridge and prints the answer.
+
 Usage: ``python fake_supervisor.py --port N --token T``
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import io
 import json
 import logging
+import tarfile
 import uuid
 
 from aiohttp import WSMsgType, web
@@ -303,9 +316,76 @@ async def fallback(request: web.Request) -> web.Response:
     return web.json_response({"result": "error", "message": "not mocked"}, status=404)
 
 
+PROBE_APP_ID = "ingress-probe"
+
+_PROBE_HTML = """<!doctype html>
+<html><head><meta charset="utf-8"><title>Ingress probe</title>
+<style>html,body{margin:0;height:100%;font:16px sans-serif}
+body{display:flex;align-items:center;justify-content:center;background:#e8f0e8}</style>
+</head><body><p id="out">waiting</p><script>__PROBE_JS__</script></body></html>
+"""
+
+# The SDK's wire protocol (socialhome-apps packages/app-sdk): post
+# {id, method} to the parent, read {id, ok, result} back.
+_PROBE_JS = """window.addEventListener('message', function (e) {
+  if (e.source !== window.parent || !e.data || e.data.id !== 1) return;
+  document.getElementById('out').textContent =
+    e.data.ok ? 'probe ready ' + e.data.result.appId : 'probe error';
+});
+window.parent.postMessage({ id: 1, method: 'app.context' }, '*');
+"""
+
+
+def _probe_bundle() -> bytes:
+    """The ``ingress-probe`` bundle: a gzipped tar with the files at its root."""
+    manifest = {
+        "app_id": PROBE_APP_ID,
+        "name": "Ingress probe",
+        "version": "2026.1.1",
+        "description": "Harness app: answers the host bridge.",
+        "entry": "index.html",
+        "capabilities": [],
+    }
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for name, text in (
+            ("manifest.json", json.dumps(manifest)),
+            ("index.html", _PROBE_HTML.replace("__PROBE_JS__", _PROBE_JS)),
+        ):
+            data = text.encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    return buf.getvalue()
+
+
+PROBE_BUNDLE = _probe_bundle()
+
+
+async def apps_catalog(request: web.Request) -> web.Response:
+    base = f"{request.scheme}://{request.host}"
+    entry = {
+        "app_id": PROBE_APP_ID,
+        "name": "Ingress probe",
+        "latest_version": "2026.1.1",
+        "description": "Harness app: answers the host bridge.",
+        "icon_url": None,
+        "capabilities": [],
+        "bundle_url": f"{base}/_apps/{PROBE_APP_ID}.tgz",
+        "bundle_sha256": hashlib.sha256(PROBE_BUNDLE).hexdigest(),
+    }
+    return web.json_response({"apps": [entry]})
+
+
+async def apps_bundle(request: web.Request) -> web.Response:
+    return web.Response(body=PROBE_BUNDLE, content_type="application/gzip")
+
+
 def build_app(token: str) -> web.Application:
     app = web.Application()
     app[TOKEN_KEY] = token
+    app.router.add_get("/_apps/catalog.json", apps_catalog)
+    app.router.add_get(f"/_apps/{PROBE_APP_ID}.tgz", apps_bundle)
     app.router.add_get("/addons/self/info", addon_info)
     app.router.add_post("/discovery", discovery)
     app.router.add_get("/core/api/websocket", core_ws)

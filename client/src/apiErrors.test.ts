@@ -24,6 +24,15 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe('The app catalog is turned off on this Social Home.')
   })
 
+  it('tells an app turned off by an admin from one that is not for this account', () => {
+    expect(apiErrorMessage(403, '/api/apps/chess/store/k', {
+      code: 'APP_NOT_ENABLED', detail: "App 'chess' is disabled",
+    })).toBe('An admin turned this app off.')
+    expect(apiErrorMessage(403, '/api/apps/chess/store/k', {
+      code: 'APP_AGE_RESTRICTED', detail: 'This app is restricted to ages 13+.',
+    })).toBe("This app isn't available for your account.")
+  })
+
   it('translates a highlight frame refused for another audience', () => {
     expect(apiErrorMessage(409, '/api/highlights/frames', {
       code: 'HIGHLIGHT_AUDIENCE_MISMATCH',

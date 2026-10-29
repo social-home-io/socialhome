@@ -140,7 +140,11 @@ async def test_runtime_404_uninstalled(client):
 
 
 async def test_runtime_403_disabled(client):
-    """GET /runtime for a disabled app → 403 FORBIDDEN."""
+    """GET /runtime for a disabled app → 403 APP_NOT_ENABLED + the app's name.
+
+    Its own code (not the age gate's) so the host can say "turned off" and
+    offer an admin "Turn on", and the name so it can say which app.
+    """
     config_obj = client.app[
         __import__("socialhome.app_keys", fromlist=["config_key"]).config_key
     ]
@@ -153,7 +157,8 @@ async def test_runtime_403_disabled(client):
     )
     assert r.status == 403
     body = await r.json()
-    assert body["error"]["code"] == "FORBIDDEN"
+    assert body["error"]["code"] == "APP_NOT_ENABLED"
+    assert body["error"]["name"] == "Chess App"
 
 
 async def test_runtime_requires_auth(client):
@@ -576,11 +581,11 @@ async def test_bundle_tampered_bundle_path_returns_403(client):
 
 
 async def test_runtime_403_for_age_restricted_minor(client, monkeypatch):
-    """/runtime returns 403 FORBIDDEN for a protected minor below the app's min_age.
+    """/runtime returns 403 APP_AGE_RESTRICTED for a protected minor below min_age.
 
     The age check in AppRuntimeView.get calls svc.assert_age_allowed(app,
     user.user_id) which raises AppAgeRestrictedError when the minor's
-    declared_age < app.min_age.  BaseView._iter maps it to 403 FORBIDDEN.
+    declared_age < app.min_age.  BaseView._iter maps it to 403 APP_AGE_RESTRICTED.
     A blocked minor must never receive the signed entry URL.
     """
 
@@ -603,7 +608,7 @@ async def test_runtime_403_for_age_restricted_minor(client, monkeypatch):
     )
     assert r.status == 403
     body = await r.json()
-    assert body["error"]["code"] == "FORBIDDEN"
+    assert body["error"]["code"] == "APP_AGE_RESTRICTED"
     assert "13+" in body["error"]["detail"]
 
 
