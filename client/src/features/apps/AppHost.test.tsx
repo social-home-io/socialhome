@@ -168,6 +168,31 @@ describe('AppHostInner', () => {
     expect((vi.mocked(mountBridge).mock.calls[0][1] as BridgeContext).permissions).toEqual([])
   })
 
+  it('hands the bridge the look: language, theme, tokens and a watcher (D14)', async () => {
+    render(<AppHostInner appId="chess" />)
+    await waitFor(() => expect(vi.mocked(mountBridge)).toHaveBeenCalledOnce())
+    const ctx = vi.mocked(mountBridge).mock.calls[0][1] as BridgeContext
+    expect(ctx.hostContext!()).toMatchObject({ locale: 'en', dir: 'ltr', theme: 'light' })
+    expect(typeof ctx.watchHostContext).toBe('function')
+  })
+
+  it('the frame’s color-scheme follows the SPA’s light/dark, live — native controls in the app follow', async () => {
+    const root = document.documentElement
+    root.classList.add('sh-theme-light')
+    try {
+      const { container } = render(<AppHostInner appId="chess" />)
+      await waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
+      expect(container.querySelector('iframe')!.style.colorScheme).toBe('light')
+      await act(async () => {
+        root.classList.replace('sh-theme-light', 'sh-theme-dark')
+        await new Promise(r => setTimeout(r, 0))
+      })
+      expect(container.querySelector('iframe')!.style.colorScheme).toBe('dark')
+    } finally {
+      root.classList.remove('sh-theme-light', 'sh-theme-dark')
+    }
+  })
+
   it('the app name is the host heading, under the topbar\'s h1', async () => {
     const view = render(<AppHostInner appId="chess" />)
     await waitFor(() => expect(view.getByRole('heading', { level: 2, name: 'Chess' })).toBeTruthy())
@@ -234,7 +259,7 @@ describe('AppHostInner', () => {
       {
         id: 1,
         ok: true,
-        result: { appId: 'chess', selfUserId: 'u1', permissions: ['storage', 'people', 'federation'], launch: {} },
+        result: expect.objectContaining({ appId: 'chess', selfUserId: 'u1', permissions: ['storage', 'people', 'federation'], launch: {}, theme: 'light' }),
       },
       '*',
     ))

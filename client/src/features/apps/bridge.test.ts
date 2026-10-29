@@ -295,6 +295,59 @@ describe('mountBridge', () => {
     expect(mockApiGet).not.toHaveBeenCalled()
   })
 
+  // ── look: language, theme, tokens (D14) ──────────────────────────────────
+
+  describe('the app’s look (D14)', () => {
+    const LOOK = {
+      locale: 'de',
+      dir: 'ltr' as const,
+      theme: 'dark' as const,
+      reducedMotion: true,
+      tokens: {
+        bg: '#1a1612', surface: '#2f261e', text: '#f1e9da', muted: '#9a8e7d',
+        accent: '#e96a3f', onAccent: '#1a1612', border: '#3d332a', focus: '#f1d9ca',
+      },
+    }
+    let push: ((c: typeof LOOK) => void) | null
+    let stopWatching: ReturnType<typeof vi.fn<() => void>>
+
+    beforeEach(() => {
+      cleanup()
+      push = null
+      stopWatching = vi.fn<() => void>()
+      cleanup = mountBridge(iframe, {
+        appId: APP_ID, selfUserId: USER_ID, permissions: [],
+        hostContext: () => LOOK,
+        watchHostContext: (cb) => { push = cb; return stopWatching },
+      })
+    })
+
+    const posted = () => (iframe.contentWindow!.postMessage as ReturnType<typeof vi.fn>).mock.calls.map(c => c[0])
+
+    it('app.context carries locale, dir, theme, reducedMotion and the eight tokens — needs no permission', async () => {
+      await captureMessageHandler()({ source: iframe.contentWindow as unknown as Window, data: { id: 30, method: 'app.context' } })
+      const reply = posted()[0]
+      expect(reply.ok).toBe(true)
+      expect(reply.result).toMatchObject(LOOK)
+      expect(reply.result.appId).toBe(APP_ID)
+      expect(reply.result).not.toHaveProperty('token')
+    })
+
+    it('pushes app.context-changed once the app has spoken, never before', async () => {
+      push!({ ...LOOK, theme: 'light' as never })
+      expect(posted()).toEqual([])
+      await captureMessageHandler()({ source: iframe.contentWindow as unknown as Window, data: { id: 31, method: 'app.ready' } })
+      push!({ ...LOOK, locale: 'nl' })
+      expect(posted().at(-1)).toEqual({ type: 'app.context-changed', context: { ...LOOK, locale: 'nl' } })
+    })
+
+    it('stops watching when the frame goes', () => {
+      cleanup()
+      expect(stopWatching).toHaveBeenCalledOnce()
+      cleanup = () => {}
+    })
+  })
+
   // ── unknown method ────────────────────────────────────────────────────────
 
   it('unknown method: replies ok:false', async () => {
