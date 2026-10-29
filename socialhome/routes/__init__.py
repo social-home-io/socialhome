@@ -55,6 +55,7 @@ from .apps import (
     AppSessionsView,
     AppStoreCollectionView,
     AppStoreItemView,
+    AppUninstallPreviewView,
     AppUpdatesView,
     AppUpdateView,
 )
@@ -1354,6 +1355,7 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_view("/api/apps/updates", AppUpdatesView)
     app.router.add_view("/api/apps/{app_id}", AppDetailView)
     app.router.add_view("/api/apps/{app_id}/store", AppStoreCollectionView)
+    app.router.add_view("/api/apps/{app_id}/uninstall-preview", AppUninstallPreviewView)
     app.router.add_view("/api/apps/{app_id}/store/{key}", AppStoreItemView)
     app.router.add_view("/api/apps/{app_id}/runtime", AppRuntimeView)
     app.router.add_view("/api/apps/{app_id}/bundle/{tail:.*}", AppBundleView)

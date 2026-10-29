@@ -315,6 +315,24 @@ export async function loadAppsNav(): Promise<void> {
   navChecked.value = true
 }
 
+/** What uninstalling an app loses (D9) — the uninstall dialog's counts.
+ *  Counts and names only: never what a game holds, nor who here plays
+ *  whom. ``told`` names up to three people in other households who will
+ *  be told (``told_more`` the rest); ``untold`` counts games with a
+ *  household on an older Social Home, which won't hear about them. */
+export interface UninstallPreview {
+  people: number
+  games: number
+  invites: number
+  told: string[]
+  told_more: number
+  untold: number
+}
+
+export async function loadUninstallPreview(appId: string): Promise<UninstallPreview> {
+  return await api.get(`/api/apps/${encodeURIComponent(appId)}/uninstall-preview`) as UninstallPreview
+}
+
 export async function uninstallApp(appId: string): Promise<void> {
   await api.delete(`/api/apps/${encodeURIComponent(appId)}`)
   installedApps.value = installedApps.value.filter(a => a.app_id !== appId)

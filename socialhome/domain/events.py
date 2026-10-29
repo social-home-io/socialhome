@@ -2660,6 +2660,29 @@ class AppChallengeDeclined(DomainEvent):
     from_user_id: str | None = None
 
 
+@dataclass(slots=True, frozen=True)
+class AppGameEnded(DomainEvent):
+    """A game ``to_user_id`` (a local user) played ended because the other
+    household uninstalled the app (D9, v_72).
+
+    Published by :class:`AppFederationService` when an ``APP_SESSION
+    {verb: "close", reason: "ended"}`` reaches the player's mailbox — a
+    game this household knows they play with exactly that person; once per
+    opponent per message, however many games with them ended. Consumed by
+    the notification service: a bell row ("Ben no longer has Chess, so your
+    game ended"), so they learn why the game is gone even if they don't
+    open the app for weeks. ``from_display`` is a label only.
+    """
+
+    app_id: str
+    session_id: str
+    to_user_id: str
+    from_display: str
+    #: The opponent's user id — never shown, only checked against the
+    #: recipient's personal and guardian blocks.
+    from_user_id: str | None = None
+
+
 # ─── Momentum (§Momentum) ─────────────────────────────────────────────────
 
 

@@ -54,6 +54,34 @@ INVITES_PER_DAY_MAX: int = 30
 #: household is stored without them, so it can't pose as one of ours.
 SESSION_MARKS: frozenset[str] = frozenset({"sent", "answered", "withdrawn"})
 
+#: ``APP_SESSION {verb: "close", reason}`` reasons Social Home itself sends:
+#: the invitee said no…
+CLOSE_DECLINED: str = "declined"
+#: …the challenger took the invite back (also what an uninstall tells a
+#: household below v_72 about a pending invite)…
+CLOSE_WITHDRAWN: str = "withdrawn"
+#: …or the other household uninstalled the app, so the game is over
+#: (D9, v_72 ``MIN_FOR_APP_SESSION_ENDED``).
+CLOSE_ENDED: str = "ended"
+
+#: An uninstall tells each opponent household its games ended in one
+#: ``APP_SESSION {verb: "close", reason: "ended", sessions: [...]}`` —
+#: at most this many sessions per event (sender chunks, receiver drops
+#: the rest). One household realistically has a handful; 100 entries are
+#: ≈ 13 KB sealed (≈ 130 B each).
+ENDED_SESSIONS_MAX: int = 100
+
+#: An uninstall counts and announces a game only when it moved in this
+#: long. Social Home can't tell a finished game from a resting one (both
+#: are ``active`` rows until the 90-day TTL); a game quiet for a month is
+#: most likely over, and telling its opponent "your game ended" weeks
+#: later would be noise. Quieter games are left to the TTL.
+UNINSTALL_GAME_RECENT_SECONDS: int = 30 * 24 * 60 * 60
+
+#: The uninstall dialog names at most this many opponents ("Ben, Clara and
+#: Ömer will be told") and counts the rest.
+UNINSTALL_NAMES_MAX: int = 3
+
 
 class AppError(Exception):
     """Base for app-registry domain errors."""
@@ -443,6 +471,28 @@ class AppPendingSession:
             and self.from_instance == instance_id
             and self.from_user == user_ref
         )
+
+
+@dataclass(slots=True, frozen=True)
+class AppUninstallPreview:
+    """What uninstalling an app loses (D9) — the dialog's counts.
+
+    ``people`` — people in this household with saved data (``app_kv``);
+    ``games`` — games being played with people in other households;
+    ``invites`` — open invites with people in other households, either
+    way; ``told`` — up to :data:`UNINSTALL_NAMES_MAX` opponents who will be
+    told, as the admin sees them anywhere else ("Ben · Familie Okafor"),
+    ``told_more`` the rest; ``untold`` — games with a household on an
+    older Social Home (below v_72), which hears nothing about them. Counts
+    and names only: never what the games hold, nor who here plays whom.
+    """
+
+    people: int
+    games: int
+    invites: int
+    told: tuple[str, ...] = ()
+    told_more: int = 0
+    untold: int = 0
 
 
 @dataclass(slots=True, frozen=True)

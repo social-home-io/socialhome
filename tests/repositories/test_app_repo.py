@@ -708,3 +708,38 @@ async def test_an_invite_is_refreshed_only_by_the_same_person(db):
     await repo.add_pending_session(_pending(uid, "w", from_user="mallory@remote"))
     row = await repo.get_pending_session("chess", uid, "w")
     assert row is not None and row.from_user == "alice@remote"
+
+
+@pytest.mark.asyncio
+async def test_list_app_sessions_lists_everyones_rows_of_one_app(db):
+    """What an uninstall ends (D9): every person's sessions of this app."""
+    repo = SqliteAppRepo(db)
+    a = await _seed_user(db)
+    b = await _seed_user(db)
+    await repo.install(_app())
+    await repo.install(_app("draughts"))
+    await repo.add_pending_session(_pending(a))
+    await repo.add_active_session(_sent(b, "mine"))
+    await repo.add_active_session(
+        dataclasses.replace(_sent(b, "other-app"), app_id="draughts")
+    )
+    rows = await repo.list_app_sessions("chess")
+    assert sorted((r.user_id, r.session_id) for r in rows) == sorted(
+        [(a, "sess-1"), (b, "mine")]
+    )
+    assert await repo.list_app_sessions("nope") == []
+
+
+@pytest.mark.asyncio
+async def test_kv_people_counts_people_with_saved_data(db):
+    repo = SqliteAppRepo(db)
+    a = await _seed_user(db)
+    b = await _seed_user(db)
+    await repo.install(_app())
+    assert await repo.kv_people("chess") == 0
+    now = datetime.now(UTC).isoformat()
+    await repo.kv_set("chess", a, "game:1", "{}", now)
+    await repo.kv_set("chess", a, "game:2", "{}", now)
+    await repo.kv_set("chess", b, "settings", "{}", now)
+    assert await repo.kv_people("chess") == 2
+    assert await repo.kv_people("draughts") == 0

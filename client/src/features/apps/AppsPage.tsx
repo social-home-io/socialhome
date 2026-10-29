@@ -19,8 +19,9 @@
  * ``?app=<id>`` (a "new app" notification) picks that app's entry out.
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
+import type { ComponentChildren } from 'preact'
 import { useLocation } from 'preact-iso'
-import { t, isOne, locale } from '@/i18n/i18n'
+import { t, isOne, locale, formatLocale } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { currentUser } from '@/store/auth'
 import {
@@ -38,6 +39,7 @@ import {
   loadCatalog,
   loadUpdates,
   uninstallApp,
+  loadUninstallPreview,
   setEnabled,
   setMinAge,
   loadProtectionStatus,
@@ -48,6 +50,7 @@ import {
   type InstalledApp,
   type AppUpdate,
   type CatalogEntry,
+  type UninstallPreview,
 } from '@/store/apps'
 import { addBase } from '@/baseUrl'
 import { Button } from '@/components/Button'
@@ -436,23 +439,48 @@ function InstalledRow({ app, entry, isAdmin, picked, update, lang }: {
         )}
       </div>
       {isAdmin && (
-        <UninstallDialog app={app} name={name} open={uninstallOpen} onClose={() => setUninstallOpen(false)} />
+        <UninstallDialog app={app} name={name} icon={entry?.icon_url} open={uninstallOpen} onClose={() => setUninstallOpen(false)} />
       )}
     </li>
   )
 }
 
-/** The uninstall confirmation (PR 13 redesigns it). */
-export function UninstallDialog({ app, name, open, onClose, onDone }: {
+/**
+ * The uninstall dialog (D9): what is lost — people with saved data, games
+ * and open invites with other households and who will be told — counted by
+ * ``GET /api/apps/{id}/uninstall-preview``. **Turn off instead** is the
+ * focused default (it keeps everything); **Uninstall and delete** is the
+ * destructive second choice. A failed count still lets the admin decide,
+ * with the general warning.
+ */
+export function UninstallDialog({ app, name, icon, open, onClose, onDone }: {
   app: InstalledApp
   name: string
+  icon?: string | null
   open: boolean
   onClose: () => void
   onDone?: () => void
 }) {
-  const [busy, setBusy] = useState(false)
-  const run = async () => {
-    setBusy(true)
+  const [busy, setBusy] = useState<'uninstall' | 'off' | null>(null)
+  const [preview, setPreview] = useState<UninstallPreview | null>(null)
+  const [failed, setFailed] = useState(false)
+  const keepRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!open) return
+    let live = true
+    setPreview(null)
+    setFailed(false)
+    loadUninstallPreview(app.app_id)
+      .then(p => { if (live) setPreview(p) })
+      .catch(() => { if (live) setFailed(true) })
+    // The safe choice has the focus (after the dialog's own focus move).
+    const id = setTimeout(() => keepRef.current?.querySelector<HTMLButtonElement>('[data-keep]')?.focus(), 0)
+    return () => { live = false; clearTimeout(id) }
+  }, [open, app.app_id])
+
+  const uninstall = async () => {
+    setBusy('uninstall')
     try {
       await uninstallApp(app.app_id)
       showToast(t('apps.uninstalled', { name }), 'info')
@@ -461,25 +489,132 @@ export function UninstallDialog({ app, name, open, onClose, onDone }: {
     } catch (err: unknown) {
       showToast((err as Error).message ?? t('apps.uninstall_failed'), 'error')
     } finally {
-      setBusy(false)
+      setBusy(null)
     }
   }
+  const turnOff = async () => {
+    setBusy('off')
+    try {
+      await setEnabled(app.app_id, false)
+      showToast(t('apps.uninstall.turned_off', { name }), 'success')
+      onClose()
+    } catch {
+      showToast(t('apps.disable_failed'), 'error')
+    } finally {
+      setBusy(null)
+    }
+  }
+
   return (
-    <Modal open={open} onClose={onClose} title={t('apps.uninstall_title', { name })}>
-      <p>{boldName(t('apps.uninstall_body', { name: '\u0000' }), name)}</p>
-      <div class="sh-modal-actions">
-        <Button variant="secondary" onClick={onClose}>{t('common.cancel')}</Button>
-        <Button variant="danger" loading={busy} onClick={() => { void run() }}>{t('apps.uninstall')}</Button>
+    <Modal
+      open={open}
+      onClose={onClose}
+      title={t('apps.uninstall_title', { name })}
+      class="sh-app-consent sh-app-uninstall"
+      role="alertdialog"
+      header={(titleId) => (
+        <>
+          <span class="sh-app-uninstall__title">
+            <AppIcon src={icon ?? app.icon} size="sm" />
+            <h2 id={titleId}>{t('apps.uninstall_title', { name })}</h2>
+          </span>
+          <button type="button" class="sh-modal-close" onClick={onClose} aria-label={t('modal.close')}>
+            &times;
+          </button>
+        </>
+      )}
+    >
+      <p class="sh-app-uninstall__lead">{t('apps.uninstall.lead', { name })}</p>
+      <UninstallLosses preview={preview} failed={failed} name={name} />
+      {app.enabled
+        ? <p class="sh-app-uninstall__keep">{withBold(t('apps.uninstall.keep', { turn_off: '\u0000' }), t('apps.uninstall.turn_it_off'))}</p>
+        : <p class="sh-app-uninstall__keep">{t('apps.uninstall.keep_off', { name })}</p>}
+      <div class="sh-modal-actions sh-app-uninstall__actions" ref={keepRef}>
+        {/* Destructive first in the DOM (left on a wide screen, below on a
+          * phone — CSS); the safe choice is the one focused. */}
+        <Button variant="secondary" loading={busy === 'uninstall'} disabled={busy !== null} onClick={() => { void uninstall() }}>
+          {t('apps.uninstall.confirm')}
+        </Button>
+        {app.enabled
+          ? <Button data-keep loading={busy === 'off'} disabled={busy !== null} onClick={() => { void turnOff() }}>{t('apps.uninstall.turn_off_instead')}</Button>
+          : <Button data-keep onClick={onClose}>{t('apps.uninstall.keep_button', { name })}</Button>}
       </div>
     </Modal>
   )
 }
 
+/** "Melanie", "Melanie and Pascal", "A, B and C" in the UI language. */
+function joinNames(names: string[]): string {
+  try {
+    return new Intl.ListFormat(formatLocale(), { type: 'conjunction' }).format(names)
+  } catch {
+    return names.join(', ')
+  }
+}
+
+/** The lines of what an uninstall loses. */
+export function UninstallLosses({ preview, failed, name }: {
+  preview: UninstallPreview | null
+  failed: boolean
+  name: string
+}) {
+  if (failed) return <p class="sh-app-uninstall__note">{t('apps.uninstall.unknown')}</p>
+  if (!preview) return <p class="sh-app-uninstall__note" role="status">{t('apps.uninstall.checking')}</p>
+  const { people, games, invites, told, told_more: more, untold } = preview
+  if (people === 0 && games === 0 && invites === 0) {
+    return <p class="sh-app-uninstall__note">{t('apps.uninstall.nothing', { name })}</p>
+  }
+  const plural = (key: string, n: number, extra: Record<string, string> = {}) =>
+    t(isOne(n) ? `${key}_one` : key, { n: String(n), ...extra })
+  const names = [...told, ...(more > 0 ? [plural('apps.uninstall.told_more', more)] : [])]
+  const lines: { key: string, glyph: string, text: ComponentChildren }[] = []
+  if (people > 0) {
+    lines.push({
+      key: 'people',
+      glyph: '▣',
+      text: withBold(plural('apps.uninstall.people', people, { who: '\u0000' }), plural('apps.uninstall.people_n', people)),
+    })
+  }
+  if (games > 0) {
+    const tell = untold >= games
+      ? t('apps.uninstall.untold_all')
+      : [
+          names.length > 0 ? t(names.length === 1 ? 'apps.uninstall.told_one' : 'apps.uninstall.told', { names: joinNames(names) }) : '',
+          untold > 0 ? plural('apps.uninstall.untold', untold) : '',
+        ].filter(Boolean).join(' ')
+    lines.push({
+      key: 'games',
+      glyph: '⇄',
+      text: <>{withBold(plural('apps.uninstall.games', games, { what: '\u0000' }), plural('apps.uninstall.games_n', games))}{tell && <> {tell}</>}</>,
+    })
+  }
+  if (invites > 0) {
+    lines.push({
+      key: 'invites',
+      glyph: '✉',
+      text: <>
+        {withBold(plural('apps.uninstall.invites', invites, { what: '\u0000' }), plural('apps.uninstall.invites_n', invites))}
+        {games === 0 && names.length > 0 && <> {t(names.length === 1 ? 'apps.uninstall.told_one' : 'apps.uninstall.told', { names: joinNames(names) })}</>}
+      </>,
+    })
+  }
+  return (
+    <ul class="sh-app-perms sh-app-perms--detailed sh-app-uninstall__losses">
+      {lines.map(l => (
+        <li key={l.key} class="sh-app-perms__item">
+          <span class="sh-app-perms__glyph" aria-hidden="true">{l.glyph}</span>
+          <span class="sh-app-perms__text sh-app-uninstall__line">{l.text}</span>
+        </li>
+      ))}
+    </ul>
+  )
+}
+
 /** Render a translated sentence with the ``\u0000`` placeholder swapped
- *  for the bold app name, so word order stays the translator's. */
-function boldName(sentence: string, name: string) {
+ *  for *bold* in bold, so word order stays the translator's. */
+function withBold(sentence: string, bold: ComponentChildren) {
   const [before, after = ''] = sentence.split('\u0000')
-  return <>{before}<strong>{name}</strong>{after}</>
+  return <>{before}<strong>{bold}</strong>{after}</>
 }
 
 /**

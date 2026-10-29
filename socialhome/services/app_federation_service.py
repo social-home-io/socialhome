@@ -79,6 +79,17 @@ bell row. Nothing more goes over the wire: the mailbox only keeps what was
 sent anyway. A message for a session the household doesn't know for that
 person — or from anyone but its other side — is never kept.
 
+Uninstall (D9): before the rows go with the app (FK cascade),
+:meth:`sessions_ending` lists every game and invite a person here has
+with someone in another household; :meth:`preview_uninstall` turns them
+into the dialog's counts and :meth:`tell_opponents` tells each of those
+households — ONE ``APP_SESSION {verb: "close", reason: "ended", sessions:
+[...]}`` per household (v_72, :data:`FederationCapability.MIN_FOR_APP_SESSION_ENDED`),
+or, below v_72, the per-session ``withdrawn`` close it already knows for
+each pending invite and nothing for a game. The receiver ends only
+sessions its own person plays with exactly that household and person,
+and tells the player once per opponent (:class:`AppGameEnded`).
+
 Per move, the sender's session row stands in for the roster scan: a
 message in a game this household knows with that very person needs one
 primary-key read plus the block checks, not the whole contact list.
@@ -98,6 +109,10 @@ import orjson
 
 from ..domain.apps import (
     ACTIVE_SESSION_TTL_SECONDS,
+    CLOSE_DECLINED,
+    CLOSE_ENDED,
+    CLOSE_WITHDRAWN,
+    ENDED_SESSIONS_MAX,
     HELD_MESSAGE_MAX_BYTES,
     INVITES_OPEN_MAX,
     INVITES_PER_DAY_MAX,
@@ -105,8 +120,11 @@ from ..domain.apps import (
     PERMISSION_FEDERATION,
     PERMISSION_PEOPLE,
     SESSION_ACTIVE,
+    SESSION_INVITED,
     SESSION_MARKS,
     SESSION_VERB_CONTINUE,
+    UNINSTALL_GAME_RECENT_SECONDS,
+    UNINSTALL_NAMES_MAX,
     AppAgeRestrictedError,
     AppChallengeHandledError,
     AppContactNotFoundError,
@@ -116,11 +134,13 @@ from ..domain.apps import (
     AppPendingSession,
     AppSessionTakenError,
     AppSessionUnknownError,
+    AppUninstallPreview,
 )
 from ..domain.events import (
     AppChallengeDeclined,
     AppChallengeEnded,
     AppChallengeReceived,
+    AppGameEnded,
 )
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.federation_capabilities import FederationCapability
@@ -166,6 +186,36 @@ def _is_decline(kind: str, payload: dict) -> bool:
         and payload.get("verb") == "close"
         and payload.get("reason") == "declined"
     )
+
+
+def _ending_kind(
+    row: AppPendingSession, own_instance: str, recent_cut: str
+) -> str | None:
+    """What an uninstall ends in *row*: ``"game"`` (being played),
+    ``"invite"`` (waiting, either way) or ``None`` — a session with
+    someone in this household (the uninstall reaches them itself), an
+    invite this person took back, a game the other side already closed
+    (its close waits in the mailbox), or a game nobody moved in since
+    *recent_cut* (:data:`UNINSTALL_GAME_RECENT_SECONDS`: Social Home can't
+    tell a finished game from a resting one, so a quiet game is left to
+    the session TTL instead of counted and announced as "ended")."""
+    if row.from_instance == own_instance or not row.from_user:
+        return None
+    if row.state == SESSION_INVITED:
+        return "invite"
+    if row.withdrawn:
+        return None
+    held = row.held or {}
+    if (
+        held.get("kind") == "session"
+        and (held.get("payload") or {}).get("verb") == "close"
+    ):
+        return None
+    if row.sent and not row.answered:
+        return "invite"
+    if row.last_change < recent_cut:
+        return None
+    return "game"
 
 
 def _target_permission(target: dict) -> str:
@@ -853,6 +903,14 @@ class AppFederationService(ProtectionGateMixin):
         if not isinstance(event.payload, dict):
             log.debug("app_federation: inbound event with non-dict payload — dropping")
             return
+        if (
+            event.event_type is FederationEventType.APP_SESSION
+            and event.payload.get("verb") == "close"
+            and event.payload.get("reason") == CLOSE_ENDED
+            and "sessions" in event.payload
+        ):
+            await self._on_ended(event)
+            return
         app_id = event.payload.get("app_id")
         session_id = event.payload.get("session_id")
         if not app_id or not session_id:
@@ -1368,6 +1426,7 @@ class AppFederationService(ProtectionGateMixin):
         notify_open: bool = False,
         continued: bool = False,
         withdraw: bool = False,
+        ended: set[tuple[str, str, str]] | None = None,
     ) -> None:
         """Route an inbound app message to local users via WebSocket.
 
@@ -1410,6 +1469,12 @@ class AppFederationService(ProtectionGateMixin):
             ``True`` only for an inbound ``APP_SESSION`` *close* addressed to
             one person: the invite it ends stops waiting — only when the same
             household and person opened it.
+        ended:
+            Set for one session of an inbound ``reason: "ended"`` close
+            (v_72): when the close is held for a game the person plays with
+            exactly that sender, they are told the game ended
+            (:class:`AppGameEnded`) — once per opponent per message: the
+            set holds who was told already.
 
         The mailbox (D11): a move or a close for one person is also kept
         as the latest message of that session for them (:meth:`_hold`) —
@@ -1587,6 +1652,16 @@ class AppFederationService(ProtectionGateMixin):
                             kind=kind,
                             payload=payload,
                         )
+                        if held and ended is not None and from_user:
+                            await self._game_ended(
+                                app_id,
+                                session_id,
+                                recipient.user_id,
+                                from_instance=from_instance,
+                                from_user=from_user,
+                                initiator=initiator,
+                                told=ended,
+                            )
                         if held and _is_decline(kind, payload):
                             await self._emit(
                                 AppChallengeDeclined(
@@ -1680,6 +1755,260 @@ class AppFederationService(ProtectionGateMixin):
             len(user_ids),
         )
         await self._ws.broadcast_to_users(user_ids, frame)
+
+    async def _game_ended(
+        self,
+        app_id: str,
+        session_id: str,
+        user_id: str,
+        *,
+        from_instance: str,
+        from_user: str,
+        initiator: RemoteUser,
+        told: set[tuple[str, str, str]],
+    ) -> None:
+        """Tell *user_id* their game with this opponent ended (D9) — once
+        per opponent per inbound ``ended`` message (*told*)."""
+        key = (user_id, from_instance, from_user)
+        if key in told:
+            return
+        told.add(key)
+        await self._emit(
+            AppGameEnded(
+                app_id=app_id,
+                session_id=session_id,
+                to_user_id=user_id,
+                from_display=await self._remote_open_display(
+                    from_instance, from_user, remote=initiator
+                ),
+                from_user_id=initiator.user_id,
+            )
+        )
+
+    async def _on_ended(self, event: FederationEvent) -> None:
+        """An inbound ``APP_SESSION {verb: "close", reason: "ended",
+        sessions: [...]}`` (v_72): the other household uninstalled the app.
+
+        Each entry ``{session_id, to_user, from_user}`` goes through the
+        same per-person path as a single close (:meth:`_deliver`): it ends
+        a waiting invite only when that household and person opened it,
+        and is held (live into an open app) only for a game the addressed
+        person plays with exactly that sender — so a household can end
+        only its own people's games, never anyone else's. At most
+        :data:`ENDED_SESSIONS_MAX` entries; a re-delivered entry is
+        skipped."""
+        app_id = event.payload.get("app_id")
+        sessions = event.payload.get("sessions")
+        if not isinstance(app_id, str) or not app_id or not isinstance(sessions, list):
+            log.debug("app_federation: malformed ended close — dropping")
+            return
+        if len(sessions) > ENDED_SESSIONS_MAX:
+            log.warning(
+                "app_federation: ended close from %s with %d sessions — "
+                "keeping the first %d",
+                event.from_instance,
+                len(sessions),
+                ENDED_SESSIONS_MAX,
+            )
+        told: set[tuple[str, str, str]] = set()
+        for entry in sessions[:ENDED_SESSIONS_MAX]:
+            if not isinstance(entry, dict):
+                continue
+            session_id = entry.get("session_id")
+            to_user = entry.get("to_user")
+            from_user = entry.get("from_user")
+            if not (
+                isinstance(session_id, str)
+                and session_id
+                and isinstance(to_user, str)
+                and to_user
+                and isinstance(from_user, str)
+                and from_user
+            ):
+                continue
+            # Keyed on the whole entry (per sending household): an entry
+            # naming the wrong person must not suppress the real one.
+            if self._seen_open_session(
+                event.from_instance, f"ended:{from_user}:{to_user}:{session_id}"
+            ):
+                continue
+            await self._deliver(
+                app_id,
+                session_id,
+                from_instance=event.from_instance,
+                payload={
+                    "app_id": app_id,
+                    "session_id": session_id,
+                    "verb": "close",
+                    "reason": CLOSE_ENDED,
+                },
+                kind="session",
+                to_user=to_user,
+                from_user=from_user,
+                withdraw=True,
+                ended=told,
+            )
+
+    # ─── Uninstall: what is lost, and telling opponents (D9) ─────────────
+
+    async def sessions_ending(
+        self, app_id: str
+    ) -> list[tuple[AppPendingSession, str, bool, bool]]:
+        """Every session of *app_id* an uninstall ends with someone in
+        another household: ``(row, kind, ended, tell)`` — *kind* ``"game"``
+        or ``"invite"`` (:func:`_ending_kind`), *ended* whether that
+        household hears ``reason: "ended"`` (v_72), *tell* whether anything
+        may reach the other side at all (never across a guardian block,
+        like a decline). Read before the uninstall: the rows go with the
+        app."""
+        own = self._federation.own_instance_id
+        recent_cut = (
+            datetime.now(UTC) - timedelta(seconds=UNINSTALL_GAME_RECENT_SECONDS)
+        ).isoformat()
+        modern: dict[str, bool] = {}
+        out: list[tuple[AppPendingSession, str, bool, bool]] = []
+        for row in await self._app_repo.list_app_sessions(app_id):
+            kind = _ending_kind(row, own, recent_cut)
+            if kind is None:
+                continue
+            if row.from_instance not in modern:
+                modern[row.from_instance] = await self._federation.peer_supports(
+                    row.from_instance,
+                    min_version=FederationCapability.MIN_FOR_APP_SESSION_ENDED,
+                )
+            other = await self._invite_sender_id(row)
+            tell = other is None or not await self._guardian_blocked(row.user_id, other)
+            out.append((row, kind, modern[row.from_instance], tell))
+        return out
+
+    async def preview_uninstall(self, app_id: str) -> AppUninstallPreview:
+        """The uninstall dialog's counts (D9): people here with saved
+        data, games and open invites with other households, and who will
+        be told — names the admin already sees for those households'
+        people, never what the games hold nor who here plays whom."""
+        games = invites = untold = 0
+        names: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for row, kind, modern, tell in await self.sessions_ending(app_id):
+            if kind == "game":
+                games += 1
+                if not modern or not tell:
+                    untold += 1
+                    continue
+            else:
+                invites += 1
+                if not tell:
+                    continue
+                if not modern and not await self._federation.peer_supports(
+                    row.from_instance,
+                    min_version=FederationCapability.MIN_FOR_APP_USER_ROUTING,
+                ):
+                    continue
+            key = (row.from_instance, str(row.from_user))
+            if key in seen:
+                continue
+            seen.add(key)
+            name = await self._remote_open_display(row.from_instance, row.from_user)
+            if name not in names:
+                names.append(name)
+        return AppUninstallPreview(
+            people=await self._app_repo.kv_people(app_id),
+            games=games,
+            invites=invites,
+            told=tuple(names[:UNINSTALL_NAMES_MAX]),
+            told_more=max(0, len(names) - UNINSTALL_NAMES_MAX),
+            untold=untold,
+        )
+
+    async def tell_opponents(
+        self,
+        app_id: str,
+        ending: list[tuple[AppPendingSession, str, bool, bool]],
+    ) -> None:
+        """The app was uninstalled: tell the other side of every session in
+        *ending* (:meth:`sessions_ending`, read before the uninstall).
+
+        A v_72 household gets ONE ``APP_SESSION {verb: "close", reason:
+        "ended", sessions: [{session_id, to_user, from_user}, ...]}`` for
+        all of them (chunks of :data:`ENDED_SESSIONS_MAX`, one opponent's
+        entries kept together); an older one the per-session close it
+        already knows for each pending invite — ``declined`` for an invite
+        it sent us, ``withdrawn`` for one we sent — and nothing for a game.
+        Nothing crosses a guardian block (like a decline).
+        Households are told in parallel, each best effort: the uninstall
+        stands if a send fails."""
+        per_household: dict[str, list[dict[str, str]]] = {}
+        legacy: list[tuple[AppPendingSession, str]] = []
+        usernames: dict[str, str | None] = {}
+        for row, kind, modern, tell in ending:
+            if not tell:
+                continue
+            if row.user_id not in usernames:
+                me = await self._user_repo.get_by_user_id(row.user_id)
+                usernames[row.user_id] = me.username if me is not None else None
+            username = usernames[row.user_id]
+            if not username or not row.from_user:
+                continue
+            if modern:
+                per_household.setdefault(row.from_instance, []).append(
+                    {
+                        "session_id": row.session_id,
+                        "to_user": row.from_user,
+                        "from_user": username,
+                    }
+                )
+            elif kind == "invite":
+                legacy.append((row, username))
+        # One opponent's entries stay in one chunk where they fit: the
+        # receiver tells each player once per opponent per event.
+        for entries in per_household.values():
+            entries.sort(key=lambda e: (e["to_user"], e["from_user"]))
+        sends = [
+            self._send_ended(app_id, instance, entries[i : i + ENDED_SESSIONS_MAX])
+            for instance, entries in per_household.items()
+            for i in range(0, len(entries), ENDED_SESSIONS_MAX)
+        ]
+        sends += [
+            self._send_close(
+                app_id=app_id,
+                session_id=row.session_id,
+                actor_user_id=row.user_id,
+                to_instance=row.from_instance,
+                to_user=str(row.from_user),
+                # An invite they sent us: our side said no. One we sent:
+                # taken back.
+                reason=CLOSE_DECLINED
+                if row.state == SESSION_INVITED
+                else CLOSE_WITHDRAWN,
+            )
+            for row, _username in legacy
+        ]
+        if sends:
+            await asyncio.gather(*sends)
+
+    async def _send_ended(
+        self, app_id: str, to_instance: str, entries: list[dict[str, str]]
+    ) -> None:
+        """One bundled ``ended`` close to *to_instance* (best effort)."""
+        try:
+            await self._federation.send_event(
+                to_instance_id=to_instance,
+                event_type=FederationEventType.APP_SESSION,
+                payload={
+                    "app_id": app_id,
+                    "verb": "close",
+                    "reason": CLOSE_ENDED,
+                    "sessions": entries,
+                },
+            )
+        except Exception as exc:
+            log.warning(
+                "app_federation: ended close (%d sessions) to %s not sent: %s",
+                len(entries),
+                to_instance,
+                exc,
+                exc_info=True,
+            )
 
     async def accept_session(
         self, *, app_id: str, session_id: str, actor_user_id: str

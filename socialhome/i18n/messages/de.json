@@ -289,6 +289,8 @@
   "notification.app.continue": "{name} möchte eure {app}-Partie fortsetzen",
   "notification.app.challenge_declined": "{name} hat deine Einladung zu {app} abgelehnt",
   "notification.app.challenge_declined_generic": "{name} hat deine Spieleinladung abgelehnt",
+  "notification.app.game_ended": "{name} hat {app} nicht mehr, darum ist euer Spiel zu Ende",
+  "notification.app.game_ended_generic": "{name} hat die App nicht mehr, darum ist euer Spiel zu Ende",
   "notification.app.requested": "{name} wünscht sich {app}",
   "notification.app.update_available": "Update für {app}",
   "notification.post.moderated": "Dein Beitrag wurde moderiert",

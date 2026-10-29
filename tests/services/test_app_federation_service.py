@@ -21,6 +21,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from socialhome.domain.apps import (
+    ENDED_SESSIONS_MAX,
     INVITES_OPEN_MAX,
     INVITES_PER_DAY_MAX,
     AppAgeRestrictedError,
@@ -40,6 +41,7 @@ from socialhome.domain.events import (
     AppChallengeDeclined,
     AppChallengeEnded,
     AppChallengeReceived,
+    AppGameEnded,
 )
 from socialhome.domain.federation import (
     FederationEvent,
@@ -228,6 +230,12 @@ class _FakeAppRepo:
                 p, dataclasses.replace(p, payload={**p.payload, "withdrawn": True})
             )
 
+    async def list_app_sessions(self, app_id):
+        return [p for p in self.pending if p.app_id == app_id]
+
+    async def kv_people(self, app_id):
+        return getattr(self, "people", 0)
+
     async def take_held(self, app_id, user_id):
         out = [
             p
@@ -341,9 +349,13 @@ class _FakeFederation:
         self.own_instance_id = own_instance_id
         #: Version every peer is assumed to advertise — drives peer_supports.
         self.peer_version = peer_version
+        #: Per-household overrides of :attr:`peer_version`.
+        self.peer_versions: dict[str, int] = {}
+        #: Households whose send raises (a dead link).
+        self.failing: set[str] = set()
 
     async def peer_supports(self, instance_id: str, *, min_version: int) -> bool:
-        return self.peer_version >= min_version
+        return self.peer_versions.get(instance_id, self.peer_version) >= min_version
 
     async def send_event(
         self,
@@ -353,6 +365,8 @@ class _FakeFederation:
         payload: dict,
         space_id: str | None = None,
     ):
+        if to_instance_id in self.failing:
+            raise ConnectionError("peer unreachable")
         self.sent_events.append(
             {
                 "to_instance_id": to_instance_id,
@@ -4124,3 +4138,375 @@ async def test_a_local_continue_asks_the_person_here():
     )
     (ev,) = [e for e in bus.published if isinstance(e, AppChallengeReceived)]
     assert ev.continued and ev.to_user_id == "u-ann"
+
+
+# ─── Uninstall tells opponents (D9, v_72) ─────────────────────────────────────
+
+
+def _row(
+    user_id: str,
+    session_id: str,
+    *,
+    instance: str = "peer-inst-id",
+    other: str = "carol",
+    state: str = "active",
+    payload: dict | None = None,
+    held: dict | None = None,
+    days_ago: int = 0,
+) -> AppPendingSession:
+    when = (datetime.now(UTC) - timedelta(days=days_ago)).isoformat()
+    return AppPendingSession(
+        app_id="chess",
+        user_id=user_id,
+        session_id=session_id,
+        from_instance=instance,
+        from_user=other,
+        payload=payload or {"app_id": "chess", "session_id": session_id},
+        created_at=when,
+        state=state,
+        held=held,
+        updated_at=when,
+    )
+
+
+def _uninstall_svc(**kw):
+    return _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[
+            _make_user("u-alice", "alice", "Alice"),
+            _make_user("u-bob", "bob", "Bob"),
+        ],
+        remote_users=[
+            _carol(),
+            _make_remote_user("ru-dan", "peer-2", "dan", "Dan"),
+        ],
+        instances=[
+            _make_remote_instance("peer-inst-id", display_name="Familie Okafor"),
+            _make_remote_instance("peer-2", display_name="Brookside"),
+        ],
+        peer_version=72,
+        **kw,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sessions_ending_counts_games_and_invites_with_other_households():
+    svc, fed, _ = _uninstall_svc()
+    sent = {"sent": True}
+    svc._app_repo.pending += [
+        _row("u-alice", "game"),  # a game being played
+        _row("u-alice", "waits", state="invited"),  # an invite to Alice
+        _row("u-bob", "asked", payload=sent),  # Bob's invite, unanswered
+        _row("u-bob", "answered", payload={"sent": True, "answered": True}),
+        _row("u-bob", "took-back", payload={"sent": True, "withdrawn": True}),
+        _row(
+            "u-bob",
+            "over",
+            held={"kind": "session", "payload": {"verb": "close", "reason": "x"}},
+        ),
+        _row("u-alice", "local", instance="own-inst-id", other="u-bob"),
+        # Quiet for over a month: most likely over — left to the TTL.
+        _row("u-alice", "quiet", days_ago=31),
+        # An invite that waits counts however old (its own 14-day TTL).
+        _row("u-bob", "old-invite", state="invited", days_ago=10),
+    ]
+    fed.peer_versions["peer-2"] = 71
+    svc._app_repo.pending.append(_row("u-alice", "old", instance="peer-2", other="dan"))
+    ending = await svc.sessions_ending("chess")
+    assert [(r.session_id, kind, modern, tell) for r, kind, modern, tell in ending] == [
+        ("game", "game", True, True),
+        ("waits", "invite", True, True),
+        ("asked", "invite", True, True),
+        ("answered", "game", True, True),
+        ("old-invite", "invite", True, True),
+        ("old", "game", False, True),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_preview_names_who_is_told_and_counts_the_untold():
+    svc, fed, _ = _uninstall_svc()
+    svc._app_repo.people = 4
+    fed.peer_versions["peer-2"] = 71
+    svc._app_repo.pending += [
+        _row("u-alice", "g1"),
+        _row("u-bob", "g2"),  # a second game with Carol: named once
+        _row("u-alice", "g3", instance="peer-2", other="dan"),  # older household
+        _row("u-bob", "i1", state="invited"),
+    ]
+    preview = await svc.preview_uninstall("chess")
+    assert preview.people == 4
+    assert (preview.games, preview.invites, preview.untold) == (3, 1, 1)
+    assert preview.told == ("Bob · Familie Okafor",)
+    assert preview.told_more == 0
+
+
+@pytest.mark.asyncio
+async def test_preview_names_at_most_three():
+    remotes = [
+        _make_remote_user(f"ru-{n}", "peer-inst-id", n, n.title())
+        for n in ("ben", "clara", "omer", "zoe")
+    ]
+    svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[_make_user("u-alice", "alice", "Alice")],
+        remote_users=remotes,
+        peer_version=72,
+    )
+    for r in remotes:
+        svc._app_repo.pending.append(
+            _row("u-alice", f"s-{r.remote_username}", other=r.remote_username)
+        )
+    preview = await svc.preview_uninstall("chess")
+    assert preview.told == ("Ben", "Clara", "Omer")
+    assert preview.told_more == 1
+
+
+@pytest.mark.asyncio
+async def test_uninstall_sends_one_ended_close_per_household():
+    svc, fed, _ = _uninstall_svc()
+    svc._app_repo.pending += [
+        _row("u-alice", "g1"),
+        _row("u-bob", "g2"),
+        _row("u-bob", "i1", state="invited"),
+        _row("u-alice", "g3", instance="peer-2", other="dan"),
+    ]
+    await svc.tell_opponents("chess", await svc.sessions_ending("chess"))
+    by_peer = {e["to_instance_id"]: e for e in fed.sent_events}
+    assert set(by_peer) == {"peer-inst-id", "peer-2"}
+    assert len(fed.sent_events) == 2
+    one = by_peer["peer-inst-id"]
+    assert one["event_type"] is FederationEventType.APP_SESSION
+    assert one["payload"] == {
+        "app_id": "chess",
+        "verb": "close",
+        "reason": "ended",
+        "sessions": [
+            {"session_id": "g1", "to_user": "carol", "from_user": "alice"},
+            {"session_id": "g2", "to_user": "carol", "from_user": "bob"},
+            {"session_id": "i1", "to_user": "carol", "from_user": "bob"},
+        ],
+    }
+    assert by_peer["peer-2"]["payload"]["sessions"] == [
+        {"session_id": "g3", "to_user": "dan", "from_user": "alice"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_an_older_household_hears_only_about_pending_invites():
+    """Below v_72: the close it already knows — ``declined`` for an invite
+    it sent us (our side said no), ``withdrawn`` for one we sent — and
+    nothing for a game."""
+    svc, fed, _ = _uninstall_svc()
+    fed.peer_versions["peer-inst-id"] = 71
+    svc._app_repo.pending += [
+        _row("u-alice", "g1"),  # a game: nothing it would understand
+        _row("u-bob", "i1", state="invited"),
+        _row("u-bob", "i2", payload={"sent": True}),
+    ]
+    await svc.tell_opponents("chess", await svc.sessions_ending("chess"))
+    assert sorted(
+        (e["payload"]["session_id"], e["payload"]["reason"], e["payload"]["from_user"])
+        for e in fed.sent_events
+    ) == [("i1", "declined", "bob"), ("i2", "withdrawn", "bob")]
+    assert all("sessions" not in e["payload"] for e in fed.sent_events)
+
+
+@pytest.mark.asyncio
+async def test_ended_closes_are_chunked():
+    svc, fed, _ = _uninstall_svc()
+    n = ENDED_SESSIONS_MAX + 5
+    svc._app_repo.pending += [_row("u-alice", f"g{i}") for i in range(n)]
+    await svc.tell_opponents("chess", await svc.sessions_ending("chess"))
+    sizes = [len(e["payload"]["sessions"]) for e in fed.sent_events]
+    assert sizes == [ENDED_SESSIONS_MAX, 5]
+
+
+@pytest.mark.asyncio
+async def test_a_household_that_cant_be_reached_doesnt_stop_the_others():
+    svc, fed, _ = _uninstall_svc()
+    fed.failing.add("peer-inst-id")
+    svc._app_repo.pending += [
+        _row("u-alice", "g1"),
+        _row("u-alice", "g3", instance="peer-2", other="dan"),
+    ]
+    await svc.tell_opponents("chess", await svc.sessions_ending("chess"))
+    assert [e["to_instance_id"] for e in fed.sent_events] == ["peer-2"]
+
+
+@pytest.mark.asyncio
+async def test_nothing_crosses_a_guardian_block_on_uninstall():
+    svc, fed, _ = _uninstall_svc()
+    svc.attach_child_protection(
+        _FakeChildProtection({frozenset({"u-alice", "ru-carol"})})
+    )
+    svc._app_repo.pending += [_row("u-alice", "g1"), _row("u-bob", "g2")]
+    await svc.tell_opponents("chess", await svc.sessions_ending("chess"))
+    (event,) = fed.sent_events
+    assert [e["session_id"] for e in event["payload"]["sessions"]] == ["g2"]
+    # The dialog counts it as a game nobody is told about.
+    preview = await svc.preview_uninstall("chess")
+    assert (preview.games, preview.untold) == (2, 1)
+
+
+@pytest.mark.asyncio
+async def test_one_opponents_entries_stay_together_across_chunks():
+    """Sorted by person before chunking: the receiver tells each player
+    once per opponent per event."""
+    svc, fed, _ = _uninstall_svc()
+    svc._app_repo.pending += [
+        _row("u-alice" if i % 2 else "u-bob", f"g{i}")
+        for i in range(ENDED_SESSIONS_MAX + 4)
+    ]
+    await svc.tell_opponents("chess", await svc.sessions_ending("chess"))
+    firsts = [
+        {e["from_user"] for e in ev["payload"]["sessions"]} for ev in fed.sent_events
+    ]
+    assert firsts[0] == {"alice"} or "alice" not in firsts[1]
+
+
+def _ended_event(sessions: list[dict], *, from_instance: str = "peer-inst-id"):
+    return _make_event(
+        FederationEventType.APP_SESSION,
+        {"app_id": "chess", "verb": "close", "reason": "ended", "sessions": sessions},
+        from_instance=from_instance,
+    )
+
+
+def _game_ended(bus: _FakeBus) -> list[AppGameEnded]:
+    return [e for e in bus.published if isinstance(e, AppGameEnded)]
+
+
+@pytest.mark.asyncio
+async def test_an_ended_close_ends_the_games_and_tells_the_player_once():
+    bus = _FakeBus()
+    svc, _, ws = _uninstall_svc(bus=bus)
+    svc._app_repo.pending += [_row("u-bob", "g1"), _row("u-bob", "g2")]
+    await svc.on_inbound_event(
+        _ended_event(
+            [
+                {"session_id": "g1", "to_user": "bob", "from_user": "carol"},
+                {"session_id": "g2", "to_user": "bob", "from_user": "carol"},
+            ]
+        )
+    )
+    close = {"verb": "close", "reason": "ended"}
+    for sid in ("g1", "g2"):
+        row = await svc._app_repo.get_pending_session("chess", "u-bob", sid)
+        assert row.held["kind"] == "session"
+        assert row.held["payload"] == {"app_id": "chess", "session_id": sid, **close}
+    # Live into an open app too (Bob plays both).
+    assert [c["payload"]["session_id"] for c in ws.user_calls] == ["g1", "g2"]
+    (told,) = _game_ended(bus)
+    assert (told.to_user_id, told.from_display, told.from_user_id) == (
+        "u-bob",
+        "Bob · Familie Okafor",
+        "ru-carol",
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_ended_close_takes_a_waiting_invite_down():
+    bus = _FakeBus()
+    svc, _, _ = _uninstall_svc(bus=bus)
+    await _remote_invite(svc)
+    await svc.on_inbound_event(
+        _ended_event([{"session_id": "sess-1", "to_user": "bob", "from_user": "carol"}])
+    )
+    assert svc._app_repo.invites == []
+    assert [(e.session_ids, e.outcome) for e in _ended(bus)] == [
+        (("sess-1",), "withdrawn")
+    ]
+    assert _game_ended(bus) == []
+
+
+@pytest.mark.asyncio
+async def test_an_ended_close_is_handled_once():
+    bus = _FakeBus()
+    svc, _, _ = _uninstall_svc(bus=bus)
+    svc._app_repo.pending.append(_row("u-bob", "g1"))
+    entry = {"session_id": "g1", "to_user": "bob", "from_user": "carol"}
+    await svc.on_inbound_event(_ended_event([entry]))
+    await svc.on_inbound_event(_ended_event([entry]))
+    assert len(_game_ended(bus)) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_ended_close_reads_at_most_the_cap():
+    bus = _FakeBus()
+    svc, _, _ = _uninstall_svc(bus=bus)
+    n = ENDED_SESSIONS_MAX + 3
+    svc._app_repo.pending += [_row("u-bob", f"g{i}") for i in range(n)]
+    await svc.on_inbound_event(
+        _ended_event(
+            [
+                {"session_id": f"g{i}", "to_user": "bob", "from_user": "carol"}
+                for i in range(n)
+            ]
+        )
+    )
+    held = [p for p in svc._app_repo.pending if p.held is not None]
+    assert len(held) == ENDED_SESSIONS_MAX
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"app_id": "chess", "verb": "close", "reason": "ended", "sessions": "g1"},
+        {"verb": "close", "reason": "ended", "sessions": []},
+        {
+            "app_id": "chess",
+            "verb": "close",
+            "reason": "ended",
+            "sessions": [
+                "g1",
+                {"session_id": "g1", "to_user": "", "from_user": "carol"},
+                {"session_id": "g1", "to_user": "bob"},
+                {"session_id": 7, "to_user": "bob", "from_user": "carol"},
+            ],
+        },
+    ],
+)
+async def test_a_malformed_ended_close_changes_nothing(payload):
+    bus = _FakeBus()
+    svc, _, ws = _uninstall_svc(bus=bus)
+    svc._app_repo.pending.append(_row("u-bob", "g1"))
+    await svc.on_inbound_event(_make_event(FederationEventType.APP_SESSION, payload))
+    assert svc._app_repo.pending[0].held is None
+    assert bus.published == [] and ws.user_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("from_instance", "from_user"),
+    [
+        ("peer-2", "dan"),  # another household: not the other side of g1
+        ("peer-inst-id", "erin"),  # the right household, another person
+    ],
+)
+async def test_only_the_other_side_can_end_a_game(from_instance, from_user):
+    """Hijack: a household (or a person of it) that isn't the other side of
+    Bob's game can't end it — nothing held, nothing told, the game stays."""
+    bus = _FakeBus()
+    svc, _, ws = _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[_make_user("u-bob", "bob", "Bob")],
+        remote_users=[
+            _carol(),
+            _make_remote_user("ru-dan", "peer-2", "dan", "Dan"),
+            _make_remote_user("ru-erin", "peer-inst-id", "erin", "Erin"),
+        ],
+        peer_version=72,
+        bus=bus,
+    )
+    svc._app_repo.pending.append(_row("u-bob", "g1"))
+    await svc.on_inbound_event(
+        _ended_event(
+            [{"session_id": "g1", "to_user": "bob", "from_user": from_user}],
+            from_instance=from_instance,
+        )
+    )
+    (row,) = svc._app_repo.pending
+    assert row.held is None and row.state == "active"
+    assert _game_ended(bus) == [] and ws.user_calls == []

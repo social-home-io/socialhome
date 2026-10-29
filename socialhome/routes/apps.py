@@ -7,6 +7,8 @@ Four resource groups:
 * ``AppRequestsView``        — ``POST/DELETE /api/apps/{app_id}/requests``
   ("Ask an admin" / "Not now")
 * ``AppDetailView``          — ``GET /api/apps/{app_id}`` + ``PATCH`` (toggle) + ``DELETE``
+* ``AppUninstallPreviewView`` — ``GET /api/apps/{app_id}/uninstall-preview``
+  (what an uninstall loses, admins)
 * ``AppStoreCollectionView`` — ``GET /api/apps/{app_id}/store`` (list all KV pairs)
 * ``AppStoreItemView``       — ``GET/PUT/DELETE /api/apps/{app_id}/store/{key}``
 
@@ -311,6 +313,31 @@ class AppDetailView(BaseView):
         svc = self.svc(app_service_key)
         await svc.uninstall(app_id, actor_is_admin=True)
         return self._json({"status": "ok"})
+
+
+class AppUninstallPreviewView(BaseView):
+    """``GET /api/apps/{app_id}/uninstall-preview`` (admins) — what an
+    uninstall loses (D9): ``{people, games, invites, told, told_more,
+    untold}``. Counts and the names of people in other households who will
+    be told — never what the games hold, nor who here plays whom."""
+
+    async def get(self) -> web.Response:
+        user = self.user
+        if not user.is_admin:
+            return error_response(403, "FORBIDDEN", "Admin only.")
+        preview = await self.svc(app_service_key).uninstall_preview(
+            self.match("app_id"), actor_is_admin=True
+        )
+        return self._json(
+            {
+                "people": preview.people,
+                "games": preview.games,
+                "invites": preview.invites,
+                "told": list(preview.told),
+                "told_more": preview.told_more,
+                "untold": preview.untold,
+            }
+        )
 
 
 class AppStoreCollectionView(BaseView):

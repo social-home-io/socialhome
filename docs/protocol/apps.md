@@ -83,7 +83,8 @@ sequenceDiagram
 | `app_id` | yes | Installed app identifier. Must match a locally-enabled app on the receiver or the inbound is silently dropped. |
 | `session_id` | yes | Hex UUID allocated by the initiator.  Scopes all subsequent `APP_MESSAGE` frames for this session. |
 | `verb` | yes | `"open"` / `"accept"` / `"close"` / `"continue"` ([continue a game](#continue-a-game): an old game picked up again through the sheet — kept as an invite for the recipient). |
-| `reason` | no | On a `close` this household sends: `"declined"` (the invitee said no) or `"withdrawn"` (the challenger took the invite back). Passed through to the app. |
+| `reason` | no | On a `close` this household sends: `"declined"` (the invitee said no), `"withdrawn"` (the challenger took the invite back) or `"ended"` (v_72: the other household uninstalled the app — see [Uninstall](#uninstall-tells-opponents-v_72)). Passed through to the app. |
+| `sessions` | `ended` only (v_72) | `[{session_id, to_user, from_user}, ...]` — every session of the app the sending household had with people of the receiving one, in ONE event (≤ 100 entries; more go in further events). Present only on `reason: "ended"`; such an event carries no top-level `session_id` / `to_user` / `from_user`. |
 | `to_user` | no (v_18+) | The target user's username on the receiving household.  When present and non-empty, the receiver delivers the frame only to that user (instead of fanning out to all local users).  Omitted for sub-v_18 peers — gated on `FederationCapability.MIN_FOR_APP_USER_ROUTING`. |
 | `from_user` | no (v_18+) | The initiator's username on the sending household.  Used by the receiver to show who sent the challenge.  Omitted for sub-v_18 peers. |
 
@@ -97,6 +98,7 @@ sequenceDiagram
 | Declined | `POST /api/apps/{id}/sessions/{sid}/decline` (Needs you's Decline, after its 5-s undo) | `declined` | `APP_SESSION {verb: "close", reason: "declined"}` to the challenger (v_18+, best effort). Their household keeps it in the challenger's [mailbox](#mailbox) and gives them a bell row, "Ben declined your Chess game" (`app_challenge_declined`, no push) |
 | Withdrawn | The challenger's `POST …/sessions/{sid}/cancel` sends `APP_SESSION {verb: "close", reason: "withdrawn"}`; the invitee's household drops the invite only when the close comes from the household **and** person that opened it. If the invitee already pressed Play, the close waits in their [mailbox](#mailbox) instead, so their app clears the game when it opens | `withdrawn` | — |
 | Expired | 14 days (`PENDING_SESSION_TTL_SECONDS`): no longer replayed, pruned hourly; "Needs you" reads it as expired on the next look | `expired` | — |
+| App uninstalled | Either household uninstalls the app. On the household that uninstalls, the invite goes with the app (FK cascade). The other one gets `reason: "ended"` (v_72) or, below v_72, `reason: "withdrawn"` — and drops the invite exactly as for a withdrawal (only from the household and person on its other side) | `withdrawn` | see [Uninstall](#uninstall-tells-opponents-v_72) |
 
 No new event type or field the older side can't ignore: a household before this change passes the `close` through to the app as before and keeps its invite until it is played or expires. One decline or withdrawal is one `APP_SESSION` (≈ 200 bytes) to one household — never a fan-out.
 
@@ -248,6 +250,96 @@ relationship.  Sub-v_18 peers still receive no per-user identity on the wire
 All fields above are inside the **encrypted payload** (AES-256-GCM).  Only
 `event_type`, `from_instance`, `to_instance`, `msg_id`, and `timestamp` are
 in plaintext for routing.
+
+### Uninstall tells opponents (v_72)
+
+**Uninstall says what will be lost and tells opponents (D9).** Uninstalling an
+app deletes it for everyone in the household: every person's saved data
+(`app_kv`) and every session row and held message (`app_pending_sessions`) go
+with it (FK cascade). Before that happens:
+
+- **The dialog says what is lost.** `GET /api/apps/{id}/uninstall-preview`
+  (admins) answers `{people, games, invites, told, told_more, untold}`: how
+  many people here saved something, how many games are being played and how
+  many invites are open with people in **other** households (either way), up to
+  three of those people by the name the admin already sees anywhere else
+  (`"Ben · Familie Okafor"`, `told_more` counts the rest), and `untold` — the
+  games with a household below v_72, which won't hear about them. Counts and
+  names only: never what a game holds, nor who here plays whom. "Turn off
+  instead" is the dialog's default: turning off keeps everything (the
+  [mailbox](#mailbox) keeps moves while it is off).
+- **Opponents are told.** `AppService.uninstall` reads the sessions it ends
+  (`AppFederationService.sessions_ending`) before the rows go, removes the
+  app, and then tells each household (`tell_opponents`), in parallel and best
+  effort (the uninstall stands if a send fails; an unreachable household gets
+  it from the outbox):
+
+| Other household | What it gets | What its person sees |
+|---|---|---|
+| v_72+ | ONE `APP_SESSION {app_id, verb: "close", reason: "ended", sessions: [{session_id, to_user, from_user}, ...]}` with **every** game and invite with it (chunks of 100, one opponent's entries kept together) | A game — or an invite **they** sent us: the close waits in their mailbox (live into an open app), so the app clears it; and **one** bell row per opponent per event, "Ben no longer has Chess, so your game ended" (`app_game_ended`, About you, no push). An invite **we** sent them: it stops waiting (Needs you reads `withdrawn`), no bell row |
+| v_18 – v_71 | For each **pending invite** the close it already knows: `reason: "declined"` for an invite they sent us (our side is gone — it reads as a decline, with their existing "declined your game" row), `reason: "withdrawn"` for one we sent them. Nothing for a game being played | An invite: declined / withdrawn as usual. A game: nothing — it rests until the 90-day session TTL prunes it, and a move sent in it reaches a household without the app and is dropped there |
+| this household | nothing on the wire — the app is gone for everyone here | an open tab gets `app.uninstalled` over WebSocket and closes the app |
+
+Not told: a session whose other side already closed it (its close waits in the
+mailbox), an invite this person took back, a game nobody moved in for 30 days
+(`UNINSTALL_GAME_RECENT_SECONDS` — Social Home can't tell a finished game from
+a resting one; telling the opponent "your game ended" weeks after it was won
+would be noise, and the 90-day TTL takes it), and anything across a guardian
+block (§CP.F2, like a decline: counted in `untold`, never named).
+
+The sends run inside the uninstall request, households in parallel; each
+falls back to the outbox when the household can't be reached, and a failure
+is logged — the uninstall itself has already happened.
+
+**Receiver rule.** Each `sessions` entry goes through the same per-person path
+as a single `close` (`_deliver`): `to_user` must be a person here, `from_user`
+a known user of the sending household, and the entry ends only a session that
+person has **with exactly that household and person** — a waiting invite only
+when they opened it, a game only when they are its other side (`hold_message`
+checks both). So a household can end only its own people's games, never anyone
+else's; an entry naming another household's game or another person changes
+nothing. A re-delivered entry is skipped (the in-memory bounded LRU of
+inbound opens, keyed on the whole entry per sending household — marked
+before the entry is handled, lost on restart, so a re-delivery after a
+restart can repeat a bell row; it never changes which game ends), entries
+past 100 are dropped, and a malformed entry is ignored. Blocks, guardian blocks and the §CP.F3 messaging rule apply
+as for any app frame.
+
+**Cost** (measured: an entry is ≈ 98 B of JSON, ≈ 130 B once sealed and
+base64-encoded; the signed envelope around it ≈ 400 B). One sealed
+`APP_SESSION` per household that had a game or invite with anyone here, once
+per uninstall: ≈ 400 B + ≈ 130 B per session (a full chunk of 100 ≈ 13.6 KB).
+Household with 6 people × 15 games spread over 5 households → 5 events,
+≈ 90 × 130 B + 5 × 400 B ≈ 14 KB in total, once. Worst realistic case (a busy
+household: 10 people × 30 games each, all with one other household) → 3
+events (300 sessions, chunks of 100) ≈ 40 KB, once. Below v_72: one ≈ 200 B close per
+pending invite — at most 10 open invites per person and app
+(`INVITES_OPEN_MAX`) plus the ≤ 50 waiting invites per person kept here. No
+fan-out: each event goes to the one household that holds those games.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Admin as A admin (SPA)
+    participant A as HFS A
+    participant B as HFS B (v_72)
+    participant C as HFS C (v_71)
+    participant Ben as B: Ben (WS / bell)
+
+    Admin->>A: GET /api/apps/chess/uninstall-preview
+    A-->>Admin: {people: 4, games: 3, invites: 1, told: ["Ben · Brookside"], untold: 1}
+    Admin->>A: DELETE /api/apps/chess ("Uninstall and delete")
+    A->>A: sessions_ending(chess) — read before the cascade
+    A->>A: delete app (app_kv + app_pending_sessions cascade), app.uninstalled WS to open tabs
+    par one event per household
+        A->>B: APP_SESSION {verb:"close", reason:"ended", sessions:[{session_id, to_user:"ben", from_user:"anna"}, ...]}
+        B->>B: §24.11 → per entry: _deliver → hold_message (only Ben's game with A/anna)
+        B->>Ben: app.message {verb:"close", reason:"ended"} (live) — held for a closed app
+        B->>Ben: one bell row "Anna · Familie A no longer has Chess, so your game ended" (no push)
+    and older household
+        A->>C: APP_SESSION {verb:"close", reason:"withdrawn", session_id, to_user, from_user} — pending invites only
+    end
+```
 
 ### `APP_MESSAGE` (JSON fallback)
 

@@ -57,6 +57,7 @@ from ..domain.apps import (
     AppNotFoundError,
     AppQuotaExceededError,
     AppRequestNotAllowedError,
+    AppUninstallPreview,
     InstalledApp,
     app_age_allows,
     changelog_since,
@@ -84,6 +85,7 @@ from .bus_publisher import BusPublisherMixin
 
 if TYPE_CHECKING:
     from ..infrastructure.event_bus import EventBus
+    from .app_federation_service import AppFederationService
 
 log = logging.getLogger(__name__)
 
@@ -137,6 +139,7 @@ class AppService(BusPublisherMixin):
         "_cp_repo",
         "_downloader",
         "_repo",
+        "_sessions",
         "_users",
     )
 
@@ -160,6 +163,12 @@ class AppService(BusPublisherMixin):
         self._downloader = downloader
         self._bus = bus
         self._cp_repo = cp_repo
+        self._sessions: AppFederationService | None = None
+
+    def attach_sessions(self, sessions: AppFederationService) -> None:
+        """Wire the games side (D9): an uninstall reads which games and
+        invites it ends with other households, and tells them."""
+        self._sessions = sessions
 
     # ─── Read-side passthroughs ──────────────────────────────────────────────
 
@@ -730,6 +739,10 @@ class AppService(BusPublisherMixin):
     async def uninstall(self, app_id: str, *, actor_is_admin: bool) -> None:
         """Remove an installed app from disk and the registry.
 
+        Everyone's saved data and sessions go with it (FK cascade); the
+        households a person here plays it with are told their games and
+        invites ended (D9, :meth:`AppFederationService.tell_opponents`).
+
         Raises :class:`SpacePermissionError` for non-admins and
         :class:`AppNotFoundError` when the app is not installed.
         """
@@ -739,6 +752,14 @@ class AppService(BusPublisherMixin):
         existing = await self._repo.get(app_id)
         if existing is None:
             raise AppNotFoundError(f"App {app_id!r} is not installed")
+
+        # Read what the uninstall ends before the rows go with the app (FK
+        # cascade); tell the other households once it is gone.
+        ending = (
+            await self._sessions.sessions_ending(app_id)
+            if self._sessions is not None
+            else []
+        )
 
         await self._repo.uninstall(app_id)
 
@@ -756,6 +777,32 @@ class AppService(BusPublisherMixin):
             await asyncio.to_thread(self._rmtree_sync, bundle_dir)
 
         await self._emit(AppUninstalled(app_id=app_id, min_age=existing.min_age))
+        if ending and self._sessions is not None:
+            try:
+                await self._sessions.tell_opponents(app_id, ending)
+            except Exception as exc:
+                log.warning(
+                    "uninstall: telling opponents about %s failed: %s",
+                    app_id,
+                    exc,
+                    exc_info=True,
+                )
+
+    async def uninstall_preview(
+        self, app_id: str, *, actor_is_admin: bool
+    ) -> AppUninstallPreview:
+        """What uninstalling *app_id* loses (D9): people with saved data,
+        and the games and open invites with other households (with who
+        will be told). Admins only."""
+        if not actor_is_admin:
+            raise SpacePermissionError("Only admins may uninstall apps")
+        if await self._repo.get(app_id) is None:
+            raise AppNotFoundError(f"App {app_id!r} is not installed")
+        if self._sessions is not None:
+            return await self._sessions.preview_uninstall(app_id)
+        return AppUninstallPreview(
+            people=await self._repo.kv_people(app_id), games=0, invites=0
+        )
 
     async def set_enabled(
         self,

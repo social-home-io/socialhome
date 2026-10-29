@@ -289,6 +289,8 @@
   "notification.app.continue": "{name} wants to continue your {app} game",
   "notification.app.challenge_declined": "{name} declined your {app} game",
   "notification.app.challenge_declined_generic": "{name} declined your game",
+  "notification.app.game_ended": "{name} no longer has {app}, so your game ended",
+  "notification.app.game_ended_generic": "{name} no longer has the app, so your game ended",
   "notification.app.requested": "{name} asked for {app}",
   "notification.app.update_available": "{app} has an update",
   "notification.post.moderated": "Your post was moderated",
