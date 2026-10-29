@@ -39,6 +39,7 @@ export const NEEDS_YOU_TYPES: ReadonlySet<string> = new Set([
   'space_invite',
   'pairing_request',
   'app_challenge',
+  'app_challenge_continue',
   'app_request',
   'app_update',
 ])
@@ -103,10 +104,15 @@ export function flagsOf(n: Notification): readonly string[] {
   return mustReview.value.get(itemKey(n)) ?? n.params?.flags ?? []
 }
 
+/** A game invite: a new one, or an old game picked up again ("continue"). */
+function isGame(type: string): boolean {
+  return type === 'app_challenge' || type === 'app_challenge_continue'
+}
+
 /** What an item offers inline (the safety rules above). */
 export function inlineAction(n: Notification): InlineAction {
   if (n.type === 'space_invite') return 'invite'
-  if (n.type === 'app_challenge' && n.object_key?.startsWith('app_session:')) return 'game'
+  if (isGame(n.type) && n.object_key?.startsWith('app_session:')) return 'game'
   if (n.type === 'app_update' && n.object_key?.startsWith('app:')) return 'update'
   if (
     n.type === 'space_join_requested'
@@ -239,7 +245,7 @@ async function sendDecline(n: Notification): Promise<void> {
     await api.post(`/api/spaces/${n.space_id}/join-requests/${idOf(n)}/deny`, undefined, { keepalive: true })
     return
   }
-  if (n.type === 'app_challenge') {
+  if (isGame(n.type)) {
     const { appId, sessionId } = gameOf(n)
     await api.post(
       `/api/apps/${encodeURIComponent(appId)}/sessions/${encodeURIComponent(sessionId)}/decline`,
@@ -266,6 +272,7 @@ async function sendDecline(n: Notification): Promise<void> {
 const DECLINE_TEXT: Record<string, readonly [string, string]> = {
   space_invite: ['notifications.needs_you.declining_invite', 'notifications.needs_you.invite_declined'],
   app_challenge: ['notifications.needs_you.declining_game', 'notifications.needs_you.game_declined'],
+  app_challenge_continue: ['notifications.needs_you.declining_game', 'notifications.needs_you.game_declined'],
 }
 
 /** Declines waiting out their undo window, by item key. */

@@ -15,22 +15,32 @@ Security invariants:
 from __future__ import annotations
 
 import dataclasses
+from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock
 
 import pytest
 
 from socialhome.domain.apps import (
+    INVITES_OPEN_MAX,
+    INVITES_PER_DAY_MAX,
     AppAgeRestrictedError,
     AppChallengeHandledError,
     AppContactNotFoundError,
+    AppInviteLimitError,
     AppManifest,
     AppNotEnabledError,
     AppNotFoundError,
     AppPendingSession,
     AppPermissionDeniedError,
+    AppSessionTakenError,
+    AppSessionUnknownError,
     InstalledApp,
 )
-from socialhome.domain.events import AppChallengeDeclined, AppChallengeEnded
+from socialhome.domain.events import (
+    AppChallengeDeclined,
+    AppChallengeEnded,
+    AppChallengeReceived,
+)
 from socialhome.domain.federation import (
     FederationEvent,
     FederationEventType,
@@ -199,14 +209,32 @@ class _FakeAppRepo:
         p = await self.get_pending_session(app_id, user_id, session_id)
         if p is None or (p.from_instance, p.from_user) != (from_instance, from_user):
             return False
-        self._swap(p, dataclasses.replace(p, held=held, updated_at=now))
+        payload = dict(p.payload)
+        if payload.get("sent") is True:
+            payload["answered"] = True
+        self._swap(
+            p, dataclasses.replace(p, held=held, updated_at=now, payload=payload)
+        )
         return True
+
+    async def list_sessions(self, app_id, user_id):
+        rows = [p for p in self.pending if (p.app_id, p.user_id) == (app_id, user_id)]
+        return sorted(rows, key=lambda p: p.last_change, reverse=True)
+
+    async def withdraw_session(self, app_id, user_id, session_id):
+        p = await self.get_pending_session(app_id, user_id, session_id)
+        if p is not None:
+            self._swap(
+                p, dataclasses.replace(p, payload={**p.payload, "withdrawn": True})
+            )
 
     async def take_held(self, app_id, user_id):
         out = [
             p
             for p in self.pending
-            if (p.app_id, p.user_id) == (app_id, user_id) and p.held is not None
+            if (p.app_id, p.user_id) == (app_id, user_id)
+            and p.held is not None
+            and p.state == "active"
         ]
         for p in out:
             self._swap(p, dataclasses.replace(p, held=None))
@@ -476,6 +504,22 @@ def _local_target(user_ref: str, *, own: str = "own-inst-id") -> dict:
     return {"instance_id": own, "user_ref": user_ref, "is_local": True}
 
 
+async def _know(
+    svc: AppFederationService,
+    user_id: str,
+    session_id: str,
+    target: dict,
+    *,
+    app_id: str = "chess",
+) -> None:
+    """*user_id* sent *session_id* to *target* through the invite sheet: the
+    session row :meth:`open_session` keeps (D3 — only known sessions may be
+    messaged)."""
+    await svc._know_game(
+        app_id, user_id, session_id, str(target["instance_id"]), target
+    )
+
+
 @pytest.mark.asyncio
 async def test_open_session_sends_app_session_event():
     """open_session fires APP_SESSION with app_id, session_id, verb."""
@@ -548,12 +592,10 @@ async def test_open_session_returns_unique_ids():
 
 
 @pytest.mark.asyncio
-async def test_open_session_local_loopback_delivers_to_the_target_only():
-    """Local target → one per-user WS frame to the target, no fed send.
-
-    Never an echo to the initiator: it raced the openSession reply, so the
-    challenger's own app read it as an invite from themselves (chess showed
-    "<their user id> invited you to play!")."""
+async def test_open_session_local_loopback_keeps_the_invite_for_the_target_only():
+    """Local target → no fed send and no live frame into anyone's app (D3:
+    the invite waits in Needs you until Play); the invite is kept for the
+    target only. Never an echo to the initiator either."""
     app = _make_installed_app("chess")
     initiator = _make_user("u-init", "alice", "Alice")
     target = _make_user("u-target", "bob", "Bob")
@@ -571,21 +613,10 @@ async def test_open_session_local_loopback_delivers_to_the_target_only():
     assert federation.sent_events == []
     # Not a fan-out to all local users.
     assert ws.calls == []
-    # Per-user delivery to exactly the target.
-    assert [c["user_id"] for c in ws.user_calls] == ["u-target"]
-    for c in ws.user_calls:
-        frame = c["payload"]
-        assert frame["type"] == "app.message"
-        assert frame["app_id"] == "chess"
-        assert frame["kind"] == "session"
-        assert frame["session_id"] == session_id
-        assert frame["from_instance"] == "own-inst-id"
-        assert frame["from_user"] == "u-init"
-        assert frame["payload"] == {
-            "app_id": "chess",
-            "session_id": session_id,
-            "verb": "open",
-        }
+    assert ws.user_calls == []
+    (invite,) = svc._app_repo.invites
+    assert (invite.user_id, invite.session_id) == ("u-target", session_id)
+    assert (invite.from_instance, invite.from_user) == ("own-inst-id", "u-init")
 
 
 @pytest.mark.asyncio
@@ -610,8 +641,9 @@ async def test_open_session_remote_includes_to_user_and_from_user_when_peer_supp
 
 
 @pytest.mark.asyncio
-async def test_open_session_remote_omits_to_user_for_legacy_peer():
-    """peer_version=17 → no to_user/from_user on the wire (legacy fan-out)."""
+async def test_open_session_refuses_a_household_too_old_to_address_a_person():
+    """peer_version=17 → its people aren't in the sheet and an open is
+    refused: it could only reach the whole household (D3)."""
     app = _make_installed_app("chess")
     svc, federation, _ = _make_svc(
         apps={"chess": app},
@@ -619,20 +651,20 @@ async def test_open_session_remote_omits_to_user_for_legacy_peer():
         remote_users=[_make_remote_user(instance_id="peer-1", remote_username="bob")],
         peer_version=17,
     )
-    await svc.open_session(
-        app_id="chess",
-        target=_remote_target("peer-1", "bob"),
-        actor_user_id="u-init",
-    )
-    assert len(federation.sent_events) == 1
-    payload = federation.sent_events[0]["payload"]
-    assert "to_user" not in payload
-    assert "from_user" not in payload
+    assert await svc.list_invitable(app_id="chess", self_user_id="u-init") == []
+    with pytest.raises(AppContactNotFoundError):
+        await svc.open_session(
+            app_id="chess",
+            target=_remote_target("peer-1", "bob"),
+            actor_user_id="u-init",
+        )
+    assert federation.sent_events == []
 
 
 @pytest.mark.asyncio
 async def test_open_session_local_loopback_excludes_protected_minor_target():
-    """A local under-age protected-minor target is not delivered to."""
+    """A local under-age protected minor isn't in the invite sheet, so an
+    invite to them is refused — nobody hears it."""
     app = _make_installed_app("chess", min_age=13)
     cp = _FakeCpRepo()
     cp.add("u-target", enabled=True, declared_age=10)  # protected minor
@@ -644,15 +676,16 @@ async def test_open_session_local_loopback_excludes_protected_minor_target():
         cp_repo=cp,
         own_instance_id="own-inst-id",
     )
-    await svc.open_session(
-        app_id="chess",
-        target=_local_target("u-target"),
-        actor_user_id="u-init",
-    )
+    assert await svc.list_invitable(app_id="chess", self_user_id="u-init") == []
+    with pytest.raises(AppContactNotFoundError):
+        await svc.open_session(
+            app_id="chess",
+            target=_local_target("u-target"),
+            actor_user_id="u-init",
+        )
     assert federation.sent_events == []
-    # The minor target is filtered, and the initiator never gets their own
-    # invite: nobody hears it.
     assert ws.user_calls == []
+    assert svc._app_repo.pending == []
 
 
 # ─── send_message ─────────────────────────────────────────────────────────────
@@ -668,6 +701,7 @@ async def test_send_message_delegates_to_send_app_message():
         remote_users=[_make_remote_user(instance_id="peer-1", remote_username="bob")],
     )
     payload = {"move": "e2e4", "clock": 90}
+    await _know(svc, "user-1", "session-abc", _remote_target("peer-1", "bob"))
     await svc.send_message(
         app_id="chess",
         session_id="session-abc",
@@ -730,6 +764,9 @@ async def test_send_message_local_loopback_per_user():
         own_instance_id="own-inst-id",
     )
     payload = {"move": "e2e4"}
+    await _know(svc, "u-init", "sess-local", _local_target("u-target"))
+    # Bob plays it (he pressed Play): his row names Alice.
+    await _know(svc, "u-target", "sess-local", _local_target("u-init"))
     await svc.send_message(
         app_id="chess",
         session_id="sess-local",
@@ -766,6 +803,7 @@ async def test_send_message_remote_includes_to_user_when_peer_supports():
         remote_users=[_make_remote_user(instance_id="peer-1", remote_username="bob")],
         peer_version=18,
     )
+    await _know(svc, "u-init", "s1", _remote_target("peer-1", "bob"))
     await svc.send_message(
         app_id="chess",
         session_id="s1",
@@ -780,8 +818,9 @@ async def test_send_message_remote_includes_to_user_when_peer_supports():
 
 
 @pytest.mark.asyncio
-async def test_send_message_remote_omits_to_user_for_legacy_peer():
-    """peer_version=17 → no to_user/from_user passed to send_app_message."""
+async def test_send_message_refuses_a_household_too_old_to_address_a_person():
+    """peer_version=17 → even a known game sends nothing: it would reach
+    the whole household."""
     app = _make_installed_app("chess")
     svc, federation, _ = _make_svc(
         apps={"chess": app},
@@ -789,22 +828,21 @@ async def test_send_message_remote_omits_to_user_for_legacy_peer():
         remote_users=[_make_remote_user(instance_id="peer-1", remote_username="bob")],
         peer_version=17,
     )
-    await svc.send_message(
-        app_id="chess",
-        session_id="s1",
-        target=_remote_target("peer-1", "bob"),
-        payload={"move": "e2e4"},
-        actor_user_id="u-init",
-    )
-    assert len(federation.sent_app_messages) == 1
-    msg = federation.sent_app_messages[0]
-    assert msg["to_user"] is None
-    assert msg["from_user"] is None
+    await _know(svc, "u-init", "s1", _remote_target("peer-1", "bob"))
+    with pytest.raises(AppContactNotFoundError):
+        await svc.send_message(
+            app_id="chess",
+            session_id="s1",
+            target=_remote_target("peer-1", "bob"),
+            payload={"move": "e2e4"},
+            actor_user_id="u-init",
+        )
+    assert federation.sent_app_messages == []
 
 
 @pytest.mark.asyncio
 async def test_send_message_rejects_blocked_target():
-    """A blocked remote contact is not in the roster → send_message raises."""
+    """A game with someone the actor blocked since → send_message raises."""
     app = _make_installed_app("chess")
     blocked_remote = _make_remote_user(
         user_id="ru-blocked",
@@ -815,8 +853,9 @@ async def test_send_message_rejects_blocked_target():
         apps={"chess": app},
         users=[_make_user("u-init", "alice", "Alice")],
         remote_users=[blocked_remote],
-        blocked_ids={"ru-blocked"},
+        block_pairs={("u-init", "ru-blocked")},
     )
+    await _know(svc, "u-init", "s1", _remote_target("peer-1", "bob"))
     with pytest.raises(AppContactNotFoundError):
         await svc.send_message(
             app_id="chess",
@@ -953,10 +992,11 @@ async def test_inbound_no_local_users_no_broadcast():
 
 @pytest.mark.asyncio
 async def test_inbound_binary_delivers_to_local_users():
-    """Binary-channel path delivers to users just like the JSON event path."""
+    """Binary-channel path delivers to users just like the JSON event path
+    (an older, household-addressed sender)."""
     app = _make_installed_app("chess")
     users = [_make_user("u1", "alice")]
-    svc, _, ws = _make_svc(apps={"chess": app}, users=users)
+    svc, _, ws = _make_svc(apps={"chess": app}, users=users, peer_version=17)
 
     await svc.on_inbound_message(
         "peer-inst-id",
@@ -996,7 +1036,8 @@ async def test_inbound_binary_for_uninstalled_app_not_delivered():
 
 @pytest.mark.asyncio
 async def test_inbound_routes_to_resolved_user_when_to_user_present():
-    """A non-empty to_user resolves to a local user → single broadcast_to_user."""
+    """A non-empty to_user resolves to a local user: the invite is kept for
+    them only — no fan-out, and no live frame into their app (D3)."""
     app = _make_installed_app("chess")
     users = [_make_user("u1", "alice"), _make_user("u2", "bob")]
     svc, _, ws = _make_svc(
@@ -1017,21 +1058,17 @@ async def test_inbound_routes_to_resolved_user_when_to_user_present():
     )
     await svc.on_inbound_event(event)
 
-    # Per-user delivery to exactly the resolved user — no fan-out.
     assert ws.calls == []
-    recipients = {c["user_id"] for c in ws.user_calls}
-    assert recipients == {"u2"}
-    frame = ws.user_calls[0]["payload"]
-    assert frame["type"] == "app.message"
-    assert frame["session_id"] == "sess-1"
-    assert frame["kind"] == "session"
+    assert ws.user_calls == []
+    (invite,) = svc._app_repo.invites
+    assert (invite.user_id, invite.session_id) == ("u2", "sess-1")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("event_type", "body", "kind"),
     [
-        (FederationEventType.APP_SESSION, {"verb": "open"}, "session"),
+        (FederationEventType.APP_SESSION, {"verb": "close"}, "session"),
         (FederationEventType.APP_MESSAGE, {"data": {"move": "e2e4"}}, "message"),
     ],
 )
@@ -1050,6 +1087,8 @@ async def test_inbound_per_user_frame_names_the_sender(event_type, body, kind):
         users=users,
         remote_users=[_make_remote_user(remote_username="remote-alice")],
     )
+    # Bob plays sess-1 with remote Alice (D3: only then does it reach his app).
+    await _know(svc, "u2", "sess-1", _remote_target("peer-inst-id", "remote-alice"))
 
     await svc.on_inbound_event(
         _make_event(
@@ -1207,7 +1246,7 @@ async def test_inbound_binary_frame_without_people_broadcasts():
     """A binary frame naming nobody (older sender) → household fan-out."""
     app = _make_installed_app("chess")
     users = [_make_user("u1", "alice"), _make_user("u2", "bob")]
-    svc, _, ws = _make_svc(apps={"chess": app}, users=users)
+    svc, _, ws = _make_svc(apps={"chess": app}, users=users, peer_version=17)
 
     await svc.on_inbound_message("peer-inst-id", "chess", "sess-bin", {"move": "d5"})
 
@@ -1226,6 +1265,7 @@ async def test_inbound_binary_frame_goes_to_the_addressed_person_and_names_the_s
         users=users,
         remote_users=[_make_remote_user(remote_username="remote-alice")],
     )
+    await _know(svc, "u2", "sess-bin", _remote_target("peer-inst-id", "remote-alice"))
 
     await svc.on_inbound_message(
         "peer-inst-id",
@@ -1350,21 +1390,28 @@ async def test_remote_open_session_does_not_self_echo_locally():
 
 
 @pytest.mark.asyncio
-async def test_legacy_household_target_is_exempt_from_contact_check():
-    """A legacy household-addressed target (user_ref == "") is allowed through."""
+async def test_a_household_addressed_target_is_refused():
+    """D3: a household-addressed target (user_ref == "") names nobody anyone
+    picked in the invite sheet — no open, no message."""
     app = _make_installed_app("chess")
     svc, federation, _ = _make_svc(
         apps={"chess": app},
         users=[_make_user("u-init", "alice", "Alice")],
         peer_version=17,
     )
-    # No remote contacts, but user_ref="" is the legacy back-compat path.
-    await svc.open_session(
-        app_id="chess",
-        target={"instance_id": "peer-1", "user_ref": "", "is_local": False},
-        actor_user_id="u-init",
-    )
-    assert len(federation.sent_events) == 1
+    target = {"instance_id": "peer-1", "user_ref": "", "is_local": False}
+    with pytest.raises(AppContactNotFoundError):
+        await svc.open_session(app_id="chess", target=target, actor_user_id="u-init")
+    with pytest.raises(AppSessionUnknownError):
+        await svc.send_message(
+            app_id="chess",
+            session_id="s1",
+            target=target,
+            payload={"x": 1},
+            actor_user_id="u-init",
+        )
+    assert federation.sent_events == []
+    assert federation.sent_app_messages == []
 
 
 # ─── Age gate tests (§CP) ─────────────────────────────────────────────────────
@@ -1439,6 +1486,7 @@ async def test_send_message_allowed_for_adult_meeting_min_age():
         remote_users=[_make_remote_user(instance_id="peer-1", remote_username="bob")],
         cp_repo=cp,
     )
+    await _know(svc, "teen1", "s1", _remote_target("peer-1", "bob"))
     await svc.send_message(
         app_id="chess",
         session_id="s1",
@@ -1530,28 +1578,33 @@ async def test_deliver_skips_filtering_when_min_age_zero():
 
 
 @pytest.mark.asyncio
-async def test_list_contacts_excludes_self():
+async def test_list_invitable_excludes_self():
     """The calling user must not appear in their own contact list."""
     alice = _make_user("u-alice", "alice", "Alice")
     bob = _make_user("u-bob", "bob", "Bob")
-    svc, _, _ = _make_svc(users=[alice, bob], own_instance_id="own-inst")
-    contacts = await svc.list_contacts(self_user_id="u-alice")
+    svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app()},
+        users=[alice, bob],
+        own_instance_id="own-inst",
+    )
+    contacts = await svc.list_invitable(app_id="chess", self_user_id="u-alice")
     ids = [c["user_ref"] for c in contacts]
     assert "u-alice" not in ids
     assert "u-bob" in ids
 
 
 @pytest.mark.asyncio
-async def test_list_contacts_local_member_shape():
+async def test_list_invitable_local_member_shape():
     """A local household member appears with is_local=True and the own instance_id."""
     alice = _make_user("u-alice", "alice", "Alice")
     bob = _make_user("u-bob", "bob", "Bob")
     svc, _, _ws = _make_svc(
+        apps={"chess": _make_installed_app()},
         users=[alice, bob],
         online_user_ids={"u-bob"},
         own_instance_id="own-inst",
     )
-    contacts = await svc.list_contacts(self_user_id="u-alice")
+    contacts = await svc.list_invitable(app_id="chess", self_user_id="u-alice")
     assert len(contacts) == 1
     c = contacts[0]
     assert c["instance_id"] == "own-inst"
@@ -1562,22 +1615,23 @@ async def test_list_contacts_local_member_shape():
 
 
 @pytest.mark.asyncio
-async def test_list_contacts_local_member_offline():
+async def test_list_invitable_local_member_offline():
     """A local member with no WS session is online=False."""
     alice = _make_user("u-alice", "alice", "Alice")
     bob = _make_user("u-bob", "bob", "Bob")
     svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app()},
         users=[alice, bob],
         online_user_ids=set(),  # nobody online
         own_instance_id="own-inst",
     )
-    contacts = await svc.list_contacts(self_user_id="u-alice")
+    contacts = await svc.list_invitable(app_id="chess", self_user_id="u-alice")
     assert len(contacts) == 1
     assert contacts[0]["online"] is False
 
 
 @pytest.mark.asyncio
-async def test_list_contacts_remote_user_shape():
+async def test_list_invitable_remote_user_shape():
     """A known remote user appears with is_local=False, correct instance_id and user_ref."""
     local = _make_user("u-alice", "alice", "Alice")
     remote = _make_remote_user(
@@ -1587,11 +1641,12 @@ async def test_list_contacts_remote_user_shape():
         display_name="Bob Remote",
     )
     svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app()},
         users=[local],
         remote_users=[remote],
         own_instance_id="own-inst",
     )
-    contacts = await svc.list_contacts(self_user_id="u-alice")
+    contacts = await svc.list_invitable(app_id="chess", self_user_id="u-alice")
     # one remote, self excluded from local
     remote_contacts = [c for c in contacts if not c["is_local"]]
     assert len(remote_contacts) == 1
@@ -1604,7 +1659,7 @@ async def test_list_contacts_remote_user_shape():
 
 
 @pytest.mark.asyncio
-async def test_list_contacts_remote_falls_back_to_username_when_display_name_empty():
+async def test_list_invitable_remote_falls_back_to_username_when_display_name_empty():
     """When a remote user has no display_name, user_ref (remote_username) is used."""
     local = _make_user("u-alice", "alice", "Alice")
     remote = _make_remote_user(
@@ -1614,26 +1669,29 @@ async def test_list_contacts_remote_falls_back_to_username_when_display_name_emp
         display_name="",  # empty — should fall back to remote_username
     )
     svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app()},
         users=[local],
         remote_users=[remote],
         own_instance_id="own-inst",
     )
-    contacts = await svc.list_contacts(self_user_id="u-alice")
+    contacts = await svc.list_invitable(app_id="chess", self_user_id="u-alice")
     remote_contacts = [c for c in contacts if not c["is_local"]]
     assert len(remote_contacts) == 1
     assert remote_contacts[0]["display_name"] == "charlie"
 
 
 @pytest.mark.asyncio
-async def test_list_contacts_empty_when_only_self_and_no_remotes():
+async def test_list_invitable_empty_when_only_self_and_no_remotes():
     """Single local user with no remotes → empty contact list."""
     alice = _make_user("u-alice", "alice", "Alice")
-    svc, _, _ = _make_svc(users=[alice], own_instance_id="own-inst")
-    assert await svc.list_contacts(self_user_id="u-alice") == []
+    svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app()}, users=[alice], own_instance_id="own-inst"
+    )
+    assert await svc.list_invitable(app_id="chess", self_user_id="u-alice") == []
 
 
 @pytest.mark.asyncio
-async def test_list_contacts_excludes_blocked_users():
+async def test_list_invitable_excludes_blocked_users():
     """Blocked contacts (local and remote) are excluded from list_contacts.
 
     Matches the /friends and DM roster behaviour: list_blocked(self_user_id)
@@ -1658,12 +1716,13 @@ async def test_list_contacts_excludes_blocked_users():
     )
 
     svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app()},
         users=[alice, blocked_local, visible_local],
         remote_users=[blocked_remote, visible_remote],
         own_instance_id="own-inst",
         blocked_ids={"u-blocked", "ru-blocked"},
     )
-    contacts = await svc.list_contacts(self_user_id="u-alice")
+    contacts = await svc.list_invitable(app_id="chess", self_user_id="u-alice")
     user_refs = {c["user_ref"] for c in contacts}
 
     # Blocked contacts must not appear.
@@ -1746,7 +1805,9 @@ async def test_inbound_resolved_open_publishes_challenge():
     )
     await svc.on_inbound_event(event)
     # Delivered to the resolved local user.
-    assert any(c["user_id"] == "u-bob" for c in ws.user_calls)
+    # Kept for Bob (Needs you) — never a live frame into his app (D3).
+    assert [p.user_id for p in svc._app_repo.invites] == ["u-bob"]
+    assert ws.user_calls == []
     challenges = [e for e in bus.published if isinstance(e, AppChallengeReceived)]
     assert len(challenges) == 1
     ev = challenges[0]
@@ -1800,7 +1861,7 @@ async def test_legacy_broadcast_open_does_not_publish_challenge():
 
 
 @pytest.mark.asyncio
-async def test_duplicate_inbound_open_delivers_and_publishes_once():
+async def test_duplicate_inbound_open_is_kept_and_published_once():
     """A re-delivered inbound open (same session_id) is idempotent: it
     delivers and publishes exactly once."""
     from socialhome.domain.events import AppChallengeReceived
@@ -1828,8 +1889,8 @@ async def test_duplicate_inbound_open_delivers_and_publishes_once():
     await svc.on_inbound_event(_make_event(FederationEventType.APP_SESSION, payload))
     challenges = [e for e in bus.published if isinstance(e, AppChallengeReceived)]
     assert len(challenges) == 1
-    delivered = [c for c in ws.user_calls if c["user_id"] == "u-bob"]
-    assert len(delivered) == 1
+    assert len(svc._app_repo.invites) == 1
+    assert ws.user_calls == []
 
 
 # ─── Recipient block enforcement on inbound challenge (Fix 1) ─────────────────
@@ -1906,7 +1967,9 @@ async def test_inbound_challenge_not_blocked_is_delivered():
         },
     )
     await svc.on_inbound_event(event)
-    assert any(c["user_id"] == "u-bob" for c in ws.user_calls)
+    # Kept for Bob (Needs you) — never a live frame into his app (D3).
+    assert [p.user_id for p in svc._app_repo.invites] == ["u-bob"]
+    assert ws.user_calls == []
     assert len([e for e in bus.published if isinstance(e, AppChallengeReceived)]) == 1
 
 
@@ -2054,7 +2117,7 @@ async def test_legacy_fanout_open_does_not_persist():
 
 
 @pytest.mark.asyncio
-async def test_list_contacts_uses_active_users():
+async def test_list_invitable_uses_active_users():
     """A soft-deleted/inactive local user is not surfaced as a contact."""
     alice = _make_user("u-alice", "alice", "Alice")
     inactive = dataclasses.replace(
@@ -2063,10 +2126,11 @@ async def test_list_contacts_uses_active_users():
         deleted_at="2026-01-01T00:00:00+00:00",
     )
     svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app()},
         users=[alice, inactive],
         own_instance_id="own-inst",
     )
-    contacts = await svc.list_contacts(self_user_id="u-alice")
+    contacts = await svc.list_invitable(app_id="chess", self_user_id="u-alice")
     refs = {c["user_ref"] for c in contacts}
     assert "u-gone" not in refs
 
@@ -2166,6 +2230,8 @@ async def test_open_session_refuses_a_local_target_who_blocked_the_actor():
         await svc.open_session(
             app_id="chess", target=_local_target("u-ann"), actor_user_id="u-bob"
         )
+    # Not even in a game they had before the block.
+    await _know(svc, "u-bob", "s1", _local_target("u-ann"))
     with pytest.raises(AppContactNotFoundError):
         await svc.send_message(
             app_id="chess",
@@ -2305,37 +2371,29 @@ async def test_an_expired_invite_cannot_be_played():
 
 
 @pytest.mark.asyncio
-async def test_a_move_by_the_invitee_takes_the_invite_in():
-    """An app that seats live invites itself (before launch contexts) plays
-    the game without "Play": the invitee's first message accepts it."""
+async def test_a_move_by_the_invitee_does_not_take_the_invite_in():
+    """D3/D12: only Play takes an invite in. A message an app sends in a
+    session that still waits in Needs you is refused, and the invite keeps
+    waiting."""
     bus = _FakeBus()
-    svc, _, _ = _make_svc(
+    svc, fed, _ = _make_svc(
         apps={"chess": _make_installed_app("chess")},
         users=[_make_user("u-bob", "bob", "Bob")],
         remote_users=[_carol()],
         bus=bus,
     )
     await _remote_invite(svc, "s1")
-    await _remote_invite(svc, "s2")
-    await svc.send_message(
-        app_id="chess",
-        session_id="s1",
-        target=_remote_target("peer-inst-id", "carol"),
-        payload={"move": "e7e5"},
-        actor_user_id="u-bob",
-    )
-    (ended,) = _ended(bus)
-    assert (ended.session_ids, ended.outcome) == (("s1",), "accepted")
-    assert [p.session_id for p in svc._app_repo.invites] == ["s2"]  # type: ignore[attr-defined]
-    # Later moves find nothing waiting: nothing more ends.
-    await svc.send_message(
-        app_id="chess",
-        session_id="s1",
-        target=_remote_target("peer-inst-id", "carol"),
-        payload={"move": "g8f6"},
-        actor_user_id="u-bob",
-    )
-    assert len(_ended(bus)) == 1
+    with pytest.raises(AppSessionUnknownError):
+        await svc.send_message(
+            app_id="chess",
+            session_id="s1",
+            target=_remote_target("peer-inst-id", "carol"),
+            payload={"move": "e7e5"},
+            actor_user_id="u-bob",
+        )
+    assert _ended(bus) == []
+    assert [p.session_id for p in svc._app_repo.invites] == ["s1"]  # type: ignore[attr-defined]
+    assert fed.sent_app_messages == []
 
 
 @pytest.mark.asyncio
@@ -2487,9 +2545,8 @@ async def test_the_challenger_withdraws_a_local_invite():
     assert svc._app_repo.invites == []
     (ended,) = _ended(bus)
     assert (ended.user_id, ended.outcome) == ("u-bob", "withdrawn")
-    (call,) = ws.user_calls
-    assert call["user_id"] == "u-bob"
-    assert call["payload"]["payload"]["reason"] == "withdrawn"
+    # Bob never played it: nothing reaches his app (D3), the invite just goes.
+    assert ws.user_calls == []
 
 
 @pytest.mark.asyncio
@@ -2508,12 +2565,14 @@ async def test_only_the_challenger_can_withdraw_an_invite():
     session_id = await svc.open_session(
         app_id="chess", target=_local_target("u-bob"), actor_user_id="u-alice"
     )
-    await svc.cancel_session(
-        app_id="chess",
-        session_id=session_id,
-        target=_local_target("u-bob"),
-        actor_user_id="u-eve",
-    )
+    # Eve doesn't play that game: refused (D3), and nothing changes.
+    with pytest.raises(AppSessionUnknownError):
+        await svc.cancel_session(
+            app_id="chess",
+            session_id=session_id,
+            target=_local_target("u-bob"),
+            actor_user_id="u-eve",
+        )
     assert len(svc._app_repo.invites) == 1
     assert _ended(bus) == []
 
@@ -2527,6 +2586,7 @@ async def test_the_challenger_withdraws_a_remote_invite():
         instances=[_make_remote_instance()],
     )
     target = {"instance_id": "peer-inst-id", "user_ref": "carol", "is_local": False}
+    await _know(svc, "u-alice", "s9", target)
     await svc.cancel_session(
         app_id="chess", session_id="s9", target=target, actor_user_id="u-alice"
     )
@@ -2549,9 +2609,12 @@ async def test_a_close_is_not_sent_to_a_household_that_cant_address_a_person():
         peer_version=17,
     )
     target = {"instance_id": "peer-inst-id", "user_ref": "carol", "is_local": False}
-    await svc.cancel_session(
-        app_id="chess", session_id="s9", target=target, actor_user_id="u-alice"
-    )
+    await _know(svc, "u-alice", "s9", target)
+    # A pre-v_18 household can't address a person: no game with it at all.
+    with pytest.raises(AppContactNotFoundError):
+        await svc.cancel_session(
+            app_id="chess", session_id="s9", target=target, actor_user_id="u-alice"
+        )
     assert fed.sent_events == []
 
 
@@ -2582,8 +2645,8 @@ async def test_an_inbound_close_from_the_challenger_withdraws_the_invite():
     assert [(e.session_ids, e.outcome) for e in _ended(bus)] == [
         (("sess-1",), "withdrawn")
     ]
-    # The close still reaches Bob's app.
-    assert ws.user_calls[-1]["payload"]["payload"]["verb"] == "close"
+    # Bob never played it: his app hears nothing of it (D3).
+    assert ws.user_calls == []
 
 
 # ─── §CP.F2 guardian blocks (audit #10) ──────────────────────────────────────
@@ -2603,9 +2666,17 @@ class _FakeChildProtection:
         #: user_id → instance_id for the blocked people (household check).
         self.homes = homes or {}
         self.gates: list[object] = []
+        #: (protected user_id, instance_id) pairs the DM rule refuses
+        #: (§CP.F3: not a direct pairing).
+        self.no_dm: set[tuple[str, str]] = set()
 
     def register_gate(self, gate: object) -> None:
         self.gates.append(gate)
+
+    async def is_dm_allowed(
+        self, *, sender_user_id: str, target_instance_id: str | None
+    ) -> bool:
+        return (sender_user_id, target_instance_id or "") not in self.no_dm
 
     async def is_protected(self, user_id: str) -> bool:
         return any(user_id in p for p in self.pairs)
@@ -2666,10 +2737,14 @@ async def test_guardian_blocked_people_are_not_in_each_others_app_contacts():
     svc, _, _, _, _ = _guarded_svc(
         {frozenset({"u-kid", "u-adult"}), frozenset({"u-kid", "ru-mallory"})}
     )
-    kid_refs = {c["user_ref"] for c in await svc.list_contacts(self_user_id="u-kid")}
+    kid_refs = {
+        c["user_ref"]
+        for c in await svc.list_invitable(app_id="chess", self_user_id="u-kid")
+    }
     assert kid_refs.isdisjoint({"u-adult", "mallory"})
     adult_refs = {
-        c["user_ref"] for c in await svc.list_contacts(self_user_id="u-adult")
+        c["user_ref"]
+        for c in await svc.list_invitable(app_id="chess", self_user_id="u-adult")
     }
     assert "u-kid" not in adult_refs
     assert "mallory" in adult_refs  # no block between the two adults
@@ -2689,6 +2764,8 @@ async def test_guardian_blocked_local_pair_cannot_challenge_or_message(actor, ta
     target = {**target, "is_local": True}
     with pytest.raises(AppContactNotFoundError):
         await svc.open_session(app_id="chess", target=target, actor_user_id=actor)
+    # Not even in a game from before the block.
+    await _know(svc, actor, "s", target)
     with pytest.raises(AppContactNotFoundError):
         await svc.send_message(
             app_id="chess",
@@ -2708,6 +2785,7 @@ async def test_protected_minor_cannot_challenge_or_message_a_guardian_blocked_re
     target = {"instance_id": "peer-inst-id", "user_ref": "mallory", "is_local": False}
     with pytest.raises(AppContactNotFoundError):
         await svc.open_session(app_id="chess", target=target, actor_user_id="u-kid")
+    await _know(svc, "u-kid", "s", target)
     with pytest.raises(AppContactNotFoundError):
         await svc.send_message(
             app_id="chess",
@@ -2722,19 +2800,14 @@ async def test_protected_minor_cannot_challenge_or_message_a_guardian_blocked_re
 @pytest.mark.asyncio
 async def test_protected_minor_legacy_household_send_refused_across_guardian_block():
     """A household-addressed (pre-v_18) send would reach everyone there,
-    the blocked adult included — refused like a non-contact."""
+    the blocked adult included — refused like any household-addressed one
+    (D3: it names nobody anyone picked)."""
     svc, fed, _, _, _ = _guarded_svc({frozenset({"u-kid", "ru-mallory"})})
-    target = {"instance_id": "peer-inst-id", "user_ref": "", "is_local": False}
-    with pytest.raises(AppContactNotFoundError):
-        await svc.open_session(app_id="chess", target=target, actor_user_id="u-kid")
+    for instance in ("peer-inst-id", "other-inst"):
+        target = {"instance_id": instance, "user_ref": "", "is_local": False}
+        with pytest.raises(AppContactNotFoundError):
+            await svc.open_session(app_id="chess", target=target, actor_user_id="u-kid")
     assert fed.sent_events == []
-    # Another household is fine.
-    await svc.open_session(
-        app_id="chess",
-        target={"instance_id": "other-inst", "user_ref": "", "is_local": False},
-        actor_user_id="u-kid",
-    )
-    assert len(fed.sent_events) == 1
 
 
 @pytest.mark.asyncio
@@ -2889,7 +2962,7 @@ def test_with_household_names_the_household():
 
 
 @pytest.mark.asyncio
-async def test_list_contacts_names_a_remote_persons_household():
+async def test_list_invitable_names_a_remote_persons_household():
     """Two "Admin"s — one at home, one in a paired household — read apart."""
     alice = _make_user("u-alice", "alice", "Alice")
     admin = _make_user("u-admin", "admin", "Admin")
@@ -2900,13 +2973,15 @@ async def test_list_contacts_names_a_remote_persons_household():
         display_name="Admin",
     )
     svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app()},
         users=[alice, admin],
         remote_users=[remote],
         instances=[_make_remote_instance("peer-inst", display_name="Familie Okafor")],
         own_instance_id="own-inst",
     )
     contacts = {
-        c["instance_id"]: c for c in await svc.list_contacts(self_user_id="u-alice")
+        c["instance_id"]: c
+        for c in await svc.list_invitable(app_id="chess", self_user_id="u-alice")
     }
     mine, theirs = contacts["own-inst"], contacts["peer-inst"]
     assert mine["display_name"] == "Admin"
@@ -2918,7 +2993,7 @@ async def test_list_contacts_names_a_remote_persons_household():
 
 
 @pytest.mark.asyncio
-async def test_list_contacts_uses_the_households_local_alias():
+async def test_list_invitable_uses_the_households_local_alias():
     inst = _make_remote_instance("peer-inst", display_name="Okafor-HA")
     inst = dataclasses.replace(inst, local_alias="The Okafors")
     remote = _make_remote_user(
@@ -2928,11 +3003,12 @@ async def test_list_contacts_uses_the_households_local_alias():
         display_name="Ben",
     )
     svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app()},
         users=[_make_user("u-alice", "alice", "Alice")],
         remote_users=[remote],
         instances=[inst],
     )
-    (c,) = await svc.list_contacts(self_user_id="u-alice")
+    (c,) = await svc.list_invitable(app_id="chess", self_user_id="u-alice")
     assert c["display_name"] == "Ben · The Okafors"
 
 
@@ -3087,16 +3163,12 @@ async def test_an_invite_to_a_turned_off_app_is_still_dropped():
 
 @pytest.mark.asyncio
 async def test_a_move_in_a_game_this_household_does_not_know_is_not_kept():
-    """Only a known session is kept: a message for any other session id
-    is delivered live as before (an older game) and never stored."""
+    """Only a known session is kept — and (D3) only a known session reaches
+    the app live: a message for any other session id goes nowhere."""
     svc, _, ws, _ = _mailbox_svc()
     await _inbound_move(svc, {"n": 1}, session_id="unknown")
     assert svc._app_repo.pending == []
-    assert [c["user_id"] for c in ws.user_calls] == ["u-bob"]
-    _turn(svc, enabled=False)
-    ws.user_calls.clear()
-    await _inbound_move(svc, {"n": 2}, session_id="unknown")
-    assert ws.user_calls == [] and svc._app_repo.pending == []
+    assert ws.user_calls == []
 
 
 @pytest.mark.asyncio
@@ -3293,16 +3365,18 @@ async def test_a_move_in_a_known_game_skips_the_roster_scan():
 
 
 @pytest.mark.asyncio
-async def test_a_move_to_someone_else_in_a_known_game_takes_the_full_check():
-    svc, _, _, _ = _counting_svc()
+async def test_a_move_to_someone_else_in_a_known_game_is_refused():
+    """D3: a game is with the person it was opened with — never someone
+    else on the same session id."""
+    svc, fed, _, _ = _counting_svc()
     sid = await svc.open_session(
         app_id="chess",
         target=_remote_target("peer-inst-id", "carol"),
         actor_user_id="u-bob",
     )
-    before = svc._user_repo.roster_reads
-    await _move(svc, sid, _remote_target("peer-inst-id", "dave"))
-    assert svc._user_repo.roster_reads == before + 1
+    with pytest.raises(AppSessionUnknownError):
+        await _move(svc, sid, _remote_target("peer-inst-id", "dave"))
+    assert fed.sent_app_messages == []
 
 
 @pytest.mark.asyncio
@@ -3342,17 +3416,16 @@ async def test_a_known_game_refuses_someone_no_longer_known():
 
 
 @pytest.mark.asyncio
-async def test_a_game_from_before_the_mailbox_is_known_after_the_first_move():
-    """No row (a game started before 0131): the first move takes the full
-    check and keeps the game known from then on."""
-    svc, _, _, _ = _counting_svc()
-    await _move(svc, "old-game")
-    (row,) = svc._app_repo.pending
-    assert (row.user_id, row.state) == ("u-bob", "active")
-    assert (row.from_instance, row.from_user) == ("peer-inst-id", "carol")
-    before = svc._user_repo.roster_reads
-    await _move(svc, "old-game")
-    assert svc._user_repo.roster_reads == before
+async def test_a_move_in_a_session_nobody_opened_is_refused():
+    """D3 — real hole 2: an app can't message an old opponent (Carol is a
+    contact) on a session id the household never saw — not opened through
+    the invite sheet, not taken in with Play. Nothing goes out and nothing
+    becomes known."""
+    svc, fed, _, _ = _counting_svc()
+    with pytest.raises(AppSessionUnknownError):
+        await _move(svc, "made-up-session")
+    assert fed.sent_app_messages == []
+    assert svc._app_repo.pending == []
 
 
 @pytest.mark.asyncio
@@ -3559,3 +3632,495 @@ async def test_declining_after_federation_was_taken_away_sends_nothing():
     )
     assert svc._app_repo.invites == []  # type: ignore[attr-defined]
     assert fed.sent_events == []
+
+
+# ─── D3: invites go through Social Home (R3 PR 9) ───────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_an_apps_contacts_are_only_who_was_picked_and_who_they_play_with():
+    """The app learns who the person sent an invite to (through the sheet)
+    and who they play with after Play — never the roster, and never an
+    inviter whose invite still waits in Needs you."""
+    svc, _, _, _ = _mailbox_svc()
+    # Nothing yet: the roster (Ann, Carol, Dave) is not the app's to see.
+    assert await svc.list_contacts(app_id="chess", self_user_id="u-bob") == []
+    await svc.open_session(
+        app_id="chess", target=_local_target("u-ann"), actor_user_id="u-bob"
+    )
+    await _remote_invite(svc, "sess-carol")  # Carol's invite, still waiting
+    refs = [
+        c["user_ref"]
+        for c in await svc.list_contacts(app_id="chess", self_user_id="u-bob")
+    ]
+    assert refs == ["u-ann"]
+    await svc.accept_session(
+        app_id="chess", session_id="sess-carol", actor_user_id="u-bob"
+    )
+    contacts = await svc.list_contacts(app_id="chess", self_user_id="u-bob")
+    assert {(c["user_ref"], c["is_local"]) for c in contacts} == {
+        ("u-ann", True),
+        ("carol", False),
+    }
+    carol = next(c for c in contacts if c["user_ref"] == "carol")
+    assert carol["instance_id"] == "peer-inst-id"
+
+
+@pytest.mark.asyncio
+async def test_contacts_leave_out_a_blocked_person_and_an_old_game():
+    svc, _, _, _ = _mailbox_svc(block_pairs={("u-bob", "u-ann")})
+    await _know(svc, "u-bob", "s-ann", _local_target("u-ann"))
+    await _know(svc, "u-bob", "s-carol", _remote_target("peer-inst-id", "carol"))
+    old = (datetime.now(UTC) - timedelta(days=91)).isoformat()
+    row = await svc._app_repo.get_pending_session("chess", "u-bob", "s-carol")
+    svc._app_repo._swap(row, dataclasses.replace(row, created_at=old, updated_at=old))
+    assert await svc.list_contacts(app_id="chess", self_user_id="u-bob") == []
+
+
+@pytest.mark.asyncio
+async def test_a_local_only_app_sees_and_invites_only_this_household():
+    """Without ``federation`` the sheet lists only people here, and the
+    app's contacts leave out a remote game from before."""
+    svc, _, _, _ = _mailbox_svc()
+    svc._app_repo._apps["chess"] = _make_installed_app(
+        "chess", capabilities=("storage", "people")
+    )
+    people = await svc.list_invitable(app_id="chess", self_user_id="u-bob")
+    assert [(p["user_ref"], p["is_local"]) for p in people] == [("u-ann", True)]
+    await _know(svc, "u-bob", "s-carol", _remote_target("peer-inst-id", "carol"))
+    assert await svc.list_contacts(app_id="chess", self_user_id="u-bob") == []
+
+
+@pytest.mark.asyncio
+async def test_a_protected_childs_picker_lists_only_people_it_can_message():
+    """D5 (§CP.F3): a protected account's sheet lists only households it
+    could already DM — and it can't open, message or receive outside them."""
+    svc, fed, ws, _, cp = _guarded_svc(set())
+    cp.no_dm.add(("u-kid", "peer-inst-id"))
+    kid = {
+        c["user_ref"]
+        for c in await svc.list_invitable(app_id="chess", self_user_id="u-kid")
+    }
+    assert kid == {"u-adult"}
+    adult = {
+        c["user_ref"]
+        for c in await svc.list_invitable(app_id="chess", self_user_id="u-adult")
+    }
+    assert adult == {"u-kid", "mallory"}  # the rule is the child's, not theirs
+    target = {"instance_id": "peer-inst-id", "user_ref": "mallory", "is_local": False}
+    with pytest.raises(AppContactNotFoundError):
+        await svc.open_session(app_id="chess", target=target, actor_user_id="u-kid")
+    await _know(svc, "u-kid", "s", target)
+    with pytest.raises(AppContactNotFoundError):
+        await svc.send_message(
+            app_id="chess",
+            target=target,
+            session_id="s",
+            payload={"m": 1},
+            actor_user_id="u-kid",
+        )
+    assert await svc.list_contacts(app_id="chess", self_user_id="u-kid") == []
+    # Mallory's invite to the child is dropped on receipt.
+    await svc.on_inbound_event(
+        _make_event(
+            FederationEventType.APP_SESSION,
+            {
+                "app_id": "chess",
+                "session_id": "from-mallory",
+                "verb": "open",
+                "to_user": "kid",
+                "from_user": "mallory",
+            },
+        )
+    )
+    assert svc._app_repo.invites == []
+    assert ws.user_calls == []
+    assert fed.sent_events == [] and fed.sent_app_messages == []
+
+
+async def _invite_carol(svc) -> str:
+    return await svc.open_session(
+        app_id="chess",
+        target=_remote_target("peer-inst-id", "carol"),
+        actor_user_id="u-bob",
+    )
+
+
+async def _withdraw(svc, sid: str) -> None:
+    await svc.cancel_session(
+        app_id="chess",
+        session_id=sid,
+        target=_remote_target("peer-inst-id", "carol"),
+        actor_user_id="u-bob",
+    )
+
+
+@pytest.mark.asyncio
+async def test_at_most_ten_unanswered_invites_per_person_and_app():
+    svc, fed, _, _ = _mailbox_svc()
+    sids = [await _invite_carol(svc) for _ in range(INVITES_OPEN_MAX)]
+    counts = await svc.invite_counts(app_id="chess", user_id="u-bob")
+    assert counts == {"open": 10, "max_open": 10, "today": 10, "max_per_day": 30}
+    with pytest.raises(AppInviteLimitError) as exc:
+        await _invite_carol(svc)
+    assert exc.value.code == "APP_INVITES_OPEN_LIMIT"
+    assert exc.value.params == {"limit": 10}
+    assert len(fed.sent_events) == 10
+    # Carol answers one (a move): a slot frees up.
+    await svc.on_inbound_event(
+        _make_event(
+            FederationEventType.APP_MESSAGE,
+            {
+                "app_id": "chess",
+                "session_id": sids[0],
+                "to_user": "bob",
+                "from_user": "carol",
+                "data": {"san": "e5"},
+            },
+        )
+    )
+    await _invite_carol(svc)
+    # Withdrawing one frees another.
+    await _withdraw(svc, sids[1])
+    await _invite_carol(svc)
+    assert (await svc.invite_counts(app_id="chess", user_id="u-bob"))["open"] == 10
+
+
+@pytest.mark.asyncio
+async def test_at_most_thirty_new_invites_a_day():
+    """Answered and withdrawn invites still count for the day."""
+    svc, _, _, _ = _mailbox_svc()
+    for _ in range(INVITES_PER_DAY_MAX):
+        await _withdraw(svc, await _invite_carol(svc))
+    with pytest.raises(AppInviteLimitError) as exc:
+        await _invite_carol(svc)
+    assert exc.value.code == "APP_INVITES_DAILY_LIMIT"
+    assert exc.value.params == {"limit": 30}
+    # Yesterday's invites don't count.
+    day_ago = (datetime.now(UTC) - timedelta(days=1, minutes=1)).isoformat()
+    for row in list(svc._app_repo.pending):
+        svc._app_repo._swap(row, dataclasses.replace(row, created_at=day_ago))
+    await _invite_carol(svc)
+
+
+@pytest.mark.asyncio
+async def test_the_caps_are_per_person():
+    svc, _, _, _ = _mailbox_svc()
+    for _ in range(INVITES_OPEN_MAX):
+        await _invite_carol(svc)
+    # Ann still can; and an invite Bob *received* never counts for him.
+    await svc.open_session(
+        app_id="chess", target=_local_target("u-bob"), actor_user_id="u-ann"
+    )
+    assert (await svc.invite_counts(app_id="chess", user_id="u-ann"))["open"] == 1
+    assert (await svc.invite_counts(app_id="chess", user_id="u-bob"))["open"] == 10
+
+
+@pytest.mark.asyncio
+async def test_nothing_goes_out_in_a_withdrawn_invite():
+    svc, fed, _, _ = _mailbox_svc()
+    sid = await _invite_carol(svc)
+    await _withdraw(svc, sid)
+    with pytest.raises(AppSessionUnknownError):
+        await _move(svc, sid)
+    assert fed.sent_app_messages == []
+
+
+@pytest.mark.asyncio
+async def test_a_target_mislabelled_local_or_remote_is_refused():
+    """``is_local`` must match where the person lives: a game can't be
+    steered between the WebSocket and the federation path."""
+    svc, fed, ws, _ = _mailbox_svc()
+    sid = await svc.open_session(
+        app_id="chess", target=_local_target("u-ann"), actor_user_id="u-bob"
+    )
+    ws.user_calls.clear()
+    with pytest.raises(AppSessionUnknownError):
+        await _move(svc, sid, {**_local_target("u-ann"), "is_local": False})
+    with pytest.raises(AppSessionUnknownError):
+        await _move(
+            svc,
+            sid,
+            {"instance_id": "peer-inst-id", "user_ref": "u-ann", "is_local": True},
+        )
+    assert fed.sent_app_messages == [] and ws.user_calls == []
+
+
+@pytest.mark.asyncio
+async def test_an_inbound_invite_cant_pose_as_one_this_person_sent():
+    """Our own marks (sent / answered / withdrawn) are stripped from an
+    inbound open, so another household can't eat this person's invite caps
+    or stop their game."""
+    svc, _, _, _ = _mailbox_svc()
+    await svc.on_inbound_event(
+        _make_event(
+            FederationEventType.APP_SESSION,
+            {
+                "app_id": "chess",
+                "session_id": "sess-x",
+                "verb": "open",
+                "to_user": "bob",
+                "from_user": "carol",
+                "sent": True,
+                "withdrawn": True,
+            },
+        )
+    )
+    (row,) = svc._app_repo.invites
+    assert "sent" not in row.payload and "withdrawn" not in row.payload
+    await svc.accept_session(app_id="chess", session_id="sess-x", actor_user_id="u-bob")
+    assert (await svc.invite_counts(app_id="chess", user_id="u-bob"))["open"] == 0
+    await _move(svc, "sess-x")  # not withdrawn: the game goes on
+
+
+@pytest.mark.asyncio
+async def test_a_v18_household_cannot_fan_a_binary_move_out_to_everyone():
+    """A household that addresses people must name one on the binary path
+    too — never the whole household (D3, D5)."""
+    app = _make_installed_app("chess")
+    users = [_make_user("u1", "alice"), _make_user("u2", "bob")]
+    svc, _, ws = _make_svc(apps={"chess": app}, users=users)
+    await svc.on_inbound_message("peer-inst-id", "chess", "sess-bin", {"move": "d5"})
+    assert ws.calls == [] and ws.user_calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_move_for_a_session_the_person_does_not_play_never_reaches_their_app():
+    """D3: a made-up session id, a game with someone else, or an invite
+    still waiting in Needs you — none reaches the app live. The waiting
+    invite's message is kept for after Play."""
+    svc, _, ws, _ = _mailbox_svc()
+    await _remote_invite(svc, "waiting")
+    await _know(svc, "u-bob", "with-dave", _remote_target("peer-inst-id", "dave"))
+    for sid in ("made-up", "with-dave", "waiting"):
+        await svc.on_inbound_event(
+            _make_event(
+                FederationEventType.APP_MESSAGE,
+                {
+                    "app_id": "chess",
+                    "session_id": sid,
+                    "to_user": "bob",
+                    "from_user": "carol",
+                    "data": {"san": "e5"},
+                },
+            )
+        )
+    assert ws.user_calls == []
+    # Nothing is handed over for the waiting invite before Play…
+    assert await svc.take_held(app_id="chess", actor_user_id="u-bob") == []
+    await svc.accept_session(
+        app_id="chess", session_id="waiting", actor_user_id="u-bob"
+    )
+    # …and after Play the move made meanwhile is there.
+    (held,) = await svc.take_held(app_id="chess", actor_user_id="u-bob")
+    assert held.session_id == "waiting"
+
+
+@pytest.mark.asyncio
+async def test_an_app_cannot_take_an_invite_in_by_messaging_it():
+    """D3/D12: only Play takes an invite in — never a message the app sends
+    in a session that still waits in Needs you."""
+    svc, fed, _, _ = _mailbox_svc()
+    await _remote_invite(svc, "sess-1")
+    with pytest.raises(AppSessionUnknownError):
+        await _move(svc, "sess-1")
+    assert fed.sent_app_messages == []
+    assert len(svc._app_repo.invites) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_sheet_leaves_out_someone_here_who_blocked_you():
+    """Offering them and then failing Send would reveal the block."""
+    svc, _, _, _ = _mailbox_svc(block_pairs={("u-ann", "u-bob")})
+    refs = {
+        p["user_ref"]
+        for p in await svc.list_invitable(app_id="chess", self_user_id="u-bob")
+    }
+    assert "u-ann" not in refs and "carol" in refs
+
+
+@pytest.mark.asyncio
+async def test_a_protected_childs_old_invite_is_not_played_or_handed_over():
+    """D5: an invite (or a held move) from a household the child can't
+    message — kept from before the account was protected — is not handed
+    to the app."""
+    svc, _, _, _, cp = _guarded_svc(set())
+    await svc.on_inbound_event(
+        _make_event(
+            FederationEventType.APP_SESSION,
+            {
+                "app_id": "chess",
+                "session_id": "old",
+                "verb": "open",
+                "to_user": "kid",
+                "from_user": "mallory",
+            },
+        )
+    )
+    cp.no_dm.add(("u-kid", "peer-inst-id"))
+    with pytest.raises(AppChallengeHandledError):
+        await svc.accept_session(
+            app_id="chess", session_id="old", actor_user_id="u-kid"
+        )
+    await _know(svc, "u-kid", "g", _remote_target("peer-inst-id", "mallory"))
+    await svc._app_repo.hold_message(
+        "chess",
+        "u-kid",
+        "g",
+        from_instance="peer-inst-id",
+        from_user="mallory",
+        held={"kind": "message", "payload": {}},
+        now="2026-10-29T12:00:00+00:00",
+    )
+    assert await svc.take_held(app_id="chess", actor_user_id="u-kid") == []
+
+
+@pytest.mark.asyncio
+async def test_an_older_households_fan_out_skips_a_protected_child_it_cant_reach():
+    """D5 on the household-wide path (a pre-v_18 sender names nobody)."""
+    svc, _, ws, _, cp = _guarded_svc(set(), peer_version=17)
+    cp.no_dm.add(("u-kid", "peer-inst-id"))
+    await svc.on_inbound_message("peer-inst-id", "chess", "s", {"m": 1})
+    (call,) = ws.calls
+    assert call["user_ids"] == ["u-adult"]
+
+
+# ─── Continue game (owner decision 2026-10-29) ───────────────────────────────
+
+
+async def _continue(svc, sid: str, target: dict | None = None, actor: str = "u-bob"):
+    return await svc.continue_session(
+        app_id="chess",
+        session_id=sid,
+        target=target or _remote_target("peer-inst-id", "carol"),
+        actor_user_id=actor,
+    )
+
+
+async def _inbound_continue(
+    svc, sid: str, from_user: str = "carol", inst: str = "peer-inst-id"
+):
+    await svc.on_inbound_event(
+        _make_event(
+            FederationEventType.APP_SESSION,
+            {
+                "app_id": "chess",
+                "session_id": sid,
+                "verb": "continue",
+                "to_user": "bob",
+                "from_user": from_user,
+            },
+            from_instance=inst,
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_active_game_stays_known_for_90_days():
+    svc, _, _, _ = _mailbox_svc()
+    await _know(svc, "u-bob", "g", _remote_target("peer-inst-id", "carol"))
+    old = (datetime.now(UTC) - timedelta(days=60)).isoformat()
+    row = await svc._app_repo.get_pending_session("chess", "u-bob", "g")
+    svc._app_repo._swap(row, dataclasses.replace(row, created_at=old, updated_at=old))
+    contacts = await svc.list_contacts(app_id="chess", self_user_id="u-bob")
+    assert [c["user_ref"] for c in contacts] == ["carol"]
+    await _move(svc, "g")  # still playable after 60 quiet days
+
+
+@pytest.mark.asyncio
+async def test_continue_registers_the_game_and_asks_the_other_side():
+    svc, fed, _, _ = _mailbox_svc()
+    with pytest.raises(AppSessionUnknownError):
+        await _move(svc, "old-game")
+    assert await _continue(svc, "old-game") == "old-game"
+    (sent,) = fed.sent_events
+    assert sent["payload"] == {
+        "app_id": "chess",
+        "session_id": "old-game",
+        "verb": "continue",
+        "to_user": "carol",
+        "from_user": "bob",
+    }
+    row = await svc._app_repo.get_pending_session("chess", "u-bob", "old-game")
+    assert row.state == "active" and row.sent and row.is_with("peer-inst-id", "carol")
+    await _move(svc, "old-game")  # now known
+    # The same again is a no-op: nothing more goes out.
+    await _continue(svc, "old-game")
+    assert len(fed.sent_events) == 1
+
+
+@pytest.mark.asyncio
+async def test_continue_never_moves_a_session_id_to_someone_else():
+    svc, fed, _, _ = _mailbox_svc()
+    await _know(svc, "u-bob", "g", _remote_target("peer-inst-id", "carol"))
+    with pytest.raises(AppSessionTakenError):
+        await _continue(svc, "g", _remote_target("peer-inst-id", "dave"))
+    await _remote_invite(svc, "waiting")  # Carol's invite, not yet played
+    with pytest.raises(AppSessionTakenError):
+        await _continue(svc, "waiting")
+    assert fed.sent_events == []
+
+
+@pytest.mark.asyncio
+async def test_continue_needs_someone_the_sheet_lists_and_counts_as_an_invite():
+    svc, fed, _, _ = _mailbox_svc(blocked_ids={"ru-carol"})
+    with pytest.raises(AppContactNotFoundError):
+        await _continue(svc, "g")
+    svc2, _, _, _ = _mailbox_svc()
+    await _continue(svc2, "g1")
+    assert (await svc2.invite_counts(app_id="chess", user_id="u-bob"))["today"] == 1
+    assert fed.sent_events == []
+
+
+@pytest.mark.asyncio
+async def test_an_inbound_continue_waits_in_needs_you_and_holds_moves_until_play():
+    svc, _, ws, bus = _mailbox_svc()
+    await _inbound_continue(svc, "old-game")
+    (invite,) = svc._app_repo.invites
+    assert invite.payload["verb"] == "continue"
+    (ev,) = [e for e in bus.published if isinstance(e, AppChallengeReceived)]
+    assert ev.continued is True
+    await _inbound_move(svc, {"n": 1}, session_id="old-game")
+    assert ws.user_calls == []  # nothing reaches the app before Play
+    await svc.accept_session(
+        app_id="chess", session_id="old-game", actor_user_id="u-bob"
+    )
+    (held,) = await svc.take_held(app_id="chess", actor_user_id="u-bob")
+    assert held.held["payload"] == {"n": 1}
+    await _move(svc, "old-game")  # Bob answers in the game
+
+
+@pytest.mark.asyncio
+async def test_an_inbound_continue_cannot_hijack_a_known_session():
+    """A continue for a session id the person already has a row for — a
+    game with someone, or an invite waiting from someone — is dropped:
+    nobody (another household, or another person of the same one) can
+    point a session id at themselves."""
+    svc, _, _, bus = _mailbox_svc()
+    await _know(svc, "u-bob", "g", _remote_target("peer-inst-id", "carol"))
+    await _inbound_continue(svc, "g", from_user="dave")
+    await _inbound_continue(svc, "g", from_user="carol")
+    row = await svc._app_repo.get_pending_session("chess", "u-bob", "g")
+    assert row.state == "active" and row.is_with("peer-inst-id", "carol")
+    await _remote_invite(svc, "w")  # Carol's open
+    await _inbound_continue(svc, "w", from_user="dave")
+    invite = await svc._app_repo.get_pending_session("chess", "u-bob", "w")
+    assert invite.from_user == "carol"
+    assert not any(
+        isinstance(e, AppChallengeReceived) and e.continued for e in bus.published
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_local_continue_asks_the_person_here():
+    svc, fed, _, bus = _mailbox_svc()
+    await _continue(svc, "g", _local_target("u-ann"))
+    assert fed.sent_events == []
+    (invite,) = svc._app_repo.invites
+    assert (invite.user_id, invite.from_user, invite.payload["verb"]) == (
+        "u-ann",
+        "u-bob",
+        "continue",
+    )
+    (ev,) = [e for e in bus.published if isinstance(e, AppChallengeReceived)]
+    assert ev.continued and ev.to_user_id == "u-ann"

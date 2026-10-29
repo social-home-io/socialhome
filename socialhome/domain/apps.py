@@ -20,6 +20,18 @@ from .errors import CodedError, WrongTypeError
 #: hours.
 PENDING_SESSION_TTL_SECONDS: int = 14 * 24 * 60 * 60  # 14 days
 
+#: How long a game being played (an ``active`` session row) stays known
+#: after its last move or held message (owner decision 2026-10-29): a
+#: correspondence game may rest for weeks. Past it the game can be picked
+#: up again only through Social Home's sheet ("Continue game with Ben").
+ACTIVE_SESSION_TTL_SECONDS: int = 90 * 24 * 60 * 60  # 90 days
+
+#: ``APP_SESSION`` verb: "pick this game up again" — a game this
+#: household no longer knows (from before the mailbox, or quiet past
+#: :data:`ACTIVE_SESSION_TTL_SECONDS`) re-registered through the sheet.
+#: The other side gets it as an invite (Needs you → Play), never silently.
+SESSION_VERB_CONTINUE: str = "continue"
+
 #: ``app_pending_sessions.state`` (0131): an invite waiting in Needs you…
 SESSION_INVITED: str = "invited"
 #: …or a game being played (Play pressed, or this person invited / moved).
@@ -29,6 +41,18 @@ SESSION_ACTIVE: str = "active"
 #: the latest — up to this size. A bigger message still goes out live, it
 #: just isn't kept for a closed app (live messages may be up to 256 KiB).
 HELD_MESSAGE_MAX_BYTES: int = 64 * 1024
+
+#: Invites go through Social Home's invite sheet (D3). Backstops on what
+#: one person can send in one app: at most this many invites nobody has
+#: answered yet (a move, a decline) and that weren't withdrawn…
+INVITES_OPEN_MAX: int = 10
+#: …and at most this many new invites in any 24 hours.
+INVITES_PER_DAY_MAX: int = 30
+
+#: Keys of a session row's ``payload`` only Social Home writes (sent
+#: through the sheet / answered / withdrawn). An invite from another
+#: household is stored without them, so it can't pose as one of ours.
+SESSION_MARKS: frozenset[str] = frozenset({"sent", "answered", "withdrawn"})
 
 
 class AppError(Exception):
@@ -152,6 +176,48 @@ class AppContactNotFoundError(AppError):
     blocks).  Closes the authorization gap where a crafted ``target`` could
     address an arbitrary user / household the actor has no relationship with.
     """
+
+
+class AppSessionUnknownError(AppError, CodedError):
+    """A message (or a withdrawal) for a game this household doesn't know
+    the sender plays with that person: not one opened through the invite
+    sheet, not one they took in with Play (D3). An app can't message an
+    old opponent on a new session id."""
+
+    status = 403
+    code = "APP_SESSION_UNKNOWN"
+    detail = "This app can only message games you started or accepted."
+
+
+class AppSessionTakenError(AppError, CodedError):
+    """ "Continue game" for a session id this household already knows for
+    the person with someone else (or still waiting as an invite): a session
+    id is never moved to another opponent. 409."""
+
+    status = 409
+    code = "APP_SESSION_TAKEN"
+    detail = "That game is already known with someone else."
+
+
+class AppInviteLimitError(AppError, CodedError):
+    """Too many invites from one person in one app: :data:`INVITES_OPEN_MAX`
+    unanswered (``APP_INVITES_OPEN_LIMIT``) or :data:`INVITES_PER_DAY_MAX`
+    in 24 hours (``APP_INVITES_DAILY_LIMIT``); ``params.limit`` is the
+    number. 429."""
+
+    status = 429
+    code = "APP_INVITES_OPEN_LIMIT"
+    detail = "Too many invites are waiting for an answer."
+
+    def __init__(self, *, daily: bool) -> None:
+        if daily:
+            super().__init__(
+                "Too many invites today.",
+                code="APP_INVITES_DAILY_LIMIT",
+                params={"limit": INVITES_PER_DAY_MAX},
+            )
+        else:
+            super().__init__(params={"limit": INVITES_OPEN_MAX})
 
 
 class AppChallengeHandledError(CodedError):
@@ -348,6 +414,26 @@ class AppPendingSession:
     def last_change(self) -> str:
         """When the row last changed (UTC ISO 8601)."""
         return self.updated_at or self.created_at
+
+    @property
+    def sent(self) -> bool:
+        """This person sent this invite through the invite sheet (a game
+        they started). The marks live in ``payload`` and only Social Home
+        writes them: an inbound invite is stored without them
+        (:data:`SESSION_MARKS`)."""
+        return self.state == SESSION_ACTIVE and self.payload.get("sent") is True
+
+    @property
+    def answered(self) -> bool:
+        """The other side of an invite this person sent said something (a
+        move, a decline): it no longer counts as open."""
+        return self.payload.get("answered") is True
+
+    @property
+    def withdrawn(self) -> bool:
+        """This person took back the invite they sent: nothing more goes
+        out in it."""
+        return self.payload.get("withdrawn") is True
 
     def is_with(self, instance_id: str, user_ref: str | None) -> bool:
         """Whether the other side of this session is *user_ref* on

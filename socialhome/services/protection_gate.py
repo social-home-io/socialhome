@@ -97,6 +97,16 @@ class ProtectionGateMixin:
             user_id, instance_id
         )
 
+    async def _may_message_household(self, user_id: str, instance_id: str) -> bool:
+        """Whether *user_id* may message people of *instance_id* — the DM
+        rule (§CP.F3): a protected account only reaches households its own
+        household paired with directly. Everyone else: always."""
+        if self._child_protection is None:
+            return True
+        return await self._child_protection.is_dm_allowed(
+            sender_user_id=user_id, target_instance_id=instance_id
+        )
+
     async def _guardian_block_counterparts(self, user_id: str) -> frozenset[str]:
         """Everyone a guardian block separates from *user_id*."""
         if self._child_protection is None:

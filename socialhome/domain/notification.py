@@ -47,6 +47,7 @@ ACTION_ITEM_TYPES: frozenset[str] = (
             "space_invite",
             "pairing_request",
             "app_challenge",
+            "app_challenge_continue",
             "app_request",
             "app_update",
         }

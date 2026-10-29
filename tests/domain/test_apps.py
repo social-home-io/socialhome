@@ -14,9 +14,12 @@ from socialhome.domain.apps import (
     CATALOG_LOCALES_MAX,
     CATALOG_NAME_MAX,
     CATALOG_PUBLISHER_MAX,
+    INVITES_OPEN_MAX,
+    INVITES_PER_DAY_MAX,
     PERMISSION_FEDERATION,
     PERMISSION_PEOPLE,
     PERMISSION_STORAGE,
+    SESSION_MARKS,
     AppAgeRestrictedError,
     AppAlreadyInstalledError,
     AppCatalogEntry,
@@ -27,15 +30,18 @@ from socialhome.domain.apps import (
     AppContactNotFoundError,
     AppError,
     AppIntegrityError,
+    AppInviteLimitError,
     AppKvEntry,
     AppManifest,
     AppNeedsNewerCoreError,
     AppNewPermissionsError,
     AppNotEnabledError,
     AppNotFoundError,
+    AppPendingSession,
     AppPermissionDeniedError,
     AppQuotaExceededError,
     AppRequestNotAllowedError,
+    AppSessionUnknownError,
     InstalledApp,
     app_age_allows,
     app_permissions,
@@ -610,3 +616,45 @@ def test_changelog_since_keeps_only_what_is_new_newest_first():
 
 def test_changelog_since_nothing_new():
     assert changelog_since(_log("2026.10.21"), "2026.10.21", "2026.10.28") == ()
+
+
+# ── D3: invites through Social Home (R3 PR 9) ─────────────────────────────
+
+
+def test_invite_errors_are_coded():
+    assert (INVITES_OPEN_MAX, INVITES_PER_DAY_MAX) == (10, 30)
+    open_ = AppInviteLimitError(daily=False)
+    daily = AppInviteLimitError(daily=True)
+    assert (open_.status, open_.code, open_.params) == (
+        429,
+        "APP_INVITES_OPEN_LIMIT",
+        {"limit": 10},
+    )
+    assert (daily.status, daily.code, daily.params) == (
+        429,
+        "APP_INVITES_DAILY_LIMIT",
+        {"limit": 30},
+    )
+    unknown = AppSessionUnknownError()
+    assert (unknown.status, unknown.code) == (403, "APP_SESSION_UNKNOWN")
+    assert isinstance(unknown, AppError)
+
+
+def test_session_marks_read_only_our_own_flags():
+    assert SESSION_MARKS == {"sent", "answered", "withdrawn"}
+    base = {
+        "app_id": "chess",
+        "user_id": "u",
+        "session_id": "s",
+        "from_instance": "i",
+        "from_user": "x",
+        "created_at": "2026-10-29T00:00:00+00:00",
+    }
+    sent = AppPendingSession(
+        **base, payload={"sent": True, "answered": True}, state="active"
+    )
+    assert sent.sent and sent.answered and not sent.withdrawn
+    # Only an active row can be one this person sent; truthy isn't True.
+    assert not AppPendingSession(**base, payload={"sent": True}).sent
+    assert not AppPendingSession(**base, payload={"sent": 1}, state="active").sent
+    assert AppPendingSession(**base, payload={"withdrawn": True}).withdrawn

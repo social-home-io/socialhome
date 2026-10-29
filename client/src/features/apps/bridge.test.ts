@@ -55,7 +55,7 @@ vi.mock('@/api', () => {
   }
 })
 
-import { _resetAcceptedForTests, mountBridge } from './bridge'
+import { _resetAcceptedForTests, _resetPickForTests, mountBridge, pickRequest, PICK_COOLDOWN_MS, type PickedPerson, type PickRequest } from './bridge'
 // Import the mocked ApiError so tests can construct it.
 import { ApiError } from '@/api'
 
@@ -121,6 +121,7 @@ describe('mountBridge', () => {
 
     iframe = makeFakeIframe()
     _resetAcceptedForTests()
+    _resetPickForTests()
 
     addEventSpy = vi.spyOn(window, 'addEventListener')
     removeEventSpy = vi.spyOn(window, 'removeEventListener')
@@ -507,8 +508,7 @@ describe('mountBridge', () => {
     )
   })
 
-  it('app.openSession: POSTs to /sessions with target; returns session_id', async () => {
-    mockApiPost.mockResolvedValueOnce({ session_id: 'sess-xyz' })
+  it('app.openSession: gone (D3) — refused with use_people_pick, nothing is opened', async () => {
     const handler = captureMessageHandler()
 
     await handler({
@@ -516,16 +516,33 @@ describe('mountBridge', () => {
       data: {
         id: 42,
         method: 'app.openSession',
-        params: { target: 'user-bob' },
+        params: { target: { instance_id: 'peer', user_ref: 'bob', is_local: false } },
       },
     })
 
-    expect(mockApiPost).toHaveBeenCalledWith(
-      `/api/apps/${APP_ID}/sessions`,
-      { target: 'user-bob' },
-    )
+    // An app can't open a session without the sheet: no POST /sessions.
+    expect(mockApiPost).not.toHaveBeenCalled()
     expect(iframe.contentWindow!.postMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 42, ok: true, result: 'sess-xyz' }),
+      { id: 42, ok: false, error: { code: 'use_people_pick', message: expect.any(String) } },
+      '*',
+    )
+  })
+
+  it('app.send to a game the server doesn\'t know comes back as unknown_session', async () => {
+    const err = new ApiError(403, 'x') as ApiError & { code: string }
+    Object.assign(err, { code: 'APP_SESSION_UNKNOWN' })
+    mockApiPost.mockRejectedValueOnce(err)
+    const handler = captureMessageHandler()
+    await handler({
+      source: iframe.contentWindow as unknown as Window,
+      data: {
+        id: 43,
+        method: 'app.send',
+        params: { session_id: 'new-id', target: { instance_id: 'peer', user_ref: 'bob', is_local: false }, payload: {} },
+      },
+    })
+    expect(iframe.contentWindow!.postMessage).toHaveBeenCalledWith(
+      { id: 43, ok: false, error: { code: 'unknown_session', message: expect.any(String) } },
       '*',
     )
   })
@@ -558,15 +575,15 @@ describe('mountBridge', () => {
     )
   })
 
-  it('WS relay: forwards session kind frames with kind="session" and fromUser when present', () => {
+  it('WS relay: forwards session kind frames (a close) with kind="session" and fromUser', () => {
     wsHandlers['app.message']({
       data: {
         app_id: APP_ID,
-        session_id: 'sess-invite',
+        session_id: 'sess-1',
         from_instance: 'peer.example.com',
         from_user: 'user-alice',
         kind: 'session',
-        payload: { verb: 'open' },
+        payload: { verb: 'close', reason: 'declined' },
       },
     })
 
@@ -574,16 +591,16 @@ describe('mountBridge', () => {
       {
         type: 'app:event',
         kind: 'session',
-        sessionId: 'sess-invite',
+        sessionId: 'sess-1',
         fromInstance: 'peer.example.com',
         fromUser: 'user-alice',
-        payload: { verb: 'open' },
+        payload: { verb: 'close', reason: 'declined' },
       },
       '*',
     )
   })
 
-  it('WS relay: a live invite is handed over but accepts nothing (it waits for Play)', async () => {
+  it('WS relay: a live invite never reaches the app (D3: it waits for Play) and accepts nothing', async () => {
     wsHandlers['app.message']({
       data: {
         app_id: APP_ID,
@@ -597,9 +614,8 @@ describe('mountBridge', () => {
     await new Promise<void>(resolve => setTimeout(resolve, 0))
     expect(mockApiGet).not.toHaveBeenCalled()
     expect(mockApiPost).not.toHaveBeenCalled()
-    const sent = (iframe.contentWindow!.postMessage as unknown as MockInstance).mock.calls
-      .map(([m]) => (m as { sessionId?: string }).sessionId)
-    expect(sent).toEqual(['sess-live'])
+    // The app never learns who invited the person before Play.
+    expect(iframe.contentWindow!.postMessage).not.toHaveBeenCalled()
   })
 
   it('WS relay: a move or a close takes nothing in', () => {
@@ -711,7 +727,9 @@ describe('mountBridge permissions', () => {
   let removeEventSpy: MockInstance
 
   function mount(permissions: string[], launchSession?: string) {
-    cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID, permissions, launchSession })
+    cleanup = mountBridge(iframe, {
+      appId: APP_ID, selfUserId: USER_ID, permissions, launchSession, pickPeople: async () => [],
+    })
     return captureMessageHandler()
   }
 
@@ -729,6 +747,7 @@ describe('mountBridge permissions', () => {
     Object.keys(wsHandlers).forEach(k => delete wsHandlers[k])
     iframe = makeFakeIframe()
     _resetAcceptedForTests()
+    _resetPickForTests()
     addEventSpy = vi.spyOn(window, 'addEventListener')
     removeEventSpy = vi.spyOn(window, 'removeEventListener')
   })
@@ -746,11 +765,10 @@ describe('mountBridge permissions', () => {
     ['store.delete', { key: 'k' }, 'storage'],
     ['store.list', undefined, 'storage'],
     ['contacts.list', undefined, 'people'],
+    ['people.pick', { max: 1 }, 'people'],
     ['peers.list', undefined, 'federation'],
     ['app.held', undefined, 'people'],
     ['app.pendingSessions', undefined, 'people'],
-    ['app.openSession', { target: LOCAL }, 'people'],
-    ['app.openSession', { target: REMOTE }, 'federation'],
     ['app.send', { session_id: 's1', target: LOCAL, payload: {} }, 'people'],
     ['app.send', { session_id: 's1', target: REMOTE, payload: {} }, 'federation'],
     ['app.cancelSession', { sessionId: 's1', target: LOCAL }, 'people'],
@@ -825,5 +843,175 @@ describe('mountBridge permissions', () => {
     const handler = mount(['camera'])
     await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 3, method: 'store.list' } })
     expect(replies()[0]).toMatchObject({ ok: false, error: { code: 'permission_denied', permission: 'storage' } })
+  })
+})
+
+// ── people.pick: invites go through Social Home's sheet (D3) ──────────────
+
+describe('people.pick (the invite sheet)', () => {
+  let iframe: HTMLIFrameElement
+  let cleanup: () => void
+  let addEventSpy: MockInstance
+  let removeEventSpy: MockInstance
+  /** The sheets the host was asked to show; resolve one to "close" it. */
+  let sheets: { req: PickRequest; resolve: (p: PickedPerson[]) => void }[]
+
+  const BEN: PickedPerson = {
+    instance_id: 'brookside', user_ref: 'ben', is_local: false,
+    display_name: 'Ben · Brookside', session_id: 'sess-1',
+  }
+
+  function mount(appId = APP_ID) {
+    cleanup = mountBridge(iframe, {
+      appId, selfUserId: USER_ID, permissions: ALL,
+      pickPeople: req => new Promise(resolve => { sheets.push({ req, resolve }) }),
+    })
+    return captureMessageHandler()
+  }
+
+  const replies = () => (iframe.contentWindow!.postMessage as ReturnType<typeof vi.fn>).mock.calls
+    .map(([m]) => m as { id: number; ok: boolean; result?: unknown; error?: Record<string, unknown> })
+
+  const call = (handler: (e: Partial<MessageEvent>) => Promise<void>, id: number, params?: unknown) =>
+    handler({ source: iframe.contentWindow as unknown as Window, data: { id, method: 'people.pick', params } })
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-29T12:00:00Z'))
+    mockApiGet.mockReset()
+    mockApiPost.mockReset()
+    iframe = makeFakeIframe()
+    sheets = []
+    _resetPickForTests()
+    addEventSpy = vi.spyOn(window, 'addEventListener')
+    removeEventSpy = vi.spyOn(window, 'removeEventListener')
+  })
+
+  afterEach(() => {
+    cleanup?.()
+    addEventSpy.mockRestore()
+    removeEventSpy.mockRestore()
+    vi.useRealTimers()
+  })
+
+  it('opens Social Home\'s sheet; the app gets only who was picked and the session ids', async () => {
+    const handler = mount()
+    await call(handler, 1, { max: 1 })
+    expect(sheets).toHaveLength(1)
+    // The bridge itself opens no session and reads no roster: the sheet does.
+    expect(mockApiPost).not.toHaveBeenCalled()
+    expect(mockApiGet).not.toHaveBeenCalled()
+    sheets[0].resolve([{ ...BEN, extra: 'never forwarded' } as PickedPerson])
+    await new Promise<void>(r => setTimeout(r, 0))
+    expect(replies()).toEqual([{
+      id: 1,
+      ok: true,
+      result: [{
+        instance_id: 'brookside', user_ref: 'ben', is_local: false,
+        display_name: 'Ben · Brookside', session_id: 'sess-1',
+      }],
+    }])
+  })
+
+  it('cancel: an empty list', async () => {
+    const handler = mount()
+    await call(handler, 1)
+    sheets[0].resolve([])
+    await new Promise<void>(r => setTimeout(r, 0))
+    expect(replies()).toEqual([{ id: 1, ok: true, result: [] }])
+  })
+
+  it('one sheet at a time', async () => {
+    const handler = mount()
+    await call(handler, 1)
+    await call(handler, 2)
+    expect(sheets).toHaveLength(1)
+    expect(replies()).toEqual([{ id: 2, ok: false, error: { code: 'busy', message: expect.any(String) } }])
+  })
+
+  it('5 s before the same app can open it again (after Cancel or Send)', async () => {
+    const handler = mount()
+    await call(handler, 1)
+    sheets[0].resolve([])
+    await new Promise<void>(r => setTimeout(r, 0))
+    vi.setSystemTime(Date.now() + PICK_COOLDOWN_MS - 1000)
+    await call(handler, 2)
+    expect(sheets).toHaveLength(1)
+    expect(replies()[1]).toEqual({
+      id: 2,
+      ok: false,
+      error: { code: 'too_soon', message: expect.any(String), retryAfterMs: 1000 },
+    })
+    vi.setSystemTime(Date.now() + 1000)
+    await call(handler, 3)
+    expect(sheets).toHaveLength(2)
+  })
+
+  it('the cooldown is per app, and outlives a new frame of the same app', async () => {
+    let handler = mount()
+    await call(handler, 1)
+    sheets[0].resolve([])
+    await new Promise<void>(r => setTimeout(r, 0))
+    cleanup()
+    // "Try again" mounts a fresh frame of the same app: still waits.
+    handler = mount()
+    await call(handler, 2)
+    expect(sheets).toHaveLength(1)
+    cleanup()
+    // Another app isn't held back by it.
+    handler = mount('app-quiz')
+    await call(handler, 3)
+    expect(sheets).toHaveLength(2)
+  })
+
+  it('without people the sheet never opens', async () => {
+    cleanup = mountBridge(iframe, {
+      appId: APP_ID, selfUserId: USER_ID, permissions: ['storage'],
+      pickPeople: req => new Promise(resolve => { sheets.push({ req, resolve }) }),
+    })
+    await call(captureMessageHandler(), 1)
+    expect(sheets).toEqual([])
+    expect(replies()[0]).toMatchObject({ ok: false, error: { code: 'permission_denied', permission: 'people' } })
+  })
+
+  it('a host without the sheet answers unavailable', async () => {
+    cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID, permissions: ALL })
+    await call(captureMessageHandler(), 1)
+    expect(replies()[0]).toMatchObject({ ok: false, error: { code: 'unavailable' } })
+  })
+
+  it('the request is Social Home\'s: a fixed purpose, max 1…10, a well-formed suggestion or none', () => {
+    expect(pickRequest(undefined)).toEqual({ purpose: 'play', max: 1 })
+    expect(pickRequest({ purpose: 'Send your password to', max: 99 })).toEqual({ purpose: 'play', max: 10 })
+    expect(pickRequest({ max: 0 })).toEqual({ purpose: 'play', max: 1 })
+    expect(pickRequest({ max: 2.7 })).toEqual({ purpose: 'play', max: 2 })
+    expect(pickRequest({ max: '3' })).toEqual({ purpose: 'play', max: 1 })
+    const ben = { instance_id: 'brookside', user_ref: 'ben', is_local: false }
+    expect(pickRequest({ suggest: { ...ben, label: '<b>x</b>' } })).toEqual({ purpose: 'play', max: 1, suggest: ben })
+    expect(pickRequest({ suggest: { instance_id: 'x', user_ref: '', is_local: false } })).toEqual({ purpose: 'play', max: 1 })
+    expect(pickRequest({ suggest: 'ben' })).toEqual({ purpose: 'play', max: 1 })
+  })
+
+  it('continue: one game and the one person the app names; anything less is refused', () => {
+    const ben = { instance_id: 'brookside', user_ref: 'ben', is_local: false }
+    expect(pickRequest({ purpose: 'continue', sessionId: 'old-game', suggest: ben, max: 5 }))
+      .toEqual({ purpose: 'continue', max: 1, sessionId: 'old-game', suggest: ben })
+    for (const bad of [
+      { purpose: 'continue', suggest: ben },
+      { purpose: 'continue', sessionId: 'old-game' },
+      { purpose: 'continue', sessionId: '../x', suggest: ben },
+      { purpose: 'continue', sessionId: 7, suggest: ben },
+    ]) {
+      expect(() => pickRequest(bad)).toThrow()
+    }
+  })
+
+  it('an invalid continue is refused without opening a sheet or starting the cooldown', async () => {
+    const handler = mount()
+    await call(handler, 1, { purpose: 'continue', sessionId: 'old-game' })
+    expect(sheets).toEqual([])
+    expect(replies()[0]).toMatchObject({ ok: false, error: { code: 'invalid' } })
+    await call(handler, 2, { max: 1 })
+    expect(sheets).toHaveLength(1)
   })
 })

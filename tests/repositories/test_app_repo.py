@@ -20,6 +20,7 @@ committed row — no extra flush or sleep is needed.
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -465,6 +466,9 @@ async def test_hold_keeps_only_the_latest_message_per_session(db):
             held={"kind": "message", "payload": {"n": n}},
             now=_now(),
         )
+    # Kept while the invite waits, handed over only once it is played (D3).
+    assert await repo.take_held("chess", uid) == []
+    await repo.activate_pending_session("chess", uid, "sess-1", now=_now())
     taken = await repo.take_held("chess", uid)
     assert [t.held for t in taken] == [{"kind": "message", "payload": {"n": 3}}]
     # Cleared: a second open gets nothing, the session stays known.
@@ -553,3 +557,154 @@ async def test_uninstall_drops_held_messages(db):
     )
     await repo.uninstall("chess")
     assert await repo.get_pending_session("chess", uid, "sess-1") is None
+
+
+# ── D3: the invite sheet's session marks (R3 PR 9) ────────────────────────
+
+
+def _sent(uid: str, session_id: str, **kw) -> AppPendingSession:
+    """An invite *uid* sent through the sheet, to alice@remote."""
+    return AppPendingSession(
+        app_id="chess",
+        user_id=uid,
+        session_id=session_id,
+        from_instance="remote.example",
+        from_user="alice@remote",
+        payload={"app_id": "chess", "session_id": session_id, "sent": True},
+        created_at=_now(),
+        state="active",
+        updated_at=_now(),
+        **kw,
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_answer_marks_a_sent_invite_answered(db):
+    repo = SqliteAppRepo(db)
+    uid = await _seed_user(db)
+    await repo.install(_app())
+    await repo.add_active_session(_sent(uid, "mine"))
+    await repo.add_pending_session(_pending(uid))  # an invite *to* uid
+    row = await repo.get_pending_session("chess", uid, "mine")
+    assert row is not None and row.sent and not row.answered
+    for sid in ("mine", "sess-1"):
+        assert await repo.hold_message(
+            "chess",
+            uid,
+            sid,
+            from_instance="remote.example",
+            from_user="alice@remote",
+            held={"kind": "message", "payload": {}},
+            now=_now(),
+        )
+    row = await repo.get_pending_session("chess", uid, "mine")
+    assert row is not None and row.answered and row.sent
+    # Only a sent invite gets the mark.
+    other = await repo.get_pending_session("chess", uid, "sess-1")
+    assert other is not None and "answered" not in other.payload
+
+
+@pytest.mark.asyncio
+async def test_withdraw_session_marks_it_and_keeps_the_row(db):
+    repo = SqliteAppRepo(db)
+    uid = await _seed_user(db)
+    await repo.install(_app())
+    await repo.add_active_session(_sent(uid, "mine"))
+    await repo.withdraw_session("chess", uid, "mine")
+    row = await repo.get_pending_session("chess", uid, "mine")
+    assert row is not None and row.withdrawn and row.sent
+
+
+@pytest.mark.asyncio
+async def test_list_sessions_lists_one_persons_rows_latest_first(db):
+    repo = SqliteAppRepo(db)
+    uid = await _seed_user(db)
+    await repo.install(_app())
+    old = (datetime.now(UTC) - timedelta(hours=2)).isoformat()
+    await repo.add_pending_session(_pending(uid, created_at=old))
+    await repo.add_active_session(_sent(uid, "mine"))
+    assert [r.session_id for r in await repo.list_sessions("chess", uid)] == [
+        "mine",
+        "sess-1",
+    ]
+    assert await repo.list_sessions("chess", "someone-else") == []
+
+
+@pytest.mark.asyncio
+async def test_an_open_never_rewrites_a_game_already_sent_or_played(db):
+    """An inbound open reusing the id of a game this person sent (or
+    played) changes nothing — not its other side, not its marks."""
+    repo = SqliteAppRepo(db)
+    uid = await _seed_user(db)
+    await repo.install(_app())
+    await repo.add_active_session(_sent(uid, "mine"))
+    await repo.add_pending_session(
+        AppPendingSession(
+            app_id="chess",
+            user_id=uid,
+            session_id="mine",
+            from_instance="remote.example",
+            from_user="mallory@remote",
+            payload={"verb": "open"},
+            created_at=_now(),
+        )
+    )
+    row = await repo.get_pending_session("chess", uid, "mine")
+    assert row is not None
+    assert (row.state, row.from_user, row.sent) == ("active", "alice@remote", True)
+
+
+@pytest.mark.asyncio
+async def test_a_flood_of_invites_never_pushes_out_a_game_or_a_sent_invite(db):
+    """Eviction (50 per person and app) takes only waiting invites: a paired
+    household can't wipe someone's games or reset their invite caps (D3)."""
+    repo = SqliteAppRepo(db)
+    uid = await _seed_user(db)
+    await repo.install(_app())
+    old = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    await repo.add_active_session(
+        dataclasses.replace(_sent(uid, "mine"), created_at=old, updated_at=old)
+    )
+    for n in range(60):
+        await repo.add_pending_session(_pending(uid, session_id=f"flood-{n}"))
+    rows = await repo.list_sessions("chess", uid)
+    assert len([r for r in rows if r.state == "invited"]) == 50
+    mine = await repo.get_pending_session("chess", uid, "mine")
+    assert mine is not None and mine.sent
+
+
+@pytest.mark.asyncio
+async def test_prune_keeps_a_game_90_days_and_an_invite_14(db):
+    """Owner decision 2026-10-29: a game being played stays known 90 days
+    after its last move; a waiting invite still goes after 14."""
+    repo = SqliteAppRepo(db)
+    uid = await _seed_user(db)
+    await repo.install(_app())
+
+    def ago(days: int) -> str:
+        return (datetime.now(UTC) - timedelta(days=days)).isoformat()
+
+    for sid, days in (("game-60", 60), ("game-91", 91)):
+        await repo.add_active_session(
+            dataclasses.replace(
+                _sent(uid, sid), created_at=ago(days), updated_at=ago(days)
+            )
+        )
+    await repo.add_pending_session(_pending(uid, "invite-10", created_at=ago(10)))
+    await repo.add_pending_session(_pending(uid, "invite-15", created_at=ago(15)))
+    assert await repo.prune_pending_sessions() == 2
+    left = sorted(r.session_id for r in await repo.list_sessions("chess", uid))
+    assert left == ["game-60", "invite-10"]
+
+
+@pytest.mark.asyncio
+async def test_an_invite_is_refreshed_only_by_the_same_person(db):
+    """Another person of the same household reusing a waiting invite's
+    session id can't re-point it at themselves."""
+    repo = SqliteAppRepo(db)
+    uid = await _seed_user(db)
+    await repo.install(_app())
+    await repo.add_pending_session(_pending(uid, "w", from_user="alice@remote"))
+    await repo.add_pending_session(_pending(uid, "w", from_user="mallory@remote"))
+    row = await repo.get_pending_session("chess", uid, "w")
+    assert row is not None and row.from_user == "alice@remote"

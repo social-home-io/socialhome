@@ -94,9 +94,10 @@ describe('AppDetailPage — what an app can do', () => {
     expect(getByRole('heading', { level: 1, name: 'Chess' })).toBeTruthy()
     expect(getByRole('heading', { level: 2, name: 'What Chess can do' })).toBeTruthy()
     expect(getByText('Like saved games and settings. Only Chess can read it, and only for you.')).toBeTruthy()
-    expect(getByText('Encrypted home to home, to people you know.')).toBeTruthy()
+    expect(getByText('Only to the person you picked, encrypted home to home.')).toBeTruthy()
     expect(getByRole('heading', { level: 3, name: 'Chess can never' })).toBeTruthy()
     expect(getByText('reach the internet or other websites')).toBeTruthy()
+    expect(getByText('send anything without you choosing who')).toBeTruthy()
   })
 
   it('lists the facts: source, publisher, rating, languages by their own names', () => {
@@ -107,7 +108,6 @@ describe('AppDetailPage — what an app can do', () => {
     // The Languages fact names them too, not a count.
     const langs = [...container.querySelectorAll('.sh-app-facts__row')].find(r => r.querySelector('dt')?.textContent === 'Languages')
     expect(langs?.querySelector('dd')?.textContent).toBe('English, Deutsch')
-    expect(container.textContent).not.toContain('without you choosing who')
     expect(getByText('Social Home 2026.10.29')).toBeTruthy()
     expect(container.textContent).toContain('Source: github.com/social-home-io/socialhome-apps')
     expect(container.textContent).not.toMatch(/verified/i)

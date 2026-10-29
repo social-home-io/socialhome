@@ -44,11 +44,13 @@ from .apps import (
     AppContactsView,
     AppDetailView,
     AppHeldView,
+    AppInvitableView,
     AppMessagesView,
     AppPeersView,
     AppRequestsView,
     AppSessionAcceptView,
     AppSessionCancelView,
+    AppSessionContinueView,
     AppSessionDeclineView,
     AppSessionsView,
     AppStoreCollectionView,
@@ -1358,6 +1360,7 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_view("/api/apps/{app_id}/update", AppUpdateView)
     app.router.add_view("/api/apps/{app_id}/requests", AppRequestsView)
     app.router.add_view("/api/apps/{app_id}/contacts", AppContactsView)
+    app.router.add_view("/api/apps/{app_id}/invitable", AppInvitableView)
     app.router.add_view("/api/apps/{app_id}/peers", AppPeersView)
     app.router.add_view("/api/apps/{app_id}/sessions", AppSessionsView)
     app.router.add_view(
@@ -1368,6 +1371,10 @@ def setup_routes(app: web.Application) -> None:
     )
     app.router.add_view(
         "/api/apps/{app_id}/sessions/{session_id}/cancel", AppSessionCancelView
+    )
+    app.router.add_view(
+        "/api/apps/{app_id}/sessions/{session_id}/continue",
+        AppSessionContinueView,
     )
     app.router.add_view("/api/apps/{app_id}/messages", AppMessagesView)
     app.router.add_view("/api/apps/{app_id}/held", AppHeldView)

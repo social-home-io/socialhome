@@ -46,6 +46,19 @@
  * ``app.context`` lists ``permissions`` so an app can leave out what it
  * may not do. The server checks every route again and is authoritative:
  * its ``403 APP_PERMISSION_DENIED`` comes back as the same typed error.
+ *
+ * Invites (owner decision D3, "invites go through Social Home"): the bridge
+ * offers no way to open a session. ``people.pick({max, suggest})`` asks the
+ * host to draw its own invite sheet *outside* the frame (``pickPeople``);
+ * the person picks and taps Send, Social Home opens the games, and the app
+ * gets back only who was picked and their session ids. One sheet at a time
+ * (``busy``); after one closes the same app waits
+ * :data:`PICK_COOLDOWN_MS` (``too_soon``, ``retryAfterMs``); the sheet's
+ * Send ignores taps for its first 600 ms (InviteSheet.tsx) so an app can't
+ * open it under a double tap. ``app.openSession`` answers ``use_people_pick``.
+ * ``contacts.list`` is only the people picked and played with in this app,
+ * and ``app.send`` only reaches games the server knows for that person
+ * (``unknown_session`` otherwise).
  */
 
 import { api, ApiError } from '@/api'
@@ -55,6 +68,57 @@ import type { AppPermission } from '@/store/apps'
 
 /** The typed refusal an app gets for a call outside its permissions. */
 export const PERMISSION_DENIED = 'permission_denied'
+/** ``app.openSession`` is gone (D3): invites go through ``people.pick``. */
+export const USE_PEOPLE_PICK = 'use_people_pick'
+/** ``people.pick`` while a sheet is already open (one at a time). */
+export const PICK_BUSY = 'busy'
+/** ``people.pick`` again within :data:`PICK_COOLDOWN_MS` of the last
+ *  sheet closing (``retryAfterMs`` says how long). */
+export const PICK_TOO_SOON = 'too_soon'
+/** A message for a game the household doesn't know (server
+ *  ``APP_SESSION_UNKNOWN``): an app can't message an old opponent on a
+ *  new session id. */
+export const UNKNOWN_SESSION = 'unknown_session'
+
+/** ``people.pick`` asked for something it can't be (``continue`` without
+ *  the game's ``sessionId`` or the person). */
+export const PICK_INVALID = 'invalid'
+
+/** After a sheet closes, the same app can't open another for this long:
+ *  an app can't keep throwing it up under the person's finger. */
+export const PICK_COOLDOWN_MS = 5_000
+/** Most people one ``people.pick`` may ask for (the open-invite cap). */
+export const PICK_MAX = 10
+
+/** A person the app names: who to suggest in the sheet (a rematch). */
+export interface PersonRef {
+  instance_id: string
+  user_ref: string
+  is_local: boolean
+}
+
+/** What an app asks the invite sheet for. ``purpose`` is a fixed word,
+ *  never the app's own text: Social Home writes every line of the sheet,
+ *  so an app can't put words in its mouth. */
+export interface PickRequest {
+  /** ``play`` — invite someone new; ``continue`` — pick up a game Social
+   *  Home no longer knows (``sessionId``) with the person ``suggest``
+   *  names ("Continue game with Ben"). */
+  purpose: 'play' | 'continue'
+  /** How many people may be picked (1…:data:`PICK_MAX`; 1 to continue). */
+  max: number
+  /** ``continue`` only: the app's own id for the game. */
+  sessionId?: string
+  /** One person to show selected — the person still taps Send, which
+   *  names them. Ignored when they aren't someone the sheet lists. */
+  suggest?: PersonRef
+}
+
+/** A person picked in the sheet, with the game Social Home opened. */
+export interface PickedPerson extends PersonRef {
+  display_name: string
+  session_id: string
+}
 
 export interface BridgeContext {
   appId: string
@@ -62,6 +126,10 @@ export interface BridgeContext {
   /** What the household agreed to (``/runtime``'s ``permissions``): only
    *  these bridge calls are offered. Unknown names grant nothing. */
   permissions: readonly string[]
+  /** Show Social Home's invite sheet (outside the frame) and resolve with
+   *  who was picked and the games opened for them — ``[]`` on Cancel.
+   *  Without it ``people.pick`` answers ``unavailable``. */
+  pickPeople?: (req: PickRequest) => Promise<PickedPerson[]>
   /** ``?session=`` the app was opened with ("Play" in Needs you): the
    *  one invite to take in and hand to the app. */
   launchSession?: string
@@ -94,7 +162,7 @@ interface RpcErrReply {
   id: string | number
   ok: false
   /** ``permission`` is set on a ``permission_denied`` refusal. */
-  error: { code: string; message: string; permission?: AppPermission }
+  error: { code: string; message: string; permission?: AppPermission; retryAfterMs?: number }
 }
 
 /** A call outside the app's permissions (here or on the server). */
@@ -103,6 +171,56 @@ class PermissionDenied extends Error {
     super(`This app doesn't have the ${permission} permission.`)
   }
 }
+
+/** A refusal with a stable code the SDK maps (``ShError.code``). */
+class Refused extends Error {
+  constructor(public readonly code: string, message: string, public readonly retryAfterMs?: number) {
+    super(message)
+  }
+}
+
+/** One invite sheet at a time, across every app frame on the page. */
+let sheetOpen = false
+/** When each app's last sheet closed (``Date.now()``), for the cooldown. */
+const sheetClosedAt = new Map<string, number>()
+
+/** Tests only. */
+export function _resetPickForTests(): void {
+  sheetOpen = false
+  sheetClosedAt.clear()
+}
+
+/** A person reference the app passed, or ``undefined`` when it isn't one. */
+function personRef(v: unknown): PersonRef | undefined {
+  const o = v as Partial<PersonRef> | null | undefined
+  if (!o || typeof o !== 'object') return undefined
+  if (typeof o.instance_id !== 'string' || !o.instance_id) return undefined
+  if (typeof o.user_ref !== 'string' || !o.user_ref) return undefined
+  if (typeof o.is_local !== 'boolean') return undefined
+  return { instance_id: o.instance_id, user_ref: o.user_ref, is_local: o.is_local }
+}
+
+/** ``people.pick`` params as a :type:`PickRequest` — nothing the app wrote
+ *  is shown as text. */
+export function pickRequest(params: unknown): PickRequest {
+  const p = (params ?? {}) as { max?: unknown; suggest?: unknown; purpose?: unknown; sessionId?: unknown }
+  const suggest = personRef(p.suggest)
+  if (p.purpose === 'continue') {
+    // One game, one person, both named by the app — the person confirms.
+    const sid = typeof p.sessionId === 'string' && SESSION_ID.test(p.sessionId) ? p.sessionId : null
+    if (!sid || !suggest) {
+      throw new Refused(PICK_INVALID, 'Continuing a game needs its sessionId and the person (suggest).')
+    }
+    return { purpose: 'continue', max: 1, sessionId: sid, suggest }
+  }
+  const max = typeof p.max === 'number' && Number.isFinite(p.max) ? Math.floor(p.max) : 1
+  const req: PickRequest = { purpose: 'play', max: Math.min(PICK_MAX, Math.max(1, max)) }
+  if (suggest) req.suggest = suggest
+  return req
+}
+
+/** An app's own session id (what ``?session=`` and the server accept). */
+const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/
 
 /** The permission a game with *target* takes: ``people`` for someone in
  *  this household, ``federation`` for anyone in another one (the same rule
@@ -121,13 +239,13 @@ function permissionFor(method: string, params: { target?: unknown } | undefined)
     case 'store.list':
       return 'storage'
     case 'contacts.list':
+    case 'people.pick':
     case 'app.held':
     case 'app.pendingSessions':
       return 'people'
     case 'peers.list':
       return 'federation'
     case 'app.send':
-    case 'app.openSession':
     case 'app.cancelSession':
       return targetPermission(params?.target)
     default:
@@ -381,10 +499,49 @@ export function mountBridge(
         }
 
         case 'contacts.list': {
+          // Only who the person picked and who they play with in this app
+          // (D3) — the server never hands an app the roster.
           const resp = await api.get<{ contacts: unknown[] }>(
             `/api/apps/${encodeURIComponent(appId)}/contacts`,
           )
           reply({ id, ok: true, result: resp.contacts })
+          break
+        }
+
+        case 'people.pick': {
+          // D3: the app asks; Social Home draws the sheet outside the frame,
+          // the person picks and taps Send, and Social Home opens the games.
+          // The app gets back only who was picked and the session ids.
+          if (!ctx.pickPeople) {
+            throw new Refused('unavailable', 'This Social Home can\'t show the invite sheet here.')
+          }
+          const pickReq = pickRequest(params)
+          if (sheetOpen) {
+            throw new Refused(PICK_BUSY, 'An invite sheet is already open.')
+          }
+          const wait = (sheetClosedAt.get(appId) ?? -Infinity) + PICK_COOLDOWN_MS - Date.now()
+          if (wait > 0) {
+            throw new Refused(PICK_TOO_SOON, 'The invite sheet was just closed.', wait)
+          }
+          sheetOpen = true
+          let picked: PickedPerson[]
+          try {
+            picked = await ctx.pickPeople(pickReq)
+          } finally {
+            sheetOpen = false
+            sheetClosedAt.set(appId, Date.now())
+          }
+          reply({
+            id,
+            ok: true,
+            result: picked.map(p => ({
+              instance_id: p.instance_id,
+              user_ref: p.user_ref,
+              is_local: p.is_local,
+              display_name: p.display_name,
+              session_id: p.session_id,
+            })),
+          })
           break
         }
 
@@ -408,13 +565,14 @@ export function mountBridge(
         }
 
         case 'app.openSession': {
-          const { target } = params ?? {}
-          const resp = await api.post<{ session_id: string }>(
-            `/api/apps/${encodeURIComponent(appId)}/sessions`,
-            { target },
+          // Gone (D3): an app never opens a session itself — it asks for
+          // the invite sheet (``people.pick``), where the person picks and
+          // Social Home sends. Refused with a code an SDK ≥ 1.4 maps; an
+          // older app sees the call fail (its games and Play still work).
+          throw new Refused(
+            USE_PEOPLE_PICK,
+            'Invites go through Social Home: use people.pick (app SDK 1.4 or newer).',
           )
-          reply({ id, ok: true, result: resp.session_id })
-          break
         }
 
         case 'app.cancelSession': {
@@ -443,6 +601,26 @@ export function mountBridge(
           id,
           ok: false,
           error: { code: PERMISSION_DENIED, message: new PermissionDenied(denied).message, permission: denied },
+        })
+        return
+      }
+      if (err instanceof Refused) {
+        reply({
+          id,
+          ok: false,
+          error: {
+            code: err.code,
+            message: err.message,
+            ...(err.retryAfterMs !== undefined ? { retryAfterMs: Math.ceil(err.retryAfterMs) } : {}),
+          },
+        })
+        return
+      }
+      if (err instanceof ApiError && err.code === 'APP_SESSION_UNKNOWN') {
+        reply({
+          id,
+          ok: false,
+          error: { code: UNKNOWN_SESSION, message: 'This app can only message games you started or accepted.' },
         })
         return
       }
@@ -475,7 +653,11 @@ export function mountBridge(
   // Forwards the full identity so multi-game / multi-friend apps can route
   // a message to the right session and distinguish invites from in-game moves.
   const offWs = ws.on('app.message', (evt: WsEvent) => {
-    // Every app message is from a person in a game: ``people`` only.
+    // Every app message is from a person in a game: ``people`` only. A live
+    // invite (``verb: 'open'``) never reaches the app (D3): it waits in
+    // Needs you, and the app learns of the inviter only on Play.
+    const payload = evt.data?.payload as { verb?: unknown } | null | undefined
+    if (evt.data?.kind === 'session' && payload?.verb === 'open') return
     if (evt.data?.app_id === appId && has('people')) {
       iframe.contentWindow?.postMessage(
         {

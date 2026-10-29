@@ -286,6 +286,7 @@
   "notification.app.added": "{name} añadió {app}",
   "notification.app.challenge": "{name} te invitó a jugar a {app}",
   "notification.app.challenge_generic": "{name} te invitó a jugar",
+  "notification.app.continue": "{name} quiere continuar tu partida de {app}",
   "notification.app.challenge_declined": "{name} rechazó tu invitación a {app}",
   "notification.app.challenge_declined_generic": "{name} rechazó tu invitación a jugar",
   "notification.app.requested": "{name} pidió {app}",

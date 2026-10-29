@@ -34,6 +34,21 @@ vi.mock('@/features/apps/bridge', () => ({
   mountBridge: vi.fn().mockReturnValue(() => {}),
 }))
 
+// ── Mock the invite sheet: the host's own picker (D3) ──────────────────
+// A stub that shows what it was asked and lets a test Send or Cancel.
+vi.mock('@/features/apps/InviteSheet', () => ({
+  InviteSheet: ({ appName, request, onDone }: {
+    appName: string
+    request: { max: number }
+    onDone: (p: unknown[]) => void
+  }) => (
+    <div data-testid="invite-sheet" data-app={appName} data-max={request.max}>
+      <button onClick={() => onDone([{ instance_id: 'brookside', user_ref: 'ben', is_local: false, display_name: 'Ben', session_id: 's9' }])}>Send</button>
+      <button onClick={() => onDone([])}>Cancel</button>
+    </div>
+  ),
+}))
+
 // ── Mock @/ws ─────────────────────────────────────────────────────────────
 // Captures the host's ``app.uninstalled`` / ``app.disabled`` listeners so a
 // test can play the frame an admin's action sends.
@@ -223,6 +238,36 @@ describe('AppHostInner', () => {
       },
       '*',
     ))
+  })
+
+  // ── The invite sheet (D3): drawn by the host, outside the frame ───────
+
+  it('people.pick shows Social Home\'s sheet outside the frame and hands back who was picked', async () => {
+    const view = render(<AppHostInner appId="chess" />)
+    await waitFor(() => expect(view.container.querySelector('iframe')).not.toBeNull())
+    const ctx = vi.mocked(mountBridge).mock.calls[0][1] as BridgeContext
+    let picked: Promise<unknown> | undefined
+    act(() => { picked = ctx.pickPeople!({ purpose: 'play', max: 1 }) })
+    const sheet = await view.findByTestId('invite-sheet')
+    // Not inside the app's frame: the host draws it, the app can't touch it.
+    expect(view.container.querySelector('iframe')!.contains(sheet)).toBe(false)
+    expect(sheet.dataset.app).toBe('Chess')
+    fireEvent.click(view.getByText('Send'))
+    await expect(picked).resolves.toEqual([
+      { instance_id: 'brookside', user_ref: 'ben', is_local: false, display_name: 'Ben', session_id: 's9' },
+    ])
+    expect(view.queryByTestId('invite-sheet')).toBeNull()
+  })
+
+  it('a sheet goes with its frame: leaving the app hands back nobody', async () => {
+    const view = render(<AppHostInner appId="chess" />)
+    await waitFor(() => expect(view.container.querySelector('iframe')).not.toBeNull())
+    const ctx = vi.mocked(mountBridge).mock.calls[0][1] as BridgeContext
+    let picked: Promise<unknown> | undefined
+    act(() => { picked = ctx.pickPeople!({ purpose: 'play', max: 1 }) })
+    await view.findByTestId('invite-sheet')
+    view.unmount()
+    await expect(picked).resolves.toEqual([])
   })
 
   // ── Launch context: Play opens the game you were invited to ───────────

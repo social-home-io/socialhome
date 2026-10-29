@@ -344,6 +344,59 @@ export async function getRuntime(appId: string): Promise<AppRuntime> {
   return await api.get(`/api/apps/${encodeURIComponent(appId)}/runtime`) as AppRuntime
 }
 
+/** One person Social Home's invite sheet lists (D3). */
+export interface InvitablePerson {
+  instance_id:    string
+  user_ref:       string
+  /** "Ben · Brookside" for someone in another household. */
+  display_name:   string
+  person_name:    string
+  /** ``null`` for your own household. */
+  household_name: string | null
+  is_local:       boolean
+  online:         boolean
+}
+
+/** What the invite caps leave (server-enforced; shown before Send). */
+export interface InviteCounts {
+  open:        number
+  max_open:    number
+  today:       number
+  max_per_day: number
+}
+
+/** The invite sheet's list — Social Home's own read, never the app's. */
+export async function getInvitable(appId: string): Promise<{ people: InvitablePerson[], invites: InviteCounts }> {
+  return await api.get(`/api/apps/${encodeURIComponent(appId)}/invitable`) as {
+    people: InvitablePerson[]
+    invites: InviteCounts
+  }
+}
+
+/** The sheet's "Continue game with …": pick an old game up again. */
+export async function continueGame(
+  appId: string,
+  sessionId: string,
+  person: Pick<InvitablePerson, 'instance_id' | 'user_ref' | 'is_local'>,
+): Promise<string> {
+  const r = await api.post(
+    `/api/apps/${encodeURIComponent(appId)}/sessions/${encodeURIComponent(sessionId)}/continue`,
+    { target: { instance_id: person.instance_id, user_ref: person.user_ref, is_local: person.is_local } },
+  ) as { session_id: string }
+  return r.session_id
+}
+
+/** The sheet's Send: one invite to one picked person. */
+export async function sendInvite(
+  appId: string,
+  person: Pick<InvitablePerson, 'instance_id' | 'user_ref' | 'is_local'>,
+): Promise<string> {
+  const r = await api.post(`/api/apps/${encodeURIComponent(appId)}/sessions`, {
+    target: { instance_id: person.instance_id, user_ref: person.user_ref, is_local: person.is_local },
+  }) as { session_id: string }
+  return r.session_id
+}
+
 /** Test helper — reset signals without hitting the API. */
 export function _resetAppsForTest(): void {
   installedApps.value    = []

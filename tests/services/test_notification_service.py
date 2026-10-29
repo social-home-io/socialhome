@@ -2005,6 +2005,27 @@ async def test_on_app_challenge_received_push_is_title_only(stack):
     assert not hasattr(payload, "body")
 
 
+async def test_a_continued_game_is_its_own_needs_you_row(stack):
+    """An old game picked up again reads "… wants to continue your … game"
+    and files as ``app_challenge_continue`` (Play / Decline as an invite)."""
+    from socialhome.domain.events import AppChallengeReceived
+
+    target = await stack.provision_user("target")
+    await stack.bus.publish(
+        AppChallengeReceived(
+            app_id="chess",
+            session_id="old-game",
+            to_user_id=target.user_id,
+            from_display="Magnus",
+            continued=True,
+        )
+    )
+    notifs = await stack.notif_repo.list(target.user_id, limit=10)
+    (row,) = [n for n in notifs if n.type == "app_challenge_continue"]
+    assert "Magnus" in row.title and "continue" in row.title
+    assert row.object_key == "app_session:chess/old-game"
+
+
 async def test_space_join_approved_for_a_non_local_user_saves_nothing(stack):
     """A §D2 cross-household applicant — or an admin/mod elevation of one —
     is approved with a ``user_id`` that has no local ``users`` row. The

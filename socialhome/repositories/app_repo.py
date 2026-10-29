@@ -17,6 +17,7 @@ import orjson
 
 from ..db import AsyncDatabase
 from ..domain.apps import (
+    ACTIVE_SESSION_TTL_SECONDS,
     PENDING_SESSION_TTL_SECONDS,
     SESSION_ACTIVE,
     SESSION_INVITED,
@@ -27,6 +28,7 @@ from ..domain.apps import (
 )
 
 _PENDING_SESSION_TTL_SECONDS = PENDING_SESSION_TTL_SECONDS
+_ACTIVE_SESSION_TTL_SECONDS = ACTIVE_SESSION_TTL_SECONDS
 _PENDING_SESSION_MAX_PER_PAIR = 50
 
 
@@ -55,8 +57,12 @@ class AbstractAppRepo(Protocol):
     async def kv_count(self, app_id: str, user_id: str) -> int: ...
     async def add_pending_session(self, s: AppPendingSession) -> None: ...
     async def prune_pending_sessions(
-        self, *, max_age_seconds: int = _PENDING_SESSION_TTL_SECONDS
+        self,
+        *,
+        max_age_seconds: int = _PENDING_SESSION_TTL_SECONDS,
+        active_max_age_seconds: int = _ACTIVE_SESSION_TTL_SECONDS,
     ) -> int: ...
+
     async def get_pending_session(
         self, app_id: str, user_id: str, session_id: str
     ) -> AppPendingSession | None: ...
@@ -91,6 +97,12 @@ class AbstractAppRepo(Protocol):
         now: str,
     ) -> bool: ...
     async def take_held(self, app_id: str, user_id: str) -> list[AppPendingSession]: ...
+    async def list_sessions(
+        self, app_id: str, user_id: str
+    ) -> list[AppPendingSession]: ...
+    async def withdraw_session(
+        self, app_id: str, user_id: str, session_id: str
+    ) -> None: ...
 
 
 def _row_to_kv(row) -> AppKvEntry:
@@ -288,7 +300,11 @@ class SqliteAppRepo:
                  created_at=excluded.created_at
                -- A pending invite is only ever refreshed by the household
                -- that opened it; another one reusing the id changes nothing.
-               WHERE app_pending_sessions.from_instance = excluded.from_instance""",
+               -- A game already played or sent (``active``) is never
+               -- rewritten by an open reusing its id.
+               WHERE app_pending_sessions.from_instance = excluded.from_instance
+                 AND app_pending_sessions.from_user IS excluded.from_user
+                 AND app_pending_sessions.state = 'invited'""",
             (
                 s.app_id,
                 s.user_id,
@@ -300,7 +316,8 @@ class SqliteAppRepo:
             ),
         )
         # Bound a flood from a paired peer: keep at most
-        # ``_PENDING_SESSION_MAX_PER_PAIR`` rows per (app, user), deleting the
+        # ``_PENDING_SESSION_MAX_PER_PAIR`` waiting invites per (app, user) — never a
+        # game being played or an invite this person sent (D3) — deleting the
         # oldest beyond the cap. Same write-queue batch as the insert, so the
         # per-pair invariant holds continuously (mirrors the notifications
         # per-user cap).
@@ -308,7 +325,7 @@ class SqliteAppRepo:
             """DELETE FROM app_pending_sessions
                 WHERE rowid IN (
                     SELECT rowid FROM app_pending_sessions
-                     WHERE app_id = ? AND user_id = ?
+                     WHERE app_id = ? AND user_id = ? AND state = 'invited'
                      ORDER BY COALESCE(updated_at, created_at) DESC
                      LIMIT -1 OFFSET ?
                 )""",
@@ -316,28 +333,32 @@ class SqliteAppRepo:
         )
 
     async def prune_pending_sessions(
-        self, *, max_age_seconds: int = _PENDING_SESSION_TTL_SECONDS
+        self,
+        *,
+        max_age_seconds: int = _PENDING_SESSION_TTL_SECONDS,
+        active_max_age_seconds: int = _ACTIVE_SESSION_TTL_SECONDS,
     ) -> int:
-        """Delete sessions quiet for longer than the TTL — an invite nobody
-        played, a game nobody moved in (and whatever it still held).
+        """Delete sessions quiet for longer than their TTL — an invite
+        nobody played (``max_age_seconds``, 14 days), a game nobody moved in
+        (``active_max_age_seconds``, 90 days), and whatever they still held.
         Returns purge count.
 
         Counts before deleting (aiosqlite's DELETE doesn't surface a row
         count at this revision) — same mechanism as
         ``federation_repo.prune_replay_cache``.
         """
-        cutoff = (datetime.now(UTC) - timedelta(seconds=max_age_seconds)).isoformat()
+        now = datetime.now(UTC)
+        invited_cut = (now - timedelta(seconds=max_age_seconds)).isoformat()
+        active_cut = (now - timedelta(seconds=active_max_age_seconds)).isoformat()
+        where = (
+            " WHERE (state = ? AND COALESCE(updated_at, created_at) < ?)"
+            " OR (state = ? AND COALESCE(updated_at, created_at) < ?)"
+        )
+        args = (SESSION_ACTIVE, active_cut, SESSION_INVITED, invited_cut)
         before = await self._db.fetchval(
-            "SELECT COUNT(*) FROM app_pending_sessions"
-            " WHERE COALESCE(updated_at, created_at) < ?",
-            (cutoff,),
-            default=0,
+            "SELECT COUNT(*) FROM app_pending_sessions" + where, args, default=0
         )
-        await self._db.enqueue(
-            "DELETE FROM app_pending_sessions"
-            " WHERE COALESCE(updated_at, created_at) < ?",
-            (cutoff,),
-        )
+        await self._db.enqueue("DELETE FROM app_pending_sessions" + where, args)
         return int(before)
 
     async def get_pending_session(
@@ -439,7 +460,7 @@ class SqliteAppRepo:
             """DELETE FROM app_pending_sessions
                 WHERE rowid IN (
                     SELECT rowid FROM app_pending_sessions
-                     WHERE app_id = ? AND user_id = ?
+                     WHERE app_id = ? AND user_id = ? AND state = 'invited'
                      ORDER BY COALESCE(updated_at, created_at) DESC
                      LIMIT -1 OFFSET ?
                 )""",
@@ -471,8 +492,14 @@ class SqliteAppRepo:
         session for this person, replacing an older one, but only when the
         session is known for them and its other side is ``from_instance``
         / ``from_user``. One primary-key write. ``True`` when kept."""
+        # An invite this person sent is answered once the other side says
+        # anything: it stops counting towards the open-invite cap.
         changed = await self._db.enqueue_rowcount(
-            """UPDATE app_pending_sessions SET held_json = ?, updated_at = ?
+            """UPDATE app_pending_sessions SET held_json = ?, updated_at = ?,
+                 payload_json = CASE
+                   WHEN json_type(payload_json, '$.sent') = 'true'
+                   THEN json_set(payload_json, '$.answered', json('true'))
+                   ELSE payload_json END
                WHERE app_id = ? AND user_id = ? AND session_id = ?
                  AND from_instance = ? AND from_user = ?""",
             (
@@ -487,13 +514,39 @@ class SqliteAppRepo:
         )
         return changed == 1
 
+    async def list_sessions(self, app_id: str, user_id: str) -> list[AppPendingSession]:
+        """Every session this household knows for this person in this app
+        — invites waiting for them, games they play, invites they sent —
+        latest change first, by the existing index. Bounded: at most
+        ``_PENDING_SESSION_MAX_PER_PAIR`` waiting invites, plus games and sent
+        invites (≤ 30 sent a day) that the 14-day TTL prunes."""
+        rows = await self._db.fetchall(
+            """SELECT * FROM app_pending_sessions
+               WHERE app_id = ? AND user_id = ?
+               ORDER BY COALESCE(updated_at, created_at) DESC""",
+            (app_id, user_id),
+        )
+        return [_row_to_pending(r) for r in rows]
+
+    async def withdraw_session(
+        self, app_id: str, user_id: str, session_id: str
+    ) -> None:
+        """The person took back an invite they sent: the row stays (it
+        still counts towards the day's invites), marked withdrawn."""
+        await self._db.enqueue(
+            """UPDATE app_pending_sessions
+                  SET payload_json = json_set(payload_json, '$.withdrawn', json('true'))
+               WHERE app_id = ? AND user_id = ? AND session_id = ?""",
+            (app_id, user_id, session_id),
+        )
+
     async def take_held(self, app_id: str, user_id: str) -> list[AppPendingSession]:
         """The person's app opened: hand over every held message (oldest
         change first) and clear them. A message held again meanwhile (a
         newer move) is not cleared: it waits for the next open."""
         rows = await self._db.fetchall(
             """SELECT * FROM app_pending_sessions
-               WHERE app_id = ? AND user_id = ? AND held_json IS NOT NULL
+               WHERE app_id = ? AND user_id = ? AND held_json IS NOT NULL AND state = 'active'
                ORDER BY COALESCE(updated_at, created_at)""",
             (app_id, user_id),
         )

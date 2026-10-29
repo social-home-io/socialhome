@@ -130,6 +130,7 @@ export const HOUSEHOLD_CHAT_LINK = '/?tab=chat'
  *   notifications.row.bazaar_offer_accepted_none
  *   notifications.row.bazaar_offer_rejected_none
  *   notifications.row.app_challenge notifications.row.app_challenge_many
+ *   notifications.row.app_challenge_continue notifications.row.app_challenge_continue_many
  *   notifications.row.app_added notifications.row.app_added_many
  *   notifications.row.app_challenge_declined notifications.row.app_challenge_declined_many
  *   notifications.row.app_request notifications.row.app_request_many
@@ -183,6 +184,8 @@ export const ROW_TYPES: Readonly<Record<string, TypeSpec>> = {
   // The app's name rides as the place (``params.space_name``): "Ben invited
   // you to play Chess". A row without it keeps its title.
   app_challenge: {},
+  // An old game picked up again: "Ben wants to continue your Chess game".
+  app_challenge_continue: {},
   // A new app in the household: "Anna added Chess" — the app's name is
   // the place too.
   app_added: {},

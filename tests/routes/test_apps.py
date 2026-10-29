@@ -23,10 +23,12 @@ from socialhome.domain.apps import (
     AppContactNotFoundError,
     AppDownloadError,
     AppIntegrityError,
+    AppInviteLimitError,
     AppManifest,
     AppNotEnabledError,
     AppNotFoundError,
     AppPendingSession,
+    AppSessionUnknownError,
     InstalledApp,
 )
 from socialhome.repositories.app_repo import SqliteAppRepo
@@ -34,6 +36,9 @@ from socialhome.services.app_federation_service import AppFederationService
 from socialhome.services.app_service import AppService
 
 from .conftest import _auth, client_with_stubs
+
+#: A person picked in the invite sheet (another household).
+_T = {"instance_id": "peer.example.com", "user_ref": "bob", "is_local": False}
 
 # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -934,9 +939,52 @@ async def test_get_contacts_returns_contact_shape(client, fed_svc):
     fed_svc.list_contacts.assert_awaited_once()
 
 
+async def test_contacts_are_the_callers_for_this_app(client, fed_svc):
+    """D3: the app's contacts are asked for per app and caller (who they
+    picked and play with there) — never the roster."""
+    fed_svc.list_contacts.return_value = []
+    r = await client.get(
+        "/api/apps/com.example.hello/contacts", headers=_auth(client._tok)
+    )
+    assert r.status == 200
+    fed_svc.list_contacts.assert_awaited_once_with(
+        app_id="com.example.hello", self_user_id=client._uid
+    )
+
+
+async def test_invitable_lists_the_sheet_and_the_caps(client, fed_svc):
+    person = {
+        "instance_id": "peer.example.com",
+        "user_ref": "bob",
+        "display_name": "Bob · Brookside",
+        "is_local": False,
+        "online": False,
+        "person_name": "Bob",
+        "household_name": "Brookside",
+    }
+    counts = {"open": 2, "max_open": 10, "today": 3, "max_per_day": 30}
+    fed_svc.list_invitable.return_value = [person]
+    fed_svc.invite_counts.return_value = counts
+    r = await client.get(
+        "/api/apps/com.example.hello/invitable", headers=_auth(client._tok)
+    )
+    assert r.status == 200
+    assert await r.json() == {"people": [person], "invites": counts}
+    fed_svc.list_invitable.assert_awaited_once_with(
+        app_id="com.example.hello", self_user_id=client._uid
+    )
+
+
+async def test_invitable_requires_auth(client):
+    r = await client.get("/api/apps/com.example.hello/invitable")
+    assert r.status == 401
+
+
 async def test_contacts_member_can_list(client, fed_svc):
     """Non-admin members can also list contacts."""
     fed_svc.list_contacts.return_value = []
+    fed_svc.list_invitable.return_value = []
+    fed_svc.invite_counts.return_value = {}
     member_tok = await _seed_member(client._db)
 
     r = await client.get(
@@ -954,7 +1002,7 @@ async def test_contacts_member_can_list(client, fed_svc):
 async def test_sessions_requires_auth(client):
     r = await client.post(
         "/api/apps/com.example.hello/sessions",
-        json={"peer_instance_id": "peer.example.com"},
+        json={"target": _T},
     )
     assert r.status == 401
 
@@ -983,27 +1031,16 @@ async def test_sessions_returns_session_id_201(client, fed_svc):
     )
 
 
-async def test_sessions_legacy_peer_instance_id_still_works(client, fed_svc):
-    """A legacy ``peer_instance_id`` body maps to a remote household target."""
-    fed_svc.open_session.return_value = "cafebabe89abcdef"
-
+async def test_sessions_refuse_a_household_addressed_body(client, fed_svc):
+    """D3: a legacy ``peer_instance_id`` body names nobody anyone picked in
+    the invite sheet — 400, the service is never asked."""
     r = await client.post(
         "/api/apps/com.example.hello/sessions",
         json={"peer_instance_id": "peer.example.com"},
         headers=_auth(client._tok),
     )
-    assert r.status == 201
-    body = await r.json()
-    assert body == {"session_id": "cafebabe89abcdef"}
-    fed_svc.open_session.assert_awaited_once_with(
-        app_id="com.example.hello",
-        target={
-            "instance_id": "peer.example.com",
-            "user_ref": "",
-            "is_local": False,
-        },
-        actor_user_id=client._uid,
-    )
+    assert r.status == 400
+    fed_svc.open_session.assert_not_awaited()
 
 
 async def test_sessions_rejects_malformed_target(client, fed_svc):
@@ -1068,11 +1105,14 @@ async def test_accept_returns_the_invite_scoped_to_the_caller(client, fed_svc):
 
 async def test_the_blanket_pending_sessions_drain_is_gone(client):
     """Opening an app accepts nothing: there is no endpoint that takes in
-    every waiting invite at once."""
-    r = await client.get(
-        "/api/apps/com.example.hello/pending-sessions", headers=_auth(client._tok)
-    )
-    assert r.status == 404
+    every waiting invite at once.
+
+    Asked of the router, not of a request: with a built SPA in
+    ``socialhome/static`` an unknown GET falls through to the SPA
+    fallback and answers 200 — the route's absence is what matters."""
+    paths = {r.canonical for r in client.server.app.router.resources()}
+    assert any(p.startswith("/api/apps/{app_id}/") for p in paths)  # sanity
+    assert not any(p.endswith("/pending-sessions") for p in paths)
 
 
 async def test_sessions_rejects_empty_peer(client, fed_svc):
@@ -1091,7 +1131,7 @@ async def test_sessions_app_not_found_404(client, fed_svc):
 
     r = await client.post(
         "/api/apps/com.example.missing/sessions",
-        json={"peer_instance_id": "peer.example.com"},
+        json={"target": _T},
         headers=_auth(client._tok),
     )
     assert r.status == 404
@@ -1102,7 +1142,7 @@ async def test_sessions_app_not_enabled_403(client, fed_svc):
 
     r = await client.post(
         "/api/apps/com.example.hello/sessions",
-        json={"peer_instance_id": "peer.example.com"},
+        json={"target": _T},
         headers=_auth(client._tok),
     )
     assert r.status == 403
@@ -1116,7 +1156,7 @@ async def test_messages_requires_auth(client):
         "/api/apps/com.example.hello/messages",
         json={
             "session_id": "s1",
-            "peer_instance_id": "peer.example.com",
+            "target": _T,
             "payload": {},
         },
     )
@@ -1153,10 +1193,8 @@ async def test_messages_returns_ok(client, fed_svc):
     )
 
 
-async def test_messages_legacy_peer_instance_id_still_works(client, fed_svc):
-    """A legacy ``peer_instance_id`` body maps to a household-addressed target."""
-    fed_svc.send_message.return_value = None
-
+async def test_messages_refuse_a_household_addressed_body(client, fed_svc):
+    """D3: a legacy ``peer_instance_id`` body is no game anyone knows — 400."""
     r = await client.post(
         "/api/apps/com.example.hello/messages",
         json={
@@ -1166,18 +1204,36 @@ async def test_messages_legacy_peer_instance_id_still_works(client, fed_svc):
         },
         headers=_auth(client._tok),
     )
-    assert r.status == 200
-    fed_svc.send_message.assert_awaited_once_with(
-        app_id="com.example.hello",
-        target={
-            "instance_id": "peer.example.com",
-            "user_ref": "",
-            "is_local": False,
-        },
-        session_id="sess-abc",
-        payload={"move": "e4"},
-        actor_user_id=client._uid,
+    assert r.status == 400
+    fed_svc.send_message.assert_not_awaited()
+
+
+async def test_messages_in_an_unknown_session_are_403(client, fed_svc):
+    fed_svc.send_message.side_effect = AppSessionUnknownError()
+    r = await client.post(
+        "/api/apps/com.example.hello/messages",
+        json={"session_id": "made-up", "target": _T, "payload": {"m": 1}},
+        headers=_auth(client._tok),
     )
+    assert r.status == 403
+    assert (await r.json())["error"]["code"] == "APP_SESSION_UNKNOWN"
+
+
+async def test_sessions_past_the_invite_caps_are_429(client, fed_svc):
+    for daily, code, limit in (
+        (False, "APP_INVITES_OPEN_LIMIT", 10),
+        (True, "APP_INVITES_DAILY_LIMIT", 30),
+    ):
+        fed_svc.open_session.side_effect = AppInviteLimitError(daily=daily)
+        r = await client.post(
+            "/api/apps/com.example.hello/sessions",
+            json={"target": _T},
+            headers=_auth(client._tok),
+        )
+        assert r.status == 429
+        err = (await r.json())["error"]
+        assert err["code"] == code
+        assert err["params"] == {"limit": limit}
 
 
 async def test_messages_rejects_malformed_target(client, fed_svc):
@@ -1241,7 +1297,7 @@ async def test_messages_non_contact_target_forbidden(client, fed_svc):
 async def test_messages_rejects_missing_session_id(client, fed_svc):
     r = await client.post(
         "/api/apps/com.example.hello/messages",
-        json={"peer_instance_id": "peer.example.com", "payload": {}},
+        json={"target": _T, "payload": {}},
         headers=_auth(client._tok),
     )
     assert r.status == 400
@@ -1263,7 +1319,7 @@ async def test_messages_rejects_missing_peer(client, fed_svc):
 async def test_messages_rejects_missing_payload(client, fed_svc):
     r = await client.post(
         "/api/apps/com.example.hello/messages",
-        json={"session_id": "s1", "peer_instance_id": "peer.example.com"},
+        json={"session_id": "s1", "target": _T},
         headers=_auth(client._tok),
     )
     assert r.status == 400
@@ -1279,7 +1335,7 @@ async def test_messages_rejects_oversized_payload(client, fed_svc):
         "/api/apps/com.example.hello/messages",
         json={
             "session_id": "s1",
-            "peer_instance_id": "peer.example.com",
+            "target": _T,
             "payload": big_payload,
         },
         headers=_auth(client._tok),
@@ -1294,7 +1350,7 @@ async def test_messages_app_not_found_404(client, fed_svc):
 
     r = await client.post(
         "/api/apps/com.example.missing/messages",
-        json={"session_id": "s1", "peer_instance_id": "p.example.com", "payload": {}},
+        json={"session_id": "s1", "target": _T, "payload": {}},
         headers=_auth(client._tok),
     )
     assert r.status == 404
@@ -1305,7 +1361,7 @@ async def test_messages_app_not_enabled_403(client, fed_svc):
 
     r = await client.post(
         "/api/apps/com.example.hello/messages",
-        json={"session_id": "s1", "peer_instance_id": "p.example.com", "payload": {}},
+        json={"session_id": "s1", "target": _T, "payload": {}},
         headers=_auth(client._tok),
     )
     assert r.status == 403
@@ -2301,6 +2357,7 @@ _ROUTES = [
     ("put", "/store/k", {"value": 1}, "storage"),
     ("delete", "/store/k", None, "storage"),
     ("get", "/contacts", None, "people"),
+    ("get", "/invitable", None, "people"),
     ("get", "/peers", None, "federation"),
     ("post", "/sessions", {"target": _LOCAL}, "people"),
     (
@@ -2340,6 +2397,7 @@ async def test_a_route_refuses_an_app_without_its_permission(
     # Nothing reached the service behind the route.
     for name in (
         "list_contacts",
+        "list_invitable",
         "list_peers",
         "open_session",
         "send_message",
@@ -2357,6 +2415,8 @@ async def test_a_route_lets_an_app_with_its_permission_through(
 ):
     await _seed_installed_enabled_app(client._db, capabilities=(permission,))
     fed_svc.list_contacts.return_value = []
+    fed_svc.list_invitable.return_value = []
+    fed_svc.invite_counts.return_value = {}
     fed_svc.list_peers.return_value = []
     fed_svc.open_session.return_value = "s1"
     fed_svc.take_held.return_value = []
@@ -2387,6 +2447,8 @@ async def test_chess_keeps_every_permission_it_had(client, fed_svc):
         client._db, capabilities=("storage", "federation")
     )
     fed_svc.list_contacts.return_value = []
+    fed_svc.list_invitable.return_value = []
+    fed_svc.invite_counts.return_value = {}
     fed_svc.open_session.return_value = "s1"
     for method, path, body in (
         ("get", "/contacts", None),

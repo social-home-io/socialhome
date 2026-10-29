@@ -142,7 +142,7 @@ describe('One Apps page (D1)', () => {
 
   it('puts the app Needs-you rows (invites, requests) on top', () => {
     const { getByTestId } = render(<AppsPage />)
-    expect(getByTestId('needs-you').textContent).toBe('app_challenge,app_request')
+    expect(getByTestId('needs-you').textContent).toBe('app_challenge,app_challenge_continue,app_request')
   })
 
   it('names apps in the viewer\'s language from the catalog', () => {
@@ -203,7 +203,7 @@ describe('First run with one app (nothing added yet)', () => {
     const { getByRole, getByText, queryByRole, queryByText } = render(<AppsPage />)
     expect(getByRole('heading', { level: 2, name: 'Nothing added yet' })).toBeTruthy()
     expect(getByText('Saves its own data for each person')).toBeTruthy()
-    expect(getByText('Lets it invite people you know')).toBeTruthy()
+    expect(getByText('Lets you pick people to play with')).toBeTruthy()
     expect(getByText('Sends invites and moves to other households')).toBeTruthy()
     expect(getByText(/From Social Home/)).toBeTruthy()
     expect(getByText(/More apps are on the way/)).toBeTruthy()
@@ -218,7 +218,7 @@ describe('First run with one app (nothing added yet)', () => {
     fireEvent.click(getByRole('button', { name: 'Add to household' }))
     const dialog = getByRole('dialog', { name: 'Add Chess for everyone?' })
     expect(dialog.textContent).toContain('Chess will be able to:')
-    expect(dialog.textContent).toContain('It sees the people you can message in Social Home, so you can invite them.')
+    expect(dialog.textContent).toContain("You choose someone in Social Home. Chess learns only who you picked and people you've played with.")
     expect(dialog.textContent).toContain('It can never see your password')
     expect(dialog.textContent).toContain('Everyone in your household can open it.')
     expect(dialog.textContent).toContain('Protected accounts play only with people they can already message.')

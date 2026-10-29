@@ -19,11 +19,11 @@ manifest (:func:`~socialhome.domain.apps.app_permissions`) and answers
 Route                                              Permission
 =================================================  =========================
 ``GET /store``, ``GET/PUT/DELETE /store/{key}``    ``storage``
-``GET /contacts``                                  ``people``
+``GET /contacts``, ``GET /invitable``              ``people``
 ``GET /peers``                                     ``federation``
 ``POST /sessions``, ``POST /messages``,            ``people`` — and
-``POST /sessions/{sid}/cancel``                    ``federation`` when the
-                                                   target is in another
+``POST /sessions/{sid}/cancel``,                   ``federation`` when the
+``POST /sessions/{sid}/continue``                  target is in another
                                                    household (service)
 ``POST /sessions/{sid}/accept``,                   ``people``
 ``POST /sessions/{sid}/decline``, ``POST /held``
@@ -34,6 +34,8 @@ admin routes (install, update, toggle, catalog) need none.
 """
 
 from __future__ import annotations
+
+import re
 
 import orjson
 from aiohttp import web
@@ -424,51 +426,49 @@ class AppPeersView(AppPermissionView):
 
 
 class AppContactsView(AppPermissionView):
-    """``GET /api/apps/{app_id}/contacts`` — people this user can challenge
-    (``people``)."""
+    """``GET /api/apps/{app_id}/contacts`` — the people the app may know
+    about (``people``): who the caller picked in the invite sheet and who
+    they play with in this app (D3) — never the roster."""
 
     async def get(self) -> web.Response:
         await self.require_permission(PERMISSION_PEOPLE)
         svc = self.svc(app_federation_service_key)
-        contacts = await svc.list_contacts(self_user_id=self.user.user_id)
+        contacts = await svc.list_contacts(
+            app_id=self.match("app_id"), self_user_id=self.user.user_id
+        )
         return self._json({"contacts": contacts})
 
 
+class AppInvitableView(AppPermissionView):
+    """``GET /api/apps/{app_id}/invitable`` — the people Social Home's
+    invite sheet lists (``people``) and what the invite caps leave
+    (``invites: {open, max_open, today, max_per_day}``). The sheet is
+    drawn by Social Home outside the app's frame; the bridge never offers
+    this list to an app (D3)."""
+
+    async def get(self) -> web.Response:
+        await self.require_permission(PERMISSION_PEOPLE)
+        app_id = self.match("app_id")
+        uid = self.user.user_id
+        svc = self.svc(app_federation_service_key)
+        people = await svc.list_invitable(app_id=app_id, self_user_id=uid)
+        invites = await svc.invite_counts(app_id=app_id, user_id=uid)
+        return self._json({"people": people, "invites": invites})
+
+
 class AppSessionsView(AppPermissionView):
-    """``POST /api/apps/{app_id}/sessions`` — open an app session with a
-    person (``people``; ``federation`` too for another household — checked
-    by the service, which knows where the target lives)."""
+    """``POST /api/apps/{app_id}/sessions`` — send a game invite to one
+    person picked in Social Home's invite sheet (``people``; ``federation``
+    too for another household — checked by the service, which knows where
+    the target lives). The app's bridge never calls this (D3). ``429
+    APP_INVITES_OPEN_LIMIT`` / ``APP_INVITES_DAILY_LIMIT`` past the invite
+    caps."""
 
     async def post(self) -> web.Response:
         await self.require_permission(PERMISSION_PEOPLE)
         app_id = self.match("app_id")
-        body = await self.body()
-        target = body.get("target")
-
+        target = _target(await self.body())
         if target is None:
-            # Back-compat: a legacy household-addressed body carries
-            # ``peer_instance_id`` instead of a ``target`` object.  Map it to
-            # a remote target with an empty user_ref (household fan-out).
-            peer_instance_id = body.get("peer_instance_id")
-            if not isinstance(peer_instance_id, str) or not peer_instance_id:
-                return error_response(
-                    400,
-                    "UNPROCESSABLE",
-                    "target object or peer_instance_id is required.",
-                )
-            target = {
-                "instance_id": peer_instance_id,
-                "user_ref": "",
-                "is_local": False,
-            }
-        elif (
-            not isinstance(target, dict)
-            or not isinstance(target.get("instance_id"), str)
-            or not target["instance_id"]
-            or not isinstance(target.get("user_ref"), str)
-            or not target["user_ref"]
-            or not isinstance(target.get("is_local"), bool)
-        ):
             return error_response(
                 400,
                 "UNPROCESSABLE",
@@ -514,6 +514,40 @@ class AppSessionDeclineView(AppPermissionView):
             actor_user_id=self.user.user_id,
         )
         return self._json({"ok": True})
+
+
+#: An app's own session id: what the SPA's ``?session=`` accepts too.
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
+
+
+class AppSessionContinueView(AppPermissionView):
+    """``POST /api/apps/{app_id}/sessions/{session_id}/continue`` — pick a
+    game this household no longer knows up again with one person, from
+    Social Home's sheet ("Continue game with Ben"; ``people``, and
+    ``federation`` for another household). Body ``{target}``. Returns
+    ``{session_id}``. ``409 APP_SESSION_TAKEN`` when the id is known with
+    someone else; the invite caps apply (``429``)."""
+
+    async def post(self) -> web.Response:
+        await self.require_permission(PERMISSION_PEOPLE)
+        session_id = self.match("session_id")
+        if not _SESSION_ID_RE.fullmatch(session_id):
+            return error_response(400, "UNPROCESSABLE", "Not a session id.")
+        target = _target(await self.body())
+        if target is None:
+            return error_response(
+                400,
+                "UNPROCESSABLE",
+                "target must have non-empty string instance_id, non-empty "
+                "string user_ref, and a bool is_local.",
+            )
+        sid = await self.svc(app_federation_service_key).continue_session(
+            app_id=self.match("app_id"),
+            session_id=session_id,
+            target=target,
+            actor_user_id=self.user.user_id,
+        )
+        return self._json({"session_id": sid})
 
 
 class AppSessionCancelView(AppPermissionView):
@@ -597,14 +631,15 @@ class AppHeldView(AppPermissionView):
 class AppMessagesView(AppPermissionView):
     """``POST /api/apps/{app_id}/messages`` — send an app-layer message to a
     person (``people``; ``federation`` too for another household — checked
-    by the service)."""
+    by the service), only in a game this household knows the caller plays
+    with them (``403 APP_SESSION_UNKNOWN`` otherwise, D3)."""
 
     async def post(self) -> web.Response:
         await self.require_permission(PERMISSION_PEOPLE)
         app_id = self.match("app_id")
         body = await self.body()
         session_id = body.get("session_id")
-        target = body.get("target")
+        target = _target(body)
         payload = body.get("payload")
 
         if not isinstance(session_id, str) or not session_id:
@@ -613,29 +648,6 @@ class AppMessagesView(AppPermissionView):
             )
 
         if target is None:
-            # Back-compat: a legacy household-addressed body carries
-            # ``peer_instance_id`` instead of a ``target`` object.  Map it to
-            # a remote target with an empty user_ref (household fan-out).
-            peer_instance_id = body.get("peer_instance_id")
-            if not isinstance(peer_instance_id, str) or not peer_instance_id:
-                return error_response(
-                    400,
-                    "UNPROCESSABLE",
-                    "target object or peer_instance_id is required.",
-                )
-            target = {
-                "instance_id": peer_instance_id,
-                "user_ref": "",
-                "is_local": False,
-            }
-        elif (
-            not isinstance(target, dict)
-            or not isinstance(target.get("instance_id"), str)
-            or not target["instance_id"]
-            or not isinstance(target.get("user_ref"), str)
-            or not target["user_ref"]
-            or not isinstance(target.get("is_local"), bool)
-        ):
             return error_response(
                 400,
                 "UNPROCESSABLE",
