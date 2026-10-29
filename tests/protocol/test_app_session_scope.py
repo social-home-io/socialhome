@@ -111,7 +111,9 @@ async def env(aiohttp_client, tmp_dir, monkeypatch):
             name="Chess",
             version="1.0.0",
             enabled=True,
-            manifest=AppManifest(entry="index.html", icon=None, capabilities=()),
+            manifest=AppManifest(
+                entry="index.html", icon=None, capabilities=("storage", "federation")
+            ),
             bundle_path="apps/chess/1.0.0",
             bundle_sha256="ab" * 32,
             source_url="https://example/chess.tgz",

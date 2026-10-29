@@ -7,12 +7,16 @@ import dataclasses
 import pytest
 
 from socialhome.domain.apps import (
+    APP_PERMISSIONS,
     CATALOG_CHANGELOG_MAX,
     CATALOG_CHANGELOG_NOTE_MAX,
     CATALOG_DESCRIPTION_MAX,
     CATALOG_LOCALES_MAX,
     CATALOG_NAME_MAX,
     CATALOG_PUBLISHER_MAX,
+    PERMISSION_FEDERATION,
+    PERMISSION_PEOPLE,
+    PERMISSION_STORAGE,
     AppAgeRestrictedError,
     AppAlreadyInstalledError,
     AppCatalogEntry,
@@ -28,6 +32,7 @@ from socialhome.domain.apps import (
     AppNeedsNewerCoreError,
     AppNotEnabledError,
     AppNotFoundError,
+    AppPermissionDeniedError,
     AppQuotaExceededError,
     AppRequestNotAllowedError,
     InstalledApp,
@@ -36,6 +41,7 @@ from socialhome.domain.apps import (
     core_version_satisfies,
     is_newer_version,
     parse_app_version,
+    unknown_capabilities,
 )
 
 
@@ -487,3 +493,74 @@ def test_needs_newer_core_and_request_errors_are_coded():
         "APP_NEEDS_NEWER_SOCIAL_HOME",
     )
     assert AppRequestNotAllowedError.code == "APP_REQUEST_NOT_NEEDED"
+
+
+# ── Permissions ───────────────────────────────────────────────────────────
+
+
+def _app_with_caps(*caps: str) -> InstalledApp:
+    return InstalledApp(
+        app_id="chess",
+        name="Chess",
+        version="2026.10.29",
+        enabled=True,
+        manifest=AppManifest(entry="index.html", icon=None, capabilities=caps),
+        bundle_path="chess/2026.10.29",
+        bundle_sha256="ab" * 32,
+        source_url="https://example/chess.tgz",
+        installed_by="u1",
+        installed_at="2026-10-29T00:00:00+00:00",
+    )
+
+
+def test_permission_names_are_the_three_plain_words():
+    assert APP_PERMISSIONS == ("storage", "people", "federation")
+    assert (PERMISSION_STORAGE, PERMISSION_PEOPLE, PERMISSION_FEDERATION) == (
+        APP_PERMISSIONS
+    )
+
+
+@pytest.mark.parametrize(
+    ("caps", "perms"),
+    [
+        ((), ()),
+        (("storage",), ("storage",)),
+        (("people",), ("people",)),
+        (("people", "storage"), ("storage", "people")),
+        # Chess: federation implies people (grandfathered installs too).
+        (("storage", "federation"), ("storage", "people", "federation")),
+        (("federation",), ("people", "federation")),
+        # An unknown capability grants nothing.
+        (("storage", "camera"), ("storage",)),
+    ],
+)
+def test_an_installed_app_has_its_manifests_permissions(caps, perms):
+    """One mapping (``app_permissions``) for the catalog and the install."""
+    assert _app_with_caps(*caps).permissions == perms
+
+
+def test_unknown_capabilities_keeps_order_and_dedupes():
+    assert unknown_capabilities(("storage", "camera", "gps", "camera")) == (
+        "camera",
+        "gps",
+    )
+    assert unknown_capabilities(("storage", "people", "federation")) == ()
+
+
+def test_require_permission_allows_granted():
+    _app_with_caps("storage", "federation").require_permission("people")
+
+
+def test_require_permission_refuses_missing_with_code():
+    with pytest.raises(AppPermissionDeniedError) as ei:
+        _app_with_caps("storage").require_permission("federation")
+    assert ei.value.status == 403
+    assert ei.value.code == "APP_PERMISSION_DENIED"
+    assert ei.value.params == {"permission": "federation"}
+
+
+def test_needs_newer_social_home_names_the_capabilities():
+    err = AppNeedsNewerCoreError(params={"capabilities": "camera, gps"})
+    assert err.status == 409
+    assert err.code == "APP_NEEDS_NEWER_SOCIAL_HOME"
+    assert err.params == {"capabilities": "camera, gps"}

@@ -179,6 +179,35 @@ def is_newer_version(candidate: str, current: str) -> bool:
     return new > old
 
 
+#: The plain-word permissions (owner decision D2) by name. What the
+#: household agreed to is the *installed* manifest (an update that grows
+#: them waits for an admin), so an app's permissions are read from
+#: ``installed_apps.manifest_json`` through :func:`app_permissions` — no
+#: separate grant table. Enforced twice: in the SPA's bridge (the
+#: sandbox's only way out) and on every ``/api/apps/{id}/…`` route.
+#: "Saves its own data" — the per-app, per-person key-value store.
+PERMISSION_STORAGE: str = "storage"
+#: "Lets you pick people" — contacts, and games (sessions) with people:
+#: invites, moves, the mailbox.
+PERMISSION_PEOPLE: str = "people"
+#: "Sends to other households" — anything that leaves this household, and
+#: anything another household's copy of the app sends here.
+PERMISSION_FEDERATION: str = "federation"
+
+
+class AppPermissionDeniedError(AppError, CodedError):
+    """The app asked for something outside the permissions the household
+    agreed to when it installed it (403, ``params.permission``)."""
+
+    status = 403
+    code = "APP_PERMISSION_DENIED"
+    detail = "This app doesn't have that permission."
+
+    def __init__(self, permission: str) -> None:
+        super().__init__(params={"permission": permission})
+        self.permission = permission
+
+
 _VALID_MIN_AGES: frozenset[int] = frozenset({0, 13, 16, 18})
 
 
@@ -250,6 +279,18 @@ class InstalledApp:
     installed_by: str | None
     installed_at: str
     min_age: int = 0
+
+    @property
+    def permissions(self) -> tuple[str, ...]:
+        """What the household agreed to: the installed manifest's
+        capabilities as permissions (:func:`app_permissions` — the one
+        mapping, ``people`` implied by ``federation``)."""
+        return app_permissions(self.manifest.capabilities)
+
+    def require_permission(self, permission: str) -> None:
+        """Raise :class:`AppPermissionDeniedError` unless granted."""
+        if permission not in self.permissions:
+            raise AppPermissionDeniedError(permission)
 
 
 @dataclass(slots=True, frozen=True)
@@ -335,6 +376,17 @@ def app_permissions(declared: tuple[str, ...] | list[str]) -> tuple[str, ...]:
     if "federation" in have:
         have.add("people")
     return tuple(p for p in APP_PERMISSIONS if p in have)
+
+
+def unknown_capabilities(declared: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    """The ids in *declared* this Social Home doesn't know, in order, each
+    once — a manifest with any is refused at install / update
+    (:class:`AppNeedsNewerCoreError`), never granted blindly or dropped."""
+    seen: list[str] = []
+    for c in declared:
+        if c not in _KNOWN_PERMISSIONS and c not in seen:
+            seen.append(c)
+    return tuple(seen)
 
 
 #: Receiver bounds for catalog schema v2 (r2-proposal §7). A value past a

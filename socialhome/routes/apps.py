@@ -9,6 +9,28 @@ Four resource groups:
 * ``AppDetailView``          — ``GET /api/apps/{app_id}`` + ``PATCH`` (toggle) + ``DELETE``
 * ``AppStoreCollectionView`` — ``GET /api/apps/{app_id}/store`` (list all KV pairs)
 * ``AppStoreItemView``       — ``GET/PUT/DELETE /api/apps/{app_id}/store/{key}``
+
+Permissions (owner decision D2). Every route an app reaches through the
+SPA's bridge checks the permission it needs against the app's *installed*
+manifest (:func:`~socialhome.domain.apps.app_permissions`) and answers
+``403 APP_PERMISSION_DENIED`` (``params.permission``) without it:
+
+=================================================  =========================
+Route                                              Permission
+=================================================  =========================
+``GET /store``, ``GET/PUT/DELETE /store/{key}``    ``storage``
+``GET /contacts``                                  ``people``
+``GET /peers``                                     ``federation``
+``POST /sessions``, ``POST /messages``,            ``people`` — and
+``POST /sessions/{sid}/cancel``                    ``federation`` when the
+                                                   target is in another
+                                                   household (service)
+``POST /sessions/{sid}/accept``,                   ``people``
+``POST /sessions/{sid}/decline``, ``POST /held``
+=================================================  =========================
+
+``/runtime`` (it hands the permissions to the bridge), ``/bundle`` and the
+admin routes (install, update, toggle, catalog) need none.
 """
 
 from __future__ import annotations
@@ -22,11 +44,12 @@ from ..app_keys import (
     notification_service_key,
 )
 from ..domain.apps import (
+    PERMISSION_FEDERATION,
+    PERMISSION_PEOPLE,
     AppAgeRestrictedError,
     AppCatalogEntry,
     AppCatalogStatus,
     InstalledApp,
-    app_permissions,
 )
 from ..security import error_response
 from ..services.app_service import AppService
@@ -56,7 +79,7 @@ def _serialize(app: InstalledApp, names: dict[str, str] | None = None) -> dict:
         "version": app.version,
         "enabled": app.enabled,
         "capabilities": list(app.manifest.capabilities),
-        "permissions": list(app_permissions(app.manifest.capabilities)),
+        "permissions": list(app.permissions),
         "icon": app.manifest.icon,
         "min_age": app.min_age,
         "installed_at": app.installed_at,
@@ -103,6 +126,19 @@ def _serialize_entry(
         "compatible": compatible,
         "requested": requested,
     }
+
+
+class AppPermissionView(BaseView):
+    """A route an app reaches through the bridge: it needs a permission."""
+
+    async def require_permission(self, permission: str) -> None:
+        """The ``{app_id}`` app must be installed, enabled, allowed for the
+        caller (age gate) and granted *permission* — else the domain error
+        (404 / 403 ``APP_NOT_ENABLED`` / ``APP_AGE_RESTRICTED`` /
+        ``APP_PERMISSION_DENIED``), mapped by ``BaseView._iter``."""
+        await self.svc(app_service_key).require_app_permission(
+            self.match("app_id"), self.user.user_id, permission
+        )
 
 
 class AppCollectionView(BaseView):
@@ -361,28 +397,35 @@ class AppUpdateView(BaseView):
         return self._json(await _app_json(svc, app))
 
 
-class AppPeersView(BaseView):
-    """``GET /api/apps/{app_id}/peers`` — list confirmed federation peers."""
+class AppPeersView(AppPermissionView):
+    """``GET /api/apps/{app_id}/peers`` — list confirmed federation peers
+    (``federation``)."""
 
     async def get(self) -> web.Response:
+        await self.require_permission(PERMISSION_FEDERATION)
         svc = self.svc(app_federation_service_key)
         peers = await svc.list_peers()
         return self._json({"peers": peers})
 
 
-class AppContactsView(BaseView):
-    """``GET /api/apps/{app_id}/contacts`` — people this user can challenge."""
+class AppContactsView(AppPermissionView):
+    """``GET /api/apps/{app_id}/contacts`` — people this user can challenge
+    (``people``)."""
 
     async def get(self) -> web.Response:
+        await self.require_permission(PERMISSION_PEOPLE)
         svc = self.svc(app_federation_service_key)
         contacts = await svc.list_contacts(self_user_id=self.user.user_id)
         return self._json({"contacts": contacts})
 
 
-class AppSessionsView(BaseView):
-    """``POST /api/apps/{app_id}/sessions`` — open a cross-household app session."""
+class AppSessionsView(AppPermissionView):
+    """``POST /api/apps/{app_id}/sessions`` — open an app session with a
+    person (``people``; ``federation`` too for another household — checked
+    by the service, which knows where the target lives)."""
 
     async def post(self) -> web.Response:
+        await self.require_permission(PERMISSION_PEOPLE)
         app_id = self.match("app_id")
         body = await self.body()
         target = body.get("target")
@@ -442,13 +485,14 @@ def _target(body: dict) -> dict | None:
     return target
 
 
-class AppSessionDeclineView(BaseView):
+class AppSessionDeclineView(AppPermissionView):
     """``POST /api/apps/{app_id}/sessions/{session_id}/decline`` — the
     invitee declines a game invite that waits for them; the challenger's
     app hears ``{verb: "close", reason: "declined"}``. ``409
     APP_CHALLENGE_HANDLED`` when it no longer waits."""
 
     async def post(self) -> web.Response:
+        await self.require_permission(PERMISSION_PEOPLE)
         await self.svc(app_federation_service_key).decline_session(
             app_id=self.match("app_id"),
             session_id=self.match("session_id"),
@@ -457,12 +501,13 @@ class AppSessionDeclineView(BaseView):
         return self._json({"ok": True})
 
 
-class AppSessionCancelView(BaseView):
+class AppSessionCancelView(AppPermissionView):
     """``POST /api/apps/{app_id}/sessions/{session_id}/cancel`` — the
     challenger withdraws an invite. Body ``{target}`` — the person the
     session was opened with."""
 
     async def post(self) -> web.Response:
+        await self.require_permission(PERMISSION_PEOPLE)
         target = _target(await self.body())
         if target is None:
             return error_response(
@@ -480,7 +525,7 @@ class AppSessionCancelView(BaseView):
         return self._json({"ok": True})
 
 
-class AppSessionAcceptView(BaseView):
+class AppSessionAcceptView(AppPermissionView):
     """``POST /api/apps/{app_id}/sessions/{session_id}/accept`` — the
     invitee plays one game invite ("Play" in Needs you). Only that invite
     is taken in (every other one keeps waiting) and returned, for the app
@@ -488,6 +533,7 @@ class AppSessionAcceptView(BaseView):
     APP_CHALLENGE_HANDLED`` when it no longer waits."""
 
     async def post(self) -> web.Response:
+        await self.require_permission(PERMISSION_PEOPLE)
         invite = await self.svc(app_federation_service_key).accept_session(
             app_id=self.match("app_id"),
             session_id=self.match("session_id"),
@@ -505,7 +551,7 @@ class AppSessionAcceptView(BaseView):
         )
 
 
-class AppHeldView(BaseView):
+class AppHeldView(AppPermissionView):
     """``POST /api/apps/{app_id}/held`` — the app opened: hand over what
     the caller's mailbox kept for it (D11) — the latest undelivered
     message of each game, oldest first — and clear it. ``kind`` is
@@ -513,6 +559,7 @@ class AppHeldView(BaseView):
     withdrawal). A POST: taking them empties the mailbox."""
 
     async def post(self) -> web.Response:
+        await self.require_permission(PERMISSION_PEOPLE)
         held = await self.svc(app_federation_service_key).take_held(
             app_id=self.match("app_id"), actor_user_id=self.user.user_id
         )
@@ -532,10 +579,13 @@ class AppHeldView(BaseView):
         )
 
 
-class AppMessagesView(BaseView):
-    """``POST /api/apps/{app_id}/messages`` — send an app-layer message to a peer."""
+class AppMessagesView(AppPermissionView):
+    """``POST /api/apps/{app_id}/messages`` — send an app-layer message to a
+    person (``people``; ``federation`` too for another household — checked
+    by the service)."""
 
     async def post(self) -> web.Response:
+        await self.require_permission(PERMISSION_PEOPLE)
         app_id = self.match("app_id")
         body = await self.body()
         session_id = body.get("session_id")

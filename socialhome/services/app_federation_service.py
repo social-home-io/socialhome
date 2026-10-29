@@ -88,6 +88,8 @@ import orjson
 from ..domain.apps import (
     HELD_MESSAGE_MAX_BYTES,
     PENDING_SESSION_TTL_SECONDS,
+    PERMISSION_FEDERATION,
+    PERMISSION_PEOPLE,
     SESSION_ACTIVE,
     SESSION_INVITED,
     AppAgeRestrictedError,
@@ -146,6 +148,12 @@ def _is_decline(kind: str, payload: dict) -> bool:
         and payload.get("verb") == "close"
         and payload.get("reason") == "declined"
     )
+
+
+def _target_permission(target: dict) -> str:
+    """The permission a game with *target* takes: ``people`` for someone
+    in this household, ``federation`` for anyone in another one."""
+    return PERMISSION_PEOPLE if target.get("is_local") else PERMISSION_FEDERATION
 
 
 class AppFederationService(ProtectionGateMixin):
@@ -367,7 +375,7 @@ class AppFederationService(ProtectionGateMixin):
         event path regardless of peer version — the binary channel is only
         used for :meth:`send_message`.
         """
-        await self._require_enabled(app_id)
+        await self._require_enabled(app_id, target)
         await self._assert_age_allowed(app_id, actor_user_id)
         await self._assert_target_allowed(actor_user_id, target)
         session_id = uuid4().hex
@@ -486,7 +494,7 @@ class AppFederationService(ProtectionGateMixin):
         frame's envelope metadata (see
         :meth:`FederationService.send_app_message`).
         """
-        app = await self._require_enabled(app_id)
+        app = await self._require_enabled(app_id, target)
         await self._assert_age_allowed(app_id, actor_user_id, app=app)
         own = self._federation.own_instance_id
         peer_instance = own if target.get("is_local") else str(target["instance_id"])
@@ -737,14 +745,23 @@ class AppFederationService(ProtectionGateMixin):
         _ = instance_id, remote_username  # reserved for future wiring
         return False
 
-    async def _require_enabled(self, app_id: str) -> InstalledApp:
+    async def _require_enabled(
+        self, app_id: str, target: dict | None = None
+    ) -> InstalledApp:
         """The installed, enabled app — else raise :class:`AppNotFoundError`
-        or :class:`AppNotEnabledError`."""
+        or :class:`AppNotEnabledError`.
+
+        With *target* (a game with that person), the app must also have the
+        permission it takes (:func:`_target_permission`) — else
+        :class:`~socialhome.domain.apps.AppPermissionDeniedError`, before
+        anything is sent."""
         app = await self._app_repo.get(app_id)
         if app is None:
             raise AppNotFoundError(app_id)
         if not app.enabled:
             raise AppNotEnabledError(app_id)
+        if target is not None:
+            app.require_permission(_target_permission(target))
         return app
 
     async def _assert_age_allowed(
@@ -1068,6 +1085,14 @@ class AppFederationService(ProtectionGateMixin):
         if app is None or (not app.enabled and (notify_open or to_user is None)):
             log.debug(
                 "app_federation: dropping inbound for app %r (not installed/enabled)",
+                app_id,
+            )
+            return
+        if PERMISSION_FEDERATION not in app.permissions:
+            # The household installed this app without "sends to other
+            # households": another household's copy can't reach it either.
+            log.debug(
+                "app_federation: dropping inbound for app %r (no federation permission)",
                 app_id,
             )
             return
@@ -1396,6 +1421,13 @@ class AppFederationService(ProtectionGateMixin):
         app = await self._app_repo.get(app_id)
         if app is None or not app.enabled or not invite.from_user:
             return
+        if (
+            invite.from_instance != self._federation.own_instance_id
+            and PERMISSION_FEDERATION not in app.permissions
+        ):
+            # The invite is gone here; nothing leaves the household for an
+            # app that may no longer send to other households.
+            return
         # §CP.F2: an invite from before a guardian block is still declined
         # here, but nothing reaches the person on the other side of it.
         sender = await self._invite_sender_id(invite)
@@ -1421,7 +1453,7 @@ class AppFederationService(ProtectionGateMixin):
         household gets ``APP_SESSION {verb: "close", reason: "withdrawn"}``
         and does the same on its side. Either way the invitee's app hears
         the close."""
-        await self._require_enabled(app_id)
+        await self._require_enabled(app_id, target)
         await self._assert_target_allowed(actor_user_id, target)
         own = self._federation.own_instance_id
         if target.get("is_local"):

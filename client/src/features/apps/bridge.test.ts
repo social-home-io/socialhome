@@ -63,6 +63,8 @@ import { ApiError } from '@/api'
 
 const APP_ID = 'app-chess'
 const USER_ID = 'user-42'
+/** Chess: storage + federation, people implied. */
+const ALL = ['storage', 'people', 'federation']
 
 function makeFakeIframe() {
   return {
@@ -123,7 +125,7 @@ describe('mountBridge', () => {
     addEventSpy = vi.spyOn(window, 'addEventListener')
     removeEventSpy = vi.spyOn(window, 'removeEventListener')
 
-    cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID })
+    cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID, permissions: ALL })
   })
 
   afterEach(() => {
@@ -151,7 +153,7 @@ describe('mountBridge', () => {
   it('onReady fires once, on the app\'s first request — app.ready or any RPC', async () => {
     cleanup()
     const onReady = vi.fn()
-    cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID, onReady })
+    cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID, permissions: ALL, onReady })
     const handler = captureMessageHandler()
 
     // A stranger's message, or junk from the frame, is not "the app started".
@@ -396,7 +398,7 @@ describe('mountBridge', () => {
     beforeEach(() => {
       cleanup()
       addEventSpy.mockClear()
-      cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID, launchSession: 's1' })
+      cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID, permissions: ALL, launchSession: 's1' })
       handler = captureMessageHandler()
     })
 
@@ -418,13 +420,13 @@ describe('mountBridge', () => {
       await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 1, method: 'app.context' } })
       await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 2, method: 'app.pendingSessions' } })
       cleanup()
-      cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID, launchSession: 's1' })
+      cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID, permissions: ALL, launchSession: 's1' })
       await captureMessageHandler()({ source: iframe.contentWindow as unknown as Window, data: { id: 3, method: 'app.context' } })
       expect(acceptCalls()).toHaveLength(1)
       expect(replies().map(r => r.result)).toEqual([
-        { appId: APP_ID, selfUserId: USER_ID, launch: { sessionId: 's1', invite: asApp } },
+        { appId: APP_ID, selfUserId: USER_ID, permissions: ALL, launch: { sessionId: 's1', invite: asApp } },
         [invite],
-        { appId: APP_ID, selfUserId: USER_ID, launch: { sessionId: 's1', invite: asApp } },
+        { appId: APP_ID, selfUserId: USER_ID, permissions: ALL, launch: { sessionId: 's1', invite: asApp } },
       ])
     })
 
@@ -697,5 +699,131 @@ describe('mountBridge', () => {
       expect.objectContaining({ id: 60, ok: true }),
       '*',
     )
+  })
+})
+
+// ── Permissions: the bridge only offers what the household agreed to ───────
+
+describe('mountBridge permissions', () => {
+  let iframe: HTMLIFrameElement
+  let cleanup: () => void
+  let addEventSpy: MockInstance
+  let removeEventSpy: MockInstance
+
+  function mount(permissions: string[], launchSession?: string) {
+    cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID, permissions, launchSession })
+    return captureMessageHandler()
+  }
+
+  const replies = () => (iframe.contentWindow!.postMessage as ReturnType<typeof vi.fn>).mock.calls
+    .map(([m]) => m as { id: number; ok: boolean; result?: unknown; error?: Record<string, unknown> })
+
+  const LOCAL = { instance_id: 'own', user_ref: 'u-carl', is_local: true }
+  const REMOTE = { instance_id: 'peer', user_ref: 'bob', is_local: false }
+
+  beforeEach(() => {
+    mockApiGet.mockReset()
+    mockApiPost.mockReset()
+    mockApiPut.mockReset()
+    mockApiDelete.mockReset()
+    Object.keys(wsHandlers).forEach(k => delete wsHandlers[k])
+    iframe = makeFakeIframe()
+    _resetAcceptedForTests()
+    addEventSpy = vi.spyOn(window, 'addEventListener')
+    removeEventSpy = vi.spyOn(window, 'removeEventListener')
+  })
+
+  afterEach(() => {
+    cleanup?.()
+    addEventSpy.mockRestore()
+    removeEventSpy.mockRestore()
+  })
+
+  /** Each bridge call and the permission it needs. */
+  const CALLS: [string, Record<string, unknown> | undefined, string][] = [
+    ['store.get', { key: 'k' }, 'storage'],
+    ['store.set', { key: 'k', value: 1 }, 'storage'],
+    ['store.delete', { key: 'k' }, 'storage'],
+    ['store.list', undefined, 'storage'],
+    ['contacts.list', undefined, 'people'],
+    ['peers.list', undefined, 'federation'],
+    ['app.held', undefined, 'people'],
+    ['app.pendingSessions', undefined, 'people'],
+    ['app.openSession', { target: LOCAL }, 'people'],
+    ['app.openSession', { target: REMOTE }, 'federation'],
+    ['app.send', { session_id: 's1', target: LOCAL, payload: {} }, 'people'],
+    ['app.send', { session_id: 's1', target: REMOTE, payload: {} }, 'federation'],
+    ['app.cancelSession', { sessionId: 's1', target: LOCAL }, 'people'],
+    ['app.cancelSession', { sessionId: 's1', target: REMOTE }, 'federation'],
+  ]
+
+  it.each(CALLS)('%s refuses without the permission it needs (%j → %s)', async (method, params, permission) => {
+    const handler = mount(['storage', 'people', 'federation'].filter(p => p !== permission
+      // Without people, federation can't be granted either (it implies people).
+      && !(permission === 'people' && p === 'federation')))
+    await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 7, method, params } })
+    expect(replies()).toEqual([{
+      id: 7,
+      ok: false,
+      error: { code: 'permission_denied', message: expect.any(String), permission },
+    }])
+    // Never reached the server.
+    expect(mockApiGet).not.toHaveBeenCalled()
+    expect(mockApiPost).not.toHaveBeenCalled()
+    expect(mockApiPut).not.toHaveBeenCalled()
+    expect(mockApiDelete).not.toHaveBeenCalled()
+  })
+
+  it.each(CALLS)('%s goes through with the permission it needs (%j → %s)', async (method, params, permission) => {
+    mockApiGet.mockResolvedValue({ key: 'k', value: 1, items: [], contacts: [], peers: [] })
+    mockApiPost.mockResolvedValue({ session_id: 's1', messages: [] })
+    mockApiPut.mockResolvedValue({})
+    mockApiDelete.mockResolvedValue({})
+    const handler = mount(permission === 'federation' ? ['federation', 'people'] : [permission])
+    await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 8, method, params } })
+    expect(replies()[0]).toMatchObject({ id: 8, ok: true })
+  })
+
+  it('app.context tells the app its permissions, so it can leave out what it may not do', async () => {
+    const handler = mount(['storage'])
+    await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 1, method: 'app.context' } })
+    expect(replies()[0]).toMatchObject({ ok: true, result: { permissions: ['storage'] } })
+    // Without people there is no mailbox to push.
+    expect(mockApiPost).not.toHaveBeenCalled()
+  })
+
+  it('without people a Play launch accepts nothing', async () => {
+    const handler = mount(['storage'], 's1')
+    await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 1, method: 'app.context' } })
+    expect(replies()[0]).toMatchObject({ ok: true, result: { launch: {} } })
+    expect(mockApiPost).not.toHaveBeenCalled()
+  })
+
+  it('a server refusal comes back as the same typed error', async () => {
+    const err = new ApiError(403, 'x') as ApiError & { code: string; extra: Record<string, unknown> }
+    Object.assign(err, { code: 'APP_PERMISSION_DENIED', extra: { params: { permission: 'federation' } } })
+    mockApiPost.mockRejectedValueOnce(err)
+    const handler = mount(['federation', 'people'])
+    await handler({
+      source: iframe.contentWindow as unknown as Window,
+      data: { id: 9, method: 'app.send', params: { session_id: 's1', target: REMOTE, payload: {} } },
+    })
+    expect(replies()[0]).toEqual({
+      id: 9,
+      ok: false,
+      error: { code: 'permission_denied', message: expect.any(String), permission: 'federation' },
+    })
+  })
+
+  it('the live relay stays quiet for an app without people', () => {
+    mount(['storage'])
+    wsHandlers['app.message']?.({ data: { app_id: APP_ID, kind: 'message', session_id: 's1', payload: {} } })
+    expect(iframe.contentWindow!.postMessage).not.toHaveBeenCalled()
+  })
+
+  it('an unknown permission name grants nothing (fails closed)', async () => {
+    const handler = mount(['camera'])
+    await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 3, method: 'store.list' } })
+    expect(replies()[0]).toMatchObject({ ok: false, error: { code: 'permission_denied', permission: 'storage' } })
   })
 })

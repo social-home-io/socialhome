@@ -82,7 +82,8 @@ const RUNTIME = {
   name: 'Chess',
   entry_url: '/api/apps/chess/bundle/index.html?exp=1&sig=x',
   self_user_id: 'u1',
-  capabilities: [],
+  capabilities: ['storage', 'federation'],
+  permissions: ['storage', 'people', 'federation'],
 }
 
 /** The ``onReady`` the host handed the bridge on its latest mount. */
@@ -135,6 +136,21 @@ describe('AppHostInner', () => {
     await waitFor(() => {
       expect(vi.mocked(mountBridge)).toHaveBeenCalledOnce()
     })
+  })
+
+  it('hands the bridge the permissions the household agreed to', async () => {
+    render(<AppHostInner appId="chess" />)
+    await waitFor(() => expect(vi.mocked(mountBridge)).toHaveBeenCalledOnce())
+    const ctx = vi.mocked(mountBridge).mock.calls[0][1] as BridgeContext
+    expect(ctx.permissions).toEqual(['storage', 'people', 'federation'])
+  })
+
+  it('a runtime answer without permissions grants the bridge nothing', async () => {
+    const { permissions: _drop, ...older } = RUNTIME
+    vi.mocked(getRuntime).mockResolvedValue(older as typeof RUNTIME)
+    render(<AppHostInner appId="chess" />)
+    await waitFor(() => expect(vi.mocked(mountBridge)).toHaveBeenCalledOnce())
+    expect((vi.mocked(mountBridge).mock.calls[0][1] as BridgeContext).permissions).toEqual([])
   })
 
   it('the app name is the host heading, under the topbar\'s h1', async () => {
@@ -200,7 +216,11 @@ describe('AppHostInner', () => {
     )
 
     await waitFor(() => expect(post).toHaveBeenCalledWith(
-      { id: 1, ok: true, result: { appId: 'chess', selfUserId: 'u1', launch: {} } },
+      {
+        id: 1,
+        ok: true,
+        result: { appId: 'chess', selfUserId: 'u1', permissions: ['storage', 'people', 'federation'], launch: {} },
+      },
       '*',
     ))
   })
