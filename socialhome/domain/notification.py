@@ -48,12 +48,21 @@ ACTION_ITEM_TYPES: frozenset[str] = (
             "pairing_request",
             "app_challenge",
             "app_challenge_continue",
+            "app_challenge_waiting",
             "app_request",
             "app_update",
         }
     )
     | RETIRED_ACTION_TYPES
 )
+
+#: Why a game invite waits instead of offering Play (D10): the app isn't
+#: in the household (``app_missing``) or an admin turned it off
+#: (``app_off``). Carried in an ``app_challenge_waiting`` row's ``flags``.
+APP_INVITE_FLAGS: frozenset[str] = frozenset({"app_missing", "app_off"})
+
+#: Every flag a row may carry: join requests' and waiting game invites'.
+NOTIFICATION_FLAGS: frozenset[str] = JOIN_REQUEST_FLAGS | APP_INVITE_FLAGS
 
 #: How a "Needs you" item ended (:attr:`NotificationHandled.outcome`):
 #: someone approved or declined a request, the invitee accepted or declined
@@ -257,7 +266,8 @@ class NotificationParams:
       for a row about a group chat (a missed call, being added) the chat's,
       for a game invite the app's ("… invited you to play Chess").
     * ``flags`` — why a "Needs you" item can't be decided with one tap
-      (:data:`JOIN_REQUEST_FLAGS`).
+      (:data:`JOIN_REQUEST_FLAGS`), or why a game invite waits for its
+      app (:data:`APP_INVITE_FLAGS`).
     * ``handled`` — set once a "Needs you" item was handled: it leaves the
       section for every recipient ("Handled by Søren").
     """
@@ -310,7 +320,7 @@ class NotificationParams:
             space_name=space_name if isinstance(space_name, str) else None,
             flags=tuple(
                 sorted(
-                    {f for f in flags if isinstance(f, str) and f in JOIN_REQUEST_FLAGS}
+                    {f for f in flags if isinstance(f, str) and f in NOTIFICATION_FLAGS}
                 )
                 if isinstance(flags, list)
                 else ()

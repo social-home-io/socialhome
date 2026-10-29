@@ -76,7 +76,7 @@ export const SEARCH_AT = 8
 export const FILTERS_AT = 12
 
 /** The Needs-you rows the Apps page shows on top. */
-const APP_NEEDS: ReadonlySet<string> = new Set(['app_challenge', 'app_challenge_continue', 'app_request'])
+const APP_NEEDS: ReadonlySet<string> = new Set(['app_challenge', 'app_challenge_continue', 'app_challenge_waiting', 'app_request'])
 
 type Filter = 'all' | 'together' | 'solo'
 

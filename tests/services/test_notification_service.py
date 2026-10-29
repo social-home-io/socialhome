@@ -22,7 +22,10 @@ from socialhome.domain.conversation import (
 )
 from socialhome.domain.events import (
     AppChallengeDeclined,
+    AppChallengeEnded,
     AppChallengeReceived,
+    AppChallengeWaiting,
+    AppEnabledChanged,
     AppGameEnded,
     AppInstalled,
     AppRequestDismissed,
@@ -4475,6 +4478,152 @@ async def test_an_app_request_skips_a_decider_who_is_gone(stack):
 
 def test_app_request_is_filed_under_needs_you():
     assert notif_kind("app_request") is NotifKind.NEEDS_YOU
+
+
+class _OffApp:
+    """An app registry where Chess is installed but turned off."""
+
+    def __init__(self) -> None:
+        self.enabled = False
+
+    async def get(self, app_id: str):
+        return SimpleNamespace(name="Chess", enabled=self.enabled)
+
+
+async def test_an_ask_to_turn_an_app_on_waits_until_it_is_on(stack):
+    """D10: "Ask to turn it on" — the request waits while the app is off,
+    and turning it on answers it for every decider."""
+    registry = _OffApp()
+    stack.notif_svc.attach_app_repo(registry)
+    anna = await stack.provision_user("anna", is_admin=True)
+    milo = await stack.provision_user("milo")
+    await stack.bus.publish(_asked(milo.user_id, anna.user_id))
+    [pending] = await stack.notif_svc.pending_actions(anna.user_id)
+    assert pending.type == "app_request"
+    # Turning it off again changes nothing.
+    await stack.bus.publish(AppEnabledChanged(app_id="chess", enabled=False))
+    assert len(await stack.notif_svc.pending_actions(anna.user_id)) == 1
+    registry.enabled = True
+    await stack.bus.publish(AppEnabledChanged(app_id="chess", enabled=True))
+    [row] = await _request_rows(stack, anna.user_id)
+    assert row.params is not None and row.params.handled is not None
+    assert row.params.handled.outcome == "approved"
+    assert await stack.notif_svc.pending_actions(anna.user_id) == []
+
+
+# ─── D10: a game invite that waits for its app ─────────────────────────────
+
+
+def _waiting(to_user_id: str, *, reason: str = "app_missing", sid: str = "s1"):
+    return AppChallengeWaiting(
+        app_id="chess",
+        session_id=sid,
+        to_user_id=to_user_id,
+        from_display="Ben · Lakeside",
+        from_user_id="r-ben",
+        app_name="Chess",
+        reason=reason,
+    )
+
+
+async def _rows_of(stack, user_id: str, type: str):
+    return [n for n in await stack.notif_repo.list(user_id, limit=20) if n.type == type]
+
+
+async def test_a_waiting_invite_is_a_needs_you_row_with_its_reason(stack):
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    milo = await stack.provision_user("milo")
+    await stack.bus.publish(_waiting(milo.user_id))
+    [row] = await _rows_of(stack, milo.user_id, "app_challenge_waiting")
+    assert row.title == "Ben · Lakeside invited you to play Chess"
+    assert row.object_key == "app_session:chess/s1"
+    assert row.link_url == "/apps/chess/about"
+    assert row.body is None
+    assert row.params is not None
+    assert row.params.flags == ("app_missing",)
+    assert row.params.space_name == "Chess"
+    assert [a.id for a in row.params.actors] == ["r-ben"]
+    [pending] = await stack.notif_svc.pending_actions(milo.user_id)
+    assert pending.id == row.id
+    # Needs you → a push by default; title only (§25.3).
+    assert push.calls
+    assert "Chess" in push.calls[-1][1].title
+
+
+async def test_a_waiting_invite_for_a_turned_off_app_says_so(stack):
+    milo = await stack.provision_user("milo")
+    await stack.bus.publish(_waiting(milo.user_id, reason="app_off"))
+    [row] = await _rows_of(stack, milo.user_id, "app_challenge_waiting")
+    assert row.params is not None and row.params.flags == ("app_off",)
+
+
+async def test_a_waiting_invite_becomes_a_playable_one(stack):
+    """The app arrived: the waiting row makes way for a normal invite — a
+    fresh row (so it buzzes), Play / Decline."""
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    milo = await stack.provision_user("milo")
+    await stack.bus.publish(_waiting(milo.user_id))
+    before = len(push.calls)
+    await stack.bus.publish(
+        AppChallengeReceived(
+            app_id="chess",
+            session_id="s1",
+            to_user_id=milo.user_id,
+            from_display="Ben · Lakeside",
+            from_user_id="r-ben",
+        )
+    )
+    [waiting] = await _rows_of(stack, milo.user_id, "app_challenge_waiting")
+    assert waiting.params is not None and waiting.params.handled is not None
+    assert waiting.params.handled.outcome == "done"
+    [invite] = await _rows_of(stack, milo.user_id, "app_challenge")
+    assert invite.object_key == "app_session:chess/s1"
+    assert [n.id for n in await stack.notif_svc.pending_actions(milo.user_id)] == [
+        invite.id
+    ]
+    assert len(push.calls) == before + 1
+
+
+async def test_a_declined_or_withdrawn_waiting_invite_leaves_needs_you(stack):
+    milo = await stack.provision_user("milo")
+    await stack.bus.publish(_waiting(milo.user_id, sid="s1"))
+    await stack.bus.publish(_waiting(milo.user_id, sid="s2"))
+    for sid, outcome in (("s1", "declined"), ("s2", "withdrawn")):
+        await stack.bus.publish(
+            AppChallengeEnded(
+                app_id="chess",
+                user_id=milo.user_id,
+                session_ids=(sid,),
+                outcome=outcome,
+            )
+        )
+    rows = await _rows_of(stack, milo.user_id, "app_challenge_waiting")
+    assert sorted(
+        n.params.handled.outcome
+        for n in rows
+        if n.params is not None and n.params.handled is not None
+    ) == ["declined", "withdrawn"]
+    assert await stack.notif_svc.pending_actions(milo.user_id) == []
+
+
+async def test_a_waiting_invite_runs_out_like_any_invite(stack):
+    milo = await stack.provision_user("milo")
+    await stack.bus.publish(_waiting(milo.user_id))
+    [row] = await _rows_of(stack, milo.user_id, "app_challenge_waiting")
+    old = (datetime.now(UTC) - timedelta(days=15)).isoformat()
+    await stack.db.enqueue(
+        "UPDATE notifications SET created_at=? WHERE id=?", (old, row.id)
+    )
+    assert await stack.notif_svc.pending_actions(milo.user_id) == []
+    [row] = await _rows_of(stack, milo.user_id, "app_challenge_waiting")
+    assert row.params is not None and row.params.handled is not None
+    assert row.params.handled.outcome == "expired"
+
+
+def test_a_waiting_invite_is_filed_under_needs_you():
+    assert notif_kind("app_challenge_waiting") is NotifKind.NEEDS_YOU
 
 
 # ─── AppUpdateAvailable: one "Needs you" row per app for admins (D7) ───────

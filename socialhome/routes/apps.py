@@ -531,11 +531,22 @@ class AppSessionDeclineView(AppPermissionView):
     """``POST /api/apps/{app_id}/sessions/{session_id}/decline`` — the
     invitee declines a game invite that waits for them; the challenger's
     app hears ``{verb: "close", reason: "declined"}``. ``409
-    APP_CHALLENGE_HANDLED`` when it no longer waits."""
+    APP_CHALLENGE_HANDLED`` when it no longer waits.
+
+    An invite that waits for its app (D10: not in the household, or
+    turned off) is declined here too — without the app, and without
+    anything sent to the challenger."""
 
     async def post(self) -> web.Response:
+        svc = self.svc(app_federation_service_key)
+        if await svc.decline_waiting(
+            app_id=self.match("app_id"),
+            session_id=self.match("session_id"),
+            actor_user_id=self.user.user_id,
+        ):
+            return self._json({"ok": True})
         await self.require_permission(PERMISSION_PEOPLE)
-        await self.svc(app_federation_service_key).decline_session(
+        await svc.decline_session(
             app_id=self.match("app_id"),
             session_id=self.match("session_id"),
             actor_user_id=self.user.user_id,

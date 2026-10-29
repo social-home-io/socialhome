@@ -52,7 +52,12 @@ from .dashboard.render import DashboardRenderer
 from .dashboard.server import DashboardServer
 from .db import AsyncDatabase
 from .domain.conversation import SystemChatScope
-from .domain.events import PeerProtoVersionRaised, UserBlocked
+from .domain.events import (
+    AppEnabledChanged,
+    AppInstalled,
+    PeerProtoVersionRaised,
+    UserBlocked,
+)
 from .domain.federation import (
     DELIVERY_ERROR_RELAY_TOO_LARGE,
     FederationEventType,
@@ -4800,7 +4805,14 @@ def create_app(config: Config | None = None) -> web.Application:
             federation_repo=federation_repo,
             cp_repo=repos.cp,
             bus=bus,
+            # D10: an invite for an app the household doesn't have (or
+            # turned off) waits as a Needs-you row, named by the catalog.
+            notifications=repos.notification,
+            catalog=app[K.app_service_key],
         )
+        # …and becomes playable once the app is added or turned on.
+        bus.subscribe(AppInstalled, app_federation_service.on_app_usable)
+        bus.subscribe(AppEnabledChanged, app_federation_service.on_app_usable)
         federation_service.attach_apps(app_federation_service)
         # D9: an uninstall tells the households people here play it with.
         app_service.attach_sessions(app_federation_service)
