@@ -29,9 +29,12 @@ from socialhome.domain.apps import (
     AppBundleTooLargeError,
     AppCatalogEntry,
     AppCatalogStatus,
+    AppChangelogEntry,
     AppIntegrityError,
     AppKvEntry,
+    AppManifest,
     AppNeedsNewerCoreError,
+    AppNewPermissionsError,
     AppNotEnabledError,
     AppNotFoundError,
     AppPermissionDeniedError,
@@ -45,7 +48,9 @@ from socialhome.domain.events import (
     AppRequestDismissed,
     AppRequested,
     AppUninstalled,
+    AppUpdateAvailable,
     AppUpdated,
+    AppUpdateGone,
 )
 from socialhome.domain.space import SpacePermissionError
 from socialhome.services import app_service as app_service_mod
@@ -2447,3 +2452,261 @@ async def test_require_app_permission(tmp_path: Path) -> None:
         await svc.require_app_permission("chess", "user1", "nonsense")
     with pytest.raises(AppNotFoundError):
         await svc.require_app_permission("nope", "user1", "storage")
+
+
+# ─── Updates: one Needs-you row, consent for new permissions (D7) ────────────
+
+
+def _bundle_with_caps(caps: list[str]) -> tuple[bytes, str]:
+    buf = io.BytesIO()
+    manifest = json.dumps({"entry": "index.html", "capabilities": caps}).encode()
+    with (
+        gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz,
+        tarfile.open(fileobj=gz, mode="w|") as tar,
+    ):
+        for name, data in [("manifest.json", manifest), ("index.html", b"ok")]:
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    raw = buf.getvalue()
+    return raw, hashlib.sha256(raw).hexdigest()
+
+
+def _installed_chess(
+    version: str = "2026.10.21", caps: tuple[str, ...] = ("storage",)
+) -> InstalledApp:
+    return InstalledApp(
+        app_id="chess",
+        name="Chess",
+        version=version,
+        enabled=True,
+        manifest=AppManifest(entry="index.html", icon=None, capabilities=caps),
+        bundle_path=f"chess/{version}",
+        bundle_sha256="ab" * 32,
+        source_url="https://example.com/chess.tgz",
+        installed_by="admin1",
+        installed_at="2026-10-21T09:00:00+00:00",
+    )
+
+
+def _update_entry(
+    sha: str,
+    *,
+    version: str = "2026.10.28",
+    permissions: tuple[str, ...] = ("storage",),
+    min_core_version: str | None = None,
+    changelog: tuple[AppChangelogEntry, ...] = (),
+) -> AppCatalogEntry:
+    return AppCatalogEntry(
+        app_id="chess",
+        name="Chess",
+        latest_version=version,
+        description="d",
+        icon_url=None,
+        capabilities=permissions,
+        bundle_url=f"https://example.com/chess-{version}.tgz",
+        bundle_sha256=sha,
+        permissions=permissions,
+        min_core_version=min_core_version,
+        changelog=changelog,
+    )
+
+
+def _update_service(
+    tmp_path: Path,
+    entry: AppCatalogEntry,
+    bundle: bytes,
+    *,
+    installed: InstalledApp | None = None,
+    bus: _RecordingBus | None = None,
+    users: _People | None = None,
+) -> tuple[AppService, _FakeAppRepo, list[str]]:
+    repo = _FakeAppRepo()
+    repo._apps["chess"] = installed or _installed_chess()
+    downloads: list[str] = []
+
+    async def downloader(url: str) -> bytes:
+        downloads.append(url)
+        return bundle
+
+    svc = AppService(
+        repo=repo,
+        catalog=_StubCatalog([entry]),  # type: ignore[arg-type]
+        apps_path=tmp_path,
+        downloader=downloader,
+        bus=bus,  # type: ignore[arg-type]
+        core_version="2026.10.29",
+        users=users,  # type: ignore[arg-type]
+    )
+    return svc, repo, downloads
+
+
+async def test_list_updates_names_new_permissions_and_whats_new(
+    tmp_path: Path,
+) -> None:
+    _, sha = _bundle_with_caps(["storage", "federation"])
+    log = (
+        AppChangelogEntry("2026.10.28", "2026-10-28", (("en", "Rematch"),)),
+        AppChangelogEntry("2026.10.21", "2026-10-21", (("en", "Old news"),)),
+    )
+    entry = _update_entry(
+        sha, permissions=("storage", "people", "federation"), changelog=log
+    )
+    svc, _, _ = _update_service(tmp_path, entry, b"")
+    [update] = await svc.list_updates()
+    assert update["new_permissions"] == ["people", "federation"]
+    # Only what is newer than the installed 21 Oct version.
+    assert update["changelog"] == [
+        {"version": "2026.10.28", "date": "2026-10-28", "notes": {"en": "Rematch"}}
+    ]
+
+
+async def test_same_permissions_update_straight_away(tmp_path: Path) -> None:
+    bundle, sha = _bundle_with_caps(["storage"])
+    bus = _RecordingBus()
+    svc, _repo, _ = _update_service(tmp_path, _update_entry(sha), bundle, bus=bus)
+    [update] = await svc.list_updates()
+    assert update["new_permissions"] == []
+    app = await svc.update_app("chess", actor_is_admin=True, actor_user_id="anna")
+    assert app.version == "2026.10.28"
+    [event] = [e for e in bus.published if isinstance(e, AppUpdated)]
+    assert event.updated_by == "anna"
+
+
+async def test_fewer_permissions_update_straight_away(tmp_path: Path) -> None:
+    bundle, sha = _bundle_with_caps(["storage"])
+    svc, _, _ = _update_service(
+        tmp_path,
+        _update_entry(sha),
+        bundle,
+        installed=_installed_chess(caps=("storage", "federation")),
+    )
+    app = await svc.update_app("chess", actor_is_admin=True)
+    assert app.version == "2026.10.28"
+
+
+async def test_new_permissions_need_a_yes_before_anything_is_downloaded(
+    tmp_path: Path,
+) -> None:
+    bundle, sha = _bundle_with_caps(["storage", "federation"])
+    entry = _update_entry(sha, permissions=("storage", "people", "federation"))
+    svc, repo, downloads = _update_service(tmp_path, entry, bundle)
+    with pytest.raises(AppNewPermissionsError) as info:
+        await svc.update_app("chess", actor_is_admin=True)
+    # Only the new ones, in the plain-word order.
+    assert info.value.params == {"permissions": "people,federation"}
+    assert downloads == []
+    assert (await repo.get("chess")).version == "2026.10.21"  # type: ignore[union-attr]
+    # A partial yes is not a yes.
+    with pytest.raises(AppNewPermissionsError):
+        await svc.update_app(
+            "chess", actor_is_admin=True, accept_permissions=frozenset({"people"})
+        )
+    app = await svc.update_app(
+        "chess",
+        actor_is_admin=True,
+        accept_permissions=frozenset({"people", "federation"}),
+    )
+    assert app.version == "2026.10.28"
+    assert app.manifest.capabilities == ("storage", "federation")
+
+
+async def test_the_downloaded_manifest_is_checked_too(tmp_path: Path) -> None:
+    """The catalog says nothing new, but the bundle asks for more: the
+    bundle (what runs) wins — refused, and its unpack removed."""
+    bundle, sha = _bundle_with_caps(["storage", "federation"])
+    svc, repo, downloads = _update_service(tmp_path, _update_entry(sha), bundle)
+    with pytest.raises(AppNewPermissionsError) as info:
+        await svc.update_app("chess", actor_is_admin=True)
+    assert info.value.params == {"permissions": "people,federation"}
+    assert len(downloads) == 1
+    assert not (tmp_path / "chess" / "2026.10.28").exists()
+    assert (await repo.get("chess")).version == "2026.10.21"  # type: ignore[union-attr]
+
+
+async def test_no_rollback_an_older_catalog_version_is_never_offered(
+    tmp_path: Path,
+) -> None:
+    """D8: no rollback. A catalog that went back is neither an update nor
+    something update_app installs."""
+    bundle, sha = _bundle_with_caps(["storage"])
+    svc, _repo, downloads = _update_service(
+        tmp_path,
+        _update_entry(sha, version="2026.10.2"),
+        bundle,
+    )
+    assert await svc.list_updates() == []
+    app = await svc.update_app("chess", actor_is_admin=True)
+    assert app.version == "2026.10.21"
+    assert downloads == []
+
+
+async def test_check_for_updates_announces_to_the_admins(tmp_path: Path) -> None:
+    bus = _RecordingBus()
+    users = _People(
+        ("anna", "Anna", True), ("ben", "Ben", True), ("milo", "Milo", False)
+    )
+    _, sha = _bundle_with_caps(["storage"])
+    svc, _, downloads = _update_service(
+        tmp_path, _update_entry(sha), b"", bus=bus, users=users
+    )
+    updates = await svc.check_for_updates()
+    assert [u["app_id"] for u in updates] == ["chess"]
+    [event] = bus.published
+    assert isinstance(event, AppUpdateAvailable)
+    assert (event.app_id, event.name, event.version) == ("chess", "Chess", "2026.10.28")
+    assert event.recipients == ("anna", "ben")
+    # Nothing updates on its own.
+    assert downloads == []
+    assert svc._catalog.fetch_call_count == 1  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize("why", ["up_to_date", "incompatible"])
+async def test_check_for_updates_withdraws_when_there_is_none(
+    tmp_path: Path, why: str
+) -> None:
+    bus = _RecordingBus()
+    _, sha = _bundle_with_caps(["storage"])
+    entry = (
+        _update_entry(sha, version="2026.10.21")
+        if why == "up_to_date"
+        else _update_entry(sha, min_core_version="2099.1.1")
+    )
+    svc, _, _ = _update_service(
+        tmp_path, entry, b"", bus=bus, users=_People(("anna", "Anna", True))
+    )
+    await svc.check_for_updates()
+    assert bus.published == [
+        AppUpdateGone(app_id="chess", occurred_at=bus.published[0].occurred_at)
+    ]
+
+
+async def test_check_for_updates_says_nothing_on_a_stale_catalog(
+    tmp_path: Path,
+) -> None:
+    """The catalog couldn't be reached (the held copy was served): the
+    check knows nothing new — no row, and none withdrawn."""
+    bus = _RecordingBus()
+    _, sha = _bundle_with_caps(["storage"])
+    svc, _, _ = _update_service(
+        tmp_path,
+        _update_entry(sha),
+        b"",
+        bus=bus,
+        users=_People(("anna", "Anna", True)),
+    )
+    svc._catalog.status = AppCatalogStatus(
+        checked_at="2026-10-28T00:00:00+00:00", stale=True
+    )  # type: ignore[union-attr]
+    assert len(await svc.check_for_updates()) == 1
+    assert bus.published == []
+
+
+async def test_check_for_updates_without_a_catalog_does_nothing(tmp_path: Path) -> None:
+    async def downloader(url: str) -> bytes:
+        return b""
+
+    svc = AppService(
+        repo=_FakeAppRepo(), catalog=None, apps_path=tmp_path, downloader=downloader
+    )
+    assert await svc.check_for_updates() == []

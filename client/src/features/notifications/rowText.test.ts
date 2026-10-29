@@ -310,6 +310,7 @@ describe('notices about you, in the viewer\'s language', () => {
       ['bazaar_offer_rejected', params(['Ben']), null, 'Your offer was declined', 'Dein Angebot wurde abgelehnt'],
       ['app_challenge', params(['Ben · Familie Okafor'], { space_name: 'Chess' }), null, 'Ben · Familie Okafor invited you to play Chess', 'Ben · Familie Okafor hat dich eingeladen, Chess zu spielen'],
       ['app_added', params(['Anna'], { space_name: 'Chess' }), null, 'Anna added Chess', 'Anna hat Chess hinzugefügt'],
+      ['app_update', none({ space_name: 'Chess' }), null, 'Chess has an update', 'Update für Chess'],
       ['app_challenge_declined', params(['Ben · Familie Okafor'], { space_name: 'Chess' }), null, 'Ben · Familie Okafor declined your Chess game', 'Ben · Familie Okafor hat deine Einladung zu Chess abgelehnt'],
     ]
     for (const [type, p, sid, en_] of cases) expect(say(type, p, sid), type).toBe(en_)

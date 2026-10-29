@@ -1,8 +1,10 @@
 """Daily background scheduler that checks for Social Home App updates.
 
-Runs :meth:`AppService.list_updates` once per ``interval`` seconds (default
-24 hours, matching :data:`AppCatalogService.CATALOG_TTL_S`). The call uses
-``force=True`` so the catalog cache is refreshed on every check tick.
+Runs :meth:`AppService.check_for_updates` once per ``interval`` seconds
+(default 24 hours, matching :data:`AppCatalogService.CATALOG_TTL_S`),
+against a fresh catalog. A newer compatible version becomes one "Needs
+you" row per app for the household's admins (D7); nothing updates on its
+own.
 
 Mirrors the ``_stop: asyncio.Event`` lifecycle of
 :class:`~socialhome.infrastructure.replay_cache_scheduler.ReplayCachePruneScheduler`:
@@ -32,8 +34,8 @@ class AppUpdateScheduler:
     Parameters
     ----------
     app_service:
-        The :class:`AppService` instance to call :meth:`~AppService.list_updates`
-        on.
+        The :class:`AppService` instance to call
+        :meth:`~AppService.check_for_updates` on.
     interval:
         How many seconds to sleep between checks.  Defaults to
         :data:`~socialhome.services.app_catalog_service.CATALOG_TTL_S`
@@ -73,7 +75,7 @@ class AppUpdateScheduler:
     async def _loop(self) -> None:
         while not self._stop.is_set():
             try:
-                updates = await self._app_service.list_updates(force=True)
+                updates = await self._app_service.check_for_updates()
                 if updates:
                     log.info(
                         "app-update check: %d update(s) available: %s",
@@ -82,7 +84,7 @@ class AppUpdateScheduler:
                     )
                 else:
                     log.debug("app-update check: all apps are up to date")
-            except Exception as exc:  # pragma: no cover
+            except Exception as exc:
                 log.warning("app-update check failed: %s", exc, exc_info=True)
             try:
                 await asyncio.wait_for(

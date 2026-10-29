@@ -95,6 +95,11 @@ describe('inlineAction: one tap only when it is safe', () => {
     expect(inlineAction(row({ id: 'p', type: 'pairing_request', object_key: 'pairing_request:p', space_id: null }))).toBe('review')
   })
 
+  it('an app update is one tap (the consent asks when it must)', () => {
+    expect(inlineAction(row({ id: 'u', type: 'app_update', object_key: 'app:chess', space_id: null }))).toBe('update')
+    expect(inlineAction(row({ id: 'u', type: 'app_update', object_key: null, space_id: null }))).toBe('review')
+  })
+
   it('an invite is viewed, never joined in one tap', () => {
     expect(inlineAction(row({ id: 'i', type: 'space_invite', object_key: 'space_invite:s1' }))).toBe('invite')
   })

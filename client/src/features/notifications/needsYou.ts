@@ -15,7 +15,9 @@
  *   card asks a local community's location consent, so never a one-tap
  *   join — plus Decline. A game invite gets
  *   "Play" (opens the app, which takes the invite in) / Decline (their app
- *   hears it). Everything else gets "Review".
+ *   hears it). An app update (admins, D7) gets "Update" — one tap, or the
+ *   consent dialog when the version asks for new permissions — and
+ *   "What's new". Everything else gets "Review".
  * - **Decline waits 5 s** behind an Undo toast before it is sent (a
  *   federated decline can't be taken back); leaving the page sends it at
  *   once. Approve goes straight away.
@@ -38,6 +40,7 @@ export const NEEDS_YOU_TYPES: ReadonlySet<string> = new Set([
   'pairing_request',
   'app_challenge',
   'app_request',
+  'app_update',
 ])
 
 /** Entries shown before "Show N more". */
@@ -54,7 +57,7 @@ export type NeedsYouEntry =
   | { kind: 'single', key: string, row: Notification }
   | { kind: 'group', key: string, spaceId: string, rows: Notification[] }
 
-export type InlineAction = 'decide' | 'invite' | 'game' | 'review'
+export type InlineAction = 'decide' | 'invite' | 'game' | 'update' | 'review'
 
 function itemKey(n: Notification): string {
   return n.object_key || n.id
@@ -104,6 +107,7 @@ export function flagsOf(n: Notification): readonly string[] {
 export function inlineAction(n: Notification): InlineAction {
   if (n.type === 'space_invite') return 'invite'
   if (n.type === 'app_challenge' && n.object_key?.startsWith('app_session:')) return 'game'
+  if (n.type === 'app_update' && n.object_key?.startsWith('app:')) return 'update'
   if (
     n.type === 'space_join_requested'
     && n.object_key?.startsWith('join_request:')
@@ -120,8 +124,8 @@ export function reviewHref(entry: NeedsYouEntry): string {
   return entry.rows.find(r => r.link_url)?.link_url || `/spaces/${entry.spaceId}/moderation`
 }
 
-/** The id after ``<kind>:`` in an object key. */
-function idOf(n: Notification): string {
+/** The id after ``<kind>:`` in an object key (an app update's app id). */
+export function idOf(n: Notification): string {
   const key = n.object_key ?? ''
   return key.slice(key.indexOf(':') + 1)
 }

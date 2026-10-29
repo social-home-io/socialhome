@@ -23,6 +23,7 @@ import { spaces } from '@/store/spaces'
 import { ws } from '@/ws'
 import { relativeDocsTime } from '@/utils/relativeTime'
 import type { Notification } from '@/types'
+import { UpdateButton } from '@/features/apps/AppDialogs'
 import { NotificationRow, RowAvatar, Sentence, markRowRead, withRead } from './NotificationRow'
 import { groupSentence } from './rowText'
 import {
@@ -34,6 +35,7 @@ import {
   dropHandled,
   flagsOf,
   flushDeclines,
+  idOf,
   inlineAction,
   loadNeedsYou,
   needsYou,
@@ -126,6 +128,27 @@ function Actions({ entry, describedBy, onNavigate }: {
         <Button variant="secondary" aria-describedby={describedBy} onClick={() => declineWithUndo(row)}>
           {t('notifications.needs_you.decline')}
         </Button>
+      </div>
+    )
+  }
+  if (row && action === 'update') {
+    const appId = idOf(row)
+    return (
+      <div class="sh-needs__actions">
+        <UpdateButton
+          appId={appId}
+          name={row.params?.space_name || appId}
+          describedBy={describedBy}
+          onDone={() => dropHandled([row.object_key || `app:${appId}`])}
+        />
+        <a
+          class="sh-btn sh-btn--secondary"
+          href={appHref(`${row.link_url || `/apps/${encodeURIComponent(appId)}/about`}#whats-new`)}
+          aria-describedby={describedBy}
+          onClick={() => { void markRowRead(row).catch(() => {}); onNavigate?.() }}
+        >
+          {t('apps.whats_new')}
+        </a>
       </div>
     )
   }

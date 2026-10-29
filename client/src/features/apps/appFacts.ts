@@ -12,7 +12,7 @@
  *   apps.perm.federation apps.perm.federation_detail
  */
 import { formatLocale, t } from '@/i18n/i18n'
-import type { AppPermission, CatalogEntry, InstalledApp } from '@/store/apps'
+import type { AppPermission, CatalogChangelogEntry, CatalogEntry, InstalledApp } from '@/store/apps'
 
 /** The short line ("Saves its own data for each person"). */
 export function permissionTitle(p: AppPermission): string {
@@ -94,6 +94,14 @@ export function languageNames(codes: readonly string[] | undefined): string[] {
 /** D6: "From Social Home", or "From <host>, set by your server operator". */
 export function sourceLabel(host: string | null): string {
   return host ? t('apps.source.operator', { host }) : t('apps.source.social_home')
+}
+
+/** A changelog entry's note in the viewer's language (``pt-BR`` → ``pt``),
+ *  else English, else whatever it has; ``''`` when it has none. */
+export function changelogNote(entry: CatalogChangelogEntry, lang: string): string {
+  const notes = entry.notes ?? {}
+  const base = lang.split('-')[0]
+  return notes[lang] ?? notes[base] ?? notes.en ?? Object.values(notes)[0] ?? ''
 }
 
 /** The permissions to show for an app: what the household agreed to when

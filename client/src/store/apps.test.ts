@@ -9,6 +9,7 @@ import {
   loadCatalog,
   loadUpdates,
   updateApp,
+  newPermissionsAsked,
   installApp,
   uninstallApp,
   setEnabled,
@@ -293,6 +294,26 @@ describe('apps store', () => {
     expect(opts.method).toBe('POST')
     expect(installedApps.value[0].version).toBe('1.1')
     expect(updates.value).toHaveLength(0)
+  })
+
+  it('updateApp sends the permissions the admin accepted', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ app_id: 'a1', name: 'A', version: '2', enabled: true, capabilities: [], icon: null, min_age: 0 }))
+    fetchMock.mockResolvedValueOnce(jsonResponse({ apps: [] }))
+    fetchMock.mockResolvedValueOnce(jsonResponse({ updates: [] }))
+    await updateApp('a1', ['people', 'federation'])
+    const [, opts] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(String(opts.body))).toEqual({ accept_permissions: ['people', 'federation'] })
+  })
+
+  it('newPermissionsAsked reads only the new permissions off a 409', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse(
+      { error: { code: 'APP_NEW_PERMISSIONS', detail: 'x', params: { permissions: 'people,federation,camera' } } },
+      { status: 409 },
+    ))
+    const err = await updateApp('a1').catch((e: unknown) => e)
+    // An id this client doesn't know is dropped, never shown raw.
+    expect(newPermissionsAsked(err)).toEqual(['people', 'federation'])
+    expect(newPermissionsAsked(new Error('boom'))).toBeNull()
   })
 
   it('updateApp rethrows ApiError for the caller to handle', async () => {

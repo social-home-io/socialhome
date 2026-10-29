@@ -112,6 +112,19 @@ class AppNeedsNewerCoreError(AppError, CodedError):
     detail = "This app needs a newer Social Home."
 
 
+class AppNewPermissionsError(AppError, CodedError):
+    """An update asks for permissions the household hasn't agreed to (D7):
+    the catalog's — or the downloaded manifest's — permissions grow past
+    the installed ones and the admin's ``accept_permissions`` doesn't
+    cover the growth. ``params.permissions`` names only the new ones
+    (comma-separated, :data:`APP_PERMISSIONS` order); the installed
+    version stays."""
+
+    status = 409
+    code = "APP_NEW_PERMISSIONS"
+    detail = "This version asks for new permissions."
+
+
 class AppRequestNotAllowedError(AppError, CodedError):
     """ "Ask an admin" for an app that can't be asked for: the caller is an
     admin (they add apps themselves) or the app is already in the
@@ -389,6 +402,18 @@ def unknown_capabilities(declared: tuple[str, ...] | list[str]) -> tuple[str, ..
     return tuple(seen)
 
 
+def new_permissions(
+    installed: tuple[str, ...] | list[str], candidate: tuple[str, ...] | list[str]
+) -> tuple[str, ...]:
+    """The plain-word permissions *candidate* (a new version's catalog
+    ``permissions`` or manifest ``capabilities``) asks for beyond
+    *installed* (what the household agreed to), in
+    :data:`APP_PERMISSIONS` order. Empty: same or fewer — the update needs
+    no new yes."""
+    have = set(app_permissions(installed))
+    return tuple(p for p in app_permissions(candidate) if p not in have)
+
+
 #: Receiver bounds for catalog schema v2 (r2-proposal §7). A value past a
 #: bound is capped (text) or ignored (anything else) — one bad field never
 #: drops the entry, and a publisher can't inflate what every household
@@ -659,4 +684,20 @@ def _parse_changelog(raw: object) -> tuple[AppChangelogEntry, ...]:
                 notes=tuple(notes),
             )
         )
+    return tuple(out)
+
+
+def changelog_since(
+    changelog: tuple[AppChangelogEntry, ...], installed: str, latest: str
+) -> tuple[AppChangelogEntry, ...]:
+    """ "What's new" for an update: the *changelog* entries newer than the
+    *installed* version and no newer than *latest* (an entry past the
+    offered version isn't in it), newest first."""
+    out = [
+        c
+        for c in changelog
+        if is_newer_version(c.version, installed)
+        and not is_newer_version(c.version, latest)
+    ]
+    out.sort(key=lambda c: parse_app_version(c.version) or (), reverse=True)
     return tuple(out)

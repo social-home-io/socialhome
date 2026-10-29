@@ -2568,6 +2568,36 @@ class AppUpdated(DomainEvent):
     old_version: str
     new_version: str
     min_age: int = 0
+    #: The admin who updated it ("Handled by Anna" on the other admins'
+    #: update rows); ``None`` when not known.
+    updated_by: str | None = None
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class AppUpdateAvailable(DomainEvent):
+    """The daily check found a newer, compatible version of an installed
+    app (D7). Published by :meth:`AppService.check_for_updates` on every
+    check while the update waits; ``recipients`` are the household's
+    admins. The notification service keeps **one** "Needs you" row per
+    admin per app (``app_update`` about ``app:<id>``): a repeat for the
+    same ``version`` adds nothing, an even newer one re-opens the row.
+    Nothing updates on its own."""
+
+    app_id: str
+    name: str
+    version: str
+    recipients: tuple[str, ...] = ()
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class AppUpdateGone(DomainEvent):
+    """The daily check found no compatible update for an installed app
+    any more (the catalog dropped it, or it now needs a newer Social
+    Home): its update rows are resolved for every admin."""
+
+    app_id: str
     occurred_at: datetime = field(default_factory=_now)
 
 

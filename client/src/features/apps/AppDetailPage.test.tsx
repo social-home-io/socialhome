@@ -33,6 +33,7 @@ vi.mock('@/store/apps', async (orig) => {
     localized: real.localized,
     installApp: h.installApp, requestApp: h.requestApp, dismissRequests: h.dismissRequests,
     setEnabled: h.setEnabled, updateApp: h.updateApp,
+    newPermissionsAsked: real.newPermissionsAsked,
     setMinAge: vi.fn(), uninstallApp: vi.fn(),
   }
 })
@@ -158,8 +159,9 @@ describe('AppDetailPage — what an app can do', () => {
     fireEvent.click(getByRole('button', { name: 'Open Chess' }))
     expect(h.route).toHaveBeenCalledWith('/apps/chess')
     expect(getByText(/Added by Anna/)).toBeTruthy()
-    fireEvent.click(getByRole('button', { name: /^Update to / }))
-    await vi.waitFor(() => expect(h.updateApp).toHaveBeenCalledWith('chess'))
+    expect(getByText(/Same permissions/)).toBeTruthy()
+    fireEvent.click(getByRole('button', { name: 'Update Chess' }))
+    await vi.waitFor(() => expect(h.updateApp).toHaveBeenCalledWith('chess', []))
     fireEvent.click(getByRole('button', { name: 'Turn off' }))
     expect(h.setEnabled).toHaveBeenCalledWith('chess', false)
   })

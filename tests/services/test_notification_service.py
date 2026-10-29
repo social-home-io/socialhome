@@ -11,6 +11,7 @@ import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.apps import AppCatalogEntry, AppManifest, InstalledApp
 from socialhome.domain.calendar import Calendar, CalendarEvent
 from socialhome.domain.conversation import (
     MUTED_FOREVER,
@@ -25,6 +26,10 @@ from socialhome.domain.events import (
     AppInstalled,
     AppRequestDismissed,
     AppRequested,
+    AppUninstalled,
+    AppUpdateAvailable,
+    AppUpdated,
+    AppUpdateGone,
     BazaarBidPlaced,
     BazaarListingExpired,
     BazaarOfferAccepted,
@@ -83,6 +88,7 @@ from socialhome.repositories.space_remote_member_repo import (
 )
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.app_service import AppService
 from socialhome.services.feed_service import FeedService
 from socialhome.services.notification_service import NotificationService
 from socialhome.services.space_moderation_service import SpaceModerationService
@@ -4400,3 +4406,282 @@ async def test_an_app_request_skips_a_decider_who_is_gone(stack):
 
 def test_app_request_is_filed_under_needs_you():
     assert notif_kind("app_request") is NotifKind.NEEDS_YOU
+
+
+# ─── AppUpdateAvailable: one "Needs you" row per app for admins (D7) ───────
+
+
+class _InstalledVersions:
+    """The app registry with each app's installed version."""
+
+    def __init__(self, versions: dict[str, str]) -> None:
+        self.versions = versions
+
+    async def get(self, app_id: str):
+        version = self.versions.get(app_id)
+        if version is None:
+            return None
+        return SimpleNamespace(name=app_id.title(), enabled=True, version=version)
+
+
+async def _update_rows(stack, user_id: str):
+    return [
+        n
+        for n in await stack.notif_repo.list(user_id, limit=20)
+        if n.type == "app_update"
+    ]
+
+
+def _available(version: str, *recipients: str) -> AppUpdateAvailable:
+    return AppUpdateAvailable(
+        app_id="chess", name="Chess", version=version, recipients=recipients
+    )
+
+
+def _pushes_to(push: _CapturingPush, user_id: str) -> int:
+    return sum(1 for ids, _ in push.calls if ids == [user_id])
+
+
+async def test_an_update_is_one_needs_you_row_per_admin(stack):
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    stack.notif_svc.attach_app_repo(_InstalledVersions({"chess": "2026.10.21"}))
+    anna = await stack.provision_user("anna", is_admin=True)
+    ben = await stack.provision_user("ben", is_admin=True)
+    milo = await stack.provision_user("milo")
+    await stack.bus.publish(
+        _available("2026.10.28", anna.user_id, ben.user_id, milo.user_id)
+    )
+
+    for admin in (anna, ben):
+        [row] = await _update_rows(stack, admin.user_id)
+        assert row.title == "Chess has an update"
+        assert row.object_key == "app:chess"
+        assert row.link_url == "/apps/chess/about"
+        assert row.body == "2026.10.28"
+        assert row.is_pending_action
+        assert row.params is not None and row.params.space_name == "Chess"
+        assert row.params.actors == ()
+        [pending] = await stack.notif_svc.pending_actions(admin.user_id)
+        assert pending.id == row.id
+        # "Needs you" pushes by default.
+        assert _pushes_to(push, admin.user_id) == 1
+    # Never a member, even one named by mistake.
+    assert await _update_rows(stack, milo.user_id) == []
+
+
+async def test_the_daily_check_repeating_adds_nothing(stack):
+    """The same version again (tomorrow's check, read or not): no second
+    row, no second push."""
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    stack.notif_svc.attach_app_repo(_InstalledVersions({"chess": "2026.10.21"}))
+    anna = await stack.provision_user("anna", is_admin=True)
+    await stack.bus.publish(_available("2026.10.28", anna.user_id))
+    [row] = await _update_rows(stack, anna.user_id)
+    await stack.notif_repo.mark_read(row.id, anna.user_id)
+    await stack.bus.publish(_available("2026.10.28", anna.user_id))
+    await stack.bus.publish(_available("2026.10.28", anna.user_id))
+
+    [again] = await _update_rows(stack, anna.user_id)
+    assert again.id == row.id
+    assert again.is_read
+    assert _pushes_to(push, anna.user_id) == 1
+
+
+async def test_an_admin_added_later_gets_the_row_too(stack):
+    stack.notif_svc.attach_app_repo(_InstalledVersions({"chess": "2026.10.21"}))
+    anna = await stack.provision_user("anna", is_admin=True)
+    await stack.bus.publish(_available("2026.10.28", anna.user_id))
+    ben = await stack.provision_user("ben", is_admin=True)
+    await stack.bus.publish(_available("2026.10.28", anna.user_id, ben.user_id))
+    assert len(await _update_rows(stack, anna.user_id)) == 1
+    assert len(await _update_rows(stack, ben.user_id)) == 1
+
+
+async def test_an_even_newer_version_reopens_the_row(stack):
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    stack.notif_svc.attach_app_repo(_InstalledVersions({"chess": "2026.10.21"}))
+    anna = await stack.provision_user("anna", is_admin=True)
+    await stack.bus.publish(_available("2026.10.28", anna.user_id))
+    [row] = await _update_rows(stack, anna.user_id)
+    await stack.notif_repo.mark_read(row.id, anna.user_id)
+    await stack.bus.publish(_available("2026.10.28.1", anna.user_id))
+
+    [again] = await _update_rows(stack, anna.user_id)
+    assert again.id == row.id  # re-opened, never a second row
+    assert again.body == "2026.10.28.1"
+    assert not again.is_read
+    assert again.is_pending_action
+    assert _pushes_to(push, anna.user_id) == 2
+
+
+async def test_updating_resolves_the_row_for_every_admin(stack):
+    stack.notif_svc.attach_app_repo(_InstalledVersions({"chess": "2026.10.21"}))
+    anna = await stack.provision_user("anna", is_admin=True)
+    ben = await stack.provision_user("ben", is_admin=True)
+    await stack.bus.publish(_available("2026.10.28", anna.user_id, ben.user_id))
+    await stack.bus.publish(
+        AppUpdated(
+            app_id="chess",
+            name="Chess",
+            old_version="2026.10.21",
+            new_version="2026.10.28",
+            updated_by=ben.user_id,
+        )
+    )
+    for admin in (anna, ben):
+        [row] = await _update_rows(stack, admin.user_id)
+        assert row.params is not None and row.params.handled is not None
+        assert row.params.handled.outcome == "done"
+        assert row.params.handled.by is not None
+        assert row.params.handled.by.id == ben.user_id
+        assert await stack.notif_svc.pending_actions(admin.user_id) == []
+
+
+@pytest.mark.parametrize("gone", ["update_gone", "uninstalled"])
+async def test_the_update_going_away_resolves_the_row(stack, gone):
+    stack.notif_svc.attach_app_repo(_InstalledVersions({"chess": "2026.10.21"}))
+    anna = await stack.provision_user("anna", is_admin=True)
+    await stack.bus.publish(_available("2026.10.28", anna.user_id))
+    await stack.bus.publish(
+        AppUpdateGone(app_id="chess")
+        if gone == "update_gone"
+        else AppUninstalled(app_id="chess")
+    )
+    [row] = await _update_rows(stack, anna.user_id)
+    assert row.params is not None and row.params.handled is not None
+    assert row.params.handled.by is None
+    assert await stack.notif_svc.pending_actions(anna.user_id) == []
+
+
+async def test_a_row_the_events_missed_resolves_when_read(stack):
+    """An update made while the event was missed (a restart), or an admin
+    who is no longer one: Needs you drops the row on its next read."""
+    apps = _InstalledVersions({"chess": "2026.10.21"})
+    stack.notif_svc.attach_app_repo(apps)
+    anna = await stack.provision_user("anna", is_admin=True)
+    await stack.bus.publish(_available("2026.10.28", anna.user_id))
+    assert len(await stack.notif_svc.pending_actions(anna.user_id)) == 1
+    apps.versions["chess"] = "2026.10.28"
+    assert await stack.notif_svc.pending_actions(anna.user_id) == []
+    [row] = await _update_rows(stack, anna.user_id)
+    assert row.params is not None and row.params.handled is not None
+    assert row.params.handled.outcome == "done"
+
+
+def test_app_update_is_filed_under_needs_you():
+    assert notif_kind("app_update") is NotifKind.NEEDS_YOU
+
+
+# ─── The daily check end to end (AppService → bus → rows) ──────────────────
+
+
+class _Catalog:
+    def __init__(self, entry) -> None:
+        self.entry = entry
+        self.status = SimpleNamespace(checked_at=None, stale=False)
+
+    async def fetch_catalog(self, *, force: bool = False):
+        return [self.entry]
+
+
+def _chess_entry(version: str, *, min_core_version: str | None = None):
+    return AppCatalogEntry(
+        app_id="chess",
+        name="Chess",
+        latest_version=version,
+        description="d",
+        icon_url=None,
+        capabilities=("storage",),
+        bundle_url="https://example.com/chess.tgz",
+        bundle_sha256="ab" * 32,
+        permissions=("storage",),
+        min_core_version=min_core_version,
+    )
+
+
+class _OneApp:
+    """``AbstractAppRepo`` slice: chess at a version."""
+
+    def __init__(self, version: str) -> None:
+        self.app = InstalledApp(
+            app_id="chess",
+            name="Chess",
+            version=version,
+            enabled=True,
+            manifest=AppManifest(
+                entry="index.html", icon=None, capabilities=("storage",)
+            ),
+            bundle_path=f"chess/{version}",
+            bundle_sha256="ab" * 32,
+            source_url="https://example.com/chess.tgz",
+            installed_by=None,
+            installed_at="2026-10-21T09:00:00+00:00",
+        )
+
+    async def list_installed(self):
+        return [self.app]
+
+    async def get(self, app_id: str):
+        return self.app if app_id == "chess" else None
+
+
+async def _checker(stack, tmp_dir, catalog, repo) -> AppService:
+    stack.notif_svc.attach_app_repo(repo)
+
+    async def downloader(url: str) -> bytes:  # pragma: no cover - never called
+        raise AssertionError("the check must not download anything")
+
+    return AppService(
+        repo=repo,  # type: ignore[arg-type]
+        catalog=catalog,  # type: ignore[arg-type]
+        apps_path=tmp_dir,
+        downloader=downloader,
+        bus=stack.bus,
+        core_version="2026.10.29",
+        users=SqliteUserRepo(stack.db),
+    )
+
+
+async def test_the_daily_check_writes_one_row_per_app(stack, tmp_dir):
+    anna = await stack.provision_user("anna", is_admin=True)
+    milo = await stack.provision_user("milo")
+    catalog = _Catalog(_chess_entry("2026.10.28"))
+    svc = await _checker(stack, tmp_dir, catalog, _OneApp("2026.10.21"))
+    await svc.check_for_updates()
+    await svc.check_for_updates()
+    [row] = await _update_rows(stack, anna.user_id)
+    assert row.body == "2026.10.28"
+    assert await _update_rows(stack, milo.user_id) == []
+    # A newer version re-opens the same row.
+    catalog.entry = _chess_entry("2026.11.2")
+    await svc.check_for_updates()
+    [again] = await _update_rows(stack, anna.user_id)
+    assert (again.id, again.body) == (row.id, "2026.11.2")
+    assert again.is_pending_action
+
+
+async def test_the_daily_check_says_nothing_for_an_incompatible_or_stale_catalog(
+    stack, tmp_dir
+):
+    anna = await stack.provision_user("anna", is_admin=True)
+    catalog = _Catalog(_chess_entry("2026.10.28", min_core_version="2099.1.1"))
+    svc = await _checker(stack, tmp_dir, catalog, _OneApp("2026.10.21"))
+    await svc.check_for_updates()
+    assert await _update_rows(stack, anna.user_id) == []
+    catalog.entry = _chess_entry("2026.10.28")
+    catalog.status = SimpleNamespace(checked_at="2026-10-28T00:00:00+00:00", stale=True)
+    await svc.check_for_updates()
+    assert await _update_rows(stack, anna.user_id) == []
+    # The catalog answers again: now it is said.
+    catalog.status = SimpleNamespace(
+        checked_at="2026-10-29T00:00:00+00:00", stale=False
+    )
+    await svc.check_for_updates()
+    assert len(await _update_rows(stack, anna.user_id)) == 1
+    # The update needs a newer Social Home after all: the row goes.
+    catalog.entry = _chess_entry("2026.10.28", min_core_version="2099.1.1")
+    await svc.check_for_updates()
+    assert await stack.notif_svc.pending_actions(anna.user_id) == []

@@ -289,6 +289,7 @@
   "notification.app.challenge_declined": "{name} hat deine Einladung zu {app} abgelehnt",
   "notification.app.challenge_declined_generic": "{name} hat deine Spieleinladung abgelehnt",
   "notification.app.requested": "{name} wünscht sich {app}",
+  "notification.app.update_available": "Update für {app}",
   "notification.post.moderated": "Dein Beitrag wurde moderiert",
   "notification.space.post.moderated": "Dein Beitrag in {space_name} wurde moderiert",
   "notification.space.dissolved": "„{space_name}“ wurde aufgelöst",

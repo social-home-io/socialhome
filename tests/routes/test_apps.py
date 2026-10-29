@@ -1522,8 +1522,14 @@ class _CatalogResp:
     def raise_for_status(self) -> None:
         return None
 
-    async def text(self) -> str:
-        return orjson.dumps(self._payload).decode()
+    content_length = None
+
+    @property
+    def content(self):
+        return self
+
+    async def iter_chunked(self, n: int):
+        yield orjson.dumps(self._payload)
 
 
 class _CatalogHost:
@@ -1680,7 +1686,102 @@ async def test_update_app_admin_success_returns_serialized_app(client, monkeypat
     assert body["enabled"] is True
     assert body["capabilities"] == ["read"]
     assert body["icon"] == "icon.png"
-    mock.assert_awaited_once_with("com.example.hello", actor_is_admin=True)
+    admin_id = (
+        await client._db.fetchone("SELECT user_id FROM users WHERE is_admin=1")
+    )["user_id"]
+    mock.assert_awaited_once_with(
+        "com.example.hello",
+        actor_is_admin=True,
+        actor_user_id=admin_id,
+        accept_permissions=frozenset(),
+    )
+
+
+async def test_update_app_passes_the_accepted_permissions(client, monkeypatch):
+    mock = AsyncMock(return_value=_make_installed())
+    monkeypatch.setattr(AppService, "update_app", mock)
+    r = await client.post(
+        "/api/apps/com.example.hello/update",
+        json={"accept_permissions": ["people", "federation"]},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    assert mock.await_args.kwargs["accept_permissions"] == frozenset(
+        {"people", "federation"}
+    )
+
+
+@pytest.mark.parametrize("bad", [["people", 3], "federation", {"x": 1}])
+async def test_update_app_refuses_a_bad_accept_list(client, monkeypatch, bad):
+    mock = AsyncMock(return_value=_make_installed())
+    monkeypatch.setattr(AppService, "update_app", mock)
+    r = await client.post(
+        "/api/apps/com.example.hello/update",
+        json={"accept_permissions": bad},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 400
+    mock.assert_not_awaited()
+
+
+async def test_update_asking_for_new_permissions_answers_409_with_them(
+    client, monkeypatch
+):
+    """D7: the server holds the consent rule — an update growing the
+    permissions without a yes is refused, naming only the new ones."""
+    installed = InstalledApp(
+        app_id="chess",
+        name="Chess",
+        version="2026.10.21",
+        enabled=True,
+        manifest=AppManifest(entry="index.html", icon=None, capabilities=("storage",)),
+        bundle_path="chess/2026.10.21",
+        bundle_sha256="ab" * 32,
+        source_url="https://example.com/chess.tgz",
+        installed_by=None,
+        installed_at="2026-10-21T09:00:00+00:00",
+    )
+    svc = client.app[app_service_key]
+    svc._core_version = "2026.10.29"
+    monkeypatch.setattr(SqliteAppRepo, "get", AsyncMock(return_value=installed))
+    entry = AppCatalogEntry.from_dict(
+        {
+            "app_id": "chess",
+            "name": "Chess",
+            "latest_version": "2026.10.28",
+            "description": "Play chess",
+            "bundle_url": "https://example.com/chess.tgz",
+            "bundle_sha256": "ab" * 32,
+            "permissions": ["storage", "people", "federation"],
+        }
+    )
+    monkeypatch.setattr(
+        type(svc._catalog), "fetch_catalog", AsyncMock(return_value=[entry])
+    )
+    r = await client.post("/api/apps/chess/update", headers=_auth(client._tok))
+    assert r.status == 409
+    err = (await r.json())["error"]
+    assert err["code"] == "APP_NEW_PERMISSIONS"
+    assert err["params"] == {"permissions": "people,federation"}
+
+
+async def test_updates_list_carries_new_permissions_and_whats_new(client, monkeypatch):
+    update = {
+        "app_id": "chess",
+        "name": "Chess",
+        "current_version": "2026.10.21",
+        "latest_version": "2026.10.28",
+        "compatible": True,
+        "new_permissions": ["people", "federation"],
+        "changelog": [
+            {"version": "2026.10.28", "date": None, "notes": {"en": "Rematch"}}
+        ],
+    }
+    monkeypatch.setattr(AppService, "list_updates", AsyncMock(return_value=[update]))
+    r = await client.get("/api/apps/updates", headers=_auth(client._tok))
+    [item] = (await r.json())["updates"]
+    assert item["new_permissions"] == ["people", "federation"]
+    assert item["changelog"][0]["notes"] == {"en": "Rematch"}
 
 
 async def test_update_app_not_found_returns_404(client, monkeypatch):
@@ -2148,6 +2249,8 @@ async def test_member_asks_an_admin_and_sees_it_asked(client, monkeypatch):
     r = await client.post("/api/apps/chess/requests", headers=_auth(member_tok))
     assert r.status == 202
     assert await r.json() == {"requested": True}
+    # The request is the deciders' row, written off the request path.
+    await client.app[notification_delivery_key].drain()
 
     r = await client.get("/api/apps/catalog", headers=_auth(member_tok))
     [item] = (await r.json())["apps"]
@@ -2161,6 +2264,7 @@ async def test_member_asks_an_admin_and_sees_it_asked(client, monkeypatch):
 
     r = await client.delete("/api/apps/chess/requests", headers=_auth(client._tok))
     assert r.status == 200
+    await client.app[notification_delivery_key].drain()
     r = await client.get("/api/apps/catalog", headers=_auth(member_tok))
     assert (await r.json())["apps"][0]["requested"] is False
 

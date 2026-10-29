@@ -8,6 +8,7 @@ vi.mock('@/api', () => ({
     get: (...a: unknown[]) => apiGet(...a),
     post: (...a: unknown[]) => apiPost(...a),
   },
+  ApiError: class ApiError extends Error {},
 }))
 
 const wsListeners = vi.hoisted(() => ({} as Record<string, ((e: { data: Record<string, unknown> }) => void)[]>))
@@ -233,6 +234,25 @@ describe('NeedsYouSection', () => {
     expect(getByRole('link', { name: 'Play' }).getAttribute('href')).toBe('/apps/chess?session=s1')
     expect(getByRole('button', { name: 'Decline' })).toBeTruthy()
     expect(queryByRole('link', { name: 'Review' })).toBeNull()
+  })
+
+  it('an app update offers Update (one tap) and What\'s new', async () => {
+    const upd = row('u', {
+      type: 'app_update',
+      title: 'Chess has an update',
+      object_key: 'app:chess',
+      space_id: null,
+      link_url: '/apps/chess/about',
+      params: { actors: [], actor_count: 0, new: 1, total: 1, space_name: 'Chess' },
+    })
+    const { getByRole, queryByRole, container } = await mount([upd])
+    expect(container.textContent).toContain('Chess has an update')
+    expect(getByRole('link', { name: "What's new" }).getAttribute('href')).toBe('/apps/chess/about#whats-new')
+    expect(queryByRole('link', { name: 'Review' })).toBeNull()
+    await act(async () => { fireEvent.click(getByRole('button', { name: 'Update Chess' })) })
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/apps/chess/update', { accept_permissions: [] }))
+    // Done: it leaves the section.
+    await waitFor(() => expect(needsYou.value).toEqual([]))
   })
 
   it('reads in German with the glossary words', async () => {

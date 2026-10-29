@@ -8,7 +8,7 @@
  * fetch round-trip.
  */
 import { computed, signal } from '@preact/signals'
-import { api } from '@/api'
+import { api, ApiError } from '@/api'
 import { ws } from '@/ws'
 import { showToast } from '@/components/Toast'
 import { t } from '@/i18n/i18n'
@@ -69,6 +69,12 @@ export interface AppUpdate {
   latest_version:  string
   /** ``false``: the new version needs a newer Social Home. */
   compatible?:     boolean
+  /** What the new version asks for beyond what the household agreed to:
+   *  updating needs a yes for exactly these (D7). */
+  new_permissions?: AppPermission[]
+  /** "What's new": the catalog's entries newer than the installed
+   *  version, newest first. */
+  changelog?:      CatalogChangelogEntry[]
 }
 
 export const installedApps   = signal<InstalledApp[]>([])
@@ -218,11 +224,30 @@ export async function loadUpdates(force = false): Promise<void> {
   }
 }
 
-export async function updateApp(appId: string): Promise<void> {
-  const updated = await api.post(`/api/apps/${encodeURIComponent(appId)}/update`) as InstalledApp
+/** Update *appId* to the catalog's newest version. *acceptPermissions*
+ *  are the new permissions the admin said yes to; without them a version
+ *  that asks for more is refused (``409 APP_NEW_PERMISSIONS``, see
+ *  :func:`newPermissionsAsked`). */
+export async function updateApp(appId: string, acceptPermissions: readonly AppPermission[] = []): Promise<void> {
+  const updated = await api.post(
+    `/api/apps/${encodeURIComponent(appId)}/update`,
+    { accept_permissions: [...acceptPermissions] },
+  ) as InstalledApp
   installedApps.value = installedApps.value.map(a => a.app_id === appId ? updated : a)
   await loadInstalled()
   await loadUpdates()
+}
+
+/** The new permissions an update refusal names (``409
+ *  APP_NEW_PERMISSIONS``, ``params.permissions`` "people,federation"), or
+ *  ``null`` when *err* is any other failure. */
+export function newPermissionsAsked(err: unknown): AppPermission[] | null {
+  if (!(err instanceof ApiError) || err.code !== 'APP_NEW_PERMISSIONS') return null
+  const params = (err.extra.params ?? {}) as Record<string, unknown>
+  const raw = typeof params.permissions === 'string' ? params.permissions : ''
+  return raw.split(',')
+    .map(p => p.trim())
+    .filter((p): p is AppPermission => (APP_PERMISSIONS as readonly string[]).includes(p))
 }
 
 export async function installApp(appId: string): Promise<InstalledApp> {

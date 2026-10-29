@@ -8,10 +8,13 @@
  * - **AskAdminDialog** — "Ask an admin for Chess?" (D4); a protected
  *   account asks its grown-ups instead. The request is the deciders'
  *   Needs-you row; nothing else is sent.
+ * - **UpdateButton** / **UpdateConsentDialog** — one-tap update (D7); a
+ *   version asking for more lists only the new permissions and waits for
+ *   a yes.
  */
 import { useState } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
-import { t } from '@/i18n/i18n'
+import { isOne, locale, t } from '@/i18n/i18n'
 import { Button } from '@/components/Button'
 import { Modal } from '@/components/Modal'
 import { showToast } from '@/components/Toast'
@@ -22,12 +25,19 @@ import {
   catalogSourceHost,
   householdHasProtectedMinor,
   installApp,
+  loadUpdates,
+  newPermissionsAsked,
   requestApp,
+  updateApp,
+  updates,
   type AppPermission,
+  type AppUpdate,
   type CatalogEntry,
 } from '@/store/apps'
 import {
   PERMISSION_GLYPH,
+  changelogNote,
+  versionLabel,
   permissionDetail,
   permissionTitle,
   ratingLabel,
@@ -201,6 +211,125 @@ export function AskButton({ entry, name, variant = 'secondary' }: {
       </Button>
       <AskAdminDialog entry={entry} name={name} open={open} onClose={() => setOpen(false)} />
     </>
+  )
+}
+
+/**
+ * **Update** — one tap (D7). Same or fewer permissions: it updates at
+ * once. When the new version asks for more — known ahead from the updates
+ * list, or found by the server (``409 APP_NEW_PERMISSIONS``: it checks the
+ * downloaded bundle too) — the consent dialog lists only the new ones and
+ * nothing changes until the admin says yes. Used by the Updates section,
+ * an app's detail page and the "Needs you" row.
+ */
+export function UpdateButton({ appId, name, update, variant = 'primary', describedBy, onDone }: {
+  appId: string
+  /** The app's name in the viewer's language. */
+  name: string
+  /** What the updates list says about it (looked up when not given). */
+  update?: AppUpdate | null
+  variant?: 'primary' | 'secondary'
+  describedBy?: string
+  onDone?: () => void
+}) {
+  const info = update ?? updates.value.find(u => u.app_id === appId) ?? null
+  const known = info?.new_permissions ?? []
+  const [busy, setBusy] = useState(false)
+  const [asked, setAsked] = useState<AppPermission[] | null>(null)
+
+  const run = async (accept: readonly AppPermission[]) => {
+    setBusy(true)
+    try {
+      await updateApp(appId, accept)
+      setAsked(null)
+      showToast(t('apps.updated_named', { name }), 'success')
+      onDone?.()
+    } catch (err: unknown) {
+      const more = newPermissionsAsked(err)
+      if (more && more.length > 0) {
+        // The server found new permissions: ask, with What's new if the
+        // updates list wasn't loaded here yet.
+        if (!info) void loadUpdates()
+        setAsked(more)
+      } else {
+        showToast(errorText(err, t('apps.update_failed')), 'error')
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <>
+      <Button
+        variant={variant}
+        loading={busy && asked === null}
+        aria-describedby={describedBy}
+        aria-label={t(known.length > 0 ? 'apps.update_review_named' : 'apps.update_named', { name })}
+        onClick={() => {
+          if (known.length > 0) setAsked(known)
+          else void run([])
+        }}
+      >
+        {known.length > 0 ? t('apps.update_review') : t('apps.update')}
+      </Button>
+      <UpdateConsentDialog
+        name={name}
+        update={info}
+        permissions={asked ?? []}
+        open={asked !== null}
+        busy={busy}
+        onAccept={() => { void run(asked ?? []) }}
+        onClose={() => setAsked(null)}
+      />
+    </>
+  )
+}
+
+/** The consent for an update that asks for more (D7): What's new, then
+ *  only the new permissions in plain words. "Not now" keeps the version
+ *  the household has. */
+export function UpdateConsentDialog({ name, update, permissions, open, busy, onAccept, onClose }: {
+  name: string
+  update: AppUpdate | null
+  permissions: AppPermission[]
+  open: boolean
+  busy: boolean
+  onAccept: () => void
+  onClose: () => void
+}) {
+  const lang = locale.value || 'en'
+  const notes = (update?.changelog ?? []).map(c => changelogNote(c, lang)).filter(Boolean)
+  const n = permissions.length
+  return (
+    <Modal open={open} onClose={onClose} title={t('apps.update_consent_title', { name })} class="sh-app-consent">
+      {update && (
+        <p class="sh-app-meta">
+          {versionLabel(update.current_version)} → {versionLabel(update.latest_version)}
+        </p>
+      )}
+      {notes.length > 0 && (
+        <>
+          <h3 class="sh-app-consent__h">{t('apps.whats_new')}</h3>
+          <ul class="sh-app-consent__news">
+            {notes.map(note => <li key={note}>{note}</li>)}
+          </ul>
+        </>
+      )}
+      <p class="sh-app-consent__ask" role="note">
+        <strong>{t(isOne(n) ? 'apps.update_asks_one' : 'apps.update_asks', { n: String(n) })}</strong>
+        {' '}
+        {update
+          ? t('apps.update_keeps', { version: versionLabel(update.current_version) })
+          : t('apps.update_keeps_plain')}
+      </p>
+      <PermissionList perms={permissions} name={name} detailed />
+      <p class="sh-app-never-line">{t('apps.never.line')}</p>
+      <div class="sh-modal-actions">
+        <Button variant="secondary" onClick={onClose}>{t('common.not_now')}</Button>
+        <Button loading={busy} onClick={onAccept}>{t('apps.update_accept')}</Button>
+      </div>
+    </Modal>
   )
 }
 

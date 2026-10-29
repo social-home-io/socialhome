@@ -37,7 +37,6 @@ import {
   loadInstalled,
   loadCatalog,
   loadUpdates,
-  updateApp,
   uninstallApp,
   setEnabled,
   setMinAge,
@@ -63,6 +62,7 @@ import {
   AskButton,
   PermissionList,
   RatingChip,
+  UpdateButton,
   aboutPath,
 } from './AppDialogs'
 import { permissionsOf, shortDay, sizeLabel, sourceLabel, versionLabel } from './appFacts'
@@ -309,18 +309,7 @@ function UpdatesSection({ list, byId, lang }: {
 
 function UpdateRow({ update, name, icon }: { update: AppUpdate, name: string, icon: string | null }) {
   const { route } = useLocation()
-  const [updating, setUpdating] = useState(false)
-  const handleUpdate = async () => {
-    setUpdating(true)
-    try {
-      await updateApp(update.app_id)
-      showToast(t('apps.updated_named', { name }), 'success')
-    } catch (err: unknown) {
-      showToast((err as Error).message ?? t('apps.update_failed'), 'error')
-    } finally {
-      setUpdating(false)
-    }
-  }
+  const asks = update.new_permissions?.length ?? 0
   return (
     <li class="sh-apps-row sh-apps-row--update">
       <AppIcon src={icon} />
@@ -328,6 +317,14 @@ function UpdateRow({ update, name, icon }: { update: AppUpdate, name: string, ic
         <h3 class="sh-apps-row__name">{t('apps.update_title', { name })}</h3>
         <p class="sh-apps-row__meta">
           {versionLabel(update.current_version)} → {versionLabel(update.latest_version)}
+          {update.compatible !== false && (
+            <>
+              {' · '}
+              {asks > 0
+                ? <span class="sh-apps-row__asks">{t(isOne(asks) ? 'apps.update_new_permission_one' : 'apps.update_new_permissions', { n: String(asks) })}</span>
+                : t('apps.update_same_permissions')}
+            </>
+          )}
         </p>
       </div>
       <div class="sh-apps-row__actions">
@@ -340,11 +337,7 @@ function UpdateRow({ update, name, icon }: { update: AppUpdate, name: string, ic
         </Button>
         {update.compatible === false
           ? <span class="sh-apps-row__note">{t('apps.needs_newer')}</span>
-          : (
-            <Button loading={updating} onClick={() => { void handleUpdate() }} aria-label={t('apps.update_named', { name })}>
-              {t('apps.update')}
-            </Button>
-          )}
+          : <UpdateButton appId={update.app_id} name={name} update={update} />}
       </div>
     </li>
   )
