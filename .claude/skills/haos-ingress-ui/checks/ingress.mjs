@@ -738,9 +738,11 @@ await check('app-play-launch', async () => {
   // Installed by app-frame; again here when run alone (--only).
   await asUser('alice', 'POST', '/api/apps', { json: { app_id: appId } }).catch(() => {})
   const me = await asUser('alice', 'GET', '/api/me')
-  const { contacts } = await asUser('bob', 'GET', `/api/apps/${appId}/contacts`)
-  const alice = contacts.find(c => c.is_local && c.user_ref === me.user_id)
-  if (!alice) throw new Error(`alice is not in bob's ${appId} contacts`)
+  // The invite sheet's list (D3: Social Home's own read — an app's
+  // /contacts holds only people it was given), and its Send.
+  const { people } = await asUser('bob', 'GET', `/api/apps/${appId}/invitable`)
+  const alice = people.find(c => c.is_local && c.user_ref === me.user_id)
+  if (!alice) throw new Error(`alice is not in bob's ${appId} invite sheet`)
   const target = { instance_id: alice.instance_id, user_ref: alice.user_ref, is_local: true }
   const invite = async () => (await asUser('bob', 'POST', `/api/apps/${appId}/sessions`, { json: { target } })).session_id
   const waiting = async () => (await asUser('alice', 'GET', '/api/notifications/needs-you')).items
@@ -790,6 +792,46 @@ await check('app-play-launch', async () => {
   const after = await waiting()
   if (after.length !== before.length) problems.push(`opening the app took ${before.length - after.length} invite(s) out of Needs you`)
   return { problems, played, waitingAfterOpen: after }
+})
+
+// 6e. Invites go through Social Home (D3): the probe app's "Invite" asks
+//     for the invite sheet (people.pick); the host draws it outside the
+//     frame, reads GET …/invitable and on Send POSTs …/sessions — both
+//     under the prefix — and the app gets back the session id.
+await check('app-invite-sheet', async () => {
+  const problems = []
+  const appId = 'ingress-probe'
+  await asUser('alice', 'POST', '/api/apps', { json: { app_id: appId } }).catch(() => {})
+  const sent = {}
+  for (const vp of ['desktop', 'mobile']) {
+    const { ctx, page: p } = await newPage(vp)
+    await p.goto(APP + `apps/${appId}`, { waitUntil: 'load' })
+    await step('the app frame shown', p.waitForSelector('iframe.sh-app-frame:not(.sh-app-frame--pending)'))
+    const frame = await (await p.$('iframe.sh-app-frame')).contentFrame()
+    const [list] = await Promise.all([
+      p.waitForResponse(r => r.url().includes(`/apps/${appId}/invitable`)),
+      frame.click('#pick'),
+    ])
+    if (!underPrefix(new URL(list.url()).pathname)) problems.push(`[${vp}] invitable GET went to ${list.url()} (outside the prefix)`)
+    if (list.status() !== 200) problems.push(`[${vp}] invitable GET → ${list.status()}`)
+    await step('the invite sheet, outside the frame', p.waitForSelector('.sh-invite-sheet .sh-invite-sheet__person'))
+    if (await frame.$('.sh-invite-sheet')) problems.push(`[${vp}] the sheet rendered inside the app frame`)
+    await p.click('.sh-invite-sheet .sh-invite-sheet__person')
+    // Send ignores taps for its first 600 ms (tap-jacking guard).
+    await new Promise(r => setTimeout(r, 700))
+    await p.screenshot({ path: path.join(SHOTS, `app-invite-sheet-${vp}.png`) })
+    const [open] = await Promise.all([
+      p.waitForResponse(r => r.url().includes(`/apps/${appId}/sessions`) && r.request().method() === 'POST'),
+      p.click('[data-testid=invite-send]'),
+    ])
+    if (!underPrefix(new URL(open.url()).pathname)) problems.push(`[${vp}] sessions POST went to ${open.url()} (outside the prefix)`)
+    if (open.status() !== 201) problems.push(`[${vp}] sessions POST → ${open.status()}`)
+    await step('the app got the picked person', frame.waitForFunction(() => /^picked 1 /.test(document.getElementById('picked')?.textContent || '')))
+    sent[vp] = await frame.$eval('#picked', e => e.textContent)
+    await ctx.close()
+  }
+  activePage = page
+  return { problems, sent }
 })
 
 // 7. No ingress user (Supervisor sent no X-Remote-User-*): the cold-start

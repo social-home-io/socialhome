@@ -322,8 +322,9 @@ PROBE_APP_ID = "ingress-probe"
 _PROBE_HTML = """<!doctype html>
 <html><head><meta charset="utf-8"><title>Ingress probe</title>
 <style>html,body{margin:0;height:100%;font:16px sans-serif}
-body{display:flex;align-items:center;justify-content:center;background:#e8f0e8}</style>
-</head><body><p id="out">waiting</p><script>__PROBE_JS__</script></body></html>
+body{display:flex;flex-direction:column;align-items:center;justify-content:center;background:#e8f0e8}</style>
+</head><body><p id="out">waiting</p><button id="pick" type="button">Invite</button>
+<p id="picked"></p><script>__PROBE_JS__</script></body></html>
 """
 
 # The SDK's wire protocol (socialhome-apps packages/app-sdk): post
@@ -340,6 +341,19 @@ _PROBE_JS = """window.addEventListener('message', function (e) {
       + (l.sessionId ? ' launch ' + l.sessionId + (l.invite ? ' invite' : ' gone') : '');
 });
 window.parent.postMessage({ id: 1, method: 'app.context' }, '*');
+// "Invite" asks for Social Home's invite sheet (people.pick, D3) and prints
+// ``picked <n> <session ids>`` or ``pick error <code>``.
+window.addEventListener('message', function (e) {
+  if (e.source !== window.parent || !e.data || e.data.id !== 2) return;
+  var out = document.getElementById('picked');
+  out.textContent = e.data.ok
+    ? 'picked ' + e.data.result.length + ' '
+      + e.data.result.map(function (p) { return p.session_id; }).join(',')
+    : 'pick error ' + (e.data.error && e.data.error.code);
+});
+document.getElementById('pick').addEventListener('click', function () {
+  window.parent.postMessage({ id: 2, method: 'people.pick', params: { max: 1 } }, '*');
+});
 """
 
 
