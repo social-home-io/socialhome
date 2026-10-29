@@ -50,7 +50,8 @@ reads (socialhome-apps ``scripts/build-catalog.mjs``), and
 ``GET /_apps/ingress-probe.tgz`` is its bundle — ``manifest.json`` and
 one fully inlined ``index.html`` (the shape every app must ship: the
 sandboxed frame's opaque origin can't load sub-resources). The probe asks
-the host for ``app.context`` over the bridge and prints the answer.
+the host for ``app.context`` over the bridge and prints the answer
+(with the launch context when "Play" opened it).
 
 Usage: ``python fake_supervisor.py --port N --token T``
 """
@@ -327,10 +328,16 @@ body{display:flex;align-items:center;justify-content:center;background:#e8f0e8}<
 
 # The SDK's wire protocol (socialhome-apps packages/app-sdk): post
 # {id, method} to the parent, read {id, ok, result} back.
+# Opened by "Play" (``?session=``) the context's ``launch`` names the game
+# — printed as ``launch <sid> invite`` (taken in now) or ``launch <sid>
+# gone``.
 _PROBE_JS = """window.addEventListener('message', function (e) {
   if (e.source !== window.parent || !e.data || e.data.id !== 1) return;
-  document.getElementById('out').textContent =
-    e.data.ok ? 'probe ready ' + e.data.result.appId : 'probe error';
+  var r = e.data.result || {};
+  var l = r.launch || {};
+  document.getElementById('out').textContent = !e.data.ok ? 'probe error'
+    : 'probe ready ' + r.appId
+      + (l.sessionId ? ' launch ' + l.sessionId + (l.invite ? ' invite' : ' gone') : '');
 });
 window.parent.postMessage({ id: 1, method: 'app.context' }, '*');
 """

@@ -93,12 +93,26 @@ sequenceDiagram
 
 | End | How | Row outcome | The other side hears |
 |---|---|---|---|
-| Taken in | The invitee opens the app (or has it open when the invite arrives): `GET /api/apps/{id}/pending-sessions` drains it | `accepted` | — (the game goes on) |
+| Played | The invitee taps **Play** in Needs you: `POST /api/apps/{id}/sessions/{sid}/accept` takes in that one invite (the app gets it as its [launch context](#launch-context)); or the invitee sends a message in that session (an app that seated the live invite itself). Opening the app accepts nothing | `accepted` | — (the game goes on) |
 | Declined | `POST /api/apps/{id}/sessions/{sid}/decline` (Needs you's Decline, after its 5-s undo) | `declined` | `APP_SESSION {verb: "close", reason: "declined"}` to the challenger (v_18+, best effort) |
 | Withdrawn | The challenger's `POST …/sessions/{sid}/cancel` sends `APP_SESSION {verb: "close", reason: "withdrawn"}`; the invitee's household drops the invite only when the close comes from the household **and** person that opened it | `withdrawn` | — |
 | Expired | 14 days (`PENDING_SESSION_TTL_SECONDS`): no longer replayed, pruned hourly; "Needs you" reads it as expired on the next look | `expired` | — |
 
-No new event type or field the older side can't ignore: a household before this change passes the `close` through to the app as before and keeps its invite until the app drains it or it expires. One decline or withdrawal is one `APP_SESSION` (≈ 200 bytes) to one household — never a fan-out.
+No new event type or field the older side can't ignore: a household before this change passes the `close` through to the app as before and keeps its invite until it is played or expires. One decline or withdrawal is one `APP_SESSION` (≈ 200 bytes) to one household — never a fan-out.
+
+### Launch context
+
+**"Play" opens the game you were invited to (D12).** Needs you's Play links to `/apps/<id>?session=<sid>` (through `appHref`, so it keeps the HA ingress prefix). The SPA's app host passes the session to the bridge, which takes in that one invite (`POST …/sessions/<sid>/accept`) the first time the app asks for its context — once per page, so Try again or a fresh frame reuses it — and answers `app.context` with a `launch` field:
+
+| `launch` | When |
+|---|---|
+| `{}` | Opened without `?session=` (Apps page, a bell row, a push): nothing is accepted; invites wait in Needs you. |
+| `{sessionId, invite: {sessionId, fromInstance, fromUser, payload}}` | Opened by Play: the invite was taken in now — start that game. |
+| `{sessionId}` | Opened by Play, but the invite no longer waits (played on another device, declined, withdrawn, expired): open that game if the app knows it, else say the invite is gone. |
+
+A new Play while the app is open starts a fresh frame for that game. **Backward compatibility:** the presence of `launch` tells an app that the host works this way; a host from before this change leaves it out and the app keeps its old behaviour (drain `app.pendingSessions`, seat live invites). An app from before this change never reads `launch`: its `app.pendingSessions` call is answered with the launch invite alone (`[]` without Play) — the host never hands out every waiting invite — and a live invite it seats itself is accepted by the invitee's first message in that session. Live `open` frames still reach an open app as news, but accept nothing.
+
+The SDK (`@socialhome/app-sdk` ≥ 1.2) types this as `AppContext.launch?: LaunchContext`. A local open is delivered to the invitee only — never echoed to the challenger, whose app has the session id from `openSession` (the echo raced that reply and read as an invite from themselves).
 
 **Challenge notification (v_18+):** when an inbound `APP_SESSION {verb:"open"}` resolves to a single local recipient via `to_user`, an `AppChallengeReceived` domain event is published. The `NotificationService` subscriber seats a bell row and fires a title-only push notification (§25.3) for the addressed user. Idempotent on `session_id` — a double federation delivery (WebRTC + HTTPS fallback) does not produce two notifications.
 
@@ -270,8 +284,8 @@ error.
   account — for an unnamed sender, whenever its guardian blocked someone
   on that household. A protected account's household-addressed (pre-v_18)
   send to a household its guardian blocked someone on is refused. An
-  invite that waited from before the block is dropped when the app
-  drains it (its row resolves `done`).
+  invite that waited from before the block can't be played (Play
+  answers 409 and its row resolves `done`).
 - A `close` withdraws a pending invite only when it comes from the
   household and person that opened it; anyone else naming the session
   changes nothing.

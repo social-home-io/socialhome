@@ -141,15 +141,6 @@ class _FakeAppRepo:
     async def add_pending_session(self, s) -> None:
         self.pending.append(s)
 
-    async def drain_pending_sessions(self, app_id, user_id, **kw):
-        drained = [
-            p for p in self.pending if p.app_id == app_id and p.user_id == user_id
-        ]
-        self.pending = [
-            p for p in self.pending if not (p.app_id == app_id and p.user_id == user_id)
-        ]
-        return drained
-
     async def get_pending_session(self, app_id, user_id, session_id):
         for p in self.pending:
             if (p.app_id, p.user_id, p.session_id) == (app_id, user_id, session_id):
@@ -505,8 +496,12 @@ async def test_open_session_returns_unique_ids():
 
 
 @pytest.mark.asyncio
-async def test_open_session_local_loopback_delivers_to_target_and_initiator_only():
-    """Local target → per-user WS frames to {target, initiator}, no fed send."""
+async def test_open_session_local_loopback_delivers_to_the_target_only():
+    """Local target → one per-user WS frame to the target, no fed send.
+
+    Never an echo to the initiator: it raced the openSession reply, so the
+    challenger's own app read it as an invite from themselves (chess showed
+    "<their user id> invited you to play!")."""
     app = _make_installed_app("chess")
     initiator = _make_user("u-init", "alice", "Alice")
     target = _make_user("u-target", "bob", "Bob")
@@ -524,9 +519,8 @@ async def test_open_session_local_loopback_delivers_to_target_and_initiator_only
     assert federation.sent_events == []
     # Not a fan-out to all local users.
     assert ws.calls == []
-    # Per-user delivery to exactly target + initiator.
-    recipients = {c["user_id"] for c in ws.user_calls}
-    assert recipients == {"u-target", "u-init"}
+    # Per-user delivery to exactly the target.
+    assert [c["user_id"] for c in ws.user_calls] == ["u-target"]
     for c in ws.user_calls:
         frame = c["payload"]
         assert frame["type"] == "app.message"
@@ -604,10 +598,9 @@ async def test_open_session_local_loopback_excludes_protected_minor_target():
         actor_user_id="u-init",
     )
     assert federation.sent_events == []
-    recipients = {c["user_id"] for c in ws.user_calls}
-    # Minor target is filtered; initiator (adult/unprotected) still gets it.
-    assert "u-target" not in recipients
-    assert "u-init" in recipients
+    # The minor target is filtered, and the initiator never gets their own
+    # invite: nobody hears it.
+    assert ws.user_calls == []
 
 
 # ─── send_message ─────────────────────────────────────────────────────────────
@@ -2009,37 +2002,6 @@ async def test_legacy_fanout_open_does_not_persist():
 
 
 @pytest.mark.asyncio
-async def test_drain_pending_sessions_returns_and_clears():
-    """svc.drain_pending_sessions returns captured rows and clears them."""
-    app = _make_installed_app("chess")
-    bob = _make_user("u-bob", "bob", "Bob")
-    remote = _make_remote_user(
-        user_id="ru-carol",
-        instance_id="peer-inst-id",
-        remote_username="carol",
-        display_name="Carol Remote",
-    )
-    svc, _, _ = _make_svc(apps={"chess": app}, users=[bob], remote_users=[remote])
-    await svc.on_inbound_event(
-        _make_event(
-            FederationEventType.APP_SESSION,
-            {
-                "app_id": "chess",
-                "session_id": "sess-1",
-                "verb": "open",
-                "to_user": "bob",
-                "from_user": "carol",
-            },
-        )
-    )
-    drained = await svc.drain_pending_sessions("chess", "u-bob")
-    assert len(drained) == 1
-    assert drained[0].session_id == "sess-1"
-    # A second drain returns nothing — the first cleared it.
-    assert await svc.drain_pending_sessions("chess", "u-bob") == []
-
-
-@pytest.mark.asyncio
 async def test_list_contacts_uses_active_users():
     """A soft-deleted/inactive local user is not surfaced as a contact."""
     alice = _make_user("u-alice", "alice", "Alice")
@@ -2209,7 +2171,9 @@ async def test_a_local_invite_waits_for_the_invitee_like_a_remote_one():
 
 
 @pytest.mark.asyncio
-async def test_the_app_taking_invites_in_accepts_them():
+async def test_play_takes_in_only_that_invite():
+    """D12: "Play" accepts the one invite it is on; the others keep waiting
+    in Needs you."""
     bus = _FakeBus()
     svc, _, _ = _make_svc(
         apps={"chess": _make_installed_app("chess")},
@@ -2219,13 +2183,126 @@ async def test_the_app_taking_invites_in_accepts_them():
     )
     await _remote_invite(svc, "s1")
     await _remote_invite(svc, "s2")
-    await svc.drain_pending_sessions("chess", "u-bob")
+    invite = await svc.accept_session(
+        app_id="chess", session_id="s1", actor_user_id="u-bob"
+    )
+    assert (invite.session_id, invite.from_instance, invite.from_user) == (
+        "s1",
+        "peer-inst-id",
+        "carol",
+    )
+    assert invite.payload["verb"] == "open"
     (ended,) = _ended(bus)
-    assert (ended.user_id, ended.outcome) == ("u-bob", "accepted")
-    assert set(ended.session_ids) == {"s1", "s2"}
-    # Nothing waited: nothing ends.
-    await svc.drain_pending_sessions("chess", "u-bob")
+    assert (ended.user_id, ended.session_ids, ended.outcome) == (
+        "u-bob",
+        ("s1",),
+        "accepted",
+    )
+    assert [p.session_id for p in svc._app_repo.pending] == ["s2"]  # type: ignore[attr-defined]
+    # A second tap (another device) hears it was handled; nothing else ends.
+    with pytest.raises(AppChallengeHandledError):
+        await svc.accept_session(app_id="chess", session_id="s1", actor_user_id="u-bob")
     assert len(_ended(bus)) == 1
+
+
+@pytest.mark.asyncio
+async def test_only_the_invitee_can_play_an_invite():
+    svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[_make_user("u-alice", "alice", "Alice"), _make_user("u-bob", "bob")],
+    )
+    session_id = await svc.open_session(
+        app_id="chess", target=_local_target("u-bob"), actor_user_id="u-alice"
+    )
+    with pytest.raises(AppChallengeHandledError):
+        await svc.accept_session(
+            app_id="chess", session_id=session_id, actor_user_id="u-alice"
+        )
+    assert len(svc._app_repo.pending) == 1  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_play_needs_the_app_enabled():
+    svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app("chess", enabled=False)},
+        users=[_make_user("u-bob", "bob", "Bob")],
+    )
+    with pytest.raises(AppNotEnabledError):
+        await svc.accept_session(app_id="chess", session_id="s1", actor_user_id="u-bob")
+
+
+@pytest.mark.asyncio
+async def test_an_expired_invite_cannot_be_played():
+    bus = _FakeBus()
+    svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[_make_user("u-bob", "bob", "Bob")],
+        remote_users=[_carol()],
+        bus=bus,
+    )
+    await _remote_invite(svc, "s1")
+    repo = svc._app_repo  # type: ignore[attr-defined]
+    repo.pending = [
+        dataclasses.replace(p, created_at="2020-01-01T00:00:00+00:00")
+        for p in repo.pending
+    ]
+    with pytest.raises(AppChallengeHandledError):
+        await svc.accept_session(app_id="chess", session_id="s1", actor_user_id="u-bob")
+    (ended,) = _ended(bus)
+    assert (ended.session_ids, ended.outcome) == (("s1",), "expired")
+
+
+@pytest.mark.asyncio
+async def test_a_move_by_the_invitee_takes_the_invite_in():
+    """An app that seats live invites itself (before launch contexts) plays
+    the game without "Play": the invitee's first message accepts it."""
+    bus = _FakeBus()
+    svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[_make_user("u-bob", "bob", "Bob")],
+        remote_users=[_carol()],
+        bus=bus,
+    )
+    await _remote_invite(svc, "s1")
+    await _remote_invite(svc, "s2")
+    await svc.send_message(
+        app_id="chess",
+        session_id="s1",
+        target=_remote_target("peer-inst-id", "carol"),
+        payload={"move": "e7e5"},
+        actor_user_id="u-bob",
+    )
+    (ended,) = _ended(bus)
+    assert (ended.session_ids, ended.outcome) == (("s1",), "accepted")
+    assert [p.session_id for p in svc._app_repo.pending] == ["s2"]  # type: ignore[attr-defined]
+    # Later moves find nothing waiting: nothing more ends.
+    await svc.send_message(
+        app_id="chess",
+        session_id="s1",
+        target=_remote_target("peer-inst-id", "carol"),
+        payload={"move": "g8f6"},
+        actor_user_id="u-bob",
+    )
+    assert len(_ended(bus)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_move_by_the_challenger_leaves_the_invite_waiting():
+    svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[_make_user("u-alice", "alice", "Alice"), _make_user("u-bob", "bob")],
+    )
+    session_id = await svc.open_session(
+        app_id="chess", target=_local_target("u-bob"), actor_user_id="u-alice"
+    )
+    await svc.send_message(
+        app_id="chess",
+        session_id=session_id,
+        target=_local_target("u-bob"),
+        payload={"move": "e2e4"},
+        actor_user_id="u-alice",
+    )
+    assert [p.user_id for p in svc._app_repo.pending] == ["u-bob"]  # type: ignore[attr-defined]
 
 
 @pytest.mark.asyncio
@@ -2680,9 +2757,9 @@ async def test_inbound_household_fanout_skips_guardian_blocked_minor():
 
 
 @pytest.mark.asyncio
-async def test_drain_drops_invites_from_someone_guardian_blocked_since():
+async def test_play_refuses_an_invite_from_someone_guardian_blocked_since():
     """An invite that arrived before the guardian block is not handed to
-    the protected minor's app when it opens."""
+    the protected minor's app: Play refuses it and its row ends ``done``."""
     svc, _, _, bus, cp = _guarded_svc(set())
     await svc.on_inbound_event(
         _make_event(
@@ -2696,17 +2773,23 @@ async def test_drain_drops_invites_from_someone_guardian_blocked_since():
             },
         )
     )
-    await svc.open_session(
+    local_sid = await svc.open_session(
         app_id="chess",
         target={"instance_id": "own-inst-id", "user_ref": "u-kid", "is_local": True},
         actor_user_id="u-adult",
     )
     cp.pairs = {frozenset({"u-kid", "ru-mallory"}), frozenset({"u-kid", "u-adult"})}
     bus.published.clear()
-    assert await svc.drain_pending_sessions("chess", "u-kid") == []
+    for sid in ("sess-old", local_sid):
+        with pytest.raises(AppChallengeHandledError):
+            await svc.accept_session(
+                app_id="chess", session_id=sid, actor_user_id="u-kid"
+            )
     ended = [e for e in bus.published if isinstance(e, AppChallengeEnded)]
-    assert [e.outcome for e in ended] == ["done"]
-    assert len(ended[0].session_ids) == 2
+    assert [(e.session_ids, e.outcome) for e in ended] == [
+        (("sess-old",), "done"),
+        ((local_sid,), "done"),
+    ]
 
 
 @pytest.mark.asyncio

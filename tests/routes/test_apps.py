@@ -997,58 +997,50 @@ async def test_sessions_rejects_missing_peer(client, fed_svc):
     assert body["error"]["code"] == "UNPROCESSABLE"
 
 
-# ── GET /api/apps/{app_id}/pending-sessions ──────────────────────────────
+# ── POST /api/apps/{app_id}/sessions/{session_id}/accept ─────────────────
 
 
-async def test_pending_sessions_requires_auth(client):
-    r = await client.get("/api/apps/com.example.hello/pending-sessions")
+async def test_accept_requires_auth(client):
+    r = await client.post("/api/apps/com.example.hello/sessions/s1/accept")
     assert r.status == 401
 
 
-async def test_pending_sessions_returns_and_scopes_to_user(client, fed_svc):
-    """The drain is scoped to the authed user — never a request param."""
-    pending = AppPendingSession(
+async def test_accept_returns_the_invite_scoped_to_the_caller(client, fed_svc):
+    """The invitee is the authed user — never a request param."""
+    fed_svc.accept_session.return_value = AppPendingSession(
         app_id="com.example.hello",
         user_id=client._uid,
         session_id="sess-1",
         from_instance="peer.example.com",
-        from_user="alice@peer.example.com",
-        payload={"kind": "challenge"},
-        created_at="2026-06-04 12:00:00",
+        from_user="alice",
+        payload={"verb": "open"},
+        created_at="2026-06-04T12:00:00+00:00",
     )
-    fed_svc.drain_pending_sessions.return_value = [pending]
-
-    r = await client.get(
-        "/api/apps/com.example.hello/pending-sessions",
+    r = await client.post(
+        "/api/apps/com.example.hello/sessions/sess-1/accept",
         headers=_auth(client._tok),
     )
     assert r.status == 200
-    body = await r.json()
-    assert body == {
-        "sessions": [
-            {
-                "session_id": "sess-1",
-                "from_instance": "peer.example.com",
-                "from_user": "alice@peer.example.com",
-                "payload": {"kind": "challenge"},
-            }
-        ]
+    assert await r.json() == {
+        "session": {
+            "session_id": "sess-1",
+            "from_instance": "peer.example.com",
+            "from_user": "alice",
+            "payload": {"verb": "open"},
+        }
     }
-    fed_svc.drain_pending_sessions.assert_awaited_once_with(
-        "com.example.hello", client._uid
+    fed_svc.accept_session.assert_awaited_once_with(
+        app_id="com.example.hello", session_id="sess-1", actor_user_id=client._uid
     )
 
 
-async def test_pending_sessions_empty(client, fed_svc):
-    fed_svc.drain_pending_sessions.return_value = []
-
+async def test_the_blanket_pending_sessions_drain_is_gone(client):
+    """Opening an app accepts nothing: there is no endpoint that takes in
+    every waiting invite at once."""
     r = await client.get(
-        "/api/apps/com.example.hello/pending-sessions",
-        headers=_auth(client._tok),
+        "/api/apps/com.example.hello/pending-sessions", headers=_auth(client._tok)
     )
-    assert r.status == 200
-    body = await r.json()
-    assert body == {"sessions": []}
+    assert r.status == 404
 
 
 async def test_sessions_rejects_empty_peer(client, fed_svc):
@@ -1798,13 +1790,79 @@ async def test_decline_requires_auth(client):
     assert r.status == 401
 
 
-async def test_opening_the_app_takes_the_invite_in(client):
+async def _challenge_carol_again(client) -> str:
+    """The admin sends Carol another invite: its session id."""
+    r = await client.post(
+        "/api/apps/com.example.hello/sessions",
+        json={
+            "target": {
+                "instance_id": client.app[instance_id_key],
+                "user_ref": "carol-id",
+                "is_local": True,
+            }
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+    await client.app[notification_delivery_key].drain()
+    return (await r.json())["session_id"]
+
+
+async def test_opening_the_app_accepts_nothing(client):
     carol_tok, session_id, _ = await _challenge_carol(client)
     r = await client.get(
-        "/api/apps/com.example.hello/pending-sessions", headers=_auth(carol_tok)
+        "/api/apps/com.example.hello/runtime", headers=_auth(carol_tok)
     )
-    assert [s["session_id"] for s in (await r.json())["sessions"]] == [session_id]
-    assert await _needs_you(client, carol_tok) == []
+    assert r.status == 200
+    (item,) = await _needs_you(client, carol_tok)
+    assert item["object_key"] == f"app_session:com.example.hello/{session_id}"
+
+
+async def test_play_takes_in_only_that_invite(client):
+    carol_tok, first, _ = await _challenge_carol(client)
+    second = await _challenge_carol_again(client)
+    r = await client.post(
+        f"/api/apps/com.example.hello/sessions/{first}/accept",
+        headers=_auth(carol_tok),
+    )
+    assert r.status == 200
+    session = (await r.json())["session"]
+    assert session["session_id"] == first
+    assert session["from_user"] == client._uid
+    assert session["payload"]["verb"] == "open"
+    # The other invite still waits for Carol in Needs you.
+    (item,) = await _needs_you(client, carol_tok)
+    assert item["object_key"] == f"app_session:com.example.hello/{second}"
+    # Playing it again (a second device) hears it was handled.
+    r = await client.post(
+        f"/api/apps/com.example.hello/sessions/{first}/accept",
+        headers=_auth(carol_tok),
+    )
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "APP_CHALLENGE_HANDLED"
+
+
+async def test_the_accepted_invite_reads_accepted(client):
+    carol_tok, session_id, _ = await _challenge_carol(client)
+    r = await client.post(
+        f"/api/apps/com.example.hello/sessions/{session_id}/accept",
+        headers=_auth(carol_tok),
+    )
+    assert r.status == 200
+    await client.app[notification_delivery_key].drain()
+    r = await client.get("/api/notifications", headers=_auth(carol_tok))
+    (row,) = [n for n in await r.json() if n["type"] == "app_challenge"]
+    assert row["params"]["handled"] == {"outcome": "accepted", "by": None}
+
+
+async def test_only_the_invitee_can_play_a_game_invite(client):
+    carol_tok, session_id, _ = await _challenge_carol(client)
+    r = await client.post(
+        f"/api/apps/com.example.hello/sessions/{session_id}/accept",
+        headers=_auth(client._tok),  # the challenger
+    )
+    assert r.status == 409
+    assert len(await _needs_you(client, carol_tok)) == 1
 
 
 async def test_the_challenger_cancels_a_game_invite(client):

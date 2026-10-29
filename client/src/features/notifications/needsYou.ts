@@ -218,6 +218,14 @@ function gameOf(n: Notification): { appId: string, sessionId: string } {
   return { appId: id.slice(0, cut), sessionId: id.slice(cut + 1) }
 }
 
+/** Where "Play" goes: that game in its app (``/apps/<id>?session=<sid>``)
+ *  — the app host takes in that one invite and opens the app into it.
+ *  Built from the row's subject, so rows stored before this work too. */
+export function playHref(n: Notification): string {
+  const { appId, sessionId } = gameOf(n)
+  return `/apps/${encodeURIComponent(appId)}?session=${encodeURIComponent(sessionId)}`
+}
+
 /** Decline a join request, an invite (looked up by its space) or a game
  *  invite. */
 async function sendDecline(n: Notification): Promise<void> {

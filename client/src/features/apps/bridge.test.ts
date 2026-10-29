@@ -55,7 +55,7 @@ vi.mock('@/api', () => {
   }
 })
 
-import { mountBridge } from './bridge'
+import { _resetAcceptedForTests, mountBridge } from './bridge'
 // Import the mocked ApiError so tests can construct it.
 import { ApiError } from '@/api'
 
@@ -108,6 +108,7 @@ describe('mountBridge', () => {
     Object.keys(wsOffFns).forEach(k => delete wsOffFns[k])
 
     iframe = makeFakeIframe()
+    _resetAcceptedForTests()
 
     addEventSpy = vi.spyOn(window, 'addEventListener')
     removeEventSpy = vi.spyOn(window, 'removeEventListener')
@@ -268,6 +269,19 @@ describe('mountBridge', () => {
     expect(reply.result).not.toHaveProperty('token')
   })
 
+  it('app.context: opened without ?session= the launch is empty and nothing is accepted', async () => {
+    const handler = captureMessageHandler()
+    await handler({
+      source: iframe.contentWindow as unknown as Window,
+      data: { id: 21, method: 'app.context' },
+    })
+    const reply = (iframe.contentWindow!.postMessage as ReturnType<typeof vi.fn>).mock.calls[0][0]
+    // A ``launch`` key at all: this host opens games from Play (D12).
+    expect(reply.result.launch).toEqual({})
+    expect(mockApiPost).not.toHaveBeenCalled()
+    expect(mockApiGet).not.toHaveBeenCalled()
+  })
+
   // ── unknown method ────────────────────────────────────────────────────────
 
   it('unknown method: replies ok:false', async () => {
@@ -362,28 +376,76 @@ describe('mountBridge', () => {
     )
   })
 
-  // ── app.pendingSessions ─────────────────────────────────────────────────
+  // ── launch context: Play opens the game you were invited to ───────────
 
-  it('app.pendingSessions: GETs /pending-sessions and returns sessions array', async () => {
-    const sessions = [
-      { session_id: 's1', from_instance: 'i1', from_user: 'u', payload: {} },
-    ]
-    mockApiGet.mockResolvedValueOnce({ sessions })
+  describe('opened from Play (?session=)', () => {
+    const invite = { session_id: 's1', from_instance: 'peer', from_user: 'alice', payload: { verb: 'open' } }
+    const asApp = { sessionId: 's1', fromInstance: 'peer', fromUser: 'alice', payload: { verb: 'open' } }
+    let handler: (event: Partial<MessageEvent>) => Promise<void>
+
+    beforeEach(() => {
+      cleanup()
+      addEventSpy.mockClear()
+      cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID, launchSession: 's1' })
+      handler = captureMessageHandler()
+    })
+
+    const replies = () => (iframe.contentWindow!.postMessage as ReturnType<typeof vi.fn>).mock.calls
+      .map(([m]) => m as { id: number; ok: boolean; result: Record<string, unknown> })
+
+    it('accepts only that invite and hands it over as app.context launch', async () => {
+      mockApiPost.mockResolvedValueOnce({ session: invite })
+      await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 1, method: 'app.context' } })
+      expect(mockApiPost).toHaveBeenCalledTimes(1)
+      expect(mockApiPost).toHaveBeenCalledWith(`/api/apps/${APP_ID}/sessions/s1/accept`)
+      expect(replies()[0].result.launch).toEqual({ sessionId: 's1', invite: asApp })
+      // Never the blanket drain.
+      expect(mockApiGet).not.toHaveBeenCalled()
+    })
+
+    it('accepts once, for context and pendingSessions alike, and across frames (Try again)', async () => {
+      mockApiPost.mockResolvedValueOnce({ session: invite })
+      await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 1, method: 'app.context' } })
+      await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 2, method: 'app.pendingSessions' } })
+      cleanup()
+      cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID, launchSession: 's1' })
+      await captureMessageHandler()({ source: iframe.contentWindow as unknown as Window, data: { id: 3, method: 'app.context' } })
+      expect(mockApiPost).toHaveBeenCalledTimes(1)
+      expect(replies().map(r => r.result)).toEqual([
+        { appId: APP_ID, selfUserId: USER_ID, launch: { sessionId: 's1', invite: asApp } },
+        [invite],
+        { appId: APP_ID, selfUserId: USER_ID, launch: { sessionId: 's1', invite: asApp } },
+      ])
+    })
+
+    it('an invite that no longer waits (409) still names the game, without an invite', async () => {
+      mockApiPost.mockRejectedValueOnce(new ApiError(409, 'x'))
+      await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 1, method: 'app.context' } })
+      expect(replies()[0]).toMatchObject({ ok: true, result: { launch: { sessionId: 's1' } } })
+      expect(replies()[0].result.launch).not.toHaveProperty('invite')
+    })
+
+    it('an older app (app.pendingSessions) gets that one invite, not every waiting one', async () => {
+      mockApiPost.mockResolvedValueOnce({ session: invite })
+      await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 44, method: 'app.pendingSessions' } })
+      expect(replies()[0]).toMatchObject({ id: 44, ok: true, result: [invite] })
+      expect(mockApiGet).not.toHaveBeenCalled()
+    })
+  })
+
+  it('app.pendingSessions: opened without Play it is empty — opening the app accepts nothing', async () => {
     const handler = captureMessageHandler()
-
     await handler({
       source: iframe.contentWindow as unknown as Window,
       data: { id: 44, method: 'app.pendingSessions' },
     })
-
-    expect(mockApiGet).toHaveBeenCalledWith(`/api/apps/${APP_ID}/pending-sessions`)
+    expect(mockApiGet).not.toHaveBeenCalled()
+    expect(mockApiPost).not.toHaveBeenCalled()
     expect(iframe.contentWindow!.postMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 44, ok: true, result: sessions }),
+      expect.objectContaining({ id: 44, ok: true, result: [] }),
       '*',
     )
   })
-
-  // ── app.openSession ────────────────────────────────────────────────────
 
   it('app.openSession: POSTs to /sessions with target; returns session_id', async () => {
     mockApiPost.mockResolvedValueOnce({ session_id: 'sess-xyz' })
@@ -461,13 +523,7 @@ describe('mountBridge', () => {
     )
   })
 
-  it('WS relay: an invite reaching the open app is taken in (its Needs-you item goes) and the rest handed over once', async () => {
-    mockApiGet.mockResolvedValueOnce({
-      sessions: [
-        { session_id: 'sess-live', from_instance: 'peer', from_user: 'alice', payload: { verb: 'open' } },
-        { session_id: 'sess-older', from_instance: 'peer', from_user: 'bob', payload: { verb: 'open' } },
-      ],
-    })
+  it('WS relay: a live invite is handed over but accepts nothing (it waits for Play)', async () => {
     wsHandlers['app.message']({
       data: {
         app_id: APP_ID,
@@ -479,11 +535,11 @@ describe('mountBridge', () => {
       },
     })
     await new Promise<void>(resolve => setTimeout(resolve, 0))
-    expect(mockApiGet).toHaveBeenCalledWith(`/api/apps/${APP_ID}/pending-sessions`)
+    expect(mockApiGet).not.toHaveBeenCalled()
+    expect(mockApiPost).not.toHaveBeenCalled()
     const sent = (iframe.contentWindow!.postMessage as unknown as MockInstance).mock.calls
       .map(([m]) => (m as { sessionId?: string }).sessionId)
-    // The live one once (from the frame), the older one from the drain.
-    expect(sent).toEqual(['sess-live', 'sess-older'])
+    expect(sent).toEqual(['sess-live'])
   })
 
   it('WS relay: a move or a close takes nothing in', () => {

@@ -55,7 +55,7 @@ vi.mock('@/components/Button', () => ({
   ),
 }))
 
-import { AppHostInner, FAIL_MS, LOAD_GRACE_MS, SLOW_MS } from './AppHost'
+import { AppHostInner, FAIL_MS, LOAD_GRACE_MS, SLOW_MS, launchSessionFrom } from './AppHost'
 import { mountBridge, type BridgeContext } from '@/features/apps/bridge'
 import { getRuntime, setEnabled } from '@/store/apps'
 import { ApiError } from '@/api'
@@ -182,10 +182,49 @@ describe('AppHostInner', () => {
       }),
     )
 
-    expect(post).toHaveBeenCalledWith(
-      { id: 1, ok: true, result: { appId: 'chess', selfUserId: 'u1' } },
+    await waitFor(() => expect(post).toHaveBeenCalledWith(
+      { id: 1, ok: true, result: { appId: 'chess', selfUserId: 'u1', launch: {} } },
       '*',
-    )
+    ))
+  })
+
+  // ── Launch context: Play opens the game you were invited to ───────────
+
+  it('hands the bridge the ?session= invite to launch into', async () => {
+    const { container } = render(<AppHostInner appId="chess" sessionId="s1" />)
+    await waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
+    const ctx = vi.mocked(mountBridge).mock.calls[0][1] as BridgeContext
+    expect(ctx.launchSession).toBe('s1')
+  })
+
+  it('opened without ?session= launches into nothing', async () => {
+    const { container } = render(<AppHostInner appId="chess" />)
+    await waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
+    const ctx = vi.mocked(mountBridge).mock.calls[0][1] as BridgeContext
+    expect(ctx.launchSession).toBeUndefined()
+  })
+
+  it('Play for another game while the app is open starts a fresh frame for it', async () => {
+    const view = render(<AppHostInner appId="chess" sessionId="s1" />)
+    await waitFor(() => expect(view.container.querySelector('iframe')).not.toBeNull())
+    const first = view.container.querySelector('iframe')
+    view.rerender(<AppHostInner appId="chess" sessionId="s2" />)
+    await waitFor(() => {
+      const calls = vi.mocked(mountBridge).mock.calls
+      expect((calls[calls.length - 1][1] as BridgeContext).launchSession).toBe('s2')
+    })
+    // A new element (no iframe history entry), on a fresh signed runtime.
+    expect(view.container.querySelector('iframe')).not.toBe(first)
+    expect(getRuntime).toHaveBeenCalledTimes(2)
+  })
+
+  it('reads the launch session from ?session= — a session id only', () => {
+    expect(launchSessionFrom({ session: '0f3a9c2b' })).toBe('0f3a9c2b')
+    expect(launchSessionFrom({})).toBeUndefined()
+    expect(launchSessionFrom({ session: '' })).toBeUndefined()
+    expect(launchSessionFrom({ session: '../x' })).toBeUndefined()
+    expect(launchSessionFrom({ session: '<b>' })).toBeUndefined()
+    expect(launchSessionFrom({ session: 'a'.repeat(129) })).toBeUndefined()
   })
 
   // ── Starting → ready / slow / failed ──────────────────────────────────

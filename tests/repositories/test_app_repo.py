@@ -192,48 +192,36 @@ def _pending(
     )
 
 
+async def _waiting(db, uid: str) -> list[AppPendingSession]:
+    """The invites that wait for *uid* (oldest first) — read through the
+    repo's own one-invite lookup."""
+    repo = SqliteAppRepo(db)
+    rows = await db.fetchall(
+        "SELECT session_id FROM app_pending_sessions"
+        " WHERE app_id = 'chess' AND user_id = ? ORDER BY created_at ASC",
+        (uid,),
+    )
+    out = []
+    for r in rows:
+        p = await repo.get_pending_session("chess", uid, r["session_id"])
+        assert p is not None
+        out.append(p)
+    return out
+
+
 @pytest.mark.asyncio
-async def test_pending_add_and_drain_roundtrip(db):
+async def test_pending_add_and_read_roundtrip(db):
     repo = SqliteAppRepo(db)
     uid = await _seed_user(db)
     await repo.install(_app())
     await repo.add_pending_session(_pending(uid, payload={"kind": "challenge", "n": 3}))
-    drained = await repo.drain_pending_sessions("chess", uid)
+    drained = await _waiting(db, uid)
     assert len(drained) == 1
     s = drained[0]
     assert s.session_id == "sess-1"
     assert s.from_instance == "remote.example"
     assert s.from_user == "alice@remote"
     assert s.payload == {"kind": "challenge", "n": 3}
-
-
-@pytest.mark.asyncio
-async def test_pending_drain_deletes(db):
-    repo = SqliteAppRepo(db)
-    uid = await _seed_user(db)
-    await repo.install(_app())
-    await repo.add_pending_session(_pending(uid))
-    assert len(await repo.drain_pending_sessions("chess", uid)) == 1
-    # Second drain returns nothing — the first call consumed (deleted) the row.
-    assert await repo.drain_pending_sessions("chess", uid) == []
-
-
-@pytest.mark.asyncio
-async def test_pending_drain_excludes_and_prune_deletes_expired(db):
-    repo = SqliteAppRepo(db)
-    uid = await _seed_user(db)
-    await repo.install(_app())
-    old = (datetime.now(UTC) - timedelta(seconds=600)).isoformat()
-    await repo.add_pending_session(_pending(uid, session_id="old", created_at=old))
-    fresh = _pending(uid, session_id="fresh")
-    await repo.add_pending_session(fresh)
-
-    # Drain with a small TTL: only the fresh row is returned; the old one is
-    # excluded but still drained (deleted) for that (app, user) pair.
-    drained = await repo.drain_pending_sessions("chess", uid, max_age_seconds=300)
-    assert [s.session_id for s in drained] == ["fresh"]
-    # Both rows are gone after drain.
-    assert await repo.drain_pending_sessions("chess", uid) == []
 
 
 @pytest.mark.asyncio
@@ -246,8 +234,8 @@ async def test_pending_prune_deletes_old_across_users(db):
     await repo.add_pending_session(_pending(uid, session_id="fresh"))
 
     await repo.prune_pending_sessions(max_age_seconds=300)
-    # Prune removed the old row; the fresh one survives and still drains.
-    drained = await repo.drain_pending_sessions("chess", uid)
+    # Prune removed the old row; the fresh one survives.
+    drained = await _waiting(db, uid)
     assert [s.session_id for s in drained] == ["fresh"]
 
 
@@ -258,7 +246,7 @@ async def test_pending_pk_idempotent_latest_payload(db):
     await repo.install(_app())
     await repo.add_pending_session(_pending(uid, payload={"v": 1}))
     await repo.add_pending_session(_pending(uid, payload={"v": 2}))
-    drained = await repo.drain_pending_sessions("chess", uid)
+    drained = await _waiting(db, uid)
     assert len(drained) == 1
     assert drained[0].payload == {"v": 2}
 
@@ -282,7 +270,7 @@ async def test_pending_session_is_only_refreshed_by_its_own_household(db):
             created_at=theirs.created_at,
         )
     )
-    (s,) = await repo.drain_pending_sessions("chess", uid)
+    (s,) = await _waiting(db, uid)
     assert (s.from_instance, s.payload) == ("remote.example", {"v": 1})
 
 
@@ -292,7 +280,7 @@ async def test_pending_from_user_nullable(db):
     uid = await _seed_user(db)
     await repo.install(_app())
     await repo.add_pending_session(_pending(uid, from_user=None))
-    drained = await repo.drain_pending_sessions("chess", uid)
+    drained = await _waiting(db, uid)
     assert drained[0].from_user is None
 
 
@@ -303,7 +291,7 @@ async def test_pending_cascades_on_user_delete(db):
     await repo.install(_app())
     await repo.add_pending_session(_pending(uid))
     await db.enqueue("DELETE FROM users WHERE user_id = ?", (uid,))
-    assert await repo.drain_pending_sessions("chess", uid) == []
+    assert await _waiting(db, uid) == []
 
 
 @pytest.mark.asyncio
@@ -316,7 +304,7 @@ async def test_pending_per_pair_cap_drops_oldest_on_insert(db):
 
     cap = _PENDING_SESSION_MAX_PER_PAIR
     overflow = 5
-    # Recent timestamps (within the drain TTL) spread by seconds so ordering
+    # Recent timestamps (within the TTL) spread by seconds so ordering
     # is deterministic: sess-0 is oldest, sess-(cap+overflow-1) is newest.
     base = datetime.now(UTC) - timedelta(hours=1)
     for i in range(cap + overflow):
@@ -325,7 +313,7 @@ async def test_pending_per_pair_cap_drops_oldest_on_insert(db):
             _pending(uid, session_id=f"sess-{i}", created_at=created)
         )
 
-    drained = await repo.drain_pending_sessions("chess", uid)
+    drained = await _waiting(db, uid)
     assert len(drained) == cap
     survivors = {s.session_id for s in drained}
     # The first ``overflow`` (oldest) sessions were pruned away.
@@ -351,8 +339,8 @@ async def test_pending_cap_is_per_pair_not_global(db):
     # One row for user B survives untouched despite A overflowing.
     await repo.add_pending_session(_pending(uid_b, session_id="b-only"))
 
-    assert len(await repo.drain_pending_sessions("chess", uid_a)) == cap
-    drained_b = await repo.drain_pending_sessions("chess", uid_b)
+    assert len(await _waiting(db, uid_a)) == cap
+    drained_b = await _waiting(db, uid_b)
     assert [s.session_id for s in drained_b] == ["b-only"]
 
 
