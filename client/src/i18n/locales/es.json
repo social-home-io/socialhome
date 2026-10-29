@@ -5547,6 +5547,8 @@
   "notifications.row.app_added_many": "{actors} añadieron {space}",
   "notifications.row.app_challenge": "{actor} te invitó a jugar a {space}",
   "notifications.row.app_challenge_many": "{actors} te invitaron a jugar a {space}",
+  "notifications.row.app_challenge_declined": "{actor} rechazó tu invitación a {space}",
+  "notifications.row.app_challenge_declined_many": "{actors} rechazaron tu invitación a {space}",
   "notifications.needs_you.title": "Te necesita",
   "notifications.needs_you.count": "{n} pendientes",
   "notifications.needs_you.count_one": "{n} pendiente",

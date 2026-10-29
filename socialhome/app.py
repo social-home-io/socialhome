@@ -2644,6 +2644,12 @@ def _build_middleware(config: Config, limiter: RateLimiter):
             # fetch a page (the service adds its own per-member and
             # household fetch budget on top).
             "/api/link-preview": (30, 60),
+            # App messages (moves) get their own bucket (C#31): a game's
+            # move is a store write plus a send, and every app call shared
+            # the 60/min ``/api/apps`` default, so a quick game 429'd. Each
+            # send is one envelope to one household (never a fan-out):
+            # ≤ 300 a minute per person.
+            "POST /api/apps/*/messages": (300, 60),
             # GPS pings: 10 a minute per PERSON is enforced by the view
             # (``routes/presence.py``) — Home Assistant posts the whole
             # household's with one token. This is only the ceiling for that

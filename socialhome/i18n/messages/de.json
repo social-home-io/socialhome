@@ -286,6 +286,8 @@
   "notification.app.added": "{name} hat {app} hinzugefügt",
   "notification.app.challenge": "{name} hat dich eingeladen, {app} zu spielen",
   "notification.app.challenge_generic": "{name} hat dich zu einem Spiel eingeladen",
+  "notification.app.challenge_declined": "{name} hat deine Einladung zu {app} abgelehnt",
+  "notification.app.challenge_declined_generic": "{name} hat deine Spieleinladung abgelehnt",
   "notification.post.moderated": "Dein Beitrag wurde moderiert",
   "notification.space.post.moderated": "Dein Beitrag in {space_name} wurde moderiert",
   "notification.space.dissolved": "„{space_name}“ wurde aufgelöst",

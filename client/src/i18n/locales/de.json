@@ -5520,6 +5520,8 @@
   "notifications.row.app_added_many": "{actors} haben {space} hinzugefügt",
   "notifications.row.app_challenge": "{actor} hat dich eingeladen, {space} zu spielen",
   "notifications.row.app_challenge_many": "{actors} haben dich eingeladen, {space} zu spielen",
+  "notifications.row.app_challenge_declined": "{actor} hat deine Einladung zu {space} abgelehnt",
+  "notifications.row.app_challenge_declined_many": "{actors} haben deine Einladung zu {space} abgelehnt",
   "notifications.needs_you.title": "Wartet auf dich",
   "notifications.needs_you.count": "{n} offen",
   "notifications.needs_you.count_one": "{n} offen",

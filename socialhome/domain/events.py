@@ -2580,6 +2580,27 @@ class AppChallengeEnded(DomainEvent):
     outcome: str
 
 
+@dataclass(slots=True, frozen=True)
+class AppChallengeDeclined(DomainEvent):
+    """The invitee declined a game invite ``to_user_id`` (a local user) sent.
+
+    Published by :class:`AppFederationService` when the decline
+    (``{verb: "close", reason: "declined"}``) reaches the challenger's
+    mailbox — a session this household knows they opened with exactly that
+    person. Consumed by the notification service: a bell row, so the
+    challenger learns it even if they never open the app (D11).
+    ``from_display`` is a label only.
+    """
+
+    app_id: str
+    session_id: str
+    to_user_id: str
+    from_display: str
+    #: The decliner's user id — never shown, only checked against the
+    #: recipient's personal and guardian blocks.
+    from_user_id: str | None = None
+
+
 # ─── Momentum (§Momentum) ─────────────────────────────────────────────────
 
 

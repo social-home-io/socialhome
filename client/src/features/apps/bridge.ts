@@ -21,6 +21,18 @@
  * hosts leave it out). Apps from before launch contexts call
  * ``app.pendingSessions`` instead: it answers with the launch invite
  * alone (``[]`` without one) — never every waiting invite.
+ *
+ * Held messages (D11, "moves and declines wait for you"): Social Home
+ * keeps the latest message of each game that arrived while the app was
+ * closed or turned off. The bridge takes them (``POST …/held``, once per
+ * frame) when the app has started and hands them over as ordinary
+ * ``app:event`` posts, in order — right after the ``app.context`` reply,
+ * so an app from before this change gets them through the handlers it
+ * already has. An app that applies them itself, after loading its own
+ * state, says so with ``app.context`` params ``{held: 'pull'}`` (SDK
+ * ≥ 1.3) and asks with ``app.held`` instead; nothing is pushed then. A
+ * held message may repeat one the app already saw live: apps dedupe
+ * (chess by move count).
  * - Replies use target origin ``'*'`` because the iframe's opaque origin
  *   means a specific origin target would always miss.
  */
@@ -78,6 +90,25 @@ interface PendingSession {
 
 /** An invite as the app receives it (the SDK's ``AppMessage``). */
 interface AppInvite {
+  sessionId: string
+  fromInstance: string
+  fromUser?: string
+  payload: unknown
+}
+
+/** One message the mailbox kept, as ``POST /api/apps/{id}/held`` lists it. */
+interface HeldRow {
+  session_id: string
+  from_instance: string
+  from_user: string | null
+  kind: 'message' | 'session'
+  payload: unknown
+}
+
+/** A held message as the app receives it — a live ``app:event`` minus
+ *  its ``type``. */
+export interface HeldEvent {
+  kind: 'message' | 'session'
   sessionId: string
   fromInstance: string
   fromUser?: string
@@ -147,6 +178,36 @@ export function mountBridge(
     iframe.contentWindow?.postMessage(r, '*')
   }
 
+  /** The mailbox, taken once for this frame (the server clears what it
+   *  hands over). A failed request hands over nothing: whatever wasn't
+   *  cleared waits for the next open. */
+  let held: Promise<HeldEvent[]> | null = null
+  function takeHeld(): Promise<HeldEvent[]> {
+    if (!held) {
+      held = Promise.resolve().then(() => api.post<{ messages?: HeldRow[] }>(
+        `/api/apps/${encodeURIComponent(appId)}/held`,
+      )).then(r => (r?.messages ?? []).map((m): HeldEvent => ({
+        kind: m.kind === 'session' ? 'session' : 'message',
+        sessionId: m.session_id,
+        fromInstance: m.from_instance,
+        fromUser: m.from_user ?? undefined,
+        payload: m.payload,
+      })), () => [])
+    }
+    return held
+  }
+
+  /** Whether the held messages were handed over (pushed or pulled). */
+  let heldHandedOver = false
+  /** An app that doesn't pull: post its held messages as live events. */
+  async function pushHeld(): Promise<void> {
+    if (heldHandedOver) return
+    heldHandedOver = true
+    for (const e of await takeHeld()) {
+      iframe.contentWindow?.postMessage({ type: 'app:event', ...e }, '*')
+    }
+  }
+
   async function handleRpc(req: RpcRequest): Promise<void> {
     const { id, method, params } = req
 
@@ -205,6 +266,17 @@ export function mountBridge(
             ok: true,
             result: { appId: ctx.appId, selfUserId: ctx.selfUserId, launch: await launch() },
           })
+          // The app listens now: what waited for it follows, unless it
+          // pulls held messages itself (``app.held``).
+          if (params?.held === 'pull') heldHandedOver = true
+          else await pushHeld()
+          break
+        }
+
+        case 'app.held': {
+          // An app that applies held messages itself, once its state is in.
+          heldHandedOver = true
+          reply({ id, ok: true, result: await takeHeld() })
           break
         }
 

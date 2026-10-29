@@ -841,3 +841,14 @@ async def test_a_game_invite_row_from_before_one_row_per_invite_is_done(env):
         ),
     )
     assert await env.svc.pending_actions(anna.user_id) == []
+
+
+async def test_a_played_game_invite_no_longer_waits(env):
+    """0131: Play keeps the row (as the game's mailbox), now ``active`` —
+    the invite no longer waits in Needs you."""
+    anna, apps = await _invite_env(env)
+    await apps.activate_pending_session(
+        "chess", anna.user_id, "s1", now=datetime.now(UTC).isoformat()
+    )
+    (left,) = await env.svc.pending_actions(anna.user_id)
+    assert left.object_key == _invite_key("s2")

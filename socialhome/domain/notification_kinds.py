@@ -115,6 +115,8 @@ _KIND_OF_TYPE: dict[str, NotifKind] = {
     "join_answer": NotifKind.ABOUT_YOU,
     "space_remote_invite_accepted": NotifKind.ABOUT_YOU,
     "space_remote_invite_declined": NotifKind.ABOUT_YOU,
+    # The person you invited to a game said no (D11).
+    "app_challenge_declined": NotifKind.ABOUT_YOU,
     "moderation_decided": NotifKind.ABOUT_YOU,
     "post_moderated": NotifKind.ABOUT_YOU,
     "space_ownership_transferred": NotifKind.ABOUT_YOU,
