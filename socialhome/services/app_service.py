@@ -274,17 +274,25 @@ class AppService(BusPublisherMixin):
         table: adding the app or "Not now" resolves the rows. Asking
         again only joins the open row.
 
+        An app the household has but an admin turned off can be asked for
+        too ("Ask to turn it on", D10 — an invite for it waits); turning it
+        back on answers the ask.
+
         Raises :class:`AppRequestNotAllowedError` for an admin (they add
-        it) or an app already in the household, and
+        it) or an app already in the household and turned on, and
         :class:`AppNotFoundError` for an app the catalog doesn't have or
         the age gate keeps from the caller (never confirms it exists)."""
         if is_admin:
             raise AppRequestNotAllowedError("Admins add apps themselves.")
-        if await self._repo.get(app_id) is not None:
+        installed = await self._repo.get(app_id)
+        if installed is not None and installed.enabled:
             raise AppRequestNotAllowedError("This app is already in the household.")
         entries = await self.browse_catalog_for(user_id=user_id, is_admin=False)
         entry = next((e for e in entries if e.app_id == app_id), None)
-        if entry is None:
+        if entry is None or (
+            # A turned-off app: the household's own age gate holds too.
+            installed is not None and not await self._age_allowed(installed, user_id)
+        ):
             raise AppNotFoundError(f"App {app_id!r} not found in catalog")
         recipients: list[str] = []
         protected, _ = await self._protection(user_id)

@@ -144,7 +144,7 @@ describe('One Apps page (D1)', () => {
 
   it('puts the app Needs-you rows (invites, requests) on top', () => {
     const { getByTestId } = render(<AppsPage />)
-    expect(getByTestId('needs-you').textContent).toBe('app_challenge,app_challenge_continue,app_request')
+    expect(getByTestId('needs-you').textContent).toBe('app_challenge,app_challenge_continue,app_challenge_waiting,app_request')
   })
 
   it('names apps in the viewer\'s language from the catalog', () => {

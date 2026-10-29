@@ -49,6 +49,13 @@ INVITES_OPEN_MAX: int = 10
 #: …and at most this many new invites in any 24 hours.
 INVITES_PER_DAY_MAX: int = 30
 
+#: Invites for an app this household doesn't have (or turned off) wait as
+#: Needs-you rows (D10): one per (invitee, app, sender person) — a repeat
+#: joins it — and at most this many senders' rows per invitee and app.
+#: The receiver's own bound: the sender-side caps above don't hold for a
+#: household that ignores them.
+WAITING_SENDERS_MAX: int = 5
+
 #: Keys of a session row's ``payload`` only Social Home writes (sent
 #: through the sheet / answered / withdrawn). An invite from another
 #: household is stored without them, so it can't pose as one of ours.

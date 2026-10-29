@@ -65,6 +65,8 @@ from ..domain.events import (
     AppChallengeDeclined,
     AppChallengeEnded,
     AppChallengeReceived,
+    AppChallengeWaiting,
+    AppEnabledChanged,
     AppGameEnded,
     AppInstalled,
     AppRequestDismissed,
@@ -437,6 +439,7 @@ _PUSH_AS_IS: frozenset[str] = frozenset(
         "report_answer",
         "app_challenge",
         "app_challenge_continue",
+        "app_challenge_waiting",
         "app_added",
         "app_challenge_declined",
         "app_game_ended",
@@ -1319,6 +1322,7 @@ class NotificationService(ProtectionGateMixin):
             AppChallengeReceived,
             self.on_app_challenge_received,
         )
+        self._subscribe(AppChallengeWaiting, self.on_app_challenge_waiting)
         self._subscribe(AppChallengeEnded, self.on_app_challenge_ended)
         self._subscribe(AppInstalled, self.on_app_installed)
         self._subscribe(AppChallengeDeclined, self.on_app_challenge_declined)
@@ -1326,6 +1330,8 @@ class NotificationService(ProtectionGateMixin):
         self._subscribe(AppInstalled, self.on_app_request_answered)
         self._subscribe(AppRequested, self.on_app_requested)
         self._subscribe(AppRequestDismissed, self.on_app_request_answered)
+        # An app turned back on answers the asks to turn it on (D10).
+        self._subscribe(AppEnabledChanged, self.on_app_request_answered)
         self._subscribe(AppUpdateAvailable, self.on_app_update_available)
         self._subscribe(AppUpdated, self.on_app_update_handled)
         self._subscribe(AppUpdateGone, self.on_app_update_handled)
@@ -2758,6 +2764,11 @@ class NotificationService(ProtectionGateMixin):
             return "done"
         if note.type in ("app_challenge", "app_challenge_continue"):
             return await self._challenge_ended_as(note)
+        if note.type == "app_challenge_waiting":
+            # Waits for its app (D10) as long as any invite does; adding
+            # the app turns it into a playable one.
+            cutoff = datetime.now(UTC) - timedelta(seconds=PENDING_SESSION_TTL_SECONDS)
+            return "expired" if note.created_at < cutoff.isoformat() else None
         return None if await self._still_needs(note) else "done"
 
     async def _challenge_ended_as(self, note: Notification) -> str | None:
@@ -2796,11 +2807,15 @@ class NotificationService(ProtectionGateMixin):
                 and self._pair_inbox.get(oid) is not None
             )
         if note.type == "app_request":
-            # Waits until the app is in the household (an install the
-            # event missed, e.g. during a restart, still ends it).
+            # Waits until the app is in the household and turned on (an
+            # install the event missed, e.g. during a restart, still ends
+            # it).
             if kind != NotificationObject.APP:
                 return False
-            return self._apps is None or await self._apps.get(oid) is None
+            if self._apps is None:
+                return True
+            app = await self._apps.get(oid)
+            return app is None or not app.enabled
         if note.type == "app_update":
             # Waits while its admin is one, the app is still here and the
             # version the row offers (its body) is newer than the installed
@@ -2843,13 +2858,18 @@ class NotificationService(ProtectionGateMixin):
 
     async def on_app_challenge_ended(self, event: AppChallengeEnded) -> None:
         """Game invites stopped waiting (the app took them in, a decline, a
-        withdrawal): their rows leave the invitee's section."""
+        withdrawal — or, for one that waited for its app, D10, the app
+        arriving): their rows leave the invitee's section."""
         for session_id in event.session_ids:
             await self._resolve(
                 object_key(
                     NotificationObject.APP_SESSION, f"{event.app_id}/{session_id}"
                 ),
-                types=("app_challenge", "app_challenge_continue"),
+                types=(
+                    "app_challenge",
+                    "app_challenge_continue",
+                    "app_challenge_waiting",
+                ),
                 outcome=event.outcome,
                 user_id=event.user_id,
             )
@@ -2982,6 +3002,19 @@ class NotificationService(ProtectionGateMixin):
                 fallback="{name} invited you to play a game",
                 name=event.from_display,
             )
+        about = NotificationSubject.of(
+            NotificationObject.APP_SESSION,
+            f"{event.app_id}/{event.session_id}",
+            space_name=app_name,
+        )
+        # An invite that waited for its app (D10) is playable now: its
+        # waiting row makes way for this one (a fresh row, so it buzzes).
+        await self._resolve(
+            about.object_key,
+            types=("app_challenge_waiting",),
+            outcome="done",
+            user_id=event.to_user_id,
+        )
         await self._save_notif(
             new_notification(
                 user_id=event.to_user_id,
@@ -2991,13 +3024,93 @@ class NotificationService(ProtectionGateMixin):
             ),
             # One row per invite: it stays in "Needs you" until that invite
             # is taken in, declined, withdrawn or expires.
+            about=about,
+            actor_user_id=event.from_user_id,
+            actor_name=event.from_display,
+        )
+
+    async def on_app_challenge_waiting(self, event: AppChallengeWaiting) -> None:
+        """A game invite for an app this household doesn't have or turned
+        off (D10): the invitee's "Needs you" row — "{name} invited you to
+        play {app}" — with "Ask an admin" / "Ask a grown-up" (admins: "See
+        {app}") and Decline. ``flags`` say why it waits (``app_missing`` /
+        ``app_off``); the app's name (the household's catalog's or its
+        install's) rides as the row's place. The row is about the same
+        ``app_session:<app>/<session>`` a playable invite uses, so a
+        withdrawal or a decline finds it; it becomes a playable invite once
+        the app is here (:meth:`on_app_challenge_received`). Title only
+        on the push (§25.3): the inviter and the app are labels.
+
+        **One row per (invitee, app, sender person).** A further invite
+        from the same person for the same app joins their row (D7): it
+        moves on to the newest session (the one Play takes in once the app
+        is here), its count goes up (``params.total``: "invited you 3
+        times") and nothing buzzes again."""
+        recipient = await self._local_user(event.to_user_id)
+        key = object_key(
+            NotificationObject.APP_SESSION, f"{event.app_id}/{event.session_id}"
+        )
+        prefix = object_key(NotificationObject.APP_SESSION, f"{event.app_id}/")
+        mine = [
+            n
+            for n in await self._notifs.find(
+                Spec(
+                    where=[
+                        ("type", "=", "app_challenge_waiting"),
+                        ("user_id", "=", event.to_user_id),
+                    ]
+                )
+            )
+            if n.is_pending_action
+            and (n.object_key or "").startswith(prefix)
+            and n.params is not None
+            and any(a.id == event.from_user_id for a in n.params.actors)
+        ]
+        if mine:
+            row = max(mine, key=lambda n: n.created_at)
+            if row.object_key == key:
+                return  # the same invite again
+            moved = replace(
+                row,
+                object_key=key,
+                created_at=datetime.now(UTC).isoformat(),
+                read_at=None,
+                params=regroup(
+                    row.params,
+                    NotificationActor(event.from_user_id, event.from_display),
+                    reopen=row.is_read,
+                    space_name=event.app_name,
+                    flags=(event.reason,),
+                ),
+            )
+            await self._notifs.update_group(moved)
+            await self._publish_created(
+                moved, bumped=True, reopened=row.is_read, silent=True
+            )
+            if row.is_read:
+                await self._announce_unread(moved.user_id)
+            return
+        await self._save_notif(
+            new_notification(
+                user_id=event.to_user_id,
+                type="app_challenge_waiting",
+                title=self._t(
+                    "notification.app.challenge",
+                    locale=self._locale(recipient),
+                    fallback="{name} invited you to play {app}",
+                    name=event.from_display,
+                    app=event.app_name,
+                ),
+                link_url=app_about_link(event.app_id),
+            ),
             about=NotificationSubject.of(
                 NotificationObject.APP_SESSION,
                 f"{event.app_id}/{event.session_id}",
-                space_name=app_name,
+                space_name=event.app_name,
             ),
             actor_user_id=event.from_user_id,
             actor_name=event.from_display,
+            flags=(event.reason,),
         )
 
     async def on_app_requested(self, event: AppRequested) -> None:
@@ -3038,12 +3151,17 @@ class NotificationService(ProtectionGateMixin):
             )
 
     async def on_app_request_answered(
-        self, event: AppInstalled | AppRequestDismissed
+        self, event: AppInstalled | AppRequestDismissed | AppEnabledChanged
     ) -> None:
-        """The app was added ("approved", by the installer) or an admin
-        said "Not now" ("declined"): every decider's request row for it is
+        """The app was added ("approved", by the installer) or turned back
+        on (asked for after an admin turned it off, D10), or an admin said
+        "Not now" ("declined"): every decider's request row for it is
         handled and leaves Needs you on each device."""
-        if isinstance(event, AppInstalled):
+        if isinstance(event, AppEnabledChanged):
+            if not event.enabled:
+                return
+            outcome, by = "approved", None
+        elif isinstance(event, AppInstalled):
             outcome, by = "approved", event.installed_by or None
         else:
             outcome, by = "declined", event.dismissed_by

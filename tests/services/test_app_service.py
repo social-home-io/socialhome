@@ -2391,6 +2391,32 @@ async def test_ask_refuses_what_needs_no_request(
         await svc.request_app("chess", user_id="ben", is_admin=False)
 
 
+async def test_ask_to_turn_on_an_app_an_admin_turned_off(
+    tmp_path: Path, chess_bundle: tuple[bytes, str]
+) -> None:
+    """D10: an app the household has but turned off can be asked for (an
+    invite for it waits) — the household's own age gate still holds."""
+    data, sha = chess_bundle
+    bus = _RecordingBus()
+    cp = _GuardedCp()
+    cp.add("kiki", enabled=True, declared_age=9)
+    people = _People(("anna", "Anna", True), ("ben", "Ben", False))
+    svc, _ = _v2_service(
+        tmp_path, [_v2_entry(sha)], data, cp_repo=cp, users=people, bus=bus
+    )
+    await svc.install("chess", actor_is_admin=True, actor_user_id="anna")
+    await svc.set_enabled("chess", enabled=False, actor_is_admin=True)
+    await svc.request_app("chess", user_id="ben", is_admin=False)
+    asked = [e for e in bus.published if isinstance(e, AppRequested)]
+    assert [(e.app_id, e.requested_by, e.recipients) for e in asked] == [
+        ("chess", "ben", ("anna",))
+    ]
+    # An admin raised the age gate above Kiki's age: as if it didn't exist.
+    await svc.set_min_age("chess", min_age=13, actor_is_admin=True)
+    with pytest.raises(AppNotFoundError):
+        await svc.request_app("chess", user_id="kiki", is_admin=False)
+
+
 async def test_not_now_is_for_admins(tmp_path: Path) -> None:
     bus = _RecordingBus()
     svc, _ = _v2_service(tmp_path, [], bus=bus)

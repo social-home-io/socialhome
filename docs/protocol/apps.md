@@ -102,6 +102,75 @@ sequenceDiagram
 
 No new event type or field the older side can't ignore: a household before this change passes the `close` through to the app as before and keeps its invite until it is played or expires. One decline or withdrawal is one `APP_SESSION` (≈ 200 bytes) to one household — never a fan-out.
 
+**An invite for an app the household doesn't have (D10).** An open addressed
+to one person for an app this household hasn't installed, has turned off, or
+— installed or not — keeps from that person for their age reaches **nobody's
+app** and sends **nothing back**: no reply, no `unavailable`, no read receipt,
+on any transport. R2's automatic "unavailable" answer made every household an
+oracle (which apps it has; person by person, who is age-limited); with no
+answer at all, an invite to a household without the app looks exactly like
+one nobody has answered yet. Instead the invite reaches the **person**:
+
+| Here | The invitee gets | The sender hears |
+|---|---|---|
+| Not installed, the catalog lists it for the invitee | A "Needs you" row `app_challenge_waiting` (`app_session:<app_id>/<session_id>`, `flags: ["app_missing"]`): "Ben · Lakeside invited you to play Chess" — "Chess isn't in your household yet", **Ask an admin** (members), **Ask a grown-up** (protected accounts, to their guardians), **See Chess** (admins), Decline | Nothing — "waiting" until a person answers or the 14-day TTL |
+| Installed but turned off | The same row, `flags: ["app_off"]` — "An admin turned Chess off" | Nothing |
+| Rated above the invitee's age (catalog rating, or the household's own gate for an installed app) | **Nothing** — D5: an app above a protected account's age stays hidden; no guardian is asked either (they would learn of an app the child can't use, and a guardian's ask is the child's own choice to make, from the Apps page) | Nothing |
+| Not in the household's catalog (or the catalog can't be read) | Nothing (as before) | Nothing |
+
+- **Where it is kept.** `app_pending_sessions` has a foreign key to
+  `installed_apps`, so an invite for an app that isn't installed can't be a
+  session row. It is kept in the invitee's Needs-you row: the subject names
+  the app and session, the row's actor is the sender's `remote_users` id
+  (which gives the sending household and username back), `created_at` is
+  when it arrived. No migration, no new table. A turned-off app takes the
+  same path, so there is one rule for both.
+- **The name is the household's own.** The row's app name comes from this
+  household's catalog (or its install, for a turned-off app) — never from
+  the invite. The SPA shows the catalog's name in the viewer's language.
+- **Asking** is the existing request (`POST /api/apps/{id}/requests`, D4):
+  one Needs-you row per decider, grouped per app; asking again changes
+  nothing. For a turned-off app it is an ask to turn it on, answered when an
+  admin does.
+- **When the app arrives** (installed, or turned on): every waiting invite
+  for it is checked again against the receiver rules below (sender still
+  known, no block or guardian block, a household a protected invitee may
+  message, the installed app's age gate and `federation` permission). One
+  that passes becomes a normal invite — an `app_pending_sessions` row with
+  the original arrival time (so the TTL is unchanged) and a fresh
+  `app_challenge` row with Play / Decline (a push per the person's
+  settings); the waiting row resolves `done`. One that doesn't resolves
+  `done`; one past 14 days `expired`. Still nothing goes to the sender: the
+  first thing they hear is the person's move or decline, as with any
+  invite.
+- **Decline** of a waiting invite (`POST …/sessions/{sid}/decline`) marks it
+  `declined` here and sends **nothing**: like a decline for a turned-off app,
+  the sender's invite runs out after 14 days. **Withdrawn**: a `close` from
+  the household and person that sent it resolves the row (`withdrawn`);
+  anyone else's changes nothing.
+- A `continue` (an old game picked up again) for an app that isn't usable
+  here is dropped as before — there is no old game here to continue.
+- **Bounded on the receiver.** The sender's invite caps
+  (`INVITES_OPEN_MAX` / `INVITES_PER_DAY_MAX`) don't bind a household that
+  ignores them, so the receiver keeps **one** waiting row per (invitee,
+  app, sender person): a further invite from the same person for the same
+  app joins it (D7 re-open) — the row moves on to the newest session (the
+  one Play takes in once the app is here), `params.total` counts the
+  invites, and nothing buzzes again. At most `WAITING_SENDERS_MAX` (5)
+  senders' rows wait per invitee and app; a sixth sender's invite is
+  dropped (debug log, no row, nothing sent). Both bounds are applied again
+  when the app arrives: only the newest invite per sender, of the newest
+  five senders, becomes playable; any other row ends `done`. A withdrawal
+  of an older session the row has moved past changes nothing.
+- **Known window.** Waiting invites become playable on the install / turn-on
+  event. If that event is missed (a crash between the install committing and
+  the event), the row keeps saying "isn't in your household yet" until it
+  expires; the person can still decline it.
+- Cost: 0 envelopes on every path (receive, ask, decline, install); at most
+  5 Needs-you rows per invitee and app, each bounded by the 14-day TTL.
+
+`tests/protocol/test_app_invite_waits.py`.
+
 ### Launch context
 
 **"Play" opens the game you were invited to (D12).** Needs you's Play links to `/apps/<id>?session=<sid>` (through `appHref`, so it keeps the HA ingress prefix). The SPA's app host passes the session to the bridge, which takes in that one invite (`POST …/sessions/<sid>/accept`) the first time the app asks for its context — once per page, so Try again or a fresh frame reuses it — and answers `app.context` with a `launch` field:
@@ -693,8 +762,11 @@ household's copy of the same app.
 
 If the app is not installed or not enabled on the receiving household — or
 was installed without the `federation` permission (see
-[Permissions](#permissions)) — the event is silently dropped with a debug log;
-the peer does not receive an error.
+[Permissions](#permissions)) — nothing reaches an app and the peer receives
+nothing (no error, no "unavailable"); the event is dropped with a debug log,
+except an open addressed to one person, which waits for them (see
+*An invite for an app the household doesn't have* under the APP_SESSION
+payload table, D10).
 
 ## Receiver rules
 
@@ -740,6 +812,11 @@ the peer does not receive an error.
   blocked sender is kept or handed over.
 - User-visible effect: an invite from a household user this household
   hasn't synced (or one hidden from it) is not shown.
+- An invite for an app this household doesn't have, has turned off, or
+  keeps from the addressee for their age is never answered — nothing at all
+  goes back, so a household's apps and who in it is age-limited can't be
+  probed. It waits as the addressee's Needs-you row only after every rule
+  above passed, and never for an app rated above their age (D10).
 
 `tests/protocol/test_app_session_scope.py`.
 

@@ -12,6 +12,7 @@ import pytest
 from socialhome.app_keys import (
     app_federation_service_key,
     app_service_key,
+    event_bus_key,
     instance_id_key,
     notification_delivery_key,
 )
@@ -32,8 +33,12 @@ from socialhome.domain.apps import (
     AppSessionUnknownError,
     InstalledApp,
 )
+from socialhome.domain.events import AppInstalled
+from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.user import RemoteUser
 from socialhome.federation.federation_service import FederationService
 from socialhome.repositories.app_repo import SqliteAppRepo
+from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.app_federation_service import AppFederationService
 from socialhome.services.app_service import AppService
 
@@ -839,8 +844,11 @@ async def test_store_key_too_long_413(client):
 
 @pytest.fixture
 def fed_svc():
-    """A stub AppFederationService; see the module's ``client``."""
-    return AsyncMock(spec=AppFederationService)
+    """A stub AppFederationService; see the module's ``client``. No invite
+    waits for its app (D10) unless a test says so."""
+    svc = AsyncMock(spec=AppFederationService)
+    svc.decline_waiting.return_value = False
+    return svc
 
 
 @pytest.fixture
@@ -2325,6 +2333,118 @@ async def test_member_asks_an_admin_and_sees_it_asked(client, monkeypatch):
     await client.app[notification_delivery_key].drain()
     r = await client.get("/api/apps/catalog", headers=_auth(member_tok))
     assert (await r.json())["apps"][0]["requested"] is False
+
+
+async def _seed_lakeside_ben(db) -> None:
+    """A paired household ("Lakeside") and Ben, one of its people."""
+    await db.enqueue(
+        "INSERT INTO remote_instances(id, display_name, remote_identity_pk,"
+        " key_self_to_remote, key_remote_to_self, remote_inbox_url,"
+        " local_inbox_id, status, source) VALUES('lakeside', 'Lakeside', ?,"
+        " 'k1', 'k2', 'https://lakeside/wh', 'wh-lakeside', 'confirmed',"
+        " 'manual')",
+        ("00" * 32,),
+    )
+    await SqliteUserRepo(db).upsert_remote(
+        RemoteUser(
+            user_id="r-ben",
+            instance_id="lakeside",
+            remote_username="ben",
+            display_name="Ben",
+        )
+    )
+
+
+async def _ben_invites_bob(client, session_id: str) -> None:
+    """Ben (Lakeside) invites Bob to Chess — as the §24.11 pipeline hands
+    the decrypted ``APP_SESSION`` open to the app federation service."""
+    await client.app[app_federation_service_key].on_inbound_event(
+        FederationEvent(
+            msg_id=f"m-{session_id}",
+            event_type=FederationEventType.APP_SESSION,
+            from_instance="lakeside",
+            to_instance="self",
+            timestamp="2026-10-29T10:00:00+00:00",
+            payload={
+                "app_id": "chess",
+                "session_id": session_id,
+                "verb": "open",
+                "to_user": "bob",
+                "from_user": "ben",
+            },
+        )
+    )
+    await client.app[notification_delivery_key].drain()
+
+
+async def test_an_invite_for_an_app_we_dont_have_waits_and_becomes_playable(
+    client, monkeypatch
+):
+    """D10 end to end: the invite reaches Bob as "Ask an admin"; Decline
+    works without the app; adding the app turns a waiting invite into
+    Play / Decline."""
+    monkeypatch.setattr(
+        AppService, "browse_catalog", AsyncMock(return_value=[_v2_catalog_entry()])
+    )
+    bob_tok = await _seed_member(client._db)
+    await _seed_lakeside_ben(client._db)
+    await _ben_invites_bob(client, "s0")
+    await _ben_invites_bob(client, "s1")
+
+    # One row per sender: Ben's second invite joins his row (newest session).
+    [item] = await _needs_you(client, bob_tok)
+    assert item["object_key"] == "app_session:chess/s1"
+    assert item["params"]["total"] == 2
+    assert item["type"] == "app_challenge_waiting"
+    assert item["title"] == "Ben · Lakeside invited you to play Chess"
+    assert item["params"]["flags"] == ["app_missing"]
+    assert item["params"]["space_name"] == "Chess"
+    assert item["link_url"] == "/apps/chess/about"
+
+    # Decline without the app: the row reads declined, nothing else.
+    r = await client.post("/api/apps/chess/sessions/s1/decline", headers=_auth(bob_tok))
+    assert r.status == 200
+    assert await _needs_you(client, bob_tok) == []
+    # A second tap: the invite no longer waits (and the app isn't here).
+    r = await client.post("/api/apps/chess/sessions/s1/decline", headers=_auth(bob_tok))
+    assert r.status == 404
+    # A new invite from Ben after the decline waits again.
+    await _ben_invites_bob(client, "s2")
+    assert [i["object_key"] for i in await _needs_you(client, bob_tok)] == [
+        "app_session:chess/s2"
+    ]
+
+    # Asking for it is the existing request ("Ask an admin").
+    r = await client.post("/api/apps/chess/requests", headers=_auth(bob_tok))
+    assert r.status == 202
+
+    # The admin adds Chess: s2 becomes a normal invite.
+    await _seed_installed_enabled_app(client._db, app_id="chess")
+    await client.app[event_bus_key].publish(
+        AppInstalled(app_id="chess", name="Chess", installed_by="")
+    )
+    await client.app[notification_delivery_key].drain()
+    [item] = await _needs_you(client, bob_tok)
+    assert item["type"] == "app_challenge"
+    assert item["object_key"] == "app_session:chess/s2"
+    invite = await SqliteAppRepo(client._db).get_pending_session(
+        "chess", "bob-id", "s2"
+    )
+    assert invite is not None
+    assert (invite.from_instance, invite.from_user) == ("lakeside", "ben")
+
+
+async def test_ask_to_turn_on_a_turned_off_app(client, monkeypatch):
+    monkeypatch.setattr(
+        AppService, "browse_catalog", AsyncMock(return_value=[_v2_catalog_entry()])
+    )
+    member_tok = await _seed_member(client._db)
+    await _seed_installed_enabled_app(client._db, app_id="chess")
+    r = await client.post("/api/apps/chess/requests", headers=_auth(member_tok))
+    assert r.status == 409  # on: nothing to ask for
+    await SqliteAppRepo(client._db).set_enabled("chess", enabled=False)
+    r = await client.post("/api/apps/chess/requests", headers=_auth(member_tok))
+    assert r.status == 202
 
 
 async def test_ask_an_admin_refusals(client, monkeypatch):

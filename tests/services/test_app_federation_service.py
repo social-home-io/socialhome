@@ -25,6 +25,7 @@ from socialhome.domain.apps import (
     INVITES_OPEN_MAX,
     INVITES_PER_DAY_MAX,
     AppAgeRestrictedError,
+    AppCatalogEntry,
     AppChallengeHandledError,
     AppContactNotFoundError,
     AppInviteLimitError,
@@ -41,7 +42,10 @@ from socialhome.domain.events import (
     AppChallengeDeclined,
     AppChallengeEnded,
     AppChallengeReceived,
+    AppChallengeWaiting,
+    AppEnabledChanged,
     AppGameEnded,
+    AppInstalled,
 )
 from socialhome.domain.federation import (
     FederationEvent,
@@ -49,6 +53,12 @@ from socialhome.domain.federation import (
     InstanceSource,
     PairingStatus,
     RemoteInstance,
+)
+from socialhome.domain.notification import (
+    Notification,
+    NotificationActor,
+    NotificationHandled,
+    NotificationParams,
 )
 from socialhome.domain.user import RemoteUser, User
 from socialhome.services.app_federation_service import (
@@ -290,6 +300,9 @@ class _FakeUserRepo:
 
     async def is_blocked(self, blocker_user_id: str, blocked_user_id: str) -> bool:
         return (blocker_user_id, blocked_user_id) in self._block_pairs
+
+    async def get_remote(self, user_id: str) -> RemoteUser | None:
+        return next((r for r in self._remote_users if r.user_id == user_id), None)
 
     async def get_remote_by_member(
         self, instance_id: str, remote_username: str
@@ -4140,6 +4153,513 @@ async def test_a_local_continue_asks_the_person_here():
     assert ev.continued and ev.to_user_id == "u-ann"
 
 
+# ─── D10: an invite for an app this household doesn't have waits ──────────────
+#
+# Not installed / turned off / not allowed for the person: the invite still
+# reaches the person (a waiting "Needs you" row, named from this household's
+# catalog), never anything back to the sender; it becomes a normal invite
+# once the app is added or turned on.
+
+
+class _FakeNotifRepo:
+    """The notification rows the service reads (``find`` on equality)."""
+
+    def __init__(self, rows: list | None = None) -> None:
+        self.rows: list = rows or []
+
+    async def find(self, spec) -> list:
+        out = list(self.rows)
+        for col, op, value in spec.where:
+            assert op == "="
+            out = [n for n in out if getattr(n, col) == value]
+        return out
+
+
+class _FakeCatalog:
+    """The catalog as AppService.browse_catalog_for shows it to a person —
+    with the D5 age filter (the catalog's rating)."""
+
+    def __init__(self, entries: list, cp: _FakeCpRepo | None = None) -> None:
+        self.entries = entries
+        self.cp = cp
+        self.fail = False
+
+    async def browse_catalog_for(self, *, user_id: str, is_admin: bool) -> list:
+        if self.fail:
+            raise RuntimeError("catalog unreachable")
+        p = self.cp._records.get(user_id) if self.cp else None
+        if p and p["child_protection_enabled"]:
+            return [e for e in self.entries if (e.min_age or 0) <= p["declared_age"]]
+        return list(self.entries)
+
+
+def _catalog_chess(**kw) -> AppCatalogEntry:
+    return AppCatalogEntry(
+        app_id="chess",
+        name="Chess",
+        latest_version="2026.10.29",
+        description="Play chess",
+        icon_url=None,
+        capabilities=("storage", "federation"),
+        bundle_url="https://example.com/chess.tgz",
+        bundle_sha256="x",
+        **kw,
+    )
+
+
+_BEN = _make_remote_user(
+    user_id="ru-ben",
+    instance_id="peer-inst-id",
+    remote_username="ben",
+    display_name="Ben",
+)
+_MILO = _make_user("u-milo", "milo", "Milo")
+
+
+def _waiting_svc(
+    *,
+    apps: dict | None = None,
+    entries: list | None = None,
+    cp_repo: _FakeCpRepo | None = None,
+    block_pairs: set | None = None,
+    rows: list | None = None,
+):
+    bus = _FakeBus()
+    notifs = _FakeNotifRepo(rows)
+    catalog = _FakeCatalog(
+        [_catalog_chess()] if entries is None else entries, cp=cp_repo
+    )
+    svc, fed, ws = _make_svc(
+        apps=apps or {},
+        users=[_MILO],
+        remote_users=[_BEN],
+        instances=[_make_remote_instance(display_name="Lakeside")],
+        cp_repo=cp_repo,
+        block_pairs=block_pairs,
+        bus=bus,
+    )
+    svc._notifs = notifs  # type: ignore[assignment]
+    svc._catalog = catalog  # type: ignore[assignment]
+    return svc, fed, ws, bus, notifs, catalog
+
+
+def _open_event(session_id: str = "s1", **extra) -> FederationEvent:
+    return _make_event(
+        FederationEventType.APP_SESSION,
+        {
+            "app_id": "chess",
+            "session_id": session_id,
+            "verb": "open",
+            "to_user": "milo",
+            "from_user": "ben",
+            **extra,
+        },
+    )
+
+
+def _waits(bus: _FakeBus) -> list[AppChallengeWaiting]:
+    return [e for e in bus.published if isinstance(e, AppChallengeWaiting)]
+
+
+def _nothing_sent(fed: _FakeFederation, ws: _FakeWs) -> None:
+    """The sender learns nothing: no envelope, no frame, of any kind."""
+    assert fed.sent_events == []
+    assert fed.sent_app_messages == []
+    assert ws.calls == []
+    assert ws.user_calls == []
+
+
+@pytest.mark.asyncio
+async def test_invite_for_an_app_not_installed_waits_for_the_person():
+    svc, fed, ws, bus, _, _ = _waiting_svc()
+    await svc.on_inbound_event(_open_event())
+    [w] = _waits(bus)
+    assert (w.app_id, w.session_id, w.to_user_id) == ("chess", "s1", "u-milo")
+    assert w.reason == "app_missing"
+    assert w.app_name == "Chess"  # the household's catalog, not the invite
+    assert w.from_user_id == "ru-ben"
+    assert w.from_display == "Ben · Lakeside"
+    # No session row (the app isn't here); nothing to the sender.
+    assert svc._app_repo.pending == []
+    _nothing_sent(fed, ws)
+
+
+@pytest.mark.asyncio
+async def test_invite_names_the_app_from_the_catalog_never_the_payload():
+    svc, _, _, bus, _, _ = _waiting_svc()
+    await svc.on_inbound_event(_open_event(name="Free Prizes", app_name="Free"))
+    [w] = _waits(bus)
+    assert w.app_name == "Chess"
+
+
+@pytest.mark.asyncio
+async def test_invite_for_a_turned_off_app_waits_with_its_reason():
+    app = _make_installed_app("chess", enabled=False)
+    svc, fed, ws, bus, _, _ = _waiting_svc(apps={"chess": app}, entries=[])
+    await svc.on_inbound_event(_open_event())
+    [w] = _waits(bus)
+    assert w.reason == "app_off"
+    assert w.app_name == "Chess"
+    assert svc._app_repo.pending == []
+    _nothing_sent(fed, ws)
+
+
+@pytest.mark.asyncio
+async def test_invite_for_an_app_the_catalog_doesnt_list_is_dropped():
+    svc, fed, ws, bus, _, _ = _waiting_svc(entries=[])
+    await svc.on_inbound_event(_open_event())
+    assert _waits(bus) == []
+    _nothing_sent(fed, ws)
+
+
+@pytest.mark.asyncio
+async def test_invite_is_dropped_when_the_catalog_cant_be_read():
+    svc, fed, ws, bus, _, catalog = _waiting_svc()
+    catalog.fail = True
+    await svc.on_inbound_event(_open_event())
+    assert _waits(bus) == []
+    _nothing_sent(fed, ws)
+
+
+@pytest.mark.asyncio
+async def test_age_gated_child_gets_no_row_for_a_missing_app():
+    """D5: an app rated above a protected child's age stays hidden — no
+    row for the child, no ask to a guardian, nothing to the sender."""
+    cp = _FakeCpRepo()
+    cp.add("u-milo", enabled=True, declared_age=9)
+    svc, fed, ws, bus, _, _ = _waiting_svc(
+        entries=[_catalog_chess(min_age=13)], cp_repo=cp
+    )
+    await svc.on_inbound_event(_open_event())
+    assert bus.published == []
+    _nothing_sent(fed, ws)
+
+
+@pytest.mark.asyncio
+async def test_age_gated_child_gets_no_row_for_a_turned_off_app():
+    cp = _FakeCpRepo()
+    cp.add("u-milo", enabled=True, declared_age=9)
+    app = _make_installed_app("chess", enabled=False, min_age=13)
+    svc, fed, ws, bus, _, _ = _waiting_svc(apps={"chess": app}, cp_repo=cp)
+    await svc.on_inbound_event(_open_event())
+    assert bus.published == []
+    _nothing_sent(fed, ws)
+
+
+@pytest.mark.asyncio
+async def test_child_old_enough_gets_the_waiting_row():
+    cp = _FakeCpRepo()
+    cp.add("u-milo", enabled=True, declared_age=14)
+    svc, _, _, bus, _, _ = _waiting_svc(
+        entries=[_catalog_chess(min_age=13)], cp_repo=cp
+    )
+    await svc.on_inbound_event(_open_event())
+    assert len(_waits(bus)) == 1
+
+
+@pytest.mark.asyncio
+async def test_invite_from_a_blocked_sender_leaves_no_row():
+    svc, fed, ws, bus, _, _ = _waiting_svc(block_pairs={("u-milo", "ru-ben")})
+    await svc.on_inbound_event(_open_event())
+    assert bus.published == []
+    _nothing_sent(fed, ws)
+
+
+@pytest.mark.asyncio
+async def test_invite_across_a_guardian_block_leaves_no_row():
+    svc, fed, ws, bus, _, _ = _waiting_svc()
+    svc.attach_child_protection(  # type: ignore[arg-type]
+        _FakeChildProtection({frozenset({"u-milo", "ru-ben"})})
+    )
+    await svc.on_inbound_event(_open_event())
+    assert _waits(bus) == []
+    _nothing_sent(fed, ws)
+
+
+@pytest.mark.asyncio
+async def test_protected_invitee_only_from_a_household_it_may_message():
+    svc, fed, ws, bus, _, _ = _waiting_svc()
+    gate = _FakeChildProtection({frozenset({"u-milo", "someone-else"})})
+    gate.no_dm.add(("u-milo", "peer-inst-id"))
+    svc.attach_child_protection(gate)  # type: ignore[arg-type]
+    await svc.on_inbound_event(_open_event())
+    assert _waits(bus) == []
+    _nothing_sent(fed, ws)
+
+
+@pytest.mark.asyncio
+async def test_invite_from_an_unknown_sender_or_to_nobody_leaves_no_row():
+    svc, fed, ws, bus, _, _ = _waiting_svc()
+    await svc.on_inbound_event(_open_event(from_user="stranger"))
+    await svc.on_inbound_event(_open_event("s2", to_user="nobody"))
+    assert bus.published == []
+    _nothing_sent(fed, ws)
+
+
+@pytest.mark.asyncio
+async def test_a_continue_or_a_message_for_a_missing_app_leaves_no_row():
+    svc, fed, ws, bus, _, _ = _waiting_svc()
+    await svc.on_inbound_event(_open_event(verb="continue"))
+    await svc.on_inbound_event(
+        _make_event(
+            FederationEventType.APP_MESSAGE,
+            {
+                "app_id": "chess",
+                "session_id": "s1",
+                "to_user": "milo",
+                "from_user": "ben",
+                "data": {"move": "e4"},
+            },
+        )
+    )
+    assert bus.published == []
+    _nothing_sent(fed, ws)
+
+
+@pytest.mark.asyncio
+async def test_odd_session_id_leaves_no_row():
+    svc, _, _, bus, _, _ = _waiting_svc()
+    await svc.on_inbound_event(_open_event("a/b"))
+    assert bus.published == []
+
+
+@pytest.mark.asyncio
+async def test_app_without_federation_permission_leaves_no_row():
+    off = _make_installed_app("chess", enabled=False, capabilities=("storage",))
+    svc, _, _, bus, _, _ = _waiting_svc(apps={"chess": off})
+    await svc.on_inbound_event(_open_event())
+    svc2, _, _, bus2, _, _ = _waiting_svc(
+        entries=[_catalog_chess(permissions=("storage",))]
+    )
+    await svc2.on_inbound_event(_open_event())
+    assert bus.published == []
+    assert bus2.published == []
+
+
+def _waiting_row(
+    *,
+    user_id: str = "u-milo",
+    session_id: str = "s1",
+    actor: str = "ru-ben",
+    created_at: str | None = None,
+    reason: str = "app_missing",
+    handled: bool = False,
+) -> Notification:
+    return Notification(
+        id=f"n-{user_id}-{session_id}",
+        user_id=user_id,
+        type="app_challenge_waiting",
+        title="Ben invited you to play Chess",
+        created_at=created_at or datetime.now(UTC).isoformat(),
+        object_key=f"app_session:chess/{session_id}",
+        params=NotificationParams(
+            actors=(NotificationActor(actor, "Ben"),),
+            actor_count=1,
+            space_name="Chess",
+            flags=(reason,),
+            handled=NotificationHandled("declined") if handled else None,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_same_invite_again_keeps_one_row():
+    svc, _, _, bus, _, _ = _waiting_svc(rows=[_waiting_row()])
+    await svc.on_inbound_event(_open_event())
+    assert _waits(bus) == []
+
+
+@pytest.mark.asyncio
+async def test_turned_off_app_never_re_points_a_known_session():
+    app = _make_installed_app("chess", enabled=False)
+    svc, _, _, bus, _, _ = _waiting_svc(apps={"chess": app})
+    await svc._app_repo.add_pending_session(
+        AppPendingSession(
+            app_id="chess",
+            user_id="u-milo",
+            session_id="s1",
+            from_instance="other",
+            from_user="eve",
+            payload={},
+            created_at=datetime.now(UTC).isoformat(),
+        )
+    )
+    await svc.on_inbound_event(_open_event())
+    assert _waits(bus) == []
+
+
+@pytest.mark.asyncio
+async def test_sender_withdraws_a_waiting_invite():
+    svc, fed, ws, bus, _, _ = _waiting_svc(rows=[_waiting_row()])
+    await svc.on_inbound_event(_open_event(verb="close", reason="withdrawn"))
+    [ended] = [e for e in bus.published if isinstance(e, AppChallengeEnded)]
+    assert ended.outcome == "withdrawn"
+    assert (ended.user_id, ended.session_ids) == ("u-milo", ("s1",))
+    _nothing_sent(fed, ws)
+
+
+@pytest.mark.asyncio
+async def test_only_the_sender_withdraws_a_waiting_invite():
+    eve = _make_remote_user("ru-eve", "peer-inst-id", "eve", "Eve")
+    svc, _, _, bus, _, _ = _waiting_svc(rows=[_waiting_row()])
+    svc._user_repo._remote_users.append(eve)  # type: ignore[attr-defined]
+    await svc.on_inbound_event(
+        _open_event(verb="close", reason="withdrawn", from_user="eve")
+    )
+    await svc.on_inbound_event(
+        _open_event("s9", verb="close", reason="withdrawn", from_user="ghost")
+    )
+    assert bus.published == []
+
+
+@pytest.mark.asyncio
+async def test_decline_a_waiting_invite_sends_nothing():
+    svc, fed, ws, bus, _, _ = _waiting_svc(rows=[_waiting_row()])
+    assert await svc.decline_waiting(
+        app_id="chess", session_id="s1", actor_user_id="u-milo"
+    )
+    [ended] = bus.published
+    assert isinstance(ended, AppChallengeEnded)
+    assert ended.outcome == "declined"
+    _nothing_sent(fed, ws)
+
+
+@pytest.mark.asyncio
+async def test_decline_waiting_is_false_without_such_an_invite():
+    svc, _, _, bus, _, _ = _waiting_svc(rows=[_waiting_row(handled=True)])
+    assert not await svc.decline_waiting(
+        app_id="chess", session_id="s1", actor_user_id="u-milo"
+    )
+    # Someone else's invite isn't theirs to decline.
+    assert not await svc.decline_waiting(
+        app_id="chess", session_id="s1", actor_user_id="u-other"
+    )
+    assert bus.published == []
+
+
+@pytest.mark.asyncio
+async def test_without_notifications_wired_nothing_waits():
+    svc, fed, ws = _make_svc(users=[_MILO], remote_users=[_BEN], bus=_FakeBus())
+    assert not await svc.decline_waiting(
+        app_id="chess", session_id="s1", actor_user_id="u-milo"
+    )
+    await svc.on_inbound_event(_open_event())
+    await svc.on_app_usable(AppEnabledChanged(app_id="chess", enabled=True))
+    assert svc._bus.published == []  # type: ignore[union-attr]
+    _nothing_sent(fed, ws)
+
+
+def _installed() -> AppInstalled:
+    return AppInstalled(app_id="chess", name="Chess", installed_by="anna")
+
+
+@pytest.mark.asyncio
+async def test_installing_the_app_makes_the_waiting_invite_playable():
+    created = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    svc, fed, ws, bus, _, _ = _waiting_svc(
+        apps={"chess": _make_installed_app("chess")},
+        rows=[_waiting_row(created_at=created)],
+    )
+    await svc.on_app_usable(_installed())
+    [invite] = svc._app_repo.invites
+    assert (invite.user_id, invite.session_id) == ("u-milo", "s1")
+    assert (invite.from_instance, invite.from_user) == ("peer-inst-id", "ben")
+    # The TTL counts from when the invite arrived.
+    assert invite.created_at == created
+    assert invite.payload == {"app_id": "chess", "session_id": "s1", "verb": "open"}
+    [received] = [e for e in bus.published if isinstance(e, AppChallengeReceived)]
+    assert received.to_user_id == "u-milo"
+    assert received.from_user_id == "ru-ben"
+    assert received.from_display == "Ben · Lakeside"
+    # Becoming playable is local: still nothing to the sender.
+    _nothing_sent(fed, ws)
+
+
+@pytest.mark.asyncio
+async def test_turning_the_app_on_makes_the_waiting_invite_playable():
+    svc, _, _, bus, _, _ = _waiting_svc(
+        apps={"chess": _make_installed_app("chess")},
+        rows=[_waiting_row(reason="app_off")],
+    )
+    await svc.on_app_usable(AppEnabledChanged(app_id="chess", enabled=False))
+    assert bus.published == []
+    await svc.on_app_usable(AppEnabledChanged(app_id="chess", enabled=True))
+    assert len(svc._app_repo.invites) == 1
+
+
+@pytest.mark.asyncio
+async def test_app_still_off_or_gone_makes_nothing_playable():
+    off = _make_installed_app("chess", enabled=False)
+    svc, _, _, bus, _, _ = _waiting_svc(apps={"chess": off}, rows=[_waiting_row()])
+    await svc.on_app_usable(_installed())
+    svc2, _, _, bus2, _, _ = _waiting_svc(rows=[_waiting_row()])
+    await svc2.on_app_usable(_installed())
+    assert bus.published == []
+    assert bus2.published == []
+
+
+@pytest.mark.asyncio
+async def test_a_waiting_invite_past_its_ttl_expires_on_install():
+    old = (datetime.now(UTC) - timedelta(days=15)).isoformat()
+    svc, _, _, bus, _, _ = _waiting_svc(
+        apps={"chess": _make_installed_app("chess")},
+        rows=[_waiting_row(created_at=old)],
+    )
+    await svc.on_app_usable(_installed())
+    [ended] = bus.published
+    assert isinstance(ended, AppChallengeEnded)
+    assert ended.outcome == "expired"
+    assert svc._app_repo.pending == []
+
+
+@pytest.mark.asyncio
+async def test_install_rechecks_the_receiver_rules():
+    """A block since, the installed app's age gate, a sender gone, an
+    install without ``federation``: the invite ends ``done`` instead."""
+    cp = _FakeCpRepo()
+    cp.add("u-milo", enabled=True, declared_age=9)
+    cases = [
+        _waiting_svc(
+            apps={"chess": _make_installed_app("chess")},
+            rows=[_waiting_row()],
+            block_pairs={("u-milo", "ru-ben")},
+        ),
+        _waiting_svc(
+            apps={"chess": _make_installed_app("chess", min_age=13)},
+            rows=[_waiting_row()],
+            cp_repo=cp,
+        ),
+        _waiting_svc(
+            apps={"chess": _make_installed_app("chess")},
+            rows=[_waiting_row(actor="ru-gone")],
+        ),
+        _waiting_svc(
+            apps={"chess": _make_installed_app("chess", capabilities=("storage",))},
+            rows=[_waiting_row()],
+        ),
+    ]
+    for svc, fed, ws, bus, _, _ in cases:
+        await svc.on_app_usable(_installed())
+        [ended] = bus.published
+        assert isinstance(ended, AppChallengeEnded)
+        assert ended.outcome == "done"
+        assert svc._app_repo.pending == []
+        _nothing_sent(fed, ws)
+
+
+@pytest.mark.asyncio
+async def test_install_leaves_other_apps_and_handled_rows_alone():
+    other = dataclasses.replace(
+        _waiting_row(session_id="s2"), object_key="app_session:checkers/s2"
+    )
+    svc, _, _, bus, _, _ = _waiting_svc(
+        apps={"chess": _make_installed_app("chess")},
+        rows=[other, _waiting_row(handled=True)],
+    )
+    await svc.on_app_usable(_installed())
+    assert bus.published == []
+
+
 # ─── Uninstall tells opponents (D9, v_72) ─────────────────────────────────────
 
 
@@ -4510,3 +5030,74 @@ async def test_only_the_other_side_can_end_a_game(from_instance, from_user):
     (row,) = svc._app_repo.pending
     assert row.held is None and row.state == "active"
     assert _game_ended(bus) == [] and ws.user_calls == []
+
+
+# ─── D10 bounds: one row per sender person, at most 5 senders ────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_repeat_from_the_same_sender_joins_their_row():
+    """The service hands the newer invite on (the notification service
+    folds it into the sender's row) — it never counts as a new sender."""
+    others = [_waiting_row(session_id=f"o{i}", actor=f"ru-{i}") for i in range(4)]
+    svc, fed, ws, bus, _, _ = _waiting_svc(rows=[_waiting_row(), *others])
+    await svc.on_inbound_event(_open_event("s2"))
+    [w] = _waits(bus)
+    assert (w.session_id, w.from_user_id) == ("s2", "ru-ben")
+    _nothing_sent(fed, ws)
+
+
+@pytest.mark.asyncio
+async def test_a_sixth_sender_is_dropped_silently():
+    rows = [_waiting_row(session_id=f"o{i}", actor=f"ru-{i}") for i in range(5)]
+    svc, fed, ws, bus, _, _ = _waiting_svc(rows=rows)
+    await svc.on_inbound_event(_open_event("s9"))
+    assert _waits(bus) == []
+    _nothing_sent(fed, ws)
+
+
+@pytest.mark.asyncio
+async def test_install_makes_only_the_newest_invite_per_sender_playable():
+    now = datetime.now(UTC)
+    old = _waiting_row(
+        session_id="s1", created_at=(now - timedelta(hours=2)).isoformat()
+    )
+    new = _waiting_row(
+        session_id="s2", created_at=(now - timedelta(hours=1)).isoformat()
+    )
+    svc, _, _, bus, _, _ = _waiting_svc(
+        apps={"chess": _make_installed_app("chess")}, rows=[old, new]
+    )
+    await svc.on_app_usable(_installed())
+    assert [p.session_id for p in svc._app_repo.invites] == ["s2"]
+    [ended] = [e for e in bus.published if isinstance(e, AppChallengeEnded)]
+    assert (ended.session_ids, ended.outcome) == (("s1",), "done")
+
+
+@pytest.mark.asyncio
+async def test_install_keeps_the_newest_five_senders():
+    """Six senders' rows (only possible from before the bound): the oldest
+    sender's ends ``done`` and never becomes playable."""
+    now = datetime.now(UTC)
+    newer = [
+        _waiting_row(
+            session_id=f"n{i}",
+            actor=f"ru-n{i}",
+            created_at=(now - timedelta(minutes=i)).isoformat(),
+        )
+        for i in range(5)
+    ]
+    oldest = _waiting_row(
+        session_id="s1", created_at=(now - timedelta(hours=3)).isoformat()
+    )
+    svc, _, _, bus, _, _ = _waiting_svc(
+        apps={"chess": _make_installed_app("chess")}, rows=[*newer, oldest]
+    )
+    await svc.on_app_usable(_installed())
+    ended = {
+        e.session_ids[0]: e.outcome
+        for e in bus.published
+        if isinstance(e, AppChallengeEnded)
+    }
+    assert ended["s1"] == "done"
+    assert all(p.session_id != "s1" for p in svc._app_repo.invites)

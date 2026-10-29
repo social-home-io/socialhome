@@ -15,7 +15,10 @@
  *   card asks a local community's location consent, so never a one-tap
  *   join — plus Decline. A game invite gets
  *   "Play" (opens the app, which takes the invite in) / Decline (their app
- *   hears it). An app update (admins, D7) gets "Update" — one tap, or the
+ *   hears it). A game invite for an app the household doesn't have, or
+ *   turned off (D10), gets "Ask an admin" ("Ask a grown-up"; admins: "See
+ *   Chess") / Decline — nothing goes to the sender either way; it turns
+ *   into Play once the app is there. An app update (admins, D7) gets "Update" — one tap, or the
  *   consent dialog when the version asks for new permissions — and
  *   "What's new". Everything else gets "Review".
  * - **Decline waits 5 s** behind an Undo toast before it is sent (a
@@ -40,6 +43,7 @@ export const NEEDS_YOU_TYPES: ReadonlySet<string> = new Set([
   'pairing_request',
   'app_challenge',
   'app_challenge_continue',
+  'app_challenge_waiting',
   'app_request',
   'app_update',
 ])
@@ -58,7 +62,7 @@ export type NeedsYouEntry =
   | { kind: 'single', key: string, row: Notification }
   | { kind: 'group', key: string, spaceId: string, rows: Notification[] }
 
-export type InlineAction = 'decide' | 'invite' | 'game' | 'update' | 'review'
+export type InlineAction = 'decide' | 'invite' | 'game' | 'waiting' | 'update' | 'review'
 
 function itemKey(n: Notification): string {
   return n.object_key || n.id
@@ -109,10 +113,20 @@ function isGame(type: string): boolean {
   return type === 'app_challenge' || type === 'app_challenge_continue'
 }
 
+/** A game invite that waits for its app (D10): the household doesn't
+ *  have it (``app_missing``) or an admin turned it off (``app_off``). */
+export const WAITING_GAME = 'app_challenge_waiting'
+
+/** Why *n* (a waiting game invite) waits: ``app_off`` or ``app_missing``. */
+export function waitingReason(n: Notification): 'app_off' | 'app_missing' {
+  return n.params?.flags?.includes('app_off') ? 'app_off' : 'app_missing'
+}
+
 /** What an item offers inline (the safety rules above). */
 export function inlineAction(n: Notification): InlineAction {
   if (n.type === 'space_invite') return 'invite'
   if (isGame(n.type) && n.object_key?.startsWith('app_session:')) return 'game'
+  if (n.type === WAITING_GAME && n.object_key?.startsWith('app_session:')) return 'waiting'
   if (n.type === 'app_update' && n.object_key?.startsWith('app:')) return 'update'
   if (
     n.type === 'space_join_requested'
@@ -223,7 +237,7 @@ export function approve(n: Notification): Promise<void> {
 }
 
 /** ``app_session:<app_id>/<session_id>`` → its two parts. */
-function gameOf(n: Notification): { appId: string, sessionId: string } {
+export function gameOf(n: Notification): { appId: string, sessionId: string } {
   const id = idOf(n)
   const cut = id.lastIndexOf('/')
   return { appId: id.slice(0, cut), sessionId: id.slice(cut + 1) }
@@ -245,7 +259,9 @@ async function sendDecline(n: Notification): Promise<void> {
     await api.post(`/api/spaces/${n.space_id}/join-requests/${idOf(n)}/deny`, undefined, { keepalive: true })
     return
   }
-  if (isGame(n.type)) {
+  // A waiting invite is declined the same way (nothing reaches the app or
+  // the sender: the server only marks it declined).
+  if (isGame(n.type) || n.type === WAITING_GAME) {
     const { appId, sessionId } = gameOf(n)
     await api.post(
       `/api/apps/${encodeURIComponent(appId)}/sessions/${encodeURIComponent(sessionId)}/decline`,
@@ -273,6 +289,7 @@ const DECLINE_TEXT: Record<string, readonly [string, string]> = {
   space_invite: ['notifications.needs_you.declining_invite', 'notifications.needs_you.invite_declined'],
   app_challenge: ['notifications.needs_you.declining_game', 'notifications.needs_you.game_declined'],
   app_challenge_continue: ['notifications.needs_you.declining_game', 'notifications.needs_you.game_declined'],
+  app_challenge_waiting: ['notifications.needs_you.declining_game', 'notifications.needs_you.game_declined'],
 }
 
 /** Declines waiting out their undo window, by item key. */

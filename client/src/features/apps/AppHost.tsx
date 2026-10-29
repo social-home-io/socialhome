@@ -49,7 +49,7 @@
 import type { ComponentChildren } from 'preact'
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
 import { useLocation, useRoute } from 'preact-iso'
-import { getRuntime, setEnabled, type AppRuntime } from '@/store/apps'
+import { catalog, catalogLoaded, getRuntime, loadCatalog, localized, setEnabled, type AppRuntime } from '@/store/apps'
 import { currentUser } from '@/store/auth'
 import { useTitle } from '@/store/pageTitle'
 import { mountBridge, type PickedPerson, type PickRequest } from '@/features/apps/bridge'
@@ -62,7 +62,7 @@ import { ApiError } from '@/api'
 import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
-import { t } from '@/i18n/i18n'
+import { locale, t } from '@/i18n/i18n'
 
 /** No word from the app after this long → "taking longer than usual". */
 export const SLOW_MS = 8_000
@@ -123,7 +123,14 @@ export function AppHostInner({ appId, sessionId }: {
   const { route }             = useLocation()
   const isAdmin               = !!currentUser.value?.is_admin
 
-  const name = runtime?.name ?? (state.kind === 'off' ? state.name : null)
+  // The app's name in the viewer's language (the catalog's ``i18n``),
+  // else the name it was installed under.
+  const entry = catalog.value.find(e => e.app_id === appId)
+  const installedName = runtime?.name ?? (state.kind === 'off' ? state.name : null)
+  const name = installedName && entry ? localized(entry, locale.value || 'en').name : installedName
+  useEffect(() => {
+    if (!catalogLoaded.value) void loadCatalog()
+  }, [])
   // The topbar names the section; the host bar's heading names the app
   // (three "Chess" lines stacked on a phone otherwise). Set here so a
   // deep link doesn't keep the previous page's title.
@@ -245,7 +252,7 @@ export function AppHostInner({ appId, sessionId }: {
   }
 
   const label = name ?? appId
-  const startLabel = runtime ? t('apps.host.starting', { name: runtime.name }) : t('apps.host.loading')
+  const startLabel = runtime ? t('apps.host.starting', { name: name ?? runtime.name }) : t('apps.host.loading')
 
   return (
     <div class="sh-app-host">
@@ -277,7 +284,7 @@ export function AppHostInner({ appId, sessionId }: {
             ref={iframeRef}
             class={`sh-app-frame${state.kind === 'ready' ? '' : ' sh-app-frame--pending'}`}
             src={addBase(runtime.entry_url)}
-            title={runtime.name}
+            title={name ?? runtime.name}
             sandbox="allow-scripts"
             style={{ colorScheme: scheme }}
             aria-hidden={state.kind === 'ready' ? undefined : 'true'}
@@ -351,7 +358,7 @@ export function AppHostInner({ appId, sessionId }: {
       {pick && runtime && (
         <InviteSheet
           appId={runtime.app_id}
-          appName={runtime.name}
+          appName={name ?? runtime.name}
           request={pick.req}
           onDone={(picked) => {
             pick.resolve(picked)

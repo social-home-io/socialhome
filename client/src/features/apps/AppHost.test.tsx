@@ -23,9 +23,21 @@ vi.mock('@/store/auth', () => ({ currentUser: user.currentUser }))
 // ── Mock @/store/apps ─────────────────────────────────────────────────────
 // Default: resolved runtime. Individual tests override with
 // mockRejectedValueOnce for the error states.
+// The catalog names the app in the viewer's language (``i18n``).
+const cat = vi.hoisted(() => ({
+  catalog: { value: [] as { app_id: string, name: string, i18n?: Record<string, { name: string }> }[] },
+  catalogLoaded: { value: true },
+}))
 vi.mock('@/store/apps', () => ({
   getRuntime: vi.fn(),
   setEnabled: vi.fn().mockResolvedValue(undefined),
+  catalog: cat.catalog,
+  catalogLoaded: cat.catalogLoaded,
+  loadCatalog: vi.fn().mockResolvedValue(undefined),
+  localized: (e: { name: string, i18n?: Record<string, { name: string }> }, lang: string) => ({
+    name: e.i18n?.[lang]?.name ?? e.name,
+    description: '',
+  }),
 }))
 
 // ── Mock @/features/apps/bridge ──────────────────────────────────────────
@@ -89,7 +101,8 @@ vi.mock('@/components/Button', () => ({
 
 import { AppHostInner, FAIL_MS, LOAD_GRACE_MS, SLOW_MS, launchSessionFrom } from './AppHost'
 import { mountBridge, type BridgeContext } from '@/features/apps/bridge'
-import { getRuntime, setEnabled } from '@/store/apps'
+import { getRuntime, loadCatalog, setEnabled } from '@/store/apps'
+import { locale } from '@/i18n/i18n'
 import { ApiError } from '@/api'
 
 const RUNTIME = {
@@ -115,9 +128,33 @@ describe('AppHostInner', () => {
     vi.mocked(mountBridge).mockReturnValue(() => {})
     user.currentUser.value = { is_admin: false }
     back.from = null
+    cat.catalog.value = []
+    cat.catalogLoaded.value = true
   })
   afterEach(() => {
     vi.useRealTimers()
+  })
+
+  it("names the app in the viewer's language everywhere in its chrome", async () => {
+    cat.catalog.value = [{ app_id: 'chess', name: 'Chess', i18n: { de: { name: 'Schach' } } }]
+    const was = locale.value
+    locale.value = 'de'
+    try {
+      const { container } = render(<AppHostInner appId="chess" />)
+      await waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
+      expect(container.querySelector('.sh-app-host__title')!.textContent).toBe('Schach')
+      expect(container.querySelector('iframe')!.getAttribute('title')).toBe('Schach')
+    } finally {
+      locale.value = was
+    }
+  })
+
+  it('keeps the installed name when the catalog has no entry, and loads it once', async () => {
+    cat.catalogLoaded.value = false
+    const { container } = render(<AppHostInner appId="chess" />)
+    await waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
+    expect(container.querySelector('.sh-app-host__title')!.textContent).toBe('Chess')
+    expect(vi.mocked(loadCatalog)).toHaveBeenCalledOnce()
   })
 
   it('renders an <iframe> once the runtime resolves', async () => {

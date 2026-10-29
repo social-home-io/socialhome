@@ -99,6 +99,9 @@ _KIND_OF_TYPE: dict[str, NotifKind] = {
     "app_challenge": NotifKind.NEEDS_YOU,
     # "Ben wants to continue your Chess game" — an old game picked up again.
     "app_challenge_continue": NotifKind.NEEDS_YOU,
+    # A game invite for an app the household doesn't have or turned off
+    # (D10): "Ask an admin" — it turns into Play once the app is here.
+    "app_challenge_waiting": NotifKind.NEEDS_YOU,
     # A member asked for an app ("Ask an admin", D4).
     "app_request": NotifKind.NEEDS_YOU,
     # A newer version of an installed app waits for an admin's tap (D7).

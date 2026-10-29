@@ -8,7 +8,12 @@ Security invariants
 * ``_require_enabled`` gates every outbound — an uninstalled or disabled app
   cannot initiate or send federation messages.
 * Inbound delivery is fail-soft: if the app is not installed or not enabled,
-  the event is silently dropped after a debug log (no error to the peer).
+  nothing reaches the app and nothing goes back to the peer (no error, no
+  "unavailable"). An invite addressed to one person still reaches that
+  person (D10): it waits as their "Needs you" row with "Ask an admin"
+  (:meth:`_keep_waiting`) and becomes a normal invite once the app is
+  added or turned on (:meth:`on_app_usable`). Anything else is dropped
+  after a debug log.
 * No application payload ever appears in plaintext in a federation envelope.
   Both the binary and JSON paths rely on :class:`FederationService` for
   encryption; this service only passes dicts down to the send methods and
@@ -99,6 +104,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -125,6 +131,7 @@ from ..domain.apps import (
     SESSION_VERB_CONTINUE,
     UNINSTALL_GAME_RECENT_SECONDS,
     UNINSTALL_NAMES_MAX,
+    WAITING_SENDERS_MAX,
     AppAgeRestrictedError,
     AppChallengeHandledError,
     AppContactNotFoundError,
@@ -140,22 +147,38 @@ from ..domain.events import (
     AppChallengeDeclined,
     AppChallengeEnded,
     AppChallengeReceived,
+    AppChallengeWaiting,
+    AppEnabledChanged,
     AppGameEnded,
+    AppInstalled,
 )
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.federation_capabilities import FederationCapability
+from ..domain.notification import NotificationObject, object_key
+from ..repositories._spec import Spec
 from .protection_gate import ProtectionGateMixin
 
 if TYPE_CHECKING:
-    from ..domain.apps import InstalledApp
+    from ..domain.apps import AppCatalogEntry, InstalledApp
     from ..domain.events import DomainEvent
-    from ..domain.user import RemoteUser
+    from ..domain.notification import Notification
+    from ..domain.user import RemoteUser, User
     from ..infrastructure.event_bus import EventBus
     from ..infrastructure.ws_manager import WebSocketManager
     from ..repositories.app_repo import AbstractAppRepo
     from ..repositories.cp_repo import AbstractCpRepo
     from ..repositories.federation_repo import AbstractFederationRepo
+    from ..repositories.notification_repo import AbstractNotificationRepo
     from ..repositories.user_repo import AbstractUserRepo
+    from .app_service import AppService
+
+#: The "Needs you" row of a game invite that waits for its app (D10).
+WAITING_INVITE_TYPE = "app_challenge_waiting"
+
+#: A session id a waiting invite may carry — what this household's own
+#: senders mint (``uuid4().hex``) and the SPA's ``?session=`` accepts; it
+#: becomes part of the row's subject (``app_session:<app>/<session>``).
+_WAITING_SESSION_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
 
 #: Cap on the bounded inbound de-dupe of ``APP_SESSION`` opens — keeps memory
 #: flat (LRU eviction of the oldest session id) while still suppressing the
@@ -247,16 +270,25 @@ class AppFederationService(ProtectionGateMixin):
         data messages).
     federation_repo:
         Federation peer directory — used by :meth:`list_peers`.
+    notifications:
+        The notification rows — read only, to find the invites that wait
+        for their app (D10, ``app_challenge_waiting``); ``None`` keeps
+        dropping such invites as before.
+    catalog:
+        The app service whose catalog names an app this household doesn't
+        have and says whether its age gate lets the invitee see it.
     """
 
     __slots__ = (
         "_app_repo",
         "_bus",
+        "_catalog",
         "_child_protection",
         "_cp_repo",
         "_federation",
         "_federation_repo",
         "_invite_locks",
+        "_notifs",
         "_seen_open_sessions",
         "_user_repo",
         "_ws",
@@ -272,6 +304,8 @@ class AppFederationService(ProtectionGateMixin):
         federation_repo: AbstractFederationRepo,
         cp_repo: AbstractCpRepo | None = None,
         bus: EventBus | None = None,
+        notifications: AbstractNotificationRepo | None = None,
+        catalog: AppService | None = None,
     ) -> None:
         self._app_repo = app_repo
         self._user_repo = user_repo
@@ -280,6 +314,8 @@ class AppFederationService(ProtectionGateMixin):
         self._federation_repo = federation_repo
         self._cp_repo = cp_repo
         self._bus = bus
+        self._notifs = notifications
+        self._catalog = catalog
         self._child_protection = None
         #: Bounded LRU of inbound ``APP_SESSION`` open ``session_id``s already
         #: handled — guards against a double federation delivery (WebRTC +
@@ -1437,7 +1473,9 @@ class AppFederationService(ProtectionGateMixin):
         at another sender (no hijack of a session id).
 
         Silently drops (debug log) if the app is not installed or disabled —
-        the peer doesn't need to know we don't have this app.
+        the peer doesn't need to know we don't have this app — except an
+        invite for one person, which waits for them (D10,
+        :meth:`_keep_waiting`), and a withdrawal of such an invite.
 
         Parameters
         ----------
@@ -1484,6 +1522,28 @@ class AppFederationService(ProtectionGateMixin):
         whole household, is dropped as before.
         """
         app = await self._app_repo.get(app_id)
+        if to_user is not None and (app is None or not app.enabled):
+            # D10: an invite for an app this household doesn't have, or
+            # turned off, waits for the person (Needs you, "Ask an admin")
+            # — and the sender is never told anything.
+            if notify_open and not continued:
+                await self._keep_waiting(
+                    app_id,
+                    app,
+                    session_id,
+                    from_instance=from_instance,
+                    to_user=to_user,
+                    from_user=from_user,
+                )
+                return
+            if withdraw:
+                await self._withdraw_waiting(
+                    app_id,
+                    session_id,
+                    from_instance=from_instance,
+                    to_user=to_user,
+                    from_user=from_user,
+                )
         if app is None or (not app.enabled and (notify_open or to_user is None)):
             log.debug(
                 "app_federation: dropping inbound for app %r (not installed/enabled)",
@@ -2009,6 +2069,326 @@ class AppFederationService(ProtectionGateMixin):
                 exc,
                 exc_info=True,
             )
+
+    # ─── Invites that wait for their app (D10) ───────────────────────────
+
+    async def _keep_waiting(
+        self,
+        app_id: str,
+        app: InstalledApp | None,
+        session_id: str,
+        *,
+        from_instance: str,
+        to_user: str,
+        from_user: str | None,
+    ) -> None:
+        """An invite for an app this household doesn't have (*app* ``None``)
+        or turned off reaches its person anyway (D10): after every rule a
+        playable invite passes — the addressee is a user here, the sender
+        a known user of ``from_instance``, no block or guardian block
+        between them, a protected invitee only from a household it may
+        message, the app's age gate (the catalog's rating for an app not
+        installed) — it waits as their "Needs you" row with "Ask an admin"
+        (:class:`AppChallengeWaiting`). The app's name comes from this
+        household's catalog / install, never from the invite. An app the
+        catalog doesn't list (or hides from the invitee for their age)
+        leaves no row, as before.
+
+        Nothing is sent back — no reply, no "unavailable", no read
+        receipt: whether this household has the app, or who here is
+        age-limited, is never revealed. The sender's invite just waits (it
+        runs out after :data:`PENDING_SESSION_TTL_SECONDS`)."""
+        if self._notifs is None or not _WAITING_SESSION_RE.fullmatch(session_id):
+            return
+        recipient = await self._user_repo.get(to_user)
+        initiator = await self._resolve_remote_initiator(from_instance, from_user)
+        if recipient is None or initiator is None or not recipient.is_active():
+            log.info(
+                "app_federation: invite for app %r without it dropped — unknown "
+                "addressee or sender (session=%s)",
+                app_id,
+                session_id,
+            )
+            return
+        if not await self._may_wait(recipient, initiator, from_instance):
+            return
+        if app is not None:
+            # Turned off: the install's own name, permissions and age gate.
+            if PERMISSION_FEDERATION not in app.permissions or not (
+                await self._age_filter_recipients(app_id, [recipient.user_id], app=app)
+            ):
+                return
+            if await self._app_repo.get_pending_session(
+                app_id, recipient.user_id, session_id
+            ):
+                return  # never re-point a session this person already has
+            name, reason = app.name or app_id, "app_off"
+        else:
+            entry = await self._catalog_entry(app_id, recipient.user_id)
+            if entry is None or (
+                entry.permissions and PERMISSION_FEDERATION not in entry.permissions
+            ):
+                return
+            name, reason = entry.name or app_id, "app_missing"
+        if await self._waiting_row(app_id, recipient.user_id, session_id):
+            return  # the same invite again (after a restart): one row
+        senders = {
+            r.params.actors[-1].id
+            for r in await self._waiting_rows(app_id, user_id=recipient.user_id)
+            if r.params is not None
+        }
+        if initiator.user_id not in senders and len(senders) >= WAITING_SENDERS_MAX:
+            # The receiver's bound (a repeat from a sender joins their row).
+            log.debug(
+                "app_federation: invite for app %r dropped — %d senders already "
+                "wait for this person (session=%s)",
+                app_id,
+                len(senders),
+                session_id,
+            )
+            return
+        log.info(
+            "app_federation: invite for %s app %r waits for its person (session=%s)",
+            reason,
+            app_id,
+            session_id,
+        )
+        await self._emit(
+            AppChallengeWaiting(
+                app_id=app_id,
+                session_id=session_id,
+                to_user_id=recipient.user_id,
+                from_display=await self._remote_open_display(
+                    from_instance, from_user, remote=initiator
+                ),
+                from_user_id=initiator.user_id,
+                app_name=name,
+                reason=reason,
+            )
+        )
+
+    async def _may_wait(
+        self, recipient: User, initiator: RemoteUser, from_instance: str
+    ) -> bool:
+        """The rules a playable invite passes (:meth:`_deliver`): no block
+        either way the recipient set, no guardian block, and (§CP.F3) a
+        protected recipient only from a household it may message."""
+        if await self._user_repo.is_blocked(
+            recipient.user_id, initiator.user_id
+        ) or await self._guardian_blocked(recipient.user_id, initiator.user_id):
+            return False
+        return await self._may_message_household(recipient.user_id, from_instance)
+
+    async def _catalog_entry(self, app_id: str, user_id: str) -> AppCatalogEntry | None:
+        """*app_id*'s entry in this household's catalog as *user_id* may
+        see it (D5: an app rated above a protected account's age isn't
+        there) — ``None`` when it isn't, or the catalog can't be read."""
+        if self._catalog is None:
+            return None
+        try:
+            entries = await self._catalog.browse_catalog_for(
+                user_id=user_id, is_admin=False
+            )
+        except Exception as exc:  # noqa: BLE001 — the invite just isn't kept
+            log.warning("app_federation: catalog unreadable for an invite: %s", exc)
+            return None
+        return next((e for e in entries if e.app_id == app_id), None)
+
+    async def _waiting_rows(
+        self,
+        app_id: str,
+        *,
+        user_id: str | None = None,
+        session_id: str | None = None,
+    ) -> list[Notification]:
+        """The invites that wait for *app_id* (D10) — every person's,
+        *user_id*'s, or *user_id*'s for *session_id*: open
+        ``app_challenge_waiting`` rows."""
+        if self._notifs is None:
+            return []
+        if user_id is not None and session_id is None:
+            where: list[tuple[str, str, Any]] = [
+                ("type", "=", WAITING_INVITE_TYPE),
+                ("user_id", "=", user_id),
+            ]
+        elif user_id is not None:
+            key = object_key(NotificationObject.APP_SESSION, f"{app_id}/{session_id}")
+            where = [
+                ("object_key", "=", key),
+                ("user_id", "=", user_id),
+            ]
+        else:
+            where = [("type", "=", WAITING_INVITE_TYPE)]
+        prefix = object_key(NotificationObject.APP_SESSION, f"{app_id}/")
+        return [
+            n
+            for n in await self._notifs.find(Spec(where=where))
+            if n.type == WAITING_INVITE_TYPE
+            and n.is_pending_action
+            and (n.object_key or "").startswith(prefix)
+            and n.params is not None
+            and n.params.actors
+        ]
+
+    async def _waiting_row(
+        self, app_id: str, user_id: str, session_id: str
+    ) -> Notification | None:
+        """*user_id*'s invite *session_id* that waits for *app_id*."""
+        rows = await self._waiting_rows(app_id, user_id=user_id, session_id=session_id)
+        return rows[0] if rows else None
+
+    async def _withdraw_waiting(
+        self,
+        app_id: str,
+        session_id: str,
+        *,
+        from_instance: str,
+        to_user: str,
+        from_user: str | None,
+    ) -> None:
+        """The challenger withdrew an invite that waits for its app here:
+        it stops waiting — only when they are who sent it."""
+        recipient = await self._user_repo.get(to_user)
+        initiator = await self._resolve_remote_initiator(from_instance, from_user)
+        if recipient is None or initiator is None:
+            return
+        row = await self._waiting_row(app_id, recipient.user_id, session_id)
+        if row is None or row.params is None:
+            return
+        if row.params.actors[-1].id != initiator.user_id:
+            return
+        await self._emit(
+            AppChallengeEnded(
+                app_id=app_id,
+                user_id=recipient.user_id,
+                session_ids=(session_id,),
+                outcome="withdrawn",
+            )
+        )
+
+    async def decline_waiting(
+        self, *, app_id: str, session_id: str, actor_user_id: str
+    ) -> bool:
+        """The invitee declines an invite that waits for its app (D10):
+        its "Needs you" row reads as declined. Nothing is sent — the app
+        isn't usable here, so (like any decline for a turned-off app) the
+        sender's invite just runs out. ``False`` when no such invite
+        waits for them (the caller tries a playable one)."""
+        if await self._waiting_row(app_id, actor_user_id, session_id) is None:
+            return False
+        await self._emit(
+            AppChallengeEnded(
+                app_id=app_id,
+                user_id=actor_user_id,
+                session_ids=(session_id,),
+                outcome="declined",
+            )
+        )
+        return True
+
+    async def on_app_usable(self, event: AppInstalled | AppEnabledChanged) -> None:
+        """The app was added or turned on: every invite that waited for it
+        becomes a normal invite (Play / Decline, a push per the person's
+        settings) — a session row kept for the invitee from when the
+        invite arrived, so its TTL counts from then. An invite past its
+        TTL ends ``expired``; one that no longer passes the receiver rules
+        (a block since, the age gate of the installed app, the sender
+        gone, an app without ``federation``) ends ``done``. Still nothing
+        goes to the sender.
+
+        The receiver's bounds hold here too: only the newest invite per
+        (invitee, sender person) becomes playable, and only the newest
+        :data:`WAITING_SENDERS_MAX` senders' per invitee; any other
+        waiting row ends ``done``."""
+        if isinstance(event, AppEnabledChanged) and not event.enabled:
+            return
+        app = await self._app_repo.get(event.app_id)
+        if app is None or not app.enabled:
+            return
+        cutoff = datetime.now(UTC) - timedelta(seconds=PENDING_SESSION_TTL_SECONDS)
+        rows = sorted(
+            await self._waiting_rows(app.app_id),
+            key=lambda n: n.created_at,
+            reverse=True,
+        )
+        seen: set[tuple[str, str]] = set()
+        senders: dict[str, int] = {}
+        for row in rows:
+            session_id = (row.object_key or "").partition("/")[2]
+            assert row.params is not None  # _waiting_rows keeps rows with actors
+            pair = (row.user_id, row.params.actors[-1].id)
+            if pair in seen or senders.get(row.user_id, 0) >= WAITING_SENDERS_MAX:
+                outcome: str | None = "done"
+            else:
+                seen.add(pair)
+                senders[row.user_id] = senders.get(row.user_id, 0) + 1
+                outcome = await self._make_playable(app, row, session_id, cutoff)
+            if outcome is not None:
+                await self._emit(
+                    AppChallengeEnded(
+                        app_id=app.app_id,
+                        user_id=row.user_id,
+                        session_ids=(session_id,),
+                        outcome=outcome,
+                    )
+                )
+
+    async def _make_playable(
+        self,
+        app: InstalledApp,
+        row: Notification,
+        session_id: str,
+        cutoff: datetime,
+    ) -> str | None:
+        """Turn one waiting invite into a playable one; ``None`` when it
+        did, else how it ended instead."""
+        if row.created_at < cutoff.isoformat():
+            return "expired"
+        assert row.params is not None  # _waiting_rows keeps rows with actors
+        remote = await self._user_repo.get_remote(row.params.actors[-1].id)
+        recipient = await self._user_repo.get_by_user_id(row.user_id)
+        if (
+            remote is None
+            or remote.deprovisioned_at is not None
+            or recipient is None
+            or not recipient.is_active()
+            or PERMISSION_FEDERATION not in app.permissions
+            or not await self._may_wait(recipient, remote, remote.instance_id)
+            or not await self._age_filter_recipients(
+                app.app_id, [recipient.user_id], app=app
+            )
+            or await self._app_repo.get_pending_session(
+                app.app_id, recipient.user_id, session_id
+            )
+        ):
+            return "done"
+        await self._app_repo.add_pending_session(
+            AppPendingSession(
+                app_id=app.app_id,
+                user_id=recipient.user_id,
+                session_id=session_id,
+                from_instance=remote.instance_id,
+                from_user=remote.remote_username,
+                payload={
+                    "app_id": app.app_id,
+                    "session_id": session_id,
+                    "verb": "open",
+                },
+                created_at=row.created_at,
+            )
+        )
+        await self._emit(
+            AppChallengeReceived(
+                app_id=app.app_id,
+                session_id=session_id,
+                to_user_id=recipient.user_id,
+                from_display=await self._remote_open_display(
+                    remote.instance_id, remote.remote_username, remote=remote
+                ),
+                from_user_id=remote.user_id,
+            )
+        )
+        return None
 
     async def accept_session(
         self, *, app_id: str, session_id: str, actor_user_id: str

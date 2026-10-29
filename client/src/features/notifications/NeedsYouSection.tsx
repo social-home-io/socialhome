@@ -18,12 +18,14 @@
 import { useEffect, useState } from 'preact/hooks'
 import { appHref } from '@/baseUrl'
 import { Button } from '@/components/Button'
-import { isOne, t } from '@/i18n/i18n'
+import { isOne, locale, t } from '@/i18n/i18n'
+import { catalog, catalogLoaded, loadCatalog, localized, type CatalogEntry } from '@/store/apps'
+import { currentUser } from '@/store/auth'
 import { spaces } from '@/store/spaces'
 import { ws } from '@/ws'
 import { relativeDocsTime } from '@/utils/relativeTime'
 import type { Notification } from '@/types'
-import { UpdateButton } from '@/features/apps/AppDialogs'
+import { AskButton, UpdateButton } from '@/features/apps/AppDialogs'
 import { NotificationRow, RowAvatar, Sentence, markRowRead, withRead } from './NotificationRow'
 import { groupSentence } from './rowText'
 import {
@@ -35,6 +37,7 @@ import {
   dropHandled,
   flagsOf,
   flushDeclines,
+  gameOf,
   idOf,
   inlineAction,
   loadNeedsYou,
@@ -42,6 +45,7 @@ import {
   needsYouEntries,
   playHref,
   reviewHref,
+  waitingReason,
   type NeedsYouEntry,
 } from './needsYou'
 
@@ -87,6 +91,92 @@ function spaceName(spaceId: string, rows: Notification[]): string {
     ?? ''
 }
 
+/** The app a game row is about, as the viewer's catalog names it (its
+ *  ``i18n`` for the viewer's language) — else the name the row was
+ *  written with. */
+function appEntry(n: Notification): CatalogEntry | null {
+  if (!n.object_key?.startsWith('app_session:')) return null
+  const { appId } = gameOf(n)
+  return catalog.value.find(e => e.app_id === appId) ?? null
+}
+
+function appName(n: Notification): string {
+  const entry = appEntry(n)
+  if (entry) return localized(entry, locale.value || 'en').name
+  return n.params?.space_name || gameOf(n).appId
+}
+
+/** *n* with its app named in the viewer's language (the sentence's place). */
+function withAppName(n: Notification): Notification {
+  if (!n.params || !appEntry(n)) return n
+  const name = appName(n)
+  return name === n.params.space_name ? n : { ...n, params: { ...n.params, space_name: name } }
+}
+
+/** What a waiting game invite says under its sentence (D10), per why it
+ *  waits and who looks: a member asks an admin, a protected account asks
+ *  a grown-up, an admin can add it (or turn it on) themselves. */
+const WAITING_WHY = {
+  app_missing: {
+    member: 'notifications.needs_you.app_missing',
+    grown_up: 'notifications.needs_you.app_missing_grown_up',
+    admin: 'notifications.needs_you.app_missing_admin',
+  },
+  app_off: {
+    member: 'notifications.needs_you.app_off',
+    grown_up: 'notifications.needs_you.app_off_grown_up',
+    admin: 'notifications.needs_you.app_off_admin',
+  },
+} as const
+
+/**
+ * A game invite for an app the household doesn't have or turned off
+ * (D10): why it waits, then "Ask an admin" / "Ask a grown-up" (the same
+ * request as the Apps page — a second ask changes nothing, the button
+ * reads "Asked") or, for an admin, "See Chess" (its page, where it can
+ * be added or turned on); and Decline ("Not now" for a protected account).
+ * Nothing reaches the sender either way.
+ */
+function WaitingActions({ row, describedBy, onNavigate }: {
+  row: Notification
+  describedBy: string
+  onNavigate?: () => void
+}) {
+  const { appId } = gameOf(row)
+  const name = appName(row)
+  const isAdmin = !!currentUser.value?.is_admin
+  const grownUp = !isAdmin && !!currentUser.value?.protected
+  const who = isAdmin ? 'admin' : grownUp ? 'grown_up' : 'member'
+  const entry: CatalogEntry = appEntry(row) ?? {
+    app_id: appId,
+    name,
+    latest_version: '',
+    description: null,
+    icon_url: null,
+    capabilities: [],
+  }
+  return (
+    <div class="sh-needs__actions">
+      <span class="sh-needs__why">{t(WAITING_WHY[waitingReason(row)][who], { name })}</span>
+      {isAdmin
+        ? (
+          <a
+            class="sh-btn sh-btn--primary"
+            href={appHref(row.link_url || `/apps/${encodeURIComponent(appId)}/about`)}
+            aria-describedby={describedBy}
+            onClick={() => { void markRowRead(row).catch(() => {}); onNavigate?.() }}
+          >
+            {t('notifications.needs_you.see_app', { name })}
+          </a>
+        )
+        : <AskButton entry={entry} name={name} variant="primary" />}
+      <Button variant="secondary" aria-describedby={describedBy} onClick={() => declineWithUndo(row)}>
+        {t(grownUp ? 'notifications.not_now' : 'notifications.needs_you.decline')}
+      </Button>
+    </div>
+  )
+}
+
 /** What each flag says next to "Review". */
 const FLAG_KEYS: Record<string, string> = {
   edge: 'notifications.needs_you.flag.edge',
@@ -130,6 +220,9 @@ function Actions({ entry, describedBy, onNavigate }: {
         </Button>
       </div>
     )
+  }
+  if (row && action === 'waiting') {
+    return <WaitingActions row={row} describedBy={describedBy} onNavigate={onNavigate} />
   }
   if (row && action === 'update') {
     const appId = idOf(row)
@@ -226,8 +319,13 @@ function GroupRow({ entry, titleId, compact, onNavigate }: {
 export function NeedsYouSection({ compact, onNavigate, only }: Props) {
   useNeedsYouLive()
   const [expanded, setExpanded] = useState(false)
-  const rows = only ? needsYou.value.filter(n => only.has(n.type)) : needsYou.value
+  const rows = (only ? needsYou.value.filter(n => only.has(n.type)) : needsYou.value).map(withAppName)
   const entries = needsYouEntries(rows, acting.value)
+  const hasGame = rows.some(n => n.object_key?.startsWith('app_session:'))
+  useEffect(() => {
+    // Game rows name their app in the viewer's language (the catalog).
+    if (hasGame && !catalogLoaded.value) void loadCatalog()
+  }, [hasGame])
   const pendingCount = entries.reduce((sum, e) => sum + (e.kind === 'group' ? e.rows.length : 1), 0)
   if (entries.length === 0) return null
   const shown = expanded ? entries : entries.slice(0, NEEDS_YOU_CAP)

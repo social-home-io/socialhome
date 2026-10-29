@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, act, waitFor, fireEvent } from '@testing-library/preact'
 
 const apiGet = vi.fn()
@@ -27,6 +27,8 @@ vi.mock('@/store/auth', () => ({
 }))
 
 import { setLocale } from '@/i18n/i18n'
+import { currentUser } from '@/store/auth'
+import { catalog, catalogLoaded } from '@/store/apps'
 import type { Notification } from '@/types'
 import { NeedsYouSection, pinnedIds } from './NeedsYouSection'
 import { acting, mustReview, needsYou, waitingDeclines } from './needsYou'
@@ -253,6 +255,94 @@ describe('NeedsYouSection', () => {
     await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/apps/chess/update', { accept_permissions: [] }))
     // Done: it leaves the section.
     await waitFor(() => expect(needsYou.value).toEqual([]))
+  })
+
+  describe('a game invite for an app the household doesn\'t have (D10)', () => {
+    const waiting = (flag: 'app_missing' | 'app_off' = 'app_missing') => row('w', {
+      type: 'app_challenge_waiting',
+      title: 'Ben · Lakeside invited you to play Chess',
+      object_key: 'app_session:chess/s1',
+      space_id: null,
+      link_url: '/apps/chess/about',
+      params: {
+        actors: [{ id: 'r-ben', name: 'Ben · Lakeside' }],
+        actor_count: 1, new: 1, total: 1, space_name: 'Chess', flags: [flag],
+      },
+    })
+    const as = (who: { is_admin: boolean, protected?: boolean }) => {
+      currentUser.value = { user_id: 'me', username: 'me', display_name: 'Me', ...who } as typeof currentUser.value
+    }
+    beforeEach(() => {
+      catalog.value = [{
+        app_id: 'chess', name: 'Chess', latest_version: '2026.10.29', description: 'Play chess',
+        icon_url: null, capabilities: [], i18n: { de: { name: 'Schach', description: null } },
+      }]
+      catalogLoaded.value = true
+    })
+    afterEach(() => { as({ is_admin: true }) })
+
+    it('a member reads why it waits and asks an admin — no Play', async () => {
+      as({ is_admin: false })
+      const { getByRole, queryByRole, container } = await mount([waiting()])
+      expect(container.textContent).toContain('Ben · Lakeside invited you to play Chess')
+      expect(container.querySelector('.sh-needs__why')!.textContent).toBe(
+        "Chess isn't in your household yet. Ask an admin to add it, then tap Play.",
+      )
+      expect(queryByRole('link', { name: 'Play' })).toBeNull()
+      await act(async () => { fireEvent.click(getByRole('button', { name: 'Ask an admin for Chess' })) })
+      await act(async () => { fireEvent.click(getByRole('button', { name: 'Send request' })) })
+      await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/apps/chess/requests'))
+      // A second ask isn't offered: it reads "Asked".
+      await waitFor(() => expect(container.querySelector('.sh-app-asked')).not.toBeNull())
+    })
+
+    it('a protected account asks a grown-up, and can say Not now', async () => {
+      as({ is_admin: false, protected: true })
+      const { getByRole, container } = await mount([waiting()])
+      expect(container.querySelector('.sh-needs__why')!.textContent).toBe(
+        'Ask a grown-up to add Chess, then you can play.',
+      )
+      expect(getByRole('button', { name: 'Ask a grown-up for Chess' })).toBeTruthy()
+      expect(getByRole('button', { name: 'Not now' })).toBeTruthy()
+    })
+
+    it('an admin sees the app (to add it) instead of asking', async () => {
+      const { getByRole, queryByRole, container } = await mount([waiting()])
+      expect(container.querySelector('.sh-needs__why')!.textContent).toBe(
+        "Chess isn't in your household yet. You can add it for everyone.",
+      )
+      expect(getByRole('link', { name: 'See Chess' }).getAttribute('href')).toBe('/apps/chess/about')
+      expect(queryByRole('button', { name: /Ask an admin/ })).toBeNull()
+    })
+
+    it('a turned-off app says an admin turned it off', async () => {
+      as({ is_admin: false })
+      const { container } = await mount([waiting('app_off')])
+      expect(container.querySelector('.sh-needs__why')!.textContent).toBe(
+        'An admin turned Chess off. Ask an admin to turn it on, then tap Play.',
+      )
+    })
+
+    it('Decline is the game decline (nothing reaches the sender)', async () => {
+      as({ is_admin: false })
+      const r = await mount([waiting()])
+      await act(async () => { fireEvent.click(r.getByRole('button', { name: 'Decline' })) })
+      r.unmount()
+      await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+        '/api/apps/chess/sessions/s1/decline', undefined, { keepalive: true },
+      ))
+    })
+
+    it('names the app in the viewer\'s language (the catalog), in German', async () => {
+      await setLocale('de')
+      as({ is_admin: false })
+      const { getByRole, container } = await mount([waiting()])
+      expect(container.querySelector('.sh-notif-title')!.textContent).toContain('Schach')
+      expect(container.querySelector('.sh-needs__why')!.textContent).toBe(
+        'Schach gibt es in deinem Haushalt noch nicht. Frag einen Admin, ob er es hinzufügt, dann tippe auf Spielen.',
+      )
+      expect(getByRole('button', { name: /Schach/ }).textContent).toBe('Admin fragen')
+    })
   })
 
   it('reads in German with the glossary words', async () => {

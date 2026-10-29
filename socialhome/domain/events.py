@@ -2624,6 +2624,30 @@ class AppChallengeReceived(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class AppChallengeWaiting(DomainEvent):
+    """A game invite arrived for an app this household doesn't have
+    (``reason`` ``app_missing``) or turned off (``app_off``) — D10.
+
+    Published by :class:`AppFederationService` after every receiver rule
+    passed (a known sender, no block, a household a protected invitee may
+    message, the app's age gate). The notification service keeps it as
+    the invitee's "Needs you" row ("Ben invited you to play Chess", with
+    "Ask an admin"); nothing goes back to the sender. ``app_name`` is the
+    household's own name for the app (its catalog or its install), never
+    text from the invite. Once the app is added or turned on, the row
+    becomes a normal invite (:class:`AppChallengeReceived`).
+    """
+
+    app_id: str
+    session_id: str
+    to_user_id: str
+    from_display: str
+    from_user_id: str
+    app_name: str
+    reason: str
+
+
+@dataclass(slots=True, frozen=True)
 class AppChallengeEnded(DomainEvent):
     """Game invites stopped waiting for their invitee ``user_id``.
 

@@ -131,6 +131,7 @@ export const HOUSEHOLD_CHAT_LINK = '/?tab=chat'
  *   notifications.row.bazaar_offer_rejected_none
  *   notifications.row.app_challenge notifications.row.app_challenge_many
  *   notifications.row.app_challenge_continue notifications.row.app_challenge_continue_many
+ *   notifications.row.app_challenge_waiting notifications.row.app_challenge_waiting_many
  *   notifications.row.app_added notifications.row.app_added_many
  *   notifications.row.app_challenge_declined notifications.row.app_challenge_declined_many
  *   notifications.row.app_game_ended notifications.row.app_game_ended_many
@@ -187,6 +188,9 @@ export const ROW_TYPES: Readonly<Record<string, TypeSpec>> = {
   app_challenge: {},
   // An old game picked up again: "Ben wants to continue your Chess game".
   app_challenge_continue: {},
+  // An invite for an app the household doesn't have or turned off (D10):
+  // the same sentence; Needs you says why it waits.
+  app_challenge_waiting: {},
   // A new app in the household: "Anna added Chess" — the app's name is
   // the place too.
   app_added: {},
