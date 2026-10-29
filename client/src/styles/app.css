@@ -22408,6 +22408,74 @@ span.sh-hlv__who { cursor: default; }
   line-height: 1.5;
 }
 
+/* Invite sheet (D3): Social Home's own picker, drawn outside the app's
+ * frame. A bottom sheet on phones (the Modal), a card on desktop. */
+.sh-modal.sh-invite-sheet { max-width: 520px; }
+.sh-invite-sheet__lead {
+  margin: 0 0 var(--sh-space-md);
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+  line-height: 1.5;
+}
+.sh-invite-sheet__search { width: 100%; margin-bottom: var(--sh-space-sm); }
+.sh-invite-sheet__people {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.sh-invite-sheet__person {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  min-height: 56px;
+  padding: var(--sh-space-xs) var(--sh-space-sm);
+  border-radius: var(--sh-radius-md);
+  cursor: pointer;
+}
+.sh-invite-sheet__person + .sh-invite-sheet__person { border-top: 1px solid var(--sh-border); }
+.sh-invite-sheet__person.is-on {
+  background: color-mix(in srgb, var(--sh-primary) 12%, transparent);
+  border-top-color: transparent;
+}
+.sh-invite-sheet__person:has(input:focus-visible) {
+  outline: 2px solid var(--sh-primary);
+  outline-offset: 2px;
+}
+.sh-invite-sheet__person input {
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  flex: none;
+  accent-color: var(--sh-primary);
+}
+.sh-invite-sheet__who { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.sh-invite-sheet__name { font-weight: 600; overflow-wrap: anywhere; }
+.sh-invite-sheet__home { color: var(--sh-text-muted); font-size: var(--sh-font-size-sm); overflow-wrap: anywhere; }
+.sh-invite-sheet__status,
+.sh-invite-sheet__hint {
+  margin: var(--sh-space-sm) 0 0;
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+  line-height: 1.5;
+}
+.sh-invite-sheet__limit {
+  margin: var(--sh-space-md) 0 0;
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg-secondary);
+  font-size: var(--sh-font-size-sm);
+  line-height: 1.5;
+}
+.sh-invite-sheet__actions { flex-wrap: wrap; }
+@media (max-width: 639px) {
+  /* Phones: Send on top, full width, Cancel under it (thumb reach). */
+  .sh-invite-sheet__actions { flex-direction: column-reverse; align-items: stretch; }
+  .sh-invite-sheet__actions .sh-btn { width: 100%; min-height: 44px; }
+}
+
 /* Consent dialog. */
 .sh-app-consent__head { display: flex; align-items: center; gap: var(--sh-space-sm); }
 .sh-app-consent__head .sh-app-meta { margin: 0; }

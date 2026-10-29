@@ -21,26 +21,31 @@ describe('appFacts', () => {
       'see your password or sign-in',
       'read your posts, chats, photos or location',
       'reach the internet or other websites',
+      'send anything without you choosing who',
     ])
   })
 
-  // What ships until R3 PR 9 (invites only through Social Home's sheet):
-  // the bridge still hands apps the contact list and ``openSession``, so
-  // the text may not promise "learns only who you picked" / "only to the
-  // person you picked" / "never sends without you choosing who". Changing
-  // these strings is a deliberate step — update this test with PR 9.
+  // The claims R3 PR 9 made true (invites only through Social Home's
+  // sheet — the bridge has no ``openSession``, ``contacts.list`` is only
+  // who was picked and played with, ``app.send`` only reaches known
+  // games): "learns only who you picked", "only to the person you
+  // picked", "never sends without you choosing who". Pinned so a later
+  // change to them is a deliberate step that checks they still hold.
   it.each(['en', 'de', 'nl', 'fr', 'es'])('ships only true permission claims (%s)', (lang) => {
     const cat = JSON.parse(readFileSync(join(__dirname, '..', '..', 'i18n', 'locales', `${lang}.json`), 'utf8'))
     const shipped = {
-      en: ['Lets it invite people you know', 'It sees the people you can message in Social Home, so you can invite them.', 'Encrypted home to home, to people you know.'],
-      de: ['Kann Leute einladen, die du kennst', 'Es sieht die Leute, denen du in Social Home schreiben kannst, damit du sie einladen kannst.', 'Verschlüsselt von Zuhause zu Zuhause, an Leute, die du kennst.'],
-      nl: ['Kan mensen uitnodigen die je kent', 'Het ziet de mensen aan wie je in Social Home berichten kunt sturen, zodat je ze kunt uitnodigen.', 'Versleuteld van thuis naar thuis, naar mensen die je kent.'],
-      fr: ['Peut inviter des personnes que vous connaissez', 'Elle voit les personnes à qui vous pouvez écrire dans Social Home, pour que vous puissiez les inviter.', 'Chiffré de foyer à foyer, vers des personnes que vous connaissez.'],
-      es: ['Puede invitar a personas que conoces', 'Ve a las personas a las que puedes escribir en Social Home, para que puedas invitarlas.', 'Cifrado de hogar a hogar, a personas que conoces.'],
+      en: ['Lets you pick people to play with', "You choose someone in Social Home. {name} learns only who you picked and people you've played with.", 'Only to the person you picked, encrypted home to home.', 'send anything without you choosing who'],
+      de: ['Lässt dich Leute zum Spielen auswählen', 'Du wählst jemanden in Social Home aus. {name} erfährt nur, wen du ausgewählt hast und mit wem du gespielt hast.', 'Nur an die Person, die du ausgewählt hast, verschlüsselt von Zuhause zu Zuhause.', 'etwas schicken, ohne dass du wählst, an wen'],
+      nl: ['Laat je mensen kiezen om mee te spelen', 'Je kiest iemand in Social Home. {name} komt alleen te weten wie je hebt gekozen en met wie je hebt gespeeld.', 'Alleen naar de persoon die je hebt gekozen, versleuteld van thuis naar thuis.', 'iets sturen zonder dat jij kiest naar wie'],
+      fr: ['Vous laisse choisir des personnes avec qui jouer', 'Vous choisissez quelqu’un dans Social Home. {name} sait seulement qui vous avez choisi et avec qui vous avez joué.', 'Seulement à la personne que vous avez choisie, chiffré de foyer à foyer.', 'envoyer quoi que ce soit sans que vous choisissiez à qui'],
+      es: ['Te deja elegir personas con quienes jugar', 'Eliges a alguien en Social Home. {name} solo sabe a quién elegiste y con quién has jugado.', 'Solo a la persona que elegiste, cifrado de hogar a hogar.', 'enviar nada sin que tú elijas a quién'],
     }[lang]!
-    expect([cat['apps.perm.people'], cat['apps.perm.people_detail'], cat['apps.perm.federation_detail']]).toEqual(shipped)
-    // "without you choosing who" comes back with PR 9.
-    expect(cat['apps.never.unasked']).toBeUndefined()
+    expect([
+      cat['apps.perm.people'],
+      cat['apps.perm.people_detail'],
+      cat['apps.perm.federation_detail'],
+      cat['apps.never.unasked'],
+    ]).toEqual(shipped)
   })
 
   it('a CalVer version reads as a date, anything else as v…', () => {
