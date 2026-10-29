@@ -34,7 +34,17 @@ export const PERMISSION_GLYPH: Record<AppPermission, string> = {
 /** The fixed "It can never…" list (true for every app: sandbox, no
  *  network, no token). */
 export function neverList(): string[] {
-  return [t('apps.never.sign_in'), t('apps.never.content'), t('apps.never.internet'), t('apps.never.unasked')]
+  // Each line must be true of every app today: no token reaches the
+  // sandboxed frame (sign-in), the bridge offers no posts / chats / photos
+  // / location (content), and the bundle CSP is ``default-src 'none'`` +
+  // ``connect-src 'none'`` (internet).
+  // TODO(R3 PR 9 "Invites go through Social Home"): once the bridge drops
+  // ``contacts.list`` / ``app.openSession`` and ``app.send`` only reaches
+  // known sessions, add back "send anything without you choosing who"
+  // (``apps.never.unasked``) — and switch the ``people`` / ``federation``
+  // permission text (see appFacts.test.ts) to "learns only who you picked"
+  // / "only to the person you picked".
+  return [t('apps.never.sign_in'), t('apps.never.content'), t('apps.never.internet')]
 }
 
 /** "Everyone" for no rating, else "13+". */

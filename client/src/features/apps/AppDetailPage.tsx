@@ -181,7 +181,7 @@ export default function AppDetailPage() {
               {size && <Fact label={t('apps.fact.size')} value={size} />}
               {entry?.publisher && <Fact label={t('apps.fact.publisher')} value={entry.publisher} />}
               <Fact label={t('apps.fact.rating')} value={ratingLabel(minAge)} />
-              {langs.length > 0 && <Fact label={t('apps.fact.languages')} value={String(langs.length)} />}
+              {langs.length > 0 && <Fact label={t('apps.fact.languages')} value={langs.join(', ')} />}
               {entry?.min_core_version && (
                 <Fact label={t('apps.fact.needs')} value={t('apps.fact.needs_value', { version: entry.min_core_version })} />
               )}
