@@ -3447,6 +3447,8 @@
   "error.app_catalog_unreachable": "No se pudo acceder a la lista de apps. Comprueba la conexión y vuelve a intentarlo.",
   "error.app_not_enabled": "Un admin ha desactivado esta app.",
   "error.app_age_restricted": "Esta app no está disponible para tu cuenta.",
+  "error.app_needs_newer_social_home": "Esta app necesita una versión más reciente de Social Home. Actualiza Social Home y vuelve a intentarlo.",
+  "error.app_permission_denied": "Esta app no tiene permiso para hacer eso.",
   "error.image_unreadable": "No se pudo abrir esta imagen. Prueba con un archivo JPEG, PNG o WebP.",
   "connections.map.you_pin": "Tú",
   "space.notif.muted_toast": "Silenciado: ya no recibirás notificaciones de publicaciones nuevas de este espacio.",

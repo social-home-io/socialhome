@@ -128,6 +128,8 @@ class AppRuntimeView(BaseView):
                 "entry_url": entry_url,
                 "self_user_id": user.user_id,
                 "capabilities": list(app.manifest.capabilities),
+                # What the bridge lets the app call (the routes check again).
+                "permissions": list(app.permissions),
             }
         )
 

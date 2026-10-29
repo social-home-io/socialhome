@@ -33,6 +33,17 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe("This app isn't available for your account.")
   })
 
+  it('says an app needs a newer Social Home, and when an app may not do something', () => {
+    expect(apiErrorMessage(422, '/api/apps', {
+      code: 'APP_NEEDS_NEWER_SOCIAL_HOME', detail: 'This app needs a newer Social Home.',
+      params: { capabilities: 'camera' },
+    })).toBe('This app needs a newer Social Home. Update Social Home, then try again.')
+    expect(apiErrorMessage(403, '/api/apps/chess/messages', {
+      code: 'APP_PERMISSION_DENIED', detail: "This app doesn't have that permission.",
+      params: { permission: 'federation' },
+    })).toBe("This app isn't allowed to do that.")
+  })
+
   it('translates a highlight frame refused for another audience', () => {
     expect(apiErrorMessage(409, '/api/highlights/frames', {
       code: 'HIGHLIGHT_AUDIENCE_MISMATCH',

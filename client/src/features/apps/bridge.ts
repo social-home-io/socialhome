@@ -35,14 +35,33 @@
  * (chess by move count).
  * - Replies use target origin ``'*'`` because the iframe's opaque origin
  *   means a specific origin target would always miss.
+ *
+ * Permissions (owner decision D2): the bridge is the sandbox's only way
+ * out, so it only offers what the household agreed to when the app was
+ * installed — ``storage`` (saves its own data), ``people`` (lets you pick
+ * people) and ``federation`` (sends to other households; implies
+ * ``people``), as ``/runtime`` lists them for the installed version. A
+ * call outside them is answered ``{ok: false, error: {code:
+ * 'permission_denied', permission}}`` without reaching the server, and
+ * ``app.context`` lists ``permissions`` so an app can leave out what it
+ * may not do. The server checks every route again and is authoritative:
+ * its ``403 APP_PERMISSION_DENIED`` comes back as the same typed error.
  */
 
 import { api, ApiError } from '@/api'
 import { ws, WsEvent } from '@/ws'
+import type { AppPermission } from '@/store/apps'
+
+
+/** The typed refusal an app gets for a call outside its permissions. */
+export const PERMISSION_DENIED = 'permission_denied'
 
 export interface BridgeContext {
   appId: string
   selfUserId: string
+  /** What the household agreed to (``/runtime``'s ``permissions``): only
+   *  these bridge calls are offered. Unknown names grant nothing. */
+  permissions: readonly string[]
   /** ``?session=`` the app was opened with ("Play" in Needs you): the
    *  one invite to take in and hand to the app. */
   launchSession?: string
@@ -74,7 +93,53 @@ interface RpcOkReply {
 interface RpcErrReply {
   id: string | number
   ok: false
-  error: { code: string; message: string }
+  /** ``permission`` is set on a ``permission_denied`` refusal. */
+  error: { code: string; message: string; permission?: AppPermission }
+}
+
+/** A call outside the app's permissions (here or on the server). */
+class PermissionDenied extends Error {
+  constructor(public readonly permission: AppPermission) {
+    super(`This app doesn't have the ${permission} permission.`)
+  }
+}
+
+/** The permission a game with *target* takes: ``people`` for someone in
+ *  this household, ``federation`` for anyone in another one (the same rule
+ *  the server applies). Anything not clearly local counts as remote. */
+function targetPermission(target: unknown): AppPermission {
+  return (target as { is_local?: unknown } | null)?.is_local === true ? 'people' : 'federation'
+}
+
+/** The permission each bridge call needs (``null``: none). A method not
+ *  listed is unknown and refused anyway. */
+function permissionFor(method: string, params: { target?: unknown } | undefined): AppPermission | null {
+  switch (method) {
+    case 'store.get':
+    case 'store.set':
+    case 'store.delete':
+    case 'store.list':
+      return 'storage'
+    case 'contacts.list':
+    case 'app.held':
+    case 'app.pendingSessions':
+      return 'people'
+    case 'peers.list':
+      return 'federation'
+    case 'app.send':
+    case 'app.openSession':
+    case 'app.cancelSession':
+      return targetPermission(params?.target)
+    default:
+      return null
+  }
+}
+
+/** The server's ``403 APP_PERMISSION_DENIED``, as the permission it names. */
+function serverDenied(err: unknown): AppPermission | null {
+  if (!(err instanceof ApiError) || err.code !== 'APP_PERMISSION_DENIED') return null
+  const p = (err.extra?.params as { permission?: unknown } | undefined)?.permission
+  return p === 'storage' || p === 'people' || p === 'federation' ? p : null
 }
 
 type RpcReply = RpcOkReply | RpcErrReply
@@ -166,10 +231,18 @@ export function mountBridge(
   ctx: BridgeContext,
 ): () => void {
   const { appId, launchSession } = ctx
+  const granted = new Set(ctx.permissions)
+  // ``federation`` implies ``people`` (as on the server).
+  if (granted.has('federation')) granted.add('people')
+  const has = (p: AppPermission): boolean => granted.has(p)
+  /** The known permissions the app has, for ``app.context``. */
+  // In the server's order (``APP_PERMISSIONS``, domain/apps.py).
+  const permissions = (['storage', 'people', 'federation'] as const).filter(has)
 
-  /** The launch context: the one invite "Play" opened the app for. */
+  /** The launch context: the one invite "Play" opened the app for. An app
+   *  without ``people`` has no games, so nothing is accepted for it. */
   async function launch(): Promise<LaunchContext> {
-    if (!launchSession) return {}
+    if (!launchSession || !has('people')) return {}
     const invite = await acceptOnce(appId, launchSession)
     return invite ? { sessionId: launchSession, invite } : { sessionId: launchSession }
   }
@@ -203,6 +276,7 @@ export function mountBridge(
   async function pushHeld(): Promise<void> {
     if (heldHandedOver) return
     heldHandedOver = true
+    if (!has('people')) return
     for (const e of await takeHeld()) {
       iframe.contentWindow?.postMessage({ type: 'app:event', ...e }, '*')
     }
@@ -212,6 +286,8 @@ export function mountBridge(
     const { id, method, params } = req
 
     try {
+      const needs = permissionFor(method, params)
+      if (needs && !has(needs)) throw new PermissionDenied(needs)
       switch (method) {
         case 'store.get': {
           const key = String(params?.key ?? '')
@@ -264,7 +340,12 @@ export function mountBridge(
           reply({
             id,
             ok: true,
-            result: { appId: ctx.appId, selfUserId: ctx.selfUserId, launch: await launch() },
+            result: {
+              appId: ctx.appId,
+              selfUserId: ctx.selfUserId,
+              permissions,
+              launch: await launch(),
+            },
           })
           // The app listens now: what waited for it follows, unless it
           // pulls held messages itself (``app.held``).
@@ -356,6 +437,15 @@ export function mountBridge(
           })
       }
     } catch (err) {
+      const denied = err instanceof PermissionDenied ? err.permission : serverDenied(err)
+      if (denied) {
+        reply({
+          id,
+          ok: false,
+          error: { code: PERMISSION_DENIED, message: new PermissionDenied(denied).message, permission: denied },
+        })
+        return
+      }
       const message = err instanceof Error ? err.message : String(err)
       reply({ id, ok: false, error: { code: 'error', message } })
     }
@@ -385,7 +475,8 @@ export function mountBridge(
   // Forwards the full identity so multi-game / multi-friend apps can route
   // a message to the right session and distinguish invites from in-game moves.
   const offWs = ws.on('app.message', (evt: WsEvent) => {
-    if (evt.data?.app_id === appId) {
+    // Every app message is from a person in a game: ``people`` only.
+    if (evt.data?.app_id === appId && has('people')) {
       iframe.contentWindow?.postMessage(
         {
           type: 'app:event',

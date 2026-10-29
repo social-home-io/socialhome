@@ -42,6 +42,7 @@ from ..domain.apps import (
     MAX_BUNDLE_DOWNLOAD_BYTES,
     MAX_BUNDLE_EXTRACTED_BYTES,
     MAX_BUNDLE_FILES,
+    PERMISSION_STORAGE,
     AppAgeRestrictedError,
     AppAlreadyInstalledError,
     AppBundleTooLargeError,
@@ -59,6 +60,7 @@ from ..domain.apps import (
     app_age_allows,
     core_version_satisfies,
     is_newer_version,
+    unknown_capabilities,
 )
 from ..domain.events import (
     AppEnabledChanged,
@@ -422,6 +424,14 @@ class AppService(BusPublisherMixin):
                 f"Invalid manifest.json in bundle for {app_id!r}: {exc}"
             ) from exc
 
+        # The installed manifest is what the household agrees to: a
+        # capability this Social Home can't name or enforce is refused
+        # outright — never granted blindly, never dropped silently.
+        unknown = unknown_capabilities(manifest.capabilities)
+        if unknown:
+            await asyncio.to_thread(self._rmtree_sync, dest)
+            raise AppNeedsNewerCoreError(params={"capabilities": ", ".join(unknown)})
+
         bundle_rel = f"{app_id}/{entry.latest_version}"
         return manifest, bundle_rel, actual_sha
 
@@ -724,6 +734,23 @@ class AppService(BusPublisherMixin):
         await self.assert_age_allowed(app, user_id)
         return app
 
+    async def require_app_permission(
+        self, app_id: str, user_id: str, permission: str
+    ) -> InstalledApp:
+        """The installed, enabled app *user_id* may use — and only when its
+        installed manifest grants *permission* (``storage`` / ``people`` /
+        ``federation``, :func:`~socialhome.domain.apps.app_permissions`).
+
+        The server half of the permission check (the SPA's bridge is the
+        other): every ``/api/apps/{id}/…`` route an app reaches through the
+        bridge calls this first. Raises :class:`AppNotFoundError` /
+        :class:`AppNotEnabledError` / :class:`AppAgeRestrictedError` /
+        :class:`~socialhome.domain.apps.AppPermissionDeniedError`.
+        """
+        app = await self._require_enabled_app(app_id, user_id)
+        app.require_permission(permission)
+        return app
+
     async def list_visible(self, *, user_id: str, is_admin: bool) -> list[InstalledApp]:
         """Return apps visible to the caller.
 
@@ -785,7 +812,7 @@ class AppService(BusPublisherMixin):
         age-restricted for this user; and :class:`KeyError` if the key has
         not been set.
         """
-        await self._require_enabled_app(app_id, user_id)
+        await self.require_app_permission(app_id, user_id, PERMISSION_STORAGE)
         entry = await self._repo.kv_get(app_id, user_id, key)
         if entry is None:
             raise KeyError(key)
@@ -799,7 +826,7 @@ class AppService(BusPublisherMixin):
         :class:`AppAgeRestrictedError` if the app is absent, disabled, or
         age-restricted for this user.
         """
-        await self._require_enabled_app(app_id, user_id)
+        await self.require_app_permission(app_id, user_id, PERMISSION_STORAGE)
         return {
             e.key: orjson.loads(e.value_json)
             for e in await self._repo.kv_list(app_id, user_id)
@@ -822,7 +849,7 @@ class AppService(BusPublisherMixin):
         :class:`AppAgeRestrictedError` if the app is absent, disabled, or
         age-restricted for this user.
         """
-        await self._require_enabled_app(app_id, user_id)
+        await self.require_app_permission(app_id, user_id, PERMISSION_STORAGE)
 
         if len(key) > APP_KV_MAX_KEY_LEN:
             raise AppQuotaExceededError(
@@ -855,7 +882,7 @@ class AppService(BusPublisherMixin):
         :class:`AppAgeRestrictedError` if the app is absent, disabled, or
         age-restricted for this user.
         """
-        await self._require_enabled_app(app_id, user_id)
+        await self.require_app_permission(app_id, user_id, PERMISSION_STORAGE)
         await self._repo.kv_delete(app_id, user_id, key)
 
     # ─── Sync helpers (run inside asyncio.to_thread) ─────────────────────────

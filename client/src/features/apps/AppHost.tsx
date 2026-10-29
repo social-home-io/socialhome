@@ -171,6 +171,8 @@ export function AppHostInner({ appId, sessionId }: {
     const cleanup = mountBridge(el, {
       appId: runtime.app_id,
       selfUserId: runtime.self_user_id,
+      // What the household agreed to; an older answer without it grants nothing.
+      permissions: runtime.permissions ?? [],
       launchSession: frameSession,
       onReady: () => {
         clearTimers()

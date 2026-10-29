@@ -27,6 +27,7 @@ from socialhome.domain.apps import (
     AppNotEnabledError,
     AppNotFoundError,
     AppPendingSession,
+    AppPermissionDeniedError,
     InstalledApp,
 )
 from socialhome.domain.events import AppChallengeDeclined, AppChallengeEnded
@@ -51,13 +52,14 @@ def _make_installed_app(
     *,
     enabled: bool = True,
     min_age: int = 0,
+    capabilities: tuple[str, ...] = ("storage", "federation"),
 ) -> InstalledApp:
     return InstalledApp(
         app_id=app_id,
         name="Chess",
         version="1.0.0",
         enabled=enabled,
-        manifest=AppManifest(entry="index.html", icon=None, capabilities=()),
+        manifest=AppManifest(entry="index.html", icon=None, capabilities=capabilities),
         bundle_path="/apps/chess",
         bundle_sha256="abc123",
         source_url="https://example.com/chess.tgz",
@@ -3428,3 +3430,132 @@ async def test_a_blocked_sender_is_not_handed_over():
     await _inbound_move(svc, {"n": 1})
     svc._user_repo._block_pairs = {("u-bob", "ru-carol")}
     assert await svc.take_held(app_id="chess", actor_user_id="u-bob") == []
+
+
+# ─── Permissions: "federation" = sends to (and hears from) other households ──
+
+_LOCAL_ONLY = ("storage", "people")
+
+
+@pytest.mark.asyncio
+async def test_an_app_without_federation_cannot_open_a_remote_session():
+    svc, fed, _ = _make_svc(
+        apps={"chess": _make_installed_app("chess", capabilities=_LOCAL_ONLY)},
+        users=[_make_user("u-init", "alice", "Alice")],
+        remote_users=[_make_remote_user(instance_id="peer-1", remote_username="bob")],
+    )
+    with pytest.raises(AppPermissionDeniedError) as ei:
+        await svc.open_session(
+            app_id="chess",
+            target=_remote_target("peer-1", "bob"),
+            actor_user_id="u-init",
+        )
+    assert ei.value.permission == "federation"
+    assert fed.sent_events == []
+
+
+@pytest.mark.asyncio
+async def test_an_app_without_federation_cannot_send_to_another_household():
+    svc, fed, _ = _make_svc(
+        apps={"chess": _make_installed_app("chess", capabilities=_LOCAL_ONLY)},
+        users=[_make_user("u-init", "alice", "Alice")],
+        remote_users=[_make_remote_user(instance_id="peer-1", remote_username="bob")],
+    )
+    with pytest.raises(AppPermissionDeniedError):
+        await svc.send_message(
+            app_id="chess",
+            target=_remote_target("peer-1", "bob"),
+            session_id="s1",
+            payload={"move": "e2e4"},
+            actor_user_id="u-init",
+        )
+    assert fed.sent_app_messages == [] and fed.sent_events == []
+
+
+@pytest.mark.asyncio
+async def test_an_app_without_federation_cannot_cancel_toward_another_household():
+    svc, fed, _ = _make_svc(
+        apps={"chess": _make_installed_app("chess", capabilities=_LOCAL_ONLY)},
+        users=[_make_user("u-init", "alice", "Alice")],
+        remote_users=[_make_remote_user(instance_id="peer-1", remote_username="bob")],
+    )
+    with pytest.raises(AppPermissionDeniedError):
+        await svc.cancel_session(
+            app_id="chess",
+            session_id="s1",
+            target=_remote_target("peer-1", "bob"),
+            actor_user_id="u-init",
+        )
+    assert fed.sent_events == []
+
+
+@pytest.mark.asyncio
+async def test_a_local_only_app_still_plays_inside_the_household():
+    """``people`` without ``federation``: games with people at home work."""
+    svc, fed, ws = _make_svc(
+        apps={"chess": _make_installed_app("chess", capabilities=_LOCAL_ONLY)},
+        users=[_make_user("u-alice", "alice", "Alice"), _make_user("u-bob", "bob")],
+    )
+    session_id = await svc.open_session(
+        app_id="chess", target=_local_target("u-bob"), actor_user_id="u-alice"
+    )
+    await svc.send_message(
+        app_id="chess",
+        session_id=session_id,
+        target=_local_target("u-bob"),
+        payload={"move": "e2e4"},
+        actor_user_id="u-alice",
+    )
+    assert fed.sent_events == [] and fed.sent_app_messages == []
+    assert ws.calls or ws.user_calls
+
+
+@pytest.mark.asyncio
+async def test_an_app_without_people_cannot_open_even_a_local_session():
+    svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app("chess", capabilities=("storage",))},
+        users=[_make_user("u-alice", "alice", "Alice"), _make_user("u-bob", "bob")],
+    )
+    with pytest.raises(AppPermissionDeniedError) as ei:
+        await svc.open_session(
+            app_id="chess", target=_local_target("u-bob"), actor_user_id="u-alice"
+        )
+    assert ei.value.permission == "people"
+
+
+@pytest.mark.asyncio
+async def test_inbound_for_an_app_without_federation_is_dropped():
+    """Another household's copy of the app can't reach an install that
+    never agreed to talk to other households."""
+    svc, _, ws = _make_svc(
+        apps={"chess": _make_installed_app("chess", capabilities=_LOCAL_ONLY)},
+        users=[_make_user("u1", "alice")],
+        peer_version=17,
+    )
+    await svc.on_inbound_event(
+        _make_event(
+            FederationEventType.APP_SESSION,
+            {"app_id": "chess", "session_id": "s1", "verb": "open"},
+        )
+    )
+    await svc.on_inbound_message("peer-inst-id", "chess", "s1", {"move": "e2e4"})
+    assert ws.calls == [] and ws.user_calls == []
+    assert svc._app_repo.pending == []  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_declining_after_federation_was_taken_away_sends_nothing():
+    svc, fed, _ = _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[_make_user("u-bob", "bob", "Bob")],
+        remote_users=[_carol()],
+    )
+    await _remote_invite(svc)
+    svc._app_repo._apps["chess"] = _make_installed_app(  # type: ignore[attr-defined]
+        "chess", capabilities=_LOCAL_ONLY
+    )
+    await svc.decline_session(
+        app_id="chess", session_id="sess-1", actor_user_id="u-bob"
+    )
+    assert svc._app_repo.invites == []  # type: ignore[attr-defined]
+    assert fed.sent_events == []

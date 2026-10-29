@@ -543,9 +543,11 @@ async def test_delete_success_returns_ok(client, monkeypatch):
 def _make_installed_no_installer(
     app_id: str = "com.example.hello",
     enabled: bool = True,
+    capabilities: tuple[str, ...] = ("storage", "federation"),
 ) -> InstalledApp:
-    """Like ``_make_installed`` but with ``installed_by=None`` to avoid FK issues."""
-    manifest = AppManifest(entry="index.js", icon="icon.png", capabilities=("read",))
+    """Like ``_make_installed`` but with ``installed_by=None`` to avoid FK
+    issues. Chess's permissions by default (``people`` implied)."""
+    manifest = AppManifest(entry="index.js", icon="icon.png", capabilities=capabilities)
     return InstalledApp(
         app_id=app_id,
         name="Hello App",
@@ -560,14 +562,24 @@ def _make_installed_no_installer(
     )
 
 
-async def _seed_installed_enabled_app(db, app_id: str = "com.example.hello") -> None:
-    """Insert an installed+enabled app row directly via SqliteAppRepo.
+async def _seed_installed_enabled_app(
+    db,
+    app_id: str = "com.example.hello",
+    capabilities: tuple[str, ...] = ("storage", "federation"),
+) -> None:
+    """Insert an installed+enabled app row directly via SqliteAppRepo
+    (replacing one already there — the ``client`` fixture seeds the app
+    for tests that stub the federation service).
 
     Uses ``installed_by=None`` to avoid a FK constraint on the users table
     (the installer user may not have been seeded yet at call time).
     """
     repo = SqliteAppRepo(db)
-    app = _make_installed_no_installer(app_id=app_id, enabled=True)
+    if await repo.get(app_id) is not None:
+        await repo.uninstall(app_id)
+    app = _make_installed_no_installer(
+        app_id=app_id, enabled=True, capabilities=capabilities
+    )
     await repo.install(app)
 
 
@@ -828,9 +840,14 @@ def fed_svc():
 async def client(request, make_client):
     """``client`` starts with :func:`fed_svc` swapped in when a test asks
     for it."""
-    return await client_with_stubs(
+    c = await client_with_stubs(
         request, make_client, {"fed_svc": app_federation_service_key}
     )
+    if "fed_svc" in request.fixturenames:
+        # The routes check the app's permissions before the (stubbed)
+        # service runs: the app they address is installed, with Chess's.
+        await _seed_installed_enabled_app(c._db)
+    return c
 
 
 # ── GET /api/apps/{app_id}/peers ──────────────────────────────────────────
@@ -1892,6 +1909,7 @@ async def test_the_challenger_cancels_a_game_invite(client):
 
 
 async def test_cancel_needs_a_target(client):
+    await _seed_installed_enabled_app(client._db)
     r = await client.post(
         "/api/apps/com.example.hello/sessions/s1/cancel",
         json={"target": {"instance_id": "x"}},
@@ -2164,3 +2182,139 @@ async def test_ask_an_admin_refusals(client, monkeypatch):
     assert r.status == 403
     r = await client.post("/api/apps/chess/requests")
     assert r.status == 401
+
+
+# ── Permissions: every route an app reaches checks what it needs ──────────
+#
+# (method, path, body, permission). The bridge refuses these too; the
+# server is authoritative.
+
+_LOCAL = {"instance_id": "self", "user_ref": "carol-id", "is_local": True}
+_REMOTE = {"instance_id": "peer.example.com", "user_ref": "bob", "is_local": False}
+_ROUTES = [
+    ("get", "/store", None, "storage"),
+    ("get", "/store/k", None, "storage"),
+    ("put", "/store/k", {"value": 1}, "storage"),
+    ("delete", "/store/k", None, "storage"),
+    ("get", "/contacts", None, "people"),
+    ("get", "/peers", None, "federation"),
+    ("post", "/sessions", {"target": _LOCAL}, "people"),
+    (
+        "post",
+        "/messages",
+        {"session_id": "s1", "target": _LOCAL, "payload": {"m": 1}},
+        "people",
+    ),
+    ("post", "/sessions/s1/cancel", {"target": _LOCAL}, "people"),
+    ("post", "/sessions/s1/accept", None, "people"),
+    ("post", "/sessions/s1/decline", None, "people"),
+    ("post", "/held", None, "people"),
+]
+
+#: Caps that lack the route's permission (and nothing implies it).
+_WITHOUT = {
+    "storage": ("people", "federation"),
+    "people": ("storage",),
+    "federation": ("storage", "people"),
+}
+
+
+@pytest.mark.parametrize(("method", "path", "body", "permission"), _ROUTES)
+async def test_a_route_refuses_an_app_without_its_permission(
+    client, fed_svc, method, path, body, permission
+):
+    await _seed_installed_enabled_app(client._db, capabilities=_WITHOUT[permission])
+    r = await getattr(client, method)(
+        f"/api/apps/com.example.hello{path}",
+        headers=_auth(client._tok),
+        **({"json": body} if body is not None else {}),
+    )
+    assert r.status == 403
+    err = (await r.json())["error"]
+    assert err["code"] == "APP_PERMISSION_DENIED"
+    assert err["params"] == {"permission": permission}
+    # Nothing reached the service behind the route.
+    for name in (
+        "list_contacts",
+        "list_peers",
+        "open_session",
+        "send_message",
+        "cancel_session",
+        "accept_session",
+        "decline_session",
+        "take_held",
+    ):
+        getattr(fed_svc, name).assert_not_awaited()
+
+
+@pytest.mark.parametrize(("method", "path", "body", "permission"), _ROUTES)
+async def test_a_route_lets_an_app_with_its_permission_through(
+    client, fed_svc, method, path, body, permission
+):
+    await _seed_installed_enabled_app(client._db, capabilities=(permission,))
+    fed_svc.list_contacts.return_value = []
+    fed_svc.list_peers.return_value = []
+    fed_svc.open_session.return_value = "s1"
+    fed_svc.take_held.return_value = []
+    fed_svc.accept_session.return_value = AppPendingSession(
+        app_id="com.example.hello",
+        user_id=client._uid,
+        session_id="s1",
+        from_instance="self",
+        from_user="carol-id",
+        payload={},
+        created_at="2026-10-29T00:00:00+00:00",
+    )
+    r = await getattr(client, method)(
+        f"/api/apps/com.example.hello{path}",
+        headers=_auth(client._tok),
+        **({"json": body} if body is not None else {}),
+    )
+    # A 404 is store/k's "key not found" — past the permission check.
+    assert r.status in (200, 201, 404), await r.text()
+    if r.status == 404:
+        assert (method, path) == ("get", "/store/k")
+
+
+async def test_chess_keeps_every_permission_it_had(client, fed_svc):
+    """Chess declares storage + federation: people is implied, so contacts
+    and a game with a person in another household still work."""
+    await _seed_installed_enabled_app(
+        client._db, capabilities=("storage", "federation")
+    )
+    fed_svc.list_contacts.return_value = []
+    fed_svc.open_session.return_value = "s1"
+    for method, path, body in (
+        ("get", "/contacts", None),
+        ("get", "/store", None),
+        ("post", "/sessions", {"target": _REMOTE}),
+    ):
+        r = await getattr(client, method)(
+            f"/api/apps/com.example.hello{path}",
+            headers=_auth(client._tok),
+            **({"json": body} if body is not None else {}),
+        )
+        assert r.status in (200, 201), (path, await r.text())
+
+
+async def test_a_local_only_app_cannot_open_a_game_with_another_household(client):
+    """The real service: ``people`` without ``federation`` stops at the
+    household's edge."""
+    await _seed_installed_enabled_app(client._db, capabilities=("storage", "people"))
+    r = await client.post(
+        "/api/apps/com.example.hello/sessions",
+        json={"target": _REMOTE},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 403
+    err = (await r.json())["error"]
+    assert err["code"] == "APP_PERMISSION_DENIED"
+    assert err["params"] == {"permission": "federation"}
+
+
+async def test_list_and_detail_say_which_permissions_the_app_has(client):
+    await _seed_installed_enabled_app(client._db, capabilities=("federation",))
+    r = await client.get("/api/apps/com.example.hello", headers=_auth(client._tok))
+    assert (await r.json())["permissions"] == ["people", "federation"]
+    r = await client.get("/api/apps", headers=_auth(client._tok))
+    assert (await r.json())["apps"][0]["permissions"] == ["people", "federation"]

@@ -3420,6 +3420,8 @@
   "error.app_catalog_unreachable": "Die App-Liste war nicht erreichbar. Prüfe die Verbindung und versuch es noch einmal.",
   "error.app_not_enabled": "Ein Admin hat diese App ausgeschaltet.",
   "error.app_age_restricted": "Diese App ist für dein Konto nicht verfügbar.",
+  "error.app_needs_newer_social_home": "Diese App braucht ein neueres Social Home. Aktualisiere Social Home und versuch es dann noch einmal.",
+  "error.app_permission_denied": "Diese App darf das nicht.",
   "error.image_unreadable": "Dieses Bild konnte nicht geöffnet werden. Versuch es mit einer JPEG-, PNG- oder WebP-Datei.",
   "connections.map.you_pin": "Du",
   "space.notif.muted_toast": "Stumm – du bekommst keine Mitteilungen mehr über neue Beiträge in diesem Space.",

@@ -3420,6 +3420,8 @@
   "error.app_catalog_unreachable": "Kon de app-lijst niet bereiken. Controleer de verbinding en probeer het opnieuw.",
   "error.app_not_enabled": "Een beheerder heeft deze app uitgezet.",
   "error.app_age_restricted": "Deze app is niet beschikbaar voor je account.",
+  "error.app_needs_newer_social_home": "Deze app heeft een nieuwere Social Home nodig. Werk Social Home bij en probeer het dan opnieuw.",
+  "error.app_permission_denied": "Deze app mag dat niet.",
   "error.image_unreadable": "Deze afbeelding kon niet worden geopend. Probeer een JPEG-, PNG- of WebP-bestand.",
   "connections.map.you_pin": "Jij",
   "space.notif.muted_toast": "Gedempt — je krijgt geen meldingen meer over nieuwe berichten in deze space.",

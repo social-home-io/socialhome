@@ -58,7 +58,7 @@ def _make_app(
     manifest = AppManifest(
         entry="index.html",
         icon=None,
-        capabilities=("read",),
+        capabilities=("storage", "federation"),
     )
     return InstalledApp(
         app_id=app_id,
@@ -124,7 +124,9 @@ async def test_runtime_returns_signed_entry_url(client):
     assert "exp=" in entry_url
     assert "sig=" in entry_url
     assert "index.html" in entry_url
-    assert body["capabilities"] == ["read"]
+    assert body["capabilities"] == ["storage", "federation"]
+    # What the bridge offers the app: people is implied by federation.
+    assert body["permissions"] == ["storage", "people", "federation"]
     assert "self_user_id" in body
 
 

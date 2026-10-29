@@ -351,7 +351,9 @@ def _probe_bundle() -> bytes:
         "version": "2026.1.1",
         "description": "Harness app: answers the host bridge.",
         "entry": "index.html",
-        "capabilities": [],
+        # Plays with people in this household only: the permissions the
+        # Play launch needs (contacts, sessions, accept) — no federation.
+        "capabilities": ["storage", "people"],
     }
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
@@ -377,7 +379,9 @@ async def apps_catalog(request: web.Request) -> web.Response:
         "latest_version": "2026.1.1",
         "description": "Harness app: answers the host bridge.",
         "icon_url": None,
-        "capabilities": [],
+        # Plays with people in this household only: the permissions the
+        # Play launch needs (contacts, sessions, accept) — no federation.
+        "capabilities": ["storage", "people"],
         "bundle_url": f"{base}/_apps/{PROBE_APP_ID}.tgz",
         "bundle_sha256": hashlib.sha256(PROBE_BUNDLE).hexdigest(),
     }

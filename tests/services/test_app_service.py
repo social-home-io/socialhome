@@ -34,6 +34,7 @@ from socialhome.domain.apps import (
     AppNeedsNewerCoreError,
     AppNotEnabledError,
     AppNotFoundError,
+    AppPermissionDeniedError,
     AppQuotaExceededError,
     AppRequestNotAllowedError,
     InstalledApp,
@@ -2344,3 +2345,105 @@ async def test_catalog_source_host(tmp_path: Path) -> None:
         repo=_FakeAppRepo(), catalog=None, apps_path=tmp_path, downloader=lambda u: b""
     )
     assert bare.catalog_source_host is None
+
+
+# ─── Permissions: the installed manifest is what the household agreed to ─────
+
+
+def _tarball_with_caps(caps: list[str]) -> tuple[bytes, str]:
+    buf = io.BytesIO()
+    manifest = json.dumps({"entry": "index.html", "capabilities": caps}).encode()
+    with (
+        gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz,
+        tarfile.open(fileobj=gz, mode="w|") as tar,
+    ):
+        for name, data in [("manifest.json", manifest), ("index.html", b"<p>x</p>")]:
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+    data = buf.getvalue()
+    return data, hashlib.sha256(data).hexdigest()
+
+
+def _entry_with(sha: str, version: str = "1.0.0") -> AppCatalogEntry:
+    return AppCatalogEntry(
+        app_id="chess",
+        name="Chess",
+        latest_version=version,
+        description="Play chess",
+        icon_url=None,
+        capabilities=("storage",),
+        bundle_url=f"https://example.com/chess-{version}.tgz",
+        bundle_sha256=sha,
+    )
+
+
+async def test_install_refuses_a_capability_this_social_home_does_not_know(
+    tmp_path: Path,
+) -> None:
+    raw, sha = _tarball_with_caps(["storage", "camera"])
+    svc, repo = make_service(tmp_path, [_entry_with(sha)], raw)
+    with pytest.raises(AppNeedsNewerCoreError) as ei:
+        await svc.install("chess", actor_is_admin=True, actor_user_id="admin1")
+    assert ei.value.params == {"capabilities": "camera"}
+    assert await repo.list_installed() == []
+    assert not (tmp_path / "chess" / "1.0.0").exists()
+
+
+async def test_update_refuses_a_capability_this_social_home_does_not_know(
+    tmp_path: Path, chess_bundle: tuple[bytes, str]
+) -> None:
+    repo = await _installed_at(tmp_path, chess_bundle, "1.0.0")
+    raw, sha = _tarball_with_caps(["storage", "federation", "location"])
+
+    async def downloader(url: str) -> bytes:
+        return raw
+
+    svc = AppService(
+        repo=repo,
+        catalog=_StubCatalog([_entry_with(sha, "2.0.0")]),  # type: ignore[arg-type]
+        apps_path=tmp_path / "seed",
+        downloader=downloader,
+    )
+    with pytest.raises(AppNeedsNewerCoreError):
+        await svc.update_app("chess", actor_is_admin=True)
+    kept = await repo.get("chess")
+    assert kept is not None and kept.version == "1.0.0"
+    assert kept.manifest.capabilities == ("storage",)
+    assert not (tmp_path / "seed" / "chess" / "2.0.0").exists()
+
+
+async def test_install_accepts_the_three_known_permissions(tmp_path: Path) -> None:
+    raw, sha = _tarball_with_caps(["storage", "people", "federation"])
+    svc, _ = make_service(tmp_path, [_entry_with(sha)], raw)
+    app = await svc.install("chess", actor_is_admin=True, actor_user_id="admin1")
+    assert app.permissions == ("storage", "people", "federation")
+
+
+async def test_store_needs_the_storage_permission(tmp_path: Path) -> None:
+    raw, sha = _tarball_with_caps(["people"])
+    svc, _ = make_service(tmp_path, [_entry_with(sha)], raw)
+    await svc.install("chess", actor_is_admin=True, actor_user_id="admin1")
+    for call in (
+        svc.store_get("chess", "user1", "k"),
+        svc.store_list("chess", "user1"),
+        svc.store_set("chess", "user1", "k", 1),
+        svc.store_delete("chess", "user1", "k"),
+    ):
+        with pytest.raises(AppPermissionDeniedError) as ei:
+            await call
+        assert ei.value.permission == "storage"
+
+
+async def test_require_app_permission(tmp_path: Path) -> None:
+    raw, sha = _tarball_with_caps(["storage", "federation"])
+    svc, _ = make_service(tmp_path, [_entry_with(sha)], raw)
+    await svc.install("chess", actor_is_admin=True, actor_user_id="admin1")
+    # Grandfathered: federation implies people.
+    app = await svc.require_app_permission("chess", "user1", "people")
+    assert app.app_id == "chess"
+    await svc.require_app_permission("chess", "user1", "federation")
+    with pytest.raises(AppPermissionDeniedError):
+        await svc.require_app_permission("chess", "user1", "nonsense")
+    with pytest.raises(AppNotFoundError):
+        await svc.require_app_permission("nope", "user1", "storage")

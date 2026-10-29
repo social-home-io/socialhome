@@ -306,6 +306,60 @@ This lets apps:
 - **Distinguish invites from moves** — `kind === "session"` signals a
   lifecycle event (open/close); `kind === "message"` is in-game data.
 
+## Permissions
+
+An app gets only the permissions the household agreed to when an admin
+installed it. There are three, in plain words (owner decision D2):
+
+| Permission | In plain words | What it allows |
+|---|---|---|
+| `storage` | Saves its own data | The per-app, per-person key-value store. |
+| `people` | Lets you pick people | The contact roster and games (sessions) with people in this household: invites, moves, the mailbox, Play. |
+| `federation` | Sends to other households | Anything that leaves this household — an invite, a move, a withdrawal or a decline to someone in another household — and anything another household's copy of the app sends here. Implies `people`. |
+
+The installed version's `manifest.json` `capabilities` are the agreement
+(`installed_apps.manifest_json`; no separate grant column): an update that
+asks for more waits for an admin, so the installed manifest is always what the
+household said yes to. `domain/apps.py` `app_permissions()` is the one place
+that maps capabilities to permissions; `federation` implies `people`, so an
+install from before `people` existed (Chess: `storage` + `federation`) keeps
+everything it had. A manifest that names a capability this Social Home doesn't
+know is refused at install and update with `409 APP_NEEDS_NEWER_SOCIAL_HOME`
+(`params.capabilities`), never granted blindly or dropped silently.
+
+Checked twice:
+
+1. **The bridge** (`client/src/features/apps/bridge.ts`) — the sandbox's only
+   way out — offers only calls inside the permissions `/runtime` lists. Any
+   other is answered `{ok: false, error: {code: "permission_denied",
+   permission}}` without reaching the server, so an app can degrade (leave out
+   "Play someone in another household", say why). `app.context` lists
+   `permissions` up front. Without `people` nothing is accepted on a Play
+   launch, no held messages are pushed and no live `app:event` is relayed.
+2. **The server** — every `/api/apps/{app_id}/…` route checks again and is
+   authoritative: `403 APP_PERMISSION_DENIED` with `params.permission`, which
+   the bridge hands to the app as the same typed error.
+
+| Bridge call | Route | Permission |
+|---|---|---|
+| `store.get` / `store.set` / `store.delete` / `store.list` | `GET/PUT/DELETE /store/{key}`, `GET /store` | `storage` |
+| `contacts.list` | `GET /contacts` | `people` |
+| `peers.list` | `GET /peers` | `federation` |
+| `app.openSession` / `app.send` / `app.cancelSession` | `POST /sessions`, `POST /messages`, `POST /sessions/{sid}/cancel` | `people` for someone in this household (`target.is_local`); `federation` for anyone in another one |
+| `app.held`, `app.pendingSessions`, `app.context`'s Play launch | `POST /held`, `POST /sessions/{sid}/accept` | `people` |
+| — (Needs you, the SPA) | `POST /sessions/{sid}/decline` | `people` (the decline's close to another household is skipped without `federation`) |
+| `app.context`, `app.ready` | `GET /runtime`, `/bundle/…` | none |
+
+Inbound: an `APP_SESSION` / `APP_MESSAGE` / binary app frame for an app
+installed here without `federation` is dropped like one for an app that isn't
+installed — another household's copy of the app can't reach it either.
+
+Accepted risk: an app with `federation` can send anything it stored to the
+person you picked. That is what the permission is for, and the consent says
+"sends … to other households". Apps can't reach the internet
+(`connect-src 'none'`), so correlating a person across apps needs the other
+household's copy of the same app.
+
 ## Inbound delivery
 
 `AppFederationService._deliver` routes inbound app messages:
@@ -319,9 +373,10 @@ This lets apps:
   WebSocket is open and who passes the app's age gate.  The `session_id`
   scopes the semantics so the SPA can dispatch to the correct component.
 
-If the app is not installed or not enabled on the receiving household, the
-event is silently dropped with a debug log — the peer does not receive an
-error.
+If the app is not installed or not enabled on the receiving household — or
+was installed without the `federation` permission (see
+[Permissions](#permissions)) — the event is silently dropped with a debug log;
+the peer does not receive an error.
 
 ## Receiver rules
 

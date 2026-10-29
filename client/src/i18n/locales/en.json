@@ -3456,6 +3456,8 @@
   "error.app_catalog_unreachable": "Couldn't reach the app list. Check the connection and try again.",
   "error.app_not_enabled": "An admin turned this app off.",
   "error.app_age_restricted": "This app isn't available for your account.",
+  "error.app_needs_newer_social_home": "This app needs a newer Social Home. Update Social Home, then try again.",
+  "error.app_permission_denied": "This app isn't allowed to do that.",
   "error.image_unreadable": "This image couldn't be opened. Try a JPEG, PNG or WebP file.",
   "connections.map.you_pin": "You",
   "space.notif.muted_toast": "Muted — you won't get notifications about new posts in this space.",

@@ -311,6 +311,8 @@ export interface AppRuntime {
   entry_url:    string
   self_user_id: string
   capabilities: string[]
+  /** What the bridge offers the app (the routes check again). */
+  permissions:  string[]
 }
 
 export async function getRuntime(appId: string): Promise<AppRuntime> {
