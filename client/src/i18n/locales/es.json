@@ -4832,7 +4832,7 @@
   "apps.fact.source": "Procede de",
   "apps.fact.source_social_home": "La lista de apps de Social Home",
   "apps.fact.source_operator": "{host} (elegido por quien gestiona tu servidor)",
-  "apps.fact.homepage": "Fuente",
+  "apps.fact.homepage": "Fuente: {url}",
   "compat.load_failed": "No se pudo cargar la información de versión.",
   "instance.config_failed": "No se pudieron cargar los ajustes de este Social Home.",
   "push.unsupported": "Este navegador no admite notificaciones push",

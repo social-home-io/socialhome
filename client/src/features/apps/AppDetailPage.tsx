@@ -87,7 +87,7 @@ export default function AppDetailPage() {
 
   const back = (
     <a class="sh-apps-back" href={addBase('/apps')}>
-      <span aria-hidden="true">← </span>{t('nav.apps')}
+      <span aria-hidden="true">←</span>{t('nav.apps')}
     </a>
   )
 
@@ -160,7 +160,11 @@ export default function AppDetailPage() {
                   const note = c.notes[lang] ?? c.notes[base] ?? c.notes.en ?? Object.values(c.notes)[0] ?? ''
                   return (
                     <li key={c.version}>
-                      <h3 class="sh-app-changelog__v">{versionLabel(c.version)}</h3>
+                      <h3 class="sh-app-changelog__v">
+                        {versionLabel(c.version)}
+                        {/* A same-day fix (``YYYY.M.D.N``) reads apart from the day's first. */}
+                        {c.version.split('.').length > 3 && <span class="sh-app-changelog__n"> · {c.version}</span>}
+                      </h3>
                       {note && <p class="sh-app-changelog__note">{note}</p>}
                     </li>
                   )
@@ -189,8 +193,13 @@ export default function AppDetailPage() {
                     : t('apps.fact.source_social_home')}
                 />
               )}
-              {entry?.homepage && <Fact label={t('apps.fact.homepage')} value={entry.homepage.replace(/^https:\/\//, '')} />}
             </dl>
+            {/* Text, never a link: nothing here is fetched. */}
+            {entry?.homepage && (
+              <p class="sh-app-detail__homepage">
+                {t('apps.fact.homepage', { url: entry.homepage.replace(/^https:\/\//, '') })}
+              </p>
+            )}
           </section>
           <section class="sh-app-detail__card" aria-labelledby="sh-app-detail-home">
             <h2 class="sh-app-detail__h" id="sh-app-detail-home">{t('apps.section.household')}</h2>
@@ -284,12 +293,16 @@ function HouseholdFacts({ installed, minAge, isAdmin }: {
   }
   const day = shortDay(installed.installed_at)
   return (
-    <p class="sh-app-detail__text">
-      {installed.installed_by_name
-        ? t('apps.added_by', { name: installed.installed_by_name, date: day })
-        : day ? t('apps.added_on', { date: day }) : null}
-      {installed.enabled ? <> {whoCanOpen(installed.min_age)}{protectedLine}</> : <> {t('apps.detail.turned_off')}</>}
-    </p>
+    <>
+      <p class="sh-app-detail__text sh-app-detail__added">
+        {installed.installed_by_name
+          ? t('apps.added_by', { name: installed.installed_by_name, date: day })
+          : day ? t('apps.added_on', { date: day }) : null}
+      </p>
+      <p class="sh-app-detail__text">
+        {installed.enabled ? <>{whoCanOpen(installed.min_age)}{protectedLine}</> : t('apps.detail.turned_off')}
+      </p>
+    </>
   )
 }
 

@@ -22255,6 +22255,14 @@ span.sh-hlv__who { cursor: default; }
   font-weight: 600;
   line-height: 1.25;
 }
+.sh-apps-row__name .sh-age-chip,
+.sh-app-meta .sh-age-chip { font-family: var(--sh-font-family); }
+.sh-app-detail__homepage {
+  margin: var(--sh-space-sm) 0 0;
+  font-size: var(--sh-font-size-xs);
+  color: var(--sh-text-muted);
+  overflow-wrap: anywhere;
+}
 .sh-apps-row__link { color: inherit; text-decoration: none; }
 .sh-apps-row__link:hover { text-decoration: underline; }
 .sh-apps-row__meta,
@@ -22415,6 +22423,7 @@ span.sh-hlv__who { cursor: default; }
 .sh-apps-back {
   display: inline-flex;
   align-items: center;
+  gap: 0.35em;
   min-height: 36px;
   margin-bottom: var(--sh-space-sm);
   color: var(--sh-primary-text);
@@ -22471,6 +22480,8 @@ span.sh-hlv__who { cursor: default; }
 .sh-app-facts__row dd { margin: 0; font-weight: 600; text-align: end; overflow-wrap: anywhere; }
 .sh-app-changelog { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--sh-space-md); }
 .sh-app-changelog__v { margin: 0; font-family: var(--sh-font-family); font-size: var(--sh-font-size-sm); font-weight: 700; }
+.sh-app-changelog__n { font-weight: 400; color: var(--sh-text-muted); }
+.sh-app-detail__added { margin-bottom: var(--sh-space-xs); color: var(--sh-text); }
 .sh-app-changelog__note { margin: 2px 0 0; font-size: var(--sh-font-size-sm); line-height: 1.55; }
 
 @media (max-width: 768px) {
@@ -22478,9 +22489,13 @@ span.sh-hlv__who { cursor: default; }
 }
 @media (max-width: 560px) {
   .sh-apps-search { flex-basis: 100%; }
-  .sh-apps-row { flex-wrap: wrap; gap: var(--sh-space-sm) var(--sh-space-md); padding: var(--sh-space-md) var(--sh-space-sm); }
-  .sh-apps-row__main { flex-basis: calc(100% - 56px - var(--sh-space-md)); }
-  .sh-apps-row__actions { width: 100%; justify-content: flex-end; }
+  .sh-apps-row { gap: var(--sh-space-sm); padding: var(--sh-space-sm) var(--sh-space-sm) var(--sh-space-sm) var(--sh-space-md); }
+  .sh-apps-row .sh-app-icon--md { width: 44px; height: 44px; }
+  .sh-apps-row__name { font-size: var(--sh-font-size-base); }
+  .sh-apps-row__actions .sh-btn { padding-inline: var(--sh-space-md); }
+  /* An update row's two buttons go under the text. */
+  .sh-apps-row--update { flex-wrap: wrap; }
+  .sh-apps-row--update .sh-apps-row__actions { width: 100%; justify-content: flex-end; }
   .sh-apps-featured,
   .sh-app-detail__hero { flex-direction: column; padding: var(--sh-space-md); gap: var(--sh-space-sm); }
   .sh-app-detail__card { padding: var(--sh-space-md); }

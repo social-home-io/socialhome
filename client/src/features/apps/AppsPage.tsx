@@ -322,7 +322,7 @@ function UpdateRow({ update, name, icon }: { update: AppUpdate, name: string, ic
     }
   }
   return (
-    <li class="sh-apps-row">
+    <li class="sh-apps-row sh-apps-row--update">
       <AppIcon src={icon} />
       <div class="sh-apps-row__main">
         <h3 class="sh-apps-row__name">{t('apps.update_title', { name })}</h3>

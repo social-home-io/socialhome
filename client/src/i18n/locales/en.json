@@ -4841,7 +4841,7 @@
   "apps.fact.source": "Comes from",
   "apps.fact.source_social_home": "Social Home's app list",
   "apps.fact.source_operator": "{host} (set by your server operator)",
-  "apps.fact.homepage": "Source",
+  "apps.fact.homepage": "Source: {url}",
   "compat.load_failed": "Couldn't load version info.",
   "instance.config_failed": "Couldn't load this Social Home's settings.",
   "push.unsupported": "This browser does not support push notifications",

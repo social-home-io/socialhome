@@ -4805,7 +4805,7 @@
   "apps.fact.source": "Provenance",
   "apps.fact.source_social_home": "Liste d’apps de Social Home",
   "apps.fact.source_operator": "{host} (choisi par l’exploitant de votre serveur)",
-  "apps.fact.homepage": "Source",
+  "apps.fact.homepage": "Source : {url}",
   "compat.load_failed": "Impossible de charger les infos de version.",
   "instance.config_failed": "Impossible de charger les paramètres de ce Social Home.",
   "push.unsupported": "Ce navigateur ne prend pas en charge les notifications push",

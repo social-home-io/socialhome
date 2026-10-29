@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { routes } from './router'
 
 describe('router', () => {
-  it('defines 46 routes', () => {
+  it('defines 47 routes', () => {
     // Routes added / removed across recent passes:
     //   /dms/:id/calls   — per-conversation call history
     //   /calls/:callId   — in-call page
@@ -24,7 +24,8 @@ describe('router', () => {
     //                      (3 routes collapsed into 1 hub).
     //   /apps            — Social Home Apps browse/install page (§Apps)
     //   /apps/:appId     — sandboxed AppHost iframe launcher (§Apps)
-    expect(Object.keys(routes).length).toBe(46)
+    //   /apps/:appId/about — what an app can do; never launches it
+    expect(Object.keys(routes).length).toBe(47)
   })
 
   it('a space and its sections are ONE route, after the fixed space sub-pages', () => {

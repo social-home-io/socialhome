@@ -104,7 +104,7 @@ describe('AppDetailPage — what an app can do', () => {
     expect(getByText(/From Social Home/)).toBeTruthy()
     expect(container.textContent).toContain('English, Deutsch')
     expect(getByText('Social Home 2026.10.29')).toBeTruthy()
-    expect(getByText('github.com/social-home-io/socialhome-apps')).toBeTruthy()
+    expect(container.textContent).toContain('Source: github.com/social-home-io/socialhome-apps')
     expect(container.textContent).not.toMatch(/verified/i)
   })
 

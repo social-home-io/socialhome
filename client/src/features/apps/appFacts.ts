@@ -27,7 +27,7 @@ export function permissionDetail(p: AppPermission, name: string): string {
 /** The glyph next to each permission (decorative). */
 export const PERMISSION_GLYPH: Record<AppPermission, string> = {
   storage: '▣',
-  people: '☺',
+  people: '☺\uFE0E',
   federation: '⇄',
 }
 
