@@ -44,6 +44,7 @@ from .apps import (
     AppContactsView,
     AppDetailView,
     AppHeldView,
+    AppInvitableView,
     AppMessagesView,
     AppPeersView,
     AppRequestsView,
@@ -1358,6 +1359,7 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_view("/api/apps/{app_id}/update", AppUpdateView)
     app.router.add_view("/api/apps/{app_id}/requests", AppRequestsView)
     app.router.add_view("/api/apps/{app_id}/contacts", AppContactsView)
+    app.router.add_view("/api/apps/{app_id}/invitable", AppInvitableView)
     app.router.add_view("/api/apps/{app_id}/peers", AppPeersView)
     app.router.add_view("/api/apps/{app_id}/sessions", AppSessionsView)
     app.router.add_view(

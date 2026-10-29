@@ -35,6 +35,10 @@
  * bridge takes in that one invite and hands it to the app (see bridge.ts).
  * A new ``?session=`` while the app is open (Play from the bell) starts a
  * fresh frame, so the app launches into that game.
+ *
+ * ``people.pick`` (D3) shows Social Home's InviteSheet here — outside the
+ * frame, over it — and the bridge hands the app only who was picked and the
+ * games opened. The sheet goes with its frame (nothing is sent).
  */
 import type { ComponentChildren } from 'preact'
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
@@ -42,7 +46,8 @@ import { useLocation, useRoute } from 'preact-iso'
 import { getRuntime, setEnabled, type AppRuntime } from '@/store/apps'
 import { currentUser } from '@/store/auth'
 import { useTitle } from '@/store/pageTitle'
-import { mountBridge } from '@/features/apps/bridge'
+import { mountBridge, type PickedPerson, type PickRequest } from '@/features/apps/bridge'
+import { InviteSheet } from '@/features/apps/InviteSheet'
 import { appOpenedFrom } from '@/features/apps/appReturn'
 import { addBase } from '@/baseUrl'
 import { ws, type WsEvent } from '@/ws'
@@ -101,6 +106,9 @@ export function AppHostInner({ appId, sessionId }: {
    *  entry to the browser history. */
   const [attempt, setAttempt] = useState(0)
   const [turningOn, setTurningOn] = useState(false)
+  /** The invite sheet an app asked for (``people.pick``), drawn here —
+   *  outside the frame — until the person sends or cancels (D3). */
+  const [pick, setPick] = useState<{ req: PickRequest, resolve: (p: PickedPerson[]) => void } | null>(null)
   const iframeRef             = useRef<HTMLIFrameElement | null>(null)
   const timers                = useRef<number[]>([])
   const { route }             = useLocation()
@@ -178,8 +186,14 @@ export function AppHostInner({ appId, sessionId }: {
         clearTimers()
         setState(s => s.kind === 'starting' ? { kind: 'ready' } : s)
       },
+      pickPeople: (req) => new Promise<PickedPerson[]>(resolve => setPick({ req, resolve })),
     })
-    return cleanup
+    return () => {
+      cleanup()
+      // The frame goes (Back, Try again, another Play): a sheet it asked
+      // for goes with it, sending nothing.
+      setPick(p => { p?.resolve([]); return null })
+    }
   }, [runtime, frameSession]) // iframeRef.current is stable once rendered; runtime changes re-mount
 
   function handleFrameLoad() {
@@ -319,6 +333,18 @@ export function AppHostInner({ appId, sessionId }: {
           </Status>
         )}
       </div>
+
+      {pick && runtime && (
+        <InviteSheet
+          appId={runtime.app_id}
+          appName={runtime.name}
+          request={pick.req}
+          onDone={(picked) => {
+            pick.resolve(picked)
+            setPick(null)
+          }}
+        />
+      )}
     </div>
   )
 }

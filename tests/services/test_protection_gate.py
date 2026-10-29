@@ -146,3 +146,18 @@ async def test_household_block_read_delegates_and_is_empty_unwired():
     assert await svc._guardian_blocks_household("kid", "peer-x")
     assert await svc._guardian_blocks_household(None, "peer-x")
     assert not await svc._guardian_blocks_household("bob", "peer-x")
+
+
+class _DmCp(_FakeCp):
+    async def is_dm_allowed(self, *, sender_user_id, target_instance_id):
+        return not (sender_user_id == "kid" and target_instance_id == "far")
+
+
+async def test_may_message_household_is_the_dm_rule_and_open_unwired():
+    """Apps reuse the DM rule (§CP.F3) for a protected account's games."""
+    svc = _Svc()
+    assert await svc._may_message_household("kid", "far")
+    svc.attach_child_protection(_DmCp(set()))
+    assert not await svc._may_message_household("kid", "far")
+    assert await svc._may_message_household("kid", "near")
+    assert await svc._may_message_household("adult", "far")

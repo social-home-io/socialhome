@@ -766,5 +766,11 @@
   "apps.source.operator": "Where the app list comes from when the server operator changed it. {host} is a web address like apps.example.org. Never say 'verified'.",
   "apps.perm.people": "One of three permissions an app can ask for, said in plain words. Social Home's own wording, never the app publisher's.",
   "apps.ask.button_grown_up": "Shown to a child (protected account): the request goes to their guardians. Warm, everyday word for an adult in the family.",
-  "apps.never.line": "One sentence listing what every app can never do (it runs in a sealed box)."
+  "apps.never.line": "One sentence listing what every app can never do (it runs in a sealed box).",
+  "apps.never.unasked": "Ends \"{name} can never …\" (apps.never.title): an app can't send anything to anyone unless you picked them in Social Home's invite sheet.",
+  "apps.invite.title": "Heading of Social Home's own invite sheet, opened when a game (an app) asks to invite someone. {name} is the app's name (e.g. Chess).",
+  "apps.invite.lead": "Under the heading: Social Home (not the app) sends the invite, and the app only learns who you pick. {name} is the app's name.",
+  "apps.invite.send_to": "The Send button always names who gets the invite. {name} is a person's first name. Keep it short: it is a button on a phone.",
+  "apps.invite.limit_open": "A limit: at most {count} invites nobody has answered yet, per person and app. {name} is the app's name; \"take one back\" = withdraw an invite inside the app.",
+  "apps.invite.limit_daily": "A limit: at most {count} new invites a day, per person and app."
 }

@@ -299,11 +299,16 @@ async def test_a_protected_minor_cannot_open_or_message_a_guardian_blocked_user(
     app, db = env
     await _guardian_block_bob_from_alice(db)
     svc = app[app_federation_service_key]
-    refs = {c["user_ref"] for c in await svc.list_contacts(self_user_id="u-bob")}
+    refs = {
+        c["user_ref"]
+        for c in await svc.list_invitable(app_id="chess", self_user_id="u-bob")
+    }
     assert "alice" not in refs and "eve" in refs
     target = {"instance_id": PEER, "user_ref": "alice", "is_local": False}
     with pytest.raises(AppContactNotFoundError):
         await svc.open_session(app_id="chess", target=target, actor_user_id="u-bob")
+    # Not even in a game from before the block.
+    await svc._know_game("chess", "u-bob", "s", PEER, target)
     with pytest.raises(AppContactNotFoundError):
         await svc.send_message(
             app_id="chess",

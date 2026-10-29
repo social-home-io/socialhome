@@ -91,6 +91,12 @@ class AbstractAppRepo(Protocol):
         now: str,
     ) -> bool: ...
     async def take_held(self, app_id: str, user_id: str) -> list[AppPendingSession]: ...
+    async def list_sessions(
+        self, app_id: str, user_id: str
+    ) -> list[AppPendingSession]: ...
+    async def withdraw_session(
+        self, app_id: str, user_id: str, session_id: str
+    ) -> None: ...
 
 
 def _row_to_kv(row) -> AppKvEntry:
@@ -288,7 +294,10 @@ class SqliteAppRepo:
                  created_at=excluded.created_at
                -- A pending invite is only ever refreshed by the household
                -- that opened it; another one reusing the id changes nothing.
-               WHERE app_pending_sessions.from_instance = excluded.from_instance""",
+               -- A game already played or sent (``active``) is never
+               -- rewritten by an open reusing its id.
+               WHERE app_pending_sessions.from_instance = excluded.from_instance
+                 AND app_pending_sessions.state = 'invited'""",
             (
                 s.app_id,
                 s.user_id,
@@ -471,8 +480,14 @@ class SqliteAppRepo:
         session for this person, replacing an older one, but only when the
         session is known for them and its other side is ``from_instance``
         / ``from_user``. One primary-key write. ``True`` when kept."""
+        # An invite this person sent is answered once the other side says
+        # anything: it stops counting towards the open-invite cap.
         changed = await self._db.enqueue_rowcount(
-            """UPDATE app_pending_sessions SET held_json = ?, updated_at = ?
+            """UPDATE app_pending_sessions SET held_json = ?, updated_at = ?,
+                 payload_json = CASE
+                   WHEN json_extract(payload_json, '$.sent') = 1
+                   THEN json_set(payload_json, '$.answered', json('true'))
+                   ELSE payload_json END
                WHERE app_id = ? AND user_id = ? AND session_id = ?
                  AND from_instance = ? AND from_user = ?""",
             (
@@ -486,6 +501,31 @@ class SqliteAppRepo:
             ),
         )
         return changed == 1
+
+    async def list_sessions(self, app_id: str, user_id: str) -> list[AppPendingSession]:
+        """Every session this household knows for this person in this app
+        — invites waiting for them, games they play, invites they sent —
+        latest change first. At most ``_PENDING_SESSION_MAX_PER_PAIR``
+        rows (the per-(app, person) cap), by the existing index."""
+        rows = await self._db.fetchall(
+            """SELECT * FROM app_pending_sessions
+               WHERE app_id = ? AND user_id = ?
+               ORDER BY COALESCE(updated_at, created_at) DESC""",
+            (app_id, user_id),
+        )
+        return [_row_to_pending(r) for r in rows]
+
+    async def withdraw_session(
+        self, app_id: str, user_id: str, session_id: str
+    ) -> None:
+        """The person took back an invite they sent: the row stays (it
+        still counts towards the day's invites), marked withdrawn."""
+        await self._db.enqueue(
+            """UPDATE app_pending_sessions
+                  SET payload_json = json_set(payload_json, '$.withdrawn', json('true'))
+               WHERE app_id = ? AND user_id = ? AND session_id = ?""",
+            (app_id, user_id, session_id),
+        )
 
     async def take_held(self, app_id: str, user_id: str) -> list[AppPendingSession]:
         """The person's app opened: hand over every held message (oldest
