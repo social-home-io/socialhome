@@ -36,6 +36,8 @@ import {
   setMinAge,
   loadProtectionStatus,
   householdHasProtectedMinor,
+  catalogFreshness,
+  catalogReached,
   type InstalledApp,
   type AppUpdate,
   type CatalogEntry,
@@ -46,6 +48,7 @@ import { showToast } from '@/components/Toast'
 import { TabHeader } from '@/components/TabHeader'
 import { ApiError } from '@/api'
 import { safeIconSrc } from '@/utils/appIcon'
+import { CatalogFreshnessNote, catalogFreshnessText } from './CatalogFreshnessNote'
 
 type AppsTab = 'installed' | 'catalog'
 const tabLabels = (): Record<AppsTab, string> => ({
@@ -74,6 +77,7 @@ export default function AppsPage() {
         <header class="sh-page-header">
           <h1 class="sh-page-title">{t('nav.apps')}</h1>
         </header>
+        <CatalogFreshnessNote />
         <InstalledSection isAdmin={false} onBrowse={() => {}} />
       </div>
     )
@@ -94,6 +98,14 @@ export default function AppsPage() {
         actions={tab === 'installed' ? <CheckUpdatesButton /> : undefined}
       />
 
+      {/* The Catalog tab's own error box already says it couldn't load. */}
+      {!(tab === 'catalog' && catalogError.value) && (
+        <CatalogFreshnessNote
+          retrying={updatesChecking.value}
+          onRetry={() => { void retryCatalog() }}
+        />
+      )}
+
       <div role="tabpanel" aria-label={tabLabels()[tab]}>
         {tab === 'installed' ? (
           <InstalledSection isAdmin onBrowse={() => setTab('catalog')} />
@@ -105,12 +117,25 @@ export default function AppsPage() {
   )
 }
 
+/** Admin "Retry" on the stale strip: check again, and refresh the
+ *  catalog list once the app list answers. */
+async function retryCatalog(): Promise<void> {
+  await loadUpdates(true)
+  if (catalogReached()) void loadCatalog()
+}
+
 // ─── Check-for-updates action (Installed tab header) ──────────────────────────
 
 function CheckUpdatesButton() {
   const checking = updatesChecking.value
   const handleCheckUpdates = async () => {
     await loadUpdates(true)
+    // "All apps are up to date" only after the app list answered.
+    const unreached = catalogFreshnessText(catalogFreshness.value)
+    if (unreached) {
+      showToast(unreached, 'error')
+      return
+    }
     const count = updates.value.length
     showToast(
       count > 0
@@ -481,7 +506,7 @@ function CatalogSection() {
     return (
       <div class="sh-apps-error" role="alert">
         <p>{error}</p>
-        <Button onClick={() => { void loadCatalog() }}>{t('common.retry')}</Button>
+        <Button onClick={() => { void loadCatalog(true) }}>{t('common.retry')}</Button>
       </div>
     )
   }

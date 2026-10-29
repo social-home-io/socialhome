@@ -2801,21 +2801,38 @@ class NotificationService(ProtectionGateMixin):
         self,
         event: AppChallengeReceived,
     ) -> None:
-        """A Social Home App challenge arrived for a local user — bell + push.
+        """A Social Home App invite arrived for a local user — bell + push.
 
-        §25.3: title only — the challenger's display name is a human label
-        (not user-generated content) and rides the title; no body on the wire.
-        Chess is the only app today, so the chess wording is fine. The deep
-        link points at the app surface so a tap opens it; the SPA's open frame
-        (delivered separately over WS) seats the live invite.
+        "{name} invited you to play {app}": the app's name is the one this
+        household installed it under (any app, not just chess); an app the
+        registry doesn't know (no app repo wired) reads "invited you to play
+        a game". §25.3 / D11: title only — the inviter's display name (with
+        their household for someone from another one) and the app's name
+        are labels, not user content; no body on the wire. The app's name
+        rides as the row's place (``space_name``) so the client builds the
+        same sentence in the viewer's language. The deep link points at the
+        app surface so a tap opens it; the SPA's open frame (delivered
+        separately over WS) seats the live invite.
         """
         recipient = await self._local_user(event.to_user_id)
-        title = self._t(
-            "notification.app.challenge",
-            locale=self._locale(recipient),
-            fallback="{name} challenged you to chess",
-            name=event.from_display,
-        )
+        locale = self._locale(recipient)
+        app = await self._apps.get(event.app_id) if self._apps is not None else None
+        app_name = app.name if app is not None and app.name else None
+        if app_name:
+            title = self._t(
+                "notification.app.challenge",
+                locale=locale,
+                fallback="{name} invited you to play {app}",
+                name=event.from_display,
+                app=app_name,
+            )
+        else:
+            title = self._t(
+                "notification.app.challenge_generic",
+                locale=locale,
+                fallback="{name} invited you to play a game",
+                name=event.from_display,
+            )
         await self._save_notif(
             new_notification(
                 user_id=event.to_user_id,
@@ -2826,7 +2843,9 @@ class NotificationService(ProtectionGateMixin):
             # One row per invite: it stays in "Needs you" until that invite
             # is taken in, declined, withdrawn or expires.
             about=NotificationSubject.of(
-                NotificationObject.APP_SESSION, f"{event.app_id}/{event.session_id}"
+                NotificationObject.APP_SESSION,
+                f"{event.app_id}/{event.session_id}",
+                space_name=app_name,
             ),
             actor_user_id=event.from_user_id,
             actor_name=event.from_display,

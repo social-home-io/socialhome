@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
+import aiohttp
+import orjson
 import pytest
 
 from socialhome.app_keys import (
@@ -284,7 +286,7 @@ async def test_admin_can_list_catalog_empty(client, monkeypatch):
     r = await client.get("/api/apps/catalog", headers=_auth(client._tok))
     assert r.status == 200
     body = await r.json()
-    assert body == {"apps": [], "enabled": True}
+    assert body == {"apps": [], "enabled": True, "checked_at": None, "stale": False}
 
 
 async def test_catalog_turned_off_answers_disabled_not_an_error(client):
@@ -294,10 +296,15 @@ async def test_catalog_turned_off_answers_disabled_not_an_error(client):
     client.app[app_service_key]._catalog = None
     r = await client.get("/api/apps/catalog", headers=_auth(client._tok))
     assert r.status == 200
-    assert await r.json() == {"apps": [], "enabled": False}
+    assert await r.json() == {
+        "apps": [],
+        "enabled": False,
+        "checked_at": None,
+        "stale": False,
+    }
     r = await client.get("/api/apps/updates?refresh=1", headers=_auth(client._tok))
     assert r.status == 200
-    assert await r.json() == {"updates": []}
+    assert await r.json() == {"updates": [], "checked_at": None, "stale": False}
     r = await client.post(
         "/api/apps", json={"app_id": "chess"}, headers=_auth(client._tok)
     )
@@ -1443,7 +1450,7 @@ async def test_updates_member_gets_200_force_false(client, monkeypatch):
     r = await client.get("/api/apps/updates", headers=_auth(member_tok))
     assert r.status == 200
     body = await r.json()
-    assert body == {"updates": updates}
+    assert body == {"updates": updates, "checked_at": None, "stale": False}
     mock.assert_awaited_once_with(force=False)
 
 
@@ -1476,6 +1483,137 @@ async def test_updates_admin_no_refresh_uses_cache(client, monkeypatch):
     r = await client.get("/api/apps/updates", headers=_auth(client._tok))
     assert r.status == 200
     mock.assert_awaited_once_with(force=False)
+
+
+class _CatalogResp:
+    def __init__(self, payload: dict) -> None:
+        self._payload = payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    def raise_for_status(self) -> None:
+        return None
+
+    async def text(self) -> str:
+        return orjson.dumps(self._payload).decode()
+
+
+class _CatalogHost:
+    """A catalog host that answers until ``down`` is set."""
+
+    def __init__(self) -> None:
+        self.down = False
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    def get(self, url, **kw):
+        if self.down:
+            raise aiohttp.ClientConnectionError("catalog host down")
+        return _CatalogResp(
+            {
+                "apps": [
+                    {
+                        "app_id": "com.example.new",
+                        "name": "New App",
+                        "latest_version": "2026.10.28",
+                        "description": "A test app",
+                        "bundle_url": "https://example.com/new.tgz",
+                        "bundle_sha256": "ab" * 32,
+                    }
+                ]
+            }
+        )
+
+
+async def _catalog_down_after_one_answer(client) -> None:
+    """Point the real catalog service at a host that answered once and is
+    now down."""
+    catalog = client.app[app_service_key]._catalog
+    host = _CatalogHost()
+    catalog._session_factory = host
+    await catalog.fetch_catalog(force=True)
+    host.down = True
+
+
+async def test_updates_check_against_a_down_catalog_says_stale_not_500(
+    client, monkeypatch
+):
+    """The check failed: the answer says so (``stale`` + when the catalog
+    last answered) instead of an empty "all up to date" or a 500."""
+    await _catalog_down_after_one_answer(client)
+    installed = InstalledApp(
+        app_id="com.example.new",
+        name="New App",
+        version="2026.6.4",
+        enabled=True,
+        manifest=AppManifest(entry="index.html", icon=None, capabilities=()),
+        bundle_path="com.example.new/2026.6.4",
+        bundle_sha256="ab" * 32,
+        source_url="https://example.com/new.tgz",
+        installed_by=None,
+        installed_at="2026-06-04T00:00:00+00:00",
+    )
+    repo = client.app[app_service_key]._repo
+    monkeypatch.setattr(
+        type(repo), "list_installed", AsyncMock(return_value=[installed])
+    )
+    r = await client.get("/api/apps/updates?refresh=1", headers=_auth(client._tok))
+    assert r.status == 200
+    body = await r.json()
+    assert body["stale"] is True
+    assert body["checked_at"] is not None
+    # What the catalog said when it last answered still counts.
+    assert [u["latest_version"] for u in body["updates"]] == ["2026.10.28"]
+
+
+async def test_catalog_browse_against_a_down_catalog_serves_the_held_copy(client):
+    await _catalog_down_after_one_answer(client)
+    catalog = client.app[app_service_key]._catalog
+    catalog._cache_ts = None  # expired: a plain read goes to the network
+    r = await client.get("/api/apps/catalog", headers=_auth(client._tok))
+    assert r.status == 200
+    body = await r.json()
+    assert body["stale"] is True
+    assert body["checked_at"] is not None
+    assert [a["app_id"] for a in body["apps"]] == ["com.example.new"]
+
+
+async def test_catalog_never_reached_is_a_coded_503_not_a_500(client):
+    host = _CatalogHost()
+    host.down = True
+    client.app[app_service_key]._catalog._session_factory = host
+    r = await client.get("/api/apps/catalog", headers=_auth(client._tok))
+    assert r.status == 503
+    assert (await r.json())["error"]["code"] == "APP_CATALOG_UNREACHABLE"
+
+
+async def test_catalog_refresh_retries_past_the_pause_after_a_failure(client):
+    """The Catalog tab's Retry (``?refresh=1``) reaches the network again;
+    a plain read inside the pause answers from what is held."""
+    host = _CatalogHost()
+    host.down = True
+    client.app[app_service_key]._catalog._session_factory = host
+    r = await client.get("/api/apps/catalog", headers=_auth(client._tok))
+    assert r.status == 503
+    host.down = False
+    r = await client.get("/api/apps/catalog", headers=_auth(client._tok))
+    assert r.status == 503  # still inside the retry pause: no network
+    r = await client.get("/api/apps/catalog?refresh=1", headers=_auth(client._tok))
+    assert r.status == 200
+    body = await r.json()
+    assert body["stale"] is False
+    assert [a["app_id"] for a in body["apps"]] == ["com.example.new"]
 
 
 # ── POST /api/apps/{app_id}/update ───────────────────────────────────────

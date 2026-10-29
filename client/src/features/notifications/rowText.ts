@@ -17,8 +17,9 @@
  *   others"): it counts the things, never the people
  * - ``notifications.row.<type>_none``   nobody caused it (a review queue)
  *
- * ``{space}`` is the place's name: the space's, or a group chat's for a
- * row about a chat (a missed call, being added). A row without params (written before
+ * ``{space}`` is the place's name: the space's, an app's for a game invite,
+ * or a group chat's for a row about a chat (a missed call, being added). A
+ * row without params (written before
  * 0129), of a type with no key, or missing what its sentence needs keeps the
  * server's ``title`` — already in the viewer's language.
  *
@@ -175,6 +176,8 @@ export const ROW_TYPES: Readonly<Record<string, TypeSpec>> = {
   bazaar_bid_placed: { none: true, noActor: true },
   bazaar_offer_accepted: { none: true, noActor: true },
   bazaar_offer_rejected: { none: true, noActor: true },
+  // The app's name rides as the place (``params.space_name``): "Ben invited
+  // you to play Chess". A row without it keeps its title.
   app_challenge: {},
 }
 

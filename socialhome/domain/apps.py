@@ -8,6 +8,7 @@ Pure data, no I/O. ``InstalledApp`` is the row shape of the
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import ClassVar
 
@@ -82,6 +83,15 @@ class AppDownloadError(AppError, CodedError):
     detail = "Could not download the app bundle."
 
 
+class AppCatalogUnreachableError(AppError, CodedError):
+    """The app catalog could not be fetched (network, HTTP or a body that
+    isn't a catalog) and no earlier answer is held to fall back on."""
+
+    status = 503
+    code = "APP_CATALOG_UNREACHABLE"
+    detail = "Could not reach the app catalog."
+
+
 class AppQuotaExceededError(AppError):
     """A per-(app, user) storage quota (key count / value size) was exceeded."""
 
@@ -108,6 +118,35 @@ class AppChallengeHandledError(CodedError):
     status = 409
     code = "APP_CHALLENGE_HANDLED"
     detail = "game invite already handled"
+
+
+#: A comparable app version: dot-separated non-negative integers — CalVer
+#: ``YYYY.M.D`` or ``YYYY.M.D.N`` for apps from ``socialhome-apps`` (a
+#: dev bundle's ``1.0.0`` parses the same way).
+_VERSION_RE = re.compile(r"[0-9]+(?:\.[0-9]+)*")
+
+
+def parse_app_version(version: str) -> tuple[int, ...] | None:
+    """*version* as a tuple of ints (``"2026.10.28.1"`` →
+    ``(2026, 10, 28, 1)``), or ``None`` when it isn't dot-separated
+    integers. Compared as tuples, ``2026.6.4 < 2026.10.28 < 2026.10.28.1``
+    — a string compare gets the first pair wrong."""
+    if not isinstance(version, str) or not _VERSION_RE.fullmatch(version):
+        return None
+    return tuple(int(part) for part in version.split("."))
+
+
+def is_newer_version(candidate: str, current: str) -> bool:
+    """Is *candidate* strictly newer than *current*?
+
+    Fail-closed: an older or equal catalog version is never an update (a
+    catalog rolled back to an older release must not downgrade an app),
+    and neither is a version either side can't parse."""
+    new = parse_app_version(candidate)
+    old = parse_app_version(current)
+    if new is None or old is None:
+        return False
+    return new > old
 
 
 _VALID_MIN_AGES: frozenset[int] = frozenset({0, 13, 16, 18})
@@ -197,6 +236,18 @@ class AppPendingSession:
     from_user: str | None
     payload: dict
     created_at: str
+
+
+@dataclass(slots=True, frozen=True)
+class AppCatalogStatus:
+    """How current the catalog this household holds is.
+
+    ``checked_at`` — when the catalog last answered (UTC ISO 8601), or
+    ``None`` if it never has since start. ``stale`` — the latest attempt to
+    reach it failed, so what is served is the answer from ``checked_at``."""
+
+    checked_at: str | None = None
+    stale: bool = False
 
 
 @dataclass(slots=True, frozen=True)

@@ -47,12 +47,14 @@ from ..domain.apps import (
     AppBundleTooLargeError,
     AppCatalogDisabledError,
     AppCatalogEntry,
+    AppCatalogStatus,
     AppIntegrityError,
     AppManifest,
     AppNotEnabledError,
     AppNotFoundError,
     AppQuotaExceededError,
     InstalledApp,
+    is_newer_version,
 )
 from ..domain.events import AppInstalled, AppUninstalled, AppUpdated
 from ..domain.space import SpacePermissionError
@@ -134,18 +136,31 @@ class AppService(BusPublisherMixin):
         not empty)."""
         return self._catalog is not None
 
-    async def browse_catalog(self) -> list[AppCatalogEntry]:
+    async def browse_catalog(self, *, force: bool = False) -> list[AppCatalogEntry]:
         """Return the remote catalog entries, or an empty list when no catalog
-        is configured."""
+        is configured. ``force`` re-fetches past the cache (an admin's
+        "Retry")."""
         if self._catalog is None:
             return []
-        return await self._catalog.fetch_catalog()
+        return await self._catalog.fetch_catalog(force=force)
+
+    @property
+    def catalog_status(self) -> AppCatalogStatus:
+        """When the catalog last answered and whether the latest try failed
+        (``stale``: what :meth:`browse_catalog` / :meth:`list_updates`
+        returned is that earlier answer)."""
+        if self._catalog is None:
+            return AppCatalogStatus()
+        return self._catalog.status
 
     async def list_updates(self, *, force: bool = False) -> list[dict]:
         """Return a list of installed apps that have a newer version in the catalog.
 
         Each entry is a dict with keys ``app_id``, ``name``,
-        ``current_version``, and ``latest_version``.
+        ``current_version``, and ``latest_version``. Only a strictly newer
+        version counts (:func:`~socialhome.domain.apps.is_newer_version`,
+        CalVer compared as numbers): a catalog that went back to an older
+        release offers no "update".
 
         If no catalog is configured, returns an empty list.
 
@@ -166,7 +181,9 @@ class AppService(BusPublisherMixin):
         updates: list[dict] = []
         for app in installed:
             entry = entry_map.get(app.app_id)
-            if entry is not None and entry.latest_version != app.version:
+            if entry is not None and is_newer_version(
+                entry.latest_version, app.version
+            ):
                 updates.append(
                     {
                         "app_id": app.app_id,
@@ -370,11 +387,14 @@ class AppService(BusPublisherMixin):
         if entry is None:
             raise AppNotFoundError(f"App {app_id!r} not found in catalog")
 
-        if entry.latest_version == existing.version:
+        if not is_newer_version(entry.latest_version, existing.version):
+            # Equal, older (a catalog rolled back) or unparseable: never a
+            # downgrade.
             log.info(
-                "update_app: %r is already at latest version %r",
+                "update_app: %r stays at %r (catalog has %r)",
                 app_id,
                 existing.version,
+                entry.latest_version,
             )
             return existing
 

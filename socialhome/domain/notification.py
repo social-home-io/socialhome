@@ -249,8 +249,9 @@ class NotificationParams:
       past the list's bound).
     * ``new`` — events since the row was last read; ``total`` — events
       since the row started.
-    * ``space_name`` — the place's name when it was written: the space's, or
-      for a row about a group chat (a missed call, being added) the chat's.
+    * ``space_name`` — the place's name when it was written: the space's,
+      for a row about a group chat (a missed call, being added) the chat's,
+      for a game invite the app's ("… invited you to play Chess").
     * ``flags`` — why a "Needs you" item can't be decided with one tap
       (:data:`JOIN_REQUEST_FLAGS`).
     * ``handled`` — set once a "Needs you" item was handled: it leaves the

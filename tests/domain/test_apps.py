@@ -10,6 +10,8 @@ from socialhome.domain.apps import (
     AppAgeRestrictedError,
     AppAlreadyInstalledError,
     AppCatalogEntry,
+    AppCatalogStatus,
+    AppCatalogUnreachableError,
     AppContactNotFoundError,
     AppError,
     AppIntegrityError,
@@ -19,6 +21,8 @@ from socialhome.domain.apps import (
     AppNotFoundError,
     AppQuotaExceededError,
     InstalledApp,
+    is_newer_version,
+    parse_app_version,
 )
 
 
@@ -198,3 +202,55 @@ def test_app_age_restricted_error_subclasses_app_error():
     assert issubclass(AppAgeRestrictedError, AppError)
     err = AppAgeRestrictedError("This app is restricted to ages 13+.")
     assert "13+" in str(err)
+
+
+# ─── App versions compare as CalVer numbers, never downgrade ─────────────────
+
+
+@pytest.mark.parametrize(
+    ("version", "parsed"),
+    [
+        ("2026.6.4", (2026, 6, 4)),
+        ("2026.10.28", (2026, 10, 28)),
+        ("2026.10.28.1", (2026, 10, 28, 1)),
+        ("1.0.0", (1, 0, 0)),
+        ("", None),
+        ("v2026.10.28", None),
+        ("2026.10.28-beta", None),
+        ("2026..28", None),
+        ("2026.10.", None),
+        ("٢٠٢٦.1.1", None),  # non-ASCII digits
+    ],
+)
+def test_parse_app_version(version, parsed):
+    assert parse_app_version(version) == parsed
+
+
+@pytest.mark.parametrize(
+    ("candidate", "current", "newer"),
+    [
+        # A string compare says "2026.6.4" > "2026.10.28": the tuple doesn't.
+        ("2026.10.28", "2026.6.4", True),
+        ("2026.6.4", "2026.10.28", False),  # a rolled-back catalog
+        ("2026.10.28.1", "2026.10.28", True),  # a same-day fix
+        ("2026.10.28", "2026.10.28.1", False),
+        ("2026.10.28", "2026.10.28", False),
+        ("2026.11.1", "2026.10.28.1", True),
+        ("garbage", "2026.10.28", False),  # unparseable: fail closed
+        ("2026.10.28", "garbage", False),
+    ],
+)
+def test_is_newer_version(candidate, current, newer):
+    assert is_newer_version(candidate, current) is newer
+
+
+def test_catalog_unreachable_is_a_coded_503():
+    err = AppCatalogUnreachableError()
+    assert isinstance(err, AppError)
+    assert (err.status, err.code) == (503, "APP_CATALOG_UNREACHABLE")
+
+
+def test_catalog_status_defaults_to_never_checked():
+    status = AppCatalogStatus()
+    assert status.checked_at is None
+    assert status.stale is False

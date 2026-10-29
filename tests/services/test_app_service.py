@@ -27,6 +27,7 @@ from socialhome.domain.apps import (
     AppAlreadyInstalledError,
     AppBundleTooLargeError,
     AppCatalogEntry,
+    AppCatalogStatus,
     AppIntegrityError,
     AppKvEntry,
     AppNotEnabledError,
@@ -236,6 +237,7 @@ class _StubCatalog:
     def __init__(self, entries: list[AppCatalogEntry]) -> None:
         self._entries = entries
         self.fetch_call_count: int = 0
+        self.status = AppCatalogStatus()
 
     async def fetch_catalog(self, *, force: bool = False) -> list[AppCatalogEntry]:
         self.fetch_call_count += 1
@@ -1903,3 +1905,110 @@ async def test_bundle_at_the_limits_still_installs(
     svc, _ = make_service(tmp_path, [_entry_for(sha)], raw)
     app = await svc.install("chess", actor_is_admin=True, actor_user_id="admin1")
     assert app.app_id == "chess"
+
+
+# ─── CalVer compare: no "update" to an older catalog version ─────────────────
+
+
+def _entry_at(chess_bundle: tuple[bytes, str], version: str) -> AppCatalogEntry:
+    _, sha = chess_bundle
+    return AppCatalogEntry(
+        app_id="chess",
+        name="Chess",
+        latest_version=version,
+        description="Play chess",
+        icon_url=None,
+        capabilities=("storage",),
+        bundle_url=f"https://example.com/chess-{version}.tgz",
+        bundle_sha256=sha,
+    )
+
+
+async def _installed_at(
+    tmp_path: Path, chess_bundle: tuple[bytes, str], version: str
+) -> _FakeAppRepo:
+    bundle_bytes, _ = chess_bundle
+    svc, repo = make_service(
+        tmp_path / "seed", [_entry_at(chess_bundle, version)], bundle_bytes
+    )
+    await svc.install("chess", actor_is_admin=True, actor_user_id="admin1")
+    return repo
+
+
+def _service_on(
+    tmp_path: Path,
+    repo: _FakeAppRepo,
+    chess_bundle: tuple[bytes, str],
+    catalog_version: str,
+) -> AppService:
+    bundle_bytes, _ = chess_bundle
+
+    async def downloader(url: str) -> bytes:
+        return bundle_bytes
+
+    return AppService(
+        repo=repo,
+        catalog=_StubCatalog([_entry_at(chess_bundle, catalog_version)]),  # type: ignore[arg-type]
+        apps_path=tmp_path / "seed",
+        downloader=downloader,
+    )
+
+
+@pytest.mark.parametrize(
+    ("installed", "catalog", "offered"),
+    [
+        ("2026.6.4", "2026.10.28", True),
+        ("2026.10.28", "2026.10.28.1", True),
+        # A string compare offered these; the catalog went back.
+        ("2026.10.28", "2026.6.4", False),
+        ("2026.10.28.1", "2026.10.28", False),
+        ("2026.10.28", "2026.10.28", False),
+    ],
+)
+async def test_list_updates_compares_calver_as_numbers(
+    tmp_path: Path,
+    chess_bundle: tuple[bytes, str],
+    installed: str,
+    catalog: str,
+    offered: bool,
+) -> None:
+    repo = await _installed_at(tmp_path, chess_bundle, installed)
+    svc = _service_on(tmp_path, repo, chess_bundle, catalog)
+    updates = await svc.list_updates()
+    assert bool(updates) is offered
+    if offered:
+        assert updates[0]["latest_version"] == catalog
+
+
+@pytest.mark.parametrize("catalog", ["2026.6.4", "2026.10.28"])
+async def test_update_app_never_downgrades_to_an_older_catalog(
+    tmp_path: Path,
+    chess_bundle: tuple[bytes, str],
+    catalog: str,
+) -> None:
+    repo = await _installed_at(tmp_path, chess_bundle, "2026.10.28.1")
+    svc = _service_on(tmp_path, repo, chess_bundle, catalog)
+    result = await svc.update_app("chess", actor_is_admin=True)
+    assert result.version == "2026.10.28.1"
+    assert (await repo.get("chess")).version == "2026.10.28.1"  # type: ignore[union-attr]
+
+
+async def test_catalog_status_comes_from_the_catalog(
+    tmp_path: Path, catalog_entry: AppCatalogEntry, chess_bundle: tuple[bytes, str]
+) -> None:
+    svc, _ = make_service(tmp_path, [catalog_entry], chess_bundle[0])
+    stub: _StubCatalog = svc._catalog  # type: ignore[assignment]
+    stub.status = AppCatalogStatus(checked_at="2026-10-29T08:00:00+00:00", stale=True)
+    assert svc.catalog_status == stub.status
+
+
+async def test_catalog_status_without_a_catalog_is_never_checked(
+    tmp_path: Path,
+) -> None:
+    async def downloader(url: str) -> bytes:
+        return b""
+
+    svc = AppService(
+        repo=_FakeAppRepo(), catalog=None, apps_path=tmp_path, downloader=downloader
+    )
+    assert svc.catalog_status == AppCatalogStatus()

@@ -19,12 +19,18 @@ const h = vi.hoisted(() => ({
   setMinAge: vi.fn().mockResolvedValue(undefined),
   uninstallApp: vi.fn().mockResolvedValue(undefined),
   showToast: vi.fn(),
+  catalogFreshness: {
+    value: { checkedAt: null, stale: false, failed: false } as {
+      checkedAt: string | null, stale: boolean, failed: boolean
+    },
+  },
+  loadUpdates: vi.fn().mockResolvedValue(undefined),
 }))
 const {
   installedApps, catalog, updates, updatesChecking,
   appsLoading, catalogLoading, appsError, catalogError,
   householdHasProtectedMinor, currentUser, setEnabled, setMinAge,
-  catalogEnabled, showToast,
+  catalogEnabled, showToast, catalogFreshness, loadUpdates,
 } = h
 
 vi.mock('@/store/apps', () => ({
@@ -33,7 +39,9 @@ vi.mock('@/store/apps', () => ({
   catalogLoading: h.catalogLoading, appsError: h.appsError, catalogError: h.catalogError,
   catalogEnabled: h.catalogEnabled,
   householdHasProtectedMinor: h.householdHasProtectedMinor,
-  loadInstalled: vi.fn(), loadCatalog: vi.fn(), loadUpdates: vi.fn(),
+  catalogFreshness: h.catalogFreshness,
+  catalogReached: (f = h.catalogFreshness.value) => !f.stale && !f.failed,
+  loadInstalled: vi.fn(), loadCatalog: vi.fn(), loadUpdates: h.loadUpdates,
   loadProtectionStatus: vi.fn(),
   updateApp: vi.fn(), installApp: vi.fn(),
   uninstallApp: h.uninstallApp, setEnabled: h.setEnabled, setMinAge: h.setMinAge,
@@ -92,6 +100,8 @@ beforeEach(() => {
   catalogEnabled.value = true
   householdHasProtectedMinor.value = true
   currentUser.value = { is_admin: true }
+  catalogFreshness.value = { checkedAt: null, stale: false, failed: false }
+  loadUpdates.mockResolvedValue(undefined)
 })
 
 describe('AppsPage tabs (admin)', () => {
@@ -217,5 +227,67 @@ describe('AppCard admin overflow menu', () => {
     const { getByText, queryByRole } = render(<AppsPage />)
     expect(getByText('Disabled')).toBeTruthy()
     expect(queryByRole('button', { name: 'Open' })).toBeNull()
+  })
+})
+
+describe('Check for updates is honest about reaching the app list', () => {
+  const AT = '2026-10-28T20:15:00+00:00'
+
+  it('says "All apps are up to date" only after the app list answered', async () => {
+    loadUpdates.mockImplementationOnce(async () => {
+      catalogFreshness.value = { checkedAt: AT, stale: false, failed: false }
+    })
+    const { getByText } = render(<AppsPage />)
+    fireEvent.click(getByText('Check for updates'))
+    await vi.waitFor(() =>
+      expect(showToast).toHaveBeenCalledWith('All apps are up to date', 'info'))
+  })
+
+  it('a check that could not reach the app list says so, with when it last answered', async () => {
+    loadUpdates.mockImplementationOnce(async () => {
+      catalogFreshness.value = { checkedAt: AT, stale: true, failed: false }
+    })
+    const { getByText } = render(<AppsPage />)
+    fireEvent.click(getByText('Check for updates'))
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalled())
+    const [message, kind] = showToast.mock.calls[0]
+    expect(message).toMatch(/^Couldn't reach the app list — showing what we knew at .+\.$/)
+    expect(kind).toBe('error')
+    expect(showToast).not.toHaveBeenCalledWith('All apps are up to date', 'info')
+  })
+
+  it('a check that failed outright never says "up to date"', async () => {
+    loadUpdates.mockImplementationOnce(async () => {
+      catalogFreshness.value = { checkedAt: null, stale: false, failed: true }
+    })
+    const { getByText } = render(<AppsPage />)
+    fireEvent.click(getByText('Check for updates'))
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith(
+      "Couldn't reach the app list. Check the connection and try again.", 'error'))
+  })
+
+  it('a stale app list shows the strip with Retry for admins (which checks again)', () => {
+    catalogFreshness.value = { checkedAt: AT, stale: true, failed: false }
+    const { getByRole } = render(<AppsPage />)
+    expect(getByRole('status').textContent).toMatch(/Couldn't reach the app list/)
+    loadUpdates.mockClear()
+    fireEvent.click(getByRole('button', { name: 'Retry' }))
+    expect(loadUpdates).toHaveBeenCalledWith(true)
+  })
+
+  it('members see the stale strip without Retry', () => {
+    currentUser.value = { is_admin: false }
+    catalogFreshness.value = { checkedAt: AT, stale: true, failed: false }
+    const { getByRole, queryByRole } = render(<AppsPage />)
+    expect(getByRole('status')).toBeTruthy()
+    expect(queryByRole('button', { name: 'Retry' })).toBeNull()
+  })
+
+  it('the Catalog tab error box is not doubled by the strip', () => {
+    catalogFreshness.value = { checkedAt: null, stale: false, failed: true }
+    catalogError.value = "Couldn't reach the app list. Check the connection and try again."
+    const { getByRole, getAllByText } = render(<AppsPage />)
+    fireEvent.click(getByRole('tab', { name: 'Catalog' }))
+    expect(getAllByText(/Couldn't reach the app list/)).toHaveLength(1)
   })
 })

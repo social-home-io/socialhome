@@ -15,12 +15,19 @@ import orjson
 from aiohttp import web
 
 from ..app_keys import app_federation_service_key, app_service_key
-from ..domain.apps import AppAgeRestrictedError, InstalledApp
+from ..domain.apps import AppAgeRestrictedError, AppCatalogStatus, InstalledApp
 from ..security import error_response
 from .base import BaseView
 
 # Maximum encoded payload size for app federation messages (256 KiB).
 _MAX_APP_PAYLOAD_BYTES = 256 * 1024
+
+
+def _catalog_freshness(status: AppCatalogStatus) -> dict:
+    """``checked_at`` (when the catalog last answered, UTC ISO 8601 or
+    ``None``) and ``stale`` (the latest try failed: this is that earlier
+    answer) — so the SPA only says "up to date" after the catalog answered."""
+    return {"checked_at": status.checked_at, "stale": status.stale}
 
 
 def _serialize(app: InstalledApp) -> dict:
@@ -67,7 +74,8 @@ class AppCollectionView(BaseView):
 
 
 class AppCatalogView(BaseView):
-    """``GET /api/apps/catalog``."""
+    """``GET /api/apps/catalog[?refresh=1]`` — admin-only; ``refresh``
+    re-fetches past the cache (and past the retry pause after a failure)."""
 
     async def get(self) -> web.Response:
         user = self.user
@@ -75,7 +83,9 @@ class AppCatalogView(BaseView):
             return error_response(403, "FORBIDDEN", "Admin only.")
 
         svc = self.svc(app_service_key)
-        entries = await svc.browse_catalog()
+        entries = await svc.browse_catalog(
+            force=bool(self.request.query.get("refresh"))
+        )
         return self._json(
             {
                 # ``False`` when the operator turned the catalog off
@@ -93,6 +103,7 @@ class AppCatalogView(BaseView):
                     }
                     for e in entries
                 ],
+                **_catalog_freshness(svc.catalog_status),
             }
         )
 
@@ -233,7 +244,9 @@ class AppUpdatesView(BaseView):
         force = bool(refresh) and user.is_admin
         svc = self.svc(app_service_key)
         updates = await svc.list_updates(force=force)
-        return self._json({"updates": updates})
+        return self._json(
+            {"updates": updates, **_catalog_freshness(svc.catalog_status)}
+        )
 
 
 class AppUpdateView(BaseView):

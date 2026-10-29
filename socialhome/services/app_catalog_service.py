@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import aiohttp
@@ -19,6 +20,8 @@ from ..domain.apps import (
     MAX_BUNDLE_DOWNLOAD_BYTES,
     AppBundleTooLargeError,
     AppCatalogEntry,
+    AppCatalogStatus,
+    AppCatalogUnreachableError,
     AppDownloadError,
 )
 
@@ -26,6 +29,12 @@ log = logging.getLogger(__name__)
 
 #: How long (seconds) a cached catalog result is considered fresh.
 CATALOG_TTL_S: float = 24 * 60 * 60
+
+#: After a failed fetch, how long (seconds) a non-forced read serves what
+#: is held instead of trying the network again — so a page load while the
+#: catalog host is down answers at once, not after a
+#: :data:`RELEASE_TIMEOUT_S` wait each time. ``force`` always retries.
+CATALOG_RETRY_S: float = 5 * 60
 
 #: Longest single response header the catalog and bundle downloads read.
 #: GitHub's release-download responses carry a Content-Security-Policy
@@ -96,9 +105,22 @@ class AppCatalogService:
 
     Results are cached in memory for :data:`CATALOG_TTL_S` seconds.
     Pass ``force=True`` to :meth:`fetch_catalog` to bypass the cache.
+
+    The last good answer is kept: when the catalog can't be reached (a
+    network or HTTP error, a timeout, a body that isn't a catalog), the
+    held entries are served and :attr:`status` says so (``stale``, with
+    the time the catalog last answered), never an error. Only with nothing
+    held yet does a failure raise :class:`AppCatalogUnreachableError`.
     """
 
-    __slots__ = ("_cache", "_cache_ts", "_catalog_url", "_session_factory")
+    __slots__ = (
+        "_cache",
+        "_cache_ts",
+        "_catalog_url",
+        "_checked_at",
+        "_failed_ts",
+        "_session_factory",
+    )
 
     def __init__(
         self,
@@ -116,11 +138,23 @@ class AppCatalogService:
         self._catalog_url = catalog_url
         self._cache: list[AppCatalogEntry] | None = None
         self._cache_ts: float | None = None
+        #: Wall-clock UTC time the catalog last answered.
+        self._checked_at: str | None = None
+        #: ``time.monotonic()`` of the latest failed fetch, cleared by a
+        #: good one — set means "stale".
+        self._failed_ts: float | None = None
 
     @property
     def last_fetched_monotonic(self) -> float | None:
         """Return the ``time.monotonic()`` timestamp of the last fetch, or ``None``."""
         return self._cache_ts
+
+    @property
+    def status(self) -> AppCatalogStatus:
+        """When the catalog last answered and whether the latest try failed."""
+        return AppCatalogStatus(
+            checked_at=self._checked_at, stale=self._failed_ts is not None
+        )
 
     async def fetch_catalog(self, *, force: bool = False) -> list[AppCatalogEntry]:
         """GET the catalog and parse it.
@@ -130,29 +164,61 @@ class AppCatalogService:
 
         The result is cached for :data:`CATALOG_TTL_S` seconds.  Pass
         ``force=True`` to bypass the cache and re-fetch unconditionally.
+        When the fetch fails, the last good answer is served (``stale``);
+        for :data:`CATALOG_RETRY_S` after a failure a non-forced read
+        doesn't try the network again.
 
         Args:
             force: If ``True``, ignore the in-memory cache and re-fetch.
 
         Returns:
             List of valid AppCatalogEntry objects.
+
+        Raises:
+            AppCatalogUnreachableError: The fetch failed and no earlier
+                answer is held.
         """
         now = time.monotonic()
-        if (
-            not force
-            and self._cache is not None
-            and self._cache_ts is not None
-            and (now - self._cache_ts) < CATALOG_TTL_S
-        ):
-            return self._cache
+        if not force:
+            if (
+                self._cache is not None
+                and self._cache_ts is not None
+                and (now - self._cache_ts) < CATALOG_TTL_S
+            ):
+                return self._cache
+            if (
+                self._failed_ts is not None
+                and (now - self._failed_ts) < CATALOG_RETRY_S
+            ):
+                if self._cache is not None:
+                    return self._cache
+                raise AppCatalogUnreachableError()
 
-        async with (
-            self._session_factory() as session,
-            session.get(self._catalog_url) as resp,
-        ):
-            resp.raise_for_status()
-            raw = await resp.text()
-        doc = orjson.loads(raw)
+        try:
+            async with (
+                self._session_factory() as session,
+                session.get(self._catalog_url) as resp,
+            ):
+                resp.raise_for_status()
+                raw = await resp.text()
+            doc = orjson.loads(raw)
+            if not isinstance(doc, dict):
+                raise TypeError("catalog is not a JSON object")
+        except (aiohttp.ClientError, TimeoutError, ValueError, TypeError) as exc:
+            # orjson.JSONDecodeError is a ValueError.
+            self._failed_ts = time.monotonic()
+            log.warning(
+                "app catalog %s unreachable (%r); %s",
+                self._catalog_url,
+                exc,
+                "serving the copy from " + self._checked_at
+                if self._cache is not None and self._checked_at
+                else "nothing held to serve",
+            )
+            if self._cache is not None:
+                return self._cache
+            raise AppCatalogUnreachableError() from exc
+
         out: list[AppCatalogEntry] = []
         for item in doc.get("apps", []):
             try:
@@ -162,4 +228,6 @@ class AppCatalogService:
 
         self._cache = out
         self._cache_ts = time.monotonic()
+        self._checked_at = datetime.now(UTC).isoformat()
+        self._failed_ts = None
         return out
