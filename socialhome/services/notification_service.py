@@ -65,6 +65,7 @@ from ..domain.events import (
     AppChallengeDeclined,
     AppChallengeEnded,
     AppChallengeReceived,
+    AppGameEnded,
     AppInstalled,
     AppRequestDismissed,
     AppRequested,
@@ -438,6 +439,7 @@ _PUSH_AS_IS: frozenset[str] = frozenset(
         "app_challenge_continue",
         "app_added",
         "app_challenge_declined",
+        "app_game_ended",
         "app_request",
         "app_update",
         "bazaar_bid_placed",
@@ -1320,6 +1322,7 @@ class NotificationService(ProtectionGateMixin):
         self._subscribe(AppChallengeEnded, self.on_app_challenge_ended)
         self._subscribe(AppInstalled, self.on_app_installed)
         self._subscribe(AppChallengeDeclined, self.on_app_challenge_declined)
+        self._subscribe(AppGameEnded, self.on_app_game_ended)
         self._subscribe(AppInstalled, self.on_app_request_answered)
         self._subscribe(AppRequested, self.on_app_requested)
         self._subscribe(AppRequestDismissed, self.on_app_request_answered)
@@ -2879,6 +2882,48 @@ class NotificationService(ProtectionGateMixin):
             new_notification(
                 user_id=event.to_user_id,
                 type="app_challenge_declined",
+                title=title,
+                link_url=f"/apps/{event.app_id}",
+            ),
+            about=NotificationSubject.of(
+                NotificationObject.APP_SESSION,
+                f"{event.app_id}/{event.session_id}",
+                space_name=app_name,
+            ),
+            actor_user_id=event.from_user_id,
+            actor_name=event.from_display,
+            push=False,
+        )
+
+    async def on_app_game_ended(self, event: AppGameEnded) -> None:
+        """The other household uninstalled the app — "{name} no longer has
+        {app}, so your game ended" (D9), so the player learns why the game
+        is gone even if they don't open the app for weeks. About you, a
+        row only, no push: nothing waits on them and nothing can be done.
+        Their app hears the close itself (live, or from its mailbox)."""
+        recipient = await self._local_user(event.to_user_id)
+        locale = self._locale(recipient)
+        app = await self._apps.get(event.app_id) if self._apps is not None else None
+        app_name = app.name if app is not None and app.name else None
+        if app_name:
+            title = self._t(
+                "notification.app.game_ended",
+                locale=locale,
+                fallback="{name} no longer has {app}, so your game ended",
+                name=event.from_display,
+                app=app_name,
+            )
+        else:
+            title = self._t(
+                "notification.app.game_ended_generic",
+                locale=locale,
+                fallback="{name} no longer has the app, so your game ended",
+                name=event.from_display,
+            )
+        await self._save_notif(
+            new_notification(
+                user_id=event.to_user_id,
+                type="app_game_ended",
                 title=title,
                 link_url=f"/apps/{event.app_id}",
             ),

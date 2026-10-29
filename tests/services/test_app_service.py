@@ -40,6 +40,7 @@ from socialhome.domain.apps import (
     AppPermissionDeniedError,
     AppQuotaExceededError,
     AppRequestNotAllowedError,
+    AppUninstallPreview,
     InstalledApp,
 )
 from socialhome.domain.events import (
@@ -245,6 +246,9 @@ class _FakeAppRepo:
 
     async def kv_count(self, app_id: str, user_id: str) -> int:
         return sum(1 for (a, u, _k) in self._kv if a == app_id and u == user_id)
+
+    async def kv_people(self, app_id: str) -> int:
+        return len({u for (a, u, _k) in self._kv if a == app_id})
 
 
 class _StubCatalog:
@@ -572,6 +576,66 @@ async def test_uninstall_removes_row_and_bundle(
     assert len(uninstall_events) == 1
     assert uninstall_events[0].app_id == "chess"
     assert uninstall_events[0].min_age == 0
+
+
+class _RecordingSessions:
+    """The games side of an uninstall (AppFederationService), recorded."""
+
+    def __init__(self, repo: _FakeAppRepo) -> None:
+        self.repo = repo
+        self.calls: list[tuple] = []
+
+    async def sessions_ending(self, app_id: str) -> list:
+        # Read while the app is still installed (the rows go with it).
+        self.calls.append(("ending", app_id, await self.repo.get(app_id) is not None))
+        return [("row", "game", True)]
+
+    async def tell_opponents(self, app_id: str, ending: list) -> None:
+        self.calls.append(("tell", app_id, await self.repo.get(app_id) is not None))
+
+    async def preview_uninstall(self, app_id: str) -> AppUninstallPreview:
+        return AppUninstallPreview(people=2, games=1, invites=0, told=("Ben",))
+
+
+@pytest.mark.asyncio
+async def test_uninstall_reads_the_games_first_and_tells_opponents_after(
+    tmp_path: Path,
+    catalog_entry: AppCatalogEntry,
+    chess_bundle: tuple[bytes, str],
+) -> None:
+    """D9: the sessions an uninstall ends are read before the rows go with
+    the app, and the other households are told once it is gone."""
+    bundle_bytes, _ = chess_bundle
+    svc, repo = make_service(tmp_path, [catalog_entry], bundle_bytes)
+    await svc.install("chess", actor_is_admin=True, actor_user_id="admin1")
+    sessions = _RecordingSessions(repo)
+    svc.attach_sessions(sessions)  # type: ignore[arg-type]
+    await svc.uninstall("chess", actor_is_admin=True)
+    assert sessions.calls == [("ending", "chess", True), ("tell", "chess", False)]
+
+
+@pytest.mark.asyncio
+async def test_uninstall_preview_counts_people_and_games(
+    tmp_path: Path,
+    catalog_entry: AppCatalogEntry,
+    chess_bundle: tuple[bytes, str],
+) -> None:
+    bundle_bytes, _ = chess_bundle
+    svc, repo = make_service(tmp_path, [catalog_entry], bundle_bytes)
+    await svc.install("chess", actor_is_admin=True, actor_user_id="admin1")
+    # Without the games side: people with saved data only.
+    await repo.kv_set("chess", "u1", "k", "1", "2026-10-29T00:00:00+00:00")
+    await repo.kv_set("chess", "u1", "k2", "1", "2026-10-29T00:00:00+00:00")
+    await repo.kv_set("chess", "u2", "k", "1", "2026-10-29T00:00:00+00:00")
+    alone = await svc.uninstall_preview("chess", actor_is_admin=True)
+    assert (alone.people, alone.games, alone.invites, alone.told) == (2, 0, 0, ())
+    svc.attach_sessions(_RecordingSessions(repo))  # type: ignore[arg-type]
+    preview = await svc.uninstall_preview("chess", actor_is_admin=True)
+    assert (preview.games, preview.told) == (1, ("Ben",))
+    with pytest.raises(SpacePermissionError):
+        await svc.uninstall_preview("chess", actor_is_admin=False)
+    with pytest.raises(AppNotFoundError):
+        await svc.uninstall_preview("nope", actor_is_admin=True)
 
 
 @pytest.mark.asyncio

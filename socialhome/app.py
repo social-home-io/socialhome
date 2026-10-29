@@ -4802,6 +4802,8 @@ def create_app(config: Config | None = None) -> web.Application:
             bus=bus,
         )
         federation_service.attach_apps(app_federation_service)
+        # D9: an uninstall tells the households people here play it with.
+        app_service.attach_sessions(app_federation_service)
         # §CP.F2: guardian blocks hold for app sessions as for calls / DMs.
         app_federation_service.attach_child_protection(child_protection_service)
         app[K.app_federation_service_key] = app_federation_service

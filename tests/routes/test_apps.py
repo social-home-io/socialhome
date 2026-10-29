@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
 import aiohttp
@@ -31,6 +32,7 @@ from socialhome.domain.apps import (
     AppSessionUnknownError,
     InstalledApp,
 )
+from socialhome.federation.federation_service import FederationService
 from socialhome.repositories.app_repo import SqliteAppRepo
 from socialhome.services.app_federation_service import AppFederationService
 from socialhome.services.app_service import AppService
@@ -2484,3 +2486,123 @@ async def test_list_and_detail_say_which_permissions_the_app_has(client):
     assert (await r.json())["permissions"] == ["people", "federation"]
     r = await client.get("/api/apps", headers=_auth(client._tok))
     assert (await r.json())["apps"][0]["permissions"] == ["people", "federation"]
+
+
+# ── Uninstall says what is lost and tells opponents (D9) ──────────────────
+
+
+async def _seed_game_with_okafor(client, *, proto_version: int = 72) -> None:
+    """The admin plays a game with Ben of Familie Okafor (another
+    household, at *proto_version*); two people saved something."""
+    db = client._db
+    await _seed_installed_enabled_app(db)
+    await db.enqueue(
+        "INSERT INTO remote_instances"
+        "(id, display_name, remote_identity_pk, key_self_to_remote,"
+        " key_remote_to_self, remote_inbox_url, local_inbox_id, status,"
+        " source, proto_version) VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (
+            "okafor-house",
+            "Familie Okafor",
+            "00" * 32,
+            "k1",
+            "k2",
+            "https://okafor/wh",
+            "wh-okafor",
+            "confirmed",
+            "manual",
+            proto_version,
+        ),
+    )
+    await db.enqueue(
+        "INSERT INTO remote_users(user_id, instance_id, remote_username,"
+        " display_name) VALUES(?,?,?,?)",
+        ("ben-uid", "okafor-house", "ben", "Ben"),
+    )
+    repo = SqliteAppRepo(db)
+    now = datetime.now(UTC).isoformat()
+    await repo.add_active_session(
+        AppPendingSession(
+            app_id="com.example.hello",
+            user_id=client._uid,
+            session_id="game-1",
+            from_instance="okafor-house",
+            from_user="ben",
+            payload={"app_id": "com.example.hello", "session_id": "game-1"},
+            created_at=now,
+            state="active",
+            updated_at=now,
+        )
+    )
+    await _seed_member(db)
+    await repo.kv_set("com.example.hello", client._uid, "game:1", "{}", now)
+    await repo.kv_set("com.example.hello", "bob-id", "settings", "{}", now)
+
+
+def _capture_sends(monkeypatch) -> list[dict]:
+    sent: list[dict] = []
+
+    async def _send_event(self, **kw):
+        sent.append(kw)
+
+    monkeypatch.setattr(FederationService, "send_event", _send_event)
+    return sent
+
+
+async def test_uninstall_preview_counts_what_is_lost(client):
+    await _seed_game_with_okafor(client)
+    r = await client.get(
+        "/api/apps/com.example.hello/uninstall-preview", headers=_auth(client._tok)
+    )
+    assert r.status == 200
+    assert await r.json() == {
+        "people": 2,
+        "games": 1,
+        "invites": 0,
+        "told": ["Ben · Familie Okafor"],
+        "told_more": 0,
+        "untold": 0,
+    }
+
+
+async def test_uninstall_preview_is_for_admins(client):
+    await _seed_installed_enabled_app(client._db)
+    member_tok = await _seed_member(client._db)
+    url = "/api/apps/com.example.hello/uninstall-preview"
+    assert (await client.get(url, headers=_auth(member_tok))).status == 403
+    assert (await client.get(url)).status == 401
+    r = await client.get(
+        "/api/apps/not.installed/uninstall-preview", headers=_auth(client._tok)
+    )
+    assert r.status == 404
+
+
+async def test_uninstall_tells_the_other_household_the_game_ended(client, monkeypatch):
+    await _seed_game_with_okafor(client)
+    sent = _capture_sends(monkeypatch)
+    r = await client.delete("/api/apps/com.example.hello", headers=_auth(client._tok))
+    assert r.status == 200
+    (event,) = sent
+    assert event["to_instance_id"] == "okafor-house"
+    assert event["payload"] == {
+        "app_id": "com.example.hello",
+        "verb": "close",
+        "reason": "ended",
+        "sessions": [{"session_id": "game-1", "to_user": "ben", "from_user": "admin"}],
+    }
+    repo = SqliteAppRepo(client._db)
+    assert await repo.list_app_sessions("com.example.hello") == []
+
+
+async def test_uninstall_tells_an_older_household_nothing_about_a_game(
+    client, monkeypatch
+):
+    await _seed_game_with_okafor(client, proto_version=71)
+    r = await client.get(
+        "/api/apps/com.example.hello/uninstall-preview", headers=_auth(client._tok)
+    )
+    assert (await r.json())["untold"] == 1
+    sent = _capture_sends(monkeypatch)
+    r = await client.delete("/api/apps/com.example.hello", headers=_auth(client._tok))
+    assert r.status == 200
+    assert sent == []

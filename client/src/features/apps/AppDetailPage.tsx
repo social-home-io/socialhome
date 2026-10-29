@@ -207,7 +207,7 @@ export default function AppDetailPage() {
             <HouseholdFacts installed={installed} minAge={minAge} isAdmin={isAdmin} />
           </section>
           {isAdmin && installed && (
-            <ManageCard app={installed} name={name} update={update?.compatible !== false ? update : null} />
+            <ManageCard app={installed} name={name} icon={entry?.icon_url} update={update?.compatible !== false ? update : null} />
           )}
           {isAdmin && !installed && entry && needsYou.value.some(
             n => n.type === 'app_request' && n.object_key === `app:${entry.app_id}`,
@@ -308,9 +308,10 @@ function HouseholdFacts({ installed, minAge, isAdmin }: {
 }
 
 /** Admins: update, turn on / off, minimum age and uninstall. */
-function ManageCard({ app, name, update }: {
+function ManageCard({ app, name, icon, update }: {
   app: InstalledApp
   name: string
+  icon?: string | null
   update: AppUpdate | null
 }) {
   const { route } = useLocation()
@@ -353,6 +354,7 @@ function ManageCard({ app, name, update }: {
       <UninstallDialog
         app={app}
         name={name}
+        icon={icon}
         open={uninstallOpen}
         onClose={() => setUninstallOpen(false)}
         onDone={() => route('/apps')}

@@ -55,6 +55,7 @@ class AbstractAppRepo(Protocol):
     ) -> None: ...
     async def kv_delete(self, app_id: str, user_id: str, key: str) -> None: ...
     async def kv_count(self, app_id: str, user_id: str) -> int: ...
+    async def kv_people(self, app_id: str) -> int: ...
     async def add_pending_session(self, s: AppPendingSession) -> None: ...
     async def prune_pending_sessions(
         self,
@@ -103,6 +104,7 @@ class AbstractAppRepo(Protocol):
     async def withdraw_session(
         self, app_id: str, user_id: str, session_id: str
     ) -> None: ...
+    async def list_app_sessions(self, app_id: str) -> list[AppPendingSession]: ...
 
 
 def _row_to_kv(row) -> AppKvEntry:
@@ -285,6 +287,17 @@ class SqliteAppRepo:
             (app_id, user_id),
         )
         return int(row["cnt"]) if row is not None else 0
+
+    async def kv_people(self, app_id: str) -> int:
+        """How many people have saved anything in *app_id* (the uninstall
+        dialog: "4 people lose their saved games and settings")."""
+        return int(
+            await self._db.fetchval(
+                "SELECT COUNT(DISTINCT user_id) FROM app_kv WHERE app_id = ?",
+                (app_id,),
+                default=0,
+            )
+        )
 
     # ── Pending-session invites ──────────────────────────────────────────
 
@@ -563,3 +576,14 @@ class SqliteAppRepo:
             if changed == 1:
                 out.append(held)
         return out
+
+    async def list_app_sessions(self, app_id: str) -> list[AppPendingSession]:
+        """Every session row of *app_id*, for everyone here — what an
+        uninstall ends (D9). Bounded like :meth:`list_sessions`, per
+        person."""
+        rows = await self._db.fetchall(
+            """SELECT * FROM app_pending_sessions WHERE app_id = ?
+               ORDER BY user_id, COALESCE(updated_at, created_at)""",
+            (app_id,),
+        )
+        return [_row_to_pending(r) for r in rows]

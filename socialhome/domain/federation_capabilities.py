@@ -1101,7 +1101,22 @@ from __future__ import annotations
 #:   reviewed" (``report_answer``). **Fallback**: a household below v_71 is
 #:   sent nothing — its reporter hears nothing, as before. Labelled
 #:   "Reporters in other households hear their report was reviewed".
-OURS: int = 71
+#: * **v_72** (2026-10-29) — **an uninstalled app tells opponents their
+#:   games ended** (Apps redesign D9). Uninstalling an app sends each
+#:   household a local person plays it with ONE sealed ``APP_SESSION
+#:   {verb: "close", reason: "ended", sessions: [{session_id, to_user,
+#:   from_user}, ...]}`` (≤ 100 sessions per event, chunked beyond). The
+#:   receiver handles each entry like a single close: it ends only a
+#:   session its own person plays with exactly that household and person
+#:   (an invite stops waiting, a game's close waits in the mailbox), and
+#:   tells the player once per opponent ("Ben no longer has Chess, so your
+#:   game ended", ``app_game_ended``, no push). **Fallback**: a household
+#:   below v_72 gets the per-session close it already knows for each
+#:   *pending invite* (``declined`` for one it sent us, ``withdrawn`` for
+#:   one we sent) and nothing for games being played — those end there only
+#:   when the 90-day session TTL prunes them. Labelled "Games end cleanly
+#:   when the other household removes the app".
+OURS: int = 72
 
 
 class FederationCapability:
@@ -1663,6 +1678,12 @@ class FederationCapability:
     #: moderator). A household below it is sent nothing.
     MIN_FOR_REMOTE_REPORT_ANSWER = 71
 
+    #: v_72 — an uninstalled app tells opponents their games ended: one
+    #: bundled ``APP_SESSION {verb: "close", reason: "ended", sessions}``
+    #: per household. A household below it gets ``declined`` / ``withdrawn``
+    #: for pending invites only, nothing for games being played.
+    MIN_FOR_APP_SESSION_ENDED = 72
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1932,6 +1953,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_REMOTE_REPORT_ANSWER,
         "Reporters in other households hear their report was reviewed",
     ),
+    (
+        FederationCapability.MIN_FOR_APP_SESSION_ENDED,
+        "Games end cleanly when the other household removes the app",
+    ),
 ]
 
 
@@ -2014,6 +2039,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_MOMENT_REACTION_COUNTS: "moment_reaction_counts",
     FederationCapability.MIN_FOR_HIGHLIGHT_AUDIENCE_CHANGE: "highlight_audience_change",
     FederationCapability.MIN_FOR_REMOTE_REPORT_ANSWER: "remote_report_answers",
+    FederationCapability.MIN_FOR_APP_SESSION_ENDED: "app_games_end_on_uninstall",
 }
 
 
@@ -2065,6 +2091,8 @@ def feature_keys_missing_below(version: int) -> list[str]:
 #: * ``MIN_FOR_REMOTE_REPORT_ANSWER`` — a host → reporter's-household note;
 #:   a behind household only keeps its own reporters from hearing back, the
 #:   space works the same for everyone else.
+#: * ``MIN_FOR_APP_SESSION_ENDED`` — Social Home Apps games are per-person
+#:   sessions, not a space content surface.
 SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
     {
         FederationCapability.MIN_FOR_SPACE_INVITE_REDEEM,

@@ -22503,6 +22503,37 @@ span.sh-hlv__who { cursor: default; }
   line-height: 1.5;
 }
 .sh-apps-row__asks { color: var(--sh-text); font-weight: 600; }
+
+/* Uninstall (D9): what is lost, then "Turn off instead" as the default. */
+.sh-app-uninstall__title { display: flex; align-items: center; gap: var(--sh-space-sm); min-width: 0; }
+.sh-app-uninstall__title h2 { margin: 0; }
+.sh-app-uninstall__lead { margin: 0; line-height: 1.5; }
+.sh-app-uninstall__losses { margin-top: var(--sh-space-md); }
+/* One sentence with its bold count inline (not the stacked title/detail). */
+.sh-app-uninstall__line { display: block; font-size: var(--sh-font-size-base); line-height: 1.5; }
+.sh-app-uninstall__note { margin: var(--sh-space-md) 0 0; color: var(--sh-text-muted); line-height: 1.5; }
+.sh-app-uninstall__keep {
+  margin: var(--sh-space-md) 0 0;
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg-secondary);
+  font-size: var(--sh-font-size-sm);
+  line-height: 1.5;
+}
+.sh-app-uninstall__actions { flex-wrap: wrap; }
+.sh-app-uninstall__actions .sh-btn--secondary {
+  color: var(--sh-danger);
+  border-color: color-mix(in srgb, var(--sh-danger) 60%, transparent);
+}
+.sh-app-uninstall__actions .sh-btn--secondary:not(:disabled):hover {
+  background: color-mix(in srgb, var(--sh-danger) 10%, transparent);
+  color: var(--sh-danger);
+}
+@media (max-width: 639px) {
+  .sh-app-uninstall__actions { flex-direction: column-reverse; align-items: stretch; }
+  .sh-app-uninstall__actions .sh-btn { width: 100%; min-height: 44px; }
+}
 .sh-app-detail__update { margin-bottom: var(--sh-space-sm); }
 
 /* Detail page. */

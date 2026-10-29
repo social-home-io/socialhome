@@ -772,5 +772,15 @@
   "apps.invite.lead": "Under the heading: Social Home (not the app) sends the invite, and the app only learns who you pick. {name} is the app's name.",
   "apps.invite.send_to": "The Send button always names who gets the invite. {name} is a person's first name. Keep it short: it is a button on a phone.",
   "apps.invite.limit_open": "A limit: at most {count} invites nobody has answered yet, per person and app. {name} is the app's name; \"take one back\" = withdraw an invite inside the app.",
-  "apps.invite.limit_daily": "A limit: at most {count} new invites a day, per person and app."
+  "apps.invite.limit_daily": "A limit: at most {count} new invites a day, per person and app.",
+  "apps.uninstall.lead": "First line of the uninstall dialog (Apps), above the list of what is lost. {name} is the app (e.g. Chess, never translated).",
+  "apps.uninstall.people": "Uninstall dialog line. {who} is apps.uninstall.people_n (\"4 people\"), shown in bold. Saved data of the app is deleted for these people.",
+  "apps.uninstall.games": "Uninstall dialog line. {what} is apps.uninstall.games_n (\"3 games with other households\"), shown in bold. Those games end.",
+  "apps.uninstall.invites": "Uninstall dialog line. {what} is apps.uninstall.invites_n (\"1 open invite\"), shown in bold. Game invites not answered yet, sent or received.",
+  "apps.uninstall.told": "Follows apps.uninstall.games. {names} is a list of people in other households (\"Ben · Familie Okafor, Clara and 2 more\"), already joined with \"and\". They get a notification that the game ended.",
+  "apps.uninstall.untold": "Follows apps.uninstall.games: {n} of these games are with a household whose Social Home is too old to be told.",
+  "apps.uninstall.keep": "Note box in the uninstall dialog. {turn_off} is apps.uninstall.turn_it_off in bold. \"it\" is the app (in de/fr/es \"die App\"/\"l’app\"/\"la app\" are feminine).",
+  "apps.uninstall.turn_off_instead": "The default (focused) button of the uninstall dialog: turn the app off, which keeps all data. Keep it short: it sits next to apps.uninstall.confirm on one line on a wide screen.",
+  "apps.uninstall.confirm": "The destructive button of the uninstall dialog: uninstall the app and delete everyone's data.",
+  "notifications.row.app_game_ended": "Notification: the other household uninstalled the app, so the game with {actor} ended. {actor} is a name (for someone from another household \"Ben · Familie Okafor\"); {space} is the app's name (e.g. Chess, never translated). Don't say {actor} removed it: someone in their household did. \"_many\" takes {actors}."
 }

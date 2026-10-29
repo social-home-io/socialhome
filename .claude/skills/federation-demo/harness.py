@@ -9532,6 +9532,21 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_70 highlight audience change gate in place ✓")
+    # v_72 — an uninstalled app tells opponents their games ended: one
+    # bundled ``APP_SESSION {verb: "close", reason: "ended", sessions}`` per
+    # household, only to a peer at >= v_72 (``peer_supports``); an older one
+    # gets the old declined / withdrawn close for pending invites only. The OURS round-trip above
+    # proves every inner-ring pair advertises >= v_72, so an uninstall on any
+    # of them sends the bundle. Pin the threshold so a bump that moves it
+    # fails here, not in the field (the receiver rules are covered by
+    # ``tests/protocol/test_app_session_scope.py``).
+    if int(_Cap.MIN_FOR_APP_SESSION_ENDED) != 72 or _OURS < 72:
+        failures.append(
+            "MIN_FOR_APP_SESSION_ENDED moved off v_72 (or OURS fell below it) "
+            "— an uninstall would send 'ended' to households that drop it"
+        )
+    else:
+        print("  v_72 app games end on uninstall gate in place ✓")
     hla = state.get("highlight_audience")
     if hla:
         stamps = _rows(

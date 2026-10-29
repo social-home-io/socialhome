@@ -19,6 +19,7 @@ const h = vi.hoisted(() => ({
   setEnabled: vi.fn().mockResolvedValue(undefined),
   setMinAge: vi.fn().mockResolvedValue(undefined),
   uninstallApp: vi.fn().mockResolvedValue(undefined),
+  loadUninstallPreview: vi.fn(),
   installApp: vi.fn().mockResolvedValue(undefined),
   requestApp: vi.fn().mockResolvedValue(undefined),
   updateApp: vi.fn().mockResolvedValue(undefined),
@@ -53,6 +54,7 @@ vi.mock('@/store/apps', async (orig) => {
     updateApp: h.updateApp, installApp: h.installApp, requestApp: h.requestApp,
     newPermissionsAsked: real.newPermissionsAsked,
     uninstallApp: h.uninstallApp, setEnabled: h.setEnabled, setMinAge: h.setMinAge,
+    loadUninstallPreview: h.loadUninstallPreview,
     localized: real.localized,
   }
 })
@@ -472,5 +474,102 @@ describe('Check for updates is honest about reaching the app list', () => {
     const { getByRole, queryByRole } = render(<AppsPage />)
     expect(getByRole('status')).toBeTruthy()
     expect(queryByRole('button', { name: 'Retry' })).toBeNull()
+  })
+})
+
+describe('Uninstall says what will be lost (D9)', () => {
+  const preview = (over: Partial<any> = {}) => ({
+    people: 4, games: 3, invites: 1,
+    told: ['Ben · Familie Okafor', 'Clara', 'Ömer'], told_more: 0, untold: 0,
+    ...over,
+  })
+  const open = () => {
+    const r = render(<AppsPage />)
+    fireEvent.click(r.getByRole('button', { name: 'Chess settings' }))
+    fireEvent.click(r.getByRole('menuitem', { name: 'Uninstall…' }))
+    return r
+  }
+  const text = (el: Element) => (el.textContent ?? '').replace(/\s+/g, ' ').trim()
+
+  it('counts people, games and invites, and names who will be told', async () => {
+    h.loadUninstallPreview.mockResolvedValue(preview())
+    const { getByRole } = open()
+    const dialog = getByRole('alertdialog', { name: 'Uninstall Chess?' })
+    expect(h.loadUninstallPreview).toHaveBeenCalledWith('chess')
+    await vi.waitFor(() => expect(dialog.querySelectorAll('li').length).toBe(3))
+    const lines = Array.from(dialog.querySelectorAll('li')).map(text)
+    expect(lines).toEqual([
+      '▣4 people lose their saved games and settings.',
+      '⇄3 games with other households end. Ben · Familie Okafor, Clara, and Ömer will be told.',
+      '✉1 open invite is withdrawn.',
+    ])
+    expect(dialog.querySelector('strong')?.textContent).toBe('4 people')
+    // Never what the games hold: counts and names only.
+    expect(text(dialog)).toContain('Want to keep everything? Turn it off instead.')
+  })
+
+  it('"Turn off instead" is the default and keeps everything', async () => {
+    h.loadUninstallPreview.mockResolvedValue(preview())
+    const { getByRole } = open()
+    const keep = getByRole('button', { name: 'Turn off instead' })
+    await vi.waitFor(() => expect(document.activeElement).toBe(keep))
+    fireEvent.click(keep)
+    await vi.waitFor(() => expect(setEnabled).toHaveBeenCalledWith('chess', false))
+    expect(h.uninstallApp).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith('Chess is off. Everything is kept.', 'success'))
+  })
+
+  it('"Uninstall and delete" uninstalls', async () => {
+    h.loadUninstallPreview.mockResolvedValue(preview())
+    const { getByRole } = open()
+    fireEvent.click(getByRole('button', { name: 'Uninstall and delete' }))
+    await vi.waitFor(() => expect(h.uninstallApp).toHaveBeenCalledWith('chess'))
+    expect(setEnabled).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith('Chess uninstalled.', 'info'))
+  })
+
+  it('says who can\'t be told on an older Social Home, and counts names past three', async () => {
+    h.loadUninstallPreview.mockResolvedValue(preview({
+      people: 1, games: 5, invites: 0, told_more: 2, untold: 1,
+    }))
+    const { findByText, getByRole } = open()
+    expect(await findByText(/1 person/)).toBeTruthy()
+    const dialog = getByRole('alertdialog')
+    expect(text(dialog)).toContain('1 person loses their saved games and settings.')
+    expect(text(dialog)).toContain(
+      '5 games with other households end. Ben · Familie Okafor, Clara, Ömer, and 2 more will be told. '
+      + "1 of them won't be told: their household has an older Social Home.",
+    )
+  })
+
+  it('a game only with an older household: nobody is told', async () => {
+    h.loadUninstallPreview.mockResolvedValue(preview({ people: 0, games: 1, invites: 0, told: [], untold: 1 }))
+    const { findByText } = open()
+    expect(await findByText(/Their household has an older Social Home, so they won't be told\./)).toBeTruthy()
+  })
+
+  it('nothing to lose says so', async () => {
+    h.loadUninstallPreview.mockResolvedValue(preview({ people: 0, games: 0, invites: 0, told: [] }))
+    const { findByText } = open()
+    expect(await findByText('Nobody has saved anything in Chess yet, and nobody plays it with another household.')).toBeTruthy()
+  })
+
+  it('a failed count still warns and still lets the admin decide', async () => {
+    h.loadUninstallPreview.mockRejectedValue(new Error('API 500'))
+    const { findByText, getByRole } = open()
+    expect(await findByText(/Everyone's saved games and settings are deleted/)).toBeTruthy()
+    fireEvent.click(getByRole('button', { name: 'Uninstall and delete' }))
+    await vi.waitFor(() => expect(h.uninstallApp).toHaveBeenCalledWith('chess'))
+  })
+
+  it('an app already off offers to keep it instead of turning it off', async () => {
+    installedApps.value = [makeApp({ enabled: false })]
+    h.loadUninstallPreview.mockResolvedValue(preview())
+    const { getByRole, queryByRole, queryByText } = open()
+    expect(queryByRole('button', { name: 'Turn off instead' })).toBeNull()
+    expect(queryByText(/Chess is turned off: everything is kept/)).toBeTruthy()
+    fireEvent.click(getByRole('button', { name: 'Keep Chess' }))
+    await vi.waitFor(() => expect(queryByRole('alertdialog')).toBeNull())
+    expect(h.uninstallApp).not.toHaveBeenCalled()
   })
 })

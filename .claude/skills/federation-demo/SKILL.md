@@ -717,7 +717,13 @@ Phases added after the initial publish are documented inline in
   Skips gracefully when no common installed app is present in the
   demo environment (unit tests in
   ``tests/services/test_app_federation_service.py`` cover the full
-  delivery path with a WS mock).
+  delivery path with a WS mock). ``verify`` pins v_72
+  (``MIN_FOR_APP_SESSION_ENDED``: an uninstall tells each opponent
+  household its games ended in one bundled ``APP_SESSION {verb:
+  "close", reason: "ended"}``) on top of the ``OURS`` round-trip; the
+  receiver rules (only the other side can end a game) are the security
+  tests in ``tests/protocol/test_app_session_scope.py``, and the two-
+  household chess run lives in the ``apps-development-testing`` skill.
 
 To iterate faster you can run the steps individually (``python
 harness.py up`` / ``pair`` / ``traffic`` / ``calendar`` / ``verify``

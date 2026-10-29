@@ -25,6 +25,7 @@ from socialhome.app_keys import (
     app_federation_service_key,
     db_key,
     federation_service_key,
+    notification_delivery_key,
 )
 from socialhome.config import Config
 from socialhome.domain.apps import AppContactNotFoundError, AppManifest, InstalledApp
@@ -402,3 +403,64 @@ async def test_a_guardian_blocked_sender_never_fills_the_mailbox(env):
     await _guardian_block_bob_from_alice(db)
     await _message(app, sender=PEER, from_user="alice", to_user="bob")
     assert await _held(db) == []
+
+
+async def _ended(app, *, sender: str, entries: list[dict]) -> None:
+    """An inbound ``APP_SESSION {verb: "close", reason: "ended"}`` (v_72)."""
+    handlers = app[federation_service_key]._event_registry.handlers_for(FET.APP_SESSION)
+    for handler in handlers:
+        await handler(
+            FederationEvent(
+                msg_id=f"m-ended-{sender}-{len(entries)}",
+                event_type=FET.APP_SESSION,
+                from_instance=sender,
+                to_instance="us",
+                timestamp=datetime.now(UTC).isoformat(),
+                payload={
+                    "app_id": "chess",
+                    "verb": "close",
+                    "reason": "ended",
+                    "sessions": entries,
+                },
+            )
+        )
+
+
+async def test_only_the_other_side_can_end_a_game(env):
+    """D9 (v_72): an "ended" close ends a game only from the household and
+    person on its other side. Another household — or another person of the
+    right one, or an entry addressed to someone who doesn't play it —
+    holds nothing, rings no bell and leaves the game as it was."""
+    app, db = env
+    sid = await app[app_federation_service_key].open_session(
+        app_id="chess",
+        target={"instance_id": PEER, "user_ref": "alice", "is_local": False},
+        actor_user_id="u-bob",
+    )
+    for sender, user, to_user in (
+        (OTHER, "eve", "bob"),
+        (OTHER, "alice", "bob"),
+        (PEER, "eve", "bob"),
+        (PEER, "alice", "carl"),
+    ):
+        await _ended(
+            app,
+            sender=sender,
+            entries=[{"session_id": sid, "to_user": to_user, "from_user": user}],
+        )
+    assert await _held(db) == []
+    assert await _bells(db, "app_game_ended") == 0
+    rows = await db.fetchall(
+        "SELECT user_id, state FROM app_pending_sessions WHERE session_id = ?", (sid,)
+    )
+    assert [tuple(r) for r in rows] == [("u-bob", "active")]
+    # Alice's household removed Chess: Bob's game ends, and he is told once.
+    await _ended(
+        app,
+        sender=PEER,
+        entries=[{"session_id": sid, "to_user": "bob", "from_user": "alice"}],
+    )
+    held = await _held(db)
+    assert [(s, u) for s, u, _ in held] == [(sid, "u-bob")]
+    await app[notification_delivery_key].drain()
+    assert await _bells(db, "app_game_ended") == 1
