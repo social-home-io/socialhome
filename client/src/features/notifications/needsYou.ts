@@ -37,6 +37,7 @@ export const NEEDS_YOU_TYPES: ReadonlySet<string> = new Set([
   'space_invite',
   'pairing_request',
   'app_challenge',
+  'app_request',
 ])
 
 /** Entries shown before "Show N more". */

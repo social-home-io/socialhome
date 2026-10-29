@@ -7,21 +7,33 @@ import dataclasses
 import pytest
 
 from socialhome.domain.apps import (
+    CATALOG_CHANGELOG_MAX,
+    CATALOG_CHANGELOG_NOTE_MAX,
+    CATALOG_DESCRIPTION_MAX,
+    CATALOG_LOCALES_MAX,
+    CATALOG_NAME_MAX,
+    CATALOG_PUBLISHER_MAX,
     AppAgeRestrictedError,
     AppAlreadyInstalledError,
     AppCatalogEntry,
     AppCatalogStatus,
+    AppCatalogText,
     AppCatalogUnreachableError,
+    AppChangelogEntry,
     AppContactNotFoundError,
     AppError,
     AppIntegrityError,
     AppKvEntry,
     AppManifest,
+    AppNeedsNewerCoreError,
     AppNotEnabledError,
     AppNotFoundError,
     AppQuotaExceededError,
+    AppRequestNotAllowedError,
     InstalledApp,
     app_age_allows,
+    app_permissions,
+    core_version_satisfies,
     is_newer_version,
     parse_app_version,
 )
@@ -273,3 +285,205 @@ def test_app_age_allows(min_age, protected, declared_age, allowed):
         app_age_allows(min_age, protected=protected, declared_age=declared_age)
         is allowed
     )
+
+
+# ─── Catalog schema v2 (receiver bounds, r2-proposal §7) ─────────────────────
+
+_V1 = {
+    "app_id": "chess",
+    "name": "Chess",
+    "latest_version": "2026.10.29",
+    "description": "Play chess",
+    "capabilities": ["storage", "federation"],
+    "bundle_url": "https://example/chess.tgz",
+    "bundle_sha256": "cd" * 32,
+}
+
+
+def _v2(**over: object) -> AppCatalogEntry:
+    return AppCatalogEntry.from_dict({**_V1, "schema": 2, **over})
+
+
+def test_catalog_v2_reads_the_published_chess_entry():
+    """The fields socialhome-apps 2026.10.29.1 publishes, as published."""
+    entry = _v2(
+        bundle_size=16198,
+        permissions=["storage", "people", "federation"],
+        min_age=0,
+        languages=["en"],
+        publisher="Social Home",
+        i18n={"de": {"name": "Schach", "description": "Spiel eine Partie Schach."}},
+        homepage="https://github.com/social-home-io/socialhome-apps/tree/main/apps/chess",
+        min_core_version="2026.10.29",
+        changelog=[
+            {
+                "version": "2026.10.29",
+                "date": "2026-10-29",
+                "notes": {
+                    "en": "Play with the keyboard.",
+                    "de": "Spiel mit der Tastatur.",
+                },
+            }
+        ],
+    )
+    assert entry.bundle_size == 16198
+    assert entry.permissions == ("storage", "people", "federation")
+    assert entry.unknown_permissions == ()
+    assert entry.min_age == 0
+    assert entry.languages == ("en",)
+    assert entry.publisher == "Social Home"
+    assert entry.i18n == (AppCatalogText("de", "Schach", "Spiel eine Partie Schach."),)
+    assert entry.homepage is not None and entry.homepage.endswith("/apps/chess")
+    assert entry.min_core_version == "2026.10.29"
+    assert entry.changelog == (
+        AppChangelogEntry(
+            version="2026.10.29",
+            date="2026-10-29",
+            notes=(
+                ("en", "Play with the keyboard."),
+                ("de", "Spiel mit der Tastatur."),
+            ),
+        ),
+    )
+
+
+def test_catalog_v1_entry_still_reads_and_implies_people_from_federation():
+    entry = AppCatalogEntry.from_dict(dict(_V1))
+    assert entry.permissions == ("storage", "people", "federation")
+    assert entry.i18n == ()
+    assert entry.bundle_size is None
+    assert entry.min_age is None
+    assert entry.min_core_version is None
+    assert entry.changelog == ()
+
+
+def test_catalog_v2_caps_text_at_the_receiver_bounds():
+    entry = _v2(
+        name="N" * 100,
+        description="D" * 1000,
+        publisher="P" * 200,
+        i18n={"de": {"name": "S" * 100, "description": "B" * 1000}},
+        changelog=[{"version": "1.0", "notes": {"en": "x" * 2000}}],
+    )
+    assert len(entry.name) == CATALOG_NAME_MAX
+    assert entry.name.endswith("…")
+    assert len(entry.description) == CATALOG_DESCRIPTION_MAX
+    assert entry.publisher is not None
+    assert len(entry.publisher) == CATALOG_PUBLISHER_MAX
+    assert len(entry.i18n[0].name or "") == CATALOG_NAME_MAX
+    assert len(entry.i18n[0].description or "") == CATALOG_DESCRIPTION_MAX
+    assert len(entry.changelog[0].notes[0][1]) == CATALOG_CHANGELOG_NOTE_MAX
+
+
+def test_catalog_v2_bounds_counts():
+    tags = [f"l{chr(97 + i)}" for i in range(20)]
+    entry = _v2(
+        i18n={tag: {"name": "x"} for tag in tags},
+        languages=[*tags, "la"],
+        changelog=[{"version": f"1.{i}", "notes": {}} for i in range(9)],
+    )
+    assert len(entry.i18n) == CATALOG_LOCALES_MAX
+    assert len(entry.languages) == CATALOG_LOCALES_MAX
+    assert len(entry.changelog) == CATALOG_CHANGELOG_MAX
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected"),
+    [
+        ("bundle_size", -1, None),
+        ("bundle_size", "212 KB", None),
+        ("bundle_size", True, None),
+        ("bundle_size", 10**12, None),
+        ("min_age", 12, None),
+        ("min_age", "13", None),
+        ("min_age", True, None),
+        ("min_age", 16, 16),
+        ("languages", "en", ()),
+        ("languages", ["en", "en", "not a tag", 3, "pt-BR"], ("en", "pt-BR")),
+        ("homepage", "http://example.org", None),
+        ("homepage", "https://x.org/a b", None),
+        ("homepage", "https://x.org/" + "a" * 400, None),
+        ("min_core_version", "next", None),
+        ("min_core_version", 2026, None),
+        ("publisher", {"name": "Social Home"}, None),
+        ("publisher", "   ", None),
+        ("i18n", ["de"], ()),
+        ("i18n", {"DE!": {"name": "x"}, "de": "Schach", "nl": {}}, ()),
+        ("changelog", {"version": "1"}, ()),
+        ("changelog", [{"version": "v2"}, "x"], ()),
+        ("icon_url", "data:image/svg+xml," + "a" * 20000, None),
+        ("icon_url", 42, None),
+    ],
+)
+def test_catalog_v2_ignores_bad_values(field, value, expected):
+    """A bad v2 value reads as unknown — the entry itself stays."""
+    entry = _v2(**{field: value})
+    assert getattr(entry, field) == expected
+    assert entry.app_id == "chess"
+
+
+def test_catalog_v2_changelog_drops_a_bad_date_and_note_but_keeps_the_entry():
+    entry = _v2(
+        changelog=[
+            {
+                "version": "2026.10.29",
+                "date": "yesterday",
+                "notes": {"en": "", "EN": "x", "de": "Neu"},
+            }
+        ]
+    )
+    assert entry.changelog == (AppChangelogEntry("2026.10.29", None, (("de", "Neu"),)),)
+
+
+def test_catalog_v2_unknown_permission_is_kept_apart():
+    """An unknown permission is never silently granted: the entry says
+    which ones this Social Home doesn't know."""
+    entry = _v2(permissions=["storage", "camera"])
+    assert entry.permissions == ("storage",)
+    assert entry.unknown_permissions == ("camera",)
+
+
+def test_catalog_v2_bad_permissions_list_falls_back_to_capabilities():
+    assert _v2(permissions="storage").permissions == (
+        "storage",
+        "people",
+        "federation",
+    )
+
+
+def test_app_permissions_order_and_people_implied():
+    assert app_permissions(["federation"]) == ("people", "federation")
+    assert app_permissions(("storage", "nope")) == ("storage",)
+    assert app_permissions([]) == ()
+
+
+@pytest.mark.parametrize(
+    ("need", "have", "ok"),
+    [
+        (None, "2026.10.27", True),
+        ("2026.10.29", "2026.10.29", True),
+        ("2026.10.29", "2026.11.1", True),
+        ("2026.10.29", "2026.10.27", False),
+        ("2026.10.29", "2026.10.28.3", False),
+        # Development builds run the newest code: never held back.
+        ("2026.10.29", "2026.10.12.dev2", True),
+        ("2026.10.29", "0.0.0+unknown", True),
+        ("2026.10.29", "0.0.0", True),
+        ("2026.10.29", "", True),
+    ],
+)
+def test_core_version_satisfies(need, have, ok):
+    assert core_version_satisfies(need, have) is ok
+
+
+def test_catalog_entry_must_be_an_object():
+    with pytest.raises(TypeError):
+        AppCatalogEntry.from_dict(["chess"])  # type: ignore[arg-type]
+
+
+def test_needs_newer_core_and_request_errors_are_coded():
+    assert (AppNeedsNewerCoreError.status, AppNeedsNewerCoreError.code) == (
+        409,
+        "APP_NEEDS_NEWER_SOCIAL_HOME",
+    )
+    assert AppRequestNotAllowedError.code == "APP_REQUEST_NOT_NEEDED"

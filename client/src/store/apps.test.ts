@@ -18,6 +18,12 @@ import {
   catalogEnabled,
   catalogFreshness,
   catalogReached,
+  catalogSourceHost,
+  localized,
+  requestApp,
+  dismissRequests,
+  appsNavVisible,
+  loadAppsNav,
   _resetAppsForTest,
 } from './apps'
 
@@ -329,5 +335,59 @@ describe('apps store', () => {
       jsonResponse({ error: { code: 'UNPROCESSABLE', detail: 'Invalid min_age' } }, { status: 422 }),
     )
     await expect(setMinAge('a1', 99)).rejects.toThrow()
+  })
+})
+
+describe('apps store — catalog v2, Ask an admin, nav visibility', () => {
+  it('localized picks the viewer\'s language, base language too, else the catalog\'s own', () => {
+    const entry = {
+      name: 'Chess', description: 'Play chess',
+      i18n: { de: { name: 'Schach', description: null }, 'pt-BR': { name: 'Xadrez', description: 'Jogue' } },
+    }
+    expect(localized(entry, 'de')).toEqual({ name: 'Schach', description: 'Play chess' })
+    expect(localized(entry, 'de-CH')).toEqual({ name: 'Schach', description: 'Play chess' })
+    expect(localized(entry, 'pt-BR')).toEqual({ name: 'Xadrez', description: 'Jogue' })
+    expect(localized(entry, 'fr')).toEqual({ name: 'Chess', description: 'Play chess' })
+    expect(localized({ name: 'X', description: null }, 'en')).toEqual({ name: 'X', description: '' })
+  })
+
+  it('loadCatalog keeps where the catalog comes from', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ apps: [], enabled: true, source_host: 'apps.example.org' }))
+    await loadCatalog()
+    expect(catalogSourceHost.value).toBe('apps.example.org')
+  })
+
+  it('requestApp POSTs the request and marks the entry asked', async () => {
+    catalog.value = [{ app_id: 'chess', name: 'Chess', latest_version: '1', description: '', icon_url: null, capabilities: [] }]
+    fetchMock.mockResolvedValueOnce(jsonResponse({ requested: true }, { status: 202 }))
+    await requestApp('chess')
+    const [url, opts] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('api/apps/chess/requests')
+    expect(opts.method).toBe('POST')
+    expect(catalog.value[0].requested).toBe(true)
+  })
+
+  it('dismissRequests DELETEs the requests', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true }))
+    await dismissRequests('chess')
+    const [url, opts] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('api/apps/chess/requests')
+    expect(opts.method).toBe('DELETE')
+  })
+
+  it('appsNavVisible: unknown, then shown for an installed app', async () => {
+    expect(appsNavVisible.value).toBeNull()
+    fetchMock.mockResolvedValueOnce(jsonResponse({ apps: [{ app_id: 'chess', name: 'Chess', enabled: true }] }))
+    await loadAppsNav()
+    expect(appsNavVisible.value).toBe(true)
+    // Installed: no catalog fetch needed.
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('appsNavVisible: hidden when nothing is installed or askable', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ apps: [] }))
+    fetchMock.mockResolvedValueOnce(jsonResponse({ apps: [] }))
+    await loadAppsNav()
+    expect(appsNavVisible.value).toBe(false)
   })
 })

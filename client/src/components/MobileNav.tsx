@@ -153,6 +153,8 @@ export function MobileNav() {
   }
 
   const moreActive = mobileSidebarOpen.value
+  // Apps lives in the drawer: on /apps and below, More is where you are.
+  const inDrawerPage = path === '/apps' || path.startsWith('/apps/')
   return (
     <>
       {mobileSidebarOpen.value && (
@@ -231,7 +233,7 @@ export function MobileNav() {
         <button
           ref={moreRef}
           type="button"
-          class={`sh-mobile-tab sh-mobile-tab--more${moreActive ? ' sh-active' : ''}`}
+          class={`sh-mobile-tab sh-mobile-tab--more${moreActive || inDrawerPage ? ' sh-active' : ''}`}
           aria-expanded={moreActive}
           aria-controls="sh-mobile-drawer"
           onClick={() => (mobileSidebarOpen.value = !mobileSidebarOpen.value)}

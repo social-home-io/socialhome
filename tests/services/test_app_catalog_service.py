@@ -9,6 +9,7 @@ import pytest
 from aiohttp import web
 
 from socialhome.domain.apps import (
+    MAX_CATALOG_BYTES,
     AppBundleTooLargeError,
     AppCatalogUnreachableError,
     AppDownloadError,
@@ -20,6 +21,7 @@ from socialhome.services.app_catalog_service import (
     RELEASE_MAX_FIELD_SIZE,
     RELEASE_TIMEOUT_S,
     AppCatalogService,
+    catalog_source_host,
     download_bundle,
     release_session,
 )
@@ -488,3 +490,58 @@ async def test_the_catalog_answering_again_clears_stale():
     session.error = None
     await svc.fetch_catalog(force=True)
     assert svc.status.stale is False
+
+
+# ─── Catalog v2: bounded body, honest source label (D6) ──────────────────────
+
+
+async def test_a_catalog_over_the_size_cap_is_refused():
+    """r2-proposal §7: the whole catalog is at most MAX_CATALOG_BYTES —
+    a bigger body is treated as unreachable (the held copy is served)."""
+    session = _FlakySession(_chess_payload())
+    svc = AppCatalogService(
+        session_factory=session, catalog_url="https://example/catalog.json"
+    )
+    assert [e.app_id for e in await svc.fetch_catalog()] == ["chess"]
+    session.payload = '{"apps": [], "pad": "' + "x" * MAX_CATALOG_BYTES + '"}'
+    assert [e.app_id for e in await svc.fetch_catalog(force=True)] == ["chess"]
+    assert svc.status.stale is True
+
+
+async def test_a_declared_length_over_the_cap_is_refused_before_reading():
+    class _Big(_FakeResp):
+        content_length = MAX_CATALOG_BYTES + 1
+
+        async def text(self) -> str:  # pragma: no cover - must not be read
+            raise AssertionError("read a body declared too large")
+
+    class _Session(_FlakySession):
+        def get(self, url: str, **kw: Any) -> Any:
+            return _Big({})
+
+    svc = AppCatalogService(
+        session_factory=_Session({}), catalog_url="https://example/catalog.json"
+    )
+    with pytest.raises(AppCatalogUnreachableError):
+        await svc.fetch_catalog()
+
+
+@pytest.mark.parametrize(
+    ("url", "host"),
+    [
+        (
+            "https://github.com/social-home-io/socialhome-apps/releases/latest/download/catalog.json",
+            None,
+        ),
+        (
+            "https://github.com/social-home-io/socialhome-apps/releases/download/2026.10.29.1/catalog.json",
+            None,
+        ),
+        ("https://apps.example.org/catalog.json", "apps.example.org"),
+        ("https://github.com/someone-else/apps/releases/catalog.json", "github.com"),
+    ],
+)
+def test_catalog_source_host(url, host):
+    assert catalog_source_host(url) == host
+    svc = AppCatalogService(session_factory=lambda: None, catalog_url=url)
+    assert svc.source_host == host

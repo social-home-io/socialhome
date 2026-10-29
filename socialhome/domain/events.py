@@ -2516,6 +2516,32 @@ class AppUninstalled(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class AppRequested(DomainEvent):
+    """A member asked for an app from the catalog ("Ask an admin", D4).
+
+    Published by :class:`AppService.request_app`. ``recipients`` are who
+    decides: the household's admins, or a protected account's guardians.
+    The request lives only as their "Needs you" row (``app_request``,
+    about ``app:<id>``, grouped per app) — no table; adding the app or
+    "Not now" (:class:`AppRequestDismissed`) resolves it."""
+
+    app_id: str
+    name: str
+    requested_by: str
+    recipients: tuple[str, ...] = ()
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class AppRequestDismissed(DomainEvent):
+    """An admin answered the requests for an app with "Not now"."""
+
+    app_id: str
+    dismissed_by: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class AppEnabledChanged(DomainEvent):
     """An admin turned an installed app on or off.
 

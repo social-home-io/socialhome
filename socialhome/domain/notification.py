@@ -31,7 +31,7 @@ RETIRED_ACTION_TYPES: frozenset[str] = frozenset({"dm_contact_requested"})
 #: Rows that ask someone to act — the "Needs you" items (D12): a join
 #: request, a space's review queue (posts, reports), an invite to a space,
 #: a household asking to pair, a game invite (a Social Home App
-#: challenge), plus the retired ones above. They stay pinned on top until
+#: challenge), a member asking for an app, plus the retired ones above. They stay pinned on top until
 #: handled — reading one does not un-pin it. Unread, they survive both the
 #: per-user cap and the age purge — dropping one would lose the only
 #: pointer to work still waiting. Once handled (by anyone) every
@@ -46,6 +46,7 @@ ACTION_ITEM_TYPES: frozenset[str] = (
             "space_invite",
             "pairing_request",
             "app_challenge",
+            "app_request",
         }
     )
     | RETIRED_ACTION_TYPES

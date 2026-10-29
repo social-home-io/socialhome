@@ -696,6 +696,37 @@ await check('app-frame', async () => {
   return { problems, fills }
 })
 
+// 6c2. An app's detail page (``/apps/<id>/about``, never launches it):
+//      the app's name on the Apps page links there under the prefix, the
+//      page shows what the app can do, and its back link returns to the
+//      Apps page under the prefix — on a desktop and a phone.
+await check('app-about', async () => {
+  const problems = []
+  const probe = { id: 'ingress-probe', name: 'Ingress probe' }
+  // Installed by app-frame; again here when run alone (--only).
+  await asUser('alice', 'POST', '/api/apps', { json: { app_id: probe.id } }).catch(() => {})
+  const want = `${PREFIX}/apps/${probe.id}/about`
+  for (const vp of ['desktop', 'mobile']) {
+    const { ctx, page: p } = await newPage(vp)
+    await p.goto(APP + 'apps', { waitUntil: 'load' })
+    await step('the Apps page', settled(p))
+    await step(`the "${probe.name}" link`, p.waitForSelector('a.sh-apps-row__link'))
+    const href = await p.$eval('a.sh-apps-row__link', a => new URL(a.href).pathname)
+    if (href !== want) problems.push(`[${vp}] the app's name links to ${href}, not ${want}`)
+    await p.click('a.sh-apps-row__link')
+    await step(`the detail page at ${want}`, p.waitForFunction(w => location.pathname === w, {}, want))
+    const can = T('apps.detail.can_do').replace('{name}', probe.name)
+    await step(`"${can}"`, p.waitForFunction(t => [...document.querySelectorAll('h2')].some(h => h.textContent === t), {}, can))
+    if (await p.$('iframe.sh-app-frame')) problems.push(`[${vp}] the detail page launched the app`)
+    await p.screenshot({ path: path.join(SHOTS, `app-about-${vp}.png`) })
+    await p.click('a.sh-apps-back')
+    await step('Back to the Apps page', p.waitForFunction(w => location.pathname === w, {}, `${PREFIX}/apps`))
+    await ctx.close()
+  }
+  activePage = page
+  return { problems }
+})
+
 // 6d. "Play" opens the game you were invited to (D12): Bob invites Alice
 //     twice in the probe app; her Needs you's Play links to
 //     <prefix>/apps/<id>?session=<sid>, the host takes in that one invite
