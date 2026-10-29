@@ -575,15 +575,15 @@ describe('mountBridge', () => {
     )
   })
 
-  it('WS relay: forwards session kind frames with kind="session" and fromUser when present', () => {
+  it('WS relay: forwards session kind frames (a close) with kind="session" and fromUser', () => {
     wsHandlers['app.message']({
       data: {
         app_id: APP_ID,
-        session_id: 'sess-invite',
+        session_id: 'sess-1',
         from_instance: 'peer.example.com',
         from_user: 'user-alice',
         kind: 'session',
-        payload: { verb: 'open' },
+        payload: { verb: 'close', reason: 'declined' },
       },
     })
 
@@ -591,16 +591,16 @@ describe('mountBridge', () => {
       {
         type: 'app:event',
         kind: 'session',
-        sessionId: 'sess-invite',
+        sessionId: 'sess-1',
         fromInstance: 'peer.example.com',
         fromUser: 'user-alice',
-        payload: { verb: 'open' },
+        payload: { verb: 'close', reason: 'declined' },
       },
       '*',
     )
   })
 
-  it('WS relay: a live invite is handed over but accepts nothing (it waits for Play)', async () => {
+  it('WS relay: a live invite never reaches the app (D3: it waits for Play) and accepts nothing', async () => {
     wsHandlers['app.message']({
       data: {
         app_id: APP_ID,
@@ -614,9 +614,8 @@ describe('mountBridge', () => {
     await new Promise<void>(resolve => setTimeout(resolve, 0))
     expect(mockApiGet).not.toHaveBeenCalled()
     expect(mockApiPost).not.toHaveBeenCalled()
-    const sent = (iframe.contentWindow!.postMessage as unknown as MockInstance).mock.calls
-      .map(([m]) => (m as { sessionId?: string }).sessionId)
-    expect(sent).toEqual(['sess-live'])
+    // The app never learns who invited the person before Play.
+    expect(iframe.contentWindow!.postMessage).not.toHaveBeenCalled()
   })
 
   it('WS relay: a move or a close takes nothing in', () => {

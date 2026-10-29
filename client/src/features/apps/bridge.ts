@@ -632,7 +632,11 @@ export function mountBridge(
   // Forwards the full identity so multi-game / multi-friend apps can route
   // a message to the right session and distinguish invites from in-game moves.
   const offWs = ws.on('app.message', (evt: WsEvent) => {
-    // Every app message is from a person in a game: ``people`` only.
+    // Every app message is from a person in a game: ``people`` only. A live
+    // invite (``verb: 'open'``) never reaches the app (D3): it waits in
+    // Needs you, and the app learns of the inviter only on Play.
+    const payload = evt.data?.payload as { verb?: unknown } | null | undefined
+    if (evt.data?.kind === 'session' && payload?.verb === 'open') return
     if (evt.data?.app_id === appId && has('people')) {
       iframe.contentWindow?.postMessage(
         {

@@ -20,6 +20,7 @@ committed row — no extra flush or sleep is needed.
 
 from __future__ import annotations
 
+import dataclasses
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -465,6 +466,9 @@ async def test_hold_keeps_only_the_latest_message_per_session(db):
             held={"kind": "message", "payload": {"n": n}},
             now=_now(),
         )
+    # Kept while the invite waits, handed over only once it is played (D3).
+    assert await repo.take_held("chess", uid) == []
+    await repo.activate_pending_session("chess", uid, "sess-1", now=_now())
     taken = await repo.take_held("chess", uid)
     assert [t.held for t in taken] == [{"kind": "message", "payload": {"n": 3}}]
     # Cleared: a second open gets nothing, the session stays known.
@@ -648,3 +652,22 @@ async def test_an_open_never_rewrites_a_game_already_sent_or_played(db):
     row = await repo.get_pending_session("chess", uid, "mine")
     assert row is not None
     assert (row.state, row.from_user, row.sent) == ("active", "alice@remote", True)
+
+
+@pytest.mark.asyncio
+async def test_a_flood_of_invites_never_pushes_out_a_game_or_a_sent_invite(db):
+    """Eviction (50 per person and app) takes only waiting invites: a paired
+    household can't wipe someone's games or reset their invite caps (D3)."""
+    repo = SqliteAppRepo(db)
+    uid = await _seed_user(db)
+    await repo.install(_app())
+    old = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    await repo.add_active_session(
+        dataclasses.replace(_sent(uid, "mine"), created_at=old, updated_at=old)
+    )
+    for n in range(60):
+        await repo.add_pending_session(_pending(uid, session_id=f"flood-{n}"))
+    rows = await repo.list_sessions("chess", uid)
+    assert len([r for r in rows if r.state == "invited"]) == 50
+    mine = await repo.get_pending_session("chess", uid, "mine")
+    assert mine is not None and mine.sent

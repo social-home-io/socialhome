@@ -309,7 +309,8 @@ class SqliteAppRepo:
             ),
         )
         # Bound a flood from a paired peer: keep at most
-        # ``_PENDING_SESSION_MAX_PER_PAIR`` rows per (app, user), deleting the
+        # ``_PENDING_SESSION_MAX_PER_PAIR`` waiting invites per (app, user) — never a
+        # game being played or an invite this person sent (D3) — deleting the
         # oldest beyond the cap. Same write-queue batch as the insert, so the
         # per-pair invariant holds continuously (mirrors the notifications
         # per-user cap).
@@ -317,7 +318,7 @@ class SqliteAppRepo:
             """DELETE FROM app_pending_sessions
                 WHERE rowid IN (
                     SELECT rowid FROM app_pending_sessions
-                     WHERE app_id = ? AND user_id = ?
+                     WHERE app_id = ? AND user_id = ? AND state = 'invited'
                      ORDER BY COALESCE(updated_at, created_at) DESC
                      LIMIT -1 OFFSET ?
                 )""",
@@ -448,7 +449,7 @@ class SqliteAppRepo:
             """DELETE FROM app_pending_sessions
                 WHERE rowid IN (
                     SELECT rowid FROM app_pending_sessions
-                     WHERE app_id = ? AND user_id = ?
+                     WHERE app_id = ? AND user_id = ? AND state = 'invited'
                      ORDER BY COALESCE(updated_at, created_at) DESC
                      LIMIT -1 OFFSET ?
                 )""",
@@ -485,7 +486,7 @@ class SqliteAppRepo:
         changed = await self._db.enqueue_rowcount(
             """UPDATE app_pending_sessions SET held_json = ?, updated_at = ?,
                  payload_json = CASE
-                   WHEN json_extract(payload_json, '$.sent') = 1
+                   WHEN json_type(payload_json, '$.sent') = 'true'
                    THEN json_set(payload_json, '$.answered', json('true'))
                    ELSE payload_json END
                WHERE app_id = ? AND user_id = ? AND session_id = ?
@@ -505,8 +506,9 @@ class SqliteAppRepo:
     async def list_sessions(self, app_id: str, user_id: str) -> list[AppPendingSession]:
         """Every session this household knows for this person in this app
         — invites waiting for them, games they play, invites they sent —
-        latest change first. At most ``_PENDING_SESSION_MAX_PER_PAIR``
-        rows (the per-(app, person) cap), by the existing index."""
+        latest change first, by the existing index. Bounded: at most
+        ``_PENDING_SESSION_MAX_PER_PAIR`` waiting invites, plus games and sent
+        invites (≤ 30 sent a day) that the 14-day TTL prunes."""
         rows = await self._db.fetchall(
             """SELECT * FROM app_pending_sessions
                WHERE app_id = ? AND user_id = ?
@@ -533,7 +535,7 @@ class SqliteAppRepo:
         newer move) is not cleared: it waits for the next open."""
         rows = await self._db.fetchall(
             """SELECT * FROM app_pending_sessions
-               WHERE app_id = ? AND user_id = ? AND held_json IS NOT NULL
+               WHERE app_id = ? AND user_id = ? AND held_json IS NOT NULL AND state = 'active'
                ORDER BY COALESCE(updated_at, created_at)""",
             (app_id, user_id),
         )

@@ -59,7 +59,7 @@ describe('UpdateButton (D7)', () => {
     const dialog = await findByRole('dialog')
     expect(dialog.textContent).toContain('This version asks for 2 new permissions.')
     expect(dialog.textContent).toContain('Until you accept, nothing changes.')
-    expect(dialog.textContent).toContain('Lets it invite people you know')
+    expect(dialog.textContent).toContain('Lets you pick people to play with')
     expect(dialog.textContent).not.toContain('Saves its own data')
     // What's new is fetched for the dialog.
     expect(h.loadUpdates).toHaveBeenCalled()

@@ -256,10 +256,21 @@ async def test_the_older_household_fan_out_honours_blocks(env):
     assert "u-bob" in frames
 
 
-async def test_an_addressed_message_reaches_its_user(env):
+async def test_an_addressed_message_reaches_its_user_only_in_a_game_they_play(env):
+    """D3: a move reaches the person's app only in a session this household
+    knows they play with that very sender — never a made-up one."""
     app, _ = env
     await _message(app, sender=PEER, from_user="alice", to_user="bob")
+    assert frames == []
+    svc = app[app_federation_service_key]
+    target = {"instance_id": PEER, "user_ref": "alice", "is_local": False}
+    await svc._know_game("chess", "u-bob", "sess-1", PEER, target)
+    await _message(app, sender=PEER, from_user="alice", to_user="bob")
     assert frames == ["u-bob"]
+    # Someone else of that household on the same session id: nothing.
+    frames.clear()
+    await _message(app, sender=OTHER, from_user="eve", to_user="bob")
+    assert frames == []
 
 
 async def _guardian_block_bob_from_alice(db) -> None:

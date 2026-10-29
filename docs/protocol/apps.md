@@ -93,7 +93,7 @@ sequenceDiagram
 
 | End | How | Row outcome | The other side hears |
 |---|---|---|---|
-| Played | The invitee taps **Play** in Needs you: `POST /api/apps/{id}/sessions/{sid}/accept` takes in that one invite (the app gets it as its [launch context](#launch-context)); or the invitee sends a message in that session (an app that seated the live invite itself). Opening the app accepts nothing. The row stays, now `active`: it is the game's [mailbox](#mailbox) | `accepted` | — (the game goes on) |
+| Played | The invitee taps **Play** in Needs you: `POST /api/apps/{id}/sessions/{sid}/accept` takes in that one invite (the app gets it as its [launch context](#launch-context)). Only Play: opening the app accepts nothing, and a message the app sends in a waiting invite is refused (`APP_SESSION_UNKNOWN`, D3). The row stays, now `active`: it is the game's [mailbox](#mailbox) | `accepted` | — (the game goes on) |
 | Declined | `POST /api/apps/{id}/sessions/{sid}/decline` (Needs you's Decline, after its 5-s undo) | `declined` | `APP_SESSION {verb: "close", reason: "declined"}` to the challenger (v_18+, best effort). Their household keeps it in the challenger's [mailbox](#mailbox) and gives them a bell row, "Ben declined your Chess game" (`app_challenge_declined`, no push) |
 | Withdrawn | The challenger's `POST …/sessions/{sid}/cancel` sends `APP_SESSION {verb: "close", reason: "withdrawn"}`; the invitee's household drops the invite only when the close comes from the household **and** person that opened it. If the invitee already pressed Play, the close waits in their [mailbox](#mailbox) instead, so their app clears the game when it opens | `withdrawn` | — |
 | Expired | 14 days (`PENDING_SESSION_TTL_SECONDS`): no longer replayed, pruned hourly; "Needs you" reads it as expired on the next look | `expired` | — |
@@ -127,7 +127,7 @@ app next opens.
 
 - **Which sessions are known.** One row per (app, person, session):
   `invited` while an invite waits in Needs you, `active` once it is played
-  (Play, or the invitee's first message), and for the challenger from the
+  (Play), and for the challenger from the
   moment the [invite sheet](#invite-sheet) opens the session. A game from
   before this table had rows is not known and takes no new moves (D3).
   `from_instance` / `from_user` name the other side.
@@ -364,29 +364,45 @@ The rules, each enforced where it can't be bypassed:
   with Play — within the 14-day TTL, minus blocks and guardian blocks, and
   people of other households only with `federation`. An invite that still
   waits in Needs you is not listed: the app learns about an inviter only once
-  the person plays it. Never the household roster, the friends list,
+  the person plays it. The same holds live: an open never reaches the app
+  (the server sends no frame for it and the bridge drops one), a move or a
+  close reaches it live only in a session the person plays (`active`) with
+  that very sender, and what came for an invite still waiting is held and
+  handed over only after Play. Never the household roster, the friends list,
   presence, pictures or anyone's location.
 - **What an app can message (`app.send` → `POST /messages`,
   `app.cancelSession` → `POST /sessions/{sid}/cancel`).** Only a session the
   household knows for (app, person, session) **with that very person**, and
   `is_local` must match where they live; a withdrawn invite takes no more
-  messages. A made-up session id — or an old opponent on a new one — is
+  messages, and an invite still waiting (`invited`) is never taken in by a
+  message — only Play takes it in. A made-up session id — or an old opponent on a new one — is
   `403 APP_SESSION_UNKNOWN` (the SDK's `unknown_session`) before anything is
   sent. A household-addressed body (`peer_instance_id`, from before
-  per-person addressing) names nobody and is `400`.
+  per-person addressing) names nobody and is `400`; people of a household
+  too old to address one person (pre-v_18) are not in the sheet and take
+  no game, and a v_18+ household's binary frame without `to_user` is
+  refused like its JSON one.
+- **Blocks stay unseen.** Someone here who blocked the person isn't in the
+  sheet (a Send that then failed would reveal it).
 - **Protected accounts (D5).** The sheet lists only people the child can
   already message — the DM rule (§CP.F3: households its own household paired
   with directly), plus personal and guardian blocks. The same rule refuses
-  their opens and moves, keeps others out of their contacts, and drops an
-  invite or move from a household they can't message on receipt.
+  their opens and moves, keeps others out of their contacts, drops an
+  invite or move from a household they can't message on receipt (per
+  person and on an older household's fan-out), and — for an invite or a
+  held move kept from before the account was protected — never plays or
+  hands it over.
 - **Caps** (backstops, per person per app, from the session rows — no new
   table): at most **10 open invites** (sent, not yet answered by a move or a
   decline, not withdrawn, within the TTL) — `429 APP_INVITES_OPEN_LIMIT` —
   and **30 new invites in any 24 hours** (withdrawn and answered ones count)
   — `429 APP_INVITES_DAILY_LIMIT`; both carry `params.limit`. `GET
   /invitable` reports `invites: {open, max_open, today, max_per_day}` so the
-  sheet says so in plain words before Send. Two Sends racing past the count
-  can overshoot by one; the cap is a backstop, not the design.
+  sheet says so in plain words before Send. Opens are serialized per (app,
+  person), so parallel requests can't slip past the count. The 50-row
+  bound per (app, person) evicts only waiting invites — never a game being
+  played or an invite the person sent — so a flood of invites can't wipe
+  games or reset the caps.
 
 Session marks: the challenger's row carries `sent` (written by the sheet's
 open), `answered` (the first message the other side's household keeps for
