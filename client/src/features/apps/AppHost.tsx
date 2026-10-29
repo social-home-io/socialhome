@@ -39,6 +39,12 @@
  * ``people.pick`` (D3) shows Social Home's InviteSheet here — outside the
  * frame, over it — and the bridge hands the app only who was picked and the
  * games opened. The sheet goes with its frame (nothing is sent).
+ *
+ * The look (D14): the bridge hands the app the language, light/dark and
+ * eight colour tokens (appContext.ts) and pushes changes live; the frame's
+ * own ``color-scheme`` follows the SPA's resolved theme too, so the app's
+ * native controls and ``prefers-color-scheme`` match before it has applied
+ * anything.
  */
 import type { ComponentChildren } from 'preact'
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
@@ -48,6 +54,7 @@ import { currentUser } from '@/store/auth'
 import { useTitle } from '@/store/pageTitle'
 import { mountBridge, type PickedPerson, type PickRequest } from '@/features/apps/bridge'
 import { InviteSheet } from '@/features/apps/InviteSheet'
+import { currentAppContext, shownTheme, watchAppContext, type AppTheme } from '@/features/apps/appContext'
 import { appOpenedFrom } from '@/features/apps/appReturn'
 import { addBase } from '@/baseUrl'
 import { ws, type WsEvent } from '@/ws'
@@ -109,6 +116,8 @@ export function AppHostInner({ appId, sessionId }: {
   /** The invite sheet an app asked for (``people.pick``), drawn here —
    *  outside the frame — until the person sends or cancels (D3). */
   const [pick, setPick] = useState<{ req: PickRequest, resolve: (p: PickedPerson[]) => void } | null>(null)
+  /** The SPA's light/dark, for the frame's ``color-scheme``. */
+  const [scheme, setScheme]   = useState<AppTheme>(shownTheme)
   const iframeRef             = useRef<HTMLIFrameElement | null>(null)
   const timers                = useRef<number[]>([])
   const { route }             = useLocation()
@@ -156,6 +165,8 @@ export function AppHostInner({ appId, sessionId }: {
     return () => offs.forEach(off => off())
   }, [appId])
 
+  useEffect(() => watchAppContext(c => setScheme(c.theme)), [])
+
   // While the app starts: slow after SLOW_MS, failed after FAIL_MS.
   const starting = state.kind === 'starting'
   useEffect(() => {
@@ -186,6 +197,8 @@ export function AppHostInner({ appId, sessionId }: {
         clearTimers()
         setState(s => s.kind === 'starting' ? { kind: 'ready' } : s)
       },
+      hostContext: currentAppContext,
+      watchHostContext: watchAppContext,
       pickPeople: (req) => new Promise<PickedPerson[]>(resolve => setPick({ req, resolve })),
     })
     return () => {
@@ -266,6 +279,7 @@ export function AppHostInner({ appId, sessionId }: {
             src={addBase(runtime.entry_url)}
             title={runtime.name}
             sandbox="allow-scripts"
+            style={{ colorScheme: scheme }}
             aria-hidden={state.kind === 'ready' ? undefined : 'true'}
             onLoad={handleFrameLoad}
           />

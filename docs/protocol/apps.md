@@ -114,6 +114,55 @@ A new Play while the app is open starts a fresh frame for that game. **Backward 
 
 The SDK (`@socialhome/app-sdk` ≥ 1.2) types this as `AppContext.launch?: LaunchContext`. A local open is delivered to the invitee only — never echoed to the challenger, whose app has the session id from `people.pick` (the echo raced that reply and read as an invite from themselves).
 
+### Look: language, light/dark and colours
+
+**Apps follow your language and light/dark (D14).** `app.context` also
+answers with how the app should look, and needs no permission:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `locale` | `string` | The person's Social Home language (`en`, `de`, `nl`, `fr`, `es`, …). Pick it with your own English fallback. |
+| `dir` | `"ltr" \| "rtl"` | Text direction of that language. |
+| `theme` | `"light" \| "dark"` | What the SPA shows right now — the person's choice, or the system's when they chose Auto. |
+| `reducedMotion` | `boolean` | The person asked for less motion (`prefers-reduced-motion: reduce`). |
+| `tokens` | `object` | Eight colours (below), each a plain `#rrggbb` / `#rrggbbaa` string. |
+
+The tokens, read from the SPA's `tokens.css` as the page shows them (theme
+and household colours applied), resolved by the browser and re-serialised as
+hex by `client/src/features/apps/appContext.ts`. Anything that doesn't parse
+as a plain sRGB colour is replaced by the default palette, so nothing but a
+hex colour enters the sandbox — the host never injects CSS. The app applies
+them itself; the SDK's `applyTheme()` sets each as a CSS variable on the
+app's `:root`:
+
+| Token | CSS variable (`applyTheme`) | From `tokens.css` | Use it for |
+|---|---|---|---|
+| `bg` | `--sh-bg` | `--sh-bg` | the page background |
+| `surface` | `--sh-surface` | `--sh-bg-tertiary` | cards, panels, dialogs |
+| `text` | `--sh-text` | `--sh-text` | body text |
+| `muted` | `--sh-muted` | `--sh-text-muted` | secondary text (≥ 4.5:1 on `bg` and `surface`) |
+| `accent` | `--sh-accent` | `--sh-primary-fill` | primary buttons, highlights |
+| `onAccent` | `--sh-on-accent` | `--sh-on-primary-fill` | text on an `accent` fill |
+| `border` | `--sh-border` | `--sh-border` | hairlines, dividers |
+| `focus` | `--sh-focus` | `--sh-focus-ring` | the keyboard focus ring |
+
+When any of it changes while the app is open (the person switches language
+or theme, the system flips in Auto, reduced motion changes) the bridge posts
+
+```ts
+{ type: 'app.context-changed', context: { locale, dir, theme, reducedMotion, tokens } }
+```
+
+only after the app has spoken (so it never lands in the frame's blank
+pre-load document). An SDK before 1.6 ignores the unknown `type`. The host
+also sets the iframe's `color-scheme` to `theme`, so the app's native
+controls, scrollbars and `prefers-color-scheme` follow before it applies
+anything. Following theme and language is what a listed app must do; the
+palette is a recommendation (an app may keep its own colours in both themes).
+The SDK (`@socialhome/app-sdk` ≥ 1.6) types these as optional `AppContext`
+fields (`undefined` on an older Social Home — default to English, light and
+your own colours) and adds `onContextChange()` and `applyTheme()`.
+
 ### Mailbox
 
 **Moves and declines wait for you when the app is closed or turned off (D11).**
@@ -525,7 +574,7 @@ Checked twice:
 | `app.openSession` | — refused: `use_people_pick` | — |
 | `app.held`, `app.pendingSessions`, `app.context`'s Play launch | `POST /held`, `POST /sessions/{sid}/accept` | `people` |
 | — (Needs you, the SPA) | `POST /sessions/{sid}/decline` | `people` (the decline's close to another household is skipped without `federation`) |
-| `app.context`, `app.ready` | `GET /runtime`, `/bundle/…` | none |
+| `app.context` (incl. the look), `app.ready` | `GET /runtime`, `/bundle/…` | none |
 
 Inbound: an `APP_SESSION` / `APP_MESSAGE` / binary app frame for an app
 installed here without `federation` is dropped like one for an app that isn't
@@ -666,8 +715,10 @@ never drops the entry:
 - `socialhome/repositories/app_repo.py` — `hold_message` (marks a sent
   invite answered), `take_held`, `list_sessions`, `withdraw_session`,
   `activate_pending_session`, `add_active_session` on `app_pending_sessions`.
+- `client/src/features/apps/appContext.ts` — the look (`currentAppContext`,
+  `watchAppContext`, the eight tokens, `toHexColor`).
 - `client/src/features/apps/bridge.ts` (`people.pick`, cooldown, one sheet
-  at a time) and `client/src/features/apps/InviteSheet.tsx` (the sheet, the
+  at a time, `app.context-changed`) and `client/src/features/apps/InviteSheet.tsx` (the sheet, the
   600 ms Send guard).
 - `socialhome/federation/app_framing.py` — binary frame encode/decode,
   `APP_AEAD_SUITE_AESGCM_256`, `SUPPORTED_APP_AEAD_SUITES`,

@@ -59,11 +59,21 @@
  * ``contacts.list`` is only the people picked and played with in this app,
  * and ``app.send`` only reaches games the server knows for that person
  * (``unknown_session`` otherwise).
+ *
+ * Look (owner decision D14, "apps follow your language and light/dark"):
+ * ``app.context`` also carries ``locale``, ``dir``, ``theme`` (``light`` /
+ * ``dark``, auto resolved), ``reducedMotion`` and eight colour ``tokens``
+ * (plain ``#rrggbb[aa]`` values — appContext.ts). It needs no permission.
+ * When any of it changes while the app is open the bridge posts
+ * ``{type: 'app.context-changed', context}`` with the same fields — only
+ * after the app has spoken, so it never lands in the frame's blank
+ * pre-load document. Older SDKs ignore the unknown ``type``.
  */
 
 import { api, ApiError } from '@/api'
 import { ws, WsEvent } from '@/ws'
 import type { AppPermission } from '@/store/apps'
+import type { AppHostContext } from '@/features/apps/appContext'
 
 
 /** The typed refusal an app gets for a call outside its permissions. */
@@ -139,6 +149,11 @@ export interface BridgeContext {
    *  first, which counts the same. A frame that never asks (a bundle
    *  error page, a crashed script) never calls it. */
   onReady?: () => void
+  /** The look to hand the app (D14) — ``currentAppContext`` in the SPA. */
+  hostContext?: () => AppHostContext
+  /** Watch the look; the bridge pushes ``app.context-changed`` on each call.
+   *  Returns the function that stops watching. */
+  watchHostContext?: (cb: (c: AppHostContext) => void) => () => void
 }
 
 /** RPC envelope sent by the app iframe. */
@@ -459,6 +474,8 @@ export function mountBridge(
             id,
             ok: true,
             result: {
+              // The look first: identity fields always win.
+              ...ctx.hostContext?.(),
               appId: ctx.appId,
               selfUserId: ctx.selfUserId,
               permissions,
@@ -676,8 +693,15 @@ export function mountBridge(
 
   window.addEventListener('message', onMessage)
 
+  // The person switched language or theme while the app is open.
+  const stopWatching = ctx.watchHostContext?.((context) => {
+    if (!ready) return // the app asks for its context first anyway
+    iframe.contentWindow?.postMessage({ type: 'app.context-changed', context }, '*')
+  })
+
   return () => {
     window.removeEventListener('message', onMessage)
     offWs()
+    stopWatching?.()
   }
 }
