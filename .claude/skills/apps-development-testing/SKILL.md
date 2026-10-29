@@ -41,6 +41,8 @@ sh.onSession(({ sessionId, fromInstance, payload }) => {...})  // incoming invit
 ```
 Route inbound by `sessionId` (supports many concurrent games) and identify the sender by `fromInstance`. The host relays a backend `app.message` WS frame into the iframe; outbound goes over the dedicated `fed-app-v1` channel with an `APP_MESSAGE`/HTTPS fallback.
 
+**The host shows the frame only once the app speaks.** `AppHost` keeps the iframe invisible until the app's first bridge request (`app.ready`, or any RPC such as `sh.context()`): after 8 s it says "taking longer than usual" (Try again), and it gives up with "didn't start" after 20 s, or 5 s after the frame's `load` event if the app never asked anything (a bundle error page, a script that crashed). So call `sh.context()` (or post `{id, method: 'app.ready'}`) as soon as the script runs — an app that does its first RPC late shows a spinner meanwhile.
+
 ## Build & unit test (in socialhome-apps)
 
 ```sh
@@ -101,4 +103,6 @@ The SPA does **no** client-side age *enforcement* — the server enforces all ga
 - **`sh` is null** → running outside a browser (tests); use `createClient(targetWindow, parentWindow)` with fakes.
 - **Peer not listed** → households aren't paired/confirmed; redo the pairing handshake.
 - **Move doesn't arrive** → check both are paired + the app enabled on both; the `app.message` WS frame reaches the SPA that has the app open.
+- **"Chess didn't start" in the host** → the frame loaded but no bridge request came within 5 s (bundle 404 / error body, a script error before the SDK's first call). Open the bundle URL from `/api/apps/{id}/runtime` and check the console.
+- **"An admin turned Chess off" / "turned off for this household"** → `/runtime` answered 403 `APP_NOT_ENABLED`; an admin can Turn on right there.
 - **Age-restricted app shows "not available"** → the user is a protected minor and `min_age > 0` on that app. Admin can lower/remove the restriction via the Apps page or `PATCH /api/apps/{id}` with `{min_age: 0}`.

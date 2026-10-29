@@ -18,6 +18,12 @@ import { ws, WsEvent } from '@/ws'
 export interface BridgeContext {
   appId: string
   selfUserId: string
+  /** Called once, on the app's first bridge request: the app's code runs
+   *  and talks to the host — it started. An SDK that posts ``app.ready``
+   *  says so explicitly; older ones send ``app.context`` / ``store.*``
+   *  first, which counts the same. A frame that never asks (a bundle
+   *  error page, a crashed script) never calls it. */
+  onReady?: () => void
 }
 
 /** RPC envelope sent by the app iframe. */
@@ -113,6 +119,13 @@ export function mountBridge(
           break
         }
 
+        case 'app.ready': {
+          // The app says it started (handled by ``onReady`` below for
+          // every request); nothing else to do.
+          reply({ id, ok: true, result: { ok: true } })
+          break
+        }
+
         case 'app.context': {
           // NEVER include a token — the app runs in a sandboxed iframe
           // and must not gain host credentials.
@@ -190,6 +203,9 @@ export function mountBridge(
     }
   }
 
+  /** Whether ``ctx.onReady`` already fired for this mount. */
+  let ready = false
+
   function onMessage(event: MessageEvent): void {
     // Security: reject any message not originating from our iframe.
     // Do NOT check event.origin — sandboxed iframes emit "null".
@@ -199,6 +215,10 @@ export function mountBridge(
     const req = event.data as any
     if (!req || typeof req.method !== 'string') return
 
+    if (!ready) {
+      ready = true
+      ctx.onReady?.()
+    }
     // eslint-disable-next-line @typescript-eslint/no-floating-promises
     handleRpc(req as RpcRequest)
   }

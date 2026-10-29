@@ -653,6 +653,49 @@ await check('iframe-deep-link', async () => {
   return { problems, tapUrl, historyLength }
 })
 
+// 6c. A Social Home App: installed from the fake catalog, opened from the
+//     Apps page. Its sandboxed frame loads under the prefix (the signed
+//     entry URL through the proxy), the app's bridge request is
+//     answered (the host shows the frame only then), the frame fills the
+//     space under the topbar down to the window / the phone's tab bar with
+//     no page scroll, and Back returns to the Apps page under the prefix.
+await check('app-frame', async () => {
+  const problems = []
+  const probe = { id: 'ingress-probe', name: 'Ingress probe' }
+  await asUser('alice', 'POST', '/api/apps', { json: { app_id: probe.id } })
+  const fills = {}
+  for (const vp of ['desktop', 'mobile']) {
+    const { ctx, page: p } = await newPage(vp)
+    await p.goto(APP + 'apps', { waitUntil: 'load' })
+    await step('the Apps page', settled(p))
+    const open = T('apps.open_named').replace('{name}', probe.name)
+    await step(`"${open}"`, p.waitForSelector(`button[aria-label="${open}"]`))
+    await p.click(`button[aria-label="${open}"]`)
+    await step('the app frame shown (its bridge request answered)',
+      p.waitForSelector('iframe.sh-app-frame:not(.sh-app-frame--pending)'))
+    const frame = await (await p.$('iframe.sh-app-frame')).contentFrame()
+    await step('the app ran and heard back from the host',
+      frame.waitForFunction(id => document.getElementById('out')?.textContent === `probe ready ${id}`, {}, probe.id))
+    if (!underPrefix(new URL(frame.url()).pathname)) problems.push(`[${vp}] app frame loaded ${frame.url()} — outside the prefix`)
+    if (pathOf(p) !== `${PREFIX}/apps/${probe.id}`) problems.push(`[${vp}] app opened at ${pathOf(p)}`)
+    const m = await p.evaluate(() => {
+      const f = document.querySelector('iframe.sh-app-frame').getBoundingClientRect()
+      const nav = document.querySelector('.sh-mobile-nav')?.getBoundingClientRect()
+      const bottom = nav && nav.height > 0 ? nav.top : innerHeight
+      return { frameTop: f.top, frameBottom: f.bottom, frameHeight: f.height, bottom, pageScroll: document.documentElement.scrollHeight - innerHeight }
+    })
+    fills[vp] = m
+    if (Math.abs(m.frameBottom - m.bottom) > 1) problems.push(`[${vp}] the app frame ends at ${m.frameBottom}px, the visible area at ${m.bottom}px`)
+    if (m.pageScroll > 1) problems.push(`[${vp}] the page scrolls ${m.pageScroll}px around the app frame`)
+    await p.screenshot({ path: path.join(SHOTS, `app-frame-${vp}.png`) })
+    await p.click('.sh-app-host__bar button') // the host's Back
+    await step('Back to the Apps page', p.waitForFunction(want => location.pathname === want, {}, `${PREFIX}/apps`))
+    await ctx.close()
+  }
+  activePage = page
+  return { problems, fills }
+})
+
 // 7. No ingress user (Supervisor sent no X-Remote-User-*): the cold-start
 //    /api/me 401s → IngressAuthFailed, never a password form or a
 //    "Session expired" toast (there was no token to expire).

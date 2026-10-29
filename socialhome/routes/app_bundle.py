@@ -100,10 +100,14 @@ class AppRuntimeView(BaseView):
         if app is None:
             return error_response(404, "NOT_FOUND", "App not found.")
         if not app.enabled:
-            return error_response(403, "FORBIDDEN", "App is disabled.")
+            # The name lets the host say which app is turned off (every
+            # member sees installed app names on the Apps page anyway).
+            return error_response(
+                403, "APP_NOT_ENABLED", "App is disabled.", extra={"name": app.name}
+            )
 
         # Age gate — a protected minor must not receive the signed entry URL.
-        # Raises AppAgeRestrictedError which maps to 403 via BaseView._iter.
+        # Raises AppAgeRestrictedError → 403 APP_AGE_RESTRICTED via BaseView._iter.
         await svc.assert_age_allowed(app, user.user_id)
 
         prefix = f"/api/apps/{app_id}/bundle/"

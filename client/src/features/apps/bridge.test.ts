@@ -135,6 +135,33 @@ describe('mountBridge', () => {
     expect(iframe.contentWindow!.postMessage).not.toHaveBeenCalled()
   })
 
+  // ── ready ────────────────────────────────────────────────────────────────
+
+  it('onReady fires once, on the app\'s first request — app.ready or any RPC', async () => {
+    cleanup()
+    const onReady = vi.fn()
+    cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID, onReady })
+    const handler = captureMessageHandler()
+
+    // A stranger's message, or junk from the frame, is not "the app started".
+    await handler({ source: { postMessage: vi.fn() } as unknown as Window, data: { id: 1, method: 'app.ready' } })
+    await handler({ source: iframe.contentWindow!, data: 'not found' })
+    expect(onReady).not.toHaveBeenCalled()
+
+    await handler({ source: iframe.contentWindow!, data: { id: 2, method: 'app.context' } })
+    await handler({ source: iframe.contentWindow!, data: { id: 3, method: 'app.ready' } })
+    expect(onReady).toHaveBeenCalledOnce()
+  })
+
+  it('app.ready is answered ok (an SDK that announces it started)', async () => {
+    const handler = captureMessageHandler()
+    await handler({ source: iframe.contentWindow!, data: { id: 9, method: 'app.ready' } })
+    expect(iframe.contentWindow!.postMessage).toHaveBeenCalledWith(
+      { id: 9, ok: true, result: { ok: true } },
+      '*',
+    )
+  })
+
   // ── store.set ────────────────────────────────────────────────────────────
 
   it('store.set: calls api.put with correct path and body; replies ok:true', async () => {

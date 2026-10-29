@@ -218,7 +218,7 @@ describe('AppCard admin overflow menu', () => {
 
   it('Open goes to the app in the SPA, never with a page load', () => {
     const { getByRole } = render(<AppsPage />)
-    fireEvent.click(getByRole('button', { name: 'Open' }))
+    fireEvent.click(getByRole('button', { name: 'Open Chess' }))
     expect(nav.route).toHaveBeenCalledWith('/apps/chess')
   })
 
@@ -226,7 +226,63 @@ describe('AppCard admin overflow menu', () => {
     installedApps.value = [makeApp({ enabled: false })]
     const { getByText, queryByRole } = render(<AppsPage />)
     expect(getByText('Disabled')).toBeTruthy()
-    expect(queryByRole('button', { name: 'Open' })).toBeNull()
+    expect(queryByRole('button', { name: 'Open Chess' })).toBeNull()
+  })
+})
+
+describe('AppsPage keyboard + screen reader', () => {
+  it('the ⋯ menu works from the keyboard: focus moves in, arrows move, Escape returns to ⋯', async () => {
+    const { getByRole } = render(<AppsPage />)
+    const trigger = getByRole('button', { name: 'Chess settings' })
+    trigger.focus()
+    fireEvent.click(trigger)
+    // The checked age choice takes focus on open (a pick-one menu opens on
+    // the current choice, like a native select) …
+    await vi.waitFor(() => expect(document.activeElement?.textContent).toContain('Minimum age: Everyone'))
+    // … the arrows move (and wrap), Home / End jump to the ends …
+    fireEvent.keyDown(document.activeElement!, { key: 'ArrowUp' })
+    expect(document.activeElement?.textContent).toBe('Disable app')
+    fireEvent.keyDown(document.activeElement!, { key: 'End' })
+    expect(document.activeElement?.textContent).toBe('Uninstall…')
+    // … and Escape closes it, focus back on ⋯ (never lost to <body>).
+    fireEvent.keyDown(document.activeElement!, { key: 'Escape' })
+    expect(document.activeElement).toBe(trigger)
+    expect(trigger.getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('Tab out of the menu closes it (focus leaves the menu, nothing stays open)', async () => {
+    const { getByRole, queryByRole } = render(<AppsPage />)
+    fireEvent.click(getByRole('button', { name: 'Chess settings' }))
+    const item = getByRole('menuitem', { name: 'Disable app' })
+    fireEvent.focusOut(item, { relatedTarget: getByRole('button', { name: 'Open Chess' }) })
+    expect(queryByRole('menu')).toBeNull()
+  })
+
+  it('each age choice says what it sets', () => {
+    const { getByRole } = render(<AppsPage />)
+    fireEvent.click(getByRole('button', { name: 'Chess settings' }))
+    for (const age of ['Everyone', '13+', '16+', '18+']) {
+      expect(getByRole('menuitemradio', { name: `Minimum age: ${age}` })).toBeTruthy()
+    }
+  })
+
+  it('buttons name the app they act on, and app names are headings', () => {
+    updates.value = [{ app_id: 'chess', name: 'Chess', current_version: '1.0.0', latest_version: '2.0.0' }]
+    const { getByRole } = render(<AppsPage />)
+    expect(getByRole('button', { name: 'Open Chess' })).toBeTruthy()
+    expect(getByRole('button', { name: 'Update Chess' })).toBeTruthy()
+    expect(getByRole('heading', { level: 2, name: 'Chess' })).toBeTruthy()
+    fireEvent.click(getByRole('tab', { name: 'Catalog' }))
+    expect(getByRole('button', { name: 'Install Notes' })).toBeTruthy()
+    expect(getByRole('heading', { level: 2, name: 'Notes' })).toBeTruthy()
+  })
+
+  it('the update chip reads a sentence, not "right arrow"', () => {
+    updates.value = [{ app_id: 'chess', name: 'Chess', current_version: '1.0.0', latest_version: '2.0.0' }]
+    const { container } = render(<AppsPage />)
+    const chip = container.querySelector('.sh-chip--update')!
+    expect(chip.querySelector('[aria-hidden="true"]')?.textContent).toContain('→')
+    expect(chip.querySelector('.sr-only')?.textContent).toBe('Update available: v2.0.0')
   })
 })
 

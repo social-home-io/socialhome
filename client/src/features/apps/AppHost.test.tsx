@@ -5,9 +5,11 @@
  *   - An <iframe> is rendered once the runtime resolves.
  *   - sandbox="allow-scripts" ONLY — never allow-same-origin.
  *   - mountBridge is called exactly once.
+ * And the states that say why an app isn't showing (turned off, not for
+ * this account, removed, slow, didn't start), each with its next step.
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { fireEvent, render, waitFor } from '@testing-library/preact'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { act, fireEvent, render, waitFor } from '@testing-library/preact'
 
 const nav = vi.hoisted(() => ({ route: vi.fn() }))
 vi.mock('preact-iso', async (orig) => ({
@@ -15,17 +17,15 @@ vi.mock('preact-iso', async (orig) => ({
   useLocation: () => ({ route: nav.route, path: '/apps/chess', url: '/apps/chess', query: {} }),
 }))
 
+const user = vi.hoisted(() => ({ currentUser: { value: { is_admin: false } as { is_admin: boolean } | null } }))
+vi.mock('@/store/auth', () => ({ currentUser: user.currentUser }))
+
 // ── Mock @/store/apps ─────────────────────────────────────────────────────
-// getRuntime is the only export AppHostInner calls. Default: resolved runtime.
-// Individual tests override with mockRejectedValueOnce for error paths.
+// Default: resolved runtime. Individual tests override with
+// mockRejectedValueOnce for the error states.
 vi.mock('@/store/apps', () => ({
-  getRuntime: vi.fn().mockResolvedValue({
-    app_id: 'chess',
-    name: 'Chess',
-    entry_url: '/api/apps/chess/bundle/index.html?exp=1&sig=x',
-    self_user_id: 'u1',
-    capabilities: [],
-  }),
+  getRuntime: vi.fn(),
+  setEnabled: vi.fn().mockResolvedValue(undefined),
 }))
 
 // ── Mock @/features/apps/bridge ──────────────────────────────────────────
@@ -33,6 +33,9 @@ vi.mock('@/store/apps', () => ({
 vi.mock('@/features/apps/bridge', () => ({
   mountBridge: vi.fn().mockReturnValue(() => {}),
 }))
+
+const back = vi.hoisted(() => ({ from: null as string | null }))
+vi.mock('@/features/apps/appReturn', () => ({ appOpenedFrom: () => back.from }))
 
 // ── Mock @/baseUrl ────────────────────────────────────────────────────────
 // addBase is used for src and the back-button href. Return the input
@@ -44,7 +47,7 @@ vi.mock('@/baseUrl', () => ({
 
 // ── Mock @/components ─────────────────────────────────────────────────────
 vi.mock('@/components/Spinner', () => ({
-  Spinner: ({ label }: { label: string }) => <span>{label}</span>,
+  Spinner: ({ label }: { label?: string }) => <span role="status" aria-label={label} />,
 }))
 vi.mock('@/components/Button', () => ({
   Button: ({ children, onClick }: { children?: import('preact').ComponentChildren; onClick?: () => void }) => (
@@ -52,14 +55,36 @@ vi.mock('@/components/Button', () => ({
   ),
 }))
 
-import { AppHostInner } from './AppHost'
-import { mountBridge } from '@/features/apps/bridge'
-import { getRuntime } from '@/store/apps'
+import { AppHostInner, FAIL_MS, LOAD_GRACE_MS, SLOW_MS } from './AppHost'
+import { mountBridge, type BridgeContext } from '@/features/apps/bridge'
+import { getRuntime, setEnabled } from '@/store/apps'
 import { ApiError } from '@/api'
+
+const RUNTIME = {
+  app_id: 'chess',
+  name: 'Chess',
+  entry_url: '/api/apps/chess/bundle/index.html?exp=1&sig=x',
+  self_user_id: 'u1',
+  capabilities: [],
+}
+
+/** The ``onReady`` the host handed the bridge on its latest mount. */
+function bridgeReady(): () => void {
+  const calls = vi.mocked(mountBridge).mock.calls
+  const ctx = calls[calls.length - 1][1] as BridgeContext
+  return ctx.onReady!
+}
 
 describe('AppHostInner', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    vi.mocked(getRuntime).mockResolvedValue(RUNTIME)
+    vi.mocked(mountBridge).mockReturnValue(() => {})
+    user.currentUser.value = { is_admin: false }
+    back.from = null
+  })
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('renders an <iframe> once the runtime resolves', async () => {
@@ -95,7 +120,12 @@ describe('AppHostInner', () => {
     })
   })
 
-  it('Back navigates in the app (no page load) and leaving tears the app down', async () => {
+  it('the app name is the host heading, under the topbar\'s h1', async () => {
+    const view = render(<AppHostInner appId="chess" />)
+    await waitFor(() => expect(view.getByRole('heading', { level: 2, name: 'Chess' })).toBeTruthy())
+  })
+
+  it('Back from a deep link goes to Apps in place (no history entry to come back to)', async () => {
     // A reload used to "tear down" the sandbox. Unmounting already does:
     // the iframe leaves the DOM (its browsing context is discarded) and
     // the bridge cleanup drops the message listener + the WS relay.
@@ -104,11 +134,23 @@ describe('AppHostInner', () => {
     const view = render(<AppHostInner appId="chess" />)
     await waitFor(() => expect(vi.mocked(mountBridge)).toHaveBeenCalled())
     fireEvent.click(view.getByText(/Back/))
-    expect(nav.route).toHaveBeenCalledWith('/apps')
+    expect(nav.route).toHaveBeenCalledWith('/apps', true)
     view.unmount()
     await waitFor(() => expect(cleanup).toHaveBeenCalled())
     expect(document.querySelector('iframe.sh-app-frame')).toBeNull()
-    vi.mocked(mountBridge).mockReturnValue(() => {})
+  })
+
+  it('Back returns to the page the app was opened from — one history step, not a push', async () => {
+    // Pushing /apps left the app one browser-Back away: Back, then the
+    // browser's Back, landed in the app again.
+    back.from = '/notifications'
+    const historyBack = vi.spyOn(window.history, 'back').mockImplementation(() => {})
+    const view = render(<AppHostInner appId="chess" />)
+    await waitFor(() => expect(vi.mocked(mountBridge)).toHaveBeenCalled())
+    fireEvent.click(view.getByText(/Back/))
+    expect(historyBack).toHaveBeenCalledOnce()
+    expect(nav.route).not.toHaveBeenCalled()
+    historyBack.mockRestore()
   })
 
   it('answers a bridge request the app sends as soon as its frame is in the page (cached bundle race)', async () => {
@@ -146,14 +188,113 @@ describe('AppHostInner', () => {
     )
   })
 
-  it('shows age-restricted message and no iframe when getRuntime rejects with 403', async () => {
+  // ── Starting → ready / slow / failed ──────────────────────────────────
+
+  it('keeps the frame hidden until the app speaks, then shows it', async () => {
+    // A bundle error body (raw JSON / "not found") served in the frame's
+    // place must never be what the user sees.
+    const { container, getByText } = render(<AppHostInner appId="chess" />)
+    await waitFor(() => expect(container.querySelector('iframe')).not.toBeNull())
+    const iframe = container.querySelector('iframe')!
+    expect(iframe.classList.contains('sh-app-frame--pending')).toBe(true)
+    expect(iframe.getAttribute('aria-hidden')).toBe('true')
+    expect(getByText('Starting Chess…')).toBeTruthy()
+
+    act(() => bridgeReady()())
+
+    expect(iframe.classList.contains('sh-app-frame--pending')).toBe(false)
+    expect(iframe.getAttribute('aria-hidden')).toBeNull()
+    expect(container.querySelector('.sh-app-host__status')).toBeNull()
+  })
+
+  it('says "taking longer than usual" with Try again after SLOW_MS, and still opens if the app then speaks', async () => {
+    vi.useFakeTimers()
+    const view = render(<AppHostInner appId="chess" />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(view.container.querySelector('iframe')).not.toBeNull()
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(SLOW_MS) })
+    expect(view.getByRole('heading', { name: 'Chess is taking longer than usual' })).toBeTruthy()
+    expect(view.getByRole('button', { name: 'Try again' })).toBeTruthy()
+
+    act(() => bridgeReady()())
+    expect(view.queryByText('Chess is taking longer than usual')).toBeNull()
+    // No late "didn't start" once it is running.
+    await act(async () => { await vi.advanceTimersByTimeAsync(FAIL_MS) })
+    expect(view.queryByText("Chess didn't start")).toBeNull()
+  })
+
+  it('says "didn\'t start" after FAIL_MS with Try again + Back to Apps, and drops the silent frame', async () => {
+    vi.useFakeTimers()
+    const view = render(<AppHostInner appId="chess" />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(FAIL_MS) })
+    expect(view.getByRole('heading', { name: "Chess didn't start" })).toBeTruthy()
+    expect(view.getByRole('alert').textContent).toContain('an admin can reinstall it from Apps')
+    expect(view.container.querySelector('iframe')).toBeNull()
+
+    fireEvent.click(view.getByRole('button', { name: 'Back to Apps' }))
+    expect(nav.route).toHaveBeenCalledWith('/apps')
+  })
+
+  it('a frame that loaded but never spoke (a bundle error page) fails after LOAD_GRACE_MS', async () => {
+    vi.useFakeTimers()
+    const view = render(<AppHostInner appId="chess" />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    fireEvent.load(view.container.querySelector('iframe')!)
+    await act(async () => { await vi.advanceTimersByTimeAsync(LOAD_GRACE_MS) })
+    expect(view.getByRole('heading', { name: "Chess didn't start" })).toBeTruthy()
+  })
+
+  it('Try again fetches a fresh runtime and mounts a new frame', async () => {
+    vi.useFakeTimers()
+    const view = render(<AppHostInner appId="chess" />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    await act(async () => { await vi.advanceTimersByTimeAsync(FAIL_MS) })
+    expect(getRuntime).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(view.getByRole('button', { name: 'Try again' }))
+    await act(async () => { await vi.advanceTimersByTimeAsync(0) })
+    expect(getRuntime).toHaveBeenCalledTimes(2)
+    expect(view.container.querySelector('iframe')).not.toBeNull()
+    expect(view.getByText('Starting Chess…')).toBeTruthy()
+  })
+
+  // ── Why it won't open ────────────────────────────────────────────────
+
+  it('turned off, seen by a member: says an admin turned it off — not the age text', async () => {
     vi.mocked(getRuntime).mockRejectedValueOnce(
-      new ApiError(403, '/api/apps/locked/runtime', { code: 'FORBIDDEN', detail: 'Age restricted' }),
+      new ApiError(403, '/api/apps/chess/runtime', { code: 'APP_NOT_ENABLED', detail: 'App is disabled.', name: 'Chess' }),
     )
-    const { container, getByText } = render(<AppHostInner appId="locked" />)
+    const view = render(<AppHostInner appId="chess" />)
+    await waitFor(() => expect(view.getByRole('heading', { name: 'An admin turned Chess off' })).toBeTruthy())
+    expect(view.container.textContent).not.toContain("isn't available for your account")
+    expect(view.queryByRole('button', { name: /Turn on/ })).toBeNull()
+    expect(view.container.querySelector('iframe')).toBeNull()
+    expect(vi.mocked(mountBridge)).not.toHaveBeenCalled()
+  })
+
+  it('turned off, seen by an admin: offers Turn on, which enables it and starts the app', async () => {
+    user.currentUser.value = { is_admin: true }
+    vi.mocked(getRuntime).mockRejectedValueOnce(
+      new ApiError(403, '/api/apps/chess/runtime', { code: 'APP_NOT_ENABLED', detail: 'App is disabled.', name: 'Chess' }),
+    )
+    const view = render(<AppHostInner appId="chess" />)
+    await waitFor(() => expect(view.getByRole('heading', { name: 'Chess is turned off for this household' })).toBeTruthy())
+
+    fireEvent.click(view.getByRole('button', { name: 'Turn on Chess' }))
+    await waitFor(() => expect(view.container.querySelector('iframe')).not.toBeNull())
+    expect(setEnabled).toHaveBeenCalledWith('chess', true)
+  })
+
+  it('age-restricted: keeps the "not available for your account" text, no frame', async () => {
+    vi.mocked(getRuntime).mockRejectedValueOnce(
+      new ApiError(403, '/api/apps/locked/runtime', { code: 'APP_AGE_RESTRICTED', detail: 'Age restricted' }),
+    )
+    const { container, getByRole } = render(<AppHostInner appId="locked" />)
 
     await waitFor(() => {
-      expect(getByText("This app isn't available for your account.")).toBeTruthy()
+      expect(getByRole('heading', { name: "This app isn't available for your account." })).toBeTruthy()
     })
 
     // No iframe must be mounted.
@@ -162,16 +303,28 @@ describe('AppHostInner', () => {
     expect(vi.mocked(mountBridge)).not.toHaveBeenCalled()
   })
 
-  it('shows generic error and no iframe for non-403 rejections', async () => {
+  it('removed (404, a stale link): says it isn\'t installed any more, with Back to Apps', async () => {
+    vi.mocked(getRuntime).mockRejectedValueOnce(
+      new ApiError(404, '/api/apps/gone/runtime', { code: 'NOT_FOUND', detail: 'App not found.' }),
+    )
+    const view = render(<AppHostInner appId="gone" />)
+    await waitFor(() => expect(view.getByRole('heading', { name: "This app isn't installed any more" })).toBeTruthy())
+    expect(view.container.textContent).not.toContain('App not found.')
+    expect(view.getByRole('button', { name: 'Back to Apps' })).toBeTruthy()
+  })
+
+  it('a failed runtime fetch is the "didn\'t start" state, with the translated server line', async () => {
     vi.mocked(getRuntime).mockRejectedValueOnce(
       new ApiError(500, '/api/apps/broken/runtime', { code: 'INTERNAL_ERROR', detail: 'Unexpected error' }),
     )
-    const { container, getByText } = render(<AppHostInner appId="broken" />)
+    const { container, getByText, getByRole } = render(<AppHostInner appId="broken" />)
 
     await waitFor(() => {
       // A 5xx shows the translated server line, not the raw detail.
       expect(getByText('Something went wrong on the server. Try again in a moment.')).toBeTruthy()
     })
+    expect(getByRole('heading', { name: "The app didn't start" })).toBeTruthy()
+    expect(getByRole('button', { name: 'Try again' })).toBeTruthy()
 
     expect(container.querySelector('iframe')).toBeNull()
     // Generic error: age-restricted message must NOT appear.
