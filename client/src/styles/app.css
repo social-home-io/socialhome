@@ -22432,17 +22432,20 @@ span.sh-hlv__who { cursor: default; }
   gap: var(--sh-space-sm);
   min-height: 56px;
   padding: var(--sh-space-xs) var(--sh-space-sm);
-  border-radius: var(--sh-radius-md);
   cursor: pointer;
 }
 .sh-invite-sheet__person + .sh-invite-sheet__person { border-top: 1px solid var(--sh-border); }
 .sh-invite-sheet__person.is-on {
   background: color-mix(in srgb, var(--sh-primary) 12%, transparent);
+  border-radius: var(--sh-radius-md);
   border-top-color: transparent;
 }
+.sh-invite-sheet__person.is-on + .sh-invite-sheet__person { border-top-color: transparent; }
+/* The whole row is the target: its ring, not the radio's own. */
 .sh-invite-sheet__person:has(input:focus-visible) {
-  outline: 2px solid var(--sh-primary);
+  outline: 2px solid var(--sh-focus-ring);
   outline-offset: 2px;
+  border-radius: var(--sh-radius-md);
 }
 .sh-invite-sheet__person input {
   width: 22px;
@@ -22451,6 +22454,7 @@ span.sh-hlv__who { cursor: default; }
   flex: none;
   accent-color: var(--sh-primary);
 }
+.sh-invite-sheet__person input:focus-visible { outline: none; }
 .sh-invite-sheet__who { display: flex; flex-direction: column; flex: 1; min-width: 0; }
 .sh-invite-sheet__name { font-weight: 600; overflow-wrap: anywhere; }
 .sh-invite-sheet__home { color: var(--sh-text-muted); font-size: var(--sh-font-size-sm); overflow-wrap: anywhere; }

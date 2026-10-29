@@ -31,11 +31,12 @@ apps/<app_id>/
 
 ```ts
 import { sh } from '@socialhome/app-sdk'        // null outside a browser; non-null in the iframe
-await sh.context()                               // { appId, selfUserId, launch? }  (no token)
+await sh.context()                               // { appId, selfUserId, permissions?, launch? }  (no token)
 await sh.store.get/set/delete/list(...)          // per-user KV (cleared on uninstall)
 await sh.peers()                                 // [{ instance_id, display_name }] confirmed households
-await sh.federation.openSession(peerInstanceId)  // -> sessionId; peer gets an onSession event
-await sh.federation.send(sessionId, peerInstanceId, payload)
+await sh.people.pick({ max: 1, suggest? })       // Social Home's invite sheet -> [{ ...target, display_name, sessionId }] ([] = cancel)
+await sh.contacts()                              // only people picked / played with in this app — never the roster
+await sh.federation.send(sessionId, target, payload)  // only sessions Social Home knows for that person (else ShError 'unknown_session')
 sh.onMessage(({ sessionId, fromInstance, payload }) => {...})  // in-game messages
 sh.onSession(({ sessionId, fromInstance, payload }) => {...})  // live invites (news only) + closes
 ```
@@ -73,7 +74,7 @@ POST :8099/api/pairing/initiate            -> qr
 POST :8100/api/pairing/accept   body=qr    -> { token, verification_code }
 POST :8099/api/pairing/confirm  body={token, verification_code}
 ```
-After pairing, `sh.peers()` (`GET /api/apps/<id>/peers`) lists the other household. Install the app on both, then drive two browser sessions: A `openSession` → B gets the invite (`onSession`) → both send moves → `onMessage` syncs. App messages use the HTTPS-inbox fallback when WebRTC can't establish, so localhost play works without a TURN server. (`.claude/skills/federation-demo` automates multi-household pairing if you need more.)
+After pairing, `sh.peers()` (`GET /api/apps/<id>/peers`) lists the other household. Install the app on both, then drive two browser sessions: A "New game" → Social Home's invite sheet (outside the iframe; Send ignores taps for 600 ms) → B gets the invite in Needs you → Play → both send moves → `onMessage` syncs. Invites go through Social Home only (D3): the bridge refuses `app.openSession` (`use_people_pick`), and `app.send` on a session id Social Home doesn't know for that person is `unknown_session`. App messages use the HTTPS-inbox fallback when WebRTC can't establish, so localhost play works without a TURN server. (`.claude/skills/federation-demo` automates multi-household pairing if you need more.)
 
 ### Visual / optical verification (headless Chromium)
 
