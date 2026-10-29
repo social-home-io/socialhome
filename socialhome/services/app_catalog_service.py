@@ -225,13 +225,17 @@ class AppCatalogService:
             ):
                 resp.raise_for_status()
                 # Bounded (r2-proposal §7): a declared length past the cap
-                # is refused before reading, the body after.
+                # is refused before reading; the body is streamed and
+                # abandoned the moment it passes the cap (a chunked answer
+                # declares nothing), as for a bundle download.
                 declared = getattr(resp, "content_length", None)
                 if declared is not None and declared > MAX_CATALOG_BYTES:
                     raise ValueError(f"catalog is {declared} bytes")
-                raw = await resp.text()
-            if len(raw) > MAX_CATALOG_BYTES:
-                raise ValueError(f"catalog is over {MAX_CATALOG_BYTES} bytes")
+                raw = bytearray()
+                async for chunk in resp.content.iter_chunked(_DOWNLOAD_CHUNK_BYTES):
+                    raw += chunk
+                    if len(raw) > MAX_CATALOG_BYTES:
+                        raise ValueError(f"catalog is over {MAX_CATALOG_BYTES} bytes")
             doc = orjson.loads(raw)
             if not isinstance(doc, dict):
                 raise TypeError("catalog is not a JSON object")

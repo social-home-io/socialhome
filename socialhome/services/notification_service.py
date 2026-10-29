@@ -33,6 +33,7 @@ itself is the persistence layer; push is fire-and-forget on top.
 | ReportResolved       | The local reporter                    | "Your report in {space} was reviewed"           |
 | AppInstalled         | Members (not the installer, not the age-gated; once a day per app; in app) | "{name} added {app}" |
 | AppRequested         | Admins (a protected asker's guardians) — Needs you, grouped per app | "{name} asked for {app}" |
+| AppUpdateAvailable   | Admins — Needs you, one row per app (re-opens for a newer version) | "{app} has an update" |
 
 Body is intentionally omitted for privacy-sensitive events (DMs,
 location, UGC content) per §25.3.
@@ -56,6 +57,7 @@ from ..domain.apps import (
     PENDING_SESSION_TTL_SECONDS,
     SESSION_INVITED,
     app_age_allows,
+    is_newer_version,
 )
 from ..domain.calendar import RSVPStatus
 from ..domain.conversation import ConversationType, SystemChatScope, mute_active
@@ -66,6 +68,10 @@ from ..domain.events import (
     AppInstalled,
     AppRequestDismissed,
     AppRequested,
+    AppUninstalled,
+    AppUpdateAvailable,
+    AppUpdated,
+    AppUpdateGone,
     AutoPairRequestAnswered,
     AutoPairRequestIncoming,
     BazaarBidPlaced,
@@ -432,6 +438,7 @@ _PUSH_AS_IS: frozenset[str] = frozenset(
         "app_added",
         "app_challenge_declined",
         "app_request",
+        "app_update",
         "bazaar_bid_placed",
         "bazaar_offer_accepted",
         "bazaar_offer_rejected",
@@ -1315,6 +1322,10 @@ class NotificationService(ProtectionGateMixin):
         self._subscribe(AppInstalled, self.on_app_request_answered)
         self._subscribe(AppRequested, self.on_app_requested)
         self._subscribe(AppRequestDismissed, self.on_app_request_answered)
+        self._subscribe(AppUpdateAvailable, self.on_app_update_available)
+        self._subscribe(AppUpdated, self.on_app_update_handled)
+        self._subscribe(AppUpdateGone, self.on_app_update_handled)
+        self._subscribe(AppUninstalled, self.on_app_update_handled)
         # The thing is gone, or you left its space: so are its rows.
         self._subscribe(PostDeleted, self.on_thing_deleted)
         self._subscribe(CommentDeleted, self.on_thing_deleted)
@@ -2786,6 +2797,17 @@ class NotificationService(ProtectionGateMixin):
             if kind != NotificationObject.APP:
                 return False
             return self._apps is None or await self._apps.get(oid) is None
+        if note.type == "app_update":
+            # Waits while its admin is one, the app is still here and the
+            # version the row offers (its body) is newer than the installed
+            # one — an update the event missed still ends it.
+            user = await self._local_user(note.user_id)
+            if kind != NotificationObject.APP or user is None or not user.is_admin:
+                return False
+            if self._apps is None:
+                return True
+            app = await self._apps.get(oid)
+            return app is not None and is_newer_version(note.body or "", app.version)
         if note.type == "space_invite":
             if kind != NotificationObject.SPACE_INVITE:
                 return False
@@ -2974,6 +2996,69 @@ class NotificationService(ProtectionGateMixin):
             object_key(NotificationObject.APP, event.app_id),
             types=("app_request",),
             outcome=outcome,
+            by_user_id=by,
+        )
+
+    async def on_app_update_available(self, event: AppUpdateAvailable) -> None:
+        """A newer compatible version of an installed app (D7): **one**
+        "Needs you" row per admin (``event.recipients``) per app, about
+        ``app:<id>``, opening the app's detail page (What's new, Update).
+        The row's body is the version it offers.
+
+        The daily check repeats this event while the update waits: an
+        admin whose row already offers this version gets nothing (no
+        second row, no second push, whether or not they read it). An even
+        newer version resolves the older rows and re-opens them with the
+        new version — one row, never two. Updating, uninstalling or the
+        update going away resolves it (:meth:`on_app_update_handled`)."""
+        key = object_key(NotificationObject.APP, event.app_id)
+        pending = [
+            n
+            for n in await self._notifs.find(Spec(where=[("object_key", "=", key)]))
+            if n.type == "app_update" and n.is_pending_action
+        ]
+        if any(n.body != event.version for n in pending):
+            await self._resolve(key, types=("app_update",), outcome="done")
+            pending = []
+        told = {n.user_id for n in pending}
+        about = NotificationSubject.of(
+            NotificationObject.APP, event.app_id, space_name=event.name or None
+        )
+        for recipient_id in event.recipients:
+            if recipient_id in told:
+                continue
+            recipient = await self._local_user(recipient_id)
+            if recipient is None or not recipient.is_admin:
+                continue
+            await self._save_notif(
+                new_notification(
+                    user_id=recipient_id,
+                    type="app_update",
+                    title=self._t(
+                        "notification.app.update_available",
+                        locale=self._locale(recipient),
+                        fallback="{app} has an update",
+                        app=event.name or event.app_id,
+                    ),
+                    body=event.version,
+                    link_url=app_about_link(event.app_id),
+                ),
+                about=about,
+                # Nobody caused it: the catalog has a newer version.
+                actor_user_id=None,
+            )
+
+    async def on_app_update_handled(
+        self, event: AppUpdated | AppUpdateGone | AppUninstalled
+    ) -> None:
+        """An admin updated the app ("Handled by Anna"), the update went
+        away, or the app was removed: every admin's update row for it
+        leaves Needs you."""
+        by = event.updated_by if isinstance(event, AppUpdated) else None
+        await self._resolve(
+            object_key(NotificationObject.APP, event.app_id),
+            types=("app_update",),
+            outcome="done",
             by_user_id=by,
         )
 

@@ -289,6 +289,7 @@
   "notification.app.challenge_declined": "{name} declined your {app} game",
   "notification.app.challenge_declined_generic": "{name} declined your game",
   "notification.app.requested": "{name} asked for {app}",
+  "notification.app.update_available": "{app} has an update",
   "notification.post.moderated": "Your post was moderated",
   "notification.space.post.moderated": "Your post in {space_name} was moderated",
   "notification.space.dissolved": "“{space_name}” was dissolved",

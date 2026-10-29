@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
+  changelogNote,
   languageNames,
   neverList,
   permissionDetail,
@@ -68,5 +69,14 @@ describe('appFacts', () => {
     expect(permissionsOf({ permissions: ['storage'] } as any, { permissions: ['federation'] } as any)).toEqual(['storage'])
     expect(permissionsOf(null, { permissions: ['people'] } as any)).toEqual(['people'])
     expect(permissionsOf(null, { capabilities: ['federation'] } as any)).toEqual(['people', 'federation'])
+  })
+
+  it("What's new reads in the viewer's language, else English", () => {
+    const c = { version: '2026.10.28', date: null, notes: { en: 'Rematch', de: 'Revanche', pt: 'Revanche!' } }
+    expect(changelogNote(c, 'de')).toBe('Revanche')
+    expect(changelogNote(c, 'pt-BR')).toBe('Revanche!')
+    expect(changelogNote(c, 'fr')).toBe('Rematch')
+    expect(changelogNote({ version: '1', date: null, notes: { nl: 'Nieuw' } }, 'fr')).toBe('Nieuw')
+    expect(changelogNote({ version: '1', date: null, notes: {} }, 'en')).toBe('')
   })
 })

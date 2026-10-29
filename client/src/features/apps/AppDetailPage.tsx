@@ -17,7 +17,7 @@
  */
 import { useEffect, useState } from 'preact/hooks'
 import { useLocation, useRoute } from 'preact-iso'
-import { t, locale } from '@/i18n/i18n'
+import { t, isOne, locale } from '@/i18n/i18n'
 import { addBase } from '@/baseUrl'
 import { useTitle } from '@/store/pageTitle'
 import { currentUser } from '@/store/auth'
@@ -38,8 +38,8 @@ import {
   loadProtectionStatus,
   localized,
   setEnabled,
-  updateApp,
   dismissRequests,
+  type AppUpdate,
   type CatalogEntry,
   type InstalledApp,
 } from '@/store/apps'
@@ -49,11 +49,13 @@ import {
   AskButton,
   PermissionList,
   RatingChip,
+  UpdateButton,
   whoCanOpen,
 } from './AppDialogs'
 import { AppMenu, UninstallDialog } from './AppsPage'
 import { dropHandled, loadNeedsYou, needsYou } from '@/features/notifications/needsYou'
 import {
+  changelogNote,
   languageNames,
   neverList,
   permissionsOf,
@@ -156,8 +158,7 @@ export default function AppDetailPage() {
               <h2 class="sh-app-detail__h" id="sh-app-detail-new">{t('apps.whats_new')}</h2>
               <ul class="sh-app-changelog">
                 {entry.changelog.map(c => {
-                  const base = lang.split('-')[0]
-                  const note = c.notes[lang] ?? c.notes[base] ?? c.notes.en ?? Object.values(c.notes)[0] ?? ''
+                  const note = changelogNote(c, lang)
                   return (
                     <li key={c.version}>
                       <h3 class="sh-app-changelog__v">
@@ -310,11 +311,10 @@ function HouseholdFacts({ installed, minAge, isAdmin }: {
 function ManageCard({ app, name, update }: {
   app: InstalledApp
   name: string
-  update: { latest_version: string } | null
+  update: AppUpdate | null
 }) {
   const { route } = useLocation()
   const [toggling, setToggling] = useState(false)
-  const [updating, setUpdating] = useState(false)
   const [uninstallOpen, setUninstallOpen] = useState(false)
   const toggle = async () => {
     setToggling(true)
@@ -326,29 +326,26 @@ function ManageCard({ app, name, update }: {
       setToggling(false)
     }
   }
-  const runUpdate = async () => {
-    setUpdating(true)
-    try {
-      await updateApp(app.app_id)
-      showToast(t('apps.updated_named', { name }), 'success')
-    } catch (err: unknown) {
-      showToast((err as Error).message ?? t('apps.update_failed'), 'error')
-    } finally {
-      setUpdating(false)
-    }
-  }
+  const asks = update?.new_permissions?.length ?? 0
   return (
     <section class="sh-app-detail__card" aria-labelledby="sh-app-detail-manage">
       <div class="sh-app-detail__manage-head">
         <h2 class="sh-app-detail__h" id="sh-app-detail-manage">{t('apps.detail.manage')}</h2>
         <AppMenu app={app} name={name} toggling={toggling} onToggle={() => { void toggle() }} onUninstall={() => setUninstallOpen(true)} />
       </div>
+      {update && (
+        <p class="sh-app-detail__text sh-app-detail__update">
+          <strong>{t('apps.update_title', { name })}</strong>
+          {' · '}
+          {versionLabel(update.current_version)} → {versionLabel(update.latest_version)}
+          {' · '}
+          {asks > 0
+            ? t(isOne(asks) ? 'apps.update_new_permission_one' : 'apps.update_new_permissions', { n: String(asks) })
+            : t('apps.update_same_permissions')}
+        </p>
+      )}
       <div class="sh-app-detail__actions">
-        {update && (
-          <Button loading={updating} onClick={() => { void runUpdate() }}>
-            {t('apps.update_to', { version: versionLabel(update.latest_version) })}
-          </Button>
-        )}
+        {update && <UpdateButton appId={app.app_id} name={name} update={update} />}
         <Button variant="secondary" loading={toggling} onClick={() => { void toggle() }}>
           {app.enabled ? t('apps.turn_off') : t('apps.turn_on')}
         </Button>

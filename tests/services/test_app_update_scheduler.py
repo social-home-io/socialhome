@@ -10,30 +10,32 @@ from socialhome.services.app_update_scheduler import AppUpdateScheduler
 
 
 class _FakeAppService:
-    """Fake AppService that counts list_updates calls and records force arg."""
+    """Fake AppService that counts check_for_updates calls."""
 
     def __init__(self, updates: list[dict] | None = None) -> None:
         self._updates = updates or []
         self.call_count: int = 0
-        self.last_force: bool | None = None
 
-    async def list_updates(self, *, force: bool = False) -> list[dict]:
+    async def check_for_updates(self) -> list[dict]:
         self.call_count += 1
-        self.last_force = force
         return list(self._updates)
 
 
 class _FailingAppService:
-    """Fake AppService that always raises on list_updates."""
+    """Fake AppService whose check always raises."""
 
-    async def list_updates(self, *, force: bool = False) -> list[dict]:
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    async def check_for_updates(self) -> list[dict]:
+        self.call_count += 1
         raise RuntimeError("catalog unavailable")
 
 
 @pytest.mark.asyncio
-async def test_start_calls_list_updates_with_force_true():
-    """start() must call list_updates(force=True) at least once."""
-    svc = _FakeAppService()
+async def test_start_runs_the_update_check():
+    """start() runs the check (which announces updates) at once."""
+    svc = _FakeAppService([{"app_id": "chess"}])
     scheduler = AppUpdateScheduler(svc, interval=0.05)  # type: ignore[arg-type]
 
     task = asyncio.create_task(scheduler.start())
@@ -42,7 +44,6 @@ async def test_start_calls_list_updates_with_force_true():
     await task
 
     assert svc.call_count >= 1
-    assert svc.last_force is True
 
 
 @pytest.mark.asyncio
@@ -59,8 +60,8 @@ async def test_stop_ends_loop_promptly():
 
 
 @pytest.mark.asyncio
-async def test_exception_in_list_updates_does_not_crash_loop():
-    """If list_updates raises, the loop continues (logs a warning, doesn't exit)."""
+async def test_exception_in_the_check_does_not_crash_loop():
+    """If the check raises, the loop continues (logs a warning, doesn't exit)."""
     svc = _FailingAppService()
     scheduler = AppUpdateScheduler(svc, interval=0.05)  # type: ignore[arg-type]
 
@@ -68,6 +69,7 @@ async def test_exception_in_list_updates_does_not_crash_loop():
     await asyncio.sleep(0.15)
     await scheduler.stop()
     await task  # must not raise
+    assert svc.call_count >= 2
 
 
 @pytest.mark.asyncio

@@ -133,6 +133,7 @@ export const HOUSEHOLD_CHAT_LINK = '/?tab=chat'
  *   notifications.row.app_added notifications.row.app_added_many
  *   notifications.row.app_challenge_declined notifications.row.app_challenge_declined_many
  *   notifications.row.app_request notifications.row.app_request_many
+ *   notifications.row.app_update_none
  *   notifications.new_pill notifications.new_pill_one
  *   notifications.live_new notifications.live_new_one
  *   notifications.meta.new_of_total notifications.meta.new_of_total_one
@@ -189,6 +190,8 @@ export const ROW_TYPES: Readonly<Record<string, TypeSpec>> = {
   app_challenge_declined: {},
   // A member asked for an app: "Milo and Kiki asked for Chess".
   app_request: {},
+  // Admins: "Chess has an update" — nobody caused it; the app is the place.
+  app_update: { none: true, noActor: true },
 }
 
 /** Every catalog key the renderer may ask for (the locale tests walk it). */

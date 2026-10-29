@@ -27,21 +27,43 @@ from socialhome.services.app_catalog_service import (
 )
 
 
+class _FakeContent:
+    """The streamed body of a fake response (``resp.content``)."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self.chunks_read = 0
+
+    async def iter_chunked(self, n: int):
+        for i in range(0, len(self._data), n):
+            self.chunks_read += 1
+            yield self._data[i : i + n]
+
+
 class _FakeResp:
     """Fake aiohttp response for testing."""
+
+    content_length: int | None = None
 
     def __init__(self, payload: dict[str, Any], status: int = 200) -> None:
         self._payload = payload
         self.status = status
+        self._content: _FakeContent | None = None
+
+    @property
+    def content(self) -> _FakeContent:
+        if self._content is None:
+            self._content = _FakeContent(self._raw().encode())
+        return self._content
+
+    def _raw(self) -> str:
+        return json.dumps(self._payload)
 
     async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, *a: object) -> bool:
         return False
-
-    async def text(self) -> str:
-        return json.dumps(self._payload)
 
     def raise_for_status(self) -> None:
         if self.status >= 400:
@@ -383,7 +405,7 @@ class _RawResp(_FakeResp):
         super().__init__({})
         self._body = body
 
-    async def text(self) -> str:
+    def _raw(self) -> str:
         return self._body
 
 
@@ -512,7 +534,8 @@ async def test_a_declared_length_over_the_cap_is_refused_before_reading():
     class _Big(_FakeResp):
         content_length = MAX_CATALOG_BYTES + 1
 
-        async def text(self) -> str:  # pragma: no cover - must not be read
+        @property
+        def content(self) -> _FakeContent:  # pragma: no cover - must not be read
             raise AssertionError("read a body declared too large")
 
     class _Session(_FlakySession):
@@ -524,6 +547,28 @@ async def test_a_declared_length_over_the_cap_is_refused_before_reading():
     )
     with pytest.raises(AppCatalogUnreachableError):
         await svc.fetch_catalog()
+
+
+async def test_an_undeclared_body_is_streamed_and_abandoned_at_the_cap():
+    """A body without Content-Length (chunked) is read only up to the cap,
+    never held whole before the size check (the #1238 review)."""
+    huge = '{"apps": [], "pad": "' + "x" * (MAX_CATALOG_BYTES * 4) + '"}'
+    resp = _RawResp(huge)
+    assert resp.content_length is None
+
+    class _Session(_FlakySession):
+        def get(self, url: str, **kw: Any) -> Any:
+            return resp
+
+    svc = AppCatalogService(
+        session_factory=_Session({}), catalog_url="https://example/catalog.json"
+    )
+    with pytest.raises(AppCatalogUnreachableError):
+        await svc.fetch_catalog()
+    chunk = catalog_mod._DOWNLOAD_CHUNK_BYTES
+    # Stopped one chunk past the cap, not after reading all of it.
+    assert resp.content.chunks_read == MAX_CATALOG_BYTES // chunk + 1
+    assert resp.content.chunks_read * chunk < len(huge)
 
 
 @pytest.mark.parametrize(

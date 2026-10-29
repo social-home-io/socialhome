@@ -52,14 +52,17 @@ from ..domain.apps import (
     AppIntegrityError,
     AppManifest,
     AppNeedsNewerCoreError,
+    AppNewPermissionsError,
     AppNotEnabledError,
     AppNotFoundError,
     AppQuotaExceededError,
     AppRequestNotAllowedError,
     InstalledApp,
     app_age_allows,
+    changelog_since,
     core_version_satisfies,
     is_newer_version,
+    new_permissions,
     unknown_capabilities,
 )
 from ..domain.events import (
@@ -68,7 +71,9 @@ from ..domain.events import (
     AppRequestDismissed,
     AppRequested,
     AppUninstalled,
+    AppUpdateAvailable,
     AppUpdated,
+    AppUpdateGone,
 )
 from ..domain.space import SpacePermissionError
 from ..repositories.app_repo import AbstractAppRepo
@@ -302,8 +307,12 @@ class AppService(BusPublisherMixin):
         """Return a list of installed apps that have a newer version in the catalog.
 
         Each entry is a dict with keys ``app_id``, ``name``,
-        ``current_version``, ``latest_version`` and ``compatible`` (this
-        Social Home can install it, :meth:`is_compatible`). Only a strictly newer
+        ``current_version``, ``latest_version``, ``compatible`` (this
+        Social Home can install it, :meth:`is_compatible`),
+        ``new_permissions`` (what the new version asks for beyond what the
+        household agreed to — updating needs a yes for those, D7) and
+        ``changelog`` ("What's new": the catalog's entries newer than the
+        installed version, newest first). Only a strictly newer
         version counts (:func:`~socialhome.domain.apps.is_newer_version`,
         CalVer compared as numbers): a catalog that went back to an older
         release offers no "update".
@@ -339,8 +348,61 @@ class AppService(BusPublisherMixin):
                         # ``False``: the new version needs a newer Social
                         # Home — the SPA says so instead of offering it.
                         "compatible": self.is_compatible(entry),
+                        "new_permissions": list(
+                            new_permissions(
+                                app.manifest.capabilities, entry.permissions
+                            )
+                        ),
+                        "changelog": [
+                            {
+                                "version": c.version,
+                                "date": c.date,
+                                "notes": dict(c.notes),
+                            }
+                            for c in changelog_since(
+                                entry.changelog, app.version, entry.latest_version
+                            )
+                        ],
                     }
                 )
+        return updates
+
+    async def check_for_updates(self) -> list[dict]:
+        """The daily update check (D7): :meth:`list_updates` against a
+        fresh catalog, then one :class:`AppUpdateAvailable` per app with a
+        newer compatible version (to the household's admins — the
+        notification service keeps one "Needs you" row per app) and one
+        :class:`AppUpdateGone` per installed app without one (its rows
+        resolve). Nothing is installed: an admin updates with one tap.
+
+        A check that couldn't reach the catalog (``stale``: the held copy
+        was served) announces and withdraws nothing — it doesn't know.
+        Returns the updates found."""
+        if self._catalog is None:
+            return []
+        updates = await self.list_updates(force=True)
+        if self.catalog_status.stale:
+            log.info("app-update check: catalog unreachable, nothing announced")
+            return updates
+        admins: tuple[str, ...] = ()
+        if self._users is not None:
+            admins = tuple(
+                u.user_id for u in await self._users.list_active() if u.is_admin
+            )
+        ready = {u["app_id"]: u for u in updates if u["compatible"]}
+        for app in await self._repo.list_installed():
+            update = ready.get(app.app_id)
+            if update is None:
+                await self._emit(AppUpdateGone(app_id=app.app_id))
+                continue
+            await self._emit(
+                AppUpdateAvailable(
+                    app_id=app.app_id,
+                    name=update["name"],
+                    version=update["latest_version"],
+                    recipients=admins,
+                )
+            )
         return updates
 
     # ─── Mutations ───────────────────────────────────────────────────────────
@@ -511,6 +573,8 @@ class AppService(BusPublisherMixin):
         app_id: str,
         *,
         actor_is_admin: bool,
+        actor_user_id: str | None = None,
+        accept_permissions: frozenset[str] = frozenset(),
     ) -> InstalledApp:
         """Update an installed app to the latest version from the catalog.
 
@@ -519,16 +583,26 @@ class AppService(BusPublisherMixin):
         2. Lookup installed app → :class:`AppNotFoundError` if absent.
         3. Fetch the catalog (force refresh so the check is current).
         4. If already at the latest version, return the existing row unchanged.
-        5. Download + SHA-256 verify + safe extraction via
-           :meth:`_download_verify_unpack` (same security pipeline as install).
-        6. Update the repo row, preserving ``enabled`` and ``installed_by``.
-        7. Remove the OLD bundle directory from disk.
-        8. Publish :class:`AppUpdated`.
+        5. New permissions (D7): when the catalog's ``permissions`` grow
+           past the installed ones beyond *accept_permissions*, refuse with
+           :class:`AppNewPermissionsError` naming only the new ones — before
+           anything is downloaded.
+        6. Download + SHA-256 verify + safe extraction via
+           :meth:`_download_verify_unpack` (same security pipeline as install),
+           then the same check against the downloaded manifest (the bundle,
+           not the catalog, is what runs): growth past *accept_permissions*
+           removes the new bundle and refuses.
+        7. Update the repo row, preserving ``enabled`` and ``installed_by``.
+        8. Remove the OLD bundle directory from disk.
+        9. Publish :class:`AppUpdated`.
 
         Args:
             app_id: The app to update.
             actor_is_admin: Must be ``True``; raises
                 :class:`SpacePermissionError` otherwise.
+            actor_user_id: The admin updating it (named on the other
+                admins' resolved update rows).
+            accept_permissions: The new permissions the admin said yes to.
 
         Returns:
             The updated :class:`InstalledApp` (or the unchanged existing row
@@ -539,6 +613,8 @@ class AppService(BusPublisherMixin):
             :class:`AppNotFoundError` — app is not installed.
             :class:`AppIntegrityError` — sha mismatch, path traversal,
                 or invalid manifest in the new bundle.
+            :class:`AppNewPermissionsError` — the new version asks for
+                permissions *accept_permissions* doesn't cover.
         """
         if not actor_is_admin:
             raise SpacePermissionError("Only admins may update apps")
@@ -571,10 +647,25 @@ class AppService(BusPublisherMixin):
             raise AppNeedsNewerCoreError(
                 params={"min_core_version": entry.min_core_version or ""}
             )
+        agreed = existing.manifest.capabilities
+        self._require_consent(
+            new_permissions(agreed, entry.permissions), accept_permissions
+        )
 
         manifest, bundle_rel, actual_sha = await self._download_verify_unpack(
             app_id, entry
         )
+        try:
+            # Verified again from what was downloaded: the bundle runs,
+            # not the catalog's description of it. (Unknown capabilities
+            # were already refused while unpacking; this is the growth
+            # among the known ones.)
+            self._require_consent(
+                new_permissions(agreed, manifest.capabilities), accept_permissions
+            )
+        except AppNewPermissionsError:
+            await self._drop_unpacked(existing, bundle_rel)
+            raise
 
         # Preserve admin-configured age gate, but auto-raise when the new
         # manifest declares a higher minimum age (e.g. app upgrades its rating).
@@ -613,9 +704,28 @@ class AppService(BusPublisherMixin):
                 old_version=existing.version,
                 new_version=entry.latest_version,
                 min_age=new_min_age,
+                updated_by=actor_user_id,
             )
         )
         return updated
+
+    @staticmethod
+    def _require_consent(growth: tuple[str, ...], accepted: frozenset[str]) -> None:
+        """Refuse an update whose permission *growth* isn't all in
+        *accepted* (:class:`AppNewPermissionsError` names the new ones)."""
+        if any(p not in accepted for p in growth):
+            raise AppNewPermissionsError(params={"permissions": ",".join(growth)})
+
+    async def _drop_unpacked(self, existing: InstalledApp, bundle_rel: str) -> None:
+        """Remove a new version's unpacked bundle that won't be used —
+        never the installed one."""
+        new_dir = self._apps_path / bundle_rel
+        if (
+            bundle_rel != existing.bundle_path
+            and new_dir.resolve().is_relative_to(self._apps_path.resolve())
+            and await aiofiles.os.path.isdir(str(new_dir))
+        ):
+            await asyncio.to_thread(self._rmtree_sync, new_dir)
 
     async def uninstall(self, app_id: str, *, actor_is_admin: bool) -> None:
         """Remove an installed app from disk and the registry.

@@ -382,9 +382,13 @@ class AppUpdatesView(BaseView):
 class AppUpdateView(BaseView):
     """``POST /api/apps/{app_id}/update`` — upgrade an app to its latest catalog version.
 
-    Admin-only.  Raises :class:`~socialhome.domain.apps.AppNotFoundError` if
-    the app is not installed; :class:`~socialhome.domain.apps.AppIntegrityError`
-    on bundle-integrity failure (both are mapped centrally by
+    Admin-only. Body (optional): ``{"accept_permissions": [...]}`` — the
+    new permissions the admin said yes to. A version asking for more than
+    the household agreed to is refused with 409 ``APP_NEW_PERMISSIONS``
+    (``params.permissions``: only the new ones) until they are accepted
+    (D7). Raises :class:`~socialhome.domain.apps.AppNotFoundError` if the
+    app is not installed; :class:`~socialhome.domain.apps.AppIntegrityError`
+    on bundle-integrity failure (all mapped centrally by
     :meth:`~socialhome.routes.base.BaseView._iter`).
     """
 
@@ -392,8 +396,19 @@ class AppUpdateView(BaseView):
         user = self.user
         if not user.is_admin:
             return error_response(403, "FORBIDDEN", "Admin only.")
+        body = await self.body() if self.request.can_read_body else {}
+        accept = body.get("accept_permissions", []) if isinstance(body, dict) else None
+        if not isinstance(accept, list) or not all(isinstance(p, str) for p in accept):
+            return error_response(
+                400, "UNPROCESSABLE", "accept_permissions must be a list of strings."
+            )
         svc = self.svc(app_service_key)
-        app = await svc.update_app(self.match("app_id"), actor_is_admin=True)
+        app = await svc.update_app(
+            self.match("app_id"),
+            actor_is_admin=True,
+            actor_user_id=user.user_id,
+            accept_permissions=frozenset(accept),
+        )
         return self._json(await _app_json(svc, app))
 
 

@@ -30,6 +30,7 @@ from socialhome.domain.apps import (
     AppKvEntry,
     AppManifest,
     AppNeedsNewerCoreError,
+    AppNewPermissionsError,
     AppNotEnabledError,
     AppNotFoundError,
     AppPermissionDeniedError,
@@ -38,8 +39,10 @@ from socialhome.domain.apps import (
     InstalledApp,
     app_age_allows,
     app_permissions,
+    changelog_since,
     core_version_satisfies,
     is_newer_version,
+    new_permissions,
     parse_app_version,
     unknown_capabilities,
 )
@@ -564,3 +567,46 @@ def test_needs_newer_social_home_names_the_capabilities():
     assert err.status == 409
     assert err.code == "APP_NEEDS_NEWER_SOCIAL_HOME"
     assert err.params == {"capabilities": "camera, gps"}
+
+
+# ─── Updates: new permissions and "What's new" (D7) ──────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("installed", "candidate", "grown"),
+    [
+        (("storage",), ("storage",), ()),
+        (("storage", "federation"), ("storage",), ()),  # fewer: no yes needed
+        (("storage",), ("storage", "federation"), ("people", "federation")),
+        # ``people`` was already implied by ``federation``.
+        (("federation",), ("people", "federation"), ()),
+        ((), ("storage",), ("storage",)),
+        # An unknown id is never a "new permission" here (it reads as
+        # "needs a newer Social Home" instead).
+        (("storage",), ("storage", "camera"), ()),
+    ],
+)
+def test_new_permissions(installed, candidate, grown):
+    assert new_permissions(installed, candidate) == grown
+
+
+def test_new_permissions_error_is_coded():
+    err = AppNewPermissionsError(params={"permissions": "federation"})
+    assert (err.status, err.code) == (409, "APP_NEW_PERMISSIONS")
+    assert err.params == {"permissions": "federation"}
+
+
+def _log(*versions: str) -> tuple[AppChangelogEntry, ...]:
+    return tuple(AppChangelogEntry(v, None, (("en", v),)) for v in versions)
+
+
+def test_changelog_since_keeps_only_what_is_new_newest_first():
+    log = _log("2026.10.21", "2026.10.28", "2026.10.28.1", "2026.10.2", "2026.11.5")
+    got = changelog_since(log, "2026.10.21", "2026.10.28.1")
+    # Past the installed one, up to the offered one (not the later 11.5),
+    # compared as numbers (10.2 < 10.21).
+    assert [c.version for c in got] == ["2026.10.28.1", "2026.10.28"]
+
+
+def test_changelog_since_nothing_new():
+    assert changelog_since(_log("2026.10.21"), "2026.10.21", "2026.10.28") == ()

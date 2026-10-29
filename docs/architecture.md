@@ -948,7 +948,16 @@ their 7-day window expire, and decided / expired items lose their content
 7 days later), and poll deadlines (`poll_deadline_scheduler.py`, every
 60 s: closes the polls this household wrote whose `closes_at` passed, once
 each — an atomic `closed=0 → 1` update; a space poll's close goes out as the
-one `SPACE_POLL_CLOSED` the author's button would send).
+one `SPACE_POLL_CLOSED` the author's button would send), and the app update
+check (`services/app_update_scheduler.py`, daily: `AppService.check_for_updates`
+re-fetches the app catalog and, for each installed app with a newer
+compatible version, publishes `AppUpdateAvailable` to the household's
+admins — the notification service keeps **one** `app_update` Needs-you row
+per admin per app, re-opened for an even newer version — and
+`AppUpdateGone` for the others, which resolves their rows. A check that
+couldn't reach the catalog announces and withdraws nothing. Nothing is
+installed: an admin updates with one tap, and a version asking for new
+permissions waits for their yes; older versions are never offered).
 
 The GFS runs its own periodic maintenance sweep
 (`global_server/maintenance.py`, same `_stop: asyncio.Event` lifecycle as

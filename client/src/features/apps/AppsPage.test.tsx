@@ -51,6 +51,7 @@ vi.mock('@/store/apps', async (orig) => {
     loadInstalled: vi.fn(), loadCatalog: vi.fn(), loadUpdates: h.loadUpdates,
     loadProtectionStatus: vi.fn(),
     updateApp: h.updateApp, installApp: h.installApp, requestApp: h.requestApp,
+    newPermissionsAsked: real.newPermissionsAsked,
     uninstallApp: h.uninstallApp, setEnabled: h.setEnabled, setMinAge: h.setMinAge,
     localized: real.localized,
   }
@@ -376,8 +377,27 @@ describe('Updates (admins)', () => {
     expect(getByText(/28.*2026 → .*29.*2026/)).toBeTruthy()
     fireEvent.click(getByRole('button', { name: "What's new in Chess" }))
     expect(nav.route).toHaveBeenCalledWith('/apps/chess/about#whats-new')
+    expect(getByText(/Same permissions/)).toBeTruthy()
     fireEvent.click(getByRole('button', { name: 'Update Chess' }))
-    await vi.waitFor(() => expect(updateApp).toHaveBeenCalledWith('chess'))
+    // Same permissions: one tap, no question.
+    await vi.waitFor(() => expect(updateApp).toHaveBeenCalledWith('chess', []))
+  })
+
+  it('an update asking for more says so and asks before updating', async () => {
+    updates.value = [{
+      app_id: 'chess', name: 'Chess', current_version: '2026.10.21', latest_version: '2026.10.28',
+      compatible: true, new_permissions: ['federation'],
+      changelog: [{ version: '2026.10.28', date: null, notes: { en: 'Rematch with one tap.' } }],
+    }]
+    const { getByRole, getByText, findByRole } = render(<AppsPage />)
+    expect(getByText('Asks for a new permission')).toBeTruthy()
+    fireEvent.click(getByRole('button', { name: 'Review the update for Chess' }))
+    const dialog = await findByRole('dialog')
+    expect(dialog.textContent).toContain('Rematch with one tap.')
+    expect(dialog.textContent).toContain('This version asks for one new permission.')
+    expect(updateApp).not.toHaveBeenCalled()
+    fireEvent.click(getByRole('button', { name: 'Accept and update' }))
+    await vi.waitFor(() => expect(updateApp).toHaveBeenCalledWith('chess', ['federation']))
   })
 
   it('an update needing a newer Social Home has no Update button', () => {
