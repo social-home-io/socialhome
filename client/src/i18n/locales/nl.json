@@ -5516,6 +5516,8 @@
   "notifications.row.bazaar_bid_placed_none": "Nieuw bod op je aanbieding",
   "notifications.row.bazaar_offer_accepted_none": "Je bod is geaccepteerd",
   "notifications.row.bazaar_offer_rejected_none": "Je bod is afgewezen",
+  "notifications.row.app_added": "{actor} heeft {space} toegevoegd",
+  "notifications.row.app_added_many": "{actors} hebben {space} toegevoegd",
   "notifications.row.app_challenge": "{actor} heeft je uitgenodigd om {space} te spelen",
   "notifications.row.app_challenge_many": "{actors} hebben je uitgenodigd om {space} te spelen",
   "notifications.needs_you.title": "Wacht op jou",

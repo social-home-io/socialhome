@@ -309,6 +309,7 @@ describe('notices about you, in the viewer\'s language', () => {
       ['bazaar_offer_accepted', params(['Ben']), null, 'Your offer was accepted', 'Dein Angebot wurde angenommen'],
       ['bazaar_offer_rejected', params(['Ben']), null, 'Your offer was declined', 'Dein Angebot wurde abgelehnt'],
       ['app_challenge', params(['Ben · Familie Okafor'], { space_name: 'Chess' }), null, 'Ben · Familie Okafor invited you to play Chess', 'Ben · Familie Okafor hat dich eingeladen, Chess zu spielen'],
+      ['app_added', params(['Anna'], { space_name: 'Chess' }), null, 'Anna added Chess', 'Anna hat Chess hinzugefügt'],
     ]
     for (const [type, p, sid, en_] of cases) expect(say(type, p, sid), type).toBe(en_)
     await setLocale('de')
@@ -321,6 +322,12 @@ describe('notices about you, in the viewer\'s language', () => {
     // A row from before the app's name rode along ("challenged you to
     // chess") or for an app the registry didn't know: the server's title.
     expect(say('app_challenge', params(['Ben'], { space_name: null }))).toBe('TITLE')
+  })
+
+  it('a new app names who added it and the app; no app name keeps the title', () => {
+    expect(say('app_added', params(['Anna', 'Ben'], { space_name: 'Chess' })))
+      .toBe('Anna and Ben added Chess')
+    expect(say('app_added', params(['Anna'], { space_name: null }))).toBe('TITLE')
   })
 
   it('a space notice whose space name is unknown keeps its title', () => {

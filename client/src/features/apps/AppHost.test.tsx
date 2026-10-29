@@ -34,6 +34,23 @@ vi.mock('@/features/apps/bridge', () => ({
   mountBridge: vi.fn().mockReturnValue(() => {}),
 }))
 
+// ── Mock @/ws ─────────────────────────────────────────────────────────────
+// Captures the host's ``app.uninstalled`` / ``app.disabled`` listeners so a
+// test can play the frame an admin's action sends.
+type Frame = { type: string, data: Record<string, unknown> }
+const wsh = vi.hoisted(() => ({ handlers: {} as Record<string, Set<(e: Frame) => void>> }))
+vi.mock('@/ws', () => ({
+  ws: {
+    on: (type: string, h: (e: Frame) => void) => {
+      (wsh.handlers[type] ??= new Set()).add(h)
+      return () => { wsh.handlers[type]?.delete(h) }
+    },
+  },
+}))
+function playFrame(type: string, appId: string) {
+  wsh.handlers[type]?.forEach(h => h({ type, data: { type, app_id: appId } }))
+}
+
 const back = vi.hoisted(() => ({ from: null as string | null }))
 vi.mock('@/features/apps/appReturn', () => ({ appOpenedFrom: () => back.from }))
 
@@ -350,6 +367,38 @@ describe('AppHostInner', () => {
     await waitFor(() => expect(view.getByRole('heading', { name: "This app isn't installed any more" })).toBeTruthy())
     expect(view.container.textContent).not.toContain('App not found.')
     expect(view.getByRole('button', { name: 'Back to Apps' })).toBeTruthy()
+  })
+
+  // ── Live: an admin removes or turns off the open app ──────────────────
+
+  it('uninstalled while open: the frame goes and the tab says it isn\'t installed any more', async () => {
+    const view = render(<AppHostInner appId="chess" />)
+    await waitFor(() => expect(view.container.querySelector('iframe')).not.toBeNull())
+    vi.mocked(getRuntime).mockRejectedValueOnce(
+      new ApiError(404, '/api/apps/chess/runtime', { code: 'NOT_FOUND', detail: 'App not found.' }),
+    )
+    act(() => playFrame('app.uninstalled', 'chess'))
+    await waitFor(() => expect(view.getByRole('heading', { name: "This app isn't installed any more" })).toBeTruthy())
+    expect(view.container.querySelector('iframe')).toBeNull()
+  })
+
+  it('turned off while open: a member sees that an admin turned it off', async () => {
+    const view = render(<AppHostInner appId="chess" />)
+    await waitFor(() => expect(view.container.querySelector('iframe')).not.toBeNull())
+    vi.mocked(getRuntime).mockRejectedValueOnce(
+      new ApiError(403, '/api/apps/chess/runtime', { code: 'APP_NOT_ENABLED', detail: 'App is disabled.', name: 'Chess' }),
+    )
+    act(() => playFrame('app.disabled', 'chess'))
+    await waitFor(() => expect(view.getByRole('heading', { name: 'An admin turned Chess off' })).toBeTruthy())
+    expect(view.container.querySelector('iframe')).toBeNull()
+  })
+
+  it('a frame about another app leaves the open one alone', async () => {
+    const view = render(<AppHostInner appId="chess" />)
+    await waitFor(() => expect(view.container.querySelector('iframe')).not.toBeNull())
+    act(() => playFrame('app.uninstalled', 'go'))
+    expect(getRuntime).toHaveBeenCalledTimes(1)
+    expect(view.container.querySelector('iframe')).not.toBeNull()
   })
 
   it('a failed runtime fetch is the "didn\'t start" state, with the translated server line', async () => {

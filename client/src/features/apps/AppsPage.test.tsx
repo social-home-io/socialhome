@@ -50,10 +50,10 @@ vi.mock('@/store/auth', () => ({ currentUser: h.currentUser }))
 vi.mock('@/store/pageTitle', () => ({ useTitle: () => {} }))
 vi.mock('@/components/Toast', () => ({ showToast: h.showToast }))
 vi.mock('@/baseUrl', () => ({ addBase: (p: string) => p, basePath: '/' }))
-const nav = vi.hoisted(() => ({ route: vi.fn() }))
+const nav = vi.hoisted(() => ({ route: vi.fn(), query: {} as Record<string, string> }))
 vi.mock('preact-iso', async (orig) => ({
   ...(await orig<object>()),
-  useLocation: () => ({ route: nav.route, path: '/apps', url: '/apps', query: {} }),
+  useLocation: () => ({ route: nav.route, path: '/apps', url: '/apps', query: nav.query }),
 }))
 
 // Stub TabHeader (its ResizeObserver overflow logic is covered by its own
@@ -102,6 +102,27 @@ beforeEach(() => {
   currentUser.value = { is_admin: true }
   catalogFreshness.value = { checkedAt: null, stale: false, failed: false }
   loadUpdates.mockResolvedValue(undefined)
+  nav.query = {}
+})
+
+describe('AppsPage ?app= (a "new app" notification)', () => {
+  it.each([true, false])('picks the app out and puts focus on it (admin: %s)', (isAdmin) => {
+    currentUser.value = { is_admin: isAdmin }
+    installedApps.value = [makeApp(), makeApp({ app_id: 'go', name: 'Go' })]
+    nav.query = { app: 'go' }
+    const { getByRole } = render(<AppsPage />)
+    const go = getByRole('heading', { name: 'Go' }).closest('.sh-app-card')!
+    const chess = getByRole('heading', { name: 'Chess' }).closest('.sh-app-card')!
+    expect(go.classList.contains('sh-app-card--picked')).toBe(true)
+    expect(chess.classList.contains('sh-app-card--picked')).toBe(false)
+    expect(document.activeElement).toBe(go)
+  })
+
+  it('an app that is gone picks nothing out', () => {
+    nav.query = { app: 'gone' }
+    const { container } = render(<AppsPage />)
+    expect(container.querySelector('.sh-app-card--picked')).toBeNull()
+  })
 })
 
 describe('AppsPage tabs (admin)', () => {

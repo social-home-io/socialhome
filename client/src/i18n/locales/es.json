@@ -5543,6 +5543,8 @@
   "notifications.row.bazaar_bid_placed_none": "Nueva oferta en tu anuncio",
   "notifications.row.bazaar_offer_accepted_none": "Tu oferta fue aceptada",
   "notifications.row.bazaar_offer_rejected_none": "Tu oferta fue rechazada",
+  "notifications.row.app_added": "{actor} añadió {space}",
+  "notifications.row.app_added_many": "{actors} añadieron {space}",
   "notifications.row.app_challenge": "{actor} te invitó a jugar a {space}",
   "notifications.row.app_challenge_many": "{actors} te invitaron a jugar a {space}",
   "notifications.needs_you.title": "Te necesita",

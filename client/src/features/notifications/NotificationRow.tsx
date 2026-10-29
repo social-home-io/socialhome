@@ -41,7 +41,7 @@ export function glyphFor(type: string): GlyphName {
   if (type.startsWith('call_')) return 'phone'
   if (type === 'chat_added') return 'comment'
   if (type.startsWith('poll_')) return 'poll'
-  if (type === 'app_challenge') return 'game'
+  if (type === 'app_challenge' || type === 'app_added') return 'game'
   if (type.includes('react')) return 'heart'
   if (type.includes('mention') || type === 'space_here') return 'at'
   if (type.includes('comment') || type.includes('replied')) return 'comment'

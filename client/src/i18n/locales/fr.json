@@ -5516,6 +5516,8 @@
   "notifications.row.bazaar_bid_placed_none": "Nouvelle enchère sur votre annonce",
   "notifications.row.bazaar_offer_accepted_none": "Votre offre a été acceptée",
   "notifications.row.bazaar_offer_rejected_none": "Votre offre a été refusée",
+  "notifications.row.app_added": "{actor} a ajouté {space}",
+  "notifications.row.app_added_many": "{actors} ont ajouté {space}",
   "notifications.row.app_challenge": "{actor} vous a invité à jouer à {space}",
   "notifications.row.app_challenge_many": "{actors} vous ont invité à jouer à {space}",
   "notifications.needs_you.title": "Attend votre décision",

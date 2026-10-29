@@ -21,6 +21,7 @@ from socialhome.domain.apps import (
     AppNotFoundError,
     AppQuotaExceededError,
     InstalledApp,
+    app_age_allows,
     is_newer_version,
     parse_app_version,
 )
@@ -254,3 +255,21 @@ def test_catalog_status_defaults_to_never_checked():
     status = AppCatalogStatus()
     assert status.checked_at is None
     assert status.stale is False
+
+
+@pytest.mark.parametrize(
+    ("min_age", "protected", "declared_age", "allowed"),
+    [
+        (0, True, 5, True),  # no gate
+        (13, False, None, True),  # unprotected account
+        (13, True, 13, True),  # at the gate
+        (13, True, 16, True),
+        (13, True, 12, False),
+        (13, True, None, False),  # protected, no age: fails closed
+    ],
+)
+def test_app_age_allows(min_age, protected, declared_age, allowed):
+    assert (
+        app_age_allows(min_age, protected=protected, declared_age=declared_age)
+        is allowed
+    )

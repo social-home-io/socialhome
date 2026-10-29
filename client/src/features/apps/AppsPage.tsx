@@ -11,7 +11,7 @@
  *
  * Non-admins see no tab chrome — just the enabled apps they can open.
  */
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
 import { t, isOne } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
@@ -61,6 +61,8 @@ export default function AppsPage() {
   useTitle(t('nav.apps'))
   const isAdmin = !!currentUser.value?.is_admin
   const [tab, setTab] = useState<AppsTab>('installed')
+  // ``?app=<id>`` — a "new app" notification picks the app's entry out.
+  const picked = useLocation().query.app ?? null
 
   useEffect(() => {
     void loadInstalled()
@@ -79,7 +81,7 @@ export default function AppsPage() {
           <h1 class="sh-page-title">{t('nav.apps')}</h1>
         </header>
         <CatalogFreshnessNote />
-        <InstalledSection isAdmin={false} onBrowse={() => {}} />
+        <InstalledSection isAdmin={false} picked={picked} onBrowse={() => {}} />
       </div>
     )
   }
@@ -109,7 +111,7 @@ export default function AppsPage() {
 
       <div role="tabpanel" aria-label={tabLabels()[tab]}>
         {tab === 'installed' ? (
-          <InstalledSection isAdmin onBrowse={() => setTab('catalog')} />
+          <InstalledSection isAdmin picked={picked} onBrowse={() => setTab('catalog')} />
         ) : (
           <CatalogSection />
         )}
@@ -160,9 +162,12 @@ function CheckUpdatesButton() {
 
 function InstalledSection({
   isAdmin,
+  picked = null,
   onBrowse,
 }: {
   isAdmin: boolean
+  /** The app a notification pointed at (``?app=``): tinted, scrolled to. */
+  picked?: string | null
   onBrowse: () => void
 }) {
   const loading      = appsLoading.value
@@ -206,6 +211,7 @@ function InstalledSection({
           key={app.app_id}
           app={app}
           isAdmin={isAdmin}
+          picked={app.app_id === picked}
           update={updateMap.get(app.app_id) ?? null}
         />
       ))}
@@ -223,13 +229,23 @@ const minAgeOptions = (): { value: number; label: string }[] => [
 function AppCard({
   app,
   isAdmin,
+  picked = false,
   update,
 }: {
   app: InstalledApp
   isAdmin: boolean
+  picked?: boolean
   update: AppUpdate | null
 }) {
   const { route } = useLocation()
+  const cardRef = useRef<HTMLDivElement>(null)
+  // The entry a notification opened: bring it into view and put focus
+  // on it, so a screen reader lands on the app the row named.
+  useEffect(() => {
+    if (!picked || !cardRef.current) return
+    cardRef.current.scrollIntoView?.({ block: 'center' })
+    cardRef.current.focus({ preventScroll: true })
+  }, [picked])
   const [uninstallOpen, setUninstallOpen] = useState(false)
   const [togglingEnabled, setTogglingEnabled] = useState(false)
   const [uninstalling, setUninstalling]   = useState(false)
@@ -289,7 +305,11 @@ function AppCard({
   }
 
   return (
-    <div class="sh-welcome-card sh-app-card">
+    <div
+      ref={cardRef}
+      class={`sh-welcome-card sh-app-card${picked ? ' sh-app-card--picked' : ''}`}
+      tabIndex={picked ? -1 : undefined}
+    >
       <div class="sh-app-card__header">
         {safeIconSrc(app.icon) ? (
           <img src={safeIconSrc(app.icon)!} alt="" class="sh-app-card__icon" aria-hidden="true" />

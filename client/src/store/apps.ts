@@ -8,6 +8,7 @@
  */
 import { signal } from '@preact/signals'
 import { api } from '@/api'
+import { ws } from '@/ws'
 import { showToast } from '@/components/Toast'
 import { t } from '@/i18n/i18n'
 
@@ -90,17 +91,54 @@ export async function loadProtectionStatus(): Promise<void> {
   }
 }
 
-export async function loadInstalled(): Promise<void> {
-  appsLoading.value = true
-  appsError.value = null
+/** Whether this tab loaded the installed list yet — a live change only
+ *  refreshes a list someone is looking at (the Apps page, the dashboard). */
+let installedLoaded = false
+
+/**
+ * Load ``GET /api/apps``. *quiet*: a live refresh (``app.*`` frames) —
+ * the list stays on screen while it loads and a failed refresh keeps it.
+ */
+export async function loadInstalled({ quiet = false }: { quiet?: boolean } = {}): Promise<void> {
+  if (!quiet) {
+    appsLoading.value = true
+    appsError.value = null
+  }
   try {
     const data = await api.get('/api/apps') as { apps: InstalledApp[] }
     installedApps.value = data.apps ?? []
+    installedLoaded = true
+    if (quiet) appsError.value = null
   } catch (err: unknown) {
-    appsError.value = (err as Error).message ?? t('apps.load_failed')
+    if (!quiet) appsError.value = (err as Error).message ?? t('apps.load_failed')
   } finally {
-    appsLoading.value = false
+    if (!quiet) appsLoading.value = false
   }
+}
+
+/** The live app frames (``app.installed`` / ``app.updated`` /
+ *  ``app.uninstalled`` / ``app.enabled`` / ``app.disabled``, each
+ *  ``{app_id}``) — the server sends them to whoever ``GET /api/apps``
+ *  would show the app. */
+export const APP_FRAMES = [
+  'app.installed', 'app.updated', 'app.uninstalled', 'app.enabled', 'app.disabled',
+] as const
+
+/**
+ * Keep open Apps pages and the dashboard's Apps card current: any app
+ * change refetches the installed list (quietly, and only once this tab
+ * loaded it); an updated or uninstalled app leaves the "update available"
+ * list.
+ */
+export function wireAppsWs(): () => void {
+  const offs = APP_FRAMES.map(type => ws.on(type, (e) => {
+    const appId = String(e.data.app_id ?? '')
+    if (type === 'app.updated' || type === 'app.uninstalled') {
+      updates.value = updates.value.filter(u => u.app_id !== appId)
+    }
+    if (installedLoaded) void loadInstalled({ quiet: true })
+  }))
+  return () => offs.forEach(off => off())
 }
 
 export async function loadCatalog(force = false): Promise<void> {
@@ -192,4 +230,5 @@ export function _resetAppsForTest(): void {
   catalogEnabled.value   = true
   catalogFreshness.value = { checkedAt: null, stale: false, failed: false }
   householdHasProtectedMinor.value = false
+  installedLoaded        = false
 }

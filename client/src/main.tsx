@@ -28,6 +28,7 @@ import { initLocale } from './i18n/i18n'
 import { wireMediaReadyWs } from './store/mediaReady'
 import { wireSpacesWs } from './store/spaces'
 import { wireProtectionWs } from './store/protection'
+import { wireAppsWs } from './store/apps'
 import { wireMyStatusWs } from './store/myStatus'
 
 // Wire WebSocket event handlers to local stores BEFORE connecting so
@@ -52,6 +53,7 @@ void initLocale()
 wireMediaReadyWs()
 wireSpacesWs()
 wireProtectionWs()
+wireAppsWs()
 wireMyStatusWs()
 
 // Wire the api client's 401 handler to clear the session. Done here (not at

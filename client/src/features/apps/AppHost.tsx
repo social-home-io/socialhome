@@ -25,6 +25,9 @@
  *   gone      404 → "isn't installed any more"
  *   ready     the app's first bridge request (``app.ready`` or any RPC)
  *
+ * An ``app.uninstalled`` / ``app.disabled`` frame for the open app asks
+ * the server again, so the tab lands on ``gone`` / ``off`` live.
+ *
  * The frame stays invisible until the app speaks, so a server error body
  * served in its place (raw JSON / text) is never shown to anyone.
  *
@@ -42,6 +45,7 @@ import { useTitle } from '@/store/pageTitle'
 import { mountBridge } from '@/features/apps/bridge'
 import { appOpenedFrom } from '@/features/apps/appReturn'
 import { addBase } from '@/baseUrl'
+import { ws, type WsEvent } from '@/ws'
 import { ApiError } from '@/api'
 import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
@@ -132,6 +136,17 @@ export function AppHostInner({ appId, sessionId }: {
     })
     return () => { cancelled = true }
   }, [appId, attempt, sessionId])
+
+  // An admin uninstalled or turned off this app while it's open: ask the
+  // server again, so the tab shows "isn't installed any more" / "turned
+  // off" (the frame goes) instead of an app whose calls start failing.
+  useEffect(() => {
+    const recheck = (e: WsEvent) => {
+      if (e.data.app_id === appId) setAttempt(n => n + 1)
+    }
+    const offs = [ws.on('app.uninstalled', recheck), ws.on('app.disabled', recheck)]
+    return () => offs.forEach(off => off())
+  }, [appId])
 
   // While the app starts: slow after SLOW_MS, failed after FAIL_MS.
   const starting = state.kind === 'starting'

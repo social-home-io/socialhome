@@ -63,6 +63,13 @@ def test_bazaar_listing_link():
     assert links.bazaar_listing_link("L1") == "/bazaar?listing=L1"
 
 
+def test_app_link_picks_the_app_out_on_the_apps_page():
+    """A "new app" row opens the Apps page with the app's entry picked
+    out — not ``/apps/{id}``, which launches the app."""
+    assert links.app_link("chess") == "/apps?app=chess"
+    assert spa_route_for(links.app_link("chess")) == "/apps"
+
+
 def test_space_links():
     assert links.space_calendar_link("s1") == "/spaces/s1/calendar"
     assert links.space_about_link("s1") == "/spaces/s1/about"
@@ -178,6 +185,7 @@ def _builder_links() -> set[str]:
         links.task_link(_task()),
         links.task_link(_task(), "s1"),
         links.bazaar_listing_link("L1"),
+        links.app_link("chess"),
         links.space_calendar_link("s1"),
         links.space_about_link("s1"),
         links.space_members_link("s1"),

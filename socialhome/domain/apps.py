@@ -152,6 +152,19 @@ def is_newer_version(candidate: str, current: str) -> bool:
 _VALID_MIN_AGES: frozenset[int] = frozenset({0, 13, 16, 18})
 
 
+def app_age_allows(min_age: int, *, protected: bool, declared_age: int | None) -> bool:
+    """The app age gate: may an account use an app with *min_age*?
+
+    ``min_age <= 0`` → no restriction; an unprotected account (no child
+    protection) → allowed; a protected account → only at or above
+    *min_age* (no declared age counts as 0, so the gate fails closed).
+    One rule for the runtime, the app list, the WebSocket frames about an
+    app and the "new app" row — nobody learns of an app they can't use."""
+    if min_age <= 0 or not protected:
+        return True
+    return int(declared_age or 0) >= min_age
+
+
 @dataclass(slots=True, frozen=True)
 class AppManifest:
     """Parsed ``manifest.json`` from an app bundle."""
