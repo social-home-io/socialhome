@@ -8,9 +8,14 @@ import aiohttp
 import pytest
 from aiohttp import web
 
-from socialhome.domain.apps import AppBundleTooLargeError, AppDownloadError
+from socialhome.domain.apps import (
+    AppBundleTooLargeError,
+    AppCatalogUnreachableError,
+    AppDownloadError,
+)
 from socialhome.services import app_catalog_service as catalog_mod
 from socialhome.services.app_catalog_service import (
+    CATALOG_RETRY_S,
     CATALOG_TTL_S,
     RELEASE_MAX_FIELD_SIZE,
     RELEASE_TIMEOUT_S,
@@ -251,8 +256,9 @@ async def test_the_default_session_limit_is_what_broke(long_header_server):
     """The regression this guards: aiohttp's default refuses the header."""
     url = str(long_header_server.make_url("/catalog.json"))
     svc = AppCatalogService(session_factory=aiohttp.ClientSession, catalog_url=url)
-    with pytest.raises(aiohttp.ClientResponseError):
+    with pytest.raises(AppCatalogUnreachableError) as info:
         await svc.fetch_catalog()
+    assert isinstance(info.value.__cause__, aiohttp.ClientResponseError)
 
 
 async def test_release_session_bounds_the_header_size():
@@ -337,3 +343,148 @@ async def test_download_bundle_times_out_with_a_clear_error(bundle_server, monke
 async def test_download_bundle_http_error_is_a_download_failure(bundle_server):
     with pytest.raises(AppDownloadError):
         await download_bundle(str(bundle_server.make_url("/missing.tgz")))
+
+
+# ─── Unreachable catalog: serve the last good answer, say it's stale ─────────
+
+
+class _FlakySession:
+    """A session whose .get() answers with *payload* or fails with *error*,
+    switchable between calls; counts the calls."""
+
+    def __init__(self, payload: dict[str, Any] | str) -> None:
+        self.payload: dict[str, Any] | str = payload
+        self.error: BaseException | None = None
+        self.calls = 0
+
+    def __call__(self) -> Self:
+        return self
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(self, *a: object) -> bool:
+        return False
+
+    def get(self, url: str, **kw: Any) -> Any:
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        payload = self.payload
+        if isinstance(payload, str):
+            return _RawResp(payload)
+        return _FakeResp(payload)
+
+
+class _RawResp(_FakeResp):
+    def __init__(self, body: str) -> None:
+        super().__init__({})
+        self._body = body
+
+    async def text(self) -> str:
+        return self._body
+
+
+def _flaky_service() -> tuple[AppCatalogService, _FlakySession]:
+    session = _FlakySession(_chess_payload())
+    svc = AppCatalogService(
+        session_factory=session, catalog_url="https://example/catalog.json"
+    )
+    return svc, session
+
+
+async def test_status_before_any_fetch_is_never_checked():
+    svc, _ = _flaky_service()
+    assert svc.status.checked_at is None
+    assert svc.status.stale is False
+
+
+async def test_a_good_fetch_records_when_the_catalog_answered():
+    svc, _ = _flaky_service()
+    await svc.fetch_catalog()
+    status = svc.status
+    assert status.stale is False
+    assert status.checked_at is not None
+    assert status.checked_at.endswith("+00:00")  # UTC
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        aiohttp.ClientConnectionError("down"),
+        TimeoutError(),
+    ],
+)
+async def test_a_failed_refresh_serves_the_last_good_catalog_as_stale(error):
+    svc, session = _flaky_service()
+    first = await svc.fetch_catalog()
+    answered_at = svc.status.checked_at
+    session.error = error
+    again = await svc.fetch_catalog(force=True)
+    assert [e.app_id for e in again] == [e.app_id for e in first]
+    assert svc.status.stale is True
+    # Still the time the catalog last answered, not the failed try.
+    assert svc.status.checked_at == answered_at
+
+
+async def test_a_body_that_is_not_a_catalog_is_unreachable_not_a_crash():
+    svc, session = _flaky_service()
+    await svc.fetch_catalog()
+    session.payload = "<html>proxy error</html>"
+    assert len(await svc.fetch_catalog(force=True)) == 1
+    assert svc.status.stale is True
+    session.payload = "[1, 2]"  # JSON, but not a catalog object
+    assert len(await svc.fetch_catalog(force=True)) == 1
+    assert svc.status.stale is True
+
+
+async def test_unreachable_with_nothing_held_raises_a_coded_error():
+    svc, session = _flaky_service()
+    session.error = aiohttp.ClientConnectionError("down")
+    with pytest.raises(AppCatalogUnreachableError) as info:
+        await svc.fetch_catalog()
+    assert info.value.status == 503
+    assert info.value.code == "APP_CATALOG_UNREACHABLE"
+    assert svc.status.stale is True
+    assert svc.status.checked_at is None
+
+
+async def test_after_a_failure_reads_answer_at_once_until_the_retry_window():
+    """A page load while the host is down doesn't wait on the network
+    again for CATALOG_RETRY_S; an explicit check (force) always retries."""
+    svc, session = _flaky_service()
+    await svc.fetch_catalog()
+    # Expire the TTL so a plain read would go to the network.
+    svc._cache_ts = svc._cache_ts - CATALOG_TTL_S - 1  # type: ignore[operator]
+    session.error = aiohttp.ClientConnectionError("down")
+    await svc.fetch_catalog()
+    assert session.calls == 2
+    await svc.fetch_catalog()  # inside the retry window: no network
+    assert session.calls == 2
+    await svc.fetch_catalog(force=True)
+    assert session.calls == 3
+    # Past the window a plain read tries again.
+    svc._failed_ts = svc._failed_ts - CATALOG_RETRY_S - 1  # type: ignore[operator]
+    await svc.fetch_catalog()
+    assert session.calls == 4
+
+
+async def test_inside_the_retry_window_with_nothing_held_raises_without_network():
+    svc, session = _flaky_service()
+    session.error = aiohttp.ClientConnectionError("down")
+    with pytest.raises(AppCatalogUnreachableError):
+        await svc.fetch_catalog()
+    with pytest.raises(AppCatalogUnreachableError):
+        await svc.fetch_catalog()
+    assert session.calls == 1
+
+
+async def test_the_catalog_answering_again_clears_stale():
+    svc, session = _flaky_service()
+    await svc.fetch_catalog()
+    session.error = aiohttp.ClientConnectionError("down")
+    await svc.fetch_catalog(force=True)
+    assert svc.status.stale is True
+    session.error = None
+    await svc.fetch_catalog(force=True)
+    assert svc.status.stale is False

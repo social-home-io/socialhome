@@ -48,6 +48,30 @@ export const catalogError    = signal<string | null>(null)
 /** ``false`` when the operator turned the catalog off (empty
  *  ``apps_catalog_url``) — the Catalog tab says so instead of "no apps". */
 export const catalogEnabled  = signal(true)
+
+/**
+ * How current the app list we hold is — from ``checked_at`` / ``stale`` on
+ * ``/api/apps/updates`` and ``/api/apps/catalog``. ``stale``: the latest
+ * try to reach the app list failed, so what we show is from ``checkedAt``
+ * (``null``: it never answered since the server started). ``failed``: the
+ * check itself errored (nothing held to fall back on). Either way the page
+ * must not say "All apps are up to date".
+ */
+export interface CatalogFreshness {
+  checkedAt: string | null
+  stale:     boolean
+  failed:    boolean
+}
+export const catalogFreshness = signal<CatalogFreshness>({ checkedAt: null, stale: false, failed: false })
+
+/** Did the last check reach the app list? */
+export function catalogReached(f: CatalogFreshness = catalogFreshness.value): boolean {
+  return !f.stale && !f.failed
+}
+
+function freshnessFrom(data: { checked_at?: string | null, stale?: boolean }): CatalogFreshness {
+  return { checkedAt: data.checked_at ?? null, stale: data.stale === true, failed: false }
+}
 /** True when at least one household member has child protection enabled —
  *  gates the per-app age-gate admin control (no point configuring a gate
  *  nobody is subject to). Loaded by an admin via ``GET /api/cp/protection``. */
@@ -79,15 +103,16 @@ export async function loadInstalled(): Promise<void> {
   }
 }
 
-export async function loadCatalog(): Promise<void> {
+export async function loadCatalog(force = false): Promise<void> {
   catalogLoading.value = true
   catalogError.value = null
   try {
-    const data = await api.get('/api/apps/catalog') as {
-      apps: CatalogEntry[]; enabled?: boolean
+    const data = await api.get('/api/apps/catalog' + (force ? '?refresh=1' : '')) as {
+      apps: CatalogEntry[]; enabled?: boolean; checked_at?: string | null; stale?: boolean
     }
     catalog.value = data.apps ?? []
     catalogEnabled.value = data.enabled !== false
+    catalogFreshness.value = freshnessFrom(data)
   } catch (err: unknown) {
     catalogError.value = (err as Error).message ?? t('apps.catalog_failed')
   } finally {
@@ -99,10 +124,16 @@ export async function loadUpdates(force = false): Promise<void> {
   updatesChecking.value = true
   try {
     const url = '/api/apps/updates' + (force ? '?refresh=1' : '')
-    const data = await api.get(url) as { updates: AppUpdate[] }
+    const data = await api.get(url) as {
+      updates: AppUpdate[]; checked_at?: string | null; stale?: boolean
+    }
     updates.value = data.updates ?? []
+    catalogFreshness.value = freshnessFrom(data)
   } catch {
+    // The check didn't answer and nothing is held: no list, and never
+    // "up to date".
     updates.value = []
+    catalogFreshness.value = { ...catalogFreshness.value, failed: true }
   } finally {
     updatesChecking.value = false
   }
@@ -159,5 +190,6 @@ export function _resetAppsForTest(): void {
   appsError.value        = null
   catalogError.value     = null
   catalogEnabled.value   = true
+  catalogFreshness.value = { checkedAt: null, stale: false, failed: false }
   householdHasProtectedMinor.value = false
 }

@@ -755,5 +755,7 @@
   "notifications.row.bazaar_bid_placed_none": "Bazaar: someone bid on the person's listing (glossary: Bazaar).",
   "notifications.row.bazaar_offer_accepted_none": "Bazaar: the seller accepted the person's offer.",
   "notifications.row.bazaar_offer_rejected_none": "Bazaar: the seller declined the person's offer.",
-  "notifications.row.app_challenge": "Someone challenged the person to a game of chess in Apps. {actor} is a name; \"_many\" takes {actors}."
+  "notifications.row.app_challenge": "Someone invited the person to play a game in Apps. {actor} is a name (for someone from another household \"Ben · Familie Okafor\"); {space} is the app's name (e.g. Chess, never translated). \"_many\" takes {actors}.",
+  "apps.catalog_stale": "The Apps page couldn't reach the app list (the catalog of apps to install or update), so it shows the list from an earlier check. {time} is a date and time, already formatted (\"29 Oct 2026, 08:15\"). Never say the apps are up to date here.",
+  "apps.catalog_unreachable": "The Apps page couldn't reach the app list (the catalog of apps to install or update) and has no earlier copy."
 }

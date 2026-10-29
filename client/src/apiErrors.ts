@@ -140,6 +140,7 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   APP_BUNDLE_TOO_LARGE: () => t('error.app_bundle_too_large'),
   APP_DOWNLOAD_FAILED: () => t('error.app_download_failed'),
   APP_CATALOG_DISABLED: () => t('error.app_catalog_disabled'),
+  APP_CATALOG_UNREACHABLE: () => t('error.app_catalog_unreachable'),
   IMAGE_UNREADABLE: () => t('error.image_unreadable'),
   // Connecting to a GFS (QR / pasted code, or onboarding's open sign-up).
   // Our own words for every refusal, never the GFS's (``routes/gfs.py``).

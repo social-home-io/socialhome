@@ -3528,7 +3528,7 @@ async def test_bell_rows_without_content_push_their_own_title(stack):
             from_display="anna",
         )
     )
-    assert [p.title for _, p in push.calls] == ["anna challenged you to chess"]
+    assert [p.title for _, p in push.calls] == ["anna invited you to play a game"]
 
 
 async def test_an_invite_push_names_the_space_only_when_allowed(stack):
@@ -4040,3 +4040,65 @@ async def test_event_change_without_a_known_actor_tells_the_whole_cohort(stack):
         "bob": 1,
         "carl": 1,
     }
+
+
+# ─── Game invites name the app (any app, not just chess) ────────────────────
+
+
+class _AppRegistry:
+    """The app registry the notification service reads an app's name from."""
+
+    def __init__(self, names: dict[str, str]) -> None:
+        self._names = names
+
+    async def get(self, app_id: str):
+        name = self._names.get(app_id)
+        return SimpleNamespace(name=name, enabled=True) if name else None
+
+
+async def test_a_game_invite_names_the_installed_app(stack):
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    stack.notif_svc.attach_app_repo(_AppRegistry({"checkers": "Checkers"}))
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    await stack.bus.publish(
+        AppChallengeReceived(
+            app_id="checkers",
+            session_id="s1",
+            to_user_id=b.user_id,
+            from_user_id=a.user_id,
+            from_display="Anna · Familie Okafor",
+        )
+    )
+    (row,) = [
+        n
+        for n in await stack.notif_repo.list(b.user_id, limit=10)
+        if n.type == "app_challenge"
+    ]
+    assert row.title == "Anna · Familie Okafor invited you to play Checkers"
+    # The client builds the same sentence: the app is the row's place.
+    assert row.params is not None
+    assert row.params.space_name == "Checkers"
+    # D11: who and which app — a label, not user content — and no body.
+    assert [p.title for _, p in push.calls] == [
+        "Anna · Familie Okafor invited you to play Checkers"
+    ]
+
+
+async def test_a_game_invite_for_an_app_the_registry_lacks_reads_generic(stack):
+    stack.notif_svc.attach_app_repo(_AppRegistry({}))
+    b = await stack.provision_user("bob")
+    await stack.bus.publish(
+        AppChallengeReceived(
+            app_id="gone", session_id="s1", to_user_id=b.user_id, from_display="Anna"
+        )
+    )
+    (row,) = [
+        n
+        for n in await stack.notif_repo.list(b.user_id, limit=10)
+        if n.type == "app_challenge"
+    ]
+    assert row.title == "Anna invited you to play a game"
+    assert row.params is not None
+    assert row.params.space_name is None

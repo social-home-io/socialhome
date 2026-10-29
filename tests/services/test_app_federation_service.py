@@ -37,7 +37,10 @@ from socialhome.domain.federation import (
     RemoteInstance,
 )
 from socialhome.domain.user import RemoteUser, User
-from socialhome.services.app_federation_service import AppFederationService
+from socialhome.services.app_federation_service import (
+    AppFederationService,
+    with_household,
+)
 
 # ─── Stubs ────────────────────────────────────────────────────────────────────
 
@@ -2737,3 +2740,100 @@ async def test_declining_an_invite_from_someone_guardian_blocked_since_tells_the
     assert fed.sent_events == []
     assert ws.user_calls == []
     assert svc._app_repo.pending == []  # type: ignore[attr-defined]
+
+
+# ─── People from other households are named with their household ────────────
+
+
+def test_with_household_names_the_household():
+    assert with_household("Ben", "Familie Okafor") == "Ben · Familie Okafor"
+    assert with_household("Ben", None) == "Ben"
+    assert with_household("Ben", "") == "Ben"
+    # A household that only knows itself by the person's name: no echo.
+    assert with_household("Ben", "Ben") == "Ben"
+
+
+@pytest.mark.asyncio
+async def test_list_contacts_names_a_remote_persons_household():
+    """Two "Admin"s — one at home, one in a paired household — read apart."""
+    alice = _make_user("u-alice", "alice", "Alice")
+    admin = _make_user("u-admin", "admin", "Admin")
+    remote = _make_remote_user(
+        user_id="ru-1",
+        instance_id="peer-inst",
+        remote_username="admin",
+        display_name="Admin",
+    )
+    svc, _, _ = _make_svc(
+        users=[alice, admin],
+        remote_users=[remote],
+        instances=[_make_remote_instance("peer-inst", display_name="Familie Okafor")],
+        own_instance_id="own-inst",
+    )
+    contacts = {
+        c["instance_id"]: c for c in await svc.list_contacts(self_user_id="u-alice")
+    }
+    mine, theirs = contacts["own-inst"], contacts["peer-inst"]
+    assert mine["display_name"] == "Admin"
+    assert mine["household_name"] is None
+    assert mine["person_name"] == "Admin"
+    assert theirs["display_name"] == "Admin · Familie Okafor"
+    assert theirs["household_name"] == "Familie Okafor"
+    assert theirs["person_name"] == "Admin"
+
+
+@pytest.mark.asyncio
+async def test_list_contacts_uses_the_households_local_alias():
+    inst = _make_remote_instance("peer-inst", display_name="Okafor-HA")
+    inst = dataclasses.replace(inst, local_alias="The Okafors")
+    remote = _make_remote_user(
+        user_id="ru-1",
+        instance_id="peer-inst",
+        remote_username="ben",
+        display_name="Ben",
+    )
+    svc, _, _ = _make_svc(
+        users=[_make_user("u-alice", "alice", "Alice")],
+        remote_users=[remote],
+        instances=[inst],
+    )
+    (c,) = await svc.list_contacts(self_user_id="u-alice")
+    assert c["display_name"] == "Ben · The Okafors"
+
+
+@pytest.mark.asyncio
+async def test_an_invite_from_another_household_names_it():
+    """Needs you reads "Carol · Familie Okafor invited you to play Chess"."""
+    from socialhome.domain.events import AppChallengeReceived
+
+    bus = _FakeBus()
+    svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app("chess")},
+        users=[_make_user("u-bob", "bob", "Bob")],
+        remote_users=[
+            _make_remote_user(
+                user_id="ru-carol",
+                instance_id="peer-inst-id",
+                remote_username="carol",
+                display_name="Carol",
+            )
+        ],
+        instances=[
+            _make_remote_instance("peer-inst-id", display_name="Familie Okafor")
+        ],
+        bus=bus,
+    )
+    await svc.on_inbound_event(
+        _make_event(
+            FederationEventType.APP_SESSION,
+            {
+                "app_id": "chess",
+                "session_id": "sess-1",
+                "verb": "open",
+                "to_user": "bob",
+                "from_user": "carol",
+            },
+        )
+    )
+    (ev,) = [e for e in bus.published if isinstance(e, AppChallengeReceived)]
+    assert ev.from_display == "Carol · Familie Okafor"

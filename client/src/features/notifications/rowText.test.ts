@@ -308,11 +308,19 @@ describe('notices about you, in the viewer\'s language', () => {
       ['bazaar_bid_placed', params(['Ben']), null, 'New bid on your listing', 'Neues Gebot für deine Anzeige'],
       ['bazaar_offer_accepted', params(['Ben']), null, 'Your offer was accepted', 'Dein Angebot wurde angenommen'],
       ['bazaar_offer_rejected', params(['Ben']), null, 'Your offer was declined', 'Dein Angebot wurde abgelehnt'],
-      ['app_challenge', params(['Ben']), null, 'Ben challenged you to chess', 'Ben fordert dich zu einer Partie Schach heraus'],
+      ['app_challenge', params(['Ben · Familie Okafor'], { space_name: 'Chess' }), null, 'Ben · Familie Okafor invited you to play Chess', 'Ben · Familie Okafor hat dich eingeladen, Chess zu spielen'],
     ]
     for (const [type, p, sid, en_] of cases) expect(say(type, p, sid), type).toBe(en_)
     await setLocale('de')
     for (const [type, p, sid, , de_] of cases) expect(say(type, p, sid), type).toBe(de_)
+  })
+
+  it('a game invite names the app; two inviters read in the plural; no app name keeps the title', () => {
+    expect(say('app_challenge', params(['Ben', 'Anna'], { space_name: 'Checkers' })))
+      .toBe('Ben and Anna invited you to play Checkers')
+    // A row from before the app's name rode along ("challenged you to
+    // chess") or for an app the registry didn't know: the server's title.
+    expect(say('app_challenge', params(['Ben'], { space_name: null }))).toBe('TITLE')
   })
 
   it('a space notice whose space name is unknown keeps its title', () => {

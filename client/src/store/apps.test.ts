@@ -16,6 +16,8 @@ import {
   loadProtectionStatus,
   householdHasProtectedMinor,
   catalogEnabled,
+  catalogFreshness,
+  catalogReached,
   _resetAppsForTest,
 } from './apps'
 
@@ -209,6 +211,52 @@ describe('apps store', () => {
     )
     await expect(loadUpdates()).resolves.toBeUndefined()
     expect(updates.value).toHaveLength(0)
+  })
+
+  it('loadUpdates records when the app list answered and that it is current', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ updates: [], checked_at: '2026-10-29T08:15:00+00:00', stale: false }),
+    )
+    await loadUpdates(true)
+    expect(catalogFreshness.value).toEqual({
+      checkedAt: '2026-10-29T08:15:00+00:00', stale: false, failed: false,
+    })
+    expect(catalogReached()).toBe(true)
+  })
+
+  it('loadUpdates against an app list it could not reach is stale, not "up to date"', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        updates: [{ app_id: 'a1', name: 'Alpha', current_version: '2026.6.4', latest_version: '2026.10.28' }],
+        checked_at: '2026-10-28T20:00:00+00:00',
+        stale: true,
+      }),
+    )
+    await loadUpdates(true)
+    // What the app list said when it last answered still shows.
+    expect(updates.value).toHaveLength(1)
+    expect(catalogFreshness.value.stale).toBe(true)
+    expect(catalogFreshness.value.checkedAt).toBe('2026-10-28T20:00:00+00:00')
+    expect(catalogReached()).toBe(false)
+  })
+
+  it('loadUpdates that errors (nothing held: 503) marks the check failed', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ error: { code: 'APP_CATALOG_UNREACHABLE', detail: 'x' } }, { status: 503 }),
+    )
+    await loadUpdates(true)
+    expect(catalogFreshness.value.failed).toBe(true)
+    expect(catalogReached()).toBe(false)
+  })
+
+  it('loadCatalog reads freshness and loadCatalog(true) asks for a refresh', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ apps: [], enabled: true, checked_at: '2026-10-28T20:00:00+00:00', stale: true }),
+    )
+    await loadCatalog(true)
+    const [url] = fetchMock.mock.calls[0] as [string]
+    expect(url).toBe('api/apps/catalog?refresh=1')
+    expect(catalogFreshness.value.stale).toBe(true)
   })
 
   it('loadUpdates clears updatesChecking after completion', async () => {

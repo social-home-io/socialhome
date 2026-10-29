@@ -22031,6 +22031,28 @@ span.sh-hlv__who { cursor: default; }
 .sh-apps-empty { color: var(--sh-text-muted); }
 .sh-apps-error { color: var(--sh-danger); }
 
+/* "Couldn't reach the app list — showing what we knew at …": the catalog
+   check failed, so the page says so instead of "up to date". */
+.sh-apps-stale {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sh-space-xs) var(--sh-space-sm);
+  margin-top: var(--sh-space-md);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border: 1px solid color-mix(in srgb, var(--sh-warning) 40%, transparent);
+  border-radius: var(--sh-radius-md);
+  background: color-mix(in srgb, var(--sh-warning) 12%, transparent);
+  color: var(--sh-text);
+}
+.sh-apps-stale__text {
+  flex: 1 1 16rem;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--sh-font-size-sm);
+  line-height: 1.4;
+}
+
 /* Individual installed-app card */
 .sh-app-card__header {
   display: flex;

@@ -97,6 +97,15 @@ _SEEN_OPEN_SESSIONS_MAX = 4096
 log = logging.getLogger(__name__)
 
 
+def with_household(person: str, household: str | None) -> str:
+    """``"Ben · Familie Okafor"`` — a person from another household, named
+    with it so two people called "Admin" in two households read apart.
+    Just *person* when the household is unknown or has the same name."""
+    if not household or household == person:
+        return person
+    return f"{person} · {household}"
+
+
 class AppFederationService(ProtectionGateMixin):
     """Bridge between the federation layer and Social Home Apps.
 
@@ -214,7 +223,13 @@ class AppFederationService(ProtectionGateMixin):
 
         Each contact is a dict with keys:
         ``instance_id``, ``user_ref``, ``display_name``, ``is_local``,
-        ``online``.
+        ``online``, ``person_name`` and ``household_name``.
+
+        Two households can each have an "Admin" or a "Ben": a person from
+        another household reads "Ben · Familie Okafor" in ``display_name``
+        (:func:`with_household`), so an app's picker tells them apart
+        without knowing about households. ``person_name`` is the bare name
+        and ``household_name`` the household's (``None`` for your own).
 
         Remote online presence is not yet wired in — ``online`` is always
         ``False`` for remote contacts (deferred to a future wiring task).
@@ -244,17 +259,26 @@ class AppFederationService(ProtectionGateMixin):
                     "display_name": u.display_name,
                     "is_local": True,
                     "online": u.user_id in connected,
+                    "person_name": u.display_name,
+                    "household_name": None,
                 }
             )
 
+        households: dict[str, str | None] = {}
         for r in await self._user_repo.list_all_known_remote():
             if r.user_id in blocked_ids:
                 continue
+            if r.instance_id not in households:
+                households[r.instance_id] = await self._household_name(r.instance_id)
+            household = households[r.instance_id]
+            person = r.display_name or r.remote_username
             out.append(
                 {
                     "instance_id": r.instance_id,
                     "user_ref": r.remote_username,
-                    "display_name": r.display_name or r.remote_username,
+                    "display_name": with_household(person, household),
+                    "person_name": person,
+                    "household_name": household,
                     "is_local": False,
                     "online": await self._remote_online(
                         r.instance_id, r.remote_username
@@ -608,23 +632,30 @@ class AppFederationService(ProtectionGateMixin):
     ) -> str:
         """Resolve a human label for a remote challenge initiator.
 
-        Order: the remote user's federated ``display_name`` (when ``from_user``
-        is known) → the peer instance's display name → the raw
-        ``from_instance`` id as a last resort. Never a stable cross-household
-        id beyond the fallback. ``remote`` lets a caller that already resolved
-        the initiator (e.g. for a block check) pass the row to avoid a second
-        lookup.
+        Order: the remote user's federated ``display_name`` with their
+        household (``"Ben · Familie Okafor"``, :func:`with_household`, when
+        ``from_user`` is known) → the peer household's display name → the
+        raw ``from_instance`` id as a last resort. Never a stable
+        cross-household id beyond the fallback. ``remote`` lets a caller
+        that already resolved the initiator (e.g. for a block check) pass
+        the row to avoid a second lookup.
         """
         if remote is None and from_user:
             remote = await self._user_repo.get_remote_by_member(
                 from_instance, from_user
             )
+        household = await self._household_name(from_instance)
         if remote is not None and remote.display_name:
-            return remote.display_name
-        inst = await self._federation_repo.get_instance(from_instance)
-        if inst is not None:
-            return inst.effective_display_name
-        return from_instance
+            return with_household(remote.display_name, household)
+        return household or from_instance
+
+    async def _household_name(self, instance_id: str) -> str | None:
+        """A paired household's name as this household shows it (its local
+        alias, else its own display name), or ``None`` if unknown."""
+        inst = await self._federation_repo.get_instance(instance_id)
+        if inst is None:
+            return None
+        return inst.effective_display_name.strip() or None
 
     async def _remote_online(self, instance_id: str, remote_username: str) -> bool:
         """Return whether a remote user has a live session.
