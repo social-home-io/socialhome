@@ -2708,8 +2708,11 @@ def _build_middleware(config: Config, limiter: RateLimiter):
             # call touches one key of the caller's own data, at most
             # ``APP_KV_MAX_VALUE_BYTES`` (64 KiB) — ≤ 300 × 64 KiB ≈ 19 MiB a
             # minute per person at the worst, inside the 500-key quota, local
-            # only (never federated).
-            "/api/apps/*/store*": (300, 60),
+            # only (never federated). Method rules on the store's own verbs:
+            # fnmatch's ``*`` crosses ``/``, so a path rule would also take
+            # ``POST …/sessions/store…/accept`` out of the default bucket.
+            "GET|PUT|DELETE /api/apps/*/store/*": (300, 60),
+            "GET /api/apps/*/store": (300, 60),
             # GPS pings: 10 a minute per PERSON is enforced by the view
             # (``routes/presence.py``) — Home Assistant posts the whole
             # household's with one token. This is only the ceiling for that

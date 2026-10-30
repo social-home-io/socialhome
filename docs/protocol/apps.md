@@ -354,7 +354,7 @@ thinking") and raises nothing.
   move is in front of the person.
 - **Read again.** Opening the app reads its rows: when it takes its held
   messages (`POST …/held`) the games it took are published as
-  `AppTurnsSeen` and their rows read as read on every device; a tab coming
+  `AppTurnsSeen` and their rows read as read on every device (every row about that game — a decline or an ended game too, which the app now shows); a tab coming
   back to the front reads the turn rows it heard of meanwhile
   (`POST /api/notifications/read-objects`). The next turn re-opens the row.
 

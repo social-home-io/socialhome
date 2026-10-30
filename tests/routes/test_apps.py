@@ -2288,7 +2288,20 @@ async def test_app_saved_data_has_its_own_rate_limit_bucket(client):
     assert r.status == 200
 
 
-# ── Catalog v2 on the wire, "Ask an admin", "Needs a newer Social Home" ──
+async def test_the_store_bucket_takes_only_store_calls(client):
+    """A session id that starts with "store" must not move accept /
+    decline into the looser store bucket: they keep the 60/min default."""
+    await _seed_installed_enabled_app(client._db)
+    statuses = [
+        (
+            await client.post(
+                "/api/apps/com.example.hello/sessions/storeX/accept",
+                headers=_auth(client._tok),
+            )
+        ).status
+        for _ in range(61)
+    ]
+    assert 429 in statuses
 
 
 def _v2_catalog_entry() -> AppCatalogEntry:
