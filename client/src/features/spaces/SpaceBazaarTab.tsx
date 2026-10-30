@@ -78,7 +78,7 @@ export function SpaceBazaarTab({ spaceId, canSell = true, follower = false }: {
         <Button variant="secondary" onClick={() => { selected.value = null }}>
           ← {t('bazaar.back')}
         </Button>
-        <BazaarPostBody postId={selected.value.post_id} />
+        <BazaarPostBody postId={selected.value.post_id} detail />
       </div>
     )
   }

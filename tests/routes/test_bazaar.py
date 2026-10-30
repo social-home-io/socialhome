@@ -164,3 +164,158 @@ async def test_ask_refuses_followers_the_seller_and_strangers(client):
     assert r.status == 404
     r = await client.get("/api/bazaar/no-such-listing/threads", headers=fern)
     assert r.status == 404
+
+
+# ── Questions and answers (v_75) — /api/bazaar/{id}/faq ─────────────────
+
+
+async def test_the_seller_adds_edits_and_removes_questions_and_answers(client):
+    seller = _auth(client._tok)
+    sid = await _make_space(client)
+    listing = await _make_listing(client, sid)
+    pid = listing["post_id"]
+    r = await client.post(
+        f"/api/bazaar/{pid}/faq",
+        json={"question": "  Does it\n fold? ", "answer": "Yes,\r\nflat."},
+        headers=seller,
+    )
+    assert r.status == 201, await r.text()
+    entry = await r.json()
+    assert entry["question"] == "Does it fold?"
+    assert entry["answer"] == "Yes,\nflat."
+    assert set(entry) == {"entry_id", "question", "answer", "position"}
+    # The seller rewords the question.
+    r = await client.patch(
+        f"/api/bazaar/{pid}/faq/{entry['entry_id']}",
+        json={"question": "Can it fold flat?", "answer": "Yes."},
+        headers=seller,
+    )
+    assert r.status == 200, await r.text()
+    # Everyone who sees the listing reads it — a follower included.
+    fern = await _seat_user(client, sid, "fern", "subscriber")
+    r = await client.get(f"/api/bazaar/{pid}/faq", headers=fern)
+    assert r.status == 200
+    assert [(e["question"], e["answer"]) for e in await r.json()] == [
+        ("Can it fold flat?", "Yes.")
+    ]
+    detail = await (await client.get(f"/api/bazaar/{pid}", headers=fern)).json()
+    assert [e["entry_id"] for e in detail["faq"]] == [entry["entry_id"]]
+    r = await client.delete(
+        f"/api/bazaar/{pid}/faq/{entry['entry_id']}", headers=seller
+    )
+    assert r.status == 204
+    assert await (await client.get(f"/api/bazaar/{pid}/faq", headers=fern)).json() == []
+    r = await client.delete(
+        f"/api/bazaar/{pid}/faq/{entry['entry_id']}", headers=seller
+    )
+    assert r.status == 404
+
+
+async def test_only_the_seller_writes_the_faq(client):
+    sid = await _make_space(client)
+    pid = (await _make_listing(client, sid))["post_id"]
+    mia = await _seat_user(client, sid, "mia", "member")
+    r = await client.post(
+        f"/api/bazaar/{pid}/faq", json={"question": "Q?", "answer": "A."}, headers=mia
+    )
+    assert r.status == 403
+    # A stranger to the space can neither read nor write: the unknown id's 404.
+    other = await _make_space(client)
+    stranger = await _seat_user(client, other, "sam", "member")
+    for method, path in (
+        ("get", f"/api/bazaar/{pid}/faq"),
+        ("post", f"/api/bazaar/{pid}/faq"),
+        ("patch", f"/api/bazaar/{pid}/faq/{'a' * 32}"),
+        ("delete", f"/api/bazaar/{pid}/faq/{'a' * 32}"),
+    ):
+        r = await getattr(client, method)(
+            path, json={"question": "Q?", "answer": "A."}, headers=stranger
+        )
+        assert r.status == 404, (method, path)
+
+
+async def test_faq_bounds_are_enforced(client):
+    seller = _auth(client._tok)
+    sid = await _make_space(client)
+    pid = (await _make_listing(client, sid))["post_id"]
+    for body in (
+        {"question": "", "answer": "A"},
+        {"question": "x" * 201, "answer": "A"},
+        {"question": "Q", "answer": "y" * 501},
+        {"question": "Q", "answer": None},
+        {"question": "bell\x07", "answer": "A"},
+    ):
+        r = await client.post(f"/api/bazaar/{pid}/faq", json=body, headers=seller)
+        assert r.status == 422, body
+        assert (await r.json())["error"]["code"] == "BAZAAR_FAQ_TEXT"
+    for n in range(10):
+        r = await client.post(
+            f"/api/bazaar/{pid}/faq",
+            json={"question": f"Q{n}", "answer": "A"},
+            headers=seller,
+        )
+        assert r.status == 201
+    r = await client.post(
+        f"/api/bazaar/{pid}/faq",
+        json={"question": "Q11", "answer": "A"},
+        headers=seller,
+    )
+    assert r.status == 409
+    assert (await r.json())["error"]["code"] == "BAZAAR_FAQ_FULL"
+
+
+async def test_no_faq_changes_once_the_listing_ended(client):
+    seller = _auth(client._tok)
+    sid = await _make_space(client)
+    pid = (await _make_listing(client, sid))["post_id"]
+    r = await client.post(
+        f"/api/bazaar/{pid}/faq", json={"question": "Q", "answer": "A"}, headers=seller
+    )
+    entry = await r.json()
+    assert (await client.delete(f"/api/bazaar/{pid}", headers=seller)).status == 204
+    r = await client.post(
+        f"/api/bazaar/{pid}/faq", json={"question": "Q2", "answer": "A"}, headers=seller
+    )
+    assert r.status == 422
+    # What was published stays readable with the ended listing.
+    faq = await (await client.get(f"/api/bazaar/{pid}/faq", headers=seller)).json()
+    assert [e["entry_id"] for e in faq] == [entry["entry_id"]]
+
+
+async def test_a_protected_seller_cannot_write_the_faq(client):
+    seller = _auth(client._tok)
+    sid = await _make_space(client)
+    pid = (await _make_listing(client, sid))["post_id"]
+    await client._db.enqueue(
+        "UPDATE users SET child_protection_enabled=1 WHERE user_id=?",
+        (client._uid,),
+    )
+    r = await client.post(
+        f"/api/bazaar/{pid}/faq", json={"question": "Q", "answer": "A"}, headers=seller
+    )
+    assert r.status == 403
+    assert (await r.json())["error"]["code"] == "ACCOUNT_PROTECTED"
+
+
+async def test_faq_changes_are_rate_capped(client):
+    seller = _auth(client._tok)
+    sid = await _make_space(client)
+    pid = (await _make_listing(client, sid))["post_id"]
+    r = await client.post(
+        f"/api/bazaar/{pid}/faq", json={"question": "Q", "answer": "A"}, headers=seller
+    )
+    eid = (await r.json())["entry_id"]
+    for n in range(29):
+        r = await client.patch(
+            f"/api/bazaar/{pid}/faq/{eid}",
+            json={"question": f"Q{n}", "answer": "A"},
+            headers=seller,
+        )
+        assert r.status == 200, n
+    r = await client.patch(
+        f"/api/bazaar/{pid}/faq/{eid}",
+        json={"question": "Q", "answer": "A"},
+        headers=seller,
+    )
+    assert r.status == 429
+    assert (await r.json())["error"]["code"] == "BAZAAR_FAQ_RATE_LIMITED"

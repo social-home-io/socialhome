@@ -1247,6 +1247,18 @@ export interface BazaarListing {
    *  (a writer seat in the listing's space)? ``false`` for a follower,
    *  who looks and saves but doesn't trade. Absent → assume yes. */
   viewer_can_trade?: boolean
+  /** ``GET /api/bazaar/{id}`` only: the seller's questions and answers
+   *  (v_75), in display order. Absent on list rows. */
+  faq?: BazaarFaqEntry[]
+}
+
+/** One question and its answer on a listing (v_75). Never names who
+ *  asked; only the seller writes them. */
+export interface BazaarFaqEntry {
+  entry_id: string
+  question: string
+  answer: string
+  position: number
 }
 
 export interface BazaarBid {

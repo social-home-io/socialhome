@@ -584,6 +584,20 @@ That single command runs the full sequence:
    ``tests/protocol/test_bazaar_thread_federation.py`` (direct, routed under
    ``SPACE_ROUTED``, refusals).
 
+9h. ``bazaar-faq`` (v_75, a listing's questions and answers) — right after
+   ``bazaar-ask``, on **c**'s lamp. **c** (the seller) adds two questions
+   and answers (``POST /api/bazaar/{id}/faq``); each reaches **a**, **b**
+   and **d** — every member household, the follower's included, since it
+   reads the listing (``BAZAAR_LISTING_FAQ_UPDATED``, one entry per event).
+   **c** rewords one (``PATCH``) and removes the other (``DELETE``); all
+   three converge and nobody keeps the removed words. **a** (not the
+   seller) is refused (403). **a**, **b**, **c** see each other at
+   ``>= FederationCapability.MIN_FOR_BAZAAR_FAQ`` (v_75); ``verify`` pins
+   the threshold at 75 and re-checks **a**, **b**, **d** hold the reworded
+   entry. Forged sellers, bounds on receipt, the late joiner over sync and
+   ``SPACE_ROUTED`` for an unpaired member household are
+   ``tests/protocol/test_bazaar_faq_federation.py``.
+
 9z. ``highlight-audience`` (v_70, "Change for all of today") — **a**
    narrows today's highlight to **b**'s household
    (``PATCH /api/highlights/{id}/audience``): **c** deletes it and keeps a

@@ -230,3 +230,35 @@ describe('BazaarPostBody — withdrawing a bid', () => {
     await waitFor(() => expect(withdrawBtn(c)).toBeNull(), { timeout: 3_000 })
   })
 })
+
+describe('BazaarPostBody — questions and answers (v_75)', () => {
+  beforeEach(() => {
+    apiGet.mockReset()
+    currentUser.value = { user_id: 'buyer1' } as never
+  })
+
+  const faq = [{ entry_id: 'e1', question: 'Does it fold?', answer: 'Yes.', position: 0 }]
+
+  it('folds the FAQ on a feed card', async () => {
+    mockApi(listing({ mode: 'fixed', price: 1000, faq }), [], [])
+    const { container } = render(<BazaarPostBody postId="p1" />)
+    await waitFor(() => expect(container.querySelector('details.sh-bazaar-faq')).toBeTruthy())
+    expect(container.querySelector('details.sh-bazaar-faq')!.hasAttribute('open')).toBe(false)
+    expect(container.textContent).toContain('Questions and answers')
+  })
+
+  it('shows the FAQ open on the listing detail', async () => {
+    mockApi(listing({ mode: 'fixed', price: 1000, faq }), [], [])
+    const { container, findByText } = render(<BazaarPostBody postId="p1" detail />)
+    await findByText('Does it fold?')
+    expect(container.querySelector('details.sh-bazaar-faq')).toBeNull()
+    expect(container.querySelector('section.sh-bazaar-faq')).toBeTruthy()
+  })
+
+  it('shows a buyer nothing when the listing has no FAQ', async () => {
+    mockApi(listing({ mode: 'fixed', price: 1000 }), [], [])
+    const { container } = render(<BazaarPostBody postId="p1" detail />)
+    await waitFor(() => expect(container.textContent).toContain('Vinyl'))
+    expect(container.querySelector('.sh-bazaar-faq')).toBeNull()
+  })
+})

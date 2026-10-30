@@ -73,6 +73,8 @@ from .bazaar import (
     BazaarBidRejectView,
     BazaarCollectionView,
     BazaarDetailView,
+    BazaarFaqCollectionView,
+    BazaarFaqEntryView,
     BazaarOfferAcceptView,
     BazaarOfferCollectionView,
     BazaarOfferDetailView,
@@ -1191,6 +1193,9 @@ def setup_routes(app: web.Application) -> None:
     # "Ask the seller" (v_73).
     app.router.add_view("/api/bazaar/{id}/ask", BazaarAskView)
     app.router.add_view("/api/bazaar/{id}/threads", BazaarThreadCollectionView)
+    # v_75 — a listing's questions and answers (the seller writes them).
+    app.router.add_view("/api/bazaar/{id}/faq", BazaarFaqCollectionView)
+    app.router.add_view("/api/bazaar/{id}/faq/{entry_id}", BazaarFaqEntryView)
     app.router.add_view("/api/me/bazaar/saved", MySavedBazaarView)
 
     # ── Link previews (composer live card) ──────────────────────────────

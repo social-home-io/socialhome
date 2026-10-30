@@ -281,3 +281,37 @@ async def test_export_includes_the_users_moment_saves_only(env):
         }
     ]
     assert "moments" not in out.tables
+
+
+async def test_export_includes_the_sellers_own_listing_faq_only(env):
+    """A listing's questions and answers (v_75) are the seller's words;
+    another seller's, and removal markers (no words), are left out."""
+    db, svc = env
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp','S','host','alice','ab')"
+    )
+    for pid, seller in (("l-alice", "alice-id"), ("l-bob", "bob-id")):
+        await db.enqueue(
+            "INSERT INTO space_posts(id, space_id, author, type, content)"
+            " VALUES(?, 'sp', ?, 'bazaar', 'x')",
+            (pid, seller),
+        )
+        await db.enqueue(
+            "INSERT INTO bazaar_listings(post_id, space_id, seller_user_id, mode,"
+            " title, end_time, currency) VALUES(?, 'sp', ?, 'fixed', 'T',"
+            " '2099-01-01T00:00:00+00:00', 'EUR')",
+            (pid, seller),
+        )
+    for pid, eid, removed in (
+        ("l-alice", "e1", 0),
+        ("l-alice", "e2", 1),
+        ("l-bob", "e3", 0),
+    ):
+        await db.enqueue(
+            "INSERT INTO bazaar_listing_faq(listing_post_id, entry_id, question,"
+            " answer, rev, removed) VALUES(?, ?, 'Q', 'A', 1, ?)",
+            (pid, eid, removed),
+        )
+    out = await svc.export_for_user("alice-id")
+    assert [r["entry_id"] for r in out.tables["bazaar_listing_faq"]] == ["e1"]

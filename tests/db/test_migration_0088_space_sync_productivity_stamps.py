@@ -52,6 +52,7 @@ TOUCHING: dict[str, tuple[str, frozenset[str]]] = {
     "space_schedule_poll_meta": ("post", frozenset()),
     "space_schedule_slots": ("post", frozenset()),
     "bazaar_listings": ("post", frozenset()),
+    "bazaar_listing_faq": ("post", frozenset({"updated_at"})),
     "space_page_snapshots": ("page", frozenset()),
 }
 

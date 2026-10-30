@@ -1,5 +1,5 @@
 import { Fragment } from 'preact'
-import { useEffect, useMemo, useRef, useLayoutEffect } from 'preact/hooks'
+import { useEffect, useMemo, useRef, useLayoutEffect, useState } from 'preact/hooks'
 import { signal, type Signal } from '@preact/signals'
 import { useLocation } from 'preact-iso'
 import { api } from '@/api'
@@ -29,6 +29,7 @@ import { t, formatLocale, isOne } from '@/i18n/i18n'
 import { formatCoords, parseDmLocation, toDmLocationContent } from '@/utils/dmLocation'
 import { ComposerAttachMenu } from './ComposerAttachMenu'
 import { ListingThreadCard } from './ListingThreadCard'
+import { BazaarFaqEditor } from '@/components/BazaarListingFaq'
 import { DmLocationMessage } from './DmLocationMessage'
 import { GroupInfoDialog } from './GroupInfoDialog'
 import { MuteButton } from './ConversationMute'
@@ -804,6 +805,13 @@ export function ConversationView({
   const allowChanges = listingCard === null
   const readOnly = readOnlyProp || listingClosed
   const readOnlyNote = listingClosed ? t('bazaar.ask.closed_note') : readOnlyNoteProp
+  // "Add to FAQ" (v_75): the seller turns a buyer's question into an entry
+  // of the listing's questions and answers — pre-filled, reworded before
+  // anything is published, never naming the buyer. Only while the listing
+  // is active (the FAQ is frozen once it ended).
+  const canAddToFaq = listingCard !== null && listingCard.role === 'seller'
+    && listingCard.status === 'active'
+  const [faqDraft, setFaqDraft] = useState<{ question: string; answer: string } | null>(null)
   const emptyNote = emptyNoteProp
     ?? (listingCard !== null && listingCard.writable
       ? (listingCard.role === 'buyer'
@@ -2174,6 +2182,7 @@ export function ConversationView({
         + '.sh-message-quote,'
         + '.sh-reaction-strip,'
         + '.sh-message-reply-btn,'
+        + '.sh-message-faq-btn,'
         + '.sh-message-react-btn',
       )
     ) {
@@ -2309,6 +2318,17 @@ export function ConversationView({
     )
   }
   const myUserId = currentUser.value?.user_id
+
+  /** Open the FAQ editor from a buyer's message: their words as the
+   *  question, the seller's next reply (if any) as the answer. */
+  const openFaqFrom = (m: Message) => {
+    const list = messages.value
+    const at = list.findIndex(x => x.id === m.id)
+    const reply = at >= 0
+      ? list.slice(at + 1).find(x => x.sender_user_id === myUserId && !x.deleted && x.content)
+      : undefined
+    setFaqDraft({ question: m.content, answer: reply?.content ?? '' })
+  }
 
   const handleScroll = () => {
     const el = messagesScrollRef.current
@@ -2797,6 +2817,18 @@ export function ConversationView({
                         onMention={openMentioned} />}
                 </p>
               )}
+              {canAddToFaq && !mine && !m.deleted && m.content && (
+                <button
+                  type="button"
+                  class="sh-message-faq-btn"
+                  aria-label={t('bazaar.faq.add_from_thread_aria', {
+                    name: senderName(m.sender_user_id),
+                  })}
+                  onClick={() => openFaqFrom(m)}
+                >
+                  <span aria-hidden="true">＋</span> {t('bazaar.faq.add_from_thread')}
+                </button>
+              )}
               {showFooter && (
                 <div class="sh-message-meta">
                   <time>{new Date(m.created_at).toLocaleTimeString(formatLocale(),
@@ -3172,6 +3204,13 @@ export function ConversationView({
                 glyph: '↩',
                 onClick: () => { replyTo.value = target },
               }]),
+          ...(canAddToFaq && target.sender_user_id !== myUserId && target.content
+            ? [{
+                label: t('bazaar.faq.add_from_thread'),
+                glyph: '＋',
+                onClick: () => { openFaqFrom(target) },
+              }]
+            : []),
           ...(target.content
             ? [{
                 label: t('dms.copy_text'),
@@ -3217,6 +3256,15 @@ export function ConversationView({
           />
         )
       })()}
+      {listingCard !== null && canAddToFaq && (
+        <BazaarFaqEditor
+          open={faqDraft !== null}
+          postId={listingCard.post_id}
+          initialQuestion={faqDraft?.question ?? ''}
+          initialAnswer={faqDraft?.answer ?? ''}
+          onClose={() => setFaqDraft(null)}
+        />
+      )}
       {/* Full emoji picker — shown when the user taps "+" in the
        *  context sheet. Stays mounted over the thread until the
        *  user picks a glyph or closes; tapping a result toggles

@@ -83,7 +83,9 @@ FULL_RESYNC_INTERVAL_S: float = 24 * 3600.0
 #: * 4 — migration 0096: a ``space_zones`` record carries ``icon``.
 #: * 5 — migration 0122: ``member_pictures`` streams incrementally. A
 #:   picture changed before the upgrade carries no stamp.
-SYNC_SHAPE_VERSION: int = 5
+#: * 6 — migration 0135: a ``bazaar`` record carries the listing's
+#:   questions and answers (``faq``, v_75).
+SYNC_SHAPE_VERSION: int = 6
 
 
 #: The requester's protocol version counts in the shape only where a
@@ -97,7 +99,11 @@ SYNC_VERSION_HISTORY_THROUGH: int = 64
 #: a receiver now stores, a version gate in ``provider._exporter_for`` (a
 #: tripwire test checks the gates). A bump not listed here keeps every
 #: watermark, so it costs no household a full stream.
-SYNC_RECORD_LINES: tuple[int, ...] = ()
+#:
+#: * 75 — a ``bazaar`` record's ``faq`` (a listing's questions and
+#:   answers), which a v_75 receiver stores: a household crossing it gets
+#:   one full stream, so FAQs it was not sent while older reach it.
+SYNC_RECORD_LINES: tuple[int, ...] = (75,)
 
 
 def sync_version_bucket(peer_version: int) -> int:

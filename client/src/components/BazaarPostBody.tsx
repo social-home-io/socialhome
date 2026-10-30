@@ -13,6 +13,7 @@ import { Button } from './Button'
 import { ProtectedNotice, isRestricted } from './ProtectedNotice'
 import { BazaarOffersPanel } from './BazaarOffersPanel'
 import { AskSellerButton, ListingQuestions } from './BazaarAskSeller'
+import { ListingFaq } from './BazaarListingFaq'
 import { ImageRenderer } from './FileRenderer'
 import { SaveListingButton } from './SaveListingButton'
 import { showToast } from './Toast'
@@ -53,9 +54,12 @@ function formatCountdown(iso: string): string {
 interface Props {
   postId: string
   onUpdated?: () => void
+  /** The listing's own page (the Bazaar tab / page detail): its questions
+   *  and answers show open. On a feed card they start folded. */
+  detail?: boolean
 }
 
-export function BazaarPostBody({ postId, onUpdated }: Props) {
+export function BazaarPostBody({ postId, onUpdated, detail = false }: Props) {
   const [listing, setListing] = useState<BazaarListing | null>(null)
   const [bids, setBids] = useState<BazaarBid[]>([])
   // Offers (offer / negotiable modes) live in a separate table from bids.
@@ -75,6 +79,10 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
   // stuck on "Loading listing…" forever.  Surface a calmer
   // placeholder for the missing case instead.
   const [loadState, setLoadState] = useState<'loading' | 'missing' | 'error' | 'ok'>('loading')
+
+  // Bumped when this viewer changed the FAQ: refetch the listing now
+  // (other viewers refresh on the ``bazaar.listing_updated`` frame).
+  const [reload, setReload] = useState(0)
 
   useEffect(() => {
     let stopped = false
@@ -122,7 +130,7 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
       off1(); off2(); off3(); off4(); off5(); off6(); off7()
       clearInterval(timer)
     }
-  }, [postId])
+  }, [postId, reload])
 
   // Re-render the moment the listing's end_time passes: a bid can't be
   // withdrawn from then on (the server answers 409), though the status
@@ -395,6 +403,16 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
           <span class="sh-bazaar-meta-pill">{t('bazaar.card.cancelled')}</span>
         )}
       </div>
+
+      {/* The seller's questions and answers (v_75) — read before
+       *  buying or asking. Everyone who sees the listing reads them. */}
+      <ListingFaq
+        postId={postId}
+        entries={listing.faq ?? []}
+        isSeller={isSeller}
+        editable={!closed}
+        collapsible={!detail}
+        onChanged={() => setReload(n => n + 1)} />
 
       {!closed && me && !isSeller && isRestricted('bazaar') && (
         <ProtectedNotice capability="bazaar" />

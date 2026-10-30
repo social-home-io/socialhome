@@ -73,6 +73,7 @@ def test_moment_keys_are_never_exported():
     assert "timetables" in EXPORTABLE_TABLES
     assert "space_timetables" in EXPORTABLE_TABLES
     assert "household_zones" in EXPORTABLE_TABLES
+    assert "bazaar_listing_faq" in EXPORTABLE_TABLES
 
 
 def test_moment_share_keys_are_never_exported():

@@ -305,7 +305,7 @@ Covered — streamed row by row when changed:
 
 | Resource(s) | Stamped table | Also stamped by |
 |---|---|---|
-| `posts`, `posts_deleted`, `polls`, `schedules`, `bazaar` | `space_posts` | reactions (a column), moderation / soft-delete (an update), and a change to the post's `space_polls` / `space_poll_options` / `space_poll_votes` / `space_schedule_poll_meta` / `space_schedule_slots` / `bazaar_listings` rows (insert, update, delete), which **touches** the post (`sync_seq = NULL`, re-stamped by the post's trigger) |
+| `posts`, `posts_deleted`, `polls`, `schedules`, `bazaar` | `space_posts` | reactions (a column), moderation / soft-delete (an update), and a change to the post's `space_polls` / `space_poll_options` / `space_poll_votes` / `space_schedule_poll_meta` / `space_schedule_slots` / `bazaar_listings` / `bazaar_listing_faq` rows (insert, update, delete), which **touches** the post (`sync_seq = NULL`, re-stamped by the post's trigger) |
 | `comments`, `comments_deleted` | `space_post_comments` | |
 | `chat_messages`, `chat_messages_deleted` | `conversation_messages` | |
 | `gallery`, `gallery_albums_deleted`, `gallery_items_deleted` | `gallery_albums`, `gallery_items` | the 0085 album trigger that tombstones an album's items |

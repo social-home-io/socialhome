@@ -8,6 +8,7 @@ from datetime import UTC, date, datetime
 
 import pytest
 
+from socialhome.domain.bazaar_faq import BazaarFaqEntry
 from socialhome.domain.calendar import CalendarEvent
 from socialhome.domain.conversation import (
     Conversation,
@@ -16,6 +17,7 @@ from socialhome.domain.conversation import (
     SystemChatScope,
 )
 from socialhome.domain.events import (
+    BazaarListingFaqChanged,
     CalendarEventCreated,
     CalendarEventDeleted,
     CalendarEventUpdated,
@@ -473,6 +475,28 @@ async def test_post_edited_fans_to_household(env):
     await ws.register("u1", sock)
     await bus.publish(PostEdited(post=_post()))
     assert any("post.edited" in m for m in sock.sent)
+
+
+async def test_a_listing_faq_change_refreshes_open_listings_by_id_only(env):
+    """v_75: the existing ``bazaar.listing_updated`` frame, ids only — never
+    the question or the answer."""
+    _svc, bus, ws = env
+    sock = _FakeWS()
+    await ws.register("u1", sock)
+    entry = BazaarFaqEntry(
+        listing_post_id="bzr-1",
+        entry_id="ab" * 16,
+        question="Secret question?",
+        answer="Secret answer.",
+        position=0,
+        rev=1,
+    )
+    await bus.publish(
+        BazaarListingFaqChanged(space_id="sp-1", seller_user_id="u1", entry=entry)
+    )
+    frames = [m for m in sock.sent if "bazaar.listing_updated" in m]
+    assert frames and "bzr-1" in frames[0]
+    assert "Secret" not in frames[0]
 
 
 async def test_post_deleted_carries_id_only(env):

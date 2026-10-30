@@ -93,6 +93,8 @@ EXPORTABLE_TABLES: tuple[str, ...] = (
     "notifications",
     "bazaar_listings",
     "bazaar_bids",
+    # A listing's questions and answers (v_75) — after its listing (FK).
+    "bazaar_listing_faq",
 )
 
 #: Tables whose names appear in the export but must NEVER appear on the

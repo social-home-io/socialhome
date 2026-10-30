@@ -1148,7 +1148,27 @@ from __future__ import annotations
 #:   household below v_74 is sent nothing, and the buyer's "Ask the seller"
 #:   answers 409 ``SELLER_HOUSEHOLD_TOO_OLD`` (the SPA says the seller's
 #:   household needs an update). Labelled "Ask the seller about a listing".
-OURS: int = 74
+#: * **v_75** (2026-10-30) — **A listing's questions and answers**. The
+#:   seller publishes up to 10 short questions with their answers on a
+#:   listing (``bazaar_listing_faq``, migration 0135), often taken from an
+#:   "Ask the seller" thread and reworded; an entry never names the asker.
+#:   One new event,
+#:   :attr:`~socialhome.domain.federation.FederationEventType
+#:   .BAZAAR_LISTING_FAQ_UPDATED` — ONE entry per event (a delta: added,
+#:   edited or removed), ``space_id`` in the clear; ``listing_post_id``,
+#:   ``entry_id``, ``rev``, ``position``, ``removed``, ``question`` (≤ 200)
+#:   and ``answer`` (≤ 500) encrypted — from the seller's household to every
+#:   member household (``broadcast_to_space_members``: direct,
+#:   ``SPACE_ROUTED`` across a relay, the link-joined relay seat; never a
+#:   GFS). The receiver takes it only for a listing it holds in that space,
+#:   still active, whose seller holds a writer seat on the sending
+#:   household; newer ``rev`` wins, a removal is final, ≤ 10 live entries.
+#:   The §25.6 ``bazaar`` sync record carries the entries (a late joiner
+#:   gets them), so v_75 is a sync line (``SYNC_RECORD_LINES``).
+#:   **Fallback**: a member household below v_75 is sent nothing — its
+#:   people see the listing without questions and answers, as before.
+#:   Labelled "Questions and answers on listings".
+OURS: int = 75
 
 
 class FederationCapability:
@@ -1729,6 +1749,12 @@ class FederationCapability:
     #: below it is sent nothing; the buyer's open answers 409
     #: ``SELLER_HOUSEHOLD_TOO_OLD``.
     MIN_FOR_BAZAAR_THREAD = 74
+    #: v_75 — a listing's questions and answers:
+    #: ``BAZAAR_LISTING_FAQ_UPDATED`` from the seller's household to every
+    #: member household, and the ``faq`` field of the §25.6 ``bazaar``
+    #: record. A member household below it is sent nothing — its people see
+    #: the listing without its questions and answers.
+    MIN_FOR_BAZAAR_FAQ = 75
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2011,6 +2037,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_BAZAAR_THREAD,
         "Ask the seller about a listing",
     ),
+    (
+        FederationCapability.MIN_FOR_BAZAAR_FAQ,
+        "Questions and answers on listings",
+    ),
 ]
 
 
@@ -2096,6 +2126,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_APP_SESSION_ENDED: "app_games_end_on_uninstall",
     FederationCapability.MIN_FOR_BAZAAR_OFFERS: "bazaar_offers",
     FederationCapability.MIN_FOR_BAZAAR_THREAD: "bazaar_ask_the_seller",
+    FederationCapability.MIN_FOR_BAZAAR_FAQ: "bazaar_listing_faq",
 }
 
 
@@ -2190,6 +2221,9 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES,
         FederationCapability.MIN_FOR_SPACE_CHAT,
         FederationCapability.MIN_FOR_SPACE_AUTHOR_PROFILE,
+        # A behind member household's people see every listing without its
+        # questions and answers.
+        FederationCapability.MIN_FOR_BAZAAR_FAQ,
     }
 )
 

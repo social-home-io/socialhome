@@ -7,6 +7,11 @@ from datetime import UTC
 
 import pytest
 
+from socialhome.domain.bazaar_faq import (
+    BazaarFaqEntry,
+    BazaarFaqEntryNotFoundError,
+    BazaarFaqFullError,
+)
 from socialhome.domain.post import BazaarBid, BazaarListing, BazaarMode, BazaarStatus
 from socialhome.repositories.bazaar_repo import (
     BidStateError,
@@ -811,3 +816,123 @@ async def test_mark_sold_takes_the_announced_sale_time(env):
         sold_at="2026-10-30 11:00:00",
     )
     assert (await env.bazaar_repo.get_listing("pid-s")).sold_at == "2026-10-30 11:00:00"
+
+
+# ── Questions and answers (``bazaar_listing_faq``, v_75) ─────────────────
+
+
+def _faq(pid: str, entry_id: str, rev: int, **kw) -> BazaarFaqEntry:
+    fields = {
+        "listing_post_id": pid,
+        "entry_id": entry_id,
+        "question": "Does it fold?",
+        "answer": "Yes, flat.",
+        "position": 0,
+        "rev": rev,
+    }
+    fields.update(kw)
+    return BazaarFaqEntry(**fields)
+
+
+async def test_faq_add_edit_remove_keeps_order_and_counts_revisions(env):
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    repo = env.bazaar_repo
+    first = await repo.add_faq_entry(pid, question="Q1", answer="A1")
+    second = await repo.add_faq_entry(pid, question="Q2", answer="A2")
+    assert (first.position, first.rev) == (0, 1)
+    assert (second.position, second.rev) == (1, 2)
+    edited = await repo.edit_faq_entry(
+        pid, first.entry_id, question="Q1?", answer="A1!"
+    )
+    assert (edited.position, edited.rev) == (0, 3)
+    assert [(e.question, e.answer) for e in await repo.list_faq(pid)] == [
+        ("Q1?", "A1!"),
+        ("Q2", "A2"),
+    ]
+    removed = await repo.remove_faq_entry(pid, second.entry_id)
+    assert removed.removed and removed.rev == 4
+    assert [e.entry_id for e in await repo.list_faq(pid)] == [first.entry_id]
+    # The marker stays (blank) for the sync stream.
+    every = (await repo.list_faq_for_listings([pid]))[pid]
+    marker = next(e for e in every if e.entry_id == second.entry_id)
+    assert marker.removed and marker.question == "" and marker.answer == ""
+    with pytest.raises(BazaarFaqEntryNotFoundError):
+        await repo.edit_faq_entry(pid, second.entry_id, question="x", answer="y")
+    with pytest.raises(BazaarFaqEntryNotFoundError):
+        await repo.remove_faq_entry(pid, "f" * 32)
+
+
+async def test_faq_is_capped_at_ten_live_entries(env):
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    repo = env.bazaar_repo
+    entries = [
+        await repo.add_faq_entry(pid, question=f"Q{n}", answer="A") for n in range(10)
+    ]
+    with pytest.raises(BazaarFaqFullError):
+        await repo.add_faq_entry(pid, question="Q11", answer="A")
+    # A removal frees a place.
+    await repo.remove_faq_entry(pid, entries[0].entry_id)
+    added = await repo.add_faq_entry(pid, question="Q11", answer="A")
+    assert added.position == 10
+
+
+async def test_faq_apply_is_newer_wins_and_removal_is_final(env):
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    repo = env.bazaar_repo
+    eid = "a" * 32
+    assert await repo.apply_faq_entry(_faq(pid, eid, 2, question="v2"))
+    # A replay or an older edit changes nothing.
+    assert not await repo.apply_faq_entry(_faq(pid, eid, 2, question="again"))
+    assert not await repo.apply_faq_entry(_faq(pid, eid, 1, question="v1"))
+    assert [e.question for e in await repo.list_faq(pid)] == ["v2"]
+    assert await repo.apply_faq_entry(_faq(pid, eid, 5, removed=True))
+    # A late edit never brings a removed entry back.
+    assert not await repo.apply_faq_entry(_faq(pid, eid, 9, question="back?"))
+    assert await repo.list_faq(pid) == []
+    # A removal that overtakes the entry leaves a marker the entry can't pass.
+    other = "b" * 32
+    assert await repo.apply_faq_entry(_faq(pid, other, 7, removed=True))
+    assert not await repo.apply_faq_entry(_faq(pid, other, 6, question="late"))
+    assert await repo.list_faq(pid) == []
+
+
+async def test_faq_apply_refuses_an_eleventh_live_entry(env):
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    repo = env.bazaar_repo
+    for n in range(10):
+        assert await repo.apply_faq_entry(_faq(pid, f"{n:032x}", n + 1, position=n))
+    assert not await repo.apply_faq_entry(_faq(pid, "e" * 32, 20, position=10))
+    assert len(await repo.list_faq(pid)) == 10
+
+
+async def test_faq_keeps_at_most_twenty_removal_markers(env):
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    repo = env.bazaar_repo
+    for n in range(25):
+        entry = await repo.add_faq_entry(pid, question=f"Q{n}", answer="A")
+        await repo.remove_faq_entry(pid, entry.entry_id)
+    every = (await repo.list_faq_for_listings([pid]))[pid]
+    assert len(every) == 20 and all(e.removed for e in every)
+    # The newest markers stay; the revision keeps counting up.
+    assert max(e.rev for e in every) == 50
+    assert min(e.rev for e in every) == 12
+
+
+async def test_faq_goes_with_its_listing_and_touches_the_wrapper_post(env):
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    repo = env.bazaar_repo
+    before = await env.db.fetchone(
+        "SELECT sync_seq FROM space_posts WHERE id=?", (pid,)
+    )
+    await repo.add_faq_entry(pid, question="Q", answer="A")
+    after = await env.db.fetchone("SELECT sync_seq FROM space_posts WHERE id=?", (pid,))
+    assert after["sync_seq"] is not None and after["sync_seq"] != before["sync_seq"]
+    await env.db.enqueue("DELETE FROM bazaar_listings WHERE post_id=?", (pid,))
+    assert await repo.list_faq_for_listings([pid]) == {}
+    assert await repo.list_faq_for_listings([]) == {}
