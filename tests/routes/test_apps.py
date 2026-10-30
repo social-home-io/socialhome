@@ -2204,6 +2204,27 @@ async def test_app_messages_have_their_own_rate_limit_bucket(client):
     assert r.status == 200
 
 
+async def test_app_saved_data_has_its_own_rate_limit_bucket(client):
+    """A fast game saves around each move (Battleships: a shot, the board):
+    ``store`` writes and reads no longer share the 60/min ``/api/apps``
+    bucket — 300 a minute, like moves — and don't use it up either."""
+    await _seed_installed_enabled_app(client._db)
+    path = "/api/apps/com.example.hello/store/board"
+    for i in range(150):
+        r = await client.put(
+            path, json={"value": {"shot": i}}, headers=_auth(client._tok)
+        )
+        assert r.status == 200, i
+        r = await client.delete(path, headers=_auth(client._tok))
+        assert r.status == 200, i
+    # 300 writes used the store's whole bucket; the next one waits …
+    r = await client.put(path, json={"value": {}}, headers=_auth(client._tok))
+    assert r.status == 429
+    # … while the rest of /api/apps still has its own 60.
+    r = await client.get("/api/apps", headers=_auth(client._tok))
+    assert r.status == 200
+
+
 # ── Catalog v2 on the wire, "Ask an admin", "Needs a newer Social Home" ──
 
 

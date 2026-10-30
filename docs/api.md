@@ -1390,7 +1390,7 @@ refused with `409 APP_CATALOG_DISABLED`.
 | GET | `/api/apps/{app_id}/store` | Any member | List the caller's per-user KV entries for this app. Returns `{"items": {key: value}}`. |
 | GET | `/api/apps/{app_id}/store/{key}` | Any member | Read one KV entry. Returns `{"key", "value"}`. 404 if the key does not exist. |
 | PUT | `/api/apps/{app_id}/store/{key}` | Any member | Upsert a KV entry. Body: `{"value": <any JSON>}`. 413 if quota exceeded (500 keys / user, 64 KiB per value, 256-char key). 403 `APP_NOT_ENABLED` if the app is disabled, `APP_AGE_RESTRICTED` for a protected minor below `min_age`. 404 if the app is not installed. |
-| DELETE | `/api/apps/{app_id}/store/{key}` | Any member | Delete one KV entry. Returns `{"status": "ok"}`. |
+| DELETE | `/api/apps/{app_id}/store/{key}` | Any member | Delete one KV entry. Returns `{"status": "ok"}`. `store` calls have their own rate-limit bucket (300 / min / user). |
 
 **App permissions.** An app gets only what the household agreed to when
 it was installed: `storage` (saves its own data), `people` (lets you pick
@@ -1796,6 +1796,7 @@ These pages are server-rendered HTML and require no auth.
 | `POST /api/spaces/{id}/ban` | 5 / min / user |
 | `PATCH /api/highlights/{id}/audience` | 6 / hour / user — each change can send the day's frames (≤ 30) to every household it adds, so one author can cause at most 6 × 30 envelopes per added household an hour |
 | `POST /api/apps/{app_id}/messages` | 300 / min / user — its own bucket (a quick game's moves no longer share the 60 / min `/api/apps` default with the store writes around them); each send is one envelope to one household. |
+| `/api/apps/{app_id}/store`, `…/store/{key}` (any method) | 300 / min / user — its own bucket, sized like the moves its writes go with (a fast game saves around each shot); each call touches one key of the caller's own data, ≤ 64 KiB, local only. |
 | `POST /api/link-preview` | 30 / min / user — on top, the service caps **fresh page fetches** (cache misses, including the ones a post create causes) at 20 / 5 min per member and 60 / 5 min per household; over budget the answer is simply "no card". |
 | `POST /unlock` (household dashboard port) | 5 wrong PINs / 15 min per lock — the bucket is the locked session's id (minted by `/lock`, kept by cookie renewal), never the client address: tablets behind one reverse proxy don't share it, and rotating addresses or renewing the cookie doesn't reset it. Separate from the password bucket; never feeds the global brake. The wrong PIN that reaches the limit (or any try past it) signs the tablet out (303 `/login?signed_out=1`) and revokes the session; a hold-back for any other reason only asks it to wait (303 `/?pin=wait`). |
 | `POST /ack` (household dashboard port) | 30 / 5 min per session (the session id, like the PIN bucket) — far above any household; caps writes from a stuck or scripted tablet. 429 + `Retry-After`. |

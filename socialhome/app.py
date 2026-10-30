@@ -2701,6 +2701,15 @@ def _build_middleware(config: Config, limiter: RateLimiter):
             # send is one envelope to one household (never a fan-out):
             # ≤ 300 a minute per person.
             "POST /api/apps/*/messages": (300, 60),
+            # An app's saved data (``store`` list / get / set / delete) gets
+            # its own bucket too: a fast game saves around each move (a
+            # Battleships shot, the board), so writes paired 1:1 with moves
+            # hit the 60/min default. Sized like the moves it goes with: each
+            # call touches one key of the caller's own data, at most
+            # ``APP_KV_MAX_VALUE_BYTES`` (64 KiB) — ≤ 300 × 64 KiB ≈ 19 MiB a
+            # minute per person at the worst, inside the 500-key quota, local
+            # only (never federated).
+            "/api/apps/*/store*": (300, 60),
             # GPS pings: 10 a minute per PERSON is enforced by the view
             # (``routes/presence.py``) — Home Assistant posts the whole
             # household's with one token. This is only the ceiling for that
