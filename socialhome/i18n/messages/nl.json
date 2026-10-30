@@ -343,5 +343,8 @@
   "notification.poll.scheduled": "{name} heeft een tijd gekozen in een datumprikker waarop je hebt gereageerd",
   "notification.poll.scheduled_in": "{name} heeft in {space_name} een tijd gekozen",
   "notification.report.answered": "Je melding is bekeken",
-  "notification.report.answered_in": "Je melding in {space_name} is bekeken"
+  "notification.report.answered_in": "Je melding in {space_name} is bekeken",
+  "notification.bazaar.question": "{author} heeft een vraag over {title}",
+  "notification.push.bazaar_question_in": "{name} heeft een vraag over je advertentie in {space_name}",
+  "notification.push.bazaar_question": "{name} heeft een vraag over je advertentie"
 }

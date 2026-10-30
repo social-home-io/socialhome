@@ -343,5 +343,8 @@
   "notification.poll.scheduled": "{name} hat den Termin einer Terminumfrage festgelegt, auf die du geantwortet hast",
   "notification.poll.scheduled_in": "{name} hat in {space_name} einen Termin festgelegt",
   "notification.report.answered": "Deine Meldung wurde geprüft",
-  "notification.report.answered_in": "Deine Meldung in {space_name} wurde geprüft"
+  "notification.report.answered_in": "Deine Meldung in {space_name} wurde geprüft",
+  "notification.bazaar.question": "{author} hat eine Frage zu {title}",
+  "notification.push.bazaar_question_in": "{name} hat eine Frage zu deiner Anzeige in {space_name}",
+  "notification.push.bazaar_question": "{name} hat eine Frage zu deiner Anzeige"
 }

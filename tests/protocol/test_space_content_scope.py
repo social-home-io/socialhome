@@ -551,6 +551,18 @@ ATTACKS: dict[FederationEventType, list[tuple[str, dict]]] = {
         )
         for status in ("accepted", "rejected", "withdrawn")
     ],
+    FET.BAZAAR_THREAD_MESSAGE: [
+        (
+            "ask about B's listing",
+            {
+                "listing_post_id": "post-b-listing",
+                "buyer_user_id": "u-evil",
+                "author_user_id": "u-evil",
+                "message_id": "ab" * 16,
+                "content": "still for sale?",
+            },
+        ),
+    ],
 }
 
 #: Space-write event types that carry no row id of their own — the reason

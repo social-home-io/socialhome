@@ -23,7 +23,8 @@ sender cannot forge:
   conversation id commits to.
 
 A *system chat* (``Conversation.system_scope`` set — the household chat, a
-space's chat) is never a DM peer's business: no household is ever seated
+space's chat) and an "Ask the seller" thread
+(``Conversation.bazaar_listing_id`` set) are never a DM peer's business: no household is ever seated
 in one, whatever a seat row says, so no DM event, history request or
 history chunk can reach it.
 
@@ -93,7 +94,9 @@ class DmScope:
 
     async def _is_system_chat(self, conversation_id: str) -> bool:
         conv = await self._conversations.get(conversation_id)
-        return conv is not None and conv.is_system
+        # A listing thread ("Ask the seller", v_74) is no DM peer's business
+        # either: its messages ride ``BAZAAR_THREAD_MESSAGE`` over the space.
+        return conv is not None and not conv.federates_as_dm
 
     async def seat_of(
         self,

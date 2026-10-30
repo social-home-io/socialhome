@@ -225,7 +225,7 @@ CHAT_REALERT_SECONDS = 300
 
 #: Chat types: their repeats re-alert after :data:`CHAT_REALERT_SECONDS`
 #: of quiet even while unread (D8).
-_CHAT_TYPES: frozenset[str] = frozenset({"dm_message", "dm_mention"})
+_CHAT_TYPES: frozenset[str] = frozenset({"dm_message", "dm_mention", "bazaar_question"})
 
 #: A missed call replaces the ringing push on the device (same tag), so it
 #: always goes out — even as a repeat on a row still unread — or the lock
@@ -241,6 +241,7 @@ APP_ADDED_QUIET = timedelta(days=1)
 _CONVERSATION_TYPES: tuple[str, ...] = (
     "dm_message",
     "dm_mention",
+    "bazaar_question",
     "call_missed",
     "chat_added",
 )
@@ -280,6 +281,12 @@ class _SeatPrefs:
     #: A space chat's space and its name (the bell reads "… in {space}").
     space_id: str | None = None
     space_name: str | None = None
+    #: An "Ask the seller" thread (v_74): its listing's title, seller and
+    #: space — the seller's bell row names the listing.
+    listing_title: str | None = None
+    listing_seller_user_id: str | None = None
+    listing_space_id: str | None = None
+    listing_space_name: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -395,6 +402,15 @@ _PUSH_TITLES: dict[str, tuple[tuple[str, str], ...]] = {
     "space_invite": (
         ("notification.push.space_invite_to", "{name} invited you to {space_name}"),
         ("notification.push.space_invite", "{name} invited you to a space"),
+    ),
+    # "Ask the seller" (v_74): the listing's title is the seller's own
+    # words — never on a lock screen; who and where only.
+    "bazaar_question": (
+        (
+            "notification.push.bazaar_question_in",
+            "{name} asked about your listing in {space_name}",
+        ),
+        ("notification.push.bazaar_question", "{name} asked about your listing"),
     ),
     "post_reacted": (
         (
@@ -653,6 +669,7 @@ class NotificationService(ProtectionGateMixin):
         "_convos",
         "_i18n",
         "_instances",
+        "_listings",
         "_notifs",
         "_pair_inbox",
         "_personal_calendar_repo",
@@ -742,6 +759,14 @@ class NotificationService(ProtectionGateMixin):
         # place a space's author from a household this one never met is
         # named (:meth:`_held_name`).
         self._author_profiles: AbstractSpaceAuthorProfileRepo | None = None
+        # Bazaar listings — optional; an "Ask the seller" thread (v_74)
+        # gives its seller a ``bazaar_question`` row naming the listing.
+        # Without it such a message pushes like any 1:1.
+        self._listings = None
+
+    def attach_bazaar_repo(self, bazaar_repo) -> None:
+        """Wire the bazaar listings ("Ask the seller" rows)."""
+        self._listings = bazaar_repo
 
     def attach_post_repos(
         self,
@@ -1686,6 +1711,20 @@ class NotificationService(ProtectionGateMixin):
                 )
             ):
                 continue
+            if (
+                prefs.listing_seller_user_id is not None
+                and recipient_id == prefs.listing_seller_user_id
+            ):
+                # "Ask the seller": the seller gets one row per thread
+                # (D7) — a buyer asking is about them, not chat noise.
+                await self._save_bazaar_question(
+                    local,
+                    event=event,
+                    prefs=prefs,
+                    link=link,
+                    withheld=blocked,
+                )
+                continue
             if is_mentioned:
                 await self._save_dm_mention(
                     local,
@@ -1848,6 +1887,46 @@ class NotificationService(ProtectionGateMixin):
                     space_name=prefs.space_name,
                 ),
             )
+
+    async def _save_bazaar_question(
+        self,
+        recipient,
+        *,
+        event: DmMessageCreated,
+        prefs: _SeatPrefs,
+        link: str,
+        withheld: frozenset[str],
+    ) -> None:
+        """The seller's row for an "Ask the seller" thread: "{author} asked
+        about {listing}" in the app — one per thread, bumped by each new
+        question (D7). The push names who and where only (D11): never the
+        listing's title, never the text."""
+        locale = self._locale(recipient)
+        author = event.sender_display_name or self._someone(locale)
+        await self._save_notif(
+            new_notification(
+                user_id=recipient.user_id,
+                type="bazaar_question",
+                title=self._t(
+                    "notification.bazaar.question",
+                    locale=locale,
+                    fallback="{author} asked about {title}",
+                    author=author,
+                    title=prefs.listing_title or "",
+                ),
+                link_url=link,
+            ),
+            about=NotificationSubject.of(
+                NotificationObject.CONVERSATION,
+                event.conversation_id,
+                space_id=prefs.listing_space_id,
+                space_name=prefs.listing_space_name,
+            ),
+            actor_user_id=event.sender_user_id,
+            actor_name=author,
+            withheld=withheld,
+            push_params={"name": author, "space_name": prefs.listing_space_name},
+        )
 
     async def _save_dm_mention(
         self,
@@ -2014,6 +2093,14 @@ class NotificationService(ProtectionGateMixin):
         group = conv is not None and conv.type is ConversationType.GROUP_DM
         space_id = conv.space_id if conv is not None else None
         space = await self._spaces.get(space_id) if space_id else None
+        listing = (
+            await self._listings.get_listing(conv.bazaar_listing_id)
+            if conv is not None and conv.bazaar_listing_id and self._listings
+            else None
+        )
+        listing_space = (
+            await self._spaces.get(listing.space_id) if listing is not None else None
+        )
         return _SeatPrefs(
             muted=frozenset(
                 m.username for m in members if mute_active(m.muted_until, now=now)
@@ -2026,6 +2113,14 @@ class NotificationService(ProtectionGateMixin):
             system_scope=conv.system_scope if conv is not None else None,
             space_id=space_id,
             space_name=space.name if space is not None else None,
+            listing_title=listing.title if listing is not None else None,
+            listing_seller_user_id=(
+                listing.seller_user_id if listing is not None else None
+            ),
+            listing_space_id=listing.space_id if listing is not None else None,
+            listing_space_name=(
+                listing_space.name if listing_space is not None else None
+            ),
         )
 
     async def mark_read_for_dm(

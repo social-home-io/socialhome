@@ -68,6 +68,20 @@ class AbstractConversationRepo(Protocol):
         *,
         at: str | None = None,
     ) -> None: ...
+    async def open_listing_thread(
+        self,
+        *,
+        conversation_id: str,
+        listing_post_id: str,
+        username: str,
+        remote_instance_id: str,
+        remote_user_id: str,
+        remote_display_name: str,
+        seat_at: str | None = None,
+    ) -> Conversation: ...
+    async def list_listing_threads(
+        self, listing_post_id: str, username: str
+    ) -> list[Conversation]: ...
 
     # Members -------------------------------------------------------------
     async def add_member(self, member: ConversationMember) -> None: ...
@@ -279,8 +293,8 @@ class SqliteConversationRepo:
             """
             INSERT INTO conversations(
                 id, type, name, created_at, last_message_at, bot_enabled,
-                membership_version, system_scope, space_id
-            ) VALUES(?,?,?, COALESCE(?, datetime('now')), ?, ?, ?, ?, ?)
+                membership_version, system_scope, space_id, bazaar_listing_id
+            ) VALUES(?,?,?, COALESCE(?, datetime('now')), ?, ?, ?, ?, ?, ?)
             """,
             (
                 conv.id,
@@ -292,6 +306,7 @@ class SqliteConversationRepo:
                 int(conv.membership_version),
                 conv.system_scope.value if conv.system_scope is not None else None,
                 conv.space_id,
+                conv.bazaar_listing_id,
             ),
         )
         return conv
@@ -460,6 +475,103 @@ class SqliteConversationRepo:
         if conv is None:  # pragma: no cover - see above
             raise RuntimeError("system chat was not stored")
         return conv
+
+    async def open_listing_thread(
+        self,
+        *,
+        conversation_id: str,
+        listing_post_id: str,
+        username: str,
+        remote_instance_id: str,
+        remote_user_id: str,
+        remote_display_name: str,
+        seat_at: str | None = None,
+    ) -> Conversation:
+        """Create (or reopen) the "Ask the seller" thread ``conversation_id``
+        about ``listing_post_id`` between the local ``username`` and one
+        remote person; return the stored row.
+
+        Idempotent and race-safe in one transaction: the conversation and
+        both seats are ``INSERT OR IGNORE`` (two first messages racing land
+        in the same row — the id is derived, see
+        :func:`~socialhome.domain.bazaar_thread.listing_thread_id`). A local
+        seat that hid the thread is shown again (a new message reopens a
+        1:1, as for any DM); the remote seat's name is refreshed. ``seat_at``
+        seats a new local member just before that time, so the message that
+        opened the thread reads as unread.
+        """
+        now = datetime.now(UTC).isoformat()
+
+        def _run(conn) -> dict:
+            conn.execute(
+                "INSERT OR IGNORE INTO conversations(id, type, created_at,"
+                " bazaar_listing_id) VALUES(?,?,?,?)",
+                (
+                    conversation_id,
+                    ConversationType.DM.value,
+                    now,
+                    listing_post_id,
+                ),
+            )
+            cur = conn.execute(
+                "SELECT * FROM conversations WHERE id=? AND bazaar_listing_id=?",
+                (conversation_id, listing_post_id),
+            )
+            row = cur.fetchone()
+            if row is None:
+                # The id is some other conversation's: seat nobody in it
+                # (raising rolls the transaction back).
+                raise ValueError("conversation id is taken by another conversation")
+            stored = dict(zip([c[0] for c in cur.description], row))
+            conn.execute(
+                "INSERT INTO conversation_members(conversation_id, username,"
+                " joined_at) VALUES(?,?,?)"
+                " ON CONFLICT(conversation_id, username)"
+                " DO UPDATE SET deleted_at=NULL",
+                (conversation_id, username, seat_at or now),
+            )
+            conn.execute(
+                "INSERT INTO conversation_remote_members(conversation_id,"
+                " instance_id, remote_username, joined_at, user_id, display_name)"
+                " VALUES(?,?,?,?,?,?)"
+                " ON CONFLICT(conversation_id, instance_id, remote_username)"
+                " DO UPDATE SET display_name=excluded.display_name",
+                (
+                    conversation_id,
+                    remote_instance_id,
+                    # A listing thread's remote person may live on a household
+                    # this one never paired with (no ``remote_users`` row), so
+                    # the seat names them by ``user_id`` (as a group seat does).
+                    remote_user_id,
+                    now,
+                    remote_user_id,
+                    remote_display_name,
+                ),
+            )
+            return stored
+
+        conv = _row_to_conv(await self._db.transact(_run))
+        if conv is None:  # pragma: no cover - _run returns the stored row
+            raise ValueError("listing thread was not stored")
+        return conv
+
+    async def list_listing_threads(
+        self, listing_post_id: str, username: str
+    ) -> list[Conversation]:
+        """The threads about ``listing_post_id`` that ``username`` sits in
+        (not hidden), most recent first — every buyer's for the seller, the
+        one thread for a buyer."""
+        rows = await self._db.fetchall(
+            """
+            SELECT c.* FROM conversations c
+              JOIN conversation_members m ON m.conversation_id = c.id
+             WHERE c.bazaar_listing_id = ? AND m.username = ?
+               AND m.deleted_at IS NULL
+             ORDER BY COALESCE(c.last_message_at, c.created_at) DESC
+            """,
+            (listing_post_id, username),
+        )
+        return [c for c in (_row_to_conv(d) for d in rows_to_dicts(rows)) if c]
 
     async def touch_last_message(
         self,
@@ -1772,6 +1884,7 @@ def _row_to_conv(row: dict | None) -> Conversation | None:
             SystemChatScope(row["system_scope"]) if row.get("system_scope") else None
         ),
         space_id=row.get("space_id"),
+        bazaar_listing_id=row.get("bazaar_listing_id"),
     )
 
 

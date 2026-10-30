@@ -1192,6 +1192,60 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
     ),
     # ── Space chat (v_55): writers only, owner-bound ids, author edits,
     #    author or content-authority deletes, the reactor's own reaction ──
+    # ── "Ask the seller" (v_73): the asker holds a writer seat on the
+    #    sender (strict — no host relay); the seller addressed is ours ──
+    (
+        FET.BAZAAR_THREAD_MESSAGE,
+        "ask our seller as u-o",
+        {
+            "listing_post_id": "post-l-listing",
+            "buyer_user_id": "u-o",
+            "author_user_id": "u-o",
+            "message_id": "a1" * 16,
+            "content": "still there?",
+        },
+        (OTHER,),
+        (AUTHOR, ADMIN, HOST, MOD, STRANGER, THIRD),
+    ),
+    (
+        FET.BAZAAR_THREAD_MESSAGE,
+        "ask our seller as a follower",
+        {
+            "listing_post_id": "post-l-listing",
+            "buyer_user_id": "u-sub",
+            "author_user_id": "u-sub",
+            "message_id": "a2" * 16,
+            "content": "still there?",
+        },
+        (),
+        (AUTHOR, HOST),
+    ),
+    (
+        FET.BAZAAR_THREAD_MESSAGE,
+        "answer as our own seller",
+        {
+            "listing_post_id": "post-l-listing",
+            "buyer_user_id": "u-o",
+            "author_user_id": LOCAL_USER,
+            "message_id": "a3" * 16,
+            "content": "yes",
+        },
+        (),
+        (OTHER, HOST, AUTHOR),
+    ),
+    (
+        FET.BAZAAR_THREAD_MESSAGE,
+        "a seller cold-opens a thread with u-o",
+        {
+            "listing_post_id": "post-a-listing",
+            "buyer_user_id": "u-o",
+            "author_user_id": "u-a",
+            "message_id": "a4" * 16,
+            "content": "buy it!",
+        },
+        (),
+        (AUTHOR, HOST),
+    ),
     (
         FET.SPACE_CHAT_MESSAGE_CREATED,
         "chat as u-a",

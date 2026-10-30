@@ -1,0 +1,70 @@
+-- 0133 — "Ask the seller": a conversation can be a thread about one bazaar
+-- listing (``conversations.bazaar_listing_id``, v_74).
+--
+-- A buyer with a writer seat in a listing's space asks its seller in a
+-- private 1:1 text thread tied to that listing. It is an ordinary ``dm``
+-- conversation — the buyer's or seller's local seat in
+-- ``conversation_members`` and the other person as one
+-- ``conversation_remote_members`` seat (``user_id`` + ``display_name`` from
+-- the space roster) — reusing messages, read watermark, unread, mute and
+-- the DM thread UI. What makes it a listing thread is this one column:
+--
+--   * ``bazaar_listing_id`` — the listing (``bazaar_listings.post_id``)
+--     the thread is about; ``NULL`` for every other conversation (every
+--     existing row). The thread goes with the listing (``ON DELETE
+--     CASCADE``): a household that leaves the space drops its listings
+--     and with them the threads about them.
+--   * ``idx_conversations_bazaar_listing`` — the seller's "questions about
+--     this listing" list reads threads by listing; partial, so it covers
+--     listing threads only.
+--
+-- One thread per (listing, buyer) is the primary key itself: both
+-- households derive the conversation id from the listing and the buyer
+-- (``domain/bazaar_thread.py:listing_thread_id``), so no index or table is
+-- needed for it.
+--
+-- CLAUDE.md "audit before a migration":
+--
+--   (1) Audited every code path that touches this data. ``conversations``
+--       rows are written by ``SqliteConversationRepo.create`` (local DMs and
+--       groups), ``create_system_chat`` (0082), ``apply_group_roster`` and
+--       the inbound ``DM_MESSAGE`` first-message path; read by
+--       ``list_for_user`` (inbox, DM badge, guardian view), the GC sweeper
+--       ``list_fully_left_conversation_ids``, ``DmScope`` (the DM inbound
+--       gates), ``DmService._fan_to_remote`` (DM federation), the realtime /
+--       notification fan-out and the data export. In the same change every
+--       DM-federation path (``_fan_to_remote``, ``DmScope``, the DM
+--       history provider) skips a row with ``bazaar_listing_id`` set, so a
+--       listing thread never travels as a DM event; the inbox keeps it (it
+--       is a conversation of yours, labelled with its listing).
+--       ``bazaar_listings`` is written by the bazaar repo and the inbound
+--       ``BAZAAR_LISTING_*`` handlers; its rows already reach every member
+--       household of the space, so both ends hold the listing.
+--   (2) Non-migration alternatives considered and rejected:
+--       * A new ``system_scope = 'listing'`` — the 0082 CHECK lists the
+--         scopes, and SQLite can't widen a CHECK in place: a full
+--         ``conversations`` rebuild (and of every FK child). A system
+--         chat's access is also decided live by policy, never by seats —
+--         a listing thread has exactly two people, so the seat rows are
+--         the right authority and the DM machinery applies as is.
+--       * Reuse ``space_id`` (+ a name convention) — ``space_id`` is
+--         "the chat of this space" under a unique index (one per space);
+--         it can't hold many threads, and a space is not a listing.
+--       * Derive "listing thread" from the conversation id alone — the id
+--         is a one-way hash; nothing could list a listing's threads or
+--         show which listing a thread is about.
+--       * A separate thread table — a second copy of messages, seats,
+--         unread and mute: building a messaging stack new instead of
+--         reusing the conversation storage.
+--       * Keep the link in a federation event only — each household must
+--         know, locally and durably, that a conversation must never leave
+--         as a DM and which listing's closing rule applies to it.
+--   (3) Smallest possible change. One additive nullable column with a
+--       NULL default (no backfill; every existing conversation stays what
+--       it is) and one partial index that covers listing threads only. No
+--       existing row is changed.
+ALTER TABLE conversations ADD COLUMN bazaar_listing_id TEXT
+    REFERENCES bazaar_listings(post_id) ON DELETE CASCADE;
+
+CREATE INDEX IF NOT EXISTS idx_conversations_bazaar_listing
+    ON conversations(bazaar_listing_id) WHERE bazaar_listing_id IS NOT NULL;

@@ -1861,6 +1861,7 @@
   "capability.remote_report_answers": "Quien denuncia desde otro hogar sabe que su denuncia fue revisada",
   "capability.app_games_end_on_uninstall": "Las partidas terminan bien cuando el otro hogar quita la app",
   "capability.bazaar_offers": "Las ofertas llegan a quien vende en otros hogares",
+  "capability.bazaar_ask_the_seller": "Preguntar al vendedor por un anuncio",
   "space.settings_page.moderation.queue_meta": "Publicaciones por revisar, solicitudes y denuncias",
   "space.settings_page.moderation.days": "días",
   "space.settings_page.danger.summary": "Archivar, ceder o eliminar",

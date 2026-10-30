@@ -569,6 +569,21 @@ That single command runs the full sequence:
    ``replay``: it seats **d** as a follower in **b**'s space, which the
    earlier steps assert member counts on.
 
+9g. ``bazaar-ask`` (v_74, "Ask the seller") — in the same space, right
+   after ``space-chat``. **b** (owner) turns the space's Bazaar on and
+   **c** lists a lamp in it; it reaches **a** and **d**
+   (``BAZAAR_LISTING_CREATED``). **a** taps Ask the seller
+   (``POST /api/bazaar/{id}/ask``): **a** and **c** are paired, so the
+   answer is ``kind: "dm"`` — the normal 1:1 DM, no listing thread — and
+   **a**'s question lands on **c**. **d**, a follower household, is refused
+   (``403 SUBSCRIBER_READ_ONLY``). **a**, **b**, **c** see each other at
+   ``>= FederationCapability.MIN_FOR_BAZAAR_THREAD`` (v_74); ``verify``
+   pins the threshold at 74 and re-checks **c** holds the question. Every
+   household in this demo's space is paired with the others, so the sealed
+   ``BAZAAR_THREAD_MESSAGE`` between *unpaired* households is proven by
+   ``tests/protocol/test_bazaar_thread_federation.py`` (direct, routed under
+   ``SPACE_ROUTED``, refusals).
+
 9z. ``highlight-audience`` (v_70, "Change for all of today") — **a**
    narrows today's highlight to **b**'s household
    (``PATCH /api/highlights/{id}/audience``): **c** deletes it and keeps a

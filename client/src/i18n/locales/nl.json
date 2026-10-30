@@ -1834,6 +1834,7 @@
   "capability.remote_report_answers": "Melders in andere huishoudens horen dat hun melding is bekeken",
   "capability.app_games_end_on_uninstall": "Spellen stoppen netjes als het andere huishouden de app verwijdert",
   "capability.bazaar_offers": "Biedingen bereiken verkopers in andere huishoudens",
+  "capability.bazaar_ask_the_seller": "De verkoper een vraag stellen over een advertentie",
   "space.settings_page.moderation.queue_meta": "Berichten om te beoordelen, verzoeken en meldingen",
   "space.settings_page.moderation.days": "dagen",
   "space.settings_page.danger.summary": "Archiveren, overdragen of verwijderen",

@@ -172,11 +172,15 @@ class TypingService(VisibilityMixin, SingleTargetSender, ProtectionGateMixin):
         )
 
         # Fan-out to remote instances that have members in this conversation.
-        await self._fan_to_remote_members(
-            conversation_id=conversation_id,
-            sender_user_id=sender_user_id,
-            sender_username=sender_username,
-        )
+        # A listing thread's other person may sit on a household we share
+        # only a space with: typing stays local there (its messages ride the
+        # space's own transport, nothing else of it leaves).
+        if conv is None or conv.federates_as_dm:
+            await self._fan_to_remote_members(
+                conversation_id=conversation_id,
+                sender_user_id=sender_user_id,
+                sender_username=sender_username,
+            )
         return delivered
 
     async def _system_chat_typing(

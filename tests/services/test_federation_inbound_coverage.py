@@ -62,7 +62,7 @@ def svc():
     # A plain DM conversation — never a system chat (household / space),
     # which every DM handler refuses.
     convo.get.return_value = SimpleNamespace(
-        is_system=False, type=ConversationType.DM, id="c"
+        is_system=False, federates_as_dm=True, type=ConversationType.DM, id="c"
     )
     sp_post = AsyncMock()
     # A live post / comment by ``u`` in ``sp`` — the §24.11 authorship

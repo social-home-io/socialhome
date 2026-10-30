@@ -32,6 +32,7 @@ from ..crypto import (
     derive_user_id,
     verify_user_identity_assertion,
 )
+from ..domain.bazaar_thread import is_listing_thread_id
 from ..domain.conversation import (
     MESSAGE_TYPES,
     Conversation,
@@ -1015,9 +1016,10 @@ class FederationInboundService(ProtectionGateMixin):
         scope = self._dm_scope
         reason: str | None = None
         conv = await self._conversation_repo.get(conv_id)
-        if conv is not None and conv.is_system:
+        if conv is not None and not conv.federates_as_dm:
             # A system chat (household / space) never takes DM events: the
-            # household chat is never federated, a space chat has its own.
+            # household chat is never federated, a space chat has its own —
+            # and neither does a listing thread (``BAZAAR_THREAD_MESSAGE``).
             refuse(
                 event,
                 "system conversation",
@@ -1074,6 +1076,10 @@ class FederationInboundService(ProtectionGateMixin):
                 reason = "sender is not seated in the conversation"
         elif is_owner_bound(conv_id):
             reason = "group conversation not seated here (no roster yet)"
+        elif is_listing_thread_id(conv_id):
+            # Only ``BAZAAR_THREAD_MESSAGE`` opens a listing thread: a DM
+            # must never squat on a thread's derived id.
+            reason = "listing-thread id is not a DM"
         elif not await self._has_local_recipient(recipients):
             reason = "no local recipient for a new conversation"
         if reason is None:
@@ -1088,9 +1094,10 @@ class FederationInboundService(ProtectionGateMixin):
         return False
 
     async def _in_system_chat(self, conversation_id: str) -> bool:
-        """``conversation_id`` is a system chat here (household / space)."""
+        """``conversation_id`` takes no DM events here: a system chat
+        (household / space) or a listing thread."""
         conv = await self._conversation_repo.get(conversation_id)
-        return conv is not None and conv.is_system
+        return conv is not None and not conv.federates_as_dm
 
     async def _heal_legacy_seat(
         self,

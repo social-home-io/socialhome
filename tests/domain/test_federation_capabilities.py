@@ -8,7 +8,7 @@ from socialhome.domain import federation_capabilities as fc
 
 
 def test_ours_is_current_version():
-    assert fc.OURS == 73
+    assert fc.OURS == 74
 
 
 def test_local_community_area_capability_threshold():
@@ -36,6 +36,7 @@ def test_local_community_area_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.features_missing_below(59) == [
         "Names for a space's followers",
@@ -52,6 +53,7 @@ def test_local_community_area_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.features_missing_below(60) == [
         "Names for new followers right away",
@@ -67,6 +69,7 @@ def test_local_community_area_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.features_missing_below(61) == [
         "Public moments encrypted from the GFS",
@@ -81,6 +84,7 @@ def test_local_community_area_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.features_missing_below(62) == [
         "Photos and videos in public moments",
@@ -94,6 +98,7 @@ def test_local_community_area_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.features_missing_below(63) == [
         "Time-stamped public moments",
@@ -106,6 +111,7 @@ def test_local_community_area_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.features_missing_below(64) == [
         "Choose how long followers keep your moments",
@@ -117,6 +123,7 @@ def test_local_community_area_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.features_missing_below(65) == [
         "Deletes reach every copy of a moment",
@@ -127,6 +134,7 @@ def test_local_community_area_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.features_missing_below(66) == [
         "Reactions reach authors further away",
@@ -136,6 +144,7 @@ def test_local_community_area_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.features_missing_below(67) == [
         "Reactions reach authors you follow through a GFS",
@@ -144,6 +153,7 @@ def test_local_community_area_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.features_missing_below(68) == [
         "Everyone sees the full reaction count",
@@ -151,26 +161,32 @@ def test_local_community_area_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.features_missing_below(69) == [
         "A highlight taken away stays away",
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.features_missing_below(70) == [
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.features_missing_below(71) == [
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.features_missing_below(72) == [
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
-    assert fc.features_missing_below(73) == []
+    assert fc.features_missing_below(73) == ["Ask the seller about a listing"]
+    assert fc.features_missing_below(74) == []
     assert fc.CAPABILITY_FEATURE_KEYS[59] == "local_communities"
 
 
@@ -201,6 +217,7 @@ def test_member_picture_reset_sync_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.features_missing_below(58) == [
         "Local communities",
@@ -218,6 +235,7 @@ def test_member_picture_reset_sync_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[58] == "synced_picture_resets"
 
@@ -249,6 +267,7 @@ def test_multi_gfs_publish_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert "Posting to every GFS a space is listed on" not in (
         fc.features_missing_below(57)
@@ -284,6 +303,7 @@ def test_sync_series_rows_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[56] == "synced_recurring_events"
 
@@ -314,6 +334,7 @@ def test_space_chat_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.features_missing_below(55) == [
         "Recurring events in space catch-up",
@@ -334,6 +355,7 @@ def test_space_chat_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.space_features_missing_below(54) == [
         "Chat in spaces",
@@ -377,6 +399,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.features_missing_below(54) == [
         "Chat in spaces",
@@ -398,6 +421,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
 
 
@@ -431,6 +455,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.features_missing_below(53) == [
         "Turning on the GFS fallback for an existing connection",
@@ -453,6 +478,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
 
 
@@ -485,6 +511,7 @@ def test_forwarded_invite_link_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
 
 
@@ -537,6 +564,7 @@ def test_space_authority_rotation_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.features_missing_below(46) == [
         "Role changes from member households",
@@ -566,6 +594,7 @@ def test_space_authority_rotation_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
 
 
@@ -614,6 +643,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
 
 
@@ -1155,6 +1185,7 @@ def test_forwarded_role_change_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
 
 
@@ -1198,6 +1229,7 @@ def test_host_sequenced_pages_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
 
 
@@ -1234,6 +1266,7 @@ def test_member_gfs_publish_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
 
 
@@ -1269,6 +1302,7 @@ def test_strict_member_publish_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
 
 
@@ -1304,6 +1338,7 @@ def test_private_channels_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
 
 
@@ -1382,6 +1417,7 @@ _PINNED_FEATURE_KEYS = {
     71: "remote_report_answers",
     72: "app_games_end_on_uninstall",
     73: "bazaar_offers",
+    74: "bazaar_ask_the_seller",
 }
 
 
@@ -1441,6 +1477,7 @@ def test_space_author_profile_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.space_feature_keys_missing_below(59) == [
         "follower_author_names",
@@ -1472,6 +1509,7 @@ def test_follower_profile_bundle_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[61] == "follower_names_on_join"
 
@@ -1498,6 +1536,7 @@ def test_encrypted_public_moments_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[62] == "encrypted_public_moments"
 
@@ -1522,6 +1561,7 @@ def test_encrypted_moment_media_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[63] == "public_moment_media"
 
@@ -1556,6 +1596,7 @@ def test_long_lived_moments_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[65] == "follower_moment_retention"
 
@@ -1617,6 +1658,7 @@ def test_moment_reaction_counts_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[69] == "moment_reaction_counts"
 
@@ -1636,6 +1678,7 @@ def test_highlight_audience_change_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[70] == "highlight_audience_change"
 
@@ -1653,15 +1696,19 @@ def test_remote_report_answer_capability_threshold():
         "Reporters in other households hear their report was reviewed",
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.features_missing_below(71) == [
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.features_missing_below(72) == [
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
-    assert fc.features_missing_below(73) == []
+    assert fc.features_missing_below(73) == ["Ask the seller about a listing"]
+    assert fc.features_missing_below(74) == []
     assert fc.CAPABILITY_FEATURE_KEYS[71] == "remote_report_answers"
 
 
@@ -1672,6 +1719,7 @@ def test_app_session_ended_capability_threshold():
     assert fc.features_missing_below(71) == [
         "Games end cleanly when the other household removes the app",
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[72] == "app_games_end_on_uninstall"
     assert 72 not in fc.SPACE_SCOPED_MIN_VERSIONS
@@ -1685,7 +1733,20 @@ def test_bazaar_offers_capability_threshold():
     assert fc.OURS >= fc.FederationCapability.MIN_FOR_BAZAAR_OFFERS
     assert fc.features_missing_below(72) == [
         "Offers reach sellers in other households",
+        "Ask the seller about a listing",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[73] == "bazaar_offers"
     assert 73 in fc.SPACE_SCOPED_MIN_VERSIONS
     assert fc.space_feature_keys_missing_below(72) == ["bazaar_offers"]
+
+
+def test_bazaar_thread_capability_threshold():
+    """v_74 — "Ask the seller": one sealed message to the other person's
+    household. Labelled; not space-scoped (a behind household only keeps its
+    own sellers from being asked)."""
+    assert fc.FederationCapability.MIN_FOR_BAZAAR_THREAD == 74
+    assert fc.OURS >= fc.FederationCapability.MIN_FOR_BAZAAR_THREAD
+    assert fc.features_missing_below(73) == ["Ask the seller about a listing"]
+    assert fc.features_missing_below(74) == []
+    assert fc.CAPABILITY_FEATURE_KEYS[74] == "bazaar_ask_the_seller"
+    assert 74 not in fc.SPACE_SCOPED_MIN_VERSIONS

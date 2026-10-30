@@ -1348,3 +1348,78 @@ async def test_remote_member_display_name_is_the_newest_named_seat(env):
     )
     assert await env.repo.remote_member_display_name("u-carol") == "Caro"
     assert await env.repo.remote_member_display_name("u-nobody") is None
+
+
+# ── "Ask the seller" threads (v_74, migration 0133) ──────────────────────
+
+
+async def _seed_listing(db, post_id: str = "post-bike") -> None:
+    await db.enqueue(
+        "INSERT OR IGNORE INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp', 'S', 'h', 'h', ?)",
+        ("ab" * 32,),
+    )
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content)"
+        " VALUES(?, 'sp', 'u-sam', 'bazaar', 'x')",
+        (post_id,),
+    )
+    await db.enqueue(
+        "INSERT INTO bazaar_listings(post_id, space_id, seller_user_id, mode,"
+        " title, end_time, currency) VALUES(?, 'sp', 'u-sam', 'fixed', 'Bike',"
+        " '2099-01-01T00:00:00+00:00', 'EUR')",
+        (post_id,),
+    )
+
+
+async def _open(repo, conv_id="bzt-1", username="alice", name="Sam", seat_at=None):
+    return await repo.open_listing_thread(
+        conversation_id=conv_id,
+        listing_post_id="post-bike",
+        username=username,
+        remote_instance_id="house-s",
+        remote_user_id="u-sam",
+        remote_display_name=name,
+        seat_at=seat_at,
+    )
+
+
+async def test_open_listing_thread_is_idempotent_and_reopens(env):
+    await _seed_listing(env.db)
+    conv = await _open(env.repo, seat_at="2026-01-01T00:00:00+00:00")
+    assert conv.bazaar_listing_id == "post-bike" and conv.is_listing_thread
+    assert not conv.federates_as_dm and conv.type is ConversationType.DM
+    [member] = await env.repo.list_members(conv.id)
+    assert member.joined_at == "2026-01-01T00:00:00+00:00"
+    # Hidden by alice, then reopened by the next message — with the seat's
+    # name refreshed and no second seat.
+    await env.db.enqueue(
+        "UPDATE conversation_members SET deleted_at=datetime('now')"
+        " WHERE conversation_id=?",
+        (conv.id,),
+    )
+    assert await env.repo.list_listing_threads("post-bike", "alice") == []
+    again = await _open(env.repo, name="Sam B.")
+    assert again.id == conv.id
+    [seat] = await env.repo.list_remote_members(conv.id)
+    assert (seat.user_id, seat.remote_username, seat.display_name) == (
+        "u-sam",
+        "u-sam",
+        "Sam B.",
+    )
+    threads = await env.repo.list_listing_threads("post-bike", "alice")
+    assert [c.id for c in threads] == [conv.id]
+    # Listing threads are conversations of yours: in the inbox too.
+    assert conv.id in {c.id for c in await env.repo.list_for_user("alice")}
+    # Only the people seated see it in the listing's list.
+    assert await env.repo.list_listing_threads("post-bike", "bob") == []
+
+
+async def test_open_listing_thread_refuses_an_id_taken_by_a_dm(env):
+    await _seed_listing(env.db)
+    await env.repo.create(_conv("bzt-taken"))
+    with pytest.raises(ValueError):
+        await _open(env.repo, conv_id="bzt-taken")
+    # Nobody was seated in the DM that owns the id.
+    assert await env.repo.list_remote_members("bzt-taken") == []
+    assert await env.repo.list_members("bzt-taken") == []

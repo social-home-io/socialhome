@@ -343,5 +343,8 @@
   "notification.poll.scheduled": "{name} picked a time for a date poll you answered",
   "notification.poll.scheduled_in": "{name} picked a time in {space_name}",
   "notification.report.answered": "Your report was reviewed",
-  "notification.report.answered_in": "Your report in {space_name} was reviewed"
+  "notification.report.answered_in": "Your report in {space_name} was reviewed",
+  "notification.bazaar.question": "{author} asked about {title}",
+  "notification.push.bazaar_question_in": "{name} asked about your listing in {space_name}",
+  "notification.push.bazaar_question": "{name} asked about your listing"
 }

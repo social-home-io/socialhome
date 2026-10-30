@@ -66,6 +66,7 @@ from .backup import (
     BackupPreView,
 )
 from .bazaar import (
+    BazaarAskView,
     BazaarBidAcceptView,
     BazaarBidCollectionView,
     BazaarBidDetailView,
@@ -77,6 +78,7 @@ from .bazaar import (
     BazaarOfferDetailView,
     BazaarOfferRejectView,
     BazaarSaveView,
+    BazaarThreadCollectionView,
     MySavedBazaarView,
     SpaceBazaarView,
 )
@@ -1186,6 +1188,9 @@ def setup_routes(app: web.Application) -> None:
         BazaarOfferRejectView,
     )
     app.router.add_view("/api/bazaar/{id}/save", BazaarSaveView)
+    # "Ask the seller" (v_73).
+    app.router.add_view("/api/bazaar/{id}/ask", BazaarAskView)
+    app.router.add_view("/api/bazaar/{id}/threads", BazaarThreadCollectionView)
     app.router.add_view("/api/me/bazaar/saved", MySavedBazaarView)
 
     # ── Link previews (composer live card) ──────────────────────────────

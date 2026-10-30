@@ -524,6 +524,7 @@ async def test_opening_a_chat_withdraws_its_message_mention_and_call_pushes(
             [
                 "dm_message:/dms/c1",
                 "dm_mention:/dms/c1",
+                "bazaar_question:/dms/c1",
                 "call_missed:/dms/c1",
                 "chat_added:/dms/c1",
             ],

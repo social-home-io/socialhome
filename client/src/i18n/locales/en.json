@@ -2143,6 +2143,7 @@
   "capability.remote_report_answers": "Reporters in other households hear their report was reviewed",
   "capability.app_games_end_on_uninstall": "Games end cleanly when the other household removes the app",
   "capability.bazaar_offers": "Offers reach sellers in other households",
+  "capability.bazaar_ask_the_seller": "Ask the seller about a listing",
   "space.settings_page.moderation.queue_meta": "Posts to review, join requests and reports",
   "space.settings_page.moderation.days": "days",
   "space.settings_page.danger.summary": "Archive, hand over or delete",

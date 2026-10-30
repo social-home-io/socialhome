@@ -343,5 +343,8 @@
   "notification.poll.scheduled": "{name} a choisi un créneau pour un sondage de dates auquel vous avez répondu",
   "notification.poll.scheduled_in": "{name} a choisi un créneau dans {space_name}",
   "notification.report.answered": "Votre signalement a été examiné",
-  "notification.report.answered_in": "Votre signalement dans {space_name} a été examiné"
+  "notification.report.answered_in": "Votre signalement dans {space_name} a été examiné",
+  "notification.bazaar.question": "{author} a une question sur {title}",
+  "notification.push.bazaar_question_in": "{name} a une question sur votre annonce dans {space_name}",
+  "notification.push.bazaar_question": "{name} a une question sur votre annonce"
 }

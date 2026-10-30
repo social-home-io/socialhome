@@ -132,6 +132,7 @@ If `SpaceContentEncryption` isn't configured, the outbound path raises
   - [Pages](./pages.md) — space pages (wiki-style; host-sequenced — the host merges or keeps conflicting edits, v_48).
   - [Tasks](./tasks.md) — task lists and tasks.
   - [Calendar](./calendar.md) — calendar events and RSVPs.
+  - [Bazaar: Ask the seller](./bazaar.md#ask-the-seller-v_74) — a private 1:1 text thread between a buyer and the seller about one listing: writers only, never a protected account, blocks both ways, read-only 14 days after the listing ends; each message sealed to the other person's household only over the space's own transport (`BAZAAR_THREAD_MESSAGE`, capability v_74).
   - [Space chat](./space-chat.md) — the chat next to a space's feed: the space's writers only (never a follower-only household), owner-bound message ids, every field but the routing ones encrypted, text + replies + mentions in v1, recent messages by catch-up (`SPACE_CHAT_*`, capability v_55).
   - [Bazaar](./bazaar.md) — a space's marketplace: listings, bids and sales reach every member household; an offer goes to the seller's household only and its answer back to the offerer's (`BAZAAR_OFFER_MADE` / `BAZAAR_OFFER_UPDATED`, capability v_73).
   - [Space timetables](./timetables.md) — admin-maintained shared timetables (a class *Stundenplan*), one upserted aggregate per timetable, member households only (capability v_39).

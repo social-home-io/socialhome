@@ -199,6 +199,13 @@ class BazaarService(ProtectionGateMixin):
         seat = await self._seat(listing, user_id)
         return seat is not None and seat.role in WRITER_ROLES
 
+    async def tradeable_listing(
+        self, post_id: str, buyer_user_id: str
+    ) -> BazaarListing:
+        """Public :meth:`_tradeable_listing` — for "Ask the seller", which
+        is trading too (a writer seat; a follower gets 403)."""
+        return await self._tradeable_listing(post_id, buyer_user_id)
+
     async def _tradeable_listing(
         self, post_id: str, buyer_user_id: str
     ) -> BazaarListing:

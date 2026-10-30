@@ -7,6 +7,8 @@ from aiohttp import web
 from ..app_keys import (
     bazaar_repo_key,
     bazaar_service_key,
+    bazaar_thread_service_key,
+    conversation_repo_key,
     media_signer_key,
     space_repo_key,
 )
@@ -565,3 +567,97 @@ class MySavedBazaarView(BaseView):
         svc = self.svc(bazaar_service_key)
         saved = await svc.list_saved_listings(ctx.user_id)
         return web.json_response({"saved": saved})
+
+
+def listing_thread_dict(info) -> dict:
+    """The listing card + thread state a listing thread shows (shared by
+    the threads list and ``GET /api/conversations`` rows)."""
+    listing = info.listing
+    return {
+        "post_id": listing.post_id,
+        "space_id": listing.space_id,
+        "title": listing.title,
+        "mode": listing.mode.value,
+        "status": listing.status.value,
+        "price": listing.price,
+        "start_price": listing.start_price,
+        "winning_price": listing.winning_price,
+        "currency": listing.currency,
+        "image_urls": list(listing.image_urls[:1]),
+        "seller_user_id": listing.seller_user_id,
+        "role": info.role,
+        "other_user_id": info.other_user_id,
+        "writable": info.writable,
+        "closes_at": info.closes_at.isoformat() if info.closes_at else None,
+    }
+
+
+class BazaarAskView(BaseView):
+    """``POST /api/bazaar/{id}/ask`` — "Ask the seller" (v_74).
+
+    Opens (or reopens) the caller's conversation with the listing's seller
+    and answers ``{"kind": "dm" | "thread", "conversation_id": …}``: the
+    normal 1:1 DM when the seller lives in this household or a household it
+    paired with directly, else the private listing thread whose messages go
+    to the seller's household only. 404 for a listing the caller can't see,
+    403 ``SUBSCRIBER_READ_ONLY`` for a follower, 403 ``ACCOUNT_PROTECTED``
+    for a protected account, 403 across a block, 409 ``OWN_LISTING`` for the
+    seller, 409 ``LISTING_THREAD_CLOSED`` once the listing ended more than 14
+    days ago, 409 ``SELLER_HOUSEHOLD_TOO_OLD`` for a seller's household
+    below v_74.
+    """
+
+    async def post(self) -> web.Response:
+        svc = self.svc(bazaar_thread_service_key)
+        try:
+            result = await svc.ask(self.match("id"), username=self.user.username)
+        except ListingNotFoundError:
+            return error_response(404, "NOT_FOUND", "Listing not found.")
+        return web.json_response(
+            {"kind": result.kind, "conversation_id": result.conversation_id},
+            status=201,
+        )
+
+
+class BazaarThreadCollectionView(BaseView):
+    """``GET /api/bazaar/{id}/threads`` — the "Ask the seller" threads about
+    a listing the caller sits in: every buyer's for the seller, the caller's
+    own for a buyer. Each row: ``conversation_id``, the other person
+    (``user_id``, ``display_name``), ``unread``, ``last_message_at`` and the
+    thread state (``writable``, ``closes_at``). 404 for a listing the caller
+    can't see."""
+
+    async def get(self) -> web.Response:
+        svc = self.svc(bazaar_thread_service_key)
+        convos = self.svc(conversation_repo_key)
+        try:
+            threads = await svc.list_threads(
+                self.match("id"), username=self.user.username
+            )
+        except ListingNotFoundError:
+            return error_response(404, "NOT_FOUND", "Listing not found.")
+        rows: list[dict] = []
+        for conv, info in threads:
+            seats = await convos.list_remote_members(conv.id)
+            name = next(
+                (s.display_name for s in seats if s.user_id == info.other_user_id),
+                None,
+            )
+            rows.append(
+                {
+                    "conversation_id": conv.id,
+                    "other_user_id": info.other_user_id,
+                    "other_display_name": name,
+                    "unread": await convos.count_unread(conv.id, self.user.username),
+                    "last_message_at": (
+                        conv.last_message_at.isoformat()
+                        if conv.last_message_at
+                        else None
+                    ),
+                    "writable": info.writable,
+                    "closes_at": (
+                        info.closes_at.isoformat() if info.closes_at else None
+                    ),
+                }
+            )
+        return web.json_response(rows)

@@ -343,5 +343,8 @@
   "notification.poll.scheduled": "{name} eligió una fecha para una encuesta de fechas que respondiste",
   "notification.poll.scheduled_in": "{name} eligió una fecha en {space_name}",
   "notification.report.answered": "Se revisó tu denuncia",
-  "notification.report.answered_in": "Se revisó tu denuncia en {space_name}"
+  "notification.report.answered_in": "Se revisó tu denuncia en {space_name}",
+  "notification.bazaar.question": "{author} preguntó por {title}",
+  "notification.push.bazaar_question_in": "{name} preguntó por tu anuncio en {space_name}",
+  "notification.push.bazaar_question": "{name} preguntó por tu anuncio"
 }
