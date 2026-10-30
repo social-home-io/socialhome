@@ -21,6 +21,7 @@ from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
+    from .bazaar_faq import BazaarFaqEntry
     from .calendar import CalendarEvent
     from .highlight import HighlightFrame
     from .mention import Mention
@@ -1131,6 +1132,19 @@ class BazaarListingUpdated(DomainEvent):
 
     listing_post_id: str
     seller_user_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
+class BazaarListingFaqChanged(DomainEvent):
+    """One entry of a listing's questions and answers was added, edited or
+    removed (v_75) — by this household's seller, or taken from the
+    seller's household (``origin_instance_id`` set, never sent on)."""
+
+    space_id: str
+    seller_user_id: str
+    entry: BazaarFaqEntry
+    origin_instance_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 

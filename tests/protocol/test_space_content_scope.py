@@ -551,6 +551,20 @@ ATTACKS: dict[FederationEventType, list[tuple[str, dict]]] = {
         )
         for status in ("accepted", "rejected", "withdrawn")
     ],
+    FET.BAZAAR_LISTING_FAQ_UPDATED: [
+        (
+            "a question on B's listing",
+            {
+                "listing_post_id": "post-b-listing",
+                "entry_id": "fa" * 16,
+                "rev": 1,
+                "position": 0,
+                "removed": False,
+                "question": "Does it fold?",
+                "answer": "Yes.",
+            },
+        ),
+    ],
     FET.BAZAAR_THREAD_MESSAGE: [
         (
             "ask about B's listing",

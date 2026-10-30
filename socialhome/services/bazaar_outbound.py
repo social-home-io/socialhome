@@ -28,12 +28,14 @@ import logging
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
+from ..domain.bazaar_faq import entry_to_wire
 from ..domain.events import (
     BazaarBidPlaced,
     BazaarBidWithdrawn,
     BazaarListingCancelled,
     BazaarListingCreated,
     BazaarListingExpired,
+    BazaarListingFaqChanged,
     BazaarOfferAccepted,
     BazaarOfferRejected,
 )
@@ -101,6 +103,8 @@ class BazaarOutbound:
         # v_73 — an offer's answer and its withdrawal.
         self._bus.subscribe(BazaarOfferRejected, self._on_offer_rejected)
         self._bus.subscribe(BazaarBidWithdrawn, self._on_offer_withdrawn)
+        # v_75 — one entry of a listing's questions and answers.
+        self._bus.subscribe(BazaarListingFaqChanged, self._on_faq_changed)
 
     async def _on_listing_created(self, event: BazaarListingCreated) -> None:
         """Fan ``BAZAAR_LISTING_CREATED`` to every member household.
@@ -355,6 +359,35 @@ class BazaarOutbound:
         # The listing is sold: every member household marks it so (the
         # bid row's flag alone left it "active" everywhere but here).
         await self._fan_status_update(event.listing_post_id)
+
+    async def _on_faq_changed(self, event: BazaarListingFaqChanged) -> None:
+        """``BAZAAR_LISTING_FAQ_UPDATED`` — the ONE entry that changed (a
+        delta: added, edited or removed), to every member household like
+        the listing itself; the seller's household only, never one taken
+        from a peer. Everything but ``space_id`` is in the sealed payload.
+        A member household below v_75 is sent nothing."""
+        if event.origin_instance_id:
+            return
+        if not await self._is_ours(event.seller_user_id):
+            return
+        payload: dict = {
+            "listing_post_id": event.entry.listing_post_id,
+            "space_id": event.space_id,
+            **entry_to_wire(event.entry),
+        }
+        try:
+            await self._federation.broadcast_to_space_members(
+                event.space_id,
+                FederationEventType.BAZAAR_LISTING_FAQ_UPDATED,
+                payload,
+                min_proto_version=FederationCapability.MIN_FOR_BAZAAR_FAQ,
+            )
+        except Exception:
+            log.exception(
+                "BAZAAR_LISTING_FAQ_UPDATED broadcast failed for space=%s listing=%s",
+                event.space_id,
+                event.entry.listing_post_id,
+            )
 
     # ─── Offers (v_73) — between the seller's and the offerer's household ──
 

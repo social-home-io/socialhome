@@ -9587,6 +9587,30 @@ def cmd_verify() -> None:
             failures.append("bazaar-ask: c no longer holds a's question")
         else:
             print("  bazaar-ask: c still holds a's question ✓")
+    # v_75 — a listing's questions and answers: one sealed
+    # ``BAZAAR_LISTING_FAQ_UPDATED`` per change to every member household at
+    # >= v_75. ``bazaar-faq`` exercises add / edit / remove end to end (the
+    # receiver rules are ``tests/protocol/test_bazaar_faq_federation.py``).
+    if int(_Cap.MIN_FOR_BAZAAR_FAQ) != 75 or _OURS < 75:
+        failures.append(
+            "MIN_FOR_BAZAAR_FAQ moved off v_75 (or OURS fell below it) — a "
+            "listing's FAQ would reach households that drop it"
+        )
+    else:
+        print("  v_75 listing FAQ gate in place ✓")
+    faq = state.get("bazaar_faq")
+    if faq:
+        for label in ("a", "b", "d"):
+            held = _rows(
+                label,
+                "SELECT question FROM bazaar_listing_faq"
+                " WHERE entry_id = ? AND removed = 0",
+                (faq["entry_id"],),
+            )
+            if [r[0] for r in held] != [faq["question"]]:
+                failures.append(f"bazaar-faq: {label} no longer holds c's FAQ entry")
+            else:
+                print(f"  bazaar-faq: {label} still holds c's FAQ entry ✓")
     hla = state.get("highlight_audience")
     if hla:
         stamps = _rows(
@@ -15214,6 +15238,147 @@ def cmd_bazaar_ask() -> None:
     print("bazaar-ask: ok")
 
 
+def cmd_bazaar_faq() -> None:
+    """A listing's questions and answers (v_75).
+
+    Prereqs: ``bazaar-ask`` (c's lamp listing in Beta's space: owner b,
+    members a + c, d a follower household). Runs standalone after it.
+
+    1. c (the seller) adds two questions and answers to the lamp
+       (``POST /api/bazaar/{id}/faq``); each reaches a, b and d — every
+       member household, the follower's included: it reads the listing
+       (``BAZAAR_LISTING_FAQ_UPDATED``, one entry per event).
+    2. c rewords one and removes the other; the edit and the removal reach
+       every household — nobody keeps the removed words.
+    3. **Only the seller.** a (a member, not the seller) is refused (403).
+    4. **v_75.** ``OURS`` is at least ``MIN_FOR_BAZAAR_FAQ`` and a, b and c
+       see each other at it.
+    """
+    from socialhome.domain.federation_capabilities import (
+        OURS as _OURS,
+        FederationCapability as _Cap,
+    )
+
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' first")
+    ask = state.get("bazaar_ask")
+    if not ask:
+        raise SystemExit("run 'bazaar-ask' first — needs c's listing")
+    inst = state["instances"]
+    a, b, c = inst["a"], inst["b"], inst["c"]
+    post_id = ask["post_id"]
+    nonce = secrets.token_hex(3)
+
+    def wait(what: str, check, timeout: float = 45.0) -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if check():
+                return
+            time.sleep(1.0)
+        raise SystemExit(f"bazaar-faq: timed out waiting for {what}")
+
+    def held(label: str) -> list[tuple[str, str]]:
+        return [
+            (r[0], r[1])
+            for r in _rows(
+                label,
+                "SELECT question, answer FROM bazaar_listing_faq"
+                " WHERE listing_post_id = ? AND removed = 0 ORDER BY position",
+                (post_id,),
+            )
+        ]
+
+    def add(question: str, answer: str) -> dict:
+        s, entry = _request(
+            f"http://127.0.0.1:{c['port']}/api/bazaar/{post_id}/faq",
+            token=c["token"],
+            method="POST",
+            body={"question": question, "answer": answer},
+        )
+        _must("faq add(c)", s, entry, ok=(201,))
+        return entry
+
+    # 1. Two entries by the seller reach every member household.
+    keep = add(f"Does the lamp dim? {nonce}", "Yes, three steps.")
+    drop = add(f"Is the bulb included? {nonce}", "No.")
+    want = [(keep["question"], keep["answer"]), (drop["question"], drop["answer"])]
+    for label in ("a", "b", "d"):
+        wait(f"{label} to hold both FAQ entries", lambda x=label: held(x) == want)
+    print("  c → 2 questions and answers → a, b, d (follower household) ✓")
+
+    # 2. Reworded and removed — everywhere.
+    reworded = f"Can the lamp be dimmed? {nonce}"
+    s, body = _request(
+        f"http://127.0.0.1:{c['port']}/api/bazaar/{post_id}/faq/{keep['entry_id']}",
+        token=c["token"],
+        method="PATCH",
+        body={"question": reworded, "answer": "Yes, three steps."},
+    )
+    _must("faq edit(c)", s, body)
+    s, body = _request(
+        f"http://127.0.0.1:{c['port']}/api/bazaar/{post_id}/faq/{drop['entry_id']}",
+        token=c["token"],
+        method="DELETE",
+    )
+    _must("faq remove(c)", s, body, ok=(204,))
+    for label in ("a", "b", "d"):
+        wait(
+            f"{label} to take the edit and the removal",
+            lambda x=label: held(x) == [(reworded, "Yes, three steps.")],
+        )
+        gone = _rows(
+            label,
+            "SELECT 1 FROM bazaar_listing_faq WHERE question = ?",
+            (drop["question"],),
+        )
+        if gone:
+            raise SystemExit(f"bazaar-faq: {label} keeps a removed question")
+    print("  c rewords one, removes one → a, b, d converge ✓")
+
+    # 3. Only the seller writes.
+    s, refused = _request(
+        f"http://127.0.0.1:{a['port']}/api/bazaar/{post_id}/faq",
+        token=a["token"],
+        method="POST",
+        body={"question": "Mine?", "answer": "No."},
+    )
+    if s != 403:
+        raise SystemExit(f"bazaar-faq: a (not the seller) could write: {s} {refused!r}")
+    print("  a (not the seller) can't write the FAQ ✓")
+
+    # 4. v_75 round-trips between the writer households.
+    if _OURS < _Cap.MIN_FOR_BAZAAR_FAQ:
+        raise SystemExit(
+            f"bazaar-faq: OURS={_OURS} < MIN_FOR_BAZAAR_FAQ={_Cap.MIN_FOR_BAZAAR_FAQ}"
+        )
+    for label, info in (("a", a), ("b", b), ("c", c)):
+        s, conns = _request(
+            f"http://127.0.0.1:{info['port']}/api/connections", token=info["token"]
+        )
+        _must(f"connections({label})", s, conns)
+        for row in conns:
+            peer = row.get("instance_id")
+            if row.get("status") != "confirmed" or peer not in {
+                a["instance_id"],
+                b["instance_id"],
+                c["instance_id"],
+            }:
+                continue
+            pv = int(row.get("proto_version") or 1)
+            if pv < _Cap.MIN_FOR_BAZAAR_FAQ:
+                raise SystemExit(
+                    f"bazaar-faq: {label} sees {peer[:8]} at v{pv} "
+                    f"(< {_Cap.MIN_FOR_BAZAAR_FAQ})"
+                )
+    print(
+        f"  a, b, c see each other at >= v{_Cap.MIN_FOR_BAZAAR_FAQ} (OURS={_OURS}) ✓"
+    )
+    state["bazaar_faq"] = {"entry_id": keep["entry_id"], "question": reworded}
+    _save(state)
+    print("bazaar-faq: ok")
+
+
 def cmd_down() -> None:
     state = _load()
     if state.get("gfs_b"):
@@ -19444,6 +19609,10 @@ def main() -> None:
         # lists a lamp, a (paired with c) asks and lands in the normal DM,
         # d (follower) is refused; a, b, c see each other at >= v_74.
         cmd_bazaar_ask()
+        # ``bazaar-faq`` (v_75): c adds questions and answers to the lamp,
+        # rewords one and removes one — a, b and d (follower household)
+        # converge; a (not the seller) is refused.
+        cmd_bazaar_faq()
         # ``highlight-audience`` (v_70): a narrows today's highlight to b's
         # household — c deletes it and remembers the removal, a narrowed
         # frame reaches b only — then widens back and c gets the day again.

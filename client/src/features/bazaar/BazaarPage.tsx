@@ -181,7 +181,7 @@ export default function BazaarPage() {
                   onClick={() => { selected.value = null }}>
             ← {t('bazaar.back')}
           </Button>
-          <BazaarPostBody postId={selected.value.post_id} />
+          <BazaarPostBody postId={selected.value.post_id} detail />
         </div>
       ) : (
         <>

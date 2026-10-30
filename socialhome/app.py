@@ -295,6 +295,7 @@ from .services.app_update_scheduler import AppUpdateScheduler
 from .services.audio_transcription_service import AudioTranscriptionService
 from .services.auto_pair_inbox import AutoPairInbox
 from .services.backup_service import BackupService
+from .services.bazaar_faq_service import BazaarFaqService
 from .services.bazaar_outbound import BazaarOutbound
 from .services.bazaar_service import BazaarExpiryScheduler, BazaarService
 from .services.bazaar_thread_outbound import BazaarThreadOutbound
@@ -317,6 +318,7 @@ from .services.data_export_service import DataExportService
 from .services.dm_media_sync_service import DmMediaSyncService
 from .services.dm_routing_service import DmRoutingService
 from .services.federation_inbound import (
+    BazaarFaqInboundHandlers,
     BazaarThreadInboundHandlers,
     PairingInboundHandlers,
     PersonalCalendarInboundHandlers,
@@ -3303,6 +3305,11 @@ def create_app(config: Config | None = None) -> web.Application:
         dm_service=dm_service,
     )
     dm_service.attach_listing_threads(bazaar_thread_service)
+    # A listing's questions and answers (v_75): the seller writes them; the
+    # outbound sends each change to every member household.
+    bazaar_faq_service = BazaarFaqService(
+        bazaar_service=bazaar_service, bazaar_repo=bazaar_repo, bus=bus
+    )
 
     # ── Highlights (§Highlights) ────────────────────────────────────────────
     highlight_service = HighlightService(
@@ -3473,6 +3480,7 @@ def create_app(config: Config | None = None) -> web.Application:
         space_cal_service,
         bazaar_service,
         bazaar_thread_service,
+        bazaar_faq_service,
         highlight_publication_service,
         highlight_signaling_handler,
         moment_public_service,
@@ -3827,6 +3835,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.space_poll_service_key] = space_poll_service
     app[K.bazaar_service_key] = bazaar_service
     app[K.bazaar_thread_service_key] = bazaar_thread_service
+    app[K.bazaar_faq_service_key] = bazaar_faq_service
     app[K.corner_service_key] = corner_service
     app[K.sticky_repo_key] = sticky_repo
     app[K.sticky_service_key] = sticky_service
@@ -4458,6 +4467,15 @@ def create_app(config: Config | None = None) -> web.Application:
             user_repo=user_repo,
             child_protection=child_protection_service,
         )
+        # v_75 — a listing's questions and answers, from its seller's
+        # household only.
+        BazaarFaqInboundHandlers(
+            bus=bus,
+            bazaar_repo=bazaar_repo,
+            space_repo=space_repo,
+            user_repo=user_repo,
+            authorship=fed.space_authorship,
+        ).attach_to(federation_service)
         # v_49 — member households check a member-published ``space_item``
         # against their own roster and access levels too.
         if space_public_inbound is not None:

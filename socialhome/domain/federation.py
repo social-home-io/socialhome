@@ -354,6 +354,12 @@ class FederationEventType(str, enum.Enum):
     #: or the link-joined relay seat). Every field but ``space_id`` is in
     #: the encrypted payload. See ``docs/protocol/bazaar.md``.
     BAZAAR_THREAD_MESSAGE = "bazaar_thread_message"
+    #: v_75 — one entry of a listing's public questions and answers (the
+    #: seller's FAQ): added, edited or removed. From the seller's household
+    #: to every member household (``broadcast_to_space_members``); every
+    #: field but ``space_id`` is in the encrypted payload. Newer ``rev``
+    #: wins, a removal is final. See ``docs/protocol/bazaar.md``.
+    BAZAAR_LISTING_FAQ_UPDATED = "bazaar_listing_faq_updated"
 
     # ── Space encryption key exchange ──
     SPACE_KEY_EXCHANGE = "space_key_exchange"
@@ -703,6 +709,8 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: "Ask the seller" (v_74): a link-joined member asks a seller, and
         #: hears back, over its relay seat — the space's own transport.
         FederationEventType.BAZAAR_THREAD_MESSAGE,
+        #: A listing's questions and answers (v_75), the seller's to write.
+        FederationEventType.BAZAAR_LISTING_FAQ_UPDATED,
         #: Space-scoped location pins and the space's own zone catalogue —
         #: a display layer inside the space, distinct from the household
         #: ``PRESENCE_UPDATED`` fan-out (which stays excluded).
@@ -886,6 +894,8 @@ SPACE_WRITE_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         #: "Ask the seller" (v_74): trading is for writers — a Follower
         #: household neither asks nor is asked.
         FederationEventType.BAZAAR_THREAD_MESSAGE,
+        #: A listing's questions and answers (v_75), the seller's to write.
+        FederationEventType.BAZAAR_LISTING_FAQ_UPDATED,
         # ── Map: shared location pins and zones ──
         FederationEventType.SPACE_LOCATION_UPDATED,
         FederationEventType.SPACE_ZONE_UPSERTED,

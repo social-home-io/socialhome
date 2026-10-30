@@ -428,6 +428,28 @@ class BazaarService(ProtectionGateMixin):
         enforced by the route before this is called."""
         return await self._repo.list_in_space(space_id)
 
+    async def editable_listing(self, post_id: str, actor_user_id: str) -> BazaarListing:
+        """The listing its seller may change now — its title, description
+        or questions and answers: visible to them (404 otherwise), theirs
+        (403), active (409) and, being the wrapper post's content, an edit
+        of their own post under the space's ``posts`` access level."""
+        listing = await self.get_visible_listing(post_id, actor_user_id)
+        if listing.seller_user_id != actor_user_id:
+            raise PermissionError("only the seller may edit this listing")
+        if listing.status is not BazaarStatus.ACTIVE:
+            raise BazaarServiceError("listing is not active")
+        if self._spaces is None:
+            # Fail closed: without the space service there is no access gate.
+            raise RuntimeError("space service not attached")
+        await self._spaces.require_content_access(
+            listing.space_id,
+            actor_user_id,
+            "posts",
+            ContentAction.EDIT,
+            owns_target=True,
+        )
+        return listing
+
     async def update_listing(
         self,
         *,
@@ -438,23 +460,7 @@ class BazaarService(ProtectionGateMixin):
     ) -> BazaarListing:
         """Patch mutable fields on an active listing (seller only). Someone
         who can't see the listing gets the unknown id's 404."""
-        listing = await self.get_visible_listing(post_id, actor_user_id)
-        if listing.seller_user_id != actor_user_id:
-            raise PermissionError("only the seller may edit this listing")
-        if listing.status is not BazaarStatus.ACTIVE:
-            raise BazaarServiceError("listing is not active")
-        if self._spaces is None:
-            # Fail closed: without the space service there is no access gate.
-            raise RuntimeError("space service not attached")
-        # The title / description is the wrapper post's content: an edit of
-        # one's own post under the space's ``posts`` level.
-        await self._spaces.require_content_access(
-            listing.space_id,
-            actor_user_id,
-            "posts",
-            ContentAction.EDIT,
-            owns_target=True,
-        )
+        listing = await self.editable_listing(post_id, actor_user_id)
 
         next_title = listing.title
         next_description = listing.description

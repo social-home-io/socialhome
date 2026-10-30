@@ -20,6 +20,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
+from ..domain.bazaar_faq import (
+    BAZAAR_FAQ_MAX_ENTRIES,
+    BAZAAR_FAQ_MAX_REMOVED,
+    BazaarFaqEntry,
+    BazaarFaqEntryNotFoundError,
+    BazaarFaqFullError,
+)
 from ..domain.post import (
     BAZAAR_CURRENCIES,
     BAZAAR_OFFER_TRANSITIONS,
@@ -181,6 +188,45 @@ class AbstractBazaarRepo(Protocol):
         self,
         user_id: str,
     ) -> list[dict]: ...
+
+    # ── Questions and answers (``bazaar_listing_faq``, v_75) ───────────
+    async def list_faq(self, post_id: str) -> list[BazaarFaqEntry]:
+        """The listing's live entries in display order."""
+        ...
+
+    async def list_faq_for_listings(
+        self, post_ids: list[str]
+    ) -> dict[str, list[BazaarFaqEntry]]:
+        """Every entry of these listings, removal markers included (the
+        space sync streams both), keyed by listing."""
+        ...
+
+    async def add_faq_entry(
+        self, post_id: str, *, question: str, answer: str
+    ) -> BazaarFaqEntry:
+        """A new entry by this household's seller, at the end of the list,
+        under the listing's next revision. :class:`BazaarFaqFullError` when
+        the listing already shows the maximum."""
+        ...
+
+    async def edit_faq_entry(
+        self, post_id: str, entry_id: str, *, question: str, answer: str
+    ) -> BazaarFaqEntry:
+        """A live entry's new text under the listing's next revision.
+        :class:`BazaarFaqEntryNotFoundError` for no such live entry."""
+        ...
+
+    async def remove_faq_entry(self, post_id: str, entry_id: str) -> BazaarFaqEntry:
+        """Blank a live entry into a removal marker under the listing's next
+        revision. :class:`BazaarFaqEntryNotFoundError` for no such entry."""
+        ...
+
+    async def apply_faq_entry(self, entry: BazaarFaqEntry) -> bool:
+        """Take an entry from the seller's household (or the space sync):
+        stored only when its ``rev`` is newer than the one held, never
+        reviving a removed entry, never past the live maximum. ``True``
+        when it changed what this household holds."""
+        ...
 
 
 class SqliteBazaarRepo:
@@ -897,8 +943,181 @@ class SqliteBazaarRepo:
         )
         return [{"post_id": r["post_id"], "saved_at": r["saved_at"]} for r in rows]
 
+    # ── Questions and answers (``bazaar_listing_faq``, v_75) ───────────
+
+    async def list_faq(self, post_id: str) -> list[BazaarFaqEntry]:
+        rows = await self._db.fetchall(
+            "SELECT * FROM bazaar_listing_faq WHERE listing_post_id=?"
+            " AND removed=0 ORDER BY position, entry_id",
+            (post_id,),
+        )
+        return [_row_to_faq(r) for r in rows_to_dicts(rows)]
+
+    async def list_faq_for_listings(
+        self, post_ids: list[str]
+    ) -> dict[str, list[BazaarFaqEntry]]:
+        out: dict[str, list[BazaarFaqEntry]] = {}
+        if not post_ids:
+            return out
+        marks = ",".join("?" for _ in post_ids)
+        rows = await self._db.fetchall(
+            f"SELECT * FROM bazaar_listing_faq WHERE listing_post_id IN ({marks})"
+            " ORDER BY listing_post_id, position, entry_id",
+            tuple(post_ids),
+        )
+        for r in rows_to_dicts(rows):
+            entry = _row_to_faq(r)
+            out.setdefault(entry.listing_post_id, []).append(entry)
+        return out
+
+    async def add_faq_entry(
+        self, post_id: str, *, question: str, answer: str
+    ) -> BazaarFaqEntry:
+        entry_id = uuid.uuid4().hex
+
+        def _run(conn) -> BazaarFaqEntry:
+            live, top_position, top_rev = conn.execute(
+                "SELECT COALESCE(SUM(removed=0), 0),"
+                " COALESCE(MAX(CASE WHEN removed=0 THEN position END), -1),"
+                " COALESCE(MAX(rev), 0)"
+                " FROM bazaar_listing_faq WHERE listing_post_id=?",
+                (post_id,),
+            ).fetchone()
+            if live >= BAZAAR_FAQ_MAX_ENTRIES:
+                raise BazaarFaqFullError
+            entry = BazaarFaqEntry(
+                listing_post_id=post_id,
+                entry_id=entry_id,
+                question=question,
+                answer=answer,
+                position=int(top_position) + 1,
+                rev=int(top_rev) + 1,
+            )
+            _faq_upsert(conn, entry)
+            return entry
+
+        return await self._db.transact(_run)
+
+    async def edit_faq_entry(
+        self, post_id: str, entry_id: str, *, question: str, answer: str
+    ) -> BazaarFaqEntry:
+        def _run(conn) -> BazaarFaqEntry:
+            held = _faq_live_row(conn, post_id, entry_id)
+            entry = BazaarFaqEntry(
+                listing_post_id=post_id,
+                entry_id=entry_id,
+                question=question,
+                answer=answer,
+                position=int(held[0]),
+                rev=_faq_next_rev(conn, post_id),
+            )
+            _faq_upsert(conn, entry)
+            return entry
+
+        return await self._db.transact(_run)
+
+    async def remove_faq_entry(self, post_id: str, entry_id: str) -> BazaarFaqEntry:
+        def _run(conn) -> BazaarFaqEntry:
+            held = _faq_live_row(conn, post_id, entry_id)
+            entry = BazaarFaqEntry(
+                listing_post_id=post_id,
+                entry_id=entry_id,
+                question="",
+                answer="",
+                position=int(held[0]),
+                rev=_faq_next_rev(conn, post_id),
+                removed=True,
+            )
+            _faq_upsert(conn, entry)
+            return entry
+
+        return await self._db.transact(_run)
+
+    async def apply_faq_entry(self, entry: BazaarFaqEntry) -> bool:
+        def _run(conn) -> bool:
+            held = conn.execute(
+                "SELECT rev, removed FROM bazaar_listing_faq"
+                " WHERE listing_post_id=? AND entry_id=?",
+                (entry.listing_post_id, entry.entry_id),
+            ).fetchone()
+            if held is not None and (int(held[0]) >= entry.rev or held[1]):
+                # Not newer — or removed, which is final.
+                return False
+            if held is None and not entry.removed:
+                (live,) = conn.execute(
+                    "SELECT COUNT(*) FROM bazaar_listing_faq"
+                    " WHERE listing_post_id=? AND removed=0",
+                    (entry.listing_post_id,),
+                ).fetchone()
+                if live >= BAZAAR_FAQ_MAX_ENTRIES:
+                    return False
+            _faq_upsert(conn, entry)
+            return True
+
+        return bool(await self._db.transact(_run))
+
+
+def _faq_live_row(conn, post_id: str, entry_id: str):
+    held = conn.execute(
+        "SELECT position FROM bazaar_listing_faq"
+        " WHERE listing_post_id=? AND entry_id=? AND removed=0",
+        (post_id, entry_id),
+    ).fetchone()
+    if held is None:
+        raise BazaarFaqEntryNotFoundError
+    return held
+
+
+def _faq_next_rev(conn, post_id: str) -> int:
+    (top,) = conn.execute(
+        "SELECT COALESCE(MAX(rev), 0) FROM bazaar_listing_faq WHERE listing_post_id=?",
+        (post_id,),
+    ).fetchone()
+    return int(top) + 1
+
+
+def _faq_upsert(conn, entry: BazaarFaqEntry) -> None:
+    """Write ``entry`` (text blanked for a removal) and, after a removal,
+    forget the oldest markers past :data:`BAZAAR_FAQ_MAX_REMOVED`."""
+    conn.execute(
+        "INSERT INTO bazaar_listing_faq(listing_post_id, entry_id, question,"
+        " answer, position, rev, removed) VALUES(?,?,?,?,?,?,?)"
+        " ON CONFLICT(listing_post_id, entry_id) DO UPDATE SET"
+        " question=excluded.question, answer=excluded.answer,"
+        " position=excluded.position, rev=excluded.rev,"
+        " removed=excluded.removed, updated_at=datetime('now')",
+        (
+            entry.listing_post_id,
+            entry.entry_id,
+            "" if entry.removed else entry.question,
+            "" if entry.removed else entry.answer,
+            int(entry.position),
+            int(entry.rev),
+            int(entry.removed),
+        ),
+    )
+    if entry.removed:
+        conn.execute(
+            "DELETE FROM bazaar_listing_faq WHERE listing_post_id=? AND removed=1"
+            " AND entry_id NOT IN (SELECT entry_id FROM bazaar_listing_faq"
+            " WHERE listing_post_id=? AND removed=1 ORDER BY rev DESC LIMIT ?)",
+            (entry.listing_post_id, entry.listing_post_id, BAZAAR_FAQ_MAX_REMOVED),
+        )
+
 
 # ─── Row → domain ─────────────────────────────────────────────────────────
+
+
+def _row_to_faq(row: dict) -> BazaarFaqEntry:
+    return BazaarFaqEntry(
+        listing_post_id=row["listing_post_id"],
+        entry_id=row["entry_id"],
+        question=row["question"],
+        answer=row["answer"],
+        position=int(row["position"]),
+        rev=int(row["rev"]),
+        removed=bool_col(row.get("removed", 0)),
+    )
 
 
 def _row_to_listing(row: dict | None) -> BazaarListing | None:

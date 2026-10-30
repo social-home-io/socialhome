@@ -29,13 +29,16 @@ households only.
 | A declined bid | every member household | everyone mirrors the bid, so the high bid reads the same everywhere |
 | …the seller's reason for it | **the bidder's household only** | the words are for the bidder |
 | A withdrawn bid | every member household | everyone mirrors the bid: it must stop setting the floor, and can't win, everywhere |
+| A question and answer on the listing (its FAQ), an edit, a removal | every member household | everyone who sees the listing reads them ([v_75](#questions-and-answers-v_75)) |
 
 ## Event types
 
 `BAZAAR_LISTING_CREATED` (v_10), `BAZAAR_LISTING_UPDATED` (v_11),
 `BAZAAR_BID_PLACED`, `BAZAAR_OFFER_ACCEPTED` (v_12), `BAZAAR_OFFER_MADE`,
-`BAZAAR_OFFER_UPDATED` (v_73), `BAZAAR_THREAD_MESSAGE` (v_74, see [Ask the seller](#ask-the-seller-v_74)), plus the `bazaar` resource of the §25.6
-space sync (listings only).
+`BAZAAR_OFFER_UPDATED` (v_73), `BAZAAR_THREAD_MESSAGE` (v_74, see [Ask the seller](#ask-the-seller-v_74)),
+`BAZAAR_LISTING_FAQ_UPDATED` (v_75, see [Questions and answers](#questions-and-answers-v_75)),
+plus the `bazaar` resource of the §25.6 space sync (listings and, since
+v_75, their questions and answers).
 
 | Event | Sealed payload | Sent by → to |
 |---|---|---|
@@ -386,6 +389,165 @@ no row).
   sending and on receipt, `SPACE_ROUTED` for an unpaired seller), the
   space-content scope, authorship and archived matrices.
 
+## Questions and answers (v_75)
+
+The seller can show short questions with their answers on a listing — its
+public FAQ, "Questions and answers" in the SPA. They are often taken from
+an [Ask the seller](#ask-the-seller-v_74) thread: under a buyer's message
+the seller gets **Add to FAQ**, which opens the editor with the buyer's
+text as the question and the seller's next reply (if any) as the answer;
+the seller rewords both before anything is published. The seller can also
+add entries directly on the listing. Federation capability **v_75**
+(`FederationCapability.MIN_FOR_BAZAAR_FAQ`).
+
+### Scope
+
+- **Who writes**: the seller only, on their own **active** listing, as an
+  edit of their own post under the space's `posts` access level (the same
+  gate as editing the listing's title). Never a protected account
+  (`ProtectedCapability.BAZAAR`). Nothing links an entry to a thread or a
+  person: **an entry never names who asked**, and the seller can reword the
+  question.
+- **Who reads**: everyone who can see the listing — the same audience as
+  the listing (a seat in its space, any role, a follower and a protected
+  account included: reading a listing is not trading).
+- **Bounds** (sender and receiver): at most **10** live entries per
+  listing; a question is one line of at most **200** characters, an answer
+  at most **500**; plain text only — the SPA renders text nodes, no
+  markdown or HTML; control characters are refused; a tab becomes a space,
+  runs of blank lines collapse. At most 30 changes per listing an hour
+  (`429 BAZAAR_FAQ_RATE_LIMITED`); a receiver drops more than 60.
+- **Lifetime**: the FAQ ends with the listing. A sold, expired or withdrawn
+  listing keeps showing it read-only (no more changes); a deleted listing,
+  a purged space or a household leaving the space drops it with the
+  listing (`ON DELETE CASCADE`).
+- **GFS**: never. The FAQ travels like the listing itself — member
+  households only; the GFS relays neither (the public-space relay carries
+  only the wrapper post). A household on the mesh that is not a member
+  only ever relays ciphertext (`SPACE_ROUTED`).
+- **Notifications**: none. It is public information on the listing, read
+  where the listing is read; the buyer who asked already has the answer in
+  their thread, and a notification per edit would fan a bell out to every
+  member for every keystroke-level change. Open listings refresh through
+  the existing `bazaar.listing_updated` WebSocket frame (ids only).
+
+### Event
+
+`BAZAAR_LISTING_FAQ_UPDATED` — ONE entry per event: the delta, never the
+whole list.
+
+| Field | Where |
+|---|---|
+| `space_id` | plaintext envelope routing field (and in the payload) |
+| `listing_post_id`, `entry_id` (32 hex, minted by the seller's household), `rev`, `position`, `removed`, `question`, `answer` (both absent on a removal) | encrypted payload |
+
+`rev` is the seller's household's revision of **this listing's** FAQ
+(one counter per listing, bumped by every add, edit and removal). A
+receiver stores a change only when its `rev` is higher than the one it
+holds for that entry, so a late or replayed envelope never undoes a newer
+edit. **A removal is final**: the receiver keeps a blank marker
+(`removed = 1`) so a late edit of a removed entry can never bring it back;
+at most 20 markers per listing are kept, the oldest go first.
+
+It is a space-content **write** (`SPACE_WRITE_EVENT_TYPES`: the §24.11
+writer gate drops it from a follower-only household, the archive gate from
+an archived space) and allowed from a link-joined household
+(`SPACE_SESSION_ALLOWED_EVENT_TYPES`).
+
+### Delivery
+
+`BazaarOutbound` sends each change made by one of this household's own
+sellers to **every member household** of the listing's space —
+`broadcast_to_space_members`, exactly like the listing (direct to a paired
+member household, sealed end to end inside `SPACE_ROUTED` across a relay,
+through the relay seat to a link-joined one). Never a change it took from
+a peer (`origin_instance_id`). A member household below v_75 is sent
+nothing: its people see the listing without questions and answers.
+
+**Late joiners.** The §25.6 `bazaar` record carries `faq`: the listing's
+live entries and its removal markers, in the event's shape. A change to the
+FAQ touches the wrapper post (migration 0135's triggers), so an incremental
+sync carries it too. The receiver applies the entries under the same rules
+(removals first; malformed ones skipped; a record with more than 30 items
+is refused). v_75 is a sync line (`SYNC_RECORD_LINES`): a household that
+crosses it gets one full stream, and `SYNC_SHAPE_VERSION` 6 streams every
+household in full once.
+
+### Who may do what (on receipt)
+
+`BazaarFaqInboundHandlers` re-decides everything on the receiver's facts:
+
+| Rule | |
+|---|---|
+| Space | the envelope's space, held here, not dissolved |
+| Listing | held here, in that space, still **active** (a change to an ended listing is dropped) |
+| Author | the listing's **seller** holds a live **writer** seat on the **sending** household (strict: no host relay, nobody speaks for another household's people), is not banned, and is **not one of ours** — only our own household writes our sellers' FAQs |
+| Entry | `entry_from_wire`: a 32-hex id, `rev` ≥ 1, a sane `position`, and text the sender's own cleaning leaves unchanged (≤ 200 / ≤ 500, one-line question, no control characters) |
+| Store | newer `rev` wins, a removal is final, at most 10 live entries (`apply_faq_entry`) |
+| Flood | at most 60 changes per listing an hour |
+
+### Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Ben as Ben (buyer)
+    participant Sam as Sam (seller)
+    participant S as HFS S<br/>(Sam's household)
+    participant R as HFS R<br/>(relay, no member)
+    participant B as HFS B<br/>(Ben's household)
+    participant C as HFS C<br/>(follower's household)
+
+    Ben-->>Sam: "Does it fold flat?" (Ask the seller thread, v_74)
+    Sam->>S: "Add to FAQ" → editor pre-filled, reworded →<br/>POST /api/bazaar/{id}/faq {question, answer}
+    S->>S: seller ✓, active ✓, posts access ✓, not protected ✓,<br/>plain text ≤ 200 / ≤ 500 ✓, ≤ 10 ✓ → entry, rev n
+    S->>R: SPACE_ROUTED (sealed to B's ephemeral key)
+    R->>B: SPACE_ROUTED (R sees ciphertext only)
+    S->>C: BAZAAR_LISTING_FAQ_UPDATED (sealed)
+    B->>B: §24.11 → Sam seated on S as a writer ✓ →<br/>listing active ✓ → newer rev ✓ → stored
+    C->>C: same → stored; the follower reads it on the listing
+    Note over B,C: no notification — open listings refresh
+```
+
+An edit is the same event with the entry's new text and a higher `rev`; a
+removal carries `removed: true` and no text.
+
+### Cost
+
+One sealed envelope per member household per change: ids plus at most 200
++ 500 characters, ~0.5–1.5 KB sealed — the delta, never the list. Changes
+are a seller's deliberate edits (never a timer), at most 30 per listing an
+hour. Worst realistic case, a popular listing in a space with 200 member
+households: the seller writes 10 entries and edits each twice = 30 changes
+× 200 households × ~1.5 KB ≈ 9 MB in total, once, spread over the time the
+seller types; a typical FAQ (3 entries, no edits) ≈ 600 envelopes ≈ 0.6 MB.
+A follower-heavy *global* space costs nothing extra: followers on a GFS
+never receive the FAQ, only member households do. The sync record grows by
+at most 10 entries + 20 markers (≤ ~8 KB) per listing.
+
+### Implementation pointers
+
+- `socialhome/domain/bazaar_faq.py` — the bounds, the text rule
+  (`clean_question` / `clean_answer`), `entry_from_wire` / `entry_to_wire`.
+- `socialhome/services/bazaar_faq_service.py` — `BazaarFaqService`
+  (`add`, `edit`, `remove`, `list_entries`).
+- `socialhome/services/bazaar_outbound.py` — `_on_faq_changed`.
+- `socialhome/services/federation_inbound/bazaar_faq.py` —
+  `BazaarFaqInboundHandlers`.
+- `socialhome/repositories/bazaar_repo.py` — `add_faq_entry`,
+  `edit_faq_entry`, `remove_faq_entry`, `apply_faq_entry`.
+- `socialhome/federation/sync/space/exporters/bazaar.py` /
+  `receiver.py` — the `faq` field of the `bazaar` record.
+- Migration `0135_bazaar_listing_faq.sql`.
+- Tests: `tests/protocol/test_bazaar_faq_federation.py` (six real
+  households: every member household at v_75 gets it, the older one and
+  the non-member nothing; forged sellers, a host relaying, a follower-only
+  household and a peer writing our own seller refused; bounds and plain
+  text on receipt; a late edit never resurrects a removal; a late joiner
+  gets it over sync; `SPACE_ROUTED` for an unpaired member household),
+  `test_federation_payload_minimization.py` (only `space_id` in the clear),
+  the space-content scope, authorship and archived matrices.
+
 ## Implementation
 
 - `socialhome/services/bazaar_service.py` — the local rules (`make_offer`,
@@ -399,7 +561,8 @@ no row).
   `_on_bazaar_*` handlers.
 - `socialhome/domain/federation_capabilities.py` —
   `MIN_FOR_BAZAAR_LISTING` (10), `MIN_FOR_BAZAAR_STATUS` (11),
-  `MIN_FOR_BAZAAR_BIDS` (12), `MIN_FOR_BAZAAR_OFFERS` (73).
+  `MIN_FOR_BAZAAR_BIDS` (12), `MIN_FOR_BAZAAR_OFFERS` (73),
+  `MIN_FOR_BAZAAR_THREAD` (74), `MIN_FOR_BAZAAR_FAQ` (75).
 - Tests: `tests/protocol/test_bazaar_offer_federation.py`,
   `test_bazaar_reject_federation.py` and `test_bazaar_bid_withdraw_federation.py`
   (five households, real crypto and pipeline), `tests/protocol/test_space_content_scope.py`

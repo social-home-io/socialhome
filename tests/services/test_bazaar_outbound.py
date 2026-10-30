@@ -13,10 +13,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from socialhome.domain.bazaar_faq import BazaarFaqEntry
 from socialhome.domain.events import (
     BazaarBidPlaced,
     BazaarBidWithdrawn,
     BazaarListingCreated,
+    BazaarListingFaqChanged,
     BazaarOfferAccepted,
     BazaarOfferRejected,
 )
@@ -992,4 +994,72 @@ async def test_a_failed_bid_withdrawal_send_is_logged_not_raised(federation_serv
     federation_service.broadcast_to_space_members.side_effect = RuntimeError("down")
     bus = _outbound(federation_service, users=_users("u-buyer"))
     await bus.publish(_bid_withdrawn())
+    federation_service.broadcast_to_space_members.assert_awaited_once()
+
+
+# ─── v_75 — a listing's questions and answers ─────────────────────────────
+
+
+def _faq_changed(**overrides) -> BazaarListingFaqChanged:
+    entry = BazaarFaqEntry(
+        listing_post_id="bzr-1",
+        entry_id="ab" * 16,
+        question="Does it fold?",
+        answer="Yes, flat.",
+        position=0,
+        rev=3,
+        removed=overrides.pop("removed", False),
+    )
+    return BazaarListingFaqChanged(
+        **{
+            "space_id": "sp-1",
+            "seller_user_id": "u-seller",
+            "entry": entry,
+            **overrides,
+        }
+    )
+
+
+async def test_a_faq_change_goes_to_every_member_household(federation_service):
+    bus = _outbound(federation_service, users=_users("u-seller"))
+    await bus.publish(_faq_changed())
+    call = federation_service.broadcast_to_space_members.await_args
+    assert call.args[0] == "sp-1"
+    assert call.args[1] == FederationEventType.BAZAAR_LISTING_FAQ_UPDATED
+    assert call.args[2] == {
+        "listing_post_id": "bzr-1",
+        "space_id": "sp-1",
+        "entry_id": "ab" * 16,
+        "rev": 3,
+        "position": 0,
+        "removed": False,
+        "question": "Does it fold?",
+        "answer": "Yes, flat.",
+    }
+    assert "only_instances" not in call.kwargs
+    assert call.kwargs["min_proto_version"] == FederationCapability.MIN_FOR_BAZAAR_FAQ
+
+
+async def test_a_faq_removal_carries_no_text(federation_service):
+    bus = _outbound(federation_service, users=_users("u-seller"))
+    await bus.publish(_faq_changed(removed=True))
+    payload = federation_service.broadcast_to_space_members.await_args.args[2]
+    assert payload["removed"] is True
+    assert "question" not in payload and "answer" not in payload
+
+
+async def test_a_faq_change_from_a_peer_or_another_seller_is_not_sent_on(
+    federation_service,
+):
+    bus = _outbound(federation_service, users=_users("u-seller"))
+    await bus.publish(_faq_changed(origin_instance_id="inst-peer-a"))
+    bus2 = _outbound(federation_service, users=_users("u-someone-else"))
+    await bus2.publish(_faq_changed())
+    federation_service.broadcast_to_space_members.assert_not_awaited()
+
+
+async def test_a_failed_faq_send_is_logged_not_raised(federation_service):
+    federation_service.broadcast_to_space_members.side_effect = RuntimeError("down")
+    bus = _outbound(federation_service, users=_users("u-seller"))
+    await bus.publish(_faq_changed())
     federation_service.broadcast_to_space_members.assert_awaited_once()

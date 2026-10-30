@@ -29,6 +29,7 @@ from ..domain.events import (
     BazaarListingCancelled,
     BazaarListingCreated,
     BazaarListingExpired,
+    BazaarListingFaqChanged,
     BazaarListingUpdated,
     BazaarOfferAccepted,
     BazaarOfferRejected,
@@ -405,6 +406,10 @@ class RealtimeService:
         self._bus.subscribe(
             BazaarListingCancelled,
             self._on_bazaar_listing_cancelled,
+        )
+        self._bus.subscribe(
+            BazaarListingFaqChanged,
+            self._on_bazaar_faq_changed,
         )
         self._bus.subscribe(
             BazaarOfferAccepted,
@@ -2331,6 +2336,19 @@ class RealtimeService:
             {
                 "type": "bazaar.listing_updated",
                 "listing_post_id": event.listing_post_id,
+            }
+        )
+
+    async def _on_bazaar_faq_changed(
+        self,
+        event: BazaarListingFaqChanged,
+    ) -> None:
+        """A listing's questions and answers changed (v_75): open listings
+        refetch, through the frame they already follow — ids only."""
+        await self._broadcast_household(
+            {
+                "type": "bazaar.listing_updated",
+                "listing_post_id": event.entry.listing_post_id,
             }
         )
 

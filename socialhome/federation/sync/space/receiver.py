@@ -30,6 +30,12 @@ from typing import TYPE_CHECKING, Any, Protocol
 import orjson as _orjson
 
 from ....crypto import derive_instance_id
+from ....domain.bazaar_faq import (
+    BAZAAR_FAQ_MAX_ENTRIES,
+    BAZAAR_FAQ_MAX_REMOVED,
+    BazaarFaqEntry,
+    entry_from_wire,
+)
 from ....domain.calendar import CalendarEvent, coerce_capacity, is_occurrence_id
 from ....domain.events import (
     CalendarEventDeleted,
@@ -1619,6 +1625,10 @@ class SpaceSyncReceiver:
                                 "space %s — refusing the write",
                                 listing.post_id,
                                 space_id,
+                            )
+                        else:
+                            await _apply_bazaar_faq(
+                                self._bazaar_repo, listing.post_id, r.get("faq")
                             )
                     except Exception as exc:
                         # FK / CHECK violation (anchor post missing,
@@ -3606,6 +3616,42 @@ def _calendar_from_record(r: dict[str, Any], *, provider: str) -> CalendarEvent 
         # live event's default.
         announce_in_feed=bool(r.get("announce_in_feed", True)),
     )
+
+
+async def _apply_bazaar_faq(
+    repo: AbstractBazaarRepo, listing_post_id: str, items: object
+) -> None:
+    """A ``bazaar`` record's questions and answers (``faq``, v_75), taken
+    entry by entry under the live rule (newer ``rev`` wins, a removal is
+    final, ≤ 10 live): removals first, so a full listing makes room before
+    the entries that replaced them. A malformed entry is skipped; past
+    :data:`_FAQ_RECORD_MAX_ITEMS` the record is refused (no provider sends
+    more than 10 live entries and 20 markers)."""
+    if items is None:
+        return  # an older provider
+    if not isinstance(items, list) or len(items) > _FAQ_RECORD_MAX_ITEMS:
+        log.warning(
+            "space sync: bazaar listing %s carries a malformed faq — skipped",
+            listing_post_id,
+        )
+        return
+    entries: list[BazaarFaqEntry] = []
+    for item in items:
+        try:
+            entries.append(entry_from_wire(listing_post_id, item))
+        except ValueError:
+            log.warning(
+                "space sync: bazaar listing %s: malformed faq entry skipped",
+                listing_post_id,
+            )
+    entries.sort(key=lambda e: (not e.removed, e.rev))
+    for entry in entries:
+        await repo.apply_faq_entry(entry)
+
+
+#: The most ``faq`` items one §25.6 ``bazaar`` record may carry: the live
+#: maximum plus the removal markers a listing keeps.
+_FAQ_RECORD_MAX_ITEMS = BAZAAR_FAQ_MAX_ENTRIES + BAZAAR_FAQ_MAX_REMOVED
 
 
 def _bazaar_listing_from_record(

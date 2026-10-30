@@ -7,6 +7,11 @@ card (mode / price / photos / status). Image bytes ride the
 existing :class:`SpaceMediaSyncService` outbox — see
 :meth:`SpaceSyncService._enqueue_catchup_media` for the enqueue.
 
+Each record carries the listing's questions and answers (``faq``, v_75):
+its live entries and its removal markers (a marker keeps a late edit of a
+removed entry from bringing it back on the receiver). At most 10 live
+entries and 20 markers per listing, so a record grows by ≤ ~8 KB.
+
 Without this exporter (#445 shipped realtime + image bytes only),
 a new joiner saw the wrapper post but the ``bazaar_listings`` row
 stayed empty until the seller fired a new ``BAZAAR_LISTING_CREATED``
@@ -18,10 +23,12 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
+from .....domain.bazaar_faq import entry_to_wire
 from ..exporter import PagedExporterMixin
 from ..window import SYNC_PAGE_SIZE, SyncWindows, iter_pages
 
 if TYPE_CHECKING:
+    from .....domain.bazaar_faq import BazaarFaqEntry
     from .....domain.post import BazaarListing
     from .....repositories.bazaar_repo import AbstractBazaarRepo
 
@@ -64,10 +71,15 @@ class BazaarExporter(PagedExporterMixin):
             )
 
         async for listings in iter_pages(fetch):
-            yield _records(listings)
+            faq = await self._repo.list_faq_for_listings(
+                [lst.post_id for lst in listings]
+            )
+            yield _records(listings, faq)
 
 
-def _records(listings: list[BazaarListing]) -> list[dict[str, Any]]:
+def _records(
+    listings: list[BazaarListing], faq: dict[str, list[BazaarFaqEntry]]
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for lst in listings:
         out.append(
@@ -89,6 +101,7 @@ def _records(listings: list[BazaarListing]) -> list[dict[str, Any]]:
                 "winning_price": lst.winning_price,
                 "sold_at": lst.sold_at,
                 "created_at": lst.created_at,
+                "faq": [entry_to_wire(e) for e in faq.get(lst.post_id, ())],
             },
         )
     return out

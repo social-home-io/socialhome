@@ -140,6 +140,12 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   LISTING_THREAD_TEXT_ONLY: () => t('error.listing_thread_text_only'),
   LISTING_THREAD_NO_CHANGES: () => t('error.listing_thread_no_changes'),
   LISTING_THREAD_RATE_LIMITED: () => t('error.listing_thread_rate_limited'),
+  BAZAAR_FAQ_TEXT: (_b, p) => t('error.bazaar_faq_text', {
+    question_max: str(p, 'question_max') || '200',
+    answer_max: str(p, 'answer_max') || '500',
+  }),
+  BAZAAR_FAQ_FULL: (_b, p) => t('error.bazaar_faq_full', { max: str(p, 'max') || '10' }),
+  BAZAAR_FAQ_RATE_LIMITED: () => t('error.bazaar_faq_rate_limited'),
   // Pictures.
   IMAGE_TOO_LARGE: (_b, p) => t('error.image_too_large', { max_mb: str(p, 'max_mb') }),
   APP_BUNDLE_TOO_LARGE: () => t('error.app_bundle_too_large'),

@@ -7,6 +7,7 @@ on :class:`FederationService`. Keeps the top-level
 than a 600-line monolith.
 """
 
+from .bazaar_faq import BazaarFaqInboundHandlers
 from .bazaar_thread import BazaarThreadInboundHandlers
 from .pairing import PairingInboundHandlers
 from .personal_calendar import PersonalCalendarInboundHandlers
@@ -17,6 +18,7 @@ from .space_invites import SpaceInviteInboundHandlers
 from .space_membership import SpaceMembershipInboundHandlers
 
 __all__ = [
+    "BazaarFaqInboundHandlers",
     "BazaarThreadInboundHandlers",
     "PairingInboundHandlers",
     "PersonalCalendarInboundHandlers",

@@ -5,6 +5,7 @@ from __future__ import annotations
 from aiohttp import web
 
 from ..app_keys import (
+    bazaar_faq_service_key,
     bazaar_repo_key,
     bazaar_service_key,
     bazaar_thread_service_key,
@@ -85,6 +86,17 @@ def _offer_dict(offer) -> dict:
         "responded_at": offer.responded_at,
         # Only the seller and the offerer ever get an offer row.
         "rejection_reason": offer.rejection_reason,
+    }
+
+
+def faq_entry_dict(entry) -> dict:
+    """One question and its answer as the SPA shows it — never who asked
+    (an entry names nobody)."""
+    return {
+        "entry_id": entry.entry_id,
+        "question": entry.question,
+        "answer": entry.answer,
+        "position": entry.position,
     }
 
 
@@ -222,6 +234,14 @@ class BazaarDetailView(BaseView):
         payload["viewer_can_trade"] = await svc.viewer_can_trade(
             listing, self.user.user_id
         )
+        # The seller's questions and answers (v_75) — everyone who sees the
+        # listing reads them.
+        payload["faq"] = [
+            faq_entry_dict(e)
+            for e in await self.svc(bazaar_faq_service_key).list_entries(
+                listing.post_id, self.user.user_id
+            )
+        ]
         return web.json_response(payload)
 
     async def patch(self) -> web.Response:
@@ -661,3 +681,76 @@ class BazaarThreadCollectionView(BaseView):
                 }
             )
         return web.json_response(rows)
+
+
+class BazaarFaqCollectionView(BaseView):
+    """``GET/POST /api/bazaar/{id}/faq`` — a listing's questions and
+    answers (v_75).
+
+    ``GET``: the live entries in display order, for anyone who can see the
+    listing (404 otherwise). ``POST {question, answer}``: the seller adds
+    one — 201 with the entry; 403 for anyone but the seller (or under the
+    space's ``posts`` access level), 403 ``ACCOUNT_PROTECTED``, 422 for a
+    listing that ended, 409 ``BAZAAR_FAQ_FULL`` past 10 entries, 422
+    ``BAZAAR_FAQ_TEXT`` for an empty / too long / non-text question
+    (≤ 200, one line) or answer (≤ 500), 429 ``BAZAAR_FAQ_RATE_LIMITED``.
+    """
+
+    async def get(self) -> web.Response:
+        try:
+            entries = await self.svc(bazaar_faq_service_key).list_entries(
+                self.match("id"), self.user.user_id
+            )
+        except ListingNotFoundError:
+            return _listing_not_found()
+        return web.json_response([faq_entry_dict(e) for e in entries])
+
+    async def post(self) -> web.Response:
+        body = await self.body()
+        try:
+            entry = await self.svc(bazaar_faq_service_key).add(
+                self.match("id"),
+                actor_user_id=self.user.user_id,
+                question=body.get("question"),
+                answer=body.get("answer"),
+            )
+        except ListingNotFoundError:
+            return _listing_not_found()
+        return web.json_response(faq_entry_dict(entry), status=201)
+
+
+class BazaarFaqEntryView(BaseView):
+    """``PATCH/DELETE /api/bazaar/{id}/faq/{entry_id}`` — the seller rewords
+    (``{question, answer}``) or removes one entry; the same refusals as
+    ``POST``, and 404 for an entry the listing doesn't show."""
+
+    async def patch(self) -> web.Response:
+        body = await self.body()
+        try:
+            entry = await self.svc(bazaar_faq_service_key).edit(
+                self.match("id"),
+                self.match("entry_id"),
+                actor_user_id=self.user.user_id,
+                question=body.get("question"),
+                answer=body.get("answer"),
+            )
+        except ListingNotFoundError:
+            return _listing_not_found()
+        return web.json_response(faq_entry_dict(entry))
+
+    async def delete(self) -> web.Response:
+        try:
+            await self.svc(bazaar_faq_service_key).remove(
+                self.match("id"),
+                self.match("entry_id"),
+                actor_user_id=self.user.user_id,
+            )
+        except ListingNotFoundError:
+            return _listing_not_found()
+        return web.Response(status=204)
+
+
+def _listing_not_found() -> web.Response:
+    """The bazaar routes' 404 for a listing the caller can't see — the same
+    answer as an unknown id (``BaseView`` maps the error to 403)."""
+    return error_response(404, "NOT_FOUND", "Listing not found.")

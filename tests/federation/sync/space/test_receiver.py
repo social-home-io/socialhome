@@ -29,6 +29,7 @@ from socialhome.federation.sync.space.receiver import (
     PERSIST_FAILURE_LIMIT,
     HeldBack,
     SpaceSyncReceiver,
+    _apply_bazaar_faq,
     _sticky_from_record,
 )
 from socialhome.infrastructure.event_bus import EventBus
@@ -1475,3 +1476,67 @@ async def test_on_chunk_verifies_an_unpaired_member_provider_by_its_recorded_key
     stream = r._health._streams.get("sync-adm")
     failed = bool(stream is not None and stream.failed)
     assert failed is (recorded != "own")
+
+
+# ── A bazaar record's questions and answers (``faq``, v_75) ──────────────
+
+
+class _FaqRepo:
+    def __init__(self) -> None:
+        self.applied: list = []
+
+    async def apply_faq_entry(self, entry) -> bool:
+        self.applied.append(entry)
+        return True
+
+
+def _faq_item(n: int, **over) -> dict:
+    item = {
+        "entry_id": f"{n:032x}",
+        "rev": n,
+        "position": n,
+        "removed": False,
+        "question": f"Q{n}?",
+        "answer": "A.",
+    }
+    item.update(over)
+    return item
+
+
+async def test_a_bazaar_records_faq_is_applied_removals_first():
+    repo = _FaqRepo()
+    await _apply_bazaar_faq(
+        repo,
+        "bzr-1",
+        [
+            _faq_item(5),
+            {"entry_id": f"{9:032x}", "rev": 9, "position": 1, "removed": True},
+            _faq_item(2),
+        ],
+    )
+    assert [(e.rev, e.removed) for e in repo.applied] == [
+        (9, True),
+        (2, False),
+        (5, False),
+    ]
+    assert all(e.listing_post_id == "bzr-1" for e in repo.applied)
+
+
+async def test_a_malformed_faq_entry_is_skipped_and_the_rest_applied(caplog):
+    repo = _FaqRepo()
+    with caplog.at_level(logging.WARNING):
+        await _apply_bazaar_faq(
+            repo, "bzr-1", [_faq_item(1, question="x" * 201), _faq_item(2), "junk"]
+        )
+    assert [e.rev for e in repo.applied] == [2]
+    assert "malformed faq entry" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "items",
+    [None, "not a list", [_faq_item(n + 1) for n in range(31)]],
+)
+async def test_an_absent_or_oversized_faq_applies_nothing(items):
+    repo = _FaqRepo()
+    await _apply_bazaar_faq(repo, "bzr-1", items)
+    assert repo.applied == []

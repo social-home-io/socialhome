@@ -249,3 +249,36 @@ async def test_page_sequencing_fields_ride_only_sealed(env):
         dumped = json.dumps(envelope)
         for leak in (marker, "side words", "base_seq", "conflict", "sequenced"):
             assert leak not in dumped
+
+
+async def test_listing_faq_rides_only_sealed(env):
+    """v_75: a listing's question and answer — and which listing and entry
+    they belong to — are space content: inside ``encrypted_payload`` only;
+    ``space_id`` is the one routing field."""
+    svc, peer, capture = env
+    await svc.send_event(
+        to_instance_id=peer.id,
+        event_type=FederationEventType.BAZAAR_LISTING_FAQ_UPDATED,
+        payload={
+            "listing_post_id": "listing-very-distinctive",
+            "space_id": "sp-1",
+            "entry_id": "fa" * 16,
+            "rev": 7,
+            "position": 0,
+            "removed": False,
+            "question": "faq-question-very-distinctive",
+            "answer": "faq-answer-very-distinctive",
+        },
+        space_id="sp-1",
+    )
+    envelope = capture.bodies[0]
+    assert set(envelope) - _ALLOWED_PLAINTEXT_FIELDS == set()
+    raw = json.dumps(envelope)
+    for secret in (
+        "listing-very-distinctive",
+        "fa" * 16,
+        "faq-question-very-distinctive",
+        "faq-answer-very-distinctive",
+    ):
+        assert secret not in raw
+    assert envelope["space_id"] == "sp-1"

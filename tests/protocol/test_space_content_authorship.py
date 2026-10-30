@@ -1246,6 +1246,38 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         (),
         (AUTHOR, HOST),
     ),
+    # ── A listing's questions and answers (v_75): the seller, seated on the
+    #    sender (strict — no host relay); never for our own seller ──
+    (
+        FET.BAZAAR_LISTING_FAQ_UPDATED,
+        "add a question to u-a's listing",
+        {
+            "listing_post_id": "post-a-listing",
+            "entry_id": "f1" * 16,
+            "rev": 1,
+            "position": 0,
+            "removed": False,
+            "question": "Does it fold?",
+            "answer": "Yes.",
+        },
+        (AUTHOR,),
+        (OTHER, ADMIN, HOST, MOD, STRANGER, THIRD),
+    ),
+    (
+        FET.BAZAAR_LISTING_FAQ_UPDATED,
+        "add a question to our own seller's listing",
+        {
+            "listing_post_id": "post-l-listing",
+            "entry_id": "f2" * 16,
+            "rev": 1,
+            "position": 0,
+            "removed": False,
+            "question": "Does it fold?",
+            "answer": "Yes.",
+        },
+        (),
+        (OTHER, AUTHOR, HOST, ADMIN),
+    ),
     (
         FET.SPACE_CHAT_MESSAGE_CREATED,
         "chat as u-a",

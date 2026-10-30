@@ -651,6 +651,9 @@ async def test_bazaar_exporter_serialises_listings():
         async def list_sync_page(self, space_id, **_kw):
             return [listing], None
 
+        async def list_faq_for_listings(self, post_ids):
+            return {}
+
     recs = await BazaarExporter(_Repo(), _WINDOWS).list_records("sp-1")
     assert len(recs) == 1
     r = recs[0]
@@ -665,6 +668,8 @@ async def test_bazaar_exporter_serialises_listings():
     # Auction-specific fields ship as-is (None for non-auction listings).
     assert r["start_price"] is None
     assert r["step_price"] is None
+    # No questions and answers yet (v_75).
+    assert r["faq"] == []
 
 
 async def test_member_pictures_exporter_inlines_webp_bytes():

@@ -89,6 +89,15 @@ EXPORTABLE_QUERIES: tuple[tuple[str, str], ...] = (
     ("schedule_responses", "WHERE user_id = ?"),
     ("bazaar_listings", "WHERE seller_user_id = ?"),
     ("bazaar_bids", "WHERE bidder_user_id = ?"),
+    # The seller's own questions and answers on their listings (v_75);
+    # a removal marker holds no words.
+    (
+        "bazaar_listing_faq",
+        (
+            "WHERE removed = 0 AND listing_post_id IN"
+            " (SELECT post_id FROM bazaar_listings WHERE seller_user_id = ?)"
+        ),
+    ),
     ("notifications", "WHERE user_id = ?"),
     ("shopping_list_items", "WHERE created_by = ?"),
     ("user_blocks", "WHERE blocker_user_id = ?"),
