@@ -16,6 +16,9 @@
  *   ``{actors}`` ("25 new posts in Familie Alpha from Ben, Anna and 3
  *   others"): it counts the things, never the people
  * - ``notifications.row.<type>_none``   nobody caused it (a review queue)
+ * - ``notifications.row.<type>_times``  one person did it ``{count}`` times
+ *   (``params.total`` > 1: "Ben invited you to play Chess 3 times"); the
+ *   count is always two or more, so one plural form per locale
  *
  * ``{space}`` is the place's name: the space's, an app's for a game invite,
  * or a group chat's for a row about a chat (a missed call, being added). A
@@ -43,6 +46,9 @@ interface TypeSpec {
   count?: boolean
   /** Has a ``_none`` key: a row nobody caused. */
   none?: boolean
+  /** Has a ``_times`` key: one person did it again on the same row
+   *  (``params.total`` > 1), counted as ``{count}``. */
+  times?: boolean
   /** Has no ``{actor}`` sentence (only ``_none`` / ``_count``). */
   noActor?: boolean
   /** Lives in a space or in the household feed: each key has an ``_in``
@@ -132,6 +138,7 @@ export const HOUSEHOLD_CHAT_LINK = '/?tab=chat'
  *   notifications.row.app_challenge notifications.row.app_challenge_many
  *   notifications.row.app_challenge_continue notifications.row.app_challenge_continue_many
  *   notifications.row.app_challenge_waiting notifications.row.app_challenge_waiting_many
+ *   notifications.row.app_challenge_waiting_times
  *   notifications.row.app_added notifications.row.app_added_many
  *   notifications.row.app_challenge_declined notifications.row.app_challenge_declined_many
  *   notifications.row.app_game_ended notifications.row.app_game_ended_many
@@ -189,8 +196,11 @@ export const ROW_TYPES: Readonly<Record<string, TypeSpec>> = {
   // An old game picked up again: "Ben wants to continue your Chess game".
   app_challenge_continue: {},
   // An invite for an app the household doesn't have or turned off (D10):
-  // the same sentence; Needs you says why it waits.
-  app_challenge_waiting: {},
+  // the same sentence; Needs you says why it waits. One row per sender
+  // (#1244): a repeat invite counts in ``params.total`` — "Ben invited you
+  // to play Chess 3 times". A playable ``app_challenge`` is one row per
+  // invite, so it never counts.
+  app_challenge_waiting: { times: true },
   // A new app in the household: "Anna added Chess" — the app's name is
   // the place too.
   app_added: {},
@@ -221,6 +231,7 @@ export function rowKeys(): string[] {
     if (!spec.noActor) own.push(base, `${base}_many`)
     if (spec.count) own.push(`${base}_count`)
     if (spec.none) own.push(`${base}_none`)
+    if (spec.times) own.push(`${base}_times`)
     if (spec.chat) {
       keys.push(...own.map(k => `${k}_in`), ...own.map(k => `${k}_household`))
       continue
@@ -302,7 +313,10 @@ export function rowSentence(row: RowInput, spaceName?: string | null): Segment[]
     if (!spec.none) return null
     key = `${base}_none`
   } else if (Math.max(p.actor_count, actors.length) > 1) key = `${base}_many`
+  else if (spec.times && p.total > 1) key = `${base}_times`
   else key = base
+  // ``_count`` counts the new things, ``_times`` every repeat on the row.
+  const count = key === `${base}_times` ? p.total : p.new
   if (spec.chat) {
     if (row.link_url === HOUSEHOLD_CHAT_LINK) key = `${key}_household`
     else if (space) key = `${key}_in`
@@ -318,7 +332,7 @@ export function rowSentence(row: RowInput, spaceName?: string | null): Segment[]
     actor: actors.length > 0 ? [person(actors[0])] : [],
     actors: actorsPhrase(actors, p.actor_count),
     space: [{ kind: 'place', text: space }],
-    count: [{ kind: 'text', text: String(p.new) }],
+    count: [{ kind: 'text', text: String(count) }],
   })
   return segs
 }

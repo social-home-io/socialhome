@@ -90,6 +90,7 @@ describe('row catalog', () => {
       }
       if (spec.count) expect(e[`${base}_count`]).toMatch(/\{count\}.*\{actors\}|\{actors\}.*\{count\}/)
       if (spec.none) expect(e[`${base}_none`]).toBeTruthy()
+      if (spec.times) expect(e[`${base}_times`]).toMatch(/\{count\}/)
     }
   })
 })
@@ -325,6 +326,34 @@ describe('notices about you, in the viewer\'s language', () => {
     // A row from before the app's name rode along ("challenged you to
     // chess") or for an app the registry didn't know: the server's title.
     expect(say('app_challenge', params(['Ben'], { space_name: null }))).toBe('TITLE')
+  })
+
+  it('a waiting invite says how often one person invited you (#1244 groups them)', async () => {
+    const waiting = (total: number, names = ['Ben']) =>
+      say('app_challenge_waiting', params(names, { space_name: 'Chess', new: total, total }))
+    expect(waiting(1)).toBe('Ben invited you to play Chess')
+    expect(waiting(2)).toBe('Ben invited you to play Chess 2 times')
+    expect(waiting(3)).toBe('Ben invited you to play Chess 3 times')
+    // Read once and invited again: the count is every invite, not the new ones.
+    expect(say('app_challenge_waiting', params(['Ben'], { space_name: 'Chess', new: 1, total: 3 })))
+      .toBe('Ben invited you to play Chess 3 times')
+    // Two people never share a waiting row; if one ever did, no count.
+    expect(waiting(3, ['Ben', 'Anna'])).toBe('Ben and Anna invited you to play Chess')
+    await setLocale('de')
+    expect(waiting(1)).toBe('Ben hat dich eingeladen, Chess zu spielen')
+    expect(waiting(3)).toBe('Ben hat dich 3-mal eingeladen, Chess zu spielen')
+  })
+
+  it('a playable invite is one invite: it never counts', () => {
+    expect(say('app_challenge', params(['Ben'], { space_name: 'Chess', new: 3, total: 3 })))
+      .toBe('Ben invited you to play Chess')
+  })
+
+  it('the count sentence names the person, the place and the count in every locale', () => {
+    for (const [loc, cat] of Object.entries(LOCALES)) {
+      expect(placeholders(cat['notifications.row.app_challenge_waiting_times'] ?? ''), loc)
+        .toEqual(['actor', 'count', 'space'])
+    }
   })
 
   it('a new app names who added it and the app; no app name keeps the title', () => {

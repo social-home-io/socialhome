@@ -5672,6 +5672,7 @@
   "notifications.row.app_challenge_continue_many": "{actors} willen jullie {space}-partijen voortzetten",
   "notifications.row.app_challenge_waiting": "{actor} heeft je uitgenodigd om {space} te spelen",
   "notifications.row.app_challenge_waiting_many": "{actors} hebben je uitgenodigd om {space} te spelen",
+  "notifications.row.app_challenge_waiting_times": "{actor} heeft je {count} keer uitgenodigd om {space} te spelen",
   "notifications.row.app_challenge_declined": "{actor} heeft je uitnodiging voor {space} afgewezen",
   "notifications.row.app_challenge_declined_many": "{actors} hebben je uitnodiging voor {space} afgewezen",
   "notifications.row.app_game_ended": "{actor} heeft {space} niet meer, dus jullie spel is afgelopen",
