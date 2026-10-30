@@ -185,13 +185,7 @@ class SqliteAppRepo:
                 app.name,
                 app.version,
                 1 if app.enabled else 0,
-                orjson.dumps(
-                    {
-                        "entry": app.manifest.entry,
-                        "icon": app.manifest.icon,
-                        "capabilities": list(app.manifest.capabilities),
-                    }
-                ).decode(),
+                orjson.dumps(app.manifest.to_dict()).decode(),
                 app.bundle_path,
                 app.bundle_sha256,
                 app.source_url,
@@ -211,13 +205,7 @@ class SqliteAppRepo:
             (
                 app.name,
                 app.version,
-                orjson.dumps(
-                    {
-                        "entry": app.manifest.entry,
-                        "icon": app.manifest.icon,
-                        "capabilities": list(app.manifest.capabilities),
-                    }
-                ).decode(),
+                orjson.dumps(app.manifest.to_dict()).decode(),
                 app.bundle_path,
                 app.bundle_sha256,
                 app.source_url,

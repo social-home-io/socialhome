@@ -349,12 +349,18 @@ def app_age_allows(min_age: int, *, protected: bool, declared_age: int | None) -
 
 @dataclass(slots=True, frozen=True)
 class AppManifest:
-    """Parsed ``manifest.json`` from an app bundle."""
+    """Parsed ``manifest.json`` from an app bundle.
+
+    ``names`` are the bundle's own ``i18n`` names, ``(locale, name)``
+    pairs: the app's name in a reader's language when the catalog's held
+    copy isn't there yet (e.g. right after a restart, or with the catalog
+    unreachable)."""
 
     entry: str
     icon: str | None
     capabilities: tuple[str, ...]
     min_age: int = 0
+    names: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def from_dict(cls, data: dict) -> AppManifest:
@@ -384,7 +390,29 @@ class AppManifest:
             raise ValueError(
                 f"manifest.min_age must be one of {sorted(_VALID_MIN_AGES)}, got {min_age!r}"
             )
-        return cls(entry=entry, icon=icon, capabilities=tuple(caps), min_age=min_age)
+        return cls(
+            entry=entry,
+            icon=icon,
+            capabilities=tuple(caps),
+            min_age=min_age,
+            names=tuple(
+                (t.locale, t.name)
+                for t in _parse_i18n(data.get("i18n"))
+                if t.name is not None
+            ),
+        )
+
+    def to_dict(self) -> dict:
+        """What the household keeps of the manifest (``manifest_json``):
+        :meth:`from_dict` reads it back."""
+        out: dict = {
+            "entry": self.entry,
+            "icon": self.icon,
+            "capabilities": list(self.capabilities),
+        }
+        if self.names:
+            out["i18n"] = {locale: {"name": name} for locale, name in self.names}
+        return out
 
 
 @dataclass(slots=True, frozen=True)
@@ -402,6 +430,17 @@ class InstalledApp:
     installed_by: str | None
     installed_at: str
     min_age: int = 0
+
+    def name_in(self, locale: str | None) -> str:
+        """The app's name in *locale* from its bundle's ``i18n`` (base
+        language first: ``de-AT`` → ``de``), else its installed name —
+        the rule :meth:`AppCatalogEntry.name_in` uses."""
+        if locale:
+            names = dict(self.manifest.names)
+            hit = names.get(locale) or names.get(locale.split("-")[0])
+            if hit:
+                return hit
+        return self.name
 
     @property
     def permissions(self) -> tuple[str, ...]:

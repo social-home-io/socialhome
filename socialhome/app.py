@@ -3239,7 +3239,8 @@ def create_app(config: Config | None = None) -> web.Application:
     notification_service.attach_bazaar_repo(bazaar_repo)
     # "Needs you" checks a game invite still waits.
     notification_service.attach_app_repo(repos.app)
-    # "Your turn with Ben in Chess" names the app in the reader's language.
+    # Game rows ("Your turn with Ben in Chess", invites, …) name the app in
+    # the reader's language.
     notification_service.attach_app_catalog(app_catalog)
     notification_service.attach_personal_calendar_repo(calendar_repo)
     # D6 comment audience + D13 post reactions read the posts.
@@ -5398,6 +5399,13 @@ def create_app(config: Config | None = None) -> web.Application:
         # App-update background checker — polls the app catalog once per day
         # so the admin can see available updates without a manual refresh.
         nonlocal app_update_scheduler
+        # Game rows name an app in the reader's language from its bundle's
+        # own i18n until the catalog answers (installs from before it was
+        # kept read it from disk once).
+        try:
+            await app_service.heal_manifest_names()
+        except Exception as exc:
+            log.warning("app names: heal failed: %s", exc, exc_info=True)
         app_update_scheduler = AppUpdateScheduler(app_service)
         await app_update_scheduler.start()
 

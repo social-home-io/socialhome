@@ -2800,3 +2800,75 @@ async def test_check_for_updates_without_a_catalog_does_nothing(tmp_path: Path) 
         repo=_FakeAppRepo(), catalog=None, apps_path=tmp_path, downloader=downloader
     )
     assert await svc.check_for_updates() == []
+
+
+# ─── The bundle's own i18n names (game rows right after a restart) ───────────
+
+
+def _row(app_id: str, bundle_path: str, names=()) -> InstalledApp:
+    return InstalledApp(
+        app_id=app_id,
+        name=app_id.title(),
+        version="1.0.0",
+        enabled=True,
+        manifest=AppManifest(
+            entry="index.html", icon=None, capabilities=("storage",), names=names
+        ),
+        bundle_path=bundle_path,
+        bundle_sha256="ab" * 32,
+        source_url="https://example.com/x.tgz",
+        installed_by=None,
+        installed_at="2026-10-30T00:00:00+00:00",
+    )
+
+
+async def test_heal_keeps_each_installed_bundles_i18n_names(tmp_path: Path) -> None:
+    """Installs from before the names were kept read them from their
+    bundle once at startup; a bundle without names, missing, unreadable or
+    outside the apps root is left alone."""
+    apps = tmp_path / "apps"
+    for app_id, manifest in (
+        (
+            "battleships",
+            {"entry": "index.html", "i18n": {"de": {"name": "Schiffe versenken"}}},
+        ),
+        ("plain", {"entry": "index.html"}),
+        ("broken", None),
+    ):
+        bundle = apps / app_id / "1.0.0"
+        bundle.mkdir(parents=True)
+        (bundle / "manifest.json").write_text(
+            "{not json" if manifest is None else json.dumps(manifest)
+        )
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "manifest.json").write_text(
+        json.dumps({"entry": "index.html", "i18n": {"de": {"name": "Nope"}}})
+    )
+    repo = _FakeAppRepo()
+    for row in (
+        _row("battleships", "battleships/1.0.0"),
+        _row("plain", "plain/1.0.0"),
+        _row("broken", "broken/1.0.0"),
+        _row("gone", "gone/1.0.0"),
+        _row("escape", "../outside"),
+        _row("kept", "kept/1.0.0", names=(("nl", "Al"),)),
+    ):
+        await repo.install(row)
+
+    async def downloader(url: str) -> bytes:  # pragma: no cover - never called
+        return b""
+
+    svc = AppService(repo=repo, catalog=None, apps_path=apps, downloader=downloader)
+    assert await svc.heal_manifest_names() == 1
+    healed = await repo.get("battleships")
+    assert healed is not None
+    assert healed.manifest.names == (("de", "Schiffe versenken"),)
+    assert healed.manifest.capabilities == ("storage",)
+    for app_id in ("plain", "broken", "gone", "escape"):
+        app = await repo.get(app_id)
+        assert app is not None and app.manifest.names == (), app_id
+    kept = await repo.get("kept")
+    assert kept is not None and kept.manifest.names == (("nl", "Al"),)
+    # Once healed, nothing more to do.
+    assert await svc.heal_manifest_names() == 0

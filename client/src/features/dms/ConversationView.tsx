@@ -4,6 +4,7 @@ import { signal, type Signal } from '@preact/signals'
 import { useLocation } from 'preact-iso'
 import { api } from '@/api'
 import { ws } from '@/ws'
+import { useActiveView } from '@/hooks/useActiveView'
 import type { ListingThreadInfo, Message } from '@/types'
 import { DmThreadSkeleton } from '@/components/Skeleton'
 import { Button } from '@/components/Button'
@@ -590,11 +591,6 @@ function createThreadState(): ThreadState {
   }
 }
 
-/** The mounted view that last told the backend "this thread is open"
- *  (``dm.active``), or ``null``. Module-level on purpose: the claim is
- *  one per WS connection, shared by every view on the page. */
-let activeOwner: symbol | null = null
-
 /** Routed (non-embedded) views currently mounted. The body class is
  *  dropped only when the last one goes: Preact runs a removed view's
  *  effect cleanup after paint, so a view replaced by a fresh one (thread
@@ -933,33 +929,11 @@ export function ConversationView({
   // forever, which is worse than the original bug.
   //
   // An embedded view claims it too — an open embedded chat is a thread
-  // the user is looking at. The backend tracks ONE active conversation
-  // per connection, so the last view to open owns the claim
-  // (``activeOwner``) and a view only clears it while it still owns it:
-  // an older view unmounting must not un-suppress the one on screen.
-  useEffect(() => {
-    if (!convId) return
-    const me = Symbol(convId)
-    const claim = () => {
-      activeOwner = me
-      ws.send('dm.active', { conversation_id: convId })
-    }
-    const release = () => {
-      if (activeOwner !== me) return
-      activeOwner = null
-      ws.send('dm.active', { conversation_id: null })
-    }
-    claim()
-    const onVis = () => {
-      if (document.visibilityState === 'visible') claim()
-      else release()
-    }
-    document.addEventListener('visibilitychange', onVis)
-    return () => {
-      document.removeEventListener('visibilitychange', onVis)
-      release()
-    }
-  }, [convId])
+  // the user is looking at. The backend tracks ONE active key per
+  // connection, shared with an app on screen: ``useActiveView`` owns it
+  // (the last view to open holds it, and an older view unmounting never
+  // un-suppresses the one on screen).
+  useActiveView(convId || null)
 
   const messageCount = messages.value.length
   const lastTailMessageId = useRef<string | null>(null)
