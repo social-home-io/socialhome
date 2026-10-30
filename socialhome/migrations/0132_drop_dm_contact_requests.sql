@@ -1,0 +1,27 @@
+-- 0132 — drop the unused DM contact-request table. Follows 0131.
+--
+-- #1229 retired the DM contact-request flow: anyone in a paired household
+-- may start a 1:1 with anyone in the other, no request, no accept step. The
+-- ``dm_contact_requests`` table (0001, §23.47) has been unused since; the
+-- owner decided (2026-10-30) to drop it rather than keep dead schema.
+--
+-- CLAUDE.md "audit before a migration":
+--   (1) Audited every path that touches the data. The table and its index
+--       ``idx_dm_contact_requests_to`` are defined only in 0001; no later
+--       migration touches them and no trigger or view names them. No repo,
+--       service, route, federation handler or GFS code reads or writes it.
+--       The last reader was the per-user ``data_export_service`` dump (removed
+--       in the same change). ``backup_service`` never listed it in
+--       ``EXPORTABLE_TABLES``, and its restore skips any table not on that
+--       list, so an old backup still restores. ``dm_contact_requested``
+--       notification rows live in ``notifications`` and stay as they are
+--       (``RETIRED_ACTION_TYPES`` resolves them without this table).
+--   (2) Non-migration alternative, rejected: keep the table on disk unused
+--       (what #1229 did). It carries old rows nobody can see or act on and a
+--       FK on ``users`` every user delete cascades through; dead schema is
+--       what the owner asked to remove.
+--   (3) Smallest change: ``DROP ... IF EXISTS`` of the table and its index,
+--       nothing else rewritten. Nothing references the table, so the drop
+--       cannot cascade anywhere.
+DROP INDEX IF EXISTS idx_dm_contact_requests_to;
+DROP TABLE IF EXISTS dm_contact_requests;

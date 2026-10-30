@@ -371,3 +371,43 @@ async def test_restore_brings_an_old_backups_offsetless_calendar_bounds_in_shape
         "aware": ("2026-10-22T08:00:00+02:00", "2026-10-22T09:00:00+02:00"),
     }
     await tgt.shutdown()
+
+
+async def test_restore_of_a_backup_naming_contact_requests_still_works(tmp_dir):
+    """Migration 0132 dropped ``dm_contact_requests``. A backup carrying a
+    ``tables/dm_contact_requests.json`` member (no build ever listed it in
+    ``EXPORTABLE_TABLES``, but a hand-made archive might) still restores: the
+    member is skipped as an unknown table and every other table comes back."""
+    members = {
+        "manifest.json": {
+            "schema_version": 1,
+            "instance_id": "x",
+            "exported_at": "2026-10-01T00:00:00+00:00",
+            "table_names": ["users", "dm_contact_requests"],
+        },
+        "tables/users.json": [
+            {"username": "alice", "user_id": "a", "display_name": "Alice"}
+        ],
+        "tables/dm_contact_requests.json": [
+            {"id": "r1", "from_user_id": "ru-ben", "to_user_id": "a"}
+        ],
+    }
+    blob = io.BytesIO()
+    with tarfile.open(fileobj=blob, mode="w:gz") as tar:
+        for name, body in members.items():
+            data = json.dumps(body).encode()
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, io.BytesIO(data))
+
+    db = AsyncDatabase(tmp_dir / "old.db", batch_timeout_ms=10)
+    await db.startup()
+    await BackupService(db, tmp_dir / "media-old").restore_from_bytes(blob.getvalue())
+    users = await db.fetchall("SELECT user_id FROM users")
+    assert [u["user_id"] for u in users] == ["a"]
+    gone = await db.fetchone(
+        "SELECT name FROM sqlite_master"
+        " WHERE type='table' AND name='dm_contact_requests'"
+    )
+    assert gone is None
+    await db.shutdown()
