@@ -5699,6 +5699,7 @@
   "notifications.row.app_challenge_continue_many": "{actors} quieren continuar tus partidas de {space}",
   "notifications.row.app_challenge_waiting": "{actor} te invitó a jugar a {space}",
   "notifications.row.app_challenge_waiting_many": "{actors} te invitaron a jugar a {space}",
+  "notifications.row.app_challenge_waiting_times": "{actor} te invitó {count} veces a jugar a {space}",
   "notifications.row.app_challenge_declined": "{actor} rechazó tu invitación a {space}",
   "notifications.row.app_challenge_declined_many": "{actors} rechazaron tu invitación a {space}",
   "notifications.row.app_game_ended": "{actor} ya no tiene {space}, así que tu partida terminó",
