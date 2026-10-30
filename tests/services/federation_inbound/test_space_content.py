@@ -36,7 +36,13 @@ from socialhome.domain.events import (
     TaskUpdated,
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
-from socialhome.domain.post import BazaarBid, BazaarMode, BazaarOffer, BazaarStatus
+from socialhome.domain.post import (
+    BazaarBid,
+    BazaarListing,
+    BazaarMode,
+    BazaarOffer,
+    BazaarStatus,
+)
 from socialhome.domain.sticky import DEFAULT_STICKY_COLOR, MAX_STICKY_CONTENT_LENGTH
 from socialhome.domain.task import Task, TaskList, TaskPriority, TaskStatus
 from socialhome.domain.timetable import Timetable, TimetableEntry, to_wire_dict
@@ -3029,15 +3035,21 @@ class _FakeBazaarRepoWithBids:
         self.offers: dict[str, BazaarOffer] = {}
         self.offer_status: list[tuple[str, str]] = []
         self.mode = BazaarMode.NEGOTIABLE
+        self.status = BazaarStatus.ACTIVE
+        self.end_time = "2026-06-08T00:00:00+00:00"
+        self.withdrawn: list[str] = []
 
     async def get_listing(self, post_id):
-        return SimpleNamespace(
+        return BazaarListing(
             post_id=post_id,
             space_id=self.listing_space.get(post_id, "sp-1"),
             seller_user_id="u-seller",
-            status=BazaarStatus.ACTIVE,
             mode=self.mode,
-            end_time="2026-06-08T00:00:00+00:00",
+            title="Bike",
+            end_time=self.end_time,
+            currency="EUR",
+            status=self.status,
+            created_at="",
         )
 
     async def get_offer(self, offer_id):
@@ -3101,6 +3113,11 @@ class _FakeBazaarRepoWithBids:
         self.existing_bids[bid_id] = replace(
             bid, rejected=True, rejection_reason=reason
         )
+
+    async def withdraw_bid(self, bid_id):
+        if bid_id in self.withdrawn:
+            raise BidStateError("already withdrawn")
+        self.withdrawn.append(bid_id)
 
 
 @pytest.fixture
@@ -6418,3 +6435,101 @@ async def test_a_reason_on_an_accept_is_not_kept(bazaar_bids_handlers):
     )
     assert bazaar.offers["o-1"].status == "accepted"
     assert bazaar.offers["o-1"].rejection_reason is None
+
+
+# ─── A withdrawn bid ─────────────────────────────────────────────────
+
+
+def _withdrawal(**overrides) -> dict:
+    return {
+        "bid_id": "bid-1",
+        "listing_post_id": "bzr-1",
+        "status": "withdrawn",
+        "space_id": "sp-1",
+        **overrides,
+    }
+
+
+@pytest.fixture
+def open_auction(bazaar_bids_handlers):
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.mode = BazaarMode.AUCTION
+    bazaar.end_time = "2099-01-01T00:00:00+00:00"
+    bazaar.existing_bids["bid-1"] = _bid(bidder="u-remote")
+    return handlers, bazaar
+
+
+async def test_a_withdrawn_bid_is_withdrawn_here_too(repos, bus, open_auction):
+    handlers, bazaar = open_auction
+    seen = _capture(bus, BazaarBidWithdrawn)
+    await handlers._on_bazaar_offer_updated(
+        _event(FederationEventType.BAZAAR_OFFER_UPDATED, _withdrawal())
+    )
+    assert bazaar.withdrawn == ["bid-1"]
+    # Only the household seating the bidder may withdraw it.
+    assert ("acts_for", "sp-1", "u-remote") in repos["auth"].calls
+    [evt] = seen
+    assert (evt.bid_id, evt.offer_id, evt.space_id, evt.origin_instance_id) == (
+        "bid-1",
+        "",
+        "sp-1",
+        "peer-a",
+    )
+
+
+@pytest.mark.parametrize(
+    ("label", "bid", "listing", "overrides"),
+    [
+        ("an unknown bid", None, {}, {}),
+        ("already declined", _bid(rejected=True), {}, {}),
+        ("already accepted", _bid(accepted=True), {}, {}),
+        ("already withdrawn", _bid(withdrawn=True), {}, {}),
+        ("another space", _bid(), {}, {"space_id": "sp-other"}),
+        ("the auction ended", _bid(), {"end_time": "2020-01-01T00:00:00Z"}, {}),
+        ("the listing is sold", _bid(), {"status": BazaarStatus.SOLD}, {}),
+    ],
+)
+async def test_a_bid_withdrawal_that_does_not_apply_changes_nothing(
+    bus, open_auction, label, bid, listing, overrides
+):
+    handlers, bazaar = open_auction
+    bazaar.existing_bids.pop("bid-1")
+    if bid is not None:
+        bazaar.existing_bids["bid-1"] = bid
+    for attr, value in listing.items():
+        setattr(bazaar, attr, value)
+    seen = _capture(bus, BazaarBidWithdrawn)
+    payload = _withdrawal(**overrides)
+    await handlers._on_bazaar_offer_updated(
+        _event(
+            FederationEventType.BAZAAR_OFFER_UPDATED,
+            payload,
+            space_id=payload["space_id"],
+        )
+    )
+    assert bazaar.withdrawn == [], label
+    assert seen == [], label
+
+
+async def test_a_bid_withdrawal_from_a_household_not_seating_the_bidder_is_refused(
+    repos, bus, open_auction
+):
+    handlers, bazaar = open_auction
+    repos["auth"].answer = False
+    seen = _capture(bus, BazaarBidWithdrawn)
+    await handlers._on_bazaar_offer_updated(
+        _event(FederationEventType.BAZAAR_OFFER_UPDATED, _withdrawal())
+    )
+    assert bazaar.withdrawn == []
+    assert repos["auth"].refusals == ["bid-1"]
+    assert seen == []
+
+
+async def test_a_lost_race_on_a_bid_withdrawal_publishes_nothing(bus, open_auction):
+    handlers, bazaar = open_auction
+    bazaar.withdrawn.append("bid-1")  # the repo already holds it withdrawn
+    seen = _capture(bus, BazaarBidWithdrawn)
+    await handlers._on_bazaar_offer_updated(
+        _event(FederationEventType.BAZAAR_OFFER_UPDATED, _withdrawal())
+    )
+    assert seen == []

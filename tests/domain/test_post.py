@@ -8,6 +8,9 @@ import pytest
 
 from socialhome.domain.post import (
     Availability,
+    BazaarListing,
+    BazaarMode,
+    BazaarStatus,
     Comment,
     CommentType,
     Poll,
@@ -162,3 +165,29 @@ def test_schedule_poll_poll_data():
     """PollData is a storage/wire format with question and options."""
     pd = PollData(question="ok?", options=(PollOption(id="a", text="Y"),))
     assert pd.question == "ok?"
+
+
+@pytest.mark.parametrize(
+    ("status", "end_time", "is_open"),
+    [
+        ("active", "2026-10-28T10:00:01+00:00", True),
+        ("active", "2026-10-28T10:00:00+00:00", False),  # at the end: over
+        ("active", "2026-10-28T09:00:00", False),  # naive = UTC
+        ("active", "not a date", True),  # the status alone decides
+        ("sold", "2099-01-01T00:00:00+00:00", False),
+        ("cancelled", "2099-01-01T00:00:00+00:00", False),
+    ],
+)
+def test_bazaar_listing_is_open(status, end_time, is_open):
+    listing = BazaarListing(
+        post_id="p",
+        space_id="s",
+        seller_user_id="u",
+        mode=BazaarMode.AUCTION,
+        title="Bike",
+        end_time=end_time,
+        currency="EUR",
+        status=BazaarStatus(status),
+        created_at="",
+    )
+    assert listing.is_open(datetime(2026, 10, 28, 10, 0, tzinfo=UTC)) is is_open

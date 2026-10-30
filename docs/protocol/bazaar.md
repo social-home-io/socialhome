@@ -11,8 +11,8 @@ households only.
 
 - **HFS**: the household where something happened sends it — the seller's
   household its listing, its status and its answers to offers; the buyer's
-  household a bid, an offer and an offer's withdrawal. Every receiving
-  household re-checks who may say it before storing it.
+  household a bid, its withdrawal, an offer and an offer's withdrawal.
+  Every receiving household re-checks who may say it before storing it.
 - **GFS**: uninvolved, except that the listing's wrapper post (`🛍 Title`)
   rides the public-space relay of a publicly readable space like any post.
   The listing itself, bids, offers and their answers never go to a GFS. A
@@ -28,6 +28,7 @@ households only.
 | An offer's withdrawal | **the seller's household only** | so it can no longer be accepted there |
 | A declined bid | every member household | everyone mirrors the bid, so the high bid reads the same everywhere |
 | …the seller's reason for it | **the bidder's household only** | the words are for the bidder |
+| A withdrawn bid | every member household | everyone mirrors the bid: it must stop setting the floor, and can't win, everywhere |
 
 ## Event types
 
@@ -45,6 +46,7 @@ space sync (listings only).
 | `BAZAAR_OFFER_MADE` | `offer_id`, `listing_post_id`, `space_id`, `offerer_user_id`, `amount`, `message` (≤ 280 characters) | offerer's household → the seller's household |
 | `BAZAAR_OFFER_UPDATED` | `offer_id`, `listing_post_id`, `space_id`, `status` (`accepted` / `rejected` / `withdrawn`), for `rejected` the seller's `reason` (≤ 280 characters, when given) | seller's household → the offerer's (accepted / rejected); offerer's → the seller's (withdrawn) |
 | `BAZAAR_OFFER_UPDATED` (a bid) | `bid_id`, `listing_post_id`, `space_id`, `status: rejected`; `reason` only in the bidder's household's copy | seller's household → every member household |
+| `BAZAAR_OFFER_UPDATED` (a withdrawn bid) | `bid_id`, `listing_post_id`, `space_id`, `status: withdrawn` | bidder's household → every member household |
 
 Everything but the routing fields (`event_type`, `from_instance`,
 `to_instance`, `space_id`) is inside the per-peer sealed payload. The
@@ -77,7 +79,16 @@ member household seated through an invite link receives them).
   household holds in the envelope's space. The first answer stands: a bid
   already accepted, declined or withdrawn is left as it is, so neither a
   replay nor a second decline swaps the reason. The reason is kept only
-  where the bidder is one of the household's own people.
+  where the bidder is one of the household's own people;
+- a bid's withdrawal only from the household seating the bidder
+  (`acts_for(any_role=True)`), and only as the bidder's own household
+  allows it (`BazaarListing.is_open`): a bid neither accepted, declined
+  nor withdrawn yet, on a listing still `active` and before its
+  `end_time` — past it the high bid is the winner, even before the expiry
+  sweep closes the listing, so nobody backs out of a win. A replay or a
+  second withdrawal is a no-op. The high bid recomputes everywhere
+  (`highest_bid` skips a withdrawn bid); nobody is notified, open
+  listings refresh (`bazaar.bid_withdrawn` WebSocket frame).
 
 A protected account (§CP.R) can't bid or make an offer: its own household
 refuses before anything is sent. A block or guardian block between the
@@ -112,7 +123,9 @@ A declined bid and an answer's `reason` need no version of their own:
 `reason` is an extra field a v_73 receiver ignores (the offer is still
 declined, without the words), and a v_73 receiver that knows only
 `offer_id` drops the `bid_id` form as malformed — the bid stays open there,
-as before. Below v_73 nothing is sent.
+as before. Below v_73 nothing is sent. A withdrawn bid is the same: a
+v_73 receiver without the `bid_id` withdrawal drops it and keeps the bid
+open, as before; below v_73 nothing is sent. No version bump.
 
 ## Flow — an offer from another household
 
@@ -164,6 +177,24 @@ sequenceDiagram
     C->>C: §24.11 → Anna seated on A → bid declined, no reason
 ```
 
+## Flow — a withdrawn auction bid
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Bob as Bob (bidder)
+    participant B as HFS B<br/>(Bob's household)
+    participant A as HFS A<br/>(seller's household)
+    participant C as HFS C<br/>(other member household)
+
+    Bob->>B: DELETE /api/bazaar/{id}/bids/{bid_id}
+    B->>B: bid open, listing active, before end_time →<br/>bid withdrawn, no longer the high bid
+    B->>A: BAZAAR_OFFER_UPDATED {bid_id, status: withdrawn}
+    B->>C: BAZAAR_OFFER_UPDATED {bid_id, status: withdrawn}
+    A->>A: §24.11 → Bob seated on B → bid open, listing open →<br/>bid withdrawn, high bid recomputed (no notification)
+    C->>C: same
+```
+
 ## Cost
 
 Per offer: **one** envelope (~0.5 KiB sealed, the note ≤ 280 characters),
@@ -172,7 +203,10 @@ characters of reason). Per declined bid: one envelope per member
 household — exactly what the bid itself cost, once, on a decision by the
 seller (never on a timer); the reason adds ≤ 280 characters to one of
 them. 200 member households and 30 declined bids on a busy auction: 6 000
-small envelopes over its life, against 6 000 for the bids themselves. An accepted
+small envelopes over its life, against 6 000 for the bids themselves. A
+withdrawn bid costs the same as a declined one (one envelope per member
+household, no reason), once, on the bidder's decision; a bid can be
+withdrawn once, so withdrawals never outnumber bids. An accepted
 offer adds the sale, one `BAZAAR_LISTING_UPDATED` per member household —
 the same envelope every other sale already sends. A space with 200 member
 households and 50 offers on one listing: 50 offer envelopes to the seller,
@@ -193,8 +227,9 @@ to the space.
 - `socialhome/domain/federation_capabilities.py` —
   `MIN_FOR_BAZAAR_LISTING` (10), `MIN_FOR_BAZAAR_STATUS` (11),
   `MIN_FOR_BAZAAR_BIDS` (12), `MIN_FOR_BAZAAR_OFFERS` (73).
-- Tests: `tests/protocol/test_bazaar_offer_federation.py` (five
-  households, real crypto and pipeline), `tests/protocol/test_space_content_scope.py`
+- Tests: `tests/protocol/test_bazaar_offer_federation.py`,
+  `test_bazaar_reject_federation.py` and `test_bazaar_bid_withdraw_federation.py`
+  (five households, real crypto and pipeline), `tests/protocol/test_space_content_scope.py`
   and `test_space_content_authorship.py` (the per-event rules).
 
 ## Spec refs

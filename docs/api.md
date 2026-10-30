@@ -912,6 +912,15 @@ bidder (`null` for anyone else). The decline reaches every member
 household's copy of the bid; the reason only the bidder's household (see
 [Bazaar](./protocol/bazaar.md)).
 
+**Withdrawing a bid.** `DELETE /api/bazaar/{id}/bids/{bid_id}` (the
+bidder only, `403` otherwise) works while the listing is open: `active`
+and before its `end_time` — past it the high bid is the winner, even
+before the expiry sweep closes the listing. A closed listing, or a bid
+already accepted, declined or withdrawn, answers `409 BID_STATE_ERROR`.
+A withdrawn bid no longer counts as the high bid, and the withdrawal
+reaches every member household's copy of the bid (see
+[Bazaar](./protocol/bazaar.md)).
+
 ### Bazaar offers & saved listings (§23.23)
 
 Offers write to a dedicated `bazaar_offers` table — distinct from

@@ -3222,7 +3222,8 @@ class SpaceContentInboundHandlers:
 
         A rejection may carry the seller's ``reason`` (≤ 280 characters,
         kept for the offerer). Keyed on ``bid_id`` instead of ``offer_id``
-        it is a declined auction bid (:meth:`_on_bazaar_bid_rejected`).
+        it is a declined auction bid (:meth:`_on_bazaar_bid_rejected`) or a
+        withdrawn one (:meth:`_on_bazaar_bid_withdrawn`).
         """
         if self._bazaar_repo is None:
             return
@@ -3250,7 +3251,12 @@ class SpaceContentInboundHandlers:
             )
             return
         if not offer_id:
-            await self._on_bazaar_bid_rejected(event, space_id, bid_id, status, reason)
+            if status == "withdrawn":
+                await self._on_bazaar_bid_withdrawn(event, space_id, bid_id)
+            else:
+                await self._on_bazaar_bid_rejected(
+                    event, space_id, bid_id, status, reason
+                )
             return
         offer = await self._bazaar_repo.get_offer(offer_id)
         if offer is None:
@@ -3403,6 +3409,70 @@ class SpaceContentInboundHandlers:
                 bidder_user_id=bid.bidder_user_id,
                 bid_id=bid_id,
                 reason=kept,
+                space_id=space_id,
+                origin_instance_id=event.from_instance,
+            )
+        )
+
+    async def _on_bazaar_bid_withdrawn(
+        self,
+        event: FederationEvent,
+        space_id: str,
+        bid_id: str,
+    ) -> None:
+        """The bidder took a bid back (``BAZAAR_OFFER_UPDATED`` keyed on
+        ``bid_id``, ``status: withdrawn``). Every member household mirrors
+        the bid, so every one takes the withdrawal — only from the
+        household seating the bidder (a seat demoted to follower since
+        still may, as for an offer), and only as the bidder's own household
+        allows it: the bid neither accepted, declined nor withdrawn yet,
+        on a listing still open here (active, before ``end_time`` — past
+        it the high bid is the winner). A replay is a no-op. The high bid
+        recomputes on its own (``highest_bid`` skips a withdrawn bid); the
+        seller is not notified, open listings refresh.
+        """
+        assert self._bazaar_repo is not None
+        bid = await self._bazaar_repo.get_bid(bid_id)
+        if bid is None:
+            log_not_applied(
+                event, what="bazaar bid", row_id=bid_id, reason="no such bid"
+            )
+            return
+        listing = await self._listing_in_space(event, bid.listing_post_id, space_id)
+        if listing is None:
+            return
+        if not await self._authorship.acts_for(
+            event, space_id, bid.bidder_user_id, any_role=True
+        ):
+            await self._authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="bazaar bid",
+                row_id=bid_id,
+                user_id=bid.bidder_user_id,
+            )
+            return
+        if bid.accepted or bid.rejected or bid.withdrawn:
+            log_not_applied(
+                event, what="bazaar bid", row_id=bid_id, reason="already answered"
+            )
+            return
+        if not listing.is_open(datetime.now(UTC)):
+            log_not_applied(
+                event, what="bazaar bid", row_id=bid_id, reason="listing closed"
+            )
+            return
+        try:
+            await self._bazaar_repo.withdraw_bid(bid_id)
+        except (BidStateError, ValueError) as exc:
+            log_not_applied(event, what="bazaar bid", row_id=bid_id, reason=str(exc))
+            return
+        await self._bus.publish(
+            BazaarBidWithdrawn(
+                listing_post_id=listing.post_id,
+                seller_user_id=listing.seller_user_id,
+                bidder_user_id=bid.bidder_user_id,
+                bid_id=bid_id,
                 space_id=space_id,
                 origin_instance_id=event.from_instance,
             )

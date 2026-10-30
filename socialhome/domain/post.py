@@ -216,6 +216,16 @@ class BazaarListing:
     winning_price: int | None = None
     sold_at: str | None = None
 
+    def is_open(self, now: datetime) -> bool:
+        """Still taking changes to its bids: ``active`` and ``end_time``
+        not yet reached (*now* is tz-aware). Past ``end_time`` the high
+        bid is the winner even before the expiry sweep closes the listing.
+        Read like a poll's deadline: a naive stamp is UTC, an unreadable
+        one never passes."""
+        return self.status is BazaarStatus.ACTIVE and not poll_deadline_passed(
+            self.end_time, now
+        )
+
 
 @dataclass(slots=True, frozen=True)
 class BazaarBid:

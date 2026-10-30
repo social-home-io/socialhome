@@ -653,7 +653,9 @@ class BazaarService(ProtectionGateMixin):
         bid_id: str,
         actor_user_id: str,
     ) -> None:
-        """Bidder withdraws their own bid while the listing is still open."""
+        """Bidder withdraws their own bid while the listing is still open:
+        ``active`` and before ``end_time``, and the bid neither accepted nor
+        declined (409 ``BID_STATE_ERROR`` otherwise)."""
         bid = await self._repo.get_bid(bid_id)
         if bid is None:
             raise BidNotFoundError(bid_id)
@@ -665,6 +667,12 @@ class BazaarService(ProtectionGateMixin):
         )
         if bid.bidder_user_id != actor_user_id:
             raise PermissionError("only the bidder may withdraw this bid")
+        # Past ``end_time`` the high bid is the winner, even before the
+        # expiry sweep closes the listing: no backing out of it then.
+        if not listing.is_open(datetime.now(UTC)):
+            raise BazaarServiceError(
+                "the listing is closed — the bid can no longer be withdrawn"
+            )
         try:
             await self._repo.withdraw_bid(bid_id)
         except BidStateError as exc:
@@ -675,6 +683,9 @@ class BazaarService(ProtectionGateMixin):
                 seller_user_id=listing.seller_user_id,
                 bidder_user_id=bid.bidder_user_id,
                 bid_id=bid_id,
+                # Every member household's copy of the bid hears of it
+                # (``BAZAAR_OFFER_UPDATED`` keyed on ``bid_id``).
+                space_id=listing.space_id,
             )
         )
 
