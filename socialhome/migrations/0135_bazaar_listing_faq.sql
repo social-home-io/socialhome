@@ -25,8 +25,10 @@
 --                    replayed envelope never undoes a newer edit.
 --   removed          1 = the seller removed the entry: the row stays, text
 --                    blanked, as a marker so a late edit of it can never
---                    bring it back. At most 20 markers per listing are kept
---                    (the oldest go first); at most 10 live entries.
+--                    bring it back. A marker is kept for the life of the
+--                    listing; a listing ever holds at most 30 rows (live
+--                    and removed, ``BAZAAR_FAQ_MAX_ENTRIES_EVER``), at most
+--                    10 of them live.
 --   updated_at       Local bookkeeping (when this household stored it).
 --
 -- The touch triggers re-stamp the wrapper post (0086), so an FAQ change

@@ -11,6 +11,7 @@ from socialhome.domain.bazaar_faq import (
     BazaarFaqEntry,
     BazaarFaqEntryNotFoundError,
     BazaarFaqFullError,
+    BazaarFaqUsedUpError,
 )
 from socialhome.domain.post import BazaarBid, BazaarListing, BazaarMode, BazaarStatus
 from socialhome.repositories.bazaar_repo import (
@@ -909,18 +910,56 @@ async def test_faq_apply_refuses_an_eleventh_live_entry(env):
     assert len(await repo.list_faq(pid)) == 10
 
 
-async def test_faq_keeps_at_most_twenty_removal_markers(env):
+async def test_faq_keeps_every_removal_marker_for_the_life_of_the_listing(env):
     pid = uuid.uuid4().hex
     await _seed_listing(env, pid)
     repo = env.bazaar_repo
+    first = None
     for n in range(25):
         entry = await repo.add_faq_entry(pid, question=f"Q{n}", answer="A")
+        first = first or entry
         await repo.remove_faq_entry(pid, entry.entry_id)
     every = (await repo.list_faq_for_listings([pid]))[pid]
-    assert len(every) == 20 and all(e.removed for e in every)
-    # The newest markers stay; the revision keeps counting up.
+    # Nothing is forgotten: 25 removals, 25 markers.
+    assert len(every) == 25 and all(e.removed for e in every)
     assert max(e.rev for e in every) == 50
-    assert min(e.rev for e in every) == 12
+    # A stale edit of the very first removed entry stays refused.
+    assert first is not None
+    assert not await repo.apply_faq_entry(
+        _faq(pid, first.entry_id, first.rev + 1, question="back?")
+    )
+    assert await repo.list_faq(pid) == []
+
+
+async def test_faq_add_is_refused_past_thirty_entries_ever(env):
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    repo = env.bazaar_repo
+    for n in range(30):
+        entry = await repo.add_faq_entry(pid, question=f"Q{n}", answer="A")
+        if n < 29:
+            await repo.remove_faq_entry(pid, entry.entry_id)
+    # One live entry, 29 markers: room on the listing, none left to add.
+    assert len(await repo.list_faq(pid)) == 1
+    with pytest.raises(BazaarFaqUsedUpError):
+        await repo.add_faq_entry(pid, question="Q31", answer="A")
+    # Rewording a live entry is still fine.
+    await repo.edit_faq_entry(pid, entry.entry_id, question="Q?", answer="A!")
+
+
+async def test_faq_apply_refuses_a_new_entry_past_thirty_ever(env):
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    repo = env.bazaar_repo
+    for n in range(30):
+        assert await repo.apply_faq_entry(_faq(pid, f"{n:032x}", n + 1, removed=n < 29))
+    # Neither a live entry nor a marker for a 31st id is stored.
+    assert not await repo.apply_faq_entry(_faq(pid, "e" * 32, 40))
+    assert not await repo.apply_faq_entry(_faq(pid, "f" * 32, 41, removed=True))
+    assert len((await repo.list_faq_for_listings([pid]))[pid]) == 30
+    # A held live entry still takes its newer change.
+    assert await repo.apply_faq_entry(_faq(pid, f"{29:032x}", 50, question="v2"))
+    assert [e.question for e in await repo.list_faq(pid)] == ["v2"]
 
 
 async def test_faq_goes_with_its_listing_and_touches_the_wrapper_post(env):

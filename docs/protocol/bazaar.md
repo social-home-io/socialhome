@@ -412,7 +412,9 @@ add entries directly on the listing. Federation capability **v_75**
   the listing (a seat in its space, any role, a follower and a protected
   account included: reading a listing is not trading).
 - **Bounds** (sender and receiver): at most **10** live entries per
-  listing; a question is one line of at most **200** characters, an answer
+  listing and **30** entries ever, removed ones included (see
+  [Event](#event): a removal marker is kept for the life of the
+  listing); a question is one line of at most **200** characters, an answer
   at most **500**; plain text only — the SPA renders text nodes, no
   markdown or HTML; control characters are refused; a tab becomes a space,
   runs of blank lines collapse. At most 30 changes per listing an hour
@@ -445,9 +447,20 @@ whole list.
 (one counter per listing, bumped by every add, edit and removal). A
 receiver stores a change only when its `rev` is higher than the one it
 holds for that entry, so a late or replayed envelope never undoes a newer
-edit. **A removal is final**: the receiver keeps a blank marker
-(`removed = 1`) so a late edit of a removed entry can never bring it back;
-at most 20 markers per listing are kept, the oldest go first.
+edit. **A removal is final**: every household keeps a blank marker
+(`removed = 1`) **for the life of the listing**, so a late, replayed or
+re-synced edit of a removed entry can never bring it back, however many
+removals came after it. Instead of forgetting markers, the entries a
+listing can ever have are capped: **at most 30 per listing, live and
+removed together** (`BAZAAR_FAQ_MAX_ENTRIES_EVER`; rewording an entry does
+not count, only adding one). The seller's household refuses a 31st add
+(`409 BAZAAR_FAQ_USED_UP`, the live ones can still be reworded); a receiver
+refuses a 31st entry id, live or removed. Without the cap the markers would
+only be bounded by the rate limits over the listing's life: 7 days × 15
+add-and-remove pairs an hour = 2 520 at the seller's (an in-memory limit a
+restart resets), 5 040 under a receiver's 60-an-hour flood cap. With it:
+at most 30 rows (≥ 20 of them markers once 10 are live), ending with the
+listing (`ON DELETE CASCADE`).
 
 It is a space-content **write** (`SPACE_WRITE_EVENT_TYPES`: the §24.11
 writer gate drops it from a follower-only household, the archive gate from
@@ -465,11 +478,13 @@ a peer (`origin_instance_id`). A member household below v_75 is sent
 nothing: its people see the listing without questions and answers.
 
 **Late joiners.** The §25.6 `bazaar` record carries `faq`: the listing's
-live entries and its removal markers, in the event's shape. A change to the
-FAQ touches the wrapper post (migration 0135's triggers), so an incremental
-sync carries it too. The receiver applies the entries under the same rules
-(removals first; malformed ones skipped; a record with more than 30 items
-is refused). v_75 is a sync line (`SYNC_RECORD_LINES`): a household that
+live entries and **all** its removal markers, in the event's shape — so a
+late joiner refuses a stale edit of a removed entry exactly as everyone
+else does. A change to the FAQ touches the wrapper post (migration 0135's
+triggers), so an incremental sync carries it too. The receiver applies the
+entries under the same rules (removals first; malformed ones skipped; a
+record with more than 30 items, more than a listing can ever hold, is
+refused). v_75 is a sync line (`SYNC_RECORD_LINES`): a household that
 crosses it gets one full stream, and `SYNC_SHAPE_VERSION` 6 streams every
 household in full once.
 
@@ -483,7 +498,7 @@ household in full once.
 | Listing | held here, in that space, still **active** (a change to an ended listing is dropped) |
 | Author | the listing's **seller** holds a live **writer** seat on the **sending** household (strict: no host relay, nobody speaks for another household's people), is not banned, and is **not one of ours** — only our own household writes our sellers' FAQs |
 | Entry | `entry_from_wire`: a 32-hex id, `rev` ≥ 1, a sane `position`, and text the sender's own cleaning leaves unchanged (≤ 200 / ≤ 500, one-line question, no control characters) |
-| Store | newer `rev` wins, a removal is final, at most 10 live entries (`apply_faq_entry`) |
+| Store | newer `rev` wins, a removal is final (its marker kept for the life of the listing), at most 10 live entries and 30 entries ever (`apply_faq_entry`) |
 | Flood | at most 60 changes per listing an hour |
 
 ### Flow
@@ -523,7 +538,8 @@ households: the seller writes 10 entries and edits each twice = 30 changes
 seller types; a typical FAQ (3 entries, no edits) ≈ 600 envelopes ≈ 0.6 MB.
 A follower-heavy *global* space costs nothing extra: followers on a GFS
 never receive the FAQ, only member households do. The sync record grows by
-at most 10 entries + 20 markers (≤ ~8 KB) per listing.
+at most 30 items: 10 live entries (~0.8 KB each) + 20 markers (~90 B
+each), ≤ ~10 KB per listing.
 
 ### Implementation pointers
 

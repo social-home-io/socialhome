@@ -297,6 +297,39 @@ async def test_a_protected_seller_cannot_write_the_faq(client):
     assert (await r.json())["error"]["code"] == "ACCOUNT_PROTECTED"
 
 
+async def test_faq_add_is_refused_once_the_listing_had_thirty_entries(client):
+    seller = _auth(client._tok)
+    sid = await _make_space(client)
+    pid = (await _make_listing(client, sid))["post_id"]
+    # 29 removed entries (their markers stay for the life of the listing)
+    # and one live one: room on the listing, but no new entry left.
+    for n in range(29):
+        await client._db.enqueue(
+            "INSERT INTO bazaar_listing_faq(listing_post_id, entry_id, rev,"
+            " removed) VALUES(?,?,?,1)",
+            (pid, f"{n:032x}", n + 1),
+        )
+    r = await client.post(
+        f"/api/bazaar/{pid}/faq", json={"question": "Q", "answer": "A"}, headers=seller
+    )
+    assert r.status == 201
+    eid = (await r.json())["entry_id"]
+    r = await client.post(
+        f"/api/bazaar/{pid}/faq", json={"question": "Q2", "answer": "A"}, headers=seller
+    )
+    assert r.status == 409
+    body = await r.json()
+    assert body["error"]["code"] == "BAZAAR_FAQ_USED_UP"
+    assert body["error"]["params"] == {"max": 30}
+    # The live entry can still be reworded.
+    r = await client.patch(
+        f"/api/bazaar/{pid}/faq/{eid}",
+        json={"question": "Q?", "answer": "A!"},
+        headers=seller,
+    )
+    assert r.status == 200
+
+
 async def test_faq_changes_are_rate_capped(client):
     seller = _auth(client._tok)
     sid = await _make_space(client)

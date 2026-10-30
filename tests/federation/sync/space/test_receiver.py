@@ -1540,3 +1540,15 @@ async def test_an_absent_or_oversized_faq_applies_nothing(items):
     repo = _FaqRepo()
     await _apply_bazaar_faq(repo, "bzr-1", items)
     assert repo.applied == []
+
+
+async def test_a_faq_record_with_every_marker_of_a_listing_is_taken():
+    # A listing ever holds at most 30 entries and keeps every removal
+    # marker, so a full record (30 markers) is legitimate and applied whole.
+    repo = _FaqRepo()
+    items = [
+        {"entry_id": f"{n:032x}", "rev": n + 1, "position": n, "removed": True}
+        for n in range(30)
+    ]
+    await _apply_bazaar_faq(repo, "bzr-1", items)
+    assert len(repo.applied) == 30 and all(e.removed for e in repo.applied)

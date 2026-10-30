@@ -57,6 +57,19 @@ describe('ListingQuestions', () => {
     expect(container.querySelector('.sh-dm-unread')?.textContent).toBe('2')
   })
 
+  it('is titled as private conversations, never "Questions" (that is the public FAQ)', async () => {
+    apiGet.mockResolvedValue([
+      { conversation_id: 'bzt-1', other_user_id: 'u-ben', other_display_name: 'Ben',
+        unread: 0, last_message_at: null, writable: true, closes_at: null },
+    ])
+    const { findByRole, container } = render(<ListingQuestions postId="p1" />)
+    const heading = await findByRole('heading', { level: 4 })
+    expect(heading.textContent).toContain('Private conversations')
+    expect(heading.textContent).not.toMatch(/^Questions/)
+    expect(container.querySelector('section')?.getAttribute('aria-label'))
+      .toBe('Private conversations')
+  })
+
   it('renders nothing without questions', async () => {
     apiGet.mockResolvedValue([])
     const { container } = render(<ListingQuestions postId="p1" />)

@@ -2658,8 +2658,10 @@ class FederationService:
         decides direct vs mesh based on the actual pairing state at
         send time.
 
-        When ``min_proto_version`` is set, peers whose advertised
-        ``proto_version`` is below the threshold are skipped silently —
+        When ``min_proto_version`` is set, member households whose space
+        version (:meth:`space_member_version`: the paired row's
+        ``proto_version``, else a mesh-only member's mesh claim) is below
+        the threshold are skipped silently —
         the outbox never queues, the receiver never sees an unknown
         event_type. Use this for best-effort additions where older
         peers should simply not get the new payload (vs forward-secrecy
@@ -2684,11 +2686,15 @@ class FederationService:
                 # Not in the caller's audience (e.g. a follower-only
                 # household for the space chat) — skip, like a non-member.
                 continue
-            if min_proto_version is not None and not await self.peer_supports(
+            if min_proto_version is not None and not await self.space_member_supports(
                 iid,
                 min_version=min_proto_version,
             ):
-                # Below threshold — silently skip. Best-effort path.
+                # Below threshold — silently skip. Best-effort path. Judged by
+                # the member's space version: its paired row, else — for a
+                # mesh-only member household — the version it claimed over
+                # the mesh (``peer_supports`` alone skipped every mesh-only
+                # member, so a gated event never reached it). Unknown → skip.
                 continue
             peer_payload = payload
             if (

@@ -7,9 +7,11 @@ import pytest
 from socialhome.domain.bazaar_faq import (
     BAZAAR_FAQ_ANSWER_MAX_CHARS,
     BAZAAR_FAQ_MAX_ENTRIES,
+    BAZAAR_FAQ_MAX_ENTRIES_EVER,
     BAZAAR_FAQ_QUESTION_MAX_CHARS,
     BazaarFaqFullError,
     BazaarFaqTextError,
+    BazaarFaqUsedUpError,
     clean_answer,
     clean_question,
     is_entry_id,
@@ -20,6 +22,13 @@ def test_the_owner_bounds():
     assert BAZAAR_FAQ_MAX_ENTRIES == 10
     assert BAZAAR_FAQ_QUESTION_MAX_CHARS == 200
     assert BAZAAR_FAQ_ANSWER_MAX_CHARS == 500
+
+
+def test_a_listing_ever_holds_at_most_thirty_entries():
+    # Every removal leaves a marker for the life of the listing, so the
+    # entries ever added (live + removed) are the bound: 10 live + 20 more.
+    assert BAZAAR_FAQ_MAX_ENTRIES_EVER == 30
+    assert BAZAAR_FAQ_MAX_ENTRIES_EVER >= BAZAAR_FAQ_MAX_ENTRIES
 
 
 def test_a_question_is_one_trimmed_line():
@@ -67,3 +76,12 @@ def test_entry_ids_are_32_lowercase_hex():
 def test_the_full_error_names_the_cap():
     err = BazaarFaqFullError()
     assert (err.status, err.code, err.params) == (409, "BAZAAR_FAQ_FULL", {"max": 10})
+
+
+def test_the_used_up_error_names_the_lifetime_cap():
+    err = BazaarFaqUsedUpError()
+    assert (err.status, err.code, err.params) == (
+        409,
+        "BAZAAR_FAQ_USED_UP",
+        {"max": 30},
+    )

@@ -41,6 +41,7 @@ import pytest
 
 from socialhome.app import create_app
 from socialhome.app_keys import (
+    bazaar_faq_service_key,
     db_key,
     federation_service_key,
     space_sync_receiver_key,
@@ -387,6 +388,95 @@ async def test_a_late_edit_never_brings_a_removed_entry_back(mesh):
     await _pump(mesh)  # the removal arrives first …
     assert await _receive(b, _event(s, first, b))  # … then the late add
     assert await _held(b) == []
+
+
+def _an_hour_passes(mesh) -> None:
+    """Empty every FAQ rate window: the seller's (30 an hour) and each
+    receiver's (60 an hour), as an hour going by would."""
+    for house in mesh.values():
+        house.app[bazaar_faq_service_key]._changes.reset()
+        fed = house.app[federation_service_key]
+        for handler in fed._event_registry.handlers_for(FAQ):
+            handler.__self__._arrivals.reset()
+
+
+async def _first_removed_then_many_more(mesh) -> dict:
+    """The seller rewords an entry, removes it, then adds and removes 24
+    more over the next hours. Returns the (stale) edit as B was sent it."""
+    s, b = mesh["S"], mesh["B"]
+    first = await (await _add(s, "First?", "Yes.")).json()
+    await _pump(mesh)
+    r = await s.tc.patch(
+        f"/api/bazaar/{BIKE}/faq/{first['entry_id']}",
+        json={"question": "First, reworded?", "answer": "Yes!"},
+        headers=s.headers,
+    )
+    assert r.status == 200
+    stale = next(p for _f, to, p in _faq_sends() if to == b.iid)
+    await _pump(mesh)
+    await s.tc.delete(f"/api/bazaar/{BIKE}/faq/{first['entry_id']}", headers=s.headers)
+    await _pump(mesh)
+    for n in range(24):  # well past the 20 markers v_75 first kept
+        if n % 10 == 0:
+            _an_hour_passes(mesh)
+        entry = await (await _add(s, f"Q{n}?", "A.")).json()
+        r = await s.tc.delete(
+            f"/api/bazaar/{BIKE}/faq/{entry['entry_id']}", headers=s.headers
+        )
+        assert r.status == 204, n
+        await _pump(mesh)
+    return stale
+
+
+async def _markers(house: House) -> int:
+    row = await house.db.fetchone(
+        "SELECT COUNT(*) AS n FROM bazaar_listing_faq"
+        " WHERE listing_post_id=? AND removed=1",
+        (BIKE,),
+    )
+    return int(row["n"])
+
+
+async def test_a_removal_stays_final_after_many_more_removals(mesh):
+    stale = await _first_removed_then_many_more(mesh)
+    s = mesh["S"]
+    for name in ("S", "H", "B", "C"):
+        assert await _markers(mesh[name]) == 25, name
+    # The stale edit of the first removed entry arrives late, everywhere.
+    for name in ("H", "B", "C"):
+        to = mesh[name]
+        assert await _receive(to, _event(s, {**stale}, to)), name
+        assert await _held(to) == [], name
+        assert await _markers(to) == 25, name
+
+
+async def test_a_late_joiner_gets_every_marker_and_refuses_the_stale_edit(mesh):
+    stale = await _first_removed_then_many_more(mesh)
+    s, b = mesh["S"], mesh["B"]
+    # B joined late: it holds neither the listing nor its FAQ.
+    await b.db.enqueue("DELETE FROM space_posts WHERE id=?", (BIKE,))
+    exporters = s.app[space_sync_service_key]._exporters
+    receiver = b.app[space_sync_receiver_key]
+    for resource in ("posts", "bazaar"):
+        records = await exporters[resource].list_records(SID)
+        await receiver._dispatch(resource, SID, records, provider=s.iid)
+    record = (await exporters["bazaar"].list_records(SID))[0]
+    assert len(record["faq"]) == 25 and all(i["removed"] for i in record["faq"])
+    assert await _markers(b) == 25
+    assert await _receive(b, _event(s, stale, b))
+    assert await _held(b) == []
+
+
+async def test_no_new_entry_past_thirty_ever_on_receipt(mesh):
+    s, b = mesh["S"], mesh["B"]
+    for n in range(30):
+        await _receive(b, _event(s, _payload(rev=n + 1, removed=True), b))
+    assert await _markers(b) == 30
+    # A 31st entry id — live or a marker — is refused: no seller sends it.
+    await _receive(b, _event(s, _payload(rev=40), b))
+    await _receive(b, _event(s, _payload(rev=41, removed=True), b))
+    assert await _held(b) == []
+    assert await _markers(b) == 30
 
 
 async def test_the_faq_ends_with_the_listing(mesh):

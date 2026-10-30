@@ -32,10 +32,16 @@ BAZAAR_FAQ_QUESTION_MAX_CHARS: int = 200
 #: An answer is at most this many characters (line breaks allowed).
 BAZAAR_FAQ_ANSWER_MAX_CHARS: int = 500
 
-#: How many removal markers one listing keeps (the oldest go first). A
-#: marker stops a late edit of a removed entry from bringing it back; past
-#: this many removals the oldest marker is forgotten.
-BAZAAR_FAQ_MAX_REMOVED: int = 20
+#: How many entries one listing ever holds, live or removed. A removal
+#: leaves a blank marker for the life of the listing, so a late or replayed
+#: edit of a removed entry can never bring it back on any household, however
+#: many removals came after it. This bounds the markers without ever
+#: forgetting one: at most 30 rows per listing, at most 10 of them live.
+#: Rewording an entry doesn't count, only adding a new one. Every household
+#: enforces it: the seller's on add (:class:`BazaarFaqUsedUpError`), a
+#: receiver on a new entry id. A §25.6 ``faq`` record carries at most this
+#: many items.
+BAZAAR_FAQ_MAX_ENTRIES_EVER: int = 30
 
 #: How many FAQ changes the seller's household sends for one listing per
 #: window — a backstop: every change goes to every member household. The
@@ -95,6 +101,18 @@ class BazaarFaqFullError(CodedError):
 
     def __init__(self) -> None:
         super().__init__(params={"max": BAZAAR_FAQ_MAX_ENTRIES})
+
+
+class BazaarFaqUsedUpError(CodedError):
+    """The listing already had :data:`BAZAAR_FAQ_MAX_ENTRIES_EVER` entries,
+    removed ones included: no new one, but a live one can be reworded."""
+
+    status = 409
+    code = "BAZAAR_FAQ_USED_UP"
+    detail = "This listing already had 30 questions. Edit one of them instead."
+
+    def __init__(self) -> None:
+        super().__init__(params={"max": BAZAAR_FAQ_MAX_ENTRIES_EVER})
 
 
 class BazaarFaqRateLimitedError(CodedError, PermissionError):

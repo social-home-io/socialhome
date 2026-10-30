@@ -4586,6 +4586,44 @@ async def test_broadcast_to_space_members_skips_own_instance(caplog):
 
 
 @pytest.mark.asyncio
+async def test_a_mesh_only_member_is_judged_by_its_claim_for_the_version_floor(
+    monkeypatch,
+):
+    """``min_proto_version`` gates a space broadcast on the member's space
+    version: a mesh-only member (no ``remote_instances`` row, e.g. a member
+    household its seller never paired with) by the version it claimed over
+    the mesh. Judging it by the paired-peer row alone skipped every
+    mesh-only member, so a gated event (a bazaar listing, its questions
+    and answers) never reached an unpaired member household."""
+    km = _make_kek_manager()
+    fed_repo = InMemoryFederationRepo()
+    paired, _ = _make_remote_instance(km)
+    paired_old, _ = _make_remote_instance(km)
+    await fed_repo.save_instance(dataclasses.replace(paired, proto_version=75))
+    await fed_repo.save_instance(dataclasses.replace(paired_old, proto_version=74))
+    fed_repo.mesh_claims = {"mesh-new": 75, "mesh-old": 74}
+    for iid in (paired.id, paired_old.id, "mesh-new", "mesh-old", "mesh-unknown"):
+        fed_repo.add_space_member("sp", iid)
+    svc, _ = _make_service(federation_repo=fed_repo, key_manager=km)
+    sent: list[str] = []
+
+    async def _send(_self, *, to_instance_id, event_type, payload, space_id=None):
+        sent.append(to_instance_id)
+        return MagicMock(ok=True)
+
+    monkeypatch.setattr(FederationService, "send_with_mesh_fallback", _send)
+    await svc.broadcast_to_space_members(
+        "sp",
+        FederationEventType.BAZAAR_LISTING_FAQ_UPDATED,
+        {"v": 1},
+        min_proto_version=75,
+    )
+    # The paired v_75 member and the mesh-only one that claimed v_75; never
+    # an older or an unknown household (fail closed).
+    assert sorted(sent) == sorted([paired.id, "mesh-new"])
+
+
+@pytest.mark.asyncio
 async def test_broadcast_reaches_a_member_with_no_remote_instances_row():
     """A mesh-only member — seated via a routed invite, so it has a
     ``space_instances`` row but NO ``remote_instances`` row at all — must

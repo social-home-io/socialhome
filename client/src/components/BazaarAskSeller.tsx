@@ -66,9 +66,9 @@ export function ListingQuestions({ postId }: { postId: string }) {
   }, [postId])
   if (!rows || rows.length === 0) return null
   return (
-    <section class="sh-bazaar-questions" aria-label={t('bazaar.ask.questions_title')}>
+    <section class="sh-bazaar-questions" aria-label={t('bazaar.ask.conversations_title')}>
       <h4 class="sh-bazaar-questions__title">
-        {t('bazaar.ask.questions_title')}
+        {t('bazaar.ask.conversations_title')}
         <span class="sh-badge">{rows.length}</span>
       </h4>
       <ul class="sh-bazaar-questions__list">
