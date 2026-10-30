@@ -181,6 +181,24 @@ async def test_second_fetch_within_ttl_uses_cache(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.asyncio
+async def test_cached_entry_reads_the_held_copy_only():
+    """A notification names an app from the copy already held — it never
+    makes Social Home fetch the catalog."""
+    session = _CountingSession(_chess_payload())
+    svc = AppCatalogService(
+        session_factory=lambda: session,
+        catalog_url="https://example/catalog.json",
+    )
+    assert svc.cached_entry("chess") is None
+    assert session.get_call_count == 0
+    await svc.fetch_catalog()
+    entry = svc.cached_entry("chess")
+    assert entry is not None and entry.name == "Chess"
+    assert svc.cached_entry("go") is None
+    assert session.get_call_count == 1
+
+
+@pytest.mark.asyncio
 async def test_force_refresh_ignores_cache(monkeypatch: pytest.MonkeyPatch):
     """force=True bypasses the TTL cache and re-fetches."""
     session = _CountingSession(_chess_payload())

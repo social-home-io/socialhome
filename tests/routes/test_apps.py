@@ -1200,6 +1200,7 @@ async def test_messages_returns_ok(client, fed_svc):
         session_id="sess-abc",
         payload={"move": "e4"},
         actor_user_id=client._uid,
+        turn=False,
     )
 
 
@@ -2167,6 +2168,68 @@ async def test_a_move_waits_for_a_closed_app_and_arrives_once(client):
     assert await _held(client, carol_tok) == []
 
 
+async def _turn_rows(client, tok: str) -> list[dict]:
+    await client.app[notification_delivery_key].drain()
+    rows = await (await client.get("/api/notifications", headers=_auth(tok))).json()
+    return [n for n in rows if n["type"] == "app_turn"]
+
+
+async def test_a_turn_raises_one_row_per_game_and_opening_the_app_reads_it(client):
+    """ "Your turn" (2026-10-30): the app flags a move ``turn: true``; the
+    other player gets one row for the game while their app is closed — In
+    app (Games) — and opening the app reads it. The next turn re-opens it."""
+    carol_tok, session_id, target = await _challenge_carol(client)
+    r = await client.post(
+        f"/api/apps/com.example.hello/sessions/{session_id}/accept",
+        headers=_auth(carol_tok),
+    )
+    assert r.status == 200
+    move = {"session_id": session_id, "target": target, "payload": {"n": 0}}
+    # An informational message: no row.
+    r = await client.post(
+        "/api/apps/com.example.hello/messages", json=move, headers=_auth(client._tok)
+    )
+    assert r.status == 200
+    assert await _turn_rows(client, carol_tok) == []
+    for n in (1, 2):
+        r = await client.post(
+            "/api/apps/com.example.hello/messages",
+            json={**move, "payload": {"n": n}, "turn": True},
+            headers=_auth(client._tok),
+        )
+        assert r.status == 200
+    (row,) = await _turn_rows(client, carol_tok)
+    assert row["object_key"] == f"app_session:com.example.hello/{session_id}"
+    assert row["link_url"] == "/apps/com.example.hello"
+    assert row["kind"] == "games"
+    assert row["read_at"] is None
+    await _held(client, carol_tok)
+    (row,) = await _turn_rows(client, carol_tok)
+    assert row["read_at"] is not None
+    r = await client.post(
+        "/api/apps/com.example.hello/messages",
+        json={**move, "payload": {"n": 3}, "turn": True},
+        headers=_auth(client._tok),
+    )
+    (row,) = await _turn_rows(client, carol_tok)
+    assert row["read_at"] is None
+
+
+async def test_a_turn_flag_that_is_not_a_bool_is_refused(client):
+    _carol_tok, session_id, target = await _challenge_carol(client)
+    r = await client.post(
+        "/api/apps/com.example.hello/messages",
+        json={
+            "session_id": session_id,
+            "target": target,
+            "payload": {"n": 1},
+            "turn": "yes",
+        },
+        headers=_auth(client._tok),
+    )
+    assert r.status == 400
+
+
 async def test_a_decline_waits_for_the_challenger_with_a_bell_row(client):
     """L#2 on one household: Carol declines while the admin's app is
     closed — a bell row, and the close waits for the admin's app."""
@@ -2204,7 +2267,41 @@ async def test_app_messages_have_their_own_rate_limit_bucket(client):
     assert r.status == 200
 
 
-# ── Catalog v2 on the wire, "Ask an admin", "Needs a newer Social Home" ──
+async def test_app_saved_data_has_its_own_rate_limit_bucket(client):
+    """A fast game saves around each move (Battleships: a shot, the board):
+    ``store`` writes and reads no longer share the 60/min ``/api/apps``
+    bucket — 300 a minute, like moves — and don't use it up either."""
+    await _seed_installed_enabled_app(client._db)
+    path = "/api/apps/com.example.hello/store/board"
+    for i in range(150):
+        r = await client.put(
+            path, json={"value": {"shot": i}}, headers=_auth(client._tok)
+        )
+        assert r.status == 200, i
+        r = await client.delete(path, headers=_auth(client._tok))
+        assert r.status == 200, i
+    # 300 writes used the store's whole bucket; the next one waits …
+    r = await client.put(path, json={"value": {}}, headers=_auth(client._tok))
+    assert r.status == 429
+    # … while the rest of /api/apps still has its own 60.
+    r = await client.get("/api/apps", headers=_auth(client._tok))
+    assert r.status == 200
+
+
+async def test_the_store_bucket_takes_only_store_calls(client):
+    """A session id that starts with "store" must not move accept /
+    decline into the looser store bucket: they keep the 60/min default."""
+    await _seed_installed_enabled_app(client._db)
+    statuses = [
+        (
+            await client.post(
+                "/api/apps/com.example.hello/sessions/storeX/accept",
+                headers=_auth(client._tok),
+            )
+        ).status
+        for _ in range(61)
+    ]
+    assert 429 in statuses
 
 
 def _v2_catalog_entry() -> AppCatalogEntry:

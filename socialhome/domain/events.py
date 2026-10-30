@@ -2744,6 +2744,39 @@ class AppGameEnded(DomainEvent):
     from_user_id: str | None = None
 
 
+@dataclass(slots=True, frozen=True)
+class AppTurn(DomainEvent):
+    """A move that hands ``to_user_id`` (a local user) the turn reached
+    their mailbox (owner decision 2026-10-30).
+
+    Published by :class:`AppFederationService` when an app message the
+    sending app flagged ``turn: true`` is kept for the person (the mailbox,
+    D11) — only for a game this household knows they play with exactly
+    that sender, past the block, guardian-block, protected-account and age
+    checks. Consumed by the notification service: one "Your turn with Ben
+    in Chess" row per game, unless the person has the app open right now.
+    ``from_display`` is a label only (``None``: the service looks the
+    sender's name up — a person in this household).
+    """
+
+    app_id: str
+    session_id: str
+    to_user_id: str
+    from_user_id: str
+    from_display: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class AppTurnsSeen(DomainEvent):
+    """``user_id``'s app opened and took its held messages (``POST
+    …/held``): the games in ``session_ids`` are in front of them, so their
+    "Your turn" rows read as read. Published by :class:`AppFederationService`."""
+
+    app_id: str
+    user_id: str
+    session_ids: tuple[str, ...]
+
+
 # ─── Momentum (§Momentum) ─────────────────────────────────────────────────
 
 

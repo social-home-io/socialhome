@@ -86,6 +86,24 @@ export function markSeen(link: string): void {
   if (seenTimer === null) seenTimer = setTimeout(() => { void flushSeen() }, SEEN_FLUSH_MS)
 }
 
+/**
+ * The app *appId* is on screen: its "Your turn" rows that arrived while
+ * the tab was away read as read (the app shows those moves live). Only
+ * ``app_turn`` rows — an invite of the same app still waits in Needs you,
+ * so this is not :func:`markSeen` (that reads every row opening the page).
+ * Rows this tab never heard of are read when the app takes its held
+ * messages (server side). A failure is silent.
+ */
+export function markTurnsSeen(appId: string): void {
+  const link = `/apps/${appId}`
+  const keys = recent.value
+    .filter(n => n.notif_type === 'app_turn' && n.link_url === link && n.object_key)
+    .map(n => n.object_key as string)
+  if (keys.length === 0) return
+  api.post('/api/notifications/read-objects', { object_keys: [...new Set(keys)].slice(0, 20) })
+    .catch(() => { /* a hint: the row stays unread */ })
+}
+
 /** The link a post's notifications open: its permalink for a household
  *  post, the space with ``?post=`` for a space post (the server's
  *  ``notification_links``). */

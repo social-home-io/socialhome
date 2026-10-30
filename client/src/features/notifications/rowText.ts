@@ -142,6 +142,7 @@ export const HOUSEHOLD_CHAT_LINK = '/?tab=chat'
  *   notifications.row.app_added notifications.row.app_added_many
  *   notifications.row.app_challenge_declined notifications.row.app_challenge_declined_many
  *   notifications.row.app_game_ended notifications.row.app_game_ended_many
+ *   notifications.row.app_turn notifications.row.app_turn_many
  *   notifications.row.app_request notifications.row.app_request_many
  *   notifications.row.app_update_none
  *   notifications.new_pill notifications.new_pill_one
@@ -209,6 +210,9 @@ export const ROW_TYPES: Readonly<Record<string, TypeSpec>> = {
   // "Ben no longer has Chess, so your game ended" (D9): the other household
   // uninstalled the app — the app's name rides as the place too.
   app_game_ended: {},
+  // "Your turn with Ben in Chess" (2026-10-30): one row per game while
+  // the app is closed — the app's name rides as the place too.
+  app_turn: {},
   // A member asked for an app: "Milo and Kiki asked for Chess".
   app_request: {},
   // Admins: "Chess has an update" — nobody caused it; the app is the place.

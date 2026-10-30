@@ -20,7 +20,7 @@ vi.mock('@/api', () => ({
   api: { post: (...args: unknown[]) => apiPost(...args) },
 }))
 
-import { flushSeen, markSeen, postLink, recent, unreadCount, wireNotificationsWs } from './notifications'
+import { flushSeen, markSeen, markTurnsSeen, postLink, recent, unreadCount, wireNotificationsWs } from './notifications'
 
 const frame = (data: Record<string, unknown>) => handlers['notification.new']({ data })
 
@@ -99,6 +99,40 @@ describe('markSeen', () => {
   it('does nothing with nothing queued', async () => {
     await flushSeen()
     expect(apiPost).not.toHaveBeenCalled()
+  })
+})
+
+describe('markTurnsSeen', () => {
+  beforeEach(() => {
+    apiPost.mockReset()
+    apiPost.mockResolvedValue({ ok: true, marked: 1 })
+  })
+
+  it('reads only this app\'s "Your turn" rows — never its invites', () => {
+    recent.value = [
+      { notification_id: 'n1', notif_type: 'app_turn', title: 'T', link_url: '/apps/chess', object_key: 'app_session:chess/s1' },
+      { notification_id: 'n2', notif_type: 'app_turn', title: 'T', link_url: '/apps/chess', object_key: 'app_session:chess/s1' },
+      { notification_id: 'n3', notif_type: 'app_turn', title: 'T', link_url: '/apps/go', object_key: 'app_session:go/s9' },
+      { notification_id: 'n4', notif_type: 'app_challenge', title: 'I', link_url: '/apps/chess', object_key: 'app_session:chess/s2' },
+    ]
+    markTurnsSeen('chess')
+    expect(apiPost).toHaveBeenCalledOnce()
+    expect(apiPost).toHaveBeenCalledWith(
+      '/api/notifications/read-objects',
+      { object_keys: ['app_session:chess/s1'] },
+    )
+  })
+
+  it('asks nothing when there is no turn row, and stays silent on failure', async () => {
+    recent.value = []
+    markTurnsSeen('chess')
+    expect(apiPost).not.toHaveBeenCalled()
+    recent.value = [
+      { notification_id: 'n1', notif_type: 'app_turn', title: 'T', link_url: '/apps/chess', object_key: 'app_session:chess/s1' },
+    ]
+    apiPost.mockRejectedValue(new Error('offline'))
+    expect(() => markTurnsSeen('chess')).not.toThrow()
+    await Promise.resolve()
   })
 })
 

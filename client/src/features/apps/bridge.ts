@@ -60,6 +60,12 @@
  * and ``app.send`` only reaches games the server knows for that person
  * (``unknown_session`` otherwise).
  *
+ * "Your turn" (owner decision 2026-10-30): ``app.send`` params may carry
+ * ``turn: true`` — this move hands the other player the turn. Social Home
+ * passes it on (only an exact ``true``) and, while that player's app is
+ * closed, shows them one "Your turn with … in …" row per game. Without it
+ * a message is informational (a chat line, an emote) and raises nothing.
+ *
  * Look (owner decision D14, "apps follow your language and light/dark"):
  * ``app.context`` also carries ``locale``, ``dir``, ``theme`` (``light`` /
  * ``dark``, auto resolved), ``reducedMotion`` and eight colour ``tokens``
@@ -497,11 +503,13 @@ export function mountBridge(
         }
 
         case 'app.send': {
-          const { session_id, target, payload } = params ?? {}
+          const { session_id, target, payload, turn } = params ?? {}
           await api.post(`/api/apps/${encodeURIComponent(appId)}/messages`, {
             session_id,
             target,
             payload,
+            // "Your turn": only an exact ``true`` says so.
+            ...(turn === true ? { turn: true } : {}),
           })
           reply({ id, ok: true, result: { ok: true } })
           break

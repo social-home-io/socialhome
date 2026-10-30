@@ -1,7 +1,7 @@
 """Settings → Notifications — ``/api/me/notification-settings`` (redesign D4,
 D10).
 
-* ``GET  /api/me/notification-settings`` — the seven kinds (choice, default,
+* ``GET  /api/me/notification-settings`` — the eight kinds (choice, default,
   the choices each offers) and "Muted and changed".
 * ``PATCH /api/me/notification-settings`` — ``{kind, choice}``: set one kind.
 * ``POST /api/me/notification-settings/muted-posts`` — ``{object_key}``:
@@ -31,7 +31,7 @@ from .base import BaseView
 
 
 def kinds_json(settings: NotifSettings) -> list[dict]:
-    """The seven kinds, in Settings order: what applies, the default and
+    """The eight kinds, in Settings order: what applies, the default and
     the choices each offers."""
     return [
         {

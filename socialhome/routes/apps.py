@@ -670,7 +670,9 @@ class AppMessagesView(AppPermissionView):
     """``POST /api/apps/{app_id}/messages`` — send an app-layer message to a
     person (``people``; ``federation`` too for another household — checked
     by the service), only in a game this household knows the caller plays
-    with them (``403 APP_SESSION_UNKNOWN`` otherwise, D3)."""
+    with them (``403 APP_SESSION_UNKNOWN`` otherwise, D3). Optional
+    ``turn: true`` — the move hands the other player the turn ("Your turn",
+    one row per game while their app is closed)."""
 
     async def post(self) -> web.Response:
         await self.require_permission(PERMISSION_PEOPLE)
@@ -679,11 +681,15 @@ class AppMessagesView(AppPermissionView):
         session_id = body.get("session_id")
         target = _target(body)
         payload = body.get("payload")
+        turn = body.get("turn", False)
 
         if not isinstance(session_id, str) or not session_id:
             return error_response(
                 400, "UNPROCESSABLE", "session_id must be a non-empty string."
             )
+
+        if not isinstance(turn, bool):
+            return error_response(400, "UNPROCESSABLE", "turn must be a boolean.")
 
         if target is None:
             return error_response(
@@ -718,5 +724,6 @@ class AppMessagesView(AppPermissionView):
             session_id=session_id,
             payload=payload,
             actor_user_id=self.user.user_id,
+            turn=turn,
         )
         return web.json_response({"ok": True})

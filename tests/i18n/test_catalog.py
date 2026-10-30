@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 
+import orjson
+
+import socialhome
 from socialhome.i18n import Catalog
+
+_MESSAGES = Path(socialhome.__file__).parent / "i18n" / "messages"
 
 # ─── Construction ────────────────────────────────────────────────────────
 
@@ -98,12 +105,7 @@ def test_from_directory_skips_invalid_json(tmp_path):
 
 def test_bundled_messages_loadable():
     """Sanity: the bundled en/de/fr files all parse."""
-    from pathlib import Path
-
-    import socialhome
-
-    base = Path(socialhome.__file__).parent / "i18n" / "messages"
-    c = Catalog.from_directory(base)
+    c = Catalog.from_directory(_MESSAGES)
     assert "en" in c.loaded_locales
     assert "de" in c.loaded_locales
     assert "fr" in c.loaded_locales
@@ -120,3 +122,17 @@ def test_bundled_messages_loadable():
         c.gettext("notification.task.assigned", locale="fr", title="X")
         != "notification.task.assigned"
     )
+
+
+def test_an_app_name_is_never_glued_into_a_compound():
+    """A German / Dutch compound ("{app}-Partie") reads right only for a
+    one-word name ("eure Schiffe versenken-Partie" broke): every
+    ``notification.app.*`` sentence keeps the app's name on its own."""
+    glued = [
+        f"{path.stem}:{key}"
+        for path in sorted(_MESSAGES.glob("*.json"))
+        for key, value in orjson.loads(path.read_bytes()).items()
+        if key.startswith("notification.app.")
+        and re.search(r"\{(name|app)\}-\w", value)
+    ]
+    assert glued == []

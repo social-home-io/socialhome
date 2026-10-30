@@ -34,6 +34,7 @@ itself is the persistence layer; push is fire-and-forget on top.
 | AppInstalled         | Members (not the installer, not the age-gated; once a day per app; in app) | "{name} added {app}" |
 | AppRequested         | Admins (a protected asker's guardians) — Needs you, grouped per app | "{name} asked for {app}" |
 | AppUpdateAvailable   | Admins — Needs you, one row per app (re-opens for a newer version) | "{app} has an update" |
+| AppTurn              | The player whose turn it is (not while the app is on screen; Games, in app by default) — one row per game, re-opens on the next turn | "Your turn with {name} in {app}" |
 
 Body is intentionally omitted for privacy-sensitive events (DMs,
 location, UGC content) per §25.3.
@@ -57,6 +58,7 @@ from ..domain.apps import (
     PENDING_SESSION_TTL_SECONDS,
     SESSION_INVITED,
     app_age_allows,
+    app_view_key,
     is_newer_version,
 )
 from ..domain.calendar import RSVPStatus
@@ -71,6 +73,8 @@ from ..domain.events import (
     AppInstalled,
     AppRequestDismissed,
     AppRequested,
+    AppTurn,
+    AppTurnsSeen,
     AppUninstalled,
     AppUpdateAvailable,
     AppUpdated,
@@ -459,6 +463,7 @@ _PUSH_AS_IS: frozenset[str] = frozenset(
         "app_added",
         "app_challenge_declined",
         "app_game_ended",
+        "app_turn",
         "app_request",
         "app_update",
         "bazaar_bid_placed",
@@ -661,6 +666,7 @@ class NotificationService(ProtectionGateMixin):
 
     __slots__ = (
         "_adapter",
+        "_app_catalog",
         "_apps",
         "_author_profiles",
         "_bus",
@@ -732,6 +738,9 @@ class NotificationService(ProtectionGateMixin):
         # thread open in any of their tabs. Without it the service
         # degrades to the pre-fix behaviour (always notify).
         self._ws_manager = None
+        # The app catalog's held copy — optional; names an app in the
+        # reader's language on a "Your turn" row (else its install name).
+        self._app_catalog = None
         # Remote seats per household — optional; without it the
         # "Reviewed isn't available here any more" warning is skipped.
         self._remote_members = None
@@ -799,6 +808,13 @@ class NotificationService(ProtectionGateMixin):
         """Wire the app registry and its waiting game invites
         (:meth:`pending_actions`)."""
         self._apps = app_repo
+
+    def attach_app_catalog(self, catalog) -> None:
+        """Wire the app catalog's held copy (``cached_entry``): a "Your
+        turn" row names the app in the reader's language. Never fetched
+        for a row; without it (or before the first answer) the row uses
+        the installed app's name."""
+        self._app_catalog = catalog
 
     def attach_report_repo(self, report_repo) -> None:
         """Wire the report repo (``on_report_resolved``)."""
@@ -1352,6 +1368,8 @@ class NotificationService(ProtectionGateMixin):
         self._subscribe(AppInstalled, self.on_app_installed)
         self._subscribe(AppChallengeDeclined, self.on_app_challenge_declined)
         self._subscribe(AppGameEnded, self.on_app_game_ended)
+        self._subscribe(AppTurn, self.on_app_turn)
+        self._subscribe(AppTurnsSeen, self.on_app_turns_seen)
         self._subscribe(AppInstalled, self.on_app_request_answered)
         self._subscribe(AppRequested, self.on_app_requested)
         self._subscribe(AppRequestDismissed, self.on_app_request_answered)
@@ -3051,6 +3069,92 @@ class NotificationService(ProtectionGateMixin):
             actor_name=event.from_display,
             push=False,
         )
+
+    async def on_app_turn(self, event: AppTurn) -> None:
+        """A move handed the turn to a local player while their app was
+        closed — "Your turn with {name} in {app}" (owner decision
+        2026-10-30). The app said so itself (``turn: true`` on its send);
+        Social Home reads nothing of the move.
+
+        **One row per game** (``app_session:<app>/<session>``, D7): the
+        next turn in the same game moves that row on — unread again if it
+        was read — and a repeat on a row still unread is silent (D8). Games
+        is In app by default; it pushes only for someone who set Games to
+        Push, and then the push names the person and the app only (D11).
+        A player who has the app on screen right now (the SPA's
+        ``dm.active`` claim, :func:`app_view_key`) gets no row: the move is
+        in front of them. The gate (:meth:`_save_notif`) drops a sender
+        the player blocked or a guardian block separates from them."""
+        if self._ws_manager is not None and (
+            self._ws_manager.is_user_active_in_conversation(
+                event.to_user_id, app_view_key(event.app_id)
+            )
+        ):
+            return
+        recipient = await self._local_user(event.to_user_id)
+        if recipient is None:
+            return
+        locale = self._locale(recipient)
+        app_name = await self._app_name(event.app_id, locale)
+        name = event.from_display or await self._person_name(event.from_user_id, locale)
+        if app_name:
+            title = self._t(
+                "notification.app.turn",
+                locale=locale,
+                fallback="Your turn with {name} in {app}",
+                name=name,
+                app=app_name,
+            )
+        else:
+            title = self._t(
+                "notification.app.turn_generic",
+                locale=locale,
+                fallback="Your turn with {name}",
+                name=name,
+            )
+        await self._save_notif(
+            new_notification(
+                user_id=event.to_user_id,
+                type="app_turn",
+                title=title,
+                link_url=f"/apps/{event.app_id}",
+            ),
+            about=NotificationSubject.of(
+                NotificationObject.APP_SESSION,
+                f"{event.app_id}/{event.session_id}",
+                space_name=app_name,
+            ),
+            actor_user_id=event.from_user_id,
+            actor_name=event.from_display,
+        )
+
+    async def on_app_turns_seen(self, event: AppTurnsSeen) -> None:
+        """The player's app opened and took its held messages: those games
+        are in front of them, so their rows read as read on every device
+        (the next turn re-opens a row)."""
+        await self.mark_read_by_objects(
+            event.user_id,
+            [
+                object_key(NotificationObject.APP_SESSION, f"{event.app_id}/{sid}")
+                for sid in event.session_ids
+            ],
+        )
+
+    async def _app_name(self, app_id: str, locale: str | None) -> str | None:
+        """*app_id*'s name for a reader of *locale*: the catalog's name in
+        their language (the held copy only), else the installed app's;
+        ``None`` for an app this household doesn't have."""
+        app = await self._apps.get(app_id) if self._apps is not None else None
+        if app is None:
+            return None
+        entry = (
+            self._app_catalog.cached_entry(app_id)
+            if self._app_catalog is not None
+            else None
+        )
+        if entry is not None:
+            return entry.name_in(locale)
+        return app.name or None
 
     async def on_app_challenge_received(
         self,

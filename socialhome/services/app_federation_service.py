@@ -84,6 +84,16 @@ bell row. Nothing more goes over the wire: the mailbox only keeps what was
 sent anyway. A message for a session the household doesn't know for that
 person — or from anyone but its other side — is never kept.
 
+"Your turn" (owner decision 2026-10-30): an app may flag a message
+``turn: true`` (:meth:`send_message`) — the move hands the other
+player the turn. The flag rides the sealed message beside
+``to_user`` (an older household ignores it). When such a message is
+kept in the person's mailbox for a game they play (``active``) with
+exactly that sender, in an app turned on here, :class:`AppTurn` is
+published (one "Your turn" row per game); when their app takes its
+held messages, :class:`AppTurnsSeen` names the games it took. Without
+the flag a message is informational and raises nothing.
+
 Uninstall (D9): before the rows go with the app (FK cascade),
 :meth:`sessions_ending` lists every game and invite a person here has
 with someone in another household; :meth:`preview_uninstall` turns them
@@ -151,6 +161,8 @@ from ..domain.events import (
     AppEnabledChanged,
     AppGameEnded,
     AppInstalled,
+    AppTurn,
+    AppTurnsSeen,
 )
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.federation_capabilities import FederationCapability
@@ -835,6 +847,7 @@ class AppFederationService(ProtectionGateMixin):
         session_id: str,
         payload: dict,
         actor_user_id: str,
+        turn: bool = False,
     ) -> None:
         """Send an app-layer message to a specific *person* (local or remote).
 
@@ -858,6 +871,11 @@ class AppFederationService(ProtectionGateMixin):
         both paths, sealed: the JSON ``APP_MESSAGE`` payload or the binary
         frame's envelope metadata (see
         :meth:`FederationService.send_app_message`).
+
+        ``turn`` — the app says this move hands the other player the
+        turn: kept for them while their app is closed, it raises "Your
+        turn" (:class:`AppTurn`). Sealed beside ``to_user``; an older
+        household ignores it.
         """
         app = await self._require_enabled(app_id, target)
         await self._assert_age_allowed(app_id, actor_user_id, app=app)
@@ -897,7 +915,7 @@ class AppFederationService(ProtectionGateMixin):
                 payload=payload,
             )
             if target["user_ref"] in recipients and target["user_ref"] != actor_user_id:
-                await self._hold(
+                held = await self._hold(
                     app_id,
                     target["user_ref"],
                     session_id,
@@ -906,6 +924,15 @@ class AppFederationService(ProtectionGateMixin):
                     kind="message",
                     payload=payload,
                 )
+                if held and turn:
+                    await self._your_turn(
+                        app_id,
+                        session_id,
+                        target["user_ref"],
+                        from_instance=own,
+                        from_user=actor_user_id,
+                        from_user_id=actor_user_id,
+                    )
             return
 
         # Remote — include per-user routing fields only for v_18+ peers.
@@ -925,6 +952,7 @@ class AppFederationService(ProtectionGateMixin):
             payload=payload,
             to_user=to_user,
             from_user=from_user,
+            turn=turn,
         )
 
     # ─── Inbound federation dispatch ─────────────────────────────────────────
@@ -1019,6 +1047,7 @@ class AppFederationService(ProtectionGateMixin):
                 kind == "session" and event.payload.get("verb") == SESSION_VERB_CONTINUE
             ),
             withdraw=(kind == "session" and event.payload.get("verb") == "close"),
+            turn=(kind == "message" and event.payload.get("turn") is True),
         )
 
     async def on_inbound_message(
@@ -1030,6 +1059,7 @@ class AppFederationService(ProtectionGateMixin):
         *,
         to_user: str | None = None,
         from_user: str | None = None,
+        turn: bool = False,
     ) -> None:
         """Handle an inbound binary app frame from ``fed-app-v1``.
 
@@ -1060,6 +1090,7 @@ class AppFederationService(ProtectionGateMixin):
             kind="message",
             to_user=to_user or None,
             from_user=from_user or None,
+            turn=turn,
         )
 
     # ─── Internal helpers ─────────────────────────────────────────────────────
@@ -1383,6 +1414,35 @@ class AppFederationService(ProtectionGateMixin):
             now=datetime.now(UTC).isoformat(),
         )
 
+    async def _your_turn(
+        self,
+        app_id: str,
+        session_id: str,
+        user_id: str,
+        *,
+        from_instance: str,
+        from_user: str | None,
+        from_user_id: str,
+        from_display: str | None = None,
+    ) -> None:
+        """A move flagged ``turn`` was kept for *user_id*: tell them it's
+        their turn — only in a game they play (``active``, never an
+        invite still waiting in Needs you) with exactly that sender.
+        One primary-key read."""
+        if not await self._plays_with(
+            app_id, user_id, session_id, from_instance, from_user
+        ):
+            return
+        await self._emit(
+            AppTurn(
+                app_id=app_id,
+                session_id=session_id,
+                to_user_id=user_id,
+                from_user_id=from_user_id,
+                from_display=from_display,
+            )
+        )
+
     async def _emit_frame(
         self,
         recipient_user_ids: list[str],
@@ -1463,6 +1523,7 @@ class AppFederationService(ProtectionGateMixin):
         continued: bool = False,
         withdraw: bool = False,
         ended: set[tuple[str, str, str]] | None = None,
+        turn: bool = False,
     ) -> None:
         """Route an inbound app message to local users via WebSocket.
 
@@ -1513,6 +1574,11 @@ class AppFederationService(ProtectionGateMixin):
             exactly that sender, they are told the game ended
             (:class:`AppGameEnded`) — once per opponent per message: the
             set holds who was told already.
+        turn:
+            The sending app flagged the message ``turn: true``: once it
+            is kept for a game the person plays with that very sender
+            (and the app is on here), they hear it's their turn
+            (:meth:`_your_turn`).
 
         The mailbox (D11): a move or a close for one person is also kept
         as the latest message of that session for them (:meth:`_hold`) —
@@ -1721,6 +1787,18 @@ class AppFederationService(ProtectionGateMixin):
                                 from_user=from_user,
                                 initiator=initiator,
                                 told=ended,
+                            )
+                        if held and turn and app.enabled:
+                            await self._your_turn(
+                                app_id,
+                                session_id,
+                                recipient.user_id,
+                                from_instance=from_instance,
+                                from_user=from_user,
+                                from_user_id=initiator.user_id,
+                                from_display=await self._remote_open_display(
+                                    from_instance, from_user, remote=initiator
+                                ),
                             )
                         if held and _is_decline(kind, payload):
                             await self._emit(
@@ -2458,8 +2536,19 @@ class AppFederationService(ProtectionGateMixin):
         household a protected person can't message, is dropped instead."""
         app = await self._require_enabled(app_id)
         await self._assert_age_allowed(app_id, actor_user_id, app=app)
+        taken = await self._app_repo.take_held(app_id, actor_user_id)
+        if taken:
+            # Those games are in front of the person now: their "Your
+            # turn" rows read as read.
+            await self._emit(
+                AppTurnsSeen(
+                    app_id=app_id,
+                    user_id=actor_user_id,
+                    session_ids=tuple(h.session_id for h in taken),
+                )
+            )
         out: list[AppPendingSession] = []
-        for held in await self._app_repo.take_held(app_id, actor_user_id):
+        for held in taken:
             sender = await self._invite_sender_id(held)
             if sender is not None and (
                 await self._user_repo.is_blocked(actor_user_id, sender)
