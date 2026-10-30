@@ -149,3 +149,18 @@ describe('glossary: Apps is a name', () => {
     expect(translated).toEqual([])
   })
 })
+
+describe('an app name is never glued into a compound', () => {
+  // A German or Dutch compound ("{space}-Partie") only works for a
+  // one-word name: "eure Schiffe versenken-Partie" broke. Any app name
+  // must read right, so the name stands on its own ("eure Partie {space}").
+  const locales = { en, de, nl, fr, es } as Record<string, Record<string, string>>
+  const appKey = /^(apps\.|notifications\.row\.app_)/
+
+  it.each(Object.keys(locales))('%s', (code) => {
+    const glued = Object.entries(locales[code])
+      .filter(([k, v]) => appKey.test(k) && /\{(name|space|app)\}-\p{L}/u.test(v))
+      .map(([k]) => k)
+    expect(glued).toEqual([])
+  })
+})
