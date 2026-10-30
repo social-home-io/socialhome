@@ -77,6 +77,17 @@ offer was accepted (`bazaar_offer_accepted`) or declined
 (`bazaar_offer_rejected`). Offers that close because another one was
 accepted are rejected silently, on both sides.
 
+**Known limits.** An answer or a withdrawal is sent once. If the
+`BAZAAR_OFFER_UPDATED` accept is lost, the sale still arrives
+(`BAZAAR_LISTING_UPDATED`) but the winner's offer stays `pending` on their
+household. If the buyer withdraws while the seller accepts, each side
+refuses the other's change (the status machine allows one end state), so
+the seller's household shows the sale and the buyer's shows the
+withdrawal. An answer or withdrawal from a seat demoted to follower since
+the offer is still taken (`acts_for(any_role=True)`) when that household
+holds another writer seat. A follower-only household can't send it,
+because the §24.11 writer gate refuses it first.
+
 **Older households (v_73 fallback).** A seller's household below v_73 is
 sent no offer: the offer stays on the buyer's household, as before v_73.
 

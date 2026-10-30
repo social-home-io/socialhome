@@ -3251,7 +3251,16 @@ class SpaceContentInboundHandlers:
                 offer_id,
             )
             return
-        if not await self._acts_for(event, space_id, actor, "bazaar offer", offer_id):
+        # A change to a row the actor already owns: a seat demoted to
+        # follower since keeps answering / withdrawing, as it may locally.
+        if not await self._authorship.acts_for(event, space_id, actor, any_role=True):
+            await self._authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="bazaar offer",
+                row_id=offer_id,
+                user_id=actor,
+            )
             return
         try:
             await self._bazaar_repo.update_offer_status(offer_id, status)

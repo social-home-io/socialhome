@@ -6216,3 +6216,28 @@ async def test_zone_upserted_dropped_by_a_follower_only_household(zone_handlers,
         _event(FederationEventType.SPACE_ZONE_UPSERTED, dict(_ZONE), space_id="sp-1")
     )
     assert zones.upserted == []
+
+
+async def test_an_offer_answer_accepts_a_since_demoted_seat(
+    repos, bazaar_bids_handlers
+):
+    """An answer changes a row the actor already owns: ``any_role``."""
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.offers["o-1"] = _offer("o-1")
+    asked: list[bool] = []
+    auth = repos["auth"]
+    plain = auth.acts_for
+
+    async def _acts_for(event, space_id, user_id, *, any_role=False):
+        asked.append(any_role)
+        return await plain(event, space_id, user_id, any_role=any_role)
+
+    auth.acts_for = _acts_for
+    await handlers._on_bazaar_offer_updated(
+        _event(
+            FederationEventType.BAZAAR_OFFER_UPDATED,
+            {"offer_id": "o-1", "status": "rejected", "space_id": "sp-1"},
+        )
+    )
+    assert asked == [True]
+    assert bazaar.offers["o-1"].status == "rejected"
