@@ -9,6 +9,7 @@ import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.events import BazaarBidWithdrawn
 from socialhome.domain.post import BazaarListing, BazaarMode, BazaarStatus
 from socialhome.domain.space import SpaceMember
 from socialhome.infrastructure.event_bus import EventBus
@@ -415,3 +416,34 @@ async def test_update_listing_fails_closed_without_the_space_service(env):
     with pytest.raises(RuntimeError):
         await env.svc.update_listing(post_id=pid, actor_user_id="u-seller", title="X")
     assert (await env.repo.get_listing(pid)).title == "Item"
+
+
+async def test_withdraw_bid_publishes_the_space(env):
+    pid = await _seed_listing(env, mode=BazaarMode.AUCTION)
+    bid = await env.svc.place_bid(listing_post_id=pid, bidder_user_id="u-b", amount=110)
+    seen: list = []
+
+    async def _on(evt):
+        seen.append(evt)
+
+    env.bus.subscribe(BazaarBidWithdrawn, _on)
+    await env.svc.withdraw_bid(bid_id=bid.id, actor_user_id="u-b")
+    [evt] = seen
+    assert (evt.bid_id, evt.space_id, evt.offer_id) == (bid.id, _DEFAULT_SPACE_ID, "")
+
+
+@pytest.mark.parametrize(
+    ("label", "sql"),
+    [
+        ("past end_time", "UPDATE bazaar_listings SET end_time='2020-01-01T00:00:00Z'"),
+        ("cancelled", "UPDATE bazaar_listings SET status='cancelled'"),
+        ("sold", "UPDATE bazaar_listings SET status='sold'"),
+    ],
+)
+async def test_withdraw_bid_on_a_closed_listing_raises(env, label, sql):
+    pid = await _seed_listing(env, mode=BazaarMode.AUCTION)
+    bid = await env.svc.place_bid(listing_post_id=pid, bidder_user_id="u-b", amount=110)
+    await env.db.enqueue(sql)
+    with pytest.raises(BazaarServiceError):
+        await env.svc.withdraw_bid(bid_id=bid.id, actor_user_id="u-b")
+    assert (await env.repo.get_bid(bid.id)).withdrawn is False, label

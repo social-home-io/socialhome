@@ -901,7 +901,11 @@ async def test_a_withdrawn_offer_tells_the_sellers_household(federation_service)
 
 @pytest.mark.parametrize(
     "overrides",
-    [{"offer_id": ""}, {"space_id": None}, {"origin_instance_id": "inst-peer"}],
+    [
+        {"offer_id": "", "bid_id": ""},  # neither an offer nor a bid
+        {"space_id": None},
+        {"origin_instance_id": "inst-peer"},
+    ],
 )
 async def test_a_withdrawal_that_is_not_ours_to_send(federation_service, overrides):
     bus = _outbound(federation_service)
@@ -936,3 +940,53 @@ async def test_a_mirrored_bid_is_never_echoed(federation_service):
         )
     )
     federation_service.broadcast_to_space_members.assert_not_awaited()
+
+
+# ── A withdrawn auction bid ──────────────────────────────────────────────
+
+
+def _bid_withdrawn(**overrides) -> BazaarBidWithdrawn:
+    return BazaarBidWithdrawn(
+        **{
+            "listing_post_id": "bzr-1",
+            "seller_user_id": "u-seller",
+            "bidder_user_id": "u-buyer",
+            "bid_id": "b-1",
+            "space_id": "sp-1",
+            **overrides,
+        }
+    )
+
+
+async def test_a_withdrawn_bid_reaches_every_member_household(federation_service):
+    seats = _seats("inst-seller")
+    bus = _outbound(federation_service, seats=seats, users=_users("u-buyer"))
+    await bus.publish(_bid_withdrawn())
+    call = federation_service.broadcast_to_space_members.await_args
+    assert call.args[0] == "sp-1"
+    assert call.args[1] == FederationEventType.BAZAAR_OFFER_UPDATED
+    assert call.args[2] == {
+        "bid_id": "b-1",
+        "listing_post_id": "bzr-1",
+        "space_id": "sp-1",
+        "status": "withdrawn",
+    }
+    # Every member household mirrors the bid: no narrowing to one.
+    assert "only_instances" not in call.kwargs
+    assert (
+        call.kwargs["min_proto_version"] == FederationCapability.MIN_FOR_BAZAAR_OFFERS
+    )
+    seats.get_including_tombstones.assert_not_awaited()
+
+
+async def test_only_the_bidders_household_sends_a_bid_withdrawal(federation_service):
+    bus = _outbound(federation_service, users=_users("u-seller"))
+    await bus.publish(_bid_withdrawn())
+    federation_service.broadcast_to_space_members.assert_not_awaited()
+
+
+async def test_a_failed_bid_withdrawal_send_is_logged_not_raised(federation_service):
+    federation_service.broadcast_to_space_members.side_effect = RuntimeError("down")
+    bus = _outbound(federation_service, users=_users("u-buyer"))
+    await bus.publish(_bid_withdrawn())
+    federation_service.broadcast_to_space_members.assert_awaited_once()

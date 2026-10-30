@@ -195,15 +195,17 @@ class BazaarOutbound:
         ``bazaar_listings`` row's ``status`` (+ ``winner_user_id`` /
         ``winning_price`` / ``sold_at`` if applicable) by post_id.
         """
-        if not await self._seller_is_ours(event.seller_user_id):
+        if not await self._is_ours(event.seller_user_id):
             return
         await self._fan_status_update(event.listing_post_id)
 
-    async def _seller_is_ours(self, seller_user_id: str) -> bool:
-        """Only the seller's own household announces a settlement."""
+    async def _is_ours(self, user_id: str) -> bool:
+        """``user_id`` is one of this household's people — only the
+        seller's own household announces a settlement or an answer, only
+        the bidder's a bid's withdrawal."""
         if self._users is None:
             return True
-        return await self._users.get_by_user_id(seller_user_id) is not None
+        return await self._users.get_by_user_id(user_id) is not None
 
     async def _on_listing_cancelled(
         self,
@@ -310,7 +312,7 @@ class BazaarOutbound:
         """
         if event.origin_instance_id or not event.space_id:
             return
-        if not await self._seller_is_ours(event.seller_user_id):
+        if not await self._is_ours(event.seller_user_id):
             return
         if event.offer_id:
             await self._send_offer_update(
@@ -404,7 +406,7 @@ class BazaarOutbound:
         no version bump needed.
         """
         assert event.space_id is not None
-        if not await self._seller_is_ours(event.seller_user_id):
+        if not await self._is_ours(event.seller_user_id):
             return
         payload: dict = {
             "bid_id": event.bid_id,
@@ -438,8 +440,14 @@ class BazaarOutbound:
 
     async def _on_offer_withdrawn(self, event: BazaarBidWithdrawn) -> None:
         """The offerer took an offer back — tell the seller's household,
-        so it can no longer be accepted there."""
-        if event.origin_instance_id or not event.space_id or not event.offer_id:
+        so it can no longer be accepted there. A withdrawn auction BID
+        (``bid_id``, no ``offer_id``) goes to every member household
+        instead (:meth:`_send_bid_withdrawn`)."""
+        if event.origin_instance_id or not event.space_id:
+            return
+        if not event.offer_id:
+            if event.bid_id:
+                await self._send_bid_withdrawn(event)
             return
         await self._send_offer_update(
             space_id=event.space_id,
@@ -448,6 +456,40 @@ class BazaarOutbound:
             listing_post_id=event.listing_post_id,
             status="withdrawn",
         )
+
+    async def _send_bid_withdrawn(self, event: BazaarBidWithdrawn) -> None:
+        """A withdrawn bid: ``BAZAAR_OFFER_UPDATED`` keyed on ``bid_id``,
+        ``status: withdrawn``.
+
+        Every member household mirrors every bid, so every one of them —
+        the seller's included — must drop it from the high bid (it would
+        still set the floor there, and could still win): the same envelope
+        count as the bid itself. Sent from the bidder's household only; a
+        household below v_73 is sent nothing and one at v_73 that does not
+        know the ``bid_id`` form drops it — the bid stays open there, as
+        before. No version bump needed.
+        """
+        assert event.space_id is not None
+        if not await self._is_ours(event.bidder_user_id):
+            return
+        try:
+            await self._federation.broadcast_to_space_members(
+                event.space_id,
+                FederationEventType.BAZAAR_OFFER_UPDATED,
+                {
+                    "bid_id": event.bid_id,
+                    "listing_post_id": event.listing_post_id,
+                    "space_id": event.space_id,
+                    "status": "withdrawn",
+                },
+                min_proto_version=FederationCapability.MIN_FOR_BAZAAR_OFFERS,
+            )
+        except Exception:
+            log.exception(
+                "BAZAAR_OFFER_UPDATED (bid withdrawn) send failed for space=%s bid=%s",
+                event.space_id,
+                event.bid_id,
+            )
 
     async def _send_offer_update(
         self,
