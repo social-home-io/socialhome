@@ -296,6 +296,10 @@ interface ThreadMember {
   is_online: boolean
   is_idle: boolean
   last_seen_at: string | null
+  /** ``false`` when this household never gets the person's presence (a
+   *  seat on a household it never paired with — an Ask-the-seller
+   *  thread). The header then shows no status rather than "Offline". */
+  presence_shared?: boolean
   /** ``null`` for this household's people; the household of a remote
    *  member otherwise (``household_name`` is null when not paired). */
   instance_id?: string | null
@@ -430,7 +434,8 @@ function humanizeAgo(iso: string | null | undefined): string | null {
 }
 
 /** Build the WhatsApp-style status line for the thread header.
- *  • 1:1 DM → peer's online state, or "last seen X" when offline.
+ *  • 1:1 DM → peer's online state, or "last seen X" when offline;
+ *    nothing for a peer whose presence this household never gets.
  *  • Group DM → "<n> online" when ≥ 1 peer is online; otherwise null
  *    (group threads don't surface a per-peer last-seen line — too noisy). */
 function statusLine(members: ThreadMember[]): string | null {
@@ -438,6 +443,8 @@ function statusLine(members: ThreadMember[]): string | null {
   if (peers.length === 0) return null
   if (peers.length === 1) {
     const p = peers[0]
+    // No presence ever reaches us for them: unknown, not "Offline".
+    if (p.presence_shared === false) return null
     if (p.is_online && p.is_idle) return t('dms.status.idle')
     if (p.is_online)              return t('dms.status.online')
     const ago = humanizeAgo(p.last_seen_at)

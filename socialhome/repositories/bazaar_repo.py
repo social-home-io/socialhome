@@ -110,9 +110,12 @@ class AbstractBazaarRepo(Protocol):
         space_id: str,
         winner_user_id: str,
         winning_price: int,
+        sold_at: str | None = None,
     ) -> None: ...
     async def mark_expired(self, post_id: str, *, space_id: str) -> bool: ...
-    async def mark_cancelled(self, post_id: str, *, space_id: str) -> bool: ...
+    async def mark_cancelled(
+        self, post_id: str, *, space_id: str, ended_at: str | None = None
+    ) -> bool: ...
 
     # Bids / offers -------------------------------------------------------
     async def place_bid(self, bid: BazaarBid, *, space_id: str) -> BazaarBid: ...
@@ -441,8 +444,12 @@ class SqliteBazaarRepo:
         space_id: str,
         winner_user_id: str,
         winning_price: int,
+        sold_at: str | None = None,
     ) -> None:
         """Atomic status transition ``active`` → ``sold`` with winner stamp.
+
+        ``sold_at`` (``YYYY-MM-DD HH:MM:SS`` UTC, the column's shape) is the
+        sale time the seller's household announced; ``None`` stamps now.
 
         Scoped to ``space_id``: raises ``ValueError`` when the listing is
         not an active listing of that space.
@@ -454,10 +461,10 @@ class SqliteBazaarRepo:
                 UPDATE bazaar_listings
                    SET status='sold',
                        winner_user_id=?, winning_price=?,
-                       sold_at=datetime('now')
+                       sold_at=COALESCE(?, datetime('now'))
                  WHERE post_id=? AND space_id=? AND status='active'
                 """,
-                (winner_user_id, int(winning_price), post_id, space_id),
+                (winner_user_id, int(winning_price), sold_at, post_id, space_id),
             )
             if cur.rowcount == 0:
                 raise ValueError(
@@ -479,15 +486,29 @@ class SqliteBazaarRepo:
         )
         return n > 0
 
-    async def mark_cancelled(self, post_id: str, *, space_id: str) -> bool:
+    async def mark_cancelled(
+        self, post_id: str, *, space_id: str, ended_at: str | None = None
+    ) -> bool:
         """``active`` → ``cancelled`` for a listing of ``space_id``.
+
+        ``ended_at`` (ISO 8601, UTC) is when it was withdrawn: ``end_time``
+        moves in to it, so the listing reads as ended then — and its
+        Ask-the-seller threads close 14 days later. Never out: an earlier
+        ``end_time`` (or an unreadable stamp) stays.
 
         ``False`` when no active listing of that space matched.
         """
         n = await self._db.enqueue_rowcount(
-            "UPDATE bazaar_listings SET status='cancelled' "
-            "WHERE post_id=? AND space_id=? AND status='active'",
-            (post_id, space_id),
+            """
+            UPDATE bazaar_listings
+               SET status='cancelled',
+                   end_time=CASE
+                       WHEN julianday(?) < julianday(end_time) THEN ?
+                       ELSE end_time
+                   END
+             WHERE post_id=? AND space_id=? AND status='active'
+            """,
+            (ended_at, ended_at, post_id, space_id),
         )
         return n > 0
 

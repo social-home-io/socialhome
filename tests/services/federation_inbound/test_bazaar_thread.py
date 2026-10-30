@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.bazaar_thread import listing_thread_id
+from socialhome.domain.bazaar_thread import LISTING_THREAD_RATE_CAPS, listing_thread_id
 from socialhome.domain.events import DmMessageCreated
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.infrastructure.event_bus import EventBus
@@ -359,3 +359,40 @@ async def test_registered_handler_runs_apply(env):
     _db, _convos, handlers, published = env
     await handlers._on_message(_event())
     assert len(published) == 1
+
+
+async def test_the_receiver_caps_one_buyer_per_listing(env):
+    """The hourly cap on our side too: a household that ignores it is
+    refused here, whatever ``created_at`` it claims."""
+    _db, _convos, handlers, published = env
+    (_hour, per_hour), _ = LISTING_THREAD_RATE_CAPS
+    for _ in range(per_hour):
+        assert await handlers.apply(_event())
+    assert not await handlers.apply(_event())
+    # Backdating the messages doesn't slip past: the receiver counts what
+    # arrived, not only what the stamps claim.
+    long_ago = (datetime.now(UTC) - timedelta(days=3)).isoformat()
+    assert not await handlers.apply(_event(created_at=long_ago))
+    # Another buyer about the same listing has their own allowance — and
+    # so does ben about another listing.
+    assert await handlers.apply(
+        _event(sender=HOUSE_Z, buyer_user_id="u-zoe", author_user_id="u-zoe")
+    )
+    assert len(published) == per_hour + 1
+
+
+async def test_the_receiver_counts_what_it_holds_across_restarts(env):
+    """The stored messages count too — a restart doesn't reset the cap."""
+    db, convos, handlers, _published = env
+    (_hour, per_hour), _ = LISTING_THREAD_RATE_CAPS
+    for _ in range(per_hour):
+        assert await handlers.apply(_event())
+    fresh = BazaarThreadInboundHandlers(
+        bus=EventBus(),
+        bazaar_repo=SqliteBazaarRepo(db),
+        space_repo=SqliteSpaceRepo(db),
+        remote_member_repo=SqliteSpaceRemoteMemberRepo(db),
+        conversation_repo=convos,
+        user_repo=SqliteUserRepo(db),
+    )
+    assert not await fresh.apply(_event())

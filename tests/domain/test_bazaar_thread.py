@@ -10,10 +10,13 @@ import pytest
 from socialhome.domain.bazaar_thread import (
     LISTING_THREAD_GRACE,
     LISTING_THREAD_ID_PREFIX,
+    LISTING_THREAD_RATE_CAPS,
     ListingThreadClosedError,
     ListingThreadNoChangesError,
+    ListingThreadRateLimitedError,
     ListingThreadTextOnlyError,
     ListingThreadUnsupportedError,
+    announced_end,
     is_listing_thread_id,
     listing_ended_at,
     listing_thread_closes_at,
@@ -104,9 +107,37 @@ def test_an_unreadable_end_stamp_fails_closed():
         (ListingThreadUnsupportedError, 409, "SELLER_HOUSEHOLD_TOO_OLD"),
         (ListingThreadTextOnlyError, 422, "LISTING_THREAD_TEXT_ONLY"),
         (ListingThreadNoChangesError, 422, "LISTING_THREAD_NO_CHANGES"),
+        (ListingThreadRateLimitedError, 429, "LISTING_THREAD_RATE_LIMITED"),
     ],
 )
 def test_coded_refusals(error, status, code):
     exc = error()
     assert (exc.status, exc.code) == (status, code)
     assert exc.detail
+
+
+def test_rate_caps_are_an_hourly_and_a_daily_window():
+    windows = dict(LISTING_THREAD_RATE_CAPS)
+    assert windows == {timedelta(hours=1): 30, timedelta(days=1): 100}
+
+
+def test_announced_end_takes_the_senders_stamp():
+    stamp = NOW - timedelta(minutes=5)
+    assert announced_end(stamp.isoformat(), now=NOW) == stamp
+
+
+def test_announced_end_reads_a_naive_sqlite_stamp_as_utc():
+    assert announced_end("2026-10-30 11:00:00", now=NOW) == datetime(
+        2026, 10, 30, 11, tzinfo=UTC
+    )
+
+
+@pytest.mark.parametrize("raw", [None, "", "not a time", 42])
+def test_announced_end_without_a_readable_stamp_is_now(raw):
+    assert announced_end(raw, now=NOW) == NOW
+
+
+def test_announced_end_never_lies_in_the_future():
+    # A future stamp would keep the thread open past its real end.
+    later = (NOW + timedelta(days=30)).isoformat()
+    assert announced_end(later, now=NOW) == NOW

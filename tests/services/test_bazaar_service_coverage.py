@@ -246,6 +246,16 @@ async def test_cancel_listing_happy(env):
     assert listing.status == BazaarStatus.CANCELLED
 
 
+async def test_cancel_listing_records_when_it_ended(env):
+    """Withdrawing pulls ``end_time`` in to now — the moment the listing
+    ended, from which its Ask-the-seller threads close 14 days on."""
+    pid = await _seed_listing(env, mode=BazaarMode.FIXED)
+    before = datetime.now(UTC)
+    await env.svc.cancel_listing(post_id=pid, actor_user_id="u-seller")
+    ended = datetime.fromisoformat((await env.repo.get_listing(pid)).end_time)
+    assert before <= ended <= datetime.now(UTC)
+
+
 # ── place_bid validation ─────────────────────────────────────────────────
 
 

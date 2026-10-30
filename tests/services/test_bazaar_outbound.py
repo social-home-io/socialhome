@@ -326,6 +326,9 @@ async def test_listing_cancelled_broadcasts_status_update(
     # No winner/price for a cancelled listing.
     assert payload["winner_user_id"] is None
     assert payload["winning_price"] is None
+    # When it ended (its end_time, pulled in at the withdrawal): member
+    # households close its Ask-the-seller threads from the same moment.
+    assert payload["end_time"] == cancelled.end_time
 
 
 async def test_status_update_skips_when_listing_gone(

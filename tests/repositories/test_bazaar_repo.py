@@ -758,3 +758,56 @@ async def test_a_rejected_bid_is_not_the_highest(env):
     await env.bazaar_repo.reject_offer(high.id)
     top = await env.bazaar_repo.highest_bid(pid)
     assert top is not None and top.id == low.id
+
+
+async def test_withdrawing_pulls_end_time_in_to_the_withdrawal(env):
+    """A withdrawn listing ended when it was withdrawn: ``end_time`` moves
+    in, so its Ask-the-seller threads close 14 days after that."""
+    await _seed_post(env.db, "pid-w")
+    await env.bazaar_repo.save_listing(
+        _listing("pid-w", end_time="2099-01-01T00:00:00+00:00"),
+        space_id=_DEFAULT_SPACE_ID,
+    )
+    assert await env.bazaar_repo.mark_cancelled(
+        "pid-w", space_id=_DEFAULT_SPACE_ID, ended_at="2026-10-30T12:00:00+00:00"
+    )
+    got = await env.bazaar_repo.get_listing("pid-w")
+    assert got.status is BazaarStatus.CANCELLED
+    assert got.end_time == "2026-10-30T12:00:00+00:00"
+
+
+async def test_withdrawing_never_pushes_end_time_out(env):
+    await _seed_post(env.db, "pid-w2")
+    await env.bazaar_repo.save_listing(
+        _listing("pid-w2", end_time="2026-10-01T00:00:00+00:00"),
+        space_id=_DEFAULT_SPACE_ID,
+    )
+    assert await env.bazaar_repo.mark_cancelled(
+        "pid-w2", space_id=_DEFAULT_SPACE_ID, ended_at="2026-10-30T12:00:00+00:00"
+    )
+    got = await env.bazaar_repo.get_listing("pid-w2")
+    assert got.end_time == "2026-10-01T00:00:00+00:00"
+
+
+async def test_withdrawing_without_a_stamp_keeps_end_time(env):
+    await _seed_post(env.db, "pid-w3")
+    await env.bazaar_repo.save_listing(
+        _listing("pid-w3", end_time="2099-01-01T00:00:00+00:00"),
+        space_id=_DEFAULT_SPACE_ID,
+    )
+    assert await env.bazaar_repo.mark_cancelled("pid-w3", space_id=_DEFAULT_SPACE_ID)
+    got = await env.bazaar_repo.get_listing("pid-w3")
+    assert got.end_time == "2099-01-01T00:00:00+00:00"
+
+
+async def test_mark_sold_takes_the_announced_sale_time(env):
+    await _seed_post(env.db, "pid-s")
+    await env.bazaar_repo.save_listing(_listing("pid-s"), space_id=_DEFAULT_SPACE_ID)
+    await env.bazaar_repo.mark_sold(
+        "pid-s",
+        space_id=_DEFAULT_SPACE_ID,
+        winner_user_id="u2",
+        winning_price=50,
+        sold_at="2026-10-30 11:00:00",
+    )
+    assert (await env.bazaar_repo.get_listing("pid-s")).sold_at == "2026-10-30 11:00:00"

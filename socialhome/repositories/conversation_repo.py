@@ -82,6 +82,9 @@ class AbstractConversationRepo(Protocol):
     async def list_listing_threads(
         self, listing_post_id: str, username: str
     ) -> list[Conversation]: ...
+    async def count_messages_since(
+        self, conversation_id: str, sender_user_id: str, since: datetime
+    ) -> int: ...
 
     # Members -------------------------------------------------------------
     async def add_member(self, member: ConversationMember) -> None: ...
@@ -572,6 +575,23 @@ class SqliteConversationRepo:
             (listing_post_id, username),
         )
         return [c for c in (_row_to_conv(d) for d in rows_to_dicts(rows)) if c]
+
+    async def count_messages_since(
+        self, conversation_id: str, sender_user_id: str, since: datetime
+    ) -> int:
+        """How many messages ``sender_user_id`` wrote in ``conversation_id``
+        at or after ``since`` (the Ask-the-seller rate cap). Compares
+        through ``julianday`` so a tz-aware ISO stamp and a naive SQLite
+        one both read as UTC."""
+        row = await self._db.fetchone(
+            """
+            SELECT COUNT(*) AS n FROM conversation_messages
+             WHERE conversation_id = ? AND sender_user_id = ?
+               AND julianday(created_at) >= julianday(?)
+            """,
+            (conversation_id, sender_user_id, since.isoformat()),
+        )
+        return int(row["n"]) if row is not None else 0
 
     async def touch_last_message(
         self,

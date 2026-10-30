@@ -240,6 +240,10 @@ class BazaarOutbound:
             "winner_user_id": listing.winner_user_id,
             "winning_price": listing.winning_price,
             "sold_at": listing.sold_at,
+            # When it ended (a withdrawal pulls end_time in): receivers
+            # close the listing's Ask-the-seller threads from the same
+            # moment. Additive — an older receiver ignores it.
+            "end_time": listing.end_time,
         }
         try:
             await self._federation.broadcast_to_space_members(
