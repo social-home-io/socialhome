@@ -1350,7 +1350,7 @@ async def test_remote_member_display_name_is_the_newest_named_seat(env):
     assert await env.repo.remote_member_display_name("u-nobody") is None
 
 
-# ── "Ask the seller" threads (v_74, migration 0133) ──────────────────────
+# ── "Ask the seller" threads (v_74, migration 0134) ──────────────────────
 
 
 async def _seed_listing(db, post_id: str = "post-bike") -> None:

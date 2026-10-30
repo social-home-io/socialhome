@@ -1,4 +1,4 @@
-"""Migration 0133 — ``conversations.bazaar_listing_id`` ("Ask the seller").
+"""Migration 0134 — ``conversations.bazaar_listing_id`` ("Ask the seller").
 
 Additive: every existing conversation stays a plain DM / group / system chat
 (``NULL``); a listing thread names its listing and goes with it.
@@ -12,7 +12,7 @@ import pytest
 
 from tests.migration_chain import apply_through
 
-_VERSION = 133
+_VERSION = 134
 
 
 @pytest.fixture

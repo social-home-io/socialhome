@@ -2,7 +2,7 @@
 
 A buyer with a writer seat in a listing's space asks the seller about it
 in a 1:1 text thread tied to that one listing. It is a ``dm`` conversation
-(``conversations.bazaar_listing_id`` set, migration 0133) seating the local
+(``conversations.bazaar_listing_id`` set, migration 0134) seating the local
 person and one remote seat for the other person; every message travels to
 the other person's household only, sealed, over the space's own transport
 (``BAZAAR_THREAD_MESSAGE``).

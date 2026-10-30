@@ -218,7 +218,7 @@ capability **v_74** (`FederationCapability.MIN_FOR_BAZAAR_THREAD`).
 ### Storage
 
 A listing thread is an ordinary `dm` conversation with
-`conversations.bazaar_listing_id` set (migration 0133). It seats the local
+`conversations.bazaar_listing_id` set (migration 0134). It seats the local
 person (`conversation_members`) and the other person as one
 `conversation_remote_members` seat named by `user_id` and the roster's
 display name. Both households derive the same conversation id from the
@@ -324,7 +324,7 @@ no row).
 - `socialhome/services/federation_inbound/bazaar_thread.py` — the handler.
 - `socialhome/repositories/conversation_repo.py` — `open_listing_thread`,
   `list_listing_threads`.
-- Migration `0133_conversation_bazaar_listing.sql`.
+- Migration `0134_conversation_bazaar_listing.sql`.
 
 ### Spec references
 

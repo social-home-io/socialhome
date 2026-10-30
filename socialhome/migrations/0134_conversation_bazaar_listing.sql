@@ -1,4 +1,4 @@
--- 0133 — "Ask the seller": a conversation can be a thread about one bazaar
+-- 0134 — "Ask the seller": a conversation can be a thread about one bazaar
 -- listing (``conversations.bazaar_listing_id``, v_74).
 --
 -- A buyer with a writer seat in a listing's space asks its seller in a

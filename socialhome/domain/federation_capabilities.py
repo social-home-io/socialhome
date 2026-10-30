@@ -1135,7 +1135,7 @@ from __future__ import annotations
 #: * **v_74** (2026-10-30) — **"Ask the seller"**. A buyer with a writer
 #:   seat in a listing's space asks its seller in a private 1:1 text thread
 #:   about that listing (a ``dm`` conversation with
-#:   ``conversations.bazaar_listing_id``, migration 0133). One new event,
+#:   ``conversations.bazaar_listing_id``, migration 0134). One new event,
 #:   :attr:`~socialhome.domain.federation.FederationEventType
 #:   .BAZAAR_THREAD_MESSAGE` (``space_id`` in the clear; ``listing_post_id``,
 #:   ``buyer_user_id``, ``author_user_id``, ``message_id``, ``content``,
