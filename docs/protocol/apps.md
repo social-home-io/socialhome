@@ -344,8 +344,7 @@ thinking") and raises nothing.
 - **The row.** `app_turn`, about `app_session:<app>/<session>` — one row
   per game (D7): the next turn moves it on, re-opening it if it was read; a
   repeat on a row still unread is silent (D8). It names the other player and
-  the app in the reader's language (the catalog's `i18n` name from the copy
-  already held — never a fetch — else the installed name). Kind **Games**
+  the app in the reader's language — see [App names on rows](#app-names-on-rows). Kind **Games**
   (`games`): **In app by default**; it pushes only for someone who set Games
   to Push, and the push says who and where only (D11) — never the move.
 - **Not while you're looking.** The SPA claims `app:<app_id>` with the
@@ -363,6 +362,24 @@ a message that was sent anyway (1 `APP_MESSAGE` / binary frame to 1
 household). Per turn the receiver does 1 extra primary-key read and at most
 one notification row write (one row per game, updated in place). Worst
 realistic case, a 6-person household with 15 games each: ≤ 90 rows, ever.
+
+#### App names on rows
+
+Every app row — invite (`app_challenge`), continue
+(`app_challenge_continue`), waiting (`app_challenge_waiting`), declined
+(`app_challenge_declined`), ended (`app_game_ended`), turn (`app_turn`),
+added (`app_added`), asked (`app_request`) and update (`app_update`) —
+names the app in the reader's language, in its title and as the row's
+place (`params.space_name`, which the SPA builds its sentence from):
+
+1. the catalog's `i18n` name from the copy already held (never a fetch
+   for a row);
+2. else the installed bundle's own `manifest.json` `i18n` name, kept with
+   the install in `installed_apps.manifest_json` — so it holds right after
+   a restart and with the catalog unreachable (installs from before it was
+   kept read it from their bundle once at startup); else the installed
+   name;
+3. else the name the event carries (an app this household doesn't have).
 
 ### Uninstall tells opponents (v_72)
 

@@ -30,6 +30,7 @@ import logging
 import shutil
 import tarfile
 from collections.abc import Awaitable, Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -179,6 +180,45 @@ class AppService(BusPublisherMixin):
     async def get(self, app_id: str) -> InstalledApp | None:
         """Return a single installed app by id, or ``None``."""
         return await self._repo.get(app_id)
+
+    async def heal_manifest_names(self) -> int:
+        """Keep each installed bundle's own ``i18n`` names with its row.
+
+        A row installed before the names were kept has none, so a game row
+        named the app in English until the catalog first answered (after
+        every restart, or never with the catalog unreachable). Once at
+        startup: read each such bundle's ``manifest.json`` (off the event
+        loop) and keep its names — the existing ``manifest_json`` column,
+        no migration. Returns how many rows gained names."""
+        healed = 0
+        for app in await self._repo.list_installed():
+            if app.manifest.names:
+                continue
+            names = await asyncio.to_thread(
+                self._bundle_names_sync, self._apps_path, app.bundle_path
+            )
+            if not names:
+                continue
+            await self._repo.update_installed(
+                replace(app, manifest=replace(app.manifest, names=names))
+            )
+            healed += 1
+        return healed
+
+    @staticmethod
+    def _bundle_names_sync(
+        apps_path: Path, bundle_path: str
+    ) -> tuple[tuple[str, str], ...]:
+        """The ``i18n`` names in an installed bundle's ``manifest.json``;
+        ``()`` for a bundle outside *apps_path*, missing or unreadable."""
+        root = apps_path.resolve()
+        path = (apps_path / bundle_path / "manifest.json").resolve()
+        if not path.is_relative_to(root):
+            return ()
+        try:
+            return AppManifest.from_dict(orjson.loads(path.read_bytes())).names
+        except OSError, ValueError, TypeError, KeyError:
+            return ()
 
     @property
     def catalog_enabled(self) -> bool:

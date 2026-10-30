@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 from collections import Counter
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 
@@ -2418,6 +2419,9 @@ class _BlockingCP:
     async def guardian_block_counterparts(self, user_id: str) -> frozenset[str]:
         return self._pairs.get(user_id, frozenset())
 
+    async def is_guardian_blocked(self, a: str, b: str) -> bool:
+        return b in self._pairs.get(a, frozenset())
+
     async def is_restricted(self, user_id, capability) -> bool:
         return False
 
@@ -4084,15 +4088,47 @@ async def test_event_change_without_a_known_actor_tells_the_whole_cohort(stack):
 # ─── Game invites name the app (any app, not just chess) ────────────────────
 
 
+def _app_row(
+    app_id: str,
+    name: str,
+    *,
+    enabled: bool = True,
+    version: str = "1",
+    names: tuple[tuple[str, str], ...] = (),
+) -> InstalledApp:
+    """An installed app row; *names* are its bundle's own ``i18n`` names."""
+    return InstalledApp(
+        app_id=app_id,
+        name=name,
+        version=version,
+        enabled=enabled,
+        manifest=AppManifest(
+            entry="index.html", icon=None, capabilities=(), names=names
+        ),
+        bundle_path=f"{app_id}/{version}",
+        bundle_sha256="ab" * 32,
+        source_url=f"https://example.com/{app_id}.tgz",
+        installed_by=None,
+        installed_at="2026-10-21T09:00:00+00:00",
+    )
+
+
 class _AppRegistry:
     """The app registry the notification service reads an app's name from."""
 
-    def __init__(self, names: dict[str, str]) -> None:
+    def __init__(
+        self,
+        names: dict[str, str],
+        i18n: dict[str, tuple[tuple[str, str], ...]] | None = None,
+    ) -> None:
         self._names = names
+        self._i18n = i18n or {}
 
     async def get(self, app_id: str):
         name = self._names.get(app_id)
-        return SimpleNamespace(name=name, enabled=True) if name else None
+        if not name:
+            return None
+        return _app_row(app_id, name, names=self._i18n.get(app_id, ()))
 
 
 async def test_a_game_invite_names_the_installed_app(stack):
@@ -4525,6 +4561,187 @@ async def test_your_turn_for_an_unknown_app_reads_generic(stack):
     assert row.title == "Your turn with Bob"
 
 
+async def test_your_turn_from_a_guardian_blocked_sender_makes_no_row(stack):
+    """§CP.F2: a guardian block between the player and the sender keeps
+    the turn row away (the gate every row passes)."""
+    stack.notif_svc.attach_app_repo(_AppRegistry({"chess": "Chess"}))
+    kid = await stack.provision_user("kid")
+    ben = await stack.provision_user("ben")
+    ann = await stack.provision_user("ann")
+    stack.notif_svc.attach_child_protection(_BlockingCP(kid.user_id, ben.user_id))
+    await stack.bus.publish(_turn(kid, ben, from_display="Ben"))
+    assert await _turn_rows(stack, kid) == []
+    # Someone else's turn still reaches the kid.
+    await stack.bus.publish(_turn(kid, ann, session="s2", from_display="Ann"))
+    assert len(await _turn_rows(stack, kid)) == 1
+
+
+def _battleships_catalog() -> _HeldCatalog:
+    return _HeldCatalog(
+        AppCatalogEntry.from_dict(
+            {
+                "app_id": "battleships",
+                "name": "Battleships",
+                "latest_version": "2",
+                "description": "x",
+                "bundle_url": "https://example/b.tgz",
+                "bundle_sha256": "ab" * 32,
+                "i18n": {"de": {"name": "Schiffe versenken"}},
+            }
+        )
+    )
+
+
+async def _every_game_row(stack, to, by) -> None:
+    """One of each app row for *to*, about Battleships, sent by *by*."""
+    app = "battleships"
+    for event in (
+        AppChallengeReceived(
+            app_id=app,
+            session_id="s1",
+            to_user_id=to.user_id,
+            from_display="Ben",
+            from_user_id=by.user_id,
+        ),
+        AppChallengeReceived(
+            app_id=app,
+            session_id="s2",
+            to_user_id=to.user_id,
+            from_display="Ben",
+            from_user_id=by.user_id,
+            continued=True,
+        ),
+        AppChallengeWaiting(
+            app_id=app,
+            session_id="s3",
+            to_user_id=to.user_id,
+            from_display="Ben",
+            from_user_id=by.user_id,
+            app_name="Battleships",
+            reason="app_off",
+        ),
+        AppChallengeDeclined(
+            app_id=app,
+            session_id="s4",
+            to_user_id=to.user_id,
+            from_display="Ben",
+            from_user_id=by.user_id,
+        ),
+        AppGameEnded(
+            app_id=app,
+            session_id="s5",
+            to_user_id=to.user_id,
+            from_display="Ben",
+            from_user_id=by.user_id,
+        ),
+        _turn(to, by, session="s6", app=app, from_display="Ben"),
+        AppRequested(
+            app_id=app,
+            name="Battleships",
+            requested_by=by.user_id,
+            recipients=(to.user_id,),
+        ),
+        AppUpdateAvailable(
+            app_id=app, name="Battleships", version="2", recipients=(to.user_id,)
+        ),
+        AppInstalled(app_id=app, name="Battleships", installed_by=by.user_id),
+    ):
+        await stack.bus.publish(event)
+
+
+_GAME_ROWS = {
+    "app_challenge",
+    "app_challenge_continue",
+    "app_challenge_waiting",
+    "app_challenge_declined",
+    "app_game_ended",
+    "app_turn",
+    "app_request",
+    "app_update",
+    "app_added",
+}
+
+
+async def _game_rows(stack, user):
+    return [
+        n
+        for n in await stack.notif_repo.list(user.user_id, limit=50)
+        if n.type in _GAME_ROWS
+    ]
+
+
+async def test_every_game_row_names_the_app_in_the_readers_language(stack):
+    """Invite, continue, waiting, declined, ended, turn, asked, update and
+    added all name the app as the turn row does: the held catalog's name
+    in the reader's language, in the title and as the row's place (the
+    client builds its sentence from that)."""
+    stack.notif_svc.attach_app_repo(_AppRegistry({"battleships": "Battleships"}))
+    stack.notif_svc.attach_app_catalog(_battleships_catalog())
+    anna = await stack.provision_user("anna", is_admin=True)
+    ben = await stack.provision_user("ben")
+    await stack.user_svc.patch_preferences("anna", {"locale": "de"})
+    await _every_game_row(stack, anna, ben)
+    rows = await _game_rows(stack, anna)
+    assert {n.type for n in rows} == _GAME_ROWS
+    for row in rows:
+        assert row.params is not None
+        assert row.params.space_name == "Schiffe versenken", row.type
+        assert "Schiffe versenken" in row.title, row.type
+        assert "Battleships" not in row.title, row.type
+
+
+async def test_game_rows_use_the_bundles_own_name_before_the_catalog_answers(
+    stack,
+):
+    """Right after a restart the catalog's copy isn't held yet: the
+    installed bundle's own ``i18n`` names the app in the reader's
+    language; someone reading another language gets the installed name."""
+    stack.notif_svc.attach_app_repo(
+        _AppRegistry(
+            {"battleships": "Battleships"},
+            i18n={"battleships": (("de", "Schiffe versenken"),)},
+        )
+    )
+    anna = await stack.provision_user("anna", is_admin=True)
+    ben = await stack.provision_user("ben", is_admin=True)
+    await stack.user_svc.patch_preferences("anna", {"locale": "de-AT"})
+    await _every_game_row(stack, anna, ben)
+    await _every_game_row(stack, ben, anna)
+    for user, name in ((anna, "Schiffe versenken"), (ben, "Battleships")):
+        rows = await _game_rows(stack, user)
+        assert {n.type for n in rows} == _GAME_ROWS
+        for row in rows:
+            assert row.params is not None
+            assert row.params.space_name == name, (user.username, row.type)
+
+
+async def test_a_waiting_invite_for_an_app_not_here_uses_the_catalog_name(stack):
+    """The app isn't installed: the held catalog still names it in the
+    reader's language; without it, the name the event carries."""
+    stack.notif_svc.attach_app_repo(_AppRegistry({}))
+    anna = await stack.provision_user("anna")
+    await stack.user_svc.patch_preferences("anna", {"locale": "de"})
+    waiting = AppChallengeWaiting(
+        app_id="battleships",
+        session_id="s1",
+        to_user_id=anna.user_id,
+        from_display="Ben",
+        from_user_id="r-ben",
+        app_name="Battleships",
+        reason="app_missing",
+    )
+    await stack.bus.publish(waiting)
+    [row] = await _rows_of(stack, anna.user_id, "app_challenge_waiting")
+    assert row.params is not None and row.params.space_name == "Battleships"
+    stack.notif_svc.attach_app_catalog(_battleships_catalog())
+    await stack.bus.publish(replace(waiting, session_id="s2", from_user_id="r-cleo"))
+    rows = await _rows_of(stack, anna.user_id, "app_challenge_waiting")
+    assert {r.params.space_name for r in rows if r.params} == {
+        "Battleships",
+        "Schiffe versenken",
+    }
+
+
 async def test_opening_the_app_reads_its_turn_rows_and_the_next_turn_reopens(stack):
     stack.notif_svc.attach_app_repo(_AppRegistry({"chess": "Chess"}))
     a = await stack.provision_user("anna")
@@ -4659,7 +4876,7 @@ class _OffApp:
         self.enabled = False
 
     async def get(self, app_id: str):
-        return SimpleNamespace(name="Chess", enabled=self.enabled)
+        return _app_row("chess", "Chess", enabled=self.enabled)
 
 
 async def test_an_ask_to_turn_an_app_on_waits_until_it_is_on(stack):
@@ -4817,7 +5034,7 @@ class _InstalledVersions:
         version = self.versions.get(app_id)
         if version is None:
             return None
-        return SimpleNamespace(name=app_id.title(), enabled=True, version=version)
+        return _app_row(app_id, app_id.title(), version=version)
 
 
 async def _update_rows(stack, user_id: str):

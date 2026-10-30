@@ -739,7 +739,7 @@ class NotificationService(ProtectionGateMixin):
         # degrades to the pre-fix behaviour (always notify).
         self._ws_manager = None
         # The app catalog's held copy — optional; names an app in the
-        # reader's language on a "Your turn" row (else its install name).
+        # reader's language on its rows (else the install's own names).
         self._app_catalog = None
         # Remote seats per household — optional; without it the
         # "Reviewed isn't available here any more" warning is skipped.
@@ -810,10 +810,10 @@ class NotificationService(ProtectionGateMixin):
         self._apps = app_repo
 
     def attach_app_catalog(self, catalog) -> None:
-        """Wire the app catalog's held copy (``cached_entry``): a "Your
-        turn" row names the app in the reader's language. Never fetched
-        for a row; without it (or before the first answer) the row uses
-        the installed app's name."""
+        """Wire the app catalog's held copy (``cached_entry``): every app
+        row names the app in the reader's language (:meth:`_app_name`).
+        Never fetched for a row; without it (or before the first answer)
+        the installed bundle's own names are used."""
         self._app_catalog = catalog
 
     def attach_report_repo(self, report_repo) -> None:
@@ -2994,8 +2994,7 @@ class NotificationService(ProtectionGateMixin):
         hears the close itself (live, or from its mailbox on open)."""
         recipient = await self._local_user(event.to_user_id)
         locale = self._locale(recipient)
-        app = await self._apps.get(event.app_id) if self._apps is not None else None
-        app_name = app.name if app is not None and app.name else None
+        app_name = await self._app_name(event.app_id, locale)
         if app_name:
             title = self._t(
                 "notification.app.challenge_declined",
@@ -3036,8 +3035,7 @@ class NotificationService(ProtectionGateMixin):
         Their app hears the close itself (live, or from its mailbox)."""
         recipient = await self._local_user(event.to_user_id)
         locale = self._locale(recipient)
-        app = await self._apps.get(event.app_id) if self._apps is not None else None
-        app_name = app.name if app is not None and app.name else None
+        app_name = await self._app_name(event.app_id, locale)
         if app_name:
             title = self._t(
                 "notification.app.game_ended",
@@ -3140,13 +3138,20 @@ class NotificationService(ProtectionGateMixin):
             ],
         )
 
-    async def _app_name(self, app_id: str, locale: str | None) -> str | None:
-        """*app_id*'s name for a reader of *locale*: the catalog's name in
-        their language (the held copy only), else the installed app's;
-        ``None`` for an app this household doesn't have."""
-        app = await self._apps.get(app_id) if self._apps is not None else None
-        if app is None:
-            return None
+    async def _app_name(
+        self, app_id: str, locale: str | None, fallback: str | None = None
+    ) -> str | None:
+        """*app_id*'s name for a reader of *locale* — every app row
+        (invite, continue, waiting, declined, ended, turn, added, asked,
+        update) names it this way, in the title and as the row's place:
+
+        1. the catalog's name in their language (the held copy only —
+           never a fetch for a row);
+        2. else the installed bundle's own ``i18n`` name in their language
+           (kept with the install, so right after a restart too), else
+           its installed name;
+        3. else *fallback* (the name the event carries, e.g. for an app
+           this household doesn't have); ``None`` when there is none."""
         entry = (
             self._app_catalog.cached_entry(app_id)
             if self._app_catalog is not None
@@ -3154,7 +3159,10 @@ class NotificationService(ProtectionGateMixin):
         )
         if entry is not None:
             return entry.name_in(locale)
-        return app.name or None
+        app = await self._apps.get(app_id) if self._apps is not None else None
+        if app is not None and app.name:
+            return app.name_in(locale)
+        return fallback or None
 
     async def on_app_challenge_received(
         self,
@@ -3175,8 +3183,7 @@ class NotificationService(ProtectionGateMixin):
         """
         recipient = await self._local_user(event.to_user_id)
         locale = self._locale(recipient)
-        app = await self._apps.get(event.app_id) if self._apps is not None else None
-        app_name = app.name if app is not None and app.name else None
+        app_name = await self._app_name(event.app_id, locale)
         if event.continued:
             # An old game picked up again: same Play / Decline, own words.
             title = self._t(
@@ -3246,6 +3253,8 @@ class NotificationService(ProtectionGateMixin):
         is here), its count goes up (``params.total``: "invited you 3
         times") and nothing buzzes again."""
         recipient = await self._local_user(event.to_user_id)
+        locale = self._locale(recipient)
+        app_name = await self._app_name(event.app_id, locale, event.app_name)
         key = object_key(
             NotificationObject.APP_SESSION, f"{event.app_id}/{event.session_id}"
         )
@@ -3278,7 +3287,7 @@ class NotificationService(ProtectionGateMixin):
                     row.params,
                     NotificationActor(event.from_user_id, event.from_display),
                     reopen=row.is_read,
-                    space_name=event.app_name,
+                    space_name=app_name,
                     flags=(event.reason,),
                 ),
             )
@@ -3295,17 +3304,17 @@ class NotificationService(ProtectionGateMixin):
                 type="app_challenge_waiting",
                 title=self._t(
                     "notification.app.challenge",
-                    locale=self._locale(recipient),
+                    locale=locale,
                     fallback="{name} invited you to play {app}",
                     name=event.from_display,
-                    app=event.app_name,
+                    app=app_name or event.app_id,
                 ),
                 link_url=app_about_link(event.app_id),
             ),
             about=NotificationSubject.of(
                 NotificationObject.APP_SESSION,
                 f"{event.app_id}/{event.session_id}",
-                space_name=event.app_name,
+                space_name=app_name,
             ),
             actor_user_id=event.from_user_id,
             actor_name=event.from_display,
@@ -3323,14 +3332,15 @@ class NotificationService(ProtectionGateMixin):
         asker = await self._local_user(event.requested_by)
         if asker is None:
             return
-        about = NotificationSubject.of(
-            NotificationObject.APP, event.app_id, space_name=event.name or None
-        )
         for recipient_id in event.recipients:
             recipient = await self._local_user(recipient_id)
             if recipient is None:
                 continue
             locale = self._locale(recipient)
+            app_name = await self._app_name(event.app_id, locale, event.name)
+            about = NotificationSubject.of(
+                NotificationObject.APP, event.app_id, space_name=app_name
+            )
             await self._save_notif(
                 new_notification(
                     user_id=recipient_id,
@@ -3340,7 +3350,7 @@ class NotificationService(ProtectionGateMixin):
                         locale=locale,
                         fallback="{name} asked for {app}",
                         name=asker.display_name,
-                        app=event.name or event.app_id,
+                        app=app_name or event.app_id,
                     ),
                     link_url=app_about_link(event.app_id),
                 ),
@@ -3393,24 +3403,26 @@ class NotificationService(ProtectionGateMixin):
             await self._resolve(key, types=("app_update",), outcome="done")
             pending = []
         told = {n.user_id for n in pending}
-        about = NotificationSubject.of(
-            NotificationObject.APP, event.app_id, space_name=event.name or None
-        )
         for recipient_id in event.recipients:
             if recipient_id in told:
                 continue
             recipient = await self._local_user(recipient_id)
             if recipient is None or not recipient.is_admin:
                 continue
+            locale = self._locale(recipient)
+            app_name = await self._app_name(event.app_id, locale, event.name)
+            about = NotificationSubject.of(
+                NotificationObject.APP, event.app_id, space_name=app_name
+            )
             await self._save_notif(
                 new_notification(
                     user_id=recipient_id,
                     type="app_update",
                     title=self._t(
                         "notification.app.update_available",
-                        locale=self._locale(recipient),
+                        locale=locale,
                         fallback="{app} has an update",
-                        app=event.name or event.app_id,
+                        app=app_name or event.app_id,
                     ),
                     body=event.version,
                     link_url=app_about_link(event.app_id),
@@ -3466,9 +3478,7 @@ class NotificationService(ProtectionGateMixin):
         blocked = (
             await self._withheld_from(installer_id) if installer_id else frozenset()
         )
-        about = NotificationSubject.of(
-            NotificationObject.APP, event.app_id, space_name=event.name or None
-        )
+        key = object_key(NotificationObject.APP, event.app_id)
         audience = [
             u
             for u in await self._active_users()
@@ -3482,13 +3492,14 @@ class NotificationService(ProtectionGateMixin):
         ]
         since = (datetime.now(UTC) - APP_ADDED_QUIET).isoformat()
         told = await self._notifs.latest_in_groups(
-            [(u.user_id, "app_added", about.object_key) for u in audience],
+            [(u.user_id, "app_added", key) for u in audience],
             since=since,
         )
         for user in audience:
-            if (user.user_id, "app_added", about.object_key) in told:
+            if (user.user_id, "app_added", key) in told:
                 continue
             locale = self._locale(user)
+            app_name = await self._app_name(event.app_id, locale, event.name)
             await self._save_notif(
                 new_notification(
                     user_id=user.user_id,
@@ -3498,11 +3509,13 @@ class NotificationService(ProtectionGateMixin):
                         locale=locale,
                         fallback="{name} added {app}",
                         name=name or self._someone(locale),
-                        app=event.name or event.app_id,
+                        app=app_name or event.app_id,
                     ),
                     link_url=app_link(event.app_id),
                 ),
-                about=about,
+                about=NotificationSubject.of(
+                    NotificationObject.APP, event.app_id, space_name=app_name
+                ),
                 actor_user_id=installer_id,
                 actor_name=name,
                 withheld=blocked,

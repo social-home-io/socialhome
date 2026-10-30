@@ -3426,6 +3426,63 @@ async def test_a_turn_from_someone_blocked_raises_nothing():
 
 
 @pytest.mark.asyncio
+async def test_a_turn_from_someone_guardian_blocked_raises_nothing():
+    """§CP.F2: a guardian set a block between Bob and Carol after their
+    game started — her moves never become a "Your turn" row for him."""
+    svc, _, _, bus = _mailbox_svc()
+    await _played_remote_game(svc)
+    svc.attach_child_protection(  # type: ignore[arg-type]
+        _FakeChildProtection(
+            {frozenset({"u-bob", "ru-carol"})}, homes={"ru-carol": "peer-inst-id"}
+        )
+    )
+    bus.published.clear()
+    await _inbound_turn(svc, {"n": 1})
+    await svc.on_inbound_message(
+        "peer-inst-id",
+        "chess",
+        "sess-1",
+        {"n": 2},
+        to_user="bob",
+        from_user="carol",
+        turn=True,
+    )
+    assert _turns(bus) == []
+
+
+@pytest.mark.asyncio
+async def test_a_turn_for_a_protected_account_under_the_age_gate_raises_nothing():
+    """The app's age gate went up after Bob (protected, 10) started
+    playing: a move flagged ``turn`` makes no row for him."""
+    cp = _FakeCpRepo()
+    cp.add("u-bob", enabled=True, declared_age=10)
+    svc, _, _, bus = _mailbox_svc(cp_repo=cp)
+    await _played_remote_game(svc)
+    svc._app_repo._apps["chess"] = _make_installed_app("chess", min_age=13)  # type: ignore[attr-defined]
+    bus.published.clear()
+    await _inbound_turn(svc, {"n": 1})
+    assert _turns(bus) == []
+    # At the gate's age the same move tells him.
+    cp.add("u-bob", enabled=True, declared_age=13)
+    await _inbound_turn(svc, {"n": 2})
+    assert len(_turns(bus)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_turn_for_a_protected_account_from_a_household_it_cant_message():
+    """§CP.F3: a protected account plays only with people it could already
+    message — a turn from any other household makes no row."""
+    svc, _, _, bus = _mailbox_svc()
+    await _played_remote_game(svc)
+    cp = _FakeChildProtection()
+    cp.no_dm.add(("u-bob", "peer-inst-id"))
+    svc.attach_child_protection(cp)  # type: ignore[arg-type]
+    bus.published.clear()
+    await _inbound_turn(svc, {"n": 1})
+    assert _turns(bus) == []
+
+
+@pytest.mark.asyncio
 async def test_a_binary_frame_carries_the_turn_flag_too():
     svc, _, _, bus = _mailbox_svc()
     await _played_remote_game(svc)

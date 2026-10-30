@@ -680,3 +680,53 @@ def test_app_view_key_names_the_app_a_tab_shows():
     """The SPA's "I have this app open" claim (the ``dm.active`` frame)
     — never a conversation id, which has no ``app:`` prefix."""
     assert app_view_key("chess") == "app:chess"
+
+
+# ── the bundle's own i18n names ───────────────────────────────────────────────
+
+
+def test_manifest_keeps_the_bundles_i18n_names():
+    m = AppManifest.from_dict(
+        {
+            "entry": "index.html",
+            "i18n": {
+                "de": {"name": "Schiffe versenken", "description": "x"},
+                "nl": {"description": "only a description"},
+                "not a locale!": {"name": "skipped"},
+            },
+        }
+    )
+    assert m.names == (("de", "Schiffe versenken"),)
+    # What the household keeps reads back the same (``manifest_json``).
+    assert AppManifest.from_dict(m.to_dict()) == m
+    assert m.to_dict()["i18n"] == {"de": {"name": "Schiffe versenken"}}
+
+
+def test_manifest_without_i18n_keeps_no_names():
+    m = AppManifest.from_dict({"entry": "index.html", "i18n": "nope"})
+    assert m.names == ()
+    assert "i18n" not in m.to_dict()
+
+
+def test_installed_app_name_in_the_readers_language():
+    app = InstalledApp(
+        app_id="battleships",
+        name="Battleships",
+        version="1",
+        enabled=True,
+        manifest=AppManifest(
+            entry="index.html",
+            icon=None,
+            capabilities=(),
+            names=(("de", "Schiffe versenken"),),
+        ),
+        bundle_path="battleships/1",
+        bundle_sha256="ab" * 32,
+        source_url="https://example/b.tgz",
+        installed_by=None,
+        installed_at="2026-10-30T00:00:00+00:00",
+    )
+    assert app.name_in("de") == "Schiffe versenken"
+    assert app.name_in("de-AT") == "Schiffe versenken"
+    assert app.name_in("fr") == "Battleships"
+    assert app.name_in(None) == "Battleships"

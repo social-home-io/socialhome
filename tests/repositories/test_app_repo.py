@@ -73,6 +73,31 @@ async def test_install_and_get_roundtrip(db):
 
 
 @pytest.mark.asyncio
+async def test_the_bundles_i18n_names_are_kept_with_the_install(db):
+    """A game row names the app in the reader's language right after a
+    restart: the bundle's own names live in ``manifest_json`` (install
+    and update), no column of their own."""
+    repo = SqliteAppRepo(db)
+    names = (("de", "Schiffe versenken"), ("nl", "Zeeslag"))
+    app = _app()
+    await repo.install(
+        dataclasses.replace(
+            app, manifest=dataclasses.replace(app.manifest, names=names)
+        )
+    )
+    got = await repo.get("chess")
+    assert got is not None and got.manifest.names == names
+    await repo.update_installed(
+        dataclasses.replace(
+            got, manifest=dataclasses.replace(got.manifest, names=names[:1])
+        )
+    )
+    again = await repo.get("chess")
+    assert again is not None and again.manifest.names == names[:1]
+    assert again.manifest.capabilities == ("storage",)
+
+
+@pytest.mark.asyncio
 async def test_get_missing_returns_none(db):
     repo = SqliteAppRepo(db)
     assert await repo.get("nope") is None
