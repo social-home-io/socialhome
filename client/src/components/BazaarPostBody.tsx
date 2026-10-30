@@ -124,6 +124,18 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
     }
   }, [postId])
 
+  // Re-render the moment the listing's end_time passes: a bid can't be
+  // withdrawn from then on (the server answers 409), though the status
+  // still reads active until the expiry sweep (up to a minute later).
+  const endTime = listing?.end_time
+  useEffect(() => {
+    const ms = endTime ? Date.parse(endTime) - Date.now() : NaN
+    // setTimeout's ceiling is ~24.8 days; the 30 s tick covers longer.
+    if (!(ms > 0) || ms > 2 ** 31 - 1) return
+    const timer = setTimeout(() => setTick(n => n + 1), ms + 50)
+    return () => clearTimeout(timer)
+  }, [endTime])
+
   // Acknowledge tick in a way that satisfies eslint's exhaustive-deps.
   void tick
 
@@ -170,6 +182,8 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
     : null
   const myDeclinedBid = myLatestBid?.rejected ? myLatestBid : null
   const closed = listing.status !== 'active'
+  // Past end_time the high bid has won, even before the sweep marks it.
+  const pastEnd = Date.parse(listing.end_time) <= Date.now()
   const countdown = formatCountdown(listing.end_time)
 
   const placeBid = async (amountCents: number, message?: string) => {
@@ -438,11 +452,13 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
           {t('bazaar.card.your_bid_is')} <strong>
             {formatBazaarAmount(myBid.amount, listing.currency)}
           </strong>
-          <button type="button" class="sh-link sh-link--danger"
-                  disabled={busy}
-                  onClick={() => void withdraw(myBid.id)}>
-            {t('bazaar.withdraw')}
-          </button>
+          {!pastEnd && (
+            <button type="button" class="sh-link sh-link--danger"
+                    disabled={busy}
+                    onClick={() => void withdraw(myBid.id)}>
+              {t('bazaar.withdraw')}
+            </button>
+          )}
         </div>
       )}
 

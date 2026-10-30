@@ -40,7 +40,7 @@ space sync (listings only).
 | Event | Sealed payload | Sent by → to |
 |---|---|---|
 | `BAZAAR_LISTING_CREATED` | the full listing: `post_id`, `space_id`, `seller_user_id`, `mode`, `title`, `description`, `image_urls`, `end_time`, `currency`, `status`, prices, `created_at` | seller's household → every member household |
-| `BAZAAR_LISTING_UPDATED` | `post_id`, `space_id`, `status`, `winner_user_id`, `winning_price`, `sold_at` | seller's household → every member household |
+| `BAZAAR_LISTING_UPDATED` | `post_id`, `space_id`, `status`, `winner_user_id`, `winning_price`, `sold_at`, `end_time` (a withdrawal pulls it in to the moment of withdrawal) | seller's household → every member household |
 | `BAZAAR_BID_PLACED` | `bid_id`, `listing_post_id`, `space_id`, `seller_user_id`, `bidder_user_id`, `amount`, `new_end_time`, `message` | bidder's household → every member household |
 | `BAZAAR_OFFER_ACCEPTED` | `bid_id`, `listing_post_id`, `space_id`, `seller_user_id`, `buyer_user_id`, `price` (an accepted *bid* in "make an offer" mode) | seller's household → every member household |
 | `BAZAAR_OFFER_MADE` | `offer_id`, `listing_post_id`, `space_id`, `offerer_user_id`, `amount`, `message` (≤ 280 characters) | offerer's household → the seller's household |
@@ -245,9 +245,24 @@ capability **v_74** (`FederationCapability.MIN_FOR_BAZAAR_THREAD`).
   no DM. It is text only (no media, no location, no edits, deletes or
   reactions in v1).
 - **Read-only after the listing ends.** Writable while the listing is
-  active and for 14 days after it is sold (from `sold_at`), expired or
-  withdrawn (from its `end_time`; a withdrawn listing keeps no stamp of its
-  own, so its scheduled end stands in). After that both sides read only.
+  active and for 14 days after it ended; after that both sides read only.
+  It ended at `sold_at` when sold, at `end_time` when it expired or was
+  withdrawn — withdrawing pulls `end_time` in to the moment of withdrawal
+  (never out), so no new column is needed. Both stamps reach every member
+  household in `BAZAAR_LISTING_UPDATED` (`sold_at`, `end_time`), and the
+  receiver stores the seller's stamp — never later than its own clock, the
+  arrival time when an older seller's household sends none — so both sides
+  close a thread at the same moment. (The space sync carries both columns
+  as well.) A listing withdrawn before this change keeps its scheduled end.
+- **Rate cap.** One person may write at most **30 messages an hour and
+  100 a day** in one thread (so one buyer about one listing, and the
+  seller to that buyer; `LISTING_THREAD_RATE_CAPS`). The sender's household
+  refuses the 31st before sending (`429 LISTING_THREAD_RATE_LIMITED`, the
+  SPA says so in plain words); the receiver's household refuses it before
+  storing, counting both the messages it holds (survives a restart) and,
+  in memory, what arrived in each window — so a household that backdates
+  `created_at` gains nothing. A backstop against flooding a seller's
+  inbox; the seller can still block.
 
 ### Storage
 
@@ -305,7 +320,8 @@ stream. Worst realistic case, a popular listing in a global space with
 10 000 followers: followers can't ask, so only writers do; 50 askers × 5
 messages = 250 sealed ~1 KB sends to the one seller household (and up to
 250 answers back, each to one household), spread over days. Nothing grows
-with the size of the space.
+with the size of the space. The rate cap bounds the worst case per thread:
+100 messages a day each way, ~100 KB.
 
 ### Who may do what (on receipt)
 
@@ -316,7 +332,7 @@ receiver's own facts:
 |---|---|
 | buyer → seller | The listing is held here and belongs to the envelope's space (held, not dissolved, Bazaar on). The seller is a local user with a seat here. The author is the payload's `buyer_user_id`, holds a live **writer** seat on the **sending** household (strict: no host relay — nobody speaks for another household's people), is not banned and is not the seller. The first accepted question opens the thread here. |
 | seller → buyer | The buyer is a local user with a writer seat here; the author is the listing's seller, seated on the sending household; **the thread already exists here** — a seller never cold-opens a thread. |
-| both | The thread is still writable; the local person is not a protected account; no personal block either way and no guardian block between the two; the message id is fresh (an id held anywhere is dropped — no overwrite, no replay into another conversation); text ≤ 1000 characters; a future `created_at` is clamped to now. |
+| both | The thread is still writable; the local person is not a protected account; no personal block either way and no guardian block between the two; the message id is fresh (an id held anywhere is dropped — no overwrite, no replay into another conversation); text ≤ 1000 characters; a future `created_at` is clamped to now; the author is under the rate cap in this thread. |
 
 Each side judges only its own people: a protected account, a block or a
 guardian block on the other household is enforced there before it sends.

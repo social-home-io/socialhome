@@ -182,3 +182,51 @@ describe('BazaarPostBody — a declined bid', () => {
     expect(container.querySelector('.sh-bazaar-mybid--declined')).toBeNull()
   })
 })
+
+describe('BazaarPostBody — withdrawing a bid', () => {
+  beforeEach(() => apiGet.mockReset())
+
+  const myBid = {
+    id: 'b1', listing_post_id: 'p1', bidder_user_id: 'bidder1', amount: 1500,
+    message: null, accepted: false, rejected: false, rejection_reason: null,
+    withdrawn: false, created_at: 'x',
+  }
+
+  async function asBidder(endTime: string) {
+    const saved = currentUser.value
+    ;(currentUser as { value: unknown }).value = { user_id: 'bidder1', restrictions: [] }
+    try {
+      mockApi(listing({ mode: 'auction', start_price: 1000, end_time: endTime }), [myBid], [])
+      const r = render(<BazaarPostBody postId="p1" />)
+      await waitFor(() =>
+        expect(r.container.querySelector('.sh-bazaar-mybid')).not.toBeNull(),
+      )
+      return r.container
+    } finally {
+      ;(currentUser as { value: unknown }).value = saved
+    }
+  }
+
+  const withdrawBtn = (c: Element) =>
+    Array.from(c.querySelectorAll('.sh-bazaar-mybid button'))
+      .find(b => b.textContent === 'Withdraw') ?? null
+
+  it('offers Withdraw while the listing runs', async () => {
+    const c = await asBidder(future())
+    expect(withdrawBtn(c)).not.toBeNull()
+  })
+
+  it('no Withdraw once end_time passed, before the expiry sweep closes it', async () => {
+    // The server refuses (409) from end_time on; the status still reads
+    // active for up to a minute.
+    const c = await asBidder(new Date(Date.now() - 5_000).toISOString())
+    expect(c.querySelector('.sh-bazaar-mybid')?.textContent).toContain('15.00')
+    expect(withdrawBtn(c)).toBeNull()
+  })
+
+  it('Withdraw goes away at end_time without a reload', async () => {
+    const c = await asBidder(new Date(Date.now() + 400).toISOString())
+    expect(withdrawBtn(c)).not.toBeNull()
+    await waitFor(() => expect(withdrawBtn(c)).toBeNull(), { timeout: 3_000 })
+  })
+})
