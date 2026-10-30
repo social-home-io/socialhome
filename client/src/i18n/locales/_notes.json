@@ -457,6 +457,7 @@
   "gfs_fallback.unavailable_on": "The GFS fallback switch is ticked, but the other household now runs a Social Home too old to take part. {peer} is its name.",
   "capability.gfs_fallback_later": "One of the 'Missing features' a household on an older Social Home version lacks. Short noun phrase, under ~50 characters.",
   "capability.space_chat": "One of the 'Missing features' a household on an older Social Home version lacks. Short noun phrase, under ~50 characters.",
+  "capability.bazaar_offers": "One of the 'Missing features' a household on an older Social Home version lacks: an offer on a Bazaar listing reaches a seller in another household. Short noun phrase, under ~50 characters.",
   "capability.synced_recurring_events": "One of the 'Missing features' a household on an older Social Home version lacks. Short noun phrase, under ~50 characters.",
   "capability.multi_gfs_posting": "One of the 'Missing features' a household on an older Social Home version lacks. Short noun phrase, under ~50 characters. GFS is a product term (connection server), keep it untranslated.",
   "capability.synced_picture_resets": "One of the 'Missing features' a household on an older Social Home version lacks. Short noun phrase, under ~50 characters. A member removed their per-space profile picture and households catching up on the space drop their old copy.",

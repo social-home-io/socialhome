@@ -50,6 +50,10 @@ from ...domain.calendar import (
     material_changes,
 )
 from ...domain.events import (
+    BazaarBidPlaced,
+    BazaarBidWithdrawn,
+    BazaarOfferAccepted,
+    BazaarOfferRejected,
     CalendarEventCreated,
     CalendarEventDeleted,
     CalendarEventUpdated,
@@ -78,9 +82,11 @@ from ...domain.page import MAX_PAGE_TITLE_LENGTH, Page
 from ...domain.page_version import version_hash
 from ...domain.post import (
     BAZAAR_MAX_IMAGES,
+    BAZAAR_OFFER_MESSAGE_MAX_CHARS,
     BazaarBid,
     BazaarListing,
     BazaarMode,
+    BazaarOffer,
     BazaarStatus,
     Post,
     poll_deadline_passed,
@@ -129,6 +135,7 @@ from ...federation.space_scope import (
 )
 from ...infrastructure.event_bus import EventBus
 from ...media.cleanup import unlink_unreferenced
+from ...repositories.bazaar_repo import OfferStateError
 from ...utils.datetime import parse_iso8601_optional
 from ...utils.timezones import coerce_tz
 from ..gallery_service import ALBUMS_PER_SPACE, DESCRIPTION_MAX, NAME_MAX
@@ -434,6 +441,16 @@ class SpaceContentInboundHandlers:
             registry.register(
                 FederationEventType.BAZAAR_OFFER_ACCEPTED,
                 self._on_bazaar_offer_accepted,
+            )
+            # v_73: offers on fixed-price / negotiable listings, between
+            # the seller's and the offerer's household only.
+            registry.register(
+                FederationEventType.BAZAAR_OFFER_MADE,
+                self._on_bazaar_offer_made,
+            )
+            registry.register(
+                FederationEventType.BAZAAR_OFFER_UPDATED,
+                self._on_bazaar_offer_updated,
             )
 
     # ─── Tasks ───────────────────────────────────────────────────────────
@@ -2924,6 +2941,7 @@ class SpaceContentInboundHandlers:
                     winner_user_id=winner,
                     winning_price=int(price_raw),
                 )
+                await self._close_pending_offers(post_id, winner)
             elif status_raw == "expired":
                 await self._bazaar_repo.mark_expired(post_id, space_id=space_id)
             elif status_raw == "cancelled":
@@ -2975,7 +2993,8 @@ class SpaceContentInboundHandlers:
             existing = None
         if existing is not None:
             return
-        if await self._listing_in_space(event, listing_post_id, space_id) is None:
+        listing = await self._listing_in_space(event, listing_post_id, space_id)
+        if listing is None:
             return
         if not await self._acts_for(event, space_id, bidder, "bid", bid_id):
             return
@@ -3007,6 +3026,23 @@ class SpaceContentInboundHandlers:
                 exc,
                 exc_info=True,
             )
+            return
+        # The seller hears of it (on the seller's household — every other
+        # one has nobody to tell) and open listings refresh.
+        # ``origin_instance_id`` keeps the outbound bridge from echoing.
+        refreshed = await self._bazaar_repo.get_listing(listing_post_id)
+        await self._bus.publish(
+            BazaarBidPlaced(
+                listing_post_id=listing_post_id,
+                seller_user_id=listing.seller_user_id,
+                bidder_user_id=bidder,
+                amount=int(amount_raw),
+                new_end_time=(refreshed or listing).end_time,
+                bid_id=bid_id,
+                space_id=space_id,
+                origin_instance_id=event.from_instance,
+            )
+        )
 
     async def _on_bazaar_offer_accepted(
         self,
@@ -3050,6 +3086,238 @@ class SpaceContentInboundHandlers:
                 exc,
                 exc_info=True,
             )
+            return
+        # The buyer hears of it on their own household.
+        await self._bus.publish(
+            BazaarOfferAccepted(
+                listing_post_id=listing.post_id,
+                seller_user_id=listing.seller_user_id,
+                buyer_user_id=bid.bidder_user_id,
+                price=bid.amount,
+                bid_id=bid_id,
+                space_id=space_id,
+                origin_instance_id=event.from_instance,
+            )
+        )
+
+    # ─── Bazaar offers (v_73) ───────────────────────────────────────────
+
+    async def _on_bazaar_offer_made(self, event: FederationEvent) -> None:
+        """An offer on a listing one of OUR people sells, made on the
+        offerer's household (v_73).
+
+        The same rules as an auction bid: the offerer holds a live WRITER
+        seat on the sending household (:meth:`SpaceAuthorship.acts_for` — a
+        follower, a removed member or a name from another household is
+        refused), the listing is active, takes offers and lives in this
+        space. A protected offerer was refused where the offer was made
+        (``BazaarService.make_offer``). Idempotent on ``offer_id``. The
+        seller is told through the usual ``bazaar_bid_placed`` row, which
+        a block or guardian block between the two withholds.
+        """
+        if self._bazaar_repo is None:
+            return
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
+        p = event.payload
+        offer_id = str(p.get("offer_id") or "")
+        listing_post_id = str(p.get("listing_post_id") or "")
+        offerer = str(p.get("offerer_user_id") or "")
+        amount_raw = p.get("amount")
+        message = p.get("message") or None
+        if (
+            not offer_id
+            or not listing_post_id
+            or not offerer
+            or not isinstance(amount_raw, int)
+            or isinstance(amount_raw, bool)
+            or amount_raw <= 0
+            or (
+                message is not None
+                and (
+                    not isinstance(message, str)
+                    or len(message) > BAZAAR_OFFER_MESSAGE_MAX_CHARS
+                )
+            )
+        ):
+            log.debug(
+                "BAZAAR_OFFER_MADE malformed payload from %s", event.from_instance
+            )
+            return
+        if await self._bazaar_repo.get_offer(offer_id) is not None:
+            log_not_applied(
+                event, what="bazaar offer", row_id=offer_id, reason="already here"
+            )
+            return
+        listing = await self._listing_in_space(event, listing_post_id, space_id)
+        if listing is None:
+            return
+        if not await self._authorship.is_local_user(listing.seller_user_id):
+            # Offers go to the seller's household only — another one has
+            # no business keeping it.
+            log.warning(
+                "BAZAAR_OFFER_MADE from %s for listing %s whose seller is not "
+                "ours — dropping",
+                event.from_instance,
+                listing_post_id,
+            )
+            return
+        if (
+            listing.status is not BazaarStatus.ACTIVE
+            or listing.mode is BazaarMode.AUCTION
+            or offerer == listing.seller_user_id
+        ):
+            log_not_applied(
+                event,
+                what="bazaar offer",
+                row_id=offer_id,
+                reason="listing takes no offers",
+            )
+            return
+        if not await self._acts_for(event, space_id, offerer, "bazaar offer", offer_id):
+            return
+        try:
+            await self._bazaar_repo.create_offer(
+                BazaarOffer(
+                    id=offer_id,
+                    listing_post_id=listing_post_id,
+                    offerer_user_id=offerer,
+                    amount=amount_raw,
+                    # Arrival time, never the sender's clock.
+                    created_at=datetime.now(UTC).isoformat(),
+                    message=message,
+                )
+            )
+        except Exception as exc:
+            log.debug(
+                "BAZAAR_OFFER_MADE apply failed offer=%s: %s",
+                offer_id,
+                exc,
+                exc_info=True,
+            )
+            return
+        await self._bus.publish(
+            BazaarBidPlaced(
+                listing_post_id=listing_post_id,
+                seller_user_id=listing.seller_user_id,
+                bidder_user_id=offerer,
+                amount=amount_raw,
+                new_end_time=listing.end_time,
+                space_id=space_id,
+                message=message,
+                offer_id=offer_id,
+                origin_instance_id=event.from_instance,
+            )
+        )
+
+    async def _on_bazaar_offer_updated(self, event: FederationEvent) -> None:
+        """An offer's answer between the seller's and the offerer's
+        household (v_73): ``accepted`` / ``rejected`` only from the
+        seller's own household, for an offer one of OUR people made;
+        ``withdrawn`` only from the offerer's own household, for an offer
+        on a listing one of OUR people sells. The status machine
+        (``pending`` → one terminal state) makes a replay a no-op.
+        """
+        if self._bazaar_repo is None:
+            return
+        space_id = resolve_space_id(event)
+        if not space_id:
+            return
+        p = event.payload
+        offer_id = str(p.get("offer_id") or "")
+        status = str(p.get("status") or "")
+        if not offer_id or status not in ("accepted", "rejected", "withdrawn"):
+            log.debug("BAZAAR_OFFER_UPDATED malformed payload: %s", p)
+            return
+        offer = await self._bazaar_repo.get_offer(offer_id)
+        if offer is None:
+            log_not_applied(
+                event, what="bazaar offer", row_id=offer_id, reason="no such offer"
+            )
+            return
+        listing = await self._listing_in_space(event, offer.listing_post_id, space_id)
+        if listing is None:
+            return
+        if status == "withdrawn":
+            actor, ours = offer.offerer_user_id, listing.seller_user_id
+        else:
+            actor, ours = listing.seller_user_id, offer.offerer_user_id
+        if not await self._authorship.is_local_user(ours):
+            log.warning(
+                "BAZAAR_OFFER_UPDATED from %s for offer %s that none of ours "
+                "made or receives — dropping",
+                event.from_instance,
+                offer_id,
+            )
+            return
+        if not await self._acts_for(event, space_id, actor, "bazaar offer", offer_id):
+            return
+        try:
+            await self._bazaar_repo.update_offer_status(offer_id, status)
+        except (OfferStateError, KeyError) as exc:
+            log_not_applied(
+                event, what="bazaar offer", row_id=offer_id, reason=str(exc)
+            )
+            return
+        if status == "accepted":
+            # As on the seller's household: any other pending offer of
+            # ours on it is over.
+            await self._bazaar_repo.reject_other_pending_offers(
+                listing.post_id, except_offer_id=offer_id
+            )
+            await self._bus.publish(
+                BazaarOfferAccepted(
+                    listing_post_id=listing.post_id,
+                    seller_user_id=listing.seller_user_id,
+                    buyer_user_id=offer.offerer_user_id,
+                    price=offer.amount,
+                    space_id=space_id,
+                    offer_id=offer_id,
+                    origin_instance_id=event.from_instance,
+                )
+            )
+        elif status == "rejected":
+            await self._bus.publish(
+                BazaarOfferRejected(
+                    listing_post_id=listing.post_id,
+                    seller_user_id=listing.seller_user_id,
+                    bidder_user_id=offer.offerer_user_id,
+                    bid_id=offer_id,
+                    space_id=space_id,
+                    offer_id=offer_id,
+                    origin_instance_id=event.from_instance,
+                )
+            )
+        else:
+            await self._bus.publish(
+                BazaarBidWithdrawn(
+                    listing_post_id=listing.post_id,
+                    seller_user_id=listing.seller_user_id,
+                    bidder_user_id=offer.offerer_user_id,
+                    bid_id=offer_id,
+                    space_id=space_id,
+                    offer_id=offer_id,
+                    origin_instance_id=event.from_instance,
+                )
+            )
+
+    async def _close_pending_offers(self, post_id: str, winner_user_id: str) -> None:
+        """The seller's household sold ``post_id``: our people's offers on
+        it are over — rejected, as the seller's household rejected them
+        when it accepted another (``reject_other_pending_offers``; no
+        notice there, none here). The winner's own offer is left for its
+        ``BAZAAR_OFFER_UPDATED`` accept, whichever arrives first."""
+        assert self._bazaar_repo is not None
+        for offer in await self._bazaar_repo.list_offers_for_listing(
+            post_id, status="pending"
+        ):
+            if offer.offerer_user_id == winner_user_id:
+                continue
+            try:
+                await self._bazaar_repo.update_offer_status(offer.id, "rejected")
+            except OfferStateError, KeyError:
+                continue
 
     async def _listing_in_space(
         self,

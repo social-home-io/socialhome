@@ -193,6 +193,14 @@ async def test_the_host_may_not_author_as_one_of_our_local_users(
     assert not await authorship.may_author(_ev(HOST), SPACE, "u-local")
 
 
+async def test_is_local_user_names_only_our_people(authorship) -> None:
+    """The two-household bazaar offer flow (v_73) asks it of the seller /
+    the offerer: only their own household keeps the offer."""
+    assert await authorship.is_local_user("u-local")
+    assert not await authorship.is_local_user("u-author")
+    assert not await authorship.is_local_user("")
+
+
 async def test_nobody_authors_as_a_local_user(authorship) -> None:
     for sender in (AUTHOR_HOUSE, OTHER_HOUSE, ADMIN_HOUSE, HOST):
         assert not await authorship.may_author(_ev(sender), SPACE, "u-local")

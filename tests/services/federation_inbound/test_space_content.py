@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import replace
 from datetime import UTC, date, datetime, time
 from types import SimpleNamespace
 
@@ -10,6 +11,10 @@ import pytest
 
 from socialhome.domain.calendar import CalendarRSVP
 from socialhome.domain.events import (
+    BazaarBidPlaced,
+    BazaarBidWithdrawn,
+    BazaarOfferAccepted,
+    BazaarOfferRejected,
     CalendarEventCreated,
     CalendarEventDeleted,
     CalendarEventUpdated,
@@ -31,7 +36,7 @@ from socialhome.domain.events import (
     TaskUpdated,
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
-from socialhome.domain.post import BazaarStatus
+from socialhome.domain.post import BazaarMode, BazaarOffer, BazaarStatus
 from socialhome.domain.sticky import DEFAULT_STICKY_COLOR, MAX_STICKY_CONTENT_LENGTH
 from socialhome.domain.task import Task, TaskList, TaskPriority, TaskStatus
 from socialhome.domain.timetable import Timetable, TimetableEntry, to_wire_dict
@@ -42,6 +47,7 @@ from socialhome.federation.owner_bound_id import (
     mint_owner_bound_id,
 )
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.bazaar_repo import OfferStateError
 from socialhome.services.federation_inbound import SpaceContentInboundHandlers
 from socialhome.services.federation_inbound.space_content import _deleter
 from socialhome.services.gallery_service import (
@@ -106,6 +112,12 @@ class _AllowAuthorship:
     async def writes_here(self, event, space_id):
         self.calls.append(("writes_here", space_id, ""))
         return self.answer
+
+    #: The people of THIS household (a bazaar offer's seller / offerer).
+    local_users: frozenset[str] = frozenset({"u-seller", "u-buyer"})
+
+    async def is_local_user(self, user_id):
+        return user_id in self.local_users
 
     #: Whether THIS household holds a member seat (False: a follower-only
     #: household, which keeps no member-only data).
@@ -2813,6 +2825,26 @@ class _FakeBazaarRepoWithStatus:
         self.cancelled: list[str] = []
         self.listing_space: dict[str, str] = {}
         self.fail = False
+        #: Pending offers of ours on the listing — ``(id, offerer)``.
+        self.pending_offers: list[tuple[str, str]] = []
+        self.offer_status: list[tuple[str, str]] = []
+
+    async def list_offers_for_listing(self, listing_post_id, *, status=None):
+        return [
+            BazaarOffer(
+                id=oid,
+                listing_post_id=listing_post_id,
+                offerer_user_id=who,
+                amount=1,
+                created_at="",
+            )
+            for oid, who in self.pending_offers
+        ]
+
+    async def update_offer_status(self, offer_id, new_status):
+        if offer_id == "o-gone":
+            raise OfferStateError("already answered")
+        self.offer_status.append((offer_id, new_status))
 
     async def get_listing(self, post_id):
         return SimpleNamespace(
@@ -2876,6 +2908,33 @@ async def test_bazaar_listing_updated_sold_routes_to_mark_sold(
     assert bazaar.sold == [("bzr-1", "u-bidder", 4200)]
     assert bazaar.expired == []
     assert bazaar.cancelled == []
+
+
+async def test_a_sale_closes_our_pending_offers_but_the_winners(
+    bazaar_status_handlers,
+):
+    """v_73: the seller's household rejected every other pending offer when
+    it accepted one; ours follow (no notice, as there). The winner's own
+    offer waits for its ``BAZAAR_OFFER_UPDATED`` accept."""
+    handlers, bazaar = bazaar_status_handlers
+    bazaar.pending_offers = [
+        ("o-win", "u-bidder"),
+        ("o-lose", "u-other"),
+        ("o-gone", "u-other"),
+    ]
+    await handlers._on_bazaar_listing_updated(
+        _event(
+            FederationEventType.BAZAAR_LISTING_UPDATED,
+            {
+                "post_id": "bzr-1",
+                "space_id": "sp-1",
+                "status": "sold",
+                "winner_user_id": "u-bidder",
+                "winning_price": 4200,
+            },
+        ),
+    )
+    assert bazaar.offer_status == [("o-lose", "rejected")]
 
 
 async def test_bazaar_listing_updated_expired_routes_to_mark_expired(
@@ -2967,6 +3026,9 @@ class _FakeBazaarRepoWithBids:
         self.existing_bids: dict[str, object] = {}
         self.listing_space: dict[str, str] = {}
         self.fail_place = False
+        self.offers: dict[str, BazaarOffer] = {}
+        self.offer_status: list[tuple[str, str]] = []
+        self.mode = BazaarMode.NEGOTIABLE
 
     async def get_listing(self, post_id):
         return SimpleNamespace(
@@ -2974,7 +3036,46 @@ class _FakeBazaarRepoWithBids:
             space_id=self.listing_space.get(post_id, "sp-1"),
             seller_user_id="u-seller",
             status=BazaarStatus.ACTIVE,
+            mode=self.mode,
+            end_time="2026-06-08T00:00:00+00:00",
         )
+
+    async def get_offer(self, offer_id):
+        return self.offers.get(offer_id)
+
+    async def create_offer(self, offer):
+        self.offers[offer.id] = offer
+        return offer
+
+    async def update_offer_status(self, offer_id, new_status):
+        offer = self.offers.get(offer_id)
+        if offer is None:
+            raise KeyError(offer_id)
+        if offer.status != "pending":
+            raise OfferStateError(f"{offer.status} -> {new_status}")
+        self.offers[offer_id] = replace(offer, status=new_status)
+        self.offer_status.append((offer_id, new_status))
+        return self.offers[offer_id]
+
+    async def reject_other_pending_offers(self, listing_post_id, *, except_offer_id):
+        n = 0
+        for o in list(self.offers.values()):
+            if (
+                o.listing_post_id == listing_post_id
+                and o.id != except_offer_id
+                and o.status == "pending"
+            ):
+                await self.update_offer_status(o.id, "rejected")
+                n += 1
+        return n
+
+    async def list_offers_for_listing(self, listing_post_id, *, status=None):
+        return [
+            o
+            for o in self.offers.values()
+            if o.listing_post_id == listing_post_id
+            and (status is None or o.status == status)
+        ]
 
     async def get_bid(self, bid_id):
         return self.existing_bids.get(bid_id)
@@ -3114,7 +3215,7 @@ async def test_bazaar_offer_accepted_routes_to_accept_offer(
 ):
     handlers, bazaar = bazaar_bids_handlers
     bazaar.existing_bids["bid-winning"] = SimpleNamespace(
-        id="bid-winning", listing_post_id="bzr-1"
+        id="bid-winning", listing_post_id="bzr-1", bidder_user_id="u-bidder", amount=1
     )
     await handlers._on_bazaar_offer_accepted(
         _event(
@@ -3129,6 +3230,428 @@ async def test_bazaar_offer_accepted_routes_to_accept_offer(
         ),
     )
     assert bazaar.accepted == ["bid-winning"]
+
+
+def _capture(bus, *types) -> list:
+    seen: list = []
+
+    async def _keep(evt):
+        seen.append(evt)
+
+    for t in types:
+        bus.subscribe(t, _keep)
+    return seen
+
+
+async def test_a_remote_bid_is_published_with_its_origin(bus, bazaar_bids_handlers):
+    """The seller's household hears of a remote bid (notification + live
+    refresh); ``origin_instance_id`` keeps the outbound bridge from
+    sending it back."""
+    handlers, _bazaar = bazaar_bids_handlers
+    seen = _capture(bus, BazaarBidPlaced)
+    await handlers._on_bazaar_bid_placed(
+        _event(
+            FederationEventType.BAZAAR_BID_PLACED,
+            {
+                "bid_id": "bid-1",
+                "listing_post_id": "bzr-1",
+                "bidder_user_id": "u-bidder",
+                "amount": 4200,
+                "space_id": "sp-1",
+            },
+        ),
+    )
+    [evt] = seen
+    assert (evt.bid_id, evt.seller_user_id, evt.origin_instance_id) == (
+        "bid-1",
+        "u-seller",
+        "peer-a",
+    )
+    assert evt.offer_id == ""
+
+
+async def test_a_failed_bid_publishes_nothing(bus, bazaar_bids_handlers):
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.fail_place = True
+    seen = _capture(bus, BazaarBidPlaced)
+    await handlers._on_bazaar_bid_placed(
+        _event(
+            FederationEventType.BAZAAR_BID_PLACED,
+            {
+                "bid_id": "bid-1",
+                "listing_post_id": "bzr-1",
+                "bidder_user_id": "u-bidder",
+                "amount": 4200,
+                "space_id": "sp-1",
+            },
+        ),
+    )
+    assert seen == []
+
+
+async def test_a_remote_bid_acceptance_tells_the_buyer(bus, bazaar_bids_handlers):
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.existing_bids["bid-w"] = SimpleNamespace(
+        id="bid-w", listing_post_id="bzr-1", bidder_user_id="u-bidder", amount=4500
+    )
+    seen = _capture(bus, BazaarOfferAccepted)
+    await handlers._on_bazaar_offer_accepted(
+        _event(
+            FederationEventType.BAZAAR_OFFER_ACCEPTED,
+            {"bid_id": "bid-w"},
+            space_id="sp-1",
+        )
+    )
+    [evt] = seen
+    assert (evt.buyer_user_id, evt.price, evt.bid_id, evt.origin_instance_id) == (
+        "u-bidder",
+        4500,
+        "bid-w",
+        "peer-a",
+    )
+
+
+async def test_a_failed_bid_acceptance_publishes_nothing(bus, bazaar_bids_handlers):
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.existing_bids["bid-w"] = SimpleNamespace(
+        id="bid-w", listing_post_id="bzr-1", bidder_user_id="u-bidder", amount=4500
+    )
+
+    async def _boom(bid_id, *, space_id):
+        raise ValueError("not pending")
+
+    bazaar.accept_offer = _boom
+    seen = _capture(bus, BazaarOfferAccepted)
+    await handlers._on_bazaar_offer_accepted(
+        _event(
+            FederationEventType.BAZAAR_OFFER_ACCEPTED,
+            {"bid_id": "bid-w"},
+            space_id="sp-1",
+        )
+    )
+    assert seen == []
+
+
+# ─── Bazaar offers (v_73) ────────────────────────────────────────────
+
+
+def _offer_made(**overrides) -> dict:
+    return {
+        "offer_id": "o-new",
+        "listing_post_id": "bzr-1",
+        "offerer_user_id": "u-remote",
+        "amount": 9000,
+        "message": "hold it for me?",
+        "space_id": "sp-1",
+        "created_at": "2001-01-01T00:00:00+00:00",
+        **overrides,
+    }
+
+
+def _offer(offer_id="o-1", offerer="u-buyer", status="pending", listing="bzr-1"):
+    return BazaarOffer(
+        id=offer_id,
+        listing_post_id=listing,
+        offerer_user_id=offerer,
+        amount=9000,
+        created_at="",
+        status=status,
+    )
+
+
+async def test_an_offer_for_our_sellers_listing_is_stored_and_told(
+    bus, bazaar_bids_handlers
+):
+    handlers, bazaar = bazaar_bids_handlers
+    seen = _capture(bus, BazaarBidPlaced)
+    await handlers._on_bazaar_offer_made(
+        _event(FederationEventType.BAZAAR_OFFER_MADE, _offer_made())
+    )
+    stored = bazaar.offers["o-new"]
+    assert (stored.offerer_user_id, stored.amount, stored.message, stored.status) == (
+        "u-remote",
+        9000,
+        "hold it for me?",
+        "pending",
+    )
+    # Arrival time, never the sender's clock.
+    assert not stored.created_at.startswith("2001")
+    [evt] = seen
+    assert (evt.offer_id, evt.bid_id, evt.seller_user_id, evt.message) == (
+        "o-new",
+        "",
+        "u-seller",
+        "hold it for me?",
+    )
+    assert evt.origin_instance_id == "peer-a"
+
+
+@pytest.mark.parametrize(
+    ("label", "overrides"),
+    [
+        ("no offer id", {"offer_id": ""}),
+        ("no listing", {"listing_post_id": ""}),
+        ("no offerer", {"offerer_user_id": ""}),
+        ("amount missing", {"amount": None}),
+        ("amount zero", {"amount": 0}),
+        ("amount negative", {"amount": -5}),
+        ("amount a string", {"amount": "9000"}),
+        ("amount a bool", {"amount": True}),
+        ("message not text", {"message": 7}),
+        ("message too long", {"message": "x" * 281}),
+        ("the seller offers on their own listing", {"offerer_user_id": "u-seller"}),
+    ],
+)
+async def test_a_malformed_offer_is_dropped(
+    bus, bazaar_bids_handlers, label, overrides
+):
+    handlers, bazaar = bazaar_bids_handlers
+    seen = _capture(bus, BazaarBidPlaced)
+    await handlers._on_bazaar_offer_made(
+        _event(FederationEventType.BAZAAR_OFFER_MADE, _offer_made(**overrides))
+    )
+    assert bazaar.offers == {}, label
+    assert seen == [], label
+
+
+async def test_an_offer_at_the_message_limit_is_kept(bazaar_bids_handlers):
+    handlers, bazaar = bazaar_bids_handlers
+    await handlers._on_bazaar_offer_made(
+        _event(FederationEventType.BAZAAR_OFFER_MADE, _offer_made(message="x" * 280))
+    )
+    assert "o-new" in bazaar.offers
+
+
+async def test_an_offer_on_an_auction_is_dropped(bazaar_bids_handlers):
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.mode = BazaarMode.AUCTION
+    await handlers._on_bazaar_offer_made(
+        _event(FederationEventType.BAZAAR_OFFER_MADE, _offer_made())
+    )
+    assert bazaar.offers == {}
+
+
+async def test_an_offer_whose_seller_is_not_ours_is_dropped(
+    repos, bazaar_bids_handlers, caplog
+):
+    handlers, bazaar = bazaar_bids_handlers
+    repos["auth"].local_users = frozenset()
+    with caplog.at_level("WARNING"):
+        await handlers._on_bazaar_offer_made(
+            _event(FederationEventType.BAZAAR_OFFER_MADE, _offer_made())
+        )
+    assert bazaar.offers == {}
+    assert "seller is not ours" in caplog.text
+
+
+async def test_a_replayed_offer_changes_nothing(bus, bazaar_bids_handlers):
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.offers["o-new"] = _offer("o-new", offerer="u-remote", status="withdrawn")
+    seen = _capture(bus, BazaarBidPlaced)
+    await handlers._on_bazaar_offer_made(
+        _event(FederationEventType.BAZAAR_OFFER_MADE, _offer_made())
+    )
+    assert bazaar.offers["o-new"].status == "withdrawn"
+    assert seen == []
+
+
+async def test_an_offer_into_another_space_is_refused(bazaar_bids_handlers, caplog):
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.listing_space["bzr-1"] = "sp-b"
+    with caplog.at_level("WARNING"):
+        await handlers._on_bazaar_offer_made(
+            _event(
+                FederationEventType.BAZAAR_OFFER_MADE,
+                _offer_made(space_id="sp-a"),
+                space_id="sp-a",
+            )
+        )
+    assert bazaar.offers == {}
+
+
+async def test_a_failed_offer_insert_publishes_nothing(bus, bazaar_bids_handlers):
+    handlers, bazaar = bazaar_bids_handlers
+
+    async def _boom(offer):
+        raise RuntimeError("constraint")
+
+    bazaar.create_offer = _boom
+    seen = _capture(bus, BazaarBidPlaced)
+    await handlers._on_bazaar_offer_made(
+        _event(FederationEventType.BAZAAR_OFFER_MADE, _offer_made())
+    )
+    assert seen == []
+
+
+async def test_an_accepted_offer_closes_our_other_offers(bus, bazaar_bids_handlers):
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.offers["o-1"] = _offer("o-1")
+    bazaar.offers["o-2"] = _offer("o-2", offerer="u-buyer2")
+    bazaar.offers["o-x"] = _offer("o-x", listing="bzr-other")
+    seen = _capture(bus, BazaarOfferAccepted)
+    await handlers._on_bazaar_offer_updated(
+        _event(
+            FederationEventType.BAZAAR_OFFER_UPDATED,
+            {"offer_id": "o-1", "status": "accepted", "space_id": "sp-1"},
+        )
+    )
+    assert {k: o.status for k, o in bazaar.offers.items()} == {
+        "o-1": "accepted",
+        "o-2": "rejected",
+        "o-x": "pending",
+    }
+    [evt] = seen
+    assert (evt.offer_id, evt.buyer_user_id, evt.price, evt.origin_instance_id) == (
+        "o-1",
+        "u-buyer",
+        9000,
+        "peer-a",
+    )
+
+
+async def test_a_rejected_offer_tells_the_offerer(bus, bazaar_bids_handlers):
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.offers["o-1"] = _offer("o-1")
+    seen = _capture(bus, BazaarOfferRejected)
+    await handlers._on_bazaar_offer_updated(
+        _event(
+            FederationEventType.BAZAAR_OFFER_UPDATED,
+            {"offer_id": "o-1", "status": "rejected", "space_id": "sp-1"},
+        )
+    )
+    assert bazaar.offers["o-1"].status == "rejected"
+    [evt] = seen
+    assert (evt.offer_id, evt.bid_id, evt.bidder_user_id) == ("o-1", "o-1", "u-buyer")
+
+
+async def test_a_withdrawn_offer_is_closed_for_our_seller(
+    repos, bus, bazaar_bids_handlers
+):
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.offers["o-1"] = _offer("o-1", offerer="u-remote")
+    seen = _capture(bus, BazaarBidWithdrawn)
+    await handlers._on_bazaar_offer_updated(
+        _event(
+            FederationEventType.BAZAAR_OFFER_UPDATED,
+            {"offer_id": "o-1", "status": "withdrawn", "space_id": "sp-1"},
+        )
+    )
+    assert bazaar.offers["o-1"].status == "withdrawn"
+    assert ("acts_for", "sp-1", "u-remote") in repos["auth"].calls
+    [evt] = seen
+    assert evt.offer_id == "o-1" and evt.origin_instance_id == "peer-a"
+
+
+@pytest.mark.parametrize(
+    ("label", "payload"),
+    [
+        ("no offer id", {"status": "accepted"}),
+        ("an unknown status", {"offer_id": "o-1", "status": "pending"}),
+        ("an unknown offer", {"offer_id": "o-nope", "status": "accepted"}),
+    ],
+)
+async def test_a_malformed_offer_update_is_dropped(
+    bus, bazaar_bids_handlers, label, payload
+):
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.offers["o-1"] = _offer("o-1")
+    seen = _capture(bus, BazaarOfferAccepted)
+    await handlers._on_bazaar_offer_updated(
+        _event(
+            FederationEventType.BAZAAR_OFFER_UPDATED, {"space_id": "sp-1", **payload}
+        )
+    )
+    assert bazaar.offers["o-1"].status == "pending", label
+    assert seen == [], label
+
+
+async def test_an_answer_for_an_offer_none_of_ours_made_is_dropped(
+    repos, bazaar_bids_handlers, caplog
+):
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.offers["o-1"] = _offer("o-1", offerer="u-stranger")
+    with caplog.at_level("WARNING"):
+        await handlers._on_bazaar_offer_updated(
+            _event(
+                FederationEventType.BAZAAR_OFFER_UPDATED,
+                {"offer_id": "o-1", "status": "accepted", "space_id": "sp-1"},
+            )
+        )
+    assert bazaar.offers["o-1"].status == "pending"
+    assert "none of ours" in caplog.text
+
+
+async def test_a_replayed_answer_publishes_nothing(bus, bazaar_bids_handlers):
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.offers["o-1"] = _offer("o-1", status="accepted")
+    seen = _capture(bus, BazaarOfferAccepted)
+    await handlers._on_bazaar_offer_updated(
+        _event(
+            FederationEventType.BAZAAR_OFFER_UPDATED,
+            {"offer_id": "o-1", "status": "accepted", "space_id": "sp-1"},
+        )
+    )
+    assert seen == []
+
+
+async def test_an_answer_into_another_space_is_refused(bazaar_bids_handlers):
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.offers["o-1"] = _offer("o-1")
+    bazaar.listing_space["bzr-1"] = "sp-b"
+    await handlers._on_bazaar_offer_updated(
+        _event(
+            FederationEventType.BAZAAR_OFFER_UPDATED,
+            {"offer_id": "o-1", "status": "accepted", "space_id": "sp-a"},
+            space_id="sp-a",
+        )
+    )
+    assert bazaar.offers["o-1"].status == "pending"
+
+
+async def test_offer_handlers_need_a_space(bazaar_bids_handlers):
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.offers["o-1"] = _offer("o-1")
+    await handlers._on_bazaar_offer_made(
+        _event(FederationEventType.BAZAAR_OFFER_MADE, _offer_made(space_id=""))
+    )
+    await handlers._on_bazaar_offer_updated(
+        _event(
+            FederationEventType.BAZAAR_OFFER_UPDATED,
+            {"offer_id": "o-1", "status": "accepted"},
+        )
+    )
+    assert set(bazaar.offers) == {"o-1"}
+    assert bazaar.offers["o-1"].status == "pending"
+
+
+async def test_offer_handlers_registered_with_a_bazaar_repo(bus, repos):
+    h = SpaceContentInboundHandlers(
+        bus=bus,
+        authorship=repos["auth"],
+        post_repo=repos["post"],
+        page_repo=repos["page"],
+        sticky_repo=repos["sticky"],
+        task_repo=repos["task"],
+        calendar_repo=repos["calendar"],
+        bazaar_repo=_FakeBazaarRepoWithBids(),
+    )
+    fed = _FakeFederationService()
+    h.attach_to(fed)
+    types = {t for t, _ in fed._event_registry.registered}
+    assert FederationEventType.BAZAAR_OFFER_MADE in types
+    assert FederationEventType.BAZAAR_OFFER_UPDATED in types
+
+
+async def test_offer_handlers_without_a_repo_do_nothing(handlers):
+    await handlers._on_bazaar_offer_made(
+        _event(FederationEventType.BAZAAR_OFFER_MADE, _offer_made())
+    )
+    await handlers._on_bazaar_offer_updated(
+        _event(
+            FederationEventType.BAZAAR_OFFER_UPDATED,
+            {"offer_id": "o-1", "status": "accepted", "space_id": "sp-1"},
+        )
+    )
 
 
 async def test_bazaar_bid_handlers_not_registered_without_repo(bus, repos):
@@ -4228,6 +4751,8 @@ class _FullBazaarRepo(_FakeBazaarRepoWithBids):
             space_id=self.listing_space.get(post_id, "sp-1"),
             seller_user_id="u-seller",
             status=self.status,
+            mode=self.mode,
+            end_time="2026-06-08T00:00:00+00:00",
         )
 
     async def save_listing(self, listing, *, space_id):
@@ -4421,6 +4946,32 @@ _BOUND = [
         None,
     ),
     ("_on_bazaar_offer_accepted", {"bid_id": "b-1"}, "acts_for", "u-seller", "bid"),
+    (
+        "_on_bazaar_offer_made",
+        {
+            "offer_id": "o-new",
+            "listing_post_id": "p-1",
+            "offerer_user_id": "u-remote",
+            "amount": 5,
+        },
+        "acts_for",
+        "u-remote",
+        None,
+    ),
+    (
+        "_on_bazaar_offer_updated",
+        {"offer_id": "o-1", "status": "accepted"},
+        "acts_for",
+        "u-seller",
+        "offer",
+    ),
+    (
+        "_on_bazaar_offer_updated",
+        {"offer_id": "o-1", "status": "withdrawn"},
+        "acts_for",
+        "u-buyer",
+        "offer",
+    ),
 ]
 
 
@@ -4439,7 +4990,16 @@ def _seed(repos, seed):
         return
     if seed == "bid":
         repos["bazaar"].existing_bids["b-1"] = SimpleNamespace(
-            id="b-1", listing_post_id="p-1"
+            id="b-1", listing_post_id="p-1", bidder_user_id="u-bidder", amount=1
+        )
+        return
+    if seed == "offer":
+        repos["bazaar"].offers["o-1"] = BazaarOffer(
+            id="o-1",
+            listing_post_id="p-1",
+            offerer_user_id="u-buyer",
+            amount=5,
+            created_at="",
         )
         return
     kind, row_id = seed
@@ -4472,6 +5032,7 @@ def _writes(repos) -> tuple:
         list(repos["bazaar"].cancelled),
         list(repos["bazaar"].placed),
         list(repos["bazaar"].accepted),
+        dict(repos["bazaar"].offers),
     )
 
 

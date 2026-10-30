@@ -104,6 +104,7 @@ CONTENT_TABLES = (
     "space_zones",
     "bazaar_listings",
     "bazaar_bids",
+    "bazaar_offers",
     "space_timetables",
     # The space chats (v_55) — every space's chat, and any other
     # conversation a chat event could otherwise reach.
@@ -532,6 +533,24 @@ ATTACKS: dict[FederationEventType, list[tuple[str, dict]]] = {
         ),
     ],
     FET.BAZAAR_OFFER_ACCEPTED: [("accept B's offer", {"bid_id": "bid-b"})],
+    FET.BAZAAR_OFFER_MADE: [
+        (
+            "offer on B's listing",
+            {
+                "offer_id": "offer-new",
+                "listing_post_id": "post-b-listing",
+                "offerer_user_id": "u-evil",
+                "amount": 999,
+            },
+        ),
+    ],
+    FET.BAZAAR_OFFER_UPDATED: [
+        (
+            f"{status} our offer on B's listing",
+            {"offer_id": "offer-b", "status": status},
+        )
+        for status in ("accepted", "rejected", "withdrawn")
+    ],
 }
 
 #: Space-write event types that carry no row id of their own — the reason
@@ -811,6 +830,14 @@ _SEED = [
             " VALUES('bid-b', 'post-b-listing', 'u-b2', 50)"
         ),
         (),
+    ),
+    # Our local user's pending offer on B's listing (v_73).
+    (
+        (
+            "INSERT INTO bazaar_offers(id, listing_post_id, offerer_user_id, amount)"
+            " VALUES('offer-b', 'post-b-listing', ?, 40)"
+        ),
+        (LOCAL_USER,),
     ),
     # Space chats (v_55): our local user writes in both spaces, so each
     # holds a chat here; B's chat holds a message with a reaction, and a

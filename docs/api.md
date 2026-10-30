@@ -910,7 +910,7 @@ auction/bid_from `bazaar_bids`. State machine:
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/api/bazaar/{id}/offers` | List offers. Seller sees all; others see only their own. |
-| POST | `/api/bazaar/{id}/offers` | Make an offer on a fixed / negotiable listing. Body: `{amount, message?}`. Returns the new offer row. 403 `ACCOUNT_PROTECTED` / `bazaar` for a protected account (as are `POST /api/bazaar` and `POST /api/bazaar/{id}/bids`). |
+| POST | `/api/bazaar/{id}/offers` | Make an offer on a fixed / negotiable listing. Body: `{amount, message?}` — `message` is text of at most 280 characters (422 otherwise). Returns the new offer row. 403 `ACCOUNT_PROTECTED` / `bazaar` for a protected account (as are `POST /api/bazaar` and `POST /api/bazaar/{id}/bids`). When the seller is in another household the offer, note included, is sent to that household only (sealed, v_73 — see [Bazaar](./protocol/bazaar.md)); the seller's accept / reject and the offerer's withdrawal come back the same way. A seller's household below v_73 is sent nothing: the offer stays here. |
 | DELETE | `/api/bazaar/{id}/offers/{offer_id}` | Offerer withdraws a pending offer. |
 | POST | `/api/bazaar/{id}/offers/{offer_id}/accept` | Seller accepts → listing flips to `sold` and every other pending offer on the listing is auto-rejected. |
 | POST | `/api/bazaar/{id}/offers/{offer_id}/reject` | Seller rejects. Body: `{reason?}`. Listing stays active. |

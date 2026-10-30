@@ -1833,6 +1833,7 @@
   "capability.highlight_audience_change": "Een weggehaald highlight blijft weg",
   "capability.remote_report_answers": "Melders in andere huishoudens horen dat hun melding is bekeken",
   "capability.app_games_end_on_uninstall": "Spellen stoppen netjes als het andere huishouden de app verwijdert",
+  "capability.bazaar_offers": "Biedingen bereiken verkopers in andere huishoudens",
   "space.settings_page.moderation.queue_meta": "Berichten om te beoordelen, verzoeken en meldingen",
   "space.settings_page.moderation.days": "dagen",
   "space.settings_page.danger.summary": "Archiveren, overdragen of verwijderen",

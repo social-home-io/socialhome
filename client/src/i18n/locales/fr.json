@@ -1833,6 +1833,7 @@
   "capability.highlight_audience_change": "Un highlight retiré ne revient pas",
   "capability.remote_report_answers": "Les auteurs d'un signalement dans un autre foyer apprennent qu'il a été examiné",
   "capability.app_games_end_on_uninstall": "Les parties se terminent proprement quand l’autre foyer retire l’app",
+  "capability.bazaar_offers": "Les offres parviennent aux vendeurs des autres foyers",
   "space.settings_page.moderation.queue_meta": "Publications à vérifier, demandes et signalements",
   "space.settings_page.moderation.days": "jours",
   "space.settings_page.danger.summary": "Archiver, transférer ou supprimer",

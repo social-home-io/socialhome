@@ -9547,6 +9547,21 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_72 app games end on uninstall gate in place ✓")
+    # v_73 — offers reach sellers in other households: the buyer's household
+    # sends ``BAZAAR_OFFER_MADE`` to the seller's household only, the answer
+    # (``BAZAAR_OFFER_UPDATED``) comes back to the offerer's only, both gated
+    # on ``peer_supports`` (an older seller's household is sent nothing).
+    # The OURS round-trip above proves every inner-ring pair advertises
+    # >= v_73. Pin the threshold so a bump that moves it fails here; the
+    # two-household round trip, the members-only delivery and every refusal
+    # are the security tests in ``tests/protocol/test_bazaar_offer_federation.py``.
+    if int(_Cap.MIN_FOR_BAZAAR_OFFERS) != 73 or _OURS < 73:
+        failures.append(
+            "MIN_FOR_BAZAAR_OFFERS moved off v_73 (or OURS fell below it) "
+            "— an offer would reach households that drop it"
+        )
+    else:
+        print("  v_73 bazaar offers to the seller's household gate in place ✓")
     hla = state.get("highlight_audience")
     if hla:
         stamps = _rows(

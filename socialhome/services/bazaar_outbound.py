@@ -29,10 +29,12 @@ from typing import TYPE_CHECKING
 
 from ..domain.events import (
     BazaarBidPlaced,
+    BazaarBidWithdrawn,
     BazaarListingCancelled,
     BazaarListingCreated,
     BazaarListingExpired,
     BazaarOfferAccepted,
+    BazaarOfferRejected,
 )
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
@@ -42,6 +44,9 @@ from .moderation_release import with_release
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
     from ..repositories.bazaar_repo import AbstractBazaarRepo
+    from ..repositories.space_remote_member_repo import (
+        AbstractSpaceRemoteMemberRepo,
+    )
     from ..repositories.user_repo import AbstractUserRepo
     from .space_media_sync_service import SpaceMediaSyncService
 
@@ -57,6 +62,7 @@ class BazaarOutbound:
         "_federation",
         "_federation_repo",
         "_media_sync",
+        "_seats",
         "_users",
     )
 
@@ -69,8 +75,13 @@ class BazaarOutbound:
         media_sync: SpaceMediaSyncService | None = None,
         federation_repo=None,
         user_repo: AbstractUserRepo | None = None,
+        remote_member_repo: AbstractSpaceRemoteMemberRepo | None = None,
     ) -> None:
         self._bus = bus
+        #: The space's roster mirror: which household seats a remote buyer
+        #: or seller, so an offer (v_73) goes to that one household only.
+        #: ``None``: offers stay on the household they were made on.
+        self._seats = remote_member_repo
         #: Settlement is the seller's household's to announce: every
         #: household runs the expiry sweep over every listing it mirrors, and
         #: receivers accept a listing's status change only from the seller's
@@ -86,6 +97,9 @@ class BazaarOutbound:
         # F7 — cross-household bid + offer flow.
         self._bus.subscribe(BazaarBidPlaced, self._on_bid_placed)
         self._bus.subscribe(BazaarOfferAccepted, self._on_offer_accepted)
+        # v_73 — an offer's answer and its withdrawal.
+        self._bus.subscribe(BazaarOfferRejected, self._on_offer_rejected)
+        self._bus.subscribe(BazaarBidWithdrawn, self._on_offer_withdrawn)
 
     async def _on_listing_created(self, event: BazaarListingCreated) -> None:
         """Fan ``BAZAAR_LISTING_CREATED`` to every member household.
@@ -248,9 +262,15 @@ class BazaarOutbound:
 
         ``space_id`` is required for membership-gated broadcast — it
         ships on the bus event since v_12.
+
+        An OFFER (``offer_id`` set, v_73) is not a bid: it goes to the
+        seller's household only (:meth:`_send_offer_made`).
         """
-        if not event.space_id:
-            return  # household-only listing or pre-v_12 bus payload
+        if event.origin_instance_id or not event.space_id:
+            return  # applied from a peer, or a pre-v_12 bus payload
+        if event.offer_id:
+            await self._send_offer_made(event)
+            return
         payload: dict = {
             "bid_id": event.bid_id,
             "listing_post_id": event.listing_post_id,
@@ -287,9 +307,21 @@ class BazaarOutbound:
         ``mark_sold`` — duplicate writes are idempotent (gated on
         ``status='active'``).
         """
-        if not event.space_id:
+        if event.origin_instance_id or not event.space_id:
             return
         if not await self._seller_is_ours(event.seller_user_id):
+            return
+        if event.offer_id:
+            await self._send_offer_update(
+                space_id=event.space_id,
+                to_user_id=event.buyer_user_id,
+                offer_id=event.offer_id,
+                listing_post_id=event.listing_post_id,
+                status="accepted",
+            )
+            # The sale itself is everybody's: every member household marks
+            # the listing sold (and drops its own pending offers on it).
+            await self._fan_status_update(event.listing_post_id)
             return
         payload: dict = {
             "bid_id": event.bid_id,
@@ -312,4 +344,119 @@ class BazaarOutbound:
                 event.space_id,
                 event.listing_post_id,
                 event.bid_id,
+            )
+        # The listing is sold: every member household marks it so (the
+        # bid row's flag alone left it "active" everywhere but here).
+        await self._fan_status_update(event.listing_post_id)
+
+    # ─── Offers (v_73) — between the seller's and the offerer's household ──
+
+    async def _send_offer_made(self, event: BazaarBidPlaced) -> None:
+        """``BAZAAR_OFFER_MADE`` to the seller's household — one envelope,
+        never the rest of the space: an offer is the seller's and the
+        offerer's business only (``list_offers`` shows it to nobody else)."""
+        assert event.space_id is not None
+        await self._send_to_household_of(
+            event.space_id,
+            event.seller_user_id,
+            FederationEventType.BAZAAR_OFFER_MADE,
+            {
+                "offer_id": event.offer_id,
+                "listing_post_id": event.listing_post_id,
+                "space_id": event.space_id,
+                "offerer_user_id": event.bidder_user_id,
+                "amount": event.amount,
+                "message": event.message,
+            },
+        )
+
+    async def _on_offer_rejected(self, event: BazaarOfferRejected) -> None:
+        """The seller declined an offer — tell the offerer's household."""
+        if event.origin_instance_id or not event.space_id or not event.offer_id:
+            return
+        await self._send_offer_update(
+            space_id=event.space_id,
+            to_user_id=event.bidder_user_id,
+            offer_id=event.offer_id,
+            listing_post_id=event.listing_post_id,
+            status="rejected",
+        )
+
+    async def _on_offer_withdrawn(self, event: BazaarBidWithdrawn) -> None:
+        """The offerer took an offer back — tell the seller's household,
+        so it can no longer be accepted there."""
+        if event.origin_instance_id or not event.space_id or not event.offer_id:
+            return
+        await self._send_offer_update(
+            space_id=event.space_id,
+            to_user_id=event.seller_user_id,
+            offer_id=event.offer_id,
+            listing_post_id=event.listing_post_id,
+            status="withdrawn",
+        )
+
+    async def _send_offer_update(
+        self,
+        *,
+        space_id: str,
+        to_user_id: str,
+        offer_id: str,
+        listing_post_id: str,
+        status: str,
+    ) -> None:
+        """An offer's new status. No reason text: the offerer's household
+        keeps none (``bazaar_offers`` has no column for it)."""
+        payload: dict = {
+            "offer_id": offer_id,
+            "listing_post_id": listing_post_id,
+            "space_id": space_id,
+            "status": status,
+        }
+        await self._send_to_household_of(
+            space_id, to_user_id, FederationEventType.BAZAAR_OFFER_UPDATED, payload
+        )
+
+    async def _send_to_household_of(
+        self,
+        space_id: str,
+        user_id: str,
+        event_type: FederationEventType,
+        payload: dict,
+    ) -> None:
+        """Send to the ONE member household that seats ``user_id`` in the
+        space — direct, or sealed end to end through the mesh / GFS relay
+        like any space event (``broadcast_to_space_members`` narrowed with
+        ``only_instances``, so a household that is no member is never a
+        target). Nothing when ``user_id`` is ours (same household), has no
+        live seat, or its household is below v_73: the offer then stays
+        where it is, as it always did."""
+        if self._seats is None:
+            return
+        if self._users is not None and (
+            await self._users.get_by_user_id(user_id) is not None
+        ):
+            return
+        seat = await self._seats.get_including_tombstones(space_id, "", user_id)
+        if seat is None or seat.tombstoned:
+            log.info(
+                "%s: %s holds no live seat in space %s — not sent",
+                event_type.value,
+                user_id,
+                space_id,
+            )
+            return
+        try:
+            await self._federation.broadcast_to_space_members(
+                space_id,
+                event_type,
+                payload,
+                min_proto_version=FederationCapability.MIN_FOR_BAZAAR_OFFERS,
+                only_instances=frozenset({seat.instance_id}),
+            )
+        except Exception:
+            log.exception(
+                "%s send failed for space=%s offer=%s",
+                event_type.value,
+                space_id,
+                payload.get("offer_id"),
             )

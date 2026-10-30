@@ -124,6 +124,10 @@ class FileMeta:
 
 BAZAAR_MAX_IMAGES: int = 5
 BAZAAR_MAX_DURATION_DAYS: int = 7
+#: The note a buyer adds to an offer (the SPA's ``maxLength``). Enforced
+#: where the offer is made and again by the seller's household when the
+#: offer crosses households (v_73) — the note travels in the sealed payload.
+BAZAAR_OFFER_MESSAGE_MAX_CHARS: int = 280
 
 #: ISO 4217 currencies → number of fractional digits.
 BAZAAR_CURRENCIES: dict[str, int] = {

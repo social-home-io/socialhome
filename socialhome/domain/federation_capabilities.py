@@ -1116,7 +1116,23 @@ from __future__ import annotations
 #:   one we sent) and nothing for games being played — those end there only
 #:   when the 90-day session TTL prunes them. Labelled "Games end cleanly
 #:   when the other household removes the app".
-OURS: int = 72
+#: * **v_73** (2026-10-30) — **offers reach sellers in other households**.
+#:   An offer on a fixed-price / negotiable listing (``bazaar_offers``) used
+#:   to stay on the buyer's household: only auction bids crossed. The
+#:   buyer's household now sends ONE sealed
+#:   :data:`FederationEventType.BAZAAR_OFFER_MADE` to the seller's household
+#:   only (never to the rest of the space — offers are private to the two);
+#:   the seller's accept / reject goes back the same way as
+#:   :data:`FederationEventType.BAZAAR_OFFER_UPDATED`, a withdrawal the other
+#:   way. The receiver takes an offer only for a listing its own person
+#:   sells, from the offerer's own household and a writer seat (a follower
+#:   or a forged offerer is refused), and an answer only from the household
+#:   of the person entitled to give it. An accepted offer's sale reaches
+#:   every member household as the existing ``BAZAAR_LISTING_UPDATED``.
+#:   **Fallback**: a seller's household below v_73 is sent nothing — the
+#:   offer stays on the buyer's household, as before. Labelled "Offers
+#:   reach sellers in other households".
+OURS: int = 73
 
 
 class FederationCapability:
@@ -1684,6 +1700,13 @@ class FederationCapability:
     #: for pending invites only, nothing for games being played.
     MIN_FOR_APP_SESSION_ENDED = 72
 
+    #: v_73 — offers on fixed-price / negotiable listings cross households:
+    #: ``BAZAAR_OFFER_MADE`` to the seller's household,
+    #: ``BAZAAR_OFFER_UPDATED`` (accepted / rejected / withdrawn) between the
+    #: seller's and the offerer's. A household below it is sent nothing —
+    #: the offer stays where it was made.
+    MIN_FOR_BAZAAR_OFFERS = 73
+
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
     # there is no point in the codepath where ``peer_supports(...,
@@ -1957,6 +1980,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_APP_SESSION_ENDED,
         "Games end cleanly when the other household removes the app",
     ),
+    (
+        FederationCapability.MIN_FOR_BAZAAR_OFFERS,
+        "Offers reach sellers in other households",
+    ),
 ]
 
 
@@ -2040,6 +2067,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_HIGHLIGHT_AUDIENCE_CHANGE: "highlight_audience_change",
     FederationCapability.MIN_FOR_REMOTE_REPORT_ANSWER: "remote_report_answers",
     FederationCapability.MIN_FOR_APP_SESSION_ENDED: "app_games_end_on_uninstall",
+    FederationCapability.MIN_FOR_BAZAAR_OFFERS: "bazaar_offers",
 }
 
 
@@ -2102,6 +2130,7 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_BAZAAR_LISTING,
         FederationCapability.MIN_FOR_BAZAAR_STATUS,
         FederationCapability.MIN_FOR_BAZAAR_BIDS,
+        FederationCapability.MIN_FOR_BAZAAR_OFFERS,
         FederationCapability.MIN_FOR_SYNC_HTTPS_FALLBACK,
         FederationCapability.MIN_FOR_MEDIA_CHANNEL,
         FederationCapability.MIN_FOR_REMOTE_ADMIN_ACTION,

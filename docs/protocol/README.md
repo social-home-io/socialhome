@@ -133,6 +133,7 @@ If `SpaceContentEncryption` isn't configured, the outbound path raises
   - [Tasks](./tasks.md) — task lists and tasks.
   - [Calendar](./calendar.md) — calendar events and RSVPs.
   - [Space chat](./space-chat.md) — the chat next to a space's feed: the space's writers only (never a follower-only household), owner-bound message ids, every field but the routing ones encrypted, text + replies + mentions in v1, recent messages by catch-up (`SPACE_CHAT_*`, capability v_55).
+  - [Bazaar](./bazaar.md) — a space's marketplace: listings, bids and sales reach every member household; an offer goes to the seller's household only and its answer back to the offerer's (`BAZAAR_OFFER_MADE` / `BAZAAR_OFFER_UPDATED`, capability v_73).
   - [Space timetables](./timetables.md) — admin-maintained shared timetables (a class *Stundenplan*), one upserted aggregate per timetable, member households only (capability v_39).
   - [Federated moderation](./moderation.md) — "Reviewed" across households: pending items go only to the host and the admin / moderator households, any of them approves, the approved content federates as the submitter's with an approval block (capability v_43). Space reports (`SPACE_REPORT`, `SPACE_REPORT_DECIDED`, v_45) go the same way: host + admin / moderator households only, triaged by the space's content authority, decisions synced; the host tells a reporter on another household it was reviewed (`SPACE_REPORT_ANSWERED`, v_71 — no verdict, no moderator).
 - **Realtime**
