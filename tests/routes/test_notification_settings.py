@@ -48,10 +48,14 @@ async def test_kinds_start_at_their_defaults(client):
         "needs_you",
         "plans",
         "about_you",
+        "games",
         "reactions",
         "activity",
     ]
     assert kinds["reactions"]["choice"] == "in_app"
+    # "Your turn" in a game: a row, no buzz, unless the person picks Push.
+    assert kinds["games"]["choice"] == "in_app"
+    assert kinds["games"]["choices"] == ["push", "in_app", "off"]
     assert kinds["replies"]["choice"] == "push"
     assert kinds["needs_you"]["choices"] == ["push", "in_app"]
     assert kinds["messages"]["choices"] == ["push", "off"]

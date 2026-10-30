@@ -314,6 +314,10 @@ describe('notices about you, in the viewer\'s language', () => {
       ['app_update', none({ space_name: 'Chess' }), null, 'Chess has an update', 'Update für Chess'],
       ['app_challenge_declined', params(['Ben · Familie Okafor'], { space_name: 'Chess' }), null, 'Ben · Familie Okafor declined your Chess game', 'Ben · Familie Okafor hat deine Einladung zu Chess abgelehnt'],
       ['app_game_ended', params(['Ben · Familie Okafor'], { space_name: 'Chess' }), null, 'Ben · Familie Okafor no longer has Chess, so your game ended', 'Ben · Familie Okafor hat Chess nicht mehr, darum ist euer Spiel zu Ende'],
+      // "Your turn" (2026-10-30): any app name reads right, several words too.
+      ['app_turn', params(['Ben · Familie Okafor'], { space_name: 'Chess' }), null, 'Your turn with Ben · Familie Okafor in Chess', 'Du bist bei Chess mit Ben · Familie Okafor dran'],
+      ['app_turn', params(['Ben'], { space_name: 'Schiffe versenken' }), null, 'Your turn with Ben in Schiffe versenken', 'Du bist bei Schiffe versenken mit Ben dran'],
+      ['app_challenge_continue', params(['Ben'], { space_name: 'Schiffe versenken' }), null, 'Ben wants to continue your Schiffe versenken game', 'Ben möchte eure Partie Schiffe versenken fortsetzen'],
     ]
     for (const [type, p, sid, en_] of cases) expect(say(type, p, sid), type).toBe(en_)
     await setLocale('de')

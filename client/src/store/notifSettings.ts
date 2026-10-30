@@ -2,7 +2,7 @@
  * Notification settings (redesign D4, D9, D10) — ``/api/me/notification-
  * settings``.
  *
- * - **Kinds:** seven, each Push / In app / Off (:data:`KINDS`). The server
+ * - **Kinds:** eight, each Push / In app / Off (:data:`KINDS`). The server
  *   honours them on every row.
  * - **Muted and changed:** every space, chat and post set off its default
  *   or muted — the way back from every mute made elsewhere.
@@ -21,9 +21,9 @@ export type { NotifKind }
 
 export type NotifChoice = 'push' | 'in_app' | 'off'
 
-/** The seven kinds, in Settings order. */
+/** The eight kinds, in Settings order. */
 export const KINDS: readonly NotifKind[] = [
-  'messages', 'replies', 'needs_you', 'plans', 'about_you', 'reactions', 'activity',
+  'messages', 'replies', 'needs_you', 'plans', 'about_you', 'games', 'reactions', 'activity',
 ]
 
 export interface KindSetting {

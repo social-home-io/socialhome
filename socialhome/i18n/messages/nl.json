@@ -291,6 +291,8 @@
   "notification.app.challenge_declined_generic": "{name} heeft je speluitnodiging afgewezen",
   "notification.app.game_ended": "{name} heeft {app} niet meer, dus jullie spel is afgelopen",
   "notification.app.game_ended_generic": "{name} heeft de app niet meer, dus jullie spel is afgelopen",
+  "notification.app.turn": "Jij bent aan de beurt bij {app} met {name}",
+  "notification.app.turn_generic": "Jij bent aan de beurt met {name}",
   "notification.app.requested": "{name} wil graag {app}",
   "notification.app.update_available": "Update voor {app}",
   "notification.post.moderated": "Je bericht is gemodereerd",

@@ -320,6 +320,50 @@ All fields above are inside the **encrypted payload** (AES-256-GCM).  Only
 `event_type`, `from_instance`, `to_instance`, `msg_id`, and `timestamp` are
 in plaintext for routing.
 
+### Your turn
+
+**"Your turn with Ben in Chess" — one row per game while the app is closed
+(owner decision 2026-10-30).** Social Home can't read a move, so the **app**
+says when a message hands the other player the turn: `app.send` with
+`turn: true` (bridge RPC param; `POST /api/apps/{id}/messages` body field).
+Without the flag a message is informational (a chat line, an emote, "Ben is
+thinking") and raises nothing.
+
+- **On the wire.** `turn: true` rides beside `to_user` — in the sealed
+  `APP_MESSAGE` payload, or the binary frame's sealed envelope metadata —
+  and is left out otherwise. Only an exact `true` counts. A household that
+  predates it reads both with `.get` and ignores it: it keeps and delivers
+  the move as before, just without the row. No capability bump.
+- **When a row is made.** After every receiver rule (signature, addressee,
+  named initiator, personal and guardian blocks, protected account, age
+  gate), only when the [mailbox](#mailbox) **kept** the message for a game
+  the person **plays** (`active`, not an invite still waiting in Needs you)
+  with exactly that sender, and the app is turned on here: `AppTurn` is
+  published. Same-household games follow the same rule. A message too large
+  to hold, for an unknown session or from anyone else raises nothing.
+- **The row.** `app_turn`, about `app_session:<app>/<session>` — one row
+  per game (D7): the next turn moves it on, re-opening it if it was read; a
+  repeat on a row still unread is silent (D8). It names the other player and
+  the app in the reader's language (the catalog's `i18n` name from the copy
+  already held — never a fetch — else the installed name). Kind **Games**
+  (`games`): **In app by default**; it pushes only for someone who set Games
+  to Push, and the push says who and where only (D11) — never the move.
+- **Not while you're looking.** The SPA claims `app:<app_id>` with the
+  `dm.active` WebSocket frame while the app is on screen (released when the
+  tab goes to the background or the app closes); no row is made then — the
+  move is in front of the person.
+- **Read again.** Opening the app reads its rows: when it takes its held
+  messages (`POST …/held`) the games it took are published as
+  `AppTurnsSeen` and their rows read as read on every device; a tab coming
+  back to the front reads the turn rows it heard of meanwhile
+  (`POST /api/notifications/read-objects`). The next turn re-opens the row.
+
+**Traffic math: zero new federation messages.** The flag is ~13 bytes inside
+a message that was sent anyway (1 `APP_MESSAGE` / binary frame to 1
+household). Per turn the receiver does 1 extra primary-key read and at most
+one notification row write (one row per game, updated in place). Worst
+realistic case, a 6-person household with 15 games each: ≤ 90 rows, ever.
+
 ### Uninstall tells opponents (v_72)
 
 **Uninstall says what will be lost and tells opponents (D9).** Uninstalling an
@@ -419,8 +463,9 @@ sequenceDiagram
 | `data` | yes | Application-defined dict.  The receiver's `_deliver` passes it as-is to the `app.message` WS frame's `payload` field. |
 | `to_user` | no (v_18+) | Per-user routing: the target user's username on the receiving household.  When present and non-empty, the receiver delivers the frame only to that user.  Omitted for sub-v_18 peers. |
 | `from_user` | no (v_18+) | The sender's username on the initiating household.  Omitted for sub-v_18 peers. |
+| `turn` | no | `true` when the sending app said this move hands the other player the turn ([Your turn](#your-turn)); left out otherwise. Only an exact `true` counts; an older receiver ignores it. |
 
-On the binary path `to_user` / `from_user` sit in the sealed envelope metadata beside the two binary-only fields below.
+On the binary path `to_user` / `from_user` / `turn` sit in the sealed envelope metadata beside the two binary-only fields below.
 
 | Field | Required | Notes |
 |---|---|---|

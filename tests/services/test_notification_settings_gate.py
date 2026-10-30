@@ -1,6 +1,6 @@
 """What a person chose decides what they hear (notifications redesign).
 
-* **D4** — every type falls under one of seven kinds; each kind's choice
+* **D4** — every type falls under one of eight kinds; each kind's choice
   (theirs, else its default) decides: Push → a row and a push, In app → a
   row and no push, Off → nothing. Needs you can't be Off; Messages and
   calls Off stops chat pushes.

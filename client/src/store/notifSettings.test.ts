@@ -37,9 +37,9 @@ beforeEach(() => {
 })
 
 describe('notifSettings store', () => {
-  it('seven kinds in Settings order', () => {
+  it('eight kinds in Settings order', () => {
     expect(KINDS).toEqual([
-      'messages', 'replies', 'needs_you', 'plans', 'about_you', 'reactions', 'activity',
+      'messages', 'replies', 'needs_you', 'plans', 'about_you', 'games', 'reactions', 'activity',
     ])
   })
 

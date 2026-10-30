@@ -291,6 +291,8 @@
   "notification.app.challenge_declined_generic": "{name} rechazó tu invitación a jugar",
   "notification.app.game_ended": "{name} ya no tiene {app}, así que tu partida terminó",
   "notification.app.game_ended_generic": "{name} ya no tiene la app, así que tu partida terminó",
+  "notification.app.turn": "Te toca con {name} en {app}",
+  "notification.app.turn_generic": "Te toca con {name}",
   "notification.app.requested": "{name} pidió {app}",
   "notification.app.update_available": "Actualización de {app}",
   "notification.post.moderated": "Tu publicación fue moderada",

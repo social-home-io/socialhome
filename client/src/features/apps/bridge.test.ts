@@ -399,6 +399,30 @@ describe('mountBridge', () => {
     )
   })
 
+  it('app.send with turn: true says the move hands over the turn; anything else is left out', async () => {
+    const handler = captureMessageHandler()
+    const send = async (id: number, turn: unknown) => {
+      mockApiPost.mockResolvedValueOnce({ ok: true })
+      await handler({
+        source: iframe.contentWindow as unknown as Window,
+        data: {
+          id,
+          method: 'app.send',
+          params: { session_id: 's1', target: 'user-alice', payload: { shot: 'B4' }, turn },
+        },
+      })
+    }
+    await send(41, true)
+    await send(42, 'yes')
+    await send(43, undefined)
+    const bodies = mockApiPost.mock.calls
+      .filter(c => c[0] === `/api/apps/${APP_ID}/messages`)
+      .map(c => c[1] as Record<string, unknown>)
+    expect(bodies[0]).toEqual({ session_id: 's1', target: 'user-alice', payload: { shot: 'B4' }, turn: true })
+    expect('turn' in bodies[1]).toBe(false)
+    expect('turn' in bodies[2]).toBe(false)
+  })
+
   // ── peers.list ──────────────────────────────────────────────────────────
 
   it('peers.list: GETs /peers and returns peers array', async () => {

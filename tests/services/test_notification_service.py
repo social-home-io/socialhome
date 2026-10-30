@@ -30,6 +30,8 @@ from socialhome.domain.events import (
     AppInstalled,
     AppRequestDismissed,
     AppRequested,
+    AppTurn,
+    AppTurnsSeen,
     AppUninstalled,
     AppUpdateAvailable,
     AppUpdated,
@@ -50,6 +52,7 @@ from socialhome.domain.events import (
     HighlightFrameReactionChanged,
     MomentCreated,
     MomentReactionChanged,
+    NotificationReadChanged,
     PostEdited,
     RemoteSpaceInviteDeclined,
     SpaceAdminSeedsRetiredAfterRestore,
@@ -4377,6 +4380,175 @@ async def test_an_ended_game_for_an_unknown_app_reads_generic(stack):
         if n.type == "app_game_ended"
     ]
     assert row.title == "Bob no longer has the app, so your game ended"
+
+
+# ─── AppTurn: "Your turn with Ben in Chess" (owner decision 2026-10-30) ────
+
+
+class _HeldCatalog:
+    """The held catalog copy the service names an app from."""
+
+    def __init__(self, *entries: AppCatalogEntry) -> None:
+        self._entries = {e.app_id: e for e in entries}
+
+    def cached_entry(self, app_id: str) -> AppCatalogEntry | None:
+        return self._entries.get(app_id)
+
+
+class _AppOpen:
+    """WebSocket manager stand-in: who has which app on screen."""
+
+    def __init__(self, open_: dict[str, str]) -> None:
+        self._open = open_
+
+    def is_user_active_in_conversation(self, user_id: str, key: str) -> bool:
+        return self._open.get(user_id) == key
+
+
+def _turn(to, by, session: str = "s1", app: str = "chess", **kw) -> AppTurn:
+    return AppTurn(
+        app_id=app,
+        session_id=session,
+        to_user_id=to.user_id,
+        from_user_id=by.user_id,
+        **kw,
+    )
+
+
+async def _turn_rows(stack, user):
+    return [
+        n
+        for n in await stack.notif_repo.list(user.user_id, limit=20)
+        if n.type == "app_turn"
+    ]
+
+
+async def test_your_turn_is_one_quiet_row_per_game(stack):
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    stack.notif_svc.attach_app_repo(_AppRegistry({"chess": "Chess"}))
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    await stack.bus.publish(_turn(a, b, from_display="Bob · Familie Okafor"))
+    (row,) = await _turn_rows(stack, a)
+    assert row.title == "Your turn with Bob · Familie Okafor in Chess"
+    assert row.link_url == "/apps/chess"
+    assert row.object_key == "app_session:chess/s1"
+    assert row.params is not None and row.params.space_name == "Chess"
+    assert [x.id for x in row.params.actors] == [b.user_id]
+    assert notif_kind("app_turn") is NotifKind.GAMES
+    # In app by default: a row, never a buzz.
+    assert push.calls == []
+    # The next turn in the same game moves the same row on (D7) …
+    await stack.bus.publish(_turn(a, b, from_display="Bob · Familie Okafor"))
+    assert len(await _turn_rows(stack, a)) == 1
+    # … another game is its own row.
+    await stack.bus.publish(_turn(a, b, session="s2", from_display="Bob"))
+    assert len(await _turn_rows(stack, a)) == 2
+
+
+async def test_your_turn_pushes_only_when_games_is_set_to_push(stack):
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    stack.notif_svc.attach_app_repo(_AppRegistry({"chess": "Chess"}))
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    await stack.user_svc.patch_preferences("anna", {"notif_kinds": {"games": "push"}})
+    await stack.bus.publish(_turn(a, b, from_display="Bob"))
+    (row,) = await _turn_rows(stack, a)
+    # D11: who and where only — the person and the app, never the move.
+    assert [p.title for _, p in push.calls] == ["Your turn with Bob in Chess"]
+    assert row.title == "Your turn with Bob in Chess"
+    # A repeat on the still-unread row is silent (D8).
+    await stack.bus.publish(_turn(a, b, from_display="Bob"))
+    assert len(push.calls) == 1
+
+
+async def test_your_turn_off_blocked_or_with_the_app_open_makes_no_row(stack):
+    stack.notif_svc.attach_app_repo(_AppRegistry({"chess": "Chess"}))
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    c = await stack.provision_user("carol")
+    d = await stack.provision_user("dan")
+    await stack.user_svc.patch_preferences("anna", {"notif_kinds": {"games": "off"}})
+    await stack.bus.publish(_turn(a, b))
+    assert await _turn_rows(stack, a) == []
+    # Carol blocked Bob: his turns never reach her.
+    await SqliteUserRepo(stack.db).block(c.user_id, b.user_id)
+    await stack.bus.publish(_turn(c, b))
+    assert await _turn_rows(stack, c) == []
+    # Dan has Chess on screen: the move is in front of him already.
+    stack.notif_svc.attach_ws_manager(_AppOpen({d.user_id: "app:chess"}))
+    await stack.bus.publish(_turn(d, b))
+    assert await _turn_rows(stack, d) == []
+    # Another app open doesn't count.
+    await stack.bus.publish(_turn(d, b, app="go"))
+    assert len(await _turn_rows(stack, d)) == 1
+
+
+async def test_your_turn_names_the_app_in_the_readers_language(stack):
+    stack.notif_svc.attach_app_repo(_AppRegistry({"battleships": "Battleships"}))
+    stack.notif_svc.attach_app_catalog(
+        _HeldCatalog(
+            AppCatalogEntry.from_dict(
+                {
+                    "app_id": "battleships",
+                    "name": "Battleships",
+                    "latest_version": "1",
+                    "description": "x",
+                    "bundle_url": "https://example/b.tgz",
+                    "bundle_sha256": "ab" * 32,
+                    "i18n": {"de": {"name": "Schiffe versenken"}},
+                }
+            )
+        )
+    )
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    await stack.user_svc.patch_preferences("anna", {"locale": "de"})
+    await stack.bus.publish(_turn(a, b, app="battleships", from_display="Bob"))
+    (row,) = await _turn_rows(stack, a)
+    assert row.params is not None
+    assert row.params.space_name == "Schiffe versenken"
+    # Bob reads English: the catalog's own name.
+    await stack.bus.publish(_turn(b, a, app="battleships", from_display="Anna"))
+    (row,) = await _turn_rows(stack, b)
+    assert row.params is not None and row.params.space_name == "Battleships"
+
+
+async def test_your_turn_for_an_unknown_app_reads_generic(stack):
+    stack.notif_svc.attach_app_repo(_AppRegistry({}))
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    await stack.bus.publish(_turn(a, b, app="gone", from_display="Bob"))
+    (row,) = await _turn_rows(stack, a)
+    assert row.title == "Your turn with Bob"
+
+
+async def test_opening_the_app_reads_its_turn_rows_and_the_next_turn_reopens(stack):
+    stack.notif_svc.attach_app_repo(_AppRegistry({"chess": "Chess"}))
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    await stack.bus.publish(_turn(a, b, session="s1", from_display="Bob"))
+    await stack.bus.publish(_turn(a, b, session="s2", from_display="Bob"))
+    changed: list[NotificationReadChanged] = []
+
+    async def _seen(e: NotificationReadChanged) -> None:
+        changed.append(e)
+
+    stack.bus.subscribe(NotificationReadChanged, _seen)
+    await stack.bus.publish(
+        AppTurnsSeen(app_id="chess", user_id=a.user_id, session_ids=("s1",))
+    )
+    rows = {n.object_key: n for n in await _turn_rows(stack, a)}
+    assert rows["app_session:chess/s1"].is_read
+    assert not rows["app_session:chess/s2"].is_read
+    assert changed and changed[-1].unread_count == 1
+    # Bob moves again: the read row comes back unread (D7).
+    await stack.bus.publish(_turn(a, b, session="s1", from_display="Bob"))
+    rows = {n.object_key: n for n in await _turn_rows(stack, a)}
+    assert len(rows) == 2
+    assert not rows["app_session:chess/s1"].is_read
 
 
 # ─── AppRequested: "Milo asked for Chess" ("Ask an admin", D4) ─────────────

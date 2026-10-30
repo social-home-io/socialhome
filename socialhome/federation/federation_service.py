@@ -1108,6 +1108,7 @@ class FederationService:
             decoded_payload,
             to_user=to_user if isinstance(to_user, str) and to_user else None,
             from_user=from_user if isinstance(from_user, str) and from_user else None,
+            turn=meta.get("turn") is True,
         )
 
     def set_ice_servers(self, servers: list[dict]) -> None:
@@ -2398,6 +2399,7 @@ class FederationService:
         payload: dict,
         to_user: str | None = None,
         from_user: str | None = None,
+        turn: bool = False,
     ) -> DeliveryResult:
         """Ship one app message, preferring the binary ``fed-app-v1`` channel.
 
@@ -2427,6 +2429,11 @@ class FederationService:
         needed beyond the caller's v_18 gate on supplying them at all.
         APP_SESSION (the challenge/invite that drives notifications) is always
         JSON and IS per-user routed by the caller.
+
+        ``turn`` (the app says the move hands the other player the turn)
+        rides the same sealed place as ``to_user`` — ``"turn": true``,
+        left out otherwise. A receiver that predates it ignores it (both
+        paths read with ``.get``), so no capability gate.
         """
         instance = await self._federation_repo.get_instance(to_instance_id)
         if (
@@ -2446,6 +2453,7 @@ class FederationService:
                 payload=payload,
                 to_user=to_user,
                 from_user=from_user,
+                turn=turn,
             )
             if result is not None:
                 return result
@@ -2461,6 +2469,8 @@ class FederationService:
             event_payload["to_user"] = to_user
         if from_user is not None:
             event_payload["from_user"] = from_user
+        if turn:
+            event_payload["turn"] = True
         return await self.send_event(
             to_instance_id=to_instance_id,
             event_type=FederationEventType.APP_MESSAGE,
@@ -2476,6 +2486,7 @@ class FederationService:
         payload: dict,
         to_user: str | None = None,
         from_user: str | None = None,
+        turn: bool = False,
     ) -> DeliveryResult | None:
         """Build + sign the app envelope and ship it as a binary frame.
 
@@ -2516,6 +2527,8 @@ class FederationService:
             metadata["to_user"] = to_user
         if from_user is not None:
             metadata["from_user"] = from_user
+        if turn:
+            metadata["turn"] = True
         encrypted_payload = self._encrypt_payload(_dumps(metadata), session_key)
         msg_id = str(uuid.uuid4())
         timestamp = datetime.now(UTC).isoformat()

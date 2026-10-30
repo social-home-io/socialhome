@@ -828,7 +828,7 @@ export interface Notification {
 /** Settings → Notifications kinds (D4). */
 export type NotifKind =
   | 'messages' | 'replies' | 'needs_you' | 'plans'
-  | 'about_you' | 'reactions' | 'activity'
+  | 'about_you' | 'games' | 'reactions' | 'activity'
 
 export interface ShoppingItem {
   id: string

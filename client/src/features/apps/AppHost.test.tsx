@@ -66,14 +66,18 @@ vi.mock('@/features/apps/InviteSheet', () => ({
 // test can play the frame an admin's action sends.
 type Frame = { type: string, data: Record<string, unknown> }
 const wsh = vi.hoisted(() => ({ handlers: {} as Record<string, Set<(e: Frame) => void>> }))
+const wsSend = vi.hoisted(() => vi.fn())
 vi.mock('@/ws', () => ({
   ws: {
     on: (type: string, h: (e: Frame) => void) => {
       (wsh.handlers[type] ??= new Set()).add(h)
       return () => { wsh.handlers[type]?.delete(h) }
     },
+    send: wsSend,
   },
 }))
+const markTurnsSeen = vi.hoisted(() => vi.fn())
+vi.mock('@/store/notifications', () => ({ markTurnsSeen }))
 function playFrame(type: string, appId: string) {
   wsh.handlers[type]?.forEach(h => h({ type, data: { type, app_id: appId } }))
 }
@@ -180,6 +184,26 @@ describe('AppHostInner', () => {
       // the iframe origin boundary, exposing localStorage (bearer token).
       expect(sandbox).not.toContain('allow-same-origin')
     })
+  })
+
+  it('while the app is on screen, a turn in it makes no row and its turn rows read as read', async () => {
+    const { unmount } = render(<AppHostInner appId="chess" />)
+    await waitFor(() => expect(wsSend).toHaveBeenCalledWith('dm.active', { conversation_id: 'app:chess' }))
+    expect(markTurnsSeen).toHaveBeenCalledWith('chess')
+    // A tab in the background isn't looking: rows come again …
+    const visibility = vi.spyOn(document, 'visibilityState', 'get')
+    visibility.mockReturnValue('hidden')
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(wsSend).toHaveBeenLastCalledWith('dm.active', { conversation_id: null })
+    // … and back in front, what came meanwhile reads as seen.
+    markTurnsSeen.mockClear()
+    visibility.mockReturnValue('visible')
+    document.dispatchEvent(new Event('visibilitychange'))
+    expect(wsSend).toHaveBeenLastCalledWith('dm.active', { conversation_id: 'app:chess' })
+    expect(markTurnsSeen).toHaveBeenCalledWith('chess')
+    visibility.mockRestore()
+    unmount()
+    await waitFor(() => expect(wsSend).toHaveBeenLastCalledWith('dm.active', { conversation_id: null }))
   })
 
   it('calls mountBridge exactly once after runtime resolves', async () => {

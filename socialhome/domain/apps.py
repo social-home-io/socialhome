@@ -42,6 +42,15 @@ SESSION_ACTIVE: str = "active"
 #: just isn't kept for a closed app (live messages may be up to 256 KiB).
 HELD_MESSAGE_MAX_BYTES: int = 64 * 1024
 
+
+def app_view_key(app_id: str) -> str:
+    """What a tab claims while it shows *app_id* — the SPA's ``dm.active``
+    frame, the one "this is on screen" marker a WebSocket carries. A
+    conversation id never starts with ``app:``. A "Your turn" row is
+    skipped while the person has the game in front of them."""
+    return f"app:{app_id}"
+
+
 #: Invites go through Social Home's invite sheet (D3). Backstops on what
 #: one person can send in one app: at most this many invites nobody has
 #: answered yet (a move, a decline) and that weren't withdrawn…
@@ -678,6 +687,17 @@ class AppCatalogEntry:
         "bundle_url",
         "bundle_sha256",
     )
+
+    def name_in(self, locale: str | None) -> str:
+        """The app's name in *locale* (``i18n``; base language first:
+        ``de-AT`` → ``de``), else the catalog's own — as the SPA's
+        ``localized()`` picks it."""
+        if locale:
+            texts = {t.locale: t.name for t in self.i18n if t.name}
+            hit = texts.get(locale) or texts.get(locale.split("-")[0])
+            if hit:
+                return hit
+        return self.name
 
     @classmethod
     def from_dict(cls, data: dict) -> AppCatalogEntry:

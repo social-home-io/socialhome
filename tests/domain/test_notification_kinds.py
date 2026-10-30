@@ -20,12 +20,12 @@ from socialhome.domain.notification_kinds import (
     notif_kind,
 )
 
-# ── D4: the seven kinds and their one choice ──────────────────────────
+# ── D4: the eight kinds and their one choice ──────────────────────────
 
 
 def test_d4_every_kind_has_a_default_among_its_choices():
     assert set(KIND_CHOICES) == set(NotifKind)
-    assert len(NotifKind) == 7
+    assert len(NotifKind) == 8
     for kind, choices in KIND_CHOICES.items():
         assert KIND_DEFAULTS[kind] in choices
 
@@ -38,9 +38,9 @@ def test_d4_needs_you_cannot_be_off_and_messages_have_no_in_app():
     assert KIND_CHOICES[NotifKind.MESSAGES] == (NotifDelivery.PUSH, NotifDelivery.OFF)
 
 
-def test_d4_reactions_and_activity_default_to_in_app_the_rest_push():
+def test_d4_reactions_activity_and_games_default_to_in_app_the_rest_push():
     in_app = {k for k, d in KIND_DEFAULTS.items() if d is NotifDelivery.IN_APP}
-    assert in_app == {NotifKind.REACTIONS, NotifKind.ACTIVITY}
+    assert in_app == {NotifKind.REACTIONS, NotifKind.ACTIVITY, NotifKind.GAMES}
     pushed = {k for k, d in KIND_DEFAULTS.items() if d is NotifDelivery.PUSH}
     assert pushed == set(NotifKind) - in_app
 
@@ -60,6 +60,9 @@ def test_d4_reactions_and_activity_default_to_in_app_the_rest_push():
         ("space_report", NotifKind.NEEDS_YOU),
         ("dm_contact_requested", NotifKind.NEEDS_YOU),
         ("app_challenge", NotifKind.NEEDS_YOU),
+        # "Your turn with Ben in Chess": its own kind, In app by default
+        # — Push only for someone who picks it.
+        ("app_turn", NotifKind.GAMES),
         ("space_invite", NotifKind.NEEDS_YOU),
         ("pairing_request", NotifKind.NEEDS_YOU),
         ("task_assigned", NotifKind.PLANS),

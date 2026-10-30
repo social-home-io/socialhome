@@ -1,5 +1,5 @@
 /**
- * Settings → Notifications (D4): this device, the seven kinds, and
+ * Settings → Notifications (D4): this device, the eight kinds, and
  * "Muted and changed" with its way back.
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -29,6 +29,7 @@ const KIND_ROWS: KindSetting[] = [
   { kind: 'needs_you', choice: 'push', default: 'push', choices: ['push', 'in_app'] },
   { kind: 'plans', choice: 'push', default: 'push', choices: ALL },
   { kind: 'about_you', choice: 'push', default: 'push', choices: ALL },
+  { kind: 'games', choice: 'in_app', default: 'in_app', choices: ALL },
   { kind: 'reactions', choice: 'in_app', default: 'in_app', choices: ALL },
   { kind: 'activity', choice: 'in_app', default: 'in_app', choices: ALL },
 ]
@@ -72,13 +73,18 @@ describe('DeviceBlock', () => {
 })
 
 describe('KindsBlock', () => {
-  it('seven kinds, each one choice with an example; a pick saves', async () => {
+  it('eight kinds, each one choice with an example; a pick saves', async () => {
     notifSettings.value = { kinds: KIND_ROWS, changed: [] }
     api.patch.mockResolvedValue({ kinds: KIND_ROWS.map(k => (k.kind === 'reactions' ? { ...k, choice: 'push' } : k)) })
     const { getAllByRole, getByRole, getByText } = render(<KindsBlock />)
     const groups = getAllByRole('radiogroup')
-    expect(groups).toHaveLength(7)
+    expect(groups).toHaveLength(8)
     expect(getByText('Messages and calls')).toBeTruthy()
+    // Games: "Your turn" rows, In app until the person picks Push.
+    expect(getByText('“Your turn with Ben in Chess”')).toBeTruthy()
+    const games = getByRole('radiogroup', { name: 'Games' })
+    expect(Array.from(games.querySelectorAll('[role="radio"]')).map(r => r.textContent))
+      .toEqual(['Push', 'In app', 'Off'])
     expect(getByText('“25 new posts in Familie Alpha”')).toBeTruthy()
     // Needs you has no Off; Messages and calls no In app.
     const needs = getByRole('radiogroup', { name: 'Needs you' })

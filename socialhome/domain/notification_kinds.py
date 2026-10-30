@@ -1,7 +1,7 @@
 """What a person hears about, and how (notifications redesign, D4 / D10).
 
 People never see notification *types*; Settings → Notifications offers
-seven **kinds** (:class:`NotifKind`), each with one choice
+eight **kinds** (:class:`NotifKind`), each with one choice
 (:class:`NotifDelivery`): Push (a row and a push), In app (a row, no push)
 or Off (nothing). :func:`notif_kind` files every type under its kind.
 
@@ -28,13 +28,17 @@ from enum import StrEnum
 
 
 class NotifKind(StrEnum):
-    """The seven kinds Settings → Notifications offers (D4)."""
+    """The eight kinds Settings → Notifications offers (D4)."""
 
     MESSAGES = "messages"  # Messages and calls
     REPLIES = "replies"  # Replies and mentions
     NEEDS_YOU = "needs_you"
     PLANS = "plans"  # Plans and tasks
     ABOUT_YOU = "about_you"
+    # "Your turn with Ben in Chess" (2026-10-30). Its own kind: a turn is
+    # In app by default and Push only for someone who picks it — no other
+    # kind has that default without also pushing feed posts or reactions.
+    GAMES = "games"
     REACTIONS = "reactions"  # Reactions and follows
     ACTIVITY = "activity"  # Activity in your spaces
 
@@ -58,18 +62,21 @@ KIND_CHOICES: dict[NotifKind, tuple[NotifDelivery, ...]] = {
     NotifKind.NEEDS_YOU: (NotifDelivery.PUSH, NotifDelivery.IN_APP),
     NotifKind.PLANS: _ALL,
     NotifKind.ABOUT_YOU: _ALL,
+    NotifKind.GAMES: _ALL,
     NotifKind.REACTIONS: _ALL,
     NotifKind.ACTIVITY: _ALL,
 }
 
 #: What someone who never chose hears: reactions (D13) and activity in
-#: their spaces (D5, D6) are nice to see, never worth a buzz.
+#: their spaces (D5, D6) are nice to see, never worth a buzz; so is "your
+#: turn" in a game (a game waits — owner decision 2026-10-30).
 KIND_DEFAULTS: dict[NotifKind, NotifDelivery] = {
     NotifKind.MESSAGES: NotifDelivery.PUSH,
     NotifKind.REPLIES: NotifDelivery.PUSH,
     NotifKind.NEEDS_YOU: NotifDelivery.PUSH,
     NotifKind.PLANS: NotifDelivery.PUSH,
     NotifKind.ABOUT_YOU: NotifDelivery.PUSH,
+    NotifKind.GAMES: NotifDelivery.IN_APP,
     NotifKind.REACTIONS: NotifDelivery.IN_APP,
     NotifKind.ACTIVITY: NotifDelivery.IN_APP,
 }
@@ -143,6 +150,9 @@ _KIND_OF_TYPE: dict[str, NotifKind] = {
     "bazaar_offer_rejected": NotifKind.ABOUT_YOU,
     "bazaar_listing_sold": NotifKind.ABOUT_YOU,
     "bazaar_listing_expired": NotifKind.ABOUT_YOU,
+    # Games — "Your turn with Ben in Chess": one row per game while the
+    # app is closed (the app said the move hands over the turn).
+    "app_turn": NotifKind.GAMES,
     # Reactions and follows.
     "post_reacted": NotifKind.REACTIONS,
     "moment_reacted": NotifKind.REACTIONS,

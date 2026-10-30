@@ -58,6 +58,7 @@ import { currentAppContext, shownTheme, watchAppContext, type AppTheme } from '@
 import { appOpenedFrom } from '@/features/apps/appReturn'
 import { addBase } from '@/baseUrl'
 import { ws, type WsEvent } from '@/ws'
+import { markTurnsSeen } from '@/store/notifications'
 import { ApiError } from '@/api'
 import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
@@ -173,6 +174,31 @@ export function AppHostInner({ appId, sessionId }: {
   }, [appId])
 
   useEffect(() => watchAppContext(c => setScheme(c.theme)), [])
+
+  // "Your turn" (2026-10-30): while the app is on screen the person sees
+  // each move live, so tell the server (the ``dm.active`` claim — one per
+  // connection, ``app:<id>`` never collides with a conversation id) and
+  // read the turn rows of this app that came while the tab was away. A
+  // tab in the background is not looking: it lets go, and rows come again.
+  const running = runtime !== null
+  useEffect(() => {
+    if (!running) return
+    const claim = () => {
+      ws.send('dm.active', { conversation_id: `app:${appId}` })
+      markTurnsSeen(appId)
+    }
+    const release = () => ws.send('dm.active', { conversation_id: null })
+    const onVis = () => {
+      if (document.visibilityState === 'visible') claim()
+      else release()
+    }
+    if (document.visibilityState !== 'hidden') claim()
+    document.addEventListener('visibilitychange', onVis)
+    return () => {
+      document.removeEventListener('visibilitychange', onVis)
+      release()
+    }
+  }, [appId, running])
 
   // While the app starts: slow after SLOW_MS, failed after FAIL_MS.
   const starting = state.kind === 'starting'

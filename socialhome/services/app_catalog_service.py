@@ -180,6 +180,12 @@ class AppCatalogService:
             checked_at=self._checked_at, stale=self._failed_ts is not None
         )
 
+    def cached_entry(self, app_id: str) -> AppCatalogEntry | None:
+        """*app_id*'s entry in the copy already held (``None`` before the
+        first answer, or when it isn't listed) — never a fetch: a
+        notification names an app in the reader's language from it."""
+        return next((e for e in self._cache or () if e.app_id == app_id), None)
+
     async def fetch_catalog(self, *, force: bool = False) -> list[AppCatalogEntry]:
         """GET the catalog and parse it.
 

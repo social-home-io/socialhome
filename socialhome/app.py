@@ -2257,7 +2257,7 @@ def _build_notification_settings(
     user_service: UserService,
     system_chats: SystemChatPolicy,
 ) -> NotificationSettingsService:
-    """Settings → Notifications: the seven kinds, space levels with a
+    """Settings → Notifications: the eight kinds, space levels with a
     duration, muted posts and the "Muted and changed" list."""
     return NotificationSettingsService(
         users=repos.user,
@@ -3155,9 +3155,10 @@ def create_app(config: Config | None = None) -> web.Application:
     space_service.attach_link_previews(link_preview_service)
 
     # ── App service (Social Home Apps install / uninstall / enable) ──────
+    app_catalog = _build_app_catalog(config)
     app_service = AppService(
         repo=repos.app,
-        catalog=_build_app_catalog(config),
+        catalog=app_catalog,
         apps_path=pathlib.Path(config.apps_path),
         downloader=download_bundle,
         bus=bus,
@@ -3235,6 +3236,8 @@ def create_app(config: Config | None = None) -> web.Application:
     notification_service.attach_bazaar_repo(bazaar_repo)
     # "Needs you" checks a game invite still waits.
     notification_service.attach_app_repo(repos.app)
+    # "Your turn with Ben in Chess" names the app in the reader's language.
+    notification_service.attach_app_catalog(app_catalog)
     notification_service.attach_personal_calendar_repo(calendar_repo)
     # D6 comment audience + D13 post reactions read the posts.
     notification_service.attach_post_repos(repos.post, repos.space_post)

@@ -45,6 +45,7 @@ from socialhome.domain.apps import (
     InstalledApp,
     app_age_allows,
     app_permissions,
+    app_view_key,
     changelog_since,
     core_version_satisfies,
     is_newer_version,
@@ -658,3 +659,24 @@ def test_session_marks_read_only_our_own_flags():
     assert not AppPendingSession(**base, payload={"sent": True}).sent
     assert not AppPendingSession(**base, payload={"sent": 1}, state="active").sent
     assert AppPendingSession(**base, payload={"withdrawn": True}).withdrawn
+
+
+def test_catalog_name_in_the_viewers_language():
+    """A row names the app as the viewer reads it: their language, else
+    its base language (``de-AT`` → ``de``), else the catalog's own name."""
+    entry = _v2(
+        name="Battleships",
+        i18n={"de": {"name": "Schiffe versenken"}, "fr": {"description": "Jeu"}},
+    )
+    assert entry.name_in("de") == "Schiffe versenken"
+    assert entry.name_in("de-AT") == "Schiffe versenken"
+    # A locale with only a description, an unknown one, or none at all.
+    assert entry.name_in("fr") == "Battleships"
+    assert entry.name_in("nl") == "Battleships"
+    assert entry.name_in(None) == "Battleships"
+
+
+def test_app_view_key_names_the_app_a_tab_shows():
+    """The SPA's "I have this app open" claim (the ``dm.active`` frame)
+    — never a conversation id, which has no ``app:`` prefix."""
+    assert app_view_key("chess") == "app:chess"

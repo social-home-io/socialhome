@@ -2985,6 +2985,63 @@ async def test_send_app_message_json_omits_routing_when_none():
     )
     assert "to_user" not in meta
     assert "from_user" not in meta
+    assert "turn" not in meta
+
+
+@pytest.mark.asyncio
+async def test_send_app_message_json_seals_the_turn_flag():
+    """``turn`` (the app says the move hands over the turn) rides the
+    sealed APP_MESSAGE payload beside ``to_user`` — never in plaintext."""
+    p = _paired_app(peer_proto_version=1)  # forces JSON path
+    await p.svc_a.send_app_message(
+        to_instance_id=p.b_id,
+        app_id="chess",
+        session_id="sess-t",
+        payload={"move": "e7e5"},
+        to_user="bob",
+        from_user="alice",
+        turn=True,
+    )
+    env = p.cap.json_envelopes[0]
+    assert "turn" not in orjson.dumps(env).decode()
+    meta = orjson.loads(
+        p.svc_b._encoder.decrypt_payload(env["encrypted_payload"], p.session)
+    )
+    assert meta["turn"] is True
+
+
+@pytest.mark.asyncio
+async def test_app_binary_frame_seals_the_turn_flag():
+    """``turn`` rides the binary frame's sealed metadata and reaches the
+    receiver; a frame without it reads ``turn=False``."""
+    p = _paired_app()
+    routings: list[dict] = []
+
+    class _FakeAppFed:
+        async def on_inbound_message(
+            self, instance_id, app_id, session_id, payload, **routing
+        ):
+            routings.append(routing)
+
+    p.svc_b.attach_apps(_FakeAppFed())
+    await p.svc_a.send_app_message(
+        to_instance_id=p.b_id,
+        app_id="chess",
+        session_id="sess-bin",
+        payload={"move": "g1f3"},
+        to_user="bob",
+        from_user="alice",
+        turn=True,
+    )
+    assert p.cap.json_envelopes == []
+    header, payload_bytes = p.cap.app
+    assert "turn" not in orjson.dumps(header).decode()
+    meta = orjson.loads(
+        p.svc_b._encoder.decrypt_payload(header["encrypted_payload"], p.session)
+    )
+    assert meta["turn"] is True
+    await p.svc_b._app_inbound_handler(p.a_id, orjson.dumps(header), payload_bytes)
+    assert routings == [{"to_user": "bob", "from_user": "alice", "turn": True}]
 
 
 @pytest.mark.asyncio
@@ -3058,7 +3115,7 @@ async def test_app_inbound_handler_dispatches_to_app_fed():
     assert session_id == "sess-bin"
     assert payload == {"move": "g1f3"}
     # No person named by the sender (older shape): household-addressed.
-    assert routings == [{"to_user": None, "from_user": None}]
+    assert routings == [{"to_user": None, "from_user": None, "turn": False}]
 
 
 @pytest.mark.asyncio
@@ -3098,7 +3155,7 @@ async def test_app_binary_frame_carries_the_people_it_is_between():
     assert (meta["to_user"], meta["from_user"]) == ("bob", "alice")
 
     await p.svc_b._app_inbound_handler(p.a_id, orjson.dumps(header), payload_bytes)
-    assert routings == [{"to_user": "bob", "from_user": "alice"}]
+    assert routings == [{"to_user": "bob", "from_user": "alice", "turn": False}]
 
 
 @pytest.mark.asyncio

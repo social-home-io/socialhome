@@ -3,7 +3,7 @@
  *
  * 1. **This device** (:func:`DeviceBlock`) — is push on for this browser,
  *    off, blocked (with the steps to unblock it) or not possible here.
- * 2. **What you hear about** (:func:`KindsBlock`) — seven kinds, each with
+ * 2. **What you hear about** (:func:`KindsBlock`) — eight kinds, each with
  *    one Push / In app / Off choice and a real example sentence.
  * 3. **Muted and changed** (:func:`MutedAndChanged`) — every space, chat
  *    and post not at its default or muted, with Unmute / Change: the way

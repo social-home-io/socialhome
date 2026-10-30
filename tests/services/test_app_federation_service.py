@@ -46,6 +46,8 @@ from socialhome.domain.events import (
     AppEnabledChanged,
     AppGameEnded,
     AppInstalled,
+    AppTurn,
+    AppTurnsSeen,
 )
 from socialhome.domain.federation import (
     FederationEvent,
@@ -399,6 +401,7 @@ class _FakeFederation:
         payload: dict,
         to_user: str | None = None,
         from_user: str | None = None,
+        turn: bool = False,
     ):
         self.sent_app_messages.append(
             {
@@ -408,6 +411,7 @@ class _FakeFederation:
                 "payload": payload,
                 "to_user": to_user,
                 "from_user": from_user,
+                "turn": turn,
             }
         )
         return MagicMock(ok=True)
@@ -3339,6 +3343,167 @@ async def test_a_local_withdrawal_after_play_waits_for_the_invitee():
     )
     (held,) = await svc.take_held(app_id="chess", actor_user_id="u-bob")
     assert held.held is not None and held.held["payload"]["reason"] == "withdrawn"
+
+
+# ─── "Your turn" (owner decision 2026-10-30): the app flags the move ─────────
+
+
+def _turns(bus: _FakeBus) -> list[AppTurn]:
+    return [e for e in bus.published if isinstance(e, AppTurn)]
+
+
+async def _inbound_turn(svc, data: dict, *, turn: object = True, **kw) -> None:
+    payload = {
+        "app_id": "chess",
+        "session_id": kw.get("session_id", "sess-1"),
+        "data": data,
+        "to_user": "bob",
+        "from_user": kw.get("from_user", "carol"),
+        "turn": turn,
+    }
+    await svc.on_inbound_event(_make_event(FederationEventType.APP_MESSAGE, payload))
+
+
+@pytest.mark.asyncio
+async def test_a_move_flagged_turn_tells_the_player_once_it_is_kept():
+    """Carol's move hands Bob the turn: kept in his mailbox, and Social
+    Home raises "Your turn" for him — the app said so, Social Home read
+    nothing of the move."""
+    svc, _, _, bus = _mailbox_svc()
+    await _played_remote_game(svc)
+    bus.published.clear()
+    await _inbound_turn(svc, {"shot": "B4"})
+    (turn,) = _turns(bus)
+    assert (turn.app_id, turn.session_id) == ("chess", "sess-1")
+    assert (turn.to_user_id, turn.from_user_id) == ("u-bob", "ru-carol")
+    # The sender as this household names them (the fixture's "Bob").
+    assert turn.from_display == "Bob"
+
+
+@pytest.mark.asyncio
+async def test_a_move_without_the_turn_flag_raises_nothing():
+    """An informational message (a chat line, "Ben is thinking"), or a
+    flag that isn't exactly ``true``, makes no row — older apps and
+    households send none."""
+    svc, _, _, bus = _mailbox_svc()
+    await _played_remote_game(svc)
+    bus.published.clear()
+    await _inbound_move(svc, {"n": 1})
+    await _inbound_turn(svc, {"n": 2}, turn="yes")
+    await _inbound_turn(svc, {"n": 3}, turn=1)
+    assert _turns(bus) == []
+    # The messages were kept all the same.
+    (held,) = await svc.take_held(app_id="chess", actor_user_id="u-bob")
+    assert held.held == {"kind": "message", "payload": {"n": 3}}
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_is_not_kept_raises_nothing():
+    """Only a move the mailbox keeps: a made-up session, someone other
+    than the game's other side, a message too large to hold, an invite
+    not played yet (it waits in Needs you) or an app turned off."""
+    svc, _, _, bus = _mailbox_svc()
+    await _inbound_turn(svc, {"n": 1}, session_id="made-up")
+    await _remote_invite(svc)
+    await _inbound_turn(svc, {"n": 1})  # before Play: Needs you has it
+    await svc.accept_session(app_id="chess", session_id="sess-1", actor_user_id="u-bob")
+    await _inbound_turn(svc, {"n": 2}, from_user="dave")
+    await _inbound_turn(svc, {"blob": "x" * (64 * 1024)})
+    _turn(svc, enabled=False)
+    await _inbound_turn(svc, {"n": 3})
+    assert _turns(bus) == []
+
+
+@pytest.mark.asyncio
+async def test_a_turn_from_someone_blocked_raises_nothing():
+    svc, _, _, bus = _mailbox_svc()
+    await _played_remote_game(svc)
+    bus.published.clear()
+    # Bob blocked Carol after the game started.
+    svc._user_repo._block_pairs.add(("u-bob", "ru-carol"))
+    await _inbound_turn(svc, {"n": 1})
+    assert _turns(bus) == []
+
+
+@pytest.mark.asyncio
+async def test_a_binary_frame_carries_the_turn_flag_too():
+    svc, _, _, bus = _mailbox_svc()
+    await _played_remote_game(svc)
+    bus.published.clear()
+    await svc.on_inbound_message(
+        "peer-inst-id", "chess", "sess-1", {"n": 1}, to_user="bob", from_user="carol"
+    )
+    assert _turns(bus) == []
+    await svc.on_inbound_message(
+        "peer-inst-id",
+        "chess",
+        "sess-1",
+        {"n": 2},
+        to_user="bob",
+        from_user="carol",
+        turn=True,
+    )
+    (turn,) = _turns(bus)
+    assert turn.to_user_id == "u-bob"
+
+
+@pytest.mark.asyncio
+async def test_sending_a_turn_flags_it_for_the_other_household():
+    """``turn`` rides the sealed message (beside ``to_user``) — only when
+    the app set it."""
+    svc, fed, _, _ = _mailbox_svc()
+    await _played_remote_game(svc)
+    target = _remote_target("peer-inst-id", "carol")
+    for turn in (True, False):
+        await svc.send_message(
+            app_id="chess",
+            target=target,
+            session_id="sess-1",
+            payload={"n": 1},
+            actor_user_id="u-bob",
+            turn=turn,
+        )
+    assert [m["turn"] for m in fed.sent_app_messages] == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_a_local_turn_tells_the_other_player():
+    svc, _, _, bus = _mailbox_svc()
+    sid = await svc.open_session(
+        app_id="chess", target=_local_target("u-bob"), actor_user_id="u-ann"
+    )
+    await svc.accept_session(app_id="chess", session_id=sid, actor_user_id="u-bob")
+    bus.published.clear()
+    for turn in (False, True):
+        await svc.send_message(
+            app_id="chess",
+            target=_local_target("u-bob"),
+            session_id=sid,
+            payload={"san": "e4"},
+            actor_user_id="u-ann",
+            turn=turn,
+        )
+    (turn,) = _turns(bus)
+    assert (turn.to_user_id, turn.from_user_id) == ("u-bob", "u-ann")
+    assert turn.session_id == sid and turn.from_display is None
+
+
+@pytest.mark.asyncio
+async def test_opening_the_app_tells_which_games_it_took():
+    """The app took its held messages: those games' "Your turn" rows read
+    as read. Nothing taken, nothing said."""
+    svc, _, _, bus = _mailbox_svc()
+    await _played_remote_game(svc)
+    await _inbound_turn(svc, {"n": 1})
+    bus.published.clear()
+    await svc.take_held(app_id="chess", actor_user_id="u-bob")
+    (seen,) = [e for e in bus.published if isinstance(e, AppTurnsSeen)]
+    assert seen == AppTurnsSeen(
+        app_id="chess", user_id="u-bob", session_ids=("sess-1",)
+    )
+    bus.published.clear()
+    await svc.take_held(app_id="chess", actor_user_id="u-bob")
+    assert bus.published == []
 
 
 class _CountingUserRepo(_FakeUserRepo):
