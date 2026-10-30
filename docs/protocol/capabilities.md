@@ -77,6 +77,17 @@ that hasn't announced yet, so the legacy shape always reaches the
 peer; new fields are added only when we positively know the receiver
 will parse them.
 
+**Space broadcasts** judge a member household by its *space* version,
+`FederationService.space_member_supports`: the `remote_instances` row's
+`proto_version` for a paired household, else the version a **mesh-only**
+member household (one the sender never paired with, reached over
+`SPACE_ROUTED`) claimed over the mesh (`space_instances.proto_version`);
+unknown → not supported. `broadcast_to_space_members(…,
+min_proto_version=N)` and its `legacy_below` variant both use it — gating a
+space broadcast on `peer_supports` alone would skip every mesh-only member,
+so a gated event (a bazaar listing, its questions and answers) never
+reached a member household that isn't paired with the sender.
+
 ## Bumping the version
 
 When a release adds a federation surface whose default-if-missing
