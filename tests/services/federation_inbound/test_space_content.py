@@ -36,7 +36,7 @@ from socialhome.domain.events import (
     TaskUpdated,
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
-from socialhome.domain.post import BazaarMode, BazaarOffer, BazaarStatus
+from socialhome.domain.post import BazaarBid, BazaarMode, BazaarOffer, BazaarStatus
 from socialhome.domain.sticky import DEFAULT_STICKY_COLOR, MAX_STICKY_CONTENT_LENGTH
 from socialhome.domain.task import Task, TaskList, TaskPriority, TaskStatus
 from socialhome.domain.timetable import Timetable, TimetableEntry, to_wire_dict
@@ -47,7 +47,7 @@ from socialhome.federation.owner_bound_id import (
     mint_owner_bound_id,
 )
 from socialhome.infrastructure.event_bus import EventBus
-from socialhome.repositories.bazaar_repo import OfferStateError
+from socialhome.repositories.bazaar_repo import BidStateError, OfferStateError
 from socialhome.services.federation_inbound import SpaceContentInboundHandlers
 from socialhome.services.federation_inbound.space_content import _deleter
 from socialhome.services.gallery_service import (
@@ -2841,7 +2841,7 @@ class _FakeBazaarRepoWithStatus:
             for oid, who in self.pending_offers
         ]
 
-    async def update_offer_status(self, offer_id, new_status):
+    async def update_offer_status(self, offer_id, new_status, *, reason=None):
         if offer_id == "o-gone":
             raise OfferStateError("already answered")
         self.offer_status.append((offer_id, new_status))
@@ -3047,13 +3047,17 @@ class _FakeBazaarRepoWithBids:
         self.offers[offer.id] = offer
         return offer
 
-    async def update_offer_status(self, offer_id, new_status):
+    async def update_offer_status(self, offer_id, new_status, *, reason=None):
         offer = self.offers.get(offer_id)
         if offer is None:
             raise KeyError(offer_id)
         if offer.status != "pending":
             raise OfferStateError(f"{offer.status} -> {new_status}")
-        self.offers[offer_id] = replace(offer, status=new_status)
+        self.offers[offer_id] = replace(
+            offer,
+            status=new_status,
+            rejection_reason=reason if new_status == "rejected" else None,
+        )
         self.offer_status.append((offer_id, new_status))
         return self.offers[offer_id]
 
@@ -3089,6 +3093,14 @@ class _FakeBazaarRepoWithBids:
 
     async def accept_offer(self, bid_id, *, space_id):
         self.accepted.append(bid_id)
+
+    async def reject_offer(self, bid_id, *, reason=None):
+        bid = self.existing_bids[bid_id]
+        if bid.rejected:
+            raise BidStateError("already rejected")
+        self.existing_bids[bid_id] = replace(
+            bid, rejected=True, rejection_reason=reason
+        )
 
 
 @pytest.fixture
@@ -6241,3 +6253,168 @@ async def test_an_offer_answer_accepts_a_since_demoted_seat(
     )
     assert asked == [True]
     assert bazaar.offers["o-1"].status == "rejected"
+
+
+# ─── A declined bid / an answer's reason ─────────────────────────────
+
+
+def _bid(bid_id="bid-1", bidder="u-buyer", **kw) -> BazaarBid:
+    return BazaarBid(
+        id=bid_id,
+        listing_post_id="bzr-1",
+        bidder_user_id=bidder,
+        amount=500,
+        created_at="",
+        **kw,
+    )
+
+
+def _declined(**overrides) -> dict:
+    return {
+        "bid_id": "bid-1",
+        "listing_post_id": "bzr-1",
+        "status": "rejected",
+        "reason": "not to you",
+        "space_id": "sp-1",
+        **overrides,
+    }
+
+
+async def test_a_declined_bid_of_ours_keeps_the_reason_and_tells_the_bidder(
+    repos, bus, bazaar_bids_handlers
+):
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.existing_bids["bid-1"] = _bid()
+    seen = _capture(bus, BazaarOfferRejected)
+    await handlers._on_bazaar_offer_updated(
+        _event(FederationEventType.BAZAAR_OFFER_UPDATED, _declined())
+    )
+    got = bazaar.existing_bids["bid-1"]
+    assert (got.rejected, got.rejection_reason) == (True, "not to you")
+    # Only the listing's seller may decline it.
+    assert ("acts_for", "sp-1", "u-seller") in repos["auth"].calls
+    [evt] = seen
+    assert (evt.bid_id, evt.offer_id, evt.reason, evt.origin_instance_id) == (
+        "bid-1",
+        "",
+        "not to you",
+        "peer-a",
+    )
+
+
+async def test_a_declined_bid_of_someone_elses_keeps_no_reason(
+    bus, bazaar_bids_handlers
+):
+    """Another member household mirrors the decline, never the words."""
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.existing_bids["bid-1"] = _bid(bidder="u-remote")
+    seen = _capture(bus, BazaarOfferRejected)
+    await handlers._on_bazaar_offer_updated(
+        _event(FederationEventType.BAZAAR_OFFER_UPDATED, _declined())
+    )
+    got = bazaar.existing_bids["bid-1"]
+    assert (got.rejected, got.rejection_reason) == (True, None)
+    [evt] = seen
+    assert evt.reason is None
+
+
+@pytest.mark.parametrize(
+    ("label", "bid", "overrides"),
+    [
+        ("an unknown bid", None, {}),
+        ("not a rejection", _bid(), {"status": "accepted"}),
+        ("already declined", _bid(rejected=True, rejection_reason="first"), {}),
+        ("already accepted", _bid(accepted=True), {}),
+        ("withdrawn", _bid(withdrawn=True), {}),
+        ("a reason that is no text", _bid(), {"reason": 7}),
+        ("an over-long reason", _bid(), {"reason": "x" * 281}),
+        ("another space", _bid(), {"space_id": "sp-other"}),
+    ],
+)
+async def test_a_bid_decline_that_does_not_apply_changes_nothing(
+    bus, bazaar_bids_handlers, label, bid, overrides
+):
+    handlers, bazaar = bazaar_bids_handlers
+    if bid is not None:
+        bazaar.existing_bids["bid-1"] = bid
+    seen = _capture(bus, BazaarOfferRejected)
+    payload = _declined(**overrides)
+    await handlers._on_bazaar_offer_updated(
+        _event(
+            FederationEventType.BAZAAR_OFFER_UPDATED,
+            payload,
+            space_id=payload["space_id"],
+        )
+    )
+    assert bazaar.existing_bids.get("bid-1") == bid, label
+    assert seen == [], label
+
+
+async def test_a_bid_decline_from_a_household_not_seating_the_seller_is_refused(
+    repos, bus, bazaar_bids_handlers
+):
+    handlers, bazaar = bazaar_bids_handlers
+    repos["auth"].answer = False
+    bazaar.existing_bids["bid-1"] = _bid()
+    seen = _capture(bus, BazaarOfferRejected)
+    await handlers._on_bazaar_offer_updated(
+        _event(FederationEventType.BAZAAR_OFFER_UPDATED, _declined())
+    )
+    assert not bazaar.existing_bids["bid-1"].rejected
+    assert repos["auth"].refusals == ["bid-1"]
+    assert seen == []
+
+
+async def test_a_lost_race_on_a_bid_decline_publishes_nothing(
+    bus, bazaar_bids_handlers
+):
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.existing_bids["bid-1"] = _bid()
+
+    async def _gone(bid_id, *, reason=None):
+        raise BidStateError("withdrawn meanwhile")
+
+    bazaar.reject_offer = _gone
+    seen = _capture(bus, BazaarOfferRejected)
+    await handlers._on_bazaar_offer_updated(
+        _event(FederationEventType.BAZAAR_OFFER_UPDATED, _declined())
+    )
+    assert seen == []
+
+
+async def test_a_declined_offer_keeps_the_sellers_reason(bus, bazaar_bids_handlers):
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.offers["o-1"] = _offer("o-1")
+    seen = _capture(bus, BazaarOfferRejected)
+    await handlers._on_bazaar_offer_updated(
+        _event(
+            FederationEventType.BAZAAR_OFFER_UPDATED,
+            {
+                "offer_id": "o-1",
+                "status": "rejected",
+                "reason": "sold",
+                "space_id": "sp-1",
+            },
+        )
+    )
+    assert bazaar.offers["o-1"].rejection_reason == "sold"
+    [evt] = seen
+    assert evt.reason == "sold"
+
+
+async def test_a_reason_on_an_accept_is_not_kept(bazaar_bids_handlers):
+    handlers, bazaar = bazaar_bids_handlers
+    bazaar.offers["o-1"] = _offer("o-1")
+    await handlers._on_bazaar_offer_updated(
+        _event(
+            FederationEventType.BAZAAR_OFFER_UPDATED,
+            {
+                "offer_id": "o-1",
+                "status": "accepted",
+                "reason": "x",
+                "space_id": "sp-1",
+            },
+        )
+    )
+    assert bazaar.offers["o-1"].status == "accepted"
+    assert bazaar.offers["o-1"].rejection_reason is None

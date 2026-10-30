@@ -81,6 +81,8 @@ def _offer_dict(offer) -> dict:
         "status": offer.status,
         "created_at": offer.created_at,
         "responded_at": offer.responded_at,
+        # Only the seller and the offerer ever get an offer row.
+        "rejection_reason": offer.rejection_reason,
     }
 
 
@@ -369,6 +371,8 @@ class BazaarBidRejectView(BaseView):
             return error_response(403, "FORBIDDEN", str(exc))
         except BazaarServiceError as exc:
             return error_response(409, "BID_STATE_ERROR", str(exc))
+        except ValueError as exc:
+            return error_response(422, "UNPROCESSABLE", str(exc))
         return web.json_response({"ok": True})
 
 
@@ -481,7 +485,8 @@ class BazaarOfferAcceptView(BaseView):
 class BazaarOfferRejectView(BaseView):
     """``POST /api/bazaar/{id}/offers/{offer_id}/reject`` — seller rejects.
 
-    Body: ``{reason?}``. Listing stays active.
+    Body: ``{reason?}`` — at most 280 characters, for the seller and the
+    offerer only. Listing stays active.
     """
 
     async def post(self) -> web.Response:
@@ -502,6 +507,8 @@ class BazaarOfferRejectView(BaseView):
             return error_response(403, "FORBIDDEN", str(exc))
         except OfferStateError as exc:
             return error_response(409, "OFFER_STATE_ERROR", str(exc))
+        except ValueError as exc:
+            return error_response(422, "UNPROCESSABLE", str(exc))
         return web.json_response(_offer_dict(updated))
 
 

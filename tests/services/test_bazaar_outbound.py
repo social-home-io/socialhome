@@ -747,20 +747,116 @@ async def test_a_rejected_offer_answers_the_buyer_only(federation_service):
     )
     call = federation_service.broadcast_to_space_members.await_args
     assert call.args[1] == FederationEventType.BAZAAR_OFFER_UPDATED
-    # No reason text crosses: the offerer's household keeps none.
+    # The seller's reason rides the sealed answer to the offerer's
+    # household — the only one it goes to.
     assert call.args[2] == {
         "offer_id": "o-1",
         "listing_post_id": "bzr-1",
         "space_id": "sp-1",
         "status": "rejected",
+        "reason": "too low, sorry",
     }
     assert call.kwargs["only_instances"] == frozenset({"inst-buyer"})
+
+
+async def test_a_rejected_offer_without_a_reason_sends_none(federation_service):
+    bus = _outbound(
+        federation_service, seats=_seats("inst-buyer"), users=_users("u-seller")
+    )
+    await bus.publish(
+        BazaarOfferRejected(
+            listing_post_id="bzr-1",
+            seller_user_id="u-seller",
+            bidder_user_id="u-buyer",
+            bid_id="o-1",
+            space_id="sp-1",
+            offer_id="o-1",
+        )
+    )
+    assert (
+        "reason" not in federation_service.broadcast_to_space_members.await_args.args[2]
+    )
+
+
+def _bid_rejected(**overrides) -> BazaarOfferRejected:
+    return BazaarOfferRejected(
+        **{
+            "listing_post_id": "bzr-1",
+            "seller_user_id": "u-seller",
+            "bidder_user_id": "u-buyer",
+            "bid_id": "b-1",
+            "reason": "not to you",
+            "space_id": "sp-1",
+            **overrides,
+        }
+    )
+
+
+async def test_a_declined_bid_reaches_every_member_the_reason_only_the_bidder(
+    federation_service,
+):
+    bus = _outbound(
+        federation_service, seats=_seats("inst-buyer"), users=_users("u-seller")
+    )
+    await bus.publish(_bid_rejected())
+    call = federation_service.broadcast_to_space_members.await_args
+    assert call.args[1] == FederationEventType.BAZAAR_OFFER_UPDATED
+    assert call.args[2] == {
+        "bid_id": "b-1",
+        "listing_post_id": "bzr-1",
+        "space_id": "sp-1",
+        "status": "rejected",
+    }
+    assert "only_instances" not in call.kwargs
+    assert (
+        call.kwargs["min_proto_version"] == FederationCapability.MIN_FOR_BAZAAR_OFFERS
+    )
+    per_peer = call.kwargs["per_peer"]
+    base = dict(call.args[2])
+    assert await per_peer("inst-buyer", base) == {**base, "reason": "not to you"}
+    other = await per_peer("inst-other", base)
+    assert other == base and other is not base
+    assert base == call.args[2]  # never mutated
+
+
+@pytest.mark.parametrize(
+    ("label", "overrides", "seats", "users"),
+    [
+        ("no reason", {"reason": None}, "inst-buyer", ("u-seller",)),
+        ("bidder is ours", {}, "inst-buyer", ("u-seller", "u-buyer")),
+        ("bidder holds no seat", {}, None, ("u-seller",)),
+    ],
+)
+async def test_a_declined_bid_without_a_remote_bidder_carries_no_reason(
+    federation_service, label, overrides, seats, users
+):
+    bus = _outbound(federation_service, seats=_seats(seats), users=_users(*users))
+    await bus.publish(_bid_rejected(**overrides))
+    call = federation_service.broadcast_to_space_members.await_args
+    assert call is not None, label
+    assert call.kwargs["per_peer"] is None, label
+    assert "reason" not in call.args[2], label
+
+
+async def test_only_the_sellers_household_declines_a_bid(federation_service):
+    bus = _outbound(federation_service, seats=_seats("inst-buyer"), users=_users())
+    await bus.publish(_bid_rejected())
+    federation_service.broadcast_to_space_members.assert_not_awaited()
+
+
+async def test_a_failed_bid_decline_send_is_logged_not_raised(federation_service):
+    federation_service.broadcast_to_space_members.side_effect = RuntimeError("down")
+    bus = _outbound(
+        federation_service, seats=_seats("inst-buyer"), users=_users("u-seller")
+    )
+    await bus.publish(_bid_rejected())
+    federation_service.broadcast_to_space_members.assert_awaited_once()
 
 
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"offer_id": ""},  # a bid's rejection — not an offer
+        {"offer_id": "", "bid_id": ""},  # neither an offer nor a bid
         {"space_id": None},
         {"origin_instance_id": "inst-peer"},
     ],

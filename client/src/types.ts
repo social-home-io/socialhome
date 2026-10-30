@@ -1229,6 +1229,9 @@ export interface BazaarOffer {
   status: BazaarOfferStatus
   created_at: string
   responded_at: string | null
+  /** The seller's words when declined — only the seller and the offerer
+   *  ever get the row. ``null``: no reason given. */
+  rejection_reason?: string | null
 }
 
 // ─── Timetables (household school timetables, "Stundenplan") ─────────

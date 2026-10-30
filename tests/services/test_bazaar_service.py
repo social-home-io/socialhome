@@ -20,6 +20,7 @@ from socialhome.domain.events import (
 )
 from socialhome.domain.post import (
     BAZAAR_OFFER_MESSAGE_MAX_CHARS,
+    BAZAAR_REJECT_REASON_MAX_CHARS,
     BazaarListing,
     BazaarMode,
     BazaarStatus,
@@ -441,3 +442,123 @@ async def test_an_offers_answers_name_space_and_offer(env):
         _DEFAULT_SPACE_ID,
         "u-other",
     )
+
+
+# ─── A decline's reason (for the buyer, nobody else) ─────────────────────
+
+
+async def _rejections(env) -> list[BazaarOfferRejected]:
+    seen: list[BazaarOfferRejected] = []
+
+    async def _keep(evt):
+        seen.append(evt)
+
+    env.bus.subscribe(BazaarOfferRejected, _keep)
+    return seen
+
+
+async def test_a_declined_offer_keeps_the_sellers_reason(env):
+    seen = await _rejections(env)
+    pid = await _seed_listing(env, mode=BazaarMode.NEGOTIABLE, end_in=timedelta(days=1))
+    offer = await env.svc.make_offer(
+        listing_post_id=pid, offerer_user_id="u-buyer", amount=90
+    )
+    updated = await env.svc.reject_fixed_offer(
+        offer_id=offer.id, actor_user_id="u-seller", reason="  sold it at the door  "
+    )
+    assert updated.rejection_reason == "sold it at the door"
+    [evt] = seen
+    assert evt.reason == "sold it at the door"
+
+
+async def test_a_declined_bid_names_its_space_and_reason(env):
+    """The bid's answer crosses households (``space_id`` routes it)."""
+    seen = await _rejections(env)
+    pid = await _seed_listing(env, mode=BazaarMode.AUCTION, end_in=timedelta(days=1))
+    bid = await env.svc.place_bid(
+        listing_post_id=pid, bidder_user_id="u-bidder", amount=500
+    )
+    await env.svc.reject_offer(
+        bid_id=bid.id, actor_user_id="u-seller", reason="not to you"
+    )
+    [evt] = seen
+    assert (evt.bid_id, evt.offer_id, evt.space_id, evt.reason) == (
+        bid.id,
+        "",
+        _DEFAULT_SPACE_ID,
+        "not to you",
+    )
+    assert (await env.repo.get_bid(bid.id)).rejection_reason == "not to you"
+
+
+@pytest.mark.parametrize("reason", ["", "   ", None])
+async def test_a_blank_reason_is_no_reason(env, reason):
+    pid = await _seed_listing(env, mode=BazaarMode.NEGOTIABLE, end_in=timedelta(days=1))
+    offer = await env.svc.make_offer(
+        listing_post_id=pid, offerer_user_id="u-buyer", amount=90
+    )
+    updated = await env.svc.reject_fixed_offer(
+        offer_id=offer.id, actor_user_id="u-seller", reason=reason
+    )
+    assert updated.rejection_reason is None
+
+
+@pytest.mark.parametrize(
+    "reason", ["x" * (BAZAAR_REJECT_REASON_MAX_CHARS + 1), 7, ["x"]]
+)
+async def test_a_reason_is_bounded_text(env, reason):
+    pid = await _seed_listing(env, mode=BazaarMode.NEGOTIABLE, end_in=timedelta(days=1))
+    offer = await env.svc.make_offer(
+        listing_post_id=pid, offerer_user_id="u-buyer", amount=90
+    )
+    with pytest.raises(ValueError):
+        await env.svc.reject_fixed_offer(
+            offer_id=offer.id, actor_user_id="u-seller", reason=reason
+        )
+    assert (await env.repo.get_offer(offer.id)).status == "pending"
+    auction = await _seed_listing(
+        env, mode=BazaarMode.AUCTION, end_in=timedelta(days=1)
+    )
+    bid = await env.svc.place_bid(
+        listing_post_id=auction, bidder_user_id="u-bidder", amount=500
+    )
+    with pytest.raises(ValueError):
+        await env.svc.reject_offer(
+            bid_id=bid.id, actor_user_id="u-seller", reason=reason
+        )
+    assert not (await env.repo.get_bid(bid.id)).rejected
+
+
+async def test_a_bids_reason_shows_to_the_seller_and_the_bidder_only(env):
+    pid = await _seed_listing(env, mode=BazaarMode.AUCTION, end_in=timedelta(days=1))
+    bid = await env.svc.place_bid(
+        listing_post_id=pid, bidder_user_id="u-bidder", amount=500
+    )
+    await env.svc.reject_offer(bid_id=bid.id, actor_user_id="u-seller", reason="no")
+    for viewer, expected in (
+        ("u-seller", "no"),
+        ("u-bidder", "no"),
+        ("u-someone", None),
+    ):
+        [row] = await env.svc.list_bids(pid, viewer_user_id=viewer)
+        assert row.rejected
+        assert row.rejection_reason == expected, viewer
+
+
+async def test_a_declined_high_bid_neither_sets_the_floor_nor_wins(env):
+    pid = await _seed_listing(env, mode=BazaarMode.AUCTION, end_in=timedelta(days=1))
+    high = await env.svc.place_bid(
+        listing_post_id=pid, bidder_user_id="u-bidder", amount=500
+    )
+    await env.svc.reject_offer(bid_id=high.id, actor_user_id="u-seller")
+    # 110 = start 100 + step 10 is enough again: the declined 500 is gone.
+    low = await env.svc.place_bid(
+        listing_post_id=pid, bidder_user_id="u-other", amount=110
+    )
+    await env.db.enqueue(
+        "UPDATE bazaar_listings SET end_time=? WHERE post_id=?",
+        ((datetime.now(UTC) - timedelta(minutes=1)).isoformat(), pid),
+    )
+    await env.svc.expire_due()
+    listing = await env.repo.get_listing(pid)
+    assert (listing.winner_user_id, listing.winning_price) == ("u-other", low.amount)

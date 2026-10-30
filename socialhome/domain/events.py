@@ -1145,12 +1145,14 @@ class BazaarListingCancelled(DomainEvent):
 
 @dataclass(slots=True, frozen=True)
 class BazaarOfferRejected(DomainEvent):
-    """Seller explicitly rejected an OFFER-mode bid."""
+    """Seller explicitly declined a bid or an offer."""
 
     listing_post_id: str
     seller_user_id: str
     bidder_user_id: str
     bid_id: str
+    #: The seller's words (≤ 280 characters) — for the bidder / offerer
+    #: only: it crosses households to theirs alone, sealed. Never in a push.
     reason: str | None = None
     space_id: str | None = None
     #: The rejected ``bazaar_offers`` row (v_73); empty for a bid.

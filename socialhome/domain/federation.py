@@ -339,8 +339,13 @@ class FederationEventType(str, enum.Enum):
     #: v_73 — an offer's answer, between the same two households only: the
     #: seller's household → the offerer's (``accepted`` / ``rejected``), the
     #: offerer's → the seller's (``withdrawn``). Payload (sealed):
-    #: ``offer_id``, ``listing_post_id``, ``status``, ``reason``. The sale
-    #: itself reaches every member household as ``BAZAAR_LISTING_UPDATED``.
+    #: ``offer_id``, ``listing_post_id``, ``status``, and for a rejection
+    #: the seller's ``reason`` (≤ 280 characters). The sale itself reaches
+    #: every member household as ``BAZAAR_LISTING_UPDATED``.
+    #: Keyed on ``bid_id`` instead (``status: rejected``) it is a declined
+    #: auction bid: the seller's household → every member household (each
+    #: mirrors the bid), the ``reason`` inside the bidder's household's
+    #: copy only. A v_73 receiver that knows only ``offer_id`` drops it.
     BAZAAR_OFFER_UPDATED = "bazaar_offer_updated"
 
     # ── Space encryption key exchange ──

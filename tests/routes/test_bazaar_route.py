@@ -623,3 +623,43 @@ async def test_create_listing_with_non_local_image_is_422(client):
     body = await r.json()
     assert body["error"]["code"] == "INVALID_MEDIA_URL"
     assert body["error"]["detail"].startswith("image_urls ")
+
+
+# ─── A decline's reason ────────────────────────────────────────────────────
+
+
+async def test_a_declined_offer_shows_its_reason_to_the_seller(client):
+    await _seed_listing(client, listing_id="lst-why")  # self is seller
+    await client._db.enqueue(
+        "INSERT INTO bazaar_offers(id, listing_post_id, offerer_user_id,"
+        " amount, status) VALUES('why-1','lst-why','u-z',100,'pending')",
+    )
+    r = await client.post(
+        "/api/bazaar/lst-why/offers/why-1/reject",
+        json={"reason": "already promised to a neighbour"},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 200
+    assert (await r.json())["rejection_reason"] == "already promised to a neighbour"
+    listed = await client.get("/api/bazaar/lst-why/offers", headers=_auth(client._tok))
+    [row] = await listed.json()
+    assert row["rejection_reason"] == "already promised to a neighbour"
+
+
+async def test_an_over_long_reason_is_refused(client):
+    await _seed_listing(client, listing_id="lst-long")  # self is seller
+    await client._db.enqueue(
+        "INSERT INTO bazaar_offers(id, listing_post_id, offerer_user_id,"
+        " amount, status) VALUES('long-1','lst-long','u-z',100,'pending')",
+    )
+    await client._db.enqueue(
+        "INSERT INTO bazaar_bids(id, listing_post_id, bidder_user_id, amount)"
+        " VALUES('long-b','lst-long','u-z',100)",
+    )
+    for path in ("offers/long-1/reject", "bids/long-b/reject"):
+        r = await client.post(
+            f"/api/bazaar/lst-long/{path}",
+            json={"reason": "x" * 281},
+            headers=_auth(client._tok),
+        )
+        assert r.status == 422, path

@@ -162,6 +162,12 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
   const myBid = me
     ? activeBids.filter(b => b.bidder_user_id === me).at(-1) ?? null
     : null
+  // The bidder's latest bid, when the seller declined it and nothing newer
+  // of theirs stands — they read why (the reason reaches only them).
+  const myLatestBid = me
+    ? bids.filter(b => b.bidder_user_id === me && !b.withdrawn).at(-1) ?? null
+    : null
+  const myDeclinedBid = myLatestBid?.rejected ? myLatestBid : null
   const closed = listing.status !== 'active'
   const countdown = formatCountdown(listing.end_time)
 
@@ -219,7 +225,9 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
   }
 
   const rejectOffer = async (bidId: string) => {
-    const reason = prompt(t('bazaar.card.reason_prompt')) ?? ''
+    const typed = prompt(t('bazaar.card.reason_prompt'))
+    if (typed === null) return  // Cancel backs out; OK with no text declines.
+    const reason = typed.trim()
     setBusy(true)
     try {
       await api.post(
@@ -426,6 +434,21 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
                   onClick={() => void withdraw(myBid.id)}>
             {t('bazaar.withdraw')}
           </button>
+        </div>
+      )}
+
+      {!closed && myDeclinedBid && !isSeller && (
+        <div class="sh-bazaar-mybid sh-bazaar-mybid--declined" role="status">
+          <span>
+            {t('bazaar.card.your_bid_declined', {
+              amount: formatBazaarAmount(myDeclinedBid.amount, listing.currency),
+            })}
+          </span>
+          {myDeclinedBid.rejection_reason && (
+            <p class="sh-bazaar-reason sh-muted">
+              {t('bazaar.offers.reason', { reason: myDeclinedBid.rejection_reason })}
+            </p>
+          )}
         </div>
       )}
 
