@@ -48,8 +48,8 @@ refused at the first §24.11 step as an unknown type (`400` on the inbox,
 dropped on the DataChannel) before anything is looked up or stored. A
 `dm_contact_requested` notification kept from an older build reads from its
 stored title and resolves (`done`) on the next "Needs you" look; the
-`dm_contact_requests` table stays on disk, unused and exported with a
-person's data.
+`dm_contact_requests` table and its old rows were dropped in migration
+`0132`.
 
 **History pull**
 

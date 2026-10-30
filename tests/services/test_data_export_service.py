@@ -80,22 +80,28 @@ async def test_export_excludes_other_users_data(env):
     assert "feed_posts" not in out.tables
 
 
-# ─── Two-condition WHERE (e.g. dm_contact_requests / call_sessions) ─────
+# ─── Two-condition WHERE (e.g. call_sessions) ────────────────────────────
 
 
 async def test_export_handles_two_param_clauses(env):
     db, svc = env
     await db.enqueue(
-        "INSERT INTO dm_contact_requests(id, from_user_id, to_user_id)"
-        " VALUES('r1', 'alice-id', 'bob-id')",
+        "INSERT INTO call_sessions(id, initiator_user_id, callee_user_id, call_type)"
+        " VALUES('c1', 'alice-id', 'bob-id', 'audio')",
     )
     await db.enqueue(
-        "INSERT INTO dm_contact_requests(id, from_user_id, to_user_id)"
-        " VALUES('r2', 'bob-id', 'alice-id')",
+        "INSERT INTO call_sessions(id, initiator_user_id, callee_user_id, call_type)"
+        " VALUES('c2', 'bob-id', 'alice-id', 'video')",
     )
     out = await svc.export_for_user("alice-id")
-    assert "dm_contact_requests" in out.tables
-    assert len(out.tables["dm_contact_requests"]) == 2
+    assert "call_sessions" in out.tables
+    assert len(out.tables["call_sessions"]) == 2
+
+
+def test_dropped_contact_request_table_is_not_exported():
+    """Migration 0132 dropped ``dm_contact_requests``; the export no longer
+    names it, so no export queries a table that is gone."""
+    assert "dm_contact_requests" not in {t for t, _ in EXPORTABLE_QUERIES}
 
 
 # ─── Skip unknown tables silently ───────────────────────────────────────
