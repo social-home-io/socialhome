@@ -1074,6 +1074,13 @@ class BazaarBidPlaced(DomainEvent):
     bid_id: str = ""
     space_id: str | None = None
     message: str | None = None
+    #: Set instead of ``bid_id`` for an offer on a fixed-price / negotiable
+    #: listing (``bazaar_offers``, v_73) — it goes to the seller's household
+    #: only, never to the whole space like a bid.
+    offer_id: str = ""
+    #: Set when federation inbound applied it, so the outbound bridge does
+    #: not echo the peer's own bid / offer back.
+    origin_instance_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -1089,6 +1096,10 @@ class BazaarOfferAccepted(DomainEvent):
     #: accepted=True flag onto their local row.
     bid_id: str = ""
     space_id: str | None = None
+    #: The accepted ``bazaar_offers`` row (v_73), instead of ``bid_id``.
+    offer_id: str = ""
+    #: Set by federation inbound — the outbound bridge never echoes it.
+    origin_instance_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -1141,6 +1152,11 @@ class BazaarOfferRejected(DomainEvent):
     bidder_user_id: str
     bid_id: str
     reason: str | None = None
+    space_id: str | None = None
+    #: The rejected ``bazaar_offers`` row (v_73); empty for a bid.
+    offer_id: str = ""
+    #: Set by federation inbound — the outbound bridge never echoes it.
+    origin_instance_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 
@@ -1152,6 +1168,11 @@ class BazaarBidWithdrawn(DomainEvent):
     seller_user_id: str
     bidder_user_id: str
     bid_id: str
+    space_id: str | None = None
+    #: The withdrawn ``bazaar_offers`` row (v_73); empty for a bid.
+    offer_id: str = ""
+    #: Set by federation inbound — the outbound bridge never echoes it.
+    origin_instance_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
 
 

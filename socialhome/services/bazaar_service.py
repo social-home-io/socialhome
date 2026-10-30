@@ -34,6 +34,7 @@ from ..domain.post import (
     BAZAAR_CURRENCIES,
     BAZAAR_MAX_DURATION_DAYS,
     BAZAAR_MAX_IMAGES,
+    BAZAAR_OFFER_MESSAGE_MAX_CHARS,
     BazaarBid,
     BazaarListing,
     BazaarMode,
@@ -705,6 +706,13 @@ class BazaarService(ProtectionGateMixin):
             raise OwnListingError(status=403)
         if int(amount) <= 0:
             raise ValueError("amount must be positive")
+        message = message or None
+        if message is not None and not isinstance(message, str):
+            raise ValueError("message must be text")
+        if message is not None and len(message) > BAZAAR_OFFER_MESSAGE_MAX_CHARS:
+            raise ValueError(
+                f"message must be at most {BAZAAR_OFFER_MESSAGE_MAX_CHARS} characters"
+            )
 
         offer = new_offer(
             listing_post_id=listing_post_id,
@@ -715,7 +723,8 @@ class BazaarService(ProtectionGateMixin):
         await self._repo.create_offer(offer)
         # Reuse BazaarBidPlaced so the seller notification path handles
         # both bid + offer uniformly. ``new_end_time`` is the listing's
-        # own end_time — fixed-price offers don't anti-snipe.
+        # own end_time — fixed-price offers don't anti-snipe. ``offer_id``
+        # (not ``bid_id``) sends it to the seller's household only (v_73).
         await self._bus.publish(
             BazaarBidPlaced(
                 listing_post_id=listing_post_id,
@@ -723,6 +732,9 @@ class BazaarService(ProtectionGateMixin):
                 bidder_user_id=offerer_user_id,
                 amount=int(amount),
                 new_end_time=listing.end_time,
+                space_id=listing.space_id,
+                message=message,
+                offer_id=offer.id,
             )
         )
         return offer
@@ -774,6 +786,8 @@ class BazaarService(ProtectionGateMixin):
                 seller_user_id=listing.seller_user_id,
                 buyer_user_id=offer.offerer_user_id,
                 price=offer.amount,
+                space_id=listing.space_id,
+                offer_id=offer_id,
             )
         )
         return updated
@@ -806,6 +820,8 @@ class BazaarService(ProtectionGateMixin):
                 bidder_user_id=offer.offerer_user_id,
                 bid_id=offer_id,
                 reason=reason,
+                space_id=listing.space_id,
+                offer_id=offer_id,
             )
         )
         return updated
@@ -824,7 +840,7 @@ class BazaarService(ProtectionGateMixin):
         offer = await self._repo.get_offer(offer_id)
         if offer is None:
             raise OfferNotFoundError(offer_id)
-        await self._listing_of_bid_or_offer(
+        listing = await self._listing_of_bid_or_offer(
             offer.listing_post_id,
             actor_user_id,
             owner_user_id=offer.offerer_user_id,
@@ -832,7 +848,19 @@ class BazaarService(ProtectionGateMixin):
         )
         if actor_user_id != offer.offerer_user_id:
             raise PermissionError("only the offerer may withdraw")
-        return await self._repo.update_offer_status(offer_id, "withdrawn")
+        updated = await self._repo.update_offer_status(offer_id, "withdrawn")
+        # The seller's household (another one, v_73) must not accept it.
+        await self._bus.publish(
+            BazaarBidWithdrawn(
+                listing_post_id=offer.listing_post_id,
+                seller_user_id=listing.seller_user_id,
+                bidder_user_id=offer.offerer_user_id,
+                bid_id=offer_id,
+                space_id=listing.space_id,
+                offer_id=offer_id,
+            )
+        )
+        return updated
 
     async def list_offers(
         self,

@@ -13,10 +13,17 @@ from socialhome.db.database import AsyncDatabase
 from socialhome.domain.child_protection import AccountProtectedError
 from socialhome.domain.events import (
     BazaarBidPlaced,
+    BazaarBidWithdrawn,
     BazaarListingExpired,
     BazaarOfferAccepted,
+    BazaarOfferRejected,
 )
-from socialhome.domain.post import BazaarListing, BazaarMode, BazaarStatus
+from socialhome.domain.post import (
+    BAZAAR_OFFER_MESSAGE_MAX_CHARS,
+    BazaarListing,
+    BazaarMode,
+    BazaarStatus,
+)
 from socialhome.domain.space import SpaceMember
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.bazaar_repo import SqliteBazaarRepo, new_bid
@@ -347,3 +354,90 @@ async def test_a_protected_high_bidder_never_wins_the_auction(env):
     await env.svc.expire_due()
     listing = await env.repo.get_listing(pid)
     assert listing.status == BazaarStatus.EXPIRED
+
+
+# ─── Offers carry what the cross-household bridge needs (v_73) ────────
+
+
+async def test_an_offer_names_its_space_and_offer_for_the_seller(env):
+    """The bug: the offer's bus event had no ``space_id`` / id, so it never
+    left the buyer's household. It now names both — and an ``offer_id``,
+    not a ``bid_id``, so it is never fanned out like a bid."""
+    pid = await _seed_listing(env, mode=BazaarMode.NEGOTIABLE, end_in=timedelta(days=1))
+    offer = await env.svc.make_offer(
+        listing_post_id=pid, offerer_user_id="u-buyer", amount=90, message="hi"
+    )
+    [evt] = [e for e in env.events if isinstance(e, BazaarBidPlaced)]
+    assert (evt.space_id, evt.offer_id, evt.bid_id, evt.message) == (
+        _DEFAULT_SPACE_ID,
+        offer.id,
+        "",
+        "hi",
+    )
+
+
+async def test_an_empty_offer_message_is_none(env):
+    pid = await _seed_listing(env, mode=BazaarMode.NEGOTIABLE, end_in=timedelta(days=1))
+    offer = await env.svc.make_offer(
+        listing_post_id=pid, offerer_user_id="u-buyer", amount=90, message=""
+    )
+    assert offer.message is None
+
+
+@pytest.mark.parametrize(
+    "message", ["x" * (BAZAAR_OFFER_MESSAGE_MAX_CHARS + 1), 7, ["x"]]
+)
+async def test_an_offer_message_is_bounded_text(env, message):
+    pid = await _seed_listing(env, mode=BazaarMode.NEGOTIABLE, end_in=timedelta(days=1))
+    with pytest.raises(ValueError):
+        await env.svc.make_offer(
+            listing_post_id=pid, offerer_user_id="u-buyer", amount=90, message=message
+        )
+    assert await env.repo.list_offers_for_listing(pid) == []
+
+
+async def test_an_offer_message_at_the_limit_is_kept(env):
+    pid = await _seed_listing(env, mode=BazaarMode.NEGOTIABLE, end_in=timedelta(days=1))
+    text = "x" * BAZAAR_OFFER_MESSAGE_MAX_CHARS
+    offer = await env.svc.make_offer(
+        listing_post_id=pid, offerer_user_id="u-buyer", amount=90, message=text
+    )
+    assert offer.message == text
+
+
+async def test_an_offers_answers_name_space_and_offer(env):
+    seen: list = []
+
+    async def _keep(evt):
+        seen.append(evt)
+
+    env.bus.subscribe(BazaarOfferRejected, _keep)
+    env.bus.subscribe(BazaarBidWithdrawn, _keep)
+    pid = await _seed_listing(env, mode=BazaarMode.NEGOTIABLE, end_in=timedelta(days=1))
+    first = await env.svc.make_offer(
+        listing_post_id=pid, offerer_user_id="u-buyer", amount=90
+    )
+    second = await env.svc.make_offer(
+        listing_post_id=pid, offerer_user_id="u-buyer", amount=95
+    )
+    third = await env.svc.make_offer(
+        listing_post_id=pid, offerer_user_id="u-other", amount=99
+    )
+    await env.svc.reject_fixed_offer(offer_id=first.id, actor_user_id="u-seller")
+    await env.svc.withdraw_fixed_offer(offer_id=second.id, actor_user_id="u-buyer")
+    await env.svc.accept_fixed_offer(offer_id=third.id, actor_user_id="u-seller")
+    rejected, withdrawn = seen
+    assert isinstance(rejected, BazaarOfferRejected)
+    assert (rejected.offer_id, rejected.space_id) == (first.id, _DEFAULT_SPACE_ID)
+    assert isinstance(withdrawn, BazaarBidWithdrawn)
+    assert (withdrawn.offer_id, withdrawn.space_id, withdrawn.seller_user_id) == (
+        second.id,
+        _DEFAULT_SPACE_ID,
+        "u-seller",
+    )
+    [accepted] = [e for e in env.events if isinstance(e, BazaarOfferAccepted)]
+    assert (accepted.offer_id, accepted.space_id, accepted.buyer_user_id) == (
+        third.id,
+        _DEFAULT_SPACE_ID,
+        "u-other",
+    )

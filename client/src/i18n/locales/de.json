@@ -1838,6 +1838,7 @@
   "capability.highlight_audience_change": "Ein weggenommenes Highlight bleibt weg",
   "capability.remote_report_answers": "Meldende in anderen Haushalten erfahren, dass ihre Meldung geprüft wurde",
   "capability.app_games_end_on_uninstall": "Spiele enden sauber, wenn der andere Haushalt die App entfernt",
+  "capability.bazaar_offers": "Angebote erreichen Verkäufer in anderen Haushalten",
   "space.settings_page.moderation.queue_meta": "Beiträge zum Prüfen, Beitrittsanfragen und Meldungen",
   "space.settings_page.moderation.days": "Tagen",
   "space.settings_page.danger.summary": "Archivieren, übergeben oder löschen",

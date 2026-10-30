@@ -2050,6 +2050,8 @@ def _wire_federation_stack(
         media_sync=space_media_sync_service,
         federation_repo=federation_repo,
         user_repo=user_repo,
+        # v_73 — an offer goes to the one household seating its seller.
+        remote_member_repo=space_remote_member_repo,
     )
 
     # DM history sync: reconcile missed messages when a peer reconnects.

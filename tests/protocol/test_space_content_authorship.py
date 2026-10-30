@@ -252,6 +252,7 @@ _SEED = [
             ("post-a-bare", "u-a", "bazaar"),
             ("post-a-sched", "u-a", "schedule"),
             ("post-l", LOCAL_USER, "text"),
+            ("post-l-listing", LOCAL_USER, "bazaar"),
             ("post-bot", "system-integration", "text"),
         )
     ],
@@ -419,6 +420,24 @@ _SEED = [
             " VALUES('bid-o', 'post-a-listing', 'u-o', 50)"
         ),
         (),
+    ),
+    # v_73 offers: our local user sells post-l-listing (u-o made an offer on
+    # it) and made an offer on u-a's listing.
+    (
+        (
+            "INSERT INTO bazaar_listings(post_id, space_id, seller_user_id, mode,"
+            " title, end_time, currency) VALUES('post-l-listing', ?, ?,"
+            " 'negotiable', 'Lamp', ?, 'EUR')"
+        ),
+        (SP, LOCAL_USER, _FAR),
+    ),
+    (
+        (
+            "INSERT INTO bazaar_offers(id, listing_post_id, offerer_user_id, amount)"
+            " VALUES('offer-o', 'post-l-listing', 'u-o', 40),"
+            " ('offer-l', 'post-a-listing', ?, 45)"
+        ),
+        (LOCAL_USER,),
     ),
     (
         (
@@ -846,6 +865,40 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         {"bid_id": "bid-o"},
         (AUTHOR,),
         (OTHER, ADMIN, HOST, MOD),
+    ),
+    # v_73 — an offer is the offerer's own; its answer the seller's own.
+    (
+        FET.BAZAAR_OFFER_MADE,
+        "offer as u-o on our seller's listing",
+        {
+            "offer_id": "offer-new",
+            "listing_post_id": "post-l-listing",
+            "offerer_user_id": "u-o",
+            "amount": 60,
+        },
+        (OTHER,),
+        (AUTHOR, ADMIN, HOST, MOD),
+    ),
+    (
+        FET.BAZAAR_OFFER_UPDATED,
+        "accept our user's offer on u-a's listing",
+        {"offer_id": "offer-l", "status": "accepted"},
+        (AUTHOR,),
+        (OTHER, ADMIN, HOST, MOD),
+    ),
+    (
+        FET.BAZAAR_OFFER_UPDATED,
+        "reject our user's offer on u-a's listing",
+        {"offer_id": "offer-l", "status": "rejected"},
+        (AUTHOR,),
+        (OTHER, ADMIN, HOST, MOD),
+    ),
+    (
+        FET.BAZAAR_OFFER_UPDATED,
+        "withdraw u-o's offer on our seller's listing",
+        {"offer_id": "offer-o", "status": "withdrawn"},
+        (OTHER,),
+        (AUTHOR, ADMIN, HOST, MOD),
     ),
     # ── Owned rows: the owner's household or a moderator ──
     (

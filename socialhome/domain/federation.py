@@ -329,6 +329,19 @@ class FederationEventType(str, enum.Enum):
     #: the matching ``mark_sold`` so winner_user_id / winning_price
     #: stay consistent.
     BAZAAR_OFFER_ACCEPTED = "bazaar_offer_accepted"
+    #: v_73 — a buyer's household → the SELLER's household only: an offer
+    #: on a fixed-price / negotiable listing (``bazaar_offers``, not a bid).
+    #: Offers are private to the seller and the offerer, so it never fans
+    #: out to the space: one targeted, sealed envelope. Payload (all
+    #: sealed): ``offer_id``, ``listing_post_id``, ``offerer_user_id``,
+    #: ``amount``, ``message``.
+    BAZAAR_OFFER_MADE = "bazaar_offer_made"
+    #: v_73 — an offer's answer, between the same two households only: the
+    #: seller's household → the offerer's (``accepted`` / ``rejected``), the
+    #: offerer's → the seller's (``withdrawn``). Payload (sealed):
+    #: ``offer_id``, ``listing_post_id``, ``status``, ``reason``. The sale
+    #: itself reaches every member household as ``BAZAAR_LISTING_UPDATED``.
+    BAZAAR_OFFER_UPDATED = "bazaar_offer_updated"
 
     # ── Space encryption key exchange ──
     SPACE_KEY_EXCHANGE = "space_key_exchange"
@@ -673,6 +686,8 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.BAZAAR_LISTING_UPDATED,
         FederationEventType.BAZAAR_BID_PLACED,
         FederationEventType.BAZAAR_OFFER_ACCEPTED,
+        FederationEventType.BAZAAR_OFFER_MADE,
+        FederationEventType.BAZAAR_OFFER_UPDATED,
         #: Space-scoped location pins and the space's own zone catalogue —
         #: a display layer inside the space, distinct from the household
         #: ``PRESENCE_UPDATED`` fan-out (which stays excluded).
@@ -851,6 +866,8 @@ SPACE_WRITE_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.BAZAAR_LISTING_UPDATED,
         FederationEventType.BAZAAR_BID_PLACED,
         FederationEventType.BAZAAR_OFFER_ACCEPTED,
+        FederationEventType.BAZAAR_OFFER_MADE,
+        FederationEventType.BAZAAR_OFFER_UPDATED,
         # ── Map: shared location pins and zones ──
         FederationEventType.SPACE_LOCATION_UPDATED,
         FederationEventType.SPACE_ZONE_UPSERTED,

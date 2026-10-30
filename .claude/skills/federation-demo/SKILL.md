@@ -724,6 +724,12 @@ Phases added after the initial publish are documented inline in
   receiver rules (only the other side can end a game) are the security
   tests in ``tests/protocol/test_app_session_scope.py``, and the two-
   household chess run lives in the ``apps-development-testing`` skill.
+  ``verify`` also pins v_73 (``MIN_FOR_BAZAAR_OFFERS``: an offer on a
+  fixed-price / negotiable listing goes to the seller's household only as
+  ``BAZAAR_OFFER_MADE``, its answer back as ``BAZAAR_OFFER_UPDATED``);
+  the five-household round trip, members-only delivery and the refused
+  forgeries / replay live in
+  ``tests/protocol/test_bazaar_offer_federation.py``.
 
 To iterate faster you can run the steps individually (``python
 harness.py up`` / ``pair`` / ``traffic`` / ``calendar`` / ``verify``

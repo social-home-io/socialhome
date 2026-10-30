@@ -486,6 +486,12 @@ class SpaceAuthorship:
         )
         return any(s.role in _WRITER_ROLES for s in seats)
 
+    async def is_local_user(self, user_id: str) -> bool:
+        """``user_id`` is one of OUR people — for the two-household flows
+        (a bazaar offer, v_73) that only the household of one named party
+        may receive."""
+        return await self._is_local_user(user_id)
+
     async def _is_local_user(self, user_id: str) -> bool:
         return await self._users.get_by_user_id(user_id) is not None
 

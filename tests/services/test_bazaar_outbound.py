@@ -13,11 +13,18 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from socialhome.domain.events import BazaarListingCreated
+from socialhome.domain.events import (
+    BazaarBidPlaced,
+    BazaarBidWithdrawn,
+    BazaarListingCreated,
+    BazaarOfferAccepted,
+    BazaarOfferRejected,
+)
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.post import BazaarListing, BazaarMode, BazaarStatus
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.space_remote_member_repo import SpaceRemoteMember
 from socialhome.services.bazaar_outbound import BazaarOutbound
 from socialhome.services.moderation_release import release_scope
 
@@ -405,6 +412,11 @@ async def test_offer_accepted_broadcasts(
         media_sync=media_sync,
         federation_repo=federation_repo,
     )
+    bazaar_repo.get_listing = AsyncMock(
+        return_value=_make_listing(
+            status=BazaarStatus.SOLD, winner_user_id="u-buyer", winning_price=4500
+        )
+    )
     await bus.publish(
         BazaarOfferAccepted(
             listing_post_id="bzr-1",
@@ -415,12 +427,16 @@ async def test_offer_accepted_broadcasts(
             space_id="sp-1",
         ),
     )
-    federation_service.broadcast_to_space_members.assert_awaited_once()
-    call = federation_service.broadcast_to_space_members.await_args
-    assert call.args[1] == FederationEventType.BAZAAR_OFFER_ACCEPTED
-    payload = call.args[2]
+    first, second = federation_service.broadcast_to_space_members.await_args_list
+    assert first.args[1] == FederationEventType.BAZAAR_OFFER_ACCEPTED
+    payload = first.args[2]
     assert payload["bid_id"] == "bid-1"
     assert payload["price"] == 4500
+    # The sale reaches every member household too: the bid row's flag alone
+    # left the listing "active" everywhere but on the seller's household.
+    assert second.args[1] == FederationEventType.BAZAAR_LISTING_UPDATED
+    assert second.args[2]["status"] == "sold"
+    assert second.args[2]["winner_user_id"] == "u-buyer"
 
 
 async def test_bid_placed_without_space_id_skips_broadcast(
@@ -536,3 +552,291 @@ async def test_a_listing_released_with_its_post_carries_the_approval_block(
         )
     payload = federation_service.broadcast_to_space_members.await_args.args[2]
     assert payload["moderation"] == {"item_id": "item-1", "approved_by": "u-mod"}
+
+
+# ─── Offers (v_73) — the seller's and the offerer's household only ──────
+
+
+def _seats(instance_id: str | None = "inst-seller", *, tombstoned: bool = False):
+    seats = MagicMock()
+    row = (
+        None
+        if instance_id is None
+        else SpaceRemoteMember(
+            space_id="sp-1",
+            instance_id=instance_id,
+            user_id="u-x",
+            tombstoned=tombstoned,
+        )
+    )
+    seats.get_including_tombstones = AsyncMock(return_value=row)
+    return seats
+
+
+def _users(*ours: str):
+    users = MagicMock()
+
+    async def _get(user_id):
+        return object() if user_id in ours else None
+
+    users.get_by_user_id = AsyncMock(side_effect=_get)
+    return users
+
+
+def _outbound(federation_service, *, seats=None, users=None, listing=None):
+    bus = EventBus()
+    bazaar_repo = MagicMock()
+    bazaar_repo.get_listing = AsyncMock(return_value=listing or _make_listing())
+    BazaarOutbound(
+        bus=bus,
+        federation_service=federation_service,
+        bazaar_repo=bazaar_repo,
+        user_repo=users if users is not None else _users(),
+        remote_member_repo=seats if seats is not None else _seats(),
+    )
+    return bus
+
+
+def _offer_placed(**overrides) -> BazaarBidPlaced:
+    return BazaarBidPlaced(
+        **{
+            "listing_post_id": "bzr-1",
+            "seller_user_id": "u-seller",
+            "bidder_user_id": "u-buyer",
+            "amount": 9000,
+            "new_end_time": "2026-06-01T00:00:00+00:00",
+            "space_id": "sp-1",
+            "message": "cash on Saturday?",
+            "offer_id": "o-1",
+            **overrides,
+        }
+    )
+
+
+async def test_an_offer_goes_to_the_sellers_household_only(federation_service):
+    seats = _seats("inst-seller")
+    bus = _outbound(federation_service, seats=seats)
+    await bus.publish(_offer_placed())
+    federation_service.broadcast_to_space_members.assert_awaited_once()
+    call = federation_service.broadcast_to_space_members.await_args
+    assert call.args[0] == "sp-1"
+    assert call.args[1] == FederationEventType.BAZAAR_OFFER_MADE
+    assert call.args[2] == {
+        "offer_id": "o-1",
+        "listing_post_id": "bzr-1",
+        "space_id": "sp-1",
+        "offerer_user_id": "u-buyer",
+        "amount": 9000,
+        "message": "cash on Saturday?",
+    }
+    assert call.kwargs["only_instances"] == frozenset({"inst-seller"})
+    assert (
+        call.kwargs["min_proto_version"] == FederationCapability.MIN_FOR_BAZAAR_OFFERS
+    )
+    seats.get_including_tombstones.assert_awaited_once_with("sp-1", "", "u-seller")
+
+
+@pytest.mark.parametrize(
+    ("label", "seats", "users", "event"),
+    [
+        ("the seller is ours", "live", ("u-seller",), {}),
+        ("the seller holds no seat", "none", (), {}),
+        ("the seller's seat is gone", "tombstoned", (), {}),
+        ("applied from a peer", "live", (), {"origin_instance_id": "inst-peer"}),
+        ("no space", "live", (), {"space_id": None}),
+    ],
+)
+async def test_an_offer_that_stays_home(federation_service, label, seats, users, event):
+    seat_repo = {
+        "live": _seats(),
+        "none": _seats(None),
+        "tombstoned": _seats(tombstoned=True),
+    }[seats]
+    bus = _outbound(federation_service, seats=seat_repo, users=_users(*users))
+    await bus.publish(_offer_placed(**event))
+    assert federation_service.broadcast_to_space_members.await_count == 0, label
+
+
+async def test_without_a_roster_offers_stay_home(federation_service):
+    bus = EventBus()
+    BazaarOutbound(
+        bus=bus,
+        federation_service=federation_service,
+        bazaar_repo=MagicMock(),
+        user_repo=_users(),
+    )
+    await bus.publish(_offer_placed())
+    federation_service.broadcast_to_space_members.assert_not_awaited()
+
+
+async def test_a_failed_offer_send_is_logged_not_raised(federation_service, caplog):
+    federation_service.broadcast_to_space_members = AsyncMock(
+        side_effect=RuntimeError("down")
+    )
+    bus = _outbound(federation_service)
+    with caplog.at_level("ERROR"):
+        await bus.publish(_offer_placed())
+    assert "bazaar_offer_made send failed" in caplog.text
+
+
+async def test_an_accepted_offer_answers_the_buyer_and_announces_the_sale(
+    federation_service,
+):
+    seats = _seats("inst-buyer")
+    bus = _outbound(
+        federation_service,
+        seats=seats,
+        users=_users("u-seller"),
+        listing=_make_listing(
+            status=BazaarStatus.SOLD, winner_user_id="u-buyer", winning_price=9000
+        ),
+    )
+    await bus.publish(
+        BazaarOfferAccepted(
+            listing_post_id="bzr-1",
+            seller_user_id="u-seller",
+            buyer_user_id="u-buyer",
+            price=9000,
+            space_id="sp-1",
+            offer_id="o-1",
+        )
+    )
+    answer, sale = federation_service.broadcast_to_space_members.await_args_list
+    assert answer.args[1] == FederationEventType.BAZAAR_OFFER_UPDATED
+    assert answer.args[2] == {
+        "offer_id": "o-1",
+        "listing_post_id": "bzr-1",
+        "space_id": "sp-1",
+        "status": "accepted",
+    }
+    assert answer.kwargs["only_instances"] == frozenset({"inst-buyer"})
+    seats.get_including_tombstones.assert_awaited_once_with("sp-1", "", "u-buyer")
+    assert sale.args[1] == FederationEventType.BAZAAR_LISTING_UPDATED
+    assert "only_instances" not in sale.kwargs
+
+
+async def test_a_mirrored_acceptance_is_never_echoed(federation_service):
+    bus = _outbound(federation_service, users=_users("u-seller"))
+    await bus.publish(
+        BazaarOfferAccepted(
+            listing_post_id="bzr-1",
+            seller_user_id="u-seller",
+            buyer_user_id="u-buyer",
+            price=9000,
+            space_id="sp-1",
+            offer_id="o-1",
+            origin_instance_id="inst-peer",
+        )
+    )
+    federation_service.broadcast_to_space_members.assert_not_awaited()
+
+
+async def test_a_rejected_offer_answers_the_buyer_only(federation_service):
+    seats = _seats("inst-buyer")
+    bus = _outbound(federation_service, seats=seats, users=_users("u-seller"))
+    await bus.publish(
+        BazaarOfferRejected(
+            listing_post_id="bzr-1",
+            seller_user_id="u-seller",
+            bidder_user_id="u-buyer",
+            bid_id="o-1",
+            reason="too low, sorry",
+            space_id="sp-1",
+            offer_id="o-1",
+        )
+    )
+    call = federation_service.broadcast_to_space_members.await_args
+    assert call.args[1] == FederationEventType.BAZAAR_OFFER_UPDATED
+    # No reason text crosses: the offerer's household keeps none.
+    assert call.args[2] == {
+        "offer_id": "o-1",
+        "listing_post_id": "bzr-1",
+        "space_id": "sp-1",
+        "status": "rejected",
+    }
+    assert call.kwargs["only_instances"] == frozenset({"inst-buyer"})
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"offer_id": ""},  # a bid's rejection — not an offer
+        {"space_id": None},
+        {"origin_instance_id": "inst-peer"},
+    ],
+)
+async def test_a_rejection_that_is_not_ours_to_send(federation_service, overrides):
+    bus = _outbound(federation_service, users=_users("u-seller"))
+    await bus.publish(
+        BazaarOfferRejected(
+            **{
+                "listing_post_id": "bzr-1",
+                "seller_user_id": "u-seller",
+                "bidder_user_id": "u-buyer",
+                "bid_id": "o-1",
+                "space_id": "sp-1",
+                "offer_id": "o-1",
+                **overrides,
+            }
+        )
+    )
+    federation_service.broadcast_to_space_members.assert_not_awaited()
+
+
+async def test_a_withdrawn_offer_tells_the_sellers_household(federation_service):
+    seats = _seats("inst-seller")
+    bus = _outbound(federation_service, seats=seats, users=_users("u-buyer"))
+    await bus.publish(
+        BazaarBidWithdrawn(
+            listing_post_id="bzr-1",
+            seller_user_id="u-seller",
+            bidder_user_id="u-buyer",
+            bid_id="o-1",
+            space_id="sp-1",
+            offer_id="o-1",
+        )
+    )
+    call = federation_service.broadcast_to_space_members.await_args
+    assert call.args[1] == FederationEventType.BAZAAR_OFFER_UPDATED
+    assert call.args[2]["status"] == "withdrawn"
+    assert call.kwargs["only_instances"] == frozenset({"inst-seller"})
+    seats.get_including_tombstones.assert_awaited_once_with("sp-1", "", "u-seller")
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [{"offer_id": ""}, {"space_id": None}, {"origin_instance_id": "inst-peer"}],
+)
+async def test_a_withdrawal_that_is_not_ours_to_send(federation_service, overrides):
+    bus = _outbound(federation_service)
+    await bus.publish(
+        BazaarBidWithdrawn(
+            **{
+                "listing_post_id": "bzr-1",
+                "seller_user_id": "u-seller",
+                "bidder_user_id": "u-buyer",
+                "bid_id": "o-1",
+                "space_id": "sp-1",
+                "offer_id": "o-1",
+                **overrides,
+            }
+        )
+    )
+    federation_service.broadcast_to_space_members.assert_not_awaited()
+
+
+async def test_a_mirrored_bid_is_never_echoed(federation_service):
+    bus = _outbound(federation_service)
+    await bus.publish(
+        BazaarBidPlaced(
+            listing_post_id="bzr-1",
+            seller_user_id="u-seller",
+            bidder_user_id="u-bidder",
+            amount=4200,
+            new_end_time="2026-06-01T00:00:00+00:00",
+            bid_id="bid-1",
+            space_id="sp-1",
+            origin_instance_id="inst-peer",
+        )
+    )
+    federation_service.broadcast_to_space_members.assert_not_awaited()
