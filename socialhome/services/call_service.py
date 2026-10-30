@@ -1184,9 +1184,11 @@ class CallSignalingService(BusPublisherMixin, ProtectionGateMixin):
                     self._per_user.pop(u, None)
 
     async def _is_system_chat(self, conversation_id: str) -> bool:
-        """``conversation_id`` is a system chat (household / space chat)."""
+        """``conversation_id`` is no DM a call may start in: a system chat
+        (household / space chat) or a listing thread (its other person may
+        be on a household we only share a space with)."""
         conv = await self._conv_repo.get(conversation_id)
-        return conv is not None and conv.is_system
+        return conv is not None and not conv.federates_as_dm
 
     async def _refuse_system_chat(self, conversation_id: str) -> None:
         """No call starts or grows inside a system chat — it is not a DM."""

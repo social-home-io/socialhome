@@ -4,7 +4,7 @@ import { signal, type Signal } from '@preact/signals'
 import { useLocation } from 'preact-iso'
 import { api } from '@/api'
 import { ws } from '@/ws'
-import type { Message } from '@/types'
+import type { ListingThreadInfo, Message } from '@/types'
 import { DmThreadSkeleton } from '@/components/Skeleton'
 import { Button } from '@/components/Button'
 import { VoiceRecordButton } from '@/components/VoiceRecordButton'
@@ -28,6 +28,7 @@ import { LocationPicker, type LocationDraft } from '@/components/LocationPicker'
 import { t, formatLocale, isOne } from '@/i18n/i18n'
 import { formatCoords, parseDmLocation, toDmLocationContent } from '@/utils/dmLocation'
 import { ComposerAttachMenu } from './ComposerAttachMenu'
+import { ListingThreadCard } from './ListingThreadCard'
 import { DmLocationMessage } from './DmLocationMessage'
 import { GroupInfoDialog } from './GroupInfoDialog'
 import { MuteButton } from './ConversationMute'
@@ -310,6 +311,8 @@ interface ThreadMember {
 interface ThreadInfo {
   type: string
   name: string | null
+  /** An "Ask the seller" thread: its listing card and state. */
+  bazaar_listing: ListingThreadInfo | null
   managed_here: boolean
   /** The viewer's own mute of this thread (``null`` = not muted). */
   muted_until: string | null
@@ -328,6 +331,7 @@ interface ConversationRow {
   last_read_at?: string | null
   muted_until?: string | null
   notif_level?: string
+  bazaar_listing?: ListingThreadInfo | null
 }
 
 /** A thread's metadata handed in by the host instead of fetched — for a
@@ -354,6 +358,7 @@ function toThreadInfo(row: ConversationRow | null | undefined): ThreadInfo | nul
   return {
     type: row.type ?? 'dm',
     name: row.name ?? null,
+    bazaar_listing: row.bazaar_listing ?? null,
     managed_here: row.managed_here === true,
     muted_until: row.muted_until ?? null,
     notif_level: row.notif_level === 'mentions' ? 'mentions' : 'all',
@@ -364,6 +369,7 @@ function metaToThreadInfo(meta: ConversationMeta): ThreadInfo {
   return {
     type: meta.type,
     name: meta.name,
+    bazaar_listing: null,
     managed_here: meta.managed_here === true,
     muted_until: meta.muted_until,
     notif_level: meta.notif_level,
@@ -741,16 +747,16 @@ export function ConversationView({
   conversationId,
   embedded = false,
   showHeader = true,
-  allowAttachments = true,
+  allowAttachments: allowAttachmentsProp = true,
   showGroupInfo = true,
-  allowCalls = true,
+  allowCalls: allowCallsProp = true,
   onLeave,
   meta,
   allowDelete = false,
   canModerate = false,
-  readOnly = false,
-  readOnlyNote,
-  emptyNote,
+  readOnly: readOnlyProp = false,
+  readOnlyNote: readOnlyNoteProp,
+  emptyNote: emptyNoteProp,
   logLabel,
 }: ConversationViewProps) {
   const convId = conversationId
@@ -781,6 +787,22 @@ export function ConversationView({
     threadInfo, groupInfoOpen, replyTo, editing, contextSheetFor,
     reactionPickerFor, gaps,
   } = s
+  // An "Ask the seller" thread (v_73): text only (no attachments, no
+  // calls, no edits or reactions), its listing card on top, and
+  // read-only once it closed — the server refuses the rest anyway.
+  const listingCard = threadInfo.value?.bazaar_listing ?? null
+  const listingClosed = listingCard !== null && !listingCard.writable
+  const allowAttachments = allowAttachmentsProp && listingCard === null
+  const allowCalls = allowCallsProp && listingCard === null
+  const allowChanges = listingCard === null
+  const readOnly = readOnlyProp || listingClosed
+  const readOnlyNote = listingClosed ? t('bazaar.ask.closed_note') : readOnlyNoteProp
+  const emptyNote = emptyNoteProp
+    ?? (listingCard !== null && listingCard.writable
+      ? (listingCard.role === 'buyer'
+        ? t('bazaar.ask.empty_buyer')
+        : t('bazaar.ask.empty_seller'))
+      : undefined)
   const reloadKey = reloadNonce.value
   // A host-given ``meta`` changed (its own mute / level control): keep
   // the header and Group info in step without a refetch.
@@ -2445,6 +2467,13 @@ export function ConversationView({
         )}
       </div>
       )}
+      {listingCard && (
+        <ListingThreadCard
+          card={listingCard}
+          otherName={peers[0]?.display_name ?? null}
+          onBlocked={() => { location.route('/dms') }}
+        />
+      )}
       {gaps.value.length > 0 && (
         <div class="sh-dm-gap-banner" role="status" aria-live="polite">
           <span aria-hidden="true">⚠️</span>
@@ -2822,7 +2851,7 @@ export function ConversationView({
                             + (info.mine ? ' sh-reaction-chip--mine' : '')
                           }
                           aria-pressed={info.mine}
-                          disabled={readOnly}
+                          disabled={readOnly || !allowChanges}
                           aria-label={
                             info.mine
                               ? t('dms.reaction_remove_aria', { emoji, n: String(info.count) })
@@ -2843,7 +2872,7 @@ export function ConversationView({
               )}
               {!m.deleted && (
                 <Fragment>
-                  {!readOnly && (
+                  {!readOnly && allowChanges && (
                   <button
                     type="button"
                     class="sh-message-react-btn"
@@ -2854,7 +2883,7 @@ export function ConversationView({
                     😊
                   </button>
                   )}
-                  {!readOnly && canEditMessage(m, myUserId) && (
+                  {!readOnly && allowChanges && canEditMessage(m, myUserId) && (
                     <button
                       type="button"
                       class="sh-message-react-btn sh-message-edit-btn"
@@ -3143,7 +3172,7 @@ export function ConversationView({
                 onClick: () => { void copyMessageText(target) },
               }]
             : []),
-          ...(!readOnly && canEditMessage(target, myUserId)
+          ...(!readOnly && allowChanges && canEditMessage(target, myUserId)
             ? [{
                 label: t('common.edit'),
                 glyph: '✎',
@@ -3171,8 +3200,12 @@ export function ConversationView({
         return (
           <MessageContextSheet
             actions={actions}
-            onReact={readOnly ? undefined : (emoji) => { void toggleReaction(target, emoji) }}
-            onPickMore={readOnly ? undefined : () => { reactionPickerFor.value = target }}
+            onReact={readOnly || !allowChanges
+              ? undefined
+              : (emoji) => { void toggleReaction(target, emoji) }}
+            onPickMore={readOnly || !allowChanges
+              ? undefined
+              : () => { reactionPickerFor.value = target }}
             onClose={() => { contextSheetFor.value = null }}
           />
         )

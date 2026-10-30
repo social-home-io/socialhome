@@ -297,6 +297,8 @@ from .services.auto_pair_inbox import AutoPairInbox
 from .services.backup_service import BackupService
 from .services.bazaar_outbound import BazaarOutbound
 from .services.bazaar_service import BazaarExpiryScheduler, BazaarService
+from .services.bazaar_thread_outbound import BazaarThreadOutbound
+from .services.bazaar_thread_service import BazaarThreadService
 from .services.bot_bridge_service import BotBridgeService
 from .services.calendar_feed_bridge import CalendarFeedBridge
 from .services.calendar_import_service import CalendarImportService
@@ -315,6 +317,7 @@ from .services.data_export_service import DataExportService
 from .services.dm_media_sync_service import DmMediaSyncService
 from .services.dm_routing_service import DmRoutingService
 from .services.federation_inbound import (
+    BazaarThreadInboundHandlers,
     PairingInboundHandlers,
     PersonalCalendarInboundHandlers,
     ResyncInboundHandlers,
@@ -2328,6 +2331,45 @@ def _build_space_chat_federation(
     app[K.space_sync_receiver_key].attach_chat_sink(handlers)
 
 
+def _build_bazaar_threads_federation(
+    *,
+    bus: EventBus,
+    federation_service: FederationService,
+    federation_repo: AbstractFederationRepo,
+    threads: BazaarThreadService,
+    bazaar_repo,
+    space_repo,
+    remote_member_repo,
+    conversation_repo,
+    user_repo,
+    child_protection: ChildProtectionService,
+) -> None:
+    """Wire "Ask the seller" threads to the other households (v_74).
+
+    The thread service learns whether the seller's household is paired or
+    new enough; the outbound sends each local message to the other person's
+    household only; the inbound handler sits on the event registry.
+    """
+    threads.attach_federation(federation_service, federation_repo)
+    BazaarThreadOutbound(
+        bus=bus,
+        federation_service=federation_service,
+        conversation_repo=conversation_repo,
+        bazaar_repo=bazaar_repo,
+    ).wire()
+    handlers = BazaarThreadInboundHandlers(
+        bus=bus,
+        bazaar_repo=bazaar_repo,
+        space_repo=space_repo,
+        remote_member_repo=remote_member_repo,
+        conversation_repo=conversation_repo,
+        user_repo=user_repo,
+    )
+    # §CP.R / §CP.F2: a protected account is never asked; guardian blocks hold.
+    handlers.attach_child_protection(child_protection)
+    handlers.attach_to(federation_service)
+
+
 def _build_app_catalog(config: Config) -> AppCatalogService | None:
     """The app catalog reader, or ``None`` when ``apps_catalog_url`` is empty
     — the documented way to turn the catalog off (``config.py``). With no
@@ -3179,6 +3221,7 @@ def create_app(config: Config | None = None) -> web.Application:
     # Only a household below v_43 warns about "Reviewed" (federated moderation).
     notification_service.attach_federation_repo(repos.federation)
     notification_service.attach_report_repo(report_repo)
+    notification_service.attach_bazaar_repo(bazaar_repo)
     # "Needs you" checks a game invite still waits.
     notification_service.attach_app_repo(repos.app)
     notification_service.attach_personal_calendar_repo(calendar_repo)
@@ -3248,6 +3291,18 @@ def create_app(config: Config | None = None) -> web.Application:
     bazaar_service = BazaarService(bazaar_repo, bus)
     bazaar_service.attach_spaces(space_service)
     bazaar_expiry_scheduler = BazaarExpiryScheduler(bazaar_service)
+    # "Ask the seller" (v_74): DmService asks it on every message in a
+    # listing thread; federation attaches at startup.
+    bazaar_thread_service = BazaarThreadService(
+        bazaar_service=bazaar_service,
+        bazaar_repo=bazaar_repo,
+        conversation_repo=conversation_repo,
+        user_repo=user_repo,
+        space_repo=space_repo,
+        remote_member_repo=repos.space_remote_member,
+        dm_service=dm_service,
+    )
+    dm_service.attach_listing_threads(bazaar_thread_service)
 
     # ── Highlights (§Highlights) ────────────────────────────────────────────
     highlight_service = HighlightService(
@@ -3417,6 +3472,7 @@ def create_app(config: Config | None = None) -> web.Application:
         space_approval_service,
         space_cal_service,
         bazaar_service,
+        bazaar_thread_service,
         highlight_publication_service,
         highlight_signaling_handler,
         moment_public_service,
@@ -3770,6 +3826,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.poll_service_key] = poll_service
     app[K.space_poll_service_key] = space_poll_service
     app[K.bazaar_service_key] = bazaar_service
+    app[K.bazaar_thread_service_key] = bazaar_thread_service
     app[K.corner_service_key] = corner_service
     app[K.sticky_repo_key] = sticky_repo
     app[K.sticky_service_key] = sticky_service
@@ -4386,6 +4443,20 @@ def create_app(config: Config | None = None) -> web.Application:
             policy=system_chat_policy,
             child_protection=child_protection_service,
             own_instance_id=real_instance_id,
+        )
+        # v_74 — "Ask the seller": one household per message, the space's
+        # own transport.
+        _build_bazaar_threads_federation(
+            bus=bus,
+            federation_service=federation_service,
+            federation_repo=federation_repo,
+            threads=bazaar_thread_service,
+            bazaar_repo=bazaar_repo,
+            space_repo=space_repo,
+            remote_member_repo=repos.space_remote_member,
+            conversation_repo=conversation_repo,
+            user_repo=user_repo,
+            child_protection=child_protection_service,
         )
         # v_49 — member households check a member-published ``space_item``
         # against their own roster and access levels too.

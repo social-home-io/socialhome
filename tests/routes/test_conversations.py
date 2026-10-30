@@ -1758,7 +1758,13 @@ async def test_conversation_row_shows_a_guardian_block_counterpart_by_name_only(
             )
 
     row = await _conversation_row(
-        NS(id="c1", type=ConversationType.GROUP_DM, name=None, last_message_at=None),
+        NS(
+            id="c1",
+            type=ConversationType.GROUP_DM,
+            name=None,
+            last_message_at=None,
+            is_listing_thread=False,
+        ),
         username="me",
         svc=NS(groups=NS(is_authority_here=lambda _cid: True)),
         repo=_Repo(),

@@ -94,11 +94,27 @@ class Conversation:
     system_scope: SystemChatScope | None = None
     #: The space a :attr:`SystemChatScope.SPACE` chat belongs to.
     space_id: str | None = None
+    #: Set for an "Ask the seller" thread (v_74): the bazaar listing a
+    #: buyer and its seller talk about. Such a 1:1 never travels as a DM
+    #: event — its messages ride ``BAZAAR_THREAD_MESSAGE`` over the
+    #: listing's space (:mod:`socialhome.domain.bazaar_thread`).
+    bazaar_listing_id: str | None = None
 
     @property
     def is_system(self) -> bool:
         """A system chat (household / space), not a person-made DM."""
         return self.system_scope is not None
+
+    @property
+    def is_listing_thread(self) -> bool:
+        """An "Ask the seller" thread about one bazaar listing."""
+        return self.bazaar_listing_id is not None
+
+    @property
+    def federates_as_dm(self) -> bool:
+        """Travels between households as ``DM_*`` events: a person-made DM
+        or group — never a system chat, never a listing thread."""
+        return self.system_scope is None and self.bazaar_listing_id is None
 
 
 @dataclass(slots=True, frozen=True)

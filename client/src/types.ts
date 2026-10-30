@@ -679,6 +679,50 @@ export interface Conversation {
   muted_until?: string | null
   /** Groups: the caller's own level — every message, or only @-mentions. */
   notif_level?: 'all' | 'mentions'
+  /** An "Ask the seller" thread (v_73): the listing it is about and the
+   *  thread's state; ``null`` / absent for every other conversation. */
+  bazaar_listing?: ListingThreadInfo | null
+}
+
+/** The listing card + state of an "Ask the seller" thread, for one viewer
+ *  (``bazaar_listing`` on a ``GET /api/conversations`` row). */
+export interface ListingThreadInfo {
+  post_id: string
+  space_id: string
+  title: string
+  mode: BazaarMode
+  status: BazaarStatus
+  price: number | null
+  start_price: number | null
+  winning_price: number | null
+  currency: string
+  /** The first photo, signed. */
+  image_urls: string[]
+  seller_user_id: string
+  /** The viewer's side of the thread. */
+  role: 'buyer' | 'seller'
+  other_user_id: string
+  /** Either side may still write (until 14 days after the listing ended). */
+  writable: boolean
+  /** When it turns (turned) read-only; ``null`` while the listing is active. */
+  closes_at: string | null
+}
+
+/** ``POST /api/bazaar/{id}/ask`` — where "Ask the seller" leads. */
+export interface BazaarAskResult {
+  kind: 'dm' | 'thread'
+  conversation_id: string
+}
+
+/** One row of ``GET /api/bazaar/{id}/threads``. */
+export interface BazaarThreadRow {
+  conversation_id: string
+  other_user_id: string
+  other_display_name: string | null
+  unread: number
+  last_message_at: string | null
+  writable: boolean
+  closes_at: string | null
 }
 
 export interface Message {

@@ -12,6 +12,12 @@ copy of the conversation history.
 - **GFS**: none. Push notifications come from the recipient's own
   household, never a GFS (see [push-relay](./push-relay.md)).
 
+**Not a DM: "Ask the seller" threads.** A conversation with
+`bazaar_listing_id` set (v_74) is a 1:1 between a buyer and a seller who may
+share only a space. It never travels as a `DM_*` event: every DM handler
+refuses it, a DM can't be opened under its `bzt-` id, and its messages ride
+`BAZAAR_THREAD_MESSAGE` over the space — see [`bazaar.md`](./bazaar.md#ask-the-seller-v_74).
+
 ## DM E2E is transport-only
 
 Federation envelopes carrying DM payloads are AES-256-GCM encrypted

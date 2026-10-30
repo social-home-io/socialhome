@@ -9562,6 +9562,31 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_73 bazaar offers to the seller's household gate in place ✓")
+    # v_74 — "Ask the seller": one sealed ``BAZAAR_THREAD_MESSAGE`` to the
+    # other person's household, only to a member household at >= v_74
+    # (``space_member_supports``); an older seller's household is sent
+    # nothing and the buyer's ask answers 409 ``SELLER_HOUSEHOLD_TOO_OLD``.
+    # The OURS round-trip above proves every inner-ring pair advertises
+    # >= v_74; ``bazaar-ask`` exercises the one button end to end (the
+    # receiver rules are ``tests/protocol/test_bazaar_thread_federation.py``).
+    if int(_Cap.MIN_FOR_BAZAAR_THREAD) != 74 or _OURS < 74:
+        failures.append(
+            "MIN_FOR_BAZAAR_THREAD moved off v_74 (or OURS fell below it) — a "
+            "question would reach households that drop it"
+        )
+    else:
+        print("  v_74 ask-the-seller gate in place ✓")
+    ask = state.get("bazaar_ask")
+    if ask:
+        found = _rows(
+            "c",
+            "SELECT 1 FROM conversation_messages WHERE content = ?",
+            (ask["text"],),
+        )
+        if not found:
+            failures.append("bazaar-ask: c no longer holds a's question")
+        else:
+            print("  bazaar-ask: c still holds a's question ✓")
     hla = state.get("highlight_audience")
     if hla:
         stamps = _rows(
@@ -15031,6 +15056,164 @@ def cmd_space_chat() -> None:
     print("space-chat: ok")
 
 
+def cmd_bazaar_ask() -> None:
+    """"Ask the seller" from the listing (v_74).
+
+    Prereqs: ``space-chat`` (Beta's space: owner b, members a + c, d a
+    follower household). Runs standalone after it.
+
+    1. b (owner) turns the space's Bazaar on; c lists a lamp in it; the
+       listing reaches a and d (``BAZAAR_LISTING_CREATED``).
+    2. **One button, the right path.** a asks the seller: a and c are
+       paired directly, so the answer is the normal 1:1 DM
+       (``kind: "dm"`` — no listing thread, no new wire). a's question
+       reaches c.
+    3. **Writers only.** d — a follower household — asks too and is
+       refused (403 ``SUBSCRIBER_READ_ONLY``), or never holds the listing.
+    4. **v_74.** ``OURS`` is at least ``MIN_FOR_BAZAAR_THREAD`` and a, b and
+       c see each other at it, so a question to an unpaired seller's
+       household would be sent (the sealed thread path between unpaired
+       households is the six-household protocol test; every household in
+       this demo's space is paired with the others).
+    """
+    from socialhome.domain.federation_capabilities import (
+        OURS as _OURS,
+        FederationCapability as _Cap,
+    )
+
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' first")
+    space_id = state.get("space_id")
+    if not space_id or not state.get("space_chat_follower_d"):
+        raise SystemExit("run 'space-chat' first — needs Beta's space with d")
+    inst = state["instances"]
+    a, b, c, d = inst["a"], inst["b"], inst["c"], inst["d"]
+    nonce = secrets.token_hex(3)
+
+    def wait(what: str, check, timeout: float = 45.0) -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if check():
+                return
+            time.sleep(1.0)
+        raise SystemExit(f"bazaar-ask: timed out waiting for {what}")
+
+    # 1. The Bazaar on, a listing by c.
+    s, body = _request(
+        f"http://127.0.0.1:{b['port']}/api/spaces/{space_id}",
+        token=b["token"],
+        method="PATCH",
+        body={"features": {"bazaar": True}},
+    )
+    _must("bazaar on(b)", s, body)
+    def bazaar_on(label: str) -> bool:
+        rows = _rows(label, "SELECT feature_bazaar FROM spaces WHERE id=?", (space_id,))
+        return bool(rows and rows[0][0])
+
+    wait("c to see the Bazaar on", lambda: bazaar_on("c"))
+    s, listing = _request(
+        f"http://127.0.0.1:{c['port']}/api/bazaar",
+        token=c["token"],
+        method="POST",
+        body={
+            "space_id": space_id,
+            "title": f"Reading lamp {nonce}",
+            "mode": "fixed",
+            "currency": "EUR",
+            "price": 2500,
+            "duration_days": 7,
+        },
+    )
+    _must("bazaar create(c)", s, listing, ok=(201,))
+    post_id = listing["post_id"]
+
+    def sees(label: str, info: dict) -> bool:
+        st, _ = _request(
+            f"http://127.0.0.1:{info['port']}/api/bazaar/{post_id}",
+            token=info["token"],
+        )
+        return st == 200
+
+    wait("a to hold c's listing", lambda: sees("a", a))
+    print(f"  c listed {post_id[:8]}… in space {space_id[:8]}; a holds it ✓")
+
+    # 2. a asks: paired with c → the normal DM.
+    s, ask = _request(
+        f"http://127.0.0.1:{a['port']}/api/bazaar/{post_id}/ask",
+        token=a["token"],
+        method="POST",
+    )
+    _must("ask(a)", s, ask, ok=(201,))
+    if ask.get("kind") != "dm":
+        raise SystemExit(f"bazaar-ask: a↔c are paired, expected a DM: {ask!r}")
+    text = f"bazaar-ask: is the lamp still there? {nonce}"
+    s, msg = _request(
+        f"http://127.0.0.1:{a['port']}/api/conversations/"
+        f"{ask['conversation_id']}/messages",
+        token=a["token"],
+        method="POST",
+        body={"content": text},
+    )
+    _must("ask send(a)", s, msg, ok=(201,))
+    wait(
+        "c to receive a's question",
+        lambda: bool(
+            _rows(
+                "c", "SELECT 1 FROM conversation_messages WHERE content=?", (text,)
+            )
+        ),
+    )
+    print("  a → Ask the seller → DM to c (paired) ✓")
+
+    # 3. d follows only: no asking.
+    wait("d to hold c's listing", lambda: sees("d", d), timeout=30.0)
+    s, refused = _request(
+        f"http://127.0.0.1:{d['port']}/api/bazaar/{post_id}/ask",
+        token=d["token"],
+        method="POST",
+    )
+    code = (
+        refused.get("error", {}).get("code") if isinstance(refused, dict) else None
+    )
+    if s != 403 or code != "SUBSCRIBER_READ_ONLY":
+        raise SystemExit(f"bazaar-ask: follower d could ask: {s} {refused!r}")
+    print("  d (follower) can't ask ✓")
+
+    # 4. v_73 round-trips between the writer households.
+    if _OURS < _Cap.MIN_FOR_BAZAAR_THREAD:
+        raise SystemExit(
+            f"bazaar-ask: OURS={_OURS} < MIN_FOR_BAZAAR_THREAD="
+            f"{_Cap.MIN_FOR_BAZAAR_THREAD}"
+        )
+    for label, info in (("a", a), ("b", b), ("c", c)):
+        s, conns = _request(
+            f"http://127.0.0.1:{info['port']}/api/connections", token=info["token"]
+        )
+        _must(f"connections({label})", s, conns)
+        for row in conns:
+            peer = row.get("instance_id")
+            if row.get("status") != "confirmed" or peer not in {
+                a["instance_id"],
+                b["instance_id"],
+                c["instance_id"],
+            }:
+                continue
+            pv = int(row.get("proto_version") or 1)
+            if pv < _Cap.MIN_FOR_BAZAAR_THREAD:
+                raise SystemExit(
+                    f"bazaar-ask: {label} sees {peer[:8]} at v{pv} "
+                    f"(< {_Cap.MIN_FOR_BAZAAR_THREAD})"
+                )
+    print(
+        f"  a, b, c see each other at >= v{_Cap.MIN_FOR_BAZAAR_THREAD} "
+        f"(OURS={_OURS}) ✓"
+    )
+    state["bazaar_ask"] = {"post_id": post_id, "text": text}
+    _save(state)
+    print("bazaar-ask: ok")
+
+
 def cmd_down() -> None:
     state = _load()
     if state.get("gfs_b"):
@@ -19257,6 +19440,10 @@ def main() -> None:
         # d holds nothing. Late in the chain: it seats d as a follower in
         # the space the earlier steps assert member counts on.
         cmd_space_chat()
+        # ``bazaar-ask`` (v_74): in the same space b turns the Bazaar on, c
+        # lists a lamp, a (paired with c) asks and lands in the normal DM,
+        # d (follower) is refused; a, b, c see each other at >= v_74.
+        cmd_bazaar_ask()
         # ``highlight-audience`` (v_70): a narrows today's highlight to b's
         # household — c deletes it and remembers the removal, a narrowed
         # frame reaches b only — then widens back and c gets the day again.

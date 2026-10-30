@@ -1,5 +1,7 @@
 """Tests for socialhome.routes.bazaar."""
 
+from socialhome.auth import sha256_token_hash
+
 from .conftest import _auth
 
 
@@ -103,3 +105,62 @@ async def test_bazaar_feature_off_blocks_create_and_browse(client):
     assert create.status == 403
     browse = await client.get(f"/api/spaces/{sid}/bazaar", headers=h)
     assert browse.status == 403
+
+
+# ── "Ask the seller" (v_74) — POST /api/bazaar/{id}/ask, GET …/threads ──
+
+
+async def _seat_user(client, sid: str, username: str, role: str) -> dict:
+    """A second local user with a seat in ``sid``; returns their headers."""
+    uid = f"uid-{username}"
+    token = f"{username}-tok"
+    await client._db.enqueue(
+        "INSERT INTO users(username, user_id, display_name, is_admin)"
+        " VALUES(?, ?, ?, 0)",
+        (username, uid, username.title()),
+    )
+    await client._db.enqueue(
+        "INSERT INTO api_tokens(token_id, user_id, label, token_hash)"
+        " VALUES(?, ?, 't', ?)",
+        (f"t-{username}", uid, sha256_token_hash(token)),
+    )
+    await client._db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES(?, ?, ?)",
+        (sid, uid, role),
+    )
+    return _auth(token)
+
+
+async def test_ask_a_seller_in_the_household_opens_the_normal_dm(client):
+    sid = await _make_space(client)
+    listing = await _make_listing(client, sid)
+    mia = await _seat_user(client, sid, "mia", "member")
+    r = await client.post(f"/api/bazaar/{listing['post_id']}/ask", headers=mia)
+    assert r.status == 201, await r.text()
+    body = await r.json()
+    assert body["kind"] == "dm"
+    # The same button again lands in the same DM.
+    r = await client.post(f"/api/bazaar/{listing['post_id']}/ask", headers=mia)
+    assert (await r.json())["conversation_id"] == body["conversation_id"]
+    # A DM is no listing thread: the seller's thread list stays empty.
+    r = await client.get(
+        f"/api/bazaar/{listing['post_id']}/threads", headers=_auth(client._tok)
+    )
+    assert r.status == 200 and await r.json() == []
+
+
+async def test_ask_refuses_followers_the_seller_and_strangers(client):
+    sid = await _make_space(client)
+    listing = await _make_listing(client, sid)
+    fern = await _seat_user(client, sid, "fern", "subscriber")
+    r = await client.post(f"/api/bazaar/{listing['post_id']}/ask", headers=fern)
+    assert r.status == 403
+    assert (await r.json())["error"]["code"] == "SUBSCRIBER_READ_ONLY"
+    r = await client.post(
+        f"/api/bazaar/{listing['post_id']}/ask", headers=_auth(client._tok)
+    )
+    assert (await r.json())["error"]["code"] == "OWN_LISTING"
+    r = await client.post("/api/bazaar/no-such-listing/ask", headers=fern)
+    assert r.status == 404
+    r = await client.get("/api/bazaar/no-such-listing/threads", headers=fern)
+    assert r.status == 404

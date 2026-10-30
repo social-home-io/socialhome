@@ -347,6 +347,13 @@ class FederationEventType(str, enum.Enum):
     #: mirrors the bid), the ``reason`` inside the bidder's household's
     #: copy only. A v_73 receiver that knows only ``offer_id`` drops it.
     BAZAAR_OFFER_UPDATED = "bazaar_offer_updated"
+    #: v_74 "Ask the seller" — one message of the private 1:1 thread
+    #: between a buyer and the seller about one listing. Sent to the OTHER
+    #: person's household only (``broadcast_to_space_members`` narrowed to
+    #: that one member household: direct, ``SPACE_ROUTED`` across a relay,
+    #: or the link-joined relay seat). Every field but ``space_id`` is in
+    #: the encrypted payload. See ``docs/protocol/bazaar.md``.
+    BAZAAR_THREAD_MESSAGE = "bazaar_thread_message"
 
     # ── Space encryption key exchange ──
     SPACE_KEY_EXCHANGE = "space_key_exchange"
@@ -693,6 +700,9 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.BAZAAR_OFFER_ACCEPTED,
         FederationEventType.BAZAAR_OFFER_MADE,
         FederationEventType.BAZAAR_OFFER_UPDATED,
+        #: "Ask the seller" (v_74): a link-joined member asks a seller, and
+        #: hears back, over its relay seat — the space's own transport.
+        FederationEventType.BAZAAR_THREAD_MESSAGE,
         #: Space-scoped location pins and the space's own zone catalogue —
         #: a display layer inside the space, distinct from the household
         #: ``PRESENCE_UPDATED`` fan-out (which stays excluded).
@@ -873,6 +883,9 @@ SPACE_WRITE_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.BAZAAR_OFFER_ACCEPTED,
         FederationEventType.BAZAAR_OFFER_MADE,
         FederationEventType.BAZAAR_OFFER_UPDATED,
+        #: "Ask the seller" (v_74): trading is for writers — a Follower
+        #: household neither asks nor is asked.
+        FederationEventType.BAZAAR_THREAD_MESSAGE,
         # ── Map: shared location pins and zones ──
         FederationEventType.SPACE_LOCATION_UPDATED,
         FederationEventType.SPACE_ZONE_UPSERTED,

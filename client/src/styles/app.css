@@ -27892,3 +27892,142 @@ a.sh-spaces-row__main:focus-visible { outline: 2px solid var(--sh-focus-ring); o
   font-size: var(--sh-font-size-xs);
 }
 .sh-notif-menu__sep { margin: 4px 6px; border-block-start: 1px solid var(--sh-border); }
+
+/* ── "Ask the seller" (v_74) ─────────────────────────────────────────── */
+
+/* The listing a thread is about, pinned under the thread header. */
+.sh-listing-thread-card {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sh-space-sm);
+  margin: var(--sh-space-xs) var(--sh-space-md) 0;
+  padding: var(--sh-space-sm);
+  background: var(--sh-bg-tertiary);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  min-width: 0;
+}
+.sh-listing-thread-card__img {
+  flex: 0 0 auto;
+  width: 56px;
+  height: 56px;
+  border-radius: var(--sh-radius-md);
+  object-fit: cover;
+  background: var(--sh-bg-secondary);
+}
+.sh-listing-thread-card__img--none {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 1.6rem;
+}
+.sh-listing-thread-card__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.sh-listing-thread-card__title {
+  font-weight: 600;
+  color: var(--sh-text);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sh-listing-thread-card__title:hover,
+.sh-listing-thread-card__title:focus-visible {
+  text-decoration: underline;
+}
+.sh-listing-thread-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  font-size: var(--sh-font-size-sm);
+}
+.sh-listing-thread-card__price {
+  font-weight: 600;
+}
+.sh-listing-thread-card__status {
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid var(--sh-border);
+  font-size: 0.75rem;
+}
+.sh-listing-thread-card__status--sold {
+  color: var(--sh-success);
+  border-color: color-mix(in srgb, var(--sh-success) 40%, var(--sh-border));
+}
+.sh-listing-thread-card__who,
+.sh-listing-thread-card__open {
+  font-size: var(--sh-font-size-sm);
+}
+.sh-listing-thread-card__block {
+  align-self: flex-start;
+  min-height: 36px;
+  padding: 0;
+  text-align: left;
+}
+
+/* The buyer's button on a listing. */
+.sh-bazaar-ask {
+  display: flex;
+}
+.sh-bazaar-ask .sh-btn {
+  min-height: 36px;
+}
+
+/* The seller's questions under their listing. */
+.sh-bazaar-questions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
+}
+.sh-bazaar-questions__title {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-xs);
+  margin: 0;
+  font-size: var(--sh-font-size-sm);
+}
+.sh-bazaar-questions__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sh-bazaar-questions__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  min-height: 40px;
+  padding: 6px var(--sh-space-sm);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  color: var(--sh-text);
+  text-decoration: none;
+}
+.sh-bazaar-questions__row:hover,
+.sh-bazaar-questions__row:focus-visible {
+  background: var(--sh-bg-tertiary);
+}
+.sh-bazaar-questions__name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The listing a chat row in the inbox is about. */
+.sh-dm-listing {
+  display: block;
+  font-size: var(--sh-font-size-sm);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

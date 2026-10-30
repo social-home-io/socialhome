@@ -365,6 +365,7 @@ act as one — only moderation (below) reaches a local user's rows.
 | Bazaar offers (v_73) | the offerer holds a live **writer** seat on the sender, on an active non-auction listing whose seller is one of OUR people — offers go to the seller's household only, see [Bazaar](./bazaar.md) | accept / reject: the seller's household, for an offer one of ours made; withdraw: the offerer's household, for a listing one of ours sells | — |
 | Zones | settings authority only — the host or a live `admin` seat; a `moderator` seat is refused (the local service is admin-only); a new zone's `created_by` bound like a create | same | same |
 | Timetables (v_39) | an admin household, recording the edit as **an admin** (`SpaceAuthorship.admin_as`: `updated_by` holds a live `admin` seat on the sender — never a `moderator`; from the host, the roster authority, any live writer seat on the host — the owner is mirrored as a member — or a relayed remote user with a live `admin` seat; never a follower); the id must be owner-bound to `created_by` in this space (no legacy window) and a new row's `created_by` bound like a create | same — last-writer-wins on `version` (a jump > 10 000 or a version near the cap refused); a tombstoned id never comes back | same, bound to `deleted_by`; an unseen id is tombstoned only when owner-bound to the payload's `created_by` in this space — see [`timetables.md`](./timetables.md) |
+| Ask the seller (v_74) | buyer → seller: the author is the payload's buyer with a live **writer** seat on the sender (strict — no host relay), the seller ours with a seat here; seller → buyer: the author is the listing's seller seated on the sender, the buyer ours with a writer seat, and the thread already exists here. Never a protected account, never across a block, only while the thread is open — see [`bazaar.md`](./bazaar.md) | — (no edits in v1) | — (no deletes in v1) |
 | Space chat (v_55) | the author holds a live **writer** seat on the sender (`SpaceAuthorship.may_author_writer`), or the host relays a remote writer's message on catch-up; never a follower, a banned user, one of OUR users or the bot; the id must be owner-bound (`space-chat-message`) to the author in this space, no legacy window; the receiver itself holds a writer seat and has `features.chat` on | the author's household only (`acts_for`, writer seat) | the author's household, or content authority acting as a named `actor_user_id` (`moderates_as`) — see [`space-chat.md`](./space-chat.md) |
 
 **Creator-bound ids (v_34 albums, v_36 everything else).** The rules
@@ -1081,6 +1082,12 @@ is opt-in:
   payload so member households mirror the same feed visibility. Absent on
   an older sender → the receiver defaults to **visible**. Additive +
   fail-soft — **no new event type or capability bump**.
+
+**Ask the seller (v_74).** A writer asks a listing's seller in a private
+1:1 thread about that listing — the normal DM when the seller is in the
+same or a paired household, else a listing thread whose messages
+(`BAZAAR_THREAD_MESSAGE`) go to the other person's household only, over the
+space's own transport. See [`bazaar.md`](./bazaar.md#ask-the-seller-v_74).
 
 ## Chat (on by default)
 

@@ -33,7 +33,7 @@ households only.
 
 `BAZAAR_LISTING_CREATED` (v_10), `BAZAAR_LISTING_UPDATED` (v_11),
 `BAZAAR_BID_PLACED`, `BAZAAR_OFFER_ACCEPTED` (v_12), `BAZAAR_OFFER_MADE`,
-`BAZAAR_OFFER_UPDATED` (v_73), plus the `bazaar` resource of the §25.6
+`BAZAAR_OFFER_UPDATED` (v_73), `BAZAAR_THREAD_MESSAGE` (v_74, see [Ask the seller](#ask-the-seller-v_74)), plus the `bazaar` resource of the §25.6
 space sync (listings only).
 
 | Event | Sealed payload | Sent by → to |
@@ -178,6 +178,163 @@ the same envelope every other sale already sends. A space with 200 member
 households and 50 offers on one listing: 50 offer envelopes to the seller,
 at most 50 answers, 200 sale envelopes once. No offer is ever fanned out
 to the space.
+
+## Ask the seller (v_74)
+
+A buyer with a writer seat in a listing's space asks its seller about the
+listing in a private 1:1 text thread tied to that one listing. After a sale
+the same thread is where the two arrange the handover. Federation
+capability **v_74** (`FederationCapability.MIN_FOR_BAZAAR_THREAD`).
+
+### Scope
+
+- **One button, the right path.** `POST /api/bazaar/{id}/ask` picks:
+  - the seller lives in the buyer's own household, or in a household it
+    paired with directly → the **normal 1:1 DM** (no new wire;
+    [`dm.md`](./dm.md));
+  - anyone else in the space (a mesh-only member, a link-joined member) →
+    the **listing thread**, below.
+- **HFS**: both ends. The buyer's household opens the thread and sends
+  the questions; the seller's household opens its copy on the first
+  question it accepts and sends the answers.
+- **Who**: writers only. A follower (`SpaceRole.SUBSCRIBER`) can't ask
+  and is never asked. A protected account (`ProtectedCapability.BAZAAR`)
+  can neither ask nor be asked. Personal blocks and guardian blocks apply
+  both ways; the seller can block from the thread.
+- **GFS**: never sees a thread. It forwards a thread message in exactly
+  one case: to or from a link-joined member household
+  (`InstanceSource.SPACE_SESSION`), through its relay seat, as a sealed
+  per-pair envelope it can't read. Households that met through a GFS still
+  never talk directly: the thread uses only the space's existing delivery
+  path.
+- **Not a contact.** A thread creates no pairing, no `remote_users` row and
+  no DM. It is text only (no media, no location, no edits, deletes or
+  reactions in v1).
+- **Read-only after the listing ends.** Writable while the listing is
+  active and for 14 days after it is sold (from `sold_at`), expired or
+  withdrawn (from its `end_time`; a withdrawn listing keeps no stamp of its
+  own, so its scheduled end stands in). After that both sides read only.
+
+### Storage
+
+A listing thread is an ordinary `dm` conversation with
+`conversations.bazaar_listing_id` set (migration 0134). It seats the local
+person (`conversation_members`) and the other person as one
+`conversation_remote_members` seat named by `user_id` and the roster's
+display name. Both households derive the same conversation id from the
+listing and the buyer (`listing_thread_id`: `bzt-` + 28 hex of a SHA-256),
+so **no conversation id travels** and one buyer has exactly one thread per
+listing. The DM inbound refuses any `DM_*` event for a listing thread and
+refuses to open a DM under a `bzt-` id, so a paired household can't squat
+on a thread.
+
+The inbox lists the thread like any conversation, with its listing card
+(`bazaar_listing` on the `GET /api/conversations` row).
+
+### Event types
+
+`BAZAAR_THREAD_MESSAGE` — one message, from the buyer to the seller or
+back.
+
+| Field | Where |
+|---|---|
+| `space_id` | plaintext envelope routing field (and in the payload) |
+| `listing_post_id`, `buyer_user_id`, `author_user_id`, `message_id` (32 hex), `content` (≤ 1000 characters), `reply_to_id` (a message of the same thread, or `null`), `created_at` | encrypted payload |
+
+It is a space-content **write** (`SPACE_WRITE_EVENT_TYPES`: the §24.11
+writer gate drops it from a follower-only household, the archive gate
+from an archived space) and allowed from a link-joined household
+(`SPACE_SESSION_ALLOWED_EVENT_TYPES`).
+
+### Delivery
+
+`BazaarThreadOutbound` sends each message a local person writes in a
+thread to **the other person's household only**:
+`broadcast_to_space_members(space_id, …, only_instances={that household})`.
+That never adds a target: the household must be a member household of the
+listing's space and not banned. Each send rides `send_with_mesh_fallback`:
+
+- a directly paired member household gets it directly;
+- a non-paired one gets it inside `SPACE_ROUTED`, sealed end to end to its
+  ephemeral X25519 key, so a relay household (never a party, possibly not
+  even a member) sees only ciphertext;
+- a link-joined one gets it through its `space_session` relay seat.
+
+A household below v_74 (by `space_member_supports`) is sent nothing; the
+buyer's ask answers `409 SELLER_HOUSEHOLD_TOO_OLD` before any thread
+exists. An inbound message carries `origin_instance_id` and is never sent
+on.
+
+**Cost.** One recipient × one envelope per message: about 0.5–1.5 KB
+(ids plus at most 1000 characters, sealed). No fan-out, no catch-up
+stream. Worst realistic case, a popular listing in a global space with
+10 000 followers: followers can't ask, so only writers do; 50 askers × 5
+messages = 250 sealed ~1 KB sends to the one seller household (and up to
+250 answers back, each to one household), spread over days. Nothing grows
+with the size of the space.
+
+### Who may do what (on receipt)
+
+The handler (`BazaarThreadInboundHandlers`) re-decides everything on the
+receiver's own facts:
+
+| Direction | Rule |
+|---|---|
+| buyer → seller | The listing is held here and belongs to the envelope's space (held, not dissolved, Bazaar on). The seller is a local user with a seat here. The author is the payload's `buyer_user_id`, holds a live **writer** seat on the **sending** household (strict: no host relay — nobody speaks for another household's people), is not banned and is not the seller. The first accepted question opens the thread here. |
+| seller → buyer | The buyer is a local user with a writer seat here; the author is the listing's seller, seated on the sending household; **the thread already exists here** — a seller never cold-opens a thread. |
+| both | The thread is still writable; the local person is not a protected account; no personal block either way and no guardian block between the two; the message id is fresh (an id held anywhere is dropped — no overwrite, no replay into another conversation); text ≤ 1000 characters; a future `created_at` is clamped to now. |
+
+Each side judges only its own people: a protected account, a block or a
+guardian block on the other household is enforced there before it sends.
+
+### Flow
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as HFS B<br/>(ben, member)
+    participant R as HFS R<br/>(relay)
+    participant S as HFS S<br/>(sam, member, sells the bike)
+    participant H as HFS H<br/>(host)
+
+    B->>B: POST /api/bazaar/{bike}/ask<br/>writer ✓, not protected ✓, no block ✓,<br/>S ≥ v_74 ✓, not paired with S<br/>→ thread bzt-… (listing, ben)
+    B->>R: SPACE_ROUTED (sealed to S's ephemeral key)
+    R->>S: SPACE_ROUTED (R sees ciphertext only)
+    S->>S: unwrap → §24.11 gates → handler:<br/>ben writer on B ✓, sam ours ✓, open ✓<br/>→ thread bzt-… opened, "Ben asked about Bike" row
+    S->>B: BAZAAR_THREAD_MESSAGE (sam's answer, sealed)
+    B->>B: thread exists ✓, sam seated on S ✓ → stored
+    Note over H: the host, the other members and every<br/>follower are sent nothing
+```
+
+### Notifications
+
+The seller gets one Messages row per thread, "Ben asked about Bike",
+bumped by every new question (D7). Its push names who and where only:
+"Ben asked about your listing in Street" — never the listing's title or
+the text (D11). The buyer hears an answer like any 1:1 message (a push,
+no row).
+
+### Implementation pointers
+
+- `socialhome/domain/bazaar_thread.py` — id derivation, closing rule,
+  coded refusals.
+- `socialhome/services/bazaar_thread_service.py` — `ask`, `list_threads`,
+  the live write gate `require_write` (`DmService` asks it on every send).
+- `socialhome/services/bazaar_thread_outbound.py` — `BazaarThreadOutbound`.
+- `socialhome/services/federation_inbound/bazaar_thread.py` — the handler.
+- `socialhome/repositories/conversation_repo.py` — `open_listing_thread`,
+  `list_listing_threads`.
+- Migration `0134_conversation_bazaar_listing.sql`.
+
+### Spec references
+
+- §24.11 inbound pipeline (writer gate, archive gate)
+- CLAUDE.md "Encryption-First Rule", "non-member households MUST NOT see
+  space content", "Keep the protocol efficient"
+- Tests: `tests/protocol/test_bazaar_thread_federation.py` (six real
+  households: only the other household hears a message, refusals before
+  sending and on receipt, `SPACE_ROUTED` for an unpaired seller), the
+  space-content scope, authorship and archived matrices.
 
 ## Implementation
 

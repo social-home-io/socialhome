@@ -12,6 +12,7 @@ import { ws } from '@/ws'
 import { Button } from './Button'
 import { ProtectedNotice, isRestricted } from './ProtectedNotice'
 import { BazaarOffersPanel } from './BazaarOffersPanel'
+import { AskSellerButton, ListingQuestions } from './BazaarAskSeller'
 import { ImageRenderer } from './FileRenderer'
 import { SaveListingButton } from './SaveListingButton'
 import { showToast } from './Toast'
@@ -424,6 +425,14 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
         )
       )}
 
+      {/* "Ask the seller" (v_73): a writer asks while the listing is
+       *  open; after a sale the buyer messages the seller to arrange
+       *  pickup. The server picks the DM or the private thread. */}
+      {me && !isSeller && !isRestricted('bazaar') && canTrade
+        && (!closed || (listing.status === 'sold' && listing.winner_user_id === me)) && (
+        <AskSellerButton postId={postId} afterSale={closed} />
+      )}
+
       {!closed && myBid && !isSeller && (
         <div class="sh-bazaar-mybid">
           {t('bazaar.card.your_bid_is')} <strong>
@@ -460,6 +469,8 @@ export function BazaarPostBody({ postId, onUpdated }: Props) {
           currentUserId={me ?? null}
           onListingChanged={onUpdated} />
       )}
+
+      {isSeller && <ListingQuestions postId={postId} />}
 
       {isSeller && (
         <SellerControls

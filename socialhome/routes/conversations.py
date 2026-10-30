@@ -9,6 +9,7 @@ from urllib.parse import unquote
 from aiohttp import web
 
 from ..app_keys import (
+    bazaar_thread_service_key,
     conversation_repo_key,
     dm_service_key,
     federation_repo_key,
@@ -25,9 +26,11 @@ from ..media_signer import sign_media_urls_in, strip_signature_query
 from ..repositories.conversation_repo import AbstractConversationRepo
 from ..repositories.user_repo import AbstractUserRepo
 from ..security import error_response, sanitise_for_api
+from ..services.bazaar_thread_service import BazaarThreadService
 from ..services.dm_service import DmService
 from ..services.inbound_media_store import local_media_ref
 from .base import BaseView
+from .bazaar import listing_thread_dict
 from .media_status import READY, media_filename, video_poster_path
 
 log = logging.getLogger(__name__)
@@ -42,6 +45,8 @@ async def _conversation_row(
     user_repo: AbstractUserRepo,
     now: datetime,
     withheld: frozenset[str] = frozenset(),
+    threads: BazaarThreadService | None = None,
+    viewer_user_id: str | None = None,
 ) -> dict | None:
     """One ``GET /api/conversations`` row for *username*.
 
@@ -129,6 +134,11 @@ async def _conversation_row(
     # Membership is established by the snapshot above, so read the
     # count straight from the repo (``svc.count_unread`` re-checks it).
     unread = await repo.count_unread(c.id, username)
+    # An "Ask the seller" thread (v_74) carries its listing card and state.
+    listing: dict | None = None
+    if c.is_listing_thread and threads is not None and viewer_user_id is not None:
+        info = await threads.info(c, viewer_user_id)
+        listing = listing_thread_dict(info) if info is not None else None
     return {
         "id": c.id,
         "type": c.type.value,
@@ -162,6 +172,9 @@ async def _conversation_row(
         # ``mentions`` (only @-mentions ring). Always ``all``
         # for a 1:1.
         "notif_level": own_notif_level,
+        # ``null`` unless this is an "Ask the seller" thread: then the
+        # listing card, the viewer's side and whether it is still open.
+        "bazaar_listing": listing,
     }
 
 
@@ -186,10 +199,22 @@ class ConversationCollectionView(BaseView):
                 user_repo=user_repo,
                 now=now,
                 withheld=withheld,
+                threads=self.request.app.get(bazaar_thread_service_key),
+                viewer_user_id=ctx.user_id,
             )
             if row is not None:
                 rows.append(row)
+        self._sign(rows)
         return web.json_response(rows)
+
+    def _sign(self, rows: list[dict]) -> None:
+        """Sign a listing thread's photo (only that — the rest of the row
+        keeps its historic shape)."""
+        signer = self.request.app.get(media_signer_key)
+        if signer is not None:
+            for row in rows:
+                if row.get("bazaar_listing"):
+                    sign_media_urls_in(row["bazaar_listing"], signer)
 
 
 class ConversationDmView(BaseView):
@@ -285,9 +310,14 @@ class ConversationItemView(BaseView):
             user_repo=self.svc(user_repo_key),
             now=datetime.now(UTC),
             withheld=await self.guardian_block_counterparts(),
+            threads=self.request.app.get(bazaar_thread_service_key),
+            viewer_user_id=ctx.user_id,
         )
         if row is None:
             raise PermissionError("not a member of this conversation")
+        signer = self.request.app.get(media_signer_key)
+        if signer is not None and row.get("bazaar_listing"):
+            sign_media_urls_in(row["bazaar_listing"], signer)
         return web.json_response(row)
 
     async def patch(self) -> web.Response:

@@ -1132,7 +1132,23 @@ from __future__ import annotations
 #:   **Fallback**: a seller's household below v_73 is sent nothing — the
 #:   offer stays on the buyer's household, as before. Labelled "Offers
 #:   reach sellers in other households".
-OURS: int = 73
+#: * **v_74** (2026-10-30) — **"Ask the seller"**. A buyer with a writer
+#:   seat in a listing's space asks its seller in a private 1:1 text thread
+#:   about that listing (a ``dm`` conversation with
+#:   ``conversations.bazaar_listing_id``, migration 0134). One new event,
+#:   :attr:`~socialhome.domain.federation.FederationEventType
+#:   .BAZAAR_THREAD_MESSAGE` (``space_id`` in the clear; ``listing_post_id``,
+#:   ``buyer_user_id``, ``author_user_id``, ``message_id``, ``content``,
+#:   ``reply_to_id``, ``created_at`` encrypted), sent to the other person's
+#:   household ONLY over the space's own transport
+#:   (``broadcast_to_space_members`` narrowed to that household: direct,
+#:   ``SPACE_ROUTED`` across a relay, or the link-joined relay seat). Writers
+#:   only, protected accounts never, blocks both ways, read-only 14 days
+#:   after the listing ended. **Fallback**: none on the wire — a seller's
+#:   household below v_74 is sent nothing, and the buyer's "Ask the seller"
+#:   answers 409 ``SELLER_HOUSEHOLD_TOO_OLD`` (the SPA says the seller's
+#:   household needs an update). Labelled "Ask the seller about a listing".
+OURS: int = 74
 
 
 class FederationCapability:
@@ -1706,6 +1722,13 @@ class FederationCapability:
     #: seller's and the offerer's. A household below it is sent nothing —
     #: the offer stays where it was made.
     MIN_FOR_BAZAAR_OFFERS = 73
+    #: v_74 — "Ask the seller": ``BAZAAR_THREAD_MESSAGE`` to the other
+    #: person's household only. Judged by
+    #: :meth:`FederationService.space_member_supports` (the seller's
+    #: household may be mesh-only or link-joined). A seller's household
+    #: below it is sent nothing; the buyer's open answers 409
+    #: ``SELLER_HOUSEHOLD_TOO_OLD``.
+    MIN_FOR_BAZAAR_THREAD = 74
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -1984,6 +2007,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_BAZAAR_OFFERS,
         "Offers reach sellers in other households",
     ),
+    (
+        FederationCapability.MIN_FOR_BAZAAR_THREAD,
+        "Ask the seller about a listing",
+    ),
 ]
 
 
@@ -2068,6 +2095,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_REMOTE_REPORT_ANSWER: "remote_report_answers",
     FederationCapability.MIN_FOR_APP_SESSION_ENDED: "app_games_end_on_uninstall",
     FederationCapability.MIN_FOR_BAZAAR_OFFERS: "bazaar_offers",
+    FederationCapability.MIN_FOR_BAZAAR_THREAD: "bazaar_ask_the_seller",
 }
 
 
@@ -2121,6 +2149,9 @@ def feature_keys_missing_below(version: int) -> list[str]:
 #:   space works the same for everyone else.
 #: * ``MIN_FOR_APP_SESSION_ENDED`` — Social Home Apps games are per-person
 #:   sessions, not a space content surface.
+#: * ``MIN_FOR_BAZAAR_THREAD`` — an "Ask the seller" thread is between two
+#:   people; a behind household only keeps its own sellers from being
+#:   asked, every other listing of the space works the same.
 SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
     {
         FederationCapability.MIN_FOR_SPACE_INVITE_REDEEM,

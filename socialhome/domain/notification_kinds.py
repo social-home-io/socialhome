@@ -81,6 +81,8 @@ _KIND_OF_TYPE: dict[str, NotifKind] = {
     "dm_message": NotifKind.MESSAGES,
     "call_incoming": NotifKind.MESSAGES,
     "call_missed": NotifKind.MESSAGES,
+    # "Ask the seller" (v_74): the seller's row per thread about a listing.
+    "bazaar_question": NotifKind.MESSAGES,
     # Replies and mentions — things said *to* you.
     "post_replied": NotifKind.REPLIES,
     "comment_replied": NotifKind.REPLIES,

@@ -25,6 +25,10 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from ..domain.bazaar_thread import (
+    ListingThreadNoChangesError,
+    ListingThreadTextOnlyError,
+)
 from ..domain.conversation import (
     CONVERSATION_NOTIF_LEVELS,
     MESSAGE_TYPES,
@@ -73,6 +77,7 @@ if TYPE_CHECKING:
         AbstractPeerUserVisibilityRepo,
     )
     from .audio_transcription_service import AudioTranscriptionService
+    from .bazaar_thread_service import BazaarThreadService
     from .dm_media_sync_service import DmMediaSyncService
     from .system_chat_policy import SystemChatPolicy
 
@@ -179,6 +184,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         "_federation",
         "_federation_repo",
         "_groups",
+        "_listing_threads",
         "_media_dir",
         "_media_refs",
         "_media_sync",
@@ -236,6 +242,9 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         #: Live access rules for system chats (household / space); without
         #: it every system chat is refused (fail closed).
         self._system_chats: SystemChatPolicy | None = None
+        #: The live write gate of "Ask the seller" threads; without it every
+        #: listing thread refuses writes (fail closed).
+        self._listing_threads: BazaarThreadService | None = None
         #: Group-conversation membership authority (v_37). Always present —
         #: a local-only group needs it too; federation is attached later.
         self._groups = DmGroupService(
@@ -269,6 +278,11 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         defers to ``policy`` instead of the seat rows.
         """
         self._system_chats = policy
+
+    def attach_listing_threads(self, threads: BazaarThreadService) -> None:
+        """Wire the "Ask the seller" write gate (v_74): every message in a
+        conversation with ``bazaar_listing_id`` set asks ``threads``."""
+        self._listing_threads = threads
 
     def attach_federation(
         self,
@@ -316,7 +330,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
 
             existing = await self._convos.list_for_user(creator_username)
             for conv in existing:
-                if conv.type is not ConversationType.DM:
+                if conv.type is not ConversationType.DM or conv.is_listing_thread:
                     continue
                 members = await self._convos.list_members(conv.id)
                 usernames = {m.username for m in members}
@@ -371,7 +385,8 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
 
         existing = await self._convos.list_for_user(creator_username)
         for conv in existing:
-            if conv.type is not ConversationType.DM:
+            # A listing thread with the same person is not their DM.
+            if conv.type is not ConversationType.DM or conv.is_listing_thread:
                 continue
             local_members = await self._convos.list_members(conv.id)
             remote_members = await self._convos.list_remote_members(conv.id)
@@ -725,6 +740,15 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
                     await self._guard_block_pair(sender.user_id, peer_id)
         if type not in MESSAGE_TYPES:
             raise ValueError(f"invalid message type {type!r}")
+        if conv.is_listing_thread:
+            await self._check_listing_thread_message(
+                conv,
+                sender_user_id=sender.user_id,
+                type=type,
+                media_url=media_url,
+                reply_to_id=reply_to_id,
+                highlight_reply=reply_to_highlight_frame_id is not None,
+            )
         space_chat = conv.system_scope is SystemChatScope.SPACE
         if space_chat:
             await self._check_space_chat_message(
@@ -1094,6 +1118,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         ``ValueError`` (422); anyone but the sender is refused (403).
         """
         msg = await self._require_message(message_id, conversation_id)
+        await self._refuse_listing_thread_change(msg.conversation_id)
         await self._require_system_write(msg.conversation_id, editor_username)
         editor = await self._require_user(editor_username)
         if msg.sender_user_id != editor.user_id:
@@ -1180,6 +1205,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         deletes.
         """
         msg = await self._require_message(message_id, conversation_id)
+        await self._refuse_listing_thread_change(msg.conversation_id)
         conv = await self._convos.get(msg.conversation_id)
         if conv is not None and conv.is_system:
             await self._require_system_seat(conv, actor_username, write=False)
@@ -1477,6 +1503,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         emoji: str,
     ) -> None:
         msg = await self._require_message(message_id)
+        await self._refuse_listing_thread_change(msg.conversation_id)
         await self._require_membership(msg.conversation_id, username, write=True)
         actor = await self._require_user(username)
         # §CP.F2: a reaction is a message too — same rule as a send, and
@@ -1516,6 +1543,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         emoji: str,
     ) -> None:
         msg = await self._require_message(message_id)
+        await self._refuse_listing_thread_change(msg.conversation_id)
         await self._require_membership(msg.conversation_id, username, write=True)
         actor = await self._require_user(username)
         clean = emoji.strip()
@@ -1897,6 +1925,36 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
             if target is None or target.conversation_id != conversation_id:
                 raise ValueError("reply_to_id is not a message of this chat")
 
+    async def _check_listing_thread_message(
+        self,
+        conv: Conversation,
+        *,
+        sender_user_id: str,
+        type: str,
+        media_url: str | None,
+        reply_to_id: str | None,
+        highlight_reply: bool,
+    ) -> None:
+        """An "Ask the seller" thread (v_74) takes text only — a reply to a
+        message of the same thread included — and only while its live gate
+        (:meth:`BazaarThreadService.require_write`) admits the sender."""
+        if type != "text" or media_url or highlight_reply:
+            raise ListingThreadTextOnlyError()
+        if reply_to_id is not None:
+            target = await self._convos.get_message(reply_to_id)
+            if target is None or target.conversation_id != conv.id:
+                raise ValueError("reply_to_id is not a message of this thread")
+        if self._listing_threads is None:
+            raise PermissionError("listing threads are not available")
+        await self._listing_threads.require_write(conv, sender_user_id)
+
+    async def _refuse_listing_thread_change(self, conversation_id: str) -> None:
+        """No edit, delete or reaction in a listing thread (v1: a change
+        would stay on this side only)."""
+        conv = await self._convos.get(conversation_id)
+        if conv is not None and conv.is_listing_thread:
+            raise ListingThreadNoChangesError()
+
     async def _require_message(
         self,
         message_id: str,
@@ -1937,9 +1995,10 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         if self._federation is None:
             return
         conv = await self._convos.get(conversation_id)
-        if conv is not None and conv.is_system:
+        if conv is not None and not conv.federates_as_dm:
             # System chats never travel as DM events: the household chat
-            # stays on this household, a space chat has its own events.
+            # stays on this household, a space chat has its own events —
+            # and so does a listing thread (``BAZAAR_THREAD_MESSAGE``).
             log.debug("%s for system chat %s not federated", event_type.value, conv.id)
             return
         try:
