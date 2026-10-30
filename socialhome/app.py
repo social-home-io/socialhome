@@ -4917,7 +4917,10 @@ def create_app(config: Config | None = None) -> web.Application:
             notifications=repos.notification,
             catalog=app[K.app_service_key],
         )
-        # …and becomes playable once the app is added or turned on.
+        # …and becomes playable once the app is added or turned on. Those
+        # rows are written by notification delivery jobs, so every step
+        # that reads them runs in order behind those jobs.
+        app_federation_service.attach_delivery_worker(notification_delivery)
         bus.subscribe(AppInstalled, app_federation_service.on_app_usable)
         bus.subscribe(AppEnabledChanged, app_federation_service.on_app_usable)
         federation_service.attach_apps(app_federation_service)

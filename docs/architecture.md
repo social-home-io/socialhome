@@ -283,6 +283,14 @@ them off it:
   the edges (and unit tests without a running app see rows at once).
   Anything that must read the rows an event wrote — integration tests —
   awaits `app[notification_delivery_key].drain()` first.
+- **Steps that decide on those rows run behind them.** A step that reads
+  rows the worker writes, and decides from them, is queued in order with
+  the jobs (`worker.call(step)`) instead of running in the publisher: an
+  app invite that waits for its app (D10) is created, withdrawn, declined
+  and made playable through notification rows, so `AppFederationService`
+  runs its arrival, withdrawal and app-arrived steps there (`_in_order`).
+  Read inline, a decline still queued left its row open when the app was
+  turned on right after, and the declined invite came back playable.
 
 Wall panels adopted in Home Assistant are found through the optional
 `DisplayDirectory` Provider (`adapter.displays`; `None` on standalone).

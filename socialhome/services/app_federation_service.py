@@ -116,7 +116,9 @@ import asyncio
 import logging
 import re
 from collections import OrderedDict
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 from weakref import WeakValueDictionary
@@ -183,6 +185,7 @@ if TYPE_CHECKING:
     from ..repositories.notification_repo import AbstractNotificationRepo
     from ..repositories.user_repo import AbstractUserRepo
     from .app_service import AppService
+    from .notification_delivery_worker import NotificationDeliveryWorker
 
 #: The "Needs you" row of a game invite that waits for its app (D10).
 WAITING_INVITE_TYPE = "app_challenge_waiting"
@@ -297,6 +300,7 @@ class AppFederationService(ProtectionGateMixin):
         "_catalog",
         "_child_protection",
         "_cp_repo",
+        "_delivery",
         "_federation",
         "_federation_repo",
         "_invite_locks",
@@ -329,6 +333,9 @@ class AppFederationService(ProtectionGateMixin):
         self._notifs = notifications
         self._catalog = catalog
         self._child_protection = None
+        #: Where the waiting-invite steps (D10) run in order with the jobs
+        #: that write their rows (:meth:`attach_delivery_worker`).
+        self._delivery: NotificationDeliveryWorker | None = None
         #: Bounded LRU of inbound ``APP_SESSION`` open ``session_id``s already
         #: handled — guards against a double federation delivery (WebRTC +
         #: HTTPS fallback / retransmit) seating two invites + two notifications
@@ -341,6 +348,31 @@ class AppFederationService(ProtectionGateMixin):
         self._invite_locks: WeakValueDictionary[tuple[str, str], asyncio.Lock] = (
             WeakValueDictionary()
         )
+
+    def attach_delivery_worker(self, worker: NotificationDeliveryWorker) -> None:
+        """Run the waiting-invite steps (D10) on *worker*.
+
+        A waiting invite is a notification row, written (arrival) and
+        resolved (decline, withdrawal, the app arriving) by jobs on the
+        notification delivery worker — after the publisher returns. A step
+        that reads those rows to decide must not run ahead of the jobs
+        queued before it, so it is queued behind them (:meth:`_in_order`).
+        Read inline, a decline still in the queue left its row open and the
+        app arriving made the declined invite playable again; a withdrawal
+        right behind its invite found no row and was lost; and a burst of
+        invites slipped past the per-person bound of
+        :data:`WAITING_SENDERS_MAX` senders."""
+        self._delivery = worker
+
+    async def _in_order(
+        self, step: Callable[..., Awaitable[None]], /, *args: Any, **kwargs: Any
+    ) -> None:
+        """Run a waiting-invite *step* after every delivery job queued so
+        far (inline without a worker)."""
+        if self._delivery is None:
+            await step(*args, **kwargs)
+            return
+        await self._delivery.call(partial(step, *args, **kwargs))
 
     async def _emit(self, event: DomainEvent) -> None:
         """Publish ``event`` fail-soft; no-op without a bus.
@@ -1593,7 +1625,8 @@ class AppFederationService(ProtectionGateMixin):
             # turned off, waits for the person (Needs you, "Ask an admin")
             # — and the sender is never told anything.
             if notify_open and not continued:
-                await self._keep_waiting(
+                await self._in_order(
+                    self._keep_waiting,
                     app_id,
                     app,
                     session_id,
@@ -1603,7 +1636,8 @@ class AppFederationService(ProtectionGateMixin):
                 )
                 return
             if withdraw:
-                await self._withdraw_waiting(
+                await self._in_order(
+                    self._withdraw_waiting,
                     app_id,
                     session_id,
                     from_instance=from_instance,
@@ -2244,6 +2278,12 @@ class AppFederationService(ProtectionGateMixin):
                 reason=reason,
             )
         )
+        now = await self._app_repo.get(app_id)
+        if now is not None and now.enabled:
+            # The app arrived while this invite was on its way here — its
+            # own pass may have run already: the invite becomes playable
+            # now rather than wait for an app the household has.
+            await self._make_waiting_playable(app_id)
 
     async def _may_wait(
         self, recipient: User, initiator: RemoteUser, from_instance: str
@@ -2365,6 +2405,14 @@ class AppFederationService(ProtectionGateMixin):
         return True
 
     async def on_app_usable(self, event: AppInstalled | AppEnabledChanged) -> None:
+        """The app was added or turned on: its waiting invites become
+        playable (:meth:`_make_waiting_playable`) — once every invite,
+        decline and withdrawal queued before it has landed."""
+        if isinstance(event, AppEnabledChanged) and not event.enabled:
+            return
+        await self._in_order(self._make_waiting_playable, event.app_id)
+
+    async def _make_waiting_playable(self, app_id: str) -> None:
         """The app was added or turned on: every invite that waited for it
         becomes a normal invite (Play / Decline, a push per the person's
         settings) — a session row kept for the invitee from when the
@@ -2378,9 +2426,7 @@ class AppFederationService(ProtectionGateMixin):
         (invitee, sender person) becomes playable, and only the newest
         :data:`WAITING_SENDERS_MAX` senders' per invitee; any other
         waiting row ends ``done``."""
-        if isinstance(event, AppEnabledChanged) and not event.enabled:
-            return
-        app = await self._app_repo.get(event.app_id)
+        app = await self._app_repo.get(app_id)
         if app is None or not app.enabled:
             return
         cutoff = datetime.now(UTC) - timedelta(seconds=PENDING_SESSION_TTL_SECONDS)

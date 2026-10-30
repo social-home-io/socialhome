@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -58,10 +59,11 @@ DEFAULT_FULL_WARNING_SECONDS: float = 5.0
 @dataclass(slots=True, frozen=True)
 class _Job:
     """Service-local: one triggering event and the handler that delivers
-    its notifications."""
+    its notifications — or, for a step queued with
+    :meth:`NotificationDeliveryWorker.call`, no event."""
 
     handler: Handler[Any]
-    event: DomainEvent
+    event: DomainEvent | None
 
 
 class NotificationDeliveryWorker:
@@ -114,7 +116,23 @@ class NotificationDeliveryWorker:
         While the worker is not running the job runs right here — and so
         does an event a job itself publishes, which must never wait on the
         queue its own task drains."""
-        job = _Job(handler, event)
+        await self._submit(_Job(handler, event))
+
+    async def call(self, step: Callable[[], Awaitable[None]]) -> None:
+        """Queue *step* in order with the delivery jobs — for work that
+        reads rows earlier jobs write and must not run ahead of them (an
+        invite that waits for its app, D10). Same rules as :meth:`submit`:
+        inline before :meth:`start`, after :meth:`stop` and inside a job."""
+
+        async def job(_event: DomainEvent | None) -> None:
+            await step()
+
+        job.__qualname__ = getattr(
+            getattr(step, "func", step), "__qualname__", repr(step)
+        )
+        await self._submit(_Job(job, None))
+
+    async def _submit(self, job: _Job) -> None:
         if not self.running or asyncio.current_task() is self._task:
             await self._run(job)
             return
@@ -132,7 +150,7 @@ class NotificationDeliveryWorker:
                 "%s waits for a free slot",
                 self._queue.maxsize,
                 self._full_warning,
-                type(event).__name__,
+                _what(job),
             )
         await self._queue.put(job)
 
@@ -206,5 +224,13 @@ class NotificationDeliveryWorker:
             log.exception(
                 "notification delivery: %s failed for %s",
                 getattr(job.handler, "__qualname__", repr(job.handler)),
-                type(job.event).__name__,
+                _what(job),
             )
+
+
+def _what(job: _Job) -> str:
+    """What *job* delivers, for a log line: its event's type, or the
+    queued step's name."""
+    if job.event is not None:
+        return type(job.event).__name__
+    return getattr(job.handler, "__qualname__", "a queued step")

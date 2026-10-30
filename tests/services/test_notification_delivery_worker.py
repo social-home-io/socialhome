@@ -208,6 +208,78 @@ async def test_the_subscriber_keeps_the_handlers_name():
     )
 
 
+async def test_a_called_step_runs_after_the_jobs_queued_before_it():
+    """``call`` queues a plain step (no event) behind what is queued — a
+    step that reads rows earlier jobs write never runs ahead of them."""
+    seen: list[str] = []
+
+    async def handler(ev):
+        seen.append(f"job{ev.n}")
+
+    async def step():
+        seen.append("step")
+
+    worker = NotificationDeliveryWorker()
+    await worker.call(step)  # before start: inline
+    assert seen == ["step"]
+    await worker.start()
+    publish = worker.deferred(handler)
+    await publish(_Ev(1))
+    await worker.call(step)
+    await publish(_Ev(2))
+    assert seen == ["step"]
+    await worker.drain()
+    assert seen == ["step", "job1", "step", "job2"]
+    await worker.stop()
+
+
+async def test_a_failing_called_step_is_logged_by_name_and_never_stops_the_next(
+    caplog,
+):
+    seen: list[str] = []
+
+    async def broken_step():
+        raise RuntimeError("boom")
+
+    async def step():
+        seen.append("step")
+
+    worker = NotificationDeliveryWorker()
+    await worker.start()
+    with caplog.at_level(logging.ERROR):
+        await worker.call(broken_step)
+        await worker.call(step)
+        await worker.drain()
+    assert seen == ["step"]
+    assert "broken_step failed for" in caplog.text
+    await worker.stop()
+
+
+async def test_a_step_waiting_on_a_full_queue_is_named_in_the_warning(caplog):
+    gate = asyncio.Event()
+
+    async def hold():
+        await gate.wait()
+
+    async def waiting_step():
+        return None
+
+    worker = NotificationDeliveryWorker(max_queued=1, full_warning_seconds=0.01)
+    await worker.start()
+    await worker.call(hold)  # in hand
+    await asyncio.sleep(0)
+    await worker.call(hold)  # fills the one slot
+    with caplog.at_level(logging.WARNING):
+        late = asyncio.create_task(worker.call(waiting_step))
+        while "waits for a free slot" not in caplog.text:
+            await asyncio.sleep(0.01)
+    assert "waiting_step waits for a free slot" in caplog.text
+    gate.set()
+    await late
+    await worker.drain()
+    await worker.stop()
+
+
 # ── The fan-out it runs: round-trips per job ───────────────────────────
 
 
