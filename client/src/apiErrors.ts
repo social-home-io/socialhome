@@ -145,6 +145,7 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
     answer_max: str(p, 'answer_max') || '500',
   }),
   BAZAAR_FAQ_FULL: (_b, p) => t('error.bazaar_faq_full', { max: str(p, 'max') || '10' }),
+  BAZAAR_FAQ_USED_UP: (_b, p) => t('error.bazaar_faq_used_up', { max: str(p, 'max') || '30' }),
   BAZAAR_FAQ_RATE_LIMITED: () => t('error.bazaar_faq_rate_limited'),
   // Pictures.
   IMAGE_TOO_LARGE: (_b, p) => t('error.image_too_large', { max_mb: str(p, 'max_mb') }),

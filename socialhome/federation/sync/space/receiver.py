@@ -31,8 +31,7 @@ import orjson as _orjson
 
 from ....crypto import derive_instance_id
 from ....domain.bazaar_faq import (
-    BAZAAR_FAQ_MAX_ENTRIES,
-    BAZAAR_FAQ_MAX_REMOVED,
+    BAZAAR_FAQ_MAX_ENTRIES_EVER,
     BazaarFaqEntry,
     entry_from_wire,
 )
@@ -3625,8 +3624,8 @@ async def _apply_bazaar_faq(
     entry by entry under the live rule (newer ``rev`` wins, a removal is
     final, ≤ 10 live): removals first, so a full listing makes room before
     the entries that replaced them. A malformed entry is skipped; past
-    :data:`_FAQ_RECORD_MAX_ITEMS` the record is refused (no provider sends
-    more than 10 live entries and 20 markers)."""
+    :data:`_FAQ_RECORD_MAX_ITEMS` the record is refused (a listing never
+    holds more entries than that, live and removed together)."""
     if items is None:
         return  # an older provider
     if not isinstance(items, list) or len(items) > _FAQ_RECORD_MAX_ITEMS:
@@ -3649,9 +3648,10 @@ async def _apply_bazaar_faq(
         await repo.apply_faq_entry(entry)
 
 
-#: The most ``faq`` items one §25.6 ``bazaar`` record may carry: the live
-#: maximum plus the removal markers a listing keeps.
-_FAQ_RECORD_MAX_ITEMS = BAZAAR_FAQ_MAX_ENTRIES + BAZAAR_FAQ_MAX_REMOVED
+#: The most ``faq`` items one §25.6 ``bazaar`` record may carry: every
+#: entry a listing ever holds, all its removal markers included (so a late
+#: joiner never takes a stale edit of a removed entry).
+_FAQ_RECORD_MAX_ITEMS = BAZAAR_FAQ_MAX_ENTRIES_EVER
 
 
 def _bazaar_listing_from_record(

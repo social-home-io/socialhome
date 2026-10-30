@@ -154,6 +154,14 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe("You've sent a lot of messages about this listing. Wait a while, then send the rest.")
   })
 
+  it('says a listing used up its questions and that editing one still works', () => {
+    expect(apiErrorMessage(409, '/api/bazaar/p1/faq', {
+      code: 'BAZAAR_FAQ_USED_UP',
+      detail: 'This listing already had 30 questions. Edit one of them instead.',
+      params: { max: 30 },
+    })).toBe('This listing has already had 30 questions, the most it can. Edit one of the questions it shows instead.')
+  })
+
   it('formats the bid floor as money in the listing currency', () => {
     const msg = apiErrorMessage(422, '/api/bazaar/p1/bids', {
       code: 'BID_TOO_LOW',

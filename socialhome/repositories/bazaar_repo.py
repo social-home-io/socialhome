@@ -22,10 +22,11 @@ from typing import Protocol, runtime_checkable
 from ..db import AsyncDatabase
 from ..domain.bazaar_faq import (
     BAZAAR_FAQ_MAX_ENTRIES,
-    BAZAAR_FAQ_MAX_REMOVED,
+    BAZAAR_FAQ_MAX_ENTRIES_EVER,
     BazaarFaqEntry,
     BazaarFaqEntryNotFoundError,
     BazaarFaqFullError,
+    BazaarFaqUsedUpError,
 )
 from ..domain.post import (
     BAZAAR_CURRENCIES,
@@ -206,7 +207,9 @@ class AbstractBazaarRepo(Protocol):
     ) -> BazaarFaqEntry:
         """A new entry by this household's seller, at the end of the list,
         under the listing's next revision. :class:`BazaarFaqFullError` when
-        the listing already shows the maximum."""
+        the listing already shows the maximum, :class:`BazaarFaqUsedUpError`
+        when it already had :data:`BAZAAR_FAQ_MAX_ENTRIES_EVER` entries
+        (removal markers included)."""
         ...
 
     async def edit_faq_entry(
@@ -218,14 +221,16 @@ class AbstractBazaarRepo(Protocol):
 
     async def remove_faq_entry(self, post_id: str, entry_id: str) -> BazaarFaqEntry:
         """Blank a live entry into a removal marker under the listing's next
-        revision. :class:`BazaarFaqEntryNotFoundError` for no such entry."""
+        revision; the marker stays for the life of the listing.
+        :class:`BazaarFaqEntryNotFoundError` for no such entry."""
         ...
 
     async def apply_faq_entry(self, entry: BazaarFaqEntry) -> bool:
         """Take an entry from the seller's household (or the space sync):
         stored only when its ``rev`` is newer than the one held, never
-        reviving a removed entry, never past the live maximum. ``True``
-        when it changed what this household holds."""
+        reviving a removed entry, never past the live maximum, never a new
+        entry id past :data:`BAZAAR_FAQ_MAX_ENTRIES_EVER`. ``True`` when it
+        changed what this household holds."""
         ...
 
 
@@ -976,13 +981,16 @@ class SqliteBazaarRepo:
         entry_id = uuid.uuid4().hex
 
         def _run(conn) -> BazaarFaqEntry:
-            live, top_position, top_rev = conn.execute(
-                "SELECT COALESCE(SUM(removed=0), 0),"
+            live, ever, top_position, top_rev = conn.execute(
+                "SELECT COALESCE(SUM(removed=0), 0), COUNT(*),"
                 " COALESCE(MAX(CASE WHEN removed=0 THEN position END), -1),"
                 " COALESCE(MAX(rev), 0)"
                 " FROM bazaar_listing_faq WHERE listing_post_id=?",
                 (post_id,),
             ).fetchone()
+            # Used up first: removing one would not make room then.
+            if ever >= BAZAAR_FAQ_MAX_ENTRIES_EVER:
+                raise BazaarFaqUsedUpError
             if live >= BAZAAR_FAQ_MAX_ENTRIES:
                 raise BazaarFaqFullError
             entry = BazaarFaqEntry(
@@ -1043,13 +1051,15 @@ class SqliteBazaarRepo:
             if held is not None and (int(held[0]) >= entry.rev or held[1]):
                 # Not newer — or removed, which is final.
                 return False
-            if held is None and not entry.removed:
-                (live,) = conn.execute(
-                    "SELECT COUNT(*) FROM bazaar_listing_faq"
-                    " WHERE listing_post_id=? AND removed=0",
+            if held is None:
+                live, ever = conn.execute(
+                    "SELECT COALESCE(SUM(removed=0), 0), COUNT(*)"
+                    " FROM bazaar_listing_faq WHERE listing_post_id=?",
                     (entry.listing_post_id,),
                 ).fetchone()
-                if live >= BAZAAR_FAQ_MAX_ENTRIES:
+                if ever >= BAZAAR_FAQ_MAX_ENTRIES_EVER or (
+                    not entry.removed and live >= BAZAAR_FAQ_MAX_ENTRIES
+                ):
                     return False
             _faq_upsert(conn, entry)
             return True
@@ -1077,8 +1087,9 @@ def _faq_next_rev(conn, post_id: str) -> int:
 
 
 def _faq_upsert(conn, entry: BazaarFaqEntry) -> None:
-    """Write ``entry`` (text blanked for a removal) and, after a removal,
-    forget the oldest markers past :data:`BAZAAR_FAQ_MAX_REMOVED`."""
+    """Write ``entry`` (text blanked for a removal). A removal marker is
+    never forgotten while the listing lives; the rows of one listing are
+    bounded by :data:`BAZAAR_FAQ_MAX_ENTRIES_EVER` instead."""
     conn.execute(
         "INSERT INTO bazaar_listing_faq(listing_post_id, entry_id, question,"
         " answer, position, rev, removed) VALUES(?,?,?,?,?,?,?)"
@@ -1096,13 +1107,6 @@ def _faq_upsert(conn, entry: BazaarFaqEntry) -> None:
             int(entry.removed),
         ),
     )
-    if entry.removed:
-        conn.execute(
-            "DELETE FROM bazaar_listing_faq WHERE listing_post_id=? AND removed=1"
-            " AND entry_id NOT IN (SELECT entry_id FROM bazaar_listing_faq"
-            " WHERE listing_post_id=? AND removed=1 ORDER BY rev DESC LIMIT ?)",
-            (entry.listing_post_id, entry.listing_post_id, BAZAAR_FAQ_MAX_REMOVED),
-        )
 
 
 # ─── Row → domain ─────────────────────────────────────────────────────────

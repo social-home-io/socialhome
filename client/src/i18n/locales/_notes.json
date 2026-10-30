@@ -42,6 +42,8 @@
 
   "nav.feed": "Top-level nav label — keep short (≤ 10 chars). 'Feed' as in 'timeline', not 'food'.",
   "nav.spaces": "'Spaces' = shared rooms / communities. Keep short.",
+  "bazaar.ask.conversations_title": "Heading, shown to the seller only, over the list of private Ask-the-seller conversations about one listing (one row per buyer). It sits right next to the public 'Questions and answers' section, so it must not say 'Questions': say it is the private conversations.",
+  "error.bazaar_faq_used_up": "{max} is 30. Removed questions count too, so removing one does not help; editing a shown question still works.",
   "nav.bazaar": "'Bazaar' = peer-to-peer marketplace. Keep short.",
   "nav.stickies": "'Sticky notes' on a shared pinboard. Keep short (≤ 10 chars).",
 
