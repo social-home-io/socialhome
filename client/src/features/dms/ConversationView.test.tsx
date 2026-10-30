@@ -154,6 +154,35 @@ describe('ConversationView', () => {
     expect(queryByTestId('thread-load-error')).toBeNull()
   })
 
+  it('a 1:1 peer with presence reads Offline; one whose presence never reaches us shows no status', async () => {
+    // A person on a household we never paired with (an Ask-the-seller
+    // thread) sends us no presence: "Offline" would be a guess.
+    const { render, waitFor, ConversationView } = await setup()
+    const { container, unmount } = render(<ConversationView conversationId="conv-a" />)
+    await waitFor(() => {
+      expect(container.querySelector('.sh-thread-header-status-line')?.textContent)
+        .toBe('Offline')
+    }, { timeout: RENDER_WAIT })
+    unmount()
+    const wired = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => {
+      if (url === '/api/conversations/conv-a/members') {
+        return [roster[0], { ...roster[1], presence_shared: false }]
+      }
+      return wired(url)
+    })
+    const again = render(<ConversationView conversationId="conv-a" />)
+    await waitFor(() => {
+      expect(again.container.textContent ?? '').toContain('BOB-conv-a')
+    }, { timeout: RENDER_WAIT })
+    await waitFor(() => {
+      expect(apiGet.mock.calls.filter(c => c[0] === '/api/conversations/conv-a/members').length)
+        .toBeGreaterThanOrEqual(2)
+    })
+    expect(again.container.querySelector('.sh-thread-header-status-line')).toBeNull()
+    expect(again.container.querySelector('.sh-thread-header-dot')).toBeNull()
+  })
+
   it('loads its metadata from GET /api/conversations/{id}, never the whole list', async () => {
     const { render, waitFor, ConversationView } = await setup()
     const { container } = render(<ConversationView conversationId="conv-b" />)

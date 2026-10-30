@@ -511,7 +511,13 @@ class BazaarService(ProtectionGateMixin):
             )
         if listing.status is not BazaarStatus.ACTIVE:
             raise BazaarServiceError("listing is not active")
-        await self._repo.mark_cancelled(post_id, space_id=listing.space_id)
+        # The listing ends now, not at its scheduled end: its threads
+        # close 14 days from here (``listing_ended_at``).
+        await self._repo.mark_cancelled(
+            post_id,
+            space_id=listing.space_id,
+            ended_at=datetime.now(UTC).isoformat(),
+        )
         await self._bus.publish(
             BazaarListingCancelled(
                 listing_post_id=post_id,

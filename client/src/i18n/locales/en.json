@@ -3486,6 +3486,7 @@
   "error.seller_household_too_old": "The seller's household needs an update to Social Home before you can ask here.",
   "error.listing_thread_text_only": "Only text can be sent about a listing. Photos belong in the listing itself.",
   "error.listing_thread_no_changes": "Messages about a listing can't be edited, deleted or reacted to.",
+  "error.listing_thread_rate_limited": "You've sent a lot of messages about this listing. Wait a while, then send the rest.",
   "error.image_too_large": "This picture is too big. Pick one under {max_mb} MB.",
   "error.app_bundle_too_large": "This app is too big to install.",
   "error.app_download_failed": "Couldn't download the app. Check the connection and try again.",

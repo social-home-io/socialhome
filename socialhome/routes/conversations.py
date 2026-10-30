@@ -562,6 +562,11 @@ class ConversationMembersView(BaseView):
     (``is_online`` / ``is_idle`` / ``last_seen_at``) so the DM thread
     header can render a WhatsApp-style "Online" / "Last seen 2 h ago"
     status without a follow-up fetch.
+
+    ``presence_shared`` says whether this household gets that person's
+    presence at all: ``false`` for a seat on a household it never paired
+    with (an Ask-the-seller thread, a group seat) — the header then shows
+    no status rather than "Offline".
     """
 
     async def post(self) -> web.Response:
@@ -651,6 +656,7 @@ class ConversationMembersView(BaseView):
                     "is_online": is_online,
                     "is_idle": is_idle,
                     "last_seen_at": last_seen,
+                    "presence_shared": True,
                     "instance_id": None,
                     "household_name": None,
                     "mention": tokens.get(u.user_id),
@@ -680,6 +686,9 @@ class ConversationMembersView(BaseView):
                         "is_online": False,
                         "is_idle": False,
                         "last_seen_at": None,
+                        # No pairing, so no presence ever reaches us:
+                        # unknown, not offline.
+                        "presence_shared": False,
                         "instance_id": rm.instance_id,
                         "household_name": await _household(rm.instance_id),
                         "mention": tokens.get(rm.user_id),
@@ -708,6 +717,7 @@ class ConversationMembersView(BaseView):
                     "is_online": is_online,
                     "is_idle": is_idle,
                     "last_seen_at": last_seen,
+                    "presence_shared": True,
                     "instance_id": rm.instance_id,
                     "household_name": await _household(rm.instance_id),
                     "mention": tokens.get(ru.user_id),

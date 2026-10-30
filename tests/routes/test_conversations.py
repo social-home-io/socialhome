@@ -326,6 +326,52 @@ async def test_list_dm_members_includes_remote_peer(client):
     assert self_row["username"] == "pascal"
 
 
+async def test_a_person_whose_presence_we_never_get_has_no_presence(client):
+    """A seat on a household we never paired with (an Ask-the-seller
+    thread, a group seat) comes with ``presence_shared: false`` — the
+    header shows no status rather than claiming "Offline". Our own people
+    and paired peers keep ``presence_shared: true``."""
+    remote_uid = await _seed_remote_brother(client)
+    repo = client.app[conversation_repo_key]
+    db = client.app[_db_key]
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp-x', 'Street', 'h', 'h', ?)",
+        ("ab" * 32,),
+    )
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content)"
+        " VALUES('post-x', 'sp-x', 'u-sam', 'bazaar', 'x')"
+    )
+    await db.enqueue(
+        "INSERT INTO bazaar_listings(post_id, space_id, seller_user_id, mode,"
+        " title, end_time, currency) VALUES('post-x', 'sp-x', 'u-sam', 'fixed',"
+        " 'Bike', '2099-01-01T00:00:00+00:00', 'EUR')"
+    )
+    thread = await repo.open_listing_thread(
+        conversation_id="bzt-" + "0" * 28,
+        listing_post_id="post-x",
+        username="pascal",
+        remote_instance_id="inst-far",
+        remote_user_id="u-sam",
+        remote_display_name="Sam",
+    )
+    h = _auth(client._admin_token)
+    resp = await client.get(f"/api/conversations/{thread.id}/members", headers=h)
+    assert resp.status == 200
+    rows = {m["user_id"]: m for m in await resp.json()}
+    assert rows["u-sam"]["presence_shared"] is False
+    assert rows["u-sam"]["is_online"] is False
+    assert next(m for m in rows.values() if m["is_self"])["presence_shared"] is True
+    r = await client.post(
+        "/api/conversations/dm", json={"user_id": remote_uid}, headers=h
+    )
+    conv_id = (await r.json())["id"]
+    resp = await client.get(f"/api/conversations/{conv_id}/members", headers=h)
+    peer = next(m for m in await resp.json() if m["user_id"] == remote_uid)
+    assert peer["presence_shared"] is True
+
+
 async def test_create_dm(client):
     """POST /api/conversations/dm creates a DM and returns 201."""
     resp = await client.post(

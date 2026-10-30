@@ -30,7 +30,7 @@ from __future__ import annotations
 
 import copy
 import itertools
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
@@ -40,7 +40,7 @@ from socialhome.app import create_app
 from socialhome.app_keys import db_key, federation_service_key
 from socialhome.auth import sha256_token_hash
 from socialhome.config import Config
-from socialhome.domain.bazaar_thread import listing_thread_id
+from socialhome.domain.bazaar_thread import LISTING_THREAD_RATE_CAPS, listing_thread_id
 from socialhome.domain.federation import (
     DeliveryResult,
     FederationEvent,
@@ -661,3 +661,90 @@ async def test_an_unpaired_sellers_household_gets_it_sealed_in_space_routed(
     assert inner[0]["target_eph_pk_b64"] == "eph-pk"
     assert inner[0]["inner_payload"]["content"] == SECRET
     assert [k for k in sent_in_clear if k.get("event_type") is THREAD] == []
+
+
+# ── Thread lifetime and the rate cap ──────────────────────────────────────
+
+
+async def _deliver(mesh, event_type: FederationEventType) -> list[str]:
+    """Deliver every queued ``event_type`` envelope through the real gates;
+    the names of the households it reached."""
+    houses = _by_iid(mesh)
+    reached: list[str] = []
+    for iid, sent in OUTBOX.items():
+        for to, et, payload in list(sent):
+            if et is event_type and to in houses:
+                event = replace(
+                    _event(houses[iid], payload, houses[to]), event_type=event_type
+                )
+                if await _receive(houses[to], event):
+                    reached.append(houses[to].name)
+        sent[:] = [s for s in sent if s[1] is not event_type]
+    return reached
+
+
+async def _card(house: House, conv_id: str) -> dict:
+    r = await house.tc.get(f"/api/conversations/{conv_id}", headers=house.headers)
+    assert r.status == 200, await r.text()
+    return (await r.json())["bazaar_listing"]
+
+
+async def test_a_withdrawn_listings_threads_close_14_days_after_the_withdrawal(mesh):
+    """Not 14 days after the scheduled end: the seller's household records
+    the withdrawal and every member household closes the threads from the
+    same moment."""
+    s, b = mesh["S"], mesh["B"]
+    conv_id = await _open_thread(mesh)
+    await _say(b, conv_id, "still there?")
+    await _pump(mesh)
+    before = datetime.now(UTC)
+    r = await s.tc.delete(f"/api/bazaar/{BIKE}", headers=s.headers)
+    assert r.status in (200, 204), await r.text()
+    reached = await _deliver(mesh, FET.BAZAAR_LISTING_UPDATED)
+    assert "B" in reached
+    seller_side, buyer_side = await _card(s, conv_id), await _card(b, conv_id)
+    assert seller_side["status"] == buyer_side["status"] == "cancelled"
+    # Both close at the same moment: the withdrawal + 14 days.
+    assert seller_side["closes_at"] == buyer_side["closes_at"]
+    closes = datetime.fromisoformat(seller_side["closes_at"])
+    assert before + timedelta(days=14) <= closes
+    assert closes <= datetime.now(UTC) + timedelta(days=14)
+    assert seller_side["writable"] and buyer_side["writable"]
+    # 14 days on (the withdrawal moved back), both sides read only.
+    long_ago = (datetime.now(UTC) - timedelta(days=15)).isoformat()
+    for house in (s, b):
+        await house.db.enqueue(
+            "UPDATE bazaar_listings SET end_time=? WHERE post_id=?", (long_ago, BIKE)
+        )
+    r = await _say(b, conv_id, "hello?")
+    assert (await r.json())["error"]["code"] == "LISTING_THREAD_CLOSED"
+    assert await _receive(s, _event(b, _thread_payload(content="late"), s))
+    assert ("u-ben", "late") not in await _messages(s)
+
+
+async def test_one_buyer_is_capped_on_both_households(mesh):
+    """The sender stops at the cap with a coded 429 and sends nothing more;
+    a household that ignores it is refused on receipt, however it stamps
+    ``created_at``."""
+    s, b = mesh["S"], mesh["B"]
+    conv_id = await _open_thread(mesh)
+    (_hour, per_hour), _ = LISTING_THREAD_RATE_CAPS
+    for i in range(per_hour):
+        r = await _say(b, conv_id, f"question {i}")
+        assert r.status == 201, await r.text()
+    await _pump(mesh)
+    assert len(await _messages(s)) == per_hour
+    r = await _say(b, conv_id, "one more")
+    assert r.status == 429
+    assert (await r.json())["error"]["code"] == "LISTING_THREAD_RATE_LIMITED"
+    assert _thread_sends() == []
+    # A household sending anyway — fresh or backdated — is refused.
+    long_ago = (datetime.now(UTC) - timedelta(days=2)).isoformat()
+    for created_at in (datetime.now(UTC).isoformat(), long_ago):
+        await _receive(
+            s, _event(b, _thread_payload(content="flood", created_at=created_at), s)
+        )
+    assert ("u-ben", "flood") not in await _messages(s)
+    # The seller still answers: the cap is per person.
+    r = await _say(s, conv_id, "Slow down, please.")
+    assert r.status == 201, await r.text()

@@ -42,6 +42,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from ...domain.bazaar_thread import announced_end
 from ...domain.calendar import (
     CalendarEvent,
     CalendarRSVP,
@@ -2936,17 +2937,28 @@ class SpaceContentInboundHandlers:
                 if not winner or price_raw is None:
                     log.debug("BAZAAR_LISTING_UPDATED sold missing winner/price: %s", p)
                     return
+                # The seller's own sale time (the column's SQLite shape), so
+                # the listing's Ask-the-seller threads close here when
+                # they close there.
+                sold_at = announced_end(p.get("sold_at"), now=datetime.now(UTC))
                 await self._bazaar_repo.mark_sold(
                     post_id,
                     space_id=space_id,
                     winner_user_id=winner,
                     winning_price=int(price_raw),
+                    sold_at=sold_at.strftime("%Y-%m-%d %H:%M:%S"),
                 )
                 await self._close_pending_offers(post_id, winner)
             elif status_raw == "expired":
                 await self._bazaar_repo.mark_expired(post_id, space_id=space_id)
             elif status_raw == "cancelled":
-                await self._bazaar_repo.mark_cancelled(post_id, space_id=space_id)
+                # A withdrawal ends the listing when the seller withdrew it
+                # (the payload's ``end_time``; on arrival from an older
+                # household that sends none).
+                ended = announced_end(p.get("end_time"), now=datetime.now(UTC))
+                await self._bazaar_repo.mark_cancelled(
+                    post_id, space_id=space_id, ended_at=ended.isoformat()
+                )
             else:
                 log.debug(
                     "BAZAAR_LISTING_UPDATED unknown status %r — skipping",

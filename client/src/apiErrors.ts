@@ -139,6 +139,7 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   SELLER_HOUSEHOLD_TOO_OLD: () => t('error.seller_household_too_old'),
   LISTING_THREAD_TEXT_ONLY: () => t('error.listing_thread_text_only'),
   LISTING_THREAD_NO_CHANGES: () => t('error.listing_thread_no_changes'),
+  LISTING_THREAD_RATE_LIMITED: () => t('error.listing_thread_rate_limited'),
   // Pictures.
   IMAGE_TOO_LARGE: (_b, p) => t('error.image_too_large', { max_mb: str(p, 'max_mb') }),
   APP_BUNDLE_TOO_LARGE: () => t('error.app_bundle_too_large'),

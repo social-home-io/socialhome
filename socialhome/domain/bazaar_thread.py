@@ -15,6 +15,9 @@ Pure helpers — no I/O:
 * :func:`listing_thread_writable` — open while the listing is active and
   for :data:`LISTING_THREAD_GRACE` after it ended (sold, expired or
   withdrawn): the pickup chat after a sale. Read-only afterwards.
+* :data:`LISTING_THREAD_RATE_CAPS` — how many messages one person may
+  write in one thread per window; the sender's household and the
+  receiver's both count.
 """
 
 from __future__ import annotations
@@ -29,6 +32,16 @@ from .post import BazaarListing, BazaarStatus
 #: How long a thread stays writable after its listing ended (owner
 #: decision 2026-10-30: ~14 days — the handover window after a sale).
 LISTING_THREAD_GRACE = timedelta(days=14)
+
+#: How many messages one person may write in one thread (so one buyer
+#: about one listing, or the seller to that buyer) per sliding window. A
+#: backstop against a flood into the seller's inbox: the hour cap stops a
+#: burst, the day cap a steady drip. Both households enforce it — the
+#: sender before it sends, the receiver before it stores.
+LISTING_THREAD_RATE_CAPS: tuple[tuple[timedelta, int], ...] = (
+    (timedelta(hours=1), 30),
+    (timedelta(days=1), 100),
+)
 
 #: Domain separator of :func:`listing_thread_id` (versioned, so a later
 #: derivation never collides with this one).
@@ -74,10 +87,12 @@ _LONG_AGO = datetime.min.replace(tzinfo=UTC)
 def listing_ended_at(listing: BazaarListing) -> datetime | None:
     """When the listing ended (UTC), or ``None`` while it is active.
 
-    A sale ends it at ``sold_at``; an expiry at ``end_time``. A withdrawn
-    listing keeps no timestamp of its own, so its scheduled ``end_time``
-    stands in (at most the listing's duration after the withdrawal). An
-    unreadable stamp reads as long ago — fail closed.
+    A sale ends it at ``sold_at``; an expiry or a withdrawal at
+    ``end_time`` — withdrawing a listing pulls its ``end_time`` in to the
+    moment it was withdrawn (``mark_cancelled``), on the seller's household
+    and, from ``BAZAAR_LISTING_UPDATED``, on every member household. (A
+    listing withdrawn before that keeps its scheduled end.) An unreadable
+    stamp reads as long ago — fail closed.
     """
     if listing.status is BazaarStatus.ACTIVE:
         return None
@@ -105,12 +120,37 @@ def listing_thread_writable(listing: BazaarListing, *, now: datetime) -> bool:
     return closes is None or now < closes
 
 
+def announced_end(raw: object, *, now: datetime) -> datetime:
+    """When a listing ended, as its seller's household announced it.
+
+    ``raw`` is the ``sold_at`` / ``end_time`` of a ``BAZAAR_LISTING_UPDATED``
+    payload. A receiver stores it so its threads close at the same moment
+    as the seller's. Never later than ``now`` (a stamp from the future
+    would keep the threads open past the real end); ``now`` when the
+    payload carries none (an older seller's household) or an unreadable
+    one — the moment the news arrived.
+    """
+    parsed = parse_iso8601_optional(raw) if isinstance(raw, str) else None
+    if parsed is None:
+        return now
+    return min(as_utc(parsed), now)
+
+
 class ListingThreadClosedError(CodedError, PermissionError):
     """A message in a thread whose listing ended more than the grace ago."""
 
     status = 409
     code = "LISTING_THREAD_CLOSED"
     detail = "This conversation is closed: the listing ended over 14 days ago."
+
+
+class ListingThreadRateLimitedError(CodedError, PermissionError):
+    """One person wrote more than :data:`LISTING_THREAD_RATE_CAPS` allows
+    in one thread."""
+
+    status = 429
+    code = "LISTING_THREAD_RATE_LIMITED"
+    detail = "Too many messages about this listing. Wait a while, then send more."
 
 
 class ListingThreadUnsupportedError(CodedError):

@@ -28,6 +28,12 @@ drops (WARNING) anything else:
   people are judged by their own household before it sends.)
 * **Still open.** The listing is active, or ended less than
   :data:`~socialhome.domain.bazaar_thread.LISTING_THREAD_GRACE` ago.
+* **Not a flood.** The author is under
+  :data:`~socialhome.domain.bazaar_thread.LISTING_THREAD_RATE_CAPS` in this
+  thread — counted twice: the messages held here by their ``created_at``
+  (survives a restart) and, in memory, what arrived in each window (so a
+  household that backdates ``created_at`` can't slip past). The sender's
+  household enforces the same caps before it sends.
 * **The message.** Text only, at most ``MAX_DM_LENGTH`` characters, a fresh
   32-hex id (an id held anywhere already is dropped — no overwrite, no
   replay into another conversation), a reply only to a message of the same
@@ -45,7 +51,11 @@ import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from ...domain.bazaar_thread import listing_thread_id, listing_thread_writable
+from ...domain.bazaar_thread import (
+    LISTING_THREAD_RATE_CAPS,
+    listing_thread_id,
+    listing_thread_writable,
+)
 from ...domain.child_protection import ProtectedCapability
 from ...domain.conversation import ConversationMessage
 from ...domain.events import DmMessageCreated
@@ -53,12 +63,14 @@ from ...domain.federation import FederationEvent, FederationEventType
 from ...domain.space import WRITER_ROLES
 from ...federation.space_scope import resolve_space_id
 from ...infrastructure.event_bus import EventBus
+from ...rate_limiter import RateLimiter
 from ...repositories.bazaar_repo import AbstractBazaarRepo
 from ...repositories.conversation_repo import AbstractConversationRepo
 from ...repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
 from ...repositories.space_repo import AbstractSpaceRepo
 from ...repositories.user_repo import AbstractUserRepo
 from ...utils.datetime import as_utc, parse_iso8601_lenient
+from ..bazaar_thread_service import listing_thread_capped
 from ..dm_service import MAX_DM_LENGTH
 from ..protection_gate import ProtectionGateMixin
 
@@ -74,6 +86,18 @@ _MESSAGE_ID = re.compile(r"^[0-9a-f]{32}$")
 
 #: How a person reads when no roster name is held for them.
 _SOMEONE = "Someone"
+
+
+#: :data:`LISTING_THREAD_RATE_CAPS` in whole seconds, shortest window first.
+_CAPS_S: tuple[tuple[int, int], ...] = tuple(
+    sorted(
+        (int(window.total_seconds()), cap) for window, cap in LISTING_THREAD_RATE_CAPS
+    )
+)
+
+
+def _arrival_key(window_s: int, thread_id: str, author: str) -> str:
+    return f"{window_s}:{thread_id}:{author}"
 
 
 def _str(payload: dict, key: str) -> str:
@@ -97,6 +121,7 @@ class BazaarThreadInboundHandlers(ProtectionGateMixin):
     """Register and run the ``BAZAAR_THREAD_MESSAGE`` handler."""
 
     __slots__ = (
+        "_arrivals",
         "_bus",
         "_child_protection",
         "_convos",
@@ -123,12 +148,34 @@ class BazaarThreadInboundHandlers(ProtectionGateMixin):
         self._convos = conversation_repo
         self._users = user_repo
         self._child_protection = None
+        #: When each author's messages arrived, per thread and window.
+        self._arrivals = RateLimiter()
 
     def attach_to(self, federation_service: FederationService) -> None:
         """Register the handler on the event registry."""
         federation_service._event_registry.register(
             FederationEventType.BAZAAR_THREAD_MESSAGE, self._on_message
         )
+
+    def _arrivals_have_room(self, thread_id: str, author: str) -> bool:
+        return all(
+            self._arrivals.has_room(
+                _arrival_key(window_s, thread_id, author),
+                limit=cap,
+                window_s=window_s,
+            )
+            for window_s, cap in _CAPS_S
+        )
+
+    def _count_arrival(self, thread_id: str, author: str) -> None:
+        for window_s, cap in _CAPS_S:
+            self._arrivals.is_allowed(
+                _arrival_key(window_s, thread_id, author),
+                limit=cap,
+                window_s=window_s,
+            )
+        # Forget threads quiet for a day, so the map stays small.
+        self._arrivals.prune(window_s=_CAPS_S[-1][0])
 
     async def _on_message(self, event: FederationEvent) -> None:
         await self.apply(event)
@@ -209,8 +256,14 @@ class BazaarThreadInboundHandlers(ProtectionGateMixin):
         ):
             _refuse(event, message_id, "no thread here — a seller never opens one")
             return False
-        if not listing_thread_writable(listing, now=datetime.now(UTC)):
+        now = datetime.now(UTC)
+        if not listing_thread_writable(listing, now=now):
             _refuse(event, message_id, "the thread is closed")
+            return False
+        if not self._arrivals_have_room(thread_id, author) or (
+            await listing_thread_capped(self._convos, thread_id, author, now=now)
+        ):
+            _refuse(event, message_id, "the author is over the thread's rate cap")
             return False
         if await self._is_restricted(local_id, ProtectedCapability.BAZAAR):
             _refuse(event, message_id, "the addressed person can't trade")
@@ -260,6 +313,7 @@ class BazaarThreadInboundHandlers(ProtectionGateMixin):
         )
         if not await self._convos.insert_message_if_absent(msg):
             return False
+        self._count_arrival(thread_id, author)
         await self._bus.publish(
             DmMessageCreated(
                 conversation_id=conv.id,

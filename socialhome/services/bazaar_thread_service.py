@@ -19,8 +19,11 @@ button:
 message a local person writes in a listing thread: their trading seat
 (a writer for the buyer, any seat for the seller), not a protected account
 (``ProtectedCapability.BAZAAR``), the other person still seated in the space
-(not banned, not removed), and the thread still open
-(:func:`~socialhome.domain.bazaar_thread.listing_thread_writable`). Blocks
+(not banned, not removed), the thread still open
+(:func:`~socialhome.domain.bazaar_thread.listing_thread_writable`) and the
+writer under :data:`~socialhome.domain.bazaar_thread.LISTING_THREAD_RATE_CAPS`
+(:func:`listing_thread_capped` — the receiving household counts the same
+way). Blocks
 and guardian blocks are the DM rules :class:`DmService` already applies to
 the two seats.
 """
@@ -33,7 +36,9 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..domain.bazaar_thread import (
+    LISTING_THREAD_RATE_CAPS,
     ListingThreadClosedError,
+    ListingThreadRateLimitedError,
     ListingThreadUnsupportedError,
     listing_thread_closes_at,
     listing_thread_id,
@@ -70,6 +75,26 @@ _WRITER_ROLE_VALUES: frozenset[str] = frozenset(r.value for r in WRITER_ROLES)
 
 #: How the seller's side names a buyer it holds no roster name for.
 _SOMEONE = "Someone"
+
+
+async def listing_thread_capped(
+    convos: AbstractConversationRepo,
+    conversation_id: str,
+    user_id: str,
+    *,
+    now: datetime,
+) -> bool:
+    """Has ``user_id`` already written as many messages in the listing
+    thread ``conversation_id`` as one of :data:`LISTING_THREAD_RATE_CAPS`'
+    windows allows? The sender's household asks before it sends, the
+    receiver's before it stores."""
+    for window, cap in LISTING_THREAD_RATE_CAPS:
+        if (
+            await convos.count_messages_since(conversation_id, user_id, now - window)
+            >= cap
+        ):
+            return True
+    return False
 
 
 @dataclass(slots=True, frozen=True)
@@ -345,9 +370,12 @@ class BazaarThreadService(ProtectionGateMixin):
         )
         if seat is None or (is_seller and seat.role not in _WRITER_ROLE_VALUES):
             raise PermissionError("The other person is no longer in this space.")
-        if not listing_thread_writable(listing, now=datetime.now(UTC)):
+        now = datetime.now(UTC)
+        if not listing_thread_writable(listing, now=now):
             raise ListingThreadClosedError()
         await self._require_open_space(listing.space_id)
+        if await listing_thread_capped(self._convos, conv.id, user_id, now=now):
+            raise ListingThreadRateLimitedError()
 
     async def _require_open_space(self, space_id: str) -> None:
         """The listing's space still trades here: held, not dissolved or

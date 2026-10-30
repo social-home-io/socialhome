@@ -9,11 +9,13 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
+from uuid import uuid4
 
 import pytest
 
 from socialhome.app import create_app
 from socialhome.app_keys import (
+    bazaar_service_key,
     bazaar_thread_service_key,
     conversation_repo_key,
     db_key,
@@ -23,12 +25,19 @@ from socialhome.app_keys import (
 )
 from socialhome.config import Config
 from socialhome.domain.bazaar_thread import (
+    LISTING_THREAD_GRACE,
+    LISTING_THREAD_RATE_CAPS,
     ListingThreadClosedError,
+    ListingThreadRateLimitedError,
     ListingThreadUnsupportedError,
     listing_thread_id,
 )
 from socialhome.domain.child_protection import AccountProtectedError
-from socialhome.domain.conversation import Conversation, ConversationType
+from socialhome.domain.conversation import (
+    Conversation,
+    ConversationMessage,
+    ConversationType,
+)
 from socialhome.domain.federation import FederationEventType
 from socialhome.federation.federation_service import FederationService
 from socialhome.services.bazaar_service import ListingNotFoundError, OwnListingError
@@ -293,6 +302,72 @@ async def test_the_seller_side_needs_a_writer_buyer(env):
     await db.enqueue("UPDATE space_remote_members SET role='subscriber'", ())
     with pytest.raises(PermissionError):
         await svc.require_write(conv, "u-ben")
+
+
+async def test_a_withdrawn_listing_closes_its_threads_14_days_after_withdrawal(
+    env,
+):
+    """Not 14 days after the scheduled end: withdrawing records when the
+    listing ended."""
+    app, _db, _ = env
+    svc = app[bazaar_thread_service_key]
+    conv = await app[conversation_repo_key].open_listing_thread(
+        conversation_id=listing_thread_id(OWN, "u-sam"),
+        listing_post_id=OWN,
+        username="ben",
+        remote_instance_id=HOUSE_S,
+        remote_user_id="u-sam",
+        remote_display_name="Sam",
+    )
+    before = datetime.now(UTC)
+    await app[bazaar_service_key].cancel_listing(post_id=OWN, actor_user_id="u-ben")
+    info = await svc.info(conv, "u-ben")
+    assert info is not None and info.writable
+    assert info.closes_at is not None
+    assert before + LISTING_THREAD_GRACE <= info.closes_at
+    assert info.closes_at <= datetime.now(UTC) + LISTING_THREAD_GRACE
+
+
+async def _fill(convos, conv_id: str, sender: str, n: int, *, age: timedelta) -> None:
+    at = datetime.now(UTC) - age
+    for _ in range(n):
+        await convos.save_message(
+            ConversationMessage(
+                id=uuid4().hex,
+                conversation_id=conv_id,
+                sender_user_id=sender,
+                content="hi",
+                created_at=at,
+            )
+        )
+
+
+async def test_require_write_caps_one_person_per_thread(env):
+    """The hourly cap, then the daily one; the other person and other
+    threads are not counted."""
+    app, _db, _ = env
+    svc = app[bazaar_thread_service_key]
+    convos = app[conversation_repo_key]
+    conv_id = (await svc.ask(BIKE, username="ben")).conversation_id
+    conv = await convos.get(conv_id)
+    (hour, per_hour), (day, per_day) = LISTING_THREAD_RATE_CAPS
+    await _fill(convos, conv_id, "u-sam", per_hour, age=timedelta(minutes=1))
+    await _fill(convos, conv_id, "u-ben", per_hour - 1, age=timedelta(minutes=1))
+    await svc.require_write(conv, "u-ben")
+    await _fill(convos, conv_id, "u-ben", 1, age=timedelta(seconds=1))
+    with pytest.raises(ListingThreadRateLimitedError):
+        await svc.require_write(conv, "u-ben")
+    # Older than an hour, inside the day: the hour cap lets go …
+    await _db.enqueue(
+        "UPDATE conversation_messages SET created_at=? WHERE sender_user_id='u-ben'",
+        ((datetime.now(UTC) - hour - timedelta(minutes=5)).isoformat(),),
+    )
+    await svc.require_write(conv, "u-ben")
+    # … until the day's count reaches its own cap.
+    await _fill(convos, conv_id, "u-ben", per_day - per_hour, age=timedelta(hours=3))
+    with pytest.raises(ListingThreadRateLimitedError):
+        await svc.require_write(conv, "u-ben")
+    assert day > hour
 
 
 async def test_without_federation_no_thread_can_open(aiohttp_client, tmp_dir):

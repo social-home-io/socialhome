@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import replace
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime, time, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -2829,6 +2829,8 @@ class _FakeBazaarRepoWithStatus:
         self.sold: list[tuple[str, str, int]] = []
         self.expired: list[str] = []
         self.cancelled: list[str] = []
+        #: The end stamp each ``mark_sold`` / ``mark_cancelled`` stored.
+        self.stamps: list[str | None] = []
         self.listing_space: dict[str, str] = {}
         self.fail = False
         #: Pending offers of ours on the listing — ``(id, offerer)``.
@@ -2860,10 +2862,13 @@ class _FakeBazaarRepoWithStatus:
             status=BazaarStatus.ACTIVE,
         )
 
-    async def mark_sold(self, post_id, *, space_id, winner_user_id, winning_price):
+    async def mark_sold(
+        self, post_id, *, space_id, winner_user_id, winning_price, sold_at=None
+    ):
         if self.fail:
             raise ValueError("not active")
         self.sold.append((post_id, winner_user_id, int(winning_price)))
+        self.stamps.append(sold_at)
 
     async def mark_expired(self, post_id, *, space_id):
         if self.fail:
@@ -2871,10 +2876,11 @@ class _FakeBazaarRepoWithStatus:
         self.expired.append(post_id)
         return True
 
-    async def mark_cancelled(self, post_id, *, space_id):
+    async def mark_cancelled(self, post_id, *, space_id, ended_at=None):
         if self.fail:
             raise ValueError("not active")
         self.cancelled.append(post_id)
+        self.stamps.append(ended_at)
         return True
 
 
@@ -2967,6 +2973,69 @@ async def test_bazaar_listing_updated_cancelled_routes_to_mark_cancelled(
         ),
     )
     assert bazaar.cancelled == ["bzr-1"]
+
+
+async def test_a_withdrawal_ends_the_listing_when_the_seller_said(
+    bazaar_status_handlers,
+):
+    """The announced ``end_time`` (the withdrawal) is stored, so the
+    listing's Ask-the-seller threads close here when they close there."""
+    handlers, bazaar = bazaar_status_handlers
+    ended = datetime.now(UTC) - timedelta(minutes=3)
+    await handlers._on_bazaar_listing_updated(
+        _event(
+            FederationEventType.BAZAAR_LISTING_UPDATED,
+            {
+                "post_id": "bzr-1",
+                "space_id": "sp-1",
+                "status": "cancelled",
+                "end_time": ended.isoformat(),
+            },
+        ),
+    )
+    assert bazaar.stamps == [ended.isoformat()]
+
+
+@pytest.mark.parametrize("end_time", [None, "garbage", "2999-01-01T00:00:00+00:00"])
+async def test_a_withdrawal_without_a_usable_stamp_ends_on_arrival(
+    bazaar_status_handlers, end_time
+):
+    """An older seller's household sends no stamp; a future one would hold
+    the threads open — both read as the moment the news arrived."""
+    handlers, bazaar = bazaar_status_handlers
+    before = datetime.now(UTC)
+    await handlers._on_bazaar_listing_updated(
+        _event(
+            FederationEventType.BAZAAR_LISTING_UPDATED,
+            {
+                "post_id": "bzr-1",
+                "space_id": "sp-1",
+                "status": "cancelled",
+                "end_time": end_time,
+            },
+        ),
+    )
+    (stamp,) = bazaar.stamps
+    assert before <= datetime.fromisoformat(stamp) <= datetime.now(UTC)
+
+
+async def test_a_sale_keeps_the_sellers_sale_time(bazaar_status_handlers):
+    handlers, bazaar = bazaar_status_handlers
+    await handlers._on_bazaar_listing_updated(
+        _event(
+            FederationEventType.BAZAAR_LISTING_UPDATED,
+            {
+                "post_id": "bzr-1",
+                "space_id": "sp-1",
+                "status": "sold",
+                "winner_user_id": "u-bidder",
+                "winning_price": 4200,
+                "sold_at": "2026-10-30 09:15:00",
+            },
+        ),
+    )
+    # Stored in the column's own shape (SQLite ``datetime('now')``).
+    assert bazaar.stamps == ["2026-10-30 09:15:00"]
 
 
 async def test_bazaar_listing_updated_sold_missing_winner_drops(
@@ -4788,7 +4857,7 @@ class _FullBazaarRepo(_FakeBazaarRepoWithBids):
         self.saved.append(listing)
         return True
 
-    async def mark_cancelled(self, post_id, *, space_id):
+    async def mark_cancelled(self, post_id, *, space_id, ended_at=None):
         self.cancelled.append(post_id)
         return True
 

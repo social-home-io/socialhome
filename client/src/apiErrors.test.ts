@@ -147,6 +147,13 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe("That file can't be sent. Attach it again and resend.")
   })
 
+  it('says in plain words that a listing thread hit its rate cap, not the generic 429', () => {
+    expect(apiErrorMessage(429, '/api/conversations/bzt-1/messages', {
+      code: 'LISTING_THREAD_RATE_LIMITED',
+      detail: 'Too many messages about this listing. Wait a while, then send more.',
+    })).toBe("You've sent a lot of messages about this listing. Wait a while, then send the rest.")
+  })
+
   it('formats the bid floor as money in the listing currency', () => {
     const msg = apiErrorMessage(422, '/api/bazaar/p1/bids', {
       code: 'BID_TOO_LOW',

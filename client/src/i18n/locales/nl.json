@@ -3450,6 +3450,7 @@
   "error.seller_household_too_old": "Het huishouden van de verkoper moet Social Home eerst bijwerken voordat je hier iets kunt vragen.",
   "error.listing_thread_text_only": "Over een advertentie kun je alleen tekst sturen. Foto's horen in de advertentie zelf.",
   "error.listing_thread_no_changes": "Berichten over een advertentie kun je niet bewerken, verwijderen of erop reageren met een emoji.",
+  "error.listing_thread_rate_limited": "Je hebt veel berichten over deze advertentie gestuurd. Wacht even, dan kun je verder schrijven.",
   "error.image_too_large": "Deze afbeelding is te groot. Kies er een kleiner dan {max_mb} MB.",
   "error.app_bundle_too_large": "Deze app is te groot om te installeren.",
   "error.app_download_failed": "Kon de app niet downloaden. Controleer de verbinding en probeer het opnieuw.",

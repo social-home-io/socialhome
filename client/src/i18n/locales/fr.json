@@ -3450,6 +3450,7 @@
   "error.seller_household_too_old": "Le foyer du vendeur doit mettre à jour Social Home avant que vous puissiez poser une question ici.",
   "error.listing_thread_text_only": "Seul du texte peut être envoyé au sujet d’une annonce. Les photos vont dans l’annonce elle-même.",
   "error.listing_thread_no_changes": "Les messages au sujet d’une annonce ne peuvent pas être modifiés, supprimés ni recevoir de réaction.",
+  "error.listing_thread_rate_limited": "Vous avez envoyé beaucoup de messages au sujet de cette annonce. Patientez un peu avant d’en envoyer d’autres.",
   "error.image_too_large": "Cette image est trop lourde. Choisissez-en une de moins de {max_mb} Mo.",
   "error.app_bundle_too_large": "Cette app est trop volumineuse pour être installée.",
   "error.app_download_failed": "Impossible de télécharger l’app. Vérifiez la connexion et réessayez.",

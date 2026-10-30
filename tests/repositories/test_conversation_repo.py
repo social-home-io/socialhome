@@ -1423,3 +1423,32 @@ async def test_open_listing_thread_refuses_an_id_taken_by_a_dm(env):
     # Nobody was seated in the DM that owns the id.
     assert await env.repo.list_remote_members("bzt-taken") == []
     assert await env.repo.list_members("bzt-taken") == []
+
+
+async def test_count_messages_since_counts_one_sender_in_one_window(env):
+    """The Ask-the-seller rate cap counts one person's messages in one
+    thread since a moment — whatever shape the stamp was stored in."""
+    await env.repo.create(_conv("c-cap"))
+    await env.repo.create(_conv("c-other"))
+    now = datetime.now(UTC)
+    for i, (conv, sender, age) in enumerate(
+        [
+            ("c-cap", "uid-alice", timedelta(minutes=5)),
+            ("c-cap", "uid-alice", timedelta(minutes=50)),
+            ("c-cap", "uid-alice", timedelta(hours=2)),  # outside the hour
+            ("c-cap", "uid-bob", timedelta(minutes=1)),  # someone else
+            ("c-other", "uid-alice", timedelta(minutes=1)),  # another thread
+        ]
+    ):
+        msg = _message(f"cap-{i}", conv, sender=sender)
+        await env.repo.save_message(dataclasses.replace(msg, created_at=now - age))
+    # A naive SQLite-shaped stamp counts as UTC too.
+    await env.db.enqueue(
+        "INSERT INTO conversation_messages(id, conversation_id, sender_user_id,"
+        " content, created_at) VALUES('cap-naive','c-cap','uid-alice','x',"
+        " datetime('now','-10 minutes'))"
+    )
+    since = now - timedelta(hours=1)
+    assert await env.repo.count_messages_since("c-cap", "uid-alice", since) == 3
+    assert await env.repo.count_messages_since("c-cap", "uid-bob", since) == 1
+    assert await env.repo.count_messages_since("c-none", "uid-alice", since) == 0
