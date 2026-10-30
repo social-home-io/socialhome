@@ -12,6 +12,7 @@ from socialhome.repositories.bazaar_repo import (
     BidStateError,
     SqliteBazaarRepo,
     new_bid,
+    new_offer,
 )
 
 
@@ -704,3 +705,56 @@ async def test_list_sync_page_since_a_stamp_follows_the_listing_and_its_post(env
     await env.db.enqueue("UPDATE space_posts SET content='c' WHERE id='bz-b'")
     changed, _ = await env.bazaar_repo.list_sync_page(_DEFAULT_SPACE_ID, since=mark)
     assert {lst.post_id for lst in changed} == {"bz-a", "bz-b"}
+
+
+# ── A declined offer / bid keeps the seller's reason ────────────────────────
+
+
+async def test_a_rejected_offer_keeps_the_sellers_reason(env):
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    offer = new_offer(listing_post_id=pid, offerer_user_id="u2", amount=100)
+    await env.bazaar_repo.create_offer(offer)
+    updated = await env.bazaar_repo.update_offer_status(
+        offer.id, "rejected", reason="too low, sorry"
+    )
+    assert (updated.status, updated.rejection_reason) == ("rejected", "too low, sorry")
+    [listed] = await env.bazaar_repo.list_offers_for_offerer("u2")
+    assert listed.rejection_reason == "too low, sorry"
+
+
+async def test_a_reason_rides_only_a_rejection(env):
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    offer = new_offer(listing_post_id=pid, offerer_user_id="u2", amount=100)
+    await env.bazaar_repo.create_offer(offer)
+    updated = await env.bazaar_repo.update_offer_status(
+        offer.id, "accepted", reason="ignored"
+    )
+    assert updated.rejection_reason is None
+
+
+async def test_a_rejected_bid_is_not_rejected_twice(env):
+    """The first answer stands: a replayed or repeated decline can't swap
+    the reason the bidder already has."""
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    bid = new_bid(listing_post_id=pid, bidder_user_id="u2", amount=100)
+    await env.bazaar_repo.place_bid(bid, space_id=_DEFAULT_SPACE_ID)
+    await env.bazaar_repo.reject_offer(bid.id, reason="first")
+    with pytest.raises(BidStateError):
+        await env.bazaar_repo.reject_offer(bid.id, reason="second")
+    assert (await env.bazaar_repo.get_bid(bid.id)).rejection_reason == "first"
+
+
+async def test_a_rejected_bid_is_not_the_highest(env):
+    """A declined bid neither sets the floor nor wins at the end."""
+    pid = uuid.uuid4().hex
+    await _seed_listing(env, pid)
+    low = new_bid(listing_post_id=pid, bidder_user_id="u2", amount=100)
+    high = new_bid(listing_post_id=pid, bidder_user_id="u3", amount=900)
+    for b in (low, high):
+        await env.bazaar_repo.place_bid(b, space_id=_DEFAULT_SPACE_ID)
+    await env.bazaar_repo.reject_offer(high.id)
+    top = await env.bazaar_repo.highest_bid(pid)
+    assert top is not None and top.id == low.id

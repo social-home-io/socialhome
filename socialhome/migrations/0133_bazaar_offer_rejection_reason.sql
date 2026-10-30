@@ -1,0 +1,35 @@
+-- 0133 — a declined offer keeps the seller's reason. Follows 0132.
+--
+-- The seller's "Decline" asks for an optional reason "shown to the buyer",
+-- but ``bazaar_offers`` (0001, §23.23) had nowhere to keep it: the reason
+-- reached ``BazaarOfferRejected`` and was dropped. Auction bids keep theirs
+-- in ``bazaar_bids.rejection_reason`` (0001); offers now match.
+--
+--   rejection_reason  The seller's words, at most 280 characters (the
+--                     offer note's cap), set only when the offer is
+--                     rejected. Held by the seller's household and the
+--                     offerer's (it reaches the latter sealed inside
+--                     ``BAZAAR_OFFER_UPDATED``, v_73). NULL: no reason, or
+--                     an offer closed because another one was accepted.
+--
+-- CLAUDE.md "audit before a migration":
+--   (1) Audited every path that touches the data. ``bazaar_offers`` is
+--       defined only in 0001; no later migration alters it, no trigger or
+--       view names it. Writers: ``SqliteBazaarRepo.create_offer`` /
+--       ``update_offer_status`` / ``reject_other_pending_offers`` (local
+--       offers and the v_73 ``BAZAAR_OFFER_MADE`` / ``_UPDATED`` inbound
+--       handlers). Readers: ``get_offer`` / ``list_offers_for_listing`` /
+--       ``list_offers_for_offerer`` (``SELECT *``), shown by ``GET
+--       /api/bazaar/{id}/offers`` to the seller and the offerer only. It is
+--       not in ``backup_service.EXPORTABLE_TABLES``, the data export, nor
+--       the §25.6 space sync (listings only). Cascades are unchanged.
+--   (2) Non-migration alternatives, rejected: put the reason into
+--       ``message`` (that is the buyer's own note, which the seller still
+--       reads); only in the notification row (it is gone when the
+--       notification is cleared, and the listing — where the buyer looks —
+--       could never show it); keep it on the seller's household only (the
+--       buyer is the one it is for). The bid table's existing
+--       ``rejection_reason`` is the shape this mirrors.
+--   (3) Smallest change: one NULL-defaulted column, no backfill, no index
+--       (always read with its row), no change to any existing row.
+ALTER TABLE bazaar_offers ADD COLUMN rejection_reason TEXT;

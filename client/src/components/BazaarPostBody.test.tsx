@@ -129,3 +129,56 @@ describe('BazaarPostBody — a follower', () => {
     }
   })
 })
+
+describe('BazaarPostBody — a declined bid', () => {
+  beforeEach(() => apiGet.mockReset())
+
+  const bid = (over: Record<string, unknown> = {}) => ({
+    id: 'b1', listing_post_id: 'p1', bidder_user_id: 'bidder1', amount: 1500,
+    message: null, accepted: false, rejected: true,
+    rejection_reason: 'My sister wants it after all', withdrawn: false,
+    created_at: 'x', ...over,
+  })
+
+  async function asBidder(bids: object[]) {
+    const saved = currentUser.value
+    ;(currentUser as { value: unknown }).value = { user_id: 'bidder1', restrictions: [] }
+    try {
+      mockApi(listing({ mode: 'auction', start_price: 1000 }), bids, [])
+      const r = render(<BazaarPostBody postId="p1" />)
+      await waitFor(() =>
+        expect(r.container.querySelector('form.sh-bazaar-bid-form')).not.toBeNull(),
+      )
+      return r.container
+    } finally {
+      ;(currentUser as { value: unknown }).value = saved
+    }
+  }
+
+  it('tells the bidder it was declined, and why', async () => {
+    const container = await asBidder([bid()])
+    const note = container.querySelector('.sh-bazaar-mybid--declined')
+    expect(note?.textContent).toContain('was declined')
+    expect(note?.querySelector('.sh-bazaar-reason')?.textContent)
+      .toBe('Reason: “My sister wants it after all”')
+  })
+
+  it('says nothing more when no reason was given', async () => {
+    const container = await asBidder([bid({ rejection_reason: null })])
+    expect(container.querySelector('.sh-bazaar-mybid--declined')).not.toBeNull()
+    expect(container.querySelector('.sh-bazaar-reason')).toBeNull()
+  })
+
+  it('a newer bid of theirs replaces the note', async () => {
+    const container = await asBidder([
+      bid(),
+      bid({ id: 'b2', amount: 2000, rejected: false, rejection_reason: null }),
+    ])
+    expect(container.querySelector('.sh-bazaar-mybid--declined')).toBeNull()
+  })
+
+  it('someone else’s declined bid is not shown as theirs', async () => {
+    const container = await asBidder([bid({ bidder_user_id: 'other1' })])
+    expect(container.querySelector('.sh-bazaar-mybid--declined')).toBeNull()
+  })
+})

@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -35,6 +36,7 @@ from ..domain.post import (
     BAZAAR_MAX_DURATION_DAYS,
     BAZAAR_MAX_IMAGES,
     BAZAAR_OFFER_MESSAGE_MAX_CHARS,
+    BAZAAR_REJECT_REASON_MAX_CHARS,
     BazaarBid,
     BazaarListing,
     BazaarMode,
@@ -627,6 +629,7 @@ class BazaarService(ProtectionGateMixin):
         )
         if listing.seller_user_id != actor_user_id:
             raise PermissionError("Only the seller may reject this offer")
+        reason = _clean_reason(reason)
         try:
             await self._repo.reject_offer(bid_id, reason=reason)
         except BidStateError as exc:
@@ -638,6 +641,9 @@ class BazaarService(ProtectionGateMixin):
                 bidder_user_id=bid.bidder_user_id,
                 bid_id=bid_id,
                 reason=reason,
+                # The bidder's household — and every member household's
+                # copy of the bid — hears of it (``BAZAAR_OFFER_UPDATED``).
+                space_id=listing.space_id,
             )
         )
 
@@ -673,9 +679,21 @@ class BazaarService(ProtectionGateMixin):
         )
 
     async def list_bids(self, post_id: str, *, viewer_user_id: str) -> list[BazaarBid]:
-        """The bids on a listing the viewer may see (404 otherwise)."""
-        await self.get_visible_listing(post_id, viewer_user_id)
-        return await self._repo.list_bids(post_id)
+        """The bids on a listing the viewer may see (404 otherwise).
+
+        Every member sees every bid and whether it was declined; the
+        seller's reason only the seller and that bidder.
+        """
+        listing = await self.get_visible_listing(post_id, viewer_user_id)
+        bids = await self._repo.list_bids(post_id)
+        if viewer_user_id == listing.seller_user_id:
+            return bids
+        return [
+            b
+            if b.rejection_reason is None or b.bidder_user_id == viewer_user_id
+            else replace(b, rejection_reason=None)
+            for b in bids
+        ]
 
     # ─── Fixed-price offers (§23.23) ────────────────────────────────────
 
@@ -812,7 +830,10 @@ class BazaarService(ProtectionGateMixin):
         )
         if actor_user_id != listing.seller_user_id:
             raise PermissionError("only the seller may reject offers")
-        updated = await self._repo.update_offer_status(offer_id, "rejected")
+        reason = _clean_reason(reason)
+        updated = await self._repo.update_offer_status(
+            offer_id, "rejected", reason=reason
+        )
         await self._bus.publish(
             BazaarOfferRejected(
                 listing_post_id=offer.listing_post_id,
@@ -982,6 +1003,22 @@ class BazaarService(ProtectionGateMixin):
             )
             n += 1
         return n
+
+
+def _clean_reason(reason: object) -> str | None:
+    """The seller's reason for declining: trimmed text of at most
+    :data:`BAZAAR_REJECT_REASON_MAX_CHARS`, or ``None`` for none.
+    ``ValueError`` (422) for anything else."""
+    if reason is not None and not isinstance(reason, str):
+        raise ValueError("reason must be text")  # a 422, like every bad field
+    if reason is None:
+        return None
+    reason = reason.strip()
+    if len(reason) > BAZAAR_REJECT_REASON_MAX_CHARS:
+        raise ValueError(
+            f"reason must be at most {BAZAAR_REJECT_REASON_MAX_CHARS} characters"
+        )
+    return reason or None
 
 
 def _coerce_mode(value: str | BazaarMode) -> BazaarMode:

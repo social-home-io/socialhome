@@ -14413,6 +14413,21 @@ a.sh-space-hero-members:focus-visible,
   border-color: var(--sh-border);
   color: var(--sh-text-muted);
 }
+/* The seller's reason under a declined offer / bid — its own line. */
+.sh-bazaar-offers-own,
+.sh-bazaar-mybid--declined {
+  flex-wrap: wrap;
+}
+.sh-bazaar-mybid--declined {
+  background: var(--sh-bg-secondary);
+  border-color: var(--sh-border);
+}
+.sh-bazaar-reason {
+  flex-basis: 100%;
+  margin: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-line;
+}
 .sh-bazaar-offers-status-pill {
   display: inline-block;
   padding: 0 8px;

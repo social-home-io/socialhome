@@ -901,6 +901,17 @@ per caller: a writer seat and not the seller) so the SPA hides Buy / bid /
 offer for a follower. `GET /api/me/bazaar/saved` leaves out bookmarks of
 listings the caller can no longer see.
 
+**Declining a bid.** `POST /api/bazaar/{id}/bids/{bid_id}/reject` (seller
+only) takes `{reason?}` like an offer's reject — at most 280 characters,
+trimmed, 422 otherwise. A bid already accepted, declined or withdrawn
+answers `409 BID_STATE_ERROR`. A declined bid no longer counts as the high
+bid: neither for the next bid's floor nor as the auction's winner. `GET
+/api/bazaar/{id}/bids` shows every bid and its `rejected` flag to everyone
+who sees the listing, but `rejection_reason` only to the seller and that
+bidder (`null` for anyone else). The decline reaches every member
+household's copy of the bid; the reason only the bidder's household (see
+[Bazaar](./protocol/bazaar.md)).
+
 ### Bazaar offers & saved listings (§23.23)
 
 Offers write to a dedicated `bazaar_offers` table — distinct from
@@ -909,11 +920,11 @@ auction/bid_from `bazaar_bids`. State machine:
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/api/bazaar/{id}/offers` | List offers. Seller sees all; others see only their own. |
+| GET | `/api/bazaar/{id}/offers` | List offers. Seller sees all; others see only their own. A row carries `rejection_reason` — the seller's words when declined (`null`: none given). |
 | POST | `/api/bazaar/{id}/offers` | Make an offer on a fixed / negotiable listing. Body: `{amount, message?}` — `message` is text of at most 280 characters (422 otherwise). Returns the new offer row. 403 `ACCOUNT_PROTECTED` / `bazaar` for a protected account (as are `POST /api/bazaar` and `POST /api/bazaar/{id}/bids`). When the seller is in another household the offer, note included, is sent to that household only (sealed, v_73 — see [Bazaar](./protocol/bazaar.md)); the seller's accept / reject and the offerer's withdrawal come back the same way. A seller's household below v_73 is sent nothing: the offer stays here. |
 | DELETE | `/api/bazaar/{id}/offers/{offer_id}` | Offerer withdraws a pending offer. |
 | POST | `/api/bazaar/{id}/offers/{offer_id}/accept` | Seller accepts → listing flips to `sold` and every other pending offer on the listing is auto-rejected. |
-| POST | `/api/bazaar/{id}/offers/{offer_id}/reject` | Seller rejects. Body: `{reason?}`. Listing stays active. |
+| POST | `/api/bazaar/{id}/offers/{offer_id}/reject` | Seller rejects. Body: `{reason?}` — text of at most 280 characters, trimmed (422 otherwise; blank is none). Stored as the offer's `rejection_reason`; when the offerer is in another household it reaches that household only, sealed inside the answer (see [Bazaar](./protocol/bazaar.md)). Listing stays active. |
 | GET / POST / DELETE | `/api/bazaar/{id}/save` | Probe / bookmark / un-bookmark. POST returns `{saved: true}` (201). |
 | GET | `/api/me/bazaar/saved` | Caller's bookmarked listings — `{saved: [{post_id, saved_at}]}`. Client hydrates each via `/api/bazaar/{post_id}`. |
 

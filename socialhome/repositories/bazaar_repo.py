@@ -145,6 +145,8 @@ class AbstractBazaarRepo(Protocol):
         self,
         offer_id: str,
         new_status: str,
+        *,
+        reason: str | None = None,
     ) -> BazaarOffer: ...
     async def reject_other_pending_offers(
         self,
@@ -587,14 +589,16 @@ class SqliteBazaarRepo:
         return [b for b in (_row_to_bid(d) for d in rows_to_dicts(rows)) if b]
 
     async def highest_bid(self, post_id: str) -> BazaarBid | None:
-        """Return the single highest *non-withdrawn* bid, or ``None``.
+        """Return the single highest bid still standing — neither withdrawn
+        nor declined by the seller — or ``None``.
 
-        Useful for determining an auction winner at end-time.
+        The bid floor and the auction winner at end-time: a declined bid
+        counts for neither (the SPA already leaves it out of the high bid).
         """
         row = await self._db.fetchone(
             """
             SELECT * FROM bazaar_bids
-             WHERE listing_post_id=? AND withdrawn=0
+             WHERE listing_post_id=? AND withdrawn=0 AND rejected=0
              ORDER BY amount DESC, created_at ASC
              LIMIT 1
             """,
@@ -657,9 +661,12 @@ class SqliteBazaarRepo:
             ).fetchone()
             if row is None:
                 raise ValueError(f"bid {bid_id!r} not found")
-            if row[0] or row[2]:
+            if row[0] or row[1] or row[2]:
+                # The first answer stands — a repeat (or a replayed one
+                # from another household) never swaps the reason.
                 raise BidStateError(
-                    f"bid {bid_id!r} already accepted or withdrawn — cannot reject"
+                    f"bid {bid_id!r} already accepted, rejected or withdrawn"
+                    " — cannot reject"
                 )
             conn.execute(
                 "UPDATE bazaar_bids SET rejected=1, rejection_reason=? WHERE id=?",
@@ -751,13 +758,17 @@ class SqliteBazaarRepo:
         self,
         offer_id: str,
         new_status: str,
+        *,
+        reason: str | None = None,
     ) -> BazaarOffer:
         """State-machine-guarded status flip.
 
         Raises :class:`OfferStateError` if ``new_status`` isn't a legal
         transition from the row's current status (e.g. accept after
-        reject).
+        reject). ``reason`` — the seller's words — is kept for a
+        ``rejected`` flip only.
         """
+        rejection_reason = reason if new_status == "rejected" else None
 
         def _run(conn):
             row = conn.execute(
@@ -775,8 +786,9 @@ class SqliteBazaarRepo:
                 )
             now = datetime.now(UTC).isoformat()
             conn.execute(
-                "UPDATE bazaar_offers SET status=?, responded_at=? WHERE id=?",
-                (new_status, now, offer_id),
+                "UPDATE bazaar_offers SET status=?, responded_at=?,"
+                " rejection_reason=? WHERE id=?",
+                (new_status, now, rejection_reason, offer_id),
             )
 
         await self._db.transact(_run)
@@ -939,6 +951,7 @@ def _row_to_offer(row: dict | None) -> BazaarOffer | None:
         status=row.get("status", "pending"),
         created_at=row["created_at"],
         responded_at=row.get("responded_at"),
+        rejection_reason=row.get("rejection_reason"),
     )
 
 

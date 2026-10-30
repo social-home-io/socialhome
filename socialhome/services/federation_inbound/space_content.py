@@ -83,6 +83,7 @@ from ...domain.page_version import version_hash
 from ...domain.post import (
     BAZAAR_MAX_IMAGES,
     BAZAAR_OFFER_MESSAGE_MAX_CHARS,
+    BAZAAR_REJECT_REASON_MAX_CHARS,
     BazaarBid,
     BazaarListing,
     BazaarMode,
@@ -135,7 +136,7 @@ from ...federation.space_scope import (
 )
 from ...infrastructure.event_bus import EventBus
 from ...media.cleanup import unlink_unreferenced
-from ...repositories.bazaar_repo import OfferStateError
+from ...repositories.bazaar_repo import BidStateError, OfferStateError
 from ...utils.datetime import parse_iso8601_optional
 from ...utils.timezones import coerce_tz
 from ..gallery_service import ALBUMS_PER_SPACE, DESCRIPTION_MAX, NAME_MAX
@@ -3218,6 +3219,10 @@ class SpaceContentInboundHandlers:
         ``withdrawn`` only from the offerer's own household, for an offer
         on a listing one of OUR people sells. The status machine
         (``pending`` → one terminal state) makes a replay a no-op.
+
+        A rejection may carry the seller's ``reason`` (≤ 280 characters,
+        kept for the offerer). Keyed on ``bid_id`` instead of ``offer_id``
+        it is a declined auction bid (:meth:`_on_bazaar_bid_rejected`).
         """
         if self._bazaar_repo is None:
             return
@@ -3226,9 +3231,26 @@ class SpaceContentInboundHandlers:
             return
         p = event.payload
         offer_id = str(p.get("offer_id") or "")
+        bid_id = str(p.get("bid_id") or "")
         status = str(p.get("status") or "")
-        if not offer_id or status not in ("accepted", "rejected", "withdrawn"):
-            log.debug("BAZAAR_OFFER_UPDATED malformed payload: %s", p)
+        reason = p.get("reason") or None
+        if (
+            not (offer_id or bid_id)
+            or status not in ("accepted", "rejected", "withdrawn")
+            or (
+                reason is not None
+                and (
+                    not isinstance(reason, str)
+                    or len(reason) > BAZAAR_REJECT_REASON_MAX_CHARS
+                )
+            )
+        ):
+            log.debug(
+                "BAZAAR_OFFER_UPDATED malformed payload from %s", event.from_instance
+            )
+            return
+        if not offer_id:
+            await self._on_bazaar_bid_rejected(event, space_id, bid_id, status, reason)
             return
         offer = await self._bazaar_repo.get_offer(offer_id)
         if offer is None:
@@ -3263,7 +3285,9 @@ class SpaceContentInboundHandlers:
             )
             return
         try:
-            await self._bazaar_repo.update_offer_status(offer_id, status)
+            await self._bazaar_repo.update_offer_status(
+                offer_id, status, reason=reason if status == "rejected" else None
+            )
         except (OfferStateError, KeyError) as exc:
             log_not_applied(
                 event, what="bazaar offer", row_id=offer_id, reason=str(exc)
@@ -3293,6 +3317,7 @@ class SpaceContentInboundHandlers:
                     seller_user_id=listing.seller_user_id,
                     bidder_user_id=offer.offerer_user_id,
                     bid_id=offer_id,
+                    reason=reason,
                     space_id=space_id,
                     offer_id=offer_id,
                     origin_instance_id=event.from_instance,
@@ -3310,6 +3335,78 @@ class SpaceContentInboundHandlers:
                     origin_instance_id=event.from_instance,
                 )
             )
+
+    async def _on_bazaar_bid_rejected(
+        self,
+        event: FederationEvent,
+        space_id: str,
+        bid_id: str,
+        status: str,
+        reason: str | None,
+    ) -> None:
+        """The seller declined a bid (``BAZAAR_OFFER_UPDATED`` keyed on
+        ``bid_id``). Every member household mirrors the bid, so every one
+        takes the decline — only from the household seating the listing's
+        seller (a demoted seat still may, as for offers). The reason is
+        kept only where the bidder is one of OUR people; the seller's
+        household sends it to no one else. The first answer stands: a
+        bid already accepted / declined / withdrawn here is left as it is,
+        so a replay or a second decline can't swap the words.
+        """
+        assert self._bazaar_repo is not None
+        if status != "rejected":
+            log.debug(
+                "BAZAAR_OFFER_UPDATED bid %s: %s is no bid answer", bid_id, status
+            )
+            return
+        bid = await self._bazaar_repo.get_bid(bid_id)
+        if bid is None:
+            log_not_applied(
+                event, what="bazaar bid", row_id=bid_id, reason="no such bid"
+            )
+            return
+        listing = await self._listing_in_space(event, bid.listing_post_id, space_id)
+        if listing is None:
+            return
+        if not await self._authorship.acts_for(
+            event, space_id, listing.seller_user_id, any_role=True
+        ):
+            await self._authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="bazaar bid",
+                row_id=bid_id,
+                user_id=listing.seller_user_id,
+            )
+            return
+        if bid.accepted or bid.rejected or bid.withdrawn:
+            log_not_applied(
+                event, what="bazaar bid", row_id=bid_id, reason="already answered"
+            )
+            return
+        kept = (
+            reason
+            if reason and await self._authorship.is_local_user(bid.bidder_user_id)
+            else None
+        )
+        try:
+            await self._bazaar_repo.reject_offer(bid_id, reason=kept)
+        except (BidStateError, ValueError) as exc:
+            log_not_applied(event, what="bazaar bid", row_id=bid_id, reason=str(exc))
+            return
+        # The bidder hears of it on their own household (the notification
+        # gate drops it everywhere else); open listings refresh.
+        await self._bus.publish(
+            BazaarOfferRejected(
+                listing_post_id=listing.post_id,
+                seller_user_id=listing.seller_user_id,
+                bidder_user_id=bid.bidder_user_id,
+                bid_id=bid_id,
+                reason=kept,
+                space_id=space_id,
+                origin_instance_id=event.from_instance,
+            )
+        )
 
     async def _close_pending_offers(self, post_id: str, winner_user_id: str) -> None:
         """The seller's household sold ``post_id``: our people's offers on

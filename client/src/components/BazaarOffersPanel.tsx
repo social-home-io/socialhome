@@ -6,7 +6,7 @@
  *     buttons. Accepting one flips the listing to sold and auto-
  *     rejects the rest.
  *   - **Buyer** sees only their own offer (if any) with a withdraw
- *     button while pending.
+ *     button while pending, and the seller's reason once declined.
  *
  * Kept separate from :mod:`BazaarPostBody` so the feed card can host
  * it without ballooning — the panel fetches its own data and cleans
@@ -90,14 +90,14 @@ export function BazaarOffersPanel({
   }
 
   const reject = async (offer: BazaarOffer) => {
-    const reason = prompt(
-      t('bazaar.offers.reason_prompt'),
-    ) ?? ''
+    const typed = prompt(t('bazaar.offers.reason_prompt'))
+    if (typed === null) return  // Cancel backs out; OK with no text declines.
+    const reason = typed.trim()
     setBusy(true)
     try {
       await api.post(
         `/api/bazaar/${listing.post_id}/offers/${offer.id}/reject`,
-        reason.trim() ? { reason: reason.trim() } : {},
+        reason ? { reason } : {},
       )
       showToast(t('bazaar.offers.declined'), 'info')
     } catch (err: unknown) {
@@ -187,6 +187,11 @@ export function BazaarOffersPanel({
                 onClick={() => void withdraw(newest)}>
           {t('bazaar.withdraw')}
         </button>
+      )}
+      {newest.status === 'rejected' && newest.rejection_reason && (
+        <p class="sh-bazaar-reason sh-muted">
+          {t('bazaar.offers.reason', { reason: newest.rejection_reason })}
+        </p>
       )}
     </div>
   )

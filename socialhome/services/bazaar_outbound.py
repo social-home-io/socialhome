@@ -25,6 +25,7 @@ data with missing fields.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from ..domain.events import (
@@ -371,8 +372,15 @@ class BazaarOutbound:
         )
 
     async def _on_offer_rejected(self, event: BazaarOfferRejected) -> None:
-        """The seller declined an offer — tell the offerer's household."""
-        if event.origin_instance_id or not event.space_id or not event.offer_id:
+        """The seller declined an offer — tell the offerer's household,
+        the seller's reason (if any) with it. A declined auction BID
+        (``bid_id``, no ``offer_id``) goes to every member household
+        instead (:meth:`_send_bid_rejected`)."""
+        if event.origin_instance_id or not event.space_id:
+            return
+        if not event.offer_id:
+            if event.bid_id:
+                await self._send_bid_rejected(event)
             return
         await self._send_offer_update(
             space_id=event.space_id,
@@ -380,7 +388,53 @@ class BazaarOutbound:
             offer_id=event.offer_id,
             listing_post_id=event.listing_post_id,
             status="rejected",
+            reason=event.reason,
         )
+
+    async def _send_bid_rejected(self, event: BazaarOfferRejected) -> None:
+        """A declined bid: ``BAZAAR_OFFER_UPDATED`` keyed on ``bid_id``.
+
+        Every member household mirrors every bid (the high bid reads the
+        same everywhere), so every one of them learns the bid is out —
+        the same envelope count as the bid itself. The seller's REASON is
+        for the bidder only: it rides the bidder's household's sealed copy
+        alone (``per_peer``), never another member's. Sent from the
+        seller's household only; a household below v_73 is sent nothing
+        and one at v_73 that only knows ``offer_id`` drops it as before —
+        no version bump needed.
+        """
+        assert event.space_id is not None
+        if not await self._seller_is_ours(event.seller_user_id):
+            return
+        payload: dict = {
+            "bid_id": event.bid_id,
+            "listing_post_id": event.listing_post_id,
+            "space_id": event.space_id,
+            "status": "rejected",
+        }
+        bidder_household = (
+            await self._household_of(event.space_id, event.bidder_user_id)
+            if event.reason
+            else None
+        )
+        try:
+            await self._federation.broadcast_to_space_members(
+                event.space_id,
+                FederationEventType.BAZAAR_OFFER_UPDATED,
+                payload,
+                min_proto_version=FederationCapability.MIN_FOR_BAZAAR_OFFERS,
+                per_peer=(
+                    _reason_only_for(bidder_household, event.reason)
+                    if bidder_household is not None and event.reason
+                    else None
+                ),
+            )
+        except Exception:
+            log.exception(
+                "BAZAAR_OFFER_UPDATED (bid) send failed for space=%s bid=%s",
+                event.space_id,
+                event.bid_id,
+            )
 
     async def _on_offer_withdrawn(self, event: BazaarBidWithdrawn) -> None:
         """The offerer took an offer back — tell the seller's household,
@@ -403,15 +457,18 @@ class BazaarOutbound:
         offer_id: str,
         listing_post_id: str,
         status: str,
+        reason: str | None = None,
     ) -> None:
-        """An offer's new status. No reason text: the offerer's household
-        keeps none (``bazaar_offers`` has no column for it)."""
+        """An offer's new status, and for a rejection the seller's reason
+        (sealed; an older receiver ignores the extra field)."""
         payload: dict = {
             "offer_id": offer_id,
             "listing_post_id": listing_post_id,
             "space_id": space_id,
             "status": status,
         }
+        if reason:
+            payload["reason"] = reason
         await self._send_to_household_of(
             space_id, to_user_id, FederationEventType.BAZAAR_OFFER_UPDATED, payload
         )
@@ -430,16 +487,10 @@ class BazaarOutbound:
         target). Nothing when ``user_id`` is ours (same household), has no
         live seat, or its household is below v_73: the offer then stays
         where it is, as it always did."""
-        if self._seats is None:
-            return
-        if self._users is not None and (
-            await self._users.get_by_user_id(user_id) is not None
-        ):
-            return
-        seat = await self._seats.get_including_tombstones(space_id, "", user_id)
-        if seat is None or seat.tombstoned:
-            log.info(
-                "%s: %s holds no live seat in space %s — not sent",
+        household = await self._household_of(space_id, user_id)
+        if household is None:
+            log.debug(
+                "%s: %s is ours or holds no live seat in space %s — not sent",
                 event_type.value,
                 user_id,
                 space_id,
@@ -451,7 +502,7 @@ class BazaarOutbound:
                 event_type,
                 payload,
                 min_proto_version=FederationCapability.MIN_FOR_BAZAAR_OFFERS,
-                only_instances=frozenset({seat.instance_id}),
+                only_instances=frozenset({household}),
             )
         except Exception:
             log.exception(
@@ -460,3 +511,32 @@ class BazaarOutbound:
                 space_id,
                 payload.get("offer_id"),
             )
+
+    async def _household_of(self, space_id: str, user_id: str) -> str | None:
+        """The other member household seating ``user_id`` in the space —
+        ``None`` when the person is ours, holds no live seat, or there is
+        no roster mirror to ask."""
+        if self._seats is None:
+            return None
+        if self._users is not None and (
+            await self._users.get_by_user_id(user_id) is not None
+        ):
+            return None
+        seat = await self._seats.get_including_tombstones(space_id, "", user_id)
+        if seat is None or seat.tombstoned:
+            return None
+        return seat.instance_id
+
+
+def _reason_only_for(
+    household: str, reason: str
+) -> Callable[[str, dict], Awaitable[dict]]:
+    """``per_peer`` for a declined bid: the seller's reason rides the
+    bidder's household's sealed copy only, never another member's."""
+
+    async def _copy(instance_id: str, base: dict) -> dict:
+        if instance_id == household:
+            return {**base, "reason": reason}
+        return dict(base)
+
+    return _copy

@@ -128,6 +128,10 @@ BAZAAR_MAX_DURATION_DAYS: int = 7
 #: where the offer is made and again by the seller's household when the
 #: offer crosses households (v_73) — the note travels in the sealed payload.
 BAZAAR_OFFER_MESSAGE_MAX_CHARS: int = 280
+#: The reason a seller gives when declining an offer or a bid — as short as
+#: the buyer's note. Enforced where the seller declines and again by the
+#: buyer's household, which receives it sealed (``BAZAAR_OFFER_UPDATED``).
+BAZAAR_REJECT_REASON_MAX_CHARS: int = BAZAAR_OFFER_MESSAGE_MAX_CHARS
 
 #: ISO 4217 currencies → number of fractional digits.
 BAZAAR_CURRENCIES: dict[str, int] = {
@@ -267,6 +271,9 @@ class BazaarOffer:
     status: str = "pending"
     message: str | None = None
     responded_at: str | None = None
+    #: The seller's words when it was declined (0133) — for the seller and
+    #: the offerer only. ``None``: no reason given, or not rejected.
+    rejection_reason: str | None = None
 
 
 # ─── Polls ────────────────────────────────────────────────────────────────
