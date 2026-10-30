@@ -202,10 +202,15 @@ export default function DmInboxPage() {
                   )}
                 </strong>
                 <span class="sh-badge">
-                  {c.type === 'group_dm'
-                    ? t('dms.badge.group', { n: String(c.member_count ?? peers.length + 1) })
-                    : t('dms.badge.dm')}
+                  {c.bazaar_listing
+                    ? t('dms.badge.bazaar')
+                    : c.type === 'group_dm'
+                      ? t('dms.badge.group', { n: String(c.member_count ?? peers.length + 1) })
+                      : t('dms.badge.dm')}
                 </span>
+                {c.bazaar_listing && (
+                  <span class="sh-muted sh-dm-listing">🛍 {c.bazaar_listing.title}</span>
+                )}
               </div>
               {c.last_message_at && (
                 <time
