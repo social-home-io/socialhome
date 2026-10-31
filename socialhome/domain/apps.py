@@ -66,9 +66,10 @@ INVITES_PER_DAY_MAX: int = 30
 WAITING_SENDERS_MAX: int = 5
 
 #: Keys of a session row's ``payload`` only Social Home writes (sent
-#: through the sheet / answered / withdrawn). An invite from another
-#: household is stored without them, so it can't pose as one of ours.
-SESSION_MARKS: frozenset[str] = frozenset({"sent", "answered", "withdrawn"})
+#: through the sheet / answered / withdrawn / a seat at a group table,
+#: v_76). An invite from another household is stored without them, so it
+#: can't pose as one of ours — nor a 1:1 invite as a group seat.
+SESSION_MARKS: frozenset[str] = frozenset({"sent", "answered", "withdrawn", "group"})
 
 #: ``APP_SESSION {verb: "close", reason}`` reasons Social Home itself sends:
 #: the invitee said no…
@@ -361,6 +362,14 @@ class AppManifest:
     capabilities: tuple[str, ...]
     min_age: int = 0
     names: tuple[tuple[str, str], ...] = ()
+    #: Group play (v_76, SDK 1.9): how many players a game takes, whether
+    #: it may be opened as a table (``tables``) and whether a game being
+    #: played still takes people (``late_join``). Without ``tables`` an
+    #: app keeps 1:1 invites only.
+    players_min: int = 2
+    players_max: int = 2
+    tables: bool = False
+    late_join: bool = False
 
     @classmethod
     def from_dict(cls, data: dict) -> AppManifest:
@@ -390,6 +399,11 @@ class AppManifest:
             raise ValueError(
                 f"manifest.min_age must be one of {sorted(_VALID_MIN_AGES)}, got {min_age!r}"
             )
+        players_min, players_max = _parse_players(data.get("players"))
+        tables = data.get("tables", False)
+        late_join = data.get("late_join", False)
+        if not isinstance(tables, bool) or not isinstance(late_join, bool):
+            raise ValueError("manifest.tables / late_join must be booleans")  # noqa: TRY004 — one refusal type
         return cls(
             entry=entry,
             icon=icon,
@@ -400,6 +414,10 @@ class AppManifest:
                 for t in _parse_i18n(data.get("i18n"))
                 if t.name is not None
             ),
+            players_min=players_min,
+            players_max=players_max,
+            tables=tables,
+            late_join=late_join,
         )
 
     def to_dict(self) -> dict:
@@ -412,7 +430,41 @@ class AppManifest:
         }
         if self.names:
             out["i18n"] = {locale: {"name": name} for locale, name in self.names}
+        if self.tables or (self.players_min, self.players_max) != (2, 2):
+            out["players"] = {"min": self.players_min, "max": self.players_max}
+        if self.tables:
+            out["tables"] = True
+        if self.late_join:
+            out["late_join"] = True
         return out
+
+
+#: The most players any table seats, whatever an app's manifest says
+#: (``GROUP_MAX_PLAYERS`` in :mod:`socialhome.domain.app_group`; repeated
+#: here so the manifest parser stays free of the group module).
+MANIFEST_PLAYERS_MAX: int = 30
+
+
+def _parse_players(raw: object) -> tuple[int, int]:
+    """A manifest's ``players: {min, max}`` — ``(2, 2)`` when absent. ``min``
+    is at least 2 and at most ``max``; a ``max`` past
+    :data:`MANIFEST_PLAYERS_MAX` is cut to it (design 2.1)."""
+    if raw is None:
+        return 2, 2
+    if not isinstance(raw, dict):
+        raise ValueError("manifest.players must be an object {min, max}")  # noqa: TRY004 — one refusal type
+    lo, hi = raw.get("min", 2), raw.get("max", 2)
+    if (
+        not isinstance(lo, int)
+        or isinstance(lo, bool)
+        or not isinstance(hi, int)
+        or isinstance(hi, bool)
+    ):
+        raise ValueError("manifest.players.min / max must be integers")  # noqa: TRY004 — one refusal type
+    hi = min(hi, MANIFEST_PLAYERS_MAX)
+    if lo < 2 or hi < lo:
+        raise ValueError("manifest.players needs 2 <= min <= max")
+    return lo, hi
 
 
 @dataclass(slots=True, frozen=True)
@@ -517,6 +569,14 @@ class AppPendingSession:
         """This person took back the invite they sent: nothing more goes
         out in it."""
         return self.payload.get("withdrawn") is True
+
+    @property
+    def is_group(self) -> bool:
+        """A seat at a group table (v_76, :mod:`socialhome.domain.app_group`):
+        the row keeps Needs you, the TTL and the uninstall cascade for the
+        person, but none of the 1:1 paths (moves, the mailbox's
+        ``held_json``, contacts, accept / decline) apply to it."""
+        return self.payload.get("group") is True
 
     def is_with(self, instance_id: str, user_ref: str | None) -> bool:
         """Whether the other side of this session is *user_ref* on

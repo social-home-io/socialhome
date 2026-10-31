@@ -598,6 +598,25 @@ That single command runs the full sequence:
    ``SPACE_ROUTED`` for an unpaired member household are
    ``tests/protocol/test_bazaar_faq_federation.py``.
 
+9i. ``app-group`` (v_76, group games — the roster) — right after
+   ``bazaar-faq``. Installs a stand-in group app (``demo-table``,
+   ``players {3, 6}``, ``tables: true``) on **a**, **b**, **c** straight
+   into ``installed_apps`` (the demo has no catalog; the group routes never
+   load the bundle). **a**'s invite sheet offers **b**'s and **c**'s admins
+   with ``groups: true``; **a** opens a table with them
+   (``POST /api/apps/demo-table/groups``) — each gets ONE sealed
+   ``group_invite`` and lists it as ``invited``; both join
+   (``group_join`` → ``group_seat`` + coalesced ``group_roster``) and all
+   three converge on seats 1–3; **b** (not the host) is refused Start
+   (403); **a** starts (``group_start`` → ``playing`` on **b** and **c**)
+   and closes it (``group_close`` → ``ended``). **a** sees **b** and **c**
+   at ``>= FederationCapability.MIN_FOR_APP_GROUPS``; ``verify`` pins the
+   threshold at 76 and re-checks all three hold the closed table. Forged
+   snapshots, strangers' joins, a non-host's commands, the hidden invite
+   and the block / children rules are
+   ``tests/protocol/test_app_group_federation.py`` and
+   ``tests/services/test_app_group_service.py``.
+
 9z. ``highlight-audience`` (v_70, "Change for all of today") — **a**
    narrows today's highlight to **b**'s household
    (``PATCH /api/highlights/{id}/audience``): **c** deletes it and keeps a

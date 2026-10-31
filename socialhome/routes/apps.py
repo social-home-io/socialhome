@@ -494,7 +494,7 @@ class AppSessionsView(AppPermissionView):
     async def post(self) -> web.Response:
         await self.require_permission(PERMISSION_PEOPLE)
         app_id = self.match("app_id")
-        target = _target(await self.body())
+        target = person_target(await self.body())
         if target is None:
             return error_response(
                 400,
@@ -512,7 +512,7 @@ class AppSessionsView(AppPermissionView):
         return self._json({"session_id": session_id}, status=201)
 
 
-def _target(body: dict) -> dict | None:
+def person_target(body: dict) -> dict | None:
     """A ``{instance_id, user_ref, is_local}`` person target, or ``None``."""
     target = body.get("target")
     if (
@@ -571,7 +571,7 @@ class AppSessionContinueView(AppPermissionView):
         session_id = self.match("session_id")
         if not _SESSION_ID_RE.fullmatch(session_id):
             return error_response(400, "UNPROCESSABLE", "Not a session id.")
-        target = _target(await self.body())
+        target = person_target(await self.body())
         if target is None:
             return error_response(
                 400,
@@ -595,7 +595,7 @@ class AppSessionCancelView(AppPermissionView):
 
     async def post(self) -> web.Response:
         await self.require_permission(PERMISSION_PEOPLE)
-        target = _target(await self.body())
+        target = person_target(await self.body())
         if target is None:
             return error_response(
                 400,
@@ -679,7 +679,7 @@ class AppMessagesView(AppPermissionView):
         app_id = self.match("app_id")
         body = await self.body()
         session_id = body.get("session_id")
-        target = _target(body)
+        target = person_target(body)
         payload = body.get("payload")
         turn = body.get("turn", False)
 

@@ -7,6 +7,9 @@ arrives at Bob's household as an `app.message` WebSocket frame that the
 host bridge relays into the running iframe — all without the app or the frame
 content ever appearing in plaintext on the network.
 
+Group games (a *table* of 2–30 players, v_76) build on these sessions: see
+[`app-groups.md`](./app-groups.md).
+
 ## Scope
 
 - **HFS**: full participant.  The `AppFederationService` drives session

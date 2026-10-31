@@ -1168,7 +1168,31 @@ from __future__ import annotations
 #:   **Fallback**: a member household below v_75 is sent nothing — its
 #:   people see the listing without questions and answers, as before.
 #:   Labelled "Questions and answers on listings".
-OURS: int = 75
+#: * **v_76** (2026-10-31) — **Group games (tables), the roster**. An app
+#:   session may now seat 2–30 people (a *table*; up to 10 when opened by
+#:   picking people). The host household (*hub*, fixed for the table's
+#:   life) keeps the roster and is the only household the others talk to
+#:   about it. No new event type: new sealed ``APP_SESSION`` verbs —
+#:   ``group_invite`` (hub → an invitee's household, one person),
+#:   ``group_join`` / ``group_leave`` (a player's household → hub; a leave
+#:   before joining is a decline), ``group_seat`` (hub → the joiner's
+#:   household), ``group_roster`` (hub → seated households, at most one
+#:   per 5 s per table), ``group_start`` / ``group_close`` (hub → every
+#:   household at the table; also the host person's command to the hub
+#:   when the host person lives elsewhere after a hand-over) and
+#:   ``group_remove`` (host person → hub). The hub's messages carry one
+#:   table snapshot (``rev``, state, host seat, players range, note,
+#:   expiry, roster ``[{seat, instance, user, name, household, state}]``);
+#:   a receiver keeps a snapshot only from the table's hub and only when
+#:   newer. Who else was invited never travels. Blocks and children's
+#:   rules are enforced by each player's own household (it hides the table
+#:   or takes its person out with an ordinary leave); the hub is never
+#:   told. **Fallback**: none on the wire — a household below v_76 is
+#:   never offered a seat (the invite sheet marks its people, an open
+#:   naming one answers 409 ``APP_GROUP_HOUSEHOLD_TOO_OLD``); its 1:1
+#:   games are untouched. Not space-scoped, no sync stream change.
+#:   Labelled "Games for groups of players".
+OURS: int = 76
 
 
 class FederationCapability:
@@ -1755,6 +1779,10 @@ class FederationCapability:
     #: record. A member household below it is sent nothing — its people see
     #: the listing without its questions and answers.
     MIN_FOR_BAZAAR_FAQ = 75
+    #: v_76 — group games (tables): the ``group_*`` verbs of
+    #: ``APP_SESSION`` between a table's hub and each player's household.
+    #: A household below it is never offered a seat; nothing is sent to it.
+    MIN_FOR_APP_GROUPS = 76
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2041,6 +2069,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_BAZAAR_FAQ,
         "Questions and answers on listings",
     ),
+    (
+        FederationCapability.MIN_FOR_APP_GROUPS,
+        "Games for groups of players",
+    ),
 ]
 
 
@@ -2127,6 +2159,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_BAZAAR_OFFERS: "bazaar_offers",
     FederationCapability.MIN_FOR_BAZAAR_THREAD: "bazaar_ask_the_seller",
     FederationCapability.MIN_FOR_BAZAAR_FAQ: "bazaar_listing_faq",
+    FederationCapability.MIN_FOR_APP_GROUPS: "app_groups",
 }
 
 
@@ -2183,6 +2216,9 @@ def feature_keys_missing_below(version: int) -> list[str]:
 #: * ``MIN_FOR_BAZAAR_THREAD`` — an "Ask the seller" thread is between two
 #:   people; a behind household only keeps its own sellers from being
 #:   asked, every other listing of the space works the same.
+#: * ``MIN_FOR_APP_GROUPS`` — a table opened by picking people is not
+#:   space content; a behind household only keeps its own people from
+#:   being offered seats.
 SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
     {
         FederationCapability.MIN_FOR_SPACE_INVITE_REDEEM,

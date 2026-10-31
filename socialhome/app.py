@@ -55,6 +55,7 @@ from .domain.conversation import SystemChatScope
 from .domain.events import (
     AppEnabledChanged,
     AppInstalled,
+    AppUninstalled,
     PeerProtoVersionRaised,
     UserBlocked,
 )
@@ -218,6 +219,7 @@ from .repositories import (
     SqliteUserRepo,
 )
 from .repositories.alias_repo import SqliteAliasRepo
+from .repositories.app_group_repo import SqliteAppGroupRepo
 from .repositories.app_repo import SqliteAppRepo
 from .repositories.auth_audit_log_repo import SqliteAuthAuditLogRepo
 from .repositories.call_repo import SqliteCallRepo
@@ -290,6 +292,7 @@ from .services.app_catalog_service import (
     release_session,
 )
 from .services.app_federation_service import AppFederationService
+from .services.app_group_service import AppGroupService
 from .services.app_service import AppService
 from .services.app_update_scheduler import AppUpdateScheduler
 from .services.audio_transcription_service import AudioTranscriptionService
@@ -1202,6 +1205,7 @@ def _build_repos(db: AsyncDatabase):
         dm_media_outbox=SqliteDmMediaOutboxRepo(db),
         space_media_outbox=SqliteSpaceMediaOutboxRepo(db),
         app=SqliteAppRepo(db),
+        app_group=SqliteAppGroupRepo(db),
         preferences=SqlitePreferencesRepo(db),
         presence=SqlitePresenceRepo(db),
         public_space=SqlitePublicSpaceRepo(db),
@@ -4930,6 +4934,26 @@ def create_app(config: Config | None = None) -> web.Application:
         app_federation_service.attach_child_protection(child_protection_service)
         app[K.app_federation_service_key] = app_federation_service
 
+        # AppGroupService — group tables (v_76): the hub's roster, the
+        # copies other households keep, and each household's own rules for
+        # its people. Its ``group_*`` verbs arrive through the app bridge,
+        # and its invites count towards the bridge's invite caps.
+        app_group_service = AppGroupService(
+            group_repo=repos.app_group,
+            app_repo=repos.app,
+            user_repo=user_repo,
+            app_federation=app_federation_service,
+            federation=federation_service,
+            ws=ws_manager,
+            bus=bus,
+        )
+        app_federation_service.attach_groups(app_group_service)
+        bus.subscribe(AppUninstalled, app_group_service.on_app_uninstalled)
+        bus.subscribe(UserBlocked, app_group_service.on_user_blocked)
+        # §CP.F2 / D8: guardian blocks and children's rules hold at tables.
+        app_group_service.attach_child_protection(child_protection_service)
+        app[K.app_group_service_key] = app_group_service
+
         # Stale-call cleanup scheduler (§26.8).
         nonlocal stale_call_scheduler
         stale_call_scheduler = StaleCallCleanupScheduler(call_signaling)
@@ -5223,7 +5247,9 @@ def create_app(config: Config | None = None) -> web.Application:
         # invites so the table can't accumulate abandoned invites forever
         # (the per-pair cap bounds a flood; this clears the slow leak).
         nonlocal app_pending_session_scheduler
-        app_pending_session_scheduler = AppPendingSessionPruneScheduler(repos.app)
+        app_pending_session_scheduler = AppPendingSessionPruneScheduler(
+            repos.app, groups=app[K.app_group_service_key]
+        )
         await app_pending_session_scheduler.start()
 
         # DM-relay-seen pruner (§12.5.3) — same shape as the replay-cache
@@ -5575,6 +5601,9 @@ def create_app(config: Config | None = None) -> web.Application:
             await moderation_expiry_scheduler.stop()
         if app_pending_session_scheduler is not None:
             await app_pending_session_scheduler.stop()
+        app_group_service = app.get(K.app_group_service_key)
+        if app_group_service is not None:
+            await app_group_service.stop()
         if dm_relay_seen_scheduler is not None:
             await dm_relay_seen_scheduler.stop()
         if audio_transcript_scheduler is not None:
