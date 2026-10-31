@@ -16,6 +16,10 @@
  *   ``{actors}`` ("25 new posts in Familie Alpha from Ben, Anna and 3
  *   others"): it counts the things, never the people
  * - ``notifications.row.<type>_none``   nobody caused it (a review queue)
+ * - ``notifications.row.<type>_others`` / ``_others_one``  a group game's
+ *   row (v_76): ``{actor}`` and ``{count}`` other people (``params.others``
+ *   — "Anna invited you and 3 others to play Quiz"); with no others the
+ *   plain key
  * - ``notifications.row.<type>_times``  one person did it ``{count}`` times
  *   (``params.total`` > 1: "Ben invited you to play Chess 3 times"); the
  *   count is always two or more, so one plural form per locale
@@ -49,6 +53,9 @@ interface TypeSpec {
   /** Has a ``_times`` key: one person did it again on the same row
    *  (``params.total`` > 1), counted as ``{count}``. */
   times?: boolean
+  /** A group game's row: ``_others`` / ``_others_one`` keys, picked when
+   *  ``params.others`` is a number above 0 (it wins over ``_many``). */
+  others?: boolean
   /** Has no ``{actor}`` sentence (only ``_none`` / ``_count``). */
   noActor?: boolean
   /** Lives in a space or in the household feed: each key has an ``_in``
@@ -145,6 +152,14 @@ export const HOUSEHOLD_CHAT_LINK = '/?tab=chat'
  *   notifications.row.app_turn notifications.row.app_turn_many
  *   notifications.row.app_request notifications.row.app_request_many
  *   notifications.row.app_update_none
+ *   notifications.row.app_challenge_others notifications.row.app_challenge_others_one
+ *   notifications.row.app_challenge_waiting_others
+ *   notifications.row.app_challenge_waiting_others_one
+ *   notifications.row.app_table_joined notifications.row.app_table_joined_many
+ *   notifications.row.app_table_joined_others notifications.row.app_table_joined_others_one
+ *   notifications.row.app_table_started notifications.row.app_table_started_many
+ *   notifications.row.app_table_started_others notifications.row.app_table_started_others_one
+ *   notifications.row.app_table_can_start
  *   notifications.new_pill notifications.new_pill_one
  *   notifications.live_new notifications.live_new_one
  *   notifications.meta.new_of_total notifications.meta.new_of_total_one
@@ -193,7 +208,9 @@ export const ROW_TYPES: Readonly<Record<string, TypeSpec>> = {
   bazaar_offer_rejected: { none: true, noActor: true },
   // The app's name rides as the place (``params.space_name``): "Ben invited
   // you to play Chess". A row without it keeps its title.
-  app_challenge: {},
+  // A group game's invite (flag ``group``) counts the others asked:
+  // "Anna invited you and 3 others to play Quiz".
+  app_challenge: { others: true },
   // An old game picked up again: "Ben wants to continue your Chess game".
   app_challenge_continue: {},
   // An invite for an app the household doesn't have or turned off (D10):
@@ -201,7 +218,7 @@ export const ROW_TYPES: Readonly<Record<string, TypeSpec>> = {
   // (#1244): a repeat invite counts in ``params.total`` — "Ben invited you
   // to play Chess 3 times". A playable ``app_challenge`` is one row per
   // invite, so it never counts.
-  app_challenge_waiting: { times: true },
+  app_challenge_waiting: { times: true, others: true },
   // A new app in the household: "Anna added Chess" — the app's name is
   // the place too.
   app_added: {},
@@ -213,6 +230,12 @@ export const ROW_TYPES: Readonly<Record<string, TypeSpec>> = {
   // "Your turn with Ben in Chess" (2026-10-30): one row per game while
   // the app is closed — the app's name rides as the place too.
   app_turn: {},
+  // Group games (v_76, design 3.7): "Ben and 2 others joined your Quiz
+  // game" for the person who started it (one row per game; ``can_start``
+  // adds "You can start now"), "Your Quiz game with Anna and 3 others
+  // started" for each other player.
+  app_table_joined: { others: true },
+  app_table_started: { others: true },
   // A member asked for an app: "Milo and Kiki asked for Chess".
   app_request: {},
   // Admins: "Chess has an update" — nobody caused it; the app is the place.
@@ -228,6 +251,7 @@ export function rowKeys(): string[] {
     'notifications.actors.more',
     'notifications.actors.more_one',
     'notifications.someone',
+    'notifications.row.app_table_can_start',
   ]
   for (const [type, spec] of Object.entries(ROW_TYPES)) {
     const base = `notifications.row.${type}`
@@ -236,6 +260,7 @@ export function rowKeys(): string[] {
     if (spec.count) own.push(`${base}_count`)
     if (spec.none) own.push(`${base}_none`)
     if (spec.times) own.push(`${base}_times`)
+    if (spec.others) own.push(`${base}_others`, `${base}_others_one`)
     if (spec.chat) {
       keys.push(...own.map(k => `${k}_in`), ...own.map(k => `${k}_household`))
       continue
@@ -316,11 +341,16 @@ export function rowSentence(row: RowInput, spaceName?: string | null): Segment[]
   else if (actors.length === 0 || spec.noActor) {
     if (!spec.none) return null
     key = `${base}_none`
+  } else if (spec.others && typeof p.others === 'number') {
+    // A group game's row: the actor and how many others, never _many.
+    key = p.others <= 0 ? base : isOne(p.others) ? `${base}_others_one` : `${base}_others`
   } else if (Math.max(p.actor_count, actors.length) > 1) key = `${base}_many`
   else if (spec.times && p.total > 1) key = `${base}_times`
   else key = base
   // ``_count`` counts the new things, ``_times`` every repeat on the row.
-  const count = key === `${base}_times` ? p.total : p.new
+  const count = key === `${base}_times`
+    ? p.total
+    : key.startsWith(`${base}_others`) ? (p.others ?? 0) : p.new
   if (spec.chat) {
     if (row.link_url === HOUSEHOLD_CHAT_LINK) key = `${key}_household`
     else if (space) key = `${key}_in`
@@ -338,6 +368,10 @@ export function rowSentence(row: RowInput, spaceName?: string | null): Segment[]
     space: [{ kind: 'place', text: space }],
     count: [{ kind: 'text', text: String(count) }],
   })
+  if (row.type === 'app_table_joined' && p.flags?.includes('can_start')) {
+    // Its own sentence after the row's: enough players are in.
+    segs.push({ kind: 'text', text: ` · ${t('notifications.row.app_table_can_start')}` })
+  }
   return segs
 }
 

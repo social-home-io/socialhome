@@ -61,6 +61,27 @@ vi.mock('@/features/apps/InviteSheet', () => ({
   ),
 }))
 
+// ── Mock the group sheet: the host's own picker for a group game ───────
+vi.mock('@/features/apps/groups/GroupSheet', () => ({
+  GroupSheet: ({ appName, request, players, onDone }: {
+    appName: string
+    request: { suggest: unknown[] }
+    players?: { min: number, max: number }
+    onDone: (s: unknown, refused?: string) => void
+  }) => (
+    <div
+      data-testid="group-sheet"
+      data-app={appName}
+      data-suggest={request.suggest.length}
+      data-max={players?.max ?? ''}
+    >
+      <button onClick={() => onDone({ id: 't1', players: [] })}>Invite</button>
+      <button onClick={() => onDone(null)}>Close</button>
+      <button onClick={() => onDone(null, 'groups_not_supported')}>Close unsupported</button>
+    </div>
+  ),
+}))
+
 // ── Mock @/ws ─────────────────────────────────────────────────────────────
 // Captures the host's ``app.uninstalled`` / ``app.disabled`` listeners so a
 // test can play the frame an admin's action sends.
@@ -354,6 +375,59 @@ describe('AppHostInner', () => {
     await view.findByTestId('invite-sheet')
     view.unmount()
     await expect(picked).resolves.toEqual([])
+  })
+
+  // ── The group sheet: group.open, drawn by the host, outside the frame ─
+
+  it('group.open shows Social Home\'s group sheet outside the frame and hands back the game', async () => {
+    vi.mocked(getRuntime).mockResolvedValue({ ...RUNTIME, players: { min: 2, max: 6 }, tables: true })
+    const view = render(<AppHostInner appId="chess" />)
+    await waitFor(() => expect(view.container.querySelector('iframe')).not.toBeNull())
+    const ctx = vi.mocked(mountBridge).mock.calls[0][1] as BridgeContext
+    let opened: Promise<unknown> | undefined
+    act(() => { opened = ctx.openGroup!({ suggest: [{ instance_id: 'b', user_ref: 'ben', is_local: false }] }) })
+    const sheet = await view.findByTestId('group-sheet')
+    expect(view.container.querySelector('iframe')!.contains(sheet)).toBe(false)
+    expect(sheet.dataset.app).toBe('Chess')
+    expect(sheet.dataset.suggest).toBe('1')
+    // The app's own player range reaches the sheet when the server says it.
+    expect(sheet.dataset.max).toBe('6')
+    fireEvent.click(view.getByText('Invite'))
+    await expect(opened).resolves.toEqual({ id: 't1', players: [] })
+    expect(view.queryByTestId('group-sheet')).toBeNull()
+  })
+
+  it('closing the group sheet hands back null; "can\'t be played in a group" refuses', async () => {
+    const view = render(<AppHostInner appId="chess" />)
+    await waitFor(() => expect(view.container.querySelector('iframe')).not.toBeNull())
+    const ctx = vi.mocked(mountBridge).mock.calls[0][1] as BridgeContext
+    let opened: Promise<unknown> | undefined
+    act(() => { opened = ctx.openGroup!({ suggest: [] }) })
+    fireEvent.click(await view.findByText('Close'))
+    await expect(opened).resolves.toBeNull()
+    act(() => { opened = ctx.openGroup!({ suggest: [] }) })
+    fireEvent.click(await view.findByText('Close unsupported'))
+    await expect(opened).rejects.toMatchObject({ code: 'groups_not_supported' })
+  })
+
+  it('an app the server says has no group games never shows the sheet', async () => {
+    vi.mocked(getRuntime).mockResolvedValue({ ...RUNTIME, tables: false })
+    const view = render(<AppHostInner appId="chess" />)
+    await waitFor(() => expect(view.container.querySelector('iframe')).not.toBeNull())
+    const ctx = vi.mocked(mountBridge).mock.calls[0][1] as BridgeContext
+    await expect(ctx.openGroup!({ suggest: [] })).rejects.toMatchObject({ code: 'groups_not_supported' })
+    expect(view.queryByTestId('group-sheet')).toBeNull()
+  })
+
+  it('a group sheet goes with its frame: leaving the app hands back null', async () => {
+    const view = render(<AppHostInner appId="chess" />)
+    await waitFor(() => expect(view.container.querySelector('iframe')).not.toBeNull())
+    const ctx = vi.mocked(mountBridge).mock.calls[0][1] as BridgeContext
+    let opened: Promise<unknown> | undefined
+    act(() => { opened = ctx.openGroup!({ suggest: [] }) })
+    await view.findByTestId('group-sheet')
+    view.unmount()
+    await expect(opened).resolves.toBeNull()
   })
 
   // ── Launch context: Play opens the game you were invited to ───────────

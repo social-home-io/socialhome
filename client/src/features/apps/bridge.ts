@@ -76,7 +76,13 @@
  * pre-load document. Older SDKs ignore the unknown ``type``.
  *
  * Group tables (group play, v_76): ``group.*`` calls and ``group:event``
- * posts — groupBridge.ts and docs/protocol/app-groups.md. ``app.context``
+ * posts — groupBridge.ts and docs/protocol/app-groups.md. ``group.open
+ * ({suggest})`` is the group twin of ``people.pick``: the host draws Social
+ * Home's group sheet outside the frame (``openGroup``), the person picks
+ * and taps Send, Social Home opens the game, and the app gets back the
+ * :type:`GroupSession` (``null`` on Cancel). It shares people.pick's
+ * guards — one sheet at a time across frames (``busy``), the per-app
+ * cooldown (``too_soon``) and the 600 ms arm on Send. ``app.context``
  * says ``groups: true``; opened from a table (``?session=<table id>``)
  * its ``launch`` is ``{sessionId, group}`` and no invite is accepted (a
  * table is joined through Social Home's own screens).
@@ -87,6 +93,7 @@ import { ws, WsEvent } from '@/ws'
 import type { AppPermission } from '@/store/apps'
 import type { AppHostContext } from '@/features/apps/appContext'
 import {
+  GROUP_MAX_PLAYERS,
   GroupBridge,
   GroupRefused,
   groupRefusal,
@@ -146,6 +153,16 @@ export interface PickRequest {
   suggest?: PersonRef
 }
 
+/** Most people one ``group.open`` may suggest: every player of the
+ *  largest game but the person opening it. */
+export const GROUP_SUGGEST_MAX = GROUP_MAX_PLAYERS - 1
+
+/** What an app asks the group sheet for: only whom to start ticked
+ *  (well-formed person references; nothing it writes is shown). */
+export interface GroupOpenRequest {
+  suggest: PersonRef[]
+}
+
 /** A person picked in the sheet, with the game Social Home opened. */
 export interface PickedPerson extends PersonRef {
   display_name: string
@@ -162,6 +179,11 @@ export interface BridgeContext {
    *  who was picked and the games opened for them — ``[]`` on Cancel.
    *  Without it ``people.pick`` answers ``unavailable``. */
   pickPeople?: (req: PickRequest) => Promise<PickedPerson[]>
+  /** Show Social Home's group sheet (outside the frame) and resolve with
+   *  the group game opened — ``null`` on Cancel. It may reject with a
+   *  ``GroupRefused`` (``groups_not_supported``). Without it
+   *  ``group.open`` answers ``unavailable``. */
+  openGroup?: (req: GroupOpenRequest) => Promise<GroupSession | null>
   /** ``?session=`` the app was opened with ("Play" in Needs you): the
    *  one invite to take in and hand to the app. */
   launchSession?: string
@@ -216,7 +238,7 @@ class Refused extends Error {
   }
 }
 
-/** One invite sheet at a time, across every app frame on the page. */
+/** One sheet at a time (invite or group), across every app frame on the page. */
 let sheetOpen = false
 /** When each app's last sheet closed (``Date.now()``), for the cooldown. */
 const sheetClosedAt = new Map<string, number>()
@@ -254,6 +276,46 @@ export function pickRequest(params: unknown): PickRequest {
   const req: PickRequest = { purpose: 'play', max: Math.min(PICK_MAX, Math.max(1, max)) }
   if (suggest) req.suggest = suggest
   return req
+}
+
+/** ``group.open`` params as a :type:`GroupOpenRequest`: each suggestion a
+ *  well-formed person (bad ones dropped, repeats once), at most
+ *  :data:`GROUP_SUGGEST_MAX`. */
+export function groupOpenRequest(params: unknown): GroupOpenRequest {
+  const raw = (params as { suggest?: unknown } | null | undefined)?.suggest
+  const suggest: PersonRef[] = []
+  const seen = new Set<string>()
+  for (const v of Array.isArray(raw) ? raw : []) {
+    if (suggest.length >= GROUP_SUGGEST_MAX) break
+    const ref = personRef(v)
+    if (!ref) continue
+    const k = `${ref.instance_id}\u0000${ref.user_ref}`
+    if (seen.has(k)) continue
+    seen.add(k)
+    suggest.push(ref)
+  }
+  return { suggest }
+}
+
+/** Show one of Social Home's sheets for *appId* under the guards every
+ *  sheet shares: one at a time across frames (``busy``), and
+ *  :data:`PICK_COOLDOWN_MS` after the app's last one closed
+ *  (``too_soon``). */
+async function withSheet<T>(appId: string, show: () => Promise<T>): Promise<T> {
+  if (sheetOpen) {
+    throw new Refused(PICK_BUSY, 'An invite sheet is already open.')
+  }
+  const wait = (sheetClosedAt.get(appId) ?? -Infinity) + PICK_COOLDOWN_MS - Date.now()
+  if (wait > 0) {
+    throw new Refused(PICK_TOO_SOON, 'The invite sheet was just closed.', wait)
+  }
+  sheetOpen = true
+  try {
+    return await show()
+  } finally {
+    sheetOpen = false
+    sheetClosedAt.set(appId, Date.now())
+  }
 }
 
 /** An app's own session id (what ``?session=`` and the server accept). */
@@ -484,6 +546,19 @@ export function mountBridge(
     try {
       const needs = permissionFor(method, params)
       if (needs && !has(needs)) throw new PermissionDenied(needs)
+      if (method === 'group.open') {
+        // D3: the app asks; Social Home's group sheet (outside the frame)
+        // asks the person and opens the game. Same guards as people.pick.
+        const open = ctx.openGroup
+        if (!open) {
+          throw new Refused('unavailable', 'This Social Home can\'t show the group sheet here.')
+        }
+        const req = groupOpenRequest(params)
+        const session = await withSheet(appId, () => open(req))
+        // Later ``app.group`` frames of this game diff against it.
+        reply({ id, ok: true, result: session ? groups.keep(session) : null })
+        return
+      }
       if (isGroupMethod(method)) {
         reply({ id, ok: true, result: await groups.call(method, params) })
         return
@@ -604,21 +679,8 @@ export function mountBridge(
             throw new Refused('unavailable', 'This Social Home can\'t show the invite sheet here.')
           }
           const pickReq = pickRequest(params)
-          if (sheetOpen) {
-            throw new Refused(PICK_BUSY, 'An invite sheet is already open.')
-          }
-          const wait = (sheetClosedAt.get(appId) ?? -Infinity) + PICK_COOLDOWN_MS - Date.now()
-          if (wait > 0) {
-            throw new Refused(PICK_TOO_SOON, 'The invite sheet was just closed.', wait)
-          }
-          sheetOpen = true
-          let picked: PickedPerson[]
-          try {
-            picked = await ctx.pickPeople(pickReq)
-          } finally {
-            sheetOpen = false
-            sheetClosedAt.set(appId, Date.now())
-          }
+          const pick = ctx.pickPeople
+          const picked = await withSheet(appId, () => pick(pickReq))
           reply({
             id,
             ok: true,

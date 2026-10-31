@@ -797,6 +797,9 @@ export interface NotifParams {
   /** A "Needs you" item someone handled: how it ended and who ended it
    *  (``null``: the viewer themself, or nobody). It left the section. */
   handled?: NotifHandled | null
+  /** A group game's row (v_76): how many people besides the reader were
+   *  invited / joined / play ("… and 3 others"). */
+  others?: number | null
 }
 
 /** How a "Needs you" item ended. */

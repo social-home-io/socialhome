@@ -34,32 +34,14 @@ import {
   type InviteCounts,
 } from '@/store/apps'
 import type { PickedPerson, PickRequest } from './bridge'
+import { SEND_ARM_MS, keyOf, limitFrom, limitOf, limitText as capText, type InviteLimit } from './inviteCaps'
 
-/** Send ignores taps for this long after the sheet appears. */
-export const SEND_ARM_MS = 600
+export { SEND_ARM_MS }
 
 /** Show the search field from this many people on. */
 const SEARCH_FROM = 6
 
-type Limit = 'open' | 'daily' | null
-
-const keyOf = (p: { instance_id: string, user_ref: string }) => `${p.instance_id}\u0000${p.user_ref}`
-
-/** The cap the counts already hit (open first: the one the person can act on). */
-function limitFrom(c: InviteCounts | null): Limit {
-  if (!c) return null
-  if (c.open >= c.max_open) return 'open'
-  if (c.today >= c.max_per_day) return 'daily'
-  return null
-}
-
-/** The cap a refused Send names, or ``null`` for any other failure. */
-function limitOf(err: unknown): Limit {
-  if (!(err instanceof ApiError)) return null
-  if (err.code === 'APP_INVITES_OPEN_LIMIT') return 'open'
-  if (err.code === 'APP_INVITES_DAILY_LIMIT') return 'daily'
-  return null
-}
+type Limit = InviteLimit
 
 export function InviteSheet({ appId, appName, request, onDone }: {
   appId: string
@@ -175,9 +157,7 @@ export function InviteSheet({ appId, appName, request, onDone }: {
     finish(out)
   }
 
-  const limitText = (l: Exclude<Limit, null>) => l === 'open'
-    ? t('apps.invite.limit_open', { count: String(counts?.max_open ?? 10), name: appName })
-    : t('apps.invite.limit_daily', { count: String(counts?.max_per_day ?? 30) })
+  const limitText = (l: Exclude<Limit, null>) => capText(l, counts, appName)
 
   const sendLabel = continuing && chosen.length === 1
     ? t('apps.invite.continue_send', { name: chosen[0].person_name })

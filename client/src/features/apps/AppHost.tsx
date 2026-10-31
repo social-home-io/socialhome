@@ -39,6 +39,9 @@
  * ``people.pick`` (D3) shows Social Home's InviteSheet here — outside the
  * frame, over it — and the bridge hands the app only who was picked and the
  * games opened. The sheet goes with its frame (nothing is sent).
+ * ``group.open`` does the same with the GroupSheet (pick people for one
+ * group game), given the app's player range when the runtime says it; an
+ * app the runtime marks ``tables: false`` is refused without a sheet.
  *
  * The look (D14): the bridge hands the app the language, light/dark and
  * eight colour tokens (appContext.ts) and pushes changes live; the frame's
@@ -52,8 +55,10 @@ import { useLocation, useRoute } from 'preact-iso'
 import { catalog, catalogLoaded, getRuntime, loadCatalog, localized, setEnabled, type AppRuntime } from '@/store/apps'
 import { currentUser } from '@/store/auth'
 import { useTitle } from '@/store/pageTitle'
-import { mountBridge, type PickedPerson, type PickRequest } from '@/features/apps/bridge'
+import { mountBridge, type GroupOpenRequest, type PickedPerson, type PickRequest } from '@/features/apps/bridge'
 import { InviteSheet } from '@/features/apps/InviteSheet'
+import { GroupSheet } from '@/features/apps/groups/GroupSheet'
+import { GroupRefused, type GroupSession } from '@/features/apps/groupBridge'
 import { currentAppContext, shownTheme, watchAppContext, type AppTheme } from '@/features/apps/appContext'
 import { appOpenedFrom } from '@/features/apps/appReturn'
 import { addBase } from '@/baseUrl'
@@ -118,6 +123,12 @@ export function AppHostInner({ appId, sessionId }: {
   /** The invite sheet an app asked for (``people.pick``), drawn here —
    *  outside the frame — until the person sends or cancels (D3). */
   const [pick, setPick] = useState<{ req: PickRequest, resolve: (p: PickedPerson[]) => void } | null>(null)
+  /** The group sheet an app asked for (``group.open``), drawn the same way. */
+  const [group, setGroup] = useState<{
+    req: GroupOpenRequest
+    resolve: (s: GroupSession | null) => void
+    reject: (e: unknown) => void
+  } | null>(null)
   /** The SPA's light/dark, for the frame's ``color-scheme``. */
   const [scheme, setScheme]   = useState<AppTheme>(shownTheme)
   const iframeRef             = useRef<HTMLIFrameElement | null>(null)
@@ -217,12 +228,16 @@ export function AppHostInner({ appId, sessionId }: {
       hostContext: currentAppContext,
       watchHostContext: watchAppContext,
       pickPeople: (req) => new Promise<PickedPerson[]>(resolve => setPick({ req, resolve })),
+      openGroup: (req) => runtime.tables === false
+        ? Promise.reject(notForGroups())
+        : new Promise<GroupSession | null>((resolve, reject) => setGroup({ req, resolve, reject })),
     })
     return () => {
       cleanup()
       // The frame goes (Back, Try again, another Play): a sheet it asked
       // for goes with it, sending nothing.
       setPick(p => { p?.resolve([]); return null })
+      setGroup(g => { g?.resolve(null); return null })
     }
   }, [runtime, frameSession]) // iframeRef.current is stable once rendered; runtime changes re-mount
 
@@ -376,8 +391,27 @@ export function AppHostInner({ appId, sessionId }: {
           }}
         />
       )}
+
+      {group && runtime && (
+        <GroupSheet
+          appId={runtime.app_id}
+          appName={name ?? runtime.name}
+          request={group.req}
+          players={runtime.players}
+          onDone={(session, refused) => {
+            if (refused) group.reject(notForGroups())
+            else group.resolve(session)
+            setGroup(null)
+          }}
+        />
+      )}
     </div>
   )
+}
+
+/** ``group.open`` for an app that can't be played as a group game. */
+function notForGroups(): GroupRefused {
+  return new GroupRefused('groups_not_supported', 'This app can\'t be played in a group.')
 }
 
 /** The host state a failed runtime fetch maps to. */

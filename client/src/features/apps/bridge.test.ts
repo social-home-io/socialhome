@@ -55,7 +55,8 @@ vi.mock('@/api', () => {
   }
 })
 
-import { _resetAcceptedForTests, _resetPickForTests, mountBridge, pickRequest, PICK_COOLDOWN_MS, type PickedPerson, type PickRequest } from './bridge'
+import { _resetAcceptedForTests, _resetPickForTests, groupOpenRequest, mountBridge, pickRequest, GROUP_SUGGEST_MAX, PICK_COOLDOWN_MS, type GroupOpenRequest, type PickedPerson, type PickRequest } from './bridge'
+import { GroupRefused, type GroupSession } from './groupBridge'
 // Import the mocked ApiError so tests can construct it.
 import { ApiError } from '@/api'
 
@@ -932,7 +933,7 @@ describe('mountBridge permissions', () => {
     expect(replies()[0]).toMatchObject({ id: 8, ok: true })
   })
 
-  it('group.open needs people, and answers unavailable until the group sheet lands', async () => {
+  it('group.open needs people, and answers unavailable from a host without the group sheet', async () => {
     let handler = mount(['storage'])
     await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 9, method: 'group.open', params: { suggest: [] } } })
     expect(replies()[0]).toMatchObject({ ok: false, error: { code: 'permission_denied', permission: 'people' } })
@@ -1163,5 +1164,139 @@ describe('people.pick (the invite sheet)', () => {
     expect(replies()[0]).toMatchObject({ ok: false, error: { code: 'invalid' } })
     await call(handler, 2, { max: 1 })
     expect(sheets).toHaveLength(1)
+  })
+})
+
+// ── group.open: a group game goes through Social Home's group sheet ───────
+
+describe('group.open (the group sheet)', () => {
+  let iframe: HTMLIFrameElement
+  let cleanup: () => void
+  let addEventSpy: MockInstance
+  let removeEventSpy: MockInstance
+  let sheets: { req: GroupOpenRequest; resolve: (s: GroupSession | null) => void; reject: (e: unknown) => void }[]
+  let picks: { resolve: (p: PickedPerson[]) => void }[]
+
+  const SESSION: GroupSession = {
+    id: 't1', appId: APP_ID, state: 'lobby', me: 1, myState: 'seated', host: 1, isHost: true,
+    min: 2, max: 8, lateJoin: false, seq: 0,
+    players: [{ seat: 1, name: 'Anna', household: null, isLocal: true, state: 'seated' }],
+  }
+  const BEN = { instance_id: 'brookside', user_ref: 'ben', is_local: false }
+
+  function mount(appId = APP_ID, withSheet = true) {
+    cleanup = mountBridge(iframe, {
+      appId, selfUserId: USER_ID, permissions: ALL,
+      pickPeople: () => new Promise(resolve => { picks.push({ resolve }) }),
+      ...(withSheet
+        ? { openGroup: (req: GroupOpenRequest) => new Promise<GroupSession | null>((resolve, reject) => { sheets.push({ req, resolve, reject }) }) }
+        : {}),
+    })
+    return captureMessageHandler()
+  }
+
+  const replies = () => (iframe.contentWindow!.postMessage as ReturnType<typeof vi.fn>).mock.calls
+    .map(([m]) => m as { id?: number; ok?: boolean; result?: unknown; error?: Record<string, unknown>; type?: string; event?: unknown })
+
+  const call = (handler: (e: Partial<MessageEvent>) => Promise<void>, id: number, params?: unknown, method = 'group.open') =>
+    handler({ source: iframe.contentWindow as unknown as Window, data: { id, method, params } })
+
+  const tick = () => new Promise<void>(r => setTimeout(r, 0))
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(new Date('2026-10-31T12:00:00Z'))
+    mockApiGet.mockReset()
+    mockApiPost.mockReset()
+    Object.keys(wsHandlers).forEach(k => delete wsHandlers[k])
+    iframe = makeFakeIframe()
+    sheets = []
+    picks = []
+    _resetPickForTests()
+    addEventSpy = vi.spyOn(window, 'addEventListener')
+    removeEventSpy = vi.spyOn(window, 'removeEventListener')
+  })
+
+  afterEach(() => {
+    cleanup?.()
+    addEventSpy.mockRestore()
+    removeEventSpy.mockRestore()
+    vi.useRealTimers()
+  })
+
+  it('shows the group sheet; the app gets the game it opened, and its roster changes follow', async () => {
+    const handler = mount()
+    await call(handler, 1, { suggest: [BEN] })
+    expect(sheets).toHaveLength(1)
+    expect(sheets[0].req).toEqual({ suggest: [BEN] })
+    // The bridge opens nothing itself: the sheet does.
+    expect(mockApiPost).not.toHaveBeenCalled()
+    sheets[0].resolve(SESSION)
+    await tick()
+    expect(replies()).toEqual([{ id: 1, ok: true, result: SESSION }])
+    // Remembered: the next app.group frame of this game diffs against it.
+    wsHandlers['app.group']({ data: { app_id: APP_ID, session_id: 't1', group: {
+      session_id: 't1', app_id: APP_ID, state: 'lobby', me: 1, my_state: 'seated', host: 1, is_host: true,
+      min: 2, max: 8, late_join: false, seq: 0,
+      players: [
+        { seat: 1, name: 'Anna', household: null, is_local: true, state: 'seated' },
+        { seat: 2, name: 'Ben', household: 'Brookside', is_local: false, state: 'seated' },
+      ],
+    } } })
+    expect(replies()[1]).toMatchObject({ type: 'group:event', event: { type: 'joined', id: 't1', seat: 2 } })
+  })
+
+  it('Cancel: null', async () => {
+    const handler = mount()
+    await call(handler, 1, {})
+    sheets[0].resolve(null)
+    await tick()
+    expect(replies()).toEqual([{ id: 1, ok: true, result: null }])
+  })
+
+  it('one sheet at a time, shared with people.pick', async () => {
+    const handler = mount()
+    await call(handler, 1, {}, 'people.pick')
+    await call(handler, 2, {})
+    expect(sheets).toHaveLength(0)
+    expect(replies()).toEqual([{ id: 2, ok: false, error: { code: 'busy', message: expect.any(String) } }])
+  })
+
+  it('the same 5 s cooldown as people.pick, per app', async () => {
+    const handler = mount()
+    await call(handler, 1, {}, 'people.pick')
+    picks[0].resolve([])
+    await tick()
+    vi.setSystemTime(Date.now() + PICK_COOLDOWN_MS - 2000)
+    await call(handler, 2, {})
+    expect(sheets).toHaveLength(0)
+    expect(replies()[1]).toEqual({ id: 2, ok: false, error: { code: 'too_soon', message: expect.any(String), retryAfterMs: 2000 } })
+    vi.setSystemTime(Date.now() + 2000)
+    await call(handler, 3, {})
+    expect(sheets).toHaveLength(1)
+  })
+
+  it('a host without the group sheet answers unavailable', async () => {
+    const handler = mount(APP_ID, false)
+    await call(handler, 1, {})
+    expect(replies()[0]).toMatchObject({ ok: false, error: { code: 'unavailable' } })
+  })
+
+  it('an app that can\'t be played in a group hears groups_not_supported', async () => {
+    const handler = mount()
+    await call(handler, 1, {})
+    sheets[0].reject(new GroupRefused('groups_not_supported', 'This app can\'t be played in a group.'))
+    await tick()
+    expect(replies()[0]).toMatchObject({ ok: false, error: { code: 'groups_not_supported' } })
+  })
+
+  it('the request keeps only well-formed people, once each, at most 29', () => {
+    expect(groupOpenRequest(undefined)).toEqual({ suggest: [] })
+    expect(groupOpenRequest({ suggest: 'ben' })).toEqual({ suggest: [] })
+    expect(groupOpenRequest({ suggest: [BEN, { ...BEN, label: '<b>x</b>' }, { instance_id: 'x', user_ref: '', is_local: false }, 7] }))
+      .toEqual({ suggest: [BEN] })
+    const many = Array.from({ length: 40 }, (_, i) => ({ instance_id: 'h', user_ref: `u${i}`, is_local: false }))
+    expect(GROUP_SUGGEST_MAX).toBe(29)
+    expect(groupOpenRequest({ suggest: many }).suggest).toHaveLength(29)
   })
 })
