@@ -20,6 +20,9 @@ tests encode, against the real wiring and SQLite:
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from types import MappingProxyType
 from unittest.mock import AsyncMock
@@ -193,6 +196,7 @@ async def _session(
     from_user: str = "ben",
     session_id: str = "s1",
     verb: str = "open",
+    drain: bool = True,
 ) -> None:
     handlers = app[federation_service_key]._event_registry.handlers_for(FET.APP_SESSION)
     assert handlers
@@ -216,7 +220,27 @@ async def _session(
                 payload=payload,
             )
         )
-    await app[notification_delivery_key].drain()
+    if drain:
+        await app[notification_delivery_key].drain()
+
+
+@asynccontextmanager
+async def _busy(app) -> AsyncIterator[None]:
+    """The notification delivery worker is behind (a busy household):
+    nothing queued inside the block runs until it ends, then all of it
+    does, in order."""
+    worker = app[notification_delivery_key]
+    gate = asyncio.Event()
+
+    async def _hold() -> None:
+        await gate.wait()
+
+    await worker.call(_hold)
+    try:
+        yield
+    finally:
+        gate.set()
+        await worker.drain()
 
 
 async def _waiting(db) -> list[tuple]:
@@ -300,6 +324,91 @@ async def test_decline_and_the_app_arriving_send_nothing(env):
         (),
     )
     assert [tuple(r) for r in pending] == [("s2", OTHER, "eve", "invited")]
+
+
+async def test_a_decline_still_queued_holds_when_the_app_arrives(env):
+    """The decline's row lands on the delivery worker after the request
+    returns; the app arriving right behind it must not read the row still
+    open and turn the declined invite into a playable one (a session row,
+    a fresh Play / Decline) — the flake behind this file under load."""
+    app, db = env
+    await _session(app, app_id="sketch", session_id="s1")
+    async with _busy(app):
+        assert await app[app_federation_service_key].decline_waiting(
+            app_id="sketch", session_id="s1", actor_user_id="u-bob"
+        )
+        await SqliteAppRepo(db).set_enabled("sketch", enabled=True)
+        await app[event_bus_key].publish(
+            AppEnabledChanged(app_id="sketch", enabled=True)
+        )
+    assert sent == []
+    assert frames == []
+    rows = await db.fetchall(
+        "SELECT type, json_extract(params, '$.handled.outcome') FROM notifications"
+        " WHERE object_key = 'app_session:sketch/s1'",
+        (),
+    )
+    assert [tuple(r) for r in rows] == [("app_challenge_waiting", "declined")]
+    assert await db.fetchall("SELECT session_id FROM app_pending_sessions", ()) == []
+
+
+async def test_a_withdrawal_right_behind_its_invite_is_not_lost(env):
+    """The sender withdraws before the waiting row has landed: the
+    withdrawal still ends it (it would otherwise wait — and turn playable
+    once the app arrives — for an invite its sender took back)."""
+    app, db = env
+    async with _busy(app):
+        await _session(app, app_id="sketch", session_id="s1", drain=False)
+        await _session(app, app_id="sketch", session_id="s1", verb="close", drain=False)
+    assert await _waiting(db) == [
+        ("u-bob", "app_session:sketch/s1", "app_off", "withdrawn")
+    ]
+    assert sent == []
+
+
+async def test_a_burst_of_invites_keeps_the_receiver_bound(env):
+    """Invites that arrive faster than their rows land still meet the
+    five-senders bound."""
+    app, db = env
+    async with _busy(app):
+        for i in range(8):
+            await db.enqueue(
+                "INSERT INTO remote_users(user_id, instance_id, remote_username,"
+                " display_name) VALUES(?,?,?,?)",
+                (f"u-p{i}", PEER, f"p{i}", f"P{i}"),
+            )
+            await _session(app, from_user=f"p{i}", session_id=f"p{i}-1", drain=False)
+    assert len(await _waiting(db)) == 5
+    assert sent == []
+
+
+async def test_an_invite_that_meets_its_app_arriving_becomes_playable(env):
+    """The invite was read against the app turned off, but the app is on
+    by the time its row lands (and the app's own pass may have run): it
+    becomes playable rather than wait for an app the household has."""
+    app, db = env
+    repo = SqliteAppRepo(db)
+    off = await repo.get("sketch")
+    await repo.set_enabled("sketch", enabled=True)
+    svc = app[app_federation_service_key]
+    await svc._in_order(
+        svc._keep_waiting,
+        "sketch",
+        off,
+        "s1",
+        from_instance=PEER,
+        to_user="bob",
+        from_user="ben",
+    )
+    await app[notification_delivery_key].drain()
+    assert [(o, h) for _, o, _, h in await _waiting(db)] == [
+        ("app_session:sketch/s1", "done")
+    ]
+    pending = await db.fetchall(
+        "SELECT session_id, from_instance, state FROM app_pending_sessions", ()
+    )
+    assert [tuple(r) for r in pending] == [("s1", PEER, "invited")]
+    assert sent == []
 
 
 async def test_a_rematch_after_uninstall_waits_and_tells_the_sender_nothing(env):

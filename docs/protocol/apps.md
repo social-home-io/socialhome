@@ -143,6 +143,11 @@ one nobody has answered yet. Instead the invite reaches the **person**:
   `done`; one past 14 days `expired`. Still nothing goes to the sender: the
   first thing they hear is the person's move or decline, as with any
   invite.
+- **In order.** Every step that reads the waiting rows (an invite arriving,
+  its withdrawal, the app arriving) runs on the notification delivery
+  worker behind the jobs that write them, so a decline or a withdrawal
+  queued before the app arrives always holds, and a burst of invites still
+  meets the five-senders bound.
 - **Decline** of a waiting invite (`POST …/sessions/{sid}/decline`) marks it
   `declined` here and sends **nothing**: like a decline for a turned-off app,
   the sender's invite runs out after 14 days. **Withdrawn**: a `close` from
