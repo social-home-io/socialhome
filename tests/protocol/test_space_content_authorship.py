@@ -469,6 +469,29 @@ _SEED = [
         )
         for mid, uid in ((_CHAT_A, "u-a"), (_CHAT_L, LOCAL_USER))
     ],
+    # Games in SP (v_77): the space allows the quiz, and our household hosts
+    # a table at which u-a (username "a", of AUTHOR) sits.
+    ("UPDATE spaces SET allowed_apps='[\"quiz\"]' WHERE id=?", (SP,)),
+    (
+        (
+            "INSERT INTO app_group_sessions(session_id, app_id, host_instance,"
+            " host_user, hub_instance, space_id, state, min_players, max_players,"
+            " roster_json, roster_rev, created_at, expires_at, updated_at)"
+            " SELECT 'table-l', 'quiz', instance_id, 'local', instance_id, ?,"
+            " 'lobby', 2, 4, ?, 1, ?, ?, ? FROM instance_identity WHERE id='self'"
+        ),
+        (
+            SP,
+            (
+                '[{"seat": 1, "instance": "", "user": "local", "name": "Local",'
+                ' "state": "seated"}, {"seat": 2, "instance": "house-author",'
+                ' "user": "a", "name": "A", "state": "seated", "user_id": "u-a"}]'
+            ),
+            _TS,
+            "2099-01-01T00:00:00+00:00",
+            _TS,
+        ),
+    ),
     (
         (
             "INSERT INTO message_reactions(message_id, user_id, emoji)"
@@ -518,6 +541,9 @@ async def _deliver(app, event_type, payload, *, sender) -> None:
 
 
 _CAL = {"calendar_id": SP, "start": _OCC, "end": _END}
+
+#: A game table card's times: now (bounded to ±14 days by its receiver).
+_GAME_TS = datetime.now(UTC).isoformat()
 
 #: Zone display data no household may store, whoever sends it (§23.8.7).
 _HOSTILE_ZONE_DATA: list[tuple[str, dict]] = [
@@ -1277,6 +1303,48 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         },
         (),
         (OTHER, AUTHOR, HOST, ADMIN),
+    ),
+    # ── Games in a space (v_77): a card names a host seated on the sender
+    #    (strict — no host relay); a seat is left only by its own household ──
+    (
+        FET.SPACE_APP_TABLE,
+        "open a game table as u-a",
+        {
+            "table_id": "table-new",
+            "rev": 1,
+            "app_id": "quiz",
+            "host_user": "a",
+            "host_user_id": "u-a",
+            "host_name": "A",
+            "note": None,
+            "players": {"min": 2, "max": 4},
+            "seated": 1,
+            "state": "open",
+            "end_reason": None,
+            "late_join": False,
+            "created_at": _GAME_TS,
+            "started_at": None,
+            "expires_at": _GAME_TS,
+            "announce": False,
+        },
+        (AUTHOR,),
+        (OTHER, ADMIN, HOST, MOD, STRANGER, THIRD),
+    ),
+    (
+        FET.SPACE_APP_SESSION,
+        "leave u-a's seat at our table",
+        {
+            "kind": "session",
+            "body": {
+                "app_id": "quiz",
+                "session_id": "table-l",
+                "verb": "group_leave",
+                "from_user": "a",
+                "reason": "left",
+            },
+        },
+        (AUTHOR,),
+        (OTHER, ADMIN, HOST, MOD, STRANGER, THIRD),
     ),
     (
         FET.SPACE_CHAT_MESSAGE_CREATED,
