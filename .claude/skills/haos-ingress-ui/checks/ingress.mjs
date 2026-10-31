@@ -901,6 +901,57 @@ await check('space-games', async () => {
   return { problems, sids, saved }
 })
 
+// 6g. A group game (v_76): Bob opens one in the probe app for Alice. Her
+//     Needs you's Join links to <prefix>/apps/<id>/tables/<sid>; the click
+//     POSTs …/groups/<sid>/join under the prefix, then lands on the game's
+//     Who's-in page there, whose "Open <app>" link stays under the prefix
+//     too. A cold load of that page (a deep link) renders it as well.
+await check('app-group-lobby', async () => {
+  const problems = []
+  const appId = 'ingress-probe'
+  await asUser('alice', 'POST', '/api/apps', { json: { app_id: appId } }).catch(() => {})
+  const me = await asUser('alice', 'GET', '/api/me')
+  const { people } = await asUser('bob', 'GET', `/api/apps/${appId}/invitable`)
+  const alice = people.find(c => c.is_local && c.user_ref === me.user_id)
+  if (!alice) throw new Error(`alice is not in bob's ${appId} invite sheet`)
+  const target = { instance_id: alice.instance_id, user_ref: alice.user_ref, is_local: true }
+  const joined = {}
+  for (const vp of ['desktop', 'mobile']) {
+    const { group } = await asUser('bob', 'POST', `/api/apps/${appId}/groups`, { json: { targets: [target] } })
+    const sid = group.session_id
+    const lobby = `${PREFIX}/apps/${appId}/tables/${sid}`
+    const { ctx, page: p } = await newPage(vp)
+    await p.goto(APP + 'notifications', { waitUntil: 'load' })
+    await step('the Notifications page', settled(p))
+    const sel = `a.sh-btn[href$="/tables/${sid}"]`
+    await step(`"${T('notifications.needs_you.join')}" for ${sid}`, p.waitForSelector(sel))
+    const href = await p.$eval(sel, a => a.getAttribute('href'))
+    if (href !== lobby) problems.push(`[${vp}] Join href is ${href}, want ${lobby}`)
+    const [join] = await Promise.all([
+      p.waitForResponse(r => r.url().includes(`/groups/${sid}/join`) && r.request().method() === 'POST'),
+      p.click(sel),
+    ])
+    if (!underPrefix(new URL(join.url()).pathname)) problems.push(`[${vp}] join POST went to ${join.url()} (outside the prefix)`)
+    if (join.status() !== 200) problems.push(`[${vp}] join POST → ${join.status()}`)
+    await step(`the Who's-in page at ${lobby}`, p.waitForFunction(w => location.pathname === w, {}, lobby))
+    await step('the players listed', p.waitForSelector('.sh-game-lobby .sh-seat-list'))
+    const open = await p.$eval('.sh-game-lobby a.sh-btn', a => a.getAttribute('href')).catch(() => null)
+    const wantOpen = `${PREFIX}/apps/${appId}?session=${sid}`
+    if (open !== wantOpen) problems.push(`[${vp}] "Open" links to ${open}, want ${wantOpen}`)
+    await p.screenshot({ path: path.join(SHOTS, `app-group-lobby-${vp}.png`) })
+    await ctx.close()
+    // A cold load of the page itself (a shared link, a reload).
+    const cold = await newPage(vp)
+    await cold.page.goto(PROXY + lobby, { waitUntil: 'load' })
+    await step('the Who\'s-in page from a cold load', cold.page.waitForSelector('.sh-game-lobby .sh-seat-list'))
+    if (pathOf(cold.page) !== lobby) problems.push(`[${vp}] cold load moved to ${pathOf(cold.page)}`)
+    await cold.ctx.close()
+    joined[vp] = sid
+  }
+  activePage = page
+  return { problems, joined }
+})
+
 // 7. No ingress user (Supervisor sent no X-Remote-User-*): the cold-start
 //    /api/me 401s → IngressAuthFailed, never a password form or a
 //    "Session expired" toast (there was no token to expire).
