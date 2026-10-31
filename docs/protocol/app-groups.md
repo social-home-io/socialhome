@@ -353,8 +353,9 @@ method needs `people` (else `permission_denied`).
 | `group.send` | `{id, data, to?: number[], turn?: number}` → `{seq: number \| null}` — resolves once this household took it (sent on to the hub, or numbered here when this is the hub) |
 | `group.leave` | `{id}` → `{ok: true}` |
 | `group.remove` | `{id, seat}` → `GroupSession` (host only) |
+| `group.close` | `{id}` → `{ok: true}` (host only: ends the table for everyone, `cancelled`) |
 | `group.held` | — → `GroupEvent[]` (the held `message` events, oldest `seq` first) — for an app that pulls (`app.context` params `{held: 'pull'}`); otherwise they are posted as events right after the `app.context` reply |
-| `group.open` | answers `unavailable` until Social Home's group sheet lands (group play PR 5); an app opens a table only through that sheet (D3) |
+| `group.open` | `{suggest?: PersonRef[]}` (the same `{instance_id, user_ref, is_local}` shape as `people.pick`) → `GroupSession` or `null` (cancelled). Answers `unavailable` until Social Home's group sheet lands (group play PR 5); an app opens a table only through that sheet (D3) |
 
 Error codes: `group_not_found`, `group_not_host`, `group_closed`,
 `group_full`, `group_too_few`, `group_seat`, `group_busy` (with
