@@ -10,6 +10,8 @@
  * - **Glyph:** a small badge on the avatar saying what kind of thing it is.
  * - **Sentence:** built from ``params`` in the viewer's language
  *   (:func:`rowSentence`): names bold, the space emphasised, never cut.
+ *   An app row's place is the app, named in the viewer's language
+ *   (:func:`withAppName`), not the name stored with the row.
  *   A row without params shows its title.
  * - **Meta:** the relative time, plus "N new · M in all" on a row that came
  *   back with new activity after it was read. The place is never repeated.
@@ -20,6 +22,7 @@
  * is nothing to open). Opening it marks it read (:func:`markRowRead`).
  */
 import type { ComponentChildren, JSX } from 'preact'
+import { useEffect } from 'preact/hooks'
 import { Avatar } from '@/components/Avatar'
 import { api } from '@/api'
 import { appHref } from '@/baseUrl'
@@ -31,6 +34,7 @@ import { relativeDocsTime } from '@/utils/relativeTime'
 import type { Notification } from '@/types'
 import { currentUser } from '@/store/auth'
 import { countsMeta, handledMeta, plainText, rowSentence, type Segment } from './rowText'
+import { appIdOf, ensureAppCatalog, withAppName } from './appName'
 
 export type GlyphName =
   | 'comment' | 'at' | 'post' | 'heart' | 'person' | 'calendar'
@@ -152,7 +156,12 @@ interface RowProps {
 
 export function NotificationRow({ n, onOpen, compact, titleId, menu }: RowProps) {
   const unread = !n.read_at
-  const segs = rowSentence(n, spaceOf(n.space_id)?.name)
+  const isApp = appIdOf(n) !== null
+  useEffect(() => {
+    // An app row names its app in the viewer's language (the catalog).
+    if (isApp) ensureAppCatalog()
+  }, [isApp])
+  const segs = rowSentence(withAppName(n), spaceOf(n.space_id)?.name)
   // A handled "Needs you" item says how it ended ("Approved by Søren").
   const meta = handledMeta(n.params, currentUser.value?.user_id) ?? countsMeta(n.params)
   const cls = `sh-notif-row${unread ? ' sh-notif-row--unread' : ''}${compact ? ' sh-notif-row--compact' : ''}`
@@ -198,7 +207,7 @@ export function NotificationRow({ n, onOpen, compact, titleId, menu }: RowProps)
 
 /** *n*'s sentence as plain text (its title for a row without params). */
 export function rowPlainText(n: Notification): string {
-  const segs = rowSentence(n, spaceOf(n.space_id)?.name)
+  const segs = rowSentence(withAppName(n), spaceOf(n.space_id)?.name)
   return segs ? plainText(segs) : n.title
 }
 
