@@ -61,8 +61,17 @@ ACTION_ITEM_TYPES: frozenset[str] = (
 #: (``app_off``). Carried in an ``app_challenge_waiting`` row's ``flags``.
 APP_INVITE_FLAGS: frozenset[str] = frozenset({"app_missing", "app_off"})
 
-#: Every flag a row may carry: join requests' and waiting game invites'.
-NOTIFICATION_FLAGS: frozenset[str] = JOIN_REQUEST_FLAGS | APP_INVITE_FLAGS
+#: A game row about a group game (v_76): ``group`` — the invite is to a
+#: game for several people (Join, not Play; ``params.others`` says how
+#: many others were asked); ``can_start`` — on the "joined your game"
+#: row of the person who started it: enough players are in to start.
+APP_GROUP_FLAGS: frozenset[str] = frozenset({"group", "can_start"})
+
+#: Every flag a row may carry: join requests', waiting game invites' and
+#: group games'.
+NOTIFICATION_FLAGS: frozenset[str] = (
+    JOIN_REQUEST_FLAGS | APP_INVITE_FLAGS | APP_GROUP_FLAGS
+)
 
 #: How a "Needs you" item ended (:attr:`NotificationHandled.outcome`):
 #: someone approved or declined a request, the invitee accepted or declined
@@ -266,8 +275,13 @@ class NotificationParams:
       for a row about a group chat (a missed call, being added) the chat's,
       for a game invite the app's ("… invited you to play Chess").
     * ``flags`` — why a "Needs you" item can't be decided with one tap
-      (:data:`JOIN_REQUEST_FLAGS`), or why a game invite waits for its
-      app (:data:`APP_INVITE_FLAGS`).
+      (:data:`JOIN_REQUEST_FLAGS`), why a game invite waits for its
+      app (:data:`APP_INVITE_FLAGS`), or that a game row is about a group
+      game (:data:`APP_GROUP_FLAGS`).
+    * ``others`` — on a group game's rows (v_76): how many other people
+      besides the reader were invited ("… invited you and 3 others") or
+      joined / play ("Ben and 2 others joined your game"); ``None`` on
+      every other row.
     * ``handled`` — set once a "Needs you" item was handled: it leaves the
       section for every recipient ("Handled by Søren").
     """
@@ -279,6 +293,7 @@ class NotificationParams:
     space_name: str | None = None
     flags: tuple[str, ...] = ()
     handled: NotificationHandled | None = None
+    others: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -293,6 +308,8 @@ class NotificationParams:
             out["flags"] = list(self.flags)
         if self.handled is not None:
             out["handled"] = self.handled.to_dict()
+        if self.others is not None:
+            out["others"] = self.others
         return out
 
     @classmethod
@@ -312,6 +329,7 @@ class NotificationParams:
         )
         space_name = raw.get("space_name")
         flags = raw.get("flags")
+        others = raw.get("others")
         return cls(
             actors=actors,
             actor_count=_count(raw.get("actor_count"), len(actors)),
@@ -326,6 +344,13 @@ class NotificationParams:
                 else ()
             ),
             handled=NotificationHandled.from_dict(raw.get("handled")),
+            others=(
+                others
+                if isinstance(others, int)
+                and not isinstance(others, bool)
+                and others >= 0
+                else None
+            ),
         )
 
 
@@ -340,6 +365,7 @@ def first_params(
     *,
     space_name: str | None = None,
     flags: tuple[str, ...] = (),
+    others: int | None = None,
 ) -> NotificationParams:
     """A fresh row's params: one event, by *actor* (``None`` for a notice
     nobody caused)."""
@@ -351,6 +377,7 @@ def first_params(
         total=1,
         space_name=space_name,
         flags=flags,
+        others=others,
     )
 
 
@@ -361,6 +388,7 @@ def regroup(
     reopen: bool,
     space_name: str | None = None,
     flags: tuple[str, ...] = (),
+    others: int | None = None,
 ) -> NotificationParams:
     """*old*'s params after one more event by *actor*.
 
@@ -371,12 +399,14 @@ def regroup(
     as one earlier event by nobody known.
 
     New activity is new work: a "Needs you" row that had been handled is
-    pending again (no ``handled``), with this event's *flags*."""
+    pending again (no ``handled``), with this event's *flags*. *others*
+    (a group game's count) is this event's, else the row's."""
     if old is None:
         old = NotificationParams()
     space_name = space_name or old.space_name
+    others = others if others is not None else old.others
     if reopen:
-        fresh = first_params(actor, space_name=space_name, flags=flags)
+        fresh = first_params(actor, space_name=space_name, flags=flags, others=others)
         return NotificationParams(
             actors=fresh.actors,
             actor_count=fresh.actor_count,
@@ -384,6 +414,7 @@ def regroup(
             total=old.total + 1,
             space_name=space_name,
             flags=flags,
+            others=others,
         )
     actors = old.actors
     count = old.actor_count
@@ -398,6 +429,7 @@ def regroup(
         total=old.total + 1,
         space_name=space_name,
         flags=flags,
+        others=others,
     )
 
 

@@ -1169,8 +1169,9 @@ from __future__ import annotations
 #:   people see the listing without questions and answers, as before.
 #:   Labelled "Questions and answers on listings".
 #: * **v_76** (2026-10-31) — **Group games (tables), the roster**. An app
-#:   session may now seat 2–30 people (a *table*; up to 10 when opened by
-#:   picking people). The host household (*hub*, fixed for the table's
+#:   session may now seat 2–30 people (a *table*; up to the app's own
+#:   ``players.max`` when opened by picking people — owner decision D2).
+#:   The host household (*hub*, fixed for the table's
 #:   life) keeps the roster and is the only household the others talk to
 #:   about it. No new event type: new sealed ``APP_SESSION`` verbs —
 #:   ``group_invite`` (hub → an invitee's household, one person),

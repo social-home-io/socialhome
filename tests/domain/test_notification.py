@@ -235,3 +235,29 @@ def test_d5_a_followed_space_defaults_to_replies_and_mentions():
 
 def test_d5_an_unknown_space_type_errs_quiet():
     assert default_space_notif_level("galaxy", "member") is SpaceNotifLevel.MENTIONS
+
+
+def test_a_group_invite_row_keeps_how_many_others_were_asked():
+    p = first_params(NotificationActor("ben"), flags=("group",), others=3)
+    raw = p.to_dict()
+    assert raw["others"] == 3 and raw["flags"] == ["group"]
+    assert NotificationParams.from_dict(raw) == p
+    # A 1:1 row carries no ``others`` at all.
+    assert "others" not in first_params(NotificationActor("ben")).to_dict()
+    # The newest event's count wins; one without a count keeps the row's.
+    assert regroup(p, None, reopen=False, others=5).others == 5
+    assert regroup(p, None, reopen=True).others == 3
+
+
+def test_a_bad_others_count_reads_as_none():
+    for bad in (-1, "3", True, 1.5, None):
+        assert NotificationParams.from_dict({"others": bad}).others is None
+
+
+def test_group_flags_survive_a_round_trip():
+    raw = {"flags": ["group", "can_start", "app_missing", "nope"]}
+    assert NotificationParams.from_dict(raw).flags == (
+        "app_missing",
+        "can_start",
+        "group",
+    )

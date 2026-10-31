@@ -1,7 +1,8 @@
 # Social Home Apps — group games (tables)
 
-A **table** is an app session with 2–30 seats (up to 10 when opened by
-picking people). Its **host household** — the *hub*, the household of the
+A **table** is an app session with 2–30 seats (when opened by picking
+people, up to the app's own `players.max` — owner decision D2, so a big
+family fits one game). Its **host household** — the *hub*, the household of the
 person who opened it — keeps the roster and is the only household the
 others talk to about it. The *host person* can change (hand-over); the hub
 never does. Every other household with a player keeps a copy of the table
@@ -94,13 +95,40 @@ sequenceDiagram
 
 | Step | Rule |
 |---|---|
-| **Open** | Only through Social Home's invite sheet (D3): people of `GET /invitable` with `groups: true` (households at v_76). Host + picked people within the app's `players` range, ≤ 10. Caps: ≤ 5 tables waiting per person per app, ≤ 10 new a day; each person picked counts once against the 1:1 invite caps (10 open, 30 a day). Waits 1, 3 (default), 7 or 14 days. |
+| **Open** | Only through Social Home's invite sheet (D3): people of `GET /invitable` with `groups: true` (households at v_76); the sheet can tick everyone of a space at once (`spaces`, writing seats only). Host + picked people within the app's `players` range — up to the app's `players.max`, at most 30 (owner decision D2). Caps: ≤ 5 tables waiting per person per app, ≤ 10 new a day; a table counts as **one** invite against the 1:1 invite caps (10 open, 30 a day) — one open while someone hasn't answered, one that day — however many people it asks (see [Invite caps](#invite-caps)). Waits 1, 3 (default), 7 or 14 days. |
 | **Invite** | A household below v_76 is refused (409 `APP_GROUP_HOUSEHOLD_TOO_OLD`). A person on the hub's own household gets no envelope. |
 | **Join** | The joiner's household checks first (app here and on, age, blocks, children); the hub seats only an invited person, from their own household, while the table is open and not full. A refusal is `group_close {to_user, reason: full / withdrawn}`; a stranger's join is ignored. |
 | **Start** | Host person only, once `min` are seated. Unanswered invites are withdrawn (`group_close {to_user, reason: withdrawn}`) unless the app takes late joiners. A table of two (`max: 2`) starts by itself when the second seat fills. |
 | **Leave** | Before Start the seat is free again; the host person leaving a lobby closes it (`cancelled`); after Start the host passes to the player seated longest. A decline is a leave before joining (the hub marks it; the players aren't told). |
 | **Remove** | Host person only; the removed person's household gets `group_close {to_user, reason: removed}`, they can't come back. |
 | **Close / expire** | Host person closes (`cancelled`); a lobby past its time ends `expired` (the hub's hourly sweep; a copy ends on its own an hour later if the hub is gone). The app uninstalled at the hub ends its tables (`host_gone`); at a player's household its people leave. |
+
+### Invite caps
+
+Counted per person picked, a family table of 29 would need 29 of the 10
+open 1:1 invites and could never be sent. So a table counts as ONE
+invite there (`AppGroupService.invite_usage`): one open while it waits
+for players with someone who hasn't answered, one in the last 24 hours.
+What bounds a person's group invites instead: ≤ 5 tables waiting and ≤ 10
+new a day per app (so ≤ 290 people asked a day per app, only people the
+sheet lists — this household's and paired households' people), and every
+receiver keeps at most 50 open tables from one hub. The `others` count
+an invite carries is the hub's word: a receiver takes it only as a whole
+number below 30, anything else reads as 0.
+
+### Needs you and the bell (design 3.7)
+
+| Row | For | What it says, where it opens |
+|---|---|---|
+| `app_challenge` (Needs you) with flag `group`, `params.others` | each invitee | "Anna invited you and 3 others to play Quiz" ("… and 1 other", or the 1:1 words for nobody else) — **Join** / Decline; opens `/apps/{app}/tables/{session}` |
+| `app_challenge_waiting` (Needs you) with flags `app_missing` / `app_off` and `group`, `params.others` | an invitee whose household doesn't have the app or turned it off | the same sentence, "Ask an admin" (D10); a row of its own, never joined to the sender's 1:1 row |
+| `app_table_joined` (Games) | the person who started the game, on its hub | ONE row per game, moved on by each joiner (newest first in `params.actors`): "Ben joined your Quiz game" / "Ben and 2 others joined your Quiz game" (`params.others`: how many more are in, the starter not counted); flag `can_start` once enough players are in ("You can start now"); opens `/apps/{app}/tables/{session}` |
+| `app_table_started` (Games) | each player seated when it went from waiting to playing, but the person who started it — on the hub when Start is pressed, on another household when the hub's `group_start` arrives (a two-player game that starts by itself raises none) | "Your Quiz game with Anna and 3 others started" (`params.others`); opens `/apps/{app}?session={session}` |
+
+Games rows push only for someone who set Games to Push (as "Your turn");
+a repeat on a row still unread is silent. Nothing new travels: every row
+is made by the household of the person it is for, from what the roster
+already carries.
 
 ## Each household's own rules (design 2.11, D8, D12)
 
@@ -133,10 +161,12 @@ household an invite for that id first, which then drops the real one
   and hub never change. A snapshot out of shape — over 30 seats, a seat or
   person twice, a host without a seat, an expiry past 14 days, a note over
   80 characters or across lines, a name over 80 — is dropped.
-- An invite is kept only for a table still open, of at most 10 seats, whose
-  host is the sending household's `from_user`, for an app installed here,
-  on, allowed to reach other households and marked `tables`; for a session
+- An invite is kept only for a table still open (at most 30 seats, as
+  any snapshot), whose host is the sending household's `from_user`, for an
+  app allowed to reach other households and marked `tables`; for a session
   id the person has no row for; and at most 50 open tables from one hub.
+  For an app this household doesn't have, or turned off, it waits (D10,
+  [below](#an-invite-for-an-app-not-here)).
 - A space table's verbs and messages are taken only over its space
   (`SPACE_APP_SESSION`); one arriving as a bare `APP_SESSION` /
   `APP_MESSAGE` is dropped, and a picked table's never ride a space.
@@ -150,17 +180,47 @@ household an invite for that id first, which then drops the real one
 |---|---|
 | A picked person's household is below v_76 | The sheet marks them (`groups: false`); an open naming them answers 409 `APP_GROUP_HOUSEHOLD_TOO_OLD`. Nothing is sent. Their 1:1 games are untouched. |
 | An app without `tables: true` in its manifest | 409 `APP_GROUPS_NOT_SUPPORTED`; 1:1 invites only. |
-| An invite for an app not here or turned off | Dropped (the 1:1 "waits for its app" row isn't offered for tables yet). |
+| An invite for an app not here or turned off | Waits for its person (D10, below). |
+
+## An invite for an app not here
+
+A group invite for an app this household doesn't have — or turned off —
+reaches its person anyway, as a 1:1 invite does (D10,
+`AppFederationService.keep_group_waiting`): after the same receiver rules
+(the person here and active, the host a known person of the hub, no block
+either way or guardian block, a protected account only with households it
+may message, the app's age gate — the catalog's rating for an app not
+here — and nobody at the table the person can't play with), it waits as
+their Needs-you row with "Ask an admin" (`app_challenge_waiting`, flags
+`app_missing` / `app_off` and `group`). The household keeps its copy of
+the table (bounded like any: ≤ 50 open from one hub); it holds no seat
+row yet. **Nothing goes back to the hub** — it can't tell "doesn't have
+the app" from "hasn't looked".
+
+- **The app arrives / is turned on** while the table still takes people:
+  the row becomes a normal group invite (a seat row, `app_challenge` with
+  flag `group`, Join) — after the rules again (a block since, the age gate
+  of the installed app, its `federation` permission and `tables`). A table
+  that ended, started without the person, or whose lobby ran out ends the
+  row (`expired` / `done`); so does an invite past the 14-day TTL.
+- **The table ends** (closed, expired, the hub's app gone) or the hub
+  **withdraws** the invite (Start without late joiners): the row ends
+  (`withdrawn` / `expired`).
+- **Decline**: the row reads as declined; nothing is sent (D10) — the
+  hub's invite just runs out.
 
 ## Cost
 
 Invites are one envelope per person invited (`group_invite` names one
-person; ≤ 9), the hub's own people none. Everything after is one
+person; ≤ 29), the hub's own people none. Everything after is one
 envelope per household, never per person. A join: one envelope
 to the hub, one seat answer, and at most one coalesced roster per 5 s to
 the other households at the table (≤ 0.6 KB each sealed). Filling 10 seats
 over 10 households one by one: ≈ 10 × 2 + ~10 × 9 rosters × 0.6 KB ≈ 60 KB,
-once. Start / close: *h − 1* envelopes.
+once; 30 seats over 30 households ≈ 30 × 2 + ~30 × 15 rosters × 0.6 KB ≈
+300 KB, once (design 2.12). Opening such a table: 29 invites of ≈ 1 KB
+sealed (the snapshot holds only the host). Start / close: *h − 1*
+envelopes. The rows above cost nothing on the wire.
 
 ## Messages at a table
 
@@ -377,7 +437,7 @@ method needs `people` (else `permission_denied`).
 | `group.remove` | `{id, seat}` → `GroupSession` (host only) |
 | `group.close` | `{id}` → `{ok: true}` (host only: ends the table for everyone, `cancelled`) |
 | `group.held` | — → `GroupEvent[]` (the held `message` events, oldest `seq` first) — for an app that pulls (`app.context` params `{held: 'pull'}`); otherwise they are posted as events right after the `app.context` reply |
-| `group.open` | `{suggest?: PersonRef[]}` (the same `{instance_id, user_ref, is_local}` shape as `people.pick`) → `GroupSession` or `null` (cancelled). Answers `unavailable` until Social Home's group sheet lands (group play PR 5); an app opens a table only through that sheet (D3) |
+| `group.open` | `{suggest?: PersonRef[]}` (the same `{instance_id, user_ref, is_local}` shape as `people.pick`; malformed ones dropped, at most 29) → `GroupSession` or `null` (cancelled). Social Home draws its own group sheet outside the frame (D3: an app opens a table only through it): the person picks up to the app's `players.max` − 1 people (hard ceiling 30 players; search, and "Everyone in …" a space, from `GET /invitable`'s `spaces`), says how long it stays open (`lobby_days`) and may add a note, then taps Send (`POST /groups`). Suggested people start ticked. Same guards as `people.pick`: one sheet at a time across frames (`busy`), 5 s per app after a sheet closes (`too_soon`, `retryAfterMs`), Send ignores taps for its first 600 ms. `unavailable` from a host without the sheet; `groups_not_supported` for an app without `tables` |
 
 Error codes: every server `APP_GROUP_*` / `APP_GROUPS_*` code lower-cased
 without `app_` — `group_not_found`, `group_not_host`, `group_closed`,
@@ -387,7 +447,8 @@ without `app_` — `group_not_found`, `group_not_host`, `group_closed`,
 and `cant_join` (`APP_GROUP_CANT_JOIN`), `too_large` (413, past 64 KiB, or
 a directed message's data × its seats past 128 KiB), `invalid` (a call
 without a well-formed table id / seat / `to` / `turn`, refused before the
-server), `unavailable` (`group.open` for now), `unknown_method`, plus
+server), `busy` / `too_soon` / `unavailable` (`group.open`, as for
+`people.pick`), `unknown_method`, plus
 `permission_denied` / `error`.
 
 ```ts

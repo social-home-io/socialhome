@@ -24,18 +24,21 @@ from uuid import uuid4
 
 from socialhome.crypto import generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.app_group import GROUP_PICK_MAX_PLAYERS
-from socialhome.domain.apps import AppManifest, InstalledApp
+from socialhome.domain.apps import AppCatalogEntry, AppManifest, InstalledApp
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.federation_capabilities import OURS
 from socialhome.domain.user import User
+from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.app_group_repo import SqliteAppGroupRepo
 from socialhome.repositories.app_repo import SqliteAppRepo
 from socialhome.repositories.federation_repo import SqliteFederationRepo
+from socialhome.repositories.notification_repo import SqliteNotificationRepo
+from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.app_federation_service import AppFederationService
 from socialhome.services.app_group_service import AppGroupService
+from socialhome.services.notification_service import NotificationService
 
 APP = "quiz"
 
@@ -91,6 +94,41 @@ class FakeBus:
 
     def of(self, kind: type) -> list:
         return [e for e in self.events if isinstance(e, kind)]
+
+
+class RecordingBus(EventBus):
+    """A real bus (the notification service listens) that also keeps
+    every event, like :class:`FakeBus`."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: list = []
+
+    async def publish(self, event) -> None:
+        self.events.append(event)
+        await super().publish(event)
+
+    def of(self, kind: type) -> list:
+        return [e for e in self.events if isinstance(e, kind)]
+
+
+class FakeCatalog:
+    """This household's app catalog, listing the quiz (D10: an invite for
+    an app the household doesn't have is named from it)."""
+
+    async def browse_catalog_for(self, *, user_id: str, is_admin: bool) -> list:
+        return [
+            AppCatalogEntry(
+                app_id=APP,
+                name="Quiz",
+                latest_version="1.0.0",
+                description="A quiz",
+                icon_url=None,
+                capabilities=("storage", "federation"),
+                bundle_url="https://example/quiz.tgz",
+                bundle_sha256="ab" * 32,
+            )
+        ]
 
 
 class FakeChildProtection:
@@ -164,6 +202,9 @@ class Household:
     app_fed: AppFederationService
     groups: AppGroupService
     users: dict[str, User] = field(default_factory=dict)
+    #: The notification rows, when the household keeps them
+    #: (``notifications=True``: waiting invites, D10).
+    notifs: SqliteNotificationRepo | None = None
 
     async def add_user(self, username: str, name: str | None = None) -> User:
         user = User(
@@ -198,13 +239,19 @@ class Network:
         #: The event type each sent payload went as (by ``id``).
         self.types: dict[int, FederationEventType] = {}
 
-    async def household(self, instance: str, *, version: int = OURS) -> Household:
+    async def household(
+        self, instance: str, *, version: int = OURS, notifications: bool = False
+    ) -> Household:
+        """A household; with *notifications* its bus is a real one and the
+        notification service keeps rows — what a game invite waiting for
+        its app (D10) is."""
         path = self.root / instance
         path.mkdir(parents=True, exist_ok=True)
         db = AsyncDatabase(path / "h.db", batch_timeout_ms=5)
         await db.startup()
         fed = FakeFederation(self, instance)
-        ws, bus, cp = FakeWs(), FakeBus(), FakeChildProtection()
+        ws, cp = FakeWs(), FakeChildProtection()
+        bus: FakeBus | RecordingBus = RecordingBus() if notifications else FakeBus()
         app_repo, group_repo = SqliteAppRepo(db), SqliteAppGroupRepo(db)
         user_repo = SqliteUserRepo(db)
         app_fed = AppFederationService(
@@ -231,6 +278,19 @@ class Network:
         app_fed.attach_groups(groups)
         app_fed._child_protection = cp  # type: ignore[assignment]
         groups._child_protection = cp  # type: ignore[assignment]
+        notifs = None
+        if notifications:
+            notifs = SqliteNotificationRepo(db)
+            svc = NotificationService(
+                notifs,
+                user_repo,
+                SqliteSpaceRepo(db, key_manager=KeyManager(os.urandom(32))),
+                bus,  # type: ignore[arg-type]
+            )
+            svc.attach_app_repo(app_repo)
+            svc.wire()
+            app_fed._notifs = notifs
+            app_fed._catalog = FakeCatalog()  # type: ignore[assignment]
         home = Household(
             instance=instance,
             db=db,
@@ -243,6 +303,7 @@ class Network:
             user_repo=user_repo,
             app_fed=app_fed,
             groups=groups,
+            notifs=notifs,
         )
         home.fed.versions[instance] = version
         self.homes[instance] = home
@@ -348,9 +409,10 @@ class Network:
 
 __all__ = [
     "APP",
-    "GROUP_PICK_MAX_PLAYERS",
     "FakeBus",
+    "FakeCatalog",
     "Household",
     "Network",
+    "RecordingBus",
     "quiz_app",
 ]

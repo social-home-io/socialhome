@@ -12,8 +12,10 @@ Security invariants
   "unavailable"). An invite addressed to one person still reaches that
   person (D10): it waits as their "Needs you" row with "Ask an admin"
   (:meth:`_keep_waiting`) and becomes a normal invite once the app is
-  added or turned on (:meth:`on_app_usable`). Anything else is dropped
-  after a debug log.
+  added or turned on (:meth:`on_app_usable`). A group game's invite
+  (v_76) waits the same way (:meth:`keep_group_waiting`; the table's
+  service keeps its copy of the table and makes it a Join once the app
+  is here). Anything else is dropped after a debug log.
 * No application payload ever appears in plaintext in a federation envelope.
   Both the binary and JSON paths rely on :class:`FederationService` for
   encryption; this service only passes dicts down to the send methods and
@@ -170,6 +172,7 @@ from ..domain.events import (
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.notification import NotificationObject, object_key
+from ..domain.space import WRITER_ROLES, SpaceType
 from ..repositories._spec import Spec
 from .protection_gate import ProtectionGateMixin
 
@@ -184,6 +187,10 @@ if TYPE_CHECKING:
     from ..repositories.cp_repo import AbstractCpRepo
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.notification_repo import AbstractNotificationRepo
+    from ..repositories.space_remote_member_repo import (
+        AbstractSpaceRemoteMemberRepo,
+    )
+    from ..repositories.space_repo import AbstractSpaceRepo
     from ..repositories.user_repo import AbstractUserRepo
     from .app_group_service import AppGroupService
     from .app_service import AppService
@@ -295,6 +302,10 @@ class AppFederationService(ProtectionGateMixin):
     catalog:
         The app service whose catalog names an app this household doesn't
         have and says whether its age gate lets the invitee see it.
+    spaces / space_remote_members:
+        The caller's spaces and their seats (local / other households') —
+        read only, for the invite sheet's "pick everyone from a space"
+        (:meth:`invite_sheet`); without them the sheet offers no spaces.
     """
 
     __slots__ = (
@@ -310,6 +321,8 @@ class AppFederationService(ProtectionGateMixin):
         "_invite_locks",
         "_notifs",
         "_seen_open_sessions",
+        "_space_remote_members",
+        "_spaces",
         "_user_repo",
         "_ws",
     )
@@ -326,8 +339,12 @@ class AppFederationService(ProtectionGateMixin):
         bus: EventBus | None = None,
         notifications: AbstractNotificationRepo | None = None,
         catalog: AppService | None = None,
+        spaces: AbstractSpaceRepo | None = None,
+        space_remote_members: AbstractSpaceRemoteMemberRepo | None = None,
     ) -> None:
         self._app_repo = app_repo
+        self._spaces = spaces
+        self._space_remote_members = space_remote_members
         self._user_repo = user_repo
         self._ws = ws
         self._federation = federation
@@ -452,10 +469,67 @@ class AppFederationService(ProtectionGateMixin):
         app = await self.require_enabled(app_id)
         await self.assert_age_allowed(app_id, self_user_id, app=app)
         app.require_permission(PERMISSION_PEOPLE)
-        return await self._roster(self_user_id, app)
+        return [person for person, _id in await self._roster(self_user_id, app)]
 
-    async def _roster(self, self_user_id: str, app: InstalledApp) -> list[dict]:
-        """:meth:`list_invitable` without the app checks."""
+    async def invite_sheet(
+        self, *, app_id: str, self_user_id: str
+    ) -> tuple[list[dict], list[dict]]:
+        """What Social Home's invite sheet shows (``GET /invitable``):
+        :meth:`list_invitable`'s people, and the spaces to pick everyone
+        from at once (group play, owner decision D2) — ``[{space_id, name,
+        people}]``, ``people`` the indexes into the people list of whom
+        hold a writing seat there.
+
+        A space is offered when the caller holds a writing seat in it
+        (owner, admin, moderator or member — never a follower's), it is
+        not a global space and not archived, and at least one person the
+        sheet lists writes there too (local seats by user id, another
+        household's by their ``remote_users`` id). Followers are never
+        offered. Sorted by name. The SPA's sheet only — the app's bridge
+        never sees it (D3)."""
+        app = await self.require_enabled(app_id)
+        await self.assert_age_allowed(app_id, self_user_id, app=app)
+        app.require_permission(PERMISSION_PEOPLE)
+        roster = await self._roster(self_user_id, app)
+        people = [person for person, _id in roster]
+        return people, await self._sheet_spaces(
+            self_user_id, [pid for _person, pid in roster]
+        )
+
+    async def _sheet_spaces(
+        self, self_user_id: str, person_ids: list[str]
+    ) -> list[dict]:
+        if self._spaces is None or not person_ids:
+            return []
+        index = {pid: i for i, pid in enumerate(person_ids)}
+        out: list[dict] = []
+        for space in await self._spaces.list_for_user(self_user_id):
+            if space.space_type == SpaceType.GLOBAL or space.archived:
+                continue
+            writers = {
+                m.user_id
+                for m in await self._spaces.list_members(space.id)
+                if m.role in WRITER_ROLES
+            }
+            if self_user_id not in writers:
+                continue
+            if self._space_remote_members is not None:
+                writers |= {
+                    m.user_id
+                    for m in await self._space_remote_members.list_for_space(space.id)
+                    if m.role in WRITER_ROLES
+                }
+            picks = sorted(index[uid] for uid in writers if uid in index)
+            if picks:
+                out.append({"space_id": space.id, "name": space.name, "people": picks})
+        out.sort(key=lambda s: (s["name"].casefold(), s["space_id"]))
+        return out
+
+    async def _roster(
+        self, self_user_id: str, app: InstalledApp
+    ) -> list[tuple[dict, str]]:
+        """:meth:`list_invitable` without the app checks — each person with
+        their local or ``remote_users`` id (never sent)."""
         own = self._federation.own_instance_id
         connected = self._ws.connected_users()
 
@@ -467,7 +541,7 @@ class AppFederationService(ProtectionGateMixin):
         # way, local or remote) — same as calls and DMs.
         blocked_ids |= await self._guardian_block_counterparts(self_user_id)
 
-        out: list[dict] = []
+        out: list[tuple[dict, str]] = []
 
         local = [
             u
@@ -488,16 +562,19 @@ class AppFederationService(ProtectionGateMixin):
             if await self._user_repo.is_blocked(u.user_id, self_user_id):
                 continue
             out.append(
-                {
-                    "instance_id": own,
-                    "user_ref": u.user_id,
-                    "display_name": u.display_name,
-                    "is_local": True,
-                    "online": u.user_id in connected,
-                    "person_name": u.display_name,
-                    "household_name": None,
-                    "groups": True,
-                }
+                (
+                    {
+                        "instance_id": own,
+                        "user_ref": u.user_id,
+                        "display_name": u.display_name,
+                        "is_local": True,
+                        "online": u.user_id in connected,
+                        "person_name": u.display_name,
+                        "household_name": None,
+                        "groups": True,
+                    },
+                    u.user_id,
+                )
             )
 
         if PERMISSION_FEDERATION not in app.permissions:
@@ -530,10 +607,13 @@ class AppFederationService(ProtectionGateMixin):
                     min_version=FederationCapability.MIN_FOR_APP_GROUPS,
                 )
             out.append(
-                {
-                    **self._remote_contact(r, households[r.instance_id]),
-                    "groups": groups[r.instance_id],
-                }
+                (
+                    {
+                        **self._remote_contact(r, households[r.instance_id]),
+                        "groups": groups[r.instance_id],
+                    },
+                    r.user_id,
+                )
             )
 
         return out
@@ -656,7 +736,8 @@ class AppFederationService(ProtectionGateMixin):
             if not row.answered and not row.withdrawn and row.last_change >= ttl_cut:
                 open_ += 1
         if self._groups is not None:
-            # A table counts once per person it invited (v_76).
+            # A table counts as one invite, however many it asked (v_76,
+            # AppGroupService.invite_usage).
             g_open, g_today = await self._groups.invite_usage(app_id, user_id)
             open_ += g_open
             today += g_today
@@ -667,8 +748,8 @@ class AppFederationService(ProtectionGateMixin):
     ) -> None:
         """Raise :class:`AppInviteLimitError` when *adding* more invites
         would pass a cap (open first: it is the one the person can act on —
-        withdraw an invite). A table opened by picking people adds one per
-        person picked."""
+        withdraw an invite). A table opened by picking people adds one,
+        however many people it asks (owner decision D2)."""
         open_, today = await self._invite_usage(app_id, user_id)
         if open_ + adding > INVITES_OPEN_MAX:
             raise AppInviteLimitError(daily=False)
@@ -1315,7 +1396,7 @@ class AppFederationService(ProtectionGateMixin):
             target.get("user_ref"),
             bool(target.get("is_local")),
         )
-        for c in await self._roster(actor_user_id, app):
+        for c, _id in await self._roster(actor_user_id, app):
             if (c["instance_id"], c["user_ref"], c["is_local"]) == key:
                 break
         else:
@@ -2111,9 +2192,10 @@ class AppFederationService(ProtectionGateMixin):
 
     async def preview_uninstall(self, app_id: str) -> AppUninstallPreview:
         """The uninstall dialog's counts (D9): people here with saved
-        data, games and open invites with other households, and who will
-        be told — names the admin already sees for those households'
-        people, never what the games hold nor who here plays whom."""
+        data, games and open invites with other households, group games
+        with them (``tables``, v_76), and who will be told — names the
+        admin already sees for those households' people, never what the
+        games hold nor who here plays whom."""
         games = invites = untold = 0
         names: list[str] = []
         seen: set[tuple[str, str]] = set()
@@ -2146,6 +2228,11 @@ class AppFederationService(ProtectionGateMixin):
             told=tuple(names[:UNINSTALL_NAMES_MAX]),
             told_more=max(0, len(names) - UNINSTALL_NAMES_MAX),
             untold=untold,
+            tables=(
+                await self._groups.tables_ending(app_id)
+                if self._groups is not None
+                else 0
+            ),
         )
 
     async def tell_opponents(
@@ -2249,6 +2336,8 @@ class AppFederationService(ProtectionGateMixin):
         from_instance: str,
         to_user: str,
         from_user: str | None,
+        others: int | None = None,
+        keep: Callable[[], Awaitable[bool]] | None = None,
     ) -> None:
         """An invite for an app this household doesn't have (*app* ``None``)
         or turned off reaches its person anyway (D10): after every rule a
@@ -2265,7 +2354,11 @@ class AppFederationService(ProtectionGateMixin):
         Nothing is sent back — no reply, no "unavailable", no read
         receipt: whether this household has the app, or who here is
         age-limited, is never revealed. The sender's invite just waits (it
-        runs out after :data:`PENDING_SESSION_TTL_SECONDS`)."""
+        runs out after :data:`PENDING_SESSION_TTL_SECONDS`).
+
+        A group game's invite (v_76, :meth:`keep_group_waiting`) carries
+        *others* (how many more were asked) and *keep*: the table's own
+        rules and its copy of the table, run last — ``False`` drops it."""
         if self._notifs is None or not _WAITING_SESSION_RE.fullmatch(session_id):
             return
         recipient = await self._user_repo.get(to_user)
@@ -2315,6 +2408,8 @@ class AppFederationService(ProtectionGateMixin):
                 session_id,
             )
             return
+        if keep is not None and not await keep():
+            return
         log.info(
             "app_federation: invite for %s app %r waits for its person (session=%s)",
             reason,
@@ -2332,6 +2427,7 @@ class AppFederationService(ProtectionGateMixin):
                 from_user_id=initiator.user_id,
                 app_name=name,
                 reason=reason,
+                others=others,
             )
         )
         now = await self._app_repo.get(app_id)
@@ -2340,6 +2436,67 @@ class AppFederationService(ProtectionGateMixin):
             # own pass may have run already: the invite becomes playable
             # now rather than wait for an app the household has.
             await self._make_waiting_playable(app_id)
+
+    async def keep_group_waiting(
+        self,
+        app_id: str,
+        app: InstalledApp | None,
+        session_id: str,
+        *,
+        from_instance: str,
+        to_user: str,
+        from_user: str,
+        others: int,
+        keep: Callable[[], Awaitable[bool]],
+    ) -> None:
+        """A group game's invite for an app this household doesn't have or
+        turned off (D10, v_76): it waits like a 1:1 invite
+        (:meth:`_keep_waiting` — the same receiver rules, the catalog's
+        name and age gate, nothing back to the hub), in order with the
+        delivery jobs; *keep* is the table's service's last word (its
+        rules, its copy of the table)."""
+        await self._in_order(
+            self._keep_waiting,
+            app_id,
+            app,
+            session_id,
+            from_instance=from_instance,
+            to_user=to_user,
+            from_user=from_user,
+            others=others,
+            keep=keep,
+        )
+
+    async def end_waiting(
+        self,
+        app_id: str,
+        session_id: str,
+        *,
+        outcome: str,
+        user_id: str | None = None,
+    ) -> None:
+        """A group game's invite that waits for its app here ends (D10,
+        v_76): its table ended, or the hub withdrew it — for *user_id*, or
+        everyone here it waits for. Its row reads as *outcome*. Nothing is
+        sent."""
+        await self._in_order(
+            self._end_waiting, app_id, session_id, outcome=outcome, user_id=user_id
+        )
+
+    async def _end_waiting(
+        self, app_id: str, session_id: str, *, outcome: str, user_id: str | None
+    ) -> None:
+        for row in await self._waiting_rows(
+            app_id, user_id=user_id, session_id=session_id
+        ):
+            await self._emit(
+                AppChallengeEnded(
+                    app_id=app_id,
+                    user_id=row.user_id,
+                    session_ids=(session_id,),
+                    outcome=outcome,
+                )
+            )
 
     async def _may_wait(
         self, recipient: User, initiator: RemoteUser, from_instance: str
@@ -2376,17 +2533,19 @@ class AppFederationService(ProtectionGateMixin):
         session_id: str | None = None,
     ) -> list[Notification]:
         """The invites that wait for *app_id* (D10) — every person's,
-        *user_id*'s, or *user_id*'s for *session_id*: open
-        ``app_challenge_waiting`` rows."""
+        *user_id*'s, *user_id*'s for *session_id*, or everyone's for
+        *session_id*: open ``app_challenge_waiting`` rows."""
         if self._notifs is None:
             return []
-        if user_id is not None and session_id is None:
-            where: list[tuple[str, str, Any]] = [
+        key = object_key(NotificationObject.APP_SESSION, f"{app_id}/{session_id}")
+        if user_id is None and session_id is not None:
+            where: list[tuple[str, str, Any]] = [("object_key", "=", key)]
+        elif user_id is not None and session_id is None:
+            where = [
                 ("type", "=", WAITING_INVITE_TYPE),
                 ("user_id", "=", user_id),
             ]
         elif user_id is not None:
-            key = object_key(NotificationObject.APP_SESSION, f"{app_id}/{session_id}")
             where = [
                 ("object_key", "=", key),
                 ("user_id", "=", user_id),
@@ -2481,7 +2640,10 @@ class AppFederationService(ProtectionGateMixin):
         The receiver's bounds hold here too: only the newest invite per
         (invitee, sender person) becomes playable, and only the newest
         :data:`WAITING_SENDERS_MAX` senders' per invitee; any other
-        waiting row ends ``done``."""
+        waiting row ends ``done``. A group game's invite (flag ``group``,
+        v_76) is the table's service's to turn into a Join
+        (:meth:`AppGroupService.waiting_playable`) — outside those bounds:
+        its table was bounded when it arrived."""
         app = await self._app_repo.get(app_id)
         if app is None or not app.enabled:
             return
@@ -2493,12 +2655,19 @@ class AppFederationService(ProtectionGateMixin):
         )
         seen: set[tuple[str, str]] = set()
         senders: dict[str, int] = {}
+        outcome: str | None
         for row in rows:
             session_id = (row.object_key or "").partition("/")[2]
             assert row.params is not None  # _waiting_rows keeps rows with actors
             pair = (row.user_id, row.params.actors[-1].id)
-            if pair in seen or senders.get(row.user_id, 0) >= WAITING_SENDERS_MAX:
-                outcome: str | None = "done"
+            if "group" in row.params.flags:
+                outcome = (
+                    await self._groups.waiting_playable(app, row, session_id, cutoff)
+                    if self._groups is not None
+                    else "done"
+                )
+            elif pair in seen or senders.get(row.user_id, 0) >= WAITING_SENDERS_MAX:
+                outcome = "done"
             else:
                 seen.add(pair)
                 senders[row.user_id] = senders.get(row.user_id, 0) + 1

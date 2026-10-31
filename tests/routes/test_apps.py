@@ -974,16 +974,71 @@ async def test_invitable_lists_the_sheet_and_the_caps(client, fed_svc):
         "household_name": "Brookside",
     }
     counts = {"open": 2, "max_open": 10, "today": 3, "max_per_day": 30}
-    fed_svc.list_invitable.return_value = [person]
+    spaces = [{"space_id": "s1", "name": "Family", "people": [0]}]
+    fed_svc.invite_sheet.return_value = ([person], spaces)
     fed_svc.invite_counts.return_value = counts
     r = await client.get(
         "/api/apps/com.example.hello/invitable", headers=_auth(client._tok)
     )
     assert r.status == 200
-    assert await r.json() == {"people": [person], "invites": counts}
-    fed_svc.list_invitable.assert_awaited_once_with(
+    assert await r.json() == {"people": [person], "spaces": spaces, "invites": counts}
+    fed_svc.invite_sheet.assert_awaited_once_with(
         app_id="com.example.hello", self_user_id=client._uid
     )
+
+
+async def _space_with(db, sid: str, name: str, seats: dict[str, str], kind="private"):
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key, space_type, join_mode, allow_subscribers)"
+        " VALUES(?, ?, 'inst', 'admin', ?, ?, 'invite_only', 1)",
+        (sid, name, "ab" * 32, kind),
+    )
+    for user_id, role in seats.items():
+        await db.enqueue(
+            "INSERT INTO space_members(space_id, user_id, role) VALUES(?, ?, ?)",
+            (sid, user_id, role),
+        )
+
+
+async def test_invitable_offers_the_callers_spaces_to_pick_from(client):
+    """The real service: spaces the caller writes in, each naming the
+    people of the sheet who write there too (indexes into ``people``)."""
+    await _seed_installed_enabled_app(client._db, capabilities=("storage", "people"))
+    await _seed_member(client._db)  # bob-id
+    await _seed_second_user(client._db)  # carol-id
+    me = client._uid
+    await _space_with(
+        client._db,
+        "s-fam",
+        "Family",
+        {me: "owner", "bob-id": "member", "carol-id": "subscriber"},
+    )
+    await _space_with(
+        client._db,
+        "s-world",
+        "World",
+        {me: "member", "bob-id": "member"},
+        kind="global",
+    )
+    await _space_with(
+        client._db,
+        "s-read",
+        "Read only",
+        {me: "subscriber", "bob-id": "member"},
+        kind="public",
+    )
+    r = await client.get(
+        "/api/apps/com.example.hello/invitable", headers=_auth(client._tok)
+    )
+    assert r.status == 200
+    body = await r.json()
+    refs = [p["user_ref"] for p in body["people"]]
+    assert sorted(refs) == ["bob-id", "carol-id"]
+    assert body["spaces"] == [
+        {"space_id": "s-fam", "name": "Family", "people": [refs.index("bob-id")]}
+    ]
+    assert body["invites"]["open"] == 0
 
 
 async def test_invitable_requires_auth(client):
@@ -2666,6 +2721,7 @@ async def test_a_route_refuses_an_app_without_its_permission(
     for name in (
         "list_contacts",
         "list_invitable",
+        "invite_sheet",
         "list_peers",
         "open_session",
         "send_message",
@@ -2684,6 +2740,7 @@ async def test_a_route_lets_an_app_with_its_permission_through(
     await _seed_installed_enabled_app(client._db, capabilities=(permission,))
     fed_svc.list_contacts.return_value = []
     fed_svc.list_invitable.return_value = []
+    fed_svc.invite_sheet.return_value = ([], [])
     fed_svc.invite_counts.return_value = {}
     fed_svc.list_peers.return_value = []
     fed_svc.open_session.return_value = "s1"
@@ -2828,6 +2885,7 @@ async def test_uninstall_preview_counts_what_is_lost(client):
         "told": ["Ben · Familie Okafor"],
         "told_more": 0,
         "untold": 0,
+        "tables": 0,
     }
 
 

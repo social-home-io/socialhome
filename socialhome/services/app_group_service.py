@@ -1,7 +1,8 @@
 """AppGroupService — group sessions ("tables") for Social Home Apps (v_76).
 
-A table seats 2–30 people (up to :data:`GROUP_PICK_MAX_PLAYERS` when opened
-by picking people, the only way in until space tables, v_77). Its **hub**
+A table seats 2–30 people — when opened by picking people (the only way in
+until space tables, v_77) up to the app's own ``players.max``, at most
+:data:`GROUP_MAX_PLAYERS` (owner decision D2). Its **hub**
 — the household of the person who opened it — keeps the roster
 (:class:`~socialhome.domain.app_group.GroupSession`) and is the only
 household the others talk to about it; every other household with a
@@ -58,6 +59,7 @@ import logging
 import re
 from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 from weakref import WeakValueDictionary
@@ -83,11 +85,11 @@ from ..domain.app_group import (
     GROUP_LOBBY,
     GROUP_LOBBY_DAYS,
     GROUP_LOBBY_DEFAULT_DAYS,
+    GROUP_MAX_PLAYERS,
     GROUP_MESSAGE_MAX_BYTES,
     GROUP_MIRROR_GRACE_SECONDS,
     GROUP_MIRRORS_PER_HUB_MAX,
     GROUP_OPEN_TABLES_MAX,
-    GROUP_PICK_MAX_PLAYERS,
     GROUP_PLAYING,
     GROUP_ROSTER_EVERY_SECONDS,
     GROUP_ROSTER_MAX,
@@ -144,6 +146,8 @@ from ..domain.apps import (
 from ..domain.events import (
     AppChallengeEnded,
     AppChallengeReceived,
+    AppTableJoined,
+    AppTableStarted,
     AppTurn,
     AppTurnsSeen,
     UserBlocked,
@@ -170,6 +174,7 @@ from .protection_gate import ProtectionGateMixin
 if TYPE_CHECKING:
     from ..domain.apps import InstalledApp
     from ..domain.events import AppUninstalled, DomainEvent
+    from ..domain.notification import Notification
     from ..domain.user import User
     from ..infrastructure.event_bus import EventBus
     from ..infrastructure.key_manager import KeyManager
@@ -201,6 +206,19 @@ def _seat_key_ad(session_id: str) -> bytes:
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _others(raw: object) -> int:
+    """The ``others`` count of an inbound invite (how many more people the
+    hub asked) — the hub's word, so taken only as a whole number within a
+    table's seats; anything else reads as ``0`` (no count)."""
+    if (
+        isinstance(raw, int)
+        and not isinstance(raw, bool)
+        and 0 <= raw < GROUP_MAX_PLAYERS
+    ):
+        return raw
+    return 0
 
 
 #: :meth:`AppGroupService._open` found nothing it could open.
@@ -443,10 +461,21 @@ class AppGroupService(ProtectionGateMixin):
         return self.view(table, user, row)
 
     async def invite_usage(self, app_id: str, user_id: str) -> tuple[int, int]:
-        """(open, today): the people *user_id*'s tables in *app_id* invited
-        who haven't answered (tables still waiting for players), and the
-        people invited in the last 24 hours — their share of the 1:1 invite
-        caps (one per person, design 2.5)."""
+        """(open, today): *user_id*'s share of the 1:1 invite caps from the
+        tables they opened in *app_id* — **one per table, never one per
+        person picked**: a table still waiting for players with someone who
+        hasn't answered counts one open invite, a table opened in the last
+        24 hours one invite that day.
+
+        Why one per table (owner decision D2, 2026-10-31: a picked group
+        seats up to the app's ``players.max``, ≤ 30): counted per person, a
+        29-person family table would need 29 of the 10 open invites and
+        could never be sent. The table caps bound what a person can send
+        instead — :data:`GROUP_OPEN_TABLES_MAX` tables waiting and
+        :data:`GROUP_TABLES_PER_DAY_MAX` a day per app, each to people the
+        invite sheet lists (this household's and paired households'
+        people only) — and every receiver keeps at most
+        :data:`GROUP_MIRRORS_PER_HUB_MAX` open tables from one hub."""
         user = await self._user_repo.get_by_user_id(user_id)
         if user is None:
             return 0, 0
@@ -459,10 +488,10 @@ class AppGroupService(ProtectionGateMixin):
             user.username,
             since=(now - timedelta(seconds=PENDING_SESSION_TTL_SECONDS)).isoformat(),
         ):
-            if t.state == GROUP_LOBBY:
-                open_ += t.pending_invites
+            if t.state == GROUP_LOBBY and t.pending_invites:
+                open_ += 1
             if t.created_at >= day_cut:
-                today += t.invited_total
+                today += 1
         return open_, today
 
     # ─── Opening a table (the invite sheet) ───────────────────────────
@@ -482,12 +511,13 @@ class AppGroupService(ProtectionGateMixin):
         :meth:`AppFederationService.list_invitable` — and invite them.
 
         The opener is the host (seat 1). ``max_players`` defaults to the
-        app's (at most :data:`GROUP_PICK_MAX_PLAYERS`); the picked people
-        plus the host must reach the app's fewest players and fit
-        ``max_players`` (:class:`AppGroupSizeError`). The table waits
-        *lobby_days* for players. Refused past the table caps
-        (:class:`AppGroupLimitError`) and the invite caps — one invite per
-        person picked (:class:`~socialhome.domain.apps.AppInviteLimitError`).
+        app's own ``players.max`` (at most :data:`GROUP_MAX_PLAYERS`, owner
+        decision D2); the picked people plus the host must reach the app's
+        fewest players and fit ``max_players`` (:class:`AppGroupSizeError`).
+        The table waits *lobby_days* for players. Refused past the table
+        caps (:class:`AppGroupLimitError`) and the invite caps — the table
+        counts as ONE invite there, however many people it asks
+        (:meth:`invite_usage`; :class:`~socialhome.domain.apps.AppInviteLimitError`).
         A person whose household runs a Social Home below v_76 is refused
         (:class:`AppGroupHouseholdTooOldError`): it would never hear of it.
         """
@@ -497,7 +527,7 @@ class AppGroupService(ProtectionGateMixin):
         host = await self._local_user(actor_user_id)
         own = self._own
         lo = app.manifest.players_min
-        hi = min(app.manifest.players_max, GROUP_PICK_MAX_PLAYERS)
+        hi = min(app.manifest.players_max, GROUP_MAX_PLAYERS)
         seats = hi if max_players is None else max_players
         picked = self._distinct(targets)
         if not lo <= seats <= hi or not lo <= len(picked) + 1 <= seats:
@@ -516,9 +546,8 @@ class AppGroupService(ProtectionGateMixin):
                 raise AppGroupHouseholdTooOldError()
         async with self._app_fed.invite_lock(app_id, actor_user_id):
             await self._check_table_caps(app_id, host.username)
-            await self._app_fed.check_invite_caps(
-                app_id, actor_user_id, adding=len(picked)
-            )
+            # One invite for the whole table (:meth:`invite_usage`).
+            await self._app_fed.check_invite_caps(app_id, actor_user_id, adding=1)
             now = _now()
             stamp = now.isoformat()
             roster = [
@@ -563,7 +592,9 @@ class AppGroupService(ProtectionGateMixin):
             if entry.state != SEAT_INVITED:
                 continue
             if entry.instance == own:
-                await self._invite_local(table, app, entry, host, actor_user_id)
+                await self._invite_local(
+                    table, app, entry, host, actor_user_id, others=others
+                )
             else:
                 await self._send(
                     entry.instance,
@@ -670,9 +701,12 @@ class AppGroupService(ProtectionGateMixin):
         entry: GroupSeat,
         host: User,
         host_user_id: str,
+        *,
+        others: int,
     ) -> None:
         """Someone in the hub's own household was picked: their invite
-        waits in Needs you (age gate first, as for a 1:1 invite)."""
+        waits in Needs you (age gate first, as for a 1:1 invite) —
+        "… invited you and *others* others"."""
         user = await self._user_repo.get(entry.user)
         if user is None:
             return
@@ -688,6 +722,7 @@ class AppGroupService(ProtectionGateMixin):
                 to_user_id=user.user_id,
                 from_display=host.display_name,
                 from_user_id=host_user_id,
+                others=others,
             )
         )
 
@@ -956,7 +991,77 @@ class AppGroupService(ProtectionGateMixin):
             self._schedule_roster(table)
         await self._recheck_local(table)
         await self._push(table)
+        await self._tell_host_joined(table, instance, user)
         return table
+
+    async def _tell_host_joined(
+        self, table: GroupSession, instance: str, user: str
+    ) -> None:
+        """The host person — when they are one of this household's people —
+        hears who joined (:class:`AppTableJoined`, design 3.7): one row per
+        game, ``can_start`` once enough players are in."""
+        if table.host_instance != self._own or table.is_host(instance, user):
+            return
+        host = await self._user_repo.get(table.host_user)
+        joiner = table.entry(instance, user)
+        if host is None or joiner is None:
+            return
+        others = sum(
+            1
+            for e in table.seated
+            if not e.is_person(instance, user) and not table.is_host(e.instance, e.user)
+        )
+        await self._emit(
+            AppTableJoined(
+                app_id=table.app_id,
+                session_id=table.session_id,
+                to_user_id=host.user_id,
+                from_display=await self._label(joiner),
+                from_user_id=await self._person_id(joiner),
+                others=others,
+                can_start=table.can_start,
+            )
+        )
+
+    async def _label(self, entry: GroupSeat) -> str:
+        """*entry*'s name as this household shows it: with their household
+        for someone from another one ("Ben · Familie Okafor")."""
+        if entry.instance == self._own:
+            return entry.name
+        household = entry.household_name or await self._app_fed.household_name(
+            entry.instance
+        )
+        return with_household(entry.name, household)
+
+    async def _tell_started(self, table: GroupSession) -> None:
+        """*table* went from waiting to playing: each of this household's
+        people seated there — but the host person, who pressed Start —
+        hears it (:class:`AppTableStarted`, design 3.7)."""
+        host = table.entry(table.host_instance, table.host_user)
+        if host is None:
+            return
+        name = await self._label(host)
+        host_id = await self._person_id(host)
+        others = max(0, len(table.seated) - 2)
+        for person, row in await self._local_people(table):
+            mine = table.entry(self._own, person.username)
+            if (
+                row.state != SESSION_ACTIVE
+                or mine is None
+                or mine.state != SEAT_SEATED
+                or table.is_host(self._own, person.username)
+            ):
+                continue
+            await self._emit(
+                AppTableStarted(
+                    app_id=table.app_id,
+                    session_id=table.session_id,
+                    to_user_id=person.user_id,
+                    from_display=name,
+                    from_user_id=host_id,
+                    others=others,
+                )
+            )
 
     async def _hub_leave(
         self, session_id: str, instance: str, user: str, *, declined: bool
@@ -1034,6 +1139,7 @@ class AppGroupService(ProtectionGateMixin):
         # the start too (else their copy would run out as a lobby).
         await self._broadcast(table, VERB_START, states=(SEAT_SEATED, SEAT_INVITED))
         await self._push(table)
+        await self._tell_started(table)
         return table
 
     async def _hub_remove(
@@ -2040,7 +2146,15 @@ class AppGroupService(ProtectionGateMixin):
         allowed to reach other households, the age gate, the host a known
         person of the sending household, nobody at the table the invitee
         can't play with, a seat id this person has no row for, and at most
-        :data:`GROUP_MIRRORS_PER_HUB_MAX` open tables from that hub."""
+        :data:`GROUP_MIRRORS_PER_HUB_MAX` open tables from that hub.
+
+        For an app this household doesn't have, or turned off (D10), the
+        invite waits for its person instead ("Ask an admin";
+        :meth:`AppFederationService.keep_group_waiting` — the same rules,
+        the catalog's name and age gate): this household keeps its copy of
+        the table (bounded as above) so the table's end ends the row, and
+        once the app is here it becomes a Join (:meth:`waiting_playable`).
+        Nothing goes back to the hub: it never learns the app is missing."""
         p = event.payload
         hub = event.from_instance
         to_user, from_user = p.get("to_user"), p.get("from_user")
@@ -2057,7 +2171,6 @@ class AppGroupService(ProtectionGateMixin):
             not table.is_open
             or table.host_instance != hub
             or table.host_user != from_user
-            or table.max_players > GROUP_PICK_MAX_PLAYERS
         ):
             return
         await self._check_seat_keys(table)
@@ -2067,12 +2180,23 @@ class AppGroupService(ProtectionGateMixin):
         if user is None or not user.is_active():
             return
         app = await self._app_repo.get(app_id)
-        if (
-            app is None
-            or not app.enabled
-            or PERMISSION_FEDERATION not in app.permissions
-            or not app.manifest.tables
-        ):
+        others = _others(p.get("others"))
+        if app is not None and not app.manifest.tables:
+            log.info("app_group: invite for app %r without tables dropped", app_id)
+            return
+        if app is None or not app.enabled:
+            await self._app_fed.keep_group_waiting(
+                app_id,
+                app,
+                session_id,
+                from_instance=hub,
+                to_user=to_user,
+                from_user=from_user,
+                others=others,
+                keep=partial(self._keep_waiting_copy, table, user, known),
+            )
+            return
+        if PERMISSION_FEDERATION not in app.permissions:
             log.info("app_group: invite for app %r not usable here dropped", app_id)
             return
         if not await self._app_fed.age_filter_recipients(
@@ -2104,9 +2228,106 @@ class AppGroupService(ProtectionGateMixin):
                     await self._app_fed.household_name(hub),
                 ),
                 from_user_id=host.user_id,
+                others=others,
             )
         )
         await self._push(await self._repo.get(session_id) or table)
+
+    async def _keep_waiting_copy(
+        self, table: GroupSession, user: User, known: GroupSession | None
+    ) -> bool:
+        """The table's last word on an invite that waits for its app (D10):
+        nobody at the table *user* can't play with, and this household's
+        copy of the table kept — at most :data:`GROUP_MIRRORS_PER_HUB_MAX`
+        open ones from that hub."""
+        if not await self._may_play(user, table):
+            log.info(
+                "app_group: invite for %s dropped by its household", table.session_id
+            )
+            return False
+        hub = table.hub_instance
+        async with self._lock(f"hub:{hub}"):
+            if (
+                known is None
+                and await self._repo.count_open_from(hub) >= GROUP_MIRRORS_PER_HUB_MAX
+            ):
+                log.warning("app_group: too many open tables from %s", hub)
+                return False
+            await self._repo.save_newer(table)
+        return True
+
+    async def waiting_playable(
+        self,
+        app: InstalledApp,
+        row: Notification,
+        session_id: str,
+        cutoff: datetime,
+    ) -> str | None:
+        """The app arrived (or was turned on): a group invite that waited
+        for it (D10, row *row*) becomes a normal group invite — a seat row,
+        "Join" in Needs you (:class:`AppChallengeReceived` with the count).
+        ``None`` when it did; else how its row ends: ``expired`` (past the
+        invite TTL, or the table's lobby ran out / it ended so), ``done``
+        (the table is gone, started without this person, or a rule no
+        longer passes — a block since, the age gate, the app without
+        ``federation`` or tables). Nothing goes to the hub either way."""
+        table = await self._repo.get(session_id)
+        if (
+            table is None
+            or table.app_id != app.app_id
+            or table.hub_instance == self._own
+        ):
+            return "done"
+        now = _now().isoformat()
+        if row.created_at < cutoff.isoformat() or (
+            table.state == GROUP_LOBBY and table.expires_at <= now
+        ):
+            return "expired"
+        if table.state == GROUP_ENDED:
+            return "expired" if table.end_reason == END_EXPIRED else "done"
+        if not table.is_open:
+            return "done"
+        assert row.params is not None  # waiting rows name their sender
+        sender = await self._user_repo.get_remote(row.params.actors[-1].id)
+        user = await self._user_repo.get_by_user_id(row.user_id)
+        if (
+            sender is None
+            or sender.deprovisioned_at is not None
+            or sender.instance_id != table.hub_instance
+            or user is None
+            or not user.is_active()
+            or PERMISSION_FEDERATION not in app.permissions
+            or not app.manifest.tables
+            or not await self._app_fed.age_filter_recipients(
+                app.app_id, [user.user_id], app=app
+            )
+            or await self._app_repo.get_pending_session(
+                app.app_id, user.user_id, session_id
+            )
+            or await self._user_repo.is_blocked(user.user_id, sender.user_id)
+            or await self._guardian_blocked(user.user_id, sender.user_id)
+            or not await self._may_play(user, table)
+        ):
+            return "done"
+        seat = dataclasses.replace(
+            self._seat_row(table, user.user_id), created_at=row.created_at
+        )
+        await self._app_repo.add_pending_session(seat)
+        await self._emit(
+            AppChallengeReceived(
+                app_id=app.app_id,
+                session_id=session_id,
+                to_user_id=user.user_id,
+                from_display=with_household(
+                    sender.display_name or sender.remote_username,
+                    await self._app_fed.household_name(table.hub_instance),
+                ),
+                from_user_id=sender.user_id,
+                others=row.params.others if row.params.others is not None else 0,
+            )
+        )
+        await self._push(table)
+        return None
 
     async def _on_snapshot(
         self, event: FederationEvent, app_id: str, mirror: GroupSession
@@ -2140,6 +2361,7 @@ class AppGroupService(ProtectionGateMixin):
             if reason in PERSON_CLOSE_REASONS:
                 await self._gone_local(table, to_user, change=str(reason))
         async with self._lock(mirror.session_id):
+            before = await self._repo.get(mirror.session_id)
             kept = await self._repo.save_newer(table)
         if kept:
             if table.state == GROUP_ENDED:
@@ -2147,6 +2369,12 @@ class AppGroupService(ProtectionGateMixin):
             else:
                 await self._recheck_local(table)
             await self._push(table)
+            if (
+                p.get("verb") == VERB_START
+                and table.state == GROUP_PLAYING
+                and (before is None or before.state == GROUP_LOBBY)
+            ):
+                await self._tell_started(table)
 
     async def _unwanted_seat(self, table: GroupSession, username: str) -> None:
         """The hub seated someone from here who no longer wants the seat
@@ -2265,6 +2493,11 @@ class AppGroupService(ProtectionGateMixin):
         for user, row in await self._local_people(table):
             if row.state == SESSION_INVITED:
                 await self._withdraw_local(table, user.username, outcome=outcome)
+        if table.hub_instance != self._own:
+            # …and so do invites that wait here for the app (D10).
+            await self._app_fed.end_waiting(
+                table.app_id, table.session_id, outcome=outcome
+            )
 
     async def _withdraw_local(
         self, table: GroupSession, username: str, *, outcome: str = "withdrawn"
@@ -2297,7 +2530,16 @@ class AppGroupService(ProtectionGateMixin):
         row = await self._app_repo.get_pending_session(
             table.app_id, user.user_id, table.session_id
         )
-        if row is None or not row.is_group:
+        if row is None:
+            # An invite that waits here for the app (D10) ends instead.
+            await self._app_fed.end_waiting(
+                table.app_id,
+                table.session_id,
+                user_id=user.user_id,
+                outcome="withdrawn" if change == CLOSE_WITHDRAWN else "done",
+            )
+            return
+        if not row.is_group:
             return
         if row.state == SESSION_INVITED:
             await self._withdraw_local(table, username)
@@ -2416,6 +2658,29 @@ class AppGroupService(ProtectionGateMixin):
                 now - timedelta(seconds=ACTIVE_SESSION_TTL_SECONDS)
             ).isoformat(),
         )
+
+    async def tables_ending(self, app_id: str) -> int:
+        """The uninstall dialog's ``tables`` (D9): group games in *app_id*
+        not over yet (waiting for players or being played) where someone
+        of this household has a place (seated or invited) together with
+        someone of another household — an uninstall ends them (a hub's
+        table, ``host_gone``) or takes this household's people out."""
+        own = self._own
+        count = 0
+        for table in await self._repo.list_for_app(app_id):
+            if table.state == GROUP_ENDED or table.space_id is not None:
+                continue
+            elsewhere = table.hub_instance != own or bool(
+                table.households(SEAT_SEATED, SEAT_INVITED) - {own}
+            )
+            if elsewhere and any(
+                row.is_group
+                for row in await self._app_repo.list_session_rows(
+                    app_id, table.session_id
+                )
+            ):
+                count += 1
+        return count
 
     async def on_app_uninstalled(self, event: AppUninstalled) -> None:
         """The app is gone here (its people's rows went with it): a table

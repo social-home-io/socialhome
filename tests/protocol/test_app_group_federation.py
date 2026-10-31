@@ -9,8 +9,8 @@ The rules these tests encode, over three households with real SQLite:
 * The hub seats only people it invited, each only from their own household;
   it acts on start / remove / close only from the host person's household.
 * Who else was invited never travels; a ``group_*`` verb reaches only a
-  household at v_76 and is taken only from one; an invite past the sheet's
-  bound, for a space, or naming another host is dropped.
+  household at v_76 and is taken only from one; an invite past the 30
+  seats, for a space, or naming another host is dropped.
 * A group invite can't re-point a session id a person already has.
 * Every ``group_*`` message rides ``APP_SESSION`` — the sealed event path —
   and carries only the fields the table needs.
@@ -22,6 +22,7 @@ import pytest
 
 from socialhome.domain.app_group import SEAT_INVITED, SEAT_REMOVED, SEAT_SEATED
 from socialhome.domain.apps import AppPendingSession
+from socialhome.domain.events import AppChallengeReceived
 from tests.app_group_network import APP, Network, quiz_app
 
 pytestmark = pytest.mark.security
@@ -243,7 +244,7 @@ async def test_an_invite_out_of_bounds_is_dropped(net):
     sid = await _open(net)
     wire = (await hub.group_repo.get(sid)).to_wire()
     cases = [
-        _invite(wire, sid="a" * 32, max=11),  # past the sheet's 10
+        _invite(wire, sid="a" * 32, max=31),  # past GROUP_MAX_PLAYERS
         _invite(wire, sid="b" * 32, space_id="sp1"),  # space tables: v_77
         _invite(wire, sid="c" * 32, from_user="cleo"),  # not the host
         _invite(wire, sid="d" * 32, state="ended", end_reason="cancelled"),
@@ -319,3 +320,22 @@ async def test_mirrors_from_one_hub_are_bounded(net, monkeypatch):
     held = [await b.group_repo.get(f"{n}" * 32) for n in range(3)]
     # One table from before plus one more: the third is dropped.
     assert [h is not None for h in held] == [True, False, False]
+
+
+async def test_the_others_count_of_an_invite_is_bounded(net):
+    """``others`` (how many more were asked) is the hub's word: a receiver
+    keeps it only as a whole number within the seats, else none (0)."""
+    hub, b = net.homes["hub"], net.homes["b"]
+    sid = await _open(net)
+    wire = (await hub.group_repo.get(sid)).to_wire()
+    for entry in wire["roster"]:
+        entry.pop("seat_key", None)
+    for n, others in enumerate((999, "lots", -1, True, 7)):
+        _forge(net, "hub", "b", {**_invite(wire, sid=f"{n}" * 32), "others": others})
+    await net.flush()
+    got = {
+        e.session_id: e.others
+        for e in b.bus.of(AppChallengeReceived)
+        if e.session_id != sid
+    }
+    assert got == {"0" * 32: 0, "1" * 32: 0, "2" * 32: 0, "3" * 32: 0, "4" * 32: 7}

@@ -70,6 +70,14 @@ def test_app_link_picks_the_app_out_on_the_apps_page():
     assert spa_route_for(links.app_link("chess")) == "/apps"
 
 
+def test_group_game_links():
+    """A group game's invite / "joined" rows open its Who's-in page; a
+    "started" row opens the app on that game."""
+    assert links.app_table_link("quiz", "t1") == "/apps/quiz/tables/t1"
+    assert links.app_game_link("quiz", "t1") == "/apps/quiz?session=t1"
+    assert links.app_game_link("quiz", "a&b") == "/apps/quiz?session=a%26b"
+
+
 def test_space_links():
     assert links.space_calendar_link("s1") == "/spaces/s1/calendar"
     assert links.space_games_link("s1") == "/spaces/s1/games"
@@ -187,6 +195,8 @@ def _builder_links() -> set[str]:
         links.task_link(_task(), "s1"),
         links.bazaar_listing_link("L1"),
         links.app_link("chess"),
+        links.app_table_link("quiz", "t1"),
+        links.app_game_link("quiz", "t1"),
         links.space_calendar_link("s1"),
         links.space_games_link("s1"),
         links.space_about_link("s1"),

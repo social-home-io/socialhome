@@ -37,16 +37,15 @@ from .errors import CodedError
 GROUP_MAX_PLAYERS: int = 30
 #: The fewest players a table takes.
 GROUP_MIN_PLAYERS: int = 2
-#: A table opened by picking people (the invite sheet) seats at most this
-#: many — the host and up to nine people picked.
-GROUP_PICK_MAX_PLAYERS: int = 10
 #: Roster entries a table may carry at all (seated, left, removed — and,
 #: on the hub only, invited / declined). Bounds a hub's snapshot.
 GROUP_ROSTER_MAX: int = 2 * GROUP_MAX_PLAYERS
 #: Tables waiting for players (``lobby``) one person hosts in one app.
 GROUP_OPEN_TABLES_MAX: int = 5
-#: New tables one person opens in one app in any 24 hours. The people
-#: invited also count against the 1:1 invite caps (one per person).
+#: New tables one person opens in one app in any 24 hours. A table also
+#: counts as ONE invite against the 1:1 invite caps (one while it waits
+#: for answers, one a day) — never one per person picked, so a big family
+#: fits one table (owner decision D2, 2026-10-31).
 GROUP_TABLES_PER_DAY_MAX: int = 10
 #: The host's own words on a table ("Bring snacks").
 GROUP_NOTE_MAX: int = 80
@@ -254,8 +253,8 @@ class AppGroupsNotSupportedError(CodedError):
 
 
 class AppGroupSizeError(CodedError):
-    """The players asked for don't fit the app (its ``players`` range) or
-    the way in (at most :data:`GROUP_PICK_MAX_PLAYERS` by picking)."""
+    """The players asked for don't fit the app (its ``players`` range, at
+    most :data:`GROUP_MAX_PLAYERS`)."""
 
     status = 422
     code = "APP_GROUP_SIZE"
@@ -490,8 +489,8 @@ class GroupSession:
 
     @property
     def invited_total(self) -> int:
-        """Everyone the host asked — what the table cost of the invite
-        caps (hub only; the host themself isn't counted)."""
+        """Everyone the host asked (hub only; the host themself isn't
+        counted)."""
         opener = self.opener_user or self.host_user
         return sum(1 for e in self.roster if not e.is_person(self.hub_instance, opener))
 

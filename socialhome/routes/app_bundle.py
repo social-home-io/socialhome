@@ -42,6 +42,7 @@ import aiofiles.os
 from aiohttp import web
 
 from ..app_keys import app_service_key, config_key, media_signer_key
+from ..domain.app_group import GROUP_MAX_PLAYERS
 from ..security import error_response
 from .base import BaseView
 from .ingress_path import trusted_ingress_path
@@ -130,6 +131,14 @@ class AppRuntimeView(BaseView):
                 "capabilities": list(app.manifest.capabilities),
                 # What the bridge lets the app call (the routes check again).
                 "permissions": list(app.permissions),
+                # Group play (v_76): how many players a game seats — the
+                # group sheet caps its picks at max − 1 — and whether the
+                # app can be played as a group game at all.
+                "players": {
+                    "min": app.manifest.players_min,
+                    "max": min(app.manifest.players_max, GROUP_MAX_PLAYERS),
+                },
+                "tables": app.manifest.tables,
             }
         )
 

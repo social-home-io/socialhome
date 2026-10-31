@@ -598,8 +598,12 @@ class AppUninstallPreview:
     way; ``told`` — up to :data:`UNINSTALL_NAMES_MAX` opponents who will be
     told, as the admin sees them anywhere else ("Ben · Familie Okafor"),
     ``told_more`` the rest; ``untold`` — games with a household on an
-    older Social Home (below v_72), which hears nothing about them. Counts
-    and names only: never what the games hold, nor who here plays whom.
+    older Social Home (below v_72), which hears nothing about them;
+    ``tables`` — group games (v_76) still waiting for players or being
+    played that someone here has a place at with someone of another
+    household (they end, or this household's people leave them; never
+    counted in ``games`` / ``invites``). Counts and names only: never
+    what the games hold, nor who here plays whom.
     """
 
     people: int
@@ -608,6 +612,7 @@ class AppUninstallPreview:
     told: tuple[str, ...] = ()
     told_more: int = 0
     untold: int = 0
+    tables: int = 0
 
 
 @dataclass(slots=True, frozen=True)
