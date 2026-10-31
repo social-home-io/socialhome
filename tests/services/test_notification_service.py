@@ -4483,6 +4483,29 @@ async def test_your_turn_is_one_quiet_row_per_game(stack):
     assert len(await _turn_rows(stack, a)) == 2
 
 
+async def test_your_turn_at_a_group_table_from_someone_unknown_here(stack):
+    """A player at a group table whose household this one doesn't know
+    (v_76): no actor id, the hub's name for them."""
+    stack.notif_svc.attach_app_repo(_AppRegistry({"quiz": "Quiz"}))
+    a = await stack.provision_user("anna")
+    await stack.bus.publish(
+        AppTurn(
+            app_id="quiz",
+            session_id="t1",
+            to_user_id=a.user_id,
+            from_user_id=None,
+            from_display="Cleo · Home c",
+        )
+    )
+    (row,) = await _turn_rows(stack, a)
+    assert row.title == "Your turn with Cleo · Home c in Quiz"
+    await stack.bus.publish(
+        AppTurn(app_id="quiz", session_id="t2", to_user_id=a.user_id, from_user_id=None)
+    )
+    rows = await _turn_rows(stack, a)
+    assert len(rows) == 2 and any("Someone" in r.title for r in rows)
+
+
 async def test_your_turn_pushes_only_when_games_is_set_to_push(stack):
     push = _CapturingPush()
     stack.notif_svc.attach_push_service(push)
