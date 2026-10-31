@@ -21,8 +21,6 @@ from ..domain.app_group import (
     GroupSeat,
     GroupSession,
     SeatKey,
-    GroupSeat,
-    GroupSession,
     TableCard,
 )
 
