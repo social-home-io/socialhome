@@ -22201,6 +22201,215 @@ span.sh-hlv__who { cursor: default; }
   min-width: 0;
   min-height: 40px;
 }
+/* "Apps" with the Your apps | Store switch right beside it. */
+.sh-apps-head__title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sh-space-sm) var(--sh-space-md);
+  min-width: 0;
+}
+.sh-apps-head__title .sh-page-title { margin: 0; }
+.sh-apps-tabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid var(--sh-border-strong);
+  border-radius: var(--sh-radius-full);
+  background: var(--sh-bg);
+}
+.sh-apps-tabs__tab {
+  min-height: 36px;
+  padding: 0 var(--sh-space-md);
+  border: 0;
+  border-radius: var(--sh-radius-full);
+  background: transparent;
+  color: var(--sh-text-muted);
+  font: inherit;
+  font-size: var(--sh-font-size-sm);
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color var(--sh-transition-fast), color var(--sh-transition-fast);
+}
+.sh-apps-tabs__tab:hover { color: var(--sh-text); }
+.sh-apps-tabs__tab.is-on,
+.sh-apps-tabs__tab.is-on:hover {
+  background: var(--sh-text);
+  color: var(--sh-bg);
+}
+.sh-apps-tabs__tab:focus-visible {
+  outline: 2px solid var(--sh-focus-ring);
+  outline-offset: 2px;
+}
+.sh-apps-panel { margin-top: var(--sh-space-md); }
+.sh-apps-page .sh-apps-panel > .sh-apps-section:first-child { margin-top: 0; }
+
+/* A text button ("See all in the Store", "What's new"). */
+.sh-apps-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  padding: 0 var(--sh-space-xs);
+  border: 0;
+  border-radius: var(--sh-radius-sm);
+  background: transparent;
+  color: var(--sh-primary-text);
+  font: inherit;
+  font-size: var(--sh-font-size-sm);
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.sh-apps-link:hover { text-decoration: underline; }
+.sh-apps-link:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: 2px; }
+
+.sh-nowrap { white-space: nowrap; }
+.sh-apps-page .sh-apps-list { box-shadow: var(--sh-shadow-md); }
+
+/* Facts in a row, a dot between them ("Added by Anna · 12 Oct · …"). */
+.sh-apps-row__meta--facts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px var(--sh-space-sm);
+}
+.sh-apps-row__meta--facts > * + *::before,
+.sh-store-card__meta > * + *::before {
+  content: "•";
+  margin-inline-end: var(--sh-space-sm);
+  color: var(--sh-text-muted);
+  opacity: 0.6;
+}
+.sh-apps-row__meta--facts > .sh-store-chip::before { content: none; }
+
+/* Nothing added yet (Your apps). */
+.sh-apps-none {
+  padding: var(--sh-space-lg);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  background: var(--sh-bg-tertiary);
+}
+.sh-apps-none__title {
+  margin: 0 0 var(--sh-space-xs);
+  font-family: var(--sh-font-family-display);
+  font-size: var(--sh-font-size-xl);
+}
+.sh-apps-none__text {
+  margin: 0 0 var(--sh-space-md);
+  max-width: 60ch;
+  color: var(--sh-text-muted);
+  line-height: 1.5;
+}
+
+/* Store: a card per app — 3 columns on a desktop, 2 on a tablet, 1 on a
+ * phone (the column count follows the room the content column has). */
+.sh-store-grid {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
+  gap: var(--sh-space-md);
+}
+.sh-store-grid > li { display: flex; min-width: 0; }
+.sh-store-card {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: var(--sh-space-md) var(--sh-space-md) var(--sh-space-md);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  background: var(--sh-bg-tertiary);
+  box-shadow: var(--sh-shadow-md);
+}
+.sh-store-card--picked {
+  border-color: var(--sh-primary);
+  box-shadow: 0 0 0 2px var(--sh-primary-soft), var(--sh-shadow-md);
+}
+.sh-store-card--picked:focus { outline: none; }
+.sh-store-card__head { display: flex; align-items: center; gap: var(--sh-space-md); }
+.sh-store-card__title { min-width: 0; }
+.sh-store-card__name {
+  margin: 0;
+  font-family: var(--sh-font-family-display);
+  font-size: var(--sh-font-size-lg);
+  font-weight: 600;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+.sh-store-card__pub {
+  margin: 2px 0 0;
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-text-muted);
+}
+.sh-store-card__desc {
+  margin: var(--sh-space-md) 0 0;
+  font-size: var(--sh-font-size-sm);
+  line-height: 1.5;
+}
+.sh-store-card .sh-app-perms { margin-top: var(--sh-space-sm); }
+.sh-store-card .sh-app-perms__title { color: var(--sh-text-muted); }
+.sh-store-card__foot {
+  margin-top: auto;
+  padding-top: var(--sh-space-md);
+}
+.sh-store-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sh-space-xs) var(--sh-space-sm);
+  margin: 0;
+  padding-top: var(--sh-space-sm);
+  border-top: 1px solid var(--sh-border);
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-text-muted);
+}
+.sh-store-card__fact { white-space: nowrap; }
+.sh-store-card__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sh-space-sm);
+  margin-top: var(--sh-space-sm);
+}
+.sh-store-card__actions .sh-btn { padding: 8px 16px; }
+.sh-store-card__note {
+  margin-inline-end: auto;
+  font-size: var(--sh-font-size-sm);
+  font-weight: 600;
+}
+.sh-store-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 10px;
+  border: 1px solid var(--sh-border-strong);
+  border-radius: var(--sh-radius-full);
+  font-size: var(--sh-font-size-xs);
+  font-weight: 700;
+  line-height: 1.6;
+  color: var(--sh-text);
+  white-space: nowrap;
+}
+.sh-store-chip__glyph { margin-inline-end: 4px; }
+.sh-store-chip--ok {
+  border-color: color-mix(in srgb, var(--sh-success) 45%, transparent);
+  background: color-mix(in srgb, var(--sh-success) 14%, transparent);
+  color: var(--sh-success);
+}
+.sh-store-chip--age {
+  border-color: color-mix(in srgb, var(--sh-warning) 60%, transparent);
+  background: color-mix(in srgb, var(--sh-warning) 18%, transparent);
+}
+.sh-store-chip--asks {
+  border-color: color-mix(in srgb, var(--sh-primary) 55%, transparent);
+  background: var(--sh-primary-soft);
+  color: var(--sh-primary-text);
+  font-size: var(--sh-font-size-xs);
+}
+.sh-store-sealed { margin-top: var(--sh-space-lg); }
 .sh-apps-intro {
   margin: 0 0 var(--sh-space-md);
   max-width: 60ch;
@@ -22227,7 +22436,6 @@ span.sh-hlv__who { cursor: default; }
   color: var(--sh-text-muted);
 }
 .sh-apps-section__head .sh-apps-section__title { margin: 0; }
-.sh-apps-section__count { font-weight: 600; }
 .sh-apps-note {
   margin: var(--sh-space-md) 0 0;
   font-size: var(--sh-font-size-sm);
@@ -22288,6 +22496,13 @@ span.sh-hlv__who { cursor: default; }
   color: var(--sh-text-muted);
   line-height: 1.4;
 }
+/* The More apps teaser: two lines of description, the Store has the rest. */
+.sh-apps-row__desc {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
 .sh-apps-row__update { color: var(--sh-primary-text); font-weight: 600; }
 .sh-apps-row__note { color: var(--sh-text); font-weight: 600; }
 .sh-apps-row__actions {
@@ -22343,25 +22558,6 @@ span.sh-hlv__who { cursor: default; }
   color: var(--sh-text-muted);
 }
 
-/* First run: the one featured app. */
-.sh-apps-featured {
-  display: flex;
-  gap: var(--sh-space-md) var(--sh-space-lg);
-  padding: var(--sh-space-lg);
-  border: 1px solid var(--sh-border);
-  border-radius: var(--sh-radius-lg);
-  background: var(--sh-bg-tertiary);
-  box-shadow: var(--sh-shadow-md);
-}
-.sh-apps-featured__body { flex: 1 1 auto; min-width: 0; }
-.sh-apps-featured__name {
-  margin: 0;
-  font-family: var(--sh-font-family-display);
-  font-size: var(--sh-font-size-xl);
-  line-height: 1.2;
-}
-.sh-apps-featured__desc { margin: var(--sh-space-sm) 0; line-height: 1.5; }
-.sh-apps-featured__actions,
 .sh-app-detail__actions {
   display: flex;
   align-items: center;
@@ -22733,7 +22929,6 @@ span.sh-hlv__who { cursor: default; }
   font-size: var(--sh-font-size-sm);
   line-height: 1.5;
 }
-.sh-apps-row__asks { color: var(--sh-text); font-weight: 600; }
 
 /* Uninstall (D9): what is lost, then "Turn off instead" as the default. */
 .sh-app-uninstall__title { display: flex; align-items: center; gap: var(--sh-space-sm); min-width: 0; }
@@ -22835,6 +23030,12 @@ span.sh-hlv__who { cursor: default; }
 @media (max-width: 768px) {
   .sh-app-detail__grid { grid-template-columns: minmax(0, 1fr); }
 }
+/* The page header stacks on a phone: title + switch on the left, the
+ * search full width under it. */
+@media (max-width: 640px) {
+  .sh-apps-head { align-items: stretch; }
+  .sh-apps-search { flex-basis: auto; }
+}
 @media (max-width: 560px) {
   .sh-apps-search { flex-basis: 100%; }
   .sh-apps-row { gap: var(--sh-space-sm); padding: var(--sh-space-sm) var(--sh-space-sm) var(--sh-space-sm) var(--sh-space-md); }
@@ -22843,8 +23044,9 @@ span.sh-hlv__who { cursor: default; }
   .sh-apps-row__actions .sh-btn { padding-inline: var(--sh-space-md); }
   /* An update row's two buttons go under the text. */
   .sh-apps-row--update { flex-wrap: wrap; }
+  /* …while the text stays beside the icon. */
+  .sh-apps-row--update .sh-apps-row__main { flex-basis: 0; }
   .sh-apps-row--update .sh-apps-row__actions { width: 100%; justify-content: flex-end; }
-  .sh-apps-featured,
   .sh-app-detail__hero { flex-direction: column; padding: var(--sh-space-md); gap: var(--sh-space-sm); }
   .sh-app-detail__card { padding: var(--sh-space-md); }
   .sh-app-icon--lg { width: 64px; height: 64px; }

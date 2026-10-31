@@ -1,22 +1,26 @@
 /**
- * AppsPage — one Apps page that grows with the catalog (D1, R3 §2.1).
+ * AppsPage — "Apps" with a **Your apps | Store** switch beside the title
+ * (owner's mockup, 2026-10-31).
  *
- * Top to bottom, each part only when it has something:
+ * **Your apps**, top to bottom, each part only when it has something:
  *  - **Needs you** for apps: game invites waiting for you; for admins the
  *    requests members sent ("Milo asked for Chess").
- *  - **Updates** (admins): Update, or "Needs a newer Social Home".
- *  - **In your household**: Open, who added it, and for admins a ⋯ menu
- *    (about, turn on / off, minimum age, uninstall).
- *  - **More apps**: name, one line, a rating chip only when it isn't
- *    "Everyone", and Details (the detail page holds the full trust surface
- *    and the add / ask buttons).
+ *  - **Updates** (admins): "has an update", from → to, a chip when it asks
+ *    for a new permission, What's new and Update / Review update.
+ *  - **In your household**: Open, who added it and when, Off + Turn on,
+ *    and for admins a ⋯ menu (about, turn on / off, minimum age,
+ *    uninstall). Search at 8 apps (D1).
+ *  - **More apps**: a few apps the household could add, and a way to the
+ *    Store.
  *
- * Nothing added yet (today's first run): one featured card with the three
- * permission lines and **Add to household** (admins, through the consent
- * dialog) or **Ask an admin** (members). Search appears at 8 catalog apps,
- * filter chips at 12; the layout stays the same.
+ * **Store**: search, then a card grid (3 / 2 / 1 columns) — what each
+ * app can do in Social Home's own words, who it is for, size and date,
+ * and Install (admins, through the consent dialog) or Ask an admin
+ * (members, D4). Filter chips at 12 apps.
  *
- * ``?app=<id>`` (a "new app" notification) picks that app's entry out.
+ * The view is a deep link (``?tab=store``), remembered per viewer, and
+ * ``?app=<id>`` (a "new app" notification) opens the view holding that
+ * app and picks its entry out (``appsTab.ts``).
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
 import type { ComponentChildren } from 'preact'
@@ -34,6 +38,7 @@ import {
   appsError,
   catalogError,
   catalogEnabled,
+  catalogLoaded,
   catalogSourceHost,
   loadInstalled,
   loadCatalog,
@@ -59,21 +64,19 @@ import { showToast } from '@/components/Toast'
 import { OverflowMenu, type MenuItem } from '@/components/OverflowMenu'
 import { NeedsYouSection } from '@/features/notifications/NeedsYouSection'
 import { CatalogFreshnessNote, catalogFreshnessText } from './CatalogFreshnessNote'
-import {
-  AddAppDialog,
-  AppIcon,
-  AskButton,
-  PermissionList,
-  RatingChip,
-  UpdateButton,
-  aboutPath,
-} from './AppDialogs'
-import { permissionsOf, shortDay, sizeLabel, sourceLabel, versionLabel } from './appFacts'
+import { AppIcon, RatingChip, UpdateButton, aboutPath } from './AppDialogs'
+import { permissionsOf, shortDay, versionDay } from './appFacts'
+import { AppsTabs, panelId, tabId } from './AppsTabs'
+import { pickTab, rememberTab, type AppsTab } from './appsTab'
+import { StoreCard } from './StoreCard'
 
-/** Catalog size at which the search box appears (D1). */
+/** Your apps: the household's app count at which its search box appears
+ *  (D1). The Store always has one. */
 export const SEARCH_AT = 8
-/** Catalog size at which the filter chips appear (D1). */
+/** Catalog size at which the Store's filter chips appear (D1). */
 export const FILTERS_AT = 12
+/** How many apps the "More apps" teaser on Your apps shows. */
+export const TEASER_MAX = 3
 
 /** The Needs-you rows the Apps page shows on top. */
 const APP_NEEDS: ReadonlySet<string> = new Set(['app_challenge', 'app_challenge_continue', 'app_challenge_waiting', 'app_request'])
@@ -83,13 +86,24 @@ type Filter = 'all' | 'together' | 'solo'
 export default function AppsPage() {
   useTitle(t('nav.apps'))
   const isAdmin = !!currentUser.value?.is_admin
+  const { query: q, route } = useLocation()
   // ``?app=<id>`` — a "new app" notification picks the app's entry out.
-  const picked = useLocation().query.app ?? null
+  const picked = q.app ?? null
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<Filter>('all')
+  // The view in use. ``null`` until the lists answered (the default
+  // depends on them); then pinned, so adding the household's first app
+  // from the Store doesn't throw the page over to Your apps. A new
+  // ``?tab=`` (a link) wins again.
+  const [chosen, setChosen] = useState<AppsTab | null>(null)
+  // The page asked for the household's list (``appsLoading`` is still
+  // ``false`` on the very first render, before that).
+  const [asked, setAsked] = useState(false)
+  useEffect(() => { setChosen(null) }, [q.tab])
 
   useEffect(() => {
     void loadInstalled()
+    setAsked(true)
     void loadUpdates()
     void loadCatalog()
     if (isAdmin) void loadProtectionStatus()
@@ -99,56 +113,62 @@ export default function AppsPage() {
   const entries = catalog.value
   const byId = new Map(entries.map(e => [e.app_id, e]))
   const installed = isAdmin ? installedApps.value : installedApps.value.filter(a => a.enabled)
-  const installedIds = new Set(installedApps.value.map(a => a.app_id))
-  const more = entries.filter(e => !installedIds.has(e.app_id))
+  const installedById = new Map(installedApps.value.map(a => [a.app_id, a]))
+  const more = entries.filter(e => !installedById.has(e.app_id))
+  const listed = asked && !appsLoading.value
+  const nothingAdded = listed && installedApps.value.length === 0 && !appsError.value
+  const catalogAnswered = catalogLoaded.value || !!catalogError.value || !catalogEnabled.value
+
+  const tab = chosen ?? pickTab({
+    query: q.tab,
+    picked,
+    installedIds: new Set(installed.map(a => a.app_id)),
+    catalogIds: new Set(entries.map(e => e.app_id)),
+    nothingAdded,
+  })
+  useEffect(() => {
+    if (chosen === null && !q.tab && listed && catalogAnswered) setChosen(tab)
+  }, [chosen, q.tab, listed, catalogAnswered, tab])
+  const select = (next: AppsTab) => {
+    setChosen(next)
+    rememberTab(next)
+    // Each view has its own search: a word typed in one never hides the
+    // other's list.
+    setQuery('')
+    setFilter('all')
+    // Replaces the entry (a switch isn't a page); drops ``?app=``.
+    route(`/apps?tab=${next}`, true)
+  }
+  // "See all in the Store": switch, and land on the Store tab.
+  const toStore = () => {
+    select('store')
+    setTimeout(() => document.getElementById(tabId('store'))?.focus(), 0)
+  }
 
   const needle = query.trim().toLocaleLowerCase()
   const matches = (name: string, description: string) =>
     !needle || name.toLocaleLowerCase().includes(needle) || description.toLocaleLowerCase().includes(needle)
-  const passes = (e: CatalogEntry) => {
-    const perms = permissionsOf(null, e)
-    if (filter === 'together' && !perms.includes('people')) return false
-    if (filter === 'solo' && perms.includes('people')) return false
-    const text = localized(e, lang)
-    return matches(text.name, text.description)
-  }
-  const shownInstalled = installed.filter((a) => {
-    const entry = byId.get(a.app_id)
-    const text = entry ? localized(entry, lang) : { name: a.name, description: '' }
-    return matches(text.name, text.description)
-  })
-  const shownMore = more.filter(passes)
-
-  const firstRun = installedApps.value.length === 0 && !appsLoading.value && !appsError.value
-  const featured = firstRun && !needle && filter === 'all'
-    ? (more.find(e => e.compatible !== false) ?? more[0] ?? null)
-    : null
-  const rest = shownMore.filter(e => e !== featured)
-  const showSearch = entries.length >= SEARCH_AT
+  const showSearch = tab === 'store' ? entries.length > 0 : installed.length >= SEARCH_AT
   const showFilters = entries.length >= FILTERS_AT
 
   return (
     <div class="sh-page sh-apps-page">
       <header class="sh-page-header sh-apps-head">
-        <h1 class="sh-page-title">{t('nav.apps')}</h1>
+        <div class="sh-apps-head__title">
+          <h1 class="sh-page-title">{t('nav.apps')}</h1>
+          <AppsTabs value={tab} onChange={select} />
+        </div>
         {showSearch && (
           <input
             type="search"
             class="sh-input sh-apps-search"
-            placeholder={t('apps.search_placeholder', { n: String(entries.length) })}
+            placeholder={t('apps.search_placeholder', { n: String(tab === 'store' ? entries.length : installed.length) })}
             aria-label={t('apps.search_aria')}
             value={query}
             onInput={(e) => setQuery((e.target as HTMLInputElement).value)}
           />
         )}
       </header>
-      {firstRun && (
-        <p class="sh-apps-intro">
-          {catalogSourceHost.value
-            ? t('apps.intro_operator', { host: catalogSourceHost.value })
-            : t('apps.intro')}
-        </p>
-      )}
 
       <CatalogFreshnessNote
         retrying={isAdmin && updatesChecking.value}
@@ -157,6 +177,74 @@ export default function AppsPage() {
 
       <NeedsYouSection only={APP_NEEDS} />
 
+      <div role="tabpanel" id={panelId(tab)} aria-labelledby={tabId(tab)} tabIndex={0} class="sh-apps-panel">
+        {tab === 'yours'
+          ? (
+            <YourApps
+              installed={installed.filter((a) => {
+                const entry = byId.get(a.app_id)
+                const text = entry ? localized(entry, lang) : { name: a.name, description: '' }
+                return matches(text.name, text.description ?? '')
+              })}
+              all={installed}
+              more={more}
+              byId={byId}
+              isAdmin={isAdmin}
+              picked={picked}
+              lang={lang}
+              searching={!!needle}
+              query={query.trim()}
+              onStore={toStore}
+            />
+          )
+          : (
+            <Store
+              entries={entries.filter((e) => {
+                const perms = permissionsOf(null, e)
+                if (showFilters && filter === 'together' && !perms.includes('people')) return false
+                if (showFilters && filter === 'solo' && perms.includes('people')) return false
+                const text = localized(e, lang)
+                return matches(text.name, text.description ?? '')
+              })}
+              installedById={installedById}
+              isAdmin={isAdmin}
+              picked={picked}
+              lang={lang}
+              query={query.trim()}
+              filter={showFilters ? filter : null}
+              onFilter={setFilter}
+              nothingAdded={nothingAdded}
+              total={entries.length}
+            />
+          )}
+      </div>
+    </div>
+  )
+}
+
+// ─── Your apps ───────────────────────────────────────────────────────────────
+
+function YourApps({ installed, all, more, byId, isAdmin, picked, lang, searching, query, onStore }: {
+  /** The household's apps the search lets through. */
+  installed: InstalledApp[]
+  /** All the household's apps this person sees. */
+  all: InstalledApp[]
+  /** Catalog apps the household hasn't added. */
+  more: CatalogEntry[]
+  byId: Map<string, CatalogEntry>
+  isAdmin: boolean
+  picked: string | null
+  lang: string
+  searching: boolean
+  query: string
+  onStore: () => void
+}) {
+  const teaser = more.filter(e => e.compatible !== false).slice(0, TEASER_MAX)
+  // The household has no apps at all (a member's list leaves out apps
+  // that are off, so this asks the whole list).
+  const empty = installedApps.value.length === 0 && !appsLoading.value && !appsError.value
+  return (
+    <>
       {isAdmin && updates.value.length > 0 && (
         <UpdatesSection list={updates.value} byId={byId} lang={lang} />
       )}
@@ -171,14 +259,14 @@ export default function AppsPage() {
         </div>
       )}
 
-      {shownInstalled.length > 0 && (
+      {installed.length > 0 && (
         <section class="sh-apps-section" aria-labelledby="sh-apps-h-household">
           <div class="sh-apps-section__head">
             <h2 class="sh-apps-section__title" id="sh-apps-h-household">{t('apps.section.household')}</h2>
             {isAdmin && <CheckUpdatesButton />}
           </div>
           <ul class="sh-apps-list">
-            {shownInstalled.map(app => (
+            {installed.map(app => (
               <InstalledRow
                 key={app.app_id}
                 app={app}
@@ -193,43 +281,108 @@ export default function AppsPage() {
         </section>
       )}
 
-      {featured && (
-        <section class="sh-apps-section" aria-labelledby="sh-apps-h-first">
-          <h2 class="sh-apps-section__title" id="sh-apps-h-first">{t('apps.section.nothing_yet')}</h2>
-          <FeaturedCard entry={featured} isAdmin={isAdmin} lang={lang} />
+      {searching && installed.length === 0 && all.length > 0 && (
+        <p class="sh-apps-empty">{t('apps.search_empty', { query })}</p>
+      )}
+
+      {empty && (
+        <section class="sh-apps-section sh-apps-none" aria-labelledby="sh-apps-h-none">
+          <h2 class="sh-apps-none__title" id="sh-apps-h-none">{t('apps.section.nothing_yet')}</h2>
+          <p class="sh-apps-none__text">
+            {catalogSourceHost.value
+              ? t('apps.intro_operator', { host: catalogSourceHost.value })
+              : t('apps.intro')}
+          </p>
+          {catalogEnabled.value && <Button onClick={onStore}>{t('apps.store.browse')}</Button>}
         </section>
       )}
 
-      {(rest.length > 0 || (showFilters && filter !== 'all')) && (
+      {!searching && teaser.length > 0 && !empty && (
         <section class="sh-apps-section" aria-labelledby="sh-apps-h-more">
-          <h2 class="sh-apps-section__title" id="sh-apps-h-more">
-            {t('apps.section.more')}
-            <span class="sh-apps-section__count"> · {rest.length}</span>
-          </h2>
-          {showFilters && <FilterChips value={filter} onChange={setFilter} />}
-          {rest.length > 0
-            ? (
-              <ul class="sh-apps-list">
-                {rest.map(e => <MoreRow key={e.app_id} entry={e} isAdmin={isAdmin} lang={lang} />)}
-              </ul>
-            )
-            : <p class="sh-muted">{t('apps.filter_empty')}</p>}
+          <div class="sh-apps-section__head">
+            <h2 class="sh-apps-section__title" id="sh-apps-h-more">{t('apps.section.more')}</h2>
+            <button type="button" class="sh-apps-link" onClick={onStore}>
+              {t('apps.store.see_all')}
+            </button>
+          </div>
+          <ul class="sh-apps-list">
+            {teaser.map(e => <MoreRow key={e.app_id} entry={e} isAdmin={isAdmin} lang={lang} />)}
+          </ul>
         </section>
       )}
 
-      {needle && shownInstalled.length === 0 && shownMore.length === 0 && (
-        <p class="sh-apps-empty">{t('apps.search_empty', { query: query.trim() })}</p>
-      )}
+      {/* The app list turned off or failing: why there is nothing to add. */}
+      <CatalogState empty={false} quiet />
 
-      <CatalogState empty={entries.length === 0 && installedApps.value.length === 0} />
-
-      {firstRun && entries.length > 0 && entries.length < 4 && (
-        <p class="sh-apps-note">{t('apps.more_on_the_way')}</p>
-      )}
-      {isAdmin && householdHasProtectedMinor.value && (installed.length > 0 || entries.length > 0) && (
+      {isAdmin && householdHasProtectedMinor.value && all.length > 0 && (
         <p class="sh-apps-note">{t('apps.protected_note')}</p>
       )}
-    </div>
+    </>
+  )
+}
+
+// ─── Store ───────────────────────────────────────────────────────────────────
+
+function Store({ entries, installedById, isAdmin, picked, lang, query, filter, onFilter, nothingAdded, total }: {
+  /** The catalog apps search and filter let through. */
+  entries: CatalogEntry[]
+  installedById: Map<string, InstalledApp>
+  isAdmin: boolean
+  picked: string | null
+  lang: string
+  query: string
+  /** ``null``: too few apps for filter chips. */
+  filter: Filter | null
+  onFilter: (f: Filter) => void
+  nothingAdded: boolean
+  total: number
+}) {
+  return (
+    <>
+      {nothingAdded && total > 0 && (
+        <p class="sh-apps-intro">
+          {catalogSourceHost.value
+            ? t('apps.intro_operator', { host: catalogSourceHost.value })
+            : t('apps.intro')}
+        </p>
+      )}
+      {filter && <FilterChips value={filter} onChange={onFilter} />}
+      {entries.length > 0 && (
+        <ul class="sh-store-grid" aria-label={t('apps.tab.store')}>
+          {entries.map(e => (
+            <li key={e.app_id}>
+              <StoreCard
+                entry={e}
+                installed={installedById.get(e.app_id) ?? null}
+                isAdmin={isAdmin}
+                lang={lang}
+                picked={e.app_id === picked}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
+      {total > 0 && entries.length === 0 && (
+        query
+          ? <p class="sh-apps-empty">{t('apps.search_empty', { query })}</p>
+          : <p class="sh-apps-empty">{t('apps.filter_empty')}</p>
+      )}
+
+      <CatalogState empty={total === 0} />
+
+      {nothingAdded && total > 0 && total < 4 && (
+        <p class="sh-apps-note">{t('apps.more_on_the_way')}</p>
+      )}
+      {/* The intro already says it on a first visit. */}
+      {total > 0 && !nothingAdded && (
+        <p class="sh-apps-note sh-store-sealed">
+          <span aria-hidden="true">🔒 </span>{t('apps.store.sealed')}
+        </p>
+      )}
+      {isAdmin && householdHasProtectedMinor.value && total > 0 && (
+        <p class="sh-apps-note">{t('apps.protected_note')}</p>
+      )}
+    </>
   )
 }
 
@@ -241,8 +394,13 @@ async function retryCatalog(): Promise<void> {
 }
 
 /** Catalog loading / failed / turned off / empty — said once, under the lists. */
-function CatalogState({ empty }: { empty: boolean }) {
+function CatalogState({ empty, quiet = false }: {
+  empty: boolean
+  /** Say nothing while it loads (Your apps doesn't wait on it). */
+  quiet?: boolean
+}) {
   if (catalogLoading.value && catalog.value.length === 0) {
+    if (quiet) return null
     return <div class="sh-apps-loading" aria-live="polite">{t('apps.catalog_loading')}</div>
   }
   if (catalogError.value && catalog.value.length === 0) {
@@ -318,26 +476,24 @@ function UpdateRow({ update, name, icon }: { update: AppUpdate, name: string, ic
       <AppIcon src={icon} />
       <div class="sh-apps-row__main">
         <h3 class="sh-apps-row__name">{t('apps.update_title', { name })}</h3>
-        <p class="sh-apps-row__meta">
-          {versionLabel(update.current_version)} → {versionLabel(update.latest_version)}
+        <p class="sh-apps-row__meta sh-apps-row__meta--facts">
+          <span class="sh-nowrap">{versionDay(update.current_version)} → {versionDay(update.latest_version)}</span>
           {update.compatible !== false && (
-            <>
-              {' · '}
-              {asks > 0
-                ? <span class="sh-apps-row__asks">{t(isOne(asks) ? 'apps.update_new_permission_one' : 'apps.update_new_permissions', { n: String(asks) })}</span>
-                : t('apps.update_same_permissions')}
-            </>
+            asks > 0
+              ? <span class="sh-store-chip sh-store-chip--asks">{t(isOne(asks) ? 'apps.update_new_permission_one' : 'apps.update_new_permissions', { n: String(asks) })}</span>
+              : <span>{t('apps.update_same_permissions')}</span>
           )}
         </p>
       </div>
       <div class="sh-apps-row__actions">
-        <Button
-          variant="secondary"
+        <button
+          type="button"
+          class="sh-apps-link"
           onClick={() => route(`${aboutPath(update.app_id)}#whats-new`)}
           aria-label={t('apps.whats_new_named', { name })}
         >
           {t('apps.whats_new')}
-        </Button>
+        </button>
         {update.compatible === false
           ? <span class="sh-apps-row__note">{t('apps.needs_newer')}</span>
           : <UpdateButton appId={update.app_id} name={name} update={update} />}
@@ -403,10 +559,11 @@ function InstalledRow({ app, entry, isAdmin, picked, update, lang }: {
           {isAdmin && !app.enabled && <span class="sh-chip sh-chip--muted">{t('apps.off')}</span>}
           <RatingChip minAge={app.min_age} />
         </h3>
-        {(added || update) && (
-          <p class="sh-apps-row__meta">
-            {added}
-            {isAdmin && update && <>{added && ' · '}<span class="sh-apps-row__update">{t('apps.update_ready')}</span></>}
+        {(added || update || !app.enabled) && (
+          <p class="sh-apps-row__meta sh-apps-row__meta--facts">
+            {added && <span>{added}</span>}
+            {!app.enabled && <span>{t('apps.off_kept')}</span>}
+            {isAdmin && update && <span class="sh-apps-row__update">{t('apps.update_ready')}</span>}
           </p>
         )}
       </div>
@@ -739,52 +896,5 @@ function MoreRow({ entry, isAdmin, lang }: { entry: CatalogEntry, isAdmin: boole
         </Button>
       </div>
     </li>
-  )
-}
-
-/** First run: the one app, with what it can do and the way to add it. */
-function FeaturedCard({ entry, isAdmin, lang }: { entry: CatalogEntry, isAdmin: boolean, lang: string }) {
-  const { route } = useLocation()
-  const [consentOpen, setConsentOpen] = useState(false)
-  const text = localized(entry, lang)
-  const perms = permissionsOf(null, entry)
-  const size = sizeLabel(entry.bundle_size)
-  return (
-    <div class="sh-apps-featured">
-      <AppIcon src={entry.icon_url} size="lg" />
-      <div class="sh-apps-featured__body">
-        <h3 class="sh-apps-featured__name">{text.name}</h3>
-        <p class="sh-app-meta">
-          {sourceLabel(catalogSourceHost.value)}
-          <RatingChip minAge={entry.min_age} />
-          {size && <> · {size}</>}
-        </p>
-        {text.description && <p class="sh-apps-featured__desc">{text.description}</p>}
-        <PermissionList perms={perms} name={text.name} />
-        <div class="sh-apps-featured__actions">
-          {entry.compatible === false
-            ? <span class="sh-apps-row__note">{t('apps.needs_newer')}</span>
-            : isAdmin
-              ? <Button onClick={() => setConsentOpen(true)}>{t('apps.add_to_household')}</Button>
-              : <AskButton entry={entry} name={text.name} variant="primary" />}
-          <Button
-            variant="secondary"
-            onClick={() => route(aboutPath(entry.app_id))}
-            aria-label={t('apps.details_named', { name: text.name })}
-          >
-            {t('apps.details')}
-          </Button>
-        </div>
-      </div>
-      {isAdmin && (
-        <AddAppDialog
-          entry={entry}
-          name={text.name}
-          permissions={perms}
-          open={consentOpen}
-          onClose={() => setConsentOpen(false)}
-        />
-      )}
-    </div>
   )
 }
