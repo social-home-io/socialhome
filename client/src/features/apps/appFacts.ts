@@ -63,12 +63,29 @@ export function versionLabel(version: string): string {
   return d.toLocaleDateString(formatLocale(), { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' })
 }
 
-/** An ISO timestamp as a short day ("12 Oct"). */
+/** Glue a short date's words with no-break spaces, so "31 Oct" never
+ *  wraps into "31" / "Oct" in a tight row. */
+function unbroken(text: string): string {
+  return text.replace(/\s/g, ' ')
+}
+
+/** An ISO timestamp as a short day ("12 Oct"), never split over lines. */
 export function shortDay(iso: string | null | undefined): string {
   if (!iso) return ''
   const d = new Date(iso)
   if (Number.isNaN(d.getTime())) return ''
-  return d.toLocaleDateString(formatLocale(), { day: 'numeric', month: 'short' })
+  return unbroken(d.toLocaleDateString(formatLocale(), { day: 'numeric', month: 'short' }))
+}
+
+/** A CalVer version as a short day ("28 Oct"; with the year when it isn't
+ *  this year), never split over lines; anything else as ``v1.2.3``. */
+export function versionDay(version: string, now: Date = new Date()): string {
+  const m = /^(\d{4})\.(\d{1,2})\.(\d{1,2})(?:\.\d+)?$/.exec(version)
+  if (!m) return `v${version}`
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])))
+  if (Number.isNaN(d.getTime())) return `v${version}`
+  const year = d.getUTCFullYear() === now.getFullYear() ? undefined : 'numeric'
+  return unbroken(d.toLocaleDateString(formatLocale(), { day: 'numeric', month: 'short', year, timeZone: 'UTC' }))
 }
 
 /** Bytes as "16 KB" / "1.2 MB". */

@@ -45,7 +45,7 @@ vi.mock('@/store/apps', async (orig) => {
     installedApps: h.installedApps, catalog: h.catalog, updates: h.updates,
     updatesChecking: h.updatesChecking, appsLoading: h.appsLoading,
     catalogLoading: h.catalogLoading, appsError: h.appsError, catalogError: h.catalogError,
-    catalogEnabled: h.catalogEnabled, catalogSourceHost: h.catalogSourceHost,
+    catalogEnabled: h.catalogEnabled, catalogSourceHost: h.catalogSourceHost, catalogLoaded: { value: true },
     householdHasProtectedMinor: h.householdHasProtectedMinor,
     catalogFreshness: h.catalogFreshness,
     catalogReached: (f = h.catalogFreshness.value) => !f.stale && !f.failed,
@@ -77,7 +77,7 @@ vi.mock('preact-iso', async (orig) => ({
   useLocation: () => ({ route: nav.route, path: '/apps', url: '/apps', query: nav.query }),
 }))
 
-import AppsPage, { FILTERS_AT, SEARCH_AT } from './AppsPage'
+import AppsPage, { FILTERS_AT, SEARCH_AT, TEASER_MAX } from './AppsPage'
 
 function makeApp(over: Partial<any> = {}) {
   return {
@@ -110,6 +110,7 @@ function manyEntries(n: number) {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  localStorage.clear()
   installedApps.value = [makeApp()]
   catalog.value = [makeEntry(), makeEntry({ app_id: 'notes', name: 'Notes', description: 'Take notes', i18n: {}, permissions: ['storage'], min_age: 13 })]
   updates.value = []
@@ -124,116 +125,281 @@ beforeEach(() => {
   h.locale.value = 'en'
 })
 
-describe('One Apps page (D1)', () => {
-  it('has no tabs: your apps, then More apps with Details', () => {
-    const { queryByRole, getByRole, getByText } = render(<AppsPage />)
-    expect(queryByRole('tablist')).toBeNull()
+/** Render the page on the Store tab. */
+const renderStore = () => {
+  nav.query = { tab: 'store' }
+  return render(<AppsPage />)
+}
+const card = (r: ReturnType<typeof render>, name: string) =>
+  r.getByRole('article', { name })
+
+describe('Your apps | Store', () => {
+  it('"Apps" has the switch beside it; Your apps first when the household has apps', () => {
+    const { getByRole } = render(<AppsPage />)
+    const tabs = getByRole('tablist', { name: 'Apps' })
+    expect(tabs.closest('.sh-apps-head__title')?.querySelector('h1')?.textContent).toBe('Apps')
+    expect(getByRole('tab', { name: 'Your apps' }).getAttribute('aria-selected')).toBe('true')
+    expect(getByRole('tabpanel', { name: 'Your apps' })).toBeTruthy()
+  })
+
+  it('a click switches, deep-links the view and remembers it', () => {
+    const { getByRole } = render(<AppsPage />)
+    fireEvent.click(getByRole('tab', { name: 'Store' }))
+    expect(nav.route).toHaveBeenCalledWith('/apps?tab=store', true)
+    expect(getByRole('tabpanel', { name: 'Store' })).toBeTruthy()
+    expect(localStorage.getItem('sh_apps_tab')).toBe('store')
+  })
+
+  it('?tab=store opens the Store; the remembered view is the default', () => {
+    const a = renderStore()
+    expect(a.getByRole('tab', { name: 'Store' }).getAttribute('aria-selected')).toBe('true')
+    a.unmount()
+    nav.query = {}
+    localStorage.setItem('sh_apps_tab', 'store')
+    const b = render(<AppsPage />)
+    expect(b.getByRole('tabpanel', { name: 'Store' })).toBeTruthy()
+  })
+
+  it('puts the app Needs-you rows (invites, requests) on top of both views', () => {
+    const a = render(<AppsPage />)
+    expect(a.getByTestId('needs-you').textContent).toBe('app_challenge,app_challenge_continue,app_challenge_waiting,app_request')
+    a.unmount()
+    expect(renderStore().getByTestId('needs-you')).toBeTruthy()
+  })
+})
+
+describe('Your apps', () => {
+  it('lists the household\'s apps with who added them, the date never split', () => {
+    const { getByRole, getByText } = render(<AppsPage />)
     expect(getByRole('heading', { level: 2, name: 'In your household' })).toBeTruthy()
     expect(getByRole('heading', { level: 3, name: 'Chess' })).toBeTruthy()
-    expect(getByText(/^Added by Anna · .*12/)).toBeTruthy()
-    expect(getByRole('heading', { level: 2, name: /More apps/ })).toBeTruthy()
-    fireEvent.click(getByRole('button', { name: 'Details about Notes' }))
-    expect(nav.route).toHaveBeenCalledWith('/apps/notes/about')
+    const added = getByText(/^Added by Anna · /)
+    expect(added.textContent).toMatch(/12/)
+    // "12 Oct" / "Oct 12" glued with a no-break space: never "Oct" alone.
+    expect(added.textContent!.replace(/^Added by Anna · /, '')).not.toContain(' ')
   })
 
   it('shows the rating chip only when it is not "Everyone"', () => {
+    installedApps.value = [makeApp(), makeApp({ app_id: 'notes', name: 'Notes', min_age: 13 })]
     const { container } = render(<AppsPage />)
     const chips = Array.from(container.querySelectorAll('.sh-age-chip')).map(c => c.textContent)
     expect(chips).toEqual(['13+'])
   })
 
-  it('puts the app Needs-you rows (invites, requests) on top', () => {
-    const { getByTestId } = render(<AppsPage />)
-    expect(getByTestId('needs-you').textContent).toBe('app_challenge,app_challenge_continue,app_challenge_waiting,app_request')
-  })
-
-  it('names apps in the viewer\'s language from the catalog', () => {
-    h.locale.value = 'de'
+  it('a More apps teaser shows apps to add and leads to the Store', async () => {
     const { getByRole } = render(<AppsPage />)
-    expect(getByRole('heading', { level: 3, name: 'Schach' })).toBeTruthy()
+    expect(getByRole('heading', { level: 2, name: 'More apps' })).toBeTruthy()
+    fireEvent.click(getByRole('button', { name: 'Details about Notes' }))
+    expect(nav.route).toHaveBeenCalledWith('/apps/notes/about')
+    fireEvent.click(getByRole('button', { name: 'See all in the Store' }))
+    expect(getByRole('tab', { name: 'Store' }).getAttribute('aria-selected')).toBe('true')
+    await vi.waitFor(() => expect(document.activeElement).toBe(getByRole('tab', { name: 'Store' })))
   })
 
-  it('no search box under 8 apps, a search box at 8, filters at 12', () => {
-    catalog.value = manyEntries(SEARCH_AT - 1)
+  it('the teaser shows at most three apps and none needing a newer Social Home', () => {
+    catalog.value = [makeEntry(), makeEntry({ app_id: 'old', name: 'Old', compatible: false }), ...manyEntries(5)]
+    const { container, queryByText } = render(<AppsPage />)
+    expect(container.querySelectorAll('section[aria-labelledby="sh-apps-h-more"] li').length).toBe(TEASER_MAX)
+    expect(queryByText('Old')).toBeNull()
+  })
+
+  it('a search box only from 8 apps in the household', () => {
+    installedApps.value = Array.from({ length: SEARCH_AT - 1 }, (_, i) => makeApp({ app_id: `a${i}`, name: `Game ${i}` }))
     const a = render(<AppsPage />)
     expect(a.queryByRole('searchbox')).toBeNull()
     a.unmount()
-    catalog.value = manyEntries(SEARCH_AT)
+    installedApps.value = Array.from({ length: SEARCH_AT }, (_, i) => makeApp({ app_id: `a${i}`, name: `Game ${i}` }))
     const b = render(<AppsPage />)
-    expect(b.getByRole('searchbox', { name: 'Search apps' })).toBeTruthy()
-    expect(b.queryByRole('group', { name: 'Show apps' })).toBeNull()
-    b.unmount()
-    catalog.value = manyEntries(FILTERS_AT)
-    const c = render(<AppsPage />)
-    expect(c.getByRole('group', { name: 'Show apps' })).toBeTruthy()
+    fireEvent.input(b.getByRole('searchbox', { name: 'Search apps' }), { target: { value: 'Game 3' } })
+    expect(b.getByRole('heading', { level: 3, name: 'Game 3' })).toBeTruthy()
+    expect(b.queryByRole('heading', { level: 3, name: 'Game 2' })).toBeNull()
+    fireEvent.input(b.getByRole('searchbox'), { target: { value: 'zebra' } })
+    expect(b.getByText('No apps match “zebra”.')).toBeTruthy()
   })
 
-  it('search narrows both lists and says when nothing matches', () => {
-    catalog.value = [makeEntry(), ...manyEntries(9)]
-    const { getByRole, queryByRole, getByText } = render(<AppsPage />)
-    fireEvent.input(getByRole('searchbox'), { target: { value: 'Game 3' } })
-    expect(getByRole('heading', { level: 3, name: 'Game 3' })).toBeTruthy()
-    expect(queryByRole('heading', { level: 3, name: 'Chess' })).toBeNull()
-    fireEvent.input(getByRole('searchbox'), { target: { value: 'zebra' } })
-    expect(getByText('No apps match “zebra”.')).toBeTruthy()
-  })
-
-  it('filter chips pick apps to play together or on your own', () => {
-    installedApps.value = []
-    catalog.value = manyEntries(FILTERS_AT)
-    const { getByRole, queryByRole } = render(<AppsPage />)
-    fireEvent.click(getByRole('button', { name: 'On your own' }))
-    expect(getByRole('button', { name: 'On your own' }).getAttribute('aria-pressed')).toBe('true')
-    expect(getByRole('heading', { level: 3, name: 'Game 1' })).toBeTruthy()
-    expect(queryByRole('heading', { level: 3, name: 'Game 2' })).toBeNull()
-  })
-
-  it('an app needing a newer Social Home says so in More apps', () => {
-    catalog.value = [makeEntry({ app_id: 'go', name: 'Go', compatible: false })]
+  it('a turned-off app says what is kept', () => {
+    installedApps.value = [makeApp({ enabled: false })]
     const { getByText } = render(<AppsPage />)
-    expect(getByText('Needs a newer Social Home')).toBeTruthy()
+    expect(getByText('Everything saved in it is kept')).toBeTruthy()
+  })
+
+  it('nothing added yet: says so and leads to the Store', () => {
+    installedApps.value = []
+    nav.query = { tab: 'yours' }
+    const { getByRole } = render(<AppsPage />)
+    expect(getByRole('heading', { level: 2, name: 'Nothing added yet' })).toBeTruthy()
+    fireEvent.click(getByRole('button', { name: 'Browse the Store' }))
+    expect(getByRole('tabpanel', { name: 'Store' })).toBeTruthy()
+  })
+
+  it('a member whose household\'s apps are all off is not told "Nothing added yet"', () => {
+    currentUser.value = { is_admin: false }
+    installedApps.value = [makeApp({ enabled: false })]
+    const { queryByRole, getByRole } = render(<AppsPage />)
+    expect(queryByRole('heading', { name: 'Nothing added yet' })).toBeNull()
+    expect(getByRole('heading', { level: 2, name: 'More apps' })).toBeTruthy()
+  })
+
+  it('says when the app list is turned off, so the missing apps make sense', () => {
+    catalogEnabled.value = false
+    const { getByText } = render(<AppsPage />)
+    expect(getByText(/The app catalog is turned off on this Social Home/)).toBeTruthy()
+  })
+
+  it('a word searched in one view never hides the other view\'s list', () => {
+    installedApps.value = Array.from({ length: SEARCH_AT }, (_, i) => makeApp({ app_id: `a${i}`, name: `Game ${i}` }))
+    const { getByRole, getAllByRole } = render(<AppsPage />)
+    fireEvent.input(getByRole('searchbox'), { target: { value: 'zebra' } })
+    fireEvent.click(getByRole('tab', { name: 'Store' }))
+    expect((getByRole('searchbox') as HTMLInputElement).value).toBe('')
+    expect(getAllByRole('article').length).toBe(2)
   })
 })
 
-describe('First run with one app (nothing added yet)', () => {
+describe('Store', () => {
+  it('a card per app: what it can do, who it is for, size and date', () => {
+    const r = renderStore()
+    const notes = card(r, 'Notes')
+    expect(notes.textContent).toContain('From Social Home')
+    expect(notes.textContent).toContain('Take notes')
+    expect(notes.textContent).toContain('Saves its own data for each person')
+    expect(notes.textContent).not.toContain('Sends invites')
+    const meta = notes.querySelector('.sh-store-card__meta')!
+    expect(meta.textContent).toMatch(/^13\+/)
+    expect(meta.textContent).toMatch(/16\s?kB/i)
+    const day = meta.lastElementChild!.textContent!
+    expect(day).toMatch(/29/)
+    expect(day).not.toContain(' ')
+    expect(card(r, 'Chess').querySelector('.sh-store-card__meta')!.textContent).toMatch(/^Everyone/)
+  })
+
+  it('an app the household has reads "Installed" with Open', () => {
+    const r = renderStore()
+    const chess = card(r, 'Chess')
+    expect(chess.textContent).toContain('Installed')
+    fireEvent.click(r.getByRole('button', { name: 'Open Chess' }))
+    expect(nav.route).toHaveBeenCalledWith('/apps/chess')
+    expect(r.queryByRole('button', { name: 'Install Chess' })).toBeNull()
+  })
+
+  it('an app that is turned off reads "Off" with Details', () => {
+    installedApps.value = [makeApp({ enabled: false })]
+    const r = renderStore()
+    const chess = card(r, 'Chess')
+    expect(chess.textContent).toContain('Off')
+    expect(r.queryByRole('button', { name: 'Open Chess' })).toBeNull()
+    expect(r.getByRole('button', { name: 'Details about Chess' })).toBeTruthy()
+  })
+
+  it('Install asks first: "Add Notes for everyone?", then adds it', async () => {
+    const r = renderStore()
+    fireEvent.click(r.getByRole('button', { name: 'Install Notes' }))
+    const dialog = r.getByRole('dialog', { name: 'Add Notes for everyone?' })
+    expect(dialog.textContent).toContain('It can never see your password')
+    expect(dialog.textContent).toContain('Everyone in your household aged 13 and over can open it.')
+    expect(installApp).not.toHaveBeenCalled()
+    fireEvent.click(r.getByRole('button', { name: 'Add to household' }))
+    await vi.waitFor(() => expect(installApp).toHaveBeenCalledWith('notes'))
+  })
+
+  it('always has a search box; filters from 12 apps', () => {
+    catalog.value = manyEntries(2)
+    const a = renderStore()
+    expect(a.getByRole('searchbox', { name: 'Search apps' })).toBeTruthy()
+    expect(a.queryByRole('group', { name: 'Show apps' })).toBeNull()
+    a.unmount()
+    installedApps.value = []
+    catalog.value = manyEntries(FILTERS_AT)
+    const b = renderStore()
+    fireEvent.click(b.getByRole('button', { name: 'On your own' }))
+    expect(b.getByRole('button', { name: 'On your own' }).getAttribute('aria-pressed')).toBe('true')
+    expect(b.getByRole('heading', { level: 3, name: 'Game 1' })).toBeTruthy()
+    expect(b.queryByRole('heading', { level: 3, name: 'Game 2' })).toBeNull()
+  })
+
+  it('search narrows the cards and says when nothing matches', () => {
+    catalog.value = [makeEntry(), ...manyEntries(3)]
+    const r = renderStore()
+    fireEvent.input(r.getByRole('searchbox'), { target: { value: 'Game 2' } })
+    expect(r.getByRole('heading', { level: 3, name: 'Game 2' })).toBeTruthy()
+    expect(r.queryByRole('heading', { level: 3, name: 'Chess' })).toBeNull()
+    fireEvent.input(r.getByRole('searchbox'), { target: { value: 'zebra' } })
+    expect(r.getByText('No apps match “zebra”.')).toBeTruthy()
+  })
+
+  it('names apps in the viewer\'s language', () => {
+    h.locale.value = 'de'
+    const r = renderStore()
+    expect(r.getByRole('heading', { level: 3, name: 'Schach' })).toBeTruthy()
+  })
+
+  it('an app needing a newer Social Home says so and offers no Install', () => {
+    catalog.value = [makeEntry({ app_id: 'go', name: 'Go', compatible: false })]
+    const r = renderStore()
+    expect(r.getByText('Needs a newer Social Home')).toBeTruthy()
+    expect(r.queryByRole('button', { name: 'Install Go' })).toBeNull()
+  })
+
+  it('a group game shows how many play', () => {
+    catalog.value = [makeEntry({ app_id: 'gift', name: 'Gift Draw', players: { min: 3, max: 12 } })]
+    const r = renderStore()
+    expect(card(r, 'Gift Draw').textContent).toContain('3–12 players')
+  })
+
+  it('ends with the sealed-box line, only what is true of every app', () => {
+    const r = renderStore()
+    expect(r.getByText("Apps run in a sealed box: they never see your password, posts, chats, photos or location, and can't reach the internet.")).toBeTruthy()
+  })
+})
+
+describe('First run (nothing added yet)', () => {
   beforeEach(() => {
     installedApps.value = []
     catalog.value = [makeEntry()]
   })
 
-  it('an admin sees one featured card with the three permissions and Add to household', () => {
-    const { getByRole, getByText, queryByRole, queryByText } = render(<AppsPage />)
-    expect(getByRole('heading', { level: 2, name: 'Nothing added yet' })).toBeTruthy()
+  it('stays on the Store after the first app is added, with focus on its Open', async () => {
+    installApp.mockImplementationOnce(async () => { installedApps.value = [makeApp()] })
+    const { getByRole } = render(<AppsPage />)
+    fireEvent.click(getByRole('button', { name: 'Install Chess' }))
+    fireEvent.click(getByRole('button', { name: 'Add to household' }))
+    // Re-render the page (the store's signal does that in the app).
+    // (The store's signal re-renders the page in the app.)
+    fireEvent.input(getByRole('searchbox'), { target: { value: 'c' } })
+    await vi.waitFor(() => expect(getByRole('button', { name: 'Open Chess' })).toBeTruthy())
+    expect(getByRole('tabpanel', { name: 'Store' })).toBeTruthy()
+    await vi.waitFor(() => expect(document.activeElement).toBe(getByRole('button', { name: 'Open Chess' })))
+  })
+
+  it('opens the Store, with the intro and the three permissions', () => {
+    const { getByRole, getByText, queryByText } = render(<AppsPage />)
+    expect(getByRole('tabpanel', { name: 'Store' })).toBeTruthy()
+    expect(getByText(/Small apps for your household/)).toBeTruthy()
     expect(getByText('Saves its own data for each person')).toBeTruthy()
     expect(getByText('Lets you pick people to play with')).toBeTruthy()
     expect(getByText('Sends invites and moves to other households')).toBeTruthy()
-    expect(getByText(/From Social Home/)).toBeTruthy()
     expect(getByText(/More apps are on the way/)).toBeTruthy()
-    expect(queryByRole('searchbox')).toBeNull()
-    // Never "verified", never "Store".
-    expect(queryByText(/verified|store/i)).toBeNull()
-    expect(getByRole('button', { name: 'Add to household' })).toBeTruthy()
+    // Never "verified".
+    expect(queryByText(/verified/i)).toBeNull()
+    expect(getByRole('button', { name: 'Install Chess' })).toBeTruthy()
   })
 
-  it('Add to household asks first: "Add Chess for everyone?", then adds it', async () => {
-    const { getByRole, getAllByRole } = render(<AppsPage />)
-    fireEvent.click(getByRole('button', { name: 'Add to household' }))
+  it('the consent says what the app can do, for everyone', async () => {
+    const { getByRole } = render(<AppsPage />)
+    fireEvent.click(getByRole('button', { name: 'Install Chess' }))
     const dialog = getByRole('dialog', { name: 'Add Chess for everyone?' })
     expect(dialog.textContent).toContain('Chess will be able to:')
     expect(dialog.textContent).toContain("You choose someone in Social Home. Chess learns only who you picked and people you've played with.")
-    expect(dialog.textContent).toContain('It can never see your password')
     expect(dialog.textContent).toContain('Everyone in your household can open it.')
     expect(dialog.textContent).toContain('Protected accounts play only with people they can already message.')
-    expect(installApp).not.toHaveBeenCalled()
-    const buttons = getAllByRole('button', { name: 'Add to household' })
-    fireEvent.click(buttons[buttons.length - 1])
+    fireEvent.click(getByRole('button', { name: 'Add to household' }))
     await vi.waitFor(() => expect(installApp).toHaveBeenCalledWith('chess'))
   })
 
   it('a member sees Ask an admin instead, and the request is sent from the dialog', async () => {
     currentUser.value = { is_admin: false }
     const { getByRole, queryByRole } = render(<AppsPage />)
-    expect(queryByRole('button', { name: 'Add to household' })).toBeNull()
+    expect(queryByRole('button', { name: 'Install Chess' })).toBeNull()
     fireEvent.click(getByRole('button', { name: 'Ask an admin for Chess' }))
     const dialog = getByRole('dialog', { name: 'Ask an admin for Chess?' })
     expect(dialog.textContent).toContain("They'll see what the app can do before adding it.")
@@ -259,8 +425,8 @@ describe('First run with one app (nothing added yet)', () => {
 
   it('an operator\'s catalog is named by its host (D6)', () => {
     catalogSourceHost.value = 'apps.example.org'
-    const { getByText } = render(<AppsPage />)
-    expect(getByText(/From apps\.example\.org, set by your server operator/)).toBeTruthy()
+    const { getAllByText } = render(<AppsPage />)
+    expect(getAllByText(/From apps\.example\.org, set by your server operator/).length).toBeGreaterThan(0)
   })
 })
 
@@ -277,10 +443,19 @@ describe('AppsPage ?app= (a "new app" notification)', () => {
     expect(document.activeElement).toBe(go)
   })
 
+  it('an app the household doesn\'t have opens the Store on its card', () => {
+    localStorage.setItem('sh_apps_tab', 'yours')
+    nav.query = { app: 'notes' }
+    const r = render(<AppsPage />)
+    const notes = card(r, 'Notes')
+    expect(notes.classList.contains('sh-store-card--picked')).toBe(true)
+    expect(document.activeElement).toBe(notes)
+  })
+
   it('an app that is gone picks nothing out', () => {
     nav.query = { app: 'gone' }
     const { container } = render(<AppsPage />)
-    expect(container.querySelector('.sh-apps-row--picked')).toBeNull()
+    expect(container.querySelector('.sh-apps-row--picked, .sh-store-card--picked')).toBeNull()
   })
 })
 
@@ -296,6 +471,7 @@ describe('Icons never load from a remote host', () => {
     expect(srcs).toEqual(['data:image/svg+xml,%3Csvg%3E%3C/svg%3E'])
   })
 })
+
 
 describe('Members', () => {
   it('see enabled apps only, no ⋯ menu, no Check for updates', () => {
@@ -382,7 +558,7 @@ describe('Updates (admins)', () => {
     updates.value = [{ app_id: 'chess', name: 'Chess', current_version: '2026.10.28', latest_version: '2026.10.29', compatible: true }]
     const { getByRole, getByText } = render(<AppsPage />)
     expect(getByRole('heading', { level: 3, name: 'Chess has an update' })).toBeTruthy()
-    expect(getByText(/28.*2026 → .*29.*2026/)).toBeTruthy()
+    expect(getByText(/28.* → .*29/)).toBeTruthy()
     fireEvent.click(getByRole('button', { name: "What's new in Chess" }))
     expect(nav.route).toHaveBeenCalledWith('/apps/chess/about#whats-new')
     expect(getByText(/Same permissions/)).toBeTruthy()
@@ -427,7 +603,7 @@ describe('Catalog states', () => {
   it('a turned-off catalog says so', () => {
     catalogEnabled.value = false
     catalog.value = []
-    const { getByText, queryByText } = render(<AppsPage />)
+    const { getByText, queryByText } = renderStore()
     expect(getByText(/The app catalog is turned off on this Social Home/)).toBeTruthy()
     expect(queryByText('No apps available in the catalog.')).toBeNull()
   })

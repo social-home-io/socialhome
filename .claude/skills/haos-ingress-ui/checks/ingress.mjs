@@ -721,6 +721,12 @@ await check('app-about', async () => {
     await p.screenshot({ path: path.join(SHOTS, `app-about-${vp}.png`) })
     await p.click('a.sh-apps-back')
     await step('Back to the Apps page', p.waitForFunction(w => location.pathname === w, {}, `${PREFIX}/apps`))
+    // The Your apps | Store switch deep-links the view under the prefix.
+    await step('the Store tab', p.waitForSelector('#sh-apps-tab-store'))
+    await p.click('#sh-apps-tab-store')
+    await step(`the Store at ${PREFIX}/apps?tab=store`, p.waitForFunction(
+      w => location.pathname === w && location.search === '?tab=store', {}, `${PREFIX}/apps`))
+    await step('the Store panel', p.waitForSelector('#sh-apps-panel-store'))
     await ctx.close()
   }
   activePage = page

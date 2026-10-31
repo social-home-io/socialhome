@@ -9,8 +9,10 @@ import {
   permissionTitle,
   permissionsOf,
   ratingLabel,
+  shortDay,
   sizeLabel,
   sourceLabel,
+  versionDay,
   versionLabel,
 } from './appFacts'
 
@@ -53,6 +55,23 @@ describe('appFacts', () => {
     expect(versionLabel('2026.10.29')).toMatch(/29.*2026|2026.*29/)
     expect(versionLabel('2026.10.29.1')).toMatch(/2026/)
     expect(versionLabel('1.2.3')).toBe('v1.2.3')
+  })
+
+  it('short dates never wrap: "31 Oct" stays on one line (no "Oct" alone)', () => {
+    const day = shortDay('2026-10-31T10:00:00Z')
+    expect(day).toMatch(/31/)
+    expect(day).not.toContain(' ')
+    expect(shortDay(null)).toBe('')
+  })
+
+  it('a CalVer version reads as a short day, with the year only when not this year', () => {
+    const now = new Date(2026, 9, 31)
+    const same = versionDay('2026.10.28.2', now)
+    expect(same).toMatch(/28/)
+    expect(same).not.toMatch(/2026/)
+    expect(same).not.toContain(' ')
+    expect(versionDay('2025.3.1', now)).toMatch(/2025/)
+    expect(versionDay('1.2.3', now)).toBe('v1.2.3')
   })
 
   it('sizes, ratings and the source label', () => {
