@@ -1192,6 +1192,9 @@ from __future__ import annotations
 #:   never offered a seat (the invite sheet marks its people, an open
 #:   naming one answers 409 ``APP_GROUP_HOUSEHOLD_TOO_OLD``); its 1:1
 #:   games are untouched. Not space-scoped, no sync stream change.
+#:   Same version (unreleased then): ``group.final`` marks a game's last
+#:   message — the hub ends the table ``finished`` after numbering it,
+#:   and a copy that ended ``finished`` still takes that one message.
 #:   Labelled "Games for groups of players".
 #: * **v_77** (2026-10-31) — **Games in a space (space tables)**. A member
 #:   opens a group game *in a space* and any member may take a seat (up to

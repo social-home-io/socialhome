@@ -172,7 +172,9 @@ describe('labels', () => {
       .toBe('A moderator closed this game.')
     expect(endedLabel(table({ state: 'closed', end_reason: 'app_removed' })))
       .toBe('This game is no longer allowed here.')
-    expect(endedLabel(table({ state: 'closed', end_reason: 'finished' }))).toBe('This game is over.')
+    expect(endedLabel(table({ state: 'closed', end_reason: 'finished' }))).toBe('Played to the end.')
+    expect(endedLabel(table({ state: 'closed', end_reason: 'cancelled' }))).toBe('This game was closed.')
+    expect(endedLabel(table({ state: 'closed', end_reason: 'host_gone' }))).toBe('This game is over.')
   })
 
   it('the game screen lives with the app', () => {

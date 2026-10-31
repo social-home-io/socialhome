@@ -1747,6 +1747,8 @@
   "space.games.ended.moderator": "A moderator closed this game.",
   "space.games.ended.not_allowed": "This game is no longer allowed here.",
   "space.games.ended.expired": "Nobody started it in time.",
+  "space.games.ended.finished": "Played to the end.",
+  "space.games.ended.cancelled": "This game was closed.",
   "space.games.ended.over": "This game is over.",
   "space.games.app_missing": "Your home doesn't have this app yet.",
   "space.games.app_off": "An admin turned this app off in your home.",

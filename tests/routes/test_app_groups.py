@@ -245,6 +245,8 @@ async def test_message_bodies_out_of_shape_are_refused(client):
         {"data": 1, "to": [True]},
         {"data": 1, "turn": "2"},
         {"data": 1, "turn": 0},
+        {"data": 1, "final": "yes"},
+        {"data": 1, "final": 1},
     ):
         r = await client.post(f"{base}/messages", json=body, headers=_auth(bob))
         assert r.status == 400, body
@@ -258,6 +260,34 @@ async def test_message_bodies_out_of_shape_are_refused(client):
         )
         assert r.status == 409
         assert (await r.json())["error"]["code"] == "APP_GROUP_SEAT"
+
+
+async def test_the_last_message_ends_the_table(client):
+    base, bob, _carol = await _seated_table(client)
+    owner = client._tok
+    r = await client.post(
+        f"{base}/messages", json={"data": 1, "final": True}, headers=_auth(owner)
+    )
+    assert r.status == 409  # still waiting for players
+    assert (await r.json())["error"]["code"] == "APP_GROUP_CLOSED"
+    r = await client.post(f"{base}/start", headers=_auth(owner))
+    assert r.status == 200, await r.text()
+    r = await client.post(
+        f"{base}/messages", json={"data": 1, "final": True}, headers=_auth(bob)
+    )
+    assert r.status == 403  # three at the table: the host sends the result
+    assert (await r.json())["error"]["code"] == "APP_GROUP_NOT_HOST"
+    r = await client.post(
+        f"{base}/messages",
+        json={"data": {"winner": 2}, "final": True},
+        headers=_auth(owner),
+    )
+    assert await r.json() == {"seq": 1}
+    r = await client.get(base, headers=_auth(bob))
+    group = (await r.json())["group"]
+    assert (group["state"], group["end_reason"]) == ("ended", "finished")
+    r = await client.post(f"/api/apps/{APP}/held", headers=_auth(bob))
+    assert [m["data"] for m in (await r.json())["group_messages"]] == [{"winner": 2}]
 
 
 async def test_messages_need_a_seat(client):

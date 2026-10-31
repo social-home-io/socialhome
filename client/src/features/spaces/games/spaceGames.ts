@@ -232,6 +232,8 @@ export function endedLabel(table: SpaceTable): string | null {
     case 'closed_by_moderator': return t('space.games.ended.moderator')
     case 'app_removed': return t('space.games.ended.not_allowed')
     case 'expired': return t('space.games.ended.expired')
+    case 'finished': return t('space.games.ended.finished')
+    case 'cancelled': return t('space.games.ended.cancelled')
     default: return t('space.games.ended.over')
   }
 }

@@ -73,6 +73,7 @@ from ..domain.app_group import (
     CLOSE_WITHDRAWN,
     END_CANCELLED,
     END_EXPIRED,
+    END_FINISHED,
     END_HOST_GONE,
     GROUP_BATCH_MAX_BYTES,
     GROUP_BATCH_MAX_MESSAGES,
@@ -81,6 +82,7 @@ from ..domain.app_group import (
     GROUP_DIRECT_MAX_PLAINTEXT,
     GROUP_ENDED,
     GROUP_ENDED_KEEP_SECONDS,
+    GROUP_FINISH_GRACE_SECONDS,
     GROUP_HELD_MAX_BYTES,
     GROUP_LOBBY,
     GROUP_LOBBY_DAYS,
@@ -247,6 +249,18 @@ class _Seen:
             self.msg_ids.popitem(last=False)
 
 
+def _check_finish(table: GroupSession, instance: str, user: str) -> None:
+    """Whether *user* of *instance* may send the game's last message
+    (``final``): only at a table being played, and at a table of more than
+    two only the host person — in a duel either player ends the game (a
+    win, a resignation, an agreed draw), at a bigger table the host sends
+    the result. :class:`AppGroupClosedError` / :class:`AppGroupNotHostError`."""
+    if table.state != GROUP_PLAYING:
+        raise AppGroupClosedError()
+    if len(table.seated) > 2 and not table.is_host(instance, user):
+        raise AppGroupNotHostError()
+
+
 def _sender_share(households: int) -> int:
     """The envelopes a minute one player may send at a table of
     *households*: three times a fair share, never less than two messages
@@ -293,6 +307,7 @@ class AppGroupService(ProtectionGateMixin):
         "_coalesce_every",
         "_fed_repo",
         "_federation",
+        "_finished_at",
         "_key_manager",
         "_locks",
         "_out_due",
@@ -354,6 +369,11 @@ class AppGroupService(ProtectionGateMixin):
         #: The ``seq`` numbers each table's copy passed on lately (repeats
         #: are dropped) — bounded per table, least recent table forgotten.
         self._seen: OrderedDict[str, _Seen] = OrderedDict()
+        #: Hub tables that ended ``finished`` lately (loop time): their
+        #: players' messages are still taken for
+        #: :data:`GROUP_FINISH_GRACE_SECONDS` (in memory — a restart ends
+        #: the grace early).
+        self._finished_at: dict[str, float] = {}
         #: Space tables (v_77): the space transport, cards and space rules
         #: (:meth:`attach_space_tables`).
         self._space_tables: SpaceTableService | None = None
@@ -1471,17 +1491,23 @@ class AppGroupService(ProtectionGateMixin):
         data: Any,
         to: list[int] | None = None,
         turn: int | None = None,
+        final: bool = False,
     ) -> dict:
         """A seated person's app sends *data* to everyone at the table, or
         to the seats in *to* (sealed here to each one's household seat key:
         the hub passes on only ciphertext). *turn* names the seat whose
-        turn it is now ("Your turn" there). ``{"seq": n}`` when this
-        household is the hub, ``{"seq": None}`` when it went to the hub's.
+        turn it is now ("Your turn" there). *final* says it is the game's
+        last message: the hub ends the table (``finished``) right after
+        numbering it (:func:`_check_finish` says who may). ``{"seq": n}``
+        when this household is the hub, ``{"seq": None}`` when it went to
+        the hub's.
 
         :class:`AppGroupClosedError` when the table ended or the caller
-        isn't seated, :class:`AppGroupSeatError` for a ``to`` / ``turn``
-        seat nobody holds, one's own, or one without a seat key,
-        :class:`AppGroupBusyError` past the table's send budget."""
+        isn't seated (or *final* at a table not being played),
+        :class:`AppGroupNotHostError` for *final* by someone other than the
+        host at a table of more than two, :class:`AppGroupSeatError` for a
+        ``to`` / ``turn`` seat nobody holds, one's own, or one without a
+        seat key, :class:`AppGroupBusyError` past the table's send budget."""
         app = await self._usable(app_id, actor_user_id)
         table, user, row = await self._mine(app_id, session_id, actor_user_id)
         own = self._own
@@ -1492,7 +1518,9 @@ class AppGroupService(ProtectionGateMixin):
             row.state != SESSION_ACTIVE
             or mine is None
             or mine.state != SEAT_SEATED
-            or table.state == GROUP_ENDED
+            # A game that just finished still takes a crossing move (the
+            # hub decides how long: GROUP_FINISH_GRACE_SECONDS).
+            or (table.state == GROUP_ENDED and table.end_reason != END_FINISHED)
         ):
             raise AppGroupClosedError()
         seats = {e.seat: e for e in table.seated}
@@ -1501,9 +1529,11 @@ class AppGroupService(ProtectionGateMixin):
             raise AppGroupSeatError()
         if turn is not None and turn not in seats:
             raise AppGroupSeatError()
+        if final and table.state != GROUP_ENDED:
+            _check_finish(table, own, user.username)
         msg_id = new_msg_id()
         if targets is None:
-            msg = GroupMessage(msg_id=msg_id, data=data, turn=turn)
+            msg = GroupMessage(msg_id=msg_id, data=data, turn=turn, final=final)
         else:
             if not targets:
                 raise AppGroupSeatError()
@@ -1532,7 +1562,11 @@ class AppGroupService(ProtectionGateMixin):
                     # A seat key that can't be sealed to (the hub's word).
                     raise AppGroupSeatError() from exc
             msg = GroupMessage(
-                msg_id=msg_id, to=targets, sealed=tuple(sealed), turn=turn
+                msg_id=msg_id,
+                to=targets,
+                sealed=tuple(sealed),
+                turn=turn,
+                final=final,
             )
         now = _now()
         if row.last_change < (now - timedelta(hours=1)).isoformat():
@@ -1614,7 +1648,15 @@ class AppGroupService(ProtectionGateMixin):
         the sender's own as a target), sealed entries of a suite this build
         knows, within the size and the table's send budget. Numbers it
         (``seq``) and queues it, one envelope per household it is for; the
-        hub's own people get it at once. Returns the ``seq``."""
+        hub's own people get it at once. Returns the ``seq``.
+
+        A ``final`` message (the game's last) ends the table ``finished``
+        once numbered: its batches leave first, then the close — and a
+        receiver takes it even after the close (it may overtake the batch),
+        so the last move reaches everyone, their mailbox included. For
+        :data:`GROUP_FINISH_GRACE_SECONDS` after that the players' messages
+        are still taken (a move that crossed the last one)."""
+        finished: GroupSession | None = None
         async with self._lock(session_id):
             table = await self._hub_table(session_id)
             if table is None:
@@ -1623,7 +1665,7 @@ class AppGroupService(ProtectionGateMixin):
             if (
                 sender is None
                 or sender.state != SEAT_SEATED
-                or table.state == GROUP_ENDED
+                or (table.state == GROUP_ENDED and not self._in_grace(table))
             ):
                 raise AppGroupClosedError()
             seated = {e.seat for e in table.seated}
@@ -1633,6 +1675,8 @@ class AppGroupService(ProtectionGateMixin):
                 raise AppGroupSeatError()
             if msg.turn is not None and msg.turn not in seated:
                 raise AppGroupSeatError()
+            if msg.final and table.state != GROUP_ENDED:
+                _check_finish(table, instance, user)
             if msg.to is None:
                 if len(orjson.dumps(msg.data)) > GROUP_MESSAGE_MAX_BYTES:
                     raise GroupWireError("message too large")
@@ -1670,7 +1714,41 @@ class AppGroupService(ProtectionGateMixin):
                 self._queue_out(table, household, numbered.relayed(for_seats))
             # Under the lock: the hub's own people get them in ``seq`` order.
             await self._deliver_local(table, numbered)
+            if msg.final and table.state != GROUP_ENDED:
+                finished = table.bumped(
+                    stamp, state=GROUP_ENDED, end_reason=END_FINISHED
+                )
+                await self._repo.save(finished)
+                self._mark_finished(session_id)
+        if finished is not None:
+            # The last move leaves before the close (one flush, in order).
+            await self._flush_table(session_id)
+            await self._after_change(finished, ended=True)
         return seq
+
+    def _mark_finished(self, session_id: str) -> None:
+        now = asyncio.get_running_loop().time()
+        for sid, at in list(self._finished_at.items()):
+            if now - at > GROUP_FINISH_GRACE_SECONDS:
+                del self._finished_at[sid]
+        self._finished_at[session_id] = now
+
+    def _in_grace(self, table: GroupSession) -> bool:
+        """*table* (the hub's) ended ``finished`` within
+        :data:`GROUP_FINISH_GRACE_SECONDS`: its players' messages are still
+        taken (a move that crossed the last one)."""
+        at = self._finished_at.get(table.session_id)
+        return (
+            table.end_reason == END_FINISHED
+            and at is not None
+            and asyncio.get_running_loop().time() - at <= GROUP_FINISH_GRACE_SECONDS
+        )
+
+    async def _flush_table(self, session_id: str) -> None:
+        """Send what waits in the coalescing queue for *session_id* now
+        (the scheduled flush then finds nothing)."""
+        for key in [k for k in self._outq if k[0] == session_id]:
+            await self._flush_now(key)
 
     def _queue_out(self, table: GroupSession, household: str, msg: dict) -> None:
         """Gather *msg* for *household* — it goes with whatever else the
@@ -1687,7 +1765,6 @@ class AppGroupService(ProtectionGateMixin):
     async def _flush_later(
         self, key: tuple[str, str], app_id: str, space_id: str | None = None
     ) -> None:
-        session_id, household = key
         try:
             if self._coalesce_every > 0 and not self._stop.is_set():
                 try:
@@ -1698,6 +1775,21 @@ class AppGroupService(ProtectionGateMixin):
                     pass
         finally:
             self._out_due.discard(key)
+        await self._flush_now(key, app_id, space_id)
+
+    async def _flush_now(
+        self,
+        key: tuple[str, str],
+        app_id: str | None = None,
+        space_id: str | None = None,
+    ) -> None:
+        session_id, household = key
+        if app_id is None:
+            table = await self._repo.get(session_id)
+            if table is None:
+                self._outq.pop(key, None)
+                return
+            app_id, space_id = table.app_id, table.space_id
         # One flush per household and table at a time: batches leave in
         # ``seq`` order.
         async with self._lock(f"out:{session_id}:{household}"):
@@ -1784,8 +1876,14 @@ class AppGroupService(ProtectionGateMixin):
     async def _on_relayed(self, table: GroupSession, msg: GroupMessage) -> None:
         """One message the table's hub passed on: once per ``seq`` (a
         repeat, or one far below the newest seen, is dropped), then to
-        this household's people it is for."""
-        if table.state == GROUP_ENDED:
+        this household's people it is for. After a table ended
+        ``finished`` (the game's last message) the hub's messages above the
+        stored ``seq`` are still taken — the last one may arrive after the
+        close, a move that crossed it after that (the hub's grace) — each
+        once, by the persisted ``seq``; after any other end, none."""
+        if table.state == GROUP_ENDED and not (
+            table.end_reason == END_FINISHED and msg.seq > table.seq
+        ):
             return
         seen = self._seen.get(table.session_id)
         if seen is None:

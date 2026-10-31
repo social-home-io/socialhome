@@ -170,6 +170,15 @@ describe('GroupBridge', () => {
     expect(mockApiPost).toHaveBeenLastCalledWith(`/api/apps/${APP}/groups/t1/messages`, { data: 'x' })
   })
 
+  it('group.send passes final: true for the game\'s last message, drops final: false', async () => {
+    mockApiPost.mockResolvedValueOnce({ seq: 9 })
+    await bridge.call('group.send', { id: 't1', data: { over: true }, final: true })
+    expect(mockApiPost).toHaveBeenLastCalledWith(`/api/apps/${APP}/groups/t1/messages`, { data: { over: true }, final: true })
+    mockApiPost.mockResolvedValueOnce({ seq: 10 })
+    await bridge.call('group.send', { id: 't1', data: 1, final: false })
+    expect(mockApiPost).toHaveBeenLastCalledWith(`/api/apps/${APP}/groups/t1/messages`, { data: 1 })
+  })
+
   it('refuses a bad id, to or turn without calling the server', async () => {
     for (const params of [
       { data: 1 },
@@ -178,6 +187,7 @@ describe('GroupBridge', () => {
       { id: 't1', data: 1, to: [0] },
       { id: 't1', data: 1, to: 'all' },
       { id: 't1', data: 1, turn: 1.5 },
+      { id: 't1', data: 1, final: 'yes' },
     ]) {
       await expect(bridge.call('group.send', params)).rejects.toMatchObject({ code: 'invalid' })
     }

@@ -327,10 +327,39 @@ def test_a_directed_message_passes_on_only_each_households_entries():
     assert got.sealed == (other,) and got.to == (3, 4)
 
 
+def test_the_last_message_says_so_on_both_legs():
+    m = parse_message(
+        {"to": "all", "msg_id": "end", "final": True},
+        data={"over": True},
+        has_data=True,
+        relayed=False,
+    )
+    assert m.final and m.to_hub()["final"] is True
+    out = dataclasses.replace(m, seq=3, from_seat=2).relayed()
+    assert out["final"] is True
+    assert parse_message(out, has_data=False, relayed=True).final
+    sealed = parse_message(
+        {"to": [3], "msg_id": "e2", "final": True, "sealed": [SEALED]},
+        has_data=False,
+        relayed=False,
+    )
+    assert sealed.final and dataclasses.replace(sealed, seq=1).relayed()["final"]
+    # Not final: the key stays off the wire.
+    plain = parse_message(
+        {"to": "all", "msg_id": "a", "final": False},
+        data=1,
+        has_data=True,
+        relayed=False,
+    )
+    assert not plain.final and "final" not in plain.to_hub()
+
+
 @pytest.mark.parametrize(
     ("group", "has_data"),
     [
         ("x", True),
+        ({"to": "all", "msg_id": "a", "final": 1}, True),
+        ({"to": "all", "msg_id": "a", "final": "true"}, True),
         ({"to": "all", "msg_id": "a"}, False),  # everyone needs data
         ({"to": "all", "msg_id": "a", "sealed": [SEALED]}, True),
         ({"to": [3], "msg_id": "a", "sealed": [SEALED]}, True),  # data beside a seal

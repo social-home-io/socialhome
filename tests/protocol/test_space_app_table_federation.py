@@ -252,3 +252,51 @@ async def test_a_card_for_a_space_without_games_is_dropped(net):
     _queue(net, h["host"], h["m"], TABLE, wire)
     await net.flush()
     assert await h["m"].home.group_repo.get("8" * 32) is None
+
+
+async def test_the_last_move_ends_a_space_table_finished_for_every_member(net):
+    """``final`` (v_76): the host's last message reaches every player, the
+    table ends ``finished`` on every member household with someone there,
+    its card goes ``closed`` with that reason — and a player who isn't the
+    host can't end a table of three, not even past their own household."""
+    h = _h(net)
+    sid = await _table(net)
+    await h["host"].home.groups.start(
+        app_id=APP, session_id=sid, actor_user_id=h["host"].uid("anna")
+    )
+    await net.flush()
+    forged = {
+        "kind": "message",
+        "body": {
+            "app_id": APP,
+            "session_id": sid,
+            "from_user": "ben",
+            "group": {"to": "all", "msg_id": "forged", "final": True},
+            "data": "I win",
+        },
+    }
+    _queue(net, h["b"], h["host"], SESSION, forged)
+    await net.flush()
+    assert (await h["host"].home.group_repo.get(sid)).state == "playing"
+    await h["host"].home.groups.send_message(
+        app_id=APP,
+        session_id=sid,
+        actor_user_id=h["host"].uid("anna"),
+        data={"winner": "mia"},
+        final=True,
+    )
+    await net.flush()
+    for name, user in (("b", "ben"), ("m", "mia")):
+        home = h[name].home
+        table = await home.group_repo.get(sid)
+        assert (table.state, table.end_reason) == ("ended", "finished")
+        held = await home.groups.take_held(app_id=APP, actor_user_id=h[name].uid(user))
+        assert [m["data"] for m in held] == [{"winner": "mia"}]
+    for name, user in (("host", "anna"), ("b", "ben"), ("m", "mia")):
+        got = await h[name].tables.list_tables(
+            space_id=SPACE, actor_user_id=h[name].uid(user)
+        )
+        (card,) = [t for t in got["tables"] if t["session_id"] == sid]
+        assert (card["state"], card["end_reason"]) == ("closed", "finished")
+    for name in ("f", "x"):
+        assert await h[name].home.group_repo.get(sid) is None
