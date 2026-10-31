@@ -15406,17 +15406,6 @@ def cmd_app_group() -> None:
 
     seat_b, seat_c = me(b), me(c)
     marker = f"DEMO-WHISPER-{secrets.token_hex(6)}"
-    s, sent = api(
-        b, f"/groups/{sid}/messages", method="POST", body={"data": {"round": 1}}
-    )
-    _must("message to everyone(b)", s, sent)
-    s, sent = api(
-        b,
-        f"/groups/{sid}/messages",
-        method="POST",
-        body={"data": {"whisper": marker}, "to": [seat_c]},
-    )
-    _must("sealed message(b → c)", s, sent)
     got: dict[str, list[dict]] = {"a": [], "c": []}
 
     def held(label: str, node: dict) -> list[dict]:
@@ -15425,11 +15414,29 @@ def cmd_app_group() -> None:
             got[label].extend((body or {}).get("group_messages", []))
         return got[label]
 
-    wait(
-        "c to get both messages",
-        lambda: {(m["from_seat"], m["direct"]) for m in held("c", c)}
-        >= {(seat_b, False), (seat_b, True)},
+    # The mailbox keeps each sender's latest: c takes the first before the
+    # second (from the same seat) replaces it.
+    s, sent = api(
+        b, f"/groups/{sid}/messages", method="POST", body={"data": {"round": 1}}
     )
+    _must("message to everyone(b)", s, sent)
+    wait(
+        "c to get the message to everyone",
+        lambda: any(not m["direct"] for m in held("c", c)),
+    )
+    s, sent = api(
+        b,
+        f"/groups/{sid}/messages",
+        method="POST",
+        body={"data": {"whisper": marker}, "to": [seat_c]},
+    )
+    _must("sealed message(b → c)", s, sent)
+    wait(
+        "c to get the sealed message",
+        lambda: any(m["direct"] for m in held("c", c)),
+    )
+    if {m["from_seat"] for m in got["c"]} != {seat_b}:
+        raise SystemExit(f"app-group: c's messages name the wrong seat: {got['c']!r}")
     by_kind = {m["direct"]: m for m in got["c"]}
     if by_kind[True]["data"] != {"whisper": marker} or by_kind[False]["data"] != {
         "round": 1
