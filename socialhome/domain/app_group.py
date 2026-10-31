@@ -626,12 +626,12 @@ def _when(raw: object, what: str, *, optional: bool = False) -> datetime | None:
         raise GroupWireError(f"{what} malformed")
     try:
         parsed = datetime.fromisoformat(raw)
-    except ValueError as exc:
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        # Stored as UTC ISO 8601 so the expiry / prune compare as strings.
+        return parsed.astimezone(UTC)
+    except (ValueError, OverflowError) as exc:
         raise GroupWireError(f"{what} malformed") from exc
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    # Stored as UTC ISO 8601 so the expiry / prune compare as strings.
-    return parsed.astimezone(UTC)
 
 
 def note_ok(note: str | None) -> str | None:

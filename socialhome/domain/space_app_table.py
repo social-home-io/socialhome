@@ -198,11 +198,11 @@ def _when(raw: object, what: str, *, optional: bool = False) -> datetime | None:
         raise GroupWireError(f"{what} malformed")
     try:
         parsed = datetime.fromisoformat(raw)
-    except ValueError as exc:
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+    except (ValueError, OverflowError) as exc:
         raise GroupWireError(f"{what} malformed") from exc
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
 
 
 def parse_card(raw: object, *, now: datetime) -> SpaceTableCard:
@@ -307,6 +307,7 @@ def card_table(
         late_join=card.late_join,
         note=card.note,
         started_at=card.started_at,
-        opener_user=card.host_user,
+        # The seat-checked id — the receiver's caps count by it.
+        opener_user=card.host_user_id,
         card=TableCard(seated=card.seated, announce=card.announce, seen_at=seen_at),
     )

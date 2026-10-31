@@ -90,6 +90,7 @@ from ..domain.app_group import (
     GROUP_PICK_MAX_PLAYERS,
     GROUP_PLAYING,
     GROUP_ROSTER_EVERY_SECONDS,
+    GROUP_ROSTER_MAX,
     GROUP_SEND_BUDGET,
     GROUP_SEQ_WINDOW,
     GROUP_TABLES_PER_DAY_MAX,
@@ -906,6 +907,9 @@ class AppGroupService(ProtectionGateMixin):
                 and table.space_id is not None
                 and newcomer.is_person(instance, user)
                 and (entry is None or entry.state in (SEAT_LEFT, SEAT_DECLINED))
+                # The roster's bound (seated, left and removed travel): a
+                # table full of comings and goings takes nobody new.
+                and (entry is not None or len(table.roster) < GROUP_ROSTER_MAX)
             ):
                 entry = dataclasses.replace(newcomer, state=SEAT_INVITED, seat=0)
             if entry is None or entry.state not in (SEAT_INVITED, SEAT_SEATED):
@@ -2587,6 +2591,28 @@ class AppGroupService(ProtectionGateMixin):
             )
         await self._push(table)
         return self.view(table, user, row)
+
+    async def drop_space_player(self, session_id: str, entry: GroupSeat) -> None:
+        """Take *entry* out of a space table this household hosts because
+        they left the space (removed, banned, made a follower): the host
+        person as if they left, anyone else as if the host removed them."""
+        async with self._lock(session_id):
+            table = await self._hub_table(session_id)
+        if table is None or table.state == GROUP_ENDED:
+            return
+        current = table.entry(entry.instance, entry.user)
+        if current is None or current.state != SEAT_SEATED:
+            return
+        if table.is_host(entry.instance, entry.user):
+            await self._hub_leave(
+                session_id, entry.instance, entry.user, declined=False
+            )
+            return
+        await self._quietly(
+            self._hub_remove(
+                session_id, table.host_instance, table.host_user, current.seat
+            )
+        )
 
     async def end_space_table(self, table: GroupSession, reason: str) -> None:
         """End a space table this household hosts for everyone (a

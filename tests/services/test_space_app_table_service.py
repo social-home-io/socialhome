@@ -40,6 +40,7 @@ from socialhome.domain.apps import AppNotEnabledError, AppNotFoundError
 from socialhome.domain.events import (
     AppTableAnnounced,
     AppTableClosed,
+    RemoteSpaceMemberBanned,
     SpaceFeaturesApplied,
     SpaceMemberLeft,
 )
@@ -568,3 +569,132 @@ async def test_an_unknown_table_or_space_is_dropped(net):
         await h["b"].tables.join(
             space_id=SPACE, session_id="nope", actor_user_id=h["b"].uid("ben")
         )
+
+
+# ─── Review fixes: who stays, one seat per person, the caps' key ──────────
+
+
+async def test_a_banned_player_is_taken_out_and_heard_no_more(net):
+    h = _h(net)
+    sid = await _open(net)
+    await _join(net, "b", "ben", sid)
+    await _join(net, "m", "mia", sid)
+    await h["host"].home.groups.start(
+        app_id=APP, session_id=sid, actor_user_id=h["host"].uid("anna")
+    )
+    await net.flush()
+    # The host bans Mia: her seat on the host's roster mirror is gone.
+    await h["host"].home.db.enqueue(
+        "INSERT INTO space_bans(space_id, user_id, banned_by) VALUES(?, ?, 'anna')",
+        (SPACE, h["m"].uid("mia")),
+    )
+    # A move she sends before the ban is acted on is dropped at the hub.
+    seq = (await h["host"].home.group_repo.get(sid)).seq
+    await h["m"].home.groups.send_message(
+        app_id=APP, session_id=sid, actor_user_id=h["m"].uid("mia"), data="late"
+    )
+    await net.flush()
+    assert (await h["host"].home.group_repo.get(sid)).seq == seq
+    await h["host"].tables._on_space_config(
+        RemoteSpaceMemberBanned(space_id=SPACE, user_id=h["m"].uid("mia"))
+    )
+    await net.flush()
+    hub = await h["host"].home.group_repo.get(sid)
+    assert [e.user for e in hub.seated] == ["anna", "ben"]
+    assert (
+        await h["m"].home.app_repo.get_pending_session(APP, h["m"].uid("mia"), sid)
+    ) is None
+
+
+async def test_a_removed_host_hands_the_game_on(net):
+    h = _h(net)
+    net.knows(h["b"], h["m"])  # b knows m's version (its mesh claim)
+    net.knows(h["m"], h["b"])
+    sid = await _open(net, "b", "ben")  # hosted at b
+    for name, user in (("host", "anna"), ("m", "mia")):
+        await _join(net, name, user, sid)
+    await h["b"].home.groups.start(
+        app_id=APP, session_id=sid, actor_user_id=h["b"].uid("ben")
+    )
+    await net.flush()
+    # b's own Ben leaves the space: the game passes on, b keeps relaying.
+    await h["b"].home.db.enqueue(
+        "DELETE FROM space_members WHERE space_id = ? AND user_id = ?",
+        (SPACE, h["b"].uid("ben")),
+    )
+    await h["b"].tables._on_member_left(
+        SpaceMemberLeft(space_id=SPACE, user_id=h["b"].uid("ben"))
+    )
+    await net.flush()
+    hub = await h["b"].home.group_repo.get(sid)
+    assert hub.state == GROUP_PLAYING and hub.host_user == "anna"
+
+
+async def test_a_global_or_archived_space_closes_its_waiting_tables(net):
+    h = _h(net)
+    sid = await _open(net)
+    space = await h["host"].spaces.get(SPACE)
+    await h["host"].spaces.save(dataclasses.replace(space, archived=True))
+    await h["host"].tables._on_space_config(SpaceFeaturesApplied(space_id=SPACE))
+    await net.flush()
+    hub = await h["host"].home.group_repo.get(sid)
+    assert (hub.state, hub.end_reason) == (GROUP_ENDED, END_APP_REMOVED)
+
+
+async def test_one_person_takes_one_seat(net):
+    """A household can't seat one member under many names (that would fill
+    every seat and grow the roster past its bound)."""
+    h = _h(net)
+    sid = await _open(net)
+    await _join(net, "b", "ben", sid)
+    for n in range(3):
+        _queue(
+            net,
+            h["b"],
+            h["host"],
+            FederationEventType.SPACE_APP_SESSION,
+            {
+                "space_id": SPACE,
+                "kind": "session",
+                "body": {
+                    "app_id": APP,
+                    "session_id": sid,
+                    "verb": "group_join",
+                    "from_user": f"ben{n}",
+                    "user_id": h["b"].uid("ben"),
+                    "identity_pk": h["b"].home.fed.own_identity_pk.hex(),
+                },
+            },
+        )
+    await net.flush()
+    hub = await h["host"].home.group_repo.get(sid)
+    assert [e.user for e in hub.seated] == ["anna", "ben"]
+
+
+async def test_receivers_count_by_the_hosts_user_id_not_a_name(net):
+    """A hub can't slip past the per-person caps by renaming its host."""
+    h = _h(net)
+    sid = await _open(net, announce=True)
+    hub = await h["host"].home.group_repo.get(sid)
+    for n in range(3):
+        wire = card_wire(dataclasses.replace(hub, session_id=f"{n}" * 32), SPACE)
+        wire["host_user"] = f"anna{n}"
+        wire["announce"] = True
+        _queue(net, h["host"], h["b"], FederationEventType.SPACE_APP_TABLE, wire)
+    await net.flush()
+    kept = [await h["b"].home.group_repo.get(f"{n}" * 32) for n in range(3)]
+    assert [k is not None for k in kept] == [True, True, False]
+    assert len(h["b"].home.bus.of(AppTableAnnounced)) == 1
+
+
+async def test_the_live_card_skips_people_who_block_the_host(net):
+    h = _h(net)
+    await h["b"].home.add_user("bea")
+    await h["b"].home.db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES(?, ?, 'member')",
+        (SPACE, h["b"].uid("bea")),
+    )
+    await h["b"].home.user_repo.block(h["b"].uid("bea"), h["host"].uid("anna"))
+    await _open(net)
+    to = {uid for uid, f in h["b"].home.ws.frames if f["type"] == "space.app_table"}
+    assert to == {h["b"].uid("ben")}

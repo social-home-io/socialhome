@@ -58,6 +58,7 @@ import dataclasses
 import logging
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
+from weakref import WeakValueDictionary
 
 from ..crypto import derive_instance_id
 from ..domain.app_group import (
@@ -85,6 +86,7 @@ from ..domain.apps import PERMISSION_FEDERATION, PERMISSION_PEOPLE, SESSION_INVI
 from ..domain.events import (
     AppTableAnnounced,
     AppTableClosed,
+    RemoteSpaceMemberBanned,
     SpaceConfigChanged,
     SpaceFeaturesApplied,
     SpaceMemberLeft,
@@ -229,7 +231,8 @@ class SpaceTableService(BusPublisherMixin):
         self._card_due: set[str] = set()
         self._tasks: set[asyncio.Task] = set()
         self._stop = asyncio.Event()
-        self._locks: dict[str, asyncio.Lock] = {}
+        #: One change at a time per table / opener / hub (dropped when idle).
+        self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._told: dict[str, None] = {}
 
     @property
@@ -250,9 +253,7 @@ class SpaceTableService(BusPublisherMixin):
         bus.subscribe(SpaceFeaturesApplied, self._on_space_config)
         bus.subscribe(SpaceConfigChanged, self._on_space_config)
         bus.subscribe(SpaceMemberLeft, self._on_member_left)
-
-    async def start(self) -> None:
-        self._stop.clear()
+        bus.subscribe(RemoteSpaceMemberBanned, self._on_space_config)
 
     async def stop(self) -> None:
         """Let the card sends that wait go (none is sent)."""
@@ -263,7 +264,8 @@ class SpaceTableService(BusPublisherMixin):
     def _lock(self, key: str) -> asyncio.Lock:
         lock = self._locks.get(key)
         if lock is None:
-            lock = self._locks[key] = asyncio.Lock()
+            lock = asyncio.Lock()
+            self._locks[key] = lock
         return lock
 
     # ─── Guards ───────────────────────────────────────────────────────
@@ -363,7 +365,16 @@ class SpaceTableService(BusPublisherMixin):
         tables: list[dict] = []
         shown = 0
         if space.space_type is not SpaceType.GLOBAL:
-            for table in await self._repo.list_for_space(space_id):
+            # Newest first by when this household heard of each (a hub
+            # can't jump the strip with a future ``created_at``).
+            rows = sorted(
+                await self._repo.list_for_space(space_id),
+                key=lambda t: (
+                    t.card.seen_at if self._card_only(t) and t.card else t.created_at
+                ),
+                reverse=True,
+            )
+            for table in rows:
                 row = await self._app_repo.get_pending_session(
                     table.app_id, user.user_id, table.session_id
                 )
@@ -678,17 +689,33 @@ class SpaceTableService(BusPublisherMixin):
         ]
 
     async def _push_card(self, table: GroupSession) -> None:
+        """The card to each member here who may see it — as
+        :meth:`list_tables` would show it to them (the app on the list,
+        their age, no block either way with the host)."""
         assert table.space_id is not None
-        users = await self._local_writers(table.space_id)
-        if users:
-            await self._ws.broadcast_to_users(
-                users,
-                {
-                    "type": WS_FRAME_TYPE,
-                    "space_id": table.space_id,
-                    "table": self.card_view(table),
-                },
+        space = await self._spaces.get(table.space_id)
+        if space is None:
+            return
+        app = await self._app_repo.get(table.app_id)
+        frame = {
+            "type": WS_FRAME_TYPE,
+            "space_id": table.space_id,
+            "table": self.card_view(table),
+        }
+        listed = table.app_id in space.features.allowed_apps
+        for user_id in await self._local_writers(table.space_id):
+            user = await self._user_repo.get_by_user_id(user_id)
+            if user is None:
+                continue
+            row = await self._app_repo.get_pending_session(
+                table.app_id, user_id, table.session_id
             )
+            if row is None or not row.is_group:
+                if not listed or await self._host_blocked(user, table):
+                    continue
+                if app is not None and not await self._age_ok(app, user):
+                    continue
+            await self._ws.broadcast_to_user(user_id, frame)
 
     async def _tell_closed(self, table: GroupSession) -> None:
         """Each person from here with a seat hears why a table a moderator
@@ -840,7 +867,7 @@ class SpaceTableService(BusPublisherMixin):
                 t
                 for t in await self._repo.list_for_space(space.id)
                 if t.hub_instance == sender
-                and t.opener_user == card.host_user
+                and t.opener_user == card.host_user_id
                 and t.card is not None
                 and t.card.seen_at >= day_cut
             ]
@@ -915,6 +942,18 @@ class SpaceTableService(BusPublisherMixin):
         ):
             log.warning("space_tables: %s holds no writer seat in %s", sender, space.id)
             return
+        if (
+            table.hub_instance == self._own
+            and sender != self._own
+            and not await self._actor_still_seated(space, table, sender, body)
+        ):
+            log.info(
+                "space_tables: %s from %s by someone no longer in %s dropped",
+                body.get("verb", "message"),
+                sender,
+                space.id,
+            )
+            return
         inner = FederationEvent(
             msg_id=event.msg_id,
             event_type=(
@@ -958,6 +997,21 @@ class SpaceTableService(BusPublisherMixin):
             return
         await self._groups.on_space_session(inner)
 
+    async def _actor_still_seated(
+        self, space: Space, table: GroupSession, sender: str, body: dict
+    ) -> bool:
+        """At the hub: the person a verb or message from *sender* is by
+        still holds a live writer seat there and isn't banned (a leave is
+        always taken). Someone not at the table yet passes (a join is
+        checked on its own)."""
+        if body.get("verb") == "group_leave":
+            return True
+        actor = body.get("from_user")
+        entry = table.entry(sender, actor) if isinstance(actor, str) else None
+        if entry is None or entry.user_id is None:
+            return True
+        return await self._writer_seat(space.id, sender, entry.user_id)
+
     async def _newcomer(
         self, space: Space, table: GroupSession, sender: str, body: dict
     ) -> GroupSeat | None:
@@ -983,6 +1037,12 @@ class SpaceTableService(BusPublisherMixin):
                 return None
         except ValueError:
             return None
+        # One person, one place: the same user id under another name is
+        # refused (else one seat on the space fills every seat).
+        if any(
+            e.user_id == user_id and not e.is_person(sender, user) for e in table.roster
+        ):
+            return None
         seat = await self._seats.get(space.id, sender, user_id)
         name = _line(body.get("name"), GROUP_NAME_MAX) or (
             seat.display_name if seat is not None and seat.display_name else user
@@ -1000,30 +1060,64 @@ class SpaceTableService(BusPublisherMixin):
     # ─── The space's list and its members ─────────────────────────────
 
     async def _on_space_config(
-        self, event: SpaceFeaturesApplied | SpaceConfigChanged
+        self,
+        event: SpaceFeaturesApplied
+        | SpaceConfigChanged
+        | RemoteSpaceMemberBanned
+        | SpaceMemberLeft,
     ) -> None:
-        """An app left the space's list (D10): the tables of it this
-        household hosts that still wait for players close
-        (``app_removed``); games being played finish (they take nobody
-        more — the join checks the list)."""
+        """The space changed (its config, its roster, a ban): the tables
+        this household hosts in it follow.
+
+        * An app left the list (D10) — or the space turned global or was
+          archived (D6: no games there): the tables still waiting for
+          players close (``app_removed``); games being played finish and
+          take nobody more (the join checks).
+        * A seated player who no longer holds a live writer seat there
+          (removed, banned, made a follower) is taken out — the host
+          person's seat as if they left (a waiting table closes, a game
+          passes to the player seated longest)."""
         space = await self._spaces.get(event.space_id)
         if space is None:
             return
         allowed = set(space.features.allowed_apps)
+        no_games = space.space_type is SpaceType.GLOBAL or space.archived
         for table in await self._repo.list_for_space(space.id):
-            if (
-                table.hub_instance == self._own
-                and table.state == GROUP_LOBBY
-                and table.app_id not in allowed
-            ):
+            if table.hub_instance != self._own or table.state == GROUP_ENDED:
+                continue
+            if table.state == GROUP_LOBBY and (no_games or table.app_id not in allowed):
                 await self._groups.end_space_table(table, END_APP_REMOVED)
+                continue
+            for entry in table.seated:
+                if entry.user_id is None or await self._still_in_space(space, entry):
+                    continue
+                log.info(
+                    "space_tables: %s left %s — out of table %s",
+                    entry.user_id,
+                    space.id,
+                    table.session_id,
+                )
+                await self._groups.drop_space_player(table.session_id, entry)
+
+    async def _still_in_space(self, space: Space, entry: GroupSeat) -> bool:
+        if entry.instance != self._own:
+            assert entry.user_id is not None
+            return await self._writer_seat(space.id, entry.instance, entry.user_id)
+        member = await self._spaces.get_member(space.id, str(entry.user_id))
+        return (
+            member is not None
+            and member.role in _WRITER_VALUES
+            and not await self._spaces.is_banned(space.id, str(entry.user_id))
+        )
 
     async def _on_member_left(self, event: SpaceMemberLeft) -> None:
-        """Someone from here left the space (or was removed): they leave
+        """Someone left the space (or was removed). One of ours leaves
         every table of it (a waiting table they host closes, a game being
-        played passes to the player seated longest). With no writer seat
-        left here, the space's cards go too."""
+        played passes to the player seated longest); with no writer seat
+        left here, the space's cards go too. Anyone else is taken out of
+        the tables this household hosts there."""
         if await self._user_repo.get_by_user_id(event.user_id) is None:
+            await self._on_space_config(event)
             return
         for table in await self._repo.list_for_space(event.space_id):
             row = await self._app_repo.get_pending_session(

@@ -126,6 +126,7 @@ def test_parse_card_round_trips_into_a_kept_table():
         {"host_user_id": None},
         {"expires_at": "2026-12-31T12:00:00+00:00"},
         {"expires_at": "soon"},
+        {"created_at": "0001-01-01T00:00:00+14:00"},
         {"end_reason": "cancelled"},
         {"announce": "yes"},
     ],
