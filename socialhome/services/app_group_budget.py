@@ -59,6 +59,13 @@ class TableSendBudget:
                 return max(1, math.ceil(when + self._window - now))
         return math.ceil(self._window)  # pragma: no cover — freed covers need
 
+    def refund(self, cost: int, now: float) -> None:
+        """Give back the last *cost* spent at *now* (a message another
+        budget then refused)."""
+        if self._spent and self._spent[-1] == (now, cost):
+            self._spent.pop()
+            self._total -= cost
+
     def idle(self, now: float) -> bool:
         """Nothing spent in the window (the budget can be forgotten)."""
         self._expire(now)

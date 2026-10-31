@@ -393,3 +393,17 @@ async def test_hub_batches_carry_no_usernames(net):
         "msg_id",
         "data",
     }
+
+
+async def test_a_hub_cant_replay_a_sealed_message_under_a_new_seq(net):
+    c = net.homes["c"]
+    sid, seats = await _table(net)
+    batch = await _whisper_batch(net, seats, sid)
+    assert len(_frames(c, "cleo")) == 1
+    replay = copy.deepcopy(batch)
+    replay["group"]["msgs"][0]["seq"] = 77  # same msg_id, sender, seal
+    net.forge("hub", "c", replay, MSG)
+    await net.flush()
+    assert len(_frames(c, "cleo")) == 1
+    held = await c.groups.take_held(app_id=APP, actor_user_id=c.uid("cleo"))
+    assert [h["seq"] for h in held] == [1]

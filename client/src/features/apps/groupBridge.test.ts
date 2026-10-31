@@ -135,6 +135,7 @@ describe('refusals', () => {
     expect(groupRefusal(new ApiError(409, 'x', { code: 'APP_GROUP_SEAT' }))?.code).toBe('group_seat')
     expect(groupRefusal(new ApiError(403, 'x', { code: 'APP_GROUP_CANT_JOIN' }))?.code).toBe('cant_join')
     expect(groupRefusal(new ApiError(413, 'x', { code: 'PAYLOAD_TOO_LARGE' }))?.code).toBe('too_large')
+    expect(groupRefusal(new ApiError(409, 'x', { code: 'APP_GROUPS_NOT_SUPPORTED' }))?.code).toBe('groups_not_supported')
     expect(groupRefusal(new ApiError(500, 'x', { code: 'BOOM' }))).toBeNull()
     expect(groupRefusal(new Error('x'))).toBeNull()
   })

@@ -223,6 +223,18 @@ async def test_messages_over_the_routes(client):
     assert (await r.json())["group"]["seq"] == 2
 
 
+async def test_held_takes_one_half_at_a_time(client):
+    base, bob, carol = await _seated_table(client)
+    await client.post(f"{base}/messages", json={"data": 1}, headers=_auth(bob))
+    held = f"/api/apps/{APP}/held"
+    r = await client.post(f"{held}?only=messages", headers=_auth(carol))
+    assert (await r.json())["group_messages"] == []
+    r = await client.post(f"{held}?only=group", headers=_auth(carol))
+    assert [m["data"] for m in (await r.json())["group_messages"]] == [1]
+    r = await client.post(f"{held}?only=nope", headers=_auth(carol))
+    assert r.status == 400
+
+
 async def test_message_bodies_out_of_shape_are_refused(client):
     base, bob, _carol = await _seated_table(client)
     for body in (

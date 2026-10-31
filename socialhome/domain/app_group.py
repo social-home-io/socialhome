@@ -79,6 +79,12 @@ GROUP_MIRRORS_PER_HUB_MAX: int = 50
 
 #: A group message's data (JSON-encoded) — the 1:1 live limit.
 GROUP_MESSAGE_MAX_BYTES: int = 64 * 1024
+#: A directed message's data times its target seats (it is sealed once
+#: per seat): one envelope stays well inside a peer's inbox limit.
+GROUP_DIRECT_MAX_PLAINTEXT: int = 128 * 1024
+#: The sealed entries' ciphertext of one directed message on the wire
+#: (b64url of the above plus a tag per seat).
+GROUP_DIRECT_MAX_BYTES: int = GROUP_DIRECT_MAX_PLAINTEXT * 4 // 3 + 30 * 64
 #: The most a closed app's mailbox keeps per sender seat (bigger messages
 #: go out live only).
 GROUP_HELD_MAX_BYTES: int = 16 * 1024
@@ -306,6 +312,15 @@ class AppGroupSeatError(CodedError):
     status = 409
     code = "APP_GROUP_SEAT"
     detail = "That player can't get this message."
+
+
+class AppGroupTooLargeError(CodedError):
+    """A directed message's data times its target seats is past
+    :data:`GROUP_DIRECT_MAX_PLAINTEXT` (it is sealed once per seat)."""
+
+    status = 413
+    code = "PAYLOAD_TOO_LARGE"
+    detail = "That message is too large for so many players."
 
 
 class AppGroupSessionError(CodedError):

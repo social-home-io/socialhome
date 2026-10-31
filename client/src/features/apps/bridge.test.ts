@@ -98,7 +98,7 @@ function acceptCalls(): unknown[][] {
 
 /** The mailbox takes the bridge made (``POST …/held``). */
 function heldCalls(): unknown[][] {
-  return mockApiPost.mock.calls.filter(([url]) => String(url).endsWith('/held'))
+  return mockApiPost.mock.calls.filter(([url]) => /\/held(\?|$)/.test(String(url)))
 }
 
 // ── test suite ─────────────────────────────────────────────────────────────
@@ -576,7 +576,8 @@ describe('mountBridge', () => {
       mockApiPost.mockResolvedValueOnce({ messages: rows })
       await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 2, method: 'app.held' } })
       expect(posted()[1]).toEqual({ id: 2, ok: true, result: events })
-      expect(heldCalls()).toHaveLength(1)
+      // Only the 1:1 half: group messages stay held for group.held.
+      expect(heldCalls()).toEqual([[`/api/apps/${APP_ID}/held?only=messages`]])
     })
 
     it('group messages that waited come as group:event, after the 1:1 ones; a pulling app asks with group.held', async () => {
@@ -593,12 +594,17 @@ describe('mountBridge', () => {
       cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID, permissions: ALL })
       const pull = captureMessageHandler()
       await pull({ source: iframe.contentWindow as unknown as Window, data: { id: 1, method: 'app.context', params: { held: 'pull' } } })
-      mockApiPost.mockResolvedValueOnce({ messages: rows, group_messages: group })
+      mockApiPost.mockResolvedValueOnce({ messages: [], group_messages: group })
       await pull({ source: iframe.contentWindow as unknown as Window, data: { id: 2, method: 'group.held' } })
+      mockApiPost.mockResolvedValueOnce({ messages: rows, group_messages: [] })
       await pull({ source: iframe.contentWindow as unknown as Window, data: { id: 3, method: 'app.held' } })
       expect(posted()[1]).toEqual({ id: 2, ok: true, result: [asEvent] })
       expect(posted()[2]).toEqual({ id: 3, ok: true, result: events })
-      expect(heldCalls()).toHaveLength(2)
+      // Each half its own take: pulling one never clears the other.
+      expect(heldCalls().slice(1)).toEqual([
+        [`/api/apps/${APP_ID}/held?only=group`],
+        [`/api/apps/${APP_ID}/held?only=messages`],
+      ])
     })
 
     it('a failed take hands over nothing (what waits stays for the next open)', async () => {

@@ -412,27 +412,45 @@ export function mountBridge(
     iframe.contentWindow?.postMessage(r, '*')
   }
 
-  /** The mailbox, taken once for this frame (the server clears what it
-   *  hands over): 1:1 messages and each table player's latest. A failed
-   *  request hands over nothing: whatever wasn't cleared waits for the
-   *  next open. */
-  let held: Promise<{ one: HeldEvent[]; group: GroupEvent[] }> | null = null
-  function takeHeld(): Promise<{ one: HeldEvent[]; group: GroupEvent[] }> {
-    if (!held) {
-      held = Promise.resolve().then(() => api.post<{ messages?: HeldRow[]; group_messages?: HeldGroupRow[] }>(
-        `/api/apps/${encodeURIComponent(appId)}/held`,
-      )).then(r => ({
-        one: (r?.messages ?? []).map((m): HeldEvent => ({
-          kind: m.kind === 'session' ? 'session' : 'message',
-          sessionId: m.session_id,
-          fromInstance: m.from_instance,
-          fromUser: m.from_user ?? undefined,
-          payload: m.payload,
-        })),
-        group: (r?.group_messages ?? []).map(heldToEvent),
-      }), () => ({ one: [], group: [] }))
+  /** The mailbox, taken once per half for this frame (the server clears
+   *  what it hands over): 1:1 messages (``one``) and each table player's
+   *  latest (``group``). An app that pushes takes both in one request; an
+   *  app that pulls takes each half with its own call (``?only=``), so
+   *  pulling one never clears the other. A failed request hands over
+   *  nothing: whatever wasn't cleared waits for the next open. */
+  type Held = { one: HeldEvent[]; group: GroupEvent[] }
+  let heldOne: Promise<HeldEvent[]> | null = null
+  let heldGroup: Promise<GroupEvent[]> | null = null
+  function fetchHeld(only?: 'messages' | 'group'): Promise<Held> {
+    const q = only ? `?only=${only}` : ''
+    return Promise.resolve().then(() => api.post<{ messages?: HeldRow[]; group_messages?: HeldGroupRow[] }>(
+      `/api/apps/${encodeURIComponent(appId)}/held${q}`,
+    )).then(r => ({
+      one: (r?.messages ?? []).map((m): HeldEvent => ({
+        kind: m.kind === 'session' ? 'session' : 'message',
+        sessionId: m.session_id,
+        fromInstance: m.from_instance,
+        fromUser: m.from_user ?? undefined,
+        payload: m.payload,
+      })),
+      group: (r?.group_messages ?? []).map(heldToEvent),
+    }), () => ({ one: [], group: [] }))
+  }
+  function takeHeld(): Promise<Held> {
+    if (!heldOne && !heldGroup) {
+      const both = fetchHeld()
+      heldOne = both.then(h => h.one)
+      heldGroup = both.then(h => h.group)
     }
-    return held
+    return Promise.all([takeOne(), takeGroup()]).then(([one, group]) => ({ one, group }))
+  }
+  function takeOne(): Promise<HeldEvent[]> {
+    if (!heldOne) heldOne = fetchHeld('messages').then(h => h.one)
+    return heldOne
+  }
+  function takeGroup(): Promise<GroupEvent[]> {
+    if (!heldGroup) heldGroup = fetchHeld('group').then(h => h.group)
+    return heldGroup
   }
 
   const groups = new GroupBridge(
@@ -440,7 +458,7 @@ export function mountBridge(
     msg => iframe.contentWindow?.postMessage(msg, '*'),
     async () => {
       heldHandedOver = true
-      return (await takeHeld()).group
+      return takeGroup()
     },
   )
 
@@ -543,7 +561,7 @@ export function mountBridge(
         case 'app.held': {
           // An app that applies held messages itself, once its state is in.
           heldHandedOver = true
-          reply({ id, ok: true, result: (await takeHeld()).one })
+          reply({ id, ok: true, result: await takeOne() })
           break
         }
 

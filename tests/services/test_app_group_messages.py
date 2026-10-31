@@ -18,6 +18,7 @@ from socialhome.domain.app_group import (
     AppGroupClosedError,
     AppGroupNotFoundError,
     AppGroupSeatError,
+    AppGroupTooLargeError,
 )
 from socialhome.domain.events import AppTurn, AppTurnsSeen
 from socialhome.services.app_group_budget import TableSendBudget
@@ -237,7 +238,7 @@ async def test_the_hub_send_budget(net, monkeypatch):
     hub = net.homes["hub"]
     monkeypatch.setattr(
         "socialhome.services.app_group_service.TableSendBudget",
-        lambda: TableSendBudget(limit=2),
+        lambda **_kw: TableSendBudget(limit=2),
     )
     hub.groups._budgets.clear()
     # Anna to everyone: b and c — 2 envelopes, the whole budget.
@@ -254,7 +255,7 @@ async def test_a_senders_household_applies_the_budget_too(net, monkeypatch):
     b = net.homes["b"]
     monkeypatch.setattr(
         "socialhome.services.app_group_service.TableSendBudget",
-        lambda: TableSendBudget(limit=1),
+        lambda **_kw: TableSendBudget(limit=1),
     )
     await _send(net, "ben", sid, 1)  # 1 envelope: hub → c
     with pytest.raises(AppGroupBusyError):
@@ -323,3 +324,38 @@ async def test_installed_app_turned_off_holds_without_live_frames(net):
     await c.app_repo.set_enabled(APP, enabled=True)
     held = await c.groups.take_held(app_id=APP, actor_user_id=c.uid("cleo"))
     assert [h["data"] for h in held] == [{"v": 1}]
+
+
+async def test_a_directed_message_to_many_seats_is_bounded(net):
+    sid, seats = await _table(net)
+    with pytest.raises(AppGroupTooLargeError):
+        await _send(
+            net,
+            "ben",
+            sid,
+            "x" * (50 * 1024),
+            to=[seats["anna"], seats["ada"], seats["cleo"]],
+        )
+
+
+async def test_one_player_cant_use_up_the_table(net, monkeypatch):
+    sid, _seats = await _table(net)
+    monkeypatch.setattr(
+        "socialhome.services.app_group_service._sender_share", lambda _h: 2
+    )
+    hub = net.homes["hub"]
+    await _send(net, "anna", sid, 1)  # b and c: Anna's whole share
+    with pytest.raises(AppGroupBusyError):
+        await _send(net, "anna", sid, 2)
+    await _send(net, "ada", sid, 3)  # Ada still has hers
+    assert hub.groups._budgets
+
+
+async def test_a_new_players_messages_follow_the_roster(net):
+    """The hub sends a roster still waiting before a message, so a
+    household hears a newly seated player's message."""
+    hub, c = net.homes["hub"], net.homes["c"]
+    hub.groups._roster_every = 30.0
+    sid, _seats = await _table(net, start=False)
+    await _send(net, "ben", sid, "hello")
+    assert [f["data"] for f in _frames(c, c.uid("cleo"))] == ["hello"]

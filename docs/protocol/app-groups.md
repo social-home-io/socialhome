@@ -257,7 +257,9 @@ messages ride the JSON `APP_MESSAGE` (outbox, retries) — not the binary
 - `turn`: a seat seated now (the next player). Only that seat's household
   raises "Your turn" — one row per game, as for 1:1 (`app_turn`).
 - `data`: any JSON, ≤ 64 KiB encoded (the 1:1 limit); a sealed entry's
-  `ct` ≤ 64 KiB + the tag.
+  `ct` ≤ 64 KiB + the tag; a directed message's data × its seats ≤ 128
+  KiB (it is sealed once per seat — the envelope stays inside a peer's
+  inbox limit).
 - A hub batch (`msgs`) holds ≤ 64 messages and ≤ 64 KiB of data unless a
   single message is bigger (then it rides alone).
 
@@ -267,10 +269,15 @@ The hub stamps every message it takes with `seq` (per table, + 1 each,
 directed ones too — a player can see a gap and know it wasn't for them)
 and hands batches on in `seq` order. A receiving household passes on a
 `seq` once: it drops one it saw already, and one more than 256 below the
-highest it has seen. The SDK hands messages to the app in `seq` order.
-(**Residual:** the "saw already" set is kept in memory; after a restart
-the hub could repeat a message from within the last 256 — only the hub,
-which can say anything to everyone anyway.) The sender's own message is
+highest it has seen, and one whose `(from_seat, msg_id)` it passed on
+already — `seq` is not sealed, so this is what stops a hub replaying a
+sealed message under a new number. The SDK hands messages to the app in
+`seq` order. Before a message, the hub sends a roster change that still
+waits for its 5-s slot, so every household knows a newly seated player
+(and their seat key) before their first message. (**Residual:** the
+"saw already" sets are kept in memory, the last 512 `msg_id`s per table;
+after a restart the hub could repeat a message from before — only the
+hub, which can say anything to everyone anyway.) The sender's own message is
 not echoed back to it (the `strict_order` echo + skipped-`seq` stubs of
 the design are left for an app that asks for them).
 
@@ -290,7 +297,9 @@ guardian block separates from them (the household's own rules, as for
 
 The hub passes on at most **600 envelopes a minute per table** (one per
 message per household it goes to): 20 messages a minute to everyone at a
-table of 30 households, 200 at a table of 4. Above it a message is
+table of 30 households, 200 at a table of 4. One player gets at most
+three times a fair share of it (`3 × 600 / households`, never less than
+two messages to everyone), so nobody can use up the table for the rest. Above it a message is
 refused — `429 APP_GROUP_BUSY` (`params.retry_after`, seconds) when the
 sender is on the hub's household; dropped (logged) from another household.
 A sender's household applies the same budget to what its own people send
@@ -303,7 +312,8 @@ seat and let the host send one result to everyone (SDK docs).
 A closed app gets **each player's latest message** of a table, ≤ 16 KiB
 each (bigger ones go out live only): `app_group_held` keeps, per (app,
 person, table, sender seat), the newest by `seq`. `POST /api/apps/{id}/held`
-hands them over (oldest `seq` first) as `group_messages` and clears them.
+hands them over (oldest `seq` first) as `group_messages` and clears them
+(`?only=group` / `?only=messages` takes one half and leaves the other).
 The table's own state (roster, `seq`, host, `lobby/playing/ended`) is on the
 table row, never in a held message. **SDK contract for groups:** *a closed
 app gets each player's latest message; send state, not deltas.*
@@ -334,7 +344,7 @@ another household is at the table):
 | Route | Body → answer |
 |---|---|
 | `POST /api/apps/{id}/groups/{sid}/messages` | `{data, to?: [seat…], turn?: seat}` → `{seq}` (`seq` is the number when this household is the hub, `null` when it went to the hub's household). 413 `PAYLOAD_TOO_LARGE` past 64 KiB; 429 `APP_GROUP_BUSY`; 409 `APP_GROUP_SEAT` (a `to` / `turn` seat not seated, your own seat, or no seat key for it); 409 `APP_GROUP_CLOSED` (ended, or you aren't seated); 404 `APP_GROUP_NOT_FOUND`. Rate limit 300 / min per person. |
-| `POST /api/apps/{id}/held` | as for 1:1, plus `group_messages: [{session_id, seq, from_seat, direct, data}]`, oldest `seq` first. |
+| `POST /api/apps/{id}/held` | as for 1:1, plus `group_messages: [{session_id, seq, from_seat, direct, data}]`, oldest `seq` first. `?only=messages` / `?only=group` takes one half (the bridge's `app.held` / `group.held` each take their own, so pulling one never loses the other). |
 
 **WebSocket** (to the person's own sockets):
 `{type: "app.group.message", app_id, session_id, seq, from_seat, direct, data}`
@@ -359,10 +369,16 @@ method needs `people` (else `permission_denied`).
 | `group.held` | — → `GroupEvent[]` (the held `message` events, oldest `seq` first) — for an app that pulls (`app.context` params `{held: 'pull'}`); otherwise they are posted as events right after the `app.context` reply |
 | `group.open` | `{suggest?: PersonRef[]}` (the same `{instance_id, user_ref, is_local}` shape as `people.pick`) → `GroupSession` or `null` (cancelled). Answers `unavailable` until Social Home's group sheet lands (group play PR 5); an app opens a table only through that sheet (D3) |
 
-Error codes: `group_not_found`, `group_not_host`, `group_closed`,
+Error codes: every server `APP_GROUP_*` / `APP_GROUPS_*` code lower-cased
+without `app_` — `group_not_found`, `group_not_host`, `group_closed`,
 `group_full`, `group_too_few`, `group_seat`, `group_busy` (with
-`retryAfterMs`), `too_large`, `cant_join`, plus `permission_denied` /
-`error`.
+`retryAfterMs`), `group_size`, `group_open_limit` / `group_daily_limit`,
+`group_household_too_old`, `group_session`, `groups_not_supported` —
+and `cant_join` (`APP_GROUP_CANT_JOIN`), `too_large` (413, past 64 KiB, or
+a directed message's data × its seats past 128 KiB), `invalid` (a call
+without a well-formed table id / seat / `to` / `turn`, refused before the
+server), `unavailable` (`group.open` for now), `unknown_method`, plus
+`permission_denied` / `error`.
 
 ```ts
 interface GroupSession {
@@ -391,8 +407,9 @@ The bridge derives `joined` / `left` / `removed` / `started` /
 `host-changed` / `ended` by comparing each `app.group` frame with the last
 view it saw of that table (a seat newly `seated`, a seat that turned
 `left` / `removed`, `lobby` → `playing`, a new host seat, → `ended`);
-your own place ending (`change`: `left` / `removed` / `withdrawn`) is a
-`removed` (or `left`) event for your seat. `session` is the table after
+your own place ending (`change`: `left` / `removed`) is a `left` /
+`removed` event for your seat (`session.me`); an invite withdrawn before
+you sat (`withdrawn`) has no seat and posts nothing. `session` is the table after
 the change (an addition to design 2.9).
 
 `app.context` gains `groups: true` (this host speaks `group.*`) and, when

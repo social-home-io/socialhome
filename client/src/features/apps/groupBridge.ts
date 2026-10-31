@@ -162,7 +162,8 @@ export function diffEvents(prev: GroupSession, next: GroupSession): GroupEvent[]
 export function groupRefusal(err: unknown): GroupRefused | null {
   if (!(err instanceof ApiError) || !err.code) return null
   if (err.code === 'PAYLOAD_TOO_LARGE') return new GroupRefused('too_large', err.message)
-  if (!err.code.startsWith('APP_GROUP_')) return null
+  // ``APP_GROUP_*`` and ``APP_GROUPS_NOT_SUPPORTED``.
+  if (!err.code.startsWith('APP_GROUP')) return null
   const code = err.code.slice('APP_'.length).toLowerCase()
   const params = err.extra?.params as { retry_after?: unknown } | undefined
   const retry = typeof params?.retry_after === 'number' ? params.retry_after * 1000 : undefined

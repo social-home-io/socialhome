@@ -75,6 +75,8 @@ from ..domain.app_group import (
     GROUP_BATCH_MAX_BYTES,
     GROUP_BATCH_MAX_MESSAGES,
     GROUP_COALESCE_SECONDS,
+    GROUP_DIRECT_MAX_BYTES,
+    GROUP_DIRECT_MAX_PLAINTEXT,
     GROUP_ENDED,
     GROUP_ENDED_KEEP_SECONDS,
     GROUP_HELD_MAX_BYTES,
@@ -88,6 +90,7 @@ from ..domain.app_group import (
     GROUP_PICK_MAX_PLAYERS,
     GROUP_PLAYING,
     GROUP_ROSTER_EVERY_SECONDS,
+    GROUP_SEND_BUDGET,
     GROUP_SEQ_WINDOW,
     GROUP_TABLES_PER_DAY_MAX,
     PERSON_CLOSE_REASONS,
@@ -117,6 +120,7 @@ from ..domain.app_group import (
     AppGroupSizeError,
     AppGroupsNotSupportedError,
     AppGroupTooFewError,
+    AppGroupTooLargeError,
     GroupMessage,
     GroupSeat,
     GroupSession,
@@ -199,6 +203,41 @@ def _now() -> datetime:
 
 #: :meth:`AppGroupService._open` found nothing it could open.
 _UNOPENED = object()
+
+#: ``msg_id`` s a table's copy remembers (a hub can't replay a message under
+#: a new ``seq``).
+_SEEN_MSG_IDS_MAX = 2 * GROUP_SEQ_WINDOW
+
+
+class _Seen:
+    """What one table's copy passed on lately: ``seq`` numbers (within
+    :data:`GROUP_SEQ_WINDOW` of the newest) and ``(from_seat, msg_id)``."""
+
+    __slots__ = ("msg_ids", "seqs")
+
+    def __init__(self) -> None:
+        self.seqs: set[int] = set()
+        self.msg_ids: OrderedDict[tuple[int, str], None] = OrderedDict()
+
+    def add(self, seq: int, mid: tuple[int, str], floor: int) -> None:
+        self.seqs.add(seq)
+        self.seqs = {s for s in self.seqs if s > floor}
+        self.msg_ids[mid] = None
+        while len(self.msg_ids) > _SEEN_MSG_IDS_MAX:
+            self.msg_ids.popitem(last=False)
+
+
+def _sender_share(households: int) -> int:
+    """The envelopes a minute one player may send at a table of
+    *households*: three times a fair share, never less than two messages
+    to everyone, never more than the table's budget."""
+    fair = 3 * GROUP_SEND_BUDGET // max(2, households)
+    return min(GROUP_SEND_BUDGET, max(fair, 2 * max(1, households - 1)))
+
+
+def _sealed_size(msg: GroupMessage) -> int:
+    """The ciphertext a directed message carries (b64url characters)."""
+    return sum(len(str(e.get("ct", ""))) for e in msg.sealed)
 
 
 def _batches(msgs: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
@@ -293,7 +332,7 @@ class AppGroupService(ProtectionGateMixin):
         self._budgets: dict[str, TableSendBudget] = {}
         #: The ``seq`` numbers each table's copy passed on lately (repeats
         #: are dropped) — bounded per table, least recent table forgotten.
-        self._seen: OrderedDict[str, set[int]] = OrderedDict()
+        self._seen: OrderedDict[str, _Seen] = OrderedDict()
 
     @property
     def _own(self) -> str:
@@ -1220,7 +1259,8 @@ class AppGroupService(ProtectionGateMixin):
 
     async def _check_seat_keys(self, table: GroupSession) -> None:
         """Every seat key in a hub's snapshot: a suite this build knows;
-        this household's own must be the one it made; another household's
+        a key under this household must be the one it made (none planted
+        before it made one); another household's
         must verify against the identity key this household stores for it
         (a household it isn't paired with: the hub's word — the residual
         of design 2.3). Raises :class:`GroupWireError` (the snapshot is
@@ -1237,7 +1277,7 @@ class AppGroupService(ProtectionGateMixin):
                 parse_seat_key(wire)
                 if entry.instance == own:
                     mine = await self._own_seat_secret(table.session_id)
-                    if mine is not None and mine[1] != key:
+                    if mine is None or mine[1] != key:
                         raise SeatSealError("not our seat key")
                     continue
                 identity = await self._identity_pk(entry.instance)
@@ -1304,22 +1344,28 @@ class AppGroupService(ProtectionGateMixin):
                 raise AppGroupSeatError()
             priv, _pub = await self._own_seat_secret_or_mint(table.session_id)
             plaintext = orjson.dumps(data)
+            if len(plaintext) * len(targets) > GROUP_DIRECT_MAX_PLAINTEXT:
+                raise AppGroupTooLargeError()
             sealed = []
             for seat in targets:
                 key = seats[seat].seat_key
                 if key is None:
                     raise AppGroupSeatError()
-                sealed.append(
-                    seal(
-                        plaintext,
-                        my_priv=priv,
-                        peer_pub=b64url_decode(key.pub),
-                        session_id=table.session_id,
-                        from_seat=mine.seat,
-                        to_seat=seat,
-                        msg_id=msg_id,
+                try:
+                    sealed.append(
+                        seal(
+                            plaintext,
+                            my_priv=priv,
+                            peer_pub=b64url_decode(key.pub),
+                            session_id=table.session_id,
+                            from_seat=mine.seat,
+                            to_seat=seat,
+                            msg_id=msg_id,
+                        )
                     )
-                )
+                except (SeatSealError, ValueError) as exc:
+                    # A seat key that can't be sealed to (the hub's word).
+                    raise AppGroupSeatError() from exc
             msg = GroupMessage(
                 msg_id=msg_id, to=targets, sealed=tuple(sealed), turn=turn
             )
@@ -1333,7 +1379,7 @@ class AppGroupService(ProtectionGateMixin):
             seq = await self._hub_message(session_id, own, user.username, msg)
             return {"seq": seq}
         # This household's own budget for the table, before the hub's.
-        self._spend(table, self._recipient_households(table, mine, msg))
+        self._spend(table, self._recipient_households(table, mine, msg), sender=mine)
         payload: dict[str, Any] = {
             "app_id": app_id,
             "session_id": session_id,
@@ -1365,13 +1411,30 @@ class AppGroupService(ProtectionGateMixin):
             and (msg.to is None or e.seat in msg.to)
         } - {table.hub_instance}
 
-    def _spend(self, table: GroupSession, households: set[str]) -> None:
-        """Spend one envelope per household of the table's send budget —
-        or :class:`AppGroupBusyError`."""
-        budget = self._budgets.get(table.session_id)
-        if budget is None:
-            budget = self._budgets[table.session_id] = TableSendBudget()
-        wait = budget.take(len(households), asyncio.get_running_loop().time())
+    def _spend(
+        self, table: GroupSession, households: set[str], *, sender: GroupSeat
+    ) -> None:
+        """Spend one envelope per household of the sender's share and of
+        the table's send budget — or :class:`AppGroupBusyError`. The share
+        (:func:`_sender_share`) keeps one player from using up the table."""
+        now = asyncio.get_running_loop().time()
+        cost = len(households)
+        if cost <= 0:
+            return
+        mine_key = f"{table.session_id}|{sender.instance}|{sender.user}"
+        mine = self._budgets.get(mine_key)
+        if mine is None:
+            mine = self._budgets[mine_key] = TableSendBudget(
+                limit=_sender_share(len(table.households()))
+            )
+        whole = self._budgets.get(table.session_id)
+        if whole is None:
+            whole = self._budgets[table.session_id] = TableSendBudget()
+        wait = mine.take(cost, now)
+        if wait is None:
+            wait = whole.take(cost, now)
+            if wait is not None:
+                mine.refund(cost, now)
         if wait is not None:
             raise AppGroupBusyError(wait)
 
@@ -1412,7 +1475,17 @@ class AppGroupService(ProtectionGateMixin):
                 except (SeatSealError, UnsupportedSeatKemSuite) as exc:
                     raise GroupWireError(f"sealed entry: {exc}") from exc
             households = self._recipient_households(table, sender, msg)
-            self._spend(table, households)
+            self._spend(table, households, sender=sender)
+            if msg.to is not None and _sealed_size(msg) > GROUP_DIRECT_MAX_BYTES:
+                raise GroupWireError("sealed entries too large")
+            if table.session_id in self._roster_due:
+                # Someone sat down and the coalesced roster still waits: it
+                # goes first, so every household knows the seats (and their
+                # keys) this message names.
+                self._roster_sent[session_id] = asyncio.get_running_loop().time()
+                await self._broadcast(
+                    table, VERB_ROSTER, states=(SEAT_SEATED, SEAT_INVITED)
+                )
             seq = table.seq + 1
             stamp = _now().isoformat()
             await self._repo.raise_seq(session_id, seq, now=stamp)
@@ -1427,7 +1500,8 @@ class AppGroupService(ProtectionGateMixin):
                     and (msg.to is None or e.seat in msg.to)
                 )
                 self._queue_out(table, household, numbered.relayed(for_seats))
-        await self._deliver_local(table, numbered)
+            # Under the lock: the hub's own people get them in ``seq`` order.
+            await self._deliver_local(table, numbered)
         return seq
 
     def _queue_out(self, table: GroupSession, household: str, msg: dict) -> None:
@@ -1534,23 +1608,33 @@ class AppGroupService(ProtectionGateMixin):
             return
         seen = self._seen.get(table.session_id)
         if seen is None:
-            seen = self._seen[table.session_id] = set()
+            seen = self._seen[table.session_id] = _Seen()
         self._seen.move_to_end(table.session_id)
         while len(self._seen) > 4 * GROUP_MIRRORS_PER_HUB_MAX:
             self._seen.popitem(last=False)
-        newest = max([table.seq, *seen])
-        if msg.seq in seen or msg.seq <= newest - GROUP_SEQ_WINDOW:
+        newest = max([table.seq, *seen.seqs])
+        # A repeat by ``seq`` — or the same sender's ``msg_id`` under a new
+        # ``seq`` (a hub replaying a sealed message: ``seq`` isn't sealed).
+        mid = (msg.from_seat, msg.msg_id)
+        if (
+            msg.seq in seen.seqs
+            or mid in seen.msg_ids
+            or msg.seq <= newest - GROUP_SEQ_WINDOW
+        ):
             log.info(
                 "app_group: seq %s at %s seen already — dropped",
                 msg.seq,
                 table.session_id,
             )
             return
-        seen.add(msg.seq)
-        for old in [s for s in seen if s <= max(newest, msg.seq) - GROUP_SEQ_WINDOW]:
-            seen.discard(old)
+        seen.add(msg.seq, mid, max(newest, msg.seq) - GROUP_SEQ_WINDOW)
         await self._repo.raise_seq(table.session_id, msg.seq, now=_now().isoformat())
-        await self._deliver_local(table, msg)
+        try:
+            await self._deliver_local(table, msg)
+        except Exception:
+            log.exception(
+                "app_group: seq %s at %s not delivered", msg.seq, table.session_id
+            )
 
     async def _deliver_local(self, table: GroupSession, msg: GroupMessage) -> None:
         """Hand *msg* to each person of this household seated at *table*
@@ -1560,7 +1644,7 @@ class AppGroupService(ProtectionGateMixin):
         Live to their app, kept in their mailbox (≤ 16 KiB, the latest
         per sender seat), and "Your turn" when ``turn`` names their seat."""
         sender = table.at_seat(msg.from_seat)
-        if sender is None:
+        if sender is None or sender.state != SEAT_SEATED:
             log.info(
                 "app_group: message from unknown seat %s at %s dropped",
                 msg.from_seat,
