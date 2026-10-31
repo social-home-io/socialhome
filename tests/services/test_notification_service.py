@@ -5385,7 +5385,7 @@ async def test_let_everyone_know_is_one_in_app_row_never_a_push(stack):
         if n.type == "app_table_announced"
     ]
     assert row.title == "Bob started a game of Chess in Lakeside"
-    assert row.link_url == "/spaces/sp1/games"
+    assert row.link_url == "/spaces/sp1"
     assert notif_kind("app_table_announced") is NotifKind.GAMES
     assert push.calls == []
     # Someone Anna blocked gets no row.

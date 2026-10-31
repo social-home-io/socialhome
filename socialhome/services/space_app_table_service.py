@@ -90,6 +90,8 @@ from ..domain.events import (
     SpaceConfigChanged,
     SpaceFeaturesApplied,
     SpaceMemberLeft,
+    SpaceRemoteSeatEnded,
+    SpaceRemoteSeatLive,
 )
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.federation_capabilities import FederationCapability
@@ -254,6 +256,9 @@ class SpaceTableService(BusPublisherMixin):
         bus.subscribe(SpaceConfigChanged, self._on_space_config)
         bus.subscribe(SpaceMemberLeft, self._on_member_left)
         bus.subscribe(RemoteSpaceMemberBanned, self._on_space_config)
+        # A remote seat removed, left or demoted (a follower is live too).
+        bus.subscribe(SpaceRemoteSeatEnded, self._on_space_config)
+        bus.subscribe(SpaceRemoteSeatLive, self._on_space_config)
 
     async def stop(self) -> None:
         """Let the card sends that wait go (none is sent)."""
@@ -379,20 +384,20 @@ class SpaceTableService(BusPublisherMixin):
                     table.app_id, user.user_id, table.session_id
                 )
                 mine = row is not None and row.is_group
-                if not mine:
-                    if (
-                        table.app_id not in allowed
-                        or space.archived
-                        or table.state == GROUP_ENDED
-                        or (table.state == GROUP_LOBBY and table.expires_at < now)
-                        or shown >= SPACE_TABLES_SHOWN
-                        or await self._host_blocked(user, table)
-                    ):
-                        continue
-                    shown += 1
+                if not mine and (
+                    table.app_id not in allowed
+                    or space.archived
+                    or table.state == GROUP_ENDED
+                    or (table.state == GROUP_LOBBY and table.expires_at < now)
+                    or shown >= SPACE_TABLES_SHOWN
+                    or await self._host_blocked(user, table)
+                ):
+                    continue
                 app = await self._app_repo.get(table.app_id)
                 if app is not None and not await self._age_ok(app, user):
                     continue
+                if not mine:
+                    shown += 1
                 view = self.card_view(table)
                 view["app"] = {
                     "installed": app is not None,
@@ -627,7 +632,7 @@ class SpaceTableService(BusPublisherMixin):
         loop = asyncio.get_running_loop()
         last = self._card_last.get(sid)
         if last is None or last[0] != state:
-            await self._send_card(table, first=last is None)
+            await self._send_card(table)
             return
         if last[1] == seated or sid in self._card_due:
             return
@@ -656,7 +661,7 @@ class SpaceTableService(BusPublisherMixin):
         if (last[0], last[1]) != (card_state(table), len(table.seated)):
             await self._send_card(table)
 
-    async def _send_card(self, table: GroupSession, *, first: bool = False) -> None:
+    async def _send_card(self, table: GroupSession) -> None:
         space_id = table.space_id
         assert space_id is not None
         state = card_state(table)
@@ -665,7 +670,24 @@ class SpaceTableService(BusPublisherMixin):
             self._card_last.pop(table.session_id, None)
         else:
             self._card_last[table.session_id] = (state, len(table.seated), loop.time())
-        announce = first and table.card is not None and table.card.announce
+        # The hub's own "let everyone know" rides only the first card it
+        # sends — once, for good: ``seen_at`` marks it sent (a restart or a
+        # later card never announces again).
+        announce = (
+            table.card is not None and table.card.announce and not table.card.seen_at
+        )
+        if announce:
+            async with self._lock(table.session_id):
+                current = await self._repo.get(table.session_id)
+                if current is not None and current.card is not None:
+                    await self._repo.save(
+                        dataclasses.replace(
+                            current,
+                            card=dataclasses.replace(
+                                current.card, seen_at=_now().isoformat()
+                            ),
+                        )
+                    )
         targets = await self._writers.writer_households(space_id)
         if not targets:
             return
@@ -841,11 +863,13 @@ class SpaceTableService(BusPublisherMixin):
                 hub_instance=sender,
                 seen_at=seen.seen_at if seen is not None else _now().isoformat(),
             )
+            assert kept.card is not None
             kept = dataclasses.replace(
                 kept,
+                opener_user=existing.opener_user,
+                updated_at=_now().isoformat(),
                 card=dataclasses.replace(
-                    kept.card or TableCard(seated=card.seated),
-                    announce=bool(seen and seen.announce),
+                    kept.card, announce=bool(seen and seen.announce)
                 ),
             )
             async with self._lock(card.table_id):
@@ -863,6 +887,8 @@ class SpaceTableService(BusPublisherMixin):
         now = _now()
         day_cut = (now - timedelta(days=1)).isoformat()
         async with self._lock(f"hub:{sender}"):
+            if await self._repo.get(card.table_id) is not None:
+                return  # another card for it got here first: the next one updates it
             from_host = [
                 t
                 for t in await self._repo.list_for_space(space.id)
@@ -1064,7 +1090,9 @@ class SpaceTableService(BusPublisherMixin):
         event: SpaceFeaturesApplied
         | SpaceConfigChanged
         | RemoteSpaceMemberBanned
-        | SpaceMemberLeft,
+        | SpaceMemberLeft
+        | SpaceRemoteSeatEnded
+        | SpaceRemoteSeatLive,
     ) -> None:
         """The space changed (its config, its roster, a ban): the tables
         this household hosts in it follow.
@@ -1086,7 +1114,9 @@ class SpaceTableService(BusPublisherMixin):
             if table.hub_instance != self._own or table.state == GROUP_ENDED:
                 continue
             if table.state == GROUP_LOBBY and (no_games or table.app_id not in allowed):
-                await self._groups.end_space_table(table, END_APP_REMOVED)
+                await self._groups.end_space_table(
+                    table, END_APP_REMOVED, only_lobby=True
+                )
                 continue
             for entry in table.seated:
                 if entry.user_id is None or await self._still_in_space(space, entry):

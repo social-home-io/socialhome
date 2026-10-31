@@ -85,11 +85,11 @@ async def test_the_games_list_is_chosen_by_owner_admins_and_moderators(client):
     r = await client.put(
         url, json={"allowed_apps": ["bad id"]}, headers=_auth(tok["owner"])
     )
-    assert r.status in (400, 422)
+    assert r.status == 422
     r = await client.put(
         url, json={"allowed_apps": "quiz"}, headers=_auth(tok["owner"])
     )
-    assert r.status in (400, 422)
+    assert r.status == 422
 
 
 async def test_a_moderator_changes_nothing_else_through_the_config(client):

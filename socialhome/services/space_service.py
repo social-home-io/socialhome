@@ -123,6 +123,7 @@ from ..domain.events import (
     SpaceMemberProfileUpdated,
     SpacePostCreated,
     SpacePostModerated,
+    SpaceRemoteSeatEnded,
     SpaceRemoteSeatLive,
     UserProvisioned,
 )
@@ -6980,6 +6981,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             space_id, instance_id, user_id
         )
         await self._remote_members.remove(space_id, instance_id, user_id)
+        await self._bus.publish(
+            SpaceRemoteSeatEnded(
+                space_id=space_id, instance_id=instance_id, user_id=user_id
+            )
+        )
         # Audit-fix (HIGH from PR #429 review): if that was the
         # last remote member from this peer instance, also drop the
         # ``space_instances`` row so subsequent broadcasts via

@@ -1736,6 +1736,19 @@ class PeerCapabilitiesAdvertised(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class SpaceRemoteSeatEnded(DomainEvent):
+    """A remote member's seat in this household's roster mirror just ended
+    — removed by the host here (``remove_remote_member``) or tombstoned by
+    authority-signed roster gossip (they left, or were removed). The game
+    tables this household hosts in the space take them out (v_77)."""
+
+    space_id: str
+    instance_id: str
+    user_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class SpaceRemoteSeatLive(DomainEvent):
     """A remote member's seat just became live in this household's roster
     mirror (``space_remote_members``) — seated by an accept / redeem, or

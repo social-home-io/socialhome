@@ -21,7 +21,11 @@ from socialhome.crypto import (
     generate_space_keypair,
 )
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import RemoteJoinRequestApproved, SpaceInviteAnswered
+from socialhome.domain.events import (
+    RemoteJoinRequestApproved,
+    SpaceInviteAnswered,
+    SpaceRemoteSeatEnded,
+)
 from socialhome.domain.federation import (
     DELIVERY_ERROR_MESH_DEFERRED,
     DELIVERY_ERROR_QUEUED,
@@ -380,6 +384,18 @@ async def test_remove_remote_member_happy(stack):
         user_id="bob",
     )
     stack.fed_svc.send_with_mesh_fallback.assert_awaited()
+
+
+async def test_remove_remote_member_announces_the_seat_ended(stack):
+    """v_77: the game tables this household hosts take the player out."""
+    await _user(stack, "alicehost")
+    space = await stack.svc.create_space(owner_username="alicehost", name="S")
+    ended: list = []
+    stack.bus.subscribe(SpaceRemoteSeatEnded, ended.append)
+    await stack.svc.remove_remote_member(
+        space.id, actor_username="alicehost", instance_id="peer", user_id="bob"
+    )
+    assert [(e.instance_id, e.user_id) for e in ended] == [("peer", "bob")]
 
 
 # ── request_join_remote ────────────────────────────────────────────

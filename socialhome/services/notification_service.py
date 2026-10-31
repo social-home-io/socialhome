@@ -54,6 +54,7 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from string import Formatter
 
+from ..domain.app_group import END_CLOSED_BY_MODERATOR
 from ..domain.apps import (
     PENDING_SESSION_TTL_SECONDS,
     SESSION_INVITED,
@@ -3169,7 +3170,7 @@ class NotificationService(ProtectionGateMixin):
                 user_id=event.to_user_id,
                 type="app_table_announced",
                 title=title,
-                link_url=f"/spaces/{event.space_id}/games",
+                link_url=f"/spaces/{event.space_id}",
             ),
             about=NotificationSubject.of(
                 NotificationObject.APP_SESSION,
@@ -3191,33 +3192,51 @@ class NotificationService(ProtectionGateMixin):
             return
         locale = self._locale(recipient)
         app_name = await self._app_name(event.app_id, locale)
-        kind = "moderator" if event.reason == "closed_by_moderator" else "not_allowed"
-        fallbacks = {
-            ("moderator", True): "A moderator closed the {app} game in {space}",
-            ("moderator", False): "A moderator closed a game in {space}",
-            ("not_allowed", True): "{app} is no longer allowed in {space}",
-            ("not_allowed", False): "A game is no longer allowed in {space}",
-        }
-        key = f"notification.app.table_closed_{kind}" + ("" if app_name else "_generic")
-        title = self._t(
-            key,
-            locale=locale,
-            fallback=fallbacks[(kind, bool(app_name))],
-            app=app_name or "",
-            space=event.space_name,
-        )
+        by_moderator = event.reason == END_CLOSED_BY_MODERATOR
+        if by_moderator and app_name:
+            title = self._t(
+                "notification.app.table_closed_moderator",
+                locale=locale,
+                fallback="A moderator closed the {app} game in {space}",
+                app=app_name,
+                space=event.space_name,
+            )
+        elif by_moderator:
+            title = self._t(
+                "notification.app.table_closed_moderator_generic",
+                locale=locale,
+                fallback="A moderator closed a game in {space}",
+                space=event.space_name,
+            )
+        elif app_name:
+            title = self._t(
+                "notification.app.table_closed_not_allowed",
+                locale=locale,
+                fallback="{app} is no longer allowed in {space}",
+                app=app_name,
+                space=event.space_name,
+            )
+        else:
+            title = self._t(
+                "notification.app.table_closed_not_allowed_generic",
+                locale=locale,
+                fallback="A game is no longer allowed in {space}",
+                space=event.space_name,
+            )
         await self._save_notif(
             new_notification(
                 user_id=event.to_user_id,
                 type="app_table_closed",
                 title=title,
-                link_url=f"/spaces/{event.space_id}/games",
+                link_url=f"/spaces/{event.space_id}",
             ),
             about=NotificationSubject.of(
                 NotificationObject.APP_SESSION,
                 f"{event.app_id}/{event.session_id}",
                 space_name=app_name,
             ),
+            # Nobody is named: who closed it stays the space's business.
+            actor_user_id=None,
             push=False,
         )
 

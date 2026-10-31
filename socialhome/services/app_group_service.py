@@ -2596,8 +2596,7 @@ class AppGroupService(ProtectionGateMixin):
         """Take *entry* out of a space table this household hosts because
         they left the space (removed, banned, made a follower): the host
         person as if they left, anyone else as if the host removed them."""
-        async with self._lock(session_id):
-            table = await self._hub_table(session_id)
+        table = await self._hub_table(session_id)
         if table is None or table.state == GROUP_ENDED:
             return
         current = table.entry(entry.instance, entry.user)
@@ -2614,9 +2613,16 @@ class AppGroupService(ProtectionGateMixin):
             )
         )
 
-    async def end_space_table(self, table: GroupSession, reason: str) -> None:
+    async def end_space_table(
+        self, table: GroupSession, reason: str, *, only_lobby: bool = False
+    ) -> None:
         """End a space table this household hosts for everyone (a
-        moderator closed it, its app left the space's list)."""
+        moderator closed it, its app left the space's list). With
+        *only_lobby*, a table that started meanwhile plays on (D10)."""
+        if only_lobby:
+            current = await self._hub_table(table.session_id)
+            if current is None or current.state != GROUP_LOBBY:
+                return
         await self._hub_end(table, reason)
 
     async def on_space_session(

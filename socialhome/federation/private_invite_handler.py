@@ -36,6 +36,7 @@ from ..domain.events import (
     RemoteSpaceLocationUpdated,
     RemoteSpaceMemberRemoved,
     SpaceAdminAuthorityRevoked,
+    SpaceRemoteSeatEnded,
     SpaceRemoteSeatLive,
 )
 from ..domain.federation import FederationEvent, FederationEventType
@@ -1824,6 +1825,12 @@ class PrivateSpaceInviteHandler:
         if applied and not tombstoned:
             await self._bus.publish(
                 SpaceRemoteSeatLive(
+                    space_id=space_id, instance_id=instance_id, user_id=user_id
+                )
+            )
+        if applied and tombstoned:
+            await self._bus.publish(
+                SpaceRemoteSeatEnded(
                     space_id=space_id, instance_id=instance_id, user_id=user_id
                 )
             )

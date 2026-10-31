@@ -43,6 +43,7 @@ from socialhome.domain.events import (
     RemoteSpaceMemberBanned,
     SpaceFeaturesApplied,
     SpaceMemberLeft,
+    SpaceRemoteSeatEnded,
 )
 from socialhome.domain.federation import FederationEventType
 from socialhome.domain.space import SpaceFeatures, SpaceType, SubscriberReadOnlyError
@@ -698,3 +699,39 @@ async def test_the_live_card_skips_people_who_block_the_host(net):
     await _open(net)
     to = {uid for uid, f in h["b"].home.ws.frames if f["type"] == "space.app_table"}
     assert to == {h["b"].uid("ben")}
+
+
+async def test_a_remote_seat_that_ends_leaves_the_table(net):
+    """The host removes Mia from the space (her seat on its roster mirror
+    ends): the tables it hosts take her out."""
+    h = _h(net)
+    sid = await _open(net)
+    await _join(net, "b", "ben", sid)
+    await _join(net, "m", "mia", sid)
+    await h["host"].home.db.enqueue(
+        "UPDATE space_remote_members SET tombstoned = 1"
+        " WHERE space_id = ? AND user_id = ?",
+        (SPACE, h["m"].uid("mia")),
+    )
+    await h["host"].tables._on_space_config(
+        SpaceRemoteSeatEnded(
+            space_id=SPACE, instance_id=h["m"].instance, user_id=h["m"].uid("mia")
+        )
+    )
+    await net.flush()
+    hub = await h["host"].home.group_repo.get(sid)
+    assert [e.user for e in hub.seated] == ["anna", "ben"]
+
+
+async def test_let_everyone_know_goes_out_once_even_after_a_restart(net):
+    h = _h(net)
+    sid = await _open(net, announce=True)
+    h["host"].tables._card_last.clear()  # as after a restart
+    await _join(net, "b", "ben", sid)
+    announced = [
+        p["announce"]
+        for _s, t, p in net.space_events(to=h["m"].instance)
+        if t == SPACE_TABLE
+    ]
+    assert announced[0] is True and not any(announced[1:])
+    assert len(announced) >= 2

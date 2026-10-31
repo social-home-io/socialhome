@@ -42,9 +42,13 @@
 --       * not storing cards at all (ask the hub on every view) — a request
 --         per viewer instead of an event per change, and nothing to show
 --         while the hub is offline.
---   (3) Smallest change: two additive columns, ``allowed_apps`` NOT NULL
+--   (3) Smallest change: one index (``list_for_space``) and two
+--       additive columns, ``allowed_apps`` NOT NULL
 --       with a constant default (no backfill: every existing space has no
 --       games, which is the owner's default), ``card_json`` NULL.
 
 ALTER TABLE spaces ADD COLUMN allowed_apps TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE app_group_sessions ADD COLUMN card_json TEXT;
+
+-- A space's tables are read by space on every list, card and config change.
+CREATE INDEX idx_app_group_sessions_space ON app_group_sessions(space_id);
