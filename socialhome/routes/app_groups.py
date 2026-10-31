@@ -187,12 +187,14 @@ class AppGroupCloseView(AppPermissionView):
 
 class AppGroupMessagesView(AppPermissionView):
     """``POST …/groups/{session_id}/messages`` — a seated person's app sends
-    ``{data, to?: [seat…], turn?: seat}`` to everyone at the table, or to
-    the seats in ``to`` (sealed to their households' seat keys — the hub
-    passes on ciphertext only). ``turn`` names whose turn it is now. →
+    ``{data, to?: [seat…], turn?: seat, final?: true}`` to everyone at the
+    table, or to the seats in ``to`` (sealed to their households' seat keys
+    — the hub passes on ciphertext only). ``turn`` names whose turn it is
+    now; ``final`` makes it the game's last message (the table ends
+    ``finished``; at a table of more than two only the host's). →
     ``{seq}`` (``null`` when it went to the hub's household). 413
     ``PAYLOAD_TOO_LARGE`` past 64 KiB, 429 ``APP_GROUP_BUSY``, 409
-    ``APP_GROUP_SEAT`` / ``APP_GROUP_CLOSED``."""
+    ``APP_GROUP_SEAT`` / ``APP_GROUP_CLOSED``, 403 ``APP_GROUP_NOT_HOST``."""
 
     async def post(self) -> web.Response:
         await self.require_permission(PERMISSION_PEOPLE)
@@ -211,6 +213,9 @@ class AppGroupMessagesView(AppPermissionView):
             )
         if turn is not None and not (_is_int(turn) and turn > 0):
             return error_response(400, "UNPROCESSABLE", "turn must be a seat.")
+        final = body.get("final", False)
+        if not isinstance(final, bool):
+            return error_response(400, "UNPROCESSABLE", "final must be true or false.")
         try:
             size = len(orjson.dumps(body["data"]))
         except TypeError, ValueError:
@@ -230,5 +235,6 @@ class AppGroupMessagesView(AppPermissionView):
             data=body["data"],
             to=to,
             turn=turn,
+            final=final,
         )
         return self._json(result)

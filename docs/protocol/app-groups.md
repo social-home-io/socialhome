@@ -320,12 +320,13 @@ messages ride the JSON `APP_MESSAGE` (outbox, retries) — not the binary
 
 | From → to | Sealed fields |
 |---|---|
-| a player's household → hub | `app_id, session_id, from_user, group: {to: "all" \| [seat…], msg_id, turn?}, data` (to all) — or `group: {to: [seat…], msg_id, turn?, sealed: [{to_seat, seat_kem_suite, nonce, ct}]}` and no `data` (directed) |
-| hub → a household with someone it is for | `app_id, session_id, group: {msgs: [{seq, from_seat, to, msg_id, turn?, data \| sealed}]}` — no `to_user` / `from_user`: seats only |
+| a player's household → hub | `app_id, session_id, from_user, group: {to: "all" \| [seat…], msg_id, turn?, final?}, data` (to all) — or `group: {to: [seat…], msg_id, turn?, final?, sealed: [{to_seat, seat_kem_suite, nonce, ct}]}` and no `data` (directed) |
+| hub → a household with someone it is for | `app_id, session_id, group: {msgs: [{seq, from_seat, to, msg_id, turn?, final?, data \| sealed}]}` — no `to_user` / `from_user`: seats only |
 
 - `to`: `"all"`, or 1–29 distinct seats seated now, never the sender's own.
 - `turn`: a seat seated now (the next player). Only that seat's household
   raises "Your turn" — one row per game, as for 1:1 (`app_turn`).
+- `final`: `true` on the game's last message (below); absent otherwise.
 - `data`: any JSON, ≤ 64 KiB encoded (the 1:1 limit); a sealed entry's
   `ct` ≤ 64 KiB + the tag; a directed message's data × its seats ≤ 128
   KiB (it is sealed once per seat — the envelope stays inside a peer's
@@ -362,6 +363,47 @@ takes `msgs` only from the table's hub and delivers to its own people
 seated at the table — never someone who blocked the sender, or whom a
 guardian block separates from them (the household's own rules, as for
 1:1).
+
+### The game's last message (`final`)
+
+A game that ends — a win, a draw, a resignation, a claimed timeout — says
+so on its last message (`final: true`), so its table ends at once instead
+of staying "being played" until the hub's prune:
+
+- **Who.** Only at a table being played (`playing`; else 409
+  `APP_GROUP_CLOSED`). In a duel (two seated) either player — the move
+  that wins, or the resignation, is the loser's or the winner's; at a
+  bigger table only the host person (403 `APP_GROUP_NOT_HOST`) — the
+  host sends the result, the rest send answers to the host seat. The
+  sender's household checks first; the hub checks again and drops a
+  final from anyone else (logged).
+- **The hub** numbers it like any message, gives it to its own people
+  (live + mailbox), ends the table `finished` (`rev` + 1) under the same
+  lock, then sends the message's batches at once and the `group_close`
+  after them.
+- **Crossing moves.** Two players can end a game at once (both resign, a
+  resignation against the mating move): the second final left its
+  household before the close arrived. For 5 minutes after a `finished`
+  end (`GROUP_FINISH_GRACE_SECONDS`, kept in the hub's memory — a restart
+  ends it early) the hub still takes its seated players' messages and
+  passes them on like any other (a `final` among them ends nothing more),
+  so each app sees both and settles the same way. After that, 409
+  `APP_GROUP_CLOSED` / dropped.
+- **The receivers.** Batches and the close may arrive in either order (the
+  outbox retries each on its own), so a household's copy that ended
+  `finished` still takes the hub's messages above its stored `seq` —
+  delivered live and to the mailbox, each once: the stored `seq` rises
+  with it, so a repeat, even after a restart, is dropped. A copy that
+  ended any other way takes nothing more. (Only the hub can send these,
+  and the hub can say anything to everyone anyway.)
+- **The app.** The mailbox keeps the last message (the seat row stays
+  until the prune), so a closed app gets it with the table already
+  `ended` / `finished` — SDK contract: *take held messages before you
+  conclude a table ended unfinished*. A space table's card turns `closed`
+  with `end_reason: finished` — "Played to the end" under Finished.
+
+No new envelope: the close that would come anyway, now when the game
+ends instead of at the prune (h − 1 closes, ≈ 1 KB each, once per game).
 
 ### The send budget (per table)
 
@@ -413,7 +455,7 @@ another household is at the table):
 
 | Route | Body → answer |
 |---|---|
-| `POST /api/apps/{id}/groups/{sid}/messages` | `{data, to?: [seat…], turn?: seat}` → `{seq}` (`seq` is the number when this household is the hub, `null` when it went to the hub's household). 413 `PAYLOAD_TOO_LARGE` past 64 KiB; 429 `APP_GROUP_BUSY`; 409 `APP_GROUP_SEAT` (a `to` / `turn` seat not seated, your own seat, or no seat key for it); 409 `APP_GROUP_CLOSED` (ended, or you aren't seated); 404 `APP_GROUP_NOT_FOUND`. Rate limit 300 / min per person. |
+| `POST /api/apps/{id}/groups/{sid}/messages` | `{data, to?: [seat…], turn?: seat, final?: true}` → `{seq}` (`seq` is the number when this household is the hub, `null` when it went to the hub's household). 413 `PAYLOAD_TOO_LARGE` past 64 KiB; 429 `APP_GROUP_BUSY`; 409 `APP_GROUP_SEAT` (a `to` / `turn` seat not seated, your own seat, or no seat key for it); 409 `APP_GROUP_CLOSED` (ended, or you aren't seated, or `final` before the game started); 403 `APP_GROUP_NOT_HOST` (`final` at a table of more than two from someone other than the host); 404 `APP_GROUP_NOT_FOUND`. Rate limit 300 / min per person. |
 | `POST /api/apps/{id}/held` | as for 1:1, plus `group_messages: [{session_id, seq, from_seat, direct, data}]`, oldest `seq` first. `?only=messages` / `?only=group` takes one half (the bridge's `app.held` / `group.held` each take their own, so pulling one never loses the other). |
 
 **WebSocket** (to the person's own sockets):
@@ -432,7 +474,7 @@ method needs `people` (else `permission_denied`).
 | `group.list` | — → `GroupSession[]` (the person's tables in this app) |
 | `group.get` | `{id}` → `GroupSession` |
 | `group.start` | `{id}` → `GroupSession` (host only; ≥ `min` seated) |
-| `group.send` | `{id, data, to?: number[], turn?: number}` → `{seq: number \| null}` — resolves once this household took it (sent on to the hub, or numbered here when this is the hub) |
+| `group.send` | `{id, data, to?: number[], turn?: number, final?: boolean}` → `{seq: number \| null}` — resolves once this household took it (sent on to the hub, or numbered here when this is the hub); `final: true` on the game's last message ends the table `finished` ([above](#the-games-last-message-final)) |
 | `group.leave` | `{id}` → `{ok: true}` |
 | `group.remove` | `{id, seat}` → `GroupSession` (host only) |
 | `group.close` | `{id}` → `{ok: true}` (host only: ends the table for everyone, `cancelled`) |

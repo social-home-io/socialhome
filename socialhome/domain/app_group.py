@@ -95,6 +95,10 @@ GROUP_SEND_BUDGET_SECONDS: float = 60.0
 #: The hub gathers what goes to one household this long before sending
 #: (one envelope for a burst of answers).
 GROUP_COALESCE_SECONDS: float = 0.2
+#: After a table ended ``finished`` (the game's last message) the hub
+#: still takes messages from its players this long — a move that crossed
+#: the last one (two resignations at once) reaches the other player too.
+GROUP_FINISH_GRACE_SECONDS: float = 300.0
 #: One hub envelope carries at most this many messages, and at most
 #: :data:`GROUP_BATCH_MAX_BYTES` of data unless one message alone is bigger.
 GROUP_BATCH_MAX_MESSAGES: int = 64
@@ -779,7 +783,9 @@ class GroupMessage:
     only that seat's household opens). ``msg_id`` is the sender's random
     id (bound into every seal). ``seq`` / ``from_seat`` are the hub's
     (``0`` on the way to the hub). ``turn`` names the seat whose turn it
-    is now, if the sender said so."""
+    is now, if the sender said so. ``final`` marks the game's last
+    message: the hub ends the table (``finished``) once it numbered it, and
+    a receiver still takes it after the end."""
 
     msg_id: str
     to: tuple[int, ...] | None = None
@@ -788,6 +794,7 @@ class GroupMessage:
     turn: int | None = None
     seq: int = 0
     from_seat: int = 0
+    final: bool = False
 
     @property
     def direct(self) -> bool:
@@ -802,6 +809,8 @@ class GroupMessage:
         }
         if self.turn is not None:
             out["turn"] = self.turn
+        if self.final:
+            out["final"] = True
         if self.to is not None:
             out["sealed"] = list(self.sealed)
         return out
@@ -817,6 +826,8 @@ class GroupMessage:
         }
         if self.turn is not None:
             out["turn"] = self.turn
+        if self.final:
+            out["final"] = True
         if self.to is None:
             out["data"] = self.data
         else:
@@ -870,6 +881,9 @@ def parse_message(
         raise GroupWireError("msg_id malformed")
     turn_raw = group.get("turn")
     turn = None if turn_raw is None else _int(turn_raw, 1, GROUP_SEAT_MAX, "turn")
+    final = group.get("final", False)
+    if not isinstance(final, bool):
+        raise GroupWireError("final malformed")
     seq = from_seat = 0
     if relayed:
         seq = _int(group.get("seq"), 1, 2**53, "seq")
@@ -881,7 +895,12 @@ def parse_message(
         if not has_data or sealed_raw is not None:
             raise GroupWireError("a message to everyone carries data, unsealed")
         return GroupMessage(
-            msg_id=msg_id, data=data, turn=turn, seq=seq, from_seat=from_seat
+            msg_id=msg_id,
+            data=data,
+            turn=turn,
+            seq=seq,
+            from_seat=from_seat,
+            final=final,
         )
     if has_data or not isinstance(sealed_raw, list) or not sealed_raw:
         raise GroupWireError("a directed message carries sealed entries only")
@@ -902,6 +921,7 @@ def parse_message(
         turn=turn,
         seq=seq,
         from_seat=from_seat,
+        final=final,
     )
 
 

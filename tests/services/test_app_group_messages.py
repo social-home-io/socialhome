@@ -17,10 +17,12 @@ from socialhome.domain.app_group import (
     AppGroupBusyError,
     AppGroupClosedError,
     AppGroupNotFoundError,
+    AppGroupNotHostError,
     AppGroupSeatError,
     AppGroupTooLargeError,
 )
 from socialhome.domain.events import AppTurn, AppTurnsSeen
+from socialhome.domain.federation import FederationEventType
 from socialhome.services.app_group_budget import TableSendBudget
 from tests.app_group_network import APP, Network, quiz_app
 
@@ -359,3 +361,171 @@ async def test_a_new_players_messages_follow_the_roster(net):
     sid, _seats = await _table(net, start=False)
     await _send(net, "ben", sid, "hello")
     assert [f["data"] for f in _frames(c, c.uid("cleo"))] == ["hello"]
+
+
+# ─── The game's last message (``final``) ──────────────────────────────────
+
+
+@pytest.fixture
+async def duel(tmp_path):
+    """A two-player table: Anna (hub) and Ben (b), started by itself."""
+    n = Network(tmp_path)
+    hub = await n.household("hub")
+    b = await n.household("b")
+    await hub.add_user("anna")
+    await b.add_user("ben")
+    for home in (hub, b):
+        await home.app_repo.install(quiz_app(players=(2, 2)))
+    await n.pair(hub, b)
+    view = await hub.groups.open_table(
+        app_id=APP, actor_user_id=hub.uid("anna"), targets=[hub.target(b, "ben")]
+    )
+    sid = view["session_id"]
+    await n.flush()
+    await b.groups.join(app_id=APP, session_id=sid, actor_user_id=b.uid("ben"))
+    await n.flush()
+    assert (await hub.group_repo.get(sid)).state == "playing"
+    yield n, sid
+    await n.close()
+
+
+async def _say(home, name, sid, data, **kw):
+    return await home.groups.send_message(
+        app_id=APP, session_id=sid, actor_user_id=home.uid(name), data=data, **kw
+    )
+
+
+async def test_a_final_message_ends_the_table_finished_after_it_reached_everyone(
+    duel,
+):
+    net, sid = duel
+    hub, b = net.homes["hub"], net.homes["b"]
+    await _say(b, "ben", sid, {"move": 1}, turn=1)
+    await net.flush()
+    assert await _say(b, "ben", sid, {"mate": True}, final=True) == {"seq": None}
+    await net.flush()
+    for home in (hub, b):
+        table = await home.group_repo.get(sid)
+        assert (table.state, table.end_reason) == ("ended", "finished")
+    (frame,) = [f for f in _frames(hub, hub.uid("anna")) if f["seq"] == 2]
+    assert frame["data"] == {"mate": True}
+    # Anna's app was closed: her mailbox has the last move.
+    held = await hub.groups.take_held(app_id=APP, actor_user_id=hub.uid("anna"))
+    assert [h["data"] for h in held] == [{"mate": True}]
+
+
+async def test_the_last_move_is_taken_even_when_the_close_overtakes_it(duel):
+    net, sid = duel
+    hub, b = net.homes["hub"], net.homes["b"]
+    await _say(hub, "anna", sid, {"resign": True}, final=True)
+    # The close and the batch are both queued for b; deliver the close first.
+    assert [p.get("verb", "message") for _s, _t, p in net.queue] == [
+        "message",
+        "group_close",
+    ]
+    net.queue.reverse()
+    batch = net.queue[-1]
+    await net.flush()
+    table = await b.group_repo.get(sid)
+    assert (table.state, table.end_reason) == ("ended", "finished")
+    (frame,) = _frames(b, b.uid("ben"))
+    assert frame["data"] == {"resign": True} and frame["seq"] == 1
+    held = await b.groups.take_held(app_id=APP, actor_user_id=b.uid("ben"))
+    assert [h["data"] for h in held] == [{"resign": True}]
+    # A repeat of the batch (an outbox retry) is not taken twice.
+    b.groups._seen.clear()  # as after a restart: only the stored seq is left
+    net.forge(*batch[:2], dict(batch[2]), FederationEventType.APP_MESSAGE)
+    await net.flush()
+    assert len(_frames(b, b.uid("ben"))) == 1
+
+
+async def test_a_move_that_crossed_the_last_one_still_reaches_the_other_player(
+    duel, monkeypatch
+):
+    """Both resign at once: Anna's (the hub's) ends the table, Ben's still
+    reaches her within the grace — each app sees both and settles the
+    same way. After the grace nothing more is taken."""
+    net, sid = duel
+    hub, b = net.homes["hub"], net.homes["b"]
+    await _say(hub, "anna", sid, {"resign": "anna"}, final=True)
+    # Ben's resignation left before Anna's arrived (his copy still plays).
+    assert (await b.group_repo.get(sid)).state == "playing"
+    await _say(b, "ben", sid, {"resign": "ben"}, final=True)
+    await net.flush()
+    assert [f["data"] for f in _frames(b, b.uid("ben"))] == [{"resign": "anna"}]
+    assert [f["data"] for f in _frames(hub, hub.uid("anna"))] == [{"resign": "ben"}]
+    held = await hub.groups.take_held(app_id=APP, actor_user_id=hub.uid("anna"))
+    assert [h["data"] for h in held] == [{"resign": "ben"}]
+    table = await hub.group_repo.get(sid)
+    assert (table.state, table.end_reason, table.roster_rev) == (
+        "ended",
+        "finished",
+        (await b.group_repo.get(sid)).roster_rev,
+    )  # one end, one close
+    assert net.verbs(to="b").count("group_close") == 1
+    monkeypatch.setattr(
+        "socialhome.services.app_group_service.GROUP_FINISH_GRACE_SECONDS", 0.0
+    )
+    with pytest.raises(AppGroupClosedError):
+        await _say(hub, "anna", sid, "too late")
+    await _say(b, "ben", sid, "too late")  # his copy ended: the hub drops it
+    await net.flush()
+    assert [f["data"] for f in _frames(hub, hub.uid("anna"))] == [{"resign": "ben"}]
+
+
+async def test_cancelled_tables_drop_a_final_message(duel):
+    net, sid = duel
+    hub, b = net.homes["hub"], net.homes["b"]
+    await hub.groups.close(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
+    await net.flush()
+    msg = {
+        "seq": 1,
+        "from_seat": 1,
+        "to": "all",
+        "msg_id": "m1",
+        "final": True,
+        "data": "x",
+    }
+    net.forge(
+        "hub",
+        "b",
+        {"app_id": APP, "session_id": sid, "group": {"msgs": [msg]}},
+        FederationEventType.APP_MESSAGE,
+    )
+    await net.flush()
+    assert _frames(b, b.uid("ben")) == []
+
+
+async def test_at_a_bigger_table_only_the_host_ends_the_game(net):
+    hub, b = net.homes["hub"], net.homes["b"]
+    sid, _seats = await _table(net)
+    with pytest.raises(AppGroupNotHostError):
+        await _send(net, "ben", sid, "I win", final=True)
+    with pytest.raises(AppGroupNotHostError):
+        await _send(net, "ada", sid, "I win", final=True)
+    # Forged past Ben's own household: the hub drops it, the game goes on.
+    net.forge(
+        "b",
+        "hub",
+        {
+            "app_id": APP,
+            "session_id": sid,
+            "from_user": "ben",
+            "group": {"to": "all", "msg_id": "forged", "final": True},
+            "data": "I win",
+        },
+        FederationEventType.APP_MESSAGE,
+    )
+    await net.flush()
+    assert (await hub.group_repo.get(sid)).state == "playing"
+    await _send(net, "anna", sid, {"scores": [3, 1]}, final=True)
+    for home in net.homes.values():
+        table = await home.group_repo.get(sid)
+        assert (table.state, table.end_reason) == ("ended", "finished")
+    assert _frames(b, b.uid("ben"))[-1]["data"] == {"scores": [3, 1]}
+
+
+async def test_a_final_message_needs_a_game_being_played(net):
+    sid, _seats = await _table(net, start=False)
+    with pytest.raises(AppGroupClosedError):
+        await _send(net, "anna", sid, "over", final=True)

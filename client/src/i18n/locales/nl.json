@@ -1437,6 +1437,8 @@
   "space.games.ended.moderator": "Een moderator heeft het spel gesloten.",
   "space.games.ended.not_allowed": "Dit spel is hier niet meer toegestaan.",
   "space.games.ended.expired": "Het is niet op tijd gestart.",
+  "space.games.ended.finished": "Uitgespeeld.",
+  "space.games.ended.cancelled": "Dit spel is gesloten.",
   "space.games.ended.over": "Dit spel is voorbij.",
   "space.games.app_missing": "Je huis heeft deze app nog niet.",
   "space.games.app_off": "Een beheerder heeft deze app in je huis uitgezet.",

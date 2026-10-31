@@ -269,7 +269,7 @@ export class GroupBridge {
       }
       case 'group.send': {
         const id = tableId(params)
-        const body: { data: unknown; to?: number[]; turn?: number } = { data: params?.data ?? null }
+        const body: { data: unknown; to?: number[]; turn?: number; final?: boolean } = { data: params?.data ?? null }
         if (params?.to !== undefined) {
           if (!Array.isArray(params.to) || !params.to.length || !params.to.every(seat)) {
             throw new GroupRefused('invalid', 'to must be a list of seats.')
@@ -279,6 +279,10 @@ export class GroupBridge {
         if (params?.turn !== undefined) {
           if (!seat(params.turn)) throw new GroupRefused('invalid', 'turn must be a seat.')
           body.turn = params.turn
+        }
+        if (params?.final !== undefined) {
+          if (typeof params.final !== 'boolean') throw new GroupRefused('invalid', 'final must be true or false.')
+          if (params.final) body.final = true
         }
         const r = await api.post<{ seq: number | null }>(`${this.base(id)}/messages`, body)
         return { seq: typeof r?.seq === 'number' ? r.seq : null }

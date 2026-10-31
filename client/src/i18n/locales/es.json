@@ -1464,6 +1464,8 @@
   "space.games.ended.moderator": "Un moderador cerró la partida.",
   "space.games.ended.not_allowed": "Este juego ya no está permitido aquí.",
   "space.games.ended.expired": "No empezó a tiempo.",
+  "space.games.ended.finished": "Jugada hasta el final.",
+  "space.games.ended.cancelled": "Esta partida se cerró.",
   "space.games.ended.over": "Esta partida terminó.",
   "space.games.app_missing": "Tu hogar todavía no tiene esta app.",
   "space.games.app_off": "Un admin desactivó esta app en tu hogar.",

@@ -1437,6 +1437,8 @@
   "space.games.ended.moderator": "Un modérateur a fermé la partie.",
   "space.games.ended.not_allowed": "Ce jeu n'est plus autorisé ici.",
   "space.games.ended.expired": "Elle n'a pas commencé à temps.",
+  "space.games.ended.finished": "Jouée jusqu'au bout.",
+  "space.games.ended.cancelled": "Cette partie a été fermée.",
   "space.games.ended.over": "Cette partie est terminée.",
   "space.games.app_missing": "Votre foyer n'a pas encore cette app.",
   "space.games.app_off": "Un admin a désactivé cette app dans votre foyer.",
