@@ -20,7 +20,8 @@ import { Button } from '@/components/Button'
 import { LoadErrorState } from '@/components/LoadErrorState'
 import { Spinner } from '@/components/Spinner'
 import { locale, t } from '@/i18n/i18n'
-import { catalog, catalogEnabled, catalogLoaded, ensureInstalled, installedApps, loadCatalog } from '@/store/apps'
+import { catalog, catalogEnabled, catalogLoaded, ensureInstalled, installedApps } from '@/store/apps'
+import { ensureAppCatalog } from '@/features/notifications/appName'
 import { settingsSectionPath } from '../spaceSettingsSections'
 import { SpaceGameCard } from './SpaceGameCard'
 import { appLook, groupTables, knownTables, type SpaceTable } from './spaceGames'
@@ -38,7 +39,7 @@ export function useGameApps(enabled = true): void {
   useEffect(() => {
     if (!enabled) return
     void ensureInstalled()
-    if (!catalogLoaded.value) void loadCatalog()
+    ensureAppCatalog()
   }, [enabled])
 }
 
