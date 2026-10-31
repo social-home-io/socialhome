@@ -1,0 +1,50 @@
+-- 0137 — Space tables: the space's games list and the table cards a
+-- household hears (group play PR 6, v_77). Follows 0136.
+--
+--   spaces.allowed_apps         "Games allowed here": a JSON list of app
+--       ids (≤ 20) people may open a game table with in this space. The
+--       owner, admins and moderators choose; it rides the authority-signed
+--       SPACE_CONFIG_CHANGED / _CATCH_UP features like allowed_post_types.
+--       Empty — the default for every space, existing and new — means no
+--       games in the space.
+--   app_group_sessions.card_json  A space table this household knows only
+--       from its card (SPACE_APP_TABLE: nobody from here sits at it):
+--       ``{"seated": n, "announce": bool, "seen_at": "<UTC ISO>"}`` — the
+--       seat count the hub last announced, whether its opener asked to
+--       "let everyone know", and when this household first heard of it
+--       (the receiver's own clock, for its per-person caps). NULL for a
+--       table this household hosts or has someone at (the roster says it).
+--
+-- CLAUDE.md "audit before a migration":
+--   (1) Audited every path that touches the data. ``spaces``: the domain's
+--       ``SpaceFeatures.from_row`` / ``to_columns`` / ``to_wire_dict`` /
+--       ``from_wire_dict``, ``SqliteSpaceRepo._save_statement`` (the one
+--       upsert ``save`` and ``save_config_if_authority_epoch`` share), the
+--       config outbound (``space_config_outbound``), the config inbound on
+--       every member household (``federation_inbound_service``: the stub
+--       rebuilt from the wire, owner-only pins, ``keep_local_space_state``),
+--       the forwarded admin edit (``SpaceService._run_admin_action``), the
+--       PATCH route and the §25.6 sync stream (which carries no features —
+--       config travels as SPACE_CONFIG_*, so no SYNC_RECORD_LINES entry).
+--       ``app_group_sessions`` (0136): ``SqliteAppGroupRepo`` (upsert,
+--       save_newer, prune, the lobby expiry), ``AppGroupService`` (hub,
+--       mirrors, sweep, uninstall) — a card is a row with ``space_id`` set
+--       and no roster beyond its host, and ``space_id`` cascades with the
+--       space (leaving it drops its cards).
+--   (2) Non-migration alternatives, rejected:
+--       * a ``space_allowed_apps`` table — a set of ≤ 20 strings read with
+--         the space every time (the features block) is one value, like
+--         ``retention_exempt_json``;
+--       * one column per app — open-ended ids;
+--       * the card's seat count in ``roster_json`` (fake seats) or in
+--         ``seq`` — overloading columns other code reads as roster / message
+--         numbering;
+--       * not storing cards at all (ask the hub on every view) — a request
+--         per viewer instead of an event per change, and nothing to show
+--         while the hub is offline.
+--   (3) Smallest change: two additive columns, ``allowed_apps`` NOT NULL
+--       with a constant default (no backfill: every existing space has no
+--       games, which is the owner's default), ``card_json`` NULL.
+
+ALTER TABLE spaces ADD COLUMN allowed_apps TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE app_group_sessions ADD COLUMN card_json TEXT;

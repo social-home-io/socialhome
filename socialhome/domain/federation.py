@@ -360,6 +360,21 @@ class FederationEventType(str, enum.Enum):
     #: field but ``space_id`` is in the encrypted payload. Newer ``rev``
     #: wins, a removal is final. See ``docs/protocol/bazaar.md``.
     BAZAAR_LISTING_FAQ_UPDATED = "bazaar_listing_faq_updated"
+    #: v_77 — a game table opened in a space: its *card* (upsert by
+    #: ``rev``). From the table's host household to the member households
+    #: holding a writer seat (``broadcast_to_space_members`` narrowed with
+    #: ``only_instances``) — never a follower-only household, never a GFS.
+    #: ``space_id`` is the only routing field; the card (table id, app,
+    #: host, note, players, seats taken, state, expiry) is encrypted. See
+    #: ``docs/protocol/app-groups.md``.
+    SPACE_APP_TABLE = "space_app_table"
+    #: v_77 — one ``group_*`` verb of a space table between its host
+    #: household and ONE player's household, over the space's own transport
+    #: (``broadcast_to_space_members`` narrowed to that household: direct,
+    #: ``SPACE_ROUTED`` across a relay, the link-joined relay seat). Same
+    #: sealed payload as the ``APP_SESSION`` group verbs; ``space_id`` is
+    #: the only routing field.
+    SPACE_APP_SESSION = "space_app_session"
 
     # ── Space encryption key exchange ──
     SPACE_KEY_EXCHANGE = "space_key_exchange"
@@ -711,6 +726,10 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.BAZAAR_THREAD_MESSAGE,
         #: A listing's questions and answers (v_75), the seller's to write.
         FederationEventType.BAZAAR_LISTING_FAQ_UPDATED,
+        #: Game tables in the space (v_77): a link-joined member household
+        #: hears the cards and plays over its relay seat.
+        FederationEventType.SPACE_APP_TABLE,
+        FederationEventType.SPACE_APP_SESSION,
         #: Space-scoped location pins and the space's own zone catalogue —
         #: a display layer inside the space, distinct from the household
         #: ``PRESENCE_UPDATED`` fan-out (which stays excluded).
@@ -896,6 +915,9 @@ SPACE_WRITE_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.BAZAAR_THREAD_MESSAGE,
         #: A listing's questions and answers (v_75), the seller's to write.
         FederationEventType.BAZAAR_LISTING_FAQ_UPDATED,
+        # ── Game tables (v_77): members play, followers never see one ──
+        FederationEventType.SPACE_APP_TABLE,
+        FederationEventType.SPACE_APP_SESSION,
         # ── Map: shared location pins and zones ──
         FederationEventType.SPACE_LOCATION_UPDATED,
         FederationEventType.SPACE_ZONE_UPSERTED,

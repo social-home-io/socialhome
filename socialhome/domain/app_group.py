@@ -389,6 +389,10 @@ class GroupSeat:
     #: one household), once they sat down — what a directed message to
     #: their seat is sealed to.
     seat_key: SeatKey | None = None
+    #: Their user id (the space roster's key) — set at a space table
+    #: (v_77) so each household can check its people's blocks against
+    #: players of households it isn't paired with; ``None`` otherwise.
+    user_id: str | None = None
 
     def is_person(self, instance: str, user: str) -> bool:
         """Whether this entry is *user* of *instance*."""
@@ -396,7 +400,8 @@ class GroupSeat:
 
     def to_wire(self) -> dict[str, Any]:
         """The entry as the players see it — names (and, for someone
-        seated, their household's seat key), never more."""
+        seated, their household's seat key; at a space table, the user id
+        the space roster already shows), never more."""
         out: dict[str, Any] = {
             "seat": self.seat,
             "instance": self.instance,
@@ -407,7 +412,21 @@ class GroupSeat:
         }
         if self.seat_key is not None and self.state == SEAT_SEATED:
             out["seat_key"] = self.seat_key.to_wire()
+        if self.user_id is not None:
+            out["user_id"] = self.user_id
         return out
+
+
+@dataclass(slots=True, frozen=True)
+class TableCard:
+    """What a household knows of a space table it has nobody at — its card
+    (``SPACE_APP_TABLE``, v_77): how many sit, whether the opener asked to
+    let everyone know, and when this household first heard of it (its own
+    clock — what its per-person caps count by)."""
+
+    seated: int
+    announce: bool = False
+    seen_at: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -441,8 +460,12 @@ class GroupSession:
     seq: int = 0
     started_at: str | None = None
     #: Who opened the table (a username on the hub) — fixed, unlike
-    #: the host person: the opener's caps count on it. Hub only.
+    #: the host person: the opener's caps count on it. Hub only (and, for
+    #: a space table's card, the opener the card named).
     opener_user: str | None = None
+    #: Set for a space table known only from its card (v_77); ``None`` for
+    #: the hub's own table and a copy with someone from here at it.
+    card: TableCard | None = None
 
     # ─── Reading ──────────────────────────────────────────────────────
 
@@ -674,6 +697,7 @@ def parse_table(
         household = _text(
             item.get("household"), GROUP_NAME_MAX, "household", optional=True
         )
+        user_id = _text(item.get("user_id"), GROUP_REF_MAX, "user_id", optional=True)
         entry_state = item.get("state")
         if entry_state not in WIRE_SEAT_STATES:
             raise GroupWireError("seat state unknown")
@@ -696,6 +720,7 @@ def parse_table(
                 state=entry_state,
                 seat=seat,
                 seat_key=seat_key,
+                user_id=user_id,
             )
         )
     host_seat = _int(raw.get("host_seat"), 1, GROUP_SEAT_MAX, "host_seat")

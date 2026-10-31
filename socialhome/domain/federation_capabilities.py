@@ -1192,7 +1192,28 @@ from __future__ import annotations
 #:   naming one answers 409 ``APP_GROUP_HOUSEHOLD_TOO_OLD``); its 1:1
 #:   games are untouched. Not space-scoped, no sync stream change.
 #:   Labelled "Games for groups of players".
-OURS: int = 76
+#: * **v_77** (2026-10-31) — **Games in a space (space tables)**. A member
+#:   opens a group game *in a space* and any member may take a seat (up to
+#:   30); the host person presses Start, a two-player table starts when the
+#:   second seat fills. The space's "Games allowed here" list
+#:   (``SpaceFeatures.allowed_apps``, ≤ 20 app ids, migration 0137) rides
+#:   the authority-signed ``SPACE_CONFIG_CHANGED`` / ``_CATCH_UP`` features;
+#:   the owner, admins and moderators choose; empty by default. Two new
+#:   events: ``SPACE_APP_TABLE`` — the table's *card* (``table_id``,
+#:   ``rev``, app, host, note, players, seats taken, state, expiry,
+#:   ``announce``), upsert by ``rev``, from the host household to the member
+#:   households holding a writer seat only; and ``SPACE_APP_SESSION`` —
+#:   the ``group_*`` verbs of a space table between its host household and
+#:   ONE player's household over the space's own transport (direct,
+#:   ``SPACE_ROUTED``, the link-joined relay seat), so households that
+#:   aren't paired play (space membership + Join is the consent, D7).
+#:   ``space_id`` is the only routing field of both; never a follower-only
+#:   household, never a GFS, never a global space. Not in the §25.6 sync
+#:   stream. **Fallback**: a member household below v_77 is sent no card
+#:   and no seat; an older admin household's config edit (no
+#:   ``allowed_apps`` key) leaves the list as it is. Labelled "Games in a
+#:   space".
+OURS: int = 77
 
 
 class FederationCapability:
@@ -1783,6 +1804,11 @@ class FederationCapability:
     #: ``APP_SESSION`` between a table's hub and each player's household.
     #: A household below it is never offered a seat; nothing is sent to it.
     MIN_FOR_APP_GROUPS = 76
+    #: v_77 — games in a space: ``SPACE_APP_TABLE`` (cards) and
+    #: ``SPACE_APP_SESSION`` (a space table's ``group_*`` verbs), and the
+    #: ``allowed_apps`` features key. A member household below it is sent
+    #: neither — its people don't see the space's games.
+    MIN_FOR_SPACE_APP_TABLES = 77
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2073,6 +2099,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_APP_GROUPS,
         "Games for groups of players",
     ),
+    (
+        FederationCapability.MIN_FOR_SPACE_APP_TABLES,
+        "Games in a space",
+    ),
 ]
 
 
@@ -2160,6 +2190,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_BAZAAR_THREAD: "bazaar_ask_the_seller",
     FederationCapability.MIN_FOR_BAZAAR_FAQ: "bazaar_listing_faq",
     FederationCapability.MIN_FOR_APP_GROUPS: "app_groups",
+    FederationCapability.MIN_FOR_SPACE_APP_TABLES: "space_app_tables",
 }
 
 
@@ -2260,6 +2291,8 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         # A behind member household's people see every listing without its
         # questions and answers.
         FederationCapability.MIN_FOR_BAZAAR_FAQ,
+        # A behind member household's people don't see the space's games.
+        FederationCapability.MIN_FOR_SPACE_APP_TABLES,
     }
 )
 
