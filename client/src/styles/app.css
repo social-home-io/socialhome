@@ -28281,8 +28281,10 @@ a.sh-spaces-row__main:focus-visible { outline: 2px solid var(--sh-focus-ring); o
   border: 0;
   min-width: 0;
 }
-.sh-start-game__app {
+.sh-start-game__app,
+.sh-form label.sh-start-game__app {
   display: flex;
+  margin: 0;
   align-items: center;
   gap: var(--sh-space-sm);
   min-height: 44px;

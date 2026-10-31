@@ -76,17 +76,20 @@ export interface SpaceTabFeatures {
  *  ``follower`` — a read-only follower, who gets no Map (the pins and
  *  zones are the members' whereabouts; the server refuses them too);
  *  ``choosesGames`` — the owner / an admin / a moderator (D9);
- *  ``global`` — a global space (no games). */
+ *  ``global`` — a global space (no games); ``writer`` — ``false`` while
+ *  the viewer has no known writing seat (a non-member, a role not loaded
+ *  yet): the games can't be read, so no Games. */
 export interface SectionViewer {
   chat: boolean
   follower: boolean
   choosesGames?: boolean
   global?: boolean
+  writer?: boolean
 }
 
 /** Does the Games section show? */
 export function gamesSectionShown(f: SpaceTabFeatures | undefined, viewer: SectionViewer): boolean {
-  if (viewer.follower || viewer.global) return false
+  if (viewer.follower || viewer.global || viewer.writer === false) return false
   return (f?.allowed_apps?.length ?? 0) > 0 || viewer.choosesGames === true
 }
 

@@ -46,10 +46,10 @@ export function SpaceGamesSection({ spaceId, state }: Props) {
   const [starting, setStarting] = useState(false)
   useGameApps()
 
-  const { games, loading, failed, reload } = state
+  const { games, loading, failed, reload, retry } = state
   if (loading && !games) return <Spinner />
   if (failed || !games) {
-    return <LoadErrorState headingLevel={2} message={t('space.games.load_failed')} onRetry={() => { void reload() }} />
+    return <LoadErrorState headingLevel={2} message={t('space.games.load_failed')} onRetry={() => { void retry() }} />
   }
 
   const lang = locale.value || 'en'

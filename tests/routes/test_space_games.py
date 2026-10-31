@@ -4,9 +4,12 @@ follower; the games list, opening, joining and closing a table."""
 
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 from socialhome.auth import sha256_token_hash
 from socialhome.domain.apps import AppManifest, InstalledApp
 from socialhome.repositories.app_repo import SqliteAppRepo
+from socialhome.services.space_service import SpaceService
 
 from .conftest import _auth
 
@@ -90,6 +93,21 @@ async def test_the_games_list_is_chosen_by_owner_admins_and_moderators(client):
         url, json={"allowed_apps": "quiz"}, headers=_auth(tok["owner"])
     )
     assert r.status == 422
+
+
+async def test_an_unchanged_list_is_never_reported_forwarded(client, monkeypatch):
+    """On a space hosted elsewhere an edit is only forwarded — but saving
+    the list it already has sends nothing, so the SPA mustn't say "sent"."""
+    sid, tok = await _space(client)
+    url = f"/api/spaces/{sid}/games/allowed"
+    r = await client.put(url, json={"allowed_apps": [APP]}, headers=_auth(tok["owner"]))
+    assert r.status == 200
+    monkeypatch.setattr(
+        SpaceService, "config_edits_forward", AsyncMock(return_value=True)
+    )
+    r = await client.put(url, json={"allowed_apps": [APP]}, headers=_auth(tok["owner"]))
+    assert r.status == 200, await r.text()
+    assert await r.json() == {"allowed_apps": [APP], "forwarded": False}
 
 
 async def test_a_moderator_changes_nothing_else_through_the_config(client):

@@ -26,9 +26,8 @@ import { showToast } from '@/components/Toast'
 import { AppIcon } from '@/features/apps/AppDialogs'
 import { ratingLabel } from '@/features/apps/appFacts'
 import { locale, t } from '@/i18n/i18n'
-import {
-  catalog, catalogError, catalogLoaded, catalogLoading, ensureInstalled, installedApps, loadCatalog,
-} from '@/store/apps'
+import { catalog, catalogError, catalogLoaded, catalogLoading, installedApps } from '@/store/apps'
+import { useGameApps } from '../games/SpaceGamesSection'
 import type { Space } from '@/types'
 import { gameChoices, playersLabel, type GameChoice } from '../games/spaceGames'
 import { useServerValue } from './spacePatch'
@@ -57,10 +56,7 @@ export function GamesSection({ space, onUpdate }: { space: Space; onUpdate: () =
   const [hostSupports, setHostSupports] = useState(true)
   const lang = locale.value || 'en'
 
-  useEffect(() => {
-    void ensureInstalled()
-    if (!catalogLoaded.value) void loadCatalog()
-  }, [])
+  useGameApps()
   // Whether the space's host household keeps a games list (v_77).
   useEffect(() => {
     let stop = false
@@ -77,6 +73,7 @@ export function GamesSection({ space, onUpdate }: { space: Space; onUpdate: () =
     if (saving) return
     const before = allowed
     const next = nextAllowedApps(allowed, appId, on)
+    const name = choices.find((c) => c.app_id === appId)?.name ?? appId
     setAllowed(next)
     setSaving(appId)
     try {
@@ -89,10 +86,7 @@ export function GamesSection({ space, onUpdate }: { space: Space; onUpdate: () =
         showToast(t('space.settings.forwarded'), 'info')
       } else {
         setAllowed(res?.allowed_apps ?? next)
-        showToast(on
-          ? t('space.games.settings.on_toast', { name: choices.find((c) => c.app_id === appId)?.name ?? appId })
-          : t('space.games.settings.off_toast', { name: choices.find((c) => c.app_id === appId)?.name ?? appId }),
-        'success')
+        showToast(t(on ? 'space.games.settings.on_toast' : 'space.games.settings.off_toast', { name }), 'success')
       }
       onUpdate()
     } catch (err: unknown) {
@@ -136,8 +130,12 @@ export function GamesSection({ space, onUpdate }: { space: Space; onUpdate: () =
                     {saving === c.app_id && <> · <span role="status">{t('space.games.settings.saving')}</span></>}
                   </span>
                 </div>
+                {/* While a save runs the others wait (``flip`` ignores them);
+                    none is disabled, so the one just flipped keeps the focus. */}
                 <Switch id={id} checked={on} aria-describedby={metaId}
-                        disabled={!hostSupports || saving !== null || (!on && full)}
+                        aria-disabled={saving !== null ? 'true' : undefined}
+                        aria-busy={saving === c.app_id ? 'true' : undefined}
+                        disabled={!hostSupports || (!on && full)}
                         onChange={(next) => { void flip(c.app_id, next) }} />
               </li>
             )

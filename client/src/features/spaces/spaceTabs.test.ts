@@ -39,6 +39,12 @@ describe('visibleSpaceSections', () => {
     expect(gamesSectionShown(undefined, chooser)).toBe(true)
   })
 
+  it('no Games without a known writing seat (a non-member, a role still loading)', () => {
+    expect(gamesSectionShown({ allowed_apps: ['chess'] }, { ...member, writer: false })).toBe(false)
+    expect(sectionAllowed('games', { allowed_apps: ['chess'] }, { ...member, writer: false, canModerate: false }))
+      .toBe(false)
+  })
+
   it('never Games for a follower, nor in a global space', () => {
     expect(visibleSpaceSections({ allowed_apps: ['chess'] }, follower)).not.toContain('games')
     expect(gamesSectionShown({ allowed_apps: ['chess'] }, { ...member, choosesGames: true, global: true }))

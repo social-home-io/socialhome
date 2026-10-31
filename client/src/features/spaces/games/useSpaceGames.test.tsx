@@ -23,8 +23,8 @@ vi.mock('@/ws', () => ({
 import { normalizeGames, useSpaceGames, type SpaceGamesState } from './useSpaceGames'
 
 let latest: SpaceGamesState | null = null
-function Probe({ enabled }: { enabled: boolean }) {
-  latest = useSpaceGames('sp-1', enabled)
+function Probe({ enabled, space = 'sp-1' }: { enabled: boolean, space?: string }) {
+  latest = useSpaceGames(space, enabled)
   return null
 }
 
@@ -64,6 +64,22 @@ describe('useSpaceGames', () => {
     render(<Probe enabled />)
     await flush()
     expect(latest?.failed).toBe(true)
+  })
+
+  it('another space never shows the last one’s games while its own load', async () => {
+    let slow!: (v: unknown) => void
+    apiGet.mockImplementationOnce(async () => ({ space_id: 'sp-1', tables: [{ session_id: 'a' }] }))
+      .mockImplementationOnce(() => new Promise((res) => { slow = res }))
+    const v = render(<Probe enabled />)
+    await flush()
+    expect(latest?.games?.tables).toHaveLength(1)
+    v.rerender(<Probe enabled space="sp-2" />)
+    await flush()
+    expect(latest?.games).toBeNull()
+    expect(latest?.loading).toBe(true)
+    slow({ space_id: 'sp-2', tables: [] })
+    await flush()
+    expect(latest?.games?.space_id).toBe('sp-2')
   })
 
   it('off: reads nothing, listens to nothing', async () => {

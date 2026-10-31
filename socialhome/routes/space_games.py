@@ -16,6 +16,7 @@ from aiohttp import web
 
 from ..app_keys import space_app_table_service_key, space_service_key
 from ..domain.app_group import GROUP_LOBBY_DEFAULT_DAYS
+from ..domain.space import normalize_allowed_apps
 from ..security import error_response
 from .base import BaseView
 
@@ -125,15 +126,19 @@ class SpaceGamesAllowedView(BaseView):
         body = await self.body()
         svc = self.svc(space_service_key)
         space_id = self.match("space_id")
-        forwarded = await svc.config_edits_forward(space_id)
+        forwards = await svc.config_edits_forward(space_id)
+        before = (await svc._require_space(space_id)).features.allowed_apps
         space = await svc.set_allowed_apps(
             space_id,
             actor_username=self.user.username,
             app_ids=body.get("allowed_apps"),
         )
+        # An unchanged list sends nothing anywhere (``set_allowed_apps``
+        # returns early), so it was never forwarded.
+        asked = normalize_allowed_apps(body.get("allowed_apps"), strict=True)
         return self._json(
             {
                 "allowed_apps": list(space.features.allowed_apps),
-                "forwarded": forwarded,
+                "forwarded": forwards and asked != before,
             }
         )

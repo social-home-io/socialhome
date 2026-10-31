@@ -39,7 +39,10 @@ export interface SpaceGamesState {
   loading: boolean
   /** The first read failed (nothing to show). */
   failed: boolean
+  /** Re-read quietly (live updates, after a join or close). */
   reload: () => Promise<void>
+  /** Re-read showing the spinner and the error again (Retry). */
+  retry: () => Promise<void>
 }
 
 /** ``revision`` — re-read when it changes (the space's games list, which
@@ -53,6 +56,7 @@ export function useSpaceGames(
   // The newest request wins: a slow answer for an older space (or an
   // older re-read) never overwrites a newer one.
   const seq = useRef(0)
+  const shownFor = useRef<string | null>(null)
 
   const load = async (quiet: boolean) => {
     const mine = ++seq.current
@@ -73,10 +77,16 @@ export function useSpaceGames(
   useEffect(() => {
     if (!enabled) {
       seq.current++
+      shownFor.current = null
       setGames(null)
       setLoading(false)
       setFailed(false)
       return
+    }
+    // Another space: never show the last one's games meanwhile.
+    if (shownFor.current !== spaceId) {
+      setGames(null)
+      shownFor.current = spaceId
     }
     void load(false)
     let timer: ReturnType<typeof setTimeout> | null = null
@@ -88,5 +98,5 @@ export function useSpaceGames(
     return () => { off(); if (timer) clearTimeout(timer) }
   }, [spaceId, enabled, revision]) // eslint-disable-line react-hooks/exhaustive-deps
 
-  return { games, loading, failed, reload: () => load(true) }
+  return { games, loading, failed, reload: () => load(true), retry: () => load(false) }
 }

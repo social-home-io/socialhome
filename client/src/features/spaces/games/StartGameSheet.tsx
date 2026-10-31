@@ -27,7 +27,7 @@ import { isOne, locale, t } from '@/i18n/i18n'
 import { currentUser } from '@/store/auth'
 import { catalog, installedApps } from '@/store/apps'
 import {
-  ANNOUNCES_PER_DAY, LOBBY_DAYS, LOBBY_DEFAULT_DAYS, NOTE_MAX, appLook, gamePath, playersLabel,
+  ANNOUNCES_PER_DAY, LOBBY_DAYS, LOBBY_DEFAULT_DAYS, NOTE_MAX, appLook, gamePath, installedHere, playersLabel,
   seatRange, startableApps, type SpaceTable,
 } from './spaceGames'
 
@@ -61,6 +61,10 @@ export function StartGameSheet({ spaceId, allowed, open, onClose, onStarted }: P
     setNote('')
     setAnnounce(false)
   }, [open]) // eslint-disable-line react-hooks/exhaustive-deps
+  // This home's apps arrived after the sheet opened (a deep link).
+  useEffect(() => {
+    if (open && appId === null && apps.length === 1) setAppId(apps[0].app_id)
+  }, [open, apps.length]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const chosen = apps.find((a) => a.app_id === appId) ?? null
   const range = chosen ? seatRange(chosen) : null
@@ -120,15 +124,23 @@ export function StartGameSheet({ spaceId, allowed, open, onClose, onStarted }: P
 
         {missing.length > 0 && (
           <div class="sh-start-game__missing">
-            <p class="sh-form-label">{t('space.games.not_here_yet')}</p>
+            <p class="sh-form-label">{t('space.games.cant_start_here')}</p>
             <ul class="sh-start-game__missing-list">
               {missing.map((id) => {
                 const look = appLook(id, installedApps.value, catalog.value, lang)
                 const entry = catalog.value.find((x) => x.app_id === id)
+                const here = installedHere(installedApps.value.find((a) => a.app_id === id))
                 return (
                   <li key={id} class="sh-start-game__missing-row">
                     <AppIcon src={look.icon} size="sm" />
-                    <span class="sh-start-game__app-name">{look.name}</span>
+                    <span class="sh-start-game__app-text">
+                      <span class="sh-start-game__app-name">{look.name}</span>
+                      <span class="sh-start-game__app-meta">
+                        {here === 'off' ? t('space.games.settings.here_off')
+                          : here === 'yes' ? t('space.games.not_playable_here')
+                            : t('space.games.settings.here_no')}
+                      </span>
+                    </span>
                     {householdAdmin ? (
                       <a class="sh-btn sh-btn--secondary" href={addBase(`/apps/${encodeURIComponent(id)}/about`)}>
                         {t('space.games.see_app', { name: look.name })}

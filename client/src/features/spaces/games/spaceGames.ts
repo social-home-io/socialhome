@@ -92,9 +92,10 @@ export function stripTables(tables: readonly SpaceTable[]): { shown: SpaceTable[
   return { shown: ordered.slice(0, STRIP_MAX), total: waiting.length }
 }
 
-/** Waiting games the caller could still join — the section's dot. */
+/** Waiting games the caller could join now (the app here and on) —
+ *  the section's dot. */
 export function joinableCount(tables: readonly SpaceTable[]): number {
-  return tables.filter((x) => x.state === 'open' && !isMine(x)).length
+  return tables.filter((x) => x.state === 'open' && !isMine(x) && appHere(x) === 'yes').length
 }
 
 /** The Games section's three lists. */
@@ -113,6 +114,12 @@ export function groupTables(tables: readonly SpaceTable[]): {
 
 /** Is the app here and on for this household? */
 export type AppHere = 'yes' | 'off' | 'missing'
+
+/** The same for an installed app (``undefined``: not added here). */
+export function installedHere(app: Pick<InstalledApp, 'enabled'> | undefined): AppHere {
+  if (!app) return 'missing'
+  return app.enabled ? 'yes' : 'off'
+}
 
 export function appHere(table: Pick<SpaceTable, 'app'>): AppHere {
   if (!table.app?.installed) return 'missing'
@@ -254,7 +261,7 @@ export function gameChoices(
       icon: look.icon,
       players: app?.players && app.tables ? app.players : (entry?.players ?? null),
       min_age: app?.min_age ?? entry?.min_age ?? null,
-      here: !app ? 'missing' : app.enabled ? 'yes' : 'off',
+      here: installedHere(app),
     })
   }
   return out.sort((a, b) => a.name.localeCompare(b.name))

@@ -39,7 +39,8 @@ function state(over: Partial<SpaceGames> = {}, extra: Partial<SpaceGamesState> =
       space_id: 'sp-1', allowed_apps: ['quiz'], games_possible: true, can_edit_games: false,
       host_supports: true, tables: [], ...over,
     },
-    loading: false, failed: false, reload: vi.fn().mockResolvedValue(undefined), ...extra,
+    loading: false, failed: false, reload: vi.fn().mockResolvedValue(undefined),
+    retry: vi.fn().mockResolvedValue(undefined), ...extra,
   }
 }
 
@@ -94,6 +95,6 @@ describe('SpaceGamesSection', () => {
     const v = render(<SpaceGamesSection spaceId="sp-1" state={st} />)
     expect(v.getByRole('alert').textContent).toMatch(/Couldn't load the games/)
     fireEvent.click(v.getByRole('button', { name: /Retry/ }))
-    expect(st.reload).toHaveBeenCalled()
+    expect(st.retry).toHaveBeenCalled()
   })
 })

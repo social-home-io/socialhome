@@ -367,9 +367,12 @@ export default function SpaceFeedPage() {
   // moderators, D9) see the section even before any game is allowed;
   // never a follower, never a global space.
   const globalSpace = spaceDetail.value?.space_type === 'global'
-  const gamesViewer = { choosesGames: canModerateHere, global: globalSpace }
-  const gamesOn = roleKnown.value && isWriterRole(viewerRole.value)
-    && gamesSectionShown(features, { chat: chatOn, follower, ...gamesViewer })
+  const gamesViewer = {
+    choosesGames: canModerateHere,
+    global: globalSpace,
+    writer: roleKnown.value && isWriterRole(viewerRole.value),
+  }
+  const gamesOn = gamesSectionShown(features, { chat: chatOn, follower, ...gamesViewer })
   const games = useSpaceGames(spaceId, gamesOn, (features?.allowed_apps ?? []).join(','))
   useGameApps(gamesOn)
   // A section the viewer can't have here (feature off, a follower on the
@@ -385,7 +388,7 @@ export default function SpaceFeedPage() {
       const target = moved && sectionAllowed(moved, features, viewer) ? moved : 'feed'
       loc.route(spaceSectionPath(spaceId, target), true)
     }
-  }, [spaceId, section, features, roleKnown.value, chatOn, follower, canModerateHere, globalSpace]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [spaceId, section, features, roleKnown.value, chatOn, follower, canModerateHere, globalSpace, gamesViewer.writer]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const chatOpen = section === 'chat'
   useSpaceChatSummary(spaceId, chatEligible, chatOpen)
@@ -601,7 +604,7 @@ export default function SpaceFeedPage() {
         sections={sections}
         active={section}
         chatUnread={chatUnread}
-        gamesOpen={section === 'games' ? 0 : joinableCount(games.games?.tables ?? [])}
+        gamesOpen={joinableCount(games.games?.tables ?? [])}
         members={memberSummary.value && membersShown != null
           ? { ...memberSummary.value, count: membersShown }
           : memberSummary.value}

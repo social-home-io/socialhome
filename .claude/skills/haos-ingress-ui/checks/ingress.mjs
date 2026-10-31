@@ -846,12 +846,16 @@ await check('space-games', async () => {
   const appId = 'table-probe'
   await asUser('alice', 'POST', '/api/apps', { json: { app_id: appId } }).catch(() => {})
   await asUser('alice', 'PUT', `/api/spaces/${ids.spaceId}/games/allowed`, { json: { allowed_apps: [appId] } })
-  const opened = await asUser('alice', 'POST', `/api/spaces/${ids.spaceId}/games`, { json: { app_id: appId, max_players: 4 } })
-  const sid = opened.table.session_id
-  const gamePath = `${PREFIX}/apps/${appId}/tables/${sid}`
   const gamesPath = `${PREFIX}/spaces/${ids.spaceId}/games`
   const saved = {}
+  const sids = {}
   for (const vp of ['desktop', 'mobile']) {
+    // A fresh game per viewport: turning the app off below closes its
+    // waiting games (D10).
+    const opened = await asUser('alice', 'POST', `/api/spaces/${ids.spaceId}/games`, { json: { app_id: appId, max_players: 4 } })
+    const sid = opened.table.session_id
+    sids[vp] = sid
+    const gamePath = `${PREFIX}/apps/${appId}/tables/${sid}`
     const { ctx, page: p } = await newPage(vp)
     await p.goto(APP + `spaces/${ids.spaceId}`, { waitUntil: 'load' })
     await step('the space feed', settled(p))
@@ -894,7 +898,7 @@ await check('space-games', async () => {
     await ctx.close()
   }
   activePage = page
-  return { problems, sid, saved }
+  return { problems, sids, saved }
 })
 
 // 7. No ingress user (Supervisor sent no X-Remote-User-*): the cold-start

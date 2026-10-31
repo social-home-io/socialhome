@@ -69,6 +69,7 @@ describe('isMine / joinableCount', () => {
   it('the dot counts open games you could join', () => {
     expect(joinableCount([
       table(), table({ state: 'full' }), table({ group: { is_host: true, my_state: 'seated' } }),
+      table({ app: { installed: false, enabled: false } }),
     ])).toBe(1)
   })
 })
