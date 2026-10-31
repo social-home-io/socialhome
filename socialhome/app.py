@@ -4925,6 +4925,9 @@ def create_app(config: Config | None = None) -> web.Application:
             # turned off) waits as a Needs-you row, named by the catalog.
             notifications=repos.notification,
             catalog=app[K.app_service_key],
+            # The invite sheet's "pick everyone from a space" (group play).
+            spaces=repos.space,
+            space_remote_members=repos.space_remote_member,
         )
         # …and becomes playable once the app is added or turned on. Those
         # rows are written by notification delivery jobs, so every step

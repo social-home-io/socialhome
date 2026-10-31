@@ -2671,6 +2671,10 @@ class AppChallengeReceived(DomainEvent):
     #: A "continue game" (an old game picked up again through the sheet),
     #: not a new invite — "Ben wants to continue your Chess game".
     continued: bool = False
+    #: An invite to a group game (v_76): how many people besides the
+    #: invitee were asked ("Anna invited you and 3 others to play Quiz";
+    #: the hub's count, bounded by the receiver). ``None`` for a 1:1 game.
+    others: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -2695,6 +2699,11 @@ class AppChallengeWaiting(DomainEvent):
     from_user_id: str
     app_name: str
     reason: str
+    #: A group game's invite (v_76): how many others were asked; ``None``
+    #: for a 1:1 game. A group invite keeps a row of its own (it never
+    #: joins the sender's 1:1 row) and, once the app is here, becomes a
+    #: group invite (Join), not a 1:1 one.
+    others: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -2812,6 +2821,51 @@ class AppTableClosed(DomainEvent):
     to_user_id: str
     reason: str
     space_name: str
+
+
+@dataclass(slots=True, frozen=True)
+class AppTableJoined(DomainEvent):
+    """Someone took a seat at a group game a local person started (v_76,
+    design 3.7) — published by :class:`AppGroupService` on the hub, for the
+    host person (``to_user_id``, a local user).
+
+    Consumed by the notification service: ONE row per game, moved on with
+    each joiner ("Ben and 2 others joined your Quiz game"); ``can_start``
+    — enough players are in to start ("You can start now"). ``others`` is
+    how many besides the newest joiner (``from_display``) hold a seat now,
+    the host not counted. ``from_display`` is a label only."""
+
+    app_id: str
+    session_id: str
+    to_user_id: str
+    from_display: str
+    #: The joiner's local or ``remote_users`` id — never shown, only
+    #: checked against the host's blocks (``None``: not known here).
+    from_user_id: str | None
+    others: int
+    can_start: bool = False
+
+
+@dataclass(slots=True, frozen=True)
+class AppTableStarted(DomainEvent):
+    """A group game a local person sits at started (v_76, design 3.7) —
+    published by :class:`AppGroupService` for each local player seated
+    when it went from waiting to playing, except the person who started
+    it (on the hub when Start is pressed, on another household when the
+    hub's ``group_start`` arrives).
+
+    Consumed by the notification service: "Your Quiz game with Anna and 3
+    others started" — ``from_display`` the person who started it,
+    ``others`` the other players besides the reader and them."""
+
+    app_id: str
+    session_id: str
+    to_user_id: str
+    from_display: str
+    #: Who started it — local or ``remote_users`` id, never shown (``None``:
+    #: not known here).
+    from_user_id: str | None
+    others: int
 
 
 @dataclass(slots=True, frozen=True)

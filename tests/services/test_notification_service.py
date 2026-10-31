@@ -33,6 +33,8 @@ from socialhome.domain.events import (
     AppRequested,
     AppTableAnnounced,
     AppTableClosed,
+    AppTableJoined,
+    AppTableStarted,
     AppTurn,
     AppTurnsSeen,
     AppUninstalled,
@@ -5447,3 +5449,213 @@ async def test_a_space_game_closed_for_you_says_why(stack):
     ]
     assert notif_kind("app_table_closed") is NotifKind.ABOUT_YOU
     assert push.calls == []
+
+
+# ─── Group games (v_76): invites to a group, "joined", "started" ──────────
+
+
+def _group_invite(to, *, others: int | None, sid: str = "t1") -> AppChallengeReceived:
+    return AppChallengeReceived(
+        app_id="quiz",
+        session_id=sid,
+        to_user_id=to.user_id,
+        from_display="Anna · Home hub",
+        from_user_id="r-anna",
+        others=others,
+    )
+
+
+async def test_a_group_invite_names_how_many_others_and_opens_whos_in(stack):
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    stack.notif_svc.attach_app_repo(_AppRegistry({"quiz": "Quiz"}))
+    ben = await stack.provision_user("ben")
+    await stack.bus.publish(_group_invite(ben, others=3))
+    [row] = await _rows_of(stack, ben.user_id, "app_challenge")
+    assert row.title == "Anna · Home hub invited you and 3 others to play Quiz"
+    assert row.link_url == "/apps/quiz/tables/t1"
+    assert row.object_key == "app_session:quiz/t1"
+    assert row.params is not None
+    assert row.params.flags == ("group",) and row.params.others == 3
+    # Title only on the push (§25.3): who and which app.
+    assert [p.title for _, p in push.calls] == [row.title]
+    await stack.bus.publish(_group_invite(ben, others=1, sid="t2"))
+    await stack.bus.publish(_group_invite(ben, others=0, sid="t3"))
+    titles = {
+        r.object_key: r.title
+        for r in await _rows_of(stack, ben.user_id, "app_challenge")
+    }
+    assert titles["app_session:quiz/t2"] == (
+        "Anna · Home hub invited you and 1 other to play Quiz"
+    )
+    assert titles["app_session:quiz/t3"] == "Anna · Home hub invited you to play Quiz"
+
+
+async def test_a_one_to_one_invite_has_no_group_params(stack):
+    stack.notif_svc.attach_app_repo(_AppRegistry({"quiz": "Quiz"}))
+    ben = await stack.provision_user("ben")
+    await stack.bus.publish(_group_invite(ben, others=None))
+    [row] = await _rows_of(stack, ben.user_id, "app_challenge")
+    assert row.link_url == "/apps/quiz"
+    assert row.params is not None
+    assert row.params.flags == () and row.params.others is None
+
+
+async def test_a_group_invite_for_an_app_the_registry_lacks_reads_generic(stack):
+    stack.notif_svc.attach_app_repo(_AppRegistry({}))
+    ben = await stack.provision_user("ben")
+    await stack.bus.publish(_group_invite(ben, others=2))
+    await stack.bus.publish(_group_invite(ben, others=1, sid="t2"))
+    titles = sorted(
+        r.title for r in await _rows_of(stack, ben.user_id, "app_challenge")
+    )
+    assert titles == [
+        "Anna · Home hub invited you and 1 other to play a game",
+        "Anna · Home hub invited you and 2 others to play a game",
+    ]
+
+
+async def test_a_waiting_group_invite_keeps_a_row_of_its_own(stack):
+    milo = await stack.provision_user("milo")
+    await stack.bus.publish(_waiting(milo.user_id))  # a 1:1 invite from Ben
+    group = AppChallengeWaiting(
+        app_id="chess",
+        session_id="g1",
+        to_user_id=milo.user_id,
+        from_display="Ben · Lakeside",
+        from_user_id="r-ben",
+        app_name="Chess",
+        reason="app_missing",
+        others=4,
+    )
+    await stack.bus.publish(group)
+    rows = await _rows_of(stack, milo.user_id, "app_challenge_waiting")
+    assert len(rows) == 2
+    [g] = [r for r in rows if r.object_key == "app_session:chess/g1"]
+    assert g.title == "Ben · Lakeside invited you and 4 others to play Chess"
+    assert g.params is not None
+    assert g.params.flags == ("app_missing", "group") and g.params.others == 4
+    assert g.link_url == "/apps/chess/about"
+    # A further 1:1 invite from Ben joins his 1:1 row, never the group's.
+    await stack.bus.publish(_waiting(milo.user_id, sid="s2"))
+    rows = await _rows_of(stack, milo.user_id, "app_challenge_waiting")
+    assert sorted(r.object_key for r in rows) == [
+        "app_session:chess/g1",
+        "app_session:chess/s2",
+    ]
+    # The same group invite again changes nothing.
+    await stack.bus.publish(group)
+    assert len(await _rows_of(stack, milo.user_id, "app_challenge_waiting")) == 2
+
+
+def _joined(to, *, by: str, others: int, can_start: bool = False) -> AppTableJoined:
+    return AppTableJoined(
+        app_id="quiz",
+        session_id="t1",
+        to_user_id=to.user_id,
+        from_display=by,
+        from_user_id=f"r-{by.lower()}",
+        others=others,
+        can_start=can_start,
+    )
+
+
+async def test_joined_your_game_is_one_row_per_game(stack):
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    stack.notif_svc.attach_app_repo(_AppRegistry({"quiz": "Quiz"}))
+    anna = await stack.provision_user("anna")
+    await stack.bus.publish(_joined(anna, by="Ben", others=0))
+    [row] = await _rows_of(stack, anna.user_id, "app_table_joined")
+    assert row.title == "Ben joined your Quiz game"
+    assert row.link_url == "/apps/quiz/tables/t1"
+    assert row.object_key == "app_session:quiz/t1"
+    assert row.params is not None and row.params.others == 0
+    assert notif_kind("app_table_joined") is NotifKind.GAMES
+    assert push.calls == []  # Games: in app by default
+    await stack.bus.publish(_joined(anna, by="Cleo", others=1))
+    [row] = await _rows_of(stack, anna.user_id, "app_table_joined")
+    assert row.title == "Cleo and 1 other joined your Quiz game"
+    assert row.params is not None and row.params.flags == ()
+    await stack.bus.publish(_joined(anna, by="Dan", others=2, can_start=True))
+    [row] = await _rows_of(stack, anna.user_id, "app_table_joined")
+    assert row.title == "Dan and 2 others joined your Quiz game"
+    assert row.params is not None
+    assert row.params.flags == ("can_start",) and row.params.others == 2
+    assert [a.name for a in row.params.actors] == ["Dan", "Cleo", "Ben"]
+
+
+async def test_joined_your_game_pushes_when_games_is_set_to_push(stack):
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    stack.notif_svc.attach_app_repo(_AppRegistry({"quiz": "Quiz"}))
+    anna = await stack.provision_user("anna")
+    await stack.user_svc.patch_preferences("anna", {"notif_kinds": {"games": "push"}})
+    await stack.bus.publish(_joined(anna, by="Ben", others=0))
+    assert [p.title for _, p in push.calls] == ["Ben joined your Quiz game"]
+
+
+def _started(to, *, others: int, sid: str = "t1") -> AppTableStarted:
+    return AppTableStarted(
+        app_id="quiz",
+        session_id=sid,
+        to_user_id=to.user_id,
+        from_display="Anna · Home hub",
+        from_user_id="r-anna",
+        others=others,
+    )
+
+
+async def test_a_group_game_started(stack):
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    stack.notif_svc.attach_app_repo(_AppRegistry({"quiz": "Quiz"}))
+    ben = await stack.provision_user("ben")
+    await stack.bus.publish(_started(ben, others=2))
+    [row] = await _rows_of(stack, ben.user_id, "app_table_started")
+    assert row.title == "Your Quiz game with Anna · Home hub and 2 others started"
+    assert row.link_url == "/apps/quiz?session=t1"
+    assert row.params is not None and row.params.others == 2
+    assert notif_kind("app_table_started") is NotifKind.GAMES
+    assert push.calls == []
+    await stack.bus.publish(_started(ben, others=1, sid="t2"))
+    await stack.bus.publish(_started(ben, others=0, sid="t3"))
+    titles = {
+        r.object_key: r.title
+        for r in await _rows_of(stack, ben.user_id, "app_table_started")
+    }
+    assert titles["app_session:quiz/t2"] == (
+        "Your Quiz game with Anna · Home hub and 1 other started"
+    )
+    assert titles["app_session:quiz/t3"] == (
+        "Your Quiz game with Anna · Home hub started"
+    )
+
+
+async def test_a_group_game_row_for_an_unknown_app_reads_generic(stack):
+    stack.notif_svc.attach_app_repo(_AppRegistry({}))
+    ben = await stack.provision_user("ben")
+    await stack.bus.publish(_started(ben, others=2))
+    await stack.bus.publish(_joined(ben, by="Cleo", others=0))
+    [started] = await _rows_of(stack, ben.user_id, "app_table_started")
+    assert started.title == "Your game with Anna · Home hub and 2 others started"
+    [joined] = await _rows_of(stack, ben.user_id, "app_table_joined")
+    assert joined.title == "Cleo joined your game"
+
+
+async def test_a_group_game_row_from_someone_blocked_makes_no_row(stack):
+    stack.notif_svc.attach_app_repo(_AppRegistry({"quiz": "Quiz"}))
+    anna = await stack.provision_user("anna")
+    ben = await stack.provision_user("ben")
+    await SqliteUserRepo(stack.db).block(anna.user_id, ben.user_id)
+    await stack.bus.publish(
+        AppTableJoined(
+            app_id="quiz",
+            session_id="t1",
+            to_user_id=anna.user_id,
+            from_display="Ben",
+            from_user_id=ben.user_id,
+            others=0,
+        )
+    )
+    assert await _rows_of(stack, anna.user_id, "app_table_joined") == []

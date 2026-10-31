@@ -238,6 +238,53 @@ describe('NeedsYouSection', () => {
     expect(queryByRole('link', { name: 'Review' })).toBeNull()
   })
 
+  describe('a group game invite (v_76)', () => {
+    const group = () => row('gg', {
+      type: 'app_challenge',
+      title: 'Anna invited you and 3 others to play Quiz',
+      object_key: 'app_session:quiz/t1',
+      space_id: null,
+      link_url: '/apps/quiz/tables/t1',
+      params: { actors: [{ id: 'u-anna', name: 'Anna' }], actor_count: 1, new: 1, total: 1, space_name: 'Quiz', flags: ['group'], others: 3 },
+    })
+
+    it('reads "and 3 others" and offers Join to the Who\'s-in page — no Play', async () => {
+      const { getByRole, queryByRole, container } = await mount([group()])
+      expect(container.textContent).toContain('Anna invited you and 3 others to play Quiz')
+      expect(getByRole('link', { name: 'Join' }).getAttribute('href')).toBe('/apps/quiz/tables/t1')
+      expect(queryByRole('link', { name: 'Play' })).toBeNull()
+      expect(getByRole('button', { name: 'Decline' })).toBeTruthy()
+    })
+
+    it('Join takes the seat first, then moves on', async () => {
+      apiPost.mockResolvedValue({ group: { session_id: 't1', app_id: 'quiz', state: 'lobby', me: null, my_state: 'joining', host: 1, is_host: false, min: 3, max: 8, late_join: false, players: [] } })
+      const { getByRole } = await mount([group()])
+      const join = getByRole('link', { name: 'Join' })
+      const moves: boolean[] = []
+      join.addEventListener('click', e => { moves.push(e.defaultPrevented); e.preventDefault() })
+      await act(async () => { join.click() })
+      await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/apps/quiz/groups/t1/join'))
+      // The first click is held for the Join; the second is the move.
+      await waitFor(() => expect(moves).toEqual([true, false]))
+    })
+
+    it('a refused Join stays here and says so, without a reason', async () => {
+      const { ApiError } = await import('@/api')
+      // The mocked ApiError takes a message only.
+      const Mocked = ApiError as unknown as new (message: string) => Error
+      const err = Object.assign(new Mocked('no'), { code: 'APP_GROUP_CANT_JOIN' })
+      apiPost.mockRejectedValue(err)
+      const { getByRole } = await mount([group()])
+      const join = getByRole('link', { name: 'Join' })
+      const moves: boolean[] = []
+      join.addEventListener('click', e => { moves.push(e.defaultPrevented); e.preventDefault() })
+      await act(async () => { join.click() })
+      const { toasts } = await import('@/components/Toast')
+      await waitFor(() => expect(toasts.value.map(x => x.message)).toContain("You can't join this game."))
+      expect(moves).toEqual([true])
+    })
+  })
+
   it('an app update offers Update (one tap) and What\'s new', async () => {
     const upd = row('u', {
       type: 'app_update',

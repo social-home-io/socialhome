@@ -21,6 +21,8 @@ import {
   flagsOf,
   flushDeclines,
   inlineAction,
+  isGroupInvite,
+  lobbyHref,
   mustReview,
   loadNeedsYou,
   needsYou,
@@ -274,6 +276,47 @@ describe('game invites', () => {
       '/api/apps/chess/sessions/sess-1/decline', undefined, { keepalive: true },
     ))
     await vi.waitFor(() => expect(toasts.value.map(t => t.message)).toContain('Game declined'))
+  })
+})
+
+describe('group game invites (v_76)', () => {
+  const group = (over: Partial<Notification> = {}) => row({
+    id: 'gg',
+    type: 'app_challenge',
+    object_key: 'app_session:quiz/t-1',
+    space_id: null,
+    link_url: '/apps/quiz/tables/t-1',
+    params: { actors: [{ id: 'u-anna', name: 'Anna' }], actor_count: 1, new: 1, total: 1, space_name: 'Quiz', flags: ['group'], others: 3 },
+    ...over,
+  })
+
+  it('offers Join (not Play) and lands on the game\'s Who\'s-in page', () => {
+    expect(isGroupInvite(group())).toBe(true)
+    expect(inlineAction(group())).toBe('join')
+    expect(lobbyHref(group())).toBe('/apps/quiz/tables/t-1')
+  })
+
+  it('a 1:1 invite and a waiting group invite are not a Join', () => {
+    expect(isGroupInvite(group({ params: { actors: [], actor_count: 0, new: 1, total: 1 } }))).toBe(false)
+    const waiting = group({ type: 'app_challenge_waiting', params: { actors: [{ id: 'u-anna', name: 'Anna' }], actor_count: 1, new: 1, total: 1, flags: ['app_missing', 'group'], others: 3 } })
+    expect(isGroupInvite(waiting)).toBe(false)
+    expect(inlineAction(waiting)).toBe('waiting')
+  })
+
+  it('declining a group invite answers through the game', async () => {
+    declineWithUndo(group())
+    flushDeclines()
+    await vi.waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/apps/quiz/groups/t-1/decline', undefined, { keepalive: true },
+    ))
+  })
+
+  it('declining a waiting group invite stays on this household (D10)', async () => {
+    declineWithUndo(group({ type: 'app_challenge_waiting', params: { actors: [{ id: 'u-anna', name: 'Anna' }], actor_count: 1, new: 1, total: 1, flags: ['app_missing', 'group'], others: 3 } }))
+    flushDeclines()
+    await vi.waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/apps/quiz/sessions/t-1/decline', undefined, { keepalive: true },
+    ))
   })
 })
 

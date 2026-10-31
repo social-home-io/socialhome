@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest'
+import { exec } from 'preact-iso/router'
 import { routes } from './router'
 
 describe('router', () => {
-  it('defines 47 routes', () => {
+  it('defines 48 routes', () => {
     // Routes added / removed across recent passes:
     //   /dms/:id/calls   — per-conversation call history
     //   /calls/:callId   — in-call page
@@ -25,7 +26,8 @@ describe('router', () => {
     //   /apps            — Social Home Apps browse/install page (§Apps)
     //   /apps/:appId     — sandboxed AppHost iframe launcher (§Apps)
     //   /apps/:appId/about — what an app can do; never launches it
-    expect(Object.keys(routes).length).toBe(47)
+    //   /apps/:appId/tables/:sessionId — a group game's "Who's in" page
+    expect(Object.keys(routes).length).toBe(48)
   })
 
   it('a space and its sections are ONE route, after the fixed space sub-pages', () => {
@@ -61,6 +63,16 @@ describe('router', () => {
   it('the settings sections are one route, so a section jump keeps the page', () => {
     expect(routes['/spaces/:id/settings/:section?']).toBeTruthy()
     expect(routes['/spaces/:id/settings']).toBeUndefined()
+  })
+
+  it('a group game has its own page; the app route does not take its address', () => {
+    expect(routes['/apps/:appId/tables/:sessionId']).toBeTruthy()
+    // preact-iso takes the first route that matches the whole path.
+    const first = Object.keys(routes).find(r => exec('/apps/gift-draw/tables/s1', r))
+    expect(first).toBe('/apps/:appId/tables/:sessionId')
+    expect(exec('/apps/gift-draw/tables/s1', '/apps/:appId/tables/:sessionId'))
+      .toMatchObject({ params: { appId: 'gift-draw', sessionId: 's1' } })
+    expect(Object.keys(routes).find(r => exec('/apps/gift-draw', r))).toBe('/apps/:appId')
   })
 
   it('has feed route at /', () => {

@@ -343,6 +343,10 @@ export interface UninstallPreview {
   told: string[]
   told_more: number
   untold: number
+  /** Group games (v_76) with other households someone here has a place
+   *  at: they end, or this household's players leave them. Missing from
+   *  an older server: 0. */
+  tables?: number
 }
 
 export async function loadUninstallPreview(appId: string): Promise<UninstallPreview> {
@@ -372,6 +376,12 @@ export interface AppRuntime {
   capabilities: string[]
   /** What the bridge offers the app (the routes check again). */
   permissions:  string[]
+  /** The app's player range (manifest ``players``), when the server
+   *  says it: the group sheet's cap. Missing → the hard ceiling. */
+  players?:     { min: number, max: number }
+  /** Whether the app can be played as a group game (manifest
+   *  ``tables``). Only an explicit ``false`` keeps the group sheet shut. */
+  tables?:      boolean
 }
 
 export async function getRuntime(appId: string): Promise<AppRuntime> {
@@ -389,6 +399,16 @@ export interface InvitablePerson {
   household_name: string | null
   is_local:       boolean
   online:         boolean
+  /** Whether their household can take part in group games (v_76+). */
+  groups?:        boolean
+}
+
+/** A space the person can pick everyone from in the group sheet: the
+ *  invitable people with a writing seat there (indices into ``people``). */
+export interface InvitableSpace {
+  space_id: string
+  name:     string
+  people:   number[]
 }
 
 /** What the invite caps leave (server-enforced; shown before Send). */
@@ -400,10 +420,16 @@ export interface InviteCounts {
 }
 
 /** The invite sheet's list — Social Home's own read, never the app's. */
-export async function getInvitable(appId: string): Promise<{ people: InvitablePerson[], invites: InviteCounts }> {
+export async function getInvitable(appId: string): Promise<{
+  people: InvitablePerson[]
+  invites: InviteCounts
+  /** Group sheet only; older servers leave it out. */
+  spaces?: InvitableSpace[]
+}> {
   return await api.get(`/api/apps/${encodeURIComponent(appId)}/invitable`) as {
     people: InvitablePerson[]
     invites: InviteCounts
+    spaces?: InvitableSpace[]
   }
 }
 

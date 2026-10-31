@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
@@ -62,6 +63,7 @@ from socialhome.domain.notification import (
     NotificationHandled,
     NotificationParams,
 )
+from socialhome.domain.space import SpaceMember, SpaceRole, SpaceType
 from socialhome.domain.user import RemoteUser, User
 from socialhome.services.app_federation_service import (
     AppFederationService,
@@ -5323,3 +5325,147 @@ async def test_install_keeps_the_newest_five_senders():
     }
     assert ended["s1"] == "done"
     assert all(p.session_id != "s1" for p in svc._app_repo.invites)
+
+
+# ─── The invite sheet's spaces ("pick everyone from a space") ────────────
+
+
+class _FakeSpaces:
+    """The spaces the caller is in (``list_for_user``) and the local seats
+    (``list_members``)."""
+
+    def __init__(self, spaces: list, members: dict[str, list[tuple[str, str]]]):
+        self.spaces = spaces
+        self.members = members
+
+    async def list_for_user(self, user_id: str) -> list:
+        return [
+            s
+            for s in self.spaces
+            if any(uid == user_id for uid, _ in self.members.get(s.id, ()))
+        ]
+
+    async def list_members(self, space_id: str) -> list[SpaceMember]:
+        return [
+            SpaceMember(space_id=space_id, user_id=uid, role=role, joined_at="x")
+            for uid, role in self.members.get(space_id, ())
+        ]
+
+
+class _FakeRemoteMembers:
+    def __init__(self, seats: dict[str, list[tuple[str, str, str]]]):
+        self.seats = seats
+
+    async def list_for_space(self, space_id: str) -> list:
+        return [
+            SimpleNamespace(instance_id=inst, user_id=uid, role=role)
+            for inst, uid, role in self.seats.get(space_id, ())
+        ]
+
+
+def _with_spaces(svc, spaces: _FakeSpaces, remote: _FakeRemoteMembers) -> None:
+    svc._spaces = spaces
+    svc._space_remote_members = remote
+
+
+def _space(sid: str, name: str, kind=SpaceType.PRIVATE, **kw) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=sid, name=name, space_type=kind, archived=kw.get("archived", False)
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_invite_sheet_offers_spaces_with_invitable_writers():
+    alice = _make_user("u-alice", "alice", "Alice")
+    bob = _make_user("u-bob", "bob", "Bob")
+    cara = _make_user("u-cara", "cara", "Cara")
+    ben = _make_remote_user("ru-ben", "peer-inst", "ben", "Ben")
+    svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app()},
+        users=[alice, bob, cara],
+        remote_users=[ben],
+        own_instance_id="own-inst",
+    )
+    member, sub = SpaceRole.MEMBER.value, SpaceRole.SUBSCRIBER.value
+    spaces = _FakeSpaces(
+        [
+            _space("s-fam", "family"),
+            _space("s-club", "Chess club", SpaceType.PUBLIC),
+            _space("s-glob", "World", SpaceType.GLOBAL),
+            _space("s-old", "Old", archived=True),
+            _space("s-follow", "Followed", SpaceType.PUBLIC),
+            _space("s-alone", "Alone"),
+        ],
+        {
+            # Bob writes, Cara only follows.
+            "s-fam": [("u-alice", "owner"), ("u-bob", member), ("u-cara", sub)],
+            "s-club": [("u-alice", "moderator"), ("u-cara", member)],
+            "s-glob": [("u-alice", member), ("u-bob", member)],
+            "s-old": [("u-alice", member), ("u-bob", member)],
+            # The caller only follows this one: not theirs to pick from.
+            "s-follow": [("u-alice", sub), ("u-bob", member)],
+            "s-alone": [("u-alice", "admin")],
+        },
+    )
+    _with_spaces(
+        svc,
+        spaces,
+        _FakeRemoteMembers(
+            {
+                "s-fam": [("peer-inst", "ru-ben", "admin")],
+                "s-club": [("peer-inst", "ru-ben", sub)],
+            }
+        ),
+    )
+    people, picks = await svc.invite_sheet(app_id="chess", self_user_id="u-alice")
+    refs = [p["user_ref"] for p in people]
+    assert refs == await _refs(svc)
+    by_name = {s["name"]: [refs[i] for i in s["people"]] for s in picks}
+    # Sorted by name; global, archived, followed and empty spaces left out;
+    # followers (local or remote) are never offered from a space.
+    assert [s["name"] for s in picks] == ["Chess club", "family"]
+    assert by_name == {"Chess club": ["u-cara"], "family": ["u-bob", "ben"]}
+    assert all(set(s) == {"space_id", "name", "people"} for s in picks)
+    assert picks[1]["space_id"] == "s-fam"
+
+
+async def _refs(svc) -> list[str]:
+    return [
+        p["user_ref"]
+        for p in await svc.list_invitable(app_id="chess", self_user_id="u-alice")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_spaces_only_name_people_the_sheet_lists():
+    """A blocked person, or another household's people for an app without
+    ``federation``, isn't in ``people`` — so no space names them."""
+    alice = _make_user("u-alice", "alice", "Alice")
+    bob = _make_user("u-bob", "bob", "Bob")
+    ben = _make_remote_user("ru-ben", "peer-inst", "ben", "Ben")
+    svc, _, _ = _make_svc(
+        apps={"chess": _make_installed_app(capabilities=("storage", "people"))},
+        users=[alice, bob],
+        remote_users=[ben],
+        own_instance_id="own-inst",
+        blocked_ids={"u-bob"},
+    )
+    _with_spaces(
+        svc,
+        _FakeSpaces(
+            [_space("s1", "Family")],
+            {"s1": [("u-alice", "owner"), ("u-bob", "member")]},
+        ),
+        _FakeRemoteMembers({"s1": [("peer-inst", "ru-ben", "member")]}),
+    )
+    people, picks = await svc.invite_sheet(app_id="chess", self_user_id="u-alice")
+    assert people == [] and picks == []
+
+
+@pytest.mark.asyncio
+async def test_without_spaces_wired_the_sheet_has_none():
+    alice = _make_user("u-alice", "alice", "Alice")
+    bob = _make_user("u-bob", "bob", "Bob")
+    svc, _, _ = _make_svc(apps={"chess": _make_installed_app()}, users=[alice, bob])
+    people, picks = await svc.invite_sheet(app_id="chess", self_user_id="u-alice")
+    assert [p["user_ref"] for p in people] == ["u-bob"] and picks == []

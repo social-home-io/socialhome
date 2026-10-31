@@ -9,6 +9,7 @@ delivers the sealed ``APP_SESSION`` payloads in order.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -40,6 +41,11 @@ from socialhome.domain.apps import INVITES_OPEN_MAX, AppInviteLimitError
 from socialhome.domain.events import (
     AppChallengeEnded,
     AppChallengeReceived,
+    AppChallengeWaiting,
+    AppEnabledChanged,
+    AppInstalled,
+    AppTableJoined,
+    AppTableStarted,
     AppUninstalled,
     UserBlocked,
 )
@@ -113,7 +119,10 @@ async def test_open_invites_each_person_and_names_nobody_else(net):
     got = b.bus.of(AppChallengeReceived)
     assert got[0].to_user_id == b.uid("ben")
     assert got[0].from_display == "Anna · Home hub"
-    assert hub.bus.of(AppChallengeReceived)[0].to_user_id == hub.uid("ada")
+    # A group invite: "… invited you and 2 others" (the hub's count).
+    assert got[0].others == 2
+    local = hub.bus.of(AppChallengeReceived)[0]
+    assert local.to_user_id == hub.uid("ada") and local.others == 2
 
 
 async def test_open_refuses_what_doesnt_fit(net):
@@ -123,12 +132,12 @@ async def test_open_refuses_what_doesnt_fit(net):
         await hub.groups.open_table(
             app_id=APP, actor_user_id=anna, targets=[hub.target(b, "ben")]
         )
-    with pytest.raises(AppGroupSizeError):  # max past the sheet's 10
+    with pytest.raises(AppGroupSizeError):  # max past the app's 8
         await hub.groups.open_table(
             app_id=APP,
             actor_user_id=anna,
             targets=[hub.target(b, "ben"), hub.target(c, "cleo")],
-            max_players=11,
+            max_players=9,
         )
     with pytest.raises(AppGroupHouseholdTooOldError):
         await hub.groups.open_table(
@@ -152,18 +161,53 @@ async def test_the_invite_sheet_says_who_can_have_a_seat(net):
     assert groups == {hub.uid("ada"): True, "ben": True, "cleo": True, "olga": False}
 
 
-async def test_tables_count_against_the_invite_caps_per_person(net):
+async def test_a_table_counts_once_against_the_invite_caps(net, monkeypatch):
     hub, _b, _c = _homes(net)
     anna = hub.uid("anna")
     await _open(net)
     counts = await hub.app_fed.invite_counts(app_id=APP, user_id=anna)
-    assert counts["open"] == 3 and counts["today"] == 3
-    # Three tables of three: nine open invites, one more table passes 10.
-    await _open(net)
+    # Three people asked, one invite counted (owner decision D2).
+    assert counts["open"] == 1 and counts["today"] == 1
+    assert counts["max_open"] == INVITES_OPEN_MAX
+    monkeypatch.setattr(
+        "socialhome.services.app_federation_service.INVITES_OPEN_MAX", 2
+    )
     await _open(net)
     with pytest.raises(AppInviteLimitError):
         await _open(net, people=("ben", "cleo"))
-    assert counts["max_open"] == INVITES_OPEN_MAX
+
+
+async def test_a_table_answered_by_everyone_stops_counting_as_open(net):
+    hub, b, c = _homes(net)
+    sid = await _open(net, people=("ben", "cleo"))
+    for home, user in ((b, "ben"), (c, "cleo")):
+        await home.groups.join(app_id=APP, session_id=sid, actor_user_id=home.uid(user))
+    await net.flush()
+    counts = await hub.app_fed.invite_counts(app_id=APP, user_id=hub.uid("anna"))
+    assert counts["open"] == 0 and counts["today"] == 1
+
+
+async def test_a_picked_group_seats_up_to_the_apps_own_max(net):
+    hub = net.homes["hub"]
+    await hub.app_repo.update_installed(quiz_app(players=(2, 30)))
+    family = [f"kid{n}" for n in range(30)]
+    for name in family:
+        await hub.add_user(name)
+    anna = hub.uid("anna")
+    # 29 picked + the host = 30 seats: one table, one invite of the caps.
+    view = await hub.groups.open_table(
+        app_id=APP,
+        actor_user_id=anna,
+        targets=[hub.target(hub, n) for n in family[:29]],
+    )
+    assert view["max"] == 30 and view["invited"] == 29
+    with pytest.raises(AppGroupSizeError) as err:  # a 31st seat
+        await hub.groups.open_table(
+            app_id=APP,
+            actor_user_id=anna,
+            targets=[hub.target(hub, n) for n in family],
+        )
+    assert err.value.params == {"min": 2, "max": 30}
 
 
 async def test_open_tables_per_person_are_capped(net):
@@ -590,7 +634,7 @@ async def test_a_hand_over_keeps_counting_on_the_opener(net):
     await net.flush()
     assert (await hub.group_repo.get(sid)).host_user == "ben"
     counts = await hub.app_fed.invite_counts(app_id=APP, user_id=anna)
-    assert counts["today"] == 2
+    assert counts["today"] == 1  # the one table Anna opened
 
 
 async def test_a_snapshot_that_changes_the_players_range_is_dropped(net):
@@ -636,3 +680,251 @@ async def test_blocking_someone_takes_one_out_of_their_table(net):
     )
     await net.flush()
     assert (await hub.group_repo.get(sid)).entry("hub", "ada").state == SEAT_LEFT
+
+
+# ─── "Joined your game" / "Your game started" (design 3.7) ────────────────
+
+
+async def test_the_host_hears_each_join_and_when_they_can_start(net):
+    hub, b, c = _homes(net)
+    sid = await _open(net)
+    await b.groups.join(app_id=APP, session_id=sid, actor_user_id=b.uid("ben"))
+    await net.flush()
+    [first] = hub.bus.of(AppTableJoined)
+    assert first.to_user_id == hub.uid("anna") and first.session_id == sid
+    assert first.from_display == "Ben · Home b"
+    assert first.from_user_id == "r-b-ben"
+    assert first.others == 0 and not first.can_start  # 2 of the app's 3
+    await c.groups.join(app_id=APP, session_id=sid, actor_user_id=c.uid("cleo"))
+    await net.flush()
+    second = hub.bus.of(AppTableJoined)[-1]
+    assert second.from_display == "Cleo · Home c"
+    assert second.others == 1 and second.can_start
+    # Only the hub's own host person hears it; the players' households not.
+    assert not b.bus.of(AppTableJoined) and not c.bus.of(AppTableJoined)
+
+
+async def test_every_other_player_hears_the_game_started(net):
+    hub, b, c = _homes(net)
+    sid = await _open(net)
+    await hub.groups.join(app_id=APP, session_id=sid, actor_user_id=hub.uid("ada"))
+    for home, user in ((b, "ben"), (c, "cleo")):
+        await home.groups.join(app_id=APP, session_id=sid, actor_user_id=home.uid(user))
+        await net.flush()
+    await hub.groups.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
+    await net.flush()
+    # On the hub: Ada (not Anna, who pressed Start).
+    [ada] = hub.bus.of(AppTableStarted)
+    assert ada.to_user_id == hub.uid("ada") and ada.from_display == "Anna"
+    assert ada.from_user_id == hub.uid("anna") and ada.others == 2
+    # On each other household, when the hub's start arrives.
+    [ben] = b.bus.of(AppTableStarted)
+    assert ben.to_user_id == b.uid("ben") and ben.from_display == "Anna · Home hub"
+    assert ben.from_user_id == "r-hub-anna" and ben.others == 2
+    assert len(c.bus.of(AppTableStarted)) == 1
+    # A repeated start snapshot raises nothing more.
+    await hub.groups._broadcast(await hub.group_repo.get(sid), "group_start")
+    await net.flush()
+    assert len(b.bus.of(AppTableStarted)) == 1
+
+
+async def test_a_two_player_game_that_starts_by_itself_tells_nobody_twice(net):
+    hub, b, _c = _homes(net)
+    await hub.app_repo.update_installed(quiz_app(players=(2, 2)))
+    await b.app_repo.update_installed(quiz_app(players=(2, 2)))
+    sid = await _open(net, people=("ben",))
+    await b.groups.join(app_id=APP, session_id=sid, actor_user_id=b.uid("ben"))
+    await net.flush()
+    [joined] = hub.bus.of(AppTableJoined)
+    assert joined.from_display == "Ben · Home b" and not joined.can_start
+    # Ben's own Join started it: no "started" row for him, none for Anna.
+    assert not b.bus.of(AppTableStarted) and not hub.bus.of(AppTableStarted)
+
+
+# ─── D10: a group invite for an app this household doesn't have ─────────
+
+
+@pytest.fixture
+async def wnet(tmp_path):
+    """hub (Anna) with the quiz; b (Ben) without it, keeping notification
+    rows; c (Cleo) with it."""
+    n = Network(tmp_path)
+    hub = await n.household("hub")
+    b = await n.household("b", notifications=True)
+    c = await n.household("c")
+    await hub.add_user("anna")
+    await b.add_user("ben")
+    await c.add_user("cleo")
+    for home in (hub, c):
+        await home.app_repo.install(quiz_app())
+    await n.pair(hub, b)
+    await n.pair(hub, c)
+    yield n
+    await n.close()
+
+
+async def _wopen(net, **kw) -> str:
+    hub, b, c = _homes(net)
+    view = await hub.groups.open_table(
+        app_id=APP,
+        actor_user_id=hub.uid("anna"),
+        targets=[hub.target(b, "ben"), hub.target(c, "cleo")],
+        **kw,
+    )
+    await net.flush()
+    return view["session_id"]
+
+
+async def _waiting_rows(home, user):
+    return [
+        n
+        for n in await home.notifs.list(home.uid(user), limit=20)
+        if n.type == "app_challenge_waiting"
+    ]
+
+
+async def _app_arrives(net, home) -> None:
+    await home.app_repo.install(quiz_app())
+    await home.app_fed.on_app_usable(AppInstalled(app_id=APP, name="Quiz"))
+    await net.flush()
+
+
+async def test_a_group_invite_for_an_app_not_here_waits_and_tells_nobody(wnet):
+    _hub, b, _c = _homes(wnet)
+    sid = await _wopen(wnet)
+    [waiting] = b.bus.of(AppChallengeWaiting)
+    assert waiting.session_id == sid and waiting.to_user_id == b.uid("ben")
+    assert waiting.others == 1 and waiting.reason == "app_missing"
+    assert waiting.from_display == "Anna · Home hub"
+    [row] = await _waiting_rows(b, "ben")
+    assert row.params is not None
+    assert row.params.flags == ("app_missing", "group") and row.params.others == 1
+    assert row.title == "Anna · Home hub invited you and 1 other to play Quiz"
+    # The table's copy is kept (it ends the row when the table ends); no
+    # seat row yet, and nothing went back to the hub.
+    assert (await b.group_repo.get(sid)) is not None
+    assert await b.app_repo.get_pending_session(APP, b.uid("ben"), sid) is None
+    assert "group_leave" not in wnet.verbs(to="hub")
+    assert "group_join" not in wnet.verbs(to="hub")
+
+
+async def test_a_waiting_group_invite_becomes_a_join_when_the_app_arrives(wnet):
+    hub, b, _c = _homes(wnet)
+    sid = await _wopen(wnet)
+    await _app_arrives(wnet, b)
+    seat = await b.app_repo.get_pending_session(APP, b.uid("ben"), sid)
+    assert seat is not None and seat.is_group and seat.state == "invited"
+    [got] = b.bus.of(AppChallengeReceived)
+    assert got.session_id == sid and got.others == 1
+    assert got.from_display == "Anna · Home hub"
+    [row] = await _waiting_rows(b, "ben")
+    assert row.params is not None and row.params.handled is not None
+    [invite] = [
+        n
+        for n in await b.notifs.list(b.uid("ben"), limit=20)
+        if n.type == "app_challenge"
+    ]
+    assert invite.params is not None and invite.params.flags == ("group",)
+    assert invite.link_url == f"/apps/{APP}/tables/{sid}"
+    # Join works like any group invite.
+    await b.groups.join(app_id=APP, session_id=sid, actor_user_id=b.uid("ben"))
+    await wnet.flush()
+    assert (await _view(b, "ben", sid))["my_state"] == SEAT_SEATED
+    assert (await _view(hub, "anna", sid))["players"][1]["name"] == "Ben"
+
+
+async def test_a_waiting_group_invite_for_a_turned_off_app(wnet):
+    _hub, b, _c = _homes(wnet)
+    await b.app_repo.install(quiz_app())
+    await b.app_repo.set_enabled(APP, enabled=False)
+    sid = await _wopen(wnet)
+    [waiting] = b.bus.of(AppChallengeWaiting)
+    assert waiting.reason == "app_off" and waiting.others == 1
+    await b.app_repo.set_enabled(APP, enabled=True)
+    await b.app_fed.on_app_usable(AppEnabledChanged(app_id=APP, enabled=True))
+    seat = await b.app_repo.get_pending_session(APP, b.uid("ben"), sid)
+    assert seat is not None and seat.is_group
+
+
+async def test_a_waiting_group_invite_ends_with_its_table(wnet):
+    hub, b, _c = _homes(wnet)
+    sid = await _wopen(wnet)
+    await hub.groups.close(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
+    await wnet.flush()
+    [ended] = b.bus.of(AppChallengeEnded)
+    assert (ended.session_ids, ended.outcome) == ((sid,), "withdrawn")
+    [row] = await _waiting_rows(b, "ben")
+    assert row.params is not None and row.params.handled is not None
+    # The app arriving later makes nothing of it.
+    await _app_arrives(wnet, b)
+    assert await b.app_repo.get_pending_session(APP, b.uid("ben"), sid) is None
+    assert not b.bus.of(AppChallengeReceived)
+
+
+async def test_a_start_withdraws_a_waiting_group_invite(wnet):
+    hub, b, c = _homes(wnet)
+    await hub.app_repo.update_installed(quiz_app(players=(2, 8)))
+    sid = await _wopen(wnet)
+    await c.groups.join(app_id=APP, session_id=sid, actor_user_id=c.uid("cleo"))
+    await wnet.flush()
+    await hub.groups.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
+    await wnet.flush()
+    [ended] = b.bus.of(AppChallengeEnded)
+    assert ended.outcome == "withdrawn"
+
+
+async def test_a_waiting_group_invite_whose_lobby_ran_out_expires(wnet):
+    _hub, b, _c = _homes(wnet)
+    sid = await _wopen(wnet)
+    table = await b.group_repo.get(sid)
+    past = (datetime.now(UTC) - timedelta(minutes=1)).isoformat()
+    await b.group_repo.save(replace(table, expires_at=past))
+    await _app_arrives(wnet, b)
+    [ended] = b.bus.of(AppChallengeEnded)
+    assert ended.outcome == "expired"
+    assert await b.app_repo.get_pending_session(APP, b.uid("ben"), sid) is None
+
+
+async def test_declining_a_waiting_group_invite_sends_nothing(wnet):
+    _hub, b, _c = _homes(wnet)
+    sid = await _wopen(wnet)
+    sent = len(wnet.sent)
+    assert await b.app_fed.decline_waiting(
+        app_id=APP, session_id=sid, actor_user_id=b.uid("ben")
+    )
+    await wnet.flush()
+    assert len(wnet.sent) == sent  # D10: the hub never learns why
+    await _app_arrives(wnet, b)
+    assert await b.app_repo.get_pending_session(APP, b.uid("ben"), sid) is None
+
+
+async def test_a_group_invite_from_someone_blocked_never_waits(wnet):
+    _hub, b, _c = _homes(wnet)
+    await b.user_repo.block(b.uid("ben"), "r-hub-anna")
+    await _wopen(wnet)
+    assert not b.bus.of(AppChallengeWaiting)
+    assert await _waiting_rows(b, "ben") == []
+
+
+# ─── Uninstall preview: group games with other households ────────────────
+
+
+async def test_the_uninstall_preview_counts_group_games_apart(net):
+    hub, b, _c = _homes(net)
+    sid = await _open(net)
+    for home in (hub, b):
+        preview = await home.app_fed.preview_uninstall(APP)
+        assert preview.tables == 1
+        # Group seats are not 1:1 games or invites.
+        assert (preview.games, preview.invites) == (0, 0)
+    await hub.groups.close(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
+    await net.flush()
+    assert (await hub.app_fed.preview_uninstall(APP)).tables == 0
+    assert (await b.app_fed.preview_uninstall(APP)).tables == 0
+
+
+async def test_a_group_game_only_within_the_household_isnt_counted(net):
+    hub = net.homes["hub"]
+    await hub.app_repo.update_installed(quiz_app(players=(2, 8)))
+    await _open(net, people=("ada",))
+    assert (await hub.app_fed.preview_uninstall(APP)).tables == 0

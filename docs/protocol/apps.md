@@ -376,6 +376,8 @@ realistic case, a 6-person household with 15 games each: ≤ 90 rows, ever.
 Every app row — invite (`app_challenge`), continue
 (`app_challenge_continue`), waiting (`app_challenge_waiting`), declined
 (`app_challenge_declined`), ended (`app_game_ended`), turn (`app_turn`),
+a group game joined / started (`app_table_joined` / `app_table_started`,
+[`app-groups.md`](./app-groups.md#needs-you-and-the-bell-design-37)),
 added (`app_added`), asked (`app_request`) and update (`app_update`) —
 names the app in the reader's language, in its title and as the row's
 place (`params.space_name`, which the SPA builds its sentence from):

@@ -333,7 +333,8 @@ class AppDetailView(BaseView):
 class AppUninstallPreviewView(BaseView):
     """``GET /api/apps/{app_id}/uninstall-preview`` (admins) — what an
     uninstall loses (D9): ``{people, games, invites, told, told_more,
-    untold}``. Counts and the names of people in other households who will
+    untold, tables}`` (``tables``: group games with other households,
+    v_76). Counts and the names of people in other households who will
     be told — never what the games hold, nor who here plays whom."""
 
     async def get(self) -> web.Response:
@@ -351,6 +352,7 @@ class AppUninstallPreviewView(BaseView):
                 "told": list(preview.told),
                 "told_more": preview.told_more,
                 "untold": preview.untold,
+                "tables": preview.tables,
             }
         )
 
@@ -483,19 +485,20 @@ class AppContactsView(AppPermissionView):
 
 class AppInvitableView(AppPermissionView):
     """``GET /api/apps/{app_id}/invitable`` — the people Social Home's
-    invite sheet lists (``people``) and what the invite caps leave
-    (``invites: {open, max_open, today, max_per_day}``). The sheet is
-    drawn by Social Home outside the app's frame; the bridge never offers
-    this list to an app (D3)."""
+    invite sheet lists (``people``), the spaces to pick everyone from
+    (``spaces: [{space_id, name, people: [index into people]}]``) and what
+    the invite caps leave (``invites: {open, max_open, today,
+    max_per_day}``). The sheet is drawn by Social Home outside the app's
+    frame; the bridge never offers this to an app (D3)."""
 
     async def get(self) -> web.Response:
         await self.require_permission(PERMISSION_PEOPLE)
         app_id = self.match("app_id")
         uid = self.user.user_id
         svc = self.svc(app_federation_service_key)
-        people = await svc.list_invitable(app_id=app_id, self_user_id=uid)
+        people, spaces = await svc.invite_sheet(app_id=app_id, self_user_id=uid)
         invites = await svc.invite_counts(app_id=app_id, user_id=uid)
-        return self._json({"people": people, "invites": invites})
+        return self._json({"people": people, "spaces": spaces, "invites": invites})
 
 
 class AppSessionsView(AppPermissionView):

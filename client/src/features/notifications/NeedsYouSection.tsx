@@ -15,9 +15,10 @@
  * link — and each action names the row it acts on (``aria-describedby``).
  * The chip counts pending items, not unread ones.
  */
-import { useEffect, useState } from 'preact/hooks'
+import { useEffect, useRef, useState } from 'preact/hooks'
 import { appHref } from '@/baseUrl'
 import { Button } from '@/components/Button'
+import { showToast } from '@/components/Toast'
 import { isOne, t } from '@/i18n/i18n'
 import { type CatalogEntry } from '@/store/apps'
 import { currentUser } from '@/store/auth'
@@ -26,6 +27,8 @@ import { ws } from '@/ws'
 import { relativeDocsTime } from '@/utils/relativeTime'
 import type { Notification } from '@/types'
 import { AskButton, UpdateButton } from '@/features/apps/AppDialogs'
+import { refusalText } from '@/features/apps/groups/refusal'
+import { joinGroup } from '@/store/appGroups'
 import { NotificationRow, RowAvatar, Sentence, markRowRead, withRead } from './NotificationRow'
 import { groupSentence } from './rowText'
 import { appEntryOf, appNameOf, ensureAppCatalog, withAppName } from './appName'
@@ -41,6 +44,7 @@ import {
   gameOf,
   idOf,
   inlineAction,
+  lobbyHref,
   loadNeedsYou,
   needsYou,
   needsYouEntries,
@@ -156,6 +160,57 @@ function WaitingActions({ row, describedBy, onNavigate }: {
   )
 }
 
+/**
+ * A group game's invite (v_76): Join takes the seat here, then opens the
+ * game's Who's-in page — one tap, as Play is for a 1:1 game. It is a link
+ * to that page (so the router and the ingress prefix handle the move); the
+ * click holds the move until the Join answered. A refusal ("This game is
+ * full", "You can't join this game" — never why) stays here as a toast.
+ */
+function JoinActions({ row, describedBy, onNavigate }: {
+  row: Notification
+  describedBy: string
+  onNavigate?: () => void
+}) {
+  const { appId, sessionId } = gameOf(row)
+  const [joining, setJoining] = useState(false)
+  /** Set once the Join went through: the next click is the move itself. */
+  const joined = useRef(false)
+  const onClick = (e: MouseEvent) => {
+    if (joined.current) {
+      onNavigate?.()
+      return
+    }
+    e.preventDefault()
+    if (joining) return
+    const link = e.currentTarget as HTMLAnchorElement
+    setJoining(true)
+    joinGroup(appId, sessionId).then(() => {
+      joined.current = true
+      void markRowRead(row).catch(() => {})
+      link.click()
+    }, (err: unknown) => {
+      showToast(refusalText(err), 'error')
+    }).finally(() => setJoining(false))
+  }
+  return (
+    <div class="sh-needs__actions">
+      <a
+        class={`sh-btn sh-btn--primary${joining ? ' is-loading' : ''}`}
+        href={appHref(lobbyHref(row))}
+        aria-describedby={describedBy}
+        aria-disabled={joining ? 'true' : undefined}
+        onClick={onClick}
+      >
+        {t('notifications.needs_you.join')}
+      </a>
+      <Button variant="secondary" aria-describedby={describedBy} onClick={() => declineWithUndo(row)}>
+        {t('notifications.needs_you.decline')}
+      </Button>
+    </div>
+  )
+}
+
 /** What each flag says next to "Review". */
 const FLAG_KEYS: Record<string, string> = {
   edge: 'notifications.needs_you.flag.edge',
@@ -199,6 +254,9 @@ function Actions({ entry, describedBy, onNavigate }: {
         </Button>
       </div>
     )
+  }
+  if (row && action === 'join') {
+    return <JoinActions row={row} describedBy={describedBy} onNavigate={onNavigate} />
   }
   if (row && action === 'waiting') {
     return <WaitingActions row={row} describedBy={describedBy} onNavigate={onNavigate} />

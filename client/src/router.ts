@@ -40,6 +40,8 @@ export const routes: Record<string, ReturnType<typeof lazy>> = {
   '/apps/:appId':    lazy(() => import('@/features/apps/AppHost')),
   // What an app can do, and where it is added — never launches it.
   '/apps/:appId/about': lazy(() => import('@/features/apps/AppDetailPage')),
+  // A group game's "Who's in" page (Join, Start, Leave…), Social Home's own.
+  '/apps/:appId/tables/:sessionId': lazy(() => import('@/features/apps/groups/GameLobbyPage')),
   '/admin':          lazy(() => import('@/features/admin/AdminPage')),
   '/connections':    lazy(() => import('@/features/connections/ConnectionsPage')),
   '/friends':        lazy(() => import('@/features/friends/FriendsPage')),

@@ -35,6 +35,8 @@ itself is the persistence layer; push is fire-and-forget on top.
 | AppRequested         | Admins (a protected asker's guardians) — Needs you, grouped per app | "{name} asked for {app}" |
 | AppUpdateAvailable   | Admins — Needs you, one row per app (re-opens for a newer version) | "{app} has an update" |
 | AppTurn              | The player whose turn it is (not while the app is on screen; Games, in app by default) — one row per game, re-opens on the next turn | "Your turn with {name} in {app}" |
+| AppTableJoined       | The person who started a group game (Games) — one row per game, moved on by each joiner; ``can_start`` once enough are in | "{name} and {count} others joined your {app} game" |
+| AppTableStarted      | Each local player of a group game that started, but the person who started it (Games) | "Your {app} game with {name} and {count} others started" |
 
 Body is intentionally omitted for privacy-sensitive events (DMs,
 location, UGC content) per §25.3.
@@ -76,6 +78,8 @@ from ..domain.events import (
     AppRequested,
     AppTableAnnounced,
     AppTableClosed,
+    AppTableJoined,
+    AppTableStarted,
     AppTurn,
     AppTurnsSeen,
     AppUninstalled,
@@ -203,7 +207,9 @@ from .notification_links import (
     HOUSEHOLD_CALENDAR_LINK,
     HOUSEHOLD_FEED_LINK,
     app_about_link,
+    app_game_link,
     app_link,
+    app_table_link,
     bazaar_listing_link,
     household_post_link,
     link_target,
@@ -309,6 +315,7 @@ class _Pending:
     push: bool
     push_params: dict[str, str | None] | None
     flags: tuple[str, ...]
+    others: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -340,6 +347,56 @@ class _DeliveryBatch:
 _BATCH: ContextVar[_DeliveryBatch | None] = ContextVar(
     "notification_delivery_batch", default=None
 )
+
+#: A group game's "joined" / "started" titles (v_76), keyed by (the app
+#: has a name here, how many others: 0, 1, 2 = more) → (catalog key,
+#: English fallback).
+_TABLE_JOINED_TITLES: dict[tuple[bool, int], tuple[str, str]] = {
+    (True, 0): ("notification.app.table_joined", "{name} joined your {app} game"),
+    (True, 1): (
+        "notification.app.table_joined_one",
+        "{name} and 1 other joined your {app} game",
+    ),
+    (True, 2): (
+        "notification.app.table_joined_many",
+        "{name} and {count} others joined your {app} game",
+    ),
+    (False, 0): ("notification.app.table_joined_generic", "{name} joined your game"),
+    (False, 1): (
+        "notification.app.table_joined_one_generic",
+        "{name} and 1 other joined your game",
+    ),
+    (False, 2): (
+        "notification.app.table_joined_many_generic",
+        "{name} and {count} others joined your game",
+    ),
+}
+_TABLE_STARTED_TITLES: dict[tuple[bool, int], tuple[str, str]] = {
+    (True, 0): (
+        "notification.app.table_started",
+        "Your {app} game with {name} started",
+    ),
+    (True, 1): (
+        "notification.app.table_started_one",
+        "Your {app} game with {name} and 1 other started",
+    ),
+    (True, 2): (
+        "notification.app.table_started_many",
+        "Your {app} game with {name} and {count} others started",
+    ),
+    (False, 0): (
+        "notification.app.table_started_generic",
+        "Your game with {name} started",
+    ),
+    (False, 1): (
+        "notification.app.table_started_one_generic",
+        "Your game with {name} and 1 other started",
+    ),
+    (False, 2): (
+        "notification.app.table_started_many_generic",
+        "Your game with {name} and {count} others started",
+    ),
+}
 
 #: Where a household-chat bell / push leads: the feed's Chat tab.
 HOUSEHOLD_CHAT_LINK = "/?tab=chat"
@@ -470,6 +527,8 @@ _PUSH_AS_IS: frozenset[str] = frozenset(
         "app_turn",
         "app_table_announced",
         "app_table_closed",
+        "app_table_joined",
+        "app_table_started",
         "app_request",
         "app_update",
         "bazaar_bid_placed",
@@ -601,6 +660,7 @@ def _grouped(
     actor: NotificationActor | None,
     push: bool,
     flags: tuple[str, ...],
+    others: int | None = None,
 ) -> tuple[Notification, bool, bool]:
     """``(row to write, reopened, silent)`` for *note* joining *group*.
 
@@ -615,7 +675,9 @@ def _grouped(
             note,
             object_key=about.object_key,
             space_id=about.space_id,
-            params=first_params(actor, space_name=about.space_name, flags=flags),
+            params=first_params(
+                actor, space_name=about.space_name, flags=flags, others=others
+            ),
         )
         return saved, False, not push
     saved = replace(
@@ -632,6 +694,7 @@ def _grouped(
             reopen=group.is_read,
             space_name=about.space_name,
             flags=flags,
+            others=others,
         ),
     )
     reopened = group.is_read
@@ -902,6 +965,7 @@ class NotificationService(ProtectionGateMixin):
         push: bool = True,
         push_params: dict[str, str | None] | None = None,
         flags: tuple[str, ...] = (),
+        others: int | None = None,
     ) -> Notification | None:
         """The one gate every notification passes, then persist + publish
         ``NotificationCreated`` + fire title-only pushes to every registered
@@ -948,6 +1012,7 @@ class NotificationService(ProtectionGateMixin):
 
         ``flags`` say why a "Needs you" item can't be decided with one tap
         (:data:`~socialhome.domain.notification.JOIN_REQUEST_FLAGS`).
+        ``others`` is a group game's count (``params.others``, v_76).
 
         What the recipient chose (D4, D10, :meth:`_heard`) comes last: a
         muted post or a kind set to Off → no row; a kind set to In app → a
@@ -983,7 +1048,7 @@ class NotificationService(ProtectionGateMixin):
         if batch is not None:
             # A delivery job: the row joins the job's one batched write.
             batch.items.append(
-                _Pending(note, about, user, actor, push, push_params, flags)
+                _Pending(note, about, user, actor, push, push_params, flags, others)
             )
             return None
         group = await self._notifs.latest_in_group(
@@ -992,7 +1057,9 @@ class NotificationService(ProtectionGateMixin):
             object_key=about.object_key,
             since=_group_since(),
         )
-        saved, reopened, silent = _grouped(note, group, about, actor, push, flags)
+        saved, reopened, silent = _grouped(
+            note, group, about, actor, push, flags, others
+        )
         if group is None:
             await self._notifs.save(saved)
         else:
@@ -1051,7 +1118,13 @@ class NotificationService(ProtectionGateMixin):
             key = (item.note.user_id, item.note.type, item.about.object_key)
             group = groups.get(key)
             saved, reopened, silent = _grouped(
-                item.note, group, item.about, item.actor, item.push, item.flags
+                item.note,
+                group,
+                item.about,
+                item.actor,
+                item.push,
+                item.flags,
+                item.others,
             )
             # A second event for the same group in this job joins the row
             # the first one made, as it would one save at a time.
@@ -1378,6 +1451,8 @@ class NotificationService(ProtectionGateMixin):
         self._subscribe(AppTurnsSeen, self.on_app_turns_seen)
         self._subscribe(AppTableAnnounced, self.on_app_table_announced)
         self._subscribe(AppTableClosed, self.on_app_table_closed)
+        self._subscribe(AppTableJoined, self.on_app_table_joined)
+        self._subscribe(AppTableStarted, self.on_app_table_started)
         self._subscribe(AppInstalled, self.on_app_request_answered)
         self._subscribe(AppRequested, self.on_app_requested)
         self._subscribe(AppRequestDismissed, self.on_app_request_answered)
@@ -3241,6 +3316,94 @@ class NotificationService(ProtectionGateMixin):
             push=False,
         )
 
+    async def on_app_table_joined(self, event: AppTableJoined) -> None:
+        """Someone joined a group game the reader started — "Ben joined
+        your {app} game" / "Ben and 2 others joined your {app} game"
+        (design 3.7). **One row per game** (``app_session:<app>/<session>``,
+        D7): each joiner moves it on (newest first in ``params.actors``,
+        ``params.others`` how many more are in), unread again; once enough
+        players are in it carries the flag ``can_start`` ("You can start
+        now"). A repeat on a row still unread is silent (D8). Games kind —
+        it pushes only for someone who set Games to Push (D11: the person
+        and the app only). Opens the game's Who's-in page."""
+        recipient = await self._local_user(event.to_user_id)
+        if recipient is None:
+            return
+        locale = self._locale(recipient)
+        app_name = await self._app_name(event.app_id, locale)
+        others = max(0, event.others)
+        title = self._counted_title(
+            _TABLE_JOINED_TITLES, locale, event.from_display, app_name, others
+        )
+        await self._save_notif(
+            new_notification(
+                user_id=event.to_user_id,
+                type="app_table_joined",
+                title=title,
+                link_url=app_table_link(event.app_id, event.session_id),
+            ),
+            about=NotificationSubject.of(
+                NotificationObject.APP_SESSION,
+                f"{event.app_id}/{event.session_id}",
+                space_name=app_name,
+            ),
+            actor_user_id=event.from_user_id,
+            actor_name=event.from_display,
+            flags=("can_start",) if event.can_start else (),
+            others=others,
+        )
+
+    async def on_app_table_started(self, event: AppTableStarted) -> None:
+        """A group game the reader sits at started — "Your {app} game with
+        Anna and 3 others started" (design 3.7), ``from_display`` the
+        person who started it. One row per game, Games kind (a push only
+        for someone who set Games to Push). Opens the app on that game."""
+        recipient = await self._local_user(event.to_user_id)
+        if recipient is None:
+            return
+        locale = self._locale(recipient)
+        app_name = await self._app_name(event.app_id, locale)
+        others = max(0, event.others)
+        title = self._counted_title(
+            _TABLE_STARTED_TITLES, locale, event.from_display, app_name, others
+        )
+        await self._save_notif(
+            new_notification(
+                user_id=event.to_user_id,
+                type="app_table_started",
+                title=title,
+                link_url=app_game_link(event.app_id, event.session_id),
+            ),
+            about=NotificationSubject.of(
+                NotificationObject.APP_SESSION,
+                f"{event.app_id}/{event.session_id}",
+                space_name=app_name,
+            ),
+            actor_user_id=event.from_user_id,
+            actor_name=event.from_display,
+            others=others,
+        )
+
+    def _counted_title(
+        self,
+        titles: dict[tuple[bool, int], tuple[str, str]],
+        locale: str | None,
+        name: str,
+        app_name: str | None,
+        others: int,
+    ) -> str:
+        """A group game's title from *titles* — keyed by (the app has a
+        name, how many others: 0, 1 or more) — in the reader's language."""
+        key, fallback = titles[(bool(app_name), min(others, 2))]
+        return self._t(
+            key,
+            locale=locale,
+            fallback=fallback,
+            name=name,
+            app=app_name or "",
+            count=others,
+        )
+
     async def on_app_turns_seen(self, event: AppTurnsSeen) -> None:
         """The player's app opened and took its held messages: those games
         are in front of them, so their rows read as read on every device
@@ -3295,11 +3458,24 @@ class NotificationService(ProtectionGateMixin):
         same sentence in the viewer's language. The deep link points at the
         app surface so a tap opens it; the SPA's open frame (delivered
         separately over WS) seats the live invite.
+
+        An invite to a **group game** (``others`` set, v_76): "{name}
+        invited you and 3 others to play {app}", flag ``group`` (Join, not
+        Play), ``params.others`` the count, and the link opens the game's
+        Who's-in page (``/apps/{app}/tables/{session}``).
         """
         recipient = await self._local_user(event.to_user_id)
         locale = self._locale(recipient)
         app_name = await self._app_name(event.app_id, locale)
-        if event.continued:
+        link = f"/apps/{event.app_id}"
+        flags: tuple[str, ...] = ()
+        if event.others is not None:
+            title = self._group_invite_title(
+                locale, event.from_display, app_name, event.others
+            )
+            link = app_table_link(event.app_id, event.session_id)
+            flags = ("group",)
+        elif event.continued:
             # An old game picked up again: same Play / Decline, own words.
             title = self._t(
                 "notification.app.continue",
@@ -3336,18 +3512,72 @@ class NotificationService(ProtectionGateMixin):
             outcome="done",
             user_id=event.to_user_id,
         )
+        continued = event.continued and event.others is None
         await self._save_notif(
             new_notification(
                 user_id=event.to_user_id,
-                type=("app_challenge_continue" if event.continued else "app_challenge"),
+                type=("app_challenge_continue" if continued else "app_challenge"),
                 title=title,
-                link_url=f"/apps/{event.app_id}",
+                link_url=link,
             ),
             # One row per invite: it stays in "Needs you" until that invite
             # is taken in, declined, withdrawn or expires.
             about=about,
             actor_user_id=event.from_user_id,
             actor_name=event.from_display,
+            flags=flags,
+            others=event.others,
+        )
+
+    def _group_invite_title(
+        self, locale: str | None, name: str, app_name: str | None, others: int
+    ) -> str:
+        """ "{name} invited you and {count} others to play {app}" — the
+        one-other and the nobody-else wording too; "a game" for an app this
+        household has no name for."""
+        if others <= 0:
+            if app_name:
+                return self._t(
+                    "notification.app.challenge",
+                    locale=locale,
+                    fallback="{name} invited you to play {app}",
+                    name=name,
+                    app=app_name,
+                )
+            return self._t(
+                "notification.app.challenge_generic",
+                locale=locale,
+                fallback="{name} invited you to play a game",
+                name=name,
+            )
+        one = others == 1
+        if app_name:
+            return self._t(
+                "notification.app.challenge_group_one"
+                if one
+                else "notification.app.challenge_group",
+                locale=locale,
+                fallback=(
+                    "{name} invited you and 1 other to play {app}"
+                    if one
+                    else "{name} invited you and {count} others to play {app}"
+                ),
+                name=name,
+                app=app_name,
+                count=others,
+            )
+        return self._t(
+            "notification.app.challenge_group_one_generic"
+            if one
+            else "notification.app.challenge_group_generic",
+            locale=locale,
+            fallback=(
+                "{name} invited you and 1 other to play a game"
+                if one
+                else "{name} invited you and {count} others to play a game"
+            ),
+            name=name,
+            count=others,
         )
 
     async def on_app_challenge_waiting(self, event: AppChallengeWaiting) -> None:
@@ -3366,13 +3596,49 @@ class NotificationService(ProtectionGateMixin):
         from the same person for the same app joins their row (D7): it
         moves on to the newest session (the one Play takes in once the app
         is here), its count goes up (``params.total``: "invited you 3
-        times") and nothing buzzes again."""
+        times") and nothing buzzes again.
+
+        An invite to a **group game** (``others`` set, v_76) keeps a row of
+        its own — never joined to the sender's 1:1 row, nor one joined to
+        it: "{name} invited you and 3 others to play {app}", flags its
+        reason and ``group``, ``params.others`` the count."""
         recipient = await self._local_user(event.to_user_id)
         locale = self._locale(recipient)
         app_name = await self._app_name(event.app_id, locale, event.app_name)
         key = object_key(
             NotificationObject.APP_SESSION, f"{event.app_id}/{event.session_id}"
         )
+        if event.others is not None:
+            if await self._notifs.latest_in_group(
+                user_id=event.to_user_id,
+                type="app_challenge_waiting",
+                object_key=key,
+                since=_group_since(),
+            ):
+                return  # the same invite again
+            await self._save_notif(
+                new_notification(
+                    user_id=event.to_user_id,
+                    type="app_challenge_waiting",
+                    title=self._group_invite_title(
+                        locale,
+                        event.from_display,
+                        app_name or event.app_id,
+                        event.others,
+                    ),
+                    link_url=app_about_link(event.app_id),
+                ),
+                about=NotificationSubject.of(
+                    NotificationObject.APP_SESSION,
+                    f"{event.app_id}/{event.session_id}",
+                    space_name=app_name,
+                ),
+                actor_user_id=event.from_user_id,
+                actor_name=event.from_display,
+                flags=(event.reason, "group"),
+                others=event.others,
+            )
+            return
         prefix = object_key(NotificationObject.APP_SESSION, f"{event.app_id}/")
         mine = [
             n
@@ -3387,6 +3653,7 @@ class NotificationService(ProtectionGateMixin):
             if n.is_pending_action
             and (n.object_key or "").startswith(prefix)
             and n.params is not None
+            and "group" not in n.params.flags
             and any(a.id == event.from_user_id for a in n.params.actors)
         ]
         if mine:

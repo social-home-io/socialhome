@@ -370,6 +370,9 @@ def _probe_bundle(manifest: dict | None = None) -> bytes:
         # Plays with people in this household only: the permissions the
         # Play launch needs (contacts, sessions, accept) — no federation.
         "capabilities": ["storage", "people"],
+        # A group game too (v_76): the app-group-lobby check opens one.
+        "players": {"min": 2, "max": 4},
+        "tables": True,
     }
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:

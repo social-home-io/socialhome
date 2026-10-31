@@ -735,3 +735,16 @@ async def test_let_everyone_know_goes_out_once_even_after_a_restart(net):
     ]
     assert announced[0] is True and not any(announced[1:])
     assert len(announced) >= 2
+
+
+# ─── Uninstall preview ─────────────────────────────────────────────────────
+
+
+async def test_the_uninstall_preview_counts_a_space_game_with_other_households(net):
+    h = _h(net)
+    sid = await _open(net)
+    # Only the card: nobody here has a place at it yet.
+    assert (await h["b"].home.app_fed.preview_uninstall(APP)).tables == 0
+    await _join(net, "b", "ben", sid)
+    for name in ("host", "b"):
+        assert (await h[name].home.app_fed.preview_uninstall(APP)).tables == 1

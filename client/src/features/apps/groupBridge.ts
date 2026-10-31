@@ -6,8 +6,10 @@
  * - ``group.list`` / ``get`` / ``start`` / ``send`` / ``leave`` /
  *   ``remove`` / ``close`` call the ``/api/apps/{id}/groups…`` routes;
  *   ``group.held`` hands over the held group messages (for an app that
- *   pulls); ``group.open`` answers ``unavailable`` until Social Home's
- *   group sheet lands (D3: an app never opens a table itself).
+ *   pulls). ``group.open`` is answered by bridge.ts, not here: it shows
+ *   Social Home's group sheet under the same guards as ``people.pick``
+ *   (D3: an app never opens a table itself), and the game it opens is
+ *   remembered here (:meth:`GroupBridge.keep`).
  * - Live events are posted to the frame as ``{type: 'group:event', event}``:
  *   ``message`` from each ``app.group.message`` frame, and ``joined`` /
  *   ``left`` / ``removed`` / ``started`` / ``host-changed`` / ``ended``
@@ -53,7 +55,7 @@ export type GroupEvent =
   | { type: 'started' | 'host-changed' | 'ended'; id: string; session: GroupSession }
 
 /** A table as the server's routes and ``app.group`` frames carry it. */
-interface GroupView {
+export interface GroupView {
   session_id: string
   app_id: string
   state: GroupSession['state']
@@ -68,6 +70,12 @@ interface GroupView {
   late_join: boolean
   seq?: number
   note?: string | null
+  /** ISO 8601 (UTC). The lobby reads these; the app's session leaves them out. */
+  created_at?: string | null
+  started_at?: string | null
+  expires_at?: string | null
+  /** Unanswered invites — on the starter's own household only, else ``null``. */
+  invited?: number | null
   players: { seat: number; name: string; household: string | null; is_local: boolean; state: GroupPlayer['state'] }[]
 }
 
@@ -86,6 +94,10 @@ export class GroupRefused extends Error {
     super(message)
   }
 }
+
+/** Most players any group game may have (server ``GROUP_MAX_PLAYERS``;
+ *  an app's own ``players.max`` above it is cut to it). */
+export const GROUP_MAX_PLAYERS = 30
 
 /** A table id (what the server mints and accepts). */
 const SESSION_ID = /^[A-Za-z0-9_-]{1,128}$/
@@ -209,6 +221,14 @@ export class GroupBridge {
     return s
   }
 
+  /** Remember *session* (a game Social Home's group sheet just opened) as
+   *  the frame's view of it, so later ``app.group`` frames diff against
+   *  it; returns it. */
+  keep(session: GroupSession): GroupSession {
+    this.seen.set(session.id, session)
+    return session
+  }
+
   /** The table *sessionId* if the person has a place at it — the launch
    *  context of a Play / Join on a table — else ``null``. */
   async launch(sessionId: string): Promise<GroupSession | null> {
@@ -266,8 +286,9 @@ export class GroupBridge {
       case 'group.held':
         return this.heldGroup()
       case 'group.open':
-        // D3: tables open only through Social Home's own sheet (PR 5).
-        throw new GroupRefused('unavailable', 'This Social Home can\'t open a group game here yet.')
+        // Handled by mountBridge (the group sheet and its guards); a
+        // GroupBridge on its own has no sheet to show.
+        throw new GroupRefused('unavailable', 'This Social Home can\'t show the group sheet here.')
       default:
         throw new GroupRefused('unknown_method', `Unknown method: ${method}`)
     }

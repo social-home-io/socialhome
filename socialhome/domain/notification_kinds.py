@@ -158,6 +158,11 @@ _KIND_OF_TYPE: dict[str, NotifKind] = {
     # "Anna started a game of Chess in Lakeside" — only when the opener
     # ticked "Let everyone know" (v_77, D5); in-app, never a push.
     "app_table_announced": NotifKind.GAMES,
+    # Group games (v_76, design 3.7): "Ben and 2 others joined your Quiz
+    # game" (one row per game, for the person who started it) and "Your
+    # Quiz game with Anna and 3 others started" (each other player).
+    "app_table_joined": NotifKind.GAMES,
+    "app_table_started": NotifKind.GAMES,
     # Reactions and follows.
     "post_reacted": NotifKind.REACTIONS,
     "moment_reacted": NotifKind.REACTIONS,

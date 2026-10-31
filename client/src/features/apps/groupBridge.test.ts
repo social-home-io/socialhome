@@ -201,7 +201,7 @@ describe('GroupBridge', () => {
     expect(mockApiPost).toHaveBeenLastCalledWith(`/api/apps/${APP}/groups/t1/close`)
   })
 
-  it('group.open is unavailable until the sheet lands; group.held hands over the take', async () => {
+  it('group.open on its own (no sheet) is unavailable; group.held hands over the take', async () => {
     await expect(bridge.call('group.open', { suggest: [] })).rejects.toMatchObject({ code: 'unavailable' })
     held.mockResolvedValueOnce([{ type: 'message' }])
     expect(await bridge.call('group.held', {})).toEqual([{ type: 'message' }])
@@ -233,6 +233,15 @@ describe('GroupBridge', () => {
     expect(posted).toMatchObject([{ event: { type: 'removed', seat: 1, session: { myState: 'removed' } } }])
     stop()
     expect(wsHandlers['app.group']).toBeUndefined()
+  })
+
+  it('keep: a game the group sheet opened is the view the next frame diffs against', () => {
+    bridge.listen(() => true)
+    const kept = bridge.keep(toGroupSession(view() as never))
+    expect(kept).toMatchObject({ id: 't1' })
+    const third = { seat: 3, name: 'Cleo', household: 'C', is_local: false, state: 'seated' }
+    wsHandlers['app.group']({ data: { app_id: APP, session_id: 't1', group: view({ players: [...view().players, third] }) } })
+    expect(posted).toMatchObject([{ type: 'group:event', event: { type: 'joined', id: 't1', seat: 3 } }])
   })
 
   it('stays quiet when the app may not see people', () => {

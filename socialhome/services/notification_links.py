@@ -19,6 +19,9 @@ reply does (``/momentum/{id}?reply={reply_id}``):
 * ``/bazaar?listing={post_id}`` — the listing opened.
 * ``/apps?app={app_id}`` — the app's entry on the Apps page.
 * ``/apps/{app_id}/about`` — the app's detail page (a request for it).
+* ``/apps/{app_id}/tables/{session_id}`` — a group game's "Who's in"
+  page (an invite to it, someone joining it).
+* ``/apps/{app_id}?session={session_id}`` — the app opened on one game.
 
 A grouped "new posts" row (D5) opens the feed itself: ``/feed`` for the
 household, ``/spaces/{id}`` for a space.
@@ -108,6 +111,17 @@ def app_link(app_id: str) -> str:
 def app_about_link(app_id: str) -> str:
     """The app's detail page — what it can do, and where it is added."""
     return f"/apps/{app_id}/about"
+
+
+def app_table_link(app_id: str, session_id: str) -> str:
+    """A group game's page before it starts — who's in, Join, Start
+    (v_76)."""
+    return f"/apps/{app_id}/tables/{session_id}"
+
+
+def app_game_link(app_id: str, session_id: str) -> str:
+    """The app opened on one game (a group game that started)."""
+    return _with_query(f"/apps/{app_id}", session=session_id)
 
 
 def link_target(link: str) -> str:

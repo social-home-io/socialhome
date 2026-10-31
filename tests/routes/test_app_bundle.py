@@ -20,6 +20,7 @@ from __future__ import annotations
 import pathlib
 import re
 import urllib.parse
+from dataclasses import replace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -128,6 +129,25 @@ async def test_runtime_returns_signed_entry_url(client):
     # What the bridge offers the app: people is implied by federation.
     assert body["permissions"] == ["storage", "people", "federation"]
     assert "self_user_id" in body
+    # A 1:1 app: two players, no group games.
+    assert body["players"] == {"min": 2, "max": 2}
+    assert body["tables"] is False
+
+
+async def test_runtime_names_the_group_players_range(client):
+    """A group app's range, ``max`` never past the 30-seat ceiling — the
+    SPA's group sheet caps its picks at max − 1."""
+    app = _make_app()
+    group = replace(
+        app,
+        manifest=replace(app.manifest, players_min=3, players_max=40, tables=True),
+    )
+    await SqliteAppRepo(client._db).install(group)
+    r = await client.get(f"/api/apps/{_APP_ID}/runtime", headers=_auth(client._tok))
+    assert r.status == 200
+    body = await r.json()
+    assert body["players"] == {"min": 3, "max": 30}
+    assert body["tables"] is True
 
 
 async def test_runtime_404_uninstalled(client):
