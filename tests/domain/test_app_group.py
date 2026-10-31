@@ -10,6 +10,7 @@ import pytest
 
 from socialhome.domain.app_group import (
     END_CANCELLED,
+    GROUP_BATCH_MAX_MESSAGES,
     GROUP_ENDED,
     GROUP_LOBBY,
     GROUP_MAX_PLAYERS,
@@ -21,13 +22,18 @@ from socialhome.domain.app_group import (
     SEAT_LEFT,
     SEAT_REMOVED,
     SEAT_SEATED,
+    AppGroupBusyError,
     AppGroupLimitError,
+    AppGroupSeatError,
     AppGroupSizeError,
     AppGroupTooFewError,
     GroupSeat,
     GroupSession,
     GroupWireError,
+    SeatKey,
     note_ok,
+    parse_batch,
+    parse_message,
     parse_table,
 )
 
@@ -228,3 +234,159 @@ def test_coded_errors_carry_their_numbers():
     assert AppGroupSizeError(2, 10).params == {"min": 2, "max": 10}
     assert AppGroupLimitError(daily=True).code == "APP_GROUP_DAILY_LIMIT"
     assert AppGroupLimitError(daily=False).params == {"limit": 5}
+    assert AppGroupBusyError(12).params == {"retry_after": 12}
+    assert AppGroupBusyError(1).status == 429
+    assert AppGroupSeatError().code == "APP_GROUP_SEAT"
+
+
+# ─── Seat keys on the roster ──────────────────────────────────────────────
+
+KEY_B = SeatKey(kem_suite="x25519", pub="pubB", sig_suite="ed25519", sig="sigB")
+KEY_HUB = SeatKey(kem_suite="x25519", pub="pubH", sig_suite="ed25519", sig="sigH")
+
+
+def test_seat_keys_travel_for_seated_people_and_come_back():
+    anna = dataclasses.replace(ANNA, seat_key=KEY_HUB)
+    ben = dataclasses.replace(BEN, seat_key=KEY_B)
+    gone = _seat("cleo", SEAT_LEFT, seat=3, instance="c", seat_key=KEY_B)
+    t = _table(anna, ben, gone)
+    wire = t.to_wire()
+    assert wire["roster"][0]["seat_key"] == KEY_HUB.to_wire()
+    assert "seat_key" not in wire["roster"][2]  # someone who left: no key
+    got = _parse(wire)
+    assert got.seat_key_of("b") == KEY_B
+    assert got.seat_key_of("hub") == KEY_HUB
+    assert got.seat_key_of("c") is None
+
+
+def test_two_keys_for_one_household_are_refused():
+    ben = dataclasses.replace(BEN, seat_key=KEY_B)
+    bob = _seat("bob", seat=3, instance="b", seat_key=KEY_HUB)
+    with pytest.raises(GroupWireError):
+        _parse(_table(ANNA, ben, bob).to_wire())
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "x",
+        {"seat_kem_suite": "x25519", "pub": "p", "sig_suite": "ed25519"},
+        {**KEY_B.to_wire(), "pub": ""},
+        {**KEY_B.to_wire(), "sig": "a" * 300},
+        {**KEY_B.to_wire(), "pub": 5},
+    ],
+)
+def test_a_seat_key_out_of_shape_drops_the_snapshot(key):
+    wire = _table(ANNA, BEN).to_wire()
+    wire["roster"][1]["seat_key"] = key
+    with pytest.raises(GroupWireError):
+        _parse(wire)
+
+
+# ─── Messages ─────────────────────────────────────────────────────────────
+
+SEALED = {"to_seat": 3, "seat_kem_suite": "x25519", "nonce": "n", "ct": "c"}
+
+
+def test_a_message_to_everyone_round_trips_through_the_hub():
+    m = parse_message(
+        {"to": "all", "msg_id": "abc", "turn": 2},
+        data={"x": 1},
+        has_data=True,
+        relayed=False,
+    )
+    assert m.to is None and not m.direct and m.data == {"x": 1} and m.turn == 2
+    assert m.to_hub() == {"to": "all", "msg_id": "abc", "turn": 2}
+    numbered = dataclasses.replace(m, seq=7, from_seat=1)
+    out = numbered.relayed()
+    assert out == {
+        "seq": 7,
+        "from_seat": 1,
+        "to": "all",
+        "msg_id": "abc",
+        "turn": 2,
+        "data": {"x": 1},
+    }
+    again = parse_message(out, has_data=False, relayed=True)
+    assert again == numbered
+
+
+def test_a_directed_message_passes_on_only_each_households_entries():
+    other = {**SEALED, "to_seat": 4}
+    m = parse_message(
+        {"to": [3, 4], "msg_id": "m1", "sealed": [SEALED, other]},
+        has_data=False,
+        relayed=False,
+    )
+    assert m.direct and m.to == (3, 4)
+    assert m.to_hub()["sealed"] == [SEALED, other]
+    numbered = dataclasses.replace(m, seq=8, from_seat=2)
+    out = numbered.relayed(frozenset({4}))
+    assert out["sealed"] == [other] and "data" not in out
+    got = parse_message(out, has_data=False, relayed=True)
+    assert got.sealed == (other,) and got.to == (3, 4)
+
+
+@pytest.mark.parametrize(
+    ("group", "has_data"),
+    [
+        ("x", True),
+        ({"to": "all", "msg_id": "a"}, False),  # everyone needs data
+        ({"to": "all", "msg_id": "a", "sealed": [SEALED]}, True),
+        ({"to": [3], "msg_id": "a", "sealed": [SEALED]}, True),  # data beside a seal
+        ({"to": [3], "msg_id": "a"}, False),
+        ({"to": [3], "msg_id": "a", "sealed": []}, False),
+        ({"to": [3, 4], "msg_id": "a", "sealed": [SEALED]}, False),  # one missing
+        ({"to": [3], "msg_id": "a", "sealed": [{**SEALED, "to_seat": 5}]}, False),
+        ({"to": [3], "msg_id": "a", "sealed": [SEALED, SEALED]}, False),
+        ({"to": [3], "msg_id": "a", "sealed": ["x"]}, False),
+        ({"to": [3], "msg_id": "a", "sealed": [{**SEALED, "to_seat": True}]}, False),
+        ({"to": [], "msg_id": "a"}, True),
+        ({"to": [3, 3], "msg_id": "a", "sealed": [SEALED]}, False),
+        ({"to": list(range(1, 31)), "msg_id": "a"}, True),
+        ({"to": ["3"], "msg_id": "a"}, True),
+        ({"to": "some", "msg_id": "a"}, True),
+        ({"to": "all", "msg_id": ""}, True),
+        ({"to": "all", "msg_id": "a" * 33}, True),
+        ({"to": "all", "msg_id": "a|b"}, True),
+        ({"to": "all", "msg_id": "a", "turn": 0}, True),
+        ({"to": "all", "msg_id": "a", "turn": True}, True),
+    ],
+)
+def test_a_message_out_of_shape_is_refused(group, has_data):
+    with pytest.raises(GroupWireError):
+        parse_message(group, data={}, has_data=has_data, relayed=False)
+
+
+@pytest.mark.parametrize(
+    "msg",
+    [
+        {"to": "all", "msg_id": "a", "from_seat": 1, "data": 1},  # no seq
+        {"to": "all", "msg_id": "a", "seq": 0, "from_seat": 1, "data": 1},
+        {"to": "all", "msg_id": "a", "seq": 1, "data": 1},  # no from_seat
+        {"to": "all", "msg_id": "a", "seq": 1, "from_seat": 1},  # no data
+        {"to": [3], "msg_id": "a", "seq": 1, "from_seat": 1, "sealed": []},
+    ],
+)
+def test_a_relayed_message_out_of_shape_is_refused(msg):
+    with pytest.raises(GroupWireError):
+        parse_message(msg, has_data=False, relayed=True)
+
+
+def test_a_relayed_directed_message_may_carry_only_some_entries():
+    msg = {"to": [3, 4], "msg_id": "a", "seq": 2, "from_seat": 1, "sealed": [SEALED]}
+    assert parse_message(msg, has_data=False, relayed=True).sealed == (SEALED,)
+
+
+def test_parse_batch_bounds():
+    one = {"to": "all", "msg_id": "a", "seq": 1, "from_seat": 1, "data": None}
+    assert len(parse_batch({"msgs": [one, {**one, "seq": 2}]})) == 2
+    for bad in (
+        None,
+        {},
+        {"msgs": []},
+        {"msgs": [one] * (GROUP_BATCH_MAX_MESSAGES + 1)},
+        {"msgs": [{**one, "seq": "1"}]},
+    ):
+        with pytest.raises(GroupWireError):
+            parse_batch(bad)
