@@ -295,6 +295,7 @@ export function GroupSheet({ appId, appName, request, players, onDone }: {
             <div class="sh-group-sheet__spaces" role="group" aria-label={t('apps.group_sheet.from_space')}>
               {spaces.map(({ space, keys }) => {
                 const on = keys.every(k => picked.includes(k))
+                const label = t('apps.group_sheet.everyone_in', { space: space.name, count: String(keys.length) })
                 return (
                   <button
                     key={space.space_id}
@@ -302,9 +303,12 @@ export function GroupSheet({ appId, appName, request, players, onDone }: {
                     class={`sh-chip sh-group-sheet__space${on ? ' sh-chip--active' : ''}`}
                     aria-pressed={on ? 'true' : 'false'}
                     disabled={sending || (!on && full)}
+                    // A long space name is cut short on a phone: the whole
+                    // of it on hover (the accessible name has it anyway).
+                    title={label}
                     onClick={() => toggleSpace(keys)}
                   >
-                    {t('apps.group_sheet.everyone_in', { space: space.name, count: String(keys.length) })}
+                    {label}
                   </button>
                 )
               })}

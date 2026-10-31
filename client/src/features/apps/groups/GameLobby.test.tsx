@@ -336,6 +336,17 @@ describe('GameLobby', () => {
     expect(queryByRole('button', { name: 'Close this game' })).toBeNull()
   })
 
+  it('playing: no free seats once nobody can join any more', async () => {
+    const { queryByText } = await open(view({ state: 'playing' }))
+    expect(queryByText('Free seat')).toBeNull()
+    expect(queryByText(/more free seat/)).toBeNull()
+  })
+
+  it('playing with late join: the free seats still show', async () => {
+    const { getAllByText } = await open(view({ state: 'playing', late_join: true }))
+    expect(getAllByText('Free seat').length).toBeGreaterThan(0)
+  })
+
   it('playing: the person who started it may leave too (it passes on)', async () => {
     const { getByRole, queryByRole } = await open(starterView({ state: 'playing' }))
     expect(getByRole('button', { name: 'Leave' })).toBeTruthy()

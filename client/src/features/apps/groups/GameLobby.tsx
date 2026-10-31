@@ -373,7 +373,9 @@ export function GameLobby({ appId, sessionId, appName, onClosed }: GameLobbyProp
         </div>
         <SeatList
           players={game.players.filter(p => !removing.includes(p.seat))}
-          max={game.max}
+          // Once a game started nobody else can join (unless the app
+          // takes late joins): no free seats to show then.
+          max={game.state === 'playing' && !game.lateJoin ? n : game.max}
           host={game.host}
           me={game.me}
           label={t('apps.lobby.who_in')}
