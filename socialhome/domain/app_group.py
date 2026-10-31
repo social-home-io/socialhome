@@ -107,6 +107,8 @@ GROUP_SEQ_WINDOW: int = 256
 GROUP_MSG_ID_MAX: int = 32
 #: A seat-key field on the wire.
 _SEAT_KEY_FIELD_MAX: int = 256
+#: A household identity key on the wire (Ed25519, 32 bytes as hex).
+_HEX64_RE = re.compile(r"[0-9a-f]{64}")
 
 # ─── States ───────────────────────────────────────────────────────────────
 
@@ -393,6 +395,11 @@ class GroupSeat:
     #: (v_77) so each household can check its people's blocks against
     #: players of households it isn't paired with; ``None`` otherwise.
     user_id: str | None = None
+    #: Their household's Ed25519 identity key (64 hex) — set at a space
+    #: table (v_77). The household id is this key's fingerprint, so any
+    #: receiver checks the seat key's signature without trusting the hub,
+    #: paired with that household or not.
+    identity_pk: str | None = None
 
     def is_person(self, instance: str, user: str) -> bool:
         """Whether this entry is *user* of *instance*."""
@@ -414,6 +421,8 @@ class GroupSeat:
             out["seat_key"] = self.seat_key.to_wire()
         if self.user_id is not None:
             out["user_id"] = self.user_id
+        if self.identity_pk is not None:
+            out["identity_pk"] = self.identity_pk
         return out
 
 
@@ -698,6 +707,11 @@ def parse_table(
             item.get("household"), GROUP_NAME_MAX, "household", optional=True
         )
         user_id = _text(item.get("user_id"), GROUP_REF_MAX, "user_id", optional=True)
+        identity_pk = item.get("identity_pk")
+        if identity_pk is not None and (
+            not isinstance(identity_pk, str) or not _HEX64_RE.fullmatch(identity_pk)
+        ):
+            raise GroupWireError("identity_pk malformed")
         entry_state = item.get("state")
         if entry_state not in WIRE_SEAT_STATES:
             raise GroupWireError("seat state unknown")
@@ -721,6 +735,7 @@ def parse_table(
                 seat=seat,
                 seat_key=seat_key,
                 user_id=user_id,
+                identity_pk=identity_pk,
             )
         )
     host_seat = _int(raw.get("host_seat"), 1, GROUP_SEAT_MAX, "host_seat")

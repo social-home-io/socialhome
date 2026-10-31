@@ -73,6 +73,8 @@ from ..domain.events import (
     AppInstalled,
     AppRequestDismissed,
     AppRequested,
+    AppTableAnnounced,
+    AppTableClosed,
     AppTurn,
     AppTurnsSeen,
     AppUninstalled,
@@ -464,6 +466,8 @@ _PUSH_AS_IS: frozenset[str] = frozenset(
         "app_challenge_declined",
         "app_game_ended",
         "app_turn",
+        "app_table_announced",
+        "app_table_closed",
         "app_request",
         "app_update",
         "bazaar_bid_placed",
@@ -1370,6 +1374,8 @@ class NotificationService(ProtectionGateMixin):
         self._subscribe(AppGameEnded, self.on_app_game_ended)
         self._subscribe(AppTurn, self.on_app_turn)
         self._subscribe(AppTurnsSeen, self.on_app_turns_seen)
+        self._subscribe(AppTableAnnounced, self.on_app_table_announced)
+        self._subscribe(AppTableClosed, self.on_app_table_closed)
         self._subscribe(AppInstalled, self.on_app_request_answered)
         self._subscribe(AppRequested, self.on_app_requested)
         self._subscribe(AppRequestDismissed, self.on_app_request_answered)
@@ -3128,6 +3134,91 @@ class NotificationService(ProtectionGateMixin):
             ),
             actor_user_id=event.from_user_id,
             actor_name=event.from_display,
+        )
+
+    async def on_app_table_announced(self, event: AppTableAnnounced) -> None:
+        """Someone opened a game in a space and ticked "Let everyone know"
+        (group play D5, v_77) — "Anna started a game of Chess in Lakeside".
+        One in-app row per member, never a push (the opener's household
+        sends at most one such table per day; receivers cap it too). The
+        gate (:meth:`_save_notif`) drops an opener the member blocked."""
+        recipient = await self._local_user(event.to_user_id)
+        if recipient is None:
+            return
+        locale = self._locale(recipient)
+        app_name = await self._app_name(event.app_id, locale)
+        if app_name:
+            title = self._t(
+                "notification.app.table_announced",
+                locale=locale,
+                fallback="{name} started a game of {app} in {space}",
+                name=event.host_display,
+                app=app_name,
+                space=event.space_name,
+            )
+        else:
+            title = self._t(
+                "notification.app.table_announced_generic",
+                locale=locale,
+                fallback="{name} started a game in {space}",
+                name=event.host_display,
+                space=event.space_name,
+            )
+        await self._save_notif(
+            new_notification(
+                user_id=event.to_user_id,
+                type="app_table_announced",
+                title=title,
+                link_url=f"/spaces/{event.space_id}/games",
+            ),
+            about=NotificationSubject.of(
+                NotificationObject.APP_SESSION,
+                f"{event.app_id}/{event.session_id}",
+                space_name=app_name,
+            ),
+            actor_user_id=event.host_user_id,
+            actor_name=event.host_display,
+            push=False,
+        )
+
+    async def on_app_table_closed(self, event: AppTableClosed) -> None:
+        """A space game someone had a seat at ended for a reason its host
+        didn't choose (v_77): "A moderator closed the Chess game in
+        Lakeside", or "Chess is no longer allowed in Lakeside" (its app
+        left the space's games list). About you, a row only, no push."""
+        recipient = await self._local_user(event.to_user_id)
+        if recipient is None:
+            return
+        locale = self._locale(recipient)
+        app_name = await self._app_name(event.app_id, locale)
+        kind = "moderator" if event.reason == "closed_by_moderator" else "not_allowed"
+        fallbacks = {
+            ("moderator", True): "A moderator closed the {app} game in {space}",
+            ("moderator", False): "A moderator closed a game in {space}",
+            ("not_allowed", True): "{app} is no longer allowed in {space}",
+            ("not_allowed", False): "A game is no longer allowed in {space}",
+        }
+        key = f"notification.app.table_closed_{kind}" + ("" if app_name else "_generic")
+        title = self._t(
+            key,
+            locale=locale,
+            fallback=fallbacks[(kind, bool(app_name))],
+            app=app_name or "",
+            space=event.space_name,
+        )
+        await self._save_notif(
+            new_notification(
+                user_id=event.to_user_id,
+                type="app_table_closed",
+                title=title,
+                link_url=f"/spaces/{event.space_id}/games",
+            ),
+            about=NotificationSubject.of(
+                NotificationObject.APP_SESSION,
+                f"{event.app_id}/{event.session_id}",
+                space_name=app_name,
+            ),
+            push=False,
         )
 
     async def on_app_turns_seen(self, event: AppTurnsSeen) -> None:

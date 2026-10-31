@@ -64,7 +64,7 @@ from weakref import WeakValueDictionary
 
 import orjson
 
-from ..crypto import b64url_decode
+from ..crypto import b64url_decode, derive_instance_id
 from ..domain.app_group import (
     CLOSE_FULL,
     CLOSE_REMOVED,
@@ -178,6 +178,7 @@ if TYPE_CHECKING:
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.user_repo import AbstractUserRepo
     from .app_federation_service import AppFederationService
+    from .space_app_table_service import SpaceTableService
 
 log = logging.getLogger(__name__)
 
@@ -282,6 +283,7 @@ class AppGroupService(ProtectionGateMixin):
         "_roster_every",
         "_roster_sent",
         "_seen",
+        "_space_tables",
         "_stop",
         "_tasks",
         "_user_repo",
@@ -333,6 +335,9 @@ class AppGroupService(ProtectionGateMixin):
         #: The ``seq`` numbers each table's copy passed on lately (repeats
         #: are dropped) — bounded per table, least recent table forgotten.
         self._seen: OrderedDict[str, _Seen] = OrderedDict()
+        #: Space tables (v_77): the space transport, cards and space rules
+        #: (:meth:`attach_space_tables`).
+        self._space_tables: SpaceTableService | None = None
 
     @property
     def _own(self) -> str:
@@ -879,12 +884,16 @@ class AppGroupService(ProtectionGateMixin):
         user: str,
         *,
         seat_key: SeatKey | None = None,
+        newcomer: GroupSeat | None = None,
     ) -> GroupSession:
         """Seat an invited person — or say why not (raised for a local
         joiner, sent as ``group_close`` to a remote one). Someone the hub
         never invited, removed or who declined is ignored. *seat_key* is
         their household's (already checked); the first key a household
-        brings to a table stays."""
+        brings to a table stays. At a space table (v_77) anyone of the
+        space's members may sit: *newcomer* is their entry, checked by
+        :class:`SpaceTableService` (a writer seat here, the app still
+        allowed) — someone removed never comes back."""
         refusal: str | None = None
         started = False
         async with self._lock(session_id):
@@ -892,6 +901,13 @@ class AppGroupService(ProtectionGateMixin):
             if table is None:
                 raise AppGroupNotFoundError()
             entry = table.entry(instance, user)
+            if (
+                newcomer is not None
+                and table.space_id is not None
+                and newcomer.is_person(instance, user)
+                and (entry is None or entry.state in (SEAT_LEFT, SEAT_DECLINED))
+            ):
+                entry = dataclasses.replace(newcomer, state=SEAT_INVITED, seat=0)
             if entry is None or entry.state not in (SEAT_INVITED, SEAT_SEATED):
                 raise AppGroupNotFoundError()
             if entry.state != SEAT_SEATED:
@@ -1159,14 +1175,32 @@ class AppGroupService(ProtectionGateMixin):
         }
         if snap:
             payload["table"] = table.to_wire()
-        await self._send_raw(to_instance, FederationEventType.APP_SESSION, payload)
+        await self._send_raw(
+            to_instance,
+            FederationEventType.APP_SESSION,
+            payload,
+            space_id=table.space_id,
+        )
 
     async def _send_raw(
-        self, to_instance: str, event_type: FederationEventType, payload: dict
+        self,
+        to_instance: str,
+        event_type: FederationEventType,
+        payload: dict,
+        *,
+        space_id: str | None = None,
     ) -> None:
         """One sealed event to *to_instance* (best effort: the outbox
-        retries; a failure is logged)."""
+        retries; a failure is logged). A space table's (*space_id*) goes
+        over the space's own transport instead (v_77)."""
         try:
+            if space_id is not None:
+                if self._space_tables is None:
+                    raise RuntimeError("space tables not attached")
+                await self._space_tables.send(
+                    space_id, to_instance, event_type, payload
+                )
+                return
             await self._federation.send_event(
                 to_instance_id=to_instance,
                 event_type=event_type,
@@ -1220,16 +1254,33 @@ class AppGroupService(ProtectionGateMixin):
         )
         return priv, SeatKey.from_wire(record)
 
-    async def _identity_pk(self, instance: str) -> bytes | None:
-        """*instance*'s Ed25519 identity key, if this household is paired
-        with it."""
+    async def _identity_pk(self, instance: str, hint: object = None) -> bytes | None:
+        """*instance*'s Ed25519 identity key: the one its pairing stores (a
+        link-joined household's too); else (v_77) the key *hint* names or a
+        member household of a shared space claimed over the mesh — either
+        only when it derives to *instance* (a household id IS its identity
+        key's fingerprint, so no hub can pass off another key). ``None``
+        otherwise."""
         peer = await self._fed_repo.get_instance(instance)
-        if peer is None or not peer.remote_identity_pk:
-            return None
-        try:
-            return bytes.fromhex(peer.remote_identity_pk)
-        except ValueError:
-            return None
+        if peer is not None and peer.remote_identity_pk:
+            try:
+                return bytes.fromhex(peer.remote_identity_pk)
+            except ValueError:
+                return None
+        candidates: list[object] = [hint]
+        claim = await self._fed_repo.get_space_member_version(instance)
+        if claim is not None:
+            candidates.append(claim[1])
+        for raw in candidates:
+            if not isinstance(raw, str) or len(raw) != 64:
+                continue
+            try:
+                key = bytes.fromhex(raw)
+            except ValueError:
+                continue
+            if derive_instance_id(key) == instance:
+                return key
+        return None
 
     async def _joiner_key(
         self, session_id: str, instance: str, payload: dict
@@ -1239,7 +1290,7 @@ class AppGroupService(ProtectionGateMixin):
         when it is missing, malformed, of an unknown suite or doesn't
         verify. The hub is paired with every household it invites."""
         raw = payload.get("seat_key")
-        identity = await self._identity_pk(instance)
+        identity = await self._identity_pk(instance, payload.get("identity_pk"))
         try:
             if identity is None or not verify_seat_key(
                 raw, session_id=session_id, instance=instance, identity_pk=identity
@@ -1280,7 +1331,11 @@ class AppGroupService(ProtectionGateMixin):
                     if mine is None or mine[1] != key:
                         raise SeatSealError("not our seat key")
                     continue
-                identity = await self._identity_pk(entry.instance)
+                identity = await self._identity_pk(entry.instance, entry.identity_pk)
+                if identity is None and table.space_id is not None:
+                    # A space table names every household's identity key:
+                    # nothing there rests on the hub's word.
+                    raise SeatSealError("seat key can't be checked")
                 if identity is not None and not verify_seat_key(
                     wire,
                     session_id=table.session_id,
@@ -1389,7 +1444,10 @@ class AppGroupService(ProtectionGateMixin):
         if targets is None:
             payload["data"] = data
         await self._send_raw(
-            table.hub_instance, FederationEventType.APP_MESSAGE, payload
+            table.hub_instance,
+            FederationEventType.APP_MESSAGE,
+            payload,
+            space_id=table.space_id,
         )
         return {"seq": None}
 
@@ -1512,11 +1570,13 @@ class AppGroupService(ProtectionGateMixin):
         if key in self._out_due:
             return
         self._out_due.add(key)
-        task = asyncio.create_task(self._flush_later(key, table.app_id))
+        task = asyncio.create_task(self._flush_later(key, table.app_id, table.space_id))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _flush_later(self, key: tuple[str, str], app_id: str) -> None:
+    async def _flush_later(
+        self, key: tuple[str, str], app_id: str, space_id: str | None = None
+    ) -> None:
         session_id, household = key
         try:
             if self._coalesce_every > 0 and not self._stop.is_set():
@@ -1541,6 +1601,7 @@ class AppGroupService(ProtectionGateMixin):
                         "session_id": session_id,
                         "group": {"msgs": batch},
                     },
+                    space_id=space_id,
                 )
 
     async def on_inbound_message(self, event: FederationEvent) -> None:
@@ -1548,17 +1609,10 @@ class AppGroupService(ProtectionGateMixin):
         §24.11 pipeline): a player's message to this hub, or a hub's batch
         for this household's people. Anything malformed, from a household
         below v_76, or not from who may send it is dropped with a log line
-        — nothing goes back."""
-        p = event.payload
-        app_id, session_id = p.get("app_id"), p.get("session_id")
-        if (
-            not isinstance(app_id, str)
-            or not app_id
-            or not isinstance(session_id, str)
-            or not _SESSION_RE.fullmatch(session_id)
-            or event.space_id is not None
-        ):
-            log.debug("app_group: malformed message from %s", event.from_instance)
+        — nothing goes back. A space table's arrive only through
+        :meth:`on_space_message`."""
+        if event.space_id is not None:
+            log.debug("app_group: space-routed message from %s", event.from_instance)
             return
         if not await self._federation.peer_supports(
             event.from_instance, min_version=FederationCapability.MIN_FOR_APP_GROUPS
@@ -1567,8 +1621,25 @@ class AppGroupService(ProtectionGateMixin):
                 "app_group: message from %s below v_76 dropped", event.from_instance
             )
             return
+        await self._on_message(event, space_id=None)
+
+    async def _on_message(
+        self, event: FederationEvent, *, space_id: str | None
+    ) -> None:
+        p = event.payload
+        app_id, session_id = p.get("app_id"), p.get("session_id")
+        if (
+            not isinstance(app_id, str)
+            or not app_id
+            or not isinstance(session_id, str)
+            or not _SESSION_RE.fullmatch(session_id)
+        ):
+            log.debug("app_group: malformed message from %s", event.from_instance)
+            return
         table = await self._repo.get(session_id)
-        if table is None or table.app_id != app_id:
+        if table is None or table.app_id != app_id or table.space_id != space_id:
+            # A space table's messages come only over its space, a picked
+            # table's never.
             log.debug("app_group: message for unknown table %s", session_id)
             return
         group = p.get("group")
@@ -1829,7 +1900,25 @@ class AppGroupService(ProtectionGateMixin):
     async def on_inbound_event(self, event: FederationEvent) -> None:
         """An inbound ``group_*`` verb (after the §24.11 pipeline). Anything
         malformed, from a household below v_76, or not from who may send
-        it is dropped with a log line — nothing goes back."""
+        it is dropped with a log line — nothing goes back. A space table's
+        arrive only through :meth:`on_space_session`."""
+        if event.space_id is not None:
+            log.debug("app_group: space-routed verb from %s", event.from_instance)
+            return
+        if not await self._federation.peer_supports(
+            event.from_instance, min_version=FederationCapability.MIN_FOR_APP_GROUPS
+        ):
+            log.info("app_group: verb from %s below v_76 dropped", event.from_instance)
+            return
+        await self._on_session(event, space_id=None)
+
+    async def _on_session(
+        self,
+        event: FederationEvent,
+        *,
+        space_id: str | None,
+        newcomer: GroupSeat | None = None,
+    ) -> None:
         p = event.payload
         app_id, session_id, verb = p.get("app_id"), p.get("session_id"), p.get("verb")
         if (
@@ -1837,19 +1926,18 @@ class AppGroupService(ProtectionGateMixin):
             or not app_id
             or not isinstance(session_id, str)
             or not _SESSION_RE.fullmatch(session_id)
-            or event.space_id is not None  # space tables: v_77
         ):
             log.debug("app_group: malformed %s from %s", verb, event.from_instance)
             return
-        if not await self._federation.peer_supports(
-            event.from_instance, min_version=FederationCapability.MIN_FOR_APP_GROUPS
-        ):
-            log.info(
-                "app_group: %s from %s below v_76 dropped", verb, event.from_instance
-            )
-            return
         try:
-            await self._dispatch(event, app_id, session_id, str(verb))
+            await self._dispatch(
+                event,
+                app_id,
+                session_id,
+                str(verb),
+                space_id=space_id,
+                newcomer=newcomer,
+            )
         except GroupWireError as exc:
             log.info(
                 "app_group: %s from %s for %s dropped: %s",
@@ -1860,11 +1948,21 @@ class AppGroupService(ProtectionGateMixin):
             )
 
     async def _dispatch(
-        self, event: FederationEvent, app_id: str, session_id: str, verb: str
+        self,
+        event: FederationEvent,
+        app_id: str,
+        session_id: str,
+        verb: str,
+        *,
+        space_id: str | None = None,
+        newcomer: GroupSeat | None = None,
     ) -> None:
         table = await self._repo.get(session_id)
-        if table is not None and table.app_id != app_id:
+        if table is not None and (table.app_id != app_id or table.space_id != space_id):
+            # A space table speaks only over its space, a picked one never.
             return
+        if verb == "group_invite" and space_id is not None:
+            return  # a space table invites nobody: members join it
         is_hub = table is not None and table.hub_instance == self._own
         sender = event.from_instance
         actor = event.payload.get("from_user")
@@ -1876,7 +1974,9 @@ class AppGroupService(ProtectionGateMixin):
                 key = await self._joiner_key(session_id, sender, event.payload)
                 if key is not None:
                     await self._quietly(
-                        self._hub_join(session_id, sender, actor, seat_key=key)
+                        self._hub_join(
+                            session_id, sender, actor, seat_key=key, newcomer=newcomer
+                        )
                     )
             case "group_leave" if is_hub and actor:
                 await self._hub_leave(
@@ -2025,6 +2125,8 @@ class AppGroupService(ProtectionGateMixin):
         ):
             # The players range is fixed when the table opens.
             raise GroupWireError("players range changed")
+        # A table's space never changes (the snapshot doesn't carry it).
+        table = dataclasses.replace(table, space_id=mirror.space_id)
         await self._check_seat_keys(table)
         to_user = p.get("to_user")
         if p.get("verb") == VERB_SEAT and isinstance(to_user, str) and to_user:
@@ -2078,24 +2180,35 @@ class AppGroupService(ProtectionGateMixin):
             and not e.is_person(self._own, user.username)
         ]
         for e in others:
+            ids: set[str] = set()
             if e.instance == self._own:
                 other = await self._user_repo.get(e.user)
                 if other is None:
                     continue
-                other_id = other.user_id
-                if await self._user_repo.is_blocked(other_id, user.user_id):
+                if await self._user_repo.is_blocked(other.user_id, user.user_id):
                     return False
+                ids.add(other.user_id)
             else:
-                if not await self._may_message_household(user.user_id, e.instance):
+                # D8: at a private space's table a protected account plays
+                # with the people it already chats with there (a public
+                # space seats no protected account at all).
+                if table.space_id is None and not await self._may_message_household(
+                    user.user_id, e.instance
+                ):
                     return False
                 remote = await self._user_repo.get_remote_by_member(e.instance, e.user)
-                if remote is None:
-                    continue
-                other_id = remote.user_id
-            if await self._user_repo.is_blocked(
-                user.user_id, other_id
-            ) or await self._guardian_blocked(user.user_id, other_id):
-                return False
+                if remote is not None:
+                    ids.add(remote.user_id)
+                # At a space table a player is also named by the user id
+                # the space knows them by (v_77) — a household this one isn't
+                # paired with is known by nothing else.
+                if e.user_id is not None:
+                    ids.add(e.user_id)
+            for other_id in ids:
+                if await self._user_repo.is_blocked(
+                    user.user_id, other_id
+                ) or await self._guardian_blocked(user.user_id, other_id):
+                    return False
         return True
 
     async def _local_people(
@@ -2191,7 +2304,10 @@ class AppGroupService(ProtectionGateMixin):
         await self._push_to(table, user, change=change)
 
     async def _push(self, table: GroupSession) -> None:
-        """Each local person at *table* gets their view (``app.group``)."""
+        """Each local person at *table* gets their view (``app.group``);
+        a space table's card follows the change (v_77)."""
+        if table.space_id is not None and self._space_tables is not None:
+            await self._space_tables.on_table_changed(table)
         for user, row in await self._local_people(table):
             await self._ws.broadcast_to_user(
                 user.user_id,
@@ -2300,10 +2416,10 @@ class AppGroupService(ProtectionGateMixin):
     async def on_app_uninstalled(self, event: AppUninstalled) -> None:
         """The app is gone here (its people's rows went with it): a table
         this household hosts ends for everyone (``host_gone``); at another
-        hub, each person from here who sat leaves. Then the tables go."""
+        hub, each person from here who sat leaves. Then the tables go —
+        except a space table someone else hosts, whose card stays (its
+        members may still ask for the app, v_77)."""
         for table in await self._repo.list_for_app(event.app_id):
-            if table.space_id is not None:
-                continue  # a space table's card stays (v_77)
             if table.state != GROUP_ENDED:
                 if table.hub_instance == self._own:
                     await self._hub_end(table, END_HOST_GONE)
@@ -2318,6 +2434,8 @@ class AppGroupService(ProtectionGateMixin):
                                 reason=SEAT_LEFT,
                                 snap=False,
                             )
+            if table.space_id is not None and table.hub_instance != self._own:
+                continue
             await self._repo.delete(table.session_id)
             self._roster_sent.pop(table.session_id, None)
             self._budgets.pop(table.session_id, None)
@@ -2346,3 +2464,149 @@ class AppGroupService(ProtectionGateMixin):
                 table = await self._repo.get(row.session_id)
                 if table is not None and table.state != GROUP_ENDED:
                     await self._recheck_local(table)
+
+    # ─── Space tables (v_77) — driven by SpaceTableService ────────────
+
+    @property
+    def _own_identity_hex(self) -> str:
+        return bytes(self._federation.own_identity_pk).hex()
+
+    def attach_space_tables(self, space_tables: SpaceTableService) -> None:
+        """Wire space tables: their sends go over the space's own
+        transport, and each change of one moves its card on."""
+        self._space_tables = space_tables
+
+    async def open_space_table(
+        self,
+        *,
+        app: InstalledApp,
+        host: User,
+        space_id: str,
+        max_players: int,
+        lobby_days: int,
+        note: str | None,
+    ) -> GroupSession:
+        """Open a table in *space_id* with *host* in seat 1 — nobody is
+        invited: the space's members join it. The caller checked the space
+        (a writer seat, the app on its list) and its own caps; this checks
+        the table caps of the app (:class:`AppGroupLimitError`)."""
+        clean_note = note_ok(note)
+        if lobby_days not in GROUP_LOBBY_DAYS:
+            raise ValueError("lobby_days must be one of 1, 3, 7, 14")
+        async with self._app_fed.invite_lock(app.app_id, host.user_id):
+            await self._check_table_caps(app.app_id, host.username)
+            now = _now()
+            stamp = now.isoformat()
+            table = GroupSession(
+                session_id=uuid4().hex,
+                app_id=app.app_id,
+                host_instance=self._own,
+                host_user=host.username,
+                hub_instance=self._own,
+                state=GROUP_LOBBY,
+                min_players=app.manifest.players_min,
+                max_players=max_players,
+                roster=(
+                    GroupSeat(
+                        instance=self._own,
+                        user=host.username,
+                        name=host.display_name,
+                        state=SEAT_SEATED,
+                        seat=1,
+                        joined_at=stamp,
+                        user_id=host.user_id,
+                        identity_pk=self._own_identity_hex,
+                    ),
+                ),
+                roster_rev=1,
+                created_at=stamp,
+                expires_at=(now + timedelta(days=lobby_days)).isoformat(),
+                updated_at=stamp,
+                space_id=space_id,
+                late_join=app.manifest.late_join,
+                note=clean_note,
+                opener_user=host.username,
+            )
+            await self._repo.save(table)
+            key = await self._own_seat_key(table.session_id)
+            table = table.with_entry(dataclasses.replace(table.roster[0], seat_key=key))
+            await self._repo.save(table)
+            await self._app_repo.add_active_session(
+                self._seat_row(table, host.user_id, state=SESSION_ACTIVE)
+            )
+        return table
+
+    async def join_space_table(
+        self, *, table: GroupSession, user: User, name: str | None = None
+    ) -> dict:
+        """*user* takes a seat at a space table this household knows (its
+        card, or a copy). The caller checked the space side; this checks
+        the person's own rules (:class:`AppGroupCantJoinError`, no reason)
+        and asks the hub — at once when the hub is here
+        (:class:`AppGroupFullError` / :class:`AppGroupClosedError`)."""
+        if table.space_id is None or not table.is_open:
+            raise AppGroupClosedError()
+        if not await self._may_play(user, table):
+            raise AppGroupCantJoinError()
+        existing = await self._app_repo.get_pending_session(
+            table.app_id, user.user_id, table.session_id
+        )
+        if existing is not None and existing.is_group:
+            return self.view(table, user, existing)
+        key = await self._own_seat_key(table.session_id)
+        newcomer = GroupSeat(
+            instance=self._own,
+            user=user.username,
+            name=user.display_name,
+            state=SEAT_INVITED,
+            user_id=user.user_id,
+            identity_pk=self._own_identity_hex,
+        )
+        row = self._seat_row(table, user.user_id, state=SESSION_ACTIVE)
+        if table.hub_instance == self._own:
+            table = await self._hub_join(
+                table.session_id,
+                self._own,
+                user.username,
+                seat_key=key,
+                newcomer=newcomer,
+            )
+            await self._app_repo.add_active_session(row)
+        else:
+            await self._app_repo.add_active_session(row)
+            await self._send(
+                table.hub_instance,
+                table,
+                VERB_JOIN,
+                from_user=user.username,
+                user_id=user.user_id,
+                name=name or user.display_name,
+                identity_pk=self._own_identity_hex,
+                seat_key=key.to_wire(),
+                snap=False,
+            )
+        await self._push(table)
+        return self.view(table, user, row)
+
+    async def end_space_table(self, table: GroupSession, reason: str) -> None:
+        """End a space table this household hosts for everyone (a
+        moderator closed it, its app left the space's list)."""
+        await self._hub_end(table, reason)
+
+    async def on_space_session(
+        self, event: FederationEvent, *, newcomer: GroupSeat | None = None
+    ) -> None:
+        """A space table's ``group_*`` verb that came over its space —
+        :class:`SpaceTableService` checked the space, the sender's writer
+        seat and (for a join) *newcomer*."""
+        await self._on_session(event, space_id=event.space_id, newcomer=newcomer)
+
+    async def on_space_message(self, event: FederationEvent) -> None:
+        """A space table's group message that came over its space."""
+        await self._on_message(event, space_id=event.space_id)
+
+    async def local_people(
+        self, table: GroupSession
+    ) -> list[tuple[User, AppPendingSession]]:
+        """The people of this household with a place at *table*."""
+        return await self._local_people(table)

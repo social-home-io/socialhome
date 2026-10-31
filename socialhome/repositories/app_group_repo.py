@@ -67,6 +67,7 @@ def _seat_to_json(e: GroupSeat) -> dict:
         "joined_at": e.joined_at,
         "seat_key": e.seat_key.to_wire() if e.seat_key is not None else None,
         "user_id": e.user_id,
+        "identity_pk": e.identity_pk,
     }
 
 
@@ -81,6 +82,7 @@ def _seat_from_json(d: dict) -> GroupSeat:
         joined_at=d.get("joined_at"),
         seat_key=SeatKey.from_wire(d["seat_key"]) if d.get("seat_key") else None,
         user_id=d.get("user_id"),
+        identity_pk=d.get("identity_pk"),
     )
 
 

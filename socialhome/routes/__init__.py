@@ -361,6 +361,12 @@ from .space_bots import (
     SpaceBotDetailView,
     SpaceBotTokenView,
 )
+from .space_games import (
+    SpaceGameCloseView,
+    SpaceGameJoinView,
+    SpaceGamesAllowedView,
+    SpaceGamesView,
+)
 from .space_polls import (
     SpacePollCloseView,
     SpacePollSummaryView,
@@ -1414,6 +1420,15 @@ def setup_routes(app: web.Application) -> None:
         ("messages", AppGroupMessagesView),
     ):
         app.router.add_view(f"/api/apps/{{app_id}}/groups/{{session_id}}/{verb}", view)
+    # Games in a space (v_77) — the Games section, the "Open games" strip.
+    app.router.add_view("/api/spaces/{space_id}/games", SpaceGamesView)
+    app.router.add_view("/api/spaces/{space_id}/games/allowed", SpaceGamesAllowedView)
+    app.router.add_view(
+        "/api/spaces/{space_id}/games/{session_id}/join", SpaceGameJoinView
+    )
+    app.router.add_view(
+        "/api/spaces/{space_id}/games/{session_id}/close", SpaceGameCloseView
+    )
 
     # ── Backup (adapter-agnostic) ────────────────────────────────────────
     app.router.add_view("/api/backup/pre_backup", BackupPreView)
