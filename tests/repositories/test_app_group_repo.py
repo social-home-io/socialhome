@@ -15,6 +15,7 @@ from socialhome.domain.app_group import (
     SEAT_SEATED,
     GroupSeat,
     GroupSession,
+    SeatKey,
 )
 from socialhome.repositories.app_group_repo import SqliteAppGroupRepo
 
@@ -159,6 +160,97 @@ async def test_prune_ended_and_quiet(repo):
     assert pruned == 2
     left = {t.session_id for t in await repo.list_for_app("quiz")}
     assert left == {"ended-new", "busy"}
+
+
+KEY = SeatKey(kem_suite="x25519", pub="p", sig_suite="ed25519", sig="s")
+
+
+async def test_seat_keys_on_the_roster_round_trip(repo):
+    anna = dataclasses.replace(_table().roster[0], seat_key=KEY)
+    t = _table(roster=(anna, _table().roster[1]))
+    await repo.save(t)
+    assert (await repo.get("t1")).roster[0].seat_key == KEY
+
+
+async def test_own_seat_key_first_one_stays_and_saves_leave_it(repo):
+    await repo.save(_table())
+    assert await repo.get_seat_key("t1") is None
+    assert await repo.set_seat_key("t1", '{"pub":"a"}') is True
+    assert await repo.set_seat_key("t1", '{"pub":"b"}') is False
+    await repo.save_newer(_table(roster_rev=2))
+    await repo.save(_table(roster_rev=3))
+    assert await repo.get_seat_key("t1") == '{"pub":"a"}'
+    assert await repo.set_seat_key("nope", "x") is False
+
+
+async def test_raise_seq_only_goes_up_and_saves_leave_it(repo):
+    await repo.save(_table())
+    await repo.raise_seq("t1", 5, now="2026-10-31T11:00:00+00:00")
+    await repo.raise_seq("t1", 3, now="2026-10-31T11:01:00+00:00")
+    got = await repo.get("t1")
+    assert got.seq == 5 and got.updated_at == "2026-10-31T11:01:00+00:00"
+    await repo.save(_table(roster_rev=2))
+    assert (await repo.get("t1")).seq == 5
+
+
+async def _seat_row(db, state: str = "active", session_id: str = "t1") -> None:
+    await db.enqueue(
+        "INSERT OR IGNORE INTO users(username, user_id, display_name)"
+        " VALUES('cleo', 'u-c', 'Cleo')"
+    )
+    await db.enqueue(
+        "INSERT OR IGNORE INTO installed_apps(app_id, name, version, enabled,"
+        " manifest_json, bundle_path, bundle_sha256, source_url, installed_at)"
+        " VALUES('quiz', 'Quiz', '1', 1, '{}', '/b', 'h', 'u', '2026-10-01')"
+    )
+    await db.enqueue(
+        "INSERT INTO app_pending_sessions(app_id, user_id, session_id,"
+        " from_instance, from_user, payload_json, created_at, state, updated_at)"
+        " VALUES('quiz', 'u-c', ?, 'hub', 'anna', '{\"group\":true}', ?, ?, ?)",
+        (session_id, T0, state, T0),
+    )
+
+
+async def test_held_keeps_the_latest_per_sender_seat(repo, db):
+    await _seat_row(db)
+    assert await repo.hold_group_message(
+        "quiz", "u-c", "t1", from_seat=2, seq=4, held={"data": 1}, now=T0
+    )
+    assert await repo.hold_group_message(
+        "quiz", "u-c", "t1", from_seat=1, seq=3, held={"data": "a"}, now=T0
+    )
+    # Newer from seat 2 replaces; an older repeat doesn't.
+    assert await repo.hold_group_message(
+        "quiz", "u-c", "t1", from_seat=2, seq=9, held={"data": 2}, now=T0
+    )
+    assert not await repo.hold_group_message(
+        "quiz", "u-c", "t1", from_seat=2, seq=6, held={"data": "old"}, now=T0
+    )
+    taken = await repo.take_group_held("quiz", "u-c")
+    assert [(h.session_id, h.from_seat, h.seq, h.held) for h in taken] == [
+        ("t1", 1, 3, {"data": "a"}),
+        ("t1", 2, 9, {"data": 2}),
+    ]
+    assert await repo.take_group_held("quiz", "u-c") == []
+
+
+async def test_held_only_for_a_person_seated_here(repo, db):
+    assert not await repo.hold_group_message(
+        "quiz", "u-c", "t1", from_seat=2, seq=1, held={}, now=T0
+    )
+    await _seat_row(db, state="invited")
+    assert not await repo.hold_group_message(
+        "quiz", "u-c", "t1", from_seat=2, seq=1, held={}, now=T0
+    )
+
+
+async def test_held_goes_with_the_persons_row(repo, db):
+    await _seat_row(db)
+    await repo.hold_group_message(
+        "quiz", "u-c", "t1", from_seat=2, seq=1, held={}, now=T0
+    )
+    await db.enqueue("DELETE FROM app_pending_sessions WHERE session_id = 't1'")
+    assert await repo.take_group_held("quiz", "u-c") == []
 
 
 async def test_rows_are_frozen_values(repo):

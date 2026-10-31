@@ -772,6 +772,19 @@ class GroupMessage:
         return out
 
 
+@dataclass(slots=True, frozen=True)
+class GroupHeld:
+    """One message a person's mailbox kept for their closed app
+    (``app_group_held``): the latest from ``from_seat`` at ``session_id``.
+    ``held`` is ``{data, direct}``."""
+
+    session_id: str
+    from_seat: int
+    seq: int
+    held: dict[str, Any]
+    updated_at: str
+
+
 def _seat_list(raw: object, what: str) -> tuple[int, ...] | None:
     if raw == "all":
         return None
