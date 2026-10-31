@@ -642,7 +642,7 @@ def test_invite_errors_are_coded():
 
 
 def test_session_marks_read_only_our_own_flags():
-    assert SESSION_MARKS == {"sent", "answered", "withdrawn"}
+    assert SESSION_MARKS == {"sent", "answered", "withdrawn", "group"}
     base = {
         "app_id": "chess",
         "user_id": "u",
@@ -659,6 +659,60 @@ def test_session_marks_read_only_our_own_flags():
     assert not AppPendingSession(**base, payload={"sent": True}).sent
     assert not AppPendingSession(**base, payload={"sent": 1}, state="active").sent
     assert AppPendingSession(**base, payload={"withdrawn": True}).withdrawn
+    # A seat at a group table (v_76) is marked by Social Home alone.
+    assert AppPendingSession(**base, payload={"group": True}).is_group
+    assert not AppPendingSession(**base, payload={"group": 1}).is_group
+    assert not AppPendingSession(**base, payload={}).is_group
+
+
+def test_manifest_without_players_is_one_to_one():
+    m = AppManifest.from_dict({"entry": "index.html"})
+    assert (m.players_min, m.players_max, m.tables, m.late_join) == (
+        2,
+        2,
+        False,
+        False,
+    )
+    assert "players" not in m.to_dict()
+    assert "tables" not in m.to_dict()
+
+
+def test_manifest_group_fields_round_trip():
+    m = AppManifest.from_dict(
+        {
+            "entry": "index.html",
+            "players": {"min": 3, "max": 8},
+            "tables": True,
+            "late_join": True,
+        }
+    )
+    assert (m.players_min, m.players_max, m.tables, m.late_join) == (3, 8, True, True)
+    assert AppManifest.from_dict(m.to_dict()) == m
+
+
+def test_manifest_players_max_is_cut_to_thirty():
+    m = AppManifest.from_dict({"entry": "a.html", "players": {"min": 2, "max": 99}})
+    assert m.players_max == 30
+
+
+@pytest.mark.parametrize(
+    "players",
+    [
+        {"min": 1, "max": 4},
+        {"min": 5, "max": 4},
+        {"min": "2", "max": 4},
+        {"min": True, "max": 4},
+        [2, 4],
+    ],
+)
+def test_manifest_players_out_of_shape_is_refused(players):
+    with pytest.raises(ValueError):
+        AppManifest.from_dict({"entry": "a.html", "players": players})
+
+
+def test_manifest_tables_must_be_a_boolean():
+    with pytest.raises(ValueError):
+        AppManifest.from_dict({"entry": "a.html", "tables": "yes"})
 
 
 def test_catalog_name_in_the_viewers_language():
