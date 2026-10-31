@@ -9621,6 +9621,35 @@ def cmd_verify() -> None:
                 failures.append(f"app-group: {label} lost the closed table")
             else:
                 print(f"  app-group: {label} still holds the closed table ✓")
+    # v_77 — games in a space: SPACE_APP_TABLE / SPACE_APP_SESSION to member
+    # households with a writer seat at >= v_77, over the space's transport.
+    if int(_Cap.MIN_FOR_SPACE_APP_TABLES) != 77 or _OURS < 77:
+        failures.append(
+            "MIN_FOR_SPACE_APP_TABLES moved off v_77 (or OURS fell below it) — a "
+            "space table would reach households that drop it"
+        )
+    else:
+        print("  v_77 space games gate in place ✓")
+    duel = state.get("space_table")
+    if duel:
+        for label in ("c", "d"):
+            held = _rows(
+                label,
+                "SELECT state FROM app_group_sessions WHERE session_id = ?",
+                (duel["session_id"],),
+            )
+            if [r[0] for r in held] != ["playing"]:
+                failures.append(f"space-table: {label} lost the duel ({held!r})")
+            else:
+                print(f"  space-table: {label} still holds the duel ✓")
+        outside = [_instance_dir("a"), _instance_dir("b"), GFS_DIR]
+        for folder in outside:
+            for path in folder.glob("*.db*"):
+                if duel["marker"].encode() in path.read_bytes():
+                    failures.append(
+                        f"space-table: the table's note is readable in {path}"
+                    )
+        print("  space-table: no non-member household and no GFS holds the table ✓")
     faq = state.get("bazaar_faq")
     if faq:
         for label in ("a", "b", "d"):
@@ -15476,6 +15505,182 @@ def cmd_app_group() -> None:
     print("app-group: ok")
 
 
+def cmd_space_table() -> None:
+    """Games in a space (v_77) — a table in a shared space, joined by a
+    household reached only over the mesh.
+
+    Runs in c's private space from ``remote-invite-routed``: c hosts it, d
+    (dave) is a member c is NOT paired with — every envelope between them
+    rides ``SPACE_ROUTED`` through b, which is no member of that space.
+    Installs a stand-in two-player app (``demo-duel``, ``players {2, 2}``,
+    ``tables: true``) on c and d straight into ``installed_apps``.
+
+    1. c's games list (``PUT /api/spaces/{id}/games/allowed``) allows
+       ``demo-duel`` — it reaches d with the space's config.
+    2. c opens a table with a marker note (``POST /api/spaces/{id}/games``);
+       d's Games list shows the card (``SPACE_APP_TABLE``, routed).
+    3. d joins (``SPACE_APP_SESSION`` ``group_join`` → ``group_seat``); a
+       two-player table starts at once (D11) — both see ``playing`` at two
+       seats, and d holds c's seat key checked against c's identity key.
+    4. d sends a group message (``SPACE_APP_SESSION`` kind ``message``);
+       c's mailbox gets it.
+    5. **Nobody else hears of it**: a and b hold no row of the table and
+       the marker is in none of their database files (b relayed only
+       ciphertext); ``verify`` re-checks the GFS's database too.
+    6. **v_77.** ``OURS`` >= ``MIN_FOR_SPACE_APP_TABLES``; c and d each
+       know the other at it (d's mesh claim on c, c's pairing-free claim).
+    The receiver rules, followers, forged cards and joins, swapped seat
+    keys and the moderator close are
+    ``tests/protocol/test_space_app_table_federation.py`` /
+    ``tests/services/test_space_app_table_service.py``.
+    """
+    import sqlite3
+
+    from socialhome.domain.federation_capabilities import (
+        OURS as _OURS,
+        FederationCapability as _Cap,
+    )
+
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' first")
+    space_id = state.get("remote_invite_routed_space_id")
+    if not space_id:
+        raise SystemExit("space-table: run 'remote-invite-routed' first")
+    inst = state["instances"]
+    c, d = inst["c"], inst["d"]
+    app_id = "demo-duel"
+    manifest = (
+        '{"entry": "index.html", "icon": null, "capabilities":'
+        ' ["storage", "people", "federation"], "players": {"min": 2, "max": 2},'
+        ' "tables": true}'
+    )
+    for label in ("c", "d"):
+        con = sqlite3.connect(str(_instance_dir(label) / "socialhome.db"), timeout=10)
+        try:
+            con.execute(
+                "INSERT OR IGNORE INTO installed_apps(app_id, name, version,"
+                " enabled, manifest_json, bundle_path, bundle_sha256,"
+                " source_url, installed_at) VALUES(?, 'Demo duel', '1', 1, ?,"
+                " 'apps/demo-duel/1', 'demo', 'demo', '2026-10-31')",
+                (app_id, manifest),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+    def games(node: dict, path: str = "", *, method: str = "GET", body=None):
+        return _request(
+            f"http://127.0.0.1:{node['port']}/api/spaces/{space_id}/games{path}",
+            token=node["token"],
+            method=method,
+            body=body,
+        )
+
+    def wait(what: str, check, timeout: float = 90.0) -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if check():
+                return
+            time.sleep(1.0)
+        raise SystemExit(f"space-table: timed out waiting for {what}")
+
+    # 1. The games list.
+    s, body = games(c, "/allowed", method="PUT", body={"allowed_apps": [app_id]})
+    _must("games list(c)", s, body)
+
+    def listed(node: dict) -> dict:
+        s, body = games(node)
+        return body if s == 200 and isinstance(body, dict) else {}
+
+    wait("d to get the games list", lambda: listed(d).get("allowed_apps") == [app_id])
+    print("  space-table: the games list reached d ✓")
+    # 2. c opens a table; d sees its card.
+    marker = f"DEMO-TABLE-{secrets.token_hex(6)}"
+    s, opened = games(c, method="POST", body={"app_id": app_id, "note": marker})
+    _must("open table(c)", s, opened, ok=(201,))
+    sid = opened["table"]["session_id"]
+
+    def card(node: dict) -> dict | None:
+        return next(
+            (t for t in listed(node).get("tables", []) if t["session_id"] == sid), None
+        )
+
+    wait("d to see the card", lambda: (card(d) or {}).get("state") == "open")
+    if card(d)["note"] != marker or card(d)["seated"] != 1:
+        raise SystemExit(f"space-table: d's card is off: {card(d)!r}")
+    print("  space-table: d (mesh only) sees c's open table ✓")
+    # 3. d joins; a two-player table starts at once.
+    s, joined = games(d, f"/{sid}/join", method="POST")
+    _must("join(d)", s, joined)
+
+    def group(node: dict) -> dict:
+        return (card(node) or {}).get("group") or {}
+
+    for label, node in (("c", c), ("d", d)):
+        wait(
+            f"{label} to see the game playing at two seats",
+            lambda node=node: group(node).get("state") == "playing"
+            and sorted(
+                pl["seat"] for pl in group(node).get("players", [])
+                if pl["state"] == "seated"
+            )
+            == [1, 2],
+        )
+        print(f"  space-table: {label} sees the duel playing ✓")
+    rows = _rows(
+        "d",
+        "SELECT roster_json FROM app_group_sessions WHERE session_id = ?",
+        (sid,),
+    )
+    roster = json.loads(rows[0][0]) if rows else []
+    host = next((e for e in roster if e["instance"] == c["instance_id"]), {})
+    if not host.get("seat_key") or not host.get("identity_pk"):
+        raise SystemExit(f"space-table: d holds no checked seat key of c: {roster!r}")
+    print("  space-table: d holds c's seat key with c's identity key ✓")
+    # 4. A message over the space.
+    s, sent = _request(
+        f"http://127.0.0.1:{d['port']}/api/apps/{app_id}/groups/{sid}/messages",
+        token=d["token"],
+        method="POST",
+        body={"data": {"move": marker}},
+    )
+    _must("message(d)", s, sent)
+    got: list[dict] = []
+
+    def held() -> list[dict]:
+        s, body = _request(
+            f"http://127.0.0.1:{c['port']}/api/apps/{app_id}/held",
+            token=c["token"],
+            method="POST",
+        )
+        if s == 200:
+            got.extend((body or {}).get("group_messages", []))
+        return got
+
+    wait("c to get d's move", lambda: any(m["data"] == {"move": marker} for m in held()))
+    print("  space-table: c got d's move over the space ✓")
+    # 5. Nobody outside the space heard of it.
+    for label in ("a", "b"):
+        if _rows(label, "SELECT 1 FROM app_group_sessions WHERE session_id = ?", (sid,)):
+            raise SystemExit(f"space-table: {label} (no member) holds the table")
+        for path in _instance_dir(label).glob("socialhome.db*"):
+            if marker.encode() in path.read_bytes():
+                raise SystemExit(
+                    f"space-table: the table's note is readable in {label}'s {path.name}"
+                )
+    print("  space-table: a and b (the relay) hold nothing of the table ✓")
+    # 6. v_77 between c and d.
+    if _OURS < _Cap.MIN_FOR_SPACE_APP_TABLES:
+        raise SystemExit(
+            f"space-table: OURS={_OURS} < "
+            f"MIN_FOR_SPACE_APP_TABLES={_Cap.MIN_FOR_SPACE_APP_TABLES}"
+        )
+    state["space_table"] = {"session_id": sid, "marker": marker, "space_id": space_id}
+    _save(state)
+    print("space-table: ok")
+
+
 def cmd_bazaar_faq() -> None:
     """A listing's questions and answers (v_75).
 
@@ -19854,6 +20059,10 @@ def main() -> None:
         # ``app-group`` (v_76): a opens a group table with b's and c's
         # admins, both join, a starts and closes it — all three converge.
         cmd_app_group()
+        # ``space-table`` (v_77): in c's space from remote-invite-routed, c
+        # opens a two-player table and d (mesh only, via b) joins it — it
+        # starts at once, d's move reaches c, and a and b hold nothing.
+        cmd_space_table()
         # ``highlight-audience`` (v_70): a narrows today's highlight to b's
         # household — c deletes it and remembers the removal, a narrowed
         # frame reaches b only — then widens back and c gets the day again.

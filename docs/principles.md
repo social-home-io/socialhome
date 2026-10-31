@@ -740,6 +740,40 @@ roster (e.g. adding unauthenticated guest channels, GFS-relayed routing, or
 any path that bypasses `_assert_target_allowed`) MUST treat it as a §2
 principle change requiring a new sign-off.
 
+### Sign-off needed: space membership is consent to play with its members' households (v_77)
+
+**Pending the owner's sign-off** (group play D7, PR #TBD). The rule above
+keeps per-user app routing to the pairing-scoped roster. Space tables
+(v_77) widen the audience of a *group* table: in a space, a member with a
+writing seat may sit at a table with members of households that aren't
+paired with theirs (or with the table's host household), and their
+households then exchange the game's verbs and messages and the table's
+roster — seat number, display name, household name, the space user id and
+the household's identity key — over the space's own transport (direct,
+`SPACE_ROUTED` sealed end to end across a relay, or the link-joined relay
+seat). Being in the space and pressing **Join** is the consent, the same
+reasoning as Bazaar's "Ask the seller" (v_74).
+
+The bounds that make it acceptable:
+
+1. **Members only.** Only households holding a writer seat in the space
+   ever hear of a table (followers, non-member relays and GFSs never; no
+   global spaces). The table's host household decides who sits from its
+   own copy of the space roster — a live writer seat, not banned.
+2. **Nothing beyond the space.** What travels is what the space's member
+   list already shows (names) plus the game; no address, no pairing, no
+   new direct channel. Directed messages stay sealed to the target
+   household's seat key, checked against the household's own identity key
+   (its id is that key's fingerprint), so no hub can read them.
+3. **Each household's own rules.** Personal and guardian blocks are
+   enforced by each player's household (the hub is never told); a
+   protected account sits only at a private space's table — with the
+   people it already chats with there — and never above the app's age.
+
+A change that lets a table reach anyone outside a space's writer seats, or
+seats people without their own Join, is a §2 principle change needing a
+new sign-off.
+
 ### Sign-off: Social Home Apps execute fetched third-party JavaScript
 
 Social Home Apps (PR1 and later) represent an **explicit, bounded
