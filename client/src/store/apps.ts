@@ -33,6 +33,10 @@ export interface InstalledApp {
   players?:   { min: number, max: number }
   tables?:    boolean
   late_join?: boolean
+  /** How many of the VIEWER's own games in it are going (1:1 games being
+   *  played + group games they joined that haven't ended) — ``GET
+   *  /api/apps`` only; "2 games going" on Your apps. */
+  games_going?: number
 }
 
 /** The three plain-word permissions (D2), in the order they are listed. */
@@ -269,7 +273,7 @@ export function newPermissionsAsked(err: unknown): AppPermission[] | null {
 export async function installApp(appId: string): Promise<InstalledApp> {
   const app = await api.post('/api/apps', { app_id: appId }) as InstalledApp
   installedApps.value = [...installedApps.value.filter(a => a.app_id !== appId), app]
-  showToast(t('apps.added_toast', { name: app.name }), 'success')
+  showToast(t('apps.installed_toast', { name: app.name }), 'success')
   return app
 }
 

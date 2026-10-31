@@ -143,7 +143,7 @@ export function AddAppDialog({ entry, name, permissions, open, onClose, onAdded 
       </p>
       <div class="sh-modal-actions">
         <Button variant="secondary" onClick={onClose}>{t('common.cancel')}</Button>
-        <Button loading={adding} onClick={() => { void add() }}>{t('apps.add_to_household')}</Button>
+        <Button loading={adding} onClick={() => { void add() }}>{t('apps.install')}</Button>
       </div>
     </Modal>
   )

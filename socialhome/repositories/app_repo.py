@@ -105,6 +105,9 @@ class AbstractAppRepo(Protocol):
         self, app_id: str, user_id: str, session_id: str
     ) -> None: ...
     async def list_app_sessions(self, app_id: str) -> list[AppPendingSession]: ...
+    async def list_playing(
+        self, user_id: str, app_ids: list[str]
+    ) -> list[AppPendingSession]: ...
     async def list_session_rows(
         self, app_id: str, session_id: str
     ) -> list[AppPendingSession]: ...
@@ -582,6 +585,25 @@ class SqliteAppRepo:
             """SELECT * FROM app_pending_sessions WHERE app_id = ?
                ORDER BY user_id, COALESCE(updated_at, created_at)""",
             (app_id,),
+        )
+        return [_row_to_pending(r) for r in rows]
+
+    async def list_playing(
+        self, user_id: str, app_ids: list[str]
+    ) -> list[AppPendingSession]:
+        """*user_id*'s own 1:1 sessions being played in *app_ids* (``active``,
+        not a group seat) — one query for the Apps page's "2 games going",
+        by the ``(app_id, user_id)`` index. Bounded like
+        :meth:`list_sessions`, per app. Only this person's rows: never
+        what anyone else here plays."""
+        if not app_ids:
+            return []
+        marks = ",".join("?" * len(app_ids))
+        rows = await self._db.fetchall(
+            f"""SELECT * FROM app_pending_sessions
+               WHERE app_id IN ({marks}) AND user_id = ? AND state = ?
+                 AND json_type(payload_json, '$.group') IS NULL""",
+            (*app_ids, user_id, SESSION_ACTIVE),
         )
         return [_row_to_pending(r) for r in rows]
 

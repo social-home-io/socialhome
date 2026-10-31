@@ -119,11 +119,11 @@ describe('AppDetailPage — what an app can do', () => {
     expect(getByText('Keyboard play.')).toBeTruthy()
   })
 
-  it('an admin adds it through the consent dialog', async () => {
+  it('an admin installs it through the consent dialog', async () => {
     const { getByRole, getAllByRole } = render(<AppDetailPage />)
-    fireEvent.click(getByRole('button', { name: 'Add to household' }))
-    expect(getByRole('dialog', { name: 'Add Chess for everyone?' })).toBeTruthy()
-    const buttons = getAllByRole('button', { name: 'Add to household' })
+    fireEvent.click(getByRole('button', { name: 'Install' }))
+    expect(getByRole('dialog', { name: 'Install Chess for everyone?' })).toBeTruthy()
+    const buttons = getAllByRole('button', { name: 'Install' })
     fireEvent.click(buttons[buttons.length - 1])
     await vi.waitFor(() => expect(h.installApp).toHaveBeenCalledWith('chess'))
   })
@@ -131,21 +131,21 @@ describe('AppDetailPage — what an app can do', () => {
   it('the consent dialog states the age gate when the catalog rates it', () => {
     h.catalog.value = [entry({ min_age: 13 })]
     const { getByRole } = render(<AppDetailPage />)
-    fireEvent.click(getByRole('button', { name: 'Add to household' }))
+    fireEvent.click(getByRole('button', { name: 'Install' }))
     expect(getByRole('dialog').textContent).toContain('Everyone in your household aged 13 and over can open it.')
   })
 
-  it('an app needing a newer Social Home offers no Add button', () => {
+  it('an app needing a newer Social Home offers no Install button', () => {
     h.catalog.value = [entry({ compatible: false, min_core_version: '2026.11.2' })]
     const { queryByRole, getByText } = render(<AppDetailPage />)
-    expect(queryByRole('button', { name: 'Add to household' })).toBeNull()
+    expect(queryByRole('button', { name: 'Install' })).toBeNull()
     expect(getByText(/Needs Social Home 2026.11.2 or newer/)).toBeTruthy()
   })
 
   it('a member asks an admin, and nothing installs', async () => {
     h.currentUser.value = { is_admin: false }
     const { getByRole, queryByRole } = render(<AppDetailPage />)
-    expect(queryByRole('button', { name: 'Add to household' })).toBeNull()
+    expect(queryByRole('button', { name: 'Install' })).toBeNull()
     fireEvent.click(getByRole('button', { name: 'Ask an admin for Chess' }))
     fireEvent.click(getByRole('button', { name: 'Send request' }))
     await vi.waitFor(() => expect(h.requestApp).toHaveBeenCalledWith('chess'))

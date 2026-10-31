@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+from datetime import date
 
 import pytest
 
@@ -525,15 +526,27 @@ def test_app_permissions_order_and_people_implied():
         ("2026.10.29", "2026.11.1", True),
         ("2026.10.29", "2026.10.27", False),
         ("2026.10.29", "2026.10.28.3", False),
-        # Development builds run the newest code: never held back.
+        # Development builds run the newest code: never held back by a
+        # release that is out (dated today or earlier)…
         ("2026.10.29", "2026.10.12.dev2", True),
         ("2026.10.29", "0.0.0+unknown", True),
         ("2026.10.29", "0.0.0", True),
         ("2026.10.29", "", True),
+        ("2026.10.31.2", "0.0.0+unknown", True),
+        ("1.2", "0.0.0+unknown", True),
+        # …but a requirement dated after today needs a Social Home nobody
+        # has: "Needs a newer Social Home" (#1265 showed Install).
+        ("2026.11.1", "2026.10.30.dev3", False),
+        ("2099.1.1", "0.0.0+unknown", False),
+        ("2099.1.1", "", False),
+        ("2099", "0.0.0", False),
+        # A release still compares as a version.
+        ("2099.1.1", "2026.10.29", False),
+        ("not-a-version", "0.0.0+unknown", True),
     ],
 )
 def test_core_version_satisfies(need, have, ok):
-    assert core_version_satisfies(need, have) is ok
+    assert core_version_satisfies(need, have, today=date(2026, 10, 31)) is ok
 
 
 def test_catalog_entry_must_be_an_object():
@@ -828,3 +841,46 @@ def test_installed_app_name_in_the_readers_language():
     assert app.name_in("de-AT") == "Schiffe versenken"
     assert app.name_in("fr") == "Battleships"
     assert app.name_in(None) == "Battleships"
+
+
+@pytest.mark.parametrize(
+    ("state", "payload", "held", "updated_at", "going"),
+    [
+        # An invite the person accepted: being played.
+        ("active", {}, None, "2026-10-30T00:00:00+00:00", True),
+        # One they sent that was answered.
+        ("active", {"sent": True, "answered": True}, None, None, True),
+        # Still waiting for an answer, either way: not a game yet.
+        ("active", {"sent": True}, None, None, False),
+        ("invited", {}, None, None, False),
+        # Taken back, or closed by the other side.
+        ("active", {"withdrawn": True}, None, None, False),
+        (
+            "active",
+            {},
+            {"kind": "session", "payload": {"verb": "close"}},
+            None,
+            False,
+        ),
+        # A move held for the app still means the game goes on.
+        ("active", {}, {"kind": "message", "payload": {}}, None, True),
+        # Quiet past the cut: most likely over.
+        ("active", {}, None, "2026-09-01T00:00:00+00:00", False),
+        # A seat at a group table is counted through its table.
+        ("active", {"group": True}, None, None, False),
+    ],
+)
+def test_is_game_going(state, payload, held, updated_at, going):
+    row = AppPendingSession(
+        app_id="chess",
+        user_id="u",
+        session_id="s",
+        from_instance="i",
+        from_user="x",
+        payload=payload,
+        created_at="2026-10-29T00:00:00+00:00",
+        state=state,
+        held=held,
+        updated_at=updated_at,
+    )
+    assert row.is_game_going("2026-10-01T00:00:00+00:00") is going

@@ -534,6 +534,11 @@ function InstalledRow({ app, entry, isAdmin, picked, update, lang }: {
   const added = app.installed_by_name
     ? t('apps.added_by', { name: app.installed_by_name, date: shortDay(app.installed_at) })
     : shortDay(app.installed_at) ? t('apps.added_on', { date: shortDay(app.installed_at) }) : ''
+  // "2 games going": the viewer's own games in it (nothing when none).
+  const goingN = app.games_going ?? 0
+  const going = goingN > 0
+    ? t(isOne(goingN) ? 'apps.games_going_one' : 'apps.games_going', { n: String(goingN) })
+    : ''
 
   const toggle = async () => {
     setToggling(true)
@@ -559,9 +564,10 @@ function InstalledRow({ app, entry, isAdmin, picked, update, lang }: {
           {isAdmin && !app.enabled && <span class="sh-chip sh-chip--muted">{t('apps.off')}</span>}
           <RatingChip minAge={app.min_age} />
         </h3>
-        {(added || update || !app.enabled) && (
+        {(added || going || update || !app.enabled) && (
           <p class="sh-apps-row__meta sh-apps-row__meta--facts">
             {added && <span>{added}</span>}
+            {going && <span>{going}</span>}
             {!app.enabled && <span>{t('apps.off_kept')}</span>}
             {isAdmin && update && <span class="sh-apps-row__update">{t('apps.update_ready')}</span>}
           </p>

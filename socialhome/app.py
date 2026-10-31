@@ -3177,6 +3177,7 @@ def create_app(config: Config | None = None) -> web.Application:
         cp_repo=repos.cp,
         core_version=__version__,
         users=repos.user,
+        group_repo=repos.app_group,
     )
 
     # Feature gating for §18: wire household toggle enforcement into

@@ -14,6 +14,7 @@ import hashlib
 import io
 import json
 import tarfile
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -37,6 +38,7 @@ from socialhome.domain.apps import (
     AppNewPermissionsError,
     AppNotEnabledError,
     AppNotFoundError,
+    AppPendingSession,
     AppPermissionDeniedError,
     AppQuotaExceededError,
     AppRequestNotAllowedError,
@@ -2228,18 +2230,37 @@ async def test_install_refuses_an_app_asking_for_an_unknown_permission(
         await svc.install("chess", actor_is_admin=True, actor_user_id="a")
 
 
-async def test_a_development_build_installs_anything(
+async def test_a_development_build_installs_anything_released(
     tmp_path: Path, chess_bundle: tuple[bytes, str]
 ) -> None:
+    """A checkout runs the newest code: an app needing a release that is
+    out (dated up to today) installs even though the build's own version
+    can't be compared."""
     data, sha = chess_bundle
+    today = datetime.now(UTC).date()
     svc, _ = _v2_service(
         tmp_path,
-        [_v2_entry(sha, min_core_version="2099.1.1")],
+        [_v2_entry(sha, min_core_version=f"{today.year}.{today.month}.{today.day}")],
         data,
         core_version="2026.10.30.dev3+gabc",
     )
     app = await svc.install("chess", actor_is_admin=True, actor_user_id="a")
     assert app.app_id == "chess"
+
+
+@pytest.mark.parametrize("core", ["2026.10.30.dev3+gabc", "0.0.0+unknown", ""])
+async def test_a_development_build_is_held_back_by_an_unreleased_core(
+    tmp_path: Path, chess_bundle: tuple[bytes, str], core: str
+) -> None:
+    """#1265 regression: an app needing a Social Home dated after today
+    (``2099.1.1``) read as compatible on a checkout — the Store offered
+    Install. No build has that yet: incompatible, and install refuses."""
+    data, sha = chess_bundle
+    entry = _v2_entry(sha, min_core_version="2099.1.1")
+    svc, _ = _v2_service(tmp_path, [entry], data, core_version=core)
+    assert svc.is_compatible(entry) is False
+    with pytest.raises(AppNeedsNewerCoreError):
+        await svc.install("chess", actor_is_admin=True, actor_user_id="a")
 
 
 @pytest.mark.parametrize(("catalog_age", "expected"), [(13, 13), (None, 0), (0, 0)])
@@ -2872,3 +2893,86 @@ async def test_heal_keeps_each_installed_bundles_i18n_names(tmp_path: Path) -> N
     assert kept is not None and kept.manifest.names == (("nl", "Al"),)
     # Once healed, nothing more to do.
     assert await svc.heal_manifest_names() == 0
+
+
+# ── "2 games going" on Your apps ─────────────────────────────────────────
+
+
+class _PlayingRepo(_FakeAppRepo):
+    """:class:`_FakeAppRepo` with session rows for ``list_playing``."""
+
+    def __init__(self, rows: list[AppPendingSession]) -> None:
+        super().__init__()
+        self.rows = rows
+        self.calls: list[tuple[str, list[str]]] = []
+
+    async def list_playing(
+        self, user_id: str, app_ids: list[str]
+    ) -> list[AppPendingSession]:
+        self.calls.append((user_id, list(app_ids)))
+        return [r for r in self.rows if r.user_id == user_id and r.app_id in app_ids]
+
+
+class _SeatedRepo:
+    def __init__(self, counts: dict[str, int]) -> None:
+        self.counts = counts
+        self.calls: list[tuple[str, list[str]]] = []
+
+    async def count_seated(self, user_id: str, app_ids: list[str]) -> dict[str, int]:
+        self.calls.append((user_id, list(app_ids)))
+        return {a: n for a, n in self.counts.items() if a in app_ids}
+
+
+def _game(app_id: str, session_id: str, **kw: Any) -> AppPendingSession:
+    now = datetime.now(UTC).isoformat()
+    base: dict[str, Any] = {
+        "app_id": app_id,
+        "user_id": "me",
+        "session_id": session_id,
+        "from_instance": "b",
+        "from_user": "ben",
+        "payload": {},
+        "created_at": now,
+        "state": "active",
+        "updated_at": now,
+    }
+    base.update(kw)
+    return AppPendingSession(**base)
+
+
+async def test_games_going_counts_the_callers_games_and_tables(tmp_path: Path) -> None:
+    """1:1 games being played plus group tables not ended, per app, in one
+    call per repo — the 1:1 rule is :meth:`AppPendingSession.is_game_going`
+    (a sent invite nobody answered isn't a game yet)."""
+    repo = _PlayingRepo(
+        [
+            _game("chess", "c1"),
+            _game("chess", "c2"),
+            _game("chess", "c3", payload={"sent": True}),
+            _game("go", "g1"),
+        ]
+    )
+    seated = _SeatedRepo({"chess": 1, "quiz": 2})
+    svc = AppService(
+        repo=repo,  # type: ignore[arg-type]
+        catalog=None,
+        apps_path=tmp_path,
+        downloader=lambda url: b"",
+        group_repo=seated,  # type: ignore[arg-type]
+    )
+    going = await svc.games_going("me", ["chess", "quiz", "draughts"])
+    assert going == {"chess": 3, "quiz": 2}
+    assert repo.calls == [("me", ["chess", "quiz", "draughts"])]
+    assert seated.calls == [("me", ["chess", "quiz", "draughts"])]
+
+
+async def test_games_going_without_group_tables(tmp_path: Path) -> None:
+    repo = _PlayingRepo([_game("chess", "c1")])
+    svc = AppService(
+        repo=repo,  # type: ignore[arg-type]
+        catalog=None,
+        apps_path=tmp_path,
+        downloader=lambda url: b"",
+    )
+    assert await svc.games_going("me", ["chess"]) == {"chess": 1}
+    assert await svc.games_going("someone-else", ["chess"]) == {}

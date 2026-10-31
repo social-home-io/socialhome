@@ -31,7 +31,7 @@ import shutil
 import tarfile
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -44,6 +44,7 @@ from ..domain.apps import (
     MAX_BUNDLE_EXTRACTED_BYTES,
     MAX_BUNDLE_FILES,
     PERMISSION_STORAGE,
+    UNINSTALL_GAME_RECENT_SECONDS,
     AppAgeRestrictedError,
     AppAlreadyInstalledError,
     AppBundleTooLargeError,
@@ -78,6 +79,7 @@ from ..domain.events import (
     AppUpdateGone,
 )
 from ..domain.space import SpacePermissionError
+from ..repositories.app_group_repo import AbstractAppGroupRepo
 from ..repositories.app_repo import AbstractAppRepo
 from ..repositories.cp_repo import AbstractCpRepo
 from ..repositories.user_repo import AbstractUserRepo
@@ -126,6 +128,8 @@ class AppService(BusPublisherMixin):
     users:
         The household's people: who added an app ("Added by Anna") and
         who an "Ask an admin" request goes to.
+    group_repo:
+        Group tables (v_76) — counted into a person's "games going".
     """
 
     # NOTE: SpacePermissionError is intentionally used for admin-gate failures
@@ -139,6 +143,7 @@ class AppService(BusPublisherMixin):
         "_core_version",
         "_cp_repo",
         "_downloader",
+        "_group_repo",
         "_repo",
         "_sessions",
         "_users",
@@ -155,8 +160,10 @@ class AppService(BusPublisherMixin):
         cp_repo: AbstractCpRepo | None = None,
         core_version: str = "",
         users: AbstractUserRepo | None = None,
+        group_repo: AbstractAppGroupRepo | None = None,
     ) -> None:
         self._repo = repo
+        self._group_repo = group_repo
         self._core_version = core_version
         self._users = users
         self._catalog = catalog
@@ -258,7 +265,9 @@ class AppService(BusPublisherMixin):
         one (``min_core_version``) or asks for a permission this one
         doesn't know."""
         return not entry.unknown_permissions and core_version_satisfies(
-            entry.min_core_version, self._core_version
+            entry.min_core_version,
+            self._core_version,
+            today=datetime.now(UTC).date(),
         )
 
     @staticmethod
@@ -974,6 +983,25 @@ class AppService(BusPublisherMixin):
             if await self._age_allowed(app, user_id):
                 result.append(app)
         return result
+
+    async def games_going(self, user_id: str, app_ids: list[str]) -> dict[str, int]:
+        """Per app of *app_ids*: how many games *user_id* has going — their
+        1:1 games being played (:meth:`AppPendingSession.is_game_going`)
+        and the group tables they have a place at that haven't ended. Only
+        the caller's own games; apps with none are left out. One query per
+        table, whatever the number of apps."""
+        recent_cut = (
+            datetime.now(UTC) - timedelta(seconds=UNINSTALL_GAME_RECENT_SECONDS)
+        ).isoformat()
+        out: dict[str, int] = {}
+        for row in await self._repo.list_playing(user_id, app_ids):
+            if row.is_game_going(recent_cut):
+                out[row.app_id] = out.get(row.app_id, 0) + 1
+        if self._group_repo is not None:
+            seated = await self._group_repo.count_seated(user_id, app_ids)
+            for app_id, n in seated.items():
+                out[app_id] = out.get(app_id, 0) + n
+        return out
 
     async def set_min_age(
         self,

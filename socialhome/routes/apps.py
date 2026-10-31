@@ -2,7 +2,8 @@
 
 Four resource groups:
 
-* ``AppCollectionView``      — ``GET /api/apps`` (list) + ``POST /api/apps`` (install)
+* ``AppCollectionView``      — ``GET /api/apps`` (list, with the caller's
+  own ``games_going`` per app) + ``POST /api/apps`` (install)
 * ``AppCatalogView``         — ``GET /api/apps/catalog`` (browse remote catalog)
 * ``AppRequestsView``        — ``POST/DELETE /api/apps/{app_id}/requests``
   ("Ask an admin" / "Not now")
@@ -168,7 +169,16 @@ class AppCollectionView(BaseView):
         svc = self.svc(app_service_key)
         apps = await svc.list_visible(user_id=user.user_id, is_admin=user.is_admin)
         names = await svc.user_names({a.installed_by for a in apps if a.installed_by})
-        return self._json({"apps": [_serialize(a, names) for a in apps]})
+        # "2 games going" on Your apps: the caller's own games only.
+        going = await svc.games_going(user.user_id, [a.app_id for a in apps])
+        return self._json(
+            {
+                "apps": [
+                    {**_serialize(a, names), "games_going": going.get(a.app_id, 0)}
+                    for a in apps
+                ]
+            }
+        )
 
     async def post(self) -> web.Response:
         user = self.user
