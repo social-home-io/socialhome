@@ -98,7 +98,7 @@ function acceptCalls(): unknown[][] {
 
 /** The mailbox takes the bridge made (``POST …/held``). */
 function heldCalls(): unknown[][] {
-  return mockApiPost.mock.calls.filter(([url]) => String(url).endsWith('/held'))
+  return mockApiPost.mock.calls.filter(([url]) => /\/held(\?|$)/.test(String(url)))
 }
 
 // ── test suite ─────────────────────────────────────────────────────────────
@@ -489,8 +489,8 @@ describe('mountBridge', () => {
       expect(acceptCalls()).toHaveLength(1)
       expect(mockApiPost).toHaveBeenCalledWith(`/api/apps/${APP_ID}/sessions/s1/accept`)
       expect(replies()[0].result.launch).toEqual({ sessionId: 's1', invite: asApp })
-      // Never the blanket drain.
-      expect(mockApiGet).not.toHaveBeenCalled()
+      // Never the blanket drain: only the one look whether it is a table.
+      expect(mockApiGet.mock.calls.map(c => c[0])).toEqual([`/api/apps/${APP_ID}/groups/s1`])
     })
 
     it('accepts once, for context and pendingSessions alike, and across frames (Try again)', async () => {
@@ -502,9 +502,9 @@ describe('mountBridge', () => {
       await captureMessageHandler()({ source: iframe.contentWindow as unknown as Window, data: { id: 3, method: 'app.context' } })
       expect(acceptCalls()).toHaveLength(1)
       expect(replies().map(r => r.result)).toEqual([
-        { appId: APP_ID, selfUserId: USER_ID, permissions: ALL, launch: { sessionId: 's1', invite: asApp } },
+        { appId: APP_ID, selfUserId: USER_ID, permissions: ALL, groups: true, launch: { sessionId: 's1', invite: asApp } },
         [invite],
-        { appId: APP_ID, selfUserId: USER_ID, permissions: ALL, launch: { sessionId: 's1', invite: asApp } },
+        { appId: APP_ID, selfUserId: USER_ID, permissions: ALL, groups: true, launch: { sessionId: 's1', invite: asApp } },
       ])
     })
 
@@ -515,11 +515,27 @@ describe('mountBridge', () => {
       expect(replies()[0].result.launch).not.toHaveProperty('invite')
     })
 
+    it('Play on a table hands over the table and accepts nothing', async () => {
+      mockApiGet.mockResolvedValueOnce({
+        group: {
+          session_id: 's1', app_id: APP_ID, state: 'lobby', me: 2, my_state: 'seated',
+          host: 1, is_host: false, min: 2, max: 4, late_join: false, seq: 0,
+          players: [{ seat: 2, name: 'Ben', household: null, is_local: true, state: 'seated' }],
+        },
+      })
+      await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 1, method: 'app.context' } })
+      expect(acceptCalls()).toEqual([])
+      const launch = replies()[0].result.launch as { sessionId: string; group: { id: string; me: number } }
+      expect(launch.sessionId).toBe('s1')
+      expect(launch.group).toMatchObject({ id: 's1', me: 2, isHost: false })
+      expect(replies()[0].result.groups).toBe(true)
+    })
+
     it('an older app (app.pendingSessions) gets that one invite, not every waiting one', async () => {
       mockApiPost.mockResolvedValueOnce({ session: invite })
       await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 44, method: 'app.pendingSessions' } })
       expect(replies()[0]).toMatchObject({ id: 44, ok: true, result: [invite] })
-      expect(mockApiGet).not.toHaveBeenCalled()
+      expect(mockApiGet.mock.calls.map(c => c[0])).toEqual([`/api/apps/${APP_ID}/groups/s1`])
     })
   })
 
@@ -560,7 +576,35 @@ describe('mountBridge', () => {
       mockApiPost.mockResolvedValueOnce({ messages: rows })
       await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 2, method: 'app.held' } })
       expect(posted()[1]).toEqual({ id: 2, ok: true, result: events })
-      expect(heldCalls()).toHaveLength(1)
+      // Only the 1:1 half: group messages stay held for group.held.
+      expect(heldCalls()).toEqual([[`/api/apps/${APP_ID}/held?only=messages`]])
+    })
+
+    it('group messages that waited come as group:event, after the 1:1 ones; a pulling app asks with group.held', async () => {
+      const group = [{ session_id: 't1', seq: 3, from_seat: 2, direct: false, data: { v: 1 } }]
+      const asEvent = { type: 'message', id: 't1', seq: 3, from: 2, data: { v: 1 }, direct: false, held: true }
+      mockApiPost.mockResolvedValueOnce({ messages: rows, group_messages: group })
+      const handler = captureMessageHandler()
+      await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 1, method: 'app.context' } })
+      expect(posted().at(-1)).toEqual({ type: 'group:event', event: asEvent })
+      expect(posted()).toHaveLength(4)
+      // A new frame that pulls: one take, shared by app.held and group.held.
+      cleanup()
+      ;(iframe.contentWindow!.postMessage as ReturnType<typeof vi.fn>).mockClear()
+      cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID, permissions: ALL })
+      const pull = captureMessageHandler()
+      await pull({ source: iframe.contentWindow as unknown as Window, data: { id: 1, method: 'app.context', params: { held: 'pull' } } })
+      mockApiPost.mockResolvedValueOnce({ messages: [], group_messages: group })
+      await pull({ source: iframe.contentWindow as unknown as Window, data: { id: 2, method: 'group.held' } })
+      mockApiPost.mockResolvedValueOnce({ messages: rows, group_messages: [] })
+      await pull({ source: iframe.contentWindow as unknown as Window, data: { id: 3, method: 'app.held' } })
+      expect(posted()[1]).toEqual({ id: 2, ok: true, result: [asEvent] })
+      expect(posted()[2]).toEqual({ id: 3, ok: true, result: events })
+      // Each half its own take: pulling one never clears the other.
+      expect(heldCalls().slice(1)).toEqual([
+        [`/api/apps/${APP_ID}/held?only=group`],
+        [`/api/apps/${APP_ID}/held?only=messages`],
+      ])
     })
 
     it('a failed take hands over nothing (what waits stays for the next open)', async () => {
@@ -850,6 +894,14 @@ describe('mountBridge permissions', () => {
     ['app.send', { session_id: 's1', target: REMOTE, payload: {} }, 'federation'],
     ['app.cancelSession', { sessionId: 's1', target: LOCAL }, 'people'],
     ['app.cancelSession', { sessionId: 's1', target: REMOTE }, 'federation'],
+    ['group.list', undefined, 'people'],
+    ['group.get', { id: 't1' }, 'people'],
+    ['group.send', { id: 't1', data: 1 }, 'people'],
+    ['group.start', { id: 't1' }, 'people'],
+    ['group.leave', { id: 't1' }, 'people'],
+    ['group.remove', { id: 't1', seat: 2 }, 'people'],
+    ['group.close', { id: 't1' }, 'people'],
+    ['group.held', undefined, 'people'],
   ]
 
   it.each(CALLS)('%s refuses without the permission it needs (%j → %s)', async (method, params, permission) => {
@@ -870,13 +922,34 @@ describe('mountBridge permissions', () => {
   })
 
   it.each(CALLS)('%s goes through with the permission it needs (%j → %s)', async (method, params, permission) => {
-    mockApiGet.mockResolvedValue({ key: 'k', value: 1, items: [], contacts: [], peers: [] })
-    mockApiPost.mockResolvedValue({ session_id: 's1', messages: [] })
+    const table = { session_id: 't1', app_id: 'x', state: 'lobby', me: 1, my_state: 'seated', host: 1, is_host: true, min: 2, max: 2, late_join: false, players: [] }
+    mockApiGet.mockResolvedValue({ key: 'k', value: 1, items: [], contacts: [], peers: [], groups: [], group: table })
+    mockApiPost.mockResolvedValue({ session_id: 's1', messages: [], group: table, seq: 1 })
     mockApiPut.mockResolvedValue({})
     mockApiDelete.mockResolvedValue({})
     const handler = mount(permission === 'federation' ? ['federation', 'people'] : [permission])
     await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 8, method, params } })
     expect(replies()[0]).toMatchObject({ id: 8, ok: true })
+  })
+
+  it('group.open needs people, and answers unavailable until the group sheet lands', async () => {
+    let handler = mount(['storage'])
+    await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 9, method: 'group.open', params: { suggest: [] } } })
+    expect(replies()[0]).toMatchObject({ ok: false, error: { code: 'permission_denied', permission: 'people' } })
+    cleanup()
+    ;(iframe.contentWindow!.postMessage as ReturnType<typeof vi.fn>).mockClear()
+    handler = mount(['people'])
+    await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 10, method: 'group.open', params: { suggest: [] } } })
+    expect(replies()[0]).toMatchObject({ ok: false, error: { code: 'unavailable' } })
+  })
+
+  it('a group refusal from the server comes back with its code (and when to retry)', async () => {
+    const handler = mount(['people'])
+    const busy = new ApiError(429, 'x') as ApiError & { code: string; extra: Record<string, unknown> }
+    Object.assign(busy, { code: 'APP_GROUP_BUSY', extra: { params: { retry_after: 3 } } })
+    mockApiPost.mockRejectedValueOnce(busy)
+    await handler({ source: iframe.contentWindow as unknown as Window, data: { id: 11, method: 'group.send', params: { id: 't1', data: 1 } } })
+    expect(replies()[0]).toMatchObject({ ok: false, error: { code: 'group_busy', retryAfterMs: 3000 } })
   })
 
   it('app.context tells the app its permissions, so it can leave out what it may not do', async () => {

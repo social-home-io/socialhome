@@ -2115,6 +2115,7 @@ async def test_held_hands_over_the_callers_mailbox(client, fed_svc):
     )
     assert r.status == 200
     assert await r.json() == {
+        "group_messages": [],
         "messages": [
             {
                 "session_id": "sess-1",
@@ -2123,7 +2124,7 @@ async def test_held_hands_over_the_callers_mailbox(client, fed_svc):
                 "kind": "session",
                 "payload": {"verb": "close", "reason": "x"},
             }
-        ]
+        ],
     }
     fed_svc.take_held.assert_awaited_once_with(
         app_id="com.example.hello", actor_user_id=client._uid

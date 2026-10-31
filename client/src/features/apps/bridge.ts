@@ -74,12 +74,28 @@
  * ``{type: 'app.context-changed', context}`` with the same fields — only
  * after the app has spoken, so it never lands in the frame's blank
  * pre-load document. Older SDKs ignore the unknown ``type``.
+ *
+ * Group tables (group play, v_76): ``group.*`` calls and ``group:event``
+ * posts — groupBridge.ts and docs/protocol/app-groups.md. ``app.context``
+ * says ``groups: true``; opened from a table (``?session=<table id>``)
+ * its ``launch`` is ``{sessionId, group}`` and no invite is accepted (a
+ * table is joined through Social Home's own screens).
  */
 
 import { api, ApiError } from '@/api'
 import { ws, WsEvent } from '@/ws'
 import type { AppPermission } from '@/store/apps'
 import type { AppHostContext } from '@/features/apps/appContext'
+import {
+  GroupBridge,
+  GroupRefused,
+  groupRefusal,
+  heldToEvent,
+  isGroupMethod,
+  type GroupEvent,
+  type GroupSession,
+  type HeldGroupRow,
+} from '@/features/apps/groupBridge'
 
 
 /** The typed refusal an app gets for a call outside its permissions. */
@@ -270,7 +286,8 @@ function permissionFor(method: string, params: { target?: unknown } | undefined)
     case 'app.cancelSession':
       return targetPermission(params?.target)
     default:
-      return null
+      // Every group call is about people at a table.
+      return isGroupMethod(method) ? 'people' : null
   }
 }
 
@@ -323,6 +340,8 @@ export interface HeldEvent {
 export interface LaunchContext {
   sessionId?: string
   invite?: AppInvite
+  /** Opened from a table the person has a place at (Join / Play). */
+  group?: GroupSession
 }
 
 /** Accepts already made, by ``<appId>/<sessionId>``: a retry or a new
@@ -382,6 +401,9 @@ export function mountBridge(
    *  without ``people`` has no games, so nothing is accepted for it. */
   async function launch(): Promise<LaunchContext> {
     if (!launchSession || !has('people')) return {}
+    // A table first: its seat is never "accepted" like a 1:1 invite.
+    const group = await groups.launch(launchSession)
+    if (group) return { sessionId: launchSession, group }
     const invite = await acceptOnce(appId, launchSession)
     return invite ? { sessionId: launchSession, invite } : { sessionId: launchSession }
   }
@@ -390,24 +412,55 @@ export function mountBridge(
     iframe.contentWindow?.postMessage(r, '*')
   }
 
-  /** The mailbox, taken once for this frame (the server clears what it
-   *  hands over). A failed request hands over nothing: whatever wasn't
-   *  cleared waits for the next open. */
-  let held: Promise<HeldEvent[]> | null = null
-  function takeHeld(): Promise<HeldEvent[]> {
-    if (!held) {
-      held = Promise.resolve().then(() => api.post<{ messages?: HeldRow[] }>(
-        `/api/apps/${encodeURIComponent(appId)}/held`,
-      )).then(r => (r?.messages ?? []).map((m): HeldEvent => ({
+  /** The mailbox, taken once per half for this frame (the server clears
+   *  what it hands over): 1:1 messages (``one``) and each table player's
+   *  latest (``group``). An app that pushes takes both in one request; an
+   *  app that pulls takes each half with its own call (``?only=``), so
+   *  pulling one never clears the other. A failed request hands over
+   *  nothing: whatever wasn't cleared waits for the next open. */
+  type Held = { one: HeldEvent[]; group: GroupEvent[] }
+  let heldOne: Promise<HeldEvent[]> | null = null
+  let heldGroup: Promise<GroupEvent[]> | null = null
+  function fetchHeld(only?: 'messages' | 'group'): Promise<Held> {
+    const q = only ? `?only=${only}` : ''
+    return Promise.resolve().then(() => api.post<{ messages?: HeldRow[]; group_messages?: HeldGroupRow[] }>(
+      `/api/apps/${encodeURIComponent(appId)}/held${q}`,
+    )).then(r => ({
+      one: (r?.messages ?? []).map((m): HeldEvent => ({
         kind: m.kind === 'session' ? 'session' : 'message',
         sessionId: m.session_id,
         fromInstance: m.from_instance,
         fromUser: m.from_user ?? undefined,
         payload: m.payload,
-      })), () => [])
-    }
-    return held
+      })),
+      group: (r?.group_messages ?? []).map(heldToEvent),
+    }), () => ({ one: [], group: [] }))
   }
+  function takeHeld(): Promise<Held> {
+    if (!heldOne && !heldGroup) {
+      const both = fetchHeld()
+      heldOne = both.then(h => h.one)
+      heldGroup = both.then(h => h.group)
+    }
+    return Promise.all([takeOne(), takeGroup()]).then(([one, group]) => ({ one, group }))
+  }
+  function takeOne(): Promise<HeldEvent[]> {
+    if (!heldOne) heldOne = fetchHeld('messages').then(h => h.one)
+    return heldOne
+  }
+  function takeGroup(): Promise<GroupEvent[]> {
+    if (!heldGroup) heldGroup = fetchHeld('group').then(h => h.group)
+    return heldGroup
+  }
+
+  const groups = new GroupBridge(
+    appId,
+    msg => iframe.contentWindow?.postMessage(msg, '*'),
+    async () => {
+      heldHandedOver = true
+      return takeGroup()
+    },
+  )
 
   /** Whether the held messages were handed over (pushed or pulled). */
   let heldHandedOver = false
@@ -416,8 +469,12 @@ export function mountBridge(
     if (heldHandedOver) return
     heldHandedOver = true
     if (!has('people')) return
-    for (const e of await takeHeld()) {
+    const { one, group } = await takeHeld()
+    for (const e of one) {
       iframe.contentWindow?.postMessage({ type: 'app:event', ...e }, '*')
+    }
+    for (const event of group) {
+      iframe.contentWindow?.postMessage({ type: 'group:event', event }, '*')
     }
   }
 
@@ -427,6 +484,10 @@ export function mountBridge(
     try {
       const needs = permissionFor(method, params)
       if (needs && !has(needs)) throw new PermissionDenied(needs)
+      if (isGroupMethod(method)) {
+        reply({ id, ok: true, result: await groups.call(method, params) })
+        return
+      }
       switch (method) {
         case 'store.get': {
           const key = String(params?.key ?? '')
@@ -485,6 +546,8 @@ export function mountBridge(
               appId: ctx.appId,
               selfUserId: ctx.selfUserId,
               permissions,
+              // This host speaks ``group.*`` (group play, v_76).
+              groups: true,
               launch: await launch(),
             },
           })
@@ -498,7 +561,7 @@ export function mountBridge(
         case 'app.held': {
           // An app that applies held messages itself, once its state is in.
           heldHandedOver = true
-          reply({ id, ok: true, result: await takeHeld() })
+          reply({ id, ok: true, result: await takeOne() })
           break
         }
 
@@ -629,6 +692,19 @@ export function mountBridge(
         })
         return
       }
+      const refused = err instanceof GroupRefused ? err : groupRefusal(err)
+      if (refused) {
+        reply({
+          id,
+          ok: false,
+          error: {
+            code: refused.code,
+            message: refused.message,
+            ...(refused.retryAfterMs !== undefined ? { retryAfterMs: Math.ceil(refused.retryAfterMs) } : {}),
+          },
+        })
+        return
+      }
       if (err instanceof Refused) {
         reply({
           id,
@@ -699,6 +775,9 @@ export function mountBridge(
     }
   })
 
+  // Group tables: messages and roster changes as ``group:event`` posts.
+  const offGroups = groups.listen(() => has('people'))
+
   window.addEventListener('message', onMessage)
 
   // The person switched language or theme while the app is open.
@@ -710,6 +789,7 @@ export function mountBridge(
   return () => {
     window.removeEventListener('message', onMessage)
     offWs()
+    offGroups()
     stopWatching?.()
   }
 }

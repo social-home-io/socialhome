@@ -14,7 +14,14 @@ from typing import Protocol, runtime_checkable
 import orjson
 
 from ..db import AsyncDatabase
-from ..domain.app_group import GROUP_ENDED, GROUP_LOBBY, GroupSeat, GroupSession
+from ..domain.app_group import (
+    GROUP_ENDED,
+    GROUP_LOBBY,
+    GroupHeld,
+    GroupSeat,
+    GroupSession,
+    SeatKey,
+)
 
 
 @runtime_checkable
@@ -30,6 +37,21 @@ class AbstractAppGroupRepo(Protocol):
     async def count_open_from(self, hub_instance: str) -> int: ...
     async def list_lobby_expired(self, *, before: str) -> list[GroupSession]: ...
     async def prune(self, *, ended_before: str, quiet_before: str) -> int: ...
+    async def get_seat_key(self, session_id: str) -> str | None: ...
+    async def set_seat_key(self, session_id: str, value: str) -> bool: ...
+    async def raise_seq(self, session_id: str, seq: int, *, now: str) -> None: ...
+    async def hold_group_message(
+        self,
+        app_id: str,
+        user_id: str,
+        session_id: str,
+        *,
+        from_seat: int,
+        seq: int,
+        held: dict,
+        now: str,
+    ) -> bool: ...
+    async def take_group_held(self, app_id: str, user_id: str) -> list[GroupHeld]: ...
 
 
 def _seat_to_json(e: GroupSeat) -> dict:
@@ -41,6 +63,7 @@ def _seat_to_json(e: GroupSeat) -> dict:
         "household": e.household_name,
         "state": e.state,
         "joined_at": e.joined_at,
+        "seat_key": e.seat_key.to_wire() if e.seat_key is not None else None,
     }
 
 
@@ -53,6 +76,7 @@ def _seat_from_json(d: dict) -> GroupSeat:
         household_name=d.get("household"),
         seat=int(d.get("seat") or 0),
         joined_at=d.get("joined_at"),
+        seat_key=SeatKey.from_wire(d["seat_key"]) if d.get("seat_key") else None,
     )
 
 
@@ -225,3 +249,110 @@ class SqliteAppGroupRepo:
         )
         await self._db.enqueue("DELETE FROM app_group_sessions" + where, args)
         return int(before)
+
+    # ─── This household's seat key and the table's numbering ──────────
+
+    async def get_seat_key(self, session_id: str) -> str | None:
+        """This household's own seat key at the table (KEK-wrapped JSON),
+        or ``None``."""
+        return await self._db.fetchval(
+            "SELECT seat_key_json FROM app_group_sessions WHERE session_id = ?",
+            (session_id,),
+        )
+
+    async def set_seat_key(self, session_id: str, value: str) -> bool:
+        """Keep this household's seat key — only the first one: a key
+        handed out stays. ``True`` when kept. No upsert touches it."""
+        changed = await self._db.enqueue_rowcount(
+            """UPDATE app_group_sessions SET seat_key_json = ?
+               WHERE session_id = ? AND seat_key_json IS NULL""",
+            (value, session_id),
+        )
+        return changed == 1
+
+    async def raise_seq(self, session_id: str, seq: int, *, now: str) -> None:
+        """The table's message number: the hub's last given, or the
+        highest a copy has seen — it only goes up. A message counts as a
+        touch (the 90-day quiet rule)."""
+        await self._db.enqueue(
+            """UPDATE app_group_sessions SET seq = MAX(seq, ?), updated_at = ?
+               WHERE session_id = ?""",
+            (seq, now, session_id),
+        )
+
+    # ─── The group mailbox (``app_group_held``) ───────────────────────
+
+    async def hold_group_message(
+        self,
+        app_id: str,
+        user_id: str,
+        session_id: str,
+        *,
+        from_seat: int,
+        seq: int,
+        held: dict,
+        now: str,
+    ) -> bool:
+        """Keep *held* as the latest message from *from_seat* for
+        *user_id* — only while they are seated (an ``active`` row of
+        theirs for the table) and only when newer than what is kept.
+        ``True`` when kept. One atomic write."""
+        changed = await self._db.enqueue_rowcount(
+            """INSERT INTO app_group_held(app_id, user_id, session_id,
+                   from_seat, seq, held_json, updated_at)
+               SELECT ?, ?, ?, ?, ?, ?, ? FROM app_pending_sessions
+                WHERE app_id = ? AND user_id = ? AND session_id = ?
+                  AND state = 'active'
+               ON CONFLICT(app_id, user_id, session_id, from_seat) DO UPDATE SET
+                 seq = excluded.seq,
+                 held_json = excluded.held_json,
+                 updated_at = excluded.updated_at
+               WHERE excluded.seq > app_group_held.seq""",
+            (
+                app_id,
+                user_id,
+                session_id,
+                from_seat,
+                seq,
+                orjson.dumps(held).decode(),
+                now,
+                app_id,
+                user_id,
+                session_id,
+            ),
+        )
+        return changed == 1
+
+    async def take_group_held(self, app_id: str, user_id: str) -> list[GroupHeld]:
+        """The person's app opened: every group message kept for them
+        (tables they are seated at), oldest ``seq`` first — and cleared. A
+        message kept again meanwhile (a newer ``seq``) stays for next time."""
+        rows = await self._db.fetchall(
+            """SELECT h.session_id, h.from_seat, h.seq, h.held_json, h.updated_at
+                 FROM app_group_held h
+                 JOIN app_pending_sessions p
+                   ON p.app_id = h.app_id AND p.user_id = h.user_id
+                  AND p.session_id = h.session_id
+                WHERE h.app_id = ? AND h.user_id = ? AND p.state = 'active'
+                ORDER BY h.session_id, h.seq, h.from_seat""",
+            (app_id, user_id),
+        )
+        out: list[GroupHeld] = []
+        for row in rows:
+            taken = await self._db.enqueue_rowcount(
+                """DELETE FROM app_group_held
+                    WHERE app_id = ? AND user_id = ? AND session_id = ?
+                      AND from_seat = ? AND seq = ?""",
+                (app_id, user_id, row["session_id"], row["from_seat"], row["seq"]),
+            )
+            if taken:
+                out.append(
+                    GroupHeld(
+                        session_id=str(row["session_id"]),
+                        from_seat=int(row["from_seat"]),
+                        seq=int(row["seq"]),
+                        held=orjson.loads(row["held_json"]),
+                        updated_at=str(row["updated_at"]),
+                    )
+                )
+        return out

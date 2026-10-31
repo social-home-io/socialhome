@@ -306,6 +306,10 @@ async def test_mirrors_from_one_hub_are_bounded(net, monkeypatch):
     hub, b = net.homes["hub"], net.homes["b"]
     sid = await _open(net)
     wire = (await hub.group_repo.get(sid)).to_wire()
+    # The host's seat key is signed for the real table id: forged ids carry
+    # none (a key moved to another table is dropped — tested apart).
+    for entry in wire["roster"]:
+        entry.pop("seat_key", None)
     monkeypatch.setattr(
         "socialhome.services.app_group_service.GROUP_MIRRORS_PER_HUB_MAX", 2
     )

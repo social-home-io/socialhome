@@ -45,6 +45,7 @@ from .app_groups import (
     AppGroupDetailView,
     AppGroupJoinView,
     AppGroupLeaveView,
+    AppGroupMessagesView,
     AppGroupRemoveView,
     AppGroupStartView,
 )
@@ -1410,6 +1411,7 @@ def setup_routes(app: web.Application) -> None:
         ("start", AppGroupStartView),
         ("remove", AppGroupRemoveView),
         ("close", AppGroupCloseView),
+        ("messages", AppGroupMessagesView),
     ):
         app.router.add_view(f"/api/apps/{{app_id}}/groups/{{session_id}}/{verb}", view)
 

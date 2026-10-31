@@ -254,6 +254,48 @@ The whole shape is pinned by the §27.9 release blocker
 `tests/protocol/test_gfs_payload_minimization.py`. See
 `docs/protocol/discovery.md` for the shipped flow.
 
+**Group-table seat seal** (`federation/seat_crypto.py`, v_76) — a
+message at a group game table to chosen seats travels through the table's
+hub (the host household), which must not read it. Each household at a
+table holds one X25519 *seat key* for that table (private half KEK-wrapped
+on `app_group_sessions.seat_key_json`, AAD bound to the table id). Its
+public half travels signed by the household's Ed25519 identity key:
+
+```
+seat_key = {seat_kem_suite: "x25519", pub, sig_suite: "ed25519", sig}
+sig over  "socialhome/app_group/seat_key/v1" ‖ lp(session_id) ‖ lp(instance)
+          ‖ lp(seat_kem_suite) ‖ lp(pub)            (lp = 4-byte BE length prefix)
+```
+
+The hub verifies a joiner's key against the joiner's pinned identity key;
+every receiver checks each roster key against the identity key it already
+stores for that household (its own key against the one it made) and drops
+a snapshot with an unknown suite or a bad signature. A household a
+receiver isn't paired with is taken on the hub's word — the stated
+residual (a lying hub could then read whispers between two players it
+introduced; space tables, v_77, won't have it).
+
+A directed message is sealed per target seat, static–static:
+
+```
+shared = X25519(sender household seat priv, target household seat pub)
+info   = "socialhome/app_group/seat_seal/v1" ‖ lp(session_id) ‖ lp(from_seat) ‖ lp(to_seat)
+key    = HKDF-SHA256(shared, salt = msg_id (16 random bytes), info)
+ct     = AES-256-GCM(key, nonce (12 random bytes), data, AAD = info ‖ "|" ‖ msg_id)
+entry  = {to_seat, seat_kem_suite: "x25519", nonce, ct}
+```
+
+Static–static means only the two households can derive the key and the
+receiver learns which household sealed it (it derives with the sender
+seat's key; a hub that relabels the sender, moves the entry to another seat
+or table, or changes `msg_id` gets a failed tag). No forward secrecy
+inside a table's life: a household's seat key lives as long as the table.
+`SUPPORTED_SEAT_KEM_SUITES` / `SUPPORTED_SEAT_KEY_SIG_SUITES`; unknown →
+`UnsupportedSeatKemSuite` / `UnsupportedSeatKeySigSuite`, never a default.
+Phase 2 adds `"x25519+mlkem768"` beside it. Messages *to everyone* are not
+sealed beyond the hop envelope: the hub is a player's household, and a group
+key it hands out would add nothing. See `docs/protocol/app-groups.md`.
+
 **Routed-envelope seal** (`federation/routed_crypto.py`) — for
 multi-hop `SPACE_ROUTED` events the inner payload is sealed with a
 per-route ephemeral X25519+HKDF directional key (HKDF info
@@ -1199,6 +1241,7 @@ hex>$<hash hex>`. Parameters can be bumped without a schema change.
 | `remote_instances` | `remote_pq_identity_pk` | Peer ML-DSA-65 public key (hex) | no | — |
 | `remote_instances` | `sig_suite` | Negotiated per-peer suite | no | — |
 | `space_keys` | `content_key_hex` | 32-byte space content key | KEK AES-256-GCM | `space_id` |
+| `app_group_sessions` | `seat_key_json` | This household's X25519 seat key at a group table (`priv` KEK-wrapped; `pub` + identity signature in the clear) | `priv`: KEK AES-256-GCM | `socialhome/app_group/seat_key_at_rest\|session_id` |
 | `moment_public_keys` | `key_sealed` | 32-byte public-moment step key at `key_step` of generation `key_gen` (own or delivered, v_62), advanced in place | KEK AES-256-GCM | `moment-public-key\|own\|delivered\|author\|key_gen` |
 | `pending_pairings` | `own_dh_sk` | X25519 ephemeral secret | KEK AES-256-GCM | — |
 | `platform_users` | `password_hash` | `scrypt$N$r$p$salt$hash` | self-contained (params + salt embedded) | — |

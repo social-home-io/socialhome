@@ -23,6 +23,7 @@ Pure data, no I/O.
 from __future__ import annotations
 
 import dataclasses
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -73,6 +74,39 @@ GROUP_MIRROR_GRACE_SECONDS: int = 60 * 60
 #: A receiver keeps at most this many open tables from one hub household
 #: (its own bound — the hub's caps don't hold for a hub that ignores them).
 GROUP_MIRRORS_PER_HUB_MAX: int = 50
+
+# ─── Messages at a table (design 2.3, 2.4, 2.6, 2.12) ─────────────────────
+
+#: A group message's data (JSON-encoded) — the 1:1 live limit.
+GROUP_MESSAGE_MAX_BYTES: int = 64 * 1024
+#: A directed message's data times its target seats (it is sealed once
+#: per seat): one envelope stays well inside a peer's inbox limit.
+GROUP_DIRECT_MAX_PLAINTEXT: int = 128 * 1024
+#: The sealed entries' ciphertext of one directed message on the wire
+#: (b64url of the above plus a tag per seat).
+GROUP_DIRECT_MAX_BYTES: int = GROUP_DIRECT_MAX_PLAINTEXT * 4 // 3 + 30 * 64
+#: The most a closed app's mailbox keeps per sender seat (bigger messages
+#: go out live only).
+GROUP_HELD_MAX_BYTES: int = 16 * 1024
+#: Envelopes the hub passes on per table in :data:`GROUP_SEND_BUDGET_SECONDS`
+#: (one per message per household it goes to); above it a message is
+#: refused (``429 APP_GROUP_BUSY``).
+GROUP_SEND_BUDGET: int = 600
+GROUP_SEND_BUDGET_SECONDS: float = 60.0
+#: The hub gathers what goes to one household this long before sending
+#: (one envelope for a burst of answers).
+GROUP_COALESCE_SECONDS: float = 0.2
+#: One hub envelope carries at most this many messages, and at most
+#: :data:`GROUP_BATCH_MAX_BYTES` of data unless one message alone is bigger.
+GROUP_BATCH_MAX_MESSAGES: int = 64
+GROUP_BATCH_MAX_BYTES: int = 64 * 1024
+#: A receiving household drops a ``seq`` more than this far below the
+#: highest it has seen (and any it saw already).
+GROUP_SEQ_WINDOW: int = 256
+#: A ``msg_id`` on the wire (16 random bytes, b64url).
+GROUP_MSG_ID_MAX: int = 32
+#: A seat-key field on the wire.
+_SEAT_KEY_FIELD_MAX: int = 256
 
 # ─── States ───────────────────────────────────────────────────────────────
 
@@ -259,6 +293,36 @@ class AppGroupLimitError(CodedError):
             super().__init__(params={"limit": GROUP_OPEN_TABLES_MAX})
 
 
+class AppGroupBusyError(CodedError):
+    """The table's hub passed on its :data:`GROUP_SEND_BUDGET` envelopes in
+    the last minute; ``params.retry_after`` is the seconds to wait."""
+
+    status = 429
+    code = "APP_GROUP_BUSY"
+    detail = "This game is sending too much — wait a moment."
+
+    def __init__(self, retry_after: int) -> None:
+        super().__init__(params={"retry_after": retry_after})
+
+
+class AppGroupSeatError(CodedError):
+    """A message names a seat it can't go to: nobody seated there, the
+    sender's own seat, or a seat whose household has no seat key."""
+
+    status = 409
+    code = "APP_GROUP_SEAT"
+    detail = "That player can't get this message."
+
+
+class AppGroupTooLargeError(CodedError):
+    """A directed message's data times its target seats is past
+    :data:`GROUP_DIRECT_MAX_PLAINTEXT` (it is sealed once per seat)."""
+
+    status = 413
+    code = "PAYLOAD_TOO_LARGE"
+    detail = "That message is too large for so many players."
+
+
 class AppGroupSessionError(CodedError):
     """A 1:1 session route (accept / decline / a move) used on a group
     seat: a table is answered and played through its group routes."""
@@ -269,6 +333,38 @@ class AppGroupSessionError(CodedError):
 
 
 # ─── Data ─────────────────────────────────────────────────────────────────
+
+
+@dataclass(slots=True, frozen=True)
+class SeatKey:
+    """A household's seat key at one table — the public half, signed with
+    the household's identity key (``socialhome.federation.seat_crypto``
+    checks the suites and the signature; here only the shape)."""
+
+    kem_suite: str
+    pub: str
+    sig_suite: str
+    sig: str
+
+    def to_wire(self) -> dict[str, str]:
+        return {
+            "seat_kem_suite": self.kem_suite,
+            "pub": self.pub,
+            "sig_suite": self.sig_suite,
+            "sig": self.sig,
+        }
+
+    @classmethod
+    def from_wire(cls, raw: object) -> SeatKey:
+        """The four fields, each a short one-line string — else
+        :class:`GroupWireError`."""
+        if not isinstance(raw, dict):
+            raise GroupWireError("seat_key malformed")
+        kem, pub, sig_suite, sig = (
+            str(_text(raw.get(name), _SEAT_KEY_FIELD_MAX, f"seat_key.{name}"))
+            for name in ("seat_kem_suite", "pub", "sig_suite", "sig")
+        )
+        return cls(kem_suite=kem, pub=pub, sig_suite=sig_suite, sig=sig)
 
 
 @dataclass(slots=True, frozen=True)
@@ -289,14 +385,19 @@ class GroupSeat:
     household_name: str | None = None
     seat: int = 0
     joined_at: str | None = None
+    #: Their household's seat key at this table (the same for everyone of
+    #: one household), once they sat down — what a directed message to
+    #: their seat is sealed to.
+    seat_key: SeatKey | None = None
 
     def is_person(self, instance: str, user: str) -> bool:
         """Whether this entry is *user* of *instance*."""
         return self.instance == instance and self.user == user
 
     def to_wire(self) -> dict[str, Any]:
-        """The entry as the players see it — names, never more."""
-        return {
+        """The entry as the players see it — names (and, for someone
+        seated, their household's seat key), never more."""
+        out: dict[str, Any] = {
             "seat": self.seat,
             "instance": self.instance,
             "user": self.user,
@@ -304,6 +405,9 @@ class GroupSeat:
             "household": self.household_name,
             "state": self.state,
         }
+        if self.seat_key is not None and self.state == SEAT_SEATED:
+            out["seat_key"] = self.seat_key.to_wire()
+        return out
 
 
 @dataclass(slots=True, frozen=True)
@@ -390,6 +494,17 @@ class GroupSession:
         if seat <= 0:
             return None
         return next((e for e in self.roster if e.seat == seat), None)
+
+    def seat_key_of(self, instance: str) -> SeatKey | None:
+        """*instance*'s seat key at this table (from any of its people)."""
+        return next(
+            (
+                e.seat_key
+                for e in self.roster
+                if e.instance == instance and e.seat_key is not None
+            ),
+            None,
+        )
 
     def is_host(self, instance: str, user: str) -> bool:
         return self.host_instance == instance and self.host_user == user
@@ -548,6 +663,7 @@ def parse_table(
     roster: list[GroupSeat] = []
     seats: set[int] = set()
     people: set[tuple[str, str]] = set()
+    keys: dict[str, SeatKey] = {}
     for item in entries:
         if not isinstance(item, dict):
             raise GroupWireError("roster entry malformed")
@@ -566,6 +682,11 @@ def parse_table(
             raise GroupWireError("seat or person twice")
         seats.add(seat)
         people.add((instance, user))
+        seat_key = None
+        if item.get("seat_key") is not None:
+            seat_key = SeatKey.from_wire(item.get("seat_key"))
+            if keys.setdefault(instance, seat_key) != seat_key:
+                raise GroupWireError("two seat keys for one household")
         roster.append(
             GroupSeat(
                 instance=instance,
@@ -574,6 +695,7 @@ def parse_table(
                 household_name=household,
                 state=entry_state,
                 seat=seat,
+                seat_key=seat_key,
             )
         )
     host_seat = _int(raw.get("host_seat"), 1, GROUP_SEAT_MAX, "host_seat")
@@ -602,3 +724,155 @@ def parse_table(
         note=note,
         started_at=started.isoformat() if started is not None else None,
     )
+
+
+# ─── Messages (``APP_MESSAGE.group``) ─────────────────────────────────────
+
+_MSG_ID_RE = re.compile(rf"[A-Za-z0-9_-]{{1,{GROUP_MSG_ID_MAX}}}")
+
+
+@dataclass(slots=True, frozen=True)
+class GroupMessage:
+    """One message at a table.
+
+    ``to`` is ``None`` for everyone, else the seats it is for (a *directed*
+    message: its data is in ``sealed``, one entry per target seat, which
+    only that seat's household opens). ``msg_id`` is the sender's random
+    id (bound into every seal). ``seq`` / ``from_seat`` are the hub's
+    (``0`` on the way to the hub). ``turn`` names the seat whose turn it
+    is now, if the sender said so."""
+
+    msg_id: str
+    to: tuple[int, ...] | None = None
+    data: Any = None
+    sealed: tuple[dict[str, Any], ...] = ()
+    turn: int | None = None
+    seq: int = 0
+    from_seat: int = 0
+
+    @property
+    def direct(self) -> bool:
+        return self.to is not None
+
+    def to_hub(self) -> dict[str, Any]:
+        """The ``group`` object a player's household sends the hub (the
+        data to everyone rides beside it as ``data``)."""
+        out: dict[str, Any] = {
+            "to": "all" if self.to is None else list(self.to),
+            "msg_id": self.msg_id,
+        }
+        if self.turn is not None:
+            out["turn"] = self.turn
+        if self.to is not None:
+            out["sealed"] = list(self.sealed)
+        return out
+
+    def relayed(self, seats: frozenset[int] | None = None) -> dict[str, Any]:
+        """The message as the hub passes it on: for a directed one only
+        the sealed entries for *seats* (one household's)."""
+        out: dict[str, Any] = {
+            "seq": self.seq,
+            "from_seat": self.from_seat,
+            "to": "all" if self.to is None else list(self.to),
+            "msg_id": self.msg_id,
+        }
+        if self.turn is not None:
+            out["turn"] = self.turn
+        if self.to is None:
+            out["data"] = self.data
+        else:
+            out["sealed"] = [
+                e for e in self.sealed if seats is None or e.get("to_seat") in seats
+            ]
+        return out
+
+
+@dataclass(slots=True, frozen=True)
+class GroupHeld:
+    """One message a person's mailbox kept for their closed app
+    (``app_group_held``): the latest from ``from_seat`` at ``session_id``.
+    ``held`` is ``{data, direct}``."""
+
+    session_id: str
+    from_seat: int
+    seq: int
+    held: dict[str, Any]
+    updated_at: str
+
+
+def _seat_list(raw: object, what: str) -> tuple[int, ...] | None:
+    if raw == "all":
+        return None
+    if not isinstance(raw, list) or not 1 <= len(raw) < GROUP_MAX_PLAYERS:
+        raise GroupWireError(f"{what} malformed")
+    seats = tuple(_int(v, 1, GROUP_SEAT_MAX, what) for v in raw)
+    if len(set(seats)) != len(seats):
+        raise GroupWireError(f"{what} names a seat twice")
+    return seats
+
+
+def parse_message(
+    group: object, *, data: object = None, has_data: bool, relayed: bool
+) -> GroupMessage:
+    """A ``group`` object off the wire — or :class:`GroupWireError`.
+
+    ``relayed=False``: a player's household → hub (``data`` beside it,
+    *has_data* whether the payload carried the key; a directed message
+    carries exactly one sealed entry per ``to`` seat). ``relayed=True``:
+    one entry of a hub's ``msgs`` (``seq``, ``from_seat`` and ``data``
+    inside; a directed one carries the entries for the receiving
+    household's seats only, at least one). The sealed entries' crypto shape
+    is the service's to check (``seat_crypto.check_sealed_entry``)."""
+    if not isinstance(group, dict):
+        raise GroupWireError("group malformed")
+    to = _seat_list(group.get("to"), "to")
+    msg_id = group.get("msg_id")
+    if not isinstance(msg_id, str) or not _MSG_ID_RE.fullmatch(msg_id):
+        raise GroupWireError("msg_id malformed")
+    turn_raw = group.get("turn")
+    turn = None if turn_raw is None else _int(turn_raw, 1, GROUP_SEAT_MAX, "turn")
+    seq = from_seat = 0
+    if relayed:
+        seq = _int(group.get("seq"), 1, 2**53, "seq")
+        from_seat = _int(group.get("from_seat"), 1, GROUP_SEAT_MAX, "from_seat")
+        has_data = "data" in group
+        data = group.get("data")
+    sealed_raw = group.get("sealed")
+    if to is None:
+        if not has_data or sealed_raw is not None:
+            raise GroupWireError("a message to everyone carries data, unsealed")
+        return GroupMessage(
+            msg_id=msg_id, data=data, turn=turn, seq=seq, from_seat=from_seat
+        )
+    if has_data or not isinstance(sealed_raw, list) or not sealed_raw:
+        raise GroupWireError("a directed message carries sealed entries only")
+    if not all(isinstance(e, dict) for e in sealed_raw):
+        raise GroupWireError("sealed entry malformed")
+    targets = [e.get("to_seat") for e in sealed_raw]
+    if (
+        not all(isinstance(t, int) and not isinstance(t, bool) for t in targets)
+        or len(set(targets)) != len(targets)
+        or not set(targets) <= set(to)
+        or (not relayed and len(targets) != len(to))
+    ):
+        raise GroupWireError("sealed entries don't match to")
+    return GroupMessage(
+        msg_id=msg_id,
+        to=to,
+        sealed=tuple(sealed_raw),
+        turn=turn,
+        seq=seq,
+        from_seat=from_seat,
+    )
+
+
+def parse_batch(group: object) -> list[GroupMessage]:
+    """A hub's ``group: {msgs: [...]}`` — 1 to
+    :data:`GROUP_BATCH_MAX_MESSAGES` messages, each :func:`parse_message`'d
+    — or :class:`GroupWireError`."""
+    if not isinstance(group, dict):
+        raise GroupWireError("group malformed")
+    msgs = group.get("msgs")
+    if not isinstance(msgs, list) or not 1 <= len(msgs) <= GROUP_BATCH_MAX_MESSAGES:
+        raise GroupWireError("msgs size")
+    return [parse_message(m, has_data=False, relayed=True) for m in msgs]

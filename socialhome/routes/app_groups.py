@@ -14,9 +14,11 @@ knows where people live). Refusals are coded domain errors
 
 from __future__ import annotations
 
+import orjson
 from aiohttp import web
 
 from ..app_keys import app_group_service_key
+from ..domain.app_group import GROUP_MESSAGE_MAX_BYTES
 from ..domain.apps import PERMISSION_PEOPLE
 from ..security import error_response
 from .apps import AppPermissionView, person_target
@@ -181,3 +183,52 @@ class AppGroupCloseView(AppPermissionView):
             actor_user_id=self.user.user_id,
         )
         return self._json({"ok": True})
+
+
+class AppGroupMessagesView(AppPermissionView):
+    """``POST …/groups/{session_id}/messages`` — a seated person's app sends
+    ``{data, to?: [seat…], turn?: seat}`` to everyone at the table, or to
+    the seats in ``to`` (sealed to their households' seat keys — the hub
+    passes on ciphertext only). ``turn`` names whose turn it is now. →
+    ``{seq}`` (``null`` when it went to the hub's household). 413
+    ``PAYLOAD_TOO_LARGE`` past 64 KiB, 429 ``APP_GROUP_BUSY``, 409
+    ``APP_GROUP_SEAT`` / ``APP_GROUP_CLOSED``."""
+
+    async def post(self) -> web.Response:
+        await self.require_permission(PERMISSION_PEOPLE)
+        body = await self.body()
+        if "data" not in body:
+            return error_response(400, "UNPROCESSABLE", "data is required.")
+        to = body.get("to")
+        turn = body.get("turn")
+        if to is not None and (
+            not isinstance(to, list)
+            or not to
+            or not all(_is_int(s) and s > 0 for s in to)
+        ):
+            return error_response(
+                400, "UNPROCESSABLE", "to must be a non-empty list of seats."
+            )
+        if turn is not None and not (_is_int(turn) and turn > 0):
+            return error_response(400, "UNPROCESSABLE", "turn must be a seat.")
+        try:
+            size = len(orjson.dumps(body["data"]))
+        except TypeError, ValueError:
+            return error_response(
+                400, "UNPROCESSABLE", "data must be JSON-serialisable."
+            )
+        if size > GROUP_MESSAGE_MAX_BYTES:
+            return error_response(
+                413,
+                "PAYLOAD_TOO_LARGE",
+                f"data exceeds the {GROUP_MESSAGE_MAX_BYTES // 1024} KiB limit.",
+            )
+        result = await self.svc(app_group_service_key).send_message(
+            app_id=self.match("app_id"),
+            session_id=self.match("session_id"),
+            actor_user_id=self.user.user_id,
+            data=body["data"],
+            to=to,
+            turn=turn,
+        )
+        return self._json(result)

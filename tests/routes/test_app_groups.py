@@ -184,3 +184,84 @@ async def test_unknown_table_is_not_found(client):
 async def test_groups_need_auth(client):
     r = await client.get(f"/api/apps/{APP}/groups")
     assert r.status == 401
+
+
+async def _seated_table(client):
+    db = client._db
+    await _install(db)
+    bob, carol = await _member(db, "bob"), await _member(db, "carol")
+    sid = (await (await _open(client, await _own(client))).json())["group"][
+        "session_id"
+    ]
+    base = f"/api/apps/{APP}/groups/{sid}"
+    for tok in (bob, carol):
+        r = await client.post(f"{base}/join", headers=_auth(tok))
+        assert r.status == 200, await r.text()
+    return base, bob, carol
+
+
+async def test_messages_over_the_routes(client):
+    base, bob, carol = await _seated_table(client)
+    r = await client.post(
+        f"{base}/messages", json={"data": {"q": 1}, "turn": 2}, headers=_auth(bob)
+    )
+    assert r.status == 200, await r.text()
+    assert await r.json() == {"seq": 1}
+    # Bob to Carol only (seat 3), sealed even inside one household.
+    r = await client.post(
+        f"{base}/messages", json={"data": "psst", "to": [3]}, headers=_auth(bob)
+    )
+    assert await r.json() == {"seq": 2}
+    r = await client.post(f"/api/apps/{APP}/held", headers=_auth(carol))
+    got = (await r.json())["group_messages"]
+    assert [(m["seq"], m["from_seat"], m["direct"], m["data"]) for m in got] == [
+        (2, 2, True, "psst")
+    ]  # the latest from Bob's seat
+    r = await client.post(f"/api/apps/{APP}/held", headers=_auth(client._tok))
+    assert [m["data"] for m in (await r.json())["group_messages"]] == [{"q": 1}]
+    r = await client.get(base, headers=_auth(carol))
+    assert (await r.json())["group"]["seq"] == 2
+
+
+async def test_held_takes_one_half_at_a_time(client):
+    base, bob, carol = await _seated_table(client)
+    await client.post(f"{base}/messages", json={"data": 1}, headers=_auth(bob))
+    held = f"/api/apps/{APP}/held"
+    r = await client.post(f"{held}?only=messages", headers=_auth(carol))
+    assert (await r.json())["group_messages"] == []
+    r = await client.post(f"{held}?only=group", headers=_auth(carol))
+    assert [m["data"] for m in (await r.json())["group_messages"]] == [1]
+    r = await client.post(f"{held}?only=nope", headers=_auth(carol))
+    assert r.status == 400
+
+
+async def test_message_bodies_out_of_shape_are_refused(client):
+    base, bob, _carol = await _seated_table(client)
+    for body in (
+        {},
+        {"data": 1, "to": []},
+        {"data": 1, "to": [0]},
+        {"data": 1, "to": "all"},
+        {"data": 1, "to": [True]},
+        {"data": 1, "turn": "2"},
+        {"data": 1, "turn": 0},
+    ):
+        r = await client.post(f"{base}/messages", json=body, headers=_auth(bob))
+        assert r.status == 400, body
+    r = await client.post(
+        f"{base}/messages", json={"data": "x" * (65 * 1024)}, headers=_auth(bob)
+    )
+    assert r.status == 413
+    for to in ([2], [9]):  # his own seat; nobody's
+        r = await client.post(
+            f"{base}/messages", json={"data": 1, "to": to}, headers=_auth(bob)
+        )
+        assert r.status == 409
+        assert (await r.json())["error"]["code"] == "APP_GROUP_SEAT"
+
+
+async def test_messages_need_a_seat(client):
+    base, _bob, _carol = await _seated_table(client)
+    dave = await _member(client._db, "dave")
+    r = await client.post(f"{base}/messages", json={"data": 1}, headers=_auth(dave))
+    assert r.status == 404

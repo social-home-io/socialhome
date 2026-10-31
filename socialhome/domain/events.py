@@ -2762,7 +2762,9 @@ class AppTurn(DomainEvent):
     app_id: str
     session_id: str
     to_user_id: str
-    from_user_id: str
+    #: Who moved — ``None`` for a player at a group table whose household
+    #: this one doesn't know (then ``from_display`` names them).
+    from_user_id: str | None
     from_display: str | None = None
 
 
