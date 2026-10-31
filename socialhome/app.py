@@ -4949,6 +4949,7 @@ def create_app(config: Config | None = None) -> web.Application:
         )
         app_federation_service.attach_groups(app_group_service)
         bus.subscribe(AppUninstalled, app_group_service.on_app_uninstalled)
+        bus.subscribe(UserBlocked, app_group_service.on_user_blocked)
         # §CP.F2 / D8: guardian blocks and children's rules hold at tables.
         app_group_service.attach_child_protection(child_protection_service)
         app[K.app_group_service_key] = app_group_service

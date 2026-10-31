@@ -25,7 +25,7 @@ class AbstractAppGroupRepo(Protocol):
     async def delete(self, session_id: str) -> None: ...
     async def list_for_app(self, app_id: str) -> list[GroupSession]: ...
     async def list_hosted(
-        self, app_id: str, hub_instance: str, host_user: str, *, since: str
+        self, app_id: str, hub_instance: str, opener_user: str, *, since: str
     ) -> list[GroupSession]: ...
     async def count_open_from(self, hub_instance: str) -> int: ...
     async def list_lobby_expired(self, *, before: str) -> list[GroupSession]: ...
@@ -77,17 +77,19 @@ def _row_to_table(row) -> GroupSession:
         started_at=row["started_at"],
         expires_at=str(row["expires_at"]),
         updated_at=str(row["updated_at"]),
+        opener_user=row["opener_user"],
     )
 
 
 _COLUMNS = (
     "session_id, app_id, host_instance, host_user, hub_instance, space_id,"
     " state, end_reason, min_players, max_players, late_join, note,"
-    " roster_json, roster_rev, created_at, started_at, expires_at, updated_at"
+    " roster_json, roster_rev, created_at, started_at, expires_at, updated_at,"
+    " opener_user"
 )
 
 _UPSERT = f"""INSERT INTO app_group_sessions ({_COLUMNS})
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(session_id) DO UPDATE SET
       host_instance = excluded.host_instance,
       host_user = excluded.host_user,
@@ -128,6 +130,7 @@ def _args(t: GroupSession) -> tuple:
         t.started_at,
         t.expires_at,
         t.updated_at,
+        t.opener_user,
     )
 
 
@@ -174,16 +177,16 @@ class SqliteAppGroupRepo:
         return [_row_to_table(r) for r in rows]
 
     async def list_hosted(
-        self, app_id: str, hub_instance: str, host_user: str, *, since: str
+        self, app_id: str, hub_instance: str, opener_user: str, *, since: str
     ) -> list[GroupSession]:
-        """The tables *host_user* opened on *hub_instance* in *app_id* since
+        """The tables *opener_user* opened on *hub_instance* in *app_id* since
         *since* — the caps (bounded by them: ≤ 10 a day)."""
         rows = await self._db.fetchall(
             """SELECT * FROM app_group_sessions
-               WHERE app_id = ? AND hub_instance = ? AND host_user = ?
+               WHERE app_id = ? AND hub_instance = ? AND opener_user = ?
                  AND created_at >= ?
                ORDER BY created_at""",
-            (app_id, hub_instance, host_user, since),
+            (app_id, hub_instance, opener_user, since),
         )
         return [_row_to_table(r) for r in rows]
 

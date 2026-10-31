@@ -41,6 +41,7 @@ from socialhome.domain.events import (
     AppChallengeEnded,
     AppChallengeReceived,
     AppUninstalled,
+    UserBlocked,
 )
 from tests.app_group_network import APP, Network, quiz_app
 
@@ -553,3 +554,85 @@ async def test_list_tables_lists_the_callers_places(net):
         "is_local": False,
         "state": SEAT_SEATED,
     }
+
+
+# ─── Review fixes ─────────────────────────────────────────────────────────
+
+
+async def test_with_late_joiners_the_start_reaches_open_invites(net):
+    hub, b, c = _homes(net)
+    for home in (hub, b, c):
+        await home.app_repo.update_installed(quiz_app(late_join=True))
+    sid = await _open(net)
+    for home, user in ((b, "ben"), (hub, "ada")):
+        await home.groups.join(app_id=APP, session_id=sid, actor_user_id=home.uid(user))
+        await net.flush()
+    await hub.groups.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
+    await net.flush()
+    # Cleo never answered: her household knows the game started, her
+    # invite still waits, and she can still sit down.
+    assert (await c.group_repo.get(sid)).state == GROUP_PLAYING
+    assert await c.app_repo.get_pending_session(APP, c.uid("cleo"), sid) is not None
+    await c.groups.join(app_id=APP, session_id=sid, actor_user_id=c.uid("cleo"))
+    await net.flush()
+    assert (await hub.group_repo.get(sid)).entry("c", "cleo").state == SEAT_SEATED
+
+
+async def test_a_hand_over_keeps_counting_on_the_opener(net):
+    hub, b, c = _homes(net)
+    anna = hub.uid("anna")
+    sid = await _open(net, people=("ben", "cleo"))
+    for home, user in ((b, "ben"), (c, "cleo")):
+        await home.groups.join(app_id=APP, session_id=sid, actor_user_id=home.uid(user))
+        await net.flush()
+    await hub.groups.start(app_id=APP, session_id=sid, actor_user_id=anna)
+    await hub.groups.leave(app_id=APP, session_id=sid, actor_user_id=anna)
+    await net.flush()
+    assert (await hub.group_repo.get(sid)).host_user == "ben"
+    counts = await hub.app_fed.invite_counts(app_id=APP, user_id=anna)
+    assert counts["today"] == 2
+
+
+async def test_a_snapshot_that_changes_the_players_range_is_dropped(net):
+    hub, b, _c = _homes(net)
+    sid = await _open(net)
+    wire = (await hub.group_repo.get(sid)).to_wire()
+    net.queue.append(
+        (
+            "hub",
+            "b",
+            {
+                "app_id": APP,
+                "session_id": sid,
+                "verb": "group_roster",
+                "table": {**wire, "rev": 5, "max": 30},
+            },
+        )
+    )
+    await net.flush()
+    assert (await b.group_repo.get(sid)).roster_rev == 1
+
+
+async def test_a_seat_for_someone_who_left_meanwhile_is_given_back(net):
+    hub, b, _c = _homes(net)
+    sid = await _open(net)
+    await b.groups.join(app_id=APP, session_id=sid, actor_user_id=b.uid("ben"))
+    # Ben's row goes before the hub's seat arrives (his household took
+    # him out, two paths reordered).
+    await b.app_repo.delete_pending_session(APP, b.uid("ben"), sid)
+    await net.flush()
+    assert (await hub.group_repo.get(sid)).entry("b", "ben").state == SEAT_LEFT
+
+
+async def test_blocking_someone_takes_one_out_of_their_table(net):
+    hub, b, _c = _homes(net)
+    sid = await _open(net)
+    for home, user in ((hub, "ada"), (b, "ben")):
+        await home.groups.join(app_id=APP, session_id=sid, actor_user_id=home.uid(user))
+        await net.flush()
+    await hub.user_repo.block(hub.uid("ada"), "r-b-ben")
+    await hub.groups.on_user_blocked(
+        UserBlocked(blocker_user_id=hub.uid("ada"), blocked_user_id="r-b-ben")
+    )
+    await net.flush()
+    assert (await hub.group_repo.get(sid)).entry("hub", "ada").state == SEAT_LEFT

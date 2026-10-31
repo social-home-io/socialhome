@@ -113,6 +113,13 @@ The hub is never told why someone isn't at a table:
   directly (§CP.F3). Checked at the invite, at Join and on every roster.
 - The app's age rating applies as for 1:1 invites.
 
+**Residuals.** A leave a household makes for its person right after
+someone sits down shows up at the same time as that join — the players
+see "Ben left" next to "Dev joined", as the design accepts (a block means
+"keep us apart"). A player who knows a table's id could send another
+household an invite for that id first, which then drops the real one
+(nuisance only: nothing is learned or seated).
+
 ## Receiver rules
 
 - A copy takes a snapshot only from the household that invited it (the
@@ -140,8 +147,9 @@ The hub is never told why someone isn't at a table:
 
 ## Cost
 
-One envelope per household, never per person; the hub's own people get
-none. Opening for *h* households: *h − 1* invites. A join: one envelope
+Invites are one envelope per person invited (`group_invite` names one
+person; ≤ 9), the hub's own people none. Everything after is one
+envelope per household, never per person. A join: one envelope
 to the hub, one seat answer, and at most one coalesced roster per 5 s to
 the other households at the table (≤ 0.6 KB each sealed). Filling 10 seats
 over 10 households one by one: ≈ 10 × 2 + ~10 × 9 rosters × 0.6 KB ≈ 60 KB,

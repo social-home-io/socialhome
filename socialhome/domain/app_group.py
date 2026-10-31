@@ -336,6 +336,9 @@ class GroupSession:
     note: str | None = None
     seq: int = 0
     started_at: str | None = None
+    #: Who opened the table (a username on the hub) — fixed, unlike
+    #: the host person: the opener's caps count on it. Hub only.
+    opener_user: str | None = None
 
     # ─── Reading ──────────────────────────────────────────────────────
 
@@ -353,11 +356,8 @@ class GroupSession:
     def invited_total(self) -> int:
         """Everyone the host asked — what the table cost of the invite
         caps (hub only; the host themself isn't counted)."""
-        return sum(
-            1
-            for e in self.roster
-            if not e.is_person(self.host_instance, self.host_user)
-        )
+        opener = self.opener_user or self.host_user
+        return sum(1 for e in self.roster if not e.is_person(self.hub_instance, opener))
 
     @property
     def host_seat(self) -> int:

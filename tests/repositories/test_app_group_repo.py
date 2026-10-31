@@ -52,6 +52,7 @@ def _table(session_id: str = "t1", **kw) -> GroupSession:
         "created_at": T0,
         "expires_at": "2026-11-03T10:00:00+00:00",
         "updated_at": T0,
+        "opener_user": "anna",
     }
     base.update(kw)
     return GroupSession(**base)
@@ -107,12 +108,14 @@ async def test_list_for_app_and_delete(repo):
 async def test_list_hosted_by_person_and_time(repo):
     await repo.save(_table("old", created_at="2026-10-29T10:00:00+00:00"))
     await repo.save(_table("new"))
-    await repo.save(_table("other", host_user="cleo"))
+    await repo.save(_table("other", opener_user="cleo"))
+    # A hand-over changes the host, never who opened it (the caps).
+    await repo.save(_table("handed", host_user="ben", host_instance="b"))
     await repo.save(_table("mirror", hub_instance="b"))
     got = await repo.list_hosted(
         "quiz", "hub", "anna", since="2026-10-30T10:00:00+00:00"
     )
-    assert [t.session_id for t in got] == ["new"]
+    assert sorted(t.session_id for t in got) == ["handed", "new"]
 
 
 async def test_count_open_from_a_hub(repo):

@@ -120,7 +120,7 @@ from ..domain.apps import (
     SESSION_INVITED,
     AppPendingSession,
 )
-from ..domain.events import AppChallengeEnded, AppChallengeReceived
+from ..domain.events import AppChallengeEnded, AppChallengeReceived, UserBlocked
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from .app_federation_service import with_household
@@ -409,6 +409,7 @@ class AppGroupService(ProtectionGateMixin):
                 updated_at=stamp,
                 late_join=app.manifest.late_join,
                 note=clean_note,
+                opener_user=host.username,
             )
             await self._repo.save(table)
             hosting = self._seat_row(table, actor_user_id, state=SESSION_ACTIVE)
@@ -471,7 +472,8 @@ class AppGroupService(ProtectionGateMixin):
         them."""
         if target.get("is_local"):
             user = await self._user_repo.get_by_user_id(str(target["user_ref"]))
-            assert user is not None  # assert_invitable found them
+            if user is None:  # gone since the sheet listed them
+                raise AppGroupNotFoundError()
             return GroupSeat(
                 instance=self._own,
                 user=user.username,
@@ -482,7 +484,8 @@ class AppGroupService(ProtectionGateMixin):
         remote = await self._user_repo.get_remote_by_member(
             instance, str(target["user_ref"])
         )
-        assert remote is not None  # assert_invitable found them
+        if remote is None:  # gone since the sheet listed them
+            raise AppGroupNotFoundError()
         return GroupSeat(
             instance=instance,
             user=remote.remote_username,
@@ -852,7 +855,9 @@ class AppGroupService(ProtectionGateMixin):
                     to_user=entry.user,
                     reason=CLOSE_WITHDRAWN,
                 )
-        await self._broadcast(table, VERB_START)
+        # With late joiners the invites stay open: their households hear
+        # the start too (else their copy would run out as a lobby).
+        await self._broadcast(table, VERB_START, states=(SEAT_SEATED, SEAT_INVITED))
         await self._push(table)
         return table
 
@@ -1164,13 +1169,14 @@ class AppGroupService(ProtectionGateMixin):
         if host is None or not await self._may_play(user, table):
             log.info("app_group: invite for %s dropped by its household", session_id)
             return
-        if (
-            known is None
-            and await self._repo.count_open_from(hub) >= GROUP_MIRRORS_PER_HUB_MAX
-        ):
-            log.warning("app_group: too many open tables from %s", hub)
-            return
-        await self._repo.save_newer(table)
+        async with self._lock(f"hub:{hub}"):
+            if (
+                known is None
+                and await self._repo.count_open_from(hub) >= GROUP_MIRRORS_PER_HUB_MAX
+            ):
+                log.warning("app_group: too many open tables from %s", hub)
+                return
+            await self._repo.save_newer(table)
         await self._app_repo.add_pending_session(self._seat_row(table, user.user_id))
         await self._emit(
             AppChallengeReceived(
@@ -1201,7 +1207,15 @@ class AppGroupService(ProtectionGateMixin):
             hub_instance=mirror.hub_instance,
             now=_now(),
         )
+        if (table.min_players, table.max_players) != (
+            mirror.min_players,
+            mirror.max_players,
+        ):
+            # The players range is fixed when the table opens.
+            raise GroupWireError("players range changed")
         to_user = p.get("to_user")
+        if p.get("verb") == VERB_SEAT and isinstance(to_user, str) and to_user:
+            await self._unwanted_seat(table, to_user)
         if p.get("verb") == VERB_CLOSE and isinstance(to_user, str) and to_user:
             reason = p.get("reason")
             if reason in PERSON_CLOSE_REASONS:
@@ -1214,6 +1228,28 @@ class AppGroupService(ProtectionGateMixin):
             else:
                 await self._recheck_local(table)
             await self._push(table)
+
+    async def _unwanted_seat(self, table: GroupSession, username: str) -> None:
+        """The hub seated someone from here who no longer wants the seat
+        (their household took them out, or the app went, before the
+        seat arrived — two paths can reorder): answer with a leave so
+        no ghost sits at the table."""
+        user = await self._user_repo.get(username)
+        if user is None:
+            return
+        row = await self._app_repo.get_pending_session(
+            table.app_id, user.user_id, table.session_id
+        )
+        if row is not None and row.is_group:
+            return
+        await self._send(
+            table.hub_instance,
+            table,
+            VERB_LEAVE,
+            from_user=username,
+            reason=SEAT_LEFT,
+            snap=False,
+        )
 
     # ─── This household's own people ──────────────────────────────────
 
@@ -1428,6 +1464,9 @@ class AppGroupService(ProtectionGateMixin):
                 await self._repo.save(ended)
                 await self._reconcile_local(ended)
                 await self._push(ended)
+        for sid in list(self._roster_sent):
+            if await self._repo.get(sid) is None:
+                self._roster_sent.pop(sid, None)
         return await self._repo.prune(
             ended_before=(
                 now - timedelta(seconds=GROUP_ENDED_KEEP_SECONDS)
@@ -1461,11 +1500,24 @@ class AppGroupService(ProtectionGateMixin):
             await self._repo.delete(table.session_id)
             self._roster_sent.pop(table.session_id, None)
 
+    async def on_account_protected(self, user_id: str) -> None:
+        """§CP: *user_id* just became protected — the children's rule now
+        holds at every table they have a place at."""
+        await self._recheck_person(user_id)
+
     async def on_guardian_block(self, minor_user_id: str, blocked_user_id: str) -> None:
         """§CP.F2: a guardian blocked someone for *minor_user_id* — the
         minor leaves every table where that person sits."""
+        await self._recheck_person(minor_user_id)
+
+    async def on_user_blocked(self, event: UserBlocked) -> None:
+        """A person here blocked someone: they leave every table where
+        that person sits (and a waiting invite to one is hidden)."""
+        await self._recheck_person(event.blocker_user_id)
+
+    async def _recheck_person(self, user_id: str) -> None:
         for app in await self._app_repo.list_installed():
-            for row in await self._app_repo.list_sessions(app.app_id, minor_user_id):
+            for row in await self._app_repo.list_sessions(app.app_id, user_id):
                 if not row.is_group:
                     continue
                 table = await self._repo.get(row.session_id)

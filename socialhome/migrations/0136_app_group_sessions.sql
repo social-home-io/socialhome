@@ -75,11 +75,12 @@ CREATE TABLE app_group_sessions (
     created_at     TEXT NOT NULL,   -- UTC ISO 8601
     started_at     TEXT,
     expires_at     TEXT NOT NULL,
-    updated_at     TEXT NOT NULL
+    updated_at     TEXT NOT NULL,
+    opener_user    TEXT              -- who opened it (hub only; the caps)
 );
 
 CREATE INDEX idx_app_group_sessions_host
-    ON app_group_sessions(app_id, hub_instance, host_user, created_at);
+    ON app_group_sessions(app_id, hub_instance, opener_user, created_at);
 CREATE INDEX idx_app_group_sessions_state
     ON app_group_sessions(state, updated_at);
 
