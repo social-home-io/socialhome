@@ -834,6 +834,69 @@ await check('app-invite-sheet', async () => {
   return { problems, sent }
 })
 
+// 6f. Games in a space (group play, v_77): Alice allows the group game
+//     ``table-probe`` in her space and opens a game. At 1280×720 /
+//     390×844 the space's feed shows "Open games" whose links stay under
+//     the prefix (her game → <prefix>/apps/table-probe/tables/<sid>, "All
+//     games" → <prefix>/spaces/<id>/games), the Games section and its
+//     Start-a-game sheet open, and Settings › Games allowed here saves
+//     its switch with a PUT under the prefix.
+await check('space-games', async () => {
+  const problems = []
+  const appId = 'table-probe'
+  await asUser('alice', 'POST', '/api/apps', { json: { app_id: appId } }).catch(() => {})
+  await asUser('alice', 'PUT', `/api/spaces/${ids.spaceId}/games/allowed`, { json: { allowed_apps: [appId] } })
+  const opened = await asUser('alice', 'POST', `/api/spaces/${ids.spaceId}/games`, { json: { app_id: appId, max_players: 4 } })
+  const sid = opened.table.session_id
+  const gamePath = `${PREFIX}/apps/${appId}/tables/${sid}`
+  const gamesPath = `${PREFIX}/spaces/${ids.spaceId}/games`
+  const saved = {}
+  for (const vp of ['desktop', 'mobile']) {
+    const { ctx, page: p } = await newPage(vp)
+    await p.goto(APP + `spaces/${ids.spaceId}`, { waitUntil: 'load' })
+    await step('the space feed', settled(p))
+    const strip = T('space.games.strip_title')
+    await step(`"${strip}" on the feed`, p.waitForFunction(t => [...document.querySelectorAll('.sh-games-strip h2')].some(h => h.textContent === t), {}, strip))
+    const hrefs = await p.$$eval('.sh-games-strip a', as => as.map(a => new URL(a.href).pathname))
+    if (!hrefs.includes(gamePath)) problems.push(`[${vp}] the strip doesn't link the game to ${gamePath}: ${hrefs.join(', ')}`)
+    if (!hrefs.includes(gamesPath)) problems.push(`[${vp}] "All games" doesn't link to ${gamesPath}: ${hrefs.join(', ')}`)
+    for (const h of hrefs) if (!underPrefix(h)) problems.push(`[${vp}] strip link ${h} is outside the prefix`)
+    await p.screenshot({ path: path.join(SHOTS, `space-games-strip-${vp}.png`) })
+    await p.click('.sh-games-strip__all')
+    await step(`the Games section at ${gamesPath}`, p.waitForFunction(w => location.pathname === w, {}, gamesPath))
+    const start = T('space.games.start')
+    await step(`"${start}"`, p.waitForFunction(t => [...document.querySelectorAll('.sh-games-section__bar button')].some(b => b.textContent === t), {}, start))
+    await p.screenshot({ path: path.join(SHOTS, `space-games-section-${vp}.png`) })
+    await p.click('.sh-games-section__bar button')
+    await step('the Start-a-game sheet', p.waitForSelector('.sh-start-game [role=radio], .sh-start-game input[type=radio]'))
+    await p.screenshot({ path: path.join(SHOTS, `space-games-start-${vp}.png`) })
+    await p.keyboard.press('Escape')
+    await p.goto(APP + `spaces/${ids.spaceId}/settings/games`, { waitUntil: 'load' })
+    await step('Settings › Games allowed here', settled(p))
+    const sw = `#sh-game-allowed-${appId}`
+    await step(`the ${appId} switch`, p.waitForSelector(sw))
+    if (!(await p.$eval(sw, e => e.checked))) problems.push(`[${vp}] ${appId} isn't shown as allowed`)
+    await p.screenshot({ path: path.join(SHOTS, `space-games-settings-${vp}.png`) })
+    // Off and on again: each flip is one PUT under the prefix.
+    for (const want of [false, true]) {
+      const [put] = await Promise.all([
+        p.waitForResponse(r => r.url().includes(`/spaces/${ids.spaceId}/games/allowed`) && r.request().method() === 'PUT'),
+        p.click(sw),
+      ])
+      if (!underPrefix(new URL(put.url()).pathname)) problems.push(`[${vp}] games PUT went to ${put.url()} (outside the prefix)`)
+      if (put.status() !== 200) problems.push(`[${vp}] games PUT → ${put.status()}`)
+      await step(`the switch ${want ? 'on' : 'off'} and saved`, p.waitForFunction((s, w) => {
+        const e = document.querySelector(s)
+        return e && e.checked === w && !e.disabled
+      }, {}, sw, want))
+    }
+    saved[vp] = true
+    await ctx.close()
+  }
+  activePage = page
+  return { problems, sid, saved }
+})
+
 // 7. No ingress user (Supervisor sent no X-Remote-User-*): the cold-start
 //    /api/me 401s → IngressAuthFailed, never a password form or a
 //    "Session expired" toast (there was no token to expire).

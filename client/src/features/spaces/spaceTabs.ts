@@ -17,6 +17,12 @@
  * Calendar link in a space with only a timetable goes there
  * (``redirectedSection``).
  *
+ * Games (group play, v_77) follows the space's games list instead of a
+ * switch: it shows while the space allows at least one game, and for the
+ * people who choose the games (owner, admins, moderators — D9) also while
+ * the list is empty, so they find "Choose games". Never for a follower,
+ * never in a global space (no games there).
+ *
  * The section bar shows the sections in ONE fixed order
  * (``SECTION_ORDER``) and moves whatever doesn't fit into More — it
  * never reorders by activity. Members and Moderation are never in the
@@ -28,6 +34,7 @@ import { t } from '@/i18n/i18n'
 export type SpaceSection =
   | 'feed'
   | 'chat'
+  | 'games'
   | 'calendar'
   | 'tasks'
   | 'pages'
@@ -41,7 +48,8 @@ export type SpaceSection =
 
 /** The section bar's order. What doesn't fit goes to More, from the end. */
 export const SECTION_ORDER: readonly SpaceSection[] = [
-  'feed', 'chat', 'calendar', 'tasks', 'pages', 'gallery', 'stickies', 'bazaar', 'map', 'timetable',
+  'feed', 'chat', 'games', 'calendar', 'tasks', 'pages', 'gallery', 'stickies', 'bazaar', 'map',
+  'timetable',
 ]
 
 /** Sections that live in More, never in the bar. */
@@ -59,15 +67,27 @@ export interface SpaceTabFeatures {
   gallery?: boolean
   bazaar?: boolean
   location?: boolean
+  /** The space's games list (app ids). */
+  allowed_apps?: string[]
 }
 
 /** Who is looking: ``chat`` — the space chat is open to the viewer (a
  *  member, never a follower, while the space keeps chat on);
  *  ``follower`` — a read-only follower, who gets no Map (the pins and
- *  zones are the members' whereabouts; the server refuses them too). */
+ *  zones are the members' whereabouts; the server refuses them too);
+ *  ``choosesGames`` — the owner / an admin / a moderator (D9);
+ *  ``global`` — a global space (no games). */
 export interface SectionViewer {
   chat: boolean
   follower: boolean
+  choosesGames?: boolean
+  global?: boolean
+}
+
+/** Does the Games section show? */
+export function gamesSectionShown(f: SpaceTabFeatures | undefined, viewer: SectionViewer): boolean {
+  if (viewer.follower || viewer.global) return false
+  return (f?.allowed_apps?.length ?? 0) > 0 || viewer.choosesGames === true
 }
 
 /** The bar's sections for this space and viewer, in ``SECTION_ORDER``. */
@@ -77,6 +97,7 @@ export function visibleSpaceSections(
   const on: Record<string, boolean> = {
     feed: true,
     chat: viewer.chat,
+    games: gamesSectionShown(f, viewer),
     calendar: f?.calendar ?? true,
     tasks: f?.todo ?? true,
     pages: f?.pages ?? true,
@@ -117,6 +138,7 @@ export function sectionLabel(section: SpaceSection): string {
   switch (section) {
     case 'feed':       return t('nav.feed')
     case 'chat':       return t('space.chat.view_chat')
+    case 'games':      return t('space.games.section_title')
     case 'calendar':   return t('nav.calendar')
     case 'tasks':      return t('nav.tasks')
     case 'pages':      return t('nav.pages')

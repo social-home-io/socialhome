@@ -5,6 +5,7 @@ const { apiPost } = vi.hoisted(() => ({ apiPost: vi.fn() }))
 vi.mock('@/api', () => ({ api: { post: apiPost } }))
 vi.mock('./Toast', () => ({ showToast: vi.fn() }))
 
+import { installedApps } from '@/store/apps'
 import { SpaceProposalDialog, canVoteOn, describeProposal, type SpaceProposal } from './SpaceProposalDialog'
 import { currentUser } from '@/store/auth'
 import type { User } from '@/types'
@@ -175,6 +176,26 @@ describe('describeProposal', () => {
       fwd_params: { instance_id: 'house-c', user_id: 'u-carol', from_role: 'member', role: 'moderator' },
       fwd_target_label: 'Carol',
     }))).toBe('make Carol a moderator')
+  })
+
+  it('a forwarded games-list edit names the games (group play D9)', () => {
+    installedApps.value = [{
+      app_id: 'quiz', name: 'Quiz', version: '1', enabled: true, capabilities: [], icon: null, min_age: 0,
+    }]
+    expect(describeProposal(proposal({
+      action: 'remote_admin_action', owner_only: true, fwd_action: 'update_config',
+      fwd_params: { features: { allowed_apps: ['quiz', 'chess'] } },
+    }))).toBe('allow these games here: Quiz, chess')
+    expect(describeProposal(proposal({
+      action: 'remote_admin_action', owner_only: true, fwd_action: 'update_config',
+      fwd_params: { features: { allowed_apps: [] } },
+    }))).toBe('turn off every game here')
+    // Anything else in the edit: the generic settings line.
+    expect(describeProposal(proposal({
+      action: 'remote_admin_action', owner_only: true, fwd_action: 'update_config',
+      fwd_params: { features: { allowed_apps: ['quiz'], bazaar: false } },
+    }))).toBe("change this space's settings")
+    installedApps.value = []
   })
 
   it('a role change with no resolvable name still names the role', () => {

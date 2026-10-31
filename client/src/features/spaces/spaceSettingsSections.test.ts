@@ -20,6 +20,24 @@ describe('space settings sections', () => {
     expect(settingsSections('follower')).toEqual(['notifications', 'unfollow'])
   })
 
+  it('Games — for an admin after Sections, for a moderator after Notifications (D9)', () => {
+    expect(settingsSections('admin', { games: true })).toEqual([
+      'basics', 'find', 'members', 'sections', 'games', 'notifications',
+      'location', 'moderation', 'bots', 'danger',
+    ])
+    expect(settingsSections('remote-admin', { games: true })).toContain('games')
+    expect(settingsSections('member', { games: true }))
+      .toEqual(['notifications', 'games', 'you', 'bots', 'leave'])
+    // A follower never; nobody without the flag (a plain member, a
+    // global space).
+    expect(settingsSections('follower', { games: true })).not.toContain('games')
+    expect(settingsSections('admin')).not.toContain('games')
+    expect(resolveSettingsSection('games', 'member', { games: true })).toBe('games')
+    expect(resolveSettingsSection('games', 'member')).toBe('notifications')
+    expect(parseSettingsSection('games')).toBe('games')
+    expect(settingsSectionLabel('games')).toBe('Games allowed here')
+  })
+
   it('has one Bots section at most (no repeated "Bots & automations")', () => {
     for (const v of ['admin', 'remote-admin', 'member', 'follower'] as const) {
       expect(settingsSections(v).filter(s => s === 'bots').length).toBeLessThanOrEqual(1)

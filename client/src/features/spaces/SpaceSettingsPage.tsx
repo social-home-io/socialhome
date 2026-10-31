@@ -20,7 +20,8 @@
  * Who sees what (``settingsSections``): owners / admins get every section
  * (a remote admin — space hosted elsewhere — only what forwards to the
  * host); members and moderators their notifications, "You in this space",
- * their bots and Leave; followers their notifications and Unfollow.
+ * their bots and Leave — moderators also Games (D9); followers their
+ * notifications and Unfollow.
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { useLocation, useRoute } from 'preact-iso'
@@ -42,7 +43,7 @@ import { SpaceBotsTab } from './SpaceBotsTab'
 import {
   SpaceNotificationChoices, useSpaceChatNotif, useSpaceNotifLevel,
 } from './SpaceNotifLevels'
-import { parseSpaceRole } from './spaceRoles'
+import { canModerate, parseSpaceRole } from './spaceRoles'
 import {
   legacySettingsSection, resolveSettingsSection, settingsSectionLabel, settingsSectionPath, settingsSections,
   type SettingsSection, type SettingsViewer,
@@ -52,6 +53,7 @@ import { BasicsSection } from './settings/BasicsSection'
 import { DangerSection } from './settings/DangerSection'
 import { FeaturesSection } from './settings/FeaturesSection'
 import { FindSection } from './settings/FindSection'
+import { GamesSection } from './settings/GamesSection'
 import { LocationSection } from './settings/LocationSection'
 import { MembersSection } from './settings/MembersSection'
 import { ModerationSection } from './settings/ModerationSection'
@@ -91,11 +93,13 @@ export function settingsViewer(role: string | undefined, isRemoteSpace: boolean)
 // t('space.settings_page.lead.members') t('space.settings_page.lead.sections')
 // t('space.settings_page.lead.notifications') t('space.settings_page.lead.location')
 // t('space.settings_page.lead.moderation') t('space.settings_page.lead.you')
+// t('space.settings_page.lead.games')
 const LEADS: Partial<Record<SettingsSection, string>> = {
   basics: 'space.settings_page.lead.basics',
   find: 'space.settings_page.lead.find',
   members: 'space.settings_page.lead.members',
   sections: 'space.settings_page.lead.sections',
+  games: 'space.settings_page.lead.games',
   notifications: 'space.settings_page.lead.notifications',
   location: 'space.settings_page.lead.location',
   moderation: 'space.settings_page.lead.moderation',
@@ -166,8 +170,13 @@ export default function SpaceSettingsPage() {
   const viewer = space ? settingsViewer(myRole, isRemoteSpace) : null
   const isOwner = myRole === 'owner'
   const admin = viewer === 'admin' || viewer === 'remote-admin'
-  const sections = viewer ? settingsSections(viewer) : []
-  const active = viewer ? resolveSettingsSection(segment, viewer) : null
+  // The owner, admins and moderators choose the space's games (D9) —
+  // never in a global space.
+  const extras = {
+    games: canModerate(parseSpaceRole(myRole)) && space?.space_type !== 'global',
+  }
+  const sections = viewer ? settingsSections(viewer, extras) : []
+  const active = viewer ? resolveSettingsSection(segment, viewer, extras) : null
 
   const form = useBasicsForm(basicsOf(space ?? FALLBACK))
   // The theme studio inside Basics reports its draft here, so one save bar
@@ -326,6 +335,8 @@ export default function SpaceSettingsPage() {
         return <MembersSection space={space} isRemoteSpace={isRemoteSpace} members={members} onUpdate={refresh} />
       case 'sections':
         return <FeaturesSection space={space} onUpdate={refresh} />
+      case 'games':
+        return <GamesSection space={space} onUpdate={refresh} />
       case 'notifications':
         return (
           <div class="sh-ss-card">

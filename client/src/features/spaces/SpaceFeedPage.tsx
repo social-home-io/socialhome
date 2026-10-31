@@ -34,9 +34,13 @@ import { SpacePagesTab } from './SpacePagesTab'
 import { SpaceCalendarSection } from './SpaceCalendarSection'
 import { SpaceTimetableTab } from './SpaceTimetableTab'
 import {
-  legacySpaceSection, parseSpaceSection, redirectedSection, sectionAllowed, spaceSectionPath,
-  visibleSpaceSections,
+  gamesSectionShown, legacySpaceSection, parseSpaceSection, redirectedSection, sectionAllowed,
+  spaceSectionPath, visibleSpaceSections,
 } from './spaceTabs'
+import { joinableCount } from './games/spaceGames'
+import { SpaceGamesSection, useGameApps } from './games/SpaceGamesSection'
+import { SpaceOpenGamesStrip } from './games/SpaceOpenGamesStrip'
+import { useSpaceGames } from './games/useSpaceGames'
 import {
   canContribute,
   canModerate as roleCanModerate,
@@ -101,6 +105,8 @@ interface SpaceDetail {
     /** §23.49 — post types members may compose here; gates the
      *  composer's type picker. Absent → all types offered. */
     allowed_post_types?: string[]
+    /** "Games allowed here" (group play, v_77). */
+    allowed_apps?: string[]
   }
   /** §D1b — the originating instance. When it differs from
    *  ``instanceConfig.value.instance_id``, this is a stub of a
@@ -357,6 +363,15 @@ export default function SpaceFeedPage() {
   const chatOn = !soloSpace && spaceChatOpenTo(features, viewerRole.value, spaceChatOf(spaceId))
   const follower = isFollower(viewerRole.value)
   const canModerateHere = roleCanModerate(viewerRole.value)
+  // Games (group play): the people who choose them (owner / admins /
+  // moderators, D9) see the section even before any game is allowed;
+  // never a follower, never a global space.
+  const globalSpace = spaceDetail.value?.space_type === 'global'
+  const gamesViewer = { choosesGames: canModerateHere, global: globalSpace }
+  const gamesOn = roleKnown.value && isWriterRole(viewerRole.value)
+    && gamesSectionShown(features, { chat: chatOn, follower, ...gamesViewer })
+  const games = useSpaceGames(spaceId, gamesOn, (features?.allowed_apps ?? []).join(','))
+  useGameApps(gamesOn)
   // A section the viewer can't have here (feature off, a follower on the
   // Map, Moderation without content authority) falls back to the feed —
   // once the space and the viewer's role are known, and again if an
@@ -364,13 +379,13 @@ export default function SpaceFeedPage() {
   // a space that keeps only a timetable opens the Timetable section.
   useEffect(() => {
     if (!loc || !spaceDetail.value || !roleKnown.value) return
-    const viewer = { chat: chatOn, follower, canModerate: canModerateHere }
+    const viewer = { chat: chatOn, follower, canModerate: canModerateHere, ...gamesViewer }
     if (!sectionAllowed(section, features, viewer)) {
       const moved = redirectedSection(section, features)
       const target = moved && sectionAllowed(moved, features, viewer) ? moved : 'feed'
       loc.route(spaceSectionPath(spaceId, target), true)
     }
-  }, [spaceId, section, features, roleKnown.value, chatOn, follower, canModerateHere]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [spaceId, section, features, roleKnown.value, chatOn, follower, canModerateHere, globalSpace]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const chatOpen = section === 'chat'
   useSpaceChatSummary(spaceId, chatEligible, chatOpen)
@@ -541,7 +556,7 @@ export default function SpaceFeedPage() {
 
   // Per-space feature toggles hide their section when off (``spaceTabs``).
   const f = s?.features
-  const sections = visibleSpaceSections(f, { chat: chatOn, follower })
+  const sections = visibleSpaceSections(f, { chat: chatOn, follower, ...gamesViewer })
   const attention = spaceAttention.value
   const chatSummary = spaceChatOf(spaceId)
   // A muted chat keeps its count on the server but raises no badge — the
@@ -586,6 +601,7 @@ export default function SpaceFeedPage() {
         sections={sections}
         active={section}
         chatUnread={chatUnread}
+        gamesOpen={section === 'games' ? 0 : joinableCount(games.games?.tables ?? [])}
         members={memberSummary.value && membersShown != null
           ? { ...memberSummary.value, count: membersShown }
           : memberSummary.value}
@@ -659,6 +675,13 @@ export default function SpaceFeedPage() {
       )}
       {s && feedList && settingsAuthority && !s.archived && membersShown === 1 && (
         <SpaceInviteFirst spaceId={spaceId} role={viewerRole.value} />
+      )}
+
+      {/* "Open games" on top of the feed — only while a game waits for
+       *  people (group play D5); nothing at all otherwise. */}
+      {s && feedList && gamesOn && (
+        <SpaceOpenGamesStrip spaceId={spaceId} games={games.games}
+                             onChanged={() => { void games.reload() }} />
       )}
 
       {chatOpen && (
@@ -825,6 +848,9 @@ export default function SpaceFeedPage() {
         />
       )}
 
+      {section === 'games' && sections.includes('games') && (
+        <SpaceGamesSection spaceId={spaceId} state={games} />
+      )}
       {section === 'calendar' && sections.includes('calendar') && (
         <SpaceCalendarSection
           spaceId={spaceId}

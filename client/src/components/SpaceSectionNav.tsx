@@ -79,6 +79,9 @@ interface Props {
   active: SpaceSection
   /** Unread space-chat messages (quiet badge on Chat); 0 → none. */
   chatUnread: number
+  /** Games waiting for people the viewer could join — a dot on Games
+   *  (group play D5: no bell, the dot and the strip); 0 → none. */
+  gamesOpen?: number
   members: SpaceMemberSummary | null
   /** Content authority: show the Moderation row. ``null`` → no row. */
   needsYou: SpaceNeedsYou | null
@@ -118,7 +121,13 @@ const SVG = {
   'aria-hidden': 'true', focusable: 'false',
 } as const
 
-const EXTRA_ICONS: Record<'map' | 'timetable' | 'moderation' | 'bell' | 'gear' | 'chevron' | 'down', JSX.Element> = {
+const EXTRA_ICONS: Record<'map' | 'timetable' | 'games' | 'moderation' | 'bell' | 'gear' | 'chevron' | 'down', JSX.Element> = {
+  games: (
+    <svg {...SVG}>
+      <rect x="3" y="3" width="18" height="18" rx="3" />
+      <circle cx="8.5" cy="8.5" r="1.2" /><circle cx="15.5" cy="15.5" r="1.2" /><circle cx="12" cy="12" r="1.2" />
+    </svg>
+  ),
   map: (
     <svg {...SVG}><path d="M3 6l6-2 6 2 6-2v14l-6 2-6-2-6 2z" /><path d="M9 4v14M15 6v14" /></svg>
   ),
@@ -145,7 +154,8 @@ function SectionIcon({ section }: { section: SpaceSection }) {
   const name = SECTION_ICON[section]
   if (name) return <SideNavIcon name={name} />
   const extra = section === 'map' ? EXTRA_ICONS.map
-    : section === 'timetable' ? EXTRA_ICONS.timetable : EXTRA_ICONS.moderation
+    : section === 'timetable' ? EXTRA_ICONS.timetable
+      : section === 'games' ? EXTRA_ICONS.games : EXTRA_ICONS.moderation
   return <span class="sh-sidenav-icon">{extra}</span>
 }
 
@@ -156,6 +166,18 @@ function UnreadBadge({ count }: { count: number }) {
     <>
       <span class="sh-space-badge sh-space-badge--unread" aria-hidden="true">{count > 99 ? '99+' : count}</span>
       <span class="sr-only">{', '}{t('space.sections.unread', { count: String(count) })}</span>
+    </>
+  )
+}
+
+/** A dot on Games while a game waits for people — spoken as ", open
+ *  games". */
+function GamesDot({ count }: { count: number }) {
+  if (count <= 0) return null
+  return (
+    <>
+      <span class="sh-space-dot" aria-hidden="true" />
+      <span class="sr-only">{', '}{t('space.games.dot_sr')}</span>
     </>
   )
 }
@@ -199,7 +221,7 @@ export function membersMeta(m: SpaceMemberSummary): string {
 }
 
 export function SpaceSectionNav({
-  spaceId, spaceName, sections, active, chatUnread,
+  spaceId, spaceName, sections, active, chatUnread, gamesOpen = 0,
   members, needsYou, notifLevel, onNotifLevel, chatNotif = null,
   settingsHref, canEditSections, leave = null, onLeave,
 }: Props) {
@@ -221,6 +243,7 @@ export function SpaceSectionNav({
   const needs = needsYouTotal(needsYou)
   const fitKey = [
     sections.map(label).join('\u0000'), chatUnread > 0 ? String(chatUnread) : '',
+    gamesOpen > 0 ? 'g' : '',
     needs > 0 ? String(needs) : '',
   ].join('|')
   const shown = usePriorityPlus(rowRef, measureRef, sections.length, fitKey)
@@ -397,6 +420,7 @@ export function SpaceSectionNav({
                   <>
                     <span class="sh-space-section__label">{label(s)}</span>
                     <UnreadBadge count={badgeOf(s)} />
+                    {s === 'games' && active !== 'games' && <GamesDot count={gamesOpen} />}
                   </>
                 ))}
               </li>

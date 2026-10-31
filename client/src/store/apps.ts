@@ -27,6 +27,12 @@ export interface InstalledApp {
   installed_at?: string | null
   /** Who added it ("Added by Anna"); ``null`` when that person is gone. */
   installed_by_name?: string | null
+  /** Group play (SDK 1.9): how many play, whether it can be opened as a
+   *  game in a space (``tables``), and whether a game being played still
+   *  takes people (``late_join``). */
+  players?:   { min: number, max: number }
+  tables?:    boolean
+  late_join?: boolean
 }
 
 /** The three plain-word permissions (D2), in the order they are listed. */
@@ -60,6 +66,10 @@ export interface CatalogEntry {
   compatible?:       boolean
   /** The caller asked an admin for it and nobody answered yet. */
   requested?:        boolean
+  /** Group play: the app's players range (``null``: not a group game)
+   *  and whether it can be opened as a game in a space. */
+  players?:          { min: number, max: number } | null
+  tables?:           boolean
 }
 
 export interface AppUpdate {
@@ -158,6 +168,12 @@ export async function loadInstalled({ quiet = false }: { quiet?: boolean } = {})
   } finally {
     if (!quiet) appsLoading.value = false
   }
+}
+
+/** Load the installed list once for a screen that only reads it (a
+ *  space's games): no spinner, a failure leaves it empty. */
+export function ensureInstalled(): Promise<void> {
+  return installedLoaded ? Promise.resolve() : loadInstalled({ quiet: true })
 }
 
 /** The live app frames (``app.installed`` / ``app.updated`` /

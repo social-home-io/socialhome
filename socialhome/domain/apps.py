@@ -777,6 +777,14 @@ class AppCatalogEntry:
     homepage: str | None = None
     min_core_version: str | None = None
     changelog: tuple[AppChangelogEntry, ...] = ()
+    #: Group play (SDK 1.9): the app's players range as ``(min, max)``
+    #: ("2–8 players"), ``None`` when the catalog doesn't say. ``tables``:
+    #: the catalog says the app can be opened as a game in a space — taken
+    #: as true when the entry carries a ``players`` range (only group-
+    #: capable apps declare one), so a space's "Games allowed here" can
+    #: offer an app this household hasn't added yet.
+    players: tuple[int, int] | None = None
+    tables: bool = False
 
     _REQUIRED: ClassVar[tuple[str, ...]] = (
         "app_id",
@@ -817,6 +825,7 @@ class AppCatalogEntry:
             declared = capabilities
         icon = data.get("icon_url")
         app_id = str(data["app_id"])
+        players = _parse_catalog_players(data.get("players"))
         return cls(
             app_id=app_id,
             name=_capped(str(data["name"]), CATALOG_NAME_MAX) or app_id,
@@ -841,7 +850,27 @@ class AppCatalogEntry:
             homepage=_parse_homepage(data.get("homepage")),
             min_core_version=_parse_core_version(data.get("min_core_version")),
             changelog=_parse_changelog(data.get("changelog")),
+            players=players,
+            tables=data.get("tables") is True or players is not None,
         )
+
+
+def _parse_catalog_players(raw: object) -> tuple[int, int] | None:
+    """``players {min, max}`` — whole numbers, ``2 ≤ min ≤ max ≤ 30`` —
+    else ``None`` (one bad field never drops the entry)."""
+    if not isinstance(raw, dict):
+        return None
+    lo, hi = raw.get("min"), raw.get("max")
+    if (
+        isinstance(lo, bool)
+        or isinstance(hi, bool)
+        or not isinstance(lo, int)
+        or not isinstance(hi, int)
+    ):
+        return None
+    if not 2 <= lo <= hi <= MANIFEST_PLAYERS_MAX:
+        return None
+    return (lo, hi)
 
 
 def _parse_i18n(raw: object) -> tuple[AppCatalogText, ...]:

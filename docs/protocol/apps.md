@@ -921,6 +921,7 @@ never drops the entry:
 | `min_core_version` | a version that parses | Unknown |
 | `icon_url` | ≤ 16 KiB | The placeholder icon |
 | `permissions` | strings | A non-list falls back to `capabilities` |
+| `players` (group games, SDK 1.9) | `{min, max}` whole numbers, `2 ≤ min ≤ max ≤ 30`; an entry with a range counts as a game that can be opened in a space (`tables`, also read as an explicit `tables: true`) — a space's "Games allowed here" offers it before this household adds it | Unknown (not offered there) |
 
 - **Permissions** are shown in Social Home's own words — never text from
   the catalog, so a publisher can't soften "sends invites and moves to

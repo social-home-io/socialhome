@@ -78,7 +78,7 @@ async def test_the_games_list_is_chosen_by_owner_admins_and_moderators(client):
     assert r.status == 403
     r = await client.put(url, json={"allowed_apps": [APP]}, headers=_auth(tok["mod"]))
     assert r.status == 200, await r.text()
-    assert (await r.json())["allowed_apps"] == [APP]
+    assert (await r.json()) == {"allowed_apps": [APP], "forwarded": False}
     # It rides the space's features (the config every member household gets).
     r = await client.get(f"/api/spaces/{sid}", headers=_auth(tok["owner"]))
     assert (await r.json())["features"]["allowed_apps"] == [APP]

@@ -6,7 +6,7 @@
  */
 import { describe, it, expect } from 'vitest'
 import {
-  SECTION_ORDER, legacySpaceSection, parseSpaceSection, redirectedSection,
+  SECTION_ORDER, gamesSectionShown, legacySpaceSection, parseSpaceSection, redirectedSection,
   sectionAllowed, sectionLabel, spaceSectionPath, visibleSpaceSections,
 } from './spaceTabs'
 
@@ -20,10 +20,36 @@ describe('visibleSpaceSections', () => {
   })
 
   it('never puts Members or Moderation in the bar (they are rows of More)', () => {
-    const all = visibleSpaceSections({ location: true, timetable: true }, member)
+    const all = visibleSpaceSections({ location: true, timetable: true, allowed_apps: ['chess'] }, member)
     expect(all).not.toContain('members')
     expect(all).not.toContain('moderation')
     expect(all).toEqual([...SECTION_ORDER])
+  })
+
+  it('Games follows the games list: shown while a game is allowed, after Chat', () => {
+    expect(visibleSpaceSections({ allowed_apps: ['chess'] }, member)).toEqual(
+      ['feed', 'chat', 'games', 'calendar', 'tasks', 'pages', 'gallery', 'stickies', 'bazaar'])
+    expect(visibleSpaceSections({ allowed_apps: [] }, member)).not.toContain('games')
+    expect(visibleSpaceSections(undefined, member)).not.toContain('games')
+  })
+
+  it('the people who choose the games see Games before any is allowed (D9)', () => {
+    const chooser = { ...member, choosesGames: true }
+    expect(visibleSpaceSections({ allowed_apps: [] }, chooser)).toContain('games')
+    expect(gamesSectionShown(undefined, chooser)).toBe(true)
+  })
+
+  it('never Games for a follower, nor in a global space', () => {
+    expect(visibleSpaceSections({ allowed_apps: ['chess'] }, follower)).not.toContain('games')
+    expect(gamesSectionShown({ allowed_apps: ['chess'] }, { ...member, choosesGames: true, global: true }))
+      .toBe(false)
+    expect(sectionAllowed('games', { allowed_apps: ['chess'] }, { ...follower, canModerate: false }))
+      .toBe(false)
+    expect(sectionAllowed('games', { allowed_apps: ['chess'] }, { ...member, canModerate: false }))
+      .toBe(true)
+    expect(sectionLabel('games')).toBe('Games')
+    expect(parseSpaceSection('games')).toBe('games')
+    expect(spaceSectionPath('sp-1', 'games')).toBe('/spaces/sp-1/games')
   })
 
   it('keeps SECTION_ORDER whatever the toggles', () => {

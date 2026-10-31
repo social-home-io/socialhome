@@ -90,6 +90,50 @@ def test_catalog_entry_from_dict_validates_required_fields():
     assert entry.bundle_sha256 == "cd" * 32
 
 
+def _entry(**extra) -> AppCatalogEntry:
+    return AppCatalogEntry.from_dict(
+        {
+            "app_id": "quiz",
+            "name": "Quiz",
+            "latest_version": "1.0.0",
+            "description": "A quiz",
+            "bundle_url": "https://example/quiz.tgz",
+            "bundle_sha256": "cd" * 32,
+            **extra,
+        }
+    )
+
+
+def test_catalog_entry_players_make_it_a_group_game():
+    """``players`` (SDK 1.9 catalogs) → the range, and the app can be
+    opened as a game in a space; without it, it can't (unless ``tables``)."""
+    e = _entry(players={"min": 3, "max": 30})
+    assert e.players == (3, 30)
+    assert e.tables is True
+    plain = _entry()
+    assert plain.players is None
+    assert plain.tables is False
+    assert _entry(tables=True).tables is True
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "2-4",
+        {"min": 1, "max": 4},
+        {"min": 5, "max": 4},
+        {"min": 2, "max": 31},
+        {"min": True, "max": 4},
+        {"min": 2.0, "max": 4},
+        {"max": 4},
+    ],
+)
+def test_a_bad_catalog_players_range_reads_as_unknown(raw):
+    e = _entry(players=raw)
+    assert e.players is None
+    assert e.tables is False
+
+
 def test_catalog_entry_from_dict_missing_fields():
     with pytest.raises(ValueError):
         AppCatalogEntry.from_dict({"app_id": "x"})  # missing fields

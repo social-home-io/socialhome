@@ -17,6 +17,11 @@
  *   - ``member`` — member or moderator: their own notifications, "You in
  *     this space", their bots, and Leave.
  *   - ``follower`` — notifications and Unfollow, nothing else.
+ *
+ * Games ("Games allowed here", group play D9) is the one section a
+ * moderator gets beyond a member's: the owner, admins and moderators
+ * choose the space's games. Never in a global space (no games there) —
+ * the caller says with ``{ games }``.
  */
 import { t } from '@/i18n/i18n'
 
@@ -25,6 +30,7 @@ export type SettingsSection =
   | 'find'
   | 'members'
   | 'sections'
+  | 'games'
   | 'notifications'
   | 'location'
   | 'moderation'
@@ -35,6 +41,12 @@ export type SettingsSection =
   | 'unfollow'
 
 export type SettingsViewer = 'admin' | 'remote-admin' | 'member' | 'follower'
+
+/** What else decides the sections: ``games`` — the viewer chooses the
+ *  space's games (owner / admin / moderator, not a global space). */
+export interface SettingsExtras {
+  games?: boolean
+}
 
 const ORDER: Record<SettingsViewer, readonly SettingsSection[]> = {
   admin: [
@@ -50,13 +62,20 @@ const ORDER: Record<SettingsViewer, readonly SettingsSection[]> = {
 }
 
 const ALL: readonly SettingsSection[] = [
-  'basics', 'find', 'members', 'sections', 'notifications', 'location',
+  'basics', 'find', 'members', 'sections', 'games', 'notifications', 'location',
   'moderation', 'bots', 'danger', 'you', 'leave', 'unfollow',
 ]
 
-/** The viewer's sections, in page order. */
-export function settingsSections(viewer: SettingsViewer): readonly SettingsSection[] {
-  return ORDER[viewer]
+/** The viewer's sections, in page order: Games after Sections for an
+ *  admin, after Notifications for a moderator. */
+export function settingsSections(
+  viewer: SettingsViewer, extras: SettingsExtras = {},
+): readonly SettingsSection[] {
+  const order = ORDER[viewer]
+  if (!extras.games || viewer === 'follower') return order
+  const after = order.includes('sections') ? 'sections' : 'notifications'
+  const at = order.indexOf(after) + 1
+  return [...order.slice(0, at), 'games', ...order.slice(at)]
 }
 
 /** The section a ``/settings/:section`` segment names, or ``null`` for
@@ -81,10 +100,10 @@ export function legacySettingsSection(
 /** The section to show: the asked one when this viewer has it, else the
  *  viewer's first. */
 export function resolveSettingsSection(
-  segment: unknown, viewer: SettingsViewer,
+  segment: unknown, viewer: SettingsViewer, extras: SettingsExtras = {},
 ): SettingsSection {
   const asked = parseSettingsSection(segment)
-  const mine = settingsSections(viewer)
+  const mine = settingsSections(viewer, extras)
   return asked && mine.includes(asked) ? asked : mine[0]
 }
 
@@ -100,6 +119,7 @@ export function settingsSectionLabel(section: SettingsSection): string {
     case 'find':          return t('space.settings_page.section.find')
     case 'members':       return t('space.settings_page.section.members')
     case 'sections':      return t('space.settings_page.section.sections')
+    case 'games':         return t('space.settings_page.section.games')
     case 'notifications': return t('space.settings_page.section.notifications')
     case 'location':      return t('space.settings_page.section.location')
     case 'moderation':    return t('space.settings_page.section.moderation')

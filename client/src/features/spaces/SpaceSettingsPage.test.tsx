@@ -93,8 +93,8 @@ describe('SpaceSettingsPage — one page, a URL per section', () => {
     const view = await mount()
     const links = indexLinks(view)
     expect(links.map(a => a.textContent)).toEqual([
-      'Basics', 'Who can find it', 'Members & joining', 'Sections', 'Your notifications',
-      'Location & zones', 'Moderation & age', 'Bots', 'Archive or delete',
+      'Basics', 'Who can find it', 'Members & joining', 'Sections', 'Games allowed here',
+      'Your notifications', 'Location & zones', 'Moderation & age', 'Bots', 'Archive or delete',
     ])
     expect(links[0].getAttribute('href')).toBe('/spaces/sp-1/settings/basics')
     expect(links[0].getAttribute('aria-current')).toBe('page')
@@ -103,9 +103,27 @@ describe('SpaceSettingsPage — one page, a URL per section', () => {
     expect(view.queryAllByRole('tab')).toHaveLength(0)
     expect(view.queryAllByRole('tablist')).toHaveLength(0)
     // Every section is on the page, with its own anchor.
-    for (const s of ['basics', 'find', 'members', 'sections', 'notifications', 'location', 'moderation', 'bots', 'danger']) {
+    for (const s of ['basics', 'find', 'members', 'sections', 'games', 'notifications', 'location', 'moderation', 'bots', 'danger']) {
       expect(view.container.querySelector(`#settings-${s}`)).not.toBeNull()
     }
+  })
+
+  it('a moderator gets Games allowed here (D9); a plain member does not', async () => {
+    role = 'moderator'
+    let view = await mount()
+    expect(indexLinks(view).map(a => a.textContent)).toEqual([
+      'Your notifications', 'Games allowed here', 'You in this space', 'Bots', 'Leave',
+    ])
+    view.unmount()
+    role = 'member'
+    view = await mount()
+    expect(indexLinks(view).map(a => a.textContent)).not.toContain('Games allowed here')
+  })
+
+  it('a global space has no Games allowed here, even for its owner', async () => {
+    detail = { ...detail, space_type: 'global' }
+    const view = await mount()
+    expect(indexLinks(view).map(a => a.textContent)).not.toContain('Games allowed here')
   })
 
   it('an old "Reviewed is not available" bell link (?household=) opens Members & joining', async () => {

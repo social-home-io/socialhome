@@ -157,6 +157,20 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   APP_AGE_RESTRICTED: () => t('error.app_age_restricted'),
   APP_NEEDS_NEWER_SOCIAL_HOME: () => t('error.app_needs_newer_social_home'),
   APP_PERMISSION_DENIED: () => t('error.app_permission_denied'),
+  // Games in a space (group play, v_77) and the group games they open.
+  SPACE_APP_NOT_ALLOWED: () => t('error.space_app_not_allowed'),
+  SPACE_TABLE_DAILY_LIMIT: (_b, p) => t('error.space_table_daily_limit', { limit: str(p, 'limit') }),
+  SPACE_TABLE_ANNOUNCE_LIMIT: () => t('error.space_table_announce_limit'),
+  SPACE_TABLE_HOUSEHOLD_TOO_OLD: () => t('error.space_table_household_too_old'),
+  APP_GROUP_NOT_FOUND: () => t('error.app_group_not_found'),
+  APP_GROUP_NOT_HOST: () => t('error.app_group_not_host'),
+  APP_GROUP_CLOSED: () => t('error.app_group_closed'),
+  APP_GROUP_FULL: () => t('error.app_group_full'),
+  APP_GROUP_CANT_JOIN: () => t('error.app_group_cant_join'),
+  APP_GROUPS_NOT_SUPPORTED: () => t('error.app_groups_not_supported'),
+  APP_GROUP_SIZE: (_b, p) => t('error.app_group_size', { min: str(p, 'min'), max: str(p, 'max') }),
+  APP_GROUP_OPEN_LIMIT: (_b, p) => t('error.app_group_open_limit', { limit: str(p, 'limit') }),
+  APP_GROUP_DAILY_LIMIT: (_b, p) => t('error.app_group_daily_limit', { limit: str(p, 'limit') }),
   IMAGE_UNREADABLE: () => t('error.image_unreadable'),
   // Connecting to a GFS (QR / pasted code, or onboarding's open sign-up).
   // Our own words for every refusal, never the GFS's (``routes/gfs.py``).
