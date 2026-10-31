@@ -452,7 +452,8 @@ budget are exactly as above. What the space adds:
   Private and public spaces (local communities included), D6.
 - **Who may sit** — anyone with a live writer seat on the joining household
   in the hub's own copy of the space roster, not banned, while the app is on
-  the list. Being in the space and pressing Join is the consent (D7):
+  the list — one place per person (the same user id under another name is
+  refused), and nobody new once the roster holds 60 entries. Being in the space and pressing Join is the consent (D7):
   households that aren't paired with the hub or each other play, and what
   travels between them is the game and the roster's names. Each household's
   own rules (blocks, guardian blocks, age) hold as above; a protected
@@ -462,9 +463,12 @@ budget are exactly as above. What the space adds:
   a moderator closes any table of the space (`closed_by_moderator`; their
   household sends `group_close {by_role: true, user_id}` to the hub, which
   checks their content-authority seat). An app taken off the list closes
-  its waiting tables (`app_removed`); games being played finish but take
-  nobody more (D10). Leaving the space leaves its tables (a waiting table
-  one hosts closes). Everyone seated at a table a moderator or the list
+  its waiting tables (`app_removed`), as does the space turning global or
+  being archived; games being played finish but take nobody more (D10).
+  Leaving the space — or being removed, banned or made a follower — leaves
+  its tables: the hub takes such a player out (the host person as if they
+  left: a waiting table closes, a game passes on) and, until then, drops
+  any verb or message by someone without a live writer seat. Everyone seated at a table a moderator or the list
   closed gets one About-you row ("A moderator closed the Chess game in
   Lakeside" / "Chess is no longer allowed in Lakeside"), no push.
 - **Let everyone know** — the opener may tick it (D5): each member household
@@ -520,8 +524,10 @@ sequenceDiagram
   (`host_user_id`) holds a live writer seat on the **sending** household
   and isn't banned, for an app on this household's copy of the list, and
   newer than the copy held; a known table only from its hub, for the same
-  space and app. At most **3 new tables per person per space per day**
-  (counted by this household's own clock) and 50 open tables per hub. A
+  space and app. At most **3 new tables per person per space per day** and
+  one "let everyone know" — counted by the host's seat-checked user id and
+  this household's own clock — and 50 open tables per hub. The strip
+  orders tables by when this household heard of them. A
   household with someone at the table follows the roster, not the card.
 - A space session is taken only for a table of that space this household
   knows, from its hub or a household with a writer seat; a join only at the
@@ -537,6 +543,13 @@ sequenceDiagram
 household that was offline. A household that joins the space later hears
 of a table with its next card (Start, close, full / not full, or the seat
 count), not before — no `SYNC_RECORD_LINES` entry.
+
+**Residual — the roster's user ids.** A player's `user_id` on the roster
+is the hub's word (a receiver checks the seat keys, not who holds a
+seat); a hostile hub could relabel a player so a household's block check
+misses them. It could as well leave anyone off the roster: blocks are
+kept by each household's own view, and a hub is a member household of
+the space.
 
 **Residual — households the hub doesn't know.** A card and a seat answer
 go only to member households whose version the hub knows
