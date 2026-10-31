@@ -2704,6 +2704,10 @@ def _build_middleware(config: Config, limiter: RateLimiter):
             # the 60/min ``/api/apps`` default, so a quick game 429'd. Each
             # send is one envelope to one household (never a fan-out):
             # ≤ 300 a minute per person.
+            # fnmatch's ``*`` crosses ``/``: messages at a group table
+            # (``POST …/groups/{sid}/messages``, v_76) share this bucket;
+            # the table's hub adds its own send budget (600 envelopes a
+            # minute per table).
             "POST /api/apps/*/messages": (300, 60),
             # An app's saved data (``store`` list / get / set / delete) gets
             # its own bucket too: a fast game saves around each move (a
@@ -4944,6 +4948,8 @@ def create_app(config: Config | None = None) -> web.Application:
             user_repo=user_repo,
             app_federation=app_federation_service,
             federation=federation_service,
+            federation_repo=federation_repo,
+            key_manager=key_manager,
             ws=ws_manager,
             bus=bus,
         )

@@ -56,11 +56,15 @@ import asyncio
 import dataclasses
 import logging
 import re
+from collections import OrderedDict
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 from weakref import WeakValueDictionary
 
+import orjson
+
+from ..crypto import b64url_decode
 from ..domain.app_group import (
     CLOSE_FULL,
     CLOSE_REMOVED,
@@ -68,17 +72,23 @@ from ..domain.app_group import (
     END_CANCELLED,
     END_EXPIRED,
     END_HOST_GONE,
+    GROUP_BATCH_MAX_BYTES,
+    GROUP_BATCH_MAX_MESSAGES,
+    GROUP_COALESCE_SECONDS,
     GROUP_ENDED,
     GROUP_ENDED_KEEP_SECONDS,
+    GROUP_HELD_MAX_BYTES,
     GROUP_LOBBY,
     GROUP_LOBBY_DAYS,
     GROUP_LOBBY_DEFAULT_DAYS,
+    GROUP_MESSAGE_MAX_BYTES,
     GROUP_MIRROR_GRACE_SECONDS,
     GROUP_MIRRORS_PER_HUB_MAX,
     GROUP_OPEN_TABLES_MAX,
     GROUP_PICK_MAX_PLAYERS,
     GROUP_PLAYING,
     GROUP_ROSTER_EVERY_SECONDS,
+    GROUP_SEQ_WINDOW,
     GROUP_TABLES_PER_DAY_MAX,
     PERSON_CLOSE_REASONS,
     SEAT_DECLINED,
@@ -95,6 +105,7 @@ from ..domain.app_group import (
     VERB_SEAT,
     VERB_START,
     WIRE_SEAT_STATES,
+    AppGroupBusyError,
     AppGroupCantJoinError,
     AppGroupClosedError,
     AppGroupFullError,
@@ -102,13 +113,18 @@ from ..domain.app_group import (
     AppGroupLimitError,
     AppGroupNotFoundError,
     AppGroupNotHostError,
+    AppGroupSeatError,
     AppGroupSizeError,
     AppGroupsNotSupportedError,
     AppGroupTooFewError,
+    GroupMessage,
     GroupSeat,
     GroupSession,
     GroupWireError,
+    SeatKey,
     note_ok,
+    parse_batch,
+    parse_message,
     parse_table,
 )
 from ..domain.apps import (
@@ -120,10 +136,30 @@ from ..domain.apps import (
     SESSION_INVITED,
     AppPendingSession,
 )
-from ..domain.events import AppChallengeEnded, AppChallengeReceived, UserBlocked
+from ..domain.events import (
+    AppChallengeEnded,
+    AppChallengeReceived,
+    AppTurn,
+    AppTurnsSeen,
+    UserBlocked,
+)
 from ..domain.federation import FederationEvent, FederationEventType
 from ..domain.federation_capabilities import FederationCapability
+from ..federation.seat_crypto import (
+    SeatSealError,
+    UnsupportedSeatKemSuite,
+    UnsupportedSeatKeySigSuite,
+    check_sealed_entry,
+    new_msg_id,
+    new_seat_keypair,
+    open_sealed,
+    parse_seat_key,
+    seal,
+    sign_seat_key,
+    verify_seat_key,
+)
 from .app_federation_service import with_household
+from .app_group_budget import TableSendBudget
 from .protection_gate import ProtectionGateMixin
 
 if TYPE_CHECKING:
@@ -131,9 +167,11 @@ if TYPE_CHECKING:
     from ..domain.events import AppUninstalled, DomainEvent
     from ..domain.user import User
     from ..infrastructure.event_bus import EventBus
+    from ..infrastructure.key_manager import KeyManager
     from ..infrastructure.ws_manager import WebSocketManager
     from ..repositories.app_group_repo import AbstractAppGroupRepo
     from ..repositories.app_repo import AbstractAppRepo
+    from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.user_repo import AbstractUserRepo
     from .app_federation_service import AppFederationService
 
@@ -145,10 +183,42 @@ _SESSION_RE = re.compile(r"[A-Za-z0-9_-]{1,128}")
 #: The WebSocket frame a local person's SPA gets on every change of a
 #: table they have a place at (their own view, :meth:`AppGroupService.view`).
 WS_FRAME_TYPE = "app.group"
+#: The WebSocket frame a local person's SPA gets for each message at a
+#: table delivered to them live.
+WS_MESSAGE_FRAME_TYPE = "app.group.message"
+
+
+def _seat_key_ad(session_id: str) -> bytes:
+    """What this household's KEK-wrapped seat key is bound to."""
+    return b"socialhome/app_group/seat_key_at_rest|" + session_id.encode()
 
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+#: :meth:`AppGroupService._open` found nothing it could open.
+_UNOPENED = object()
+
+
+def _batches(msgs: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """*msgs* in envelopes of at most :data:`GROUP_BATCH_MAX_MESSAGES`
+    messages and :data:`GROUP_BATCH_MAX_BYTES` (a bigger message alone)."""
+    out: list[list[dict[str, Any]]] = []
+    batch: list[dict[str, Any]] = []
+    size = 0
+    for msg in msgs:
+        n = len(orjson.dumps(msg))
+        if batch and (
+            len(batch) >= GROUP_BATCH_MAX_MESSAGES or size + n > GROUP_BATCH_MAX_BYTES
+        ):
+            out.append(batch)
+            batch, size = [], 0
+        batch.append(msg)
+        size += n
+    if batch:
+        out.append(batch)
+    return out
 
 
 class AppGroupService(ProtectionGateMixin):
@@ -158,14 +228,21 @@ class AppGroupService(ProtectionGateMixin):
     __slots__ = (
         "_app_fed",
         "_app_repo",
+        "_budgets",
         "_bus",
         "_child_protection",
+        "_coalesce_every",
+        "_fed_repo",
         "_federation",
+        "_key_manager",
         "_locks",
+        "_out_due",
+        "_outq",
         "_repo",
         "_roster_due",
         "_roster_every",
         "_roster_sent",
+        "_seen",
         "_stop",
         "_tasks",
         "_user_repo",
@@ -181,8 +258,11 @@ class AppGroupService(ProtectionGateMixin):
         app_federation: AppFederationService,
         federation: Any,
         ws: WebSocketManager,
+        federation_repo: AbstractFederationRepo,
+        key_manager: KeyManager,
         bus: EventBus | None = None,
         roster_every: float = GROUP_ROSTER_EVERY_SECONDS,
+        coalesce_every: float = GROUP_COALESCE_SECONDS,
     ) -> None:
         self._repo = group_repo
         self._app_repo = app_repo
@@ -201,6 +281,19 @@ class AppGroupService(ProtectionGateMixin):
         self._roster_due: set[str] = set()
         self._tasks: set[asyncio.Task] = set()
         self._stop = asyncio.Event()
+        self._fed_repo = federation_repo
+        self._key_manager = key_manager
+        self._coalesce_every = coalesce_every
+        #: Messages the hub passes on, gathered per (table, household)
+        #: for :data:`GROUP_COALESCE_SECONDS`, and which wait to go.
+        self._outq: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        self._out_due: set[tuple[str, str]] = set()
+        #: The send budget of each table (the hub's, or what this
+        #: household's own people send to another hub's table).
+        self._budgets: dict[str, TableSendBudget] = {}
+        #: The ``seq`` numbers each table's copy passed on lately (repeats
+        #: are dropped) — bounded per table, least recent table forgotten.
+        self._seen: OrderedDict[str, set[int]] = OrderedDict()
 
     @property
     def _own(self) -> str:
@@ -223,7 +316,8 @@ class AppGroupService(ProtectionGateMixin):
             log.warning("app_group: bus publish failed: %s", exc)
 
     async def stop(self) -> None:
-        """Let the coalesced roster sends that wait go (none is sent)."""
+        """Let the coalesced roster sends that wait go (none is sent);
+        messages that wait for their envelope go now (to the outbox)."""
         self._stop.set()
         if self._tasks:
             await asyncio.gather(*self._tasks, return_exceptions=True)
@@ -252,6 +346,7 @@ class AppGroupService(ProtectionGateMixin):
             "end_reason": table.end_reason,
             "space_id": table.space_id,
             "rev": table.roster_rev,
+            "seq": table.seq,
             "host": table.host_seat or None,
             "is_host": table.is_host(own, user.username),
             "me": mine.seat if mine is not None and mine.seat else None,
@@ -412,10 +507,16 @@ class AppGroupService(ProtectionGateMixin):
                 opener_user=host.username,
             )
             await self._repo.save(table)
+            # The hub's own seat key, on the host's entry.
+            key = await self._own_seat_key(table.session_id)
+            table = table.with_entry(dataclasses.replace(table.roster[0], seat_key=key))
+            await self._repo.save(table)
             hosting = self._seat_row(table, actor_user_id, state=SESSION_ACTIVE)
             await self._app_repo.add_active_session(hosting)
         others = len(picked) - 1
-        for entry in table.roster[1:]:
+        for entry in table.roster:
+            if entry.state != SEAT_INVITED:
+                continue
             if entry.instance == own:
                 await self._invite_local(table, app, entry, host, actor_user_id)
             else:
@@ -566,14 +667,18 @@ class AppGroupService(ProtectionGateMixin):
             raise AppGroupClosedError()
         if not await self._may_play(user, table):
             raise AppGroupCantJoinError()
+        key = await self._own_seat_key(table.session_id)
         if table.hub_instance == self._own:
-            table = await self._hub_join(table.session_id, self._own, user.username)
+            table = await self._hub_join(
+                table.session_id, self._own, user.username, seat_key=key
+            )
         else:
             await self._send(
                 table.hub_instance,
                 table,
                 VERB_JOIN,
                 from_user=user.username,
+                seat_key=key.to_wire(),
                 snap=False,
             )
         taken = await self._app_repo.activate_pending_session(
@@ -729,11 +834,18 @@ class AppGroupService(ProtectionGateMixin):
         return table
 
     async def _hub_join(
-        self, session_id: str, instance: str, user: str
+        self,
+        session_id: str,
+        instance: str,
+        user: str,
+        *,
+        seat_key: SeatKey | None = None,
     ) -> GroupSession:
         """Seat an invited person — or say why not (raised for a local
         joiner, sent as ``group_close`` to a remote one). Someone the hub
-        never invited, removed or who declined is ignored."""
+        never invited, removed or who declined is ignored. *seat_key* is
+        their household's (already checked); the first key a household
+        brings to a table stays."""
         refusal: str | None = None
         started = False
         async with self._lock(session_id):
@@ -751,7 +863,11 @@ class AppGroupService(ProtectionGateMixin):
                 else:
                     stamp = _now().isoformat()
                     seated = dataclasses.replace(
-                        entry, state=SEAT_SEATED, seat=table.next_seat, joined_at=stamp
+                        entry,
+                        state=SEAT_SEATED,
+                        seat=table.next_seat,
+                        joined_at=stamp,
+                        seat_key=table.seat_key_of(instance) or seat_key,
                     )
                     changes: dict[str, Any] = {}
                     if (
@@ -1004,20 +1120,625 @@ class AppGroupService(ProtectionGateMixin):
         }
         if snap:
             payload["table"] = table.to_wire()
+        await self._send_raw(to_instance, FederationEventType.APP_SESSION, payload)
+
+    async def _send_raw(
+        self, to_instance: str, event_type: FederationEventType, payload: dict
+    ) -> None:
+        """One sealed event to *to_instance* (best effort: the outbox
+        retries; a failure is logged)."""
         try:
             await self._federation.send_event(
                 to_instance_id=to_instance,
-                event_type=FederationEventType.APP_SESSION,
+                event_type=event_type,
                 payload=payload,
             )
         except Exception as exc:  # noqa: BLE001 — the change stands here
             log.warning(
                 "app_group: %s for table %s to %s not sent: %s",
-                verb,
-                table.session_id,
+                payload.get("verb", "message"),
+                payload.get("session_id"),
                 to_instance,
                 exc,
             )
+
+    # ─── Seat keys ────────────────────────────────────────────────────
+
+    async def _own_seat_key(self, session_id: str) -> SeatKey:
+        """This household's seat key at the table — made (and kept,
+        KEK-wrapped, on the table's row) the first time one of its people
+        takes a seat there. One per household, never per person."""
+        stored = await self._own_seat_secret(session_id)
+        if stored is None:
+            priv, pub = new_seat_keypair()
+            wire = sign_seat_key(
+                seed=self._federation.own_identity_seed,
+                session_id=session_id,
+                instance=self._own,
+                pub=pub,
+            )
+            record = {
+                **wire,
+                "priv": self._key_manager.encrypt(
+                    priv, associated_data=_seat_key_ad(session_id)
+                ),
+            }
+            await self._repo.set_seat_key(session_id, orjson.dumps(record).decode())
+            # Two joins racing: whichever key was kept first stays.
+            stored = await self._own_seat_secret(session_id)
+            if stored is None:
+                raise AppGroupNotFoundError()
+        return stored[1]
+
+    async def _own_seat_secret(self, session_id: str) -> tuple[bytes, SeatKey] | None:
+        """This household's seat key at the table: (private, public)."""
+        raw = await self._repo.get_seat_key(session_id)
+        if raw is None:
+            return None
+        record = orjson.loads(raw)
+        priv = self._key_manager.decrypt(
+            record["priv"], associated_data=_seat_key_ad(session_id)
+        )
+        return priv, SeatKey.from_wire(record)
+
+    async def _identity_pk(self, instance: str) -> bytes | None:
+        """*instance*'s Ed25519 identity key, if this household is paired
+        with it."""
+        peer = await self._fed_repo.get_instance(instance)
+        if peer is None or not peer.remote_identity_pk:
+            return None
+        try:
+            return bytes.fromhex(peer.remote_identity_pk)
+        except ValueError:
+            return None
+
+    async def _joiner_key(
+        self, session_id: str, instance: str, payload: dict
+    ) -> SeatKey | None:
+        """The seat key a ``group_join`` carries, checked against the
+        joining household's identity key — ``None`` (the join is dropped)
+        when it is missing, malformed, of an unknown suite or doesn't
+        verify. The hub is paired with every household it invites."""
+        raw = payload.get("seat_key")
+        identity = await self._identity_pk(instance)
+        try:
+            if identity is None or not verify_seat_key(
+                raw, session_id=session_id, instance=instance, identity_pk=identity
+            ):
+                raise SeatSealError("seat key doesn't verify")
+            return SeatKey.from_wire(parse_seat_key(raw))
+        except (
+            SeatSealError,
+            UnsupportedSeatKemSuite,
+            UnsupportedSeatKeySigSuite,
+            GroupWireError,
+        ) as exc:
+            log.info(
+                "app_group: join for %s from %s dropped: %s", session_id, instance, exc
+            )
+            return None
+
+    async def _check_seat_keys(self, table: GroupSession) -> None:
+        """Every seat key in a hub's snapshot: a suite this build knows;
+        this household's own must be the one it made; another household's
+        must verify against the identity key this household stores for it
+        (a household it isn't paired with: the hub's word — the residual
+        of design 2.3). Raises :class:`GroupWireError` (the snapshot is
+        dropped)."""
+        own = self._own
+        checked: set[str] = set()
+        for entry in table.roster:
+            key = entry.seat_key
+            if key is None or entry.instance in checked:
+                continue
+            checked.add(entry.instance)
+            wire = key.to_wire()
+            try:
+                parse_seat_key(wire)
+                if entry.instance == own:
+                    mine = await self._own_seat_secret(table.session_id)
+                    if mine is not None and mine[1] != key:
+                        raise SeatSealError("not our seat key")
+                    continue
+                identity = await self._identity_pk(entry.instance)
+                if identity is not None and not verify_seat_key(
+                    wire,
+                    session_id=table.session_id,
+                    instance=entry.instance,
+                    identity_pk=identity,
+                ):
+                    raise SeatSealError("seat key doesn't verify")
+            except (
+                SeatSealError,
+                UnsupportedSeatKemSuite,
+                UnsupportedSeatKeySigSuite,
+            ) as exc:
+                raise GroupWireError(f"seat key of {entry.instance}: {exc}") from exc
+
+    # ─── Messages ─────────────────────────────────────────────────────
+
+    async def send_message(
+        self,
+        *,
+        app_id: str,
+        session_id: str,
+        actor_user_id: str,
+        data: Any,
+        to: list[int] | None = None,
+        turn: int | None = None,
+    ) -> dict:
+        """A seated person's app sends *data* to everyone at the table, or
+        to the seats in *to* (sealed here to each one's household seat key:
+        the hub passes on only ciphertext). *turn* names the seat whose
+        turn it is now ("Your turn" there). ``{"seq": n}`` when this
+        household is the hub, ``{"seq": None}`` when it went to the hub's.
+
+        :class:`AppGroupClosedError` when the table ended or the caller
+        isn't seated, :class:`AppGroupSeatError` for a ``to`` / ``turn``
+        seat nobody holds, one's own, or one without a seat key,
+        :class:`AppGroupBusyError` past the table's send budget."""
+        app = await self._usable(app_id, actor_user_id)
+        table, user, row = await self._mine(app_id, session_id, actor_user_id)
+        own = self._own
+        if table.households() - {own} or table.hub_instance != own:
+            app.require_permission(PERMISSION_FEDERATION)
+        mine = table.entry(own, user.username)
+        if (
+            row.state != SESSION_ACTIVE
+            or mine is None
+            or mine.state != SEAT_SEATED
+            or table.state == GROUP_ENDED
+        ):
+            raise AppGroupClosedError()
+        seats = {e.seat: e for e in table.seated}
+        targets = None if to is None else tuple(dict.fromkeys(to))
+        if any(seat not in seats or seat == mine.seat for seat in targets or ()):
+            raise AppGroupSeatError()
+        if turn is not None and turn not in seats:
+            raise AppGroupSeatError()
+        msg_id = new_msg_id()
+        if targets is None:
+            msg = GroupMessage(msg_id=msg_id, data=data, turn=turn)
+        else:
+            if not targets:
+                raise AppGroupSeatError()
+            priv, _pub = await self._own_seat_secret_or_mint(table.session_id)
+            plaintext = orjson.dumps(data)
+            sealed = []
+            for seat in targets:
+                key = seats[seat].seat_key
+                if key is None:
+                    raise AppGroupSeatError()
+                sealed.append(
+                    seal(
+                        plaintext,
+                        my_priv=priv,
+                        peer_pub=b64url_decode(key.pub),
+                        session_id=table.session_id,
+                        from_seat=mine.seat,
+                        to_seat=seat,
+                        msg_id=msg_id,
+                    )
+                )
+            msg = GroupMessage(
+                msg_id=msg_id, to=targets, sealed=tuple(sealed), turn=turn
+            )
+        now = _now()
+        if row.last_change < (now - timedelta(hours=1)).isoformat():
+            # The seat's 90-day quiet rule moves on (at most hourly).
+            await self._app_repo.touch_session(
+                app_id, actor_user_id, session_id, now=now.isoformat()
+            )
+        if table.hub_instance == own:
+            seq = await self._hub_message(session_id, own, user.username, msg)
+            return {"seq": seq}
+        # This household's own budget for the table, before the hub's.
+        self._spend(table, self._recipient_households(table, mine, msg))
+        payload: dict[str, Any] = {
+            "app_id": app_id,
+            "session_id": session_id,
+            "from_user": user.username,
+            "group": msg.to_hub(),
+        }
+        if targets is None:
+            payload["data"] = data
+        await self._send_raw(
+            table.hub_instance, FederationEventType.APP_MESSAGE, payload
+        )
+        return {"seq": None}
+
+    async def _own_seat_secret_or_mint(self, session_id: str) -> tuple[bytes, SeatKey]:
+        await self._own_seat_key(session_id)
+        secret = await self._own_seat_secret(session_id)
+        assert secret is not None  # kept just now
+        return secret
+
+    def _recipient_households(
+        self, table: GroupSession, sender: GroupSeat, msg: GroupMessage
+    ) -> set[str]:
+        """The households (not the hub's own) the hub sends *msg* to: those
+        of everyone seated it is for — never the sender themself."""
+        return {
+            e.instance
+            for e in table.seated
+            if not e.is_person(sender.instance, sender.user)
+            and (msg.to is None or e.seat in msg.to)
+        } - {table.hub_instance}
+
+    def _spend(self, table: GroupSession, households: set[str]) -> None:
+        """Spend one envelope per household of the table's send budget —
+        or :class:`AppGroupBusyError`."""
+        budget = self._budgets.get(table.session_id)
+        if budget is None:
+            budget = self._budgets[table.session_id] = TableSendBudget()
+        wait = budget.take(len(households), asyncio.get_running_loop().time())
+        if wait is not None:
+            raise AppGroupBusyError(wait)
+
+    async def _hub_message(
+        self, session_id: str, instance: str, user: str, msg: GroupMessage
+    ) -> int:
+        """The hub takes a message from *user* of *instance*: seated now,
+        at a table not ended, every ``to`` / ``turn`` seat seated (never
+        the sender's own as a target), sealed entries of a suite this build
+        knows, within the size and the table's send budget. Numbers it
+        (``seq``) and queues it, one envelope per household it is for; the
+        hub's own people get it at once. Returns the ``seq``."""
+        async with self._lock(session_id):
+            table = await self._hub_table(session_id)
+            if table is None:
+                raise AppGroupNotFoundError()
+            sender = table.entry(instance, user)
+            if (
+                sender is None
+                or sender.state != SEAT_SEATED
+                or table.state == GROUP_ENDED
+            ):
+                raise AppGroupClosedError()
+            seated = {e.seat for e in table.seated}
+            if msg.to is not None and (
+                not set(msg.to) <= seated or sender.seat in msg.to
+            ):
+                raise AppGroupSeatError()
+            if msg.turn is not None and msg.turn not in seated:
+                raise AppGroupSeatError()
+            if msg.to is None:
+                if len(orjson.dumps(msg.data)) > GROUP_MESSAGE_MAX_BYTES:
+                    raise GroupWireError("message too large")
+            else:
+                try:
+                    for entry in msg.sealed:
+                        check_sealed_entry(entry)
+                except (SeatSealError, UnsupportedSeatKemSuite) as exc:
+                    raise GroupWireError(f"sealed entry: {exc}") from exc
+            households = self._recipient_households(table, sender, msg)
+            self._spend(table, households)
+            seq = table.seq + 1
+            stamp = _now().isoformat()
+            await self._repo.raise_seq(session_id, seq, now=stamp)
+            table = dataclasses.replace(table, seq=seq, updated_at=stamp)
+            numbered = dataclasses.replace(msg, seq=seq, from_seat=sender.seat)
+            for household in sorted(households):
+                for_seats = frozenset(
+                    e.seat
+                    for e in table.seated
+                    if e.instance == household
+                    and not e.is_person(instance, user)
+                    and (msg.to is None or e.seat in msg.to)
+                )
+                self._queue_out(table, household, numbered.relayed(for_seats))
+        await self._deliver_local(table, numbered)
+        return seq
+
+    def _queue_out(self, table: GroupSession, household: str, msg: dict) -> None:
+        """Gather *msg* for *household* — it goes with whatever else the
+        hub passes it on this table within :data:`GROUP_COALESCE_SECONDS`."""
+        key = (table.session_id, household)
+        self._outq.setdefault(key, []).append(msg)
+        if key in self._out_due:
+            return
+        self._out_due.add(key)
+        task = asyncio.create_task(self._flush_later(key, table.app_id))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _flush_later(self, key: tuple[str, str], app_id: str) -> None:
+        session_id, household = key
+        try:
+            if self._coalesce_every > 0 and not self._stop.is_set():
+                try:
+                    await asyncio.wait_for(
+                        self._stop.wait(), timeout=self._coalesce_every
+                    )
+                except TimeoutError:
+                    pass
+        finally:
+            self._out_due.discard(key)
+        # One flush per household and table at a time: batches leave in
+        # ``seq`` order.
+        async with self._lock(f"out:{session_id}:{household}"):
+            msgs = self._outq.pop(key, [])
+            for batch in _batches(msgs):
+                await self._send_raw(
+                    household,
+                    FederationEventType.APP_MESSAGE,
+                    {
+                        "app_id": app_id,
+                        "session_id": session_id,
+                        "group": {"msgs": batch},
+                    },
+                )
+
+    async def on_inbound_message(self, event: FederationEvent) -> None:
+        """An inbound ``APP_MESSAGE`` with a ``group`` object (after the
+        §24.11 pipeline): a player's message to this hub, or a hub's batch
+        for this household's people. Anything malformed, from a household
+        below v_76, or not from who may send it is dropped with a log line
+        — nothing goes back."""
+        p = event.payload
+        app_id, session_id = p.get("app_id"), p.get("session_id")
+        if (
+            not isinstance(app_id, str)
+            or not app_id
+            or not isinstance(session_id, str)
+            or not _SESSION_RE.fullmatch(session_id)
+            or event.space_id is not None
+        ):
+            log.debug("app_group: malformed message from %s", event.from_instance)
+            return
+        if not await self._federation.peer_supports(
+            event.from_instance, min_version=FederationCapability.MIN_FOR_APP_GROUPS
+        ):
+            log.info(
+                "app_group: message from %s below v_76 dropped", event.from_instance
+            )
+            return
+        table = await self._repo.get(session_id)
+        if table is None or table.app_id != app_id:
+            log.debug("app_group: message for unknown table %s", session_id)
+            return
+        group = p.get("group")
+        try:
+            if table.hub_instance == self._own:
+                actor = p.get("from_user")
+                if not isinstance(actor, str) or not actor:
+                    raise GroupWireError("from_user missing")
+                msg = parse_message(
+                    group, data=p.get("data"), has_data="data" in p, relayed=False
+                )
+                await self._quietly(
+                    self._hub_message(session_id, event.from_instance, actor, msg)
+                )
+            elif table.hub_instance == event.from_instance:
+                for msg in parse_batch(group):
+                    await self._on_relayed(table, msg)
+            else:
+                log.info(
+                    "app_group: message for %s from %s (not its hub) dropped",
+                    session_id,
+                    event.from_instance,
+                )
+        except GroupWireError as exc:
+            log.info(
+                "app_group: message from %s for %s dropped: %s",
+                event.from_instance,
+                session_id,
+                exc,
+            )
+
+    async def _on_relayed(self, table: GroupSession, msg: GroupMessage) -> None:
+        """One message the table's hub passed on: once per ``seq`` (a
+        repeat, or one far below the newest seen, is dropped), then to
+        this household's people it is for."""
+        if table.state == GROUP_ENDED:
+            return
+        seen = self._seen.get(table.session_id)
+        if seen is None:
+            seen = self._seen[table.session_id] = set()
+        self._seen.move_to_end(table.session_id)
+        while len(self._seen) > 4 * GROUP_MIRRORS_PER_HUB_MAX:
+            self._seen.popitem(last=False)
+        newest = max([table.seq, *seen])
+        if msg.seq in seen or msg.seq <= newest - GROUP_SEQ_WINDOW:
+            log.info(
+                "app_group: seq %s at %s seen already — dropped",
+                msg.seq,
+                table.session_id,
+            )
+            return
+        seen.add(msg.seq)
+        for old in [s for s in seen if s <= max(newest, msg.seq) - GROUP_SEQ_WINDOW]:
+            seen.discard(old)
+        await self._repo.raise_seq(table.session_id, msg.seq, now=_now().isoformat())
+        await self._deliver_local(table, msg)
+
+    async def _deliver_local(self, table: GroupSession, msg: GroupMessage) -> None:
+        """Hand *msg* to each person of this household seated at *table*
+        it is for (not the sender): a directed one opened with this
+        household's seat key; never to someone who blocked the sender or
+        whom a guardian block (or the children's rule) separates from them.
+        Live to their app, kept in their mailbox (≤ 16 KiB, the latest
+        per sender seat), and "Your turn" when ``turn`` names their seat."""
+        sender = table.at_seat(msg.from_seat)
+        if sender is None:
+            log.info(
+                "app_group: message from unknown seat %s at %s dropped",
+                msg.from_seat,
+                table.session_id,
+            )
+            return
+        app = await self._app_repo.get(table.app_id)
+        if app is None:
+            return
+        own = self._own
+        sender_id = await self._person_id(sender)
+        secret: tuple[bytes, SeatKey] | None = None
+        for user, row in await self._local_people(table):
+            entry = table.entry(own, user.username)
+            if (
+                row.state != SESSION_ACTIVE
+                or entry is None
+                or entry.state != SEAT_SEATED
+                or entry.is_person(sender.instance, sender.user)
+                or (msg.to is not None and entry.seat not in msg.to)
+            ):
+                continue
+            if not await self._may_hear(user, sender, sender_id):
+                continue
+            data = msg.data
+            if msg.to is not None:
+                if secret is None:
+                    secret = await self._own_seat_secret(table.session_id)
+                data = self._open(table, msg, entry.seat, sender, secret)
+                if data is _UNOPENED:
+                    continue
+            await self._hand_over(table, app, user, msg, data, sender, sender_id)
+
+    def _open(
+        self,
+        table: GroupSession,
+        msg: GroupMessage,
+        seat: int,
+        sender: GroupSeat,
+        secret: tuple[bytes, SeatKey] | None,
+    ) -> Any:
+        """The data of the sealed entry for *seat*, or :data:`_UNOPENED`."""
+        entry = next((e for e in msg.sealed if e.get("to_seat") == seat), None)
+        if entry is None or secret is None or sender.seat_key is None:
+            log.info(
+                "app_group: directed seq %s at %s can't be opened here",
+                msg.seq,
+                table.session_id,
+            )
+            return _UNOPENED
+        try:
+            raw = open_sealed(
+                entry,
+                my_priv=secret[0],
+                peer_pub=b64url_decode(sender.seat_key.pub),
+                session_id=table.session_id,
+                from_seat=msg.from_seat,
+                msg_id=msg.msg_id,
+            )
+            return orjson.loads(raw)
+        except (SeatSealError, UnsupportedSeatKemSuite, orjson.JSONDecodeError) as exc:
+            log.info(
+                "app_group: directed seq %s at %s dropped: %s",
+                msg.seq,
+                table.session_id,
+                exc,
+            )
+            return _UNOPENED
+
+    async def _person_id(self, entry: GroupSeat) -> str | None:
+        """The local or ``remote_users`` id of a seat's person, if known."""
+        if entry.instance == self._own:
+            local = await self._user_repo.get(entry.user)
+            return local.user_id if local is not None else None
+        remote = await self._user_repo.get_remote_by_member(entry.instance, entry.user)
+        return remote.user_id if remote is not None else None
+
+    async def _may_hear(
+        self, user: User, sender: GroupSeat, sender_id: str | None
+    ) -> bool:
+        """Whether *user* takes a message from *sender*: no block either
+        way here, no guardian block, and a protected account only from a
+        household it may message."""
+        if sender.instance != self._own and not await self._may_message_household(
+            user.user_id, sender.instance
+        ):
+            return False
+        if sender_id is None:
+            return True
+        return not (
+            await self._user_repo.is_blocked(user.user_id, sender_id)
+            or await self._user_repo.is_blocked(sender_id, user.user_id)
+            or await self._guardian_blocked(user.user_id, sender_id)
+        )
+
+    async def _hand_over(
+        self,
+        table: GroupSession,
+        app: InstalledApp,
+        user: User,
+        msg: GroupMessage,
+        data: Any,
+        sender: GroupSeat,
+        sender_id: str | None,
+    ) -> None:
+        if app.enabled:
+            await self._ws.broadcast_to_user(
+                user.user_id,
+                {
+                    "type": WS_MESSAGE_FRAME_TYPE,
+                    "app_id": table.app_id,
+                    "session_id": table.session_id,
+                    "seq": msg.seq,
+                    "from_seat": msg.from_seat,
+                    "direct": msg.direct,
+                    "data": data,
+                },
+            )
+        held = {"data": data, "direct": msg.direct}
+        kept = False
+        if len(orjson.dumps(held)) <= GROUP_HELD_MAX_BYTES:
+            kept = await self._repo.hold_group_message(
+                table.app_id,
+                user.user_id,
+                table.session_id,
+                from_seat=msg.from_seat,
+                seq=msg.seq,
+                held=held,
+                now=_now().isoformat(),
+            )
+        mine = table.entry(self._own, user.username)
+        if (
+            app.enabled
+            and msg.turn is not None
+            and mine is not None
+            and msg.turn == mine.seat
+        ):
+            await self._emit(
+                AppTurn(
+                    app_id=table.app_id,
+                    session_id=table.session_id,
+                    to_user_id=user.user_id,
+                    from_user_id=sender_id,
+                    from_display=with_household(sender.name, sender.household_name),
+                )
+            )
+        if not kept:
+            log.debug(
+                "app_group: seq %s at %s live only (too large or not seated)",
+                msg.seq,
+                table.session_id,
+            )
+
+    async def take_held(self, *, app_id: str, actor_user_id: str) -> list[dict]:
+        """The person's app opened: each player's latest message at the
+        tables they sit at (≤ 16 KiB each), oldest ``seq`` first per table
+        — cleared as they are handed over. Their "Your turn" rows for
+        those tables read as read."""
+        await self._usable(app_id, actor_user_id)
+        taken = await self._repo.take_group_held(app_id, actor_user_id)
+        if taken:
+            await self._emit(
+                AppTurnsSeen(
+                    app_id=app_id,
+                    user_id=actor_user_id,
+                    session_ids=tuple(dict.fromkeys(h.session_id for h in taken)),
+                )
+            )
+        return [
+            {
+                "session_id": h.session_id,
+                "seq": h.seq,
+                "from_seat": h.from_seat,
+                "direct": bool(h.held.get("direct")),
+                "data": h.held.get("data"),
+            }
+            for h in taken
+        ]
 
     # ─── Inbound ──────────────────────────────────────────────────────
 
@@ -1068,7 +1789,11 @@ class AppGroupService(ProtectionGateMixin):
             case "group_invite":
                 await self._on_invite(event, app_id, session_id, table)
             case "group_join" if is_hub and actor:
-                await self._quietly(self._hub_join(session_id, sender, actor))
+                key = await self._joiner_key(session_id, sender, event.payload)
+                if key is not None:
+                    await self._quietly(
+                        self._hub_join(session_id, sender, actor, seat_key=key)
+                    )
             case "group_leave" if is_hub and actor:
                 await self._hub_leave(
                     session_id,
@@ -1110,6 +1835,8 @@ class AppGroupService(ProtectionGateMixin):
             AppGroupClosedError,
             AppGroupTooFewError,
             AppGroupFullError,
+            AppGroupSeatError,
+            AppGroupBusyError,
         ) as exc:
             log.info("app_group: remote step refused: %s", exc.code)
 
@@ -1145,6 +1872,7 @@ class AppGroupService(ProtectionGateMixin):
             or table.max_players > GROUP_PICK_MAX_PLAYERS
         ):
             return
+        await self._check_seat_keys(table)
         if known is not None and known.hub_instance != hub:
             return
         user = await self._user_repo.get(to_user)
@@ -1213,6 +1941,7 @@ class AppGroupService(ProtectionGateMixin):
         ):
             # The players range is fixed when the table opens.
             raise GroupWireError("players range changed")
+        await self._check_seat_keys(table)
         to_user = p.get("to_user")
         if p.get("verb") == VERB_SEAT and isinstance(to_user, str) and to_user:
             await self._unwanted_seat(table, to_user)
@@ -1467,6 +2196,14 @@ class AppGroupService(ProtectionGateMixin):
         for sid in list(self._roster_sent):
             if await self._repo.get(sid) is None:
                 self._roster_sent.pop(sid, None)
+        clock = asyncio.get_running_loop().time()
+        for sid in list(self._budgets):
+            if self._budgets[sid].idle(clock):
+                del self._budgets[sid]
+        for sid in list(self._seen):
+            gone = await self._repo.get(sid)
+            if gone is None or gone.state == GROUP_ENDED:
+                self._seen.pop(sid, None)
         return await self._repo.prune(
             ended_before=(
                 now - timedelta(seconds=GROUP_ENDED_KEEP_SECONDS)
@@ -1499,6 +2236,8 @@ class AppGroupService(ProtectionGateMixin):
                             )
             await self._repo.delete(table.session_id)
             self._roster_sent.pop(table.session_id, None)
+            self._budgets.pop(table.session_id, None)
+            self._seen.pop(table.session_id, None)
 
     async def on_account_protected(self, user_id: str) -> None:
         """§CP: *user_id* just became protected — the children's rule now

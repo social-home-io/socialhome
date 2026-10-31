@@ -1036,6 +1036,13 @@ class AppFederationService(ProtectionGateMixin):
         if not isinstance(event.payload, dict):
             log.debug("app_federation: inbound event with non-dict payload — dropping")
             return
+        if event.event_type is FederationEventType.APP_MESSAGE and isinstance(
+            event.payload.get("group"), dict
+        ):
+            # A message at a group table (v_76): its own service.
+            if self._groups is not None:
+                await self._groups.on_inbound_message(event)
+            return
         if (
             event.event_type is FederationEventType.APP_SESSION
             and event.payload.get("verb") in GROUP_VERBS

@@ -17,16 +17,19 @@ Not a test module itself (no ``test_`` prefix): imported by
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
 
+from socialhome.crypto import generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.app_group import GROUP_PICK_MAX_PLAYERS
 from socialhome.domain.apps import AppManifest, InstalledApp
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.federation_capabilities import OURS
 from socialhome.domain.user import User
+from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.repositories.app_group_repo import SqliteAppGroupRepo
 from socialhome.repositories.app_repo import SqliteAppRepo
 from socialhome.repositories.federation_repo import SqliteFederationRepo
@@ -127,14 +130,21 @@ class FakeFederation:
         self.net = net
         self.own_instance_id = own
         self.versions: dict[str, int] = {}
+        kp = generate_identity_keypair()
+        self.own_identity_seed = kp.private_key
+        self.own_identity_pk = kp.public_key
 
     async def peer_supports(self, instance_id: str, *, min_version: int) -> bool:
         return self.versions.get(instance_id, 0) >= min_version
 
     async def send_event(self, *, to_instance_id, event_type, payload, **_kw):
-        assert event_type is FederationEventType.APP_SESSION
+        assert event_type in (
+            FederationEventType.APP_SESSION,
+            FederationEventType.APP_MESSAGE,
+        )
         self.net.sent.append((self.own_instance_id, to_instance_id, payload))
         self.net.queue.append((self.own_instance_id, to_instance_id, payload))
+        self.net.types[id(payload)] = event_type
 
     async def send_app_message(self, **_kw) -> None:
         raise AssertionError("no 1:1 messages in group tests")
@@ -185,6 +195,8 @@ class Network:
         self.homes: dict[str, Household] = {}
         self.queue: list[tuple[str, str, dict]] = []
         self.sent: list[tuple[str, str, dict]] = []
+        #: The event type each sent payload went as (by ``id``).
+        self.types: dict[int, FederationEventType] = {}
 
     async def household(self, instance: str, *, version: int = OURS) -> Household:
         path = self.root / instance
@@ -205,6 +217,9 @@ class Network:
         )
         groups = AppGroupService(
             group_repo=group_repo,
+            federation_repo=SqliteFederationRepo(db),
+            key_manager=KeyManager(os.urandom(32)),
+            coalesce_every=0.0,
             app_repo=app_repo,
             user_repo=user_repo,
             app_federation=app_fed,
@@ -244,7 +259,7 @@ class Network:
                 (
                     other.instance,
                     f"Home {other.instance}",
-                    "00" * 32,
+                    other.fed.own_identity_pk.hex(),
                     "k1",
                     "k2",
                     f"https://{other.instance}/wh",
@@ -287,7 +302,9 @@ class Network:
             await target.app_fed.on_inbound_event(
                 FederationEvent(
                     msg_id=uuid4().hex,
-                    event_type=FederationEventType.APP_SESSION,
+                    event_type=self.types.get(
+                        id(payload), FederationEventType.APP_SESSION
+                    ),
                     from_instance=sender,
                     to_instance=to,
                     timestamp="2026-10-31T12:00:00+00:00",
@@ -296,8 +313,32 @@ class Network:
             )
         raise AssertionError("the network never went quiet")
 
+    def forge(
+        self,
+        sender: str,
+        to: str,
+        payload: dict,
+        event_type: FederationEventType = FederationEventType.APP_SESSION,
+    ) -> None:
+        """Queue *payload* as if *sender* (the signature-proven household)
+        had sent it to *to*."""
+        self.queue.append((sender, to, payload))
+        self.types[id(payload)] = event_type
+        self.sent.append((sender, to, payload))
+
     def verbs(self, *, to: str | None = None) -> list[str]:
-        return [p["verb"] for _s, t, p in self.sent if to is None or t == to]
+        return [
+            p.get("verb", "message") for _s, t, p in self.sent if to is None or t == to
+        ]
+
+    def messages(self, *, to: str | None = None) -> list[dict]:
+        """The ``APP_MESSAGE`` payloads sent (to *to*)."""
+        return [
+            p
+            for _s, t, p in self.sent
+            if self.types.get(id(p)) is FederationEventType.APP_MESSAGE
+            and (to is None or t == to)
+        ]
 
     async def close(self) -> None:
         for home in self.homes.values():

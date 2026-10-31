@@ -3094,7 +3094,11 @@ class NotificationService(ProtectionGateMixin):
             return
         locale = self._locale(recipient)
         app_name = await self._app_name(event.app_id, locale)
-        name = event.from_display or await self._person_name(event.from_user_id, locale)
+        name = event.from_display or (
+            await self._person_name(event.from_user_id, locale)
+            if event.from_user_id
+            else self._someone(locale)
+        )
         if app_name:
             title = self._t(
                 "notification.app.turn",

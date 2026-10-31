@@ -44,6 +44,7 @@ from aiohttp import web
 
 from ..app_keys import (
     app_federation_service_key,
+    app_group_service_key,
     app_service_key,
     notification_service_key,
 )
@@ -643,15 +644,27 @@ class AppHeldView(AppPermissionView):
     the caller's mailbox kept for it (D11) — the latest undelivered
     message of each game, oldest first — and clear it. ``kind`` is
     ``"message"`` (a move) or ``"session"`` (a close: a decline or a
-    withdrawal). A POST: taking them empties the mailbox."""
+    withdrawal). ``group_messages`` (v_76): each player's latest message
+    at the tables the caller sits at, ``{session_id, seq, from_seat,
+    direct, data}``, oldest ``seq`` first per table. A POST: taking them
+    empties the mailbox."""
 
     async def post(self) -> web.Response:
         await self.require_permission(PERMISSION_PEOPLE)
         held = await self.svc(app_federation_service_key).take_held(
             app_id=self.match("app_id"), actor_user_id=self.user.user_id
         )
+        groups = self.request.app.get(app_group_service_key)
+        group_held = (
+            await groups.take_held(
+                app_id=self.match("app_id"), actor_user_id=self.user.user_id
+            )
+            if groups is not None
+            else []
+        )
         return self._json(
             {
+                "group_messages": group_held,
                 "messages": [
                     {
                         "session_id": h.session_id,
@@ -661,7 +674,7 @@ class AppHeldView(AppPermissionView):
                         "payload": (h.held or {}).get("payload"),
                     }
                     for h in held
-                ]
+                ],
             }
         )
 
