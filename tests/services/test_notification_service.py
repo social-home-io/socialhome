@@ -5666,6 +5666,8 @@ async def test_gift_draw_rows_never_name_whom_you_give_to(stack):
     """v_78: "Your gift draw is ready" (pushed, title only), drawn again,
     a hand-over and a wish-list change — each a row into Social Home's own
     result sheet, none naming the person drawn."""
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
     a = await stack.provision_user("anna")
     expected = {
         "ready": (
@@ -5684,6 +5686,7 @@ async def test_gift_draw_rows_never_name_whom_you_give_to(stack):
             "app_draw_changed",
             "The person you're giving to changed their wish list",
         ),
+    }
     for i, (change, (kind, title)) in enumerate(expected.items()):
         await stack.bus.publish(
             AppDrawChanged(
@@ -5694,6 +5697,7 @@ async def test_gift_draw_rows_never_name_whom_you_give_to(stack):
                 gen=2 if change == "again" else 1,
                 name="Cleo" if change == "handover" else None,
             )
+        )
         rows = [
             n
             for n in await stack.notif_repo.list(a.user_id, limit=10)
@@ -5704,6 +5708,9 @@ async def test_gift_draw_rows_never_name_whom_you_give_to(stack):
     assert notif_kind("app_draw_changed") is NotifKind.ABOUT_YOU
     # A new name is pushed (title only); a hand-over or wish list is not.
     assert len(push.calls) == 2
+    await stack.bus.publish(
         AppDrawChanged(
             app_id="gift-draw", session_id="t9", to_user_id="nobody", change="ready"
+        )
+    )
     assert len(push.calls) == 2

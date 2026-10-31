@@ -781,7 +781,7 @@
   "apps.draw.result.giving_to": "Before the recipient's name, shown large below it. Glossary: 'You're giving a gift to Ben'.",
   "apps.draw.result.day": "Label before the exchange day's date (when presents are given). Glossary: 'Exchange day'.",
   "apps.draw.result.private": "Say only what holds: nobody else, not even the person who started the draw, sees whom you give to. {name} is the recipient.",
-  "apps.invite.title":"Heading of Social Home's own invite sheet, opened when a game (an app) asks to invite someone. {name} is the app's name (e.g. Chess).",
+  "apps.invite.title": "Heading of Social Home's own invite sheet, opened when a game (an app) asks to invite someone. {name} is the app's name (e.g. Chess).",
   "apps.invite.lead": "Under the heading: Social Home (not the app) sends the invite, and the app only learns who you pick. {name} is the app's name.",
   "apps.invite.send_to": "The Send button always names who gets the invite. {name} is a person's first name. Keep it short: it is a button on a phone.",
   "apps.invite.limit_open": "A limit: at most {count} invites nobody has answered yet, per person and app. {name} is the app's name; \"take one back\" = withdraw an invite inside the app.",
