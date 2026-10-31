@@ -740,9 +740,9 @@ roster (e.g. adding unauthenticated guest channels, GFS-relayed routing, or
 any path that bypasses `_assert_target_allowed`) MUST treat it as a §2
 principle change requiring a new sign-off.
 
-### Sign-off needed: space membership is consent to play with its members' households (v_77)
+### Sign-off: space membership is consent to play with its members' households (v_77)
 
-**Pending the owner's sign-off** (group play D7, PR #TBD). The rule above
+**Signed off by the owner on 2026-10-31** (group play D7, PR #1259). The rule above
 keeps per-user app routing to the pairing-scoped roster. Space tables
 (v_77) widen the audience of a *group* table: in a space, a member with a
 writing seat may sit at a table with members of households that aren't
