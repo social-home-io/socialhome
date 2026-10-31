@@ -5,7 +5,7 @@ Translates between the federation layer (inbound events + binary frames from
 
 Security invariants
 -------------------
-* ``_require_enabled`` gates every outbound — an uninstalled or disabled app
+* ``require_enabled`` gates every outbound — an uninstalled or disabled app
   cannot initiate or send federation messages.
 * Inbound delivery is fail-soft: if the app is not installed or not enabled,
   nothing reaches the app and nothing goes back to the peer (no error, no
@@ -125,6 +125,7 @@ from weakref import WeakValueDictionary
 
 import orjson
 
+from ..domain.app_group import GROUP_VERBS, AppGroupSessionError
 from ..domain.apps import (
     ACTIVE_SESSION_TTL_SECONDS,
     CLOSE_DECLINED,
@@ -184,6 +185,7 @@ if TYPE_CHECKING:
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.notification_repo import AbstractNotificationRepo
     from ..repositories.user_repo import AbstractUserRepo
+    from .app_group_service import AppGroupService
     from .app_service import AppService
     from .notification_delivery_worker import NotificationDeliveryWorker
 
@@ -237,7 +239,8 @@ def _ending_kind(
     *recent_cut* (:data:`UNINSTALL_GAME_RECENT_SECONDS`: Social Home can't
     tell a finished game from a resting one, so a quiet game is left to
     the session TTL instead of counted and announced as "ended")."""
-    if row.from_instance == own_instance or not row.from_user:
+    if row.from_instance == own_instance or not row.from_user or row.is_group:
+        # A group table ends through its own service (v_76).
         return None
     if row.state == SESSION_INVITED:
         return "invite"
@@ -303,6 +306,7 @@ class AppFederationService(ProtectionGateMixin):
         "_delivery",
         "_federation",
         "_federation_repo",
+        "_groups",
         "_invite_locks",
         "_notifs",
         "_seen_open_sessions",
@@ -333,6 +337,9 @@ class AppFederationService(ProtectionGateMixin):
         self._notifs = notifications
         self._catalog = catalog
         self._child_protection = None
+        #: Group sessions (v_76): its ``group_*`` verbs and its invites'
+        #: share of the invite caps (:meth:`attach_groups`).
+        self._groups: AppGroupService | None = None
         #: Where the waiting-invite steps (D10) run in order with the jobs
         #: that write their rows (:meth:`attach_delivery_worker`).
         self._delivery: NotificationDeliveryWorker | None = None
@@ -363,6 +370,12 @@ class AppFederationService(ProtectionGateMixin):
         invites slipped past the per-person bound of
         :data:`WAITING_SENDERS_MAX` senders."""
         self._delivery = worker
+
+    def attach_groups(self, groups: AppGroupService) -> None:
+        """Wire group sessions (v_76): inbound ``APP_SESSION`` verbs in
+        :data:`~socialhome.domain.app_group.GROUP_VERBS` go to *groups*,
+        and the people a table invites count towards the invite caps."""
+        self._groups = groups
 
     async def _in_order(
         self, step: Callable[..., Awaitable[None]], /, *args: Any, **kwargs: Any
@@ -436,8 +449,8 @@ class AppFederationService(ProtectionGateMixin):
         household's (``None`` for your own). Remote ``online`` is always
         ``False`` (remote presence isn't wired in).
         """
-        app = await self._require_enabled(app_id)
-        await self._assert_age_allowed(app_id, self_user_id, app=app)
+        app = await self.require_enabled(app_id)
+        await self.assert_age_allowed(app_id, self_user_id, app=app)
         app.require_permission(PERMISSION_PEOPLE)
         return await self._roster(self_user_id, app)
 
@@ -463,7 +476,7 @@ class AppFederationService(ProtectionGateMixin):
         ]
         # A member below the app's age rating never gets the invite.
         allowed = set(
-            await self._age_filter_recipients(
+            await self.age_filter_recipients(
                 app.app_id, [u.user_id for u in local], app=app
             )
         )
@@ -483,6 +496,7 @@ class AppFederationService(ProtectionGateMixin):
                     "online": u.user_id in connected,
                     "person_name": u.display_name,
                     "household_name": None,
+                    "groups": True,
                 }
             )
 
@@ -491,6 +505,7 @@ class AppFederationService(ProtectionGateMixin):
 
         households: dict[str, str | None] = {}
         reachable: dict[str, bool] = {}
+        groups: dict[str, bool] = {}
         for r in await self._user_repo.list_all_known_remote():
             if r.user_id in blocked_ids:
                 continue
@@ -508,8 +523,18 @@ class AppFederationService(ProtectionGateMixin):
             if not reachable[r.instance_id]:
                 continue
             if r.instance_id not in households:
-                households[r.instance_id] = await self._household_name(r.instance_id)
-            out.append(self._remote_contact(r, households[r.instance_id]))
+                households[r.instance_id] = await self.household_name(r.instance_id)
+                # Group tables (v_76) reach only households that know them.
+                groups[r.instance_id] = await self._federation.peer_supports(
+                    r.instance_id,
+                    min_version=FederationCapability.MIN_FOR_APP_GROUPS,
+                )
+            out.append(
+                {
+                    **self._remote_contact(r, households[r.instance_id]),
+                    "groups": groups[r.instance_id],
+                }
+            )
 
         return out
 
@@ -542,8 +567,8 @@ class AppFederationService(ProtectionGateMixin):
         person once the app lost ``federation`` is left out. Sessions past
         their TTL are left out before the hourly prune removes them.
         """
-        app = await self._require_enabled(app_id)
-        await self._assert_age_allowed(app_id, self_user_id, app=app)
+        app = await self.require_enabled(app_id)
+        await self.assert_age_allowed(app_id, self_user_id, app=app)
         app.require_permission(PERMISSION_PEOPLE)
         own = self._federation.own_instance_id
         connected = self._ws.connected_users()
@@ -554,6 +579,9 @@ class AppFederationService(ProtectionGateMixin):
         out: list[dict] = []
         for row in await self._app_repo.list_sessions(app_id, self_user_id):
             if row.state != SESSION_ACTIVE or not row.from_user:
+                continue
+            if row.is_group:
+                # People at a table are seats, never contacts (v_76).
                 continue
             if row.last_change < cutoff:
                 continue
@@ -594,7 +622,7 @@ class AppFederationService(ProtectionGateMixin):
                 continue
             out.append(
                 self._remote_contact(
-                    remote, await self._household_name(row.from_instance)
+                    remote, await self.household_name(row.from_instance)
                 )
             )
         return out
@@ -627,15 +655,24 @@ class AppFederationService(ProtectionGateMixin):
                 today += 1
             if not row.answered and not row.withdrawn and row.last_change >= ttl_cut:
                 open_ += 1
+        if self._groups is not None:
+            # A table counts once per person it invited (v_76).
+            g_open, g_today = await self._groups.invite_usage(app_id, user_id)
+            open_ += g_open
+            today += g_today
         return open_, today
 
-    async def _check_invite_caps(self, app_id: str, user_id: str) -> None:
-        """Raise :class:`AppInviteLimitError` past a cap (open first: it is
-        the one the person can act on — withdraw an invite)."""
+    async def check_invite_caps(
+        self, app_id: str, user_id: str, *, adding: int = 1
+    ) -> None:
+        """Raise :class:`AppInviteLimitError` when *adding* more invites
+        would pass a cap (open first: it is the one the person can act on —
+        withdraw an invite). A table opened by picking people adds one per
+        person picked."""
         open_, today = await self._invite_usage(app_id, user_id)
-        if open_ >= INVITES_OPEN_MAX:
+        if open_ + adding > INVITES_OPEN_MAX:
             raise AppInviteLimitError(daily=False)
-        if today >= INVITES_PER_DAY_MAX:
+        if today + adding > INVITES_PER_DAY_MAX:
             raise AppInviteLimitError(daily=True)
 
     async def open_session(
@@ -647,12 +684,12 @@ class AppFederationService(ProtectionGateMixin):
     ) -> str:
         """Send one invite (:meth:`_open_session`), one at a time per (app,
         person), so the invite caps hold under parallel requests."""
-        async with self._invite_lock(app_id, actor_user_id):
+        async with self.invite_lock(app_id, actor_user_id):
             return await self._open_session(
                 app_id=app_id, target=target, actor_user_id=actor_user_id
             )
 
-    def _invite_lock(self, app_id: str, user_id: str) -> asyncio.Lock:
+    def invite_lock(self, app_id: str, user_id: str) -> asyncio.Lock:
         """The one lock for *user_id*'s invites in *app_id* (open and
         continue), kept while anyone holds it."""
         key = (app_id, user_id)
@@ -702,10 +739,10 @@ class AppFederationService(ProtectionGateMixin):
         event path regardless of peer version — the binary channel is only
         used for :meth:`send_message`.
         """
-        app = await self._require_enabled(app_id, target)
-        await self._assert_age_allowed(app_id, actor_user_id, app=app)
-        await self._assert_target_allowed(actor_user_id, target, app=app)
-        await self._check_invite_caps(app_id, actor_user_id)
+        app = await self.require_enabled(app_id, target)
+        await self.assert_age_allowed(app_id, actor_user_id, app=app)
+        await self.assert_invitable(actor_user_id, target, app=app)
+        await self.check_invite_caps(app_id, actor_user_id)
         session_id = uuid4().hex
         own = self._federation.own_instance_id
 
@@ -714,7 +751,7 @@ class AppFederationService(ProtectionGateMixin):
             # invite waits in Needs you until Play, which hands it over as
             # the launch context). Keep the invite for the target and raise
             # a bell row + push for them only — if they pass the age gate.
-            recipients = await self._age_filter_recipients(app_id, [target["user_ref"]])
+            recipients = await self.age_filter_recipients(app_id, [target["user_ref"]])
             if target["user_ref"] in recipients:
                 await self._app_repo.add_pending_session(
                     AppPendingSession(
@@ -801,10 +838,10 @@ class AppFederationService(ProtectionGateMixin):
         no-op. The receiving household keeps a continue only for a session
         id its person has no row for, and only from the person who sent it
         (see :meth:`_deliver`)."""
-        async with self._invite_lock(app_id, actor_user_id):
-            app = await self._require_enabled(app_id, target)
-            await self._assert_age_allowed(app_id, actor_user_id, app=app)
-            await self._assert_target_allowed(actor_user_id, target, app=app)
+        async with self.invite_lock(app_id, actor_user_id):
+            app = await self.require_enabled(app_id, target)
+            await self.assert_age_allowed(app_id, actor_user_id, app=app)
+            await self.assert_invitable(actor_user_id, target, app=app)
             own = self._federation.own_instance_id
             is_local = bool(target.get("is_local"))
             peer = own if is_local else str(target["instance_id"])
@@ -820,14 +857,14 @@ class AppFederationService(ProtectionGateMixin):
                 ):
                     return session_id
                 raise AppSessionTakenError()
-            await self._check_invite_caps(app_id, actor_user_id)
+            await self.check_invite_caps(app_id, actor_user_id)
             payload: dict[str, Any] = {
                 "app_id": app_id,
                 "session_id": session_id,
                 "verb": SESSION_VERB_CONTINUE,
             }
             if is_local:
-                recipients = await self._age_filter_recipients(
+                recipients = await self.age_filter_recipients(
                     app_id, [user_ref], app=app
                 )
                 theirs = await self._app_repo.get_pending_session(
@@ -909,8 +946,8 @@ class AppFederationService(ProtectionGateMixin):
         turn" (:class:`AppTurn`). Sealed beside ``to_user``; an older
         household ignores it.
         """
-        app = await self._require_enabled(app_id, target)
-        await self._assert_age_allowed(app_id, actor_user_id, app=app)
+        app = await self.require_enabled(app_id, target)
+        await self.assert_age_allowed(app_id, actor_user_id, app=app)
         own = self._federation.own_instance_id
         # D3: only in a game this household knows the actor plays with this
         # very person — one they sent through the invite sheet or took in
@@ -928,7 +965,7 @@ class AppFederationService(ProtectionGateMixin):
             # person and the initiator only, never a fan-out to all local
             # users; to the person only once they play it (D3: not while the
             # invite still waits in Needs you — it is held for after Play).
-            recipients = await self._age_filter_recipients(
+            recipients = await self.age_filter_recipients(
                 app_id, [target["user_ref"], actor_user_id], app=app
             )
             live = [
@@ -998,6 +1035,14 @@ class AppFederationService(ProtectionGateMixin):
         """
         if not isinstance(event.payload, dict):
             log.debug("app_federation: inbound event with non-dict payload — dropping")
+            return
+        if (
+            event.event_type is FederationEventType.APP_SESSION
+            and event.payload.get("verb") in GROUP_VERBS
+        ):
+            # A group table (v_76): its own service, never the 1:1 paths.
+            if self._groups is not None:
+                await self._groups.on_inbound_event(event)
             return
         if (
             event.event_type is FederationEventType.APP_SESSION
@@ -1182,12 +1227,12 @@ class AppFederationService(ProtectionGateMixin):
             remote = await self._user_repo.get_remote_by_member(
                 from_instance, from_user
             )
-        household = await self._household_name(from_instance)
+        household = await self.household_name(from_instance)
         if remote is not None and remote.display_name:
             return with_household(remote.display_name, household)
         return household or from_instance
 
-    async def _household_name(self, instance_id: str) -> str | None:
+    async def household_name(self, instance_id: str) -> str | None:
         """A paired household's name as this household shows it (its local
         alias, else its own display name), or ``None`` if unknown."""
         inst = await self._federation_repo.get_instance(instance_id)
@@ -1195,7 +1240,7 @@ class AppFederationService(ProtectionGateMixin):
             return None
         return inst.effective_display_name.strip() or None
 
-    async def _require_enabled(
+    async def require_enabled(
         self, app_id: str, target: dict | None = None
     ) -> InstalledApp:
         """The installed, enabled app — else raise :class:`AppNotFoundError`
@@ -1214,7 +1259,7 @@ class AppFederationService(ProtectionGateMixin):
             app.require_permission(_target_permission(target))
         return app
 
-    async def _assert_age_allowed(
+    async def assert_age_allowed(
         self, app_id: str, actor_user_id: str, *, app: InstalledApp | None = None
     ) -> None:
         """Raise :class:`AppAgeRestrictedError` for protected minors below min_age.
@@ -1241,7 +1286,7 @@ class AppFederationService(ProtectionGateMixin):
                 f"This app is restricted to ages {app.min_age}+."
             )
 
-    async def _assert_target_allowed(
+    async def assert_invitable(
         self, actor_user_id: str, target: dict, *, app: InstalledApp
     ) -> None:
         """Raise :class:`AppContactNotFoundError` unless *target* is one of
@@ -1293,6 +1338,9 @@ class AppFederationService(ProtectionGateMixin):
         known = await self._app_repo.get_pending_session(
             app_id, actor_user_id, session_id
         )
+        if known is not None and known.is_group:
+            # A seat at a group table is played through the table (v_76).
+            raise AppGroupSessionError()
         # An invite that still waits in Needs you is not the app's yet: only
         # Play takes it in (D3/D12) — never a message the app sends in it.
         if (
@@ -1318,6 +1366,7 @@ class AppFederationService(ProtectionGateMixin):
         return (
             row is not None
             and row.state == SESSION_ACTIVE
+            and not row.is_group
             and row.is_with(from_instance, from_user)
         )
 
@@ -1508,7 +1557,7 @@ class AppFederationService(ProtectionGateMixin):
         for uid in recipient_user_ids:
             await self._ws.broadcast_to_user(uid, frame)
 
-    async def _age_filter_recipients(
+    async def age_filter_recipients(
         self, app_id: str, user_ids: list[str], *, app: InstalledApp | None = None
     ) -> list[str]:
         """Drop protected minors below the app's ``min_age`` from ``user_ids``.
@@ -1748,7 +1797,7 @@ class AppFederationService(ProtectionGateMixin):
                         session_id,
                     )
                     return
-                allowed = await self._age_filter_recipients(
+                allowed = await self.age_filter_recipients(
                     app_id, [recipient.user_id], app=app
                 )
                 log.info(
@@ -1913,7 +1962,7 @@ class AppFederationService(ProtectionGateMixin):
 
         # Age-gate filter: skip recipients who are protected minors below
         # the app's minimum age.  Fast path when the app has no restriction.
-        user_ids = await self._age_filter_recipients(app_id, user_ids, app=app)
+        user_ids = await self.age_filter_recipients(app_id, user_ids, app=app)
 
         if not user_ids:
             return
@@ -2227,7 +2276,7 @@ class AppFederationService(ProtectionGateMixin):
         if app is not None:
             # Turned off: the install's own name, permissions and age gate.
             if PERMISSION_FEDERATION not in app.permissions or not (
-                await self._age_filter_recipients(app_id, [recipient.user_id], app=app)
+                await self.age_filter_recipients(app_id, [recipient.user_id], app=app)
             ):
                 return
             if await self._app_repo.get_pending_session(
@@ -2478,7 +2527,7 @@ class AppFederationService(ProtectionGateMixin):
             or not recipient.is_active()
             or PERMISSION_FEDERATION not in app.permissions
             or not await self._may_wait(recipient, remote, remote.instance_id)
-            or not await self._age_filter_recipients(
+            or not await self.age_filter_recipients(
                 app.app_id, [recipient.user_id], app=app
             )
             or await self._app_repo.get_pending_session(
@@ -2529,8 +2578,9 @@ class AppFederationService(ProtectionGateMixin):
         guardian block separates from the invitee since it arrived (row
         ``done``). A played invite stays known as an ``active`` game: the
         other side's moves wait in its mailbox from now on."""
-        app = await self._require_enabled(app_id)
-        await self._assert_age_allowed(app_id, actor_user_id, app=app)
+        app = await self.require_enabled(app_id)
+        await self.assert_age_allowed(app_id, actor_user_id, app=app)
+        await self._refuse_group_seat(app_id, actor_user_id, session_id)
         invite = await self._app_repo.activate_pending_session(
             app_id, actor_user_id, session_id, now=datetime.now(UTC).isoformat()
         )
@@ -2580,8 +2630,8 @@ class AppFederationService(ProtectionGateMixin):
         inviter before). A message from someone the person blocked, or a
         guardian block now separates them from, or (§CP.F3) from a
         household a protected person can't message, is dropped instead."""
-        app = await self._require_enabled(app_id)
-        await self._assert_age_allowed(app_id, actor_user_id, app=app)
+        app = await self.require_enabled(app_id)
+        await self.assert_age_allowed(app_id, actor_user_id, app=app)
         taken = await self._app_repo.take_held(app_id, actor_user_id)
         if taken:
             # Those games are in front of the person now: their "Your
@@ -2605,6 +2655,15 @@ class AppFederationService(ProtectionGateMixin):
                 continue
             out.append(held)
         return out
+
+    async def _refuse_group_seat(
+        self, app_id: str, user_id: str, session_id: str
+    ) -> None:
+        """Raise :class:`AppGroupSessionError` when *session_id* is a seat
+        at a group table: Play / Decline answer it through the table."""
+        row = await self._app_repo.get_pending_session(app_id, user_id, session_id)
+        if row is not None and row.is_group:
+            raise AppGroupSessionError()
 
     async def _invite_sender_id(self, invite: AppPendingSession) -> str | None:
         """The user id of who opened *invite*: a local user id as stored, or
@@ -2633,6 +2692,7 @@ class AppFederationService(ProtectionGateMixin):
         else as an ``APP_SESSION`` to their household (best effort: the
         decline stands if that send fails). Nothing is sent for an app that
         is no longer enabled here."""
+        await self._refuse_group_seat(app_id, actor_user_id, session_id)
         invite = await self._app_repo.take_pending_session(
             app_id, actor_user_id, session_id
         )
@@ -2684,7 +2744,7 @@ class AppFederationService(ProtectionGateMixin):
         with *target* (:class:`AppSessionUnknownError` otherwise); an
         invite they sent is marked withdrawn — it stops counting as open,
         and nothing more goes out in it."""
-        await self._require_enabled(app_id, target)
+        await self.require_enabled(app_id, target)
         known = await self._known_session(app_id, actor_user_id, session_id, target)
         await self._assert_person_allowed(actor_user_id, target)
         if known.sent:
@@ -2720,6 +2780,10 @@ class AppFederationService(ProtectionGateMixin):
         invite that waited for ``user_id``: it stops waiting — only when
         they are who opened it."""
         if not from_user:
+            return
+        row = await self._app_repo.get_pending_session(app_id, user_id, session_id)
+        if row is None or row.is_group:
+            # A group seat ends only through its table (v_76).
             return
         taken = await self._app_repo.take_pending_session(
             app_id,
@@ -2761,7 +2825,7 @@ class AppFederationService(ProtectionGateMixin):
         }
         own = self._federation.own_instance_id
         if to_instance == own:
-            recipients = await self._age_filter_recipients(app_id, [to_user])
+            recipients = await self.age_filter_recipients(app_id, [to_user])
             # Live only into a game they play with the actor (D3).
             await self._emit_frame(
                 [

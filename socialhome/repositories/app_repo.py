@@ -105,6 +105,9 @@ class AbstractAppRepo(Protocol):
         self, app_id: str, user_id: str, session_id: str
     ) -> None: ...
     async def list_app_sessions(self, app_id: str) -> list[AppPendingSession]: ...
+    async def list_session_rows(
+        self, app_id: str, session_id: str
+    ) -> list[AppPendingSession]: ...
 
 
 def _row_to_kv(row) -> AppKvEntry:
@@ -579,5 +582,17 @@ class SqliteAppRepo:
             """SELECT * FROM app_pending_sessions WHERE app_id = ?
                ORDER BY user_id, COALESCE(updated_at, created_at)""",
             (app_id,),
+        )
+        return [_row_to_pending(r) for r in rows]
+
+    async def list_session_rows(
+        self, app_id: str, session_id: str
+    ) -> list[AppPendingSession]:
+        """Everyone here with a row for *session_id* — the people of this
+        household at one group table (v_76): invited, or seated."""
+        rows = await self._db.fetchall(
+            """SELECT * FROM app_pending_sessions
+               WHERE app_id = ? AND session_id = ? ORDER BY user_id""",
+            (app_id, session_id),
         )
         return [_row_to_pending(r) for r in rows]

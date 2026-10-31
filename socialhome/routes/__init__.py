@@ -38,6 +38,16 @@ from .admin_instance_bans import (
 )
 from .aliases import AliasCollectionView, AliasItemView
 from .app_bundle import AppBundleView, AppRuntimeView
+from .app_groups import (
+    AppGroupCloseView,
+    AppGroupCollectionView,
+    AppGroupDeclineView,
+    AppGroupDetailView,
+    AppGroupJoinView,
+    AppGroupLeaveView,
+    AppGroupRemoveView,
+    AppGroupStartView,
+)
 from .apps import (
     AppCatalogView,
     AppCollectionView,
@@ -1390,6 +1400,18 @@ def setup_routes(app: web.Application) -> None:
     )
     app.router.add_view("/api/apps/{app_id}/messages", AppMessagesView)
     app.router.add_view("/api/apps/{app_id}/held", AppHeldView)
+    # Group tables (v_76) — the sheet's group mode, the lobby, Needs you.
+    app.router.add_view("/api/apps/{app_id}/groups", AppGroupCollectionView)
+    app.router.add_view("/api/apps/{app_id}/groups/{session_id}", AppGroupDetailView)
+    for verb, view in (
+        ("join", AppGroupJoinView),
+        ("decline", AppGroupDeclineView),
+        ("leave", AppGroupLeaveView),
+        ("start", AppGroupStartView),
+        ("remove", AppGroupRemoveView),
+        ("close", AppGroupCloseView),
+    ):
+        app.router.add_view(f"/api/apps/{{app_id}}/groups/{{session_id}}/{verb}", view)
 
     # ── Backup (adapter-agnostic) ────────────────────────────────────────
     app.router.add_view("/api/backup/pre_backup", BackupPreView)

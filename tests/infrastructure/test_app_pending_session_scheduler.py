@@ -47,6 +47,23 @@ async def test_prune_once_calls_repo_and_returns_count():
     assert repo.calls == 1
 
 
+class _FakeGroups:
+    def __init__(self) -> None:
+        self.sweeps = 0
+
+    async def sweep(self) -> int:
+        self.sweeps += 1
+        return 2
+
+
+async def test_prune_once_also_sweeps_group_tables():
+    repo = _FakeAppRepo(deleted=3)
+    groups = _FakeGroups()
+    sched = AppPendingSessionPruneScheduler(repo, groups=groups)
+    assert await sched._prune_once() == 5
+    assert groups.sweeps == 1
+
+
 async def test_double_start_is_idempotent(env):
     _, repo = env
     sched = AppPendingSessionPruneScheduler(repo, interval_seconds=10.0)

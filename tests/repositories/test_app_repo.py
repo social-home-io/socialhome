@@ -803,3 +803,17 @@ async def test_hold_never_fills_a_group_seat(db):
         held={"kind": "message", "payload": {}},
         now=_now(),
     )
+
+
+@pytest.mark.asyncio
+async def test_list_session_rows_lists_everyone_at_one_session(db):
+    repo = SqliteAppRepo(db)
+    a = await _seed_user(db)
+    b = await _seed_user(db)
+    await repo.install(_app())
+    await repo.add_pending_session(_pending(a, "g1", payload={"group": True}))
+    await repo.add_pending_session(_pending(b, "g1", payload={"group": True}))
+    await repo.add_pending_session(_pending(b, "other"))
+    rows = await repo.list_session_rows("chess", "g1")
+    assert sorted(r.user_id for r in rows) == sorted([a, b])
+    assert await repo.list_session_rows("chess", "nope") == []
