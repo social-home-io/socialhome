@@ -80,6 +80,11 @@ def space_calendar_link(space_id: str) -> str:
     return f"/spaces/{space_id}/calendar"
 
 
+def space_games_link(space_id: str) -> str:
+    """The space's Games section (group play, v_77)."""
+    return f"/spaces/{space_id}/games"
+
+
 def space_about_link(space_id: str) -> str:
     """The space's landing page — what a non-member can see of it."""
     return f"/spaces/{space_id}/about"

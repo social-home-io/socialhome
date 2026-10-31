@@ -608,6 +608,9 @@ export interface SpaceFeatures {
    *  doesn't want (e.g. no polls). Absent → treat as all-allowed
    *  (a freshly-stubbed remote space before the host's config lands). */
   allowed_post_types?: string[]
+  /** "Games allowed here" (group play, v_77): the app ids people may
+   *  start as a game in this space. Empty / absent → no games. */
+  allowed_apps?: string[]
 }
 
 /** Per-space display zone (§23.8.7). Members' GPS pins are matched to

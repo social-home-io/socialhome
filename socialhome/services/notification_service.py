@@ -210,6 +210,7 @@ from .notification_links import (
     space_about_link,
     space_calendar_link,
     space_feed_link,
+    space_games_link,
     space_members_link,
     space_moderation_link,
     space_post_link,
@@ -3170,7 +3171,7 @@ class NotificationService(ProtectionGateMixin):
                 user_id=event.to_user_id,
                 type="app_table_announced",
                 title=title,
-                link_url=f"/spaces/{event.space_id}",
+                link_url=space_games_link(event.space_id),
             ),
             about=NotificationSubject.of(
                 NotificationObject.APP_SESSION,

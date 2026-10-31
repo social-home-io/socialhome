@@ -795,5 +795,14 @@
   "bazaar.card.your_bid_declined": "Shown to a bidder whose auction bid the seller declined. {amount} = the bid with currency, e.g. €12.00.",
   "bazaar.faq.title": "A listing's public FAQ: short questions with the seller's answers, shown on the listing to everyone who sees it. Use the glossary's 'Questions and answers'.",
   "bazaar.faq.add_from_thread": "Small button under a buyer's message in an 'Ask the seller' chat (seller only): turns that question into an entry of the listing's Questions and answers. Keep very short (it sits under a chat bubble on phones).",
-  "bazaar.faq.editor.counter": "{n} characters typed out of {max} allowed."
+  "bazaar.faq.editor.counter": "{n} characters typed out of {max} allowed.",
+  "space.games.all": "{n} is how many games are waiting for people. Links to the space's Games section.",
+  "space.games.started_by": "A game opened in a space (design word 'table'). Glossary 'Playing together': never 'host' / 'Gastgeber' / 'hôte' / 'anfitrión' for the person who opened it.",
+  "space.games.take": "Button on a two-player game anyone in the space can take: taking the seat starts the game (glossary: the button stays Play).",
+  "space.games.join": "Glossary: joining a game, not joining a space (de Mitmachen, nl Meedoen, fr Participer, es Participar).",
+  "space.games.host_too_old": "'host household' = the household that hosts the space (as in space.settings.forwarded), not the person who opened a game.",
+  "space.games.announce": "Option when opening a game: every member gets one in-app message, never a push. Glossary 'Let everyone know'.",
+  "space.proposal.fwd.games": "Fills {action} in space.proposal.owner_body ('A proposal to …'). {games} is a comma-separated list of app names.",
+  "space.games.closes_soon": "Lower case: follows '3–30 players · '.",
+  "space.settings_page.section.games": "Glossary 'Games allowed here' (de Erlaubte Spiele, nl Toegestane spellen, fr Jeux autorisés ici, es Juegos permitidos aquí)."
 }

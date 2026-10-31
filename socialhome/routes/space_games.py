@@ -16,6 +16,7 @@ from aiohttp import web
 
 from ..app_keys import space_app_table_service_key, space_service_key
 from ..domain.app_group import GROUP_LOBBY_DEFAULT_DAYS
+from ..domain.space import normalize_allowed_apps
 from ..security import error_response
 from .base import BaseView
 
@@ -115,14 +116,29 @@ class SpaceGamesAllowedView(BaseView):
     games list: ``{allowed_apps: [app_id, …]}`` (≤ 20) → ``{allowed_apps}``.
     The owner, an admin or a moderator (owner decision D9); on a space
     hosted elsewhere the edit goes to the host (and may wait for the
-    owner's approval, as any forwarded config edit). 403 for anyone else,
-    409 ``SPACE_APP_NOT_ALLOWED`` on a global space, 422 for a bad list."""
+    owner's approval, as any forwarded config edit) — then ``forwarded``
+    is true and ``allowed_apps`` is still this household's copy (the SPA
+    says "sent to the space's home" and the config broadcast refreshes it).
+    403 for anyone else, 409 ``SPACE_APP_NOT_ALLOWED`` on a global space,
+    422 for a bad list."""
 
     async def put(self) -> web.Response:
         body = await self.body()
-        space = await self.svc(space_service_key).set_allowed_apps(
-            self.match("space_id"),
+        svc = self.svc(space_service_key)
+        space_id = self.match("space_id")
+        forwards = await svc.config_edits_forward(space_id)
+        before = (await svc._require_space(space_id)).features.allowed_apps
+        space = await svc.set_allowed_apps(
+            space_id,
             actor_username=self.user.username,
             app_ids=body.get("allowed_apps"),
         )
-        return self._json({"allowed_apps": list(space.features.allowed_apps)})
+        # An unchanged list sends nothing anywhere (``set_allowed_apps``
+        # returns early), so it was never forwarded.
+        asked = normalize_allowed_apps(body.get("allowed_apps"), strict=True)
+        return self._json(
+            {
+                "allowed_apps": list(space.features.allowed_apps),
+                "forwarded": forwards and asked != before,
+            }
+        )

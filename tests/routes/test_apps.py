@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock
 
@@ -2361,6 +2362,20 @@ async def test_catalog_carries_the_v2_fields(client, monkeypatch):
     # This Social Home is older than the app needs.
     assert item["compatible"] is False
     assert item["requested"] is False
+    # Not a group game: no players range.
+    assert item["players"] is None
+    assert item["tables"] is False
+
+
+async def test_catalog_says_a_group_games_players_range(client, monkeypatch):
+    """A space's "Games allowed here" offers catalog apps that can be
+    opened as a game in a space, with their players range."""
+    entry = dataclasses.replace(_v2_catalog_entry(), players=(3, 30), tables=True)
+    monkeypatch.setattr(AppService, "browse_catalog", AsyncMock(return_value=[entry]))
+    r = await client.get("/api/apps/catalog", headers=_auth(client._tok))
+    [item] = (await r.json())["apps"]
+    assert item["players"] == {"min": 3, "max": 30}
+    assert item["tables"] is True
 
 
 async def test_install_of_an_app_needing_a_newer_social_home_is_refused(
@@ -2403,6 +2418,39 @@ async def test_list_apps_names_who_added_it_and_the_permissions(client, monkeypa
     assert item["installed_at"] == "2026-10-12T09:00:00+00:00"
     # ``people`` is implied by ``federation`` for an older manifest.
     assert item["permissions"] == ["storage", "people", "federation"]
+    # A 1:1 app: two players, no games in a space.
+    assert item["players"] == {"min": 2, "max": 2}
+    assert item["tables"] is False
+    assert item["late_join"] is False
+
+
+async def test_list_apps_says_a_group_games_players(client, monkeypatch):
+    app = InstalledApp(
+        app_id="quiz",
+        name="Quiz",
+        version="1.0.0",
+        enabled=True,
+        manifest=AppManifest(
+            entry="index.html",
+            icon=None,
+            capabilities=("storage", "people", "federation"),
+            players_min=3,
+            players_max=12,
+            tables=True,
+            late_join=True,
+        ),
+        bundle_path="quiz/1.0.0",
+        bundle_sha256="ab" * 32,
+        source_url="https://example.com/quiz.tgz",
+        installed_by=None,
+        installed_at="2026-10-12T09:00:00+00:00",
+    )
+    monkeypatch.setattr(AppService, "list_visible", AsyncMock(return_value=[app]))
+    r = await client.get("/api/apps", headers=_auth(client._tok))
+    [item] = (await r.json())["apps"]
+    assert item["players"] == {"min": 3, "max": 12}
+    assert item["tables"] is True
+    assert item["late_join"] is True
 
 
 async def test_member_asks_an_admin_and_sees_it_asked(client, monkeypatch):

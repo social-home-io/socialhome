@@ -476,9 +476,11 @@ budget are exactly as above. What the space adds:
   game of Chess in Lakeside"), no push, at most one such table per person
   per space per day (the hub refuses a second, 429
   `SPACE_TABLE_ANNOUNCE_LIMIT`; receivers hold a hub that doesn't to it).
-  Zero extra envelopes: the first card carries `announce: true`.
+  Zero extra envelopes: the first card carries `announce: true`. The row
+  opens the space's Games section (`/spaces/{id}/games`).
 - **No app here** — the card still shows; Join answers the app's own error
-  (`APP_NOT_FOUND` / `APP_NOT_ENABLED` / too young) and the SPA offers the
+  (404 `NOT_FOUND` / `APP_NOT_ENABLED` / too young); the SPA re-reads the
+  list (the card then knows the app is missing) and offers the
   existing "Ask an admin" request. Nothing goes back to the hub.
 
 ### Event types

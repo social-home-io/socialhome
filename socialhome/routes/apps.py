@@ -77,7 +77,9 @@ def _serialize(app: InstalledApp, names: dict[str, str] | None = None) -> dict:
     ``permissions`` are the plain-word ones the household agreed to (the
     installed manifest; ``people`` implied by ``federation``);
     ``installed_by_name`` says who added it ("Added by Anna") when
-    *names* holds them."""
+    *names* holds them; ``players`` / ``tables`` / ``late_join`` are the
+    group-play manifest fields (a space's "Games allowed here", the
+    Start-a-game sheet's players range)."""
     return {
         "app_id": app.app_id,
         "name": app.name,
@@ -89,6 +91,12 @@ def _serialize(app: InstalledApp, names: dict[str, str] | None = None) -> dict:
         "min_age": app.min_age,
         "installed_at": app.installed_at,
         "installed_by_name": (names or {}).get(app.installed_by or ""),
+        "players": {
+            "min": app.manifest.players_min,
+            "max": app.manifest.players_max,
+        },
+        "tables": app.manifest.tables,
+        "late_join": app.manifest.late_join,
     }
 
 
@@ -128,6 +136,12 @@ def _serialize_entry(
             {"version": c.version, "date": c.date, "notes": dict(c.notes)}
             for c in entry.changelog
         ],
+        "players": (
+            {"min": entry.players[0], "max": entry.players[1]}
+            if entry.players is not None
+            else None
+        ),
+        "tables": entry.tables,
         "compatible": compatible,
         "requested": requested,
     }

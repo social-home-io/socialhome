@@ -28131,3 +28131,215 @@ a.sh-spaces-row__main:focus-visible { outline: 2px solid var(--sh-focus-ring); o
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* ── Games in a space (group play, v_77) ─────────────────────────────
+ * The "Open games" strip on top of a space's feed, the Games section,
+ * the Start-a-game sheet and Settings › Games. */
+.sh-games-strip {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+  margin: 0 0 var(--sh-space-md);
+  min-width: 0;
+}
+.sh-games-strip__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sh-space-sm);
+  flex-wrap: wrap;
+}
+.sh-games-strip__title,
+.sh-games-section__title {
+  margin: 0;
+  font-family: var(--sh-font-family-display);
+  font-size: var(--sh-font-size-lg);
+}
+.sh-games-strip__all {
+  display: inline-flex;
+  align-items: center;
+  min-height: 36px;
+  color: var(--sh-primary-text);
+  font-weight: 600;
+  font-size: var(--sh-font-size-sm);
+}
+.sh-games-strip__row,
+.sh-games-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 260px), 1fr));
+  gap: var(--sh-space-sm);
+  min-width: 0;
+}
+.sh-game-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-md);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  background: var(--sh-bg-secondary);
+  min-width: 0;
+}
+.sh-game-card__head {
+  display: flex;
+  gap: var(--sh-space-sm);
+  align-items: flex-start;
+  min-width: 0;
+}
+.sh-game-card__text { min-width: 0; flex: 1; }
+.sh-game-card__title {
+  margin: 0;
+  font-size: var(--sh-font-size-base);
+  overflow-wrap: anywhere;
+}
+.sh-game-card__line {
+  margin: 0;
+  font-size: var(--sh-font-size-sm);
+  overflow-wrap: anywhere;
+}
+.sh-game-card__meta { color: var(--sh-text-muted); }
+.sh-game-card__note {
+  margin: 0;
+  padding: var(--sh-space-xs) var(--sh-space-sm);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg-tertiary);
+  font-size: var(--sh-font-size-sm);
+  overflow-wrap: anywhere;
+}
+.sh-game-card__foot {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sh-space-sm);
+  flex-wrap: wrap;
+}
+.sh-game-card__seated {
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+}
+.sh-game-card__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  flex-wrap: wrap;
+  margin-inline-start: auto;
+}
+.sh-game-card__close {
+  min-height: 36px;
+  font-size: var(--sh-font-size-sm);
+}
+.sh-games-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-md);
+  min-width: 0;
+}
+.sh-games-section__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sh-space-sm);
+  flex-wrap: wrap;
+}
+.sh-games-group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+}
+.sh-games-group__title {
+  margin: 0;
+  font-size: var(--sh-font-size-md);
+}
+.sh-games-group__empty { margin: 0; }
+.sh-games-section__foot { margin: 0; font-size: var(--sh-font-size-sm); }
+.sh-games-section__foot a { text-decoration: underline; text-underline-offset: 2px; }
+.sh-games-note {
+  margin: 0;
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg-tertiary);
+  font-size: var(--sh-font-size-sm);
+}
+/* A dot on the Games section while a game waits for people. */
+.sh-space-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-inline-start: 6px;
+  border-radius: var(--sh-radius-full);
+  background: var(--sh-primary-fill);
+  vertical-align: middle;
+}
+/* Start a game. */
+.sh-start-game__apps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
+  margin: 0;
+  padding: 0;
+  border: 0;
+  min-width: 0;
+}
+.sh-start-game__app,
+.sh-form label.sh-start-game__app {
+  display: flex;
+  margin: 0;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  min-height: 44px;
+  padding: var(--sh-space-xs) var(--sh-space-sm);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  cursor: pointer;
+}
+.sh-start-game__app--on {
+  border-color: var(--sh-primary-text);
+  background: var(--sh-primary-soft);
+}
+.sh-start-game__app:focus-within {
+  outline: 2px solid var(--sh-focus-ring);
+  outline-offset: 2px;
+}
+.sh-start-game__app-text { display: flex; flex-direction: column; min-width: 0; }
+.sh-start-game__app-name { font-weight: 600; overflow-wrap: anywhere; }
+.sh-start-game__app-meta { color: var(--sh-text-muted); font-size: var(--sh-font-size-sm); }
+.sh-start-game__missing-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-xs);
+}
+.sh-start-game__missing-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  flex-wrap: wrap;
+}
+.sh-start-game__missing-row .sh-start-game__app-name { flex: 1; min-width: 0; }
+/* Settings › Games. */
+.sh-games-settings__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+}
+.sh-games-settings__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-sm) 0;
+  border-bottom: 1px solid var(--sh-border);
+}
+.sh-games-settings__row:last-child { border-bottom: 0; }
+.sh-games-settings__text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.sh-games-settings__name { font-weight: 600; overflow-wrap: anywhere; }
+.sh-games-settings__meta {
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+  overflow-wrap: anywhere;
+}
+.sh-games-settings__here--yes { color: var(--sh-success); font-weight: 600; }

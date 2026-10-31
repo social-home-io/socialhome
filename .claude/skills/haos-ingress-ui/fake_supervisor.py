@@ -45,8 +45,9 @@ stamp ``X-Remote-User-*`` like the Supervisor does).
 It also stands in for the Social Home Apps release (not an HA surface —
 the backend's ``SH_APPS_CATALOG_URL`` points here so the harness can
 install an app without the network): ``GET /_apps/catalog.json`` lists
-one tiny app, ``ingress-probe``, in the shape ``AppCatalogEntry.from_dict``
-reads (socialhome-apps ``scripts/build-catalog.mjs``), and
+two tiny apps, ``ingress-probe`` and ``table-probe`` (a group game for a
+space's Games section), in the shape ``AppCatalogEntry.from_dict``
+reads (socialhome-apps ``scripts/build-catalog.mjs``);
 ``GET /_apps/ingress-probe.tgz`` is its bundle — ``manifest.json`` and
 one fully inlined ``index.html`` (the shape every app must ship: the
 sandboxed frame's opaque origin can't load sub-resources). The probe asks
@@ -357,9 +358,10 @@ document.getElementById('pick').addEventListener('click', function () {
 """
 
 
-def _probe_bundle() -> bytes:
-    """The ``ingress-probe`` bundle: a gzipped tar with the files at its root."""
-    manifest = {
+def _probe_bundle(manifest: dict | None = None) -> bytes:
+    """The ``ingress-probe`` bundle (or *manifest*'s app): a gzipped tar
+    with the files at its root."""
+    manifest = manifest or {
         "app_id": PROBE_APP_ID,
         "name": "Ingress probe",
         "version": "2026.1.1",
@@ -384,6 +386,23 @@ def _probe_bundle() -> bytes:
 
 PROBE_BUNDLE = _probe_bundle()
 
+# ``table-probe``: a group game (SDK 1.9 manifest: ``tables``, ``players``)
+# that can be opened as a game in a space — the ``space-games`` check
+# allows it in a space and opens one. Same page as ``ingress-probe``.
+TABLE_APP_ID = "table-probe"
+_TABLE_MANIFEST = {
+    "app_id": TABLE_APP_ID,
+    "name": "Table probe",
+    "version": "2026.1.1",
+    "description": "Harness app: a group game for a space.",
+    "entry": "index.html",
+    # Space games reach other households: people + federation.
+    "capabilities": ["storage", "people", "federation"],
+    "players": {"min": 2, "max": 4},
+    "tables": True,
+}
+TABLE_BUNDLE = _probe_bundle(_TABLE_MANIFEST)
+
 
 async def apps_catalog(request: web.Request) -> web.Response:
     base = f"{request.scheme}://{request.host}"
@@ -399,11 +418,26 @@ async def apps_catalog(request: web.Request) -> web.Response:
         "bundle_url": f"{base}/_apps/{PROBE_APP_ID}.tgz",
         "bundle_sha256": hashlib.sha256(PROBE_BUNDLE).hexdigest(),
     }
-    return web.json_response({"apps": [entry]})
+    table = {
+        "app_id": TABLE_APP_ID,
+        "name": "Table probe",
+        "latest_version": "2026.1.1",
+        "description": "Harness app: a group game for a space.",
+        "icon_url": None,
+        "capabilities": ["storage", "people", "federation"],
+        "players": {"min": 2, "max": 4},
+        "bundle_url": f"{base}/_apps/{TABLE_APP_ID}.tgz",
+        "bundle_sha256": hashlib.sha256(TABLE_BUNDLE).hexdigest(),
+    }
+    return web.json_response({"apps": [entry, table]})
 
 
 async def apps_bundle(request: web.Request) -> web.Response:
     return web.Response(body=PROBE_BUNDLE, content_type="application/gzip")
+
+
+async def table_bundle(request: web.Request) -> web.Response:
+    return web.Response(body=TABLE_BUNDLE, content_type="application/gzip")
 
 
 def build_app(token: str) -> web.Application:
@@ -411,6 +445,7 @@ def build_app(token: str) -> web.Application:
     app[TOKEN_KEY] = token
     app.router.add_get("/_apps/catalog.json", apps_catalog)
     app.router.add_get(f"/_apps/{PROBE_APP_ID}.tgz", apps_bundle)
+    app.router.add_get(f"/_apps/{TABLE_APP_ID}.tgz", table_bundle)
     app.router.add_get("/addons/self/info", addon_info)
     app.router.add_post("/discovery", discovery)
     app.router.add_get("/core/api/websocket", core_ws)

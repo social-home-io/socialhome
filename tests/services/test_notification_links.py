@@ -72,6 +72,7 @@ def test_app_link_picks_the_app_out_on_the_apps_page():
 
 def test_space_links():
     assert links.space_calendar_link("s1") == "/spaces/s1/calendar"
+    assert links.space_games_link("s1") == "/spaces/s1/games"
     assert links.space_about_link("s1") == "/spaces/s1/about"
     assert links.space_members_link("s1") == "/spaces/s1/settings/members"
     assert links.space_moderation_link("s1") == "/spaces/s1/moderation"
@@ -187,6 +188,7 @@ def _builder_links() -> set[str]:
         links.bazaar_listing_link("L1"),
         links.app_link("chess"),
         links.space_calendar_link("s1"),
+        links.space_games_link("s1"),
         links.space_about_link("s1"),
         links.space_members_link("s1"),
         links.HOUSEHOLD_CALENDAR_LINK,

@@ -325,6 +325,50 @@ describe('the Members row and the member count', () => {
     expect(rows[0].textContent).toContain('Members')
   }, 20000)
 
+  it('games allowed: a member gets Games after Chat and the "Open games" strip on the feed', async () => {
+    wire({}, 'member', { features: { allowed_apps: ['quiz'] } })
+    const games = {
+      allowed_apps: ['quiz'], games_possible: true, can_edit_games: false, host_supports: true,
+      tables: [{
+        session_id: 't1', app_id: 'quiz', host_name: 'Anna', host_is_local: false, note: null,
+        min: 3, max: 8, seated: 1, state: 'open', late_join: false, created_at: '2026-10-31T10:00:00Z',
+        expires_at: '2099-01-01T00:00:00Z', app: { installed: true, enabled: true }, group: null,
+      }],
+    }
+    const base = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => (url === '/api/spaces/s1/games' ? games : base(url)))
+    const { tl, r } = await open()
+    const strip = await tl.waitFor(() => r.getByRole('heading', { level: 2, name: 'Open games' }))
+    expect(strip).toBeTruthy()
+    expect(r.getByRole('button', { name: 'Join quiz' })).toBeTruthy()
+    const nav = r.getByRole('navigation', { name: 'Space sections' })
+    const hrefs = Array.from(nav.querySelectorAll('a')).map((a) => a.getAttribute('href'))
+    expect(hrefs.slice(0, 3)).toEqual(['/spaces/s1', '/spaces/s1/chat', '/spaces/s1/games'])
+    // The dot says a game waits for people.
+    expect(r.getByRole('link', { name: /Games, open games/ })).toBeTruthy()
+  }, 20000)
+
+  it('a follower gets neither Games nor the strip, and never asks for the games', async () => {
+    wire({}, 'subscriber', { features: { allowed_apps: ['quiz'] } })
+    const { tl, r } = await open()
+    await tl.waitFor(() => expect(r.getByRole('link', { name: 'Feed' })).toBeTruthy())
+    await tl.waitFor(() => expect(apiGet).toHaveBeenCalledWith('/api/spaces/s1'))
+    expect(r.queryByRole('link', { name: /^Games/ })).toBeNull()
+    expect(r.queryByText('Open games')).toBeNull()
+    expect(apiGet).not.toHaveBeenCalledWith('/api/spaces/s1/games')
+  }, 20000)
+
+  it('no games allowed: a member gets no Games; a moderator does (to choose them)', async () => {
+    wire({}, 'member')
+    let opened = await open()
+    await opened.tl.waitFor(() => expect(opened.r.getByRole('link', { name: 'Chat' })).toBeTruthy())
+    expect(opened.r.queryByRole('link', { name: /^Games/ })).toBeNull()
+    opened.tl.cleanup()
+    wire({}, 'moderator')
+    opened = await open('games')
+    await opened.tl.waitFor(() => expect(opened.r.getByText('No games here yet')).toBeTruthy())
+  }, 20000)
+
   it('the hero member count links to the Members section', async () => {
     wire({}, 'member', { about_markdown: 'Hello', cover_url: null, icon_url: null })
     const { tl, r } = await open()

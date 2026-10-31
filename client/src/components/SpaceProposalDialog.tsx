@@ -18,8 +18,10 @@ import { api } from '@/api'
 import { Button } from './Button'
 import { Modal } from './Modal'
 import { isRestricted } from './ProtectedNotice'
-import { t } from '@/i18n/i18n'
+import { locale, t } from '@/i18n/i18n'
 import { parseSpaceRole } from '@/features/spaces/spaceRoles'
+import { appLook } from '@/features/spaces/games/spaceGames'
+import { catalog, installedApps } from '@/store/apps'
 import { showToast } from './Toast'
 import { awaitsMyVote } from '@/store/spaceAttention'
 
@@ -59,6 +61,19 @@ const ROLE_PHRASE: Record<string, (name: string) => string> = {
   subscriber: (name) => t('space.proposal.role.subscriber', { name }),
 }
 
+/** The games list a forwarded ``update_config`` asks for, when that is
+ *  all it changes (``fwd_params: {features: {allowed_apps}}``), else
+ *  ``null``. */
+export function proposedGames(p: SpaceProposal): string[] | null {
+  if (p.action !== 'remote_admin_action' || p.fwd_action !== 'update_config') return null
+  const feats = p.fwd_params?.features
+  if (!feats || typeof feats !== 'object' || Array.isArray(feats)) return null
+  const keys = Object.keys(feats)
+  const list = (feats as Record<string, unknown>).allowed_apps
+  if (keys.length !== 1 || !Array.isArray(list)) return null
+  return list.filter((x): x is string => typeof x === 'string')
+}
+
 export function describeProposal(p: SpaceProposal): string {
   if (p.action === 'dissolve') return t('space.proposal.action.dissolve')
   if (p.action === 'set_public_tier') {
@@ -73,6 +88,16 @@ export function describeProposal(p: SpaceProposal): string {
     const role = parseSpaceRole(p.fwd_params?.role)
     const who = p.fwd_target_label || t('space.proposal.someone')
     return role ? ROLE_PHRASE[role](who) : t('space.proposal.role.change', { name: who })
+  }
+  const games = proposedGames(p)
+  if (games) {
+    // A remote admin's or moderator's "Games allowed here" edit, held for
+    // the owner (group play D9): say which games, by name.
+    const lang = locale.value || 'en'
+    const names = games.map((id) => appLook(id, installedApps.value, catalog.value, lang).name)
+    return names.length
+      ? t('space.proposal.fwd.games', { games: names.join(', ') })
+      : t('space.proposal.fwd.games_none')
   }
   if (p.action === 'remote_admin_action') {
     const copy = p.fwd_action ? FWD_ACTION_COPY[p.fwd_action] : undefined
