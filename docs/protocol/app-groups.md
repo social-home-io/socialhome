@@ -8,10 +8,13 @@ never does. Every other household with a player keeps a copy of the table
 as the hub last sent it. Households never talk to each other because of a
 table: each talks only to the hub, over the pairing it already has.
 
-This page covers **the roster** (capability v_76): opening a table from the
-invite sheet, invites, join / decline / leave / remove, Start, the host
-hand-over, closing and expiry. Messages at a table (`APP_MESSAGE.group`,
-sealed seat keys, the per-seat mailbox) and space tables (v_77) come next;
+This page covers **the roster** and **messages at a table** (capability
+v_76): opening a table from the invite sheet, invites, join / decline /
+leave / remove, Start, the host hand-over, closing and expiry; then
+messages to everyone or to chosen seats (sealed to the target household's
+*seat key*, so the hub that passes them on can't read them), the hub's
+numbering (`seq`), the per-sender mailbox, "your turn" and the hub's send
+budget; and the app bridge (`sh.group.*`). Space tables (v_77) come next;
 the 1:1 sessions are in [`apps.md`](./apps.md).
 
 ## Scope
@@ -154,6 +157,244 @@ to the hub, one seat answer, and at most one coalesced roster per 5 s to
 the other households at the table (≤ 0.6 KB each sealed). Filling 10 seats
 over 10 households one by one: ≈ 10 × 2 + ~10 × 9 rosters × 0.6 KB ≈ 60 KB,
 once. Start / close: *h − 1* envelopes.
+
+## Messages at a table
+
+Every message goes to the hub, which numbers it (`seq`) and passes it on
+— one envelope per household that has someone it is for, never per
+person. **To everyone** (`to: "all"`) the hub reads it (the hub is a
+player's household; a group key it hands out would add nothing). **To
+chosen seats** (`to: [seats]`) the sender's household seals the data to
+each target seat's household *seat key*: the hub, and every other
+household, sees only ciphertext.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant B as Ben's household (seat 2)
+    participant H as Hub (Anna's household, seat 1)
+    participant C as Cleo's household (seat 3)
+    participant D as Dev's household (seat 4)
+    B->>H: APP_MESSAGE {from_user: ben, group: {to: "all", msg_id}, data}
+    H->>H: Ben seated? table open? under the send budget? → seq 41
+    par one envelope per household (coalesced 200 ms, ≤ 64 KiB)
+        H->>C: APP_MESSAGE {group: {msgs: [{seq: 41, from_seat: 2, to: "all", data}]}}
+        H->>D: APP_MESSAGE {group: {msgs: [{seq: 41, from_seat: 2, to: "all", data}]}}
+    end
+    H->>H: Anna (seat 1) gets it here: live + held
+    B->>B: seal data to Dev's household seat key (seat 4)
+    B->>H: APP_MESSAGE {group: {to: [4], msg_id, sealed: [{to_seat: 4, …}]}}
+    H->>D: APP_MESSAGE {group: {msgs: [{seq: 42, from_seat: 2, to: [4], sealed}]}}
+    Note over H: the hub sees only ciphertext; Cleo's household gets nothing
+    D->>D: open with its seat key → Dev's app (direct: true)
+```
+
+### Seat keys
+
+When a household first takes a seat at a table it makes a fresh X25519
+key pair for that table — **one per household, not per person** (the
+household server is the trust boundary, as for DMs). The private half is
+kept KEK-wrapped on its own table row (`app_group_sessions.seat_key_json`,
+bound to the table id); the public half rides its `group_join`, **signed
+with the household's Ed25519 identity key**, and the hub hands it on in
+every roster entry of that household:
+
+```json
+"seat_key": { "seat_kem_suite": "x25519", "pub": "<b64url 32 B>",
+              "sig_suite": "ed25519", "sig": "<b64url 64 B>" }
+```
+
+The signature covers
+`socialhome/app_group/seat_key/v1|<session_id>|<instance>|<seat_kem_suite>|<pub>`.
+The hub verifies it against the joiner's identity key (the hub is paired
+with every household it invites) and seats the joiner only then; the first
+key a household brings to a table stays. A receiver checks every roster
+key against a key it **already stores** for that household (its pairing),
+its own entries against its own seat key, and drops a snapshot whose key
+doesn't verify, whose suite it doesn't know, or that names two keys for
+one household. For a household it holds no key for (people picked by the
+host whose households aren't paired with each other) it takes the hub's
+word — **residual**: a lying hub household could then read directed
+messages between those two players. Space tables (v_77) won't have it.
+
+### Sealing a directed message
+
+`seat_kem_suite: "x25519"` (`SUPPORTED_SEAT_KEM_SUITES`; anything else is
+refused — `UnsupportedSeatKemSuite`, never a fallback):
+
+- *shared* = X25519(sender household's seat private key, target
+  household's seat public key) — static–static, so only those two
+  households can derive it, and the receiver knows which household sent
+  it;
+- *key* = HKDF-SHA256(*shared*, salt = `msg_id`, info =
+  `socialhome/app_group/seat_seal/v1|<session_id>|<from_seat>|<to_seat>`)
+  — one key per message and direction;
+- AES-256-GCM, random 12-byte nonce, AAD = the same context string plus
+  `|<msg_id>`.
+
+`msg_id` is 16 random bytes the sender picks (b64url); the hub can't
+seal one itself (it holds neither private half), can't move one to
+another seat or table (the AAD binds both) and can't pass it off as from
+another seat (the receiver derives with that seat's household key, and
+the tag fails). One sealed entry per target seat: `{to_seat,
+seat_kem_suite, nonce, ct}`. The hub forwards to each household only the
+entries for its seats.
+
+### On the wire
+
+`APP_MESSAGE`, all inside the sealed payload, v_76 households only. Group
+messages ride the JSON `APP_MESSAGE` (outbox, retries) — not the binary
+`fed-app-v1` channel, so a message never arrives twice by two paths.
+
+| From → to | Sealed fields |
+|---|---|
+| a player's household → hub | `app_id, session_id, from_user, group: {to: "all" \| [seat…], msg_id, turn?}, data` (to all) — or `group: {to: [seat…], msg_id, turn?, sealed: [{to_seat, seat_kem_suite, nonce, ct}]}` and no `data` (directed) |
+| hub → a household with someone it is for | `app_id, session_id, group: {msgs: [{seq, from_seat, to, msg_id, turn?, data \| sealed}]}` — no `to_user` / `from_user`: seats only |
+
+- `to`: `"all"`, or 1–29 distinct seats seated now, never the sender's own.
+- `turn`: a seat seated now (the next player). Only that seat's household
+  raises "Your turn" — one row per game, as for 1:1 (`app_turn`).
+- `data`: any JSON, ≤ 64 KiB encoded (the 1:1 limit); a sealed entry's
+  `ct` ≤ 64 KiB + the tag.
+- A hub batch (`msgs`) holds ≤ 64 messages and ≤ 64 KiB of data unless a
+  single message is bigger (then it rides alone).
+
+### Order and repeats
+
+The hub stamps every message it takes with `seq` (per table, + 1 each,
+directed ones too — a player can see a gap and know it wasn't for them)
+and hands batches on in `seq` order. A receiving household passes on a
+`seq` once: it drops one it saw already, and one more than 256 below the
+highest it has seen. The SDK hands messages to the app in `seq` order.
+(**Residual:** the "saw already" set is kept in memory; after a restart
+the hub could repeat a message from within the last 256 — only the hub,
+which can say anything to everyone anyway.) The sender's own message is
+not echoed back to it (the `strict_order` echo + skipped-`seq` stubs of
+the design are left for an app that asks for them).
+
+### Who may send, the hub's checks
+
+The hub takes a message only from a person **seated** now, from their own
+household (the signature-proven sender), at a table in `lobby` or
+`playing`; with every `to` / `turn` seat seated now and the `sealed`
+entries exactly the `to` seats. A refusal from another household is
+dropped (logged); on the hub itself it is an error (below). Each receiver
+takes `msgs` only from the table's hub and delivers to its own people
+seated at the table — never someone who blocked the sender, or whom a
+guardian block separates from them (the household's own rules, as for
+1:1).
+
+### The send budget (per table)
+
+The hub passes on at most **600 envelopes a minute per table** (one per
+message per household it goes to): 20 messages a minute to everyone at a
+table of 30 households, 200 at a table of 4. Above it a message is
+refused — `429 APP_GROUP_BUSY` (`params.retry_after`, seconds) when the
+sender is on the hub's household; dropped (logged) from another household.
+A sender's household applies the same budget to what its own people send
+to one table, so they get the 429 too. The per-person `POST …/messages`
+bucket (300 a minute) holds as well. Apps should send answers to the host
+seat and let the host send one result to everyone (SDK docs).
+
+### The mailbox (closed apps)
+
+A closed app gets **each player's latest message** of a table, ≤ 16 KiB
+each (bigger ones go out live only): `app_group_held` keeps, per (app,
+person, table, sender seat), the newest by `seq`. `POST /api/apps/{id}/held`
+hands them over (oldest `seq` first) as `group_messages` and clears them.
+The table's own state (roster, `seq`, host, `lobby/playing/ended`) is on the
+table row, never in a held message. **SDK contract for groups:** *a closed
+app gets each player's latest message; send state, not deltas.*
+
+### Cost
+
+A message to everyone at a table of *h* households: 1 envelope to the hub
++ *h* − 2 out (none back to the sender's household unless another of its
+people sits there) ≈ (*h* − 1) × (size + 400 B). A directed message to *k*
+seats: 1 + the households of those seats. Coalescing makes a burst of
+answers one envelope per household per 200 ms.
+
+- Typical: 8 households, 1 KB full-state message, 200 moves → 7 × 1.4 KB ×
+  200 ≈ **2 MB per game**, ≈ 280 KB received per household.
+- Worst realistic: a 30-household quiz, 20 rounds, written "answers to the
+  host": 29 directed + 29 results per round = 58 envelopes; 20 rounds ≈
+  **1,160 envelopes ≈ 3 MB**, ≈ 100 KB per household. The naive version
+  (everyone answers everyone: 600 × 29 ≈ 17,400 envelopes ≈ 42 MB) runs
+  into the 600/min budget — the backstop, not the design.
+- Seat keys: ≈ 180 B per roster entry in each snapshot (≤ 30 × 180 B ≈
+  5.4 KB for a full table).
+
+## HTTP, WebSocket and the app bridge
+
+**HTTP** (all need the app's `people` permission; `federation` once
+another household is at the table):
+
+| Route | Body → answer |
+|---|---|
+| `POST /api/apps/{id}/groups/{sid}/messages` | `{data, to?: [seat…], turn?: seat}` → `{seq}` (`seq` is the number when this household is the hub, `null` when it went to the hub's household). 413 `PAYLOAD_TOO_LARGE` past 64 KiB; 429 `APP_GROUP_BUSY`; 409 `APP_GROUP_SEAT` (a `to` / `turn` seat not seated, your own seat, or no seat key for it); 409 `APP_GROUP_CLOSED` (ended, or you aren't seated); 404 `APP_GROUP_NOT_FOUND`. Rate limit 300 / min per person. |
+| `POST /api/apps/{id}/held` | as for 1:1, plus `group_messages: [{session_id, seq, from_seat, direct, data}]`, oldest `seq` first. |
+
+**WebSocket** (to the person's own sockets):
+`{type: "app.group.message", app_id, session_id, seq, from_seat, direct, data}`
+for each message delivered live (as well as held); the existing
+`app.group` frame for every roster change (`group` = the person's view of
+the table, or `change` when their place is over).
+
+**Bridge** (`client/src/features/apps/bridge.ts`; SDK 1.9's `sh.group.*`).
+RPC from the app frame is `{id, method, params}` → `{id, ok, result}` or
+`{id, ok: false, error: {code, message, retryAfterMs?}}`. Every `group.*`
+method needs `people` (else `permission_denied`).
+
+| Method | Params → result |
+|---|---|
+| `group.list` | — → `GroupSession[]` (the person's tables in this app) |
+| `group.get` | `{id}` → `GroupSession` |
+| `group.start` | `{id}` → `GroupSession` (host only; ≥ `min` seated) |
+| `group.send` | `{id, data, to?: number[], turn?: number}` → `{seq: number \| null}` — resolves once this household took it (sent on to the hub, or numbered here when this is the hub) |
+| `group.leave` | `{id}` → `{ok: true}` |
+| `group.remove` | `{id, seat}` → `GroupSession` (host only) |
+| `group.held` | — → `GroupEvent[]` (the held `message` events, oldest `seq` first) — for an app that pulls (`app.context` params `{held: 'pull'}`); otherwise they are posted as events right after the `app.context` reply |
+| `group.open` | answers `unavailable` until Social Home's group sheet lands (group play PR 5); an app opens a table only through that sheet (D3) |
+
+Error codes: `group_not_found`, `group_not_host`, `group_closed`,
+`group_full`, `group_too_few`, `group_seat`, `group_busy` (with
+`retryAfterMs`), `too_large`, `cant_join`, plus `permission_denied` /
+`error`.
+
+```ts
+interface GroupSession {
+  id: string; appId: string
+  state: 'lobby' | 'playing' | 'ended'; endReason?: string; spaceId?: string
+  me: number | null      // my seat (null: invited / joining)
+  myState: 'invited' | 'joining' | 'seated' | 'left' | 'removed'
+  host: number | null; isHost: boolean
+  min: number; max: number; lateJoin: boolean; seq: number; note?: string
+  players: { seat: number; name: string; household: string | null;
+             isLocal: boolean; state: 'seated' | 'left' | 'removed' }[]
+}
+```
+
+Events — posted to the frame as `{type: 'group:event', event}`:
+
+```ts
+type GroupEvent =
+  | { type: 'message'; id: string; seq: number; from: number; data: unknown;
+      direct: boolean; held?: true }
+  | { type: 'joined' | 'left' | 'removed'; id: string; seat: number; session: GroupSession }
+  | { type: 'started' | 'host-changed' | 'ended'; id: string; session: GroupSession }
+```
+
+The bridge derives `joined` / `left` / `removed` / `started` /
+`host-changed` / `ended` by comparing each `app.group` frame with the last
+view it saw of that table (a seat newly `seated`, a seat that turned
+`left` / `removed`, `lobby` → `playing`, a new host seat, → `ended`);
+your own place ending (`change`: `left` / `removed` / `withdrawn`) is a
+`removed` (or `left`) event for your seat. `session` is the table after
+the change (an addition to design 2.9).
+
+`app.context` gains `groups: true` (this host speaks `group.*`) and, when
+the app was opened from a table (`?session=<table id>`, Join / Play),
+`launch: {sessionId, group: GroupSession}` instead of `invite`.
 
 ## Storage
 
