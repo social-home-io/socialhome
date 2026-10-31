@@ -9598,6 +9598,29 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_75 listing FAQ gate in place ✓")
+    # v_76 — group games: the ``group_*`` verbs of ``APP_SESSION`` between a
+    # table's hub and each player's household at >= v_76. ``app-group``
+    # runs a three-household table end to end (the receiver rules are
+    # ``tests/protocol/test_app_group_federation.py``).
+    if int(_Cap.MIN_FOR_APP_GROUPS) != 76 or _OURS < 76:
+        failures.append(
+            "MIN_FOR_APP_GROUPS moved off v_76 (or OURS fell below it) — a "
+            "group table would reach households that drop it"
+        )
+    else:
+        print("  v_76 group games gate in place ✓")
+    table = state.get("app_group")
+    if table:
+        for label in ("a", "b", "c"):
+            ended = _rows(
+                label,
+                "SELECT state FROM app_group_sessions WHERE session_id = ?",
+                (table["session_id"],),
+            )
+            if [r[0] for r in ended] != ["ended"]:
+                failures.append(f"app-group: {label} lost the closed table")
+            else:
+                print(f"  app-group: {label} still holds the closed table ✓")
     faq = state.get("bazaar_faq")
     if faq:
         for label in ("a", "b", "d"):
@@ -15238,6 +15261,163 @@ def cmd_bazaar_ask() -> None:
     print("bazaar-ask: ok")
 
 
+def cmd_app_group() -> None:
+    """Group games — a table of three households, the roster (v_76).
+
+    Prereqs: ``up`` + ``pair`` (a↔b, a↔c paired). Installs a stand-in
+    group app (``demo-table``: ``players {3, 6}``, ``tables: true``) on a, b
+    and c straight into ``installed_apps`` — the demo has no catalog; the
+    group routes never load the bundle.
+
+    1. a reads its invite sheet (``GET /invitable``): b's and c's admins
+       are offered with ``groups: true`` (their households run v_76).
+    2. a opens a table with them (``POST /groups``); b and c each get ONE
+       sealed ``group_invite`` and list the table as ``invited``.
+    3. b and c join (``group_join`` → ``group_seat`` + coalesced
+       ``group_roster``); all three converge on seats 1–3.
+    4. b (not the host) can't start (403); a starts — ``group_start``
+       reaches b and c (``playing``).
+    5. a closes it — ``group_close`` ends it on b and c (``cancelled``).
+    6. **v_76.** ``OURS`` >= ``MIN_FOR_APP_GROUPS`` and a sees b and c at
+       it. Forged snapshots, strangers' joins, a non-host's commands and
+       the block / children rules are
+       ``tests/protocol/test_app_group_federation.py`` /
+       ``tests/services/test_app_group_service.py``.
+    """
+    import sqlite3
+
+    from socialhome.domain.federation_capabilities import (
+        OURS as _OURS,
+        FederationCapability as _Cap,
+    )
+
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' first")
+    inst = state["instances"]
+    a, b, c = inst["a"], inst["b"], inst["c"]
+    app_id = "demo-table"
+    manifest = (
+        '{"entry": "index.html", "icon": null, "capabilities":'
+        ' ["storage", "federation"], "players": {"min": 3, "max": 6},'
+        ' "tables": true}'
+    )
+    for label in ("a", "b", "c"):
+        con = sqlite3.connect(str(_instance_dir(label) / "socialhome.db"), timeout=10)
+        try:
+            con.execute(
+                "INSERT OR IGNORE INTO installed_apps(app_id, name, version,"
+                " enabled, manifest_json, bundle_path, bundle_sha256,"
+                " source_url, installed_at) VALUES(?, 'Demo table', '1', 1, ?,"
+                " 'apps/demo-table/1', 'demo', 'demo', '2026-10-31')",
+                (app_id, manifest),
+            )
+            con.commit()
+        finally:
+            con.close()
+
+    def api(node: dict, path: str, *, method: str = "GET", body=None):
+        return _request(
+            f"http://127.0.0.1:{node['port']}/api/apps/{app_id}{path}",
+            token=node["token"],
+            method=method,
+            body=body,
+        )
+
+    def wait(what: str, check, timeout: float = 60.0) -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if check():
+                return
+            time.sleep(1.0)
+        raise SystemExit(f"app-group: timed out waiting for {what}")
+
+    def view(node: dict) -> list[dict]:
+        s, body = api(node, "/groups")
+        return (body or {}).get("groups", []) if s == 200 else []
+
+    # 1. The invite sheet offers b's and c's admins for a group.
+    s, sheet = api(a, "/invitable")
+    _must("invitable(a)", s, sheet)
+    picks = []
+    for node in (b, c):
+        hit = [
+            p
+            for p in sheet["people"]
+            if p["instance_id"] == node["instance_id"]
+            and p["user_ref"] == node["username"]
+        ]
+        if not hit or hit[0].get("groups") is not True:
+            raise SystemExit(f"app-group: {node['username']} not offered for a group")
+        picks.append(
+            {"instance_id": node["instance_id"], "user_ref": node["username"],
+             "is_local": False}
+        )
+    # 2. Open the table.
+    s, opened = api(a, "/groups", method="POST", body={"targets": picks})
+    _must("open table(a)", s, opened, ok=(201,))
+    sid = opened["group"]["session_id"]
+    for label, node in (("b", b), ("c", c)):
+        wait(
+            f"{label} to hold the invite",
+            lambda node=node: any(
+                g["session_id"] == sid and g["my_state"] == "invited"
+                for g in view(node)
+            ),
+        )
+        print(f"  app-group: {label} got the invite ✓")
+    # 3. b and c join; everyone converges on three seats.
+    for label, node in (("b", b), ("c", c)):
+        s, joined = api(node, f"/groups/{sid}/join", method="POST")
+        _must(f"join({label})", s, joined)
+
+    def seats(node: dict) -> list[int]:
+        g = next((g for g in view(node) if g["session_id"] == sid), None)
+        return sorted(
+            p["seat"] for p in (g or {}).get("players", []) if p["state"] == "seated"
+        )
+
+    for label, node in (("a", a), ("b", b), ("c", c)):
+        wait(f"{label} to see three seats", lambda node=node: seats(node) == [1, 2, 3])
+        print(f"  app-group: {label} sees seats 1-3 ✓")
+    # 4. Only the host starts.
+    s, refused = api(b, f"/groups/{sid}/start", method="POST")
+    if s != 403:
+        raise SystemExit(f"app-group: b (not the host) could start: {s} {refused!r}")
+    s, started = api(a, f"/groups/{sid}/start", method="POST")
+    _must("start(a)", s, started)
+
+    def state_of(node: dict) -> str | None:
+        g = next((g for g in view(node) if g["session_id"] == sid), None)
+        return g["state"] if g else None
+
+    for label, node in (("b", b), ("c", c)):
+        wait(f"{label} to see the game start", lambda node=node: state_of(node) == "playing")
+        print(f"  app-group: {label} sees the game playing ✓")
+    # 5. The host closes it.
+    s, closed = api(a, f"/groups/{sid}/close", method="POST")
+    _must("close(a)", s, closed)
+    for label, node in (("b", b), ("c", c)):
+        wait(f"{label} to see the table end", lambda node=node: state_of(node) == "ended")
+        print(f"  app-group: {label} sees the table closed ✓")
+    # 6. v_76 round-trips between the three.
+    if _OURS < _Cap.MIN_FOR_APP_GROUPS:
+        raise SystemExit(
+            f"app-group: OURS={_OURS} < MIN_FOR_APP_GROUPS={_Cap.MIN_FOR_APP_GROUPS}"
+        )
+    for peer in (b, c):
+        rows = _rows(
+            "a",
+            "SELECT proto_version FROM remote_instances WHERE id = ?",
+            (peer["instance_id"],),
+        )
+        if not rows or int(rows[0][0] or 1) < _Cap.MIN_FOR_APP_GROUPS:
+            raise SystemExit(f"app-group: a sees {peer['instance_id'][:8]} below v_76")
+    state["app_group"] = {"session_id": sid, "app_id": app_id}
+    _save(state)
+    print("app-group: ok")
+
+
 def cmd_bazaar_faq() -> None:
     """A listing's questions and answers (v_75).
 
@@ -19613,6 +19793,9 @@ def main() -> None:
         # rewords one and removes one — a, b and d (follower household)
         # converge; a (not the seller) is refused.
         cmd_bazaar_faq()
+        # ``app-group`` (v_76): a opens a group table with b's and c's
+        # admins, both join, a starts and closes it — all three converge.
+        cmd_app_group()
         # ``highlight-audience`` (v_70): a narrows today's highlight to b's
         # household — c deletes it and remembers the removal, a narrowed
         # frame reaches b only — then widens back and c gets the day again.
