@@ -15277,6 +15277,11 @@ def cmd_app_group() -> None:
        ``group_roster``); all three converge on seats 1–3.
     4. b (not the host) can't start (403); a starts — ``group_start``
        reaches b and c (``playing``).
+    4b. **Messages.** b sends one to everyone and one sealed to c's seat
+       only (``APP_MESSAGE.group``, relayed by a — the hub). c's mailbox
+       (``POST /held``) gets both, numbered by a; a's gets the one to
+       everyone only, and the whisper's marker appears nowhere in a's
+       database files: the relay passed on ciphertext.
     5. a closes it — ``group_close`` ends it on b and c (``cancelled``).
     6. **v_76.** ``OURS`` >= ``MIN_FOR_APP_GROUPS`` and a sees b and c at
        it. Forged snapshots, strangers' joins, a non-host's commands and
@@ -15394,6 +15399,52 @@ def cmd_app_group() -> None:
     for label, node in (("b", b), ("c", c)):
         wait(f"{label} to see the game start", lambda node=node: state_of(node) == "playing")
         print(f"  app-group: {label} sees the game playing ✓")
+    # 4b. Messages: one to everyone, one sealed to c's seat only.
+    def me(node: dict) -> int:
+        g = next((g for g in view(node) if g["session_id"] == sid), None)
+        return int((g or {}).get("me") or 0)
+
+    seat_b, seat_c = me(b), me(c)
+    marker = f"DEMO-WHISPER-{secrets.token_hex(6)}"
+    s, sent = api(
+        b, f"/groups/{sid}/messages", method="POST", body={"data": {"round": 1}}
+    )
+    _must("message to everyone(b)", s, sent)
+    s, sent = api(
+        b,
+        f"/groups/{sid}/messages",
+        method="POST",
+        body={"data": {"whisper": marker}, "to": [seat_c]},
+    )
+    _must("sealed message(b → c)", s, sent)
+    got: dict[str, list[dict]] = {"a": [], "c": []}
+
+    def held(label: str, node: dict) -> list[dict]:
+        s, body = api(node, "/held", method="POST")
+        if s == 200:
+            got[label].extend((body or {}).get("group_messages", []))
+        return got[label]
+
+    wait(
+        "c to get both messages",
+        lambda: {(m["from_seat"], m["direct"]) for m in held("c", c)}
+        >= {(seat_b, False), (seat_b, True)},
+    )
+    by_kind = {m["direct"]: m for m in got["c"]}
+    if by_kind[True]["data"] != {"whisper": marker} or by_kind[False]["data"] != {
+        "round": 1
+    }:
+        raise SystemExit(f"app-group: c got the wrong messages: {got['c']!r}")
+    if not by_kind[False]["seq"] < by_kind[True]["seq"]:
+        raise SystemExit(f"app-group: the hub's numbering is off: {got['c']!r}")
+    print("  app-group: c got the message to everyone and the sealed one ✓")
+    wait("a to get the message to everyone", lambda: bool(held("a", a)))
+    if any(m["direct"] for m in got["a"]) or marker in json.dumps(got["a"]):
+        raise SystemExit(f"app-group: a (the hub) got the whisper: {got['a']!r}")
+    for path in _instance_dir("a").glob("socialhome.db*"):
+        if marker.encode() in path.read_bytes():
+            raise SystemExit(f"app-group: the whisper is readable in a's {path.name}")
+    print("  app-group: a (the relay) holds no plaintext of the sealed message ✓")
     # 5. The host closes it.
     s, closed = api(a, f"/groups/{sid}/close", method="POST")
     _must("close(a)", s, closed)
