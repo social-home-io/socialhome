@@ -110,6 +110,8 @@ CONTENT_TABLES = (
     # conversation a chat event could otherwise reach.
     "conversation_messages",
     "message_reactions",
+    # Game tables in a space (v_77) — the cards and copies a household keeps.
+    "app_group_sessions",
 )
 
 
@@ -565,6 +567,46 @@ ATTACKS: dict[FederationEventType, list[tuple[str, dict]]] = {
             },
         ),
     ],
+    FET.SPACE_APP_TABLE: [
+        (
+            "re-announce B's game table as ours",
+            {
+                "table_id": "table-b",
+                "rev": 9,
+                "app_id": "quiz",
+                "host_user": "evil",
+                "host_user_id": "u-evil",
+                "host_name": "Evil",
+                "note": None,
+                "players": {"min": 2, "max": 4},
+                "seated": 1,
+                "state": "closed",
+                "end_reason": "cancelled",
+                "late_join": False,
+                "created_at": _NOW,
+                "started_at": None,
+                "expires_at": _NOW,
+                "announce": False,
+            },
+        ),
+    ],
+    FET.SPACE_APP_SESSION: [
+        (
+            f"{verb} B's game table",
+            {
+                "kind": "session",
+                "body": {
+                    "app_id": "quiz",
+                    "session_id": "table-b",
+                    "verb": verb,
+                    "from_user": "evil",
+                    "user_id": "u-evil",
+                    "by_role": True,
+                },
+            },
+        )
+        for verb in ("group_close", "group_roster", "group_leave")
+    ],
     FET.BAZAAR_THREAD_MESSAGE: [
         (
             "ask about B's listing",
@@ -899,6 +941,17 @@ _SEED = [
         )
         for mid, cid in ((CHAT_MSG_B, "chat-b"), ("dm-msg-home", "dm-home"))
     ],
+    # A game table in B (v_77), hosted by B's own member household.
+    (
+        (
+            "INSERT INTO app_group_sessions(session_id, app_id, host_instance,"
+            " host_user, hub_instance, space_id, state, min_players, max_players,"
+            " roster_json, roster_rev, created_at, expires_at, updated_at, card_json)"
+            " VALUES('table-b', 'quiz', ?, 'b', ?, ?, 'lobby', 2, 4, '[]', 1, ?, ?,"
+            " ?, '{\"seated\": 1}')"
+        ),
+        (VICTIM_HOUSE, VICTIM_HOUSE, VICTIM, _NOW, "2099-01-01T00:00:00+00:00", _NOW),
+    ),
     (
         (
             "INSERT INTO message_reactions(message_id, user_id, emoji)"

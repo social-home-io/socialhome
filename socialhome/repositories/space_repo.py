@@ -599,11 +599,12 @@ class SqliteSpaceRepo:
                 allow_post_transcript, allow_post_poll, allow_post_schedule,
                 allow_post_file, allow_post_bazaar,
                 allow_post_event, allow_post_location, allow_post_highlight_share,
+                allowed_apps,
                 lat, lon, radius_km, bot_enabled, allow_here_mention,
                 dissolved, archived, archived_reason, about_markdown, cover_hash, tz,
                 min_age, category
             ) VALUES(
-                -- 60 placeholders, one per column listed above.
+                -- 61 placeholders, one per column listed above.
                 ?, ?, ?, ?,                   -- id, name, description, emoji
                 ?, ?, ?,                      -- owner_instance_id, owner_username, identity_public_key
                 ?, ?, ?,                      -- config_sequence, roster_sequence, config_hlc
@@ -621,6 +622,7 @@ class SqliteSpaceRepo:
                 ?, ?, ?,                      -- allow_post_transcript, allow_post_poll, allow_post_schedule
                 ?, ?,                         -- allow_post_file, allow_post_bazaar
                 ?, ?, ?,                      -- allow_post_event, allow_post_location, allow_post_highlight_share
+                ?,                            -- allowed_apps
                 ?, ?, ?, ?, ?,                -- lat, lon, radius_km, bot_enabled, allow_here_mention
                 ?, ?, ?, ?, ?, ?,             -- dissolved, archived, archived_reason, about_markdown, cover_hash, tz
                 ?, ?                          -- min_age, category
@@ -669,6 +671,7 @@ class SqliteSpaceRepo:
                 allow_post_event=excluded.allow_post_event,
                 allow_post_location=excluded.allow_post_location,
                 allow_post_highlight_share=excluded.allow_post_highlight_share,
+                allowed_apps=excluded.allowed_apps,
                 lat=excluded.lat,
                 lon=excluded.lon,
                 radius_km=excluded.radius_km,
@@ -731,6 +734,7 @@ class SqliteSpaceRepo:
                 cols["allow_post_event"],
                 cols["allow_post_location"],
                 cols["allow_post_highlight_share"],
+                cols["allowed_apps"],
                 space.lat,
                 space.lon,
                 space.radius_km,

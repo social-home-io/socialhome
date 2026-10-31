@@ -1736,6 +1736,19 @@ class PeerCapabilitiesAdvertised(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class SpaceRemoteSeatEnded(DomainEvent):
+    """A remote member's seat in this household's roster mirror just ended
+    — removed by the host here (``remove_remote_member``) or tombstoned by
+    authority-signed roster gossip (they left, or were removed). The game
+    tables this household hosts in the space take them out (v_77)."""
+
+    space_id: str
+    instance_id: str
+    user_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class SpaceRemoteSeatLive(DomainEvent):
     """A remote member's seat just became live in this household's roster
     mirror (``space_remote_members``) — seated by an accept / redeem, or
@@ -2766,6 +2779,39 @@ class AppTurn(DomainEvent):
     #: this one doesn't know (then ``from_display`` names them).
     from_user_id: str | None
     from_display: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class AppTableAnnounced(DomainEvent):
+    """Someone opened a game table in a space and ticked "Let everyone
+    know" (group play D5, v_77): one in-app row for ``to_user_id`` (a
+    member with a writing seat here) — "Anna started a game of Chess in
+    Lakeside". Published by :class:`SpaceTableService` at most once per
+    opener per space per day; no push. ``host_display`` / ``space_name``
+    are labels only; ``host_user_id`` is checked against blocks."""
+
+    app_id: str
+    session_id: str
+    space_id: str
+    to_user_id: str
+    host_display: str
+    space_name: str
+    host_user_id: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class AppTableClosed(DomainEvent):
+    """A space table ``to_user_id`` had a place at ended for a reason the
+    host person didn't choose (v_77): a moderator closed it
+    (``closed_by_moderator``), or its app left the space's games list
+    (``app_removed``). One About-you row, no push."""
+
+    app_id: str
+    session_id: str
+    space_id: str
+    to_user_id: str
+    reason: str
+    space_name: str
 
 
 @dataclass(slots=True, frozen=True)

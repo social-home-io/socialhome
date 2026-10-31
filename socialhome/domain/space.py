@@ -29,6 +29,8 @@ from enum import StrEnum
 from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
 
+import orjson
+
 from .emoji import is_single_emoji
 from .errors import CodedError, WrongTypeError
 from .gfs_server import SignedGfsServerList
@@ -392,6 +394,42 @@ _ALL_POST_TYPES: tuple[str, ...] = (
 #: match a row and would be a silently-ignored exemption.
 RETENTION_EXEMPTABLE_TYPES: frozenset[str] = frozenset(_ALL_POST_TYPES)
 
+#: The most apps a space's "Games allowed here" list holds (group play
+#: §4, v_77).
+SPACE_ALLOWED_APPS_MAX: int = 20
+#: An app id on the list — the catalog's ids (``chess``, ``gift-draw``).
+_APP_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+
+def normalize_allowed_apps(raw: object, *, strict: bool = False) -> tuple[str, ...]:
+    """A space's games list as stored: distinct app ids, sorted, at most
+    :data:`SPACE_ALLOWED_APPS_MAX`.
+
+    ``strict`` (an edit through the API) raises :class:`ValueError` for
+    anything that isn't a list of app ids, or one too many. Lenient (the
+    wire, a stored column) drops what it can't read and keeps the first
+    :data:`SPACE_ALLOWED_APPS_MAX` — a newer peer's list never fails a
+    whole config."""
+    if not isinstance(raw, (list, tuple)):
+        if strict:
+            raise ValueError("allowed_apps must be a list of app ids")
+        return ()
+    ids: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not _APP_ID_RE.fullmatch(item):
+            if strict:
+                raise ValueError("allowed_apps holds something that is no app id")
+            continue
+        if item not in ids:
+            ids.append(item)
+    if len(ids) > SPACE_ALLOWED_APPS_MAX:
+        if strict:
+            raise ValueError(
+                f"allowed_apps holds at most {SPACE_ALLOWED_APPS_MAX} apps"
+            )
+        ids = ids[:SPACE_ALLOWED_APPS_MAX]
+    return tuple(sorted(ids))
+
 
 def normalize_retention_exempt_types(
     value: object,
@@ -563,6 +601,15 @@ class SpaceFeatures:
 
     allowed_post_types: tuple[str, ...] = _ALL_POST_TYPES
 
+    #: "Games allowed here" (group play §4, v_77): the app ids people may
+    #: open a game table with in this space, ≤ :data:`SPACE_ALLOWED_APPS_MAX`.
+    #: Empty — the default for every space, existing and new — means no
+    #: games: no Games section, no tables. The owner, admins and moderators
+    #: choose (owner decision D9). An older peer that omits the field leaves
+    #: the list as it is (see the config inbound), so an absent wire field
+    #: reads as "unchanged", never "empty".
+    allowed_apps: tuple[str, ...] = ()
+
     # ── Helpers ──────────────────────────────────────────────────────────
 
     def allows(self, post_type: PostType | str) -> bool:
@@ -694,6 +741,7 @@ class SpaceFeatures:
             gfs_publish_mode=_publish_mode(row.get("gfs_publish_mode"), "trusted"),
             private_gfs=bool(row.get("private_gfs", 0)),
             allowed_post_types=allowed or ("text",),
+            allowed_apps=_allowed_apps_column(row.get("allowed_apps")),
         )
 
     def to_columns(self) -> dict:
@@ -732,6 +780,7 @@ class SpaceFeatures:
             "allow_post_highlight_share": int(
                 "highlight_share" in self.allowed_post_types
             ),
+            "allowed_apps": orjson.dumps(list(self.allowed_apps)).decode(),
         }
 
     def to_wire_dict(self) -> dict:
@@ -759,6 +808,7 @@ class SpaceFeatures:
             "gfs_publish_mode": self.gfs_publish_mode,
             "private_gfs": self.private_gfs,
             "allowed_post_types": list(self.allowed_post_types),
+            "allowed_apps": list(self.allowed_apps),
         }
 
     @classmethod
@@ -843,7 +893,23 @@ class SpaceFeatures:
             ),
             private_gfs=bool(raw.get("private_gfs", defaults.private_gfs)),
             allowed_post_types=allowed,
+            allowed_apps=(
+                normalize_allowed_apps(raw["allowed_apps"])
+                if "allowed_apps" in raw
+                else defaults.allowed_apps
+            ),
         )
+
+
+def _allowed_apps_column(raw: object) -> tuple[str, ...]:
+    """``spaces.allowed_apps`` (a JSON list, migration 0137) as a tuple —
+    empty for a missing column or anything unreadable."""
+    if not isinstance(raw, str) or not raw:
+        return ()
+    try:
+        return normalize_allowed_apps(orjson.loads(raw))
+    except orjson.JSONDecodeError:
+        return ()
 
 
 #: What a NEW space starts with (owner decision 3): the feed, chat and the

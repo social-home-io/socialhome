@@ -31,6 +31,8 @@ from socialhome.domain.events import (
     AppInstalled,
     AppRequestDismissed,
     AppRequested,
+    AppTableAnnounced,
+    AppTableClosed,
     AppTurn,
     AppTurnsSeen,
     AppUninstalled,
@@ -5355,3 +5357,93 @@ async def test_a_repeat_invite_from_the_same_sender_joins_their_row(stack):
         )
     )
     assert len(await _rows_of(stack, milo.user_id, "app_challenge_waiting")) == 2
+
+
+# ─── Games in a space (v_77): "Let everyone know", closed for you ─────────
+
+
+async def test_let_everyone_know_is_one_in_app_row_never_a_push(stack):
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    stack.notif_svc.attach_app_repo(_AppRegistry({"chess": "Chess"}))
+    a = await stack.provision_user("anna")
+    b = await stack.provision_user("bob")
+    await stack.bus.publish(
+        AppTableAnnounced(
+            app_id="chess",
+            session_id="t1",
+            space_id="sp1",
+            to_user_id=a.user_id,
+            host_display="Bob",
+            space_name="Lakeside",
+            host_user_id=b.user_id,
+        )
+    )
+    (row,) = [
+        n
+        for n in await stack.notif_repo.list(a.user_id, limit=10)
+        if n.type == "app_table_announced"
+    ]
+    assert row.title == "Bob started a game of Chess in Lakeside"
+    assert row.link_url == "/spaces/sp1"
+    assert notif_kind("app_table_announced") is NotifKind.GAMES
+    assert push.calls == []
+    # Someone Anna blocked gets no row.
+    await SqliteUserRepo(stack.db).block(a.user_id, b.user_id)
+    await stack.bus.publish(
+        AppTableAnnounced(
+            app_id="chess",
+            session_id="t2",
+            space_id="sp1",
+            to_user_id=a.user_id,
+            host_display="Bob",
+            space_name="Lakeside",
+            host_user_id=b.user_id,
+        )
+    )
+    rows = [
+        n
+        for n in await stack.notif_repo.list(a.user_id, limit=10)
+        if n.type == "app_table_announced"
+    ]
+    assert len(rows) == 1
+
+
+async def test_a_space_game_closed_for_you_says_why(stack):
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    stack.notif_svc.attach_app_repo(_AppRegistry({"chess": "Chess"}))
+    a = await stack.provision_user("anna")
+    for sid, reason in (("t1", "closed_by_moderator"), ("t2", "app_removed")):
+        await stack.bus.publish(
+            AppTableClosed(
+                app_id="chess",
+                session_id=sid,
+                space_id="sp1",
+                to_user_id=a.user_id,
+                reason=reason,
+                space_name="Lakeside",
+            )
+        )
+    await stack.bus.publish(
+        AppTableClosed(
+            app_id="gone",
+            session_id="t3",
+            space_id="sp1",
+            to_user_id=a.user_id,
+            reason="closed_by_moderator",
+            space_name="Lakeside",
+        )
+    )
+    titles = sorted(
+        n.title
+        for n in await stack.notif_repo.list(a.user_id, limit=10)
+        if n.type == "app_table_closed"
+    )
+    assert titles == [
+        "A moderator closed a game in Lakeside",
+        "A moderator closed the Chess game in Lakeside",
+        "Chess is no longer allowed in Lakeside",
+    ]
+    assert notif_kind("app_table_closed") is NotifKind.ABOUT_YOU
+    assert push.calls == []

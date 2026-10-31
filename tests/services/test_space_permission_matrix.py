@@ -59,6 +59,8 @@ GATED_METHODS: frozenset[str] = frozenset(
         "archive_space",
         "unarchive_space",
         "update_config",
+        # The games list (v_77) — owner / admin / moderator.
+        "set_allowed_apps",
         "set_local_area",
         "set_place_pin",
         "add_member",
@@ -388,6 +390,12 @@ async def stack(tmp_dir):
             "update_config",
             lambda s: s.space_svc.update_config(
                 s.space.id, actor_username="bob", name="hijacked"
+            ),
+        ),
+        (
+            "set_allowed_apps",
+            lambda s: s.space_svc.set_allowed_apps(
+                s.space.id, actor_username="bob", app_ids=["quiz"]
             ),
         ),
         (

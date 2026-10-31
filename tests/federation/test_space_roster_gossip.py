@@ -838,12 +838,18 @@ async def test_host_publishes_revocation_when_an_admin_seat_is_tombstoned(tmp_di
             role="admin",
         )
         await _gossip(h, seed, tombstoned=True, member_version=9, role="admin")
-        assert published == [
+        revoked = [e for e in published if isinstance(e, SpaceAdminAuthorityRevoked)]
+        assert revoked == [
             SpaceAdminAuthorityRevoked(
                 space_id=SPACE_ID,
                 instance_id=MEMBER_INSTANCE,
-                occurred_at=published[0].occurred_at,
+                occurred_at=revoked[0].occurred_at,
             )
+        ]
+        # v_77: the ended seat is announced too (the game tables follow).
+        assert [type(e).__name__ for e in published] == [
+            "SpaceRemoteSeatEnded",
+            "SpaceAdminAuthorityRevoked",
         ]
     finally:
         await db.shutdown()

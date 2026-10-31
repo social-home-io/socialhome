@@ -123,6 +123,7 @@ from ..domain.events import (
     SpaceMemberProfileUpdated,
     SpacePostCreated,
     SpacePostModerated,
+    SpaceRemoteSeatEnded,
     SpaceRemoteSeatLive,
     UserProvisioned,
 )
@@ -233,6 +234,7 @@ from ..domain.space import (
     UserBannedError,
     join_request_flags,
     mirrorable_remote_role,
+    normalize_allowed_apps,
     normalize_category,
     normalize_min_age,
     normalize_retention_exempt_types,
@@ -242,6 +244,7 @@ from ..domain.space import (
     role_change_event_type,
     validate_space_link_url,
 )
+from ..domain.space_app_table import SpaceAppNotAllowedError
 from ..domain.space_place import PlacePin, validate_place_pin
 from ..domain.user import User
 from ..domain.writer_cert import WriterEntitlement
@@ -2551,7 +2554,30 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         (:meth:`on_tier_change`). A public space never touches a GFS.
         """
         space = await self._require_space(space_id)
-        await self._require_admin_or_owner(space, actor_username)
+        if _games_list_only(
+            space,
+            features,
+            others=(
+                name,
+                description,
+                emoji,
+                join_mode,
+                space_type,
+                retention_days,
+                retention_exempt_types,
+                bot_enabled,
+                category,
+                allow_here_mention,
+            ),
+            about_markdown=about_markdown,
+        ):
+            # Owner decision D9 (group play, v_77): the space's games list is
+            # chosen by the owner, admins AND moderators — the one setting a
+            # moderator changes. Anything else in the same edit needs
+            # settings authority as always.
+            await self._require_content_authority(space, actor_username)
+        else:
+            await self._require_admin_or_owner(space, actor_username)
 
         if category is not None and category not in SPACE_CATEGORIES:
             raise ValueError(f"unknown category {category!r}")
@@ -3077,6 +3103,29 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 updated, actor_user_id=actor.user_id if actor else actor_username
             )
         return updated
+
+    async def set_allowed_apps(
+        self, space_id: str, *, actor_username: str, app_ids: object
+    ) -> Space:
+        """ "Games allowed here" (group play §4, v_77): replace the space's
+        games list. The owner, an admin or a moderator (D9); at most
+        :data:`~socialhome.domain.space.SPACE_ALLOWED_APPS_MAX` app ids
+        (:class:`ValueError` otherwise). A global space has no games
+        (:class:`~socialhome.domain.space_app_table.SpaceAppNotAllowedError`).
+        Rides the ordinary config path: forwarded to a remote host, signed
+        and sent to every member household as ``SPACE_CONFIG_CHANGED``."""
+        apps = normalize_allowed_apps(app_ids, strict=True)
+        space = await self._require_space(space_id)
+        if space.space_type is SpaceType.GLOBAL:
+            raise SpaceAppNotAllowedError()
+        if apps == space.features.allowed_apps:
+            await self._require_content_authority(space, actor_username)
+            return space
+        return await self.update_config(
+            space_id,
+            actor_username=actor_username,
+            features=replace(space.features, allowed_apps=apps),
+        )
 
     async def _after_writer_key_scope_change(self, space: Space) -> None:
         """v_57 — a config change gave the space we host a writer group key it
@@ -4543,7 +4592,16 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             actor_instance_id,
             actor_user_id,
         )
-        if actor is None or actor.role != SpaceRole.ADMIN:
+        # D9 (v_77): a remote moderator may forward an edit of the games list
+        # — and nothing else; the same delegation / owner-approval rule as an
+        # admin's forwarded edit applies below.
+        games_list_edit = (
+            actor is not None
+            and actor.role == SpaceRole.MODERATOR
+            and action == "update_config"
+            and _forwarded_games_list_only(params)
+        )
+        if not games_list_edit and (actor is None or actor.role != SpaceRole.ADMIN):
             log.info(
                 "apply_remote_admin_action: actor %s@%s not an admin "
                 "of space=%s — dropping",
@@ -6923,6 +6981,11 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
             space_id, instance_id, user_id
         )
         await self._remote_members.remove(space_id, instance_id, user_id)
+        await self._bus.publish(
+            SpaceRemoteSeatEnded(
+                space_id=space_id, instance_id=instance_id, user_id=user_id
+            )
+        )
         # Audit-fix (HIGH from PR #429 review): if that was the
         # last remote member from this peer instance, also drop the
         # ``space_instances`` row so subsequent broadcasts via
@@ -9639,6 +9702,35 @@ async def apply_space_images_from_config_change(
             await repo.clear(space_id)
 
 
+def _games_list_only(
+    space: Space,
+    features: SpaceFeatures | None,
+    *,
+    others: tuple[object, ...],
+    about_markdown: object,
+) -> bool:
+    """Whether a config edit changes the space's games list
+    (``allowed_apps``, v_77) and nothing else — the edit a moderator may
+    make (owner decision D9)."""
+    if features is None or features.allowed_apps == space.features.allowed_apps:
+        return False
+    if (
+        any(v is not None for v in others)
+        or about_markdown is not _UNSET_MEMBER_PROFILE
+    ):
+        return False
+    return replace(features, allowed_apps=space.features.allowed_apps) == space.features
+
+
+def _forwarded_games_list_only(params: dict | None) -> bool:
+    """A forwarded ``update_config`` whose only change is the games list:
+    ``{"features": {"allowed_apps": [...]}}``."""
+    if not isinstance(params, dict) or set(params) != {"features"}:
+        return False
+    feats = params.get("features")
+    return isinstance(feats, dict) and set(feats) == {"allowed_apps"}
+
+
 def stub_space_from_metadata(
     space_id: str,
     *,
@@ -10359,9 +10451,20 @@ def keep_local_space_state(
       ``update_config`` instead. A member household takes the host's values
       when the snapshot carries them, and keeps what it has when an older
       sender omits them ("absent" is "unknown", not "Forever").
+    * The games list (``features.allowed_apps``, v_77) likewise: a snapshot
+      from an older household carries no ``allowed_apps`` key, and that
+      means "unknown" — the stored list stays, never emptied.
     """
     keep_retention = we_host or "retention_days" not in meta
     keep_exempt = we_host or "retention_exempt_types" not in meta
+    feats_in = meta.get("features")
+    if not isinstance(feats_in, dict) or "allowed_apps" not in feats_in:
+        refreshed = replace(
+            refreshed,
+            features=replace(
+                refreshed.features, allowed_apps=existing.features.allowed_apps
+            ),
+        )
     return replace(
         refreshed,
         join_code=existing.join_code,

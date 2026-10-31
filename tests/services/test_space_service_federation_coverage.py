@@ -21,7 +21,11 @@ from socialhome.crypto import (
     generate_space_keypair,
 )
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import RemoteJoinRequestApproved, SpaceInviteAnswered
+from socialhome.domain.events import (
+    RemoteJoinRequestApproved,
+    SpaceInviteAnswered,
+    SpaceRemoteSeatEnded,
+)
 from socialhome.domain.federation import (
     DELIVERY_ERROR_MESH_DEFERRED,
     DELIVERY_ERROR_QUEUED,
@@ -380,6 +384,18 @@ async def test_remove_remote_member_happy(stack):
         user_id="bob",
     )
     stack.fed_svc.send_with_mesh_fallback.assert_awaited()
+
+
+async def test_remove_remote_member_announces_the_seat_ended(stack):
+    """v_77: the game tables this household hosts take the player out."""
+    await _user(stack, "alicehost")
+    space = await stack.svc.create_space(owner_username="alicehost", name="S")
+    ended: list = []
+    stack.bus.subscribe(SpaceRemoteSeatEnded, ended.append)
+    await stack.svc.remove_remote_member(
+        space.id, actor_username="alicehost", instance_id="peer", user_id="bob"
+    )
+    assert [(e.instance_id, e.user_id) for e in ended] == [("peer", "bob")]
 
 
 # ── request_join_remote ────────────────────────────────────────────
@@ -2177,3 +2193,65 @@ async def test_startup_sweep_spares_gfs_mirror_stubs(stack):
     assert await stack.svc.sweep_unjoined_invitation_stubs() == 0
     assert await stack.space_repo.get("sp-mirror") is not None
     assert await stack.space_repo.get("sp-seat") is not None
+
+
+# ── v_77: a remote moderator forwards a games-list edit, and only that ──
+
+
+async def _host_space_with_remote_moderator(stack, *, delegation=True):
+    space = await _host_space_with_remote_admin(stack, delegation=delegation)
+    await stack.svc._remote_members.add(
+        space_id=space.id,
+        instance_id="instance-M",
+        user_id="u-mod",
+        user_pk=None,
+        display_name=None,
+    )
+    await stack.svc._remote_members.set_role(
+        space.id, "instance-M", "u-mod", "moderator"
+    )
+    return space
+
+
+async def test_a_remote_moderators_games_list_edit_is_applied(stack):
+    space = await _host_space_with_remote_moderator(stack)
+    outcome = await stack.svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-M",
+        actor_user_id="u-mod",
+        action="update_config",
+        params={"features": {"allowed_apps": ["quiz"]}},
+    )
+    assert outcome is RemoteAdminOutcome.EXECUTED
+    assert (await stack.space_repo.get(space.id)).features.allowed_apps == ("quiz",)
+
+
+async def test_a_remote_moderator_forwards_nothing_else(stack):
+    space = await _host_space_with_remote_moderator(stack)
+    for params in (
+        {"name": "Hacked"},
+        {"features": {"allowed_apps": ["quiz"], "bazaar": False}},
+        {"features": {"allowed_apps": ["quiz"]}, "name": "Hacked"},
+    ):
+        outcome = await stack.svc.apply_remote_admin_action(
+            space.id,
+            actor_instance_id="instance-M",
+            actor_user_id="u-mod",
+            action="update_config",
+            params=params,
+        )
+        assert outcome is RemoteAdminOutcome.DROPPED
+    stored = await stack.space_repo.get(space.id)
+    assert (stored.name, stored.features.allowed_apps) == ("S", ())
+
+
+async def test_a_remote_moderators_edit_waits_for_the_owner_without_delegation(stack):
+    space = await _host_space_with_remote_moderator(stack, delegation=False)
+    outcome = await stack.svc.apply_remote_admin_action(
+        space.id,
+        actor_instance_id="instance-M",
+        actor_user_id="u-mod",
+        action="update_config",
+        params={"features": {"allowed_apps": ["quiz"]}},
+    )
+    assert outcome is RemoteAdminOutcome.NEEDS_OWNER_APPROVAL

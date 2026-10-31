@@ -21,6 +21,7 @@ from ..domain.app_group import (
     GroupSeat,
     GroupSession,
     SeatKey,
+    TableCard,
 )
 
 
@@ -31,6 +32,7 @@ class AbstractAppGroupRepo(Protocol):
     async def save_newer(self, table: GroupSession) -> bool: ...
     async def delete(self, session_id: str) -> None: ...
     async def list_for_app(self, app_id: str) -> list[GroupSession]: ...
+    async def list_for_space(self, space_id: str) -> list[GroupSession]: ...
     async def list_hosted(
         self, app_id: str, hub_instance: str, opener_user: str, *, since: str
     ) -> list[GroupSession]: ...
@@ -64,6 +66,8 @@ def _seat_to_json(e: GroupSeat) -> dict:
         "state": e.state,
         "joined_at": e.joined_at,
         "seat_key": e.seat_key.to_wire() if e.seat_key is not None else None,
+        "user_id": e.user_id,
+        "identity_pk": e.identity_pk,
     }
 
 
@@ -77,6 +81,27 @@ def _seat_from_json(d: dict) -> GroupSeat:
         seat=int(d.get("seat") or 0),
         joined_at=d.get("joined_at"),
         seat_key=SeatKey.from_wire(d["seat_key"]) if d.get("seat_key") else None,
+        user_id=d.get("user_id"),
+        identity_pk=d.get("identity_pk"),
+    )
+
+
+def _card_to_json(card: TableCard | None) -> str | None:
+    if card is None:
+        return None
+    return orjson.dumps(
+        {"seated": card.seated, "announce": card.announce, "seen_at": card.seen_at}
+    ).decode()
+
+
+def _card_from_json(raw: str | None) -> TableCard | None:
+    if not raw:
+        return None
+    d = orjson.loads(raw)
+    return TableCard(
+        seated=int(d.get("seated") or 0),
+        announce=bool(d.get("announce")),
+        seen_at=str(d.get("seen_at") or ""),
     )
 
 
@@ -102,6 +127,7 @@ def _row_to_table(row) -> GroupSession:
         expires_at=str(row["expires_at"]),
         updated_at=str(row["updated_at"]),
         opener_user=row["opener_user"],
+        card=_card_from_json(row["card_json"]),
     )
 
 
@@ -109,11 +135,11 @@ _COLUMNS = (
     "session_id, app_id, host_instance, host_user, hub_instance, space_id,"
     " state, end_reason, min_players, max_players, late_join, note,"
     " roster_json, roster_rev, created_at, started_at, expires_at, updated_at,"
-    " opener_user"
+    " opener_user, card_json"
 )
 
 _UPSERT = f"""INSERT INTO app_group_sessions ({_COLUMNS})
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(session_id) DO UPDATE SET
       host_instance = excluded.host_instance,
       host_user = excluded.host_user,
@@ -127,7 +153,8 @@ _UPSERT = f"""INSERT INTO app_group_sessions ({_COLUMNS})
       roster_rev = excluded.roster_rev,
       started_at = excluded.started_at,
       expires_at = excluded.expires_at,
-      updated_at = excluded.updated_at
+      updated_at = excluded.updated_at,
+      card_json = excluded.card_json
     -- A table's app, hub and space never change: a row for the same id
     -- from anyone else changes nothing.
     WHERE app_group_sessions.hub_instance = excluded.hub_instance
@@ -155,6 +182,7 @@ def _args(t: GroupSession) -> tuple:
         t.expires_at,
         t.updated_at,
         t.opener_user,
+        _card_to_json(t.card),
     )
 
 
@@ -197,6 +225,16 @@ class SqliteAppGroupRepo:
         rows = await self._db.fetchall(
             "SELECT * FROM app_group_sessions WHERE app_id = ? ORDER BY created_at",
             (app_id,),
+        )
+        return [_row_to_table(r) for r in rows]
+
+    async def list_for_space(self, space_id: str) -> list[GroupSession]:
+        """Every table of *space_id* here (v_77), newest first — bounded by
+        the per-person caps and the prune."""
+        rows = await self._db.fetchall(
+            "SELECT * FROM app_group_sessions WHERE space_id = ?"
+            " ORDER BY created_at DESC",
+            (space_id,),
         )
         return [_row_to_table(r) for r in rows]
 

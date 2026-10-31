@@ -25,6 +25,7 @@ from socialhome.domain.events import (
     RemoteSpaceLocationRemoved,
     RemoteSpaceLocationUpdated,
     RemoteSpaceMemberRemoved,
+    SpaceRemoteSeatEnded,
 )
 from socialhome.domain.space import (
     JoinMode,
@@ -2620,3 +2621,26 @@ async def test_proposal_mirror_is_kept_by_member_households_only(member):
         )
     )
     assert approvals.apply_mirror_update.await_count == (1 if member else 0)
+
+
+async def test_a_left_seat_is_announced_as_ended(handler):
+    """v_77: a tombstoned seat publishes ``SpaceRemoteSeatEnded`` so the game
+    tables this household hosts in the space take that player out."""
+    payload = {
+        "space_id": "sp-gossip",
+        "user_id": "u-bye",
+        "instance_id": "inst-bye",
+        "member_version": 4,
+    }
+    ev = _event("SPACE_MEMBER_LEFT", payload, from_instance="inst-bye")
+    handler.remote_members.apply_member_event = AsyncMock(return_value=True)
+    with patch.object(
+        PrivateSpaceInviteHandler,
+        "_verify_roster_gossip",
+        AsyncMock(return_value=("sp-gossip", payload, 0)),
+    ):
+        await handler.h._on_space_member_left(ev)
+    ended = [e for e in handler.bus.events if isinstance(e, SpaceRemoteSeatEnded)]
+    assert [(e.space_id, e.instance_id, e.user_id) for e in ended] == [
+        ("sp-gossip", "inst-bye", "u-bye")
+    ]

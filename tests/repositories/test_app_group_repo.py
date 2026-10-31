@@ -16,6 +16,7 @@ from socialhome.domain.app_group import (
     GroupSeat,
     GroupSession,
     SeatKey,
+    TableCard,
 )
 from socialhome.repositories.app_group_repo import SqliteAppGroupRepo
 
@@ -259,3 +260,53 @@ async def test_rows_are_frozen_values(repo):
     got = await repo.get("t1")
     with pytest.raises(dataclasses.FrozenInstanceError):
         got.state = GROUP_ENDED  # type: ignore[misc]
+
+
+async def _space(db, space_id: str = "sp1") -> None:
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES(?, 'Lakeside', 'hub', 'anna', ?)",
+        (space_id, "aa" * 32),
+    )
+
+
+async def test_a_space_tables_card_and_user_ids_round_trip(db, repo):
+    """v_77: a card (no roster beyond its host) keeps its seat count, its
+    announce flag and when it was first seen; roster entries keep the
+    user id a space table carries."""
+    await _space(db)
+    seat = GroupSeat(
+        instance="hub",
+        user="anna",
+        name="Anna",
+        state=SEAT_SEATED,
+        seat=1,
+        user_id="uid-anna",
+    )
+    card = TableCard(seated=3, announce=True, seen_at=T0)
+    t = _table(space_id="sp1", roster=(seat,), card=card)
+    await repo.save(t)
+    assert await repo.get("t1") == t
+    # A newer snapshot from the hub (someone from here sat down) replaces
+    # the card with the roster.
+    assert await repo.save_newer(dataclasses.replace(t, roster_rev=2, card=None))
+    assert (await repo.get("t1")).card is None
+
+
+async def test_list_for_space_newest_first(db, repo):
+    await _space(db)
+    await _space(db, "sp2")
+    await repo.save(
+        _table("old", space_id="sp1", created_at="2026-10-29T10:00:00+00:00")
+    )
+    await repo.save(_table("new", space_id="sp1"))
+    await repo.save(_table("other", space_id="sp2"))
+    await repo.save(_table("picked"))
+    assert [t.session_id for t in await repo.list_for_space("sp1")] == ["new", "old"]
+
+
+async def test_a_spaces_tables_go_with_the_space(db, repo):
+    await _space(db)
+    await repo.save(_table(space_id="sp1"))
+    await db.enqueue("DELETE FROM spaces WHERE id = 'sp1'")
+    assert await repo.get("t1") is None

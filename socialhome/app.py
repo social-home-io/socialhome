@@ -408,6 +408,7 @@ from .services.schedule_federation_outbound import ScheduleFederationOutbound
 from .services.search_service import SearchService
 from .services.setup_service import SetupService
 from .services.shopping_service import ShoppingService
+from .services.space_app_table_service import SpaceTableService
 from .services.space_approval_service import SpaceApprovalService
 from .services.space_author_profile_outbound import SpaceAuthorProfileOutbound
 from .services.space_authority_pin import owner_statement_for_delegated
@@ -4959,6 +4960,25 @@ def create_app(config: Config | None = None) -> web.Application:
         # §CP.F2 / D8: guardian blocks and children's rules hold at tables.
         app_group_service.attach_child_protection(child_protection_service)
         app[K.app_group_service_key] = app_group_service
+        # v_77 — games in a space: the cards, the space's transport for a
+        # space table's verbs and messages, the games list and its rules.
+        space_app_table_service = SpaceTableService(
+            groups=app_group_service,
+            group_repo=repos.app_group,
+            app_repo=repos.app,
+            app_federation=app_federation_service,
+            space_repo=space_repo,
+            remote_member_repo=repos.space_remote_member,
+            user_repo=user_repo,
+            federation=federation_service,
+            authorship=fed.space_authorship,
+            ws=ws_manager,
+            bus=bus,
+        )
+        app_group_service.attach_space_tables(space_app_table_service)
+        space_app_table_service.attach_to(federation_service)
+        space_app_table_service.wire(bus)
+        app[K.space_app_table_service_key] = space_app_table_service
 
         # Stale-call cleanup scheduler (§26.8).
         nonlocal stale_call_scheduler
@@ -5607,6 +5627,9 @@ def create_app(config: Config | None = None) -> web.Application:
             await moderation_expiry_scheduler.stop()
         if app_pending_session_scheduler is not None:
             await app_pending_session_scheduler.stop()
+        space_app_table_service = app.get(K.space_app_table_service_key)
+        if space_app_table_service is not None:
+            await space_app_table_service.stop()
         app_group_service = app.get(K.app_group_service_key)
         if app_group_service is not None:
             await app_group_service.stop()

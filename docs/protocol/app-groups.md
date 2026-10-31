@@ -14,8 +14,9 @@ leave / remove, Start, the host hand-over, closing and expiry; then
 messages to everyone or to chosen seats (sealed to the target household's
 *seat key*, so the hub that passes them on can't read them), the hub's
 numbering (`seq`), the per-sender mailbox, "your turn" and the hub's send
-budget; and the app bridge (`sh.group.*`). Space tables (v_77) come next;
-the 1:1 sessions are in [`apps.md`](./apps.md).
+budget; and the app bridge (`sh.group.*`). [**Space tables**](#space-tables-v_77)
+(capability v_77) open a table *in a space* for its members; the 1:1
+sessions are in [`apps.md`](./apps.md).
 
 ## Scope
 
@@ -23,7 +24,9 @@ the 1:1 sessions are in [`apps.md`](./apps.md).
   household keeps a copy and applies its own people's rules (blocks,
   children). Same §24.11 pipeline and sealing as every app event.
 - **GFS**: uninvolved. A table opened by picking people only reaches
-  households the host's household is paired with.
+  households the host's household is paired with; a space table only the
+  space's member households, over the space's own transport — never a
+  GFS channel.
 
 ## Event types
 
@@ -134,8 +137,9 @@ household an invite for that id first, which then drops the real one
   host is the sending household's `from_user`, for an app installed here,
   on, allowed to reach other households and marked `tables`; for a session
   id the person has no row for; and at most 50 open tables from one hub.
-- A table with a `space_id`, or a verb arriving space-routed, is dropped
-  (space tables are v_77).
+- A space table's verbs and messages are taken only over its space
+  (`SPACE_APP_SESSION`); one arriving as a bare `APP_SESSION` /
+  `APP_MESSAGE` is dropped, and a picked table's never ride a space.
 - The hub acts on `group_start` / `group_remove` / `group_close` only from
   the host person's own household, on `group_join` / `group_leave` only for
   the person of the sending household.
@@ -216,7 +220,13 @@ doesn't verify, whose suite it doesn't know, or that names two keys for
 one household. For a household it holds no key for (people picked by the
 host whose households aren't paired with each other) it takes the hub's
 word — **residual**: a lying hub household could then read directed
-messages between those two players. Space tables (v_77) won't have it.
+messages between those two players. **Space tables don't have it**: there
+every roster entry carries its household's Ed25519 identity key
+(`identity_pk`), and a household id is that key's fingerprint, so any
+receiver checks every seat key against the household's own key — paired
+with it or not — and drops a snapshot with a seat key it can't check that
+way. A household this one reaches only over the mesh is checked by the
+same key (also known from its mesh claim, `space_instances.identity_pk`).
 
 ### Sealing a directed message
 
@@ -416,6 +426,150 @@ the change (an addition to design 2.9).
 the app was opened from a table (`?session=<table id>`, Join / Play),
 `launch: {sessionId, group: GroupSession}` instead of `invite`.
 
+## Space tables (v_77)
+
+A member opens a table **in a space**, and any member with a writing seat
+(owner, admin, moderator, member) may take a seat — up to 30. The host
+person presses Start once the app's fewest players sit; a two-player table
+starts when the second seat fills (D11). It is an ordinary group table: the
+hub is the opener's household, the roster, messages, seat keys, mailbox and
+budget are exactly as above. What the space adds:
+
+- **The games list** — "Games allowed here", `SpaceFeatures.allowed_apps`
+  (≤ 20 app ids, migration 0137). Empty by default: no games. The owner,
+  admins **and moderators** choose (owner decision D9 — the one setting a
+  moderator changes; an edit that also changes anything else needs settings
+  authority). It rides the authority-signed `SPACE_CONFIG_CHANGED` /
+  `_CATCH_UP` features; a remote admin's or moderator's edit is forwarded to
+  the host as `update_config {features: {allowed_apps}}` (held for the
+  owner's approval like any forwarded edit when delegation is off; a
+  moderator's forward carrying anything else is dropped). A snapshot from an
+  older household without the key leaves the list as it is.
+- **Who sees a table** — member households with a writer seat only. Never a
+  follower-only household, never a household outside the space, never a
+  GFS, never a **global** space (its members reach each other only
+  anonymously through GFSs); an **archived** space takes no new table.
+  Private and public spaces (local communities included), D6.
+- **Who may sit** — anyone with a live writer seat on the joining household
+  in the hub's own copy of the space roster, not banned, while the app is on
+  the list — one place per person (the same user id under another name is
+  refused), and nobody new once the roster holds 60 entries. Being in the space and pressing Join is the consent (D7):
+  households that aren't paired with the hub or each other play, and what
+  travels between them is the game and the roster's names. Each household's
+  own rules (blocks, guardian blocks, age) hold as above; a protected
+  account sits at a private space's table with the people it already chats
+  with there (D8).
+- **Closing** — the host person closes their table; the owner, an admin or
+  a moderator closes any table of the space (`closed_by_moderator`; their
+  household sends `group_close {by_role: true, user_id}` to the hub, which
+  checks their content-authority seat). An app taken off the list closes
+  its waiting tables (`app_removed`), as does the space turning global or
+  being archived; games being played finish but take nobody more (D10).
+  Leaving the space — or being removed, banned or made a follower — leaves
+  its tables: the hub takes such a player out (the host person as if they
+  left: a waiting table closes, a game passes on) and, until then, drops
+  any verb or message by someone without a live writer seat. Everyone seated at a table a moderator or the list
+  closed gets one About-you row ("A moderator closed the Chess game in
+  Lakeside" / "Chess is no longer allowed in Lakeside"), no push.
+- **Let everyone know** — the opener may tick it (D5): each member household
+  makes one in-app Games row per member with a writer seat ("Anna started a
+  game of Chess in Lakeside"), no push, at most one such table per person
+  per space per day (the hub refuses a second, 429
+  `SPACE_TABLE_ANNOUNCE_LIMIT`; receivers hold a hub that doesn't to it).
+  Zero extra envelopes: the first card carries `announce: true`.
+- **No app here** — the card still shows; Join answers the app's own error
+  (`APP_NOT_FOUND` / `APP_NOT_ENABLED` / too young) and the SPA offers the
+  existing "Ask an admin" request. Nothing goes back to the hub.
+
+### Event types
+
+| Event | From → to | Plaintext | Sealed |
+|---|---|---|---|
+| `SPACE_APP_TABLE` | hub → every member household with a writer seat (`broadcast_to_space_members(only_instances=writer households, min_proto_version=77)`) | `space_id` | the **card**: `table_id, rev, app_id, host_user, host_user_id, host_name, note, players {min, max}, seated` (a count), `state` (`open` / `full` / `playing` / `closed`), `end_reason, late_join, created_at, started_at, expires_at, announce` — never the roster |
+| `SPACE_APP_SESSION` | hub ↔ ONE player's household (`broadcast_to_space_members(only_instances={it})`: direct, `SPACE_ROUTED` sealed end to end across a relay, or the link-joined relay seat) | `space_id` | `kind` (`session` / `message`) and `body` — the `APP_SESSION` group verb or group `APP_MESSAGE` payload as above; a space join adds `user_id`, `name` and `identity_pk` |
+
+Both are `SPACE_WRITE_EVENT_TYPES` (the §24.11 writer gate refuses them
+from a follower-only household; an archived space takes none) and
+`SPACE_SESSION_ALLOWED_EVENT_TYPES` (a link-joined member plays).
+
+The card is an **upsert by `rev`** (the hub's roster numbering), sent on
+open, on Start / close, when the table turns full or not full, and with a
+new seat count at most once per 10 minutes — not on every join.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant H as Hub (Anna's household)
+    participant B as Ben's household (paired with H)
+    participant M as Mia's household (mesh only)
+    participant F as A follower-only household
+    H->>H: Anna opens Chess in Lakeside (on the list) → table, seat 1
+    par card to writer households only
+        H->>B: SPACE_APP_TABLE {card: open, seated 1}
+        H->>M: SPACE_APP_TABLE (SPACE_ROUTED, sealed end to end)
+    end
+    Note over F: never sent anything
+    M->>H: SPACE_APP_SESSION {group_join, user_id, identity_pk, seat_key}
+    H->>H: writer seat on M? not banned? app still listed? key derives to M?
+    H->>M: SPACE_APP_SESSION {group_seat, table}
+    Note over H: a two-player table starts here (D11)
+    H-->>B: SPACE_APP_TABLE {card: playing}
+    M->>H: SPACE_APP_SESSION {kind: message, …}
+```
+
+### Receiver rules
+
+- A card is taken only for a space held here (not dissolved, not global),
+  by a household with a writer seat here, whose named host
+  (`host_user_id`) holds a live writer seat on the **sending** household
+  and isn't banned, for an app on this household's copy of the list, and
+  newer than the copy held; a known table only from its hub, for the same
+  space and app. At most **3 new tables per person per space per day** and
+  one "let everyone know" — counted by the host's seat-checked user id and
+  this household's own clock — and 50 open tables per hub. The strip
+  orders tables by when this household heard of them. A
+  household with someone at the table follows the roster, not the card.
+- A space session is taken only for a table of that space this household
+  knows, from its hub or a household with a writer seat; a join only at the
+  hub, as above; a moderator's close only from a content-authority seat
+  (`SpaceAuthorship.moderates_as`).
+- A table opened in the space shows to the members of this household
+  (`GET /api/spaces/{id}/games`) only while its app is on the list — the
+  newest 10 open ones, plus every table they have a place at — and never
+  one whose host they blocked or who blocked them, nor an app their age
+  doesn't allow.
+
+**Not in the space sync stream.** Tables live days; the outbox covers a
+household that was offline. A household that joins the space later hears
+of a table with its next card (Start, close, full / not full, or the seat
+count), not before — no `SYNC_RECORD_LINES` entry.
+
+**Residual — the roster's user ids.** A player's `user_id` on the roster
+is the hub's word (a receiver checks the seat keys, not who holds a
+seat); a hostile hub could relabel a player so a household's block check
+misses them. It could as well leave anyone off the roster: blocks are
+kept by each household's own view, and a hub is a member household of
+the space.
+
+**Residual — households the hub doesn't know.** A card and a seat answer
+go only to member households whose version the hub knows
+(`space_member_supports`: a pairing, a link-joined seat, or a mesh claim).
+A mesh-only member announces its claim to the space's **host**; a table
+hosted by another member household doesn't reach a member it has neither
+a pairing nor a claim for (that member's people don't see the card).
+
+### Cost
+
+Card ≈ 0.6 KB sealed + 0.4 KB envelope ≈ 1 KB per writer household per
+card. A 25-household private space, a table a day with ~4 cards → 25 × 4 ×
+1 KB = **100 KB per table**. Worst realistic, a 200-household local
+community at the caps (50 people opening 3 tables a day): 150 tables × ~4
+cards × 200 × 1 KB ≈ **120 MB a day across the space, ≈ 600 KB per
+household per day** — bounded by the receivers' caps (3 per person per
+day, 50 open per hub) and the 7-day prune. Every session envelope goes to
+ONE household (h − 1 per message, as above). "Let everyone know" costs no
+envelope.
+
 ## Storage
 
 `app_group_sessions` (one row per table a household knows, migration
@@ -424,7 +578,10 @@ the app was opened from a table (`?session=<table id>`, Join / Play),
 `app_pending_sessions` rows (marked `group`), which keep Needs you, the
 TTLs and the uninstall cascade; `app_group_held` (per person, table and
 sender seat, the latest message, ≤ 16 KiB), which goes with the
-person's row. No new migration for messages. See
+person's row. No new migration for messages. Space tables (migration
+0137): `spaces.allowed_apps` (the games list) and
+`app_group_sessions.card_json` (a table known only from its card: seats
+taken, announce, first seen here). See
 [`../database.md`](../database.md).
 
 ## Implementation
@@ -436,18 +593,23 @@ person's row. No new migration for messages. See
   it and keeps group rows out of every 1:1 path.
 - `socialhome/federation/seat_crypto.py` — seat keys and the seat seal;
   `socialhome/services/app_group_budget.py` — the per-table send budget.
+- `socialhome/services/space_app_table_service.py`,
+  `socialhome/domain/space_app_table.py` — space tables: cards, the space's
+  transport and rules; `socialhome/routes/space_games.py`.
 - `socialhome/repositories/app_group_repo.py`, `socialhome/routes/app_groups.py`.
 - `client/src/features/apps/groupBridge.ts` — the bridge's `group.*`.
 - Tests: `tests/services/test_app_group_service.py`,
   `tests/services/test_app_group_messages.py`,
   `tests/protocol/test_app_group_federation.py`,
   `tests/protocol/test_app_group_messages.py` (security),
-  `tests/federation/test_seat_crypto.py`.
+  `tests/federation/test_seat_crypto.py`,
+  `tests/services/test_space_app_table_service.py`,
+  `tests/protocol/test_space_app_table_federation.py` (security).
 
 ## Spec references
 
 Group-play design §2 (roster, topology, life of a table, who can send
 to whom, order, mailbox, wire, storage, SDK, older households, blocks and
-children, bounds), decisions D1–D4, D8, D11, D12;
-[`capabilities.md`](./capabilities.md) v_76; [`../crypto.md`](../crypto.md)
+children, bounds), §3 (space tables), §4 (the games list), decisions
+D1–D12; [`capabilities.md`](./capabilities.md) v_76, v_77; [`../crypto.md`](../crypto.md)
 (seat seal).

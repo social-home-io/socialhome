@@ -14,6 +14,7 @@ from socialhome.domain.space import (
     MIRRORABLE_REMOTE_ROLES,
     NEW_SPACE_FEATURES,
     SETTINGS_AUTHORITY_ROLES,
+    SPACE_ALLOWED_APPS_MAX,
     WRITER_ROLES,
     AccessAdminOnlyError,
     AccessDecision,
@@ -31,6 +32,7 @@ from socialhome.domain.space import (
     SpaceZone,
     join_request_flags,
     mirrorable_remote_role,
+    normalize_allowed_apps,
     normalize_join_mode,
     normalize_min_age,
     normalize_retention_exempt_types,
@@ -122,6 +124,7 @@ def test_space_features_wire_roundtrip_every_field_non_default():
         allow_subscriber_react=True,  # default False
         delegated_admin_authority=True,  # default False
         allowed_post_types=("image", "text"),  # default _ALL_POST_TYPES
+        allowed_apps=("chess", "quiz"),  # default ()
     )
     assert SpaceFeatures.from_wire_dict(f.to_wire_dict()) == f
 
@@ -929,3 +932,56 @@ def test_review_required_names_the_flags():
     err = ReviewRequiredError(("age", "edge"))
     assert (err.status, err.code) == (409, "REVIEW_REQUIRED")
     assert err.params == {"flags": "age,edge"}
+
+
+# ─── Games allowed here (v_77) ────────────────────────────────────────────
+
+
+def test_a_space_has_no_games_by_default():
+    assert SpaceFeatures().allowed_apps == ()
+    assert NEW_SPACE_FEATURES.allowed_apps == ()
+
+
+def test_allowed_apps_round_trip_column_and_wire():
+    f = SpaceFeatures(allowed_apps=("chess", "gift-draw"))
+    assert SpaceFeatures.from_row(f.to_columns()).allowed_apps == ("chess", "gift-draw")
+    assert f.to_wire_dict()["allowed_apps"] == ["chess", "gift-draw"]
+
+
+def test_an_absent_allowed_apps_key_leaves_the_list_alone():
+    """An older household's edit carries no ``allowed_apps``: the list it
+    is merged onto stays (and a stub built from nothing has none)."""
+    current = SpaceFeatures(allowed_apps=("chess",))
+    edit = {k: v for k, v in current.to_wire_dict().items() if k != "allowed_apps"}
+    edit["bazaar"] = False
+    merged = SpaceFeatures.from_wire_dict(edit, defaults=current)
+    assert merged.allowed_apps == ("chess",)
+    assert merged.bazaar is False
+    assert SpaceFeatures.from_wire_dict({"bazaar": False}).allowed_apps == ()
+    # An explicit empty list empties it.
+    assert (
+        SpaceFeatures.from_wire_dict(
+            {"allowed_apps": []}, defaults=current
+        ).allowed_apps
+        == ()
+    )
+
+
+def test_normalize_allowed_apps_strict_and_lenient():
+    assert normalize_allowed_apps(["quiz", "chess", "quiz"], strict=True) == (
+        "chess",
+        "quiz",
+    )
+    for bad in ("chess", ["bad id"], [3], ["x" * 65]):
+        with pytest.raises(ValueError):
+            normalize_allowed_apps(bad, strict=True)
+        assert normalize_allowed_apps(bad) == ()
+    many = [f"app{i:02d}" for i in range(SPACE_ALLOWED_APPS_MAX + 1)]
+    with pytest.raises(ValueError):
+        normalize_allowed_apps(many, strict=True)
+    assert len(normalize_allowed_apps(many)) == SPACE_ALLOWED_APPS_MAX
+
+
+def test_an_unreadable_column_reads_as_no_games():
+    assert SpaceFeatures.from_row({"allowed_apps": "not json"}).allowed_apps == ()
+    assert SpaceFeatures.from_row({}).allowed_apps == ()

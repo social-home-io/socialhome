@@ -137,6 +137,8 @@ _KIND_OF_TYPE: dict[str, NotifKind] = {
     "app_challenge_declined": NotifKind.ABOUT_YOU,
     # The other household removed the app, so your game ended (D9).
     "app_game_ended": NotifKind.ABOUT_YOU,
+    # A moderator closed your space game, or its app left the space (v_77).
+    "app_table_closed": NotifKind.ABOUT_YOU,
     "moderation_decided": NotifKind.ABOUT_YOU,
     "post_moderated": NotifKind.ABOUT_YOU,
     "space_ownership_transferred": NotifKind.ABOUT_YOU,
@@ -153,6 +155,9 @@ _KIND_OF_TYPE: dict[str, NotifKind] = {
     # Games — "Your turn with Ben in Chess": one row per game while the
     # app is closed (the app said the move hands over the turn).
     "app_turn": NotifKind.GAMES,
+    # "Anna started a game of Chess in Lakeside" — only when the opener
+    # ticked "Let everyone know" (v_77, D5); in-app, never a push.
+    "app_table_announced": NotifKind.GAMES,
     # Reactions and follows.
     "post_reacted": NotifKind.REACTIONS,
     "moment_reacted": NotifKind.REACTIONS,

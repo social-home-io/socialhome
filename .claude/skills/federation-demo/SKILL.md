@@ -621,6 +621,27 @@ That single command runs the full sequence:
    ``tests/protocol/test_app_group_federation.py`` and
    ``tests/services/test_app_group_service.py``.
 
+9j. ``space-table`` (v_77, games in a space) — right after ``app-group``,
+   in **c**'s private space from ``remote-invite-routed``: **c** hosts it,
+   **d** (dave) is a member **c** is not paired with, so every envelope
+   between them rides ``SPACE_ROUTED`` through **b** — no member of that
+   space. Installs a stand-in two-player app (``demo-duel``,
+   ``players {2, 2}``, ``tables: true``) on **c** and **d**. **c** allows it
+   in the space's games list (``PUT /api/spaces/{id}/games/allowed`` — it
+   reaches **d** with the config), opens a table with a marker note
+   (``POST /api/spaces/{id}/games``) and **d** sees the card
+   (``SPACE_APP_TABLE``); **d** joins (``SPACE_APP_SESSION`` →
+   ``group_join`` / ``group_seat``) and the table starts at once (D11) —
+   both see ``playing`` at two seats, and **d** holds **c**'s seat key next
+   to **c**'s identity key; **d**'s move (``kind: message``) reaches **c**'s
+   mailbox. **a** and **b** hold no row of the table and the marker is in
+   none of their database files; ``verify`` re-checks **c** and **d** still
+   hold the duel, pins ``MIN_FOR_SPACE_APP_TABLES`` = 77 and greps the GFS's
+   database for the marker too. Followers, forged cards and joins, swapped
+   seat keys and the moderator close are
+   ``tests/protocol/test_space_app_table_federation.py`` and
+   ``tests/services/test_space_app_table_service.py``.
+
 9z. ``highlight-audience`` (v_70, "Change for all of today") — **a**
    narrows today's highlight to **b**'s household
    (``PATCH /api/highlights/{id}/audience``): **c** deletes it and keeps a

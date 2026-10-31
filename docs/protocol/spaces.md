@@ -1093,6 +1093,19 @@ space's own transport. See [`bazaar.md`](./bazaar.md#ask-the-seller-v_74).
 
 `SpaceFeatures.chat` (column `spaces.feature_chat`, default **on** in every existing and new space, federated in `space_meta.features.chat`, an owner or admin turns it off) gives the space a chat next to its feed — its writers only, never a follower. Each household keeps its own copy (a system conversation); messages travel as `SPACE_CHAT_*` (v_55) to the households holding a writer seat, so a follower-only household receives nothing. Full flow, authorization table and catch-up: [`space-chat.md`](./space-chat.md).
 
+## Games (opt-in, v_77)
+
+`SpaceFeatures.allowed_apps` (column `spaces.allowed_apps`, migration 0137,
+federated in `space_meta.features.allowed_apps`) is the space's "Games
+allowed here" list: up to 20 app ids. Empty by default — no Games section,
+no tables. The owner, admins **and moderators** choose it (owner decision
+D9: the one setting a moderator changes); a remote moderator's edit is
+forwarded to the host like an admin's and may carry nothing else. Members
+with a writing seat open game tables of the listed apps and join each
+other's — households that aren't paired included — over the space's own
+transport; followers never see one, and global spaces have no games. Full
+flow, authorization and cost: [`app-groups.md`](./app-groups.md#space-tables-v_77).
+
 ## Timetable tab (opt-in)
 
 `SpaceFeatures.timetable` (column `spaces.feature_timetable`, default
