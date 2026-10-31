@@ -204,8 +204,9 @@ every roster entry of that household:
               "sig_suite": "ed25519", "sig": "<b64url 64 B>" }
 ```
 
-The signature covers
-`socialhome/app_group/seat_key/v1|<session_id>|<instance>|<seat_kem_suite>|<pub>`.
+The signature covers `socialhome/app_group/seat_key/v1` followed by
+`session_id`, `instance`, `seat_kem_suite` and `pub`, each with a 4-byte
+big-endian length prefix (no two field lists encode the same).
 The hub verifies it against the joiner's identity key (the hub is paired
 with every household it invites) and seats the joiner only then; the first
 key a household brings to a table stays. A receiver checks every roster
@@ -227,10 +228,11 @@ refused — `UnsupportedSeatKemSuite`, never a fallback):
   households can derive it, and the receiver knows which household sent
   it;
 - *key* = HKDF-SHA256(*shared*, salt = `msg_id`, info =
-  `socialhome/app_group/seat_seal/v1|<session_id>|<from_seat>|<to_seat>`)
-  — one key per message and direction;
-- AES-256-GCM, random 12-byte nonce, AAD = the same context string plus
-  `|<msg_id>`.
+  `socialhome/app_group/seat_seal/v1` + `session_id`, `from_seat`,
+  `to_seat`, length-prefixed as above) — one key per message and
+  direction;
+- AES-256-GCM, random 12-byte nonce, AAD = the same info + `|` +
+  `msg_id`.
 
 `msg_id` is 16 random bytes the sender picks (b64url); the hub can't
 seal one itself (it holds neither private half), can't move one to
@@ -400,8 +402,12 @@ the app was opened from a table (`?session=<table id>`, Join / Play),
 ## Storage
 
 `app_group_sessions` (one row per table a household knows, migration
-0136) and the people's own `app_pending_sessions` rows (marked `group`),
-which keep Needs you, the TTLs and the uninstall cascade. See
+0136; `seq` the hub's last number or a copy's highest seen,
+`seat_key_json` this household's seat key) and the people's own
+`app_pending_sessions` rows (marked `group`), which keep Needs you, the
+TTLs and the uninstall cascade; `app_group_held` (per person, table and
+sender seat, the latest message, ≤ 16 KiB), which goes with the
+person's row. No new migration for messages. See
 [`../database.md`](../database.md).
 
 ## Implementation
@@ -411,12 +417,20 @@ which keep Needs you, the TTLs and the uninstall cascade. See
 - `socialhome/services/app_group_service.py` — the hub, the copies, each
   household's rules; `AppFederationService` routes the `group_*` verbs to
   it and keeps group rows out of every 1:1 path.
+- `socialhome/federation/seat_crypto.py` — seat keys and the seat seal;
+  `socialhome/services/app_group_budget.py` — the per-table send budget.
 - `socialhome/repositories/app_group_repo.py`, `socialhome/routes/app_groups.py`.
+- `client/src/features/apps/groupBridge.ts` — the bridge's `group.*`.
 - Tests: `tests/services/test_app_group_service.py`,
-  `tests/protocol/test_app_group_federation.py` (security).
+  `tests/services/test_app_group_messages.py`,
+  `tests/protocol/test_app_group_federation.py`,
+  `tests/protocol/test_app_group_messages.py` (security),
+  `tests/federation/test_seat_crypto.py`.
 
 ## Spec references
 
-Group-play design §2 (roster, topology, life of a table, wire, storage,
-older households, blocks and children, bounds), decisions D1–D3, D8, D11,
-D12; [`capabilities.md`](./capabilities.md) v_76.
+Group-play design §2 (roster, topology, life of a table, who can send
+to whom, order, mailbox, wire, storage, SDK, older households, blocks and
+children, bounds), decisions D1–D4, D8, D11, D12;
+[`capabilities.md`](./capabilities.md) v_76; [`../crypto.md`](../crypto.md)
+(seat seal).
