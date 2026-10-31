@@ -92,6 +92,16 @@ export function stripTables(tables: readonly SpaceTable[]): { shown: SpaceTable[
   return { shown: ordered.slice(0, STRIP_MAX), total: waiting.length }
 }
 
+/** §3.5: a game of an app this home neither has nor finds in its catalog
+ *  shows no card. Until the catalog has answered (or when it's off) the
+ *  card stays — nothing to tell it by. */
+export function knownTables(
+  tables: readonly SpaceTable[], catalog: readonly CatalogEntry[], catalogReady: boolean,
+): SpaceTable[] {
+  if (!catalogReady) return [...tables]
+  return tables.filter((x) => x.app?.installed || catalog.some((e) => e.app_id === x.app_id))
+}
+
 /** Waiting games the caller could join now (the app here and on) —
  *  the section's dot. */
 export function joinableCount(tables: readonly SpaceTable[]): number {

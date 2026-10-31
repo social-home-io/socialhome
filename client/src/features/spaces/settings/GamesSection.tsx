@@ -102,13 +102,13 @@ export function GamesSection({ space, onUpdate }: { space: Space; onUpdate: () =
       {!hostSupports && (
         <p class="sh-games-note" role="status">{t('space.games.host_too_old')}</p>
       )}
-      {choices.length === 0 ? (
+      {choices.length === 0 && !catalogError.value ? (
         <p class="sh-ss-hint" role="status">
           {catalogLoading.value && !catalogLoaded.value
             ? t('common.loading')
             : t('space.games.settings.no_apps')}
         </p>
-      ) : (
+      ) : choices.length > 0 && (
         <ul class="sh-games-settings__list">
           {choices.map((c) => {
             const on = allowed.includes(c.app_id)

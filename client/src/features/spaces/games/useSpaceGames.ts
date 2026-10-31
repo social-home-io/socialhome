@@ -15,6 +15,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { ws } from '@/ws'
+import { APP_FRAMES } from '@/store/apps'
 import type { SpaceGames } from './spaceGames'
 
 /** The live frame (``SpaceAppTableService.WS_FRAME_TYPE``). */
@@ -95,7 +96,10 @@ export function useSpaceGames(
       if (timer) clearTimeout(timer)
       timer = setTimeout(() => { timer = null; void load(true) }, REFRESH_DEBOUNCE_MS)
     })
-    return () => { off(); if (timer) clearTimeout(timer) }
+    // An app added, updated, turned on / off or removed here changes what
+    // each card offers (Join vs "Ask an admin").
+    const offApps = APP_FRAMES.map((type) => ws.on(type, () => { void load(true) }))
+    return () => { off(); offApps.forEach((o) => o()); if (timer) clearTimeout(timer) }
   }, [spaceId, enabled, revision]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return { games, loading, failed, reload: () => load(true), retry: () => load(false) }

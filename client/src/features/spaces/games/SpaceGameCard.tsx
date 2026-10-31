@@ -28,7 +28,7 @@ import { addBase } from '@/baseUrl'
 import { Button } from '@/components/Button'
 import { confirmDialog } from '@/components/confirm'
 import { showToast } from '@/components/Toast'
-import { AppIcon, AskAdminDialog } from '@/features/apps/AppDialogs'
+import { AppIcon, AskAdminDialog, aboutPath } from '@/features/apps/AppDialogs'
 import { t } from '@/i18n/i18n'
 import { currentUser } from '@/store/auth'
 import type { CatalogEntry } from '@/store/apps'
@@ -37,8 +37,10 @@ import {
   seatedLabel, starterLabel, type AppLook, type SpaceTable,
 } from './spaceGames'
 
-/** Join refusals that mean "this app isn't usable here" — ask for it. */
-const ASK_CODES = new Set(['APP_NOT_FOUND', 'APP_NOT_ENABLED'])
+/** Join refusals that mean "this app is off here" — ask for it. (A
+ *  missing app answers a plain 404: the toast, and the re-read list turns
+ *  the card into "Ask an admin".) */
+const ASK_CODES = new Set(['APP_NOT_ENABLED'])
 
 interface Props {
   spaceId: string
@@ -153,7 +155,7 @@ export function SpaceGameCard({
         return <Button variant="secondary" disabled>{t('space.games.full')}</Button>
       case 'see':
         return (
-          <a class="sh-btn sh-btn--secondary" href={addBase(`/apps/${encodeURIComponent(table.app_id)}/about`)}>
+          <a class="sh-btn sh-btn--secondary" href={addBase(aboutPath(table.app_id))}>
             {t('space.games.see_app', { name })}
           </a>
         )

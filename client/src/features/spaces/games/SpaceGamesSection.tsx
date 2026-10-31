@@ -20,10 +20,10 @@ import { Button } from '@/components/Button'
 import { LoadErrorState } from '@/components/LoadErrorState'
 import { Spinner } from '@/components/Spinner'
 import { locale, t } from '@/i18n/i18n'
-import { catalog, catalogLoaded, ensureInstalled, installedApps, loadCatalog } from '@/store/apps'
+import { catalog, catalogEnabled, catalogLoaded, ensureInstalled, installedApps, loadCatalog } from '@/store/apps'
 import { settingsSectionPath } from '../spaceSettingsSections'
 import { SpaceGameCard } from './SpaceGameCard'
-import { appLook, groupTables, type SpaceTable } from './spaceGames'
+import { appLook, groupTables, knownTables, type SpaceTable } from './spaceGames'
 import type { SpaceGamesState } from './useSpaceGames'
 import { StartGameSheet } from './StartGameSheet'
 
@@ -53,7 +53,8 @@ export function SpaceGamesSection({ spaceId, state }: Props) {
   }
 
   const lang = locale.value || 'en'
-  const { waiting, playing, finished } = groupTables(games.tables)
+  const { waiting, playing, finished } = groupTables(
+    knownTables(games.tables, catalog.value, catalogLoaded.value && catalogEnabled.value))
   const listEmpty = games.allowed_apps.length === 0
   const canStart = games.games_possible && games.host_supports && !listEmpty
   const chooseHref = addBase(settingsSectionPath(spaceId, 'games'))

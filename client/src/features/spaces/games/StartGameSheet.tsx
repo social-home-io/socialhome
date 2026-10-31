@@ -22,7 +22,7 @@ import { addBase } from '@/baseUrl'
 import { Button } from '@/components/Button'
 import { Modal } from '@/components/Modal'
 import { showToast } from '@/components/Toast'
-import { AppIcon, AskButton } from '@/features/apps/AppDialogs'
+import { AppIcon, AskButton, aboutPath } from '@/features/apps/AppDialogs'
 import { isOne, locale, t } from '@/i18n/i18n'
 import { currentUser } from '@/store/auth'
 import { catalog, installedApps } from '@/store/apps'
@@ -142,7 +142,7 @@ export function StartGameSheet({ spaceId, allowed, open, onClose, onStarted }: P
                       </span>
                     </span>
                     {householdAdmin ? (
-                      <a class="sh-btn sh-btn--secondary" href={addBase(`/apps/${encodeURIComponent(id)}/about`)}>
+                      <a class="sh-btn sh-btn--secondary" href={addBase(aboutPath(id))}>
                         {t('space.games.see_app', { name: look.name })}
                       </a>
                     ) : entry ? (

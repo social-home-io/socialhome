@@ -7,7 +7,7 @@ import { describe, it, expect } from 'vitest'
 import type { CatalogEntry, InstalledApp } from '@/store/apps'
 import {
   appHere, appLook, canClose, cardAction, closesLabel, daysLeft, endedLabel, gameChoices, gamePath,
-  groupTables, isMine, joinableCount, playersLabel, seatRange, seatedLabel, startableApps,
+  groupTables, isMine, joinableCount, knownTables, playersLabel, seatRange, seatedLabel, startableApps,
   starterLabel, stripTables, type SpaceTable,
 } from './spaceGames'
 
@@ -55,6 +55,19 @@ describe('stripTables', () => {
   it('nothing waiting → nothing shown', () => {
     expect(stripTables([table({ state: 'playing' })]).shown).toEqual([])
     expect(stripTables([]).total).toBe(0)
+  })
+})
+
+describe('knownTables (§3.5)', () => {
+  it('drops a game whose app this home neither has nor finds in the catalog — once the catalog answered', () => {
+    const list = [
+      table({ session_id: 'here' }),
+      table({ session_id: 'cat', app_id: 'draw', app: { installed: false, enabled: false } }),
+      table({ session_id: 'unknown', app_id: 'zzz', app: { installed: false, enabled: false } }),
+    ]
+    expect(knownTables(list, [entry({ app_id: 'draw' })], true).map((x) => x.session_id))
+      .toEqual(['here', 'cat'])
+    expect(knownTables(list, [], false)).toHaveLength(3)
   })
 })
 

@@ -9,10 +9,10 @@
  */
 import { addBase } from '@/baseUrl'
 import { locale, t } from '@/i18n/i18n'
-import { catalog, installedApps } from '@/store/apps'
+import { catalog, catalogEnabled, catalogLoaded, installedApps } from '@/store/apps'
 import { spaceSectionPath } from '../spaceTabs'
 import { SpaceGameCard } from './SpaceGameCard'
-import { appLook, stripTables, type SpaceGames } from './spaceGames'
+import { appLook, knownTables, stripTables, type SpaceGames } from './spaceGames'
 
 interface Props {
   spaceId: string
@@ -22,7 +22,8 @@ interface Props {
 
 export function SpaceOpenGamesStrip({ spaceId, games, onChanged }: Props) {
   if (!games) return null
-  const { shown, total } = stripTables(games.tables)
+  const { shown, total } = stripTables(
+    knownTables(games.tables, catalog.value, catalogLoaded.value && catalogEnabled.value))
   if (shown.length === 0) return null
   const lang = locale.value || 'en'
   return (
