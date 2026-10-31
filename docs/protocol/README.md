@@ -149,6 +149,7 @@ If `SpaceContentEncryption` isn't configured, the outbound path raises
   - [Momentum — public sharing](./momentum_public.md) — GFS-brokered follow graph for public moment fan-out beyond the household mesh; recipients dedupe with the household relay path.
 - **Apps**
   - [Social Home Apps](./apps.md) — cross-household app-to-app federation via a dedicated `fed-app-v1` binary DataChannel (v_17) with JSON event fallback; AES-256-GCM sealed payloads delivered as `app.message` WS frames.
+  - [Social Home Apps — group games](./app-groups.md) — a *table* of 2–30 players whose host household keeps the roster and is the only household the others talk to: invite, join, Start, leave, remove, host hand-over, each household's own block and children's rules (`group_*` verbs of `APP_SESSION`, capability v_76).
 - **Relay**
   - [Push & WebRTC signalling](./push-relay.md) — push comes from each person's own household; DataChannel signalling travels inside the households' sealed federation envelopes, which a GFS may carry only as ciphertext.
 
