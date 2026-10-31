@@ -2664,11 +2664,13 @@ class AppGroupService(ProtectionGateMixin):
         not over yet (waiting for players or being played) where someone
         of this household has a place (seated or invited) together with
         someone of another household — an uninstall ends them (a hub's
-        table, ``host_gone``) or takes this household's people out."""
+        table, ``host_gone``) or takes this household's people out. Space
+        games count too (v_77); a space's card nobody here took a place at
+        doesn't."""
         own = self._own
         count = 0
         for table in await self._repo.list_for_app(app_id):
-            if table.state == GROUP_ENDED or table.space_id is not None:
+            if table.state == GROUP_ENDED:
                 continue
             elsewhere = table.hub_instance != own or bool(
                 table.households(SEAT_SEATED, SEAT_INVITED) - {own}

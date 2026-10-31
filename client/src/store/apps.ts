@@ -343,6 +343,10 @@ export interface UninstallPreview {
   told: string[]
   told_more: number
   untold: number
+  /** Group games (v_76) with other households someone here has a place
+   *  at: they end, or this household's players leave them. Missing from
+   *  an older server: 0. */
+  tables?: number
 }
 
 export async function loadUninstallPreview(appId: string): Promise<UninstallPreview> {

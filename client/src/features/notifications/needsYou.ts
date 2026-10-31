@@ -62,7 +62,7 @@ export type NeedsYouEntry =
   | { kind: 'single', key: string, row: Notification }
   | { kind: 'group', key: string, spaceId: string, rows: Notification[] }
 
-export type InlineAction = 'decide' | 'invite' | 'game' | 'waiting' | 'update' | 'review'
+export type InlineAction = 'decide' | 'invite' | 'game' | 'join' | 'waiting' | 'update' | 'review'
 
 function itemKey(n: Notification): string {
   return n.object_key || n.id
@@ -122,9 +122,16 @@ export function waitingReason(n: Notification): 'app_off' | 'app_missing' {
   return n.params?.flags?.includes('app_off') ? 'app_off' : 'app_missing'
 }
 
+/** An invite to a group game (v_76, flag ``group``): Join, not Play — it
+ *  opens the game's Who's-in page, not the app. */
+export function isGroupInvite(n: Notification): boolean {
+  return n.type === 'app_challenge' && !!n.params?.flags?.includes('group')
+}
+
 /** What an item offers inline (the safety rules above). */
 export function inlineAction(n: Notification): InlineAction {
   if (n.type === 'space_invite') return 'invite'
+  if (isGroupInvite(n) && n.object_key?.startsWith('app_session:')) return 'join'
   if (isGame(n.type) && n.object_key?.startsWith('app_session:')) return 'game'
   if (n.type === WAITING_GAME && n.object_key?.startsWith('app_session:')) return 'waiting'
   if (n.type === 'app_update' && n.object_key?.startsWith('app:')) return 'update'
@@ -251,6 +258,13 @@ export function playHref(n: Notification): string {
   return `/apps/${encodeURIComponent(appId)}?session=${encodeURIComponent(sessionId)}`
 }
 
+/** Where a group invite's Join lands: the game's Who's-in page
+ *  (``/apps/<id>/tables/<sid>``), built from the row's subject. */
+export function lobbyHref(n: Notification): string {
+  const { appId, sessionId } = gameOf(n)
+  return `/apps/${encodeURIComponent(appId)}/tables/${encodeURIComponent(sessionId)}`
+}
+
 /** Decline a join request, an invite (looked up by its space) or a game
  *  invite. */
 async function sendDecline(n: Notification): Promise<void> {
@@ -261,6 +275,17 @@ async function sendDecline(n: Notification): Promise<void> {
   }
   // A waiting invite is declined the same way (nothing reaches the app or
   // the sender: the server only marks it declined).
+  if (isGroupInvite(n)) {
+    // A seat at a group game is answered through the game (its host's
+    // household hears the decline); a waiting one (D10) below, unsent.
+    const { appId, sessionId } = gameOf(n)
+    await api.post(
+      `/api/apps/${encodeURIComponent(appId)}/groups/${encodeURIComponent(sessionId)}/decline`,
+      undefined,
+      { keepalive: true },
+    )
+    return
+  }
   if (isGame(n.type) || n.type === WAITING_GAME) {
     const { appId, sessionId } = gameOf(n)
     await api.post(

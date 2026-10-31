@@ -554,6 +554,16 @@ describe('Uninstall says what will be lost (D9)', () => {
     expect(await findByText(/Their household has an older Social Home, so they won't be told\./)).toBeTruthy()
   })
 
+  it('counts group games with other households (v_76) — on their own, they still count', async () => {
+    h.loadUninstallPreview.mockResolvedValue(preview({ people: 0, games: 0, invites: 0, told: [], tables: 2 }))
+    const { getByRole } = open()
+    const dialog = getByRole('alertdialog')
+    await vi.waitFor(() => expect(dialog.querySelectorAll('li').length).toBe(1))
+    expect(text(dialog.querySelector('li')!)).toBe(
+      "⇶2 group games with other households end, or your household's players leave them.",
+    )
+  })
+
   it('nothing to lose says so', async () => {
     h.loadUninstallPreview.mockResolvedValue(preview({ people: 0, games: 0, invites: 0, told: [] }))
     const { findByText } = open()

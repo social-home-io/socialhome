@@ -331,7 +331,15 @@ describe('GameLobby', () => {
     const { getByText, getByRole, queryByRole } = await open(view({ state: 'playing' }))
     expect(getByText('Playing')).toBeTruthy()
     expect(getByRole('link', { name: 'Open Gift draw' }).getAttribute('href')).toBe('/apps/gift-draw?session=s1')
-    expect(queryByRole('button', { name: 'Leave' })).toBeNull()
+    // Anyone may leave a game being played (design 2.5); nobody closes it.
+    expect(getByRole('button', { name: 'Leave' })).toBeTruthy()
+    expect(queryByRole('button', { name: 'Close this game' })).toBeNull()
+  })
+
+  it('playing: the person who started it may leave too (it passes on)', async () => {
+    const { getByRole, queryByRole } = await open(starterView({ state: 'playing' }))
+    expect(getByRole('button', { name: 'Leave' })).toBeTruthy()
+    expect(queryByRole('button', { name: 'Close this game' })).toBeNull()
   })
 
   it.each([

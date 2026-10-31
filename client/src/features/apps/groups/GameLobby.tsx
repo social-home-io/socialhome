@@ -55,6 +55,7 @@ import { ws, type WsEvent } from '@/ws'
 import { AppIcon } from '@/features/apps/AppDialogs'
 import type { GroupView } from '@/features/apps/groupBridge'
 import { SeatList } from './SeatList'
+import { refusalText } from './refusal'
 
 /** Start ignores taps for this long after it turns on. */
 export const START_ARM_MS = 600
@@ -78,23 +79,6 @@ export interface GameLobbyProps {
   sessionId: string
   appName?: string
   onClosed?: () => void
-}
-
-/** A refused action in the person's own words. */
-function refusalText(err: unknown): string {
-  if (err instanceof ApiError) {
-    switch (err.code) {
-      case 'APP_GROUP_FULL': return t('apps.lobby.err.full')
-      case 'APP_GROUP_CLOSED': return t('apps.lobby.err.closed')
-      // No reason: whose household refused, and why, stays theirs.
-      case 'APP_GROUP_CANT_JOIN': return t('apps.lobby.err.cant_join')
-      case 'APP_GROUP_TOO_FEW': {
-        const min = (err.extra?.params as { min?: unknown } | undefined)?.min
-        return t('apps.lobby.err.too_few', { n: String(typeof min === 'number' ? min : '') })
-      }
-    }
-  }
-  return t('apps.lobby.err.other')
 }
 
 export function GameLobby({ appId, sessionId, appName, onClosed }: GameLobbyProps) {
@@ -438,7 +422,9 @@ export function GameLobby({ appId, sessionId, appName, onClosed }: GameLobbyProp
             {t('apps.open_named', { name })}
           </a>
         )}
-        {isSeated && lobby && !starter && (
+        {/* Anyone leaves a game being played (it passes on from the person
+            who started it); before Start, that person closes it instead. */}
+        {isSeated && (game.state === 'playing' || !starter) && (
           <Button variant="ghost" disabled={busy} onClick={() => { void leave() }}>{t('apps.lobby.leave')}</Button>
         )}
         {starter && lobby && (

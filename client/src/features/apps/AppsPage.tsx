@@ -561,7 +561,8 @@ export function UninstallLosses({ preview, failed, name }: {
   if (failed) return <p class="sh-app-uninstall__note">{t('apps.uninstall.unknown')}</p>
   if (!preview) return <p class="sh-app-uninstall__note" role="status">{t('apps.uninstall.checking')}</p>
   const { people, games, invites, told, told_more: more, untold } = preview
-  if (people === 0 && games === 0 && invites === 0) {
+  const tables = preview.tables ?? 0
+  if (people === 0 && games === 0 && invites === 0 && tables === 0) {
     return <p class="sh-app-uninstall__note">{t('apps.uninstall.nothing', { name })}</p>
   }
   const plural = (key: string, n: number, extra: Record<string, string> = {}) =>
@@ -586,6 +587,13 @@ export function UninstallLosses({ preview, failed, name }: {
       key: 'games',
       glyph: '⇄',
       text: <>{withBold(plural('apps.uninstall.games', games, { what: '\u0000' }), plural('apps.uninstall.games_n', games))}{tell && <> {tell}</>}</>,
+    })
+  }
+  if (tables > 0) {
+    lines.push({
+      key: 'tables',
+      glyph: '⇶',
+      text: withBold(plural('apps.uninstall.tables', tables, { what: '\u0000' }), plural('apps.uninstall.tables_n', tables)),
     })
   }
   if (invites > 0) {

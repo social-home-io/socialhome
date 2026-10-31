@@ -360,6 +360,37 @@ describe('notices about you, in the viewer\'s language', () => {
     }
   })
 
+  it('a group game reads "and N others" (v_76): invites, joins, starts', async () => {
+    const g = (names: string[], others: number, flags: string[] = ['group']) =>
+      params(names, { space_name: 'Quiz', others, flags })
+    expect(say('app_challenge', g(['Anna'], 3))).toBe('Anna invited you and 3 others to play Quiz')
+    expect(say('app_challenge', g(['Anna'], 1))).toBe('Anna invited you and 1 other to play Quiz')
+    expect(say('app_challenge', g(['Anna'], 0))).toBe('Anna invited you to play Quiz')
+    expect(say('app_challenge_waiting', g(['Anna'], 4, ['app_missing', 'group'])))
+      .toBe('Anna invited you and 4 others to play Quiz')
+    // One row per game: the newest joiner and how many more are in; never
+    // the plural list, which would double-count.
+    expect(say('app_table_joined', g(['Cleo', 'Ben'], 2, []))).toBe('Cleo and 2 others joined your Quiz game')
+    expect(say('app_table_joined', g(['Ben'], 0, []))).toBe('Ben joined your Quiz game')
+    expect(say('app_table_joined', g(['Ben'], 2, ['can_start'])))
+      .toBe('Ben and 2 others joined your Quiz game · You can start now')
+    expect(say('app_table_started', g(['Anna'], 3, []))).toBe('Your Quiz game with Anna and 3 others started')
+    expect(say('app_table_started', g(['Anna'], 1, []))).toBe('Your Quiz game with Anna and 1 other started')
+    await setLocale('de')
+    expect(say('app_challenge', g(['Anna'], 3))).toBe('Anna hat dich und 3 andere eingeladen, Quiz zu spielen')
+    expect(say('app_table_joined', g(['Ben'], 2, ['can_start'])))
+      .toBe('Ben und 2 andere machen bei deinem Spiel Quiz mit · Du kannst jetzt starten')
+  })
+
+  it('the "others" sentences name the person, the count and the app in every locale', () => {
+    for (const [loc, cat] of Object.entries(LOCALES)) {
+      for (const type of ['app_challenge', 'app_challenge_waiting', 'app_table_joined', 'app_table_started']) {
+        expect(placeholders(cat[`notifications.row.${type}_others`] ?? ''), `${loc} ${type}`)
+          .toEqual(['actor', 'count', 'space'])
+      }
+    }
+  })
+
   it('a new app names who added it and the app; no app name keeps the title', () => {
     expect(say('app_added', params(['Anna', 'Ben'], { space_name: 'Chess' })))
       .toBe('Anna and Ben added Chess')
