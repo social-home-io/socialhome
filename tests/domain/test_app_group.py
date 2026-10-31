@@ -390,3 +390,20 @@ def test_parse_batch_bounds():
     ):
         with pytest.raises(GroupWireError):
             parse_batch(bad)
+
+
+def test_a_space_tables_roster_carries_user_ids_and_identity_keys():
+    """v_77: at a space table each entry names the person's space user id
+    and their household's identity key (64 hex) — both optional, both
+    round-trip; a malformed identity key drops the snapshot."""
+    pk = "ab" * 32
+    ben = dataclasses.replace(BEN, user_id="uid-ben", identity_pk=pk)
+    got = _parse(_table(ANNA, ben).to_wire())
+    entry = got.roster[1]
+    assert (entry.user_id, entry.identity_pk) == ("uid-ben", pk)
+    assert got.roster[0].user_id is None and got.roster[0].identity_pk is None
+    for bad in ("AB" * 32, "ab" * 31, 7):
+        wire = _table(ANNA, ben).to_wire()
+        wire["roster"][1]["identity_pk"] = bad
+        with pytest.raises(GroupWireError):
+            _parse(wire)

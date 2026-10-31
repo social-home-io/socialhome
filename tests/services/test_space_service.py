@@ -10,6 +10,7 @@ import logging
 import os
 import random
 import time
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -78,6 +79,7 @@ from socialhome.domain.space import (
     SpaceRole,
     SpaceType,
 )
+from socialhome.domain.space_app_table import SpaceAppNotAllowedError
 from socialhome.domain.space_key import SpaceKey
 from socialhome.domain.writer_cert import WriterCert, WriterEntitlement
 from socialhome.domain.writer_key import WriterKeyGrant
@@ -107,6 +109,7 @@ from socialhome.services.space_service import (
     SPACE_CATEGORIES,
     SpaceService,
     build_space_snapshot_for_federation,
+    keep_local_space_state,
     normalize_category,
 )
 from socialhome.services.space_writer_cert_service import (
@@ -11562,3 +11565,120 @@ async def test_list_pending_local_invites_space_gone(stack):
     assert inv["space_name"] is None
     assert inv["member_count"] is None
     assert inv["space_icon_url"] is None
+
+
+# ─── Games allowed here (v_77, owner decision D9) ─────────────────────────
+
+
+async def _games_space(stack, space_type=None):
+    await stack.provision_user("anna")
+    mo = await stack.provision_user("mo")
+    bob = await stack.provision_user("bob")
+    kw = {} if space_type is None else {"space_type": space_type}
+    space = await stack.space_svc.create_space(owner_username="anna", name="S", **kw)
+    for user in (mo, bob):
+        await stack.space_svc.add_member(
+            space.id, actor_username="anna", user_id=user.user_id
+        )
+    await stack.space_svc.set_role(
+        space.id, actor_username="anna", user_id=mo.user_id, role="moderator"
+    )
+    return space
+
+
+async def test_owner_and_moderator_choose_the_games_list(stack):
+    space = await _games_space(stack)
+    assert space.features.allowed_apps == ()
+    got = await stack.space_svc.set_allowed_apps(
+        space.id, actor_username="mo", app_ids=["quiz", "chess", "quiz"]
+    )
+    assert got.features.allowed_apps == ("chess", "quiz")
+    stored = await stack.space_repo.get(space.id)
+    assert stored.features.allowed_apps == ("chess", "quiz")
+    # The rest of the features stay as they were.
+    assert replace(stored.features, allowed_apps=()) == space.features
+    await stack.space_svc.set_allowed_apps(space.id, actor_username="anna", app_ids=[])
+    assert (await stack.space_repo.get(space.id)).features.allowed_apps == ()
+
+
+async def test_a_member_cant_choose_the_games(stack):
+    space = await _games_space(stack)
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.set_allowed_apps(
+            space.id, actor_username="bob", app_ids=["quiz"]
+        )
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.set_allowed_apps(
+            space.id, actor_username="bob", app_ids=[]
+        )
+
+
+async def test_a_moderator_changes_only_the_games_list(stack):
+    """D9 makes the list a moderator's — nothing else of the config."""
+    space = await _games_space(stack)
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.update_config(
+            space.id,
+            actor_username="mo",
+            features=replace(space.features, allowed_apps=("quiz",), bazaar=True),
+        )
+    with pytest.raises(SpacePermissionError):
+        await stack.space_svc.update_config(
+            space.id,
+            actor_username="mo",
+            name="Renamed",
+            features=replace(space.features, allowed_apps=("quiz",)),
+        )
+    await stack.space_svc.update_config(
+        space.id,
+        actor_username="mo",
+        features=replace(space.features, allowed_apps=("quiz",)),
+    )
+    assert (await stack.space_repo.get(space.id)).features.allowed_apps == ("quiz",)
+
+
+async def test_a_bad_games_list_or_a_global_space_is_refused(stack):
+    space = await _games_space(stack)
+    with pytest.raises(ValueError):
+        await stack.space_svc.set_allowed_apps(
+            space.id, actor_username="anna", app_ids=["bad id"]
+        )
+    with pytest.raises(ValueError):
+        await stack.space_svc.set_allowed_apps(
+            space.id, actor_username="anna", app_ids=[f"a{i}" for i in range(21)]
+        )
+    await stack.space_repo.save(replace(space, space_type=SpaceType.GLOBAL))
+    with pytest.raises(SpaceAppNotAllowedError):
+        await stack.space_svc.set_allowed_apps(
+            space.id, actor_username="anna", app_ids=["quiz"]
+        )
+
+
+def test_an_older_households_snapshot_leaves_the_games_list_alone():
+    """``keep_local_space_state``: a config snapshot without
+    ``allowed_apps`` (an older sender) keeps the stored list; one with the
+    key takes it."""
+    existing = Space(
+        id="sp",
+        name="S",
+        owner_instance_id="host",
+        owner_username="anna",
+        identity_public_key="aa" * 32,
+        config_sequence=1,
+        features=SpaceFeatures(allowed_apps=("quiz",)),
+        space_type=SpaceType.PRIVATE,
+        join_mode=JoinMode.INVITE_ONLY,
+    )
+    older = replace(existing, features=SpaceFeatures(bazaar=False))
+    kept = keep_local_space_state(
+        older, existing=existing, meta={"features": {"bazaar": False}}, we_host=False
+    )
+    assert kept.features.allowed_apps == ("quiz",)
+    assert kept.features.bazaar is False
+    newer = keep_local_space_state(
+        older,
+        existing=existing,
+        meta={"features": {"bazaar": False, "allowed_apps": []}},
+        we_host=False,
+    )
+    assert newer.features.allowed_apps == ()
