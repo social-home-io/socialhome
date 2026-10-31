@@ -669,6 +669,10 @@ export function AppMenu({ app, name, toggling, onAbout, onToggle, onUninstall }:
       items={items}
       wrapClass="sh-app-card__menu"
       menuClass="sh-app-menu"
+      // The household list clips its rows (rounded card, overflow hidden),
+      // so the menu floats above the page instead of hanging off the row.
+      floating
+      menuWidth={240}
     >
       ⋯
     </OverflowMenu>

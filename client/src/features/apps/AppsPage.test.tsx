@@ -320,6 +320,12 @@ describe('Admin ⋯ menu', () => {
     expect(getByRole('menuitem', { name: 'Uninstall…' })).toBeTruthy()
   })
 
+  it('floats above the page so the clipped app list never cuts it off', () => {
+    const { getByRole } = render(<AppsPage />)
+    fireEvent.click(getByRole('button', { name: 'Chess settings' }))
+    expect(getByRole('menu').classList.contains('sh-timetable-menu--floating')).toBe(true)
+  })
+
   it('selecting a minimum-age radio calls setMinAge', () => {
     const { getByRole } = render(<AppsPage />)
     fireEvent.click(getByRole('button', { name: 'Chess settings' }))
