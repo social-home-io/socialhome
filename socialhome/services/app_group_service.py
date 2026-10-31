@@ -976,7 +976,9 @@ class AppGroupService(ProtectionGateMixin):
         if table is None or table.state == GROUP_ENDED:
             return
         self._roster_sent[session_id] = asyncio.get_running_loop().time()
-        await self._broadcast(table, VERB_ROSTER)
+        # Invitees' households too: whoever sits down decides whether their
+        # people may still join (blocks, children — design 2.11).
+        await self._broadcast(table, VERB_ROSTER, states=(SEAT_SEATED, SEAT_INVITED))
 
     async def _send(
         self,
@@ -1265,9 +1267,13 @@ class AppGroupService(ProtectionGateMixin):
         """Someone sat down: each local person seated (or joining) whom a
         block or a children's rule now separates from someone at the table
         leaves — an ordinary leave, so nothing more reaches the hub — and
-        only they are told why."""
+        only they are told why. An invite still waiting is hidden instead:
+        it stops waiting here and nothing goes back (the hub's invite just
+        runs out), so not even a decline follows the newcomer."""
         for user, row in await self._local_people(table):
             if row.state != SESSION_ACTIVE:
+                if not await self._may_play(user, table):
+                    await self._withdraw_local(table, user.username, outcome="done")
                 continue
             entry = table.entry(self._own, user.username)
             if entry is not None and entry.state in (SEAT_LEFT, SEAT_REMOVED):
