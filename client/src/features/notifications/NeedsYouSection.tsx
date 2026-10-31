@@ -209,7 +209,7 @@ function Actions({ entry, describedBy, onNavigate }: {
       <div class="sh-needs__actions">
         <UpdateButton
           appId={appId}
-          name={row.params?.space_name || appId}
+          name={appNameOf(row)}
           describedBy={describedBy}
           onDone={() => dropHandled([row.object_key || `app:${appId}`])}
         />
