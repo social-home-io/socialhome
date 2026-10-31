@@ -768,3 +768,38 @@ async def test_kv_people_counts_people_with_saved_data(db):
     await repo.kv_set("chess", b, "settings", "{}", now)
     assert await repo.kv_people("chess") == 2
     assert await repo.kv_people("draughts") == 0
+
+
+@pytest.mark.asyncio
+async def test_a_group_seat_and_a_one_to_one_invite_never_refresh_each_other(db):
+    """v_76: the same household and person reusing a session id can't turn
+    a group seat into a 1:1 invite (dropping its ``group`` mark), nor the
+    other way round."""
+    repo = SqliteAppRepo(db)
+    uid = await _seed_user(db)
+    await repo.install(_app())
+    await repo.add_pending_session(_pending(uid, "g1", payload={"group": True}))
+    await repo.add_pending_session(_pending(uid, "g1", payload={"verb": "open"}))
+    assert (await repo.get_pending_session("chess", uid, "g1")).is_group
+    await repo.add_pending_session(_pending(uid, "s1", payload={"verb": "open"}))
+    await repo.add_pending_session(_pending(uid, "s1", payload={"group": True}))
+    assert not (await repo.get_pending_session("chess", uid, "s1")).is_group
+
+
+@pytest.mark.asyncio
+async def test_hold_never_fills_a_group_seat(db):
+    """A group seat's mailbox is per sender seat (v_76 part II): a 1:1 move
+    on its session id from its host is never held in ``held_json``."""
+    repo = SqliteAppRepo(db)
+    uid = await _seed_user(db)
+    await repo.install(_app())
+    await repo.add_pending_session(_pending(uid, "g1", payload={"group": True}))
+    assert not await repo.hold_message(
+        "chess",
+        uid,
+        "g1",
+        from_instance="remote.example",
+        from_user="alice@remote",
+        held={"kind": "message", "payload": {}},
+        now=_now(),
+    )

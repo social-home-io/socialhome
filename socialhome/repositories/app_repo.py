@@ -303,9 +303,13 @@ class SqliteAppRepo:
                -- that opened it; another one reusing the id changes nothing.
                -- A game already played or sent (``active``) is never
                -- rewritten by an open reusing its id.
+               -- A seat at a group table (v_76) and a 1:1 invite never
+               -- refresh each other.
                WHERE app_pending_sessions.from_instance = excluded.from_instance
                  AND app_pending_sessions.from_user IS excluded.from_user
-                 AND app_pending_sessions.state = 'invited'""",
+                 AND app_pending_sessions.state = 'invited'
+                 AND json_type(app_pending_sessions.payload_json, '$.group') IS NULL
+                 AND json_type(excluded.payload_json, '$.group') IS NULL""",
             (
                 s.app_id,
                 s.user_id,
@@ -502,7 +506,9 @@ class SqliteAppRepo:
                    THEN json_set(payload_json, '$.answered', json('true'))
                    ELSE payload_json END
                WHERE app_id = ? AND user_id = ? AND session_id = ?
-                 AND from_instance = ? AND from_user = ?""",
+                 AND from_instance = ? AND from_user = ?
+                 -- A group seat's mailbox is per sender seat (v_76 part II).
+                 AND json_type(payload_json, '$.group') IS NULL""",
             (
                 orjson.dumps(held).decode(),
                 now,
