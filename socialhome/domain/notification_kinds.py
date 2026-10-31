@@ -139,6 +139,10 @@ _KIND_OF_TYPE: dict[str, NotifKind] = {
     "app_game_ended": NotifKind.ABOUT_YOU,
     # A moderator closed your space game, or its app left the space (v_77).
     "app_table_closed": NotifKind.ABOUT_YOU,
+    # Your gift draw is ready / drawn again (v_78); the person you give to
+    # left (hand-over) or changed their wish list.
+    "app_draw_ready": NotifKind.ABOUT_YOU,
+    "app_draw_changed": NotifKind.ABOUT_YOU,
     "moderation_decided": NotifKind.ABOUT_YOU,
     "post_moderated": NotifKind.ABOUT_YOU,
     "space_ownership_transferred": NotifKind.ABOUT_YOU,

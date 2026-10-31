@@ -675,6 +675,219 @@ day, 50 open per hub) and the 7-day prune. Every session envelope goes to
 ONE household (h − 1 per message, as above). "Let everyone know" costs no
 envelope.
 
+## The gift draw (v_78)
+
+*Gift draw / Wichteln / Lootjes trekken / Père Noël secret / Amigo
+invisible.* An app at a table (3–30 people — the Gift draw app) asks Social
+Home to draw names. Every person is drawn one other person to give a gift
+to, in **one circle** (nobody draws themselves; everyone gives and gets
+once); couples listed by the organiser don't draw each other. Each
+participant's **own household** does its part by itself (no app needs to be
+open), and the result is shown only in **Social Home's own sheet**
+("You're giving a gift to Ben (Familie Okafor)", Ben's wish list, the
+budget and the day — `GET …/draw/result`, the route
+`/apps/{app}/draw/{table}`): the app gets the state, never a result.
+
+### What holds, and against whom
+
+Threat model: honest-but-curious organiser, participants and host
+household (the hub, which passes every message on); a tampering app; a
+cheating household that deviates (it must be *detected*, which aborts the
+round; it can't get a secret result out of it).
+
+| Party | Learns |
+|---|---|
+| A participant (incl. the organiser) | the people, the round's box keys `S` (random), their own position, **their own recipient's card** |
+| Their household | the same for each of its own people (it holds their keys, as it holds their DMs) |
+| The hub (as relay) | the above for its own people, plus which household sent which sealed card — cards are key-private and all 1 KiB, so not whom a card is for. `tests/protocol/test_app_draw.py` pins that everything the hub stores and sees, with the random bytes blanked, is identical whoever draws whom |
+| A mixing household | its own shuffle's input and output only; linking a person to a position needs **every** household's shuffle, and the person's own household is one of them |
+| A non-member relay household, the GFS | ciphertext, sizes, timing (the table's transport) |
+| The app | the people, the state, the person's own wish list — never a result |
+| A recipient | nothing about their giver |
+
+### The protocol (one round)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant H as Hub (organiser's household)
+    participant X as Each participant household (×h, the hub too)
+    H->>X: draw_start {people, identities, settings, because}
+    X->>H: draw_key {mixer pub, sig}
+    H->>X: draw_mixers {keys in mixing order}
+    Note over X: per own person p: box key Bp, commitment H(ctx,p,Bp,nonce),<br/>onion = seal(M1, seal(M2, … seal(Mh, Bp)))
+    X->>H: draw_onions {onions, commits, sig}
+    loop each household in mixing order
+        H->>X: draw_mix {k, batches | list + prev mixer's signature}
+        Note over X: verify input = previous signed output,<br/>peel own layer, check, shuffle (CSPRNG), sign (in, out)
+        X->>H: draw_mixed {k, list, in, sig}
+    end
+    H->>X: draw_list {S, batches (hashes + commits + sigs), chain}
+    Note over X: chain + every signature checks out? each own Bp in S once?<br/>else draw_fail {missing, proof} (instead of cards)
+    X->>H: draw_cards {key-private card per own person, sealed to S[j−1]}
+    H->>X: draw_cards_all {all n, sorted by hash}
+    Note over X: own box opens exactly one valid card signed by its<br/>person's household? not the giver's partner?<br/>else draw_fail {cards} / draw_redo {partner}, with proof
+    X->>H: draw_done {count}
+    H->>X: draw_complete → "Your gift draw is ready"
+```
+
+1. **Start.** The hub sends the people (seat, household, username), each
+   household's identity key and the settings (name, budget, day, pairs).
+   Every signature and seal of the round is bound to the **round context**
+   `SHA-256(suite ‖ table ‖ gen ‖ round ‖ people ‖ identity keys ‖
+   settings)`, so the hub can't show two households two rounds. Identity
+   keys are the paired household's stored key or one that **derives to the
+   household's id** (an id is its key's fingerprint). The mixing order is
+   `sorted by SHA-256(table ‖ gen ‖ round ‖ household)` — nobody picks it.
+2. **Keys, onions.** A fresh X25519 mixer key per household per round
+   (signed); a fresh X25519 box key per person (the private half never
+   leaves the household) wrapped in one layer per mixer, and a hiding
+   commitment to which box is whose. Onions are `32 + 48·h` bytes, all the
+   same.
+3. **The mix (signed chain).** Mixer k takes only exactly the previous
+   mixer's signed output (the first: exactly every household's signed onion
+   batch, its own unchanged), peels its layer, checks every entry opened and
+   all are distinct, shuffles, and signs `(k, in-digest, out-digest)`. A
+   mixer mixes **once per round** (a second, different list is refused) —
+   so the relay can't feed a mixer one real onion among fakes.
+4. **Check.** Each household checks the whole chain from hashes (every
+   batch and link signature, the digests linking up to `S`) and that each of
+   its people's box keys is in `S` exactly once. A key missing is told
+   **instead of** sending cards — never after the cards went out.
+5. **The circle and cards.** Box at position `j` gives to `j + 1`. Each
+   person's **card** (their name and household as their own household knows
+   them, their wish list, signed by that household for this round) is padded
+   to exactly **1 KiB** and sealed key-private to `S[j − 1]` — their giver.
+6. **Open.** Each household tries its people's boxes on all n cards: exactly
+   one opens per person, signed by the household of a person of the round
+   who isn't the giver. If it is the giver's partner → `draw_redo`.
+
+**No re-rolls on demand.** A household accepts a new round only when it is
+the table's first draw (or a fresh one after a draw gave up), the
+organiser's **Draw again** after a reveal (everyone is told, with the
+count; at most 10, only until the exchange day), a round with **fewer**
+people (someone left or was removed — never new ones), or a **complaint it
+verifies itself**: the complainer's box private key and commitment nonce,
+signed by its household, checked against the round's `S` and cards **as
+this household received them**. A complaint without proof is named to the
+organiser ("…'s home stopped the draw without reason") and changes nothing.
+At most **12 rounds** per draw ((2/3)^12 ≈ 0.8 % for the worst allowed
+pairs), then "The names couldn't be drawn with these rules".
+
+**Exclusions** (couples, decision D14): non-overlapping pairs of seats, at
+most ⌊n/3⌋, at least four people when there is any. Checked privately by
+each giver's household; a hit is redrawn with proof (it reveals only that
+the thrown-away round had that pair).
+
+### Event types
+
+All sealed `APP_SESSION` verbs between the hub and each participant
+household (a picked table over the pairing, a space table over
+`SPACE_APP_SESSION`), all carrying `draw_suite:
+"x25519-hkdf-aesgcm256"`, `gen` (1, +1 per Draw again) and `round`; sent
+only to households at v_78 (`FederationCapability.MIN_FOR_APP_DRAW`):
+
+| Verb | From → to | Fields |
+|---|---|---|
+| `draw_start` | hub → participants | `people [{seat, instance, user, name}]`, `identities {instance: hex}`, `settings {name, budget, day, pairs}`, `because {kind: first \| again \| changed \| complaint, complaint?, list?, cards?}` |
+| `draw_key` | participant → hub | `pub`, `sig` |
+| `draw_mixers` | hub → participants | `keys [{instance, pub, sig}]` in mixing order |
+| `draw_onions` | participant → hub | `onions`, `commits [[user, c]]`, `sig` |
+| `draw_mix` / `draw_mixed` | hub ↔ mixer k | `k`, `batches` (k = 0) or `list` + `prev {instance, in, sig}`; back `list`, `in`, `sig` |
+| `draw_list` | hub → participants | `S`, `batches [{instance, hashes, commits, sig}]`, `chain [{k, instance, in, out, sig}]` |
+| `draw_cards` / `draw_cards_all` | participant → hub / hub → participants | `cards` (sealed, 1 072 bytes each) |
+| `draw_fail` / `draw_redo` | participant → hub | `complaint {kind: missing \| cards \| partner, instance, user, box_priv, nonce, sig}` |
+| `draw_done` / `draw_complete` / `draw_end` | participant → hub / hub → participants | `count` / — / `reason: rules \| too_few` |
+| `draw_handover` / `draw_wish` | participant → hub → participants (`relayed: true`) | `sealed` |
+
+**Receivers enforce:** the suite; `gen` ≤ 11, `round` ≤ 12; 3 ≤ n ≤ 30,
+unique seats and people; exact sizes (box 32 B, onion `32 + 48·(h − k)`,
+sealed card 1 072 B, hand-over 1 328 B, digests 32 B, signatures 64 B);
+lists of exactly n distinct entries; one draw per table; hub-to-participant
+verbs only from the table's hub, participant-to-hub verbs only from a
+household with people in the round; nothing from a household below v_78.
+
+### After the reveal, people leaving, offline homes (design 5.6)
+
+- **Leave after the reveal:** the leaver's household seals the card its
+  person drew (the original, signed card) to the leaver's giver's box
+  (`draw_handover`) — the giver now gives to the leaver's recipient ("Ben
+  left the draw — you're now giving to Cleo"). The giver's household takes
+  it only once its own copy of the table shows the leaver gone. Fewer than
+  three left → the draw ends.
+- **Wish list after the reveal:** sealed again to the same giver box
+  (`draw_wish`, `rev` + 1, ≤ 5 per person); a household whose person left
+  passes it on to their giver.
+- **Someone leaves mid-round:** a fresh round without them, automatically.
+- **A household doesn't answer:** messages wait in outboxes. After an hour
+  the organiser's status names the seats of the homes the draw waits for
+  (`waiting_for`); removing them ("Draw without them",
+  `sh.group.remove`) starts a fresh round without them. Nobody is removed
+  automatically.
+
+### Cost (once per round)
+
+`n` people in `h` households. Mixer key 32 B; onion `32 + 48h` B; sealed card
+1 072 B; base64 +33 %; envelope ≈ 400 B. Envelopes per round ≈ 11(h − 1).
+
+| | n = 12 in 5 homes | n = 30 in 30 homes (worst) |
+|---|---|---|
+| start + keys + mixer list | 12 × ~1 KB | 87 × ~1.5 KB ≈ 130 KB |
+| onions to the hub | 4 × ~1 KB | 29 × ~2.4 KB ≈ 70 KB |
+| the mix (out + back per household) | 8 × ~3 KB ≈ 25 KB | 58 × ~30 KB ≈ 1.7 MB |
+| `S` + chain to everyone | 4 × ~3 KB | 29 × ~6 KB ≈ 170 KB |
+| cards in + all cards out | ≈ 80 KB | 29 × 2 KB + 29 × 44 KB ≈ 1.3 MB |
+| done + complete | ~4 KB | ~20 KB |
+| **one round** | **≈ 44 envelopes, ≈ 150 KB** | **≈ 320 envelopes, ≈ 3.4 MB** |
+
+Worst realistic draw: 30 homes, ~3 rounds with pairs ≈ 10 MB once a year,
+≈ 340 KB per household. A redo's `draw_start` carries its proof (the list
+body ≈ 6 KB, the cards ≤ 44 KB) to each household once. After the reveal:
+a hand-over or wish update is 1 envelope in + h out (≈ 2 KB each), ≤ 6 per
+person. CPU: a mixer peels n onions, a household tries its boxes on n cards
+(≤ 900 X25519 operations for one household with all 30 people) — in a worker
+thread.
+
+### Storage and the app
+
+`app_group_sessions.draw_json` (migration 0138): one KEK-wrapped blob per
+table and household (settings, wish lists, this household's mixer and box
+keys, the round's public data it checks proofs against, its people's
+results; on the hub the relay state — ciphertext and signatures). The app
+bridge (`client/src/features/apps/draw/drawBridge.ts`): `draw.configure`,
+`draw.setWishes`, `draw.start ({again?})`, `draw.status` →
+`{state: gathering | drawing | ready | failed, reason?, round, again, of,
+done?, waitingFor?, falseComplaints?, settings, wish, hasResult, isHost}`,
+`draw.reveal` (opens Social Home's sheet, resolves `null`), and
+`{type: 'draw:event', event: {type: 'status', id, status}}` posts. No call
+returns a result. Notifications: one row per person "Your gift draw is
+ready — see who you're giving to" (pushed, title only), drawn again, a
+hand-over, a wish-list change — never naming whom they give to.
+
+### Residual risks
+
+- **One-household draws:** when every participant lives in one household,
+  its server holds every box key; its admin could rebuild the draw from the
+  database. Stated in the app's About text.
+- **A malicious (not just curious) hub** in a picked group whose households
+  aren't paired with each other could impersonate a participant household
+  with a key of its own (a self-certifying id it controls) and run two
+  rounds; space tables and paired households don't have it. It can also
+  leave a seated person out of the draw (that person sees no name) or stall
+  it.
+- **A cheating household** can stall a draw (refuse to mix, or commit to one
+  box and onion another — a valid "missing" proof, but only before any card
+  is opened), up to the 12-round cap; who did it isn't proven (no blame
+  phase in v1). It can't learn another pair or steer its own people's
+  recipients.
+- **A household's own people:** a household can hand its own people's cards
+  to whichever of its people's givers it likes (it holds their keys anyway).
+- **Hand-over to a partner:** a hand-over can give a giver their partner;
+  the organiser can draw again.
+- v1 runs the draw from the host household only: after a host hand-over to
+  another household's person, Draw names / Draw again answer
+  `APP_DRAW_HOST_ELSEWHERE`.
+
 ## Storage
 
 `app_group_sessions` (one row per table a household knows, migration
@@ -703,6 +916,14 @@ taken, announce, first seen here). See
   transport and rules; `socialhome/routes/space_games.py`.
 - `socialhome/repositories/app_group_repo.py`, `socialhome/routes/app_groups.py`.
 - `client/src/features/apps/groupBridge.ts` — the bridge's `group.*`.
+- The gift draw (v_78): `socialhome/federation/draw_crypto.py` (pure
+  functions: seals, onions, the mix, cards), `socialhome/domain/app_draw.py`,
+  `socialhome/services/app_draw_service.py` (the hub's rounds and each
+  household's steps), `socialhome/routes/app_draw.py`,
+  `client/src/features/apps/draw/` (bridge `draw.*`, the result sheet);
+  tests `tests/federation/test_draw_crypto.py`,
+  `tests/services/test_app_draw_service.py`,
+  `tests/protocol/test_app_draw.py` (security).
 - Tests: `tests/services/test_app_group_service.py`,
   `tests/services/test_app_group_messages.py`,
   `tests/protocol/test_app_group_federation.py`,
@@ -715,6 +936,6 @@ taken, announce, first seen here). See
 
 Group-play design §2 (roster, topology, life of a table, who can send
 to whom, order, mailbox, wire, storage, SDK, older households, blocks and
-children, bounds), §3 (space tables), §4 (the games list), decisions
-D1–D12; [`capabilities.md`](./capabilities.md) v_76, v_77; [`../crypto.md`](../crypto.md)
-(seat seal).
+children, bounds), §3 (space tables), §4 (the games list), §5 (the gift
+draw), decisions D1–D14; [`capabilities.md`](./capabilities.md) v_76, v_77,
+v_78; [`../crypto.md`](../crypto.md) (seat seal, gift draw).

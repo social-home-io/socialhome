@@ -150,6 +150,45 @@ describe('mountBridge', () => {
     expect(iframe.contentWindow!.postMessage).not.toHaveBeenCalled()
   })
 
+  // ── the gift draw (v_78) ─────────────────────────────────────────────────
+
+  it('draw.reveal opens Social Home\'s sheet; the app gets nothing back', async () => {
+    cleanup()
+    const revealDraw = vi.fn()
+    cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID, permissions: ALL, revealDraw })
+    const handler = captureMessageHandler()
+    await handler({ source: iframe.contentWindow!, data: { id: 5, method: 'draw.reveal', params: { id: 't1' } } })
+    expect(revealDraw).toHaveBeenCalledWith('t1')
+    expect(iframe.contentWindow!.postMessage).toHaveBeenCalledWith({ id: 5, ok: true, result: null }, '*')
+    expect(mockApiGet).not.toHaveBeenCalled()
+  })
+
+  it('draw.* needs the people permission', async () => {
+    cleanup()
+    cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID, permissions: ['storage'], revealDraw: vi.fn() })
+    const handler = captureMessageHandler()
+    await handler({ source: iframe.contentWindow!, data: { id: 6, method: 'draw.status', params: { id: 't1' } } })
+    expect(iframe.contentWindow!.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 6, ok: false, error: expect.objectContaining({ code: 'permission_denied' }) }),
+      '*',
+    )
+    expect(mockApiGet).not.toHaveBeenCalled()
+  })
+
+  it('app.draw frames reach the app as draw:event, never with a result', async () => {
+    wsHandlers['app.draw']({
+      data: {
+        app_id: APP_ID,
+        session_id: 't1',
+        draw: { state: 'ready', has_result: true, round: 1, again: 0, of: 4, done: null, settings: null, wish: '', is_host: false, waiting_for: null, false_complaints: null, gen: 1 },
+      },
+    })
+    expect(iframe.contentWindow!.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'draw:event', event: expect.objectContaining({ type: 'status', id: 't1' }) }),
+      '*',
+    )
+  })
+
   // ── ready ────────────────────────────────────────────────────────────────
 
   it('onReady fires once, on the app\'s first request — app.ready or any RPC', async () => {
@@ -503,9 +542,9 @@ describe('mountBridge', () => {
       await captureMessageHandler()({ source: iframe.contentWindow as unknown as Window, data: { id: 3, method: 'app.context' } })
       expect(acceptCalls()).toHaveLength(1)
       expect(replies().map(r => r.result)).toEqual([
-        { appId: APP_ID, selfUserId: USER_ID, permissions: ALL, groups: true, launch: { sessionId: 's1', invite: asApp } },
+        { appId: APP_ID, selfUserId: USER_ID, permissions: ALL, groups: true, draw: true, launch: { sessionId: 's1', invite: asApp } },
         [invite],
-        { appId: APP_ID, selfUserId: USER_ID, permissions: ALL, groups: true, launch: { sessionId: 's1', invite: asApp } },
+        { appId: APP_ID, selfUserId: USER_ID, permissions: ALL, groups: true, draw: true, launch: { sessionId: 's1', invite: asApp } },
       ])
     })
 

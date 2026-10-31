@@ -26,6 +26,7 @@ from socialhome.domain.events import (
     AppChallengeEnded,
     AppChallengeReceived,
     AppChallengeWaiting,
+    AppDrawChanged,
     AppEnabledChanged,
     AppGameEnded,
     AppInstalled,
@@ -5659,3 +5660,50 @@ async def test_a_group_game_row_from_someone_blocked_makes_no_row(stack):
         )
     )
     assert await _rows_of(stack, anna.user_id, "app_table_joined") == []
+
+
+async def test_gift_draw_rows_never_name_whom_you_give_to(stack):
+    """v_78: "Your gift draw is ready" (pushed, title only), drawn again,
+    a hand-over and a wish-list change — each a row into Social Home's own
+    result sheet, none naming the person drawn."""
+    a = await stack.provision_user("anna")
+    expected = {
+        "ready": (
+            "app_draw_ready",
+            "Your gift draw is ready — see who you're giving to",
+        ),
+        "again": (
+            "app_draw_ready",
+            "The names were drawn again — see who you're giving to now",
+        ),
+        "handover": (
+            "app_draw_changed",
+            "Cleo left the gift draw — see who you're giving to now",
+        ),
+        "wish": (
+            "app_draw_changed",
+            "The person you're giving to changed their wish list",
+        ),
+    for i, (change, (kind, title)) in enumerate(expected.items()):
+        await stack.bus.publish(
+            AppDrawChanged(
+                app_id="gift-draw",
+                session_id=f"t{i}",
+                to_user_id=a.user_id,
+                change=change,
+                gen=2 if change == "again" else 1,
+                name="Cleo" if change == "handover" else None,
+            )
+        rows = [
+            n
+            for n in await stack.notif_repo.list(a.user_id, limit=10)
+            if n.link_url == f"/apps/gift-draw/draw/t{i}"
+        ]
+        assert [(n.type, n.title) for n in rows] == [(kind, title)]
+    assert notif_kind("app_draw_ready") is NotifKind.ABOUT_YOU
+    assert notif_kind("app_draw_changed") is NotifKind.ABOUT_YOU
+    # A new name is pushed (title only); a hand-over or wish list is not.
+    assert len(push.calls) == 2
+        AppDrawChanged(
+            app_id="gift-draw", session_id="t9", to_user_id="nobody", change="ready"
+    assert len(push.calls) == 2

@@ -71,6 +71,7 @@ from ..domain.events import (
     AppChallengeEnded,
     AppChallengeReceived,
     AppChallengeWaiting,
+    AppDrawChanged,
     AppEnabledChanged,
     AppGameEnded,
     AppInstalled,
@@ -207,6 +208,7 @@ from .notification_links import (
     HOUSEHOLD_CALENDAR_LINK,
     HOUSEHOLD_FEED_LINK,
     app_about_link,
+    app_draw_link,
     app_game_link,
     app_link,
     app_table_link,
@@ -529,6 +531,8 @@ _PUSH_AS_IS: frozenset[str] = frozenset(
         "app_table_closed",
         "app_table_joined",
         "app_table_started",
+        "app_draw_ready",
+        "app_draw_changed",
         "app_request",
         "app_update",
         "bazaar_bid_placed",
@@ -1453,6 +1457,7 @@ class NotificationService(ProtectionGateMixin):
         self._subscribe(AppTableClosed, self.on_app_table_closed)
         self._subscribe(AppTableJoined, self.on_app_table_joined)
         self._subscribe(AppTableStarted, self.on_app_table_started)
+        self._subscribe(AppDrawChanged, self.on_app_draw_changed)
         self._subscribe(AppInstalled, self.on_app_request_answered)
         self._subscribe(AppRequested, self.on_app_requested)
         self._subscribe(AppRequestDismissed, self.on_app_request_answered)
@@ -3402,6 +3407,56 @@ class NotificationService(ProtectionGateMixin):
             name=name,
             app=app_name or "",
             count=others,
+        )
+
+    async def on_app_draw_changed(self, event: AppDrawChanged) -> None:
+        """The gift draw has news for this person (v_78): their name is
+        ready (or drawn again), the person they gave to left and they now
+        give to someone else, or their recipient changed the wish list.
+        The row never says whom they give to — only Social Home's own
+        result sheet (the link) does; a push carries the title only, and
+        only for a new name."""
+        recipient = await self._local_user(event.to_user_id)
+        if recipient is None:
+            return
+        locale = self._locale(recipient)
+        match event.change:
+            case "again":
+                key, fallback = (
+                    "notification.app.draw_again",
+                    "The names were drawn again — see who you're giving to now",
+                )
+            case "handover":
+                key, fallback = (
+                    "notification.app.draw_handover",
+                    "{name} left the gift draw — see who you're giving to now",
+                )
+            case "wish":
+                key, fallback = (
+                    "notification.app.draw_wish",
+                    "The person you're giving to changed their wish list",
+                )
+            case _:
+                key, fallback = (
+                    "notification.app.draw_ready",
+                    "Your gift draw is ready — see who you're giving to",
+                )
+        title = self._t(key, locale=locale, fallback=fallback, name=event.name or "")
+        await self._save_notif(
+            new_notification(
+                user_id=event.to_user_id,
+                type="app_draw_ready"
+                if event.change in ("ready", "again")
+                else "app_draw_changed",
+                title=title,
+                link_url=app_draw_link(event.app_id, event.session_id),
+            ),
+            about=NotificationSubject.of(
+                NotificationObject.APP_SESSION,
+                f"{event.app_id}/{event.session_id}",
+            ),
+            actor_user_id=None,
+            push=event.change in ("ready", "again"),
         )
 
     async def on_app_turns_seen(self, event: AppTurnsSeen) -> None:

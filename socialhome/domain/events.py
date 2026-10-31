@@ -2869,6 +2869,24 @@ class AppTableStarted(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class AppDrawChanged(DomainEvent):
+    """The gift draw at a table has news for ``to_user_id`` (v_78), one row
+    each: ``ready`` ("Your gift draw is ready — see who you're giving
+    to"), ``again`` (the organiser drew names again; ``gen`` says which
+    draw), ``handover`` (``name`` left the draw — they now give to someone
+    else) or ``wish`` (their recipient changed their wish list). Never
+    names whom they give to: that is shown only in Social Home's own
+    result sheet. Published by :class:`AppDrawService`."""
+
+    app_id: str
+    session_id: str
+    to_user_id: str
+    change: str
+    gen: int = 1
+    name: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
 class AppTurnsSeen(DomainEvent):
     """``user_id``'s app opened and took its held messages (``POST
     …/held``): the games in ``session_ids`` are in front of them, so their

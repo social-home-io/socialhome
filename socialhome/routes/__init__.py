@@ -38,6 +38,12 @@ from .admin_instance_bans import (
 )
 from .aliases import AliasCollectionView, AliasItemView
 from .app_bundle import AppBundleView, AppRuntimeView
+from .app_draw import (
+    AppDrawResultView,
+    AppDrawStartView,
+    AppDrawView,
+    AppDrawWishView,
+)
 from .app_groups import (
     AppGroupCloseView,
     AppGroupCollectionView,
@@ -1420,6 +1426,12 @@ def setup_routes(app: web.Application) -> None:
         ("messages", AppGroupMessagesView),
     ):
         app.router.add_view(f"/api/apps/{{app_id}}/groups/{{session_id}}/{verb}", view)
+    # The gift draw at a table (v_78) — the bridge's draw.* and the result sheet.
+    draw_base = "/api/apps/{app_id}/groups/{session_id}/draw"
+    app.router.add_view(draw_base, AppDrawView)
+    app.router.add_view(f"{draw_base}/wish", AppDrawWishView)
+    app.router.add_view(f"{draw_base}/start", AppDrawStartView)
+    app.router.add_view(f"{draw_base}/result", AppDrawResultView)
     # Games in a space (v_77) — the Games section, the "Open games" strip.
     app.router.add_view("/api/spaces/{space_id}/games", SpaceGamesView)
     app.router.add_view("/api/spaces/{space_id}/games/allowed", SpaceGamesAllowedView)

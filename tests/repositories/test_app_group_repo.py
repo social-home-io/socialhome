@@ -184,6 +184,18 @@ async def test_own_seat_key_first_one_stays_and_saves_leave_it(repo):
     assert await repo.set_seat_key("nope", "x") is False
 
 
+async def test_the_draw_state_and_saves_leave_it(repo):
+    """v_78: the table's gift draw (KEK-wrapped JSON) — no upsert of the
+    roster touches it."""
+    await repo.save(_table())
+    assert await repo.get_draw("t1") is None
+    await repo.set_draw("t1", '{"v":1,"enc":"x"}')
+    await repo.save_newer(_table(roster_rev=2))
+    await repo.save(_table(roster_rev=3))
+    assert await repo.get_draw("t1") == '{"v":1,"enc":"x"}'
+    assert await repo.get_draw("nope") is None
+
+
 async def test_raise_seq_only_goes_up_and_saves_leave_it(repo):
     await repo.save(_table())
     await repo.raise_seq("t1", 5, now="2026-10-31T11:00:00+00:00")

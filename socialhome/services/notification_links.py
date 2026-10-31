@@ -124,6 +124,11 @@ def app_game_link(app_id: str, session_id: str) -> str:
     return _with_query(f"/apps/{app_id}", session=session_id)
 
 
+def app_draw_link(app_id: str, session_id: str) -> str:
+    """Social Home's own gift-draw result sheet (v_78) — never the app."""
+    return f"/apps/{app_id}/draw/{session_id}"
+
+
 def link_target(link: str) -> str:
     """The page ``link`` opens, without the part it picks out.
 

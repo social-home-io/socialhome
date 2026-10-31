@@ -1,0 +1,37 @@
+-- 0138 — The gift draw at a group table (group play PR 9, v_78). Follows 0137.
+--
+--   app_group_sessions.draw_json  This household's part of the table's gift
+--       draw, KEK-wrapped as one blob ``{"v": 1, "enc": "<nonce:ct>"}``
+--       (KeyManager AES-GCM, bound to the session id): the organiser's
+--       settings (name, budget, day, pairs), its people's wish lists, per
+--       round its mixer key and its people's box keys + commitment nonces,
+--       the public round data it checks complaints against, and once the
+--       draw is revealed each of its people's result (the card they drew).
+--       On the hub (the host household) also the relay state of the round
+--       (keys, onions, the signed chain, sealed cards — ciphertext and
+--       signatures only). NULL until someone at the table uses the draw.
+--
+-- CLAUDE.md "audit before a migration":
+--   (1) Audited every path that touches the data. ``app_group_sessions``
+--       (0136, 0137): ``SqliteAppGroupRepo`` — the upsert names its columns
+--       (``_UPSERT`` / ``_args``), so ``save`` / ``save_newer`` never touch
+--       ``draw_json``; ``prune`` deletes the row with everything on it
+--       (the draw goes with its table: 7 days after the end, the 90-day
+--       quiet rule); ``space_id`` cascades with the space. ``seat_key_json``
+--       (0136) is the same shape of per-household secret on the same row.
+--       ``AppGroupService`` (hub, mirrors, sweep, uninstall) and
+--       ``SpaceTableService`` read the row through the repo only.
+--   (2) Non-migration alternatives, rejected:
+--       * a separate ``app_draws`` table — one draw per table, always read
+--         and written with it, gone with it; a second table adds a key and
+--         a cascade for nothing;
+--       * the app's own ``store`` — plaintext, and readable by the app,
+--         which must never see a result (decision D13);
+--       * ``app_pending_sessions.payload_json`` — per person, not per
+--         table, and the hub's relay state isn't any person's;
+--       * ``seat_key_json`` — the seat key's shape is checked on every
+--         roster (``SeatKey``); overloading it breaks those readers.
+--   (3) Smallest change: one additive NULL column, no backfill, no index
+--       (read by primary key only).
+
+ALTER TABLE app_group_sessions ADD COLUMN draw_json TEXT;

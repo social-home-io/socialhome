@@ -733,6 +733,38 @@ await check('app-about', async () => {
   return { problems }
 })
 
+// 6c3. The gift draw's result sheet on its own address
+//      (``/apps/<id>/draw/<table>``, v_78 — where "Your gift draw is
+//      ready" leads): it renders under the prefix, reads its result
+//      through the prefix (no table here → "no name yet"), and Done goes
+//      back to the Apps page under the prefix — on a desktop and a phone.
+await check('app-draw-result', async () => {
+  const problems = []
+  const want = `${PREFIX}/apps/ingress-probe/draw/no-such-table`
+  for (const vp of ['desktop', 'mobile']) {
+    const { ctx, page: p } = await newPage(vp)
+    const fetched = p.waitForResponse(r => r.url().includes('/draw/result'))
+    await p.goto(APP + 'apps/ingress-probe/draw/no-such-table', { waitUntil: 'load' })
+    await step('the result sheet', settled(p))
+    const res = await step('its result request', fetched)
+    if (!underPrefix(new URL(res.url()).pathname)) problems.push(`[${vp}] the result was read outside the prefix: ${res.url()}`)
+    if (pathOf(p) !== want) problems.push(`[${vp}] the sheet opened at ${pathOf(p)}, not ${want}`)
+    // No table here: "no name yet" (or, for an app without the people
+    // permission, "couldn't load") — either way Social Home's own words.
+    const said = [T('apps.draw.result.none'), T('apps.draw.result.load_failed')]
+    await step(`"${said[0]}"`, p.waitForFunction(ts => ts.some(t => document.body.textContent.includes(t)), {}, said))
+    await p.screenshot({ path: path.join(SHOTS, `app-draw-result-${vp}.png`) })
+    // Done ignores taps for its first 600 ms (an app-timed tap).
+    await new Promise(r => setTimeout(r, 700))
+    const done = T('apps.draw.result.done')
+    await p.evaluate(t => [...document.querySelectorAll('button')].find(b => b.textContent.trim() === t)?.click(), done)
+    await step('Done goes to Apps', p.waitForFunction(w => location.pathname === w, {}, `${PREFIX}/apps`))
+    await ctx.close()
+  }
+  activePage = page
+  return { problems }
+})
+
 // 6d. "Play" opens the game you were invited to (D12): Bob invites Alice
 //     twice in the probe app; her Needs you's Play links to
 //     <prefix>/apps/<id>?session=<sid>, the host takes in that one invite

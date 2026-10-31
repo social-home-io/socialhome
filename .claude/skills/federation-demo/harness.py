@@ -9621,6 +9621,37 @@ def cmd_verify() -> None:
                 failures.append(f"app-group: {label} lost the closed table")
             else:
                 print(f"  app-group: {label} still holds the closed table ✓")
+    # v_78 — the gift draw: the ``draw_*`` verbs of ``APP_SESSION``.
+    # ``app-draw`` runs a four-person draw over a, b, c end to end (the
+    # tamper and privacy rules are ``tests/protocol/test_app_draw.py``).
+    if int(_Cap.MIN_FOR_APP_DRAW) != 78 or _OURS < 78:
+        failures.append(
+            "MIN_FOR_APP_DRAW moved off v_78 (or OURS fell below it) — a draw "
+            "would reach households that drop it"
+        )
+    else:
+        print("  v_78 gift draw gate in place ✓")
+    drawn = state.get("app_draw")
+    if drawn:
+        for label in ("a", "b", "c"):
+            rows = _rows(
+                label,
+                "SELECT draw_json FROM app_group_sessions WHERE session_id = ?",
+                (drawn["session_id"],),
+            )
+            if not rows or not rows[0][0] or '"enc"' not in rows[0][0]:
+                failures.append(f"app-draw: {label} lost its sealed draw")
+                continue
+            leaked = [
+                m
+                for path in _instance_dir(label).glob("socialhome.db*")
+                for m in drawn["marks"]
+                if m.encode() in path.read_bytes()
+            ]
+            if leaked:
+                failures.append(f"app-draw: a wish list is readable on {label}")
+            else:
+                print(f"  app-draw: {label} keeps its draw sealed ✓")
     # v_77 — games in a space: SPACE_APP_TABLE / SPACE_APP_SESSION to member
     # households with a writer seat at >= v_77, over the space's transport.
     if int(_Cap.MIN_FOR_SPACE_APP_TABLES) != 77 or _OURS < 77:
@@ -15505,6 +15536,228 @@ def cmd_app_group() -> None:
     print("app-group: ok")
 
 
+def cmd_app_draw() -> None:
+    """The gift draw (v_78) — four people in three households draw names,
+    with one pair who must not draw each other, and the host household
+    learns only its own people's names.
+
+    Prereqs: ``up`` + ``pair`` (a↔b, a↔c paired). Installs a stand-in
+    draw app (``demo-draw``: ``players {3, 30}``, ``tables: true``) on a,
+    b and c straight into ``installed_apps``, and a second person on a
+    (``dora``).
+
+    1. a's admin opens a table with dora (local), b's and c's admins
+       (``POST /groups``); all three join — four seats on a, b, c.
+    2. a sets the draw (``PATCH …/draw``): name, budget, day and the pair
+       (a's admin, dora). Everyone writes a wish list with a marker
+       (``PUT …/draw/wish``).
+    3. a draws names (``POST …/draw/start``); the households run the
+       rounds by themselves (``draw_*`` verbs — the mix, the cards, any redo
+       with its proof) until each person's ``GET …/draw`` says ``ready``.
+    4. **The result.** Each person's own ``GET …/draw/result``: the four
+       form one circle, the pair don't draw each other, each sheet shows
+       the recipient's own wish list.
+    5. **Nobody else learns it.** No wish-list marker is in any household's
+       database files in plaintext (the draw is KEK-wrapped), and none in
+       a's (the host household's) log; a's admin reads only their own
+       result.
+    6. **v_78.** ``OURS`` >= ``MIN_FOR_APP_DRAW`` and a sees b and c at it.
+       Tampering mixers, false complaints, replays, offline homes and the
+       hand-over are ``tests/protocol/test_app_draw.py``.
+    """
+    import sqlite3
+
+    from socialhome.domain.federation_capabilities import (
+        OURS as _OURS,
+        FederationCapability as _Cap,
+    )
+
+    state = _load()
+    if not state:
+        raise SystemExit("run 'up' first")
+    inst = state["instances"]
+    a, b, c = inst["a"], inst["b"], inst["c"]
+    app_id = "demo-draw"
+    manifest = (
+        '{"entry": "index.html", "icon": null, "capabilities":'
+        ' ["storage", "federation"], "players": {"min": 3, "max": 30},'
+        ' "tables": true}'
+    )
+    for label in ("a", "b", "c"):
+        con = sqlite3.connect(str(_instance_dir(label) / "socialhome.db"), timeout=10)
+        try:
+            con.execute(
+                "INSERT OR IGNORE INTO installed_apps(app_id, name, version,"
+                " enabled, manifest_json, bundle_path, bundle_sha256,"
+                " source_url, installed_at) VALUES(?, 'Demo draw', '1', 1, ?,"
+                " 'apps/demo-draw/1', 'demo', 'demo', '2026-10-31')",
+                (app_id, manifest),
+            )
+            con.commit()
+        finally:
+            con.close()
+    a_url = f"http://127.0.0.1:{a['port']}"
+    # A second person on a (the host household): dora.
+    s, made = _request(
+        f"{a_url}/api/admin/users",
+        token=a["token"],
+        method="POST",
+        body={
+            "username": "dora",
+            "password": "harness-pwd-dora",
+            "display_name": "Dora Draw",
+            "is_admin": False,
+        },
+    )
+    if s == 409:
+        s, listing = _request(f"{a_url}/api/users", token=a["token"])
+        _must("list users(a)", s, listing)
+        dora_id = next(u["user_id"] for u in listing if u.get("username") == "dora")
+    else:
+        _must("provision dora(a)", s, made, ok=(201,))
+        dora_id = made["user_id"]
+    s, login = _request(
+        f"{a_url}/api/auth/token",
+        method="POST",
+        body={"username": "dora", "password": "harness-pwd-dora"},
+    )
+    _must("dora login(a)", s, login)
+    dora = {**a, "token": login["token"], "username": "dora"}
+    people = {"a": a, "dora": dora, "b": b, "c": c}
+
+    def api(node: dict, path: str, *, method: str = "GET", body=None):
+        return _request(
+            f"http://127.0.0.1:{node['port']}/api/apps/{app_id}{path}",
+            token=node["token"],
+            method=method,
+            body=body,
+        )
+
+    def wait(what: str, check, timeout: float = 120.0) -> None:
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if check():
+                return
+            time.sleep(1.0)
+        raise SystemExit(f"app-draw: timed out waiting for {what}")
+
+    # 1. The table: a's admin, dora (local), b's and c's admins.
+    picks = [
+        {"instance_id": a["instance_id"], "user_ref": dora_id, "is_local": True},
+        {"instance_id": b["instance_id"], "user_ref": b["username"], "is_local": False},
+        {"instance_id": c["instance_id"], "user_ref": c["username"], "is_local": False},
+    ]
+    s, opened = api(a, "/groups", method="POST", body={"targets": picks})
+    _must("open table(a)", s, opened, ok=(201,))
+    sid = opened["group"]["session_id"]
+
+    def mine(node: dict) -> dict | None:
+        s, body = api(node, "/groups")
+        groups = (body or {}).get("groups", []) if s == 200 else []
+        return next((g for g in groups if g["session_id"] == sid), None)
+
+    for label in ("dora", "b", "c"):
+        node = people[label]
+        wait(f"{label} to hold the invite", lambda node=node: mine(node) is not None)
+        s, joined = api(node, f"/groups/{sid}/join", method="POST")
+        _must(f"join({label})", s, joined)
+
+    def seated(node: dict) -> int:
+        g = mine(node) or {}
+        return sum(1 for p in g.get("players", []) if p["state"] == "seated")
+
+    for label, node in people.items():
+        wait(f"{label} to see four seats", lambda node=node: seated(node) == 4)
+    print("  app-draw: four people in three households at the table ✓")
+    seat = {label: int((mine(node) or {}).get("me") or 0) for label, node in people.items()}
+    # 2. Settings, the pair, wish lists.
+    s, conf = api(
+        a,
+        f"/groups/{sid}/draw",
+        method="PATCH",
+        body={
+            "name": "Demo gift draw",
+            "budget": "about 20 €",
+            "day": "2026-12-24",
+            "pairs": [[seat["a"], seat["dora"]]],
+        },
+    )
+    _must("configure(a)", s, conf)
+    marks = {label: f"DEMO-WISH-{label}-{secrets.token_hex(6)}" for label in people}
+    for label, node in people.items():
+        s, w = api(node, f"/groups/{sid}/draw/wish", method="PUT", body={"text": marks[label]})
+        _must(f"wish({label})", s, w)
+    a_log_from = _log_size("a")
+    # 3. Draw names.
+    s, started = api(a, f"/groups/{sid}/draw/start", method="POST", body={})
+    _must("draw names(a)", s, started)
+
+    def ready(node: dict) -> bool:
+        s, body = api(node, f"/groups/{sid}/draw")
+        d = (body or {}).get("draw") or {}
+        return s == 200 and d.get("state") == "ready" and d.get("has_result") is True
+
+    for label, node in people.items():
+        wait(f"{label}'s name to be ready", lambda node=node: ready(node), timeout=240.0)
+    print("  app-draw: every household did its part — four names ready ✓")
+    # 4. The results: one circle, the pair apart, the right wish lists.
+    names = {}
+    for label, node in people.items():
+        s, me = _request(f"http://127.0.0.1:{node['port']}/api/me", token=node["token"])
+        _must(f"me({label})", s, me)
+        names[me["display_name"]] = label
+    gives: dict[str, str] = {}
+    for label, node in people.items():
+        s, body = api(node, f"/groups/{sid}/draw/result")
+        _must(f"result({label})", s, body)
+        res = body["result"]
+        to = names.get(res["name"])
+        if to is None or to == label:
+            raise SystemExit(f"app-draw: {label} drew {res['name']!r}")
+        if res["wish"] != marks[to]:
+            raise SystemExit(f"app-draw: {label}'s sheet shows the wrong wish list")
+        gives[label] = to
+    if sorted(gives.values()) != sorted(people):
+        raise SystemExit(f"app-draw: not everyone gets one gift: {gives!r}")
+    seen, cur = set(), "a"
+    while cur not in seen:
+        seen.add(cur)
+        cur = gives[cur]
+    if seen != set(people):
+        raise SystemExit(f"app-draw: the draw is not one circle: {gives!r}")
+    if gives["a"] == "dora" or gives["dora"] == "a":
+        raise SystemExit(f"app-draw: the pair drew each other: {gives!r}")
+    print("  app-draw: one circle, the pair apart, each sheet the right wish list ✓")
+    # 5. Nobody else learns it.
+    for label in ("a", "b", "c"):
+        for path in _instance_dir(label).glob("socialhome.db*"):
+            raw = path.read_bytes()
+            for who, mark in marks.items():
+                if mark.encode() in raw:
+                    raise SystemExit(
+                        f"app-draw: {who}'s wish list is readable in {label}'s {path.name}"
+                    )
+    a_log = _log_path("a").read_bytes()[a_log_from:]
+    for who, mark in marks.items():
+        if mark.encode() in a_log:
+            raise SystemExit(f"app-draw: {who}'s wish list is in a's log")
+    print("  app-draw: no wish list or result in plaintext on any disk or a's log ✓")
+    # 6. v_78 between the three.
+    if _OURS < _Cap.MIN_FOR_APP_DRAW:
+        raise SystemExit(f"app-draw: OURS={_OURS} < MIN_FOR_APP_DRAW={_Cap.MIN_FOR_APP_DRAW}")
+    for peer in (b, c):
+        rows = _rows(
+            "a",
+            "SELECT proto_version FROM remote_instances WHERE id = ?",
+            (peer["instance_id"],),
+        )
+        if not rows or int(rows[0][0] or 1) < _Cap.MIN_FOR_APP_DRAW:
+            raise SystemExit(f"app-draw: a sees {peer['instance_id'][:8]} below v_78")
+    state["app_draw"] = {"session_id": sid, "marks": list(marks.values())}
+    _save(state)
+    print("app-draw: ok")
+
+
 def cmd_space_table() -> None:
     """Games in a space (v_77) — a table in a shared space, joined by a
     household reached only over the mesh.
@@ -20059,6 +20312,10 @@ def main() -> None:
         # ``app-group`` (v_76): a opens a group table with b's and c's
         # admins, both join, a starts and closes it — all three converge.
         cmd_app_group()
+        # ``app-draw`` (v_78): a's admin, dora (on a), b's and c's admins
+        # draw names with one pair apart — one circle, every result only on
+        # its own sheet, no wish list in plaintext on any disk.
+        cmd_app_draw()
         # ``space-table`` (v_77): in c's space from remote-invite-routed, c
         # opens a two-player table and d (mesh only, via b) joins it — it
         # starts at once, d's move reaches c, and a and b hold nothing.

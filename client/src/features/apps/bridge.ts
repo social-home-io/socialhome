@@ -103,6 +103,7 @@ import {
   type GroupSession,
   type HeldGroupRow,
 } from '@/features/apps/groupBridge'
+import { DrawBridge, isDrawMethod } from '@/features/apps/draw/drawBridge'
 
 
 /** The typed refusal an app gets for a call outside its permissions. */
@@ -198,6 +199,10 @@ export interface BridgeContext {
   /** Watch the look; the bridge pushes ``app.context-changed`` on each call.
    *  Returns the function that stops watching. */
   watchHostContext?: (cb: (c: AppHostContext) => void) => () => void
+  /** Show Social Home's own gift-draw result sheet (outside the frame)
+   *  for the table *sessionId* — ``draw.reveal``. The app gets nothing
+   *  back. Without it ``draw.reveal`` answers ``unavailable``. */
+  revealDraw?: (sessionId: string) => void
 }
 
 /** RPC envelope sent by the app iframe. */
@@ -348,8 +353,8 @@ function permissionFor(method: string, params: { target?: unknown } | undefined)
     case 'app.cancelSession':
       return targetPermission(params?.target)
     default:
-      // Every group call is about people at a table.
-      return isGroupMethod(method) ? 'people' : null
+      // Every group and draw call is about people at a table.
+      return isGroupMethod(method) || isDrawMethod(method) ? 'people' : null
   }
 }
 
@@ -524,6 +529,13 @@ export function mountBridge(
     },
   )
 
+  /** The gift draw (v_78): ``draw.*`` calls and ``draw:event`` posts. */
+  const draws = new DrawBridge(
+    appId,
+    msg => iframe.contentWindow?.postMessage(msg, '*'),
+    ctx.revealDraw,
+  )
+
   /** Whether the held messages were handed over (pushed or pulled). */
   let heldHandedOver = false
   /** An app that doesn't pull: post its held messages as live events. */
@@ -561,6 +573,10 @@ export function mountBridge(
       }
       if (isGroupMethod(method)) {
         reply({ id, ok: true, result: await groups.call(method, params) })
+        return
+      }
+      if (isDrawMethod(method)) {
+        reply({ id, ok: true, result: await draws.call(method, params) })
         return
       }
       switch (method) {
@@ -623,6 +639,8 @@ export function mountBridge(
               permissions,
               // This host speaks ``group.*`` (group play, v_76).
               groups: true,
+              // …and ``draw.*`` (the gift draw, v_78).
+              draw: true,
               launch: await launch(),
             },
           })
@@ -839,6 +857,8 @@ export function mountBridge(
 
   // Group tables: messages and roster changes as ``group:event`` posts.
   const offGroups = groups.listen(() => has('people'))
+  // The gift draw: its state (never a result) as ``draw:event`` posts.
+  const offDraws = draws.listen(() => has('people'))
 
   window.addEventListener('message', onMessage)
 
@@ -852,6 +872,7 @@ export function mountBridge(
     window.removeEventListener('message', onMessage)
     offWs()
     offGroups()
+    offDraws()
     stopWatching?.()
   }
 }

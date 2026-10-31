@@ -1217,7 +1217,24 @@ from __future__ import annotations
 #:   and no seat; an older admin household's config edit (no
 #:   ``allowed_apps`` key) leaves the list as it is. Labelled "Games in a
 #:   space".
-OURS: int = 77
+#: * **v_78** (2026-10-31) — **The gift draw** (Gift draw / Wichteln /
+#:   Lootjes trekken / Père Noël secret / Amigo invisible). An app at a
+#:   table (3–30 people) asks Social Home to draw names; each participant's
+#:   household does its part unattended — a decryption mix of sealed
+#:   name-boxes (``federation/draw_crypto.py``, ``draw_suite:
+#:   "x25519-hkdf-aesgcm256"``) with a signed chain, key-private 1 KiB
+#:   cards, exclusions (couples) checked by each giver's household, and a
+#:   fresh round only on a proven complaint, a smaller roster or the
+#:   organiser's visible "Draw again". No new event type: sixteen sealed
+#:   ``APP_SESSION`` verbs ``draw_*`` between the table's hub and each
+#:   participant household (picked tables over the pairing, space tables
+#:   over ``SPACE_APP_SESSION``). The result shows only in Social Home's
+#:   own sheet — never to the app. **Fallback**: none on the wire — a
+#:   table with a household below v_78 can't start a draw (409
+#:   ``APP_DRAW_HOUSEHOLD_TOO_OLD``); a receiver drops ``draw_*`` from a
+#:   household below it. Not space-scoped, no sync stream change.
+#:   Labelled "Gift draws".
+OURS: int = 78
 
 
 class FederationCapability:
@@ -1813,6 +1830,9 @@ class FederationCapability:
     #: ``allowed_apps`` features key. A member household below it is sent
     #: neither — its people don't see the space's games.
     MIN_FOR_SPACE_APP_TABLES = 77
+    #: v_78 — the gift draw: the ``draw_*`` verbs of ``APP_SESSION``. A
+    #: table with a household below it can't start a draw.
+    MIN_FOR_APP_DRAW = 78
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2107,6 +2127,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_SPACE_APP_TABLES,
         "Games in a space",
     ),
+    (
+        FederationCapability.MIN_FOR_APP_DRAW,
+        "Gift draws",
+    ),
 ]
 
 
@@ -2195,6 +2219,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_BAZAAR_FAQ: "bazaar_listing_faq",
     FederationCapability.MIN_FOR_APP_GROUPS: "app_groups",
     FederationCapability.MIN_FOR_SPACE_APP_TABLES: "space_app_tables",
+    FederationCapability.MIN_FOR_APP_DRAW: "app_draw",
 }
 
 

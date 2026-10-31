@@ -291,6 +291,7 @@ from .services.app_catalog_service import (
     download_bundle,
     release_session,
 )
+from .services.app_draw_service import AppDrawService
 from .services.app_federation_service import AppFederationService
 from .services.app_group_service import AppGroupService
 from .services.app_service import AppService
@@ -4983,6 +4984,21 @@ def create_app(config: Config | None = None) -> web.Application:
         space_app_table_service.attach_to(federation_service)
         space_app_table_service.wire(bus)
         app[K.space_app_table_service_key] = space_app_table_service
+        # v_78 — the gift draw at a table: each household's own steps of the
+        # mix, the hub's rounds, the result for Social Home's own sheet.
+        app_draw_service = AppDrawService(
+            groups=app_group_service,
+            group_repo=repos.app_group,
+            app_federation=app_federation_service,
+            user_repo=user_repo,
+            federation=federation_service,
+            key_manager=key_manager,
+            ws=ws_manager,
+            household_label=config.instance_name,
+            bus=bus,
+        )
+        app_group_service.attach_draw(app_draw_service)
+        app[K.app_draw_service_key] = app_draw_service
 
         # Stale-call cleanup scheduler (§26.8).
         nonlocal stale_call_scheduler
@@ -5634,6 +5650,9 @@ def create_app(config: Config | None = None) -> web.Application:
         space_app_table_service = app.get(K.space_app_table_service_key)
         if space_app_table_service is not None:
             await space_app_table_service.stop()
+        app_draw_service = app.get(K.app_draw_service_key)
+        if app_draw_service is not None:
+            await app_draw_service.stop()
         app_group_service = app.get(K.app_group_service_key)
         if app_group_service is not None:
             await app_group_service.stop()

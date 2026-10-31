@@ -296,6 +296,39 @@ Phase 2 adds `"x25519+mlkem768"` beside it. Messages *to everyone* are not
 sealed beyond the hop envelope: the hub is a player's household, and a group
 key it hands out would add nothing. See `docs/protocol/app-groups.md`.
 
+**Gift draw** (`federation/draw_crypto.py`, v_78) — a decryption mix of
+sealed name-boxes (Chaum 1981; for Secret Santa as in Mauw–Radomirović–Ryan
+2010 / Ryan's "Crypto Santa") with key-private card seals
+(Bellare–Boldyreva–Desai–Pointcheval 2001). One seal everywhere:
+
+```
+seal(to_pub, pt; ctx, label) = eph_pub ‖ AES-256-GCM(k, nonce = 0¹², pt)
+  k = HKDF-SHA256(X25519(eph_priv, to_pub), salt = none,
+                  info = "socialhome/app_draw/seal/v1" ‖ lp(ctx) ‖ lp(label)
+                         ‖ lp(eph_pub) ‖ lp(to_pub))
+```
+
+A fresh ephemeral key per seal makes the zero nonce safe and the seal
+name nobody (key-private). `label` is `layer|k` for mixer k's onion layer,
+`card`, or `handover`; `ctx` is the round context
+`SHA-256("socialhome/app_draw/round/v1" ‖ suite ‖ table ‖ gen ‖ round ‖
+people ‖ identity keys ‖ settings)`. Onion: `seal(M1, seal(M2, … seal(Mh,
+B)))`, `32 + 48h` bytes. Card: exactly 1 024 bytes (`u16 len ‖ v1 ‖ rev ‖
+lp16(instance, user, name, household, wish) ‖ Ed25519 sig ‖ zeros`), the
+signature by the person's household over the round context and every field;
+sealed to the giver's box (1 072 bytes). Commitments: `SHA-256(domain ‖ ctx
+‖ instance ‖ user ‖ box_pub ‖ 32-byte nonce)`. Household Ed25519
+signatures (domain-separated, length-prefixed) over: the mixer key, the
+onion batch (onion hashes + commitments), each mix step `(k, in-digest,
+out-digest)`, a complaint (it reveals the box private key and nonce — a
+proof for a thrown-away round), a hand-over. Every message carries
+`draw_suite: "x25519-hkdf-aesgcm256"` (`DRAW_SUITE_X25519_AESGCM`,
+`SUPPORTED_DRAW_SUITES`); unknown → `UnsupportedDrawSuite`, never a default.
+Secrets (mixer and box keys, results, wish lists) are KEK-wrapped on
+`app_group_sessions.draw_json`, AAD bound to the table id. Phase 2 adds a
+hybrid KEM suite beside it (the shape keeps `draw_suite`). See
+`docs/protocol/app-groups.md#the-gift-draw-v_78`.
+
 **Routed-envelope seal** (`federation/routed_crypto.py`) — for
 multi-hop `SPACE_ROUTED` events the inner payload is sealed with a
 per-route ephemeral X25519+HKDF directional key (HKDF info
