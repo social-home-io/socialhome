@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render } from '@testing-library/preact'
 
 const apiPost = vi.fn()
@@ -8,6 +8,8 @@ vi.mock('@/api', () => ({
 
 import type { Notification, Space } from '@/types'
 import { spaces } from '@/store/spaces'
+import { catalog, catalogLoaded } from '@/store/apps'
+import { setLocale } from '@/i18n/i18n'
 import {
   NewPill, NotificationRow, glyphFor, markRowRead, rowPlainText, withRead,
 } from './NotificationRow'
@@ -138,5 +140,58 @@ describe('NewPill', () => {
     expect(render(<NewPill count={0} onShow={() => {}} />).container.innerHTML).toBe('')
     const { container } = render(<NewPill count={2} onShow={() => {}} />)
     expect(container.querySelector('button')!.textContent).toBe('↑ 2 new')
+  })
+})
+
+describe('NotificationRow — game rows name the app in the viewer\'s language', () => {
+  // The server writes the app's name in the reader's saved language; a
+  // reader with none (German only from the browser) got "Chess" stored.
+  // The row names it again from the catalog in the language on screen.
+  const game = (type: string, object_key: string): Notification => row({
+    id: `g-${type}`, type, object_key, space_id: null, link_url: '/apps/chess',
+    params: { actors: [{ id: 'u2', name: 'Ben' }], actor_count: 1, new: 1, total: 1, space_name: 'Chess' },
+  })
+  beforeEach(async () => {
+    catalog.value = [{
+      app_id: 'chess', name: 'Chess', latest_version: '2026.10.29', description: null,
+      icon_url: null, capabilities: [], i18n: { de: { name: 'Schach', description: null } },
+    }]
+    catalogLoaded.value = true
+    await setLocale('de')
+  })
+  afterEach(async () => {
+    catalog.value = []
+    catalogLoaded.value = false
+    await setLocale('en')
+  })
+
+  it.each([
+    ['app_turn', 'app_session:chess/s1'],
+    ['app_challenge', 'app_session:chess/s1'],
+    ['app_challenge_continue', 'app_session:chess/s1'],
+    ['app_challenge_waiting', 'app_session:chess/s1'],
+    ['app_challenge_declined', 'app_session:chess/s1'],
+    ['app_game_ended', 'app_session:chess/s1'],
+    ['app_added', 'app:chess'],
+    ['app_request', 'app:chess'],
+    ['app_update', 'app:chess'],
+  ])('%s (%s) says Schach, not the stored Chess', (type, key) => {
+    const n = game(type, key)
+    const { container } = render(<NotificationRow n={n} />)
+    const text = container.querySelector('.sh-notif-title')!.textContent!
+    expect(text).toContain('Schach')
+    expect(text).not.toContain('Chess')
+    expect(rowPlainText(n)).toContain('Schach')
+  })
+
+  it('an app the catalog doesn\'t list keeps the stored name', () => {
+    const n = { ...game('app_turn', 'app_session:go/s1'), params: { ...game('app_turn', 'x').params!, space_name: 'Go' } }
+    const { container } = render(<NotificationRow n={n} />)
+    expect(container.querySelector('.sh-notif-title')!.textContent).toContain('Go')
+  })
+
+  it('a space row keeps its space name', () => {
+    const { container } = render(<NotificationRow n={row({ params: { ...row().params!, space_name: 'Chess' } })} />)
+    expect(container.querySelector('.sh-notif-title')!.textContent).toContain('Chess')
   })
 })

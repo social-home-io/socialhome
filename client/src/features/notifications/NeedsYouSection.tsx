@@ -18,8 +18,8 @@
 import { useEffect, useState } from 'preact/hooks'
 import { appHref } from '@/baseUrl'
 import { Button } from '@/components/Button'
-import { isOne, locale, t } from '@/i18n/i18n'
-import { catalog, catalogLoaded, loadCatalog, localized, type CatalogEntry } from '@/store/apps'
+import { isOne, t } from '@/i18n/i18n'
+import { type CatalogEntry } from '@/store/apps'
 import { currentUser } from '@/store/auth'
 import { spaces } from '@/store/spaces'
 import { ws } from '@/ws'
@@ -28,6 +28,7 @@ import type { Notification } from '@/types'
 import { AskButton, UpdateButton } from '@/features/apps/AppDialogs'
 import { NotificationRow, RowAvatar, Sentence, markRowRead, withRead } from './NotificationRow'
 import { groupSentence } from './rowText'
+import { appEntryOf, appNameOf, ensureAppCatalog, withAppName } from './appName'
 import {
   NEEDS_YOU_CAP,
   NEEDS_YOU_TYPES,
@@ -91,28 +92,6 @@ function spaceName(spaceId: string, rows: Notification[]): string {
     ?? ''
 }
 
-/** The app a game row is about, as the viewer's catalog names it (its
- *  ``i18n`` for the viewer's language) — else the name the row was
- *  written with. */
-function appEntry(n: Notification): CatalogEntry | null {
-  if (!n.object_key?.startsWith('app_session:')) return null
-  const { appId } = gameOf(n)
-  return catalog.value.find(e => e.app_id === appId) ?? null
-}
-
-function appName(n: Notification): string {
-  const entry = appEntry(n)
-  if (entry) return localized(entry, locale.value || 'en').name
-  return n.params?.space_name || gameOf(n).appId
-}
-
-/** *n* with its app named in the viewer's language (the sentence's place). */
-function withAppName(n: Notification): Notification {
-  if (!n.params || !appEntry(n)) return n
-  const name = appName(n)
-  return name === n.params.space_name ? n : { ...n, params: { ...n.params, space_name: name } }
-}
-
 /** What a waiting game invite says under its sentence (D10), per why it
  *  waits and who looks: a member asks an admin, a protected account asks
  *  a grown-up, an admin can add it (or turn it on) themselves. */
@@ -143,11 +122,11 @@ function WaitingActions({ row, describedBy, onNavigate }: {
   onNavigate?: () => void
 }) {
   const { appId } = gameOf(row)
-  const name = appName(row)
+  const name = appNameOf(row)
   const isAdmin = !!currentUser.value?.is_admin
   const grownUp = !isAdmin && !!currentUser.value?.protected
   const who = isAdmin ? 'admin' : grownUp ? 'grown_up' : 'member'
-  const entry: CatalogEntry = appEntry(row) ?? {
+  const entry: CatalogEntry = appEntryOf(row) ?? {
     app_id: appId,
     name,
     latest_version: '',
@@ -230,7 +209,7 @@ function Actions({ entry, describedBy, onNavigate }: {
       <div class="sh-needs__actions">
         <UpdateButton
           appId={appId}
-          name={row.params?.space_name || appId}
+          name={appNameOf(row)}
           describedBy={describedBy}
           onDone={() => dropHandled([row.object_key || `app:${appId}`])}
         />
@@ -324,7 +303,7 @@ export function NeedsYouSection({ compact, onNavigate, only }: Props) {
   const hasGame = rows.some(n => n.object_key?.startsWith('app_session:'))
   useEffect(() => {
     // Game rows name their app in the viewer's language (the catalog).
-    if (hasGame && !catalogLoaded.value) void loadCatalog()
+    if (hasGame) ensureAppCatalog()
   }, [hasGame])
   const pendingCount = entries.reduce((sum, e) => sum + (e.kind === 'group' ? e.rows.length : 1), 0)
   if (entries.length === 0) return null
