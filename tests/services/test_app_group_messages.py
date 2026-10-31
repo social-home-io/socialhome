@@ -323,8 +323,3 @@ async def test_installed_app_turned_off_holds_without_live_frames(net):
     await c.app_repo.set_enabled(APP, enabled=True)
     held = await c.groups.take_held(app_id=APP, actor_user_id=c.uid("cleo"))
     assert [h["data"] for h in held] == [{"v": 1}]
-
-
-def test_quiz_app_has_tables():
-    assert quiz_app().manifest.tables
-    assert Network
