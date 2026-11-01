@@ -806,11 +806,17 @@ class AppCatalogText:
 
 @dataclass(slots=True, frozen=True)
 class AppChangelogEntry:
-    """One version's "What's new" (``changelog``); ``notes`` per locale."""
+    """One version's "What's new" (``changelog``); ``notes`` per locale.
+
+    ``quiet``: the publisher says nobody notices this version — a
+    maintenance build (a newer SDK, a smaller bundle) with nothing changed
+    in how the app looks or plays. Only an exact ``true`` in the catalog
+    counts (:func:`is_quiet_update`)."""
 
     version: str
     date: str | None
     notes: tuple[tuple[str, str], ...]
+    quiet: bool = False
 
 
 @dataclass(slots=True, frozen=True)
@@ -1042,6 +1048,7 @@ def _parse_changelog(raw: object) -> tuple[AppChangelogEntry, ...]:
                 if isinstance(date, str) and _DATE_RE.fullmatch(date)
                 else None,
                 notes=tuple(notes),
+                quiet=item.get("quiet") is True,
             )
         )
     return tuple(out)
@@ -1061,3 +1068,22 @@ def changelog_since(
     ]
     out.sort(key=lambda c: parse_app_version(c.version) or (), reverse=True)
     return tuple(out)
+
+
+def is_quiet_update(
+    changelog: tuple[AppChangelogEntry, ...], installed: str, latest: str
+) -> bool:
+    """Whether going from *installed* to *latest* is a maintenance update
+    nobody notices: every version in between has a ``quiet`` entry — the
+    offered one included, and none missing. The catalog keeps only the
+    newest :data:`CATALOG_CHANGELOG_MAX` entries, so when all of them are
+    past *installed* an older, ordinary one may have been cut: not quiet.
+    Unknown always means "tell the admins". New permissions are the
+    caller's to check (they need a yes either way)."""
+    since = changelog_since(changelog, installed, latest)
+    if not since or since[0].version != latest:
+        return False
+    complete = len(changelog) < CATALOG_CHANGELOG_MAX or any(
+        not is_newer_version(c.version, installed) for c in changelog
+    )
+    return complete and all(c.quiet for c in since)

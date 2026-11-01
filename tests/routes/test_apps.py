@@ -1603,6 +1603,46 @@ async def test_updates_member_gets_200_force_false(client, monkeypatch):
     mock.assert_awaited_once_with(force=False)
 
 
+async def test_updates_say_when_an_update_is_quiet(client, monkeypatch):
+    """A maintenance build (every entry since the installed version
+    ``quiet``) is still listed for the Apps page's Updates, with
+    ``quiet: true`` — the daily check raises no Needs-you row for it."""
+    svc = client.app[app_service_key]
+    await svc._repo.install(dataclasses.replace(_make_installed(), installed_by=None))
+    entry = _make_catalog_entry("com.example.hello")
+    raw = {
+        "app_id": entry.app_id,
+        "name": entry.name,
+        "latest_version": "1.0.1",
+        "description": entry.description,
+        "icon_url": None,
+        "capabilities": ["read"],
+        "bundle_url": entry.bundle_url,
+        "bundle_sha256": entry.bundle_sha256,
+        "changelog": [
+            {
+                "version": "1.0.1",
+                "date": "2026-11-01",
+                "quiet": True,
+                "notes": {"en": "Under the hood."},
+            }
+        ],
+    }
+    monkeypatch.setattr(
+        type(svc._catalog),  # slotted: patch the class
+        "fetch_catalog",
+        AsyncMock(return_value=[AppCatalogEntry.from_dict(raw)]),
+    )
+    r = await client.get("/api/apps/updates", headers=_auth(client._tok))
+    assert r.status == 200
+    [update] = (await r.json())["updates"]
+    assert update["latest_version"] == "1.0.1"
+    assert update["quiet"] is True
+    assert update["changelog"] == [
+        {"version": "1.0.1", "date": "2026-11-01", "notes": {"en": "Under the hood."}}
+    ]
+
+
 async def test_updates_member_refresh_param_ignored(client, monkeypatch):
     """Non-admin member with ?refresh=1 still calls list_updates(force=False)."""
     mock = AsyncMock(return_value=[])

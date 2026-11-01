@@ -65,6 +65,7 @@ from ..domain.apps import (
     changelog_since,
     core_version_satisfies,
     is_newer_version,
+    is_quiet_update,
     new_permissions,
     unknown_capabilities,
 )
@@ -376,9 +377,12 @@ class AppService(BusPublisherMixin):
         ``current_version``, ``latest_version``, ``compatible`` (this
         Social Home can install it, :meth:`is_compatible`),
         ``new_permissions`` (what the new version asks for beyond what the
-        household agreed to — updating needs a yes for those, D7) and
+        household agreed to — updating needs a yes for those, D7),
         ``changelog`` ("What's new": the catalog's entries newer than the
-        installed version, newest first). Only a strictly newer
+        installed version, newest first) and ``quiet`` (a maintenance build
+        nobody notices — every entry since the installed version is quiet
+        and nothing new is asked for, :func:`is_quiet_update`: no "Needs
+        you" row, only the Apps page's Updates). Only a strictly newer
         version counts (:func:`~socialhome.domain.apps.is_newer_version`,
         CalVer compared as numbers): a catalog that went back to an older
         release offers no "update".
@@ -405,6 +409,9 @@ class AppService(BusPublisherMixin):
             if entry is not None and is_newer_version(
                 entry.latest_version, app.version
             ):
+                asks = list(
+                    new_permissions(app.manifest.capabilities, entry.permissions)
+                )
                 updates.append(
                     {
                         "app_id": app.app_id,
@@ -414,10 +421,12 @@ class AppService(BusPublisherMixin):
                         # ``False``: the new version needs a newer Social
                         # Home — the SPA says so instead of offering it.
                         "compatible": self.is_compatible(entry),
-                        "new_permissions": list(
-                            new_permissions(
-                                app.manifest.capabilities, entry.permissions
-                            )
+                        "new_permissions": asks,
+                        # A maintenance build nobody notices: listed under
+                        # Updates, but no "Needs you" row (check_for_updates).
+                        "quiet": not asks
+                        and is_quiet_update(
+                            entry.changelog, app.version, entry.latest_version
                         ),
                         "changelog": [
                             {
@@ -436,10 +445,11 @@ class AppService(BusPublisherMixin):
     async def check_for_updates(self) -> list[dict]:
         """The daily update check (D7): :meth:`list_updates` against a
         fresh catalog, then one :class:`AppUpdateAvailable` per app with a
-        newer compatible version (to the household's admins — the
-        notification service keeps one "Needs you" row per app) and one
-        :class:`AppUpdateGone` per installed app without one (its rows
-        resolve). Nothing is installed: an admin updates with one tap.
+        newer compatible version that isn't ``quiet`` (to the household's
+        admins — the notification service keeps one "Needs you" row per
+        app) and one :class:`AppUpdateGone` per installed app without one,
+        or with only a quiet one (its rows resolve). Nothing is installed:
+        an admin updates with one tap.
 
         A check that couldn't reach the catalog (``stale``: the held copy
         was served) announces and withdraws nothing — it doesn't know.
@@ -455,7 +465,11 @@ class AppService(BusPublisherMixin):
             admins = tuple(
                 u.user_id for u in await self._users.list_active() if u.is_admin
             )
-        ready = {u["app_id"]: u for u in updates if u["compatible"]}
+        # A quiet update (a maintenance build, :func:`is_quiet_update`)
+        # stays on the Apps page's Updates only: no row, and one left over
+        # for a version now marked quiet goes away. Still never installed
+        # on its own (D7).
+        ready = {u["app_id"]: u for u in updates if u["compatible"] and not u["quiet"]}
         for app in await self._repo.list_installed():
             update = ready.get(app.app_id)
             if update is None:

@@ -50,6 +50,7 @@ from socialhome.domain.apps import (
     changelog_since,
     core_version_satisfies,
     is_newer_version,
+    is_quiet_update,
     new_permissions,
     parse_app_version,
     unknown_capabilities,
@@ -674,6 +675,66 @@ def test_changelog_since_keeps_only_what_is_new_newest_first():
 
 def test_changelog_since_nothing_new():
     assert changelog_since(_log("2026.10.21"), "2026.10.21", "2026.10.28") == ()
+
+
+# ── Quiet updates: a maintenance build raises no Needs-you row ─────────────
+
+
+def _quiet(*versions: str) -> tuple[AppChangelogEntry, ...]:
+    return tuple(AppChangelogEntry(v, None, (("en", v),), quiet=True) for v in versions)
+
+
+def test_changelog_quiet_reads_only_an_exact_true():
+    entry = _v2(
+        changelog=[
+            {"version": "2026.11.1.2", "quiet": True, "notes": {"en": "a"}},
+            {"version": "2026.11.1.1", "quiet": "yes", "notes": {"en": "b"}},
+            {"version": "2026.11.1", "quiet": 1, "notes": {"en": "c"}},
+            {"version": "2026.10.31", "notes": {"en": "d"}},
+        ]
+    )
+    assert [c.quiet for c in entry.changelog] == [True, False, False, False]
+
+
+def test_quiet_when_every_version_since_the_installed_one_is_quiet():
+    log = _quiet("2026.11.1.2", "2026.11.1") + _log("2026.10.31")
+    assert is_quiet_update(log, "2026.10.31", "2026.11.1.2")
+
+
+def test_one_ordinary_version_in_between_is_not_quiet():
+    log = (
+        _quiet("2026.11.1.2")
+        + _log("2026.11.1.1")
+        + _quiet("2026.11.1")
+        + _log("2026.10.31")
+    )
+    assert not is_quiet_update(log, "2026.10.31", "2026.11.1.2")
+    # Once that one is installed, the rest is quiet.
+    assert is_quiet_update(log, "2026.11.1.1", "2026.11.1.2")
+
+
+def test_an_offered_version_without_its_entry_is_not_quiet():
+    """Nothing says what the offered version changes: tell the admins."""
+    log = _quiet("2026.11.1") + _log("2026.10.31")
+    assert not is_quiet_update(log, "2026.10.31", "2026.11.1.2")
+
+
+def test_nothing_new_is_not_a_quiet_update():
+    assert not is_quiet_update(_quiet("2026.11.1"), "2026.11.1", "2026.11.1")
+    assert not is_quiet_update((), "2026.10.31", "2026.11.1")
+
+
+def test_a_cut_history_is_not_quiet():
+    """The catalog keeps the newest five entries: when all five are past the
+    installed version, an older ordinary one may be missing."""
+    five = _quiet("2026.11.5", "2026.11.4", "2026.11.3", "2026.11.2", "2026.11.1")
+    assert len(five) == CATALOG_CHANGELOG_MAX
+    assert not is_quiet_update(five, "2026.10.1", "2026.11.5")
+    # The installed version's own entry is still there: nothing is missing.
+    four = five[:4] + _log("2026.11.1")
+    assert is_quiet_update(four, "2026.11.1", "2026.11.5")
+    # A shorter list is the whole history.
+    assert is_quiet_update(five[:3], "2026.10.1", "2026.11.5")
 
 
 # ── D3: invites through Social Home (R3 PR 9) ─────────────────────────────
