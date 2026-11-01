@@ -115,6 +115,7 @@ _CARD_SIG_DOMAIN = b"socialhome/app_engine/draw/card/v1"
 _CARD_COMMIT_DOMAIN = b"socialhome/app_engine/draw/card_commit/v1"
 _DONE_DOMAIN = b"socialhome/app_engine/draw/done/v1"
 _OPENING_DOMAIN = b"socialhome/app_engine/draw/opening/v2"
+_CARD_OPENING_DOMAIN = b"socialhome/app_engine/draw/card_opening/v1"
 _HANDOVER_SIG_DOMAIN = b"socialhome/app_engine/draw/handover/v3"
 
 _ZERO_NONCE = b"\x00" * 12
@@ -546,6 +547,20 @@ def opening_message(
     return _fields(_OPENING_DOMAIN, *parts)
 
 
+def card_opening_message(
+    ctx: bytes,
+    instance: str,
+    entries: Sequence[tuple[str, bytes, bytes, bytes, bytes]],
+) -> bytes:
+    """A household opening, for a round whose card complaint named nobody,
+    each of its people's box key, commitment nonce, and where it sealed
+    their card: ``(user, box_pub, nonce, target_pub, eph_priv)``."""
+    parts: list[bytes | str | int] = [ctx, instance, len(entries)]
+    for user, box_pub, nonce, target, eph in sorted(entries):
+        parts += [user, box_pub, nonce, target, eph]
+    return _fields(_CARD_OPENING_DOMAIN, *parts)
+
+
 def card_commit_message(
     ctx: bytes, instance: str, card_hashes: Sequence[bytes]
 ) -> bytes:
@@ -680,6 +695,38 @@ def seal_card(
     if len(card_bytes) != CARD_BYTES:
         raise DrawCryptoError("card wrong size")
     return seal(giver_box_pub, card_bytes, ctx=ctx, label="card", rand=rand)
+
+
+def card_rand(seed: bytes) -> Rand:
+    """The randomness a person's card of the round is sealed with — from
+    their seed, so their household can later show where it sealed it."""
+    return seed_stream(seed, "card")
+
+
+def card_eph(seed: bytes) -> bytes:
+    """The ephemeral private key of the seal of a person's card."""
+    return new_keypair(card_rand(seed))[0]
+
+
+def open_card_as_sealer(
+    eph_priv: bytes, target_pub: bytes, sealed: bytes, *, ctx: bytes
+) -> bytes | None:
+    """The card in *sealed* when it was sealed with *eph_priv* to
+    *target_pub* (what its sealer opens to show where it sealed it)."""
+    if len(sealed) != SEALED_CARD_BYTES or len(target_pub) != KEY_BYTES:
+        return None
+    try:
+        eph_pub = public_of(eph_priv)
+        if sealed[:KEY_BYTES] != eph_pub:
+            return None
+        shared = _exchange(eph_priv, target_pub)
+    except DrawCryptoError:
+        return None
+    key = _seal_key(shared, ctx=ctx, label="card", eph_pub=eph_pub, to_pub=target_pub)
+    try:
+        return AESGCM(key).decrypt(_ZERO_NONCE, sealed[KEY_BYTES:], None)
+    except InvalidTag:
+        return None
 
 
 def open_card(box_priv: bytes, sealed: bytes, *, ctx: bytes) -> bytes | None:

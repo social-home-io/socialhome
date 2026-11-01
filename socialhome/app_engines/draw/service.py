@@ -27,21 +27,24 @@ the cryptography is :mod:`socialhome.app_engines.draw.crypto`)::
     hub → all     cards_all                             (= the commitments)
     each → hub    done {count, sig} | fail {cards} | redo {partner}  (own seed)
     (a mixer stuck) hub → all void {stuck} → each: open {seeds}
+    (no card / two)  hub → all void {cards} → each: open {where its cards went}
     hub → all     complete {every signed done} | end {reason, proof?}
     after the reveal: handover / wish (each → hub → all)
 
 Security invariants (see ``docs/protocol/app-engines.md``)
 ------------------------------------------------------------
-* A round whose cards are out is never opened: no step after the reveal
-  asks for a seed or a box key (but a complainer's own); a void comes only
-  before the list, and a household that opened never takes ``complete``.
+* A completed round is never opened: a void or a complaint after
+  ``complete`` is refused, and a household that opened never takes it. Only
+  a card complaint that named nobody opens that dead round's card seals
+  (keys from the person's seeds); no seed is opened after the list.
 * A round broken by someone's proven doing names them to every household:
   a seed rebuilds its person's entry at each step of the mix and the
   chain's signed per-entry hashes show which mixer's output lacks it; a
   void's validly signed openings show who broke it (an unsigned one proves
-  nothing); a wrong card names the household that signed its hash. Each
-  household checks on its own copy and names the same households. One that
-  broke a second round holds the draw for the organiser.
+  nothing); a wrong card names the household that signed its hash, or the
+  card void the one that sealed elsewhere. Each household checks on its own
+  copy, names the same households, and counts them: none takes a round
+  after the same household broke two (the draw waits for the organiser).
 * An ``end`` only when this household's own copy shows it, never after the
   reveal; a fresh draw after one counts as a Draw again.
 * A new round only for the first draw, the organiser's visible Draw again,
@@ -136,6 +139,7 @@ from .domain import (
     STEP_START,
     STEP_VOID,
     STEP_WISH,
+    VOID_CARDS,
     VOID_STUCK,
     VOID_UNUSABLE,
     AppDrawAgainLimitError,
@@ -773,6 +777,9 @@ def judge_void(
     S: list[bytes] | None = None,
     batches: dict[str, dict] | None = None,
     links: list[list[bytes]] | None = None,
+    C: list[bytes] | None = None,
+    cards: list[bytes] | None = None,
+    commits: dict[str, list[str]] | None = None,
 ) -> list[str]:
     """Who broke a round that broke publicly **before any card existed** —
     from every household's signed opening and the round's list as the
@@ -793,6 +800,30 @@ def judge_void(
     openings = ev.get("openings")
     if not isinstance(openings, dict) or set(openings) != set(rnd.order):
         raise DrawWireError("openings malformed")
+    if why == VOID_CARDS:
+        if (
+            S is None
+            or batches is None
+            or links is None
+            or C is None
+            or cards is None
+            or commits is None
+        ):
+            raise DrawWireError("no cards here")
+        return sorted(
+            _judge_cards(
+                rnd,
+                ev,
+                openings,
+                S=S,
+                batches=batches,
+                links=links,
+                mixer_pubs=mixer_pubs,
+                C=C,
+                cards=cards,
+                commits=commits,
+            )
+        )
     stuck: int | None = None
     if why == VOID_UNUSABLE:
         if S is None or batches is None or links is None:
@@ -833,6 +864,131 @@ def judge_void(
         # Its input was every honest entry, each sealed to its key.
         culprits.add(rnd.order[stuck])
     return sorted(culprits)
+
+
+def _card_opening_entries(
+    rnd: _Round, instance: str, opening: object
+) -> list[tuple[str, bytes, bytes, bytes, bytes]] | None:
+    """A card opening's entries when its household signed it (else
+    ``None``)."""
+    try:
+        if not isinstance(opening, dict) or not isinstance(opening.get("cards"), dict):
+            return None
+        entries: list[tuple[str, bytes, bytes, bytes, bytes]] = []
+        for user, item in opening["cards"].items():
+            if not isinstance(item, list) or len(item) != 4:
+                return None
+            entries.append(
+                (
+                    user,
+                    _raw(item[0], dc.KEY_BYTES, "box"),
+                    _raw(item[1], dc.NONCE_BYTES, "nonce"),
+                    _raw(item[2], dc.KEY_BYTES, "target"),
+                    _raw(item[3], dc.KEY_BYTES, "eph"),
+                )
+            )
+        sig = _raw(opening.get("sig"), dc.SIG_BYTES, "sig")
+        msg = dc.card_opening_message(rnd.ctx, instance, entries)
+        if not verify_ed25519(rnd.identity(instance), msg, sig):
+            return None
+        return entries
+    except DrawWireError, KeyError, ValueError:
+        return None
+
+
+def opened_cards(
+    rnd: _Round,
+    instance: str,
+    opening: object,
+    *,
+    batches: dict[str, dict],
+    cards: list[bytes],
+    commits: dict[str, list[str]],
+) -> dict[str, tuple[bytes, bytes]] | None:
+    """A household's signed opening of where it sealed each of its people's
+    cards (``{user: (box, target)}``) — ``None`` when its own signed word
+    shows it broke the round: a box that isn't the one it committed to, or
+    a sealed card of its own that doesn't open, as it says, to its person's
+    usable card. Unsigned: :class:`DrawWireError` (proves nothing)."""
+    entries = _card_opening_entries(rnd, instance, opening)
+    if entries is None:
+        raise DrawWireError("an opening without its household's word")
+    try:
+        if sorted(u for u, *_r in entries) != sorted(p.user for p in rnd.of(instance)):
+            return None
+        mine = [c for c in cards if _b64(dc.sha256(c)) in commits[instance]]
+        nobody = dc.Person(seat=0, instance="", user="")
+        out: dict[str, tuple[bytes, bytes]] = {}
+        used: set[bytes] = set()
+        for user, box, nonce, target, eph in entries:
+            c = _b64(dc.commitment(rnd.ctx, instance, user, box, nonce))
+            if [user, c] not in batches[instance]["commits"]:
+                return None
+            hit = None
+            for sealed in mine:
+                if sealed in used:
+                    continue
+                plain = dc.open_card_as_sealer(eph, target, sealed, ctx=rnd.ctx)
+                if plain is not None:
+                    hit = (sealed, plain)
+                    break
+            if hit is None:
+                return None
+            card = usable_card(rnd, hit[1], giver=nobody)
+            if card is None or (card.instance, card.user) != (instance, user):
+                return None
+            used.add(hit[0])
+            out[user] = (box, target)
+        return out
+    except DrawWireError, dc.DrawCryptoError, KeyError, ValueError:
+        return None
+
+
+def _judge_cards(
+    rnd: _Round,
+    ev: dict,
+    openings: dict,
+    *,
+    S: list[bytes],
+    batches: dict[str, dict],
+    links: list[list[bytes]],
+    mixer_pubs: list[bytes],
+    C: list[bytes],
+    cards: list[bytes],
+    commits: dict[str, list[str]],
+) -> set[str]:
+    """A card complaint that named nobody (no card opened, or two usable
+    ones): every household showed where it sealed its people's cards — the
+    one whose card isn't sealed to the box before its person's is named."""
+    verdict = complaint_verdict(
+        rnd,
+        ev.get("complaint"),
+        S=S,
+        batches=batches,
+        links=links,
+        mixer_pubs=mixer_pubs,
+        cards=cards,
+        commits=commits,
+    )
+    complaint = ev.get("complaint")
+    if (
+        verdict != []
+        or not isinstance(complaint, dict)
+        or complaint.get("kind") != COMPLAINT_CARDS
+    ):
+        raise DrawWireError("not a card complaint that named nobody")
+    culprits: set[str] = set()
+    for inst in rnd.order:
+        got = opened_cards(
+            rnd, inst, openings[inst], batches=batches, cards=cards, commits=commits
+        )
+        if got is None:
+            culprits.add(inst)
+            continue
+        for box, target in got.values():
+            if box not in C or target != C[(C.index(box) - 1) % rnd.n]:
+                culprits.add(inst)
+    return culprits
 
 
 class AppDrawService:
@@ -1389,6 +1545,21 @@ class AppDrawService:
             await self._save(table.session_id, st)
             await self._push(table, st)
             return
+        if kind == COMPLAINT_CARDS and not verdict:
+            # No card opened, or two usable ones: who sealed wrong shows
+            # once every household shows where it sealed its cards — this
+            # round only, never once it completed (an opener never takes
+            # ``complete``).
+            hub["phase"] = _PHASE_VOID
+            hub["void"] = {"why": VOID_CARDS, "complaint": complaint}
+            hub["opens"] = {}
+            hub["since"] = _now().isoformat()
+            await self._save(table.session_id, st)
+            await self._to_all(
+                table, rnd, STEP_VOID, {"why": VOID_CARDS, "complaint": complaint}
+            )
+            await self._push(table, st)
+            return
         # Every household checks the complaint on its own copy of the
         # round — the evidence is the complaint alone.
         await self._redraw(
@@ -1449,7 +1620,13 @@ class AppDrawService:
         checks the same) and a fresh round follows."""
         hub = st["hub"]
         opening = p.get("opening")
-        if not _opening_signed(rnd, sender, opening):
+        cards_void = hub["phase"] == _PHASE_VOID and hub["void"]["why"] == VOID_CARDS
+        signed = (
+            _card_opening_entries(rnd, sender, opening) is not None
+            if cards_void
+            else _opening_signed(rnd, sender, opening)
+        )
+        if not signed:
             raise DrawWireError("an opening without its household's word")
         assert isinstance(opening, dict)
         if hub["phase"] == _PHASE_MIXING:
@@ -1486,6 +1663,22 @@ class AppDrawService:
         if hub["void"]["why"] == VOID_STUCK:
             culprits = await asyncio.to_thread(
                 judge_void, rnd, evidence, mixer_pubs=mixer_pubs
+            )
+        elif hub["void"]["why"] == VOID_CARDS:
+            S, batches, links, _m, cards = self._hub_round_data(hub)
+            reveals = {i: _raw(r) for i, r in hub["reveals"].items()}
+            C = dc.circle(S, ctx=rnd.ctx, R=dc.round_randomness(rnd.ctx, reveals))
+            culprits = await asyncio.to_thread(
+                judge_void,
+                rnd,
+                evidence,
+                mixer_pubs=mixer_pubs,
+                S=S,
+                batches=batches,
+                links=links,
+                C=C,
+                cards=cards,
+                commits={i: c["hashes"] for i, c in hub["commits"].items()},
             )
         else:
             S, batches, links, _m, _c = self._hub_round_data(hub)
@@ -1524,6 +1717,8 @@ class AppDrawService:
             ev.update(
                 k=hub["void"]["k"], batches=hub["batches_pub"], chain=hub["chain"]
             )
+        elif why == VOID_CARDS:
+            ev["complaint"] = hub["void"]["complaint"]
         return ev
 
     async def _hub_relay_after(
@@ -1793,7 +1988,16 @@ class AppDrawService:
         key_msg = self._rid(
             rnd, pub=_b64(pub), sig=self._sign(dc.key_message(rnd.ctx, self._own, pub))
         )
-        if cur is None or gen != cur["gen"]:
+        new_draw = cur is None or gen != cur["gen"]
+        # Each household counts who broke rounds of this draw itself: no
+        # round after the same household broke two (the organiser decides).
+        broke = {} if new_draw else dict(st.get("broke", {}))
+        for inst in culprits:
+            broke[inst] = broke.get(inst, 0) + 1
+        if any(broke[i] >= 2 for i in culprits):
+            raise DrawWireError("a household broke a second round")
+        st["broke"] = broke
+        if new_draw:
             st.pop("final", None)  # a new draw: everyone gets a new name
             st["blamed"] = []
         # Who broke the last round — this household checked the proof
@@ -1856,10 +2060,21 @@ class AppDrawService:
             return [] if now == seated else None
         if last is None or cur is None:
             raise DrawWireError("no draw to follow")
-        if last["complete"] or (gen, round_no) != (last["gen"], last["round"] + 1):
+        next_round = (gen, round_no) == (last["gen"], last["round"] + 1)
+        # Someone removed once the cards are out (people may have read
+        # theirs): the fresh round counts as a Draw again — its count, its
+        # exchange day.
+        as_again = (gen, round_no) == (last["gen"] + 1, 1)
+        if last["complete"] or not (
+            next_round or (kind == BECAUSE_CHANGED and as_again)
+        ):
             raise DrawWireError("not the next round")
         before = {_person_key(x) for x in _people_from(cur["people"])}
         if kind == BECAUSE_CHANGED:
+            if "cards" in cur and not as_again:
+                raise DrawWireError("a removal after the cards is a Draw again")
+            if as_again and not _before_the_day(cur):
+                raise DrawWireError("past the exchange day")
             # Fewer people, never new ones — and only people our own copy
             # shows gone.
             if not now < before:
@@ -1933,14 +2148,25 @@ class AppDrawService:
             )
         if "S" not in cur or "links" not in cur:
             raise DrawWireError("no list of ours to check it on")
+        extra: dict[str, Any] = {}
+        if why == VOID_CARDS:
+            if "cards" not in cur or "C" not in cur:
+                raise DrawWireError("no cards of ours to check it on")
+            extra = {
+                "C": [_raw(x) for x in cur["C"]],
+                "cards": [_raw(c) for c in cur["cards"]],
+                "commits": cur["commits_cards"],
+            }
         return await asyncio.to_thread(
-            judge_void,
-            rnd,
-            because,
-            mixer_pubs=mixer_pubs,
-            S=[_raw(x) for x in cur["S"]],
-            batches=cur["batches"],
-            links=[[_raw(x) for x in link] for link in cur["links"]],
+            lambda: judge_void(
+                rnd,
+                because,
+                mixer_pubs=mixer_pubs,
+                S=[_raw(x) for x in cur["S"]],
+                batches=cur["batches"],
+                links=[[_raw(x) for x in link] for link in cur["links"]],
+                **extra,
+            )
         )
 
     async def _on_mixers(
@@ -2168,18 +2394,25 @@ class AppDrawService:
     async def _on_void(
         self, table: GroupSession, st: dict, rnd: _Round, p: dict
     ) -> None:
-        """The hub says a mixer's signed input doesn't peel: checked on our
-        own copy (before the list, never once a card could exist), then we
-        open our seeds. A finished round is never opened."""
+        """The hub says the round broke: a mixer's signed input doesn't peel
+        (before the list: we open our seeds), or a giver's box opened no card
+        or two usable ones (we show where we sealed our people's cards).
+        Checked on our own copy first; a completed round is never opened, and
+        once we opened we never take its ``complete``."""
         cur = st["p"]
         if "seeds" not in cur:
             raise DrawWireError("no seeds of ours in this round")
-        if st["last"]["complete"] or "S" in cur:
-            raise DrawWireError("a void after the list")
+        if st["last"]["complete"]:
+            raise DrawWireError("a void after the reveal")
         if cur.get("void_answer"):
             step, msg = cur["void_answer"]
             await self._send(table, table.hub_instance, step, msg)
             return
+        if p.get("why") == VOID_CARDS:
+            await self._on_card_void(table, st, rnd, p)
+            return
+        if "S" in cur:
+            raise DrawWireError("a void after the list")
         if p.get("why") != VOID_STUCK:
             raise DrawWireError("void reason malformed")
         k = _int(p.get("k"), 0, rnd.h - 1, "k")
@@ -2201,6 +2434,57 @@ class AppDrawService:
         cur["void_answer"] = [STEP_OPEN, opening]
         await self._save(table.session_id, st)
         await self._send(table, table.hub_instance, STEP_OPEN, opening)
+
+    async def _on_card_void(
+        self, table: GroupSession, st: dict, rnd: _Round, p: dict
+    ) -> None:
+        cur = st["p"]
+        if "cards" not in cur or "C" not in cur:
+            raise DrawWireError("no cards here")
+        verdict = await asyncio.to_thread(
+            complaint_verdict,
+            rnd,
+            p.get("complaint"),
+            S=[_raw(s) for s in cur["S"]],
+            batches=cur["batches"],
+            links=[[_raw(x) for x in link] for link in cur["links"]],
+            mixer_pubs=[_raw(x) for x in cur["mixer_pubs"]],
+            cards=[_raw(c) for c in cur["cards"]],
+            commits=cur["commits_cards"],
+        )
+        complaint = p.get("complaint")
+        if (
+            verdict != []
+            or not isinstance(complaint, dict)
+            or complaint.get("kind") != COMPLAINT_CARDS
+        ):
+            raise DrawWireError("not a card complaint that named nobody")
+        opening = self._card_opening(rnd, cur)
+        cur["void_answer"] = [STEP_OPEN, opening]
+        await self._save(table.session_id, st)
+        await self._send(table, table.hub_instance, STEP_OPEN, opening)
+
+    def _card_opening(self, rnd: _Round, cur: dict) -> dict:
+        """Where we sealed each of our people's cards this round: their box
+        and commitment nonce, the box sealed to, the seal's ephemeral key
+        (from the person's seed) — signed."""
+        C = [_raw(x) for x in cur["C"]]
+        entries = []
+        for user in sorted(cur["seeds"]):
+            seed = _raw(cur["seeds"][user])
+            keys = dc.person_keys(seed)
+            target = C[dc.circle_targets(C.index(keys.box_pub), rnd.n)[1]]
+            entries.append((user, keys.box_pub, keys.nonce, target, dc.card_eph(seed)))
+        sig = self._sign(dc.card_opening_message(rnd.ctx, self._own, entries))
+        return self._rid(
+            rnd,
+            opening={
+                "cards": {
+                    u: [_b64(b), _b64(n), _b64(t), _b64(e)] for u, b, n, t, e in entries
+                },
+                "sig": sig,
+            },
+        )
 
     def _complaint(self, rnd: _Round, cur: dict, kind: str, user: str) -> dict:
         seed = _raw(cur["seeds"][user])
@@ -2285,15 +2569,18 @@ class AppDrawService:
     async def _make_cards(
         self, rnd: _Round, cur: dict, C: list[bytes], wishes: dict[str, str]
     ) -> list[bytes]:
-        plain: list[tuple[bytes, bytes]] = []
+        plain: list[tuple[bytes, bytes, bytes]] = []
         for user in sorted(cur["seeds"]):
             j = C.index(self._box_pub(cur, user))
             _gives, sealed_to = dc.circle_targets(j, rnd.n)
             card = await self._card_for(rnd, user, wish=wishes.get(user, ""), rev=0)
-            plain.append((C[sealed_to], card))
+            plain.append((C[sealed_to], card, _raw(cur["seeds"][user])))
+        # Sealed with randomness from the person's seed: should a card
+        # complaint name nobody, this household can show where it sealed it.
         sealed = await asyncio.to_thread(
             lambda: [
-                dc.seal_card(to, c, ctx=rnd.ctx, rand=self._rand) for to, c in plain
+                dc.seal_card(to, c, ctx=rnd.ctx, rand=dc.card_rand(seed))
+                for to, c, seed in plain
             ]
         )
         return dc.shuffle(sealed, self._rand)
@@ -2745,12 +3032,19 @@ class AppDrawService:
                 return
             if any(x.instance in gone_homes for x in still):
                 return
+        again = bool(hub.get("all_cards"))
+        if again and (hub["gen"] > DRAW_AGAIN_MAX or not _before_the_day(hub)):
+            log.warning(
+                "app_draw: %s — no Draw again left after a removal", table.session_id
+            )
+            return
         await self._next_round(
             table,
             st,
             people=still,
             names=rnd.names,
             because={"kind": BECAUSE_CHANGED},
+            again=again,
         )
 
     async def _hand_over_leavers(
@@ -3146,6 +3440,7 @@ __all__ = [
     "complaint_holds",
     "complaint_verdict",
     "judge_void",
+    "opened_cards",
     "opened_seeds",
     "parse_commits",
     "parse_reveals",

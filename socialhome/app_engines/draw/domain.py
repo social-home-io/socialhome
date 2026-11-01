@@ -71,7 +71,7 @@ STEP_COMMITS = "commits"  # hub → participants (every household's)
 STEP_CARDS = "cards"  # participant → hub
 STEP_CARDS_ALL = "cards_all"  # hub → participants
 STEP_OPEN = "open"  # participant → hub (its seeds / box keys of a broken round)
-STEP_VOID = "void"  # hub → participants (a mixer's input doesn't peel)
+STEP_VOID = "void"  # hub → participants (a mixer stuck / a card complaint unnamed)
 STEP_FAIL = "fail"  # participant → hub (a key missing / cards off)
 STEP_REDO = "redo"  # participant → hub (drew their partner)
 STEP_DONE = "done"  # participant → hub (signed)
@@ -135,12 +135,16 @@ BECAUSE_KINDS: frozenset[str] = frozenset(
     {BECAUSE_FIRST, BECAUSE_AGAIN, BECAUSE_CHANGED, BECAUSE_COMPLAINT, BECAUSE_VOID}
 )
 
-#: Why a round broke publicly (``void``) — only ever before any card exists:
-#: every household opens its seeds, and the openings name who broke it — to
-#: every household. Once a card could have been opened nothing is opened.
+#: Why a round broke publicly (``void``): every household opens, and the
+#: openings name who broke it — to every household. A round that completed
+#: is never opened.
 VOID_UNUSABLE = "unusable"  # S holds a key nobody can seal to (seeds open)
 VOID_STUCK = "stuck"  # a mixer's signed input doesn't peel (seeds open)
-VOID_WHYS: frozenset[str] = frozenset({VOID_UNUSABLE, VOID_STUCK})
+#: A giver's box opens no card, or two usable ones — before ``complete``,
+#: and only that dead round: every household shows where it sealed its
+#: people's cards (a household that opened never takes ``complete``).
+VOID_CARDS = "cards"
+VOID_WHYS: frozenset[str] = frozenset({VOID_UNUSABLE, VOID_STUCK, VOID_CARDS})
 
 #: What a complaint says (it always carries its proof: the person's seed).
 COMPLAINT_MISSING = "missing"  # my box key isn't in the list exactly once

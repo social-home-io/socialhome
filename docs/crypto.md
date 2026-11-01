@@ -331,9 +331,13 @@ keys ‖ settings)`.
   scalar must not fail); a low-order key voids the round publicly and every
   household opens its seeds, which names the mixer that put it there (or
   the household whose signed seeds don't rebuild what it signed — an
-  unsigned opening proves nothing). Only before any card exists: once the
-  cards are out no seed or box key is ever asked for; a card complaint
-  rests on the complainer's own seed and the sealer's signed card hash.
+  unsigned opening proves nothing). A card's seal draws its ephemeral key
+  from the person's seed (`seed_stream(seed, "card")`): should a card
+  complaint name nobody, each household shows, for that dead round only and
+  before it can complete, each person's box and nonce, the box it sealed to
+  and that ephemeral key — anyone opens the sealed card with it and checks
+  it went to the box before its person's. A completed round is never
+  opened.
 - **Cards**: exactly 1 024 bytes (`u16 len ‖ v1 ‖ rev ‖ lp16(instance,
   user, name, household, wish) ‖ Ed25519 sig ‖ zeros`), signed by the
   person's household over the round context and every field; sealed to the

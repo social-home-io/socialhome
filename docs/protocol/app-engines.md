@@ -84,12 +84,36 @@ and the day, "Only you can see this. Ben won't know it's you."
 Threat model: an honest-but-curious organiser, participants and host
 household (the hub, which passes every message on); a tampering app; a
 cheating household that deviates — it must be **detected**, and must not be
-able to learn another pair or steer a result.
+able to steer a result.
+
+**What the draw guarantees:** no other participant, no organiser through
+Social Home, no app, no GFS and no relay learns who gives to whom — each
+person learns only their own recipient. **What it doesn't:** a household's
+*server* (its admin reading its own database) holds its people's box keys
+and results; a box at circle position `j` gives to `j + 1` and receives
+from `j − 1`, so when two of its people sit two places apart it can work
+out the pair between them — who gives to one of its own people. Households
+that collude pool what they know. This is a documented limit, like the one-
+and two-household cases (owner decision 2026-11-01); the app doesn't point
+it out. `tests/protocol/test_app_engine_draw.py` pins it
+(`test_accepted_limit_*`), so a change that closes it is noticed.
+
+Chance (circle uniform) that a household with *m* of the *n* people can work
+out at least one pair whose giver is in another household:
+
+| n people | m of them in one household | chance |
+|---|---|---|
+| 6 | 2 | 40 % |
+| 8 | 3 | 57 % |
+| 12 | 2 | 18 % |
+| 12 | 4 | 64 % |
+| 20 | 4 | 47 % |
+| 30 | 5 | 50 % |
 
 | Party | Learns |
 |---|---|
 | A participant (incl. the organiser) | the people, the round's box keys `S` (random), the circle of boxes, **their own recipient's card** |
-| Their household | the same for each of its own people (it holds their keys, as it holds their DMs) |
+| Their household (its server) | the same for each of its own people (it holds their keys, as it holds their DMs) — and, from those, sometimes who gives to one of its own people (above) |
 | The hub (as relay) | the above for its own people, plus which household sent which sealed card — cards are key-private and all 1 KiB. `tests/protocol/test_app_engine_draw.py` pins that everything the hub stores and sees, with random bytes blanked, is identical whoever draws whom |
 | A mixing household | its own shuffle's input and output; **the circle doesn't follow any shuffle** (commit-reveal order) |
 | A non-member relay household, the GFS | ciphertext, sizes, timing |
@@ -127,9 +151,9 @@ sequenceDiagram
     H->>X: complete {every signed done} → "Your gift draw is ready"
 ```
 
-**A void** — only ever **before any card exists**: a key in `S` nobody can
-seal to, or a mixer whose signed input doesn't peel. Every household sends
-`open {seeds}` (signed; the hub keeps only a validly signed one), the hub
+**A void** — before any card exists: a key in `S` nobody can seal to, or a
+mixer whose signed input doesn't peel. Every household sends `open {seeds}`
+(signed; the hub keeps only a validly signed one), the hub
 passes on a fresh `start {because: void, why, openings[, k, batches,
 chain]}`, and every household — finding its own opening there exactly as it
 sent it — runs the same check on its own copy of the list and names the
@@ -138,10 +162,11 @@ signed opening that doesn't rebuild what its household signed names that
 household; a missing or unsigned one proves nothing and the restart is
 refused.
 
-**A round whose cards are out is never opened.** No step after the reveal
-asks any household for a seed or a box key (only a complainer's own seed
-for its own box, below); a void after the list is refused, and a household
-that opened a round never takes its `complete`.
+**A completed round is never opened.** After the cards, only a card
+complaint that named nobody (below) opens that one round — before it can
+complete: a household that opened never takes its `complete`, and a void
+or a complaint after `complete` is refused. Nothing ever opens a seed after
+the list.
 
 1. **Start.** People (seat, household, username), each household's identity
    key, the settings. Every signature and seal is bound to the **round
@@ -192,10 +217,13 @@ that opened a round never takes its `complete`.
    — it shows only the giver's own box and what opens there. Every card that
    opens there and isn't usable carries the signed hash of the household
    that sealed it: that household is named (refused when it is the
-   complainer's own). No card, or two usable ones: the complaint holds but
-   names nobody — who should have sealed there only the circle's map could
-   show, and that map is never opened. The round is redrawn either way
-   (visible, counted). A partner → `redo` with the seed as proof (chance:
+   complainer's own). No card, or two usable ones: a **card void** — every
+   household shows where it sealed its people's cards (`open {cards {user:
+   [box, nonce, target, eph]}}`: the box and nonce against its commitment,
+   the box it sealed to, the seal's ephemeral key, which derives from the
+   person's seed; anyone opens the sealed card with it and checks it went to
+   the box before its person's). The household whose card isn't there is
+   named. This opens that dead round only, before it can complete. A partner → `redo` with the seed as proof (chance:
    nobody named). A round completes only with every household's **signed**
    `done`.
 
@@ -214,7 +242,10 @@ completes and the leaver hands over. A complaint without proof names its
 household to the organiser and changes nothing. ≤ 40 rounds per draw.
 **Once the same household broke a second round of a draw, no more rounds:**
 the draw waits for the organiser, who sees that household at once
-(`waitingFor`) and can draw without it — a visible removal.
+(`waitingFor`) and can draw without it — a visible removal. Every household
+counts who broke rounds itself and refuses a round after the same household
+broke two. A removal once the cards are out (people may have read theirs)
+starts a new draw: it counts as a Draw again (its count, its exchange day).
 
 **An `end` is checked too.** A household takes `end {too_few}` only when
 fewer than three of the round's people are seated in its own copy;
@@ -239,8 +270,8 @@ fresh start), `round`; sent only to households at v_78:
 | `mix` / `mixed` | hub ↔ mixer k | `k`, `batches` or `list` + `prev {instance, in, sig}` / `list`, `in`, `sig` |
 | `list` | hub → all | `S`, `batches [{instance, hashes, commits, r_commit, sig}]`, `chain [{instance, hashes, sig}]` (every output entry's hash) |
 | `reveal` / `reveals` | each → hub / hub → all | `r` / `reveals {instance: r}` |
-| `open` | each → hub | `opening {seeds {user: seed}, stuck?, sig}` (only before any card; `stuck: k` from the mixer whose input doesn't peel) |
-| `void` | hub → all | `why: stuck, k, claim, batches, chain` (the chain so far: no household holds it yet) |
+| `open` | each → hub | `opening {seeds {user: seed}, stuck?, sig}` (before any card; `stuck: k` from the mixer whose input doesn't peel) or `opening {cards {user: [box, nonce, target, eph]}, sig}` (a card void) |
+| `void` | hub → all | `why: stuck, k, claim, batches, chain` (the chain so far: no household holds it yet) / `why: cards, complaint` |
 | `commit` / `commits` | each → hub / hub → all | `hashes`, `sig` / `commits {instance: {hashes, sig}}` |
 | `cards` / `cards_all` | each → hub / hub → all | `cards` (1 072 bytes each) |
 | `fail` / `redo` | each → hub | `complaint {kind: missing \| cards \| partner, instance, user, seed, sig}` |
@@ -346,16 +377,16 @@ No call returns a result; the app's sandboxed frame can't reach the API.
   reveal `r` (the hub sees every `r` as it relays) can, with a mixer that
   dropped its entry, choose to complain after seeing the circle: that names
   the mixer to everyone.
-- **Card complaints come after the cards opened:** a household whose card
-  was sealed wrong learns it only once every household has read its own
-  card, so a complaint redraws a round people have seen. Where the card
-  that opens is wrong, its sealer is named; where none opens (or two
-  usable ones do), nobody is — the redraw is visible and counted, and the
-  round's circle is never opened (a household sealing its own card to the
-  wrong box can force one such unnamed redraw per round).
-- **A hand-over shows the giver one more pair:** the card sealed to the
-  leaver's box names the leaver's own recipient (the giver now gives to
-  them).
+- **A household's server works out some pairs touching its own people**
+  (see "What holds"; the chance table there), and colluding households pool
+  what they know. Accepted (owner, 2026-11-01); the app doesn't say so.
+- **Card complaints come after the cards opened:** a complaint redraws a
+  round people have read; its culprit is named (from the card that opens,
+  or the card void), and that dead round's circle and cards are shown to
+  every household — it never completes.
+- **Removals hand over pairs:** a hand-over shows the giver the card sealed
+  to the leaver's box — the leaver's own recipient; a chain of leavers, or a
+  giver colluding with the leavers' household, walks further.
 - **Couples on small tables:** a box names nobody, so the circle can't steer
   around a pair; four people with a pair need 3 rounds on average, and give
   up after 40 rounds once in ~11 million draws.

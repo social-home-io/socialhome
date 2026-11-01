@@ -348,8 +348,9 @@ def test_signed_messages_are_domain_separated():
         dc.done_message(ctx, "i", 1),
         dc.opening_message(ctx, "i", [("u", pub)]),
         dc.opening_message(ctx, "i", [("u", pub)], stuck=0),
+        dc.card_opening_message(ctx, "i", [("u", pub, pub, pub, pub)]),
     }
-    assert len(msgs) == 10
+    assert len(msgs) == 11
 
 
 def test_public_of_and_sizes():
@@ -422,3 +423,24 @@ def test_the_engine_is_bound_into_context_and_labels():
     blob = dc.seal(pub, b"x", ctx=_ctx(), label="card")
     shared_label = dc.open_sealed(priv, blob, ctx=_ctx(), label="card")
     assert shared_label == b"x"
+
+
+def test_a_card_seal_key_from_the_seed_shows_where_it_went():
+    """A card sealed with randomness from the person's seed: its sealer
+    can show the box it went to (the ephemeral key opens it with that box
+    only), and the giver's box opens it as ever."""
+    seed = b"\x05" * 32
+    giver_priv, giver_pub = dc.new_keypair()
+    card = b"\x07" * dc.CARD_BYTES
+    sealed = dc.seal_card(giver_pub, card, ctx=_ctx(), rand=dc.card_rand(seed))
+    assert dc.seal_card(giver_pub, card, ctx=_ctx(), rand=dc.card_rand(seed)) == sealed
+    eph = dc.card_eph(seed)
+    assert dc.open_card_as_sealer(eph, giver_pub, sealed, ctx=_ctx()) == card
+    assert dc.open_card(giver_priv, sealed, ctx=_ctx()) == card
+    other = dc.new_keypair()[1]
+    assert dc.open_card_as_sealer(eph, other, sealed, ctx=_ctx()) is None
+    assert (
+        dc.open_card_as_sealer(dc.new_keypair()[0], giver_pub, sealed, ctx=_ctx())
+        is None
+    )
+    assert dc.open_card_as_sealer(eph, giver_pub, sealed[:-1], ctx=_ctx()) is None
