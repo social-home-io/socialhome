@@ -145,7 +145,7 @@ export default function AppDetailPage() {
         <div class="sh-app-detail__main">
           <section class="sh-app-detail__card" aria-labelledby="sh-app-detail-can">
             <h2 class="sh-app-detail__h" id="sh-app-detail-can">{t('apps.detail.can_do', { name })}</h2>
-            <PermissionList perms={perms} name={name} detailed />
+            <PermissionList perms={perms} name={name} detailed engines={installed?.engines ?? entry?.engines ?? []} />
             <div class="sh-app-never">
               <h3 class="sh-app-never__h">{t('apps.never.title', { name })}</h3>
               <ul class="sh-app-never__list">

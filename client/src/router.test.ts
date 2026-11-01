@@ -27,7 +27,13 @@ describe('router', () => {
     //   /apps/:appId     — sandboxed AppHost iframe launcher (§Apps)
     //   /apps/:appId/about — what an app can do; never launches it
     //   /apps/:appId/tables/:sessionId — a group game's "Who's in" page
-    expect(Object.keys(routes).length).toBe(48)
+    //   /apps/:appId/draw/:sessionId — Social Home's gift-draw result sheet
+    expect(Object.keys(routes).length).toBe(49)
+  })
+
+  it('the gift draw result is a Social Home page of its own, never the app', () => {
+    expect(routes['/apps/:appId/draw/:sessionId']).toBeTruthy()
+    expect(routes['/apps/:appId/draw/:sessionId']).not.toBe(routes['/apps/:appId'])
   })
 
   it('a space and its sections are ONE route, after the fixed space sub-pages', () => {

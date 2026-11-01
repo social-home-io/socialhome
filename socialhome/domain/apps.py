@@ -371,6 +371,12 @@ class AppManifest:
     players_max: int = 2
     tables: bool = False
     late_join: bool = False
+    #: App engines (v_78) the app may call at its tables — Social Home
+    #: features that run on each household for it (``"draw"``: the gift
+    #: draw). Core lets an app call only the engines it declares here and
+    #: that this Social Home has; an unknown id is kept (a newer engine)
+    #: but never callable.
+    engines: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, data: dict) -> AppManifest:
@@ -405,6 +411,7 @@ class AppManifest:
         late_join = data.get("late_join", False)
         if not isinstance(tables, bool) or not isinstance(late_join, bool):
             raise ValueError("manifest.tables / late_join must be booleans")  # noqa: TRY004 — one refusal type
+        engines = _parse_engines(data.get("engines"))
         return cls(
             entry=entry,
             icon=icon,
@@ -419,6 +426,7 @@ class AppManifest:
             players_max=players_max,
             tables=tables,
             late_join=late_join,
+            engines=engines,
         )
 
     def to_dict(self) -> dict:
@@ -437,7 +445,30 @@ class AppManifest:
             out["tables"] = True
         if self.late_join:
             out["late_join"] = True
+        if self.engines:
+            out["engines"] = list(self.engines)
         return out
+
+
+#: An app engine id in a manifest (``"draw"``), and how many one declares.
+_ENGINE_ID_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")
+MANIFEST_ENGINES_MAX: int = 8
+
+
+def _parse_engines(raw: object) -> tuple[str, ...]:
+    """``manifest.engines``: a list of distinct engine ids (lowercase,
+    ≤ 32 characters, at most :data:`MANIFEST_ENGINES_MAX`) — else
+    ``ValueError``. Absent → none."""
+    if raw is None:
+        return ()
+    if (
+        not isinstance(raw, list)
+        or len(raw) > MANIFEST_ENGINES_MAX
+        or not all(isinstance(e, str) and _ENGINE_ID_RE.fullmatch(e) for e in raw)
+        or len(set(raw)) != len(raw)
+    ):
+        raise ValueError("manifest.engines must be a list of distinct engine ids")
+    return tuple(raw)
 
 
 #: The most players any table seats, whatever an app's manifest says

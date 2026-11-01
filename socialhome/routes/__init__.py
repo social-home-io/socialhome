@@ -38,6 +38,7 @@ from .admin_instance_bans import (
 )
 from .aliases import AliasCollectionView, AliasItemView
 from .app_bundle import AppBundleView, AppRuntimeView
+from .app_engines import AppEngineActionView, AppEngineView
 from .app_groups import (
     AppGroupCloseView,
     AppGroupCollectionView,
@@ -1420,6 +1421,11 @@ def setup_routes(app: web.Application) -> None:
         ("messages", AppGroupMessagesView),
     ):
         app.router.add_view(f"/api/apps/{{app_id}}/groups/{{session_id}}/{verb}", view)
+    # App engines at a table (v_78) — one route family, dispatched through
+    # the registry (the bridge's engine.<id>.* and the result sheet).
+    engine_base = "/api/apps/{app_id}/groups/{session_id}/engines/{engine}"
+    app.router.add_view(engine_base, AppEngineView)
+    app.router.add_view(f"{engine_base}/{{action}}", AppEngineActionView)
     # Games in a space (v_77) — the Games section, the "Open games" strip.
     app.router.add_view("/api/spaces/{space_id}/games", SpaceGamesView)
     app.router.add_view("/api/spaces/{space_id}/games/allowed", SpaceGamesAllowedView)

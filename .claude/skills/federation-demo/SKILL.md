@@ -621,6 +621,28 @@ That single command runs the full sequence:
    ``tests/protocol/test_app_group_federation.py`` and
    ``tests/services/test_app_group_service.py``.
 
+9i½. ``app-draw`` (v_78, app engines — the gift draw) — right after
+   ``app-group``. Installs a stand-in draw app (``demo-draw``,
+   ``players {3, 30}``, ``tables: true``, ``engines: ["draw"]``) on **a**,
+   **b**, **c** and a second person on **a** (``dora``). **a**'s admin
+   opens a table with dora, **b**'s and **c**'s admins; all join (four
+   people, three households); **a** sets the draw in two patches (name,
+   budget, day; then the pair **a**-admin / dora — the pair keeps the rest)
+   and everyone writes a wish list with a marker; **a** draws names
+   (``POST …/engines/draw/start``) and the households run the rounds by
+   themselves (the sealed ``engine`` verb of ``APP_SESSION``: keys, seeded
+   onions, the signed mix, the commit-reveal circle, card commitments,
+   key-private cards, a redo with proof when the pair drew each other,
+   signed completion) until every person's ``GET …/engines/draw`` is
+   ``ready``. Each person's own ``GET …/engines/draw/result`` forms one
+   circle with the pair apart and shows the recipient's wish list; no
+   marker is in any household's database files in plaintext
+   (``app_engine_state`` is KEK-wrapped) nor in **a**'s (the host
+   household's) log. ``verify`` pins ``MIN_FOR_APP_ENGINES`` = 78 and
+   re-checks **a**, **b**, **c** keep their draw sealed. The review's
+   attacks, tampering mixers, false complaints, replays, offline homes and
+   the hand-over are ``tests/protocol/test_app_engine_draw.py``.
+
 9j. ``space-table`` (v_77, games in a space) — right after ``app-group``,
    in **c**'s private space from ``remote-invite-routed``: **c** hosts it,
    **d** (dave) is a member **c** is not paired with, so every envelope

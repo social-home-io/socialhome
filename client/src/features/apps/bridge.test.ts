@@ -150,6 +150,59 @@ describe('mountBridge', () => {
     expect(iframe.contentWindow!.postMessage).not.toHaveBeenCalled()
   })
 
+  // ── app engines (v_78): the gift draw ────────────────────────────────────
+
+  const DRAW = { engines: ['draw'], enginesDeclared: ['draw'] }
+
+  it('engine.draw.reveal opens Social Home\'s sheet; the app gets nothing back', async () => {
+    cleanup()
+    const revealDraw = vi.fn()
+    cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID, permissions: ALL, revealDraw, ...DRAW })
+    const handler = captureMessageHandler()
+    await handler({ source: iframe.contentWindow!, data: { id: 5, method: 'engine.draw.reveal', params: { id: 't1' } } })
+    expect(revealDraw).toHaveBeenCalledWith('t1')
+    expect(iframe.contentWindow!.postMessage).toHaveBeenCalledWith({ id: 5, ok: true, result: null }, '*')
+    expect(mockApiGet).not.toHaveBeenCalled()
+  })
+
+  it('engine.* needs the people permission', async () => {
+    cleanup()
+    cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID, permissions: ['storage'], revealDraw: vi.fn(), ...DRAW })
+    const handler = captureMessageHandler()
+    await handler({ source: iframe.contentWindow!, data: { id: 6, method: 'engine.draw.status', params: { id: 't1' } } })
+    expect(iframe.contentWindow!.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 6, ok: false, error: expect.objectContaining({ code: 'permission_denied' }) }),
+      '*',
+    )
+    expect(mockApiGet).not.toHaveBeenCalled()
+  })
+
+  it('an engine the app did not declare is refused', async () => {
+    const handler = captureMessageHandler()
+    await handler({ source: iframe.contentWindow!, data: { id: 7, method: 'engine.draw.status', params: { id: 't1' } } })
+    expect(iframe.contentWindow!.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 7, ok: false, error: expect.objectContaining({ code: 'engine_not_declared' }) }),
+      '*',
+    )
+  })
+
+  it('app.engine frames reach the app as engine:event, never with a result', async () => {
+    cleanup()
+    cleanup = mountBridge(iframe, { appId: APP_ID, selfUserId: USER_ID, permissions: ALL, ...DRAW })
+    wsHandlers['app.engine']({
+      data: {
+        app_id: APP_ID,
+        engine: 'draw',
+        session_id: 't1',
+        state: { state: 'ready', has_result: true, round: 1, again: 0, of: 4, done: null, settings: null, wish: '', is_host: false, waiting_for: null, blamed: null, gen: 1 },
+      },
+    })
+    expect(iframe.contentWindow!.postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'engine:event', engine: 'draw', event: expect.objectContaining({ type: 'status', id: 't1' }) }),
+      '*',
+    )
+  })
+
   // ── ready ────────────────────────────────────────────────────────────────
 
   it('onReady fires once, on the app\'s first request — app.ready or any RPC', async () => {
@@ -503,9 +556,9 @@ describe('mountBridge', () => {
       await captureMessageHandler()({ source: iframe.contentWindow as unknown as Window, data: { id: 3, method: 'app.context' } })
       expect(acceptCalls()).toHaveLength(1)
       expect(replies().map(r => r.result)).toEqual([
-        { appId: APP_ID, selfUserId: USER_ID, permissions: ALL, groups: true, launch: { sessionId: 's1', invite: asApp } },
+        { appId: APP_ID, selfUserId: USER_ID, permissions: ALL, groups: true, engines: [], launch: { sessionId: 's1', invite: asApp } },
         [invite],
-        { appId: APP_ID, selfUserId: USER_ID, permissions: ALL, groups: true, launch: { sessionId: 's1', invite: asApp } },
+        { appId: APP_ID, selfUserId: USER_ID, permissions: ALL, groups: true, engines: [], launch: { sessionId: 's1', invite: asApp } },
       ])
     })
 

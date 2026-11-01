@@ -38,6 +38,9 @@ import {
   PERMISSION_GLYPH,
   changelogNote,
   versionLabel,
+  engineDetail,
+  engineTitle,
+  isKnownEngine,
   permissionDetail,
   permissionTitle,
   ratingLabel,
@@ -55,12 +58,16 @@ export function AppIcon({ src, size = 'md' }: { src: string | null | undefined, 
 
 /** The plain-word permission list: short lines, or with *name* full
  *  sentences under each. Nothing asked for → one line saying so. */
-export function PermissionList({ perms, name, detailed = false }: {
+export function PermissionList({ perms, name, detailed = false, engines = [] }: {
   perms: AppPermission[]
   name: string
   detailed?: boolean
+  /** App engines (v_78) the app declares: Social Home features it uses
+   *  (the gift draw), said in Social Home's own words. */
+  engines?: readonly string[]
 }) {
-  if (perms.length === 0) {
+  const known = engines.filter(isKnownEngine)
+  if (perms.length === 0 && known.length === 0) {
     return <p class="sh-app-perms__none">{t('apps.perm.none', { name })}</p>
   }
   return (
@@ -71,6 +78,15 @@ export function PermissionList({ perms, name, detailed = false }: {
           <span class="sh-app-perms__text">
             <span class="sh-app-perms__title">{permissionTitle(p)}</span>
             {detailed && <span class="sh-app-perms__detail">{permissionDetail(p, name)}</span>}
+          </span>
+        </li>
+      ))}
+      {known.map(e => (
+        <li key={`engine-${e}`} class="sh-app-perms__item">
+          <span class="sh-app-perms__glyph" aria-hidden="true">🎁</span>
+          <span class="sh-app-perms__text">
+            <span class="sh-app-perms__title">{engineTitle(e)}</span>
+            {detailed && <span class="sh-app-perms__detail">{engineDetail(e, name)}</span>}
           </span>
         </li>
       ))}
@@ -135,7 +151,7 @@ export function AddAppDialog({ entry, name, permissions, open, onClose, onAdded 
         </p>
       </div>
       <p class="sh-app-consent__lead">{t('apps.consent.able', { name })}</p>
-      <PermissionList perms={permissions} name={name} detailed />
+      <PermissionList perms={permissions} name={name} detailed engines={entry.engines ?? []} />
       <p class="sh-app-never-line">{t('apps.never.line')}</p>
       <p class="sh-app-consent__who">
         {whoCanOpen(minAge)}

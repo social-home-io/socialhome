@@ -34,6 +34,8 @@ from aiohttp import web
 from . import __version__
 from . import app_keys as K
 from .access_log import RedactingAccessLogger
+from .app_engines import AppEngineRegistry
+from .app_engines.draw import AppDrawService
 from .auth import (
     BearerTokenStrategy,
     ChainedStrategy,
@@ -219,6 +221,7 @@ from .repositories import (
     SqliteUserRepo,
 )
 from .repositories.alias_repo import SqliteAliasRepo
+from .repositories.app_engine_state_repo import SqliteAppEngineStateRepo
 from .repositories.app_group_repo import SqliteAppGroupRepo
 from .repositories.app_repo import SqliteAppRepo
 from .repositories.auth_audit_log_repo import SqliteAuthAuditLogRepo
@@ -1207,6 +1210,7 @@ def _build_repos(db: AsyncDatabase):
         space_media_outbox=SqliteSpaceMediaOutboxRepo(db),
         app=SqliteAppRepo(db),
         app_group=SqliteAppGroupRepo(db),
+        app_engine_state=SqliteAppEngineStateRepo(db),
         preferences=SqlitePreferencesRepo(db),
         presence=SqlitePresenceRepo(db),
         public_space=SqlitePublicSpaceRepo(db),
@@ -4983,6 +4987,26 @@ def create_app(config: Config | None = None) -> web.Application:
         space_app_table_service.attach_to(federation_service)
         space_app_table_service.wire(bus)
         app[K.space_app_table_service_key] = space_app_table_service
+        # v_78 — app engines: Social Home features apps call at their
+        # tables, behind one registry (the manifest's ``engines`` gate). The
+        # first is the gift draw: each household's own steps of the mix,
+        # the hub's rounds, the result for Social Home's own sheet.
+        app_engine_registry = AppEngineRegistry(app_repo=repos.app)
+        app_draw_service = AppDrawService(
+            groups=app_group_service,
+            group_repo=repos.app_group,
+            state_repo=repos.app_engine_state,
+            app_federation=app_federation_service,
+            user_repo=user_repo,
+            federation=federation_service,
+            key_manager=key_manager,
+            ws=ws_manager,
+            household_label=config.instance_name,
+            bus=bus,
+        )
+        app_engine_registry.register(app_draw_service)
+        app_group_service.attach_engines(app_engine_registry)
+        app[K.app_engine_registry_key] = app_engine_registry
 
         # Stale-call cleanup scheduler (§26.8).
         nonlocal stale_call_scheduler
@@ -5634,6 +5658,9 @@ def create_app(config: Config | None = None) -> web.Application:
         space_app_table_service = app.get(K.space_app_table_service_key)
         if space_app_table_service is not None:
             await space_app_table_service.stop()
+        app_engine_registry = app.get(K.app_engine_registry_key)
+        if app_engine_registry is not None:
+            await app_engine_registry.stop()
         app_group_service = app.get(K.app_group_service_key)
         if app_group_service is not None:
             await app_group_service.stop()

@@ -24,6 +24,25 @@ export function permissionDetail(p: AppPermission, name: string): string {
   return t(`apps.perm.${p}_detail`, { name })
 }
 
+/** App engines (v_78) Social Home can describe — an id it doesn't know
+ *  says nothing (it isn't callable here either). */
+const KNOWN_ENGINES: readonly string[] = ['draw']
+
+export function isKnownEngine(engine: string): boolean {
+  return KNOWN_ENGINES.includes(engine)
+}
+
+/** The short line for an app engine the app uses ("Runs gift draws with
+ *  Social Home"). Keys: apps.engine.draw apps.engine.draw_detail */
+export function engineTitle(engine: string): string {
+  return t(`apps.engine.${engine}`)
+}
+
+/** The full sentence: what Social Home does for it — and no more. */
+export function engineDetail(engine: string, name: string): string {
+  return t(`apps.engine.${engine}_detail`, { name })
+}
+
 /** The glyph next to each permission (decorative). */
 export const PERMISSION_GLYPH: Record<AppPermission, string> = {
   storage: '▣',

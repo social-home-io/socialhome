@@ -127,6 +127,7 @@ from weakref import WeakValueDictionary
 
 import orjson
 
+from ..app_engines.domain import VERB_ENGINE
 from ..domain.app_group import GROUP_VERBS, AppGroupSessionError
 from ..domain.apps import (
     ACTIVE_SESSION_TTL_SECONDS,
@@ -1120,11 +1121,12 @@ class AppFederationService(ProtectionGateMixin):
             if self._groups is not None:
                 await self._groups.on_inbound_message(event)
             return
-        if (
-            event.event_type is FederationEventType.APP_SESSION
-            and event.payload.get("verb") in GROUP_VERBS
+        if event.event_type is FederationEventType.APP_SESSION and (
+            event.payload.get("verb") in GROUP_VERBS
+            or event.payload.get("verb") == VERB_ENGINE
         ):
-            # A group table (v_76): its own service, never the 1:1 paths.
+            # A group table (v_76) and its app engines (v_78): its own
+            # service, never the 1:1 paths.
             if self._groups is not None:
                 await self._groups.on_inbound_event(event)
             return

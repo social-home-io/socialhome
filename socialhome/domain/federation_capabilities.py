@@ -1217,7 +1217,30 @@ from __future__ import annotations
 #:   and no seat; an older admin household's config edit (no
 #:   ``allowed_apps`` key) leaves the list as it is. Labelled "Games in a
 #:   space".
-OURS: int = 77
+#: * **v_78** (2026-11-01) — **App engines; the first: the gift draw**
+#:   (Gift draw / Wichteln / Lootjes trekken / Père Noël secret / Amigo
+#:   invisible). An app declaring ``engines: ["draw"]`` asks Social Home to
+#:   draw names at a table (3–30 people); each participant's household does
+#:   its part unattended (``app_engines/draw``): person seeds and
+#:   deterministic onions, a signed mixing chain of per-entry hashes (a
+#:   round broken on purpose names who broke it, to every household), the
+#:   circle ordered by a commit-reveal of every household, card commitments
+#:   before any card,
+#:   key-private 1 KiB cards, couples checked by each giver's household,
+#:   signed completion, and a new round only on a proven complaint, a public
+#:   void, fewer people or the organiser's visible "Draw again". No new
+#:   event type: ONE sealed ``APP_SESSION`` verb, ``engine``, carrying
+#:   ``{engine: "draw", engine_suite: "x25519-hkdf-aesgcm256", step, gen,
+#:   round, …}`` between the table's hub and each participant household
+#:   (picked tables over the pairing, space tables over
+#:   ``SPACE_APP_SESSION``); a receiver takes it only for an engine it has,
+#:   a suite of it, and a table whose app (as installed here) declares it.
+#:   The result shows only in Social Home's own sheet — never to the app.
+#:   **Fallback**: none on the wire — a table with a household below v_78
+#:   can't start a draw (409 ``APP_DRAW_HOUSEHOLD_TOO_OLD``); a receiver
+#:   drops ``engine`` steps from a household below it. Not space-scoped, no
+#:   sync stream change. Labelled "Gift draws".
+OURS: int = 78
 
 
 class FederationCapability:
@@ -1813,6 +1836,10 @@ class FederationCapability:
     #: ``allowed_apps`` features key. A member household below it is sent
     #: neither — its people don't see the space's games.
     MIN_FOR_SPACE_APP_TABLES = 77
+    #: v_78 — app engines (the first: the gift draw): the sealed
+    #: ``engine`` verb of ``APP_SESSION``. A table with a household below
+    #: it can't start a draw.
+    MIN_FOR_APP_ENGINES = 78
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2107,6 +2134,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_SPACE_APP_TABLES,
         "Games in a space",
     ),
+    (
+        FederationCapability.MIN_FOR_APP_ENGINES,
+        "Gift draws",
+    ),
 ]
 
 
@@ -2195,6 +2226,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_BAZAAR_FAQ: "bazaar_listing_faq",
     FederationCapability.MIN_FOR_APP_GROUPS: "app_groups",
     FederationCapability.MIN_FOR_SPACE_APP_TABLES: "space_app_tables",
+    FederationCapability.MIN_FOR_APP_ENGINES: "app_engines",
 }
 
 

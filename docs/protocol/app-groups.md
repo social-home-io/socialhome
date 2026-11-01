@@ -675,6 +675,16 @@ day, 50 open per hub) and the 7-day prune. Every session envelope goes to
 ONE household (h − 1 per message, as above). "Let everyone know" costs no
 envelope.
 
+## App engines at a table (v_78)
+
+An app at a table may call Social Home features that run on every
+household for it — *app engines*, declared in its manifest
+(`engines: ["draw"]`). The first is the **gift draw**: every person is drawn
+one other person to give a gift to, and nobody — not the organiser, not the
+hub — sees who drew whom. Their steps ride one sealed `APP_SESSION` verb,
+`engine`, between the hub and each player's household. See
+[`app-engines.md`](./app-engines.md).
+
 ## Storage
 
 `app_group_sessions` (one row per table a household knows, migration
@@ -703,6 +713,7 @@ taken, announce, first seen here). See
   transport and rules; `socialhome/routes/space_games.py`.
 - `socialhome/repositories/app_group_repo.py`, `socialhome/routes/app_groups.py`.
 - `client/src/features/apps/groupBridge.ts` — the bridge's `group.*`.
+- App engines (v_78): see [`app-engines.md`](./app-engines.md#implementation).
 - Tests: `tests/services/test_app_group_service.py`,
   `tests/services/test_app_group_messages.py`,
   `tests/protocol/test_app_group_federation.py`,
@@ -715,6 +726,6 @@ taken, announce, first seen here). See
 
 Group-play design §2 (roster, topology, life of a table, who can send
 to whom, order, mailbox, wire, storage, SDK, older households, blocks and
-children, bounds), §3 (space tables), §4 (the games list), decisions
-D1–D12; [`capabilities.md`](./capabilities.md) v_76, v_77; [`../crypto.md`](../crypto.md)
-(seat seal).
+children, bounds), §3 (space tables), §4 (the games list), §5 (the gift
+draw), decisions D1–D14; [`capabilities.md`](./capabilities.md) v_76, v_77,
+v_78; [`../crypto.md`](../crypto.md) (seat seal, gift draw).

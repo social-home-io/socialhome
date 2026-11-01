@@ -59,6 +59,7 @@ import { mountBridge, type GroupOpenRequest, type PickedPerson, type PickRequest
 import { InviteSheet } from '@/features/apps/InviteSheet'
 import { GroupSheet } from '@/features/apps/groups/GroupSheet'
 import { GroupRefused, type GroupSession } from '@/features/apps/groupBridge'
+import { DrawResultSheet } from '@/features/apps/engines/draw/DrawResultSheet'
 import { currentAppContext, shownTheme, watchAppContext, type AppTheme } from '@/features/apps/appContext'
 import { appOpenedFrom } from '@/features/apps/appReturn'
 import { addBase } from '@/baseUrl'
@@ -129,6 +130,9 @@ export function AppHostInner({ appId, sessionId }: {
     resolve: (s: GroupSession | null) => void
     reject: (e: unknown) => void
   } | null>(null)
+  /** The gift-draw result sheet an app asked for (``draw.reveal``): the
+   *  table it is for, drawn here — outside the frame (D13). */
+  const [reveal, setReveal] = useState<string | null>(null)
   /** The SPA's light/dark, for the frame's ``color-scheme``. */
   const [scheme, setScheme]   = useState<AppTheme>(shownTheme)
   const iframeRef             = useRef<HTMLIFrameElement | null>(null)
@@ -231,6 +235,9 @@ export function AppHostInner({ appId, sessionId }: {
       openGroup: (req) => runtime.tables === false
         ? Promise.reject(notForGroups())
         : new Promise<GroupSession | null>((resolve, reject) => setGroup({ req, resolve, reject })),
+      engines: runtime.engines ?? [],
+      enginesDeclared: runtime.engines_declared ?? [],
+      revealDraw: (sessionId) => setReveal(sessionId),
     })
     return () => {
       cleanup()
@@ -238,6 +245,7 @@ export function AppHostInner({ appId, sessionId }: {
       // for goes with it, sending nothing.
       setPick(p => { p?.resolve([]); return null })
       setGroup(g => { g?.resolve(null); return null })
+      setReveal(null)
     }
   }, [runtime, frameSession]) // iframeRef.current is stable once rendered; runtime changes re-mount
 
@@ -404,6 +412,10 @@ export function AppHostInner({ appId, sessionId }: {
             setGroup(null)
           }}
         />
+      )}
+
+      {reveal && runtime && (
+        <DrawResultSheet appId={runtime.app_id} sessionId={reveal} onClose={() => setReveal(null)} />
       )}
     </div>
   )

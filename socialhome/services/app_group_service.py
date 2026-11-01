@@ -66,6 +66,7 @@ from weakref import WeakValueDictionary
 
 import orjson
 
+from ..app_engines.domain import VERB_ENGINE
 from ..crypto import b64url_decode, derive_instance_id
 from ..domain.app_group import (
     CLOSE_FULL,
@@ -174,6 +175,7 @@ from .app_group_budget import TableSendBudget
 from .protection_gate import ProtectionGateMixin
 
 if TYPE_CHECKING:
+    from ..app_engines.registry import AppEngineRegistry
     from ..domain.apps import InstalledApp
     from ..domain.events import AppUninstalled, DomainEvent
     from ..domain.notification import Notification
@@ -305,6 +307,7 @@ class AppGroupService(ProtectionGateMixin):
         "_bus",
         "_child_protection",
         "_coalesce_every",
+        "_engines",
         "_fed_repo",
         "_federation",
         "_finished_at",
@@ -377,6 +380,9 @@ class AppGroupService(ProtectionGateMixin):
         #: Space tables (v_77): the space transport, cards and space rules
         #: (:meth:`attach_space_tables`).
         self._space_tables: SpaceTableService | None = None
+        #: App engines (v_78): their ``engine`` steps and table changes
+        #: (:meth:`attach_engines`).
+        self._engines: AppEngineRegistry | None = None
 
     @property
     def _own(self) -> str:
@@ -832,6 +838,9 @@ class AppGroupService(ProtectionGateMixin):
     async def _leave_table(
         self, table: GroupSession, user: User, *, declined: bool
     ) -> None:
+        if self._engines is not None and not declined:
+            # After a reveal, their household hands their recipient on.
+            self._engines.person_left(table, user.username)
         if table.hub_instance == self._own:
             await self._hub_leave(
                 table.session_id, self._own, user.username, declined=declined
@@ -2171,6 +2180,11 @@ class AppGroupService(ProtectionGateMixin):
             return
         if verb == "group_invite" and space_id is not None:
             return  # a space table invites nobody: members join it
+        if verb == VERB_ENGINE:
+            # An app engine's step (v_78) at a table this household knows.
+            if table is not None and self._engines is not None:
+                await self._engines.on_inbound(event, table)
+            return
         is_hub = table is not None and table.hub_instance == self._own
         sender = event.from_instance
         actor = event.payload.get("from_user")
@@ -2645,13 +2659,18 @@ class AppGroupService(ProtectionGateMixin):
         await self._app_repo.delete_pending_session(
             table.app_id, user.user_id, table.session_id
         )
+        if self._engines is not None:
+            self._engines.person_left(table, username)
         await self._push_to(table, user, change=change)
 
     async def _push(self, table: GroupSession) -> None:
         """Each local person at *table* gets their view (``app.group``);
-        a space table's card follows the change (v_77)."""
+        a space table's card follows the change (v_77), and so does a
+        draw at it (v_78)."""
         if table.space_id is not None and self._space_tables is not None:
             await self._space_tables.on_table_changed(table)
+        if self._engines is not None:
+            self._engines.table_changed(table)
         for user, row in await self._local_people(table):
             await self._ws.broadcast_to_user(
                 user.user_id,
@@ -3007,3 +3026,48 @@ class AppGroupService(ProtectionGateMixin):
     ) -> list[tuple[User, AppPendingSession]]:
         """The people of this household with a place at *table*."""
         return await self._local_people(table)
+
+    # ─── App engines (v_78) — driven by the AppEngineRegistry ─────────
+
+    def attach_engines(self, engines: AppEngineRegistry) -> None:
+        """Wire app engines: ``engine`` steps for a table this household
+        knows go to *engines*, and each change of a table reaches them."""
+        self._engines = engines
+
+    async def send_to(
+        self, table: GroupSession, to_instance: str, payload: dict
+    ) -> None:
+        """One sealed ``APP_SESSION`` about *table* to *to_instance* — over
+        the space's transport for a space table (best effort; the outbox
+        retries)."""
+        await self._send_raw(
+            to_instance,
+            FederationEventType.APP_SESSION,
+            payload,
+            space_id=table.space_id,
+        )
+
+    async def identity_pk_of(self, instance: str, hint: object = None) -> bytes | None:
+        """*instance*'s identity key, as :meth:`_identity_pk` proves it."""
+        return await self._identity_pk(instance, hint)
+
+    async def seat_row(
+        self, table: GroupSession, user_id: str
+    ) -> AppPendingSession | None:
+        """*user_id*'s group row at *table* (``None`` without one)."""
+        row = await self._app_repo.get_pending_session(
+            table.app_id, user_id, table.session_id
+        )
+        return row if row is not None and row.is_group else None
+
+    async def seat_of_caller(
+        self, app_id: str, session_id: str, actor_user_id: str
+    ) -> tuple[GroupSession, User]:
+        """The table and the caller, who must be seated at it from here —
+        else :class:`AppGroupNotFoundError` (the app must be usable)."""
+        await self._usable(app_id, actor_user_id)
+        table, user, _row = await self._mine(app_id, session_id, actor_user_id)
+        entry = table.entry(self._own, user.username)
+        if entry is None or entry.state != SEAT_SEATED:
+            raise AppGroupNotFoundError()
+        return table, user
