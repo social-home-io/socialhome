@@ -348,9 +348,8 @@ def test_signed_messages_are_domain_separated():
         dc.done_message(ctx, "i", 1),
         dc.opening_message(ctx, "i", [("u", pub)]),
         dc.opening_message(ctx, "i", [("u", pub)], stuck=0),
-        dc.boxes_message(ctx, "i", [("u", pub, pub)]),
     }
-    assert len(msgs) == 11
+    assert len(msgs) == 10
 
 
 def test_public_of_and_sizes():

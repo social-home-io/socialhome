@@ -115,7 +115,6 @@ _CARD_SIG_DOMAIN = b"socialhome/app_engine/draw/card/v1"
 _CARD_COMMIT_DOMAIN = b"socialhome/app_engine/draw/card_commit/v1"
 _DONE_DOMAIN = b"socialhome/app_engine/draw/done/v1"
 _OPENING_DOMAIN = b"socialhome/app_engine/draw/opening/v2"
-_BOXES_DOMAIN = b"socialhome/app_engine/draw/boxes/v1"
 _HANDOVER_SIG_DOMAIN = b"socialhome/app_engine/draw/handover/v3"
 
 _ZERO_NONCE = b"\x00" * 12
@@ -545,18 +544,6 @@ def opening_message(
         parts += [user, seed]
     parts.append("" if stuck is None else stuck)
     return _fields(_OPENING_DOMAIN, *parts)
-
-
-def boxes_message(
-    ctx: bytes, instance: str, boxes: Sequence[tuple[str, bytes, bytes]]
-) -> bytes:
-    """A household opening its people's box keys (with the commitment
-    nonces) of a round whose cards broke — not the seeds: nobody can open a
-    card with them."""
-    parts: list[bytes | str | int] = [ctx, instance, len(boxes)]
-    for user, box_pub, nonce in sorted(boxes):
-        parts += [user, box_pub, nonce]
-    return _fields(_BOXES_DOMAIN, *parts)
 
 
 def card_commit_message(

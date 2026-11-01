@@ -28,6 +28,7 @@ from socialhome.app_engines.draw.domain import (
     DrawWireError,
 )
 from socialhome.app_engines.draw.service import (
+    AppDrawService,
     _int,
     _parse_people,
     _raw,
@@ -448,12 +449,14 @@ async def test_complaint_holds_only_with_its_proof(done):
             "sig": b64url_encode(sig),
         }
 
+    commits = {i: c["hashes"] for i, c in hub_st["commits"].items()}
     kw = {
         "S": S,
         "batches": batches,
         "links": links,
         "mixer_pubs": mixer_pubs,
         "cards": cards,
+        "commits": commits,
     }
     # Ben's key IS in S once and his card is fine: nothing holds.
     for kind in ("missing", "cards", "partner"):
@@ -531,23 +534,38 @@ async def test_a_draw_that_gives_up_and_a_fresh_one(net, monkeypatch):
     sid = await draw_table(net, PEOPLE)
     hub = net.homes["hub"]
     real_mix = dc.mix
+    real_make = AppDrawService._make_onions
+    boxes: dict = {}
     cheated = []
+
+    def make(self, rnd, pubs):
+        onions, seeds, commits = real_make(self, rnd, pubs)
+        boxes["order"] = rnd.order
+        boxes[self._own] = {
+            dc.person_keys(b64url_decode(x)).box_pub for x in seeds.values()
+        }
+        return onions, seeds, commits
 
     def dropping_mix(priv, entries, *, ctx, k, h, rand=os.urandom):
         out = real_mix(priv, entries, ctx=ctx, k=k, h=h, rand=rand)
         if k == h - 1 and not cheated:
-            cheated.append(True)
-            out[0] = dc.new_keypair()[1]
+            # Another household's person (not the mixer's own, not the
+            # hub's — whose steps stay local): a proof that names the mixer.
+            victim = next(
+                i for i in boxes["order"] if i not in ("hub", boxes["order"][-1])
+            )
+            j = next(j for j, o in enumerate(out) if o in boxes[victim])
+            cheated.append(victim)
+            out[j] = dc.new_keypair()[1]
         return out
 
+    monkeypatch.setattr(AppDrawService, "_make_onions", make)
     monkeypatch.setattr(dc, "mix", dropping_mix)
     await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
     await settle(net)
     st = await hub.draw._load(sid)
-    if not sent_steps(net, "fail"):
-        # The mixer dropped its own household's entry: refused, named.
-        assert st["hub"]["blamed"] == [st["hub"]["order"][-1]]
-        return
+    fails = sent_steps(net, "fail")
+    assert [f["complaint"]["instance"] for f in fails[:1]] == cheated
     ends = sent_steps(net, "end")
     assert ends and all(e["because"]["kind"] == "complaint" for e in ends)
     culprit = st["hub"]["order"][-1]
@@ -657,10 +675,12 @@ async def test_after_the_reveal_too_few_left_keeps_the_names(tmp_path):
 # ─── Hardening from the security review ───────────────────────────────────
 
 
-async def test_a_redo_proof_must_be_about_the_cards_this_household_saw(done):
-    """A relay can't drop or swap a card in a complaint's evidence to make
-    it hold: each household checks the cards against every household's
-    signed commitments and its own copy."""
+async def test_a_complaint_is_checked_on_the_households_own_copy(done):
+    """A restart's proof is the complaint alone: each household checks it
+    on its own copy of the round (the list, the mixer keys, the committed
+    cards) — the hub can't hand it doctored evidence; without its own copy
+    a household doesn't take the round; a missing key after the cards is
+    refused."""
     net, sid, st = done
     b = net.homes["b"]
     st_b = copy.deepcopy(await b.draw._load(sid))
@@ -671,37 +691,25 @@ async def test_a_redo_proof_must_be_about_the_cards_this_household_saw(done):
         for p in hub["people"]
     ]
     table = await b.group_repo.get(sid)
-    doctored = list(hub["all_cards"])
-    doctored[0] = b64url_encode(b"\x01" * dc.SEALED_CARD_BYTES)
-    base = {
-        "kind": "complaint",
-        "complaint": {"kind": "partner"},
-        "list": hub["list_body"],
-        "mixer_pubs": hub["mixer_pubs"],
-        "commits": hub["commits"],
-    }
-    for evidence, why in (
-        ({"cards": doctored}, "aren't the committed ones"),
-        ({"cards": hub["all_cards"], "commits": {}}, "commitments malformed"),
-        (
-            {"complaint": {"kind": "missing"}, "cards": hub["all_cards"]},
-            "a missing key told after the cards",
-        ),
-    ):
-        with pytest.raises(DrawWireError, match=why):
-            await b.draw._justify(
-                table, st_b, hub["gen"], hub["round"] + 1, people, {**base, **evidence}
-            )
-    # A card complaint never restarts a round by itself: it goes through a
-    # void, where the box keys name who sealed it wrong.
-    with pytest.raises(DrawWireError, match="a complaint of another kind"):
+    complaint = {"kind": "complaint", "complaint": {"kind": "partner"}}
+    with pytest.raises(DrawWireError, match="the complaint doesn't hold"):
+        await b.draw._justify(
+            table, st_b, hub["gen"], hub["round"] + 1, people, complaint
+        )
+    with pytest.raises(DrawWireError, match="a missing key told after the cards"):
         await b.draw._justify(
             table,
             st_b,
             hub["gen"],
             hub["round"] + 1,
             people,
-            {**base, "complaint": {"kind": "cards"}, "cards": hub["all_cards"]},
+            {"kind": "complaint", "complaint": {"kind": "missing"}},
+        )
+    no_list = copy.deepcopy(st_b)
+    no_list["p"].pop("S")
+    with pytest.raises(DrawWireError, match="no list of ours"):
+        await b.draw._justify(
+            table, no_list, hub["gen"], hub["round"] + 1, people, complaint
         )
 
 

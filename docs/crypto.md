@@ -330,10 +330,10 @@ keys ‖ settings)`.
 - **Every key in `S` is checked** for a usable point (X25519 with a fixed
   scalar must not fail); a low-order key voids the round publicly and every
   household opens its seeds, which names the mixer that put it there (or
-  the household whose seeds don't rebuild what it signed). After the cards,
-  a void opens only box keys with their commitment nonces (signed, checked
-  against the commitments): they place every person in the circle without
-  opening any card.
+  the household whose signed seeds don't rebuild what it signed — an
+  unsigned opening proves nothing). Only before any card exists: once the
+  cards are out no seed or box key is ever asked for; a card complaint
+  rests on the complainer's own seed and the sealer's signed card hash.
 - **Cards**: exactly 1 024 bytes (`u16 len ‖ v1 ‖ rev ‖ lp16(instance,
   user, name, household, wish) ‖ Ed25519 sig ‖ zeros`), signed by the
   person's household over the round context and every field; sealed to the
@@ -349,8 +349,8 @@ keys ‖ settings)`.
   the mixer key, the onion batch (onion hashes, commitments, `r`
   commitment), each mix step `(k, in-digest, out-digest)`, a complaint (it
   reveals a person's seed — for a thrown-away round), an opening (every
-  seed of a void round, with `stuck: k` from a mixer whose input doesn't
-  peel; or every box key and nonce after the cards), the card commitment, `done` (a round completes only
+  seed of a void round before any card, with `stuck: k` from a mixer whose
+  input doesn't peel), the card commitment, `done` (a round completes only
   with every household's), the hand-over.
 
 Every step carries `engine_suite: "x25519-hkdf-aesgcm256"`
