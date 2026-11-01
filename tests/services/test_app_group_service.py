@@ -622,6 +622,50 @@ async def test_with_late_joiners_the_start_reaches_open_invites(net):
     assert (await hub.group_repo.get(sid)).entry("c", "cleo").state == SEAT_SEATED
 
 
+async def test_ending_late_joins_in_the_lobby_keeps_it_open(net):
+    hub, b, c = _homes(net)
+    for home in (hub, b, c):
+        await home.app_repo.update_installed(quiz_app(late_join=True))
+    sid = await _open(net)
+    await b.groups.join(app_id=APP, session_id=sid, actor_user_id=b.uid("ben"))
+    await net.flush()
+    table = await hub.groups.end_late_joins(sid)
+    await net.flush()
+    assert table is not None and table.late_join is False
+    assert table.state == GROUP_LOBBY
+    # Still waiting for players: Cleo's invite stands, and she can join.
+    assert table.entry("c", "cleo").state == "invited"
+    assert (await b.group_repo.get(sid)).late_join is False
+    await c.groups.join(app_id=APP, session_id=sid, actor_user_id=c.uid("cleo"))
+    await net.flush()
+    assert (await hub.group_repo.get(sid)).entry("c", "cleo").state == SEAT_SEATED
+    # Once is enough; a copy's household doesn't decide it.
+    again = await hub.groups.end_late_joins(sid)
+    assert (
+        again is not None
+        and again.roster_rev == (await hub.group_repo.get(sid)).roster_rev
+    )
+    assert await b.groups.end_late_joins(sid) is None
+
+
+async def test_ending_late_joins_after_the_start_closes_the_table(net):
+    hub, b, c = _homes(net)
+    for home in (hub, b, c):
+        await home.app_repo.update_installed(quiz_app(late_join=True))
+    sid = await _open(net)
+    for home, user in ((b, "ben"), (hub, "ada")):
+        await home.groups.join(app_id=APP, session_id=sid, actor_user_id=home.uid(user))
+        await net.flush()
+    await hub.groups.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
+    await net.flush()
+    await hub.groups.end_late_joins(sid)
+    await net.flush()
+    # Cleo's invite is withdrawn; her household's copy takes nobody new.
+    assert await c.app_repo.get_pending_session(APP, c.uid("cleo"), sid) is None
+    assert (await hub.group_repo.get(sid)).entry("c", "cleo").state == "declined"
+    assert (await b.group_repo.get(sid)).is_open is False
+
+
 async def test_a_hand_over_keeps_counting_on_the_opener(net):
     hub, b, c = _homes(net)
     anna = hub.uid("anna")

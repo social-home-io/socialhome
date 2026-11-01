@@ -31,9 +31,11 @@ async def _supports(self, instance_id: str, *, min_version: int) -> bool:
     return self.versions.get(instance_id, 0) >= min_version
 
 
-def draw_app(*, engines: tuple[str, ...] = ("draw",)) -> InstalledApp:
+def draw_app(
+    *, engines: tuple[str, ...] = ("draw",), late_join: bool = False
+) -> InstalledApp:
     """The quiz stand-in, 3–30 players, declaring *engines*."""
-    app = quiz_app(players=(3, 30))
+    app = quiz_app(players=(3, 30), late_join=late_join)
     return dataclasses.replace(
         app, manifest=dataclasses.replace(app.manifest, engines=engines)
     )
@@ -143,16 +145,19 @@ async def draw_table(
     *,
     hub: str = "hub",
     seeds: bool = True,
+    late_join: bool = False,
+    waiting: tuple[tuple[str, str], ...] = (),
 ) -> str:
     """Households (name → usernames) at one picked table opened by the
-    first person of *hub*, everyone seated; returns the session id. Every
+    first person of *hub*, everyone seated but the *waiting* (household,
+    username) people, who stay invited; returns the session id. Every
     household is paired with every other (identity keys known)."""
     homes: dict[str, Household] = {}
     for i, (inst, users) in enumerate(people.items()):
         home = await net.household(inst)
         for u in users:
             await home.add_user(u)
-        await home.app_repo.install(draw_app())
+        await home.app_repo.install(draw_app(late_join=late_join))
         add_draw(home, seed=1000 + i if seeds else None)
         homes[inst] = home
     names = list(homes)
@@ -174,7 +179,7 @@ async def draw_table(
     await settle(net)
     for inst, users in people.items():
         for u in users:
-            if (inst, u) == (hub, host):
+            if (inst, u) == (hub, host) or (inst, u) in waiting:
                 continue
             await homes[inst].groups.join(
                 app_id=APP, session_id=sid, actor_user_id=homes[inst].uid(u)

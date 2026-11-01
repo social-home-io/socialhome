@@ -3340,13 +3340,20 @@ class AppDrawService:
     async def start(
         self, *, app_id: str, session_id: str, actor_user_id: str, again: bool = False
     ) -> dict:
-        """Draw names (organiser): starts the table if it waits for
-        players, then the first round — or, *again*, a new draw for
+        """Draw names (organiser): ends late joins (an app that takes them
+        takes them only until names are drawn), starts the table if it
+        waits for players, then the first round — or, *again*, a new draw for
         everyone still in after a reveal (visible to all, with its count;
         only until the exchange day)."""
         table, user = await self._host(app_id, session_id, actor_user_id)
         if len(table.seated) < DRAW_MIN_PEOPLE:
             raise AppDrawTooFewError()
+        if not again:
+            # People can join (an app with late joiners) until names are
+            # drawn: once the seats as they are could be drawn, nobody new
+            # sits down — before the seats are read again below.
+            await self._drawable(table)
+            table = await self._groups.end_late_joins(session_id) or table
         if table.state == GROUP_LOBBY:
             await self._groups.start(
                 app_id=app_id, session_id=session_id, actor_user_id=actor_user_id
@@ -3403,6 +3410,22 @@ class AppDrawService:
                 again=again or hub is not None,
             )
         return self._view(table, st, user)
+
+    async def _drawable(self, table: GroupSession) -> None:
+        """The checks :meth:`start` makes of the seats, made before late
+        joins end — so a refused Draw names leaves the table open."""
+        seated = [e for e in table.roster if e.state == SEAT_SEATED]
+        too_old = [
+            e.household_name or e.instance
+            for e in seated
+            if not await self._supports(e.instance)
+        ]
+        if too_old:
+            raise AppDrawHouseholdTooOldError(sorted(set(too_old)))
+        st = await self._load(table.session_id)
+        settings = DrawSettings.from_wire(st.get("settings") or {})
+        if not pairs_fit(settings.pairs, frozenset(e.seat for e in seated)):
+            raise AppDrawPairsError()
 
     async def result(self, *, app_id: str, session_id: str, actor_user_id: str) -> dict:
         """Whom the caller gives to — for Social Home's own result sheet

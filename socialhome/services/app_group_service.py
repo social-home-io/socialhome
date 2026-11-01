@@ -263,6 +263,17 @@ def _check_finish(table: GroupSession, instance: str, user: str) -> None:
         raise AppGroupNotHostError()
 
 
+def _withdraw_invites(
+    table: GroupSession,
+) -> tuple[GroupSession, tuple[GroupSeat, ...]]:
+    """*table* with every unanswered invite withdrawn (declined), and the
+    invites that were."""
+    withdrawn = tuple(e for e in table.roster if e.state == SEAT_INVITED)
+    for entry in withdrawn:
+        table = table.with_entry(dataclasses.replace(entry, state=SEAT_DECLINED))
+    return table, withdrawn
+
+
 def _sender_share(households: int) -> int:
     """The envelopes a minute one player may send at a table of
     *households*: three times a fair share, never less than two messages
@@ -1143,16 +1154,24 @@ class AppGroupService(ProtectionGateMixin):
                     raise AppGroupClosedError()
                 raise AppGroupTooFewError(table.min_players)
             stamp = _now().isoformat()
-            withdrawn: list[GroupSeat] = []
+            withdrawn: tuple[GroupSeat, ...] = ()
             if not table.late_join:
-                for entry in table.roster:
-                    if entry.state == SEAT_INVITED:
-                        withdrawn.append(entry)
-                        table = table.with_entry(
-                            dataclasses.replace(entry, state=SEAT_DECLINED)
-                        )
+                table, withdrawn = _withdraw_invites(table)
             table = table.bumped(stamp, state=GROUP_PLAYING, started_at=stamp)
             await self._repo.save(table)
+        await self._send_withdrawn(table, withdrawn)
+        # With late joiners the invites stay open: their households hear
+        # the start too (else their copy would run out as a lobby).
+        await self._broadcast(table, VERB_START, states=(SEAT_SEATED, SEAT_INVITED))
+        await self._push(table)
+        await self._tell_started(table)
+        return table
+
+    async def _send_withdrawn(
+        self, table: GroupSession, withdrawn: tuple[GroupSeat, ...]
+    ) -> None:
+        """Each invite in *withdrawn* is over: a local person's row goes, a
+        remote one's household hears ``group_close {reason: withdrawn}``."""
         for entry in withdrawn:
             if entry.instance == self._own:
                 await self._withdraw_local(table, entry.user)
@@ -1164,11 +1183,34 @@ class AppGroupService(ProtectionGateMixin):
                     to_user=entry.user,
                     reason=CLOSE_WITHDRAWN,
                 )
-        # With late joiners the invites stay open: their households hear
-        # the start too (else their copy would run out as a lobby).
-        await self._broadcast(table, VERB_START, states=(SEAT_SEATED, SEAT_INVITED))
+
+    async def end_late_joins(self, session_id: str) -> GroupSession | None:
+        """Nobody new sits down at this hub table from now on (v_78): an
+        app engine that fixes who takes part — the gift draw's Draw names —
+        calls it before it reads the seats, so a late joiner can't land
+        after the people are counted. A table that takes late joiners turns
+        into one that doesn't: invites nobody answered are withdrawn (as a
+        Start without late joiners does) and every household hears the new
+        roster at once (its ``late_join`` reads ``false`` from here). A
+        table still waiting for players keeps taking people until it starts.
+        The table as it is now; ``None`` for a table this household doesn't
+        host."""
+        async with self._lock(session_id):
+            table = await self._hub_table(session_id)
+            if table is None or not table.late_join or table.state == GROUP_ENDED:
+                return table
+            withdrawn: tuple[GroupSeat, ...] = ()
+            if table.state == GROUP_PLAYING:
+                table, withdrawn = _withdraw_invites(table)
+            table = table.bumped(_now().isoformat(), late_join=False)
+            await self._repo.save(table)
+        await self._send_withdrawn(table, withdrawn)
+        # At once, not on the coalesced roster: the households' copies and
+        # a space table's card stop offering the free seats now.
+        await self._broadcast(table, VERB_ROSTER, states=(SEAT_SEATED, SEAT_INVITED))
+        self._roster_sent[session_id] = asyncio.get_running_loop().time()
+        await self._recheck_local(table)
         await self._push(table)
-        await self._tell_started(table)
         return table
 
     async def _hub_remove(

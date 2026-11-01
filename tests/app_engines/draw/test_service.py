@@ -831,3 +831,55 @@ async def test_configure_is_a_patch(net):
     with pytest.raises(AppDrawSettingsError):
         await hub.draw.configure(**ids, settings={"day": "soon"})
     assert (await hub.draw.status(**ids))["settings"]["name"] == "Familie Müller"
+
+
+# ─── Late joins until names are drawn ─────────────────────────────────────
+
+
+async def test_late_joiners_sit_down_until_names_are_drawn(net):
+    """An app with late joiners takes people until Draw names: after a
+    Start a late joiner still sits down and is drawn; Draw names ends
+    late joins — an unanswered invite is withdrawn and nobody new sits."""
+    people = {"hub": ["anna"], "b": ["ben"], "c": ["cleo"], "d": ["dev", "dora"]}
+    sid = await draw_table(
+        net, people, late_join=True, waiting=(("d", "dev"), ("d", "dora"))
+    )
+    hub, d = net.homes["hub"], net.homes["d"]
+    anna = hub.uid("anna")
+    await hub.groups.start(app_id=APP, session_id=sid, actor_user_id=anna)
+    await settle(net)
+    await d.groups.join(app_id=APP, session_id=sid, actor_user_id=d.uid("dev"))
+    await settle(net)
+    table = await hub.group_repo.get(sid)
+    assert table.state == "playing" and table.entry("d", "dev").state == "seated"
+    await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=anna)
+    await settle(net)
+    table = await hub.group_repo.get(sid)
+    assert table.late_join is False
+    assert table.entry("d", "dora").state == "declined"
+    # The households' copies hear it: no free seats offered any more.
+    assert (await d.group_repo.get(sid)).late_join is False
+    assert await d.app_repo.get_pending_session(APP, d.uid("dora"), sid) is None
+    # Dev was drawn with the rest.
+    res = await d.draw.result(app_id=APP, session_id=sid, actor_user_id=d.uid("dev"))
+    assert res["name"] in {"Anna", "Ben", "Cleo"}
+
+
+async def test_a_refused_draw_leaves_late_joins_open(net):
+    sid = await draw_table(net, PEOPLE, late_join=True, waiting=(("d", "dev"),))
+    hub = net.homes["hub"]
+    ids = {"app_id": APP, "session_id": sid, "actor_user_id": hub.uid("anna")}
+    await hub.draw.configure(**ids, settings={"pairs": [[1, 2], [3, 4]]})
+    with pytest.raises(AppDrawPairsError):
+        await hub.draw.start(**ids)
+    table = await hub.group_repo.get(sid)
+    assert table.late_join is True and table.entry("d", "dev").state == "invited"
+
+
+async def test_without_late_joiners_draw_names_changes_nothing_for_joins(net):
+    sid = await draw_table(net, PEOPLE)
+    hub = net.homes["hub"]
+    await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
+    await settle(net)
+    table = await hub.group_repo.get(sid)
+    assert table.state == "playing" and table.late_join is False

@@ -15706,19 +15706,25 @@ def cmd_app_draw() -> None:
         wait(f"{label}'s name to be ready", lambda node=node: ready(node), timeout=240.0)
     print("  app-draw: every household did its part — four names ready ✓")
     # 4. The results: one circle, the pair apart, the right wish lists.
-    names = {}
+    # The admins of a, b and c share one display name, so a sheet's person
+    # is told apart by (name, household) — the card carries both.
+    household = {i[0]: i[4] for i in INSTANCES}
+    home_of = {"a": "a", "dora": "a", "b": "b", "c": "c"}
+    names: dict[tuple[str, str], str] = {}
     for label, node in people.items():
         s, me = _request(f"http://127.0.0.1:{node['port']}/api/me", token=node["token"])
         _must(f"me({label})", s, me)
-        names[me["display_name"]] = label
+        names[(me["display_name"], household[home_of[label]])] = label
     gives: dict[str, str] = {}
     for label, node in people.items():
         s, body = api(node, f"/groups/{sid}/engines/draw/result")
         _must(f"result({label})", s, body)
         res = body["result"]
-        to = names.get(res["name"])
+        to = names.get((res["name"], res["household"]))
         if to is None or to == label:
-            raise SystemExit(f"app-draw: {label} drew {res['name']!r}")
+            raise SystemExit(
+                f"app-draw: {label} drew {res['name']!r} of {res['household']!r}"
+            )
         if res["wish"] != marks[to]:
             raise SystemExit(f"app-draw: {label}'s sheet shows the wrong wish list")
         gives[label] = to
