@@ -5680,7 +5680,7 @@ async def test_gift_draw_rows_never_name_whom_you_give_to(stack):
         ),
         "handover": (
             "app_draw_changed",
-            "Cleo left the gift draw — see who you're giving to now",
+            "The person you were giving to left the gift draw — see who you're giving to now",
         ),
         "wish": (
             "app_draw_changed",
@@ -5695,7 +5695,6 @@ async def test_gift_draw_rows_never_name_whom_you_give_to(stack):
                 to_user_id=a.user_id,
                 change=change,
                 gen=2 if change == "again" else 1,
-                name="Cleo" if change == "handover" else None,
             )
         )
         rows = [
