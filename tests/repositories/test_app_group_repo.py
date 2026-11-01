@@ -310,3 +310,20 @@ async def test_a_spaces_tables_go_with_the_space(db, repo):
     await repo.save(_table(space_id="sp1"))
     await db.enqueue("DELETE FROM spaces WHERE id = 'sp1'")
     assert await repo.get("t1") is None
+
+
+async def test_count_seated_counts_one_persons_tables_not_ended(repo, db):
+    """The Apps page's "2 games going": tables the person has a place at
+    (an ``active`` seat row) waiting or being played — not an ended one, a
+    table they're only invited to, nor someone else's seat."""
+    await _seat_row(db, session_id="t1")
+    await _seat_row(db, session_id="t2")
+    await _seat_row(db, session_id="t3")
+    await _seat_row(db, state="invited", session_id="t4")
+    await repo.save(_table("t1"))
+    await repo.save(_table("t2", state=GROUP_PLAYING))
+    await repo.save(_table("t3", state=GROUP_ENDED, end_reason=END_CANCELLED))
+    await repo.save(_table("t4"))
+    assert await repo.count_seated("u-c", ["quiz", "chess"]) == {"quiz": 2}
+    assert await repo.count_seated("u-other", ["quiz"]) == {}
+    assert await repo.count_seated("u-c", []) == {}

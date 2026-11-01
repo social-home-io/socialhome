@@ -266,7 +266,7 @@ function HeroAction({ entry, installed, name, isAdmin, size, onOpen }: {
   }
   return (
     <div class="sh-app-detail__actions">
-      <Button onClick={() => setConsentOpen(true)}>{t('apps.add_to_household')}</Button>
+      <Button onClick={() => setConsentOpen(true)}>{t('apps.install')}</Button>
       <span class="sh-app-detail__hint">
         {size ? t('apps.detail.add_hint_size', { size }) : t('apps.detail.add_hint')}
       </span>
@@ -290,7 +290,7 @@ function HouseholdFacts({ installed, minAge, isAdmin }: {
     ? <> {t('apps.consent.protected')}</>
     : null
   if (!installed) {
-    return <p class="sh-app-detail__text">{t('apps.detail.not_added')} {whoCanOpen(minAge)}{protectedLine}</p>
+    return <p class="sh-app-detail__text">{t('apps.detail.not_installed')} {whoCanOpen(minAge)}{protectedLine}</p>
   }
   const day = shortDay(installed.installed_at)
   return (

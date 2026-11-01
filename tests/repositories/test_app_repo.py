@@ -817,3 +817,32 @@ async def test_list_session_rows_lists_everyone_at_one_session(db):
     rows = await repo.list_session_rows("chess", "g1")
     assert sorted(r.user_id for r in rows) == sorted([a, b])
     assert await repo.list_session_rows("chess", "nope") == []
+
+
+@pytest.mark.asyncio
+async def test_list_playing_lists_one_persons_one_to_one_games(db):
+    """The Apps page's "2 games going": the caller's own ``active`` 1:1
+    rows in the asked apps — never a waiting invite, a group seat, another
+    person's game or another app."""
+    repo = SqliteAppRepo(db)
+    me = await _seed_user(db)
+    other = await _seed_user(db)
+    await repo.install(_app())
+    await repo.install(_app("draughts"))
+    await repo.install(_app("go"))
+    await repo.add_active_session(_sent(me, "g1"))
+    await repo.add_active_session(
+        dataclasses.replace(_sent(me, "d1"), app_id="draughts")
+    )
+    await repo.add_active_session(dataclasses.replace(_sent(me, "go1"), app_id="go"))
+    await repo.add_pending_session(_pending(me, "waiting"))
+    await repo.add_active_session(
+        dataclasses.replace(_sent(me, "seat"), payload={"group": True})
+    )
+    await repo.add_active_session(_sent(other, "theirs"))
+    rows = await repo.list_playing(me, ["chess", "draughts"])
+    assert sorted((r.app_id, r.session_id) for r in rows) == [
+        ("chess", "g1"),
+        ("draughts", "d1"),
+    ]
+    assert await repo.list_playing(me, []) == []

@@ -179,6 +179,20 @@ describe('Your apps', () => {
     expect(added.textContent!.replace(/^Added by Anna · /, '')).not.toContain(' ')
   })
 
+  it('says how many of the viewer\'s games are going, and nothing when none', () => {
+    installedApps.value = [
+      makeApp({ games_going: 2 }),
+      makeApp({ app_id: 'go', name: 'Go', games_going: 1 }),
+      makeApp({ app_id: 'notes', name: 'Notes', games_going: 0 }),
+    ]
+    const { getByText, queryByText } = render(<AppsPage />)
+    expect(getByText('2 games going')).toBeTruthy()
+    expect(getByText('1 game going')).toBeTruthy()
+    expect(queryByText(/0 games? going/)).toBeNull()
+    // Next to who added it, in the same facts line.
+    expect(getByText('2 games going').parentElement!.textContent).toMatch(/^Added by Anna · .*2 games going$/)
+  })
+
   it('shows the rating chip only when it is not "Everyone"', () => {
     installedApps.value = [makeApp(), makeApp({ app_id: 'notes', name: 'Notes', min_age: 13 })]
     const { container } = render(<AppsPage />)
@@ -227,16 +241,16 @@ describe('Your apps', () => {
     installedApps.value = []
     nav.query = { tab: 'yours' }
     const { getByRole } = render(<AppsPage />)
-    expect(getByRole('heading', { level: 2, name: 'Nothing added yet' })).toBeTruthy()
+    expect(getByRole('heading', { level: 2, name: 'Nothing installed yet' })).toBeTruthy()
     fireEvent.click(getByRole('button', { name: 'Browse the Store' }))
     expect(getByRole('tabpanel', { name: 'Store' })).toBeTruthy()
   })
 
-  it('a member whose household\'s apps are all off is not told "Nothing added yet"', () => {
+  it('a member whose household\'s apps are all off is not told "Nothing installed yet"', () => {
     currentUser.value = { is_admin: false }
     installedApps.value = [makeApp({ enabled: false })]
     const { queryByRole, getByRole } = render(<AppsPage />)
-    expect(queryByRole('heading', { name: 'Nothing added yet' })).toBeNull()
+    expect(queryByRole('heading', { name: 'Nothing installed yet' })).toBeNull()
     expect(getByRole('heading', { level: 2, name: 'More apps' })).toBeTruthy()
   })
 
@@ -291,14 +305,14 @@ describe('Store', () => {
     expect(r.getByRole('button', { name: 'Details about Chess' })).toBeTruthy()
   })
 
-  it('Install asks first: "Add Notes for everyone?", then adds it', async () => {
+  it('Install asks first: "Install Notes for everyone?", then adds it', async () => {
     const r = renderStore()
     fireEvent.click(r.getByRole('button', { name: 'Install Notes' }))
-    const dialog = r.getByRole('dialog', { name: 'Add Notes for everyone?' })
+    const dialog = r.getByRole('dialog', { name: 'Install Notes for everyone?' })
     expect(dialog.textContent).toContain('It can never see your password')
     expect(dialog.textContent).toContain('Everyone in your household aged 13 and over can open it.')
     expect(installApp).not.toHaveBeenCalled()
-    fireEvent.click(r.getByRole('button', { name: 'Add to household' }))
+    fireEvent.click(r.getByRole('button', { name: 'Install' }))
     await vi.waitFor(() => expect(installApp).toHaveBeenCalledWith('notes'))
   })
 
@@ -362,7 +376,7 @@ describe('First run (nothing added yet)', () => {
     installApp.mockImplementationOnce(async () => { installedApps.value = [makeApp()] })
     const { getByRole } = render(<AppsPage />)
     fireEvent.click(getByRole('button', { name: 'Install Chess' }))
-    fireEvent.click(getByRole('button', { name: 'Add to household' }))
+    fireEvent.click(getByRole('button', { name: 'Install' }))
     // Re-render the page (the store's signal does that in the app).
     // (The store's signal re-renders the page in the app.)
     fireEvent.input(getByRole('searchbox'), { target: { value: 'c' } })
@@ -387,12 +401,12 @@ describe('First run (nothing added yet)', () => {
   it('the consent says what the app can do, for everyone', async () => {
     const { getByRole } = render(<AppsPage />)
     fireEvent.click(getByRole('button', { name: 'Install Chess' }))
-    const dialog = getByRole('dialog', { name: 'Add Chess for everyone?' })
+    const dialog = getByRole('dialog', { name: 'Install Chess for everyone?' })
     expect(dialog.textContent).toContain('Chess will be able to:')
     expect(dialog.textContent).toContain("You choose someone in Social Home. Chess learns only who you picked and people you've played with.")
     expect(dialog.textContent).toContain('Everyone in your household can open it.')
     expect(dialog.textContent).toContain('Protected accounts play only with people they can already message.')
-    fireEvent.click(getByRole('button', { name: 'Add to household' }))
+    fireEvent.click(getByRole('button', { name: 'Install' }))
     await vi.waitFor(() => expect(installApp).toHaveBeenCalledWith('chess'))
   })
 
@@ -402,7 +416,7 @@ describe('First run (nothing added yet)', () => {
     expect(queryByRole('button', { name: 'Install Chess' })).toBeNull()
     fireEvent.click(getByRole('button', { name: 'Ask an admin for Chess' }))
     const dialog = getByRole('dialog', { name: 'Ask an admin for Chess?' })
-    expect(dialog.textContent).toContain("They'll see what the app can do before adding it.")
+    expect(dialog.textContent).toContain("They'll see what the app can do before installing it.")
     fireEvent.click(getByRole('button', { name: 'Send request' }))
     await vi.waitFor(() => expect(requestApp).toHaveBeenCalledWith('chess'))
     await vi.waitFor(() => expect(showToast).toHaveBeenCalledWith('Request sent.', 'success'))

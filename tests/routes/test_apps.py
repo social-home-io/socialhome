@@ -18,6 +18,7 @@ from socialhome.app_keys import (
     notification_delivery_key,
 )
 from socialhome.auth import sha256_token_hash
+from socialhome.domain.app_group import GROUP_ENDED, GROUP_PLAYING, GroupSession
 from socialhome.domain.apps import (
     AppAgeRestrictedError,
     AppAlreadyInstalledError,
@@ -38,6 +39,7 @@ from socialhome.domain.events import AppInstalled
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.user import RemoteUser
 from socialhome.federation.federation_service import FederationService
+from socialhome.repositories.app_group_repo import SqliteAppGroupRepo
 from socialhome.repositories.app_repo import SqliteAppRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.app_federation_service import AppFederationService
@@ -2930,3 +2932,79 @@ async def test_uninstall_tells_an_older_household_nothing_about_a_game(
     r = await client.delete("/api/apps/com.example.hello", headers=_auth(client._tok))
     assert r.status == 200
     assert sent == []
+
+
+# ── "2 games going" on Your apps ─────────────────────────────────────────
+
+
+async def test_list_apps_counts_only_the_callers_own_games(client):
+    """``games_going`` per app: the caller's 1:1 games being played plus
+    the group tables they have a place at that haven't ended — never
+    another person's games here, never a waiting invite or an ended table."""
+    db = client._db
+    admin_id = (await db.fetchone("SELECT user_id FROM users WHERE is_admin=1"))[
+        "user_id"
+    ]
+    bob_tok = await _seed_member(db)
+    await _seed_installed_enabled_app(db, "chess")
+    repo = SqliteAppRepo(db)
+    now = datetime.now(UTC).isoformat()
+
+    def row(user_id: str, session_id: str, **kw) -> AppPendingSession:
+        base = {
+            "app_id": "chess",
+            "user_id": user_id,
+            "session_id": session_id,
+            "from_instance": "lakeside",
+            "from_user": "ben",
+            "payload": {},
+            "created_at": now,
+            "state": "active",
+            "updated_at": now,
+        }
+        base.update(kw)
+        return AppPendingSession(**base)
+
+    await repo.add_active_session(row(admin_id, "a1"))
+    await repo.add_active_session(row(admin_id, "a2"))
+    # Sent, not answered yet: not a game.
+    await repo.add_active_session(row(admin_id, "a3", payload={"sent": True}))
+    await repo.add_pending_session(row(admin_id, "a4", state="invited"))
+    await repo.add_active_session(row("bob-id", "b1"))
+    # A seat at a table being played, and one at a table that ended.
+    groups = SqliteAppGroupRepo(db)
+    for sid, state in (("t1", GROUP_PLAYING), ("t2", GROUP_ENDED)):
+        await repo.add_active_session(row(admin_id, sid, payload={"group": True}))
+        await groups.save(
+            GroupSession(
+                session_id=sid,
+                app_id="chess",
+                host_instance="lakeside",
+                host_user="ben",
+                hub_instance="lakeside",
+                state=state,
+                min_players=2,
+                max_players=4,
+                roster=(),
+                roster_rev=1,
+                created_at=now,
+                expires_at=now,
+                updated_at=now,
+            )
+        )
+
+    r = await client.get("/api/apps", headers=_auth(client._tok))
+    assert r.status == 200
+    [item] = (await r.json())["apps"]
+    assert item["games_going"] == 3
+
+    r = await client.get("/api/apps", headers=_auth(bob_tok))
+    [item] = (await r.json())["apps"]
+    assert item["games_going"] == 1
+
+
+async def test_list_apps_says_no_games_going(client):
+    await _seed_installed_enabled_app(client._db, "chess")
+    r = await client.get("/api/apps", headers=_auth(client._tok))
+    [item] = (await r.json())["apps"]
+    assert item["games_going"] == 0

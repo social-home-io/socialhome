@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date
 from typing import ClassVar
 
 from .errors import CodedError, WrongTypeError
@@ -571,6 +572,32 @@ class AppPendingSession:
         return self.payload.get("withdrawn") is True
 
     @property
+    def closed_by_other(self) -> bool:
+        """The other side closed this session: its ``close`` waits in the
+        mailbox (D11) for the person's app."""
+        held = self.held or {}
+        return (
+            held.get("kind") == "session"
+            and (held.get("payload") or {}).get("verb") == "close"
+        )
+
+    def is_game_going(self, recent_cut: str) -> bool:
+        """A 1:1 game this person is playing: the game started (an invite
+        they got and accepted, or one they sent that was answered), nobody
+        took it back or closed it, and someone moved since *recent_cut*
+        (:data:`UNINSTALL_GAME_RECENT_SECONDS` — Social Home can't tell a
+        finished game from a resting one, so a game quiet that long counts
+        as over). A seat at a group table is not a 1:1 game."""
+        return (
+            self.state == SESSION_ACTIVE
+            and not self.is_group
+            and not self.withdrawn
+            and not self.closed_by_other
+            and not (self.sent and not self.answered)
+            and self.last_change >= recent_cut
+        )
+
+    @property
     def is_group(self) -> bool:
         """A seat at a group table (v_76, :mod:`socialhome.domain.app_group`):
         the row keeps Needs you, the TTL and the uninstall cascade for the
@@ -714,20 +741,26 @@ def _locale(value: object) -> str | None:
     return None
 
 
-def core_version_satisfies(min_core_version: str | None, core_version: str) -> bool:
+def core_version_satisfies(
+    min_core_version: str | None, core_version: str, *, today: date
+) -> bool:
     """Is this Social Home (*core_version*) new enough for an app that
     needs *min_core_version*?
 
-    No requirement → yes. A core version that isn't a plain release — a
-    development build (``2026.10.12.dev2``, ``0.0.0+unknown``: built from a
-    checkout, ahead of every release) — is never held back either: the
-    gate is about compatibility, and a checkout runs the newest code."""
+    No requirement → yes. A release compares as a version. A core version
+    that isn't a plain release — a development build (``2026.10.12.dev2``,
+    ``0.0.0+unknown``: built from a checkout) — runs the newest code, so
+    it is ahead of every release out by *today* (UTC): only a requirement
+    dated after *today* (CalVer ``YYYY.M.D``) holds it back — no Social
+    Home has that yet, so the Store says "Needs a newer Social Home"."""
     if not min_core_version:
         return True
     need = parse_app_version(min_core_version)
-    have = parse_app_version(core_version)
-    if need is None or have is None or have == (0, 0, 0):
+    if need is None:
         return True
+    have = parse_app_version(core_version)
+    if have is None or have == (0, 0, 0):
+        return need[:3] <= (today.year, today.month, today.day)
     return have >= need
 
 

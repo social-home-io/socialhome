@@ -253,11 +253,7 @@ def _ending_kind(
         return "invite"
     if row.withdrawn:
         return None
-    held = row.held or {}
-    if (
-        held.get("kind") == "session"
-        and (held.get("payload") or {}).get("verb") == "close"
-    ):
+    if row.closed_by_other:
         return None
     if row.sent and not row.answered:
         return "invite"

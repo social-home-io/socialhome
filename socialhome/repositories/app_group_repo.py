@@ -23,6 +23,7 @@ from ..domain.app_group import (
     SeatKey,
     TableCard,
 )
+from ..domain.apps import SESSION_ACTIVE
 
 
 @runtime_checkable
@@ -37,6 +38,9 @@ class AbstractAppGroupRepo(Protocol):
         self, app_id: str, hub_instance: str, opener_user: str, *, since: str
     ) -> list[GroupSession]: ...
     async def count_open_from(self, hub_instance: str) -> int: ...
+    async def count_seated(
+        self, user_id: str, app_ids: list[str]
+    ) -> dict[str, int]: ...
     async def list_lobby_expired(self, *, before: str) -> list[GroupSession]: ...
     async def prune(self, *, ended_before: str, quiet_before: str) -> int: ...
     async def get_seat_key(self, session_id: str) -> str | None: ...
@@ -263,6 +267,27 @@ class SqliteAppGroupRepo:
                 default=0,
             )
         )
+
+    async def count_seated(self, user_id: str, app_ids: list[str]) -> dict[str, int]:
+        """Per app of *app_ids*: the group tables *user_id* has a place at
+        (their ``active`` seat row) that haven't ended — waiting for
+        players or being played. One query for the Apps page's "2 games
+        going"; only this person's seats, never anyone else's."""
+        if not app_ids:
+            return {}
+        marks = ",".join("?" * len(app_ids))
+        rows = await self._db.fetchall(
+            f"""SELECT p.app_id AS app_id, COUNT(*) AS n
+                  FROM app_pending_sessions p
+                  JOIN app_group_sessions g
+                    ON g.session_id = p.session_id AND g.app_id = p.app_id
+                 WHERE p.app_id IN ({marks}) AND p.user_id = ?
+                   AND p.state = ? AND json_type(p.payload_json, '$.group') = 'true'
+                   AND g.state != ?
+                 GROUP BY p.app_id""",
+            (*app_ids, user_id, SESSION_ACTIVE, GROUP_ENDED),
+        )
+        return {str(r["app_id"]): int(r["n"]) for r in rows}
 
     async def list_lobby_expired(self, *, before: str) -> list[GroupSession]:
         """Tables still waiting for players whose time ran out before

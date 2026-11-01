@@ -933,7 +933,10 @@ never drops the entry:
   Home" and install answers 409 `APP_NEEDS_NEWER_SOCIAL_HOME`.
 - **`min_core_version`** past this Social Home's release: the same answer,
   for install and update. A development build (a version that isn't a
-  plain release, such as `2026.10.30.dev3`) is never held back.
+  plain release, such as `2026.10.30.dev3` or `0.0.0+unknown`) runs the
+  newest code, so a release that is out doesn't hold it back — but a
+  `min_core_version` dated after today (UTC, CalVer `YYYY.M.D`) does: no
+  Social Home has it yet, so the Store says "Needs a newer Social Home".
 - **`min_age`** is the install's default age gate (the stricter of it and
   the bundle manifest's); an admin can change it afterwards, and an update
   never lowers it. A protected account doesn't see catalog apps rated
