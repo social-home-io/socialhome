@@ -9624,9 +9624,9 @@ def cmd_verify() -> None:
     # v_78 — the gift draw: the ``draw_*`` verbs of ``APP_SESSION``.
     # ``app-draw`` runs a four-person draw over a, b, c end to end (the
     # tamper and privacy rules are ``tests/protocol/test_app_draw.py``).
-    if int(_Cap.MIN_FOR_APP_DRAW) != 78 or _OURS < 78:
+    if int(_Cap.MIN_FOR_APP_ENGINES) != 78 or _OURS < 78:
         failures.append(
-            "MIN_FOR_APP_DRAW moved off v_78 (or OURS fell below it) — a draw "
+            "MIN_FOR_APP_ENGINES moved off v_78 (or OURS fell below it) — a draw "
             "would reach households that drop it"
         )
     else:
@@ -9636,7 +9636,7 @@ def cmd_verify() -> None:
         for label in ("a", "b", "c"):
             rows = _rows(
                 label,
-                "SELECT draw_json FROM app_group_sessions WHERE session_id = ?",
+                "SELECT state_json FROM app_engine_state WHERE session_id = ? AND engine = 'draw'",
                 (drawn["session_id"],),
             )
             if not rows or not rows[0][0] or '"enc"' not in rows[0][0]:
@@ -15548,20 +15548,20 @@ def cmd_app_draw() -> None:
 
     1. a's admin opens a table with dora (local), b's and c's admins
        (``POST /groups``); all three join — four seats on a, b, c.
-    2. a sets the draw (``PATCH …/draw``): name, budget, day and the pair
+    2. a sets the draw (``POST …/engines/draw/configure``, a patch): name, budget, day and the pair
        (a's admin, dora). Everyone writes a wish list with a marker
-       (``PUT …/draw/wish``).
-    3. a draws names (``POST …/draw/start``); the households run the
-       rounds by themselves (``draw_*`` verbs — the mix, the cards, any redo
-       with its proof) until each person's ``GET …/draw`` says ``ready``.
-    4. **The result.** Each person's own ``GET …/draw/result``: the four
+       (``POST …/engines/draw/wish``).
+    3. a draws names (``POST …/engines/draw/start``); the households run the
+       rounds by themselves (the ``engine`` verb — the mix, the cards, any redo
+       with its proof) until each person's ``GET …/engines/draw`` says ``ready``.
+    4. **The result.** Each person's own ``GET …/engines/draw/result``: the four
        form one circle, the pair don't draw each other, each sheet shows
        the recipient's own wish list.
     5. **Nobody else learns it.** No wish-list marker is in any household's
        database files in plaintext (the draw is KEK-wrapped), and none in
        a's (the host household's) log; a's admin reads only their own
        result.
-    6. **v_78.** ``OURS`` >= ``MIN_FOR_APP_DRAW`` and a sees b and c at it.
+    6. **v_78.** ``OURS`` >= ``MIN_FOR_APP_ENGINES`` and a sees b and c at it.
        Tampering mixers, false complaints, replays, offline homes and the
        hand-over are ``tests/protocol/test_app_draw.py``.
     """
@@ -15581,7 +15581,7 @@ def cmd_app_draw() -> None:
     manifest = (
         '{"entry": "index.html", "icon": null, "capabilities":'
         ' ["storage", "federation"], "players": {"min": 3, "max": 30},'
-        ' "tables": true}'
+        ' "tables": true, "engines": ["draw"]}'
     )
     for label in ("a", "b", "c"):
         con = sqlite3.connect(str(_instance_dir(label) / "socialhome.db"), timeout=10)
@@ -15673,28 +15673,33 @@ def cmd_app_draw() -> None:
     # 2. Settings, the pair, wish lists.
     s, conf = api(
         a,
-        f"/groups/{sid}/draw",
-        method="PATCH",
-        body={
-            "name": "Demo gift draw",
-            "budget": "about 20 €",
-            "day": "2026-12-24",
-            "pairs": [[seat["a"], seat["dora"]]],
-        },
+        f"/groups/{sid}/engines/draw/configure",
+        method="POST",
+        body={"name": "Demo gift draw", "budget": "about 20 €", "day": "2026-12-24"},
     )
     _must("configure(a)", s, conf)
+    # configure is a patch: the pair keeps the name, budget and day.
+    s, conf = api(
+        a,
+        f"/groups/{sid}/engines/draw/configure",
+        method="POST",
+        body={"pairs": [[seat["a"], seat["dora"]]]},
+    )
+    _must("configure pair(a)", s, conf)
+    if (conf.get("state") or {}).get("settings", {}).get("name") != "Demo gift draw":
+        raise SystemExit(f"app-draw: adding a pair wiped the settings: {conf!r}")
     marks = {label: f"DEMO-WISH-{label}-{secrets.token_hex(6)}" for label in people}
     for label, node in people.items():
-        s, w = api(node, f"/groups/{sid}/draw/wish", method="PUT", body={"text": marks[label]})
+        s, w = api(node, f"/groups/{sid}/engines/draw/wish", method="POST", body={"text": marks[label]})
         _must(f"wish({label})", s, w)
     a_log_from = _log_size("a")
     # 3. Draw names.
-    s, started = api(a, f"/groups/{sid}/draw/start", method="POST", body={})
+    s, started = api(a, f"/groups/{sid}/engines/draw/start", method="POST", body={})
     _must("draw names(a)", s, started)
 
     def ready(node: dict) -> bool:
-        s, body = api(node, f"/groups/{sid}/draw")
-        d = (body or {}).get("draw") or {}
+        s, body = api(node, f"/groups/{sid}/engines/draw")
+        d = (body or {}).get("state") or {}
         return s == 200 and d.get("state") == "ready" and d.get("has_result") is True
 
     for label, node in people.items():
@@ -15708,7 +15713,7 @@ def cmd_app_draw() -> None:
         names[me["display_name"]] = label
     gives: dict[str, str] = {}
     for label, node in people.items():
-        s, body = api(node, f"/groups/{sid}/draw/result")
+        s, body = api(node, f"/groups/{sid}/engines/draw/result")
         _must(f"result({label})", s, body)
         res = body["result"]
         to = names.get(res["name"])
@@ -15743,15 +15748,15 @@ def cmd_app_draw() -> None:
             raise SystemExit(f"app-draw: {who}'s wish list is in a's log")
     print("  app-draw: no wish list or result in plaintext on any disk or a's log ✓")
     # 6. v_78 between the three.
-    if _OURS < _Cap.MIN_FOR_APP_DRAW:
-        raise SystemExit(f"app-draw: OURS={_OURS} < MIN_FOR_APP_DRAW={_Cap.MIN_FOR_APP_DRAW}")
+    if _OURS < _Cap.MIN_FOR_APP_ENGINES:
+        raise SystemExit(f"app-draw: OURS={_OURS} < MIN_FOR_APP_ENGINES={_Cap.MIN_FOR_APP_ENGINES}")
     for peer in (b, c):
         rows = _rows(
             "a",
             "SELECT proto_version FROM remote_instances WHERE id = ?",
             (peer["instance_id"],),
         )
-        if not rows or int(rows[0][0] or 1) < _Cap.MIN_FOR_APP_DRAW:
+        if not rows or int(rows[0][0] or 1) < _Cap.MIN_FOR_APP_ENGINES:
             raise SystemExit(f"app-draw: a sees {peer['instance_id'][:8]} below v_78")
     state["app_draw"] = {"session_id": sid, "marks": list(marks.values())}
     _save(state)

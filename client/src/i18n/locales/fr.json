@@ -4970,6 +4970,8 @@
   "apps.perm.federation": "Envoie des invitations et des coups à d’autres foyers",
   "apps.perm.federation_detail": "Seulement à la personne que vous avez choisie, chiffré de foyer à foyer.",
   "apps.perm.none": "{name} ne demande rien : elle ne peut rien enregistrer ni joindre personne.",
+  "apps.engine.draw": "Organise des Pères Noël secrets avec Social Home",
+  "apps.engine.draw_detail": "Social Home tire les noms au sort dans chaque foyer et montre à chacun, dans son propre écran, à qui il offre un cadeau. {name} ne sait jamais qui offre à qui.",
   "apps.never.title": "{name} ne peut jamais",
   "apps.never.sign_in": "voir votre mot de passe ou votre connexion",
   "apps.never.content": "lire vos publications, chats, photos ou votre position",

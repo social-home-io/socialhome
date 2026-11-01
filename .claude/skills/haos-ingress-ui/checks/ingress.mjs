@@ -743,7 +743,7 @@ await check('app-draw-result', async () => {
   const want = `${PREFIX}/apps/ingress-probe/draw/no-such-table`
   for (const vp of ['desktop', 'mobile']) {
     const { ctx, page: p } = await newPage(vp)
-    const fetched = p.waitForResponse(r => r.url().includes('/draw/result'))
+    const fetched = p.waitForResponse(r => r.url().includes('/engines/draw/result'))
     await p.goto(APP + 'apps/ingress-probe/draw/no-such-table', { waitUntil: 'load' })
     await step('the result sheet', settled(p))
     const res = await step('its result request', fetched)

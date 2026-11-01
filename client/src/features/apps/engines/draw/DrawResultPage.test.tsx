@@ -11,7 +11,7 @@ vi.mock('preact-iso', () => ({
   useRoute: () => ({ params: { appId: 'gift-draw', sessionId: 't1' } }),
   useLocation: () => ({ route: h.route, path: '/apps/gift-draw/draw/t1', url: '/apps/gift-draw/draw/t1', query: {} }),
 }))
-vi.mock('./drawBridge', () => ({ getDrawResult: h.getDrawResult }))
+vi.mock('../engineBridge', () => ({ getDrawResult: h.getDrawResult }))
 
 import DrawResultPage from './DrawResultPage'
 import { DONE_ARM_MS } from './DrawResultSheet'

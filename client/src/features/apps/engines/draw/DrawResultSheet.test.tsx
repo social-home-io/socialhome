@@ -11,7 +11,7 @@ import { render, fireEvent, waitFor } from '@testing-library/preact'
 
 const h = vi.hoisted(() => ({ getDrawResult: vi.fn() }))
 
-vi.mock('./drawBridge', () => ({ getDrawResult: h.getDrawResult }))
+vi.mock('../engineBridge', () => ({ getDrawResult: h.getDrawResult }))
 
 import { ApiError } from '@/api'
 import { DrawResultSheet, DONE_ARM_MS, dayLabel } from './DrawResultSheet'

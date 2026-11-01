@@ -317,7 +317,7 @@
   "notification.app.table_started_many_generic": "Dein Spiel mit {name} und {count} anderen hat begonnen",
   "notification.app.draw_ready": "Dein Los ist da – sieh nach, wen du beschenkst",
   "notification.app.draw_again": "Es wurde neu ausgelost – sieh nach, wen du jetzt beschenkst",
-  "notification.app.draw_handover": "{name} macht beim Wichteln nicht mehr mit – sieh nach, wen du jetzt beschenkst",
+  "notification.app.draw_handover": "Die Person, die du beschenkt hast, macht beim Wichteln nicht mehr mit – sieh nach, wen du jetzt beschenkst",
   "notification.app.draw_wish": "Die Person, die du beschenkst, hat ihre Wunschliste geändert",
   "notification.app.requested": "{name} wünscht sich {app}",
   "notification.app.update_available": "Update für {app}",

@@ -66,8 +66,8 @@ from weakref import WeakValueDictionary
 
 import orjson
 
+from ..app_engines.domain import VERB_ENGINE
 from ..crypto import b64url_decode, derive_instance_id
-from ..domain.app_draw import DRAW_VERBS
 from ..domain.app_group import (
     CLOSE_FULL,
     CLOSE_REMOVED,
@@ -175,6 +175,7 @@ from .app_group_budget import TableSendBudget
 from .protection_gate import ProtectionGateMixin
 
 if TYPE_CHECKING:
+    from ..app_engines.registry import AppEngineRegistry
     from ..domain.apps import InstalledApp
     from ..domain.events import AppUninstalled, DomainEvent
     from ..domain.notification import Notification
@@ -186,7 +187,6 @@ if TYPE_CHECKING:
     from ..repositories.app_repo import AbstractAppRepo
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.user_repo import AbstractUserRepo
-    from .app_draw_service import AppDrawService
     from .app_federation_service import AppFederationService
     from .space_app_table_service import SpaceTableService
 
@@ -307,7 +307,7 @@ class AppGroupService(ProtectionGateMixin):
         "_bus",
         "_child_protection",
         "_coalesce_every",
-        "_draw",
+        "_engines",
         "_fed_repo",
         "_federation",
         "_finished_at",
@@ -380,9 +380,9 @@ class AppGroupService(ProtectionGateMixin):
         #: Space tables (v_77): the space transport, cards and space rules
         #: (:meth:`attach_space_tables`).
         self._space_tables: SpaceTableService | None = None
-        #: The gift draw (v_78): its ``draw_*`` verbs and table changes
-        #: (:meth:`attach_draw`).
-        self._draw: AppDrawService | None = None
+        #: App engines (v_78): their ``engine`` steps and table changes
+        #: (:meth:`attach_engines`).
+        self._engines: AppEngineRegistry | None = None
 
     @property
     def _own(self) -> str:
@@ -838,9 +838,9 @@ class AppGroupService(ProtectionGateMixin):
     async def _leave_table(
         self, table: GroupSession, user: User, *, declined: bool
     ) -> None:
-        if self._draw is not None and not declined:
+        if self._engines is not None and not declined:
             # After a reveal, their household hands their recipient on.
-            self._draw.person_left(table, user.username)
+            self._engines.person_left(table, user.username)
         if table.hub_instance == self._own:
             await self._hub_leave(
                 table.session_id, self._own, user.username, declined=declined
@@ -2180,10 +2180,10 @@ class AppGroupService(ProtectionGateMixin):
             return
         if verb == "group_invite" and space_id is not None:
             return  # a space table invites nobody: members join it
-        if verb in DRAW_VERBS:
-            # The gift draw (v_78) at a table this household knows.
-            if table is not None and self._draw is not None:
-                await self._draw.on_inbound(event, table)
+        if verb == VERB_ENGINE:
+            # An app engine's step (v_78) at a table this household knows.
+            if table is not None and self._engines is not None:
+                await self._engines.on_inbound(event, table)
             return
         is_hub = table is not None and table.hub_instance == self._own
         sender = event.from_instance
@@ -2659,8 +2659,8 @@ class AppGroupService(ProtectionGateMixin):
         await self._app_repo.delete_pending_session(
             table.app_id, user.user_id, table.session_id
         )
-        if self._draw is not None:
-            self._draw.person_left(table, username)
+        if self._engines is not None:
+            self._engines.person_left(table, username)
         await self._push_to(table, user, change=change)
 
     async def _push(self, table: GroupSession) -> None:
@@ -2669,8 +2669,8 @@ class AppGroupService(ProtectionGateMixin):
         draw at it (v_78)."""
         if table.space_id is not None and self._space_tables is not None:
             await self._space_tables.on_table_changed(table)
-        if self._draw is not None:
-            self._draw.table_changed(table)
+        if self._engines is not None:
+            self._engines.table_changed(table)
         for user, row in await self._local_people(table):
             await self._ws.broadcast_to_user(
                 user.user_id,
@@ -3027,12 +3027,12 @@ class AppGroupService(ProtectionGateMixin):
         """The people of this household with a place at *table*."""
         return await self._local_people(table)
 
-    # ─── The gift draw (v_78) — driven by AppDrawService ──────────────
+    # ─── App engines (v_78) — driven by the AppEngineRegistry ─────────
 
-    def attach_draw(self, draw: AppDrawService) -> None:
-        """Wire the gift draw: ``draw_*`` verbs for a table this household
-        knows go to *draw*, and each change of a table reaches it."""
-        self._draw = draw
+    def attach_engines(self, engines: AppEngineRegistry) -> None:
+        """Wire app engines: ``engine`` steps for a table this household
+        knows go to *engines*, and each change of a table reaches them."""
+        self._engines = engines
 
     async def send_to(
         self, table: GroupSession, to_instance: str, payload: dict

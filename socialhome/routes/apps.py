@@ -98,6 +98,7 @@ def _serialize(app: InstalledApp, names: dict[str, str] | None = None) -> dict:
         },
         "tables": app.manifest.tables,
         "late_join": app.manifest.late_join,
+        "engines": list(app.manifest.engines),
     }
 
 

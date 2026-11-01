@@ -1,52 +1,48 @@
 """The gift draw's cryptography — a decryption mix of sealed name-boxes (v_78).
 
-Group-play design §5.4. A draw among *n* people (3 ≤ n ≤ 30) in *h*
-households runs in **rounds**; each round:
+Group-play design §5.4, hardened after the first independent review
+(``docs/protocol/app-engines.md``). A draw among *n* people (3 ≤ n ≤ 30)
+in *h* households runs in **rounds**; each round:
 
-1. Every household makes a fresh X25519 **mixer key** and signs its public
-   half with its household identity key (Ed25519).
-2. For each of its people it makes a fresh X25519 **box key** ``B`` (the
-   private half never leaves the household) and wraps the public half in
-   one layer per mixer, outermost first in the mixing order:
-   ``seal(M1, seal(M2, … seal(Mh, B)))`` — an **onion**. All onions of a
-   round have the same size. It also commits to which box is whose with a
-   hiding commitment ``H(ctx, instance, user, B, nonce)``.
-3. The mixers, one after the other, each peel their layer off every
-   entry, check each opened, shuffle with a CSPRNG and sign the hash of
-   what they got and what they give on (the **signed chain**). The last
-   output is ``S``: the n box keys in an order nobody knows.
-4. The person whose box sits at position ``j`` gives to whoever holds
-   ``j + 1`` (the last gives to the first) — a random circle: nobody draws
-   themselves, everyone gives and gets once. Each household seals each of
-   its people's **card** (name, household, wish list — exactly
-   :data:`CARD_BYTES`) to the box at ``j − 1`` (their giver) with a
-   key-private seal; each household tries its boxes on all n cards and
-   exactly one opens per person.
+1. Every household makes a fresh X25519 **mixer key** and signs it with its
+   household identity key (Ed25519).
+2. For each of its people it draws a fresh 32-byte **person seed**. Every
+   secret of that person's round derives from it: the X25519 **box key**
+   ``B`` (the private half never leaves the household), a commitment nonce,
+   and the ephemeral keys of the **onion** — ``B`` wrapped in one layer per
+   mixer, ``seal(M1, seal(M2, … seal(Mh, B)))``. The onion is therefore
+   *deterministic* from the seed: a complaint that reveals the seed lets
+   anyone rebuild it byte for byte, so a household can't commit to one box
+   and onion another. Each household also commits to a random value ``r``
+   (``H(ctx ‖ instance ‖ r)``) for the circle's order.
+3. The mixers, one after the other, peel their layer, check, shuffle and
+   sign the hash of what they took and gave (the **signed chain**). The
+   last output is the **set** ``S`` of the n box keys.
+4. After ``S`` is published every household reveals ``r``; the circle is
+   ``S`` sorted by ``H(ctx ‖ R ‖ box)`` with ``R = H(ctx ‖ all r)`` — so no
+   mixer (the last one included) chooses who sits next to whom.
+5. The box at circle position ``j`` gives to ``j + 1``. Each person's
+   **card** (name, household, wish list — exactly :data:`CARD_BYTES`) is
+   sealed key-private to the box at ``j − 1`` (their giver); every household
+   commits to its sealed cards' hashes before any card is sent.
 
-Primitives
-----------
-One construction, :func:`seal` / :func:`open_sealed`: an ephemeral X25519
-key, ECDH with the recipient's public key, HKDF-SHA256 over the shared
-secret with ``info`` binding the domain, the round context, a label
-(``layer|k``, ``card``, ``handover``), the ephemeral public key and the
-recipient's public key, then AES-256-GCM with an all-zero nonce — safe
-because every seal derives a fresh key from a fresh ephemeral key, so no
-nonce travels. A seal is ``eph_pub ‖ ct`` and names nobody: it is
-**key-private** (Bellare–Boldyreva–Desai–Pointcheval, ASIACRYPT 2001) — the
-relay can't tell whom a card is for. Every seal of one kind has one size.
+One seal construction, :func:`seal` / :func:`open_sealed`: an ephemeral
+X25519 key, ECDH with the recipient's key, HKDF-SHA256 with ``info``
+binding the domain, the round context, a label (``draw|layer|k``,
+``draw|card``, ``draw|handover`` — the engine id first), both public keys;
+AES-256-GCM with an all-zero nonce (a fresh key per seal). A seal names
+nobody: it is **key-private**. Every wire shape carries the suite
+(``engine_suite: "x25519-hkdf-aesgcm256"``); a receiver refuses another
+with :class:`UnsupportedDrawSuite`.
 
-Every wire shape carries ``draw_suite`` (:data:`DRAW_SUITE_X25519_AESGCM`);
-a receiver refuses any other value with :class:`UnsupportedDrawSuite` —
-never a default (CLAUDE.md, "crypto wire shapes carry a suite tag").
-
-Pure functions, no I/O. Every function that needs randomness takes
-``rand`` (``os.urandom`` by default) so tests can pin test vectors with a
-seeded generator; production never passes one.
+Pure functions, no I/O. Functions that need randomness take ``rand``
+(``os.urandom`` by default) so tests pin vectors with a seeded generator.
 """
 
 from __future__ import annotations
 
 import hashlib
+import hmac
 import os
 import struct
 from collections.abc import Callable, Sequence
@@ -61,6 +57,9 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+#: The engine every label and context of this module is bound to.
+ENGINE_ID: str = "draw"
 
 #: The one draw suite: X25519 + HKDF-SHA256 + AES-256-GCM seals,
 #: Ed25519 household signatures. Phase 2 of ``docs/crypto.md`` adds a
@@ -77,35 +76,43 @@ SEAL_OVERHEAD: int = KEY_BYTES + TAG_BYTES
 CARD_BYTES: int = 1024
 #: A sealed card on the wire (before base64).
 SEALED_CARD_BYTES: int = CARD_BYTES + SEAL_OVERHEAD
-#: A hand-over's plaintext: the leaver's word around their recipient's card.
-HANDOVER_BYTES: int = CARD_BYTES + 256
+#: A hand-over's plaintext: who left, their box key, their household's word.
+HANDOVER_BYTES: int = 256
 SEALED_HANDOVER_BYTES: int = HANDOVER_BYTES + SEAL_OVERHEAD
-#: A commitment's nonce and an Ed25519 signature.
+#: A person seed, a commitment nonce, the circle randomness, a signature.
+SEED_BYTES: int = 32
 NONCE_BYTES: int = 32
 SIG_BYTES: int = 64
 DIGEST_BYTES: int = 32
 
-#: The card's byte budget per field (UTF-8). A name or household name
-#: longer than :data:`CARD_LABEL_MAX_BYTES` is cut on a character boundary;
-#: a wish list that doesn't fit is refused by the caller before it is set.
+#: The card's byte budget per field (UTF-8).
 CARD_LABEL_MAX_BYTES: int = 120
 CARD_REF_MAX_BYTES: int = 64
 _CARD_VERSION: int = 1
-_HANDOVER_VERSION: int = 1
+_HANDOVER_VERSION: int = 2
 
-_CTX_DOMAIN = b"socialhome/app_draw/round/v1"
-_ORDER_DOMAIN = b"socialhome/app_draw/order/v1"
-_SEAL_DOMAIN = b"socialhome/app_draw/seal/v1"
-_LIST_DOMAIN = b"socialhome/app_draw/list/v1"
-_COMMIT_DOMAIN = b"socialhome/app_draw/commit/v1"
-_KEY_SIG_DOMAIN = b"socialhome/app_draw/mixer_key/v1"
-_BATCH_SIG_DOMAIN = b"socialhome/app_draw/onions/v1"
-_MIX_SIG_DOMAIN = b"socialhome/app_draw/mixed/v1"
-_COMPLAINT_DOMAIN = b"socialhome/app_draw/complaint/v1"
-_CARD_SIG_DOMAIN = b"socialhome/app_draw/card/v1"
-_HANDOVER_SIG_DOMAIN = b"socialhome/app_draw/handover/v1"
+_CTX_DOMAIN = b"socialhome/app_engine/draw/round/v2"
+_ORDER_DOMAIN = b"socialhome/app_engine/draw/order/v1"
+_SEAL_DOMAIN = b"socialhome/app_engine/draw/seal/v2"
+_LIST_DOMAIN = b"socialhome/app_engine/draw/list/v1"
+_COMMIT_DOMAIN = b"socialhome/app_engine/draw/commit/v1"
+_SEED_DOMAIN = b"socialhome/app_engine/draw/seed/v1"
+_R_COMMIT_DOMAIN = b"socialhome/app_engine/draw/r_commit/v1"
+_R_DOMAIN = b"socialhome/app_engine/draw/r/v1"
+_CIRCLE_DOMAIN = b"socialhome/app_engine/draw/circle/v1"
+_KEY_SIG_DOMAIN = b"socialhome/app_engine/draw/mixer_key/v1"
+_BATCH_SIG_DOMAIN = b"socialhome/app_engine/draw/onions/v2"
+_MIX_SIG_DOMAIN = b"socialhome/app_engine/draw/mixed/v1"
+_COMPLAINT_DOMAIN = b"socialhome/app_engine/draw/complaint/v2"
+_CARD_SIG_DOMAIN = b"socialhome/app_engine/draw/card/v1"
+_CARD_COMMIT_DOMAIN = b"socialhome/app_engine/draw/card_commit/v1"
+_DONE_DOMAIN = b"socialhome/app_engine/draw/done/v1"
+_OPENING_DOMAIN = b"socialhome/app_engine/draw/opening/v1"
+_HANDOVER_SIG_DOMAIN = b"socialhome/app_engine/draw/handover/v2"
 
 _ZERO_NONCE = b"\x00" * 12
+#: A fixed scalar to test a public key with (any non-zero scalar works).
+_PROBE_SCALAR = b"\x40" + b"\x11" * 30 + b"\x40"
 
 #: A source of random bytes (``os.urandom``'s shape).
 Rand = Callable[[int], bytes]
@@ -124,7 +131,7 @@ class UnsupportedDrawSuite(ValueError):
 def check_suite(suite: object) -> str:
     """*suite* when this build speaks it; else :class:`UnsupportedDrawSuite`."""
     if not isinstance(suite, str) or suite not in SUPPORTED_DRAW_SUITES:
-        raise UnsupportedDrawSuite(f"draw_suite {suite!r}")
+        raise UnsupportedDrawSuite(f"engine_suite {suite!r}")
     return suite
 
 
@@ -136,10 +143,7 @@ def _fields(domain: bytes, *parts: bytes | str | int) -> bytes:
     different field lists encode the same."""
     out = bytearray(domain)
     for part in parts:
-        if isinstance(part, bytes):
-            raw = part
-        else:
-            raw = str(part).encode("utf-8")
+        raw = part if isinstance(part, bytes) else str(part).encode("utf-8")
         out += struct.pack(">I", len(raw)) + raw
     return bytes(out)
 
@@ -180,13 +184,60 @@ def _exchange(priv: bytes, pub: bytes) -> bytes:
         raise DrawCryptoError("key agreement failed") from exc
 
 
+def is_usable_key(pub: bytes) -> bool:
+    """Whether *pub* is a 32-byte X25519 key one can seal to (no low-order
+    point) — every household checks every box in ``S`` publicly."""
+    try:
+        _exchange(_PROBE_SCALAR, pub)
+    except DrawCryptoError:
+        return False
+    return True
+
+
+def seed_stream(seed: bytes, label: str) -> Rand:
+    """A deterministic byte source from *seed* (HMAC-SHA256 in counter
+    mode) — what a person's onion draws its ephemeral keys from."""
+    if len(seed) != SEED_BYTES:
+        raise DrawCryptoError("seed wrong size")
+    key = sha256(_fields(_SEED_DOMAIN, seed, label))
+    counter = [0]
+    buf = bytearray()
+
+    def take(n: int) -> bytes:
+        while len(buf) < n:
+            buf.extend(
+                hmac.new(key, struct.pack(">Q", counter[0]), hashlib.sha256).digest()
+            )
+            counter[0] += 1
+        out = bytes(buf[:n])
+        del buf[:n]
+        return out
+
+    return take
+
+
+@dataclass(slots=True, frozen=True)
+class PersonKeys:
+    """What a person's round derives from their seed."""
+
+    box_priv: bytes
+    box_pub: bytes
+    nonce: bytes
+
+
+def person_keys(seed: bytes) -> PersonKeys:
+    """The box key and commitment nonce a person seed derives."""
+    stream = seed_stream(seed, "box")
+    priv, pub = new_keypair(stream)
+    return PersonKeys(box_priv=priv, box_pub=pub, nonce=stream(NONCE_BYTES))
+
+
 # ─── The round ────────────────────────────────────────────────────────────
 
 
 @dataclass(slots=True, frozen=True)
 class Person:
-    """One person in a draw round: their seat at the table, their
-    household and their username there."""
+    """One person in a draw round: their seat, household and username."""
 
     seat: int
     instance: str
@@ -203,14 +254,18 @@ def round_context(
     identities: dict[str, str],
     settings_digest: bytes,
 ) -> bytes:
-    """The 32-byte context every signature and seal of a round is bound to.
-
-    It covers the table, the draw (*gen*: 1, then +1 per "Draw again") and
-    the round, the people (by seat), each household's identity key (hex)
-    and the draw's settings — so a relay can't show two households two
-    different rounds and have their signatures agree."""
+    """The 32-byte context every signature and seal of a round is bound to:
+    the engine, the suite, the table, the draw and round, the people (by
+    seat), each household's identity key and the settings."""
     check_suite(suite)
-    parts: list[bytes | str | int] = [suite, session_id, gen, round_no, len(people)]
+    parts: list[bytes | str | int] = [
+        ENGINE_ID,
+        suite,
+        session_id,
+        gen,
+        round_no,
+        len(people),
+    ]
     for p in sorted(people, key=lambda p: p.seat):
         parts += [p.seat, p.instance, p.user]
     for inst in sorted(identities):
@@ -223,17 +278,36 @@ def mix_order(
     session_id: str, gen: int, round_no: int, instances: Sequence[str]
 ) -> list[str]:
     """The households in mixing order: sorted by
-    ``SHA-256(session ‖ gen ‖ round ‖ instance)`` — nobody picks it."""
+    ``SHA-256(table ‖ gen ‖ round ‖ household)`` — nobody picks it."""
     return sorted(
         set(instances),
         key=lambda i: sha256(_fields(_ORDER_DOMAIN, session_id, gen, round_no, i)),
     )
 
 
+def r_commitment(ctx: bytes, instance: str, r: bytes) -> bytes:
+    """A household's commitment to its circle randomness *r*."""
+    if len(r) != SEED_BYTES:
+        raise DrawCryptoError("r wrong size")
+    return sha256(_fields(_R_COMMIT_DOMAIN, ctx, instance, r))
+
+
+def round_randomness(ctx: bytes, reveals: dict[str, bytes]) -> bytes:
+    """``R`` from every household's revealed *r* (households in id order)."""
+    parts: list[bytes | str | int] = [ctx, len(reveals)]
+    for inst in sorted(reveals):
+        parts += [inst, reveals[inst]]
+    return sha256(_fields(_R_DOMAIN, *parts))
+
+
+def circle(S: Sequence[bytes], *, ctx: bytes, R: bytes) -> list[bytes]:
+    """The circle: the box keys of ``S`` sorted by ``H(ctx ‖ R ‖ box)`` —
+    the order the mixers left them in doesn't count."""
+    return sorted(S, key=lambda box: sha256(_fields(_CIRCLE_DOMAIN, ctx, R, box)))
+
+
 def circle_targets(position: int, n: int) -> tuple[int, int]:
-    """For the box at *position* of *n*: ``(gives_to, sealed_to)`` — the
-    position whose person this one gives to, and the position (its giver)
-    its own card is sealed to."""
+    """For the box at *position* of *n*: ``(gives_to, sealed_to)``."""
     if n < 2 or not 0 <= position < n:
         raise DrawCryptoError("position out of range")
     return (position + 1) % n, (position - 1) % n
@@ -245,7 +319,7 @@ def circle_targets(position: int, n: int) -> tuple[int, int]:
 def _seal_key(
     shared: bytes, *, ctx: bytes, label: str, eph_pub: bytes, to_pub: bytes
 ) -> bytes:
-    info = _fields(_SEAL_DOMAIN, ctx, label, eph_pub, to_pub)
+    info = _fields(_SEAL_DOMAIN, ctx, f"{ENGINE_ID}|{label}", eph_pub, to_pub)
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=info).derive(
         shared
     )
@@ -259,9 +333,8 @@ def seal(
     label: str,
     rand: Rand = os.urandom,
 ) -> bytes:
-    """Seal *plaintext* to the X25519 public key *to_pub*:
-    ``eph_pub ‖ AES-256-GCM(k, 0¹², plaintext)``. Key-private: nothing in
-    it names the recipient."""
+    """Seal *plaintext* to *to_pub*: ``eph_pub ‖ AES-256-GCM(k, 0¹², pt)``.
+    Key-private: nothing in it names the recipient."""
     eph_priv, eph_pub = new_keypair(rand)
     shared = _exchange(eph_priv, to_pub)
     key = _seal_key(shared, ctx=ctx, label=label, eph_pub=eph_pub, to_pub=to_pub)
@@ -269,9 +342,8 @@ def seal(
 
 
 def open_sealed(priv: bytes, blob: bytes, *, ctx: bytes, label: str) -> bytes:
-    """Open a seal to the key pair whose private half is *priv*. Raises
-    :class:`DrawCryptoError` when it isn't for that key (or was changed,
-    or was made for another round or label)."""
+    """Open a seal to the key whose private half is *priv* — else
+    :class:`DrawCryptoError`."""
     if len(blob) < SEAL_OVERHEAD:
         raise DrawCryptoError("seal too short")
     eph_pub = blob[:KEY_BYTES]
@@ -304,14 +376,25 @@ def build_onion(
     ctx: bytes,
     rand: Rand = os.urandom,
 ) -> bytes:
-    """Wrap *box_pub* in one layer per mixer key (in mixing order: the
-    first mixer's layer outermost)."""
+    """Wrap *box_pub* in one layer per mixer key (the first mixer's layer
+    outermost)."""
     if len(box_pub) != KEY_BYTES:
         raise DrawCryptoError("box key wrong size")
     inner = box_pub
     for k in reversed(range(len(mixer_pubs))):
         inner = seal(mixer_pubs[k], inner, ctx=ctx, label=_layer_label(k), rand=rand)
     return inner
+
+
+def onion_from_seed(seed: bytes, mixer_pubs: Sequence[bytes], *, ctx: bytes) -> bytes:
+    """A person's onion, deterministic from their seed — what a complaint's
+    revealed seed lets anyone rebuild byte for byte."""
+    return build_onion(
+        person_keys(seed).box_pub,
+        mixer_pubs,
+        ctx=ctx,
+        rand=seed_stream(seed, "onion"),
+    )
 
 
 def peel(mixer_priv: bytes, onion: bytes, *, ctx: bytes, k: int, h: int) -> bytes:
@@ -325,8 +408,7 @@ def peel(mixer_priv: bytes, onion: bytes, *, ctx: bytes, k: int, h: int) -> byte
 
 
 def _randbelow(bound: int, rand: Rand) -> int:
-    """A uniform integer in ``[0, bound)`` from *rand* (rejection
-    sampling — no modulo bias)."""
+    """A uniform integer in ``[0, bound)`` (rejection sampling)."""
     if bound <= 1:
         return 0
     nbytes = (bound.bit_length() + 7) // 8 + 1
@@ -338,8 +420,7 @@ def _randbelow(bound: int, rand: Rand) -> int:
 
 
 def shuffle(items: list[bytes], rand: Rand = os.urandom) -> list[bytes]:
-    """A uniformly random permutation of *items* (Fisher–Yates over a
-    CSPRNG), as a new list."""
+    """A uniformly random permutation of *items* (Fisher–Yates), new list."""
     out = list(items)
     for i in range(len(out) - 1, 0, -1):
         j = _randbelow(i + 1, rand)
@@ -357,8 +438,7 @@ def mix(
     rand: Rand = os.urandom,
 ) -> list[bytes]:
     """Mixer *k*'s step: peel every entry, check each opened and all are
-    distinct (before and after), and shuffle. Raises
-    :class:`DrawCryptoError` on anything off — the mixer then refuses."""
+    distinct (before and after), shuffle."""
     if len(set(entries)) != len(entries):
         raise DrawCryptoError("duplicate entry in the input")
     out = [peel(mixer_priv, e, ctx=ctx, k=k, h=h) for e in entries]
@@ -372,8 +452,7 @@ def entry_hash(entry: bytes) -> bytes:
 
 
 def list_digest(hashes_: Sequence[bytes]) -> bytes:
-    """The digest a mixer signs for a list, from its entries' hashes in
-    order (so a household can check the chain from hashes alone)."""
+    """The digest a mixer signs for a list, from its entries' hashes."""
     return sha256(_fields(_LIST_DOMAIN, len(hashes_), *hashes_))
 
 
@@ -386,11 +465,16 @@ def commitment(
     return sha256(_fields(_COMMIT_DOMAIN, ctx, instance, user, box_pub, nonce))
 
 
+def person_commitment(ctx: bytes, instance: str, user: str, seed: bytes) -> bytes:
+    """:func:`commitment` for the keys *seed* derives."""
+    keys = person_keys(seed)
+    return commitment(ctx, instance, user, keys.box_pub, keys.nonce)
+
+
 # ─── What households sign ─────────────────────────────────────────────────
 
 
 def key_message(ctx: bytes, instance: str, mixer_pub: bytes) -> bytes:
-    """What a household signs to vouch for its mixer key this round."""
     return _fields(_KEY_SIG_DOMAIN, ctx, instance, mixer_pub)
 
 
@@ -399,28 +483,52 @@ def batch_message(
     instance: str,
     onion_hashes: Sequence[bytes],
     commits: Sequence[tuple[str, bytes]],
+    r_commit: bytes,
 ) -> bytes:
-    """What a household signs over its onions (by hash, in its order) and
-    its people's commitments (by username, sorted)."""
+    """A household's onions (by hash, in its order), its people's
+    commitments (by username) and its circle-randomness commitment."""
     parts: list[bytes | str | int] = [ctx, instance, len(onion_hashes), *onion_hashes]
     parts.append(len(commits))
     for user, c in sorted(commits):
         parts += [user, c]
+    parts.append(r_commit)
     return _fields(_BATCH_SIG_DOMAIN, *parts)
 
 
 def mix_message(
     ctx: bytes, k: int, instance: str, in_digest: bytes, out_digest: bytes
 ) -> bytes:
-    """What mixer *k* signs: the list it took and the list it gave on."""
     return _fields(_MIX_SIG_DOMAIN, ctx, k, instance, in_digest, out_digest)
 
 
 def complaint_message(
-    ctx: bytes, instance: str, kind: str, user: str, box_priv: bytes, nonce: bytes
+    ctx: bytes, instance: str, kind: str, user: str, seed: bytes
 ) -> bytes:
-    """What a household signs when it stops a round with its proof."""
-    return _fields(_COMPLAINT_DOMAIN, ctx, instance, kind, user, box_priv, nonce)
+    """A household stopping a round with its proof: the person's seed."""
+    return _fields(_COMPLAINT_DOMAIN, ctx, instance, kind, user, seed)
+
+
+def opening_message(
+    ctx: bytes, instance: str, seeds: Sequence[tuple[str, bytes]]
+) -> bytes:
+    """A household opening every seed of a round that broke publicly."""
+    parts: list[bytes | str | int] = [ctx, instance, len(seeds)]
+    for user, seed in sorted(seeds):
+        parts += [user, seed]
+    return _fields(_OPENING_DOMAIN, *parts)
+
+
+def card_commit_message(
+    ctx: bytes, instance: str, card_hashes: Sequence[bytes]
+) -> bytes:
+    """A household committing to its sealed cards before any card is out."""
+    return _fields(_CARD_COMMIT_DOMAIN, ctx, instance, *sorted(card_hashes))
+
+
+def done_message(ctx: bytes, instance: str, count: int) -> bytes:
+    """A household saying its people's names opened (signed: a hub can't
+    complete a round for it)."""
+    return _fields(_DONE_DOMAIN, ctx, instance, count)
 
 
 # ─── Cards ────────────────────────────────────────────────────────────────
@@ -428,10 +536,7 @@ def complaint_message(
 
 @dataclass(slots=True, frozen=True)
 class Card:
-    """A person's card: who they are (as their own household knows them),
-    their wish list, and which revision (0, then +1 per update after the
-    reveal). ``sig`` is their household's signature over all of it and the
-    round (:func:`card_message`)."""
+    """A person's card, signed by their own household for the round."""
 
     instance: str
     user: str
@@ -498,22 +603,22 @@ def _read_fields(raw: bytes, at: int, count: int) -> tuple[list[str], int]:
     out: list[str] = []
     for _ in range(count):
         if at + 2 > len(raw):
-            raise DrawCryptoError("card malformed")
+            raise DrawCryptoError("malformed")
         (size,) = struct.unpack(">H", raw[at : at + 2])
         at += 2
         if at + size > len(raw):
-            raise DrawCryptoError("card malformed")
+            raise DrawCryptoError("malformed")
         try:
             out.append(raw[at : at + size].decode("utf-8"))
         except UnicodeDecodeError as exc:
-            raise DrawCryptoError("card malformed") from exc
+            raise DrawCryptoError("malformed") from exc
         at += size
     return out, at
 
 
 def decode_card(raw: bytes) -> Card:
-    """The card in *raw* (exactly :data:`CARD_BYTES`, zero-padded — strict:
-    any other padding is refused). The signature is not checked here."""
+    """The card in *raw* (exactly :data:`CARD_BYTES`, zero-padded — strict).
+    The signature is not checked here."""
     if len(raw) != CARD_BYTES:
         raise DrawCryptoError("card wrong size")
     (body_len,) = struct.unpack(">H", raw[:2])
@@ -550,8 +655,7 @@ def seal_card(
 
 
 def open_card(box_priv: bytes, sealed: bytes, *, ctx: bytes) -> bytes | None:
-    """The card bytes when *sealed* is for the box *box_priv*, else
-    ``None``."""
+    """The card bytes when *sealed* is for the box *box_priv*, else ``None``."""
     if len(sealed) != SEALED_CARD_BYTES:
         raise DrawCryptoError("sealed card wrong size")
     try:
@@ -563,8 +667,7 @@ def open_card(box_priv: bytes, sealed: bytes, *, ctx: bytes) -> bytes | None:
 def try_cards(
     box_priv: bytes, sealed_cards: Sequence[bytes], *, ctx: bytes
 ) -> list[bytes]:
-    """Every card among *sealed_cards* that opens with *box_priv* — exactly
-    one in an honest round."""
+    """Every card among *sealed_cards* that opens with *box_priv*."""
     out = []
     for sealed in sealed_cards:
         opened = open_card(box_priv, sealed, ctx=ctx)
@@ -577,17 +680,17 @@ def try_cards(
 
 
 def handover_message(
-    ctx: bytes, instance: str, leaver: str, card_bytes: bytes
+    ctx: bytes, instance: str, leaver: str, leaver_box_pub: bytes
 ) -> bytes:
-    """What the leaver's household signs when it passes the card its
-    person drew on to that person's giver."""
-    return _fields(_HANDOVER_SIG_DOMAIN, ctx, instance, leaver, sha256(card_bytes))
+    """What the leaver's household signs when it hands its person's box key
+    to that person's giver."""
+    return _fields(_HANDOVER_SIG_DOMAIN, ctx, instance, leaver, leaver_box_pub)
 
 
-def encode_handover(instance: str, leaver: str, sig: bytes, card_bytes: bytes) -> bytes:
-    """``version ‖ u16 len ‖ instance ‖ u16 len ‖ leaver ‖ sig ‖ card ‖
-    zeros`` — exactly :data:`HANDOVER_BYTES`."""
-    if len(sig) != SIG_BYTES or len(card_bytes) != CARD_BYTES:
+def encode_handover(instance: str, leaver: str, box_priv: bytes, sig: bytes) -> bytes:
+    """``version ‖ lp16(instance) ‖ lp16(leaver) ‖ box_priv ‖ sig ‖ zeros``
+    — exactly :data:`HANDOVER_BYTES`."""
+    if len(sig) != SIG_BYTES or len(box_priv) != KEY_BYTES:
         raise DrawCryptoError("hand-over malformed")
     head = bytearray([_HANDOVER_VERSION])
     for part in (instance, leaver):
@@ -595,19 +698,19 @@ def encode_handover(instance: str, leaver: str, sig: bytes, card_bytes: bytes) -
         if len(raw) > CARD_REF_MAX_BYTES:
             raise DrawCryptoError("hand-over malformed")
         head += struct.pack(">H", len(raw)) + raw
-    raw = bytes(head) + sig + card_bytes
+    raw = bytes(head) + box_priv + sig
     return raw + b"\x00" * (HANDOVER_BYTES - len(raw))
 
 
 def decode_handover(raw: bytes) -> tuple[str, str, bytes, bytes]:
-    """``(instance, leaver, sig, card_bytes)`` from a hand-over plaintext."""
+    """``(instance, leaver, box_priv, sig)`` from a hand-over plaintext."""
     if len(raw) != HANDOVER_BYTES or raw[0] != _HANDOVER_VERSION:
         raise DrawCryptoError("hand-over malformed")
     (instance, leaver), at = _read_fields(raw, 1, 2)
-    end = at + SIG_BYTES + CARD_BYTES
+    end = at + KEY_BYTES + SIG_BYTES
     if end > HANDOVER_BYTES or any(raw[end:]):
         raise DrawCryptoError("hand-over malformed")
-    return instance, leaver, raw[at : at + SIG_BYTES], raw[at + SIG_BYTES : end]
+    return instance, leaver, raw[at : at + KEY_BYTES], raw[at + KEY_BYTES : end]
 
 
 def seal_handover(
@@ -630,6 +733,7 @@ def open_handover(box_priv: bytes, sealed: bytes, *, ctx: bytes) -> bytes | None
 __all__ = [
     "CARD_BYTES",
     "DRAW_SUITE_X25519_AESGCM",
+    "ENGINE_ID",
     "HANDOVER_BYTES",
     "SEALED_CARD_BYTES",
     "SEALED_HANDOVER_BYTES",
@@ -637,5 +741,6 @@ __all__ = [
     "Card",
     "DrawCryptoError",
     "Person",
+    "PersonKeys",
     "UnsupportedDrawSuite",
 ]

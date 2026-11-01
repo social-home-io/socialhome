@@ -59,7 +59,7 @@ import { mountBridge, type GroupOpenRequest, type PickedPerson, type PickRequest
 import { InviteSheet } from '@/features/apps/InviteSheet'
 import { GroupSheet } from '@/features/apps/groups/GroupSheet'
 import { GroupRefused, type GroupSession } from '@/features/apps/groupBridge'
-import { DrawResultSheet } from '@/features/apps/draw/DrawResultSheet'
+import { DrawResultSheet } from '@/features/apps/engines/draw/DrawResultSheet'
 import { currentAppContext, shownTheme, watchAppContext, type AppTheme } from '@/features/apps/appContext'
 import { appOpenedFrom } from '@/features/apps/appReturn'
 import { addBase } from '@/baseUrl'
@@ -235,6 +235,8 @@ export function AppHostInner({ appId, sessionId }: {
       openGroup: (req) => runtime.tables === false
         ? Promise.reject(notForGroups())
         : new Promise<GroupSession | null>((resolve, reject) => setGroup({ req, resolve, reject })),
+      engines: runtime.engines ?? [],
+      enginesDeclared: runtime.engines_declared ?? [],
       revealDraw: (sessionId) => setReveal(sessionId),
     })
     return () => {

@@ -1594,7 +1594,7 @@ _PINNED_FEATURE_KEYS = {
     75: "bazaar_listing_faq",
     76: "app_groups",
     77: "space_app_tables",
-    78: "app_draw",
+    78: "app_engines",
 }
 
 
@@ -2064,10 +2064,10 @@ def test_app_draw_capability_threshold():
     """v_78 — the gift draw: the ``draw_*`` verbs of ``APP_SESSION``.
     Labelled; not space-scoped (a draw runs at any table) and no sync
     line (nothing of it is in a space's stream)."""
-    assert fc.FederationCapability.MIN_FOR_APP_DRAW == 78
-    assert fc.OURS >= fc.FederationCapability.MIN_FOR_APP_DRAW
+    assert fc.FederationCapability.MIN_FOR_APP_ENGINES == 78
+    assert fc.OURS >= fc.FederationCapability.MIN_FOR_APP_ENGINES
     assert fc.features_missing_below(77) == ["Gift draws"]
     assert fc.features_missing_below(78) == []
-    assert fc.CAPABILITY_FEATURE_KEYS[78] == "app_draw"
+    assert fc.CAPABILITY_FEATURE_KEYS[78] == "app_engines"
     assert 78 not in fc.SPACE_SCOPED_MIN_VERSIONS
     assert fc.space_feature_keys_missing_below(77) == []

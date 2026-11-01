@@ -45,8 +45,6 @@ class AbstractAppGroupRepo(Protocol):
     async def prune(self, *, ended_before: str, quiet_before: str) -> int: ...
     async def get_seat_key(self, session_id: str) -> str | None: ...
     async def set_seat_key(self, session_id: str, value: str) -> bool: ...
-    async def get_draw(self, session_id: str) -> str | None: ...
-    async def set_draw(self, session_id: str, value: str) -> None: ...
     async def raise_seq(self, session_id: str, seq: int, *, now: str) -> None: ...
     async def hold_group_message(
         self,
@@ -334,21 +332,6 @@ class SqliteAppGroupRepo:
             (value, session_id),
         )
         return changed == 1
-
-    async def get_draw(self, session_id: str) -> str | None:
-        """The table's gift draw state on this household (KEK-wrapped
-        JSON, v_78), or ``None``."""
-        return await self._db.fetchval(
-            "SELECT draw_json FROM app_group_sessions WHERE session_id = ?",
-            (session_id,),
-        )
-
-    async def set_draw(self, session_id: str, value: str) -> None:
-        """Keep the table's gift draw state (no upsert touches it)."""
-        await self._db.enqueue(
-            "UPDATE app_group_sessions SET draw_json = ? WHERE session_id = ?",
-            (value, session_id),
-        )
 
     async def raise_seq(self, session_id: str, seq: int, *, now: str) -> None:
         """The table's message number: the hub's last given, or the

@@ -37,6 +37,8 @@ export interface InstalledApp {
    *  played + group games they joined that haven't ended) — ``GET
    *  /api/apps`` only; "2 games going" on Your apps. */
   games_going?: number
+  /** App engines (v_78) the app declares (``"draw"``: the gift draw). */
+  engines?:   string[]
 }
 
 /** The three plain-word permissions (D2), in the order they are listed. */
@@ -51,6 +53,8 @@ export interface CatalogChangelogEntry {
 
 export interface CatalogEntry {
   app_id:       string
+  /** App engines (v_78) the app declares, when the catalog says. */
+  engines?:     string[]
   name:         string
   latest_version: string
   description:  string | null
@@ -386,6 +390,10 @@ export interface AppRuntime {
   /** Whether the app can be played as a group game (manifest
    *  ``tables``). Only an explicit ``false`` keeps the group sheet shut. */
   tables?:      boolean
+  /** App engines (v_78) the app may call: declared and on this Social Home. */
+  engines?:     string[]
+  /** The app engines its manifest declares. */
+  engines_declared?: string[]
 }
 
 export async function getRuntime(appId: string): Promise<AppRuntime> {

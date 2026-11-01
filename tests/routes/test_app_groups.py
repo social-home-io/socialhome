@@ -12,7 +12,9 @@ from .conftest import _auth
 APP = "quiz"
 
 
-async def _install(db, *, capabilities=("storage", "people"), tables=True) -> None:
+async def _install(
+    db, *, capabilities=("storage", "people"), tables=True, engines=()
+) -> None:
     await SqliteAppRepo(db).install(
         InstalledApp(
             app_id=APP,
@@ -26,6 +28,7 @@ async def _install(db, *, capabilities=("storage", "people"), tables=True) -> No
                 players_min=3,
                 players_max=6,
                 tables=tables,
+                engines=engines,
             ),
             bundle_path="apps/quiz/1.0.0",
             bundle_sha256="ab" * 32,

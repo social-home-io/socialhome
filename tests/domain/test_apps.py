@@ -884,3 +884,16 @@ def test_is_game_going(state, payload, held, updated_at, going):
         updated_at=updated_at,
     )
     assert row.is_game_going("2026-10-01T00:00:00+00:00") is going
+
+
+def test_manifest_engines_parse_round_trip_and_bounds():
+    """v_78: ``engines`` — the app engines an app may call (``draw``)."""
+    base = {"entry": "index.html", "capabilities": ["people"]}
+    m = AppManifest.from_dict({**base, "engines": ["draw", "deal"]})
+    assert m.engines == ("draw", "deal")
+    assert AppManifest.from_dict(m.to_dict()).engines == ("draw", "deal")
+    assert AppManifest.from_dict(base).engines == ()
+    assert "engines" not in AppManifest.from_dict(base).to_dict()
+    for bad in ("draw", ["Draw"], ["draw", "draw"], [7], ["x" * 33], ["e"] * 9):
+        with pytest.raises(ValueError):
+            AppManifest.from_dict({**base, "engines": bad})

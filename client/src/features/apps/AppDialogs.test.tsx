@@ -20,7 +20,7 @@ vi.mock('@/store/apps', async (orig) => {
 })
 vi.mock('@/components/Toast', () => ({ showToast: h.showToast }))
 
-import { UpdateButton } from './AppDialogs'
+import { PermissionList, UpdateButton } from './AppDialogs'
 
 function newPermissions(list: string): ApiError {
   return new ApiError(409, '/api/apps/chess/update', {
@@ -89,5 +89,20 @@ describe('UpdateButton (D7)', () => {
     fireEvent.click(getByRole('button', { name: 'Update Chess' }))
     await vi.waitFor(() => expect(h.showToast).toHaveBeenCalledWith('Needs a newer Social Home', 'error'))
     expect(queryByRole('dialog')).toBeNull()
+  })
+})
+
+describe('PermissionList with app engines (v_78)', () => {
+  it('lists a known engine after the permissions and ignores unknown ones', () => {
+    const { container, getByText } = render(
+      <PermissionList perms={['people']} name="Gift draw" detailed engines={['draw', 'deal']} />,
+    )
+    expect(getByText('Runs gift draws with Social Home')).toBeTruthy()
+    expect(container.querySelectorAll('.sh-app-perms__item')).toHaveLength(2)
+  })
+
+  it('an app with only an engine is not "asks for nothing"', () => {
+    const { container } = render(<PermissionList perms={[]} name="X" engines={['draw']} />)
+    expect(container.textContent).not.toContain('asks for nothing')
   })
 })

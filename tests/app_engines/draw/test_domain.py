@@ -1,4 +1,4 @@
-"""The gift draw's pure domain (``domain/app_draw.py``, v_78): settings on the
+"""The gift draw's pure domain (``app_engines/draw/domain.py``, v_78): settings on the
 wire, the pairs rule (couples, at most a third, four people at least), the
 wish-list bound, the verbs."""
 
@@ -6,9 +6,9 @@ from __future__ import annotations
 
 import pytest
 
-from socialhome.domain.app_draw import (
-    DRAW_TO_HUB_VERBS,
-    DRAW_VERBS,
+from socialhome.app_engines.draw.domain import (
+    DRAW_STEPS,
+    DRAW_TO_HUB_STEPS,
     DRAW_WISH_MAX_CHARS,
     AppDrawHouseholdTooOldError,
     AppDrawSettingsError,
@@ -87,10 +87,10 @@ def test_wish_ok():
 
 
 def test_verbs():
-    assert len(DRAW_VERBS) == 16
-    assert DRAW_TO_HUB_VERBS < DRAW_VERBS
-    assert not DRAW_VERBS & GROUP_VERBS
-    assert all(v.startswith("draw_") for v in DRAW_VERBS)
+    assert len(DRAW_STEPS) == 21
+    assert DRAW_TO_HUB_STEPS < DRAW_STEPS
+    assert not DRAW_STEPS & GROUP_VERBS
+    assert all(v.isidentifier() and not v.startswith("draw_") for v in DRAW_STEPS)
 
 
 def test_too_old_names_the_households():

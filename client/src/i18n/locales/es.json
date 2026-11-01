@@ -4997,6 +4997,8 @@
   "apps.perm.federation": "Envía invitaciones y jugadas a otros hogares",
   "apps.perm.federation_detail": "Solo a la persona que elegiste, cifrado de hogar a hogar.",
   "apps.perm.none": "{name} no pide nada: no puede guardar nada ni llegar a nadie.",
+  "apps.engine.draw": "Organiza amigos invisibles con Social Home",
+  "apps.engine.draw_detail": "Social Home sortea los nombres en cada hogar y muestra a cada uno, en su propia pantalla, a quién le regala. {name} nunca sabe quién le regala a quién.",
   "apps.never.title": "{name} nunca puede",
   "apps.never.sign_in": "ver tu contraseña o tu inicio de sesión",
   "apps.never.content": "leer tus publicaciones, chats, fotos o tu ubicación",

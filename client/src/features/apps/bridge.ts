@@ -103,7 +103,7 @@ import {
   type GroupSession,
   type HeldGroupRow,
 } from '@/features/apps/groupBridge'
-import { DrawBridge, isDrawMethod } from '@/features/apps/draw/drawBridge'
+import { EngineBridge, isEngineMethod } from '@/features/apps/engines/engineBridge'
 
 
 /** The typed refusal an app gets for a call outside its permissions. */
@@ -199,9 +199,16 @@ export interface BridgeContext {
   /** Watch the look; the bridge pushes ``app.context-changed`` on each call.
    *  Returns the function that stops watching. */
   watchHostContext?: (cb: (c: AppHostContext) => void) => () => void
+  /** App engines (v_78) the app may call — declared in its manifest AND
+   *  on this Social Home (``/runtime``'s ``engines``). */
+  engines?: readonly string[]
+  /** The engines its manifest declares (``/runtime``'s
+   *  ``engines_declared``): one declared but not here answers
+   *  ``engine_not_supported``, one not declared ``engine_not_declared``. */
+  enginesDeclared?: readonly string[]
   /** Show Social Home's own gift-draw result sheet (outside the frame)
-   *  for the table *sessionId* — ``draw.reveal``. The app gets nothing
-   *  back. Without it ``draw.reveal`` answers ``unavailable``. */
+   *  for the table *sessionId* — ``engine.draw.reveal``. The app gets
+   *  nothing back. Without it the call answers ``unavailable``. */
   revealDraw?: (sessionId: string) => void
 }
 
@@ -354,7 +361,7 @@ function permissionFor(method: string, params: { target?: unknown } | undefined)
       return targetPermission(params?.target)
     default:
       // Every group and draw call is about people at a table.
-      return isGroupMethod(method) || isDrawMethod(method) ? 'people' : null
+      return isGroupMethod(method) || isEngineMethod(method) ? 'people' : null
   }
 }
 
@@ -529,10 +536,13 @@ export function mountBridge(
     },
   )
 
-  /** The gift draw (v_78): ``draw.*`` calls and ``draw:event`` posts. */
-  const draws = new DrawBridge(
+  /** App engines (v_78): ``engine.<id>.*`` calls and ``engine:event``
+   *  posts — only engines the app declares and this Social Home has. */
+  const engines = new EngineBridge(
     appId,
     msg => iframe.contentWindow?.postMessage(msg, '*'),
+    ctx.engines ?? [],
+    ctx.enginesDeclared ?? [],
     ctx.revealDraw,
   )
 
@@ -575,8 +585,8 @@ export function mountBridge(
         reply({ id, ok: true, result: await groups.call(method, params) })
         return
       }
-      if (isDrawMethod(method)) {
-        reply({ id, ok: true, result: await draws.call(method, params) })
+      if (isEngineMethod(method)) {
+        reply({ id, ok: true, result: await engines.call(method, params) })
         return
       }
       switch (method) {
@@ -639,8 +649,8 @@ export function mountBridge(
               permissions,
               // This host speaks ``group.*`` (group play, v_76).
               groups: true,
-              // …and ``draw.*`` (the gift draw, v_78).
-              draw: true,
+              // …and the app engines it may call (v_78): ``engine.<id>.*``.
+              engines: engines.available(),
               launch: await launch(),
             },
           })
@@ -857,8 +867,8 @@ export function mountBridge(
 
   // Group tables: messages and roster changes as ``group:event`` posts.
   const offGroups = groups.listen(() => has('people'))
-  // The gift draw: its state (never a result) as ``draw:event`` posts.
-  const offDraws = draws.listen(() => has('people'))
+  // App engines: their state (never a result) as ``engine:event`` posts.
+  const offEngines = engines.listen(() => has('people'))
 
   window.addEventListener('message', onMessage)
 
@@ -872,7 +882,7 @@ export function mountBridge(
     window.removeEventListener('message', onMessage)
     offWs()
     offGroups()
-    offDraws()
+    offEngines()
     stopWatching?.()
   }
 }

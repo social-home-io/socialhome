@@ -1,4 +1,4 @@
-"""The gift draw's cryptography (``federation/draw_crypto.py``, v_78).
+"""The gift draw's cryptography (``app_engines/draw/crypto.py``, v_78).
 
 * **Test vectors** — every household must compute the same round context,
   mixing order, onion, card seal and commitment from the same inputs:
@@ -27,7 +27,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import (
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
-from socialhome.federation import draw_crypto as dc
+from socialhome.app_engines.draw import crypto as dc
 
 SEED = 20261031
 PEOPLE = [
@@ -57,9 +57,9 @@ def _ctx(**over) -> bytes:
 
 def test_vectors_round_context_and_order():
     assert _ctx().hex() == (
-        "ac85c841a9f3a1651890a7d078ee1eda953bf5c8cec9f8dc4b6d66c04eb86a6a"
+        "4acc37cb40c33948fcf917fcddb6c364a6521fc027dd262a7d38cef37ef20c32"
     )
-    assert dc.mix_order("t1", 1, 1, ["aaa", "bbb", "ccc"]) == ["ccc", "bbb", "aaa"]
+    assert dc.mix_order("t1", 1, 1, ["aaa", "bbb", "ccc"]) == ["aaa", "bbb", "ccc"]
     # The people's order on the wire doesn't change the context.
     assert _ctx(people=list(reversed(PEOPLE))) == _ctx()
 
@@ -78,17 +78,17 @@ def test_vectors_onion_card_commitment_with_seeded_randomness():
     onion = dc.build_onion(box[1], [m[1] for m in mixers], ctx=ctx, rand=r)
     assert len(onion) == dc.onion_size(3) == 176
     assert hashlib.sha256(onion).hexdigest() == (
-        "e5a3ed2939e0c8a544dd2b541eb3739a89ffe5b0814d769dbf28ab476d5ebce3"
+        "464f8a1ab529176cfaa82829b7ec7b216ca5d30fc7bea03c78244c17c147c83c"
     )
     card = dc.encode_card(
         dc.Card("aaa", "anna", "Anna", "Home a", "A bike", 0, b"\x01" * 64)
     )
     sealed = dc.seal_card(box[1], card, ctx=ctx, rand=r)
     assert hashlib.sha256(sealed).hexdigest() == (
-        "cf063c2f18efaa091bbb3858d02fa572b3f5ac9f5d9d828dd3e39edf10c44cfc"
+        "596518390f20b89072a546d685b5eb935708abd05634fa128809ec381d0ff565"
     )
     assert dc.commitment(ctx, "aaa", "anna", box[1], b"\x02" * 32).hex() == (
-        "d21f13758f72f9c89fa8be309c73602dc5e246494312f0a46fe0499c2f4c8646"
+        "78094ed3cdb37ce54fe1f1568699d5bd1a8b679d146ff05deffef5cca54fc192"
     )
     assert dc.shuffle([bytes([i]) for i in range(6)], random.Random(7).randbytes) == [
         b"\x01",
@@ -121,7 +121,9 @@ def test_the_seal_is_x25519_hkdf_sha256_aes256gcm_from_the_primitives():
     shared = X25519PrivateKey.from_private_bytes(to_priv).exchange(
         X25519PublicKey.from_public_bytes(eph_pub)
     )
-    info = b"socialhome/app_draw/seal/v1" + _lp(ctx, "card", eph_pub, to_pub)
+    info = b"socialhome/app_engine/draw/seal/v2" + _lp(
+        ctx, "draw|card", eph_pub, to_pub
+    )
     key = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=info).derive(
         shared
     )
@@ -284,16 +286,18 @@ def test_cut_utf8_keeps_whole_characters():
 
 def test_handover_round_trip_and_strictness():
     priv, pub = dc.new_keypair()
-    card = dc.encode_card(dc.Card("i", "u", "N", "H", "w", 0, b"\x00" * 64))
-    plain = dc.encode_handover("inst", "cleo", b"\x05" * 64, card)
+    leaver_priv = dc.new_keypair()[0]
+    plain = dc.encode_handover("inst", "cleo", leaver_priv, b"\x05" * 64)
     assert len(plain) == dc.HANDOVER_BYTES
-    assert dc.decode_handover(plain) == ("inst", "cleo", b"\x05" * 64, card)
+    assert dc.decode_handover(plain) == ("inst", "cleo", leaver_priv, b"\x05" * 64)
     sealed = dc.seal_handover(pub, plain, ctx=_ctx())
     assert len(sealed) == dc.SEALED_HANDOVER_BYTES
     assert dc.open_handover(priv, sealed, ctx=_ctx()) == plain
     assert dc.open_handover(dc.new_keypair()[0], sealed, ctx=_ctx()) is None
     with pytest.raises(dc.DrawCryptoError):
         dc.decode_handover(plain[:-1] + b"\x09")
+    with pytest.raises(dc.DrawCryptoError):
+        dc.encode_handover("inst", "cleo", b"short", b"\x05" * 64)
 
 
 def test_unknown_suites_are_refused():
@@ -317,12 +321,15 @@ def test_signed_messages_are_domain_separated():
     msgs = {
         dc.key_message(ctx, "i", pub),
         dc.mix_message(ctx, 0, "i", pub, pub),
-        dc.batch_message(ctx, "i", [pub], [("u", pub)]),
-        dc.complaint_message(ctx, "i", "missing", "u", pub, pub),
+        dc.batch_message(ctx, "i", [pub], [("u", pub)], pub),
+        dc.complaint_message(ctx, "i", "missing", "u", pub),
         dc.card_message(ctx, dc.Card("i", "u", "N", "H", "w", 0)),
-        dc.handover_message(ctx, "i", "u", b"\x00" * dc.CARD_BYTES),
+        dc.handover_message(ctx, "i", "u", pub),
+        dc.card_commit_message(ctx, "i", [pub]),
+        dc.done_message(ctx, "i", 1),
+        dc.opening_message(ctx, "i", [("u", pub)]),
     }
-    assert len(msgs) == 6
+    assert len(msgs) == 9
 
 
 def test_public_of_and_sizes():
@@ -334,3 +341,64 @@ def test_public_of_and_sizes():
         dc.build_onion(b"\x00", [pub], ctx=_ctx())
     with pytest.raises(dc.DrawCryptoError):
         dc.commitment(_ctx(), "i", "u", pub, b"\x00")
+
+
+def test_vectors_person_seed_r_and_circle():
+    """A person seed derives the same box, nonce and onion everywhere (a
+    complaint's seed lets anyone rebuild the onion); ``R`` and the circle
+    are pinned too."""
+    ctx = _ctx()
+    seed = b"\x05" * 32
+    keys = dc.person_keys(seed)
+    assert keys.box_pub.hex() == (
+        "15cc46fed05a230573f6d5c913f58829bf24d3317b8c3df7e42e21d88066280e"
+    )
+    assert keys.nonce.hex() == (
+        "eab8bdc66915157b86f033af8353b0d81c2b7ab3b55573fe7d3f452709ac6c05"
+    )
+    assert dc.public_of(keys.box_priv) == keys.box_pub
+    rand = random.Random(SEED).randbytes
+    mixers = [dc.new_keypair(rand)[1] for _ in range(3)]
+    onion = dc.onion_from_seed(seed, mixers, ctx=ctx)
+    assert hashlib.sha256(onion).hexdigest() == (
+        "cec66a6d569b7f83f8b90ba5807932f10c407c06badf833a12dcd63939bea940"
+    )
+    assert dc.onion_from_seed(seed, mixers, ctx=ctx) == onion
+    assert dc.onion_from_seed(b"\x06" * 32, mixers, ctx=ctx) != onion
+    R = dc.round_randomness(ctx, {"aaa": b"\x01" * 32, "bbb": b"\x02" * 32})
+    assert R.hex() == "17cfddb5a433ddaefa36dfb204bdd6139d90b1536c845796a724c76d9e321202"
+    boxes = [b"\x09" * 32, b"\x08" * 32, b"\x07" * 32]
+    assert dc.circle(boxes, ctx=ctx, R=R) == [b"\x07" * 32, b"\x09" * 32, b"\x08" * 32]
+    # The order S arrives in doesn't count; R does.
+    assert dc.circle(list(reversed(boxes)), ctx=ctx, R=R) == dc.circle(
+        boxes, ctx=ctx, R=R
+    )
+    other = dc.round_randomness(ctx, {"aaa": b"\x01" * 32, "bbb": b"\x03" * 32})
+    assert other != R
+    assert dc.person_commitment(ctx, "i", "u", seed) == dc.commitment(
+        ctx, "i", "u", keys.box_pub, keys.nonce
+    )
+    with pytest.raises(dc.DrawCryptoError):
+        dc.seed_stream(b"short", "box")
+    with pytest.raises(dc.DrawCryptoError):
+        dc.r_commitment(ctx, "i", b"short")
+    assert dc.r_commitment(ctx, "i", b"\x01" * 32) != dc.r_commitment(
+        ctx, "j", b"\x01" * 32
+    )
+
+
+def test_low_order_keys_are_not_usable():
+    assert dc.is_usable_key(dc.new_keypair()[1])
+    assert not dc.is_usable_key(b"\x00" * 32)
+    assert not dc.is_usable_key(b"\x01" + b"\x00" * 31)
+    assert not dc.is_usable_key(b"\x00" * 31)
+
+
+def test_the_engine_is_bound_into_context_and_labels():
+    """A seal of the draw engine can't be opened as another engine's (the
+    engine id is in every seal's info and in the round context)."""
+    assert dc.ENGINE_ID == "draw"
+    priv, pub = dc.new_keypair()
+    blob = dc.seal(pub, b"x", ctx=_ctx(), label="card")
+    shared_label = dc.open_sealed(priv, blob, ctx=_ctx(), label="card")
+    assert shared_label == b"x"

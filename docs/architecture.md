@@ -1394,6 +1394,34 @@ See [`protocol/apps.md`](./protocol/apps.md) for the wire protocol and
 sequence diagram, and [`docs/crypto.md`](./crypto.md) for the `fed-app-v1`
 AEAD suite details.
 
+### App engines (v_78)
+
+An *app engine* is a Social Home feature an app calls at its group tables
+— the app asks and hears the state, every household at the table does the
+work (and the cryptography) itself, and anything private shows only in
+Social Home's own screens. The first is the gift draw; the design names a
+later "deal" (secret cards or roles). Layout:
+
+```
+socialhome/app_engines/
+  registry.py   AppEngine Protocol (engine_id, suites, steps, on_inbound,
+                call, table_changed, person_left, stop) + AppEngineRegistry
+  domain.py     VERB_ENGINE ("engine"), ENGINE_SUITE_FIELD, EngineCall, errors
+  draw/         crypto.py (pure), domain.py (pure), service.py (AppDrawService)
+socialhome/routes/app_engines.py                 …/groups/{table}/engines/{engine}[/{action}]
+socialhome/repositories/app_engine_state_repo.py  app_engine_state (0138)
+client/src/features/apps/engines/                engineBridge.ts + draw/ (result sheet)
+```
+
+The registry is the one gate: an app calls only engines its manifest
+declares (`engines`) and this Social Home has; an inbound `engine` step is
+taken only for a known engine, one of its suites and steps, and a table
+whose app as installed here declares it. `AppGroupService` hands the
+`engine` verb and every table change to the registry; `create_app` builds
+the registry and registers each engine. A new engine is a new package under
+`app_engines/` registered there — no group-service, route or wire change.
+See [`protocol/app-engines.md`](./protocol/app-engines.md).
+
 ## System chats on group-DM storage
 
 The household chat and each space's chat are not a new chat
@@ -2341,6 +2369,7 @@ and the morning's first icon.
 | Services (business logic) | `socialhome/services/` |
 | Federation (envelope, signing, transport, sync) | `socialhome/federation/` |
 | Routes (`BaseView` subclasses) | `socialhome/routes/` |
+| App engines (Social Home features apps call at tables; registry + one package per engine) | `socialhome/app_engines/` |
 | Background schedulers | `socialhome/infrastructure/` |
 | Platform adapters (HA / HAOS / standalone) | `socialhome/platform/` |
 | Household dashboard (own-port app, cookie auth) | `socialhome/dashboard/` |

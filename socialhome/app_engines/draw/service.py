@@ -1,48 +1,53 @@
-"""AppDrawService — the gift draw at a group table (v_78).
+"""AppDrawService — the gift draw engine (``engine: "draw"``, v_78).
 
-Group-play design §5. An app at a table (the Gift draw app) asks Social
-Home to draw names; every participant's **own household** then does its
-part by itself — no app needs to stay open — and the result is shown in
-Social Home's own sheet: the app never sees who draws whom, the
-organiser learns only their own recipient, and the table's **hub** (the
-host household, which passes every message on) learns nothing more than
-any participant.
+Group-play design §5, hardened after the first independent review. An app
+at a table that declares ``engines: ["draw"]`` asks Social Home to draw
+names; every participant's **own household** then does its part by itself,
+and the result is shown in Social Home's own sheet: the app never sees who
+draws whom, the organiser learns only their own recipient, and the
+table's **hub** (the host household, which passes every message on) learns
+nothing more than any participant.
 
-The rounds (all sealed ``APP_SESSION`` verbs between the hub and each
-participant household, carrying ``draw_suite``, ``gen`` and ``round``;
-the cryptography is :mod:`socialhome.federation.draw_crypto`)::
+One round (every step rides the sealed ``APP_SESSION`` verb ``engine``
+with ``engine: "draw"``, ``engine_suite``, ``step``, ``gen``, ``round``;
+the cryptography is :mod:`socialhome.app_engines.draw.crypto`)::
 
-    hub → all     draw_start {people, identities, settings, because}
-    each → hub    draw_key {pub, sig}               (a fresh mixer key)
-    hub → all     draw_mixers {keys}                (in mixing order)
-    each → hub    draw_onions {onions, commits, sig}
-    hub → mixer k draw_mix {k, batches | list+prev} (one after the other)
-    mixer → hub   draw_mixed {k, list, in, sig}
-    hub → all     draw_list {S, batches, chain}     (the signed chain)
-    each → hub    draw_cards {cards}                (key-private, 1 KiB)
-    hub → all     draw_cards_all {cards}            (sorted by hash)
-    each → hub    draw_done {count} | draw_fail / draw_redo {complaint}
-    hub → all     draw_complete | draw_end {reason}
-    after the reveal: draw_handover / draw_wish (each → hub → all)
+    hub → all     start {people, identities, settings, because}
+    each → hub    key {pub, sig}                        (a fresh mixer key)
+    hub → all     mixers {keys}                         (in mixing order)
+    each → hub    onions {onions, commits, r_commit, sig}  (from person seeds)
+    hub → mixer k mix {k, batches | list + prev}        (one after the other)
+    mixer → hub   mixed {k, list, in, sig}
+    hub → all     list {S, batches, chain}              (the signed chain)
+    each → hub    reveal {r}  | fail {missing, seed} | open {every seed}
+    hub → all     reveals {r of every household}        → the circle
+    each → hub    commit {card hashes, sig}             (before any card)
+    hub → all     commits
+    each → hub    cards {sealed cards}
+    hub → all     cards_all                             (= the commitments)
+    each → hub    done {count, sig} | fail / redo {complaint with seed}
+    hub → all     complete {every signed done} | end {reason}
+    after the reveal: handover / wish (each → hub → all)
 
-Security invariants
--------------------
-* A household refuses a new round unless it is the table's first draw,
-  the organiser's visible "Draw again" after a reveal, a round with fewer
-  people (someone left or was removed), or a complaint about the last
-  round that **it verifies itself** from the proof (the complainer's box
-  key and commitment) — no re-rolls on demand.
-* Every signature and seal is bound to the round's context (table, draw,
-  round, people, identity keys, settings): the hub can't show two
-  households two different rounds.
-* A mixer mixes once per round, only exactly the previous mixer's signed
-  output (the first: exactly the n signed onions).
-* A card's person is named by their own household and signed by it; a
-  giver checks the signature, the person and the pairs.
-* Every secret (mixer key, box keys, results, wish lists) is stored
-  KEK-wrapped; the app gets the state only (``status``), never a result.
-* Receivers enforce the bounds: 3 ≤ n ≤ 30, exact sizes, ≤ 12 rounds per
-  draw, one draw per table, only from the hub / only from a participant.
+Security invariants (see ``docs/protocol/app-engines.md``)
+------------------------------------------------------------
+* A new round only for the first draw, the organiser's visible Draw again,
+  fewer people (before ``S`` is out, or a whole stuck household removed —
+  and only once this household's own roster shows them gone), a complaint
+  it verifies itself, or a public void (a key in ``S`` nobody can seal to).
+* The people of a first round / Draw again are exactly the seated people
+  of this household's own copy of the table — no invisible extras.
+* Onions derive from person seeds: a complaint reveals the seed and anyone
+  rebuilds the onion — a household can't commit to one box and onion
+  another. A missing key is told only before any card exists.
+* The circle is ``S`` ordered by a commit-reveal of every household — no
+  mixer chooses neighbours.
+* Every household commits to its card hashes before any card is sent; a
+  card list is taken only when it is exactly the commitments.
+* A round completes only with every household's signed ``done``.
+* A hand-over carries the leaver's box key; the giver checks it against
+  ``S`` and opens the new card from its own stored card list.
+* Every secret is KEK-wrapped; the app gets the state only, never a result.
 """
 
 from __future__ import annotations
@@ -57,12 +62,24 @@ from weakref import WeakValueDictionary
 
 import orjson
 
-from ..crypto import b64url_decode, b64url_encode, sign_ed25519, verify_ed25519
-from ..domain.app_draw import (
+from ...crypto import b64url_decode, b64url_encode, sign_ed25519, verify_ed25519
+from ...domain.app_group import (
+    GROUP_ENDED,
+    GROUP_LOBBY,
+    SEAT_SEATED,
+    GroupSession,
+)
+from ...domain.events import AppDrawChanged
+from ...domain.federation import FederationEvent
+from ...domain.federation_capabilities import FederationCapability
+from ..domain import ENGINE_SUITE_FIELD, VERB_ENGINE, AppEngineActionError, EngineCall
+from . import crypto as dc
+from .domain import (
     BECAUSE_AGAIN,
     BECAUSE_CHANGED,
     BECAUSE_COMPLAINT,
     BECAUSE_FIRST,
+    BECAUSE_VOID,
     COMPLAINT_CARDS,
     COMPLAINT_KINDS,
     COMPLAINT_MISSING,
@@ -71,7 +88,8 @@ from ..domain.app_draw import (
     DRAW_MAX_PEOPLE,
     DRAW_MIN_PEOPLE,
     DRAW_ROUNDS_MAX,
-    DRAW_TO_HUB_VERBS,
+    DRAW_STEPS,
+    DRAW_TO_HUB_STEPS,
     DRAW_WAIT_SECONDS,
     DRAW_WISH_UPDATES_MAX,
     END_RULES,
@@ -80,22 +98,27 @@ from ..domain.app_draw import (
     STATE_FAILED,
     STATE_GATHERING,
     STATE_READY,
-    VERB_DRAW_CARDS,
-    VERB_DRAW_CARDS_ALL,
-    VERB_DRAW_COMPLETE,
-    VERB_DRAW_DONE,
-    VERB_DRAW_END,
-    VERB_DRAW_FAIL,
-    VERB_DRAW_HANDOVER,
-    VERB_DRAW_KEY,
-    VERB_DRAW_LIST,
-    VERB_DRAW_MIX,
-    VERB_DRAW_MIXED,
-    VERB_DRAW_MIXERS,
-    VERB_DRAW_ONIONS,
-    VERB_DRAW_REDO,
-    VERB_DRAW_START,
-    VERB_DRAW_WISH,
+    STEP_CARDS,
+    STEP_CARDS_ALL,
+    STEP_COMMIT,
+    STEP_COMMITS,
+    STEP_COMPLETE,
+    STEP_DONE,
+    STEP_END,
+    STEP_FAIL,
+    STEP_HANDOVER,
+    STEP_KEY,
+    STEP_LIST,
+    STEP_MIX,
+    STEP_MIXED,
+    STEP_MIXERS,
+    STEP_ONIONS,
+    STEP_OPEN,
+    STEP_REDO,
+    STEP_REVEAL,
+    STEP_REVEALS,
+    STEP_START,
+    STEP_WISH,
     AppDrawAgainLimitError,
     AppDrawHostElsewhereError,
     AppDrawHouseholdTooOldError,
@@ -113,50 +136,56 @@ from ..domain.app_draw import (
     pairs_fit,
     wish_ok,
 )
-from ..domain.app_group import (
-    GROUP_ENDED,
-    GROUP_LOBBY,
-    SEAT_SEATED,
-    AppGroupNotFoundError,
-    GroupSession,
-)
-from ..domain.events import AppDrawChanged
-from ..domain.federation import FederationEvent
-from ..domain.federation_capabilities import FederationCapability
-from ..federation import draw_crypto as dc
 
 if TYPE_CHECKING:
-    from ..domain.events import DomainEvent
-    from ..domain.user import User
-    from ..infrastructure.event_bus import EventBus
-    from ..infrastructure.key_manager import KeyManager
-    from ..infrastructure.ws_manager import WebSocketManager
-    from ..repositories.app_group_repo import AbstractAppGroupRepo
-    from .app_federation_service import AppFederationService
-    from .app_group_service import AppGroupService
+    from ...domain.events import DomainEvent
+    from ...domain.user import User
+    from ...infrastructure.event_bus import EventBus
+    from ...infrastructure.key_manager import KeyManager
+    from ...infrastructure.ws_manager import WebSocketManager
+    from ...repositories.app_engine_state_repo import AbstractAppEngineStateRepo
+    from ...repositories.app_group_repo import AbstractAppGroupRepo
+    from ...services.app_federation_service import AppFederationService
+    from ...services.app_group_service import AppGroupService
 
 log = logging.getLogger(__name__)
 
-#: The WebSocket frame each local person at a table gets when the draw's
-#: state changes (the app hears it as ``draw:event``; never a result).
-WS_FRAME_TYPE = "app.draw"
+#: The engine's id (manifest ``engines``, the wire, the routes).
+DRAW_ENGINE_ID: str = dc.ENGINE_ID
+
+#: The WebSocket frame each local person at a table gets when an engine's
+#: state changes (the app hears it as ``engine:event``; never a result).
+WS_FRAME_TYPE = "app.engine"
 
 _PHASE_KEYS = "keys"
 _PHASE_ONIONS = "onions"
 _PHASE_MIXING = "mixing"
+_PHASE_REVEAL = "reveal"
+_PHASE_COMMIT = "commit"
 _PHASE_CARDS = "cards"
 _PHASE_OPENING = "opening"
+_PHASE_VOID = "void"
 _PHASE_COMPLETE = "complete"
 _PHASE_ENDED = "ended"
 _RUNNING = frozenset(
-    {_PHASE_KEYS, _PHASE_ONIONS, _PHASE_MIXING, _PHASE_CARDS, _PHASE_OPENING}
+    {
+        _PHASE_KEYS,
+        _PHASE_ONIONS,
+        _PHASE_MIXING,
+        _PHASE_REVEAL,
+        _PHASE_COMMIT,
+        _PHASE_CARDS,
+        _PHASE_OPENING,
+        _PHASE_VOID,
+    }
+)
+#: Phases after ``S`` is out: a leave no longer starts a new round.
+_AFTER_S = frozenset(
+    {_PHASE_REVEAL, _PHASE_COMMIT, _PHASE_CARDS, _PHASE_OPENING, _PHASE_VOID}
 )
 
 #: The largest value a draw message carries (an onion with 30 layers).
 _MAX_BLOB = dc.onion_size(DRAW_MAX_PEOPLE)
-
-#: What the draw's KEK-wrapped state is bound to.
-_AD = b"socialhome/app_draw/state_at_rest|"
 
 
 def _now() -> datetime:
@@ -225,14 +254,11 @@ def _parse_people(raw: object) -> tuple[list[dc.Person], dict[tuple[str, str], s
             raise DrawWireError("person malformed")
         seat = _int(item.get("seat"), 1, 999, "seat")
         inst, user, name = item.get("instance"), item.get("user"), item.get("name")
+        if not isinstance(inst, str) or not isinstance(user, str):
+            raise DrawWireError("person malformed")
         for v in (inst, user):
-            if (
-                not isinstance(v, str)
-                or not v
-                or len(v.encode()) > dc.CARD_REF_MAX_BYTES
-            ):
+            if not v or len(v.encode()) > dc.CARD_REF_MAX_BYTES:
                 raise DrawWireError("person malformed")
-        assert isinstance(inst, str) and isinstance(user, str)
         p = dc.Person(seat=seat, instance=inst, user=user)
         people.append(p)
         names[_person_key(p)] = name[:80] if isinstance(name, str) and name else user
@@ -249,9 +275,12 @@ def _people_from(raw: list) -> list[dc.Person]:
     ]
 
 
+def _seated(table: GroupSession) -> set[tuple[str, str]]:
+    return {(e.instance, e.user) for e in table.roster if e.state == SEAT_SEATED}
+
+
 class _Round:
-    """A round's public frame, rebuilt from stored JSON: who, in what
-    order, under which context."""
+    """A round's public frame, rebuilt from stored JSON."""
 
     __slots__ = (
         "ctx",
@@ -331,15 +360,13 @@ def _frame(
 # ─── Checks every household runs on the round's public data ──────────────
 
 
-def check_list(rnd: _Round, body: dict) -> tuple[list[bytes], dict[str, list[list]]]:
-    """A ``draw_list`` body against its round: the n box keys ``S`` and
-    every household's commitments — or :class:`DrawWireError` /
-    :class:`~socialhome.federation.draw_crypto.DrawCryptoError`.
-
-    Every household's onion batch is signed by that household; the chain
-    starts at those onions (``list_digest`` over their hashes, households
-    in id order), every link is signed by the mixer whose turn it was and
-    takes exactly what the one before gave; the last link gives ``S``."""
+def check_list(rnd: _Round, body: dict) -> tuple[list[bytes], dict[str, dict]]:
+    """A ``list`` body against its round: the n box keys ``S`` and every
+    household's batch (``{hashes, commits, r_commit}``) — or
+    :class:`DrawWireError`. Every batch is signed by its household; the
+    chain starts at those onions, every link is signed by the mixer whose
+    turn it was and takes exactly what the one before gave; the last gives
+    ``S``."""
     S = _raw_list(body.get("S"), rnd.n, dc.KEY_BYTES, "S")
     batches = body.get("batches")
     if not isinstance(batches, list) or len(batches) != rnd.h:
@@ -352,18 +379,23 @@ def check_list(rnd: _Round, body: dict) -> tuple[list[bytes], dict[str, list[lis
     if len(by_inst) != rnd.h:
         raise DrawWireError("batches repeat")
     hashes: list[bytes] = []
-    commits_all: dict[str, list[list]] = {}
+    out: dict[str, dict] = {}
     for inst in sorted(by_inst):
         b = by_inst[inst]
         mine = rnd.of(inst)
         hs = _raw_list(b.get("hashes"), len(mine), dc.DIGEST_BYTES, "hashes")
         commits = _commits(b.get("commits"), mine)
+        r_commit = _raw(b.get("r_commit"), dc.DIGEST_BYTES, "r_commit")
         sig = _raw(b.get("sig"), dc.SIG_BYTES, "sig")
-        msg = dc.batch_message(rnd.ctx, inst, hs, commits)
+        msg = dc.batch_message(rnd.ctx, inst, hs, commits, r_commit)
         if not verify_ed25519(rnd.identity(inst), msg, sig):
             raise DrawWireError("batch signature")
         hashes += hs
-        commits_all[inst] = [[u, _b64(c)] for u, c in commits]
+        out[inst] = {
+            "hashes": [_b64(x) for x in hs],
+            "commits": [[u, _b64(c)] for u, c in commits],
+            "r_commit": _b64(r_commit),
+        }
     chain = body.get("chain")
     if not isinstance(chain, list) or len(chain) != rnd.h:
         raise DrawWireError("chain wrong length")
@@ -382,7 +414,7 @@ def check_list(rnd: _Round, body: dict) -> tuple[list[bytes], dict[str, list[lis
         prev_out = d_out
     if prev_out != dc.list_digest([dc.entry_hash(s) for s in S]):
         raise DrawWireError("chain doesn't end in S")
-    return S, commits_all
+    return S, out
 
 
 def _commits(raw: object, mine: list[dc.Person]) -> list[tuple[str, bytes]]:
@@ -400,8 +432,8 @@ def _commits(raw: object, mine: list[dc.Person]) -> list[tuple[str, bytes]]:
 
 
 def check_card(rnd: _Round, card_bytes: bytes, *, giver: dc.Person) -> dc.Card | None:
-    """The card a giver's box opened — ``None`` when it is not a valid
-    card of another person of the round signed by their own household."""
+    """A card a giver's box opened — ``None`` unless it is a valid card of
+    another person of the round, signed by their own household."""
     try:
         card = dc.decode_card(card_bytes)
     except dc.DrawCryptoError:
@@ -419,17 +451,30 @@ def check_card(rnd: _Round, card_bytes: bytes, *, giver: dc.Person) -> dc.Card |
     return card
 
 
+def check_card_list(
+    cards: list[bytes], committed: dict[str, list[str]], n: int
+) -> bool:
+    """Whether *cards* are exactly the sealed cards every household
+    committed to (by hash) — n of them, no other."""
+    want = sorted(h for hs in committed.values() for h in hs)
+    return len(cards) == n and sorted(_b64(dc.sha256(c)) for c in cards) == want
+
+
 def complaint_holds(
     rnd: _Round,
     complaint: dict,
     *,
     S: list[bytes],
-    commits_all: dict[str, list[list]],
+    batches: dict[str, dict],
+    mixer_pubs: list[bytes],
     cards: list[bytes] | None,
 ) -> bool:
-    """Whether *complaint* about round *rnd* is proven: signed by its
-    household, its box key committed to for that person, and what it says
-    is true of the round's public data (``S``, the cards)."""
+    """Whether *complaint* about round *rnd* is proven. Its proof is the
+    person's seed: the commitment it derives must be the one the
+    household signed for that person, and — for a missing key — the onion
+    it rebuilds must be one the household submitted (so a household can't
+    commit to one box and onion another). Then what it says must be true of
+    ``S`` and the committed cards."""
     try:
         kind = complaint.get("kind")
         inst, user = complaint.get("instance"), complaint.get("user")
@@ -441,26 +486,27 @@ def complaint_holds(
             return False
         if inst not in rnd.identities or rnd.seat_of(inst, user) is None:
             return False
-        box_priv = _raw(complaint.get("box_priv"), dc.KEY_BYTES, "box_priv")
-        nonce = _raw(complaint.get("nonce"), dc.NONCE_BYTES, "nonce")
+        seed = _raw(complaint.get("seed"), dc.SEED_BYTES, "seed")
         sig = _raw(complaint.get("sig"), dc.SIG_BYTES, "sig")
-        msg = dc.complaint_message(rnd.ctx, inst, kind, user, box_priv, nonce)
+        msg = dc.complaint_message(rnd.ctx, inst, kind, user, seed)
         if not verify_ed25519(rnd.identity(inst), msg, sig):
             return False
-        box_pub = dc.public_of(box_priv)
-        c = _b64(dc.commitment(rnd.ctx, inst, user, box_pub, nonce))
-        if [user, c] not in commits_all.get(inst, []):
+        keys = dc.person_keys(seed)
+        c = _b64(dc.commitment(rnd.ctx, inst, user, keys.box_pub, keys.nonce))
+        if [user, c] not in batches.get(inst, {}).get("commits", []):
             return False
         if kind == COMPLAINT_MISSING:
-            return S.count(box_pub) != 1
-        if S.count(box_pub) != 1 or cards is None:
+            onion = dc.onion_from_seed(seed, mixer_pubs, ctx=rnd.ctx)
+            if _b64(dc.entry_hash(onion)) not in batches[inst]["hashes"]:
+                return False  # the household onioned another box
+            return S.count(keys.box_pub) != 1
+        if S.count(keys.box_pub) != 1 or cards is None:
             return False
-        opened = dc.try_cards(box_priv, cards, ctx=rnd.ctx)
+        opened = dc.try_cards(keys.box_priv, cards, ctx=rnd.ctx)
         giver = dc.Person(seat=rnd.seat_of(inst, user) or 0, instance=inst, user=user)
         card = check_card(rnd, opened[0], giver=giver) if len(opened) == 1 else None
         if kind == COMPLAINT_CARDS:
             return card is None
-        # COMPLAINT_PARTNER: exactly one valid card, the giver's partner.
         if card is None:
             return False
         to_seat = rnd.seat_of(card.instance, card.user)
@@ -469,9 +515,51 @@ def complaint_holds(
         return False
 
 
+def opening_holds(
+    rnd: _Round,
+    instance: str,
+    opening: dict,
+    *,
+    batches: dict[str, dict],
+    mixer_pubs: list[bytes],
+) -> bool:
+    """Whether a household's opening of a broken round rebuilds exactly
+    the onions and commitments it signed (else it is the one that broke
+    it)."""
+    try:
+        seeds_raw = opening.get("seeds")
+        sig = _raw(opening.get("sig"), dc.SIG_BYTES, "sig")
+        if not isinstance(seeds_raw, dict):
+            return False
+        seeds = [(u, _raw(s, dc.SEED_BYTES, "seed")) for u, s in seeds_raw.items()]
+        if not verify_ed25519(
+            rnd.identity(instance), dc.opening_message(rnd.ctx, instance, seeds), sig
+        ):
+            return False
+        if sorted(u for u, _ in seeds) != sorted(p.user for p in rnd.of(instance)):
+            return False
+        batch = batches[instance]
+        rebuilt = sorted(
+            _b64(dc.entry_hash(dc.onion_from_seed(s, mixer_pubs, ctx=rnd.ctx)))
+            for _u, s in seeds
+        )
+        commits = sorted(
+            [u, _b64(dc.person_commitment(rnd.ctx, instance, u, s))] for u, s in seeds
+        )
+        return rebuilt == sorted(batch["hashes"]) and commits == sorted(
+            batch["commits"]
+        )
+    except DrawWireError, dc.DrawCryptoError, KeyError, ValueError:
+        return False
+
+
 class AppDrawService:
-    """The gift draw: the hub's rounds and each household's own steps. See
-    the module docstring."""
+    """The gift draw engine: the hub's rounds and each household's own
+    steps. An :class:`~socialhome.app_engines.registry.AppEngine`."""
+
+    engine_id: str = DRAW_ENGINE_ID
+    suites: frozenset[str] = dc.SUPPORTED_DRAW_SUITES
+    steps: frozenset[str] = DRAW_STEPS
 
     __slots__ = (
         "_app_fed",
@@ -483,6 +571,7 @@ class AppDrawService:
         "_locks",
         "_rand",
         "_repo",
+        "_state",
         "_tasks",
         "_user_repo",
         "_ws",
@@ -493,6 +582,7 @@ class AppDrawService:
         *,
         groups: AppGroupService,
         group_repo: AbstractAppGroupRepo,
+        state_repo: AbstractAppEngineStateRepo,
         app_federation: AppFederationService,
         user_repo: Any,
         federation: Any,
@@ -504,6 +594,7 @@ class AppDrawService:
     ) -> None:
         self._groups = groups
         self._repo = group_repo
+        self._state = state_repo
         self._app_fed = app_federation
         self._user_repo = user_repo
         self._federation = federation
@@ -511,8 +602,8 @@ class AppDrawService:
         self._ws = ws
         self._household_label = household_label
         self._bus = bus
-        #: Randomness for keys, shuffles and seals (``os.urandom``; tests
-        #: pin it to make test vectors).
+        #: Randomness for keys, seeds, shuffles and seals (``os.urandom``;
+        #: tests pin it to make test vectors).
         self._rand = rand
         self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._tasks: set[asyncio.Task] = set()
@@ -547,37 +638,42 @@ class AppDrawService:
         except Exception as exc:  # noqa: BLE001 — fail-soft publish
             log.warning("app_draw: bus publish failed: %s", exc)
 
+    def _ad(self, session_id: str) -> bytes:
+        return f"socialhome/app_engine/state|{session_id}|{DRAW_ENGINE_ID}".encode()
+
     async def _load(self, session_id: str) -> dict:
-        raw = await self._repo.get_draw(session_id)
+        raw = await self._state.get(session_id, DRAW_ENGINE_ID)
         if raw is None:
             return {"v": 1}
         record = orjson.loads(raw)
         plain = self._key_manager.decrypt(
-            record["enc"], associated_data=_AD + session_id.encode()
+            record["enc"], associated_data=self._ad(session_id)
         )
         return orjson.loads(plain)
 
     async def _save(self, session_id: str, st: dict) -> None:
         enc = self._key_manager.encrypt(
-            orjson.dumps(st), associated_data=_AD + session_id.encode()
+            orjson.dumps(st), associated_data=self._ad(session_id)
         )
-        await self._repo.set_draw(
-            session_id, orjson.dumps({"v": 1, "enc": enc}).decode()
+        await self._state.set(
+            session_id, DRAW_ENGINE_ID, orjson.dumps({"v": 1, "enc": enc}).decode()
         )
 
     def _sign(self, message: bytes) -> str:
         return _b64(sign_ed25519(self._federation.own_identity_seed, message))
 
     async def _send(
-        self, table: GroupSession, to_instance: str, verb: str, body: dict
+        self, table: GroupSession, to_instance: str, step: str, body: dict
     ) -> None:
-        """One draw verb to *to_instance* — this household's own steps run
+        """One draw step to *to_instance* — this household's own steps run
         in a task of their own (after the caller's lock is released)."""
         payload = {
             "app_id": table.app_id,
             "session_id": table.session_id,
-            "verb": verb,
-            "draw_suite": dc.DRAW_SUITE_X25519_AESGCM,
+            "verb": VERB_ENGINE,
+            "engine": DRAW_ENGINE_ID,
+            ENGINE_SUITE_FIELD: dc.DRAW_SUITE_X25519_AESGCM,
+            "step": step,
             **body,
         }
         if to_instance == self._own:
@@ -591,57 +687,62 @@ class AppDrawService:
             return
         try:
             await self._step(table, self._own, payload)
+        except (DrawWireError, dc.DrawCryptoError, dc.UnsupportedDrawSuite) as exc:
+            log.info("app_draw: own %s step dropped: %s", payload.get("step"), exc)
         except Exception:
-            log.exception("app_draw: own step %s failed", payload.get("verb"))
+            log.exception("app_draw: own step %s failed", payload.get("step"))
 
     async def _supports(self, instance: str) -> bool:
         if instance == self._own:
             return True
         return bool(
             await self._federation.space_member_supports(
-                instance, min_version=FederationCapability.MIN_FOR_APP_DRAW
+                instance, min_version=FederationCapability.MIN_FOR_APP_ENGINES
             )
         )
 
-    # ─── Inbound ──────────────────────────────────────────────────────
+    # ─── Inbound (from the registry) ──────────────────────────────────
 
     async def on_inbound(self, event: FederationEvent, table: GroupSession) -> None:
-        """A ``draw_*`` verb for *table* (its app and space already
-        matched by :class:`AppGroupService`). Anything malformed, from a
-        household below v_78 or not from who may send it is dropped."""
+        """A draw step for *table* — the registry checked the engine, its
+        suite, and that this household's copy of the app declares it."""
         sender = event.from_instance
         if not await self._supports(sender):
-            log.info("app_draw: verb from %s below v_78 dropped", sender)
+            log.info("app_draw: step from %s below v_78 dropped", sender)
             return
         try:
             await self._step(table, sender, event.payload)
         except (DrawWireError, dc.DrawCryptoError, dc.UnsupportedDrawSuite) as exc:
             log.info(
                 "app_draw: %s from %s for %s dropped: %s",
-                event.payload.get("verb"),
+                event.payload.get("step"),
                 sender,
                 table.session_id,
                 exc,
             )
 
     async def _step(self, table: GroupSession, sender: str, p: dict) -> None:
-        dc.check_suite(p.get("draw_suite"))
-        verb = p.get("verb")
+        dc.check_suite(p.get(ENGINE_SUITE_FIELD))
+        if p.get("engine") != DRAW_ENGINE_ID:
+            raise DrawWireError("not a draw step")
+        step = p.get("step")
+        if step not in DRAW_STEPS:
+            raise DrawWireError("unknown step")
         gen = _int(p.get("gen"), 1, DRAW_AGAIN_MAX + 1, "gen")
         round_no = _int(p.get("round"), 1, DRAW_ROUNDS_MAX, "round")
         is_hub = table.hub_instance == self._own
-        # A hand-over / wish update the hub passes on keeps its verb and
+        # A hand-over / wish update the hub passes on keeps its step and
         # says so (``relayed``); only the hub's own copy may.
-        if verb in DRAW_TO_HUB_VERBS and p.get("relayed") is not True:
+        if step in DRAW_TO_HUB_STEPS and p.get("relayed") is not True:
             if not is_hub:
                 raise DrawWireError("not the hub")
             async with self._lock(table.session_id):
-                await self._hub_step(table, sender, str(verb), gen, round_no, p)
+                await self._hub_step(table, sender, str(step), gen, round_no, p)
             return
         if sender != table.hub_instance:
             raise DrawWireError("not from the hub")
         async with self._lock(table.session_id):
-            await self._participant_step(table, str(verb), gen, round_no, p)
+            await self._participant_step(table, str(step), gen, round_no, p)
 
     # ─── The hub ──────────────────────────────────────────────────────
 
@@ -649,7 +750,7 @@ class AppDrawService:
         self,
         table: GroupSession,
         sender: str,
-        verb: str,
+        step: str,
         gen: int,
         round_no: int,
         p: dict,
@@ -661,27 +762,44 @@ class AppDrawService:
         rnd = _Round(hub)
         if sender not in rnd.order:
             raise DrawWireError("not a participant household")
-        match verb:
-            case "draw_key":
+        match step:
+            case "key":
                 await self._hub_key(table, st, rnd, sender, p)
-            case "draw_onions":
+            case "onions":
                 await self._hub_onions(table, st, rnd, sender, p)
-            case "draw_mixed":
+            case "mixed":
                 await self._hub_mixed(table, st, rnd, sender, p)
-            case "draw_cards":
+            case "reveal":
+                await self._hub_reveal(table, st, rnd, sender, p)
+            case "open":
+                await self._hub_open(table, st, rnd, sender, p)
+            case "commit":
+                await self._hub_commit(table, st, rnd, sender, p)
+            case "cards":
                 await self._hub_cards(table, st, rnd, sender, p)
-            case "draw_done":
+            case "done":
                 await self._hub_done(table, st, rnd, sender, p)
-            case "draw_fail" | "draw_redo":
-                await self._hub_complaint(table, st, rnd, sender, verb, p)
-            case "draw_handover" | "draw_wish":
-                await self._hub_relay_after(table, st, rnd, sender, verb, p)
-            case _:  # pragma: no cover — DRAW_TO_HUB_VERBS is exhaustive
-                raise DrawWireError("unknown verb")
+            case "fail" | "redo":
+                await self._hub_complaint(table, st, rnd, sender, step, p)
+            case "handover" | "wish":
+                await self._hub_relay_after(table, st, rnd, sender, step, p)
+            case _:  # pragma: no cover — DRAW_TO_HUB_STEPS is exhaustive
+                raise DrawWireError("unknown step")
 
-    def _hub_expect(self, hub: dict, phase: str) -> None:
+    @staticmethod
+    def _hub_expect(hub: dict, phase: str) -> None:
         if hub["phase"] != phase:
             raise DrawWireError(f"not in {phase}")
+
+    @staticmethod
+    def _rid(rnd: _Round, **fields: Any) -> dict:
+        return {"gen": rnd.gen, "round": rnd.round, **fields}
+
+    async def _to_all(
+        self, table: GroupSession, rnd: _Round, step: str, body: dict
+    ) -> None:
+        for inst in rnd.order:
+            await self._send(table, inst, step, self._rid(rnd, **body))
 
     async def _hub_key(
         self, table: GroupSession, st: dict, rnd: _Round, sender: str, p: dict
@@ -694,6 +812,8 @@ class AppDrawService:
             rnd.identity(sender), dc.key_message(rnd.ctx, sender, pub), sig
         ):
             raise DrawWireError("key signature")
+        if not dc.is_usable_key(pub):
+            raise DrawWireError("mixer key unusable")
         if sender in hub["keys"]:
             return  # first key wins; a repeat is the outbox retrying
         hub["keys"][sender] = {"pub": _b64(pub), "sig": _b64(sig)}
@@ -702,10 +822,10 @@ class AppDrawService:
             return
         hub["phase"] = _PHASE_ONIONS
         hub["since"] = _now().isoformat()
+        hub["mixer_pubs"] = [hub["keys"][i]["pub"] for i in rnd.order]
         await self._save(table.session_id, st)
         keys = [{"instance": i, **hub["keys"][i]} for i in rnd.order]
-        for inst in rnd.order:
-            await self._send(table, inst, VERB_DRAW_MIXERS, self._rid(rnd, keys=keys))
+        await self._to_all(table, rnd, STEP_MIXERS, {"keys": keys})
 
     async def _hub_onions(
         self, table: GroupSession, st: dict, rnd: _Round, sender: str, p: dict
@@ -714,8 +834,7 @@ class AppDrawService:
         self._hub_expect(hub, _PHASE_ONIONS)
         if sender in hub["batches"]:
             return
-        batch = self._check_batch(rnd, sender, p)
-        hub["batches"][sender] = batch
+        hub["batches"][sender] = self._check_batch(rnd, sender, p)
         if len(hub["batches"]) < rnd.h:
             await self._save(table.session_id, st)
             return
@@ -730,25 +849,27 @@ class AppDrawService:
         await self._save(table.session_id, st)
         batches = [{"instance": i, **hub["batches"][i]} for i in sorted(hub["batches"])]
         await self._send(
-            table, rnd.order[0], VERB_DRAW_MIX, self._rid(rnd, k=0, batches=batches)
+            table, rnd.order[0], STEP_MIX, self._rid(rnd, k=0, batches=batches)
         )
 
     @staticmethod
     def _check_batch(rnd: _Round, inst: str, b: dict) -> dict:
         """A household's onions: one per person of it, each exactly the
-        round's onion size, signed by it with its commitments."""
+        round's onion size, signed with its commitments and r-commitment."""
         mine = rnd.of(inst)
         onions = _raw_list(b.get("onions"), len(mine), dc.onion_size(rnd.h), "onions")
         commits = _commits(b.get("commits"), mine)
+        r_commit = _raw(b.get("r_commit"), dc.DIGEST_BYTES, "r_commit")
         sig = _raw(b.get("sig"), dc.SIG_BYTES, "sig")
         msg = dc.batch_message(
-            rnd.ctx, inst, [dc.entry_hash(o) for o in onions], commits
+            rnd.ctx, inst, [dc.entry_hash(o) for o in onions], commits, r_commit
         )
         if not verify_ed25519(rnd.identity(inst), msg, sig):
             raise DrawWireError("onions signature")
         return {
             "onions": [_b64(o) for o in onions],
             "commits": [[u, _b64(c)] for u, c in commits],
+            "r_commit": _b64(r_commit),
             "sig": _b64(sig),
         }
 
@@ -787,7 +908,7 @@ class AppDrawService:
             await self._send(
                 table,
                 rnd.order[k + 1],
-                VERB_DRAW_MIX,
+                STEP_MIX,
                 self._rid(
                     rnd,
                     k=k + 1,
@@ -796,7 +917,6 @@ class AppDrawService:
                 ),
             )
             return
-        hub["phase"] = _PHASE_CARDS
         hub["S"] = hub.pop("list")
         hub["list_body"] = {
             "S": hub["S"],
@@ -808,6 +928,7 @@ class AppDrawService:
                         for o in hub["batches"][i]["onions"]
                     ],
                     "commits": hub["batches"][i]["commits"],
+                    "r_commit": hub["batches"][i]["r_commit"],
                     "sig": hub["batches"][i]["sig"],
                 }
                 for i in sorted(hub["batches"])
@@ -815,11 +936,62 @@ class AppDrawService:
             "chain": hub["chain"],
         }
         hub["batches"] = {}  # the onions are spent: keep the hashes only
+        # A key in S nobody can seal to breaks the round publicly: every
+        # household opens its seeds, which names the one that sent it.
+        usable = all(dc.is_usable_key(_raw(s)) for s in hub["S"])
+        hub["phase"] = _PHASE_REVEAL if usable else _PHASE_VOID
         await self._save(table.session_id, st)
-        for inst in rnd.order:
-            await self._send(
-                table, inst, VERB_DRAW_LIST, self._rid(rnd, **hub["list_body"])
-            )
+        await self._to_all(table, rnd, STEP_LIST, hub["list_body"])
+
+    async def _hub_reveal(
+        self, table: GroupSession, st: dict, rnd: _Round, sender: str, p: dict
+    ) -> None:
+        hub = st["hub"]
+        self._hub_expect(hub, _PHASE_REVEAL)
+        r = _raw(p.get("r"), dc.SEED_BYTES, "r")
+        batch = next(b for b in hub["list_body"]["batches"] if b["instance"] == sender)
+        if _b64(dc.r_commitment(rnd.ctx, sender, r)) != batch["r_commit"]:
+            raise DrawWireError("r doesn't match its commitment")
+        if sender in hub["reveals"]:
+            return
+        hub["reveals"][sender] = _b64(r)
+        if len(hub["reveals"]) < rnd.h:
+            await self._save(table.session_id, st)
+            return
+        hub["phase"] = _PHASE_COMMIT
+        hub["since"] = _now().isoformat()
+        await self._save(table.session_id, st)
+        await self._to_all(table, rnd, STEP_REVEALS, {"reveals": hub["reveals"]})
+
+    async def _hub_commit(
+        self, table: GroupSession, st: dict, rnd: _Round, sender: str, p: dict
+    ) -> None:
+        hub = st["hub"]
+        self._hub_expect(hub, _PHASE_COMMIT)
+        hashes = _raw_list(
+            p.get("hashes"), len(rnd.of(sender)), dc.DIGEST_BYTES, "hashes"
+        )
+        sig = _raw(p.get("sig"), dc.SIG_BYTES, "sig")
+        if not verify_ed25519(
+            rnd.identity(sender), dc.card_commit_message(rnd.ctx, sender, hashes), sig
+        ):
+            raise DrawWireError("card commitment signature")
+        if sender in hub["commits"]:
+            return
+        hub["commits"][sender] = {"hashes": [_b64(x) for x in hashes], "sig": _b64(sig)}
+        if len(hub["commits"]) < rnd.h:
+            await self._save(table.session_id, st)
+            return
+        every = [x for c in hub["commits"].values() for x in c["hashes"]]
+        if len(set(every)) != len(every):
+            # Two households committed the same card: refuse the last word
+            # (nothing else changed) — the round waits for an honest one.
+            hub["commits"].pop(sender)
+            raise DrawWireError("card commitments repeat")
+        hub["phase"] = _PHASE_CARDS
+        hub["since"] = _now().isoformat()
+        await self._save(table.session_id, st)
+        await self._to_all(table, rnd, STEP_COMMITS, {"commits": hub["commits"]})
 
     async def _hub_cards(
         self, table: GroupSession, st: dict, rnd: _Round, sender: str, p: dict
@@ -831,6 +1003,10 @@ class AppDrawService:
         cards = _raw_list(
             p.get("cards"), len(rnd.of(sender)), dc.SEALED_CARD_BYTES, "cards"
         )
+        if sorted(_b64(dc.sha256(c)) for c in cards) != sorted(
+            hub["commits"][sender]["hashes"]
+        ):
+            raise DrawWireError("cards aren't the ones committed to")
         hub["cards"][sender] = [_b64(c) for c in cards]
         if len(hub["cards"]) < rnd.h:
             await self._save(table.session_id, st)
@@ -839,38 +1015,46 @@ class AppDrawService:
             (c for cs in hub["cards"].values() for c in cs),
             key=lambda c: dc.sha256(_raw(c)),
         )
-        if len(set(every)) != rnd.n:
-            # Two households sent the same sealed card: someone copied one.
-            raise DrawWireError("cards repeat")
         hub["all_cards"] = every
         hub["cards"] = {i: len(cs) for i, cs in hub["cards"].items()}
         hub["phase"] = _PHASE_OPENING
         hub["since"] = _now().isoformat()
         await self._save(table.session_id, st)
-        for inst in rnd.order:
-            await self._send(
-                table, inst, VERB_DRAW_CARDS_ALL, self._rid(rnd, cards=every)
-            )
+        await self._to_all(table, rnd, STEP_CARDS_ALL, {"cards": every})
 
     async def _hub_done(
         self, table: GroupSession, st: dict, rnd: _Round, sender: str, p: dict
     ) -> None:
         hub = st["hub"]
         self._hub_expect(hub, _PHASE_OPENING)
-        if _int(p.get("count"), 1, DRAW_MAX_PEOPLE, "count") != len(rnd.of(sender)):
+        count = _int(p.get("count"), 1, DRAW_MAX_PEOPLE, "count")
+        if count != len(rnd.of(sender)):
             raise DrawWireError("done for the wrong count")
+        sig = _raw(p.get("sig"), dc.SIG_BYTES, "sig")
+        if not verify_ed25519(
+            rnd.identity(sender), dc.done_message(rnd.ctx, sender, count), sig
+        ):
+            raise DrawWireError("done signature")
         if sender in hub["done"]:
             return
-        hub["done"].append(sender)
+        hub["done"][sender] = {"count": count, "sig": _b64(sig)}
         if len(hub["done"]) < rnd.h:
             await self._save(table.session_id, st)
             await self._push(table, st)
             return
         hub["phase"] = _PHASE_COMPLETE
         await self._save(table.session_id, st)
-        for inst in rnd.order:
-            await self._send(table, inst, VERB_DRAW_COMPLETE, self._rid(rnd))
+        await self._to_all(table, rnd, STEP_COMPLETE, {"dones": hub["done"]})
         await self._push(table, st)
+
+    def _hub_round_data(
+        self, hub: dict
+    ) -> tuple[list[bytes], dict[str, dict], list[bytes], list[bytes] | None]:
+        S = [_raw(s) for s in hub["S"]]
+        batches = {b["instance"]: b for b in hub["list_body"]["batches"]}
+        mixer_pubs = [_raw(x) for x in hub["mixer_pubs"]]
+        cards = [_raw(c) for c in hub.get("all_cards", [])] or None
+        return S, batches, mixer_pubs, cards
 
     async def _hub_complaint(
         self,
@@ -878,37 +1062,37 @@ class AppDrawService:
         st: dict,
         rnd: _Round,
         sender: str,
-        verb: str,
+        step: str,
         p: dict,
     ) -> None:
         hub = st["hub"]
         complaint = p.get("complaint")
-        if hub["phase"] not in (_PHASE_CARDS, _PHASE_OPENING) or not isinstance(
-            complaint, dict
-        ):
-            raise DrawWireError("no complaint expected")
+        if not isinstance(complaint, dict):
+            raise DrawWireError("no complaint")
         kind = complaint.get("kind")
         if complaint.get("instance") != sender or (
-            (verb == VERB_DRAW_REDO) != (kind == COMPLAINT_PARTNER)
+            (step == STEP_REDO) != (kind == COMPLAINT_PARTNER)
         ):
             raise DrawWireError("complaint malformed")
-        if kind == COMPLAINT_MISSING and (
-            hub["phase"] != _PHASE_CARDS or sender in hub["cards"]
-        ):
-            # A missing key is said INSTEAD of sending cards, before any
-            # card is opened — never later, once the household has seen
-            # whom its people drew (a household that committed to one box
-            # and onioned another could otherwise re-roll at will).
-            raise DrawWireError("a missing key told too late")
-        S = [_raw(s) for s in hub["S"]]
-        cards = [_raw(c) for c in hub.get("all_cards", [])] or None
-        commits_all = {b["instance"]: b["commits"] for b in hub["list_body"]["batches"]}
+        if kind == COMPLAINT_MISSING:
+            # Told INSTEAD of revealing, before any card exists.
+            if hub["phase"] != _PHASE_REVEAL or sender in hub["reveals"]:
+                raise DrawWireError("a missing key told too late")
+        elif hub["phase"] != _PHASE_OPENING or sender in hub["done"]:
+            raise DrawWireError("a card complaint out of turn")
+        S, batches, mixer_pubs, cards = self._hub_round_data(hub)
         if not await asyncio.to_thread(
-            complaint_holds, rnd, complaint, S=S, commits_all=commits_all, cards=cards
+            complaint_holds,
+            rnd,
+            complaint,
+            S=S,
+            batches=batches,
+            mixer_pubs=mixer_pubs,
+            cards=cards,
         ):
-            # Named to the organiser: "…'s home stopped the draw without reason".
-            if sender not in hub["false"]:
-                hub["false"].append(sender)
+            # Named to the organiser: "…'s home stopped the draw".
+            if sender not in hub["blamed"]:
+                hub["blamed"].append(sender)
             log.warning(
                 "app_draw: %s stopped round %s/%s of %s without proof",
                 sender,
@@ -919,13 +1103,41 @@ class AppDrawService:
             await self._save(table.session_id, st)
             await self._push(table, st)
             return
-        evidence = {
+        evidence: dict[str, Any] = {
             "kind": BECAUSE_COMPLAINT,
             "complaint": complaint,
             "list": hub["list_body"],
+            "mixer_pubs": hub["mixer_pubs"],
         }
         if kind != COMPLAINT_MISSING:
             evidence["cards"] = hub.get("all_cards", [])
+            evidence["commits"] = hub["commits"]
+        await self._next_round(
+            table, st, people=rnd.people, names=rnd.names, because=evidence
+        )
+
+    async def _hub_open(
+        self, table: GroupSession, st: dict, rnd: _Round, sender: str, p: dict
+    ) -> None:
+        """A household's opening of a round whose ``S`` holds a key nobody
+        can seal to. Once every household opened (or is named for an
+        opening that doesn't rebuild), a fresh round follows."""
+        hub = st["hub"]
+        self._hub_expect(hub, _PHASE_VOID)
+        opening = p.get("opening")
+        if not isinstance(opening, dict) or sender in hub["opens"]:
+            return
+        _S, batches, mixer_pubs, _c = self._hub_round_data(hub)
+        good = await asyncio.to_thread(
+            opening_holds, rnd, sender, opening, batches=batches, mixer_pubs=mixer_pubs
+        )
+        hub["opens"][sender] = opening
+        if not good and sender not in hub["blamed"]:
+            hub["blamed"].append(sender)
+        if len(hub["opens"]) < rnd.h:
+            await self._save(table.session_id, st)
+            return
+        evidence = {"kind": BECAUSE_VOID, "list": hub["list_body"]}
         await self._next_round(
             table, st, people=rnd.people, names=rnd.names, because=evidence
         )
@@ -936,19 +1148,17 @@ class AppDrawService:
         st: dict,
         rnd: _Round,
         sender: str,
-        verb: str,
+        step: str,
         p: dict,
     ) -> None:
-        """A hand-over or a wish-list update after the reveal: passed on
-        to every participant household (key-private — the hub can't tell
-        whom it is for), at most a few per person of the sender."""
+        """A hand-over or a wish-list update after the reveal: passed on to
+        every participant household (key-private — the hub can't tell whom
+        it is for), a bounded number per person of the sender."""
         hub = st["hub"]
         if hub["phase"] != _PHASE_COMPLETE:
             raise DrawWireError("not revealed")
         size = (
-            dc.SEALED_HANDOVER_BYTES
-            if verb == VERB_DRAW_HANDOVER
-            else dc.SEALED_CARD_BYTES
+            dc.SEALED_HANDOVER_BYTES if step == STEP_HANDOVER else dc.SEALED_CARD_BYTES
         )
         sealed = _raw(p.get("sealed"), size, "sealed")
         sent = hub.setdefault("after", {})
@@ -957,14 +1167,7 @@ class AppDrawService:
             raise DrawWireError("too many updates")
         sent[sender] = sent.get(sender, 0) + 1
         await self._save(table.session_id, st)
-        for inst in rnd.order:
-            await self._send(
-                table, inst, verb, self._rid(rnd, sealed=_b64(sealed), relayed=True)
-            )
-
-    @staticmethod
-    def _rid(rnd: _Round, **fields: Any) -> dict:
-        return {"gen": rnd.gen, "round": rnd.round, **fields}
+        await self._to_all(table, rnd, step, {"sealed": _b64(sealed), "relayed": True})
 
     async def _identities(
         self,
@@ -972,11 +1175,9 @@ class AppDrawService:
         instances: set[str],
         hints: dict[str, object] | None = None,
     ) -> dict[str, str] | None:
-        """Each household's identity key (hex): the one this household
-        stores for it, else a *hint* (the roster's, or the start message's)
-        that derives to its id — a household id IS its key's fingerprint,
-        so a relay can't pass off another key. ``None`` when one is
-        unknown."""
+        """Each household's identity key (hex): the one this household stores
+        for it, else a *hint* that derives to its id (a household id IS its
+        key's fingerprint). ``None`` when one is unknown."""
         out: dict[str, str] = {}
         for inst in sorted(instances):
             if inst == self._own:
@@ -1006,8 +1207,8 @@ class AppDrawService:
         because: dict,
         again: bool = False,
     ) -> None:
-        """Start the hub's next round (or the next draw, *again*) for
-        *people*; gives up after :data:`DRAW_ROUNDS_MAX` rounds."""
+        """Start the hub's next round (or the next draw, *again*); gives up
+        after :data:`DRAW_ROUNDS_MAX` rounds."""
         old = st.get("hub")
         gen = (
             (old["gen"] + 1)
@@ -1015,15 +1216,12 @@ class AppDrawService:
             else (old["gen"] if old else 1)
         )
         round_no = 1 if (old is None or again) else old["round"] + 1
-        settings = DrawSettings.from_wire(st.get("settings") or {}).only(
-            frozenset(p.seat for p in people)
-        )
+        seats = frozenset(p.seat for p in people)
+        settings = DrawSettings.from_wire(st.get("settings") or {}).only(seats)
         if len(people) < DRAW_MIN_PEOPLE:
             await self._hub_end(table, st, END_TOO_FEW)
             return
-        if round_no > DRAW_ROUNDS_MAX or not pairs_fit(
-            settings.pairs, frozenset(p.seat for p in people)
-        ):
+        if round_no > DRAW_ROUNDS_MAX or not pairs_fit(settings.pairs, seats):
             await self._hub_end(table, st, END_RULES)
             return
         identities = await self._identities(table, {p.instance for p in people})
@@ -1047,9 +1245,13 @@ class AppDrawService:
             "keys": {},
             "batches": {},
             "chain": [],
+            "reveals": {},
+            "commits": {},
             "cards": {},
-            "done": [],
-            "false": [],
+            "done": {},
+            "opens": {},
+            # Who broke a round stays named to the organiser for the draw.
+            "blamed": [] if (old is None or again) else list(old.get("blamed", [])),
         }
         await self._save(table.session_id, st)
         rnd = _Round(st["hub"])
@@ -1059,8 +1261,7 @@ class AppDrawService:
             "settings": frame["settings"],
             "because": because,
         }
-        for inst in rnd.order:
-            await self._send(table, inst, VERB_DRAW_START, self._rid(rnd, **body))
+        await self._to_all(table, rnd, STEP_START, body)
         await self._push(table, st)
 
     async def _hub_end(self, table: GroupSession, st: dict, reason: str) -> None:
@@ -1070,57 +1271,56 @@ class AppDrawService:
         hub["phase"] = _PHASE_ENDED
         hub["ended"] = reason
         await self._save(table.session_id, st)
-        rnd = _Round(hub)
-        for inst in rnd.order:
-            await self._send(table, inst, VERB_DRAW_END, self._rid(rnd, reason=reason))
+        await self._to_all(table, _Round(hub), STEP_END, {"reason": reason})
         await self._push(table, st)
 
     # ─── A participant household ──────────────────────────────────────
 
     async def _participant_step(
-        self, table: GroupSession, verb: str, gen: int, round_no: int, p: dict
+        self, table: GroupSession, step: str, gen: int, round_no: int, p: dict
     ) -> None:
         st = await self._load(table.session_id)
-        if verb == VERB_DRAW_START:
+        if step == STEP_START:
             await self._on_start(table, st, gen, round_no, p)
             return
         cur = st.get("p")
         if cur is None or (cur["gen"], cur["round"]) != (gen, round_no):
             raise DrawWireError("not the current round")
         rnd = _Round(cur)
-        match verb:
-            case "draw_mixers":
+        match step:
+            case "mixers":
                 await self._on_mixers(table, st, rnd, p)
-            case "draw_mix":
+            case "mix":
                 await self._on_mix(table, st, rnd, p)
-            case "draw_list":
+            case "list":
                 await self._on_list(table, st, rnd, p)
-            case "draw_cards_all":
+            case "reveals":
+                await self._on_reveals(table, st, rnd, p)
+            case "commits":
+                await self._on_commits(table, st, rnd, p)
+            case "cards_all":
                 await self._on_cards_all(table, st, rnd, p)
-            case "draw_complete":
-                await self._on_complete(table, st, rnd)
-            case "draw_end":
+            case "complete":
+                await self._on_complete(table, st, rnd, p)
+            case "end":
                 await self._on_end(table, st, p)
-            case "draw_handover":
+            case "handover":
                 await self._on_handover(table, st, rnd, p)
-            case "draw_wish":
+            case "wish":
                 await self._on_wish(table, st, rnd, p)
             case _:
-                raise DrawWireError("not a verb for a participant")
+                raise DrawWireError("not a step for a participant")
 
-    async def _own_people(
-        self, table: GroupSession, rnd_people: list[dc.Person]
-    ) -> bool:
-        """Whether every person of this household in *rnd_people* has a
-        place at the table here (a local user with a group seat)."""
-        for person in rnd_people:
+    async def _own_people(self, table: GroupSession, people: list[dc.Person]) -> bool:
+        """Whether every person of this household in *people* has a place
+        at the table here (a local user with a group seat)."""
+        for person in people:
             if person.instance != self._own:
                 continue
             user = await self._user_repo.get(person.user)
             if user is None:
                 return False
-            row = await self._groups.seat_row(table, user.user_id)
-            if row is None:
+            if await self._groups.seat_row(table, user.user_id) is None:
                 return False
         return True
 
@@ -1156,9 +1356,15 @@ class AppDrawService:
         if cur is not None and (cur["gen"], cur["round"]) == (gen, round_no):
             if cur["ctx"] != frame["ctx"]:
                 raise DrawWireError("a second start for the same round")
-            await self._send(table, table.hub_instance, VERB_DRAW_KEY, cur["key_msg"])
+            await self._send(table, table.hub_instance, STEP_KEY, cur["key_msg"])
             return
-        self._justify(table, st, gen, round_no, people, p.get("because"))
+        if not self._justify(table, st, gen, round_no, people, p.get("because")):
+            # Our copy of the table doesn't show it yet (the hub's roster
+            # is on its way): keep the start until it does.
+            st["pending_start"] = p
+            await self._save(table.session_id, st)
+            return
+        st.pop("pending_start", None)
         priv, pub = dc.new_keypair(self._rand)
         rnd = _Round(frame)
         key_msg = self._rid(
@@ -1170,7 +1376,7 @@ class AppDrawService:
         st["last"] = {"gen": gen, "round": round_no, "complete": False}
         st.pop("ended", None)
         await self._save(table.session_id, st)
-        await self._send(table, table.hub_instance, VERB_DRAW_KEY, key_msg)
+        await self._send(table, table.hub_instance, STEP_KEY, key_msg)
         await self._push(table, st)
 
     def _justify(
@@ -1181,70 +1387,114 @@ class AppDrawService:
         round_no: int,
         people: list[dc.Person],
         because: object,
-    ) -> None:
+    ) -> bool:
         """Refuse a new round without its reason (design 5.4, "No re-rolls
-        on demand") — :class:`DrawWireError`."""
+        on demand") — :class:`DrawWireError`. ``False``: it may hold, but
+        this household's copy of the table doesn't show it yet."""
         if not isinstance(because, dict) or not isinstance(because.get("kind"), str):
             raise DrawWireError("a round without its reason")
         kind = because["kind"]
         last = st.get("last")
         cur = st.get("p")
-        if kind == BECAUSE_FIRST:
-            # The table's first draw — or a fresh one after a draw gave up.
-            fresh = last is None and (gen, round_no) == (1, 1)
-            retry = (
-                last is not None
-                and st.get("ended") is not None
-                and (gen, round_no) == (last["gen"] + 1, 1)
-            )
-            if not (fresh or retry):
-                raise DrawWireError("not the first draw")
-            return
+        now = {_person_key(x) for x in people}
+        seated = _seated(table)
+        if kind in (BECAUSE_FIRST, BECAUSE_AGAIN):
+            if kind == BECAUSE_FIRST:
+                fresh = last is None and (gen, round_no) == (1, 1)
+                retry = (
+                    last is not None
+                    and st.get("ended") is not None
+                    and (gen, round_no) == (last["gen"] + 1, 1)
+                )
+                if not (fresh or retry):
+                    raise DrawWireError("not the first draw")
+            elif (
+                last is None
+                or not last["complete"]
+                or (gen, round_no) != (last["gen"] + 1, 1)
+            ):
+                raise DrawWireError("draw again before a reveal")
+            # Exactly the people seated at the table as we see it — no
+            # invisible extras, nobody left out.
+            return now == seated
         if last is None or cur is None:
             raise DrawWireError("no draw to follow")
-        if kind == BECAUSE_AGAIN:
-            if not last["complete"] or (gen, round_no) != (last["gen"] + 1, 1):
-                raise DrawWireError("draw again before a reveal")
-            return
         if last["complete"] or (gen, round_no) != (last["gen"], last["round"] + 1):
             raise DrawWireError("not the next round")
         before = {_person_key(x) for x in _people_from(cur["people"])}
-        now = {_person_key(x) for x in people}
         if kind == BECAUSE_CHANGED:
-            # Fewer people, never new ones (a removal is visible to all;
-            # the removed can't come back to the table).
+            # Fewer people, never new ones — and only people our own copy
+            # shows gone.
             if not now < before:
                 raise DrawWireError("the people didn't change")
-            return
-        if kind != BECAUSE_COMPLAINT or now != before:
-            raise DrawWireError("unknown reason")
+            if "S" in cur:
+                gone_households = {i for i, _u in before - now}
+                if any(i == inst for i, _u in now for inst in gone_households):
+                    # After S, only whole stuck households are dropped.
+                    raise DrawWireError("a leave after S is no new round")
+            return not ((before - now) & seated)
+        if now != before:
+            raise DrawWireError("the people changed")
         rnd = _Round(cur)
         body = because.get("list")
-        complaint = because.get("complaint")
-        if not isinstance(body, dict) or not isinstance(complaint, dict):
-            raise DrawWireError("a complaint without its proof")
-        S, commits_all = check_list(rnd, body)
-        cards_raw = because.get("cards")
-        cards = (
-            _raw_list(cards_raw, rnd.n, dc.SEALED_CARD_BYTES, "cards")
-            if cards_raw is not None
-            else None
-        )
-        # The proof must be about the round as THIS household saw it: the
-        # same S, the same cards — a relay can't drop a card to make a
-        # complaint hold.
+        if not isinstance(body, dict):
+            raise DrawWireError("a new round without its proof")
+        S, batches = check_list(rnd, body)
         if "S" in cur and [_b64(s) for s in S] != cur["S"]:
             raise DrawWireError("another list than ours")
-        if "cards" in cur and (
-            cards is None or [_b64(c) for c in cards] != cur["cards"]
-        ):
-            raise DrawWireError("other cards than ours")
-        if complaint.get("kind") == COMPLAINT_MISSING and "cards" in cur:
-            raise DrawWireError("a missing key told after the cards went out")
+        if kind == BECAUSE_VOID:
+            if all(dc.is_usable_key(s) for s in S):
+                raise DrawWireError("the round wasn't void")
+            return True
+        if kind != BECAUSE_COMPLAINT:
+            raise DrawWireError("unknown reason")
+        complaint = because.get("complaint")
+        if not isinstance(complaint, dict):
+            raise DrawWireError("a complaint without its proof")
+        mixer_pubs = _raw_list(
+            because.get("mixer_pubs"), rnd.h, dc.KEY_BYTES, "mixer_pubs"
+        )
+        if "mixer_pubs" in cur and [_b64(x) for x in mixer_pubs] != cur["mixer_pubs"]:
+            raise DrawWireError("other mixer keys than ours")
+        cards: list[bytes] | None = None
+        if complaint.get("kind") == COMPLAINT_MISSING:
+            if "cards_msg" in cur or "commits_cards" in cur:
+                raise DrawWireError("a missing key told after the cards")
+        else:
+            cards = _raw_list(
+                because.get("cards"), rnd.n, dc.SEALED_CARD_BYTES, "cards"
+            )
+            committed = self._parse_commits(rnd, because.get("commits"))
+            if "commits_cards" in cur and committed != cur["commits_cards"]:
+                raise DrawWireError("other card commitments than ours")
+            if not check_card_list(cards, committed, rnd.n):
+                raise DrawWireError("cards aren't the committed ones")
         if not complaint_holds(
-            rnd, complaint, S=S, commits_all=commits_all, cards=cards
+            rnd, complaint, S=S, batches=batches, mixer_pubs=mixer_pubs, cards=cards
         ):
             raise DrawWireError("the complaint doesn't hold")
+        return True
+
+    @staticmethod
+    def _parse_commits(rnd: _Round, raw: object) -> dict[str, list[str]]:
+        """Every household's signed card commitment."""
+        if not isinstance(raw, dict) or set(raw) != set(rnd.order):
+            raise DrawWireError("commitments malformed")
+        out: dict[str, list[str]] = {}
+        for inst in rnd.order:
+            c = raw[inst]
+            if not isinstance(c, dict):
+                raise DrawWireError("commitment malformed")
+            hashes = _raw_list(
+                c.get("hashes"), len(rnd.of(inst)), dc.DIGEST_BYTES, "hashes"
+            )
+            sig = _raw(c.get("sig"), dc.SIG_BYTES, "sig")
+            if not verify_ed25519(
+                rnd.identity(inst), dc.card_commit_message(rnd.ctx, inst, hashes), sig
+            ):
+                raise DrawWireError("card commitment signature")
+            out[inst] = sorted(_b64(x) for x in hashes)
+        return out
 
     async def _on_mixers(
         self, table: GroupSession, st: dict, rnd: _Round, p: dict
@@ -1263,49 +1513,67 @@ class AppDrawService:
                 rnd.identity(inst), dc.key_message(rnd.ctx, inst, pub), sig
             ):
                 raise DrawWireError("mixer key signature")
+            if not dc.is_usable_key(pub):
+                raise DrawWireError("mixer key unusable")
             pubs.append(pub)
         mine = dc.public_of(_raw(cur["mixer_priv"]))
         if pubs[rnd.order.index(self._own)] != mine:
             raise DrawWireError("not our mixer key")
         if "onions_msg" not in cur:
-            onions, boxes, commits = await asyncio.to_thread(
+            onions, seeds, commits = await asyncio.to_thread(
                 self._make_onions, rnd, pubs
             )
+            r = self._rand(dc.SEED_BYTES)
+            r_commit = dc.r_commitment(rnd.ctx, self._own, r)
             batch_sig = self._sign(
                 dc.batch_message(
-                    rnd.ctx, self._own, [dc.entry_hash(o) for o in onions], commits
+                    rnd.ctx,
+                    self._own,
+                    [dc.entry_hash(o) for o in onions],
+                    commits,
+                    r_commit,
                 )
             )
-            cur["boxes"] = boxes
+            cur["seeds"] = seeds
+            cur["r"] = _b64(r)
+            cur["mixer_pubs"] = [_b64(x) for x in pubs]
             cur["onions_msg"] = self._rid(
                 rnd,
                 onions=[_b64(o) for o in onions],
                 commits=[[u, _b64(c)] for u, c in commits],
+                r_commit=_b64(r_commit),
                 sig=batch_sig,
             )
             await self._save(table.session_id, st)
-        await self._send(table, table.hub_instance, VERB_DRAW_ONIONS, cur["onions_msg"])
+        await self._send(table, table.hub_instance, STEP_ONIONS, cur["onions_msg"])
 
     def _make_onions(
         self, rnd: _Round, pubs: list[bytes]
-    ) -> tuple[list[bytes], dict, list[tuple[str, bytes]]]:
-        """A box key, commitment and onion per own person (CPU-bound: runs
-        in a worker thread)."""
+    ) -> tuple[list[bytes], dict[str, str], list[tuple[str, bytes]]]:
+        """A seed, commitment and (deterministic) onion per own person
+        (CPU-bound: runs in a worker thread)."""
         onions: list[bytes] = []
-        boxes: dict[str, dict] = {}
+        seeds: dict[str, str] = {}
         commits: list[tuple[str, bytes]] = []
         for person in rnd.of(self._own):
-            priv, pub = dc.new_keypair(self._rand)
-            nonce = self._rand(dc.NONCE_BYTES)
-            boxes[person.user] = {"priv": _b64(priv), "nonce": _b64(nonce)}
+            seed = self._rand(dc.SEED_BYTES)
+            seeds[person.user] = _b64(seed)
             commits.append(
                 (
                     person.user,
-                    dc.commitment(rnd.ctx, self._own, person.user, pub, nonce),
+                    dc.person_commitment(rnd.ctx, self._own, person.user, seed),
                 )
             )
-            onions.append(dc.build_onion(pub, pubs, ctx=rnd.ctx, rand=self._rand))
-        return dc.shuffle(onions, self._rand), boxes, sorted(commits)
+            onions.append(dc.onion_from_seed(seed, pubs, ctx=rnd.ctx))
+        return dc.shuffle(onions, self._rand), seeds, sorted(commits)
+
+    @staticmethod
+    def _box_priv(cur: dict, user: str) -> bytes:
+        return dc.person_keys(_raw(cur["seeds"][user])).box_priv
+
+    @staticmethod
+    def _box_pub(cur: dict, user: str) -> bytes:
+        return dc.person_keys(_raw(cur["seeds"][user])).box_pub
 
     async def _on_mix(
         self, table: GroupSession, st: dict, rnd: _Round, p: dict
@@ -1331,12 +1599,11 @@ class AppDrawService:
         done = cur.get("mixed")
         if done is not None:
             if done["in"] != _b64(d_in):
-                # A mixer mixes once per round, only the one signed list.
                 log.warning(
                     "app_draw: second, different list to mix for %s", table.session_id
                 )
                 raise DrawWireError("already mixed another list")
-            await self._send(table, table.hub_instance, VERB_DRAW_MIXED, done["msg"])
+            await self._send(table, table.hub_instance, STEP_MIXED, done["msg"])
             return
         out = await asyncio.to_thread(
             dc.mix,
@@ -1354,7 +1621,7 @@ class AppDrawService:
         )
         cur["mixed"] = {"in": _b64(d_in), "msg": reply}
         await self._save(table.session_id, st)
-        await self._send(table, table.hub_instance, VERB_DRAW_MIXED, reply)
+        await self._send(table, table.hub_instance, STEP_MIXED, reply)
 
     def _first_list(self, rnd: _Round, p: dict, cur: dict) -> list[bytes]:
         """The first mixer's input: exactly every household's signed onions
@@ -1381,28 +1648,101 @@ class AppDrawService:
         self, table: GroupSession, st: dict, rnd: _Round, p: dict
     ) -> None:
         cur = st["p"]
-        if "boxes" not in cur:
+        if "seeds" not in cur:
             raise DrawWireError("no onions of ours in this round")
-        S, commits_all = await asyncio.to_thread(check_list, rnd, p)
-        own_commits = [[u, c] for u, c in cur["onions_msg"]["commits"]]
-        if commits_all.get(self._own) != own_commits:
+        S, batches = await asyncio.to_thread(check_list, rnd, p)
+        mine = batches[self._own]
+        sent = cur["onions_msg"]
+        if mine["commits"] != sent["commits"] or mine["r_commit"] != sent["r_commit"]:
             raise DrawWireError("our commitments changed")
+        if sorted(mine["hashes"]) != sorted(
+            _b64(dc.entry_hash(_raw(o))) for o in sent["onions"]
+        ):
+            raise DrawWireError("our onions changed")
         cur["S"] = [_b64(s) for s in S]
-        cur["commits_all"] = commits_all
-        if "cards_msg" in cur:
+        cur["batches"] = batches
+        if "answer" in cur:
             await self._save(table.session_id, st)
-            await self._send(
-                table, table.hub_instance, VERB_DRAW_CARDS, cur["cards_msg"]
-            )
+            step, msg = cur["answer"]
+            await self._send(table, table.hub_instance, step, msg)
             return
-        for user, box in sorted(cur["boxes"].items()):
-            if S.count(dc.public_of(_raw(box["priv"]))) != 1:
-                await self._complain(table, st, rnd, COMPLAINT_MISSING, user)
-                return
-        cards = await self._make_cards(rnd, cur, S, st.get("wishes", {}))
-        cur["cards_msg"] = self._rid(rnd, cards=[_b64(c) for c in cards])
+        if not all(dc.is_usable_key(s) for s in S):
+            # The round broke publicly: open every seed, which shows ours
+            # rebuild exactly what we signed (and names whoever's don't).
+            seeds = [(u, _raw(s)) for u, s in cur["seeds"].items()]
+            sig = self._sign(dc.opening_message(rnd.ctx, self._own, seeds))
+            answer = (
+                STEP_OPEN,
+                self._rid(rnd, opening={"seeds": cur["seeds"], "sig": sig}),
+            )
+        else:
+            missing = next(
+                (
+                    u
+                    for u in sorted(cur["seeds"])
+                    if S.count(self._box_pub(cur, u)) != 1
+                ),
+                None,
+            )
+            if missing is not None:
+                answer = (
+                    STEP_FAIL,
+                    self._complaint(rnd, cur, COMPLAINT_MISSING, missing),
+                )
+            else:
+                answer = (STEP_REVEAL, self._rid(rnd, r=cur["r"]))
+        cur["answer"] = list(answer)
         await self._save(table.session_id, st)
-        await self._send(table, table.hub_instance, VERB_DRAW_CARDS, cur["cards_msg"])
+        await self._send(table, table.hub_instance, answer[0], answer[1])
+
+    def _complaint(self, rnd: _Round, cur: dict, kind: str, user: str) -> dict:
+        seed = _raw(cur["seeds"][user])
+        sig = self._sign(dc.complaint_message(rnd.ctx, self._own, kind, user, seed))
+        complaint = {
+            "kind": kind,
+            "instance": self._own,
+            "user": user,
+            "seed": cur["seeds"][user],
+            "sig": sig,
+        }
+        cur["complained"] = complaint
+        log.info("app_draw: round %s/%s stopped (%s)", rnd.gen, rnd.round, kind)
+        return self._rid(rnd, complaint=complaint)
+
+    async def _on_reveals(
+        self, table: GroupSession, st: dict, rnd: _Round, p: dict
+    ) -> None:
+        cur = st["p"]
+        if "S" not in cur or cur.get("complained"):
+            raise DrawWireError("no list of ours in this round")
+        raw = p.get("reveals")
+        if not isinstance(raw, dict) or set(raw) != set(rnd.order):
+            raise DrawWireError("reveals malformed")
+        reveals: dict[str, bytes] = {}
+        for inst in rnd.order:
+            r = _raw(raw[inst], dc.SEED_BYTES, "r")
+            if (
+                _b64(dc.r_commitment(rnd.ctx, inst, r))
+                != cur["batches"][inst]["r_commit"]
+            ):
+                raise DrawWireError("r doesn't match its commitment")
+            reveals[inst] = r
+        if reveals[self._own] != _raw(cur["r"]):
+            raise DrawWireError("not our r")
+        if "commit_msg" not in cur:
+            S = [_raw(s) for s in cur["S"]]
+            R = dc.round_randomness(rnd.ctx, reveals)
+            C = dc.circle(S, ctx=rnd.ctx, R=R)
+            cards = await self._make_cards(rnd, cur, C, st.get("wishes", {}))
+            hashes = [dc.sha256(c) for c in cards]
+            sig = self._sign(dc.card_commit_message(rnd.ctx, self._own, hashes))
+            cur["C"] = [_b64(x) for x in C]
+            cur["cards_msg"] = self._rid(rnd, cards=[_b64(c) for c in cards])
+            cur["commit_msg"] = self._rid(
+                rnd, hashes=[_b64(x) for x in hashes], sig=sig
+            )
+            await self._save(table.session_id, st)
+        await self._send(table, table.hub_instance, STEP_COMMIT, cur["commit_msg"])
 
     async def _card_for(self, rnd: _Round, user: str, *, wish: str, rev: int) -> bytes:
         """This household's signed card for its person *user*."""
@@ -1447,14 +1787,14 @@ class AppDrawService:
         )
 
     async def _make_cards(
-        self, rnd: _Round, cur: dict, S: list[bytes], wishes: dict[str, str]
+        self, rnd: _Round, cur: dict, C: list[bytes], wishes: dict[str, str]
     ) -> list[bytes]:
         plain: list[tuple[bytes, bytes]] = []
-        for user, box in sorted(cur["boxes"].items()):
-            j = S.index(dc.public_of(_raw(box["priv"])))
+        for user in sorted(cur["seeds"]):
+            j = C.index(self._box_pub(cur, user))
             _gives, sealed_to = dc.circle_targets(j, rnd.n)
             card = await self._card_for(rnd, user, wish=wishes.get(user, ""), rev=0)
-            plain.append((S[sealed_to], card))
+            plain.append((C[sealed_to], card))
         sealed = await asyncio.to_thread(
             lambda: [
                 dc.seal_card(to, c, ctx=rnd.ctx, rand=self._rand) for to, c in plain
@@ -1462,98 +1802,107 @@ class AppDrawService:
         )
         return dc.shuffle(sealed, self._rand)
 
-    async def _complain(
-        self, table: GroupSession, st: dict, rnd: _Round, kind: str, user: str
+    async def _on_commits(
+        self, table: GroupSession, st: dict, rnd: _Round, p: dict
     ) -> None:
         cur = st["p"]
-        box = cur["boxes"][user]
-        box_priv, nonce = _raw(box["priv"]), _raw(box["nonce"])
-        sig = self._sign(
-            dc.complaint_message(rnd.ctx, self._own, kind, user, box_priv, nonce)
-        )
-        complaint = {
-            "kind": kind,
-            "instance": self._own,
-            "user": user,
-            "box_priv": box["priv"],
-            "nonce": box["nonce"],
-            "sig": sig,
-        }
-        cur["complained"] = complaint
+        if "commit_msg" not in cur:
+            raise DrawWireError("no commitment of ours in this round")
+        committed = self._parse_commits(rnd, p.get("commits"))
+        if committed[self._own] != sorted(cur["commit_msg"]["hashes"]):
+            raise DrawWireError("not our commitment")
+        all_hashes = [x for hs in committed.values() for x in hs]
+        if len(set(all_hashes)) != len(all_hashes):
+            raise DrawWireError("card commitments repeat")
+        cur["commits_cards"] = committed
+        cur["commits_raw"] = p["commits"]
         await self._save(table.session_id, st)
-        log.info(
-            "app_draw: round %s/%s of %s stopped (%s)",
-            rnd.gen,
-            rnd.round,
-            table.session_id,
-            kind,
-        )
-        verb = VERB_DRAW_REDO if kind == COMPLAINT_PARTNER else VERB_DRAW_FAIL
-        await self._send(
-            table, table.hub_instance, verb, self._rid(rnd, complaint=complaint)
-        )
+        await self._send(table, table.hub_instance, STEP_CARDS, cur["cards_msg"])
 
     async def _on_cards_all(
         self, table: GroupSession, st: dict, rnd: _Round, p: dict
     ) -> None:
         cur = st["p"]
-        if "cards_msg" not in cur:
-            raise DrawWireError("no cards of ours in this round")
+        if "commits_cards" not in cur:
+            raise DrawWireError("no card commitments here")
         cards = _raw_list(p.get("cards"), rnd.n, dc.SEALED_CARD_BYTES, "cards")
-        mine = {_raw(c) for c in cur["cards_msg"]["cards"]}
-        if not mine <= set(cards):
-            raise DrawWireError("our cards are missing")
+        if not check_card_list(cards, cur["commits_cards"], rnd.n):
+            # Not the cards every household committed to: a relay's doing —
+            # nothing is opened, nobody is blamed for it.
+            raise DrawWireError("cards aren't the committed ones")
         cur["cards"] = [_b64(c) for c in cards]
         if cur.get("complained") is not None:
             await self._save(table.session_id, st)
             return
         if "done_msg" in cur:
             await self._save(table.session_id, st)
-            await self._send(table, table.hub_instance, VERB_DRAW_DONE, cur["done_msg"])
+            await self._send(table, table.hub_instance, STEP_DONE, cur["done_msg"])
             return
-        S = [_raw(s) for s in cur["S"]]
+        C = [_raw(x) for x in cur["C"]]
         results: dict[str, dict] = {}
-        for user, box in sorted(cur["boxes"].items()):
-            box_priv = _raw(box["priv"])
+        for user in sorted(cur["seeds"]):
+            box_priv = self._box_priv(cur, user)
             opened = await asyncio.to_thread(dc.try_cards, box_priv, cards, ctx=rnd.ctx)
             giver = dc.Person(
                 seat=rnd.seat_of(self._own, user) or 0, instance=self._own, user=user
             )
             card = check_card(rnd, opened[0], giver=giver) if len(opened) == 1 else None
             if card is None or card.rev != 0:
-                await self._complain(table, st, rnd, COMPLAINT_CARDS, user)
+                msg = self._complaint(rnd, cur, COMPLAINT_CARDS, user)
+                await self._save(table.session_id, st)
+                await self._send(table, table.hub_instance, STEP_FAIL, msg)
                 return
             to_seat = rnd.seat_of(card.instance, card.user) or 0
             if rnd.settings.excludes(giver.seat, to_seat):
-                await self._complain(table, st, rnd, COMPLAINT_PARTNER, user)
+                msg = self._complaint(rnd, cur, COMPLAINT_PARTNER, user)
+                await self._save(table.session_id, st)
+                await self._send(table, table.hub_instance, STEP_REDO, msg)
                 return
+            j = C.index(dc.public_of(box_priv))
+            gives_to, _sealed_to = dc.circle_targets(j, rnd.n)
             results[user] = {
                 "card": _b64(opened[0]),
-                "j": S.index(dc.public_of(box_priv)),
+                "rbox": _b64(C[gives_to]),
                 "rev": 0,
                 "via": None,
+                "extra": [],
             }
         cur["results"] = results
-        cur["done_msg"] = self._rid(rnd, count=len(results))
+        count = len(results)
+        cur["done_msg"] = self._rid(
+            rnd, count=count, sig=self._sign(dc.done_message(rnd.ctx, self._own, count))
+        )
         await self._save(table.session_id, st)
-        await self._send(table, table.hub_instance, VERB_DRAW_DONE, cur["done_msg"])
+        await self._send(table, table.hub_instance, STEP_DONE, cur["done_msg"])
 
-    async def _on_complete(self, table: GroupSession, st: dict, rnd: _Round) -> None:
+    async def _on_complete(
+        self, table: GroupSession, st: dict, rnd: _Round, p: dict
+    ) -> None:
         cur = st["p"]
         if "results" not in cur or st["last"]["complete"]:
             return
+        dones = p.get("dones")
+        if not isinstance(dones, dict) or set(dones) != set(rnd.order):
+            raise DrawWireError("complete without every household's done")
+        for inst in rnd.order:
+            d = dones[inst]
+            if not isinstance(d, dict) or d.get("count") != len(rnd.of(inst)):
+                raise DrawWireError("done malformed")
+            sig = _raw(d.get("sig"), dc.SIG_BYTES, "sig")
+            if not verify_ed25519(
+                rnd.identity(inst), dc.done_message(rnd.ctx, inst, d["count"]), sig
+            ):
+                raise DrawWireError("done signature")
         st["last"]["complete"] = True
-        st["final"] = {
-            "gen": rnd.gen,
-            "round": rnd.round,
-            "results": cur["results"],
-        }
+        st["final"] = {"gen": rnd.gen, "round": rnd.round, "results": cur["results"]}
         await self._save(table.session_id, st)
         for user in cur["results"]:
             await self._tell(
                 table, user, "again" if rnd.gen > 1 else "ready", gen=rnd.gen
             )
         await self._push(table, st)
+        # Someone of ours who left during the round hands over now.
+        await self._hand_over_leavers(table, st, _seated(table))
 
     async def _on_end(self, table: GroupSession, st: dict, p: dict) -> None:
         reason = p.get("reason")
@@ -1565,79 +1914,97 @@ class AppDrawService:
 
     # ─── After the reveal: hand-overs and wish-list updates ──────────
 
+    def _final_of(self, st: dict, rnd: _Round) -> dict | None:
+        final = st.get("final")
+        if final is None or (final["gen"], final["round"]) != (rnd.gen, rnd.round):
+            return None
+        return final
+
     async def _on_handover(
         self, table: GroupSession, st: dict, rnd: _Round, p: dict
     ) -> None:
-        final = st.get("final")
-        if final is None or (final["gen"], final["round"]) != (rnd.gen, rnd.round):
+        final = self._final_of(st, rnd)
+        if final is None:
             return
         sealed = _raw(p.get("sealed"), dc.SEALED_HANDOVER_BYTES, "sealed")
         cur = st["p"]
+        cards = [_raw(c) for c in cur["cards"]]
+        C = [_raw(x) for x in cur["C"]]
         for user, res in final["results"].items():
             if res.get("left"):
                 continue
-            opened = dc.open_handover(
-                _raw(cur["boxes"][user]["priv"]), sealed, ctx=rnd.ctx
+            keys = [self._box_priv(cur, user)] + [_raw(x) for x in res.get("extra", [])]
+            opened = next(
+                (o for k in keys if (o := dc.open_handover(k, sealed, ctx=rnd.ctx))),
+                None,
             )
             if opened is None:
                 continue
-            inst, leaver, sig, card_bytes = dc.decode_handover(opened)
+            inst, leaver, leaver_priv, sig = dc.decode_handover(opened)
+            leaver_pub = dc.public_of(leaver_priv)
             if inst not in rnd.identities or rnd.seat_of(inst, leaver) is None:
                 raise DrawWireError("hand-over from someone not in the draw")
             if not verify_ed25519(
                 rnd.identity(inst),
-                dc.handover_message(rnd.ctx, inst, leaver, card_bytes),
+                dc.handover_message(rnd.ctx, inst, leaver, leaver_pub),
                 sig,
             ):
                 raise DrawWireError("hand-over signature")
+            to_now = dc.decode_card(_raw(res["card"]))
+            if (to_now.instance, to_now.user) != (inst, leaver):
+                raise DrawWireError("a hand-over from someone we don't give to")
+            # The leaver's box must be exactly the one we give to.
+            if leaver_pub != _raw(res["rbox"]):
+                raise DrawWireError("hand-over with another box")
+            gone = table.entry(inst, leaver)
+            if gone is not None and gone.state == SEAT_SEATED:
+                # Our copy still seats the leaver (the hub's roster is on
+                # its way): keep it until it shows them gone.
+                pending = st.setdefault("pending", [])
+                if p["sealed"] not in pending and len(pending) < DRAW_MAX_PEOPLE:
+                    pending.append(p["sealed"])
+                    await self._save(table.session_id, st)
+                return
+            # The new card is the one sealed to the leaver's box in the
+            # round's committed list we hold — byte for byte, nothing else.
+            new = dc.try_cards(leaver_priv, cards, ctx=rnd.ctx)
             giver = dc.Person(
                 seat=rnd.seat_of(self._own, user) or 0, instance=self._own, user=user
             )
-            card = check_card(rnd, card_bytes, giver=giver)
+            card = check_card(rnd, new[0], giver=giver) if len(new) == 1 else None
             if card is None:
                 raise DrawWireError("hand-over card")
-            to_now = dc.decode_card(_raw(res["card"]))
-            if (to_now.instance, to_now.user) == (inst, leaver):
-                gone = table.entry(inst, leaver)
-                if gone is not None and gone.state == SEAT_SEATED:
-                    # Our copy still seats the leaver (the hub's roster is
-                    # on its way): keep it until it shows them gone — a
-                    # household can't hand over someone still playing.
-                    pending = st.setdefault("pending", [])
-                    if p["sealed"] not in pending and len(pending) < DRAW_MAX_PEOPLE:
-                        pending.append(p["sealed"])
-                        await self._save(table.session_id, st)
-                    return
-                res.update(
-                    {"card": _b64(card_bytes), "rev": card.rev, "via": [inst, leaver]}
-                )
-                change = "handover"
-            elif (
-                (to_now.instance, to_now.user) == (card.instance, card.user)
-                and res.get("via") == [inst, leaver]
-                and card.rev > res["rev"]
-            ):
-                res.update({"card": _b64(card_bytes), "rev": card.rev})
-                change = "wish"
-            else:
-                continue
-            await self._save(table.session_id, st)
-            await self._tell(
-                table, user, change, gen=rnd.gen, name=rnd.names.get((inst, leaver))
+            j = C.index(leaver_pub)
+            gives_to, _s = dc.circle_targets(j, rnd.n)
+            res.update(
+                {
+                    "card": _b64(new[0]),
+                    "rbox": _b64(C[gives_to]),
+                    "rev": 0,
+                    "via": [inst, leaver],
+                    "extra": [*res.get("extra", []), _b64(leaver_priv)],
+                }
             )
+            await self._save(table.session_id, st)
+            await self._tell(table, user, "handover", gen=rnd.gen)
             await self._push(table, st)
             return
 
     async def _on_wish(
         self, table: GroupSession, st: dict, rnd: _Round, p: dict
     ) -> None:
-        final = st.get("final")
-        if final is None or (final["gen"], final["round"]) != (rnd.gen, rnd.round):
+        final = self._final_of(st, rnd)
+        if final is None:
             return
         sealed = _raw(p.get("sealed"), dc.SEALED_CARD_BYTES, "sealed")
         cur = st["p"]
         for user, res in final["results"].items():
-            opened = dc.open_card(_raw(cur["boxes"][user]["priv"]), sealed, ctx=rnd.ctx)
+            if res.get("left"):
+                continue
+            keys = [self._box_priv(cur, user)] + [_raw(x) for x in res.get("extra", [])]
+            opened = next(
+                (o for k in keys if (o := dc.open_card(k, sealed, ctx=rnd.ctx))), None
+            )
             if opened is None:
                 continue
             giver = dc.Person(
@@ -1646,23 +2013,10 @@ class AppDrawService:
             card = check_card(rnd, opened, giver=giver)
             if card is None:
                 raise DrawWireError("wish card")
-            if res.get("left"):
-                # Our person left and handed their recipient on: pass the
-                # new card on to their giver the same way.
-                held = dc.decode_card(_raw(res["card"]))
-                if res.get("handed") and (held.instance, held.user) == (
-                    card.instance,
-                    card.user,
-                ):
-                    res["card"] = _b64(opened)
-                    await self._save(table.session_id, st)
-                    await self._send_handover(table, rnd, cur, user, opened)
-                return
             to_now = dc.decode_card(_raw(res["card"]))
-            if (to_now.instance, to_now.user) != (
-                card.instance,
-                card.user,
-            ) or card.rev <= res["rev"]:
+            if (to_now.instance, to_now.user) != (card.instance, card.user) or (
+                card.rev <= res["rev"]
+            ):
                 return
             res.update({"card": _b64(opened), "rev": card.rev})
             await self._save(table.session_id, st)
@@ -1671,25 +2025,27 @@ class AppDrawService:
             return
 
     async def _send_handover(
-        self, table: GroupSession, rnd: _Round, cur: dict, user: str, card_bytes: bytes
+        self, table: GroupSession, rnd: _Round, cur: dict, user: str
     ) -> None:
-        S = [_raw(s) for s in cur["S"]]
-        j = S.index(dc.public_of(_raw(cur["boxes"][user]["priv"])))
+        C = [_raw(x) for x in cur["C"]]
+        box_priv = self._box_priv(cur, user)
+        box_pub = dc.public_of(box_priv)
+        j = C.index(box_pub)
         _gives, giver_pos = dc.circle_targets(j, rnd.n)
         sig = sign_ed25519(
             self._federation.own_identity_seed,
-            dc.handover_message(rnd.ctx, self._own, user, card_bytes),
+            dc.handover_message(rnd.ctx, self._own, user, box_pub),
         )
-        plain = dc.encode_handover(self._own, user, sig, card_bytes)
-        sealed = dc.seal_handover(S[giver_pos], plain, ctx=rnd.ctx, rand=self._rand)
+        plain = dc.encode_handover(self._own, user, box_priv, sig)
+        sealed = dc.seal_handover(C[giver_pos], plain, ctx=rnd.ctx, rand=self._rand)
         await self._send(
             table,
             table.hub_instance,
-            VERB_DRAW_HANDOVER,
+            STEP_HANDOVER,
             self._rid(rnd, sealed=_b64(sealed)),
         )
 
-    # ─── Table changes (hooked from AppGroupService) ──────────────────
+    # ─── Table changes (from AppGroupService via the registry) ───────
 
     def table_changed(self, table: GroupSession) -> None:
         """The table's roster or state changed here: re-check the draw in a
@@ -1697,10 +2053,7 @@ class AppDrawService:
         self._spawn(self._table_changed(table.session_id))
 
     def person_left(self, table: GroupSession, username: str) -> None:
-        """*username* of this household left the table (or was removed):
-        after a reveal their recipient goes to their giver. The household's
-        own copy may not show it yet — the hub tells only those still
-        seated."""
+        """*username* of this household left the table (or was removed)."""
         self._spawn(self._table_changed(table.session_id, gone=username))
 
     async def _table_changed(self, session_id: str, *, gone: str | None = None) -> None:
@@ -1710,16 +2063,14 @@ class AppDrawService:
                 if table is None:
                     return
                 st = await self._load(session_id)
+                seated = {k for k in _seated(table) if k != (self._own, gone)}
+                pending_start = st.get("pending_start")
+                if pending_start is not None:
+                    await self._retry_start(table, st, pending_start)
+                    st = await self._load(session_id)
                 if not st.get("hub") and not st.get("final"):
                     return
-                seated = {
-                    (e.instance, e.user): e
-                    for e in table.roster
-                    if e.state == SEAT_SEATED
-                    and (e.instance, e.user) != (self._own, gone)
-                }
                 await self._hand_over_leavers(table, st, seated)
-                # Hand-overs that waited for the leaver to show as gone.
                 waiting = st.pop("pending", [])
                 if waiting and st.get("p") is not None:
                     rnd_p = _Round(st["p"])
@@ -1731,36 +2082,61 @@ class AppDrawService:
                         except (DrawWireError, dc.DrawCryptoError) as exc:
                             log.info("app_draw: a waiting hand-over dropped: %s", exc)
                     await self._save(session_id, st)
-                hub = st.get("hub")
-                if hub is None or table.hub_instance != self._own:
-                    return
-                rnd = _Round(hub)
-                if table.state == GROUP_ENDED and hub["phase"] != _PHASE_ENDED:
-                    hub["phase"] = _PHASE_ENDED
-                    hub["ended"] = END_TOO_FEW
-                    await self._save(session_id, st)
-                    return
-                still = [x for x in rnd.people if _person_key(x) in seated]
-                if len(still) == rnd.n:
-                    return
-                if hub["phase"] in _RUNNING:
-                    await self._next_round(
-                        table,
-                        st,
-                        people=still,
-                        names=rnd.names,
-                        because={"kind": BECAUSE_CHANGED},
-                    )
-                elif hub["phase"] == _PHASE_COMPLETE and len(still) < DRAW_MIN_PEOPLE:
-                    await self._hub_end(table, st, END_TOO_FEW)
+                await self._hub_roster_change(table, st)
         except Exception:
             log.exception("app_draw: table change for %s", session_id)
 
+    async def _retry_start(self, table: GroupSession, st: dict, p: dict) -> None:
+        try:
+            gen = _int(p.get("gen"), 1, DRAW_AGAIN_MAX + 1, "gen")
+            round_no = _int(p.get("round"), 1, DRAW_ROUNDS_MAX, "round")
+            await self._on_start(table, st, gen, round_no, p)
+        except (DrawWireError, dc.DrawCryptoError) as exc:
+            log.info("app_draw: a waiting start dropped: %s", exc)
+            st.pop("pending_start", None)
+            await self._save(table.session_id, st)
+
+    async def _hub_roster_change(self, table: GroupSession, st: dict) -> None:
+        """At the hub: people who left before ``S`` start a fresh round
+        without them. After ``S`` a leave starts nothing (the round ends,
+        then the leaver hands over) — except a whole household that holds
+        the round up and the organiser took out ("Draw without them")."""
+        hub = st.get("hub")
+        if hub is None or table.hub_instance != self._own:
+            return
+        if table.state == GROUP_ENDED and hub["phase"] != _PHASE_ENDED:
+            hub["phase"] = _PHASE_ENDED
+            hub["ended"] = END_TOO_FEW
+            await self._save(table.session_id, st)
+            return
+        rnd = _Round(hub)
+        seated = _seated(table)
+        still = [x for x in rnd.people if _person_key(x) in seated]
+        if len(still) == rnd.n:
+            return
+        if hub["phase"] in _AFTER_S:
+            gone_homes = {x.instance for x in rnd.people} - {x.instance for x in still}
+            stuck = set(self._waiting(hub, rnd))
+            if not gone_homes or not gone_homes <= stuck:
+                return
+            if any(x.instance in gone_homes for x in still):
+                return
+        if hub["phase"] in _RUNNING:
+            await self._next_round(
+                table,
+                st,
+                people=still,
+                names=rnd.names,
+                because={"kind": BECAUSE_CHANGED},
+            )
+        elif hub["phase"] == _PHASE_COMPLETE and len(still) < DRAW_MIN_PEOPLE:
+            await self._hub_end(table, st, END_TOO_FEW)
+
     async def _hand_over_leavers(
-        self, table: GroupSession, st: dict, seated: dict
+        self, table: GroupSession, st: dict, seated: set
     ) -> None:
-        """Our people who left after the reveal hand their recipient on to
-        their giver (design 5.6) — once each."""
+        """Our people who left after the reveal hand their box key to their
+        giver (design 5.6) — once each."""
         final = st.get("final")
         cur = st.get("p")
         if (
@@ -1775,23 +2151,25 @@ class AppDrawService:
             return
         rnd = _Round(cur)
         for user, res in final["results"].items():
-            if (self._own, user) in seated or res.get("handed"):
+            if res.get("handed"):
                 continue
+            if (self._own, user) in seated:
+                # Our copy may lag (the hub tells only households with
+                # someone still seated): their own place here decides.
+                local = await self._user_repo.get(user)
+                if local is not None and await self._groups.seat_row(
+                    table, local.user_id
+                ):
+                    continue
             res["left"] = True
             res["handed"] = True
             await self._save(table.session_id, st)
-            await self._send_handover(table, rnd, cur, user, _raw(res["card"]))
+            await self._send_handover(table, rnd, cur, user)
 
     # ─── People and the app ───────────────────────────────────────────
 
     async def _tell(
-        self,
-        table: GroupSession,
-        username: str,
-        change: str,
-        *,
-        gen: int,
-        name: str | None = None,
+        self, table: GroupSession, username: str, change: str, *, gen: int
     ) -> None:
         user = await self._user_repo.get(username)
         if user is None:
@@ -1803,23 +2181,41 @@ class AppDrawService:
                 to_user_id=user.user_id,
                 change=change,
                 gen=gen,
-                name=name,
             )
         )
 
     async def _push(self, table: GroupSession, st: dict) -> None:
         """Each local person at the table hears the draw's state (never a
-        result) on the ``app.draw`` frame."""
+        result) on the ``app.engine`` frame."""
         for user, _row in await self._groups.local_people(table):
             await self._ws.broadcast_to_user(
                 user.user_id,
                 {
                     "type": WS_FRAME_TYPE,
+                    "engine": DRAW_ENGINE_ID,
                     "app_id": table.app_id,
                     "session_id": table.session_id,
-                    "draw": self._view(table, st, user),
+                    "state": self._view(table, st, user),
                 },
             )
+
+    @staticmethod
+    def _waiting(hub: dict, rnd: _Round) -> list[str]:
+        """The households the round waits for now."""
+        phase = hub["phase"]
+        have: set[str] | dict
+        if phase == _PHASE_MIXING:
+            return [rnd.order[hub["k"]]]
+        have = {
+            _PHASE_KEYS: hub["keys"],
+            _PHASE_ONIONS: hub["batches"],
+            _PHASE_REVEAL: hub["reveals"],
+            _PHASE_COMMIT: hub["commits"],
+            _PHASE_CARDS: hub["cards"],
+            _PHASE_OPENING: hub["done"],
+            _PHASE_VOID: hub["opens"],
+        }.get(phase, rnd.order)
+        return [i for i in rnd.order if i not in have]
 
     def _view(self, table: GroupSession, st: dict, user: User) -> dict:
         """What the app may know: the state, the round, progress, the
@@ -1840,6 +2236,7 @@ class AppDrawService:
             state = STATE_GATHERING
         is_host = table.is_host(self._own, user.username)
         frame = hub or st.get("p")
+        mine = (final or {}).get("results", {}).get(user.username)
         out: dict[str, Any] = {
             "state": state,
             "reason": ended,
@@ -1850,53 +2247,59 @@ class AppDrawService:
             "done": None,
             "settings": (frame or {}).get("settings") or st.get("settings"),
             "wish": st.get("wishes", {}).get(user.username, ""),
-            "has_result": final is not None
-            and user.username in final["results"]
-            and not final["results"][user.username].get("left"),
+            "has_result": mine is not None and not mine.get("left"),
             "is_host": is_host,
             "waiting_for": None,
-            "false_complaints": None,
+            "blamed": None,
         }
         if hub is not None and is_host:
             rnd = _Round(hub)
-            done = self._done_households(hub, rnd)
-            out["done"] = sum(len(rnd.of(i)) for i in done)
+            waiting = self._waiting(hub, rnd) if hub["phase"] in _RUNNING else []
+            out["done"] = (
+                sum(len(rnd.of(i)) for i in rnd.order if i not in waiting)
+                if hub["phase"] != _PHASE_MIXING
+                else sum(len(rnd.of(i)) for i in rnd.order[: hub["k"]])
+            )
             since = datetime.fromisoformat(hub["since"])
-            if (
-                hub["phase"] in _RUNNING
-                and (_now() - since).total_seconds() >= DRAW_WAIT_SECONDS
-            ):
-                # The mix goes one household at a time: only the one whose
-                # turn it is holds it up.
-                waiting = (
-                    [rnd.order[hub["k"]]]
-                    if hub["phase"] == _PHASE_MIXING
-                    else [i for i in rnd.order if i not in done]
-                )
+            if waiting and (_now() - since).total_seconds() >= DRAW_WAIT_SECONDS:
                 out["waiting_for"] = self._seats_of(rnd, waiting)
-            out["false_complaints"] = self._seats_of(rnd, hub["false"]) or None
+            out["blamed"] = self._seats_of(rnd, hub["blamed"]) or None
         return out
-
-    @staticmethod
-    def _done_households(hub: dict, rnd: _Round) -> set[str]:
-        phase = hub["phase"]
-        if phase == _PHASE_KEYS:
-            return set(hub["keys"])
-        if phase == _PHASE_ONIONS:
-            return set(hub["batches"])
-        if phase == _PHASE_MIXING:
-            return set(rnd.order[: hub["k"]])
-        if phase == _PHASE_CARDS:
-            return set(hub["cards"])
-        if phase == _PHASE_OPENING:
-            return set(hub["done"])
-        return set(rnd.order)
 
     @staticmethod
     def _seats_of(rnd: _Round, instances: list[str]) -> list[dict]:
         return [{"seats": [p.seat for p in rnd.of(i)]} for i in instances if rnd.of(i)]
 
-    # ─── What people do (routes) ──────────────────────────────────────
+    # ─── Route calls (through the registry) ───────────────────────────
+
+    async def call(self, call: EngineCall) -> dict:
+        """``GET …/engines/draw`` (status), ``POST …/configure``,
+        ``POST …/wish``, ``POST …/start``, ``GET …/result`` (Social Home's
+        own sheet only — the bridge has no call for it)."""
+        ids = {
+            "app_id": call.app_id,
+            "session_id": call.session_id,
+            "actor_user_id": call.actor_user_id,
+        }
+        match (call.action, call.method):
+            case (None, "GET"):
+                return {"state": await self.status(**ids)}
+            case ("configure", "POST"):
+                return {"state": await self.configure(**ids, settings=call.body)}
+            case ("wish", "POST"):
+                text = call.body.get("text")
+                if not isinstance(text, str):
+                    raise AppDrawSettingsError()
+                return {"state": await self.set_wish(**ids, text=text)}
+            case ("start", "POST"):
+                again = call.body.get("again", False)
+                if not isinstance(again, bool):
+                    raise AppDrawSettingsError()
+                return {"state": await self.start(**ids, again=again)}
+            case ("result", "GET"):
+                return {"result": await self.result(**ids)}
+            case _:
+                raise AppEngineActionError()
 
     async def status(self, *, app_id: str, session_id: str, actor_user_id: str) -> dict:
         table, user = await self._groups.seat_of_caller(
@@ -1908,20 +2311,29 @@ class AppDrawService:
         self, *, app_id: str, session_id: str, actor_user_id: str, settings: dict
     ) -> dict:
         """The organiser's settings — before the first draw (or after one
-        gave up)."""
+        gave up). A **patch**: only the fields given change (``name``,
+        ``budget``, ``day``, ``pairs``); a field given as ``null`` clears it."""
         table, user = await self._host(app_id, session_id, actor_user_id)
-        try:
-            clean = DrawSettings.from_wire(settings)
-        except DrawWireError as exc:
-            raise AppDrawSettingsError() from exc
-        seats = frozenset(e.seat for e in table.roster if e.seat)
-        if any(a not in seats or b not in seats for a, b in clean.pairs):
-            raise AppDrawPairsError()
+        if not isinstance(settings, dict):
+            raise AppDrawSettingsError()
         async with self._lock(session_id):
             st = await self._load(session_id)
             hub = st.get("hub")
             if hub is not None and hub["phase"] in _RUNNING:
                 raise AppDrawStateError()
+            merged = dict(st.get("settings") or {})
+            for field in ("name", "budget", "day", "pairs"):
+                if field in settings:
+                    merged[field] = settings[field]
+            if merged.get("pairs") is None:
+                merged["pairs"] = []
+            try:
+                clean = DrawSettings.from_wire(merged)
+            except DrawWireError as exc:
+                raise AppDrawSettingsError() from exc
+            seats = frozenset(e.seat for e in table.roster if e.seat)
+            if any(a not in seats or b not in seats for a, b in clean.pairs):
+                raise AppDrawPairsError()
             st["settings"] = clean.to_wire()
             await self._save(session_id, st)
         await self._push(table, st)
@@ -1965,15 +2377,15 @@ class AppDrawService:
                 updates[user.username] = rev
                 rnd = _Round(cur)
                 card = await self._card_for(rnd, user.username, wish=clean, rev=rev)
-                S = [_raw(s) for s in cur["S"]]
-                j = S.index(dc.public_of(_raw(cur["boxes"][user.username]["priv"])))
+                C = [_raw(x) for x in cur["C"]]
+                j = C.index(self._box_pub(cur, user.username))
                 _g, giver_pos = dc.circle_targets(j, rnd.n)
-                sealed = dc.seal_card(S[giver_pos], card, ctx=rnd.ctx, rand=self._rand)
+                sealed = dc.seal_card(C[giver_pos], card, ctx=rnd.ctx, rand=self._rand)
                 await self._save(session_id, st)
                 await self._send(
                     table,
                     table.hub_instance,
-                    VERB_DRAW_WISH,
+                    STEP_WISH,
                     self._rid(rnd, sealed=_b64(sealed)),
                 )
             else:
@@ -2032,7 +2444,6 @@ class AppDrawService:
                     raise AppDrawStateError()
                 if hub is not None and hub["gen"] > DRAW_AGAIN_MAX:
                     raise AppDrawAgainLimitError()
-                # A draw that gave up starts afresh as the next draw.
                 because = {"kind": BECAUSE_FIRST}
             await self._next_round(
                 table,
@@ -2046,7 +2457,8 @@ class AppDrawService:
 
     async def result(self, *, app_id: str, session_id: str, actor_user_id: str) -> dict:
         """Whom the caller gives to — for Social Home's own result sheet
-        only (the app has no route to it: its frame can't reach the API)."""
+        only (the app has no route to it: its frame can't reach the API,
+        and the bridge has no call for it)."""
         _table, user = await self._groups.seat_of_caller(
             app_id, session_id, actor_user_id
         )
@@ -2093,10 +2505,12 @@ class AppDrawService:
 
 
 __all__ = [
+    "DRAW_ENGINE_ID",
     "WS_FRAME_TYPE",
     "AppDrawService",
-    "AppGroupNotFoundError",
     "check_card",
+    "check_card_list",
     "check_list",
     "complaint_holds",
+    "opening_holds",
 ]

@@ -3,6 +3,9 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
   changelogNote,
+  engineDetail,
+  engineTitle,
+  isKnownEngine,
   languageNames,
   neverList,
   permissionDetail,
@@ -102,5 +105,14 @@ describe('appFacts', () => {
     expect(changelogNote(c, 'fr')).toBe('Rematch')
     expect(changelogNote({ version: '1', date: null, notes: { nl: 'Nieuw' } }, 'fr')).toBe('Nieuw')
     expect(changelogNote({ version: '1', date: null, notes: {} }, 'en')).toBe('')
+  })
+})
+
+describe('app engines (v_78)', () => {
+  it('describes the gift draw in Social Home\'s words, nothing for an unknown engine', () => {
+    expect(isKnownEngine('draw')).toBe(true)
+    expect(isKnownEngine('deal')).toBe(false)
+    expect(engineTitle('draw')).toBe('Runs gift draws with Social Home')
+    expect(engineDetail('draw', 'Gift draw')).toContain('Gift draw never learns who gives to whom')
   })
 })

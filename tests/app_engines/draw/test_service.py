@@ -3,7 +3,7 @@
 Every household runs the real group and draw services on its own SQLite
 database; :func:`tests.app_draw_network.settle` carries the sealed
 ``APP_SESSION`` payloads between them. Tamper and privacy checks live in
-``tests/protocol/test_app_draw.py``.
+``tests/protocol/test_app_engine_draw.py``.
 """
 
 from __future__ import annotations
@@ -13,22 +13,20 @@ import logging
 
 import pytest
 
-from socialhome.crypto import b64url_decode, b64url_encode, sign_ed25519
-from socialhome.domain.app_draw import (
+from socialhome.app_engines.draw import crypto as dc
+from socialhome.app_engines.draw.domain import (
     AppDrawHostElsewhereError,
     AppDrawNoResultError,
     AppDrawNotHostError,
     AppDrawPairsError,
+    AppDrawSettingsError,
     AppDrawStateError,
     AppDrawTooFewError,
     AppDrawWishTooLongError,
     AppDrawWishUpdatesError,
     DrawWireError,
 )
-from socialhome.domain.events import AppDrawChanged
-from socialhome.domain.federation import FederationEvent, FederationEventType
-from socialhome.federation import draw_crypto as dc
-from socialhome.services.app_draw_service import (
+from socialhome.app_engines.draw.service import (
     _int,
     _parse_people,
     _raw,
@@ -37,7 +35,10 @@ from socialhome.services.app_draw_service import (
     check_list,
     complaint_holds,
 )
-from tests.app_draw_network import APP, draw_table, settle
+from socialhome.crypto import b64url_decode, b64url_encode, sign_ed25519
+from socialhome.domain.events import AppDrawChanged
+from socialhome.domain.federation import FederationEvent, FederationEventType
+from tests.app_draw_network import APP, draw_table, engine_step, settle
 from tests.app_group_network import Network
 
 PEOPLE = {
@@ -143,14 +144,18 @@ async def test_the_app_frame_never_carries_a_result(net):
     await settle(net)
     results = await _results(net, sid)
     for home in net.homes.values():
-        frames = [f for _u, f in home.ws.frames if f.get("type") == "app.draw"]
+        frames = [
+            f
+            for _u, f in home.ws.frames
+            if f.get("type") == "app.engine" and f.get("engine") == "draw"
+        ]
         assert frames
         blob = repr(frames)
         for name, household in results.values():
             assert name not in blob and household not in blob
         for f in frames:
-            assert set(f["draw"]) >= {"state", "has_result"}
-            assert "name" not in f["draw"] and "recipient" not in f["draw"]
+            assert set(f["state"]) >= {"state", "has_result"}
+            assert "name" not in f["state"] and "recipient" not in f["state"]
 
 
 async def test_exclusions_hold_and_rounds_redo_with_proof(net):
@@ -301,7 +306,7 @@ async def test_a_leaver_after_the_reveal_hands_their_recipient_to_their_giver(ne
     rows = [
         e for e in home.bus.of(AppDrawChanged) if e.to_user_id == home.uid(giver[1])
     ]
-    assert rows[-1].change == "handover" and rows[-1].name == "Cleo"
+    assert rows[-1].change == "handover"
     # The leaver's recipient updates their wish list: it reaches the new giver.
     to_inst, to_user = next(
         (i, u) for i, us in PEOPLE.items() for u in us if u.title() == leaver_to[0]
@@ -416,28 +421,27 @@ async def test_complaint_holds_only_with_its_proof(done):
     hub_st = st["hub"]
     rnd = _Round(hub_st)
     b_st = await net.homes["b"].draw._load(sid)
-    box = b_st["p"]["boxes"]["ben"]
+    seed_ben = b64url_decode(b_st["p"]["seeds"]["ben"])
+    ben = dc.person_keys(seed_ben)
     S = [b64url_decode(s) for s in hub_st["S"]]
-    commits = {x["instance"]: x["commits"] for x in hub_st["list_body"]["batches"]}
+    batches = {x["instance"]: x for x in hub_st["list_body"]["batches"]}
+    mixer_pubs = [b64url_decode(x) for x in hub_st["mixer_pubs"]]
     cards = [b64url_decode(c) for c in hub_st["all_cards"]]
-    seed = net.homes["b"].fed.own_identity_seed
+    id_seed = net.homes["b"].fed.own_identity_seed
 
-    def complaint(kind, *, user="ben", inst="b", priv=None, nonce=None, sign_seed=None):
-        p = b64url_decode(priv or box["priv"])
-        n = b64url_decode(nonce or box["nonce"])
+    def complaint(kind, *, user="ben", inst="b", seed=seed_ben, sign_seed=None):
         sig = sign_ed25519(
-            sign_seed or seed, dc.complaint_message(rnd.ctx, inst, kind, user, p, n)
+            sign_seed or id_seed, dc.complaint_message(rnd.ctx, inst, kind, user, seed)
         )
         return {
             "kind": kind,
             "instance": inst,
             "user": user,
-            "box_priv": b64url_encode(p),
-            "nonce": b64url_encode(n),
+            "seed": b64url_encode(seed),
             "sig": b64url_encode(sig),
         }
 
-    kw = {"S": S, "commits_all": commits, "cards": cards}
+    kw = {"S": S, "batches": batches, "mixer_pubs": mixer_pubs, "cards": cards}
     # Ben's key IS in S once and his card is fine: nothing holds.
     for kind in ("missing", "cards", "partner"):
         assert complaint_holds(rnd, complaint(kind), **kw) is False
@@ -448,28 +452,15 @@ async def test_complaint_holds_only_with_its_proof(done):
     assert (
         complaint_holds(rnd, complaint("missing", sign_seed=other_seed), **kw) is False
     )
-    fresh = b64url_encode(dc.new_keypair()[0])
-    assert complaint_holds(rnd, complaint("missing", priv=fresh), **kw) is False
+    # A seed the household never committed to proves nothing.
+    assert complaint_holds(rnd, complaint("missing", seed=b"\x07" * 32), **kw) is False
     # His key really missing from S: holds.
-    gone = [s for s in S if s != dc.public_of(b64url_decode(box["priv"]))]
-    gone.append(dc.new_keypair()[1])
-    assert complaint_holds(
-        rnd, complaint("missing"), S=gone, commits_all=commits, cards=cards
-    )
-    # His card gone from the cards: holds as "cards", not without the cards.
-    mine = dc.try_cards(b64url_decode(box["priv"]), cards, ctx=rnd.ctx)
-    assert len(mine) == 1
-    no_card = [
-        c
-        for c in cards
-        if dc.open_card(b64url_decode(box["priv"]), c, ctx=rnd.ctx) is None
-    ]
-    assert complaint_holds(
-        rnd, complaint("cards"), S=S, commits_all=commits, cards=no_card
-    )
-    assert not complaint_holds(
-        rnd, complaint("cards"), S=S, commits_all=commits, cards=None
-    )
+    gone = [s for s in S if s != ben.box_pub] + [dc.new_keypair()[1]]
+    assert complaint_holds(rnd, complaint("missing"), **{**kw, "S": gone})
+    # His card gone from the cards: holds as "cards", not without cards.
+    no_card = [c for c in cards if dc.open_card(ben.box_priv, c, ctx=rnd.ctx) is None]
+    assert complaint_holds(rnd, complaint("cards"), **{**kw, "cards": no_card})
+    assert not complaint_holds(rnd, complaint("cards"), **{**kw, "cards": None})
     assert not complaint_holds(rnd, {"kind": "missing"}, **kw)
 
 
@@ -480,8 +471,7 @@ async def test_a_mixer_mixes_once_per_round(done, caplog):
     last = rnd.order[-1]
     home = net.homes[last]
     mixed = (await home.draw._load(sid))["p"]["mixed"]
-    prev = st["hub"]["chain"][-2] if rnd.h > 1 else None
-    assert prev is not None
+    prev = st["hub"]["chain"][-2]
     # The relay hands the last mixer a different list for the same turn.
     other = [
         b64url_encode(dc.new_keypair()[1] + b"\x00" * dc.SEAL_OVERHEAD)
@@ -490,21 +480,15 @@ async def test_a_mixer_mixes_once_per_round(done, caplog):
     net.forge(
         "hub",
         last,
-        {
-            "app_id": APP,
-            "session_id": sid,
-            "verb": "draw_mix",
-            "draw_suite": dc.DRAW_SUITE_X25519_AESGCM,
-            "gen": rnd.gen,
-            "round": rnd.round,
-            "k": rnd.h - 1,
-            "list": other,
-            "prev": {
-                "instance": prev["instance"],
-                "in": prev["in"],
-                "sig": prev["sig"],
-            },
-        },
+        engine_step(
+            sid,
+            "mix",
+            gen=rnd.gen,
+            round_no=rnd.round,
+            k=rnd.h - 1,
+            list=other,
+            prev={"instance": prev["instance"], "in": prev["in"], "sig": prev["sig"]},
+        ),
     )
     await settle(net)
     assert "not the previous mixer's output" in caplog.text
@@ -537,21 +521,15 @@ async def test_malformed_inbound_is_dropped(done, caplog):
     caplog.set_level(logging.INFO)
     b = net.homes["b"]
     table = await b.group_repo.get(sid)
-    base = {"app_id": APP, "session_id": sid, "draw_suite": dc.DRAW_SUITE_X25519_AESGCM}
     for payload in (
-        {**base, "verb": "draw_start", "gen": 0, "round": 1},
-        {**base, "verb": "draw_start", "gen": 1, "round": 13},
-        {**base, "verb": "draw_mixers", "gen": 9, "round": 1},
-        {**base, "verb": "draw_key", "gen": 1, "round": 1},  # b is no hub
-        {**base, "verb": "draw_end", "gen": 1, "round": 1, "reason": "nope"},
-        {
-            **base,
-            "verb": "draw_wish",
-            "gen": 1,
-            "round": 1,
-            "relayed": True,
-            "sealed": "x",
-        },
+        engine_step(sid, "start", gen=0),
+        engine_step(sid, "start", round_no=13),
+        engine_step(sid, "mixers", gen=9),
+        engine_step(sid, "key"),  # b is no hub
+        engine_step(sid, "end", reason="nope"),
+        engine_step(sid, "wish", relayed=True, sealed="x"),
+        {**engine_step(sid, "start"), "engine_suite": "x25519"},
+        {**engine_step(sid, "start"), "engine": "deal"},
     ):
         await b.draw.on_inbound(
             FederationEvent(
@@ -564,7 +542,7 @@ async def test_malformed_inbound_is_dropped(done, caplog):
             ),
             table,
         )
-    assert caplog.text.count("dropped") >= 5
+    assert caplog.text.count("dropped") >= 8
     status = await b.draw.status(app_id=APP, session_id=sid, actor_user_id=b.uid("ben"))
     assert status["state"] == "ready"
 
@@ -602,7 +580,8 @@ async def test_after_the_reveal_too_few_left_ends_it(tmp_path):
 
 async def test_a_redo_proof_must_be_about_the_cards_this_household_saw(done):
     """A relay can't drop or swap a card in a complaint's evidence to make
-    it hold: each household compares the proof with its own copy."""
+    it hold: each household checks the cards against every household's
+    signed commitments and its own copy."""
     net, sid, st = done
     b = net.homes["b"]
     st_b = copy.deepcopy(await b.draw._load(sid))
@@ -613,24 +592,27 @@ async def test_a_redo_proof_must_be_about_the_cards_this_household_saw(done):
         for p in hub["people"]
     ]
     table = await b.group_repo.get(sid)
-    swapped = list(hub["all_cards"])
-    swapped[0], swapped[1] = swapped[1], swapped[0]
+    doctored = list(hub["all_cards"])
+    doctored[0] = b64url_encode(b"\x01" * dc.SEALED_CARD_BYTES)
+    base = {
+        "kind": "complaint",
+        "complaint": {"kind": "cards"},
+        "list": hub["list_body"],
+        "mixer_pubs": hub["mixer_pubs"],
+        "commits": hub["commits"],
+    }
     for evidence, why in (
-        ({"cards": swapped}, "other cards than ours"),
-        ({}, "other cards than ours"),
+        ({"cards": doctored}, "aren't the committed ones"),
+        ({"cards": hub["all_cards"], "commits": {}}, "commitments malformed"),
         (
             {"complaint": {"kind": "missing"}, "cards": hub["all_cards"]},
-            "a missing key told after the cards went out",
+            "a missing key told after the cards",
         ),
     ):
-        because = {
-            "kind": "complaint",
-            "complaint": {"kind": "cards"},
-            "list": hub["list_body"],
-            **evidence,
-        }
         with pytest.raises(DrawWireError, match=why):
-            b.draw._justify(table, st_b, hub["gen"], hub["round"] + 1, people, because)
+            b.draw._justify(
+                table, st_b, hub["gen"], hub["round"] + 1, people, {**base, **evidence}
+            )
 
 
 async def test_a_missing_key_said_after_the_cards_is_refused(done, caplog):
@@ -639,24 +621,28 @@ async def test_a_missing_key_said_after_the_cards_is_refused(done, caplog):
     hub = net.homes["hub"]
     st["hub"]["phase"] = "opening"
     await hub.draw._save(sid, st)
-    box = (await net.homes["b"].draw._load(sid))["p"]["boxes"]["ben"]
+    seed = (await net.homes["b"].draw._load(sid))["p"]["seeds"]["ben"]
     net.forge(
         "b",
         "hub",
-        {
-            "app_id": APP,
-            "session_id": sid,
-            "verb": "draw_fail",
-            "draw_suite": dc.DRAW_SUITE_X25519_AESGCM,
-            "gen": st["hub"]["gen"],
-            "round": st["hub"]["round"],
-            "complaint": {"kind": "missing", "instance": "b", "user": "ben", **box},
-        },
+        engine_step(
+            sid,
+            "fail",
+            gen=st["hub"]["gen"],
+            round_no=st["hub"]["round"],
+            complaint={
+                "kind": "missing",
+                "instance": "b",
+                "user": "ben",
+                "seed": seed,
+                "sig": "x",
+            },
+        ),
     )
     await settle(net)
     assert "a missing key told too late" in caplog.text
     after = await hub.draw._load(sid)
-    assert (after["hub"]["round"], after["hub"]["false"]) == (st["hub"]["round"], [])
+    assert (after["hub"]["round"], after["hub"]["blamed"]) == (st["hub"]["round"], [])
 
 
 async def test_a_hand_over_waits_until_the_leaver_shows_as_gone(net):
@@ -716,3 +702,28 @@ async def test_identity_hints_from_the_start_are_passed_on(done, monkeypatch):
     out = await b.draw._identities(table, {"b", "c"}, hints={"c": "ab" * 32})
     assert seen == {"c": "ab" * 32}
     assert out == {"b": b.fed.own_identity_pk.hex(), "c": "01" * 32}
+
+
+async def test_configure_is_a_patch(net):
+    """Only the fields given change: adding a pair keeps the name, budget
+    and day (socialhome-apps#32's real run); ``null`` clears one."""
+    sid = await draw_table(net, PEOPLE)
+    hub = net.homes["hub"]
+    ids = {"app_id": APP, "session_id": sid, "actor_user_id": hub.uid("anna")}
+    await hub.draw.configure(
+        **ids,
+        settings={"name": "Familie Müller", "budget": "20 €", "day": "2026-12-24"},
+    )
+    view = await hub.draw.configure(**ids, settings={"pairs": [[1, 2]]})
+    assert view["settings"] == {
+        "name": "Familie Müller",
+        "budget": "20 €",
+        "day": "2026-12-24",
+        "pairs": [[1, 2]],
+    }
+    view = await hub.draw.configure(**ids, settings={"day": None, "pairs": None})
+    assert (view["settings"]["day"], view["settings"]["pairs"]) == (None, [])
+    assert view["settings"]["name"] == "Familie Müller"
+    with pytest.raises(AppDrawSettingsError):
+        await hub.draw.configure(**ids, settings={"day": "soon"})
+    assert (await hub.draw.status(**ids))["settings"]["name"] == "Familie Müller"

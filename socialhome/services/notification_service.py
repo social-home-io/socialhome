@@ -3429,7 +3429,7 @@ class NotificationService(ProtectionGateMixin):
             case "handover":
                 key, fallback = (
                     "notification.app.draw_handover",
-                    "{name} left the gift draw — see who you're giving to now",
+                    "The person you were giving to left the gift draw — see who you're giving to now",
                 )
             case "wish":
                 key, fallback = (
@@ -3441,7 +3441,7 @@ class NotificationService(ProtectionGateMixin):
                     "notification.app.draw_ready",
                     "Your gift draw is ready — see who you're giving to",
                 )
-        title = self._t(key, locale=locale, fallback=fallback, name=event.name or "")
+        title = self._t(key, locale=locale, fallback=fallback)
         await self._save_notif(
             new_notification(
                 user_id=event.to_user_id,

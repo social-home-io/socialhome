@@ -43,7 +43,7 @@ export const routes: Record<string, ReturnType<typeof lazy>> = {
   // A group game's "Who's in" page (Join, Start, Leave…), Social Home's own.
   '/apps/:appId/tables/:sessionId': lazy(() => import('@/features/apps/groups/GameLobbyPage')),
   // Whom you give to in a gift draw — Social Home's own sheet, never the app.
-  '/apps/:appId/draw/:sessionId': lazy(() => import('@/features/apps/draw/DrawResultPage')),
+  '/apps/:appId/draw/:sessionId': lazy(() => import('@/features/apps/engines/draw/DrawResultPage')),
   '/admin':          lazy(() => import('@/features/admin/AdminPage')),
   '/connections':    lazy(() => import('@/features/connections/ConnectionsPage')),
   '/friends':        lazy(() => import('@/features/friends/FriendsPage')),

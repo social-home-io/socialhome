@@ -4970,6 +4970,8 @@
   "apps.perm.federation": "Schickt Einladungen und Züge an andere Haushalte",
   "apps.perm.federation_detail": "Nur an die Person, die du ausgewählt hast, verschlüsselt von Zuhause zu Zuhause.",
   "apps.perm.none": "{name} braucht nichts: Es kann nichts speichern und niemanden erreichen.",
+  "apps.engine.draw": "Wichtelt mit Social Home",
+  "apps.engine.draw_detail": "Social Home zieht die Namen in jedem Haushalt und zeigt allen in einem eigenen Fenster, wen sie beschenken. {name} erfährt nie, wer wen beschenkt.",
   "apps.never.title": "{name} kann nie",
   "apps.never.sign_in": "dein Passwort oder deine Anmeldung sehen",
   "apps.never.content": "deine Beiträge, Chats, Fotos oder deinen Standort lesen",

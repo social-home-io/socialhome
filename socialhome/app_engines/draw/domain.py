@@ -6,8 +6,8 @@ person at the table is drawn one other person to give a gift to, in one
 circle, so that each giver learns only their own recipient — not the
 organiser, not the table's host household (the hub, which passes every
 message on), not the app. Group-play design §5; the cryptography is
-:mod:`socialhome.federation.draw_crypto`, the rounds
-:mod:`socialhome.services.app_draw_service`.
+:mod:`socialhome.app_engines.draw.crypto`, the rounds
+:mod:`socialhome.app_engines.draw.service`.
 
 Pure data and bounds, no I/O.
 """
@@ -21,8 +21,8 @@ from typing import Any
 
 import orjson
 
-from .app_group import GROUP_MAX_PLAYERS, GROUP_SEAT_MAX
-from .errors import CodedError
+from ...domain.app_group import GROUP_MAX_PLAYERS, GROUP_SEAT_MAX
+from ...domain.errors import CodedError
 
 # ─── Bounds (design 5.5, 5.7, owner decisions 2026-10-31) ─────────────────
 
@@ -49,71 +49,85 @@ DRAW_BUDGET_MAX: int = 40
 #: "Waiting for …'s home" (and may draw without them).
 DRAW_WAIT_SECONDS: int = 60 * 60
 
-# ─── Verbs (``APP_SESSION``, sealed, v_78 only) ────────────────────────────
+# ─── Steps (the sealed ``APP_SESSION`` verb ``engine``, ``engine: "draw"``) ─
 
-VERB_DRAW_START = "draw_start"  # hub → participant households
-VERB_DRAW_KEY = "draw_key"  # participant → hub
-VERB_DRAW_MIXERS = "draw_mixers"  # hub → participants
-VERB_DRAW_ONIONS = "draw_onions"  # participant → hub
-VERB_DRAW_MIX = "draw_mix"  # hub → one mixer
-VERB_DRAW_MIXED = "draw_mixed"  # mixer → hub
-VERB_DRAW_LIST = "draw_list"  # hub → participants
-VERB_DRAW_CARDS = "draw_cards"  # participant → hub
-VERB_DRAW_CARDS_ALL = "draw_cards_all"  # hub → participants
-VERB_DRAW_FAIL = "draw_fail"  # participant → hub (a key missing / cards off)
-VERB_DRAW_REDO = "draw_redo"  # participant → hub (drew their partner)
-VERB_DRAW_DONE = "draw_done"  # participant → hub
-VERB_DRAW_COMPLETE = "draw_complete"  # hub → participants
-VERB_DRAW_HANDOVER = "draw_handover"  # leaver household → hub → participants
-VERB_DRAW_WISH = "draw_wish"  # recipient household → hub → participants
-VERB_DRAW_END = "draw_end"  # hub → participants (gave up / too few left)
+STEP_START = "start"  # hub → participant households
+STEP_KEY = "key"  # participant → hub
+STEP_MIXERS = "mixers"  # hub → participants
+STEP_ONIONS = "onions"  # participant → hub
+STEP_MIX = "mix"  # hub → one mixer
+STEP_MIXED = "mixed"  # mixer → hub
+STEP_LIST = "list"  # hub → participants (S + the signed chain)
+STEP_REVEAL = "reveal"  # participant → hub (its circle randomness r)
+STEP_REVEALS = "reveals"  # hub → participants (every r)
+STEP_COMMIT = "commit"  # participant → hub (its sealed cards' hashes)
+STEP_COMMITS = "commits"  # hub → participants (every household's)
+STEP_CARDS = "cards"  # participant → hub
+STEP_CARDS_ALL = "cards_all"  # hub → participants
+STEP_OPEN = "open"  # participant → hub (every seed of a publicly broken round)
+STEP_FAIL = "fail"  # participant → hub (a key missing / cards off)
+STEP_REDO = "redo"  # participant → hub (drew their partner)
+STEP_DONE = "done"  # participant → hub (signed)
+STEP_COMPLETE = "complete"  # hub → participants (every household's done)
+STEP_HANDOVER = "handover"  # leaver household → hub → participants
+STEP_WISH = "wish"  # recipient household → hub → participants
+STEP_END = "end"  # hub → participants (gave up / too few left)
 
-DRAW_VERBS: frozenset[str] = frozenset(
+DRAW_STEPS: frozenset[str] = frozenset(
     {
-        VERB_DRAW_START,
-        VERB_DRAW_KEY,
-        VERB_DRAW_MIXERS,
-        VERB_DRAW_ONIONS,
-        VERB_DRAW_MIX,
-        VERB_DRAW_MIXED,
-        VERB_DRAW_LIST,
-        VERB_DRAW_CARDS,
-        VERB_DRAW_CARDS_ALL,
-        VERB_DRAW_FAIL,
-        VERB_DRAW_REDO,
-        VERB_DRAW_DONE,
-        VERB_DRAW_COMPLETE,
-        VERB_DRAW_HANDOVER,
-        VERB_DRAW_WISH,
-        VERB_DRAW_END,
+        STEP_START,
+        STEP_KEY,
+        STEP_MIXERS,
+        STEP_ONIONS,
+        STEP_MIX,
+        STEP_MIXED,
+        STEP_LIST,
+        STEP_REVEAL,
+        STEP_REVEALS,
+        STEP_COMMIT,
+        STEP_COMMITS,
+        STEP_CARDS,
+        STEP_CARDS_ALL,
+        STEP_OPEN,
+        STEP_FAIL,
+        STEP_REDO,
+        STEP_DONE,
+        STEP_COMPLETE,
+        STEP_HANDOVER,
+        STEP_WISH,
+        STEP_END,
     }
 )
-#: Verbs a participant household sends to the hub.
-DRAW_TO_HUB_VERBS: frozenset[str] = frozenset(
+#: Steps a participant household sends to the hub.
+DRAW_TO_HUB_STEPS: frozenset[str] = frozenset(
     {
-        VERB_DRAW_KEY,
-        VERB_DRAW_ONIONS,
-        VERB_DRAW_MIXED,
-        VERB_DRAW_CARDS,
-        VERB_DRAW_FAIL,
-        VERB_DRAW_REDO,
-        VERB_DRAW_DONE,
-        VERB_DRAW_HANDOVER,
-        VERB_DRAW_WISH,
+        STEP_KEY,
+        STEP_ONIONS,
+        STEP_MIXED,
+        STEP_REVEAL,
+        STEP_COMMIT,
+        STEP_CARDS,
+        STEP_OPEN,
+        STEP_FAIL,
+        STEP_REDO,
+        STEP_DONE,
+        STEP_HANDOVER,
+        STEP_WISH,
     }
 )
 
-#: Why a new round starts (``draw_start.because.kind``) — a household
+#: Why a new round starts (``start`` step, ``because.kind``) — a household
 #: refuses a new round without one of these ("no re-rolls on demand").
-BECAUSE_FIRST = "first"  # the table's first draw
+BECAUSE_FIRST = "first"  # the table's first draw (or afresh after one gave up)
 BECAUSE_AGAIN = "again"  # the organiser's visible "Draw again" after a reveal
-BECAUSE_CHANGED = "changed"  # people left or were removed
+BECAUSE_CHANGED = "changed"  # people left or were removed (before S, or a stuck home)
 BECAUSE_COMPLAINT = "complaint"  # a household proved the last round wrong
+BECAUSE_VOID = "void"  # the last round's S held a key nobody can seal to
 BECAUSE_KINDS: frozenset[str] = frozenset(
-    {BECAUSE_FIRST, BECAUSE_AGAIN, BECAUSE_CHANGED, BECAUSE_COMPLAINT}
+    {BECAUSE_FIRST, BECAUSE_AGAIN, BECAUSE_CHANGED, BECAUSE_COMPLAINT, BECAUSE_VOID}
 )
 
-#: What a complaint says (it always carries its proof: the box key).
+#: What a complaint says (it always carries its proof: the person's seed).
 COMPLAINT_MISSING = "missing"  # my box key isn't in the list exactly once
 COMPLAINT_CARDS = "cards"  # my box opens no card, several, or a bad one
 COMPLAINT_PARTNER = "partner"  # my card is my partner's (exclusions)
@@ -121,7 +135,7 @@ COMPLAINT_KINDS: frozenset[str] = frozenset(
     {COMPLAINT_MISSING, COMPLAINT_CARDS, COMPLAINT_PARTNER}
 )
 
-#: Why a draw ended without a result (``draw_end.reason``).
+#: Why a draw ended without a result (``end`` step, ``reason``).
 END_RULES = "rules"  # DRAW_ROUNDS_MAX rounds and no circle fit the pairs
 END_TOO_FEW = "too_few"  # fewer than three people left
 DRAW_END_REASONS: frozenset[str] = frozenset({END_RULES, END_TOO_FEW})
@@ -314,7 +328,7 @@ class DrawSettings:
         return cls(name=name, budget=budget, day=day, pairs=tuple(sorted(pairs)))
 
     def digest_bytes(self) -> bytes:
-        """The canonical bytes a round's context binds (``draw_crypto``)."""
+        """The canonical bytes a round's context binds (``crypto``)."""
         return orjson.dumps(self.to_wire(), option=orjson.OPT_SORT_KEYS)
 
     def only(self, seats: frozenset[int]) -> DrawSettings:

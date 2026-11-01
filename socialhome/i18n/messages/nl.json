@@ -317,7 +317,7 @@
   "notification.app.table_started_many_generic": "Je spel met {name} en {count} anderen is begonnen",
   "notification.app.draw_ready": "Je lootje is er – bekijk wie je hebt getrokken",
   "notification.app.draw_again": "Er is opnieuw getrokken – bekijk wie je nu hebt getrokken",
-  "notification.app.draw_handover": "{name} doet niet meer mee met het lootjes trekken – bekijk wie je nu hebt getrokken",
+  "notification.app.draw_handover": "Degene die je had getrokken doet niet meer mee – bekijk wie je nu hebt getrokken",
   "notification.app.draw_wish": "Degene die je hebt getrokken heeft het verlanglijstje aangepast",
   "notification.app.requested": "{name} wil graag {app}",
   "notification.app.update_available": "Update voor {app}",

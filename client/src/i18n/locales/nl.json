@@ -4970,6 +4970,8 @@
   "apps.perm.federation": "Stuurt uitnodigingen en zetten naar andere huishoudens",
   "apps.perm.federation_detail": "Alleen naar de persoon die je hebt gekozen, versleuteld van thuis naar thuis.",
   "apps.perm.none": "{name} vraagt niets: het kan niets bewaren en niemand bereiken.",
+  "apps.engine.draw": "Trekt lootjes met Social Home",
+  "apps.engine.draw_detail": "Social Home trekt de lootjes in elk huishouden en laat iedereen in een eigen scherm zien wie hij een cadeau geeft. {name} komt nooit te weten wie wie heeft getrokken.",
   "apps.never.title": "{name} kan nooit",
   "apps.never.sign_in": "je wachtwoord of aanmelding zien",
   "apps.never.content": "je berichten, chats, foto's of locatie lezen",

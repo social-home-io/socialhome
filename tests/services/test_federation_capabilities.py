@@ -23,7 +23,7 @@ def test_ours_is_v31_with_routed_origin_signature_capability():
     signing-seed share, v_21 authenticated mesh route discovery, v_20
     SPACE_SYNC_REJECTED)."""
     assert OURS == 78
-    assert FederationCapability.MIN_FOR_APP_DRAW == 78
+    assert FederationCapability.MIN_FOR_APP_ENGINES == 78
     assert FederationCapability.MIN_FOR_SPACE_APP_TABLES == 77
     assert FederationCapability.MIN_FOR_APP_GROUPS == 76
     assert FederationCapability.MIN_FOR_BAZAAR_FAQ == 75

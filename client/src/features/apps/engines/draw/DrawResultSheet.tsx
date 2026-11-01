@@ -18,7 +18,7 @@ import { ApiError } from '@/api'
 import { Avatar } from '@/components/Avatar'
 import { Button } from '@/components/Button'
 import { Modal } from '@/components/Modal'
-import { getDrawResult, type DrawResult } from './drawBridge'
+import { getDrawResult, type DrawResult } from '../engineBridge'
 import './DrawResultSheet.css'
 
 /** Done (and every other way out) ignores taps for this long. */

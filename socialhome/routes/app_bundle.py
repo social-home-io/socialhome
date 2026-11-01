@@ -41,7 +41,12 @@ import urllib.parse
 import aiofiles.os
 from aiohttp import web
 
-from ..app_keys import app_service_key, config_key, media_signer_key
+from ..app_keys import (
+    app_engine_registry_key,
+    app_service_key,
+    config_key,
+    media_signer_key,
+)
 from ..domain.app_group import GROUP_MAX_PLAYERS
 from ..security import error_response
 from .base import BaseView
@@ -139,6 +144,14 @@ class AppRuntimeView(BaseView):
                     "max": min(app.manifest.players_max, GROUP_MAX_PLAYERS),
                 },
                 "tables": app.manifest.tables,
+                # App engines (v_78): what the app declares, and those of
+                # them this Social Home has — the bridge offers only these.
+                "engines_declared": list(app.manifest.engines),
+                "engines": [
+                    e
+                    for e in app.manifest.engines
+                    if e in self.svc(app_engine_registry_key).ids
+                ],
             }
         )
 
