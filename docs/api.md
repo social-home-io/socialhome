@@ -771,7 +771,9 @@ Same CRUD shape:
 Who may change household gallery content: a household photo or video is
 deleted by its uploader, the album's owner or a household admin; a
 household album is renamed, flagged or deleted by its owner or a household
-admin. Anyone else gets 403. A space album follows the space's roles
+admin. Anyone else gets 403. A protected account (a child) deletes only
+its own uploads — not others' photos in an album it owns, and not an album
+that still holds someone else's photo. A space album follows the space's roles
 instead (items: the uploader or a moderator / admin / owner; albums: the
 owner or a space admin / owner) — being a household admin gives no say
 there.

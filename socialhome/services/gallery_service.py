@@ -370,6 +370,13 @@ class GalleryService:
                 "system album cannot be deleted",
             )
         await self._require_album_owner_or_admin(album, actor_user_id)
+        if await self._is_protected(
+            actor_user_id
+        ) and await self._repo.has_items_by_others(album_id, actor_user_id):
+            # Deleting the album would delete other people's photos with it.
+            raise GalleryPermissionError(
+                "A protected account may only delete its own uploads"
+            )
         media = await self._repo.list_album_media(album_id)
         # A space album keeps a tombstone (§25.6 ``gallery_albums_deleted``);
         # a household album is removed.
@@ -509,6 +516,12 @@ class GalleryService:
                 "delete the source post to remove this item",
             )
         if album is not None and item.uploaded_by != actor_user_id:
+            if await self._is_protected(actor_user_id):
+                # A protected account (a child) removes only what it added
+                # — whatever album or space role it holds.
+                raise GalleryPermissionError(
+                    "A protected account may only delete its own uploads"
+                )
             if album.space_id is not None:
                 if not await self._has_content_authority(album.space_id, actor_user_id):
                     raise GalleryPermissionError(
@@ -775,6 +788,14 @@ class GalleryService:
             return False
         user = await self._users.get_by_user_id(user_id)
         return user is not None and user.is_admin and user.is_active()
+
+    async def _is_protected(self, user_id: str) -> bool:
+        """A local account under child protection (§CP) — it deletes only
+        its own uploads."""
+        if self._users is None:
+            return False
+        user = await self._users.get_by_user_id(user_id)
+        return user is not None and user.child_protection_enabled
 
     # ─── System album (auto-mirror of feed media) ─────────────────────────
     #

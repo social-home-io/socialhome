@@ -51,6 +51,7 @@ class AbstractGalleryRepo(Protocol):
         self, album_id: str, *, space_id: str, deleted_by: str = ""
     ) -> bool: ...
     async def list_album_media(self, album_id: str) -> list[str]: ...
+    async def has_items_by_others(self, album_id: str, user_id: str) -> bool: ...
     async def list_items(
         self,
         album_id: str,
@@ -419,6 +420,16 @@ class SqliteGalleryRepo:
             return True
 
         return bool(await self._db.transact(_run))
+
+    async def has_items_by_others(self, album_id: str, user_id: str) -> bool:
+        """Whether the album holds a live item someone other than *user_id*
+        uploaded."""
+        row = await self._db.fetchone(
+            "SELECT 1 FROM gallery_items WHERE album_id=? AND uploaded_by<>?"
+            " AND deleted_at IS NULL LIMIT 1",
+            (album_id, user_id),
+        )
+        return row is not None
 
     async def list_album_media(self, album_id: str) -> list[str]:
         """The ``api/media/`` references of every item file in the album —

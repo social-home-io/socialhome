@@ -1004,3 +1004,37 @@ async def test_without_a_user_repo_nobody_is_a_household_admin(env):
     env._users = None
     with pytest.raises(GalleryPermissionError):
         await env.delete_item(item.id, actor_user_id="a-id")
+
+
+async def test_a_protected_account_deletes_only_its_own_uploads(env):
+    """Live walk: Mia (protected, 9) deleted her mother's photo with a 204.
+    A protected account removes only what it uploaded — even in its own
+    album, and not by deleting an album that holds someone else's photo."""
+    await env._users._db.enqueue(  # type: ignore[union-attr]
+        "UPDATE users SET child_protection_enabled=1 WHERE user_id='e-id'"
+    )
+    album = await env.create_album(space_id=None, owner_user_id="e-id", name="Mia's")
+    bobs = await env.upload_item(
+        album.id,
+        data=_jpeg(),
+        content_type="image/jpeg",
+        caption=None,
+        uploader_user_id="b-id",
+    )
+    own = await env.upload_item(
+        album.id,
+        data=_jpeg(),
+        content_type="image/jpeg",
+        caption=None,
+        uploader_user_id="e-id",
+    )
+    with pytest.raises(GalleryPermissionError):
+        await env.delete_item(bobs.id, actor_user_id="e-id")
+    with pytest.raises(GalleryPermissionError):
+        await env.delete_album(album.id, actor_user_id="e-id")
+    await env.delete_item(own.id, actor_user_id="e-id")
+    # Once only her own photos are left, the album is hers to delete.
+    await env.delete_item(bobs.id, actor_user_id="b-id")
+    await env.delete_album(album.id, actor_user_id="e-id")
+    with pytest.raises(GalleryNotFoundError):
+        await env.get_album(album.id, actor_user_id="b-id")

@@ -10,6 +10,8 @@ for anyone to delete anyone's photos. Against the real application
   household admin — any other member gets 403 and the photo stays.
 * A household album is renamed, re-flagged or deleted by its owner or a
   household admin — any other member gets 403.
+* A protected account (a child) deletes only its own uploads — not even
+  in an album it owns.
 * A household admin has no say over a space album: the space's roles do.
 """
 
@@ -28,8 +30,9 @@ from socialhome.config import Config
 
 pytestmark = pytest.mark.security
 
-#: ann is the household admin; bob and carol are members.
-PEOPLE = (("ann", 1), ("bob", 0), ("carol", 0))
+#: ann is the household admin; bob and carol are members; mia is a
+#: protected account (a child).
+PEOPLE = (("ann", 1, 0), ("bob", 0, 0), ("carol", 0, 0), ("mia", 0, 1))
 
 
 def _h(name: str) -> dict:
@@ -62,11 +65,11 @@ async def tc(aiohttp_client, tmp_dir):
     app = create_app(_config(tmp_dir))
     client = await aiohttp_client(app)
     db = app[db_key]
-    for name, admin in PEOPLE:
+    for name, admin, protected in PEOPLE:
         await db.enqueue(
-            "INSERT INTO users(username, user_id, display_name, is_admin)"
-            " VALUES(?,?,?,?)",
-            (name, f"u-{name}", name.title(), admin),
+            "INSERT INTO users(username, user_id, display_name, is_admin,"
+            " child_protection_enabled) VALUES(?,?,?,?,?)",
+            (name, f"u-{name}", name.title(), admin, protected),
         )
         await db.enqueue(
             "INSERT INTO api_tokens(token_id, user_id, label, token_hash)"
@@ -122,3 +125,20 @@ async def test_only_the_owner_or_an_admin_manages_a_household_album(tc):
     assert (await tc.patch(url, json={"name": "Tidy"}, headers=_h("ann"))).status == 204
     assert (await tc.delete(url, headers=_h("ann"))).status == 204
     assert (await tc.get(url, headers=_h("bob"))).status == 404
+
+
+async def test_a_protected_account_cannot_delete_others_photos_even_in_its_album(tc):
+    r = await tc.post("/api/gallery/albums", json={"name": "Mia's"}, headers=_h("mia"))
+    album_id = (await r.json())["id"]
+    r = await tc.post(
+        f"/api/gallery/albums/{album_id}/items",
+        data=_png(),
+        headers={**_h("ann"), "Content-Type": "image/png"},
+    )
+    anns = (await r.json())["id"]
+    assert (
+        await tc.delete(f"/api/gallery/items/{anns}", headers=_h("mia"))
+    ).status == 403
+    r = await tc.delete(f"/api/gallery/albums/{album_id}", headers=_h("mia"))
+    assert r.status == 403
+    assert await _item_ids(tc, album_id) == [anns]
