@@ -448,7 +448,8 @@ class AppService(BusPublisherMixin):
         newer compatible version that isn't ``quiet`` (to the household's
         admins — the notification service keeps one "Needs you" row per
         app) and one :class:`AppUpdateGone` per installed app without one,
-        or with only a quiet one (its rows resolve). Nothing is installed: an admin updates with one tap.
+        or with only a quiet one (its rows resolve). Nothing is installed:
+        an admin updates with one tap.
 
         A check that couldn't reach the catalog (``stale``: the held copy
         was served) announces and withdraws nothing — it doesn't know.
