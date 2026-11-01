@@ -563,7 +563,9 @@ def circle_digest(C: Sequence[bytes]) -> bytes:
 
 # ─── The round's transcript ───────────────────────────────────────────────
 #
-# Every public value of a round, in the order it appears, chained into one
+# The public values of a round every household relies on, in the order
+# they appear (all but the card-commitment set, which each household
+# checks against every household's signature), chained into one
 # running digest. Every signature made after a value appeared signs the
 # transcript up to that point (it is passed in place of the bare round
 # context), and every household checks each signature against its OWN

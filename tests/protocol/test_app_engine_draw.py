@@ -2257,6 +2257,131 @@ async def test_a_couple_in_one_household_is_told_before_any_card(net):
     _assert_circle(await _results(net, sid))
 
 
+# ─── draw-review-7 ────────────────────────────────────────────────────────
+
+
+async def test_hub_peeks_at_cards_then_rerolls_with_its_own_couple(net, monkeypatch):
+    """R7 MEDIUM. The hub's household holds a couple (Anna, Amy). When the
+    circle puts them side by side it keeps quiet, commits its cards like
+    everyone, opens its own people's cards from what the others sent (the
+    peek), withholds ``cards_all`` and restarts with the couple complaint.
+    A couple is told INSTEAD of committing: no household that holds every
+    card commitment (the complainer's own among them) takes it."""
+    people = {"hub": ["anna", "amy"], "b": ["ben"], "c": ["cleo"], "d": ["dev"]}
+    plan: dict = {"peeked": []}
+    real_couple = svc_mod.AppDrawService._own_couple
+    real_cards = svc_mod.AppDrawService._hub_cards
+
+    def own_couple(self, rnd, cur, C):
+        got = real_couple(self, rnd, cur, C)
+        if self._own == "hub" and got is not None and "couple" not in plan:
+            plan["couple"] = (rnd.gen, rnd.round, got)
+            return None  # keep quiet: commit cards as if nothing
+        return got
+
+    async def hub_cards(self, table, st, rnd, sender, p):
+        hub = st["hub"]
+        c = plan.get("couple")
+        if c is None or (c[0], c[1]) != (rnd.gen, rnd.round) or plan.get("done"):
+            return await real_cards(self, table, st, rnd, sender, p)
+        hub["cards"][sender] = p["cards"]
+        if len(hub["cards"]) < rnd.h:
+            await self._save(table.session_id, st)
+            return
+        every = [svc_mod._raw(x) for cs in hub["cards"].values() for x in cs]
+        cur = st["p"]
+        for user in cur["seeds"]:  # the peek: our people's recipients
+            got = dc.try_cards(self._box_priv(cur, user), every, ctx=rnd.ctx)
+            plan["peeked"].append((user, dc.decode_card(got[0]).user))
+        plan["done"] = True
+        msg = self._complaint(rnd, cur, "couple", *c[2])
+        await self._redraw(
+            table, st, rnd, {"kind": "complaint", "complaint": msg["complaint"]}, []
+        )
+
+    monkeypatch.setattr(svc_mod.AppDrawService, "_own_couple", own_couple)
+    monkeypatch.setattr(svc_mod.AppDrawService, "_hub_cards", hub_cards)
+    sid = await draw_table(net, people)
+    hub = net.homes["hub"]
+    seats = {e.user: e.seat for e in (await hub.group_repo.get(sid)).roster}
+    await hub.draw.configure(
+        app_id=APP,
+        session_id=sid,
+        actor_user_id=hub.uid("anna"),
+        settings={"pairs": [[seats["anna"], seats["amy"]]]},
+    )
+    await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
+    await settle(net)
+    for _ in range(10):
+        if plan.get("done"):
+            break
+        await hub.draw.start(
+            app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"), again=True
+        )
+        await settle(net)
+    assert plan.get("done") and len(plan["peeked"]) == 2
+    gen, rno, _c = plan["couple"]
+    for inst in ("b", "c", "d"):
+        assert not [
+            p
+            for s, _t, p in net.sent
+            if s == inst
+            and p.get("step") == "key"
+            and (p["gen"], p["round"]) == (gen, rno + 1)
+        ], inst  # nobody took the re-roll
+        st = await net.homes[inst].draw._load(sid)
+        assert (st["p"]["gen"], st["p"]["round"]) == (gen, rno), inst
+
+
+async def test_hub_changes_the_settings_mid_draw(net, monkeypatch):
+    """R7 LOW. The organiser can't change the settings while a draw runs,
+    and neither can the hub: the next round of the same draw must carry the
+    settings of the one before (the pairs only for the seats still in).
+    Here the hub drops the pair and changes the budget and day at a redraw:
+    no household takes it."""
+    people = {"hub": ["anna"], "b": ["ben", "bea"], "c": ["cleo"], "d": ["dev"]}
+    real_redraw = svc_mod.AppDrawService._redraw
+    tampered: list = []
+
+    async def redraw(self, table, st, rnd, because, culprits):
+        if self._own == "hub" and not tampered:
+            st["settings"] = {
+                "name": "x",
+                "budget": "999 EUR",
+                "day": "2099-12-24",
+                "pairs": [],
+            }
+            tampered.append((rnd.gen, rnd.round))
+        return await real_redraw(self, table, st, rnd, because, culprits)
+
+    monkeypatch.setattr(svc_mod.AppDrawService, "_redraw", redraw)
+    sid = await draw_table(net, people)
+    hub = net.homes["hub"]
+    seats = {e.user: e.seat for e in (await hub.group_repo.get(sid)).roster}
+    await hub.draw.configure(
+        app_id=APP,
+        session_id=sid,
+        actor_user_id=hub.uid("anna"),
+        settings={"pairs": [[seats["ben"], seats["bea"]]], "budget": "20 EUR"},
+    )
+    await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
+    await settle(net)
+    for _ in range(10):
+        if tampered:
+            break
+        await hub.draw.start(
+            app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"), again=True
+        )
+        await settle(net)
+    assert tampered
+    gen, rno = tampered[0]
+    for inst in ("b", "c", "d"):
+        st = await net.homes[inst].draw._load(sid)
+        assert (st["p"]["gen"], st["p"]["round"]) == (gen, rno), inst
+        assert st["p"]["settings"]["budget"] == "20 EUR", inst
+        assert not st["last"]["complete"], inst
+
+
 # ─── A cheating household is caught ───────────────────────────────────────
 
 

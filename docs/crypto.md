@@ -336,7 +336,7 @@ keys ‖ settings)`.
 - **The round's transcript** (`transcript_keys` → `transcript_batches` →
   `transcript_chain` → `transcript_reveals`, SHA-256 over
   `"socialhome/app_engine/draw/transcript/v1" ‖ previous ‖ stage ‖ values`)
-  chains every public value in order: the round context, the signed mixer
+  chains the public values every household relies on, in order: the round context, the signed mixer
   keys, every batch (`r` commitment included), every chain link, the
   reveals and the circle (`circle_digest`). Every signature made after a
   value appeared signs the transcript up to it (in place of the bare

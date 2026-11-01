@@ -167,7 +167,7 @@ complainer's own seed for its own box. A void after the list (or after a
 household's own `done`) is refused.
 
 **The rule: one transcript, checked by every household on its own copy.**
-Every public value of a round, in the order it appears — the round context
+The public values every household relies on, in the order they appear — the round context
 (the people, identity keys, settings), every signed mixer key in mixing
 order, every batch (onion hashes, commitments, `r` commitment), every chain
 link, the reveals and the circle — is chained into one running digest per
@@ -183,7 +183,13 @@ link, reveal, people) makes the signatures disagree: the round stalls
 (`DrawWireError`), **nobody is named, nothing is opened** — an honest
 household is never named on evidence that didn't verify against its own
 transcript. `test_any_equivocation_stalls_and_names_nobody` equivocates
-each value in turn.
+each value in turn. Not in it: the set of card commitments (each household
+checks it against every household's signed commitment, not against the
+others' copies) — a household that sent two households two different
+commitment sets for its own cards gains nothing it couldn't by sealing its
+own cards wrongly (a card complaint). A redraw of the same draw keeps the
+round's settings (the pairs only for the seats still in): a household
+refuses one with other settings.
 
 1. **Start.** People (seat, household, username), each household's identity
    key, the settings. Every signature and seal is bound to the **round
@@ -410,6 +416,12 @@ No call returns a result; the app's sandboxed frame can't reach the API.
   people's cards go missing) causes a card complaint, which redraws a
   round people have already read and names nobody. After 3 such redraws
   the draw stops for the organiser.
+- **A giver's household sees its people's cards before it complains
+  about a partner:** with a pair across two households, the giver's
+  household reads its people's cards, then decides whether to tell
+  "drew my partner" — only when the circle really put them so (chance),
+  and counted toward the pairs' cap (30). A couple within one household is
+  told before any card, never after its own card commitment.
 - **Removals hand over pairs:** a hand-over shows the giver the card sealed
   to the leaver's box — the leaver's own recipient; a chain of leavers, or a
   giver colluding with the leavers' household, walks further.

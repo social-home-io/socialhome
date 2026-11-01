@@ -1969,6 +1969,14 @@ class AppDrawService:
             rnd, pub=_b64(pub), sig=self._sign(dc.key_message(rnd.ctx, self._own, pub))
         )
         new_draw = cur is None or gen != cur["gen"]
+        if not new_draw:
+            # The next round of the same draw keeps its settings (the pairs
+            # only for the seats still in): the organiser can't change them
+            # while a draw runs, so neither can the hub.
+            assert cur is not None
+            before = DrawSettings.from_wire(cur["settings"]).only(seats)
+            if settings != before:
+                raise DrawWireError("the settings changed mid-draw")
         # Each household counts who broke rounds of this draw itself: no
         # round after the same household broke two (the organiser decides).
         broke = {} if new_draw else dict(st.get("broke", {}))
@@ -2097,7 +2105,10 @@ class AppDrawService:
             if "cards_msg" in cur or "commits_cards" in cur:
                 raise DrawWireError("a missing key told after the cards")
         elif complaint.get("kind") == COMPLAINT_COUPLE:
-            if "C" not in cur or "cards" in cur:
+            # Told instead of committing: never once we hold every
+            # household's card commitment (theirs included — a household
+            # that committed its cards saw no couple, or kept it to peek).
+            if "C" not in cur or "commits_cards" in cur or "cards" in cur:
                 raise DrawWireError("a couple told out of turn")
             C = [_raw(x) for x in cur["C"]]
         else:
