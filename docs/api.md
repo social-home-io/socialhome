@@ -143,6 +143,7 @@ Coded refusals (`socialhome/domain/errors.py` `CodedError` subclasses):
 | `LISTING_THREAD_RATE_LIMITED` | 429 | — | A message in an "Ask the seller" thread over the per-person cap: 30 an hour, 100 a day in one thread |
 | `IMAGE_TOO_LARGE` | 422 | `max_mb` | `POST /api/me/picture`, `/api/spaces/{id}/members/me/picture`, `/cover`, `/icon` over the size limit |
 | `PAYLOAD_TOO_LARGE` | 413 | `max_mb` | `POST /api/gallery/albums/{id}/items`, `POST /api/backup/import` over the size limit — refused while streaming, so a chunked body (no `Content-Length`) is bounded too. `POST /api/media/upload` answers the same code without params |
+| `STORAGE_FULL` | 507 | — | `POST /api/media/upload` and `POST /api/gallery/albums/{id}/items` when the file would take the household past its storage quota (`max_storage_bytes`); nothing is stored |
 | `IMAGE_UNREADABLE` | 422 | — | The same picture endpoints and `POST /api/media/upload`, when the file isn't a supported image or the image library can't open it (the library's error text and the file name stay in the server log) |
 | `INVALID_REACH` | 422 | — | `POST /api/pairing/initiate` / `accept` with an unknown pairing `reach` |
 | `GFS_NOT_CONNECTED` | 422 | — | `POST /api/pairing/initiate` with `reach` `url_gfs` / `gfs` and no active GFS connection that relays envelopes |
@@ -766,6 +767,16 @@ Same CRUD shape:
 /api/bazaar[/{id}]            /{id}/bids[/{bid_id}]  POST /accept, /reject
 /api/gallery/albums[/{id}]    /{id}/items[/{iid}]
 ```
+
+Who may change household gallery content: a household photo or video is
+deleted by its uploader, the album's owner or a household admin; a
+household album is renamed, flagged or deleted by its owner or a household
+admin. Anyone else gets 403. A protected account (a child) deletes only
+its own uploads — not others' photos in an album it owns, and not an album
+that still holds someone else's photo. A space album follows the space's roles
+instead (items: the uploader or a moderator / admin / owner; albums: the
+owner or a space admin / owner) — being a household admin gives no say
+there.
 
 `/api/stickies[/{id}]` is the **household** board only: `PATCH` /
 `DELETE` on the id of a space sticky is 404, exactly like an unknown

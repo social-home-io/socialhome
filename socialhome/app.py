@@ -3109,6 +3109,8 @@ def create_app(config: Config | None = None) -> web.Application:
         media_transcode_repo=repos.media_transcode,
         media_transcode_service=media_transcode_service,
         media_refs=repos.media_reference,
+        user_repo=repos.user,
+        storage_quota=storage_quota,
     )
 
     # ── System "Posts" album bridge (§Gallery) ──────────────────────────
