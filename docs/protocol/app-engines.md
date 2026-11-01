@@ -74,6 +74,14 @@ KEK-wrapped blob per (table, engine), gone with its table. **Bridge.**
 The organiser opens a table in the Gift draw app, sets a name, a budget, the
 exchange day and the couples who mustn't draw each other; everyone joins and
 writes a wish list (≤ 500 characters); the organiser taps **Draw names**.
+People can still join until then — even after the organiser started the game
+— when the app takes late joiners (`late_join: true` in its manifest): Draw
+names first ends late joins at the hub (`AppGroupService.end_late_joins`:
+unanswered invites withdrawn, the roster with `late_join: false` to every
+household at once), then reads the seats, so nobody sits down after the people
+are counted. A Draw names the hub refuses (a pair that doesn't fit, a
+household too old) leaves the table open. No new wire field: the table's
+`late_join` flips from `true` to `false` (any v_76 household takes that).
 The households draw by themselves; each person gets one row "Your gift draw
 is ready — see who you're giving to", which opens Social Home's own sheet:
 "You're giving a gift to Ben (Familie Okafor)", Ben's wish list, the budget
@@ -441,8 +449,7 @@ No call returns a result; the app's sandboxed frame can't reach the API.
   the context); the card's name is signed by the person's household (L2).
 - v1 runs Draw names / Draw again from the host household only
   (`APP_DRAW_HOST_ELSEWHERE` after a host hand-over to another household's
-  person). One `late_join` flag per table (follow-up: "late join until the
-  draw starts").
+  person).
 
 ### Implementation
 
