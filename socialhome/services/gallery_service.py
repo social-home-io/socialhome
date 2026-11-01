@@ -68,8 +68,10 @@ from ..repositories.gallery_repo import AbstractGalleryRepo
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from ..repositories.media_transcode_repo import AbstractMediaTranscodeRepo
 from ..repositories.space_repo import AbstractSpaceRepo
+from ..repositories.user_repo import AbstractUserRepo
 from .media_transcode_service import MediaTranscodeService
 from .space_member_guard import NOT_A_SPACE_MEMBER, seat_of
+from .storage_quota_service import StorageQuotaService
 
 try:
     from PIL import ExifTags, Image
@@ -182,8 +184,10 @@ class GalleryService:
         "_media_refs",
         "_repo",
         "_space_repo",
+        "_storage_quota",
         "_transcode_repo",
         "_transcode_service",
+        "_users",
     )
 
     def __init__(
@@ -196,6 +200,8 @@ class GalleryService:
         media_transcode_repo: AbstractMediaTranscodeRepo | None = None,
         media_transcode_service: MediaTranscodeService | None = None,
         media_refs: AbstractMediaReferenceRepo | None = None,
+        user_repo: AbstractUserRepo | None = None,
+        storage_quota: StorageQuotaService | None = None,
     ) -> None:
         self._repo = repo
         self._space_repo = space_repo
@@ -211,6 +217,13 @@ class GalleryService:
         # only exercise photos / album CRUD can omit them.
         self._transcode_repo = media_transcode_repo
         self._transcode_service = media_transcode_service
+        # Household admins manage every household album and item. Without
+        # the user repo nobody is an admin here — the safe default.
+        self._users = user_repo
+        # The household's byte budget (§5.2) — the same guard rail
+        # ``POST /api/media/upload`` applies, so the gallery (the biggest
+        # disk consumer) can't fill the disk past it.
+        self._storage_quota = storage_quota
 
     # ─── Albums ───────────────────────────────────────────────────────────
 
@@ -435,6 +448,9 @@ class GalleryService:
             raise ValueError(f"Caption must be {CAPTION_MAX} characters or fewer")
         if not data:
             raise ValueError("upload data is empty")
+        if self._storage_quota is not None:
+            # 507 STORAGE_FULL via ``BaseView._iter``, before any disk write.
+            await self._storage_quota.check_can_store(len(data))
 
         is_video = (
             content_type.startswith("video/")
@@ -492,14 +508,21 @@ class GalleryService:
                 "system album items are managed automatically — "
                 "delete the source post to remove this item",
             )
-        if album is not None and album.space_id is not None:
-            is_uploader = item.uploaded_by == actor_user_id
-            is_moderator = await self._has_content_authority(
-                album.space_id, actor_user_id
-            )
-            if not (is_uploader or is_moderator):
+        if album is not None and item.uploaded_by != actor_user_id:
+            if album.space_id is not None:
+                if not await self._has_content_authority(album.space_id, actor_user_id):
+                    raise GalleryPermissionError(
+                        "Only the uploader or a space moderator may delete this item"
+                    )
+            elif not (
+                album.owner_user_id == actor_user_id
+                or await self._is_household_admin(actor_user_id)
+            ):
+                # A household photo: its uploader, the album's owner or a
+                # household admin — not every member of the household.
                 raise GalleryPermissionError(
-                    "Only the uploader or a space moderator may delete this item"
+                    "Only the uploader, the album owner or a household admin "
+                    "may delete this item"
                 )
         # A space item keeps a file-free tombstone (§25.6
         # ``gallery_items_deleted``); a household item is removed.
@@ -724,20 +747,34 @@ class GalleryService:
         album: GalleryAlbum,
         actor_user_id: str,
     ) -> None:
-        """The album's owner, or settings authority (owner / admin).
+        """The album's owner, or — for a space album — settings authority
+        (owner / admin), for a household album a household admin.
 
         A whole album — rename, delete, retention — is not moderation: a
-        moderator acts on single items (:meth:`delete_item`)."""
-        roles = SETTINGS_AUTHORITY_ROLES
+        moderator acts on single items (:meth:`delete_item`). A household
+        admin has no say over a space album: the space's own roles do."""
         if album.owner_user_id == actor_user_id:
             return
-        if album.space_id is not None and await self._has_role(
-            album.space_id, actor_user_id, roles
+        if album.space_id is None:
+            if await self._is_household_admin(actor_user_id):
+                return
+            raise GalleryPermissionError(
+                "Only the album owner or a household admin can perform this action"
+            )
+        if await self._has_role(
+            album.space_id, actor_user_id, SETTINGS_AUTHORITY_ROLES
         ):
             return
         raise GalleryPermissionError(
             "Only the album owner or a space admin can perform this action"
         )
+
+    async def _is_household_admin(self, user_id: str) -> bool:
+        """A local admin of this household (``users.is_admin``)."""
+        if self._users is None:
+            return False
+        user = await self._users.get_by_user_id(user_id)
+        return user is not None and user.is_admin and user.is_active()
 
     # ─── System album (auto-mirror of feed media) ─────────────────────────
     #
