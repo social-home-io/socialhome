@@ -34,8 +34,11 @@ DRAW_MAX_PEOPLE: int = GROUP_MAX_PLAYERS
 #: circle exists).
 DRAW_MIN_PEOPLE_WITH_PAIRS: int = 4
 #: Rounds one draw may take before it gives up ("The names couldn't be
-#: drawn with these rules") — (2/3)^12 ≈ 0.8 % for the worst allowed rules.
-DRAW_ROUNDS_MAX: int = 12
+#: drawn with these rules"). The worst allowed rules (four people, one
+#: pair) fit a random circle 1 time in 3: (2/3)^40 ≈ 1 in 11 million draws
+#: gives up (12 rounds gave up 0.8 % of the time — the second review). Every
+#: round that isn't chance names the household that broke it, to everyone.
+DRAW_ROUNDS_MAX: int = 40
 #: "Draw again" after the reveal, at most this many times per table.
 DRAW_AGAIN_MAX: int = 10
 #: A wish list, in characters (it must also fit the 1 KiB card).
@@ -48,6 +51,9 @@ DRAW_BUDGET_MAX: int = 40
 #: After this long without a household's step, the organiser sees
 #: "Waiting for …'s home" (and may draw without them).
 DRAW_WAIT_SECONDS: int = 60 * 60
+#: A step this household keeps until its own copy of the table shows what
+#: the step says (a start, an end, a hand-over) is dropped after this long.
+DRAW_PENDING_SECONDS: int = 24 * 60 * 60
 
 # ─── Steps (the sealed ``APP_SESSION`` verb ``engine``, ``engine: "draw"``) ─
 
@@ -64,7 +70,8 @@ STEP_COMMIT = "commit"  # participant → hub (its sealed cards' hashes)
 STEP_COMMITS = "commits"  # hub → participants (every household's)
 STEP_CARDS = "cards"  # participant → hub
 STEP_CARDS_ALL = "cards_all"  # hub → participants
-STEP_OPEN = "open"  # participant → hub (every seed of a publicly broken round)
+STEP_OPEN = "open"  # participant → hub (its seeds / box keys of a broken round)
+STEP_VOID = "void"  # hub → participants (a mixer stuck / a card complaint held)
 STEP_FAIL = "fail"  # participant → hub (a key missing / cards off)
 STEP_REDO = "redo"  # participant → hub (drew their partner)
 STEP_DONE = "done"  # participant → hub (signed)
@@ -89,6 +96,7 @@ DRAW_STEPS: frozenset[str] = frozenset(
         STEP_CARDS,
         STEP_CARDS_ALL,
         STEP_OPEN,
+        STEP_VOID,
         STEP_FAIL,
         STEP_REDO,
         STEP_DONE,
@@ -122,10 +130,17 @@ BECAUSE_FIRST = "first"  # the table's first draw (or afresh after one gave up)
 BECAUSE_AGAIN = "again"  # the organiser's visible "Draw again" after a reveal
 BECAUSE_CHANGED = "changed"  # people left or were removed (before S, or a stuck home)
 BECAUSE_COMPLAINT = "complaint"  # a household proved the last round wrong
-BECAUSE_VOID = "void"  # the last round's S held a key nobody can seal to
+BECAUSE_VOID = "void"  # the last round broke publicly; every household opened
 BECAUSE_KINDS: frozenset[str] = frozenset(
     {BECAUSE_FIRST, BECAUSE_AGAIN, BECAUSE_CHANGED, BECAUSE_COMPLAINT, BECAUSE_VOID}
 )
+
+#: Why a round broke publicly (``void``): every household opens, and the
+#: openings name who broke it — to every household.
+VOID_UNUSABLE = "unusable"  # S holds a key nobody can seal to (seeds open)
+VOID_STUCK = "stuck"  # a mixer's signed input doesn't peel (seeds open)
+VOID_CARDS = "cards"  # a giver proved its box opens no good card (boxes open)
+VOID_WHYS: frozenset[str] = frozenset({VOID_UNUSABLE, VOID_STUCK, VOID_CARDS})
 
 #: What a complaint says (it always carries its proof: the person's seed).
 COMPLAINT_MISSING = "missing"  # my box key isn't in the list exactly once

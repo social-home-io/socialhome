@@ -319,7 +319,9 @@ keys ‖ settings)`.
   nonce and the ephemeral keys of the onion `seal(M1, … seal(Mh, B))`
   (`32 + 48h` bytes) — so the onion is deterministic, and a complaint that
   reveals the seed lets anyone rebuild it and check it is the one the
-  household submitted. Commitment `SHA-256(domain ‖ ctx ‖ instance ‖ user ‖
+  household submitted — and every form it takes on the way (layer k is
+  what mixer k takes); each mixer signs the hash of every entry it gives,
+  so a seed shows which mixer's output lacks it. Commitment `SHA-256(domain ‖ ctx ‖ instance ‖ user ‖
   box_pub ‖ nonce)`.
 - **The circle** is not the mixers' order: each household commits to a
   random `r` (`SHA-256(domain ‖ ctx ‖ instance ‖ r)`) with its onions and
@@ -327,21 +329,28 @@ keys ‖ settings)`.
   circle is `S` sorted by `SHA-256(domain ‖ ctx ‖ R ‖ box)`.
 - **Every key in `S` is checked** for a usable point (X25519 with a fixed
   scalar must not fail); a low-order key voids the round publicly and every
-  household opens its seeds, which names the one that sent it.
+  household opens its seeds, which names the mixer that put it there (or
+  the household whose seeds don't rebuild what it signed). After the cards,
+  a void opens only box keys with their commitment nonces (signed, checked
+  against the commitments): they place every person in the circle without
+  opening any card.
 - **Cards**: exactly 1 024 bytes (`u16 len ‖ v1 ‖ rev ‖ lp16(instance,
   user, name, household, wish) ‖ Ed25519 sig ‖ zeros`), signed by the
   person's household over the round context and every field; sealed to the
   giver's box (1 072 bytes). Each household commits to its sealed cards'
   hashes (signed) before any card is sent.
-- **Hand-over**: the leaver's household seals the leaver's box **private
-  key** (signed over the round, the leaver and the box's public key) to the
-  giver's box; the giver checks the key is exactly the box it gives to and
-  opens the new card from the committed list it holds.
+- **Hand-over** (exactly 1 152 bytes, sealed 1 200): the leaver's
+  household seals the leaver's box **private key** and every box key handed
+  to them before (≤ 29, signed over the round, the leaver and the chain of
+  public keys) to the giver's box; the giver checks the first key is exactly
+  the box it gives to and each next one the box after it in the circle, and
+  opens the new card sealed to the last from the committed list it holds.
 - Household Ed25519 signatures (domain-separated, length-prefixed) over:
   the mixer key, the onion batch (onion hashes, commitments, `r`
   commitment), each mix step `(k, in-digest, out-digest)`, a complaint (it
   reveals a person's seed — for a thrown-away round), an opening (every
-  seed of a void round), the card commitment, `done` (a round completes only
+  seed of a void round, with `stuck: k` from a mixer whose input doesn't
+  peel; or every box key and nonce after the cards), the card commitment, `done` (a round completes only
   with every household's), the hand-over.
 
 Every step carries `engine_suite: "x25519-hkdf-aesgcm256"`

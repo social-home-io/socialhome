@@ -286,18 +286,37 @@ def test_cut_utf8_keeps_whole_characters():
 
 def test_handover_round_trip_and_strictness():
     priv, pub = dc.new_keypair()
-    leaver_priv = dc.new_keypair()[0]
-    plain = dc.encode_handover("inst", "cleo", leaver_priv, b"\x05" * 64)
+    chain = [dc.new_keypair()[0] for _ in range(3)]
+    plain = dc.encode_handover("inst", "cleo", chain, b"\x05" * 64)
     assert len(plain) == dc.HANDOVER_BYTES
-    assert dc.decode_handover(plain) == ("inst", "cleo", leaver_priv, b"\x05" * 64)
+    assert dc.decode_handover(plain) == ("inst", "cleo", chain, b"\x05" * 64)
+    # The longest chain (everyone but the giver left) still fits.
+    longest = [dc.new_keypair()[0] for _ in range(dc.HANDOVER_KEYS_MAX)]
+    full = dc.encode_handover("i" * 64, "u" * 64, longest, b"\x05" * 64)
+    assert dc.decode_handover(full)[2] == longest
     sealed = dc.seal_handover(pub, plain, ctx=_ctx())
     assert len(sealed) == dc.SEALED_HANDOVER_BYTES
     assert dc.open_handover(priv, sealed, ctx=_ctx()) == plain
     assert dc.open_handover(dc.new_keypair()[0], sealed, ctx=_ctx()) is None
     with pytest.raises(dc.DrawCryptoError):
         dc.decode_handover(plain[:-1] + b"\x09")
-    with pytest.raises(dc.DrawCryptoError):
-        dc.encode_handover("inst", "cleo", b"short", b"\x05" * 64)
+    for keys in ([b"short"], [], [chain[0]] * (dc.HANDOVER_KEYS_MAX + 1)):
+        with pytest.raises(dc.DrawCryptoError):
+            dc.encode_handover("inst", "cleo", keys, b"\x05" * 64)
+
+
+def test_onion_layers_are_every_step_of_the_mix():
+    """A seed rebuilds what each mixer takes and gives for its person — the
+    peel of layer k is layer k + 1, and the last is the box key."""
+    rand = random.Random(SEED).randbytes
+    mixers = [dc.new_keypair(rand) for _ in range(3)]
+    pubs = [pub for _priv, pub in mixers]
+    seed = b"\x05" * 32
+    layers = dc.onion_layers(seed, pubs, ctx=_ctx())
+    assert layers[0] == dc.onion_from_seed(seed, pubs, ctx=_ctx())
+    assert layers[-1] == dc.person_keys(seed).box_pub
+    for k, (priv, _pub) in enumerate(mixers):
+        assert dc.peel(priv, layers[k], ctx=_ctx(), k=k, h=3) == layers[k + 1]
 
 
 def test_unknown_suites_are_refused():
@@ -324,12 +343,14 @@ def test_signed_messages_are_domain_separated():
         dc.batch_message(ctx, "i", [pub], [("u", pub)], pub),
         dc.complaint_message(ctx, "i", "missing", "u", pub),
         dc.card_message(ctx, dc.Card("i", "u", "N", "H", "w", 0)),
-        dc.handover_message(ctx, "i", "u", pub),
+        dc.handover_message(ctx, "i", "u", [pub]),
         dc.card_commit_message(ctx, "i", [pub]),
         dc.done_message(ctx, "i", 1),
         dc.opening_message(ctx, "i", [("u", pub)]),
+        dc.opening_message(ctx, "i", [("u", pub)], stuck=0),
+        dc.boxes_message(ctx, "i", [("u", pub, pub)]),
     }
-    assert len(msgs) == 9
+    assert len(msgs) == 11
 
 
 def test_public_of_and_sizes():

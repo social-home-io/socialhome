@@ -110,11 +110,11 @@ sequenceDiagram
     X->>H: onions {onions, commits, r_commit, sig}
     loop each household in mixing order
         H->>X: mix {k, batches | list + prev signature}
-        Note over X: take only the previous mixer's signed output,<br/>peel, check, shuffle, sign (in, out) — once per round
+        Note over X: take only the previous mixer's signed output,<br/>peel, check, shuffle, sign (in, hash of every out entry) — once per round<br/>input doesn't peel? → open {seeds, stuck: k} (a void)
         X->>H: mixed {k, list, in, sig}
     end
-    H->>X: list {S, batches, chain}
-    Note over X: check the chain and every signature; every key in S usable?<br/>own boxes in S once? else open / fail {missing, seed}
+    H->>X: list {S, batches, chain of per-entry hashes}
+    Note over X: check the chain and every signature; every key in S usable?<br/>own boxes in S? else open {seeds} (void) / fail {missing, seed}
     X->>H: reveal {r}
     H->>X: reveals {every r} → circle = S sorted by H(ctx ‖ R ‖ box)
     Note over X: seal each own card to the box before it (its giver)
@@ -122,10 +122,18 @@ sequenceDiagram
     H->>X: commits {every household's}
     X->>H: cards {sealed cards}
     H->>X: cards_all (exactly the committed cards)
-    Note over X: exactly one valid card opens per person?<br/>a partner? → redo {complaint with seed}
+    Note over X: exactly one usable card opens per person?<br/>no → fail {cards, seed} → void: every household opens its box keys<br/>a partner? → redo {complaint with seed}
     X->>H: done {count, sig}
     H->>X: complete {every signed done} → "Your gift draw is ready"
 ```
+
+**A void** (a key in `S` nobody can seal to, a mixer whose signed input
+doesn't peel, or a proven card complaint) goes: every household sends
+`open` — its seeds before the cards, only its box keys and commitment nonces
+after them — the hub passes on a fresh `start {because: void, why,
+openings, …}`, and **every household runs the same check on the openings
+and names the same households** (`blamed`, shown to everyone at the
+table).
 
 1. **Start.** People (seat, household, username), each household's identity
    key, the settings. Every signature and seal is bound to the **round
@@ -143,14 +151,21 @@ sequenceDiagram
    Each household also commits to a random `r`.
 3. **The mix (signed chain).** Mixer k takes only exactly the previous
    mixer's signed output (the first: every household's signed onions), peels
-   its layer, checks every entry, shuffles, signs `(k, in, out)`, once per
-   round.
+   its layer, checks every entry, shuffles, signs `(k, in, out)` — `out` the
+   digest of **every output entry's hash**, which the chain carries (n × 32 B
+   a link) — once per round. A seed rebuilds its person's entry at every step
+   of the mix, so it shows **which mixer's signed output lacks it**. A mixer
+   whose signed input doesn't peel says so with its seeds (`open {stuck:
+   k}`): the round is void.
 4. **Check.** Every household verifies the whole chain from hashes and that
    every key in `S` is one it can seal to (a low-order key voids the round
-   **publicly**: every household opens its seeds, the one whose opening
-   doesn't rebuild what it signed is named, a fresh round follows). A
-   household whose own box is missing says so with the seed — **instead of**
-   revealing, before any card exists.
+   **publicly**: every household opens its seeds; whoever's opening doesn't
+   rebuild what it signed is named, and so is the first mixer whose output
+   lacks someone's entry — the one that put the key there). A household
+   whose own box is missing says so with the seed — **instead of** revealing,
+   decided from the list alone, before any card exists — and the chain names
+   the mixer that dropped it (refused when that is the complainer's own
+   mixer: it proves nothing against anyone, and names the complainer).
 5. **The circle.** Every household reveals `r`; `R = H(ctx ‖ every r)`; the
    circle is `S` sorted by `H(ctx ‖ R ‖ box)` — no mixer, the last one
    included, chooses who sits next to whom. The box at position `j` gives to
@@ -162,13 +177,21 @@ sequenceDiagram
    sent**; a card list is taken only when it is exactly the commitments (a
    relay can't doctor one, and a household can't swap its own card after a
    peek).
-7. **Open and complete.** Exactly one valid card opens per person (a card of
-   another person of the round, signed by their household). A partner →
-   `redo` with the seed as proof. A round completes only with every
-   household's **signed** `done`.
+7. **Open and complete.** Exactly one usable card opens per person (a card
+   of another person of the round, signed by their household, `rev` 0 — the
+   one test, the same for the giver and for everyone checking its
+   complaint). Anything else → `fail {cards}` with the seed; it holds, so
+   every household opens its **box keys** (with the commitment nonces, never
+   a seed), which show whose card belonged there: whoever sealed a card that
+   opens there but isn't that one is named, and that person's household when
+   theirs isn't there. A partner → `redo` with the seed as proof (chance:
+   nobody named). A round completes only with every household's **signed**
+   `done`.
 
 **No re-rolls on demand.** A household takes a new round only for: the
-table's first draw (or a fresh one after a draw gave up); the organiser's
+table's first draw (or a fresh one after a draw gave up — an `end` it
+checked itself, never after the names were revealed; a fresh draw counts as
+a Draw again: its count and its exchange day); the organiser's
 visible **Draw again** after a reveal (≤ 10, until the exchange day); fewer
 people — before `S` is out, or a whole household that holds the round up
 removed by the organiser ("Draw without them"), and only once its own copy
@@ -177,7 +200,15 @@ round as **it** received it (the complainer's seed rebuilds the committed
 box and the submitted onion; the cards are the committed ones); or a public
 void. **Once `S` is out, a leave never starts a new round** — the round
 completes and the leaver hands over. A complaint without proof names its
-household to the organiser and changes nothing. ≤ 12 rounds per draw.
+household to the organiser and changes nothing. ≤ 40 rounds per draw; every
+round that isn't chance names who broke it, to everyone.
+
+**An `end` is checked too.** A household takes `end {too_few}` only when
+fewer than three of the round's people are seated in its own copy;
+`end {rules}` only when the pairs no longer fit the people still seated
+there, or at the last round with the proof that broke it (`because`, the same
+a next round would carry). It never takes an end after the reveal. An end
+its copy doesn't show (yet) is kept for 24 hours, then dropped.
 
 **Couples** (D14): non-overlapping pairs of seats, ≤ ⌊n/3⌋, ≥ 4 people.
 Checked by each giver's household; a hit is redrawn with proof.
@@ -189,22 +220,23 @@ fresh start), `round`; sent only to households at v_78:
 
 | Step | From → to | Fields |
 |---|---|---|
-| `start` | hub → all | `people [{seat, instance, user, name}]`, `identities {instance: hex}`, `settings {name, budget, day, pairs}`, `because {kind: first \| again \| changed \| complaint \| void, complaint?, list?, mixer_pubs?, cards?, commits?}` |
+| `start` | hub → all | `people [{seat, instance, user, name}]`, `identities {instance: hex}`, `settings {name, budget, day, pairs}`, `because {kind: first \| again \| changed \| complaint \| void, complaint?, list?, mixer_pubs?, cards?, commits?, why?: unusable \| stuck \| cards, openings?, k?, batches?, chain?, reveals?}` |
 | `key` / `mixers` | each → hub / hub → all | `pub`, `sig` / `keys [{instance, pub, sig}]` |
 | `onions` | each → hub | `onions`, `commits [[user, c]]`, `r_commit`, `sig` |
 | `mix` / `mixed` | hub ↔ mixer k | `k`, `batches` or `list` + `prev {instance, in, sig}` / `list`, `in`, `sig` |
-| `list` | hub → all | `S`, `batches [{instance, hashes, commits, r_commit, sig}]`, `chain [{k, instance, in, out, sig}]` |
+| `list` | hub → all | `S`, `batches [{instance, hashes, commits, r_commit, sig}]`, `chain [{instance, hashes, sig}]` (every output entry's hash) |
 | `reveal` / `reveals` | each → hub / hub → all | `r` / `reveals {instance: r}` |
-| `open` | each → hub | `opening {seeds {user: seed}, sig}` (a void round) |
+| `open` | each → hub | `opening {seeds {user: seed}, stuck?, sig}` (before the cards; `stuck: k` from the mixer whose input doesn't peel) or `opening {boxes {user: [box, nonce]}, sig}` (a card complaint) |
+| `void` | hub → all | `why: stuck, k, claim, batches, chain` / `why: cards, complaint` |
 | `commit` / `commits` | each → hub / hub → all | `hashes`, `sig` / `commits {instance: {hashes, sig}}` |
 | `cards` / `cards_all` | each → hub / hub → all | `cards` (1 072 bytes each) |
 | `fail` / `redo` | each → hub | `complaint {kind: missing \| cards \| partner, instance, user, seed, sig}` |
-| `done` / `complete` / `end` | each → hub / hub → all | `count`, `sig` / `dones {instance: {count, sig}}` / `reason: rules \| too_few` |
+| `done` / `complete` / `end` | each → hub / hub → all | `count`, `sig` / `dones {instance: {count, sig}}` / `reason: rules \| too_few`, `because?`, `people?` (a give-up at the last round carries its proof) |
 | `handover` / `wish` | each → hub → all (`relayed: true`) | `sealed` |
 
-**Receivers enforce:** the suite; `gen` ≤ 11, `round` ≤ 12; 3 ≤ n ≤ 30,
+**Receivers enforce:** the suite; `gen` ≤ 11, `round` ≤ 40; 3 ≤ n ≤ 30,
 unique seats and people; exact sizes (box 32 B, onion `32 + 48·(h − k)`,
-sealed card 1 072 B, hand-over 304 B, digests 32 B, signatures 64 B); lists
+sealed card 1 072 B, hand-over 1 200 B, digests 32 B, signatures 64 B); lists
 of exactly n distinct entries; one draw per table; hub-to-participant steps
 only from the hub, participant-to-hub steps only from a household with
 people in the round; nothing from a household below v_78; nothing for an app
@@ -213,11 +245,16 @@ that, as installed here, doesn't declare `draw`.
 ### After the reveal, leaving, offline homes
 
 - **Leave after the reveal:** the leaver's household seals the leaver's
-  **box key** to the leaver's giver (`handover`). The giver checks it is
-  exactly the box it gives to, opens the new card from the round's committed
-  card list it holds — byte for byte, nothing else — and takes it only once
-  its own copy of the table shows the leaver gone. Fewer than three left →
-  the draw ends.
+  **box keys** to the leaver's giver (`handover`): their own, then every key
+  handed to them before (a chain of leavers, ≤ 29 keys). The giver checks the
+  first is exactly the box it gives to and each next one the box after it in
+  the circle, opens the new card sealed to the last one from the round's
+  committed card list it holds — byte for byte, nothing else — and takes it
+  only once its own copy of the table shows the leaver gone. So X → Y → Z → W
+  with Z, then Y leaving gives X to W (never to someone who left). Hand-overs
+  are kept and retried with every key a household holds (one taken may open
+  the next), for 24 hours. The others keep their names; Draw again needs
+  three people seated.
 - **Leave during a round:** before `S`, a fresh round without them; after
   `S`, the round goes on and the leaver hands over when it completes.
 - **Wish list after the reveal:** sealed to the same giver box (`wish`, rev
@@ -241,19 +278,20 @@ reveal and the card commitments add 4(h − 1) small ones).
 | start + keys + mixer list | 12 × ~1 KB | 87 × ~1.5 KB ≈ 130 KB |
 | onions to the hub | 4 × ~1 KB | 29 × ~2.4 KB ≈ 70 KB |
 | the mix | 8 × ~3 KB ≈ 25 KB | 58 × ~30 KB ≈ 1.7 MB |
-| `S` + chain to everyone | 4 × ~3 KB | 29 × ~6 KB ≈ 170 KB |
+| `S` + chain to everyone | 4 × ~4 KB | 29 × ~45 KB ≈ 1.3 MB |
 | reveal + card commitments (in and out) | 16 × ~0.6 KB | 116 × ~1 KB ≈ 120 KB |
 | cards in + all cards out | ≈ 80 KB | 29 × 2 KB + 29 × 44 KB ≈ 1.3 MB |
 | done + complete | ~5 KB | 29 × 0.5 KB + 29 × 3 KB ≈ 100 KB |
-| **one round** | **≈ 60 envelopes, ≈ 160 KB** | **≈ 435 envelopes, ≈ 3.6 MB** |
+| **one round** | **≈ 60 envelopes, ≈ 165 KB** | **≈ 435 envelopes, ≈ 4.7 MB** |
 
-Worst realistic draw: 30 homes, ~3 rounds with couples ≈ 11 MB once a year,
-≈ 370 KB per household. A redo's `start` carries its proof (list body
-≈ 6 KB, cards ≤ 44 KB, commitments ≈ 3 KB) to each household once. After the
-reveal: a hand-over or wish update is 1 envelope in + h out (≈ 0.6 / 2 KB),
-≤ 12 per person. CPU: a mixer peels n onions; a household tries its boxes on
-n cards (≤ 900 X25519 operations) and rebuilds at most one onion per proof —
-in a worker thread.
+Worst realistic draw: 30 homes, ~3 rounds with couples ≈ 14 MB once a year,
+≈ 470 KB per household. A redo's `start` carries its proof (list body
+≤ 45 KB, cards ≤ 44 KB, commitments ≈ 3 KB, openings ≤ 4 KB — ≤ 100 KB, under
+the GFS relay's envelope cap) to each household once. After the reveal: a
+hand-over or wish update is 1 envelope in + h out (≈ 1.7 / 2 KB), ≤ 12 per
+person. CPU: a mixer peels n onions; a household tries its boxes on n cards
+(≤ 900 X25519 operations); a void rebuilds every onion (n × h seals,
+≤ 900) — in a worker thread.
 
 ### The app's side (bridge)
 
@@ -262,7 +300,9 @@ given change (`name`, `budget`, `day`, `pairs`); `null` clears one.
 `engine.draw.setWishes({id, text})`, `engine.draw.start({id, again?})`,
 `engine.draw.status({id})` →
 `{id, state: gathering | drawing | ready | failed, reason?, round, again,
-of, done?, waitingFor?, blamed?, settings, wish, hasResult, isHost}`,
+of, done?, waitingFor?, blamed?, settings, wish, hasResult, isHost}`
+(`blamed`: households whose misbehaviour this household proved itself —
+shown to every person, not only the organiser),
 `engine.draw.reveal({id})` → `null` (opens Social Home's sheet). Events:
 `{type: 'engine:event', engine: 'draw', event: {type: 'status', id, status}}`.
 No call returns a result; the app's sandboxed frame can't reach the API.
@@ -281,6 +321,17 @@ No call returns a result; the app's sandboxed frame can't reach the API.
   with a key of its own (a self-certifying id it controls) and run split
   rounds; it can also leave a seated person out or stall. Space tables and
   paired households don't have the impersonation.
+- **Forced redraws cost a name:** a household (or a mixer working with
+  the hub) can still break a round on purpose — drop an entry, seal a card
+  wrong, lie about a stuck input — but every such round names it to every
+  household, and a fresh round (fresh keys) follows. The last household to
+  reveal `r` (the hub sees every `r` as it relays) can, with a mixer that
+  dropped its entry, choose to complain after seeing the circle: that names
+  the mixer to everyone. A card void reveals that round's circle of boxes
+  (no card opens with a box key; the round is dropped).
+- **Couples on small tables:** a box names nobody, so the circle can't steer
+  around a pair; four people with a pair need 3 rounds on average, and give
+  up after 40 rounds once in ~11 million draws.
 - **Stalls:** a household can stall (refuse to mix, withhold its `r`, its
   commitment or its cards); the organiser sees it after an hour and can draw
   without it — a visible removal, which is the only way a household's

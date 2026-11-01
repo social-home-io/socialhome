@@ -17,7 +17,10 @@ in *h* households runs in **rounds**; each round:
    (``H(ctx ‖ instance ‖ r)``) for the circle's order.
 3. The mixers, one after the other, peel their layer, check, shuffle and
    sign the hash of what they took and gave (the **signed chain**). The
-   last output is the **set** ``S`` of the n box keys.
+   last output is the **set** ``S`` of the n box keys. Each mixer signs the
+   hash of every entry it gives (in order), so a person's seed — which
+   rebuilds every form of their entry — shows which mixer's output lacks it
+   (:func:`onion_layers`).
 4. After ``S`` is published every household reveals ``r``; the circle is
    ``S`` sorted by ``H(ctx ‖ R ‖ box)`` with ``R = H(ctx ‖ all r)`` — so no
    mixer (the last one included) chooses who sits next to whom.
@@ -76,8 +79,12 @@ SEAL_OVERHEAD: int = KEY_BYTES + TAG_BYTES
 CARD_BYTES: int = 1024
 #: A sealed card on the wire (before base64).
 SEALED_CARD_BYTES: int = CARD_BYTES + SEAL_OVERHEAD
-#: A hand-over's plaintext: who left, their box key, their household's word.
-HANDOVER_BYTES: int = 256
+#: Box keys a hand-over carries at most: the leaver's own and every one it
+#: was handed before (a chain of leavers, at most n − 1 of 30).
+HANDOVER_KEYS_MAX: int = 29
+#: A hand-over's plaintext: who left, their chain of box keys, their
+#: household's word — always exactly this many bytes.
+HANDOVER_BYTES: int = 1152
 SEALED_HANDOVER_BYTES: int = HANDOVER_BYTES + SEAL_OVERHEAD
 #: A person seed, a commitment nonce, the circle randomness, a signature.
 SEED_BYTES: int = 32
@@ -89,7 +96,7 @@ DIGEST_BYTES: int = 32
 CARD_LABEL_MAX_BYTES: int = 120
 CARD_REF_MAX_BYTES: int = 64
 _CARD_VERSION: int = 1
-_HANDOVER_VERSION: int = 2
+_HANDOVER_VERSION: int = 3
 
 _CTX_DOMAIN = b"socialhome/app_engine/draw/round/v2"
 _ORDER_DOMAIN = b"socialhome/app_engine/draw/order/v1"
@@ -107,8 +114,9 @@ _COMPLAINT_DOMAIN = b"socialhome/app_engine/draw/complaint/v2"
 _CARD_SIG_DOMAIN = b"socialhome/app_engine/draw/card/v1"
 _CARD_COMMIT_DOMAIN = b"socialhome/app_engine/draw/card_commit/v1"
 _DONE_DOMAIN = b"socialhome/app_engine/draw/done/v1"
-_OPENING_DOMAIN = b"socialhome/app_engine/draw/opening/v1"
-_HANDOVER_SIG_DOMAIN = b"socialhome/app_engine/draw/handover/v2"
+_OPENING_DOMAIN = b"socialhome/app_engine/draw/opening/v2"
+_BOXES_DOMAIN = b"socialhome/app_engine/draw/boxes/v1"
+_HANDOVER_SIG_DOMAIN = b"socialhome/app_engine/draw/handover/v3"
 
 _ZERO_NONCE = b"\x00" * 12
 #: A fixed scalar to test a public key with (any non-zero scalar works).
@@ -397,6 +405,21 @@ def onion_from_seed(seed: bytes, mixer_pubs: Sequence[bytes], *, ctx: bytes) -> 
     )
 
 
+def onion_layers(
+    seed: bytes, mixer_pubs: Sequence[bytes], *, ctx: bytes
+) -> list[bytes]:
+    """Every form a person's entry takes on its way through the mix:
+    ``[k]`` is what mixer *k* takes (``[0]`` the onion, ``[h]`` the box
+    key) — so a revealed seed shows which mixer's output lacks it."""
+    stream = seed_stream(seed, "onion")
+    inner = person_keys(seed).box_pub
+    forms = [inner]
+    for k in reversed(range(len(mixer_pubs))):
+        inner = seal(mixer_pubs[k], inner, ctx=ctx, label=_layer_label(k), rand=stream)
+        forms.append(inner)
+    return list(reversed(forms))
+
+
 def peel(mixer_priv: bytes, onion: bytes, *, ctx: bytes, k: int, h: int) -> bytes:
     """Mixer *k* (0-based, of *h*) takes its layer off *onion*."""
     if len(onion) != onion_size(h - k):
@@ -509,13 +532,31 @@ def complaint_message(
 
 
 def opening_message(
-    ctx: bytes, instance: str, seeds: Sequence[tuple[str, bytes]]
+    ctx: bytes,
+    instance: str,
+    seeds: Sequence[tuple[str, bytes]],
+    *,
+    stuck: int | None = None,
 ) -> bytes:
-    """A household opening every seed of a round that broke publicly."""
+    """A household opening every seed of a round that broke before its
+    cards — *stuck*: it is mixer *stuck* and its input doesn't peel."""
     parts: list[bytes | str | int] = [ctx, instance, len(seeds)]
     for user, seed in sorted(seeds):
         parts += [user, seed]
+    parts.append("" if stuck is None else stuck)
     return _fields(_OPENING_DOMAIN, *parts)
+
+
+def boxes_message(
+    ctx: bytes, instance: str, boxes: Sequence[tuple[str, bytes, bytes]]
+) -> bytes:
+    """A household opening its people's box keys (with the commitment
+    nonces) of a round whose cards broke — not the seeds: nobody can open a
+    card with them."""
+    parts: list[bytes | str | int] = [ctx, instance, len(boxes)]
+    for user, box_pub, nonce in sorted(boxes):
+        parts += [user, box_pub, nonce]
+    return _fields(_BOXES_DOMAIN, *parts)
 
 
 def card_commit_message(
@@ -680,17 +721,26 @@ def try_cards(
 
 
 def handover_message(
-    ctx: bytes, instance: str, leaver: str, leaver_box_pub: bytes
+    ctx: bytes, instance: str, leaver: str, chain_pubs: Sequence[bytes]
 ) -> bytes:
-    """What the leaver's household signs when it hands its person's box key
-    to that person's giver."""
-    return _fields(_HANDOVER_SIG_DOMAIN, ctx, instance, leaver, leaver_box_pub)
+    """What the leaver's household signs when it hands its person's box
+    keys (their own, then every one handed to them) to that person's
+    giver."""
+    return _fields(
+        _HANDOVER_SIG_DOMAIN, ctx, instance, leaver, len(chain_pubs), *chain_pubs
+    )
 
 
-def encode_handover(instance: str, leaver: str, box_priv: bytes, sig: bytes) -> bytes:
-    """``version ‖ lp16(instance) ‖ lp16(leaver) ‖ box_priv ‖ sig ‖ zeros``
-    — exactly :data:`HANDOVER_BYTES`."""
-    if len(sig) != SIG_BYTES or len(box_priv) != KEY_BYTES:
+def encode_handover(
+    instance: str, leaver: str, keys: Sequence[bytes], sig: bytes
+) -> bytes:
+    """``version ‖ lp16(instance) ‖ lp16(leaver) ‖ count ‖ keys ‖ sig ‖
+    zeros`` — exactly :data:`HANDOVER_BYTES`."""
+    if (
+        len(sig) != SIG_BYTES
+        or not 1 <= len(keys) <= HANDOVER_KEYS_MAX
+        or any(len(k) != KEY_BYTES for k in keys)
+    ):
         raise DrawCryptoError("hand-over malformed")
     head = bytearray([_HANDOVER_VERSION])
     for part in (instance, leaver):
@@ -698,19 +748,23 @@ def encode_handover(instance: str, leaver: str, box_priv: bytes, sig: bytes) -> 
         if len(raw) > CARD_REF_MAX_BYTES:
             raise DrawCryptoError("hand-over malformed")
         head += struct.pack(">H", len(raw)) + raw
-    raw = bytes(head) + box_priv + sig
+    head.append(len(keys))
+    raw = bytes(head) + b"".join(keys) + sig
     return raw + b"\x00" * (HANDOVER_BYTES - len(raw))
 
 
-def decode_handover(raw: bytes) -> tuple[str, str, bytes, bytes]:
-    """``(instance, leaver, box_priv, sig)`` from a hand-over plaintext."""
+def decode_handover(raw: bytes) -> tuple[str, str, list[bytes], bytes]:
+    """``(instance, leaver, keys, sig)`` from a hand-over plaintext."""
     if len(raw) != HANDOVER_BYTES or raw[0] != _HANDOVER_VERSION:
         raise DrawCryptoError("hand-over malformed")
     (instance, leaver), at = _read_fields(raw, 1, 2)
-    end = at + KEY_BYTES + SIG_BYTES
-    if end > HANDOVER_BYTES or any(raw[end:]):
+    count = raw[at]
+    at += 1
+    end = at + count * KEY_BYTES + SIG_BYTES
+    if not 1 <= count <= HANDOVER_KEYS_MAX or end > HANDOVER_BYTES or any(raw[end:]):
         raise DrawCryptoError("hand-over malformed")
-    return instance, leaver, raw[at : at + KEY_BYTES], raw[at + KEY_BYTES : end]
+    keys = [raw[at + i * KEY_BYTES : at + (i + 1) * KEY_BYTES] for i in range(count)]
+    return instance, leaver, keys, raw[end - SIG_BYTES : end]
 
 
 def seal_handover(
@@ -735,6 +789,7 @@ __all__ = [
     "DRAW_SUITE_X25519_AESGCM",
     "ENGINE_ID",
     "HANDOVER_BYTES",
+    "HANDOVER_KEYS_MAX",
     "SEALED_CARD_BYTES",
     "SEALED_HANDOVER_BYTES",
     "SUPPORTED_DRAW_SUITES",

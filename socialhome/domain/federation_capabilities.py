@@ -1222,8 +1222,10 @@ from __future__ import annotations
 #:   invisible). An app declaring ``engines: ["draw"]`` asks Social Home to
 #:   draw names at a table (3–30 people); each participant's household does
 #:   its part unattended (``app_engines/draw``): person seeds and
-#:   deterministic onions, a signed mixing chain, the circle ordered by a
-#:   commit-reveal of every household, card commitments before any card,
+#:   deterministic onions, a signed mixing chain of per-entry hashes (a
+#:   round broken on purpose names who broke it, to every household), the
+#:   circle ordered by a commit-reveal of every household, card commitments
+#:   before any card,
 #:   key-private 1 KiB cards, couples checked by each giver's household,
 #:   signed completion, and a new round only on a proven complaint, a public
 #:   void, fewer people or the organiser's visible "Draw again". No new

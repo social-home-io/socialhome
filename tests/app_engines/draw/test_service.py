@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import os
 
 import pytest
 
@@ -34,11 +35,12 @@ from socialhome.app_engines.draw.service import (
     _Round,
     check_list,
     complaint_holds,
+    complaint_verdict,
 )
 from socialhome.crypto import b64url_decode, b64url_encode, sign_ed25519
 from socialhome.domain.events import AppDrawChanged
 from socialhome.domain.federation import FederationEvent, FederationEventType
-from tests.app_draw_network import APP, draw_table, engine_step, settle
+from tests.app_draw_network import APP, draw_table, engine_step, sent_steps, settle
 from tests.app_group_network import Network
 
 PEOPLE = {
@@ -384,8 +386,9 @@ async def test_check_list_refuses_every_tampering(done):
     _net, _sid, st = done
     rnd = _Round(st["hub"])
     body = st["hub"]["list_body"]
-    S, commits = check_list(rnd, body)
+    S, commits, links = check_list(rnd, body)
     assert len(S) == rnd.n and set(commits) == set(rnd.order)
+    assert len(links) == rnd.h and links[-1] == [dc.entry_hash(s) for s in S]
 
     def broken(fn):
         b = copy.deepcopy(body)
@@ -407,8 +410,11 @@ async def test_check_list_refuses_every_tampering(done):
         ),
         lambda b: b["chain"].pop(),
         lambda b: b["chain"].reverse(),
-        lambda b: b["chain"][-1].__setitem__("in", b["chain"][0]["in"]),
+        lambda b: b["chain"][0]["hashes"].reverse(),
+        lambda b: b["chain"][0]["hashes"].__setitem__(0, b["chain"][-1]["hashes"][0]),
+        lambda b: b["chain"][-1]["hashes"].pop(),
         lambda b: b["chain"][0].__setitem__("sig", b["chain"][-1]["sig"]),
+        lambda b: b["chain"][0].__setitem__("instance", b["chain"][-1]["instance"]),
         lambda b: b.__setitem__("batches", "x"),
         lambda b: b.__setitem__("chain", None),
     ):
@@ -426,6 +432,7 @@ async def test_complaint_holds_only_with_its_proof(done):
     S = [b64url_decode(s) for s in hub_st["S"]]
     batches = {x["instance"]: x for x in hub_st["list_body"]["batches"]}
     mixer_pubs = [b64url_decode(x) for x in hub_st["mixer_pubs"]]
+    links = [[b64url_decode(x) for x in link["hashes"]] for link in hub_st["chain"]]
     cards = [b64url_decode(c) for c in hub_st["all_cards"]]
     id_seed = net.homes["b"].fed.own_identity_seed
 
@@ -441,7 +448,13 @@ async def test_complaint_holds_only_with_its_proof(done):
             "sig": b64url_encode(sig),
         }
 
-    kw = {"S": S, "batches": batches, "mixer_pubs": mixer_pubs, "cards": cards}
+    kw = {
+        "S": S,
+        "batches": batches,
+        "links": links,
+        "mixer_pubs": mixer_pubs,
+        "cards": cards,
+    }
     # Ben's key IS in S once and his card is fine: nothing holds.
     for kind in ("missing", "cards", "partner"):
         assert complaint_holds(rnd, complaint(kind), **kw) is False
@@ -454,9 +467,18 @@ async def test_complaint_holds_only_with_its_proof(done):
     )
     # A seed the household never committed to proves nothing.
     assert complaint_holds(rnd, complaint("missing", seed=b"\x07" * 32), **kw) is False
-    # His key really missing from S: holds.
+    # His key really missing from S — the last mixer's signed output has
+    # another in its place: holds, and names that mixer (unless it is
+    # Ben's own household's: then it proves nothing against anyone).
     gone = [s for s in S if s != ben.box_pub] + [dc.new_keypair()[1]]
-    assert complaint_holds(rnd, complaint("missing"), **{**kw, "S": gone})
+    gone_links = links[:-1] + [[dc.entry_hash(s) for s in gone]]
+    verdict = complaint_verdict(
+        rnd, complaint("missing"), **{**kw, "S": gone, "links": gone_links}
+    )
+    last = rnd.order[-1]
+    assert verdict == (None if last == "b" else [last])
+    # S without him but a chain that still carries him: proves nothing.
+    assert not complaint_holds(rnd, complaint("missing"), **{**kw, "S": gone})
     # His card gone from the cards: holds as "cards", not without cards.
     no_card = [c for c in cards if dc.open_card(ben.box_priv, c, ctx=rnd.ctx) is None]
     assert complaint_holds(rnd, complaint("cards"), **{**kw, "cards": no_card})
@@ -472,6 +494,12 @@ async def test_a_mixer_mixes_once_per_round(done, caplog):
     home = net.homes[last]
     mixed = (await home.draw._load(sid))["p"]["mixed"]
     prev = st["hub"]["chain"][-2]
+    before = (
+        st["hub"]["chain"][-3]["hashes"]
+        if rnd.h > 2
+        else [h for b in st["hub"]["list_body"]["batches"] for h in b["hashes"]]
+    )
+    prev_in = b64url_encode(dc.list_digest([b64url_decode(x) for x in before]))
     # The relay hands the last mixer a different list for the same turn.
     other = [
         b64url_encode(dc.new_keypair()[1] + b"\x00" * dc.SEAL_OVERHEAD)
@@ -487,7 +515,7 @@ async def test_a_mixer_mixes_once_per_round(done, caplog):
             round_no=rnd.round,
             k=rnd.h - 1,
             list=other,
-            prev={"instance": prev["instance"], "in": prev["in"], "sig": prev["sig"]},
+            prev={"instance": prev["instance"], "in": prev_in, "sig": prev["sig"]},
         ),
     )
     await settle(net)
@@ -495,16 +523,41 @@ async def test_a_mixer_mixes_once_per_round(done, caplog):
     assert (await home.draw._load(sid))["p"]["mixed"] == mixed
 
 
-async def test_a_draw_that_gives_up_and_a_fresh_one(done, monkeypatch):
-    net, sid, st = done
+async def test_a_draw_that_gives_up_and_a_fresh_one(net, monkeypatch):
+    """The last round allowed breaks (a mixer drops an entry): the hub gives
+    up with the proof, every household checks it and takes the end — and
+    names the mixer — then the organiser draws afresh (the next draw)."""
+    monkeypatch.setattr("socialhome.app_engines.draw.service.DRAW_ROUNDS_MAX", 1)
+    sid = await draw_table(net, PEOPLE)
     hub = net.homes["hub"]
-    await hub.draw._hub_end(await hub.group_repo.get(sid), st, "rules")
+    real_mix = dc.mix
+    cheated = []
+
+    def dropping_mix(priv, entries, *, ctx, k, h, rand=os.urandom):
+        out = real_mix(priv, entries, ctx=ctx, k=k, h=h, rand=rand)
+        if k == h - 1 and not cheated:
+            cheated.append(True)
+            out[0] = dc.new_keypair()[1]
+        return out
+
+    monkeypatch.setattr(dc, "mix", dropping_mix)
+    await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
     await settle(net)
+    st = await hub.draw._load(sid)
+    if not sent_steps(net, "fail"):
+        # The mixer dropped its own household's entry: refused, named.
+        assert st["hub"]["blamed"] == [st["hub"]["order"][-1]]
+        return
+    ends = sent_steps(net, "end")
+    assert ends and all(e["because"]["kind"] == "complaint" for e in ends)
+    culprit = st["hub"]["order"][-1]
     for home, u in _everyone(net):
         status = await home.draw.status(
             app_id=APP, session_id=sid, actor_user_id=home.uid(u)
         )
         assert (status["state"], status["reason"]) == ("failed", "rules")
+        seats = [p["seat"] for p in st["hub"]["people"] if p["instance"] == culprit]
+        assert status["blamed"] == [{"seats": seats}]
     # The organiser tries again: a fresh draw (the next generation).
     await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
     await settle(net)
@@ -514,6 +567,24 @@ async def test_a_draw_that_gives_up_and_a_fresh_one(done, monkeypatch):
         app_id=APP, session_id=sid, actor_user_id=hub.uid("anna")
     )
     assert status["state"] == "ready" and status["gen"] == 2
+
+
+async def test_an_end_after_the_reveal_is_refused(done, caplog):
+    """HIGH 1 (second review): once the names are revealed no household
+    takes an ``end`` (so no "first" draw can follow it)."""
+    net, sid, st = done
+    caplog.set_level(logging.INFO)
+    hub = net.homes["hub"]
+    await hub.draw._hub_end(await hub.group_repo.get(sid), st, "rules")
+    await settle(net)
+    assert "an end after the reveal" in caplog.text
+    for home, u in _everyone(net):
+        if home is hub:
+            continue
+        status = await home.draw.status(
+            app_id=APP, session_id=sid, actor_user_id=home.uid(u)
+        )
+        assert (status["state"], status["reason"]) == ("ready", None)
 
 
 async def test_malformed_inbound_is_dropped(done, caplog):
@@ -557,7 +628,10 @@ async def test_the_table_ending_ends_the_draw(net):
     assert st["hub"]["phase"] == "ended"
 
 
-async def test_after_the_reveal_too_few_left_ends_it(tmp_path):
+async def test_after_the_reveal_too_few_left_keeps_the_names(tmp_path):
+    """After the reveal a leave changes nothing but the leaver's giver: the
+    others keep their names (no "end" after the reveal), and Draw again
+    needs three people seated."""
     net = Network(tmp_path)
     try:
         sid = await draw_table(net, {"hub": ["anna"], "b": ["ben"], "c": ["cleo"]})
@@ -567,10 +641,15 @@ async def test_after_the_reveal_too_few_left_ends_it(tmp_path):
         c = net.homes["c"]
         await c.groups.leave(app_id=APP, session_id=sid, actor_user_id=c.uid("cleo"))
         await settle(net)
+        assert not sent_steps(net, "end")
         status = await hub.draw.status(
             app_id=APP, session_id=sid, actor_user_id=hub.uid("anna")
         )
-        assert (status["state"], status["reason"]) == ("failed", "too_few")
+        assert (status["state"], status["has_result"]) == ("ready", True)
+        with pytest.raises(AppDrawTooFewError):
+            await hub.draw.start(
+                app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"), again=True
+            )
     finally:
         await net.close()
 
@@ -596,7 +675,7 @@ async def test_a_redo_proof_must_be_about_the_cards_this_household_saw(done):
     doctored[0] = b64url_encode(b"\x01" * dc.SEALED_CARD_BYTES)
     base = {
         "kind": "complaint",
-        "complaint": {"kind": "cards"},
+        "complaint": {"kind": "partner"},
         "list": hub["list_body"],
         "mixer_pubs": hub["mixer_pubs"],
         "commits": hub["commits"],
@@ -610,9 +689,20 @@ async def test_a_redo_proof_must_be_about_the_cards_this_household_saw(done):
         ),
     ):
         with pytest.raises(DrawWireError, match=why):
-            b.draw._justify(
+            await b.draw._justify(
                 table, st_b, hub["gen"], hub["round"] + 1, people, {**base, **evidence}
             )
+    # A card complaint never restarts a round by itself: it goes through a
+    # void, where the box keys name who sealed it wrong.
+    with pytest.raises(DrawWireError, match="a complaint of another kind"):
+        await b.draw._justify(
+            table,
+            st_b,
+            hub["gen"],
+            hub["round"] + 1,
+            people,
+            {**base, "complaint": {"kind": "cards"}, "cards": hub["all_cards"]},
+        )
 
 
 async def test_a_missing_key_said_after_the_cards_is_refused(done, caplog):
@@ -675,14 +765,14 @@ async def test_a_hand_over_waits_until_the_leaver_shows_as_gone(net):
         app_id=APP, session_id=sid, actor_user_id=home.uid(giver[1])
     )
     assert sheet["name"] == leaver[1].title()  # not yet: still seated here
-    assert (await home.draw._load(sid)).get("pending")
+    assert (await home.draw._load(sid))["final"]["handovers"]
     net.queue.extend(held)
     await settle(net)
     sheet = await home.draw.result(
         app_id=APP, session_id=sid, actor_user_id=home.uid(giver[1])
     )
     assert (sheet["name"], sheet["household"]) == before[leaver]
-    assert not (await home.draw._load(sid)).get("pending")
+    assert not (await home.draw._load(sid))["final"]["handovers"]
 
 
 async def test_identity_hints_from_the_start_are_passed_on(done, monkeypatch):

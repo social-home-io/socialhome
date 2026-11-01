@@ -87,7 +87,7 @@ def test_wish_ok():
 
 
 def test_verbs():
-    assert len(DRAW_STEPS) == 21
+    assert len(DRAW_STEPS) == 22
     assert DRAW_TO_HUB_STEPS < DRAW_STEPS
     assert not DRAW_STEPS & GROUP_VERBS
     assert all(v.isidentifier() and not v.startswith("draw_") for v in DRAW_STEPS)
