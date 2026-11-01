@@ -404,7 +404,7 @@ class SpaceTableService(BusPublisherMixin):
                     "enabled": bool(app is not None and app.enabled),
                 }
                 view["group"] = (
-                    self._groups.view(table, user, row)
+                    await self._groups.view_of(table, user, row)
                     if mine and row is not None
                     else None
                 )
@@ -518,7 +518,7 @@ class SpaceTableService(BusPublisherMixin):
             app_id, user.user_id, table.session_id
         )
         view = self.card_view(table)
-        view["group"] = self._groups.view(table, user, row) if row else None
+        view["group"] = await self._groups.view_of(table, user, row) if row else None
         return view
 
     async def join(self, *, space_id: str, session_id: str, actor_user_id: str) -> dict:

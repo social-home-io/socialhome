@@ -36,6 +36,7 @@ itself is the persistence layer; push is fire-and-forget on top.
 | AppUpdateAvailable   | Admins — Needs you, one row per app (re-opens for a newer version) | "{app} has an update" |
 | AppTurn              | The player whose turn it is (not while the app is on screen; Games, in app by default) — one row per game, re-opens on the next turn | "Your turn with {name} in {app}" |
 | AppTableJoined       | The person who started a group game (Games) — one row per game, moved on by each joiner; ``can_start`` once enough are in | "{name} and {count} others joined your {app} game" |
+| AppTableCanStart     | The person who started a group game, when it reaches the app's fewest players (Games) — one row per game, re-opened if it reaches them again | "Your {app} game can start" |
 | AppTableStarted      | Each local player of a group game that started, but the person who started it (Games) | "Your {app} game with {name} and {count} others started" |
 
 Body is intentionally omitted for privacy-sensitive events (DMs,
@@ -78,6 +79,7 @@ from ..domain.events import (
     AppRequestDismissed,
     AppRequested,
     AppTableAnnounced,
+    AppTableCanStart,
     AppTableClosed,
     AppTableJoined,
     AppTableStarted,
@@ -530,6 +532,7 @@ _PUSH_AS_IS: frozenset[str] = frozenset(
         "app_table_announced",
         "app_table_closed",
         "app_table_joined",
+        "app_table_can_start",
         "app_table_started",
         "app_draw_ready",
         "app_draw_changed",
@@ -1456,6 +1459,7 @@ class NotificationService(ProtectionGateMixin):
         self._subscribe(AppTableAnnounced, self.on_app_table_announced)
         self._subscribe(AppTableClosed, self.on_app_table_closed)
         self._subscribe(AppTableJoined, self.on_app_table_joined)
+        self._subscribe(AppTableCanStart, self.on_app_table_can_start)
         self._subscribe(AppTableStarted, self.on_app_table_started)
         self._subscribe(AppDrawChanged, self.on_app_draw_changed)
         self._subscribe(AppInstalled, self.on_app_request_answered)
@@ -3358,6 +3362,48 @@ class NotificationService(ProtectionGateMixin):
             others=others,
         )
 
+    async def on_app_table_can_start(self, event: AppTableCanStart) -> None:
+        """A group game the reader started reached the app's fewest
+        players — "Your {app} game can start" (design 3.7). Said once when
+        it happens, not on each join after (the joined row only moves on,
+        silent while unread): **one row per game**
+        (``app_session:<app>/<session>``), re-opened if the game drops
+        below its minimum and reaches it again. Nobody caused it. Games
+        kind — in the app unless the person set Games to Push. Opens the
+        game's Who's-in page, where Start is."""
+        recipient = await self._local_user(event.to_user_id)
+        if recipient is None:
+            return
+        locale = self._locale(recipient)
+        app_name = await self._app_name(event.app_id, locale)
+        if app_name:
+            title = self._t(
+                "notification.app.table_can_start",
+                locale=locale,
+                fallback="Your {app} game can start",
+                app=app_name,
+            )
+        else:
+            title = self._t(
+                "notification.app.table_can_start_generic",
+                locale=locale,
+                fallback="Your game can start",
+            )
+        await self._save_notif(
+            new_notification(
+                user_id=event.to_user_id,
+                type="app_table_can_start",
+                title=title,
+                link_url=app_table_link(event.app_id, event.session_id),
+            ),
+            about=NotificationSubject.of(
+                NotificationObject.APP_SESSION,
+                f"{event.app_id}/{event.session_id}",
+                space_name=app_name,
+            ),
+            actor_user_id=None,
+        )
+
     async def on_app_table_started(self, event: AppTableStarted) -> None:
         """A group game the reader sits at started — "Your {app} game with
         Anna and 3 others started" (design 3.7), ``from_display`` the
@@ -3561,6 +3607,20 @@ class NotificationService(ProtectionGateMixin):
         )
         # An invite that waited for its app (D10) is playable now: its
         # waiting row makes way for this one (a fresh row, so it buzzes).
+        # A group game's waiting row led to the app's About page (the app
+        # wasn't here); from now on it opens the game too.
+        if event.others is not None:
+            for waiting in await self._notifs.find(
+                Spec(
+                    where=[
+                        ("object_key", "=", about.object_key),
+                        ("user_id", "=", event.to_user_id),
+                        ("type", "=", "app_challenge_waiting"),
+                    ]
+                )
+            ):
+                if waiting.link_url != link:
+                    await self._notifs.update_group(replace(waiting, link_url=link))
         await self._resolve(
             about.object_key,
             types=("app_challenge_waiting",),

@@ -15952,6 +15952,9 @@ input.sh-switch {
   transition: background-color var(--sh-transition-fast), background-position var(--sh-transition-fast);
 }
 input.sh-switch:checked { background-color: var(--sh-primary); background-position: 19px 50%; }
+/* Right to left the thumb starts on the right and moves left when on. */
+[dir="rtl"] input.sh-switch { background-position: 19px 50%; }
+[dir="rtl"] input.sh-switch:checked { background-position: 1px 50%; }
 /* Mouse focus: no glow (the global ``input:focus`` one); keyboard focus
  * keeps the ring from ``input[type="checkbox"]:focus-visible``. */
 input.sh-switch:focus { box-shadow: none; }

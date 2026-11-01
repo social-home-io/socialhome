@@ -303,6 +303,8 @@
   "notification.app.challenge_group_one": "{name} hat dich und 1 weitere Person eingeladen, {app} zu spielen",
   "notification.app.challenge_group_generic": "{name} hat dich und {count} andere zu einem Spiel eingeladen",
   "notification.app.challenge_group_one_generic": "{name} hat dich und 1 weitere Person zu einem Spiel eingeladen",
+  "notification.app.table_can_start": "Dein Spiel {app} kann starten",
+  "notification.app.table_can_start_generic": "Dein Spiel kann starten",
   "notification.app.table_joined": "{name} macht bei deinem Spiel {app} mit",
   "notification.app.table_joined_one": "{name} und 1 weitere Person machen bei deinem Spiel {app} mit",
   "notification.app.table_joined_many": "{name} und {count} andere machen bei deinem Spiel {app} mit",

@@ -149,6 +149,7 @@ from ..domain.apps import (
 from ..domain.events import (
     AppChallengeEnded,
     AppChallengeReceived,
+    AppTableCanStart,
     AppTableJoined,
     AppTableStarted,
     AppTurn,
@@ -413,13 +414,28 @@ class AppGroupService(ProtectionGateMixin):
 
     # ─── Reading ──────────────────────────────────────────────────────
 
-    def view(self, table: GroupSession, user: User, row: AppPendingSession) -> dict:
+    def view(
+        self,
+        table: GroupSession,
+        user: User,
+        row: AppPendingSession,
+        *,
+        away: frozenset[str] = frozenset(),
+        homes: dict[str, str] | None = None,
+    ) -> dict:
         """*table* as *user* sees it (the lobby, the coming SDK's
         ``GroupSession``): seats, names and household names — never a
         username. ``me`` is their seat (``None`` until the hub seated
         them), ``my_state`` their place: ``invited``, ``joining`` (Join
         sent, the hub hasn't answered), ``seated``, ``left`` or
-        ``removed``."""
+        ``removed``. ``away`` lists the seats of players whose household
+        this one can't reach now (*away*, from :meth:`_away`): "Waiting
+        for Ben's home to come back". A player's ``household`` is ``None``
+        for this household's own people ("Your household") and else the
+        name the roster carries, or the one this household knows that
+        household by (*homes*, from :meth:`_homes` — the hub names nobody
+        of its own household on the wire)."""
+        known = homes or {}
         own = self._own
         mine = table.entry(own, user.username)
         if mine is not None and mine.state in WIRE_SEAT_STATES:
@@ -449,11 +465,16 @@ class AppGroupService(ProtectionGateMixin):
             "expires_at": table.expires_at,
             # Who else was asked is the host's own business (hub only).
             "invited": table.pending_invites if table.hub_instance == own else None,
+            "away": [
+                e.seat for e in table.seated if e.instance in away and e.instance != own
+            ],
             "players": [
                 {
                     "seat": e.seat,
                     "name": e.name,
-                    "household": e.household_name,
+                    "household": None
+                    if e.instance == own
+                    else e.household_name or known.get(e.instance),
                     "is_local": e.instance == own,
                     "state": e.state,
                 }
@@ -461,6 +482,58 @@ class AppGroupService(ProtectionGateMixin):
                 if e.state in WIRE_SEAT_STATES
             ],
         }
+
+    async def _away(self, table: GroupSession) -> frozenset[str]:
+        """The households at *table* this one holds as unreachable now
+        (``remote_instances.unreachable_since``, set when a send fails and
+        cleared by the next delivery — no traffic of its own). The hub
+        talks to every seated household; any other household only to the
+        hub, so only the hub's absence holds its game up. A household this
+        one isn't paired with (a space table) has no row: never away."""
+        if table.state == GROUP_ENDED:
+            return frozenset()
+        own = self._own
+        if table.hub_instance == own:
+            homes = {e.instance for e in table.seated} - {own}
+        else:
+            homes = {table.hub_instance}
+        out: set[str] = set()
+        for instance in sorted(homes):
+            peer = await self._fed_repo.get_instance(instance)
+            if peer is not None and peer.unreachable_since:
+                out.add(instance)
+        return frozenset(out)
+
+    async def _homes(self, table: GroupSession) -> dict[str, str]:
+        """The names this household knows the other households at *table*
+        by, for the players whose roster entry names none (the hub's own
+        people, on another household)."""
+        own = self._own
+        out: dict[str, str] = {}
+        for instance in sorted(
+            {
+                e.instance
+                for e in table.roster
+                if e.instance != own and not e.household_name
+            }
+        ):
+            name = await self._app_fed.household_name(instance)
+            if name:
+                out[instance] = name
+        return out
+
+    async def view_of(
+        self, table: GroupSession, user: User, row: AppPendingSession
+    ) -> dict:
+        """:meth:`view` with the households this one can't reach now and
+        the names it knows the others by."""
+        return self.view(
+            table,
+            user,
+            row,
+            away=await self._away(table),
+            homes=await self._homes(table),
+        )
 
     async def list_tables(self, *, app_id: str, actor_user_id: str) -> list[dict]:
         """The tables *actor_user_id* has a place at in *app_id* (invited,
@@ -474,7 +547,7 @@ class AppGroupService(ProtectionGateMixin):
                 continue
             table = await self._repo.get(row.session_id)
             if table is not None and table.app_id == app_id:
-                out.append(self.view(table, user, row))
+                out.append(await self.view_of(table, user, row))
         return out
 
     async def get_table(
@@ -484,7 +557,7 @@ class AppGroupService(ProtectionGateMixin):
         :class:`AppGroupNotFoundError`."""
         await self._usable(app_id, actor_user_id)
         table, user, row = await self._mine(app_id, session_id, actor_user_id)
-        return self.view(table, user, row)
+        return await self.view_of(table, user, row)
 
     async def invite_usage(self, app_id: str, user_id: str) -> tuple[int, int]:
         """(open, today): *user_id*'s share of the 1:1 invite caps from the
@@ -631,7 +704,7 @@ class AppGroupService(ProtectionGateMixin):
                     others=others,
                 )
         await self._push(table)
-        return self.view(table, host, hosting)
+        return await self.view_of(table, host, hosting)
 
     @staticmethod
     def _distinct(targets: list[dict]) -> list[dict]:
@@ -801,7 +874,7 @@ class AppGroupService(ProtectionGateMixin):
             )
         row = dataclasses.replace(row, state=SESSION_ACTIVE)
         await self._push(table)
-        return self.view(table, user, row)
+        return await self.view_of(table, user, row)
 
     async def decline(
         self, *, app_id: str, session_id: str, actor_user_id: str
@@ -879,7 +952,7 @@ class AppGroupService(ProtectionGateMixin):
                 from_user=user.username,
                 snap=False,
             )
-        return self.view(table, user, row)
+        return await self.view_of(table, user, row)
 
     async def remove(
         self, *, app_id: str, session_id: str, actor_user_id: str, seat: int
@@ -907,7 +980,7 @@ class AppGroupService(ProtectionGateMixin):
                 seat=seat,
                 snap=False,
             )
-        return self.view(table, user, row)
+        return await self.view_of(table, user, row)
 
     async def close(self, *, app_id: str, session_id: str, actor_user_id: str) -> None:
         """Close the table (host person only): the game is over for
@@ -1051,6 +1124,17 @@ class AppGroupService(ProtectionGateMixin):
                 can_start=table.can_start,
             )
         )
+        if table.can_start and len(table.seated) == table.min_players:
+            # This join brought the game to its minimum: the one moment
+            # the person who started it can start, said once (D8 — the
+            # joined row only moves on).
+            await self._emit(
+                AppTableCanStart(
+                    app_id=table.app_id,
+                    session_id=table.session_id,
+                    to_user_id=host.user_id,
+                )
+            )
 
     async def _label(self, entry: GroupSeat) -> str:
         """*entry*'s name as this household shows it: with their household
@@ -2671,14 +2755,17 @@ class AppGroupService(ProtectionGateMixin):
             await self._space_tables.on_table_changed(table)
         if self._engines is not None:
             self._engines.table_changed(table)
-        for user, row in await self._local_people(table):
+        people = await self._local_people(table)
+        away = await self._away(table) if people else frozenset()
+        homes = await self._homes(table) if people else {}
+        for user, row in people:
             await self._ws.broadcast_to_user(
                 user.user_id,
                 {
                     "type": WS_FRAME_TYPE,
                     "app_id": table.app_id,
                     "session_id": table.session_id,
-                    "group": self.view(table, user, row),
+                    "group": self.view(table, user, row, away=away, homes=homes),
                 },
             )
 
@@ -2940,7 +3027,7 @@ class AppGroupService(ProtectionGateMixin):
             table.app_id, user.user_id, table.session_id
         )
         if existing is not None and existing.is_group:
-            return self.view(table, user, existing)
+            return await self.view_of(table, user, existing)
         key = await self._own_seat_key(table.session_id)
         newcomer = GroupSeat(
             instance=self._own,
@@ -2974,7 +3061,7 @@ class AppGroupService(ProtectionGateMixin):
                 snap=False,
             )
         await self._push(table)
-        return self.view(table, user, row)
+        return await self.view_of(table, user, row)
 
     async def drop_space_player(self, session_id: str, entry: GroupSeat) -> None:
         """Take *entry* out of a space table this household hosts because

@@ -85,4 +85,21 @@ describe('SeatList', () => {
     const { getByRole } = render(<SeatList players={PLAYERS} max={3} host={1} me={1} label="Who's in" />)
     expect(getByRole('list', { name: "Who's in" })).toBeTruthy()
   })
+
+  it('a household not known here shows no name; your own always reads "Your household"', () => {
+    const { container } = render(
+      <SeatList
+        players={[
+          { seat: 1, name: 'Anna', household: null, isLocal: false, state: 'seated' },
+          { seat: 2, name: 'Ben', household: 'Familie Okafor', isLocal: true, state: 'seated' },
+        ]}
+        max={2}
+        host={1}
+        me={2}
+      />,
+    )
+    const rows = container.querySelectorAll('.sh-seat-list__row')
+    expect(rows[0].querySelector('.sh-seat-list__home')).toBeNull()
+    expect(rows[1].querySelector('.sh-seat-list__home')?.textContent).toBe('Your household')
+  })
 })

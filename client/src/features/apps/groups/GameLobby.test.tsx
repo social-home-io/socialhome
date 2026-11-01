@@ -406,6 +406,57 @@ describe('GameLobby', () => {
       const { unmount } = await open()
       unmount()
       await waitFor(() => expect(h.handlers['app.group']?.size ?? 0).toBe(0))
+      expect(h.handlers['connection.reachable']?.size ?? 0).toBe(0)
+      expect(h.handlers['connection.unreachable']?.size ?? 0).toBe(0)
+    })
+  })
+
+  describe('a household that can\'t be reached', () => {
+    it('says whose home the game waits for', async () => {
+      const { getByText } = await open(view({ away: [1] }))
+      expect(getByText('Waiting for Anna\'s home to come back.')).toBeTruthy()
+    })
+
+    it('names the first and counts the rest', async () => {
+      const a = await open(starterView({ away: [2, 3] }))
+      expect(a.getByText('Waiting for Ben\'s home and 1 other to come back.')).toBeTruthy()
+      a.unmount()
+      const b = await open(starterView({
+        away: [2, 3, 4],
+        players: [
+          ...starterView().players,
+          { seat: 4, name: 'Dev', household: 'Okafor', is_local: false, state: 'seated' },
+        ],
+      }))
+      expect(b.getByText('Waiting for Ben\'s home and 2 others to come back.')).toBeTruthy()
+    })
+
+    it('a seat that left or was never in is not waited for', async () => {
+      const { container } = await open(view({
+        away: [3],
+        players: [
+          ...view().players,
+          { seat: 3, name: 'Cleo', household: 'Krämer', is_local: false, state: 'left' },
+        ],
+      }))
+      expect(container.textContent).not.toContain('come back')
+    })
+
+    it('asks again when a household comes back or goes', async () => {
+      const { findByText, queryByText } = await open(view({ away: [1] }))
+      h.get.mockResolvedValue({ group: view({ away: [] }) })
+      act(() => {
+        h.handlers['connection.reachable']?.forEach(fn =>
+          fn({ type: 'connection.reachable', data: { instance_id: 'x' } }))
+      })
+      await waitFor(() => expect(queryByText('Waiting for Anna\'s home to come back.')).toBeNull())
+      h.get.mockResolvedValue({ group: view({ away: [1] }) })
+      act(() => {
+        h.handlers['connection.unreachable']?.forEach(fn =>
+          fn({ type: 'connection.unreachable', data: { instance_id: 'x' } }))
+      })
+      await findByText('Waiting for Anna\'s home to come back.')
+      expect(h.get).toHaveBeenCalledTimes(3)
     })
   })
 

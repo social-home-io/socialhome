@@ -31,6 +31,8 @@ export interface LobbyGame extends GroupSession {
   /** Invites nobody answered yet — only for the household that started
    *  the game, else ``null``. */
   invited: number | null
+  /** Seats of players whose household this one can't reach now. */
+  away: number[]
 }
 
 /** The server's view of a game → the lobby's. */
@@ -41,6 +43,7 @@ export function toLobbyGame(v: GroupView): LobbyGame {
     startedAt: v.started_at ?? null,
     createdAt: v.created_at ?? null,
     invited: typeof v.invited === 'number' ? v.invited : null,
+    away: Array.isArray(v.away) ? v.away.filter(s => typeof s === 'number') : [],
   }
 }
 

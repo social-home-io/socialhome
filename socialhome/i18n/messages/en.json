@@ -303,6 +303,8 @@
   "notification.app.challenge_group_one": "{name} invited you and 1 other to play {app}",
   "notification.app.challenge_group_generic": "{name} invited you and {count} others to play a game",
   "notification.app.challenge_group_one_generic": "{name} invited you and 1 other to play a game",
+  "notification.app.table_can_start": "Your {app} game can start",
+  "notification.app.table_can_start_generic": "Your game can start",
   "notification.app.table_joined": "{name} joined your {app} game",
   "notification.app.table_joined_one": "{name} and 1 other joined your {app} game",
   "notification.app.table_joined_many": "{name} and {count} others joined your {app} game",

@@ -76,6 +76,10 @@ export interface GroupView {
   expires_at?: string | null
   /** Unanswered invites — on the starter's own household only, else ``null``. */
   invited?: number | null
+  /** Seats of players whose household this one can't reach now (the
+   *  lobby's "Waiting for Ben's home to come back"); the app's session
+   *  leaves it out. */
+  away?: number[]
   players: { seat: number; name: string; household: string | null; is_local: boolean; state: GroupPlayer['state'] }[]
 }
 

@@ -4,7 +4,8 @@
  * jsdom does no layout, so these pin the CSS / markup that keeps RTL
  * mirrored:
  *
- * - Space, calendar, member, Momentum, Highlights and chrome rules use logical properties
+ * - Space, calendar, member, Momentum, Highlights, group game (Who's in,
+ *   the group sheet, Games, Needs you) and chrome rules use logical properties
  *   (``margin-inline-start``, ``inset-inline-end``, ``text-align: start``…),
  *   so card stripes, tape, popovers and the drawer flip with ``dir``.
  * - ``.sh-flip-rtl`` mirrors drawn SVG arrows only. ‹ › « » are
@@ -21,7 +22,7 @@ const css = readFileSync(join(__dirname, 'app.css'), 'utf8')
 const SRC = join(__dirname, '..')
 
 /** Rules whose selectors name these blocks must mirror in RTL. */
-const SCOPED = /\.sh-(?:space|spaces|ss|member|cal|calendar|event|moderation|subscribed|sidenav|mobile-drawer|mobile-nav|post-overflow-wrap|momentum|moment|hl|hlc)(?:[-_\s.:>+~,[]|$)/
+const SCOPED = /\.sh-(?:space|spaces|ss|member|cal|calendar|event|moderation|subscribed|sidenav|mobile-drawer|mobile-nav|post-overflow-wrap|momentum|moment|hl|hlc|game-lobby|seat-list|group-sheet|games|needs)(?:[-_\s.:>+~,[]|$)/
 
 /** Physical inline-axis properties (``left: 50%`` + translate centring is
  *  direction-neutral, so it is allowed). */
@@ -46,6 +47,11 @@ describe('RTL', () => {
       if (bad.length) offenders.push(`${sel} → ${bad.map(d => d.trim()).join('; ')}`)
     }
     expect(offenders).toEqual([])
+  })
+
+  it('a switch\'s thumb starts on the right and moves left in RTL', () => {
+    expect(css).toMatch(/\[dir="rtl"\] input\.sh-switch \{ background-position: 19px 50%; \}/)
+    expect(css).toMatch(/\[dir="rtl"\] input\.sh-switch:checked \{ background-position: 1px 50%; \}/)
   })
 
   it('the phone drawer slides in from the inline-start edge in RTL too', () => {

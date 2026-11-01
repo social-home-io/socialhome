@@ -44,6 +44,7 @@ from socialhome.domain.events import (
     AppChallengeWaiting,
     AppEnabledChanged,
     AppInstalled,
+    AppTableCanStart,
     AppTableJoined,
     AppTableStarted,
     AppUninstalled,
@@ -591,13 +592,34 @@ async def test_list_tables_lists_the_callers_places(net):
     sid = await _open(net)
     listed = await b.groups.list_tables(app_id=APP, actor_user_id=b.uid("ben"))
     assert [g["session_id"] for g in listed] == [sid]
+    # The hub names nobody of its own household on the wire: b shows
+    # Anna's household by the name b knows it by.
     assert listed[0]["players"][0] == {
         "seat": 1,
         "name": "Anna",
-        "household": None,
+        "household": "Home hub",
         "is_local": False,
         "state": SEAT_SEATED,
     }
+
+
+async def test_a_players_own_household_reads_as_theirs(net):
+    hub, b, _c = _homes(net)
+    sid = await _open(net)
+    await b.groups.join(app_id=APP, session_id=sid, actor_user_id=b.uid("ben"))
+    await net.flush()
+    on_b = {p["name"]: p for p in (await _view(b, "ben", sid))["players"]}
+    assert on_b["Ben"]["household"] is None and on_b["Ben"]["is_local"]
+    assert on_b["Anna"]["household"] == "Home hub"
+    on_hub = {p["name"]: p for p in (await _view(hub, "anna", sid))["players"]}
+    assert on_hub["Anna"]["household"] is None
+    assert on_hub["Ben"]["household"] == "Home b"
+    # Live frames carry the same names.
+    await b.groups._push(await b.group_repo.get(sid))
+    frame = [f for _u, f in b.ws.frames if f.get("group")][-1]
+    by_name = {p["name"]: p for p in frame["group"]["players"]}
+    assert by_name["Anna"]["household"] == "Home hub"
+    assert by_name["Ben"]["household"] is None
 
 
 # ─── Review fixes ─────────────────────────────────────────────────────────
@@ -702,6 +724,25 @@ async def test_the_host_hears_each_join_and_when_they_can_start(net):
     assert second.others == 1 and second.can_start
     # Only the hub's own host person hears it; the players' households not.
     assert not b.bus.of(AppTableJoined) and not c.bus.of(AppTableJoined)
+    # The join that brought it to three: "Your Quiz game can start", once.
+    [can] = hub.bus.of(AppTableCanStart)
+    assert can.to_user_id == hub.uid("anna") and can.session_id == sid
+    assert not b.bus.of(AppTableCanStart) and not c.bus.of(AppTableCanStart)
+
+
+async def test_can_start_is_said_once_and_again_after_dropping_below(net):
+    hub, b, c = _homes(net)
+    sid = await _open(net)
+    for home, user in ((b, "ben"), (c, "cleo")):
+        await home.groups.join(app_id=APP, session_id=sid, actor_user_id=home.uid(user))
+        await net.flush()
+    assert len(hub.bus.of(AppTableCanStart)) == 1
+    # Cleo leaves (two of 3), Ada joins: it can start again — said again.
+    await c.groups.leave(app_id=APP, session_id=sid, actor_user_id=c.uid("cleo"))
+    await net.flush()
+    await hub.groups.join(app_id=APP, session_id=sid, actor_user_id=hub.uid("ada"))
+    await net.flush()
+    assert len(hub.bus.of(AppTableCanStart)) == 2
 
 
 async def test_every_other_player_hears_the_game_started(net):
@@ -737,6 +778,7 @@ async def test_a_two_player_game_that_starts_by_itself_tells_nobody_twice(net):
     await net.flush()
     [joined] = hub.bus.of(AppTableJoined)
     assert joined.from_display == "Ben · Home b" and not joined.can_start
+    assert not hub.bus.of(AppTableCanStart)
     # Ben's own Join started it: no "started" row for him, none for Anna.
     assert not b.bus.of(AppTableStarted) and not hub.bus.of(AppTableStarted)
 
@@ -826,6 +868,8 @@ async def test_a_waiting_group_invite_becomes_a_join_when_the_app_arrives(wnet):
     ]
     assert invite.params is not None and invite.params.flags == ("group",)
     assert invite.link_url == f"/apps/{APP}/tables/{sid}"
+    # The row that waited led to the app's About page; now to the game.
+    assert row.link_url == f"/apps/{APP}/tables/{sid}"
     # Join works like any group invite.
     await b.groups.join(app_id=APP, session_id=sid, actor_user_id=b.uid("ben"))
     await wnet.flush()
@@ -928,3 +972,46 @@ async def test_a_group_game_only_within_the_household_isnt_counted(net):
     await hub.app_repo.update_installed(quiz_app(players=(2, 8)))
     await _open(net, people=("ada",))
     assert (await hub.app_fed.preview_uninstall(APP)).tables == 0
+
+
+# ─── "Waiting for Ben's home to come back" ───────────────────────────────
+
+
+async def test_the_view_names_the_seats_whose_home_is_away(net):
+    hub, b, c = _homes(net)
+    sid = await _open(net)
+    for home, user in ((b, "ben"), (c, "cleo")):
+        await home.groups.join(app_id=APP, session_id=sid, actor_user_id=home.uid(user))
+        await net.flush()
+    assert (await _view(hub, "anna", sid))["away"] == []
+    # The hub can't reach b: Ben's seat is away for the person who started it.
+    await hub.groups._fed_repo.mark_unreachable("b")
+    host = await _view(hub, "anna", sid)
+    ben = next(p["seat"] for p in host["players"] if p["name"] == "Ben")
+    assert host["away"] == [ben]
+    # Another household only waits on the hub — b being away from c is
+    # not c's game held up.
+    await c.groups._fed_repo.mark_unreachable("b")
+    assert (await _view(c, "cleo", sid))["away"] == []
+    await c.groups._fed_repo.mark_unreachable("hub")
+    cleo = await _view(c, "cleo", sid)
+    assert cleo["away"] == [cleo["host"]]
+    # Back again: nothing waits.
+    await hub.groups._fed_repo.mark_reachable("b")
+    assert (await _view(hub, "anna", sid))["away"] == []
+    # Live frames carry it too.
+    await hub.groups._fed_repo.mark_unreachable("b")
+    await hub.groups._push(await hub.group_repo.get(sid))
+    frame = [f for _u, f in hub.ws.frames if f.get("group")][-1]
+    assert frame["group"]["away"] == [ben]
+
+
+async def test_an_ended_game_waits_for_nobody(net):
+    hub, b, _c = _homes(net)
+    sid = await _open(net)
+    await b.groups.join(app_id=APP, session_id=sid, actor_user_id=b.uid("ben"))
+    await net.flush()
+    await hub.groups._fed_repo.mark_unreachable("b")
+    await hub.groups.close(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
+    table = await hub.group_repo.get(sid)
+    assert await hub.groups._away(table) == frozenset()

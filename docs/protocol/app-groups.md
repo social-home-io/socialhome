@@ -121,8 +121,9 @@ number below 30, anything else reads as 0.
 | Row | For | What it says, where it opens |
 |---|---|---|
 | `app_challenge` (Needs you) with flag `group`, `params.others` | each invitee | "Anna invited you and 3 others to play Quiz" ("… and 1 other", or the 1:1 words for nobody else) — **Join** / Decline; opens `/apps/{app}/tables/{session}` |
-| `app_challenge_waiting` (Needs you) with flags `app_missing` / `app_off` and `group`, `params.others` | an invitee whose household doesn't have the app or turned it off | the same sentence, "Ask an admin" (D10); a row of its own, never joined to the sender's 1:1 row |
+| `app_challenge_waiting` (Needs you) with flags `app_missing` / `app_off` and `group`, `params.others` | an invitee whose household doesn't have the app or turned it off | the same sentence, "Ask an admin" (D10); a row of its own, never joined to the sender's 1:1 row; opens the app's About page — once the app is here and on, the invite becomes an `app_challenge` (Join) and this row is handled and opens the game too |
 | `app_table_joined` (Games) | the person who started the game, on its hub | ONE row per game, moved on by each joiner (newest first in `params.actors`): "Ben joined your Quiz game" / "Ben and 2 others joined your Quiz game" (`params.others`: how many more are in, the starter not counted); flag `can_start` once enough players are in ("You can start now"); opens `/apps/{app}/tables/{session}` |
+| `app_table_can_start` (Games) | the person who started the game, on its hub | "Your Quiz game can start" — said once, by the join that brings the seats up to the app's `min` (not by each join after); ONE row per game, re-opened when it drops below `min` and reaches it again; nobody named; opens `/apps/{app}/tables/{session}` |
 | `app_table_started` (Games) | each player seated when it went from waiting to playing, but the person who started it — on the hub when Start is pressed, on another household when the hub's `group_start` arrives (a two-player game that starts by itself raises none) | "Your Quiz game with Anna and 3 others started" (`params.others`); opens `/apps/{app}?session={session}` |
 
 Games rows push only for someone who set Games to Push (as "Your turn");
@@ -505,6 +506,12 @@ interface GroupSession {
              isLocal: boolean; state: 'seated' | 'left' | 'removed' }[]
 }
 ```
+
+A player's `household` is `null` for the viewer's own household (`isLocal`)
+and otherwise the name the roster carries, or the name this household knows
+that household by: the hub names none of its own people on the wire
+(`"household": null` in the snapshot). It is `null` too when this household
+doesn't know the other one (a space table across unpaired households).
 
 Events — posted to the frame as `{type: 'group:event', event}`:
 

@@ -159,7 +159,7 @@ export const HOUSEHOLD_CHAT_LINK = '/?tab=chat'
  *   notifications.row.app_table_joined_others notifications.row.app_table_joined_others_one
  *   notifications.row.app_table_started notifications.row.app_table_started_many
  *   notifications.row.app_table_started_others notifications.row.app_table_started_others_one
- *   notifications.row.app_table_can_start
+ *   notifications.row.app_table_can_start notifications.row.app_table_can_start_none
  *   notifications.new_pill notifications.new_pill_one
  *   notifications.live_new notifications.live_new_one
  *   notifications.meta.new_of_total notifications.meta.new_of_total_one
@@ -235,6 +235,9 @@ export const ROW_TYPES: Readonly<Record<string, TypeSpec>> = {
   // adds "You can start now"), "Your Quiz game with Anna and 3 others
   // started" for each other player.
   app_table_joined: { others: true },
+  // "Your Quiz game can start" — once, when it reaches its minimum;
+  // nobody named, the app is the place.
+  app_table_can_start: { none: true, noActor: true },
   app_table_started: { others: true },
   // A member asked for an app: "Milo and Kiki asked for Chess".
   app_request: {},
