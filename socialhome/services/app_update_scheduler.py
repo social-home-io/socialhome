@@ -3,8 +3,9 @@
 Runs :meth:`AppService.check_for_updates` once per ``interval`` seconds
 (default 24 hours, matching :data:`AppCatalogService.CATALOG_TTL_S`),
 against a fresh catalog. A newer compatible version becomes one "Needs
-you" row per app for the household's admins (D7); nothing updates on its
-own.
+you" row per app for the household's admins (D7) — unless it is a quiet
+maintenance build (:func:`~socialhome.domain.apps.is_quiet_update`), which
+only the Apps page's Updates lists; nothing updates on its own.
 
 Mirrors the ``_stop: asyncio.Event`` lifecycle of
 :class:`~socialhome.infrastructure.replay_cache_scheduler.ReplayCachePruneScheduler`:

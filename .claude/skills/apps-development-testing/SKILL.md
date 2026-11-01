@@ -41,6 +41,8 @@ sh.onMessage(({ sessionId, fromInstance, payload }) => {...})  // in-game messag
 sh.onSession(({ sessionId, fromInstance, payload }) => {...})  // live invites (news only) + closes
 ```
 
+**SDK 2.0 is modular — an app's bundle carries only what it uses.** Group games and engines join the client at start-up: `const client = withDraw(withGroups(sh!))` (`@socialhome/app-sdk/group` → `client.group`, `@socialhome/app-sdk/draw` → `client.engines.draw`). A new SDK feature goes into its own module with a `with<Name>(client)`, never onto `SocialHomeClient`: otherwise every app's bundle changes, the version guard bumps every app and every household gets an update for nothing (`packages/app-sdk/src/modules.test.ts` guards it).
+
 **Invites are played from Social Home, not the app (D12).** An invite waits in the person's "Needs you"; **Play** opens `/apps/<id>?session=<sid>`, the host accepts that one invite and `sh.context()` returns `launch: { sessionId, invite? }` — start/open that game. Opened any other way, `launch` is `{}` and nothing is accepted. `launch` missing entirely = an older host: fall back to `federation.pendingSessions()` + seating live invites. Two-household check: invite twice, Play the first from Needs you → the app opens that game, and the second invite is still in Needs you. See `docs/protocol/apps.md#launch-context`.
 Route inbound by `sessionId` (supports many concurrent games) and identify the sender by `fromInstance`. The host relays a backend `app.message` WS frame into the iframe; outbound goes over the dedicated `fed-app-v1` channel with an `APP_MESSAGE`/HTTPS fallback.
 
@@ -82,7 +84,7 @@ Chromium is baked into the devcontainer (`/usr/bin/chromium`, `DISPLAY=:99`); se
 
 ## Release (publishes the catalog Social Home installs from)
 
-1. Bump `version` (CalVer) in each changed app's `manifest.json`; commit to `main`.
+1. Bump `version` (CalVer) in each changed app's `manifest.json` and add its `CHANGELOG.json` entry, through a PR (the version guard compares built bundles). A bump nobody notices (a newer SDK, a build tool) marks its entry `"quiet": true`: Social Home lists it under Updates without a Needs-you row (`is_quiet_update`); never on a version that changes how the app looks or plays, its capabilities or engines.
 2. Confirm green CI.
 3. Cut the release: `gh release create YYYY.M.D --title YYYY.M.D --notes "…"` (or the Releases UI). Same-day re-release → `YYYY.M.D.N`.
 4. `.github/workflows/release.yml` builds + tests, then uploads `catalog.json` + each `<app>-<version>.tgz` (**sha256-pinned**) as release assets.

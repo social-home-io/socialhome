@@ -2792,6 +2792,78 @@ async def test_check_for_updates_withdraws_when_there_is_none(
     ]
 
 
+def _maintenance_log() -> tuple[AppChangelogEntry, ...]:
+    """A maintenance build on top of the installed 21 Oct version."""
+    return (
+        AppChangelogEntry(
+            "2026.10.28", "2026-10-28", (("en", "Under the hood"),), quiet=True
+        ),
+        AppChangelogEntry("2026.10.21", "2026-10-21", (("en", "Old news"),)),
+    )
+
+
+async def test_list_updates_marks_a_maintenance_build_quiet(tmp_path: Path) -> None:
+    _, sha = _bundle_with_caps(["storage"])
+    svc, _, _ = _update_service(
+        tmp_path, _update_entry(sha, changelog=_maintenance_log()), b""
+    )
+    [update] = await svc.list_updates()
+    assert update["quiet"] is True
+    # Still listed for the Apps page's Updates, What's new included.
+    assert update["changelog"] == [
+        {
+            "version": "2026.10.28",
+            "date": "2026-10-28",
+            "notes": {"en": "Under the hood"},
+        }
+    ]
+
+
+async def test_an_ordinary_update_is_not_quiet(tmp_path: Path) -> None:
+    _, sha = _bundle_with_caps(["storage"])
+    log = (AppChangelogEntry("2026.10.28", "2026-10-28", (("en", "Rematch"),)),)
+    svc, _, _ = _update_service(tmp_path, _update_entry(sha, changelog=log), b"")
+    [update] = await svc.list_updates()
+    assert update["quiet"] is False
+
+
+async def test_a_quiet_build_asking_for_more_is_not_quiet(tmp_path: Path) -> None:
+    """New permissions need an admin's yes: they hear about it."""
+    _, sha = _bundle_with_caps(["storage", "federation"])
+    entry = _update_entry(
+        sha,
+        permissions=("storage", "people", "federation"),
+        changelog=_maintenance_log(),
+    )
+    svc, _, _ = _update_service(tmp_path, entry, b"")
+    [update] = await svc.list_updates()
+    assert update["new_permissions"] == ["people", "federation"]
+    assert update["quiet"] is False
+
+
+async def test_check_for_updates_raises_no_row_for_a_quiet_update(
+    tmp_path: Path,
+) -> None:
+    """A maintenance build: no Needs-you row (and an older one for a version
+    now marked quiet goes away) — the Apps page's Updates still lists it,
+    and nothing updates on its own."""
+    bus = _RecordingBus()
+    _, sha = _bundle_with_caps(["storage"])
+    svc, _, downloads = _update_service(
+        tmp_path,
+        _update_entry(sha, changelog=_maintenance_log()),
+        b"",
+        bus=bus,
+        users=_People(("anna", "Anna", True)),
+    )
+    updates = await svc.check_for_updates()
+    assert [u["app_id"] for u in updates] == ["chess"]
+    assert bus.published == [
+        AppUpdateGone(app_id="chess", occurred_at=bus.published[0].occurred_at)
+    ]
+    assert downloads == []
+
+
 async def test_check_for_updates_says_nothing_on_a_stale_catalog(
     tmp_path: Path,
 ) -> None:

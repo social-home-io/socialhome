@@ -903,7 +903,7 @@ additive — every v1 field keeps its meaning and a v1 catalog still reads.
 Per app it adds `i18n` (`{locale: {name, description}}`), `bundle_size`,
 `permissions` (`storage` / `people` / `federation`), `min_age`,
 `languages`, `publisher`, `homepage`, `min_core_version` and `changelog`
-(`[{version, date, notes: {locale: text}}]`).
+(`[{version, date, notes: {locale: text}, quiet?: true}]`).
 
 Receiver rules (`AppCatalogEntry.from_dict`, `AppCatalogService`) — a
 publisher can't inflate what every household holds, and one bad field
@@ -916,7 +916,7 @@ never drops the entry:
 | `description` / `i18n.*.description` | ≤ 300 characters | Cut, with "…" |
 | `i18n`, changelog `notes` | ≤ 12 locales; keys are locale tags (`de`, `pt-BR`) | Bad keys or values skipped |
 | `languages` | ≤ 12 distinct locale tags | Bad items skipped |
-| `changelog` | ≤ 5 entries, each with a version that parses (`YYYY.M.D[.N]`); `date` `YYYY-MM-DD`; each note ≤ 500 characters | Bad entries skipped, a bad date dropped |
+| `changelog` | ≤ 5 entries, each with a version that parses (`YYYY.M.D[.N]`); `date` `YYYY-MM-DD`; each note ≤ 500 characters; `quiet` only as an exact `true` | Bad entries skipped, a bad date dropped, any other `quiet` read as not quiet |
 | `bundle_size` | integer, 1 byte … the 8 MiB download cap | Unknown |
 | `min_age` | one of 0 / 13 / 16 / 18 | Unknown (the bundle manifest's still applies) |
 | `publisher` | string ≤ 60 characters | Cut / unknown |
@@ -938,6 +938,20 @@ never drops the entry:
   newest code, so a release that is out doesn't hold it back — but a
   `min_core_version` dated after today (UTC, CalVer `YYYY.M.D`) does: no
   Social Home has it yet, so the Store says "Needs a newer Social Home".
+- **Quiet updates** (`changelog[i].quiet`, socialhome-apps SDK 2.0): the
+  publisher marks a maintenance build nobody notices (a newer SDK, a
+  smaller bundle). The daily update check (D7) turns an update into an
+  `app_update` Needs-you row only when it is not quiet: quiet means every
+  entry since the installed version is quiet, the offered version has its
+  own entry, the history isn't cut (the catalog keeps the newest five: one
+  of them is the installed version or older, or there are fewer than five)
+  and it asks for no new permission (`domain/apps.py` `is_quiet_update`).
+  A quiet update is still listed by `GET /api/apps/updates` (`quiet: true`)
+  for the Apps page's Updates and is still installed only when an admin
+  taps Update — nothing updates on its own. A row already open for the app
+  resolves (`AppUpdateGone`), e.g. once its version's entry is marked
+  quiet. Unknown means "tell the admins": a missing entry, a cut history or
+  one ordinary entry in between raises the row as before.
 - **`min_age`** is the install's default age gate (the stricter of it and
   the bundle manifest's); an admin can change it afterwards, and an update
   never lowers it. A protected account doesn't see catalog apps rated
