@@ -39,6 +39,11 @@ DRAW_MIN_PEOPLE_WITH_PAIRS: int = 4
 #: gives up (12 rounds gave up 0.8 % of the time — the second review). Every
 #: round that isn't chance names the household that broke it, to everyone.
 DRAW_ROUNDS_MAX: int = 40
+#: Redraws a draw takes for card complaints — a giver's box opened no card
+#: it could use, or two. Nothing is opened to find out who sealed it so, so
+#: such a redraw names nobody; past this many the draw stops ("Someone's
+#: home kept breaking the draw") and the organiser decides.
+DRAW_CARD_REDRAWS_MAX: int = 3
 #: "Draw again" after the reveal, at most this many times per table.
 DRAW_AGAIN_MAX: int = 10
 #: A wish list, in characters (it must also fit the 1 KiB card).
@@ -71,7 +76,7 @@ STEP_COMMITS = "commits"  # hub → participants (every household's)
 STEP_CARDS = "cards"  # participant → hub
 STEP_CARDS_ALL = "cards_all"  # hub → participants
 STEP_OPEN = "open"  # participant → hub (its seeds / box keys of a broken round)
-STEP_VOID = "void"  # hub → participants (a mixer stuck / a card complaint unnamed)
+STEP_VOID = "void"  # hub → participants (a mixer's input doesn't peel)
 STEP_FAIL = "fail"  # participant → hub (a key missing / cards off)
 STEP_REDO = "redo"  # participant → hub (drew their partner)
 STEP_DONE = "done"  # participant → hub (signed)
@@ -135,16 +140,12 @@ BECAUSE_KINDS: frozenset[str] = frozenset(
     {BECAUSE_FIRST, BECAUSE_AGAIN, BECAUSE_CHANGED, BECAUSE_COMPLAINT, BECAUSE_VOID}
 )
 
-#: Why a round broke publicly (``void``): every household opens, and the
-#: openings name who broke it — to every household. A round that completed
-#: is never opened.
+#: Why a round broke publicly (``void``) — only ever before any card exists:
+#: every household opens its seeds, and the openings name who broke it — to
+#: every household. Once a card could have been opened nothing is opened.
 VOID_UNUSABLE = "unusable"  # S holds a key nobody can seal to (seeds open)
 VOID_STUCK = "stuck"  # a mixer's signed input doesn't peel (seeds open)
-#: A giver's box opens no card, or two usable ones — before ``complete``,
-#: and only that dead round: every household shows where it sealed its
-#: people's cards (a household that opened never takes ``complete``).
-VOID_CARDS = "cards"
-VOID_WHYS: frozenset[str] = frozenset({VOID_UNUSABLE, VOID_STUCK, VOID_CARDS})
+VOID_WHYS: frozenset[str] = frozenset({VOID_UNUSABLE, VOID_STUCK})
 
 #: What a complaint says (it always carries its proof: the person's seed).
 COMPLAINT_MISSING = "missing"  # my box key isn't in the list exactly once
@@ -157,6 +158,7 @@ COMPLAINT_KINDS: frozenset[str] = frozenset(
 #: Why a draw ended without a result (``end`` step, ``reason``).
 END_RULES = "rules"  # DRAW_ROUNDS_MAX rounds and no circle fit the pairs
 END_TOO_FEW = "too_few"  # fewer than three people left
+END_BROKEN = "broken"  # card complaints past DRAW_CARD_REDRAWS_MAX
 DRAW_END_REASONS: frozenset[str] = frozenset({END_RULES, END_TOO_FEW})
 
 # ─── What the app sees (``sh.draw.status()``) ─────────────────────────────

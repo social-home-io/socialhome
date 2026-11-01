@@ -44,6 +44,7 @@ import pytest
 from socialhome.app_engines.draw import crypto as dc
 from socialhome.app_engines.draw import service as svc_mod
 from socialhome.app_engines.draw.domain import (
+    DRAW_CARD_REDRAWS_MAX,
     DRAW_PENDING_SECONDS,
     DRAW_ROUNDS_MAX,
     DRAW_WAIT_SECONDS,
@@ -630,7 +631,9 @@ async def test_duplicate_card_commitments_dont_stall(net):
     b_hashes = [b64url_decode(x) for x in st["hub"]["commits"]["b"]["hashes"]][:1]
     sig = sign_ed25519(
         net.homes["c"].fed.own_identity_seed,
-        dc.card_commit_message(rnd.ctx, "c", b_hashes),
+        dc.card_commit_message(
+            rnd.ctx, "c", b_hashes, b64url_decode(st["hub"]["circle"])
+        ),
     )
     net.forge(
         "c",
@@ -780,76 +783,64 @@ async def test_a_restart_after_an_end_counts_as_draw_again(net):
         await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
 
 
+async def _no_one_named_card_redraw(net, sid) -> None:
+    """A card complaint held: a visible redraw (round 2, because the
+    complaint) that names nobody and opened nothing — counted by every
+    household."""
+    redo = [p for p in sent_steps(net, "start") if p["round"] == 2]
+    assert redo and redo[0]["because"]["kind"] == "complaint"
+    assert redo[0]["because"]["complaint"]["kind"] == "cards"
+    assert set(redo[0]["because"]) == {"kind", "complaint"}  # nothing more
+    assert not sent_steps(net, "open")  # nobody opened anything
+    st = await _hub_state(net, sid)
+    assert st["hub"]["blamed"] == [] and st["hub"]["card_redraws"] == 1
+    for inst in PEOPLE:
+        s_i = await net.homes[inst].draw._load(sid)
+        assert not s_i.get("blamed") and s_i["card_redraws"] == 1, inst
+    _assert_circle(await _results(net, sid))
+
+
 async def test_rev1_card_frames_the_honest_giver(net, monkeypatch):
-    """NEW-H2 / MED 3 (review 2). Household b seals Ben's card with ``rev``
-    1 (validly signed). The giver and anyone checking its complaint use one
+    """NEW-H2 / MED 3 (review 2). Household b seals a card with ``rev`` 1
+    (validly signed). The giver and anyone checking its complaint use one
     test (a round's card is ``rev`` 0): the complaint holds on the giver's
-    own box alone — the card that opens there carries b's signed hash, so b
-    is named by everyone — nothing else is opened, and a fresh round
-    follows."""
+    own box alone, so the honest giver is never framed. Since review 5 a
+    card complaint names nobody (nothing is opened to find out who): a
+    visible, counted redraw."""
     real_make = svc_mod.AppDrawService._make_cards
 
     async def make(self, rnd, cur, C, wishes):
         if self._own != "b" or rnd.round != 1:
             return await real_make(self, rnd, cur, C, wishes)
-        own = {self._box_pub(cur, u) for u in cur["seeds"]}
-        plain, armed = [], False
-        for user in sorted(cur["seeds"]):
+        plain = []
+        for i, user in enumerate(sorted(cur["seeds"])):
             to = C[dc.circle_targets(C.index(self._box_pub(cur, user)), rnd.n)[1]]
-            # One card whose giver is in another household (a card b's own
-            # person would open proves nothing against anyone).
-            rev = 1 if (not armed and to not in own) else 0
-            armed = armed or rev == 1
-            card = await self._card_for(rnd, user, wish="", rev=rev)
+            card = await self._card_for(rnd, user, wish="", rev=1 if i == 0 else 0)
             plain.append(dc.seal_card(to, card, ctx=rnd.ctx))
         return plain
 
     monkeypatch.setattr(svc_mod.AppDrawService, "_make_cards", make)
     sid = await _draw(net)
-    # (The giver may be the hub's own person: its steps stay local.)
-    redo = [p for p in sent_steps(net, "start") if p["round"] == 2]
-    assert redo and redo[0]["because"]["kind"] == "complaint"
-    assert redo[0]["because"]["complaint"]["kind"] == "cards"
-    assert set(redo[0]["because"]) == {"kind", "complaint"}  # nothing more
-    assert not sent_steps(net, "open")  # no household opened anything
-    st = await _hub_state(net, sid)
-    assert st["hub"]["blamed"] == ["b"]
-    await _everyone_names(net, sid, ["b"])
-    _assert_circle(await _results(net, sid))
+    await _no_one_named_card_redraw(net, sid)
 
 
 async def test_a_card_sealed_to_the_wrong_box_names_its_household(net, monkeypatch):
-    """NEW-H2 (c), R4 HIGH 2. Household c seals Cleo's card to a key nobody
-    holds: her giver's box opens nothing. Before the round completes every
-    household shows where it sealed its people's cards (box, nonce, target,
-    the seal's key from the person's seed) — c's card isn't sealed to the
-    box before Cleo's, so c is named by everyone; nobody opened a round
-    that completed."""
+    """NEW-H2 (c). Household c seals Cleo's card to a key nobody holds: her
+    giver's box opens nothing — proven by the giver's own seed. After the
+    list nothing is ever opened (review 5): a visible redraw naming nobody,
+    counted against the draw, never against the complainer."""
     real = svc_mod.AppDrawService._make_cards
 
     async def misplaced(self, rnd, cur, C, wishes):
         cards = await real(self, rnd, cur, C, wishes)
         if self._own == "c" and rnd.round == 1:
             card = await self._card_for(rnd, "cleo", wish="", rev=0)
-            seed = svc_mod._raw(cur["seeds"]["cleo"])
-            cards = [
-                dc.seal_card(
-                    dc.new_keypair()[1], card, ctx=rnd.ctx, rand=dc.card_rand(seed)
-                )
-            ]
+            cards = [dc.seal_card(dc.new_keypair()[1], card, ctx=rnd.ctx)]
         return cards
 
     monkeypatch.setattr(svc_mod.AppDrawService, "_make_cards", misplaced)
     sid = await _draw(net)
-    redo = [p for p in sent_steps(net, "start") if p["round"] == 2]
-    assert redo and redo[0]["because"]["kind"] == "void"
-    assert redo[0]["because"]["why"] == "cards"
-    for p in sent_steps(net, "open"):
-        assert set(p["opening"]) == {"cards", "sig"}  # never a seed
-    st = await _hub_state(net, sid)
-    assert st["hub"]["blamed"] == ["c"]
-    await _everyone_names(net, sid, ["c"])
-    _assert_circle(await _results(net, sid))
+    await _no_one_named_card_redraw(net, sid)
 
 
 async def test_mixer_injects_low_order_point_nobody_blamed(net, monkeypatch):
@@ -901,6 +892,45 @@ async def test_mixer_injects_low_order_point_nobody_blamed(net, monkeypatch):
     left = {k: v for k, v in PEOPLE.items() if k != lasts[-1]}
     if lasts[-1] != "hub":
         _assert_circle(await _results(net, sid, left))
+
+
+async def test_every_household_refuses_a_round_after_a_second_break(net, monkeypatch):
+    """R4 LOW 4. Each household counts who broke rounds of a draw itself: a
+    hub that ignores the hold and starts the next round anyway finds every
+    household refusing it."""
+    real_mix = dc.mix
+
+    def evil(priv, entries, *, ctx, k, h, rand=os.urandom):
+        out = real_mix(priv, entries, ctx=ctx, k=k, h=h, rand=rand)
+        if k == h - 1:
+            out[0] = b"\x00" * 32
+        return out
+
+    async def no_hold(self, table, st, rnd, because, culprits):
+        self._blame(st["hub"], culprits)
+        await self._next_round(
+            table, st, people=rnd.people, names=rnd.names, because=because
+        )
+
+    monkeypatch.setattr(dc, "mix", evil)
+    monkeypatch.setattr(svc_mod.AppDrawService, "_redraw", no_hold)
+    sid = await draw_table(net, PEOPLE)
+    hub = net.homes["hub"]
+    await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
+    await settle(net)
+    lasts: list[str] = []
+    for rnd_no in range(1, 20):
+        last = dc.mix_order(sid, 1, rnd_no, list(PEOPLE))[-1]
+        lasts.append(last)
+        if lasts.count(last) == 2:
+            break
+    # Round len(lasts) broke a second time by the same household; the hub
+    # started round len(lasts) + 1 anyway — nobody took it.
+    st = await _hub_state(net, sid)
+    assert st["hub"]["round"] == len(lasts) + 1
+    for inst in ("b", "c", "d"):
+        s_i = await net.homes[inst].draw._load(sid)
+        assert s_i["p"]["round"] == len(lasts), inst
 
 
 async def test_hub_mixer_arms_missing_and_decides_after_all_reveals(net, monkeypatch):
@@ -1214,7 +1244,7 @@ async def test_hub_learns_whole_completed_draw_with_a_late_card_void(net, caplog
     before = {inst: (await net.homes[inst].draw._load(sid))["final"] for inst in PEOPLE}
     await _late_card_void(net, sid)
     await settle(net)
-    assert "a void after the reveal" in caplog.text
+    assert "a void after the list" in caplog.text
     assert not sent_steps(net, "open")
     for inst in ("b", "c", "d"):
         st_i = await net.homes[inst].draw._load(sid)
@@ -1238,8 +1268,7 @@ async def test_hub_voids_then_completes_anyway(net, caplog):
     assert hold
     await _late_card_void(net, sid)
     await settle(net)
-    # (Anna's card is fine: the complaint doesn't hold — nothing opens.)
-    assert "not a card complaint that named nobody" in caplog.text
+    assert "a void after the list" in caplog.text
     assert not sent_steps(net, "open")
     # Had a household opened this round, it would never take the complete.
     b = net.homes["b"]
@@ -1564,12 +1593,12 @@ FAMILY = {
 async def test_household_with_adjacent_people_peeks_then_rerolls_unnamed(
     net, monkeypatch
 ):
-    """R4 HIGH 2. Household a, when one of its people gives to another of
-    its people, seals that card to a junk key (only its own person would
-    notice), peeks at its cards, and lets the "no card" complaint redraw
-    the round. The card's seal key derives from the person's seed: before
-    the round completes every household shows where it sealed its cards,
-    and a is named — by everyone."""
+    """R4 HIGH 2 under the owner's decision (review 5). Household a, when
+    one of its people gives to another of its people, seals that card to a
+    junk key, peeks at its cards and lets the "no card" complaint redraw the
+    round. Nothing is opened after the list, so nobody is named — but every
+    such redraw is visible and counted, and after DRAW_CARD_REDRAWS_MAX the
+    draw stops (next test)."""
     armed: list = []
     real_make = svc_mod.AppDrawService._make_cards
 
@@ -1582,11 +1611,10 @@ async def test_household_with_adjacent_people_peeks_then_rerolls_unnamed(
             j = C.index(self._box_pub(cur, user))
             to = C[dc.circle_targets(j, rnd.n)[1]]
             card = await self._card_for(rnd, user, wish="", rev=0)
-            seed = svc_mod._raw(cur["seeds"][user])
             if to in mine and not armed:
                 armed.append((rnd.gen, rnd.round))
                 to = dc.new_keypair()[1]
-            out.append(dc.seal_card(to, card, ctx=rnd.ctx, rand=dc.card_rand(seed)))
+            out.append(dc.seal_card(to, card, ctx=rnd.ctx))
         return out
 
     monkeypatch.setattr(svc_mod.AppDrawService, "_make_cards", make)
@@ -1608,80 +1636,76 @@ async def test_household_with_adjacent_people_peeks_then_rerolls_unnamed(
         for p in sent_steps(net, "start")
         if (p["gen"], p["round"]) == (gen, rnd_no + 1)
     ]
-    assert redo and (redo[0]["because"]["kind"], redo[0]["because"]["why"]) == (
-        "void",
-        "cards",
-    )
-    st = await _hub_state(net, sid)
-    assert st["hub"]["blamed"] == ["a"]
+    assert redo and redo[0]["because"]["complaint"]["kind"] == "cards"
+    assert not sent_steps(net, "open")
     for inst in FAMILY:
         s_i = await net.homes[inst].draw._load(sid)
-        assert s_i["blamed"] == ["a"] and s_i["last"]["complete"], inst
+        assert not s_i.get("blamed") and s_i["last"]["complete"], inst
+        assert s_i["card_redraws"] == 1, inst
 
 
 SMALL = {"hub": ["anna"], "b": ["ben"], "c": ["cleo"], "d": ["dev"]}
 
 
 async def test_one_household_kills_every_round_unnamed(net, monkeypatch):
-    """R4 MED 3 and LOW 4. Household c seals its card to a fresh junk key
-    every round: the first void names c, the second holds the draw for the
-    organiser — and a hub that starts a third round anyway finds every
-    household refusing it (each counts who broke rounds itself)."""
+    """R4 MED 3 under the owner's decision. Household c seals its card to a
+    fresh junk key every round: each card complaint is a visible redraw
+    naming nobody; after DRAW_CARD_REDRAWS_MAX the draw stops with a plain
+    state ("Someone's home kept breaking the draw") that every household
+    checked itself — not 40 rounds."""
     real_make = svc_mod.AppDrawService._make_cards
 
     async def make(self, rnd, cur, C, wishes):
         if self._own != "c":
             return await real_make(self, rnd, cur, C, wishes)
-        seed = svc_mod._raw(cur["seeds"]["cleo"])
         card = await self._card_for(rnd, "cleo", wish="", rev=0)
-        return [
-            dc.seal_card(
-                dc.new_keypair()[1], card, ctx=rnd.ctx, rand=dc.card_rand(seed)
-            )
-        ]
+        return [dc.seal_card(dc.new_keypair()[1], card, ctx=rnd.ctx)]
 
     monkeypatch.setattr(svc_mod.AppDrawService, "_make_cards", make)
+    seen: dict = {}
+    real_c = svc_mod.AppDrawService._hub_complaint
+
+    async def spy(self, table, st, rnd, sender, step, p):
+        seen["complaint"] = p.get("complaint")
+        return await real_c(self, table, st, rnd, sender, step, p)
+
+    monkeypatch.setattr(svc_mod.AppDrawService, "_hub_complaint", spy)
     sid = await draw_table(net, SMALL)
     hub = net.homes["hub"]
     await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
     await settle(net)
     st = await _hub_state(net, sid)
-    assert (st["hub"]["phase"], st["hub"]["held"], st["hub"]["round"]) == (
-        "held",
-        ["c"],
-        2,
-    )
+    assert (st["hub"]["phase"], st["hub"]["ended"]) == ("ended", "broken")
+    assert st["hub"]["round"] == DRAW_CARD_REDRAWS_MAX + 1
     for inst in SMALL:
         s_i = await net.homes[inst].draw._load(sid)
-        assert s_i["blamed"] == ["c"] and s_i["broke"] == {"c": 1}, inst
-    # A hub that ignores the hold: no household takes the third round.
-    held_round = st["hub"]["round"]
-
-    async def no_hold(self, table, st, rnd, because, culprits):
-        self._blame(st["hub"], culprits)
-        await self._next_round(
-            table, st, people=rnd.people, names=rnd.names, because=because
+        assert s_i.get("ended") == "broken" and not s_i.get("blamed"), inst
+        home = net.homes[inst]
+        status = await home.draw.status(
+            app_id=APP, session_id=sid, actor_user_id=home.uid(SMALL[inst][0])
         )
-
-    monkeypatch.setattr(svc_mod.AppDrawService, "_redraw", no_hold)
-    st["hub"]["phase"] = "void"
-    await hub.draw._save(sid, st)
-    evidence = None
+        assert (status["state"], status["reason"]) == ("failed", "broken")
+    # A hub that starts another round anyway: no household takes it.
     async with hub.draw._lock(sid):
         st = await hub.draw._load(sid)
-        evidence = hub.draw._void_evidence(st["hub"])
+        last = st["hub"]
+        last.update(phase="opening")
         table = await hub.group_repo.get(sid)
-        await hub.draw._redraw(table, st, _Round(st["hub"]), evidence, ["c"])
+        rnd = _Round(last)
+        fake = {"kind": "complaint", "complaint": seen["complaint"]}
+        await hub.draw._next_round(
+            table, st, people=rnd.people, names=rnd.names, because=fake
+        )
     await settle(net)
     for inst in ("b", "c", "d"):
         s_i = await net.homes[inst].draw._load(sid)
-        assert s_i["p"]["round"] == held_round, inst
+        assert s_i["p"]["round"] == DRAW_CARD_REDRAWS_MAX + 1, inst
 
 
 async def test_a_removal_after_the_cards_counts_as_a_draw_again(net, monkeypatch):
-    """R4 LOW 5. The organiser removes a household once the cards are out
-    (people may have read theirs): the fresh round is a new draw — counted
-    as a Draw again, visible to all."""
+    """R4 LOW 5. The organiser removes a household once the circle is known
+    (the cards are out; people may have read theirs): the fresh round is a
+    new draw — counted as a Draw again, visible to all."""
 
     def hold_d(s, t, p):
         return "d" in (s, t) and p.get("step") in ("done", "cards_all", "complete")
@@ -1819,6 +1843,138 @@ def test_accepted_limit_how_often_a_household_learns_a_pair():
             if any((j + 2) % n in own and (j + 1) % n not in own for j in own):
                 hits += 1
         assert abs(hits / T - p) < 0.03, (n, m, hits / T)
+
+
+# ─── draw-review-5 (owner: simplify — nothing opened after the list) ─────
+
+
+async def test_hub_splits_void_and_complete_and_learns_victims_final_pairs(net, caplog):
+    """R5 HIGH 1. The hub holds ``complete`` back, sends it to one household
+    and a card void (with a real complaint of its own person) to the others,
+    hoping they open where they sealed their cards. There is no such void:
+    after the list nothing is ever opened (and never after one's own
+    ``done``) — no household opens anything; the round stays as it was."""
+    caplog.set_level(logging.INFO)
+    hold: list = []
+
+    def drop_complete(s, t, p):
+        if p.get("step") == "complete" and t != "hub":
+            hold.append((s, t, p))
+            return True
+        return False
+
+    sid = await _draw(net, drop=drop_complete)
+    hub = net.homes["hub"]
+    st = await hub.draw._load(sid)
+    rnd = _Round(st["p"])
+    complaint = hub.draw._complaint(rnd, st["p"], "cards", "anna")["complaint"]
+    for to in ("b", "d"):
+        for why in ("cards", "unusable", "stuck"):
+            net.forge(
+                "hub",
+                to,
+                engine_step(
+                    sid,
+                    "void",
+                    gen=rnd.gen,
+                    round_no=rnd.round,
+                    why=why,
+                    complaint=complaint,
+                    k=0,
+                ),
+            )
+    net.queue.extend(x for x in hold if x[1] == "c")
+    await settle(net)
+    assert "a void after the list" in caplog.text
+    assert not sent_steps(net, "open")
+    assert (await net.homes["c"].draw._load(sid))["last"]["complete"]
+
+
+async def test_hub_equivocates_its_r_commit_and_frames_an_honest_household(
+    net, monkeypatch
+):
+    """R5 HIGH 2. The hub signs a second batch with another ``r`` commitment
+    and hands it (and the matching ``r``) to household c only, so c draws
+    another circle. Card commitments and ``done`` carry the circle each
+    household drew: c's commitment doesn't match the round's — the round
+    stalls; nobody is named, nothing is opened."""
+    r_alt = b"\x07" * dc.SEED_BYTES
+    box: dict = {}
+    real_send = svc_mod.AppDrawService._send
+    real_to_all = svc_mod.AppDrawService._to_all
+
+    async def send(self, table, to, step, body):
+        if self._own == "hub" and to == "c" and step in ("list", "reveals"):
+            body = copy.deepcopy(body)
+            ctx = box["ctx"]
+            if step == "list":
+                for b in body["batches"]:
+                    if b["instance"] == "hub":
+                        rc = dc.r_commitment(ctx, "hub", r_alt)
+                        b["r_commit"] = svc_mod._b64(rc)
+                        hs = [svc_mod._raw(h) for h in b["hashes"]]
+                        cm = [(u, svc_mod._raw(c)) for u, c in b["commits"]]
+                        b["sig"] = self._sign(dc.batch_message(ctx, "hub", hs, cm, rc))
+            else:
+                body["reveals"]["hub"] = svc_mod._b64(r_alt)
+        return await real_send(self, table, to, step, body)
+
+    async def to_all(self, table, rnd, step, body):
+        box["ctx"] = rnd.ctx
+        return await real_to_all(self, table, rnd, step, body)
+
+    monkeypatch.setattr(svc_mod.AppDrawService, "_send", send)
+    monkeypatch.setattr(svc_mod.AppDrawService, "_to_all", to_all)
+    sid = await draw_table(net, PEOPLE)
+    hub = net.homes["hub"]
+    await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
+    await settle(net)
+    st = await _hub_state(net, sid)
+    assert st["hub"]["phase"] == "commit" and "c" not in st["hub"]["commits"]
+    assert not sent_steps(net, "void") and not sent_steps(net, "open")
+    for inst in PEOPLE:
+        s_i = await net.homes[inst].draw._load(sid)
+        assert not s_i.get("blamed") and not s_i.get("broke"), inst
+
+
+async def test_hub_peeks_at_held_cards_then_drops_a_household_without_draw_again(
+    net,
+):
+    """R5 LOW 3. The hub holds every sealed card before anyone else, keeps
+    ``cards_all`` back, and — a whole household gone — sends a same-draw
+    "changed" round. Every household that committed its cards (the circle
+    is known) takes a removal only as a Draw again: nobody starts it."""
+    sid = await draw_table(net, PEOPLE)
+    hub = net.homes["hub"]
+    await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
+    no_cards = lambda s, t, p: p.get("step") == "cards_all"
+    await settle(net, drop=no_cards)
+    st = await _hub_state(net, sid)
+    assert st["hub"].get("all_cards") and st["hub"]["phase"] == "opening"
+    d = net.homes["d"]
+    await d.groups.leave(app_id=APP, session_id=sid, actor_user_id=d.uid("dev"))
+    await settle(net, drop=lambda s, t, p: p.get("step") in ("cards_all", "start"))
+    hubst = st["hub"]
+    people = [p for p in hubst["people"] if p["instance"] != "d"]
+    for to in ("b", "c"):
+        net.forge(
+            "hub",
+            to,
+            engine_step(
+                sid,
+                "start",
+                gen=hubst["gen"],
+                round_no=hubst["round"] + 1,
+                people=people,
+                identities={k: v for k, v in hubst["identities"].items() if k != "d"},
+                settings=hubst["settings"],
+                because={"kind": "changed"},
+            ),
+        )
+    await settle(net, drop=no_cards)
+    for inst in ("b", "c"):
+        s_i = await net.homes[inst].draw._load(sid)
+        assert (s_i["p"]["gen"], s_i["p"]["round"]) == (1, 1), inst
 
 
 # ─── A cheating household is caught ───────────────────────────────────────

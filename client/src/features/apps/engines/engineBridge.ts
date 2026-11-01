@@ -32,7 +32,8 @@ export const BRIDGE_ENGINES: readonly string[] = ['draw']
 export interface DrawStatus {
   id: string
   state: 'gathering' | 'drawing' | 'ready' | 'failed'
-  /** Why a draw failed: ``rules`` (the pairs never fit) / ``too_few``. */
+  /** Why a draw failed: ``rules`` (the pairs never fit) / ``too_few`` /
+   *  ``broken`` (card complaints kept breaking the draw). */
   reason?: string
   round: number
   /** How often the names were drawn again after a reveal. */

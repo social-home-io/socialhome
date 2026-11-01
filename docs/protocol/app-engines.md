@@ -146,7 +146,7 @@ sequenceDiagram
     H->>X: commits {every household's}
     X->>H: cards {sealed cards}
     H->>X: cards_all (exactly the committed cards)
-    Note over X: exactly one usable card opens per person?<br/>no → fail {cards, own seed}: the cards that open there name their sealers<br/>a partner? → redo {complaint with seed}
+    Note over X: exactly one usable card opens per person?<br/>no → fail {cards, own seed}: a visible redraw naming nobody (≤ 3 per draw)<br/>a partner? → redo {complaint with seed}
     X->>H: done {count, sig}
     H->>X: complete {every signed done} → "Your gift draw is ready"
 ```
@@ -162,11 +162,9 @@ signed opening that doesn't rebuild what its household signed names that
 household; a missing or unsigned one proves nothing and the restart is
 refused.
 
-**A completed round is never opened.** After the cards, only a card
-complaint that named nobody (below) opens that one round — before it can
-complete: a household that opened never takes its `complete`, and a void
-or a complaint after `complete` is refused. Nothing ever opens a seed after
-the list.
+**After the list, nothing is ever opened** — by anyone, except a
+complainer's own seed for its own box. A void after the list (or after a
+household's own `done`) is refused.
 
 1. **Start.** People (seat, household, username), each household's identity
    key, the settings. Every signature and seal is bound to the **round
@@ -214,18 +212,17 @@ the list.
    of another person of the round, signed by their household, `rev` 0 — the
    one test, the same for the giver and for everyone checking its
    complaint). Anything else → `fail {cards}` with the giver's **own seed**
-   — it shows only the giver's own box and what opens there. Every card that
-   opens there and isn't usable carries the signed hash of the household
-   that sealed it: that household is named (refused when it is the
-   complainer's own). No card, or two usable ones: a **card void** — every
-   household shows where it sealed its people's cards (`open {cards {user:
-   [box, nonce, target, eph]}}`: the box and nonce against its commitment,
-   the box it sealed to, the seal's ephemeral key, which derives from the
-   person's seed; anyone opens the sealed card with it and checks it went to
-   the box before its person's). The household whose card isn't there is
-   named. This opens that dead round only, before it can complete. A partner → `redo` with the seed as proof (chance:
-   nobody named). A round completes only with every household's **signed**
-   `done`.
+   — it shows only the giver's own box and what opens there, checked
+   against the signed card commitments. If it holds, the round is redrawn,
+   **visibly, naming nobody** (nothing else is opened to find out who sealed
+   it so), and never counted against the complainer. Every household counts
+   these redraws itself: after 3 (`DRAW_CARD_REDRAWS_MAX`) the next one stops
+   the draw (`end {broken}`: "Someone's home kept breaking the draw"); the
+   organiser can try again later (a Draw again) or draw without someone. A
+   partner → `redo` with the seed as proof (chance: nobody named). Card
+   commitments and `done` carry the circle each household drew (a digest of
+   `C`): a household handed another `R` stalls the round; it blames nobody.
+   A round completes only with every household's **signed** `done`.
 
 **No re-rolls on demand.** A household takes a new round only for: the
 table's first draw (or a fresh one after a draw gave up — an `end` it
@@ -244,8 +241,9 @@ household to the organiser and changes nothing. ≤ 40 rounds per draw.
 the draw waits for the organiser, who sees that household at once
 (`waitingFor`) and can draw without it — a visible removal. Every household
 counts who broke rounds itself and refuses a round after the same household
-broke two. A removal once the cards are out (people may have read theirs)
-starts a new draw: it counts as a Draw again (its count, its exchange day).
+broke two. A removal once the circle is known (a household committed
+its cards; the hub may already hold them) starts a new draw: it counts as a
+Draw again (its count, its exchange day).
 
 **An `end` is checked too.** A household takes `end {too_few}` only when
 fewer than three of the round's people are seated in its own copy;
@@ -270,12 +268,12 @@ fresh start), `round`; sent only to households at v_78:
 | `mix` / `mixed` | hub ↔ mixer k | `k`, `batches` or `list` + `prev {instance, in, sig}` / `list`, `in`, `sig` |
 | `list` | hub → all | `S`, `batches [{instance, hashes, commits, r_commit, sig}]`, `chain [{instance, hashes, sig}]` (every output entry's hash) |
 | `reveal` / `reveals` | each → hub / hub → all | `r` / `reveals {instance: r}` |
-| `open` | each → hub | `opening {seeds {user: seed}, stuck?, sig}` (before any card; `stuck: k` from the mixer whose input doesn't peel) or `opening {cards {user: [box, nonce, target, eph]}, sig}` (a card void) |
-| `void` | hub → all | `why: stuck, k, claim, batches, chain` (the chain so far: no household holds it yet) / `why: cards, complaint` |
+| `open` | each → hub | `opening {seeds {user: seed}, stuck?, sig}` (only before the list is out; `stuck: k` from the mixer whose input doesn't peel) |
+| `void` | hub → all | `why: stuck, k, claim, batches, chain` (the chain so far: no household holds it yet) |
 | `commit` / `commits` | each → hub / hub → all | `hashes`, `sig` / `commits {instance: {hashes, sig}}` |
 | `cards` / `cards_all` | each → hub / hub → all | `cards` (1 072 bytes each) |
 | `fail` / `redo` | each → hub | `complaint {kind: missing \| cards \| partner, instance, user, seed, sig}` |
-| `done` / `complete` / `end` | each → hub / hub → all | `count`, `sig` / `dones {instance: {count, sig}}` / `reason: rules \| too_few`, `because?`, `people?` (a give-up at the last round carries its proof) |
+| `done` / `complete` / `end` | each → hub / hub → all | `count`, `sig` / `dones {instance: {count, sig}}` / `reason: rules \| too_few \| broken`, `because?`, `people?` (a give-up at the last round, or past the card-redraw cap, carries its proof) |
 | `handover` / `wish` | each → hub → all (`relayed: true`) | `sealed` |
 
 **Receivers enforce:** the suite; `gen` ≤ 11, `round` ≤ 40; 3 ≤ n ≤ 30,
@@ -380,10 +378,11 @@ No call returns a result; the app's sandboxed frame can't reach the API.
 - **A household's server works out some pairs touching its own people**
   (see "What holds"; the chance table there), and colluding households pool
   what they know. Accepted (owner, 2026-11-01); the app doesn't say so.
-- **Card complaints come after the cards opened:** a complaint redraws a
-  round people have read; its culprit is named (from the card that opens,
-  or the card void), and that dead round's circle and cards are shown to
-  every household — it never completes.
+- **A cheater can force a few visible, unnamed redraws, then the draw
+  stops:** a household that seals a card wrongly (or lets one of its own
+  people's cards go missing) causes a card complaint, which redraws a
+  round people have already read and names nobody. After 3 such redraws
+  the draw stops for the organiser.
 - **Removals hand over pairs:** a hand-over shows the giver the card sealed
   to the leaver's box — the leaver's own recipient; a chain of leavers, or a
   giver colluding with the leavers' household, walks further.

@@ -449,14 +449,12 @@ async def test_complaint_holds_only_with_its_proof(done):
             "sig": b64url_encode(sig),
         }
 
-    commits = {i: c["hashes"] for i, c in hub_st["commits"].items()}
     kw = {
         "S": S,
         "batches": batches,
         "links": links,
         "mixer_pubs": mixer_pubs,
         "cards": cards,
-        "commits": commits,
     }
     # Ben's key IS in S once and his card is fine: nothing holds.
     for kind in ("missing", "cards", "partner"):

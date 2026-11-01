@@ -344,13 +344,12 @@ def test_signed_messages_are_domain_separated():
         dc.complaint_message(ctx, "i", "missing", "u", pub),
         dc.card_message(ctx, dc.Card("i", "u", "N", "H", "w", 0)),
         dc.handover_message(ctx, "i", "u", [pub]),
-        dc.card_commit_message(ctx, "i", [pub]),
-        dc.done_message(ctx, "i", 1),
+        dc.card_commit_message(ctx, "i", [pub], pub),
+        dc.done_message(ctx, "i", 1, pub),
         dc.opening_message(ctx, "i", [("u", pub)]),
         dc.opening_message(ctx, "i", [("u", pub)], stuck=0),
-        dc.card_opening_message(ctx, "i", [("u", pub, pub, pub, pub)]),
     }
-    assert len(msgs) == 11
+    assert len(msgs) == 10
 
 
 def test_public_of_and_sizes():
@@ -425,22 +424,13 @@ def test_the_engine_is_bound_into_context_and_labels():
     assert shared_label == b"x"
 
 
-def test_a_card_seal_key_from_the_seed_shows_where_it_went():
-    """A card sealed with randomness from the person's seed: its sealer
-    can show the box it went to (the ephemeral key opens it with that box
-    only), and the giver's box opens it as ever."""
-    seed = b"\x05" * 32
-    giver_priv, giver_pub = dc.new_keypair()
-    card = b"\x07" * dc.CARD_BYTES
-    sealed = dc.seal_card(giver_pub, card, ctx=_ctx(), rand=dc.card_rand(seed))
-    assert dc.seal_card(giver_pub, card, ctx=_ctx(), rand=dc.card_rand(seed)) == sealed
-    eph = dc.card_eph(seed)
-    assert dc.open_card_as_sealer(eph, giver_pub, sealed, ctx=_ctx()) == card
-    assert dc.open_card(giver_priv, sealed, ctx=_ctx()) == card
-    other = dc.new_keypair()[1]
-    assert dc.open_card_as_sealer(eph, other, sealed, ctx=_ctx()) is None
-    assert (
-        dc.open_card_as_sealer(dc.new_keypair()[0], giver_pub, sealed, ctx=_ctx())
-        is None
-    )
-    assert dc.open_card_as_sealer(eph, giver_pub, sealed[:-1], ctx=_ctx()) is None
+def test_the_circle_digest_binds_the_circle():
+    """Card commitments and ``done`` carry the circle a household drew: a
+    different circle (or order) is a different digest."""
+    a, b, c = b"\x01" * 32, b"\x02" * 32, b"\x03" * 32
+    assert dc.circle_digest([a, b, c]) != dc.circle_digest([b, a, c])
+    assert dc.circle_digest([a, b]) != dc.circle_digest([a, b, c])
+    hashes = [b"\x09" * 32]
+    assert dc.card_commit_message(
+        _ctx(), "i", hashes, dc.circle_digest([a, b, c])
+    ) != dc.card_commit_message(_ctx(), "i", hashes, dc.circle_digest([b, a, c]))
