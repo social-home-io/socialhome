@@ -332,10 +332,16 @@ keys ‖ settings)`.
   household opens its seeds, which names the mixer that put it there (or
   the household whose signed seeds don't rebuild what it signed — an
   unsigned opening proves nothing) — only ever before the list is out.
-  After it nothing is opened except a complainer's own seed. The card
-  commitment and `done` sign a digest of the circle each household drew
-  (`circle_digest`), so a household handed another `R` stalls the round
-  instead of blaming anyone.
+  After it nothing is opened except a complainer's own seed.
+- **The round's transcript** (`transcript_keys` → `transcript_batches` →
+  `transcript_chain` → `transcript_reveals`, SHA-256 over
+  `"socialhome/app_engine/draw/transcript/v1" ‖ previous ‖ stage ‖ values`)
+  chains every public value in order: the round context, the signed mixer
+  keys, every batch (`r` commitment included), every chain link, the
+  reveals and the circle (`circle_digest`). Every signature made after a
+  value appeared signs the transcript up to it (in place of the bare
+  context), and every household verifies against its own: equivocating any
+  value makes signatures fail — the round stalls, nobody is named.
 - **Cards**: exactly 1 024 bytes (`u16 len ‖ v1 ‖ rev ‖ lp16(instance,
   user, name, household, wish) ‖ Ed25519 sig ‖ zeros`), signed by the
   person's household over the round context and every field; sealed to the
@@ -348,12 +354,14 @@ keys ‖ settings)`.
   the box it gives to and each next one the box after it in the circle, and
   opens the new card sealed to the last from the committed list it holds.
 - Household Ed25519 signatures (domain-separated, length-prefixed) over:
-  the mixer key, the onion batch (onion hashes, commitments, `r`
-  commitment), each mix step `(k, in-digest, out-digest)`, a complaint (it
-  reveals a person's seed — for a thrown-away round), an opening (every
-  seed of a void round before any card, with `stuck: k` from a mixer whose
-  input doesn't peel), the card commitment, `done` (a round completes only
-  with every household's), the hand-over.
+  the mixer key (the context), the onion batch (onion hashes, commitments,
+  `r` commitment; the transcript after the keys), each mix step `(k,
+  in-digest, out-digest)` (after the batches), a complaint (it reveals a
+  person's seed — two for a couple — for a thrown-away round; after the
+  chain or the reveals), an opening (every seed of a void round before any
+  card, with `stuck: k` from a mixer whose input doesn't peel; after the
+  batches or the chain), the card commitment and `done` (after the
+  reveals; a round completes only with every household's), the hand-over.
 
 Every step carries `engine_suite: "x25519-hkdf-aesgcm256"`
 (`DRAW_SUITE_X25519_AESGCM`, `SUPPORTED_DRAW_SUITES`); the app engine

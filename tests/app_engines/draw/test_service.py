@@ -387,7 +387,7 @@ async def test_check_list_refuses_every_tampering(done):
     _net, _sid, st = done
     rnd = _Round(st["hub"])
     body = st["hub"]["list_body"]
-    S, commits, links = check_list(rnd, body)
+    S, commits, links, _tb, _tc = check_list(rnd, body)
     assert len(S) == rnd.n and set(commits) == set(rnd.order)
     assert len(links) == rnd.h and links[-1] == [dc.entry_hash(s) for s in S]
 
@@ -439,7 +439,14 @@ async def test_complaint_holds_only_with_its_proof(done):
 
     def complaint(kind, *, user="ben", inst="b", seed=seed_ben, sign_seed=None):
         sig = sign_ed25519(
-            sign_seed or id_seed, dc.complaint_message(rnd.ctx, inst, kind, user, seed)
+            sign_seed or id_seed,
+            dc.complaint_message(
+                rnd.t("chain" if kind == "missing" else "reveals"),
+                inst,
+                kind,
+                user,
+                seed,
+            ),
         )
         return {
             "kind": kind,
@@ -517,6 +524,7 @@ async def test_a_mixer_mixes_once_per_round(done, caplog):
             k=rnd.h - 1,
             list=other,
             prev={"instance": prev["instance"], "in": prev_in, "sig": prev["sig"]},
+            batches=st["hub"]["batches_pub"],
         ),
     )
     await settle(net)

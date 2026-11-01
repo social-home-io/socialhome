@@ -344,12 +344,13 @@ def test_signed_messages_are_domain_separated():
         dc.complaint_message(ctx, "i", "missing", "u", pub),
         dc.card_message(ctx, dc.Card("i", "u", "N", "H", "w", 0)),
         dc.handover_message(ctx, "i", "u", [pub]),
-        dc.card_commit_message(ctx, "i", [pub], pub),
-        dc.done_message(ctx, "i", 1, pub),
+        dc.card_commit_message(ctx, "i", [pub]),
+        dc.done_message(ctx, "i", 1),
+        dc.complaint_message(ctx, "i", "couple", "u", pub, pair=("v", pub)),
         dc.opening_message(ctx, "i", [("u", pub)]),
         dc.opening_message(ctx, "i", [("u", pub)], stuck=0),
     }
-    assert len(msgs) == 10
+    assert len(msgs) == 11
 
 
 def test_public_of_and_sizes():
@@ -424,13 +425,25 @@ def test_the_engine_is_bound_into_context_and_labels():
     assert shared_label == b"x"
 
 
-def test_the_circle_digest_binds_the_circle():
-    """Card commitments and ``done`` carry the circle a household drew: a
-    different circle (or order) is a different digest."""
+def test_the_transcript_binds_every_public_value():
+    """Each stage of the round's transcript chains the last: any other
+    mixer key, batch (r commitment included), link, reveal or circle gives
+    another digest — so a signature over one doesn't verify over another."""
+    ctx = _ctx()
     a, b, c = b"\x01" * 32, b"\x02" * 32, b"\x03" * 32
     assert dc.circle_digest([a, b, c]) != dc.circle_digest([b, a, c])
     assert dc.circle_digest([a, b]) != dc.circle_digest([a, b, c])
-    hashes = [b"\x09" * 32]
-    assert dc.card_commit_message(
-        _ctx(), "i", hashes, dc.circle_digest([a, b, c])
-    ) != dc.card_commit_message(_ctx(), "i", hashes, dc.circle_digest([b, a, c]))
+    keys = dc.transcript_keys(ctx, [("i", a), ("j", b)])
+    assert keys != dc.transcript_keys(ctx, [("i", a), ("j", c)])
+    assert keys != dc.transcript_keys(ctx, [("j", b), ("i", a)])
+    batch = [("i", [a], [("u", b)], c)]
+    tb = dc.transcript_batches(keys, batch)
+    assert tb != dc.transcript_batches(keys, [("i", [a], [("u", b)], a)])
+    assert tb != dc.transcript_batches(
+        dc.transcript_keys(ctx, [("i", b), ("j", b)]), batch
+    )
+    tc = dc.transcript_chain(tb, [("i", [a, b])])
+    assert tc != dc.transcript_chain(tb, [("i", [b, a])])
+    tr = dc.transcript_reveals(tc, {"i": a}, dc.circle_digest([a, b]))
+    assert tr != dc.transcript_reveals(tc, {"i": b}, dc.circle_digest([a, b]))
+    assert tr != dc.transcript_reveals(tc, {"i": a}, dc.circle_digest([b, a]))

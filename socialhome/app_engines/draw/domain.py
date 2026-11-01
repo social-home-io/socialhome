@@ -44,6 +44,11 @@ DRAW_ROUNDS_MAX: int = 40
 #: such a redraw names nobody; past this many the draw stops ("Someone's
 #: home kept breaking the draw") and the organiser decides.
 DRAW_CARD_REDRAWS_MAX: int = 3
+#: Redraws a draw takes because of the pairs (chance: a giver drew their
+#: partner). Room for a real small table of couples — the worst allowed
+#: rules fit 1 circle in 3, so (2/3)^30 ≈ 1 in 190 000 genuine draws reach
+#: it — while a household can't re-roll without end.
+DRAW_PARTNER_REDRAWS_MAX: int = 30
 #: "Draw again" after the reveal, at most this many times per table.
 DRAW_AGAIN_MAX: int = 10
 #: A wish list, in characters (it must also fit the 1 KiB card).
@@ -150,16 +155,17 @@ VOID_WHYS: frozenset[str] = frozenset({VOID_UNUSABLE, VOID_STUCK})
 #: What a complaint says (it always carries its proof: the person's seed).
 COMPLAINT_MISSING = "missing"  # my box key isn't in the list exactly once
 COMPLAINT_CARDS = "cards"  # my box opens no card, several, or a bad one
-COMPLAINT_PARTNER = "partner"  # my card is my partner's (exclusions)
+COMPLAINT_PARTNER = "partner"  # my card is my partner's (another household's)
+COMPLAINT_COUPLE = "couple"  # two of my people the pairs exclude sit side by side
 COMPLAINT_KINDS: frozenset[str] = frozenset(
-    {COMPLAINT_MISSING, COMPLAINT_CARDS, COMPLAINT_PARTNER}
+    {COMPLAINT_MISSING, COMPLAINT_CARDS, COMPLAINT_PARTNER, COMPLAINT_COUPLE}
 )
 
 #: Why a draw ended without a result (``end`` step, ``reason``).
 END_RULES = "rules"  # DRAW_ROUNDS_MAX rounds and no circle fit the pairs
 END_TOO_FEW = "too_few"  # fewer than three people left
 END_BROKEN = "broken"  # card complaints past DRAW_CARD_REDRAWS_MAX
-DRAW_END_REASONS: frozenset[str] = frozenset({END_RULES, END_TOO_FEW})
+DRAW_END_REASONS: frozenset[str] = frozenset({END_RULES, END_TOO_FEW, END_BROKEN})
 
 # ─── What the app sees (``sh.draw.status()``) ─────────────────────────────
 

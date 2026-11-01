@@ -166,6 +166,25 @@ refused.
 complainer's own seed for its own box. A void after the list (or after a
 household's own `done`) is refused.
 
+**The rule: one transcript, checked by every household on its own copy.**
+Every public value of a round, in the order it appears — the round context
+(the people, identity keys, settings), every signed mixer key in mixing
+order, every batch (onion hashes, commitments, `r` commitment), every chain
+link, the reveals and the circle — is chained into one running digest per
+round (`transcript_keys` → `_batches` → `_chain` → `_reveals`). Every
+signature made after a value appeared signs the transcript up to that
+point: a batch signs it after the keys; a mix step after the batches (every
+mixer gets every batch); a void's opening after the batches (stuck) or the
+chain; a missing-key complaint after the chain; a card commitment, `done`,
+and a card, partner or couple complaint after the reveals. Every household
+checks every signature against its **own** transcript. A hub that hands
+two households different values (another mixer key, `r` commitment, batch,
+link, reveal, people) makes the signatures disagree: the round stalls
+(`DrawWireError`), **nobody is named, nothing is opened** — an honest
+household is never named on evidence that didn't verify against its own
+transcript. `test_any_equivocation_stalls_and_names_nobody` equivocates
+each value in turn.
+
 1. **Start.** People (seat, household, username), each household's identity
    key, the settings. Every signature and seal is bound to the **round
    context** `SHA-256(engine ‖ suite ‖ table ‖ gen ‖ round ‖ people ‖
@@ -219,10 +238,17 @@ household's own `done`) is refused.
    these redraws itself: after 3 (`DRAW_CARD_REDRAWS_MAX`) the next one stops
    the draw (`end {broken}`: "Someone's home kept breaking the draw"); the
    organiser can try again later (a Draw again) or draw without someone. A
-   partner → `redo` with the seed as proof (chance: nobody named). Card
-   commitments and `done` carry the circle each household drew (a digest of
-   `C`): a household handed another `R` stalls the round; it blames nobody.
-   A round completes only with every household's **signed** `done`.
+   partner → `redo` with the seed as proof (chance: nobody named) — only
+   for a card another household sealed: a couple within one household is
+   told **before any card exists**, right after the reveal (`redo {couple,
+   both seeds}`, checked against each household's own circle), and a
+   partner complaint about a card the complainer's own household signed
+   proves nothing (refused, named to the organiser). Redraws for the pairs
+   are counted by every household: past 30 (`DRAW_PARTNER_REDRAWS_MAX`) the
+   draw ends `rules` — the worst allowed rules fit one circle in three, so
+   a genuine draw reaches it once in ~190 000 (the spread test pins that
+   real draws don't). A round completes only with every household's
+   **signed** `done`.
 
 **No re-rolls on demand.** A household takes a new round only for: the
 table's first draw (or a fresh one after a draw gave up — an `end` it
@@ -253,7 +279,8 @@ a next round would carry). It never takes an end after the reveal. An end
 its copy doesn't show (yet) is kept for 24 hours, then dropped.
 
 **Couples** (D14): non-overlapping pairs of seats, ≤ ⌊n/3⌋, ≥ 4 people.
-Checked by each giver's household; a hit is redrawn with proof.
+Checked by the household holding both (before the cards) or each giver's
+household (after); a hit is redrawn with proof, counted.
 
 ### Steps
 
@@ -265,14 +292,14 @@ fresh start), `round`; sent only to households at v_78:
 | `start` | hub → all | `people [{seat, instance, user, name}]`, `identities {instance: hex}`, `settings {name, budget, day, pairs}`, `because {kind: first \| again \| changed \| complaint \| void, complaint?, why?: unusable \| stuck, openings?, k?, batches?, chain?}` — every household checks it on its own copy of the round; nothing it already holds is sent again |
 | `key` / `mixers` | each → hub / hub → all | `pub`, `sig` / `keys [{instance, pub, sig}]` |
 | `onions` | each → hub | `onions`, `commits [[user, c]]`, `r_commit`, `sig` |
-| `mix` / `mixed` | hub ↔ mixer k | `k`, `batches` or `list` + `prev {instance, in, sig}` / `list`, `in`, `sig` |
+| `mix` / `mixed` | hub ↔ mixer k | `k`, `batches` (with onions for k = 0; every batch's public part for k > 0) + `list` + `prev {instance, in, sig}` / `list`, `in`, `sig` |
 | `list` | hub → all | `S`, `batches [{instance, hashes, commits, r_commit, sig}]`, `chain [{instance, hashes, sig}]` (every output entry's hash) |
 | `reveal` / `reveals` | each → hub / hub → all | `r` / `reveals {instance: r}` |
 | `open` | each → hub | `opening {seeds {user: seed}, stuck?, sig}` (only before the list is out; `stuck: k` from the mixer whose input doesn't peel) |
 | `void` | hub → all | `why: stuck, k, claim, batches, chain` (the chain so far: no household holds it yet) |
 | `commit` / `commits` | each → hub / hub → all | `hashes`, `sig` / `commits {instance: {hashes, sig}}` |
 | `cards` / `cards_all` | each → hub / hub → all | `cards` (1 072 bytes each) |
-| `fail` / `redo` | each → hub | `complaint {kind: missing \| cards \| partner, instance, user, seed, sig}` |
+| `fail` / `redo` | each → hub | `complaint {kind: missing \| cards \| partner \| couple, instance, user, seed, partner?, partner_seed?, sig}` (`couple`: instead of `commit`, before any card) |
 | `done` / `complete` / `end` | each → hub / hub → all | `count`, `sig` / `dones {instance: {count, sig}}` / `reason: rules \| too_few \| broken`, `because?`, `people?` (a give-up at the last round, or past the card-redraw cap, carries its proof) |
 | `handover` / `wish` | each → hub → all (`relayed: true`) | `sealed` |
 

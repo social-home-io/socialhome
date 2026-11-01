@@ -45,6 +45,7 @@ from socialhome.app_engines.draw import crypto as dc
 from socialhome.app_engines.draw import service as svc_mod
 from socialhome.app_engines.draw.domain import (
     DRAW_CARD_REDRAWS_MAX,
+    DRAW_PARTNER_REDRAWS_MAX,
     DRAW_PENDING_SECONDS,
     DRAW_ROUNDS_MAX,
     DRAW_WAIT_SECONDS,
@@ -631,9 +632,7 @@ async def test_duplicate_card_commitments_dont_stall(net):
     b_hashes = [b64url_decode(x) for x in st["hub"]["commits"]["b"]["hashes"]][:1]
     sig = sign_ed25519(
         net.homes["c"].fed.own_identity_seed,
-        dc.card_commit_message(
-            rnd.ctx, "c", b_hashes, b64url_decode(st["hub"]["circle"])
-        ),
+        dc.card_commit_message(rnd.t("reveals"), "c", b_hashes),
     )
     net.forge(
         "c",
@@ -1178,17 +1177,26 @@ def _ago(hours: int) -> str:
     return (datetime.now(UTC) - timedelta(hours=hours)).isoformat()
 
 
+@pytest.mark.parametrize("same_home", [True, False])
 async def test_small_tables_with_a_pair_spread_evenly_and_never_give_up(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, same_home
 ):
     """LOW (spread). Four people, one pair: one circle in three fits, so a
     draw takes a few rounds — and the two circles that fit come out about
     equally often. A box names nobody, so the circle can't steer around a
-    pair; the round cap is what keeps it from giving up:
-    (2/3)^DRAW_ROUNDS_MAX < 1e-7."""
+    pair; the caps are what keep it from giving up: (2/3)^DRAW_ROUNDS_MAX
+    < 1e-7, and the pairs' own redraw cap (2/3)^DRAW_PARTNER_REDRAWS_MAX
+    < 1e-5 (R6: genuine draws never reach it — pinned below). The pair is
+    in one household (told before any card) or in two (after them)."""
     assert (2 / 3) ** DRAW_ROUNDS_MAX < 1e-7
-    people = {"a": ["anna"], "b": ["ben", "lena"], "c": ["cleo"]}
+    assert (2 / 3) ** DRAW_PARTNER_REDRAWS_MAX < 1e-5
+    people = (
+        {"a": ["anna"], "b": ["ben", "lena"], "c": ["cleo"]}
+        if same_home
+        else {"a": ["anna"], "b": ["ben"], "c": ["lena"], "d": ["cleo"]}
+    )
     counts: collections.Counter = collections.Counter()
+    most = 0
     for i in range(40):
         net = Network(tmp_path / f"r{i}")
         try:
@@ -1209,9 +1217,14 @@ async def test_small_tables_with_a_pair_spread_evenly_and_never_give_up(
             assert res["ben"] != "lena" and res["lena"] != "ben"
             _assert_circle(res)
             counts[tuple(sorted(res.items()))] += 1
+            st = await hub.draw._load(sid)
+            most = max(most, st["hub"]["partner_redraws"])
+            kinds = {p["complaint"]["kind"] for p in sent_steps(net, "redo")}
+            assert kinds <= ({"couple"} if same_home else {"partner"})
         finally:
             await net.close()
     assert len(counts) == 2
+    assert most < DRAW_PARTNER_REDRAWS_MAX
     assert min(counts.values()) >= 6  # 40 draws, p = 1/2 each: < 6 is 4.4 σ
 
 
@@ -1366,9 +1379,9 @@ async def test_a_household_checks_its_own_opening_is_passed_on_unchanged(net):
     st_b["last"]["complete"] = False
     rnd = _Round(st_b["p"])
     table = await b.group_repo.get(sid)
-    sent = b.draw._opening(rnd, st_b["p"])
+    sent = b.draw._opening(rnd, st_b["p"], rnd.t("chain"))
     st_b["p"]["void_answer"] = ["open", sent]
-    other = b.draw._opening(rnd, {**st_b["p"], "seeds": st_b["p"]["seeds"]}, stuck=0)
+    other = b.draw._opening(rnd, st_b["p"], rnd.t("chain"), stuck=0)
     with pytest.raises(DrawWireError, match="not our opening"):
         await b.draw._justify(
             table,
@@ -1552,24 +1565,12 @@ def test_worst_case_draw_messages_fit_the_gfs_relay_cap():
                 "chain": chain[:29],
             },
         },
-        "start (card void)": {
-            "step": "start",
-            "people": people,
-            "identities": {i: "ab" * 32 for i in inst},
-            "settings": {
-                "name": "N" * 80,
-                "budget": "B" * 40,
-                "day": None,
-                "pairs": [[1, 2]] * 10,
-            },
-            "because": {
-                "kind": "void",
-                "why": "cards",
-                "complaint": complaint,
-                "openings": {
-                    i: {"cards": {user[0]: [b(32)] * 4}, "sig": b(64)} for i in inst
-                },
-            },
+        "mix k>0 (list + every batch)": {
+            "step": "mix",
+            "k": 1,
+            "list": [b(dc.onion_size(h - 1)) for _ in range(n)],
+            "prev": {"instance": inst[0], "in": b(32), "sig": b(64)},
+            "batches": batches,
         },
     }
     for name, body in messages.items():
@@ -1930,7 +1931,10 @@ async def test_hub_equivocates_its_r_commit_and_frames_an_honest_household(
     await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
     await settle(net)
     st = await _hub_state(net, sid)
-    assert st["hub"]["phase"] == "commit" and "c" not in st["hub"]["commits"]
+    # (c's copy of the batches differs: the mixers' signatures over the
+    # transcript don't verify there — c stalls at the list.)
+    assert st["hub"]["phase"] in ("reveal", "commit")
+    assert "c" not in st["hub"]["reveals"] and "c" not in st["hub"]["commits"]
     assert not sent_steps(net, "void") and not sent_steps(net, "open")
     for inst in PEOPLE:
         s_i = await net.homes[inst].draw._load(sid)
@@ -1975,6 +1979,282 @@ async def test_hub_peeks_at_held_cards_then_drops_a_household_without_draw_again
     for inst in ("b", "c"):
         s_i = await net.homes[inst].draw._load(sid)
         assert (s_i["p"]["gen"], s_i["p"]["round"]) == (1, 1), inst
+
+
+# ─── draw-review-6: the round's transcript closes equivocation ───────────
+
+
+def _equivocate_mixer_key(monkeypatch, plan, *, victims=None):
+    """The hub signs a DIFFERENT mixer key of its own for each other
+    household (or only for *victims*)."""
+    real_to_all = svc_mod.AppDrawService._to_all
+
+    async def to_all(self, table, rnd, step, body):
+        if self._own != "hub" or step != "mixers":
+            return await real_to_all(self, table, rnd, step, body)
+        st = await self._load(table.session_id)
+        plan["hub_priv"] = svc_mod._raw(st["p"]["mixer_priv"])
+        plan["privs"] = {}
+        slot = rnd.order.index("hub")
+        for inst in rnd.order:
+            keys = [dict(k) for k in body["keys"]]
+            if inst != "hub" and (victims is None or inst in victims):
+                priv, pub = dc.new_keypair()
+                plan["privs"][inst] = priv
+                keys[slot]["pub"] = svc_mod._b64(pub)
+                keys[slot]["sig"] = self._sign(dc.key_message(rnd.ctx, "hub", pub))
+            await self._send(table, inst, step, self._rid(rnd, keys=keys))
+
+    monkeypatch.setattr(svc_mod.AppDrawService, "_to_all", to_all)
+
+
+async def _nobody_named_and_nothing_opened(net, sid, people) -> None:
+    for inst in people:
+        s_i = await net.homes[inst].draw._load(sid)
+        assert not s_i.get("blamed") and not s_i.get("broke"), inst
+        assert not (s_i.get("last") or {}).get("complete"), inst
+    st = await _hub_state(net, sid)
+    assert st["hub"]["blamed"] == [] and st["hub"]["phase"] != "held"
+    assert not sent_steps(net, "open")
+
+
+async def test_hub_equivocates_its_mixer_key_and_learns_every_final_pair(
+    net, monkeypatch
+):
+    """R6 HIGH 1 (privacy). The hub hands each household its own hub mixer
+    key, hoping — as the last mixer — to tell each entry's household. Every
+    batch signs the transcript of the mixer keys as ITS household holds
+    them: the first mixer (and every household at the list) finds batches
+    signed over other keys — the round stalls before any ``r`` is out, so
+    no circle exists to map; nobody is named, nothing is opened."""
+    plan: dict = {}
+    _equivocate_mixer_key(monkeypatch, plan)
+    sid = await draw_table(net, PEOPLE)
+    hub = net.homes["hub"]
+    await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
+    await settle(net)
+    st = await _hub_state(net, sid)
+    assert st["hub"]["phase"] in ("onions", "mixing")
+    assert not sent_steps(net, "list") and not sent_steps(net, "reveal")
+    await _nobody_named_and_nothing_opened(net, sid, PEOPLE)
+
+
+async def test_hub_equivocates_its_mixer_key_and_frames_an_honest_household(
+    net, monkeypatch
+):
+    """R6 HIGH 1 (framing). The hub gives only household c another hub key,
+    then says "stuck" at its own mixing turn. c's batch was signed over c's
+    transcript of the keys: it doesn't verify on anyone else's — the round
+    stalls; c is never named."""
+    plan: dict = {}
+    _equivocate_mixer_key(monkeypatch, plan, victims={"c"})
+    real_mix = dc.mix
+
+    def mix(mixer_priv, entries, **kw):
+        if mixer_priv == plan.get("hub_priv"):
+            raise dc.DrawCryptoError("hub says: stuck")
+        return real_mix(mixer_priv, entries, **kw)
+
+    monkeypatch.setattr(dc, "mix", mix)
+    sid = await draw_table(net, PEOPLE)
+    hub = net.homes["hub"]
+    await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
+    await settle(net)
+    await _nobody_named_and_nothing_opened(net, sid, PEOPLE)
+
+
+def _equivocator(monkeypatch, what: str) -> None:
+    """The hub hands household c — only c — another value of the round's
+    public data, re-signing what it can sign itself (its own key, its own
+    batch, its own link)."""
+    real_send = svc_mod.AppDrawService._send
+
+    async def send(self, table, to, step, body):
+        if self._own != "hub" or to != "c":
+            return await real_send(self, table, to, step, body)
+        body = copy.deepcopy(body)
+        hub_st = (await self._load(table.session_id))["hub"]
+        ctx = svc_mod._raw(hub_st["ctx"])
+        rnd = _Round(hub_st)
+        if what == "people" and step == "start":
+            body["settings"] = {**body["settings"], "name": "Another draw"}
+        elif what == "mixer key" and step == "mixers":
+            slot = rnd.order.index("hub")
+            _priv, pub = dc.new_keypair()
+            body["keys"][slot]["pub"] = svc_mod._b64(pub)
+            body["keys"][slot]["sig"] = self._sign(dc.key_message(ctx, "hub", pub))
+        elif what in ("r_commit", "batch") and step == "list":
+            for b in body["batches"]:
+                if b["instance"] == "hub":
+                    if what == "r_commit":
+                        b["r_commit"] = svc_mod._b64(
+                            dc.r_commitment(ctx, "hub", b"\x07" * 32)
+                        )
+                    else:
+                        b["commits"] = [
+                            [u, svc_mod._b64(b"\x05" * 32)] for u, _c in b["commits"]
+                        ]
+                    b["sig"] = self._sign(
+                        dc.batch_message(
+                            rnd.t("keys"),
+                            "hub",
+                            [svc_mod._raw(x) for x in b["hashes"]],
+                            [(u, svc_mod._raw(c)) for u, c in b["commits"]],
+                            svc_mod._raw(b["r_commit"]),
+                        )
+                    )
+        elif what == "chain link" and step == "list":
+            k = rnd.order.index("hub")
+            link = body["chain"][k]
+            link["hashes"] = list(reversed(link["hashes"]))
+            prev = (
+                dc.list_digest(
+                    [svc_mod._raw(x) for x in body["chain"][k - 1]["hashes"]]
+                )
+                if k
+                else dc.list_digest(
+                    [svc_mod._raw(x) for bt in body["batches"] for x in bt["hashes"]]
+                )
+            )
+            out = dc.list_digest([svc_mod._raw(x) for x in link["hashes"]])
+            link["sig"] = self._sign(
+                dc.mix_message(rnd.t("batches"), k, "hub", prev, out)
+            )
+        elif what == "reveal" and step == "reveals":
+            body["reveals"]["hub"] = svc_mod._b64(b"\x07" * 32)
+        return await real_send(self, table, to, step, body)
+
+    monkeypatch.setattr(svc_mod.AppDrawService, "_send", send)
+
+
+@pytest.mark.parametrize(
+    "what", ["people", "mixer key", "r_commit", "batch", "chain link", "reveal"]
+)
+async def test_any_equivocation_stalls_and_names_nobody(net, monkeypatch, what):
+    """R6 (the whole class). Whatever public value of the round the hub
+    hands one household differently, that household's transcript differs:
+    the signatures it checks — or the ones checked against it — don't
+    verify. The round stalls; nobody is named; nothing is opened; no
+    household gets a result."""
+    _equivocator(monkeypatch, what)
+    sid = await draw_table(net, PEOPLE)
+    hub = net.homes["hub"]
+    await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
+    await settle(net)
+    await _nobody_named_and_nothing_opened(net, sid, PEOPLE)
+    assert "results" not in (await net.homes["c"].draw._load(sid)).get("p", {})
+
+
+async def test_couple_household_forces_uncounted_partner_redraws(net, monkeypatch):
+    """R6 HIGH/MED 2. Household b holds a couple (Ben, Bea) and Bob. When
+    Ben gives to Bob, b seals Bea's card (its own, valid) to Ben's box
+    instead of Bob's, so Ben "drew his partner". A couple within one
+    household is told before any card exists; after the cards a partner
+    complaint about a card the complainer's own household signed proves
+    nothing — refused, and b is named to the organiser; no redraw."""
+    people = {
+        "hub": ["anna"],
+        "b": ["ben", "bea", "bob"],
+        "c": ["cleo"],
+        "d": ["dev"],
+    }
+    forced: list = []
+    real_make = svc_mod.AppDrawService._make_cards
+
+    async def make(self, rnd, cur, C, wishes):
+        if self._own != "b" or forced:
+            return await real_make(self, rnd, cur, C, wishes)
+        n = rnd.n
+        pos = {u: C.index(self._box_pub(cur, u)) for u in cur["seeds"]}
+        out = []
+        for user in sorted(cur["seeds"]):
+            _g, sealed_to = dc.circle_targets(pos[user], n)
+            who = user
+            if user == "bob" and (pos["bob"] - pos["ben"]) % n == 1:
+                who = "bea"  # Bob's giver (Ben) gets Bea's card
+                forced.append(rnd.round)
+            card = await self._card_for(rnd, who, wish="", rev=0)
+            out.append(dc.seal_card(C[sealed_to], card, ctx=rnd.ctx))
+        return out
+
+    monkeypatch.setattr(svc_mod.AppDrawService, "_make_cards", make)
+    sid = await draw_table(net, people)
+    hub = net.homes["hub"]
+    seats = {e.user: e.seat for e in (await hub.group_repo.get(sid)).roster}
+    await hub.draw.configure(
+        app_id=APP,
+        session_id=sid,
+        actor_user_id=hub.uid("anna"),
+        settings={"pairs": [[seats["ben"], seats["bea"]]]},
+    )
+    await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
+    await settle(net)
+    for _ in range(10):
+        if forced:
+            break
+        await hub.draw.start(
+            app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"), again=True
+        )
+        await settle(net)
+    assert forced
+    st = await _hub_state(net, sid)
+    partner_redos = [
+        p for p in sent_steps(net, "redo") if p["complaint"]["kind"] == "partner"
+    ]
+    assert partner_redos and st["hub"]["blamed"] == ["b"]
+    assert st["hub"]["phase"] == "opening"  # no redraw: the round waits
+    assert not [
+        p
+        for p in sent_steps(net, "start")
+        if p["round"] == forced[0] + 1
+        and p["because"]["kind"] == "complaint"
+        and p["because"]["complaint"]["kind"] == "partner"
+    ]
+
+
+async def test_a_couple_in_one_household_is_told_before_any_card(net):
+    """R6 HIGH/MED 2. Ben and Bea (household b) may not draw each other:
+    when the circle puts them side by side, b says so right after the
+    reveal — with both seeds — before any card exists; the redraw is
+    counted with the pairs' redraws."""
+    seen = 0
+    sid = await draw_table(net, PEOPLE)
+    hub = net.homes["hub"]
+    for attempt in range(12):
+        if attempt == 0:
+            await hub.draw.configure(
+                app_id=APP,
+                session_id=sid,
+                actor_user_id=hub.uid("anna"),
+                settings={"pairs": [[2, 3]]},
+            )
+            await hub.draw.start(
+                app_id=APP, session_id=sid, actor_user_id=hub.uid("anna")
+            )
+        else:
+            await hub.draw.start(
+                app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"), again=True
+            )
+        await settle(net)
+        couples = [
+            p for p in sent_steps(net, "redo") if p["complaint"]["kind"] == "couple"
+        ]
+        if couples:
+            seen = len(couples)
+            break
+    assert seen
+    c = couples[0]
+    # Told instead of the commitment: b had sealed no card for that round.
+    assert not [
+        p
+        for s, _t, p in net.sent
+        if s == "b"
+        and p.get("step") == "commit"
+        and (p["gen"], p["round"]) == (c["gen"], c["round"])
+    ]
+    st = await _hub_state(net, sid)
+    assert st["hub"]["blamed"] == []
+    _assert_circle(await _results(net, sid))
 
 
 # ─── A cheating household is caught ───────────────────────────────────────
@@ -2172,7 +2452,8 @@ async def test_pairs_redo_with_proof_until_the_circle_fits(tmp_path, monkeypatch
             assert results["ben"] != "bea" and results["bea"] != "ben"
             redos = sent_steps(net, "redo")
             for p in redos:
-                assert p["complaint"]["kind"] == "partner"
+                # Ben and Bea are both b's: told before any card exists.
+                assert p["complaint"]["kind"] == "couple"
                 assert p["complaint"]["instance"] == "b"
             assert len(_rounds(net)) == len(redos) + 1
             total_redos += len(redos)

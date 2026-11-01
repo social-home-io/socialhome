@@ -108,6 +108,7 @@ _R_COMMIT_DOMAIN = b"socialhome/app_engine/draw/r_commit/v1"
 _R_DOMAIN = b"socialhome/app_engine/draw/r/v1"
 _CIRCLE_DOMAIN = b"socialhome/app_engine/draw/circle/v1"
 _CIRCLE_DIGEST_DOMAIN = b"socialhome/app_engine/draw/circle_digest/v1"
+_TRANSCRIPT_DOMAIN = b"socialhome/app_engine/draw/transcript/v1"
 _KEY_SIG_DOMAIN = b"socialhome/app_engine/draw/mixer_key/v1"
 _BATCH_SIG_DOMAIN = b"socialhome/app_engine/draw/onions/v2"
 _MIX_SIG_DOMAIN = b"socialhome/app_engine/draw/mixed/v1"
@@ -525,10 +526,18 @@ def mix_message(
 
 
 def complaint_message(
-    ctx: bytes, instance: str, kind: str, user: str, seed: bytes
+    ctx: bytes,
+    instance: str,
+    kind: str,
+    user: str,
+    seed: bytes,
+    *,
+    pair: tuple[str, bytes] | None = None,
 ) -> bytes:
-    """A household stopping a round with its proof: the person's seed."""
-    return _fields(_COMPLAINT_DOMAIN, ctx, instance, kind, user, seed)
+    """A household stopping a round with its proof: the person's seed (and,
+    for a couple of its own drawn next to each other, the partner's)."""
+    extra: list[bytes | str | int] = ["", b""] if pair is None else [pair[0], pair[1]]
+    return _fields(_COMPLAINT_DOMAIN, ctx, instance, kind, user, seed, *extra)
 
 
 def opening_message(
@@ -548,24 +557,83 @@ def opening_message(
 
 
 def circle_digest(C: Sequence[bytes]) -> bytes:
-    """The circle a household drew from ``S`` and ``R`` — bound into its
-    card commitment and its ``done``, so a household handed another circle
-    (another ``R``) stalls the round instead of blaming anyone."""
+    """The circle a household drew from ``S`` and ``R``."""
     return sha256(_fields(_CIRCLE_DIGEST_DOMAIN, len(C), *C))
 
 
+# ─── The round's transcript ───────────────────────────────────────────────
+#
+# Every public value of a round, in the order it appears, chained into one
+# running digest. Every signature made after a value appeared signs the
+# transcript up to that point (it is passed in place of the bare round
+# context), and every household checks each signature against its OWN
+# transcript: a hub that hands two households different values (a mixer
+# key, a batch, a link, a reveal…) makes the signatures disagree — the
+# round stalls, nobody is named, nothing is opened.
+
+
+def _transcript(prev: bytes, stage: str, *parts: bytes | str | int) -> bytes:
+    return sha256(_fields(_TRANSCRIPT_DOMAIN, prev, stage, *parts))
+
+
+def transcript_keys(ctx: bytes, keys: Sequence[tuple[str, bytes]]) -> bytes:
+    """After the mixer keys (in mixing order) — what a batch signs."""
+    parts: list[bytes | str | int] = [len(keys)]
+    for inst, pub in keys:
+        parts += [inst, pub]
+    return _transcript(ctx, "keys", *parts)
+
+
+def transcript_batches(
+    t_keys: bytes,
+    batches: Sequence[tuple[str, Sequence[bytes], Sequence[tuple[str, bytes]], bytes]],
+) -> bytes:
+    """After every household's batch ``(instance, onion hashes, commits,
+    r_commit)``, households in id order — what a mixer signs."""
+    parts: list[bytes | str | int] = [len(batches)]
+    for inst, hs, commits, r_commit in sorted(batches, key=lambda b: b[0]):
+        parts += [inst, len(hs), *hs, len(commits)]
+        for user, c in sorted(commits):
+            parts += [user, c]
+        parts.append(r_commit)
+    return _transcript(t_keys, "batches", *parts)
+
+
+def transcript_chain(
+    t_batches: bytes, links: Sequence[tuple[str, Sequence[bytes]]]
+) -> bytes:
+    """After the whole signed chain (its last link is ``S``) — what a
+    missing-key complaint or a void's opening signs."""
+    parts: list[bytes | str | int] = [len(links)]
+    for inst, hs in links:
+        parts += [inst, len(hs), *hs]
+    return _transcript(t_batches, "chain", *parts)
+
+
+def transcript_reveals(
+    t_chain: bytes, reveals: dict[str, bytes], circle: bytes
+) -> bytes:
+    """After every household's ``r`` and the circle they give — what a card
+    commitment, ``done`` and a card or partner complaint sign."""
+    parts: list[bytes | str | int] = [len(reveals)]
+    for inst in sorted(reveals):
+        parts += [inst, reveals[inst]]
+    parts.append(circle)
+    return _transcript(t_chain, "reveals", *parts)
+
+
 def card_commit_message(
-    ctx: bytes, instance: str, card_hashes: Sequence[bytes], circle: bytes
+    t_reveals: bytes, instance: str, card_hashes: Sequence[bytes]
 ) -> bytes:
     """A household committing to its sealed cards before any card is out —
-    for the circle it drew (:func:`circle_digest`)."""
-    return _fields(_CARD_COMMIT_DOMAIN, ctx, instance, circle, *sorted(card_hashes))
+    over the round's transcript (the circle it drew included)."""
+    return _fields(_CARD_COMMIT_DOMAIN, t_reveals, instance, *sorted(card_hashes))
 
 
-def done_message(ctx: bytes, instance: str, count: int, circle: bytes) -> bytes:
+def done_message(t_reveals: bytes, instance: str, count: int) -> bytes:
     """A household saying its people's names opened (signed: a hub can't
-    complete a round for it), in the circle it drew."""
-    return _fields(_DONE_DOMAIN, ctx, instance, count, circle)
+    complete a round for it), over the round's transcript."""
+    return _fields(_DONE_DOMAIN, t_reveals, instance, count)
 
 
 # ─── Cards ────────────────────────────────────────────────────────────────
