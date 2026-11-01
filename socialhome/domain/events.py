@@ -2847,6 +2847,23 @@ class AppTableJoined(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class AppTableCanStart(DomainEvent):
+    """A group game a local person started has just reached the app's
+    fewest players (v_76, design 3.7) — published by
+    :class:`AppGroupService` on the hub, for the host person
+    (``to_user_id``), when a join brings the seats up to ``min`` (again
+    after someone left).
+
+    Consumed by the notification service: "Your Quiz game can start" — one
+    row per game, re-opened each time it reaches its minimum again; Games
+    kind (in the app unless the person set Games to Push)."""
+
+    app_id: str
+    session_id: str
+    to_user_id: str
+
+
+@dataclass(slots=True, frozen=True)
 class AppTableStarted(DomainEvent):
     """A group game a local person sits at started (v_76, design 3.7) —
     published by :class:`AppGroupService` for each local player seated

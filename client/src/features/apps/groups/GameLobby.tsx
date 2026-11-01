@@ -9,7 +9,10 @@
  * :sessionId``) and the space Games section (PR 7). Self-loading and
  * live: it reads ``GET /api/apps/{appId}/groups/{sessionId}`` and follows
  * the ``app.group`` frames for that game (a frame with ``group`` replaces
- * the view; a frame with ``change`` asks again).
+ * the view; a frame with ``change`` asks again). A household that can't
+ * be reached holds the game up: "Waiting for Ben's home to come back"
+ * (the view's ``away`` seats), asked again when a ``connection.*``
+ * frame says a household came back or went.
  *
  * Props:
  * - ``appId``     the app (a Social Home app id).
@@ -133,6 +136,14 @@ export function GameLobby({ appId, sessionId, appName, onClosed }: GameLobbyProp
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [appId, sessionId])
+
+  // A household came back (or went): who the game waits for may change.
+  useEffect(() => {
+    const again = () => { void refresh() }
+    const offs = [ws.on('connection.reachable', again), ws.on('connection.unreachable', again)]
+    return () => { for (const off of offs) off() }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [appId, sessionId])
 
   // A Remove still waiting for its toast is sent when this screen goes.
   useEffect(() => () => {
@@ -339,6 +350,17 @@ export function GameLobby({ appId, sessionId, appName, onClosed }: GameLobbyProp
   const needText = t(isOne(need) ? 'apps.lobby.need_more_one' : 'apps.lobby.need_more', { n: String(need) })
   const pct = game.max > 0 ? Math.min(100, Math.round((n / game.max) * 100)) : 0
 
+  // Whose household this one can't reach: the first by name, the rest
+  // counted (on the starter's household; elsewhere only theirs matters).
+  const awayNames = seated.filter(p => game.away.includes(p.seat)).map(p => p.name)
+  const awayMore = awayNames.length - 1
+  const awayText = awayNames.length === 0
+    ? null
+    : awayMore === 0
+      ? t('apps.lobby.away', { name: awayNames[0] })
+      : t(isOne(awayMore) ? 'apps.lobby.away_more_one' : 'apps.lobby.away_more',
+        { name: awayNames[0], n: String(awayMore) })
+
   let status: string[] = []
   if (game.state === 'playing') status = [t('apps.lobby.playing')]
   else if (invited) status = starterName ? [t('apps.lobby.invited', { name: starterName })] : []
@@ -351,6 +373,7 @@ export function GameLobby({ appId, sessionId, appName, onClosed }: GameLobbyProp
     status = [t('apps.lobby.wait_start', { name: starterName })]
     if (need > 0) status.push(needText)
   }
+  if (awayText) status.unshift(awayText)
 
   return (
     <section class="sh-game-lobby">

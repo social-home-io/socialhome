@@ -376,7 +376,10 @@ describe('notices about you, in the viewer\'s language', () => {
       .toBe('Ben and 2 others joined your Quiz game · You can start now')
     expect(say('app_table_started', g(['Anna'], 3, []))).toBe('Your Quiz game with Anna and 3 others started')
     expect(say('app_table_started', g(['Anna'], 1, []))).toBe('Your Quiz game with Anna and 1 other started')
+    // Nobody named: the game reached its minimum.
+    expect(say('app_table_can_start', params([], { space_name: 'Quiz' }))).toBe('Your Quiz game can start')
     await setLocale('de')
+    expect(say('app_table_can_start', params([], { space_name: 'Quiz' }))).toBe('Dein Spiel Quiz kann starten')
     expect(say('app_challenge', g(['Anna'], 3))).toBe('Anna hat dich und 3 andere eingeladen, Quiz zu spielen')
     expect(say('app_table_joined', g(['Ben'], 2, ['can_start'])))
       .toBe('Ben und 2 andere machen bei deinem Spiel Quiz mit · Du kannst jetzt starten')

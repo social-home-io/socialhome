@@ -166,6 +166,8 @@ _KIND_OF_TYPE: dict[str, NotifKind] = {
     # game" (one row per game, for the person who started it) and "Your
     # Quiz game with Anna and 3 others started" (each other player).
     "app_table_joined": NotifKind.GAMES,
+    # "Your Quiz game can start" — once, when it reaches its minimum.
+    "app_table_can_start": NotifKind.GAMES,
     "app_table_started": NotifKind.GAMES,
     # Reactions and follows.
     "post_reacted": NotifKind.REACTIONS,

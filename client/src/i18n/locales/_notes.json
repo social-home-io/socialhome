@@ -828,6 +828,8 @@
   "apps.lobby.start_with": "Start button: {n} is how many people are in. Play begins; see the glossary 'Start with 4 people'.",
   "apps.lobby.start_confirm": "Confirm heading before starting with free places left. {n} is how many people are in.",
   "apps.lobby.free_left": "In the Start confirm: {n} places stay empty.",
+  "apps.lobby.away": "On a game's Who's-in page: a household this one can't reach right now holds the game up. {name} is a player of that household. \"home\" means their household.",
+  "notifications.row.app_table_can_start_none": "A notification for the person who started a group game: enough people joined to start. {space} is the app's name (Chess, Quiz).",
   "apps.lobby.ended.app_removed": "{name} is the app's name (e.g. Gift draw); it was removed from a household.",
   "apps.lobby.err.too_few": "The server refused Start: at least {n} people must be in.",
   "apps.lobby.invites_open": "For the person who started the game: {n} people haven't answered the invite yet.",

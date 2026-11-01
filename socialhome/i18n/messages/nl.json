@@ -303,6 +303,8 @@
   "notification.app.challenge_group_one": "{name} heeft je en 1 ander uitgenodigd om {app} te spelen",
   "notification.app.challenge_group_generic": "{name} heeft je en {count} anderen uitgenodigd voor een spel",
   "notification.app.challenge_group_one_generic": "{name} heeft je en 1 ander uitgenodigd voor een spel",
+  "notification.app.table_can_start": "Je spel {app} kan starten",
+  "notification.app.table_can_start_generic": "Je spel kan starten",
   "notification.app.table_joined": "{name} doet mee met je spel {app}",
   "notification.app.table_joined_one": "{name} en 1 ander doen mee met je spel {app}",
   "notification.app.table_joined_many": "{name} en {count} anderen doen mee met je spel {app}",

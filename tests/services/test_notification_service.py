@@ -33,6 +33,7 @@ from socialhome.domain.events import (
     AppRequestDismissed,
     AppRequested,
     AppTableAnnounced,
+    AppTableCanStart,
     AppTableClosed,
     AppTableJoined,
     AppTableStarted,
@@ -5594,6 +5595,39 @@ async def test_joined_your_game_pushes_when_games_is_set_to_push(stack):
     await stack.user_svc.patch_preferences("anna", {"notif_kinds": {"games": "push"}})
     await stack.bus.publish(_joined(anna, by="Ben", others=0))
     assert [p.title for _, p in push.calls] == ["Ben joined your Quiz game"]
+
+
+async def test_your_game_can_start_is_one_row_per_game_reopened(stack):
+    push = _CapturingPush()
+    stack.notif_svc.attach_push_service(push)
+    stack.notif_svc.attach_app_repo(_AppRegistry({"quiz": "Quiz"}))
+    anna = await stack.provision_user("anna")
+    can = AppTableCanStart(app_id="quiz", session_id="t1", to_user_id=anna.user_id)
+    await stack.bus.publish(can)
+    [row] = await _rows_of(stack, anna.user_id, "app_table_can_start")
+    assert row.title == "Your Quiz game can start"
+    assert row.link_url == "/apps/quiz/tables/t1"
+    assert row.object_key == "app_session:quiz/t1"
+    assert row.params is not None and row.params.actors == ()
+    assert notif_kind("app_table_can_start") is NotifKind.GAMES
+    assert push.calls == []  # Games: in app by default
+    # Read, then the game reaches its minimum again: the same row re-opens.
+    await stack.notif_svc.mark_read(anna.user_id, row.id)
+    [read] = await _rows_of(stack, anna.user_id, "app_table_can_start")
+    assert read.read_at is not None
+    await stack.bus.publish(can)
+    [again] = await _rows_of(stack, anna.user_id, "app_table_can_start")
+    assert again.id == row.id and again.read_at is None
+    # Its own row, next to the joined one.
+    await stack.bus.publish(_joined(anna, by="Ben", others=1, can_start=True))
+    assert len(await _rows_of(stack, anna.user_id, "app_table_joined")) == 1
+    # Someone who set Games to Push gets the push; an app with no name here
+    # reads "Your game".
+    await stack.user_svc.patch_preferences("anna", {"notif_kinds": {"games": "push"}})
+    await stack.bus.publish(
+        AppTableCanStart(app_id="other", session_id="t2", to_user_id=anna.user_id)
+    )
+    assert [p.title for _, p in push.calls] == ["Your game can start"]
 
 
 def _started(to, *, others: int, sid: str = "t1") -> AppTableStarted:

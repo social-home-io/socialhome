@@ -20,9 +20,10 @@
  *                seat. Never on the viewer's own row.
  * - ``label``    optional accessible name of the list.
  *
- * A player's ``household`` of ``null`` is the viewer's own household
- * ("Your household"). Names come from the game's roster: display names,
- * never usernames.
+ * A player of the viewer's own household (``isLocal``) reads "Your
+ * household"; anyone else their household's name (none when it isn't
+ * known here). Names come from the game's roster: display names, never
+ * usernames.
  */
 import { Avatar } from '@/components/Avatar'
 import { isOne, t } from '@/i18n/i18n'
@@ -60,7 +61,9 @@ export function SeatList({ players, max, host, me, onRemove, label }: SeatListPr
                 {started && <span class="sh-seat-list__tag">{t('apps.lobby.started_this')}</span>}
                 {mine && <span class="sh-seat-list__tag sh-seat-list__tag--you">{t('apps.lobby.you')}</span>}
               </span>
-              <span class="sh-seat-list__home">{p.household ?? t('apps.invite.your_household')}</span>
+              {(p.isLocal || p.household) && (
+                <span class="sh-seat-list__home">{p.isLocal ? t('apps.invite.your_household') : p.household}</span>
+              )}
             </span>
             {onRemove && !mine && (
               <button
