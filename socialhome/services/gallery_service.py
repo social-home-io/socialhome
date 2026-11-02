@@ -75,6 +75,7 @@ from ..infrastructure.event_bus import EventBus
 from ..media.cleanup import media_basename, unlink_unreferenced
 from ..media.image_processor import ImageProcessor
 from ..repositories.gallery_repo import AbstractGalleryRepo
+from ..repositories.instance_config_repo import AbstractInstanceConfigRepo
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from ..repositories.media_transcode_repo import AbstractMediaTranscodeRepo
 from ..repositories.space_repo import AbstractSpaceRepo
@@ -164,6 +165,8 @@ def _read_dims_sync(path: pathlib.Path) -> tuple[int, int]:
 NAME_MAX: int = 80
 DESCRIPTION_MAX: int = 500
 ALBUMS_PER_SPACE: int = 200
+#: ``instance_config`` key holding the household default album's id.
+DEFAULT_ALBUM_KEY: str = "gallery.default_album_id"
 
 
 # ─── Errors ──────────────────────────────────────────────────────────────
@@ -190,6 +193,8 @@ class GalleryService:
     __slots__ = (
         "_bus",
         "_config",
+        "_default_lock",
+        "_instance_config",
         "_media_dir",
         "_media_refs",
         "_repo",
@@ -212,6 +217,7 @@ class GalleryService:
         media_refs: AbstractMediaReferenceRepo | None = None,
         user_repo: AbstractUserRepo | None = None,
         storage_quota: StorageQuotaService | None = None,
+        instance_config: AbstractInstanceConfigRepo | None = None,
     ) -> None:
         self._repo = repo
         self._space_repo = space_repo
@@ -234,6 +240,12 @@ class GalleryService:
         # ``POST /api/media/upload`` applies, so the gallery (the biggest
         # disk consumer) can't fill the disk past it.
         self._storage_quota = storage_quota
+        # Remembers which household album is the default one an upload
+        # lands in when nobody picked an album (see
+        # :meth:`ensure_default_album`). Without it there is no default.
+        self._instance_config = instance_config
+        # Two first uploads at once must not make two default albums.
+        self._default_lock = asyncio.Lock()
 
     def wire(self) -> None:
         """Hand a removed person's household albums to an admin."""
@@ -352,6 +364,49 @@ class GalleryService:
                 owner_id=owner_user_id,
             )
         )
+        return album
+
+    async def get_default_album(self, *, actor_user_id: str) -> GalleryAlbum | None:
+        """The household's default album — where an upload goes when
+        nobody chose an album — or ``None`` before the first such upload
+        (or after someone deleted it)."""
+        album = await self._stored_default_album()
+        if album is None:
+            return None
+        return await self._for_viewer(album, actor_user_id)
+
+    async def ensure_default_album(
+        self, *, actor_user_id: str, name: str
+    ) -> tuple[GalleryAlbum, bool]:
+        """The household's default album, made now under *name* (the
+        uploader's own word for "Photos") when there is none yet.
+
+        It is an ordinary household album — the uploader owns it, anyone
+        may rename it, and deleting it just means the next upload without
+        an album makes a fresh one. Only its id is remembered
+        (``instance_config``), so no new table or column is needed.
+        Returns ``(album, created)``."""
+        if self._instance_config is None:
+            raise RuntimeError("the default album needs the instance config repo")
+        async with self._default_lock:
+            album = await self._stored_default_album()
+            created = album is None
+            if album is None:
+                album = await self.create_album(
+                    space_id=None, owner_user_id=actor_user_id, name=name
+                )
+                await self._instance_config.set(DEFAULT_ALBUM_KEY, album.id)
+        return await self._for_viewer(album, actor_user_id), created
+
+    async def _stored_default_album(self) -> GalleryAlbum | None:
+        if self._instance_config is None:
+            return None
+        album_id = await self._instance_config.get(DEFAULT_ALBUM_KEY)
+        if not album_id:
+            return None
+        album = await self._repo.get_album(album_id)
+        if album is None or album.space_id is not None or album.is_system:
+            return None
         return album
 
     async def update_album(

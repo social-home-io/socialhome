@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import io
 import pathlib
@@ -10,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 import av
 import pytest
 from PIL import Image
+from pillow_heif import register_heif_opener
 
 from socialhome.config import Config
 from socialhome.crypto import (
@@ -27,6 +29,7 @@ from socialhome.domain.events import (
 from socialhome.domain.gallery import UploadOutcome
 from socialhome.domain.media_constraints import (
     IMAGE_MAX_DIMENSION,
+    IMAGE_WEBP_QUALITY,
     THUMBNAIL_PX,
     VIDEO_MAX_DIMENSION,
 )
@@ -43,11 +46,13 @@ from socialhome.federation.owner_bound_id import (
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.media.video_processor import VideoProcessor
 from socialhome.repositories.gallery_repo import SqliteGalleryRepo
+from socialhome.repositories.instance_config_repo import SqliteInstanceConfigRepo
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.media_transcode_repo import SqliteMediaTranscodeRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.gallery_service import (
+    DEFAULT_ALBUM_KEY,
     DESCRIPTION_MAX,
     NAME_MAX,
     GalleryNotFoundError,
@@ -115,6 +120,7 @@ async def env(tmp_dir):
         media_transcode_service=transcode_service,
         media_refs=SqliteMediaReferenceRepo(db),
         user_repo=SqliteUserRepo(db),
+        instance_config=SqliteInstanceConfigRepo(db),
     )
     yield svc
     await db.shutdown()
@@ -1556,3 +1562,162 @@ async def test_a_household_video_is_stored_as_webm_within_1920(env):
         assert longest <= VIDEO_MAX_DIMENSION
     with Image.open(media_dir / up.item.thumbnail_url.rsplit("/", 1)[-1]) as poster:
         assert poster.format == "WEBP"
+
+
+# ─── Default album (upload without choosing an album) ────────────────────
+
+
+async def test_no_default_album_until_the_first_upload_without_one(env):
+    assert await env.get_default_album(actor_user_id="b-id") is None
+
+
+async def test_the_default_album_is_made_once_and_then_reused(env):
+    first, created = await env.ensure_default_album(actor_user_id="b-id", name="Fotos")
+    assert created is True
+    assert first.name == "Fotos"
+    assert first.space_id is None
+    assert first.owner_user_id == "b-id"
+    # Someone else, in another language, gets the same album.
+    again, created_again = await env.ensure_default_album(
+        actor_user_id="a-id", name="Photos"
+    )
+    assert created_again is False
+    assert again.id == first.id
+    assert again.name == "Fotos"
+    shown = await env.get_default_album(actor_user_id="e-id")
+    assert shown is not None and shown.id == first.id
+
+
+async def test_two_first_uploads_at_once_make_one_default_album(env):
+    results = await asyncio.gather(
+        env.ensure_default_album(actor_user_id="a-id", name="Photos"),
+        env.ensure_default_album(actor_user_id="b-id", name="Fotos"),
+    )
+    assert results[0][0].id == results[1][0].id
+    assert sorted(created for _, created in results) == [False, True]
+
+
+async def test_a_deleted_default_album_is_made_afresh(env):
+    first, _ = await env.ensure_default_album(actor_user_id="a-id", name="Photos")
+    await env.delete_album(first.id, actor_user_id="a-id")
+    assert await env.get_default_album(actor_user_id="a-id") is None
+    second, created = await env.ensure_default_album(actor_user_id="b-id", name="Fotos")
+    assert created is True
+    assert second.id != first.id
+
+
+async def test_a_default_key_naming_a_space_album_is_ignored(env):
+    space_album = await env.create_album(
+        space_id="sp-1", owner_user_id="a-id", name="Space"
+    )
+    await env._instance_config.set(DEFAULT_ALBUM_KEY, space_album.id)
+    assert await env.get_default_album(actor_user_id="a-id") is None
+    album, created = await env.ensure_default_album(actor_user_id="a-id", name="Photos")
+    assert created is True
+    assert album.space_id is None
+
+
+async def test_the_default_album_needs_a_name(env):
+    with pytest.raises(ValueError):
+        await env.ensure_default_album(actor_user_id="a-id", name="  ")
+
+
+async def test_without_the_config_repo_there_is_no_default(tmp_dir):
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "x.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+    )
+    svc = GalleryService(None, None, EventBus(), cfg)  # type: ignore[arg-type]
+    assert await svc.get_default_album(actor_user_id="a-id") is None
+    with pytest.raises(RuntimeError):
+        await svc.ensure_default_album(actor_user_id="a-id", name="Photos")
+
+
+# ─── Storage format: an upload into the default album, HEIC, quality ─────
+# Owner rule: images WebP ≤ IMAGE_MAX_DIMENSION at IMAGE_WEBP_QUALITY,
+# videos VP9/Opus WebM ≤ VIDEO_MAX_DIMENSION, thumbnails / posters WebP ≤
+# THUMBNAIL_PX. No originals, no other formats, whatever the upload was.
+
+
+def _stored(svc: GalleryService, url: str) -> bytes:
+    return (svc._media_dir / url.removeprefix("api/media/")).read_bytes()
+
+
+def _assert_webp_within(data: bytes, max_px: int) -> tuple[int, int]:
+    assert data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+    img = Image.open(io.BytesIO(data))
+    assert img.format == "WEBP"
+    assert max(img.size) <= max_px
+    return img.size
+
+
+async def test_a_large_phone_photo_is_stored_as_webp_at_the_defined_size(env):
+    album, _ = await env.ensure_default_album(actor_user_id="b-id", name="Photos")
+    img = Image.new("RGB", (4032, 3024), (200, 120, 40))
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=90)
+    item = (
+        await env.upload_item(
+            album.id,
+            data=buf.getvalue(),
+            content_type="image/jpeg",
+            caption=None,
+            uploader_user_id="b-id",
+        )
+    ).item
+    size = _assert_webp_within(_stored(env, item.url), IMAGE_MAX_DIMENSION)
+    assert size == (IMAGE_MAX_DIMENSION, 1920)
+    assert (item.width, item.height) == size
+    _assert_webp_within(_stored(env, item.thumbnail_url), THUMBNAIL_PX)
+    # Only the web copy and its thumbnail — never the original bytes.
+    names = {p.name for p in env._media_dir.iterdir() if p.is_file()}
+    assert names == {
+        item.url.removeprefix("api/media/"),
+        item.thumbnail_url.removeprefix("api/media/"),
+    }
+
+
+async def test_the_webp_quality_is_the_defined_one(env, monkeypatch):
+    seen: list[int] = []
+    real_save = Image.Image.save
+
+    def spy(self, fp, format=None, **params):
+        if format == "WEBP" and self.size[0] > 600:
+            seen.append(params.get("quality"))
+        return real_save(self, fp, format, **params)
+
+    monkeypatch.setattr(Image.Image, "save", spy)
+    album, _ = await env.ensure_default_album(actor_user_id="b-id", name="Photos")
+    buf = io.BytesIO()
+    Image.new("RGB", (1200, 800), (10, 20, 30)).save(buf, "PNG")
+    await env.upload_item(
+        album.id,
+        data=buf.getvalue(),
+        content_type="image/png",
+        caption=None,
+        uploader_user_id="b-id",
+    )
+    assert seen == [IMAGE_WEBP_QUALITY]
+
+
+async def test_a_heic_photo_is_stored_as_webp(env):
+    register_heif_opener()
+    album, _ = await env.ensure_default_album(actor_user_id="b-id", name="Photos")
+    buf = io.BytesIO()
+    Image.new("RGB", (64, 48), (90, 160, 30)).save(buf, "HEIF")
+    item = (
+        await env.upload_item(
+            album.id,
+            data=buf.getvalue(),
+            content_type="image/heic",
+            caption=None,
+            uploader_user_id="b-id",
+        )
+    ).item
+    assert item.item_type == "photo"
+    assert _assert_webp_within(_stored(env, item.url), IMAGE_MAX_DIMENSION) == (
+        64,
+        48,
+    )

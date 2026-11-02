@@ -2,10 +2,12 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, fireEvent, waitFor, cleanup } from '@testing-library/preact'
 
 const apiGet = vi.fn()
+const apiPost = vi.fn()
 vi.mock('@/api', () => ({
   api: {
     get: (...args: unknown[]) => apiGet(...args),
-    post: vi.fn(), patch: vi.fn(), delete: vi.fn(),
+    post: (...args: unknown[]) => apiPost(...args),
+    patch: vi.fn(), delete: vi.fn(),
   },
 }))
 
@@ -65,6 +67,7 @@ beforeEach(() => {
   handlers.clear()
   showToast.mockReset()
   apiGet.mockReset()
+  apiPost.mockReset()
   people.clear()
   albumRows = [album('al-1', 'Holiday')]
   itemRows = []
@@ -72,6 +75,7 @@ beforeEach(() => {
     const [path] = split(url)
     if (path === '/api/spaces/sp-1/gallery/albums') return albumRows
     if (path === '/api/gallery/albums') return albumRows
+    if (path === '/api/gallery/default-album') return { album: null }
     if (path.startsWith('/api/gallery/albums/')) return itemRows
     return []
   })
@@ -269,11 +273,11 @@ describe('GalleryPage tiles', () => {
   })
 })
 
-// ─── Upload (UX review #9 + live walk) ───────────────────────────────────
+// ─── Upload sheet (gallery redesign PR 2) ────────────────────────────────
 
 type Reply = { status: number; body?: string; retryAfter?: string }
 let replies: Map<string, Reply[]>
-const sent: string[] = []
+const sent: Array<{ name: string; url: string; type: string }> = []
 
 class FakeXhr {
   status = 0
@@ -281,16 +285,22 @@ class FakeXhr {
   upload: { onprogress?: (e: unknown) => void; onload?: () => void } = {}
   onload?: () => void
   onerror?: () => void
+  onabort?: () => void
   withCredentials = false
+  private url = ''
   private retryAfter: string | null = null
-  open() {}
+  open(_m: string, url: string) { this.url = url }
   setRequestHeader() {}
+  abort() { this.onabort?.() }
   getResponseHeader(name: string) { return name === 'Retry-After' ? this.retryAfter : null }
   send(fd: FormData) {
     const file = fd.get('file') as File
-    sent.push(file.name)
+    sent.push({ name: file.name, url: this.url, type: file.type })
     const queue = replies.get(file.name) ?? []
-    const r = queue.shift() ?? { status: 201, body: '{}' }
+    const r = queue.shift() ?? {
+      status: 201,
+      body: JSON.stringify({ id: `it-${file.name}`, item_type: 'photo', thumbnail_url: `api/media/t-${file.name}` }),
+    }
     setTimeout(() => {
       this.status = r.status
       this.responseText = r.body ?? ''
@@ -301,7 +311,7 @@ class FakeXhr {
   }
 }
 
-describe('GalleryPage upload results', () => {
+describe('GalleryPage upload sheet', () => {
   beforeEach(() => {
     replies = new Map()
     sent.length = 0
@@ -309,54 +319,128 @@ describe('GalleryPage upload results', () => {
   })
   afterEach(() => { vi.unstubAllGlobals() })
 
-  async function pick(view: Awaited<ReturnType<typeof renderOpenAlbum>>, names: string[]) {
-    const input = view.container.querySelector('input[type=file]') as HTMLInputElement
-    const files = names.map(n => new File(['x'], n, { type: 'image/jpeg' }))
+  function pick(view: { container: Element }, files: File[]) {
+    const input = view.container.querySelector('[data-testid=gallery-upload-input]') as HTMLInputElement
     Object.defineProperty(input, 'files', { value: files, configurable: true })
     fireEvent.change(input)
   }
+  const jpg = (n: string) => new File(['x'], n, { type: 'image/jpeg' })
 
-  it('says how many made it, and why the rest did not — never raw JSON', async () => {
-    replies.set('list.pdf', [{
+  it('every file goes up into the open album and the sheet says so', async () => {
+    const view = await renderOpenAlbum()
+    pick(view, [jpg('a.jpg'), jpg('b.jpg'), jpg('c.jpg')])
+    expect(await view.findByRole('dialog', { name: /uploaded|added/ })).toBeTruthy()
+    await view.findByRole('heading', { name: '3 added' })
+    expect(sent.map(s => s.url)).toEqual([
+      'api/gallery/albums/al-1/items', 'api/gallery/albums/al-1/items', 'api/gallery/albums/al-1/items',
+    ])
+    expect(view.getByText('Done · 3')).toBeTruthy()
+    expect(showToast).not.toHaveBeenCalled()
+  })
+
+  it('a refused file needs you, with a translated reason — never raw JSON', async () => {
+    replies.set('list.jpg', [{
       status: 422,
       body: JSON.stringify({ error: { code: 'IMAGE_UNREADABLE', detail: "This image couldn't be opened." } }),
     }])
     const view = await renderOpenAlbum()
-    await pick(view, ['a.jpg', 'list.pdf', 'b.jpg'])
-    await waitFor(() => expect(showToast).toHaveBeenCalled())
-    const [msg, kind] = showToast.mock.calls.at(-1)!
-    expect(kind).toBe('error')
-    expect(msg).toBe(
-      "Uploaded 2 of 3 — 1 failed: Couldn't upload list.pdf — that file type isn't supported. Try JPEG, PNG, WebP, or MP4.",
-    )
-    expect(showToast).toHaveBeenCalledTimes(1)
+    pick(view, [jpg('a.jpg'), jpg('list.jpg')])
+    await view.findByText("This file couldn't be opened as a photo or video.")
+    expect(view.getByText('Needs you · 1')).toBeTruthy()
+    expect(view.getByRole('heading', { name: '1 of 2 uploaded' })).toBeTruthy()
+    expect(view.container.textContent).not.toContain('IMAGE_UNREADABLE')
+    // Try again sends it once more.
+    fireEvent.click(view.getByRole('button', { name: 'Try list.jpg again' }))
+    await view.findByRole('heading', { name: '2 added' })
+    expect(sent.filter(s => s.name === 'list.jpg')).toHaveLength(2)
   })
 
-  it('all fine is the plain success toast', async () => {
+  it('a file the household already has is counted, not called new', async () => {
+    replies.set('b.jpg', [{ status: 200, body: JSON.stringify({ id: 'it-old', item_type: 'photo', duplicate: 'already_here' }) }])
+    replies.set('c.jpg', [{ status: 200, body: JSON.stringify({ id: 'it-tr', item_type: 'photo', duplicate: 'restored' }) }])
     const view = await renderOpenAlbum()
-    await pick(view, ['a.jpg', 'b.jpg'])
-    await waitFor(() => expect(showToast).toHaveBeenCalledWith('Uploaded 2 items', 'success'))
+    pick(view, [jpg('a.jpg'), jpg('b.jpg'), jpg('c.jpg')])
+    await view.findByRole('heading', { name: '1 added' })
+    expect(view.getByText('Done · 3 · 1 already here · 1 back from the trash')).toBeTruthy()
   })
 
   it('a 429 waits and sends the same file again instead of failing it', async () => {
     replies.set('a.jpg', [{ status: 429, body: '{}', retryAfter: '0.01' }])
     const view = await renderOpenAlbum()
-    await pick(view, ['a.jpg', 'b.jpg'])
-    await waitFor(() => expect(showToast).toHaveBeenCalledWith('Uploaded 2 items', 'success'))
-    expect(sent).toEqual(['a.jpg', 'a.jpg', 'b.jpg'])
+    pick(view, [jpg('a.jpg')])
+    await view.findByRole('heading', { name: '1 added' })
+    expect(sent.map(s => s.name)).toEqual(['a.jpg', 'a.jpg'])
   })
 
-  it('a file over 100 MB is refused in the reader\'s language', async () => {
+  it('a file over 100 MB is never sent and waits for a decision', async () => {
     const view = await renderOpenAlbum()
-    const input = view.container.querySelector('input[type=file]') as HTMLInputElement
-    const big = new File(['x'], 'huge.jpg', { type: 'image/jpeg' })
+    const big = jpg('huge.jpg')
     Object.defineProperty(big, 'size', { value: 105 * 1024 * 1024 })
-    Object.defineProperty(input, 'files', { value: [big], configurable: true })
-    fireEvent.change(input)
-    await waitFor(() => expect(showToast).toHaveBeenCalled())
-    const [msg] = showToast.mock.calls.at(-1)!
-    expect(msg).toMatch(/too large/)
-    expect(msg).not.toContain('>100 MB')
+    pick(view, [big, jpg('ok.jpg')])
+    await view.findByText('Too large — a file can be up to 100 MB.')
+    await waitFor(() => expect(sent.map(s => s.name)).toEqual(['ok.jpg']))
+    fireEvent.click(view.getByRole('button', { name: 'Remove huge.jpg' }))
+    await waitFor(() => expect(view.queryByText('huge.jpg')).toBeNull())
+  })
+
+  it('a HEIC from a folder without a type is sent as image/heic', async () => {
+    const view = await renderOpenAlbum()
+    pick(view, [new File(['x'], 'IMG_1.HEIC', { type: '' })])
+    await view.findByRole('heading', { name: '1 added' })
+    expect(sent[0].type).toBe('image/heic')
+  })
+
+  it('upload from the household album list needs no album: the default one is used', async () => {
+    albumRows = [album('al-1', 'Holiday', { space_id: null })]
+    apiPost.mockImplementation(async (url: string) => {
+      if (url === '/api/gallery/default-album') return { id: 'al-def', name: 'Photos', space_id: null }
+      return {}
+    })
+    const { default: GalleryPage } = await import('./GalleryPage')
+    const view = render(<GalleryPage />)
+    await view.findByRole('button', { name: /Open album Holiday/ })
+    pick(view, [jpg('a.jpg'), jpg('b.jpg')])
+    await view.findByRole('heading', { name: '2 added' })
+    expect(apiPost).toHaveBeenCalledTimes(1)
+    expect(apiPost).toHaveBeenCalledWith('/api/gallery/default-album', { name: 'Photos' })
+    expect(sent.map(s => s.url)).toEqual([
+      'api/gallery/albums/al-def/items', 'api/gallery/albums/al-def/items',
+    ])
+    expect(view.getByText(/No album chosen, so they go into “Photos”/)).toBeTruthy()
+  })
+
+  it('a space gallery with no album offers no upload', async () => {
+    albumRows = []
+    const { default: GalleryPage } = await import('./GalleryPage')
+    const view = render(<GalleryPage spaceId="sp-1" />)
+    await view.findByRole('heading', { name: /No albums yet/ })
+    expect(view.queryByRole('button', { name: /Upload/ })).toBeNull()
+    expect(view.container.querySelector('[data-testid=gallery-upload-input]')).toBeNull()
+  })
+
+  it('a space gallery with two albums waits until one is chosen', async () => {
+    albumRows = [album('al-1', 'Holiday'), album('al-2', 'Garden')]
+    const { default: GalleryPage } = await import('./GalleryPage')
+    const view = render(<GalleryPage spaceId="sp-1" />)
+    await view.findByRole('button', { name: /Open album Holiday/ })
+    pick(view, [jpg('a.jpg')])
+    await view.findByText('Choose an album to start uploading.')
+    await new Promise(r => setTimeout(r, 20))
     expect(sent).toEqual([])
+    fireEvent.change(view.getByRole('combobox', { name: 'Album' }), { target: { value: 'al-2' } })
+    await view.findByRole('heading', { name: '1 added' })
+    expect(sent[0].url).toBe('api/gallery/albums/al-2/items')
+  })
+
+  it('the sheet minimises to a pill and comes back', async () => {
+    const view = await renderOpenAlbum()
+    pick(view, [jpg('a.jpg')])
+    await view.findByRole('heading', { name: '1 added' })
+    fireEvent.click(view.getByRole('button', { name: 'Minimise' }))
+    const pill = await view.findByRole('button', { name: /1 added — Show uploads/ })
+    fireEvent.click(pill)
+    expect(await view.findByRole('dialog')).toBeTruthy()
+    fireEvent.click(view.getByRole('button', { name: 'Close' }))
+    await waitFor(() => expect(view.queryByRole('dialog')).toBeNull())
   })
 })

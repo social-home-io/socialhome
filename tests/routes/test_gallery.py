@@ -40,6 +40,50 @@ async def test_create_album_requires_auth(client):
     assert r.status == 401
 
 
+# ─── Default album (an upload with no album chosen) ──────────────────────
+
+
+async def test_default_album_requires_auth(client):
+    assert (await client.get("/api/gallery/default-album")).status == 401
+    r = await client.post("/api/gallery/default-album", json={"name": "Photos"})
+    assert r.status == 401
+
+
+async def test_default_album_is_null_until_made(client):
+    r = await client.get("/api/gallery/default-album", headers=_auth(client._tok))
+    assert r.status == 200
+    assert await r.json() == {"album": None}
+
+
+async def test_default_album_is_made_once_then_found(client):
+    h = _auth(client._tok)
+    r = await client.post(
+        "/api/gallery/default-album", json={"name": "Fotos"}, headers=h
+    )
+    assert r.status == 201
+    made = await r.json()
+    assert made["name"] == "Fotos"
+    assert made["space_id"] is None
+    assert made["is_system"] is False
+    r = await client.post(
+        "/api/gallery/default-album", json={"name": "Photos"}, headers=h
+    )
+    assert r.status == 200
+    assert (await r.json())["id"] == made["id"]
+    r = await client.get("/api/gallery/default-album", headers=h)
+    assert (await r.json())["album"]["id"] == made["id"]
+    # An ordinary album: it shows in the list.
+    r = await client.get("/api/gallery/albums", headers=h)
+    assert made["id"] in {a["id"] for a in await r.json()}
+
+
+async def test_default_album_needs_a_name(client):
+    r = await client.post(
+        "/api/gallery/default-album", json={"name": ""}, headers=_auth(client._tok)
+    )
+    assert r.status == 422
+
+
 # ─── Household album CRUD ───────────────────────────────────────────────
 
 

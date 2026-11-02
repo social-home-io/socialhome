@@ -775,6 +775,7 @@ The gallery (household albums under `/api/gallery`, a space's under
 |---|---|---|
 | GET | `/api/gallery/albums` | Household albums. `?limit=` (default 30, at most 200), `&before=&before_id=` — the last regular album's `created_at` and `id` — for the next page. The auto "Posts" album is pinned first on the first page only; then newest first. A page shorter than `limit` is the last. |
 | POST | `/api/gallery/albums` | Create a household album: `{name (1–80), description? (≤ 500)}` → 201. |
+| GET / POST | `/api/gallery/default-album` | The household's **default album** — where an upload goes when nobody picked an album, so uploading never needs an album made first. GET → `{album}` (`null` before the first such upload, or after it was deleted). POST `{name (1–80)}` → the album, made under `name` (the uploader's word for "Photos") when there is none (201), else the existing one unchanged (200). It is an ordinary household album owned by whoever made it; only its id is remembered (`instance_config` key `gallery.default_album_id`). |
 | GET / POST | `/api/spaces/{id}/gallery/albums` | The same for a space: needs a seat; create needs a writer role (a follower gets 403 `SUBSCRIBER_READ_ONLY`); at most 200 albums per space. |
 | GET | `/api/gallery/albums/{id}` | One album (with its cover URL). An album of a space the caller holds no seat in is 404. |
 | PATCH | `/api/gallery/albums/{id}` | `{name?, description?, cover_item_id?}` → 204. Owner, a household admin (household album) or a space admin / owner (space album). |

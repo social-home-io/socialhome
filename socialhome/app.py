@@ -3123,6 +3123,7 @@ def create_app(config: Config | None = None) -> web.Application:
         media_refs=repos.media_reference,
         user_repo=repos.user,
         storage_quota=storage_quota,
+        instance_config=repos.instance_config,
     )
     # Leaving the household keeps photos: a removed person's albums pass
     # to an admin. Deleted household photos wait 30 days in the trash.
