@@ -174,6 +174,8 @@ def _album_dict(a) -> dict:
         # renamed it — the SPA then shows it in the viewer's own language.
         "is_default": a.is_default,
         "default_name": a.default_name,
+        # Someone else added photos since the viewer last opened it (D9).
+        "has_new": a.has_new,
     }
 
 
@@ -341,6 +343,20 @@ class AlbumDetailView(BaseView):
         ctx = self.user
         await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
         await self.svc(K.gallery_service_key).delete_album(
+            self.match("album_id"),
+            actor_user_id=ctx.user_id,
+        )
+        return web.Response(status=204)
+
+
+class AlbumSeenView(BaseView):
+    """POST /api/gallery/albums/{album_id}/seen — the viewer opened the
+    album: its "neu" dot goes (D9). Household and space albums alike."""
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        await self.svc(K.gallery_service_key).mark_album_seen(
             self.match("album_id"),
             actor_user_id=ctx.user_id,
         )

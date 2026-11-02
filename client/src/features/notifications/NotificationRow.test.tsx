@@ -106,7 +106,7 @@ describe('glyphFor', () => {
     ['bazaar_bid_placed', 'tag'], ['app_challenge', 'game'], ['app_added', 'game'],
     ['bazaar_bid_placed', 'tag'], ['app_challenge', 'game'], ['app_challenge_declined', 'game'], ['app_game_ended', 'game'], ['app_turn', 'game'], ['app_table_announced', 'game'], ['app_table_closed', 'game'], ['app_draw_ready', 'game'], ['app_draw_changed', 'game'],
     ['call_missed', 'phone'], ['chat_added', 'comment'], ['poll_result', 'poll'], ['poll_scheduled', 'poll'],
-    ['report_answer', 'shield'],
+    ['report_answer', 'shield'], ['gallery_added', 'photo'],
   ])('%s → %s', (type, glyph) => {
     expect(glyphFor(type)).toBe(glyph)
   })
@@ -193,5 +193,24 @@ describe('NotificationRow — game rows name the app in the viewer\'s language',
   it('a space row keeps its space name', () => {
     const { container } = render(<NotificationRow n={row({ params: { ...row().params!, space_name: 'Chess' } })} />)
     expect(container.querySelector('.sh-notif-title')!.textContent).toContain('Chess')
+  })
+})
+
+describe('a "new photos" row', () => {
+  afterEach(async () => { await setLocale('en') })
+
+  it('a German UI reads German even when the server wrote English', async () => {
+    await setLocale('de')
+    const { container } = render(<NotificationRow n={row({
+      id: 'g1', type: 'gallery_added', title: 'Lena added 12 photos to “Sommer 2026”',
+      link_url: '/gallery/albums/a1', object_key: 'gallery_album:a1/u1', space_id: null,
+      params: {
+        actors: [{ id: 'u1', name: 'Lena' }], actor_count: 1, new: 1, total: 1,
+        items: 12, album: 'Sommer 2026', flags: ['photos'],
+      },
+    })} />)
+    const text = container.textContent ?? ''
+    expect(text).toContain('Lena hat 12 Fotos zu „Sommer 2026“ hinzugefügt')
+    expect(text).not.toContain('added')
   })
 })

@@ -190,6 +190,7 @@ from .gallery import (
     AlbumItemCollectionView,
     AlbumRestoreView,
     AlbumRetentionView,
+    AlbumSeenView,
     DefaultAlbumView,
     GalleryBulkView,
     GalleryDownloadView,
@@ -1242,6 +1243,7 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_view("/api/gallery/default-album", DefaultAlbumView)
     app.router.add_view("/api/gallery/albums/{album_id}", AlbumDetailView)
     app.router.add_view("/api/gallery/albums/{album_id}/retention", AlbumRetentionView)
+    app.router.add_view("/api/gallery/albums/{album_id}/seen", AlbumSeenView)
     app.router.add_view("/api/gallery/albums/{album_id}/items", AlbumItemCollectionView)
     app.router.add_view("/api/gallery/items/{item_id}", GalleryItemDetailView)
     app.router.add_view("/api/gallery/items/{item_id}/restore", GalleryItemRestoreView)

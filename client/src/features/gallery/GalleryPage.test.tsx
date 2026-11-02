@@ -42,6 +42,10 @@ function emit(type: string, data: Record<string, unknown>) {
 }
 
 const showToast = vi.fn()
+// Opening an album reads its "new photos" rows (D9): kept off the api
+// mock, whose calls the tests count.
+const markSeen = vi.fn()
+vi.mock('@/store/notifications', () => ({ markSeen: (l: string) => markSeen(l) }))
 const confirmDialog = vi.fn(async (_body: string, _opts: { title?: string }) => true)
 vi.mock('@/components/confirm', () => ({
   confirmDialog: (...a: [string, { title?: string }]) => confirmDialog(...a),
@@ -722,7 +726,7 @@ describe('GalleryPage viewer actions follow the delete rules (#1271)', () => {
     const view = await openOn(2, { spaceId: 'sp-1' }, { owner_user_id: 'u1', item_count: 2 })
     fireEvent.click(view.getByRole('button', { name: 'Delete' }))
     await waitFor(() => expect(location.pathname).toBe('/spaces/sp-1/gallery/albums/al-1/it-1'))
-    expect(apiPost).not.toHaveBeenCalled()
+    expect(apiPost.mock.calls.filter(c => c[0] === '/api/gallery/bulk')).toEqual([])
     const [message, , opts] = showToast.mock.calls.find(c => c[2]?.onExpire)!
     expect(message).toBe('1 photo deleted')
     opts.onExpire()
@@ -821,7 +825,7 @@ describe('GalleryPage selection (managing photos)', () => {
     fireEvent.click(view.getByRole('button', { name: 'Delete' }))
     // A moderator may delete both; nothing is sent before the Undo runs out.
     await waitFor(() => expect(showToast.mock.calls.some(c => c[0] === '2 photos deleted' && c[2]?.onExpire)).toBe(true))
-    expect(apiPost).not.toHaveBeenCalled()
+    expect(apiPost.mock.calls.filter(c => c[0] === '/api/gallery/bulk')).toEqual([])
     await waitFor(() => expect(view.container.querySelectorAll('.sh-gallery-item').length).toBe(0))
   })
 
@@ -1055,5 +1059,45 @@ describe('GalleryPage On this day (D14)', () => {
       "Couldn't save that. Check your connection and try again.", 'error',
     ))
     expect(await view.findByRole('region', { name: 'On this day' })).toBeTruthy()
+  })
+})
+
+describe('GalleryPage "new" pill (D9)', () => {
+  it('an album with photos you have not seen says so, and opening it clears it', async () => {
+    albumRows = [album('al-1', 'Holiday', { has_new: true }), album('al-2', 'Garden')]
+    apiPost.mockImplementation(async (url: string) => {
+      if (url === '/api/gallery/albums/al-1/seen') albumRows = [album('al-1', 'Holiday'), album('al-2', 'Garden')]
+      return undefined
+    })
+    const view = await mount({ spaceId: 'sp-1' })
+    const card = await view.findByRole('link', { name: /Open album Holiday.*New photos since your last visit/ })
+    expect(card.querySelector('.sh-album-new')?.textContent).toBe('New')
+    // Only the album with something new wears it.
+    const garden = view.getByRole('link', { name: /Open album Garden/ })
+    expect(garden.querySelector('.sh-album-new')).toBeNull()
+
+    fireEvent.click(card)
+    await view.findByRole('heading', { name: /Holiday/ })
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/gallery/albums/al-1/seen', {}))
+    // Its "new photos" rows open the same path: they read as seen too.
+    expect(markSeen).toHaveBeenCalledWith('/spaces/sp-1/gallery/albums/al-1')
+    fireEvent.click(view.getByRole('button', { name: /Albums/ }))
+    const back = await view.findByRole('link', { name: /Open album Holiday/ })
+    expect(back.querySelector('.sh-album-new')).toBeNull()
+  })
+
+  it('an album that failed to load is not marked seen', async () => {
+    albumRows = [album('al-1', 'Holiday', { has_new: true })]
+    apiPost.mockResolvedValue(undefined)
+    const base = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => {
+      if (url.startsWith('/api/gallery/albums/al-1/items')) throw new Error('offline')
+      return base(url)
+    })
+    const view = await mount({ spaceId: 'sp-1' })
+    fireEvent.click(await view.findByRole('link', { name: /Open album Holiday/ }))
+    await view.findByRole('heading', { name: /Holiday/ })
+    await waitFor(() => expect(showToast).toHaveBeenCalled())
+    expect(apiPost).not.toHaveBeenCalledWith('/api/gallery/albums/al-1/seen', {})
   })
 })

@@ -800,6 +800,10 @@ export interface NotifParams {
   /** A group game's row (v_76): how many people besides the reader were
    *  invited / joined / play ("… and 3 others"). */
   others?: number | null
+  /** A "new photos" row (gallery D9): how many photos and videos it tells
+   *  of, and the album's name. */
+  items?: number | null
+  album?: string | null
 }
 
 /** How a "Needs you" item ended. */

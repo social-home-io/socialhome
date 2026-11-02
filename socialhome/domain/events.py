@@ -1042,6 +1042,31 @@ class GalleryItemUploaded(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class GalleryItemsAdded(DomainEvent):
+    """One upload batch (D9): someone added ``photos`` photos and
+    ``videos`` videos to one album, then went quiet.
+
+    Never published by a request: :class:`~socialhome.services.
+    gallery_upload_batcher.GalleryUploadBatcher` coalesces the
+    :class:`GalleryItemUploaded` events of the same uploader and album
+    on the server, so a holiday of 80 photos is one event — and one
+    notification row — not 80. Local only: it never federates (a member
+    household batches its own copy of a space upload)."""
+
+    album_id: str
+    uploader: str
+    photos: int
+    videos: int
+    #: The space id for a space album, else None (household album).
+    space_id: str | None = None
+    occurred_at: datetime = field(default_factory=_now)
+
+    @property
+    def count(self) -> int:
+        return self.photos + self.videos
+
+
+@dataclass(slots=True, frozen=True)
 class GalleryItemDeleted(DomainEvent):
     item_id: str
     album_id: str

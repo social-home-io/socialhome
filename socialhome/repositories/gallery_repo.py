@@ -115,6 +115,14 @@ class AbstractGalleryRepo(Protocol):
     ) -> bool: ...
     async def list_album_media(self, album_id: str) -> list[str]: ...
     async def has_items_by_others(self, album_id: str, user_id: str) -> bool: ...
+    async def newest_by_others(
+        self, album_ids: list[str], viewer_user_id: str
+    ) -> dict[str, str]:
+        """Per album, when someone other than the viewer last added a live
+        item the viewer may see (D9's "neu" dot); albums with none are
+        left out."""
+        ...
+
     async def list_items(
         self,
         album_id: str,
@@ -646,6 +654,27 @@ class SqliteGalleryRepo:
             (album_id, user_id),
         )
         return row is not None
+
+    async def newest_by_others(
+        self, album_ids: list[str], viewer_user_id: str
+    ) -> dict[str, str]:
+        ids = list(dict.fromkeys(album_ids))
+        out: dict[str, str] = {}
+        for start in range(0, len(ids), 200):
+            chunk = ids[start : start + 200]
+            rows = await self._db.fetchall(
+                "SELECT i.album_id, MAX(i.created_at) AS newest"
+                " FROM gallery_items i"
+                f" WHERE i.album_id IN ({','.join('?' * len(chunk))})"
+                " AND i.uploaded_by <> ? AND i.deleted_at IS NULL"
+                f"{_VIEWER_MAY_SEE_I_UPLOADER_SQL}"
+                " GROUP BY i.album_id",
+                (*chunk, viewer_user_id, *([viewer_user_id] * 3)),
+            )
+            for r in rows:
+                if r["newest"]:
+                    out[str(r["album_id"])] = str(r["newest"])
+        return out
 
     async def list_album_media(self, album_id: str) -> list[str]:
         """The ``api/media/`` references of every item file in the album —

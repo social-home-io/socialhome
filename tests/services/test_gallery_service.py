@@ -39,6 +39,7 @@ from socialhome.domain.gallery import (
     GALLERY_MAX_UPLOAD_BYTES,
     GALLERY_VIDEO_MAX_SECONDS,
     GALLERY_VIDEO_MAX_UPLOAD_BYTES,
+    GalleryItem,
     UploadOutcome,
 )
 from socialhome.domain.media_constraints import (
@@ -2001,6 +2002,69 @@ async def test_a_heic_photo_is_stored_as_webp(env):
         64,
         48,
     )
+
+
+# ─── "Neu" dot (D9) ──────────────────────────────────────────────────────
+
+
+async def _add(env, album_id: str, who: str, item_id: str, *, ago_s: int = 0) -> None:
+    at = (datetime.now(UTC) - timedelta(seconds=ago_s)).isoformat()
+    await env._repo.create_item(  # type: ignore[attr-defined]
+        GalleryItem(
+            id=item_id,
+            album_id=album_id,
+            uploaded_by=who,
+            item_type="photo",
+            url=f"/api/media/{item_id}.webp",
+            thumbnail_url=f"/api/media/{item_id}-t.webp",
+            width=10,
+            height=10,
+            created_at=at,
+        )
+    )
+
+
+async def _dots(env, user_id: str, space_id: str | None = None) -> dict[str, bool]:
+    albums = await env.list_albums(space_id=space_id, actor_user_id=user_id)
+    return {a.name: a.has_new for a in albums}
+
+
+async def test_the_new_dot_shows_others_photos_until_the_album_is_opened(env):
+    trip = await env.create_album(space_id=None, owner_user_id="a-id", name="Trip")
+    await env.create_album(space_id=None, owner_user_id="a-id", name="Old")
+    await _add(env, trip.id, "a-id", "old-1", ago_s=3600)
+    # The first look only starts the clock: nothing is new on day one.
+    assert await _dots(env, "b-id") == {"Trip": False, "Old": False}
+    await asyncio.sleep(0.01)
+    await _add(env, trip.id, "a-id", "new-1")
+    await _add(env, trip.id, "b-id", "own-1")
+    assert await _dots(env, "b-id") == {"Trip": True, "Old": False}
+    assert (await env.get_album(trip.id, actor_user_id="b-id")).has_new
+    await env.mark_album_seen(trip.id, actor_user_id="b-id")
+    assert await _dots(env, "b-id") == {"Trip": False, "Old": False}
+    assert not (await env.get_album(trip.id, actor_user_id="b-id")).has_new
+    # Bob's own uploads never make a dot for him.
+    await asyncio.sleep(0.01)
+    await _add(env, trip.id, "b-id", "own-2")
+    assert await _dots(env, "b-id") == {"Trip": False, "Old": False}
+
+
+async def test_the_new_dot_shows_on_space_albums_too(env):
+    album = await env.create_album(space_id="sp-1", owner_user_id="a-id", name="Oma")
+    assert await _dots(env, "b-id", "sp-1") == {"Oma": False}
+    await asyncio.sleep(0.01)
+    await _add(env, album.id, "a-id", "sp-new")
+    assert await _dots(env, "b-id", "sp-1") == {"Oma": True}
+    await env.mark_album_seen(album.id, actor_user_id="b-id")
+    assert await _dots(env, "b-id", "sp-1") == {"Oma": False}
+
+
+async def test_marking_an_album_seen_needs_a_seat(env):
+    album = await env.create_album(space_id="sp-1", owner_user_id="a-id", name="Oma")
+    with pytest.raises(GalleryNotFoundError):
+        await env.mark_album_seen(album.id, actor_user_id="e-id")
+    with pytest.raises(GalleryNotFoundError):
+        await env.mark_album_seen("nope", actor_user_id="b-id")
 
 
 # ─── Managing (PR 5): edit, move, bulk, album restore, empty trash ────────

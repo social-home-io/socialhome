@@ -452,3 +452,42 @@ describe('countsMeta', () => {
     expect(countsMeta(null)).toBeNull()
   })
 })
+
+describe('a "new photos" row (gallery D9)', () => {
+  const photos = (extra: Partial<NotifParams> = {}): NotifParams => ({
+    actors: [{ id: 'u1', name: 'Lena' }], actor_count: 1, new: 1, total: 1,
+    space_name: null, items: 12, album: 'Sommer 2026', flags: ['photos'], ...extra,
+  })
+  const say = (p: NotifParams | null, space_id: string | null = null) => {
+    const segs = rowSentence({ type: 'gallery_added', title: 'SERVER TITLE', params: p, space_id })
+    return segs ? plainText(segs) : 'SERVER TITLE'
+  }
+
+  it('reads in the viewer\'s language, whatever the server wrote', async () => {
+    // The server wrote English (no saved locale); the UI is German.
+    await setLocale('de')
+    expect(say(photos())).toBe('Lena hat 12 Fotos zu „Sommer 2026“ hinzugefügt')
+    expect(say(photos({ items: 1 }))).toBe('Lena hat ein Foto zu „Sommer 2026“ hinzugefügt')
+    expect(say(photos({ flags: ['photos', 'videos'], items: 14 })))
+      .toBe('Lena hat 14 Fotos und Videos zu „Sommer 2026“ hinzugefügt')
+    expect(say(photos({ space_name: 'Großeltern', flags: ['videos'], items: 2 }), 's1'))
+      .toBe('Lena hat 2 Videos zu „Sommer 2026“ in Großeltern hinzugefügt')
+  })
+
+  it('in English, the album and the space are places', () => {
+    const segs = rowSentence({ type: 'gallery_added', title: 'T', params: photos({ space_name: 'Oma' }), space_id: 's1' })!
+    expect(plainText(segs)).toBe('Lena added 12 photos to “Sommer 2026” in Oma')
+    expect(segs.filter(s => s.kind === 'place').map(s => s.text)).toEqual(['Sommer 2026', 'Oma'])
+    expect(segs.find(s => s.kind === 'person')?.text).toBe('Lena')
+    expect(say(photos({ flags: ['videos'], items: 1 }))).toBe('Lena added a video to “Sommer 2026”')
+  })
+
+  it('keeps the server title when params lack what the sentence needs', () => {
+    expect(say(null)).toBe('SERVER TITLE')
+    expect(say(photos({ album: null }))).toBe('SERVER TITLE')
+    expect(say(photos({ items: null }))).toBe('SERVER TITLE')
+    expect(say(photos({ actors: [] }))).toBe('SERVER TITLE')
+    // A space row whose space name nobody knows.
+    expect(say(photos(), 's1')).toBe('SERVER TITLE')
+  })
+})

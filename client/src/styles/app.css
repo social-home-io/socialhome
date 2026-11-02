@@ -7464,6 +7464,35 @@ a.sh-btn { text-decoration: none; }
 }
 .sh-album-info strong { font-size: var(--sh-font-size-base); }
 
+/* "Neu" (D9): someone else added photos since you last opened the
+ * album. A filled hearth pill on the cover's corner — text, not a bare
+ * dot, so it reads for everyone (and the card's label says it too). */
+.sh-album-new {
+  position: absolute;
+  top: var(--sh-space-sm);
+  left: var(--sh-space-sm);
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--sh-radius-full);
+  background: var(--sh-primary-fill);
+  color: var(--sh-on-primary-fill);
+  font-size: var(--sh-font-size-xs);
+  font-weight: 700;
+  line-height: 1.4;
+  box-shadow: var(--sh-shadow-sm);
+  pointer-events: none;
+}
+.sh-album-new::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
 /* System "Posts" album — terracotta-tinted "Auto" pill in the album
  * card title and the detail header. Mirrors the OnlinePill aesthetic
  * for a consistent "this is a special chip" language. */
