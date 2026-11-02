@@ -436,7 +436,7 @@
   "gallery.viewer_hint": "Shown once, for a few seconds, the first time the viewer opens on a touch screen.",
   "gallery.info_copy_for_pages": "Copies a reference to this photo that can be pasted into a Page (the Pages feature, a wiki).",
   "gallery.info_no_location": "Note in the photo's info panel. True: uploaded photos lose their GPS data; only the day the photo was taken is kept.",
-  "gallery.delete_body_household": "'It' is the photo or video. There is no trash yet: deleting is final.",
+  "gallery.delete_body_household": "'It' is the photo or video. A household delete goes to the trash, which keeps it for 30 days (the space gallery has no trash: delete_body_space says it is final).",
   "gallery.album_empty_body_before": "Followed by the bold button label '+ Upload' and then album_empty_body_after.",
   "highlight.publish.no_gfs_before": "Sentence split around a link to Settings → Connections. no_gfs_after follows the link.",
   "poll.closes_in_min": "Countdown under a poll; {n} = minutes left. Keep very short.",

@@ -4480,7 +4480,7 @@
   "gallery.info_copy_for_pages": "Copier pour les Pages",
   "gallery.delete_photo_title": "Supprimer cette photo ?",
   "gallery.delete_video_title": "Supprimer cette vidéo ?",
-  "gallery.delete_body_household": "Elle disparaît pour tout votre foyer. Cette action est définitive.",
+  "gallery.delete_body_household": "Elle disparaît pour tout votre foyer et reste 30 jours dans la corbeille.",
   "gallery.delete_body_space": "Elle disparaît pour tous les membres de cet espace. Cette action est définitive.",
   "gallery.deleted": "Supprimée",
   "gallery.delete_failed": "Impossible de supprimer. Vérifiez votre connexion et réessayez.",

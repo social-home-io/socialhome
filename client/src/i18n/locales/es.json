@@ -4507,7 +4507,7 @@
   "gallery.info_copy_for_pages": "Copiar para Páginas",
   "gallery.delete_photo_title": "¿Borrar esta foto?",
   "gallery.delete_video_title": "¿Borrar este vídeo?",
-  "gallery.delete_body_household": "Desaparece para todo tu hogar. No se puede deshacer.",
+  "gallery.delete_body_household": "Desaparece para todo tu hogar y se queda 30 días en la papelera.",
   "gallery.delete_body_space": "Desaparece para todos en este espacio. No se puede deshacer.",
   "gallery.deleted": "Se ha borrado",
   "gallery.delete_failed": "No se pudo borrar. Comprueba tu conexión y vuelve a intentarlo.",

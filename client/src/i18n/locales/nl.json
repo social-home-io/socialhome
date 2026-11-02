@@ -4480,7 +4480,7 @@
   "gallery.info_copy_for_pages": "Kopiëren voor Pagina’s",
   "gallery.delete_photo_title": "Deze foto verwijderen?",
   "gallery.delete_video_title": "Deze video verwijderen?",
-  "gallery.delete_body_household": "Hij verdwijnt voor iedereen in je huishouden. Dit kan niet ongedaan worden gemaakt.",
+  "gallery.delete_body_household": "Hij verdwijnt voor iedereen in je huishouden en blijft 30 dagen in de prullenbak.",
   "gallery.delete_body_space": "Hij verdwijnt voor iedereen in deze space. Dit kan niet ongedaan worden gemaakt.",
   "gallery.deleted": "Verwijderd",
   "gallery.delete_failed": "Verwijderen is niet gelukt. Controleer je verbinding en probeer het opnieuw.",

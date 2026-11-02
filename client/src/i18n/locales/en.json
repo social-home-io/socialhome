@@ -4516,7 +4516,7 @@
   "gallery.info_copy_for_pages": "Copy for Pages",
   "gallery.delete_photo_title": "Delete this photo?",
   "gallery.delete_video_title": "Delete this video?",
-  "gallery.delete_body_household": "It's gone for everyone in your household. This can't be undone.",
+  "gallery.delete_body_household": "It disappears for everyone in your household and stays in the trash for 30 days.",
   "gallery.delete_body_space": "It's gone for everyone in this space. This can't be undone.",
   "gallery.deleted": "Deleted",
   "gallery.delete_failed": "Couldn't delete it. Check your connection and try again.",

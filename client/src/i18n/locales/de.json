@@ -4480,7 +4480,7 @@
   "gallery.info_copy_for_pages": "Für Seiten kopieren",
   "gallery.delete_photo_title": "Dieses Foto löschen?",
   "gallery.delete_video_title": "Dieses Video löschen?",
-  "gallery.delete_body_household": "Es verschwindet für alle in deinem Haushalt. Das lässt sich nicht rückgängig machen.",
+  "gallery.delete_body_household": "Es verschwindet für alle in deinem Haushalt und bleibt 30 Tage im Papierkorb.",
   "gallery.delete_body_space": "Es verschwindet für alle in diesem Space. Das lässt sich nicht rückgängig machen.",
   "gallery.deleted": "Gelöscht",
   "gallery.delete_failed": "Löschen hat nicht geklappt. Prüf deine Verbindung und versuch es noch einmal.",
