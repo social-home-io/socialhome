@@ -188,3 +188,82 @@ class GalleryAlbumAudience:
     album_id: str
     audience: str = AUDIENCE_EVERYONE
     user_ids: frozenset[str] = frozenset()
+
+
+# ─── Uploads ─────────────────────────────────────────────────────────────
+
+#: Largest photo upload, and largest video upload to a *space* album (a
+#: space keeps the protocol's 60 s, which fits). Enforced while
+#: streaming, so it holds for chunked bodies too and is independent of
+#: aiohttp's 1 MiB ``client_max_size``.
+GALLERY_MAX_UPLOAD_BYTES: int = 100 * 1024 * 1024
+
+
+def is_video_upload(content_type: str) -> bool:
+    """Does an upload with this ``Content-Type`` go the video way?
+
+    A type-less body (``application/octet-stream``) is treated as a video
+    — the SPA always names a photo's type.
+    """
+    return (
+        content_type.startswith("video/") or content_type == "application/octet-stream"
+    )
+
+
+@dataclass(slots=True, frozen=True)
+class UploadLimits:
+    """The largest files one album takes (:meth:`GalleryService.upload_limits`)."""
+
+    photo_bytes: int
+    video_bytes: int
+    #: Longest video it keeps whole: the household gallery's own limit,
+    #: or the protocol's for a space (whose videos are cut to it).
+    video_seconds: int
+
+
+@dataclass(slots=True, frozen=True)
+class StashedUpload:
+    """An uploaded file written to the (non-served) transcode temp dir
+    while it streamed in — never held in memory."""
+
+    path: str
+    size: int
+    #: SHA-256 (hex) of the bytes as uploaded — the duplicate check.
+    sha256: str
+
+
+# ─── Household videos (owner decision D4, 2026-11-02) ────────────────────
+#
+# A household gallery is not the federated feed: its videos never leave
+# the household, so it keeps longer videos than the protocol's 60 s
+# (``VIDEO_MAX_DURATION_SECONDS``, which spaces, the feed and DMs keep).
+# The stored format is the same everywhere — VP9/Opus WebM, longest edge
+# ``VIDEO_MAX_DIMENSION`` — only the length and the upload size differ.
+
+#: Longest household-gallery video. Checked before upload (the SPA reads
+#: the length from the file) and again on the server; a longer one is
+#: refused with its length, never cut. "Up to 5 minutes" is what a phone
+#: shows as ``5:00``, so anything under 301 s passes.
+GALLERY_VIDEO_MAX_SECONDS: int = 300
+
+#: Largest household-gallery video upload. Five minutes of phone video:
+#: 1080p30 H.264 ≈ 650 MB, 4K30 HEVC ≈ 850 MB, 4K30 H.264 ≈ 1.75 GB,
+#: 4K60 HEVC ≈ 2.0 GB — 2 GiB covers all of them (only 4K60 H.264,
+#: ≈ 3 GB, is over and is refused before a byte is sent). The upload is
+#: streamed to disk in chunks, never held in memory, and the stored WebM
+#: is a fraction of it.
+GALLERY_VIDEO_MAX_UPLOAD_BYTES: int = 2 * 1024 * 1024 * 1024
+
+#: Videos waiting to be converted, household-wide. A further upload is
+#: refused (503 ``TRANSCODE_QUEUE_FULL``) until the queue drains, so a
+#: runaway client can't park unbounded source files on disk.
+GALLERY_VIDEO_MAX_QUEUED: int = 300
+
+
+def video_fits(duration_s: float, max_seconds: int) -> bool:
+    """Does a video of ``duration_s`` keep within ``max_seconds``?
+
+    Whole seconds, the way a phone shows a length: ``5:00.9`` is five
+    minutes, ``5:01`` is not.
+    """
+    return int(duration_s) <= max_seconds

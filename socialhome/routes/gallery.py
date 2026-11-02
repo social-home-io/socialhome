@@ -22,11 +22,19 @@ Endpoints:
 
 Both lists page newest first with ``?limit=&before=&before_id=`` (see
 :func:`_page_query`); items newest first the same way.
+
+A video upload is streamed straight to disk (never held in memory) and
+checked there: a household album keeps videos up to 5 minutes and takes
+files up to 2 GiB (``GALLERY_VIDEO_MAX_*`` in ``domain/gallery.py``); a
+space album keeps the protocol's 60 s and 100 MiB. A video that is still
+converting carries ``media_status: "processing"`` and ``media_eta_s``
+(seconds until it is ready, a rough estimate).
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from datetime import UTC, datetime, timedelta
 
 from aiohttp import web
@@ -34,8 +42,21 @@ from aiohttp.multipart import BodyPartReader
 
 from .. import app_keys as K
 from ..domain.errors import PayloadTooLargeError
-from ..domain.gallery import TRASH_RETENTION_DAYS, GalleryTrashItem, UploadOutcome
-from ..hardening import read_body_capped, read_part_capped
+from ..domain.gallery import (
+    GALLERY_MAX_UPLOAD_BYTES,
+    GALLERY_VIDEO_MAX_UPLOAD_BYTES,
+    TRASH_RETENTION_DAYS,
+    GalleryTrashItem,
+    GalleryUpload,
+    UploadOutcome,
+    is_video_upload,
+)
+from ..hardening import (
+    STREAM_CHUNK_BYTES,
+    iter_part_chunks,
+    read_body_capped,
+    read_part_capped,
+)
 from ..media_signer import sign_media_urls_in
 from .base import BaseView
 from .media_status import READY, media_filename
@@ -44,12 +65,17 @@ log = logging.getLogger(__name__)
 
 _GALLERY_SECTION = "gallery"
 
-#: Hard cap on one uploaded item — prevents OOM on a hostile client trying
-#: to upload a 2 GB file. 100 MiB mirrors what the browser guard enforces
-#: client-side. Enforced while streaming (``read_*_capped``), so it holds
-#: for chunked bodies too and is independent of aiohttp's 1 MiB
-#: ``client_max_size``.
-GALLERY_MAX_UPLOAD_BYTES: int = 100 * 1024 * 1024
+#: ``(method, path, cap)`` for the generic body-size middleware: the item
+#: upload may declare up to a household video's cap (plus the multipart
+#: framing). The route enforces the exact limit for the album while it
+#: streams (:meth:`GalleryService.upload_limits`).
+GALLERY_LARGE_UPLOAD: tuple[str, re.Pattern[str], int] = (
+    "POST",
+    re.compile(r"/api/gallery/albums/[^/]+/items"),
+    GALLERY_VIDEO_MAX_UPLOAD_BYTES + 1024 * 1024,
+)
+
+__all__ = ["GALLERY_LARGE_UPLOAD", "GALLERY_MAX_UPLOAD_BYTES"]
 
 #: Default page sizes. A page shorter than the ``limit`` asked for is the
 #: last one; the next page is ``?before=<created_at>&before_id=<id>`` of
@@ -305,12 +331,16 @@ class AlbumItemCollectionView(BaseView):
             if i.item_type == "video" and (fn := media_filename(i.url)) is not None
         ]
         statuses = await self.svc(K.media_transcode_repo_key).status_for(video_fns)
+        waiting = [fn for fn, st in statuses.items() if st == "processing"]
+        etas = await self.svc(K.media_transcode_service_key).estimates(waiting)
         out = []
         for i in items:
             payload = _item_signed(self.request, i)
             if i.item_type == "video":
                 fn = media_filename(i.url)
                 payload["media_status"] = statuses.get(fn, READY) if fn else READY
+                if fn in etas:
+                    payload["media_eta_s"] = etas[fn]
             out.append(payload)
         return web.json_response(out)
 
@@ -319,19 +349,26 @@ class AlbumItemCollectionView(BaseView):
         await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
         album_id = self.match("album_id")
         caption = self.request.query.get("caption")
+        gallery = self.svc(K.gallery_service_key)
 
-        # A declared ``Content-Length`` over the cap is refused before the
-        # body is touched — on both paths, so the multipart reader is never
-        # even opened for it. (``read_body_capped`` repeats the check for
-        # the raw path; it is cheap.)
+        # What this album takes from this person — asked before the body
+        # is touched, so an album they can't add to, or a declared
+        # ``Content-Length`` over the cap or over the free disk, is refused
+        # before a 2 GB video is sent. (``read_body_capped`` repeats the
+        # length check for the raw path; it is cheap.)
         declared = self.request.content_length
-        if declared is not None and declared > GALLERY_MAX_UPLOAD_BYTES:
-            raise PayloadTooLargeError(GALLERY_MAX_UPLOAD_BYTES)
+        limits = await gallery.upload_limits(
+            album_id, uploader_user_id=ctx.user_id, declared_bytes=declared
+        )
+        largest = max(limits.photo_bytes, limits.video_bytes)
+        if declared is not None and declared > largest:
+            raise PayloadTooLargeError(largest)
 
         # Accept multipart upload (preferred — frontend uses FormData)
-        # or raw image bytes with a Content-Type header (CLI/scripts).
-        # Both paths stream under ``GALLERY_MAX_UPLOAD_BYTES``; an over-cap
-        # body raises ``PayloadTooLargeError`` (413) via ``_iter``.
+        # or raw bytes with a Content-Type header (CLI/scripts). A photo
+        # is read under ``limits.photo_bytes``; a video is streamed to
+        # disk under ``limits.video_bytes``, never held in memory. Over
+        # either raises ``PayloadTooLargeError`` (413) via ``_iter``.
         content_type = self.request.headers.get("Content-Type", "")
         if content_type.startswith("multipart/"):
             try:
@@ -347,20 +384,50 @@ class AlbumItemCollectionView(BaseView):
                 return web.json_response({"error": "missing file"}, status=422)
             if not isinstance(field, BodyPartReader):
                 return web.json_response({"error": "expected file part"}, status=400)
-            data = await read_part_capped(field, GALLERY_MAX_UPLOAD_BYTES)
             content_type = field.headers.get("Content-Type", "image/jpeg")
+            if is_video_upload(content_type):
+                stash = await gallery.stash_upload(
+                    iter_part_chunks(field), max_bytes=limits.video_bytes
+                )
+                upload = await gallery.upload_video(
+                    album_id,
+                    stash=stash,
+                    caption=caption,
+                    uploader_user_id=ctx.user_id,
+                )
+                return await self._uploaded(upload)
+            # A photo: its part's headers are read, its body not yet — a
+            # declared length over the photo cap is refused here.
+            if declared is not None and declared > limits.photo_bytes:
+                raise PayloadTooLargeError(limits.photo_bytes)
+            data = await read_part_capped(field, limits.photo_bytes)
         else:
-            data = await read_body_capped(self.request, GALLERY_MAX_UPLOAD_BYTES)
             if not content_type:
                 content_type = "application/octet-stream"
+            if is_video_upload(content_type):
+                stash = await gallery.stash_upload(
+                    self.request.content.iter_chunked(STREAM_CHUNK_BYTES),
+                    max_bytes=limits.video_bytes,
+                )
+                upload = await gallery.upload_video(
+                    album_id,
+                    stash=stash,
+                    caption=caption,
+                    uploader_user_id=ctx.user_id,
+                )
+                return await self._uploaded(upload)
+            data = await read_body_capped(self.request, limits.photo_bytes)
 
-        upload = await self.svc(K.gallery_service_key).upload_item(
+        upload = await gallery.upload_item(
             album_id,
             data=data,
             content_type=content_type,
             caption=caption,
             uploader_user_id=ctx.user_id,
         )
+        return await self._uploaded(upload)
+
+    async def _uploaded(self, upload: GalleryUpload) -> web.Response:
         item = upload.item
         payload = _item_signed(self.request, item)
         if upload.outcome is not UploadOutcome.CREATED:
@@ -371,10 +438,16 @@ class AlbumItemCollectionView(BaseView):
             return web.json_response(payload, status=200)
         # A freshly-uploaded video transcodes in the background — the
         # ``.webm`` + poster don't exist on disk yet. Tell the SPA to
-        # render a "processing" placeholder; the LIST endpoint (T4)
-        # derives the live status from the transcode repo on refetch.
+        # render a "processing" placeholder (with a rough "ready in"); the
+        # LIST endpoint derives the live status from the transcode repo
+        # on refetch.
         if item.item_type == "video":
             payload["media_status"] = "processing"
+            fn = media_filename(item.url)
+            if fn is not None:
+                etas = await self.svc(K.media_transcode_service_key).estimates([fn])
+                if fn in etas:
+                    payload["media_eta_s"] = etas[fn]
         return web.json_response(payload, status=201)
 
 

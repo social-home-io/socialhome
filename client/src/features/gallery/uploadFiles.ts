@@ -9,11 +9,21 @@
  * The server stores every upload in one format (WebP ≤ 2560 px photos,
  * VP9/Opus WebM ≤ 1920 px videos — ``socialhome/domain/media_constraints.py``);
  * these checks only spare a round trip for a file it would refuse.
+ *
+ * The household gallery keeps videos up to 5 minutes (a space keeps the
+ * protocol's 60 s): the length is read from the file here, before a byte
+ * is sent, and a longer video is refused with its length — never cut.
  */
 import { formatLocale } from '@/i18n/i18n'
 
-/** The server's cap on one gallery file (``GALLERY_MAX_UPLOAD_BYTES``). */
+/** The server's cap on a photo, or on a space album's video
+ *  (``GALLERY_MAX_UPLOAD_BYTES``). */
 export const MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+/** A household album's video: 5 minutes of 4K phone video
+ *  (``GALLERY_VIDEO_MAX_UPLOAD_BYTES``). */
+export const HOUSEHOLD_VIDEO_MAX_BYTES = 2 * 1024 * 1024 * 1024
+/** The longest household-gallery video (``GALLERY_VIDEO_MAX_SECONDS``). */
+export const HOUSEHOLD_VIDEO_MAX_SECONDS = 300
 
 /** Types the server turns into a WebP photo. */
 const PHOTO_TYPES: Record<string, string> = {
@@ -35,7 +45,7 @@ export const ACCEPT = [
 ].join(',')
 
 export type FileKind = 'photo' | 'video'
-export type FileProblem = 'too_large' | 'unsupported' | 'empty'
+export type FileProblem = 'too_large' | 'unsupported' | 'empty' | 'too_long'
 
 export interface FileCheck {
   kind: FileKind
@@ -52,8 +62,15 @@ function extension(name: string): string {
   return dot < 0 ? '' : name.slice(dot + 1).toLowerCase()
 }
 
-/** Classify ``file`` before upload. */
-export function checkFile(file: File): FileCheck {
+/** The largest file of ``kind`` an album takes (``household``: a
+ *  household album, whose videos may be 5 minutes long). */
+export function maxBytes(kind: FileKind, household: boolean): number {
+  return kind === 'video' && household ? HOUSEHOLD_VIDEO_MAX_BYTES : MAX_UPLOAD_BYTES
+}
+
+/** Classify ``file`` before upload (into a household album when
+ *  ``household``, else a space album). */
+export function checkFile(file: File, household = false): FileCheck {
   const ext = extension(file.name)
   const own = (file.type || '').toLowerCase()
   let kind: FileKind | null = null
@@ -68,8 +85,64 @@ export function checkFile(file: File): FileCheck {
     return { kind: own.startsWith('video/') ? 'video' : 'photo', mime: own, problem: 'unsupported' }
   }
   if (file.size === 0) return { kind, mime, problem: 'empty' }
-  if (file.size > MAX_UPLOAD_BYTES) return { kind, mime, problem: 'too_large' }
+  if (file.size > maxBytes(kind, household)) return { kind, mime, problem: 'too_large' }
   return { kind, mime, problem: null }
+}
+
+/** Is a video of ``seconds`` longer than ``max``? Whole seconds, the way
+ *  a phone shows a length: 5:00.9 is five minutes, 5:01 is not
+ *  (``video_fits`` on the server). */
+export function videoTooLong(seconds: number, max = HOUSEHOLD_VIDEO_MAX_SECONDS): boolean {
+  return Math.floor(seconds) > max
+}
+
+/** "7:12" (or "1:02:03") — a video length the way a phone shows it. */
+export function formatDuration(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds))
+  const h = Math.floor(total / 3600)
+  const m = Math.floor((total % 3600) / 60)
+  const s = String(total % 60).padStart(2, '0')
+  return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${s}` : `${m}:${s}`
+}
+
+/** Give up on reading a length after this long (a huge file on a slow
+ *  phone); the server checks it again anyway. */
+export const DURATION_TIMEOUT_MS = 15_000
+
+/**
+ * The length of a video file in seconds, read by the browser from the
+ * file itself (only its header is read, nothing is uploaded) — or
+ * ``null`` when this browser can't tell (a codec it can't open, a broken
+ * file, too slow). ``null`` lets the file go up: the server reads the
+ * length again and refuses a long one with the same message.
+ */
+export function readVideoDuration(file: File, timeoutMs = DURATION_TIMEOUT_MS): Promise<number | null> {
+  if (typeof document === 'undefined' || typeof URL.createObjectURL !== 'function') {
+    return Promise.resolve(null)
+  }
+  return new Promise((resolve) => {
+    const video = document.createElement('video')
+    const url = URL.createObjectURL(file)
+    let settled = false
+    const done = (value: number | null) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      video.removeAttribute('src')
+      video.load()
+      URL.revokeObjectURL(url)
+      resolve(value)
+    }
+    const timer = setTimeout(() => done(null), timeoutMs)
+    video.preload = 'metadata'
+    video.muted = true
+    video.onloadedmetadata = () => {
+      const d = video.duration
+      done(Number.isFinite(d) && d > 0 ? d : null)
+    }
+    video.onerror = () => done(null)
+    video.src = url
+  })
 }
 
 /** Can this browser draw ``file`` in an ``<img>``? HEIC only in Safari —

@@ -29,6 +29,7 @@ import io
 import logging
 import pathlib
 import uuid
+from collections.abc import AsyncIterable, AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -36,6 +37,12 @@ import aiofiles
 import aiofiles.os
 
 from ..config import Config
+from ..domain.errors import (
+    PayloadTooLargeError,
+    TranscodeQueueFullError,
+    VideoTooLongError,
+    VideoUnreadableError,
+)
 from ..domain.events import (
     GalleryAlbumCreated,
     GalleryAlbumDeleted,
@@ -46,17 +53,26 @@ from ..domain.events import (
     UserDeprovisioned,
 )
 from ..domain.gallery import (
+    GALLERY_MAX_UPLOAD_BYTES,
+    GALLERY_VIDEO_MAX_QUEUED,
+    GALLERY_VIDEO_MAX_SECONDS,
+    GALLERY_VIDEO_MAX_UPLOAD_BYTES,
     TRASH_RETENTION_DAYS,
     GalleryAlbum,
     GalleryItem,
     GalleryTrashItem,
     GalleryUpload,
+    StashedUpload,
+    UploadLimits,
     UploadOutcome,
+    is_video_upload,
+    video_fits,
 )
 from ..domain.media_constraints import (
     CAPTION_MAX,
-    VIDEO_MAX_DIMENSION,
+    VIDEO_MAX_DURATION_SECONDS,
 )
+from ..domain.media_transcode import VideoProbe
 from ..domain.post import Post, PostType
 from ..domain.preferences import FeatureDisabledError
 from ..domain.space import (
@@ -74,6 +90,7 @@ from ..federation.owner_bound_id import (
 from ..infrastructure.event_bus import EventBus
 from ..media.cleanup import media_basename, unlink_unreferenced
 from ..media.image_processor import ImageProcessor
+from ..media.video_processor import VideoProcessor
 from ..repositories.gallery_repo import AbstractGalleryRepo
 from ..repositories.instance_config_repo import AbstractInstanceConfigRepo
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
@@ -535,6 +552,68 @@ class GalleryService:
             viewer_user_id=actor_user_id if album.is_system else None,
         )
 
+    async def upload_limits(
+        self,
+        album_id: str,
+        *,
+        uploader_user_id: str,
+        declared_bytes: int | None = None,
+    ) -> UploadLimits:
+        """The largest files *album_id* takes from this person.
+
+        Asked before a byte of the body is read, so a refusal (an album
+        the person can't see or add to, a full disk for the declared
+        size) costs nothing — a 2 GB video isn't sent to be turned away.
+        """
+        album = await self._album_for_upload(album_id, uploader_user_id, None)
+        if declared_bytes and self._storage_quota is not None:
+            await self._storage_quota.check_can_store(declared_bytes)
+        if album.space_id is None:
+            return UploadLimits(
+                photo_bytes=GALLERY_MAX_UPLOAD_BYTES,
+                video_bytes=GALLERY_VIDEO_MAX_UPLOAD_BYTES,
+                video_seconds=GALLERY_VIDEO_MAX_SECONDS,
+            )
+        return UploadLimits(
+            photo_bytes=GALLERY_MAX_UPLOAD_BYTES,
+            video_bytes=GALLERY_MAX_UPLOAD_BYTES,
+            video_seconds=VIDEO_MAX_DURATION_SECONDS,
+        )
+
+    async def stash_upload(
+        self, chunks: AsyncIterable[bytes], *, max_bytes: int
+    ) -> StashedUpload:
+        """Write an upload to the transcode temp dir as it streams in.
+
+        Never holds the file in memory: chunks are gathered into a few
+        MiB, written with ``aiofiles`` and hashed (SHA-256, for the
+        duplicate check) in a worker thread. Over *max_bytes* raises
+        :class:`PayloadTooLargeError` (413); on any failure — a dropped
+        connection included — the partial file is removed.
+        """
+        temp_dir = self._media_dir / "transcode_src"
+        await aiofiles.os.makedirs(temp_dir, exist_ok=True)
+        path = temp_dir / f"{uuid.uuid4().hex}.bin"
+        digest = hashlib.sha256()
+        size = 0
+        pending = bytearray()
+        try:
+            async with aiofiles.open(path, "wb") as f:
+                async for chunk in chunks:
+                    size += len(chunk)
+                    if size > max_bytes:
+                        raise PayloadTooLargeError(max_bytes)
+                    pending += chunk
+                    if len(pending) >= _STASH_FLUSH_BYTES:
+                        await _write_and_hash(f, digest, bytes(pending))
+                        pending.clear()
+                if pending:
+                    await _write_and_hash(f, digest, bytes(pending))
+        except BaseException:
+            await _remove_quietly(path)
+            raise
+        return StashedUpload(path=str(path), size=size, sha256=digest.hexdigest())
+
     async def upload_item(
         self,
         album_id: str,
@@ -550,8 +629,9 @@ class GalleryService:
         ``IMAGE_MAX_DIMENSION``), extracts the EXIF date (day-only, no
         GPS), generates a WebP thumbnail.
 
-        Video path queues the VideoProcessor → VP9/Opus WebM (longest
-        side ≤ ``VIDEO_MAX_DIMENSION``) with a WebP poster.
+        A video is written to the transcode temp dir and goes on as
+        :meth:`upload_video` does (the HTTP route streams a video straight
+        to disk with :meth:`stash_upload` instead of passing its bytes).
 
         A household upload is first checked for an exact duplicate: the
         SHA-256 of the bytes as uploaded (before conversion — every stored
@@ -561,6 +641,70 @@ class GalleryService:
         comes back (:attr:`UploadOutcome.RESTORED`). Only the digest is
         kept, never the uploaded bytes. A space upload is not checked.
         """
+        album = await self._album_for_upload(album_id, uploader_user_id, caption)
+        if not data:
+            raise ValueError("upload data is empty")
+        if is_video_upload(content_type):
+            stash = await self.stash_upload(_one_chunk(data), max_bytes=len(data))
+            return await self._upload_video(
+                album,
+                stash=stash,
+                caption=caption,
+                uploader_user_id=uploader_user_id,
+            )
+        content_sha256: str | None = None
+        if album.space_id is None:
+            content_sha256 = await asyncio.to_thread(_sha256_hex, data)
+            found = await self._find_duplicate(content_sha256, uploader_user_id)
+            if found is not None:
+                return found
+        if self._storage_quota is not None:
+            # 507 STORAGE_FULL via ``BaseView._iter``, before any disk write.
+            await self._storage_quota.check_can_store(len(data))
+        item = await self._upload_photo(
+            album_id=album_id,
+            space_id=album.space_id,
+            data=data,
+            content_type=content_type,
+            caption=caption,
+            uploader_user_id=uploader_user_id,
+        )
+        return await self._store_new_item(album, item, content_sha256)
+
+    async def upload_video(
+        self,
+        album_id: str,
+        *,
+        stash: StashedUpload,
+        caption: str | None,
+        uploader_user_id: str,
+    ) -> GalleryUpload:
+        """Queue a video already written to disk (:meth:`stash_upload`).
+
+        Reads the file's length, picture size and recording day
+        (:meth:`VideoProcessor.probe_file`), refuses a household video
+        longer than ``GALLERY_VIDEO_MAX_SECONDS`` (422 ``VIDEO_TOO_LONG``
+        with its length — never cut), then queues the conversion and
+        returns at once with the item's real size, length and day. A
+        space video keeps the protocol's 60 s, as before. The stashed
+        file is removed whenever the upload doesn't go ahead.
+        """
+        try:
+            album = await self._album_for_upload(album_id, uploader_user_id, caption)
+        except BaseException:
+            await _remove_quietly(pathlib.Path(stash.path))
+            raise
+        return await self._upload_video(
+            album,
+            stash=stash,
+            caption=caption,
+            uploader_user_id=uploader_user_id,
+        )
+
+    async def _album_for_upload(
+        self, album_id: str, uploader_user_id: str, caption: str | None
+    ) -> GalleryAlbum:
+        """The album, once this person may add (captioned) items to it."""
         album = await self._visible_album(album_id, uploader_user_id)
         if album.is_system:
             raise GalleryPermissionError(
@@ -571,56 +715,36 @@ class GalleryService:
             await self._require_writer(album.space_id, uploader_user_id)
         if caption and len(caption) > CAPTION_MAX:
             raise ValueError(f"Caption must be {CAPTION_MAX} characters or fewer")
-        if not data:
-            raise ValueError("upload data is empty")
-        content_sha256: str | None = None
-        if album.space_id is None:
-            content_sha256 = await asyncio.to_thread(_sha256_hex, data)
-            duplicate = await self._repo.find_household_duplicate(
-                content_sha256, viewer_user_id=uploader_user_id
-            )
-            if duplicate is not None and not duplicate.in_trash:
-                return GalleryUpload(duplicate.item, UploadOutcome.ALREADY_HERE)
-            if duplicate is not None:
-                restored = await self._restore(duplicate.item.id)
-                if restored is not None:
-                    return GalleryUpload(restored, UploadOutcome.RESTORED)
-        if self._storage_quota is not None:
-            # 507 STORAGE_FULL via ``BaseView._iter``, before any disk write.
-            await self._storage_quota.check_can_store(len(data))
+        return album
 
-        is_video = (
-            content_type.startswith("video/")
-            or content_type == "application/octet-stream"
+    async def _find_duplicate(
+        self, content_sha256: str, uploader_user_id: str
+    ) -> GalleryUpload | None:
+        """An upload's household duplicate the uploader can see, if any —
+        brought back from the trash when it waits there."""
+        duplicate = await self._repo.find_household_duplicate(
+            content_sha256, viewer_user_id=uploader_user_id
         )
+        if duplicate is None:
+            return None
+        if not duplicate.in_trash:
+            return GalleryUpload(duplicate.item, UploadOutcome.ALREADY_HERE)
+        restored = await self._restore(duplicate.item.id)
+        if restored is not None:
+            return GalleryUpload(restored, UploadOutcome.RESTORED)
+        return None
 
-        if is_video:
-            item = await self._upload_video(
-                album_id=album_id,
-                space_id=album.space_id,
-                data=data,
-                content_type=content_type or "video/mp4",
-                caption=caption,
-                uploader_user_id=uploader_user_id,
-            )
-        else:
-            item = await self._upload_photo(
-                album_id=album_id,
-                space_id=album.space_id,
-                data=data,
-                content_type=content_type,
-                caption=caption,
-                uploader_user_id=uploader_user_id,
-            )
-
+    async def _store_new_item(
+        self, album: GalleryAlbum, item: GalleryItem, content_sha256: str | None
+    ) -> GalleryUpload:
         await self._repo.create_item(item, content_sha256=content_sha256)
-        await self._repo.increment_item_count(album_id, +1)
+        await self._repo.increment_item_count(album.id, +1)
         await self._bus.publish(
             GalleryItemUploaded(
                 item_id=item.id,
-                album_id=album_id,
+                album_id=album.id,
                 item_type=item.item_type,
-                uploader=uploader_user_id,
+                uploader=item.uploaded_by,
                 space_id=album.space_id,
             )
         )
@@ -875,79 +999,86 @@ class GalleryService:
 
     async def _upload_video(
         self,
+        album: GalleryAlbum,
         *,
-        album_id: str,
-        space_id: str | None,
-        data: bytes,
-        content_type: str,
+        stash: StashedUpload,
         caption: str | None,
         uploader_user_id: str,
-    ) -> GalleryItem:
-        """Async video upload — enqueue a transcode job, return immediately.
+    ) -> GalleryUpload:
+        """Check a stashed video, queue its conversion, store its item.
 
-        Mints the eventual ``.webm`` output + ``.webp`` thumbnail names,
-        stashes the raw source bytes under the (non-served)
-        ``transcode_src`` temp dir, enqueues a ``media_transcode_jobs``
-        row keyed by the output filename, and nudges the scheduler. The
-        :class:`GalleryItem` is created with placeholder dims and
-        ``duration_s=None`` — the SPA renders a "processing" placeholder
-        until :meth:`MediaTranscodeService.flush_once` writes the files
-        and clears the row.
+        Mints the eventual ``.webm`` output + ``.webp`` poster names from
+        one UUID stem, enqueues a ``media_transcode_jobs`` row with the
+        length to keep, and nudges the scheduler; the SPA shows a
+        "processing" tile (with an estimate) until
+        :meth:`MediaTranscodeService.flush_once` writes the files.
 
         Requires the transcode repo + service to be wired; without them
         there is no background worker to drain the queue, so we fail loud
         rather than silently dropping the upload.
         """
-        if self._transcode_repo is None or self._transcode_service is None:
-            raise RuntimeError(
-                "video upload requires the media transcode service to be wired"
+        source = pathlib.Path(stash.path)
+        try:
+            if self._transcode_repo is None or self._transcode_service is None:
+                raise RuntimeError(
+                    "video upload requires the media transcode service to be wired"
+                )
+            if stash.size == 0:
+                raise ValueError("upload data is empty")
+            household = album.space_id is None
+            content_sha256 = stash.sha256 if household else None
+            if content_sha256 is not None:
+                found = await self._find_duplicate(content_sha256, uploader_user_id)
+                if found is not None:
+                    await _remove_quietly(source)
+                    return found
+            if self._storage_quota is not None:
+                await self._storage_quota.check_can_store(stash.size)
+            probe = await self._probe_video(source)
+            keep_s = _video_keep_seconds(probe, household=household)
+            if await self._transcode_repo.count_queued() >= GALLERY_VIDEO_MAX_QUEUED:
+                raise TranscodeQueueFullError()
+            # ONE shared UUID stem for the transcoded ``.webm`` and its
+            # ``.webp`` poster so the poster path is derivable from the
+            # media URL server-side (matches the feed/DM upload path).
+            stem = uuid.uuid4().hex
+            output_filename = f"{stem}.webm"
+            thumbnail_filename = f"{stem}.webp"
+            await self._transcode_repo.enqueue(
+                output_filename=output_filename,
+                source_path=str(source),
+                thumbnail_filename=thumbnail_filename,
+                owner_user_id=uploader_user_id,
+                duration_s=keep_s,
             )
-        # ONE shared UUID stem for the transcoded ``.webm`` and its
-        # ``.webp`` poster so the poster path is derivable from the
-        # media URL server-side (matches the feed/DM upload path).
-        stem = uuid.uuid4().hex
-        output_filename = f"{stem}.webm"
-        thumbnail_filename = f"{stem}.webp"
-        source_path = await self._stash_transcode_source(data)
-        await self._transcode_repo.enqueue(
-            output_filename=output_filename,
-            source_path=str(source_path),
-            thumbnail_filename=thumbnail_filename,
-            owner_user_id=uploader_user_id,
-        )
+        except BaseException:
+            await _remove_quietly(source)
+            raise
         self._transcode_service.nudge()
-
-        return GalleryItem(
-            id=_item_id(space_id, uploader_user_id),
-            album_id=album_id,
+        item = GalleryItem(
+            id=_item_id(album.space_id, uploader_user_id),
+            album_id=album.id,
             uploaded_by=uploader_user_id,
             item_type="video",
             url=f"api/media/{output_filename}",
             thumbnail_url=f"api/media/{thumbnail_filename}",
-            width=VIDEO_MAX_DIMENSION,
-            height=int(VIDEO_MAX_DIMENSION * 9 / 16),
-            duration_s=None,
+            width=probe.width,
+            height=probe.height,
+            duration_s=round(keep_s, 2),
             caption=caption,
-            taken_at=None,
+            taken_at=probe.taken_on,
             sort_order=0,
             created_at=datetime.now(UTC).isoformat(),
         )
+        return await self._store_new_item(album, item, content_sha256)
 
-    async def _stash_transcode_source(self, data: bytes) -> pathlib.Path:
-        """Write raw upload bytes to the (non-served) transcode temp dir.
-
-        ``transcode_src`` is a subdir of the media root; the media serve
-        route rejects any filename containing ``/`` so these temp blobs
-        can never be fetched via ``/api/media/{filename}``. The transcode
-        scheduler reads + deletes them; the same dir is the one
-        :class:`MediaTranscodeService` is given as ``media_dir``'s root.
-        """
-        temp_dir = self._media_dir / "transcode_src"
-        await aiofiles.os.makedirs(temp_dir, exist_ok=True)
-        temp_path = temp_dir / f"{uuid.uuid4().hex}.bin"
-        async with aiofiles.open(temp_path, "wb") as f:
-            await f.write(data)
-        return temp_path
+    async def _probe_video(self, source: pathlib.Path) -> VideoProbe:
+        """The stashed video's length, size and day — or 422."""
+        try:
+            return await VideoProcessor().probe_file(source)
+        except ValueError as exc:
+            log.info("gallery: video upload refused, unreadable: %s", exc)
+            raise VideoUnreadableError() from exc
 
     async def _save_to_disk(self, filename: str, payload: bytes) -> None:
         await aiofiles.os.makedirs(self._media_dir, exist_ok=True)
@@ -1282,6 +1413,49 @@ class GalleryService:
 def _with_cover(album: GalleryAlbum, cover_url: str | None) -> GalleryAlbum:
     """Return a copy of *album* with ``cover_url`` filled in."""
     return replace(album, cover_url=cover_url)
+
+
+#: :meth:`GalleryService.stash_upload` writes and hashes in batches of
+#: this size (one worker-thread hop per batch, not per 64 KiB chunk).
+_STASH_FLUSH_BYTES: int = 4 * 1024 * 1024
+
+
+async def _write_and_hash(f, digest, data: bytes) -> None:
+    await f.write(data)
+    await asyncio.to_thread(digest.update, data)
+
+
+async def _remove_quietly(path: pathlib.Path) -> None:
+    """Remove a temp file; one that is already gone is fine."""
+    try:
+        await aiofiles.os.remove(path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:  # pragma: no cover — defensive
+        log.warning("gallery: could not remove temp upload %s: %s", path, exc)
+
+
+async def _one_chunk(data: bytes) -> AsyncIterator[bytes]:
+    yield data
+
+
+def _video_keep_seconds(probe: VideoProbe, *, household: bool) -> float:
+    """How much of a video is kept — or the refusal when it's too long.
+
+    Household: the whole video, up to ``GALLERY_VIDEO_MAX_SECONDS``;
+    longer is refused with its length (owner decision D4: never cut
+    silently). A file that doesn't say how long it is keeps up to the
+    limit. A space keeps the protocol's first 60 s, as before.
+    """
+    if household:
+        if probe.duration_s is None:
+            return float(GALLERY_VIDEO_MAX_SECONDS)
+        if not video_fits(probe.duration_s, GALLERY_VIDEO_MAX_SECONDS):
+            raise VideoTooLongError(probe.duration_s, GALLERY_VIDEO_MAX_SECONDS)
+        return probe.duration_s
+    if probe.duration_s is None:
+        return float(VIDEO_MAX_DURATION_SECONDS)
+    return min(probe.duration_s, float(VIDEO_MAX_DURATION_SECONDS))
 
 
 def _sha256_hex(data: bytes) -> str:

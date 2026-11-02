@@ -7644,6 +7644,12 @@ a.sh-btn { text-decoration: none; }
   text-align: center;
 }
 .sh-gallery-item-processing .sh-upload-progress__spinner { width: 20px; height: 20px; }
+/* "Ready in about 4 min" under "Processing…" — smaller, never clipped. */
+.sh-gallery-item-processing-eta {
+  font-size: var(--sh-font-size-xs);
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
 /* "Load more" under a paged album list / album grid. */
 .sh-gallery-more {
   display: flex;

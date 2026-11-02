@@ -24,6 +24,8 @@ Lifecycle:
   on boot (crash recovery).
 * ``status_for`` — bulk readiness lookup for a set of output filenames;
   absent rows mean "ready" and are simply omitted from the result.
+* ``list_queue`` / ``count_queued`` — the jobs still to convert, in the
+  order they will run, for the time estimate and the queue bound.
 """
 
 from __future__ import annotations
@@ -45,9 +47,14 @@ class AbstractMediaTranscodeRepo(Protocol):
         thumbnail_filename: str,
         owner_user_id: str | None,
         kind: str = "video",
+        duration_s: float | None = None,
     ) -> None: ...
 
     async def list_due(self, *, limit: int = 10) -> list[MediaTranscodeJob]: ...
+
+    async def list_queue(self, *, limit: int = 500) -> list[MediaTranscodeJob]: ...
+
+    async def count_queued(self) -> int: ...
 
     async def mark_processing(self, output_filename: str) -> None: ...
 
@@ -89,16 +96,24 @@ class SqliteMediaTranscodeRepo:
         thumbnail_filename: str,
         owner_user_id: str | None,
         kind: str = "video",
+        duration_s: float | None = None,
     ) -> None:
         await self._db.enqueue(
             """
             INSERT INTO media_transcode_jobs(
                 output_filename, source_path, thumbnail_filename,
-                kind, owner_user_id
-            ) VALUES(?,?,?,?,?)
+                kind, owner_user_id, duration_s
+            ) VALUES(?,?,?,?,?,?)
             ON CONFLICT(output_filename) DO NOTHING
             """,
-            (output_filename, source_path, thumbnail_filename, kind, owner_user_id),
+            (
+                output_filename,
+                source_path,
+                thumbnail_filename,
+                kind,
+                owner_user_id,
+                duration_s,
+            ),
         )
 
     async def list_due(self, *, limit: int = 10) -> list[MediaTranscodeJob]:
@@ -119,6 +134,35 @@ class SqliteMediaTranscodeRepo:
             (int(limit),),
         )
         return [_row_to_job(d) for d in rows_to_dicts(rows)]
+
+    async def list_queue(self, *, limit: int = 500) -> list[MediaTranscodeJob]:
+        """Every job still to convert, in the order it will run.
+
+        The one being converted first, then the waiting ones the way
+        :meth:`list_due` picks them (a retry waiting for its back-off
+        sorts by its next attempt). ``failed`` rows never run again and
+        are left out.
+        """
+        rows = await self._db.fetchall(
+            """
+            SELECT * FROM media_transcode_jobs
+             WHERE status IN ('pending', 'processing')
+             ORDER BY status='processing' DESC,
+                      datetime(next_attempt_at) ASC, created_at ASC
+             LIMIT ?
+            """,
+            (int(limit),),
+        )
+        return [_row_to_job(d) for d in rows_to_dicts(rows)]
+
+    async def count_queued(self) -> int:
+        """Jobs waiting or being converted (``failed`` ones don't count)."""
+        row = await self._db.fetchone(
+            "SELECT COUNT(*) AS n FROM media_transcode_jobs "
+            "WHERE status IN ('pending', 'processing')",
+            (),
+        )
+        return int(row["n"] if row is not None else 0)
 
     async def mark_processing(self, output_filename: str) -> None:
         await self._db.enqueue(
@@ -238,4 +282,7 @@ def _row_to_job(row: dict) -> MediaTranscodeJob:
         next_attempt_at=row["next_attempt_at"],
         last_error=row.get("last_error"),
         created_at=row.get("created_at"),
+        duration_s=(
+            float(row["duration_s"]) if row.get("duration_s") is not None else None
+        ),
     )

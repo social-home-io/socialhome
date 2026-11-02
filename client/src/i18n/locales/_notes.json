@@ -868,5 +868,7 @@
   "apps.group_sheet.err_open_limit": "A limit: at most {n} games per person and app still waiting for people. {name} is the app's name.",
   "apps.group_sheet.err_daily_limit": "A limit: at most {n} new group games per person and app a day.",
   "apps.group_sheet.err_too_old": "The server refused: someone picked is in a household with an older Social Home that can't take part in group games.",
-  "apps.group_sheet.err_not_supported": "This app can only be played one to one, not as a group game. {name} is the app's name."
+  "apps.group_sheet.err_not_supported": "This app can only be played one to one, not as a group game. {name} is the app's name.",
+  "gallery.upload.reason_too_long": "Shown on an upload row (the row names the file). {length} is the video's length as m:ss (e.g. 7:12), {max} the limit in minutes (5). The video is refused, never cut.",
+  "gallery.item_ready_in_min": "On a video tile while the household converts it. {n} is a rough estimate in minutes."
 }

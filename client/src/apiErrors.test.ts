@@ -24,6 +24,16 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe('The app catalog is turned off on this Social Home.')
   })
 
+  it('names a household video length and the 5-minute limit', () => {
+    expect(apiErrorMessage(422, '/api/gallery/albums/a/items', {
+      code: 'VIDEO_TOO_LONG', detail: 'x', params: { duration_s: 432, max_s: 300 },
+    })).toBe('This video is 7:12 long — the gallery keeps videos up to 5 minutes.')
+    expect(apiErrorMessage(422, '/x', { code: 'VIDEO_UNREADABLE', detail: 'x' }))
+      .toBe("This video couldn't be opened. Try an MP4, MOV or WebM file.")
+    expect(apiErrorMessage(503, '/x', { code: 'TRANSCODE_QUEUE_FULL', detail: 'x' }))
+      .toBe('Your home is still converting a lot of videos. Try again later.')
+  })
+
   it('tells an app turned off by an admin from one that is not for this account', () => {
     expect(apiErrorMessage(403, '/api/apps/chess/store/k', {
       code: 'APP_NOT_ENABLED', detail: "App 'chess' is disabled",

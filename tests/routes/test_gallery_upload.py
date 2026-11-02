@@ -185,7 +185,9 @@ async def test_upload_chunked_multipart_without_content_length_over_1mib_is_201(
 async def test_upload_multipart_part_over_cap_is_413_payload_too_large(
     client, monkeypatch
 ):
-    monkeypatch.setattr("socialhome.routes.gallery.GALLERY_MAX_UPLOAD_BYTES", 64 * 1024)
+    monkeypatch.setattr(
+        "socialhome.services.gallery_service.GALLERY_MAX_UPLOAD_BYTES", 64 * 1024
+    )
     aid = await _make_album(client)
     data = _big_jpeg_bytes()
     form = aiohttp.FormData()
@@ -206,7 +208,9 @@ async def test_upload_multipart_declared_over_cap_is_413_before_reading_the_part
 ):
     """A multipart request whose ``Content-Length`` already exceeds the cap
     is refused up front — the multipart part is never read."""
-    monkeypatch.setattr("socialhome.routes.gallery.GALLERY_MAX_UPLOAD_BYTES", 64 * 1024)
+    monkeypatch.setattr(
+        "socialhome.services.gallery_service.GALLERY_MAX_UPLOAD_BYTES", 64 * 1024
+    )
 
     async def _never(*_a, **_kw):
         raise AssertionError("part was read despite an over-cap Content-Length")
@@ -229,7 +233,9 @@ async def test_upload_multipart_declared_over_cap_is_413_before_reading_the_part
 
 
 async def test_upload_raw_body_over_cap_is_413_payload_too_large(client, monkeypatch):
-    monkeypatch.setattr("socialhome.routes.gallery.GALLERY_MAX_UPLOAD_BYTES", 64 * 1024)
+    monkeypatch.setattr(
+        "socialhome.services.gallery_service.GALLERY_MAX_UPLOAD_BYTES", 64 * 1024
+    )
     aid = await _make_album(client)
     data = _big_jpeg_bytes()
 

@@ -5,11 +5,18 @@
  * browses elsewhere in the app. Each file is one entry with its own
  * state:
  *
- *   blocked → can't go up as it is (too big, not a photo or video, empty):
- *             waits for the person to remove it — never sent.
+ *   blocked → can't go up as it is (too big, not a photo or video, empty,
+ *             a household video over 5 minutes): waits for the person to
+ *             remove it — never sent.
  *   waiting → uploading (n %) → processing (bytes are in, the server is
  *             converting) → done
  *                           ↘ failed (a translated reason; Try again)
+ *
+ * A video for the household gallery waits (still ``waiting``) until the
+ * browser has read its length from the file: one over 5 minutes is
+ * ``blocked`` with its length ("7:12 long — the gallery keeps videos up to
+ * 5 minutes"), never sent and never cut. When the browser can't tell, it
+ * goes up and the server checks the same rule.
  *
  * Three files go up at once. The gallery has its own rate bucket on the
  * server (300 uploads a minute); a 429 stops every worker until the
@@ -31,7 +38,10 @@ import { api } from '@/api'
 import { t } from '@/i18n/i18n'
 import { token } from '@/store/token'
 import { UploadHttpError, uploadHttpError } from '@/utils/uploadErrors'
-import { checkFile, withType, type FileCheck, type FileProblem } from './uploadFiles'
+import {
+  HOUSEHOLD_VIDEO_MAX_BYTES, HOUSEHOLD_VIDEO_MAX_SECONDS, checkFile, formatDuration,
+  readVideoDuration, videoTooLong, withType, type FileCheck, type FileProblem,
+} from './uploadFiles'
 
 export type EntryState =
   | 'blocked' | 'waiting' | 'uploading' | 'processing' | 'done' | 'failed'
@@ -60,6 +70,13 @@ export interface UploadEntry {
   /** The server already had it (``already_here``) or brought it back
    *  from the trash (``restored``): nothing new was stored. */
   duplicate: 'already_here' | 'restored' | null
+  /** Into a household album (its videos may be 5 minutes long). */
+  household: boolean
+  /** A household video whose length the browser is still reading — it
+   *  doesn't start until that is known. */
+  checking: boolean
+  /** The video's length in seconds, once known. */
+  durationS: number | null
 }
 
 /** Where the queue's files go. ``albumId`` ``null`` with ``isDefault``:
@@ -176,15 +193,16 @@ export function addFiles(files: File[], into: UploadTarget | null): boolean {
   }
   const dest = into ?? target.value
   if (into || !busy) target.value = dest
+  const household = isHousehold(dest)
   const fresh = files.map<UploadEntry>(file => {
-    const check = checkFile(file)
-    return {
+    const check = checkFile(file, household)
+    const entry: UploadEntry = {
       id: nextId++,
       file,
       check,
       state: check.problem ? 'blocked' : 'waiting',
       loaded: 0,
-      reason: check.problem ? problemReason(check.problem) : null,
+      reason: null,
       problem: check.problem,
       thumbUrl: null,
       netTries: 0,
@@ -192,13 +210,45 @@ export function addFiles(files: File[], into: UploadTarget | null): boolean {
       retryAt: 0,
       dest,
       duplicate: null,
+      household,
+      checking: household && check.kind === 'video' && !check.problem,
+      durationS: null,
     }
+    if (check.problem) entry.reason = problemReason(check.problem, entry)
+    return entry
   })
   entries.value = [...entries.value, ...fresh]
   sheetOpen.value = true
   sheetMinimised.value = false
+  for (const e of fresh) if (e.checking) void measure(e.id)
   pump()
   return true
+}
+
+/** Into a household album? (A space gallery's queue names its space.) */
+function isHousehold(dest: UploadTarget | null): boolean {
+  return dest !== null && (dest.spaceId ?? null) === null
+}
+
+/** Read a household video's length before it goes up; refuse one over
+ *  5 minutes with its length (never cut). */
+async function measure(id: number): Promise<void> {
+  const e = get(id)
+  if (!e) return
+  const gen = generation
+  const seconds = await readVideoDuration(e.file)
+  if (gen !== generation || !get(id)) return
+  if (seconds !== null && videoTooLong(seconds)) {
+    const blocked = { checking: false, durationS: seconds, problem: 'too_long' as const }
+    patch(id, {
+      ...blocked,
+      state: 'blocked',
+      reason: problemReason('too_long', { ...e, ...blocked }),
+    })
+  } else {
+    patch(id, { checking: false, durationS: seconds })
+  }
+  pump()
 }
 
 /** Pick (or change) the album. Files already sent stay where they went;
@@ -344,7 +394,7 @@ function pump(): void {
   let soonest = Infinity
   while (running < PARALLEL) {
     const next = entries.value.find(e => {
-      if (e.state !== 'waiting' || !hasDest(e)) return false
+      if (e.state !== 'waiting' || e.checking || !hasDest(e)) return false
       if (e.retryAt > now) { soonest = Math.min(soonest, e.retryAt); return false }
       return true
     })
@@ -439,7 +489,7 @@ function onError(id: number, err: unknown): void {
 }
 
 function fail(id: number, err: unknown): void {
-  patch(id, { state: 'failed', loaded: 0, reason: errorReason(err) })
+  patch(id, { state: 'failed', loaded: 0, reason: errorReason(err, get(id)) })
   if (err instanceof UploadHttpError && (err.code === 'STORAGE_FULL' || err.status === 507)) {
     // Every other file would fail the same way: stop, and say why.
     paused.value = true
@@ -512,15 +562,38 @@ function send(e: UploadEntry, album: string): Promise<UploadedItem> {
 
 // ─── Reasons a row shows (short: the row already names the file) ────────
 
-export function problemReason(p: FileProblem): string {
+/** What a row needs to say why: its kind, where it goes, its length. */
+type ReasonContext = Pick<UploadEntry, 'household' | 'durationS'> & {
+  check: Pick<FileCheck, 'kind'>
+}
+
+/** "7:12 long — the gallery keeps videos up to 5 minutes." */
+function tooLongReason(seconds: number, maxS = HOUSEHOLD_VIDEO_MAX_SECONDS): string {
+  return t('gallery.upload.reason_too_long', {
+    length: formatDuration(seconds),
+    max: String(Math.round(maxS / 60)),
+  })
+}
+
+function tooLargeReason(e?: ReasonContext): string {
+  if (e?.household && e.check.kind === 'video') {
+    return t('gallery.upload.reason_too_large_video', {
+      max: String(Math.round(HOUSEHOLD_VIDEO_MAX_BYTES / 1024 ** 3)),
+    })
+  }
+  return t('gallery.upload.reason_too_large')
+}
+
+export function problemReason(p: FileProblem, e?: ReasonContext): string {
   switch (p) {
-    case 'too_large': return t('gallery.upload.reason_too_large')
+    case 'too_large': return tooLargeReason(e)
+    case 'too_long': return tooLongReason(e?.durationS ?? 0)
     case 'empty': return t('gallery.upload.reason_empty')
     case 'unsupported': return t('gallery.upload.reason_unsupported')
   }
 }
 
-export function errorReason(err: unknown): string {
+export function errorReason(err: unknown, e?: ReasonContext): string {
   if (isNetworkError(err)) return t('gallery.upload.reason_network')
   if (!(err instanceof UploadHttpError)) {
     // ``api.post`` (the default album) throws "API <status>: …".
@@ -528,9 +601,18 @@ export function errorReason(err: unknown): string {
     if (!m) return t('gallery.upload.reason_network')
     err = new UploadHttpError(Number(m[1]))
   }
-  const { status, code } = err as UploadHttpError
+  const { status, code, params } = err as UploadHttpError
   if (code === 'STORAGE_FULL' || status === 507) return t('gallery.upload.reason_storage_full')
-  if (code === 'PAYLOAD_TOO_LARGE' || status === 413) return t('gallery.upload.reason_too_large')
+  if (code === 'PAYLOAD_TOO_LARGE' || status === 413) return tooLargeReason(e)
+  if (code === 'VIDEO_TOO_LONG') {
+    const seconds = Number(params?.duration_s)
+    const maxS = Number(params?.max_s)
+    return tooLongReason(
+      Number.isFinite(seconds) ? seconds : 0,
+      Number.isFinite(maxS) && maxS > 0 ? maxS : HOUSEHOLD_VIDEO_MAX_SECONDS,
+    )
+  }
+  if (code === 'TRANSCODE_QUEUE_FULL') return t('gallery.upload.reason_queue_full')
   if (code === 'IMAGE_UNREADABLE' || code === 'UNPROCESSABLE' || status === 422) {
     return t('gallery.upload.reason_unreadable')
   }

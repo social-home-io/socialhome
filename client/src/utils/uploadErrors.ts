@@ -24,25 +24,32 @@ import { t } from '@/i18n/i18n'
 export class UploadHttpError extends Error {
   readonly status: number
   readonly code: string | null
-  constructor(status: number, code: string | null = null) {
+  /** The refusal's flat ``error.params`` (e.g. a video's length). */
+  readonly params: Record<string, unknown>
+  constructor(status: number, code: string | null = null, params: Record<string, unknown> = {}) {
     super(`Upload failed (${status})${code ? `: ${code}` : ''}`)
     this.name = 'UploadHttpError'
     this.status = status
     this.code = code
+    this.params = params
   }
 }
 
 /** Build an :class:`UploadHttpError` from an XHR's status + body. */
 export function uploadHttpError(status: number, responseText: string): UploadHttpError {
   let code: string | null = null
+  let params: Record<string, unknown> = {}
   try {
     const body = JSON.parse(responseText) as { error?: unknown }
-    const err = body?.error as { code?: unknown } | undefined
+    const err = body?.error as { code?: unknown; params?: unknown } | undefined
     if (err && typeof err === 'object' && typeof err.code === 'string') code = err.code
+    if (err && typeof err === 'object' && err.params && typeof err.params === 'object') {
+      params = err.params as Record<string, unknown>
+    }
   } catch {
     code = null
   }
-  return new UploadHttpError(status, code)
+  return new UploadHttpError(status, code, params)
 }
 
 /** Error codes that mean "this file can't be used here". */

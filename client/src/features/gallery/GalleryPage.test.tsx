@@ -304,6 +304,19 @@ describe('GalleryPage tiles', () => {
     await waitFor(() => expect(view.getByRole('link', { name: /^Video/ }).querySelector('img')).toBeTruthy())
   })
 
+  it('a processing video says roughly when it will be ready', async () => {
+    itemRows = [item(1, {
+      item_type: 'video', url: 'api/media/v1.webm', media_status: 'processing', media_eta_s: 230,
+    })]
+    const view = await renderOpenAlbum()
+    const tile = await view.findByRole('img', { name: 'Video — processing · Ready in about 4 min' })
+    expect(tile.textContent).toContain('Ready in about 4 min')
+    const { readyInLabel } = await import('./GalleryPage')
+    expect(readyInLabel(30)).toBe('Ready in under a minute')
+    expect(readyInLabel(undefined)).toBeNull()
+    expect(readyInLabel(0)).toBeNull()
+  })
+
   it('the album list has a page heading', async () => {
     const view = await mount({ spaceId: 'sp-1' })
     expect(await view.findByRole('heading', { level: 1, name: 'Gallery' })).toBeTruthy()

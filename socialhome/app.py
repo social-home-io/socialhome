@@ -281,6 +281,7 @@ from .repositories.timetable_repo import (
     SqliteTimetableRepo,
 )
 from .routes import setup_routes
+from .routes.gallery import GALLERY_LARGE_UPLOAD
 from .routes.space_seat_gate import build_space_seat_gate_middleware
 from .services import (
     DmService,
@@ -2622,7 +2623,11 @@ def _build_middleware(config: Config, limiter: RateLimiter):
     then per-route rate limiting. This mirrors the §25.7 hardening
     section in the spec.
     """
-    body_size_middleware = build_body_size_middleware()
+    # A household gallery video (5 minutes of phone video) is bigger than
+    # the generic media cap; its route streams it to disk under its own.
+    body_size_middleware = build_body_size_middleware(
+        large_uploads=(GALLERY_LARGE_UPLOAD,),
+    )
     cors_middleware = build_cors_deny_middleware(
         allowed_origins=config.cors_allowed_origins,
     )

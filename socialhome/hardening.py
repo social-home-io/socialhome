@@ -2,9 +2,12 @@
 
 * :func:`build_body_size_middleware` — caps inbound bodies at
   ``json_max_bytes`` for ``application/json`` requests and
-  ``media_max_bytes`` for everything else, from ``Content-Length`` alone.
+  ``media_max_bytes`` for everything else, from ``Content-Length`` alone
+  (a few upload routes — a household gallery video — name their own,
+  larger cap via ``large_uploads``).
 * :func:`read_body_capped` / :func:`read_part_capped` — stream a raw body
-  or one multipart part under a per-route cap. Every whole-body read
+  or one multipart part under a per-route cap; :func:`iter_part_chunks`
+  hands a part out chunk by chunk to a caller that writes it to disk. Every whole-body read
   (``request.read()`` / ``json()`` / ``post()`` and, since aiohttp 3.13.3,
   ``BodyPartReader.read()``) is ceilinged by the app-wide
   ``client_max_size`` (:data:`DEFAULT_JSON_MAX_BYTES`); a route that takes
@@ -26,7 +29,8 @@ Both middlewares slot into the global stack via :func:`create_app`.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable
+import re
+from collections.abc import AsyncIterator, Iterable, Sequence
 from urllib.parse import urlparse
 
 import aiohttp
@@ -48,6 +52,10 @@ DEFAULT_MEDIA_MAX_BYTES: int = 200 * 1024 * 1024
 #: body is refused within one chunk of the cap.
 _BODY_CHUNK_BYTES: int = 64 * 1024
 
+#: Read granularity for :func:`iter_part_chunks` — a 2 GB video streams
+#: to disk in 1 MiB reads.
+STREAM_CHUNK_BYTES: int = 1024 * 1024
+
 
 # ─── Body-size middleware ────────────────────────────────────────────────
 
@@ -56,8 +64,14 @@ def build_body_size_middleware(
     *,
     json_max_bytes: int = DEFAULT_JSON_MAX_BYTES,
     media_max_bytes: int = DEFAULT_MEDIA_MAX_BYTES,
+    large_uploads: Sequence[tuple[str, re.Pattern[str], int]] = (),
 ):
     """Build an aiohttp middleware that returns 413 for oversized bodies.
+
+    ``large_uploads`` lists ``(method, path pattern, cap)`` for the few
+    upload routes that take more than ``media_max_bytes`` (a household
+    gallery video: 2 GiB). The route still enforces its own exact limit
+    while it streams; this only stops the generic cap from refusing it.
 
     The check is on ``Content-Length`` only — a chunked upload (no
     length declared) passes straight through. What then bounds it is how
@@ -85,7 +99,7 @@ def build_body_size_middleware(
             cap = (
                 json_max_bytes
                 if ctype.startswith("application/json")
-                else media_max_bytes
+                else _large_upload_cap(request, large_uploads, media_max_bytes)
             )
             if cl > cap:
                 return web.json_response(
@@ -95,6 +109,17 @@ def build_body_size_middleware(
         return await handler(request)
 
     return middleware
+
+
+def _large_upload_cap(
+    request: web.Request,
+    large_uploads: Sequence[tuple[str, re.Pattern[str], int]],
+    default: int,
+) -> int:
+    for method, pattern, cap in large_uploads:
+        if request.method == method and pattern.fullmatch(request.path):
+            return cap
+    return default
 
 
 # ─── Capped streaming readers ────────────────────────────────────────────
@@ -152,6 +177,17 @@ async def read_part_capped(part: aiohttp.BodyPartReader, max_bytes: int) -> byte
         if len(raw) > max_bytes:
             raise PayloadTooLargeError(max_bytes)
     return bytes(raw)
+
+
+async def iter_part_chunks(part: aiohttp.BodyPartReader) -> AsyncIterator[bytes]:
+    """One multipart part, chunk by chunk — for a caller that writes it
+    to disk under its own cap (``GalleryService.stash_upload``) instead of
+    holding it. ``read_chunk`` is not ceilinged by ``client_max_size``."""
+    while True:
+        chunk = await part.read_chunk(STREAM_CHUNK_BYTES)
+        if not chunk:
+            return
+        yield chunk
 
 
 # ─── CORS-deny middleware ────────────────────────────────────────────────
