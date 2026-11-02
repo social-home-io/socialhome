@@ -20,6 +20,7 @@ import { Switch } from '@/components/Switch'
 import { Modal } from '@/components/Modal'
 import { requiresHaUserPassword } from '@/platform'
 import { t } from '@/i18n/i18n'
+import { downloadError, downloadPersonPhotos } from '@/features/gallery/galleryManage'
 
 interface HaUser {
   username:     string
@@ -40,6 +41,10 @@ const notAvailable = signal(false)
  *  HA-mode provision flow keeps the warm Social Home chrome instead
  *  of a browser-native dialog. */
 const passwordPromptOpen = signal<{ user: HaUser } | null>(null)
+
+/** Asking before someone is removed — their photos stay in the gallery,
+ *  and the admin can save a copy for them first. */
+const removeAsk = signal<HaUser | null>(null)
 
 export function HaUsersPanel() {
   useEffect(() => {
@@ -98,6 +103,10 @@ export function HaUsersPanel() {
   }
 
   const toggle = (row: HaUser) => {
+    if (row.synced) {
+      removeAsk.value = row
+      return
+    }
     // ha mode: server requires a password on provision so the picked
     // HA person can sign in via /api/auth/token.  haos mode: ingress
     // signs them in, so no password.  Deprovision (wasSynced=true) is
@@ -164,6 +173,17 @@ export function HaUsersPanel() {
           </li>
         ))}
       </ul>
+
+      {removeAsk.value && (
+        <RemovePersonDialog
+          user={removeAsk.value}
+          onClose={() => { removeAsk.value = null }}
+          onRemove={(user) => {
+            removeAsk.value = null
+            void performToggle(user)
+          }}
+        />
+      )}
 
       <HaUserPasswordPromptModal
         state={passwordPromptOpen.value}
@@ -249,6 +269,61 @@ function HaUserPasswordPromptModal({
           <Button variant="secondary" onClick={onClose}>{t('common.cancel')}</Button>
           <Button onClick={submit} disabled={!canSubmit}>
             {t('ha_users.add', { name: state.user.display_name })}
+          </Button>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
+/** "Remove Ben?" — Ben's photos stay in the household gallery (his albums
+ *  pass to an admin); "Save Ben's 312 photos" hands the admin one ZIP of
+ *  them (the stored copies) to give to Ben first. */
+function RemovePersonDialog({ user, onClose, onRemove }: {
+  user: HaUser
+  onClose: () => void
+  onRemove: (user: HaUser) => void
+}) {
+  const [count, setCount] = useState<number | null>(null)
+  const [saving, setSaving] = useState(false)
+  useEffect(() => {
+    let live = true
+    // No gallery, or nothing of theirs: the save button simply stays away.
+    api.get<{ count: number }>(`/api/gallery/people/${encodeURIComponent(user.username)}/photos`)
+      .then((r) => { if (live) setCount(r.count) })
+      .catch(() => { if (live) setCount(0) })
+    return () => { live = false }
+  }, [user.username])
+
+  const save = async () => {
+    setSaving(true)
+    try {
+      await downloadPersonPhotos(user.username, user.display_name)
+    } catch (err) {
+      showToast(downloadError(err), 'error')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <Modal open onClose={onClose} title={t('ha_users.remove_title', { name: user.display_name })} role="alertdialog">
+      <div class="sh-form">
+        <p style={{ marginTop: 0 }}>{t('ha_users.remove_body', { name: user.display_name })}</p>
+        {count !== null && count > 0 && (
+          <div class="sh-remove-photos">
+            <p class="sh-muted">{t('ha_users.remove_photos_hint', { name: user.display_name })}</p>
+            <Button variant="secondary" loading={saving} onClick={() => void save()}>
+              {t(count === 1 ? 'ha_users.remove_photos_one' : 'ha_users.remove_photos', {
+                name: user.display_name, n: String(count),
+              })}
+            </Button>
+          </div>
+        )}
+        <div class="sh-form-actions">
+          <Button variant="secondary" onClick={onClose}>{t('common.cancel')}</Button>
+          <Button variant="danger" onClick={() => onRemove(user)}>
+            {t('ha_users.remove_confirm', { name: user.display_name })}
           </Button>
         </div>
       </div>

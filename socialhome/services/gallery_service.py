@@ -31,13 +31,14 @@ import pathlib
 import uuid
 from collections.abc import AsyncIterable, AsyncIterator
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
 import aiofiles
 import aiofiles.os
 
 from ..config import Config
 from ..domain.errors import (
+    DownloadTooLargeError,
     PayloadTooLargeError,
     TranscodeQueueFullError,
     VideoTooLongError,
@@ -49,16 +50,21 @@ from ..domain.events import (
     GalleryAlbumUpdated,
     GalleryItemDeleted,
     GalleryItemRestored,
+    GalleryItemUpdated,
     GalleryItemUploaded,
     UserDeprovisioned,
 )
 from ..domain.gallery import (
+    DOWNLOAD_MAX_BYTES,
+    DOWNLOAD_MAX_ITEMS,
     GALLERY_MAX_UPLOAD_BYTES,
     GALLERY_VIDEO_MAX_QUEUED,
     GALLERY_VIDEO_MAX_SECONDS,
     GALLERY_VIDEO_MAX_UPLOAD_BYTES,
+    PERSON_DOWNLOAD_MAX_ITEMS,
     TRASH_RETENTION_DAYS,
     GalleryAlbum,
+    GalleryDownloadFile,
     GalleryItem,
     GalleryTrashItem,
     GalleryUpload,
@@ -99,6 +105,7 @@ from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from ..repositories.media_transcode_repo import AbstractMediaTranscodeRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
+from .gallery_download import download_names
 from .media_transcode_service import MediaTranscodeService
 from .space_member_guard import NOT_A_SPACE_MEMBER, seat_of
 from .storage_quota_service import StorageQuotaService
@@ -184,6 +191,12 @@ def _read_dims_sync(path: pathlib.Path) -> tuple[int, int]:
 NAME_MAX: int = 80
 DESCRIPTION_MAX: int = 500
 ALBUMS_PER_SPACE: int = 200
+#: One selection action (delete / restore / move) touches at most this many.
+BULK_MAX_ITEMS: int = 500
+BULK_ACTIONS: frozenset[str] = frozenset({"delete", "restore", "purge", "move"})
+#: "Empty trash" removes at most this many per call (batch × batches).
+EMPTY_TRASH_BATCH: int = 500
+EMPTY_TRASH_MAX_BATCHES: int = 20
 #: ``instance_config`` key holding the household default album's id.
 DEFAULT_ALBUM_KEY: str = "gallery.default_album_id"
 #: The id of the default album once somebody renamed it. Until then each
@@ -195,6 +208,32 @@ DEFAULT_ALBUM_RENAMED_KEY: str = "gallery.default_album_renamed"
 
 
 # ─── Errors ──────────────────────────────────────────────────────────────
+
+
+class _Unset:
+    """An ``update_item`` field the request left out (``None`` clears it)."""
+
+    __slots__ = ()
+
+
+UNSET = _Unset()
+
+
+def _valid_taken_day(value: str | None) -> str | None:
+    """A date taken as ``YYYY-MM-DD`` (day only, like the EXIF date we keep),
+    ``None`` to clear it. Not before 1800, not after tomorrow (a phone a
+    time zone ahead)."""
+    if value is None or value == "":
+        return None
+    try:
+        day = date.fromisoformat(str(value))
+    except ValueError:
+        raise ValueError("taken_at must be YYYY-MM-DD") from None
+    if len(str(value)) != 10:
+        raise ValueError("taken_at must be YYYY-MM-DD")
+    if day.year < 1800 or day > (datetime.now(UTC) + timedelta(days=1)).date():
+        raise ValueError("taken_at is out of range")
+    return day.isoformat()
 
 
 class GalleryError(Exception):
@@ -969,6 +1008,274 @@ class GalleryService:
             "Only the uploader, the album owner or a household admin "
             "may delete this item"
         )
+
+    async def restore_album(self, album_id: str, *, actor_user_id: str) -> int:
+        """Bring a household album back from the trash with the photos that
+        went there with it — the Undo of an album delete. Whoever may delete
+        the album may restore it. How many photos came back."""
+        album = await self._repo.get_trashed_album(album_id)
+        if album is None:
+            raise GalleryNotFoundError(f"album {album_id!r} not found")
+        await self._require_album_owner_or_admin(album, actor_user_id)
+        restored = await self._repo.restore_album(album_id)
+        # One frame for the album, not one per photo: the album list, the
+        # open album and the trash all refetch on it.
+        await self._bus.publish(GalleryAlbumUpdated(album_id=album_id, space_id=None))
+        return len(restored)
+
+    async def empty_trash(self, *, actor_user_id: str) -> int:
+        """A household admin deletes everything in the trash they can see
+        for good, now. Bounded per call like the purge; how many went."""
+        if not await self._is_household_admin(actor_user_id):
+            raise GalleryPermissionError("Only a household admin may empty the trash")
+        removed = 0
+        for _ in range(EMPTY_TRASH_MAX_BATCHES):
+            rows = await self._repo.list_trash(
+                viewer_user_id=actor_user_id, limit=EMPTY_TRASH_BATCH
+            )
+            if not rows:
+                break
+            for row in rows:
+                media = await self._repo.purge_trashed_item(row.item.id)
+                await unlink_unreferenced(self._media_dir, self._media_refs, media)
+                removed += 1
+        return removed
+
+    # ─── Managing: caption, date, album ──────────────────────────────────
+
+    async def update_item(
+        self,
+        item_id: str,
+        *,
+        actor_user_id: str,
+        caption: str | None | _Unset = UNSET,
+        taken_at: str | None | _Unset = UNSET,
+        album_id: str | _Unset = UNSET,
+    ) -> GalleryItem:
+        """Change a household photo's caption, its date taken or its album
+        (a photo lives in exactly one album). Whoever may delete it may
+        change it — the uploader, the album owner, a household admin; a
+        protected account only its own. A space item is not edited here
+        (that needs a federation event — the space-parity PR)."""
+        item = await self._repo.get_item(item_id)
+        album = await self._repo.get_album(item.album_id) if item else None
+        if (
+            item is None
+            or album is None
+            or not await self._can_see(album, actor_user_id)
+        ):
+            raise GalleryNotFoundError(f"item {item_id!r} not found")
+        if album.space_id is not None:
+            # TODO(gallery PR 13, space parity, proto v_79): a space photo's
+            # caption, date and album change needs a federation event so
+            # the other member households follow; until then it is refused.
+            raise GalleryPermissionError("A space photo can't be edited here")
+        if album.is_system:
+            raise GalleryPermissionError(
+                "system album items are managed automatically — edit the post"
+            )
+        await self._require_household_item_manager(
+            item.uploaded_by, album.owner_user_id, actor_user_id
+        )
+        patch: dict = {}
+        if not isinstance(caption, _Unset):
+            text = (caption or "").strip()
+            if len(text) > CAPTION_MAX:
+                raise ValueError(f"Caption must be {CAPTION_MAX} characters or fewer")
+            patch["caption"] = text or None
+        if not isinstance(taken_at, _Unset):
+            patch["taken_at"] = _valid_taken_day(taken_at)
+        from_album: str | None = None
+        if not isinstance(album_id, _Unset) and album_id != item.album_id:
+            target = await self._repo.get_album(str(album_id))
+            if (
+                target is None
+                or target.space_id is not None
+                or not await self._can_see(target, actor_user_id)
+            ):
+                raise GalleryNotFoundError(f"album {album_id!r} not found")
+            if target.is_system:
+                raise GalleryPermissionError(
+                    "nothing can be moved into the feed's Posts album"
+                )
+            from_album = await self._repo.move_item(item_id, target.id)
+            if from_album is None:
+                raise GalleryNotFoundError(f"item {item_id!r} not found")
+        if patch:
+            await self._repo.update_item(item_id, patch)
+        updated = await self._repo.get_item(item_id)
+        if updated is None:  # trashed meanwhile
+            raise GalleryNotFoundError(f"item {item_id!r} not found")
+        if patch or from_album is not None:
+            await self._bus.publish(
+                GalleryItemUpdated(
+                    item_id=item_id,
+                    album_id=updated.album_id,
+                    from_album_id=from_album,
+                )
+            )
+        return updated
+
+    async def apply_to_items(
+        self,
+        action: str,
+        item_ids: list[str],
+        *,
+        actor_user_id: str,
+        album_id: str | None = None,
+    ) -> tuple[list[str], list[str]]:
+        """One action for a selection — ``delete`` (a household photo to the
+        trash, a space photo for good), ``restore`` (back from the trash —
+        the Undo), ``purge`` (out of the trash for good) or ``move`` (to
+        ``album_id``). Each photo is checked on
+        its own, exactly as the single-item route would: the ones the actor
+        may not touch are refused, the rest done. ``(done, refused)``."""
+        if action not in BULK_ACTIONS:
+            raise ValueError(f"unknown action {action!r}")
+        ids = list(dict.fromkeys(str(i) for i in item_ids if i))
+        if not ids or len(ids) > BULK_MAX_ITEMS:
+            raise ValueError(f"1–{BULK_MAX_ITEMS} items per request")
+        if action == "move" and not album_id:
+            raise ValueError("move needs an album_id")
+        done: list[str] = []
+        refused: list[str] = []
+        for iid in ids:
+            try:
+                if action == "delete":
+                    await self.delete_item(iid, actor_user_id=actor_user_id)
+                elif action == "restore":
+                    await self.restore_item(iid, actor_user_id=actor_user_id)
+                elif action == "purge":
+                    await self.purge_trashed_item(iid, actor_user_id=actor_user_id)
+                else:
+                    await self.update_item(
+                        iid, actor_user_id=actor_user_id, album_id=str(album_id)
+                    )
+            except (
+                GalleryPermissionError,
+                GalleryNotFoundError,
+                SubscriberReadOnlyError,
+                FeatureDisabledError,
+            ):
+                refused.append(iid)
+            else:
+                done.append(iid)
+        return done, refused
+
+    # ─── Downloads (stored WebP / WebM, human file names) ────────────────
+
+    async def download_files(
+        self,
+        item_ids: list[str],
+        *,
+        actor_user_id: str,
+        system_album_label: str | None = None,
+    ) -> list[GalleryDownloadFile]:
+        """The stored files of the photos and videos the actor picked and may
+        see, named for people (:func:`download_names`). Unknown ids, items
+        of albums the actor can't see and videos still transcoding are left
+        out. Over :data:`DOWNLOAD_MAX_ITEMS` or :data:`DOWNLOAD_MAX_BYTES`
+        is refused before anything is read."""
+        ids = list(dict.fromkeys(str(i) for i in item_ids if i))
+        if not ids:
+            raise ValueError("no items to download")
+        if len(ids) > DOWNLOAD_MAX_ITEMS:
+            raise DownloadTooLargeError(DOWNLOAD_MAX_ITEMS, DOWNLOAD_MAX_BYTES)
+        albums: dict[str, GalleryAlbum | None] = {}
+        picked: list[tuple[GalleryItem, str]] = []
+        for iid in ids:
+            item = await self._repo.get_item(iid)
+            if item is None:
+                continue
+            if item.album_id not in albums:
+                found = await self._repo.get_album(item.album_id)
+                if found is not None and not await self._can_see(found, actor_user_id):
+                    found = None
+                if found is not None:
+                    await self._require_gallery_on(found)
+                albums[item.album_id] = found
+            album = albums[item.album_id]
+            if album is None:
+                continue
+            label = album.name
+            if album.is_system and system_album_label:
+                label = system_album_label
+            picked.append((item, label))
+        return await self._stored_files(
+            picked, max_items=DOWNLOAD_MAX_ITEMS, max_bytes=DOWNLOAD_MAX_BYTES
+        )
+
+    async def person_uploads(
+        self, username: str, *, actor_user_id: str
+    ) -> tuple[str, list[GalleryItem], dict[str, str]]:
+        """A person's household uploads, for the leaving-household ZIP: the
+        person themselves or a household admin asks. Only what the actor
+        may see is in it (an admin never gets a private album's photos).
+        ``(display name, items, album names by id)``."""
+        person = await self._users.get(username) if self._users else None
+        if person is None:
+            raise GalleryNotFoundError("person not found")
+        if person.user_id != actor_user_id and not await self._is_household_admin(
+            actor_user_id
+        ):
+            raise GalleryPermissionError(
+                "Only the person or a household admin may download their photos"
+            )
+        items = await self._repo.list_household_uploads(
+            person.user_id, limit=PERSON_DOWNLOAD_MAX_ITEMS + 1
+        )
+        names: dict[str, str] = {}
+        visible: list[GalleryItem] = []
+        for item in items:
+            if item.album_id not in names:
+                album = await self._repo.get_album(item.album_id)
+                seen = album is not None and await self._can_see(album, actor_user_id)
+                names[item.album_id] = album.name if seen and album else ""
+            if names[item.album_id]:
+                visible.append(item)
+        return person.display_name or person.username, visible, names
+
+    async def person_download_files(
+        self, username: str, *, actor_user_id: str
+    ) -> tuple[str, list[GalleryDownloadFile]]:
+        """``(display name, files)`` of :meth:`person_uploads`."""
+        name, items, albums = await self.person_uploads(
+            username, actor_user_id=actor_user_id
+        )
+        if len(items) > PERSON_DOWNLOAD_MAX_ITEMS:
+            raise DownloadTooLargeError(PERSON_DOWNLOAD_MAX_ITEMS, DOWNLOAD_MAX_BYTES)
+        files = await self._stored_files(
+            [(i, albums[i.album_id]) for i in items],
+            max_items=PERSON_DOWNLOAD_MAX_ITEMS,
+            max_bytes=DOWNLOAD_MAX_BYTES,
+        )
+        return name, files
+
+    async def _stored_files(
+        self,
+        picked: list[tuple[GalleryItem, str]],
+        *,
+        max_items: int,
+        max_bytes: int,
+    ) -> list[GalleryDownloadFile]:
+        """The files on disk behind *picked*, named, with their sizes — a
+        file that isn't there (a video still transcoding) is left out."""
+        names = download_names(picked)
+        out: list[GalleryDownloadFile] = []
+        total = 0
+        for (item, _label), name in zip(picked, names, strict=True):
+            base = media_basename(item.url)
+            if base is None:
+                continue
+            path = self._media_dir / base
+            if not await aiofiles.os.path.isfile(path):
+                continue
+            size = (await aiofiles.os.stat(path)).st_size
+            total += size
+            if total > max_bytes:
+                raise DownloadTooLargeError(max_items, max_bytes)
+            out.append(GalleryDownloadFile(path=str(path), name=name, size=size))
+        return out
 
     # ─── Leaving the household ────────────────────────────────────────────
 

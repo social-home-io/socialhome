@@ -11,11 +11,14 @@
  *   The keys are handled on the viewer itself, never the whole window, so
  *   a focused video keeps its own arrow keys for the scrubber.
  * - Every control is a real button of at least 44 px; Tab stays inside.
- * - Info: date taken, who added it, the album, size — the caption is
- *   read-only for now.
+ * - Info: date taken, who added it, the album, size — and "Edit" (caption
+ *   and date) for whoever may change the photo (``canEdit``).
  * - Only allowed actions are offered: Delete for the uploader, the album
  *   owner / a household admin (a protected account: its own uploads
  *   only), a space moderator; Report for someone else's space item.
+ * - Delete asks nothing: the page offers Undo for 8 s (household: from
+ *   the trash; space: the delete waits for the Undo to run out).
+ * - Save hands out the stored file under a human name (``onDownload``).
  * - Reduced motion: the photo doesn't follow the finger or fade in.
  */
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
@@ -61,8 +64,13 @@ export interface GalleryViewerProps {
   reportFor: (item: ViewerItem) => (() => void) | null
   onGo: (index: number) => void
   onClose: () => void
-  /** Delete for real; rejects when the server says no. */
+  /** Delete (with the page's Undo); rejects when the server says no. */
   onDelete: (item: ViewerItem) => Promise<void>
+  /** May the caption / date of this item be changed here? */
+  canEdit?: (item: ViewerItem) => boolean
+  onEdit?: (item: ViewerItem) => void
+  /** Save the stored file with a human name; without it, a plain link. */
+  onDownload?: (item: ViewerItem) => Promise<void> | void
 }
 
 const HINT_KEY = 'sh_gallery_viewer_hint_seen'
@@ -93,6 +101,7 @@ const ICONS = {
   delete: 'M4.5 6.5h15M9.5 6.5V4.5h5v2m-8 0 1 13h9l1-13M10 10v6m4-6v6',
   report: 'M5.5 21V4m0 0h11l-2 4 2 4h-11',
   copy: 'M8.5 8.5h11v11h-11zM15.5 8.5v-4h-11v11h4',
+  edit: 'M4.5 19.5h4l10-10-4-4-10 10zM13 7l4 4',
 } as const
 
 function Icon({ name }: { name: keyof typeof ICONS }) {
@@ -146,13 +155,11 @@ export function GalleryViewer(props: GalleryViewerProps) {
   const stageRef = useRef<HTMLDivElement | null>(null)
   const mediaRef = useRef<HTMLImageElement | null>(null)
   const infoBtnRef = useRef<HTMLButtonElement | null>(null)
-  const deleteBtnRef = useRef<HTMLButtonElement | null>(null)
 
   const [reducedMotion] = useState(prefersReducedMotion)
   const [infoOpen, setInfoOpen] = useState(false)
-  // The item a delete is being asked for — another item shows no stale ask.
-  const [confirmFor, setConfirmFor] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null)
   const [loadedId, setLoadedId] = useState<string | null>(null)
   const [failedId, setFailedId] = useState<string | null>(null)
@@ -214,10 +221,6 @@ export function GalleryViewer(props: GalleryViewerProps) {
     }
   }, [index, items])
 
-  // A new item: no leftover confirm.
-  const confirming = !!item && confirmFor === item.id
-  const setConfirming = (on: boolean) => setConfirmFor(on && item ? item.id : null)
-
   // "Swipe to browse · pinch to zoom", once, on touch screens.
   useEffect(() => {
     if (!coarsePointer() || items.length < 2) return
@@ -243,7 +246,7 @@ export function GalleryViewer(props: GalleryViewerProps) {
     if (e.key === 'Tab') {
       const root = rootRef.current
       if (!root) return
-      const scope = (confirming && root.querySelector<HTMLElement>('.sh-gviewer-confirm')) || root
+      const scope = root
       const list = focusableWithin(scope)
       if (list.length === 0) return
       const first = list[0]
@@ -263,14 +266,12 @@ export function GalleryViewer(props: GalleryViewerProps) {
     }
     if (e.key === 'Escape') {
       e.preventDefault()
-      if (confirming) { setConfirming(false); deleteBtnRef.current?.focus(); return }
       if (infoOpen) { setInfoOpen(false); infoBtnRef.current?.focus(); return }
       props.onClose()
       return
     }
     // A video (its scrubber, volume) and form fields keep their own keys.
     if (target?.closest('video, input, textarea, select, [contenteditable="true"]')) return
-    if (confirming) return
     const panStep = Math.max(40, stage.w * KEY_PAN)
     switch (e.key) {
       case 'ArrowLeft':
@@ -313,8 +314,6 @@ export function GalleryViewer(props: GalleryViewerProps) {
     setBusy(true)
     try {
       await props.onDelete(item)
-      setConfirming(false)
-      say(t('gallery.deleted'))
     } catch {
       say(t('gallery.delete_failed'), true)
     } finally {
@@ -538,6 +537,15 @@ export function GalleryViewer(props: GalleryViewerProps) {
                 <span aria-hidden="true">🔒</span> {t('gallery.info_no_location')}
               </p>
             )}
+            {props.canEdit?.(item) && props.onEdit && (
+              <button
+                type="button"
+                class="sh-gviewer-info-action"
+                onClick={() => props.onEdit?.(item)}
+              >
+                <Icon name="edit" /> {t('gallery.manage.edit_action')}
+              </button>
+            )}
             <button
               type="button"
               class="sh-gviewer-info-action"
@@ -557,7 +565,21 @@ export function GalleryViewer(props: GalleryViewerProps) {
       )}
 
       <div class="sh-gviewer-bar" role="toolbar" aria-label={t('gallery.viewer_actions')}>
-        {item && !item.processing && (
+        {item && !item.processing && (props.onDownload ? (
+          <button
+            type="button"
+            class="sh-gviewer-action"
+            disabled={saving}
+            aria-busy={saving || undefined}
+            onClick={() => {
+              setSaving(true)
+              void Promise.resolve(props.onDownload?.(item)).finally(() => setSaving(false))
+            }}
+          >
+            <Icon name="download" />
+            <span>{t('media.download')}</span>
+          </button>
+        ) : (
           <a
             class="sh-gviewer-action"
             href={safeHref(item.url, { blob: true })}
@@ -566,7 +588,7 @@ export function GalleryViewer(props: GalleryViewerProps) {
             <Icon name="download" />
             <span>{t('media.download')}</span>
           </a>
-        )}
+        ))}
         {item && (
           <button
             ref={infoBtnRef}
@@ -582,10 +604,10 @@ export function GalleryViewer(props: GalleryViewerProps) {
         )}
         {item && deletable && (
           <button
-            ref={deleteBtnRef}
             type="button"
             class="sh-gviewer-action sh-gviewer-action--danger"
-            onClick={() => setConfirming(true)}
+            disabled={busy}
+            onClick={() => void doDelete()}
           >
             <Icon name="delete" />
             <span>{t('gallery.viewer_delete')}</span>
@@ -603,15 +625,6 @@ export function GalleryViewer(props: GalleryViewerProps) {
         )}
       </div>
 
-      {confirming && item && (
-        <ConfirmDelete
-          item={item}
-          inSpace={props.inSpace}
-          busy={busy}
-          onCancel={() => { setConfirming(false); deleteBtnRef.current?.focus() }}
-          onConfirm={() => void doDelete()}
-        />
-      )}
 
       {hint && (
         <p class="sh-gviewer-hint" aria-hidden="true">{t('gallery.viewer_hint')}</p>
@@ -629,44 +642,6 @@ export function GalleryViewer(props: GalleryViewerProps) {
       <p class="sr-only" aria-live="polite">
         {item ? `${dialogLabel}${item.caption ? `: ${item.caption}` : ''}` : ''}
       </p>
-    </div>
-  )
-}
-
-function ConfirmDelete({ item, inSpace, busy, onCancel, onConfirm }: {
-  item: ViewerItem
-  inSpace: boolean
-  busy: boolean
-  onCancel: () => void
-  onConfirm: () => void
-}) {
-  const cancelRef = useRef<HTMLButtonElement | null>(null)
-  // The safe answer has the focus.
-  useEffect(() => { cancelRef.current?.focus() }, [])
-  return (
-    <div class="sh-gviewer-confirm-scrim">
-      <div
-        class="sh-gviewer-confirm"
-        role="alertdialog"
-        aria-modal="true"
-        aria-labelledby="sh-gviewer-confirm-title"
-        aria-describedby="sh-gviewer-confirm-body"
-      >
-        <h2 id="sh-gviewer-confirm-title">
-          {item.item_type === 'video' ? t('gallery.delete_video_title') : t('gallery.delete_photo_title')}
-        </h2>
-        <p id="sh-gviewer-confirm-body">
-          {inSpace ? t('gallery.delete_body_space') : t('gallery.delete_body_household')}
-        </p>
-        <div class="sh-gviewer-confirm-actions">
-          <button ref={cancelRef} type="button" class="sh-btn sh-btn--secondary" onClick={onCancel}>
-            {t('common.cancel')}
-          </button>
-          <button type="button" class="sh-btn sh-btn--danger" onClick={onConfirm} disabled={busy}>
-            {t('gallery.viewer_delete')}
-          </button>
-        </div>
-      </div>
     </div>
   )
 }

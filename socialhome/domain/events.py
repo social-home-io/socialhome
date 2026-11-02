@@ -1064,6 +1064,18 @@ class GalleryItemRestored(DomainEvent):
     occurred_at: datetime = field(default_factory=_now)
 
 
+@dataclass(slots=True, frozen=True)
+class GalleryItemUpdated(DomainEvent):
+    """A household photo or video got a new caption or date, or moved to
+    another album (``from_album_id`` is the album it left; ``None`` when it
+    stayed). Household only: a space item is not edited in place."""
+
+    item_id: str
+    album_id: str
+    from_album_id: str | None = None
+    occurred_at: datetime = field(default_factory=_now)
+
+
 # ─── Bazaar events (§9, §23.15) ──────────────────────────────────────────
 
 

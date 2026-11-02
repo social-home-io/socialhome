@@ -119,6 +119,19 @@ export class ApiError extends Error {
   }
 }
 
+/** The file name in a ``Content-Disposition`` header: the RFC 5987
+ *  ``filename*=UTF-8''…`` form first ("Sommer 2026 – 2026-07-12.webp"),
+ *  else the plain ``filename="…"``; ``null`` when there is none. */
+export function dispositionName(header: string | null): string | null {
+  if (!header) return null
+  const star = /filename\*\s*=\s*UTF-8''([^;]+)/i.exec(header)
+  if (star) {
+    try { return decodeURIComponent(star[1].trim()) } catch { /* fall through */ }
+  }
+  const plain = /filename\s*=\s*"([^"]*)"/i.exec(header) ?? /filename\s*=\s*([^;]+)/i.exec(header)
+  return plain ? plain[1].trim() : null
+}
+
 /** Per-request options shared by the JSON verbs. */
 export interface RequestOptions {
   /** ``fetch``'s ``keepalive``: the request outlives the page — for the
@@ -259,6 +272,21 @@ class ApiClient {
       path,
     )
     return _parseJsonOrNull<T>(res)
+  }
+
+  /** Fetch a file the server hands out as an attachment — GET, or POST
+   *  with a JSON ``body`` — as a ``Blob`` plus the file name from its
+   *  ``Content-Disposition`` (the UTF-8 ``filename*`` when there is one).
+   *  Same auth and errors as every other verb: ingress headers or the
+   *  bearer token, never a token in the URL. */
+  async download(path: string, body?: unknown): Promise<{ blob: Blob; filename: string | null }> {
+    const res = await this._handle(
+      await fetch(_rel(path), body === undefined
+        ? { headers: this.headers() }
+        : { method: 'POST', headers: this.headers(), body: JSON.stringify(body) }),
+      path,
+    )
+    return { blob: await res.blob(), filename: dispositionName(res.headers.get('content-disposition')) }
   }
 
   async upload<T = any>(path: string, body: FormData): Promise<T> {

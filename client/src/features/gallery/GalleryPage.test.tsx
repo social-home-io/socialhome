@@ -42,7 +42,15 @@ function emit(type: string, data: Record<string, unknown>) {
 }
 
 const showToast = vi.fn()
-vi.mock('@/components/Toast', () => ({ showToast: (...a: unknown[]) => showToast(...a) }))
+const confirmDialog = vi.fn(async (_body: string, _opts: { title?: string }) => true)
+vi.mock('@/components/confirm', () => ({
+  confirmDialog: (...a: [string, { title?: string }]) => confirmDialog(...a),
+}))
+
+vi.mock('@/components/Toast', () => ({
+  showToast: (...a: unknown[]) => showToast(...a),
+  dismissToast: vi.fn(),
+}))
 
 const people = new Map<string, { user_id: string; display_name: string; username: string }>()
 vi.mock('@/store/householdUsers', () => ({
@@ -687,14 +695,147 @@ describe('GalleryPage viewer actions follow the delete rules (#1271)', () => {
     expect(view.getByRole('button', { name: 'Delete' })).toBeTruthy()
   })
 
-  it('deleting moves on to the next photo and drops the tile', async () => {
+  it('household: deleting goes to the trash at once, moves on, and offers Undo', async () => {
+    apiPost.mockImplementation(async (_url: string, body: { action: string; item_ids: string[] }) => {
+      // The server's answer: it leaves the album.
+      if (body.action === 'delete') itemRows = itemRows.filter(i => !body.item_ids.includes(i.id as string))
+      return { done: body.item_ids, refused: [] }
+    })
     const view = await openOn(2, {}, { owner_user_id: 'u1', item_count: 2 })
     fireEvent.click(view.getByRole('button', { name: 'Delete' }))
-    expect(await view.findByRole('alertdialog', { name: 'Delete this photo?' })).toBeTruthy()
-    fireEvent.click(view.getAllByRole('button', { name: 'Delete' }).at(-1)!)
-    await waitFor(() => expect(apiDelete).toHaveBeenCalledWith('/api/gallery/items/it-2'))
+    // No question first — the Undo is the safety net.
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/gallery/bulk', { action: 'delete', item_ids: ['it-2'] }, {}))
     await waitFor(() => expect(location.pathname).toBe('/gallery/albums/al-1/it-1'))
-    expect(await view.findByRole('dialog', { name: 'Photo 1 of 1' })).toBeTruthy()
+    expect(await view.findByRole('dialog', { name: /^Photo 1 of/ })).toBeTruthy()
+    const [message, , opts] = showToast.mock.calls.find(c => c[2]?.action)!
+    expect(message).toBe('1 photo moved to the trash')
+    opts.action.onClick()
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/gallery/bulk', { action: 'restore', item_ids: ['it-2'] }, {}))
+  })
+
+  it('space: the delete waits for its 8 s Undo before it is sent', async () => {
+    apiPost.mockImplementation(async (_url: string, body: { item_ids: string[] }) =>
+      ({ done: body.item_ids, refused: [] }))
+    const view = await openOn(2, { spaceId: 'sp-1' }, { owner_user_id: 'u1', item_count: 2 })
+    fireEvent.click(view.getByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(location.pathname).toBe('/spaces/sp-1/gallery/albums/al-1/it-1'))
+    expect(apiPost).not.toHaveBeenCalled()
+    const [message, , opts] = showToast.mock.calls.find(c => c[2]?.onExpire)!
+    expect(message).toBe('1 photo deleted')
+    opts.onExpire()
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/gallery/bulk', { action: 'delete', item_ids: ['it-2'] }, { keepalive: undefined }))
+  })
+})
+
+describe('GalleryPage selection (managing photos)', () => {
+  async function openAlbum(props: PageProps, row: Record<string, unknown> = {}) {
+    albumRows = [album('al-1', 'Holiday', { space_id: props.spaceId ?? null, item_count: 2, ...row })]
+    itemRows = [item(1, { uploaded_by: 'u-anna' }), item(2, { uploaded_by: 'u1' })]
+    people.set('u-anna', { user_id: 'u-anna', display_name: 'Anna', username: 'anna' })
+    const base = props.spaceId ? `/spaces/${props.spaceId}/gallery` : '/gallery'
+    const view = await mount(props, `${base}/albums/al-1`)
+    await view.findByRole('heading', { name: /Holiday/ })
+    await waitFor(() => expect(view.container.querySelectorAll('.sh-gallery-item').length).toBe(2))
+    return view
+  }
+
+  it('a visible Select button turns tiles into checkboxes and counts them', async () => {
+    const view = await openAlbum({}, { owner_user_id: 'u-other' })
+    fireEvent.click(view.getByRole('button', { name: 'Select' }))
+    expect(view.getByText('Tap photos to select them')).toBeTruthy()
+    const boxes = view.getAllByRole('checkbox')
+    expect(boxes).toHaveLength(2)
+    fireEvent.click(boxes[0])
+    fireEvent.click(boxes[1])
+    expect(view.getByText('2 selected')).toBeTruthy()
+    expect(boxes[0].getAttribute('aria-checked')).toBe('true')
+    // Escape leaves selection: tiles are links again.
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await waitFor(() => expect(view.queryAllByRole('checkbox')).toHaveLength(0))
+  })
+
+  it('Ctrl + click on a tile starts selecting instead of opening it', async () => {
+    const view = await openAlbum({})
+    const tile = view.container.querySelector<HTMLElement>('[data-item-id="it-1"]')!
+    fireEvent.click(tile, { ctrlKey: true })
+    expect(view.getByText('1 selected')).toBeTruthy()
+    expect(location.pathname).toBe('/gallery/albums/al-1')
+  })
+
+  it('a long press on a touch screen starts selecting', async () => {
+    // jsdom has no PointerEvent: without it ``pointerType`` is lost.
+    if (typeof window.PointerEvent === 'undefined') {
+      class PE extends MouseEvent {
+        pointerType: string
+        constructor(type: string, init: PointerEventInit = {}) {
+          super(type, init)
+          this.pointerType = init.pointerType ?? ''
+        }
+      }
+      ;(window as unknown as { PointerEvent: unknown }).PointerEvent = PE
+    }
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+    try {
+      const view = await openAlbum({})
+      const tile = view.container.querySelector<HTMLElement>('[data-item-id="it-2"]')!
+      fireEvent.pointerDown(tile, { pointerType: 'touch', clientX: 5, clientY: 5 })
+      vi.advanceTimersByTime(600)
+      fireEvent.pointerUp(tile)
+      fireEvent.click(tile)
+      await waitFor(() => expect(view.getByText('1 selected')).toBeTruthy())
+      expect(location.pathname).toBe('/gallery/albums/al-1')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('deleting a mixed selection says whose photos stay, then trashes yours with Undo', async () => {
+    confirmDialog.mockResolvedValue(true)
+    apiPost.mockImplementation(async (_url: string, body: { item_ids: string[] }) =>
+      ({ done: body.item_ids, refused: [] }))
+    const view = await openAlbum({}, { owner_user_id: 'u-other' })
+    fireEvent.click(view.getByRole('button', { name: 'Select' }))
+    for (const box of view.getAllByRole('checkbox')) fireEvent.click(box)
+    fireEvent.click(view.getByRole('button', { name: 'Delete' }))
+    await waitFor(() => expect(confirmDialog).toHaveBeenCalled())
+    const [body, opts] = confirmDialog.mock.calls[0]
+    expect(opts.title).toBe('Delete 1 of 2?')
+    expect(body).toContain('1 is from Anna')
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/gallery/bulk', { action: 'delete', item_ids: ['it-2'] }, {}))
+    await waitFor(() => expect(showToast.mock.calls.some(c => c[0] === '1 photo moved to the trash' && c[2]?.action)).toBe(true))
+    // Anna's photo stays selected.
+    await waitFor(() => expect(view.getByText('1 selected')).toBeTruthy())
+  })
+
+  it('space: no Move (needs space parity) and the delete waits for its Undo', async () => {
+    const view = await openAlbum({ spaceId: 'sp-1', canModerate: true })
+    fireEvent.click(view.getByRole('button', { name: 'Select' }))
+    for (const box of view.getAllByRole('checkbox')) fireEvent.click(box)
+    expect(view.queryByRole('button', { name: 'Move to album' })).toBeNull()
+    expect(view.getByRole('button', { name: 'Save' })).toBeTruthy()
+    fireEvent.click(view.getByRole('button', { name: 'Delete' }))
+    // A moderator may delete both; nothing is sent before the Undo runs out.
+    await waitFor(() => expect(showToast.mock.calls.some(c => c[0] === '2 photos deleted' && c[2]?.onExpire)).toBe(true))
+    expect(apiPost).not.toHaveBeenCalled()
+    await waitFor(() => expect(view.container.querySelectorAll('.sh-gallery-item').length).toBe(0))
+  })
+
+  it('household: Move offers the other albums', async () => {
+    const view = await openAlbum({})
+    apiGet.mockImplementation(async (url: string) => {
+      const [path] = split(url)
+      if (path === '/api/gallery/albums') return [...albumRows, album('al-2', 'Lake', { space_id: null })]
+      if (/items$/.test(path)) return itemRows
+      return albumRows[0]
+    })
+    fireEvent.click(view.getByRole('button', { name: 'Select' }))
+    fireEvent.click(view.getAllByRole('checkbox')[1])
+    fireEvent.click(view.getByRole('button', { name: 'Move to album' }))
+    expect(await view.findByRole('radio', { name: /Lake/ })).toBeTruthy()
   })
 })
 

@@ -55,6 +55,19 @@ import {
   type AlbumOrder,
 } from './albumOrder'
 import { OnThisDayCardView, OnThisDayNote, loadOnThisDay } from './OnThisDay'
+import { OverflowMenu } from '@/components/OverflowMenu'
+import { confirmDialog } from '@/components/confirm'
+import { pendingDeletes } from '@/utils/undoableDelete'
+import TrashPage from './TrashPage'
+import { SelectionBar, type SelectionAction } from './SelectionBar'
+import { useSelection, type Selection } from './useSelection'
+import { MoveToAlbumDialog } from './MoveToAlbumDialog'
+import { EditItemDialog } from './EditItemDialog'
+import { AlbumMenu } from './AlbumMenu'
+import {
+  bulk, deleteLaterWithUndo, downloadError, downloadItems, itemsWord, othersLine, trashWithUndo,
+} from './galleryManage'
+import { TRASH_PATH } from './galleryRoutes'
 
 interface Album {
   id: string
@@ -155,6 +168,8 @@ let wantedAlbum: string | null = null
  *  link has neither — closing then goes to the parent address. */
 let albumFromList = false
 let viewerFromGrid = false
+/** The trash was opened from the albums' ⋯ (its Back steps back). */
+let trashFromList = false
 /** A link to an item past the loaded pages reads at most this many more
  *  pages looking for it (50 each) before saying it isn't there. */
 const ITEM_SEARCH_PAGES = 40
@@ -234,10 +249,12 @@ export default function GalleryPage({
     }
   }, [spaceId])
 
-  // An address the gallery doesn't know → the albums.
+  // An address the gallery doesn't know → the albums. A space has no
+  // trash (its deletes go out to the other households).
+  const valid = where.valid && !(where.trash && spaceId)
   useEffect(() => {
-    if (!where.valid) locRef.current.route(galleryPath(spaceId), true)
-  }, [where.valid, spaceId])
+    if (!valid) locRef.current.route(galleryPath(spaceId), true)
+  }, [valid, spaceId])
 
   // The album follows the address: opened from the list, from a link or
   // a refresh; closed by Back.
@@ -277,12 +294,24 @@ export default function GalleryPage({
     type GalleryFrame = { data: { space_id?: string | null; album_id?: string } }
     const inScope = (e: GalleryFrame) =>
       (e.data.space_id ?? null) === (spaceId ?? null)
-    const handle = (e: GalleryFrame) => {
+    // A selection deletes, restores or moves many photos at once — one
+    // frame each. Re-read once for the burst, not once per frame.
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let albumDirty = false
+    const refreshSoon = (touchesOpen: boolean) => {
+      albumDirty = albumDirty || touchesOpen
+      if (timer) clearTimeout(timer)
+      timer = setTimeout(() => {
+        timer = null
+        void loadAlbums(spaceId, { quiet: true })
+        if (albumDirty && activeAlbum.value) void loadItems(activeAlbum.value.id, { quiet: true })
+        albumDirty = false
+      }, 300)
+    }
+    const handle = (e: GalleryFrame & { data: { from_album_id?: string | null } }) => {
       if (!inScope(e)) return
-      void loadAlbums(spaceId, { quiet: true })
-      if (activeAlbum.value && e.data.album_id === activeAlbum.value.id) {
-        void loadItems(activeAlbum.value.id, { quiet: true })
-      }
+      const open = activeAlbum.value?.id
+      refreshSoon(!!open && (e.data.album_id === open || e.data.from_album_id === open))
     }
     const onAlbumDeleted = (e: GalleryFrame) => {
       if (!inScope(e)) return
@@ -311,10 +340,17 @@ export default function GalleryPage({
       ws.on('gallery.album_deleted', onAlbumDeleted),
       ws.on('gallery.item_uploaded', handle),
       ws.on('gallery.item_deleted', handle),
+      // Household only (no ``space_id``): back from the trash, a new
+      // caption / date, a move between albums.
+      ws.on('gallery.item_restored', handle),
+      ws.on('gallery.item_updated', handle),
       ws.on('media.ready', onMediaDone),
       ws.on('media.failed', onMediaDone),
     ]
-    return () => { offs.forEach((off) => off()) }
+    return () => {
+      if (timer) clearTimeout(timer)
+      offs.forEach((off) => off())
+    }
   }, [spaceId])
 
   // Uploads finished: quietly re-read the list (a new default album, a
@@ -354,6 +390,8 @@ export default function GalleryPage({
       fromCamera={listControls.fromCamera}
     />
   )
+
+  if (where.trash && !spaceId) return <TrashPage fromList={trashFromList} />
 
   if (albumId) {
     // Back to the list: a step back in history when the list opened
@@ -448,6 +486,17 @@ export default function GalleryPage({
                 {t('gallery.new_album_btn')}
               </Button>
               {listCanUpload && <UploadButtons controls={listControls} />}
+              {!spaceId && (
+                <OverflowMenu
+                  label={t('gallery.manage.gallery_menu')}
+                  items={[{
+                    key: 'trash',
+                    label: t('gallery.trash.title'),
+                    onSelect: () => { trashFromList = true; loc.route(TRASH_PATH) },
+                  }]}
+                  menuWidth={200}
+                ><span aria-hidden="true">⋯</span></OverflowMenu>
+              )}
             </div>
           )}
         </header>
@@ -484,7 +533,7 @@ export default function GalleryPage({
       ) : (
         <>
           <div class="sh-album-grid">
-            {albums.value.map(a => (
+            {albums.value.filter(a => !pendingDeletes.value.has(a.id)).map(a => (
               // A real link: its own address, opens in a new tab, and
               // the router keeps the ingress prefix.
               <a
@@ -783,7 +832,9 @@ function AlbumDetail({
     return () => clearInterval(timer)
   }, [anyProcessing, album.id])
 
-  const loaded = items.value
+  // A space delete waits 8 s for its Undo before it is sent: hidden here
+  // meanwhile.
+  const loaded = items.value.filter(i => !pendingDeletes.value.has(i.id))
   // No uploads into the system album (the server refuses them too).
   const canUpload = !album.is_system && !readOnly
   const controls = useUploadControls({
@@ -792,6 +843,8 @@ function AlbumDetail({
     name: albumDisplayName(album),
     isDefault: false,
   }, canUpload)
+  const manage = useAlbumManage(album, loaded, canModerate, readOnly)
+  const sel = manage.sel
 
   return (
     <div class="sh-album-detail">
@@ -806,14 +859,27 @@ function AlbumDetail({
             </span>
           )}
         </h1>
-        {(canUpload || album.item_count > 1) && (
-          <div class="sh-row sh-upload-actions">
-            {album.item_count > 1 && <OrderToggle albumId={album.id} />}
-            {canUpload && <UploadButtons controls={controls} />}
-          </div>
-        )}
+        <div class="sh-row sh-upload-actions sh-album-actions">
+          {album.item_count > 1 && !sel.active && <OrderToggle albumId={album.id} />}
+          {canUpload && <UploadButtons controls={controls} />}
+          {loaded.length > 0 && !sel.active && (
+            <Button variant="secondary" onClick={() => sel.start()}>
+              {t('gallery.manage.select')}
+            </Button>
+          )}
+          {manage.canManageAlbum && (
+            <AlbumMenu
+              album={album}
+              covers={loaded.filter(i => !isProcessing(i))}
+              onChanged={() => void loadAlbums(spaceId, { quiet: true })}
+              onDeleted={onBack}
+              onRestored={() => void loadAlbums(spaceId, { quiet: true })}
+            />
+          )}
+        </div>
       </header>
       {controls.elements}
+      {manage.elements}
 
       {/* The system album's description is the server's English constant;
         * its translated hint below says the same thing. */}
@@ -858,7 +924,10 @@ function AlbumDetail({
                   </h3>
                   <div class="sh-image-grid">
                     {d.items.map(item => (
-                      <Tile key={item.id} item={item} albumId={album.id} spaceId={spaceId} scope={album.space_id} />
+                      <Tile
+                        key={item.id} item={item} albumId={album.id} spaceId={spaceId} scope={album.space_id}
+                        selecting={sel.active} picked={sel.ids.has(item.id)} handlers={sel.tileHandlers(item.id)}
+                      />
                     ))}
                   </div>
                 </div>
@@ -887,8 +956,9 @@ function useAlbumViewer(
   locRef.current = loc
   const searched = useRef(0)
   const fetching = useRef(false)
+  const [editing, setEditing] = useState<Item | null>(null)
   const lastItem = useRef<string | null>(null)
-  const loaded = items.value
+  const loaded = items.value.filter(i => !pendingDeletes.value.has(i.id))
   const index = itemId ? loaded.findIndex(i => i.id === itemId) : -1
   const albumPath = galleryPath(spaceId, album.id)
 
@@ -954,7 +1024,18 @@ function useAlbumViewer(
 
   const viewerItems: ViewerItem[] = loaded.map(i => ({ ...i, processing: isProcessing(i) }))
   const me = currentUser.value?.user_id
+  // TODO(gallery PR 13, space parity, proto v_79): caption / date edits
+  // in a space need a federation event — household photos only for now.
+  const household = !album.space_id && !album.is_system
   return (
+    <>
+    {editing && (
+      <EditItemDialog
+        item={editing}
+        onClose={() => setEditing(null)}
+        onSaved={(it) => { items.value = items.value.map(i => i.id === it.id ? { ...i, ...it } : i) }}
+      />
+    )}
     <GalleryViewer
       items={viewerItems}
       index={index}
@@ -973,35 +1054,67 @@ function useAlbumViewer(
         if (next) locRef.current.route(galleryPath(spaceId, album.id, next.id), true)
       }}
       onClose={close}
-      onDelete={async (it) => {
-        await api.delete(`/api/gallery/items/${it.id}`)
-        const pos = items.value.findIndex(i => i.id === it.id)
-        const rest = items.value.filter(i => i.id !== it.id)
-        const next = rest[pos] ?? rest[pos - 1]
-        // Move on first, then drop the row — the viewer never sees an
-        // address whose item is gone.
-        if (next) locRef.current.route(galleryPath(spaceId, album.id, next.id), true)
-        else {
-          close()
-          showToast(t('gallery.deleted'), 'success')
+      canEdit={(it) => household && canDeleteItem(album, it, canModerate)}
+      onEdit={(it) => {
+        const row = items.value.find(i => i.id === it.id)
+        if (row) setEditing(row)
+      }}
+      onDownload={async (it) => {
+        try {
+          await downloadItems([it.id], albumDisplayName(album))
+        } catch (err) {
+          showToast(downloadError(err), 'error')
         }
-        items.value = rest
+      }}
+      onDelete={async (it) => {
+        const pos = loaded.findIndex(i => i.id === it.id)
+        const rest = loaded.filter(i => i.id !== it.id)
+        const next = rest[pos] ?? rest[pos - 1]
+        const what = itemsWord([it])
+        const refresh = () => {
+          void loadItems(album.id, { quiet: true })
+          void loadAlbums(spaceId, { quiet: true })
+        }
+        // Move on first — the viewer never sees an address whose item
+        // is gone.
+        const moveOn = () => {
+          if (next) locRef.current.route(galleryPath(spaceId, album.id, next.id), true)
+          else close()
+        }
+        if (album.space_id) {
+          // No trash in a space: held for 8 s, sent when Undo runs out.
+          moveOn()
+          deleteLaterWithUndo([it.id], t('gallery.manage.deleted_space', { what }), refresh)
+        } else {
+          const res = await trashWithUndo([it.id], () => t('gallery.manage.trashed', { what }), refresh)
+          if (!res.done.length) throw new Error('refused')
+          // The re-read drops the tile once the address has moved on.
+          moveOn()
+          refresh()
+        }
         if (activeAlbum.value?.id === album.id) {
           activeAlbum.value = { ...album, item_count: Math.max(0, album.item_count - 1) }
         }
       }}
     />
+    </>
   )
 }
 
 /** One tile: a real link to the photo's own address (the viewer opens on
  *  it, and it can be shared or opened in a new tab) — or, for a video
  *  still transcoding, a "Processing…" placeholder that opens nothing. */
-function Tile({ item, albumId, spaceId, scope }: {
+function Tile({ item, albumId, spaceId, scope, selecting, picked, handlers }: {
   item: Item
   albumId: string
   spaceId?: string
   scope: string | null
+  /** Selecting: the tile is a checkbox (Space / Enter toggles). */
+  selecting: boolean
+  picked: boolean
+  /** ``useSelection``: a long press (touch) or Ctrl / ⌘ / Shift + click
+   *  starts selecting; while selecting a click toggles. */
+  handlers: ReturnType<Selection['tileHandlers']>
 }) {
   if (isProcessing(item)) {
     const readyIn = readyInLabel(item.media_eta_s)
@@ -1025,18 +1138,43 @@ function Tile({ item, albumId, spaceId, scope }: {
       </div>
     )
   }
+  const media = (
+    <>
+      <img src={item.thumbnail_url} alt="" loading="lazy" decoding="async" />
+      {item.item_type === 'video' && (
+        <span class="sh-video-badge" aria-hidden="true">▶</span>
+      )}
+    </>
+  )
+  if (selecting) {
+    return (
+      <button
+        type="button"
+        role="checkbox"
+        aria-checked={picked}
+        class={'sh-gallery-item sh-gallery-item--selectable' + (picked ? ' sh-gallery-item--picked' : '')}
+        data-item-id={item.id}
+        aria-label={tileLabel(item, scope)}
+        {...handlers}
+      >
+        {media}
+        <span class="sh-select-check" aria-hidden="true" />
+      </button>
+    )
+  }
   return (
     <a
       href={addBase(galleryPath(spaceId, albumId, item.id))}
       class="sh-gallery-item"
       data-item-id={item.id}
       aria-label={tileLabel(item, scope)}
-      onClick={() => { viewerFromGrid = true }}
+      {...handlers}
+      onClick={(e: MouseEvent) => {
+        handlers.onClick(e)
+        if (!e.defaultPrevented) viewerFromGrid = true
+      }}
     >
-      <img src={item.thumbnail_url} alt="" loading="lazy" decoding="async" />
-      {item.item_type === 'video' && (
-        <span class="sh-video-badge" aria-hidden="true">▶</span>
-      )}
+      {media}
     </a>
   )
 }
@@ -1089,6 +1227,138 @@ function byLine(dayItems: Item[], scope: string | null) {
     ? t('gallery.by_more', { names: names.slice(0, 3).join(', '), n: String(names.length - 3) })
     : names.join(', ')
   return <span class="sh-album-day__by"> · {t('gallery.by', { names: shown })}</span>
+}
+
+/** May this person rename, re-cover or delete the album? The owner, a
+ *  household admin (household) or a space moderator (space) — the server
+ *  checks again. Never the feed's "Posts" album. */
+function canManageAlbum(album: Album, canModerate: boolean, readOnly: boolean): boolean {
+  const me = currentUser.value
+  if (!me || album.is_system || readOnly) return false
+  if (album.owner_user_id === me.user_id) return true
+  if (me.protected) return false
+  return album.space_id ? canModerate : !!me.is_admin
+}
+
+/** Selection in an album: the bar, its actions, and their dialogs. */
+function useAlbumManage(album: Album, loaded: Item[], canModerate: boolean, readOnly: boolean) {
+  const sel = useSelection(loaded.map(i => i.id))
+  const [moving, setMoving] = useState(false)
+  const [busy, setBusy] = useState<'save' | 'delete' | null>(null)
+  const spaceId = album.space_id ?? undefined
+  const picked = loaded.filter(i => sel.ids.has(i.id))
+  const refresh = () => {
+    void loadItems(album.id, { quiet: true })
+    void loadAlbums(spaceId, { quiet: true })
+  }
+  const nameOf = (uid: string) => uploaderName(album.space_id, uid)
+
+  const remove = async () => {
+    if (!picked.length) return
+    const mine = picked.filter(i => canDeleteItem(album, i, canModerate))
+    const others = picked.filter(i => !canDeleteItem(album, i, canModerate))
+    if (!mine.length) {
+      showToast(t('gallery.manage.none_deletable', { names: othersLine(others, nameOf) }), 'error')
+      return
+    }
+    if (others.length) {
+      const ok = await confirmDialog(
+        t(isOne(others.length) ? 'gallery.manage.partial_body_one' : 'gallery.manage.partial_body', {
+          n: String(others.length), names: othersLine(others, nameOf),
+        }),
+        {
+          title: t('gallery.manage.partial_title', { n: String(mine.length), total: String(picked.length) }),
+          confirmLabel: t('gallery.manage.partial_confirm', { n: String(mine.length) }),
+          destructive: true,
+        },
+      )
+      if (!ok) return
+    }
+    const ids = mine.map(i => i.id)
+    const what = itemsWord(mine)
+    if (album.space_id) {
+      deleteLaterWithUndo(ids, t('gallery.manage.deleted_space', { what }), refresh)
+      sel.keep(others.map(i => i.id))
+      return
+    }
+    setBusy('delete')
+    try {
+      const res = await trashWithUndo(ids, (n) => t('gallery.manage.trashed', {
+        what: itemsWord(mine.slice(0, n)),
+      }), refresh)
+      items.value = items.value.filter(i => !res.done.includes(i.id))
+      sel.keep([...others.map(i => i.id), ...res.refused])
+      refresh()
+    } catch {
+      showToast(t('gallery.delete_failed'), 'error')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const save = async () => {
+    if (!picked.length) return
+    setBusy('save')
+    try {
+      await downloadItems(picked.map(i => i.id), albumDisplayName(album))
+    } catch (err) {
+      showToast(downloadError(err), 'error')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  // A space photo can't change album yet: the other member households
+  // would never hear of it (no federation event for a move).
+  // TODO(gallery PR 13, space parity, proto v_79): move within a space.
+  const movable = !album.space_id && !album.is_system
+    && picked.some(i => canDeleteItem(album, i, canModerate))
+  const move = async (toId: string, toName: string) => {
+    const mine = picked.filter(i => canDeleteItem(album, i, canModerate))
+    try {
+      const res = await bulk('move', mine.map(i => i.id), toId)
+      items.value = items.value.filter(i => !res.done.includes(i.id))
+      refresh()
+      if (res.done.length) {
+        showToast(t('gallery.manage.moved', {
+          what: itemsWord(mine.filter(i => res.done.includes(i.id))), name: toName,
+        }), 'success')
+      }
+      const left = picked.length - res.done.length
+      if (left > 0) showToast(t('gallery.manage.move_partial', { n: String(left) }), 'info')
+      sel.keep(picked.filter(i => !res.done.includes(i.id)).map(i => i.id))
+    } catch (err) {
+      showToast(String((err as Error)?.message ?? t('gallery.manage.move_failed')), 'error')
+      throw err
+    }
+  }
+
+  const deletable = !readOnly && !album.is_system
+  const actions: SelectionAction[] = [
+    ...(movable ? [{ key: 'move', icon: 'move', label: t('gallery.manage.move'), onClick: () => setMoving(true) }] : []),
+    { key: 'save', icon: 'save', label: t('gallery.manage.save'), onClick: () => void save(), busy: busy === 'save' },
+    ...(deletable ? [{
+      key: 'delete', icon: 'delete', label: t('gallery.viewer_delete'), danger: true,
+      onClick: () => void remove(), busy: busy === 'delete',
+    }] : []),
+  ]
+
+  const elements = (
+    <>
+      {sel.active && (
+        <SelectionBar count={sel.ids.size} onClose={sel.clear} actions={actions} />
+      )}
+      {moving && (
+        <MoveToAlbumDialog
+          count={picked.filter(i => canDeleteItem(album, i, canModerate)).length}
+          currentAlbumId={album.id}
+          onClose={() => setMoving(false)}
+          onMove={move}
+        />
+      )}
+    </>
+  )
+  return { sel, elements, canManageAlbum: canManageAlbum(album, canModerate, readOnly) }
 }
 
 /** Spoken name of a gallery item kind, for screen-reader labels. */

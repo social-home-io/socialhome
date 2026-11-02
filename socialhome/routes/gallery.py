@@ -15,10 +15,22 @@ Endpoints:
 * ``GET    /api/gallery/albums/{album_id}/items``       — list items
   (``?sort=taken`` / ``taken_asc``: by the day taken)
 * ``POST   /api/gallery/albums/{album_id}/items``       — upload item
+* ``PATCH  /api/gallery/items/{item_id}``               — caption, date
+  taken, album (household)
 * ``DELETE /api/gallery/items/{item_id}``               — delete item (a
   household item goes to the trash)
 * ``POST   /api/gallery/items/{item_id}/restore``       — back from the trash
+* ``POST   /api/gallery/albums/{album_id}/restore``     — an album back
+  from the trash with its photos
+* ``POST   /api/gallery/bulk``                          — delete / restore /
+  move a selection
+* ``POST   /api/gallery/download``                      — the stored file,
+  or a ZIP of a selection, with human file names
+* ``GET    /api/gallery/people/{username}/photos``      — how many photos
+  someone added (leaving the household)
+* ``GET    /api/gallery/people/{username}/photos/zip``  — them as a ZIP
 * ``GET    /api/gallery/trash``                         — the household trash
+* ``DELETE /api/gallery/trash``                         — empty it (admin)
 * ``DELETE /api/gallery/trash/{item_id}``               — delete for good
 * ``GET    /api/gallery/on-this-day``                   — today's memory card
 * ``PATCH  /api/gallery/on-this-day``                   — its per-person settings
@@ -51,6 +63,7 @@ from ..domain.gallery import (
     GALLERY_MAX_UPLOAD_BYTES,
     GALLERY_VIDEO_MAX_UPLOAD_BYTES,
     TRASH_RETENTION_DAYS,
+    GalleryDownloadFile,
     GalleryTrashItem,
     GalleryUpload,
     ItemCursor,
@@ -67,7 +80,14 @@ from ..hardening import (
     read_part_capped,
 )
 from ..media_signer import sign_media_urls_in
+from ..services.gallery_download import (
+    content_disposition,
+    safe_label,
+    stream_zip,
+    zip_size,
+)
 from ..services.gallery_on_this_day_service import resolve_today
+from ..services.gallery_service import UNSET, GalleryNotFoundError
 from .base import BaseView
 from .media_status import READY, media_filename
 
@@ -493,8 +513,39 @@ class AlbumItemCollectionView(BaseView):
         return web.json_response(payload, status=201)
 
 
+def _patch_field(body: dict, key: str):
+    """A PATCH field: left out → ``UNSET`` (unchanged), ``null`` or a string
+    as sent; any other type is refused (422)."""
+    if key not in body:
+        return UNSET
+    value = body[key]
+    if value is None or isinstance(value, str):
+        return value
+    raise ValueError(f"{key} must be a string or null")
+
+
 class GalleryItemDetailView(BaseView):
-    """DELETE /api/gallery/items/{item_id} — delete an item."""
+    """PATCH/DELETE /api/gallery/items/{item_id}."""
+
+    async def patch(self) -> web.Response:
+        """``{caption?, taken_at?, album_id?}`` — a household photo's
+        caption (``null`` / ``""`` clears it), its day taken
+        (``YYYY-MM-DD``, ``null`` clears it) or the album it lives in.
+        Keys left out stay as they are. 200 with the item."""
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        body = await self.body()
+        if not isinstance(body, dict):
+            body = {}
+        album_id = _patch_field(body, "album_id")
+        item = await self.svc(K.gallery_service_key).update_item(
+            self.match("item_id"),
+            actor_user_id=ctx.user_id,
+            caption=_patch_field(body, "caption"),
+            taken_at=_patch_field(body, "taken_at"),
+            album_id=album_id if isinstance(album_id, str) and album_id else UNSET,
+        )
+        return web.json_response(_item_signed(self.request, item))
 
     async def delete(self) -> web.Response:
         ctx = self.user
@@ -511,7 +562,16 @@ TRASH_PAGE: int = 100
 
 
 class GalleryTrashCollectionView(BaseView):
-    """GET /api/gallery/trash — the household trash the caller may see."""
+    """GET/DELETE /api/gallery/trash — the household trash the caller may
+    see; DELETE empties it (household admins)."""
+
+    async def delete(self) -> web.Response:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        removed = await self.svc(K.gallery_service_key).empty_trash(
+            actor_user_id=ctx.user_id
+        )
+        return web.json_response({"removed": removed})
 
     async def get(self) -> web.Response:
         ctx = self.user
@@ -654,3 +714,128 @@ class GalleryOnThisDayView(BaseView):
         return web.json_response(
             {"settings": _on_this_day_settings(settings, today.isoformat())}
         )
+
+
+class AlbumRestoreView(BaseView):
+    """POST /api/gallery/albums/{album_id}/restore — a household album back
+    from the trash with the photos that went there with it (the Undo of an
+    album delete)."""
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        restored = await self.svc(K.gallery_service_key).restore_album(
+            self.match("album_id"), actor_user_id=ctx.user_id
+        )
+        return web.json_response({"restored": restored})
+
+
+class GalleryBulkView(BaseView):
+    """POST /api/gallery/bulk — one action for a selection:
+    ``{action: "delete" | "restore" | "move", item_ids: [...], album_id?}``
+    (``album_id`` for ``move``). Each photo is checked as the single-item
+    route would; ``{done: [...], refused: [...]}``."""
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        body = await self.body()
+        ids = body.get("item_ids") if isinstance(body, dict) else None
+        if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+            raise ValueError("item_ids must be a list of ids")
+        album_id = body.get("album_id")
+        done, refused = await self.svc(K.gallery_service_key).apply_to_items(
+            str(body.get("action", "")),
+            ids,
+            actor_user_id=ctx.user_id,
+            album_id=str(album_id) if album_id else None,
+        )
+        return web.json_response({"done": done, "refused": refused})
+
+
+async def _send_files(
+    request: web.Request, files: list[GalleryDownloadFile], zip_name: str
+) -> web.StreamResponse:
+    """One file as itself, several as a streamed ZIP — both as attachments
+    with a human file name."""
+    if len(files) == 1:
+        (only,) = files
+        single = web.FileResponse(only.path)
+        single.headers["Content-Disposition"] = content_disposition(only.name)
+        single.headers["Cache-Control"] = "private, no-store"
+        return single
+    resp = web.StreamResponse(
+        headers={
+            "Content-Type": "application/zip",
+            "Content-Disposition": content_disposition(zip_name),
+            "Cache-Control": "private, no-store",
+        }
+    )
+    resp.content_length = zip_size(files)
+    await resp.prepare(request)
+    await stream_zip(files, resp.write)
+    await resp.write_eof()
+    return resp
+
+
+class GalleryDownloadView(BaseView):
+    """POST /api/gallery/download — ``{item_ids, album_label?, zip_name?}``.
+
+    One photo or video comes back as the stored file (WebP / WebM, never a
+    re-encode) named ``"<album> – <day>.<ext>"``; several as one ZIP of
+    them, streamed. ``album_label`` is the reader's word for the feed's
+    "Posts" album, ``zip_name`` the archive's name (both made file-safe).
+    Items the caller can't see are left out; nothing left is 404; over
+    500 items or 2 GiB is 413 ``DOWNLOAD_TOO_LARGE``."""
+
+    async def post(self) -> web.StreamResponse:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        body = await self.body()
+        ids = body.get("item_ids") if isinstance(body, dict) else None
+        if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+            raise ValueError("item_ids must be a list of ids")
+        label = body.get("album_label")
+        files = await self.svc(K.gallery_service_key).download_files(
+            ids,
+            actor_user_id=ctx.user_id,
+            system_album_label=(
+                safe_label(label, "") or None if isinstance(label, str) else None
+            ),
+        )
+        if not files:
+            raise GalleryNotFoundError("nothing to download")
+        name = body.get("zip_name")
+        zip_name = safe_label(name if isinstance(name, str) else None, "Photos")
+        return await _send_files(self.request, files, f"{zip_name}.zip")
+
+
+class GalleryPersonPhotosView(BaseView):
+    """GET /api/gallery/people/{username}/photos — ``{count, name}``: how
+    many household photos and videos someone added that the caller may see
+    — the "Download their photos first" line when a person leaves. The
+    person themselves or a household admin."""
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        name, items, _albums = await self.svc(K.gallery_service_key).person_uploads(
+            self.match("username"), actor_user_id=ctx.user_id
+        )
+        return web.json_response({"count": len(items), "name": name})
+
+
+class GalleryPersonPhotosZipView(BaseView):
+    """GET /api/gallery/people/{username}/photos/zip — those photos and
+    videos as one ZIP (``"<name> – photos.zip"``)."""
+
+    async def get(self) -> web.StreamResponse:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        name, files = await self.svc(K.gallery_service_key).person_download_files(
+            self.match("username"), actor_user_id=ctx.user_id
+        )
+        if not files:
+            raise GalleryNotFoundError("nothing to download")
+        stem = safe_label(self.request.query.get("zip_name"), "") or safe_label(name)
+        return await _send_files(self.request, files, f"{stem}.zip")

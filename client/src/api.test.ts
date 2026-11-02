@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { api, ApiError, _resetApiLoggedOut, setUnauthorizedHandler } from './api'
+import { api, ApiError, _resetApiLoggedOut, dispositionName, setUnauthorizedHandler } from './api'
 
 describe('api — surface', () => {
   it('exports an ApiClient instance', () => {
@@ -374,5 +374,30 @@ describe('ApiClient — 401 responses', () => {
     await api.get('/api/feed').catch(() => {})
     expect(onUnauth).toHaveBeenCalledTimes(1)
     token.value = null
+  })
+})
+
+describe('api.download — attachments with their file name', () => {
+  it('reads the UTF-8 name first, then the plain one', () => {
+    expect(dispositionName(
+      "attachment; filename=\"Sommer 2026 _ 1.webp\"; filename*=UTF-8''Sommer%202026%20%E2%80%93%201.webp",
+    )).toBe('Sommer 2026 – 1.webp')
+    expect(dispositionName('attachment; filename="a.zip"')).toBe('a.zip')
+    expect(dispositionName(null)).toBeNull()
+  })
+
+  it('POSTs the body relative to <base href> and returns blob + name', async () => {
+    const fetchMock = vi.fn(async () => ({
+      ok: true, status: 200,
+      headers: new Headers({ 'content-disposition': "attachment; filename*=UTF-8''x.zip" }),
+      blob: async () => new Blob(['zip']),
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+    const out = await api.download('/api/gallery/download', { item_ids: ['a'] })
+    expect(out.filename).toBe('x.zip')
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('api/gallery/download')
+    expect(init.method).toBe('POST')
+    vi.unstubAllGlobals()
   })
 })

@@ -96,6 +96,23 @@ class PayloadTooLargeError(CodedError):
         super().__init__(params={"max_mb": max(1, max_bytes // (1024 * 1024))})
 
 
+class DownloadTooLargeError(CodedError):
+    """A gallery download asks for more photos or bytes than one ZIP holds.
+    The SPA says how many fit (``max_items``) and how big (``max_mb``)."""
+
+    status = 413
+    code = "DOWNLOAD_TOO_LARGE"
+    detail = "Too many photos for one download."
+
+    def __init__(self, max_items: int, max_bytes: int) -> None:
+        super().__init__(
+            params={
+                "max_items": max_items,
+                "max_mb": max(1, max_bytes // (1024 * 1024)),
+            }
+        )
+
+
 class ImageUnreadableError(CodedError, ValueError):
     """The image library could not open an uploaded picture. The library's
     own error text stays in the server log — it can name files and

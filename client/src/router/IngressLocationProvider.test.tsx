@@ -186,6 +186,22 @@ function suppressNativeLinkNavigation(): () => void {
     pushSpy.mockRestore()
   })
 
+  it('leaves a link alone when its own handler already took the click (gallery tile selecting)', () => {
+    const { getByTestId } = render(
+      <IngressLocationProvider>
+        <Probe sink={sink} />
+      </IngressLocationProvider>,
+    )
+    const pushSpy = vi.spyOn(history, 'pushState')
+    const link = getByTestId('feed')
+    const take = (e: Event) => e.preventDefault()
+    link.addEventListener('click', take)
+    link.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 }))
+    expect(pushSpy).not.toHaveBeenCalled()
+    link.removeEventListener('click', take)
+    pushSpy.mockRestore()
+  })
+
   it('updates the context on popstate (back/forward navigation)', () => {
     render(
       <IngressLocationProvider>

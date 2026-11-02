@@ -4,6 +4,8 @@
  *   /gallery                              the albums
  *   /gallery/albums/:albumId              one album
  *   /gallery/albums/:albumId/:itemId      one photo or video in the viewer
+ *   /gallery/trash                        the household trash (no space
+ *                                         mirror: a space has no trash)
  *
  * A space gallery mirrors them under its section:
  * ``/spaces/:id/gallery[/albums/:albumId[/:itemId]]``.
@@ -22,12 +24,17 @@ export interface GalleryRoute {
   /** ``false`` for a rest the gallery doesn't know (``/gallery/xyz``):
    *  the page replaces it with the albums. */
   valid: boolean
+  /** ``/gallery/trash`` — the household trash. */
+  trash?: boolean
 }
 
 /** Read the ``:sub*`` rest after ``/gallery``. */
 export function parseGallerySub(sub: string | undefined | null): GalleryRoute {
   const parts = (sub ?? '').split('/').filter(Boolean)
   if (parts.length === 0) return { albumId: null, itemId: null, valid: true }
+  if (parts.length === 1 && parts[0] === 'trash') {
+    return { albumId: null, itemId: null, valid: true, trash: true }
+  }
   if (parts[0] !== 'albums' || parts.length < 2 || parts.length > 3) {
     return { albumId: null, itemId: null, valid: false }
   }
@@ -56,6 +63,9 @@ export function backLeadsTo(path: string): boolean {
     return false
   }
 }
+
+/** The household trash's in-app path. */
+export const TRASH_PATH = '/gallery/trash'
 
 /** The in-app path of the gallery, an album or an item in it. */
 export function galleryPath(

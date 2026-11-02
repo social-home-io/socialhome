@@ -273,6 +273,35 @@ class AbstractGalleryRepo(Protocol):
         stay theirs. How many moved."""
         ...
 
+    async def update_item(self, item_id: str, patch: dict) -> bool:
+        """Set a live household item's ``caption`` / ``taken_at`` (other
+        keys are ignored). ``False`` for an unknown, trashed or space item."""
+        ...
+
+    async def move_item(self, item_id: str, to_album_id: str) -> str | None:
+        """Move a live household item into another live household user
+        album, recounting both and dropping it as the old album's cover —
+        in one transaction. The album it left, or ``None`` when nothing
+        moved (unknown item, a space or system album on either side)."""
+        ...
+
+    async def get_trashed_album(self, album_id: str) -> GalleryAlbum | None:
+        """A household user album in the trash, or ``None``."""
+        ...
+
+    async def restore_album(self, album_id: str) -> list[str]:
+        """Bring a trashed household album back with the photos that went
+        to the trash with it (the same ``deleted_at`` stamp) — not the ones
+        deleted on their own before. The restored item ids."""
+        ...
+
+    async def list_household_uploads(
+        self, uploader_user_id: str, *, limit: int
+    ) -> list[GalleryItem]:
+        """The live household photos and videos *uploader_user_id* added to
+        user albums (not the feed's "Posts" album), oldest first."""
+        ...
+
     async def get_album_audience(
         self, album_id: str
     ) -> GalleryAlbumAudience | None: ...
@@ -1416,6 +1445,120 @@ class SqliteGalleryRepo:
             " AND audience=?",
             (to_user_id, from_user_id, AUDIENCE_EVERYONE),
         )
+
+    _ITEM_PATCH_ALLOWED = frozenset({"caption", "taken_at"})
+
+    async def update_item(self, item_id: str, patch: dict) -> bool:
+        safe = {k: v for k, v in patch.items() if k in self._ITEM_PATCH_ALLOWED}
+        if not safe:
+            return False
+        set_clause = ", ".join(f"{k}=?" for k in safe)
+        changed = await self._db.enqueue_rowcount(
+            f"UPDATE gallery_items SET {set_clause} WHERE id=?"
+            " AND deleted_at IS NULL AND album_id IN"
+            " (SELECT id FROM gallery_albums WHERE space_id IS NULL)",
+            (*safe.values(), item_id),
+        )
+        return changed > 0
+
+    async def move_item(self, item_id: str, to_album_id: str) -> str | None:
+        def _run(conn) -> str | None:
+            row = conn.execute(
+                "SELECT i.album_id FROM gallery_items i"
+                " JOIN gallery_albums a ON a.id = i.album_id"
+                " WHERE i.id=? AND i.deleted_at IS NULL AND a.space_id IS NULL"
+                " AND a.is_system = 0 AND a.deleted_at IS NULL",
+                (item_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            from_id = str(row[0])
+            if from_id == to_album_id:
+                return None
+            if (
+                conn.execute(
+                    "SELECT 1 FROM gallery_albums WHERE id=? AND space_id IS NULL"
+                    " AND is_system = 0 AND deleted_at IS NULL",
+                    (to_album_id,),
+                ).fetchone()
+                is None
+            ):
+                return None
+            conn.execute(
+                "UPDATE gallery_items SET album_id=? WHERE id=?",
+                (to_album_id, item_id),
+            )
+            conn.execute(
+                "UPDATE gallery_albums SET cover_item_id=NULL"
+                " WHERE id=? AND cover_item_id=?",
+                (from_id, item_id),
+            )
+            for aid in (from_id, to_album_id):
+                conn.execute(
+                    "UPDATE gallery_albums SET item_count=(SELECT COUNT(*)"
+                    " FROM gallery_items WHERE album_id=? AND deleted_at IS NULL)"
+                    " WHERE id=?",
+                    (aid, aid),
+                )
+            return from_id
+
+        result = await self._db.transact(_run)
+        return str(result) if result is not None else None
+
+    async def get_trashed_album(self, album_id: str) -> GalleryAlbum | None:
+        row = await self._db.fetchone(
+            "SELECT * FROM gallery_albums WHERE id=? AND space_id IS NULL"
+            " AND is_system = 0 AND deleted_at IS NOT NULL",
+            (album_id,),
+        )
+        return self._row_to_album(dict(row)) if row else None
+
+    async def restore_album(self, album_id: str) -> list[str]:
+        def _run(conn) -> list[str]:
+            row = conn.execute(
+                "SELECT deleted_at FROM gallery_albums WHERE id=?"
+                " AND space_id IS NULL AND is_system = 0"
+                " AND deleted_at IS NOT NULL",
+                (album_id,),
+            ).fetchone()
+            if row is None:
+                return []
+            stamp = row[0]
+            ids = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT id FROM gallery_items WHERE album_id=?"
+                    " AND deleted_at=? AND filename <> ''",
+                    (album_id, stamp),
+                ).fetchall()
+            ]
+            conn.execute(
+                "UPDATE gallery_items SET deleted_at=NULL, deleted_by=NULL"
+                " WHERE album_id=? AND deleted_at=? AND filename <> ''",
+                (album_id, stamp),
+            )
+            conn.execute(
+                "UPDATE gallery_albums SET deleted_at=NULL, deleted_by=NULL,"
+                " item_count=(SELECT COUNT(*) FROM gallery_items"
+                " WHERE album_id=? AND deleted_at IS NULL) WHERE id=?",
+                (album_id, album_id),
+            )
+            return ids
+
+        return list(await self._db.transact(_run))
+
+    async def list_household_uploads(
+        self, uploader_user_id: str, *, limit: int
+    ) -> list[GalleryItem]:
+        rows = await self._db.fetchall(
+            "SELECT i.* FROM gallery_items i"
+            " JOIN gallery_albums a ON a.id = i.album_id"
+            " WHERE i.uploaded_by=? AND i.deleted_at IS NULL AND i.filename <> ''"
+            " AND a.space_id IS NULL AND a.is_system = 0 AND a.deleted_at IS NULL"
+            " ORDER BY i.created_at, i.id LIMIT ?",
+            (uploader_user_id, int(limit)),
+        )
+        return [self._row_to_item(r) for r in rows_to_dicts(rows)]
 
     async def get_album_audience(self, album_id: str) -> GalleryAlbumAudience | None:
         row = await self._db.fetchone(

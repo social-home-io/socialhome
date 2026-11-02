@@ -350,3 +350,28 @@ class OnThisDayCard:
     years_ago: int
     count: int
     items: tuple[GalleryItem, ...] = ()
+
+
+# ─── Downloads ───────────────────────────────────────────────────────────
+
+#: A selection downloads as one ZIP of at most this many photos and videos …
+DOWNLOAD_MAX_ITEMS: int = 500
+#: … and "Download someone's photos" (leaving the household) of at most this
+#: many — a household's worth of one person's uploads.
+PERSON_DOWNLOAD_MAX_ITEMS: int = 5000
+#: Either ZIP holds at most this many bytes of stored files — inside the
+#: classic 32-bit ZIP fields (no ZIP64), and one request never ties up the
+#: disk and the browser for an hour.
+DOWNLOAD_MAX_BYTES: int = 2 * 1024 * 1024 * 1024
+
+
+@dataclass(slots=True, frozen=True)
+class GalleryDownloadFile:
+    """One stored file to hand out: where it is on disk (``path``), the
+    human name it is saved as (``"Summer 2026 – 2026-07-12 – 3.webp"``)
+    and its size in bytes. Downloads deliver the stored WebP / WebM as is —
+    never a re-encode, never an original (owner decision, 2026-11-02)."""
+
+    path: str
+    name: str
+    size: int

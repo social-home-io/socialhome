@@ -116,6 +116,10 @@ export function IngressLocationProvider({
 
     const onClick = (ev: MouseEvent) => {
       if (
+        // A handler on the link already took the click (a gallery tile
+        // that selects instead of opening) — like the browser, don't
+        // follow it.
+        ev.defaultPrevented ||
         ev.ctrlKey ||
         ev.metaKey ||
         ev.altKey ||
