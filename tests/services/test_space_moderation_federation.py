@@ -154,6 +154,36 @@ async def test_an_old_reviewer_is_skipped_and_an_old_host_refuses():
         await old_host.submission_targets(SPACE)
 
 
+class _MirroredRoster:
+    """A member household's ``space_members``: our own people plus the
+    host's, mirrored by the §25.6 ``members`` sync (no ``users`` row)."""
+
+    def __init__(self, local, mirrored) -> None:
+        self._local = local
+        self._mirrored = mirrored
+
+    async def list_members(self, space_id):
+        return [
+            SimpleNamespace(user_id=u, role=r)
+            for u, r in (*self._local, *self._mirrored)
+        ]
+
+    async def list_local_member_user_ids(self, space_id):
+        return [u for u, _r in self._local]
+
+
+async def test_a_mirrored_host_owner_does_not_make_this_household_a_reviewer():
+    out, _ = _fed()
+    out._spaces = _MirroredRoster(  # type: ignore[assignment]
+        local=[("u-a", "member")], mirrored=[("u-host-owner", "owner")]
+    )
+    assert not await out._reviews_here(SPACE)  # type: ignore[arg-type]
+    out._spaces = _MirroredRoster(  # type: ignore[assignment]
+        local=[("u-a", "moderator")], mirrored=[("u-host-owner", "owner")]
+    )
+    assert await out._reviews_here(SPACE)  # type: ignore[arg-type]
+
+
 async def test_a_submission_is_one_sealed_send_per_target_never_a_broadcast():
     out, fed = _fed()
     await out.send_submitted(SPACE, _item(), ["host", "house-mod"])

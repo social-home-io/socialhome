@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 
 import pytest
 
@@ -79,6 +80,19 @@ class _FakeSpaceRepo:
 
     async def get(self, space_id):
         return self.spaces.get(space_id)
+
+    #: ``(user_id, role, joined_at, local)`` seats in ``space_members`` —
+    #: ``local=False`` is a host person mirrored by the members sync.
+    seats: tuple[tuple[str, str, str, bool], ...] = ()
+
+    async def list_members(self, space_id):
+        return [
+            SimpleNamespace(user_id=u, role=r, joined_at=j)
+            for u, r, j, _local in self.seats
+        ]
+
+    async def list_local_member_user_ids(self, space_id):
+        return [u for u, _r, _j, local in self.seats if local]
 
 
 def _host_space(space_id="sp-1", owner_instance_id="peer-a"):
@@ -271,6 +285,35 @@ async def test_sync_rejected_removed_from_owner_archives(bus, repo, handlers):
     )
     assert repo.archived == [("sp-1", True, "removed")]
     assert captured[0].space_id == "sp-1"
+
+
+@pytest.mark.parametrize(
+    ("ours_joined", "archived"),
+    [
+        ("2026-10-10 10:00:00", True),  # our seat predates the removal
+        ("2026-10-10 12:00:00", False),  # we joined again after it
+    ],
+)
+async def test_sync_rejected_removed_weighs_only_our_own_joins(
+    bus, repo, handlers, ours_joined, archived
+):
+    """``space_members`` also mirrors the host's people (the §25.6
+    ``members`` sync). A host person who joined after our removal is no
+    re-join of ours: the copy is archived all the same."""
+    repo.spaces["sp-1"] = _host_space("sp-1", owner_instance_id="peer-a")
+    repo.seats = (
+        ("u-ours", "member", ours_joined, True),
+        ("u-host-new", "member", "2026-10-10 13:00:00", False),
+    )
+    await handlers._on_sync_rejected(
+        _event(
+            FederationEventType.SPACE_SYNC_REJECTED,
+            {"reason": "removed", "removed_at": "2026-10-10 11:00:00"},
+            from_instance="peer-a",
+            space_id="sp-1",
+        )
+    )
+    assert (repo.archived == [("sp-1", True, "removed")]) is archived
 
 
 async def test_sync_rejected_from_non_owner_is_rejected(bus, repo, handlers):

@@ -931,6 +931,7 @@ async def test_member_removed_clears_local_stub_when_last_member_leaves(handler)
     SPACE_REMOTE_MEMBER_REMOVED."""
     handler.space_repo.delete_member = AsyncMock()
     handler.space_repo.list_members = AsyncMock(return_value=[])
+    handler.space_repo.list_local_member_user_ids = AsyncMock(return_value=[])
     stub_space = SimpleNamespace(owner_instance_id="peer-1")
     handler.space_repo.get = AsyncMock(return_value=stub_space)
     handler.space_repo.mark_dissolved = AsyncMock()
@@ -943,6 +944,29 @@ async def test_member_removed_clears_local_stub_when_last_member_leaves(handler)
         "sp-remote",
         "u-self",
     )
+    handler.space_repo.mark_dissolved.assert_awaited_once_with("sp-remote")
+
+
+async def test_member_removed_clears_the_stub_though_the_hosts_people_stay(
+    handler,
+):
+    """The host removed our last person; ``space_members`` still holds the
+    host's people, mirrored by the §25.6 ``members`` sync. They are not
+    ours, so the stub is dissolved all the same."""
+    handler.space_repo.delete_member = AsyncMock()
+    handler.space_repo.list_members = AsyncMock(
+        return_value=[SimpleNamespace(user_id="u-host-owner", role="owner")]
+    )
+    handler.space_repo.list_local_member_user_ids = AsyncMock(return_value=[])
+    handler.space_repo.get = AsyncMock(
+        return_value=SimpleNamespace(owner_instance_id="peer-1")
+    )
+    handler.space_repo.mark_dissolved = AsyncMock()
+    ev = _event(
+        "SPACE_REMOTE_MEMBER_REMOVED",
+        {"space_id": "sp-remote", "user_id": "u-self"},
+    )
+    await handler.h._on_member_removed(ev)
     handler.space_repo.mark_dissolved.assert_awaited_once_with("sp-remote")
 
 
@@ -967,6 +991,7 @@ async def test_member_removed_naming_a_join_request_keeps_our_side(
     )
     handler.space_repo.delete_member = AsyncMock()
     handler.space_repo.list_members = AsyncMock(return_value=[])
+    handler.space_repo.list_local_member_user_ids = AsyncMock(return_value=[])
     handler.space_repo.get = AsyncMock(
         return_value=SimpleNamespace(owner_instance_id="peer-1")
     )
@@ -995,6 +1020,7 @@ async def test_member_removed_keeps_locally_owned_space(handler):
     dissolve our own space row in that case."""
     handler.space_repo.delete_member = AsyncMock()
     handler.space_repo.list_members = AsyncMock(return_value=[])
+    handler.space_repo.list_local_member_user_ids = AsyncMock(return_value=[])
     own_space = SimpleNamespace(owner_instance_id="us")
     handler.space_repo.get = AsyncMock(return_value=own_space)
     handler.space_repo.mark_dissolved = AsyncMock()
@@ -1997,6 +2023,7 @@ async def test_member_removed_does_not_delete_a_local_member_of_a_space_we_host(
     peer could delete any of OUR users from a space WE host."""
     handler.space_repo.delete_member = AsyncMock()
     handler.space_repo.list_members = AsyncMock(return_value=[])
+    handler.space_repo.list_local_member_user_ids = AsyncMock(return_value=[])
     handler.space_repo.get = AsyncMock(
         return_value=SimpleNamespace(owner_instance_id="us"),
     )

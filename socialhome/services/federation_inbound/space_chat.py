@@ -55,7 +55,6 @@ from ...domain.events import (
     DmMessageUpdated,
 )
 from ...domain.federation import FederationEvent, FederationEventType
-from ...domain.space import WRITER_ROLES
 from ...federation.owner_bound_id import (
     SPACE_CHAT_MESSAGE_KIND,
     OwnerBinding,
@@ -73,6 +72,7 @@ from ..dm_mentions import DmMentionResolver
 from ..dm_service import MAX_DM_LENGTH
 from ..protection_gate import ProtectionGateMixin
 from ..space_chat_service import SpaceChatService
+from ..space_writer_households import holds_member_seat
 from ..system_chat_policy import SystemChatPolicy
 
 if TYPE_CHECKING:
@@ -81,8 +81,6 @@ if TYPE_CHECKING:
     from ...federation.space_authorship import SpaceAuthorship
 
 log = logging.getLogger(__name__)
-
-_WRITER_ROLE_VALUES: frozenset[str] = frozenset(r.value for r in WRITER_ROLES)
 
 #: Longest emoji glyph a reaction may carry (as :meth:`DmService.add_reaction`).
 _MAX_EMOJI_LEN = 32
@@ -230,10 +228,8 @@ class SpaceChatInboundHandlers(ProtectionGateMixin):
         return space_id, await self._chats.get_chat(space_id), authorship
 
     async def _has_local_writer(self, space_id: str) -> bool:
-        return any(
-            str(m.role) in _WRITER_ROLE_VALUES
-            for m in await self._spaces.list_members(space_id)
-        )
+        # One of OUR people — ``space_members`` also mirrors the host's.
+        return await holds_member_seat(self._spaces, space_id)
 
     async def _message_in(
         self,

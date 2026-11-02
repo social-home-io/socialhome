@@ -731,6 +731,33 @@ async def test_losing_content_authority_drops_other_households_items(env):
     assert kept.status is ModerationStatus.PENDING
 
 
+async def test_the_hosts_mirrored_owner_does_not_keep_others_items_here(env):
+    """``space_members`` on a member household also mirrors the host's
+    people (the §25.6 ``members`` resource). Their owner seat has no
+    ``users`` row here and is not this household's authority: once our own
+    people hold no content-authority seat, other households' items go —
+    a mirrored host person's pending item with them."""
+    await env.db.enqueue("UPDATE spaces SET owner_instance_id='elsewhere'")
+    env.mod.attach_federation(_FakeModerationFederation(["elsewhere"]))
+    mine = await _queue_create(env)
+    theirs = replace(mine, id="theirs", submitted_by="u-host-owner")
+    await env.mod.store_received(theirs)
+    await env.db.enqueue(
+        "UPDATE space_members SET role='member' WHERE role IN"
+        " ('owner', 'admin', 'moderator')"
+    )
+    # The host's owner, mirrored by the members sync — no local user.
+    await env.db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES(?, ?, ?)",
+        ("sp", "u-host-owner", "owner"),
+    )
+    assert await env.mod.drop_held_for_others("sp") == 1
+    gone = await env.spaces.get_moderation_item("theirs")
+    assert gone.status is ModerationStatus.EXPIRED
+    kept = await env.spaces.get_moderation_item(mine.id)
+    assert kept.status is ModerationStatus.PENDING
+
+
 async def test_a_rejection_is_announced_with_its_reason(env):
     fed = _FakeModerationFederation(["inst-mod"])
     env.mod.attach_federation(fed)

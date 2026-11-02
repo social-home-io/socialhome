@@ -109,10 +109,20 @@ async def test_a_banned_author_is_refused(stack):
         "UPDATE spaces SET dissolved=1",
         # No local writer: a follower-only household stores no chat.
         "UPDATE space_members SET role='subscriber'",
+        # …even with the host's owner mirrored into ``space_members`` by
+        # the §25.6 ``members`` sync: they are not one of our people.
+        (
+            "UPDATE space_members SET role='subscriber'",
+            (
+                "INSERT INTO space_members(space_id, user_id, role)"
+                f" VALUES('{SP}', 'u-host-owner', 'owner')"
+            ),
+        ),
     ],
 )
 async def test_nothing_lands_where_the_chat_is_not_ours_to_hold(stack, setup):
-    await stack.db.enqueue(setup)
+    for sql in (setup,) if isinstance(setup, str) else setup:
+        await stack.db.enqueue(sql)
     await _create(stack, chat_id("u-rb"))
     assert await _rows(stack) == []
     assert await stack.chat.get_chat(SP) is None
