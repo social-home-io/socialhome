@@ -345,3 +345,31 @@ async def test_local_ice_drain_skipped_without_callback():
     # functional.
     await s.create_offer()
     s.close()
+
+
+async def test_recv_chunk_reports_a_closed_channel_as_connection_error():
+    """The library raises its own ``ConnectionClosedError`` (a
+    ``RuntimeError``) when the channel closes; the documented contract the
+    requester's drain relies on is ``ConnectionError``."""
+    s = SyncRtcSession(
+        sync_id="sid",
+        space_id="sp1",
+        requester_instance_id="r",
+        provider_instance_id="p",
+    )
+    s._channel = MagicMock()
+    s._channel.recv = AsyncMock(side_effect=rtc.ConnectionClosedError("closed"))
+    with pytest.raises(ConnectionError):
+        await s.recv_chunk()
+
+
+async def test_recv_chunk_returns_the_next_frame():
+    s = SyncRtcSession(
+        sync_id="sid",
+        space_id="sp1",
+        requester_instance_id="r",
+        provider_instance_id="p",
+    )
+    s._channel = MagicMock()
+    s._channel.recv = AsyncMock(return_value=b"frame")
+    assert await s.recv_chunk() == b"frame"

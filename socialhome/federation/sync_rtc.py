@@ -367,7 +367,13 @@ class SyncRtcSession:
         """
         if self._channel is None or self._closed:
             raise ConnectionError("DataChannel not open")
-        return await self._channel.recv()
+        try:
+            return await self._channel.recv()
+        except rtc.ConnectionClosedError as exc:
+            # The library's own close error — the documented contract here
+            # is ``ConnectionError``, which the requester's drain reads as
+            # "the stream ended" (and asks again when no sentinel landed).
+            raise ConnectionError(str(exc)) from exc
 
     async def send_chunk(self, chunk_payload: bytes | str) -> None:
         """Send a ``SPACE_SYNC_CHUNK`` frame over the DataChannel.
@@ -473,6 +479,11 @@ class SyncSessionRecord:
     #: requester confirms, so the next incremental session skips it unless
     #: it changed.
     kept_full_digests: dict[str, str] = field(default_factory=dict)
+    #: Requester side: the provider's end-of-stream sentinel landed for this
+    #: session (``SpaceSyncComplete``). A DataChannel that closes before it
+    #: did means the provider went away mid-stream (a restart) — the sync is
+    #: asked for again rather than left to the periodic tick.
+    sentinel_landed: bool = False
 
     def __post_init__(self) -> None:
         if not self.last_activity:

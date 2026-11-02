@@ -1347,3 +1347,17 @@ async def test_a_reviewer_household_ignores_an_answer(env, filed_here):
     assert await _answer(env) is False
     got = await env.svc._reports.get(filed_here.report.id)
     assert got is not None and got.status.value == "pending"
+
+
+async def test_the_hosts_owner_mirrored_here_by_sync_is_no_reviewer(env, filed_here):
+    """The §25.6 ``members`` resource mirrors the host's people into this
+    household's ``space_members`` — the host's owner among them. That row
+    is not one of our people: the answer still closes our copy (it used to
+    be ignored as "this household reviews", once a sync had landed)."""
+    await env.db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES('spR', ?, 'owner')",
+        ("host-owner-uid",),
+    )
+    assert await _answer(env) is True
+    got = await env.svc._reports.get(filed_here.report.id)
+    assert got is not None and got.status.value == "resolved"

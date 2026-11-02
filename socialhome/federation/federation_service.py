@@ -3668,6 +3668,10 @@ class FederationService:
                 session.provider_instance_id,
             )
             return
+        if session is not None:
+            # The stream ended; the channel closing after this is its normal
+            # end, not a cut (``_on_sync_stream_cut``).
+            session.sentinel_landed = True
         try:
             await self.send_with_mesh_fallback(
                 to_instance_id=event.from_instance,
@@ -4076,13 +4080,16 @@ class FederationService:
             try:
                 raw = await rtc_session.recv_chunk()
             except ConnectionError:
-                # Channel closed — normal end of stream or peer hung up.
+                # Channel closed — the normal end of a stream, or the
+                # provider went away mid-stream (a restart).
+                await self._on_sync_stream_cut(record, provider_instance_id)
                 return
             except Exception:
                 log.exception(
                     "sync %s: recv_chunk raised",
                     record.sync_id,
                 )
+                await self._on_sync_stream_cut(record, provider_instance_id)
                 return
             # Progress: a long stream is not reaped while chunks flow.
             record.touch()
@@ -4097,6 +4104,49 @@ class FederationService:
                     "sync %s: receiver.on_chunk raised",
                     record.sync_id,
                 )
+
+    async def _on_sync_stream_cut(self, record, provider_instance_id: str) -> None:
+        """Requester side: the DataChannel of ``record`` stopped delivering.
+
+        After the sentinel that is the normal end of the stream (its
+        session is already closing). Before it, the provider went away
+        mid-stream — a restart, a crash, a dropped link — and nothing of
+        the stream is confirmed: no watermark moved on the provider, no
+        applied snapshot here. Until now the session was simply left to the
+        stale reaper and the space to the next periodic tick (30 minutes),
+        so a household whose first sync of a space was cut held none of what
+        had not arrived yet — an album, so a photo shared into it later was
+        refused here. Close the session and ask again through the deferred
+        retry (``SpaceSyncDeferred``, ``reason="interrupted"``) in the mode
+        it was asked for: bounded and growing (the scheduler's
+        ``DEFERRED_SYNC_RETRY_S`` × attempt, at most
+        ``MAX_DEFERRED_SYNC_RETRIES`` until the space completes)."""
+        if record.sentinel_landed or self._sync_manager is None:
+            return
+        if self._sync_manager.get_session(record.sync_id) is not record:
+            # Closed already (reaped, ended) — not this drain's to report.
+            return
+        log.info(
+            "sync %s: the stream of space %s from %s broke off before its "
+            "end — asking again",
+            record.sync_id,
+            record.space_id,
+            provider_instance_id,
+        )
+        # This drain is the session's watcher: detach it so closing the
+        # session does not cancel the task running this very method.
+        record.rtc_watcher = None
+        self._sync_manager.close_session(record.sync_id)
+        self._sync_manager.forget_sync_request(record.sync_id)
+        await self._bus.publish(
+            SpaceSyncDeferred(
+                space_id=record.space_id,
+                provider_instance_id=provider_instance_id,
+                sync_mode=record.sync_mode,
+                sync_id=record.sync_id,
+                reason="interrupted",
+            )
+        )
 
     async def _handle_space_sync_answer(self, event) -> None:
         """Provider receives SPACE_SYNC_ANSWER — applies S-14 origin guard."""
