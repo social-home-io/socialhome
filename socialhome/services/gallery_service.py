@@ -24,12 +24,13 @@ the media outbox (see ``GalleryItem.to_federation_dict``).
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import logging
 import pathlib
 import uuid
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import aiofiles
 import aiofiles.os
@@ -40,9 +41,18 @@ from ..domain.events import (
     GalleryAlbumDeleted,
     GalleryAlbumUpdated,
     GalleryItemDeleted,
+    GalleryItemRestored,
     GalleryItemUploaded,
+    UserDeprovisioned,
 )
-from ..domain.gallery import GalleryAlbum, GalleryItem
+from ..domain.gallery import (
+    TRASH_RETENTION_DAYS,
+    GalleryAlbum,
+    GalleryItem,
+    GalleryTrashItem,
+    GalleryUpload,
+    UploadOutcome,
+)
 from ..domain.media_constraints import (
     CAPTION_MAX,
     VIDEO_MAX_DIMENSION,
@@ -225,6 +235,10 @@ class GalleryService:
         # disk consumer) can't fill the disk past it.
         self._storage_quota = storage_quota
 
+    def wire(self) -> None:
+        """Hand a removed person's household albums to an admin."""
+        self._bus.subscribe(UserDeprovisioned, self._on_user_deprovisioned)
+
     # ─── Albums ───────────────────────────────────────────────────────────
 
     async def list_albums(
@@ -398,14 +412,20 @@ class GalleryService:
             raise GalleryPermissionError(
                 "A protected account may only delete its own uploads"
             )
-        media = await self._repo.list_album_media(album_id)
-        # A space album keeps a tombstone (§25.6 ``gallery_albums_deleted``);
-        # a household album is removed.
-        await self._repo.delete_album(album_id, deleted_by=actor_user_id)
-        # The item rows are gone (household) or file-free tombstones (space):
-        # drop their files unless another row still names them (same rule as
-        # ``delete_item``).
-        await unlink_unreferenced(self._media_dir, self._media_refs, media)
+        if album.space_id is None:
+            # A household album goes to the trash with its photos (30 days,
+            # each restorable; a restore brings the album back). The files
+            # stay until the purge.
+            await self._repo.trash_album(album_id, deleted_by=actor_user_id)
+        else:
+            media = await self._repo.list_album_media(album_id)
+            # A space album keeps a tombstone (§25.6
+            # ``gallery_albums_deleted``) — no trash: the delete goes out to
+            # the member households.
+            await self._repo.delete_album(album_id, deleted_by=actor_user_id)
+            # Its items are file-free tombstones now: drop their files unless
+            # another row still names them (same rule as ``delete_item``).
+            await unlink_unreferenced(self._media_dir, self._media_refs, media)
         await self._bus.publish(
             GalleryAlbumDeleted(
                 album_id=album_id,
@@ -468,14 +488,23 @@ class GalleryService:
         content_type: str,
         caption: str | None,
         uploader_user_id: str,
-    ) -> GalleryItem:
+    ) -> GalleryUpload:
         """Process and store one photo or video.
 
-        Photo path runs the ImageProcessor → WebP, extracts the EXIF
-        date (day-only, no GPS), generates a thumbnail.
+        Photo path runs the ImageProcessor → WebP (longest side ≤
+        ``IMAGE_MAX_DIMENSION``), extracts the EXIF date (day-only, no
+        GPS), generates a WebP thumbnail.
 
-        Video path runs the VideoProcessor → WebM and uses the
-        extracted thumbnail.
+        Video path queues the VideoProcessor → VP9/Opus WebM (longest
+        side ≤ ``VIDEO_MAX_DIMENSION``) with a WebP poster.
+
+        A household upload is first checked for an exact duplicate: the
+        SHA-256 of the bytes as uploaded (before conversion — every stored
+        file is a fresh re-encode, so only the original can match) against
+        the household photos the uploader can see. A live match stores
+        nothing (:attr:`UploadOutcome.ALREADY_HERE`); a match in the trash
+        comes back (:attr:`UploadOutcome.RESTORED`). Only the digest is
+        kept, never the uploaded bytes. A space upload is not checked.
         """
         album = await self._visible_album(album_id, uploader_user_id)
         if album.is_system:
@@ -489,6 +518,18 @@ class GalleryService:
             raise ValueError(f"Caption must be {CAPTION_MAX} characters or fewer")
         if not data:
             raise ValueError("upload data is empty")
+        content_sha256: str | None = None
+        if album.space_id is None:
+            content_sha256 = await asyncio.to_thread(_sha256_hex, data)
+            duplicate = await self._repo.find_household_duplicate(
+                content_sha256, viewer_user_id=uploader_user_id
+            )
+            if duplicate is not None and not duplicate.in_trash:
+                return GalleryUpload(duplicate.item, UploadOutcome.ALREADY_HERE)
+            if duplicate is not None:
+                restored = await self._restore(duplicate.item.id)
+                if restored is not None:
+                    return GalleryUpload(restored, UploadOutcome.RESTORED)
         if self._storage_quota is not None:
             # 507 STORAGE_FULL via ``BaseView._iter``, before any disk write.
             await self._storage_quota.check_can_store(len(data))
@@ -517,7 +558,7 @@ class GalleryService:
                 uploader_user_id=uploader_user_id,
             )
 
-        await self._repo.create_item(item)
+        await self._repo.create_item(item, content_sha256=content_sha256)
         await self._repo.increment_item_count(album_id, +1)
         await self._bus.publish(
             GalleryItemUploaded(
@@ -528,7 +569,7 @@ class GalleryService:
                 space_id=album.space_id,
             )
         )
-        return item
+        return GalleryUpload(item)
 
     async def delete_item(
         self,
@@ -561,18 +602,21 @@ class GalleryService:
                     raise GalleryPermissionError(
                         "Only the uploader or a space moderator may delete this item"
                     )
-            elif not (
-                album.owner_user_id == actor_user_id
-                or await self._is_household_admin(actor_user_id)
-            ):
-                # A household photo: its uploader, the album's owner or a
-                # household admin — not every member of the household.
-                raise GalleryPermissionError(
-                    "Only the uploader, the album owner or a household admin "
-                    "may delete this item"
+            else:
+                await self._require_household_item_manager(
+                    item.uploaded_by, album.owner_user_id, actor_user_id
                 )
+        if album is not None and album.space_id is None:
+            # A household photo goes to the trash for 30 days, files kept
+            # (a restore brings it back; the purge removes it for good).
+            if await self._repo.trash_item(item_id, deleted_by=actor_user_id):
+                await self._bus.publish(
+                    GalleryItemDeleted(item_id=item_id, album_id=item.album_id)
+                )
+            return
         # A space item keeps a file-free tombstone (§25.6
-        # ``gallery_items_deleted``); a household item is removed.
+        # ``gallery_items_deleted``) — no trash: the delete goes out to the
+        # member households.
         await self._repo.delete_item(item_id, deleted_by=actor_user_id)
         await self._repo.increment_item_count(item.album_id, -1)
         # Drop the backing file(s) unless another row still references
@@ -588,6 +632,144 @@ class GalleryService:
                 space_id=album.space_id if album is not None else None,
             )
         )
+
+    # ─── Trash (household only, migration 0139) ──────────────────────────
+    #
+    # A deleted household photo or video keeps its row and files for
+    # ``TRASH_RETENTION_DAYS``; ``GalleryTrashPurgeScheduler`` then removes
+    # it for good. Spaces have no trash: a space delete goes out to the
+    # member households as before.
+
+    async def list_trash(
+        self,
+        *,
+        actor_user_id: str,
+        limit: int = 100,
+        before_id: str | None = None,
+    ) -> list[GalleryTrashItem]:
+        """The household trash *actor_user_id* may see (items of the albums
+        they can see), last deleted first; ``before_id`` pages on."""
+        return await self._repo.list_trash(
+            viewer_user_id=actor_user_id, limit=limit, before_id=before_id
+        )
+
+    async def restore_item(self, item_id: str, *, actor_user_id: str) -> GalleryItem:
+        """Bring a photo or video back from the trash — into its album,
+        which comes back with it when it was deleted too. Whoever may
+        delete the item may restore it."""
+        trashed = await self._visible_trashed_item(item_id, actor_user_id)
+        await self._require_household_item_manager(
+            trashed.item.uploaded_by, trashed.album_owner_user_id, actor_user_id
+        )
+        restored = await self._restore(item_id)
+        if restored is None:  # purged or restored by someone else meanwhile
+            raise GalleryNotFoundError(f"item {item_id!r} not found")
+        return restored
+
+    async def purge_trashed_item(self, item_id: str, *, actor_user_id: str) -> None:
+        """Delete a photo or video in the trash for good, now."""
+        trashed = await self._visible_trashed_item(item_id, actor_user_id)
+        await self._require_household_item_manager(
+            trashed.item.uploaded_by, trashed.album_owner_user_id, actor_user_id
+        )
+        media = await self._repo.purge_trashed_item(item_id)
+        await unlink_unreferenced(self._media_dir, self._media_refs, media)
+
+    async def purge_expired_trash(
+        self,
+        *,
+        now: datetime | None = None,
+        batch: int = 500,
+        max_batches: int = 20,
+    ) -> int:
+        """Remove what was trashed more than ``TRASH_RETENTION_DAYS`` ago
+        (and the trashed albums left empty), with the files no other row
+        names. Bounded per call (``batch`` × ``max_batches`` items); the
+        next tick continues. Returns the media references released."""
+        cutoff = (
+            (now or datetime.now(UTC)) - timedelta(days=TRASH_RETENTION_DAYS)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        released = 0
+        for _ in range(max_batches):
+            media = await self._repo.purge_expired_trash(cutoff, limit=batch)
+            if not media:
+                break
+            await unlink_unreferenced(self._media_dir, self._media_refs, media)
+            released += len(media)
+        return released
+
+    async def _visible_trashed_item(
+        self, item_id: str, actor_user_id: str
+    ) -> GalleryTrashItem:
+        """A trashed household item the actor may see — else the unknown
+        id's 404, so nobody learns of a private album's photo."""
+        trashed = await self._repo.get_trashed_item(
+            item_id, viewer_user_id=actor_user_id
+        )
+        if trashed is None:
+            raise GalleryNotFoundError(f"item {item_id!r} not found")
+        return trashed
+
+    async def _restore(self, item_id: str) -> GalleryItem | None:
+        album_id = await self._repo.restore_item(item_id)
+        if album_id is None:
+            return None
+        await self._bus.publish(GalleryItemRestored(item_id=item_id, album_id=album_id))
+        return await self._repo.get_item(item_id)
+
+    async def _require_household_item_manager(
+        self, uploaded_by: str, album_owner_user_id: str | None, actor_user_id: str
+    ) -> None:
+        """A household photo is deleted, restored or purged by its
+        uploader, the album's owner or a household admin — a protected
+        account (a child) only its own."""
+        if uploaded_by == actor_user_id:
+            return
+        if await self._is_protected(actor_user_id):
+            raise GalleryPermissionError(
+                "A protected account may only delete its own uploads"
+            )
+        if album_owner_user_id == actor_user_id or await self._is_household_admin(
+            actor_user_id
+        ):
+            return
+        # Not every member of the household.
+        raise GalleryPermissionError(
+            "Only the uploader, the album owner or a household admin "
+            "may delete this item"
+        )
+
+    # ─── Leaving the household ────────────────────────────────────────────
+
+    async def _on_user_deprovisioned(self, event: UserDeprovisioned) -> None:
+        """Keep a removed person's photos: their uploads stay where they are
+        (no gallery row goes with its person — 0046 dropped those FKs), and
+        the household albums they owned pass to an admin, so someone can
+        still manage them. A private album stays theirs: handing it over
+        would show an admin what its owner kept from them."""
+        if self._users is None:
+            return
+        admins = sorted(
+            (
+                u
+                for u in await self._users.list_active()
+                if u.is_admin and u.user_id != event.user_id
+            ),
+            key=lambda u: u.username,
+        )
+        if not admins:
+            log.warning(
+                "gallery: a removed person's albums stay theirs — no admin left "
+                "to take them over"
+            )
+            return
+        moved = await self._repo.reassign_household_albums(
+            event.user_id, admins[0].user_id
+        )
+        if moved:
+            log.info(
+                "gallery: %d album(s) of a removed person handed to an admin", moved
+            )
 
     # ─── Internals: media pipeline ────────────────────────────────────────
 
@@ -1045,6 +1227,12 @@ class GalleryService:
 def _with_cover(album: GalleryAlbum, cover_url: str | None) -> GalleryAlbum:
     """Return a copy of *album* with ``cover_url`` filled in."""
     return replace(album, cover_url=cover_url)
+
+
+def _sha256_hex(data: bytes) -> str:
+    """SHA-256 of the uploaded bytes — run off the event loop (up to the
+    100 MiB upload cap)."""
+    return hashlib.sha256(data).hexdigest()
 
 
 def _item_id(space_id: str | None, uploader_user_id: str) -> str:

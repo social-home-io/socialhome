@@ -5,11 +5,17 @@ from __future__ import annotations
 import functools
 import io
 import os
+import pathlib
 
 import aiohttp
 from PIL import Image
 
-from socialhome.app_keys import gallery_service_key, storage_quota_service_key
+from socialhome.app_keys import (
+    config_key,
+    gallery_service_key,
+    storage_quota_service_key,
+)
+from socialhome.domain.media_constraints import IMAGE_MAX_DIMENSION
 from socialhome.hardening import DEFAULT_JSON_MAX_BYTES
 
 from .conftest import _auth
@@ -317,11 +323,13 @@ async def test_a_batch_upload_has_its_own_rate_limit_bucket(client):
     with browsing) — 1 stored, 79 refused. Uploads now have their own
     bucket, and browsing the gallery stays open meanwhile."""
     aid = await _make_album(client)
-    data = _png_bytes()
     for i in range(100):
+        # 100 different files: the same bytes would be one photo (0139).
+        buf = io.BytesIO()
+        Image.new("RGB", (8, 8), (i, 100, 200)).save(buf, "PNG")
         r = await client.post(
             f"/api/gallery/albums/{aid}/items",
-            data=data,
+            data=buf.getvalue(),
             headers={**_auth(client._tok), "Content-Type": "image/png"},
         )
         assert r.status == 201, i
@@ -330,3 +338,43 @@ async def test_a_batch_upload_has_its_own_rate_limit_bucket(client):
     )
     assert r.status == 200
     assert len(await r.json()) == 100
+
+
+# ─── Stored format: WebP ≤ 2560 on every household path ──────────────────
+
+
+async def test_a_photo_shared_in_the_feed_lands_in_posts_as_webp_within_2560(client):
+    """Owner rule: everything in the gallery is converted to the defined
+    format and resolution (``domain/media_constraints.py``). The Posts
+    album shows the feed post's own file — the one ``/api/media/upload``
+    already converted — so it is WebP, longest side ≤ 2560, too."""
+    buf = io.BytesIO()
+    Image.new("RGB", (4000, 3000), (30, 90, 160)).save(buf, "JPEG", quality=85)
+    form = aiohttp.FormData()
+    form.add_field("file", buf.getvalue(), filename="p.jpg", content_type="image/jpeg")
+    r = await client.post("/api/media/upload", data=form, headers=_auth(client._tok))
+    assert r.status == 201
+    url = (await r.json())["url"]
+    r = await client.post(
+        "/api/feed/posts",
+        json={"type": "image", "content": "beach", "image_urls": [url]},
+        headers=_auth(client._tok),
+    )
+    assert r.status == 201
+
+    albums = await (
+        await client.get("/api/gallery/albums", headers=_auth(client._tok))
+    ).json()
+    posts = next(a for a in albums if a["is_system"])
+    items = await (
+        await client.get(
+            f"/api/gallery/albums/{posts['id']}/items", headers=_auth(client._tok)
+        )
+    ).json()
+    assert len(items) == 1
+    media_dir = pathlib.Path(client.app[config_key].media_path)
+    for field in ("url", "thumbnail_url"):
+        name = items[0][field].split("?", 1)[0].rsplit("/", 1)[-1]
+        with Image.open(media_dir / name) as img:
+            assert img.format == "WEBP"
+            assert max(img.size) <= IMAGE_MAX_DIMENSION

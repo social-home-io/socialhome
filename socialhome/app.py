@@ -161,6 +161,7 @@ from .infrastructure.calendar_reminder_scheduler import (
 )
 from .infrastructure.dm_gc_scheduler import DmGcScheduler
 from .infrastructure.dm_relay_seen_scheduler import DmRelaySeenPruneScheduler
+from .infrastructure.gallery_trash_purge_scheduler import GalleryTrashPurgeScheduler
 from .infrastructure.gfs_capability_warmup import GfsCapabilityWarmup
 from .infrastructure.gfs_info_refresh_scheduler import GfsInfoRefreshScheduler
 from .infrastructure.gfs_reconcile_retry import GfsReconcileRetry
@@ -3123,6 +3124,10 @@ def create_app(config: Config | None = None) -> web.Application:
         user_repo=repos.user,
         storage_quota=storage_quota,
     )
+    # Leaving the household keeps photos: a removed person's albums pass
+    # to an admin. Deleted household photos wait 30 days in the trash.
+    gallery_service.wire()
+    gallery_trash_purge_scheduler = GalleryTrashPurgeScheduler(gallery_service)
 
     # ── System "Posts" album bridge (§Gallery) ──────────────────────────
     # Subscribes to feed-post lifecycle events and mirrors photo/video
@@ -3775,6 +3780,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.map_tile_service_key] = map_tile_service
     app[K.peer_space_directory_repo_key] = repos.peer_space_directory
     app[K.gallery_service_key] = gallery_service
+    app[K.gallery_trash_purge_scheduler_key] = gallery_trash_purge_scheduler
     app[K.gallery_repo_key] = gallery_repo
     app[K.media_transcode_repo_key] = repos.media_transcode
     app[K.media_transcode_service_key] = media_transcode_service
@@ -5452,6 +5458,9 @@ def create_app(config: Config | None = None) -> web.Application:
         # Momentum retention — drops moments past their expires_at.
         await moment_retention_scheduler.start()
 
+        # Gallery trash — purges household photos deleted 30+ days ago.
+        await gallery_trash_purge_scheduler.start()
+
         # Page-lock + retention + draft cleanup schedulers.
         nonlocal page_lock_scheduler, space_retention_scheduler
         nonlocal post_draft_scheduler, calendar_reminder_scheduler
@@ -5730,6 +5739,7 @@ def create_app(config: Config | None = None) -> web.Application:
         await poll_deadline_scheduler.stop()
         await highlight_retention_scheduler.stop()
         await moment_retention_scheduler.stop()
+        await gallery_trash_purge_scheduler.stop()
         # Cancel any deferred mesh retransmit parked in the routed-envelope
         # handler BEFORE the transport below closes — a task waking after
         # that would only fail its send against a torn-down channel.

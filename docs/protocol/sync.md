@@ -299,7 +299,10 @@ changed row back and forth every tick. Columns that are local
 bookkeeping are left out of the comparison: `updated_at` (an edit always
 changes a content column too — on every stamped table, tasks, pages and
 timetables included), `calendar.notified_at` (local reminder),
-`conversation_messages.media_sync_status` (local download state).
+`conversation_messages.media_sync_status` (local download state),
+`gallery_albums.audience` and `gallery_items.content_sha256` (household
+gallery only, migration 0139: a space album is always "everyone", and the
+upload digest never leaves the household).
 
 Covered — streamed row by row when changed:
 

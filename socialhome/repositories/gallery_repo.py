@@ -6,7 +6,16 @@ from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
 from ..db import AsyncDatabase
-from ..domain.gallery import GalleryAlbum, GalleryItem
+from ..domain.gallery import (
+    AUDIENCE_CHOSEN,
+    AUDIENCE_EVERYONE,
+    AUDIENCES,
+    GalleryAlbum,
+    GalleryAlbumAudience,
+    GalleryDuplicate,
+    GalleryItem,
+    GalleryTrashItem,
+)
 from ..domain.tombstone import SpaceRowTombstone
 from .base import changed_since_sql, rows_to_dicts, sync_page_cursor
 from .cp_repo import GUARDIAN_BLOCK_COUNTERPARTS_SQL
@@ -31,6 +40,26 @@ _ITEM_TOMBSTONE_SET = (
     " thumbnail_filename='', width=0, height=0, duration_s=NULL,"
     " caption=NULL, taken_at=NULL"
 )
+
+#: A household album the viewer may see (migration 0139): every album open
+#: to everyone at home, the viewer's own, and the private albums they were
+#: chosen for. Expects the album aliased ``a``; binds the viewer twice.
+_ALBUM_VISIBLE_TO_SQL = (
+    "(a.audience = 'everyone' OR a.owner_user_id = ?"
+    " OR EXISTS (SELECT 1 FROM gallery_album_audience aa"
+    " WHERE aa.album_id = a.id AND aa.user_id = ?))"
+)
+
+#: A household item in the trash (migration 0139): deleted, files kept —
+#: a space tombstone (0085) blanks its files. Expects ``i`` and ``a``.
+_IN_TRASH_SQL = "a.space_id IS NULL AND i.deleted_at IS NOT NULL AND i.filename <> ''"
+
+
+def _utc_now_sql() -> str:
+    """Now as SQLite's ``datetime('now')`` writes it (naive UTC) — the
+    shape of every ``deleted_at``, so trash rows compare as strings."""
+    return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+
 
 #: What an album tombstone keeps of its row: no name, description or cover.
 _ALBUM_TOMBSTONE_SET = (
@@ -114,7 +143,9 @@ class AbstractGalleryRepo(Protocol):
         self,
         post_id: str,
     ) -> list[GalleryItem]: ...
-    async def create_item(self, item: GalleryItem) -> GalleryItem: ...
+    async def create_item(
+        self, item: GalleryItem, *, content_sha256: str | None = None
+    ) -> GalleryItem: ...
     async def delete_item(self, item_id: str, *, deleted_by: str = "") -> None: ...
     async def create_item_in_space(
         self,
@@ -144,6 +175,84 @@ class AbstractGalleryRepo(Protocol):
         *,
         space_id: str | None = None,
     ) -> None: ...
+
+    # ── Library model (migration 0139) ─────────────────────────────────
+    async def find_household_duplicate(
+        self, content_sha256: str, *, viewer_user_id: str
+    ) -> GalleryDuplicate | None:
+        """A household item (live first, else in the trash) whose uploaded
+        bytes hashed to ``content_sha256`` — only among the albums
+        *viewer_user_id* may see, so the lookup tells nobody about a
+        private album's photo."""
+        ...
+
+    async def trash_item(self, item_id: str, *, deleted_by: str) -> bool:
+        """Move a live household item to the trash (files kept)."""
+        ...
+
+    async def trash_album(self, album_id: str, *, deleted_by: str) -> list[str]:
+        """Move a household user album and its live items to the trash;
+        the ids of the items trashed with it."""
+        ...
+
+    async def restore_item(self, item_id: str) -> str | None:
+        """Bring a household item back from the trash — and its album, if
+        that was trashed too. The album id, or ``None`` if not in the trash."""
+        ...
+
+    async def get_trashed_item(
+        self, item_id: str, *, viewer_user_id: str | None = None
+    ) -> GalleryTrashItem | None:
+        """A household item in the trash — with ``viewer_user_id``, only
+        if that person may see its album."""
+        ...
+
+    async def list_trash(
+        self,
+        *,
+        viewer_user_id: str,
+        limit: int = 100,
+        before_id: str | None = None,
+    ) -> list[GalleryTrashItem]: ...
+    async def purge_trashed_item(self, item_id: str) -> list[str]:
+        """Delete one trashed household item for good; the ``api/media/``
+        references it held (empty when it was not in the trash)."""
+        ...
+
+    async def purge_expired_trash(self, cutoff: str, *, limit: int = 500) -> list[str]:
+        """Delete up to ``limit`` household items trashed before ``cutoff``
+        (naive UTC) and the trashed albums left empty; the ``api/media/``
+        references the purged items held."""
+        ...
+
+    async def reassign_household_albums(
+        self, from_user_id: str, to_user_id: str
+    ) -> int:
+        """Hand every household album *from_user_id* owns and everyone at
+        home sees (live or in the trash) to *to_user_id*. Private albums
+        stay theirs. How many moved."""
+        ...
+
+    async def get_album_audience(
+        self, album_id: str
+    ) -> GalleryAlbumAudience | None: ...
+    async def set_album_audience(
+        self, album_id: str, audience: str, user_ids: frozenset[str] = frozenset()
+    ) -> bool:
+        """Set a live household album's audience (``chosen`` + people, or
+        ``everyone``, which clears the people). ``False`` for an unknown,
+        space or system album."""
+        ...
+
+    async def album_visible_to(self, album_id: str, user_id: str) -> bool: ...
+    async def add_favourite(self, user_id: str, item_id: str) -> bool: ...
+    async def remove_favourite(self, user_id: str, item_id: str) -> None: ...
+    async def favourite_ids_among(
+        self, user_id: str, item_ids: list[str]
+    ) -> frozenset[str]: ...
+    async def list_favourite_items(
+        self, user_id: str, *, limit: int = 100
+    ) -> list[GalleryItem]: ...
 
     # ── Tombstones (migration 0085, §25.6 ``gallery_*_deleted``) ──────
     async def is_album_deleted(self, album_id: str, *, space_id: str) -> bool: ...
@@ -658,7 +767,11 @@ class SqliteGalleryRepo:
         )
         return [self._row_to_item(r) for r in rows_to_dicts(rows)]
 
-    async def create_item(self, item: GalleryItem) -> GalleryItem:
+    async def create_item(
+        self, item: GalleryItem, *, content_sha256: str | None = None
+    ) -> GalleryItem:
+        """Insert an item. ``content_sha256``: the SHA-256 of the bytes as
+        uploaded (household uploads only — the duplicate check, 0139)."""
         # Strip the "/api/media/" prefix so the column stores the bare filename.
         await self._db.enqueue(
             """
@@ -666,8 +779,8 @@ class SqliteGalleryRepo:
                 id, album_id, uploaded_by, item_type,
                 filename, thumbnail_filename, width, height,
                 duration_s, caption, taken_at, sort_order,
-                source_post_id, created_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                source_post_id, created_at, content_sha256
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             -- Idempotent, matching ``create_album``: a §25.6 sync can
             -- legitimately re-deliver the same item (a resumed stream, a
             -- re-issued BEGIN after a restart), and that is not an error.
@@ -675,7 +788,7 @@ class SqliteGalleryRepo:
             -- ``except`` hid it along with the failures that mattered.
             ON CONFLICT DO NOTHING
             """,
-            self._item_params(item),
+            (*self._item_params(item), content_sha256),
         )
         return item
 
@@ -908,6 +1021,363 @@ class SqliteGalleryRepo:
             if r["thumbnail_filename"]:
                 out.append(r["thumbnail_filename"])
         return out
+
+    # ─── Library model (migration 0139) ───────────────────────────────────
+
+    async def find_household_duplicate(
+        self, content_sha256: str, *, viewer_user_id: str
+    ) -> GalleryDuplicate | None:
+        """A household item with these uploaded bytes that *viewer_user_id*
+        may see — a live one first, else one in the trash (oldest first).
+        Only what the viewer can see counts: a match in a private album
+        they aren't in is no duplicate (else the answer would reveal it)."""
+        row = await self._db.fetchone(
+            "SELECT i.* FROM gallery_items i"
+            " JOIN gallery_albums a ON a.id = i.album_id"
+            " WHERE i.content_sha256 = ? AND a.space_id IS NULL"
+            " AND a.is_system = 0 AND i.filename <> ''"
+            " AND " + _ALBUM_VISIBLE_TO_SQL + " ORDER BY i.deleted_at IS NOT NULL,"
+            " i.created_at, i.id LIMIT 1",
+            (content_sha256, viewer_user_id, viewer_user_id),
+        )
+        if row is None:
+            return None
+        r = dict(row)
+        return GalleryDuplicate(
+            item=self._row_to_item(r), in_trash=r.get("deleted_at") is not None
+        )
+
+    async def trash_item(self, item_id: str, *, deleted_by: str) -> bool:
+        """Move a live household item to the trash: ``deleted_at`` /
+        ``deleted_by`` set, files and content kept, the album's count down
+        one — in one transaction. ``False`` for an unknown or space item
+        (a space item is tombstoned, see :meth:`delete_item`)."""
+        now = _utc_now_sql()
+
+        def _run(conn) -> bool:
+            row = conn.execute(
+                "SELECT i.album_id FROM gallery_items i"
+                " JOIN gallery_albums a ON a.id = i.album_id"
+                " WHERE i.id=? AND a.space_id IS NULL AND i.deleted_at IS NULL",
+                (item_id,),
+            ).fetchone()
+            if row is None:
+                return False
+            conn.execute(
+                "UPDATE gallery_items SET deleted_at=?, deleted_by=? WHERE id=?",
+                (now, deleted_by or None, item_id),
+            )
+            conn.execute(
+                "UPDATE gallery_albums SET item_count=MAX(0, item_count - 1)"
+                " WHERE id=?",
+                (row[0],),
+            )
+            return True
+
+        return bool(await self._db.transact(_run))
+
+    async def trash_album(self, album_id: str, *, deleted_by: str) -> list[str]:
+        """Move a live household user album to the trash with its live items
+        (one stamp for all). The items first: the 0085 album trigger then
+        finds none live, so it blanks no file. The album keeps its name, so
+        the trash can say where a photo came from and restore it there."""
+        now = _utc_now_sql()
+
+        def _run(conn) -> list[str]:
+            if (
+                conn.execute(
+                    "SELECT 1 FROM gallery_albums WHERE id=? AND space_id IS NULL"
+                    " AND is_system=0 AND deleted_at IS NULL",
+                    (album_id,),
+                ).fetchone()
+                is None
+            ):
+                return []
+            ids = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT id FROM gallery_items WHERE album_id=?"
+                    " AND deleted_at IS NULL",
+                    (album_id,),
+                ).fetchall()
+            ]
+            conn.execute(
+                "UPDATE gallery_items SET deleted_at=?, deleted_by=?"
+                " WHERE album_id=? AND deleted_at IS NULL",
+                (now, deleted_by or None, album_id),
+            )
+            conn.execute(
+                "UPDATE gallery_albums SET deleted_at=?, deleted_by=?, item_count=0"
+                " WHERE id=?",
+                (now, deleted_by or None, album_id),
+            )
+            return ids
+
+        return list(await self._db.transact(_run))
+
+    async def restore_item(self, item_id: str) -> str | None:
+        """Bring a household item back from the trash, and its album with it
+        when the album went to the trash too; the album's count is
+        recounted from its live rows."""
+
+        def _run(conn) -> str | None:
+            row = conn.execute(
+                "SELECT i.album_id FROM gallery_items i"
+                " JOIN gallery_albums a ON a.id = i.album_id"
+                " WHERE i.id=? AND " + _IN_TRASH_SQL,
+                (item_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            album_id = str(row[0])
+            conn.execute(
+                "UPDATE gallery_items SET deleted_at=NULL, deleted_by=NULL WHERE id=?",
+                (item_id,),
+            )
+            conn.execute(
+                "UPDATE gallery_albums SET deleted_at=NULL, deleted_by=NULL"
+                " WHERE id=? AND deleted_at IS NOT NULL",
+                (album_id,),
+            )
+            conn.execute(
+                "UPDATE gallery_albums SET item_count=(SELECT COUNT(*)"
+                " FROM gallery_items WHERE album_id=? AND deleted_at IS NULL)"
+                " WHERE id=?",
+                (album_id, album_id),
+            )
+            return album_id
+
+        result = await self._db.transact(_run)
+        return str(result) if result is not None else None
+
+    def _row_to_trash_item(self, r: dict) -> GalleryTrashItem:
+        return GalleryTrashItem(
+            item=self._row_to_item(r),
+            deleted_at=r["deleted_at"],
+            deleted_by=r.get("deleted_by"),
+            album_name=r["album_name"],
+            album_owner_user_id=r.get("album_owner_user_id"),
+            album_in_trash=r.get("album_deleted_at") is not None,
+        )
+
+    _TRASH_SELECT = (
+        "SELECT i.*, a.name AS album_name, a.owner_user_id AS album_owner_user_id,"
+        " a.deleted_at AS album_deleted_at FROM gallery_items i"
+        " JOIN gallery_albums a ON a.id = i.album_id WHERE " + _IN_TRASH_SQL
+    )
+
+    async def get_trashed_item(
+        self, item_id: str, *, viewer_user_id: str | None = None
+    ) -> GalleryTrashItem | None:
+        sql = self._TRASH_SELECT + " AND i.id=?"
+        params: tuple = (item_id,)
+        if viewer_user_id is not None:
+            sql += " AND " + _ALBUM_VISIBLE_TO_SQL
+            params = (item_id, viewer_user_id, viewer_user_id)
+        row = await self._db.fetchone(sql, params)
+        return self._row_to_trash_item(dict(row)) if row else None
+
+    async def list_trash(
+        self,
+        *,
+        viewer_user_id: str,
+        limit: int = 100,
+        before_id: str | None = None,
+    ) -> list[GalleryTrashItem]:
+        """The household trash *viewer_user_id* may see, last deleted first
+        (``deleted_at DESC, id DESC`` — an album delete stamps all its
+        photos alike, so ``id`` breaks the tie). ``before_id`` = the last
+        row's id for the next page."""
+        limit = max(1, min(limit, 500))
+        sql = self._TRASH_SELECT + " AND " + _ALBUM_VISIBLE_TO_SQL
+        params: list = [viewer_user_id, viewer_user_id]
+        if before_id:
+            sql += (
+                " AND (i.deleted_at, i.id) <"
+                " (SELECT deleted_at, id FROM gallery_items WHERE id = ?)"
+            )
+            params.append(before_id)
+        sql += " ORDER BY i.deleted_at DESC, i.id DESC LIMIT ?"
+        params.append(limit)
+        rows = await self._db.fetchall(sql, tuple(params))
+        return [self._row_to_trash_item(r) for r in rows_to_dicts(rows)]
+
+    @staticmethod
+    def _purge_rows(conn, item_ids: list[str]) -> list[str]:
+        """Hard-delete these items (favourites cascade); their media refs."""
+        media: list[str] = []
+        for iid in item_ids:
+            row = conn.execute(
+                "SELECT filename, thumbnail_filename FROM gallery_items WHERE id=?",
+                (iid,),
+            ).fetchone()
+            if row is None:
+                continue
+            media.extend(f"api/media/{n}" for n in (row[0], row[1]) if n)
+            conn.execute("DELETE FROM gallery_items WHERE id=?", (iid,))
+        return media
+
+    async def purge_trashed_item(self, item_id: str) -> list[str]:
+        def _run(conn) -> list[str]:
+            row = conn.execute(
+                "SELECT i.album_id FROM gallery_items i"
+                " JOIN gallery_albums a ON a.id = i.album_id"
+                " WHERE i.id=? AND " + _IN_TRASH_SQL,
+                (item_id,),
+            ).fetchone()
+            if row is None:
+                return []
+            media = self._purge_rows(conn, [item_id])
+            # A trashed album left with no item goes with its last photo.
+            conn.execute(
+                "DELETE FROM gallery_albums WHERE id=? AND space_id IS NULL"
+                " AND deleted_at IS NOT NULL AND NOT EXISTS"
+                " (SELECT 1 FROM gallery_items WHERE album_id=?)",
+                (row[0], row[0]),
+            )
+            return media
+
+        return list(await self._db.transact(_run))
+
+    async def purge_expired_trash(self, cutoff: str, *, limit: int = 500) -> list[str]:
+        """Delete up to ``limit`` household items trashed before ``cutoff``
+        (oldest first), then every trashed household album deleted before
+        ``cutoff`` that holds no item any more."""
+
+        def _run(conn) -> list[str]:
+            ids = [
+                r[0]
+                for r in conn.execute(
+                    "SELECT i.id FROM gallery_items i"
+                    " JOIN gallery_albums a ON a.id = i.album_id"
+                    " WHERE " + _IN_TRASH_SQL + " AND i.deleted_at < ?"
+                    " ORDER BY i.deleted_at LIMIT ?",
+                    (cutoff, int(limit)),
+                ).fetchall()
+            ]
+            media = self._purge_rows(conn, ids)
+            conn.execute(
+                "DELETE FROM gallery_albums WHERE space_id IS NULL"
+                " AND deleted_at IS NOT NULL AND deleted_at < ?"
+                " AND NOT EXISTS (SELECT 1 FROM gallery_items i"
+                " WHERE i.album_id = gallery_albums.id)",
+                (cutoff,),
+            )
+            return media
+
+        return list(await self._db.transact(_run))
+
+    async def reassign_household_albums(
+        self, from_user_id: str, to_user_id: str
+    ) -> int:
+        return await self._db.enqueue_rowcount(
+            "UPDATE gallery_albums SET owner_user_id=?"
+            " WHERE owner_user_id=? AND space_id IS NULL AND is_system=0"
+            " AND audience=?",
+            (to_user_id, from_user_id, AUDIENCE_EVERYONE),
+        )
+
+    async def get_album_audience(self, album_id: str) -> GalleryAlbumAudience | None:
+        row = await self._db.fetchone(
+            "SELECT audience FROM gallery_albums WHERE id=? AND deleted_at IS NULL",
+            (album_id,),
+        )
+        if row is None:
+            return None
+        people = await self._db.fetchall(
+            "SELECT user_id FROM gallery_album_audience WHERE album_id=?",
+            (album_id,),
+        )
+        return GalleryAlbumAudience(
+            album_id=album_id,
+            audience=row[0],
+            user_ids=frozenset(r[0] for r in people),
+        )
+
+    async def set_album_audience(
+        self, album_id: str, audience: str, user_ids: frozenset[str] = frozenset()
+    ) -> bool:
+        if audience not in AUDIENCES:
+            raise ValueError(f"unknown album audience {audience!r}")
+        people = sorted(user_ids) if audience == AUDIENCE_CHOSEN else []
+
+        def _run(conn) -> bool:
+            cur = conn.execute(
+                "UPDATE gallery_albums SET audience=? WHERE id=?"
+                " AND space_id IS NULL AND is_system=0 AND deleted_at IS NULL",
+                (audience, album_id),
+            )
+            if not cur.rowcount:
+                return False
+            conn.execute(
+                "DELETE FROM gallery_album_audience WHERE album_id=?", (album_id,)
+            )
+            conn.executemany(
+                "INSERT INTO gallery_album_audience(album_id, user_id) VALUES(?, ?)",
+                [(album_id, uid) for uid in people],
+            )
+            return True
+
+        return bool(await self._db.transact(_run))
+
+    async def album_visible_to(self, album_id: str, user_id: str) -> bool:
+        """Whether *user_id* may see this live household album under its
+        audience (a space album answers ``False``: its seats decide)."""
+        row = await self._db.fetchone(
+            "SELECT 1 FROM gallery_albums a WHERE a.id=? AND a.space_id IS NULL"
+            " AND a.deleted_at IS NULL AND " + _ALBUM_VISIBLE_TO_SQL,
+            (album_id, user_id, user_id),
+        )
+        return row is not None
+
+    async def add_favourite(self, user_id: str, item_id: str) -> bool:
+        """Mark a live item a favourite of *user_id*; ``False`` when the
+        item is unknown or deleted. Idempotent."""
+        await self._db.enqueue(
+            "INSERT INTO gallery_favourites(user_id, item_id)"
+            " SELECT ?, id FROM gallery_items WHERE id=? AND deleted_at IS NULL"
+            " ON CONFLICT DO NOTHING",
+            (user_id, item_id),
+        )
+        row = await self._db.fetchone(
+            "SELECT 1 FROM gallery_favourites f JOIN gallery_items i"
+            " ON i.id = f.item_id WHERE f.user_id=? AND f.item_id=?"
+            " AND i.deleted_at IS NULL",
+            (user_id, item_id),
+        )
+        return row is not None
+
+    async def remove_favourite(self, user_id: str, item_id: str) -> None:
+        await self._db.enqueue(
+            "DELETE FROM gallery_favourites WHERE user_id=? AND item_id=?",
+            (user_id, item_id),
+        )
+
+    async def favourite_ids_among(
+        self, user_id: str, item_ids: list[str]
+    ) -> frozenset[str]:
+        if not item_ids:
+            return frozenset()
+        marks = ",".join("?" * len(item_ids))
+        rows = await self._db.fetchall(
+            f"SELECT item_id FROM gallery_favourites WHERE user_id=?"
+            f" AND item_id IN ({marks})",
+            (user_id, *item_ids),
+        )
+        return frozenset(r[0] for r in rows)
+
+    async def list_favourite_items(
+        self, user_id: str, *, limit: int = 100
+    ) -> list[GalleryItem]:
+        """*user_id*'s live favourites, last marked first."""
+        rows = await self._db.fetchall(
+            "SELECT i.* FROM gallery_favourites f"
+            " JOIN gallery_items i ON i.id = f.item_id"
+            " WHERE f.user_id=? AND i.deleted_at IS NULL"
+            " ORDER BY f.created_at DESC, i.id DESC LIMIT ?",
+            (user_id, max(1, min(limit, 500))),
+        )
+        return [self._row_to_item(r) for r in rows_to_dicts(rows)]
 
     # ─── Tombstones (migration 0085, §25.6 ``gallery_*_deleted``) ─────────
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import replace
 
 import pytest
@@ -953,3 +954,209 @@ async def test_removing_a_person_keeps_their_albums_and_photos(env):
     await db.enqueue("DELETE FROM users WHERE user_id='a-id'")
     assert await repo.get_album("hh") is not None
     assert {i.id for i in await repo.list_items("hh")} == {"mine", "bobs"}
+
+
+# ─── Library model (migration 0139) ──────────────────────────────────────
+
+_SHA = "cd" * 32
+
+
+async def _household(db, repo, album_id: str = "h-1", owner: str = "a-id") -> None:
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name)"
+        " VALUES('bob', 'b-id', 'Bob') ON CONFLICT DO NOTHING"
+    )
+    album = _album(album_id, space_id=None)
+    await repo.create_album(dataclasses.replace(album, owner_user_id=owner))
+
+
+async def test_the_upload_digest_is_stored_with_the_item(env):
+    db, repo = env
+    await _household(db, repo)
+    await repo.create_item(_item("it-1", album_id="h-1"), content_sha256=_SHA)
+    row = await db.fetchone("SELECT content_sha256 FROM gallery_items WHERE id='it-1'")
+    assert row[0] == _SHA
+
+
+async def test_a_duplicate_is_a_live_one_before_one_in_the_trash(env):
+    db, repo = env
+    await _household(db, repo)
+    await repo.create_item(_item("old", album_id="h-1"), content_sha256=_SHA)
+    await repo.trash_item("old", deleted_by="a-id")
+    found = await repo.find_household_duplicate(_SHA, viewer_user_id="b-id")
+    assert found is not None and found.item.id == "old" and found.in_trash
+
+    await repo.create_item(_item("new", album_id="h-1"), content_sha256=_SHA)
+    found = await repo.find_household_duplicate(_SHA, viewer_user_id="b-id")
+    assert found is not None and found.item.id == "new" and not found.in_trash
+    assert await repo.find_household_duplicate("ef" * 32, viewer_user_id="b-id") is None
+
+
+async def test_a_space_item_is_never_a_household_duplicate(env):
+    _db, repo = env
+    await repo.create_album(_album("sp-alb"))
+    await repo.create_item(_item("sp-it", album_id="sp-alb"), content_sha256=_SHA)
+    assert await repo.find_household_duplicate(_SHA, viewer_user_id="a-id") is None
+
+
+async def test_trash_and_restore_touch_only_household_items(env):
+    _db, repo = env
+    await repo.create_album(_album("sp-alb"))
+    await repo.create_item(_item("sp-it", album_id="sp-alb"))
+    assert not await repo.trash_item("sp-it", deleted_by="a-id")
+    assert await repo.trash_album("sp-alb", deleted_by="a-id") == []
+    assert await repo.restore_item("sp-it") is None
+    assert await repo.purge_trashed_item("sp-it") == []
+    assert await repo.get_item("sp-it") is not None
+
+
+async def test_the_system_album_never_goes_to_the_trash(env):
+    _db, repo = env
+    await repo.create_album(
+        dataclasses.replace(_album("sys", space_id=None), is_system=True)
+    )
+    assert await repo.trash_album("sys", deleted_by="a-id") == []
+    assert await repo.get_album("sys") is not None
+
+
+async def test_trash_album_keeps_files_and_name(env):
+    db, repo = env
+    await _household(db, repo)
+    await repo.create_item(_item("it-1", album_id="h-1"))
+    assert await repo.trash_album("h-1", deleted_by="a-id") == ["it-1"]
+    row = await db.fetchone(
+        "SELECT a.name, a.deleted_at, i.filename, i.deleted_at FROM gallery_albums a"
+        " JOIN gallery_items i ON i.album_id = a.id WHERE a.id='h-1'"
+    )
+    assert row[0] == "Album h-1" and row[2] == "it-1.webp"
+    assert row[1] is not None and row[1] == row[3]  # one stamp for both
+    # A second delete finds nothing live.
+    assert await repo.trash_album("h-1", deleted_by="a-id") == []
+
+
+async def test_the_trash_pages_through_photos_deleted_together(env):
+    """An album delete stamps all its photos alike: paging on the id keeps
+    every one of them, none twice."""
+    db, repo = env
+    await _household(db, repo)
+    for n in range(5):
+        await repo.create_item(_item(f"it-{n}", album_id="h-1"))
+    await repo.trash_album("h-1", deleted_by="a-id")
+    seen: list[str] = []
+    before: str | None = None
+    while True:
+        page = await repo.list_trash(viewer_user_id="a-id", limit=2, before_id=before)
+        if not page:
+            break
+        seen += [t.item.id for t in page]
+        before = page[-1].item.id
+    assert seen == [f"it-{n}" for n in (4, 3, 2, 1, 0)]
+
+
+async def test_purge_releases_the_files_and_the_favourites(env):
+    db, repo = env
+    await _household(db, repo)
+    await repo.create_item(_item("it-1", album_id="h-1"))
+    assert await repo.add_favourite("b-id", "it-1")
+    await repo.trash_item("it-1", deleted_by="a-id")
+    assert await repo.purge_trashed_item("it-1") == [
+        "api/media/it-1.webp",
+        "api/media/it-1-thumb.jpg",
+    ]
+    assert await db.fetchone("SELECT 1 FROM gallery_favourites") is None
+    assert await db.fetchone("SELECT 1 FROM gallery_items") is None
+
+
+async def test_expired_trash_purge_leaves_newer_and_space_rows(env):
+    db, repo = env
+    await _household(db, repo)
+    await repo.create_album(_album("sp-alb"))
+    await repo.create_item(_item("old", album_id="h-1"))
+    await repo.create_item(_item("new", album_id="h-1"))
+    await repo.create_item(_item("sp-it", album_id="sp-alb"))
+    await repo.trash_item("old", deleted_by="a-id")
+    await repo.trash_item("new", deleted_by="a-id")
+    await repo.delete_item("sp-it", deleted_by="a-id")  # a space tombstone
+    await db.enqueue(
+        "UPDATE gallery_items SET deleted_at='2026-01-01 00:00:00' WHERE id IN"
+        " ('old', 'sp-it')"
+    )
+    media = await repo.purge_expired_trash("2026-02-01 00:00:00")
+    assert media == ["api/media/old.webp", "api/media/old-thumb.jpg"]
+    ids = {r[0] for r in await db.fetchall("SELECT id FROM gallery_items")}
+    assert ids == {"new", "sp-it"}
+
+
+async def test_audience_is_set_on_live_household_user_albums_only(env):
+    db, repo = env
+    await _household(db, repo)
+    await repo.create_album(_album("sp-alb"))
+    assert await repo.set_album_audience("h-1", "chosen", frozenset({"b-id"}))
+    got = await repo.get_album_audience("h-1")
+    assert got is not None
+    assert (got.audience, got.user_ids) == ("chosen", frozenset({"b-id"}))
+    assert await repo.album_visible_to("h-1", "b-id")
+    assert await repo.album_visible_to("h-1", "a-id")  # the owner
+
+    # Back to everyone clears the chosen people.
+    assert await repo.set_album_audience("h-1", "everyone", frozenset({"b-id"}))
+    got = await repo.get_album_audience("h-1")
+    assert got is not None and got.user_ids == frozenset()
+
+    assert not await repo.set_album_audience("sp-alb", "chosen")
+    assert not await repo.set_album_audience("missing", "chosen")
+    assert not await repo.album_visible_to("sp-alb", "a-id")
+    assert await repo.get_album_audience("missing") is None
+    with pytest.raises(ValueError):
+        await repo.set_album_audience("h-1", "friends")
+
+
+async def test_a_private_album_is_hidden_from_who_is_not_chosen(env):
+    db, repo = env
+    await _household(db, repo)
+    await repo.set_album_audience("h-1", "chosen")
+    assert not await repo.album_visible_to("h-1", "b-id")
+
+
+async def test_favourites(env):
+    db, repo = env
+    await _household(db, repo)
+    await repo.create_item(_item("it-1", album_id="h-1"))
+    await repo.create_item(_item("it-2", album_id="h-1"))
+    assert await repo.add_favourite("b-id", "it-1")
+    assert await repo.add_favourite("b-id", "it-1")  # idempotent
+    assert not await repo.add_favourite("b-id", "missing")
+    assert await repo.favourite_ids_among("b-id", ["it-1", "it-2"]) == {"it-1"}
+    assert await repo.favourite_ids_among("b-id", []) == frozenset()
+    assert await repo.favourite_ids_among("a-id", ["it-1"]) == frozenset()
+    assert [i.id for i in await repo.list_favourite_items("b-id")] == ["it-1"]
+
+    # A trashed favourite is hidden, and comes back with a restore.
+    await repo.trash_item("it-1", deleted_by="a-id")
+    assert await repo.list_favourite_items("b-id") == []
+    assert not await repo.add_favourite("b-id", "it-1")
+    await repo.restore_item("it-1")
+    assert [i.id for i in await repo.list_favourite_items("b-id")] == ["it-1"]
+
+    await repo.remove_favourite("b-id", "it-1")
+    assert await repo.list_favourite_items("b-id") == []
+
+
+async def test_reassign_moves_shared_household_albums_only(env):
+    db, repo = env
+    await _household(db, repo, "shared", owner="b-id")
+    await _household(db, repo, "private", owner="b-id")
+    await repo.set_album_audience("private", "chosen")
+    await repo.create_album(dataclasses.replace(_album("sp-alb"), owner_user_id="b-id"))
+    await _household(db, repo, "trashed", owner="b-id")
+    await repo.trash_album("trashed", deleted_by="b-id")
+
+    assert await repo.reassign_household_albums("b-id", "a-id") == 2
+
+    owners = dict(await db.fetchall("SELECT id, owner_user_id FROM gallery_albums"))
+    assert owners == {
+        "shared": "a-id",
+        "trashed": "a-id",
+        "private": "b-id",
+        "sp-alb": "b-id",
+    }

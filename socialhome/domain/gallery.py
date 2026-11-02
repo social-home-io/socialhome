@@ -17,6 +17,7 @@ projection.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 
 
 @dataclass(slots=True, frozen=True)
@@ -118,3 +119,72 @@ class GalleryItem:
             "sort_order": self.sort_order,
             "created_at": self.created_at,
         }
+
+
+# ─── Library model (migration 0139) ──────────────────────────────────────
+
+#: Days a deleted household photo or video stays in the trash before the
+#: purge removes it for good (owner decision D5, 2026-11-02).
+TRASH_RETENTION_DAYS: int = 30
+
+#: ``gallery_albums.audience`` — everyone at home (the default) …
+AUDIENCE_EVERYONE: str = "everyone"
+#: … or only the owner and the people in ``gallery_album_audience``
+#: (a private household album; a space album is always ``everyone``).
+AUDIENCE_CHOSEN: str = "chosen"
+AUDIENCES: frozenset[str] = frozenset({AUDIENCE_EVERYONE, AUDIENCE_CHOSEN})
+
+
+class UploadOutcome(StrEnum):
+    """What an upload did. A household upload whose bytes match a photo the
+    uploader can already see stores nothing new (owner: exact duplicates
+    are skipped and counted); one matching a photo in the trash brings that
+    photo back instead."""
+
+    CREATED = "created"
+    ALREADY_HERE = "already_here"
+    RESTORED = "restored"
+
+
+@dataclass(slots=True, frozen=True)
+class GalleryUpload:
+    """The result of :meth:`GalleryService.upload_item`: the item the
+    upload created, or the existing one it matched."""
+
+    item: GalleryItem
+    outcome: UploadOutcome = UploadOutcome.CREATED
+
+
+@dataclass(slots=True, frozen=True)
+class GalleryDuplicate:
+    """A household item whose uploaded bytes hash to the same
+    ``content_sha256`` — live, or in the trash (``in_trash``)."""
+
+    item: GalleryItem
+    in_trash: bool = False
+
+
+@dataclass(slots=True, frozen=True)
+class GalleryTrashItem:
+    """A household photo or video in the trash: the item as it was, who
+    deleted it and when (``deleted_at`` is naive UTC, SQLite
+    ``datetime('now')``), and the album it returns to on restore — which
+    may be in the trash itself (an album delete), then it comes back too."""
+
+    item: GalleryItem
+    deleted_at: str
+    deleted_by: str | None
+    album_name: str
+    album_owner_user_id: str | None
+    album_in_trash: bool = False
+
+
+@dataclass(slots=True, frozen=True)
+class GalleryAlbumAudience:
+    """Who sees a household album: ``audience`` is :data:`AUDIENCE_EVERYONE`
+    or :data:`AUDIENCE_CHOSEN`; ``user_ids`` are the chosen people (the
+    owner always sees their album and is not listed)."""
+
+    album_id: str
+    audience: str = AUDIENCE_EVERYONE
+    user_ids: frozenset[str] = frozenset()
