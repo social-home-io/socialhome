@@ -9,6 +9,7 @@ import os
 import aiohttp
 from PIL import Image
 
+from socialhome.app_keys import gallery_service_key, storage_quota_service_key
 from socialhome.hardening import DEFAULT_JSON_MAX_BYTES
 
 from .conftest import _auth
@@ -291,3 +292,21 @@ async def test_item_delete_round_trip(client):
         headers=_auth(client._tok),
     )
     assert (await r.json())["item_count"] == 0
+
+
+async def test_a_gallery_upload_over_the_household_quota_is_507_storage_full(client):
+    """The gallery honours the household byte budget exactly like
+    ``POST /api/media/upload`` (UX review #12) — and stores nothing."""
+    aid = await _make_album(client)
+    client.server.app[storage_quota_service_key].set_quota_bytes(1)
+    r = await client.post(
+        f"/api/gallery/albums/{aid}/items",
+        data=_png_bytes(),
+        headers={**_auth(client._tok), "Content-Type": "image/png"},
+    )
+    assert r.status == 507
+    assert (await r.json())["error"]["code"] == "STORAGE_FULL"
+    album = await client.server.app[gallery_service_key].get_album(
+        aid, actor_user_id=client._uid
+    )
+    assert album.item_count == 0

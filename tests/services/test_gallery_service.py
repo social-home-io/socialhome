@@ -30,6 +30,7 @@ from socialhome.repositories.gallery_repo import SqliteGalleryRepo
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.media_transcode_repo import SqliteMediaTranscodeRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.gallery_service import (
     DESCRIPTION_MAX,
     NAME_MAX,
@@ -97,6 +98,7 @@ async def env(tmp_dir):
         media_transcode_repo=transcode_repo,
         media_transcode_service=transcode_service,
         media_refs=SqliteMediaReferenceRepo(db),
+        user_repo=SqliteUserRepo(db),
     )
     yield svc
     await db.shutdown()
@@ -900,3 +902,139 @@ async def test_an_uploaded_camera_photo_keeps_its_day_and_no_exif(env):
         with Image.open(io.BytesIO(stored)) as img:
             assert not img.getexif()
             assert "exif" not in img.info
+
+
+# ─── Household albums: who may delete and manage (UX review #4) ─────────
+#
+# alice is the household admin, bob and eve are members. Before the fix any
+# household member could delete any household photo, and a household admin
+# could not tidy someone else's album.
+
+
+def _jpeg() -> bytes:
+    buf = io.BytesIO()
+    Image.new("RGB", (32, 24), (200, 40, 40)).save(buf, format="JPEG")
+    return buf.getvalue()
+
+
+async def _bobs_household_item(env, *, uploader: str = "b-id"):
+    album = await env.create_album(space_id=None, owner_user_id="b-id", name="Bob's")
+    item = await env.upload_item(
+        album.id,
+        data=_jpeg(),
+        content_type="image/jpeg",
+        caption=None,
+        uploader_user_id=uploader,
+    )
+    return album, item
+
+
+async def test_a_household_member_cannot_delete_someone_elses_photo(env):
+    album, item = await _bobs_household_item(env)
+    with pytest.raises(GalleryPermissionError):
+        await env.delete_item(item.id, actor_user_id="e-id")
+    assert [i.id for i in await env.list_items(album.id, actor_user_id="b-id")] == [
+        item.id
+    ]
+
+
+async def test_the_uploader_deletes_their_own_household_photo(env):
+    album, item = await _bobs_household_item(env, uploader="e-id")
+    await env.delete_item(item.id, actor_user_id="e-id")
+    assert await env.list_items(album.id, actor_user_id="b-id") == []
+
+
+async def test_the_album_owner_deletes_any_photo_in_their_album(env):
+    album, item = await _bobs_household_item(env, uploader="e-id")
+    await env.delete_item(item.id, actor_user_id="b-id")
+    assert await env.list_items(album.id, actor_user_id="b-id") == []
+
+
+async def test_a_household_admin_deletes_any_household_photo(env):
+    album, item = await _bobs_household_item(env, uploader="e-id")
+    await env.delete_item(item.id, actor_user_id="a-id")
+    assert await env.list_items(album.id, actor_user_id="b-id") == []
+
+
+async def test_a_household_admin_manages_someone_elses_household_album(env):
+    album, _item = await _bobs_household_item(env)
+    await env.update_album(album.id, actor_user_id="a-id", name="Tidied")
+    await env.set_retention_exempt(album.id, True, actor_user_id="a-id")
+    assert (await env.get_album(album.id, actor_user_id="b-id")).name == "Tidied"
+    await env.delete_album(album.id, actor_user_id="a-id")
+    with pytest.raises(GalleryNotFoundError):
+        await env.get_album(album.id, actor_user_id="b-id")
+
+
+async def test_a_household_member_cannot_manage_someone_elses_household_album(env):
+    album, _item = await _bobs_household_item(env)
+    with pytest.raises(GalleryPermissionError):
+        await env.update_album(album.id, actor_user_id="e-id", name="Hijack")
+    with pytest.raises(GalleryPermissionError):
+        await env.set_retention_exempt(album.id, True, actor_user_id="e-id")
+    with pytest.raises(GalleryPermissionError):
+        await env.delete_album(album.id, actor_user_id="e-id")
+    assert (await env.get_album(album.id, actor_user_id="b-id")).name == "Bob's"
+
+
+async def test_a_household_admin_gets_no_say_over_a_space_album(env):
+    """A space album follows the space's roles: a household admin who is a
+    plain member of the space is no space admin."""
+    await env._space_repo.save_member(
+        SpaceMember(space_id="sp-1", user_id="a-id", role="member", joined_at="")
+    )
+    album, item = await _bobs_item(env)
+    with pytest.raises(GalleryPermissionError):
+        await env.update_album(album.id, actor_user_id="a-id", name="Hijack")
+    with pytest.raises(GalleryPermissionError):
+        await env.delete_item(item.id, actor_user_id="a-id")
+
+
+async def test_a_deactivated_admin_is_no_household_admin(env):
+    _album, item = await _bobs_household_item(env)
+    await env._users._db.enqueue(  # type: ignore[union-attr]
+        "UPDATE users SET state='inactive' WHERE user_id='a-id'"
+    )
+    with pytest.raises(GalleryPermissionError):
+        await env.delete_item(item.id, actor_user_id="a-id")
+
+
+async def test_without_a_user_repo_nobody_is_a_household_admin(env):
+    _album, item = await _bobs_household_item(env)
+    env._users = None
+    with pytest.raises(GalleryPermissionError):
+        await env.delete_item(item.id, actor_user_id="a-id")
+
+
+async def test_a_protected_account_deletes_only_its_own_uploads(env):
+    """Live walk: Mia (protected, 9) deleted her mother's photo with a 204.
+    A protected account removes only what it uploaded — even in its own
+    album, and not by deleting an album that holds someone else's photo."""
+    await env._users._db.enqueue(  # type: ignore[union-attr]
+        "UPDATE users SET child_protection_enabled=1 WHERE user_id='e-id'"
+    )
+    album = await env.create_album(space_id=None, owner_user_id="e-id", name="Mia's")
+    bobs = await env.upload_item(
+        album.id,
+        data=_jpeg(),
+        content_type="image/jpeg",
+        caption=None,
+        uploader_user_id="b-id",
+    )
+    own = await env.upload_item(
+        album.id,
+        data=_jpeg(),
+        content_type="image/jpeg",
+        caption=None,
+        uploader_user_id="e-id",
+    )
+    with pytest.raises(GalleryPermissionError):
+        await env.delete_item(bobs.id, actor_user_id="e-id")
+    with pytest.raises(GalleryPermissionError):
+        await env.delete_album(album.id, actor_user_id="e-id")
+    await env.delete_item(own.id, actor_user_id="e-id")
+    # Once only her own photos are left, the album is hers to delete.
+    await env.delete_item(bobs.id, actor_user_id="b-id")
+    await env.delete_album(album.id, actor_user_id="e-id")
+    with pytest.raises(GalleryNotFoundError):
+        await env.get_album(album.id, actor_user_id="b-id")

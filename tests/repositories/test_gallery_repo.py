@@ -813,3 +813,12 @@ async def test_sync_pages_since_a_stamp(env):
     gone_albums, _ = await repo.list_album_tombstones_page("sp-1", since=mark)
     assert [t.id for t in gone_albums] == ["alb-b"]
     assert await repo.list_albums_sync_page("sp-1", since=mark) == ([], None)
+
+
+async def test_has_items_by_others(env):
+    _, repo = env
+    await repo.create_album(_album())
+    assert not await repo.has_items_by_others("alb-1", "a-id")
+    await repo.create_item(_item("it-1"))
+    assert not await repo.has_items_by_others("alb-1", "a-id")
+    assert await repo.has_items_by_others("alb-1", "b-id")
