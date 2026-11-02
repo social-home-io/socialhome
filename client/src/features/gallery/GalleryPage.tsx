@@ -9,10 +9,17 @@
  * Used both for household-level (no space_id) and per-space galleries.
  *
  * Both lists page: albums come 30 at a time (the auto "Posts" album
- * pinned first), an album's items 50 at a time, newest first. The next
- * page is asked for with the last row's ``created_at`` + ``id`` cursor,
- * from a "Load more" button that also fires by itself when it scrolls
- * into view — so every album and every upload can be reached.
+ * pinned first, then newest activity first — the album someone last
+ * added to on top), an album's items 50 at a time by the day they were
+ * taken (newest first, or oldest first — remembered per album, see
+ * ``albumOrder``), under month and day headings. The next page is asked
+ * for with the last row's cursor, from a "Load more" button that also
+ * fires by itself when it scrolls into view — so every album and every
+ * upload can be reached.
+ *
+ * The household list opens with the "On this day" card (``OnThisDay``),
+ * a first-run screen when the household has no photos yet, and an
+ * honest offline banner that keeps what was loaded on screen.
  *
  * Every album and every photo has its own address (``galleryRoutes``):
  * ``/gallery/albums/:albumId[/:itemId]``, mirrored under a space's
@@ -42,6 +49,12 @@ import { formatDayKey } from '@/utils/calendar'
 import { UploadSheet } from './UploadSheet'
 import { counts, type UploadTarget } from './uploadQueue'
 import { UploadButtons, useUploadControls } from './GalleryUpload'
+import { albumDisplayName } from './albumName'
+import {
+  groupByMonthDay, readAlbumOrder, sortParam, takenCursor, writeAlbumOrder,
+  type AlbumOrder,
+} from './albumOrder'
+import { OnThisDayCardView, OnThisDayNote, loadOnThisDay } from './OnThisDay'
 
 interface Album {
   id: string
@@ -58,6 +71,13 @@ interface Album {
    *  contents track every photo or video shared via a feed post. */
   is_system?: boolean
   created_at?: string
+  /** Newest activity: the newest photo's upload time, else
+   *  ``created_at`` — the list's order and its cursor. */
+  activity_at?: string
+  /** The household's default album; ``default_name`` while nobody
+   *  renamed it (shown in the reader's own language). */
+  is_default?: boolean
+  default_name?: boolean
 }
 
 interface Item {
@@ -71,6 +91,8 @@ interface Item {
   height: number
   caption?: string | null
   taken_at?: string | null
+  /** The day it sorts by — taken, else uploaded. */
+  day?: string
   created_at?: string
   duration_s?: number | null
   /** Background-transcode state for ``video`` items — ``'processing'``
@@ -104,7 +126,9 @@ const PROCESSING_POLL_MS = 10_000
 
 const albums       = signal<Album[]>([])
 const albumsMore   = signal(false)
-const albumsError  = signal(false)
+/** The list could not be read at all: ``'offline'`` (no answer from
+ *  home — the network, or the proxy in front of it) or ``'server'``. */
+const albumsError  = signal<false | 'offline' | 'server'>(false)
 const items        = signal<Item[]>([])
 const itemsMore    = signal(false)
 const itemsLoading = signal(false)
@@ -113,6 +137,11 @@ const activeAlbum  = signal<Album | null>(null)
 const albumError   = signal(false)
 const loading      = signal(true)
 const showCreate   = signal(false)
+/** The open album's order (by date taken), as this person last left it. */
+const itemOrder    = signal<AlbumOrder>('newest')
+/** The albums on screen may be out of date: the last refresh failed or
+ *  the browser went offline. They stay; a banner says so. */
+const albumsStale  = signal(false)
 /** The scope (space id, or ``null`` for the household) the signals above
  *  hold. The page is one module shared by every gallery, so moving from a
  *  space gallery to ``/gallery`` must drop the open album and its items. */
@@ -154,12 +183,6 @@ function canDeleteItem(album: Album, item: { uploaded_by: string }, canModerate:
   return album.owner_user_id === me.user_id || me.is_admin
 }
 
-/** An album's shown name — the auto "Posts" album in the reader's
- *  language (the server stores one English name for it). */
-function albumName(a: Album): string {
-  return a.is_system ? t('gallery.system_name') : a.name
-}
-
 export default function GalleryPage({
   spaceId, readOnly = false, canModerate = false, title,
 }: GalleryPageProps) {
@@ -187,7 +210,28 @@ export default function GalleryPage({
     void loadAlbums(spaceId)
     // Names for the tiles' "added by" (screen readers).
     if (spaceId) void loadSpaceMembers(spaceId)
-    else void loadHouseholdUsers()
+    else {
+      void loadHouseholdUsers()
+      // "On this day" is the household gallery's (D14), never a space's.
+      void loadOnThisDay()
+    }
+  }, [spaceId])
+
+  // Offline: what is on screen stays, a banner says it may be out of
+  // date; back online, re-read quietly (that clears the banner).
+  useEffect(() => {
+    const offline = () => { albumsStale.value = true }
+    const online = () => {
+      void loadAlbums(spaceId, { quiet: true })
+      if (!spaceId) void loadOnThisDay()
+    }
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) offline()
+    window.addEventListener('offline', offline)
+    window.addEventListener('online', online)
+    return () => {
+      window.removeEventListener('offline', offline)
+      window.removeEventListener('online', online)
+    }
   }, [spaceId])
 
   // An address the gallery doesn't know → the albums.
@@ -373,13 +417,21 @@ export default function GalleryPage({
   const albumCount = albums.value.length
   const itemCount = albums.value.reduce((acc, a) => acc + a.item_count, 0)
   const more = albumsMore.value ? '+' : ''
+  // First run: a gallery (the household's or a space's) with no photos and
+  // no album of its own yet (the auto "Posts" album may exist, empty). One
+  // screen that explains, one big button.
+  const firstRun = !albumsError.value && !albumsMore.value
+    && regular.length === 0 && itemCount === 0
 
   return (
     <div class="sh-gallery">
       {sheet}
       {listControls.elements}
       <h1 class="sr-only">{t('nav.gallery')}</h1>
-      {!albumsError.value && (
+      {albumsStale.value && !albumsError.value && (
+        <OfflineBanner onRetry={() => void loadAlbums(spaceId, { quiet: true, toastOnFail: true })} />
+      )}
+      {!albumsError.value && !firstRun && (
         <header class="sh-gallery-hero">
           <div class="sh-gallery-hero-headline">
             <strong>{albumCount}{more}</strong>{' '}
@@ -389,17 +441,19 @@ export default function GalleryPage({
           </div>
           {!readOnly && (
             <div class="sh-gallery-hero-actions sh-upload-actions">
-              {listCanUpload && <UploadButtons controls={listControls} />}
               <Button
                 variant={listCanUpload ? 'secondary' : 'primary'}
                 onClick={() => (showCreate.value = true)}
               >
                 {t('gallery.new_album_btn')}
               </Button>
+              {listCanUpload && <UploadButtons controls={listControls} />}
             </div>
           )}
         </header>
       )}
+
+      {!spaceId && !albumsError.value && <OnThisDayCardView />}
 
       {showCreate.value && !readOnly && (
         <CreateAlbumForm
@@ -413,33 +467,20 @@ export default function GalleryPage({
         // The list could not be read at all. Never the first-visit
         // "No albums yet" screen: that reads as "your photos are gone".
         <div class="sh-empty-state" role="alert">
-          <div aria-hidden="true">📡</div>
-          <h2>{t('gallery.load_error_title')}</h2>
-          <p>{t('gallery.load_error_body')}</p>
+          <div aria-hidden="true">{albumsError.value === 'offline' ? '⚡' : '📡'}</div>
+          <h2>{albumsError.value === 'offline' ? t('gallery.offline_title') : t('gallery.load_error_title')}</h2>
+          <p>{albumsError.value === 'offline' ? t('gallery.offline_first_body') : t('gallery.load_error_body')}</p>
           <Button onClick={() => void loadAlbums(spaceId)}>{t('common.retry')}</Button>
         </div>
-      ) : albums.value.length === 0 ? (
-        <div class="sh-empty-state">
-          <div aria-hidden="true">📸</div>
-          <h2>{t('gallery.empty_title')}</h2>
-          <p>{spaceId ? t('gallery.empty_body_space') : t('gallery.empty_body_household')}</p>
-          {!readOnly && listCanUpload && (
-            <>
-              <p>{t('gallery.upload.empty_hint', { name: t('gallery.upload.default_album') })}</p>
-              <div class="sh-row sh-upload-actions sh-upload-actions--center">
-                <UploadButtons controls={listControls} />
-                <Button variant="secondary" onClick={() => (showCreate.value = true)}>
-                  {t('gallery.create_first')}
-                </Button>
-              </div>
-            </>
-          )}
-          {!readOnly && !listCanUpload && (
-            <Button onClick={() => (showCreate.value = true)}>
-              {t('gallery.create_first')}
-            </Button>
-          )}
-        </div>
+      ) : firstRun ? (
+        <FirstRun
+          controls={listControls}
+          inSpace={!!spaceId}
+          canUpload={listCanUpload}
+          canCreate={!readOnly}
+          onCreate={() => (showCreate.value = true)}
+          creating={showCreate.value}
+        />
       ) : (
         <>
           <div class="sh-album-grid">
@@ -450,13 +491,13 @@ export default function GalleryPage({
                 key={a.id}
                 href={addBase(galleryPath(spaceId, a.id))}
                 class={`sh-album-card${a.is_system ? ' sh-album-card--system' : ''}`}
-                aria-label={t(isOne(a.item_count) ? 'gallery.open_album_aria_one' : 'gallery.open_album_aria', { name: albumName(a), n: String(a.item_count) })}
+                aria-label={t(isOne(a.item_count) ? 'gallery.open_album_aria_one' : 'gallery.open_album_aria', { name: albumDisplayName(a), n: String(a.item_count) })}
                 onClick={() => { albumFromList = true }}
               >
                 <AlbumCover album={a} />
                 <div class="sh-album-info">
                   <strong>
-                    {albumName(a)}
+                    {albumDisplayName(a)}
                     {a.is_system && (
                       <span class="sh-album-system-badge"
                             title={t('gallery.auto_title')}>
@@ -479,7 +520,90 @@ export default function GalleryPage({
           )}
         </>
       )}
+      {!spaceId && !albumsError.value && <OnThisDayNote />}
     </div>
+  )
+}
+
+/** The albums on screen may be out of date: home can't be reached right
+ *  now. Nothing is hidden, and uploads wait (the queue resumes online). */
+function OfflineBanner({ onRetry }: { onRetry: () => void }) {
+  // The app's connection bar already says "offline" / "can't reach your
+  // home"; this line says what it means here: nothing is gone, and
+  // uploads wait.
+  return (
+    <div class="sh-gallery-offline" role="status">
+      <span class="sh-gallery-offline__icon" aria-hidden="true">⚡</span>
+      <span class="sh-gallery-offline__text">{t('gallery.offline_body')}</span>
+      <button
+        type="button"
+        class="sh-gallery-offline__retry"
+        aria-label={t('common.retry')}
+        title={t('common.retry')}
+        onClick={onRetry}
+      >
+        <span aria-hidden="true">↻</span>
+      </button>
+    </div>
+  )
+}
+
+/** A gallery with no photos yet: what it is, who sees it, and one big
+ *  button. In the household that is "Add photos" — the files go into the
+ *  default album, so nobody has to make an album first. A space has no
+ *  default album, so its first step is "Make an album" (a follower, who
+ *  can do neither, just reads what the gallery is for). */
+function FirstRun({ controls, inSpace, canUpload, canCreate, onCreate, creating }: {
+  controls: ReturnType<typeof useUploadControls>
+  inSpace: boolean
+  canUpload: boolean
+  canCreate: boolean
+  onCreate: () => void
+  creating: boolean
+}) {
+  return (
+    <section class="sh-gallery-first" aria-labelledby="sh-gallery-first-title">
+      <div class="sh-gallery-first__art" aria-hidden="true">
+        <span>🏔️</span><span>📷</span><span>🌅</span>
+      </div>
+      <h2 id="sh-gallery-first-title">
+        {t(inSpace ? 'gallery.first.title_space' : 'gallery.first.title')}
+      </h2>
+      <p class="sh-muted">{t(inSpace ? 'gallery.first.body_space' : 'gallery.first.body')}</p>
+      {!inSpace && canUpload && (
+        <div class="sh-gallery-first__actions">
+          <Button onClick={controls.pick}>{t('gallery.first.add')}</Button>
+          <span class="sh-upload-camera-btn">
+            <Button
+              variant="secondary"
+              aria-label={t('gallery.upload.camera_aria')}
+              onClick={controls.camera}
+            >
+              <span aria-hidden="true">📷</span> {t('gallery.upload.camera')}
+            </Button>
+          </span>
+          <p class="sh-gallery-first__drop sh-muted">{t('gallery.first.drop')}</p>
+        </div>
+      )}
+      {inSpace && canCreate && !creating && (
+        <div class="sh-gallery-first__actions">
+          <Button onClick={onCreate}>{t('gallery.first.make_first_album')}</Button>
+        </div>
+      )}
+      {!inSpace && (
+        <p class="sh-gallery-first__hint sh-muted">
+          {t('gallery.first.default_album', { name: t('gallery.upload.default_album') })}{' '}
+          {!creating && (
+            <button type="button" class="sh-link-button" onClick={onCreate}>
+              {t('gallery.first.make_album')}
+            </button>
+          )}
+        </p>
+      )}
+      <p class="sh-gallery-first__hint sh-muted">
+        {t(inSpace ? 'gallery.first.feed_hint_space' : 'gallery.first.feed_hint')}
+      </p>
+    </section>
   )
 }
 
@@ -665,7 +789,7 @@ function AlbumDetail({
   const controls = useUploadControls({
     spaceId: album.space_id,
     albumId: album.id,
-    name: albumName(album),
+    name: albumDisplayName(album),
     isDefault: false,
   }, canUpload)
 
@@ -674,7 +798,7 @@ function AlbumDetail({
       <header class="sh-page-header">
         <Button variant="secondary" onClick={onBack}>← {t('gallery.albums')}</Button>
         <h1 style={{ margin: 0 }}>
-          {albumName(album)}
+          {albumDisplayName(album)}
           {album.is_system && (
             <span class="sh-album-system-badge"
                   style={{ marginLeft: 'var(--sh-space-xs)' }}>
@@ -682,9 +806,10 @@ function AlbumDetail({
             </span>
           )}
         </h1>
-        {canUpload && (
+        {(canUpload || album.item_count > 1) && (
           <div class="sh-row sh-upload-actions">
-            <UploadButtons controls={controls} />
+            {album.item_count > 1 && <OrderToggle albumId={album.id} />}
+            {canUpload && <UploadButtons controls={controls} />}
           </div>
         )}
       </header>
@@ -722,58 +847,24 @@ function AlbumDetail({
         </div>
       ) : (
         <>
-          <div class="sh-image-grid">
-            {loaded.map((item) => {
-              // A video still transcoding can't play and has no poster
-              // yet, so the tile shows a "Processing…" placeholder (no
-              // broken image) and opens nothing.
-              if (isProcessing(item)) {
-                const readyIn = readyInLabel(item.media_eta_s)
-                return (
-                  <div
-                    key={item.id}
-                    class="sh-gallery-item sh-gallery-item--processing"
-                    role="img"
-                    data-item-id={item.id}
-                    aria-label={
-                      t('gallery.item_processing_aria', { type: itemTypeLabel(item.item_type) })
-                      + (readyIn ? ` · ${readyIn}` : '')
-                    }
-                  >
-                    <span class="sh-gallery-item-processing" aria-hidden="true">
-                      <span class="sh-upload-progress__spinner" />
-                      <span class="sh-gallery-item-processing-msg">{t('media.processing')}</span>
-                      {readyIn && (
-                        <span class="sh-gallery-item-processing-eta">{readyIn}</span>
-                      )}
-                    </span>
+          {groupByMonthDay(loaded).map(m => (
+            <section key={m.month} class="sh-album-month" aria-labelledby={`sh-month-${m.month}`}>
+              <h2 id={`sh-month-${m.month}`} class="sh-album-month__title">{monthLabel(m.month)}</h2>
+              {m.days.map(d => (
+                <div key={d.day} class="sh-album-day">
+                  <h3 class="sh-album-day__title">
+                    {dayLabel(d.day)}
+                    {byLine(d.items, album.space_id)}
+                  </h3>
+                  <div class="sh-image-grid">
+                    {d.items.map(item => (
+                      <Tile key={item.id} item={item} albumId={album.id} spaceId={spaceId} scope={album.space_id} />
+                    ))}
                   </div>
-                )
-              }
-              // A real link to the photo's own address: the viewer opens
-              // on it, and it can be shared or opened in a new tab.
-              return (
-                <a
-                  key={item.id}
-                  href={addBase(galleryPath(spaceId, album.id, item.id))}
-                  class="sh-gallery-item"
-                  data-item-id={item.id}
-                  aria-label={tileLabel(item, album.space_id)}
-                  onClick={() => { viewerFromGrid = true }}
-                >
-                  <img
-                    src={item.thumbnail_url}
-                    alt=""
-                    loading="lazy"
-                    decoding="async"
-                  />
-                  {item.item_type === 'video' && (
-                    <span class="sh-video-badge" aria-hidden="true">▶</span>
-                  )}
-                </a>
-              )
-            })}
-          </div>
+                </div>
+              ))}
+            </section>
+          ))}
           {itemsMore.value && (
             <LoadMore onMore={() => loadMoreItems(album.id)} />
           )}
@@ -868,7 +959,7 @@ function useAlbumViewer(
       items={viewerItems}
       index={index}
       total={album.item_count}
-      albumName={albumName(album)}
+      albumName={albumDisplayName(album)}
       inSpace={!!album.space_id}
       uploaderName={(uid) => uploaderName(album.space_id, uid)}
       canDelete={(it) => canDeleteItem(album, it, canModerate)}
@@ -901,6 +992,103 @@ function useAlbumViewer(
       }}
     />
   )
+}
+
+/** One tile: a real link to the photo's own address (the viewer opens on
+ *  it, and it can be shared or opened in a new tab) — or, for a video
+ *  still transcoding, a "Processing…" placeholder that opens nothing. */
+function Tile({ item, albumId, spaceId, scope }: {
+  item: Item
+  albumId: string
+  spaceId?: string
+  scope: string | null
+}) {
+  if (isProcessing(item)) {
+    const readyIn = readyInLabel(item.media_eta_s)
+    return (
+      <div
+        class="sh-gallery-item sh-gallery-item--processing"
+        role="img"
+        data-item-id={item.id}
+        aria-label={
+          t('gallery.item_processing_aria', { type: itemTypeLabel(item.item_type) })
+          + (readyIn ? ` · ${readyIn}` : '')
+        }
+      >
+        <span class="sh-gallery-item-processing" aria-hidden="true">
+          <span class="sh-upload-progress__spinner" />
+          <span class="sh-gallery-item-processing-msg">{t('media.processing')}</span>
+          {readyIn && (
+            <span class="sh-gallery-item-processing-eta">{readyIn}</span>
+          )}
+        </span>
+      </div>
+    )
+  }
+  return (
+    <a
+      href={addBase(galleryPath(spaceId, albumId, item.id))}
+      class="sh-gallery-item"
+      data-item-id={item.id}
+      aria-label={tileLabel(item, scope)}
+      onClick={() => { viewerFromGrid = true }}
+    >
+      <img src={item.thumbnail_url} alt="" loading="lazy" decoding="async" />
+      {item.item_type === 'video' && (
+        <span class="sh-video-badge" aria-hidden="true">▶</span>
+      )}
+    </a>
+  )
+}
+
+/** "Newest first ⇅" / "Oldest first ⇅": shows the order and flips it.
+ *  Remembered for this album and this person; the album reloads from
+ *  the first page in the new order. */
+function OrderToggle({ albumId }: { albumId: string }) {
+  const order = itemOrder.value
+  const next: AlbumOrder = order === 'newest' ? 'oldest' : 'newest'
+  const flip = () => {
+    itemOrder.value = next
+    writeAlbumOrder(currentUser.value?.user_id, albumId, next)
+    void loadItems(albumId)
+  }
+  return (
+    <Button
+      variant="ghost"
+      onClick={flip}
+      aria-label={t(order === 'newest' ? 'gallery.order.to_oldest_aria' : 'gallery.order.to_newest_aria')}
+    >
+      {t(order === 'newest' ? 'gallery.order.newest' : 'gallery.order.oldest')}{' '}
+      <span aria-hidden="true">⇅</span>
+    </Button>
+  )
+}
+
+/** "November 2026" for ``YYYY-MM``. */
+function monthLabel(month: string): string {
+  if (!/^\d{4}-\d{2}$/.test(month)) return t('gallery.day_unknown')
+  return formatDayKey(`${month}-01`, { month: 'long', year: 'numeric' })
+}
+
+/** "Sun, 1 Nov" for ``YYYY-MM-DD``. */
+function dayLabel(day: string): string {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) return t('gallery.day_unknown')
+  return formatDayKey(day, { weekday: 'short', day: 'numeric', month: 'short' })
+}
+
+/** " · by Anna, Lena" — who added the day's photos, as far as this
+ *  browser knows their names (never an id). */
+function byLine(dayItems: Item[], scope: string | null) {
+  const names: string[] = []
+  for (const i of dayItems) {
+    const n = uploaderName(scope, i.uploaded_by)
+    if (n && !names.includes(n)) names.push(n)
+  }
+  if (names.length === 0) return null
+  const shown = names.length > 3
+    ? t('gallery.by_more', { names: names.slice(0, 3).join(', '), n: String(names.length - 3) })
+    : names.join(', ')
+  return <span class="sh-album-day__by"> · {t('gallery.by', { names: shown })}</span>
 }
 
 /** Spoken name of a gallery item kind, for screen-reader labels. */
@@ -969,11 +1157,19 @@ function CreateAlbumForm({
   )
 }
 
+/** No answer from home: the network is gone, or the proxy in front of
+ *  home (ingress, a reverse proxy) could not reach it. */
+function isOffline(err: unknown): boolean {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) return true
+  return !(err instanceof ApiError) || err.status >= 502
+}
+
 function albumsUrl(spaceId?: string): string {
   return spaceId ? `/api/spaces/${spaceId}/gallery/albums` : '/api/gallery/albums'
 }
 
-/** ``?before=&before_id=`` for the page after ``row``. */
+/** ``?before=&before_id=`` for the page after ``row`` (albums: its
+ *  ``activity_at``, the list's order). */
 function cursor(row: { created_at?: string; id: string }): string {
   return `&before=${encodeURIComponent(row.created_at ?? '')}&before_id=${encodeURIComponent(row.id)}`
 }
@@ -1004,13 +1200,18 @@ async function loadAlbums(
     albums.value = rows
     albumsMore.value = rows.length >= limit
     albumsError.value = false
+    albumsStale.value = false
     const open = activeAlbum.value
     const fresh = open ? rows.find(a => a.id === open.id) : undefined
     if (fresh) activeAlbum.value = fresh
-  } catch {
+  } catch (err) {
     if (loadedScope !== scope) return
-    if (albums.value.length === 0) albumsError.value = true
-    else if (!quiet || toastOnFail) showToast(t('gallery.refresh_failed'), 'error')
+    if (albums.value.length === 0) albumsError.value = isOffline(err) ? 'offline' : 'server'
+    else {
+      // What is on screen stays; the banner says it may be out of date.
+      albumsStale.value = true
+      if (!quiet || toastOnFail) showToast(t('gallery.refresh_failed'), 'error')
+    }
   } finally {
     if (!quiet) loading.value = false
   }
@@ -1024,7 +1225,7 @@ async function loadMoreAlbums(spaceId?: string): Promise<void> {
   if (!last) { albumsMore.value = false; return }
   try {
     const rows = await api.get(
-      `${albumsUrl(spaceId)}?limit=${ALBUM_PAGE}${cursor(last)}`,
+      `${albumsUrl(spaceId)}?limit=${ALBUM_PAGE}${cursor({ id: last.id, created_at: last.activity_at ?? last.created_at })}`,
     ) as Album[]
     if (loadedScope !== scope) return
     albums.value = appendNew(albums.value, rows)
@@ -1059,6 +1260,7 @@ async function openAlbum(id: string, spaceId?: string): Promise<boolean> {
     if ((album.space_id ?? null) !== scope) return false
   }
   activeAlbum.value = album
+  itemOrder.value = readAlbumOrder(currentUser.value?.user_id, id)
   await loadItems(id)
   return true
 }
@@ -1073,7 +1275,7 @@ async function loadItems(albumId: string, { quiet = false } = {}) {
   if (!quiet) itemsLoading.value = true
   try {
     const rows = await api.get(
-      `/api/gallery/albums/${albumId}/items?limit=${limit}`,
+      `/api/gallery/albums/${albumId}/items?limit=${limit}&sort=${sortParam(itemOrder.value)}`,
     ) as Item[]
     if (activeAlbum.value?.id !== albumId) return  // another album is open now
     items.value = rows
@@ -1093,9 +1295,13 @@ async function loadMoreItems(albumId: string): Promise<void> {
   const last = items.value[items.value.length - 1]
   if (!last) { itemsMore.value = false; return }
   try {
+    const order = itemOrder.value
     const rows = await api.get(
-      `/api/gallery/albums/${albumId}/items?limit=${ITEM_PAGE}${cursor(last)}`,
+      `/api/gallery/albums/${albumId}/items?limit=${ITEM_PAGE}&sort=${sortParam(order)}${takenCursor(last)}`,
     ) as Item[]
+    // The order flipped while this page was on its way: it belongs to the
+    // other order.
+    if (itemOrder.value !== order) return
     if (activeAlbum.value?.id !== albumId) return
     items.value = appendNew(items.value, rows)
     itemsMore.value = rows.length >= ITEM_PAGE

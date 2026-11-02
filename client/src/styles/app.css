@@ -7664,6 +7664,185 @@ a.sh-album-card:hover, a.sh-gallery-item:hover {
 }
 .sh-album-card--skeleton { cursor: default; box-shadow: none; }
 .sh-album-card--skeleton::before { display: none; }
+/* ── Albums page refresh (PR 4) ──────────────────────────────────────── */
+
+/* Inside an album: the order toggle, then month (h2) and day (h3)
+ * headings over each day's tiles. */
+.sh-album-month { display: flex; flex-direction: column; gap: var(--sh-space-md); }
+.sh-album-month + .sh-album-month { margin-top: var(--sh-space-md); }
+.sh-album-month__title {
+  margin: 0;
+  font: 600 clamp(1.25rem, 1vw + 1rem, 1.6rem) / 1.2 var(--sh-font-family-display);
+  letter-spacing: -0.01em;
+}
+.sh-album-day { display: flex; flex-direction: column; gap: var(--sh-space-xs); }
+.sh-album-day__title {
+  margin: 0;
+  font: 700 var(--sh-font-size-sm) / 1.35 var(--sh-font-family);
+  letter-spacing: 0;
+  overflow-wrap: anywhere;
+}
+.sh-album-day__by { font-weight: 400; color: var(--sh-text-muted); }
+/* Phones: three tiles a row, tight gaps — a day of photos reads as one
+ * block, as in every phone gallery. */
+@media (max-width: 600px) {
+  .sh-album-day .sh-image-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 3px; }
+  .sh-album-day .sh-gallery-item { border-radius: var(--sh-radius-sm, 6px); }
+}
+/* Phones: albums two a row, so more than one fits on a screen. */
+@media (max-width: 480px) {
+  .sh-album-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--sh-space-sm); }
+  .sh-album-grid .sh-album-info strong {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+/* On this day — one card at the top of the household albums. */
+.sh-otd {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-sm) var(--sh-space-sm) var(--sh-space-sm) var(--sh-space-md);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-lg);
+  background: linear-gradient(
+    100deg,
+    color-mix(in srgb, var(--sh-primary) 12%, var(--sh-bg-tertiary)) 0%,
+    var(--sh-bg-tertiary) 70%
+  );
+}
+.sh-otd__link {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-md);
+  color: inherit;
+  text-decoration: none;
+  border-radius: var(--sh-radius-md);
+}
+.sh-otd__link:hover, .sh-otd__link:focus-visible { color: inherit; text-decoration: none; }
+.sh-otd__link:hover .sh-otd__date { text-decoration: underline; }
+.sh-otd__link:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: 3px; }
+.sh-otd__stack { display: flex; flex: none; }
+.sh-otd__stack img {
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  border-radius: var(--sh-radius-md);
+  border: 2px solid var(--sh-bg);
+  background: var(--sh-bg-secondary);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+}
+.sh-otd__stack img + img { margin-inline-start: -22px; }
+.sh-otd__text { display: flex; flex-direction: column; min-width: 0; }
+.sh-otd__ago { font-size: var(--sh-font-size-sm); font-weight: 600; color: var(--sh-text-muted); }
+.sh-otd__date {
+  margin: 0;
+  font: 600 clamp(1.1rem, 1vw + 0.9rem, 1.35rem) / 1.25 var(--sh-font-family-display);
+}
+.sh-otd__meta {
+  font-size: var(--sh-font-size-sm);
+  color: var(--sh-text-muted);
+  overflow-wrap: anywhere;
+}
+.sh-otd__actions { display: flex; align-items: center; gap: 2px; flex: none; align-self: flex-start; }
+.sh-otd__close {
+  min-width: 40px;
+  min-height: 40px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--sh-text-muted);
+  font: inherit;
+  cursor: pointer;
+}
+.sh-otd__close:hover { background: color-mix(in srgb, var(--sh-text) 8%, transparent); color: var(--sh-text); }
+.sh-otd__close:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: 1px; }
+@media (max-width: 480px) {
+  .sh-otd { padding-inline-start: var(--sh-space-sm); }
+  .sh-otd__link { gap: var(--sh-space-sm); }
+  .sh-otd__stack img { width: 44px; height: 44px; }
+  .sh-otd__stack img + img { margin-inline-start: -26px; }
+}
+.sh-otd-note { margin: 0; text-align: center; font-size: var(--sh-font-size-sm); }
+
+/* Offline: what was loaded stays; this says it may be out of date. */
+.sh-gallery-offline {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  padding: var(--sh-space-xs) var(--sh-space-xs) var(--sh-space-xs) var(--sh-space-md);
+  border-radius: var(--sh-radius-md);
+  background: color-mix(in srgb, var(--sh-warning) 16%, var(--sh-bg));
+  border: 1px solid color-mix(in srgb, var(--sh-warning) 45%, transparent);
+  color: var(--sh-text);
+}
+.sh-gallery-offline__icon { font-size: 1.1rem; }
+.sh-gallery-offline__text { flex: 1; font-size: var(--sh-font-size-sm); }
+.sh-gallery-offline__retry {
+  flex: none;
+  min-width: 40px;
+  min-height: 40px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--sh-text);
+  font-size: 1.2rem;
+  cursor: pointer;
+}
+.sh-gallery-offline__retry:hover { background: color-mix(in srgb, var(--sh-text) 8%, transparent); }
+.sh-gallery-offline__retry:focus-visible { outline: 2px solid var(--sh-focus-ring); outline-offset: 1px; }
+
+/* First run: a household with no photos yet. */
+.sh-gallery-first {
+  max-width: 34rem;
+  margin: var(--sh-space-lg) auto 0;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sh-space-sm);
+}
+.sh-gallery-first h2 { margin: var(--sh-space-sm) 0 0; font: 600 1.6rem / 1.2 var(--sh-font-family-display); }
+.sh-gallery-first p { margin: 0; }
+.sh-gallery-first__art { display: flex; font-size: 2.4rem; }
+.sh-gallery-first__art span {
+  display: grid;
+  place-items: center;
+  width: 4.5rem;
+  height: 4.5rem;
+  border-radius: var(--sh-radius-lg);
+  background: var(--sh-bg-tertiary);
+  border: 3px solid var(--sh-bg);
+  box-shadow: var(--sh-shadow-pinned);
+}
+.sh-gallery-first__art span:first-child { transform: rotate(-8deg) translateX(14px); }
+.sh-gallery-first__art span:last-child { transform: rotate(7deg) translateX(-14px); }
+.sh-gallery-first__art span:nth-child(2) { position: relative; z-index: 1; }
+.sh-gallery-first__actions {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--sh-space-xs);
+  width: min(100%, 20rem);
+  margin-top: var(--sh-space-sm);
+}
+.sh-gallery-first__actions .sh-btn { justify-content: center; min-height: 48px; font-size: var(--sh-font-size-md, 1rem); }
+.sh-gallery-first__actions .sh-upload-camera-btn .sh-btn { width: 100%; }
+.sh-gallery-first__drop {
+  padding: var(--sh-space-sm);
+  border: 2px dashed var(--sh-border-strong);
+  border-radius: var(--sh-radius-lg);
+  font-size: var(--sh-font-size-sm);
+}
+@media (pointer: coarse) {
+  .sh-gallery-first__drop { display: none; }
+}
+.sh-gallery-first__hint { font-size: var(--sh-font-size-sm); }
 .sh-album-card--skeleton:hover { transform: none; box-shadow: none; border-color: var(--sh-border); }
 .sh-album-card--skeleton .sh-album-info { gap: var(--sh-space-sm); }
 .sh-album-skel-cover { width: 100%; aspect-ratio: 4 / 3; border-radius: 0; }

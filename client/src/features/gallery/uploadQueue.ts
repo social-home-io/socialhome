@@ -42,6 +42,7 @@ import {
   HOUSEHOLD_VIDEO_MAX_BYTES, HOUSEHOLD_VIDEO_MAX_SECONDS, checkFile, formatDuration,
   readVideoDuration, videoTooLong, withType, type FileCheck, type FileProblem,
 } from './uploadFiles'
+import { albumDisplayName } from './albumName'
 
 export type EntryState =
   | 'blocked' | 'waiting' | 'uploading' | 'processing' | 'done' | 'failed'
@@ -420,8 +421,8 @@ async function albumId(dest: UploadTarget): Promise<string> {
     defaultAlbum = (async () => {
       const a = await api.post('/api/gallery/default-album', {
         name: t('gallery.upload.default_album'),
-      }) as { id: string; name: string }
-      const known = (d: UploadTarget | null) => (d?.isDefault ? { ...d, albumId: a.id, name: a.name } : d)
+      }) as { id: string; name: string; default_name?: boolean }
+      const known = (d: UploadTarget | null) => (d?.isDefault ? { ...d, albumId: a.id, name: albumDisplayName(a) } : d)
       target.value = known(target.value)
       entries.value = entries.value.map(e => (e.dest?.isDefault ? { ...e, dest: known(e.dest) } : e))
       return a.id

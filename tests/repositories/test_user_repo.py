@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta, timezone
 
+import orjson
 import pytest
 
 from socialhome.domain.user import RemoteUser, UserStatus
@@ -1054,3 +1055,35 @@ async def test_touch_preference_entry_refuses_odd_keys(env):
         await env.user_repo.touch_preference_entry("u", 'a"b', "c", "v")
     with pytest.raises(ValueError):
         await env.user_repo.touch_preference_entry("u", "a", "c d", "v")
+
+
+async def test_set_preference_key_replaces_one_key_only(env):
+    """On this day settings are written in one statement: every other key
+    of the blob stays."""
+    u = await env.user_svc.provision(username="otto", display_name="Otto")
+    await env.user_svc.patch_preferences("otto", {"theme": "dark", "locale": "de"})
+    await env.user_repo.set_preference_key(
+        u.user_id, "gallery_on_this_day", {"off": True, "excluded_albums": ["a"]}
+    )
+    got = await env.user_repo.get("otto")
+    assert orjson.loads(got.preferences_json) == {
+        "theme": "dark",
+        "locale": "de",
+        "gallery_on_this_day": {"off": True, "excluded_albums": ["a"]},
+    }
+    await env.user_repo.set_preference_key(u.user_id, "gallery_on_this_day", {})
+    got = await env.user_repo.get("otto")
+    assert orjson.loads(got.preferences_json)["gallery_on_this_day"] == {}
+
+
+async def test_set_preference_key_starts_over_on_a_broken_blob(env):
+    u = await env.user_svc.provision(username="bea", display_name="Bea")
+    await env.db.enqueue(
+        "UPDATE users SET preferences_json = ? WHERE user_id = ?",
+        ("not json", u.user_id),
+    )
+    await env.user_repo.set_preference_key(u.user_id, "k", [1, 2])
+    got = await env.user_repo.get("bea")
+    assert orjson.loads(got.preferences_json) == {"k": [1, 2]}
+    with pytest.raises(ValueError):
+        await env.user_repo.set_preference_key(u.user_id, 'a"b', 1)

@@ -542,6 +542,12 @@ async def test_gallery_exporter_emits_albums_then_items():
     assert len(recs) == 2
     assert recs[0]["kind"] == "album"
     assert recs[1]["kind"] == "item"
+    # The per-viewer album fields (newest activity, the household's default
+    # album) never leave the household — the record shape stays as it was.
+    album = replace(album, activity_at="2026-11-01", is_default=True, default_name=True)
+    recs = await GalleryExporter(_Repo()).list_records("sp-1")
+    assert not {"activity_at", "is_default", "default_name"} & recs[0].keys()
+    assert recs[0]["name"] == "Trip"
 
 
 async def test_polls_exporter_walks_posts_with_polls():

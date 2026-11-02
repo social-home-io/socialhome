@@ -12,7 +12,7 @@ from socialhome.crypto import (
     generate_identity_keypair,
 )
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.gallery import GalleryAlbum, GalleryItem
+from socialhome.domain.gallery import GalleryAlbum, GalleryItem, ItemCursor, ItemSort
 from socialhome.repositories.gallery_repo import SqliteGalleryRepo
 
 
@@ -1160,3 +1160,248 @@ async def test_reassign_moves_shared_household_albums_only(env):
         "private": "b-id",
         "sp-alb": "b-id",
     }
+
+
+# ─── In-album date order (owner decision D1) ─────────────────────────────
+
+
+async def _dated_album(repo) -> list[str]:
+    """An album whose upload order differs from its taken order, with
+    ties on the day and on the upload time. Returns the ids newest taken
+    first — ``(day, created_at, id)`` descending."""
+    await repo.create_album(_album())
+    rows = [
+        # (id, taken_at, created_at)
+        ("t-2019", "2019-07-12", _at(20)),
+        ("t-2024-a", "2024-08-01", _at(3)),
+        ("t-2024-b", "2024-08-01", _at(3)),
+        ("t-2024-c", "2024-08-01", _at(3)),
+        ("t-2024-d", "2024-08-01", _at(4)),
+        ("u-oct-05", None, _at(5)),  # no date taken: the upload day
+        ("t-2026-09", "2026-09-30", _at(1)),
+        ("t-1999", "1999-01-01", _at(2)),
+    ]
+    for item_id, taken, created in rows:
+        await repo.create_item(
+            replace(_item(item_id), taken_at=taken, created_at=created)
+        )
+    return [
+        "u-oct-05",
+        "t-2026-09",
+        "t-2024-d",
+        "t-2024-c",
+        "t-2024-b",
+        "t-2024-a",
+        "t-2019",
+        "t-1999",
+    ]
+
+
+async def test_list_items_by_date_taken_newest_and_oldest_first(env):
+    _, repo = env
+    expected = await _dated_album(repo)
+    newest = await repo.list_items("alb-1", sort=ItemSort.TAKEN)
+    assert [i.id for i in newest] == expected
+    oldest = await repo.list_items("alb-1", sort=ItemSort.TAKEN_ASC)
+    assert [i.id for i in oldest] == list(reversed(expected))
+    # The upload order is unchanged for an older client.
+    added = await repo.list_items("alb-1")
+    assert added[0].id == "t-2019"
+
+
+@pytest.mark.parametrize("sort", [ItemSort.TAKEN, ItemSort.TAKEN_ASC])
+@pytest.mark.parametrize("limit", [1, 2, 3])
+async def test_date_pages_reach_every_item_once_even_on_ties(env, sort, limit):
+    """#1272's guarantee holds for the date order: the ``(day, created_at,
+    id)`` cursor of the last row walks the album with no item skipped or
+    repeated, across ties on the day and on the upload time."""
+    _, repo = env
+    expected = await _dated_album(repo)
+    if sort is ItemSort.TAKEN_ASC:
+        expected = list(reversed(expected))
+    seen: list[str] = []
+    after = None
+    while True:
+        page = await repo.list_items("alb-1", limit=limit, sort=sort, after=after)
+        seen += [i.id for i in page]
+        if len(page) < limit:
+            break
+        last = page[-1]
+        after = ItemCursor(day=last.day, created_at=last.created_at, item_id=last.id)
+    assert seen == expected
+
+
+async def test_the_date_order_reads_the_taken_index(env):
+    db, repo = env
+    await _dated_album(repo)
+    plan = await db.fetchall(
+        "EXPLAIN QUERY PLAN SELECT * FROM gallery_items"
+        " WHERE album_id=? AND deleted_at IS NULL"
+        " ORDER BY COALESCE(taken_at, substr(created_at, 1, 10)) DESC,"
+        " created_at DESC, id DESC LIMIT 50",
+        ("alb-1",),
+    )
+    assert "idx_gallery_items_album_taken" in " ".join(str(r[-1]) for r in plan)
+
+
+def test_item_day_is_taken_else_upload_day():
+    assert _item().day == ""
+    assert replace(_item(), created_at=_at(7)).day == "2026-10-07"
+    assert replace(_item(), taken_at="2001-02-03", created_at=_at(7)).day == (
+        "2001-02-03"
+    )
+
+
+# ─── Albums by newest activity ───────────────────────────────────────────
+
+
+async def test_list_albums_by_activity_puts_the_newest_upload_first(env):
+    _, repo = env
+    await repo.create_album(replace(_album("old"), created_at=_at(1)))
+    await repo.create_album(replace(_album("new"), created_at=_at(5)))
+    await repo.create_album(replace(_album("empty"), created_at=_at(3)))
+    await repo.create_item(replace(_item("x", album_id="old"), created_at=_at(9)))
+    by_created = await repo.list_albums("sp-1")
+    assert [a.id for a in by_created] == ["new", "empty", "old"]
+    by_activity = await repo.list_albums("sp-1", by_activity=True)
+    assert [a.id for a in by_activity] == ["old", "new", "empty"]
+    assert by_activity[0].activity_at == _at(9)
+    assert by_activity[1].activity_at == _at(5)
+    # A trashed photo is no activity.
+    await repo.delete_item("x")
+    again = await repo.list_albums("sp-1", by_activity=True)
+    assert [a.id for a in again] == ["new", "empty", "old"]
+
+
+async def test_activity_pages_reach_every_album_once(env):
+    _, repo = env
+    await repo.create_album(
+        replace(_album("sys"), is_system=True, owner_user_id=None, created_at=_at(1))
+    )
+    ids = []
+    for i in range(2, 9):
+        await repo.create_album(replace(_album(f"a-{i}"), created_at=_at(2)))
+        ids.append(f"a-{i}")
+    for i in (3, 5):  # two albums share their newest upload's time
+        await repo.create_item(
+            replace(_item(f"it-{i}", album_id=f"a-{i}"), created_at=_at(8))
+        )
+    seen: list[str] = []
+    before = before_id = None
+    while True:
+        page = await repo.list_albums(
+            "sp-1", limit=3, before=before, before_id=before_id, by_activity=True
+        )
+        seen += [a.id for a in page]
+        if len(page) < 3:
+            break
+        last = [a for a in page if not a.is_system][-1]
+        before, before_id = last.activity_at, last.id
+    assert seen[:3] == ["sys", "a-5", "a-3"]
+    assert sorted(seen) == sorted(["sys", *ids])
+    assert len(seen) == len(ids) + 1
+
+
+# ─── On this day (owner decision D14) ────────────────────────────────────
+
+
+async def _memories(db, repo) -> None:
+    """Household albums with photos from 1 November in several years."""
+    await _household(db, repo, "summer")
+    await _household(db, repo, "autumn")
+    await _household(db, repo, "secret")
+    await repo.set_album_audience("secret", "chosen")
+    await repo.create_album(_album("sp-alb"))  # a space album
+    rows = [
+        ("s-1", "summer", "2024-11-01", "a-id"),
+        ("a-1", "autumn", "2023-11-01", "a-id"),
+        ("a-2", "autumn", "2023-11-01", "b-id"),
+        ("a-3", "autumn", "2022-11-01", "a-id"),
+        ("x-1", "secret", "2021-11-01", "a-id"),
+        ("x-2", "secret", "2021-11-01", "a-id"),
+        ("x-3", "secret", "2021-11-01", "a-id"),
+        ("p-1", "sp-alb", "2020-11-01", "a-id"),
+        ("p-2", "sp-alb", "2020-11-01", "a-id"),
+        ("p-3", "sp-alb", "2020-11-01", "a-id"),
+        ("p-4", "sp-alb", "2020-11-01", "a-id"),
+        ("n-1", "summer", "2026-11-01", "a-id"),  # this year
+        ("o-1", "summer", "2024-11-02", "a-id"),  # another day
+    ]
+    for item_id, album_id, taken, who in rows:
+        await repo.create_item(
+            replace(
+                _item(item_id, album_id=album_id),
+                taken_at=taken,
+                uploaded_by=who,
+                created_at=_at(1),
+            )
+        )
+
+
+async def test_on_this_day_uses_everyone_albums_of_earlier_years_only(env):
+    db, repo = env
+    await _memories(db, repo)
+    found = await repo.find_on_this_day(
+        ("11-01",), before_year="2026", viewer_user_id="a-id"
+    )
+    # Never the private album (3 photos) or the space album (4): the
+    # household album with the most photos taken on the day — autumn 2023.
+    assert found == ("autumn", "2023", 2)
+    items = await repo.list_on_this_day_items(
+        "autumn", year="2023", month_days=("11-01",), viewer_user_id="a-id"
+    )
+    assert [i.id for i in items] == ["a-1", "a-2"]
+
+
+async def test_on_this_day_skips_left_out_albums_blocks_and_the_trash(env):
+    db, repo = env
+    await _memories(db, repo)
+    left_out = await repo.find_on_this_day(
+        ("11-01",),
+        before_year="2026",
+        viewer_user_id="a-id",
+        excluded_album_ids=frozenset({"autumn"}),
+    )
+    assert left_out == ("summer", "2024", 1)
+    # Blocking Bob hides his photo: autumn 2023 and 2022 tie with summer
+    # 2024 at one photo — the most recent year wins.
+    await db.enqueue(
+        "INSERT INTO user_blocks(blocker_user_id, blocked_user_id)"
+        " VALUES('a-id', 'b-id')"
+    )
+    blocked = await repo.find_on_this_day(
+        ("11-01",), before_year="2026", viewer_user_id="a-id"
+    )
+    assert blocked == ("summer", "2024", 1)
+    await repo.trash_item("s-1", deleted_by="a-id")
+    await repo.trash_item("a-1", deleted_by="a-id")
+    assert await repo.find_on_this_day(
+        ("11-01",), before_year="2026", viewer_user_id="a-id"
+    ) == ("autumn", "2022", 1)
+    assert (
+        await repo.find_on_this_day(
+            ("12-24",), before_year="2026", viewer_user_id="a-id"
+        )
+        is None
+    )
+    assert (
+        await repo.find_on_this_day((), before_year="2026", viewer_user_id="a-id")
+        is None
+    )
+    assert (
+        await repo.list_on_this_day_items(
+            "autumn", year="2022", month_days=(), viewer_user_id="a-id"
+        )
+        == []
+    )
+
+
+async def test_on_this_day_counts_the_upload_day_when_nothing_was_taken(env):
+    db, repo = env
+    await _household(db, repo, "feed")
+    await repo.create_item(
+        replace(_item("f-1", album_id="feed"), created_at="2025-03-04T09:00:00+00:00")
+    )
+    assert await repo.find_on_this_day(
+        ("03-04",), before_year="2026", viewer_user_id="a-id"
+    ) == ("feed", "2025", 1)

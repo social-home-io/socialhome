@@ -28,12 +28,15 @@ import {
   type UploadEntry, type UploadTarget,
 } from './uploadQueue'
 import { canPreview, formatSize } from './uploadFiles'
+import { albumDisplayName } from './albumName'
 
 export interface SheetAlbum {
   id: string
   name: string
   space_id: string | null
   is_system?: boolean
+  /** The default album under its default name (shown in the reader's language). */
+  default_name?: boolean
 }
 
 export interface UploadSheetProps {
@@ -55,7 +58,7 @@ const DEFAULT = '__default__'
 const NEW = '__new__'
 
 /** The household default album, as last read from the server. */
-interface DefaultAlbum { id: string; name: string }
+interface DefaultAlbum { id: string; name: string; default_name?: boolean }
 
 export function UploadSheet(props: UploadSheetProps) {
   return (
@@ -300,7 +303,7 @@ function AlbumChoice({ spaceId, albums, onAlbumCreated }: {
     let alive = true
     api.get('/api/gallery/default-album')
       .then((r: { album: DefaultAlbum | null }) => {
-        defaultCache = r.album ? { id: r.album.id, name: r.album.name } : null
+        defaultCache = r.album ? { id: r.album.id, name: albumDisplayName(r.album) } : null
         if (alive) setDef(defaultCache)
       })
       .catch(() => { if (alive) setDef(null) })
@@ -331,7 +334,7 @@ function AlbumChoice({ spaceId, albums, onAlbumCreated }: {
       return
     }
     const a = albums.find(x => x.id === v)
-    if (a) setTarget({ spaceId: scope, albumId: a.id, name: a.name, isDefault: false })
+    if (a) setTarget({ spaceId: scope, albumId: a.id, name: albumDisplayName(a), isDefault: false })
   }
 
   const create = async (e: Event) => {
@@ -366,7 +369,7 @@ function AlbumChoice({ spaceId, albums, onAlbumCreated }: {
           {tgt && !tgt.isDefault && tgt.albumId && !choices.some(a => a.id === tgt.albumId) && (
             <option value={tgt.albumId}>{tgt.name}</option>
           )}
-          {choices.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+          {choices.map(a => <option key={a.id} value={a.id}>{albumDisplayName(a)}</option>)}
           <option value={NEW}>{t('gallery.upload.new_album')}</option>
         </select>
       </label>
