@@ -519,6 +519,22 @@ async def test_delete_by_object_spares_kept_types_and_names_unread_owners(env):
     assert await env.notif_repo.delete_by_object([]) == []
 
 
+async def test_delete_by_object_prefix_takes_every_uploaders_row(env):
+    """A deleted album drops its "new photos" rows — one per uploader —
+    and nothing whose key merely starts alike."""
+    a = await _user(env, "uid-a")
+    b = await _user(env, "uid-b")
+    await _about(env, a, "gallery_album:al1/u1")
+    await _about(env, a, "gallery_album:al1/u2", read=True)
+    await _about(env, b, "gallery_album:al1/u1")
+    keep = await _about(env, a, "gallery_album:al10/u1")
+    touched = await env.notif_repo.delete_by_object_prefix("gallery_album:al1/")
+    assert sorted(touched) == ["uid-a", "uid-b"]
+    assert [n.id for n in await env.notif_repo.list(a, limit=50)] == [keep.id]
+    assert await env.notif_repo.list(b, limit=50) == []
+    assert await env.notif_repo.delete_by_object_prefix("") == []
+
+
 async def test_delete_by_space_for_one_user_or_everyone(env):
     a = await _user(env, "uid-a")
     b = await _user(env, "uid-b")

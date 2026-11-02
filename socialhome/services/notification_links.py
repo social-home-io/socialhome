@@ -24,12 +24,15 @@ reply does (``/momentum/{id}?reply={reply_id}``):
 * ``/apps/{app_id}?session={session_id}`` — the app opened on one game.
 
 A grouped "new posts" row (D5) opens the feed itself: ``/feed`` for the
-household, ``/spaces/{id}`` for a space.
+household, ``/spaces/{id}`` for a space. A "new photos" row (gallery D9)
+opens the album: ``/gallery/albums/{id}`` for the household,
+``/spaces/{id}/gallery/albums/{album_id}`` for a space — the album page
+reads it as seen when it opens.
 """
 
 from __future__ import annotations
 
-from urllib.parse import parse_qsl, urlencode, urlsplit
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 from ..domain.task import Task
 
@@ -127,6 +130,16 @@ def app_game_link(app_id: str, session_id: str) -> str:
 def app_draw_link(app_id: str, session_id: str) -> str:
     """Social Home's own gift-draw result sheet (v_78) — never the app."""
     return f"/apps/{app_id}/draw/{session_id}"
+
+
+def gallery_album_link(album_id: str, space_id: str | None = None) -> str:
+    """An album of the household gallery, or of a space's Gallery section
+    — the path the SPA's ``galleryPath`` builds (ids encoded the same)."""
+    album = quote(album_id, safe="")
+    if space_id:
+        space = quote(space_id, safe="")
+        return f"/spaces/{space}/gallery/albums/{album}"
+    return f"/gallery/albums/{album}"
 
 
 def link_target(link: str) -> str:

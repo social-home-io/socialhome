@@ -776,13 +776,14 @@ The gallery (household albums under `/api/gallery`, a space's under
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/gallery/albums` | Household albums, **newest activity first**: each album's `activity_at` is its newest live photo's upload time, else the album's own `created_at`. `?limit=` (default 30, at most 200), `&before=&before_id=` — the last regular album's `activity_at` and `id` — for the next page. The auto "Posts" album is pinned first on the first page only. A page shorter than `limit` is the last. Every album row also carries `is_default` (the household's default album, below) and `default_name` (`true` while nobody renamed it — the app then shows it in each viewer's own language). |
+| GET | `/api/gallery/albums` | Household albums, **newest activity first**: each album's `activity_at` is its newest live photo's upload time, else the album's own `created_at`. `?limit=` (default 30, at most 200), `&before=&before_id=` — the last regular album's `activity_at` and `id` — for the next page. The auto "Posts" album is pinned first on the first page only. A page shorter than `limit` is the last. Every album row also carries `is_default` (the household's default album, below), `default_name` (`true` while nobody renamed it — the app then shows it in each viewer's own language) and `has_new` (the "New" pill: someone else added a photo or video the caller may see since the caller last opened the album — `POST …/seen` below; never on the "Posts" album). The first album list a person ever reads only starts the clock: nothing is new before it. |
 | POST | `/api/gallery/albums` | Create a household album: `{name (1–80), description? (≤ 500)}` → 201. |
 | GET / POST | `/api/gallery/default-album` | The household's **default album** — where an upload goes when nobody picked an album, so uploading never needs an album made first. GET → `{album}` (`null` before the first such upload, or after it was deleted). POST `{name (1–80)}` → the album, made under `name` (the uploader's word for "Photos") when there is none (201), else the existing one unchanged (200). It is an ordinary household album owned by whoever made it; only its id is remembered (`instance_config` key `gallery.default_album_id`). Until someone renames it (`PATCH … {name}`, remembered as `instance_config` `gallery.default_album_renamed` = its id) it carries `default_name: true`, and each viewer sees their own word for "Photos" instead of the first uploader's. |
 | GET / POST | `/api/spaces/{id}/gallery/albums` | The same for a space: needs a seat; create needs a writer role (a follower gets 403 `SUBSCRIBER_READ_ONLY`); at most 200 albums per space. |
-| GET | `/api/gallery/albums/{id}` | One album (with its cover URL). An album of a space the caller holds no seat in is 404. |
+| GET | `/api/gallery/albums/{id}` | One album (with its cover URL and `has_new`). An album of a space the caller holds no seat in is 404. |
 | PATCH | `/api/gallery/albums/{id}` | `{name?, description?, cover_item_id?}` → 204. Owner, a household admin (household album) or a space admin / owner (space album). |
 | DELETE | `/api/gallery/albums/{id}` | Delete an album and its items → 204 (same people as PATCH). A household album goes to the trash with its photos (below). |
+| POST | `/api/gallery/albums/{id}/seen` | The caller opened the album → 204: its `has_new` is `false` until someone else adds again. Household and space albums (a space album needs a seat, else 404). Kept in the caller's `preferences_json` (`gallery_seen`, at most 300 albums), no table. |
 | POST | `/api/gallery/albums/{id}/retention` | `{retention_exempt}` → `{retention_exempt}` (same people as PATCH). |
 | GET | `/api/gallery/albums/{id}/items` | One page of the album's photos and videos. `?sort=added` (default): **newest upload first**, `&before=&before_id=` — the last item's `created_at` and `id` — for the next page. `?sort=taken` / `taken_asc`: by **date taken**, newest / oldest first — each item's `day` is the day taken, else its upload day (UTC) — then upload time and `id`; the next page is `&after_day=&after=&after_id=`, the last item's `day`, `created_at` and `id` (all three or none, else 422; an unknown `sort` is 422). Every cursor walks the album with no item skipped or repeated. `?limit=` (default 50, at most 500); a short page is the last. A video still transcoding carries `media_status: "processing"` and `media_eta_s` — rough seconds until it is ready (the household converts one video at a time: the video queued ahead of it, the running one's progress subtracted, at the speed this machine has shown). A video's `width` / `height` are the stored WebM's (a portrait phone video is upright), `duration_s` its length, `taken_at` the day its file says it was recorded. In the auto "Posts" album the posts of people the caller blocked (or is guardian-blocked from) are left out, as in the feed. |
 | POST | `/api/gallery/albums/{id}/items` | Upload one photo or video: multipart (`file`) or a raw body with its `Content-Type`; `?caption=` (≤ 300). 201 with the item. A photo ≤ 100 MiB; a video in a **household** album ≤ 2 GiB and ≤ 5 minutes, in a space album ≤ 100 MiB (cut to the protocol's 60 s, as before) — over the size 413 `PAYLOAD_TOO_LARGE` (a declared `Content-Length` is refused before the body is read), over 5 minutes 422 `VIDEO_TOO_LONG`. A video is streamed to disk, never held in memory, and converted in the background (VP9/Opus WebM ≤ 1920 px, one at a time): 201 with `media_status: "processing"` and `media_eta_s`; 503 `TRANSCODE_QUEUE_FULL` when 300 already wait. Over the household storage quota 507 `STORAGE_FULL`; a file that isn't a supported image 422 `IMAGE_UNREADABLE`, a video that can't be opened 422 `VIDEO_UNREADABLE`. Not into the "Posts" album (403). Own rate-limit bucket (see Rate limits). Household album: 200 with the existing item and `duplicate` when the same file is already here (below). |
@@ -802,6 +803,24 @@ that still holds someone else's photo. A space album follows the space's roles
 instead (items: the uploader or a moderator / admin / owner; albums: the
 owner or a space admin / owner) — being a household admin gives no say
 there.
+
+**New photos.** Uploads are one notification per batch, never one per
+photo: the server (not the app) closes a batch when the same person added
+nothing more to the same album for 90 seconds (or after 10 minutes of
+steady uploading). Each batch gives everyone who sees the album — a
+household album open to everyone at home: every member; a private album:
+only its people; a space album: this household's members of the space at
+"Everything" — but the uploader one `gallery_added` row: "Anna added 12
+photos to “Summer 2026”" (… "in {space}" for a space album), kind
+`activity` (in app by default, no push), about
+`gallery_album:<album_id>/<uploader_id>` with `params.items` (the count)
+and `flags` `photos` / `videos`, opening the album
+(`/gallery/albums/<id>`, `/spaces/<sid>/gallery/albums/<id>`). The next
+batch re-opens that row; while it is unread its count adds up. A person
+who sets Activity to Push gets "New photos from Anna" (… "in {space}") —
+a push never names the album. Blocked and guardian-blocked uploaders tell
+nobody; the "Posts" album never rings (its post did); deleting an album
+drops its rows. Opening the album reads them (`read-by-link`).
 
 **Trash (household only).** `DELETE /api/gallery/items/{iid}` on a
 household photo, and `DELETE /api/gallery/albums/{id}` on a household

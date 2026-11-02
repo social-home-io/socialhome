@@ -102,6 +102,7 @@ from ..repositories.user_repo import AbstractUserRepo
 from .media_transcode_service import MediaTranscodeService
 from .space_member_guard import NOT_A_SPACE_MEMBER, seat_of
 from .storage_quota_service import StorageQuotaService
+from .user_preferences import GALLERY_SEEN_KEY, parse_gallery_seen
 
 try:
     from PIL import ExifTags, Image
@@ -307,7 +308,7 @@ class GalleryService:
         out: list[GalleryAlbum] = []
         for a in albums:
             out.append(await self._for_viewer(a, actor_user_id, marks=marks))
-        return out
+        return await self._with_new(out, actor_user_id)
 
     async def get_album(
         self,
@@ -316,7 +317,59 @@ class GalleryService:
         actor_user_id: str,
     ) -> GalleryAlbum:
         album = await self._visible_album(album_id, actor_user_id)
-        return await self._for_viewer(album, actor_user_id)
+        [shown] = await self._with_new(
+            [await self._for_viewer(album, actor_user_id)], actor_user_id, stamp=False
+        )
+        return shown
+
+    async def mark_album_seen(self, album_id: str, *, actor_user_id: str) -> None:
+        """The person opened the album: its "neu" dot (D9) goes until
+        someone else adds a photo or video again. Kept in their
+        ``preferences_json`` (:class:`GallerySeen`) — no table."""
+        await self._visible_album(album_id, actor_user_id)
+        if self._users is None:
+            return
+        user = await self._users.get_by_user_id(actor_user_id)
+        if user is None:
+            return
+        seen = parse_gallery_seen(user.preferences_json)
+        await self._users.set_preference_key(
+            actor_user_id,
+            GALLERY_SEEN_KEY,
+            seen.opened(album_id, datetime.now(UTC)).to_dict(),
+        )
+
+    async def _with_new(
+        self, albums: list[GalleryAlbum], viewer_user_id: str, *, stamp: bool = True
+    ) -> list[GalleryAlbum]:
+        """*albums* with :attr:`GalleryAlbum.has_new` set for the viewer
+        (D9): someone else added a photo or video they may see since they
+        last opened it. Never on the system "Posts" album — a feed post
+        already tells people. The first album list someone reads only
+        stamps when it started (:meth:`GallerySeen.stamped`, ``stamp``):
+        nothing is new on the day the dot ships. Reading one album never
+        writes."""
+        if self._users is None or not albums:
+            return albums
+        user = await self._users.get_by_user_id(viewer_user_id)
+        if user is None:
+            return albums
+        seen = parse_gallery_seen(user.preferences_json)
+        if seen.since is None:
+            if stamp:
+                await self._users.set_preference_key(
+                    viewer_user_id,
+                    GALLERY_SEEN_KEY,
+                    seen.stamped(datetime.now(UTC)).to_dict(),
+                )
+            return albums
+        newest = await self._repo.newest_by_others(
+            [a.id for a in albums if not a.is_system], viewer_user_id
+        )
+        return [
+            replace(a, has_new=True) if seen.has_new(a.id, newest.get(a.id)) else a
+            for a in albums
+        ]
 
     async def _for_viewer(
         self,

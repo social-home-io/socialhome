@@ -5,16 +5,22 @@ from __future__ import annotations
 import orjson
 import pytest
 
-from socialhome.domain.gallery import ON_THIS_DAY_MAX_EXCLUDED, OnThisDaySettings
+from socialhome.domain.gallery import (
+    ON_THIS_DAY_MAX_EXCLUDED,
+    GallerySeen,
+    OnThisDaySettings,
+)
 from socialhome.domain.highlight import HighlightAudience
 from socialhome.domain.notification_kinds import NotifDelivery, NotifKind
 from socialhome.services.user_preferences import (
     DEFAULT_HIGHLIGHTS_MAX_COUNT,
     DEFAULT_HIGHLIGHTS_RETENTION_DAYS,
     GALLERY_ON_THIS_DAY_KEY,
+    GALLERY_SEEN_KEY,
     HA_AUTOMATION_EVENTS_KEY,
     MAX_TIMETABLE_HOME_PINS,
     parse_gallery_on_this_day,
+    parse_gallery_seen,
     parse_ha_automation_events,
     parse_highlights_preferences,
     parse_locale,
@@ -230,3 +236,25 @@ def test_on_this_day_settings_are_read_defensively():
     got = parse_gallery_on_this_day(orjson.dumps(many).decode())
     assert len(got.excluded_album_ids) == ON_THIS_DAY_MAX_EXCLUDED
     assert "a299" in got.excluded_album_ids
+
+
+@pytest.mark.parametrize("raw", [None, "", "not json", "[]", '{"gallery_seen": 3}'])
+def test_gallery_seen_reads_nothing_from_a_bad_blob(raw):
+    assert parse_gallery_seen(raw) == GallerySeen()
+
+
+def test_gallery_seen_keeps_only_readable_visits():
+    blob = {
+        GALLERY_SEEN_KEY: {
+            "since": "2026-11-01T10:00:00+00:00",
+            "albums": {
+                "a1": "2026-11-02T08:00:00+00:00",
+                "a2": "never",
+                "": "2026-11-02T08:00:00+00:00",
+                "a3": 5,
+            },
+        }
+    }
+    got = parse_gallery_seen(orjson.dumps(blob).decode())
+    assert got.since == "2026-11-01T10:00:00+00:00"
+    assert dict(got.albums) == {"a1": "2026-11-02T08:00:00+00:00"}

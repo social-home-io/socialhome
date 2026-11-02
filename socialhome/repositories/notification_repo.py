@@ -200,6 +200,7 @@ class AbstractNotificationRepo(Protocol):
     async def delete_by_object(
         self, object_keys: Iterable[str], *, keep_types: Iterable[str] = ()
     ) -> builtins.list[str]: ...
+    async def delete_by_object_prefix(self, prefix: str) -> builtins.list[str]: ...
     async def delete_by_space(
         self,
         space_id: str,
@@ -608,6 +609,16 @@ class SqliteNotificationRepo:
         if keep:
             where += f" AND type NOT IN ({','.join('?' * len(keep))})"
         return await self._delete_where(where, (*keys, *keep))
+
+    async def delete_by_object_prefix(self, prefix: str) -> builtins.list[str]:
+        """Delete every row whose ``object_key`` starts with *prefix* (a
+        gallery album's ``gallery_album:<album_id>/`` rows, one per
+        uploader). Returns the users who lost an unread row."""
+        if not prefix:
+            return []
+        return await self._delete_where(
+            "substr(object_key, 1, ?) = ?", (len(prefix), prefix)
+        )
 
     async def delete_by_space(
         self,

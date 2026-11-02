@@ -823,3 +823,29 @@ async def test_on_this_day_never_uses_a_space_album(client):
     )
     r = await client.get(f"/api/gallery/on-this-day?date={_today()}", headers=h)
     assert (await r.json())["card"] is None
+
+
+# ─── "Neu" dot (D9) ──────────────────────────────────────────────────────
+
+
+async def test_album_seen_requires_auth(client):
+    r = await client.post("/api/gallery/albums/x/seen")
+    assert r.status == 401
+
+
+async def test_album_seen_clears_the_dot_and_lists_carry_it(client):
+    h = _auth(client._tok)
+    r = await client.post("/api/gallery/albums", json={"name": "Trip"}, headers=h)
+    album = await r.json()
+    r = await client.get("/api/gallery/albums", headers=h)
+    [row] = [a for a in await r.json() if a["id"] == album["id"]]
+    assert row["has_new"] is False
+    r = await client.post(f"/api/gallery/albums/{album['id']}/seen", headers=h)
+    assert r.status == 204
+    r = await client.get(f"/api/gallery/albums/{album['id']}", headers=h)
+    assert (await r.json())["has_new"] is False
+
+
+async def test_album_seen_for_an_unknown_album_is_404(client):
+    r = await client.post("/api/gallery/albums/nope/seen", headers=_auth(client._tok))
+    assert r.status == 404

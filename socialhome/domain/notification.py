@@ -67,10 +67,15 @@ APP_INVITE_FLAGS: frozenset[str] = frozenset({"app_missing", "app_off"})
 #: row of the person who started it: enough players are in to start.
 APP_GROUP_FLAGS: frozenset[str] = frozenset({"group", "can_start"})
 
-#: Every flag a row may carry: join requests', waiting game invites' and
-#: group games'.
+#: What a "new photos" row (gallery D9) tells of: ``photos``, ``videos`` or
+#: both — so its sentence says "12 photos and videos" when a later batch
+#: brought the other kind.
+GALLERY_ITEM_FLAGS: frozenset[str] = frozenset({"photos", "videos"})
+
+#: Every flag a row may carry: join requests', waiting game invites',
+#: group games' and "new photos" rows'.
 NOTIFICATION_FLAGS: frozenset[str] = (
-    JOIN_REQUEST_FLAGS | APP_INVITE_FLAGS | APP_GROUP_FLAGS
+    JOIN_REQUEST_FLAGS | APP_INVITE_FLAGS | APP_GROUP_FLAGS | GALLERY_ITEM_FLAGS
 )
 
 #: How a "Needs you" item ended (:attr:`NotificationHandled.outcome`):
@@ -186,6 +191,9 @@ class NotificationObject(StrEnum):
     PAIRING_REQUEST = "pairing_request"
     #: A report someone filed (``<report_id>``) — its answer.
     REPORT = "report"
+    #: One person's uploads to one gallery album
+    #: (``<album_id>/<uploader_id>``, D9): each upload batch joins it.
+    GALLERY_ALBUM = "gallery_album"
 
 
 #: The id of the household feed's ``feed:<id>`` key — there is one.
@@ -284,6 +292,8 @@ class NotificationParams:
       every other row.
     * ``handled`` — set once a "Needs you" item was handled: it leaves the
       section for every recipient ("Handled by Søren").
+    * ``items`` — on a "new photos" row (D9): how many photos and videos
+      it tells of since it was last read; ``None`` on every other row.
     """
 
     actors: tuple[NotificationActor, ...] = ()
@@ -294,6 +304,7 @@ class NotificationParams:
     flags: tuple[str, ...] = ()
     handled: NotificationHandled | None = None
     others: int | None = None
+    items: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -310,6 +321,8 @@ class NotificationParams:
             out["handled"] = self.handled.to_dict()
         if self.others is not None:
             out["others"] = self.others
+        if self.items is not None:
+            out["items"] = self.items
         return out
 
     @classmethod
@@ -330,6 +343,7 @@ class NotificationParams:
         space_name = raw.get("space_name")
         flags = raw.get("flags")
         others = raw.get("others")
+        items = raw.get("items")
         return cls(
             actors=actors,
             actor_count=_count(raw.get("actor_count"), len(actors)),
@@ -351,6 +365,11 @@ class NotificationParams:
                 and others >= 0
                 else None
             ),
+            items=(
+                items
+                if isinstance(items, int) and not isinstance(items, bool) and items >= 0
+                else None
+            ),
         )
 
 
@@ -366,6 +385,7 @@ def first_params(
     space_name: str | None = None,
     flags: tuple[str, ...] = (),
     others: int | None = None,
+    items: int | None = None,
 ) -> NotificationParams:
     """A fresh row's params: one event, by *actor* (``None`` for a notice
     nobody caused)."""
@@ -378,6 +398,7 @@ def first_params(
         space_name=space_name,
         flags=flags,
         others=others,
+        items=items,
     )
 
 
@@ -389,6 +410,7 @@ def regroup(
     space_name: str | None = None,
     flags: tuple[str, ...] = (),
     others: int | None = None,
+    items: int | None = None,
 ) -> NotificationParams:
     """*old*'s params after one more event by *actor*.
 
@@ -400,11 +422,13 @@ def regroup(
 
     New activity is new work: a "Needs you" row that had been handled is
     pending again (no ``handled``), with this event's *flags*. *others*
-    (a group game's count) is this event's, else the row's."""
+    (a group game's count) and *items* (a "new photos" row's count, which
+    the handler already added up) are this event's, else the row's."""
     if old is None:
         old = NotificationParams()
     space_name = space_name or old.space_name
     others = others if others is not None else old.others
+    items = items if items is not None else old.items
     if reopen:
         fresh = first_params(actor, space_name=space_name, flags=flags, others=others)
         return NotificationParams(
@@ -415,6 +439,7 @@ def regroup(
             space_name=space_name,
             flags=flags,
             others=others,
+            items=items,
         )
     actors = old.actors
     count = old.actor_count
@@ -430,6 +455,7 @@ def regroup(
         space_name=space_name,
         flags=flags,
         others=others,
+        items=items,
     )
 
 

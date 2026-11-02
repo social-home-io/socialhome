@@ -107,6 +107,16 @@ def test_link_target_drops_only_the_picked_out_part():
     assert links.link_target("/bazaar?listing=L1") == "/bazaar?listing=L1"
 
 
+def test_gallery_album_links_open_the_album():
+    """A "new photos" row (D9) opens the album, in a space under its
+    Gallery section — the path the album page marks seen."""
+    assert links.gallery_album_link("a1") == "/gallery/albums/a1"
+    assert links.gallery_album_link("a1", "s1") == "/spaces/s1/gallery/albums/a1"
+    assert links.gallery_album_link("a/b") == "/gallery/albums/a%2Fb"
+    assert spa_route_for(links.gallery_album_link("a1")) == "/gallery/:sub*"
+    assert spa_route_for(links.gallery_album_link("a1", "s1")) == SPACE_ROUTE
+
+
 def test_query_values_are_encoded():
     """An id never breaks out of its query parameter."""
     assert links.household_post_link("p1", "a&b=c") == "/post/p1?comment=a%26b%3Dc"
@@ -210,6 +220,8 @@ def _builder_links() -> set[str]:
         links.task_link(_task(), "s1"),
         links.bazaar_listing_link("L1"),
         links.app_link("chess"),
+        links.gallery_album_link("a1"),
+        links.gallery_album_link("a1", "s1"),
         links.app_table_link("quiz", "t1"),
         links.app_game_link("quiz", "t1"),
         links.space_calendar_link("s1"),

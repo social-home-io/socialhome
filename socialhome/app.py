@@ -341,6 +341,7 @@ from .services.friends_service import FriendsService
 from .services.gallery_federation_outbound import GalleryFederationOutbound
 from .services.gallery_on_this_day_service import GalleryOnThisDayService
 from .services.gallery_service import GalleryService
+from .services.gallery_upload_batcher import GalleryUploadBatcher
 from .services.gfs_channel_service import GfsChannelService
 from .services.gfs_connection_service import GfsConnectionService
 from .services.gfs_directory import GfsDirectoryCache
@@ -3135,6 +3136,9 @@ def create_app(config: Config | None = None) -> web.Application:
     # to an admin. Deleted household photos wait 30 days in the trash.
     gallery_service.wire()
     gallery_trash_purge_scheduler = GalleryTrashPurgeScheduler(gallery_service)
+    # D9: one "new photos" event per upload batch, coalesced on the server.
+    gallery_upload_batcher = GalleryUploadBatcher(bus)
+    gallery_upload_batcher.wire()
     # "On this day" (D14): one memory card per person, never a notification.
     gallery_on_this_day_service = GalleryOnThisDayService(
         gallery_repo, repos.user, gallery_service
@@ -3290,6 +3294,8 @@ def create_app(config: Config | None = None) -> web.Application:
     notification_service.attach_post_repos(repos.post, repos.space_post)
     # A closed poll tells the people who voted in it (poll_result).
     notification_service.attach_poll_repos(repos.poll, repos.space_poll)
+    # An upload batch tells who sees the album ("new photos", D9).
+    notification_service.attach_gallery_repo(gallery_repo)
 
     # ── Per-user data export (§25.8.7) ──────────────────────────────────
     data_export_service = DataExportService(db)
@@ -5472,6 +5478,7 @@ def create_app(config: Config | None = None) -> web.Application:
 
         # Gallery trash — purges household photos deleted 30+ days ago.
         await gallery_trash_purge_scheduler.start()
+        await gallery_upload_batcher.start()
 
         # Page-lock + retention + draft cleanup schedulers.
         nonlocal page_lock_scheduler, space_retention_scheduler
@@ -5631,6 +5638,8 @@ def create_app(config: Config | None = None) -> web.Application:
         # deletes) are published off the author's lock; send them while
         # the federation client and the database are still up.
         await app[K.highlight_service_key].stop()
+        # Upload batches still open become their "new photos" rows first.
+        await gallery_upload_batcher.stop()
         # Deliver the notifications still queued while the database, the
         # push session and the platform adapter are up.
         await notification_delivery.stop()

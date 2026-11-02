@@ -1405,3 +1405,37 @@ async def test_on_this_day_counts_the_upload_day_when_nothing_was_taken(env):
     assert await repo.find_on_this_day(
         ("03-04",), before_year="2026", viewer_user_id="a-id"
     ) == ("feed", "2025", 1)
+
+
+async def test_newest_by_others_skips_the_viewer_the_trash_and_the_blocked(env):
+    """D9's "neu" dot: per album, the newest live item someone else added
+    that the viewer may see."""
+    db, repo = env
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES('bob', 'b-id', 'B')"
+    )
+    for album_id in ("alb-1", "alb-2", "alb-3"):
+        await repo.create_album(_album(album_id, space_id=None))
+    rows = (
+        ("it-1", "alb-1", "b-id", 1),
+        ("it-2", "alb-1", "rex", 3),
+        ("it-3", "alb-1", "a-id", 9),  # the viewer's own
+        ("it-4", "alb-2", "a-id", 4),
+        ("it-5", "alb-3", "b-id", 5),
+        ("it-6", "alb-3", "b-id", 7),  # trashed below
+    )
+    for item_id, album_id, who, day in rows:
+        await repo.create_item(
+            replace(
+                _item(item_id, album_id=album_id), uploaded_by=who, created_at=_at(day)
+            )
+        )
+    assert await repo.trash_item("it-6", deleted_by="b-id")
+    got = await repo.newest_by_others(["alb-1", "alb-2", "alb-3", "alb-1"], "a-id")
+    assert got == {"alb-1": _at(3), "alb-3": _at(5)}
+    await db.enqueue(
+        "INSERT INTO user_blocks(blocker_user_id, blocked_user_id) VALUES('a-id', 'rex')"
+    )
+    got = await repo.newest_by_others(["alb-1"], "a-id")
+    assert got == {"alb-1": _at(1)}
+    assert await repo.newest_by_others([], "a-id") == {}

@@ -421,6 +421,8 @@
   "gallery.albums_word": "Follows a bold number: '<b>3</b> albums · <b>12</b> photos and videos'. Lowercase word only.",
   "gallery.media_word": "Follows a bold number in the gallery header. Lowercase word only.",
   "gallery.kept": "Badge on an album that is never cleaned up automatically (exempt from retention).",
+  "gallery.new_badge": "Short pill on an album cover: someone else added photos since you last opened the album. Keep it to one short word.",
+  "gallery.new_photos": "Tooltip and screen-reader text for that pill.",
   "gallery.system_name": "Name of the album that fills itself with every photo and video shared in the feed (the feed's posts). Plural noun.",
   "gallery.tile_by": "Screen-reader name of a photo tile: {label} is 'Photo from 21 Jun 2026' or the caption, {name} the person who added it.",
   "gallery.upload.default_album": "Name of the household album an upload goes into when nobody picked an album. Each person sees it in their own language until someone renames it. Plain word for 'Photos'.",
