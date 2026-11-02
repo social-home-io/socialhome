@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import socket
@@ -341,6 +342,42 @@ async def test_standalone_boot_releases_the_ice_prime_gate(tmp_dir):
         assert transport._ice_primed.is_set(), (
             "standalone boot left the ICE-prime gate closed"
         )
+
+
+async def test_a_peer_that_never_answers_does_not_delay_listening(tmp_dir, monkeypatch):
+    """Regression: startup awaited the capabilities announcement (one
+    federation send per confirmed peer, RTC offer + inbox POST at 10 s
+    each) before aiohttp opened the listen port, so a restarted household
+    stayed unreachable for tens of seconds while a paired home was slow.
+    The announcement now runs in the background; the site starts at once.
+    """
+    from socialhome.infrastructure import startup_announcer
+    from socialhome.services.capabilities_outbound import CapabilitiesOutbound
+
+    monkeypatch.setattr(startup_announcer, "STOP_TIMEOUT_S", 0.05)
+    announcing = asyncio.Event()
+
+    async def _silent_peer(self):
+        announcing.set()
+        await asyncio.Event().wait()  # the peer never answers
+
+    monkeypatch.setattr(CapabilitiesOutbound, "publish", _silent_peer)
+    cfg = Config(
+        data_dir=str(tmp_dir),
+        db_path=str(tmp_dir / "test.db"),
+        media_path=str(tmp_dir / "media"),
+        mode="standalone",
+        log_level="WARNING",
+    )
+    app = create_app(cfg)
+    client = TestClient(TestServer(app))
+    await asyncio.wait_for(client.start_server(), timeout=10.0)
+    try:
+        resp = await client.get("/healthz")
+        assert resp.status == 200
+        await asyncio.wait_for(announcing.wait(), timeout=5.0)
+    finally:
+        await asyncio.wait_for(client.close(), timeout=10.0)
 
 
 def test_map_tile_user_agent_identifies_the_app_and_a_contact():

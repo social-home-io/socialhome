@@ -163,7 +163,9 @@ async def test_tombstone_survives_a_restart(aiohttp_client, tmp_dir, monkeypatch
     await _send(second, FET.MOMENT_CREATED, _signed_create())
 
     assert "m-new" not in await _live(second[db_key])
-    assert sent == []
+    # The restart announces our capabilities in the background, after the
+    # port opens — that may land here; no moment event may.
+    assert [s for s in sent if s[1] != FET.INSTANCE_CAPABILITIES_UPDATED] == []
 
 
 async def test_expired_tombstone_is_purged_and_an_expired_replay_is_refused(env):  # noqa: F811
