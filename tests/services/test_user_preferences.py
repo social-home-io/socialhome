@@ -5,13 +5,16 @@ from __future__ import annotations
 import orjson
 import pytest
 
+from socialhome.domain.gallery import ON_THIS_DAY_MAX_EXCLUDED, OnThisDaySettings
 from socialhome.domain.highlight import HighlightAudience
 from socialhome.domain.notification_kinds import NotifDelivery, NotifKind
 from socialhome.services.user_preferences import (
     DEFAULT_HIGHLIGHTS_MAX_COUNT,
     DEFAULT_HIGHLIGHTS_RETENTION_DAYS,
+    GALLERY_ON_THIS_DAY_KEY,
     HA_AUTOMATION_EVENTS_KEY,
     MAX_TIMETABLE_HOME_PINS,
+    parse_gallery_on_this_day,
     parse_ha_automation_events,
     parse_highlights_preferences,
     parse_locale,
@@ -190,3 +193,40 @@ def test_notif_settings_read_the_kinds_and_muted_posts():
 def test_parse_locale(blob, want):
     """The language picked in the app (``PATCH /api/me`` preferences)."""
     assert parse_locale(blob) == want
+
+
+@pytest.mark.parametrize(
+    "blob",
+    [
+        None,
+        "",
+        "not json",
+        "[]",
+        "{}",
+        orjson.dumps({GALLERY_ON_THIS_DAY_KEY: 3}).decode(),
+    ],
+)
+def test_on_this_day_is_on_by_default(blob):
+    assert parse_gallery_on_this_day(blob) == OnThisDaySettings()
+
+
+def test_on_this_day_settings_are_read_defensively():
+    blob = {
+        GALLERY_ON_THIS_DAY_KEY: {
+            "off": True,
+            "hidden_on": "2026-11-02",
+            "excluded_albums": ["a", 7, "", "b"],
+        }
+    }
+    got = parse_gallery_on_this_day(orjson.dumps(blob).decode())
+    assert got == OnThisDaySettings(
+        enabled=False, hidden_on="2026-11-02", excluded_album_ids=frozenset({"a", "b"})
+    )
+    # Only a literal true turns it off; a bad day is no day.
+    odd = {GALLERY_ON_THIS_DAY_KEY: {"off": "yes", "hidden_on": "today"}}
+    got = parse_gallery_on_this_day(orjson.dumps(odd).decode())
+    assert got.enabled and got.hidden_on is None
+    many = {GALLERY_ON_THIS_DAY_KEY: {"excluded_albums": [f"a{i}" for i in range(300)]}}
+    got = parse_gallery_on_this_day(orjson.dumps(many).decode())
+    assert len(got.excluded_album_ids) == ON_THIS_DAY_MAX_EXCLUDED
+    assert "a299" in got.excluded_album_ids

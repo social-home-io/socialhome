@@ -339,6 +339,7 @@ from .services.federation_inbound import (
 from .services.federation_inbound_service import FederationInboundService
 from .services.friends_service import FriendsService
 from .services.gallery_federation_outbound import GalleryFederationOutbound
+from .services.gallery_on_this_day_service import GalleryOnThisDayService
 from .services.gallery_service import GalleryService
 from .services.gfs_channel_service import GfsChannelService
 from .services.gfs_connection_service import GfsConnectionService
@@ -3134,6 +3135,10 @@ def create_app(config: Config | None = None) -> web.Application:
     # to an admin. Deleted household photos wait 30 days in the trash.
     gallery_service.wire()
     gallery_trash_purge_scheduler = GalleryTrashPurgeScheduler(gallery_service)
+    # "On this day" (D14): one memory card per person, never a notification.
+    gallery_on_this_day_service = GalleryOnThisDayService(
+        gallery_repo, repos.user, gallery_service
+    )
 
     # ── System "Posts" album bridge (§Gallery) ──────────────────────────
     # Subscribes to feed-post lifecycle events and mirrors photo/video
@@ -3788,6 +3793,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.gallery_service_key] = gallery_service
     app[K.gallery_trash_purge_scheduler_key] = gallery_trash_purge_scheduler
     app[K.gallery_repo_key] = gallery_repo
+    app[K.gallery_on_this_day_service_key] = gallery_on_this_day_service
     app[K.media_transcode_repo_key] = repos.media_transcode
     app[K.media_transcode_service_key] = media_transcode_service
     app[K.child_protection_service_key] = child_protection_service

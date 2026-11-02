@@ -13,15 +13,15 @@ Endpoints:
 * ``DELETE /api/gallery/albums/{album_id}``             — delete (owner/admin)
 * ``POST   /api/gallery/albums/{album_id}/retention``   — set retention_exempt
 * ``GET    /api/gallery/albums/{album_id}/items``       — list items
+  (``?sort=taken`` / ``taken_asc``: by the day taken)
 * ``POST   /api/gallery/albums/{album_id}/items``       — upload item
 * ``DELETE /api/gallery/items/{item_id}``               — delete item (a
   household item goes to the trash)
 * ``POST   /api/gallery/items/{item_id}/restore``       — back from the trash
 * ``GET    /api/gallery/trash``                         — the household trash
 * ``DELETE /api/gallery/trash/{item_id}``               — delete for good
-
-Both lists page newest first with ``?limit=&before=&before_id=`` (see
-:func:`_page_query`); items newest first the same way.
+* ``GET    /api/gallery/on-this-day``                   — today's memory card
+* ``PATCH  /api/gallery/on-this-day``                   — its per-person settings
 
 A video upload is streamed straight to disk (never held in memory) and
 checked there: a household album keeps videos up to 5 minutes and takes
@@ -29,6 +29,11 @@ files up to 2 GiB (``GALLERY_VIDEO_MAX_*`` in ``domain/gallery.py``); a
 space album keeps the protocol's 60 s and 100 MiB. A video that is still
 converting carries ``media_status: "processing"`` and ``media_eta_s``
 (seconds until it is ready, a rough estimate).
+
+Albums page by newest activity with ``?limit=&before=&before_id=`` (see
+:func:`_page_query`); items newest upload first the same way, or by the
+day taken with ``?sort=`` and the ``after_day`` / ``after`` / ``after_id``
+cursor (:func:`_item_order`).
 """
 
 from __future__ import annotations
@@ -48,6 +53,10 @@ from ..domain.gallery import (
     TRASH_RETENTION_DAYS,
     GalleryTrashItem,
     GalleryUpload,
+    ItemCursor,
+    ItemSort,
+    OnThisDayCard,
+    OnThisDaySettings,
     UploadOutcome,
     is_video_upload,
 )
@@ -58,6 +67,7 @@ from ..hardening import (
     read_part_capped,
 )
 from ..media_signer import sign_media_urls_in
+from ..services.gallery_on_this_day_service import resolve_today
 from .base import BaseView
 from .media_status import READY, media_filename
 
@@ -98,6 +108,26 @@ def _page_query(
     return q.get("before") or None, q.get("before_id") or None, limit
 
 
+def _item_order(request: web.Request) -> tuple[ItemSort, ItemCursor | None]:
+    """``?sort=`` (``added`` — the default, newest upload first — ``taken``
+    or ``taken_asc``) and, for a date sort, the next page's cursor: the last
+    item's ``day``, ``created_at`` and ``id`` as ``after_day`` / ``after`` /
+    ``after_id`` (all three, or none). Anything else is a ``ValueError``
+    (422)."""
+    q = request.query
+    try:
+        sort = ItemSort(q.get("sort") or ItemSort.ADDED)
+    except ValueError:
+        raise ValueError("sort must be added, taken or taken_asc") from None
+    parts = (q.get("after_day"), q.get("after"), q.get("after_id"))
+    if sort is ItemSort.ADDED or not any(parts):
+        return sort, None
+    day, at, item_id = parts
+    if not (day and at and item_id):
+        raise ValueError("after_day, after and after_id go together")
+    return sort, ItemCursor(day=day, created_at=at, item_id=item_id)
+
+
 def _album_dict(a) -> dict:
     return {
         "id": a.id,
@@ -118,6 +148,12 @@ def _album_dict(a) -> dict:
         "is_system": a.is_system,
         "created_at": a.created_at,
         "updated_at": a.updated_at,
+        # The list's "newest activity" order and its ``before`` cursor.
+        "activity_at": a.activity_at or a.created_at,
+        # The household's default album; ``default_name`` while nobody
+        # renamed it — the SPA then shows it in the viewer's own language.
+        "is_default": a.is_default,
+        "default_name": a.default_name,
     }
 
 
@@ -134,6 +170,9 @@ def _item_dict(i) -> dict:
         "duration_s": i.duration_s,
         "caption": i.caption,
         "taken_at": i.taken_at,
+        # The day the album sorts it by (taken, else uploaded) — the date
+        # sort's ``after_day`` cursor.
+        "day": i.day,
         "sort_order": i.sort_order,
         "created_at": i.created_at,
     }
@@ -314,12 +353,15 @@ class AlbumItemCollectionView(BaseView):
         ctx = self.user
         await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
         before, before_id, limit = _page_query(self.request, ITEM_PAGE)
+        sort, after = _item_order(self.request)
         items = await self.svc(K.gallery_service_key).list_items(
             self.match("album_id"),
             actor_user_id=ctx.user_id,
             limit=limit,
             before=before,
             before_id=before_id,
+            sort=sort,
+            after=after,
         )
         # Video items transcode in the background — surface a live
         # ``media_status`` so the SPA shows a "Processing…" placeholder
@@ -529,3 +571,86 @@ def _trash_signed(request: web.Request, t: GalleryTrashItem) -> dict:
         }
     )
     return payload
+
+
+def _on_this_day_settings(s: OnThisDaySettings, today: str) -> dict:
+    return {
+        "enabled": s.enabled,
+        "hidden_today": s.hidden_on == today,
+        "excluded_album_ids": sorted(s.excluded_album_ids),
+    }
+
+
+def _on_this_day_card(request: web.Request, c: OnThisDayCard) -> dict:
+    return {
+        "album": _album_signed(request, c.album),
+        "date": c.date,
+        "years_ago": c.years_ago,
+        "count": c.count,
+        "items": [_item_signed(request, i) for i in c.items],
+    }
+
+
+def _flag(body: dict, key: str) -> bool | None:
+    """An optional boolean of the body — anything else is a 422."""
+    value = body.get(key)
+    if value is None or isinstance(value, bool):
+        return value
+    raise ValueError(f"{key} must be true or false")
+
+
+def _album_id(body: dict, key: str) -> str | None:
+    value = body.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value or len(value) > 128:
+        raise ValueError(f"{key} must be an album id")
+    return value
+
+
+class GalleryOnThisDayView(BaseView):
+    """GET/PATCH /api/gallery/on-this-day — the household gallery's "On
+    this day" card (owner decision D14): photos taken on the viewer's day
+    in an earlier year, from one album open to everyone at home. Never a
+    notification; each person turns it off, hides it for the day or
+    leaves an album out.
+
+    ``?date=YYYY-MM-DD`` (GET) / ``date`` (PATCH) is the viewer's own
+    calendar day — within one day of the server's UTC date, else 422;
+    absent, the UTC date."""
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        today = resolve_today(self.request.query.get("date"))
+        svc = self.svc(K.gallery_on_this_day_service_key)
+        card = await svc.card(user_id=ctx.user_id, today=today)
+        settings = await svc.settings(ctx.user_id)
+        return web.json_response(
+            {
+                "card": _on_this_day_card(self.request, card) if card else None,
+                "settings": _on_this_day_settings(settings, today.isoformat()),
+            }
+        )
+
+    async def patch(self) -> web.Response:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        body = await self.body()
+        raw_date = body.get("date")
+        if raw_date is not None and not isinstance(raw_date, str):
+            raise ValueError("date must be YYYY-MM-DD")
+        today = resolve_today(raw_date)
+        hide_today = _flag(body, "hide_today")
+        settings = await self.svc(K.gallery_on_this_day_service_key).update(
+            ctx.user_id,
+            enabled=_flag(body, "enabled"),
+            hide_on=today if hide_today else None,
+            show_again=hide_today is False,
+            exclude_album_id=_album_id(body, "exclude_album_id"),
+            include_album_id=_album_id(body, "include_album_id"),
+            include_all=_flag(body, "include_all") is True,
+        )
+        return web.json_response(
+            {"settings": _on_this_day_settings(settings, today.isoformat())}
+        )

@@ -1841,6 +1841,48 @@ async def test_a_default_key_naming_a_space_album_is_ignored(env):
     assert album.space_id is None
 
 
+async def test_the_default_album_keeps_its_default_name_until_renamed(env):
+    """Each viewer sees the default album under their own word for
+    "Photos" (``default_name``) — not the first uploader's — until
+    someone names it; then everybody sees that name."""
+    album, _ = await env.ensure_default_album(actor_user_id="b-id", name="Fotos")
+    other = await env.create_album(space_id=None, owner_user_id="a-id", name="Summer")
+    assert (album.is_default, album.default_name) == (True, True)
+    listed = {
+        a.id: a for a in await env.list_albums(space_id=None, actor_user_id="e-id")
+    }
+    assert (listed[album.id].is_default, listed[album.id].default_name) == (True, True)
+    assert (listed[other.id].is_default, listed[other.id].default_name) == (
+        False,
+        False,
+    )
+    # Renaming another album, or editing only the description, changes nothing.
+    await env.update_album(other.id, actor_user_id="a-id", name="Sommer")
+    await env.update_album(album.id, actor_user_id="b-id", description="All of us")
+    shown = await env.get_album(album.id, actor_user_id="e-id")
+    assert shown.default_name is True
+    await env.update_album(album.id, actor_user_id="b-id", name="Familie")
+    shown = await env.get_album(album.id, actor_user_id="e-id")
+    assert (shown.name, shown.is_default, shown.default_name) == (
+        "Familie",
+        True,
+        False,
+    )
+    # Deleted, the next default album is in each viewer's language again.
+    await env.delete_album(album.id, actor_user_id="b-id")
+    fresh, _ = await env.ensure_default_album(actor_user_id="a-id", name="Photos")
+    assert fresh.default_name is True
+
+
+async def test_space_albums_are_never_the_default(env):
+    await env.ensure_default_album(actor_user_id="a-id", name="Photos")
+    space_album = await env.create_album(
+        space_id="sp-1", owner_user_id="a-id", name="Space"
+    )
+    shown = await env.get_album(space_album.id, actor_user_id="a-id")
+    assert not shown.is_default and not shown.default_name
+
+
 async def test_the_default_album_needs_a_name(env):
     with pytest.raises(ValueError):
         await env.ensure_default_album(actor_user_id="a-id", name="  ")

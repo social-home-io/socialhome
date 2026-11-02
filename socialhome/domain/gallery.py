@@ -42,6 +42,17 @@ class GalleryAlbum:
     is_system: bool = False
     created_at: str | None = None
     updated_at: str | None = None
+    # The newest live item's ``created_at``, else the album's own — the
+    # albums list's "newest activity first" order and its cursor. Read
+    # with the list, not persisted.
+    activity_at: str | None = None
+    # The household's default album (``instance_config``
+    # ``gallery.default_album_id``) — not persisted on the row.
+    is_default: bool = False
+    # ``True`` while nobody renamed the default album: each viewer then
+    # sees it under their own word for "Photos" (the SPA localises it),
+    # not the first uploader's. Not persisted on the row.
+    default_name: bool = False
 
     def to_federation_dict(self) -> dict:
         """The album as ``SPACE_GALLERY_ALBUM_CREATED`` / ``_UPDATED`` carry it.
@@ -84,6 +95,13 @@ class GalleryItem:
     # source post.
     source_post_id: str | None = None
     created_at: str | None = None
+
+    @property
+    def day(self) -> str:
+        """The day the album sorts the item by: the day taken, else the
+        upload day (UTC) — the ``idx_gallery_items_album_taken``
+        expression (migration 0139)."""
+        return self.taken_at or (self.created_at or "")[:10]
 
     def to_federation_dict(self) -> dict:
         """The item as ``SPACE_GALLERY_ITEM_CREATED`` carries it to a member.
@@ -267,3 +285,58 @@ def video_fits(duration_s: float, max_seconds: int) -> bool:
     minutes, ``5:01`` is not.
     """
     return int(duration_s) <= max_seconds
+class ItemSort(StrEnum):
+    """How an album lists its items. ``ADDED`` is the upload order
+    (newest first — the order before migration 0139, kept for old
+    clients); ``TAKEN`` / ``TAKEN_ASC`` sort by :attr:`GalleryItem.day`,
+    newest or oldest first (owner decision D1: inside an album, by date
+    taken)."""
+
+    ADDED = "added"
+    TAKEN = "taken"
+    TAKEN_ASC = "taken_asc"
+
+
+@dataclass(slots=True, frozen=True)
+class ItemCursor:
+    """Where the next page of a date-sorted album starts: the last item's
+    :attr:`GalleryItem.day`, ``created_at`` and ``id`` — the full sort
+    key, so no item is skipped or repeated between pages."""
+
+    day: str
+    created_at: str
+    item_id: str
+
+
+# ─── On this day (owner decision D14) ─────────────────────────────────────
+
+#: Previews an "On this day" card carries.
+ON_THIS_DAY_PREVIEWS: int = 3
+#: Albums one person can hide from "On this day" — bounds the
+#: preferences blob.
+ON_THIS_DAY_MAX_EXCLUDED: int = 200
+
+
+@dataclass(slots=True, frozen=True)
+class OnThisDaySettings:
+    """One person's "On this day" settings (``users.preferences_json``
+    ``gallery_on_this_day``): on unless they turned it off, the day they
+    hid the card with ✕ (it shows again the next day) and the albums they
+    never want it to use."""
+
+    enabled: bool = True
+    hidden_on: str | None = None
+    excluded_album_ids: frozenset[str] = frozenset()
+
+
+@dataclass(slots=True, frozen=True)
+class OnThisDayCard:
+    """Photos taken on this calendar day in an earlier year, from one
+    album: ``date`` (``YYYY-MM-DD``) is the day they were taken,
+    ``count`` how many, ``items`` the first few (oldest first)."""
+
+    album: GalleryAlbum
+    date: str
+    years_ago: int
+    count: int
+    items: tuple[GalleryItem, ...] = ()

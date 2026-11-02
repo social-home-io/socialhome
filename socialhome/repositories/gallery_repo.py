@@ -15,6 +15,8 @@ from ..domain.gallery import (
     GalleryDuplicate,
     GalleryItem,
     GalleryTrashItem,
+    ItemCursor,
+    ItemSort,
 )
 from ..domain.tombstone import SpaceRowTombstone
 from .base import changed_since_sql, rows_to_dicts, sync_page_cursor
@@ -50,6 +52,24 @@ _ALBUM_VISIBLE_TO_SQL = (
     " WHERE aa.album_id = a.id AND aa.user_id = ?))"
 )
 
+#: The day an album sorts an item by — the day taken, else the upload day.
+#: Spelled exactly as ``idx_gallery_items_album_taken`` (migration 0139)
+#: so SQLite serves the date order from that index.
+_ITEM_DAY_SQL = "COALESCE(taken_at, substr(created_at, 1, 10))"
+
+#: An album's newest activity: its newest live item's upload time, else
+#: the album's own creation. Expects the album aliased ``a``.
+_ALBUM_ACTIVITY_SQL = (
+    "COALESCE((SELECT MAX(i.created_at) FROM gallery_items i"
+    " WHERE i.album_id = a.id AND i.deleted_at IS NULL), a.created_at)"
+)
+
+#: Items whose uploader the viewer may see, for a query that aliases the
+#: items ``i`` — :data:`_VIEWER_MAY_SEE_UPLOADER_SQL` qualified.
+_VIEWER_MAY_SEE_I_UPLOADER_SQL = _VIEWER_MAY_SEE_UPLOADER_SQL.replace(
+    "AND uploaded_by NOT IN", "AND i.uploaded_by NOT IN"
+)
+
 #: A household item in the trash (migration 0139): deleted, files kept —
 #: a space tombstone (0085) blanks its files. Expects ``i`` and ``a``.
 _IN_TRASH_SQL = "a.space_id IS NULL AND i.deleted_at IS NOT NULL AND i.filename <> ''"
@@ -77,6 +97,7 @@ class AbstractGalleryRepo(Protocol):
         limit: int = 30,
         before: str | None = None,
         before_id: str | None = None,
+        by_activity: bool = False,
     ) -> list[GalleryAlbum]: ...
     async def get_album(self, album_id: str) -> GalleryAlbum | None: ...
     async def get_system_album(self, space_id: str | None) -> GalleryAlbum | None: ...
@@ -102,6 +123,25 @@ class AbstractGalleryRepo(Protocol):
         before: str | None = None,
         before_id: str | None = None,
         viewer_user_id: str | None = None,
+        sort: ItemSort = ItemSort.ADDED,
+        after: ItemCursor | None = None,
+    ) -> list[GalleryItem]: ...
+    async def find_on_this_day(
+        self,
+        month_days: tuple[str, ...],
+        *,
+        before_year: str,
+        viewer_user_id: str,
+        excluded_album_ids: frozenset[str] = frozenset(),
+    ) -> tuple[str, str, int] | None: ...
+    async def list_on_this_day_items(
+        self,
+        album_id: str,
+        *,
+        year: str,
+        month_days: tuple[str, ...],
+        viewer_user_id: str,
+        limit: int = 3,
     ) -> list[GalleryItem]: ...
     async def list_items_since(
         self,
@@ -321,6 +361,7 @@ class SqliteGalleryRepo:
             cover_url=None,  # filled in by service
             created_at=r.get("created_at"),
             updated_at=r.get("updated_at"),
+            activity_at=r.get("activity_at") or r.get("created_at"),
         )
 
     async def list_albums(
@@ -330,29 +371,40 @@ class SqliteGalleryRepo:
         limit: int = 30,
         before: str | None = None,
         before_id: str | None = None,
+        by_activity: bool = False,
     ) -> list[GalleryAlbum]:
         """One page of a scope's albums: the system album pinned first,
         then newest first (``created_at DESC, id DESC`` — ``id`` breaks a
         tie, so no album is skipped or repeated between pages).
 
+        ``by_activity`` orders by newest activity instead —
+        :data:`_ALBUM_ACTIVITY_SQL`, the newest live item's upload time
+        (else the album's creation) — and the cursor is that time
+        (:attr:`GalleryAlbum.activity_at`).
+
         The next page is ``before`` / ``before_id`` = the last *regular*
-        album's ``created_at`` / ``id``; a page after the first never
-        carries the system album again. ``before`` alone (an older client)
-        keeps its plain ``created_at <`` meaning.
+        album's ``created_at`` (``activity_at``) / ``id``; a page after
+        the first never carries the system album again. ``before`` alone
+        (an older client) keeps its plain ``<`` meaning.
         """
         limit = max(1, min(limit, 200))
+        key = _ALBUM_ACTIVITY_SQL if by_activity else "a.created_at"
         # ``space_id IS ?`` matches both NULL (household) and a specific id.
-        sql = "SELECT * FROM gallery_albums WHERE space_id IS ? AND deleted_at IS NULL"
+        sql = (
+            f"SELECT * FROM (SELECT a.*, {key} AS activity_at"
+            " FROM gallery_albums a"
+            " WHERE a.space_id IS ? AND a.deleted_at IS NULL)"
+        )
         params: list = [space_id]
         if before:
-            sql += " AND is_system = 0"
+            sql += " WHERE is_system = 0"
             if before_id:
-                sql += " AND (created_at < ? OR (created_at = ? AND id < ?))"
+                sql += " AND (activity_at < ? OR (activity_at = ? AND id < ?))"
                 params += [before, before, before_id]
             else:
-                sql += " AND created_at < ?"
+                sql += " AND activity_at < ?"
                 params.append(before)
-        sql += " ORDER BY is_system DESC, created_at DESC, id DESC LIMIT ?"
+        sql += " ORDER BY is_system DESC, activity_at DESC, id DESC LIMIT ?"
         params.append(limit)
         rows = await self._db.fetchall(sql, tuple(params))
         return [self._row_to_album(r) for r in rows_to_dicts(rows)]
@@ -648,12 +700,23 @@ class SqliteGalleryRepo:
         before: str | None = None,
         before_id: str | None = None,
         viewer_user_id: str | None = None,
+        sort: ItemSort = ItemSort.ADDED,
+        after: ItemCursor | None = None,
     ) -> list[GalleryItem]:
-        """One page of an album, newest first (``created_at DESC, id
-        DESC`` — ``id`` breaks a tie, so no item is skipped or repeated
-        between pages). The next page is ``before`` / ``before_id`` = the
-        last item's ``created_at`` / ``id``; ``before`` alone keeps its
-        plain ``created_at <`` meaning.
+        """One page of an album.
+
+        ``ItemSort.ADDED`` (the default): newest upload first
+        (``created_at DESC, id DESC`` — ``id`` breaks a tie, so no item is
+        skipped or repeated between pages). The next page is ``before`` /
+        ``before_id`` = the last item's ``created_at`` / ``id``; ``before``
+        alone keeps its plain ``created_at <`` meaning.
+
+        ``ItemSort.TAKEN`` / ``TAKEN_ASC``: by the day taken (the upload
+        day when the photo carries none — :data:`_ITEM_DAY_SQL`, served by
+        ``idx_gallery_items_album_taken``), newest / oldest day first, then
+        upload time and ``id`` the same way. The next page starts
+        ``after`` the last item's full key (:class:`ItemCursor`), so the
+        cursor matches the order exactly.
 
         ``viewer_user_id`` hides the items of uploaders the viewer blocked
         or is guardian-blocked from, in SQL so a page stays full.
@@ -661,17 +724,94 @@ class SqliteGalleryRepo:
         limit = max(1, min(limit, 500))
         sql = "SELECT * FROM gallery_items WHERE album_id=? AND deleted_at IS NULL"
         params: list = [album_id]
-        if before and before_id:
-            sql += " AND (created_at < ? OR (created_at = ? AND id < ?))"
-            params += [before, before, before_id]
-        elif before:
-            sql += " AND created_at < ?"
-            params.append(before)
+        if sort is ItemSort.ADDED:
+            if before and before_id:
+                sql += " AND (created_at < ? OR (created_at = ? AND id < ?))"
+                params += [before, before, before_id]
+            elif before:
+                sql += " AND created_at < ?"
+                params.append(before)
+            order = " ORDER BY created_at DESC, id DESC"
+        else:
+            cmp, way = ("<", "DESC") if sort is ItemSort.TAKEN else (">", "ASC")
+            if after is not None:
+                sql += f" AND ({_ITEM_DAY_SQL}, created_at, id) {cmp} (?, ?, ?)"
+                params += [after.day, after.created_at, after.item_id]
+            order = f" ORDER BY {_ITEM_DAY_SQL} {way}, created_at {way}, id {way}"
         if viewer_user_id is not None:
             sql += _VIEWER_MAY_SEE_UPLOADER_SQL
             params += [viewer_user_id] * 3
-        sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        sql += order + " LIMIT ?"
         params.append(limit)
+        rows = await self._db.fetchall(sql, tuple(params))
+        return [self._row_to_item(r) for r in rows_to_dicts(rows)]
+
+    async def find_on_this_day(
+        self,
+        month_days: tuple[str, ...],
+        *,
+        before_year: str,
+        viewer_user_id: str,
+        excluded_album_ids: frozenset[str] = frozenset(),
+    ) -> tuple[str, str, int] | None:
+        """The album and year with the most live items taken on one of
+        *month_days* (``MM-DD``) in a year before *before_year* (``YYYY``)
+        — ``(album_id, year, count)``, the most recent year on a tie — or
+        ``None``.
+
+        Only household albums open to everyone at home: a private album
+        (``audience = 'chosen'``) and every space album never feed "On this
+        day" (owner decisions D7 / D14). Items of uploaders hidden from the
+        viewer stay out, and so do the viewer's *excluded_album_ids*.
+        """
+        if not month_days:
+            return None
+        day = _ITEM_DAY_SQL.replace("taken_at", "i.taken_at").replace(
+            "created_at", "i.created_at"
+        )
+        sql = (
+            f"SELECT i.album_id AS album_id, substr({day}, 1, 4) AS yr,"
+            " COUNT(*) AS n"
+            " FROM gallery_items i JOIN gallery_albums a ON a.id = i.album_id"
+            " WHERE a.space_id IS NULL AND a.deleted_at IS NULL"
+            " AND a.audience = ? AND i.deleted_at IS NULL"
+            f" AND substr({day}, 6, 5) IN ({','.join('?' * len(month_days))})"
+            f" AND substr({day}, 1, 4) < ?"
+        )
+        params: list = [AUDIENCE_EVERYONE, *month_days, before_year]
+        if excluded_album_ids:
+            marks = ",".join("?" * len(excluded_album_ids))
+            sql += f" AND i.album_id NOT IN ({marks})"
+            params += sorted(excluded_album_ids)
+        sql += _VIEWER_MAY_SEE_I_UPLOADER_SQL
+        params += [viewer_user_id] * 3
+        sql += " GROUP BY i.album_id, yr ORDER BY n DESC, yr DESC, i.album_id LIMIT 1"
+        row = await self._db.fetchone(sql, tuple(params))
+        if row is None:
+            return None
+        return str(row["album_id"]), str(row["yr"]), int(row["n"])
+
+    async def list_on_this_day_items(
+        self,
+        album_id: str,
+        *,
+        year: str,
+        month_days: tuple[str, ...],
+        viewer_user_id: str,
+        limit: int = 3,
+    ) -> list[GalleryItem]:
+        """The first *limit* live items of the album taken on one of
+        *month_days* in *year*, oldest first (the album's date order)."""
+        days = [f"{year}-{md}" for md in month_days]
+        if not days:
+            return []
+        sql = (
+            "SELECT * FROM gallery_items WHERE album_id=? AND deleted_at IS NULL"
+            f" AND {_ITEM_DAY_SQL} IN ({','.join('?' * len(days))})"
+            + _VIEWER_MAY_SEE_UPLOADER_SQL
+            + f" ORDER BY {_ITEM_DAY_SQL}, created_at, id LIMIT ?"
+        )
+        params = [album_id, *days, *([viewer_user_id] * 3), max(1, min(limit, 50))]
         rows = await self._db.fetchall(sql, tuple(params))
         return [self._row_to_item(r) for r in rows_to_dicts(rows)]
 

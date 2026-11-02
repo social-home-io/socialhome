@@ -13,11 +13,13 @@ as they appear.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any
 
 import orjson
 
+from ..domain.gallery import ON_THIS_DAY_MAX_EXCLUDED, OnThisDaySettings
 from ..domain.highlight import HighlightAudience
 from ..domain.moment import (
     MOMENT_DEFAULT_RETENTION_DAYS,
@@ -265,10 +267,46 @@ def parse_notif_settings(preferences_json: str | None) -> NotifSettings:
     return NotifSettings.from_dict(blob)
 
 
+#: ``preferences_json`` key of the person's "On this day" settings (D14):
+#: ``{"off": bool, "hidden_on": "YYYY-MM-DD", "excluded_albums": [ids]}``.
+#: Written only by ``GalleryOnThisDayService``.
+GALLERY_ON_THIS_DAY_KEY = "gallery_on_this_day"
+
+_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def parse_gallery_on_this_day(preferences_json: str | None) -> OnThisDaySettings:
+    """The person's "On this day" settings — on by default.
+
+    Never raises: bad JSON or wrong types read as the defaults (on, not
+    hidden, no album left out); only ``"off": true`` turns it off, and at
+    most :data:`ON_THIS_DAY_MAX_EXCLUDED` album ids are kept (the newest)."""
+    try:
+        blob = orjson.loads(preferences_json) if preferences_json else {}
+    except orjson.JSONDecodeError:
+        return OnThisDaySettings()
+    raw = blob.get(GALLERY_ON_THIS_DAY_KEY) if isinstance(blob, dict) else None
+    if not isinstance(raw, dict):
+        return OnThisDaySettings()
+    hidden = raw.get("hidden_on")
+    albums = raw.get("excluded_albums")
+    ids = (
+        [a for a in albums if isinstance(a, str) and a][-ON_THIS_DAY_MAX_EXCLUDED:]
+        if isinstance(albums, list)
+        else []
+    )
+    return OnThisDaySettings(
+        enabled=raw.get("off") is not True,
+        hidden_on=hidden if isinstance(hidden, str) and _DAY_RE.match(hidden) else None,
+        excluded_album_ids=frozenset(ids),
+    )
+
+
 __all__ = [
     "DEFAULT_HIGHLIGHTS_MAX_COUNT",
     "DEFAULT_HIGHLIGHTS_RETENTION_DAYS",
     "DEFAULT_MOMENT_MAX_HOPS",
+    "GALLERY_ON_THIS_DAY_KEY",
     "HA_AUTOMATION_EVENTS_KEY",
     "LOCALE_KEY",
     "MAX_TIMETABLE_HOME_PINS",
@@ -276,6 +314,7 @@ __all__ = [
     "NOTIF_MUTED_POSTS_KEY",
     "HighlightsPreferences",
     "MomentPreferences",
+    "parse_gallery_on_this_day",
     "parse_ha_automation_events",
     "parse_highlights_preferences",
     "parse_locale",

@@ -3,6 +3,7 @@ import { render, fireEvent, waitFor, cleanup } from '@testing-library/preact'
 
 const apiGet = vi.fn()
 const apiPost = vi.fn()
+const apiPatch = vi.fn()
 const apiDelete = vi.fn(async () => undefined)
 class FakeApiError extends Error {
   constructor(public status: number) { super(`HTTP ${status}`) }
@@ -11,7 +12,7 @@ vi.mock('@/api', () => ({
   api: {
     get: (...args: unknown[]) => apiGet(...args),
     post: (...args: unknown[]) => apiPost(...args),
-    patch: vi.fn(),
+    patch: (...args: unknown[]) => apiPatch(...args),
     delete: (...args: unknown[]) => apiDelete(...(args as [])),
   },
   ApiError: FakeApiError,
@@ -206,7 +207,7 @@ describe('GalleryPage paging (UX review #1, #2)', () => {
     await waitFor(() => expect(view.getAllByRole('link', { name: /^Photo/ })).toHaveLength(52))
     const [path, q] = split(apiGet.mock.calls.at(-1)![0] as string)
     expect(path).toBe('/api/gallery/albums/al-1/items')
-    expect(q).toMatchObject({ before_id: 'it-51', before: '2026-10-01T00:00:51+00:00', limit: '50' })
+    expect(q).toMatchObject({ sort: 'taken', after_id: 'it-51', after_day: '2026-10-01', after: '2026-10-01T00:00:51+00:00', limit: '50' })
     // A short page is the last one: no more "Load more".
     expect(view.queryByRole('button', { name: 'Load more' })).toBeNull()
   })
@@ -251,11 +252,20 @@ describe('GalleryPage when the network is gone', () => {
   it('a failed first load is an error with Retry — never "No albums yet"', async () => {
     apiGet.mockRejectedValueOnce(new TypeError('Failed to fetch'))
     const view = await mount({ spaceId: 'sp-1' })
-    expect(await view.findByRole('heading', { name: "Couldn't load the albums" })).toBeTruthy()
+    // No answer from home at all: say so, and that nothing is lost.
+    expect(await view.findByRole('heading', { name: 'No connection to your home' })).toBeTruthy()
+    expect(view.getByText(/Your photos are safe at home/)).toBeTruthy()
     expect(view.queryByText('No albums yet')).toBeNull()
     expect(view.queryByText(/Failed to fetch/)).toBeNull()
     fireEvent.click(view.getByRole('button', { name: 'Retry' }))
     expect(await view.findByRole('link', { name: /Open album Holiday/ })).toBeTruthy()
+  })
+
+  it('a server error on the first load is not called a lost connection', async () => {
+    apiGet.mockRejectedValueOnce(new FakeApiError(500))
+    const view = await mount({ spaceId: 'sp-1' })
+    expect(await view.findByRole('heading', { name: "Couldn't load the albums" })).toBeTruthy()
+    expect(view.queryByText('No connection to your home')).toBeNull()
   })
 
   it('back to the list while offline keeps the albums already loaded', async () => {
@@ -267,6 +277,23 @@ describe('GalleryPage when the network is gone', () => {
       "Couldn't refresh the gallery — showing what was loaded before.", 'error',
     ))
     expect(view.queryByText('No albums yet')).toBeNull()
+    // The banner says the list may be out of date, and goes once a
+    // refresh works.
+    expect(await view.findByText(/Uploads wait until you're back online/)).toBeTruthy()
+    fireEvent.click(view.getByRole('button', { name: 'Retry' }))
+    await waitFor(() => expect(view.queryByText(/Uploads wait until you're back online/)).toBeNull())
+  })
+
+  it('going offline shows the banner and keeps the list; back online re-reads it', async () => {
+    const view = await mount({ spaceId: 'sp-1' })
+    await view.findByRole('link', { name: /Open album Holiday/ })
+    window.dispatchEvent(new Event('offline'))
+    expect(await view.findByText(/Uploads wait until you're back online/)).toBeTruthy()
+    expect(view.getByRole('link', { name: /Open album Holiday/ })).toBeTruthy()
+    const calls = apiGet.mock.calls.length
+    window.dispatchEvent(new Event('online'))
+    await waitFor(() => expect(view.queryByText(/Uploads wait until you're back online/)).toBeNull())
+    expect(apiGet.mock.calls.length).toBeGreaterThan(calls)
   })
 })
 
@@ -594,7 +621,7 @@ describe('GalleryPage addresses', () => {
       const [path, q] = split(url)
       if (path === '/api/gallery/albums') return albumRows
       if (path === '/api/gallery/albums/al-1') return albumRows[0]
-      if (path === '/api/gallery/albums/al-1/items') return q.before_id ? [item(7)] : first
+      if (path === '/api/gallery/albums/al-1/items') return q.after_id ? [item(7)] : first
       return []
     })
     const view = await mount({}, '/gallery/albums/al-1/it-7')
@@ -664,5 +691,202 @@ describe('GalleryPage viewer actions follow the delete rules (#1271)', () => {
     await waitFor(() => expect(apiDelete).toHaveBeenCalledWith('/api/gallery/items/it-2'))
     await waitFor(() => expect(location.pathname).toBe('/gallery/albums/al-1/it-1'))
     expect(await view.findByRole('dialog', { name: 'Photo 1 of 1' })).toBeTruthy()
+  })
+})
+
+describe('GalleryPage albums refresh (PR 4)', () => {
+  it('an album shows its photos under month and day headings, by date taken', async () => {
+    people.set('u1', { user_id: 'u1', display_name: 'Anna', username: 'anna' })
+    people.set('u2', { user_id: 'u2', display_name: 'Lena', username: 'lena' })
+    albumRows = [album('al-1', 'Holiday', { space_id: null, item_count: 3 })]
+    itemRows = [
+      item(3, { day: '2026-08-02', taken_at: '2026-08-02', uploaded_by: 'u2' }),
+      item(2, { day: '2026-07-13', taken_at: '2026-07-13' }),
+      item(1, { day: '2026-07-13', taken_at: '2026-07-13', uploaded_by: 'u2' }),
+    ]
+    const view = await renderOpenAlbum({})
+    await waitFor(() => expect(view.getAllByRole('link', { name: /^Photo/ })).toHaveLength(3))
+    const months = view.getAllByRole('heading', { level: 2 }).map(h => h.textContent)
+    expect(months).toEqual(['August 2026', 'July 2026'])
+    const days = view.getAllByRole('heading', { level: 3 }).map(h => h.textContent)
+    expect(days[0]).toMatch(/Aug.*2 · by Lena$/)
+    expect(days[1]).toMatch(/Jul.*13 · by Anna, Lena$/)
+    const [, q] = split(apiGet.mock.calls.find(c => String(c[0]).includes('/items'))![0] as string)
+    expect(q.sort).toBe('taken')
+  })
+
+  it('the order toggle flips to oldest first and is remembered for that album', async () => {
+    albumRows = [album('al-1', 'Holiday', { item_count: 2 })]
+    itemRows = [item(2, { day: '2026-08-02' }), item(1, { day: '2026-07-13' })]
+    let view = await renderOpenAlbum()
+    const toggle = await view.findByRole('button', { name: 'Newest first — show oldest first' })
+    fireEvent.click(toggle)
+    await waitFor(() => {
+      const [, q] = split(apiGet.mock.calls.at(-1)![0] as string)
+      expect(q.sort).toBe('taken_asc')
+    })
+    expect(await view.findByRole('button', { name: 'Oldest first — show newest first' })).toBeTruthy()
+    expect(localStorage.getItem('sh.gallery.order.u1.al-1')).toBe('oldest')
+    // Opened again: still oldest first.
+    cleanup()
+    apiGet.mockClear()
+    view = await renderOpenAlbum()
+    await view.findByRole('button', { name: 'Oldest first — show newest first' })
+    const [, q] = split(apiGet.mock.calls.find(c => String(c[0]).includes('/items'))![0] as string)
+    expect(q.sort).toBe('taken_asc')
+    // Back to newest first forgets the choice.
+    fireEvent.click(view.getByRole('button', { name: 'Oldest first — show newest first' }))
+    await waitFor(() => expect(localStorage.getItem('sh.gallery.order.u1.al-1')).toBeNull())
+  })
+
+  it('the default album is shown in the reader\'s language until renamed', async () => {
+    albumRows = [
+      album('def', 'Fotos', { space_id: null, is_default: true, default_name: true, item_count: 1 }),
+      album('ren', 'Familie', { space_id: null, is_default: false, default_name: false, item_count: 1 }),
+    ]
+    const view = await mount({})
+    expect(await view.findByRole('link', { name: /Open album Photos/ })).toBeTruthy()
+    expect(view.getByRole('link', { name: /Open album Familie/ })).toBeTruthy()
+    expect(view.queryByText('Fotos')).toBeNull()
+  })
+
+  it('albums page by newest activity: the next page keys on activity_at', async () => {
+    albumRows = Array.from({ length: 30 }, (_, i) => album(`a-${i}`, `Trip ${i}`, {
+      space_id: null, item_count: 1, activity_at: `2026-10-${String(30 - i).padStart(2, '0')}T08:00:00+00:00`,
+    }))
+    const view = await mount({})
+    await view.findByRole('link', { name: /Open album Trip 29/ })
+    apiGet.mockImplementationOnce(async () => [])
+    fireEvent.click(view.getByRole('button', { name: 'Load more' }))
+    await waitFor(() => {
+      const [path, q] = split(apiGet.mock.calls.at(-1)![0] as string)
+      expect(path).toBe('/api/gallery/albums')
+      expect(q).toMatchObject({ before: '2026-10-01T08:00:00+00:00', before_id: 'a-29' })
+    })
+  })
+
+  it('first run: a household without photos explains and offers one big Add photos', async () => {
+    albumRows = [album('sys', 'Posts', { space_id: null, is_system: true, owner_user_id: null })]
+    const view = await mount({})
+    expect(await view.findByRole('heading', { name: 'Your photos, all in one place' })).toBeTruthy()
+    expect(view.getByText(/Everyone at home sees what lands here/)).toBeTruthy()
+    expect(view.getByText(/They go into “Photos”/)).toBeTruthy()
+    const input = view.getByTestId('gallery-upload-input') as HTMLInputElement
+    const click = vi.spyOn(input, 'click')
+    fireEvent.click(view.getByRole('button', { name: 'Add photos' }))
+    expect(click).toHaveBeenCalled()
+    // Not the regular header or "No albums yet".
+    expect(view.queryByText('No albums yet')).toBeNull()
+    fireEvent.click(view.getByRole('button', { name: 'Make an album instead' }))
+    expect(view.getByPlaceholderText('e.g. Summer 2026')).toBeTruthy()
+  })
+
+  it('a space with no albums keeps its own empty state, never the household first run', async () => {
+    albumRows = []
+    const view = await mount({ spaceId: 'sp-1' })
+    expect(await view.findByText('No albums yet')).toBeTruthy()
+    expect(view.queryByText('Your photos, all in one place')).toBeNull()
+  })
+})
+
+describe('GalleryPage On this day (D14)', () => {
+  function withCard(settings: Record<string, unknown> = {}) {
+    albumRows = [album('al-1', 'Autumn break', { space_id: null, item_count: 6 })]
+    const base = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => {
+      const [path] = split(url)
+      if (path === '/api/gallery/on-this-day') {
+        return {
+          card: {
+            album: { id: 'al-1', name: 'Autumn break' },
+            date: '2024-11-01', years_ago: 2, count: 6,
+            items: [item(1), item(2), item(3)],
+          },
+          settings: { enabled: true, hidden_today: false, excluded_album_ids: [], ...settings },
+        }
+      }
+      return base(url)
+    })
+  }
+
+  it('one card at the top of the household albums opens the photo in the viewer', async () => {
+    withCard()
+    const view = await mount({})
+    const card = await view.findByRole('region', { name: 'On this day' })
+    expect(card.textContent).toContain('2 years ago today')
+    expect(card.textContent).toContain('6 photos · Autumn break')
+    const [path, q] = split(apiGet.mock.calls.find(c => String(c[0]).startsWith('/api/gallery/on-this-day'))![0] as string)
+    expect(path).toBe('/api/gallery/on-this-day')
+    expect(q.date).toMatch(/^\d{4}-\d{2}-\d{2}$/)
+    const link = view.getAllByRole('link').find(a => a.getAttribute('href') === '/gallery/albums/al-1/it-1')
+    expect(link).toBeTruthy()
+  })
+
+  it('never in a space gallery', async () => {
+    withCard()
+    const view = await mount({ spaceId: 'sp-1' })
+    await view.findByRole('link', { name: /Open album/ })
+    expect(view.queryByRole('region', { name: 'On this day' })).toBeNull()
+    expect(apiGet.mock.calls.some(c => String(c[0]).startsWith('/api/gallery/on-this-day'))).toBe(false)
+  })
+
+  it('✕ hides it for today, with Undo', async () => {
+    withCard()
+    apiPatch.mockResolvedValue({ settings: { enabled: true, hidden_today: true, excluded_album_ids: [] } })
+    const view = await mount({})
+    await view.findByRole('region', { name: 'On this day' })
+    fireEvent.click(view.getByRole('button', { name: 'Hide for today' }))
+    await waitFor(() => expect(view.queryByRole('region', { name: 'On this day' })).toBeNull())
+    expect(apiPatch).toHaveBeenCalledWith('/api/gallery/on-this-day', expect.objectContaining({ hide_today: true }))
+    expect(showToast).toHaveBeenCalledWith('Hidden until tomorrow.', 'info', expect.objectContaining({
+      action: expect.objectContaining({ label: 'Undo' }),
+    }))
+  })
+
+  it('don\'t show this album again, and turn it off, from the ⋯ menu', async () => {
+    withCard()
+    apiPatch.mockResolvedValue({ settings: { enabled: true, hidden_today: false, excluded_album_ids: ['al-1'] } })
+    const view = await mount({})
+    await view.findByRole('region', { name: 'On this day' })
+    fireEvent.click(view.getByRole('button', { name: 'More options for On this day' }))
+    fireEvent.click(await view.findByRole('menuitem', { name: 'Don\'t show “Autumn break” again' }))
+    await waitFor(() => expect(apiPatch).toHaveBeenCalledWith(
+      '/api/gallery/on-this-day', expect.objectContaining({ exclude_album_id: 'al-1' }),
+    ))
+    await waitFor(() => expect(view.queryByRole('region', { name: 'On this day' })).toBeNull())
+    // The foot of the list says how to bring the album back.
+    expect(await view.findByText('On this day leaves out 1 album.')).toBeTruthy()
+    apiPatch.mockResolvedValue({ settings: { enabled: true, hidden_today: false, excluded_album_ids: [] } })
+    fireEvent.click(view.getByRole('button', { name: 'Show them again' }))
+    await waitFor(() => expect(apiPatch).toHaveBeenLastCalledWith(
+      '/api/gallery/on-this-day', expect.objectContaining({ include_all: true }),
+    ))
+  })
+
+  it('turned off: no card, and the foot of the list turns it back on', async () => {
+    albumRows = [album('al-1', 'Holiday', { space_id: null, item_count: 1 })]
+    const base = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => (split(url)[0] === '/api/gallery/on-this-day'
+      ? { card: null, settings: { enabled: false, hidden_today: false, excluded_album_ids: [] } }
+      : base(url)))
+    apiPatch.mockResolvedValue({ settings: { enabled: true, hidden_today: false, excluded_album_ids: [] } })
+    const view = await mount({})
+    expect(await view.findByText('On this day is off.')).toBeTruthy()
+    fireEvent.click(view.getByRole('button', { name: 'Turn it on' }))
+    await waitFor(() => expect(apiPatch).toHaveBeenCalledWith(
+      '/api/gallery/on-this-day', expect.objectContaining({ enabled: true }),
+    ))
+  })
+
+  it('a failed save puts the card back and says so', async () => {
+    withCard()
+    apiPatch.mockRejectedValue(new TypeError('Failed to fetch'))
+    const view = await mount({})
+    await view.findByRole('region', { name: 'On this day' })
+    fireEvent.click(view.getByRole('button', { name: 'Hide for today' }))
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith(
+      "Couldn't save that. Check your connection and try again.", 'error',
+    ))
+    expect(await view.findByRole('region', { name: 'On this day' })).toBeTruthy()
   })
 })

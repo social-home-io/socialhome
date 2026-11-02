@@ -18,6 +18,8 @@ import uuid
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
+import orjson
+
 from ..db import AsyncDatabase
 from ..domain.move_errors import StaleMoveLink
 from ..domain.user import RemoteUser, User, UserStatus
@@ -44,6 +46,9 @@ class AbstractUserRepo(Protocol):
     async def set_admin(self, username: str, is_admin: bool) -> None: ...
     async def set_last_seen(self, user_id: str, at: str) -> None: ...
     async def set_tz(self, username: str, tz: str) -> None: ...
+    async def set_preference_key(
+        self, user_id: str, key: str, value: object
+    ) -> None: ...
     async def touch_preference_entry(
         self, user_id: str, key: str, sub_key: str, value: str
     ) -> None: ...
@@ -377,6 +382,26 @@ class SqliteUserRepo:
             " WHERE user_id = ? AND json_valid(preferences_json)"
             " AND json_type(preferences_json, ?) IS NOT NULL",
             (path, value, user_id, path),
+        )
+
+    async def set_preference_key(self, user_id: str, key: str, value: object) -> None:
+        """Set ``preferences_json[key]`` to the JSON of *value* in one
+        statement — the rest of the blob is untouched, so a concurrent
+        ``PATCH /api/me`` of another key is never lost. A blob that is not
+        valid JSON starts over as ``{key: value}``.
+
+        *key* must be plain (letters, digits, ``_ . : -``); anything else
+        raises :class:`ValueError` (it becomes a JSON path)."""
+        if not _PLAIN_KEY.match(key):
+            raise ValueError("preference keys must be plain")
+        path = f'$."{key}"'
+        await self._db.enqueue(
+            "UPDATE users SET preferences_json = json_set("
+            " CASE WHEN json_valid(preferences_json)"
+            " AND json_type(preferences_json) = 'object'"
+            " THEN preferences_json ELSE '{}' END, ?, json(?))"
+            " WHERE user_id = ?",
+            (path, orjson.dumps(value).decode(), user_id),
         )
 
     async def set_tz(self, username: str, tz: str) -> None:

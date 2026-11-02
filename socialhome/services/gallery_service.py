@@ -62,6 +62,8 @@ from ..domain.gallery import (
     GalleryItem,
     GalleryTrashItem,
     GalleryUpload,
+    ItemCursor,
+    ItemSort,
     StashedUpload,
     UploadLimits,
     UploadOutcome,
@@ -184,6 +186,12 @@ DESCRIPTION_MAX: int = 500
 ALBUMS_PER_SPACE: int = 200
 #: ``instance_config`` key holding the household default album's id.
 DEFAULT_ALBUM_KEY: str = "gallery.default_album_id"
+#: The id of the default album once somebody renamed it. Until then each
+#: viewer sees the default album under their own word for "Photos" (the
+#: SPA localises it, ``default_name``), not the first uploader's. Holding
+#: the album id (not a flag) means a new default album, made after the
+#: renamed one was deleted, is localised again.
+DEFAULT_ALBUM_RENAMED_KEY: str = "gallery.default_album_renamed"
 
 
 # ─── Errors ──────────────────────────────────────────────────────────────
@@ -289,11 +297,16 @@ class GalleryService:
         if space_id is not None:
             await self._require_member(space_id, actor_user_id)
         albums = await self._repo.list_albums(
-            space_id, limit=limit, before=before, before_id=before_id
+            space_id,
+            limit=limit,
+            before=before,
+            before_id=before_id,
+            by_activity=True,
         )
+        marks = await self._default_marks() if space_id is None else (None, None)
         out: list[GalleryAlbum] = []
         for a in albums:
-            out.append(await self._for_viewer(a, actor_user_id))
+            out.append(await self._for_viewer(a, actor_user_id, marks=marks))
         return out
 
     async def get_album(
@@ -306,14 +319,28 @@ class GalleryService:
         return await self._for_viewer(album, actor_user_id)
 
     async def _for_viewer(
-        self, album: GalleryAlbum, viewer_user_id: str
+        self,
+        album: GalleryAlbum,
+        viewer_user_id: str,
+        *,
+        marks: tuple[str | None, str | None] | None = None,
     ) -> GalleryAlbum:
-        """The album as *viewer_user_id* sees it: its cover, and — for the
-        system "Posts" album, which hides the posts of people the viewer
-        blocked — the count of what they actually see, so the card never
-        says 12 while 11 show."""
+        """The album as *viewer_user_id* sees it: its cover, whether it is
+        the household's default album (still under its default name), and
+        — for the system "Posts" album, which hides the posts of people the
+        viewer blocked — the count of what they actually see, so the card
+        never says 12 while 11 show. *marks* is :meth:`_default_marks`,
+        read once for a whole list."""
         cover_url = await self._resolve_cover(album, viewer_user_id=viewer_user_id)
         shown = _with_cover(album, cover_url)
+        if album.space_id is None and not album.is_system:
+            default_id, renamed_id = (
+                marks if marks is not None else await self._default_marks()
+            )
+            if album.id == default_id:
+                shown = replace(
+                    shown, is_default=True, default_name=renamed_id != album.id
+                )
         if album.is_system:
             shown = replace(
                 shown,
@@ -415,6 +442,16 @@ class GalleryService:
                 await self._instance_config.set(DEFAULT_ALBUM_KEY, album.id)
         return await self._for_viewer(album, actor_user_id), created
 
+    async def _default_marks(self) -> tuple[str | None, str | None]:
+        """``(default album id, renamed default album id)`` from
+        ``instance_config`` — ``None`` where unset."""
+        if self._instance_config is None:
+            return None, None
+        return (
+            await self._instance_config.get(DEFAULT_ALBUM_KEY) or None,
+            await self._instance_config.get(DEFAULT_ALBUM_RENAMED_KEY) or None,
+        )
+
     async def _stored_default_album(self) -> GalleryAlbum | None:
         if self._instance_config is None:
             return None
@@ -461,9 +498,19 @@ class GalleryService:
             patch["cover_item_id"] = cover_item_id
         if patch:
             await self._repo.update_album(album_id, patch)
+            if "name" in patch and album.space_id is None:
+                await self._remember_renamed_default(album_id)
             await self._bus.publish(
                 GalleryAlbumUpdated(album_id=album_id, space_id=album.space_id)
             )
+
+    async def _remember_renamed_default(self, album_id: str) -> None:
+        """Someone named the default album: from now on everybody sees
+        that name, not their own word for "Photos"."""
+        if self._instance_config is None:
+            return
+        if await self._instance_config.get(DEFAULT_ALBUM_KEY) == album_id:
+            await self._instance_config.set(DEFAULT_ALBUM_RENAMED_KEY, album_id)
 
     async def delete_album(self, album_id: str, *, actor_user_id: str) -> None:
         album = await self._repo.get_album(album_id)
@@ -536,9 +583,12 @@ class GalleryService:
         limit: int = 50,
         before: str | None = None,
         before_id: str | None = None,
+        sort: ItemSort = ItemSort.ADDED,
+        after: ItemCursor | None = None,
     ) -> list[GalleryItem]:
-        """One page of an album, newest first — see
-        :meth:`AbstractGalleryRepo.list_items` for the cursor.
+        """One page of an album: newest upload first, or (*sort*) by the
+        day taken — see :meth:`AbstractGalleryRepo.list_items` for the
+        order and the cursors.
 
         The system "Posts" album mirrors the feed, so it hides what the
         feed hides: the posts of people the viewer blocked, or is
@@ -550,6 +600,8 @@ class GalleryService:
             before=before,
             before_id=before_id,
             viewer_user_id=actor_user_id if album.is_system else None,
+            sort=sort,
+            after=after,
         )
 
     async def upload_limits(
