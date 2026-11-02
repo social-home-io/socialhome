@@ -35,6 +35,7 @@ from socialhome.domain.events import (
     GalleryAlbumUpdated,
     GalleryItemDeleted,
     GalleryItemRestored,
+    GalleryItemUpdated,
     GalleryItemUploaded,
     HighlightAudienceChanged,
     HouseholdZonesChanged,
@@ -876,6 +877,27 @@ async def test_a_restored_gallery_item_fans_to_the_household(env):
     await bus.publish(GalleryItemRestored(item_id="it-2", album_id="al-2"))
     assert [json.loads(m) for m in sock.sent] == [
         {"type": "gallery.item_restored", "album_id": "al-2", "item_id": "it-2"}
+    ]
+    assert stranger.sent == []
+
+
+async def test_gallery_item_updated_reaches_the_household_with_both_albums(env):
+    """A caption / date change or a move: household only, naming the album
+    the photo left too (both grids and counts change)."""
+    _svc, bus, ws = env
+    sock, stranger = _FakeWS(), _FakeWS()
+    await ws.register("u1", sock)
+    await ws.register("u9", stranger)
+    await bus.publish(
+        GalleryItemUpdated(item_id="it-3", album_id="al-new", from_album_id="al-old")
+    )
+    assert [json.loads(m) for m in sock.sent] == [
+        {
+            "type": "gallery.item_updated",
+            "album_id": "al-new",
+            "from_album_id": "al-old",
+            "item_id": "it-3",
+        }
     ]
     assert stranger.sent == []
 

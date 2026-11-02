@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { backLeadsTo, galleryPath, markBackTo, parseGallerySub } from './galleryRoutes'
+import { TRASH_PATH, backLeadsTo, galleryPath, markBackTo, parseGallerySub } from './galleryRoutes'
 
 describe('galleryRoutes', () => {
   it('builds the household and the space addresses', () => {
@@ -16,6 +16,12 @@ describe('galleryRoutes', () => {
     expect(parseGallerySub(undefined)).toEqual({ albumId: null, itemId: null, valid: true })
     expect(parseGallerySub('albums/a1')).toEqual({ albumId: 'a1', itemId: null, valid: true })
     expect(parseGallerySub('albums/a1/i1')).toEqual({ albumId: 'a1', itemId: 'i1', valid: true })
+  })
+
+  it('knows the household trash (/gallery/trash) — under the ingress prefix too, it is an in-app path', () => {
+    expect(parseGallerySub('trash')).toEqual({ albumId: null, itemId: null, valid: true, trash: true })
+    expect(parseGallerySub('trash/x').valid).toBe(false)
+    expect(TRASH_PATH).toBe('/gallery/trash')
   })
 
   it('an address it does not know is not valid', () => {

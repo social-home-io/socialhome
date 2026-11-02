@@ -59,8 +59,43 @@ describe('HaUsersPanel', () => {
     const word = kid.parentElement!.querySelector('span')!
     expect(word.textContent).toBe('Active')
     fireEvent.click(word)
+    // Removing someone asks first (their photos stay; a copy can be saved).
+    const confirm = await findByRole('button', { name: 'Remove Kid' })
+    expect(del).not.toHaveBeenCalled()
+    fireEvent.click(confirm)
     await new Promise((r) => setTimeout(r, 20))
     expect(del).toHaveBeenCalledTimes(1)
+  })
+
+  it('removing someone offers their photos as a ZIP first', async () => {
+    const del = vi.fn(async () => ({}))
+    const download = vi.fn(async () => ({ blob: new Blob(['zip']), filename: 'Alice – photos.zip' }))
+    vi.doMock('@/api', () => ({
+      api: {
+        get: vi.fn(async (path: string) => path.startsWith('/api/gallery/people/')
+          ? { count: 3, name: 'Alice' }
+          : [{ username: 'alice', display_name: 'Alice', picture_url: null, is_admin: false, synced: true }]),
+        post: vi.fn(),
+        delete: del,
+        download,
+      },
+      ApiError: class extends Error {},
+    }))
+    vi.doMock('@/store/instance', () => ({
+      instanceConfig: { value: { mode: 'haos', capabilities: ['ingress'], setup_required: false, instance_name: 'Home' } },
+    }))
+    URL.createObjectURL = vi.fn(() => 'blob:x')
+    URL.revokeObjectURL = vi.fn()
+    const { HaUsersPanel } = await import('./HaUsersPanel')
+    const { findByRole, getByRole } = render(<HaUsersPanel />)
+    fireEvent.click(await findByRole('switch', { name: 'Sync Alice' }))
+    expect(await findByRole('alertdialog', { name: 'Remove Alice?' })).toBeTruthy()
+    fireEvent.click(await findByRole('button', { name: "Save Alice's 3 photos" }))
+    await new Promise((r) => setTimeout(r, 20))
+    expect(download).toHaveBeenCalledWith(
+      `/api/gallery/people/alice/photos/zip?zip_name=${encodeURIComponent('Alice – photos')}`)
+    fireEvent.click(getByRole('button', { name: 'Cancel' }))
+    expect(del).not.toHaveBeenCalled()
   })
 
   it('flips the toggle and calls POST /provision for a new sync (haos)', async () => {

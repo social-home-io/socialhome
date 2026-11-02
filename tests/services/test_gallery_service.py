@@ -20,6 +20,7 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.errors import (
+    DownloadTooLargeError,
     PayloadTooLargeError,
     TranscodeQueueFullError,
     VideoTooLongError,
@@ -30,9 +31,11 @@ from socialhome.domain.events import (
     GalleryAlbumUpdated,
     GalleryItemDeleted,
     GalleryItemRestored,
+    GalleryItemUpdated,
     UserDeprovisioned,
 )
 from socialhome.domain.gallery import (
+    DOWNLOAD_MAX_ITEMS,
     GALLERY_MAX_UPLOAD_BYTES,
     GALLERY_VIDEO_MAX_SECONDS,
     GALLERY_VIDEO_MAX_UPLOAD_BYTES,
@@ -1223,10 +1226,21 @@ async def test_the_uploader_deletes_their_own_household_photo(env):
     assert await env.list_items(album.id, actor_user_id="b-id") == []
 
 
-async def test_the_album_owner_deletes_any_photo_in_their_album(env):
+async def test_the_album_owner_cannot_delete_someone_elses_photo(env):
+    """D6: one by one, a photo is its uploader's (or an admin's) — the
+    album's owner deletes the album as a whole instead."""
     album, item = await _bobs_household_item(env, uploader="e-id")
-    await env.delete_item(item.id, actor_user_id="b-id")
-    assert await env.list_items(album.id, actor_user_id="b-id") == []
+    with pytest.raises(GalleryPermissionError):
+        await env.delete_item(item.id, actor_user_id="b-id")
+    assert [i.id for i in await env.list_items(album.id, actor_user_id="b-id")] == [
+        item.id
+    ]
+    await env.delete_album(album.id, actor_user_id="b-id")
+    # Its uploader brings the photo back (and the album with it).
+    await env.restore_item(item.id, actor_user_id="e-id")
+    assert [i.id for i in await env.list_items(album.id, actor_user_id="b-id")] == [
+        item.id
+    ]
 
 
 async def test_a_household_admin_deletes_any_household_photo(env):
@@ -2051,3 +2065,241 @@ async def test_marking_an_album_seen_needs_a_seat(env):
         await env.mark_album_seen(album.id, actor_user_id="e-id")
     with pytest.raises(GalleryNotFoundError):
         await env.mark_album_seen("nope", actor_user_id="b-id")
+
+
+# ─── Managing (PR 5): edit, move, bulk, album restore, empty trash ────────
+
+
+async def test_caption_and_day_taken_are_edited_by_the_uploader(env):
+    album = await _household_album(env, owner="a-id")
+    up = await _upload(env, album.id, _jpeg(), who="b-id")
+    seen = _published(env, GalleryItemUpdated)
+
+    item = await env.update_item(
+        up.item.id, actor_user_id="b-id", caption="  Lake  ", taken_at="2026-07-12"
+    )
+
+    assert item.caption == "Lake"
+    assert item.taken_at == "2026-07-12"
+    assert [(e.item_id, e.from_album_id) for e in seen] == [(up.item.id, None)]
+    cleared = await env.update_item(
+        up.item.id, actor_user_id="b-id", caption="", taken_at=None
+    )
+    assert cleared.caption is None
+    assert cleared.taken_at is None
+
+
+async def test_only_who_may_delete_a_photo_may_edit_it(env):
+    album = await _household_album(env, owner="a-id")
+    up = await _upload(env, album.id, _jpeg(), who="a-id")
+    with pytest.raises(GalleryPermissionError):
+        await env.update_item(up.item.id, actor_user_id="e-id", caption="mine now")
+    assert (
+        await env.update_item(up.item.id, actor_user_id="a-id", caption="ok")
+    ).caption == "ok"
+
+
+@pytest.mark.parametrize(
+    "bad", ["12.07.2026", "2026-13-01", "1700-01-01", "2999-01-01", "2026-7-1"]
+)
+async def test_a_day_taken_must_be_a_real_day(env, bad):
+    album = await _household_album(env)
+    up = await _upload(env, album.id, _jpeg())
+    with pytest.raises(ValueError):
+        await env.update_item(up.item.id, actor_user_id="a-id", taken_at=bad)
+
+
+async def test_a_long_caption_is_refused(env):
+    album = await _household_album(env)
+    up = await _upload(env, album.id, _jpeg())
+    with pytest.raises(ValueError):
+        await env.update_item(up.item.id, actor_user_id="a-id", caption="x" * 301)
+
+
+async def test_a_photo_moves_to_another_album_and_both_counts_follow(env):
+    src = await _household_album(env, name="Summer")
+    dst = await _household_album(env, owner="b-id", name="Lake")
+    up = await _upload(env, src.id, _jpeg())
+    await env.update_album(src.id, actor_user_id="a-id", cover_item_id=up.item.id)
+    seen = _published(env, GalleryItemUpdated)
+
+    moved = await env.update_item(up.item.id, actor_user_id="a-id", album_id=dst.id)
+
+    assert moved.album_id == dst.id
+    src_now = await env._repo.get_album(src.id)  # type: ignore[attr-defined]
+    assert src_now.item_count == 0
+    assert src_now.cover_item_id is None  # it no longer lives there
+    assert (await env._repo.get_album(dst.id)).item_count == 1  # type: ignore[attr-defined]
+    assert [(e.album_id, e.from_album_id) for e in seen] == [(dst.id, src.id)]
+
+
+async def test_nothing_moves_into_the_posts_album_or_a_space(env):
+    album = await _household_album(env)
+    up = await _upload(env, album.id, _jpeg())
+    system = await env.ensure_system_album(None)
+    space_album = await env.create_album(
+        space_id="sp-1", owner_user_id="a-id", name="Trip"
+    )
+    with pytest.raises(GalleryPermissionError):
+        await env.update_item(up.item.id, actor_user_id="a-id", album_id=system.id)
+    with pytest.raises(GalleryNotFoundError):
+        await env.update_item(up.item.id, actor_user_id="a-id", album_id=space_album.id)
+
+
+async def test_a_space_photo_is_not_edited_here(env):
+    album = await env.create_album(space_id="sp-1", owner_user_id="a-id", name="Trip")
+    up = await _upload(env, album.id, _jpeg())
+    with pytest.raises(GalleryPermissionError):
+        await env.update_item(up.item.id, actor_user_id="a-id", caption="x")
+
+
+async def test_a_bulk_delete_does_what_it_may_and_names_the_rest(env):
+    album = await _household_album(env, owner="b-id", name="Bob's")
+    mine = await _upload(env, album.id, _jpeg((1, 2, 3)), who="e-id")
+    bobs = await _upload(env, album.id, _jpeg((4, 5, 6)), who="b-id")
+
+    done, refused = await env.apply_to_items(
+        "delete", [mine.item.id, bobs.item.id, mine.item.id], actor_user_id="e-id"
+    )
+
+    assert done == [mine.item.id]
+    assert refused == [bobs.item.id]
+    trash = await env.list_trash(actor_user_id="e-id")
+    assert [t.item.id for t in trash] == [mine.item.id]
+
+    back, _ = await env.apply_to_items("restore", [mine.item.id], actor_user_id="e-id")
+    assert back == [mine.item.id]
+    assert await env.list_trash(actor_user_id="e-id") == []
+
+
+async def test_a_bulk_move_and_its_bounds(env):
+    src = await _household_album(env, name="A")
+    dst = await _household_album(env, name="B")
+    up = await _upload(env, src.id, _jpeg())
+    done, refused = await env.apply_to_items(
+        "move", [up.item.id, "nope"], actor_user_id="a-id", album_id=dst.id
+    )
+    assert (done, refused) == ([up.item.id], ["nope"])
+    with pytest.raises(ValueError):
+        await env.apply_to_items("move", [up.item.id], actor_user_id="a-id")
+    with pytest.raises(ValueError):
+        await env.apply_to_items("explode", [up.item.id], actor_user_id="a-id")
+    with pytest.raises(ValueError):
+        await env.apply_to_items("delete", [], actor_user_id="a-id")
+    with pytest.raises(ValueError):
+        await env.apply_to_items(
+            "delete", [f"i{n}" for n in range(501)], actor_user_id="a-id"
+        )
+
+
+async def test_an_album_comes_back_with_the_photos_deleted_with_it(env):
+    album = await _household_album(env, owner="b-id", name="Bob's")
+    earlier = await _upload(env, album.id, _jpeg((1, 1, 1)), who="b-id")
+    kept = await _upload(env, album.id, _jpeg((2, 2, 2)), who="b-id")
+    await env.delete_item(earlier.item.id, actor_user_id="b-id")
+    await asyncio.sleep(1.1)  # a later trash stamp than the album's
+    await env.delete_album(album.id, actor_user_id="b-id")
+    with pytest.raises(GalleryPermissionError):
+        await env.restore_album(album.id, actor_user_id="e-id")
+
+    assert await env.restore_album(album.id, actor_user_id="b-id") == 1
+
+    back = await env.get_album(album.id, actor_user_id="b-id")
+    assert back.item_count == 1
+    trash = await env.list_trash(actor_user_id="b-id")
+    assert [t.item.id for t in trash] == [earlier.item.id]  # deleted on its own
+    assert kept.item.id not in {t.item.id for t in trash}
+    with pytest.raises(GalleryNotFoundError):
+        await env.restore_album(album.id, actor_user_id="b-id")
+
+
+async def test_only_an_admin_empties_the_trash(env):
+    album = await _household_album(env)
+    up = await _upload(env, album.id, _jpeg())
+    await env.delete_item(up.item.id, actor_user_id="a-id")
+    with pytest.raises(GalleryPermissionError):
+        await env.empty_trash(actor_user_id="b-id")
+    assert await env.empty_trash(actor_user_id="a-id") == 1
+    assert await env.list_trash(actor_user_id="a-id") == []
+    assert not _stored_files(env)
+
+
+# ─── Downloads: the stored WebP / WebM, human names ──────────────────────
+
+
+async def test_a_download_hands_out_the_stored_webp_with_a_human_name(env):
+    album = await _household_album(env, name="Sommer 2026")
+    one = await _upload(env, album.id, _jpeg((1, 1, 1)))
+    two = await _upload(env, album.id, _jpeg((2, 2, 2)))
+    await env.update_item(one.item.id, actor_user_id="a-id", taken_at="2026-07-12")
+    await env.update_item(two.item.id, actor_user_id="a-id", taken_at="2026-07-12")
+
+    files = await env.download_files(
+        [one.item.id, two.item.id, "unknown"], actor_user_id="b-id"
+    )
+
+    assert [f.name for f in files] == [
+        "Sommer 2026 – 2026-07-12 – 1.webp",
+        "Sommer 2026 – 2026-07-12 – 2.webp",
+    ]
+    for f in files:
+        data = pathlib.Path(f.path).read_bytes()
+        assert data[:4] == b"RIFF" and data[8:12] == b"WEBP"  # the stored copy
+        assert f.size == len(data)
+        with Image.open(io.BytesIO(data)) as img:
+            assert max(img.size) <= IMAGE_MAX_DIMENSION
+
+
+async def test_a_space_download_needs_a_seat(env):
+    album = await env.create_album(space_id="sp-1", owner_user_id="a-id", name="Trip")
+    up = await _upload(env, album.id, _jpeg())
+    assert await env.download_files([up.item.id], actor_user_id="e-id") == []
+    assert len(await env.download_files([up.item.id], actor_user_id="b-id")) == 1
+
+
+async def test_the_posts_album_downloads_under_the_readers_word(env):
+    await _store_photo(env, "pic.webp")
+    await env.mirror_post(_photo_post("p1", "a-id", "pic.webp"), None)
+    system = await env.ensure_system_album(None)
+    (item,) = await env.list_items(system.id, actor_user_id="a-id")
+    (f,) = await env.download_files(
+        [item.id], actor_user_id="a-id", system_album_label="Aus dem Feed"
+    )
+    assert f.name.startswith("Aus dem Feed – ")
+    assert f.name.endswith(".webp")
+
+
+async def test_too_many_photos_for_one_download(env, monkeypatch):
+    with pytest.raises(DownloadTooLargeError):
+        await env.download_files(
+            [f"i{n}" for n in range(DOWNLOAD_MAX_ITEMS + 1)], actor_user_id="a-id"
+        )
+    with pytest.raises(ValueError):
+        await env.download_files([], actor_user_id="a-id")
+    album = await _household_album(env)
+    up = await _upload(env, album.id, _jpeg())
+    monkeypatch.setattr("socialhome.services.gallery_service.DOWNLOAD_MAX_BYTES", 10)
+    with pytest.raises(DownloadTooLargeError):
+        await env.download_files([up.item.id], actor_user_id="a-id")
+
+
+async def test_someones_photos_for_the_leaving_household_zip(env):
+    album = await _household_album(env, owner="b-id", name="Bob's")
+    await _upload(env, album.id, _jpeg((1, 1, 1)), who="b-id")
+    await _upload(env, album.id, _jpeg((2, 2, 2)), who="e-id")
+    other = await _household_album(env, owner="b-id", name="Lake")
+    await _upload(env, other.id, _jpeg((3, 3, 3)), who="b-id")
+
+    name, items, _ = await env.person_uploads("bob", actor_user_id="a-id")
+    assert name == "Bob"
+    assert len(items) == 2  # his own, not Eve's
+
+    with pytest.raises(GalleryPermissionError):
+        await env.person_uploads("bob", actor_user_id="e-id")
+    with pytest.raises(GalleryNotFoundError):
+        await env.person_uploads("nobody", actor_user_id="a-id")
+    _name, files = await env.person_download_files("bob", actor_user_id="b-id")
+    assert sorted(f.name for f in files) == sorted(
+        n for n in (f.name for f in files) if n.startswith(("Bob's – ", "Lake – "))
+    )
+    assert len(files) == 2

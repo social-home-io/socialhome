@@ -6,8 +6,12 @@ A household album is shared by everyone at home, but that is not licence
 for anyone to delete anyone's photos. Against the real application
 (registry, SQLite, routes), over HTTP:
 
-* A household photo is deleted by its uploader, the album's owner or a
-  household admin — any other member gets 403 and the photo stays.
+* A household photo is deleted (restored, purged, its caption or date
+  edited) only by its uploader or a household admin (owner decision D6)
+  — any other member, the album's owner included, gets 403 and the photo
+  stays. Through the selection endpoint too.
+* The album's owner may still delete the album as a whole: its photos go
+  to the trash with it, and each uploader can bring theirs back.
 * A household album is renamed, re-flagged or deleted by its owner or a
   household admin — any other member gets 403.
 * A protected account (a child) deletes only its own uploads — not even
@@ -104,13 +108,50 @@ async def test_a_member_cannot_delete_another_members_photo(tc):
     assert await _item_ids(tc, album_id) == [item_id]
 
 
-@pytest.mark.parametrize("who", ["carol", "bob", "ann"])
-async def test_uploader_album_owner_and_admin_may_delete(tc, who):
-    """carol uploaded it, bob owns the album, ann is the household admin."""
+@pytest.mark.parametrize("who", ["carol", "ann"])
+async def test_uploader_and_admin_may_delete(tc, who):
+    """carol uploaded it, ann is the household admin."""
     album_id, item_id = await _bobs_album_with(tc, "carol")
     r = await tc.delete(f"/api/gallery/items/{item_id}", headers=_h(who))
     assert r.status == 204
     assert await _item_ids(tc, album_id) == []
+
+
+async def test_the_album_owner_cannot_delete_or_edit_someone_elses_photo(tc):
+    """bob owns the album, carol added the photo: one by one, it is hers."""
+    album_id, item_id = await _bobs_album_with(tc, "carol")
+    assert (
+        await tc.delete(f"/api/gallery/items/{item_id}", headers=_h("bob"))
+    ).status == 403
+    r = await tc.patch(
+        f"/api/gallery/items/{item_id}", json={"caption": "mine"}, headers=_h("bob")
+    )
+    assert r.status == 403
+    r = await tc.post(
+        "/api/gallery/bulk",
+        json={"action": "delete", "item_ids": [item_id]},
+        headers=_h("bob"),
+    )
+    assert await r.json() == {"done": [], "refused": [item_id]}
+    assert await _item_ids(tc, album_id) == [item_id]
+
+
+async def test_the_album_owner_may_delete_the_album_and_uploaders_restore(tc):
+    album_id, item_id = await _bobs_album_with(tc, "carol")
+    assert (
+        await tc.delete(f"/api/gallery/albums/{album_id}", headers=_h("bob"))
+    ).status == 204
+    # bob can't take carol's photo out of the trash for good …
+    r = await tc.post(
+        "/api/gallery/bulk",
+        json={"action": "purge", "item_ids": [item_id]},
+        headers=_h("bob"),
+    )
+    assert (await r.json())["refused"] == [item_id]
+    # … carol brings it back, and the album with it.
+    r = await tc.post(f"/api/gallery/items/{item_id}/restore", headers=_h("carol"))
+    assert r.status == 200
+    assert await _item_ids(tc, album_id) == [item_id]
 
 
 async def test_only_the_owner_or_an_admin_manages_a_household_album(tc):

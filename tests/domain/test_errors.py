@@ -12,6 +12,7 @@ from socialhome.domain.conversation import (
 )
 from socialhome.domain.errors import (
     CodedError,
+    DownloadTooLargeError,
     GfsSelectionInvalidError,
     GfsSelectionRequiredError,
     ImageTooLargeError,
@@ -100,6 +101,12 @@ def test_image_too_large_reports_whole_megabytes():
     assert not isinstance(exc, ValueError)
     # Never rounds down to zero.
     assert ImageTooLargeError(1000).params == {"max_mb": 1}
+
+
+def test_download_too_large_says_how_many_and_how_big():
+    exc = DownloadTooLargeError(500, 2 * 1024**3)
+    assert (exc.status, exc.code) == (413, "DOWNLOAD_TOO_LARGE")
+    assert exc.params == {"max_items": 500, "max_mb": 2048}
 
 
 def test_payload_too_large_is_a_413_with_whole_megabytes():

@@ -59,6 +59,7 @@ from ..domain.events import (
     GalleryAlbumUpdated,
     GalleryItemDeleted,
     GalleryItemRestored,
+    GalleryItemUpdated,
     GalleryItemUploaded,
     HighlightAudienceChanged,
     HighlightFrameAdded,
@@ -362,6 +363,7 @@ class RealtimeService:
         self._bus.subscribe(GalleryItemUploaded, self._on_gallery_item_uploaded)
         self._bus.subscribe(GalleryItemDeleted, self._on_gallery_item_deleted)
         self._bus.subscribe(GalleryItemRestored, self._on_gallery_item_restored)
+        self._bus.subscribe(GalleryItemUpdated, self._on_gallery_item_updated)
         self._bus.subscribe(UserStatusChanged, self._on_user_status)
         self._bus.subscribe(PresenceUpdated, self._on_presence_updated)
         # Online status (session presence) — orthogonal to physical
@@ -1491,6 +1493,18 @@ class RealtimeService:
             {
                 "type": "gallery.item_restored",
                 "album_id": event.album_id,
+                "item_id": event.item_id,
+            }
+        )
+
+    async def _on_gallery_item_updated(self, event: GalleryItemUpdated) -> None:
+        # Household only: a new caption or date, or a move between albums
+        # (both albums' counts and grids change — ``from_album_id``).
+        await self._broadcast_household(
+            {
+                "type": "gallery.item_updated",
+                "album_id": event.album_id,
+                "from_album_id": event.from_album_id,
                 "item_id": event.item_id,
             }
         )

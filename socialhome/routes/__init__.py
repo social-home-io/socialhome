@@ -188,12 +188,17 @@ from .friends import FriendsView, FriendView
 from .gallery import (
     AlbumDetailView,
     AlbumItemCollectionView,
+    AlbumRestoreView,
     AlbumRetentionView,
     AlbumSeenView,
     DefaultAlbumView,
+    GalleryBulkView,
+    GalleryDownloadView,
     GalleryItemDetailView,
     GalleryItemRestoreView,
     GalleryOnThisDayView,
+    GalleryPersonPhotosView,
+    GalleryPersonPhotosZipView,
     GalleryTrashCollectionView,
     GalleryTrashItemView,
     HouseholdAlbumCollectionView,
@@ -1242,6 +1247,15 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_view("/api/gallery/albums/{album_id}/items", AlbumItemCollectionView)
     app.router.add_view("/api/gallery/items/{item_id}", GalleryItemDetailView)
     app.router.add_view("/api/gallery/items/{item_id}/restore", GalleryItemRestoreView)
+    app.router.add_view("/api/gallery/albums/{album_id}/restore", AlbumRestoreView)
+    app.router.add_view("/api/gallery/bulk", GalleryBulkView)
+    app.router.add_view("/api/gallery/download", GalleryDownloadView)
+    app.router.add_view(
+        "/api/gallery/people/{username}/photos", GalleryPersonPhotosView
+    )
+    app.router.add_view(
+        "/api/gallery/people/{username}/photos/zip", GalleryPersonPhotosZipView
+    )
     app.router.add_view("/api/gallery/trash", GalleryTrashCollectionView)
     app.router.add_view("/api/gallery/trash/{item_id}", GalleryTrashItemView)
     app.router.add_view("/api/gallery/on-this-day", GalleryOnThisDayView)

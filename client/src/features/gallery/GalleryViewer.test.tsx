@@ -146,26 +146,31 @@ describe('GalleryViewer', () => {
     expect(view.queryByRole('complementary')).toBeNull()
   })
 
-  it('offers Delete only when allowed, and asks first', async () => {
+  it('offers Delete only when allowed, and deletes without asking (the page offers Undo)', async () => {
     let r = viewer()
     expect(r.view.queryByRole('button', { name: 'Delete' })).toBeNull()
     cleanup()
     r = viewer({ canDelete: () => true })
     fireEvent.click(r.view.getByRole('button', { name: 'Delete' }))
-    const ask = r.view.getByRole('alertdialog', { name: 'Delete this photo?' })
-    expect(ask.textContent).toContain('everyone in your household')
-    // The safe answer has the focus.
-    expect(document.activeElement?.textContent).toBe('Cancel')
-    fireEvent.click(r.view.getAllByRole('button', { name: 'Delete' }).at(-1)!)
+    expect(r.view.queryByRole('alertdialog')).toBeNull()
     await waitFor(() => expect(r.props.onDelete).toHaveBeenCalledWith(r.props.items[1]))
-    await waitFor(() => expect(r.view.queryByRole('alertdialog')).toBeNull())
   })
 
-  it('a failed delete says so inside the viewer (toasts sit behind it)', async () => {
+  it('a failed delete says so inside the viewer', async () => {
     const { view } = viewer({ canDelete: () => true, onDelete: vi.fn(async () => { throw new Error('offline') }) })
     fireEvent.click(view.getByRole('button', { name: 'Delete' }))
-    fireEvent.click(view.getAllByRole('button', { name: 'Delete' }).at(-1)!)
     expect(await view.findByText("Couldn't delete it. Check your connection and try again.")).toBeTruthy()
+  })
+
+  it('Edit is offered only where allowed, and Save uses the human-name download', async () => {
+    const onEdit = vi.fn()
+    const onDownload = vi.fn(async () => undefined)
+    const { view, props } = viewer({ canEdit: () => true, onEdit, onDownload })
+    fireEvent.click(view.getByRole('button', { name: 'Download' }))
+    await waitFor(() => expect(onDownload).toHaveBeenCalledWith(props.items[1]))
+    fireEvent.click(view.getByRole('button', { name: 'Info' }))
+    fireEvent.click(view.getByRole('button', { name: 'Edit caption and date' }))
+    expect(onEdit).toHaveBeenCalledWith(props.items[1])
   })
 
   it('Report closes the viewer and opens the report', () => {

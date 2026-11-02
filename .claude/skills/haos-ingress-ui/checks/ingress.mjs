@@ -246,6 +246,8 @@ function routeTable(ids) {
   walk.push(`/gallery/albums/${ids.albumId}`)
   if (ids.galleryItemId) walk.push(`/gallery/albums/${ids.albumId}/${ids.galleryItemId}`)
   if (ids.spaceAlbumId) walk.push(`/spaces/${ids.spaceId}/gallery/albums/${ids.spaceAlbumId}`)
+  // The household gallery's trash (a space has none).
+  walk.push('/gallery/trash')
   return { walk, skipped }
 }
 
@@ -637,8 +639,30 @@ await check('gallery-addresses', async () => {
   if (!underPrefix(new URL(src).pathname)) problems.push(`viewer photo outside the prefix: ${src}`)
   await page.keyboard.press('Escape')
   await at(albumPath, 'Esc closes the viewer to its album')
+  // Selecting a tile and saving it: the download POST stays under the
+  // prefix and the tile (a link) is not followed.
+  await page.evaluate(() => [...document.querySelectorAll('button')].find(b => b.textContent.trim() === 'Select').click())
+  await step('a selectable tile', page.waitForSelector(`button.sh-gallery-item[data-item-id="${ids.galleryItemId}"]`))
+  await page.click(`button.sh-gallery-item[data-item-id="${ids.galleryItemId}"]`)
+  const [dl] = await Promise.all([
+    page.waitForResponse(r => r.request().method() === 'POST' && /api\/gallery\/download$/.test(new URL(r.url()).pathname)),
+    page.evaluate(() => [...document.querySelectorAll('.sh-selbar button')].find(b => b.textContent.trim() === 'Save').click()),
+  ])
+  if (!underPrefix(new URL(dl.url()).pathname)) problems.push(`gallery download POSTed outside the prefix: ${dl.url()}`)
+  if (dl.status() !== 200) problems.push(`gallery download → ${dl.status()}`)
+  if (pathOf(page) !== albumPath) problems.push(`selecting a tile navigated to ${pathOf(page)}`)
+  await page.keyboard.press('Escape')
   await page.goBack()
   await at(`${PREFIX}/gallery`, 'Back to the albums')
+  // The trash: from the albums' ⋯, its own address, Back returns.
+  await step('the albums ⋯', page.waitForSelector('button[aria-label="Gallery options"]'))
+  await page.click('button[aria-label="Gallery options"]')
+  await page.evaluate(() => [...document.querySelectorAll('[role=menuitem]')].find(b => b.textContent.trim() === 'Trash').click())
+  await at(`${PREFIX}/gallery/trash`, 'the trash from the albums ⋯')
+  await step('the trash page', page.waitForSelector('.sh-trash'))
+  await page.screenshot({ path: path.join(SHOTS, 'gallery-trash.png') })
+  await page.goBack()
+  await at(`${PREFIX}/gallery`, 'Back from the trash')
   return { problems, albumPath, photoPath, viewerSrc: src }
 })
 
