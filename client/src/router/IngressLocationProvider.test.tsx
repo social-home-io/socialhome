@@ -436,7 +436,7 @@ describe('space sections under the ingress prefix (/spaces/:id/:section?)', () =
       <mod.IngressLocationProvider>
         <iso.Router>
           <About path="/spaces/:id/about" />
-          <Space path="/spaces/:id/:section?" />
+          <Space path="/spaces/:id/:section?/:sub*" />
         </iso.Router>
       </mod.IngressLocationProvider>,
     )
@@ -473,5 +473,100 @@ describe('space sections under the ingress prefix (/spaces/:id/:section?)', () =
     await vi.waitFor(() => expect(r.getByTestId('section').textContent).toBe('abc:feed'))
     // One mount: switching sections never remounts (and refetches) the page.
     expect(mounts.space).toBe(1)
+  })
+})
+
+describe('gallery albums and photos under the ingress prefix (/gallery/:sub*)', () => {
+  const PREFIX = '/api/hassio_ingress/tok/'
+  beforeEach(() => {
+    vi.resetModules()
+    vi.doMock('@/baseUrl', () => ({
+      basePath: PREFIX,
+      addBase: (p: string) => PREFIX.replace(/\/+$/, '') + (p.startsWith('/') ? p : '/' + p),
+      stripBase: (p: string) => {
+        const prefix = PREFIX.replace(/\/+$/, '')
+        if (p === prefix) return '/'
+        if (p.startsWith(prefix + '/')) return p.slice(prefix.length) || '/'
+        return p
+      },
+    }))
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.resetModules()
+    vi.doUnmock('@/baseUrl')
+  })
+
+  /** The app's two gallery routes: the household's and a space's. */
+  async function mountGallery(at: string) {
+    resetLocation(at)
+    const mod = await import('./IngressLocationProvider')
+    const iso = await import('preact-iso')
+    const base = await import('@/baseUrl')
+    const routes = await import('@/features/gallery/galleryRoutes')
+    const mounts = { gallery: 0 }
+    function Gallery(_: { path: string }) {
+      const { params } = iso.useRoute()
+      const where = routes.parseGallerySub(params.sub)
+      useEffect(() => { mounts.gallery += 1 }, [])
+      const space = params.id as string | undefined
+      return (
+        <div>
+          <p data-testid="where">{`${space ?? 'household'}:${where.albumId ?? '-'}:${where.itemId ?? '-'}`}</p>
+          <a href={base.addBase(routes.galleryPath(space, 'a1'))} data-testid="to-album">Album</a>
+          <a href={base.addBase(routes.galleryPath(space, 'a1', 'i1'))} data-testid="to-photo">Photo</a>
+        </div>
+      )
+    }
+    const r = render(
+      <mod.IngressLocationProvider>
+        <iso.Router>
+          <Gallery path="/gallery/:sub*" />
+          <Gallery path="/spaces/:id/:section?/:sub*" />
+        </iso.Router>
+      </mod.IngressLocationProvider>,
+    )
+    return { r, mounts }
+  }
+
+  const click = (el: HTMLElement) => {
+    const evt = new MouseEvent('click', { bubbles: true, cancelable: true, button: 0 })
+    el.dispatchEvent(evt)
+    return evt
+  }
+
+  it('a cold load of an ingress-prefixed photo link opens that photo (a shared link, a refresh)', async () => {
+    const { r } = await mountGallery('/api/hassio_ingress/tok/gallery/albums/a1/i1')
+    await vi.waitFor(() => expect(r.getByTestId('where').textContent).toBe('household:a1:i1'))
+  })
+
+  it('album and photo links keep the ingress prefix, Back steps out again, and the page never remounts', async () => {
+    const { r, mounts } = await mountGallery('/api/hassio_ingress/tok/gallery')
+    await vi.waitFor(() => expect(r.getByTestId('where').textContent).toBe('household:-:-'))
+    const album = r.getByTestId('to-album')
+    expect(album.getAttribute('href')).toBe('/api/hassio_ingress/tok/gallery/albums/a1')
+    expect(click(album).defaultPrevented).toBe(true)
+    await vi.waitFor(() => expect(r.getByTestId('where').textContent).toBe('household:a1:-'))
+    expect(location.pathname).toBe('/api/hassio_ingress/tok/gallery/albums/a1')
+    click(r.getByTestId('to-photo'))
+    await vi.waitFor(() => expect(r.getByTestId('where').textContent).toBe('household:a1:i1'))
+    expect(location.pathname).toBe('/api/hassio_ingress/tok/gallery/albums/a1/i1')
+    history.replaceState(null, '', '/api/hassio_ingress/tok/gallery/albums/a1')
+    fireEvent(window, new PopStateEvent('popstate'))
+    await vi.waitFor(() => expect(r.getByTestId('where').textContent).toBe('household:a1:-'))
+    // The grid stays mounted behind the viewer.
+    expect(mounts.gallery).toBe(1)
+  })
+
+  it('a space gallery photo keeps the prefix and the space', async () => {
+    const { r, mounts } = await mountGallery('/api/hassio_ingress/tok/spaces/s1/gallery')
+    await vi.waitFor(() => expect(r.getByTestId('where').textContent).toBe('s1:-:-'))
+    const photo = r.getByTestId('to-photo')
+    expect(photo.getAttribute('href')).toBe('/api/hassio_ingress/tok/spaces/s1/gallery/albums/a1/i1')
+    click(photo)
+    await vi.waitFor(() => expect(r.getByTestId('where').textContent).toBe('s1:a1:i1'))
+    expect(location.pathname).toBe('/api/hassio_ingress/tok/spaces/s1/gallery/albums/a1/i1')
+    expect(mounts.gallery).toBe(1)
   })
 })

@@ -29,17 +29,24 @@ vi.mock('@/store/auth', () => ({
 
 const route = vi.hoisted(() => ({
   section: undefined as string | undefined,
+  sub: undefined as string | undefined,
   query: {} as Record<string, string>,
   go: vi.fn(),
 }))
 vi.mock('preact-iso', () => ({
-  useRoute: () => ({ params: { id: 's1', section: route.section }, query: route.query, path: '/spaces/s1' }),
+  useRoute: () => ({ params: { id: 's1', section: route.section, sub: route.sub }, query: route.query, path: '/spaces/s1' }),
   useLocation: () => ({ route: route.go, url: '/spaces/s1', path: '/spaces/s1', query: route.query }),
 }))
 
 vi.mock('./SpaceTimetableTab', () => ({
   SpaceTimetableTab: (p: { spaceId: string; canEdit: boolean }) => (
     <div data-testid="timetable-tab">{`${p.spaceId}:${p.canEdit}`}</div>
+  ),
+}))
+
+vi.mock('@/features/gallery/GalleryPage', () => ({
+  default: (p: { spaceId: string; canModerate?: boolean; title?: string }) => (
+    <div data-testid="gallery">{`${p.spaceId}:${!!p.canModerate}:${p.title}`}</div>
   ),
 }))
 
@@ -72,6 +79,7 @@ beforeEach(() => {
   route.go.mockReset()
   route.query = {}
   route.section = undefined
+  route.sub = undefined
   window.location.hash = ''
 })
 
@@ -99,6 +107,21 @@ describe('SpaceFeedPage /spaces/:id/:section', () => {
     await tl.waitFor(() => expect(r.getByTestId('tasks-tab').textContent).toBe('s1:undefined:false'))
     answer({ id: 's1', name: 'Trip', features: { todo: true }, my_role: 'member' })
     await tl.waitFor(() => expect(r.getByTestId('tasks-tab').textContent).toBe('s1:true:false'))
+  }, 20000)
+
+  it('a Gallery album / photo address stays in the Gallery, titled "Gallery · <space>"', async () => {
+    wire({ gallery: true }, 'moderator')
+    route.sub = 'albums/a1/i1'
+    const { tl, r } = await open('gallery')
+    await tl.waitFor(() => expect(r.getByTestId('gallery').textContent).toBe('s1:true:Gallery · Trip'))
+    expect(route.go).not.toHaveBeenCalled()
+  }, 20000)
+
+  it('only the Gallery has addresses below its section — a rest elsewhere goes to the section', async () => {
+    wire({ todo: true }, 'member')
+    route.sub = 'albums/a1'
+    await open('tasks')
+    await vi.waitFor(() => expect(route.go).toHaveBeenCalledWith('/spaces/s1/tasks', true))
   }, 20000)
 
   it('a member gets Tasks writable, its link current', async () => {

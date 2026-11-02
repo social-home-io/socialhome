@@ -7650,6 +7650,384 @@ a.sh-btn { text-decoration: none; }
   justify-content: center;
   padding: var(--sh-space-md) 0;
 }
+/* Album cards and photo tiles are links (each has its own address). */
+a.sh-album-card, a.sh-gallery-item,
+a.sh-album-card:hover, a.sh-gallery-item:hover {
+  color: inherit;
+  text-decoration: none;
+}
+.sh-album-card--skeleton { cursor: default; box-shadow: none; }
+.sh-album-card--skeleton::before { display: none; }
+.sh-album-card--skeleton:hover { transform: none; box-shadow: none; border-color: var(--sh-border); }
+.sh-album-card--skeleton .sh-album-info { gap: var(--sh-space-sm); }
+.sh-album-skel-cover { width: 100%; aspect-ratio: 4 / 3; border-radius: 0; }
+.sh-gallery-skel-tile { width: 100%; aspect-ratio: 1; }
+
+/* ── Gallery viewer (GalleryViewer.tsx) ─────────────────────────────
+ * Full screen, black, above everything. Three rows: the top bar
+ * (close · date and position · zoom), the photo, the action bar. Every
+ * control is at least 44 px; focus rings are white on black. Info is a
+ * side panel on a wide screen and a bottom sheet on a phone. */
+.sh-gviewer {
+  position: fixed;
+  inset: 0;
+  z-index: var(--sh-z-lightbox);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  background: #000;
+  color: #fff;
+  outline: none;
+  overscroll-behavior: contain;
+}
+.sh-gviewer :focus-visible {
+  outline: 2px solid #fff;
+  outline-offset: 2px;
+}
+.sh-gviewer-btn {
+  min-width: 44px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border-radius: var(--sh-radius-full);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  font: inherit;
+  font-size: 1.25rem;
+  line-height: 1;
+  cursor: pointer;
+}
+.sh-gviewer-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.2); }
+.sh-gviewer-btn:disabled { opacity: 0.4; cursor: default; }
+
+.sh-gviewer-top {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  padding: calc(var(--sh-space-sm) + env(safe-area-inset-top, 0px)) var(--sh-space-sm) var(--sh-space-sm);
+  z-index: 2;
+}
+.sh-gviewer-title {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  line-height: 1.3;
+}
+.sh-gviewer-title strong,
+.sh-gviewer-title small {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sh-gviewer-title small { color: rgba(255, 255, 255, 0.72); font-size: var(--sh-font-size-sm); }
+.sh-gviewer-top-actions {
+  display: flex;
+  gap: var(--sh-space-xs);
+  min-width: 44px;
+  justify-content: flex-end;
+}
+/* Phones pinch and double-tap; the zoom buttons are for a mouse. */
+@media (pointer: coarse) {
+  .sh-gviewer-zoom { display: none; }
+}
+
+.sh-gviewer-body {
+  position: relative;
+  display: flex;
+  min-height: 0;
+}
+.sh-gviewer-stage {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: zoom-in;
+}
+.sh-gviewer--zoomed .sh-gviewer-stage { cursor: grab; }
+.sh-gviewer-track {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.sh-gviewer-photo {
+  position: relative;
+  z-index: 1;
+  max-width: none;
+  transform-origin: center;
+  opacity: 0;
+  transition: opacity 0.18s ease-out;
+  -webkit-user-drag: none;
+}
+.sh-gviewer-photo--ready { opacity: 1; }
+.sh-gviewer-placeholder {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  object-fit: cover;
+  filter: blur(6px);
+  opacity: 0.8;
+}
+.sh-gviewer-video {
+  max-width: 100%;
+  max-height: 100%;
+  background: #000;
+}
+.sh-gviewer-skeleton {
+  width: min(80%, 640px);
+  aspect-ratio: 4 / 3;
+  opacity: 0.25;
+  margin: auto;
+  position: absolute;
+  inset: 0;
+}
+.sh-gviewer-message {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  max-width: 28rem;
+  padding: var(--sh-space-lg);
+  text-align: center;
+  color: rgba(255, 255, 255, 0.85);
+}
+.sh-gviewer-nav {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 48px;
+  height: 48px;
+  font-size: 2rem;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 2;
+}
+.sh-gviewer-nav--prev { left: var(--sh-space-sm); }
+.sh-gviewer-nav--next { right: var(--sh-space-sm); }
+.sh-gviewer--info .sh-gviewer-nav--next { right: calc(var(--sh-space-sm) + var(--sh-gviewer-info-w, 0px)); }
+
+/* Shares the photo's grid row, over its lower edge. */
+.sh-gviewer-caption {
+  grid-row: 2;
+  grid-column: 1;
+  align-self: end;
+  position: relative;
+  z-index: 1;
+  padding: var(--sh-space-xl) var(--sh-space-lg) var(--sh-space-sm);
+  background: linear-gradient(rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.72));
+  pointer-events: none;
+}
+.sh-gviewer-body { grid-row: 2; grid-column: 1; }
+.sh-gviewer-caption-text {
+  margin: 0;
+  font-weight: 600;
+  font-size: var(--sh-font-size-md);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.sh-gviewer-caption-meta {
+  margin: 2px 0 0;
+  font-size: var(--sh-font-size-sm);
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.sh-gviewer-bar {
+  display: flex;
+  justify-content: space-around;
+  gap: var(--sh-space-xs);
+  padding: var(--sh-space-xs) var(--sh-space-sm) calc(var(--sh-space-sm) + env(safe-area-inset-bottom, 0px));
+  background: #000;
+  z-index: 2;
+}
+.sh-gviewer-action {
+  min-width: 64px;
+  min-height: 52px;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  padding: 0 var(--sh-space-sm);
+  border: 0;
+  border-radius: var(--sh-radius-md);
+  background: none;
+  color: #fff;
+  font: inherit;
+  font-size: var(--sh-font-size-xs);
+  text-decoration: none;
+  cursor: pointer;
+}
+.sh-gviewer-icon { width: 24px; height: 24px; flex: none; }
+.sh-gviewer-info-action .sh-gviewer-icon { width: 20px; height: 20px; }
+.sh-gviewer-action:hover { background: rgba(255, 255, 255, 0.12); color: #fff; text-decoration: none; }
+.sh-gviewer-action[aria-expanded="true"] { background: rgba(255, 255, 255, 0.16); }
+.sh-gviewer-action--danger { color: #FFB4A8; }
+.sh-gviewer-action--danger:hover { color: #FFB4A8; }
+
+/* Info — a side panel on a wide screen. */
+.sh-gviewer-info {
+  --sh-gviewer-info-w: 360px;
+  width: var(--sh-gviewer-info-w);
+  flex: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--sh-space-md) var(--sh-space-lg) var(--sh-space-lg);
+  background: var(--sh-bg-secondary);
+  color: var(--sh-text);
+  z-index: 3;
+}
+.sh-gviewer--info { --sh-gviewer-info-w: 360px; }
+.sh-gviewer-info :focus-visible { outline-color: var(--sh-focus-ring); }
+.sh-gviewer-info-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sh-space-sm);
+}
+.sh-gviewer-info-head h2 {
+  flex: 1;
+  margin: 10px 0 0;
+  font-size: var(--sh-font-size-lg);
+  overflow-wrap: anywhere;
+}
+.sh-gviewer-info-head .sh-gviewer-info-nocaption { color: var(--sh-text-muted); font-weight: 500; }
+.sh-gviewer-info-close {
+  color: var(--sh-text);
+  background: transparent;
+  border-color: var(--sh-border);
+}
+.sh-gviewer-info-close:hover:not(:disabled) { background: var(--sh-bg-tertiary); }
+.sh-gviewer-info dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--sh-space-xs) var(--sh-space-md);
+  margin: var(--sh-space-md) 0;
+  font-size: var(--sh-font-size-sm);
+}
+.sh-gviewer-info dt { color: var(--sh-text-muted); }
+.sh-gviewer-info dd { margin: 0; overflow-wrap: anywhere; }
+.sh-gviewer-info-note {
+  margin: 0 0 var(--sh-space-md);
+  padding: var(--sh-space-sm) var(--sh-space-md);
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg-tertiary);
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+}
+.sh-gviewer-info-action {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  width: 100%;
+  min-height: 44px;
+  padding: 0 var(--sh-space-sm);
+  border: 1px solid var(--sh-border);
+  border-radius: var(--sh-radius-md);
+  background: transparent;
+  color: var(--sh-text);
+  font: inherit;
+  cursor: pointer;
+}
+.sh-gviewer-info-action:hover { background: var(--sh-bg-tertiary); }
+
+.sh-gviewer-hint,
+.sh-gviewer-notice {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 4;
+  max-width: calc(100% - 32px);
+  margin: 0;
+  padding: 6px 14px;
+  border-radius: var(--sh-radius-full);
+  background: rgba(40, 40, 40, 0.92);
+  color: #fff;
+  font-size: var(--sh-font-size-sm);
+  text-align: center;
+  pointer-events: none;
+}
+.sh-gviewer-hint { top: 84px; }
+.sh-gviewer-notice { bottom: 96px; }
+.sh-gviewer-notice--error { background: #8B2E24; }
+
+.sh-gviewer-confirm-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sh-space-md);
+  background: rgba(0, 0, 0, 0.6);
+}
+.sh-gviewer-confirm {
+  width: min(100%, 420px);
+  padding: var(--sh-space-lg);
+  border-radius: var(--sh-radius-lg);
+  background: var(--sh-bg-secondary);
+  color: var(--sh-text);
+  box-shadow: var(--sh-shadow-xl);
+}
+.sh-gviewer-confirm :focus-visible { outline-color: var(--sh-focus-ring); }
+.sh-gviewer-confirm h2 { margin: 0 0 var(--sh-space-sm); font-size: var(--sh-font-size-lg); }
+.sh-gviewer-confirm p { margin: 0 0 var(--sh-space-lg); color: var(--sh-text-muted); }
+.sh-gviewer-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--sh-space-sm);
+}
+.sh-gviewer-confirm-actions .sh-btn { min-height: 44px; }
+
+@media (min-width: 900px) {
+  .sh-gviewer-bar { justify-content: center; gap: var(--sh-space-md); }
+  .sh-gviewer-action {
+    flex-direction: row;
+    gap: var(--sh-space-xs);
+    min-height: 44px;
+    padding: 0 var(--sh-space-md);
+    font-size: var(--sh-font-size-sm);
+  }
+  .sh-gviewer-action .sh-gviewer-icon { width: 20px; height: 20px; }
+  .sh-gviewer-nav--prev { left: var(--sh-space-md); }
+}
+/* A phone: Info is a bottom sheet over the photo, the confirm too. */
+@media (max-width: 899px) {
+  .sh-gviewer--info { --sh-gviewer-info-w: 0px; }
+  .sh-gviewer-info {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    max-height: 70vh;
+    max-height: 70dvh;
+    border-radius: var(--sh-radius-xl) var(--sh-radius-xl) 0 0;
+    padding-bottom: calc(var(--sh-space-lg) + env(safe-area-inset-bottom, 0px));
+    box-shadow: 0 -12px 32px rgba(0, 0, 0, 0.4);
+  }
+  .sh-gviewer-confirm-scrim { align-items: flex-end; padding: 0; }
+  .sh-gviewer-confirm {
+    width: 100%;
+    border-radius: var(--sh-radius-xl) var(--sh-radius-xl) 0 0;
+    padding-bottom: calc(var(--sh-space-lg) + env(safe-area-inset-bottom, 0px));
+  }
+  .sh-gviewer-confirm-actions .sh-btn { flex: 1; }
+}
+/* Reduced motion: no fade-in either (the photo doesn't follow the
+ * finger — see useViewerGestures). */
+.sh-gviewer--still .sh-gviewer-photo { transition: none; }
 
 /* Upload progress card — used by Composer (Home feed + Space feed
  * via the shared Composer component) and any other surface that

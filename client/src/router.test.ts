@@ -41,13 +41,32 @@ describe('router', () => {
     // route so a section switch re-renders instead of remounting. The
     // router takes the first match, so about / settings / zones go first.
     const keys = Object.keys(routes)
-    const space = keys.indexOf('/spaces/:id/:section?')
+    const space = keys.indexOf('/spaces/:id/:section?/:sub*')
     expect(space).toBeGreaterThan(-1)
     expect(routes['/spaces/:id']).toBeUndefined()
     for (const fixed of ['/spaces/browse', '/spaces/:id/about', '/spaces/:id/settings/:section?', '/spaces/:id/zones']) {
       expect(keys.indexOf(fixed)).toBeGreaterThan(-1)
       expect(keys.indexOf(fixed)).toBeLessThan(space)
     }
+  })
+
+  it('every album and photo has an address on ONE gallery route (no remount between them)', () => {
+    const first = (url: string) => Object.keys(routes).find(r => exec(url, r))
+    for (const url of ['/gallery', '/gallery/albums/a1', '/gallery/albums/a1/i1']) {
+      expect(first(url)).toBe('/gallery/:sub*')
+    }
+    expect(exec('/gallery', '/gallery/:sub*')).toMatchObject({ params: { sub: undefined } })
+    expect(exec('/gallery/albums/a1/i1', '/gallery/:sub*'))
+      .toMatchObject({ params: { sub: 'albums/a1/i1' } })
+  })
+
+  it('a space gallery album and photo stay on the space route, in its Gallery section', () => {
+    const first = Object.keys(routes).find(r => exec('/spaces/s1/gallery/albums/a1/i1', r))
+    expect(first).toBe('/spaces/:id/:section?/:sub*')
+    expect(exec('/spaces/s1/gallery/albums/a1/i1', '/spaces/:id/:section?/:sub*'))
+      .toMatchObject({ params: { id: 's1', section: 'gallery', sub: 'albums/a1/i1' } })
+    // The fixed sub-pages still win.
+    expect(Object.keys(routes).find(r => exec('/spaces/s1/about', r))).toBe('/spaces/:id/about')
   })
 
   it('Yours is a Momentum address of its own, ahead of the moment page', () => {
@@ -89,7 +108,7 @@ describe('router', () => {
     for (const path of ['/spaces', '/dms', '/calendar', '/organize',
       '/notifications', '/pages', '/bazaar',
       '/settings', '/admin', '/connections',
-      '/gallery', '/search', '/calls', '/parent', '/momentum',
+      '/gallery/:sub*', '/search', '/calls', '/parent', '/momentum',
       '/corner', '/dashboard', '/apps',
       '/momentum/discover', '/momentum/public/discover', '/momentum/public/sharing']) {
       expect(routes[path]).toBeTruthy()

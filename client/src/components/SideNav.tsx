@@ -260,6 +260,10 @@ export function SideNav() {
 
   const { main, local } = view.value
   const currentPath = loc.path
+  /** A page under an item's own address: an app (``/apps/chess``) is
+   *  still Apps, an album or a photo (``/gallery/albums/…``) Gallery. */
+  const underItem = (i: SideNavItem) =>
+    (i.key === 'apps' || i.key === 'gallery') && currentPath.startsWith(`${i.href}/`)
 
   const state = view.value.state
   const activeSpace = activeSpaceFromUrl.value
@@ -268,7 +272,7 @@ export function SideNav() {
     items: SideNavItem[],
     extra?: ComponentChildren,
   ) => {
-    const isActive = items.some(i => i.href === currentPath || (i.key === 'apps' && currentPath.startsWith('/apps/')))
+    const isActive = items.some(i => i.href === currentPath || underItem(i))
       || (group.key === 'browse' && activeSpace !== null)
     const headerId = `sidenav-group-${group.key}`
     return (
@@ -286,8 +290,9 @@ export function SideNav() {
           const ariaCurrent =
             i.href === currentPath ||
             (i.key === 'spaces' && activeSpace !== null) ||
-            // An app, or its detail page, is still "Apps".
-            (i.key === 'apps' && currentPath.startsWith('/apps/'))
+            // An app or its detail page is still "Apps"; an album or a
+            // photo is still "Gallery".
+            underItem(i)
               ? 'page'
               : undefined
           return (
