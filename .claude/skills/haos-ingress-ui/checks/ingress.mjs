@@ -578,7 +578,10 @@ await check('media-load-and-upload', async () => {
     if (!underPrefix(new URL(r.url()).pathname)) problems.push(`upload sheet request outside the prefix: ${r.url()}`)
     if (r.status() >= 300) problems.push(`upload sheet ${new URL(r.url()).pathname} → ${r.status()}`)
   }
-  await step('the upload sheet to say it is done', page.waitForFunction(() => /1 added/.test(document.querySelector('#sh-upload-sheet-title')?.textContent ?? '')))
+  // "N added" only once the queue settled with nothing failed. The same
+  // file again is an exact duplicate (#1273) — "0 added", which is fine:
+  // the requests above are what this check is about.
+  await step('the upload sheet to say it is done', page.waitForFunction(() => /\b\d+ added\b/.test(document.querySelector('#sh-upload-sheet-title')?.textContent ?? '')))
   await page.screenshot({ path: path.join(SHOTS, 'media-gallery-upload-sheet.png') })
   return {
     problems, feedImages: imgs,
