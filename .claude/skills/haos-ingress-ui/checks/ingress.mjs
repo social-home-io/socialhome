@@ -637,6 +637,13 @@ await check('gallery-addresses', async () => {
   await step('the viewer after a reload', page.waitForSelector('.sh-gviewer[role="dialog"] img.sh-gviewer-photo'))
   const src = await page.$eval('img.sh-gviewer-photo', i => i.src)
   if (!underPrefix(new URL(src).pathname)) problems.push(`viewer photo outside the prefix: ${src}`)
+  // ♡ Favourite: the PUT stays under the prefix (D12, private).
+  const [fav] = await Promise.all([
+    page.waitForResponse(r => r.request().method() === 'PUT' && /api\/gallery\/items\/[^/]+\/favourite$/.test(new URL(r.url()).pathname)),
+    page.click('.sh-gviewer-fav'),
+  ])
+  if (!underPrefix(new URL(fav.url()).pathname)) problems.push(`favourite PUT outside the prefix: ${fav.url()}`)
+  if (fav.status() !== 204) problems.push(`favourite PUT → ${fav.status()}`)
   await page.keyboard.press('Escape')
   await at(albumPath, 'Esc closes the viewer to its album')
   // Selecting a tile and saving it: the download POST stays under the
@@ -663,6 +670,26 @@ await check('gallery-addresses', async () => {
   await page.screenshot({ path: path.join(SHOTS, 'gallery-trash.png') })
   await page.goBack()
   await at(`${PREFIX}/gallery`, 'Back from the trash')
+  // Your favourites: the ♥ chip, its own address, a tile opens the viewer
+  // at /gallery/favourites/<photo>, Esc and Back step out again.
+  const favPath = `${PREFIX}/gallery/favourites`
+  const chip = await step('the ♥ Favourites chip', page.waitForSelector('a.sh-gallery-chip'))
+  const chipHref = await chip.evaluate(a => a.getAttribute('href'))
+  if (chipHref !== favPath) problems.push(`favourites chip is ${chipHref}, want ${favPath}`)
+  await chip.click()
+  await at(favPath, 'the favourites chip')
+  const favTile = await step('a favourite tile link', page.waitForSelector(`a.sh-gallery-item[data-item-id="${ids.galleryItemId}"]`))
+  const favPhoto = `${favPath}/${ids.galleryItemId}`
+  const favTileHref = await favTile.evaluate(a => a.getAttribute('href'))
+  if (favTileHref !== favPhoto) problems.push(`favourite tile link is ${favTileHref}, want ${favPhoto}`)
+  await favTile.click()
+  await at(favPhoto, 'a favourite tile')
+  await step('the viewer on a favourite', page.waitForSelector('.sh-gviewer[role="dialog"] img.sh-gviewer-photo'))
+  await page.screenshot({ path: path.join(SHOTS, 'gallery-favourites-viewer.png') })
+  await page.keyboard.press('Escape')
+  await at(favPath, 'Esc closes the viewer to the favourites')
+  await page.goBack()
+  await at(`${PREFIX}/gallery`, 'Back from the favourites')
   return { problems, albumPath, photoPath, viewerSrc: src }
 })
 

@@ -212,6 +212,18 @@ class GalleryTrashItem:
 
 
 @dataclass(slots=True, frozen=True)
+class GalleryFavourite:
+    """One of a person's favourites (owner decision D12): the item and when
+    they marked it (naive UTC, SQLite ``datetime('now')``) — the list's
+    order and its cursor. Private to that person: nobody else learns who
+    marked what, and it never leaves the household (the §25.6 exporter and
+    the federation dicts carry no favourite field)."""
+
+    item: GalleryItem
+    marked_at: str
+
+
+@dataclass(slots=True, frozen=True)
 class GalleryAlbumAudience:
     """Who sees a household album: ``audience`` is :data:`AUDIENCE_EVERYONE`
     or :data:`AUDIENCE_CHOSEN`; ``user_ids`` are the chosen people (the

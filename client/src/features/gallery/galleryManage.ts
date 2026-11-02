@@ -26,7 +26,7 @@ export const BULK_MAX = 500
 
 /** ``POST /api/gallery/bulk`` in slices of ``BULK_MAX``. */
 export async function bulk(
-  action: 'delete' | 'restore' | 'purge' | 'move',
+  action: 'delete' | 'restore' | 'purge' | 'move' | 'favourite' | 'unfavourite',
   ids: readonly string[],
   albumId?: string,
   opts: { keepalive?: boolean } = {},
@@ -40,6 +40,14 @@ export async function bulk(
     out.refused.push(...part.refused)
   }
   return out
+}
+
+/** Mark one photo a favourite of this person (♡) or not — private:
+ *  nobody else learns it (D12). */
+export async function setFavourite(id: string, on: boolean): Promise<void> {
+  const url = `/api/gallery/items/${encodeURIComponent(id)}/favourite`
+  if (on) await api.put(url)
+  else await api.delete(url)
 }
 
 /** "3 photos" / "1 video" / "4 items" — the noun for a mixed batch. */

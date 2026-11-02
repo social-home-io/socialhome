@@ -361,6 +361,30 @@ class GalleryService:
         )
         return shown
 
+    async def visible_album(self, album_id: str, *, actor_user_id: str) -> GalleryAlbum:
+        """The album as stored, for someone who may see it — else
+        :class:`GalleryNotFoundError` (and 403 ``FEATURE_DISABLED`` for a
+        space that switched its gallery off). No per-viewer decoration:
+        the cheap gate for a by-id action on one of its items."""
+        return await self._visible_album(album_id, actor_user_id)
+
+    async def albums_as_seen(
+        self, album_ids: list[str], *, actor_user_id: str
+    ) -> dict[str, GalleryAlbum]:
+        """The live albums of *album_ids* as the viewer sees them (cover,
+        the default album's name) — the albums of a list that spans several,
+        like the favourites. The caller already checked what the viewer may
+        see; unknown or trashed ids are left out."""
+        marks = await self._default_marks()
+        out: dict[str, GalleryAlbum] = {}
+        for album_id in dict.fromkeys(album_ids):
+            album = await self._repo.get_album(album_id)
+            if album is not None:
+                out[album_id] = await self._for_viewer(
+                    album, actor_user_id, marks=marks
+                )
+        return out
+
     async def mark_album_seen(self, album_id: str, *, actor_user_id: str) -> None:
         """The person opened the album: its "neu" dot (D9) goes until
         someone else adds a photo or video again. Kept in their

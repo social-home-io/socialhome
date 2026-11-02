@@ -194,4 +194,43 @@ describe('GalleryViewer', () => {
     expect(view.getByText(/still being processed/)).toBeTruthy()
     expect(view.queryByText('Download')).toBeNull()
   })
+
+  it('♡ Favourite is a toggle button with aria-pressed, and F toggles it', async () => {
+    const onFavourite = vi.fn(async () => undefined)
+    const { view } = viewer({ isFavourite: () => false, onFavourite })
+    const heart = view.getByRole('button', { name: 'Favourite' })
+    expect(heart.getAttribute('aria-pressed')).toBe('false')
+    // The bar's action buttons are at least 52 px tall (CSS).
+    expect(heart.classList.contains('sh-gviewer-action')).toBe(true)
+    fireEvent.click(heart)
+    expect(onFavourite).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'it-2' }), true)
+    // Never disabled while it saves: the focused button keeps focus, so
+    // Esc and F still reach the viewer.
+    expect((heart as HTMLButtonElement).disabled).toBe(false)
+    await waitFor(() => expect(heart.getAttribute('aria-busy')).toBeNull())
+    fireEvent.keyDown(view.getByRole('dialog'), { key: 'f' })
+    expect(onFavourite).toHaveBeenCalledTimes(2)
+  })
+
+  it('a favourite shows pressed; un-hearting asks for off', () => {
+    const onFavourite = vi.fn(async () => undefined)
+    const { view } = viewer({ isFavourite: () => true, onFavourite })
+    const heart = view.getByRole('button', { name: 'Favourite' })
+    expect(heart.getAttribute('aria-pressed')).toBe('true')
+    fireEvent.click(heart)
+    expect(onFavourite).toHaveBeenLastCalledWith(expect.objectContaining({ id: 'it-2' }), false)
+  })
+
+  it('a favourite that did not save says so', async () => {
+    const { view } = viewer({ isFavourite: () => false, onFavourite: vi.fn(async () => { throw new Error('x') }) })
+    fireEvent.click(view.getByRole('button', { name: 'Favourite' }))
+    expect(await view.findByText(/Couldn't save your favourite/)).toBeTruthy()
+  })
+
+  it('no ♡ without a favourite handler, and F then does nothing', () => {
+    const { props, view } = viewer()
+    expect(view.queryByRole('button', { name: 'Favourite' })).toBeNull()
+    fireEvent.keyDown(view.getByRole('dialog'), { key: 'f' })
+    expect(props.onGo).not.toHaveBeenCalled()
+  })
 })

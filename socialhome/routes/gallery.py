@@ -34,6 +34,10 @@ Endpoints:
 * ``DELETE /api/gallery/trash/{item_id}``               — delete for good
 * ``GET    /api/gallery/on-this-day``                   — today's memory card
 * ``PATCH  /api/gallery/on-this-day``                   — its per-person settings
+* ``PUT    /api/gallery/items/{item_id}/favourite``     — mark a favourite
+* ``DELETE /api/gallery/items/{item_id}/favourite``     — unmark it
+* ``GET    /api/gallery/favourites``                    — the caller's own
+  favourites across the albums they see (private: nobody else's)
 
 A video upload is streamed straight to disk (never held in memory) and
 checked there: a household album keeps videos up to 5 minutes and takes
@@ -86,6 +90,7 @@ from ..services.gallery_download import (
     stream_zip,
     zip_size,
 )
+from ..services.gallery_favourites_service import FAVOURITE_ACTIONS
 from ..services.gallery_on_this_day_service import resolve_today
 from ..services.gallery_service import UNSET, GalleryNotFoundError
 from .base import BaseView
@@ -113,6 +118,7 @@ __all__ = ["GALLERY_LARGE_UPLOAD", "GALLERY_MAX_UPLOAD_BYTES"]
 #: pinned to the first page only).
 ALBUM_PAGE: int = 30
 ITEM_PAGE: int = 50
+FAVOURITE_PAGE: int = 60
 
 
 def _page_query(
@@ -411,9 +417,15 @@ class AlbumItemCollectionView(BaseView):
         statuses = await self.svc(K.media_transcode_repo_key).status_for(video_fns)
         waiting = [fn for fn, st in statuses.items() if st == "processing"]
         etas = await self.svc(K.media_transcode_service_key).estimates(waiting)
+        # The viewer's own ♡ (D12) — computed per request for this person,
+        # never stored on the item and never sent anywhere else.
+        favourites = await self.svc(K.gallery_favourites_service_key).ids_among(
+            ctx.user_id, [i.id for i in items]
+        )
         out = []
         for i in items:
             payload = _item_signed(self.request, i)
+            payload["is_favourite"] = i.id in favourites
             if i.item_type == "video":
                 fn = media_filename(i.url)
                 payload["media_status"] = statuses.get(fn, READY) if fn else READY
@@ -732,6 +744,92 @@ class GalleryOnThisDayView(BaseView):
         )
 
 
+class GalleryItemFavouriteView(BaseView):
+    """PUT/DELETE /api/gallery/items/{item_id}/favourite — the caller's own
+    ♡ (owner decision D12). Private: nobody else learns who marked what,
+    and nothing is published or federated. PUT answers 404 for an item the
+    caller can't see; DELETE always succeeds. Both 204."""
+
+    async def put(self) -> web.Response:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        await self.svc(K.gallery_favourites_service_key).mark(
+            self.match("item_id"), user_id=ctx.user_id
+        )
+        return web.Response(status=204)
+
+    async def delete(self) -> web.Response:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        await self.svc(K.gallery_favourites_service_key).unmark(
+            self.match("item_id"), user_id=ctx.user_id
+        )
+        return web.Response(status=204)
+
+
+def _aware(raw: str) -> str:
+    """A stored naive-UTC time (SQLite ``datetime('now')``) as the wire's
+    tz-aware ISO 8601."""
+    when = datetime.fromisoformat(raw)
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return when.isoformat()
+
+
+def _naive(raw: str) -> str:
+    """The ``favourited_at`` cursor as sent back (tz-aware) in the column's
+    naive-UTC shape; anything else is a 422."""
+    try:
+        when = datetime.fromisoformat(raw)
+    except ValueError:
+        raise ValueError("before must be a favourited_at time") from None
+    if when.tzinfo is not None:
+        when = when.astimezone(UTC)
+    return when.strftime("%Y-%m-%d %H:%M:%S")
+
+
+class GalleryFavouritesView(BaseView):
+    """GET /api/gallery/favourites — the caller's favourites, last marked
+    first, across the household albums they see and the albums of their
+    spaces; never anyone else's. A photo in the trash is left out.
+
+    Each row is the item (``is_favourite: true``) plus ``favourited_at``
+    and its ``album`` (``id``, ``name``, ``space_id``, ``is_system``,
+    ``default_name``). Pages of ``?limit=`` (default 60); the next page is
+    ``?before=<favourited_at>&before_id=<id>`` of the last row, and a page
+    shorter than the limit is the last."""
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        before, before_id, limit = _page_query(self.request, FAVOURITE_PAGE)
+        favourites, albums = await self.svc(K.gallery_favourites_service_key).page(
+            user_id=ctx.user_id,
+            limit=limit,
+            before=_naive(before) if before else None,
+            before_id=before_id,
+        )
+        out = []
+        for f in favourites:
+            payload = _item_signed(self.request, f.item)
+            payload["is_favourite"] = True
+            payload["favourited_at"] = _aware(f.marked_at)
+            album = albums.get(f.item.album_id)
+            payload["album"] = (
+                {
+                    "id": album.id,
+                    "name": album.name,
+                    "space_id": album.space_id,
+                    "is_system": album.is_system,
+                    "default_name": album.default_name,
+                }
+                if album is not None
+                else None
+            )
+            out.append(payload)
+        return web.json_response(out)
+
+
 class AlbumRestoreView(BaseView):
     """POST /api/gallery/albums/{album_id}/restore — a household album back
     from the trash with the photos that went there with it (the Undo of an
@@ -748,9 +846,10 @@ class AlbumRestoreView(BaseView):
 
 class GalleryBulkView(BaseView):
     """POST /api/gallery/bulk — one action for a selection:
-    ``{action: "delete" | "restore" | "move", item_ids: [...], album_id?}``
-    (``album_id`` for ``move``). Each photo is checked as the single-item
-    route would; ``{done: [...], refused: [...]}``."""
+    ``{action: "delete" | "restore" | "purge" | "move" | "favourite" |
+    "unfavourite", item_ids: [...], album_id?}`` (``album_id`` for
+    ``move``). Each photo is checked as the single-item route would;
+    ``{done: [...], refused: [...]}``."""
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -759,9 +858,15 @@ class GalleryBulkView(BaseView):
         ids = body.get("item_ids") if isinstance(body, dict) else None
         if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
             raise ValueError("item_ids must be a list of ids")
+        action = str(body.get("action", ""))
+        if action in FAVOURITE_ACTIONS:
+            done, refused = await self.svc(K.gallery_favourites_service_key).apply(
+                action, ids, user_id=ctx.user_id
+            )
+            return web.json_response({"done": done, "refused": refused})
         album_id = body.get("album_id")
         done, refused = await self.svc(K.gallery_service_key).apply_to_items(
-            str(body.get("action", "")),
+            action,
             ids,
             actor_user_id=ctx.user_id,
             album_id=str(album_id) if album_id else None,

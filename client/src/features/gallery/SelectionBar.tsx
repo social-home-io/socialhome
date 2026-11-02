@@ -10,6 +10,7 @@
  */
 import type { ComponentChildren } from 'preact'
 import { t } from '@/i18n/i18n'
+import { HEART_PATH } from './HeartIcon'
 
 export interface SelectionAction {
   key: string
@@ -27,6 +28,7 @@ const ICONS: Record<string, string> = {
   delete: 'M4.5 6.5h15M9.5 6.5V4.5h5v2m-8 0 1 13h9l1-13M10 10v6m4-6v6',
   restore: 'M5 12a7 7 0 1 0 2.05-4.95M5 4.5v3.5h3.5',
   purge: 'M6 6l12 12M18 6 6 18',
+  favourite: HEART_PATH,
 }
 
 function Icon({ name }: { name: string }) {

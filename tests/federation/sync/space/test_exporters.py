@@ -7,12 +7,13 @@ so the receiver has JSON-serialisable input.
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
 from socialhome.domain.calendar import CalendarEvent
 from socialhome.domain.conversation import ConversationMessage, SystemChatScope
+from socialhome.domain.gallery import GalleryAlbum, GalleryItem
 from socialhome.domain.page import Page
 from socialhome.domain.post import Comment, CommentType, Post, PostType
 from socialhome.domain.space import SpaceMember
@@ -548,6 +549,52 @@ async def test_gallery_exporter_emits_albums_then_items():
     recs = await GalleryExporter(_Repo()).list_records("sp-1")
     assert not {"activity_at", "is_default", "default_name"} & recs[0].keys()
     assert recs[0]["name"] == "Trip"
+
+
+async def test_a_favourite_never_rides_the_gallery_sync(db):
+    """Favourites are private and stay home (D12): the §25.6 gallery stream
+    carries no favourite field and names nobody who marked one, and marking
+    one does not stamp the photo as changed (no member household is sent
+    anything)."""
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp','S','host','anna','ab')"
+    )
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name)"
+        " VALUES('mia', 'uid-mia', 'Mia')"
+    )
+    gallery = SqliteGalleryRepo(db)
+    await gallery.create_album(
+        GalleryAlbum(id="a-1", space_id="sp", owner_user_id="u-1", name="Trip")
+    )
+    await gallery.create_item(
+        GalleryItem(
+            id="i-1",
+            album_id="a-1",
+            uploaded_by="u-1",
+            item_type="photo",
+            url="api/media/x.webp",
+            thumbnail_url="api/media/x-t.webp",
+            width=10,
+            height=10,
+        )
+    )
+    mark = await _seq(db)
+    assert await gallery.add_favourite("uid-mia", "i-1")
+
+    recs = await GalleryExporter(gallery).list_records("sp")
+    assert [r["kind"] for r in recs] == ["album", "item"]
+    for rec in recs:
+        assert not {"is_favourite", "favourited_at", "marked_at"} & rec.keys()
+        assert "uid-mia" not in repr(rec)
+    changed = await collect_batches(
+        record_batches(GalleryExporter(gallery), "sp", since=mark)
+    )
+    assert changed == []
+    # The row type itself has no favourite: nothing built from it (the
+    # federation dicts, ``asdict``) can carry one by accident.
+    assert not {"is_favourite", "favourited_at"} & {f.name for f in fields(GalleryItem)}
 
 
 async def test_polls_exporter_walks_posts_with_polls():
