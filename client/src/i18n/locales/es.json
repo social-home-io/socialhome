@@ -3985,7 +3985,7 @@
   "admin.dashboard.frame.photo_count_one": "{n} foto",
   "admin.dashboard.frame.photo_count": "{n} fotos",
   "admin.dashboard.frame.no_albums": "Aún no hay álbumes que todo el hogar pueda ver. Crea uno primero en la galería.",
-  "admin.dashboard.frame.private_hint": "Solo aparecen los álbumes que todo el hogar puede ver. Los álbumes privados y los de los spaces nunca se muestran en la pared.",
+  "admin.dashboard.frame.private_hint": "Solo aparecen los álbumes que todo el hogar puede ver. Los álbumes privados y los de los espacios nunca se muestran en la pared.",
   "admin.dashboard.frame.pick_one": "Elige al menos un álbum; hasta entonces, la pared no muestra fotos.",
   "admin.dashboard.sessions.last_seen": "Abierto por última vez en una tablet: {when}",
   "admin.dashboard.sessions.never": "Ninguna tablet lo ha abierto desde el último inicio de Social Home.",
