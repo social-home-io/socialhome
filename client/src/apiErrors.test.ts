@@ -388,3 +388,29 @@ describe('apiErrorMessage — fallbacks', () => {
     expect(msg('LOCAL_AREA_DELEGATED')).toContain('Let admins act for me')
   })
 })
+
+describe('apiErrorMessage — private albums and children (gallery D6/D7)', () => {
+  it('says why an album audience change or a move was refused', () => {
+    const msg = (reason: string, extra: Record<string, unknown> = {}) => apiErrorMessage(
+      409, '/api/gallery/albums/a/audience',
+      { code: 'ALBUM_AUDIENCE', detail: 'x', params: { reason, ...extra } },
+    )
+    expect(msg('would_hide')).toMatch(/hide the photo/)
+    expect(msg('not_uploader')).toMatch(/Only the person who added/)
+    expect(msg('not_empty')).toMatch(/new private album/)
+    expect(msg('others_photos')).toMatch(/Others added photos/)
+    expect(msg('has_photos', { user_id: 'nobody' })).toMatch(/added photos here/)
+    expect(msg('default_album')).toMatch(/new photos land in/)
+    expect(msg('blocked', { user_id: 'nobody' })).toMatch(/can't be added/)
+    expect(msg('unknown_person')).toMatch(/isn't part of your home/)
+    expect(msg('too_many', { max: 50 })).toBe('A private album can have at most 50 people.')
+    // An unknown reason keeps the server's detail.
+    expect(msg('new_reason')).toBe('x')
+  })
+
+  it('tells a child that adding photos is off', () => {
+    expect(apiErrorMessage(403, '/api/gallery/albums/a/items', {
+      code: 'CHILD_UPLOAD_OFF', detail: 'x',
+    })).toMatch(/turned off for children/)
+  })
+})

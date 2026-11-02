@@ -13,11 +13,13 @@ from aiohttp.multipart import BodyPartReader
 
 from ..app_keys import (
     config_key,
+    gallery_service_key,
     media_signer_key,
     media_transcode_repo_key,
     media_transcode_service_key,
     storage_quota_service_key,
 )
+from ..auth import SIGNED_URL_PRINCIPAL
 from ..csp import media_response_headers, media_type_for
 from ..domain.errors import CodedError
 from ..domain.media_constraints import (
@@ -108,6 +110,15 @@ class MediaServeView(BaseView):
         file_path = pathlib.Path(config.media_path) / filename
         if not await aiofiles.os.path.isfile(file_path):
             return error_response(404, "NOT_FOUND", "Media file not found.")
+        if not await self._may_open(filename):
+            # A private album's photo (D7) for someone outside it: exactly
+            # the unknown file's answer, so nobody learns it exists.
+            return error_response(404, "NOT_FOUND", "Media file not found.")
+        gallery = self.request.app.get(gallery_service_key)
+        # A private album's file is never kept in a browser or proxy cache:
+        # someone taken out of the album must not find it there (a signed
+        # link they already hold still works until it expires, ≤ 7 h).
+        private = gallery is not None and await gallery.is_private_file(filename)
 
         # The type is guessed from the stored name, so a stored ``.svg`` /
         # ``.html`` would otherwise render as a document on our origin.
@@ -118,7 +129,9 @@ class MediaServeView(BaseView):
         headers = {
             **media_response_headers(content_type, filename),
             "Content-Length": str(stat_result.st_size),
-            "Cache-Control": "private, max-age=86400",
+            "Cache-Control": "private, no-store"
+            if private
+            else "private, max-age=86400",
         }
 
         response = web.StreamResponse(status=200, headers=headers)
@@ -133,6 +146,18 @@ class MediaServeView(BaseView):
 
         await response.write_eof()
         return response
+
+    async def _may_open(self, filename: str) -> bool:
+        """A signed URL was handed out by a route that already checked who
+        sees the file (it names one file, for a few hours); a bearer caller
+        is checked here against the gallery's private albums."""
+        user_id = self.user.user_id
+        if user_id == SIGNED_URL_PRINCIPAL:
+            return True
+        gallery = self.request.app.get(gallery_service_key)
+        if gallery is None:
+            return True
+        return await gallery.may_open_file(filename, user_id=user_id)
 
 
 class MediaUploadView(BaseView):

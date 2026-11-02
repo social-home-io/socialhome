@@ -44,8 +44,8 @@ beforeEach(() => {
 })
 afterEach(() => cleanup())
 
-async function mount(rows: unknown[]) {
-  apiGet.mockResolvedValue(rows)
+async function mount(rows: unknown[], locked: unknown[] = []) {
+  apiGet.mockImplementation(async (url: string) => (url === '/api/gallery/trash/locked' ? locked : rows))
   const { default: TrashPage } = await import('./TrashPage')
   return render(<TrashPage />)
 }
@@ -97,6 +97,20 @@ describe('TrashPage', () => {
     expect(await view.findByRole('img', { name: /Private album from Lena, 12 photos/ })).toBeTruthy()
     expect(view.container.querySelector('img')).toBeNull()
     expect(view.queryByRole('checkbox')).toBeNull()
+  })
+
+  it("an admin's locked tiles come from the server, unpickable, beside the rest", async () => {
+    me.value = { user_id: 'u1', is_admin: true }
+    const deleted = new Date(Date.now() - DAY)
+    const view = await mount([row('a')], [{
+      album_id: 'al-p', owner_user_id: 'u-lena', count: 3,
+      deleted_at: deleted.toISOString(),
+      purge_after: new Date(deleted.getTime() + 30 * DAY).toISOString(),
+      album_in_trash: true,
+    }])
+    expect(await view.findByRole('img', { name: /Private album from Lena, 3 photos/ })).toBeTruthy()
+    expect(view.getAllByRole('checkbox')).toHaveLength(1)
+    expect(apiGet).toHaveBeenCalledWith('/api/gallery/trash/locked')
   })
 
   it('says when the trash is empty', async () => {

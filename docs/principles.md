@@ -1098,6 +1098,20 @@ a §2-principle change requiring explicit sign-off. (The author-side link
 preview fetch above is the one sanctioned outbound fetch tied to content,
 and it runs on the author's household, never in a reader's browser.)
 
+## A media reference is a capability
+
+Every read of a post, comment, cover, chat message, moment, highlight
+frame, listing, page or task attachment signs its `api/media/<file>`
+references again for that write's audience. So whoever may *write* a
+reference decides who may *fetch* the file — and a file name alone must
+never be enough. A person may name a stored file only when they can open
+it today: nobody references it yet (their own fresh upload), or at least
+one row that does is theirs to see. A private gallery album's file only
+its uploader may name (privacy follows the upload, gallery D7). One guard
+checks it at every local write sink (`services/media_ref_guard.py`); a
+refusal answers like a malformed reference, so it tells nobody that a
+file exists.
+
 ## Plaintext locally, encrypted on the wire
 
 Local SQLite stores plaintext rows — that is your data, on your disk,

@@ -139,6 +139,7 @@ instance_keywrap_sig_key: AppKey[str] = AppKey("instance_keywrap_sig")
 #: in ``_on_startup`` once ``identity_seed`` is available; route
 #: handlers and the auth strategy read it via ``request.app[…]``.
 media_signer_key: AppKey = AppKey("media_signer")
+media_ref_guard_key: AppKey = AppKey("media_ref_guard")
 #: Map tile proxy (§map). Fetches OSM raster tiles with an identifying
 #: ``User-Agent`` the browser cannot send, so the SPA's maps render.
 map_tile_service_key: AppKey[MapTileService] = AppKey("map_tile_service")

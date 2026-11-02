@@ -38,6 +38,7 @@ import aiofiles.os
 
 from ..config import Config
 from ..domain.errors import (
+    CodedError,
     DownloadTooLargeError,
     PayloadTooLargeError,
     TranscodeQueueFullError,
@@ -52,9 +53,14 @@ from ..domain.events import (
     GalleryItemRestored,
     GalleryItemUpdated,
     GalleryItemUploaded,
+    GalleryPrivateAlbumTrashed,
     UserDeprovisioned,
 )
 from ..domain.gallery import (
+    AUDIENCE_CHOSEN,
+    AUDIENCE_EVERYONE,
+    AUDIENCE_MAX_PEOPLE,
+    AUDIENCES,
     DOWNLOAD_MAX_BYTES,
     DOWNLOAD_MAX_ITEMS,
     GALLERY_MAX_UPLOAD_BYTES,
@@ -64,12 +70,15 @@ from ..domain.gallery import (
     PERSON_DOWNLOAD_MAX_ITEMS,
     TRASH_RETENTION_DAYS,
     GalleryAlbum,
+    GalleryAlbumAudience,
     GalleryDownloadFile,
     GalleryItem,
+    GallerySettings,
     GalleryTrashItem,
     GalleryUpload,
     ItemCursor,
     ItemSort,
+    LockedTrashAlbum,
     StashedUpload,
     UploadLimits,
     UploadOutcome,
@@ -199,6 +208,10 @@ BULK_ACTIONS: frozenset[str] = frozenset({"delete", "restore", "purge", "move"})
 EMPTY_TRASH_BATCH: int = 500
 EMPTY_TRASH_MAX_BATCHES: int = 20
 #: ``instance_config`` key holding the household default album's id.
+#: ``instance_config`` key of the D6 switch "Kinder dürfen hochladen":
+#: ``"0"`` when an admin turned it off; anything else (unset) is on.
+CHILDREN_MAY_UPLOAD_KEY: str = "gallery.children_may_upload"
+
 DEFAULT_ALBUM_KEY: str = "gallery.default_album_id"
 #: The id of the default album once somebody renamed it. Until then each
 #: viewer sees the default album under their own word for "Photos" (the
@@ -247,6 +260,45 @@ class GalleryNotFoundError(GalleryError):
 
 class GalleryPermissionError(GalleryError):
     """Caller is not allowed to perform this action."""
+
+
+class AlbumAudienceError(CodedError, GalleryPermissionError):
+    """A private-album change refused (D7) — 409 ``ALBUM_AUDIENCE`` with
+    ``params.reason``:
+
+    * ``would_hide`` — moving a photo into an album fewer people see would
+      hide it from someone who sees it now (privacy follows the upload);
+    * ``not_uploader`` — only the person who added a private photo may move
+      it where more people see it;
+    * ``not_empty`` — an album that already holds photos can't become
+      private (it would hide them); make a new private album instead;
+    * ``others_photos`` — a private album holding other people's photos
+      can't be opened to everyone (they added them privately);
+    * ``has_photos`` — someone who added photos to it can't be taken out
+      (``params.user_id``);
+    * ``default_album`` — the household's default album stays everyone's;
+    * ``blocked`` — a guardian block separates the owner and someone they
+      chose (``params.user_id``);
+    * ``unknown_person`` — not an active person of this household;
+    * ``too_many`` — over ``params.max`` people.
+    """
+
+    status = 409
+    code = "ALBUM_AUDIENCE"
+    detail = "That change to who sees this album isn't possible."
+
+    def __init__(self, reason: str, **params: str | int) -> None:
+        super().__init__(params={"reason": reason, **params})
+
+
+class ChildUploadOffError(CodedError, GalleryPermissionError):
+    """403 ``CHILD_UPLOAD_OFF``: the household turned "Children may upload"
+    off (D6), and this is a protected account — it still sees the gallery,
+    it adds nothing to the household's albums."""
+
+    status = 403
+    code = "CHILD_UPLOAD_OFF"
+    detail = "Children can't add photos in this household right now."
 
 
 # ─── Service ─────────────────────────────────────────────────────────────
@@ -336,17 +388,29 @@ class GalleryService:
         """
         if space_id is not None:
             await self._require_member(space_id, actor_user_id)
+        # A household page holds the albums the viewer may see (D7); a
+        # household admin's page also holds the private albums they aren't
+        # in — as locked tiles they may delete, never open.
+        admin = space_id is None and await self._is_household_admin(actor_user_id)
         albums = await self._repo.list_albums(
             space_id,
             limit=limit,
             before=before,
             before_id=before_id,
             by_activity=True,
+            viewer_user_id=None if admin else actor_user_id,
         )
         marks = await self._default_marks() if space_id is None else (None, None)
         out: list[GalleryAlbum] = []
         for a in albums:
-            out.append(await self._for_viewer(a, actor_user_id, marks=marks))
+            if (
+                admin
+                and a.audience == AUDIENCE_CHOSEN
+                and not await self._repo.album_visible_to(a.id, actor_user_id)
+            ):
+                out.append(_locked(a))
+            else:
+                out.append(await self._for_viewer(a, actor_user_id, marks=marks))
         return await self._with_new(out, actor_user_id)
 
     async def get_album(
@@ -427,7 +491,7 @@ class GalleryService:
                 )
             return albums
         newest = await self._repo.newest_by_others(
-            [a.id for a in albums if not a.is_system], viewer_user_id
+            [a.id for a in albums if not a.is_system and not a.locked], viewer_user_id
         )
         return [
             replace(a, has_new=True) if seen.has_new(a.id, newest.get(a.id)) else a
@@ -473,7 +537,17 @@ class GalleryService:
         owner_user_id: str,
         name: str,
         description: str | None = None,
+        audience: str = AUDIENCE_EVERYONE,
+        user_ids: frozenset[str] = frozenset(),
     ) -> GalleryAlbum:
+        """A new album. A household album may start private (``audience``
+        ``chosen`` + *user_ids*, D7): everything uploaded into it is then
+        seen only by those people, the owner and — for a protected owner —
+        their guardians."""
+        if audience not in AUDIENCES:
+            raise ValueError("audience must be everyone or chosen")
+        if audience == AUDIENCE_CHOSEN and space_id is not None:
+            raise ValueError("a space album is seen by the whole space")
         if not name or not name.strip():
             raise ValueError(f"Album name must be 1–{NAME_MAX} characters")
         if len(name) > NAME_MAX:
@@ -482,6 +556,11 @@ class GalleryService:
             raise ValueError(
                 f"Description must be {DESCRIPTION_MAX} characters or fewer"
             )
+        if space_id is None:
+            await self._require_may_add(owner_user_id)
+        people: frozenset[str] = frozenset()
+        if audience == AUDIENCE_CHOSEN:
+            people = await self._valid_audience(owner_user_id, user_ids)
         if space_id is not None:
             await self._require_writer(space_id, owner_user_id)
             existing = await self._repo.list_albums(
@@ -515,8 +594,11 @@ class GalleryService:
             cover_url=None,
             created_at=now,
             updated_at=now,
+            audience=audience,
         )
-        await self._repo.create_album(album)
+        # A private album is stored with its people in one go: it is never
+        # listed to everyone for a moment.
+        await self._repo.create_album(album, audience_user_ids=people)
         await self._bus.publish(
             GalleryAlbumCreated(
                 album_id=album.id,
@@ -630,9 +712,19 @@ class GalleryService:
 
     async def delete_album(self, album_id: str, *, actor_user_id: str) -> None:
         album = await self._repo.get_album(album_id)
-        if album is None or not await self._can_see(album, actor_user_id):
-            # Idempotent, and an album of a space the caller holds no seat
-            # in answers exactly like an unknown id.
+        if album is None:
+            return
+        # A household admin may put a private album they can't open in the
+        # trash (D7: they see it as a locked tile) — its owner is told.
+        locked = (
+            album.space_id is None
+            and album.audience == AUDIENCE_CHOSEN
+            and await self._is_household_admin(actor_user_id)
+            and not await self._can_see(album, actor_user_id)
+        )
+        if not locked and not await self._can_see(album, actor_user_id):
+            # Idempotent, and an album of a space (or a private album) the
+            # caller can't see answers exactly like an unknown id.
             return
         await self._require_gallery_on(album)
         if album.is_system:
@@ -651,7 +743,22 @@ class GalleryService:
             # A household album goes to the trash with its photos (30 days,
             # each restorable; a restore brings the album back). The files
             # stay until the purge.
-            await self._repo.trash_album(album_id, deleted_by=actor_user_id)
+            trashed = await self._repo.trash_album(album_id, deleted_by=actor_user_id)
+            if (
+                album.audience == AUDIENCE_CHOSEN
+                and album.owner_user_id
+                and album.owner_user_id != actor_user_id
+            ):
+                # Only an admin deletes someone else's album: its owner is
+                # told, so nobody's private album disappears silently.
+                await self._bus.publish(
+                    GalleryPrivateAlbumTrashed(
+                        album_id=album_id,
+                        owner_id=album.owner_user_id,
+                        admin_user_id=actor_user_id,
+                        count=len(trashed),
+                    )
+                )
         else:
             media = await self._repo.list_album_media(album_id)
             # A space album keeps a tombstone (§25.6
@@ -909,6 +1016,12 @@ class GalleryService:
             )
         if album.space_id is not None:
             await self._require_writer(album.space_id, uploader_user_id)
+        else:
+            await self._require_may_add(uploader_user_id)
+            if not await self._admitted(album.id, uploader_user_id):
+                # They see it only through photos they added before (e.g. a
+                # guardian whose child grew up): they keep those, add nothing.
+                raise GalleryPermissionError("Only the album's people add to it")
         if caption and len(caption) > CAPTION_MAX:
             raise ValueError(f"Caption must be {CAPTION_MAX} characters or fewer")
         return album
@@ -935,6 +1048,20 @@ class GalleryService:
     ) -> GalleryUpload:
         await self._repo.create_item(item, content_sha256=content_sha256)
         await self._repo.increment_item_count(album.id, +1)
+        if album.space_id is None and not await self._admitted(
+            album.id, item.uploaded_by
+        ):
+            # The album turned private without this person while the upload
+            # was on its way (D7: privacy follows the upload) — it must not
+            # land there: hidden from the others who saw it, and (since an
+            # uploader always sees the album their photo is in) a way into
+            # the private album. Writes are serialised: an audience change
+            # after the insert sees this uploader and is refused, so this
+            # check after the insert closes the race.
+            await self._repo.trash_item(item.id, deleted_by=item.uploaded_by)
+            media = await self._repo.purge_trashed_item(item.id)
+            await unlink_unreferenced(self._media_dir, self._media_refs, media)
+            raise GalleryNotFoundError(f"album {album.id!r} not found")
         await self._bus.publish(
             GalleryItemUploaded(
                 item_id=item.id,
@@ -1027,6 +1154,15 @@ class GalleryService:
         return await self._repo.list_trash(
             viewer_user_id=actor_user_id, limit=limit, before_id=before_id
         )
+
+    async def list_locked_trash(self, *, actor_user_id: str) -> list[LockedTrashAlbum]:
+        """For a household admin: one locked tile per private album they
+        aren't in that has photos in the trash (D7) — whose, how many, when;
+        never a name or a preview. Anyone else: nothing (they can't act on
+        it, and its existence is not theirs to know)."""
+        if not await self._is_household_admin(actor_user_id):
+            return []
+        return await self._repo.list_locked_trash(actor_user_id)
 
     async def restore_item(self, item_id: str, *, actor_user_id: str) -> GalleryItem:
         """Bring a photo or video back from the trash — into its album,
@@ -1200,6 +1336,7 @@ class GalleryService:
                 raise GalleryPermissionError(
                     "nothing can be moved into the feed's Posts album"
                 )
+            await self._check_move(item, album, target, actor_user_id)
             from_album = await self._repo.move_item(item_id, target.id)
             if from_album is None:
                 raise GalleryNotFoundError(f"item {item_id!r} not found")
@@ -1323,8 +1460,12 @@ class GalleryService:
             raise GalleryPermissionError(
                 "Only the person or a household admin may download their photos"
             )
+        # Only what the actor may see, filtered before the limit — so no
+        # photo they may see drops because hidden ones came first.
         items = await self._repo.list_household_uploads(
-            person.user_id, limit=PERSON_DOWNLOAD_MAX_ITEMS + 1
+            person.user_id,
+            limit=PERSON_DOWNLOAD_MAX_ITEMS + 1,
+            viewer_user_id=actor_user_id,
         )
         names: dict[str, str] = {}
         visible: list[GalleryItem] = []
@@ -1389,6 +1530,7 @@ class GalleryService:
         would show an admin what its owner kept from them."""
         if self._users is None:
             return
+        await self._trash_orphaned_private_albums(event.user_id)
         admins = sorted(
             (
                 u
@@ -1410,6 +1552,214 @@ class GalleryService:
             log.info(
                 "gallery: %d album(s) of a removed person handed to an admin", moved
             )
+
+    async def _trash_orphaned_private_albums(self, user_id: str) -> None:
+        """A removed person's private albums that nobody else sees go to the
+        trash (r3: never an ownerless locked tile forever) — 30 days, then
+        the purge; one someone else sees stays, owned by them still."""
+        for album_id in await self._repo.list_private_albums_of(user_id):
+            audience = await self._repo.get_album_audience(album_id)
+            viewers = audience.viewers if audience is not None else None
+            if viewers is None or viewers - {user_id}:
+                continue
+            await self._repo.trash_album(album_id, deleted_by=user_id)
+            await self._bus.publish(
+                GalleryAlbumDeleted(album_id=album_id, space_id=None, owner_id=user_id)
+            )
+
+    # ─── Private albums (D7) ──────────────────────────────────────────────
+
+    async def get_album_audience(
+        self, album_id: str, *, actor_user_id: str
+    ) -> GalleryAlbumAudience:
+        """Who sees a household album, for someone who sees it."""
+        album = await self._visible_album(album_id, actor_user_id)
+        audience = (
+            await self._repo.get_album_audience(album.id)
+            if album.space_id is None
+            else None
+        )
+        if audience is None:
+            raise GalleryNotFoundError(f"album {album_id!r} not found")
+        return audience
+
+    async def set_album_audience(
+        self,
+        album_id: str,
+        *,
+        actor_user_id: str,
+        audience: str,
+        user_ids: frozenset[str] = frozenset(),
+    ) -> GalleryAlbumAudience:
+        """The album's owner chooses who sees it (D7) — never an admin, who
+        can't open a private album. Privacy follows the upload, so a change
+        never hides a photo from someone who saw it nor shows someone's
+        private photo wider than they added it:
+
+        * everyone → private: only while the album holds no photos;
+        * private → everyone: only while every photo in it is the owner's;
+        * private → private: anyone may be added; someone who added photos
+          stays in (a protected owner's guardians are always in, outside
+          the list — :data:`ALBUM_VISIBLE_TO_SQL`);
+        * the household's default album stays everyone's.
+        """
+        if audience not in AUDIENCES:
+            raise ValueError("audience must be everyone or chosen")
+        album = await self._visible_album(album_id, actor_user_id)
+        if album.space_id is not None or album.is_system:
+            raise GalleryPermissionError("only a household album can be private")
+        if album.owner_user_id != actor_user_id:
+            raise GalleryPermissionError("Only the album's owner chooses who sees it")
+        current = await self._repo.get_album_audience(album.id)
+        if current is None:
+            raise GalleryNotFoundError(f"album {album_id!r} not found")
+        people: frozenset[str] = frozenset()
+        if audience == AUDIENCE_CHOSEN:
+            people = await self._valid_audience(actor_user_id, user_ids)
+            default_id, _ = await self._default_marks()
+            if album.id == default_id:
+                raise AlbumAudienceError("default_album")
+        uploaders = await self._repo.album_uploaders(album.id)
+        # Who may have photos in the album once it changes — the same rule
+        # again inside the write's transaction (``allowed_uploaders``), so a
+        # photo landing meanwhile never ends up hidden or shown wider.
+        if current.audience == AUDIENCE_EVERYONE and audience == AUDIENCE_CHOSEN:
+            allowed: frozenset[str] = frozenset()
+            if uploaders:
+                raise AlbumAudienceError("not_empty")
+        elif current.audience == AUDIENCE_CHOSEN and audience == AUDIENCE_EVERYONE:
+            allowed = frozenset({actor_user_id})
+            if uploaders - allowed:
+                raise AlbumAudienceError("others_photos")
+        elif audience == AUDIENCE_CHOSEN:
+            allowed = people | current.guardian_ids | {actor_user_id}
+            for gone in sorted(uploaders - allowed):
+                raise AlbumAudienceError("has_photos", user_id=gone)
+        else:
+            allowed = uploaders | {actor_user_id}  # everyone → everyone
+        if not await self._repo.set_album_audience(
+            album.id, audience, people, allowed_uploaders=allowed
+        ):
+            raise AlbumAudienceError("not_empty" if not allowed else "has_photos")
+        await self._bus.publish(GalleryAlbumUpdated(album_id=album.id, space_id=None))
+        updated = await self._repo.get_album_audience(album.id)
+        if updated is None:  # deleted meanwhile
+            raise GalleryNotFoundError(f"album {album_id!r} not found")
+        return updated
+
+    async def _admitted(self, album_id: str, user_id: str) -> bool:
+        """Whether *user_id* sees a household album by its audience — open
+        to everyone, or its owner, chosen people or a protected owner's
+        guardians — not merely because a photo of theirs is in it (the
+        upload rule: nobody gets into a private album by adding to it)."""
+        audience = await self._repo.get_album_audience(album_id)
+        if audience is None:
+            return False
+        if audience.audience != AUDIENCE_CHOSEN:
+            return True
+        return (
+            user_id == audience.owner_user_id
+            or user_id in audience.user_ids
+            or user_id in audience.guardian_ids
+        )
+
+    async def is_private_file(self, filename: str) -> bool:
+        """Whether *filename* is a private album's photo, video or
+        thumbnail — the file route then sends it ``no-store``."""
+        return await self._repo.is_private_media(filename)
+
+    async def may_open_file(self, filename: str, *, user_id: str) -> bool:
+        """Whether *user_id* may fetch the stored file *filename* — not when
+        it is a photo, video or thumbnail of a private album they can't see
+        and didn't add (D7). Every other file is the media route's own
+        business (its names are unguessable)."""
+        return not await self._repo.media_hidden_from(filename, user_id)
+
+    async def _valid_audience(
+        self, owner_user_id: str, user_ids: frozenset[str]
+    ) -> frozenset[str]:
+        """The chosen people of a private album: active people of this
+        household (the owner is implied), none a guardian block separates
+        from the owner (§CP.F2), at most :data:`AUDIENCE_MAX_PEOPLE`."""
+        people = frozenset(str(u) for u in user_ids if u) - {owner_user_id}
+        if len(people) > AUDIENCE_MAX_PEOPLE:
+            raise AlbumAudienceError("too_many", max=AUDIENCE_MAX_PEOPLE)
+        if not people:
+            return people
+        if self._users is None:
+            raise AlbumAudienceError("unknown_person")
+        active = {u.user_id for u in await self._users.list_active()}
+        if people - active:
+            raise AlbumAudienceError("unknown_person")
+        separated = await self._repo.guardian_block_counterparts(owner_user_id)
+        for uid in sorted(people & separated):
+            raise AlbumAudienceError("blocked", user_id=uid)
+        return people
+
+    async def _check_move(
+        self,
+        item: GalleryItem,
+        source: GalleryAlbum,
+        target: GalleryAlbum,
+        actor_user_id: str,
+    ) -> None:
+        """Privacy follows the upload (D7). With one album per photo, moving
+        a photo *is* changing who sees it, so a move:
+
+        * never narrows: into an album that doesn't show it to everyone who
+          sees it now → refused (``would_hide``). Moving a photo into a
+          private album is therefore refused unless it already sits in a
+          private album shown to no more people — the photo stays where
+          everyone who saw it still does; to keep something private, upload
+          it into the private album (nothing is copied, nothing hides);
+        * widens only by its uploader: out of a private album into one more
+          people see (``not_uploader``) — like sharing (D8).
+        """
+        before = await self._repo.get_album_audience(source.id)
+        after = await self._repo.get_album_audience(target.id)
+        if before is None or after is None:
+            raise GalleryNotFoundError("album not found")
+        seen_by, will_see = before.viewers, after.viewers
+        if will_see is not None and (seen_by is None or not seen_by <= will_see):
+            raise AlbumAudienceError("would_hide")
+        widens = seen_by is not None and (will_see is None or will_see != seen_by)
+        if widens and item.uploaded_by != actor_user_id:
+            raise AlbumAudienceError("not_uploader")
+
+    # ─── Children (D6) and the gallery's settings ─────────────────────────
+
+    async def get_settings(self) -> GallerySettings:
+        """The household's gallery rules (D6)."""
+        if self._instance_config is None:
+            return GallerySettings()
+        raw = await self._instance_config.get(CHILDREN_MAY_UPLOAD_KEY)
+        return GallerySettings(children_may_upload=raw != "0")
+
+    async def set_settings(
+        self, *, actor_user_id: str, children_may_upload: bool | None = None
+    ) -> GallerySettings:
+        """A household admin sets the gallery's rules."""
+        if not await self._is_household_admin(actor_user_id):
+            raise GalleryPermissionError("Only a household admin changes this")
+        if self._instance_config is None:
+            raise RuntimeError("gallery settings need the instance config repo")
+        if children_may_upload is not None:
+            await self._instance_config.set(
+                CHILDREN_MAY_UPLOAD_KEY, "1" if children_may_upload else "0"
+            )
+        return await self.get_settings()
+
+    async def may_add(self, user_id: str) -> bool:
+        """Whether *user_id* may add photos and albums to the household
+        gallery — everyone, except a child while "Children may upload" is
+        off (D6)."""
+        if not await self._is_protected(user_id):
+            return True
+        return (await self.get_settings()).children_may_upload
+
+    async def _require_may_add(self, user_id: str) -> None:
+        if not await self.may_add(user_id):
+            raise ChildUploadOffError()
 
     # ─── Internals: media pipeline ────────────────────────────────────────
 
@@ -1587,10 +1937,16 @@ class GalleryService:
             raise SubscriberReadOnlyError("upload")
 
     async def _can_see(self, album: GalleryAlbum, user_id: str) -> bool:
-        """A household album: every local user. A space album: a seat in
-        its space (:func:`seat_of` — not a banned user's leftover)."""
+        """A household album: its audience (D7) — everyone at home, or for a
+        private album its owner, chosen people and a protected owner's
+        guardians: the repo's one rule
+        (:meth:`AbstractGalleryRepo.album_visible_to`), which every list
+        query shares. A space album: a seat in its space (:func:`seat_of` —
+        not a banned user's leftover)."""
         if album.space_id is None:
-            return True
+            if album.audience != AUDIENCE_CHOSEN:
+                return True
+            return await self._repo.album_visible_to(album.id, user_id)
         return await seat_of(self._space_repo, album.space_id, user_id) is not None
 
     async def _visible_album(self, album_id: str, user_id: str) -> GalleryAlbum:
@@ -1869,6 +2225,23 @@ class GalleryService:
 
 
 # ─── Helpers ─────────────────────────────────────────────────────────────
+
+
+def _locked(album: GalleryAlbum) -> GalleryAlbum:
+    """A private album as a household admin who isn't in it sees it: a
+    locked tile — whose, how many, never its name, description or cover."""
+    return replace(
+        album,
+        name="",
+        description=None,
+        cover_item_id=None,
+        cover_url=None,
+        retention_exempt=False,
+        is_default=False,
+        default_name=False,
+        has_new=False,
+        locked=True,
+    )
 
 
 def _with_cover(album: GalleryAlbum, cover_url: str | None) -> GalleryAlbum:

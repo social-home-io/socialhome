@@ -8,10 +8,11 @@
  * deleted album comes back with them) or Delete forever. A household
  * admin can empty the whole trash from ⋯.
  *
- * A private album someone else deleted shows as one locked tile ("Private
- * album · from Lena · 12 photos") — never a preview. The server sends
- * such rows (``locked``) once private albums arrive; the page already
- * draws them.
+ * A household admin sees, per private album they aren't in, one locked
+ * tile ("Private album · from Lena · 12 photos") — never a preview, never
+ * pickable (``GET /api/gallery/trash/locked``, D7); its photos go with the
+ * purge after 30 days, or their owner brings them back. Anyone else gets
+ * no locked tiles at all.
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { useLocation } from 'preact-iso'
@@ -46,6 +47,37 @@ export interface TrashRow {
   /** A private album the reader can't open: one locked tile, no preview
    *  (private albums — owner decision D7). */
   locked?: { owner_user_id: string; count: number } | null
+}
+
+/** ``GET /api/gallery/trash/locked`` — a private album a household admin
+ *  isn't in, with photos in the trash. */
+export interface LockedTrashAlbum {
+  album_id: string
+  owner_user_id: string | null
+  count: number
+  deleted_at: string
+  purge_after: string
+  album_in_trash: boolean
+}
+
+/** The trash rows with one locked row per private album, by deletion
+ *  time like the rest (newest first). */
+export function withLocked(rows: TrashRow[], locked: LockedTrashAlbum[]): TrashRow[] {
+  if (!locked.length) return rows
+  const tiles: TrashRow[] = locked.map(l => ({
+    id: `locked:${l.album_id}`,
+    album_id: l.album_id,
+    uploaded_by: '',
+    item_type: 'photo',
+    thumbnail_url: '',
+    deleted_at: l.deleted_at,
+    deleted_by: null,
+    purge_after: l.purge_after,
+    album_name: '',
+    album_in_trash: l.album_in_trash,
+    locked: { owner_user_id: l.owner_user_id ?? '', count: l.count },
+  }))
+  return [...rows, ...tiles].sort((a, b) => Date.parse(b.deleted_at) - Date.parse(a.deleted_at))
 }
 
 const PAGE = 100
@@ -103,9 +135,13 @@ export default function TrashPage({ fromList = false }: { fromList?: boolean }) 
     const have = rowsRef.current?.length ?? 0
     const limit = quiet ? Math.min(500, Math.max(PAGE, have)) : PAGE
     try {
-      const next = await api.get<TrashRow[]>(`/api/gallery/trash?limit=${limit}`)
+      const [own, locked] = await Promise.all([
+        api.get<TrashRow[]>(`/api/gallery/trash?limit=${limit}`),
+        api.get<LockedTrashAlbum[]>('/api/gallery/trash/locked').catch(() => []),
+      ])
+      const next = withLocked(own, locked)
       setRows(next)
-      setMore(next.length >= limit)
+      setMore(own.length >= limit)
       setFailed(false)
       // A row someone else restored or purged can't stay picked.
       setPicked(prev => new Set([...prev].filter(id => next.some(r => r.id === id))))
@@ -114,7 +150,7 @@ export default function TrashPage({ fromList = false }: { fromList?: boolean }) 
     }
   }
   const loadMore = async () => {
-    const last = rows?.[rows.length - 1]
+    const last = rows?.filter(r => !r.locked).at(-1)
     if (!last) return
     try {
       const next = await api.get<TrashRow[]>(`/api/gallery/trash?limit=${PAGE}&before_id=${encodeURIComponent(last.id)}`)

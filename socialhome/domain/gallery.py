@@ -21,6 +21,20 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 
+#: ``gallery_albums.audience`` — everyone at home (the default) …
+AUDIENCE_EVERYONE: str = "everyone"
+#: … or only the owner and the people in ``gallery_album_audience``
+#: (a private household album, "Privat – nur diese Personen", D7; a
+#: protected owner's guardians always see it too). A space album is
+#: always ``everyone`` (the 0139 CHECK).
+AUDIENCE_CHOSEN: str = "chosen"
+AUDIENCES: frozenset[str] = frozenset({AUDIENCE_EVERYONE, AUDIENCE_CHOSEN})
+
+#: People one private album may name, at most (the owner and a protected
+#: owner's guardians come on top). A household is a handful of people; the
+#: bound keeps a bad request from writing a thousand rows.
+AUDIENCE_MAX_PEOPLE: int = 50
+
 
 @dataclass(slots=True, frozen=True)
 class GalleryAlbum:
@@ -59,6 +73,13 @@ class GalleryAlbum:
     # last opened the album (D9's "neu" dot, :class:`GallerySeen`). Read
     # with the list, never stored.
     has_new: bool = False
+    # Who sees a household album (migration 0139, D7): :data:`AUDIENCE_EVERYONE`
+    # or :data:`AUDIENCE_CHOSEN`. Never leaves the household.
+    audience: str = AUDIENCE_EVERYONE
+    # ``True`` for a private album listed to a household admin who isn't in
+    # it: one locked tile ("Private album · by Lena · 12 photos") they may
+    # delete but never open — no name, description or cover. Not stored.
+    locked: bool = False
 
     def to_federation_dict(self) -> dict:
         """The album as ``SPACE_GALLERY_ALBUM_CREATED`` / ``_UPDATED`` carry it.
@@ -145,11 +166,12 @@ class GalleryItem:
         }
 
 
-#: :class:`GalleryAlbum` fields that describe the album as one viewer of
-#: this household sees it (read with the list, never stored). They never
-#: leave the household: the §25.6 exporter drops them from its records.
+#: :class:`GalleryAlbum` fields that describe the album as this household
+#: sees it — per viewer (read with the list, never stored) or household-only
+#: (``audience``: a space album is always everyone). They never leave the
+#: household: the §25.6 exporter drops them from its records.
 ALBUM_VIEW_FIELDS: frozenset[str] = frozenset(
-    {"activity_at", "is_default", "default_name", "has_new"}
+    {"activity_at", "is_default", "default_name", "has_new", "audience", "locked"}
 )
 
 
@@ -158,13 +180,6 @@ ALBUM_VIEW_FIELDS: frozenset[str] = frozenset(
 #: Days a deleted household photo or video stays in the trash before the
 #: purge removes it for good (owner decision D5, 2026-11-02).
 TRASH_RETENTION_DAYS: int = 30
-
-#: ``gallery_albums.audience`` — everyone at home (the default) …
-AUDIENCE_EVERYONE: str = "everyone"
-#: … or only the owner and the people in ``gallery_album_audience``
-#: (a private household album; a space album is always ``everyone``).
-AUDIENCE_CHOSEN: str = "chosen"
-AUDIENCES: frozenset[str] = frozenset({AUDIENCE_EVERYONE, AUDIENCE_CHOSEN})
 
 
 class UploadOutcome(StrEnum):
@@ -232,6 +247,46 @@ class GalleryAlbumAudience:
     album_id: str
     audience: str = AUDIENCE_EVERYONE
     user_ids: frozenset[str] = frozenset()
+    #: The album's owner — always sees it.
+    owner_user_id: str | None = None
+    #: A protected owner's guardians (§CP): they always see the owner's
+    #: private albums, whatever ``user_ids`` says — shown as fixed rows,
+    #: never removable (read-time rule, :data:`ALBUM_VISIBLE_TO_SQL`).
+    guardian_ids: frozenset[str] = frozenset()
+    #: Everyone with a photo or video in it (live or in the trash): an
+    #: uploader always sees the album their photo is in.
+    uploader_ids: frozenset[str] = frozenset()
+
+    @property
+    def viewers(self) -> frozenset[str] | None:
+        """Everyone who sees the album — ``None`` for everyone at home."""
+        if self.audience != AUDIENCE_CHOSEN:
+            return None
+        owner = {self.owner_user_id} if self.owner_user_id else set()
+        return frozenset(self.user_ids | self.guardian_ids | self.uploader_ids | owner)
+
+
+@dataclass(slots=True, frozen=True)
+class LockedTrashAlbum:
+    """What a household admin sees in the trash of a private album they
+    aren't in (D7, r3 "one locked tile"): whose it is, how many of its
+    photos and videos wait there, and when the last went — never a name, a
+    caption or a preview. ``deleted_at`` is naive UTC like every trash row."""
+
+    album_id: str
+    owner_user_id: str | None
+    count: int
+    deleted_at: str
+    album_in_trash: bool = False
+
+
+@dataclass(slots=True, frozen=True)
+class GallerySettings:
+    """The household's gallery rules an admin sets (D6): whether children
+    (protected accounts, §CP) may upload photos and make albums. On by
+    default; off, a child still sees what the household shows them."""
+
+    children_may_upload: bool = True
 
 
 # ─── Uploads ─────────────────────────────────────────────────────────────

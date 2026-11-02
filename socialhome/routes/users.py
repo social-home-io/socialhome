@@ -658,7 +658,8 @@ class UserExportView(BaseView):
             return error_response(403, "FORBIDDEN", "Admin only.")
         target = self.match("user_id")
         svc = self.svc(data_export_service_key)
-        body = await svc.export_to_bytes(target)
+        # Someone else's export: never their private albums (gallery D7).
+        body = await svc.export_to_bytes(target, viewer_user_id=ctx.user_id)
         return web.Response(
             body=body,
             content_type="application/json",

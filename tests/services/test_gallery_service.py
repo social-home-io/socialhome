@@ -32,6 +32,7 @@ from socialhome.domain.events import (
     GalleryItemDeleted,
     GalleryItemRestored,
     GalleryItemUpdated,
+    GalleryPrivateAlbumTrashed,
     UserDeprovisioned,
 )
 from socialhome.domain.gallery import (
@@ -71,6 +72,8 @@ from socialhome.services.gallery_service import (
     DEFAULT_ALBUM_KEY,
     DESCRIPTION_MAX,
     NAME_MAX,
+    AlbumAudienceError,
+    ChildUploadOffError,
     GalleryNotFoundError,
     GalleryPermissionError,
     GalleryService,
@@ -1711,11 +1714,14 @@ async def test_a_space_delete_has_no_trash(env):
 async def test_leaving_the_household_keeps_photos_and_hands_albums_to_an_admin(env):
     """Guard: removing a person never removes their photos; the household
     albums they owned pass to an admin — except a private one, which an
-    admin must not gain a view of."""
+    admin must not gain a view of: it stays Bob's while someone else sees
+    it, and goes to the trash when nobody else does (r3)."""
     env.wire()
     shared = await _household_album(env, owner="b-id", name="Bob's")
     private = await _household_album(env, owner="b-id", name="Bob's secret")
-    await env._repo.set_album_audience(private.id, "chosen")  # type: ignore[attr-defined]
+    await env._repo.set_album_audience(private.id, "chosen", frozenset({"a-id"}))  # type: ignore[attr-defined]
+    alone = await _household_album(env, owner="b-id", name="Only Bob")
+    await env._repo.set_album_audience(alone.id, "chosen")  # type: ignore[attr-defined]
     in_space = await env.create_album(space_id="sp-1", owner_user_id="b-id", name="S")
     up = await _upload(env, shared.id, _jpeg(), who="b-id")
 
@@ -1731,6 +1737,7 @@ async def test_leaving_the_household_keeps_photos_and_hands_albums_to_an_admin(e
     assert (
         await env.get_album(in_space.id, actor_user_id="a-id")
     ).owner_user_id == "b-id"
+    assert await env._repo.get_trashed_album(alone.id) is not None  # type: ignore[attr-defined]
     (kept,) = await env.list_items(shared.id, actor_user_id="a-id")
     assert kept.id == up.item.id and kept.uploaded_by == "b-id"
 
@@ -2303,3 +2310,188 @@ async def test_someones_photos_for_the_leaving_household_zip(env):
         n for n in (f.name for f in files) if n.startswith(("Bob's – ", "Lake – "))
     )
     assert len(files) == 2
+
+
+# ─── Private albums (D7) and children (D6) ────────────────────────────────
+
+
+async def _private(env, owner="a-id", people=("b-id",), name="Gifts"):
+    return await env.create_album(
+        space_id=None,
+        owner_user_id=owner,
+        name=name,
+        audience="chosen",
+        user_ids=frozenset(people),
+    )
+
+
+async def test_a_private_album_is_listed_only_to_its_people(env):
+    gifts = await _private(env, owner="b-id", people=())
+    for who, seen in (("b-id", True), ("e-id", False)):
+        ids = {a.id for a in await env.list_albums(space_id=None, actor_user_id=who)}
+        assert (gifts.id in ids) is seen
+    # alice is an admin: one locked tile, nothing to read on it.
+    (tile,) = [
+        a
+        for a in await env.list_albums(space_id=None, actor_user_id="a-id")
+        if a.id == gifts.id
+    ]
+    assert tile.locked and tile.name == "" and tile.cover_url is None
+
+
+async def test_a_private_album_starts_with_valid_people_only(env):
+    with pytest.raises(AlbumAudienceError) as unknown:
+        await _private(env, people=("nobody",))
+    assert unknown.value.params["reason"] == "unknown_person"
+    with pytest.raises(AlbumAudienceError) as many:
+        await _private(env, people=tuple(f"u{i}" for i in range(60)))
+    assert many.value.params["reason"] == "too_many"
+    with pytest.raises(ValueError):
+        await env.create_album(
+            space_id="sp-1", owner_user_id="a-id", name="S", audience="chosen"
+        )
+    with pytest.raises(ValueError):
+        await env.create_album(
+            space_id=None, owner_user_id="a-id", name="S", audience="nope"
+        )
+
+
+async def test_a_guardian_blocked_person_is_never_chosen(env):
+    db = env._repo._db  # type: ignore[attr-defined]
+    await db.enqueue("UPDATE users SET child_protection_enabled=1 WHERE user_id='b-id'")
+    await db.enqueue(
+        "INSERT INTO cp_minor_blocks(minor_user_id, blocked_user_id, blocked_by)"
+        " VALUES('b-id', 'e-id', 'a-id')"
+    )
+    with pytest.raises(AlbumAudienceError) as blocked:
+        await _private(env, owner="b-id", people=("e-id",))
+    assert blocked.value.params == {"reason": "blocked", "user_id": "e-id"}
+
+
+async def test_the_default_album_stays_everyones(env):
+    default, _ = await env.ensure_default_album(actor_user_id="a-id", name="Photos")
+    with pytest.raises(AlbumAudienceError) as err:
+        await env.set_album_audience(
+            default.id, actor_user_id="a-id", audience="chosen"
+        )
+    assert err.value.params["reason"] == "default_album"
+
+
+async def test_only_the_owner_sets_the_audience(env):
+    gifts = await _private(env, people=("b-id",))
+    with pytest.raises(GalleryPermissionError):
+        await env.set_album_audience(
+            gifts.id, actor_user_id="b-id", audience="everyone"
+        )
+    with pytest.raises(ValueError):
+        await env.set_album_audience(gifts.id, actor_user_id="a-id", audience="x")
+    space = await env.create_album(space_id="sp-1", owner_user_id="a-id", name="S")
+    with pytest.raises(GalleryPermissionError):
+        await env.set_album_audience(space.id, actor_user_id="a-id", audience="chosen")
+    with pytest.raises(GalleryNotFoundError):
+        await env.get_album_audience(space.id, actor_user_id="a-id")
+
+
+async def test_an_empty_album_turns_private_and_back(env):
+    album = await _household_album(env)
+    got = await env.set_album_audience(
+        album.id, actor_user_id="a-id", audience="chosen", user_ids=frozenset({"b-id"})
+    )
+    assert got.viewers == {"a-id", "b-id"}
+    await _upload(env, album.id, _jpeg((1, 50, 1)))  # alice's own photo
+    back = await env.set_album_audience(
+        album.id, actor_user_id="a-id", audience="everyone"
+    )
+    assert back.viewers is None
+    # Everyone → everyone with photos in it is a no-op, not a refusal.
+    await env.set_album_audience(album.id, actor_user_id="a-id", audience="everyone")
+
+
+async def test_people_can_be_added_to_a_private_album(env):
+    gifts = await _private(env, people=("b-id",))
+    await _upload(env, gifts.id, _jpeg((2, 50, 1)), who="b-id")
+    got = await env.set_album_audience(
+        gifts.id,
+        actor_user_id="a-id",
+        audience="chosen",
+        user_ids=frozenset({"b-id", "e-id"}),
+    )
+    assert got.user_ids == {"b-id", "e-id"}
+
+
+async def test_moves_between_private_albums(env):
+    """Same people: anyone inside may move. More people: only the uploader.
+    Fewer: nobody."""
+    small = await _private(env, people=("b-id",), name="Small")
+    same = await _private(env, people=("b-id",), name="Same")
+    wide = await _private(env, people=("b-id", "e-id"), name="Wide")
+    bobs = (await _upload(env, small.id, _jpeg((3, 50, 1)), who="b-id")).item
+    await env.update_item(bobs.id, actor_user_id="a-id", album_id=same.id)
+    with pytest.raises(AlbumAudienceError) as err:
+        await env.update_item(bobs.id, actor_user_id="a-id", album_id=wide.id)
+    assert err.value.params["reason"] == "not_uploader"
+    moved = await env.update_item(bobs.id, actor_user_id="b-id", album_id=wide.id)
+    assert moved.album_id == wide.id
+    with pytest.raises(AlbumAudienceError) as back:
+        await env.update_item(bobs.id, actor_user_id="b-id", album_id=small.id)
+    assert back.value.params["reason"] == "would_hide"
+    # Out into everyone's album: the uploader may (it is like sharing).
+    everyone = await _household_album(env, name="All")
+    out = await env.update_item(bobs.id, actor_user_id="b-id", album_id=everyone.id)
+    assert out.album_id == everyone.id
+
+
+async def test_the_gallery_settings_and_who_may_add(env):
+    assert (await env.get_settings()).children_may_upload is True
+    with pytest.raises(GalleryPermissionError):
+        await env.set_settings(actor_user_id="b-id", children_may_upload=False)
+    assert await env.may_add("b-id")
+    await env._repo._db.enqueue(  # type: ignore[attr-defined]
+        "UPDATE users SET child_protection_enabled=1 WHERE user_id='b-id'"
+    )
+    off = await env.set_settings(actor_user_id="a-id", children_may_upload=False)
+    assert off.children_may_upload is False
+    assert not await env.may_add("b-id") and await env.may_add("e-id")
+    with pytest.raises(ChildUploadOffError):
+        await _household_album(env, owner="b-id")
+    # A space album keeps the space's own rules.
+    await env.create_album(space_id="sp-1", owner_user_id="b-id", name="S")
+    on = await env.set_settings(actor_user_id="a-id")
+    assert on.children_may_upload is False
+
+
+async def test_settings_without_an_instance_config(env):
+    env._instance_config = None  # type: ignore[attr-defined]
+    assert (await env.get_settings()).children_may_upload is True
+    with pytest.raises(RuntimeError):
+        await env.set_settings(actor_user_id="a-id", children_may_upload=True)
+
+
+async def test_an_admin_trashes_a_private_album_and_its_owner_is_told(env):
+    seen: list = []
+    env._bus.subscribe(GalleryPrivateAlbumTrashed, seen.append)  # type: ignore[attr-defined]
+    gifts = await _private(env, owner="b-id", people=())
+    await _upload(env, gifts.id, _jpeg((4, 50, 1)), who="b-id")
+    # eve is no admin: like an unknown id.
+    await env.delete_album(gifts.id, actor_user_id="e-id")
+    assert await env.get_album(gifts.id, actor_user_id="b-id")
+    await env.delete_album(gifts.id, actor_user_id="a-id")
+    (event,) = seen
+    assert (event.owner_id, event.admin_user_id, event.count) == ("b-id", "a-id", 1)
+    (tile,) = await env.list_locked_trash(actor_user_id="a-id")
+    assert tile.album_id == gifts.id and tile.count == 1 and tile.album_in_trash
+    assert await env.list_locked_trash(actor_user_id="e-id") == []
+    # The owner deleting their own private album tells nobody.
+    mine = await _private(env, owner="b-id", people=(), name="Mine")
+    await env.delete_album(mine.id, actor_user_id="b-id")
+    assert len(seen) == 1
+
+
+async def test_a_private_file_is_refused_to_outsiders(env):
+    gifts = await _private(env, owner="b-id", people=())
+    item = (await _upload(env, gifts.id, _jpeg((5, 50, 1)), who="b-id")).item
+    name = item.url.rsplit("/", 1)[-1]
+    assert not await env.may_open_file(name, user_id="e-id")
+    assert not await env.may_open_file(name, user_id="a-id")
+    assert await env.may_open_file(name, user_id="b-id")
+    assert await env.may_open_file("other.webp", user_id="e-id")

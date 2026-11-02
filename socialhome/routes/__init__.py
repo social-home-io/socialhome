@@ -186,6 +186,7 @@ from .feed import (
 )
 from .friends import FriendsView, FriendView
 from .gallery import (
+    AlbumAudienceView,
     AlbumDetailView,
     AlbumItemCollectionView,
     AlbumRestoreView,
@@ -198,10 +199,12 @@ from .gallery import (
     GalleryItemDetailView,
     GalleryItemFavouriteView,
     GalleryItemRestoreView,
+    GalleryLockedTrashView,
     GalleryOnThisDayView,
     GalleryPersonPhotosView,
     GalleryPersonPhotosZipView,
     GallerySearchView,
+    GallerySettingsView,
     GalleryTrashCollectionView,
     GalleryTrashItemView,
     HouseholdAlbumCollectionView,
@@ -1248,6 +1251,8 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_view("/api/gallery/albums/{album_id}", AlbumDetailView)
     app.router.add_view("/api/gallery/albums/{album_id}/retention", AlbumRetentionView)
     app.router.add_view("/api/gallery/albums/{album_id}/seen", AlbumSeenView)
+    app.router.add_view("/api/gallery/albums/{album_id}/audience", AlbumAudienceView)
+    app.router.add_view("/api/gallery/settings", GallerySettingsView)
     app.router.add_view("/api/gallery/albums/{album_id}/items", AlbumItemCollectionView)
     app.router.add_view("/api/gallery/items/{item_id}", GalleryItemDetailView)
     app.router.add_view("/api/gallery/items/{item_id}/restore", GalleryItemRestoreView)
@@ -1268,6 +1273,8 @@ def setup_routes(app: web.Application) -> None:
         "/api/gallery/people/{username}/photos/zip", GalleryPersonPhotosZipView
     )
     app.router.add_view("/api/gallery/trash", GalleryTrashCollectionView)
+    # Before ``/trash/{item_id}``: the literal path wins.
+    app.router.add_view("/api/gallery/trash/locked", GalleryLockedTrashView)
     app.router.add_view("/api/gallery/trash/{item_id}", GalleryTrashItemView)
     app.router.add_view("/api/gallery/on-this-day", GalleryOnThisDayView)
     app.router.add_view(

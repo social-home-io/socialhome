@@ -114,6 +114,7 @@ from ..domain.events import (
     GalleryAlbumDeleted,
     GalleryItemsAdded,
     GalleryItemsShared,
+    GalleryPrivateAlbumTrashed,
     HighlightFrameReactionChanged,
     HighlightRemoved,
     LocalSpaceInviteCreated,
@@ -224,6 +225,7 @@ from .notification_links import (
     app_table_link,
     bazaar_listing_link,
     gallery_album_link,
+    gallery_trash_link,
     household_post_link,
     link_target,
     space_about_link,
@@ -615,6 +617,18 @@ _PUSH_TITLES: dict[str, tuple[tuple[str, str], ...]] = {
         ),
         ("notification.push.gallery_added", "New photos from {name}"),
         ("notification.push.gallery_added_anon", "New photos"),
+    ),
+    # An admin put your private album in the trash (D7): who, never the
+    # album — its name can be the secret.
+    "gallery_album_trashed": (
+        (
+            "notification.push.gallery_album_trashed",
+            "{name} put your private album in the trash",
+        ),
+        (
+            "notification.push.gallery_album_trashed_anon",
+            "Your private album was put in the trash",
+        ),
     ),
     # A share of your photos (D8): who, never the album or the chat.
     "gallery_shared": (
@@ -1646,6 +1660,9 @@ class NotificationService(ProtectionGateMixin):
         self._subscribe(GalleryItemsAdded, self.on_gallery_items_added)
         self._subscribe(GalleryAlbumDeleted, self.on_gallery_album_deleted)
         self._subscribe(GalleryItemsShared, self.on_gallery_items_shared)
+        self._subscribe(
+            GalleryPrivateAlbumTrashed, self.on_gallery_private_album_trashed
+        )
         self._subscribe(AppUpdated, self.on_app_update_handled)
         self._subscribe(AppUpdateGone, self.on_app_update_handled)
         self._subscribe(AppUninstalled, self.on_app_update_handled)
@@ -4421,6 +4438,47 @@ class NotificationService(ProtectionGateMixin):
             actor_name=name,
             push_params={"name": name},
             flags=flags,
+            items=event.count,
+        )
+
+    async def on_gallery_private_album_trashed(
+        self, event: GalleryPrivateAlbumTrashed
+    ) -> None:
+        """A household admin put someone's private album in the trash (D7):
+        its owner is told — "Tom put your private album “Gifts” in the
+        trash" — so nobody's private album disappears silently. The row
+        names the album (it is the owner's own; the admin never sees it)
+        and opens the trash, where the owner brings it back for 30 days;
+        the push names the admin only."""
+        if event.owner_id == event.admin_user_id:
+            return
+        user = await self._local_user(event.owner_id)
+        if user is None or self._gallery is None:
+            return
+        album = await self._gallery.get_trashed_album(event.album_id)
+        if album is None:  # restored or purged meanwhile
+            return
+        name = await self._held_name(event.admin_user_id, space_id=None)
+        locale = self._locale(user)
+        await self._save_notif(
+            new_notification(
+                user_id=user.user_id,
+                type="gallery_album_trashed",
+                title=self._t(
+                    "notification.gallery.private_album_trashed",
+                    locale=locale,
+                    fallback="{name} put your private album “{album}” in the trash",
+                    name=name or self._someone(locale),
+                    album=album.name,
+                ),
+                link_url=gallery_trash_link(),
+            ),
+            about=NotificationSubject(
+                object_key(NotificationObject.GALLERY_ALBUM_TRASHED, event.album_id)
+            ),
+            actor_user_id=event.admin_user_id,
+            actor_name=name,
+            push_params={"name": name},
             items=event.count,
         )
 
