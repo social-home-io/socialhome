@@ -8,7 +8,7 @@
  * stays greyed until then) → 2 open it on the tablet (address, a
  * one-time sign-in QR, the port) → 3 an optional privacy-lock PIN. Then
  * the display settings, "sign out all tablets" (which unpairs wall panels
- * too), the wall panels and who appears on it.
+ * too), the photo screensaver, the wall panels and who appears on it.
  *
  * Settings save as they change (optimistic, reverted on error). Every
  * call goes through the ``api`` client; the dashboard's own URL is a
@@ -27,6 +27,7 @@ import localeMeta from '@/i18n/locales/_meta.json'
 import { relativeDocsTime } from '@/utils/relativeTime'
 import { DashboardPasswordDialog, DashboardPinDialog } from './DashboardDialogs'
 import { DashboardPanelsCard } from './DashboardPanelsCard'
+import { DashboardPhotoFrameCard } from './DashboardPhotoFrameCard'
 import { SwitchRow } from './DashboardSwitchRow'
 import { Switch } from '@/components/Switch'
 import { TabletStep } from './DashboardTabletStep'
@@ -143,6 +144,7 @@ export function DashboardTab() {
       <TabletStep state={state} save={save} reload={load} />
       <PinStep state={state} reload={load} />
       <DisplaySection state={state} save={save} />
+      <DashboardPhotoFrameCard state={state} save={save} />
       <DashboardPanelsCard state={state} save={save} reload={load} />
       <PeopleSection state={state} save={save} />
     </div>

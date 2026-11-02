@@ -37,6 +37,7 @@ from ..app_keys import (
     dashboard_auth_key,
     dashboard_controller_key,
     dashboard_display_service_key,
+    dashboard_photo_frame_service_key,
     media_signer_key,
     platform_adapter_key,
     preferences_service_key,
@@ -52,12 +53,14 @@ from ..domain.household_dashboard import (
     DashboardSettings,
     DisplayDiscoveryUnavailableError,
     ExternalDisplayPanel,
+    FrameAlbumChoice,
     picture_effective,
 )
 from ..domain.user import User, _picture_url
 from ..media_signer import sign_media_urls_in
 from ..platform.adapter import DashboardHostPort
 from ..services.dashboard_display_service import DashboardDisplayService
+from ..services.dashboard_photo_frame_service import DashboardPhotoFrameService
 from ..services.dashboard_settings_service import DashboardSettingsService
 from ..services.system_chat_policy import HOUSEHOLD_CHAT_SECTION
 from .base import BaseView
@@ -197,6 +200,19 @@ def _display(display: DashboardDisplay) -> dict[str, Any]:
     }
 
 
+def _frame_album(album: FrameAlbumChoice) -> dict[str, Any]:
+    """An album the admin may pick for the photo screensaver (household,
+    everyone at home). ``is_system`` / ``default_name``: the SPA names it
+    (the feed's "Posts", the default album nobody renamed)."""
+    return {
+        "id": album.id,
+        "name": album.name,
+        "photo_count": album.photo_count,
+        "is_system": album.is_system,
+        "default_name": album.default_name,
+    }
+
+
 def _ha_panel(
     panel: ExternalDisplayPanel, display: DashboardDisplay | None
 ) -> dict[str, Any]:
@@ -267,6 +283,10 @@ class _DashboardAdminView(BaseView):
         return self.svc(dashboard_display_service_key)
 
     @property
+    def photo_frame(self) -> DashboardPhotoFrameService:
+        return self.svc(dashboard_photo_frame_service_key)
+
+    @property
     def is_admin(self) -> bool:
         user = self.user
         return bool(user is not None and user.is_admin)
@@ -315,6 +335,7 @@ class _DashboardAdminView(BaseView):
         url = await self.base_url(settings, host_port)
         prefs = await self.svc(preferences_service_key).get_household()
         displays = await self.displays.list(actor_is_admin=self.is_admin)
+        frame_albums = await self.photo_frame.album_choices()
         return self._json(
             {
                 "enabled": settings.enabled,
@@ -350,6 +371,16 @@ class _DashboardAdminView(BaseView):
                 # Home Assistant may lift a wall panel's privacy lock
                 # without the PIN (off by default).
                 "panel_unlock_from_ha": settings.panel_unlock_from_ha,
+                # The photo screensaver (off by default): when it starts,
+                # the picked albums, and the albums that may be picked —
+                # household albums everyone at home sees (never a
+                # private or space album). A picked album that left that
+                # list (made private, deleted) is still listed in
+                # ``photo_frame_albums`` but never shows.
+                "photo_frame": settings.photo_frame,
+                "photo_frame_minutes": settings.photo_frame_minutes,
+                "photo_frame_albums": list(settings.photo_frame_albums),
+                "photo_frame_album_choices": [_frame_album(a) for a in frame_albums],
                 # The messages come from the household chat: the admin UI
                 # greys the switch while the chat itself is off.
                 "household_chat_enabled": prefs.is_enabled(HOUSEHOLD_CHAT_SECTION),

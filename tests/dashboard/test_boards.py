@@ -7,10 +7,14 @@ from datetime import timedelta
 
 from socialhome.dashboard.boards import (
     TOMORROW_SHOWN,
+    FrameBoard,
     board_base,
+    frame_album_names,
+    frame_board,
     home_board,
     model_fields,
     person_board,
+    photo_date,
     tomorrow_list,
 )
 from socialhome.dashboard.presenter import (
@@ -25,6 +29,7 @@ from .factories import (
     ANNA,
     FOR_LEO,
     FOR_MIA,
+    FRAME_PHOTOS,
     HERE,
     LEO,
     MESSAGES,
@@ -192,3 +197,56 @@ def test_tomorrow_all_day_first():
     early = event("b", "Early", at(6, day=TOMORROW), at(7, day=TOMORROW), "u-anna")
     page = person(ANNA, tomorrow_items=(early, allday), people=PEOPLE)
     assert [i.id for i in tomorrow_list(page)] == ["a", "b"]
+
+
+# ─── Photo screensaver ───────────────────────────────────────────────────
+
+
+def _t(key: str, **fmt: object) -> str:
+    """A tiny catalog: English month names and the frame's date shape."""
+    if key.startswith("dashboard.date.month."):
+        return [
+            "",
+            "January",
+            "February",
+            "March",
+            "April",
+            "May",
+            "June",
+            "July",
+            "August",
+            "September",
+            "October",
+            "November",
+            "December",
+        ][int(key.rsplit(".", 1)[1])]
+    if key == "dashboard.frame.date":
+        return "{month} {day}, {year}".format(**fmt)
+    return key
+
+
+def test_photo_date_says_the_year():
+    assert photo_date("2024-03-12", _t) == "March 12, 2024"
+    assert photo_date("", _t) == ""
+    assert photo_date("not a day", _t) == ""
+
+
+def test_frame_board_captions_every_photo():
+    board = frame_board(FRAME_PHOTOS, _t)
+    assert isinstance(board, FrameBoard)
+    assert (board.interval_s, board.fade_ms) == (20, 2000)
+    first = board.slides[0]
+    assert (first.id, first.date, first.album) == (
+        "ph-lake",
+        "July 12, 2026",
+        "Summer by the lake",
+    )
+    assert (first.width, first.height) == (1600, 1200)
+    assert frame_board((), _t).slides == ()
+
+
+def test_frame_album_names():
+    assert frame_album_names(_t) == {
+        "system": "dashboard.frame.album_posts",
+        "default": "dashboard.frame.album_photos",
+    }

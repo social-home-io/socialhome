@@ -173,6 +173,7 @@
         "mention_sound",
         "night_end",
         "night_start",
+        "photo_frame_minutes",
         "pin_set"
       ],
       "properties": {
@@ -197,6 +198,14 @@
         },
         "pin_set": {
           "type": "boolean"
+        },
+        "photo_frame_minutes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1,
+          "description": "The photo screensaver starts after this many minutes without a touch (GET /frame); null while it is off or no album is picked. Never at night or while locked."
         }
       }
     },

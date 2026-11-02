@@ -8,7 +8,12 @@ from typing import Protocol
 
 from aiohttp import web
 
-from ..domain.household_dashboard import DashboardDisplay, HomeSnapshot, PersonSnapshot
+from ..domain.household_dashboard import (
+    DashboardDisplay,
+    DashboardPhoto,
+    HomeSnapshot,
+    PersonSnapshot,
+)
 from ..domain.theme import HouseholdTheme
 from ..services.dashboard_display_service import DashboardDisplayService
 from ..services.dashboard_settings_service import DashboardSettingsService
@@ -17,6 +22,7 @@ from .auth import DashboardAuth, SessionClaims
 from .avatars import AvatarImages
 from .emoji import EmojiImages
 from .map_png import MapPictures
+from .photo_png import PhotoPictures
 from .render import DashboardRenderer
 
 __all__ = [
@@ -30,10 +36,13 @@ __all__ = [
     "HOUSEHOLD_THEME_KEY",
     "HOUSEHOLD_TZ_KEY",
     "MAP_PICTURES_KEY",
+    "PHOTOS_KEY",
+    "PHOTO_PICTURES_KEY",
     "RENDERER_KEY",
     "SETTINGS_KEY",
     "SNAPSHOTS_KEY",
     "TILES_KEY",
+    "DashboardPhotos",
     "DashboardSnapshots",
     "DashboardTiles",
     "HouseholdNameFn",
@@ -69,6 +78,19 @@ class DashboardSnapshots(Protocol):
         person_id: str | None = None,
         now: datetime | None = None,
     ) -> bool: ...
+
+
+class DashboardPhotos(Protocol):
+    """The photo screensaver's read model
+    (:class:`~socialhome.services.dashboard_photo_frame_service.DashboardPhotoFrameService`)."""
+
+    async def photos(
+        self, day: str, *, album_names: dict[str, str] | None = None
+    ) -> tuple[DashboardPhoto, ...]: ...
+
+    async def photo(self, item_id: str) -> DashboardPhoto | None: ...
+
+    async def read(self, photo: DashboardPhoto) -> bytes | None: ...
 
 
 class DashboardTiles(Protocol):
@@ -109,3 +131,8 @@ EMOJI_KEY: web.AppKey[EmojiImages] = web.AppKey("dashboard_display_emoji")
 #: The wall-panel map pictures (``/api/display/v1/map.png``); absent when
 #: no tile source is wired.
 MAP_PICTURES_KEY: web.AppKey[MapPictures] = web.AppKey("dashboard_display_map")
+#: The photo screensaver's photos; absent (the screensaver never shows)
+#: when no gallery is wired.
+PHOTOS_KEY: web.AppKey[DashboardPhotos] = web.AppKey("dashboard_photos")
+#: Panel-sized screensaver PNGs (``/api/display/v1/photo/{id}.png``).
+PHOTO_PICTURES_KEY: web.AppKey[PhotoPictures] = web.AppKey("dashboard_display_photos")

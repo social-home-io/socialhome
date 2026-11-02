@@ -321,6 +321,7 @@ from .services.capabilities_outbound import CapabilitiesOutbound
 from .services.child_protection_service import ChildProtectionService
 from .services.corner_service import CornerService
 from .services.dashboard_display_service import DashboardDisplayService
+from .services.dashboard_photo_frame_service import DashboardPhotoFrameService
 from .services.dashboard_settings_service import DashboardSettingsService
 from .services.data_export_service import DataExportService
 from .services.dm_media_sync_service import DmMediaSyncService
@@ -2481,6 +2482,13 @@ def _build_household_dashboard(
         child_protection=child_protection_service,
         acknowledgements=dm_service,
     )
+    # The photo screensaver (gallery D10): the picked albums' stored WebPs.
+    photos = DashboardPhotoFrameService(
+        repos.gallery,
+        settings,
+        repos.instance_config,
+        media_dir=config.media_path,
+    )
 
     async def household_name() -> str:
         prefs = await preferences_service.get_household()
@@ -2503,6 +2511,7 @@ def _build_household_dashboard(
             household_theme=theme_service.get_household_theme,
             snapshots=snapshots,
             tiles=map_tile_service,
+            photos=photos,
             extra_hosts=extra_hosts,
             local_hostnames=own_names,
         )
@@ -2523,6 +2532,7 @@ def _build_household_dashboard(
         auth=auth,
         displays=displays,
         snapshots=snapshots,
+        photos=photos,
         advertiser=advertiser,
         server=server,
         controller=controller,
@@ -3819,6 +3829,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.dashboard_settings_service_key] = dashboard.settings
     app[K.dashboard_auth_key] = dashboard.auth
     app[K.dashboard_display_service_key] = dashboard.displays
+    app[K.dashboard_photo_frame_service_key] = dashboard.photos
     app[K.dashboard_server_key] = dashboard.server
     app[K.dashboard_controller_key] = dashboard.controller
     app[K.calendar_import_service_key] = calendar_import_service

@@ -65,6 +65,36 @@ no tile could be loaded — keep the old picture or the placeholder.
 Labels in a script the bundled Roboto lacks (Hebrew, Arabic, CJK) are
 left off the picture; the "Who's where" list carries every name.
 
+## The photo screensaver
+
+An admin may turn on a photo screensaver (off by default). Every
+board's `settings.photo_frame_minutes` says after how many minutes
+without a touch it starts — `null` while it is off (or no album is
+picked). Then:
+
+1. `GET /api/display/v1/frame` (`frame.schema.json`, fixture
+   `frame.json`) — the round: `photos` (each `{id, url, width, height,
+   date, album}`), `interval_s` (how long each stays) and `fade_ms` (the
+   crossfade into the next). `date` (the day taken) and `album` are
+   ready to show, in the wall's language: draw them small, as one line
+   "date · album", on a dark pill in the bottom-left corner (24 px in,
+   18 px text, like the tablet). `404 FRAME_OFF` — off; `409 NIGHT` — the
+   night window (the night screen wins); `423` — locked. The same round
+   all day (`ETag`): fetch it again when a round ends.
+2. `GET {url}?w=&h=` — the photo as a PNG fitted into `w` × `h` (your
+   screen; 200–1920 × 200–1200, default 1280 × 800 — `width` / `height`
+   in the round are that default fit). Aspect kept, never enlarged, an
+   opaque RGB PNG drawn from the stored WebP when you ask (never
+   stored): centre it on black. A 1280 × 800 photo is about 1–2 MB.
+   `ETag` → `304`; `404` for a photo the screensaver no longer shows
+   (skip it); `429` + `Retry-After` past the drawing budget.
+
+Any touch ends it and shows the board again — that touch only wakes the
+panel, it must not press what is underneath. Stop it when the board
+turns `is_night`, when the panel is locked (`423`), and when the
+setting goes `null`. Photos only come from household albums everyone at
+home sees (never a private or space album) — checked on every request.
+
 ## Polling and caching
 
 Every answer has an `ETag` and `Cache-Control: private, no-cache`. Send
@@ -77,8 +107,9 @@ theme colour).
 
 Budgets per panel: 120 JSON requests and 600 images a minute, 30 "Got
 it" per 5 minutes (`429` + `Retry-After`); of the images, at most 6
-freshly painted map pictures a minute (a new size, scheme or map — a kept
-picture or a `304` is free).
+freshly painted map pictures and 12 freshly drawn screensaver photos a
+minute (a new size, scheme or map, a new photo — a kept picture or a
+`304` is free).
 
 ## Pairing
 
@@ -184,8 +215,9 @@ Home builds them from fixed keys (`tests/dashboard/test_claim_seal.py`).
 | `403 DISPLAY_HA_UNLOCK_OFF` | `POST /unlock/ha` while no admin allows Home Assistant to unlock wall panels | Stay locked; report the lock entity as still locked |
 | `409 DASHBOARD_PIN_REQUIRED` | `POST /lock` while the household has no PIN | Hide the lock button (`settings.pin_set`) |
 | `404 TAB_OFF` | The tab doesn't show (chat off, stickies off, nobody located) | Go to Overview |
+| `404 FRAME_OFF` | `GET /frame` or a screensaver photo while the screensaver is off | Show the board; wait for `settings.photo_frame_minutes` |
 | `404 NOT_FOUND` | Unknown or hidden person | Go to Overview |
-| `409 NIGHT` | A tab other than Overview at night | Go to Overview |
+| `409 NIGHT` | A tab other than Overview at night — or the screensaver (`/frame`, its photos) at night | Go to Overview (end the screensaver) |
 | `423` | The panel is privacy-locked | Show the lock screen from the body (`lock.schema.json`); `GET /emoji/1f512` (the PIN button's 🔒) still answers |
 | `429` | Over the request / ack / Home Assistant unlock budget, or the PIN can't be checked now | Wait `Retry-After` seconds |
 | `503 TILES_UNAVAILABLE` | `map.png` without any map tile | Keep the old picture, retry after `Retry-After` |

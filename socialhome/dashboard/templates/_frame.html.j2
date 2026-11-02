@@ -1,0 +1,7 @@
+{#- /fragment/frame — the photo screensaver's round for frame.js: one
+    entry per photo, its picture and its caption (day taken, album). -#}
+<ol data-frame-round data-interval="{{ frame.interval_s }}" data-fade="{{ frame.fade_ms }}">
+{% for s in frame.slides %}
+<li data-photo="/photo/{{ s.id|urlencode }}" data-date="{{ s.date }}" data-album="{{ s.album }}"></li>
+{% endfor %}
+</ol>

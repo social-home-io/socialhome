@@ -291,6 +291,37 @@ Home. DMs, notifications, space chats, event locations and coordinates
 are never shown; the household chat only when you turn on *Show household
 messages* (see above), and never a hidden person's messages. Use the privacy lock below when visitors are around.
 
+## Photo screensaver
+
+Off by default. Turn it on under **Photo screensaver** in **Admin ›
+Dashboard**, pick **when it starts** (1, 2, 5, 10, 15 or 30 minutes
+without a touch — default 5) and **which albums** it shows. When the
+wall has been left alone that long, the tablets and wall panels show
+the photos one after the other — 20 seconds each, with a slow 2-second
+crossfade (a plain cut on a tablet set to reduce motion) — with the day
+each was taken and its album small in the corner. Any tap brings the
+board back (the tap only wakes the wall; it never presses anything
+underneath).
+
+- **Only albums everyone at home sees.** The list offers the
+  household's albums that everyone at home can see. A private album
+  never shows on the wall, and neither does a space album; an album made
+  private later, or moved to the trash, drops out at once. Photos only —
+  no videos, nothing in the trash. The wall is the whole household's, so
+  there is no per-person filter: what you pick is what the wall shows.
+- **A round a day.** Up to 30 photos, drawn from the newest 2000 of the
+  picked albums — the same round on every tablet and panel all day, a
+  new one tomorrow.
+- **Never at night, never while locked.** The night window shows the
+  night view as before, and a privacy-locked tablet or panel stays on
+  the lock screen.
+- **Nothing new is stored.** The tablet shows the gallery's own stored
+  photo (WebP, at most 2560 px). A wall panel can't show WebP, so Social
+  Home draws a picture fitted to the panel's screen (a 1280 × 800 PNG)
+  when the panel asks, keeps the last few in memory and stores nothing.
+- *Headless:* `PUT /api/admin/dashboard` with
+  `{"photo_frame": true, "photo_frame_minutes": 5, "photo_frame_albums": ["<album id>"]}`.
+
 ## Privacy lock (guests, cleaners)
 
 When someone who shouldn't see the household's people is around, tap

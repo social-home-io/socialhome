@@ -35,6 +35,13 @@ short code and then authenticates every request with
   of an unchanged map is a ``304`` that paints nothing (``/map``'s
   ``image.etag`` is the default picture's ``ETag``).
 
+* ``GET /api/display/v1/frame`` (bearer) — the photo screensaver's round
+  (:func:`~.views.frame_round`): ``404 FRAME_OFF`` while it is off (or
+  no album is picked), ``409 NIGHT`` in the night window;
+  ``GET /api/display/v1/photo/{id}.png?w=&h=`` — one of its photos drawn
+  from the stored WebP fitted into the panel's screen (:mod:`.photo_png`,
+  never stored), ``ETag`` → ``304``; ``404`` for a photo it doesn't show.
+
 * ``POST /api/display/v1/lock`` · ``/unlock`` (``{pin}``) · ``/ack``
   (``{message_id, person_id?}``) (bearer) — the privacy lock (stored on
   the panel's record, :meth:`DashboardDisplayService.lock` / ``unlock``:
@@ -85,6 +92,7 @@ from .display_json import (
     board_colors,
     board_header,
     display_clock,
+    frame_payload,
     home_payload,
     lock_payload,
     map_payload,
@@ -104,6 +112,8 @@ from .keys import (
     HOUSEHOLD_THEME_KEY,
     HOUSEHOLD_TZ_KEY,
     MAP_PICTURES_KEY,
+    PHOTO_PICTURES_KEY,
+    PHOTOS_KEY,
     RENDERER_KEY,
     SETTINGS_KEY,
     SNAPSHOTS_KEY,
@@ -117,9 +127,18 @@ from .map_scene import (
     scene_etag,
     scene_key,
 )
+from .photo_png import DEFAULT_SIZE as PHOTO_SIZE
+from .photo_png import clamp_size as clamp_photo_size
 from .presenter import home_colors, person_colors, view_key
 from .tabs import TAB_MAP, TAB_MESSAGES, TAB_NOTES, TAB_OVERVIEW
-from .views import ack_id, lock_is_night
+from .views import (
+    FRAME_NIGHT,
+    ack_id,
+    frame_closed,
+    frame_minutes,
+    frame_round,
+    lock_is_night,
+)
 
 log = logging.getLogger(__name__)
 
@@ -127,12 +146,14 @@ __all__ = [
     "CLAIM_PATH",
     "DISPLAY_API_PREFIX",
     "DISPLAY_CACHE",
+    "FRAME_PATH",
     "HA_UNLOCK_PATH",
     "IMAGE_PREFIXES",
     "LOCK_EMOJI_PATH",
     "LOCK_PATH",
     "MAP_PNG_PATH",
     "PAIR_PATH",
+    "PHOTO_PREFIX",
     "UNLOCK_PATH",
     "bearer_token",
     "guard_display_request",
@@ -161,11 +182,15 @@ KEY_HEADER = "X-Display-Key"
 #: nothing changed); the panel keeps it, nobody in between does.
 DISPLAY_CACHE = "private, no-cache"
 MAP_PNG_PATH = DISPLAY_API_PREFIX + "map.png"
+#: The photo screensaver's round and its pictures.
+FRAME_PATH = DISPLAY_API_PREFIX + "frame"
+PHOTO_PREFIX = DISPLAY_API_PREFIX + "photo/"
 #: Image routes — their own, larger read budget.
 IMAGE_PREFIXES = (
     DISPLAY_API_PREFIX + "avatar/",
     DISPLAY_API_PREFIX + "emoji/",
     MAP_PNG_PATH,
+    PHOTO_PREFIX,
 )
 #: The 🔒 the lock screen's PIN button shows, as on the tablet: a bundled
 #: Twemoji (no household data), so a locked panel — even one rebooted
@@ -556,6 +581,7 @@ class _DisplayBoardView(web.View):
             picture,
             tab,
             None if theme is None else theme.primary_color,
+            frame_minutes(app, settings),
         )
         header = board_header(
             view=view,
@@ -728,6 +754,83 @@ def _no_tiles() -> web.Response:
     return response
 
 
+def _frame_closed(reason: str) -> web.Response:
+    if reason == FRAME_NIGHT:
+        return error_response(409, "NIGHT", "Night mode shows no photos.")
+    return error_response(404, "FRAME_OFF", "The photo screensaver is off.")
+
+
+class DisplayFrameView(web.View):
+    """``GET /api/display/v1/frame`` — the photo screensaver's round, the
+    same photos the tablet plays (:func:`~.views.frame_round`): ``404
+    FRAME_OFF`` while it's off, ``409 NIGHT`` at night, ``423`` when
+    locked (the guard). Each photo's ``url`` is sized for the default
+    1280 × 800 screen."""
+
+    async def get(self) -> web.Response:
+        found = await frame_round(self.request.app)
+        if isinstance(found, str):
+            return _frame_closed(found)
+        payload = frame_payload(found, width=PHOTO_SIZE[0], height=PHOTO_SIZE[1])
+        return json_answer(self.request, payload)
+
+
+class DisplayPhotoView(web.View):
+    """``GET /api/display/v1/photo/{item_id}.png?w=&h=`` — a screensaver
+    photo for a panel: the stored WebP fitted into ``w`` × ``h`` (held to
+    200–1920 × 200–1200, default 1280 × 800; aspect kept, never enlarged)
+    as a PNG, drawn when asked and never stored (:mod:`.photo_png`).
+
+    ``404 NOT_FOUND`` unless the screensaver shows that photo now (its
+    album picked and open to everyone at home); ``404 FRAME_OFF`` /
+    ``409 NIGHT`` as ``/frame``; ``423`` when locked. ``ETag`` → ``304``
+    without drawing; a picture is drawn only when none is kept, at most
+    :data:`~.auth.PHOTO_RENDER_MAX` a minute per panel (``429``)."""
+
+    async def get(self) -> web.Response:
+        try:
+            width, height = clamp_photo_size(
+                _dimension(self.request, "w"), _dimension(self.request, "h")
+            )
+        except ValueError:
+            return error_response(400, "BAD_SIZE", "w and h must be whole numbers.")
+        app = self.request.app
+        closed = await frame_closed(app)
+        if closed is not None:
+            return _frame_closed(closed)
+        photos = app[PHOTOS_KEY]
+        photo = await photos.photo(self.request.match_info["item_id"])
+        if photo is None:
+            return error_response(404, "NOT_FOUND", "No such photo.")
+        tag = hashlib.sha256(
+            f"{photo.id}|{photo.filename}|{width}x{height}".encode()
+        ).hexdigest()
+        etag = f'"{tag[:32]}"'
+        if _etag_matches(self.request, etag):
+            return _png(self.request, b"", etag)
+        pictures = app[PHOTO_PICTURES_KEY]
+        kept = pictures.cached(photo.id, photo.filename, width, height)
+        if kept is None:
+            wait = app[AUTH_KEY].begin_photo_render(self.request[DISPLAY_KEY].id)
+            if wait:
+                return _rate_limited(wait, "Too many photos.")
+            body = await photos.read(photo)
+            if body is None:
+                return error_response(404, "NOT_FOUND", "No such photo.")
+            try:
+                kept = await pictures.render(
+                    photo.id, photo.filename, body, width, height
+                )
+            except Exception:
+                log.warning(
+                    "household dashboard: screensaver photo %s can't be drawn",
+                    photo.id,
+                    exc_info=True,
+                )
+                return error_response(404, "NOT_FOUND", "No such photo.")
+        return _png(self.request, kept, etag)
+
+
 class DisplayPersonView(_DisplayBoardView):
     """``GET /api/display/v1/person/{user_id}`` — ``404`` for anyone
     unknown, inactive or hidden (the same answer either way)."""
@@ -867,6 +970,10 @@ def register_display_routes(app: web.Application) -> None:
         DisplayTabView,
     )
     app.router.add_view(MAP_PNG_PATH, DisplayMapPictureView)
+    app.router.add_view(FRAME_PATH, DisplayFrameView)
+    app.router.add_view(
+        PHOTO_PREFIX + "{item_id:[A-Za-z0-9_-]{1,64}}.png", DisplayPhotoView
+    )
     app.router.add_view(DISPLAY_API_PREFIX + "person/{user_id}", DisplayPersonView)
     app.router.add_view(DISPLAY_API_PREFIX + "theme", DisplayThemeView)
     app.router.add_view(DISPLAY_API_PREFIX + "avatar/{user_id}", DisplayAvatarView)

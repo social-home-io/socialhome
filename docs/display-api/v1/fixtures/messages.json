@@ -188,6 +188,7 @@
     "mention_sound": true,
     "night_end": "06:00",
     "night_start": "22:00",
+    "photo_frame_minutes": null,
     "pin_set": false
   },
   "tab": "messages",
@@ -226,5 +227,5 @@
     }
   ],
   "view": "messages",
-  "view_key": "ba5bd0089487f90c"
+  "view_key": "581ba23b4db5a8e0"
 }

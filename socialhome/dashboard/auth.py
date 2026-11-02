@@ -72,7 +72,9 @@ A paired panel's reads are budgeted per panel
 reads and :data:`DISPLAY_IMAGE_MAX` images per :data:`DISPLAY_WINDOW_S`,
 and of those images at most :data:`MAP_RENDER_MAX` freshly painted map
 pictures (:meth:`DashboardAuth.begin_map_render` — painting is the
-expensive part; a kept picture or a ``304`` is not counted).
+expensive part; a kept picture or a ``304`` is not counted) and
+:data:`PHOTO_RENDER_MAX` freshly drawn screensaver photos
+(:meth:`DashboardAuth.begin_photo_render`, the same way).
 A panel's PIN guesses use the tablet PIN limit, keyed on the panel id
 (:meth:`DashboardAuth.display_pin_throttle_key`), and its "Got it" taps
 the tablet's ack budget (:meth:`DashboardAuth.begin_display_ack`).
@@ -126,6 +128,7 @@ __all__ = [
     "PAIR_CODE_WINDOW_S",
     "PAIR_MAX",
     "PAIR_WINDOW_S",
+    "PHOTO_RENDER_MAX",
     "PIN_THROTTLE_MAX_KEYS",
     "PRUNE_INTERVAL_S",
     "RENEW_AFTER_S",
@@ -201,6 +204,10 @@ DISPLAY_WINDOW_S = 60
 #: (:meth:`DashboardAuth.begin_map_render`): a new size or scheme, or what
 #: the map shows changing. A 30 s poll of an unchanged map paints nothing.
 MAP_RENDER_MAX = 6
+#: Screensaver photos one panel may have drawn per :data:`DISPLAY_WINDOW_S`
+#: (:meth:`DashboardAuth.begin_photo_render`): a photo every 20 s is three
+#: a minute; a kept picture or a ``304`` is free.
+PHOTO_RENDER_MAX = 12
 #: Home Assistant unlocks of one panel per window
 #: (:meth:`DashboardAuth.begin_display_ha_unlock`). An automation lifts a
 #: lock rarely (someone came home, a button was pressed); a handful in
@@ -745,6 +752,16 @@ class DashboardAuth:
         key = f"display-map:{display_id}"
         if self._display_reads.is_allowed(
             key, limit=MAP_RENDER_MAX, window_s=DISPLAY_WINDOW_S
+        ):
+            return 0
+        return self._display_reads.retry_after_s(key, window_s=DISPLAY_WINDOW_S)
+
+    def begin_photo_render(self, display_id: str) -> int:
+        """Count one screensaver photo drawn for a panel: ``0`` when it may
+        be drawn, else the seconds to wait (nothing is counted then)."""
+        key = f"display-photo:{display_id}"
+        if self._display_reads.is_allowed(
+            key, limit=PHOTO_RENDER_MAX, window_s=DISPLAY_WINDOW_S
         ):
             return 0
         return self._display_reads.retry_after_s(key, window_s=DISPLAY_WINDOW_S)

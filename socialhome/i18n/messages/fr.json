@@ -389,5 +389,9 @@
   "notification.report.answered_in": "Votre signalement dans {space_name} a été examiné",
   "notification.bazaar.question": "{author} a une question sur {title}",
   "notification.push.bazaar_question_in": "{name} a une question sur votre annonce dans {space_name}",
-  "notification.push.bazaar_question": "{name} a une question sur votre annonce"
+  "notification.push.bazaar_question": "{name} a une question sur votre annonce",
+  "dashboard.frame.date": "{day} {month} {year}",
+  "dashboard.frame.album_posts": "Publications",
+  "dashboard.frame.album_photos": "Photos",
+  "dashboard.frame.wake": "Économiseur d'écran photos — touchez pour afficher le tableau de bord"
 }

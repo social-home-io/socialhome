@@ -31,6 +31,18 @@ export interface DashboardDisplay {
   locked: boolean
 }
 
+/** An album the photo screensaver may show: a household album everyone
+ *  at home sees (never a private or space album). */
+export interface FrameAlbumChoice {
+  id: string
+  name: string
+  photo_count: number
+  /** The feed's "Posts" album — named by the app. */
+  is_system: boolean
+  /** The default album nobody renamed — named by the app. */
+  default_name: boolean
+}
+
 /** ``GET /api/admin/dashboard``. */
 export interface DashboardState {
   enabled: boolean
@@ -62,6 +74,14 @@ export interface DashboardState {
   /** A Home Assistant automation may lift a wall panel's privacy lock
    *  without the PIN (admin opt-in, default off). */
   panel_unlock_from_ha: boolean
+  /** The photo screensaver (off by default): after
+   *  ``photo_frame_minutes`` without a touch the wall shows the photos of
+   *  ``photo_frame_albums``. */
+  photo_frame: boolean
+  photo_frame_minutes: number
+  photo_frame_albums: string[]
+  /** Albums that may be picked (read-only). */
+  photo_frame_album_choices: FrameAlbumChoice[]
   /** ``feat_household_chat`` is on — the messages switch needs it. */
   household_chat_enabled: boolean
   last_seen_at: string | null
@@ -91,7 +111,8 @@ export interface HaPanel {
   display_name: string | null
 }
 
-export type Patch = Partial<Omit<DashboardState, 'people' | 'displays' | 'ha_display_discovery'>> & {
+export type Patch = Partial<Omit<DashboardState,
+  'people' | 'displays' | 'ha_display_discovery' | 'photo_frame_album_choices'>> & {
   people?: Record<string, { show: boolean, picture: boolean | null }>
 }
 

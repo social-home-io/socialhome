@@ -60,10 +60,13 @@ from .keys import (
     HOUSEHOLD_THEME_KEY,
     HOUSEHOLD_TZ_KEY,
     MAP_PICTURES_KEY,
+    PHOTO_PICTURES_KEY,
+    PHOTOS_KEY,
     RENDERER_KEY,
     SETTINGS_KEY,
     SNAPSHOTS_KEY,
     TILES_KEY,
+    DashboardPhotos,
     DashboardSnapshots,
     DashboardTiles,
     HouseholdNameFn,
@@ -71,6 +74,7 @@ from .keys import (
     HouseholdTzFn,
 )
 from .map_png import MapPictures
+from .photo_png import PhotoPictures
 from .policy import DASHBOARD_CSP_DIRECTIVES, build_dashboard_csp
 from .render import DashboardRenderer
 from .views import (
@@ -118,9 +122,10 @@ _STATIC_PREFIX = "/static/"
 _FRAGMENT_PREFIX = "/fragment/"
 _AVATAR_PREFIX = "/avatar/"
 _TILES_PREFIX = "/tiles/"
+_PHOTO_PREFIX = "/photo/"
 #: Loaded by ``<img>`` / page JS: a missing session is a plain 401, never
 #: the login redirect, and a locked tablet gets 423 / the marker.
-_ASSET_PREFIXES = (_AVATAR_PREFIX, _TILES_PREFIX)
+_ASSET_PREFIXES = (_AVATAR_PREFIX, _TILES_PREFIX, _PHOTO_PREFIX)
 #: The only non-public routes a privacy-locked tablet reaches.
 _LOCK_PATHS = frozenset({"/lock", "/unlock"})
 
@@ -375,6 +380,7 @@ def build_dashboard_app(
     household_theme: HouseholdThemeFn,
     snapshots: DashboardSnapshots,
     tiles: DashboardTiles | None = None,
+    photos: DashboardPhotos | None = None,
     extra_hosts: ExtraHosts = (),
     local_hostnames: frozenset[str] = frozenset(),
 ) -> web.Application:
@@ -418,6 +424,9 @@ def build_dashboard_app(
             avatars=app[AVATARS_KEY],
             pictures=snapshots.avatar,
         )
+    if photos is not None:
+        app[PHOTOS_KEY] = photos
+        app[PHOTO_PICTURES_KEY] = PhotoPictures()
     install_security_headers(app)
     # After the shared hook (which only ``setdefault``s), so these win.
     app.on_response_prepare.append(_dashboard_headers)

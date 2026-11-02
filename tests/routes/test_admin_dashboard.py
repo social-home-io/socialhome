@@ -24,6 +24,7 @@ from socialhome.app_keys import (
 from socialhome.crypto import b64url_encode, generate_x25519_keypair
 from socialhome.dashboard.auth import COOKIE_NAME
 from socialhome.dashboard.claim_seal import open_sealed_claim
+from socialhome.domain.gallery import GalleryAlbum, GalleryItem
 from socialhome.domain.household_dashboard import (
     DashboardAddressRequiredError,
     DisplayDiscoveryFailedError,
@@ -31,6 +32,7 @@ from socialhome.domain.household_dashboard import (
 )
 from socialhome.platform.adapter import DashboardHostPort
 from socialhome.platform.ha.displays import HaDisplayDirectory
+from socialhome.repositories.gallery_repo import SqliteGalleryRepo
 from socialhome.routes.admin_dashboard import dashboard_base_url, panel_url
 
 from .conftest import _auth
@@ -1578,3 +1580,72 @@ async def test_a_panel_without_a_key_sensor_needs_an_update_end_to_end(
     assert resp.status == 409
     assert (await resp.json())["error"]["code"] == "DISPLAY_PANEL_NEEDS_UPDATE"
     assert api.recorded == []
+
+
+# ── The photo screensaver ────────────────────────────────────────────────
+
+
+async def test_photo_frame_settings_and_album_choices(client):
+    """Off by default; only household albums everyone at home sees may be
+    picked (never a private one); the pick round-trips."""
+    repo = SqliteGalleryRepo(client._db)
+    for album_id, name in (("al-summer", "Summer"), ("al-secret", "Secret")):
+        await repo.create_album(
+            GalleryAlbum(
+                id=album_id, space_id=None, owner_user_id=client._uid, name=name
+            )
+        )
+    await repo.set_album_audience("al-secret", "chosen")
+    await repo.create_item(
+        GalleryItem(
+            id="it-1",
+            album_id="al-summer",
+            uploaded_by=client._uid,
+            item_type="photo",
+            url="api/media/it-1.webp",
+            thumbnail_url="api/media/it-1-thumb.webp",
+            width=1600,
+            height=1200,
+        )
+    )
+    body = await (
+        await client.get("/api/admin/dashboard", headers=_auth(client._tok))
+    ).json()
+    assert body["photo_frame"] is False
+    assert body["photo_frame_minutes"] == 5
+    assert body["photo_frame_albums"] == []
+    assert body["photo_frame_album_choices"] == [
+        {
+            "id": "al-summer",
+            "name": "Summer",
+            "photo_count": 1,
+            "is_system": False,
+            "default_name": False,
+        }
+    ]
+    resp = await _put(
+        client,
+        {
+            "photo_frame": True,
+            "photo_frame_minutes": 10,
+            "photo_frame_albums": ["al-summer"],
+        },
+    )
+    assert resp.status == 200
+    body = await resp.json()
+    assert body["photo_frame"] is True
+    assert body["photo_frame_minutes"] == 10
+    assert body["photo_frame_albums"] == ["al-summer"]
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"photo_frame_minutes": 7},
+        {"photo_frame_albums": "al-summer"},
+        {"photo_frame_album_choices": []},
+    ],
+)
+async def test_photo_frame_bad_patch_is_422(client, patch):
+    resp = await _put(client, patch)
+    assert resp.status in (400, 422)

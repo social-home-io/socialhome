@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 
@@ -18,6 +19,7 @@ from ..domain.gallery import (
     ItemCursor,
     ItemSort,
 )
+from ..domain.household_dashboard import DashboardPhoto, FrameAlbumChoice
 from ..domain.tombstone import SpaceRowTombstone
 from .base import changed_since_sql, rows_to_dicts, sync_page_cursor
 from .cp_repo import GUARDIAN_BLOCK_COUNTERPARTS_SQL
@@ -343,6 +345,49 @@ class AbstractGalleryRepo(Protocol):
     async def list_album_tombstones_since(
         self, space_id: str, since: str
     ) -> list[SpaceRowTombstone]: ...
+    async def list_frame_albums(self) -> list[FrameAlbumChoice]:
+        """The albums the wall's photo screensaver may show: live
+        household albums everyone at home sees, with their live photos
+        counted (``default_name`` is the caller's to set)."""
+        ...
+
+    async def list_frame_photos(
+        self, album_ids: Sequence[str], *, limit: int
+    ) -> list[DashboardPhoto]:
+        """The newest *limit* live photos (by day taken) of those of
+        *album_ids* that are household albums everyone at home sees."""
+        ...
+
+    async def get_frame_photo(
+        self, item_id: str, album_ids: Sequence[str]
+    ) -> DashboardPhoto | None:
+        """The live photo *item_id* if it sits in one of *album_ids* and
+        that album is a household album everyone at home sees."""
+        ...
+
+
+#: The screensaver's rule for an album (aliased ``a``): household, live,
+#: open to everyone at home — never a private (``chosen``) or space album.
+_FRAME_ALBUM_SQL = "a.space_id IS NULL AND a.deleted_at IS NULL AND a.audience = ?"
+#: …and for an item (aliased ``i``): a live photo with its file.
+_FRAME_ITEM_SQL = "i.deleted_at IS NULL AND i.item_type = 'photo' AND i.filename <> ''"
+_FRAME_PHOTO_COLS = (
+    "i.id AS id, i.album_id AS album_id, a.name AS album_name,"
+    " i.filename AS filename, i.width AS width, i.height AS height,"
+    " COALESCE(i.taken_at, substr(i.created_at, 1, 10)) AS day"
+)
+
+
+def _frame_photo(r: dict) -> DashboardPhoto:
+    return DashboardPhoto(
+        id=r["id"],
+        album_id=r["album_id"],
+        album_name=r["album_name"],
+        filename=r["filename"],
+        width=int(r["width"]),
+        height=int(r["height"]),
+        day=str(r["day"] or "")[:10],
+    )
 
 
 class SqliteGalleryRepo:
@@ -1726,6 +1771,58 @@ class SqliteGalleryRepo:
             )
             for r in rows
         ]
+
+    # ─── Wall photo screensaver (gallery decision D10) ────────────────────
+
+    async def list_frame_albums(self) -> list[FrameAlbumChoice]:
+        rows = await self._db.fetchall(
+            "SELECT a.id AS id, a.name AS name, a.is_system AS is_system,"
+            " (SELECT COUNT(*) FROM gallery_items i WHERE i.album_id = a.id"
+            f" AND {_FRAME_ITEM_SQL}) AS photos"
+            f" FROM gallery_albums a WHERE {_FRAME_ALBUM_SQL}"
+            " ORDER BY a.is_system DESC, a.name COLLATE NOCASE, a.id",
+            (AUDIENCE_EVERYONE,),
+        )
+        return [
+            FrameAlbumChoice(
+                id=r["id"],
+                name=r["name"],
+                photo_count=int(r["photos"] or 0),
+                is_system=bool(r["is_system"]),
+            )
+            for r in rows_to_dicts(rows)
+        ]
+
+    async def list_frame_photos(
+        self, album_ids: Sequence[str], *, limit: int
+    ) -> list[DashboardPhoto]:
+        ids = list(dict.fromkeys(album_ids))
+        if not ids:
+            return []
+        rows = await self._db.fetchall(
+            f"SELECT {_FRAME_PHOTO_COLS}"
+            " FROM gallery_items i JOIN gallery_albums a ON a.id = i.album_id"
+            f" WHERE i.album_id IN ({','.join('?' * len(ids))})"
+            f" AND {_FRAME_ALBUM_SQL} AND {_FRAME_ITEM_SQL}"
+            " ORDER BY day DESC, i.created_at DESC, i.id DESC LIMIT ?",
+            (*ids, AUDIENCE_EVERYONE, max(1, min(limit, 5000))),
+        )
+        return [_frame_photo(r) for r in rows_to_dicts(rows)]
+
+    async def get_frame_photo(
+        self, item_id: str, album_ids: Sequence[str]
+    ) -> DashboardPhoto | None:
+        ids = list(dict.fromkeys(album_ids))
+        if not ids:
+            return None
+        row = await self._db.fetchone(
+            f"SELECT {_FRAME_PHOTO_COLS}"
+            " FROM gallery_items i JOIN gallery_albums a ON a.id = i.album_id"
+            f" WHERE i.id = ? AND i.album_id IN ({','.join('?' * len(ids))})"
+            f" AND {_FRAME_ALBUM_SQL} AND {_FRAME_ITEM_SQL}",
+            (item_id, *ids, AUDIENCE_EVERYONE),
+        )
+        return _frame_photo(dict(row)) if row else None
 
 
 def _basename(url: str) -> str:

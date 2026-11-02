@@ -61,6 +61,7 @@ from .factories import (
     DINNER,
     FOR_LEO,
     FOR_MIA,
+    FRAME_PHOTOS,
     HERE,
     LEO,
     MENTIONS,
@@ -124,7 +125,7 @@ def tiles() -> FakeTiles:
 
 @pytest.fixture
 async def bare_client(
-    aiohttp_client, settings_service, auth, household, snapshots, tiles
+    aiohttp_client, settings_service, auth, household, snapshots, tiles, photos
 ):
     async def name() -> str:
         return household["name"]
@@ -149,6 +150,7 @@ async def bare_client(
         household_theme=theme,
         snapshots=snapshots,
         tiles=tiles,
+        photos=photos,
     )
     return await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())
 
@@ -4162,3 +4164,153 @@ async def test_concurrent_locks_of_one_session_mint_one_locked_session(
     assert len(minted) == 1
     assert all(r.status == 303 for r in responses)
     assert auth.revoked_count == 1
+
+
+# ─── The photo screensaver ───────────────────────────────────────────────
+
+
+async def _frame_on(settings_service, **extra) -> None:
+    await settings_service.update(
+        actor_is_admin=True,
+        patch={"photo_frame": True, "photo_frame_albums": ["al-summer"], **extra},
+    )
+
+
+async def test_board_carries_no_screensaver_while_it_is_off(client, auth):
+    html = await (await _get(client, auth, "/")).text()
+    assert "data-frame-minutes" not in html
+    assert "frame.js" not in html
+    assert "data-frame " not in html
+
+
+async def test_board_carries_the_screensaver_when_on(client, auth, settings_service):
+    await _frame_on(settings_service, photo_frame_minutes=2)
+    for path in ("/", "/p/u-anna"):
+        html = await (await _get(client, auth, path)).text()
+        assert 'data-frame-minutes="2"' in html, path
+        assert '<script src="/static/frame.js" defer></script>' in html
+        assert 'class="dash-frame" data-frame hidden' in html
+        assert 'aria-label="Photo screensaver — tap to show the dashboard"' in html
+
+
+async def test_turning_the_screensaver_on_changes_the_view_key(
+    client, auth, settings_service
+):
+    """A board open on the wall reloads to pick it up (the view key)."""
+    before = await (await _get(client, auth, "/fragment/home")).text()
+    await _frame_on(settings_service)
+    after = await (await _get(client, auth, "/fragment/home")).text()
+    key = re.compile(r'data-view-key="([^"]+)"')
+    assert key.search(before).group(1) != key.search(after).group(1)
+
+
+async def test_night_board_has_no_screensaver(
+    client, auth, settings_service, snapshots
+):
+    await _frame_on(settings_service)
+    snapshots.home_snapshot = replace(snapshots.home_snapshot, is_night=True)
+    html = await (await _get(client, auth, "/")).text()
+    assert "data-frame-minutes" not in html
+    assert "frame.js" not in html
+
+
+async def test_frame_fragment_lists_the_round(client, auth, settings_service, photos):
+    await _frame_on(settings_service)
+    resp = await _get(client, auth, "/fragment/frame")
+    assert resp.status == 200
+    html = await resp.text()
+    assert 'data-frame-round data-interval="20" data-fade="2000"' in html
+    assert (
+        '<li data-photo="/photo/ph-lake" data-date="July 12, 2026"'
+        ' data-album="Summer by the lake"></li>'
+    ) in html
+    assert 'data-album="Posts"' in html
+    assert html.count("<li ") == 3
+    # The household day (Europe/Berlin) seeds the round.
+    assert photos.days == ["2027-01-15"]
+
+
+async def test_frame_fragment_escapes_album_names(
+    client, auth, settings_service, photos
+):
+    await _frame_on(settings_service)
+    photos.shown = [replace(photos.shown[0], album_name='"><script>x</script>')]
+    html = await (await _get(client, auth, "/fragment/frame")).text()
+    assert "<script>" not in html
+    assert "&#34;&gt;&lt;script&gt;" in html
+
+
+async def test_frame_fragment_is_404_when_off_empty_or_at_night(
+    client, auth, settings_service, photos
+):
+    assert (await _get(client, auth, "/fragment/frame")).status == 404
+    await _frame_on(settings_service)
+    photos.shown = []
+    assert (await _get(client, auth, "/fragment/frame")).status == 404
+    photos.shown = list(FRAME_PHOTOS)
+    # 09:00 in Berlin (FakeClock): a night window around it.
+    await settings_service.update(
+        actor_is_admin=True, patch={"night_start": "08:30", "night_end": "09:30"}
+    )
+    assert (await _get(client, auth, "/fragment/frame")).status == 404
+
+
+async def test_frame_fragment_and_photo_while_locked(client, auth, settings_service):
+    await _frame_on(settings_service)
+    await settings_service.set_pin(actor_is_admin=True, pin="2468")
+    headers = await _cookie(auth, locked=True)
+    resp = await client.get("/fragment/frame", headers=headers)
+    assert resp.headers.get("X-Dashboard-Locked") == "1"
+    assert "ph-lake" not in await resp.text()
+    resp = await client.get("/photo/ph-lake", headers=headers)
+    assert resp.status == 423
+
+
+async def test_photo_is_the_stored_webp(client, auth, settings_service, photos):
+    await _frame_on(settings_service)
+    resp = await _get(client, auth, "/photo/ph-lake")
+    assert resp.status == 200
+    assert resp.content_type == "image/webp"
+    assert await resp.read() == photos.files["ph-lake.webp"]
+    assert resp.headers["Cache-Control"] == "private, no-cache"
+    again = await client.get(
+        "/photo/ph-lake",
+        headers={**await _cookie(auth), "If-None-Match": resp.headers["ETag"]},
+    )
+    assert again.status == 304
+
+
+async def test_photo_rules(client, auth, settings_service, photos):
+    # Off: nothing, even a photo of a picked album.
+    assert (await _get(client, auth, "/photo/ph-lake")).status == 404
+    await _frame_on(settings_service)
+    assert (await _get(client, auth, "/photo/ph-other")).status == 404
+    photos.files.pop("ph-cake.webp")
+    assert (await _get(client, auth, "/photo/ph-cake")).status == 404
+    # No session: never the photo.
+    resp = await client.get("/photo/ph-lake", allow_redirects=False)
+    assert resp.status in (302, 401)
+
+
+def test_frame_js_wakes_on_a_tap_and_never_at_night():
+    js = RENDERER.static_asset("frame.js").body.decode()
+    assert 'body.classList.contains("dash-night")' in js
+    assert 'fetch("/fragment/frame"' in js
+    assert 'res.headers.get("X-Dashboard-Locked")' in js
+    # A tap on it only wakes the board (never reaches what's beneath).
+    click = js[js.index('frame.addEventListener("click"') :]
+    click = click[: click.index("});")]
+    assert "stopPropagation()" in click and "stop();" in click
+    # The hand-over from the idle return to Overview.
+    assert '"dash-idle-since"' in js
+    dash = RENDERER.static_asset("dashboard.js").body.decode()
+    assert 'setItem("dash-idle-since"' in dash
+
+
+def test_frame_css_crossfades_and_cuts_with_reduced_motion():
+    css = RENDERER.static_asset("dashboard.css").body.decode()
+    assert "transition: opacity 2s ease-in-out;" in css
+    # The board underneath isn't drawn (nor read out) while it shows.
+    assert ".dash-framed .dash-shell {\n  visibility: hidden;" in css
+    reduced = css[css.rindex("@media (prefers-reduced-motion: reduce)") :]
+    assert ".dash-frame-img" in reduced and "transition: none;" in reduced

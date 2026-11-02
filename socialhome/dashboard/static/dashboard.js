@@ -17,7 +17,8 @@
  *   - two failed refreshes in a row show the offline banner, hide
  *     relative times and grey "now" until a refresh works again;
  *   - a person page, or Home's Messages / Notes tab, returns to Home's
- *     Overview after data-idle-minutes without a touch;
+ *     Overview after data-idle-minutes without a touch (and tells the
+ *     photo screensaver, frame.js, when the wall went idle);
  *   - the Wake Lock keeps the screen on (data-keep-awake);
  *   - every 10 min the content drifts 1–2 px against burn-in (not with
  *     prefers-reduced-motion);
@@ -691,12 +692,21 @@
   // ── Idle return to Overview (person pages, Home's other tabs) ────────
   if (idleMinutes > 0) {
     var idleTimer = null;
+    var lastActive = Date.now();
     var idleDue = function () {
+      // Tell Overview when the wall went idle, so the photo screensaver
+      // (frame.js) starts on time there rather than waiting again.
+      try {
+        window.sessionStorage.setItem("dash-idle-since", String(lastActive));
+      } catch (e) {
+        // Storage blocked: Overview waits the full time.
+      }
       goWhenReachable("/", HOME_PROBE);
       // Still here (offline)? Try again shortly.
       idleTimer = window.setTimeout(idleDue, REFRESH_MS);
     };
     var armIdle = function () {
+      lastActive = Date.now();
       window.clearTimeout(idleTimer);
       idleTimer = window.setTimeout(idleDue, idleMinutes * 60000);
     };

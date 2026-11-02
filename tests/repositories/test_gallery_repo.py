@@ -1439,3 +1439,87 @@ async def test_newest_by_others_skips_the_viewer_the_trash_and_the_blocked(env):
     got = await repo.newest_by_others(["alb-1"], "a-id")
     assert got == {"alb-1": _at(1)}
     assert await repo.newest_by_others([], "a-id") == {}
+
+
+# ─── Wall photo screensaver (gallery decision D10) ───────────────────────
+
+
+async def _frame_household(db, repo) -> None:
+    """h-1 (everyone), h-priv (private), sys (the feed's Posts), a space
+    album and their items: photos, a video, a trashed photo."""
+    await _household(db, repo, "h-1")
+    await _household(db, repo, "h-priv")
+    await repo.set_album_audience("h-priv", "chosen", frozenset({"b-id"}))
+    await repo.create_album(
+        dataclasses.replace(_album("sys", space_id=None), is_system=True)
+    )
+    await repo.create_album(_album("sp-alb"))
+    for item_id, album_id, taken in (
+        ("p-old", "h-1", "2024-05-01"),
+        ("p-new", "h-1", "2026-07-12"),
+        ("p-priv", "h-priv", "2026-07-12"),
+        ("p-sys", "sys", "2025-01-02"),
+        ("p-space", "sp-alb", "2026-01-01"),
+        ("p-gone", "h-1", "2026-08-01"),
+    ):
+        await repo.create_item(
+            replace(_item(item_id, album_id=album_id), taken_at=taken)
+        )
+    await repo.create_item(
+        replace(_item("v-1", album_id="h-1"), item_type="video", duration_s=3.0)
+    )
+    await repo.trash_item("p-gone", deleted_by="a-id")
+
+
+async def test_frame_albums_are_household_albums_everyone_sees(env):
+    db, repo = env
+    await _frame_household(db, repo)
+    albums = {a.id: a for a in await repo.list_frame_albums()}
+    # Never the private album, never a space album; the system album first.
+    assert list(albums) == ["sys", "h-1"]
+    assert albums["sys"].is_system and not albums["h-1"].is_system
+    # Live photos only: no video, nothing in the trash.
+    assert albums["h-1"].photo_count == 2
+    assert albums["h-1"].name == "Album h-1"
+
+
+async def test_frame_photos_only_from_open_household_albums(env):
+    db, repo = env
+    await _frame_household(db, repo)
+    photos = await repo.list_frame_photos(
+        ["h-1", "h-priv", "sys", "sp-alb", "h-1"], limit=50
+    )
+    # Newest day first; the private, space, video and trashed rows never.
+    assert [p.id for p in photos] == ["p-new", "p-sys", "p-old"]
+    new = photos[0]
+    assert (new.album_id, new.album_name, new.day) == ("h-1", "Album h-1", "2026-07-12")
+    assert new.filename == "p-new.webp"
+    assert (new.width, new.height) == (1920, 1080)
+    assert [p.id for p in await repo.list_frame_photos(["h-1"], limit=1)] == ["p-new"]
+    assert await repo.list_frame_photos([], limit=10) == []
+
+
+async def test_frame_photo_upload_day_when_never_taken(env):
+    db, repo = env
+    await _household(db, repo, "h-1")
+    await repo.create_item(
+        replace(_item("p-1", album_id="h-1"), created_at="2026-03-04T10:00:00+00:00")
+    )
+    (photo,) = await repo.list_frame_photos(["h-1"], limit=5)
+    assert photo.day == "2026-03-04"
+
+
+async def test_get_frame_photo_follows_the_same_rule(env):
+    db, repo = env
+    await _frame_household(db, repo)
+    picked = ["h-1", "h-priv", "sp-alb"]
+    assert (await repo.get_frame_photo("p-new", picked)).id == "p-new"
+    for item_id in ("p-priv", "p-space", "p-gone", "v-1", "missing"):
+        assert await repo.get_frame_photo(item_id, picked) is None, item_id
+    # Not in a picked album.
+    assert await repo.get_frame_photo("p-sys", picked) is None
+    assert await repo.get_frame_photo("p-new", []) is None
+    # An album made private later stops showing at once.
+    await repo.set_album_audience("h-1", "chosen")
+    assert await repo.get_frame_photo("p-new", picked) is None
+    assert await repo.list_frame_photos(picked, limit=5) == []

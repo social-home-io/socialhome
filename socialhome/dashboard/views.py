@@ -55,7 +55,15 @@ from .auth import (
     DashboardAuth,
     StaleSessionError,
 )
-from .boards import board_base, home_board, model_fields, person_board
+from .boards import (
+    FrameBoard,
+    board_base,
+    frame_album_names,
+    frame_board,
+    home_board,
+    model_fields,
+    person_board,
+)
 from .clock import household_clock, resolve_zone
 from .keys import (
     AUTH_KEY,
@@ -63,6 +71,7 @@ from .keys import (
     HOUSEHOLD_NAME_KEY,
     HOUSEHOLD_THEME_KEY,
     HOUSEHOLD_TZ_KEY,
+    PHOTOS_KEY,
     RENDERER_KEY,
     SETTINGS_KEY,
     SNAPSHOTS_KEY,
@@ -93,6 +102,8 @@ log = logging.getLogger(__name__)
 __all__ = [
     "ACK_ID_MAX",
     "AVATAR_CACHE",
+    "FRAME_NIGHT",
+    "FRAME_OFF",
     "HERE_SHOWN",
     "HOME_FRAGMENT",
     "LOCKED_FRAGMENT",
@@ -104,6 +115,7 @@ __all__ = [
     "AckView",
     "AvatarView",
     "EnterView",
+    "FrameFragmentView",
     "HealthView",
     "HomeFragmentView",
     "HomeMapFragmentView",
@@ -116,12 +128,16 @@ __all__ = [
     "LogoutView",
     "PersonFragmentView",
     "PersonView",
+    "PhotoView",
     "StaticView",
     "TileView",
     "UnlockView",
     "ack_id",
     "clear_session_cookie",
     "cookie_secure",
+    "frame_closed",
+    "frame_minutes",
+    "frame_round",
     "html_response",
     "image_type",
     "lock_is_night",
@@ -240,6 +256,49 @@ def lock_is_night(settings: DashboardSettings, now: float, zone: tzinfo) -> bool
     state, not anyone's data, so the neutral lock screen may show it."""
     local = datetime.fromtimestamp(now, zone).time()
     return in_night_window(local, settings.night_start, settings.night_end)
+
+
+#: Why the screensaver can't show now (:func:`frame_round`).
+FRAME_OFF = "off"
+FRAME_NIGHT = "night"
+
+
+def frame_minutes(app: web.Application, settings: DashboardSettings) -> int | None:
+    """Minutes before the screensaver starts — ``None`` when it is off,
+    no album is picked, or no gallery is wired to this dashboard."""
+    if PHOTOS_KEY not in app:
+        return None
+    return settings.frame_minutes
+
+
+async def frame_closed(app: web.Application) -> str | None:
+    """Why the screensaver can't show now — :data:`FRAME_OFF` (off, no
+    album, no gallery) or :data:`FRAME_NIGHT` (the night window: night
+    mode wins over the screensaver, on both screens) — else ``None``.
+    The privacy lock is the session guard's (a locked tablet or panel
+    never gets here)."""
+    settings = await app[SETTINGS_KEY].get()
+    if frame_minutes(app, settings) is None:
+        return FRAME_OFF
+    zone = await asyncio.to_thread(resolve_zone, await app[HOUSEHOLD_TZ_KEY]())
+    if lock_is_night(settings, app[AUTH_KEY].now(), zone):
+        return FRAME_NIGHT
+    return None
+
+
+async def frame_round(app: web.Application) -> FrameBoard | str:
+    """The screensaver's round now — or why there is none
+    (:func:`frame_closed`). The same round all day: the household day
+    seeds the draw."""
+    closed = await frame_closed(app)
+    if closed is not None:
+        return closed
+    settings = await app[SETTINGS_KEY].get()
+    zone = await asyncio.to_thread(resolve_zone, await app[HOUSEHOLD_TZ_KEY]())
+    t = app[RENDERER_KEY].translator(settings.locale)
+    day = datetime.fromtimestamp(app[AUTH_KEY].now(), zone).date().isoformat()
+    photos = await app[PHOTOS_KEY].photos(day, album_names=frame_album_names(t))
+    return frame_board(photos, t)
 
 
 def pin_tries_note(t: Callable[..., str], remaining: int) -> str:
@@ -597,8 +656,12 @@ async def _board(
             settings.keep_screen_on,
             picture,
             tab,
+            frame_minutes(app, settings),
         ),
         "fragment_url": fragment_url,
+        # The photo screensaver (``frame.js``): minutes without a touch
+        # before it starts — never at night (the night view wins).
+        "frame_minutes": None if night else frame_minutes(app, settings),
         # A person page and Home's Messages / Notes tabs go back to
         # Overview when nobody touches the tablet.
         "idle_minutes": (
@@ -899,6 +962,51 @@ class AvatarView(_DashboardView):
         return web.Response(body=body, content_type=image_type(body), headers=headers)
 
 
+#: A screensaver photo is revalidated on every load (``ETag``) through the
+#: session guard, so the lock, night or an album leaving the screensaver
+#: take effect at once — like a face.
+PHOTO_CACHE = "private, no-cache"
+
+
+class FrameFragmentView(_DashboardView):
+    """``GET /fragment/frame`` — the screensaver's round as a list
+    ``frame.js`` plays (:func:`frame_round`); a plain ``404`` when it is
+    off, at night or has no photo (the script keeps the board). A locked
+    tablet gets the guard's marker like any fragment."""
+
+    async def get(self) -> web.Response:
+        found = await frame_round(self.request.app)
+        if isinstance(found, str) or not found.slides:
+            raise web.HTTPNotFound()
+        settings = await self.settings.get()
+        return await self.render("_frame.html.j2", locale=settings.locale, frame=found)
+
+
+class PhotoView(_DashboardView):
+    """``GET /photo/{item_id}`` — a screensaver photo, the stored WebP
+    (≤ 2560 px, the gallery's own file: a 1280 × 800 wall needs more than
+    the 512 px thumbnail). ``404`` unless the screensaver shows it now:
+    on, not at night, its album picked and open to everyone at home
+    (:meth:`~socialhome.services.dashboard_photo_frame_service.DashboardPhotoFrameService.photo`)."""
+
+    async def get(self) -> web.Response:
+        if await frame_closed(self.request.app) is not None:
+            raise web.HTTPNotFound()
+        photos = self.request.app[PHOTOS_KEY]
+        photo = await photos.photo(self.request.match_info["item_id"])
+        if photo is None:
+            raise web.HTTPNotFound()
+        tag = hashlib.sha256(f"{photo.id}|{photo.filename}".encode()).hexdigest()
+        etag = f'"{tag[:32]}"'
+        headers = {"ETag": etag, "Cache-Control": PHOTO_CACHE}
+        if self.request.headers.get("If-None-Match") == etag:
+            return web.Response(status=304, headers=headers)
+        body = await photos.read(photo)
+        if body is None:
+            raise web.HTTPNotFound()
+        return web.Response(body=body, content_type=image_type(body), headers=headers)
+
+
 async def _signed_out_response(request: web.Request) -> web.Response:
     """Off to the login form with the "signed out" note, cookie cleared."""
     response = redirect(SIGNED_OUT_PATH)
@@ -1117,6 +1225,8 @@ def register_routes(app: web.Application) -> None:
     app.router.add_view("/fragment/p/{user_id}", PersonFragmentView)
     app.router.add_view(r"/tiles/{z:\d{1,2}}/{x:\d{1,7}}/{y:\d{1,7}}", TileView)
     app.router.add_view("/avatar/{user_id}", AvatarView)
+    app.router.add_view("/fragment/frame", FrameFragmentView)
+    app.router.add_view("/photo/{item_id:[A-Za-z0-9_-]{1,64}}", PhotoView)
     app.router.add_view("/login", LoginView)
     app.router.add_view("/enter", EnterView)
     app.router.add_view("/logout", LogoutView)
