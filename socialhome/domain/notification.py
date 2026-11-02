@@ -294,6 +294,10 @@ class NotificationParams:
       section for every recipient ("Handled by Søren").
     * ``items`` — on a "new photos" row (D9): how many photos and videos
       it tells of since it was last read; ``None`` on every other row.
+    * ``album`` — on a "new photos" row: the album's name when it was
+      written, so the client builds the sentence in the reader's language
+      (``space_name`` stays the space's, for a space album). Never in a
+      push.
     """
 
     actors: tuple[NotificationActor, ...] = ()
@@ -305,6 +309,7 @@ class NotificationParams:
     handled: NotificationHandled | None = None
     others: int | None = None
     items: int | None = None
+    album: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -323,6 +328,8 @@ class NotificationParams:
             out["others"] = self.others
         if self.items is not None:
             out["items"] = self.items
+        if self.album is not None:
+            out["album"] = self.album
         return out
 
     @classmethod
@@ -344,6 +351,7 @@ class NotificationParams:
         flags = raw.get("flags")
         others = raw.get("others")
         items = raw.get("items")
+        album = raw.get("album")
         return cls(
             actors=actors,
             actor_count=_count(raw.get("actor_count"), len(actors)),
@@ -370,6 +378,7 @@ class NotificationParams:
                 if isinstance(items, int) and not isinstance(items, bool) and items >= 0
                 else None
             ),
+            album=album if isinstance(album, str) else None,
         )
 
 
@@ -386,6 +395,7 @@ def first_params(
     flags: tuple[str, ...] = (),
     others: int | None = None,
     items: int | None = None,
+    album: str | None = None,
 ) -> NotificationParams:
     """A fresh row's params: one event, by *actor* (``None`` for a notice
     nobody caused)."""
@@ -399,6 +409,7 @@ def first_params(
         flags=flags,
         others=others,
         items=items,
+        album=album,
     )
 
 
@@ -411,6 +422,7 @@ def regroup(
     flags: tuple[str, ...] = (),
     others: int | None = None,
     items: int | None = None,
+    album: str | None = None,
 ) -> NotificationParams:
     """*old*'s params after one more event by *actor*.
 
@@ -429,6 +441,7 @@ def regroup(
     space_name = space_name or old.space_name
     others = others if others is not None else old.others
     items = items if items is not None else old.items
+    album = album if album is not None else old.album
     if reopen:
         fresh = first_params(actor, space_name=space_name, flags=flags, others=others)
         return NotificationParams(
@@ -440,6 +453,7 @@ def regroup(
             flags=flags,
             others=others,
             items=items,
+            album=album,
         )
     actors = old.actors
     count = old.actor_count
@@ -456,6 +470,7 @@ def regroup(
         flags=flags,
         others=others,
         items=items,
+        album=album,
     )
 
 

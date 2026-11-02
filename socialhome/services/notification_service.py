@@ -328,6 +328,7 @@ class _Pending:
     flags: tuple[str, ...]
     others: int | None = None
     items: int | None = None
+    album: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -734,6 +735,7 @@ def _grouped(
     flags: tuple[str, ...],
     others: int | None = None,
     items: int | None = None,
+    album: str | None = None,
 ) -> tuple[Notification, bool, bool]:
     """``(row to write, reopened, silent)`` for *note* joining *group*.
 
@@ -754,6 +756,7 @@ def _grouped(
                 flags=flags,
                 others=others,
                 items=items,
+                album=album,
             ),
         )
         return saved, False, not push
@@ -773,6 +776,7 @@ def _grouped(
             flags=flags,
             others=others,
             items=items,
+            album=album,
         ),
     )
     reopened = group.is_read
@@ -1053,6 +1057,7 @@ class NotificationService(ProtectionGateMixin):
         flags: tuple[str, ...] = (),
         others: int | None = None,
         items: int | None = None,
+        album: str | None = None,
     ) -> Notification | None:
         """The one gate every notification passes, then persist + publish
         ``NotificationCreated`` + fire title-only pushes to every registered
@@ -1100,7 +1105,8 @@ class NotificationService(ProtectionGateMixin):
         ``flags`` say why a "Needs you" item can't be decided with one tap
         (:data:`~socialhome.domain.notification.JOIN_REQUEST_FLAGS`).
         ``others`` is a group game's count (``params.others``, v_76);
-        ``items`` a "new photos" row's (``params.items``, D9).
+        ``items`` and ``album`` a "new photos" row's (``params.items`` /
+        ``params.album``, D9).
 
         What the recipient chose (D4, D10, :meth:`_heard`) comes last: a
         muted post or a kind set to Off → no row; a kind set to In app → a
@@ -1137,7 +1143,16 @@ class NotificationService(ProtectionGateMixin):
             # A delivery job: the row joins the job's one batched write.
             batch.items.append(
                 _Pending(
-                    note, about, user, actor, push, push_params, flags, others, items
+                    note,
+                    about,
+                    user,
+                    actor,
+                    push,
+                    push_params,
+                    flags,
+                    others,
+                    items,
+                    album,
                 )
             )
             return None
@@ -1148,7 +1163,7 @@ class NotificationService(ProtectionGateMixin):
             since=_group_since(),
         )
         saved, reopened, silent = _grouped(
-            note, group, about, actor, push, flags, others, items
+            note, group, about, actor, push, flags, others, items, album
         )
         if group is None:
             await self._notifs.save(saved)
@@ -1216,6 +1231,7 @@ class NotificationService(ProtectionGateMixin):
                 item.flags,
                 item.others,
                 item.items,
+                item.album,
             )
             # A second event for the same group in this job joins the row
             # the first one made, as it would one save at a time.
@@ -4189,6 +4205,7 @@ class NotificationService(ProtectionGateMixin):
                 push_params={"name": name, "space_name": space_name},
                 flags=flags,
                 items=count,
+                album=album.name,
             )
 
     def _gallery_title(

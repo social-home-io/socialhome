@@ -121,6 +121,12 @@ async def test_a_batch_is_one_row_for_everyone_else_at_home(env):
         assert row.params is not None
         assert row.params.items == 12
         assert [a.id for a in row.params.actors] == [anna.user_id]
+        # What the app builds the sentence from, in the reader's language
+        # (the title is only the fallback).
+        assert row.params.album == "Sommer 2026"
+        assert row.params.flags == ("photos",)
+        assert row.params.space_name is None
+        assert row.params.to_dict()["album"] == "Sommer 2026"
 
 
 async def test_no_push_by_default(env):
@@ -251,6 +257,8 @@ async def test_a_space_album_tells_its_members_here(env):
     assert row.title == "Anna added 5 photos to “Oma” in Großeltern"
     assert row.link_url == f"/spaces/{space.id}/gallery/albums/al-Oma"
     assert row.space_id == space.id
+    assert row.params is not None
+    assert (row.params.album, row.params.space_name) == ("Oma", "Großeltern")
     # Who and where — never the album.
     assert env.push.titles == [(ben.user_id, "New photos from Anna in Großeltern")]
 

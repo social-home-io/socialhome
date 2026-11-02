@@ -813,8 +813,11 @@ only its people; a space album: this household's members of the space at
 "Everything" — but the uploader one `gallery_added` row: "Anna added 12
 photos to “Summer 2026”" (… "in {space}" for a space album), kind
 `activity` (in app by default, no push), about
-`gallery_album:<album_id>/<uploader_id>` with `params.items` (the count)
-and `flags` `photos` / `videos`, opening the album
+`gallery_album:<album_id>/<uploader_id>` with `params.items` (the count),
+`params.album` (the album's name; `params.space_name` stays the space's)
+and `flags` `photos` / `videos` — the app builds the sentence from these
+in the viewer's language (`notifications.row.gallery_added_*`), the
+server's `title` is only the fallback — opening the album
 (`/gallery/albums/<id>`, `/spaces/<sid>/gallery/albums/<id>`). The next
 batch re-opens that row; while it is unread its count adds up. A person
 who sets Activity to Push gets "New photos from Anna" (… "in {space}") —
