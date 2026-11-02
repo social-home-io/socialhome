@@ -62,6 +62,7 @@ from ...domain.events import (
     GalleryAlbumDeleted,
     GalleryAlbumUpdated,
     GalleryItemDeleted,
+    GalleryItemUpdated,
     GalleryItemUploaded,
     PageDeleted,
     PollClosed,
@@ -78,7 +79,8 @@ from ...domain.events import (
     TimetableSaved,
 )
 from ...domain.federation import FederationEventType
-from ...domain.gallery import GalleryAlbum, GalleryItem
+from ...domain.gallery import GalleryAlbum, GalleryItem, valid_taken_day
+from ...domain.media_constraints import CAPTION_MAX
 from ...domain.page import MAX_PAGE_TITLE_LENGTH, Page
 from ...domain.page_version import version_hash
 from ...domain.post import (
@@ -390,6 +392,10 @@ class SpaceContentInboundHandlers:
             registry.register(
                 FederationEventType.SPACE_GALLERY_ITEM_CREATED,
                 self._on_gallery_item_saved,
+            )
+            registry.register(
+                FederationEventType.SPACE_GALLERY_ITEM_UPDATED,
+                self._on_gallery_item_updated,
             )
             registry.register(
                 FederationEventType.SPACE_GALLERY_ITEM_DELETED,
@@ -2302,6 +2308,108 @@ class SpaceContentInboundHandlers:
                 )
             )
 
+    async def _on_gallery_item_updated(self, event: FederationEvent) -> None:
+        """Apply a member's caption / day taken / album move (v_79).
+
+        The payload is the item's whole editable state (``caption``,
+        ``taken_at``, ``album_id``) — a key left out stays as it is. Every
+        rule is read from THIS household's copy, never the payload: the
+        item must be held live in a user album of the gated space, and the
+        named ``actor_user_id`` must be its uploader (a writer seat on the
+        sending household) or hold content authority (owner / admin /
+        moderator) as the sender records it — the local edit rule
+        (``GalleryService.update_item``). A move lands only in a live user
+        album of the same space held here. Bad values (a caption over
+        ``CAPTION_MAX``, a day that is not ``YYYY-MM-DD``) refuse the whole
+        edit.
+        """
+        if self._gallery_repo is None:
+            return
+        space_id = resolve_space_id(event)
+        p = event.payload
+        item_id = str(p.get("id") or "")
+        if not space_id or not item_id:
+            return
+        item = await self._gallery_repo.get_item(item_id)
+        if item is None:
+            log_not_applied(
+                event, what="gallery item", row_id=item_id, reason="no such item here"
+            )
+            return
+        album = await self._gallery_repo.get_album(item.album_id)
+        if album is None or album.space_id != space_id or album.is_system:
+            log_cross_space_refusal(
+                event, space_id=space_id, what="gallery item", row_id=item_id
+            )
+            return
+        actor = payload_actor(event)
+        if not actor or not await self._may_edit_gallery_item(
+            event, space_id, item.uploaded_by, actor
+        ):
+            await self._authorship.hold_or_refuse(
+                event,
+                space_id=space_id,
+                what="gallery item",
+                row_id=item_id,
+                user_id=actor or item.uploaded_by,
+            )
+            return
+        patch = _gallery_item_patch(p)
+        if patch is None:
+            log.warning(
+                "%s from %s: gallery item %s in space %s carries an invalid "
+                "caption or day taken — refusing the edit",
+                event.event_type,
+                event.from_instance,
+                item_id,
+                space_id,
+            )
+            return
+        to_album = str(p.get("album_id") or "") or None
+        from_album = await self._gallery_repo.edit_item_in_space(
+            item_id, space_id=space_id, patch=patch, to_album_id=to_album
+        )
+        if from_album is None:
+            # The target album is not held here (yet) in this space, or the
+            # item went meanwhile — the host's sync brings the state later.
+            log_not_applied(
+                event,
+                what="gallery item",
+                row_id=item_id,
+                reason="its album is not held here in this space",
+            )
+            return
+        updated = await self._gallery_repo.get_item(item_id)
+        if updated is None or (
+            updated.album_id == item.album_id
+            and updated.caption == item.caption
+            and updated.taken_at == item.taken_at
+        ):
+            return  # a redelivery: nothing changed
+        await self._bus.publish(
+            GalleryItemUpdated(
+                item_id=item_id,
+                album_id=updated.album_id,
+                from_album_id=from_album if updated.album_id != from_album else None,
+                space_id=space_id,
+                actor_user_id=actor,
+                origin_instance_id=event.from_instance,
+            )
+        )
+
+    async def _may_edit_gallery_item(
+        self, event: FederationEvent, space_id: str, uploaded_by: str, actor: str
+    ) -> bool:
+        """The named ``actor`` may change a space photo uploaded by
+        ``uploaded_by``: it is the uploader, holding a writer seat on the
+        sending household, or it holds content authority (owner / admin /
+        moderator) as the sender records it."""
+        if actor == uploaded_by and await self._authorship.acts_for(
+            event, space_id, actor
+        ):
+            return True
+        return await self._authorship.moderates_as(event, space_id, actor)
+
     async def _on_gallery_item_deleted(self, event: FederationEvent) -> None:
         if self._gallery_repo is None:
             return
@@ -3812,6 +3920,30 @@ class SpaceContentInboundHandlers:
 
 #: Upper bound on a row id read from a delete payload (the domain's id cap).
 _MAX_ROW_ID = 64
+
+
+def _gallery_item_patch(payload: dict) -> dict | None:
+    """The ``caption`` / ``taken_at`` columns a ``SPACE_GALLERY_ITEM_UPDATED``
+    sets — only for keys the payload carries — under the local edit rules
+    (``GalleryService.update_item``), or ``None`` when one is invalid."""
+    patch: dict = {}
+    if "caption" in payload:
+        caption = payload.get("caption")
+        if caption is not None and not isinstance(caption, str):
+            return None
+        text = (caption or "").strip()
+        if len(text) > CAPTION_MAX:
+            return None
+        patch["caption"] = text or None
+    if "taken_at" in payload:
+        taken_at = payload.get("taken_at")
+        if taken_at is not None and not isinstance(taken_at, str):
+            return None
+        try:
+            patch["taken_at"] = valid_taken_day(taken_at)
+        except ValueError:
+            return None
+    return patch
 
 
 def _album_text_ok(name: str, description: object) -> bool:

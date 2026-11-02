@@ -77,6 +77,7 @@ class _FakeRepos:
         self.calendar = []
         self.gallery_albums = []
         self.album_edits = []
+        self.item_edits = []
         self.recounted = []
         self.gallery_items = []
         self.zones = []
@@ -232,9 +233,18 @@ class _GalleryRepoStub:
         self._c.recounted.append(album_id)
         return sum(1 for i in self._c.gallery_items if i.album_id == album_id)
 
+    async def get_item(self, item_id):
+        return next((i for i in self._c.gallery_items if i.id == item_id), None)
+
     async def create_item_in_space(self, item, *, space_id, bump_count=True):
-        self._c.gallery_items.append(item)
+        if await self.get_item(item.id) is None:
+            self._c.gallery_items.append(item)
         return True
+
+    async def edit_item_in_space(self, item_id, *, space_id, patch, to_album_id=None):
+        self._c.item_edits.append((item_id, patch, to_album_id))
+        held = await self.get_item(item_id)
+        return held.album_id if held is not None else None
 
     async def is_album_deleted(self, album_id, *, space_id):
         return (space_id, album_id) in self._c.deleted_albums
@@ -984,6 +994,60 @@ async def test_gallery_album_then_item(setup):
     )
     assert len(c.gallery_albums) == 1 and c.gallery_albums[0].id == "a-1"
     assert len(c.gallery_items) == 1 and c.gallery_items[0].id == "i-1"
+    assert c.item_edits == []  # a new item: nothing to edit
+
+
+def _item_record(**over) -> dict:
+    record = {
+        "kind": "item",
+        "id": "i-1",
+        "album_id": "a-1",
+        "uploaded_by": "u-1",
+        "item_type": "photo",
+        "url": "/m/x.jpg",
+        "thumbnail_url": "/m/x-thumb.jpg",
+    }
+    return {**record, **over}
+
+
+async def test_a_held_gallery_item_takes_the_hosts_caption_day_and_album(setup):
+    """v_79 (sync line 79): an item held here takes the host's caption, day
+    taken and album — the edits a household below v_79 was never sent live
+    reach it with one full stream once it upgrades."""
+    r, c, kp = setup
+    albums = [
+        {
+            "kind": "album",
+            "id": a,
+            "space_id": "sp-1",
+            "owner_user_id": "u-1",
+            "name": a,
+        }
+        for a in ("a-1", "a-2")
+    ]
+    await _send(r, kp, "gallery", [*albums, _item_record()])
+    assert c.item_edits == []
+
+    await _send(
+        r,
+        kp,
+        "gallery",
+        [_item_record(album_id="a-2", caption="  Lake  ", taken_at="2026-07-12")],
+    )
+    assert c.item_edits == [
+        ("i-1", {"caption": "Lake", "taken_at": "2026-07-12"}, "a-2"),
+    ]
+
+
+async def test_a_held_gallery_item_skips_a_value_the_local_rules_refuse(setup):
+    r, c, kp = setup
+    album = {"kind": "album", "id": "a-1", "space_id": "sp-1", "owner_user_id": "u-1"}
+    await _send(r, kp, "gallery", [{**album, "name": "A"}, _item_record()])
+    await _send(
+        r, kp, "gallery", [_item_record(caption="x" * 301, taken_at="12.07.2026")]
+    )
+    # Neither value is stored; the item stays in its album.
+    assert c.item_edits == []
 
 
 async def test_gallery_album_lands_in_the_synced_space_not_the_records(setup):

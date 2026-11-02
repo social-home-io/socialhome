@@ -319,6 +319,10 @@ async def test_a_failed_trim_for_a_chat_sends_nothing(env):
 
 
 async def test_a_video_still_converting_is_not_shared(env):
+    # The app's own worker would convert a 2 s clip within moments — on a
+    # fast runner before the share below reads it. Hold it, so the video is
+    # still converting (the state under test), not racing.
+    await env.transcode.stop()
     album = await _album(env)
     up = await env.gallery.upload_item(
         album.id,

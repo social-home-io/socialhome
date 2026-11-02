@@ -2153,11 +2153,103 @@ async def test_nothing_moves_into_the_posts_album_or_a_space(env):
         await env.update_item(up.item.id, actor_user_id="a-id", album_id=space_album.id)
 
 
-async def test_a_space_photo_is_not_edited_here(env):
+async def _seat(env, user_id: str, role: str) -> None:
+    await env._space_repo.save_member(  # type: ignore[attr-defined]
+        SpaceMember(space_id="sp-1", user_id=user_id, role=role, joined_at="")
+    )
+
+
+async def test_a_space_photo_is_edited_by_its_uploader_and_the_change_names_the_space(
+    env,
+):
+    """v_79: a space photo's caption and day change in place; the event
+    names the space and the actor, so it federates to the members."""
     album = await env.create_album(space_id="sp-1", owner_user_id="a-id", name="Trip")
-    up = await _upload(env, album.id, _jpeg())
+    up = await _upload(env, album.id, _jpeg(), who="b-id")
+    seen = _published(env, GalleryItemUpdated)
+
+    item = await env.update_item(
+        up.item.id, actor_user_id="b-id", caption=" Lake ", taken_at="2026-07-12"
+    )
+
+    assert (item.caption, item.taken_at) == ("Lake", "2026-07-12")
+    assert [(e.space_id, e.actor_user_id, e.from_album_id) for e in seen] == [
+        ("sp-1", "b-id", None)
+    ]
+
+
+async def test_an_unchanged_space_photo_save_sends_nothing(env):
+    album = await env.create_album(space_id="sp-1", owner_user_id="a-id", name="Trip")
+    up = await _upload(env, album.id, _jpeg(), who="b-id")
+    await env.update_item(up.item.id, actor_user_id="b-id", caption="Lake")
+    seen = _published(env, GalleryItemUpdated)
+    again = await env.update_item(
+        up.item.id, actor_user_id="b-id", caption="Lake", album_id=album.id
+    )
+    assert again.caption == "Lake"
+    assert seen == []
+
+
+async def test_a_space_photo_is_edited_by_content_authority_only(env):
+    """The delete rule: the uploader, or the space's owner / admin /
+    moderator — not another member, not an outsider (who learns nothing)."""
+    album = await env.create_album(space_id="sp-1", owner_user_id="b-id", name="Trip")
+    up = await _upload(env, album.id, _jpeg(), who="b-id")
+    with pytest.raises(GalleryNotFoundError):
+        await env.update_item(up.item.id, actor_user_id="e-id", caption="x")
+    await _seat(env, "e-id", "member")
     with pytest.raises(GalleryPermissionError):
-        await env.update_item(up.item.id, actor_user_id="a-id", caption="x")
+        await env.update_item(up.item.id, actor_user_id="e-id", caption="x")
+    await _seat(env, "e-id", "moderator")
+    assert (
+        await env.update_item(up.item.id, actor_user_id="e-id", caption="mod")
+    ).caption == "mod"
+    assert (
+        await env.update_item(up.item.id, actor_user_id="a-id", caption="owner")
+    ).caption == "owner"
+
+
+async def test_a_follower_does_not_edit_a_space_photo_not_even_its_own(env):
+    album = await env.create_album(space_id="sp-1", owner_user_id="a-id", name="Trip")
+    up = await _upload(env, album.id, _jpeg(), who="b-id")
+    await _seat(env, "b-id", "subscriber")
+    with pytest.raises(SubscriberReadOnlyError):
+        await env.update_item(up.item.id, actor_user_id="b-id", caption="x")
+
+
+async def test_a_space_photo_moves_only_between_albums_of_its_space(env):
+    src = await env.create_album(space_id="sp-1", owner_user_id="a-id", name="Trip")
+    dst = await env.create_album(space_id="sp-1", owner_user_id="b-id", name="Lake")
+    home = await _household_album(env)
+    posts = await env.ensure_system_album("sp-1")
+    up = await _upload(env, src.id, _jpeg(), who="b-id")
+    await env.update_album(src.id, actor_user_id="a-id", cover_item_id=up.item.id)
+    with pytest.raises(GalleryNotFoundError):
+        await env.update_item(up.item.id, actor_user_id="b-id", album_id=home.id)
+    with pytest.raises(GalleryPermissionError):
+        await env.update_item(up.item.id, actor_user_id="b-id", album_id=posts.id)
+    seen = _published(env, GalleryItemUpdated)
+
+    moved = await env.update_item(up.item.id, actor_user_id="b-id", album_id=dst.id)
+
+    assert moved.album_id == dst.id
+    src_now = await env._repo.get_album(src.id)  # type: ignore[attr-defined]
+    assert (src_now.item_count, src_now.cover_item_id) == (0, None)
+    assert (await env._repo.get_album(dst.id)).item_count == 1  # type: ignore[attr-defined]
+    assert [(e.album_id, e.from_album_id, e.space_id) for e in seen] == [
+        (dst.id, src.id, "sp-1")
+    ]
+
+
+async def test_a_bulk_move_inside_a_space_moves_what_the_actor_may(env):
+    src = await env.create_album(space_id="sp-1", owner_user_id="a-id", name="Trip")
+    dst = await env.create_album(space_id="sp-1", owner_user_id="a-id", name="Lake")
+    alices = await _upload(env, src.id, _jpeg((1, 2, 3)), who="a-id")
+    bobs = await _upload(env, src.id, _jpeg((4, 5, 6)), who="b-id")
+    done, refused = await env.apply_to_items(
+        "move", [alices.item.id, bobs.item.id], actor_user_id="b-id", album_id=dst.id
+    )
+    assert (done, refused) == ([bobs.item.id], [alices.item.id])
 
 
 async def test_a_bulk_delete_does_what_it_may_and_names_the_rest(env):

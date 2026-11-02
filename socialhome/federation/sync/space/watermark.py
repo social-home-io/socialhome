@@ -103,7 +103,12 @@ SYNC_VERSION_HISTORY_THROUGH: int = 64
 #: * 75 — a ``bazaar`` record's ``faq`` (a listing's questions and
 #:   answers), which a v_75 receiver stores: a household crossing it gets
 #:   one full stream, so FAQs it was not sent while older reach it.
-SYNC_RECORD_LINES: tuple[int, ...] = (75,)
+#: * 79 — a ``gallery`` item record's ``caption`` / ``taken_at`` /
+#:   ``album_id`` for an item the receiver already holds: a v_79 receiver
+#:   takes the host's values (a space photo is edited in place from v_79).
+#:   A household crossing it gets one full stream, so edits it was not sent
+#:   while older (``SPACE_GALLERY_ITEM_UPDATED`` skips it) reach it.
+SYNC_RECORD_LINES: tuple[int, ...] = (75, 79)
 
 
 def sync_version_bucket(peer_version: int) -> int:

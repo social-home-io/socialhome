@@ -335,6 +335,23 @@ class AbstractGalleryRepo(Protocol):
         moved (unknown item, a space or system album on either side)."""
         ...
 
+    async def edit_item_in_space(
+        self,
+        item_id: str,
+        *,
+        space_id: str,
+        patch: dict,
+        to_album_id: str | None = None,
+    ) -> str | None:
+        """Set a live space item's ``caption`` / ``taken_at`` (other keys are
+        ignored) and, with ``to_album_id``, move it into another live user
+        album of the SAME space — recounting both and dropping it as the old
+        album's cover — in one transaction (v_79). The item must sit in a
+        live user album of ``space_id`` and not mirror a post. The album it
+        was in before, or ``None`` when nothing was applied (unknown item,
+        another space, a system album or a post's mirror on either side)."""
+        ...
+
     async def get_trashed_album(self, album_id: str) -> GalleryAlbum | None:
         """A household user album in the trash, or ``None``."""
         ...
@@ -1708,6 +1725,66 @@ class SqliteGalleryRepo:
                     " WHERE id=?",
                     (aid, aid),
                 )
+            return from_id
+
+        result = await self._db.transact(_run)
+        return str(result) if result is not None else None
+
+    async def edit_item_in_space(
+        self,
+        item_id: str,
+        *,
+        space_id: str,
+        patch: dict,
+        to_album_id: str | None = None,
+    ) -> str | None:
+        safe = {k: v for k, v in patch.items() if k in self._ITEM_PATCH_ALLOWED}
+
+        def _run(conn) -> str | None:
+            row = conn.execute(
+                "SELECT i.album_id FROM gallery_items i"
+                " JOIN gallery_albums a ON a.id = i.album_id"
+                " WHERE i.id=? AND i.deleted_at IS NULL"
+                " AND i.source_post_id IS NULL AND a.space_id=?"
+                " AND a.is_system = 0 AND a.deleted_at IS NULL",
+                (item_id, space_id),
+            ).fetchone()
+            if row is None:
+                return None
+            from_id = str(row[0])
+            moves = bool(to_album_id) and to_album_id != from_id
+            if moves and (
+                conn.execute(
+                    "SELECT 1 FROM gallery_albums WHERE id=? AND space_id=?"
+                    " AND is_system = 0 AND deleted_at IS NULL",
+                    (to_album_id, space_id),
+                ).fetchone()
+                is None
+            ):
+                return None
+            if safe:
+                set_clause = ", ".join(f"{k}=?" for k in safe)
+                conn.execute(
+                    f"UPDATE gallery_items SET {set_clause} WHERE id=?",
+                    (*safe.values(), item_id),
+                )
+            if moves:
+                conn.execute(
+                    "UPDATE gallery_items SET album_id=? WHERE id=?",
+                    (to_album_id, item_id),
+                )
+                conn.execute(
+                    "UPDATE gallery_albums SET cover_item_id=NULL"
+                    " WHERE id=? AND cover_item_id=?",
+                    (from_id, item_id),
+                )
+                for aid in (from_id, to_album_id):
+                    conn.execute(
+                        "UPDATE gallery_albums SET item_count=(SELECT COUNT(*)"
+                        " FROM gallery_items WHERE album_id=? AND deleted_at IS NULL)"
+                        " WHERE id=?",
+                        (aid, aid),
+                    )
             return from_id
 
         result = await self._db.transact(_run)

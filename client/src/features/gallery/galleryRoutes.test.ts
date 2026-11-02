@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { TRASH_PATH, backLeadsTo, favouritesPath, galleryPath, markBackTo, parseGallerySub, searchPath } from './galleryRoutes'
+import { TRASH_PATH, albumsUrl, backLeadsTo, favouritesPath, galleryPath, markBackTo, parseGallerySub, searchPath } from './galleryRoutes'
 
 describe('galleryRoutes', () => {
   it('builds the household and the space addresses', () => {
@@ -61,5 +61,11 @@ describe('galleryRoutes', () => {
     const p = galleryPath('s1', 'a1', 'i1')
     const rest = p.replace('/spaces/s1/gallery/', '')
     expect(parseGallerySub(rest)).toMatchObject({ albumId: 'a1', itemId: 'i1' })
+  })
+
+  it("names a space's album list, or the household's", () => {
+    expect(albumsUrl('sp-1')).toBe('/api/spaces/sp-1/gallery/albums')
+    expect(albumsUrl(null)).toBe('/api/gallery/albums')
+    expect(albumsUrl()).toBe('/api/gallery/albums')
   })
 })

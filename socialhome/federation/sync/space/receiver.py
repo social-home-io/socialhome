@@ -54,7 +54,8 @@ from ....domain.events import (
 )
 from ....domain.federation import FederationEvent, FederationEventType
 from ....domain.federation_capabilities import FederationCapability
-from ....domain.gallery import GalleryAlbum, GalleryItem
+from ....domain.gallery import GalleryAlbum, GalleryItem, valid_taken_day
+from ....domain.media_constraints import CAPTION_MAX
 from ....domain.page import Page
 from ....domain.post import (
     BAZAAR_MAX_IMAGES,
@@ -1497,7 +1498,7 @@ class SpaceSyncReceiver:
                     ):
                         recount.add(str(r["id"]))
                 elif kind == "item" and await self._persist_gallery_item(
-                    r, space_id, held_back
+                    r, space_id, held_back, from_host=from_host
                 ):
                     recount.add(str(r.get("album_id") or ""))
             # The album's count is what this household holds — the provider's
@@ -3187,13 +3188,51 @@ class SpaceSyncReceiver:
             return False
         return True
 
+    async def _take_host_item_edit(
+        self, held: GalleryItem, streamed: GalleryItem, space_id: str
+    ) -> None:
+        """Apply the host's caption / day taken / album of an item held here
+        (v_79), under the live ``SPACE_GALLERY_ITEM_UPDATED`` limits: a value
+        the local rules refuse is skipped, never stored. The repo keeps the
+        item, and any move, inside this space's live user albums."""
+        patch: dict = {}
+        caption = streamed.caption
+        if caption is None or (
+            isinstance(caption, str) and len(caption.strip()) <= CAPTION_MAX
+        ):
+            patch["caption"] = (caption or "").strip() or None
+        try:
+            patch["taken_at"] = valid_taken_day(streamed.taken_at)
+        except ValueError:
+            pass
+        patch = {k: v for k, v in patch.items() if getattr(held, k) != v}
+        to_album = streamed.album_id if streamed.album_id != held.album_id else None
+        if not patch and to_album is None:
+            return  # nothing the local rules take differs
+        if (
+            await self._gallery_repo.edit_item_in_space(
+                held.id, space_id=space_id, patch=patch, to_album_id=to_album
+            )
+            is None
+        ):
+            log.debug(
+                "sync: the host's edit of gallery item %s not applied in %s",
+                held.id,
+                space_id,
+            )
+
     async def _persist_gallery_item(
         self,
         record: dict[str, Any],
         space_id: str,
         held_back: HeldBack,
+        *,
+        from_host: bool = False,
     ) -> bool:
-        """Store a streamed item. ``True`` when it landed in an album of this
+        """Store a streamed item — or, held here already in this space, take
+        the **host's** caption, day taken and album (v_79: a space photo is
+        edited in place, and the host's copy is the one the space converges
+        on, as for albums). ``True`` when it landed in an album of this
         space (its count is then recounted)."""
         album_id = str(record.get("album_id") or "")
         if self._legacy_album_deleted(
@@ -3221,6 +3260,23 @@ class SpaceSyncReceiver:
             sort_order=int(record.get("sort_order") or 0),
             created_at=record.get("created_at"),
         )
+        held = await self._gallery_repo.get_item(item.id) if from_host else None
+        if held is not None:
+            held_album = await self._gallery_repo.get_album(held.album_id)
+            if held_album is None or held_album.space_id != space_id:
+                # The id is held here for another space or the household
+                # gallery: the record is not this space's to edit (nor does
+                # it land — an id is never reused).
+                log.warning(
+                    "sync: gallery item %s is held outside space %s here "
+                    "— refusing the write",
+                    item.id,
+                    space_id,
+                )
+                return False
+            if _item_edited(held, item):
+                await self._take_host_item_edit(held, item, space_id)
+            return True
         try:
             # ``bump_count=False``: the caller recounts the album once the
             # chunk is in. The album must belong to this sync's space.
@@ -3255,6 +3311,15 @@ class SpaceSyncReceiver:
             )
             held_back.fail()
         return False
+
+
+def _item_edited(held: GalleryItem, streamed: GalleryItem) -> bool:
+    """The host's record of a held item differs in an editable field."""
+    return (
+        held.album_id != streamed.album_id
+        or held.caption != streamed.caption
+        or held.taken_at != streamed.taken_at
+    )
 
 
 #: ``resource → (id kind, owner fields in precedence order)`` for the sync

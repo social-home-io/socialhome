@@ -308,17 +308,60 @@ async def test_a_space_selection_follows_the_space_roles_and_has_no_trash(client
     )
     assert (await r.json())["refused"] == [bens["id"]]
 
-    # A seat holder downloads; caption / date / move wait for space parity.
+    # A seat holder downloads.
     r = await client.post(
         "/api/gallery/download", json={"item_ids": [owners["id"]]}, headers=_auth(ben)
     )
     assert r.status == 200
     assert (await r.read())[8:12] == b"WEBP"
+
+
+async def test_a_space_photo_is_edited_and_moved_within_its_space(client):
+    """v_79: caption, day and a move to another album of the same space —
+    for the uploader or the space's owner / admin / moderator; never into
+    the household gallery."""
+    ben_uid, ben = await _add_user(client, "ben")
+    aid = await _space_album(client, ben_uid)
+    owners = await _upload(client, aid, (1, 1, 1))
+    h = _auth(client._tok)
+
     r = await client.patch(
-        f"/api/gallery/items/{owners['id']}", json={"caption": "x"}, headers=h
+        f"/api/gallery/items/{owners['id']}",
+        json={"caption": "Lake", "taken_at": "2026-07-12"},
+        headers=h,
+    )
+    assert r.status == 200
+    body = await r.json()
+    assert (body["caption"], body["taken_at"]) == ("Lake", "2026-07-12")
+    # A plain member doesn't change someone else's photo.
+    r = await client.patch(
+        f"/api/gallery/items/{owners['id']}", json={"caption": "x"}, headers=_auth(ben)
     )
     assert r.status == 403
 
+    r = await client.post(
+        "/api/spaces/sp-m/gallery/albums", json={"name": "Lake"}, headers=h
+    )
+    lake = (await r.json())["id"]
+    home = await _album(client, "Garden")
+    r = await client.patch(
+        f"/api/gallery/items/{owners['id']}", json={"album_id": home}, headers=h
+    )
+    assert r.status == 404
+    r = await client.post(
+        "/api/gallery/bulk",
+        json={"action": "move", "item_ids": [owners["id"]], "album_id": lake},
+        headers=h,
+    )
+    assert await r.json() == {"done": [owners["id"]], "refused": []}
+    r = await client.get(f"/api/gallery/albums/{lake}/items", headers=h)
+    assert [i["id"] for i in await r.json()] == [owners["id"]]
+
+
+async def test_the_space_owner_deletes_someone_elses_photo(client):
+    ben_uid, ben = await _add_user(client, "ben")
+    aid = await _space_album(client, ben_uid)
+    h = _auth(client._tok)
     # The space's owner may delete someone else's photo.
     other = await _upload(client, aid, (3, 3, 3), tok=ben)
     r = await client.post(

@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 from unittest.mock import AsyncMock
 
+import orjson
 import pytest
 
 from socialhome.domain.events import (
@@ -11,6 +13,7 @@ from socialhome.domain.events import (
     GalleryAlbumDeleted,
     GalleryAlbumUpdated,
     GalleryItemDeleted,
+    GalleryItemUpdated,
     GalleryItemUploaded,
 )
 from socialhome.domain.federation import FederationEventType
@@ -27,18 +30,30 @@ class _FakeFederationService:
         self.sent: list[tuple] = []
         self.broadcasts: list[tuple] = []
         self.members: dict[str, list[str]] = {}
+        #: Each member household's space version (79 when not listed).
+        self.versions: dict[str, int] = {}
 
     async def send_event(self, *, to_instance_id, event_type, payload, space_id=None):
         # Kept for back-compat — older tests still call this path.
         self.sent.append((to_instance_id, event_type, payload, space_id))
 
-    async def broadcast_to_space_members(self, space_id, event_type, payload):
+    async def broadcast_to_space_members(
+        self, space_id, event_type, payload, *, min_proto_version=None
+    ):
         """The real one fans out per member household (self excluded) via
-        ``send_with_mesh_fallback``; recorded here per target."""
+        ``send_with_mesh_fallback``, skipping a household whose space version
+        (``space_member_supports``) is below ``min_proto_version``; recorded
+        here per target."""
         self.broadcasts.append((space_id, event_type))
         for iid in self.members.get(space_id, []):
-            if iid != self._own_instance_id:
-                self.sent.append((iid, event_type, payload, space_id))
+            if iid == self._own_instance_id:
+                continue
+            if (
+                min_proto_version is not None
+                and self.versions.get(iid, 79) < min_proto_version
+            ):
+                continue
+            self.sent.append((iid, event_type, payload, space_id))
 
 
 class _FakeSpaceRepo:
@@ -413,5 +428,79 @@ async def test_changes_applied_from_another_household_are_not_sent_back(env):
             space_id="sp-A",
             origin_instance_id=origin,
         )
+    )
+    assert fed.sent == []
+
+
+# ─── v_79: a space photo's caption / day / album ─────────────────────────
+
+
+async def test_a_space_item_edit_reaches_the_v79_member_households_only(env):
+    """``SPACE_GALLERY_ITEM_UPDATED`` carries the item's whole editable state
+    and the actor, to member households at v_79 or above — an older one is
+    skipped (it has no handler), never sent the event."""
+    bus, fed, _gallery = env
+    fed.versions["peer-2"] = 78
+    await bus.publish(
+        GalleryItemUpdated(
+            item_id="it-1",
+            album_id="alb-space-A",
+            space_id="sp-A",
+            actor_user_id="alice",
+        )
+    )
+    assert [(t, e) for t, e, _p, _s in fed.sent] == [
+        ("peer-1", FederationEventType.SPACE_GALLERY_ITEM_UPDATED)
+    ]
+    payload = fed.sent[0][2]
+    assert payload == {
+        "id": "it-1",
+        "album_id": "alb-space-A",
+        "caption": None,
+        "taken_at": None,
+        "actor_user_id": "alice",
+        "space_id": "sp-A",
+    }
+
+
+async def test_a_space_item_edit_stays_under_one_kilobyte(env):
+    """The cost bound in the PR: a full 300-character caption keeps the
+    payload under 1 KB; even 300 four-byte characters (emoji) stay under
+    1.5 KB."""
+    bus, fed, gallery = env
+    gallery.items["it-1"] = dataclasses.replace(
+        gallery.items["it-1"], caption="x" * 300, taken_at="2026-07-12"
+    )
+    await bus.publish(
+        GalleryItemUpdated(
+            item_id="it-1",
+            album_id="alb-space-A",
+            space_id="sp-A",
+            actor_user_id="a" * 64,
+        )
+    )
+    assert len(orjson.dumps(fed.sent[0][2])) < 1024
+    gallery.items["it-1"] = dataclasses.replace(
+        gallery.items["it-1"], caption="\U0001f600" * 300
+    )
+    await bus.publish(
+        GalleryItemUpdated(item_id="it-1", album_id="alb-space-A", space_id="sp-A")
+    )
+    assert len(orjson.dumps(fed.sent[-1][2])) < 1536
+
+
+async def test_a_household_or_echoed_item_edit_is_not_federated(env):
+    bus, fed, _ = env
+    await bus.publish(GalleryItemUpdated(item_id="it-house", album_id="alb-house"))
+    await bus.publish(
+        GalleryItemUpdated(
+            item_id="it-1",
+            album_id="alb-space-A",
+            space_id="sp-A",
+            origin_instance_id="peer-1",
+        )
+    )
+    await bus.publish(
+        GalleryItemUpdated(item_id="gone", album_id="alb-space-A", space_id="sp-A")
     )
     assert fed.sent == []
