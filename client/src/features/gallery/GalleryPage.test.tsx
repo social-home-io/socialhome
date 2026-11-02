@@ -823,6 +823,8 @@ describe('GalleryPage selection (managing photos)', () => {
     fireEvent.click(view.getByRole('button', { name: 'Select' }))
     for (const box of view.getAllByRole('checkbox')) fireEvent.click(box)
     expect(view.queryByRole('button', { name: 'Move to album' })).toBeNull()
+    // A space's gallery shares nothing out (D8 is about household photos).
+    expect(view.queryByRole('button', { name: 'Share' })).toBeNull()
     expect(view.getByRole('button', { name: 'Save' })).toBeTruthy()
     fireEvent.click(view.getByRole('button', { name: 'Delete' }))
     // A moderator may delete both; nothing is sent before the Undo runs out.
@@ -843,6 +845,29 @@ describe('GalleryPage selection (managing photos)', () => {
     fireEvent.click(view.getAllByRole('checkbox')[1])
     fireEvent.click(view.getByRole('button', { name: 'Move to album' }))
     expect(await view.findByRole('radio', { name: /Lake/ })).toBeTruthy()
+  })
+
+  it('household: Share opens the share sheet for the picked photos', async () => {
+    const view = await openAlbum({})
+    apiGet.mockImplementation(async (url: string) => {
+      const [path] = split(url)
+      if (path === '/api/gallery/share/targets') {
+        return {
+          feed: true, spaces: [], chats: [],
+          limits: { max_items: 50, post_items: 5, chat_items: 5, video_seconds: 60 },
+        }
+      }
+      if (/items$/.test(path)) return itemRows
+      return albumRows[0]
+    })
+    fireEvent.click(view.getByRole('button', { name: 'Select' }))
+    fireEvent.click(view.getAllByRole('checkbox')[0])
+    fireEvent.click(view.getByRole('button', { name: 'Share' }))
+    expect(await view.findByRole('dialog', { name: 'Share 1 photo' })).toBeTruthy()
+    expect(await view.findByRole('radio', { name: /Household feed/ })).toBeTruthy()
+    // Anna added it: she will be told.
+    fireEvent.click(view.getByRole('radio', { name: /Household feed/ }))
+    expect(view.getByText(/Anna added one of these/)).toBeTruthy()
   })
 })
 

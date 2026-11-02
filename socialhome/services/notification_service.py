@@ -39,6 +39,7 @@ itself is the persistence layer; push is fire-and-forget on top.
 | AppTableCanStart     | The person who started a group game, when it reaches the app's fewest players (Games) — one row per game, re-opened if it reaches them again | "Your {app} game can start" |
 | AppTableStarted      | Each local player of a group game that started, but the person who started it (Games) | "Your {app} game with {name} and {count} others started" |
 | GalleryItemsAdded    | Who sees the album (household: everyone at home or a private album's people; space: members at "Everything") but the uploader — one row per album and uploader, re-opened by the next batch (Activity, in app by default) | "{name} added {count} photos to “{album}”" |
+| GalleryItemsShared   | The uploader of household photos someone else shared a copy of — one row per share action (Activity, in app by default; never names the album) | "{name} shared {count} of your photos in “{space}”" |
 
 Body is intentionally omitted for privacy-sensitive events (DMs,
 location, UGC content) per §25.3.
@@ -112,6 +113,7 @@ from ..domain.events import (
     EventReminderDue,
     GalleryAlbumDeleted,
     GalleryItemsAdded,
+    GalleryItemsShared,
     HighlightFrameReactionChanged,
     HighlightRemoved,
     LocalSpaceInviteCreated,
@@ -408,6 +410,73 @@ _GALLERY_TITLES: dict[tuple[str, bool, bool], tuple[str, str]] = {
     ),
 }
 
+#: A "your photos were shared" row's title (gallery D8), keyed by (what
+#: was shared: ``photos`` / ``videos`` / ``mixed``, exactly one, where:
+#: ``feed`` / ``space`` / ``chat``) → (catalog key, English fallback). It
+#: names the space, never an album, and never which chat.
+_SHARE_TITLES: dict[tuple[str, bool, str], tuple[str, str]] = {
+    ("photos", False, "feed"): (
+        "notification.gallery.shared_photos_feed",
+        "{name} shared {count} of your photos in the feed",
+    ),
+    ("photos", True, "feed"): (
+        "notification.gallery.shared_photo_feed",
+        "{name} shared your photo in the feed",
+    ),
+    ("videos", False, "feed"): (
+        "notification.gallery.shared_videos_feed",
+        "{name} shared {count} of your videos in the feed",
+    ),
+    ("videos", True, "feed"): (
+        "notification.gallery.shared_video_feed",
+        "{name} shared your video in the feed",
+    ),
+    ("mixed", False, "feed"): (
+        "notification.gallery.shared_mixed_feed",
+        "{name} shared {count} of your photos and videos in the feed",
+    ),
+    ("photos", False, "space"): (
+        "notification.gallery.shared_photos_space",
+        "{name} shared {count} of your photos in “{space_name}”",
+    ),
+    ("photos", True, "space"): (
+        "notification.gallery.shared_photo_space",
+        "{name} shared your photo in “{space_name}”",
+    ),
+    ("videos", False, "space"): (
+        "notification.gallery.shared_videos_space",
+        "{name} shared {count} of your videos in “{space_name}”",
+    ),
+    ("videos", True, "space"): (
+        "notification.gallery.shared_video_space",
+        "{name} shared your video in “{space_name}”",
+    ),
+    ("mixed", False, "space"): (
+        "notification.gallery.shared_mixed_space",
+        "{name} shared {count} of your photos and videos in “{space_name}”",
+    ),
+    ("photos", False, "chat"): (
+        "notification.gallery.shared_photos_chat",
+        "{name} sent {count} of your photos in a chat",
+    ),
+    ("photos", True, "chat"): (
+        "notification.gallery.shared_photo_chat",
+        "{name} sent your photo in a chat",
+    ),
+    ("videos", False, "chat"): (
+        "notification.gallery.shared_videos_chat",
+        "{name} sent {count} of your videos in a chat",
+    ),
+    ("videos", True, "chat"): (
+        "notification.gallery.shared_video_chat",
+        "{name} sent your video in a chat",
+    ),
+    ("mixed", False, "chat"): (
+        "notification.gallery.shared_mixed_chat",
+        "{name} sent {count} of your photos and videos in a chat",
+    ),
+}
+
 #: A group game's "joined" / "started" titles (v_76), keyed by (the app
 #: has a name here, how many others: 0, 1, 2 = more) → (catalog key,
 #: English fallback).
@@ -546,6 +615,11 @@ _PUSH_TITLES: dict[str, tuple[tuple[str, str], ...]] = {
         ),
         ("notification.push.gallery_added", "New photos from {name}"),
         ("notification.push.gallery_added_anon", "New photos"),
+    ),
+    # A share of your photos (D8): who, never the album or the chat.
+    "gallery_shared": (
+        ("notification.push.gallery_shared", "{name} shared your photos"),
+        ("notification.push.gallery_shared_anon", "Your photos were shared"),
     ),
     "post_reacted": (
         (
@@ -1571,6 +1645,7 @@ class NotificationService(ProtectionGateMixin):
         # Gallery (D9): one row per upload batch; a deleted album's go.
         self._subscribe(GalleryItemsAdded, self.on_gallery_items_added)
         self._subscribe(GalleryAlbumDeleted, self.on_gallery_album_deleted)
+        self._subscribe(GalleryItemsShared, self.on_gallery_items_shared)
         self._subscribe(AppUpdated, self.on_app_update_handled)
         self._subscribe(AppUpdateGone, self.on_app_update_handled)
         self._subscribe(AppUninstalled, self.on_app_update_handled)
@@ -4278,6 +4353,76 @@ class NotificationService(ProtectionGateMixin):
             for u in users
             if await self._gallery.album_visible_to(album.id, u.user_id)
         ]
+
+    async def on_gallery_items_shared(self, event: GalleryItemsShared) -> None:
+        """Someone shared a copy of the uploader's household photos (D8):
+        "Anna shared 2 of your photos in “Grandparents”".
+
+        One row for the uploader per share action — the gate drops it when
+        they blocked the sharer (or a guardian block separates them).
+        Activity, In app by default; a push names who only. The row names
+        the space (or "the feed" / "a chat") and never an album: only an
+        uploader shares from a private album, and that never tells anyone.
+        It opens the household album of the first shared photo."""
+        if event.count <= 0 or event.uploader == event.sharer:
+            return
+        user = await self._local_user(event.uploader)
+        if user is None:
+            return
+        where = event.target if event.target in ("feed", "space", "chat") else "feed"
+        space_name: str | None = None
+        if where == "space":
+            space = (
+                await self._spaces.get(event.space_id)
+                if event.space_id is not None
+                else None
+            )
+            if space is None:
+                return
+            space_name = space.name
+        name = await self._held_name(event.sharer, space_id=None)
+        noun = (
+            "mixed"
+            if event.photos and event.videos
+            else "videos"
+            if event.videos
+            else "photos"
+        )
+        key, fallback = _SHARE_TITLES[
+            (noun, event.count == 1 and noun != "mixed", where)
+        ]
+        locale = self._locale(user)
+        flags = tuple(
+            k for k, n in (("photos", event.photos), ("videos", event.videos)) if n
+        )
+        await self._save_notif(
+            new_notification(
+                user_id=user.user_id,
+                type="gallery_shared",
+                title=self._t(
+                    key,
+                    locale=locale,
+                    fallback=fallback,
+                    name=name or self._someone(locale),
+                    space_name=space_name or "",
+                    count=event.count,
+                ),
+                link_url=gallery_album_link(event.album_id),
+            ),
+            about=NotificationSubject(
+                object_key(
+                    NotificationObject.GALLERY_SHARE,
+                    f"{event.share_id}/{event.uploader}",
+                ),
+                # Not a row of the space: the uploader may not be in it,
+                # and its mute / level settings are not theirs to apply.
+            ),
+            actor_user_id=event.sharer,
+            actor_name=name,
+            push_params={"name": name},
+            flags=flags,
+            items=event.count,
+        )
 
     async def on_gallery_album_deleted(self, event: GalleryAlbumDeleted) -> None:
         """An album was deleted (or went to the trash): its "new photos"

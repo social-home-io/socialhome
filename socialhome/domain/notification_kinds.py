@@ -187,6 +187,9 @@ _KIND_OF_TYPE: dict[str, NotifKind] = {
     # "Anna added 12 photos to “Summer 2026”" (gallery D9): one row per
     # upload batch, In app by default — never a buzz unless chosen.
     "gallery_added": NotifKind.ACTIVITY,
+    # "Anna shared 2 of your photos in “Grandparents”" (gallery D8): one
+    # row per share action, In app by default like any Activity.
+    "gallery_shared": NotifKind.ACTIVITY,
 }
 
 #: Every type :func:`notif_kind` knows (for the service's walk test).

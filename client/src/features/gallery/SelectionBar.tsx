@@ -23,6 +23,7 @@ export interface SelectionAction {
 }
 
 const ICONS: Record<string, string> = {
+  share: 'M12 15V4m0 0L8 8m4-4 4 4M6 11.5H5v8.5h14v-8.5h-1',
   move: 'M3.5 7.5h6l2 2h9v9h-17zM12 13h5m-2-2 2 2-2 2',
   save: 'M12 4v11m0 0-4.5-4.5M12 15l4.5-4.5M5 19.5h14',
   delete: 'M4.5 6.5h15M9.5 6.5V4.5h5v2m-8 0 1 13h9l1-13M10 10v6m4-6v6',

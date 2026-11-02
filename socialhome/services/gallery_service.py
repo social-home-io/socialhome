@@ -869,6 +869,34 @@ class GalleryService:
             uploader_user_id=uploader_user_id,
         )
 
+    async def album_for_copy(
+        self, album_id: str, *, actor_user_id: str
+    ) -> GalleryAlbum:
+        """The space album a shared copy goes into (gallery D8), once this
+        person may add to it — the upload rules: a seat that writes, the
+        space's gallery on, never the system "Posts" album."""
+        album = await self._album_for_upload(album_id, actor_user_id, None)
+        if album.space_id is None:
+            raise GalleryPermissionError("a copy goes into a space album")
+        return album
+
+    async def add_copy(self, album: GalleryAlbum, item: GalleryItem) -> GalleryItem:
+        """Store *item* — a shared copy whose files are already on disk, in
+        the stored format (WebP ≤ 2560 px / WebM ≤ 1920 px) — in *album*
+        (from :meth:`album_for_copy`). It gets a fresh owner-bound id and
+        goes out like any upload (``GalleryItemUploaded`` → the members
+        of the space)."""
+        copy = replace(
+            item,
+            id=_item_id(album.space_id, item.uploaded_by),
+            album_id=album.id,
+            sort_order=0,
+            source_post_id=None,
+            created_at=datetime.now(UTC).isoformat(),
+        )
+        stored = await self._store_new_item(album, copy, None)
+        return stored.item
+
     async def _album_for_upload(
         self, album_id: str, uploader_user_id: str, caption: str | None
     ) -> GalleryAlbum:

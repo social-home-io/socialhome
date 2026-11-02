@@ -194,6 +194,9 @@ class NotificationObject(StrEnum):
     #: One person's uploads to one gallery album
     #: (``<album_id>/<uploader_id>``, D9): each upload batch joins it.
     GALLERY_ALBUM = "gallery_album"
+    #: One share of someone's household photos (``<share_id>/<uploader>``,
+    #: D8) — one row per share action, never grouped with another.
+    GALLERY_SHARE = "gallery_share"
 
 
 #: The id of the household feed's ``feed:<id>`` key — there is one.

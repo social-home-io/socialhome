@@ -233,4 +233,17 @@ describe('GalleryViewer', () => {
     fireEvent.keyDown(view.getByRole('dialog'), { key: 'f' })
     expect(props.onGo).not.toHaveBeenCalled()
   })
+
+  it('Share (a copy) is offered only where the page wires it, never for a video still converting', () => {
+    const onShare = vi.fn()
+    const { view } = viewer({ onShare })
+    fireEvent.click(view.getByRole('button', { name: 'Share' }))
+    expect(onShare).toHaveBeenCalledWith(expect.objectContaining({ id: 'it-2' }))
+    cleanup()
+    const none = viewer()
+    expect(none.view.queryByRole('button', { name: 'Share' })).toBeNull()
+    cleanup()
+    const busy = viewer({ onShare, items: [item(1, { item_type: 'video', processing: true })], index: 0 })
+    expect(busy.view.queryByRole('button', { name: 'Share' })).toBeNull()
+  })
 })

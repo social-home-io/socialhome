@@ -343,6 +343,7 @@ from .services.gallery_favourites_service import GalleryFavouritesService
 from .services.gallery_federation_outbound import GalleryFederationOutbound
 from .services.gallery_on_this_day_service import GalleryOnThisDayService
 from .services.gallery_service import GalleryService
+from .services.gallery_share_service import GalleryShareService
 from .services.gallery_upload_batcher import GalleryUploadBatcher
 from .services.gfs_channel_service import GfsChannelService
 from .services.gfs_connection_service import GfsConnectionService
@@ -2755,6 +2756,10 @@ def _build_middleware(config: Config, limiter: RateLimiter):
             # Browsing (lists, album detail) gets a loose bucket of its own,
             # like Spaces, so a big upload never locks the gallery.
             "POST /api/gallery/albums/*/items": (300, 60),
+            # One share copies up to 50 photos to a space's member
+            # households (≈ 50 × 0.55 MB × households − 1): ten a minute
+            # is plenty for a person and bounds what a script could send.
+            "POST /api/gallery/share": (10, 60),
             "/api/gallery": (600, 60),
             # GPS pings: 10 a minute per PERSON is enforced by the view
             # (``routes/presence.py``) — Home Assistant posts the whole
@@ -3158,6 +3163,25 @@ def create_app(config: Config | None = None) -> web.Application:
     gallery_favourites_service = GalleryFavouritesService(
         gallery_repo, space_repo, gallery_service
     )
+    # D8: share a copy of household photos to the feed, a space or a chat
+    # — through those targets' own services, no new federation event.
+    gallery_share_service = GalleryShareService(
+        repo=gallery_repo,
+        gallery=gallery_service,
+        feed=feed_service,
+        spaces=space_service,
+        space_repo=space_repo,
+        dms=dm_service,
+        conversation_repo=conversation_repo,
+        user_repo=repos.user,
+        transcode_repo=repos.media_transcode,
+        transcode_service=media_transcode_service,
+        bus=bus,
+        media_dir=pathlib.Path(config.media_path),
+        media_refs=repos.media_reference,
+        storage_quota=storage_quota,
+    )
+    gallery_share_service.wire()
 
     # ── System "Posts" album bridge (§Gallery) ──────────────────────────
     # Subscribes to feed-post lifecycle events and mirrors photo/video
@@ -3816,6 +3840,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.gallery_repo_key] = gallery_repo
     app[K.gallery_on_this_day_service_key] = gallery_on_this_day_service
     app[K.gallery_favourites_service_key] = gallery_favourites_service
+    app[K.gallery_share_service_key] = gallery_share_service
     app[K.media_transcode_repo_key] = repos.media_transcode
     app[K.media_transcode_service_key] = media_transcode_service
     app[K.child_protection_service_key] = child_protection_service
@@ -4192,6 +4217,8 @@ def create_app(config: Config | None = None) -> web.Application:
         # invites) raise ``RuntimeError: federation not attached`` with
         # a 500.
         app[K.space_service_key] = real_space_service
+        # A shared copy posts into a space through the real service.
+        gallery_share_service.attach_space_service(real_space_service)
 
         # 5a. SpaceContentEncryption — per-space epoch keys, KEK-protected.
         # Wires the bus so ``import_key`` publishes

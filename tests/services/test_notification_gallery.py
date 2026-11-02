@@ -14,7 +14,11 @@ import pytest
 import socialhome.i18n as i18n_pkg
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import GalleryAlbumDeleted, GalleryItemsAdded
+from socialhome.domain.events import (
+    GalleryAlbumDeleted,
+    GalleryItemsAdded,
+    GalleryItemsShared,
+)
 from socialhome.domain.gallery import AUDIENCE_CHOSEN, GalleryAlbum
 from socialhome.i18n import Catalog
 from socialhome.infrastructure.event_bus import EventBus
@@ -26,6 +30,7 @@ from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
 from socialhome.services.notification_service import (
     _GALLERY_TITLES,
+    _SHARE_TITLES,
     NotificationService,
 )
 from socialhome.services.space_service import SpaceService
@@ -301,3 +306,119 @@ def test_every_title_has_a_catalog_entry_with_its_fields():
         assert catalogs["en"][key] == fallback
         for loc, cat in catalogs.items():
             assert fields(cat[key]) == fields(fallback), (loc, key)
+
+
+# ─── "Your photos were shared" (D8) ──────────────────────────────────────
+
+
+def _shared(sharer: str, uploader: str, *, photos=0, videos=0, target="feed", **kw):
+    return GalleryItemsShared(
+        share_id=kw.pop("share_id", "sh-1"),
+        sharer=sharer,
+        uploader=uploader,
+        photos=photos,
+        videos=videos,
+        target=target,
+        album_id=kw.pop("album_id", "al-Trip"),
+        **kw,
+    )
+
+
+async def _shared_rows(env, user_id: str):
+    return [
+        n
+        for n in await env.notifs.list(user_id, limit=50)
+        if n.type == "gallery_shared"
+    ]
+
+
+async def test_the_uploader_hears_once_per_share_and_push_names_who_only(env):
+    anna, lena = await env.person("anna"), await env.person("lena")
+    await env.users.set_preference_key(
+        lena.user_id, "notif_kinds", {"activity": "push"}
+    )
+    await env.bus.publish(_shared(anna.user_id, lena.user_id, photos=2))
+    await env.bus.publish(_shared(anna.user_id, lena.user_id, photos=1, share_id="s2"))
+    rows = await _shared_rows(env, lena.user_id)
+    assert sorted(r.title for r in rows) == [
+        "Anna shared 2 of your photos in the feed",
+        "Anna shared your photo in the feed",
+    ]
+    assert {r.link_url for r in rows} == {"/gallery/albums/al-Trip"}
+    assert await _shared_rows(env, anna.user_id) == []
+    assert env.push.titles == [
+        (lena.user_id, "Anna shared your photos"),
+        (lena.user_id, "Anna shared your photos"),
+    ]
+
+
+async def test_a_share_is_in_app_only_by_default(env):
+    anna, lena = await env.person("anna"), await env.person("lena")
+    await env.bus.publish(_shared(anna.user_id, lena.user_id, videos=1))
+    [row] = await _shared_rows(env, lena.user_id)
+    assert row.title == "Anna shared your video in the feed"
+    assert env.push.titles == []
+
+
+async def test_a_space_share_names_the_space_and_a_chat_never_names_the_chat(env):
+    space, anna, ben = await _space(env)
+    await env.bus.publish(
+        _shared(
+            ben.user_id,
+            anna.user_id,
+            photos=2,
+            videos=1,
+            target="space",
+            space_id=space.id,
+        )
+    )
+    await env.bus.publish(
+        _shared(ben.user_id, anna.user_id, photos=3, target="chat", share_id="s9")
+    )
+    rows = await _shared_rows(env, anna.user_id)
+    assert sorted(r.title for r in rows) == [
+        "Ben sent 3 of your photos in a chat",
+        "Ben shared 3 of your photos and videos in “Großeltern”",
+    ]
+    # Not a row of the space: its mute or level is not the uploader's.
+    assert all(r.space_id is None for r in rows)
+
+
+async def test_a_blocked_sharer_or_ones_own_share_tells_nobody(env):
+    anna, lena = await env.person("anna"), await env.person("lena")
+    await env.user_svc.block(lena.username, anna.user_id)
+    await env.bus.publish(_shared(anna.user_id, lena.user_id, photos=2))
+    await env.bus.publish(_shared(lena.user_id, lena.user_id, photos=2))
+    cleo = await env.person("cleo")
+    await env.bus.publish(
+        _shared(cleo.user_id, lena.user_id, photos=1, target="space", space_id="gone")
+    )
+    await env.bus.publish(_shared(cleo.user_id, lena.user_id))
+    assert await _shared_rows(env, lena.user_id) == []
+
+
+async def test_a_share_row_is_in_the_readers_language(env):
+    anna, lena = await env.person("anna"), await env.person("lena")
+    await env.users.set_preference_key(lena.user_id, "locale", "de")
+    await env.bus.publish(_shared(anna.user_id, lena.user_id, photos=2))
+    [row] = await _shared_rows(env, lena.user_id)
+    assert row.title == "Anna hat 2 deiner Fotos im Feed geteilt"
+
+
+def test_every_share_title_has_a_catalog_entry_with_its_fields():
+    catalogs = {
+        loc: orjson.loads((_MESSAGES / f"{loc}.json").read_bytes())
+        for loc in ("en", "de", "nl", "fr", "es")
+    }
+
+    def fields(text: str) -> set[str]:
+        return {f for _, f, _, _ in string.Formatter().parse(text) if f}
+
+    for key, fallback in _SHARE_TITLES.values():
+        assert catalogs["en"][key] == fallback
+        for loc, cat in catalogs.items():
+            assert fields(cat[key]) == fields(fallback), (loc, key)
+    # A push names who only — never an album or a chat.
+    for loc, cat in catalogs.items():
+        assert fields(cat["notification.push.gallery_shared"]) == {"name"}, loc
+        assert fields(cat["notification.push.gallery_shared_anon"]) == set(), loc

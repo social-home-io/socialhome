@@ -106,7 +106,7 @@ describe('glyphFor', () => {
     ['bazaar_bid_placed', 'tag'], ['app_challenge', 'game'], ['app_added', 'game'],
     ['bazaar_bid_placed', 'tag'], ['app_challenge', 'game'], ['app_challenge_declined', 'game'], ['app_game_ended', 'game'], ['app_turn', 'game'], ['app_table_announced', 'game'], ['app_table_closed', 'game'], ['app_draw_ready', 'game'], ['app_draw_changed', 'game'],
     ['call_missed', 'phone'], ['chat_added', 'comment'], ['poll_result', 'poll'], ['poll_scheduled', 'poll'],
-    ['report_answer', 'shield'], ['gallery_added', 'photo'],
+    ['report_answer', 'shield'], ['gallery_added', 'photo'], ['gallery_shared', 'photo'],
   ])('%s → %s', (type, glyph) => {
     expect(glyphFor(type)).toBe(glyph)
   })

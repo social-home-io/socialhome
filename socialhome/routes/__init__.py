@@ -206,6 +206,7 @@ from .gallery import (
     HouseholdAlbumCollectionView,
     SpaceAlbumCollectionView,
 )
+from .gallery_share import GalleryShareTargetsView, GalleryShareView
 from .gfs import (
     GfsAppealView,
     GfsConnectionCollectionView,
@@ -1256,6 +1257,8 @@ def setup_routes(app: web.Application) -> None:
     app.router.add_view("/api/gallery/albums/{album_id}/restore", AlbumRestoreView)
     app.router.add_view("/api/gallery/bulk", GalleryBulkView)
     app.router.add_view("/api/gallery/download", GalleryDownloadView)
+    app.router.add_view("/api/gallery/share", GalleryShareView)
+    app.router.add_view("/api/gallery/share/targets", GalleryShareTargetsView)
     app.router.add_view(
         "/api/gallery/people/{username}/photos", GalleryPersonPhotosView
     )

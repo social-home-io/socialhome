@@ -2137,6 +2137,21 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
             peer_version=peer_version,
         )
 
+    async def media_allowed(self, conversation_id: str) -> bool:
+        """Whether this conversation takes photos and videos at all: a
+        person-made DM or group (no system chat, no listing thread) whose
+        remote members are all on directly paired households — the
+        :meth:`send_message` rules, asked before anything is sent (the
+        gallery share sheet lists only these chats)."""
+        conv = await self._convos.get(conversation_id)
+        if conv is None or not conv.federates_as_dm:
+            return False
+        try:
+            await self._reject_media_on_relay_only_conversation(conversation_id)
+        except MediaRequiresDirectPairingError:
+            return False
+        return True
+
     async def _reject_media_on_relay_only_conversation(
         self,
         conversation_id: str,
