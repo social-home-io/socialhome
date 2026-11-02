@@ -1044,6 +1044,18 @@ class GalleryService:
     ) -> GalleryUpload:
         await self._repo.create_item(item, content_sha256=content_sha256)
         await self._repo.increment_item_count(album.id, +1)
+        if album.space_id is None and not await self._repo.album_visible_to(
+            album.id, item.uploaded_by
+        ):
+            # The album turned private without this person while the upload
+            # was on its way (D7: privacy follows the upload) — it must not
+            # land where its uploader can't see it. Writes are serialised:
+            # an audience change after the insert sees this uploader and is
+            # refused, so this check after the insert closes the race.
+            await self._repo.trash_item(item.id, deleted_by=item.uploaded_by)
+            media = await self._repo.purge_trashed_item(item.id)
+            await unlink_unreferenced(self._media_dir, self._media_refs, media)
+            raise GalleryNotFoundError(f"album {album.id!r} not found")
         await self._bus.publish(
             GalleryItemUploaded(
                 item_id=item.id,
@@ -1598,17 +1610,27 @@ class GalleryService:
             if album.id == default_id:
                 raise AlbumAudienceError("default_album")
         uploaders = await self._repo.album_uploaders(album.id)
+        # Who may have photos in the album once it changes — the same rule
+        # again inside the write's transaction (``allowed_uploaders``), so a
+        # photo landing meanwhile never ends up hidden or shown wider.
         if current.audience == AUDIENCE_EVERYONE and audience == AUDIENCE_CHOSEN:
+            allowed: frozenset[str] = frozenset()
             if uploaders:
                 raise AlbumAudienceError("not_empty")
         elif current.audience == AUDIENCE_CHOSEN and audience == AUDIENCE_EVERYONE:
-            if uploaders - {actor_user_id}:
+            allowed = frozenset({actor_user_id})
+            if uploaders - allowed:
                 raise AlbumAudienceError("others_photos")
         elif audience == AUDIENCE_CHOSEN:
-            for gone in sorted(current.user_ids - people):
-                if gone in uploaders:
-                    raise AlbumAudienceError("has_photos", user_id=gone)
-        await self._repo.set_album_audience(album.id, audience, people)
+            allowed = people | current.guardian_ids | {actor_user_id}
+            for gone in sorted(uploaders - allowed):
+                raise AlbumAudienceError("has_photos", user_id=gone)
+        else:
+            allowed = uploaders | {actor_user_id}  # everyone → everyone
+        if not await self._repo.set_album_audience(
+            album.id, audience, people, allowed_uploaders=allowed
+        ):
+            raise AlbumAudienceError("not_empty" if not allowed else "has_photos")
         await self._bus.publish(GalleryAlbumUpdated(album_id=album.id, space_id=None))
         updated = await self._repo.get_album_audience(album.id)
         if updated is None:  # deleted meanwhile

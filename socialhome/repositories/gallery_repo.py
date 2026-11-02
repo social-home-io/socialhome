@@ -369,11 +369,19 @@ class AbstractGalleryRepo(Protocol):
         ...
 
     async def set_album_audience(
-        self, album_id: str, audience: str, user_ids: frozenset[str] = frozenset()
+        self,
+        album_id: str,
+        audience: str,
+        user_ids: frozenset[str] = frozenset(),
+        *,
+        allowed_uploaders: frozenset[str] | None = None,
     ) -> bool:
         """Set a live household album's audience (``chosen`` + people, or
         ``everyone``, which clears the people). ``False`` for an unknown,
-        space or system album."""
+        space or system album — and, with *allowed_uploaders*, when the
+        album holds a photo (live or in the trash) by anyone outside it,
+        checked in the same transaction as the write, so an upload landing
+        meanwhile can't slip past the rule."""
         ...
 
     async def album_visible_to(self, album_id: str, user_id: str) -> bool: ...
@@ -1824,13 +1832,30 @@ class SqliteGalleryRepo:
         return row is not None
 
     async def set_album_audience(
-        self, album_id: str, audience: str, user_ids: frozenset[str] = frozenset()
+        self,
+        album_id: str,
+        audience: str,
+        user_ids: frozenset[str] = frozenset(),
+        *,
+        allowed_uploaders: frozenset[str] | None = None,
     ) -> bool:
         if audience not in AUDIENCES:
             raise ValueError(f"unknown album audience {audience!r}")
         people = sorted(user_ids) if audience == AUDIENCE_CHOSEN else []
 
         def _run(conn) -> bool:
+            if allowed_uploaders is not None:
+                uploaders = {
+                    r[0]
+                    for r in conn.execute(
+                        "SELECT DISTINCT uploaded_by FROM gallery_items"
+                        " WHERE album_id=? AND filename <> ''",
+                        (album_id,),
+                    ).fetchall()
+                    if r[0]
+                }
+                if uploaders - allowed_uploaders:
+                    return False
             cur = conn.execute(
                 "UPDATE gallery_albums SET audience=? WHERE id=?"
                 " AND space_id IS NULL AND is_system=0 AND deleted_at IS NULL",

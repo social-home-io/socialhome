@@ -22,6 +22,7 @@ from socialhome.domain.gallery import (
     GalleryAlbumAudience,
     GalleryItem,
     GallerySeen,
+    GallerySettings,
     GalleryUpload,
     StashedUpload,
     UploadLimits,
@@ -67,13 +68,32 @@ def test_an_album_audience_defaults_to_everyone():
 
 
 def test_the_wire_shapes_carry_no_library_field():
-    """The audience and the upload digest are household-only: neither is a
-    field of the dataclasses the §25.6 sync exporter ships with ``asdict``."""
-    album_fields = {f.name for f in dataclasses.fields(GalleryAlbum)}
+    """The audience and the upload digest are household-only: the digest is
+    no field of the item, and the album's ``audience`` / ``locked`` are
+    :data:`ALBUM_VIEW_FIELDS` the §25.6 exporter drops — never on the wire."""
     item_fields = {f.name for f in dataclasses.fields(GalleryItem)}
-    assert "audience" not in album_fields
     assert "content_sha256" not in item_fields
+    assert {"audience", "locked"} <= ALBUM_VIEW_FIELDS
+    album = GalleryAlbum(id="a", space_id="sp", owner_user_id="u", name="n")
+    assert "audience" not in album.to_federation_dict()
+    assert "locked" not in album.to_federation_dict()
     assert "url" in _item().to_federation_dict()
+
+
+def test_the_viewers_of_an_album():
+    assert GalleryAlbumAudience(album_id="a").viewers is None
+    private = GalleryAlbumAudience(
+        album_id="a",
+        audience=AUDIENCE_CHOSEN,
+        user_ids=frozenset({"tom"}),
+        owner_user_id="mia",
+        guardian_ids=frozenset({"anna"}),
+    )
+    assert private.viewers == frozenset({"tom", "mia", "anna"})
+
+
+def test_children_may_upload_by_default():
+    assert GallerySettings().children_may_upload is True
 
 
 # ─── Household videos (D4) ───────────────────────────────────────────────
