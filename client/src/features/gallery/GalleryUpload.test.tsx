@@ -44,6 +44,15 @@ describe('useUploadControls', () => {
     expect(view.getByRole('button', { name: 'Take a photo or video' })).toBeTruthy()
   })
 
+  it('the camera button keeps its name when a narrow phone hides the word', () => {
+    // CSS hides ``__label`` on a narrow phone; the button still has an
+    // accessible name and a tooltip, and the 📷 stays visible.
+    const view = render(<Harness />)
+    const cam = view.getByRole('button', { name: 'Take a photo or video' })
+    expect(cam.getAttribute('title')).toBe('Take a photo or video')
+    expect(cam.querySelector('.sh-upload-camera-btn__label')?.textContent?.trim()).toBe('Camera')
+  })
+
   it('picked files go to the queue for the page target', () => {
     const view = render(<Harness />)
     const pick = view.container.querySelector('[data-testid=gallery-upload-input]') as HTMLInputElement

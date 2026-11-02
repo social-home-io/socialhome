@@ -56,7 +56,7 @@ describe('galleryManage', () => {
     const Err = ApiError as unknown as new (s: number, e: Record<string, unknown>) => Error
     expect(downloadError(new Err(413, { params: { max_items: 500 } })))
       .toBe("That's too many for one download — at most 500 at a time.")
-    expect(downloadError(new Error('offline'))).toBe('Couldn\'t save. Check your connection and try again.')
+    expect(downloadError(new Error('offline'))).toBe('Couldn\'t download. Check your connection and try again.')
   })
 
   it('saves the server-named file', async () => {

@@ -141,13 +141,17 @@ export function UploadButtons({ controls }: { controls: UploadControls }) {
     <>
       <Button onClick={controls.pick}>{t('gallery.upload_btn')}</Button>
       {/* Phones only (CSS): a desktop has no camera worth a button. */}
+      {/* A narrow phone shows just the 📷 (CSS), so the row of buttons
+        * stays on one line; the aria-label and the tooltip still say it. */}
       <span class="sh-upload-camera-btn">
         <Button
           variant="secondary"
           aria-label={t('gallery.upload.camera_aria')}
+          title={t('gallery.upload.camera_aria')}
           onClick={controls.camera}
         >
-          <span aria-hidden="true">📷</span> {t('gallery.upload.camera')}
+          <span aria-hidden="true">📷</span>
+          <span class="sh-upload-camera-btn__label"> {t('gallery.upload.camera')}</span>
         </Button>
       </span>
     </>

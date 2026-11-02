@@ -29784,6 +29784,21 @@ a.sh-spaces-row__main:focus-visible { outline: 2px solid var(--sh-focus-ring); o
 
 /* Album header: upload, Select and the album ⋯ sit together. */
 .sh-album-actions { align-items: center; flex-wrap: wrap; }
+/* A narrow phone: the sort toggle and the camera become 44 px icon
+ * buttons (their aria-label and tooltip keep the words) and the text
+ * buttons pad a little less, so order · Upload · 📷 · Select · ⋯ stay
+ * on one line in every language instead of stranding "Camera". */
+@media (max-width: 480px) {
+  .sh-upload-actions .sh-upload-camera-btn__label,
+  .sh-album-actions .sh-order-toggle__label { display: none; }
+  .sh-upload-actions .sh-btn:has(.sh-upload-camera-btn__label),
+  .sh-album-actions .sh-btn:has(.sh-order-toggle__label) {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0;
+  }
+  .sh-album-actions .sh-btn { padding-inline: 12px; }
+}
 
 /* Selecting: a tile is a checkbox. The ring and the tick say "picked"
  * without colour alone (the tick fills, the tile insets). */
@@ -30280,4 +30295,49 @@ body:has(.sh-gviewer) .sh-modal-overlay { z-index: calc(var(--sh-z-lightbox) + 1
 }
 .sh-cp-gallery {
   margin: var(--sh-space-md) 0;
+}
+
+/* Child protection: who is protected. A table on wide screens; on a
+ * phone each person is a small card (name + @username on the left, the
+ * status on the right, the buttons on a line of their own) so the long
+ * "Mark as minor" buttons never push past the card. */
+.sh-cp-table__actions .sh-btn { margin: 2px var(--sh-space-xs) 2px 0; }
+@media (max-width: 640px) {
+  .sh-cp-table,
+  .sh-cp-table tbody,
+  .sh-cp-table tr,
+  .sh-cp-table td { display: block; }
+  .sh-cp-table thead {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .sh-cp-table tbody tr:not(:has(.sh-cp-guardians-row)) {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-areas:
+      "name status"
+      "user status"
+      "actions actions";
+    column-gap: var(--sh-space-sm);
+    padding: var(--sh-space-sm) 0;
+    border-bottom: 1px dashed var(--sh-border);
+  }
+  .sh-cp-table tbody tr:last-child { border-bottom: none; }
+  .sh-cp-table td { border-bottom: none; padding: 0; font-size: var(--sh-font-size-sm); }
+  .sh-cp-table__name { grid-area: name; font-weight: 600; overflow-wrap: anywhere; }
+  .sh-cp-table__user { grid-area: user; color: var(--sh-text-muted); overflow-wrap: anywhere; }
+  .sh-cp-table__status { grid-area: status; align-self: center; text-align: end; }
+  .sh-cp-table__actions {
+    grid-area: actions;
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--sh-space-xs);
+    margin-top: var(--sh-space-xs);
+  }
+  .sh-cp-table__actions .sh-btn { margin: 0; min-height: 44px; white-space: normal; }
+  .sh-cp-table .sh-cp-guardians-row { padding: 0 0 var(--sh-space-sm); }
 }
