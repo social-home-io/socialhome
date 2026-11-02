@@ -417,9 +417,10 @@ export default function GalleryPage({
   const albumCount = albums.value.length
   const itemCount = albums.value.reduce((acc, a) => acc + a.item_count, 0)
   const more = albumsMore.value ? '+' : ''
-  // First run: a household with no photos at all yet (the auto "Posts"
-  // album may exist, empty). One screen that explains, one big button.
-  const firstRun = !spaceId && !albumsError.value && !albumsMore.value
+  // First run: a gallery (the household's or a space's) with no photos and
+  // no album of its own yet (the auto "Posts" album may exist, empty). One
+  // screen that explains, one big button.
+  const firstRun = !albumsError.value && !albumsMore.value
     && regular.length === 0 && itemCount === 0
 
   return (
@@ -474,29 +475,12 @@ export default function GalleryPage({
       ) : firstRun ? (
         <FirstRun
           controls={listControls}
+          inSpace={!!spaceId}
           canUpload={listCanUpload}
+          canCreate={!readOnly}
           onCreate={() => (showCreate.value = true)}
           creating={showCreate.value}
         />
-      ) : albums.value.length === 0 ? (
-        <div class="sh-empty-state">
-          <div aria-hidden="true">📸</div>
-          <h2>{t('gallery.empty_title')}</h2>
-          <p>{spaceId ? t('gallery.empty_body_space') : t('gallery.empty_body_household')}</p>
-          {!readOnly && listCanUpload && (
-            <div class="sh-row sh-upload-actions sh-upload-actions--center">
-              <UploadButtons controls={listControls} />
-              <Button variant="secondary" onClick={() => (showCreate.value = true)}>
-                {t('gallery.create_first')}
-              </Button>
-            </div>
-          )}
-          {!readOnly && !listCanUpload && (
-            <Button onClick={() => (showCreate.value = true)}>
-              {t('gallery.create_first')}
-            </Button>
-          )}
-        </div>
       ) : (
         <>
           <div class="sh-album-grid">
@@ -564,12 +548,16 @@ function OfflineBanner({ onRetry }: { onRetry: () => void }) {
   )
 }
 
-/** A household with no photos yet: what the gallery is, who sees it, and
- *  one big "Add photos" — the files go into the default album, so nobody
- *  has to make an album first. */
-function FirstRun({ controls, canUpload, onCreate, creating }: {
+/** A gallery with no photos yet: what it is, who sees it, and one big
+ *  button. In the household that is "Add photos" — the files go into the
+ *  default album, so nobody has to make an album first. A space has no
+ *  default album, so its first step is "Make an album" (a follower, who
+ *  can do neither, just reads what the gallery is for). */
+function FirstRun({ controls, inSpace, canUpload, canCreate, onCreate, creating }: {
   controls: ReturnType<typeof useUploadControls>
+  inSpace: boolean
   canUpload: boolean
+  canCreate: boolean
   onCreate: () => void
   creating: boolean
 }) {
@@ -578,9 +566,11 @@ function FirstRun({ controls, canUpload, onCreate, creating }: {
       <div class="sh-gallery-first__art" aria-hidden="true">
         <span>🏔️</span><span>📷</span><span>🌅</span>
       </div>
-      <h2 id="sh-gallery-first-title">{t('gallery.first.title')}</h2>
-      <p class="sh-muted">{t('gallery.first.body')}</p>
-      {canUpload && (
+      <h2 id="sh-gallery-first-title">
+        {t(inSpace ? 'gallery.first.title_space' : 'gallery.first.title')}
+      </h2>
+      <p class="sh-muted">{t(inSpace ? 'gallery.first.body_space' : 'gallery.first.body')}</p>
+      {!inSpace && canUpload && (
         <div class="sh-gallery-first__actions">
           <Button onClick={controls.pick}>{t('gallery.first.add')}</Button>
           <span class="sh-upload-camera-btn">
@@ -595,15 +585,24 @@ function FirstRun({ controls, canUpload, onCreate, creating }: {
           <p class="sh-gallery-first__drop sh-muted">{t('gallery.first.drop')}</p>
         </div>
       )}
+      {inSpace && canCreate && !creating && (
+        <div class="sh-gallery-first__actions">
+          <Button onClick={onCreate}>{t('gallery.first.make_first_album')}</Button>
+        </div>
+      )}
+      {!inSpace && (
+        <p class="sh-gallery-first__hint sh-muted">
+          {t('gallery.first.default_album', { name: t('gallery.upload.default_album') })}{' '}
+          {!creating && (
+            <button type="button" class="sh-link-button" onClick={onCreate}>
+              {t('gallery.first.make_album')}
+            </button>
+          )}
+        </p>
+      )}
       <p class="sh-gallery-first__hint sh-muted">
-        {t('gallery.first.default_album', { name: t('gallery.upload.default_album') })}{' '}
-        {!creating && (
-          <button type="button" class="sh-link-button" onClick={onCreate}>
-            {t('gallery.first.make_album')}
-          </button>
-        )}
+        {t(inSpace ? 'gallery.first.feed_hint_space' : 'gallery.first.feed_hint')}
       </p>
-      <p class="sh-gallery-first__hint sh-muted">{t('gallery.first.feed_hint')}</p>
     </section>
   )
 }

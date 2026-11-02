@@ -16,6 +16,7 @@ from collections.abc import AsyncIterator
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
+from .....domain.gallery import ALBUM_VIEW_FIELDS
 from ..exporter import PagedExporterMixin
 from ..window import SYNC_PAGE_SIZE, iter_pages
 
@@ -52,7 +53,7 @@ class GalleryExporter(PagedExporterMixin):
             )
 
         async for album_page in iter_pages(albums):
-            yield [{"kind": "album", **asdict(a)} for a in album_page]
+            yield [{"kind": "album", **_album_record(a)} for a in album_page]
 
         async def items(cursor: int | None) -> tuple[list[GalleryItem], int | None]:
             return await self._repo.list_items_sync_page(
@@ -61,3 +62,9 @@ class GalleryExporter(PagedExporterMixin):
 
         async for item_page in iter_pages(items):
             yield [{"kind": "item", **asdict(it)} for it in item_page]
+
+
+def _album_record(a: GalleryAlbum) -> dict[str, Any]:
+    """The album as the sync stream carries it — its stored fields only;
+    the per-viewer ones (:data:`ALBUM_VIEW_FIELDS`) stay home."""
+    return {k: v for k, v in asdict(a).items() if k not in ALBUM_VIEW_FIELDS}

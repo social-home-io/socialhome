@@ -774,3 +774,50 @@ async def test_on_this_day_follows_the_gallery_switch(client):
     assert (await client.get("/api/gallery/on-this-day", headers=h)).status == 403
     r = await client.patch("/api/gallery/on-this-day", json={}, headers=h)
     assert r.status == 403
+
+
+async def test_a_space_album_lists_by_date_taken_too(client):
+    """The date order and its cursor are the same for a space album; its
+    rows are never the household's default album."""
+    h = _auth(client._tok)
+    await _make_space(client)
+    r = await client.post(
+        "/api/spaces/sp-1/gallery/albums", json={"name": "Trip"}, headers=h
+    )
+    album = await r.json()
+    assert (album["is_default"], album["default_name"]) == (False, False)
+    await _seed(client, album["id"], _DATED)
+    seen: list[str] = []
+    cursor = ""
+    while True:
+        r = await client.get(
+            f"/api/gallery/albums/{album['id']}/items?sort=taken_asc&limit=2{cursor}",
+            headers=h,
+        )
+        assert r.status == 200
+        page = await r.json()
+        seen += [i["id"] for i in page]
+        if len(page) < 2:
+            break
+        last = page[-1]
+        cursor = (
+            f"&after_day={last['day']}&after={quote(last['created_at'])}"
+            f"&after_id={last['id']}"
+        )
+    assert seen == ["e", "a", "b", "c", "d"]
+    r = await client.get("/api/spaces/sp-1/gallery/albums", headers=h)
+    assert (await r.json())[0]["activity_at"] == "2026-10-02T10:00:00+00:00"
+
+
+async def test_on_this_day_never_uses_a_space_album(client):
+    h = _auth(client._tok)
+    await _make_space(client)
+    r = await client.post(
+        "/api/spaces/sp-1/gallery/albums", json={"name": "Trip"}, headers=h
+    )
+    day = _years_ago(1)
+    await _seed(
+        client, (await r.json())["id"], [("s-1", day, "2026-01-01T00:00:00+00:00")]
+    )
+    r = await client.get(f"/api/gallery/on-this-day?date={_today()}", headers=h)
+    assert (await r.json())["card"] is None

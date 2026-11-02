@@ -139,6 +139,14 @@ class GalleryItem:
         }
 
 
+#: :class:`GalleryAlbum` fields that describe the album as one viewer of
+#: this household sees it (read with the list, never stored). They never
+#: leave the household: the §25.6 exporter drops them from its records.
+ALBUM_VIEW_FIELDS: frozenset[str] = frozenset(
+    {"activity_at", "is_default", "default_name"}
+)
+
+
 # ─── Library model (migration 0139) ──────────────────────────────────────
 
 #: Days a deleted household photo or video stays in the trash before the

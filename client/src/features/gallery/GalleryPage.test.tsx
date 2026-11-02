@@ -158,7 +158,7 @@ describe('GalleryPage live album frames', () => {
     const view = await renderOpenAlbum()
     albumRows = []
     emit('gallery.album_deleted', { album_id: 'al-1', space_id: 'sp-1' })
-    expect(await view.findByText('No albums yet')).toBeTruthy()
+    expect(await view.findByRole('heading', { name: "This space's photos, all in one place" })).toBeTruthy()
     expect(showToast).toHaveBeenCalledWith('This album was deleted.', 'info')
   })
 
@@ -186,7 +186,7 @@ describe('GalleryPage for a read-only follower', () => {
   it('an empty space gallery invites no album for a follower', async () => {
     albumRows = []
     const view = await mount({ spaceId: 'sp-1', readOnly: true })
-    await view.findByRole('heading', { name: /No albums yet/ })
+    await view.findByRole('heading', { name: "This space's photos, all in one place" })
     expect(view.queryByRole('button', { name: /album/i })).toBeNull()
   })
 
@@ -488,8 +488,12 @@ describe('GalleryPage upload sheet', () => {
   it('a space gallery with no album offers no upload', async () => {
     albumRows = []
     const view = await mount({ spaceId: 'sp-1' })
-    await view.findByRole('heading', { name: /No albums yet/ })
+    await view.findByRole('heading', { name: "This space's photos, all in one place" })
     expect(view.queryByRole('button', { name: /Upload/ })).toBeNull()
+    expect(view.queryByRole('button', { name: 'Add photos' })).toBeNull()
+    // A space has no default album: the first step is an album.
+    fireEvent.click(view.getByRole('button', { name: 'Make the first album' }))
+    expect(view.getByPlaceholderText('e.g. Summer 2026')).toBeTruthy()
     expect(view.container.querySelector('[data-testid=gallery-upload-input]')).toBeNull()
   })
 
@@ -781,11 +785,32 @@ describe('GalleryPage albums refresh (PR 4)', () => {
     expect(view.getByPlaceholderText('e.g. Summer 2026')).toBeTruthy()
   })
 
-  it('a space with no albums keeps its own empty state, never the household first run', async () => {
+  it('a space gallery gets its own first run — no default album, no On this day', async () => {
     albumRows = []
     const view = await mount({ spaceId: 'sp-1' })
-    expect(await view.findByText('No albums yet')).toBeTruthy()
-    expect(view.queryByText('Your photos, all in one place')).toBeNull()
+    expect(await view.findByRole('heading', { name: "This space's photos, all in one place" })).toBeTruthy()
+    expect(view.getByText(/Everyone in this space sees/)).toBeTruthy()
+    expect(view.queryByText(/They go into “Photos”/)).toBeNull()
+    expect(view.getByText("Photos posted in this space's feed show up here too.")).toBeTruthy()
+  })
+
+  it('a space album sorts by date taken under month and day headings too', async () => {
+    albumRows = [album('al-1', 'Holiday', { item_count: 2 })]
+    itemRows = [
+      item(2, { day: '2026-08-02', taken_at: '2026-08-02' }),
+      item(1, { day: '2026-07-13', taken_at: '2026-07-13' }),
+    ]
+    const view = await renderOpenAlbum({ spaceId: 'sp-1' })
+    await waitFor(() => expect(view.getAllByRole('link', { name: /^Photo/ })).toHaveLength(2))
+    expect(view.getAllByRole('heading', { level: 2 }).map(h => h.textContent))
+      .toEqual(['August 2026', 'July 2026'])
+    expect(location.pathname).toBe('/spaces/sp-1/gallery/albums/al-1')
+    fireEvent.click(view.getByRole('button', { name: 'Newest first — show oldest first' }))
+    await waitFor(() => {
+      const [path, q] = split(apiGet.mock.calls.at(-1)![0] as string)
+      expect(path).toBe('/api/gallery/albums/al-1/items')
+      expect(q.sort).toBe('taken_asc')
+    })
   })
 })
 
