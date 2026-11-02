@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Started by dependabot-pinned-viewer.yml after it pushes the rebuilt
+  # manifest to a Dependabot branch: a GITHUB_TOKEN push starts no run of
+  # its own, and this run reports the required checks on the new head.
+  workflow_dispatch:
 
 jobs:
   test-shard:

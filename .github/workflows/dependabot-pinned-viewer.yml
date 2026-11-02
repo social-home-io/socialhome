@@ -1,0 +1,142 @@
+# Rebuild the pinned viewer on Dependabot's client PRs (docs/testing.md,
+# "Dependency updates").
+#
+# ``socialhome/pinned_viewer.json`` names the content-addressed public
+# viewer, so almost every client dependency bump (vite, preact, esbuild, …)
+# changes it, and CI's ``frontend`` job fails until the manifest is rebuilt
+# and committed. Dependabot can't do that itself, so this workflow does it
+# for Dependabot's own PRs and nothing else.
+#
+# Security: no third-party code ever runs next to a write token.
+#   * ``build`` installs and builds the bumped packages with a read-only
+#     token (and ``persist-credentials: false``) — exactly what CI's
+#     ``frontend`` job already runs — and hands over only the manifest
+#     file, as an artifact.
+#   * ``commit`` runs no package code at all: it checks the manifest's
+#     shape (three fields, fixed formats), commits that one file on top of
+#     the exact commit that was built and pushes it to the Dependabot
+#     branch. Only this job gets ``contents: write`` (the push) and
+#     ``actions: write`` (re-running CI, below).
+#   * It runs only when Dependabot itself pushed a same-repo branch for its
+#     own PR; ``pull_request`` (not ``pull_request_target``), as in
+#     dependabot-automerge.yml. Every action is pinned by commit.
+#
+# A push made with ``GITHUB_TOKEN`` starts no new workflow run (GitHub's
+# rule against loops), so the new head commit would carry no checks and
+# the required ones on ``main`` would never report. ``workflow_dispatch``
+# is the one event such a token may start: ``commit`` dispatches CI on the
+# branch, and those runs report the required checks on the new head.
+name: Dependabot pinned viewer
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - client/package.json
+      - client/pnpm-lock.yaml
+
+permissions: {}
+
+concurrency:
+  group: dependabot-pinned-viewer-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    if: >-
+      github.actor == 'dependabot[bot]' &&
+      github.event.pull_request.user.login == 'dependabot[bot]' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      # v7.0.1, pinned by commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      # v7.1.0, pinned by commit.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: "24"
+      # v6.1.0, pinned by commit.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413
+        with:
+          version: 10
+      - name: Install (exactly the locked set)
+        working-directory: client
+        run: pnpm install --frozen-lockfile
+      - name: Rebuild the pinned viewer
+        working-directory: client
+        run: pnpm run build:pinned-viewer
+      - name: Did the manifest change?
+        id: diff
+        run: |
+          if git diff --quiet -- socialhome/pinned_viewer.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git diff -- socialhome/pinned_viewer.json
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.diff.outputs.changed == 'true'
+        # v7.0.2, pinned by commit.
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: pinned-viewer-manifest
+          path: socialhome/pinned_viewer.json
+          retention-days: 1
+          if-no-files-found: error
+
+  commit:
+    needs: build
+    if: needs.build.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      # v7.0.1, pinned by commit. The branch is checked out to commit on,
+      # never built or run.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.event.pull_request.head.ref }}
+      # v8.0.2, pinned by commit.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: pinned-viewer-manifest
+          path: ${{ runner.temp }}/manifest
+      - name: Check the manifest's shape
+        # Exactly {version: 1, path: "v/<16 hex>/", integrity: "sha384-…"}.
+        run: |
+          jq -e '
+            (keys == ["integrity", "path", "version"]) and
+            (.version == 1) and
+            (.path | test("^v/[0-9a-f]{16}/$")) and
+            (.integrity | test("^sha384-[A-Za-z0-9+/]{64}$"))
+          ' "$RUNNER_TEMP/manifest/pinned_viewer.json"
+      - name: Commit it on the commit that was built
+        env:
+          BUILT_SHA: ${{ github.event.pull_request.head.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          # Dependabot pushed again meanwhile: that push runs this again.
+          if [ "$(git rev-parse HEAD)" != "$BUILT_SHA" ]; then
+            echo "The branch moved past $BUILT_SHA; the newer run rebuilds it."
+            exit 0
+          fi
+          cp "$RUNNER_TEMP/manifest/pinned_viewer.json" socialhome/pinned_viewer.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add socialhome/pinned_viewer.json
+          git commit -m "Rebuild the pinned viewer for this dependency update"
+          git push origin "HEAD:refs/heads/$HEAD_REF"
+          echo "pushed=true" >> "$GITHUB_ENV"
+      - name: Run CI on the new head
+        if: env.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref "$HEAD_REF"
