@@ -19,6 +19,12 @@ reached the other households only in the initial sync, so anything
 uploaded into an album created after they joined was refused
 everywhere but on the creator's household.
 
+A photo's caption, day taken and album (another album of the same space)
+change in place from v_79: ``SPACE_GALLERY_ITEM_UPDATED`` carries the
+item's whole editable state, so a redelivery or a reorder converges. A
+member household below v_79 is sent nothing (``min_proto_version``); the
+host's next §25.6 sync brings it the values once it upgrades.
+
 Household-scoped items (album with ``space_id IS NULL``) stay local —
 no peer has a right to know about them. The album lookup is the
 gate: we never emit when the resolved album has a NULL
@@ -36,9 +42,11 @@ from ..domain.events import (
     GalleryAlbumDeleted,
     GalleryAlbumUpdated,
     GalleryItemDeleted,
+    GalleryItemUpdated,
     GalleryItemUploaded,
 )
 from ..domain.federation import FederationEventType
+from ..domain.federation_capabilities import FederationCapability
 from ..infrastructure.event_bus import EventBus
 
 if TYPE_CHECKING:
@@ -88,6 +96,7 @@ class GalleryFederationOutbound:
         self._bus.subscribe(GalleryAlbumUpdated, self._on_album_updated)
         self._bus.subscribe(GalleryAlbumDeleted, self._on_album_deleted)
         self._bus.subscribe(GalleryItemUploaded, self._on_uploaded)
+        self._bus.subscribe(GalleryItemUpdated, self._on_item_updated)
         self._bus.subscribe(GalleryItemDeleted, self._on_deleted)
 
     async def _on_album_created(self, event: GalleryAlbumCreated) -> None:
@@ -195,6 +204,34 @@ class GalleryFederationOutbound:
                             item.id,
                         )
 
+    async def _on_item_updated(self, event: GalleryItemUpdated) -> None:
+        """A space photo's new caption, day taken or album (v_79).
+
+        The payload is the item's whole editable state as stored now — not
+        a diff — so two edits racing, or one redelivered, end the same on
+        every household. ≤ 1 KB (a 300-character caption at most). Member
+        households at v_79 or above only: an older one has no handler and
+        is sent nothing."""
+        if event.space_id is None or event.origin_instance_id is not None:
+            return  # household photo, or applied from another household
+        item = await self._gallery_repo.get_item(event.item_id)
+        if item is None or item.source_post_id is not None:
+            return  # deleted meanwhile / a post's mirror (never edited here)
+        payload: dict = {
+            "id": item.id,
+            "album_id": item.album_id,
+            "caption": item.caption,
+            "taken_at": item.taken_at,
+        }
+        if event.actor_user_id:
+            payload["actor_user_id"] = event.actor_user_id
+        await self._fan_out(
+            event.space_id,
+            FederationEventType.SPACE_GALLERY_ITEM_UPDATED,
+            payload,
+            min_proto_version=FederationCapability.MIN_FOR_SPACE_GALLERY_ITEM_EDIT,
+        )
+
     async def _on_deleted(self, event: GalleryItemDeleted) -> None:
         if event.origin_instance_id is not None:
             return
@@ -222,6 +259,8 @@ class GalleryFederationOutbound:
         space_id: str,
         event_type: FederationEventType,
         payload: dict,
+        *,
+        min_proto_version: int | None = None,
     ) -> None:
         # The space rides the payload as well as the routing field. A
         # mesh-relayed envelope (SPACE_ROUTED) carries no plaintext
@@ -233,9 +272,21 @@ class GalleryFederationOutbound:
         # Member households only, each via ``send_with_mesh_fallback`` so a
         # mesh-only member gets the event over ``SPACE_ROUTED``.
         try:
-            await self._federation.broadcast_to_space_members(
-                space_id, event_type, payload
-            )
+            if min_proto_version is None:
+                await self._federation.broadcast_to_space_members(
+                    space_id, event_type, payload
+                )
+            else:
+                # Judged per member household by its space version
+                # (``space_member_supports``: a mesh-only member by its mesh
+                # claim) — a household below it is skipped, never sent an
+                # event type it has no handler for.
+                await self._federation.broadcast_to_space_members(
+                    space_id,
+                    event_type,
+                    payload,
+                    min_proto_version=min_proto_version,
+                )
         except Exception as exc:  # pragma: no cover — defensive
             log.debug(
                 "gallery-outbound: broadcast %s for %s failed: %s",

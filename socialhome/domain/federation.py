@@ -307,6 +307,11 @@ class FederationEventType(str, enum.Enum):
     SPACE_GALLERY_ALBUM_DELETED = "space_gallery_album_deleted"
     SPACE_GALLERY_ITEM_CREATED = "space_gallery_item_created"
     SPACE_GALLERY_ITEM_DELETED = "space_gallery_item_deleted"
+    # v_79: a photo's caption, day taken or album (within the space)
+    # changed — ``{id, album_id, caption, taken_at, actor_user_id}``, the
+    # item's whole editable state, sealed like every space event. From the
+    # uploader's household or one with content authority.
+    SPACE_GALLERY_ITEM_UPDATED = "space_gallery_item_updated"
     # ── Bazaar (§5.6) — per-space marketplace listings. The wrapper
     # ``PostType.BAZAAR`` post federates via ``SPACE_POST_CREATED``
     # with just the caption; this event carries the full
@@ -714,6 +719,7 @@ SPACE_SESSION_ALLOWED_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_GALLERY_ALBUM_UPDATED,
         FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
         FederationEventType.SPACE_GALLERY_ITEM_CREATED,
+        FederationEventType.SPACE_GALLERY_ITEM_UPDATED,
         FederationEventType.SPACE_GALLERY_ITEM_DELETED,
         FederationEventType.BAZAAR_LISTING_CREATED,
         FederationEventType.BAZAAR_LISTING_UPDATED,
@@ -902,6 +908,7 @@ SPACE_WRITE_EVENT_TYPES: frozenset[FederationEventType] = frozenset(
         FederationEventType.SPACE_GALLERY_ALBUM_UPDATED,
         FederationEventType.SPACE_GALLERY_ALBUM_DELETED,
         FederationEventType.SPACE_GALLERY_ITEM_CREATED,
+        FederationEventType.SPACE_GALLERY_ITEM_UPDATED,
         FederationEventType.SPACE_GALLERY_ITEM_DELETED,
         # ── Bazaar (listings live in a space like any other content) ──
         FederationEventType.BAZAAR_LISTING_CREATED,

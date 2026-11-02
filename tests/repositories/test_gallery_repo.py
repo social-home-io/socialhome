@@ -482,6 +482,66 @@ async def test_create_item_in_space_refuses_household_album(two_spaces):
     assert (await repo.get_album("alb-home")).item_count == 0
 
 
+async def test_edit_item_in_space_sets_caption_day_and_moves_within_the_space(
+    two_spaces,
+):
+    """v_79: one transaction — caption / day, and a move to another live
+    user album of the SAME space, both counts recounted, the old cover
+    dropped."""
+    _db, repo = two_spaces
+    await repo.create_album(_album("alb-2b", space_id="sp-2"))
+    await repo.update_album_in_space(
+        "alb-2", {"cover_item_id": "it-2"}, space_id="sp-2"
+    )
+
+    assert (
+        await repo.edit_item_in_space(
+            "it-2",
+            space_id="sp-2",
+            patch={"caption": "Lake", "taken_at": "2026-07-12", "url": "evil"},
+            to_album_id="alb-2b",
+        )
+        == "alb-2"
+    )
+
+    item = await repo.get_item("it-2")
+    assert (item.album_id, item.caption, item.taken_at) == (
+        "alb-2b",
+        "Lake",
+        "2026-07-12",
+    )
+    assert item.url.endswith("it-2.webp")  # only caption / taken_at
+    old = await repo.get_album("alb-2")
+    assert (old.item_count, old.cover_item_id) == (0, None)
+    assert (await repo.get_album("alb-2b")).item_count == 1
+
+
+async def test_edit_item_in_space_never_leaves_the_space(two_spaces):
+    _db, repo = two_spaces
+    # Not the item's space; another space's or a household album as target.
+    assert (
+        await repo.edit_item_in_space("it-2", space_id="sp-1", patch={"caption": "x"})
+        is None
+    )
+    for target in ("alb-1", "alb-home", "nope"):
+        assert (
+            await repo.edit_item_in_space(
+                "it-2", space_id="sp-2", patch={"caption": "x"}, to_album_id=target
+            )
+            is None
+        )
+    item = await repo.get_item("it-2")
+    assert (item.album_id, item.caption) == ("alb-2", None)
+    # A household item is not a space item.
+    await repo.create_item(_item("it-home", album_id="alb-home"))
+    assert (
+        await repo.edit_item_in_space(
+            "it-home", space_id="sp-1", patch={"caption": "x"}
+        )
+        is None
+    )
+
+
 async def test_delete_item_in_space_is_scoped(two_spaces):
     _db, repo = two_spaces
     assert not await repo.delete_item_in_space("it-2", space_id="sp-1")

@@ -3,7 +3,8 @@
  *
  * The date is a day (no time — the gallery never keeps more of the
  * camera's clock); empty clears it, and the photo then sorts by the day it
- * was added. Household photos only, for whoever may delete them.
+ * was added. Household and (v_79) space photos, for whoever may delete
+ * them — a space photo's change reaches every member household.
  */
 import { useState } from 'preact/hooks'
 import { t } from '@/i18n/i18n'

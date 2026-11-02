@@ -115,3 +115,9 @@ export function galleryPath(
   }
   return p
 }
+
+/** The album list of a gallery — a space's, or the household's — for
+ *  ``GET`` (the albums) and ``POST`` (a new album there). */
+export function albumsUrl(spaceId?: string | null): string {
+  return spaceId ? `/api/spaces/${spaceId}/gallery/albums` : '/api/gallery/albums'
+}

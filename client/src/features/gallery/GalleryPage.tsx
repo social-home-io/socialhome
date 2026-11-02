@@ -41,7 +41,7 @@ import { Button } from '@/components/Button'
 import { showToast } from '@/components/Toast'
 import { openReport } from '@/components/ReportDialog'
 import { GalleryViewer, type ViewerItem } from './GalleryViewer'
-import { backLeadsTo, galleryPath, markBackTo, parseGallerySub } from './galleryRoutes'
+import { albumsUrl, backLeadsTo, galleryPath, markBackTo, parseGallerySub } from './galleryRoutes'
 import { currentUser } from '@/store/auth'
 import { householdDisplayName, householdUsers, loadHouseholdUsers } from '@/store/householdUsers'
 import { spaceMembers, loadSpaceMembers } from '@/store/spaceMembers'
@@ -370,9 +370,10 @@ export default function GalleryPage({
       ws.on('gallery.album_deleted', onAlbumDeleted),
       ws.on('gallery.item_uploaded', handle),
       ws.on('gallery.item_deleted', handle),
-      // Household only (no ``space_id``): back from the trash, a new
-      // caption / date, a move between albums.
+      // Back from the trash (household only, no ``space_id``).
       ws.on('gallery.item_restored', handle),
+      // A new caption / date, a move between albums — household or (v_79)
+      // space.
       ws.on('gallery.item_updated', handle),
       ws.on('media.ready', onMediaDone),
       ws.on('media.failed', onMediaDone),
@@ -895,7 +896,7 @@ function AlbumDetail({
   readOnly?: boolean
   canModerate?: boolean
 }) {
-  const viewer = useAlbumViewer(album, spaceId, itemId, canModerate)
+  const viewer = useAlbumViewer(album, spaceId, itemId, canModerate, readOnly)
 
   const anyProcessing = items.value.some(isProcessing)
   // Another person's video sends this browser no ready frame: re-read
@@ -1049,6 +1050,7 @@ function AlbumDetail({
  *  on until it finds the item, and closing returns focus to its tile. */
 function useAlbumViewer(
   album: Album, spaceId: string | undefined, itemId: string | null, canModerate: boolean,
+  readOnly = false,
 ) {
   const loc = useLocation()
   const locRef = useRef(loc)
@@ -1124,9 +1126,10 @@ function useAlbumViewer(
 
   const viewerItems: ViewerItem[] = loaded.map(i => ({ ...i, processing: isProcessing(i) }))
   const me = currentUser.value?.user_id
-  // TODO(gallery PR 13, space parity, proto v_79): caption / date edits
-  // in a space need a federation event — household photos only for now.
-  const household = !album.space_id && !album.is_system
+  // Caption and date: household photos, and space photos (v_79: the edit
+  // reaches every member household) — never the feed's "Posts" album, nor
+  // for a space's read-only follower.
+  const editable = !album.is_system && !readOnly
   return (
     <>
     {editing && (
@@ -1162,7 +1165,7 @@ function useAlbumViewer(
         if (next) locRef.current.route(galleryPath(spaceId, album.id, next.id), true)
       }}
       onClose={close}
-      canEdit={(it) => household && canDeleteItem(album, it, canModerate)}
+      canEdit={(it) => editable && canDeleteItem(album, it, canModerate)}
       onEdit={(it) => {
         const row = items.value.find(i => i.id === it.id)
         if (row) setEditing(row)
@@ -1427,10 +1430,9 @@ function useAlbumManage(album: Album, loaded: Item[], canModerate: boolean, read
     }
   }
 
-  // A space photo can't change album yet: the other member households
-  // would never hear of it (no federation event for a move).
-  // TODO(gallery PR 13, space parity, proto v_79): move within a space.
-  const movable = !album.space_id && !album.is_system
+  // A photo moves to another album of the same gallery: the household's,
+  // or (v_79) another album of the same space — never across.
+  const movable = !album.is_system && !readOnly
     && picked.some(i => canDeleteItem(album, i, canModerate))
   const move = async (toId: string, toName: string) => {
     const mine = picked.filter(i => canDeleteItem(album, i, canModerate))
@@ -1519,6 +1521,7 @@ function useAlbumManage(album: Album, loaded: Item[], canModerate: boolean, read
         <MoveToAlbumDialog
           count={picked.filter(i => canDeleteItem(album, i, canModerate)).length}
           currentAlbumId={album.id}
+          spaceId={spaceId}
           onClose={() => setMoving(false)}
           onMove={move}
         />
@@ -1675,10 +1678,6 @@ function CreateAlbumForm({
 function isOffline(err: unknown): boolean {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return true
   return !(err instanceof ApiError) || err.status >= 502
-}
-
-function albumsUrl(spaceId?: string): string {
-  return spaceId ? `/api/spaces/${spaceId}/gallery/albums` : '/api/gallery/albums'
 }
 
 /** ``?before=&before_id=`` for the page after ``row`` (albums: its

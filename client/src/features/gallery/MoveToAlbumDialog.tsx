@@ -1,21 +1,24 @@
 /**
  * MoveToAlbumDialog — pick the album the selected photos move to (a photo
- * lives in exactly one album), or name a new one. Household albums only:
- * the feed's "Posts" album fills itself, and space photos stay in their
- * space.
+ * lives in exactly one album), or name a new one. The albums of the same
+ * gallery only — the household's, or (v_79) the space's the photos are in:
+ * a space photo stays in its space, and the "Posts" album fills itself.
  */
 import { useEffect, useState } from 'preact/hooks'
 import { t } from '@/i18n/i18n'
 import { api } from '@/api'
 import { Modal } from '@/components/Modal'
 import { Button } from '@/components/Button'
+import { albumsUrl } from './galleryRoutes'
 
 export interface AlbumChoice { id: string; name: string; is_system?: boolean; item_count?: number }
 
-export function MoveToAlbumDialog({ count, currentAlbumId, onClose, onMove }: {
+export function MoveToAlbumDialog({ count, currentAlbumId, spaceId, onClose, onMove }: {
   /** How many photos move — the title says so. */
   count: number
   currentAlbumId: string
+  /** The space whose albums are offered; the household's when absent. */
+  spaceId?: string
   onClose: () => void
   /** Move into ``albumId``; resolves when done (the dialog then closes). */
   onMove: (albumId: string, albumName: string) => Promise<void>
@@ -28,7 +31,7 @@ export function MoveToAlbumDialog({ count, currentAlbumId, onClose, onMove }: {
 
   useEffect(() => {
     let live = true
-    api.get<AlbumChoice[]>('/api/gallery/albums?limit=200')
+    api.get<AlbumChoice[]>(`${albumsUrl(spaceId)}?limit=200`)
       .then((rows) => {
         if (!live) return
         const list = rows.filter(a => !a.is_system && a.id !== currentAlbumId)
@@ -37,7 +40,7 @@ export function MoveToAlbumDialog({ count, currentAlbumId, onClose, onMove }: {
       })
       .catch(() => { if (live) setFailed(true) })
     return () => { live = false }
-  }, [currentAlbumId])
+  }, [currentAlbumId, spaceId])
 
   const creating = pick === 'new'
   const canSubmit = !busy && (creating ? newName.trim().length > 0 : !!pick)
@@ -48,7 +51,7 @@ export function MoveToAlbumDialog({ count, currentAlbumId, onClose, onMove }: {
     setBusy(true)
     try {
       if (creating) {
-        const made = await api.post<AlbumChoice>('/api/gallery/albums', { name: newName.trim() })
+        const made = await api.post<AlbumChoice>(albumsUrl(spaceId), { name: newName.trim() })
         await onMove(made.id, made.name)
       } else {
         const album = albums?.find(a => a.id === pick)

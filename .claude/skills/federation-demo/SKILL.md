@@ -754,7 +754,12 @@ Phases added after the initial publish are documented inline in
   (``SPACE_GALLERY_ALBUM_CREATED``) and the item uploaded into it; dave
   then uploads into that album from d and c must hold the item row
   attributed to dave plus its bytes (a remote uploader); c renames the
-  album and d's copy follows (``_UPDATED``). Before v_33 the step passed on
+  album and d's copy follows (``_UPDATED``); v_79: dave re-captions and
+  re-dates his photo on d and c's copy follows, c moves its photo into a
+  second album of the space and d's copy follows
+  (``SPACE_GALLERY_ITEM_UPDATED``, mesh-routed through b, which never sees
+  it; ``verify`` pins ``MIN_FOR_SPACE_GALLERY_ITEM_EDIT`` = 79 and re-checks
+  both copies and that b's database never holds the caption). Before v_33 the step passed on
   bytes alone while d refused the item for naming an album it never got.
   From v_34 it also asserts the album id c minted is owner-bound to c's
   user in that space (``federation/owner_bound_id.check_owner_bound_id``)

@@ -28,6 +28,7 @@ from socialhome.domain.gallery import (
     UploadLimits,
     UploadOutcome,
     is_video_upload,
+    valid_taken_day,
     video_fits,
 )
 
@@ -179,3 +180,19 @@ def test_has_new_is_a_view_field_never_exported():
     assert "has_new" in ALBUM_VIEW_FIELDS
     album = GalleryAlbum(id="a", space_id=None, owner_user_id="u", name="n")
     assert album.has_new is False
+
+
+@pytest.mark.parametrize(
+    "bad", ["12.07.2026", "2026-13-01", "1799-12-31", "2999-01-01", "2026-7-1"]
+)
+def test_a_day_taken_must_be_a_real_day_in_range(bad):
+    """One rule for a local edit, a ``SPACE_GALLERY_ITEM_UPDATED`` and the
+    host's sync record (v_79)."""
+    with pytest.raises(ValueError):
+        valid_taken_day(bad)
+
+
+def test_a_day_taken_is_kept_or_cleared():
+    assert valid_taken_day("2026-07-12") == "2026-07-12"
+    assert valid_taken_day(None) is None
+    assert valid_taken_day("") is None

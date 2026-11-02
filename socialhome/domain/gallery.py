@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, timedelta
 from enum import StrEnum
 
 #: ``gallery_albums.audience`` — everyone at home (the default) …
@@ -296,6 +296,23 @@ class GallerySettings:
 #: streaming, so it holds for chunked bodies too and is independent of
 #: aiohttp's 1 MiB ``client_max_size``.
 GALLERY_MAX_UPLOAD_BYTES: int = 100 * 1024 * 1024
+
+
+def valid_taken_day(value: str | None) -> str | None:
+    """A date taken as ``YYYY-MM-DD`` (day only, like the EXIF date we keep),
+    ``None`` to clear it. Not before 1800, not after tomorrow (a phone a
+    time zone ahead)."""
+    if value is None or value == "":
+        return None
+    try:
+        day = date.fromisoformat(str(value))
+    except ValueError:
+        raise ValueError("taken_at must be YYYY-MM-DD") from None
+    if len(str(value)) != 10:
+        raise ValueError("taken_at must be YYYY-MM-DD")
+    if day.year < 1800 or day > (datetime.now(UTC) + timedelta(days=1)).date():
+        raise ValueError("taken_at is out of range")
+    return day.isoformat()
 
 
 def is_video_upload(content_type: str) -> bool:
