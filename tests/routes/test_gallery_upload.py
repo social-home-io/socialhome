@@ -310,3 +310,23 @@ async def test_a_gallery_upload_over_the_household_quota_is_507_storage_full(cli
         aid, actor_user_id=client._uid
     )
     assert album.item_count == 0
+
+
+async def test_a_batch_upload_has_its_own_rate_limit_bucket(client):
+    """Live walk: 80 picked photos hit the 60/min default bucket (shared
+    with browsing) — 1 stored, 79 refused. Uploads now have their own
+    bucket, and browsing the gallery stays open meanwhile."""
+    aid = await _make_album(client)
+    data = _png_bytes()
+    for i in range(100):
+        r = await client.post(
+            f"/api/gallery/albums/{aid}/items",
+            data=data,
+            headers={**_auth(client._tok), "Content-Type": "image/png"},
+        )
+        assert r.status == 201, i
+    r = await client.get(
+        f"/api/gallery/albums/{aid}/items?limit=500", headers=_auth(client._tok)
+    )
+    assert r.status == 200
+    assert len(await r.json()) == 100

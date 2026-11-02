@@ -7,6 +7,12 @@
  *     with prev/next + keyboard nav.
  *
  * Used both for household-level (no space_id) and per-space galleries.
+ *
+ * Both lists page: albums come 30 at a time (the auto "Posts" album
+ * pinned first), an album's items 50 at a time, newest first. The next
+ * page is asked for with the last row's ``created_at`` + ``id`` cursor,
+ * from a "Load more" button that also fires by itself when it scrolls
+ * into view — so every album and every upload can be reached.
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
 import { t, isOne } from '@/i18n/i18n'
@@ -20,7 +26,14 @@ import { showToast } from '@/components/Toast'
 import { openLightbox, type LightboxItem } from '@/components/ImageLightbox'
 import { openReport } from '@/components/ReportDialog'
 import { currentUser } from '@/store/auth'
-import { describeUploadError } from '@/utils/uploadErrors'
+import { householdUsers, loadHouseholdUsers } from '@/store/householdUsers'
+import { spaceMembers, loadSpaceMembers } from '@/store/spaceMembers'
+import { failedMedia, mediaFilename, readyMedia } from '@/store/mediaReady'
+import { personLabel } from '@/utils/names'
+import { formatDayKey } from '@/utils/calendar'
+import {
+  describeUploadError, UploadHttpError, uploadHttpError,
+} from '@/utils/uploadErrors'
 
 interface Album {
   id: string
@@ -36,6 +49,7 @@ interface Album {
   /** Auto-managed "Posts" album. Cannot be deleted or uploaded to;
    *  contents track every photo or video shared via a feed post. */
   is_system?: boolean
+  created_at?: string
 }
 
 interface Item {
@@ -49,6 +63,7 @@ interface Item {
   height: number
   caption?: string | null
   taken_at?: string | null
+  created_at?: string
   /** Background-transcode state for ``video`` items — ``'processing'``
    *  while the worker encodes. Absent on photos and on older payloads
    *  (treated as ready). A processing item can't play yet, so the tile
@@ -56,11 +71,34 @@ interface Item {
   media_status?: 'processing' | 'failed' | 'ready'
 }
 
-const albums      = signal<Album[]>([])
-const items       = signal<Item[]>([])
-const activeAlbum = signal<Album | null>(null)
-const loading     = signal(true)
-const showCreate  = signal(false)
+/** Page sizes — match the server defaults (``routes/gallery.py``). */
+export const ALBUM_PAGE = 30
+export const ITEM_PAGE = 50
+/** The server's largest page — a quiet refresh re-reads what is loaded,
+ *  up to this many rows. */
+const ALBUM_MAX = 200
+const ITEM_MAX = 500
+/** Client-side size guard; the server enforces the same cap. */
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+/** A 429 waits and tries the same file again, this many times. */
+const MAX_RATE_RETRIES = 3
+/** While a video tile still says "Processing…", re-read the album this
+ *  often — another person's upload sends this browser no ready frame. */
+const PROCESSING_POLL_MS = 10_000
+
+const albums       = signal<Album[]>([])
+const albumsMore   = signal(false)
+const albumsError  = signal(false)
+const items        = signal<Item[]>([])
+const itemsMore    = signal(false)
+const itemsLoading = signal(false)
+const activeAlbum  = signal<Album | null>(null)
+const loading      = signal(true)
+const showCreate   = signal(false)
+/** The scope (space id, or ``null`` for the household) the signals above
+ *  hold. The page is one module shared by every gallery, so moving from a
+ *  space gallery to ``/gallery`` must drop the open album and its items. */
+let loadedScope: string | null | undefined
 
 export interface GalleryPageProps {
   spaceId?: string
@@ -70,9 +108,31 @@ export interface GalleryPageProps {
   readOnly?: boolean
 }
 
+/** An album's shown name — the auto "Posts" album in the reader's
+ *  language (the server stores one English name for it). */
+function albumName(a: Album): string {
+  return a.is_system ? t('gallery.system_name') : a.name
+}
+
 export default function GalleryPage({ spaceId, readOnly = false }: GalleryPageProps) {
   useTitle(t('nav.gallery'))
-  useEffect(() => { void loadAlbums(spaceId) }, [spaceId])
+  useEffect(() => {
+    const scope = spaceId ?? null
+    if (loadedScope !== scope) {
+      // Another gallery's album must not stay open here.
+      activeAlbum.value = null
+      items.value = []
+      itemsMore.value = false
+      albums.value = []
+      albumsMore.value = false
+      showCreate.value = false
+      loadedScope = scope
+    }
+    void loadAlbums(spaceId)
+    // Names for the tiles' "added by" (screen readers).
+    if (spaceId) void loadSpaceMembers(spaceId)
+    else void loadHouseholdUsers()
+  }, [spaceId])
 
   // Live cross-device updates: refetch on gallery WS frames, scoped to
   // this page (a space gallery vs the household gallery). Thin frames →
@@ -88,7 +148,7 @@ export default function GalleryPage({ spaceId, readOnly = false }: GalleryPagePr
       if (!inScope(e)) return
       void loadAlbums(spaceId, { quiet: true })
       if (activeAlbum.value && e.data.album_id === activeAlbum.value.id) {
-        void loadItems(activeAlbum.value.id)
+        void loadItems(activeAlbum.value.id, { quiet: true })
       }
     }
     const onAlbumDeleted = (e: GalleryFrame) => {
@@ -100,12 +160,25 @@ export default function GalleryPage({ spaceId, readOnly = false }: GalleryPagePr
       }
       void loadAlbums(spaceId, { quiet: true })
     }
+    // A video this person uploaded finished (or failed) transcoding:
+    // re-read the open album so its tile swaps "Processing…" for the
+    // poster without a reload.
+    const onMediaDone = (e: { data: { output_filename?: string } }) => {
+      const fn = e.data.output_filename
+      const open = activeAlbum.value
+      if (!fn || !open) return
+      if (items.value.some(i => mediaFilename(i.url) === fn)) {
+        void loadItems(open.id, { quiet: true })
+      }
+    }
     const offs = [
       ws.on('gallery.album_created', handle),
       ws.on('gallery.album_updated', handle),
       ws.on('gallery.album_deleted', onAlbumDeleted),
       ws.on('gallery.item_uploaded', handle),
       ws.on('gallery.item_deleted', handle),
+      ws.on('media.ready', onMediaDone),
+      ws.on('media.failed', onMediaDone),
     ]
     return () => { offs.forEach((off) => off()) }
   }, [spaceId])
@@ -120,12 +193,11 @@ export default function GalleryPage({ spaceId, readOnly = false }: GalleryPagePr
         onBack={() => {
           activeAlbum.value = null
           items.value = []
+          itemsMore.value = false
           // Re-fetch the album list so a freshly-uploaded cover +
-          // bumped item_count show up immediately. Without this,
-          // returning from an upload session still rendered the
-          // pre-upload zero-item placeholder until the user
-          // hard-reloaded.
-          void loadAlbums(spaceId)
+          // bumped item_count show up immediately — quietly, so the
+          // list already on screen stays there if the network is gone.
+          void loadAlbums(spaceId, { quiet: true, toastOnFail: true })
         }}
       />
     )
@@ -133,31 +205,36 @@ export default function GalleryPage({ spaceId, readOnly = false }: GalleryPagePr
 
   const openAlbum = async (a: Album) => {
     activeAlbum.value = a
+    items.value = []
+    itemsMore.value = false
     await loadItems(a.id)
   }
 
   // Counts for the hero — system "Posts" album is folded into the
-  // total because it is real content from the household's perspective
-  // (every shared photo lives there); the "+ how many are custom"
-  // breakdown isn't useful for the user, but the totals are.
+  // total because it is real content from the household's perspective.
+  // While more albums wait to load, the counts are "at least" ("30+").
   const albumCount = albums.value.length
   const itemCount = albums.value.reduce((acc, a) => acc + a.item_count, 0)
+  const more = albumsMore.value ? '+' : ''
 
   return (
     <div class="sh-gallery">
-      <header class="sh-gallery-hero">
-        <div class="sh-gallery-hero-headline">
-          <strong>{albumCount}</strong>{' '}
-          {t(isOne(albumCount) ? 'gallery.albums_word_one' : 'gallery.albums_word')} ·{' '}
-          <strong>{itemCount}</strong>{' '}
-          {t(isOne(itemCount) ? 'gallery.media_word_one' : 'gallery.media_word')}
-        </div>
-        {!readOnly && (
-          <div class="sh-gallery-hero-actions">
-            <Button onClick={() => (showCreate.value = true)}>{t('gallery.new_album_btn')}</Button>
+      <h1 class="sr-only">{t('nav.gallery')}</h1>
+      {!albumsError.value && (
+        <header class="sh-gallery-hero">
+          <div class="sh-gallery-hero-headline">
+            <strong>{albumCount}{more}</strong>{' '}
+            {t(isOne(albumCount) && !more ? 'gallery.albums_word_one' : 'gallery.albums_word')} ·{' '}
+            <strong>{itemCount}{more}</strong>{' '}
+            {t(isOne(itemCount) && !more ? 'gallery.media_word_one' : 'gallery.media_word')}
           </div>
-        )}
-      </header>
+          {!readOnly && (
+            <div class="sh-gallery-hero-actions">
+              <Button onClick={() => (showCreate.value = true)}>{t('gallery.new_album_btn')}</Button>
+            </div>
+          )}
+        </header>
+      )}
 
       {showCreate.value && !readOnly && (
         <CreateAlbumForm
@@ -167,10 +244,19 @@ export default function GalleryPage({ spaceId, readOnly = false }: GalleryPagePr
         />
       )}
 
-      {albums.value.length === 0 ? (
+      {albumsError.value ? (
+        // The list could not be read at all. Never the first-visit
+        // "No albums yet" screen: that reads as "your photos are gone".
+        <div class="sh-empty-state" role="alert">
+          <div aria-hidden="true">📡</div>
+          <h2>{t('gallery.load_error_title')}</h2>
+          <p>{t('gallery.load_error_body')}</p>
+          <Button onClick={() => void loadAlbums(spaceId)}>{t('common.retry')}</Button>
+        </div>
+      ) : albums.value.length === 0 ? (
         <div class="sh-empty-state">
           <div aria-hidden="true">📸</div>
-          <h3>{t('gallery.empty_title')}</h3>
+          <h2>{t('gallery.empty_title')}</h2>
           <p>{spaceId ? t('gallery.empty_body_space') : t('gallery.empty_body_household')}</p>
           {!readOnly && (
             <Button onClick={() => (showCreate.value = true)}>
@@ -179,43 +265,79 @@ export default function GalleryPage({ spaceId, readOnly = false }: GalleryPagePr
           )}
         </div>
       ) : (
-        <div class="sh-album-grid">
-          {albums.value.map(a => (
-            <button
-              key={a.id}
-              type="button"
-              class={`sh-album-card${a.is_system ? ' sh-album-card--system' : ''}`}
-              aria-label={t(isOne(a.item_count) ? 'gallery.open_album_aria_one' : 'gallery.open_album_aria', { name: a.name, n: String(a.item_count) })}
-              onClick={() => void openAlbum(a)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault()
-                  void openAlbum(a)
-                }
-              }}
-            >
-              <AlbumCover album={a} />
-              <div class="sh-album-info">
-                <strong>
-                  {a.name}
-                  {a.is_system && (
-                    <span class="sh-album-system-badge"
-                          title={t('gallery.auto_title')}>
-                      <span aria-hidden="true">🔒</span> {t('gallery.auto')}
-                    </span>
+        <>
+          <div class="sh-album-grid">
+            {albums.value.map(a => (
+              <button
+                key={a.id}
+                type="button"
+                class={`sh-album-card${a.is_system ? ' sh-album-card--system' : ''}`}
+                aria-label={t(isOne(a.item_count) ? 'gallery.open_album_aria_one' : 'gallery.open_album_aria', { name: albumName(a), n: String(a.item_count) })}
+                onClick={() => void openAlbum(a)}
+              >
+                <AlbumCover album={a} />
+                <div class="sh-album-info">
+                  <strong>
+                    {albumName(a)}
+                    {a.is_system && (
+                      <span class="sh-album-system-badge"
+                            title={t('gallery.auto_title')}>
+                        <span aria-hidden="true">🔒</span> {t('gallery.auto')}
+                      </span>
+                    )}
+                  </strong>
+                  <span class="sh-muted">
+                    {t(isOne(a.item_count) ? 'gallery.items_one' : 'gallery.items', { n: String(a.item_count) })}
+                  </span>
+                  {a.retention_exempt && !a.is_system && (
+                    <span class="sh-badge">{t('gallery.kept')}</span>
                   )}
-                </strong>
-                <span class="sh-muted">
-                  {t(isOne(a.item_count) ? 'gallery.items_one' : 'gallery.items', { n: String(a.item_count) })}
-                </span>
-                {a.retention_exempt && !a.is_system && (
-                  <span class="sh-badge">{t('gallery.kept')}</span>
-                )}
-              </div>
-            </button>
-          ))}
-        </div>
+                </div>
+              </button>
+            ))}
+          </div>
+          {albumsMore.value && (
+            <LoadMore onMore={() => loadMoreAlbums(spaceId)} />
+          )}
+        </>
       )}
+    </div>
+  )
+}
+
+/** "Load more" for a paged list: a real button (keyboard, screen
+ *  reader, no IntersectionObserver), which also presses itself when it
+ *  scrolls into view so scrolling keeps going. */
+function LoadMore({ onMore }: { onMore: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false)
+  const ref = useRef<HTMLDivElement | null>(null)
+  const busyRef = useRef(false)
+  const run = async () => {
+    if (busyRef.current) return
+    busyRef.current = true
+    setBusy(true)
+    try { await onMore() } finally {
+      busyRef.current = false
+      setBusy(false)
+    }
+  }
+  // The observer outlives renders: it calls the latest ``run``.
+  const runRef = useRef(run)
+  runRef.current = run
+  useEffect(() => {
+    const el = ref.current
+    if (!el || typeof IntersectionObserver === 'undefined') return
+    const io = new IntersectionObserver((entries) => {
+      if (entries.some(e => e.isIntersecting)) void runRef.current()
+    }, { rootMargin: '400px 0px' })
+    io.observe(el)
+    return () => io.disconnect()
+  }, [])
+  return (
+    <div class="sh-gallery-more" ref={ref}>
+      <Button variant="secondary" loading={busy} onClick={() => void run()}>
+        {t('feed.load_more')}
+      </Button>
     </div>
   )
 }
@@ -245,26 +367,70 @@ function AlbumCover({ album }: { album: Album }) {
   )
 }
 
+/** Who added an item, by name — or ``''`` when this browser doesn't know
+ *  them (never an id). */
+function uploaderName(spaceId: string | null, userId: string): string {
+  if (spaceId) {
+    const m = spaceMembers.value[spaceId]?.get(userId)
+    return m ? personLabel(m.space_display_name || m.display_name, null) : ''
+  }
+  const u = householdUsers.value.get(userId)
+  return u ? personLabel(u.display_name, u.username) : ''
+}
+
+/** A tile's accessible name: the caption, else "Photo from <day>", plus
+ *  who added it — so ten tiles are not ten identical "Photo"s. */
+function tileLabel(item: Item, spaceId: string | null): string {
+  const type = itemTypeLabel(item.item_type)
+  const day = item.taken_at && /^\d{4}-\d{2}-\d{2}$/.test(item.taken_at)
+    ? formatDayKey(item.taken_at, { year: 'numeric', month: 'short', day: 'numeric' })
+    : ''
+  const label = item.caption
+    ? t('gallery.item_caption_aria', { type, caption: item.caption })
+    : day ? t('gallery.tile_dated', { type, date: day }) : type
+  const name = uploaderName(spaceId, item.uploaded_by)
+  return name ? t('gallery.tile_by', { label, name }) : label
+}
+
+/** Is this video still being transcoded? The list says so; a
+ *  ``media.ready`` / ``media.failed`` frame this browser got since
+ *  overrides it at once. */
+function isProcessing(item: Item): boolean {
+  if (item.item_type !== 'video' || item.media_status !== 'processing') return false
+  const fn = mediaFilename(item.url)
+  return !readyMedia.value.has(fn) && !failedMedia.value.has(fn)
+}
+
+interface UploadState {
+  /** 1-based index of the file going up now, and how many in the batch. */
+  index: number
+  total: number
+  pct: number
+  processing: boolean
+}
+
 function AlbumDetail({ album, onBack, readOnly = false }: {
   album: Album
   onBack: () => void
   readOnly?: boolean
 }) {
-  const [uploadPct, setUploadPct] = useState<number | null>(null)
-  // Once the bytes are sent the request blocks on server-side transcoding
-  // (video → VP9/WebM). Flip to a "Processing…" label so the bar doesn't
-  // sit at "Uploading… 100%" looking stalled — matching the feed composer.
-  const [processing, setProcessing] = useState(false)
+  const [upload, setUpload] = useState<UploadState | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const inputRef = useRef<HTMLInputElement | null>(null)
 
-  const uploadOne = (file: File): Promise<void> => {
+  const anyProcessing = items.value.some(isProcessing)
+  // Another person's video sends this browser no ready frame: re-read
+  // the album now and then while a tile still says "Processing…".
+  useEffect(() => {
+    if (!anyProcessing) return
+    const timer = setInterval(() => {
+      void loadItems(album.id, { quiet: true })
+    }, PROCESSING_POLL_MS)
+    return () => clearInterval(timer)
+  }, [anyProcessing, album.id])
+
+  const sendOnce = (file: File, index: number, total: number): Promise<void> => {
     return new Promise((resolve, reject) => {
-      // 100 MB guard, server enforces separately.
-      if (file.size > 100 * 1024 * 1024) {
-        reject(new Error('File too large (>100 MB).'))
-        return
-      }
       const fd = new FormData()
       fd.append('file', file)
       const xhr = new XMLHttpRequest()
@@ -280,44 +446,87 @@ function AlbumDetail({ album, onBack, readOnly = false }: {
       const tok = localStorage.getItem('sh_token')
       if (tok) xhr.setRequestHeader('Authorization', `Bearer ${tok}`)
       xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) setUploadPct((e.loaded / e.total) * 100)
+        if (e.lengthComputable) {
+          setUpload({ index, total, pct: (e.loaded / e.total) * 100, processing: false })
+        }
       }
-      // Bytes fully sent — the server is now transcoding before it responds.
-      xhr.upload.onload = () => setProcessing(true)
+      // Bytes fully sent — the server is now processing before it responds.
+      xhr.upload.onload = () => setUpload({ index, total, pct: 100, processing: true })
       xhr.onload = () => {
         if (xhr.status >= 200 && xhr.status < 300) resolve()
-        else reject(new Error(`Upload failed (${xhr.status}): ${xhr.responseText}`))
+        else {
+          const err = uploadHttpError(xhr.status, xhr.responseText)
+          const wait = Number(xhr.getResponseHeader('Retry-After'))
+          ;(err as UploadHttpError & { retryAfterS?: number }).retryAfterS =
+            Number.isFinite(wait) && wait > 0 ? wait : undefined
+          reject(err)
+        }
       }
       xhr.onerror = () => reject(new Error('Network error'))
       xhr.send(fd)
     })
   }
 
+  /** One file, one at a time. A 429 is a pause, not a failure: wait as
+   *  long as the server asks (else a few seconds) and send it again. */
+  const uploadOne = async (file: File, index: number, total: number): Promise<void> => {
+    if (file.size > MAX_UPLOAD_BYTES) throw new UploadHttpError(413, 'PAYLOAD_TOO_LARGE')
+    for (let attempt = 0; ; attempt++) {
+      setUpload({ index, total, pct: 0, processing: false })
+      try {
+        await sendOnce(file, index, total)
+        return
+      } catch (err) {
+        if (!(err instanceof UploadHttpError) || err.status !== 429 || attempt >= MAX_RATE_RETRIES) {
+          throw err
+        }
+        const after = (err as UploadHttpError & { retryAfterS?: number }).retryAfterS
+        await new Promise(r => setTimeout(r, Math.min(after ?? 5 * (attempt + 1), 60) * 1000))
+      }
+    }
+  }
+
   const handleFiles = async (fileList: FileList | null) => {
     if (!fileList || fileList.length === 0) return
     const files = Array.from(fileList)
-    for (let i = 0; i < files.length; i++) {
-      setUploadPct(0)
-      setProcessing(false)
+    const total = files.length
+    let ok = 0
+    let firstError: { err: unknown; file: File } | null = null
+    for (let i = 0; i < total; i++) {
       try {
-        await uploadOne(files[i])
+        await uploadOne(files[i], i + 1, total)
+        ok++
       } catch (err: unknown) {
-        showToast(describeUploadError(err, { file: files[i] }), 'error')
-        setUploadPct(null)
-        setProcessing(false)
-        continue
+        firstError ??= { err, file: files[i] }
       }
     }
-    setUploadPct(null)
-    setProcessing(false)
-    showToast(
-      files.length === 1 ? t('gallery.uploaded_one') : t('gallery.uploaded', { n: String(files.length) }),
-      'success',
-    )
-    await loadItems(album.id)
+    setUpload(null)
+    const failed = total - ok
+    if (failed === 0) {
+      showToast(
+        total === 1 ? t('gallery.uploaded_one') : t('gallery.uploaded', { n: String(total) }),
+        'success',
+      )
+    } else {
+      // One honest summary — not a toast per file, and never "Uploaded
+      // 80 items" when some of them didn't make it.
+      const reason = describeUploadError(firstError!.err, { file: firstError!.file })
+      showToast(
+        total === 1
+          ? reason
+          : ok === 0
+            ? t('gallery.upload_none', { reason })
+            : t('gallery.uploaded_partial', {
+              ok: String(ok), n: String(total), failed: String(failed), reason,
+            }),
+        'error',
+      )
+    }
+    await loadItems(album.id, { quiet: true })
   }
 
-  const lightboxItems: LightboxItem[] = items.value.map(i => ({
+  const loaded = items.value
+  const lightboxItems: LightboxItem[] = loaded.map(i => ({
     id:            i.id,
     item_type:     i.item_type,
     url:           i.url,
@@ -346,6 +555,8 @@ function AlbumDetail({ album, onBack, readOnly = false }: {
     },
   }
 
+  const pct = upload ? (upload.processing ? 100 : Math.round(upload.pct)) : 0
+
   return (
     <div
       class={`sh-album-detail ${dragOver ? 'sh-album-detail--drag' : ''}`}
@@ -354,7 +565,7 @@ function AlbumDetail({ album, onBack, readOnly = false }: {
       <header class="sh-page-header">
         <Button variant="secondary" onClick={onBack}>← {t('gallery.albums')}</Button>
         <h1 style={{ margin: 0 }}>
-          {album.name}
+          {albumName(album)}
           {album.is_system && (
             <span class="sh-album-system-badge"
                   style={{ marginLeft: 'var(--sh-space-xs)' }}>
@@ -364,7 +575,9 @@ function AlbumDetail({ album, onBack, readOnly = false }: {
         </h1>
         {canUpload && (
           <div class="sh-row">
-            <Button onClick={() => inputRef.current?.click()}>{t('gallery.upload_btn')}</Button>
+            <Button onClick={() => inputRef.current?.click()} disabled={upload !== null}>
+              {t('gallery.upload_btn')}
+            </Button>
             <input
               ref={inputRef}
               type="file"
@@ -380,7 +593,9 @@ function AlbumDetail({ album, onBack, readOnly = false }: {
         )}
       </header>
 
-      {album.description && <p class="sh-muted">{album.description}</p>}
+      {/* The system album's description is the server's English constant;
+        * its translated hint below says the same thing. */}
+      {album.description && !album.is_system && <p class="sh-muted">{album.description}</p>}
 
       {album.is_system && (
         <div class="sh-album-system-hint">
@@ -389,13 +604,31 @@ function AlbumDetail({ album, onBack, readOnly = false }: {
         </div>
       )}
 
-      {uploadPct !== null && (
-        <div class="sh-upload-progress" role="progressbar"
-             aria-valuenow={processing ? 100 : Math.round(uploadPct)}
-             aria-valuemin={0} aria-valuemax={100}>
-          <div class="sh-upload-progress-bar"
-               style={{ width: processing ? '100%' : `${uploadPct.toFixed(0)}%` }} />
-          <span>{processing ? t('media.processing') : t('media.uploading_percent', { n: uploadPct.toFixed(0) })}</span>
+      {upload !== null && (
+        <div
+          class={`sh-upload-progress${upload.processing ? ' sh-upload-progress--processing' : ''}`}
+          role="progressbar"
+          aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}
+          aria-valuetext={upload.total > 1
+            ? `${t('gallery.upload_count', { i: String(upload.index), n: String(upload.total) })} · ${pct}%`
+            : `${pct}%`}
+        >
+          <div class="sh-upload-progress__header">
+            <span class="sh-upload-progress__status">
+              {upload.processing && <span class="sh-upload-progress__spinner" aria-hidden="true" />}
+              {upload.processing
+                ? t('media.processing')
+                : t('media.uploading_percent', { n: String(pct) })}
+            </span>
+            {upload.total > 1 && (
+              <span class="sh-upload-progress__pct">
+                {t('gallery.upload_count', { i: String(upload.index), n: String(upload.total) })}
+              </span>
+            )}
+          </div>
+          <div class="sh-upload-progress__track">
+            <div class="sh-upload-progress__fill" style={{ width: `${pct}%` }} />
+          </div>
         </div>
       )}
 
@@ -405,17 +638,19 @@ function AlbumDetail({ album, onBack, readOnly = false }: {
         </div>
       )}
 
-      {items.value.length === 0 ? (
+      {loaded.length === 0 && itemsLoading.value ? (
+        <Spinner />
+      ) : loaded.length === 0 ? (
         <div class="sh-empty-state">
           <div aria-hidden="true">🖼️</div>
           {album.is_system ? (
             <>
-              <h3>{t('gallery.system_empty_title')}</h3>
+              <h2>{t('gallery.system_empty_title')}</h2>
               <p>{t('gallery.system_empty_body')}</p>
             </>
           ) : (
             <>
-              <h3>{t('gallery.album_empty_title')}</h3>
+              <h2>{t('gallery.album_empty_title')}</h2>
               {canUpload && (
                 <p>{t('gallery.album_empty_body_before')}<strong>{t('gallery.upload_btn')}</strong>{t('gallery.album_empty_body_after')}</p>
               )}
@@ -423,52 +658,61 @@ function AlbumDetail({ album, onBack, readOnly = false }: {
           )}
         </div>
       ) : (
-        <div class="sh-image-grid">
-          {items.value.map((item, idx) => {
-            // A video still transcoding can't play, so the tile shows a
-            // "Processing…" overlay and doesn't open the lightbox.
-            const processing =
-              item.item_type === 'video' && item.media_status === 'processing'
-            return (
-              <button
-                key={item.id}
-                type="button"
-                class={
-                  'sh-gallery-item' +
-                  (processing ? ' sh-gallery-item--processing' : '')
-                }
-                aria-label={
-                  processing
-                    ? t('gallery.item_processing_aria', { type: itemTypeLabel(item.item_type) })
-                    : item.caption
-                      ? t('gallery.item_caption_aria', { type: itemTypeLabel(item.item_type), caption: item.caption })
-                      : itemTypeLabel(item.item_type)
-                }
-                aria-disabled={processing ? 'true' : undefined}
-                onClick={() => {
-                  if (processing) return
-                  openLightbox({ items: lightboxItems, index: idx })
-                }}
-              >
-                <img
-                  src={item.thumbnail_url}
-                  alt={item.caption || ''}
-                  loading="lazy"
-                  decoding="async"
-                />
-                {item.item_type === 'video' && !processing && (
-                  <span class="sh-video-badge" aria-hidden="true">▶</span>
-                )}
-                {processing && (
-                  <span class="sh-gallery-item-processing">
-                    <Spinner label={t('media.video_processing')} />
-                    <span class="sh-gallery-item-processing-msg">{t('media.processing')}</span>
-                  </span>
-                )}
-              </button>
-            )
-          })}
-        </div>
+        <>
+          <div class="sh-image-grid">
+            {loaded.map((item, idx) => {
+              // A video still transcoding can't play and has no poster
+              // yet, so the tile shows a "Processing…" placeholder (no
+              // broken image) and doesn't open the lightbox.
+              const processing = isProcessing(item)
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  class={
+                    'sh-gallery-item' +
+                    (processing ? ' sh-gallery-item--processing' : '')
+                  }
+                  aria-label={
+                    processing
+                      ? t('gallery.item_processing_aria', { type: itemTypeLabel(item.item_type) })
+                      : tileLabel(item, album.space_id)
+                  }
+                  aria-disabled={processing ? 'true' : undefined}
+                  onClick={() => {
+                    if (processing) return
+                    openLightbox({
+                      items: lightboxItems,
+                      index: idx,
+                      total: Math.max(album.item_count, loaded.length),
+                    })
+                  }}
+                >
+                  {!processing && (
+                    <img
+                      src={item.thumbnail_url}
+                      alt=""
+                      loading="lazy"
+                      decoding="async"
+                    />
+                  )}
+                  {item.item_type === 'video' && !processing && (
+                    <span class="sh-video-badge" aria-hidden="true">▶</span>
+                  )}
+                  {processing && (
+                    <span class="sh-gallery-item-processing" aria-hidden="true">
+                      <span class="sh-upload-progress__spinner" />
+                      <span class="sh-gallery-item-processing-msg">{t('media.processing')}</span>
+                    </span>
+                  )}
+                </button>
+              )
+            })}
+          </div>
+          {itemsMore.value && (
+            <LoadMore onMore={() => loadMoreItems(album.id)} />
+          )}
+        </>
       )}
     </div>
   )
@@ -540,42 +784,108 @@ function CreateAlbumForm({
   )
 }
 
-/** Fetch the album list. ``quiet`` is the live-refresh path: no spinner
- *  and no error toast (a failed refresh keeps the list on screen). The
- *  open album's header (name / cover) follows the fresh row either way. */
-async function loadAlbums(spaceId?: string, { quiet = false } = {}) {
+function albumsUrl(spaceId?: string): string {
+  return spaceId ? `/api/spaces/${spaceId}/gallery/albums` : '/api/gallery/albums'
+}
+
+/** ``?before=&before_id=`` for the page after ``row``. */
+function cursor(row: { created_at?: string; id: string }): string {
+  return `&before=${encodeURIComponent(row.created_at ?? '')}&before_id=${encodeURIComponent(row.id)}`
+}
+
+/** Append ``next`` to ``rows``, skipping ids already there (a row can
+ *  arrive twice when something was added between two pages). */
+function appendNew<T extends { id: string }>(rows: T[], next: T[]): T[] {
+  const seen = new Set(rows.map(r => r.id))
+  return [...rows, ...next.filter(r => !seen.has(r.id))]
+}
+
+/** Fetch the album list's first page (or, ``quiet``, re-read as many as
+ *  are loaded). ``quiet`` is the live-refresh path: no spinner, and a
+ *  failure keeps the list on screen (``toastOnFail`` says so). A failed
+ *  first load shows the error state with Retry — never "No albums yet".
+ *  The open album's header (name / cover) follows the fresh row. */
+async function loadAlbums(
+  spaceId?: string, { quiet = false, toastOnFail = false } = {},
+) {
   if (!quiet) loading.value = true
+  const scope = spaceId ?? null
+  const limit = quiet
+    ? Math.min(ALBUM_MAX, Math.max(ALBUM_PAGE, albums.value.length))
+    : ALBUM_PAGE
   try {
-    const url = spaceId
-      ? `/api/spaces/${spaceId}/gallery/albums`
-      : '/api/gallery/albums'
-    const rows = await api.get(url) as Album[]
+    const rows = await api.get(`${albumsUrl(spaceId)}?limit=${limit}`) as Album[]
+    if (loadedScope !== scope) return  // the page moved to another gallery
     albums.value = rows
+    albumsMore.value = rows.length >= limit
+    albumsError.value = false
     const open = activeAlbum.value
     const fresh = open ? rows.find(a => a.id === open.id) : undefined
     if (fresh) activeAlbum.value = fresh
-  } catch (err: unknown) {
-    if (quiet) return
-    showToast(
-      t('gallery.load_albums_failed', { error: String((err as Error)?.message ?? err) }),
-      'error',
-    )
-    albums.value = []
+  } catch {
+    if (loadedScope !== scope) return
+    if (albums.value.length === 0) albumsError.value = true
+    else if (!quiet || toastOnFail) showToast(t('gallery.refresh_failed'), 'error')
   } finally {
     if (!quiet) loading.value = false
   }
 }
 
-async function loadItems(albumId: string) {
+async function loadMoreAlbums(spaceId?: string): Promise<void> {
+  const scope = spaceId ?? null
+  // The cursor is the last *regular* album: the system album is pinned
+  // to the first page whatever its age.
+  const last = [...albums.value].reverse().find(a => !a.is_system)
+  if (!last) { albumsMore.value = false; return }
   try {
-    items.value = await api.get(
-      `/api/gallery/albums/${albumId}/items`,
+    const rows = await api.get(
+      `${albumsUrl(spaceId)}?limit=${ALBUM_PAGE}${cursor(last)}`,
+    ) as Album[]
+    if (loadedScope !== scope) return
+    albums.value = appendNew(albums.value, rows)
+    albumsMore.value = rows.length >= ALBUM_PAGE
+  } catch {
+    showToast(t('gallery.refresh_failed'), 'error')
+  }
+}
+
+/** Fetch the open album's first page (or, ``quiet``, re-read as many as
+ *  are loaded — an upload or a ready video shows up without losing the
+ *  pages already scrolled through). */
+async function loadItems(albumId: string, { quiet = false } = {}) {
+  const limit = quiet
+    ? Math.min(ITEM_MAX, Math.max(ITEM_PAGE, items.value.length))
+    : ITEM_PAGE
+  if (!quiet) itemsLoading.value = true
+  try {
+    const rows = await api.get(
+      `/api/gallery/albums/${albumId}/items?limit=${limit}`,
     ) as Item[]
-  } catch (err: unknown) {
+    if (activeAlbum.value?.id !== albumId) return  // another album is open now
+    items.value = rows
+    itemsMore.value = rows.length >= limit
+  } catch {
+    if (activeAlbum.value?.id !== albumId) return
     showToast(
-      t('gallery.load_items_failed', { error: String((err as Error)?.message ?? err) }),
+      items.value.length ? t('gallery.refresh_failed') : t('gallery.load_items_error'),
       'error',
     )
-    items.value = []
+  } finally {
+    if (!quiet) itemsLoading.value = false
+  }
+}
+
+async function loadMoreItems(albumId: string): Promise<void> {
+  const last = items.value[items.value.length - 1]
+  if (!last) { itemsMore.value = false; return }
+  try {
+    const rows = await api.get(
+      `/api/gallery/albums/${albumId}/items?limit=${ITEM_PAGE}${cursor(last)}`,
+    ) as Item[]
+    if (activeAlbum.value?.id !== albumId) return
+    items.value = appendNew(items.value, rows)
+    itemsMore.value = rows.length >= ITEM_PAGE
+  } catch {
+    showToast(t('gallery.load_items_error'), 'error')
   }
 }

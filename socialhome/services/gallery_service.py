@@ -62,7 +62,7 @@ from ..federation.owner_bound_id import (
     mint_owner_bound_id,
 )
 from ..infrastructure.event_bus import EventBus
-from ..media.cleanup import unlink_unreferenced
+from ..media.cleanup import media_basename, unlink_unreferenced
 from ..media.image_processor import ImageProcessor
 from ..repositories.gallery_repo import AbstractGalleryRepo
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
@@ -234,18 +234,23 @@ class GalleryService:
         actor_user_id: str,
         limit: int = 30,
         before: str | None = None,
+        before_id: str | None = None,
     ) -> list[GalleryAlbum]:
-        """List albums in a space (or household) the actor can see.
+        """One page of the albums in a space (or household) the actor can
+        see — see :meth:`AbstractGalleryRepo.list_albums` for the order
+        and the ``before`` / ``before_id`` cursor.
 
         Cover URL is enriched: explicit ``cover_item_id`` if set,
         else the first item's thumbnail.
         """
         if space_id is not None:
             await self._require_member(space_id, actor_user_id)
-        albums = await self._repo.list_albums(space_id, limit=limit, before=before)
+        albums = await self._repo.list_albums(
+            space_id, limit=limit, before=before, before_id=before_id
+        )
         out: list[GalleryAlbum] = []
         for a in albums:
-            cover_url = await self._resolve_cover(a)
+            cover_url = await self._resolve_cover(a, viewer_user_id=actor_user_id)
             out.append(_with_cover(a, cover_url))
         return out
 
@@ -256,7 +261,7 @@ class GalleryService:
         actor_user_id: str,
     ) -> GalleryAlbum:
         album = await self._visible_album(album_id, actor_user_id)
-        cover_url = await self._resolve_cover(album)
+        cover_url = await self._resolve_cover(album, viewer_user_id=actor_user_id)
         return _with_cover(album, cover_url)
 
     async def create_album(
@@ -422,9 +427,22 @@ class GalleryService:
         actor_user_id: str,
         limit: int = 50,
         before: str | None = None,
+        before_id: str | None = None,
     ) -> list[GalleryItem]:
-        await self._visible_album(album_id, actor_user_id)
-        return await self._repo.list_items(album_id, limit=limit, before=before)
+        """One page of an album, newest first — see
+        :meth:`AbstractGalleryRepo.list_items` for the cursor.
+
+        The system "Posts" album mirrors the feed, so it hides what the
+        feed hides: the posts of people the viewer blocked, or is
+        guardian-blocked from."""
+        album = await self._visible_album(album_id, actor_user_id)
+        return await self._repo.list_items(
+            album_id,
+            limit=limit,
+            before=before,
+            before_id=before_id,
+            viewer_user_id=actor_user_id if album.is_system else None,
+        )
 
     async def upload_item(
         self,
@@ -692,14 +710,20 @@ class GalleryService:
 
     # ─── Internals: cover / permissions ───────────────────────────────────
 
-    async def _resolve_cover(self, album: GalleryAlbum) -> str | None:
+    async def _resolve_cover(
+        self, album: GalleryAlbum, *, viewer_user_id: str
+    ) -> str | None:
         if album.cover_item_id:
             item = await self._repo.get_item(album.cover_item_id)
             # Only an item of this album: a cover id can name one that has
             # not arrived yet, or (from the wire) one filed elsewhere.
             if item is not None and item.album_id == album.id:
                 return item.thumbnail_url
-        return await self._repo.get_first_item_thumbnail(album.id)
+        # The system album's cover follows its listing: never a photo by
+        # someone the viewer blocked.
+        return await self._repo.get_first_item_thumbnail(
+            album.id, viewer_user_id=viewer_user_id if album.is_system else None
+        )
 
     async def _require_member(self, space_id: str, user_id: str) -> None:
         """A seat in ``space_id`` (any role, a follower included — a
@@ -893,19 +917,20 @@ class GalleryService:
         # batch into one transaction).
         if existing_urls:
             await self._repo.delete_items_by_source_post(post.id)
+            await self._unlink_mirror_thumbnails(existing)
         now = datetime.now(UTC).isoformat()
+        made: list[str] = []
         for url, item_type in urls:
+            thumbnail_url = await self._mirror_thumbnail(url, item_type)
+            if thumbnail_url != url and item_type == "photo":
+                made.append(thumbnail_url)
             item = GalleryItem(
                 id=uuid.uuid4().hex,
                 album_id=album.id,
                 uploaded_by=post.author,
                 item_type=item_type,
                 url=url,
-                # The post's media is its own thumbnail — the upload
-                # pipeline already resized images and extracted video
-                # frames, and the gallery row stores filename only.
-                # Re-using the same filename means no extra disk write.
-                thumbnail_url=url,
+                thumbnail_url=thumbnail_url,
                 width=0,
                 height=0,
                 source_post_id=post.id,
@@ -924,6 +949,59 @@ class GalleryService:
                 )
             )
         await self._repo.recount_items(album.id)
+        if made:
+            # A concurrent mirror of the same post may have won the insert
+            # (``ON CONFLICT DO NOTHING``): drop the thumbnails no row kept.
+            kept = {
+                it.thumbnail_url
+                for it in await self._repo.list_items_by_source_post(post.id)
+            }
+            await unlink_unreferenced(
+                self._media_dir, self._media_refs, [u for u in made if u not in kept]
+            )
+
+    async def _mirror_thumbnail(self, url: str, item_type: str) -> str:
+        """The grid thumbnail for a mirrored post file (UX review #18).
+
+        A photo gets a real thumbnail, made once from the post's file —
+        the grid otherwise loads every full 2560 px image. A video uses
+        the poster its transcode writes next to it (``<stem>.webp``). When
+        the photo is not on disk yet (a space post whose media is still
+        syncing) or can't be read, the full file stands in, as before.
+        """
+        name = media_basename(url)
+        if name is None:
+            return url
+        if item_type == "video":
+            stem, dot, _ext = name.rpartition(".")
+            return f"api/media/{stem}.webp" if dot and stem else url
+        path = self._media_dir / name
+        try:
+            if not await aiofiles.os.path.isfile(path):
+                return url
+            async with aiofiles.open(path, "rb") as f:
+                data = await f.read()
+            thumb = await ImageProcessor().generate_thumbnail(data)
+        except OSError, ValueError:
+            log.debug("gallery: mirror thumbnail failed for %s", name, exc_info=True)
+            return url
+        thumb_name = f"{uuid.uuid4().hex}.webp"
+        await self._save_to_disk(thumb_name, thumb)
+        return f"api/media/{thumb_name}"
+
+    async def _unlink_mirror_thumbnails(self, items: list[GalleryItem]) -> None:
+        """Drop the thumbnails :meth:`_mirror_thumbnail` made for *items* —
+        never the post's own files (its photo, a video's poster): the
+        post's delete path owns those."""
+        await unlink_unreferenced(
+            self._media_dir,
+            self._media_refs,
+            [
+                it.thumbnail_url
+                for it in items
+                if it.item_type == "photo" and it.thumbnail_url != it.url
+            ],
+        )
 
     async def unmirror_post(self, post_id: str) -> None:
         """Remove every system-album item mirrored from ``post_id``.
@@ -934,9 +1012,11 @@ class GalleryService:
         scope, so the bridge doesn't need to know whether the post
         lived in the household feed or a space.
         """
+        mirrored = await self._repo.list_items_by_source_post(post_id)
         album_id, count = await self._repo.delete_items_by_source_post(post_id)
         if album_id is None or count == 0:
             return
+        await self._unlink_mirror_thumbnails(mirrored)
         await self._repo.increment_item_count(album_id, -count)
         # No per-item GalleryItemDeleted events: the post-delete event
         # already drove this; emitting a flood of item-delete frames

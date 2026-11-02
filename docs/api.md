@@ -765,8 +765,24 @@ Same CRUD shape:
                               PATCH/DELETE /stores/{name} rename-or-merge / remove
                               PUT  /stores/order          drag-defined trip order
 /api/bazaar[/{id}]            /{id}/bids[/{bid_id}]  POST /accept, /reject
-/api/gallery/albums[/{id}]    /{id}/items[/{iid}]
 ```
+
+The gallery (household albums under `/api/gallery`, a space's under
+`/api/spaces/{id}/gallery`; household `gallery` feature, and the space's
+`gallery` feature for a space album):
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/api/gallery/albums` | Household albums. `?limit=` (default 30, at most 200), `&before=&before_id=` — the last regular album's `created_at` and `id` — for the next page. The auto "Posts" album is pinned first on the first page only; then newest first. A page shorter than `limit` is the last. |
+| POST | `/api/gallery/albums` | Create a household album: `{name (1–80), description? (≤ 500)}` → 201. |
+| GET / POST | `/api/spaces/{id}/gallery/albums` | The same for a space: needs a seat; create needs a writer role (a follower gets 403 `SUBSCRIBER_READ_ONLY`); at most 200 albums per space. |
+| GET | `/api/gallery/albums/{id}` | One album (with its cover URL). An album of a space the caller holds no seat in is 404. |
+| PATCH | `/api/gallery/albums/{id}` | `{name?, description?, cover_item_id?}` → 204. Owner, a household admin (household album) or a space admin / owner (space album). |
+| DELETE | `/api/gallery/albums/{id}` | Delete an album and its items → 204 (same people as PATCH). |
+| POST | `/api/gallery/albums/{id}/retention` | `{retention_exempt}` → `{retention_exempt}` (same people as PATCH). |
+| GET | `/api/gallery/albums/{id}/items` | One page of the album's photos and videos, **newest first**. `?limit=` (default 50, at most 500), `&before=&before_id=` — the last item's `created_at` and `id` — for the next page; a short page is the last. A video still transcoding carries `media_status: "processing"`. In the auto "Posts" album the posts of people the caller blocked (or is guardian-blocked from) are left out, as in the feed. |
+| POST | `/api/gallery/albums/{id}/items` | Upload one photo or video: multipart (`file`) or a raw body with its `Content-Type`; `?caption=` (≤ 300). 201 with the item. ≤ 100 MiB (413 `PAYLOAD_TOO_LARGE`); over the household storage quota 507 `STORAGE_FULL`; a file that isn't a supported image 422 `IMAGE_UNREADABLE`. Not into the "Posts" album (403). Own rate-limit bucket (see Rate limits). |
+| DELETE | `/api/gallery/items/{id}` | Delete one item → 204 (see who may, below). |
 
 Who may change household gallery content: a household photo or video is
 deleted by its uploader, the album's owner or a household admin; a
@@ -1822,6 +1838,8 @@ These pages are server-rendered HTML and require no auth.
 | `/api/pairing/*` (handshakes: `initiate`, `accept`, `confirm`, `introduce`, auto-pair, relay requests) | 5 / min / user |
 | `/api/pairing/pending/*` (cancelling a pending pairing) | 30 / min / user — its own bucket, like connection management: an admin clearing a few stale cards in a row must not hit the handshake bucket. |
 | `/api/pairing/connections/*` (list, per-peer reads, `PATCH` toggles, unpair) | 30 / min / user — its own bucket: opening one connection's Manage panel already spends two requests, so the 5 / min handshake bucket 429'd after two opens and a switch. The longest matching prefix decides the bucket. |
+| `POST /api/gallery/albums/*/items` | 300 / min / user — a gallery upload. Picking a holiday's 80 photos used to run through the 60 / min default (shared with browsing): 79 were refused. The SPA sends one file at a time and, on a 429, waits (`Retry-After`) and sends the same file again |
+| `/api/gallery/*` (lists, album detail, every other gallery call) | 600 / min / user — its own bucket, so a big upload never locks the gallery |
 | `/api/spaces/*` (reads and every write without its own rule) | 600 / min / user — opening one space spends ~10 requests (detail, members, feed, theme, moderation, proposals, notification prefs, chat summary, …), so the 60 / min default 429'd the ~6th space opened in a minute |
 | `POST /api/spaces` (create), `POST /api/spaces/join`, `POST /api/spaces/{id}/join-requests`, `POST` / `DELETE /api/spaces/{id}/subscribe` | 20 / min / user each — method rules: create shares its path with the list, so the limiter matches method and whole path |
 | `POST /api/spaces/{id}/invite-tokens`, `POST /api/spaces/{id}/remote-invites` | 30 / min / user each |

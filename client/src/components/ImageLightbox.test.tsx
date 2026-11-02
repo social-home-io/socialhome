@@ -193,3 +193,35 @@ describe('ImageLightbox', () => {
     closeLightbox()
   })
 })
+
+describe('ImageLightbox focus (gallery live walk)', () => {
+  it('focuses close on open, keeps Tab inside, and returns focus on close', async () => {
+    const opener = document.createElement('button')
+    opener.textContent = 'tile'
+    document.body.append(opener)
+    opener.focus()
+    const r = render(<ImageLightbox />)
+    openLightbox({ items: [{ url: '/a.webp' }, { url: '/b.webp' }], index: 0 })
+    const close = await r.findByRole('button', { name: /close/i })
+    await waitFor(() => expect(document.activeElement).toBe(close))
+    // Tab from the last control in the viewer wraps to the first one —
+    // never out to the grid behind.
+    const dialog = r.getByRole('dialog')
+    const inside = Array.from(dialog.querySelectorAll<HTMLElement>('button, a[href]'))
+    inside[inside.length - 1].focus()
+    fireEvent.keyDown(document, { key: 'Tab' })
+    expect(document.activeElement).toBe(inside[0])
+    fireEvent.keyDown(document, { key: 'Tab', shiftKey: true })
+    expect(document.activeElement).toBe(inside[inside.length - 1])
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await waitFor(() => expect(document.activeElement).toBe(opener))
+    opener.remove()
+  })
+
+  it('counts the whole album when only part of it is loaded', async () => {
+    const r = render(<ImageLightbox />)
+    openLightbox({ items: [{ url: '/a.webp' }, { url: '/b.webp' }], index: 1, total: 272 })
+    expect(await r.findByText('2 / 272')).toBeTruthy()
+    closeLightbox()
+  })
+})

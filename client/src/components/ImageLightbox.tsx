@@ -11,13 +11,15 @@
  * have a single URL can still use the legacy ``openLightbox(url)``
  * call.
  */
-import { useEffect } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import { signal } from '@preact/signals'
 
 import { showToast } from './Toast'
 import { t, formatLocale } from '@/i18n/i18n'
 import { safeHref } from '@/utils/safeHref'
 import { formatDayKey } from '@/utils/calendar'
+import { restoreFocus } from '@/utils/focus'
+import { focusableWithin } from './Modal'
 
 export interface LightboxItem {
   id?:            string
@@ -35,17 +37,20 @@ export interface LightboxItem {
 interface LightboxState {
   items: LightboxItem[]
   index: number
+  /** How many items the whole set holds when ``items`` is only the part
+   *  loaded so far (a paged album) — the "n / N" counter shows this. */
+  total?: number
 }
 
 const lightbox = signal<LightboxState | null>(null)
 
 export function openLightbox(
-  arg: string | { items: LightboxItem[]; index?: number },
+  arg: string | { items: LightboxItem[]; index?: number; total?: number },
 ): void {
   if (typeof arg === 'string') {
     lightbox.value = { items: [{ url: arg }], index: 0 }
   } else {
-    lightbox.value = { items: arg.items, index: arg.index ?? 0 }
+    lightbox.value = { items: arg.items, index: arg.index ?? 0, total: arg.total }
   }
 }
 
@@ -100,6 +105,43 @@ export async function copyReferenceForItem(item: LightboxItem): Promise<void> {
 
 export function ImageLightbox() {
   const state = lightbox.value
+  const open = state !== null
+  const dialogRef = useRef<HTMLDivElement | null>(null)
+
+  // Focus (§23.21): on open, focus moves to the close button; Tab and
+  // Shift+Tab stay inside the viewer; on close, focus goes back to the
+  // tile (or whatever) that opened it — the grid behind is not reachable
+  // while the viewer is up.
+  useEffect(() => {
+    if (!open) return
+    const dialog = dialogRef.current
+    if (!dialog) return
+    const opener = document.activeElement as HTMLElement | null
+    dialog.querySelector<HTMLElement>('.sh-lightbox-close')?.focus()
+    const onTab = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab') return
+      const items = focusableWithin(dialog)
+      if (items.length === 0) return
+      const first = items[0]
+      const last = items[items.length - 1]
+      const active = document.activeElement
+      if (!dialog.contains(active)) {
+        e.preventDefault()
+        first.focus()
+      } else if (e.shiftKey && active === first) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault()
+        first.focus()
+      }
+    }
+    document.addEventListener('keydown', onTab)
+    return () => {
+      document.removeEventListener('keydown', onTab)
+      restoreFocus(opener, dialog)
+    }
+  }, [open])
 
   useEffect(() => {
     if (!state) return
@@ -136,6 +178,7 @@ export function ImageLightbox() {
 
   return (
     <div
+      ref={dialogRef}
       class="sh-lightbox"
       role="dialog"
       aria-modal="true"
@@ -215,9 +258,9 @@ export function ImageLightbox() {
                 })}
             </time>
           )}
-          {state.items.length > 1 && (
+          {Math.max(state.items.length, state.total ?? 0) > 1 && (
             <span class="sh-muted">
-              {state.index + 1} / {state.items.length}
+              {state.index + 1} / {Math.max(state.items.length, state.total ?? 0)}
             </span>
           )}
         </div>

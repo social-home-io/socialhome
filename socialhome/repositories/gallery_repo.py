@@ -9,6 +9,18 @@ from ..db import AsyncDatabase
 from ..domain.gallery import GalleryAlbum, GalleryItem
 from ..domain.tombstone import SpaceRowTombstone
 from .base import changed_since_sql, rows_to_dicts, sync_page_cursor
+from .cp_repo import GUARDIAN_BLOCK_COUNTERPARTS_SQL
+
+#: Items whose uploader the viewer may see: not on the viewer's personal
+#: block list (§Privacy) and not across a guardian block with them
+#: (§CP.F2, both directions) — the rule the feed applies to the posts the
+#: system "Posts" album mirrors. Binds the viewer three times.
+_VIEWER_MAY_SEE_UPLOADER_SQL = f"""
+    AND uploaded_by NOT IN (
+        SELECT blocked_user_id FROM user_blocks WHERE blocker_user_id = ?
+    )
+    AND uploaded_by NOT IN ({GUARDIAN_BLOCK_COUNTERPARTS_SQL})
+"""
 
 #: What a gallery item tombstone keeps of its row (migration 0085): no
 #: file, no caption, no date — the media reference scan then sees no file
@@ -35,6 +47,7 @@ class AbstractGalleryRepo(Protocol):
         *,
         limit: int = 30,
         before: str | None = None,
+        before_id: str | None = None,
     ) -> list[GalleryAlbum]: ...
     async def get_album(self, album_id: str) -> GalleryAlbum | None: ...
     async def get_system_album(self, space_id: str | None) -> GalleryAlbum | None: ...
@@ -58,6 +71,8 @@ class AbstractGalleryRepo(Protocol):
         *,
         limit: int = 50,
         before: str | None = None,
+        before_id: str | None = None,
+        viewer_user_id: str | None = None,
     ) -> list[GalleryItem]: ...
     async def list_items_since(
         self,
@@ -117,7 +132,9 @@ class AbstractGalleryRepo(Protocol):
     ) -> tuple[str | None, int]: ...
     async def increment_item_count(self, album_id: str, delta: int) -> None: ...
     async def recount_items(self, album_id: str) -> int: ...
-    async def get_first_item_thumbnail(self, album_id: str) -> str | None: ...
+    async def get_first_item_thumbnail(
+        self, album_id: str, *, viewer_user_id: str | None = None
+    ) -> str | None: ...
     async def list_space_item_filenames(self, space_id: str) -> list[str]: ...
     async def set_retention_exempt(
         self,
@@ -202,24 +219,32 @@ class SqliteGalleryRepo:
         *,
         limit: int = 30,
         before: str | None = None,
+        before_id: str | None = None,
     ) -> list[GalleryAlbum]:
+        """One page of a scope's albums: the system album pinned first,
+        then newest first (``created_at DESC, id DESC`` — ``id`` breaks a
+        tie, so no album is skipped or repeated between pages).
+
+        The next page is ``before`` / ``before_id`` = the last *regular*
+        album's ``created_at`` / ``id``; a page after the first never
+        carries the system album again. ``before`` alone (an older client)
+        keeps its plain ``created_at <`` meaning.
+        """
         limit = max(1, min(limit, 200))
         # ``space_id IS ?`` matches both NULL (household) and a specific id.
-        # System album pinned first via ``is_system DESC``.
+        sql = "SELECT * FROM gallery_albums WHERE space_id IS ? AND deleted_at IS NULL"
+        params: list = [space_id]
         if before:
-            rows = await self._db.fetchall(
-                "SELECT * FROM gallery_albums WHERE space_id IS ? AND created_at < ? "
-                "AND deleted_at IS NULL "
-                "ORDER BY is_system DESC, created_at DESC LIMIT ?",
-                (space_id, before, limit),
-            )
-        else:
-            rows = await self._db.fetchall(
-                "SELECT * FROM gallery_albums WHERE space_id IS ? "
-                "AND deleted_at IS NULL "
-                "ORDER BY is_system DESC, created_at DESC LIMIT ?",
-                (space_id, limit),
-            )
+            sql += " AND is_system = 0"
+            if before_id:
+                sql += " AND (created_at < ? OR (created_at = ? AND id < ?))"
+                params += [before, before, before_id]
+            else:
+                sql += " AND created_at < ?"
+                params.append(before)
+        sql += " ORDER BY is_system DESC, created_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        rows = await self._db.fetchall(sql, tuple(params))
         return [self._row_to_album(r) for r in rows_to_dicts(rows)]
 
     async def get_system_album(
@@ -511,22 +536,33 @@ class SqliteGalleryRepo:
         *,
         limit: int = 50,
         before: str | None = None,
+        before_id: str | None = None,
+        viewer_user_id: str | None = None,
     ) -> list[GalleryItem]:
+        """One page of an album, newest first (``created_at DESC, id
+        DESC`` — ``id`` breaks a tie, so no item is skipped or repeated
+        between pages). The next page is ``before`` / ``before_id`` = the
+        last item's ``created_at`` / ``id``; ``before`` alone keeps its
+        plain ``created_at <`` meaning.
+
+        ``viewer_user_id`` hides the items of uploaders the viewer blocked
+        or is guardian-blocked from, in SQL so a page stays full.
+        """
         limit = max(1, min(limit, 500))
-        if before:
-            rows = await self._db.fetchall(
-                "SELECT * FROM gallery_items WHERE album_id=? AND created_at < ? "
-                "AND deleted_at IS NULL "
-                "ORDER BY sort_order, created_at LIMIT ?",
-                (album_id, before, limit),
-            )
-        else:
-            rows = await self._db.fetchall(
-                "SELECT * FROM gallery_items WHERE album_id=? "
-                "AND deleted_at IS NULL "
-                "ORDER BY sort_order, created_at LIMIT ?",
-                (album_id, limit),
-            )
+        sql = "SELECT * FROM gallery_items WHERE album_id=? AND deleted_at IS NULL"
+        params: list = [album_id]
+        if before and before_id:
+            sql += " AND (created_at < ? OR (created_at = ? AND id < ?))"
+            params += [before, before, before_id]
+        elif before:
+            sql += " AND created_at < ?"
+            params.append(before)
+        if viewer_user_id is not None:
+            sql += _VIEWER_MAY_SEE_UPLOADER_SQL
+            params += [viewer_user_id] * 3
+        sql += " ORDER BY created_at DESC, id DESC LIMIT ?"
+        params.append(limit)
+        rows = await self._db.fetchall(sql, tuple(params))
         return [self._row_to_item(r) for r in rows_to_dicts(rows)]
 
     async def list_albums_sync_page(
@@ -817,12 +853,21 @@ class SqliteGalleryRepo:
         )
         return n
 
-    async def get_first_item_thumbnail(self, album_id: str) -> str | None:
-        row = await self._db.fetchone(
+    async def get_first_item_thumbnail(
+        self, album_id: str, *, viewer_user_id: str | None = None
+    ) -> str | None:
+        """The album's first item's thumbnail — the default cover.
+        ``viewer_user_id`` skips uploaders hidden from that viewer."""
+        sql = (
             "SELECT thumbnail_filename FROM gallery_items WHERE album_id=? "
-            "AND deleted_at IS NULL "
-            "ORDER BY sort_order, created_at LIMIT 1",
-            (album_id,),
+            "AND deleted_at IS NULL"
+        )
+        params: list = [album_id]
+        if viewer_user_id is not None:
+            sql += _VIEWER_MAY_SEE_UPLOADER_SQL
+            params += [viewer_user_id] * 3
+        row = await self._db.fetchone(
+            sql + " ORDER BY sort_order, created_at LIMIT 1", tuple(params)
         )
         return f"api/media/{row['thumbnail_filename']}" if row else None
 

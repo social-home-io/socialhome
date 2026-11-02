@@ -7328,6 +7328,34 @@ a.sh-btn { text-decoration: none; }
   border-radius: var(--sh-radius-full);
   backdrop-filter: blur(4px);
 }
+/* A gallery video still transcoding: no poster exists yet, so the tile is
+ * a calm placeholder (spinner + "Processing…") instead of a broken image. */
+.sh-gallery-item--processing {
+  cursor: default;
+  background: var(--sh-bg-tertiary);
+  border: 1px dashed var(--sh-border);
+}
+.sh-gallery-item--processing:hover { transform: none; }
+.sh-gallery-item-processing {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sh-space-xs);
+  padding: var(--sh-space-xs);
+  color: var(--sh-text-muted);
+  font-size: var(--sh-font-size-sm);
+  text-align: center;
+}
+.sh-gallery-item-processing .sh-upload-progress__spinner { width: 20px; height: 20px; }
+/* "Load more" under a paged album list / album grid. */
+.sh-gallery-more {
+  display: flex;
+  justify-content: center;
+  padding: var(--sh-space-md) 0;
+}
 
 /* Upload progress card — used by Composer (Home feed + Space feed
  * via the shared Composer component) and any other surface that
@@ -18398,8 +18426,12 @@ ul.sh-ha-users { list-style: none; margin: 0; padding: 0; }
   .sh-page-header { flex-direction: column; align-items: flex-start; }
   .sh-admin-table { font-size: var(--sh-font-size-xs); }
   .sh-admin-table th, .sh-admin-table td { padding: var(--sh-space-xs); }
+  /* Phones: toasts sit just above the bottom tab bar, not under the top
+   * bar — there they covered the page title and its main action (the
+   * gallery's Upload button) for as long as an error stayed up. */
   .sh-toast-container {
-    top: calc(var(--sh-topbar-height-mobile) + var(--sh-space-xs));
+    top: auto;
+    bottom: calc(var(--sh-mobile-nav-height) + env(safe-area-inset-bottom, 0px) + var(--sh-space-sm));
     right: var(--sh-space-sm);
     left: var(--sh-space-sm);
   }

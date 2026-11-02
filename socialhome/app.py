@@ -2726,6 +2726,17 @@ def _build_middleware(config: Config, limiter: RateLimiter):
             # ``POST …/sessions/store…/accept`` out of the default bucket.
             "GET|PUT|DELETE /api/apps/*/store/*": (300, 60),
             "GET /api/apps/*/store": (300, 60),
+            # Gallery uploads get their own bucket: picking a holiday's 80
+            # photos sent 80 POSTs through the 60/min default, which the
+            # album and item lists shared — 79 were refused and the album
+            # read "empty". The SPA sends one file at a time, so a batch is
+            # bounded by upload time anyway; each file is ≤ 100 MiB, checked
+            # against the household storage quota, and stored here (a space
+            # album's items federate per item to member households only).
+            # Browsing (lists, album detail) gets a loose bucket of its own,
+            # like Spaces, so a big upload never locks the gallery.
+            "POST /api/gallery/albums/*/items": (300, 60),
+            "/api/gallery": (600, 60),
             # GPS pings: 10 a minute per PERSON is enforced by the view
             # (``routes/presence.py``) — Home Assistant posts the whole
             # household's with one token. This is only the ceiling for that

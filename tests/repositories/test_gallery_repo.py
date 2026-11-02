@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from socialhome.crypto import (
@@ -153,13 +155,118 @@ async def test_create_then_get_item(env):
     assert got.url.startswith("api/media/")
 
 
-async def test_list_items_orders_by_sort_then_created(env):
+def _at(n: int) -> str:
+    return f"2026-10-{n:02d}T12:00:00+00:00"
+
+
+async def test_list_items_newest_first(env):
+    """UX review #1: an album listed oldest first and capped at a page hid
+    every upload after the first page."""
     _, repo = env
     await repo.create_album(_album())
-    for i in range(5):
-        await repo.create_item(_item(f"it-{i}"))
+    for i in range(1, 6):
+        await repo.create_item(replace(_item(f"it-{i}"), created_at=_at(i)))
     out = await repo.list_items("alb-1")
-    assert [i.id for i in out] == [f"it-{i}" for i in range(5)]
+    assert [i.id for i in out] == ["it-5", "it-4", "it-3", "it-2", "it-1"]
+
+
+async def test_list_items_pages_reach_every_item_once_even_on_ties(env):
+    """Paging with the ``(created_at, id)`` cursor of the last row walks the
+    whole album: no item skipped, none repeated — even when a burst of
+    uploads shares one timestamp across a page boundary."""
+    _, repo = env
+    await repo.create_album(_album())
+    ids = []
+    for i in range(1, 4):
+        await repo.create_item(replace(_item(f"old-{i}"), created_at=_at(i)))
+        ids.append(f"old-{i}")
+    for i in range(7):  # one burst, one timestamp
+        await repo.create_item(replace(_item(f"burst-{i}"), created_at=_at(9)))
+        ids.append(f"burst-{i}")
+    seen: list[str] = []
+    before = before_id = None
+    while True:
+        page = await repo.list_items(
+            "alb-1", limit=3, before=before, before_id=before_id
+        )
+        seen += [i.id for i in page]
+        if len(page) < 3:
+            break
+        before, before_id = page[-1].created_at, page[-1].id
+    assert sorted(seen) == sorted(ids)
+    assert len(seen) == len(ids)
+    assert seen[:7] == [f"burst-{i}" for i in reversed(range(7))]
+    assert seen[7:] == ["old-3", "old-2", "old-1"]
+
+
+async def test_list_items_before_alone_keeps_its_created_at_meaning(env):
+    _, repo = env
+    await repo.create_album(_album())
+    for i in range(1, 4):
+        await repo.create_item(replace(_item(f"it-{i}"), created_at=_at(i)))
+    out = await repo.list_items("alb-1", before=_at(3))
+    assert [i.id for i in out] == ["it-2", "it-1"]
+
+
+async def test_list_items_hides_uploaders_the_viewer_blocked(env):
+    """UX review #11: the viewer's personal and guardian blocks hide that
+    uploader's items — in SQL, so a page stays full."""
+    db, repo = env
+    for uname, uid, protected in (("bob", "b-id", 0), ("kid", "k-id", 1)):
+        await db.enqueue(
+            "INSERT INTO users(username, user_id, display_name,"
+            " child_protection_enabled) VALUES(?,?,?,?)",
+            (uname, uid, uname, protected),
+        )
+    await repo.create_album(_album())
+    for n, who in enumerate(("a-id", "b-id", "rex", "a-id"), start=1):
+        await repo.create_item(
+            replace(_item(f"it-{n}"), uploaded_by=who, created_at=_at(n))
+        )
+    await db.enqueue(
+        "INSERT INTO user_blocks(blocker_user_id, blocked_user_id)"
+        " VALUES('a-id', 'b-id')"
+    )
+    await db.enqueue(
+        "INSERT INTO cp_minor_blocks(minor_user_id, blocked_user_id, blocked_by)"
+        " VALUES('k-id', 'rex', 'a-id')"
+    )
+    everyone = [i.id for i in await repo.list_items("alb-1")]
+    assert everyone == ["it-4", "it-3", "it-2", "it-1"]
+    alice = await repo.list_items("alb-1", limit=2, viewer_user_id="a-id")
+    assert [i.id for i in alice] == ["it-4", "it-3"]
+    alice_all = await repo.list_items("alb-1", viewer_user_id="a-id")
+    assert [i.id for i in alice_all] == ["it-4", "it-3", "it-1"]
+    kid = await repo.list_items("alb-1", viewer_user_id="k-id")
+    assert [i.id for i in kid] == ["it-4", "it-2", "it-1"]
+    assert await repo.get_first_item_thumbnail(
+        "alb-1", viewer_user_id="k-id"
+    ) == await repo.get_first_item_thumbnail("alb-1")
+
+
+async def test_list_albums_pages_without_repeating_the_system_album(env):
+    """UX review #2: only 30 albums loaded. The cursor of the last regular
+    album pages on; the pinned system album appears on the first page only."""
+    _, repo = env
+    await repo.create_album(
+        replace(_album("sys"), is_system=True, owner_user_id=None, created_at=_at(1))
+    )
+    for i in range(2, 9):
+        await repo.create_album(replace(_album(f"a-{i}"), created_at=_at(5)))
+    seen: list[str] = []
+    before = before_id = None
+    while True:
+        page = await repo.list_albums(
+            "sp-1", limit=3, before=before, before_id=before_id
+        )
+        seen += [a.id for a in page]
+        if len(page) < 3:
+            break
+        last = [a for a in page if not a.is_system][-1]
+        before, before_id = last.created_at, last.id
+    assert seen[0] == "sys"
+    assert sorted(seen) == sorted(["sys"] + [f"a-{i}" for i in range(2, 9)])
+    assert len(seen) == 8
 
 
 async def test_increment_item_count(env):
