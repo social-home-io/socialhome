@@ -227,7 +227,9 @@ function routeTable(ids) {
   const walk = []
   const skipped = []
   for (const k of keys) {
-    let r = k
+    // Optional / rest tails (``/:section?``, ``/:sub*``) walk as the bare
+    // path: ``/gallery/:sub*`` is ``/gallery``.
+    let r = k.replace(/(\/:[^/]+[?*])+$/, '') || '/'
     for (const [stem, val] of Object.entries(fill)) {
       if (r.startsWith(stem)) r = r.replace(':id', val)
     }
@@ -239,6 +241,11 @@ function routeTable(ids) {
   // space post in the space's Feed.
   walk.push(`/post/${ids.postId}?comment=${ids.commentId}`)
   walk.push(`/spaces/${ids.spaceId}?post=${ids.spacePostId}`)
+  // Every album and photo has its own address (household + a space's
+  // Gallery section): a shared link or a refresh opens it under the prefix.
+  walk.push(`/gallery/albums/${ids.albumId}`)
+  if (ids.galleryItemId) walk.push(`/gallery/albums/${ids.albumId}/${ids.galleryItemId}`)
+  if (ids.spaceAlbumId) walk.push(`/spaces/${ids.spaceId}/gallery/albums/${ids.spaceAlbumId}`)
   return { walk, skipped }
 }
 
@@ -319,6 +326,14 @@ await check('setup-seed-content', async () => {
   ids.spacePostId = spacePost.id
   const album = await asUser('alice', 'POST', '/api/gallery/albums', { json: { name: 'Ingress album' } })
   ids.albumId = album.id || album.album_id
+  // A photo in it (its own address: /gallery/albums/<album>/<photo>), and
+  // a space album for the space Gallery's mirror of those addresses.
+  const galleryItem = await asUser('alice', 'POST', `/api/gallery/albums/${ids.albumId}/items`, { raw: { type: `multipart/form-data; boundary=${boundary}`, data: mp } })
+  ids.galleryItemId = galleryItem.id
+  // A new space starts with feed, chat and calendar only.
+  await asUser('alice', 'PATCH', `/api/spaces/${ids.spaceId}`, { json: { features: { gallery: true } } })
+  const spaceAlbum = await asUser('alice', 'POST', `/api/spaces/${ids.spaceId}/gallery/albums`, { json: { name: 'Space ingress album' } })
+  ids.spaceAlbumId = spaceAlbum.id || spaceAlbum.album_id
   const missing = Object.entries(ids).filter(([, v]) => !v).map(([k]) => `seed returned no ${k}`)
   return { problems: missing, ids }
 }, { browser: false })
@@ -588,6 +603,43 @@ await check('media-load-and-upload', async () => {
     upload: { url: resp.url(), status: resp.status() },
     sheet: { defaultAlbum: defResp.status(), upload: listResp.status() },
   }
+})
+
+// 5b. Every album and photo has its own address: the album card and a
+//     tile are links under the prefix, the viewer's address survives a
+//     reload, Esc / Back step out again — never outside the prefix.
+await check('gallery-addresses', async () => {
+  const problems = []
+  const albumPath = `${PREFIX}/gallery/albums/${ids.albumId}`
+  const at = async (want, desc) => {
+    await step(`${desc} → ${want} (at ${pathOf(page)})`, page.waitForFunction(w => location.pathname === w, {}, want))
+    await settled(page)
+  }
+  await page.goto(APP + 'gallery', { waitUntil: 'load' })
+  await settled(page)
+  const albumHref = await step('the seeded album card is a link', page.waitForFunction(
+    () => [...document.querySelectorAll('a.sh-album-card')].find(a => a.textContent.includes('Ingress album'))?.getAttribute('href')))
+  if ((await albumHref.jsonValue()) !== albumPath) problems.push(`album link is ${await albumHref.jsonValue()}, want ${albumPath}`)
+  await page.evaluate(() => [...document.querySelectorAll('a.sh-album-card')].find(a => a.textContent.includes('Ingress album')).click())
+  await at(albumPath, 'the album card')
+  const tile = await step('a photo tile link', page.waitForSelector(`a.sh-gallery-item[data-item-id="${ids.galleryItemId}"]`))
+  const tileHref = await tile.evaluate(a => a.getAttribute('href'))
+  const photoPath = `${albumPath}/${ids.galleryItemId}`
+  if (tileHref !== photoPath) problems.push(`photo link is ${tileHref}, want ${photoPath}`)
+  await tile.click()
+  await at(photoPath, 'the tile')
+  await step('the viewer dialog', page.waitForSelector('.sh-gviewer[role="dialog"]'))
+  await page.screenshot({ path: path.join(SHOTS, 'gallery-viewer.png') })
+  await page.reload({ waitUntil: 'load' })
+  await at(photoPath, 'a reload keeps the photo')
+  await step('the viewer after a reload', page.waitForSelector('.sh-gviewer[role="dialog"] img.sh-gviewer-photo'))
+  const src = await page.$eval('img.sh-gviewer-photo', i => i.src)
+  if (!underPrefix(new URL(src).pathname)) problems.push(`viewer photo outside the prefix: ${src}`)
+  await page.keyboard.press('Escape')
+  await at(albumPath, 'Esc closes the viewer to its album')
+  await page.goBack()
+  await at(`${PREFIX}/gallery`, 'Back to the albums')
+  return { problems, albumPath, photoPath, viewerSrc: src }
 })
 
 // 6. The way Home Assistant really mounts the panel: inside an iframe.

@@ -13,18 +13,26 @@
  * page is asked for with the last row's ``created_at`` + ``id`` cursor,
  * from a "Load more" button that also fires by itself when it scrolls
  * into view — so every album and every upload can be reached.
+ *
+ * Every album and every photo has its own address (``galleryRoutes``):
+ * ``/gallery/albums/:albumId[/:itemId]``, mirrored under a space's
+ * Gallery section. Albums and tiles are real links; the viewer
+ * (``GalleryViewer``) is open while the address names an item, so Back
+ * closes it, a refresh keeps it and a shared link opens it.
  */
 import { useEffect, useRef, useState } from 'preact/hooks'
+import { useLocation, useRoute } from 'preact-iso'
 import { t, isOne } from '@/i18n/i18n'
 import { useTitle } from '@/store/pageTitle'
 import { signal } from '@preact/signals'
-import { api } from '@/api'
+import { api, ApiError } from '@/api'
 import { ws } from '@/ws'
+import { addBase } from '@/baseUrl'
 import { Button } from '@/components/Button'
-import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
-import { openLightbox, type LightboxItem } from '@/components/ImageLightbox'
 import { openReport } from '@/components/ReportDialog'
+import { GalleryViewer, type ViewerItem } from './GalleryViewer'
+import { backLeadsTo, galleryPath, markBackTo, parseGallerySub } from './galleryRoutes'
 import { currentUser } from '@/store/auth'
 import { householdUsers, loadHouseholdUsers } from '@/store/householdUsers'
 import { spaceMembers, loadSpaceMembers } from '@/store/spaceMembers'
@@ -64,6 +72,7 @@ interface Item {
   caption?: string | null
   taken_at?: string | null
   created_at?: string
+  duration_s?: number | null
   /** Background-transcode state for ``video`` items — ``'processing'``
    *  while the worker encodes. Absent on photos and on older payloads
    *  (treated as ready). A processing item can't play yet, so the tile
@@ -89,12 +98,26 @@ const items        = signal<Item[]>([])
 const itemsMore    = signal(false)
 const itemsLoading = signal(false)
 const activeAlbum  = signal<Album | null>(null)
+/** The album in the address could not be read (offline) — not "gone". */
+const albumError   = signal(false)
 const loading      = signal(true)
 const showCreate   = signal(false)
 /** The scope (space id, or ``null`` for the household) the signals above
  *  hold. The page is one module shared by every gallery, so moving from a
  *  space gallery to ``/gallery`` must drop the open album and its items. */
 let loadedScope: string | null | undefined
+/** The album the address asks for — a slower answer for another one is
+ *  dropped. */
+let wantedAlbum: string | null = null
+/** How we got here, so the in-app Back / Close step back in history
+ *  (and the phone's Back button agrees) instead of piling up entries:
+ *  an album opened from the list, a photo opened from its grid. A cold
+ *  link has neither — closing then goes to the parent address. */
+let albumFromList = false
+let viewerFromGrid = false
+/** A link to an item past the loaded pages reads at most this many more
+ *  pages looking for it (50 each) before saying it isn't there. */
+const ITEM_SEARCH_PAGES = 40
 
 export interface GalleryPageProps {
   spaceId?: string
@@ -102,6 +125,22 @@ export interface GalleryPageProps {
    *  neither create one nor upload (the server answers 403
    *  ``SUBSCRIBER_READ_ONLY``), so neither control is offered. */
   readOnly?: boolean
+  /** A space owner / admin / moderator: may delete others' space items
+   *  (the server checks again). */
+  canModerate?: boolean
+  /** TopBar title — a space passes "Gallery · <space>". */
+  title?: string
+}
+
+/** The household gallery, or a space's: delete rules differ (#1271). */
+function canDeleteItem(album: Album, item: { uploaded_by: string }, canModerate: boolean): boolean {
+  const me = currentUser.value
+  if (!me || album.is_system) return false
+  if (item.uploaded_by === me.user_id) return true
+  // A protected account (a child) deletes only what it added.
+  if (me.protected) return false
+  if (album.space_id) return canModerate
+  return album.owner_user_id === me.user_id || me.is_admin
 }
 
 /** An album's shown name — the auto "Posts" album in the reader's
@@ -110,8 +149,18 @@ function albumName(a: Album): string {
   return a.is_system ? t('gallery.system_name') : a.name
 }
 
-export default function GalleryPage({ spaceId, readOnly = false }: GalleryPageProps) {
-  useTitle(t('nav.gallery'))
+export default function GalleryPage({
+  spaceId, readOnly = false, canModerate = false, title,
+}: GalleryPageProps) {
+  useTitle(title ?? t('nav.gallery'))
+  const { params } = useRoute()
+  const loc = useLocation()
+  const locRef = useRef(loc)
+  locRef.current = loc
+  const where = parseGallerySub(params?.sub)
+  const albumId = where.albumId
+  const itemId = where.itemId
+
   useEffect(() => {
     const scope = spaceId ?? null
     if (loadedScope !== scope) {
@@ -129,6 +178,39 @@ export default function GalleryPage({ spaceId, readOnly = false }: GalleryPagePr
     if (spaceId) void loadSpaceMembers(spaceId)
     else void loadHouseholdUsers()
   }, [spaceId])
+
+  // An address the gallery doesn't know → the albums.
+  useEffect(() => {
+    if (!where.valid) locRef.current.route(galleryPath(spaceId), true)
+  }, [where.valid, spaceId])
+
+  // The album follows the address: opened from the list, from a link or
+  // a refresh; closed by Back.
+  useEffect(() => {
+    wantedAlbum = albumId
+    if (!albumId) {
+      albumFromList = false
+      albumError.value = false
+      if (activeAlbum.value) {
+        activeAlbum.value = null
+        items.value = []
+        itemsMore.value = false
+        // Re-fetch the album list so a freshly-uploaded cover + bumped
+        // item_count show up immediately — quietly, so the list already
+        // on screen stays there if the network is gone.
+        void loadAlbums(spaceId, { quiet: true, toastOnFail: true })
+      }
+      return
+    }
+    // Remember (across a reload) that the list is one step back.
+    if (albumFromList && !itemId) markBackTo(galleryPath(spaceId))
+    if (activeAlbum.value?.id === albumId) return
+    void openAlbum(albumId, spaceId).then((found) => {
+      if (found || wantedAlbum !== albumId) return
+      showToast(t('gallery.album_missing'), 'info')
+      locRef.current.route(galleryPath(spaceId), true)
+    })
+  }, [spaceId, albumId]) // eslint-disable-line react-hooks/exhaustive-deps -- itemId only shapes the note
 
   // Live cross-device updates: refetch on gallery WS frames, scoped to
   // this page (a space gallery vs the household gallery). Thin frames →
@@ -153,6 +235,7 @@ export default function GalleryPage({ spaceId, readOnly = false }: GalleryPagePr
         activeAlbum.value = null
         items.value = []
         showToast(t('gallery.album_deleted'), 'info')
+        locRef.current.route(galleryPath(spaceId), true)
       }
       void loadAlbums(spaceId, { quiet: true })
     }
@@ -203,61 +286,75 @@ export default function GalleryPage({ spaceId, readOnly = false }: GalleryPagePr
       : null)
     : { spaceId: null, albumId: null, name: t('gallery.upload.default_album'), isDefault: true }
   const listCanUpload = !readOnly && !albumsError.value && (!spaceId || regular.length > 0)
-  const listControls = useUploadControls(listTarget, listCanUpload && !activeAlbum.value && !loading.value)
-
-  const openAlbumById = async (id: string) => {
-    const known = albums.value.find(a => a.id === id)
-    try {
-      const a = known ?? await api.get(`/api/gallery/albums/${id}`) as Album
-      activeAlbum.value = a
-      items.value = []
-      itemsMore.value = false
-      await loadItems(a.id)
-    } catch {
-      showToast(t('gallery.load_items_error'), 'error')
-    }
-  }
+  const listControls = useUploadControls(listTarget, listCanUpload && !albumId && !loading.value)
 
   const sheet = (
     <UploadSheet
       spaceId={spaceId ?? null}
       albums={albums.value}
-      onOpenAlbum={(id) => void openAlbumById(id)}
+      // "Open album" goes to the album's own address.
+      onOpenAlbum={(id) => { albumFromList = false; loc.route(galleryPath(spaceId, id)) }}
       onAlbumCreated={() => void loadAlbums(spaceId, { quiet: true })}
-      onCamera={activeAlbum.value ? undefined : listControls.camera}
+      onCamera={albumId ? undefined : listControls.camera}
       fromCamera={listControls.fromCamera}
     />
   )
 
-  if (loading.value) return <><Spinner />{sheet}</>
-
-  if (activeAlbum.value) {
+  if (albumId) {
+    // Back to the list: a step back in history when the list opened
+    // this album, else to the list's address.
+    const onBack = () => {
+      if (albumFromList || backLeadsTo(galleryPath(spaceId))) history.back()
+      else loc.route(galleryPath(spaceId))
+    }
+    const open = activeAlbum.value
+    if (albumError.value) {
+      return (
+        <div class="sh-album-detail">
+          {sheet}
+          <header class="sh-page-header">
+            <Button variant="secondary" onClick={onBack}>← {t('gallery.albums')}</Button>
+          </header>
+          <div class="sh-empty-state" role="alert">
+            <div aria-hidden="true">📡</div>
+            <h1>{t('gallery.load_items_error')}</h1>
+            <Button onClick={() => {
+              albumError.value = false
+              void openAlbum(albumId, spaceId)
+            }}>{t('common.retry')}</Button>
+          </div>
+        </div>
+      )
+    }
+    if (!open || open.id !== albumId) {
+      return (
+        <>
+          {sheet}
+          <AlbumSkeleton
+            onBack={onBack}
+            withViewer={!!itemId}
+            onCloseViewer={() => loc.route(galleryPath(spaceId, albumId), true)}
+          />
+        </>
+      )
+    }
     return (
       <>
       {sheet}
       <AlbumDetail
-        album={activeAlbum.value}
+        album={open}
+        spaceId={spaceId}
+        itemId={itemId}
         readOnly={readOnly}
-        onBack={() => {
-          activeAlbum.value = null
-          items.value = []
-          itemsMore.value = false
-          // Re-fetch the album list so a freshly-uploaded cover +
-          // bumped item_count show up immediately — quietly, so the
-          // list already on screen stays there if the network is gone.
-          void loadAlbums(spaceId, { quiet: true, toastOnFail: true })
-        }}
+        canModerate={canModerate}
+        onBack={onBack}
       />
       </>
     )
   }
 
-  const openAlbum = async (a: Album) => {
-    activeAlbum.value = a
-    items.value = []
-    itemsMore.value = false
-    await loadItems(a.id)
-  }
+  // The upload sheet stays on screen whatever loads: uploads carry on.
+  if (loading.value) return <><AlbumListSkeleton />{sheet}</>
 
   // Counts for the hero — system "Posts" album is folded into the
   // total because it is real content from the household's perspective.
@@ -336,12 +433,14 @@ export default function GalleryPage({ spaceId, readOnly = false }: GalleryPagePr
         <>
           <div class="sh-album-grid">
             {albums.value.map(a => (
-              <button
+              // A real link: its own address, opens in a new tab, and
+              // the router keeps the ingress prefix.
+              <a
                 key={a.id}
-                type="button"
+                href={addBase(galleryPath(spaceId, a.id))}
                 class={`sh-album-card${a.is_system ? ' sh-album-card--system' : ''}`}
                 aria-label={t(isOne(a.item_count) ? 'gallery.open_album_aria_one' : 'gallery.open_album_aria', { name: albumName(a), n: String(a.item_count) })}
-                onClick={() => void openAlbum(a)}
+                onClick={() => { albumFromList = true }}
               >
                 <AlbumCover album={a} />
                 <div class="sh-album-info">
@@ -361,7 +460,7 @@ export default function GalleryPage({ spaceId, readOnly = false }: GalleryPagePr
                     <span class="sh-badge">{t('gallery.kept')}</span>
                   )}
                 </div>
-              </button>
+              </a>
             ))}
           </div>
           {albumsMore.value && (
@@ -406,6 +505,62 @@ function LoadMore({ onMore }: { onMore: () => Promise<void> }) {
       <Button variant="secondary" loading={busy} onClick={() => void run()}>
         {t('feed.load_more')}
       </Button>
+    </div>
+  )
+}
+
+/** Album cards in their final shape while the list loads. One status for
+ *  screen readers, not one per block. */
+function AlbumListSkeleton() {
+  return (
+    <div class="sh-gallery">
+      <h1 class="sr-only">{t('nav.gallery')}</h1>
+      <div class="sh-album-grid" role="status" aria-label={t('common.loading')} aria-busy="true">
+        {Array.from({ length: 6 }, (_, i) => (
+          <div key={i} class="sh-album-card sh-album-card--skeleton" aria-hidden="true">
+            <span class="sh-skeleton sh-skeleton--rect sh-album-skel-cover" />
+            <div class="sh-album-info">
+              <span class="sh-skeleton sh-skeleton--line" style={{ width: '60%' }} />
+              <span class="sh-skeleton sh-skeleton--line" style={{ width: '30%' }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** Square tiles while an album's first page loads. */
+function TileSkeleton({ count = 12 }: { count?: number }) {
+  return (
+    <div class="sh-image-grid" role="status" aria-label={t('common.loading')} aria-busy="true">
+      {Array.from({ length: count }, (_, i) => (
+        <span key={i} class="sh-skeleton sh-skeleton--rect sh-gallery-skel-tile" aria-hidden="true" />
+      ))}
+    </div>
+  )
+}
+
+/** An album opened from a link, before its name has arrived. */
+function AlbumSkeleton({ onBack, withViewer, onCloseViewer }: {
+  onBack: () => void
+  withViewer: boolean
+  onCloseViewer: () => void
+}) {
+  return (
+    <div class="sh-album-detail">
+      <header class="sh-page-header">
+        <Button variant="secondary" onClick={onBack}>← {t('gallery.albums')}</Button>
+        <span class="sh-skeleton sh-skeleton--line" style={{ width: '12rem', height: '1.5rem' }} aria-hidden="true" />
+      </header>
+      <TileSkeleton />
+      {withViewer && (
+        <GalleryViewer
+          items={[]} index={-1} total={0} albumName="" inSpace={false}
+          uploaderName={() => ''} canDelete={() => false} reportFor={() => null}
+          onGo={() => undefined} onClose={onCloseViewer} onDelete={async () => undefined}
+        />
+      )}
     </div>
   )
 }
@@ -469,11 +624,19 @@ function isProcessing(item: Item): boolean {
   return !readyMedia.value.has(fn) && !failedMedia.value.has(fn)
 }
 
-function AlbumDetail({ album, onBack, readOnly = false }: {
+function AlbumDetail({
+  album, spaceId, itemId, onBack, readOnly = false, canModerate = false,
+}: {
   album: Album
+  spaceId?: string
+  /** The item the address names — the viewer is open on it. */
+  itemId: string | null
   onBack: () => void
   readOnly?: boolean
+  canModerate?: boolean
 }) {
+  const viewer = useAlbumViewer(album, spaceId, itemId, canModerate)
+
   const anyProcessing = items.value.some(isProcessing)
   // Another person's video sends this browser no ready frame: re-read
   // the album now and then while a tile still says "Processing…".
@@ -486,21 +649,6 @@ function AlbumDetail({ album, onBack, readOnly = false }: {
   }, [anyProcessing, album.id])
 
   const loaded = items.value
-  const lightboxItems: LightboxItem[] = loaded.map(i => ({
-    id:            i.id,
-    item_type:     i.item_type,
-    url:           i.url,
-    thumbnail_url: i.thumbnail_url,
-    caption:       i.caption,
-    taken_at:      i.taken_at,
-    width:         i.width,
-    height:        i.height,
-    // A space item someone else uploaded goes to the space's moderators.
-    onReport: album.space_id && i.uploaded_by !== currentUser.value?.user_id
-      ? () => openReport('gallery_item', i.id, album.space_id)
-      : undefined,
-  }))
-
   // No uploads into the system album (the server refuses them too).
   const canUpload = !album.is_system && !readOnly
   const controls = useUploadControls({
@@ -543,7 +691,7 @@ function AlbumDetail({ album, onBack, readOnly = false }: {
       )}
 
       {loaded.length === 0 && itemsLoading.value ? (
-        <Spinner />
+        <TileSkeleton count={Math.min(12, Math.max(4, album.item_count))} />
       ) : loaded.length === 0 ? (
         <div class="sh-empty-state">
           <div aria-hidden="true">🖼️</div>
@@ -564,52 +712,47 @@ function AlbumDetail({ album, onBack, readOnly = false }: {
       ) : (
         <>
           <div class="sh-image-grid">
-            {loaded.map((item, idx) => {
+            {loaded.map((item) => {
               // A video still transcoding can't play and has no poster
               // yet, so the tile shows a "Processing…" placeholder (no
-              // broken image) and doesn't open the lightbox.
-              const processing = isProcessing(item)
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  class={
-                    'sh-gallery-item' +
-                    (processing ? ' sh-gallery-item--processing' : '')
-                  }
-                  aria-label={
-                    processing
-                      ? t('gallery.item_processing_aria', { type: itemTypeLabel(item.item_type) })
-                      : tileLabel(item, album.space_id)
-                  }
-                  aria-disabled={processing ? 'true' : undefined}
-                  onClick={() => {
-                    if (processing) return
-                    openLightbox({
-                      items: lightboxItems,
-                      index: idx,
-                      total: Math.max(album.item_count, loaded.length),
-                    })
-                  }}
-                >
-                  {!processing && (
-                    <img
-                      src={item.thumbnail_url}
-                      alt=""
-                      loading="lazy"
-                      decoding="async"
-                    />
-                  )}
-                  {item.item_type === 'video' && !processing && (
-                    <span class="sh-video-badge" aria-hidden="true">▶</span>
-                  )}
-                  {processing && (
+              // broken image) and opens nothing.
+              if (isProcessing(item)) {
+                return (
+                  <div
+                    key={item.id}
+                    class="sh-gallery-item sh-gallery-item--processing"
+                    role="img"
+                    data-item-id={item.id}
+                    aria-label={t('gallery.item_processing_aria', { type: itemTypeLabel(item.item_type) })}
+                  >
                     <span class="sh-gallery-item-processing" aria-hidden="true">
                       <span class="sh-upload-progress__spinner" />
                       <span class="sh-gallery-item-processing-msg">{t('media.processing')}</span>
                     </span>
+                  </div>
+                )
+              }
+              // A real link to the photo's own address: the viewer opens
+              // on it, and it can be shared or opened in a new tab.
+              return (
+                <a
+                  key={item.id}
+                  href={addBase(galleryPath(spaceId, album.id, item.id))}
+                  class="sh-gallery-item"
+                  data-item-id={item.id}
+                  aria-label={tileLabel(item, album.space_id)}
+                  onClick={() => { viewerFromGrid = true }}
+                >
+                  <img
+                    src={item.thumbnail_url}
+                    alt=""
+                    loading="lazy"
+                    decoding="async"
+                  />
+                  {item.item_type === 'video' && (
+                    <span class="sh-video-badge" aria-hidden="true">▶</span>
                   )}
-                </button>
+                </a>
               )
             })}
           </div>
@@ -618,7 +761,127 @@ function AlbumDetail({ album, onBack, readOnly = false }: {
           )}
         </>
       )}
+      {viewer}
     </div>
+  )
+}
+
+/** The viewer for the item the address names, wired to the album: going
+ *  to a neighbour replaces the address (Back closes the viewer, it never
+ *  steps through every photo seen), a link past the loaded pages reads
+ *  on until it finds the item, and closing returns focus to its tile. */
+function useAlbumViewer(
+  album: Album, spaceId: string | undefined, itemId: string | null, canModerate: boolean,
+) {
+  const loc = useLocation()
+  const locRef = useRef(loc)
+  locRef.current = loc
+  const searched = useRef(0)
+  const fetching = useRef(false)
+  const lastItem = useRef<string | null>(null)
+  const loaded = items.value
+  const index = itemId ? loaded.findIndex(i => i.id === itemId) : -1
+  const albumPath = galleryPath(spaceId, album.id)
+
+  // Closing by history.back() lands a moment later (popstate): until
+  // then the address still names the item, which may be gone already.
+  const closing = useRef(false)
+  const close = () => {
+    closing.current = true
+    if (viewerFromGrid) history.back()
+    else locRef.current.route(albumPath, true)
+  }
+
+  const fetchMore = () => {
+    if (fetching.current) return
+    fetching.current = true
+    searched.current += 1
+    void loadMoreItems(album.id).finally(() => { fetching.current = false })
+  }
+
+  // A link to an item not loaded yet: read on; not in the album → say so.
+  useEffect(() => {
+    if (!itemId) { searched.current = 0; return }
+    // Read the signals now, not the render's copy: the effect runs after
+    // paint, and the first page may have landed in between.
+    if (items.value.some(i => i.id === itemId)) return
+    if (itemsLoading.value || fetching.current || closing.current) return
+    if (itemsMore.value && searched.current < ITEM_SEARCH_PAGES) {
+      fetchMore()
+      return
+    }
+    showToast(t('gallery.item_missing'), 'info')
+    locRef.current.route(albumPath, true)
+  }, [itemId, index, itemsLoading.value, itemsMore.value, loaded.length]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Near the end of what is loaded: the next page comes in ahead.
+  useEffect(() => {
+    if (itemId && index >= 0 && index >= loaded.length - 3 && itemsMore.value) fetchMore()
+  }, [itemId, index, loaded.length, itemsMore.value]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Closed: focus goes to the tile of the photo seen last, in view.
+  useEffect(() => {
+    if (itemId) {
+      // Opened from the grid — now, or before a reload (history.state
+      // remembers): the album is one step back. A replace (the next
+      // photo) drops the note, so it is written again each time.
+      if (backLeadsTo(albumPath)) viewerFromGrid = true
+      if (viewerFromGrid) markBackTo(albumPath)
+      lastItem.current = itemId
+      return
+    }
+    viewerFromGrid = false
+    closing.current = false
+    const seen = lastItem.current
+    lastItem.current = null
+    if (!seen) return
+    const tile = document.querySelector<HTMLElement>(`[data-item-id="${CSS.escape(seen)}"]`)
+    if (!tile) return
+    tile.focus({ preventScroll: true })
+    tile.scrollIntoView?.({ block: 'nearest' })
+  }, [itemId]) // eslint-disable-line react-hooks/exhaustive-deps -- albumPath follows itemId's album
+
+  if (!itemId) return null
+
+  const viewerItems: ViewerItem[] = loaded.map(i => ({ ...i, processing: isProcessing(i) }))
+  const me = currentUser.value?.user_id
+  return (
+    <GalleryViewer
+      items={viewerItems}
+      index={index}
+      total={album.item_count}
+      albumName={albumName(album)}
+      inSpace={!!album.space_id}
+      uploaderName={(uid) => uploaderName(album.space_id, uid)}
+      canDelete={(it) => canDeleteItem(album, it, canModerate)}
+      reportFor={(it) =>
+        // A space item someone else uploaded goes to the space's moderators.
+        album.space_id && it.uploaded_by !== me
+          ? () => openReport('gallery_item', it.id, album.space_id)
+          : null}
+      onGo={(i) => {
+        const next = loaded[i]
+        if (next) locRef.current.route(galleryPath(spaceId, album.id, next.id), true)
+      }}
+      onClose={close}
+      onDelete={async (it) => {
+        await api.delete(`/api/gallery/items/${it.id}`)
+        const pos = items.value.findIndex(i => i.id === it.id)
+        const rest = items.value.filter(i => i.id !== it.id)
+        const next = rest[pos] ?? rest[pos - 1]
+        // Move on first, then drop the row — the viewer never sees an
+        // address whose item is gone.
+        if (next) locRef.current.route(galleryPath(spaceId, album.id, next.id), true)
+        else {
+          close()
+          showToast(t('gallery.deleted'), 'success')
+        }
+        items.value = rest
+        if (activeAlbum.value?.id === album.id) {
+          activeAlbum.value = { ...album, item_count: Math.max(0, album.item_count - 1) }
+        }
+      }}
+    />
   )
 }
 
@@ -751,6 +1014,35 @@ async function loadMoreAlbums(spaceId?: string): Promise<void> {
   } catch {
     showToast(t('gallery.refresh_failed'), 'error')
   }
+}
+
+/** Open the album the address names: from the list when it is loaded,
+ *  else read on its own (a link, a refresh). ``false`` when it doesn't
+ *  exist here (gone, or another gallery's); a network failure is the
+ *  album's error state with Retry, never "gone". */
+async function openAlbum(id: string, spaceId?: string): Promise<boolean> {
+  const scope = spaceId ?? null
+  items.value = []
+  itemsMore.value = false
+  albumError.value = false
+  let album = albums.value.find(a => a.id === id)
+  if (!album) {
+    activeAlbum.value = null
+    try {
+      album = await api.get(`/api/gallery/albums/${encodeURIComponent(id)}`) as Album
+    } catch (err) {
+      if (wantedAlbum !== id || loadedScope !== scope) return true
+      if (err instanceof ApiError && err.status >= 400 && err.status < 500) return false
+      albumError.value = true
+      return true
+    }
+    if (wantedAlbum !== id || loadedScope !== scope) return true
+    // A household link must not open a space's album, or the reverse.
+    if ((album.space_id ?? null) !== scope) return false
+  }
+  activeAlbum.value = album
+  await loadItems(id)
+  return true
 }
 
 /** Fetch the open album's first page (or, ``quiet``, re-read as many as

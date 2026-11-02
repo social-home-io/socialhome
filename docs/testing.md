@@ -249,7 +249,8 @@ real thing: the built SPA in headless Chrome (puppeteer-core, pinned in
 ingress look-alike proxy under `/api/hassio_ingress/<token>/`, against a
 real `SH_MODE=haos` backend. It walks the haos setup, every route in
 `router.ts` on desktop and mobile, the live WebSocket, router history,
-media upload, the iframe embed and the no-ingress-user 401 screen, then
+media upload, the gallery's album and photo addresses (link, reload, Esc,
+Back), the iframe embed and the no-ingress-user 401 screen, then
 audits every request: anything outside the prefix, a foreign origin or an
 `Authorization` header fails the run.
 

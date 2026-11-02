@@ -19,8 +19,11 @@ export const routes: Record<string, ReturnType<typeof lazy>> = {
   // A space and its sections: ``/spaces/:id`` is the feed, ``/spaces/:id/
   // chat``, ``…/calendar`` etc. the rest. ONE route (optional segment) so a
   // section switch re-renders the page instead of remounting it. The
-  // first match wins, so it sits after the fixed sub-pages above.
-  '/spaces/:id/:section?': lazy(() => import('@/features/spaces/SpaceFeedPage')),
+  // first match wins, so it sits after the fixed sub-pages above. The
+  // ``:sub*`` rest is the Gallery's album / photo (``/spaces/:id/gallery/
+  // albums/:albumId/:itemId``) — the same route, so opening one never
+  // remounts the space; any other section drops a rest.
+  '/spaces/:id/:section?/:sub*': lazy(() => import('@/features/spaces/SpaceFeedPage')),
   '/join':           lazy(() => import('@/features/spaces/SpaceJoinLanding')),
   '/dms':            lazy(() => import('@/features/dms/DmInboxPage')),
   '/dms/:id':        lazy(() => import('@/features/dms/DmThreadPage')),
@@ -47,7 +50,10 @@ export const routes: Record<string, ReturnType<typeof lazy>> = {
   '/admin':          lazy(() => import('@/features/admin/AdminPage')),
   '/connections':    lazy(() => import('@/features/connections/ConnectionsPage')),
   '/friends':        lazy(() => import('@/features/friends/FriendsPage')),
-  '/gallery':        lazy(() => import('@/features/gallery/GalleryPage')),
+  // The albums, an album (``/gallery/albums/:albumId``) and a photo in
+  // the viewer (``…/:albumId/:itemId``): one route with a rest, so moving
+  // between them re-renders the page — the grid stays behind the viewer.
+  '/gallery/:sub*':  lazy(() => import('@/features/gallery/GalleryPage')),
   '/search':         lazy(() => import('@/features/search/SearchPage')),
   '/calls':          lazy(() => import('@/features/calls/CallsRedirect')),
   '/calls/:callId':  lazy(() => import('@/features/calls/InCallPage')),

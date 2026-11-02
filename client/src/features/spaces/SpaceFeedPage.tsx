@@ -265,11 +265,14 @@ export default function SpaceFeedPage() {
   // household feed pattern). Falls back to "Space" while the detail
   // request is in flight.
   const detail = spaceDetail.value
-  useTitle(
-    detail
-      ? (detail.emoji ? `${detail.emoji} ${detail.name}` : detail.name)
-      : t('spaces.space_title'),
-  )
+  // The Gallery says whose it is: "Gallery · <space>" (its page passes
+  // the same title, so neither replaces the other).
+  const topTitle = detail
+    ? (section === 'gallery'
+      ? `${t('nav.gallery')} · ${detail.name}`
+      : (detail.emoji ? `${detail.emoji} ${detail.name}` : detail.name))
+    : t('spaces.space_title')
+  useTitle(topTitle)
 
   useEffect(() => {
     loading.value = true
@@ -344,10 +347,16 @@ export default function SpaceFeedPage() {
   useEffect(() => {
     if (!loc) return
     if (parsedSection === null) { loc.route(spaceSectionPath(spaceId, 'feed'), true); return }
+    // Only the Gallery has addresses below its section (an album, a
+    // photo); anything else under a section → that section.
+    if (params.sub && parsedSection !== 'gallery') {
+      loc.route(spaceSectionPath(spaceId, parsedSection), true)
+      return
+    }
     if (params.section) return
     const legacy = legacySpaceSection(query, typeof location === 'undefined' ? '' : location.hash)
     if (legacy) loc.route(spaceSectionPath(spaceId, legacy), true)
-  }, [spaceId, params.section, query?.tab, query?.view]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [spaceId, params.section, params.sub, query?.tab, query?.view]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const features = spaceDetail.value?.features
   // The space chat is a section for a member (never a follower) while
@@ -895,6 +904,8 @@ export default function SpaceFeedPage() {
         <GalleryPage
           spaceId={spaceId}
           readOnly={roleKnown.value && !isWriterRole(viewerRole.value)}
+          canModerate={canModerate}
+          title={topTitle}
         />
       )}
 

@@ -510,6 +510,12 @@ describe('SideNav — Apps visibility (Apps redesign §2.1)', () => {
     expect(link.getAttribute('aria-current')).toBe('page')
   })
 
+  it('Gallery stays current on an album or a photo (/gallery/albums/…)', () => {
+    setUser({ is_admin: false })
+    const { getByText } = renderAt('/gallery/albums/a1/i1')
+    expect(getByText('Gallery').closest('a')!.getAttribute('aria-current')).toBe('page')
+  })
+
   it('a member sees Apps when an app is usable for them', async () => {
     setUser({ is_admin: false })
     vi.mocked(api.get).mockImplementation(async (url: string) =>

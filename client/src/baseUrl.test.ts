@@ -96,6 +96,14 @@ describe('under the HA ingress prefix (/api/hassio_ingress/<token>/)', () => {
     expect(mod.stripBase('/api/hassio_ingress/tok/apps/gift-draw/tables/s1')).toBe('/apps/gift-draw/tables/s1')
   })
 
+  it('a gallery album and photo link (/gallery/albums/:albumId/:itemId) keep the ingress prefix both ways', async () => {
+    const mod = await import('./baseUrl')
+    const { galleryPath } = await import('@/features/gallery/galleryRoutes')
+    expect(mod.addBase(galleryPath(null, 'a1', 'i1'))).toBe('/api/hassio_ingress/tok/gallery/albums/a1/i1')
+    expect(mod.addBase(galleryPath('s1', 'a1'))).toBe('/api/hassio_ingress/tok/spaces/s1/gallery/albums/a1')
+    expect(mod.stripBase('/api/hassio_ingress/tok/gallery/albums/a1/i1')).toBe('/gallery/albums/a1/i1')
+  })
+
   it('wsUrl keeps the ingress prefix, even on a nested in-app route', async () => {
     const before = location.pathname
     history.replaceState(null, '', '/api/hassio_ingress/tok/dms/conv-1')

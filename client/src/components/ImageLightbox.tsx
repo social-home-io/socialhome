@@ -91,15 +91,20 @@ function defaultAltText(item: LightboxItem): string {
 
 /** Copy a markdown-image snippet pointing at the canonical
  *  ``/api/media/{filename}`` URL so it pastes into a page editor and
- *  renders correctly on every reader's reload. */
-export async function copyReferenceForItem(item: LightboxItem): Promise<void> {
+ *  renders correctly on every reader's reload. ``notify`` says how it
+ *  went — a toast by default; the gallery viewer (drawn above the
+ *  toasts) passes its own. */
+export async function copyReferenceForItem(
+  item: LightboxItem,
+  notify: (text: string, kind: 'success' | 'error') => void = showToast,
+): Promise<void> {
   const canonical = canonicalMediaUrl(item.url)
   const snippet = `![${defaultAltText(item)}](${canonical})`
   try {
     await navigator.clipboard.writeText(snippet)
-    showToast(t('lightbox.reference_copied'), 'success')
+    notify(t('lightbox.reference_copied'), 'success')
   } catch (err) {
-    showToast(t('lightbox.copy_failed', { error: String((err as Error)?.message ?? err) }), 'error')
+    notify(t('lightbox.copy_failed', { error: String((err as Error)?.message ?? err) }), 'error')
   }
 }
 

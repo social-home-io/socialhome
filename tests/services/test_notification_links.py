@@ -135,13 +135,22 @@ SETTINGS_SECTIONS = _ts_union(
 )
 
 
+#: The space page's one route: a section, and below Gallery an album / photo.
+SPACE_ROUTE = "/spaces/:id/:section?/:sub*"
+
+
 def _match(route: str, path: str) -> dict[str, str] | None:
     """preact-iso's matcher: ``:name`` takes one segment, ``:name?`` an
-    optional one. Returns the params, or ``None`` when no match."""
+    optional one, ``:name*`` the rest (zero or more segments, joined with
+    ``/``). Returns the params, or ``None`` when no match."""
     want = [s for s in route.split("/") if s]
     got = [s for s in path.split("/") if s]
     params: dict[str, str] = {}
     for i, seg in enumerate(want):
+        if seg.startswith(":") and seg.endswith("*"):
+            if i < len(got):
+                params[seg[1:-1]] = "/".join(got[i:])
+            return params
         if seg.startswith(":"):
             name = seg[1:].rstrip("?")
             if i >= len(got):
@@ -162,8 +171,14 @@ def spa_route_for(link: str) -> str | None:
         params = _match(route, path)
         if params is None:
             continue
-        if route == "/spaces/:id/:section?" and params.get("section", "feed") not in (
-            SPACE_SECTIONS
+        if route == SPACE_ROUTE and params.get("section", "feed") not in SPACE_SECTIONS:
+            return None
+        # Only the Gallery has addresses below its section (an album, a
+        # photo); the space page sends any other rest back to the section.
+        if (
+            route == SPACE_ROUTE
+            and params.get("sub")
+            and params.get("section") != "gallery"
         ):
             return None
         if (
@@ -208,7 +223,13 @@ def _builder_links() -> set[str]:
 def test_the_route_table_parses():
     routes = _spa_routes()
     assert "/post/:id" in routes
-    assert "/spaces/:id/:section?" in routes
+    assert SPACE_ROUTE in routes
+    assert "/gallery/:sub*" in routes
+    # The gallery's album / photo addresses open, in a space only under
+    # its Gallery section.
+    assert spa_route_for("/gallery/albums/a1/i1") == "/gallery/:sub*"
+    assert spa_route_for("/spaces/s1/gallery/albums/a1/i1") == SPACE_ROUTE
+    assert spa_route_for("/spaces/s1/tasks/albums/a1") is None
     assert {"feed", "tasks", "calendar", "moderation"} <= SPACE_SECTIONS
     assert "members" in SETTINGS_SECTIONS
 

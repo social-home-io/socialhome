@@ -3,13 +3,27 @@ import { render, fireEvent, waitFor, cleanup } from '@testing-library/preact'
 
 const apiGet = vi.fn()
 const apiPost = vi.fn()
+const apiDelete = vi.fn(async () => undefined)
+class FakeApiError extends Error {
+  constructor(public status: number) { super(`HTTP ${status}`) }
+}
 vi.mock('@/api', () => ({
   api: {
     get: (...args: unknown[]) => apiGet(...args),
     post: (...args: unknown[]) => apiPost(...args),
-    patch: vi.fn(), delete: vi.fn(),
+    patch: vi.fn(),
+    delete: (...args: unknown[]) => apiDelete(...(args as [])),
   },
+  ApiError: FakeApiError,
 }))
+
+const me = {
+  value: { user_id: 'u1', is_admin: false, protected: false } as
+    { user_id: string; is_admin: boolean; protected?: boolean } | null,
+}
+vi.mock('@/store/auth', () => ({ currentUser: me }))
+const openReport = vi.fn()
+vi.mock('@/components/ReportDialog', () => ({ openReport: (...a: unknown[]) => openReport(...a) }))
 
 type Handler = (e: { type: string; data: Record<string, unknown> }) => void
 const handlers = new Map<string, Set<Handler>>()
@@ -76,16 +90,47 @@ beforeEach(() => {
     if (path === '/api/spaces/sp-1/gallery/albums') return albumRows
     if (path === '/api/gallery/albums') return albumRows
     if (path === '/api/gallery/default-album') return { album: null }
-    if (path.startsWith('/api/gallery/albums/')) return itemRows
+    if (/^\/api\/gallery\/albums\/[^/]+\/items$/.test(path)) return itemRows
+    const one = /^\/api\/gallery\/albums\/([^/]+)$/.exec(path)
+    if (one) {
+      const row = albumRows.find(a => a.id === one[1])
+      if (!row) throw new FakeApiError(404)
+      return row
+    }
     return []
   })
+  apiDelete.mockClear()
+  openReport.mockClear()
+  me.value = { user_id: 'u1', is_admin: false, protected: false }
 })
 afterEach(() => { cleanup() })
 
-async function renderOpenAlbum(props: { spaceId?: string } = { spaceId: 'sp-1' }) {
+interface PageProps { spaceId?: string; readOnly?: boolean; canModerate?: boolean }
+
+/** The gallery as the app mounts it: behind the router, at its address
+ *  (``/gallery…`` or a space's ``/spaces/:id/gallery…``). */
+async function mount(props: PageProps = { spaceId: 'sp-1' }, at?: string, state: unknown = null) {
+  // jsdom has no <base href>: ``baseUrl`` reads the document base once,
+  // at import — from the root, like the app's index.html.
+  history.replaceState(null, '', '/')
   const { default: GalleryPage } = await import('./GalleryPage')
-  const view = render(<GalleryPage {...props} />)
-  fireEvent.click(await view.findByRole('button', { name: /Open album Holiday/ }))
+  const { IngressLocationProvider } = await import('@/router/IngressLocationProvider')
+  const iso = await import('preact-iso')
+  history.replaceState(state, '', at ?? (props.spaceId ? `/spaces/${props.spaceId}/gallery` : '/gallery'))
+  const Page = (_: { path: string }) => <GalleryPage {...props} />
+  return render(
+    <IngressLocationProvider>
+      <iso.Router>
+        <Page path="/gallery/:sub*" />
+        <Page path="/spaces/:id/:section?/:sub*" />
+      </iso.Router>
+    </IngressLocationProvider>,
+  )
+}
+
+async function renderOpenAlbum(props: PageProps = { spaceId: 'sp-1' }) {
+  const view = await mount(props)
+  fireEvent.click(await view.findByRole('link', { name: /Open album Holiday/ }))
   await view.findByRole('heading', { name: /Holiday/ })
   return view
 }
@@ -117,32 +162,29 @@ describe('GalleryPage live album frames', () => {
   })
 
   it('a failed live refresh keeps the list and shows no error toast', async () => {
-    const { default: GalleryPage } = await import('./GalleryPage')
-    const view = render(<GalleryPage spaceId="sp-1" />)
-    await view.findByRole('button', { name: /Open album Holiday/ })
+    const view = await mount({ spaceId: 'sp-1' })
+    await view.findByRole('link', { name: /Open album Holiday/ })
     apiGet.mockRejectedValueOnce(new Error('offline'))
     emit('gallery.album_created', { album_id: 'al-2', space_id: 'sp-1' })
     await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(2))
-    expect(view.getByRole('button', { name: /Open album Holiday/ })).toBeTruthy()
+    expect(view.getByRole('link', { name: /Open album Holiday/ })).toBeTruthy()
     expect(showToast).not.toHaveBeenCalled()
   })
 })
 
 describe('GalleryPage for a read-only follower', () => {
   it('offers no New album / Upload — a follower only looks', async () => {
-    const { default: GalleryPage } = await import('./GalleryPage')
-    const view = render(<GalleryPage spaceId="sp-1" readOnly />)
-    await view.findByRole('button', { name: /Open album Holiday/ })
+    const view = await mount({ spaceId: 'sp-1', readOnly: true })
+    await view.findByRole('link', { name: /Open album Holiday/ })
     expect(view.queryByRole('button', { name: /New album/ })).toBeNull()
-    fireEvent.click(view.getByRole('button', { name: /Open album Holiday/ }))
+    fireEvent.click(view.getByRole('link', { name: /Open album Holiday/ }))
     await view.findByRole('heading', { name: /Holiday/ })
     expect(view.queryByRole('button', { name: /Upload/ })).toBeNull()
   })
 
   it('an empty space gallery invites no album for a follower', async () => {
     albumRows = []
-    const { default: GalleryPage } = await import('./GalleryPage')
-    const view = render(<GalleryPage spaceId="sp-1" readOnly />)
+    const view = await mount({ spaceId: 'sp-1', readOnly: true })
     await view.findByRole('heading', { name: /No albums yet/ })
     expect(view.queryByRole('button', { name: /album/i })).toBeNull()
   })
@@ -157,11 +199,11 @@ describe('GalleryPage paging (UX review #1, #2)', () => {
   it('an album of more than one page loads the rest with the last row cursor', async () => {
     itemRows = Array.from({ length: 50 }, (_, i) => item(100 - i))
     const view = await renderOpenAlbum()
-    await waitFor(() => expect(view.getAllByRole('button', { name: /^Photo/ })).toHaveLength(50))
+    await waitFor(() => expect(view.getAllByRole('link', { name: /^Photo/ })).toHaveLength(50))
     const older = [item(50), item(49)]
     apiGet.mockImplementationOnce(async () => older)
     fireEvent.click(view.getByRole('button', { name: 'Load more' }))
-    await waitFor(() => expect(view.getAllByRole('button', { name: /^Photo/ })).toHaveLength(52))
+    await waitFor(() => expect(view.getAllByRole('link', { name: /^Photo/ })).toHaveLength(52))
     const [path, q] = split(apiGet.mock.calls.at(-1)![0] as string)
     expect(path).toBe('/api/gallery/albums/al-1/items')
     expect(q).toMatchObject({ before_id: 'it-51', before: '2026-10-01T00:00:51+00:00', limit: '50' })
@@ -172,7 +214,7 @@ describe('GalleryPage paging (UX review #1, #2)', () => {
   it('a short first page offers no Load more', async () => {
     itemRows = [item(1), item(2)]
     const view = await renderOpenAlbum()
-    await waitFor(() => expect(view.getAllByRole('button', { name: /^Photo/ })).toHaveLength(2))
+    await waitFor(() => expect(view.getAllByRole('link', { name: /^Photo/ })).toHaveLength(2))
     expect(view.queryByRole('button', { name: 'Load more' })).toBeNull()
   })
 
@@ -181,14 +223,13 @@ describe('GalleryPage paging (UX review #1, #2)', () => {
       album('sys', 'Posts', { is_system: true, owner_user_id: null, created_at: '2020-01-01T00:00:00+00:00' }),
       ...Array.from({ length: 29 }, (_, i) => album(`a-${i}`, `Trip ${i}`)),
     ]
-    const { default: GalleryPage } = await import('./GalleryPage')
-    const view = render(<GalleryPage spaceId="sp-1" />)
-    await view.findByRole('button', { name: /Open album Trip 28/ })
+    const view = await mount({ spaceId: 'sp-1' })
+    await view.findByRole('link', { name: /Open album Trip 28/ })
     // At least 30 — the counts say so while more wait to load.
     expect(view.getByText('30+')).toBeTruthy()
     apiGet.mockImplementationOnce(async () => [album('a-old', 'Sommer 2024')])
     fireEvent.click(view.getByRole('button', { name: 'Load more' }))
-    expect(await view.findByRole('button', { name: /Open album Sommer 2024/ })).toBeTruthy()
+    expect(await view.findByRole('link', { name: /Open album Sommer 2024/ })).toBeTruthy()
     const [, q] = split(apiGet.mock.calls.at(-1)![0] as string)
     expect(q.before_id).toBe('a-28')
     expect(view.queryByRole('button', { name: 'Load more' })).toBeNull()
@@ -199,10 +240,9 @@ describe('GalleryPage across galleries (UX review #8)', () => {
   it('an album opened in a space gallery does not follow to /gallery', async () => {
     const first = await renderOpenAlbum({ spaceId: 'sp-1' })
     first.unmount()
-    const { default: GalleryPage } = await import('./GalleryPage')
     albumRows = [album('hh-1', 'Garden', { space_id: null })]
-    const view = render(<GalleryPage />)
-    expect(await view.findByRole('button', { name: /Open album Garden/ })).toBeTruthy()
+    const view = await mount({})
+    expect(await view.findByRole('link', { name: /Open album Garden/ })).toBeTruthy()
     expect(view.queryByRole('heading', { name: /Holiday/ })).toBeNull()
   })
 })
@@ -210,20 +250,19 @@ describe('GalleryPage across galleries (UX review #8)', () => {
 describe('GalleryPage when the network is gone', () => {
   it('a failed first load is an error with Retry — never "No albums yet"', async () => {
     apiGet.mockRejectedValueOnce(new TypeError('Failed to fetch'))
-    const { default: GalleryPage } = await import('./GalleryPage')
-    const view = render(<GalleryPage spaceId="sp-1" />)
+    const view = await mount({ spaceId: 'sp-1' })
     expect(await view.findByRole('heading', { name: "Couldn't load the albums" })).toBeTruthy()
     expect(view.queryByText('No albums yet')).toBeNull()
     expect(view.queryByText(/Failed to fetch/)).toBeNull()
     fireEvent.click(view.getByRole('button', { name: 'Retry' }))
-    expect(await view.findByRole('button', { name: /Open album Holiday/ })).toBeTruthy()
+    expect(await view.findByRole('link', { name: /Open album Holiday/ })).toBeTruthy()
   })
 
   it('back to the list while offline keeps the albums already loaded', async () => {
     const view = await renderOpenAlbum()
     apiGet.mockRejectedValueOnce(new TypeError('Failed to fetch'))
     fireEvent.click(view.getByRole('button', { name: /Albums/ }))
-    expect(await view.findByRole('button', { name: /Open album Holiday/ })).toBeTruthy()
+    expect(await view.findByRole('link', { name: /Open album Holiday/ })).toBeTruthy()
     await waitFor(() => expect(showToast).toHaveBeenCalledWith(
       "Couldn't refresh the gallery — showing what was loaded before.", 'error',
     ))
@@ -237,9 +276,8 @@ describe('GalleryPage system album (UX review #14)', () => {
       is_system: true, owner_user_id: null,
       description: 'Photos and videos shared to the feed appear here automatically.',
     })]
-    const { default: GalleryPage } = await import('./GalleryPage')
-    const view = render(<GalleryPage spaceId="sp-1" />)
-    fireEvent.click(await view.findByRole('button', { name: /Open album Posts/ }))
+    const view = await mount({ spaceId: 'sp-1' })
+    fireEvent.click(await view.findByRole('link', { name: /Open album Posts/ }))
     await view.findByRole('heading', { name: /Posts/ })
     expect(view.queryByText(/Server English Posts/)).toBeNull()
     expect(view.queryByText('Photos and videos shared to the feed appear here automatically.')).toBeNull()
@@ -252,23 +290,22 @@ describe('GalleryPage tiles', () => {
     albumRows = [album('al-1', 'Holiday', { space_id: null })]
     itemRows = [item(1, { taken_at: '2026-06-21', uploaded_by: 'u-anna' })]
     const view = await renderOpenAlbum({})
-    expect(await view.findByRole('button', { name: 'Photo from Jun 21, 2026, added by Anna' }))
+    expect(await view.findByRole('link', { name: 'Photo from Jun 21, 2026, added by Anna' }))
       .toBeTruthy()
   })
 
   it('a processing video is a placeholder that turns into the poster on media.ready', async () => {
     itemRows = [item(1, { item_type: 'video', url: 'api/media/v1.webm', media_status: 'processing' })]
     const view = await renderOpenAlbum()
-    const tile = await view.findByRole('button', { name: /processing/ })
+    const tile = await view.findByRole('img', { name: /processing/ })
     expect(tile.querySelector('img')).toBeNull()
     itemRows = [item(1, { item_type: 'video', url: 'api/media/v1.webm', media_status: 'ready' })]
     emit('media.ready', { output_filename: 'v1.webm' })
-    await waitFor(() => expect(view.getByRole('button', { name: /^Video/ }).querySelector('img')).toBeTruthy())
+    await waitFor(() => expect(view.getByRole('link', { name: /^Video/ }).querySelector('img')).toBeTruthy())
   })
 
   it('the album list has a page heading', async () => {
-    const { default: GalleryPage } = await import('./GalleryPage')
-    const view = render(<GalleryPage spaceId="sp-1" />)
+    const view = await mount({ spaceId: 'sp-1' })
     expect(await view.findByRole('heading', { level: 1, name: 'Gallery' })).toBeTruthy()
   })
 })
@@ -396,9 +433,8 @@ describe('GalleryPage upload sheet', () => {
       if (url === '/api/gallery/default-album') return { id: 'al-def', name: 'Photos', space_id: null }
       return {}
     })
-    const { default: GalleryPage } = await import('./GalleryPage')
-    const view = render(<GalleryPage />)
-    await view.findByRole('button', { name: /Open album Holiday/ })
+    const view = await mount({})
+    await view.findByRole('link', { name: /Open album Holiday/ })
     pick(view, [jpg('a.jpg'), jpg('b.jpg')])
     await view.findByRole('heading', { name: '2 added' })
     expect(apiPost).toHaveBeenCalledTimes(1)
@@ -411,8 +447,7 @@ describe('GalleryPage upload sheet', () => {
 
   it('a space gallery with no album offers no upload', async () => {
     albumRows = []
-    const { default: GalleryPage } = await import('./GalleryPage')
-    const view = render(<GalleryPage spaceId="sp-1" />)
+    const view = await mount({ spaceId: 'sp-1' })
     await view.findByRole('heading', { name: /No albums yet/ })
     expect(view.queryByRole('button', { name: /Upload/ })).toBeNull()
     expect(view.container.querySelector('[data-testid=gallery-upload-input]')).toBeNull()
@@ -420,9 +455,8 @@ describe('GalleryPage upload sheet', () => {
 
   it('a space gallery with two albums waits until one is chosen', async () => {
     albumRows = [album('al-1', 'Holiday'), album('al-2', 'Garden')]
-    const { default: GalleryPage } = await import('./GalleryPage')
-    const view = render(<GalleryPage spaceId="sp-1" />)
-    await view.findByRole('button', { name: /Open album Holiday/ })
+    const view = await mount({ spaceId: 'sp-1' })
+    await view.findByRole('link', { name: /Open album Holiday/ })
     pick(view, [jpg('a.jpg')])
     await view.findByText('Choose an album to start uploading.')
     await new Promise(r => setTimeout(r, 20))
@@ -442,5 +476,180 @@ describe('GalleryPage upload sheet', () => {
     expect(await view.findByRole('dialog')).toBeTruthy()
     fireEvent.click(view.getByRole('button', { name: 'Close' }))
     await waitFor(() => expect(view.queryByRole('dialog')).toBeNull())
+  })
+})
+
+// ─── Addresses + viewer (gallery redesign PR 1) ──────────────────────────
+
+describe('GalleryPage addresses', () => {
+  it('opening an album gives it its own address; Back returns to the list', async () => {
+    const view = await renderOpenAlbum()
+    expect(location.pathname).toBe('/spaces/sp-1/gallery/albums/al-1')
+    fireEvent.click(view.getByRole('button', { name: /Albums/ }))
+    // Opened from the list: Back is a step back in history.
+    await waitFor(() => expect(location.pathname).toBe('/spaces/sp-1/gallery'))
+    expect(await view.findByRole('link', { name: /Open album Holiday/ })).toBeTruthy()
+  })
+
+  it('an album link opens the album on a cold load, even one past the first page of albums', async () => {
+    albumRows = [album('al-1', 'Holiday', { space_id: null })]
+    apiGet.mockImplementation(async (url: string) => {
+      const [path] = split(url)
+      if (path === '/api/gallery/albums') return []          // not on the first page
+      if (path === '/api/gallery/albums/al-1') return albumRows[0]
+      if (path === '/api/gallery/albums/al-1/items') return [item(1)]
+      return []
+    })
+    const view = await mount({}, '/gallery/albums/al-1')
+    expect(await view.findByRole('heading', { name: /Holiday/ })).toBeTruthy()
+    expect(await view.findByRole('link', { name: /^Photo/ })).toBeTruthy()
+    // No list in history: Back goes to the list's address.
+    fireEvent.click(view.getByRole('button', { name: /Albums/ }))
+    await waitFor(() => expect(location.pathname).toBe('/gallery'))
+  })
+
+  it('a link to an album that is gone says so and shows the albums', async () => {
+    const view = await mount({ spaceId: 'sp-1' }, '/spaces/sp-1/gallery/albums/nope')
+    await waitFor(() => expect(location.pathname).toBe('/spaces/sp-1/gallery'))
+    expect(showToast).toHaveBeenCalledWith("This album isn't here any more.", 'info')
+    expect(await view.findByRole('link', { name: /Open album Holiday/ })).toBeTruthy()
+  })
+
+  it('a household link never opens a space album', async () => {
+    albumRows = [album('al-1', 'Holiday', { space_id: 'sp-1' })]
+    await mount({}, '/gallery/albums/al-1')
+    await waitFor(() => expect(location.pathname).toBe('/gallery'))
+  })
+
+  it('an address the gallery does not know goes to the albums', async () => {
+    await mount({ spaceId: 'sp-1' }, '/spaces/sp-1/gallery/photos/x')
+    await waitFor(() => expect(location.pathname).toBe('/spaces/sp-1/gallery'))
+  })
+
+  it('a tile opens the viewer at the photo\'s address; Close steps back to the album', async () => {
+    itemRows = [item(3), item(2), item(1)]
+    const view = await renderOpenAlbum()
+    const tiles = await view.findAllByRole('link', { name: /^Photo/ })
+    expect(tiles[1].getAttribute('href')).toBe('/spaces/sp-1/gallery/albums/al-1/it-2')
+    fireEvent.click(tiles[1])
+    await waitFor(() => expect(location.pathname).toBe('/spaces/sp-1/gallery/albums/al-1/it-2'))
+    const dialog = await view.findByRole('dialog', { name: 'Photo 2 of 3' })
+    // Next replaces the address: Back never walks through every photo.
+    const before = history.length
+    fireEvent.keyDown(dialog, { key: 'ArrowRight' })
+    await waitFor(() => expect(location.pathname).toBe('/spaces/sp-1/gallery/albums/al-1/it-1'))
+    expect(history.length).toBe(before)
+    fireEvent.click(view.getByRole('button', { name: /Close viewer/ }))
+    await waitFor(() => expect(location.pathname).toBe('/spaces/sp-1/gallery/albums/al-1'))
+    await waitFor(() => expect(view.queryByRole('dialog')).toBeNull())
+    // Focus goes back to the tile of the photo seen last.
+    await waitFor(() => expect(document.activeElement?.getAttribute('data-item-id')).toBe('it-1'))
+  })
+
+  it('a photo link opens the viewer on a cold load; Esc goes to its album', async () => {
+    albumRows = [album('al-1', 'Holiday', { space_id: null, item_count: 2 })]
+    itemRows = [item(2), item(1)]
+    const view = await mount({}, '/gallery/albums/al-1/it-1')
+    const dialog = await view.findByRole('dialog', { name: 'Photo 2 of 2' })
+    fireEvent.keyDown(dialog, { key: 'Escape' })
+    await waitFor(() => expect(location.pathname).toBe('/gallery/albums/al-1'))
+  })
+
+  it('a photo opened from the grid, then reloaded, still closes with a step back (no second album entry)', async () => {
+    albumRows = [album('al-1', 'Holiday', { space_id: null, item_count: 2 })]
+    itemRows = [item(2), item(1)]
+    const back = vi.spyOn(history, 'back').mockImplementation(() => undefined)
+    try {
+      // What the grid noted on the entry before the reload.
+      const view = await mount({}, '/gallery/albums/al-1/it-2', { shGalleryBack: '/gallery/albums/al-1' })
+      const dialog = await view.findByRole('dialog', { name: 'Photo 1 of 2' })
+      // The next photo replaces the entry — the note is written again.
+      fireEvent.keyDown(dialog, { key: 'ArrowRight' })
+      await waitFor(() => expect(location.pathname).toBe('/gallery/albums/al-1/it-1'))
+      await waitFor(() => expect((history.state as Record<string, string>)?.shGalleryBack).toBe('/gallery/albums/al-1'))
+      fireEvent.keyDown(view.getByRole('dialog'), { key: 'Escape' })
+      expect(back).toHaveBeenCalled()
+    } finally {
+      back.mockRestore()
+    }
+  })
+
+  it('a link to a photo past the loaded pages reads on until it finds it', async () => {
+    albumRows = [album('al-1', 'Holiday', { space_id: null, item_count: 51 })]
+    const first = Array.from({ length: 50 }, (_, i) => item(100 - i))
+    apiGet.mockImplementation(async (url: string) => {
+      const [path, q] = split(url)
+      if (path === '/api/gallery/albums') return albumRows
+      if (path === '/api/gallery/albums/al-1') return albumRows[0]
+      if (path === '/api/gallery/albums/al-1/items') return q.before_id ? [item(7)] : first
+      return []
+    })
+    const view = await mount({}, '/gallery/albums/al-1/it-7')
+    expect(await view.findByRole('dialog', { name: 'Photo 51 of 51' })).toBeTruthy()
+  })
+
+  it('a link to a photo that is gone says so and shows its album', async () => {
+    albumRows = [album('al-1', 'Holiday', { space_id: null })]
+    itemRows = [item(1)]
+    await mount({}, '/gallery/albums/al-1/it-404')
+    await waitFor(() => expect(location.pathname).toBe('/gallery/albums/al-1'))
+    expect(showToast).toHaveBeenCalledWith("This photo or video isn't here any more.", 'info')
+  })
+})
+
+describe('GalleryPage viewer actions follow the delete rules (#1271)', () => {
+  async function openOn(n: number, props: PageProps, row: Record<string, unknown> = {}) {
+    albumRows = [album('al-1', 'Holiday', { space_id: props.spaceId ?? null, ...row })]
+    itemRows = [item(1, { uploaded_by: 'u-anna' }), item(2, { uploaded_by: 'u1' })]
+    const base = props.spaceId ? `/spaces/${props.spaceId}/gallery` : '/gallery'
+    const view = await mount(props, `${base}/albums/al-1/it-${n}`)
+    await view.findByRole('dialog', { name: /^Photo/ })
+    return view
+  }
+
+  it('household: your own photo yes, someone else\'s no — unless you own the album or are an admin', async () => {
+    let view = await openOn(2, {}, { owner_user_id: 'u-other' })
+    expect(view.getByRole('button', { name: 'Delete' })).toBeTruthy()
+    cleanup()
+    view = await openOn(1, {}, { owner_user_id: 'u-other' })
+    expect(view.queryByRole('button', { name: 'Delete' })).toBeNull()
+    cleanup()
+    view = await openOn(1, {}, { owner_user_id: 'u1' })
+    expect(view.getByRole('button', { name: 'Delete' })).toBeTruthy()
+    cleanup()
+    me.value = { user_id: 'u1', is_admin: true }
+    view = await openOn(1, {}, { owner_user_id: 'u-other' })
+    expect(view.getByRole('button', { name: 'Delete' })).toBeTruthy()
+  })
+
+  it('a protected account deletes only its own, even in its own album', async () => {
+    me.value = { user_id: 'u1', is_admin: false, protected: true }
+    const view = await openOn(1, {}, { owner_user_id: 'u1' })
+    expect(view.queryByRole('button', { name: 'Delete' })).toBeNull()
+  })
+
+  it('the Posts album offers no Delete (its photos follow their posts)', async () => {
+    const view = await openOn(2, {}, { is_system: true, owner_user_id: null })
+    expect(view.queryByRole('button', { name: 'Delete' })).toBeNull()
+  })
+
+  it('space: a moderator may delete others\' items; a member reports them', async () => {
+    let view = await openOn(1, { spaceId: 'sp-1' })
+    expect(view.queryByRole('button', { name: 'Delete' })).toBeNull()
+    fireEvent.click(view.getByRole('button', { name: 'Report' }))
+    expect(openReport).toHaveBeenCalledWith('gallery_item', 'it-1', 'sp-1')
+    cleanup()
+    view = await openOn(1, { spaceId: 'sp-1', canModerate: true })
+    expect(view.getByRole('button', { name: 'Delete' })).toBeTruthy()
+  })
+
+  it('deleting moves on to the next photo and drops the tile', async () => {
+    const view = await openOn(2, {}, { owner_user_id: 'u1', item_count: 2 })
+    fireEvent.click(view.getByRole('button', { name: 'Delete' }))
+    expect(await view.findByRole('alertdialog', { name: 'Delete this photo?' })).toBeTruthy()
+    fireEvent.click(view.getAllByRole('button', { name: 'Delete' }).at(-1)!)
+    await waitFor(() => expect(apiDelete).toHaveBeenCalledWith('/api/gallery/items/it-2'))
+    await waitFor(() => expect(location.pathname).toBe('/gallery/albums/al-1/it-1'))
+    expect(await view.findByRole('dialog', { name: 'Photo 1 of 1' })).toBeTruthy()
   })
 })
