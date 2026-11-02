@@ -929,3 +929,24 @@ async def test_has_items_by_others(env):
     await repo.create_item(_item("it-1"))
     assert not await repo.has_items_by_others("alb-1", "a-id")
     assert await repo.has_items_by_others("alb-1", "b-id")
+
+
+async def test_removing_a_person_keeps_their_albums_and_photos(env):
+    """0001 had ``ON DELETE CASCADE`` from both columns to ``users``; 0046
+    dropped them. Guard it on the fully migrated schema: even a hard delete
+    of the ``users`` row (nothing does one today — ``deprovision`` only
+    soft-deletes and no job consumes ``grace_until``) takes no album and no
+    photo with it, nor the other people's photos in their albums."""
+    db, repo = env
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES('bob', 'b-id', 'Bob')"
+    )
+    await repo.create_album(_album("hh", space_id=None))
+    await repo.create_item(_item("mine", album_id="hh"))
+    await repo.create_item(replace(_item("bobs", album_id="hh"), uploaded_by="b-id"))
+    for table in ("gallery_albums", "gallery_items"):
+        fks = await db.fetchall(f"PRAGMA foreign_key_list({table})")
+        assert all(dict(fk)["table"] != "users" for fk in fks), table
+    await db.enqueue("DELETE FROM users WHERE user_id='a-id'")
+    assert await repo.get_album("hh") is not None
+    assert {i.id for i in await repo.list_items("hh")} == {"mine", "bobs"}
