@@ -563,7 +563,31 @@ await check('media-load-and-upload', async () => {
   if (resp.status() >= 300) problems.push(`gallery upload → ${resp.status()}`)
   await settled(page)
   await page.screenshot({ path: path.join(SHOTS, 'media-gallery-after-upload.png') })
-  return { problems, feedImages: imgs, upload: { url: resp.url(), status: resp.status() } }
+  // Upload sheet from the album list, no album chosen: the default album
+  // (api client, POST …/default-album) and the upload both stay under the
+  // prefix.
+  await page.goto(APP + 'gallery', { waitUntil: 'load' })
+  await settled(page)
+  const listInput = await step('the gallery list upload input', page.waitForSelector('[data-testid=gallery-upload-input]'))
+  const [defResp, listResp] = await Promise.all([
+    page.waitForResponse(r => r.request().method() === 'POST' && /api\/gallery\/default-album$/.test(new URL(r.url()).pathname)),
+    page.waitForResponse(r => r.request().method() === 'POST' && /api\/gallery\/albums\/[^/]+\/items$/.test(new URL(r.url()).pathname)),
+    listInput.uploadFile(file),
+  ])
+  for (const r of [defResp, listResp]) {
+    if (!underPrefix(new URL(r.url()).pathname)) problems.push(`upload sheet request outside the prefix: ${r.url()}`)
+    if (r.status() >= 300) problems.push(`upload sheet ${new URL(r.url()).pathname} → ${r.status()}`)
+  }
+  // "N added" only once the queue settled with nothing failed. The same
+  // file again is an exact duplicate (#1273) — "0 added", which is fine:
+  // the requests above are what this check is about.
+  await step('the upload sheet to say it is done', page.waitForFunction(() => /\b\d+ added\b/.test(document.querySelector('#sh-upload-sheet-title')?.textContent ?? '')))
+  await page.screenshot({ path: path.join(SHOTS, 'media-gallery-upload-sheet.png') })
+  return {
+    problems, feedImages: imgs,
+    upload: { url: resp.url(), status: resp.status() },
+    sheet: { defaultAlbum: defResp.status(), upload: listResp.status() },
+  }
 })
 
 // 6. The way Home Assistant really mounts the panel: inside an iframe.

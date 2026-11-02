@@ -31,9 +31,9 @@ import { spaceMembers, loadSpaceMembers } from '@/store/spaceMembers'
 import { failedMedia, mediaFilename, readyMedia } from '@/store/mediaReady'
 import { personLabel } from '@/utils/names'
 import { formatDayKey } from '@/utils/calendar'
-import {
-  describeUploadError, UploadHttpError, uploadHttpError,
-} from '@/utils/uploadErrors'
+import { UploadSheet } from './UploadSheet'
+import { counts, type UploadTarget } from './uploadQueue'
+import { UploadButtons, useUploadControls } from './GalleryUpload'
 
 interface Album {
   id: string
@@ -78,10 +78,6 @@ export const ITEM_PAGE = 50
  *  up to this many rows. */
 const ALBUM_MAX = 200
 const ITEM_MAX = 500
-/** Client-side size guard; the server enforces the same cap. */
-const MAX_UPLOAD_BYTES = 100 * 1024 * 1024
-/** A 429 waits and tries the same file again, this many times. */
-const MAX_RATE_RETRIES = 3
 /** While a video tile still says "Processing…", re-read the album this
  *  often — another person's upload sends this browser no ready frame. */
 const PROCESSING_POLL_MS = 10_000
@@ -183,10 +179,62 @@ export default function GalleryPage({ spaceId, readOnly = false }: GalleryPagePr
     return () => { offs.forEach((off) => off()) }
   }, [spaceId])
 
-  if (loading.value) return <Spinner />
+  // Uploads finished: quietly re-read the list (a new default album, a
+  // cover, counts) and the open album — once a second at most, not per
+  // file (live frames cover others' uploads).
+  const doneCount = counts.value.done
+  useEffect(() => {
+    if (doneCount === 0) return
+    const timer = setTimeout(() => {
+      void loadAlbums(spaceId, { quiet: true })
+      const open = activeAlbum.value
+      if (open) void loadItems(open.id, { quiet: true })
+    }, 1000)
+    return () => clearTimeout(timer)
+  }, [doneCount, spaceId])
+
+  // Upload from the album list: the household's default album (made on
+  // the first upload when there is none — no album needed first); in a
+  // space, its only album, else the person picks one in the sheet.
+  const regular = albums.value.filter(a => !a.is_system)
+  const listTarget: UploadTarget | null = spaceId
+    ? (regular.length === 1
+      ? { spaceId, albumId: regular[0].id, name: regular[0].name, isDefault: false }
+      : null)
+    : { spaceId: null, albumId: null, name: t('gallery.upload.default_album'), isDefault: true }
+  const listCanUpload = !readOnly && !albumsError.value && (!spaceId || regular.length > 0)
+  const listControls = useUploadControls(listTarget, listCanUpload && !activeAlbum.value && !loading.value)
+
+  const openAlbumById = async (id: string) => {
+    const known = albums.value.find(a => a.id === id)
+    try {
+      const a = known ?? await api.get(`/api/gallery/albums/${id}`) as Album
+      activeAlbum.value = a
+      items.value = []
+      itemsMore.value = false
+      await loadItems(a.id)
+    } catch {
+      showToast(t('gallery.load_items_error'), 'error')
+    }
+  }
+
+  const sheet = (
+    <UploadSheet
+      spaceId={spaceId ?? null}
+      albums={albums.value}
+      onOpenAlbum={(id) => void openAlbumById(id)}
+      onAlbumCreated={() => void loadAlbums(spaceId, { quiet: true })}
+      onCamera={activeAlbum.value ? undefined : listControls.camera}
+      fromCamera={listControls.fromCamera}
+    />
+  )
+
+  if (loading.value) return <><Spinner />{sheet}</>
 
   if (activeAlbum.value) {
     return (
+      <>
+      {sheet}
       <AlbumDetail
         album={activeAlbum.value}
         readOnly={readOnly}
@@ -200,6 +248,7 @@ export default function GalleryPage({ spaceId, readOnly = false }: GalleryPagePr
           void loadAlbums(spaceId, { quiet: true, toastOnFail: true })
         }}
       />
+      </>
     )
   }
 
@@ -219,6 +268,8 @@ export default function GalleryPage({ spaceId, readOnly = false }: GalleryPagePr
 
   return (
     <div class="sh-gallery">
+      {sheet}
+      {listControls.elements}
       <h1 class="sr-only">{t('nav.gallery')}</h1>
       {!albumsError.value && (
         <header class="sh-gallery-hero">
@@ -229,8 +280,14 @@ export default function GalleryPage({ spaceId, readOnly = false }: GalleryPagePr
             {t(isOne(itemCount) && !more ? 'gallery.media_word_one' : 'gallery.media_word')}
           </div>
           {!readOnly && (
-            <div class="sh-gallery-hero-actions">
-              <Button onClick={() => (showCreate.value = true)}>{t('gallery.new_album_btn')}</Button>
+            <div class="sh-gallery-hero-actions sh-upload-actions">
+              {listCanUpload && <UploadButtons controls={listControls} />}
+              <Button
+                variant={listCanUpload ? 'secondary' : 'primary'}
+                onClick={() => (showCreate.value = true)}
+              >
+                {t('gallery.new_album_btn')}
+              </Button>
             </div>
           )}
         </header>
@@ -258,7 +315,18 @@ export default function GalleryPage({ spaceId, readOnly = false }: GalleryPagePr
           <div aria-hidden="true">📸</div>
           <h2>{t('gallery.empty_title')}</h2>
           <p>{spaceId ? t('gallery.empty_body_space') : t('gallery.empty_body_household')}</p>
-          {!readOnly && (
+          {!readOnly && listCanUpload && (
+            <>
+              <p>{t('gallery.upload.empty_hint', { name: t('gallery.upload.default_album') })}</p>
+              <div class="sh-row sh-upload-actions sh-upload-actions--center">
+                <UploadButtons controls={listControls} />
+                <Button variant="secondary" onClick={() => (showCreate.value = true)}>
+                  {t('gallery.create_first')}
+                </Button>
+              </div>
+            </>
+          )}
+          {!readOnly && !listCanUpload && (
             <Button onClick={() => (showCreate.value = true)}>
               {t('gallery.create_first')}
             </Button>
@@ -401,23 +469,11 @@ function isProcessing(item: Item): boolean {
   return !readyMedia.value.has(fn) && !failedMedia.value.has(fn)
 }
 
-interface UploadState {
-  /** 1-based index of the file going up now, and how many in the batch. */
-  index: number
-  total: number
-  pct: number
-  processing: boolean
-}
-
 function AlbumDetail({ album, onBack, readOnly = false }: {
   album: Album
   onBack: () => void
   readOnly?: boolean
 }) {
-  const [upload, setUpload] = useState<UploadState | null>(null)
-  const [dragOver, setDragOver] = useState(false)
-  const inputRef = useRef<HTMLInputElement | null>(null)
-
   const anyProcessing = items.value.some(isProcessing)
   // Another person's video sends this browser no ready frame: re-read
   // the album now and then while a tile still says "Processing…".
@@ -428,102 +484,6 @@ function AlbumDetail({ album, onBack, readOnly = false }: {
     }, PROCESSING_POLL_MS)
     return () => clearInterval(timer)
   }, [anyProcessing, album.id])
-
-  const sendOnce = (file: File, index: number, total: number): Promise<void> => {
-    return new Promise((resolve, reject) => {
-      const fd = new FormData()
-      fd.append('file', file)
-      const xhr = new XMLHttpRequest()
-      // Raw XHR (not the ``api`` client) so we can wire
-      // ``xhr.upload.onprogress`` for the progress bar — ``fetch``
-      // doesn't expose upload-stream progress events. The URL is
-      // relative (no leading slash) so it resolves against
-      // ``<base href>`` — under HA Supervisor ingress that's the
-      // ``/api/hassio_ingress/<token>/`` prefix; an absolute
-      // ``/api/...`` would bypass it and 404 (#303).
-      xhr.open('POST', `api/gallery/albums/${album.id}/items`, true)
-      xhr.withCredentials = true
-      const tok = localStorage.getItem('sh_token')
-      if (tok) xhr.setRequestHeader('Authorization', `Bearer ${tok}`)
-      xhr.upload.onprogress = (e) => {
-        if (e.lengthComputable) {
-          setUpload({ index, total, pct: (e.loaded / e.total) * 100, processing: false })
-        }
-      }
-      // Bytes fully sent — the server is now processing before it responds.
-      xhr.upload.onload = () => setUpload({ index, total, pct: 100, processing: true })
-      xhr.onload = () => {
-        if (xhr.status >= 200 && xhr.status < 300) resolve()
-        else {
-          const err = uploadHttpError(xhr.status, xhr.responseText)
-          const wait = Number(xhr.getResponseHeader('Retry-After'))
-          ;(err as UploadHttpError & { retryAfterS?: number }).retryAfterS =
-            Number.isFinite(wait) && wait > 0 ? wait : undefined
-          reject(err)
-        }
-      }
-      xhr.onerror = () => reject(new Error('Network error'))
-      xhr.send(fd)
-    })
-  }
-
-  /** One file, one at a time. A 429 is a pause, not a failure: wait as
-   *  long as the server asks (else a few seconds) and send it again. */
-  const uploadOne = async (file: File, index: number, total: number): Promise<void> => {
-    if (file.size > MAX_UPLOAD_BYTES) throw new UploadHttpError(413, 'PAYLOAD_TOO_LARGE')
-    for (let attempt = 0; ; attempt++) {
-      setUpload({ index, total, pct: 0, processing: false })
-      try {
-        await sendOnce(file, index, total)
-        return
-      } catch (err) {
-        if (!(err instanceof UploadHttpError) || err.status !== 429 || attempt >= MAX_RATE_RETRIES) {
-          throw err
-        }
-        const after = (err as UploadHttpError & { retryAfterS?: number }).retryAfterS
-        await new Promise(r => setTimeout(r, Math.min(after ?? 5 * (attempt + 1), 60) * 1000))
-      }
-    }
-  }
-
-  const handleFiles = async (fileList: FileList | null) => {
-    if (!fileList || fileList.length === 0) return
-    const files = Array.from(fileList)
-    const total = files.length
-    let ok = 0
-    let firstError: { err: unknown; file: File } | null = null
-    for (let i = 0; i < total; i++) {
-      try {
-        await uploadOne(files[i], i + 1, total)
-        ok++
-      } catch (err: unknown) {
-        firstError ??= { err, file: files[i] }
-      }
-    }
-    setUpload(null)
-    const failed = total - ok
-    if (failed === 0) {
-      showToast(
-        total === 1 ? t('gallery.uploaded_one') : t('gallery.uploaded', { n: String(total) }),
-        'success',
-      )
-    } else {
-      // One honest summary — not a toast per file, and never "Uploaded
-      // 80 items" when some of them didn't make it.
-      const reason = describeUploadError(firstError!.err, { file: firstError!.file })
-      showToast(
-        total === 1
-          ? reason
-          : ok === 0
-            ? t('gallery.upload_none', { reason })
-            : t('gallery.uploaded_partial', {
-              ok: String(ok), n: String(total), failed: String(failed), reason,
-            }),
-        'error',
-      )
-    }
-    await loadItems(album.id, { quiet: true })
-  }
 
   const loaded = items.value
   const lightboxItems: LightboxItem[] = loaded.map(i => ({
@@ -541,27 +501,17 @@ function AlbumDetail({ album, onBack, readOnly = false }: {
       : undefined,
   }))
 
-  // Drag-drop is a noop on the system album — the album rejects
-  // direct uploads server-side too, but handling the UI ourselves
-  // avoids a needless 403 round-trip.
+  // No uploads into the system album (the server refuses them too).
   const canUpload = !album.is_system && !readOnly
-  const dragHandlers = !canUpload ? {} : {
-    onDragOver: (e: DragEvent) => { e.preventDefault(); setDragOver(true) },
-    onDragLeave: () => setDragOver(false),
-    onDrop: (e: DragEvent) => {
-      e.preventDefault()
-      setDragOver(false)
-      void handleFiles(e.dataTransfer?.files ?? null)
-    },
-  }
-
-  const pct = upload ? (upload.processing ? 100 : Math.round(upload.pct)) : 0
+  const controls = useUploadControls({
+    spaceId: album.space_id,
+    albumId: album.id,
+    name: albumName(album),
+    isDefault: false,
+  }, canUpload)
 
   return (
-    <div
-      class={`sh-album-detail ${dragOver ? 'sh-album-detail--drag' : ''}`}
-      {...dragHandlers}
-    >
+    <div class="sh-album-detail">
       <header class="sh-page-header">
         <Button variant="secondary" onClick={onBack}>← {t('gallery.albums')}</Button>
         <h1 style={{ margin: 0 }}>
@@ -574,24 +524,12 @@ function AlbumDetail({ album, onBack, readOnly = false }: {
           )}
         </h1>
         {canUpload && (
-          <div class="sh-row">
-            <Button onClick={() => inputRef.current?.click()} disabled={upload !== null}>
-              {t('gallery.upload_btn')}
-            </Button>
-            <input
-              ref={inputRef}
-              type="file"
-              accept="image/jpeg,image/png,image/webp,image/gif,image/heic,video/mp4,video/webm,video/quicktime"
-              multiple
-              onChange={(e) => {
-                void handleFiles((e.target as HTMLInputElement).files)
-                ;(e.target as HTMLInputElement).value = ''
-              }}
-              class="sr-only"
-            />
+          <div class="sh-row sh-upload-actions">
+            <UploadButtons controls={controls} />
           </div>
         )}
       </header>
+      {controls.elements}
 
       {/* The system album's description is the server's English constant;
         * its translated hint below says the same thing. */}
@@ -601,40 +539,6 @@ function AlbumDetail({ album, onBack, readOnly = false }: {
         <div class="sh-album-system-hint">
           <span aria-hidden="true">📸</span>{' '}
           {t('gallery.system_hint')}
-        </div>
-      )}
-
-      {upload !== null && (
-        <div
-          class={`sh-upload-progress${upload.processing ? ' sh-upload-progress--processing' : ''}`}
-          role="progressbar"
-          aria-valuenow={pct} aria-valuemin={0} aria-valuemax={100}
-          aria-valuetext={upload.total > 1
-            ? `${t('gallery.upload_count', { i: String(upload.index), n: String(upload.total) })} · ${pct}%`
-            : `${pct}%`}
-        >
-          <div class="sh-upload-progress__header">
-            <span class="sh-upload-progress__status">
-              {upload.processing && <span class="sh-upload-progress__spinner" aria-hidden="true" />}
-              {upload.processing
-                ? t('media.processing')
-                : t('media.uploading_percent', { n: String(pct) })}
-            </span>
-            {upload.total > 1 && (
-              <span class="sh-upload-progress__pct">
-                {t('gallery.upload_count', { i: String(upload.index), n: String(upload.total) })}
-              </span>
-            )}
-          </div>
-          <div class="sh-upload-progress__track">
-            <div class="sh-upload-progress__fill" style={{ width: `${pct}%` }} />
-          </div>
-        </div>
-      )}
-
-      {dragOver && canUpload && (
-        <div class="sh-drop-overlay" aria-hidden="true">
-          {t('gallery.drop_to_upload')}
         </div>
       )}
 

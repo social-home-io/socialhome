@@ -4,6 +4,8 @@ Endpoints:
 
 * ``GET    /api/gallery/albums``                        — list household albums
 * ``POST   /api/gallery/albums``                        — create household album
+* ``GET    /api/gallery/default-album``                 — the default album
+* ``POST   /api/gallery/default-album``                 — find or make it
 * ``GET    /api/spaces/{space_id}/gallery/albums``      — list albums
 * ``POST   /api/spaces/{space_id}/gallery/albums``      — create album
 * ``GET    /api/gallery/albums/{album_id}``             — album detail
@@ -158,6 +160,38 @@ class HouseholdAlbumCollectionView(BaseView):
             description=body.get("description"),
         )
         return web.json_response(_album_signed(self.request, album), status=201)
+
+
+class DefaultAlbumView(BaseView):
+    """GET/POST /api/gallery/default-album — where a household upload goes
+    when nobody picked an album.
+
+    GET answers ``{"album": {...}}`` or ``{"album": null}`` (none yet).
+    POST ``{name}`` returns the default album, making it under *name* (the
+    uploader's word for "Photos", 1–80 characters) when there is none:
+    201 when made, 200 when it already existed."""
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        album = await self.svc(K.gallery_service_key).get_default_album(
+            actor_user_id=ctx.user_id
+        )
+        return web.json_response(
+            {"album": _album_signed(self.request, album) if album else None}
+        )
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        body = await self.body()
+        album, created = await self.svc(K.gallery_service_key).ensure_default_album(
+            actor_user_id=ctx.user_id,
+            name=str(body.get("name", "")),
+        )
+        return web.json_response(
+            _album_signed(self.request, album), status=201 if created else 200
+        )
 
 
 class SpaceAlbumCollectionView(BaseView):
