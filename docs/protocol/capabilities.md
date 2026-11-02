@@ -27,7 +27,12 @@ build declares its current version in
 [`socialhome.domain.federation_capabilities.OURS`](../../socialhome/domain/federation_capabilities.py).
 At startup the
 [`CapabilitiesOutbound`](../../socialhome/services/capabilities_outbound.py)
-service fans out a single envelope to every confirmed peer:
+service fans out a single envelope to every confirmed peer. The fan-out
+runs in the background
+([`StartupAnnouncer`](../../socialhome/infrastructure/startup_announcer.py)),
+after the post-restore `URL_UPDATED` and before the post-upgrade capability
+re-sync, so the household starts listening without waiting on a slow or
+silent peer; anything undelivered rides the outbox as usual:
 
 ```
 FederationEventType.INSTANCE_CAPABILITIES_UPDATED

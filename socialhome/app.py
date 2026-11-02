@@ -186,6 +186,7 @@ from .infrastructure.poll_deadline_scheduler import PollDeadlineScheduler
 from .infrastructure.post_draft_scheduler import PostDraftCleanupScheduler
 from .infrastructure.replay_cache_scheduler import ReplayCachePruneScheduler
 from .infrastructure.space_retention_scheduler import SpaceRetentionScheduler
+from .infrastructure.startup_announcer import StartupAnnouncer
 from .infrastructure.task_deadline_scheduler import TaskDeadlineScheduler
 from .infrastructure.task_recurrence_scheduler import TaskRecurrenceScheduler
 from .infrastructure.user_identity import ensure_user_identities
@@ -3800,6 +3801,7 @@ def create_app(config: Config | None = None) -> web.Application:
     stale_call_scheduler: StaleCallCleanupScheduler | None = None
     gfs_ws_supervisor: GfsWebSocketSupervisor | None = None
     gfs_capability_warmup: GfsCapabilityWarmup | None = None
+    startup_announcer: StartupAnnouncer | None = None
     gfs_info_refresh: GfsInfoRefreshScheduler | None = None
     gfs_reconcile_retry: GfsReconcileRetry | None = None
     routed_handler: SpaceRoutedHandler | None = None
@@ -5630,18 +5632,6 @@ def create_app(config: Config | None = None) -> web.Application:
         # built there. First run right away, then every 5 minutes.
         await household_zone_sync.start()
 
-        # 7b. One-shot post-restore peer reconnect. Runs after the adapter's
-        #     federation base is set (above) and after the federation stack is
-        #     wired (url_update_outbound exists). On the FIRST boot after a
-        #     Recovery Kit restore it fans URL_UPDATED out to every confirmed
-        #     peer so they update our inbox URL; guarded to run exactly once.
-        #     (The authority rotation for a restore already ran, before any
-        #     transport started — see above.)
-        try:
-            await recovery_reconnect_service.maybe_reconnect()
-        except Exception:
-            log.warning("post-restore reconnect hook failed", exc_info=True)
-
         # 8. Default-calendar backfill. Runs after the adapter (so the
         #    headless ``provision_admin`` path is included) and after the
         #    HA bootstrap (so synced persons are visible). Idempotent —
@@ -5665,34 +5655,43 @@ def create_app(config: Config | None = None) -> web.Application:
         except Exception:
             log.exception("gfs: owner GFS selection reconcile failed at startup")
 
-        # 9. Advertise our protocol_version to every confirmed peer.
-        # Fire-and-forget — per-peer failures land in the outbox retry
-        # queue, and peers that haven't yet replayed our announcement
-        # default to ``proto_version=1``, so outbound senders gating on
-        # ``peer_supports(...)`` stay safe while the first exchange is
-        # in flight. Idempotent across restarts.
-        cap_outbound = app.get(K.capabilities_outbound_key)
-        if cap_outbound is not None:
-            try:
+        # 9. Tell paired households we're back — in the background, so the
+        #    listen port opens now. Each step awaits one federation send per
+        #    confirmed peer (RTC offer + inbox POST, 10 s each); awaited here,
+        #    one silent peer held the household off the network for tens of
+        #    seconds. Order is kept; each step is fail-soft and anything
+        #    undelivered sits in the outbox as before.
+        #    a. One-shot post-restore reconnect: on the FIRST boot after a
+        #       Recovery Kit restore, URL_UPDATED to every confirmed peer
+        #       (guarded to run once; the authority rotation for a restore
+        #       already ran above, before any transport started).
+        #    b. Our protocol_version to every confirmed peer. Peers that
+        #       haven't got it yet default to ``proto_version=1``, so
+        #       senders gating on ``peer_supports(...)`` stay safe meanwhile.
+        #    c. After an upgrade (OURS increased since last boot), ask peers
+        #       to re-advertise theirs — capabilities only, no content
+        #       replay; one-shot per upgrade (persisted last-OURS).
+        async def _announce_capabilities() -> None:
+            cap_outbound = app.get(K.capabilities_outbound_key)
+            if cap_outbound is not None:
                 await cap_outbound.publish()
-            except Exception as exc:  # pragma: no cover
-                log.warning(
-                    "capabilities outbound at startup failed: %s", exc, exc_info=True
-                )
 
-        # 9b. After an upgrade (OURS increased since last boot), ask confirmed
-        # peers to re-advertise their capabilities so our cached proto_version
-        # for each peer refreshes promptly. Capabilities-scope only — no
-        # content replay — so it can't cause a resync storm. One-shot per
-        # upgrade, guarded by the persisted last-OURS on the self-row.
-        try:
+        async def _resync_capabilities_if_upgraded() -> None:
             await request_capability_resync_if_upgraded(
                 federation=federation_service,
                 federation_repo=federation_repo,
                 identity_repo=federation_repo,
             )
-        except Exception as exc:  # pragma: no cover
-            log.warning("capability-resync on upgrade failed: %s", exc, exc_info=True)
+
+        nonlocal startup_announcer
+        startup_announcer = StartupAnnouncer(
+            [
+                ("post-restore reconnect", recovery_reconnect_service.maybe_reconnect),
+                ("capabilities announcement", _announce_capabilities),
+                ("capability re-sync on upgrade", _resync_capabilities_if_upgraded),
+            ]
+        )
+        await startup_announcer.start()
 
         # 10. Household dashboard listener — last, once everything it reads
         #     is up. A taken port must not stop the main app: the admin UI
@@ -5713,6 +5712,10 @@ def create_app(config: Config | None = None) -> web.Application:
 
     async def _on_cleanup(app: web.Application) -> None:
         log.info("socialhome: shutting down")
+        # Startup announcements still in flight finish (or are cut off)
+        # while the federation client and the database are still up.
+        if startup_announcer is not None:
+            await startup_announcer.stop()
         # Highlight events already decided (frames, audience changes,
         # deletes) are published off the author's lock; send them while
         # the federation client and the database are still up.
