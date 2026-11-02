@@ -58,6 +58,7 @@ from ..domain.events import (
     GalleryAlbumDeleted,
     GalleryAlbumUpdated,
     GalleryItemDeleted,
+    GalleryItemRestored,
     GalleryItemUploaded,
     HighlightAudienceChanged,
     HighlightFrameAdded,
@@ -360,6 +361,7 @@ class RealtimeService:
         self._bus.subscribe(GalleryAlbumDeleted, self._on_gallery_album_deleted)
         self._bus.subscribe(GalleryItemUploaded, self._on_gallery_item_uploaded)
         self._bus.subscribe(GalleryItemDeleted, self._on_gallery_item_deleted)
+        self._bus.subscribe(GalleryItemRestored, self._on_gallery_item_restored)
         self._bus.subscribe(UserStatusChanged, self._on_user_status)
         self._bus.subscribe(PresenceUpdated, self._on_presence_updated)
         # Online status (session presence) — orthogonal to physical
@@ -1480,6 +1482,17 @@ class RealtimeService:
                 "space_id": event.space_id,
             },
             event.space_id,
+        )
+
+    async def _on_gallery_item_restored(self, event: GalleryItemRestored) -> None:
+        # Household only (a space item has no trash): an open album, the
+        # album list (a restored album reappears) and the trash refetch.
+        await self._broadcast_household(
+            {
+                "type": "gallery.item_restored",
+                "album_id": event.album_id,
+                "item_id": event.item_id,
+            }
         )
 
     async def _broadcast_gallery(self, frame: dict, space_id: str | None) -> None:

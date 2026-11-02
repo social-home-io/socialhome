@@ -12,7 +12,11 @@ Endpoints:
 * ``POST   /api/gallery/albums/{album_id}/retention``   — set retention_exempt
 * ``GET    /api/gallery/albums/{album_id}/items``       — list items
 * ``POST   /api/gallery/albums/{album_id}/items``       — upload item
-* ``DELETE /api/gallery/items/{item_id}``               — delete item
+* ``DELETE /api/gallery/items/{item_id}``               — delete item (a
+  household item goes to the trash)
+* ``POST   /api/gallery/items/{item_id}/restore``       — back from the trash
+* ``GET    /api/gallery/trash``                         — the household trash
+* ``DELETE /api/gallery/trash/{item_id}``               — delete for good
 
 Both lists page newest first with ``?limit=&before=&before_id=`` (see
 :func:`_page_query`); items newest first the same way.
@@ -21,12 +25,14 @@ Both lists page newest first with ``?limit=&before=&before_id=`` (see
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime, timedelta
 
 from aiohttp import web
 from aiohttp.multipart import BodyPartReader
 
 from .. import app_keys as K
 from ..domain.errors import PayloadTooLargeError
+from ..domain.gallery import TRASH_RETENTION_DAYS, GalleryTrashItem, UploadOutcome
 from ..hardening import read_body_capped, read_part_capped
 from ..media_signer import sign_media_urls_in
 from .base import BaseView
@@ -314,14 +320,21 @@ class AlbumItemCollectionView(BaseView):
             if not content_type:
                 content_type = "application/octet-stream"
 
-        item = await self.svc(K.gallery_service_key).upload_item(
+        upload = await self.svc(K.gallery_service_key).upload_item(
             album_id,
             data=data,
             content_type=content_type,
             caption=caption,
             uploader_user_id=ctx.user_id,
         )
+        item = upload.item
         payload = _item_signed(self.request, item)
+        if upload.outcome is not UploadOutcome.CREATED:
+            # The same file is already here (or was in the trash and came
+            # back): nothing new was stored. 200 with the existing item, so
+            # the SPA can count "already here" rather than a new upload.
+            payload["duplicate"] = upload.outcome.value
+            return web.json_response(payload, status=200)
         # A freshly-uploaded video transcodes in the background — the
         # ``.webm`` + poster don't exist on disk yet. Tell the SPA to
         # render a "processing" placeholder; the LIST endpoint (T4)
@@ -342,3 +355,70 @@ class GalleryItemDetailView(BaseView):
             actor_user_id=ctx.user_id,
         )
         return web.Response(status=204)
+
+
+#: Default page of the trash list.
+TRASH_PAGE: int = 100
+
+
+class GalleryTrashCollectionView(BaseView):
+    """GET /api/gallery/trash — the household trash the caller may see."""
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        try:
+            limit = int(self.request.query.get("limit", TRASH_PAGE))
+        except ValueError:
+            limit = TRASH_PAGE
+        rows = await self.svc(K.gallery_service_key).list_trash(
+            actor_user_id=ctx.user_id,
+            limit=limit,
+            before_id=self.request.query.get("before_id") or None,
+        )
+        return web.json_response([_trash_signed(self.request, t) for t in rows])
+
+
+class GalleryTrashItemView(BaseView):
+    """DELETE /api/gallery/trash/{item_id} — delete one item for good."""
+
+    async def delete(self) -> web.Response:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        await self.svc(K.gallery_service_key).purge_trashed_item(
+            self.match("item_id"), actor_user_id=ctx.user_id
+        )
+        return web.Response(status=204)
+
+
+class GalleryItemRestoreView(BaseView):
+    """POST /api/gallery/items/{item_id}/restore — back from the trash."""
+
+    async def post(self) -> web.Response:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        item = await self.svc(K.gallery_service_key).restore_item(
+            self.match("item_id"), actor_user_id=ctx.user_id
+        )
+        return web.json_response(_item_signed(self.request, item))
+
+
+def _trash_signed(request: web.Request, t: GalleryTrashItem) -> dict:
+    """A trash row: the item as it was (signed URLs), when and by whom it
+    was deleted, when the purge removes it, and the album it returns to."""
+    payload = _item_signed(request, t.item)
+    # ``deleted_at`` is naive UTC (SQLite ``datetime('now')`` shape); the
+    # wire carries it tz-aware.
+    deleted = datetime.fromisoformat(t.deleted_at)
+    if deleted.tzinfo is None:
+        deleted = deleted.replace(tzinfo=UTC)
+    payload.update(
+        {
+            "deleted_at": deleted.isoformat(),
+            "deleted_by": t.deleted_by,
+            "purge_after": (deleted + timedelta(days=TRASH_RETENTION_DAYS)).isoformat(),
+            "album_name": t.album_name,
+            "album_in_trash": t.album_in_trash,
+        }
+    )
+    return payload

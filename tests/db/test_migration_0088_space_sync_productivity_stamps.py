@@ -32,8 +32,10 @@ STAMPED: dict[str, frozenset[str]] = {
     "space_posts": frozenset(),
     "space_post_comments": frozenset(),
     "conversation_messages": frozenset({"media_sync_status"}),
-    "gallery_albums": frozenset({"updated_at"}),
-    "gallery_items": frozenset(),
+    # 0139: household-only columns — a space album is always "everyone",
+    # and the upload digest never leaves the household.
+    "gallery_albums": frozenset({"updated_at", "audience"}),
+    "gallery_items": frozenset({"content_sha256"}),
     "space_calendar_events": frozenset({"updated_at", "notified_at"}),
     "stickies": frozenset({"updated_at"}),
     "space_zones": frozenset({"updated_at"}),

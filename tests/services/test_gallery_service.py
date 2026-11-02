@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import pathlib
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
+import av
 import pytest
 from PIL import Image
 
@@ -15,7 +17,19 @@ from socialhome.crypto import (
     generate_identity_keypair,
 )
 from socialhome.db.database import AsyncDatabase
-from socialhome.domain.events import GalleryAlbumDeleted, GalleryAlbumUpdated
+from socialhome.domain.events import (
+    GalleryAlbumDeleted,
+    GalleryAlbumUpdated,
+    GalleryItemDeleted,
+    GalleryItemRestored,
+    UserDeprovisioned,
+)
+from socialhome.domain.gallery import UploadOutcome
+from socialhome.domain.media_constraints import (
+    IMAGE_MAX_DIMENSION,
+    THUMBNAIL_PX,
+    VIDEO_MAX_DIMENSION,
+)
 from socialhome.domain.post import Post, PostType
 from socialhome.domain.preferences import FeatureDisabledError
 from socialhome.domain.space import SpaceMember, SubscriberReadOnlyError
@@ -413,13 +427,15 @@ async def test_a_space_upload_id_commits_to_its_uploader(env):
     for album_id, uploader in ((space_album.id, "a-id"), (home_album.id, "a-id")):
         buf = io.BytesIO()
         Image.new("RGB", (8, 8), (1, 2, 3)).save(buf, format="JPEG")
-        item = await env.upload_item(
-            album_id,
-            data=buf.getvalue(),
-            content_type="image/jpeg",
-            caption=None,
-            uploader_user_id=uploader,
-        )
+        item = (
+            await env.upload_item(
+                album_id,
+                data=buf.getvalue(),
+                content_type="image/jpeg",
+                caption=None,
+                uploader_user_id=uploader,
+            )
+        ).item
         ids.append(item.id)
     assert (
         check_owner_bound_id(
@@ -436,7 +452,9 @@ async def test_a_space_upload_id_commits_to_its_uploader(env):
     assert not is_owner_bound(ids[1])
 
 
-async def test_delete_item_removes_files_from_disk(env):
+async def test_a_deleted_household_photo_keeps_its_files_until_the_purge(env):
+    """A household delete is a move to the trash: the files stay for the
+    30 days a restore needs them, then the purge removes them."""
     import io
 
     from PIL import Image
@@ -448,13 +466,15 @@ async def test_delete_item_removes_files_from_disk(env):
     )
     buf = io.BytesIO()
     Image.new("RGB", (64, 48), (10, 120, 200)).save(buf, format="JPEG")
-    item = await env.upload_item(
-        album.id,
-        data=buf.getvalue(),
-        content_type="image/jpeg",
-        caption=None,
-        uploader_user_id="a-id",
-    )
+    item = (
+        await env.upload_item(
+            album.id,
+            data=buf.getvalue(),
+            content_type="image/jpeg",
+            caption=None,
+            uploader_user_id="a-id",
+        )
+    ).item
     media_dir = env._media_dir  # type: ignore[attr-defined]
     full = media_dir / item.url.rsplit("/", 1)[-1]
     thumb = media_dir / item.thumbnail_url.rsplit("/", 1)[-1]
@@ -462,13 +482,15 @@ async def test_delete_item_removes_files_from_disk(env):
     assert thumb.exists()
 
     await env.delete_item(item.id, actor_user_id="a-id")
+    assert full.exists() and thumb.exists()
+    await env.purge_expired_trash(now=datetime.now(UTC) + timedelta(days=31))
     assert not full.exists()
     assert not thumb.exists()
 
 
-async def test_delete_album_removes_its_items_files_from_disk(env):
-    """The cascade takes the item rows; the files go with them unless
-    another row still names them."""
+async def test_a_deleted_album_s_files_go_with_the_trash_purge(env):
+    """An album delete sends its photos to the trash (files kept); the
+    purge takes the files unless another row still names them."""
     import dataclasses
     import io
 
@@ -478,22 +500,26 @@ async def test_delete_album_removes_its_items_files_from_disk(env):
     other = await env.create_album(space_id=None, owner_user_id="a-id", name="O")
     buf = io.BytesIO()
     Image.new("RGB", (64, 48), (10, 120, 200)).save(buf, format="JPEG")
-    item = await env.upload_item(
-        album.id,
-        data=buf.getvalue(),
-        content_type="image/jpeg",
-        caption=None,
-        uploader_user_id="a-id",
-    )
+    item = (
+        await env.upload_item(
+            album.id,
+            data=buf.getvalue(),
+            content_type="image/jpeg",
+            caption=None,
+            uploader_user_id="a-id",
+        )
+    ).item
     buf2 = io.BytesIO()
     Image.new("RGB", (32, 32), (200, 20, 20)).save(buf2, format="JPEG")
-    kept = await env.upload_item(
-        album.id,
-        data=buf2.getvalue(),
-        content_type="image/jpeg",
-        caption=None,
-        uploader_user_id="a-id",
-    )
+    kept = (
+        await env.upload_item(
+            album.id,
+            data=buf2.getvalue(),
+            content_type="image/jpeg",
+            caption=None,
+            uploader_user_id="a-id",
+        )
+    ).item
     await env._repo.create_item(  # type: ignore[attr-defined]
         dataclasses.replace(kept, id="elsewhere", album_id=other.id)
     )
@@ -503,6 +529,8 @@ async def test_delete_album_removes_its_items_files_from_disk(env):
     assert all(p.exists() for p in gone + stay)
 
     await env.delete_album(album.id, actor_user_id="a-id")
+    assert all(p.exists() for p in gone + stay)
+    await env.purge_expired_trash(now=datetime.now(UTC) + timedelta(days=31))
     assert not any(p.exists() for p in gone)
     assert all(p.exists() for p in stay)
 
@@ -520,13 +548,15 @@ async def test_a_cover_renders_only_when_the_item_is_in_that_album(env):
     other = await env.create_album(space_id=None, owner_user_id="a-id", name="O")
     buf = io.BytesIO()
     Image.new("RGB", (64, 48), (10, 120, 200)).save(buf, format="JPEG")
-    own = await env.upload_item(
-        album.id,
-        data=buf.getvalue(),
-        content_type="image/jpeg",
-        caption=None,
-        uploader_user_id="a-id",
-    )
+    own = (
+        await env.upload_item(
+            album.id,
+            data=buf.getvalue(),
+            content_type="image/jpeg",
+            caption=None,
+            uploader_user_id="a-id",
+        )
+    ).item
     foreign = dataclasses.replace(
         own, id="foreign", album_id=other.id, thumbnail_url="api/media/foreign.webp"
     )
@@ -547,13 +577,15 @@ async def test_delete_item_keeps_files_another_item_uses(env):
     album = await env.create_album(space_id=None, owner_user_id="a-id", name="T")
     buf = io.BytesIO()
     Image.new("RGB", (64, 48), (10, 120, 200)).save(buf, format="JPEG")
-    item = await env.upload_item(
-        album.id,
-        data=buf.getvalue(),
-        content_type="image/jpeg",
-        caption=None,
-        uploader_user_id="a-id",
-    )
+    item = (
+        await env.upload_item(
+            album.id,
+            data=buf.getvalue(),
+            content_type="image/jpeg",
+            caption=None,
+            uploader_user_id="a-id",
+        )
+    ).item
     copy = dataclasses.replace(item, id="copy-item")
     await env._repo.create_item(copy)  # type: ignore[attr-defined]
     media_dir = env._media_dir  # type: ignore[attr-defined]
@@ -561,8 +593,10 @@ async def test_delete_item_keeps_files_another_item_uses(env):
     thumb = media_dir / item.thumbnail_url.rsplit("/", 1)[-1]
 
     await env.delete_item("copy-item", actor_user_id="a-id")
+    await env.purge_trashed_item("copy-item", actor_user_id="a-id")
     assert full.exists() and thumb.exists()
     await env.delete_item(item.id, actor_user_id="a-id")
+    await env.purge_trashed_item(item.id, actor_user_id="a-id")
     assert not full.exists() and not thumb.exists()
 
 
@@ -575,13 +609,15 @@ async def test_upload_video_is_async(env):
         owner_user_id="a-id",
         name="Clips",
     )
-    item = await env.upload_item(
-        album.id,
-        data=b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 200,
-        content_type="video/mp4",
-        caption="my clip",
-        uploader_user_id="a-id",
-    )
+    item = (
+        await env.upload_item(
+            album.id,
+            data=b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 200,
+            content_type="video/mp4",
+            caption="my clip",
+            uploader_user_id="a-id",
+        )
+    ).item
     assert item.item_type == "video"
     assert item.url.endswith(".webm")
     assert item.thumbnail_url.endswith(".webp")
@@ -616,13 +652,15 @@ async def test_upload_video_flush_writes_files(env, monkeypatch):
         owner_user_id="a-id",
         name="Clips",
     )
-    item = await env.upload_item(
-        album.id,
-        data=b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 200,
-        content_type="video/mp4",
-        caption=None,
-        uploader_user_id="a-id",
-    )
+    item = (
+        await env.upload_item(
+            album.id,
+            data=b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 200,
+            content_type="video/mp4",
+            caption=None,
+            uploader_user_id="a-id",
+        )
+    ).item
     output_filename = item.url.rsplit("/", 1)[-1]
     thumb_filename = item.thumbnail_url.rsplit("/", 1)[-1]
 
@@ -689,13 +727,15 @@ async def _bobs_item(env):
     album = await env.create_album(space_id="sp-1", owner_user_id="b-id", name="B")
     buf = io.BytesIO()
     Image.new("RGB", (8, 8), (1, 2, 3)).save(buf, format="JPEG")
-    item = await env.upload_item(
-        album.id,
-        data=buf.getvalue(),
-        content_type="image/jpeg",
-        caption=None,
-        uploader_user_id="b-id",
-    )
+    item = (
+        await env.upload_item(
+            album.id,
+            data=buf.getvalue(),
+            content_type="image/jpeg",
+            caption=None,
+            uploader_user_id="b-id",
+        )
+    ).item
     return album, item
 
 
@@ -890,13 +930,15 @@ async def test_an_uploaded_camera_photo_keeps_its_day_and_no_exif(env):
     stored files carry no EXIF at all (no time, no GPS)."""
     album = await env.create_album(space_id=None, owner_user_id="a-id", name="Trip")
     data = _image_bytes(exif_ifd={_DATETIME_ORIGINAL: "2024:05:17 21:45:03"}, gps=True)
-    item = await env.upload_item(
-        album.id,
-        data=data,
-        content_type="image/jpeg",
-        caption=None,
-        uploader_user_id="a-id",
-    )
+    item = (
+        await env.upload_item(
+            album.id,
+            data=data,
+            content_type="image/jpeg",
+            caption=None,
+            uploader_user_id="a-id",
+        )
+    ).item
     assert item.taken_at == "2024-05-17"
     media_dir = pathlib.Path(env._media_dir)
     for url in (item.url, item.thumbnail_url):
@@ -913,21 +955,25 @@ async def test_an_uploaded_camera_photo_keeps_its_day_and_no_exif(env):
 # could not tidy someone else's album.
 
 
-def _jpeg() -> bytes:
+def _jpeg(color: tuple[int, int, int] = (200, 40, 40)) -> bytes:
+    """A small JPEG; a different ``color`` is a different file (the
+    household duplicate check matches exact bytes)."""
     buf = io.BytesIO()
-    Image.new("RGB", (32, 24), (200, 40, 40)).save(buf, format="JPEG")
+    Image.new("RGB", (32, 24), color).save(buf, format="JPEG")
     return buf.getvalue()
 
 
 async def _bobs_household_item(env, *, uploader: str = "b-id"):
     album = await env.create_album(space_id=None, owner_user_id="b-id", name="Bob's")
-    item = await env.upload_item(
-        album.id,
-        data=_jpeg(),
-        content_type="image/jpeg",
-        caption=None,
-        uploader_user_id=uploader,
-    )
+    item = (
+        await env.upload_item(
+            album.id,
+            data=_jpeg(),
+            content_type="image/jpeg",
+            caption=None,
+            uploader_user_id=uploader,
+        )
+    ).item
     return album, item
 
 
@@ -1016,20 +1062,24 @@ async def test_a_protected_account_deletes_only_its_own_uploads(env):
         "UPDATE users SET child_protection_enabled=1 WHERE user_id='e-id'"
     )
     album = await env.create_album(space_id=None, owner_user_id="e-id", name="Mia's")
-    bobs = await env.upload_item(
-        album.id,
-        data=_jpeg(),
-        content_type="image/jpeg",
-        caption=None,
-        uploader_user_id="b-id",
-    )
-    own = await env.upload_item(
-        album.id,
-        data=_jpeg(),
-        content_type="image/jpeg",
-        caption=None,
-        uploader_user_id="e-id",
-    )
+    bobs = (
+        await env.upload_item(
+            album.id,
+            data=_jpeg(),
+            content_type="image/jpeg",
+            caption=None,
+            uploader_user_id="b-id",
+        )
+    ).item
+    own = (
+        await env.upload_item(
+            album.id,
+            data=_jpeg((10, 200, 10)),
+            content_type="image/jpeg",
+            caption=None,
+            uploader_user_id="e-id",
+        )
+    ).item
     with pytest.raises(GalleryPermissionError):
         await env.delete_item(bobs.id, actor_user_id="e-id")
     with pytest.raises(GalleryPermissionError):
@@ -1143,14 +1193,17 @@ async def test_an_edit_replaces_the_thumbnails_it_made(env):
 async def test_list_items_pages_newest_first_through_the_service(env):
     album = await env.create_album(space_id=None, owner_user_id="a-id", name="Lots")
     ids = []
-    for _ in range(5):
-        it = await env.upload_item(
-            album.id,
-            data=_jpeg(),
-            content_type="image/jpeg",
-            caption=None,
-            uploader_user_id="a-id",
-        )
+    for n in range(5):
+        it = (
+            await env.upload_item(
+                album.id,
+                # Five different files: the same bytes would be one photo.
+                data=_jpeg((n * 50, 40, 40)),
+                content_type="image/jpeg",
+                caption=None,
+                uploader_user_id="a-id",
+            )
+        ).item
         ids.append(it.id)
     first = await env.list_items(album.id, actor_user_id="a-id", limit=3)
     rest = await env.list_items(
@@ -1161,3 +1214,345 @@ async def test_list_items_pages_newest_first_through_the_service(env):
         before_id=first[-1].id,
     )
     assert [i.id for i in first + rest] == list(reversed(ids))
+
+
+# ─── Library model (migration 0139): duplicates, trash, leaving ─────────
+
+
+async def _household_album(env, owner: str = "a-id", name: str = "Summer"):
+    return await env.create_album(space_id=None, owner_user_id=owner, name=name)
+
+
+async def _upload(env, album_id: str, data: bytes, who: str = "a-id"):
+    return await env.upload_item(
+        album_id,
+        data=data,
+        content_type="image/jpeg",
+        caption=None,
+        uploader_user_id=who,
+    )
+
+
+def _stored_files(env) -> set[str]:
+    media_dir = env._media_dir  # type: ignore[attr-defined]
+    return {p.name for p in media_dir.iterdir() if p.is_file()}
+
+
+def _published(env, kind: type) -> list:
+    seen: list = []
+
+    async def _grab(event) -> None:
+        seen.append(event)
+
+    env._bus.subscribe(kind, _grab)  # type: ignore[attr-defined]
+    return seen
+
+
+async def test_the_same_photo_uploaded_twice_is_already_here(env):
+    """An exact re-upload stores nothing: the same item comes back, no
+    new row, no new file — whichever album it was picked for."""
+    album = await _household_album(env)
+    other = await _household_album(env, owner="b-id", name="Bob's")
+    first = await _upload(env, album.id, _jpeg())
+    files = _stored_files(env)
+
+    again = await _upload(env, other.id, _jpeg(), who="b-id")
+
+    assert first.outcome is UploadOutcome.CREATED
+    assert again.outcome is UploadOutcome.ALREADY_HERE
+    assert again.item.id == first.item.id
+    assert _stored_files(env) == files
+    assert (await env.get_album(other.id, actor_user_id="b-id")).item_count == 0
+
+
+async def test_the_digest_is_of_the_uploaded_bytes_and_the_bytes_are_not_kept(env):
+    """``content_sha256`` hashes the upload before conversion (every stored
+    file is a fresh WebP re-encode); only the WebP and its thumbnail are
+    written, never the uploaded JPEG."""
+    album = await _household_album(env)
+    data = _jpeg()
+    up = await _upload(env, album.id, data)
+    row = await env._repo._db.fetchone(  # type: ignore[attr-defined]
+        "SELECT content_sha256 FROM gallery_items WHERE id=?", (up.item.id,)
+    )
+    assert row[0] == hashlib.sha256(data).hexdigest()
+    media_dir = env._media_dir  # type: ignore[attr-defined]
+    stored = [(media_dir / n).read_bytes() for n in _stored_files(env)]
+    assert data not in stored
+    assert all(b[:4] == b"RIFF" and b[8:12] == b"WEBP" for b in stored)
+
+
+async def test_a_photo_in_a_private_album_is_no_duplicate_for_others(env):
+    """The duplicate answer must not reveal a private album's photo: for
+    someone outside its audience the upload is simply stored again."""
+    private = await _household_album(env, name="Gifts")
+    hidden = await _upload(env, private.id, _jpeg())
+    assert await env._repo.set_album_audience(private.id, "chosen")  # type: ignore[attr-defined]
+    mine = await _household_album(env, owner="b-id", name="Bob's")
+
+    up = await _upload(env, mine.id, _jpeg(), who="b-id")
+
+    assert up.outcome is UploadOutcome.CREATED
+    assert up.item.id != hidden.item.id
+
+
+async def test_a_private_album_s_audience_sees_the_duplicate(env):
+    private = await _household_album(env, name="Gifts")
+    first = await _upload(env, private.id, _jpeg())
+    await env._repo.set_album_audience(private.id, "chosen", frozenset({"b-id"}))  # type: ignore[attr-defined]
+    mine = await _household_album(env, owner="b-id", name="Bob's")
+
+    up = await _upload(env, mine.id, _jpeg(), who="b-id")
+
+    assert up.outcome is UploadOutcome.ALREADY_HERE
+    assert up.item.id == first.item.id
+
+
+async def test_uploading_a_trashed_photo_again_brings_it_back(env):
+    album = await _household_album(env)
+    first = await _upload(env, album.id, _jpeg())
+    await env.delete_item(first.item.id, actor_user_id="a-id")
+    restored = _published(env, GalleryItemRestored)
+
+    again = await _upload(env, album.id, _jpeg())
+
+    assert again.outcome is UploadOutcome.RESTORED
+    assert again.item.id == first.item.id
+    assert await env._repo.get_item(first.item.id) is not None  # type: ignore[attr-defined]
+    assert [e.item_id for e in restored] == [first.item.id]
+    assert await env.list_trash(actor_user_id="a-id") == []
+
+
+async def test_a_space_upload_is_never_checked_for_duplicates(env):
+    album = await env.create_album(space_id="sp-1", owner_user_id="a-id", name="T")
+    one = await _upload(env, album.id, _jpeg())
+    two = await _upload(env, album.id, _jpeg())
+    assert one.item.id != two.item.id
+    rows = await env._repo._db.fetchall(  # type: ignore[attr-defined]
+        "SELECT content_sha256 FROM gallery_items WHERE album_id=?", (album.id,)
+    )
+    assert [r[0] for r in rows] == [None, None]
+
+
+async def test_a_deleted_household_photo_waits_in_the_trash(env):
+    album = await _household_album(env)
+    up = await _upload(env, album.id, _jpeg())
+    deleted = _published(env, GalleryItemDeleted)
+
+    await env.delete_item(up.item.id, actor_user_id="a-id")
+
+    assert [e.item_id for e in deleted] == [up.item.id]
+    assert await env.list_items(album.id, actor_user_id="a-id") == []
+    assert (await env.get_album(album.id, actor_user_id="a-id")).item_count == 0
+    (trashed,) = await env.list_trash(actor_user_id="b-id")
+    assert trashed.item.id == up.item.id
+    assert trashed.deleted_by == "a-id"
+    assert trashed.album_name == "Summer"
+    assert not trashed.album_in_trash
+    # Deleting it again is a no-op, not a second event.
+    await env.delete_item(up.item.id, actor_user_id="a-id")
+    assert len(deleted) == 1
+
+    back = await env.restore_item(up.item.id, actor_user_id="a-id")
+    assert back.id == up.item.id
+    assert [i.id for i in await env.list_items(album.id, actor_user_id="a-id")] == [
+        up.item.id
+    ]
+    assert (await env.get_album(album.id, actor_user_id="a-id")).item_count == 1
+
+
+async def test_a_deleted_album_comes_back_with_a_restored_photo(env):
+    album = await _household_album(env)
+    one = await _upload(env, album.id, _jpeg())
+    two = await _upload(env, album.id, _jpeg((10, 10, 200)))
+
+    await env.delete_album(album.id, actor_user_id="a-id")
+
+    with pytest.raises(GalleryNotFoundError):
+        await env.get_album(album.id, actor_user_id="a-id")
+    trash = await env.list_trash(actor_user_id="a-id")
+    assert {t.item.id for t in trash} == {one.item.id, two.item.id}
+    assert all(t.album_in_trash for t in trash)
+
+    await env.restore_item(one.item.id, actor_user_id="a-id")
+
+    back = await env.get_album(album.id, actor_user_id="a-id")
+    assert back.name == "Summer" and back.item_count == 1
+    assert [t.item.id for t in await env.list_trash(actor_user_id="a-id")] == [
+        two.item.id
+    ]
+
+
+async def test_only_who_may_delete_may_restore_or_purge(env):
+    album = await _household_album(env, owner="b-id", name="Bob's")
+    up = await _upload(env, album.id, _jpeg(), who="b-id")
+    await env.delete_item(up.item.id, actor_user_id="b-id")
+
+    with pytest.raises(GalleryPermissionError):  # eve: not uploader/owner/admin
+        await env.restore_item(up.item.id, actor_user_id="e-id")
+    with pytest.raises(GalleryPermissionError):
+        await env.purge_trashed_item(up.item.id, actor_user_id="e-id")
+    with pytest.raises(GalleryNotFoundError):
+        await env.restore_item("nope", actor_user_id="a-id")
+    # A household admin may.
+    await env.restore_item(up.item.id, actor_user_id="a-id")
+
+
+async def test_a_protected_account_restores_only_its_own(env):
+    await env._users._db.enqueue(  # type: ignore[union-attr]
+        "UPDATE users SET child_protection_enabled=1 WHERE user_id='e-id'"
+    )
+    album = await _household_album(env, owner="e-id", name="Mia's")
+    up = await _upload(env, album.id, _jpeg(), who="b-id")
+    await env.delete_item(up.item.id, actor_user_id="b-id")
+    with pytest.raises(GalleryPermissionError):
+        await env.restore_item(up.item.id, actor_user_id="e-id")
+
+
+async def test_a_private_album_s_trash_is_hidden_from_others(env):
+    private = await _household_album(env, name="Gifts")
+    up = await _upload(env, private.id, _jpeg())
+    await env._repo.set_album_audience(private.id, "chosen")  # type: ignore[attr-defined]
+    await env.delete_item(up.item.id, actor_user_id="a-id")
+
+    assert await env.list_trash(actor_user_id="b-id") == []
+    with pytest.raises(GalleryNotFoundError):
+        await env.restore_item(up.item.id, actor_user_id="b-id")
+    assert [t.item.id for t in await env.list_trash(actor_user_id="a-id")] == [
+        up.item.id
+    ]
+
+
+async def test_the_purge_waits_thirty_days(env):
+    album = await _household_album(env)
+    up = await _upload(env, album.id, _jpeg())
+    await env.delete_album(album.id, actor_user_id="a-id")
+    now = datetime.now(UTC)
+
+    assert await env.purge_expired_trash(now=now + timedelta(days=29)) == 0
+    assert len(await env.list_trash(actor_user_id="a-id")) == 1
+
+    assert await env.purge_expired_trash(now=now + timedelta(days=31)) == 2
+    assert await env.list_trash(actor_user_id="a-id") == []
+    assert await env._repo.get_trashed_item(up.item.id) is None  # type: ignore[attr-defined]
+    row = await env._repo._db.fetchone(  # type: ignore[attr-defined]
+        "SELECT COUNT(*) FROM gallery_albums WHERE id=?", (album.id,)
+    )
+    assert row[0] == 0  # the emptied album went with its last photo
+
+
+async def test_the_purge_works_in_bounded_batches(env):
+    album = await _household_album(env)
+    for shade in range(3):
+        up = await _upload(env, album.id, _jpeg((shade * 60, 0, 0)))
+        await env.delete_item(up.item.id, actor_user_id="a-id")
+    later = datetime.now(UTC) + timedelta(days=31)
+
+    # One photo per batch: its file and thumbnail.
+    assert await env.purge_expired_trash(now=later, batch=1, max_batches=1) == 2
+    assert len(await env.list_trash(actor_user_id="a-id")) == 2
+    assert await env.purge_expired_trash(now=later, batch=1) == 4
+    assert await env.list_trash(actor_user_id="a-id") == []
+
+
+async def test_a_space_delete_has_no_trash(env):
+    album = await env.create_album(space_id="sp-1", owner_user_id="a-id", name="T")
+    up = await _upload(env, album.id, _jpeg())
+    await env.delete_item(up.item.id, actor_user_id="a-id")
+    assert await env.list_trash(actor_user_id="a-id") == []
+    assert await env._repo.is_item_deleted(up.item.id, space_id="sp-1")  # type: ignore[attr-defined]
+
+
+async def test_leaving_the_household_keeps_photos_and_hands_albums_to_an_admin(env):
+    """Guard: removing a person never removes their photos; the household
+    albums they owned pass to an admin — except a private one, which an
+    admin must not gain a view of."""
+    env.wire()
+    shared = await _household_album(env, owner="b-id", name="Bob's")
+    private = await _household_album(env, owner="b-id", name="Bob's secret")
+    await env._repo.set_album_audience(private.id, "chosen")  # type: ignore[attr-defined]
+    in_space = await env.create_album(space_id="sp-1", owner_user_id="b-id", name="S")
+    up = await _upload(env, shared.id, _jpeg(), who="b-id")
+
+    await env._users.soft_delete("bob")  # type: ignore[attr-defined]
+    await env._bus.publish(UserDeprovisioned(user_id="b-id", username="bob"))  # type: ignore[attr-defined]
+
+    assert (
+        await env.get_album(shared.id, actor_user_id="a-id")
+    ).owner_user_id == "a-id"
+    assert (
+        await env.get_album(private.id, actor_user_id="b-id")
+    ).owner_user_id == "b-id"
+    assert (
+        await env.get_album(in_space.id, actor_user_id="a-id")
+    ).owner_user_id == "b-id"
+    (kept,) = await env.list_items(shared.id, actor_user_id="a-id")
+    assert kept.id == up.item.id and kept.uploaded_by == "b-id"
+
+
+async def test_with_no_admin_left_the_albums_stay(env):
+    env.wire()
+    album = await _household_album(env, owner="a-id")
+    await env._users._db.enqueue("UPDATE users SET is_admin=0")  # type: ignore[attr-defined]
+    await env._bus.publish(UserDeprovisioned(user_id="a-id", username="alice"))  # type: ignore[attr-defined]
+    assert (await env.get_album(album.id, actor_user_id="a-id")).owner_user_id == "a-id"
+
+
+# ─── Stored format (domain/media_constraints.py) ──────────────────────────
+
+
+async def test_a_household_photo_is_stored_as_webp_within_2560(env):
+    """Owner rule: everything in the gallery is converted to the defined
+    format and resolution — WebP, longest side ≤ IMAGE_MAX_DIMENSION, and a
+    WebP thumbnail ≤ THUMBNAIL_PX. Never the uploaded original."""
+    album = await _household_album(env)
+    buf = io.BytesIO()
+    Image.new("RGB", (4000, 3000), (30, 90, 160)).save(buf, format="JPEG")
+    up = await _upload(env, album.id, buf.getvalue())
+    media_dir = env._media_dir  # type: ignore[attr-defined]
+    for url, cap in (
+        (up.item.url, IMAGE_MAX_DIMENSION),
+        (up.item.thumbnail_url, THUMBNAIL_PX),
+    ):
+        with Image.open(media_dir / url.rsplit("/", 1)[-1]) as img:
+            assert img.format == "WEBP"
+            assert max(img.size) <= cap
+    assert max(up.item.width, up.item.height) == IMAGE_MAX_DIMENSION
+
+
+async def test_a_household_video_is_stored_as_webm_within_1920(env):
+    """A video is transcoded to VP9/Opus WebM, longest side ≤
+    VIDEO_MAX_DIMENSION, with a WebP poster — the real processor on a
+    2560-wide source."""
+    clip = io.BytesIO()
+    out = av.open(clip, mode="w", format="webm")
+    try:
+        stream = out.add_stream("vp9", rate=1)
+        stream.width, stream.height, stream.pix_fmt = 2560, 1440, "yuv420p"
+        frame = av.VideoFrame.from_image(Image.new("RGB", (2560, 1440), (9, 9, 99)))
+        for packet in stream.encode(frame):
+            out.mux(packet)
+        for packet in stream.encode(None):
+            out.mux(packet)
+    finally:
+        out.close()
+    album = await _household_album(env)
+    up = await env.upload_item(
+        album.id,
+        data=clip.getvalue(),
+        content_type="video/webm",
+        caption=None,
+        uploader_user_id="a-id",
+    )
+    assert up.item.url.endswith(".webm")
+    assert await env._transcode_service.flush_once() == 1  # type: ignore[attr-defined]
+
+    media_dir = env._media_dir  # type: ignore[attr-defined]
+    with av.open(str(media_dir / up.item.url.rsplit("/", 1)[-1])) as container:
+        assert "webm" in container.format.name
+        video = container.streams.video[0]
+        assert video.codec_context.name == "vp9"
+        longest = max(video.codec_context.width, video.codec_context.height)
+        assert longest <= VIDEO_MAX_DIMENSION
+    with Image.open(media_dir / up.item.thumbnail_url.rsplit("/", 1)[-1]) as poster:
+        assert poster.format == "WEBP"

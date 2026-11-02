@@ -34,6 +34,7 @@ from socialhome.domain.events import (
     GalleryAlbumDeleted,
     GalleryAlbumUpdated,
     GalleryItemDeleted,
+    GalleryItemRestored,
     GalleryItemUploaded,
     HighlightAudienceChanged,
     HouseholdZonesChanged,
@@ -863,6 +864,20 @@ async def test_gallery_household_events_fan_to_household(env):
     assert "gallery.item_deleted" in joined
     assert "gallery.album_deleted" in joined
     assert "al-1" in joined
+
+
+async def test_a_restored_gallery_item_fans_to_the_household(env):
+    """A photo back from the trash refreshes every open household gallery;
+    the frame names the album (it may have come back with the photo)."""
+    _svc, bus, ws = env
+    sock, stranger = _FakeWS(), _FakeWS()
+    await ws.register("u1", sock)
+    await ws.register("u9", stranger)  # not an active local user
+    await bus.publish(GalleryItemRestored(item_id="it-2", album_id="al-2"))
+    assert [json.loads(m) for m in sock.sent] == [
+        {"type": "gallery.item_restored", "album_id": "al-2", "item_id": "it-2"}
+    ]
+    assert stranger.sent == []
 
 
 async def test_gallery_space_album_fans_to_members_only(env):

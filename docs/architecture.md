@@ -965,7 +965,12 @@ per admin per app, re-opened for an even newer version — and
 `AppUpdateGone` for the others, which resolves their rows. A check that
 couldn't reach the catalog announces and withdraws nothing. Nothing is
 installed: an admin updates with one tap, and a version asking for new
-permissions waits for their yes; older versions are never offered).
+permissions waits for their yes; older versions are never offered),
+and the household gallery trash (`gallery_trash_purge_scheduler.py`,
+hourly: `GalleryService.purge_expired_trash` deletes household photos and
+videos deleted more than 30 days ago — at most 20 × 500 per pass — and
+the trashed albums left empty, then their files through `aiofiles`
+unless another row still names them; spaces have no trash).
 
 The GFS runs its own periodic maintenance sweep
 (`global_server/maintenance.py`, same `_stop: asyncio.Event` lifecycle as

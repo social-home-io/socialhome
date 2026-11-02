@@ -1053,6 +1053,17 @@ class GalleryItemDeleted(DomainEvent):
     origin_instance_id: str | None = None
 
 
+@dataclass(slots=True, frozen=True)
+class GalleryItemRestored(DomainEvent):
+    """A household photo or video came back from the trash (migration
+    0139) — by a restore, or by uploading the same file again. Household
+    only: a space item has no trash."""
+
+    item_id: str
+    album_id: str
+    occurred_at: datetime = field(default_factory=_now)
+
+
 # ─── Bazaar events (§9, §23.15) ──────────────────────────────────────────
 
 

@@ -229,13 +229,15 @@ async def test_upload_photo_full_pipeline(env):
         owner_user_id="a-id",
         name="X",
     )
-    item = await svc.upload_item(
-        a.id,
-        data=_png_bytes(),
-        content_type="image/png",
-        caption="hello",
-        uploader_user_id="a-id",
-    )
+    item = (
+        await svc.upload_item(
+            a.id,
+            data=_png_bytes(),
+            content_type="image/png",
+            caption="hello",
+            uploader_user_id="a-id",
+        )
+    ).item
     assert item.item_type == "photo"
     # Server-emitted URLs are relative — see PR #291 (ingress).
     assert item.url.startswith("api/media/")
@@ -254,13 +256,15 @@ async def test_delete_item_uploader_succeeds(env):
         owner_user_id="b-id",
         name="Bobs",
     )
-    item = await svc.upload_item(
-        a.id,
-        data=_png_bytes(),
-        content_type="image/png",
-        caption=None,
-        uploader_user_id="b-id",
-    )
+    item = (
+        await svc.upload_item(
+            a.id,
+            data=_png_bytes(),
+            content_type="image/png",
+            caption=None,
+            uploader_user_id="b-id",
+        )
+    ).item
     await svc.delete_item(item.id, actor_user_id="b-id")
 
 
@@ -271,13 +275,15 @@ async def test_delete_item_non_uploader_non_admin_403(env):
         owner_user_id="b-id",
         name="Bobs",
     )
-    item = await svc.upload_item(
-        a.id,
-        data=_png_bytes(),
-        content_type="image/png",
-        caption=None,
-        uploader_user_id="b-id",
-    )
+    item = (
+        await svc.upload_item(
+            a.id,
+            data=_png_bytes(),
+            content_type="image/png",
+            caption=None,
+            uploader_user_id="b-id",
+        )
+    ).item
     # No seat: answered like an unknown item (a no-op), nothing deleted.
     await svc.delete_item(item.id, actor_user_id="other-id")
     assert [i.id for i in await svc.list_items(a.id, actor_user_id="b-id")] == [item.id]
@@ -290,13 +296,15 @@ async def test_delete_item_space_admin_succeeds(env):
         owner_user_id="b-id",
         name="Bobs",
     )
-    item = await svc.upload_item(
-        a.id,
-        data=_png_bytes(),
-        content_type="image/png",
-        caption=None,
-        uploader_user_id="b-id",
-    )
+    item = (
+        await svc.upload_item(
+            a.id,
+            data=_png_bytes(),
+            content_type="image/png",
+            caption=None,
+            uploader_user_id="b-id",
+        )
+    ).item
     # alice is space owner → counts as admin.
     await svc.delete_item(item.id, actor_user_id="a-id")
 
@@ -342,13 +350,15 @@ async def test_get_album_resolves_cover_from_explicit_item(env):
         owner_user_id="a-id",
         name="X",
     )
-    item = await svc.upload_item(
-        a.id,
-        data=_png_bytes(),
-        content_type="image/png",
-        caption=None,
-        uploader_user_id="a-id",
-    )
+    item = (
+        await svc.upload_item(
+            a.id,
+            data=_png_bytes(),
+            content_type="image/png",
+            caption=None,
+            uploader_user_id="a-id",
+        )
+    ).item
     await svc.update_album(
         a.id,
         actor_user_id="a-id",
