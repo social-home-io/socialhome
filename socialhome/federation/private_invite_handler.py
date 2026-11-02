@@ -919,7 +919,9 @@ class PrivateSpaceInviteHandler:
                 await self._space_repo.get_member(space_id, user_id) is not None
             )
             await self._space_repo.delete_member(space_id, user_id)
-            remaining = await self._space_repo.list_members(space_id)
+            # Only our own people: ``space_members`` also mirrors the host's
+            # (the §25.6 ``members`` resource), who never leave with ours.
+            remaining = await self._space_repo.list_local_member_user_ids(space_id)
             if not remaining:
                 await self._space_repo.mark_dissolved(space_id)
                 # Stop treating the host as a member household of a space

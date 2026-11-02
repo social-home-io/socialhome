@@ -542,7 +542,13 @@ class SpaceModerationService(BusPublisherMixin):
         space = await self._spaces.get(space_id)
         if space is None or self.is_host(space):
             return 0
-        members = await self._spaces.list_members(space_id)
+        # ``space_members`` also mirrors the host's people (the §25.6
+        # ``members`` resource): only this household's own seats count, for
+        # the authority and for whose items stay.
+        ours = set(await self._spaces.list_local_member_user_ids(space_id))
+        members = [
+            m for m in await self._spaces.list_members(space_id) if m.user_id in ours
+        ]
         if any(m.role in CONTENT_AUTHORITY_ROLES for m in members):
             return 0
         return await self._spaces.drop_pending_from_others(

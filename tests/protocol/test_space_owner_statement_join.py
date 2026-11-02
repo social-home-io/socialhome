@@ -1097,6 +1097,11 @@ async def test_removed_older_than_our_current_join_does_not_archive(
     the owner says ``removed`` — but our current join is newer, so we keep
     the copy. A removal newer than our join still archives."""
     kp = generate_space_keypair()
+    # u-joe is one of OUR people (only a local person's join counts).
+    await db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?,?,?)",
+        ("joe", "u-joe", "Joe"),
+    )
     await _join(joiner, _invite(R, _meta(kp.public_key.hex(), R), token="t-r"))
     # The accept just seated u-joe (joined now).
     removed_at = "2000-01-01 00:00:00" if joined_after else "2999-01-01 00:00:00"

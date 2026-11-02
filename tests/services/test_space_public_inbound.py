@@ -1306,6 +1306,10 @@ class _Access:
 
 
 async def _seat_us(env, role: str) -> None:
+    await env["db"].enqueue(
+        "INSERT OR IGNORE INTO users(username, user_id, display_name)"
+        " VALUES('us', 'us-user', 'Us')"
+    )
     await env["space_repo"].save_member(
         SpaceMember(space_id="sp-1", user_id="us-user", role=role, joined_at="x")
     )
@@ -1338,6 +1342,26 @@ async def test_a_member_household_admits_what_its_rules_admit(item_env):
 async def test_a_follower_household_relies_on_the_cert_alone(item_env):
     """A follower holds no roster: the access check is not asked."""
     await _seat_us(item_env, "subscriber")
+    access = _Access(False)
+    item_env["inbound"].attach_authorship(access)
+    await item_env["inbound"].handle(await _item_frame(item_env))
+    assert await item_env["post_repo"].get("post-1") is not None
+    assert access.calls == []
+
+
+async def test_the_hosts_mirrored_people_do_not_make_us_a_member_household(
+    item_env,
+):
+    """``space_members`` may also hold the host's people, mirrored by the
+    §25.6 ``members`` sync (no ``users`` row here). They are not a writer
+    seat of ours: a household whose own people only follow still relies on
+    the cert alone."""
+    await _seat_us(item_env, "subscriber")
+    await item_env["space_repo"].save_member(
+        SpaceMember(
+            space_id="sp-1", user_id="u-host-owner", role="owner", joined_at="x"
+        )
+    )
     access = _Access(False)
     item_env["inbound"].attach_authorship(access)
     await item_env["inbound"].handle(await _item_frame(item_env))

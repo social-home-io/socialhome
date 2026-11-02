@@ -1078,6 +1078,7 @@ async def _follower(
     owner_id="remote-host",
     gfs="gfs-1",
     seq=0,
+    mirrored_role=None,
 ):
     from socialhome.domain.space import SpaceMember
 
@@ -1095,8 +1096,19 @@ async def _follower(
         )
     )
     if role is not None:
+        await env.db.enqueue(
+            "INSERT OR IGNORE INTO users(username, user_id, display_name)"
+            " VALUES('u1', 'u1', 'U1')"
+        )
         await env.spaces.save_member(
             SpaceMember(space_id="sp-1", user_id="u1", role=role, joined_at="x")
+        )
+    if mirrored_role is not None:
+        # The host's person, mirrored by a members sync: no ``users`` row.
+        await env.spaces.save_member(
+            SpaceMember(
+                space_id="sp-1", user_id="u-host", role=mirrored_role, joined_at="x"
+            )
         )
     if gfs is not None:
         await env.spaces.set_mirror_provenance("sp-1", gfs_id=gfs, rotation_seq=seq)
@@ -1125,6 +1137,16 @@ async def test_refresh_heals_a_follower_from_its_own_gfs(env):
     assert await env.spaces.get_mirror_provenance("sp-1") == ("gfs-1", 1)
     # Rate-limited: a second failed-verify burst does not refetch.
     assert await mirror.refresh_authority_pin("sp-1") is False
+
+
+async def test_refresh_heals_a_follower_beside_a_mirrored_host_person(env):
+    """``space_members`` may also hold the host's people (the §25.6
+    ``members`` sync, no ``users`` row). Their seat is not ours: a household
+    whose own people only follow still heals from its GFS."""
+    await _follower(env, mirrored_role="owner")
+    mirror = _mirror(env, _listing(PIN_B, 1))
+    mirror.attach_identity(own_instance_id=env.iid)
+    assert await mirror.refresh_authority_pin("sp-1") is True
 
 
 @pytest.mark.parametrize(

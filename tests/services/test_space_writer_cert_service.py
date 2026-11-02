@@ -72,10 +72,13 @@ def _space(**features) -> Space:
 
 
 class _Spaces:
-    def __init__(self, space: Space, seed: bytes | None, members=()):
+    def __init__(self, space: Space, seed: bytes | None, members=(), mirrored=()):
         self.space = space
         self.seed = seed
-        self.members = list(members)
+        #: Our own people, then the host's mirrored by the members sync
+        #: (no ``users`` row here).
+        self.members = list(members) + list(mirrored)
+        self.mirrored = {m.user_id for m in mirrored}
 
     async def get(self, space_id):
         return self.space if space_id == self.space.id else None
@@ -85,6 +88,9 @@ class _Spaces:
 
     async def list_members(self, space_id):
         return self.members
+
+    async def list_local_member_user_ids(self, space_id):
+        return [m.user_id for m in self.members if m.user_id not in self.mirrored]
 
 
 class _Remote:
@@ -189,6 +195,7 @@ def _svc(
     seed: bytes | None = SEED,
     remote_rows=(),
     local=(),
+    mirrored=(),
     keys: _Keys | None = None,
     versions=None,
     kek: KeyManager | None = None,
@@ -196,7 +203,7 @@ def _svc(
 ) -> tuple[SpaceWriterCertService, _Keys]:
     keys = keys or _Keys()
     svc = SpaceWriterCertService(
-        space_repo=_Spaces(space or _space(), seed, local),
+        space_repo=_Spaces(space or _space(), seed, local, mirrored),
         remote_member_repo=_Remote(list(remote_rows)),
         space_key_repo=keys,
         own_instance_id="own",
@@ -281,6 +288,31 @@ async def test_own_household_scope_from_local_members():
     cert = await svc.issue_for_instance("sp-1", "own")
     assert cert is not None
     _check(cert, OWN_PK, WRITER_SCOPE_WRITE)
+
+
+async def test_own_household_never_borrows_the_hosts_mirrored_seats():
+    """A seed-holding member household also holds the host's people in
+    ``space_members`` (the §25.6 ``members`` sync). Their owner seat is not
+    ours: it neither lifts our scope nor gets bound into our cert."""
+    ours = SpaceMember(
+        space_id="sp-1", user_id="u1", role=SpaceRole.MEMBER.value, joined_at="t"
+    )
+    host_owner = SpaceMember(
+        space_id="sp-1",
+        user_id="u-host-owner",
+        role=SpaceRole.OWNER.value,
+        joined_at="t",
+    )
+    svc, _ = _svc(
+        space=_space(posts_access=SpaceFeatureAccess.ADMIN_ONLY),
+        local=[ours],
+        mirrored=[host_owner],
+    )
+    entitlement = await svc.entitlement_for_instance(
+        _space(posts_access=SpaceFeatureAccess.ADMIN_ONLY), "own"
+    )
+    assert entitlement.scope == WRITER_SCOPE_COMMENT
+    assert "u-host-owner" not in entitlement.user_ids
 
 
 # ── Issuer gates ─────────────────────────────────────────────────────────

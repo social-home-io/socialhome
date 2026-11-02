@@ -4641,6 +4641,32 @@ async def test_snapshot_carries_member_versions_and_roster_version(stack):
     assert roster["ru1"]["member_version"] == 5
 
 
+async def test_snapshot_never_ships_the_hosts_mirrored_people_as_ours(stack):
+    """A delegated admin's invite snapshot lists its OWN people on its
+    instance. ``space_members`` there also holds the host's people (the
+    §25.6 ``members`` sync, no ``users`` row): shipping them under our
+    instance would seat the host's owner on our household at the joiner."""
+    from socialhome.services.space_service import (
+        build_space_snapshot_for_federation,
+    )
+
+    anna = await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    await stack.db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role)"
+        " VALUES(?, 'u-host-owner', 'admin')",
+        (space.id,),
+    )
+    snap = await build_space_snapshot_for_federation(
+        space,
+        space_repo=stack.space_repo,
+        remote_member_repo=None,
+        user_repo=stack.space_svc._users,
+        own_instance_id=stack.iid,
+    )
+    assert [r["user_id"] for r in snap["roster"]] == [anna.user_id]
+
+
 async def test_snapshot_mints_content_key_when_space_was_never_keyed(stack):
     """A space shared only over a mesh route may never have minted its
     per-space AES content key (live mesh posts use the per-route
@@ -6482,6 +6508,39 @@ async def test_unsubscribe_last_subscriber_purges_the_mirror(stack):
     assert await stack.space_repo.get("remote-sp") is None
     keys = SqliteSpaceKeyRepo(stack.db)
     assert await keys.get_latest("remote-sp") is None
+
+
+async def test_unsubscribe_purges_the_mirror_though_the_hosts_people_stay(stack):
+    """``space_members`` may also hold the host's people, mirrored by the
+    §25.6 ``members`` sync (no ``users`` row). Our last subscriber leaving
+    still tears the mirror down: those seats are not ours."""
+    fan = await stack.provision_user("fan")
+    mirror = _FakeGfsMirror(stack.space_repo)
+    stack.space_svc.attach_gfs_space_mirror(mirror)
+    await stack.space_svc.subscribe_to_space(fan.user_id, "remote-sp")
+    await stack.db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role)"
+        " VALUES('remote-sp', 'u-host-owner', 'owner')"
+    )
+    # Ours only: the household-wide subscription list skips the host's.
+    assert await stack.space_repo.list_subscribed_space_ids() == ["remote-sp"]
+
+    await stack.space_svc.unsubscribe_from_space(fan.user_id, "remote-sp")
+
+    assert mirror.unsubscribes == ["remote-sp"]
+
+
+async def test_the_subscription_list_counts_only_our_own_followers(stack):
+    """A mirrored host follower (members sync, no ``users`` row) is no
+    subscription of this household."""
+    await stack.provision_user("anna")
+    space = await stack.space_svc.create_space(owner_username="anna", name="Fam")
+    await stack.db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role)"
+        " VALUES(?, 'u-host-fan', 'subscriber')",
+        (space.id,),
+    )
+    assert await stack.space_repo.list_subscribed_space_ids() == []
 
 
 async def test_unsubscribe_keeps_mirror_while_a_subscribe_is_in_flight(stack):

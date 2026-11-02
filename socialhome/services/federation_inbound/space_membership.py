@@ -268,8 +268,13 @@ class SpaceMembershipInboundHandlers:
         removed = _utc(removed_at)
         if removed is None:
             return False
+        # Our own people only: ``space_members`` also mirrors the host's
+        # (the §25.6 ``members`` resource), whose joins say nothing of ours.
+        ours = set(await self._space_repo.list_local_member_user_ids(space_id))
         joined = [
-            _utc(m.joined_at) for m in await self._space_repo.list_members(space_id)
+            _utc(m.joined_at)
+            for m in await self._space_repo.list_members(space_id)
+            if m.user_id in ours
         ]
         return any(j is not None and j > removed for j in joined)
 
