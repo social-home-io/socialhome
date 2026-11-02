@@ -16,7 +16,9 @@ projection.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from enum import StrEnum
 
 
@@ -53,6 +55,10 @@ class GalleryAlbum:
     # sees it under their own word for "Photos" (the SPA localises it),
     # not the first uploader's. Not persisted on the row.
     default_name: bool = False
+    # ``True`` when someone else added a photo or video since this viewer
+    # last opened the album (D9's "neu" dot, :class:`GallerySeen`). Read
+    # with the list, never stored.
+    has_new: bool = False
 
     def to_federation_dict(self) -> dict:
         """The album as ``SPACE_GALLERY_ALBUM_CREATED`` / ``_UPDATED`` carry it.
@@ -143,7 +149,7 @@ class GalleryItem:
 #: this household sees it (read with the list, never stored). They never
 #: leave the household: the §25.6 exporter drops them from its records.
 ALBUM_VIEW_FIELDS: frozenset[str] = frozenset(
-    {"activity_at", "is_default", "default_name"}
+    {"activity_at", "is_default", "default_name", "has_new"}
 )
 
 
@@ -350,3 +356,92 @@ class OnThisDayCard:
     years_ago: int
     count: int
     items: tuple[GalleryItem, ...] = ()
+
+
+# ─── "Neu" dot (D9) ──────────────────────────────────────────────────────
+
+#: Albums whose last visit one person's :class:`GallerySeen` remembers, at
+#: most. Past it the visits longest ago go, and :attr:`GallerySeen.since`
+#: moves up to the newest of them — so an album that drops out never shows
+#: older photos as new again.
+GALLERY_SEEN_MAX: int = 300
+
+
+def _when(raw: object) -> datetime | None:
+    """*raw* (a UTC time: ISO with or without zone, or SQLite's naive
+    ``YYYY-MM-DD HH:MM:SS``) as an aware datetime; ``None`` if unreadable."""
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        when = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return when if when.tzinfo is not None else when.replace(tzinfo=UTC)
+
+
+@dataclass(slots=True, frozen=True)
+class GallerySeen:
+    """When one person last opened each album (``users.preferences_json``
+    ``gallery_seen``: ``{"since": ISO, "albums": {album_id: ISO}}``).
+
+    An album "has new" photos for them when someone else added one after
+    their last visit — or, for an album they never opened, after
+    :attr:`since`: the first time the gallery listed their albums (so
+    nothing is new on the day this ships) or the newest visit the
+    :data:`GALLERY_SEEN_MAX` bound let go. ``since`` ``None`` means it was
+    never stamped: nothing is new yet."""
+
+    since: str | None = None
+    albums: Mapping[str, str] = field(default_factory=dict)
+
+    @classmethod
+    def from_dict(cls, raw: object) -> GallerySeen:
+        """Parsed defensively: bad entries are dropped, never raise."""
+        if not isinstance(raw, Mapping):
+            return cls()
+        since = raw.get("since")
+        albums = raw.get("albums")
+        return cls(
+            since=since if isinstance(since, str) and _when(since) else None,
+            albums={
+                k: v
+                for k, v in (albums.items() if isinstance(albums, Mapping) else ())
+                if isinstance(k, str) and k and isinstance(v, str) and _when(v)
+            },
+        )
+
+    def to_dict(self) -> dict[str, object]:
+        return {"since": self.since, "albums": dict(self.albums)}
+
+    def has_new(self, album_id: str, newest_by_others: str | None) -> bool:
+        """Whether a photo someone else added at *newest_by_others* is new
+        to this person in *album_id*."""
+        newest = _when(newest_by_others)
+        if newest is None:
+            return False
+        seen = _when(self.albums.get(album_id)) or _when(self.since)
+        return seen is not None and newest > seen
+
+    def opened(self, album_id: str, now: datetime) -> GallerySeen:
+        """This person opened *album_id* at *now*. Past
+        :data:`GALLERY_SEEN_MAX` the oldest visits go and :attr:`since`
+        moves up to the newest of them."""
+        stamp = now.astimezone(UTC).isoformat()
+        albums = {k: v for k, v in self.albums.items() if k != album_id}
+        albums[album_id] = stamp
+        since = self.since or stamp
+        if len(albums) > GALLERY_SEEN_MAX:
+            ordered = sorted(albums.items(), key=lambda kv: _when(kv[1]) or now)
+            cut = len(albums) - GALLERY_SEEN_MAX
+            dropped, albums = ordered[:cut], dict(ordered[cut:])
+            newest_dropped = max(_when(v) or now for _, v in dropped)
+            current = _when(since)
+            if current is None or newest_dropped > current:
+                since = newest_dropped.isoformat()
+        return GallerySeen(since=since, albums=albums)
+
+    def stamped(self, now: datetime) -> GallerySeen:
+        """With :attr:`since` set to *now* when it never was."""
+        if self.since is not None:
+            return self
+        return GallerySeen(since=now.astimezone(UTC).isoformat(), albums=self.albums)

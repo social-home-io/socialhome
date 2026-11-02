@@ -19,7 +19,11 @@ from typing import Any
 
 import orjson
 
-from ..domain.gallery import ON_THIS_DAY_MAX_EXCLUDED, OnThisDaySettings
+from ..domain.gallery import (
+    ON_THIS_DAY_MAX_EXCLUDED,
+    GallerySeen,
+    OnThisDaySettings,
+)
 from ..domain.highlight import HighlightAudience
 from ..domain.moment import (
     MOMENT_DEFAULT_RETENTION_DAYS,
@@ -302,11 +306,29 @@ def parse_gallery_on_this_day(preferences_json: str | None) -> OnThisDaySettings
     )
 
 
+#: ``preferences_json`` key of when the person last opened each album (D9's
+#: "neu" dot, :class:`~socialhome.domain.gallery.GallerySeen`). Written
+#: only by ``GalleryService``.
+GALLERY_SEEN_KEY = "gallery_seen"
+
+
+def parse_gallery_seen(preferences_json: str | None) -> GallerySeen:
+    """The person's album visits; never raises (bad JSON reads as none)."""
+    try:
+        blob = orjson.loads(preferences_json) if preferences_json else {}
+    except orjson.JSONDecodeError:
+        return GallerySeen()
+    return GallerySeen.from_dict(
+        blob.get(GALLERY_SEEN_KEY) if isinstance(blob, dict) else None
+    )
+
+
 __all__ = [
     "DEFAULT_HIGHLIGHTS_MAX_COUNT",
     "DEFAULT_HIGHLIGHTS_RETENTION_DAYS",
     "DEFAULT_MOMENT_MAX_HOPS",
     "GALLERY_ON_THIS_DAY_KEY",
+    "GALLERY_SEEN_KEY",
     "HA_AUTOMATION_EVENTS_KEY",
     "LOCALE_KEY",
     "MAX_TIMETABLE_HOME_PINS",
@@ -315,6 +337,7 @@ __all__ = [
     "HighlightsPreferences",
     "MomentPreferences",
     "parse_gallery_on_this_day",
+    "parse_gallery_seen",
     "parse_ha_automation_events",
     "parse_highlights_preferences",
     "parse_locale",

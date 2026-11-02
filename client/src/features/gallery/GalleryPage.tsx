@@ -55,6 +55,7 @@ import {
   type AlbumOrder,
 } from './albumOrder'
 import { OnThisDayCardView, OnThisDayNote, loadOnThisDay } from './OnThisDay'
+import { noteAlbumSeen, withoutDot } from './albumSeen'
 
 interface Album {
   id: string
@@ -78,6 +79,9 @@ interface Album {
    *  renamed it (shown in the reader's own language). */
   is_default?: boolean
   default_name?: boolean
+  /** Someone else added photos since the viewer last opened it — the
+   *  "neu" dot (D9; ``albumSeen``). */
+  has_new?: boolean
 }
 
 interface Item {
@@ -491,10 +495,16 @@ export default function GalleryPage({
                 key={a.id}
                 href={addBase(galleryPath(spaceId, a.id))}
                 class={`sh-album-card${a.is_system ? ' sh-album-card--system' : ''}`}
-                aria-label={t(isOne(a.item_count) ? 'gallery.open_album_aria_one' : 'gallery.open_album_aria', { name: albumDisplayName(a), n: String(a.item_count) })}
+                aria-label={t(isOne(a.item_count) ? 'gallery.open_album_aria_one' : 'gallery.open_album_aria', { name: albumDisplayName(a), n: String(a.item_count) })
+                  + (a.has_new ? `, ${t('gallery.new_photos')}` : '')}
                 onClick={() => { albumFromList = true }}
               >
                 <AlbumCover album={a} />
+                {a.has_new && (
+                  <span class="sh-album-new" title={t('gallery.new_photos')}>
+                    {t('gallery.new_badge')}
+                  </span>
+                )}
                 <div class="sh-album-info">
                   <strong>
                     {albumDisplayName(a)}
@@ -1261,14 +1271,18 @@ async function openAlbum(id: string, spaceId?: string): Promise<boolean> {
   }
   activeAlbum.value = album
   itemOrder.value = readAlbumOrder(currentUser.value?.user_id, id)
-  await loadItems(id)
+  if (await loadItems(id) && wantedAlbum === id && loadedScope === scope) {
+    // On screen now: its "neu" dot and "new photos" rows go (D9).
+    void noteAlbumSeen(id, scope)
+    albums.value = withoutDot(albums.value, id)
+  }
   return true
 }
 
 /** Fetch the open album's first page (or, ``quiet``, re-read as many as
  *  are loaded — an upload or a ready video shows up without losing the
- *  pages already scrolled through). */
-async function loadItems(albumId: string, { quiet = false } = {}) {
+ *  pages already scrolled through). ``true`` once they are on screen. */
+async function loadItems(albumId: string, { quiet = false } = {}): Promise<boolean> {
   const limit = quiet
     ? Math.min(ITEM_MAX, Math.max(ITEM_PAGE, items.value.length))
     : ITEM_PAGE
@@ -1277,11 +1291,12 @@ async function loadItems(albumId: string, { quiet = false } = {}) {
     const rows = await api.get(
       `/api/gallery/albums/${albumId}/items?limit=${limit}&sort=${sortParam(itemOrder.value)}`,
     ) as Item[]
-    if (activeAlbum.value?.id !== albumId) return  // another album is open now
+    if (activeAlbum.value?.id !== albumId) return false  // another album is open now
     items.value = rows
     itemsMore.value = rows.length >= limit
+    return true
   } catch {
-    if (activeAlbum.value?.id !== albumId) return
+    if (activeAlbum.value?.id !== albumId) return false
     showToast(
       items.value.length ? t('gallery.refresh_failed') : t('gallery.load_items_error'),
       'error',
@@ -1289,6 +1304,7 @@ async function loadItems(albumId: string, { quiet = false } = {}) {
   } finally {
     if (!quiet) itemsLoading.value = false
   }
+  return false
 }
 
 async function loadMoreItems(albumId: string): Promise<void> {

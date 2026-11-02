@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import dataclasses
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from socialhome.domain.gallery import (
+    ALBUM_VIEW_FIELDS,
     AUDIENCE_CHOSEN,
     AUDIENCE_EVERYONE,
     AUDIENCES,
     GALLERY_MAX_UPLOAD_BYTES,
+    GALLERY_SEEN_MAX,
     GALLERY_VIDEO_MAX_QUEUED,
     GALLERY_VIDEO_MAX_SECONDS,
     GALLERY_VIDEO_MAX_UPLOAD_BYTES,
@@ -18,6 +21,7 @@ from socialhome.domain.gallery import (
     GalleryAlbum,
     GalleryAlbumAudience,
     GalleryItem,
+    GallerySeen,
     GalleryUpload,
     StashedUpload,
     UploadLimits,
@@ -105,3 +109,53 @@ def test_upload_limits_and_stash_are_frozen():
     for obj, attr in ((limits, "video_bytes"), (stash, "size")):
         with pytest.raises(dataclasses.FrozenInstanceError):
             setattr(obj, attr, 0)
+
+
+# ─── "Neu" dot (D9) ──────────────────────────────────────────────────────
+
+_T0 = datetime(2026, 11, 2, 10, 0, tzinfo=UTC)
+
+
+def test_nothing_is_new_before_the_first_stamp():
+    assert not GallerySeen().has_new("a1", "2026-11-02T11:00:00+00:00")
+
+
+def test_photos_after_the_last_visit_are_new():
+    seen = GallerySeen().stamped(_T0)
+    assert seen.since == _T0.isoformat()
+    # Never opened: newer than the stamp is new, older is not.
+    assert seen.has_new("a1", (_T0 + timedelta(minutes=1)).isoformat())
+    assert not seen.has_new("a1", (_T0 - timedelta(minutes=1)).isoformat())
+    # SQLite's naive UTC reads the same.
+    assert seen.has_new("a1", "2026-11-02 10:01:00")
+    assert not seen.has_new("a1", None)
+    assert not seen.has_new("a1", "garbage")
+    opened = seen.opened("a1", _T0 + timedelta(hours=1))
+    assert not opened.has_new("a1", (_T0 + timedelta(minutes=30)).isoformat())
+    assert opened.has_new("a1", (_T0 + timedelta(hours=2)).isoformat())
+    # Stamping again keeps the first stamp.
+    assert opened.stamped(_T0 + timedelta(days=1)).since == _T0.isoformat()
+
+
+def test_round_trips_through_its_dict():
+    seen = GallerySeen().stamped(_T0).opened("a1", _T0)
+    assert GallerySeen.from_dict(seen.to_dict()) == seen
+    assert GallerySeen.from_dict("nope") == GallerySeen()
+
+
+def test_the_bound_lets_the_oldest_visits_go_and_moves_since_up():
+    seen = GallerySeen().stamped(_T0)
+    for i in range(GALLERY_SEEN_MAX + 2):
+        seen = seen.opened(f"a{i}", _T0 + timedelta(minutes=i))
+    assert len(seen.albums) == GALLERY_SEEN_MAX
+    assert "a0" not in seen.albums and "a1" not in seen.albums
+    # A dropped album falls back to the newest dropped visit — never older.
+    assert seen.since == (_T0 + timedelta(minutes=1)).isoformat()
+    assert not seen.has_new("a0", (_T0 + timedelta(seconds=30)).isoformat())
+    assert seen.has_new("a0", (_T0 + timedelta(minutes=2)).isoformat())
+
+
+def test_has_new_is_a_view_field_never_exported():
+    assert "has_new" in ALBUM_VIEW_FIELDS
+    album = GalleryAlbum(id="a", space_id=None, owner_user_id="u", name="n")
+    assert album.has_new is False

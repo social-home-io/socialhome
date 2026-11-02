@@ -166,6 +166,7 @@ export const HOUSEHOLD_CHAT_LINK = '/?tab=chat'
  *   notifications.actors.one_more notifications.actors.one_more_one
  *   notifications.actors.more notifications.actors.more_one
  *   notifications.unread_empty_title notifications.unread_empty_body
+ *   (``gallery_added``, its own sentences — see ``GALLERY_KEYS``)
  */
 export const ROW_TYPES: Readonly<Record<string, TypeSpec>> = {
   post_created: { count: true },
@@ -245,9 +246,52 @@ export const ROW_TYPES: Readonly<Record<string, TypeSpec>> = {
   app_update: { none: true, noActor: true },
 }
 
+/**
+ * A "new photos" row (gallery D9) has its own sentences: the noun follows
+ * what it tells of (``flags`` ``photos`` / ``videos``), ``{count}`` is
+ * ``params.items``, ``{album}`` the album's name (``params.album``) and,
+ * for a space album, ``{space}`` the space.
+ *
+ * Keys (listed so a grep finds them):
+ *   notifications.row.gallery_added_photos notifications.row.gallery_added_photos_one
+ *   notifications.row.gallery_added_videos notifications.row.gallery_added_videos_one
+ *   notifications.row.gallery_added_mixed notifications.row.gallery_added_photos_in
+ *   notifications.row.gallery_added_photos_one_in notifications.row.gallery_added_videos_in
+ *   notifications.row.gallery_added_videos_one_in notifications.row.gallery_added_mixed_in
+ */
+export const GALLERY_KEYS: readonly string[] = [
+  'photos', 'photos_one', 'videos', 'videos_one', 'mixed',
+].flatMap(v => [`notifications.row.gallery_added_${v}`, `notifications.row.gallery_added_${v}_in`])
+
+function gallerySentence(row: RowInput, spaceName?: string | null): Segment[] | null {
+  const p = row.params
+  const album = p?.album?.trim()
+  const count = p?.items
+  const actors = Array.isArray(p?.actors) ? p.actors.filter(a => a && typeof a.id === 'string') : []
+  if (!p || !album || typeof count !== 'number' || count < 1 || actors.length === 0) return null
+  const flags = p.flags ?? []
+  const noun = flags.includes('photos') && flags.includes('videos')
+    ? 'mixed'
+    : flags.includes('videos') ? 'videos' : 'photos'
+  let key = `notifications.row.gallery_added_${noun}${count === 1 && noun !== 'mixed' ? '_one' : ''}`
+  const space = (spaceName || p.space_name || '').trim()
+  if (row.space_id) {
+    if (!space) return null
+    key = `${key}_in`
+  }
+  if (!hasKey(key)) return null
+  return fill(t(key), {
+    actor: [person(actors[0])],
+    album: [{ kind: 'place', text: album }],
+    space: [{ kind: 'place', text: space }],
+    count: [{ kind: 'text', text: String(count) }],
+  })
+}
+
 /** Every catalog key the renderer may ask for (the locale tests walk it). */
 export function rowKeys(): string[] {
   const keys: string[] = [
+    ...GALLERY_KEYS,
     'notifications.actors.two',
     'notifications.actors.one_more',
     'notifications.actors.one_more_one',
@@ -333,6 +377,7 @@ function hasKey(key: string): boolean {
  * over the name the row was written with).
  */
 export function rowSentence(row: RowInput, spaceName?: string | null): Segment[] | null {
+  if (row.type === 'gallery_added') return gallerySentence(row, spaceName)
   const spec = ROW_TYPES[row.type]
   const p = row.params
   if (!spec || !p) return null

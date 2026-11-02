@@ -38,6 +38,7 @@ itself is the persistence layer; push is fire-and-forget on top.
 | AppTableJoined       | The person who started a group game (Games) — one row per game, moved on by each joiner; ``can_start`` once enough are in | "{name} and {count} others joined your {app} game" |
 | AppTableCanStart     | The person who started a group game, when it reaches the app's fewest players (Games) — one row per game, re-opened if it reaches them again | "Your {app} game can start" |
 | AppTableStarted      | Each local player of a group game that started, but the person who started it (Games) | "Your {app} game with {name} and {count} others started" |
+| GalleryItemsAdded    | Who sees the album (household: everyone at home or a private album's people; space: members at "Everything") but the uploader — one row per album and uploader, re-opened by the next batch (Activity, in app by default) | "{name} added {count} photos to “{album}”" |
 
 Body is intentionally omitted for privacy-sensitive events (DMs,
 location, UGC content) per §25.3.
@@ -109,6 +110,8 @@ from ..domain.events import (
     DmMessageDeleted,
     DmMessageUpdated,
     EventReminderDue,
+    GalleryAlbumDeleted,
+    GalleryItemsAdded,
     HighlightFrameReactionChanged,
     HighlightRemoved,
     LocalSpaceInviteCreated,
@@ -157,8 +160,10 @@ from ..domain.events import (
 )
 from ..domain.federation import PairingStatus
 from ..domain.federation_capabilities import FederationCapability
+from ..domain.gallery import AUDIENCE_EVERYONE, GalleryAlbum
 from ..domain.mention import Mention, MentionType
 from ..domain.notification import (
+    GALLERY_ITEM_FLAGS,
     GROUP_QUIET_DAYS,
     HOUSEHOLD_FEED_ID,
     RETIRED_ACTION_TYPES,
@@ -194,6 +199,7 @@ from ..i18n import Catalog
 from ..infrastructure.event_bus import E, EventBus, Handler
 from ..repositories._spec import Spec
 from ..repositories.conversation_repo import AbstractConversationRepo
+from ..repositories.gallery_repo import AbstractGalleryRepo
 from ..repositories.notification_repo import (
     AbstractNotificationRepo,
     GroupKey,
@@ -215,6 +221,7 @@ from .notification_links import (
     app_link,
     app_table_link,
     bazaar_listing_link,
+    gallery_album_link,
     household_post_link,
     link_target,
     space_about_link,
@@ -320,6 +327,8 @@ class _Pending:
     push_params: dict[str, str | None] | None
     flags: tuple[str, ...]
     others: int | None = None
+    items: int | None = None
+    album: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -351,6 +360,53 @@ class _DeliveryBatch:
 _BATCH: ContextVar[_DeliveryBatch | None] = ContextVar(
     "notification_delivery_batch", default=None
 )
+
+#: A "new photos" row's title (gallery D9), keyed by (what it tells of:
+#: ``photos`` / ``videos`` / ``mixed``, exactly one, in a space) →
+#: (catalog key, English fallback). The album's name stays in the app: the
+#: push says only who and where (``_PUSH_TITLES``).
+_GALLERY_TITLES: dict[tuple[str, bool, bool], tuple[str, str]] = {
+    ("photos", False, False): (
+        "notification.gallery.added_photos",
+        "{name} added {count} photos to “{album}”",
+    ),
+    ("photos", True, False): (
+        "notification.gallery.added_photos_one",
+        "{name} added a photo to “{album}”",
+    ),
+    ("videos", False, False): (
+        "notification.gallery.added_videos",
+        "{name} added {count} videos to “{album}”",
+    ),
+    ("videos", True, False): (
+        "notification.gallery.added_videos_one",
+        "{name} added a video to “{album}”",
+    ),
+    ("mixed", False, False): (
+        "notification.gallery.added_mixed",
+        "{name} added {count} photos and videos to “{album}”",
+    ),
+    ("photos", False, True): (
+        "notification.gallery.added_photos_in",
+        "{name} added {count} photos to “{album}” in {space_name}",
+    ),
+    ("photos", True, True): (
+        "notification.gallery.added_photos_one_in",
+        "{name} added a photo to “{album}” in {space_name}",
+    ),
+    ("videos", False, True): (
+        "notification.gallery.added_videos_in",
+        "{name} added {count} videos to “{album}” in {space_name}",
+    ),
+    ("videos", True, True): (
+        "notification.gallery.added_videos_one_in",
+        "{name} added a video to “{album}” in {space_name}",
+    ),
+    ("mixed", False, True): (
+        "notification.gallery.added_mixed_in",
+        "{name} added {count} photos and videos to “{album}” in {space_name}",
+    ),
+}
 
 #: A group game's "joined" / "started" titles (v_76), keyed by (the app
 #: has a name here, how many others: 0, 1, 2 = more) → (catalog key,
@@ -480,6 +536,16 @@ _PUSH_TITLES: dict[str, tuple[tuple[str, str], ...]] = {
             "{name} asked about your listing in {space_name}",
         ),
         ("notification.push.bazaar_question", "{name} asked about your listing"),
+    ),
+    # An album's name can be the secret ("Gifts for Mum", D9): a "new
+    # photos" push names who and the space, never the album.
+    "gallery_added": (
+        (
+            "notification.push.gallery_added_in",
+            "New photos from {name} in {space_name}",
+        ),
+        ("notification.push.gallery_added", "New photos from {name}"),
+        ("notification.push.gallery_added_anon", "New photos"),
     ),
     "post_reacted": (
         (
@@ -668,6 +734,8 @@ def _grouped(
     push: bool,
     flags: tuple[str, ...],
     others: int | None = None,
+    items: int | None = None,
+    album: str | None = None,
 ) -> tuple[Notification, bool, bool]:
     """``(row to write, reopened, silent)`` for *note* joining *group*.
 
@@ -683,7 +751,12 @@ def _grouped(
             object_key=about.object_key,
             space_id=about.space_id,
             params=first_params(
-                actor, space_name=about.space_name, flags=flags, others=others
+                actor,
+                space_name=about.space_name,
+                flags=flags,
+                others=others,
+                items=items,
+                album=album,
             ),
         )
         return saved, False, not push
@@ -702,6 +775,8 @@ def _grouped(
             space_name=about.space_name,
             flags=flags,
             others=others,
+            items=items,
+            album=album,
         ),
     )
     reopened = group.is_read
@@ -749,6 +824,7 @@ class NotificationService(ProtectionGateMixin):
         "_calendar_repo",
         "_child_protection",
         "_convos",
+        "_gallery",
         "_i18n",
         "_instances",
         "_listings",
@@ -848,6 +924,13 @@ class NotificationService(ProtectionGateMixin):
         # gives its seller a ``bazaar_question`` row naming the listing.
         # Without it such a message pushes like any 1:1.
         self._listings = None
+        # Gallery albums — optional; an upload batch (D9) tells who sees
+        # the album. Without it no "new photos" rows.
+        self._gallery: AbstractGalleryRepo | None = None
+
+    def attach_gallery_repo(self, gallery_repo: AbstractGalleryRepo) -> None:
+        """Wire the gallery albums ("new photos" rows, D9)."""
+        self._gallery = gallery_repo
 
     def attach_bazaar_repo(self, bazaar_repo) -> None:
         """Wire the bazaar listings ("Ask the seller" rows)."""
@@ -973,6 +1056,8 @@ class NotificationService(ProtectionGateMixin):
         push_params: dict[str, str | None] | None = None,
         flags: tuple[str, ...] = (),
         others: int | None = None,
+        items: int | None = None,
+        album: str | None = None,
     ) -> Notification | None:
         """The one gate every notification passes, then persist + publish
         ``NotificationCreated`` + fire title-only pushes to every registered
@@ -1019,7 +1104,9 @@ class NotificationService(ProtectionGateMixin):
 
         ``flags`` say why a "Needs you" item can't be decided with one tap
         (:data:`~socialhome.domain.notification.JOIN_REQUEST_FLAGS`).
-        ``others`` is a group game's count (``params.others``, v_76).
+        ``others`` is a group game's count (``params.others``, v_76);
+        ``items`` and ``album`` a "new photos" row's (``params.items`` /
+        ``params.album``, D9).
 
         What the recipient chose (D4, D10, :meth:`_heard`) comes last: a
         muted post or a kind set to Off → no row; a kind set to In app → a
@@ -1055,7 +1142,18 @@ class NotificationService(ProtectionGateMixin):
         if batch is not None:
             # A delivery job: the row joins the job's one batched write.
             batch.items.append(
-                _Pending(note, about, user, actor, push, push_params, flags, others)
+                _Pending(
+                    note,
+                    about,
+                    user,
+                    actor,
+                    push,
+                    push_params,
+                    flags,
+                    others,
+                    items,
+                    album,
+                )
             )
             return None
         group = await self._notifs.latest_in_group(
@@ -1065,7 +1163,7 @@ class NotificationService(ProtectionGateMixin):
             since=_group_since(),
         )
         saved, reopened, silent = _grouped(
-            note, group, about, actor, push, flags, others
+            note, group, about, actor, push, flags, others, items, album
         )
         if group is None:
             await self._notifs.save(saved)
@@ -1132,6 +1230,8 @@ class NotificationService(ProtectionGateMixin):
                 item.push,
                 item.flags,
                 item.others,
+                item.items,
+                item.album,
             )
             # A second event for the same group in this job joins the row
             # the first one made, as it would one save at a time.
@@ -1468,6 +1568,9 @@ class NotificationService(ProtectionGateMixin):
         # An app turned back on answers the asks to turn it on (D10).
         self._subscribe(AppEnabledChanged, self.on_app_request_answered)
         self._subscribe(AppUpdateAvailable, self.on_app_update_available)
+        # Gallery (D9): one row per upload batch; a deleted album's go.
+        self._subscribe(GalleryItemsAdded, self.on_gallery_items_added)
+        self._subscribe(GalleryAlbumDeleted, self.on_gallery_album_deleted)
         self._subscribe(AppUpdated, self.on_app_update_handled)
         self._subscribe(AppUpdateGone, self.on_app_update_handled)
         self._subscribe(AppUninstalled, self.on_app_update_handled)
@@ -4017,6 +4120,171 @@ class NotificationService(ProtectionGateMixin):
                 actor_name=name,
                 withheld=blocked,
             )
+
+    async def on_gallery_items_added(self, event: GalleryItemsAdded) -> None:
+        """Someone added photos or videos to an album, then went quiet (D9):
+        "Anna added 12 photos to “Summer 2026”".
+
+        One row per album **and uploader** (``gallery_album:<album>/<who>``)
+        for everyone who sees the album here (:meth:`_gallery_audience`) but
+        the uploader; the gate drops a blocked or guardian-blocked uploader.
+        The next batch re-opens it (D7) — while it is still unread its count
+        adds up (``params.items``). Activity, In app by default: a row, no
+        push; someone who sets Activity to Push gets one whose title never
+        names the album (``_PUSH_TITLES``). It opens the album, whose page
+        reads it as seen. The system "Posts" album never rings: its feed
+        post already did."""
+        if self._gallery is None or event.count <= 0:
+            return
+        album = await self._gallery.get_album(event.album_id)
+        if album is None or album.is_system:
+            return
+        space = None
+        if album.space_id is not None:
+            space = await self._spaces.get(album.space_id)
+            if space is None or not space.features.gallery:
+                return
+        uploader_id = event.uploader
+        blocked = await self._withheld_from(uploader_id)
+        audience = [
+            u
+            for u in await self._gallery_audience(album, space)
+            if u.user_id != uploader_id and u.user_id not in blocked
+        ]
+        if not audience:
+            return
+        key = object_key(NotificationObject.GALLERY_ALBUM, f"{album.id}/{uploader_id}")
+        groups = await self._notifs.latest_in_groups(
+            [(u.user_id, "gallery_added", key) for u in audience],
+            since=_group_since(),
+        )
+        name = await self._held_name(uploader_id, space_id=album.space_id)
+        space_name = space.name if space is not None else None
+        kinds = frozenset(
+            k for k, n in (("photos", event.photos), ("videos", event.videos)) if n > 0
+        )
+        for user in audience:
+            group = groups.get((user.user_id, "gallery_added", key))
+            earlier = (
+                group.params
+                if group is not None and not group.is_read and group.params
+                else None
+            )
+            count = event.count + ((earlier.items or 0) if earlier else 0)
+            flags = tuple(
+                sorted(
+                    kinds
+                    | (
+                        frozenset(earlier.flags) & GALLERY_ITEM_FLAGS
+                        if earlier
+                        else frozenset()
+                    )
+                )
+            )
+            locale = self._locale(user)
+            await self._save_notif(
+                new_notification(
+                    user_id=user.user_id,
+                    type="gallery_added",
+                    title=self._gallery_title(
+                        locale,
+                        name=name or self._someone(locale),
+                        album=album.name,
+                        space_name=space_name,
+                        flags=flags,
+                        count=count,
+                    ),
+                    link_url=gallery_album_link(album.id, album.space_id),
+                ),
+                about=NotificationSubject(
+                    key, space_id=album.space_id, space_name=space_name
+                ),
+                actor_user_id=uploader_id,
+                actor_name=name,
+                withheld=blocked,
+                push_params={"name": name, "space_name": space_name},
+                flags=flags,
+                items=count,
+                album=album.name,
+            )
+
+    def _gallery_title(
+        self,
+        locale: str | None,
+        *,
+        name: str,
+        album: str,
+        space_name: str | None,
+        flags: tuple[str, ...],
+        count: int,
+    ) -> str:
+        """ "{name} added {count} photos to “{album}”" (in {space}) — the
+        noun follows what the row tells of (:data:`_GALLERY_TITLES`)."""
+        noun = (
+            "mixed"
+            if len(flags) > 1
+            else "videos"
+            if flags == ("videos",)
+            else "photos"
+        )
+        key, fallback = _GALLERY_TITLES[
+            (noun, count == 1 and noun != "mixed", space_name is not None)
+        ]
+        return self._t(
+            key,
+            locale=locale,
+            fallback=fallback,
+            name=name,
+            album=album,
+            space_name=space_name or "",
+            count=count,
+        )
+
+    async def _gallery_audience(self, album: GalleryAlbum, space) -> list[User]:
+        """Who may see *album* here — the only people a "new photos" row
+        may reach.
+
+        * A space album: this household's members of the space at
+          "Everything" (their choice, else the D5 default — household and
+          private spaces; a public or global space's followers and members
+          at "Replies and mentions" don't hear of new photos, like a new
+          post).
+        * A household album open to everyone at home: every active member.
+        * A private album (D7): only the people the repo's
+          :meth:`~socialhome.repositories.gallery_repo.AbstractGalleryRepo.album_visible_to`
+          lets in — the one rule the album pages use, so the private-album
+          work (who else may see it, a child's guardians) changes it in one
+          place and a private album's uploads never tell anyone outside it.
+        """
+        if self._gallery is None:
+            return []
+        if space is not None:
+            out: list[User] = []
+            for member in await self._space_members(space.id):
+                if await self._space_level(member, space) is not SpaceNotifLevel.ALL:
+                    continue
+                user = await self._local_user(member.user_id)
+                if user is not None:
+                    out.append(user)
+            return out
+        audience = await self._gallery.get_album_audience(album.id)
+        if audience is None:
+            return []
+        users = await self._active_users()
+        if audience.audience == AUDIENCE_EVERYONE:
+            return users
+        return [
+            u
+            for u in users
+            if await self._gallery.album_visible_to(album.id, u.user_id)
+        ]
+
+    async def on_gallery_album_deleted(self, event: GalleryAlbumDeleted) -> None:
+        """An album was deleted (or went to the trash): its "new photos"
+        rows go, for every uploader."""
+        prefix = object_key(NotificationObject.GALLERY_ALBUM, f"{event.album_id}/")
+        for user_id in await self._notifs.delete_by_object_prefix(prefix):
+            await self._announce_unread(user_id)
 
     async def on_bazaar_bid_placed(self, event: BazaarBidPlaced) -> None:
         """Notify the seller that a bid landed (or was raised)."""

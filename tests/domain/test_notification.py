@@ -249,6 +249,22 @@ def test_a_group_invite_row_keeps_how_many_others_were_asked():
     assert regroup(p, None, reopen=True).others == 3
 
 
+def test_a_new_photos_row_keeps_its_count_album_and_kinds():
+    p = first_params(
+        NotificationActor("lena"), flags=("photos",), items=12, album="Sommer"
+    )
+    raw = p.to_dict()
+    assert (raw["items"], raw["album"], raw["flags"]) == (12, "Sommer", ["photos"])
+    assert NotificationParams.from_dict(raw) == p
+    assert "album" not in first_params(NotificationActor("ben")).to_dict()
+    # The newest batch's count and name win; none keeps the row's.
+    again = regroup(p, None, reopen=False, items=14, album="Sommer 26")
+    assert (again.items, again.album) == (14, "Sommer 26")
+    assert regroup(p, None, reopen=True).album == "Sommer"
+    bad = NotificationParams.from_dict({"items": -1, "album": 7})
+    assert (bad.items, bad.album) == (None, None)
+
+
 def test_a_bad_others_count_reads_as_none():
     for bad in (-1, "3", True, 1.5, None):
         assert NotificationParams.from_dict({"others": bad}).others is None
