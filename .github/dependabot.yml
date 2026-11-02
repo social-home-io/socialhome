@@ -4,7 +4,8 @@
 # (``cooldown``), runs weekly, and groups patch + minor bumps into one PR
 # per ecosystem; majors come as separate PRs. Patch/minor PRs auto-merge
 # once the required checks pass (.github/workflows/dependabot-automerge.yml);
-# majors wait for a human review.
+# majors wait for a human review. Client PRs get the pinned viewer
+# manifest rebuilt and committed by .github/workflows/dependabot-pinned-viewer.yml.
 #
 # PRs carry the ``dependencies`` label, which .github/release.yml drops from
 # the release notes (Dependabot is excluded as an author there too).

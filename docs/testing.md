@@ -399,6 +399,37 @@ reads the update type with `dependabot/fetch-metadata` and runs
 check on `main` passes — a red check leaves the PR open for a human.
 Majors are never auto-merged.
 
+Client bumps rebuild the pinned viewer themselves. Almost every client
+dependency update changes `socialhome/pinned_viewer.json`, the
+content-addressed public viewer, and CI's `frontend` job fails until
+`pnpm build:pinned-viewer` has been rerun and its output committed.
+Dependabot can't do that, so
+`.github/workflows/dependabot-pinned-viewer.yml` does it for Dependabot's
+own PRs. It runs only when Dependabot pushed a same-repo branch touching
+`client/package.json` or `client/pnpm-lock.yaml`. It works in two jobs:
+
+1. **`build`** installs the locked set and rebuilds the viewer with a
+   read-only token, the same code CI's `frontend` job already runs. It
+   passes on only the manifest file, as an artifact.
+2. **`commit`** runs no package code. It checks the manifest's shape,
+   commits that one file on top of the exact commit that was built, and
+   pushes it to the Dependabot branch. Only this job holds
+   `contents: write` and `actions: write`.
+
+A push with `GITHUB_TOKEN` starts no new workflow run (GitHub's rule
+against loops), so `commit` then dispatches CI (`workflow_dispatch`) on
+the branch. That run reports the required checks on the new head, and
+auto-merge proceeds as usual. Every action in the workflow is pinned by
+commit.
+
+Once a bot commit sits on a Dependabot branch, Dependabot stops rebasing
+that PR on its own. If it later conflicts, comment `@dependabot recreate`
+on it: the PR is rebuilt from scratch and the workflow runs again.
+
+Grouping can't fix this instead. Leaving the build tools (vite, preact,
+esbuild, …) out of the grouped PR would only move the red check to their
+own PRs, which still need someone to rebuild the viewer by hand.
+
 Because `uv.lock` is the only committed lock (see
 [Dependency lock](#dependency-lock)), a Dependabot uv PR is complete on its
 own and passes the `lock` job. Bumped by hand instead: uv itself (every
