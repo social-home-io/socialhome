@@ -1540,10 +1540,13 @@ class RealtimeService:
         audience = await self._gallery_repo.get_album_audience(
             album_id, include_trashed=True
         )
-        viewers = audience.viewers if audience is not None else None
+        users = await self._user_repo.list_active()
+        if audience is None:
+            # No row to ask (purged meanwhile): fail closed — nobody.
+            return frozenset(u.user_id for u in users)
+        viewers = audience.viewers
         if viewers is None:
             return frozenset()
-        users = await self._user_repo.list_active()
         return frozenset(u.user_id for u in users if u.user_id not in viewers)
 
     # ─── User status ──────────────────────────────────────────────────────

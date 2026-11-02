@@ -315,3 +315,42 @@ async def test_export_includes_the_sellers_own_listing_faq_only(env):
         )
     out = await svc.export_for_user("alice-id")
     assert [r["entry_id"] for r in out.tables["bazaar_listing_faq"]] == ["e1"]
+
+
+async def test_someone_elses_export_leaves_out_private_albums(env):
+    """Gallery D7: an admin's export of Alice never carries her private
+    album, its photos or the notification rows that name it; her own
+    export (and an album open to everyone) keeps them."""
+    db, svc = env
+    await db.enqueue(
+        "INSERT INTO gallery_albums(id, name, owner_user_id, audience)"
+        " VALUES('priv', 'Gifts', 'alice-id', 'chosen'),"
+        " ('open', 'Summer', 'alice-id', 'everyone')"
+    )
+    for iid, album in (("i1", "priv"), ("i2", "open")):
+        await db.enqueue(
+            "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type,"
+            " filename, thumbnail_filename, width, height)"
+            " VALUES(?, ?, 'alice-id', 'photo', ?, ?, 1, 1)",
+            (iid, album, f"{iid}.webp", f"{iid}t.webp"),
+        )
+    await db.enqueue(
+        "INSERT INTO notifications(id, user_id, type, title, link_url, object_key)"
+        " VALUES('n1', 'alice-id', 'gallery_album_trashed', 'x', '/gallery/trash',"
+        " 'gallery_album_trashed:priv'),"
+        " ('n2', 'alice-id', 'gallery_added', 'y', '/gallery/albums/open', NULL),"
+        " ('n3', 'alice-id', 'post_created', 'priv', NULL, NULL)"
+    )
+    other = await svc.export_for_user("alice-id", viewer_user_id="bob-id")
+    assert [a["id"] for a in other.tables["gallery_albums"]] == ["open"]
+    assert [i["id"] for i in other.tables["gallery_items"]] == ["i2"]
+    assert sorted(n["id"] for n in other.tables["notifications"]) == ["n2", "n3"]
+    own = await svc.export_for_user("alice-id", viewer_user_id="alice-id")
+    assert sorted(a["id"] for a in own.tables["gallery_albums"]) == ["open", "priv"]
+    assert len(own.tables["notifications"]) == 3
+    # Bob chosen for it: then he sees it in the export too.
+    await db.enqueue(
+        "INSERT INTO gallery_album_audience(album_id, user_id) VALUES('priv', 'bob-id')"
+    )
+    chosen = await svc.export_for_user("alice-id", viewer_user_id="bob-id")
+    assert len(chosen.tables["gallery_albums"]) == 2

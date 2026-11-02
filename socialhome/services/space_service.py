@@ -276,6 +276,7 @@ from .local_community import (
     pending_join_request_id,
     require_local_eligibility,
 )
+from .media_ref_guard import MediaRefGuardedMixin
 from .protection_gate import ProtectionGateMixin
 from .space_authority_pin import (
     apply_authority_cert,
@@ -434,7 +435,9 @@ def _require_link_publishable(space: Space) -> None:
     raise SpaceNotPublishableError()
 
 
-class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixin):
+class SpaceService(
+    MediaRefGuardedMixin, SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixin
+):
     """Orchestrates space lifecycle + member + post flows."""
 
     __slots__ = (
@@ -458,6 +461,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         "_link_previews",
         "_local_area_budget",
         "_media_dir",
+        "_media_guard",
         "_media_refs",
         "_member_gfs",
         "_mirror_locks",
@@ -7792,6 +7796,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # a remote URL leaks every member's IP and receivers drop it.
         media_url = optional_local_media_ref(media_url)
         image_urls_tuple = require_local_media_refs(image_urls_tuple)
+        await self._require_openable_media(
+            (media_url, *image_urls_tuple), user_id=author_user_id, field="image_urls"
+        )
         clean_attachments = self._post_attachments.validate(post_type, attachments)
         # ``posts_access`` is enforced on EVERY household from its own copy
         # of the features — the host and each member household's stub
@@ -8208,6 +8215,7 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         elif ctype is CommentType.IMAGE and not media_url:
             raise ValueError("image comment requires media_url")
         media_url = optional_local_media_ref(media_url)
+        await self._require_openable_media((media_url,), user_id=author_user_id)
         if parent_id is not None:
             parent = await self._posts.get_comment(parent_id)
             if parent is None or parent.post_id != post_id:

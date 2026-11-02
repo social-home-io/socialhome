@@ -52,6 +52,12 @@ SECRET = _jpeg((10, 200, 30))
 
 @pytest.fixture
 async def home(aiohttp_client, tmp_dir):
+    return await build_home(aiohttp_client, tmp_dir)
+
+
+async def build_home(aiohttp_client, tmp_dir):
+    """The household above, as a signed-in test client (shared with
+    ``test_gallery_private_media_refs``)."""
     client = await _authed_client(aiohttp_client, tmp_dir, None)
     toks: dict[str, str] = {"admin": client._tok}
     uids: dict[str, str] = {"admin": client._uid}

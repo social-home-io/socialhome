@@ -55,7 +55,11 @@ _ITEM_TOMBSTONE_SET = (
 #: private albums they were chosen for — and every private album of a
 #: protected child (§CP) the viewer is a guardian of, whatever the child
 #: chose (read-time, so a guardian added later sees it, and a child can't
-#: take one out). Expects the album aliased ``a``; binds the viewer twice.
+#: take one out; turning protection on later shows the guardians what is
+#: already in the child's private albums) — and every album the viewer has
+#: a photo or video in (live or in the trash): an uploader never loses
+#: sight of their own photo, e.g. a guardian when protection ends. Expects
+#: the album aliased ``a``; binds the viewer twice.
 _ALBUM_VISIBLE_TO_SQL = (
     "(a.audience = 'everyone' OR a.owner_user_id = ?"
     " OR ? IN (SELECT aa.user_id FROM gallery_album_audience aa"
@@ -63,7 +67,9 @@ _ALBUM_VISIBLE_TO_SQL = (
     " UNION ALL SELECT g.guardian_user_id FROM cp_guardians g"
     " JOIN users m ON m.user_id = g.minor_user_id"
     " WHERE g.minor_user_id = a.owner_user_id"
-    " AND m.child_protection_enabled = 1))"
+    " AND m.child_protection_enabled = 1"
+    " UNION ALL SELECT gi.uploaded_by FROM gallery_items gi"
+    " WHERE gi.album_id = a.id AND gi.filename <> ''))"
 )
 #: The public name of :data:`_ALBUM_VISIBLE_TO_SQL` for other repos.
 ALBUM_VISIBLE_TO_SQL = _ALBUM_VISIBLE_TO_SQL
@@ -340,10 +346,17 @@ class AbstractGalleryRepo(Protocol):
         ...
 
     async def list_household_uploads(
-        self, uploader_user_id: str, *, limit: int
+        self, uploader_user_id: str, *, limit: int, viewer_user_id: str | None = None
     ) -> list[GalleryItem]:
         """The live household photos and videos *uploader_user_id* added to
-        user albums (not the feed's "Posts" album), oldest first."""
+        user albums (not the feed's "Posts" album), oldest first — with
+        *viewer_user_id*, only those in albums that person may see (the
+        filter comes before the limit, so nothing visible drops)."""
+        ...
+
+    async def is_private_media(self, filename: str) -> bool:
+        """Whether the stored file *filename* belongs to a photo or video
+        of a private (``chosen``) household album."""
         ...
 
     async def get_album_audience(
@@ -1743,17 +1756,32 @@ class SqliteGalleryRepo:
         return list(await self._db.transact(_run))
 
     async def list_household_uploads(
-        self, uploader_user_id: str, *, limit: int
+        self, uploader_user_id: str, *, limit: int, viewer_user_id: str | None = None
     ) -> list[GalleryItem]:
+        visible = ""
+        params: list = [uploader_user_id]
+        if viewer_user_id is not None:
+            visible = " AND " + _ALBUM_VISIBLE_TO_SQL
+            params += [viewer_user_id, viewer_user_id]
         rows = await self._db.fetchall(
             "SELECT i.* FROM gallery_items i"
             " JOIN gallery_albums a ON a.id = i.album_id"
             " WHERE i.uploaded_by=? AND i.deleted_at IS NULL AND i.filename <> ''"
             " AND a.space_id IS NULL AND a.is_system = 0 AND a.deleted_at IS NULL"
-            " ORDER BY i.created_at, i.id LIMIT ?",
-            (uploader_user_id, int(limit)),
+            + visible
+            + " ORDER BY i.created_at, i.id LIMIT ?",
+            (*params, int(limit)),
         )
         return [self._row_to_item(r) for r in rows_to_dicts(rows)]
+
+    async def is_private_media(self, filename: str) -> bool:
+        row = await self._db.fetchone(
+            "SELECT 1 FROM gallery_albums a JOIN gallery_items i ON i.album_id = a.id"
+            " WHERE a.audience = ? AND a.space_id IS NULL"
+            " AND (i.filename = ? OR i.thumbnail_filename = ?) LIMIT 1",
+            (AUDIENCE_CHOSEN, filename, filename),
+        )
+        return row is not None
 
     async def get_album_audience(
         self, album_id: str, *, include_trashed: bool = False
@@ -1781,6 +1809,7 @@ class SqliteGalleryRepo:
             user_ids=frozenset(r[0] for r in people),
             owner_user_id=row[1],
             guardian_ids=frozenset(r[0] for r in guardians),
+            uploader_ids=await self.album_uploaders(album_id),
         )
 
     async def album_uploaders(self, album_id: str) -> frozenset[str]:

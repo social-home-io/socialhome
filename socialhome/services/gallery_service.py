@@ -1018,6 +1018,10 @@ class GalleryService:
             await self._require_writer(album.space_id, uploader_user_id)
         else:
             await self._require_may_add(uploader_user_id)
+            if not await self._admitted(album.id, uploader_user_id):
+                # They see it only through photos they added before (e.g. a
+                # guardian whose child grew up): they keep those, add nothing.
+                raise GalleryPermissionError("Only the album's people add to it")
         if caption and len(caption) > CAPTION_MAX:
             raise ValueError(f"Caption must be {CAPTION_MAX} characters or fewer")
         return album
@@ -1044,14 +1048,16 @@ class GalleryService:
     ) -> GalleryUpload:
         await self._repo.create_item(item, content_sha256=content_sha256)
         await self._repo.increment_item_count(album.id, +1)
-        if album.space_id is None and not await self._repo.album_visible_to(
+        if album.space_id is None and not await self._admitted(
             album.id, item.uploaded_by
         ):
             # The album turned private without this person while the upload
             # was on its way (D7: privacy follows the upload) — it must not
-            # land where its uploader can't see it. Writes are serialised:
-            # an audience change after the insert sees this uploader and is
-            # refused, so this check after the insert closes the race.
+            # land there: hidden from the others who saw it, and (since an
+            # uploader always sees the album their photo is in) a way into
+            # the private album. Writes are serialised: an audience change
+            # after the insert sees this uploader and is refused, so this
+            # check after the insert closes the race.
             await self._repo.trash_item(item.id, deleted_by=item.uploaded_by)
             media = await self._repo.purge_trashed_item(item.id)
             await unlink_unreferenced(self._media_dir, self._media_refs, media)
@@ -1454,8 +1460,12 @@ class GalleryService:
             raise GalleryPermissionError(
                 "Only the person or a household admin may download their photos"
             )
+        # Only what the actor may see, filtered before the limit — so no
+        # photo they may see drops because hidden ones came first.
         items = await self._repo.list_household_uploads(
-            person.user_id, limit=PERSON_DOWNLOAD_MAX_ITEMS + 1
+            person.user_id,
+            limit=PERSON_DOWNLOAD_MAX_ITEMS + 1,
+            viewer_user_id=actor_user_id,
         )
         names: dict[str, str] = {}
         visible: list[GalleryItem] = []
@@ -1636,6 +1646,27 @@ class GalleryService:
         if updated is None:  # deleted meanwhile
             raise GalleryNotFoundError(f"album {album_id!r} not found")
         return updated
+
+    async def _admitted(self, album_id: str, user_id: str) -> bool:
+        """Whether *user_id* sees a household album by its audience — open
+        to everyone, or its owner, chosen people or a protected owner's
+        guardians — not merely because a photo of theirs is in it (the
+        upload rule: nobody gets into a private album by adding to it)."""
+        audience = await self._repo.get_album_audience(album_id)
+        if audience is None:
+            return False
+        if audience.audience != AUDIENCE_CHOSEN:
+            return True
+        return (
+            user_id == audience.owner_user_id
+            or user_id in audience.user_ids
+            or user_id in audience.guardian_ids
+        )
+
+    async def is_private_file(self, filename: str) -> bool:
+        """Whether *filename* is a private album's photo, video or
+        thumbnail — the file route then sends it ``no-store``."""
+        return await self._repo.is_private_media(filename)
 
     async def may_open_file(self, filename: str, *, user_id: str) -> bool:
         """Whether *user_id* may fetch the stored file *filename* — not when

@@ -66,6 +66,7 @@ from .dm_audience import local_audience
 from .dm_group_service import DmGroupService, clean_group_name
 from .dm_mentions import MENTIONABLE_TYPES, DmMentionResolver
 from .inbound_media_store import local_media_ref
+from .media_ref_guard import MediaRefGuardedMixin
 from .protection_gate import ProtectionGateMixin
 from .visibility import VisibilityMixin
 
@@ -165,7 +166,7 @@ def _visible_reactions(
     return [r for r in reactions if r.user_id not in blocked]
 
 
-class DmService(VisibilityMixin, ProtectionGateMixin):
+class DmService(MediaRefGuardedMixin, VisibilityMixin, ProtectionGateMixin):
     """Conversation + message CRUD for household DMs.
 
     Guardian blocks (§CP.F2, via :class:`ProtectionGateMixin`) apply like a
@@ -186,6 +187,7 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
         "_groups",
         "_listing_threads",
         "_media_dir",
+        "_media_guard",
         "_media_refs",
         "_media_sync",
         "_own_instance_id",
@@ -777,6 +779,9 @@ class DmService(VisibilityMixin, ProtectionGateMixin):
             if ref is None:
                 raise InvalidMediaRefError()
             media_url = ref
+            # …and one the sender may open today (never someone else's
+            # chat attachment or a private album's photo).
+            await self._require_openable_media((ref,), user_id=sender.user_id)
         if type == "location":
             # Structured pin — validated and rounded (4-dp coords, coarse
             # accuracy bucket) here, before it is stored, published on the

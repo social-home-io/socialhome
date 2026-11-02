@@ -369,6 +369,7 @@ from .services.link_preview_service import LinkPreviewService
 from .services.local_community import LocalAreaBudget
 from .services.map_tile_service import MapTileService
 from .services.media_orphan_sweep_service import MediaOrphanSweepService
+from .services.media_ref_guard import MediaRefGuard
 from .services.media_transcode_service import MediaTranscodeService
 from .services.moment_archive_service import MomentArchiveService
 from .services.moment_federation_outbound import MomentFederationOutbound
@@ -3967,6 +3968,24 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.shopping_repo_key] = shopping_repo
     app[K.highlight_repo_key] = highlight_repo
     app[K.highlight_service_key] = highlight_service
+    # Who may name a stored file in a write (private albums D7, other
+    # people's chat attachments, a space's photos): one guard for every
+    # local write sink (``services/media_ref_guard.py``).
+    media_ref_guard = MediaRefGuard(repos.media_reference)
+    app[K.media_ref_guard_key] = media_ref_guard
+    for guarded in (
+        feed_service,
+        space_service,
+        dm_service,
+        task_service,
+        calendar_service,
+        space_cal_service,
+        space_page_service,
+        bazaar_service,
+        highlight_service,
+        moment_service,
+    ):
+        guarded.attach_media_guard(media_ref_guard)
     app[K.highlight_retention_scheduler_key] = highlight_retention_scheduler
     app[K.highlight_publication_service_key] = highlight_publication_service
     app[K.moment_repo_key] = moment_repo
@@ -4208,6 +4227,7 @@ def create_app(config: Config | None = None) -> web.Application:
         real_space_service.attach_icon_repo(space_icon_repo)
         real_space_service.attach_gallery_repo(gallery_repo)
         real_space_service.attach_link_previews(link_preview_service)
+        real_space_service.attach_media_guard(app[K.media_ref_guard_key])
         real_space_service.attach_bazaar_repo(bazaar_repo)
         real_space_service.attach_gfs_connection_service(gfs_connection_service)
         real_space_service.attach_gfs_server_selection(gfs_server_selection)

@@ -75,6 +75,8 @@ from ..repositories.user_repo import AbstractUserRepo
 from ..utils.timezones import DEFAULT_TZ, local_date
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
+from .inbound_media_store import local_media_ref
+from .media_ref_guard import MediaRefGuardedMixin
 from .space_moderation_service import ApplyResult, item_payload_snapshot
 from .space_service import SpaceService
 
@@ -266,10 +268,10 @@ def _apply_edits(
     return replace(task, **kwargs)
 
 
-class TaskService(BusPublisherMixin):
+class TaskService(MediaRefGuardedMixin, BusPublisherMixin):
     """Household task list operations."""
 
-    __slots__ = ("_bus", "_household", "_repo", "_users")
+    __slots__ = ("_bus", "_household", "_media_guard", "_repo", "_users")
 
     def __init__(
         self,
@@ -719,6 +721,13 @@ class TaskService(BusPublisherMixin):
         await self.get_task(task_id)
         if size_bytes <= 0:
             raise ValueError("size_bytes must be > 0")
+        # A local file is re-signed for everyone who reads the task: its
+        # adder must be able to open it.
+        local = local_media_ref(url)
+        if local is not None:
+            await self._require_openable_media(
+                (local,), user_id=uploaded_by, field="url"
+            )
         attachment = TaskAttachment(
             id=uuid.uuid4().hex,
             task_id=task_id,

@@ -49,6 +49,7 @@ from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from ..repositories.post_repo import AbstractPostRepo
 from ..repositories.user_repo import AbstractUserRepo
 from .inbound_media_store import optional_local_media_ref, require_local_media_refs
+from .media_ref_guard import MediaRefGuardedMixin
 
 if TYPE_CHECKING:
     import pathlib
@@ -71,7 +72,7 @@ MAX_COMMENT_LENGTH = 2_000
 LOCATION_LABEL_MAX = 80
 
 
-class FeedService:
+class FeedService(MediaRefGuardedMixin):
     """Household-feed CRUD + reactions + comments."""
 
     __slots__ = (
@@ -79,6 +80,7 @@ class FeedService:
         "_household",
         "_link_previews",
         "_media_dir",
+        "_media_guard",
         "_media_refs",
         "_posts",
         "_quota",
@@ -164,6 +166,9 @@ class FeedService:
         # Local uploads only (docs/principles.md "No third-party fetches").
         media_url = optional_local_media_ref(media_url)
         image_urls_tuple = require_local_media_refs(image_urls_tuple)
+        await self._require_openable_media(
+            (media_url, *image_urls_tuple), user_id=author_user_id, field="image_urls"
+        )
         # Truncate to 4dp at the service boundary regardless of what the
         # client sent — the column never holds higher precision than the
         # federated form (§GPS truncation).
@@ -389,6 +394,7 @@ class FeedService:
         elif ctype is CommentType.IMAGE and not media_url:
             raise ValueError("image comment requires media_url")
         media_url = optional_local_media_ref(media_url)
+        await self._require_openable_media((media_url,), user_id=author_user_id)
 
         if parent_id is not None:
             parent = await self._posts.get_comment(parent_id)

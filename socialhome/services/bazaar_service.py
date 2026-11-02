@@ -58,6 +58,7 @@ from ..repositories.bazaar_repo import (
     new_offer,
 )
 from .inbound_media_store import require_local_media_refs
+from .media_ref_guard import MediaRefGuardedMixin
 from .protection_gate import ProtectionGateMixin
 
 if TYPE_CHECKING:
@@ -124,7 +125,7 @@ class _Unset:
 _UNSET = _Unset()
 
 
-class BazaarService(ProtectionGateMixin):
+class BazaarService(MediaRefGuardedMixin, ProtectionGateMixin):
     """Service-level wrapper around :class:`AbstractBazaarRepo`.
 
     Listings are scoped to a single :class:`Space` — :meth:`create_listing`
@@ -133,7 +134,7 @@ class BazaarService(ProtectionGateMixin):
     the space's membership / federation rules.
     """
 
-    __slots__ = ("_bus", "_child_protection", "_repo", "_spaces")
+    __slots__ = ("_bus", "_child_protection", "_media_guard", "_repo", "_spaces")
 
     def __init__(self, repo: AbstractBazaarRepo, bus: EventBus) -> None:
         self._repo = repo
@@ -329,6 +330,9 @@ class BazaarService(ProtectionGateMixin):
                 f"too many images (max {BAZAAR_MAX_IMAGES})",
             )
         image_urls = require_local_media_refs(image_urls)
+        await self._require_openable_media(
+            image_urls, user_id=seller_user_id, field="image_urls"
+        )
         _validate_price_fields(mode_val, price, start_price, step_price)
 
         caption = f"🛍 {title_clean}" + (

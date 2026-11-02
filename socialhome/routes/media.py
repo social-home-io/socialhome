@@ -114,6 +114,11 @@ class MediaServeView(BaseView):
             # A private album's photo (D7) for someone outside it: exactly
             # the unknown file's answer, so nobody learns it exists.
             return error_response(404, "NOT_FOUND", "Media file not found.")
+        gallery = self.request.app.get(gallery_service_key)
+        # A private album's file is never kept in a browser or proxy cache:
+        # someone taken out of the album must not find it there (a signed
+        # link they already hold still works until it expires, ≤ 7 h).
+        private = gallery is not None and await gallery.is_private_file(filename)
 
         # The type is guessed from the stored name, so a stored ``.svg`` /
         # ``.html`` would otherwise render as a document on our origin.
@@ -124,7 +129,9 @@ class MediaServeView(BaseView):
         headers = {
             **media_response_headers(content_type, filename),
             "Content-Length": str(stat_result.st_size),
-            "Cache-Control": "private, max-age=86400",
+            "Cache-Control": "private, no-store"
+            if private
+            else "private, max-age=86400",
         }
 
         response = web.StreamResponse(status=200, headers=headers)

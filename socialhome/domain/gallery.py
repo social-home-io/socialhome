@@ -253,6 +253,9 @@ class GalleryAlbumAudience:
     #: private albums, whatever ``user_ids`` says — shown as fixed rows,
     #: never removable (read-time rule, :data:`ALBUM_VISIBLE_TO_SQL`).
     guardian_ids: frozenset[str] = frozenset()
+    #: Everyone with a photo or video in it (live or in the trash): an
+    #: uploader always sees the album their photo is in.
+    uploader_ids: frozenset[str] = frozenset()
 
     @property
     def viewers(self) -> frozenset[str] | None:
@@ -260,7 +263,7 @@ class GalleryAlbumAudience:
         if self.audience != AUDIENCE_CHOSEN:
             return None
         owner = {self.owner_user_id} if self.owner_user_id else set()
-        return frozenset(self.user_ids | self.guardian_ids | owner)
+        return frozenset(self.user_ids | self.guardian_ids | self.uploader_ids | owner)
 
 
 @dataclass(slots=True, frozen=True)
