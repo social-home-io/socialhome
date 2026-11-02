@@ -13,9 +13,9 @@
  * - Every control is a real button of at least 44 px; Tab stays inside.
  * - Info: date taken, who added it, the album, size — and "Edit" (caption
  *   and date) for whoever may change the photo (``canEdit``).
- * - Only allowed actions are offered: Delete for the uploader, the album
- *   owner / a household admin (a protected account: its own uploads
- *   only), a space moderator; Report for someone else's space item.
+ * - Only allowed actions are offered: Delete for the uploader or a
+ *   household admin (D6; a protected account: its own uploads only), a
+ *   space moderator; Report for someone else's space item.
  * - Delete asks nothing: the page offers Undo for 8 s (household: from
  *   the trash; space: the delete waits for the Undo to run out).
  * - Save hands out the stored file under a human name (``onDownload``).

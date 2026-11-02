@@ -802,9 +802,15 @@ The gallery (household albums under `/api/gallery`, a space's under
 | PATCH | `/api/gallery/on-this-day` | The caller's own On this day settings, kept in their `preferences_json` (`gallery_on_this_day`): `{enabled?: bool}` (on by default), `{hide_today?: bool}` (✕ — hide the card for `date`, the caller's day, as for GET; `false` shows it again), `{exclude_album_id?}` ("don't show this album again" — an album the caller can't see is 404; at most 200, 422 beyond) `{include_album_id?}` (undo) and `{include_all: true}` (every left-out album back in). → `{settings}`. A wrong type is 422. |
 
 Who may change household gallery content: a household photo or video is
-deleted by its uploader, the album's owner or a household admin; a
-household album is renamed, flagged or deleted by its owner or a household
-admin. Anyone else gets 403. A protected account (a child) deletes only
+deleted, restored, purged from the trash, re-captioned, re-dated or moved
+only by its uploader or a household admin (owner decision D6) — the
+album's owner included, anyone else gets 403 for someone else's photo, in
+the single routes and in `POST /api/gallery/bulk` (`refused`). A household
+album is renamed, flagged or deleted by its owner or a household admin;
+deleting an album sends every photo in it to the trash with it, where each
+uploader can still restore theirs (which brings the album back) and the
+album's owner or an admin can restore the whole album
+(`POST /api/gallery/albums/{id}/restore`). Anyone else gets 403. A protected account (a child) deletes only
 its own uploads — not others' photos in an album it owns, and not an album
 that still holds someone else's photo. A space album follows the space's roles
 instead (items: the uploader or a moderator / admin / owner; albums: the
@@ -822,8 +828,8 @@ may see, last deleted first, 100 a page (`?limit=` up to 500,
 30 days), `album_name` and `album_in_trash` (the album was deleted too —
 a restore brings it back). `POST /api/gallery/items/{iid}/restore`
 returns the item (200); `DELETE /api/gallery/trash/{iid}` deletes it
-for good (204). Both are for whoever may delete it (uploader, album
-owner, household admin; a protected account only its own: else `403`);
+for good (204). Both are for whoever may delete it (uploader or
+household admin; a protected account only its own: else `403`);
 an item not in the trash, or one the caller can't see, is `404`.
 
 **Duplicates (household only).** `POST /api/gallery/albums/{id}/items`

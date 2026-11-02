@@ -659,15 +659,16 @@ describe('GalleryPage viewer actions follow the delete rules (#1271)', () => {
     return view
   }
 
-  it('household: your own photo yes, someone else\'s no — unless you own the album or are an admin', async () => {
+  it('household (D6): your own photo yes, someone else\'s no — not even in your album; an admin yes', async () => {
     let view = await openOn(2, {}, { owner_user_id: 'u-other' })
     expect(view.getByRole('button', { name: 'Delete' })).toBeTruthy()
     cleanup()
     view = await openOn(1, {}, { owner_user_id: 'u-other' })
     expect(view.queryByRole('button', { name: 'Delete' })).toBeNull()
     cleanup()
+    // Owning the album is not enough for someone else's photo.
     view = await openOn(1, {}, { owner_user_id: 'u1' })
-    expect(view.getByRole('button', { name: 'Delete' })).toBeTruthy()
+    expect(view.queryByRole('button', { name: 'Delete' })).toBeNull()
     cleanup()
     me.value = { user_id: 'u1', is_admin: true }
     view = await openOn(1, {}, { owner_user_id: 'u-other' })

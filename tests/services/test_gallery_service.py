@@ -1225,10 +1225,21 @@ async def test_the_uploader_deletes_their_own_household_photo(env):
     assert await env.list_items(album.id, actor_user_id="b-id") == []
 
 
-async def test_the_album_owner_deletes_any_photo_in_their_album(env):
+async def test_the_album_owner_cannot_delete_someone_elses_photo(env):
+    """D6: one by one, a photo is its uploader's (or an admin's) — the
+    album's owner deletes the album as a whole instead."""
     album, item = await _bobs_household_item(env, uploader="e-id")
-    await env.delete_item(item.id, actor_user_id="b-id")
-    assert await env.list_items(album.id, actor_user_id="b-id") == []
+    with pytest.raises(GalleryPermissionError):
+        await env.delete_item(item.id, actor_user_id="b-id")
+    assert [i.id for i in await env.list_items(album.id, actor_user_id="b-id")] == [
+        item.id
+    ]
+    await env.delete_album(album.id, actor_user_id="b-id")
+    # Its uploader brings the photo back (and the album with it).
+    await env.restore_item(item.id, actor_user_id="e-id")
+    assert [i.id for i in await env.list_items(album.id, actor_user_id="b-id")] == [
+        item.id
+    ]
 
 
 async def test_a_household_admin_deletes_any_household_photo(env):

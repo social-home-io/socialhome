@@ -195,7 +195,9 @@ function canDeleteItem(album: Album, item: { uploaded_by: string }, canModerate:
   // A protected account (a child) deletes only what it added.
   if (me.protected) return false
   if (album.space_id) return canModerate
-  return album.owner_user_id === me.user_id || me.is_admin
+  // Household (D6): only who added it, or a household admin — the album's
+  // owner deletes the album as a whole, not others' photos one by one.
+  return !!me.is_admin
 }
 
 export default function GalleryPage({

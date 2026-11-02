@@ -874,7 +874,7 @@ class GalleryService:
                     )
             else:
                 await self._require_household_item_manager(
-                    item.uploaded_by, album.owner_user_id, actor_user_id
+                    item.uploaded_by, actor_user_id
                 )
         if album is not None and album.space_id is None:
             # A household photo goes to the trash for 30 days, files kept
@@ -929,7 +929,7 @@ class GalleryService:
         delete the item may restore it."""
         trashed = await self._visible_trashed_item(item_id, actor_user_id)
         await self._require_household_item_manager(
-            trashed.item.uploaded_by, trashed.album_owner_user_id, actor_user_id
+            trashed.item.uploaded_by, actor_user_id
         )
         restored = await self._restore(item_id)
         if restored is None:  # purged or restored by someone else meanwhile
@@ -940,7 +940,7 @@ class GalleryService:
         """Delete a photo or video in the trash for good, now."""
         trashed = await self._visible_trashed_item(item_id, actor_user_id)
         await self._require_household_item_manager(
-            trashed.item.uploaded_by, trashed.album_owner_user_id, actor_user_id
+            trashed.item.uploaded_by, actor_user_id
         )
         media = await self._repo.purge_trashed_item(item_id)
         await unlink_unreferenced(self._media_dir, self._media_refs, media)
@@ -988,25 +988,24 @@ class GalleryService:
         return await self._repo.get_item(item_id)
 
     async def _require_household_item_manager(
-        self, uploaded_by: str, album_owner_user_id: str | None, actor_user_id: str
+        self, uploaded_by: str, actor_user_id: str
     ) -> None:
-        """A household photo is deleted, restored or purged by its
-        uploader, the album's owner or a household admin — a protected
-        account (a child) only its own."""
+        """A single household photo is deleted, restored, purged or edited by
+        its uploader or a household admin (owner decision D6, 2026-11-02) —
+        a protected account (a child) only its own. The album's owner has no
+        say over someone else's photo one by one; they may delete their
+        album as a whole (:meth:`delete_album`), and its photos then wait in
+        the trash, restorable by their uploaders."""
         if uploaded_by == actor_user_id:
             return
         if await self._is_protected(actor_user_id):
             raise GalleryPermissionError(
                 "A protected account may only delete its own uploads"
             )
-        if album_owner_user_id == actor_user_id or await self._is_household_admin(
-            actor_user_id
-        ):
+        if await self._is_household_admin(actor_user_id):
             return
-        # Not every member of the household.
         raise GalleryPermissionError(
-            "Only the uploader, the album owner or a household admin "
-            "may delete this item"
+            "Only the person who added it or a household admin may change this item"
         )
 
     async def restore_album(self, album_id: str, *, actor_user_id: str) -> int:
@@ -1054,7 +1053,7 @@ class GalleryService:
     ) -> GalleryItem:
         """Change a household photo's caption, its date taken or its album
         (a photo lives in exactly one album). Whoever may delete it may
-        change it — the uploader, the album owner, a household admin; a
+        change it — the uploader or a household admin (D6); a
         protected account only its own. A space item is not edited here
         (that needs a federation event — the space-parity PR)."""
         item = await self._repo.get_item(item_id)
@@ -1074,9 +1073,7 @@ class GalleryService:
             raise GalleryPermissionError(
                 "system album items are managed automatically — edit the post"
             )
-        await self._require_household_item_manager(
-            item.uploaded_by, album.owner_user_id, actor_user_id
-        )
+        await self._require_household_item_manager(item.uploaded_by, actor_user_id)
         patch: dict = {}
         if not isinstance(caption, _Unset):
             text = (caption or "").strip()
