@@ -76,6 +76,7 @@ import {
   trashWithUndo,
 } from './galleryManage'
 import { TRASH_PATH, favouritesPath } from './galleryRoutes'
+import { GallerySearchField, GallerySearchResults } from './GallerySearch'
 
 interface Album {
   id: string
@@ -224,6 +225,9 @@ export default function GalleryPage({
   const where = parseGallerySub(params?.sub)
   const albumId = where.albumId
   const itemId = where.itemId
+  // A search (D11): its words ride in ``?q=``.
+  const searching = !!where.search
+  const searchQ = searching ? (loc.query?.q ?? '') : ''
 
   useEffect(() => {
     const scope = spaceId ?? null
@@ -464,7 +468,8 @@ export default function GalleryPage({
   }
 
   // The upload sheet stays on screen whatever loads: uploads carry on.
-  if (loading.value) return <><AlbumListSkeleton />{sheet}</>
+  // A search doesn't wait for the albums.
+  if (loading.value && !searching) return <><AlbumListSkeleton />{sheet}</>
 
   // Counts for the hero — system "Posts" album is folded into the
   // total because it is real content from the household's perspective.
@@ -486,7 +491,12 @@ export default function GalleryPage({
       {albumsStale.value && !albumsError.value && (
         <OfflineBanner onRetry={() => void loadAlbums(spaceId, { quiet: true, toastOnFail: true })} />
       )}
-      {!albumsError.value && !firstRun && (
+      {(searching || (!albumsError.value && !firstRun)) && (
+        // On top, and one element whether the albums or the results show
+        // below — typing never loses focus, and nothing above it moves.
+        <GallerySearchField spaceId={spaceId ?? null} q={searchQ} searching={searching} />
+      )}
+      {!searching && !albumsError.value && !firstRun && (
         <header class="sh-gallery-hero">
           <div class="sh-gallery-hero-headline">
             <strong>{albumCount}{more}</strong>{' '}
@@ -519,7 +529,11 @@ export default function GalleryPage({
         </header>
       )}
 
-      {!spaceId && !albumsError.value && !firstRun && (
+      {searching && (
+        <GallerySearchResults spaceId={spaceId ?? null} q={searchQ} itemId={itemId} />
+      )}
+
+      {!searching && !spaceId && !albumsError.value && !firstRun && (
         // A filter, not an album: a photo lives in exactly one album (D1),
         // and favourites are each person's own (D12).
         <nav class="sh-gallery-chips" aria-label={t('gallery.fav.chips_aria')}>
@@ -533,9 +547,9 @@ export default function GalleryPage({
         </nav>
       )}
 
-      {!spaceId && !albumsError.value && <OnThisDayCardView />}
+      {!searching && !spaceId && !albumsError.value && <OnThisDayCardView />}
 
-      {showCreate.value && !readOnly && (
+      {showCreate.value && !readOnly && !searching && (
         <CreateAlbumForm
           spaceId={spaceId}
           onClose={() => (showCreate.value = false)}
@@ -543,7 +557,7 @@ export default function GalleryPage({
         />
       )}
 
-      {albumsError.value ? (
+      {searching ? null : albumsError.value ? (
         // The list could not be read at all. Never the first-visit
         // "No albums yet" screen: that reads as "your photos are gone".
         <div class="sh-empty-state" role="alert">
@@ -606,7 +620,7 @@ export default function GalleryPage({
           )}
         </>
       )}
-      {!spaceId && !albumsError.value && <OnThisDayNote />}
+      {!searching && !spaceId && !albumsError.value && <OnThisDayNote />}
     </div>
   )
 }

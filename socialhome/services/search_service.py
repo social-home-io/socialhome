@@ -33,6 +33,8 @@ from ..domain.events import (
 )
 from ..infrastructure.event_bus import EventBus
 from ..repositories.search_repo import (
+    GALLERY_SCOPES,
+    SCOPE_GALLERY_ITEM,
     SCOPE_MESSAGE,
     SCOPE_PAGE,
     SCOPE_POST,
@@ -43,12 +45,15 @@ from ..repositories.search_repo import (
     AbstractSearchRepo,
     SearchHit,
 )
+from .gallery_search_service import GallerySearchService
 
 log = logging.getLogger(__name__)
 
-#: Scopes no search ever returns or counts: a DM message row carries no
-#: conversation id, so membership can't be checked — never shown.
-_NEVER_SEARCHABLE: frozenset[str] = frozenset({SCOPE_MESSAGE})
+#: Scopes no search here ever returns or counts: a DM message row carries
+#: no conversation id, so membership can't be checked — never shown; the
+#: gallery's rows (migration 0141) are searched only through
+#: :class:`GallerySearchService`, which knows who may see each album.
+_NEVER_SEARCHABLE: frozenset[str] = frozenset({SCOPE_MESSAGE}) | GALLERY_SCOPES
 
 #: Minimum query length (§23.2.5). Anything shorter returns an empty
 #: result set so the UI shows "Keep typing…".
@@ -58,7 +63,14 @@ MIN_QUERY_CHARS: int = 2
 class SearchService:
     """Domain-event-driven indexing + query API."""
 
-    __slots__ = ("_bus", "_conv_repo", "_repo", "_space_repo", "_user_repo")
+    __slots__ = (
+        "_bus",
+        "_conv_repo",
+        "_gallery_search",
+        "_repo",
+        "_space_repo",
+        "_user_repo",
+    )
 
     def __init__(self, bus: EventBus, repo: AbstractSearchRepo) -> None:
         self._bus = bus
@@ -66,6 +78,11 @@ class SearchService:
         self._space_repo = None
         self._user_repo = None
         self._conv_repo = None
+        self._gallery_search: GallerySearchService | None = None
+
+    def attach_gallery_search(self, gallery_search: GallerySearchService) -> None:
+        """Count gallery photos for the "Photos" chip (owner decision D11)."""
+        self._gallery_search = gallery_search
 
     def attach_access_repos(
         self,
@@ -253,6 +270,9 @@ class SearchService:
             scopes=scopes,
             space_id=space_id,
             limit=limit,
+            # No access filter here at all: the gallery's rows (D11) need
+            # one (private albums), so this raw path never reads them.
+            exclude_scopes=GALLERY_SCOPES,
         )
 
     async def search_with_counts(
@@ -323,6 +343,13 @@ class SearchService:
             visible_space_ids=seats,
             exclude_scopes=_NEVER_SEARCHABLE,
         )
+        # The photos a gallery search finds (D11) — a count only: the hits
+        # are the gallery's own (``GET /api/gallery/search``), under every
+        # rule of who may see an album. Not for a one-space search.
+        if self._gallery_search is not None and caller_user_id and space_id is None:
+            photos = await self._gallery_search.count(q, user_id=caller_user_id)
+            if photos:
+                counts[SCOPE_GALLERY_ITEM] = photos
         return {"hits": hits[:limit], "counts": counts}
 
     async def _seat_space_ids(self, caller_user_id: str | None) -> frozenset[str]:

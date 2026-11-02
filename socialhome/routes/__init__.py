@@ -201,6 +201,7 @@ from .gallery import (
     GalleryOnThisDayView,
     GalleryPersonPhotosView,
     GalleryPersonPhotosZipView,
+    GallerySearchView,
     GalleryTrashCollectionView,
     GalleryTrashItemView,
     HouseholdAlbumCollectionView,
@@ -1254,6 +1255,7 @@ def setup_routes(app: web.Application) -> None:
         "/api/gallery/items/{item_id}/favourite", GalleryItemFavouriteView
     )
     app.router.add_view("/api/gallery/favourites", GalleryFavouritesView)
+    app.router.add_view("/api/gallery/search", GallerySearchView)
     app.router.add_view("/api/gallery/albums/{album_id}/restore", AlbumRestoreView)
     app.router.add_view("/api/gallery/bulk", GalleryBulkView)
     app.router.add_view("/api/gallery/download", GalleryDownloadView)

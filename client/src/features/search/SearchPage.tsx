@@ -12,8 +12,11 @@ import { api } from '@/api'
 import { Button } from '@/components/Button'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
-import { t } from '@/i18n/i18n'
+import { t, isOne } from '@/i18n/i18n'
 import { loadSpaces, spaces } from '@/store/spaces'
+import { addBase } from '@/baseUrl'
+import { snippetParts } from '@/utils/snippet'
+import { searchPath } from '@/features/gallery/galleryRoutes'
 
 interface Hit {
   scope: string
@@ -66,7 +69,10 @@ const SCOPE_LABELS: Record<string, string> = {
 
 /** Sum of the underlying scopes each filter covers (for chip counts). */
 function countsFor(type: string, all: Record<string, number>): number {
-  if (type === '')         return Object.values(all).reduce((a, b) => a + b, 0)
+  if (type === '') {
+    // The gallery's photos are not in this list (see GALLERY_SCOPE).
+    return Object.entries(all).reduce((a, [k, n]) => (k === GALLERY_SCOPE ? a : a + n), 0)
+  }
   if (type === 'posts')    return (all.post ?? 0) + (all.space_post ?? 0)
   if (type === 'people')   return all.user ?? 0
   if (type === 'spaces')   return all.space ?? 0
@@ -86,28 +92,12 @@ function emptyMessage(type: string, q: string): string {
   }
 }
 
-/** Split an FTS5 ``snippet()`` into text runs, flagging the ones the
- *  server wrapped in ``<mark>…</mark>``.
- *
- *  ``snippet()`` copies the indexed body verbatim — only the
- *  ``<mark>`` delimiters are server-generated, the text between them
- *  is whatever a post / DM / page author (possibly on another
- *  household) typed, markup included. So the snippet is rendered as
- *  Preact text nodes, never via ``innerHTML``. A literal ``<mark>``
- *  typed by an author is indistinguishable from a delimiter and gets
- *  highlighted — harmless, it carries no attributes. */
-export function snippetParts(snippet: string): { text: string, mark: boolean }[] {
-  const out: { text: string, mark: boolean }[] = []
-  const re = /<mark>([\s\S]*?)<\/mark>/g
-  let last = 0
-  for (let m = re.exec(snippet); m !== null; m = re.exec(snippet)) {
-    if (m.index > last) out.push({ text: snippet.slice(last, m.index), mark: false })
-    out.push({ text: m[1], mark: true })
-    last = m.index + m[0].length
-  }
-  if (last < snippet.length) out.push({ text: snippet.slice(last), mark: false })
-  return out
-}
+/** Split an FTS5 ``snippet()`` into text runs (see ``utils/snippet``). */
+export { snippetParts }
+
+/** Photos and videos a gallery search finds (D11) — counted here, listed
+ *  by the gallery's own search, which knows who may see each album. */
+const GALLERY_SCOPE = 'gallery_item'
 
 export default function SearchPage() {
   useEffect(() => {
@@ -162,6 +152,16 @@ export default function SearchPage() {
           )
         })}
       </div>
+
+      {lastQuery.value && (counts.value[GALLERY_SCOPE] ?? 0) > 0 && (
+        // Photos are found by the gallery itself — open its search there.
+        <a class="sh-search-gallery-link" href={addBase(searchPath(null, lastQuery.value))}>
+          <span aria-hidden="true">🖼️</span>{' '}
+          {t(isOne(counts.value[GALLERY_SCOPE]) ? 'search.in_gallery_one' : 'search.in_gallery',
+            { n: String(counts.value[GALLERY_SCOPE]) })}
+          <span aria-hidden="true"> →</span>
+        </a>
+      )}
 
       {loading.value && <Spinner />}
 

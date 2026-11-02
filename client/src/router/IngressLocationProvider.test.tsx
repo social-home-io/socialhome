@@ -585,4 +585,22 @@ describe('gallery albums and photos under the ingress prefix (/gallery/:sub*)', 
     expect(location.pathname).toBe('/api/hassio_ingress/tok/spaces/s1/gallery/albums/a1/i1')
     expect(mounts.gallery).toBe(1)
   })
+
+  it('a gallery search result (/gallery/search/:itemId?q=) keeps the prefix and its words', async () => {
+    const { r } = await mountGallery('/api/hassio_ingress/tok/gallery/search?q=Strand')
+    await vi.waitFor(() => expect(r.getByTestId('where').textContent).toBe('household:-:-'))
+    const routes = await import('@/features/gallery/galleryRoutes')
+    const iso = await import('preact-iso')
+    expect(routes.parseGallerySub('search/i1')).toMatchObject({ search: true, itemId: 'i1' })
+    // ``route()`` with an in-app search path lands under the prefix.
+    let route: ((url: string) => void) | null = null
+    function Grab() { route = iso.useLocation().route; return null }
+    cleanup()
+    resetLocation('/api/hassio_ingress/tok/gallery')
+    const mod = await import('./IngressLocationProvider')
+    render(<mod.IngressLocationProvider><Grab /></mod.IngressLocationProvider>)
+    route!(routes.searchPath(null, 'Juli 2025', 'i1'))
+    expect(location.pathname).toBe('/api/hassio_ingress/tok/gallery/search/i1')
+    expect(new URLSearchParams(location.search).get('q')).toBe('Juli 2025')
+  })
 })
