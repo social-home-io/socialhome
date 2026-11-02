@@ -16,10 +16,15 @@ import asyncio
 import dataclasses
 import os
 import random
+from collections.abc import Callable
 from uuid import uuid4
+
+import pytest
 
 from socialhome.app_engines import AppEngineRegistry
 from socialhome.app_engines.draw import AppDrawService
+from socialhome.app_engines.draw import crypto as dc
+from socialhome.crypto import b64url_decode
 from socialhome.domain.apps import InstalledApp
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.infrastructure.key_manager import KeyManager
@@ -95,6 +100,52 @@ def add_draw(home: Household, *, seed: int | None = None) -> AppDrawService:
     home.draw = draw  # type: ignore[attr-defined]
     home.engines = registry  # type: ignore[attr-defined]
     return draw
+
+
+def force_circle(
+    monkeypatch: pytest.MonkeyPatch, arrange: Callable[[list[str], int], list[str]]
+) -> None:
+    """Make every household draw the circle *arrange* picks, so a test
+    that needs a given seating gets it in its first round instead of
+    hoping a shuffle lands there before the Draw again limit.
+
+    ``arrange(names, i)`` gets the real (random) circle as usernames for
+    the *i*-th round the test runs (0 first, counted over every table of
+    the test) and returns the order to use — the same in every household,
+    which all share this process. Only the order of the box keys changes:
+    the seeds, onions, mix, cards and every household's checks run as in
+    a real draw. Usernames must be unique across the households."""
+    boxes: dict[bytes, str] = {}
+    rounds: dict[bytes, int] = {}
+    real_onions = AppDrawService._make_onions
+    real_circle = dc.circle
+
+    def make_onions(self, rnd, pubs):
+        onions, seeds, commits = real_onions(self, rnd, pubs)
+        for user, seed in seeds.items():
+            boxes[dc.person_keys(b64url_decode(seed)).box_pub] = user
+        return onions, seeds, commits
+
+    def circle(S, *, ctx, R):
+        C = real_circle(S, ctx=ctx, R=R)
+        if any(box not in boxes for box in C):
+            return C
+        i = rounds.setdefault(ctx, len(rounds))
+        box_of = {boxes[box]: box for box in C}
+        order = arrange([boxes[box] for box in C], i)
+        assert sorted(order) == sorted(box_of), order
+        return [box_of[u] for u in order]
+
+    monkeypatch.setattr(AppDrawService, "_make_onions", make_onions)
+    monkeypatch.setattr(dc, "circle", circle)
+
+
+def place(names: list[str], head: list[str | None]) -> list[str]:
+    """The circle *names* reordered to start with *head*, each ``None`` in
+    it taken by the next person *head* doesn't name (in circle order),
+    then everyone else."""
+    rest = [u for u in names if u not in head]
+    return [u if u is not None else rest.pop(0) for u in head] + rest
 
 
 async def settle(net: Network, *, rounds: int = 4000, drop=None) -> None:
@@ -194,6 +245,8 @@ __all__ = [
     "draw_app",
     "draw_table",
     "engine_step",
+    "force_circle",
+    "place",
     "sent_steps",
     "settle",
 ]
