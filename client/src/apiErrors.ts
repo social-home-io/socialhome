@@ -21,7 +21,6 @@ import { t } from '@/i18n/i18n'
 import { accessNote } from '@/features/spaces/spaceAccess'
 import { formatBazaarAmount } from '@/components/bazaarFormat'
 import { formatDuration } from '@/features/gallery/uploadFiles'
-import { householdDisplayName } from '@/store/householdUsers'
 
 /** The parsed ``error`` object of a canonical error body. */
 export interface ApiErrorBody {
@@ -184,16 +183,16 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   VIDEO_UNREADABLE: () => t('error.video_unreadable'),
   TRANSCODE_QUEUE_FULL: () => t('error.transcode_queue_full'),
   // Private albums (D7): privacy follows the upload.
+  // Never names the person: apiErrors stays free of stores (no import cycle).
   ALBUM_AUDIENCE: (_b, p) => {
-    const name = householdDisplayName(str(p, 'user_id'))
     switch (p.reason) {
       case 'would_hide': return t('error.album_audience.would_hide')
       case 'not_uploader': return t('error.album_audience.not_uploader')
       case 'not_empty': return t('error.album_audience.not_empty')
       case 'others_photos': return t('error.album_audience.others_photos')
-      case 'has_photos': return t('error.album_audience.has_photos', { name })
+      case 'has_photos': return t('error.album_audience.has_photos')
       case 'default_album': return t('error.album_audience.default_album')
-      case 'blocked': return t('error.album_audience.blocked', { name })
+      case 'blocked': return t('error.album_audience.blocked')
       case 'unknown_person': return t('error.album_audience.unknown_person')
       case 'too_many': return t('error.album_audience.too_many', { max: str(p, 'max') })
       default: return null
