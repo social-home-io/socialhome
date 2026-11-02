@@ -41,9 +41,9 @@ import { Button } from '@/components/Button'
 import { showToast } from '@/components/Toast'
 import { openReport } from '@/components/ReportDialog'
 import { GalleryViewer, type ViewerItem } from './GalleryViewer'
-import { backLeadsTo, galleryPath, markBackTo, parseGallerySub } from './galleryRoutes'
+import { albumsUrl, backLeadsTo, galleryPath, markBackTo, parseGallerySub } from './galleryRoutes'
 import { currentUser } from '@/store/auth'
-import { householdUsers, loadHouseholdUsers } from '@/store/householdUsers'
+import { householdDisplayName, householdUsers, loadHouseholdUsers } from '@/store/householdUsers'
 import { spaceMembers, loadSpaceMembers } from '@/store/spaceMembers'
 import { failedMedia, mediaFilename, readyMedia } from '@/store/mediaReady'
 import { personLabel } from '@/utils/names'
@@ -76,6 +76,8 @@ import {
   trashWithUndo,
 } from './galleryManage'
 import { TRASH_PATH, favouritesPath } from './galleryRoutes'
+import { AudienceChooser, AudienceSheet, type AudienceChoice } from './AudienceSheet'
+import { loadGallerySettings, mayAddToGallery } from './gallerySettings'
 import { GallerySearchField, GallerySearchResults } from './GallerySearch'
 
 interface Album {
@@ -103,6 +105,12 @@ interface Album {
   /** Someone else added photos since the viewer last opened it — the
    *  "neu" dot (D9; ``albumSeen``). */
   has_new?: boolean
+  /** Who sees a household album (D7): ``chosen`` = "Private – only these
+   *  people". */
+  audience?: 'everyone' | 'chosen'
+  /** A private album a household admin isn't in: a locked tile with no
+   *  name or cover — they may put it in the trash, never open it. */
+  locked?: boolean
 }
 
 interface Item {
@@ -248,6 +256,8 @@ export default function GalleryPage({
       void loadHouseholdUsers()
       // "On this day" is the household gallery's (D14), never a space's.
       void loadOnThisDay()
+      // May this person add photos here (a child, D6)?
+      void loadGallerySettings()
     }
   }, [spaceId])
 
@@ -360,9 +370,10 @@ export default function GalleryPage({
       ws.on('gallery.album_deleted', onAlbumDeleted),
       ws.on('gallery.item_uploaded', handle),
       ws.on('gallery.item_deleted', handle),
-      // Household only (no ``space_id``): back from the trash, a new
-      // caption / date, a move between albums.
+      // Back from the trash (household only, no ``space_id``).
       ws.on('gallery.item_restored', handle),
+      // A new caption / date, a move between albums — household or (v_79)
+      // space.
       ws.on('gallery.item_updated', handle),
       ws.on('media.ready', onMediaDone),
       ws.on('media.failed', onMediaDone),
@@ -396,7 +407,11 @@ export default function GalleryPage({
       ? { spaceId, albumId: regular[0].id, name: regular[0].name, isDefault: false }
       : null)
     : { spaceId: null, albumId: null, name: t('gallery.upload.default_album'), isDefault: true }
-  const listCanUpload = !readOnly && !albumsError.value && (!spaceId || regular.length > 0)
+  // A child while "Children may add photos" is off (D6) adds nothing to
+  // the household gallery.
+  const mayAdd = spaceId ? true : mayAddToGallery()
+  const listCanUpload = !readOnly && mayAdd && !albumsError.value
+    && (!spaceId || regular.length > 0)
   const listControls = useUploadControls(listTarget, listCanUpload && !albumId && !loading.value)
 
   const sheet = (
@@ -474,8 +489,10 @@ export default function GalleryPage({
   // Counts for the hero — system "Posts" album is folded into the
   // total because it is real content from the household's perspective.
   // While more albums wait to load, the counts are "at least" ("30+").
-  const albumCount = albums.value.length
-  const itemCount = albums.value.reduce((acc, a) => acc + a.item_count, 0)
+  // A household admin's locked tiles (D7) are not theirs to count.
+  const counted = albums.value.filter(a => !a.locked)
+  const albumCount = counted.length
+  const itemCount = counted.reduce((acc, a) => acc + a.item_count, 0)
   const more = albumsMore.value ? '+' : ''
   // First run: a gallery (the household's or a space's) with no photos and
   // no album of its own yet (the auto "Posts" album may exist, empty). One
@@ -506,12 +523,14 @@ export default function GalleryPage({
           </div>
           {!readOnly && (
             <div class="sh-gallery-hero-actions sh-upload-actions">
-              <Button
-                variant={listCanUpload ? 'secondary' : 'primary'}
-                onClick={() => (showCreate.value = true)}
-              >
-                {t('gallery.new_album_btn')}
-              </Button>
+              {mayAdd && (
+                <Button
+                  variant={listCanUpload ? 'secondary' : 'primary'}
+                  onClick={() => (showCreate.value = true)}
+                >
+                  {t('gallery.new_album_btn')}
+                </Button>
+              )}
               {listCanUpload && <UploadButtons controls={listControls} />}
               {!spaceId && (
                 <OverflowMenu
@@ -527,6 +546,10 @@ export default function GalleryPage({
             </div>
           )}
         </header>
+      )}
+
+      {!mayAdd && !readOnly && !searching && (
+        <p class="sh-gallery-note" role="note">{t('gallery.children.off_note')}</p>
       )}
 
       {searching && (
@@ -549,7 +572,7 @@ export default function GalleryPage({
 
       {!searching && !spaceId && !albumsError.value && <OnThisDayCardView />}
 
-      {showCreate.value && !readOnly && !searching && (
+      {showCreate.value && !readOnly && mayAdd && !searching && (
         <CreateAlbumForm
           spaceId={spaceId}
           onClose={() => (showCreate.value = false)}
@@ -571,14 +594,16 @@ export default function GalleryPage({
           controls={listControls}
           inSpace={!!spaceId}
           canUpload={listCanUpload}
-          canCreate={!readOnly}
+          canCreate={!readOnly && mayAdd}
           onCreate={() => (showCreate.value = true)}
           creating={showCreate.value}
         />
       ) : (
         <>
           <div class="sh-album-grid">
-            {albums.value.filter(a => !pendingDeletes.value.has(a.id)).map(a => (
+            {albums.value.filter(a => !pendingDeletes.value.has(a.id)).map(a => a.locked ? (
+              <LockedAlbumCard key={a.id} album={a} onDeleted={() => void loadAlbums(spaceId, { quiet: true })} />
+            ) : (
               // A real link: its own address, opens in a new tab, and
               // the router keeps the ingress prefix.
               <a
@@ -607,6 +632,7 @@ export default function GalleryPage({
                   </strong>
                   <span class="sh-muted">
                     {t(isOne(a.item_count) ? 'gallery.items_one' : 'gallery.items', { n: String(a.item_count) })}
+                    {a.audience === 'chosen' && <PrivateBadge />}
                   </span>
                   {a.retention_exempt && !a.is_system && (
                     <span class="sh-badge">{t('gallery.kept')}</span>
@@ -870,7 +896,7 @@ function AlbumDetail({
   readOnly?: boolean
   canModerate?: boolean
 }) {
-  const viewer = useAlbumViewer(album, spaceId, itemId, canModerate)
+  const viewer = useAlbumViewer(album, spaceId, itemId, canModerate, readOnly)
 
   const anyProcessing = items.value.some(isProcessing)
   // Another person's video sends this browser no ready frame: re-read
@@ -886,8 +912,10 @@ function AlbumDetail({
   // A space delete waits 8 s for its Undo before it is sent: hidden here
   // meanwhile.
   const loaded = items.value.filter(i => !pendingDeletes.value.has(i.id))
-  // No uploads into the system album (the server refuses them too).
-  const canUpload = !album.is_system && !readOnly
+  // No uploads into the system album (the server refuses them too), nor
+  // by a child while "Children may add photos" is off (D6).
+  const canUpload = !album.is_system && !readOnly && (!!album.space_id || mayAddToGallery())
+  const [audienceOpen, setAudienceOpen] = useState(false)
   const controls = useUploadControls({
     spaceId: album.space_id,
     albumId: album.id,
@@ -909,6 +937,16 @@ function AlbumDetail({
               <span aria-hidden="true">🔒</span> {t('gallery.auto')}
             </span>
           )}
+          {album.audience === 'chosen' && (
+            <button
+              type="button"
+              class="sh-album-private-badge sh-album-private-badge--button"
+              onClick={() => setAudienceOpen(true)}
+              aria-label={t('gallery.audience.who_aria')}
+            >
+              <span aria-hidden="true">👥</span> {t('gallery.audience.badge')}
+            </button>
+          )}
         </h1>
         <div class="sh-row sh-upload-actions sh-album-actions">
           {album.item_count > 1 && !sel.active && <OrderToggle albumId={album.id} />}
@@ -921,6 +959,9 @@ function AlbumDetail({
           {manage.canManageAlbum && (
             <AlbumMenu
               album={album}
+              onAudience={!album.space_id && album.owner_user_id === currentUser.value?.user_id
+                ? () => setAudienceOpen(true)
+                : undefined}
               covers={loaded.filter(i => !isProcessing(i))}
               onChanged={() => void loadAlbums(spaceId, { quiet: true })}
               onDeleted={onBack}
@@ -931,6 +972,14 @@ function AlbumDetail({
       </header>
       {controls.elements}
       {manage.elements}
+      {audienceOpen && (
+        <AudienceSheet
+          albumId={album.id}
+          albumName={albumDisplayName(album)}
+          onClose={() => setAudienceOpen(false)}
+          onSaved={() => void loadAlbums(spaceId, { quiet: true })}
+        />
+      )}
 
       {/* The system album's description is the server's English constant;
         * its translated hint below says the same thing. */}
@@ -1001,6 +1050,7 @@ function AlbumDetail({
  *  on until it finds the item, and closing returns focus to its tile. */
 function useAlbumViewer(
   album: Album, spaceId: string | undefined, itemId: string | null, canModerate: boolean,
+  readOnly = false,
 ) {
   const loc = useLocation()
   const locRef = useRef(loc)
@@ -1076,9 +1126,10 @@ function useAlbumViewer(
 
   const viewerItems: ViewerItem[] = loaded.map(i => ({ ...i, processing: isProcessing(i) }))
   const me = currentUser.value?.user_id
-  // TODO(gallery PR 13, space parity, proto v_79): caption / date edits
-  // in a space need a federation event — household photos only for now.
-  const household = !album.space_id && !album.is_system
+  // Caption and date: household photos, and space photos (v_79: the edit
+  // reaches every member household) — never the feed's "Posts" album, nor
+  // for a space's read-only follower.
+  const editable = !album.is_system && !readOnly
   return (
     <>
     {editing && (
@@ -1114,7 +1165,7 @@ function useAlbumViewer(
         if (next) locRef.current.route(galleryPath(spaceId, album.id, next.id), true)
       }}
       onClose={close}
-      canEdit={(it) => household && canDeleteItem(album, it, canModerate)}
+      canEdit={(it) => editable && canDeleteItem(album, it, canModerate)}
       onEdit={(it) => {
         const row = items.value.find(i => i.id === it.id)
         if (row) setEditing(row)
@@ -1379,10 +1430,9 @@ function useAlbumManage(album: Album, loaded: Item[], canModerate: boolean, read
     }
   }
 
-  // A space photo can't change album yet: the other member households
-  // would never hear of it (no federation event for a move).
-  // TODO(gallery PR 13, space parity, proto v_79): move within a space.
-  const movable = !album.space_id && !album.is_system
+  // A photo moves to another album of the same gallery: the household's,
+  // or (v_79) another album of the same space — never across.
+  const movable = !album.is_system && !readOnly
     && picked.some(i => canDeleteItem(album, i, canModerate))
   const move = async (toId: string, toName: string) => {
     const mine = picked.filter(i => canDeleteItem(album, i, canModerate))
@@ -1471,6 +1521,7 @@ function useAlbumManage(album: Album, loaded: Item[], canModerate: boolean, read
         <MoveToAlbumDialog
           count={picked.filter(i => canDeleteItem(album, i, canModerate)).length}
           currentAlbumId={album.id}
+          spaceId={spaceId}
           onClose={() => setMoving(false)}
           onMove={move}
         />
@@ -1494,6 +1545,51 @@ function asShareItem(i: Item): ShareItem {
 }
 
 /** Spoken name of a gallery item kind, for screen-reader labels. */
+/** "Private" on an album's card (D7). */
+function PrivateBadge() {
+  return (
+    <span class="sh-album-private-badge" title={t('gallery.audience.private')}>
+      <span aria-hidden="true">👥</span> {t('gallery.audience.badge')}
+    </span>
+  )
+}
+
+/** A private album a household admin isn't in (D7): whose and how many,
+ *  never its name or a preview. The admin may put it in the trash — its
+ *  owner is told and can bring it back for 30 days. */
+function LockedAlbumCard({ album, onDeleted }: { album: Album; onDeleted: () => void }) {
+  const owner = householdDisplayName(album.owner_user_id)
+  const count = t(isOne(album.item_count) ? 'gallery.items_one' : 'gallery.items', { n: String(album.item_count) })
+  const remove = async () => {
+    const ok = await confirmDialog(t('gallery.locked.delete_body', { name: owner }), {
+      title: t('gallery.locked.delete_title', { name: owner }),
+      confirmLabel: t('gallery.locked.delete_confirm'),
+      destructive: true,
+    })
+    if (!ok) return
+    try {
+      await api.delete(`/api/gallery/albums/${encodeURIComponent(album.id)}`)
+      showToast(t('gallery.locked.deleted', { name: owner }), 'info')
+      onDeleted()
+    } catch (err) {
+      showToast(String((err as Error)?.message ?? err), 'error')
+    }
+  }
+  return (
+    <div class="sh-album-card sh-album-card--locked" role="group"
+         aria-label={t('gallery.locked.aria', { name: owner, count })}>
+      <div class="sh-album-cover sh-album-cover--locked" aria-hidden="true">🔒</div>
+      <div class="sh-album-info">
+        <strong>{t('gallery.locked.title')}</strong>
+        <span class="sh-muted">{t('gallery.locked.by', { name: owner })} · {count}</span>
+        <Button variant="secondary" onClick={() => void remove()}>
+          {t('gallery.locked.delete')}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 function itemTypeLabel(kind: 'photo' | 'video'): string {
   return kind === 'video' ? t('gallery.item_video') : t('gallery.item_photo')
 }
@@ -1508,6 +1604,7 @@ function CreateAlbumForm({
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
   const [busy, setBusy] = useState(false)
+  const [who, setWho] = useState<AudienceChoice>({ audience: 'everyone', userIds: [] })
 
   const submit = async (e: Event) => {
     e.preventDefault()
@@ -1520,6 +1617,11 @@ function CreateAlbumForm({
       await api.post(url, {
         name: name.trim(),
         description: description.trim() || null,
+        // Only a household album can be private (D7).
+        ...(spaceId ? {} : {
+          audience: who.audience,
+          user_ids: who.audience === 'chosen' ? who.userIds : [],
+        }),
       })
       showToast(t('gallery.created'), 'success')
       onCreated()
@@ -1551,6 +1653,18 @@ function CreateAlbumForm({
           onInput={(e) => setDescription((e.target as HTMLTextAreaElement).value)}
         />
       </label>
+      {!spaceId && (
+        <div class="sh-create-audience">
+          <span class="sh-create-audience__label">{t('gallery.audience.create_label')}</span>
+          <AudienceChooser
+            value={who}
+            onChange={setWho}
+            ownerId={currentUser.value?.user_id ?? null}
+            guardianIds={[]}
+            idPrefix="sh-create"
+          />
+        </div>
+      )}
       <div class="sh-form-actions">
         <Button variant="secondary" type="button" onClick={onClose}>{t('common.cancel')}</Button>
         <Button type="submit" loading={busy} disabled={!name.trim()}>{t('gallery.form.create')}</Button>
@@ -1564,10 +1678,6 @@ function CreateAlbumForm({
 function isOffline(err: unknown): boolean {
   if (typeof navigator !== 'undefined' && navigator.onLine === false) return true
   return !(err instanceof ApiError) || err.status >= 502
-}
-
-function albumsUrl(spaceId?: string): string {
-  return spaceId ? `/api/spaces/${spaceId}/gallery/albums` : '/api/gallery/albums'
 }
 
 /** ``?before=&before_id=`` for the page after ``row`` (albums: its

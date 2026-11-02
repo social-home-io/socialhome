@@ -170,6 +170,7 @@ from .space_bot_service import (
 
 if TYPE_CHECKING:
     from ..repositories.cp_repo import AbstractCpRepo
+    from ..repositories.gallery_repo import AbstractGalleryRepo
     from ..repositories.media_transcode_repo import AbstractMediaTranscodeRepo
     from ..repositories.space_remote_member_repo import AbstractSpaceRemoteMemberRepo
 
@@ -201,6 +202,7 @@ class RealtimeService:
         "_bus",
         "_conversation_repo",
         "_cp_repo",
+        "_gallery_repo",
         "_media_signer",
         "_media_transcode_repo",
         "_remote_members",
@@ -221,6 +223,7 @@ class RealtimeService:
         media_transcode_repo: AbstractMediaTranscodeRepo | None = None,
         cp_repo: AbstractCpRepo | None = None,
         remote_member_repo: AbstractSpaceRemoteMemberRepo | None = None,
+        gallery_repo: AbstractGalleryRepo | None = None,
     ) -> None:
         self._bus = bus
         self._ws = ws
@@ -254,6 +257,10 @@ class RealtimeService:
         # local one. Without it a remote subject counts as unknown (members
         # only: fail closed).
         self._remote_members = remote_member_repo
+        # A private album's frames (D7) reach only the people who see it —
+        # even an id-only frame tells that an album exists and is busy.
+        # Without it every household frame reaches everyone (test stacks).
+        self._gallery_repo = gallery_repo
 
     def attach_media_signer(self, signer: MediaUrlSigner) -> None:
         """Late binding — signer is built after RealtimeService.__init__."""
@@ -1494,26 +1501,56 @@ class RealtimeService:
                 "type": "gallery.item_restored",
                 "album_id": event.album_id,
                 "item_id": event.item_id,
-            }
+            },
+            withheld=await self._gallery_outsiders(event.album_id),
         )
 
     async def _on_gallery_item_updated(self, event: GalleryItemUpdated) -> None:
-        # Household only: a new caption or date, or a move between albums
-        # (both albums' counts and grids change — ``from_album_id``).
-        await self._broadcast_household(
-            {
-                "type": "gallery.item_updated",
-                "album_id": event.album_id,
-                "from_album_id": event.from_album_id,
-                "item_id": event.item_id,
-            }
-        )
+        # A new caption or date, or a move between albums (both albums'
+        # counts and grids change — ``from_album_id``). A space photo (v_79)
+        # goes to the space's members, a household one to who sees it.
+        frame = {
+            "type": "gallery.item_updated",
+            "album_id": event.album_id,
+            "from_album_id": event.from_album_id,
+            "item_id": event.item_id,
+            "space_id": event.space_id,
+        }
+        if event.space_id:
+            await self._broadcast_space(event.space_id, frame)
+            return
+        withheld = await self._gallery_outsiders(event.album_id)
+        if event.from_album_id:
+            # A move: whoever sees either album refetches.
+            withheld &= await self._gallery_outsiders(event.from_album_id)
+        await self._broadcast_household(frame, withheld=withheld)
 
     async def _broadcast_gallery(self, frame: dict, space_id: str | None) -> None:
         if space_id:
             await self._broadcast_space(space_id, frame)
         else:
-            await self._broadcast_household(frame)
+            await self._broadcast_household(
+                frame, withheld=await self._gallery_outsiders(frame["album_id"])
+            )
+
+    async def _gallery_outsiders(self, album_id: str) -> frozenset[str]:
+        """The local people who don't see a household album: nobody for an
+        album open to everyone at home; everyone but its owner, chosen
+        people and a protected owner's guardians for a private one (D7) —
+        trashed albums included (a delete frame is about one)."""
+        if self._gallery_repo is None:
+            return frozenset()
+        audience = await self._gallery_repo.get_album_audience(
+            album_id, include_trashed=True
+        )
+        users = await self._user_repo.list_active()
+        if audience is None:
+            # No row to ask (purged meanwhile): fail closed — nobody.
+            return frozenset(u.user_id for u in users)
+        viewers = audience.viewers
+        if viewers is None:
+            return frozenset()
+        return frozenset(u.user_id for u in users if u.user_id not in viewers)
 
     # ─── User status ──────────────────────────────────────────────────────
 

@@ -132,6 +132,11 @@ def app_draw_link(app_id: str, session_id: str) -> str:
     return f"/apps/{app_id}/draw/{session_id}"
 
 
+def gallery_trash_link() -> str:
+    """The household gallery's trash — the SPA's ``TRASH_PATH``."""
+    return "/gallery/trash"
+
+
 def gallery_album_link(album_id: str, space_id: str | None = None) -> str:
     """An album of the household gallery, or of a space's Gallery section
     — the path the SPA's ``galleryPath`` builds (ids encoded the same)."""

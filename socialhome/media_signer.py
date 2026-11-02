@@ -272,6 +272,15 @@ def sign_media_urls_in_markdown(text: str | None, signer: MediaUrlSigner) -> str
     return _BODY_MEDIA_RE.sub(_replace, text)
 
 
+def media_refs_in_markdown(text: str | None) -> list[str]:
+    """Every ``api/media/<file>`` reference in a markdown body (the ones
+    :func:`sign_media_urls_in_markdown` would sign) — for the write-time
+    check of who may name them."""
+    if not text:
+        return []
+    return [m.group(0).split("?", 1)[0] for m in _BODY_MEDIA_RE.finditer(text)]
+
+
 def strip_signed_media_in_markdown(text: str | None) -> str | None:
     """Inverse of :func:`sign_media_urls_in_markdown`.
 

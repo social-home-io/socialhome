@@ -182,6 +182,24 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
     }),
   VIDEO_UNREADABLE: () => t('error.video_unreadable'),
   TRANSCODE_QUEUE_FULL: () => t('error.transcode_queue_full'),
+  // Private albums (D7): privacy follows the upload.
+  // Never names the person: apiErrors stays free of stores (no import cycle).
+  ALBUM_AUDIENCE: (_b, p) => {
+    switch (p.reason) {
+      case 'would_hide': return t('error.album_audience.would_hide')
+      case 'not_uploader': return t('error.album_audience.not_uploader')
+      case 'not_empty': return t('error.album_audience.not_empty')
+      case 'others_photos': return t('error.album_audience.others_photos')
+      case 'has_photos': return t('error.album_audience.has_photos')
+      case 'default_album': return t('error.album_audience.default_album')
+      case 'blocked': return t('error.album_audience.blocked')
+      case 'unknown_person': return t('error.album_audience.unknown_person')
+      case 'too_many': return t('error.album_audience.too_many', { max: str(p, 'max') })
+      default: return null
+    }
+  },
+  // Children (D6): an admin turned "Children may add photos" off.
+  CHILD_UPLOAD_OFF: () => t('error.child_upload_off'),
   // Connecting to a GFS (QR / pasted code, or onboarding's open sign-up).
   // Our own words for every refusal, never the GFS's (``routes/gfs.py``).
   GFS_UNREACHABLE: () => t('error.gfs_unavailable'),

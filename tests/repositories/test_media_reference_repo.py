@@ -276,3 +276,128 @@ async def test_pending_moderation_payloads_keep_their_media(db):
     assert await repo.is_referenced("listing.webp")
     assert not await repo.is_referenced("gone1.webp")
     assert not await repo.is_referenced("pend")
+
+
+# ─── may_reference: who may name a file in a write ───────────────────────
+
+
+async def _people(db):
+    for uid, name in (("u1", "ann"), ("u2", "tom"), ("u3", "lea")):
+        await db.enqueue(
+            "INSERT INTO users(user_id, username, display_name) VALUES(?, ?, ?)",
+            (uid, name, name),
+        )
+
+
+async def test_an_unreferenced_file_is_free_to_name(db):
+    await _people(db)
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.may_reference("fresh.webp", "u3")
+    assert not await repo.may_reference("", "u3")
+
+
+async def test_a_private_album_file_only_by_its_uploader(db):
+    await _people(db)
+    await db.enqueue(
+        "INSERT INTO gallery_albums(id, name, owner_user_id, audience)"
+        " VALUES('al', 'Gifts', 'u1', 'chosen')"
+    )
+    await db.enqueue(
+        "INSERT INTO gallery_album_audience(album_id, user_id) VALUES('al', 'u2')"
+    )
+    await db.enqueue(
+        "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type, filename,"
+        " thumbnail_filename, width, height)"
+        " VALUES('gi', 'al', 'u1', 'photo', 'p.webp', 'pt.webp', 1, 1)"
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.may_reference("p.webp", "u1")
+    assert not await repo.may_reference("p.webp", "u2")  # chosen, not uploader
+    assert not await repo.may_reference("pt.webp", "u3")  # the thumbnail too
+
+
+async def test_a_household_or_space_album_file(db):
+    await _people(db)
+    await db.enqueue(
+        "INSERT INTO gallery_albums(id, name, owner_user_id) VALUES('al', 'A', 'u1')"
+    )
+    await db.enqueue(
+        "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type, filename,"
+        " thumbnail_filename, width, height)"
+        " VALUES('gi', 'al', 'u1', 'photo', 'h.webp', 'ht.webp', 1, 1)"
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.may_reference("h.webp", "u3")
+
+
+async def test_a_chat_attachment_only_by_its_members(db):
+    await _people(db)
+    await db.enqueue("INSERT INTO conversations(id, type) VALUES('c1', 'dm')")
+    for name in ("ann", "tom"):
+        await db.enqueue(
+            "INSERT INTO conversation_members(conversation_id, username) VALUES('c1', ?)",
+            (name,),
+        )
+    await db.enqueue(
+        "INSERT INTO conversation_messages(id, conversation_id, sender_user_id,"
+        " media_url) VALUES('m1', 'c1', 'u1', 'api/media/dm.webp')"
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.may_reference("dm.webp", "u2")
+    assert not await repo.may_reference("dm.webp", "u3")
+
+
+async def test_a_file_seen_through_any_row_may_be_named(db):
+    """A DM attachment also posted to the feed: anyone at home may."""
+    await _people(db)
+    await db.enqueue("INSERT INTO conversations(id, type) VALUES('c1', 'dm')")
+    await db.enqueue(
+        "INSERT INTO conversation_messages(id, conversation_id, sender_user_id,"
+        " media_url) VALUES('m1', 'c1', 'u1', 'api/media/both.webp')"
+    )
+    await db.enqueue(
+        "INSERT INTO feed_posts(id, author, type, image_urls_json)"
+        " VALUES('fp', 'u1', 'image', '[\"api/media/both.webp\"]')"
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.may_reference("both.webp", "u3")
+
+
+async def test_own_moment_highlight_draft_and_pending_item(db):
+    await _people(db)
+    await db.enqueue(
+        "INSERT INTO moments(id, author_user_id, origin_instance_id, expires_at,"
+        " media_url) VALUES('mo', 'u1', 'self', '2099-01-01T00:00:00+00:00',"
+        " 'api/media/mom.webp')"
+    )
+    await db.enqueue(
+        "INSERT INTO highlights(id, author_user_id, highlight_date, expires_at)"
+        " VALUES('h1', 'u1', '2026-01-01', '2099-01-01T00:00:00+00:00')"
+    )
+    await db.enqueue(
+        "INSERT INTO highlight_frames(id, highlight_id, sequence, frame_type,"
+        " media_url) VALUES('hf', 'h1', 1, 'image', 'api/media/hl.webp')"
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    for name in ("mom.webp", "hl.webp"):
+        assert await repo.may_reference(name, "u1")
+        assert not await repo.may_reference(name, "u3")
+
+
+async def test_a_space_photo_only_for_its_seats(db):
+    await _people(db)
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES('sp', 'S', 'i', 'ann', ?)",
+        ("ab" * 32,),
+    )
+    await db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role) VALUES('sp', 'u2', 'member')"
+    )
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, media_url)"
+        " VALUES('sp1', 'sp', 'u2', 'image', 'api/media/sp.webp')"
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.may_reference("sp.webp", "u2")
+    assert not await repo.may_reference("sp.webp", "u3")

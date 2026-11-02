@@ -60,6 +60,7 @@ from ..domain.post import Post, PostType
 from ..media.cleanup import unlink_unreferenced
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from .inbound_media_store import require_local_media_ref
+from .media_ref_guard import MediaRefGuardedMixin
 from .ordered_publisher import OrderedPublisher
 from .space_member_guard import seat_of
 from .user_preferences import parse_highlights_preferences
@@ -104,7 +105,7 @@ AudienceChangeGate = Callable[
 ]
 
 
-class HighlightService:
+class HighlightService(MediaRefGuardedMixin):
     """Personal highlights: create / view / react / share / expire."""
 
     __slots__ = (
@@ -113,6 +114,7 @@ class HighlightService:
         "_bus",
         "_highlights",
         "_media_dir",
+        "_media_guard",
         "_media_refs",
         "_posts",
         "_publisher",
@@ -287,6 +289,7 @@ class HighlightService:
         # frame leaves no empty highlight behind. A remote URL would leak
         # every viewer's IP, and receivers drop it (``_frame_from_payload``).
         media_url = require_local_media_ref(media_url)
+        await self._require_openable_media((media_url,), user_id=author_user_id)
         author = await self._users.get_by_user_id(author_user_id)
         if author is None:
             raise LookupError(f"author {author_user_id!r} not found")

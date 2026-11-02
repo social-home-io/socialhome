@@ -22,11 +22,13 @@ from socialhome.domain.gallery import (
     GalleryAlbumAudience,
     GalleryItem,
     GallerySeen,
+    GallerySettings,
     GalleryUpload,
     StashedUpload,
     UploadLimits,
     UploadOutcome,
     is_video_upload,
+    valid_taken_day,
     video_fits,
 )
 
@@ -67,13 +69,32 @@ def test_an_album_audience_defaults_to_everyone():
 
 
 def test_the_wire_shapes_carry_no_library_field():
-    """The audience and the upload digest are household-only: neither is a
-    field of the dataclasses the §25.6 sync exporter ships with ``asdict``."""
-    album_fields = {f.name for f in dataclasses.fields(GalleryAlbum)}
+    """The audience and the upload digest are household-only: the digest is
+    no field of the item, and the album's ``audience`` / ``locked`` are
+    :data:`ALBUM_VIEW_FIELDS` the §25.6 exporter drops — never on the wire."""
     item_fields = {f.name for f in dataclasses.fields(GalleryItem)}
-    assert "audience" not in album_fields
     assert "content_sha256" not in item_fields
+    assert {"audience", "locked"} <= ALBUM_VIEW_FIELDS
+    album = GalleryAlbum(id="a", space_id="sp", owner_user_id="u", name="n")
+    assert "audience" not in album.to_federation_dict()
+    assert "locked" not in album.to_federation_dict()
     assert "url" in _item().to_federation_dict()
+
+
+def test_the_viewers_of_an_album():
+    assert GalleryAlbumAudience(album_id="a").viewers is None
+    private = GalleryAlbumAudience(
+        album_id="a",
+        audience=AUDIENCE_CHOSEN,
+        user_ids=frozenset({"tom"}),
+        owner_user_id="mia",
+        guardian_ids=frozenset({"anna"}),
+    )
+    assert private.viewers == frozenset({"tom", "mia", "anna"})
+
+
+def test_children_may_upload_by_default():
+    assert GallerySettings().children_may_upload is True
 
 
 # ─── Household videos (D4) ───────────────────────────────────────────────
@@ -159,3 +180,19 @@ def test_has_new_is_a_view_field_never_exported():
     assert "has_new" in ALBUM_VIEW_FIELDS
     album = GalleryAlbum(id="a", space_id=None, owner_user_id="u", name="n")
     assert album.has_new is False
+
+
+@pytest.mark.parametrize(
+    "bad", ["12.07.2026", "2026-13-01", "1799-12-31", "2999-01-01", "2026-7-1"]
+)
+def test_a_day_taken_must_be_a_real_day_in_range(bad):
+    """One rule for a local edit, a ``SPACE_GALLERY_ITEM_UPDATED`` and the
+    host's sync record (v_79)."""
+    with pytest.raises(ValueError):
+        valid_taken_day(bad)
+
+
+def test_a_day_taken_is_kept_or_cleared():
+    assert valid_taken_day("2026-07-12") == "2026-07-12"
+    assert valid_taken_day(None) is None
+    assert valid_taken_day("") is None

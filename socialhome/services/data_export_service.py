@@ -20,6 +20,7 @@ from datetime import UTC, datetime
 import orjson
 
 from ..db import AsyncDatabase
+from ..repositories.gallery_repo import ALBUM_VISIBLE_TO_SQL
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +59,26 @@ _TABLE_SCRUB_FIELDS: dict[str, frozenset[str]] = {
 def _scrub(row: dict, table: str = "") -> dict:
     drop = _SCRUB_FIELDS | _TABLE_SCRUB_FIELDS.get(table, frozenset())
     return {k: v for k, v in row.items() if k not in drop}
+
+
+#: Notification types that can be about a household album.
+_GALLERY_NOTIF_TYPES: frozenset[str] = frozenset(
+    {"gallery_added", "gallery_shared", "gallery_album_trashed"}
+)
+
+
+def _about_hidden(table: str, row: dict, hidden: frozenset[str]) -> bool:
+    """Whether an export *row* belongs to (or tells of) a private album the
+    viewer can't see: the album itself, a photo in it, or a gallery
+    notification that names it (its link or object key)."""
+    if table == "gallery_albums":
+        return row.get("id") in hidden
+    if table == "gallery_items":
+        return row.get("album_id") in hidden
+    if table == "notifications" and row.get("type") in _GALLERY_NOTIF_TYPES:
+        text = " ".join(str(v) for v in row.values() if isinstance(v, str))
+        return any(album_id in text for album_id in hidden)
+    return False
 
 
 EXPORTABLE_QUERIES: tuple[tuple[str, str], ...] = (
@@ -131,7 +152,9 @@ class DataExportService:
     def __init__(self, db: AsyncDatabase) -> None:
         self._db = db
 
-    async def export_for_user(self, user_id: str) -> DataExport:
+    async def export_for_user(
+        self, user_id: str, *, viewer_user_id: str | None = None
+    ) -> DataExport:
         """Walk every table linked to *user_id* and return a snapshot.
 
         The export intentionally includes the user's own email, phone,
@@ -140,7 +163,16 @@ class DataExportService:
         dangerous if leaked (password_hash, identity_private_key,
         routing_secret, session keys) is scrubbed via
         :data:`_SCRUB_FIELDS` before serialisation.
+
+        ``viewer_user_id`` — someone else asking (a household admin's
+        export of a member): the private gallery albums (D7) the viewer
+        can't see are left out — the albums, the photos in them and the
+        notification rows about them (an admin can't open a private album,
+        so its export can't either).
         """
+        hidden: frozenset[str] = frozenset()
+        if viewer_user_id is not None and viewer_user_id != user_id:
+            hidden = await self._albums_hidden_from(viewer_user_id)
         tables: dict[str, list[dict]] = {}
         for table, where_clause in EXPORTABLE_QUERIES:
             params = (user_id,) if where_clause.count("?") == 1 else (user_id, user_id)
@@ -152,18 +184,33 @@ class DataExportService:
             except Exception as exc:  # defensive
                 log.debug("data_export: skipping %s: %s", table, exc, exc_info=True)
                 continue
-            if not rows:
+            kept = [dict(r) for r in rows]
+            if hidden:
+                kept = [r for r in kept if not _about_hidden(table, r, hidden)]
+            if not kept:
                 continue
-            tables[table] = [_scrub(dict(r), table) for r in rows]
+            tables[table] = [_scrub(r, table) for r in kept]
         return DataExport(
             user_id=user_id,
             exported_at=datetime.now(UTC).isoformat(),
             tables=tables,
         )
 
-    async def export_to_bytes(self, user_id: str) -> bytes:
+    async def _albums_hidden_from(self, viewer_user_id: str) -> frozenset[str]:
+        """Every private household album *viewer_user_id* can't see — the
+        gallery's one visibility rule (``ALBUM_VISIBLE_TO_SQL``)."""
+        rows = await self._db.fetchall(
+            "SELECT a.id FROM gallery_albums a WHERE a.space_id IS NULL"
+            " AND a.audience = 'chosen' AND NOT " + ALBUM_VISIBLE_TO_SQL,
+            (viewer_user_id, viewer_user_id),
+        )
+        return frozenset(r[0] for r in rows)
+
+    async def export_to_bytes(
+        self, user_id: str, *, viewer_user_id: str | None = None
+    ) -> bytes:
         """Convenience: build the export and serialise to UTF-8 JSON."""
-        export = await self.export_for_user(user_id)
+        export = await self.export_for_user(user_id, viewer_user_id=viewer_user_id)
         return orjson.dumps(
             {
                 "user_id": export.user_id,

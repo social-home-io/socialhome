@@ -1240,7 +1240,21 @@ from __future__ import annotations
 #:   can't start a draw (409 ``APP_DRAW_HOUSEHOLD_TOO_OLD``); a receiver
 #:   drops ``engine`` steps from a household below it. Not space-scoped, no
 #:   sync stream change. Labelled "Gift draws".
-OURS: int = 78
+#: * **v_79** (2026-11-02) — **Space gallery edits**. A space photo's
+#:   caption, day taken and album (another album of the same space) change
+#:   in place: one new event, ``SPACE_GALLERY_ITEM_UPDATED`` —
+#:   ``{id, album_id, caption, taken_at, actor_user_id}``, the item's whole
+#:   editable state (≤ 1 KB), sealed like every space event, to the member
+#:   households only (``broadcast_to_space_members``; ``SPACE_ROUTED``
+#:   across a non-member relay; never a GFS). Who may: the uploader or a
+#:   space owner / admin / moderator — the receiver checks the named actor
+#:   against its own roster copy and its own copy of the item. The §25.6
+#:   ``gallery`` record already carries the three fields; a v_79 receiver
+#:   now takes the **host's** values for an item it holds (sync line 79,
+#:   one full stream for a household crossing it). **Fallback**: a member
+#:   household below v_79 is sent nothing; the edit reaches it with the
+#:   host's sync once it upgrades. Labelled "Edit photos in a space".
+OURS: int = 79
 
 
 class FederationCapability:
@@ -1840,6 +1854,13 @@ class FederationCapability:
     #: ``engine`` verb of ``APP_SESSION``. A table with a household below
     #: it can't start a draw.
     MIN_FOR_APP_ENGINES = 78
+    #: v_79 — a space photo's caption, day taken and album move:
+    #: ``SPACE_GALLERY_ITEM_UPDATED`` to every member household at or above
+    #: it (:meth:`FederationService.space_member_supports`, so mesh-only
+    #: members count). A member household below it is sent nothing — its
+    #: copy keeps the old caption / day / album until it upgrades and the
+    #: host's next sync stream brings the values (sync line 79).
+    MIN_FOR_SPACE_GALLERY_ITEM_EDIT = 79
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2138,6 +2159,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_APP_ENGINES,
         "Gift draws",
     ),
+    (
+        FederationCapability.MIN_FOR_SPACE_GALLERY_ITEM_EDIT,
+        "Edit photos in a space",
+    ),
 ]
 
 
@@ -2227,6 +2252,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_APP_GROUPS: "app_groups",
     FederationCapability.MIN_FOR_SPACE_APP_TABLES: "space_app_tables",
     FederationCapability.MIN_FOR_APP_ENGINES: "app_engines",
+    FederationCapability.MIN_FOR_SPACE_GALLERY_ITEM_EDIT: "space_gallery_item_edits",
 }
 
 
@@ -2329,6 +2355,9 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         FederationCapability.MIN_FOR_BAZAAR_FAQ,
         # A behind member household's people don't see the space's games.
         FederationCapability.MIN_FOR_SPACE_APP_TABLES,
+        # A behind member household keeps the old caption, day and album of
+        # a space photo edited elsewhere until it upgrades.
+        FederationCapability.MIN_FOR_SPACE_GALLERY_ITEM_EDIT,
     }
 )
 

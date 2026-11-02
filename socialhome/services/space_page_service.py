@@ -52,11 +52,16 @@ from ..domain.space import (
     SpaceModerationItem,
     SpacePermissionError,
 )
-from ..media_signer import strip_signature_query, strip_signed_media_in_markdown
+from ..media_signer import (
+    media_refs_in_markdown,
+    strip_signature_query,
+    strip_signed_media_in_markdown,
+)
 from ..repositories.page_repo import mint_page_id, new_page
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
 from .inbound_media_store import optional_local_media_ref
+from .media_ref_guard import MediaRefGuardedMixin
 from .page_conflict_service import (
     RESOLUTIONS,
     NoActiveConflictError,
@@ -126,10 +131,17 @@ def _title(value: object) -> str:
     return title
 
 
-class SpacePageService(BusPublisherMixin, ContentAccessMixin):
+class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMixin):
     """Scoped page operations for one space's wiki."""
 
-    __slots__ = ("_bus", "_conflicts", "_moderation", "_pages", "_spaces")
+    __slots__ = (
+        "_bus",
+        "_conflicts",
+        "_media_guard",
+        "_moderation",
+        "_pages",
+        "_spaces",
+    )
 
     def __init__(
         self,
@@ -201,6 +213,11 @@ class SpacePageService(BusPublisherMixin, ContentAccessMixin):
         body = strip_signed_media_in_markdown(content or "") or ""
         cover = optional_local_media_ref(
             strip_signature_query(cover_image_url) if cover_image_url else None,
+            field="cover_image_url",
+        )
+        await self._require_openable_media(
+            (cover, *media_refs_in_markdown(body)),
+            user_id=actor_user_id,
             field="cover_image_url",
         )
         decision = await self._gate(
@@ -294,6 +311,14 @@ class SpacePageService(BusPublisherMixin, ContentAccessMixin):
             raise PageStaleError(page)
         patch = _page_patch(
             title=title, content=content, cover_image_url=cover_image_url
+        )
+        await self._require_openable_media(
+            (
+                patch.get("cover_image_url"),
+                *media_refs_in_markdown(patch.get("content")),
+            ),
+            user_id=actor_user_id,
+            field="cover_image_url",
         )
         if decision is AccessDecision.QUEUE:
             before = _page_dict(page)
@@ -507,6 +532,9 @@ class SpacePageService(BusPublisherMixin, ContentAccessMixin):
             strip_signed_media_in_markdown(merged_content)
             if merged_content is not None
             else None
+        )
+        await self._require_openable_media(
+            media_refs_in_markdown(merged), user_id=actor_user_id, field="content"
         )
         open_sides = await self._conflicts.sides(space_id, page_id)
         if not open_sides:

@@ -58,6 +58,7 @@ from ..federation.owner_bound_id import MOMENT_KIND, mint_owner_bound_id
 from ..media.cleanup import unlink_unreferenced
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
 from .inbound_media_store import optional_local_media_ref
+from .media_ref_guard import MediaRefGuardedMixin
 from .user_preferences import parse_moment_preferences
 
 if TYPE_CHECKING:
@@ -139,7 +140,7 @@ class MomentRateLimitError(Exception):
         self.next_allowed_at = next_allowed_at
 
 
-class MomentService:
+class MomentService(MediaRefGuardedMixin):
     """Create + react + delete moments and drive their lifecycle."""
 
     __slots__ = (
@@ -147,6 +148,7 @@ class MomentService:
         "_federation_repo",
         "_gfs_delete_log",
         "_media_dir",
+        "_media_guard",
         "_media_refs",
         "_moments",
         "_own_instance_id",
@@ -208,6 +210,7 @@ class MomentService:
         # Media is optional; when present it must be a local upload — a
         # remote URL would leak every viewer's IP, and receivers drop it.
         media_url = optional_local_media_ref(media_url)
+        await self._require_openable_media((media_url,), user_id=author_user_id)
         if len(content) > MOMENT_MAX_CONTENT_LEN:
             raise ValueError(
                 f"Moment text exceeds {MOMENT_MAX_CONTENT_LEN} characters."

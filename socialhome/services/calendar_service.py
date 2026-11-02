@@ -71,6 +71,7 @@ from ..utils.timezones import is_valid_tz, parse_all_day_bound, parse_event_boun
 from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
 from .inbound_media_store import require_local_media_ref
+from .media_ref_guard import MediaRefGuardedMixin
 from .moderation_release import with_release
 from .protection_gate import ProtectionGateMixin
 from .space_moderation_service import ApplyResult, item_payload_snapshot
@@ -131,6 +132,17 @@ def _clean_cover_url(value: str | None) -> str | None:
         return None
     # Local uploads only (docs/principles.md "No third-party fetches").
     return require_local_media_ref(strip_signature_query(value), field="cover_url")
+
+
+class _CoverGuard(MediaRefGuardedMixin):
+    """The cover check both calendar services share: a cover is a media
+    reference, so its writer must be able to open the file."""
+
+    __slots__ = ()
+
+    async def _openable_cover(self, cover: str | None, *, user_id: str) -> str | None:
+        await self._require_openable_media((cover,), user_id=user_id, field="cover_url")
+        return cover
 
 
 def _updated_cover_url(value: str | None, stored: str | None) -> str | None:
@@ -244,7 +256,7 @@ _DEFAULT_CALENDAR_PALETTE: tuple[str, ...] = (
 )
 
 
-class CalendarService(BusPublisherMixin):
+class CalendarService(_CoverGuard, BusPublisherMixin):
     """Personal calendar operations."""
 
     __slots__ = (
@@ -252,6 +264,7 @@ class CalendarService(BusPublisherMixin):
         "_fed_repo",
         "_federation",
         "_household",
+        "_media_guard",
         "_repo",
         "_user_repo",
     )
@@ -672,7 +685,9 @@ class CalendarService(BusPublisherMixin):
             "attendees": attendee_tuple,
             "rrule": rrule,
             "rsvp_enabled": rsvp_enabled,
-            "cover_url": _clean_cover_url(cover_url),
+            "cover_url": await self._openable_cover(
+                _clean_cover_url(cover_url), user_id=created_by
+            ),
             "location": _clean_location(location),
             "tz": event_tz,
         }
@@ -873,6 +888,7 @@ class CalendarService(BusPublisherMixin):
         location: object = _UNSET,
         tz: str | None = None,
         client_event_uuid: str | None = None,
+        actor_user_id: str | None = None,
     ) -> CalendarEvent:
         """Partial-update an existing event. Only fields the caller
         supplies are overwritten; the rest retain their current values.
@@ -940,6 +956,10 @@ class CalendarService(BusPublisherMixin):
             # the field is present in the body — assert + cast here.
             assert cover_url is None or isinstance(cover_url, str)
             new_cover = _updated_cover_url(cover_url, existing.cover_url)
+            if new_cover != existing.cover_url:
+                new_cover = await self._openable_cover(
+                    new_cover, user_id=actor_user_id or existing.created_by
+                )
         if location is _UNSET:
             new_location = existing.location
         else:
@@ -1219,7 +1239,9 @@ def _personal_event_payload(event: CalendarEvent, calendar: Calendar) -> dict:
     }
 
 
-class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccessMixin):
+class SpaceCalendarService(
+    _CoverGuard, BusPublisherMixin, ProtectionGateMixin, ContentAccessMixin
+):
     """Space calendar event operations.
 
     Event create / edit / delete pass the space's ``calendar`` access level
@@ -1235,6 +1257,7 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
         "_child_protection",
         "_federation",
         "_household",
+        "_media_guard",
         "_moderation",
         "_repo",
         "_space_repo",
@@ -1460,7 +1483,9 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
             ContentAction.CREATE,
             approved_by is None,
         )
-        clean_cover = _clean_cover_url(cover_url)
+        clean_cover = await self._openable_cover(
+            _clean_cover_url(cover_url), user_id=created_by
+        )
         clean_location = _clean_location(location)
         if decision is AccessDecision.QUEUE:
             await self._submit_for_review(
@@ -1892,6 +1917,8 @@ class SpaceCalendarService(BusPublisherMixin, ProtectionGateMixin, ContentAccess
             # the field is present in the body — assert + cast here.
             assert cover_url is None or isinstance(cover_url, str)
             new_cover = _updated_cover_url(cover_url, existing.cover_url)
+            if new_cover != existing.cover_url:
+                new_cover = await self._openable_cover(new_cover, user_id=actor_user_id)
         if location is _UNSET:
             new_location = existing.location
         else:

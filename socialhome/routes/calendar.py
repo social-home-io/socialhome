@@ -382,6 +382,7 @@ class CalendarEventDeleteView(BaseView):
             cover_url=cover,
             location=location,
             tz=body.get("tz"),
+            actor_user_id=self.user.user_id,
             # Composer-stamped grouping uuid (issue #327). Optional —
             # attaches a legacy event to a shared household group;
             # absent / null leaves any existing group id untouched.

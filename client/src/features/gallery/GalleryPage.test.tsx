@@ -62,6 +62,7 @@ const people = new Map<string, { user_id: string; display_name: string; username
 vi.mock('@/store/householdUsers', () => ({
   householdUsers: { get value() { return people } },
   loadHouseholdUsers: vi.fn(async () => undefined),
+  householdDisplayName: (id: string) => people.get(id)?.display_name ?? 'Someone',
 }))
 vi.mock('@/store/spaceMembers', () => ({
   spaceMembers: { value: {} },
@@ -818,11 +819,11 @@ describe('GalleryPage selection (managing photos)', () => {
     await waitFor(() => expect(view.getByText('1 selected')).toBeTruthy())
   })
 
-  it('space: no Move (needs space parity) and the delete waits for its Undo', async () => {
+  it('space: Move is offered (v_79) and the delete waits for its Undo', async () => {
     const view = await openAlbum({ spaceId: 'sp-1', canModerate: true })
     fireEvent.click(view.getByRole('button', { name: 'Select' }))
     for (const box of view.getAllByRole('checkbox')) fireEvent.click(box)
-    expect(view.queryByRole('button', { name: 'Move to album' })).toBeNull()
+    expect(view.getByRole('button', { name: 'Move to album' })).toBeTruthy()
     // A space's gallery shares nothing out (D8 is about household photos).
     expect(view.queryByRole('button', { name: 'Share' })).toBeNull()
     expect(view.getByRole('button', { name: 'Save' })).toBeTruthy()
@@ -831,6 +832,59 @@ describe('GalleryPage selection (managing photos)', () => {
     await waitFor(() => expect(showToast.mock.calls.some(c => c[0] === '2 photos deleted' && c[2]?.onExpire)).toBe(true))
     expect(apiPost.mock.calls.filter(c => c[0] === '/api/gallery/bulk')).toEqual([])
     await waitFor(() => expect(view.container.querySelectorAll('.sh-gallery-item').length).toBe(0))
+  })
+
+  it("space: Move offers the space's other albums and makes a new one there", async () => {
+    const view = await openAlbum({ spaceId: 'sp-1' })
+    apiGet.mockImplementation(async (url: string) => {
+      const [path] = split(url)
+      if (path === '/api/spaces/sp-1/gallery/albums') return [...albumRows, album('al-2', 'Lake')]
+      if (path === '/api/gallery/albums') return [album('hh-1', 'Garden', { space_id: null })]
+      if (/items$/.test(path)) return itemRows
+      return albumRows[0]
+    })
+    apiPost.mockImplementation(async (url: string, body: Record<string, unknown>) =>
+      url === '/api/spaces/sp-1/gallery/albums'
+        ? { id: 'al-3', name: body.name }
+        : { done: (body.item_ids as string[]) ?? [], refused: [] })
+    fireEvent.click(view.getByRole('button', { name: 'Select' }))
+    // Your own photo (u1) — Anna's is not yours to move.
+    fireEvent.click(view.getAllByRole('checkbox')[1])
+    fireEvent.click(view.getByRole('button', { name: 'Move to album' }))
+    expect(await view.findByRole('radio', { name: /Lake/ })).toBeTruthy()
+    // Never a household album: a space photo stays in its space.
+    expect(view.queryByRole('radio', { name: /Garden/ })).toBeNull()
+    fireEvent.click(view.getByRole('radio', { name: /New album/ }))
+    fireEvent.input(view.getByRole('textbox', { name: 'Name' }), { target: { value: 'Beach' } })
+    fireEvent.click(view.getByRole('button', { name: 'Move' }))
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/spaces/sp-1/gallery/albums', { name: 'Beach' }))
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/gallery/bulk', { action: 'move', item_ids: ['it-2'], album_id: 'al-3' }, {}))
+  })
+
+  it("space: the viewer offers caption and date to the photo's uploader (v_79)", async () => {
+    const edit = async (props: PageProps, itemId: string) => {
+      cleanup()
+      const view = await mount(props, `/spaces/sp-1/gallery/albums/al-1/${itemId}`)
+      fireEvent.click(await view.findByRole('button', { name: 'Info' }))
+      await view.findByRole('button', { name: 'Download' })
+      return view.queryByRole('button', { name: 'Edit caption and date' })
+    }
+    await openAlbum({ spaceId: 'sp-1' })
+    // Your own photo: editable; Anna's is not yours (no moderator seat) —
+    // unless you moderate; a follower edits nothing.
+    expect(await edit({ spaceId: 'sp-1' }, 'it-2')).toBeTruthy()
+    expect(await edit({ spaceId: 'sp-1' }, 'it-1')).toBeNull()
+    expect(await edit({ spaceId: 'sp-1', canModerate: true }, 'it-1')).toBeTruthy()
+    expect(await edit({ spaceId: 'sp-1', readOnly: true }, 'it-2')).toBeNull()
+  })
+
+  it("space: a follower is offered no Move", async () => {
+    const view = await openAlbum({ spaceId: 'sp-1', readOnly: true })
+    fireEvent.click(view.getByRole('button', { name: 'Select' }))
+    for (const box of view.getAllByRole('checkbox')) fireEvent.click(box)
+    expect(view.queryByRole('button', { name: 'Move to album' })).toBeNull()
   })
 
   it('household: Move offers the other albums', async () => {
@@ -1189,5 +1243,67 @@ describe('GalleryPage favourites (D12)', () => {
     ))
     await waitFor(() => expect(showToast).toHaveBeenCalledWith('2 photos added to your favourites', 'success'))
     await waitFor(() => expect(view.container.querySelectorAll('.sh-fav-badge').length).toBe(2))
+  })
+})
+
+describe('GalleryPage private albums (D7) and children (D6)', () => {
+  it('a private album shows its badge, and the header badge opens who sees it', async () => {
+    albumRows = [album('al-1', 'Holiday', { space_id: null, audience: 'chosen', owner_user_id: 'u2' })]
+    const base = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => url.endsWith('/audience')
+      ? { album_id: 'al-1', audience: 'chosen', user_ids: ['u1'], owner_user_id: 'u2', guardian_ids: [], can_edit: false }
+      : base(url))
+    const view = await mount({})
+    const card = await view.findByRole('link', { name: /Open album Holiday/ })
+    expect(card.textContent).toContain('Private')
+    fireEvent.click(card)
+    fireEvent.click(await view.findByRole('button', { name: 'Private album – who sees it' }))
+    expect(await view.findByText(/Private – only/)).toBeTruthy()
+    // Not the owner: a read-only answer, nothing to save.
+    expect(view.queryByRole('button', { name: 'Save' })).toBeNull()
+  })
+
+  it("an admin sees someone's private album as a locked tile and may only trash it", async () => {
+    me.value = { user_id: 'u1', is_admin: true, protected: false }
+    people.set('u-lena', { user_id: 'u-lena', display_name: 'Lena', username: 'lena' })
+    albumRows = [album('al-p', '', {
+      space_id: null, audience: 'chosen', locked: true, owner_user_id: 'u-lena', item_count: 12,
+    })]
+    const view = await mount({})
+    const tile = await view.findByRole('group', { name: /Private album by Lena, 12 items/ })
+    expect(tile.querySelector('a')).toBeNull()  // nothing to open
+    expect(tile.querySelector('img')).toBeNull()  // no preview
+    fireEvent.click(view.getByRole('button', { name: 'Move to trash…' }))
+    await waitFor(() => expect(confirmDialog).toHaveBeenCalled())
+    expect(confirmDialog.mock.calls.at(-1)![0]).toMatch(/Lena is told/)
+    await waitFor(() => expect(apiDelete).toHaveBeenCalledWith('/api/gallery/albums/al-p'))
+  })
+
+  it('a child sees no upload or new album while "Children may add photos" is off', async () => {
+    me.value = { user_id: 'u1', is_admin: false, protected: true }
+    albumRows = [album('al-1', 'Holiday', { space_id: null, item_count: 1 })]
+    const base = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => url === '/api/gallery/settings'
+      ? { children_may_upload: false, may_add: false, can_edit: false }
+      : base(url))
+    const view = await mount({})
+    expect(await view.findByText(/Adding photos is turned off for you/)).toBeTruthy()
+    expect(view.queryByRole('button', { name: /New album/ })).toBeNull()
+  })
+
+  it('a new household album can start private with the people chosen', async () => {
+    people.set('u2', { user_id: 'u2', display_name: 'Tom', username: 'tom' })
+    albumRows = [album('al-1', 'Holiday', { space_id: null, item_count: 1 })]
+    apiPost.mockResolvedValue(album('al-2', 'Gifts', { space_id: null }))
+    const view = await mount({})
+    fireEvent.click(await view.findByRole('button', { name: /New album/ }))
+    fireEvent.input(view.getByPlaceholderText('e.g. Summer 2026'), { target: { value: 'Gifts' } })
+    fireEvent.click(view.getByRole('radio', { name: /Private – only these people/ }))
+    fireEvent.click(view.getByRole('checkbox', { name: 'Tom' }))
+    expect(view.getByText(/not encryption/)).toBeTruthy()
+    fireEvent.click(view.getByRole('button', { name: 'Create' }))
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith('/api/gallery/albums', {
+      name: 'Gifts', description: null, audience: 'chosen', user_ids: ['u2'],
+    }))
   })
 })

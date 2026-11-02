@@ -1094,6 +1094,20 @@ class GalleryItemsShared(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class GalleryPrivateAlbumTrashed(DomainEvent):
+    """A household admin put someone's private album (D7) in the trash —
+    its owner is told ("An admin put your private album in the trash"),
+    so a teen knows. ``count`` is how many photos and videos went with it;
+    the owner may bring it back for 30 days. Local only: never federates."""
+
+    album_id: str
+    owner_id: str
+    admin_user_id: str
+    count: int
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class GalleryItemDeleted(DomainEvent):
     item_id: str
     album_id: str
@@ -1118,14 +1132,23 @@ class GalleryItemRestored(DomainEvent):
 
 @dataclass(slots=True, frozen=True)
 class GalleryItemUpdated(DomainEvent):
-    """A household photo or video got a new caption or date, or moved to
-    another album (``from_album_id`` is the album it left; ``None`` when it
-    stayed). Household only: a space item is not edited in place."""
+    """A photo or video got a new caption or date, or moved to another
+    album (``from_album_id`` is the album it left; ``None`` when it
+    stayed). A household item, or (v_79) a space item — ``space_id`` set —
+    moved only between albums of its own space."""
 
     item_id: str
     album_id: str
     from_album_id: str | None = None
     occurred_at: datetime = field(default_factory=_now)
+    space_id: str | None = None
+    #: Who made the change — named as ``actor_user_id`` on the
+    #: ``SPACE_GALLERY_ITEM_UPDATED`` it federates as.
+    actor_user_id: str | None = None
+    #: ``None`` on local origination; the sending household's instance id
+    #: when a federation inbound handler re-publishes a change it applied —
+    #: the outbound bridge never federates those back.
+    origin_instance_id: str | None = None
 
 
 # ─── Bazaar events (§9, §23.15) ──────────────────────────────────────────

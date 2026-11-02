@@ -18,6 +18,7 @@ from aiohttp import web
 
 from ..app_keys import (
     event_bus_key,
+    media_ref_guard_key,
     media_signer_key,
     page_repo_key,
     space_page_service_key,
@@ -35,6 +36,7 @@ from ..domain.page import MAX_PAGE_TITLE_LENGTH
 from ..domain.page_version import PageConflictSide, version_hash
 from ..media_signer import (
     MediaUrlSigner,
+    media_refs_in_markdown,
     sign_media_urls_in_markdown,
     strip_signature_query,
     strip_signed_media_in_markdown,
@@ -180,6 +182,11 @@ class PageCollectionView(BaseView):
         # have echoed back — bodies are persisted canonical so the server
         # can re-sign them on each read with a fresh signature.
         content = strip_signed_media_in_markdown(body.get("content", "")) or ""
+        # The body's media references are re-signed for every reader: its
+        # writer must be able to open each file (media_ref_guard).
+        await self.svc(media_ref_guard_key).require_openable(
+            media_refs_in_markdown(content), user_id=ctx.user_id, field="content"
+        )
         if not title:
             return error_response(422, "UNPROCESSABLE", "title is required.")
         if _title_too_long(title):
@@ -266,6 +273,14 @@ class PageDetailView(BaseView):
                 strip_signature_query(body["cover_image_url"]),
                 field="cover_image_url",
             )
+        await self.svc(media_ref_guard_key).require_openable(
+            (
+                kwargs.get("cover_image_url"),
+                *media_refs_in_markdown(kwargs.get("content")),
+            ),
+            user_id=ctx.user_id,
+            field="cover_image_url",
+        )
         updated = replace(p, **kwargs)
         await repo.save(updated, space_id=updated.space_id)
         # Answer with the stored row: the upsert stamps its own

@@ -190,6 +190,9 @@ _KIND_OF_TYPE: dict[str, NotifKind] = {
     # "Anna shared 2 of your photos in “Grandparents”" (gallery D8): one
     # row per share action, In app by default like any Activity.
     "gallery_shared": NotifKind.ACTIVITY,
+    # "Tom put your private album “Gifts” in the trash" (gallery D7): an
+    # admin acted on your own album, which they can't open — about you.
+    "gallery_album_trashed": NotifKind.ABOUT_YOU,
 }
 
 #: Every type :func:`notif_kind` knows (for the service's walk test).

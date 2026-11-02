@@ -109,7 +109,7 @@ signing" below.
 
 `SPACE_GALLERY_ALBUM_CREATED` / `SPACE_GALLERY_ALBUM_UPDATED` /
 `SPACE_GALLERY_ALBUM_DELETED` (v_33), `SPACE_GALLERY_ITEM_CREATED`,
-`SPACE_GALLERY_ITEM_DELETED`. An item names its album by id, and a
+`SPACE_GALLERY_ITEM_UPDATED` (v_79), `SPACE_GALLERY_ITEM_DELETED`. An item names its album by id, and a
 receiver files it only into an album it already holds **for that space**
 (`AbstractGalleryRepo.create_item_in_space`) — so the album has to arrive
 first. Until v_33 albums reached another household only in the §25.6
@@ -177,6 +177,53 @@ of every federated item.
 A new upload's id is owner-bound to its uploader and space (v_36, below):
 an item claimed for anybody else is refused, like an album (v_34).
 Sent ungated — see the v_33, v_34 and v_36 rows in [`capabilities.md`](./capabilities.md).
+
+**Editing a photo in place (v_79).** A space photo's caption, day taken
+and album (another user album **of the same space**) change with
+`SPACE_GALLERY_ITEM_UPDATED` — `{id, album_id, caption, taken_at,
+actor_user_id}`, the item's whole editable state as the sender stores it
+after the edit (not a diff, so a redelivery or two racing edits end the
+same everywhere), with `space_id` the only routing field; everything else
+rides inside the space-content-encrypted payload. It goes with
+`broadcast_to_space_members` to the member households only —
+`SPACE_ROUTED` across a non-member relay, never a GFS — and only to those
+at v_79 or above (`space_member_supports`, so a mesh-only member counts by
+its mesh claim). Who may: the uploader or a space owner / admin /
+moderator, the local delete rule; a follower edits nothing, a protected
+account only its own. The receiver checks it against **its own** copy: the
+item must be held live in a user album of the gated space (never a post's
+mirror in the "Posts" album), and the named `actor_user_id` must be the
+uploader holding a writer seat on the sending household, or hold content
+authority as the sender records it (`SpaceAuthorship.moderates_as`); an
+edit naming no actor is refused. A caption over 300 characters or a day
+that is not `YYYY-MM-DD` (1800 – tomorrow) refuses the whole edit; a move
+into an album not held here in this space is not applied (the host's
+§25.6 stream brings it later). Applied in one transaction
+(`AbstractGalleryRepo.edit_item_in_space`: the old album's cover drops the
+item, both counts are recounted) and re-published on the local bus with its
+origin. An unchanged save sends nothing. **Fallback**: a member household
+below v_79 is sent nothing; the host's §25.6 `gallery` record carries the
+three fields, and a v_79 receiver takes the host's values for an item it
+holds — sync line 79 gives a household crossing it one full stream, so the
+edits it missed reach it then. Cost per edit: one envelope to each other
+member household at v_79 — a payload ≤ 1 KB for a full 300-character
+caption (≤ 1.5 KB if all 300 are emoji), i.e. ≤ 1 KB × (member
+households − 1); no media, no fan-out beyond the members.
+
+```mermaid
+sequenceDiagram
+    participant D as Uploader's household
+    participant H as Host household
+    participant R as Non-member relay
+    participant C as Mesh-only member household
+    Note over D: PATCH /api/gallery/items/{id} — caption / taken_at / album_id
+    D->>H: SPACE_GALLERY_ITEM_UPDATED {id, album_id, caption, taken_at, actor_user_id} (sealed)
+    Note over H: item held in this space? actor = uploader (writer seat on D) or content authority? → apply
+    D->>R: SPACE_ROUTED (sealed to C's ephemeral X25519 key)
+    R->>C: SPACE_ROUTED (relay sees ciphertext only)
+    Note over C: same checks against its own copy → apply
+    Note over H,C: a member household below v_79 gets nothing; the host's next sync stream brings the values once it upgrades
+```
 
 ```mermaid
 sequenceDiagram
@@ -356,7 +403,7 @@ act as one — only moderation (below) reaches a local user's rows.
 |---|---|---|---|
 | Posts, comments | author seated (with a writer role) on the sender, or the host relaying a row of a user the space has a record of (§25.6 resume / §319.6 resync replay); from v_36 an owner-bound id must commit to that author and space | the author's household, or **content authority** — the host, or a household holding a live `admin` or `moderator` (v_41) seat | same as edit |
 | Gallery albums (v_33) | owner seated on the sender (or the host's relay); from v_34 an owner-bound id must commit to that owner and space | the stored owner's household or **settings** authority — the host or an `admin` seat, never a `moderator` (the payload's owner is ignored) | same as edit |
-| Gallery items | uploader seated on the sender (or the host's relay); from v_36 an owner-bound id must commit to that uploader and space | — | uploader's household or a moderator |
+| Gallery items | uploader seated on the sender (or the host's relay); from v_36 an owner-bound id must commit to that uploader and space | caption / day / album (v_79): the named actor is the uploader (writer seat on the sender) or holds content authority as the sender records it | uploader's household or a moderator |
 | Tasks, pages, stickies, calendar events | the claimed `created_by` / `author` seated on the sender (or the host's relay); a page that names nobody needs a writer household; from v_36 a new row's owner-bound id must commit to that creator and space | collaborative — any writer household (any member edits them locally); the stored attribution is kept, the payload's claim ignored | any writer household |
 | Poll votes, schedule answers, bids | the voter / user / bidder seated on the sender — strictly, no host exception | — | — |
 | RSVPs | the user seated on the sender; plus the two writes the calendar service makes for another household: the event creator's household or a moderator settling a `requested` RSVP (→ `going` / `waitlist`, or removed), and any writer household promoting a `waitlist` RSVP into a free seat | | |
@@ -1588,7 +1635,7 @@ tiers, each one frozenset that every guard — local and federated — reads:
 | Tier | Roles | What it covers |
 |---|---|---|
 | **Settings** (`SETTINGS_AUTHORITY_ROLES`) | owner, admin | config, features, access levels, members and roles, invites, bans / kicks, ownership, key rotation, archive / delete, zones, timetables, bots, themes, `@here`, join requests, multi-admin votes, the delegated signing seed, renaming / deleting someone else's whole gallery album |
-| **Content** (`CONTENT_AUTHORITY_ROLES`) | owner, admin, **moderator** | the moderation queue of every feature (list / approve / reject), editing and deleting other people's posts and comments, deleting single gallery items, deciding RSVP requests on someone else's event; bypasses `MODERATED` for one's own writes |
+| **Content** (`CONTENT_AUTHORITY_ROLES`) | owner, admin, **moderator** | the moderation queue of every feature (list / approve / reject), editing and deleting other people's posts and comments, editing (caption, day, album — v_79) and deleting single gallery items, deciding RSVP requests on someone else's event; bypasses `MODERATED` for one's own writes |
 | **Writer** (`WRITER_ROLES`) | owner, admin, moderator, member | creating content |
 
 An `ADMIN_ONLY` feature stays owner / admin only — a moderator is
