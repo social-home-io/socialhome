@@ -125,6 +125,9 @@ class _FakeSpaceRepo:
         #: ``space_id -> [role, …]`` of OUR local seats. A space not listed
         #: has one local ``member`` seat (the ordinary joined space).
         self.local_roles: dict[str, list[str]] = dict(local_roles or {})
+        #: ``space_id -> [role, …]`` of the HOST's people the members sync
+        #: mirrored into our ``space_members`` (no local ``users`` row).
+        self.mirrored_roles: dict[str, list[str]] = {}
 
     async def list_by_type(self, space_type):
         return self._spaces.get(space_type, [])
@@ -137,7 +140,14 @@ class _FakeSpaceRepo:
         return [
             SimpleNamespace(space_id=space_id, user_id=f"u{i}", role=r)
             for i, r in enumerate(roles)
+        ] + [
+            SimpleNamespace(space_id=space_id, user_id=f"host-u{i}", role=r)
+            for i, r in enumerate(self.mirrored_roles.get(space_id, []))
         ]
+
+    async def list_local_member_user_ids(self, space_id):
+        roles = self.local_roles.get(space_id, [SpaceRole.MEMBER.value])
+        return [f"u{i}" for i in range(len(roles))]
 
 
 def _space(space_id: str, *, owner_instance_id: str = "self") -> Space:
@@ -1328,14 +1338,19 @@ async def test_startup_sweep_retries_an_undelivered_announcement(
 
 
 @pytest.mark.parametrize(
-    "roles",
+    ("roles", "mirrored"),
     [
-        [SpaceRole.SUBSCRIBER.value],  # we only follow it (GFS subscriber seat)
-        [],  # a bare GFS mirror / directory stub, no seat at all
+        # we only follow it (GFS subscriber seat)
+        ([SpaceRole.SUBSCRIBER.value], []),
+        ([], []),  # a bare GFS mirror / directory stub, no seat at all
+        # Only the host's people, left mirrored by an earlier members sync
+        # in ``space_members``: none of them is a seat of ours.
+        ([SpaceRole.SUBSCRIBER.value], [SpaceRole.OWNER.value]),
+        ([], [SpaceRole.OWNER.value, SpaceRole.MEMBER.value]),
     ],
 )
 async def test_a_followed_only_space_host_gets_no_announce_and_no_catchup(
-    bus, queue, sync_manager, roles
+    bus, queue, sync_manager, roles, mirrored
 ):
     """The GFS shields followers from hosts: a PUBLIC space we only follow
     (or merely mirror) must never make us route-discover its host, announce
@@ -1350,6 +1365,7 @@ async def test_a_followed_only_space_host_gets_no_announce_and_no_catchup(
         [_space("sp-followed", owner_instance_id="host-f")],
     )
     sched._space_repo.local_roles["sp-followed"] = roles
+    sched._space_repo.mirrored_roles["sp-followed"] = mirrored
     announced: list[str] = []
 
     async def _announce(host: str) -> bool:

@@ -260,6 +260,10 @@ class _FakeSpaceRepo:
     async def list_members(self, space_id):
         return [m for m in self.members if getattr(m, "space_id", None) == space_id]
 
+    async def list_local_member_user_ids(self, space_id):
+        # Every seat this fake saves is one of its household's own people.
+        return [m.user_id for m in await self.list_members(space_id)]
+
     # ── Migration 0093 (owner statement / inviting admin) ─────────────
     async def get_space_seed(self, space_id):
         return None

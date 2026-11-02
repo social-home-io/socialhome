@@ -572,7 +572,12 @@ class GfsSpaceMirrorService:
             return False
         if space.space_type not in PUBLIC_SPACE_TIERS:
             return False
-        members = await self._spaces.list_members(space_id)
+        # Our own seats only: ``space_members`` can also mirror the host's
+        # people (the §25.6 ``members`` resource).
+        ours = set(await self._spaces.list_local_member_user_ids(space_id))
+        members = [
+            m for m in await self._spaces.list_members(space_id) if m.user_id in ours
+        ]
         if not members or any(m.role != SpaceRole.SUBSCRIBER for m in members):
             return False  # a real seat heals from the owner's cert only
         mirror_gfs, held_seq = await self._spaces.get_mirror_provenance(space_id)

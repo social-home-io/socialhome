@@ -8716,8 +8716,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
                 space_id,
             )
             return
-        if await self._spaces.list_members(space_id):
-            # Another local user still subscribes — keep the mirror.
+        if await self._spaces.list_local_member_user_ids(space_id):
+            # Another local user still subscribes — keep the mirror. (Only
+            # ours: ``space_members`` may also mirror the host's people.)
             return
         if await self._gfs_mirror.seat_in_grace(space_id):
             # A subscribe is in flight: its GFS seat was just taken and its
@@ -9166,7 +9167,14 @@ async def build_space_snapshot_for_federation(
     area = hosted_local_area(space, own_instance_id)
     if area is not None:
         meta["local_community"] = {"radius_km": area.radius_km}
-    local_members = await space_repo.list_members(space.id)
+    # Our own people only: on a delegated admin's household ``space_members``
+    # also mirrors the host's (the §25.6 ``members`` resource), and those
+    # must never ship as seats on OUR instance — they reach the joiner from
+    # the roster mirror below, on their own household.
+    ours = set(await space_repo.list_local_member_user_ids(space.id))
+    local_members = [
+        m for m in await space_repo.list_members(space.id) if m.user_id in ours
+    ]
     local_users = await user_repo.list_by_ids({m.user_id for m in local_members})
     name_by_id = {u.user_id: u.display_name for u in local_users}
     roster: list[dict] = []

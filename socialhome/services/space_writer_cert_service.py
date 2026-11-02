@@ -281,9 +281,14 @@ class SpaceWriterCertService:
         item by the receivers); a follower seat gets ``comment`` only while
         ``allow_subscriber_comment`` is on."""
         if instance_id == self._own_instance_id:
+            # Our own people only: ``space_members`` on a member household
+            # (a seed-holding delegated admin) also mirrors the host's —
+            # never seats of this household, never bound into its cert.
+            ours = set(await self._spaces.list_local_member_user_ids(space.id))
             seats = [
                 (m.user_id, str(m.role))
                 for m in await self._spaces.list_members(space.id)
+                if m.user_id in ours
             ]
         else:
             seats = [

@@ -1569,6 +1569,7 @@ class SqliteSpaceRepo:
             """
             SELECT DISTINCT m.space_id AS space_id
               FROM space_members m
+              JOIN users u ON u.user_id = m.user_id
               JOIN spaces s ON s.id = m.space_id
              WHERE m.role = 'subscriber'
                AND s.dissolved = 0

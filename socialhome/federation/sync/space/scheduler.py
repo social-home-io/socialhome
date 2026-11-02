@@ -877,8 +877,15 @@ class SpaceSyncScheduler:
             host = space.owner_instance_id
             if not host or host == self._own_instance_id:
                 continue
+            # Our own people only: ``space_members`` also mirrors the
+            # host's (the ``members`` resource), whose seats are no
+            # membership of ours.
+            ours = set(await self._space_repo.list_local_member_user_ids(space.id))
             members = await self._space_repo.list_members(space.id)
-            if any(str(m.role) != SpaceRole.SUBSCRIBER.value for m in members):
+            if any(
+                m.user_id in ours and str(m.role) != SpaceRole.SUBSCRIBER.value
+                for m in members
+            ):
                 out.append(space)
         return out
 

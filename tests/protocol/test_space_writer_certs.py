@@ -486,6 +486,12 @@ async def test_own_cert_signed_by_a_retired_key_is_not_handed_out(env):
     assert await holder.own_cert(SPACE, epoch) is None
     # A seed holder for the NEW key self-issues instead.
     await env.spaces.set_space_seed(SPACE, k2.private_key)
+    # One of OUR people (a ``users`` row) — a seat without one is a mirrored
+    # host person, never ours to self-issue for.
+    await env.db.enqueue(
+        "INSERT OR IGNORE INTO users(username, user_id, display_name)"
+        " VALUES('me', 'me', 'Me')"
+    )
     await env.db.enqueue(
         "INSERT OR IGNORE INTO space_members(space_id, user_id, role, joined_at)"
         " VALUES(?, 'me', 'owner', '2026-01-01')",

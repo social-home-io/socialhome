@@ -1070,9 +1070,12 @@ class SpacePublicInbound:
 
     async def _holds_writer_seat(self, space_id: str) -> bool:
         """We are a member household here (a local non-follower seat), so we
-        hold the roster and the access levels."""
+        hold the roster and the access levels. Our own people only:
+        ``space_members`` also mirrors the host's (the §25.6 ``members``
+        resource)."""
+        ours = set(await self._spaces.list_local_member_user_ids(space_id))
         return any(
-            str(m.role) != SpaceRole.SUBSCRIBER.value
+            m.user_id in ours and str(m.role) != SpaceRole.SUBSCRIBER.value
             for m in await self._spaces.list_members(space_id)
         )
 
