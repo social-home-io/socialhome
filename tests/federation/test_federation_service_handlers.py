@@ -27,6 +27,7 @@ from socialhome.domain.federation import (
 )
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.sync_manager import PendingSyncRequest, SyncSessionManager
+from socialhome.federation.sync_rtc import SyncSessionRecord
 
 
 def _event(
@@ -2255,3 +2256,87 @@ async def test_a_refused_begin_still_reaches_a_paired_household(svc):
             )
         )
     send.assert_awaited_once()
+
+
+# ─── A stream cut before its sentinel is asked for again ───────────────
+
+
+def _cut_svc(svc, *, recv_error: BaseException):
+    """A paired provider whose DataChannel delivers one chunk, then fails."""
+    svc._sync_manager = SyncSessionManager(MagicMock())
+    record = SyncSessionRecord(
+        sync_id="s-cut",
+        space_id="sp",
+        requester_instance_id="self-iid",
+        provider_instance_id="paired-provider",
+        sync_mode="incremental",
+    )
+    record.rtc = SimpleNamespace(  # type: ignore[assignment]
+        wait_ready=AsyncMock(return_value=True),
+        recv_chunk=AsyncMock(side_effect=[b"chunk-1", recv_error]),
+        close=MagicMock(),
+    )
+    svc._sync_manager._sessions["s-cut"] = record
+    svc._sync_manager.record_sync_request(
+        sync_id="s-cut", space_id="sp", provider_instance_id="paired-provider"
+    )
+    svc._space_sync_receiver = SimpleNamespace(on_chunk=AsyncMock())
+    return record
+
+
+@pytest.mark.parametrize(
+    "recv_error",
+    [ConnectionError("closed"), RuntimeError("libdatachannel")],
+)
+async def test_a_stream_cut_before_its_sentinel_is_asked_again(svc, recv_error):
+    """The host restarted mid-stream: the requester closes the session and
+    asks again (``SpaceSyncDeferred``, ``interrupted``) in the cut stream's
+    mode — before, it waited for the 30-minute periodic tick."""
+    record = _cut_svc(svc, recv_error=recv_error)
+    with patch.object(FederationService, "send_event", new_callable=AsyncMock):
+        await svc._watch_requester_rtc(record, "paired-provider")
+    svc._space_sync_receiver.on_chunk.assert_awaited_once()
+    assert not svc._sync_manager.has_session("s-cut")
+    assert svc._sync_manager.pending_sync_request("s-cut") is None
+    record.rtc.close.assert_called_once()
+    (deferred,) = [c.args[0] for c in svc._bus.publish.await_args_list]
+    assert deferred == SpaceSyncDeferred(
+        space_id="sp",
+        provider_instance_id="paired-provider",
+        sync_mode="incremental",
+        sync_id="s-cut",
+        reason="interrupted",
+        occurred_at=deferred.occurred_at,
+    )
+
+
+async def test_a_channel_closing_after_the_sentinel_asks_nothing(svc):
+    record = _cut_svc(svc, recv_error=ConnectionError("closed"))
+    record.sentinel_landed = True
+    with patch.object(FederationService, "send_event", new_callable=AsyncMock):
+        await svc._watch_requester_rtc(record, "paired-provider")
+    svc._bus.publish.assert_not_awaited()
+
+
+async def test_a_cut_on_a_session_already_closed_asks_nothing(svc):
+    """Reaped (or ended) meanwhile: not this drain's to report."""
+    record = _cut_svc(svc, recv_error=ConnectionError("closed"))
+    svc._sync_manager._sessions.pop("s-cut")
+    with patch.object(FederationService, "send_event", new_callable=AsyncMock):
+        await svc._watch_requester_rtc(record, "paired-provider")
+    svc._bus.publish.assert_not_awaited()
+
+
+async def test_the_sentinel_marks_the_stream_ended(svc):
+    """``SpaceSyncComplete`` (the sentinel landed) marks the session, so the
+    channel closing right after it is not taken for a cut."""
+    record = _cut_svc(svc, recv_error=ConnectionError("closed"))
+    with patch.object(
+        FederationService, "send_with_mesh_fallback", new_callable=AsyncMock
+    ):
+        await svc._on_space_sync_landed(
+            SpaceSyncComplete(
+                space_id="sp", from_instance="paired-provider", sync_id="s-cut"
+            )
+        )
+    assert record.sentinel_landed

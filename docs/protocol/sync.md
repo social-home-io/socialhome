@@ -938,6 +938,51 @@ stream plus every media blob of the space, every 30 minutes for each
 space past the third shared with one host.) A `rate_limited` refusal is
 not retried; the periodic tick covers it.
 
+**A stream cut before its sentinel.** The provider restarts (or crashes,
+or abandons the stream after `MAX_CONSECUTIVE_CHUNK_FAILURES`) while its
+chunks are on the DataChannel: the channel closes under the requester
+before the end-of-stream sentinel. Nothing of that stream is confirmed —
+the provider moved no watermark, the requester recorded no `applied_seq`
+— so the next stream is full again; the question is only when it comes.
+The requester's chunk drain used to read any close as the normal end of a
+stream: the session stayed open until the stale reaper and the space was
+asked for again only at the next periodic tick, up to 30 minutes later. A
+household whose **first** sync of a space was cut that way held none of
+what had not arrived yet. In the share-sheet live test (#1283) that was
+the space's album: the host restarted mid-stream, and a photo shared into
+the album afterwards was refused on the new member's side ("gallery album
+… is not in space"), while an album created after the join federated
+fine. Now a channel that closes (or fails) before the sentinel landed
+(`SyncSessionRecord.sentinel_landed`, set when `SpaceSyncComplete`
+fires) closes the requester's session and publishes `SpaceSyncDeferred
+{reason: "interrupted"}` with the cut stream's `sync_mode` — the same
+bounded retry as a capacity refusal above (20 s, 40 s, … at most 6 times
+until that space completes). A close after the sentinel is the normal end
+and asks nothing. (`SyncRtcSession.recv_chunk` reports the library's
+`ConnectionClosedError` as `ConnectionError`, as documented.) No wire
+change, no protocol bump.
+
+Cost: one more stream per cut, in the mode that was cut — a periodic
+session stays incremental, so only a first (or full) sync re-streams the
+space, as it would have at the next tick anyway; at most 6 per (space,
+provider) between completions. A relay-mode (`SPACE_SYNC_CHUNK` over the
+inbox) stream cut by a provider restart gives the requester no close
+signal; it still heals at the next periodic tick.
+
+**Joining a paired household's space asks for it at once.** The invitee's
+accept (`accept_remote_invite`) kicks the catch-up itself only for a host
+reachable over the mesh (`begin_mesh_catchup_sync`, a no-op for a paired
+host). A household joining a space its paired host runs had to wait for its
+own next periodic tick — up to 30 minutes of an empty space. Now
+`SpaceSyncScheduler` reacts to `SpaceInviteAnswered {accepted}`: for the
+space's owner (and an inviting admin household that acts as host), when it
+is a confirmed peer and no stream from it has applied cleanly here yet
+(`applied_seq` is `NULL`, migration 0087), it sends an `"initial"` BEGIN —
+one full stream plus the catch-up media, which the first periodic session
+would have sent anyway. A second person of a household already in the space
+costs nothing. A BEGIN that overtakes the accept is refused `not_seated`,
+which is not terminal; the periodic tick asks again.
+
 **The requester stays inside that cap.** `SpaceSyncScheduler` counts the
 BEGINs it has sent each provider that have not ended — `SpaceSyncComplete`
 for that `sync_id`, a deferral, or 120 s (`INFLIGHT_BEGIN_TTL_S`, the
