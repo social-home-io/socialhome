@@ -535,6 +535,8 @@ async def test_list_shows_ready_in_for_a_processing_video(client):
     vid = next(i for i in items if i["item_type"] == "video")
     assert vid["media_status"] == "processing"
     assert isinstance(vid["media_eta_s"], int) and vid["media_eta_s"] >= 1
+
+
 # ─── In-album date order (owner decision D1) ─────────────────────────────
 
 

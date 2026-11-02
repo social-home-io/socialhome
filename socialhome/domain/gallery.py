@@ -293,6 +293,8 @@ def video_fits(duration_s: float, max_seconds: int) -> bool:
     minutes, ``5:01`` is not.
     """
     return int(duration_s) <= max_seconds
+
+
 class ItemSort(StrEnum):
     """How an album lists its items. ``ADDED`` is the upload order
     (newest first — the order before migration 0139, kept for old
