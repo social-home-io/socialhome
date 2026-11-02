@@ -13,6 +13,7 @@ import pytest
 from socialhome.domain.events import (
     PairingConfirmed,
     SpaceAuthorityEchoDue,
+    SpaceInviteAnswered,
     SpaceSyncComplete,
     SpaceSyncDeferred,
 )
@@ -131,6 +132,13 @@ class _FakeSpaceRepo:
 
     async def list_by_type(self, space_type):
         return self._spaces.get(space_type, [])
+
+    async def get(self, space_id):
+        for spaces in self._spaces.values():
+            for space in spaces:
+                if space.id == space_id:
+                    return space
+        return None
 
     async def list_member_instances(self, space_id):
         return self._members.get(space_id, [])
@@ -1477,3 +1485,122 @@ async def test_mesh_catchup_also_asks_the_trusted_inviting_admin(db, delegation)
     assert set(calls) == expected
     if delegation:
         assert calls["admin-hh"] is None
+
+
+# ─── Joined a paired household's space: ask now (trigger 9) ──────────
+
+
+def _join_sched(bus, queue, sync_manager, fed, *, owner="host", applied=None):
+    return SpaceSyncScheduler(
+        bus=bus,
+        federation=fed,
+        federation_repo=_FakeFedRepo([]),
+        space_repo=_FakeSpaceRepo(
+            spaces_by_type={
+                SpaceType.HOUSEHOLD: [_space("sp", owner_instance_id=owner)]
+            },
+            members_by_space={"sp": [owner]},
+        ),
+        queue=queue,
+        own_instance_id="self",
+        sync_manager=sync_manager,
+        applied_seqs=applied,
+    )
+
+
+async def _answered(bus, queue, *, accepted=True, space_id="sp"):
+    await queue.start()
+    try:
+        await bus.publish(
+            SpaceInviteAnswered(space_id=space_id, user_id="oma", accepted=accepted)
+        )
+        await _settle()
+    finally:
+        await queue.stop()
+
+
+async def test_joining_a_paired_hosts_space_asks_for_it_now(bus, queue, sync_manager):
+    """A new member household used to hold an empty space (no albums, so a
+    photo shared into one was refused) until its next periodic tick."""
+    fed = _FakeFederation(confirmed={"host"})
+    sched = _join_sched(bus, queue, sync_manager, fed, applied=_Applied({}))
+    sched.wire()
+    await _answered(bus, queue)
+    (begin,) = _begins(fed)
+    assert (begin["to"], begin["payload"]["space_id"]) == ("host", "sp")
+    assert begin["payload"]["sync_mode"] == "initial"
+    assert fed.mesh_catchups == []
+
+
+async def test_joining_asks_nothing_once_a_stream_applied_cleanly(
+    bus, queue, sync_manager
+):
+    """A second person of a household already in the space: its copy is
+    current, the periodic tick keeps it so."""
+    fed = _FakeFederation(confirmed={"host"})
+    sched = _join_sched(
+        bus, queue, sync_manager, fed, applied=_Applied({("sp", "host"): 7})
+    )
+    sched.wire()
+    await _answered(bus, queue)
+    assert _begins(fed) == []
+
+
+@pytest.mark.parametrize(
+    ("owner", "confirmed", "accepted", "space_id"),
+    [
+        ("host", {"host"}, False, "sp"),  # declined
+        ("self", {"host"}, True, "sp"),  # our own space
+        ("host", set(), True, "sp"),  # mesh-only host: the accept's own catch-up
+        ("host", {"host"}, True, "unknown"),  # no such space here
+    ],
+)
+async def test_joining_asks_nothing_when_there_is_no_paired_host(
+    bus, queue, sync_manager, owner, confirmed, accepted, space_id
+):
+    fed = _FakeFederation(confirmed=confirmed)
+    sched = _join_sched(bus, queue, sync_manager, fed, owner=owner)
+    sched.wire()
+    await _answered(bus, queue, accepted=accepted, space_id=space_id)
+    assert _begins(fed) == []
+    assert fed.mesh_catchups == []
+
+
+async def test_joining_survives_a_failing_lookup(bus, queue, sync_manager, caplog):
+    fed = _FakeFederation(confirmed={"host"})
+    sched = _join_sched(bus, queue, sync_manager, fed, applied=_Applied({}, fail=True))
+    sched.wire()
+    await _answered(bus, queue)
+    assert _begins(fed) == []
+    assert "could not be asked for" in caplog.text
+
+
+async def test_an_interrupted_stream_is_asked_again_in_its_mode(
+    bus, queue, sync_manager, monkeypatch
+):
+    """The DataChannel closed before the sentinel (the host restarted): the
+    deferred retry asks again, as the cut stream was asked for."""
+    monkeypatch.setattr(scheduler_mod, "DEFERRED_SYNC_RETRY_S", 0.01)
+    fed = _FakeFederation(confirmed={"host"})
+    sched = _plain_sched(bus, queue, sync_manager, fed)
+    sched.wire()
+    await queue.start()
+    try:
+        await bus.publish(
+            SpaceSyncDeferred(
+                space_id="sp",
+                provider_instance_id="host",
+                sync_mode="initial",
+                sync_id="cut",
+                reason="interrupted",
+            )
+        )
+        for _ in range(100):
+            if fed.sent:
+                break
+            await asyncio.sleep(0.01)
+    finally:
+        await sched.stop()
+        await queue.stop()
+    (begin,) = fed.sent
+    assert (begin["to"], begin["payload"]["sync_mode"]) == ("host", "initial")

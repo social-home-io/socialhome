@@ -39,6 +39,7 @@ import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
+from unittest.mock import AsyncMock, patch
 
 import orjson
 import pytest
@@ -54,7 +55,7 @@ from socialhome.app_keys import (
 )
 from socialhome.config import Config
 from socialhome.domain.calendar import CalendarEvent
-from socialhome.domain.events import SpaceSyncComplete
+from socialhome.domain.events import SpaceSyncComplete, SpaceSyncDeferred
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.gallery import GalleryAlbum, GalleryItem
 from socialhome.domain.page import Page
@@ -1266,3 +1267,163 @@ async def test_a_synced_photo_post_shows_in_the_members_posts_album(houses):
     assert [i.id for i in await _gallery(c).list_items_by_source_post(pid)] == [
         mirrored[0].id
     ]
+
+
+# ── A stream cut short (the host restarts mid-sync) ───────────────────────
+
+
+class _CutChannel:
+    """The requester's DataChannel: it hands over ``frames`` and then closes
+    — the provider went away mid-stream (a restart), the sentinel never
+    came."""
+
+    def __init__(self, frames: list[dict]) -> None:
+        self._frames = list(frames)
+
+    async def wait_ready(self) -> bool:
+        return True
+
+    async def recv_chunk(self) -> bytes:
+        if not self._frames:
+            raise ConnectionError("DataChannel closed")
+        return orjson.dumps(self._frames.pop(0))
+
+    def close(self) -> None:
+        pass
+
+
+async def _has_album(app, aid: str) -> bool:
+    row = await app[db_key].fetchone("SELECT 1 FROM gallery_albums WHERE id=?", (aid,))
+    return row is not None
+
+
+async def test_a_first_sync_cut_by_a_host_restart_is_asked_for_again(houses):
+    """The share-sheet live test: the host restarted while its first full
+    stream to a new member household was on the wire, and that household
+    never held the space's album — a photo shared into it later was refused
+    there ("album not in space"). The requester saw its DataChannel close
+    before the sentinel, took it for the normal end of a stream and asked
+    for nothing until its next 30-minute tick. Now a stream cut before its
+    sentinel is asked for again within seconds (the deferred-sync retry),
+    in the mode it asked for, and the album lands."""
+    h, c = houses
+    aid = await _new_album(h, "Großeltern")
+    assert await _gallery(h).create_item_in_space(_photo(aid, 1), space_id=SPACE)
+
+    # H streams the first (full) session to C …
+    sync_id = uuid.uuid4().hex
+    wire = _Wire()
+    session = SyncSessionRecord(
+        sync_id=sync_id,
+        space_id=SPACE,
+        requester_instance_id=MEMBER,
+        provider_instance_id=HOST,
+        sync_mode="initial",
+        rtc=None,
+    )
+    session.rtc = wire  # type: ignore[assignment]
+    h[federation_service_key]._sync_manager._sessions[sync_id] = session
+    await h[space_sync_service_key].stream_initial(session)
+    h[federation_service_key]._sync_manager.close_session(sync_id)
+    # … and restarts before the gallery leaves: C's channel closes there.
+    cut = next(
+        i for i, f in enumerate(wire.frames) if f["resource"].startswith("gallery")
+    )
+    assert cut > 0
+    fed = c[federation_service_key]
+    fed.record_sync_request(
+        sync_id=sync_id,
+        space_id=SPACE,
+        provider_instance_id=HOST,
+        sync_mode="initial",
+    )
+    record = SyncSessionRecord(
+        sync_id=sync_id,
+        space_id=SPACE,
+        requester_instance_id=fed.own_instance_id,
+        provider_instance_id=HOST,
+        sync_mode="initial",
+        rtc=_CutChannel(wire.frames[:cut]),  # type: ignore[arg-type]
+    )
+    fed._sync_manager._sessions[sync_id] = record
+    deferred: list[SpaceSyncDeferred] = []
+
+    async def _deferred(event: SpaceSyncDeferred) -> None:
+        deferred.append(event)
+
+    c[event_bus_key].subscribe(SpaceSyncDeferred, _deferred)
+    with patch.object(type(fed), "send_event", new_callable=AsyncMock):
+        await fed._watch_requester_rtc(record, HOST)
+
+    # Nothing of the gallery landed and nothing was confirmed either side.
+    assert not await _has_album(c, aid)
+    assert await _watermark(h, MEMBER) is None
+    assert await _applied_seq(c, HOST) is None
+    # The cut is noticed: the session is closed and the sync asked again,
+    # in the mode the cut stream was asked for.
+    assert [(e.space_id, e.provider_instance_id, e.sync_mode) for e in deferred] == [
+        (SPACE, HOST, "initial")
+    ]
+    assert not fed._sync_manager.has_session(sync_id)
+    assert c[space_sync_scheduler_key]._deferred_attempts[(SPACE, HOST)] == 1
+
+    # The stream asked again (a fresh session on the restarted host) is full
+    # and brings the album and its photo.
+    again = await _h_to_c(h, c, mode="initial")
+    assert aid in _ids(again, "gallery")
+    assert await _has_album(c, aid)
+    assert (await _album_row(c, aid))["item_count"] == 1
+    assert await _applied_seq(c, HOST) is not None
+
+
+async def test_a_stream_whose_sentinel_landed_is_not_asked_again(houses):
+    """The channel closing after the sentinel is the normal end of a stream:
+    nothing is asked again."""
+    h, c = houses
+    sync_id = uuid.uuid4().hex
+    wire = _Wire()
+    session = SyncSessionRecord(
+        sync_id=sync_id,
+        space_id=SPACE,
+        requester_instance_id=MEMBER,
+        provider_instance_id=HOST,
+        sync_mode="initial",
+        rtc=None,
+    )
+    session.rtc = wire  # type: ignore[assignment]
+    h[federation_service_key]._sync_manager._sessions[sync_id] = session
+    await h[space_sync_service_key].stream_initial(session)
+    h[federation_service_key]._sync_manager.close_session(sync_id)
+    fed = c[federation_service_key]
+    fed.record_sync_request(sync_id=sync_id, space_id=SPACE, provider_instance_id=HOST)
+    record = SyncSessionRecord(
+        sync_id=sync_id,
+        space_id=SPACE,
+        requester_instance_id=fed.own_instance_id,
+        provider_instance_id=HOST,
+        sync_mode="initial",
+        rtc=_CutChannel(wire.frames),  # type: ignore[arg-type]
+    )
+    fed._sync_manager._sessions[sync_id] = record
+    deferred: list[SpaceSyncDeferred] = []
+
+    async def _deferred(event: SpaceSyncDeferred) -> None:
+        deferred.append(event)
+
+    c[event_bus_key].subscribe(SpaceSyncDeferred, _deferred)
+    # The real end-of-stream handler (the fixture delivers completions
+    # itself): it answers SPACE_SYNC_COMPLETE and marks the stream ended.
+    c[event_bus_key].subscribe(SpaceSyncComplete, fed._on_space_sync_landed)
+    with (
+        patch.object(type(fed), "send_event", new_callable=AsyncMock),
+        patch.object(
+            type(fed), "send_with_mesh_fallback", new_callable=AsyncMock
+        ) as complete,
+    ):
+        await fed._watch_requester_rtc(record, HOST)
+    assert record.sentinel_landed
+    assert [call.kwargs["event_type"] for call in complete.await_args_list] == [
+        FederationEventType.SPACE_SYNC_COMPLETE
+    ]
+    assert deferred == []
+    assert await _applied_seq(c, HOST) is not None

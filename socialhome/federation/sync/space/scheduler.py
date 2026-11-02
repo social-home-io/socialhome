@@ -22,7 +22,9 @@ Triggers:
    scheduler asks again after :data:`DEFERRED_SYNC_RETRY_S` (growing,
    at most :data:`MAX_DEFERRED_SYNC_RETRIES` until that space completes),
    in the mode the refused BEGIN asked for — a periodic sync stays
-   ``"incremental"``.
+   ``"incremental"``. A stream whose DataChannel closed before its
+   sentinel (the provider restarted mid-stream) is asked again the same
+   way (``reason="interrupted"``).
 6. **Authority epoch echo** (v_46) — a BEGIN to a space's owner carries
    the ``authority_epoch_echo`` the attached builder returns
    (:meth:`attach_authority_echo`), and :class:`SpaceAuthorityEchoDue`
@@ -37,6 +39,11 @@ Triggers:
    sync asked for while all are held waits — one entry per space, the
    stronger mode and the more urgent priority kept — and goes when one
    frees, so a periodic tick over many shared spaces is never refused.
+9. **Joined** — we accepted an invitation into a space hosted by a
+   paired household (:class:`SpaceInviteAnswered`): ask it for the space
+   now, not at the next periodic tick, unless a stream from it already
+   applied cleanly here. A host reachable only over the mesh is the
+   accept's own ``begin_mesh_catchup_sync`` (trigger 4).
 
 Follows the `_stop: asyncio.Event` lifecycle (CLAUDE.md "Schedulers").
 """
@@ -54,6 +61,7 @@ from typing import TYPE_CHECKING
 from ....domain.events import (
     PairingConfirmed,
     SpaceAuthorityEchoDue,
+    SpaceInviteAnswered,
     SpaceSyncComplete,
     SpaceSyncDeferred,
 )
@@ -278,6 +286,7 @@ class SpaceSyncScheduler:
         self._bus.subscribe(SpaceSyncComplete, self._on_space_sync_complete)
         self._bus.subscribe(SpaceAuthorityEchoDue, self._on_authority_echo_due)
         self._bus.subscribe(SpaceSyncDeferred, self._on_sync_deferred)
+        self._bus.subscribe(SpaceInviteAnswered, self._on_invite_answered)
 
     async def begin_fields(
         self, *, space_id: str, peer_instance_id: str, sync_mode: str
@@ -357,6 +366,46 @@ class SpaceSyncScheduler:
         self._release_slot(event.from_instance, event.sync_id, event.space_id)
         await self._drain_parked(event.from_instance)
 
+    async def _on_invite_answered(self, event: SpaceInviteAnswered) -> None:
+        """We took a seat in a space another household hosts (trigger 9):
+        ask its paired host for the space right away. Until now nothing did
+        — the accept's ``begin_mesh_catchup_sync`` is a no-op for a paired
+        host, leaving the new member with an empty space (no albums, so a
+        photo shared into one was refused here) until the next periodic
+        tick, up to 30 minutes later. Skipped for a host a stream already
+        applied cleanly from (``applied_seq``, migration 0087): a second
+        person of a household that is already in the space costs nothing.
+        A BEGIN that overtakes the accept is refused ``not_seated`` — not
+        terminal; the periodic tick asks again."""
+        if not event.accepted:
+            return
+        try:
+            space = await self._space_repo.get(event.space_id)
+            if (
+                space is None
+                or not space.owner_instance_id
+                or space.owner_instance_id == self._own_instance_id
+            ):
+                return
+            for host in await self._mesh_targets(space):
+                if not await self._federation.is_confirmed_peer(host):
+                    continue
+                if (
+                    self._applied_seqs is not None
+                    and await self._applied_seqs.applied_seq(space.id, host) is not None
+                ):
+                    continue
+                await self.enqueue_sync_for_space(
+                    space_id=space.id,
+                    peer_instance_id=host,
+                    priority=P4_DM,
+                    sync_mode="initial",
+                )
+        except Exception:
+            log.exception(
+                "space sync after joining %s could not be asked for", event.space_id
+            )
+
     async def _on_sync_deferred(self, event: SpaceSyncDeferred) -> None:
         """A provider had no free slot for our BEGIN: ask again shortly —
         the sync was never served (trigger 5). The retry asks for the same
@@ -369,10 +418,12 @@ class SpaceSyncScheduler:
         attempts = self._deferred_attempts.get(key, 0)
         if attempts >= MAX_DEFERRED_SYNC_RETRIES:
             log.warning(
-                "space sync %s from %s deferred %d times — left to the periodic tick",
+                "space sync %s from %s deferred %d times (%s) — left to the "
+                "periodic tick",
                 event.space_id,
                 event.provider_instance_id,
                 attempts,
+                event.reason,
             )
             return
         self._deferred_attempts[key] = attempts + 1

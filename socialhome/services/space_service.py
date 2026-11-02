@@ -6856,7 +6856,9 @@ class SpaceService(SpaceMemberGuardMixin, ProtectionGateMixin, ContentAccessMixi
         # gallery / media from the host. When the host is reachable only via the
         # mesh (not a confirmed direct peer), the SpaceSyncScheduler never
         # triggers — so initiate it explicitly here. No-op + fail-soft for a
-        # confirmed host or an unwired sync stack. (A roster snapshot the
+        # confirmed host (the sync scheduler asks it on the
+        # SpaceInviteAnswered ``accept_remote_invite`` publishes) or an
+        # unwired sync stack. (A roster snapshot the
         # host sends on seat is also re-sent on its periodic sync tick.)
         await self._federation.begin_mesh_catchup_sync(
             space_id=space_id,
