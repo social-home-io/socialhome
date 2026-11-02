@@ -16,6 +16,38 @@
 
 import { t } from '@/i18n/i18n'
 
+/** An upload the server (or the client's own size guard) refused, with
+ *  its HTTP status and — when the body was the canonical
+ *  ``{"error": {"code": …}}`` shape — its stable error code. Throw this
+ *  instead of an ``Error`` carrying the raw response text: that text is
+ *  JSON and English, never something to show a person. */
+export class UploadHttpError extends Error {
+  readonly status: number
+  readonly code: string | null
+  constructor(status: number, code: string | null = null) {
+    super(`Upload failed (${status})${code ? `: ${code}` : ''}`)
+    this.name = 'UploadHttpError'
+    this.status = status
+    this.code = code
+  }
+}
+
+/** Build an :class:`UploadHttpError` from an XHR's status + body. */
+export function uploadHttpError(status: number, responseText: string): UploadHttpError {
+  let code: string | null = null
+  try {
+    const body = JSON.parse(responseText) as { error?: unknown }
+    const err = body?.error as { code?: unknown } | undefined
+    if (err && typeof err === 'object' && typeof err.code === 'string') code = err.code
+  } catch {
+    code = null
+  }
+  return new UploadHttpError(status, code)
+}
+
+/** Error codes that mean "this file can't be used here". */
+const BAD_FILE_CODES = new Set(['IMAGE_UNREADABLE', 'UNPROCESSABLE', 'UNSUPPORTED_MEDIA_TYPE'])
+
 export interface UploadErrorContext {
   /** Optional file the user picked — surfaces in size/type messages. */
   file?: File
@@ -40,8 +72,22 @@ export function describeUploadError(
 
   // Status-coded errors. The gallery xhr throws "Upload failed
   // (413): …"; api.ts throws "API 413: <path>".
+  // ``UploadHttpError`` carries its status and stable code directly.
+  const coded = err instanceof UploadHttpError ? err : null
   const statusMatch = raw.match(/\b(4\d\d|5\d\d)\b/)
-  const status = statusMatch ? Number(statusMatch[1]) : null
+  const status = coded ? coded.status : statusMatch ? Number(statusMatch[1]) : null
+  const code = coded?.code ?? null
+
+  if (code === 'STORAGE_FULL' || status === 507) {
+    return t('upload.storage_full', { lead })
+  }
+  if (code === 'PAYLOAD_TOO_LARGE') {
+    const detail = sizeMb != null ? ` (${sizeMb} MB)` : ''
+    return t('upload.too_large', { lead: lead + detail })
+  }
+  if ((code !== null && BAD_FILE_CODES.has(code)) || status === 422) {
+    return t('upload.bad_type', { lead })
+  }
 
   if (status === 401 || status === 403) {
     return t('upload.forbidden', { lead })
@@ -60,7 +106,9 @@ export function describeUploadError(
     return t('upload.server', { lead })
   }
 
-  // Last-ditch: include the raw message but trim noise.
+  // Last-ditch: include the raw message but trim noise — never a raw
+  // response body (JSON / English server text) or a bare status line.
+  if (coded || /[{}]/.test(raw)) return t('upload.server', { lead })
   const trimmed = raw.replace(/^Error:\s*/i, '').slice(0, 140)
   return trimmed ? `${lead} — ${trimmed}` : `${lead}.`
 }

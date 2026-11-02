@@ -88,9 +88,17 @@ describe('TopBar "You" button', () => {
 
   it('toasts stack under the top bar, never over the bell / "You" button', () => {
     expect(bodiesFor('.sh-toast-container', 'none')).toMatch(/top\s*:\s*calc\(var\(--sh-topbar-height\)/)
+  })
+
+  it('on phones toasts sit above the bottom tab bar, off the page title and its actions', () => {
+    // Gallery live walk: at the top they covered the album title and the
+    // Upload button on a 390 px phone.
     const phone = rules.filter(r => r.media && r.selectors.includes('.sh-toast-container'))
     expect(phone.length).toBeGreaterThan(0)
-    for (const r of phone) expect(r.body).toMatch(/top\s*:\s*calc\(var\(--sh-topbar-height-mobile\)/)
+    for (const r of phone) {
+      expect(r.body).toMatch(/top\s*:\s*auto/)
+      expect(r.body).toMatch(/bottom\s*:\s*calc\(var\(--sh-mobile-nav-height\)/)
+    }
   })
 })
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import pathlib
+from datetime import UTC, datetime
 
 import pytest
 from PIL import Image
@@ -15,6 +16,7 @@ from socialhome.crypto import (
 )
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import GalleryAlbumDeleted, GalleryAlbumUpdated
+from socialhome.domain.post import Post, PostType
 from socialhome.domain.preferences import FeatureDisabledError
 from socialhome.domain.space import SpaceMember, SubscriberReadOnlyError
 from socialhome.federation.owner_bound_id import (
@@ -1038,3 +1040,124 @@ async def test_a_protected_account_deletes_only_its_own_uploads(env):
     await env.delete_album(album.id, actor_user_id="e-id")
     with pytest.raises(GalleryNotFoundError):
         await env.get_album(album.id, actor_user_id="b-id")
+
+
+# ─── System "Posts" album: blocks and thumbnails (UX review #11, #18) ────
+
+
+def _photo_post(pid: str, author: str, *names: str) -> Post:
+    return Post(
+        id=pid,
+        author=author,
+        type=PostType.IMAGE,
+        created_at=datetime.now(UTC),
+        content="x",
+        image_urls=tuple(f"/api/media/{n}" for n in names),
+    )
+
+
+async def _store_photo(env, name: str, size=(1600, 1200)) -> None:
+    media = env._media_dir
+    media.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", size, (10, 90, 160)).save(media / name, format="WEBP")
+
+
+async def test_the_posts_album_hides_people_the_viewer_blocked(env):
+    """The feed hides a blocked author's posts; the album that mirrors the
+    feed hides them too. A regular album is not the feed's mirror."""
+    await env.mirror_post(_photo_post("p-bob", "b-id", "bob.webp"), None)
+    await env.mirror_post(_photo_post("p-eve", "e-id", "eve.webp"), None)
+    posts = await env.ensure_system_album(None)
+    regular, bobs_upload = await _bobs_household_item(env)
+    await env._users._db.enqueue(  # type: ignore[union-attr]
+        "INSERT INTO user_blocks(blocker_user_id, blocked_user_id)"
+        " VALUES('a-id', 'b-id')"
+    )
+    alice = await env.list_items(posts.id, actor_user_id="a-id")
+    assert {i.uploaded_by for i in alice} == {"e-id"}
+    eve = await env.list_items(posts.id, actor_user_id="e-id")
+    assert {i.uploaded_by for i in eve} == {"b-id", "e-id"}
+    mine = await env.list_items(regular.id, actor_user_id="a-id")
+    assert [i.id for i in mine] == [bobs_upload.id]
+    # The album card counts what each viewer sees, not every row.
+    assert (await env.get_album(posts.id, actor_user_id="a-id")).item_count == 1
+    assert (await env.get_album(posts.id, actor_user_id="e-id")).item_count == 2
+    (listed,) = [
+        a
+        for a in await env.list_albums(space_id=None, actor_user_id="a-id")
+        if a.is_system
+    ]
+    assert listed.item_count == 1
+    assert (await env.get_album(regular.id, actor_user_id="a-id")).item_count == 1
+
+
+async def test_a_mirrored_photo_gets_a_real_thumbnail(env):
+    """The grid used the post's full 2560 px file as each tile."""
+    await _store_photo(env, "big.webp")
+    await env.mirror_post(_photo_post("p-1", "a-id", "big.webp"), None)
+    (item,) = await env._repo.list_items_by_source_post("p-1")
+    assert item.url == "api/media/big.webp"
+    assert item.thumbnail_url != item.url
+    thumb = env._media_dir / item.thumbnail_url.rsplit("/", 1)[-1]
+    with Image.open(thumb) as img:
+        assert max(img.size) <= 512
+    # Deleting the post drops the thumbnail it made, never the post's file.
+    await env.unmirror_post("p-1")
+    assert not thumb.exists()
+    assert (env._media_dir / "big.webp").exists()
+
+
+async def test_a_mirrored_photo_not_on_disk_yet_falls_back_to_its_file(env):
+    await env.mirror_post(_photo_post("p-2", "a-id", "later.webp"), None)
+    (item,) = await env._repo.list_items_by_source_post("p-2")
+    assert item.thumbnail_url == item.url
+
+
+async def test_a_mirrored_video_uses_its_poster(env):
+    post = Post(
+        id="p-v",
+        author="a-id",
+        type=PostType.VIDEO,
+        created_at=datetime.now(UTC),
+        content="x",
+        media_url="/api/media/clip.webm",
+    )
+    await env.mirror_post(post, None)
+    (item,) = await env._repo.list_items_by_source_post("p-v")
+    assert item.thumbnail_url == "api/media/clip.webp"
+    await env.unmirror_post("p-v")
+
+
+async def test_an_edit_replaces_the_thumbnails_it_made(env):
+    await _store_photo(env, "one.webp")
+    await _store_photo(env, "two.webp")
+    await env.mirror_post(_photo_post("p-3", "a-id", "one.webp"), None)
+    (first,) = await env._repo.list_items_by_source_post("p-3")
+    await env.mirror_post(_photo_post("p-3", "a-id", "two.webp"), None)
+    (second,) = await env._repo.list_items_by_source_post("p-3")
+    assert second.url == "api/media/two.webp"
+    assert not (env._media_dir / first.thumbnail_url.rsplit("/", 1)[-1]).exists()
+    assert (env._media_dir / second.thumbnail_url.rsplit("/", 1)[-1]).exists()
+
+
+async def test_list_items_pages_newest_first_through_the_service(env):
+    album = await env.create_album(space_id=None, owner_user_id="a-id", name="Lots")
+    ids = []
+    for _ in range(5):
+        it = await env.upload_item(
+            album.id,
+            data=_jpeg(),
+            content_type="image/jpeg",
+            caption=None,
+            uploader_user_id="a-id",
+        )
+        ids.append(it.id)
+    first = await env.list_items(album.id, actor_user_id="a-id", limit=3)
+    rest = await env.list_items(
+        album.id,
+        actor_user_id="a-id",
+        limit=3,
+        before=first[-1].created_at,
+        before_id=first[-1].id,
+    )
+    assert [i.id for i in first + rest] == list(reversed(ids))

@@ -2,6 +2,8 @@
 
 Endpoints:
 
+* ``GET    /api/gallery/albums``                        — list household albums
+* ``POST   /api/gallery/albums``                        — create household album
 * ``GET    /api/spaces/{space_id}/gallery/albums``      — list albums
 * ``POST   /api/spaces/{space_id}/gallery/albums``      — create album
 * ``GET    /api/gallery/albums/{album_id}``             — album detail
@@ -12,8 +14,8 @@ Endpoints:
 * ``POST   /api/gallery/albums/{album_id}/items``       — upload item
 * ``DELETE /api/gallery/items/{item_id}``               — delete item
 
-Household-level albums (no parent space) live under
-``/api/gallery/albums`` directly via the ``space_id=None`` listing.
+Both lists page newest first with ``?limit=&before=&before_id=`` (see
+:func:`_page_query`); items newest first the same way.
 """
 
 from __future__ import annotations
@@ -40,6 +42,26 @@ _GALLERY_SECTION = "gallery"
 #: for chunked bodies too and is independent of aiohttp's 1 MiB
 #: ``client_max_size``.
 GALLERY_MAX_UPLOAD_BYTES: int = 100 * 1024 * 1024
+
+#: Default page sizes. A page shorter than the ``limit`` asked for is the
+#: last one; the next page is ``?before=<created_at>&before_id=<id>`` of
+#: the last row (for albums: the last regular album — the system album is
+#: pinned to the first page only).
+ALBUM_PAGE: int = 30
+ITEM_PAGE: int = 50
+
+
+def _page_query(
+    request: web.Request, default_limit: int
+) -> tuple[str | None, str | None, int]:
+    """``(before, before_id, limit)`` from the query; a non-number limit
+    is the default (the repo clamps the range)."""
+    q = request.query
+    try:
+        limit = int(q.get("limit", default_limit))
+    except ValueError:
+        limit = default_limit
+    return q.get("before") or None, q.get("before_id") or None, limit
 
 
 def _album_dict(a) -> dict:
@@ -109,16 +131,13 @@ class HouseholdAlbumCollectionView(BaseView):
     async def get(self) -> web.Response:
         ctx = self.user
         await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
-        before = self.request.query.get("before")
-        try:
-            limit = int(self.request.query.get("limit", 30))
-        except ValueError:
-            limit = 30
+        before, before_id, limit = _page_query(self.request, ALBUM_PAGE)
         albums = await self.svc(K.gallery_service_key).list_albums(
             space_id=None,
             actor_user_id=ctx.user_id,
             limit=limit,
             before=before,
+            before_id=before_id,
         )
         return web.json_response([_album_signed(self.request, a) for a in albums])
 
@@ -143,16 +162,13 @@ class SpaceAlbumCollectionView(BaseView):
         await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
         space_id = self.match("space_id")
         await self.require_space_feature(space_id, "gallery")
-        before = self.request.query.get("before")
-        try:
-            limit = int(self.request.query.get("limit", 30))
-        except ValueError:
-            limit = 30
+        before, before_id, limit = _page_query(self.request, ALBUM_PAGE)
         albums = await self.svc(K.gallery_service_key).list_albums(
             space_id=space_id,
             actor_user_id=ctx.user_id,
             limit=limit,
             before=before,
+            before_id=before_id,
         )
         return web.json_response([_album_signed(self.request, a) for a in albums])
 
@@ -231,16 +247,13 @@ class AlbumItemCollectionView(BaseView):
     async def get(self) -> web.Response:
         ctx = self.user
         await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
-        before = self.request.query.get("before")
-        try:
-            limit = int(self.request.query.get("limit", 50))
-        except ValueError:
-            limit = 50
+        before, before_id, limit = _page_query(self.request, ITEM_PAGE)
         items = await self.svc(K.gallery_service_key).list_items(
             self.match("album_id"),
             actor_user_id=ctx.user_id,
             limit=limit,
             before=before,
+            before_id=before_id,
         )
         # Video items transcode in the background — surface a live
         # ``media_status`` so the SPA shows a "Processing…" placeholder
