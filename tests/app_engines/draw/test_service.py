@@ -41,7 +41,15 @@ from socialhome.app_engines.draw.service import (
 from socialhome.crypto import b64url_decode, b64url_encode, sign_ed25519
 from socialhome.domain.events import AppDrawChanged
 from socialhome.domain.federation import FederationEvent, FederationEventType
-from tests.app_draw_network import APP, draw_table, engine_step, sent_steps, settle
+from tests.app_draw_network import (
+    APP,
+    draw_table,
+    engine_step,
+    force_circle,
+    place,
+    sent_steps,
+    settle,
+)
 from tests.app_group_network import Network
 
 PEOPLE = {
@@ -161,7 +169,16 @@ async def test_the_app_frame_never_carries_a_result(net):
             assert "name" not in f["state"] and "recipient" not in f["state"]
 
 
-async def test_exclusions_hold_and_rounds_redo_with_proof(net):
+async def test_exclusions_hold_and_rounds_redo_with_proof(net, monkeypatch):
+    def hit_then_fit(names, i):
+        # Each draw's first circle seats both couples side by side, its
+        # redrawn one neither — left to chance a draw could run into the
+        # pairs' redraw cap ((3/5)^30 per draw).
+        if i % 2:
+            return place(names, ["anna", None, "olaf", "ben", None, "bea"])
+        return place(names, ["anna", "olaf", None, "ben", "bea"])
+
+    force_circle(monkeypatch, hit_then_fit)
     sid = await draw_table(net, PEOPLE)
     hub = net.homes["hub"]
     # anna (seat 1) & olaf (seat 2) and ben (3) & bea (4) are couples.
@@ -191,6 +208,9 @@ async def test_exclusions_hold_and_rounds_redo_with_proof(net):
         assert results[("hub", "olaf")][0] != "Anna"
         assert results[("b", "ben")][0] != "Bea"
         assert results[("b", "bea")][0] != "Ben"
+    # Every draw's first round was redone on a couple's proof.
+    redone = {(p["gen"], p["round"]) for p in sent_steps(net, "redo")}
+    assert redone == {(1, 1), (2, 1), (3, 1)}
 
 
 async def test_only_the_organiser_on_the_host_household_runs_the_draw(net):

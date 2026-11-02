@@ -69,6 +69,8 @@ from tests.app_draw_network import (
     draw_app,
     draw_table,
     engine_step,
+    force_circle,
+    place,
     sent_steps,
     settle,
 )
@@ -200,7 +202,11 @@ async def test_the_host_view_is_the_same_whoever_draws_whom(tmp_path, monkeypatc
         "socialhome.services.app_group_service.uuid4", lambda: UUID(int=7)
     )
     views, states, assignments = [], [], []
-    for run, c_seed in enumerate((1, 2, 3, 4)):
+    # At least four runs, more until two drew differently: a run's circle
+    # is one of 4! = 24, so eight runs all alike is (1/24)^7 < 1e-9.
+    for run, c_seed in enumerate(range(1, 9)):
+        if run >= 4 and len({tuple(sorted(a.items())) for a in assignments}) > 1:
+            break
         net = Network(tmp_path / f"run{run}")
         try:
             sid = await draw_table(net, PEOPLE)
@@ -1195,6 +1201,14 @@ async def test_small_tables_with_a_pair_spread_evenly_and_never_give_up(
         if same_home
         else {"a": ["anna"], "b": ["ben"], "c": ["lena"], "d": ["cleo"]}
     )
+    # 40 fixed tables, the same every run: the same table id and seeded
+    # draws, each table its own household keys (so its own circles). Left
+    # to chance, ~1 run in 5000 would see a table hit the pairs' cap
+    # (40 × (2/3)^30) and fail on a shuffle, not on the code.
+    monkeypatch.setattr(
+        "socialhome.services.app_group_service.uuid4", lambda: UUID(int=7)
+    )
+    _fixed_identities(monkeypatch)
     counts: collections.Counter = collections.Counter()
     most = 0
     for i in range(40):
@@ -1776,26 +1790,27 @@ async def _truth(net, sid, people) -> dict:
     return out
 
 
-async def _draw_until(net, sid, people, found) -> tuple[dict, dict]:
+async def _draw_seated(net, monkeypatch, people, head) -> tuple[dict, dict]:
+    """One draw over *people* whose circle starts with *head* (a seating
+    the limit shows in; a random one does only now and then), then every
+    household's stored state and the true pairs."""
+    force_circle(monkeypatch, lambda names, _i: place(names, head))
+    sid = await draw_table(net, people)
     hub = net.homes["hub"]
     await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
     await settle(net)
-    for _ in range(10):
-        sts = {i: await net.homes[i].draw._load(sid) for i in people}
-        if found(sts):
-            break
-        await hub.draw.start(
-            app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"), again=True
-        )
-        await settle(net)
+    sts = {i: await net.homes[i].draw._load(sid) for i in people}
     return sts, await _truth(net, sid, people)
 
 
-async def test_accepted_limit_a_household_learns_who_gives_to_its_own_person(net):
-    sid = await draw_table(net, LIMIT_PEOPLE)
-    sts, truth = await _draw_until(
-        net, sid, LIMIT_PEOPLE, lambda sts: any(_infer(s, i) for i, s in sts.items())
+async def test_accepted_limit_a_household_learns_who_gives_to_its_own_person(
+    net, monkeypatch
+):
+    # anna → ben → alf: the hub's own people on both sides of Ben.
+    sts, truth = await _draw_seated(
+        net, monkeypatch, LIMIT_PEOPLE, ["anna", "ben", "alf"]
     )
+    assert any(_infer(s, i) for i, s in sts.items())
     total = 0
     for inst, st in sts.items():
         for giver, rec in _infer(st, inst).items():
@@ -1804,8 +1819,7 @@ async def test_accepted_limit_a_household_learns_who_gives_to_its_own_person(net
     assert total >= 1
 
 
-async def test_accepted_limit_colluding_households_pool_pairs(net):
-    sid = await draw_table(net, LIMIT_PEOPLE)
+async def test_accepted_limit_colluding_households_pool_pairs(net, monkeypatch):
     single = [i for i, users in LIMIT_PEOPLE.items() if len(users) == 1]
 
     def pooled(sts):
@@ -1818,7 +1832,11 @@ async def test_accepted_limit_colluding_households_pool_pairs(net):
                     out.update({g: r for g, r in got.items() if g not in alone})
         return out
 
-    sts, truth = await _draw_until(net, sid, LIMIT_PEOPLE, pooled)
+    # cleo → amy → dev: c knows Amy is Cleo's, d knows Dev's position —
+    # pooled they learn Amy gives to Dev, which neither learns alone.
+    sts, truth = await _draw_seated(
+        net, monkeypatch, LIMIT_PEOPLE, ["cleo", "amy", "dev"]
+    )
     extra = pooled(sts)
     assert extra and all(truth[g] == r for g, r in extra.items())
 
@@ -2178,6 +2196,11 @@ async def test_couple_household_forces_uncounted_partner_redraws(net, monkeypatc
         return out
 
     monkeypatch.setattr(svc_mod.AppDrawService, "_make_cards", make)
+    # The first circle seats Bob right after Ben (the chance b waits for)
+    # with Bea next to neither, so the attack runs in round 1.
+    force_circle(
+        monkeypatch, lambda names, i: place(names, ["ben", "bob", None, "bea"])
+    )
     sid = await draw_table(net, people)
     hub = net.homes["hub"]
     seats = {e.user: e.seat for e in (await hub.group_repo.get(sid)).roster}
@@ -2189,14 +2212,7 @@ async def test_couple_household_forces_uncounted_partner_redraws(net, monkeypatc
     )
     await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
     await settle(net)
-    for _ in range(10):
-        if forced:
-            break
-        await hub.draw.start(
-            app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"), again=True
-        )
-        await settle(net)
-    assert forced
+    assert forced == [1]
     st = await _hub_state(net, sid)
     partner_redos = [
         p for p in sent_steps(net, "redo") if p["complaint"]["kind"] == "partner"
@@ -2212,37 +2228,29 @@ async def test_couple_household_forces_uncounted_partner_redraws(net, monkeypatc
     ]
 
 
-async def test_a_couple_in_one_household_is_told_before_any_card(net):
+async def test_a_couple_in_one_household_is_told_before_any_card(net, monkeypatch):
     """R6 HIGH/MED 2. Ben and Bea (household b) may not draw each other:
     when the circle puts them side by side, b says so right after the
     reveal — with both seeds — before any card exists; the redraw is
     counted with the pairs' redraws."""
-    seen = 0
+
+    def side_by_side_once(names, i):
+        # Round 1 seats Ben right before Bea; every later round apart.
+        return place(names, ["ben", "bea"] if i == 0 else ["ben", None, "bea"])
+
+    force_circle(monkeypatch, side_by_side_once)
     sid = await draw_table(net, PEOPLE)
     hub = net.homes["hub"]
-    for attempt in range(12):
-        if attempt == 0:
-            await hub.draw.configure(
-                app_id=APP,
-                session_id=sid,
-                actor_user_id=hub.uid("anna"),
-                settings={"pairs": [[2, 3]]},
-            )
-            await hub.draw.start(
-                app_id=APP, session_id=sid, actor_user_id=hub.uid("anna")
-            )
-        else:
-            await hub.draw.start(
-                app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"), again=True
-            )
-        await settle(net)
-        couples = [
-            p for p in sent_steps(net, "redo") if p["complaint"]["kind"] == "couple"
-        ]
-        if couples:
-            seen = len(couples)
-            break
-    assert seen
+    await hub.draw.configure(
+        app_id=APP,
+        session_id=sid,
+        actor_user_id=hub.uid("anna"),
+        settings={"pairs": [[2, 3]]},
+    )
+    await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
+    await settle(net)
+    couples = [p for p in sent_steps(net, "redo") if p["complaint"]["kind"] == "couple"]
+    assert [(p["gen"], p["round"]) for p in couples] == [(1, 1)]
     c = couples[0]
     # Told instead of the commitment: b had sealed no card for that round.
     assert not [
@@ -2254,6 +2262,7 @@ async def test_a_couple_in_one_household_is_told_before_any_card(net):
     ]
     st = await _hub_state(net, sid)
     assert st["hub"]["blamed"] == []
+    assert st["hub"]["partner_redraws"] == 1
     _assert_circle(await _results(net, sid))
 
 
@@ -2301,6 +2310,12 @@ async def test_hub_peeks_at_cards_then_rerolls_with_its_own_couple(net, monkeypa
 
     monkeypatch.setattr(svc_mod.AppDrawService, "_own_couple", own_couple)
     monkeypatch.setattr(svc_mod.AppDrawService, "_hub_cards", hub_cards)
+    force_circle(
+        monkeypatch,
+        lambda names, i: place(
+            names, ["anna", "amy"] if i == 0 else ["anna", None, "amy"]
+        ),
+    )
     sid = await draw_table(net, people)
     hub = net.homes["hub"]
     seats = {e.user: e.seat for e in (await hub.group_repo.get(sid)).roster}
@@ -2312,15 +2327,9 @@ async def test_hub_peeks_at_cards_then_rerolls_with_its_own_couple(net, monkeypa
     )
     await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
     await settle(net)
-    for _ in range(10):
-        if plan.get("done"):
-            break
-        await hub.draw.start(
-            app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"), again=True
-        )
-        await settle(net)
     assert plan.get("done") and len(plan["peeked"]) == 2
     gen, rno, _c = plan["couple"]
+    assert (gen, rno) == (1, 1)
     for inst in ("b", "c", "d"):
         assert not [
             p
@@ -2355,6 +2364,14 @@ async def test_hub_changes_the_settings_mid_draw(net, monkeypatch):
         return await real_redraw(self, table, st, rnd, because, culprits)
 
     monkeypatch.setattr(svc_mod.AppDrawService, "_redraw", redraw)
+    # Round 1 seats the pair side by side: b's couple complaint is the
+    # redraw the hub tampers with.
+    force_circle(
+        monkeypatch,
+        lambda names, i: place(
+            names, ["ben", "bea"] if i == 0 else ["ben", None, "bea"]
+        ),
+    )
     sid = await draw_table(net, people)
     hub = net.homes["hub"]
     seats = {e.user: e.seat for e in (await hub.group_repo.get(sid)).roster}
@@ -2366,14 +2383,7 @@ async def test_hub_changes_the_settings_mid_draw(net, monkeypatch):
     )
     await hub.draw.start(app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"))
     await settle(net)
-    for _ in range(10):
-        if tampered:
-            break
-        await hub.draw.start(
-            app_id=APP, session_id=sid, actor_user_id=hub.uid("anna"), again=True
-        )
-        await settle(net)
-    assert tampered
+    assert tampered == [(1, 1)]
     gen, rno = tampered[0]
     for inst in ("b", "c", "d"):
         st = await net.homes[inst].draw._load(sid)
@@ -2549,11 +2559,20 @@ async def test_a_new_round_without_its_reason_is_refused(net):
 
 async def test_pairs_redo_with_proof_until_the_circle_fits(tmp_path, monkeypatch):
     """ben(2)–bea(3) may not draw each other: about half of the rounds hit
-    the pair and are redrawn on the giver's proof. Over a few draws the
-    redo path really runs, and every result keeps the pair apart."""
+    the pair and are redrawn on the giver's proof. In each draw the first
+    circle hits the pair (Ben → Bea, then Bea → Ben in the next draw) and
+    the redrawn one doesn't, so the redo path runs every time — not only
+    when the shuffle happens to — and every result keeps the pair apart."""
     monkeypatch.setattr(
         "socialhome.services.app_group_service.uuid4", lambda: UUID(int=7)
     )
+
+    def hit_then_fit(names, i):
+        if i % 2:  # the redrawn round
+            return place(names, ["ben", None, "bea"])
+        return place(names, ["ben", "bea"] if i % 4 == 0 else ["bea", "ben"])
+
+    force_circle(monkeypatch, hit_then_fit)
     total_redos = 0
     for shift in range(6):
         net = Network(tmp_path / f"s{shift}")
@@ -2580,11 +2599,11 @@ async def test_pairs_redo_with_proof_until_the_circle_fits(tmp_path, monkeypatch
                 # Ben and Bea are both b's: told before any card exists.
                 assert p["complaint"]["kind"] == "couple"
                 assert p["complaint"]["instance"] == "b"
-            assert len(_rounds(net)) == len(redos) + 1
+            assert len(_rounds(net)) == len(redos) + 1 == 2
             total_redos += len(redos)
         finally:
             await net.close()
-    assert total_redos > 0
+    assert total_redos == 6
 
 
 async def test_an_offline_home_is_waited_for_then_drawn_without(net, monkeypatch):
