@@ -76,8 +76,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = [
-    "pytest==9.1.1",
-    "pytest-asyncio==1.4.0",
+    "pytest==9.2.0",
+    "pytest-asyncio==1.4.1",
     "pytest-aiohttp==1.1.1",    # provides ``aiohttp_server`` / ``aiohttp_client`` fixtures
     "pytest-cov==7.1.0",
     # ``pytest-xdist`` runs the suite across all available CPU cores
@@ -90,7 +90,7 @@ dev = [
     # Validates the wall-panel API payloads against their published JSON
     # Schemas (``docs/display-api/v1/``).
     "jsonschema==4.26.0",
-    "mypy==2.4.0",
+    "mypy==2.4.1",
     "types-aiofiles==25.1.0.20260518",
     # Keep the pin identical to ``.pre-commit-config.yaml``'s
     # ``ruff-pre-commit`` rev and CI's ``pip install ruff==`` — ruff
