@@ -9661,6 +9661,40 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_77 space games gate in place ✓")
+    # v_79 — a space photo's caption / day / album move:
+    # SPACE_GALLERY_ITEM_UPDATED to the member households at >= v_79
+    # (``space_member_supports``). ``space-gallery-media-blob`` step 6b
+    # edits on d and moves on c end to end (the receiver rules are
+    # ``tests/protocol/test_space_content_authorship.py``).
+    if int(_Cap.MIN_FOR_SPACE_GALLERY_ITEM_EDIT) != 79 or _OURS < 79:
+        failures.append(
+            "MIN_FOR_SPACE_GALLERY_ITEM_EDIT moved off v_79 (or OURS fell below "
+            "it) — a photo edit would reach households that drop it"
+        )
+    else:
+        print("  v_79 space photo edit gate in place ✓")
+    gedit = state.get("space_gallery_edit")
+    if gedit:
+        cap = _rows(
+            "c", "SELECT caption FROM gallery_items WHERE id = ?", (gedit["item_id"],)
+        )
+        alb = _rows(
+            "d",
+            "SELECT album_id FROM gallery_items WHERE id = ?",
+            (gedit["moved_item_id"],),
+        )
+        if cap != [(gedit["caption"],)] or alb != [(gedit["album_id"],)]:
+            failures.append(
+                f"space-gallery-edit: c holds {cap!r} / d holds {alb!r} — an "
+                "edited space photo lost its caption or album"
+            )
+        else:
+            print("  space-gallery-edit: c and d still hold the edited photos ✓")
+        for path in _instance_dir("b").glob("*.db*"):
+            if gedit["caption"].encode() in path.read_bytes():
+                failures.append(
+                    f"space-gallery-edit: the relay b holds the caption in {path}"
+                )
     duel = state.get("space_table")
     if duel:
         for label in ("c", "d"):
@@ -13738,6 +13772,10 @@ def cmd_space_gallery_media_blob() -> None:
        album on d; c must hold that item's row, attributed to dave, plus
        its bytes.
     6. c renames the album; d's copy follows (``_UPDATED``).
+    6b. v_79 — a photo edited in place: dave re-captions and re-dates his
+       own upload on d, c's copy follows; c moves its upload into a second
+       album of the space, d's copy follows (``SPACE_GALLERY_ITEM_UPDATED``,
+       over the mesh to the mesh-only member d).
     7. b (the relay) saw ``SPACE_ROUTED`` envelopes but NEVER the
        inner ``SPACE_GALLERY_*`` or ``SPACE_MEDIA_BLOB``.
 
@@ -13987,6 +14025,73 @@ def cmd_space_gallery_media_blob() -> None:
         )
     print("  d's album followed c's rename ✓")
 
+    # 6b. v_79 — caption / day / album edits reach the other member.
+    caption = f"Lake at dusk {int(time.time())}"
+    s, edited = _request(
+        f"http://127.0.0.1:{d['port']}/api/gallery/items/{dave_item_id}",
+        token=d["token"],
+        method="PATCH",
+        body={"caption": caption, "taken_at": "2026-07-12"},
+    )
+    _must("dave edits his photo on d", s, edited, ok=(200,))
+    s, album2 = _request(
+        f"http://127.0.0.1:{c['port']}/api/spaces/{space_id}/gallery/albums",
+        token=c["token"],
+        method="POST",
+        body={"name": "Demo Album 2"},
+    )
+    _must("c creates a second album", s, album2, ok=(201,))
+    album2_id = album2["id"]
+    # The new album must reach d before a move into it can land there.
+    deadline = time.monotonic() + 60
+    while time.monotonic() < deadline:
+        s_, _got = _request(
+            f"http://127.0.0.1:{d['port']}/api/gallery/albums/{album2_id}",
+            token=d["token"],
+        )
+        if s_ == 200:
+            break
+        time.sleep(2)
+    s, moved = _request(
+        f"http://127.0.0.1:{c['port']}/api/gallery/items/{item_id}",
+        token=c["token"],
+        method="PATCH",
+        body={"album_id": album2_id},
+    )
+    _must("c moves its photo to the second album", s, moved, ok=(200,))
+    deadline = time.monotonic() + 60
+    c_cap = d_alb = None
+    while time.monotonic() < deadline:
+        c_cap = _rows(
+            "c",
+            "SELECT caption, taken_at FROM gallery_items WHERE id = ?",
+            (dave_item_id,),
+        )
+        d_alb = _rows(
+            "d", "SELECT album_id FROM gallery_items WHERE id = ?", (item_id,)
+        )
+        if c_cap == [(caption, "2026-07-12")] and d_alb == [(album2_id,)]:
+            break
+        time.sleep(2)
+    if c_cap != [(caption, "2026-07-12")]:
+        raise SystemExit(
+            f"space-gallery-media-blob: c holds dave's photo as {c_cap!r} — "
+            f"SPACE_GALLERY_ITEM_UPDATED (caption / day) didn't land"
+        )
+    print("  c's copy of dave's photo took his caption and day (v_79) ✓")
+    if d_alb != [(album2_id,)]:
+        raise SystemExit(
+            f"space-gallery-media-blob: d holds c's photo in {d_alb!r}, not "
+            f"{album2_id} — SPACE_GALLERY_ITEM_UPDATED (move) didn't land"
+        )
+    print("  d's copy of c's photo moved to the second album (v_79) ✓")
+    state["space_gallery_edit"] = {
+        "item_id": dave_item_id,
+        "caption": caption,
+        "moved_item_id": item_id,
+        "album_id": album2_id,
+    }
+
     # 7. Relay-encryption invariant: b sees SPACE_ROUTED but never
     #    the inner SPACE_GALLERY_* or SPACE_MEDIA_BLOB.
     if b_log_path.exists():
@@ -13995,6 +14100,7 @@ def cmd_space_gallery_media_blob() -> None:
             "SPACE_GALLERY_ALBUM_CREATED",
             "SPACE_GALLERY_ALBUM_UPDATED",
             "SPACE_GALLERY_ITEM_CREATED",
+            "SPACE_GALLERY_ITEM_UPDATED",
             "SPACE_MEDIA_BLOB",
         ):
             if forbidden in b_log_after:

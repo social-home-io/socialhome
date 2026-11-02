@@ -391,6 +391,24 @@ ATTACKS: dict[FederationEventType, list[tuple[str, dict]]] = {
             {"id": "gi-new", "album_id": "album-home", "uploaded_by": "u-g"},
         ),
     ],
+    FET.SPACE_GALLERY_ITEM_UPDATED: [
+        (
+            "re-caption B's item",
+            {"id": "gi-b", "caption": "Evil", "actor_user_id": "u-g"},
+        ),
+        (
+            "move B's item into A's album",
+            {"id": "gi-b", "album_id": "album-a", "actor_user_id": "u-g"},
+        ),
+        (
+            "re-caption a household item",
+            {"id": "gi-home", "caption": "Evil", "actor_user_id": "u-g"},
+        ),
+        (
+            "move a household item into A's album",
+            {"id": "gi-home", "album_id": "album-a", "actor_user_id": "u-g"},
+        ),
+    ],
     FET.SPACE_GALLERY_ITEM_DELETED: [
         ("delete B's item", {"id": "gi-b"}),
         ("delete a household item", {"id": "gi-home"}),
@@ -1225,6 +1243,22 @@ _SYNC_ATTACKS = [
                 "id": "gi-new2",
                 "album_id": "album-home",
                 "uploaded_by": "u-g",
+            },
+            # v_79: the host's record of an item held here takes its
+            # caption / album — never one of another space or the household.
+            {
+                "kind": "item",
+                "id": "gi-b",
+                "album_id": "album-a",
+                "uploaded_by": "u-g",
+                "caption": "Evil",
+            },
+            {
+                "kind": "item",
+                "id": "gi-home",
+                "album_id": "album-a",
+                "uploaded_by": "u-g",
+                "caption": "Evil",
             },
         ],
     ),

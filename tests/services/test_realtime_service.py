@@ -897,9 +897,35 @@ async def test_gallery_item_updated_reaches_the_household_with_both_albums(env):
             "album_id": "al-new",
             "from_album_id": "al-old",
             "item_id": "it-3",
+            "space_id": None,
         }
     ]
     assert stranger.sent == []
+
+
+async def test_a_space_gallery_item_update_reaches_the_space_members(env):
+    """v_79: a space photo's caption / date / move refreshes the space's
+    open galleries — its members only; the frame names the space so a
+    household gallery ignores it."""
+    _svc, bus, ws = env
+    member, outsider = _FakeWS(), _FakeWS()
+    await ws.register("u1", member)  # member of sp-1
+    await ws.register("u9", outsider)
+    await bus.publish(
+        GalleryItemUpdated(
+            item_id="it-4", album_id="al-b", from_album_id="al-a", space_id="sp-1"
+        )
+    )
+    assert [json.loads(m) for m in member.sent] == [
+        {
+            "type": "gallery.item_updated",
+            "album_id": "al-b",
+            "from_album_id": "al-a",
+            "item_id": "it-4",
+            "space_id": "sp-1",
+        }
+    ]
+    assert outsider.sent == []
 
 
 async def test_gallery_space_album_fans_to_members_only(env):

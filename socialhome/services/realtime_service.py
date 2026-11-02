@@ -1506,21 +1506,24 @@ class RealtimeService:
         )
 
     async def _on_gallery_item_updated(self, event: GalleryItemUpdated) -> None:
-        # Household only: a new caption or date, or a move between albums
-        # (both albums' counts and grids change — ``from_album_id``).
+        # A new caption or date, or a move between albums (both albums'
+        # counts and grids change — ``from_album_id``). A space photo (v_79)
+        # goes to the space's members, a household one to who sees it.
+        frame = {
+            "type": "gallery.item_updated",
+            "album_id": event.album_id,
+            "from_album_id": event.from_album_id,
+            "item_id": event.item_id,
+            "space_id": event.space_id,
+        }
+        if event.space_id:
+            await self._broadcast_space(event.space_id, frame)
+            return
         withheld = await self._gallery_outsiders(event.album_id)
         if event.from_album_id:
             # A move: whoever sees either album refetches.
             withheld &= await self._gallery_outsiders(event.from_album_id)
-        await self._broadcast_household(
-            {
-                "type": "gallery.item_updated",
-                "album_id": event.album_id,
-                "from_album_id": event.from_album_id,
-                "item_id": event.item_id,
-            },
-            withheld=withheld,
-        )
+        await self._broadcast_household(frame, withheld=withheld)
 
     async def _broadcast_gallery(self, frame: dict, space_id: str | None) -> None:
         if space_id:

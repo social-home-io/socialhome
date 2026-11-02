@@ -1011,6 +1011,57 @@ CASES: list[tuple[FederationEventType, str, dict, tuple[str, ...], tuple[str, ..
         (AUTHOR, ADMIN, HOST, MOD),
         (OTHER,),
     ),
+    # v_79: the named actor is the uploader (a writer seat on the sender) or
+    # holds content authority as the sender records it.
+    (
+        FET.SPACE_GALLERY_ITEM_UPDATED,
+        "re-caption u-g's upload as u-g",
+        {"id": "gi-a", "caption": "Lake", "actor_user_id": "u-g"},
+        (AUTHOR,),
+        (OTHER, ADMIN, MOD, HOST, STRANGER),
+    ),
+    (
+        FET.SPACE_GALLERY_ITEM_UPDATED,
+        "move u-g's upload to u-g's album as u-g",
+        {"id": "gi-a", "album_id": "album-g", "actor_user_id": "u-g"},
+        (AUTHOR,),
+        (OTHER, STRANGER),
+    ),
+    (
+        FET.SPACE_GALLERY_ITEM_UPDATED,
+        "re-caption u-g's upload as moderator u-mod",
+        {"id": "gi-a", "caption": "Lake", "actor_user_id": "u-mod"},
+        (MOD,),
+        (OTHER, AUTHOR, ADMIN, STRANGER),
+    ),
+    (
+        FET.SPACE_GALLERY_ITEM_UPDATED,
+        "re-date u-g's upload as admin u-adm",
+        {"id": "gi-a", "taken_at": "2026-05-01", "actor_user_id": "u-adm"},
+        (ADMIN,),
+        (OTHER, MOD),
+    ),
+    (
+        FET.SPACE_GALLERY_ITEM_UPDATED,
+        "re-caption u-g's upload as the host's u-h",
+        {"id": "gi-a", "caption": "Lake", "actor_user_id": "u-h"},
+        (HOST,),
+        (AUTHOR, OTHER),
+    ),
+    (
+        FET.SPACE_GALLERY_ITEM_UPDATED,
+        "re-caption u-g's upload as plain member u-o",
+        {"id": "gi-a", "caption": "Lake", "actor_user_id": "u-o"},
+        (),
+        (OTHER, AUTHOR, HOST),
+    ),
+    (
+        FET.SPACE_GALLERY_ITEM_UPDATED,
+        "re-caption u-g's upload naming nobody",
+        {"id": "gi-a", "caption": "Lake"},
+        (),
+        (AUTHOR, HOST, ADMIN, MOD),
+    ),
     (
         FET.SPACE_GALLERY_ALBUM_UPDATED,
         "rename u-g's album",

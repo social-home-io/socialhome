@@ -22,6 +22,7 @@ from socialhome.domain.events import (
     GalleryAlbumDeleted,
     GalleryAlbumUpdated,
     GalleryItemDeleted,
+    GalleryItemUpdated,
     GalleryItemUploaded,
     PollClosed,
     RemoteSchedulePollFinalized,
@@ -36,6 +37,7 @@ from socialhome.domain.events import (
     TaskUpdated,
 )
 from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.gallery import GalleryItem
 from socialhome.domain.post import (
     BazaarBid,
     BazaarListing,
@@ -138,6 +140,10 @@ class _AllowAuthorship:
 
     async def has_content_authority(self, event, space_id):
         self.calls.append(("has_content_authority", space_id, ""))
+        return self.answer
+
+    async def moderates_as(self, event, space_id, user_id):
+        self.calls.append(("moderates_as", space_id, user_id))
         return self.answer
 
     def log_refusal(self, event, *, space_id, what, row_id, user_id):
@@ -2159,6 +2165,7 @@ class _FakeGalleryRepo:
         self.stubbed_albums: list[tuple[str, str]] = []
         self.item_deleted_by: list[str] = []
         self.tombstoned_items: set[str] = set()
+        self.item_edits: list[tuple[str, dict, str | None]] = []
 
     async def is_item_deleted(self, item_id, *, space_id):
         return item_id in self.tombstoned_items
@@ -2242,6 +2249,21 @@ class _FakeGalleryRepo:
         if bump_count:
             self.counts[item.album_id] = self.counts.get(item.album_id, 0) + 1
         return True
+
+    async def edit_item_in_space(self, item_id, *, space_id, patch, to_album_id=None):
+        item = self.items_by_id.get(item_id)
+        if item is None or not self._album_in(item.album_id, space_id):
+            return None
+        if to_album_id and to_album_id != item.album_id:
+            target = await self.get_album(to_album_id)
+            if target is None or target.space_id != space_id or target.is_system:
+                return None
+        from_album = item.album_id
+        self.items_by_id[item_id] = replace(
+            item, **patch, album_id=to_album_id or item.album_id
+        )
+        self.item_edits.append((item_id, dict(patch), to_album_id))
+        return from_album
 
     async def delete_item_in_space(self, item_id, *, space_id, deleted_by=""):
         item = self.items_by_id.get(item_id)
@@ -2360,6 +2382,152 @@ async def test_gallery_item_deleted_unknown_is_noop(gallery_handlers):
     )
     assert gallery.deleted == []
     assert gallery.counts == {}
+
+
+# ─── Gallery item edits (v_79) ────────────────────────────────────────
+
+
+def _held_item(gallery, item_id="gi-ed", *, album_id="alb-1", uploaded_by="u-up"):
+    gallery.items_by_id[item_id] = GalleryItem(
+        id=item_id,
+        album_id=album_id,
+        uploaded_by=uploaded_by,
+        item_type="photo",
+        url="/api/media/x",
+        thumbnail_url="/api/media/x-thumb",
+        width=1,
+        height=1,
+    )
+
+
+def _edit(payload, *, space_id="sp-1"):
+    return _event(
+        FederationEventType.SPACE_GALLERY_ITEM_UPDATED,
+        {"id": "gi-ed", "actor_user_id": "u-up", **payload},
+        space_id=space_id,
+    )
+
+
+async def test_gallery_item_updated_applies_caption_day_and_move(gallery_handlers, bus):
+    handlers, gallery = gallery_handlers
+    _held_item(gallery)
+    seen: list = []
+
+    async def _grab(e):
+        seen.append(e)
+
+    bus.subscribe(GalleryItemUpdated, _grab)
+    await handlers._on_gallery_item_updated(
+        _edit({"caption": "  Lake ", "taken_at": "2026-07-12", "album_id": "alb-2"})
+    )
+    item = gallery.items_by_id["gi-ed"]
+    assert (item.caption, item.taken_at, item.album_id) == (
+        "Lake",
+        "2026-07-12",
+        "alb-2",
+    )
+    # The uploader edits their own photo: bound to a seat on the sender.
+    assert ("acts_for", "sp-1", "u-up") in handlers._authorship.calls
+    assert [
+        (e.album_id, e.from_album_id, e.space_id, e.origin_instance_id) for e in seen
+    ] == [("alb-2", "alb-1", "sp-1", "peer-a")]
+
+
+async def test_gallery_item_updated_redelivery_publishes_nothing(gallery_handlers, bus):
+    handlers, gallery = gallery_handlers
+    _held_item(gallery)
+    await handlers._on_gallery_item_updated(_edit({"caption": "Lake"}))
+    seen: list = []
+
+    async def _grab(e):
+        seen.append(e)
+
+    bus.subscribe(GalleryItemUpdated, _grab)
+    await handlers._on_gallery_item_updated(_edit({"caption": "Lake"}))
+    assert seen == []
+
+
+async def test_gallery_item_updated_by_someone_else_needs_content_authority(
+    gallery_handlers,
+):
+    handlers, gallery = gallery_handlers
+    _held_item(gallery)
+    await handlers._on_gallery_item_updated(
+        _edit({"caption": "mod", "actor_user_id": "u-mod"})
+    )
+    assert ("moderates_as", "sp-1", "u-mod") in handlers._authorship.calls
+    assert ("acts_for", "sp-1", "u-mod") not in handlers._authorship.calls
+    assert gallery.items_by_id["gi-ed"].caption == "mod"
+
+
+async def test_gallery_item_updated_refused_without_authority(bus, repos):
+    handlers, gallery, deny = _denying_gallery_handlers(bus, repos)
+    _held_item(gallery)
+    await handlers._on_gallery_item_updated(_edit({"caption": "hijack"}))
+    assert gallery.items_by_id["gi-ed"].caption is None
+    assert deny.refusals == ["gi-ed"]
+
+
+async def test_gallery_item_updated_without_an_actor_is_refused(gallery_handlers):
+    """Every v_79 producer names the actor; an edit naming nobody is
+    nobody's to make."""
+    handlers, gallery = gallery_handlers
+    _held_item(gallery)
+    await handlers._on_gallery_item_updated(
+        _edit({"caption": "x", "actor_user_id": None})
+    )
+    assert gallery.item_edits == []
+    assert handlers._authorship.refusals == ["gi-ed"]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"caption": "x" * 301},
+        {"caption": 5},
+        {"taken_at": "12.07.2026"},
+        {"taken_at": 20260712},
+        {"taken_at": "2999-01-01"},
+    ],
+)
+async def test_gallery_item_updated_with_a_bad_value_is_refused(gallery_handlers, bad):
+    handlers, gallery = gallery_handlers
+    _held_item(gallery)
+    await handlers._on_gallery_item_updated(_edit(bad))
+    assert gallery.item_edits == []
+
+
+async def test_gallery_item_updated_stays_in_its_space(gallery_handlers):
+    """Another space's item, a move into another space's or a system album,
+    an unknown item: nothing changes."""
+    handlers, gallery = gallery_handlers
+    _held_item(gallery)
+    gallery.album_space["alb-other"] = "sp-2"
+    gallery.albums["alb-posts"] = SimpleNamespace(
+        id="alb-posts", space_id="sp-1", owner_user_id="u-owner", is_system=True
+    )
+    await handlers._on_gallery_item_updated(_edit({"caption": "x"}, space_id="sp-2"))
+    await handlers._on_gallery_item_updated(_edit({"album_id": "alb-other"}))
+    await handlers._on_gallery_item_updated(_edit({"album_id": "alb-posts"}))
+    await handlers._on_gallery_item_updated(
+        _event(
+            FederationEventType.SPACE_GALLERY_ITEM_UPDATED,
+            {"id": "ghost", "actor_user_id": "u-up", "caption": "x"},
+            space_id="sp-1",
+        )
+    )
+    assert gallery.item_edits == []
+    assert gallery.items_by_id["gi-ed"].album_id == "alb-1"
+
+
+async def test_a_space_post_mirror_is_not_edited_over_the_wire(gallery_handlers):
+    handlers, gallery = gallery_handlers
+    _held_item(gallery, album_id="alb-posts")
+    gallery.albums["alb-posts"] = SimpleNamespace(
+        id="alb-posts", space_id="sp-1", owner_user_id="u-owner", is_system=True
+    )
+    await handlers._on_gallery_item_updated(_edit({"caption": "x"}))
+    assert gallery.item_edits == []
 
 
 # ─── Gallery albums (v_33) ────────────────────────────────────────────

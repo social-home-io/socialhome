@@ -595,6 +595,21 @@ provider's rows — so the count no longer depends on the order the album
 record, its items and their tombstones are applied in. Re-applying an
 unchanged album stamps nothing (no echo).
 
+**A held item follows the host (v_79).** A space photo's caption, day
+taken and album change in place from v_79 (`SPACE_GALLERY_ITEM_UPDATED`,
+[`spaces.md`](./spaces.md)). The `gallery` item record
+always carried the three fields, but an item record was insert-only; now
+an item record from the **host** for an item held here in this space
+applies the host's caption, day and album (a move only into a user album
+of the same space held here), under the live event's limits — a value the
+local rules refuse is skipped. An item id held here for another space or
+the household gallery is refused at WARNING. A member household's item
+record still only adds. The edit stamps the row (the 0086 trigger covers
+`caption`, `taken_at`, `album_id`), so an incremental stream carries it;
+a household below v_79 is sent no live event, and **sync line 79**
+(`SYNC_RECORD_LINES`) gives it one full stream when it crosses v_79, so
+the edits it missed reach it.
+
 **`have_seq` — the requester's echo, in the requester's database
 (migration 0087).** The provider's watermark says what the household
 *confirmed*, not what it still *holds*: a household restored from an older

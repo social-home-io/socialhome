@@ -31,7 +31,7 @@ import pathlib
 import uuid
 from collections.abc import AsyncIterable, AsyncIterator
 from dataclasses import replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import aiofiles
 import aiofiles.os
@@ -83,6 +83,7 @@ from ..domain.gallery import (
     UploadLimits,
     UploadOutcome,
     is_video_upload,
+    valid_taken_day,
     video_fits,
 )
 from ..domain.media_constraints import (
@@ -233,21 +234,18 @@ class _Unset:
 UNSET = _Unset()
 
 
-def _valid_taken_day(value: str | None) -> str | None:
-    """A date taken as ``YYYY-MM-DD`` (day only, like the EXIF date we keep),
-    ``None`` to clear it. Not before 1800, not after tomorrow (a phone a
-    time zone ahead)."""
-    if value is None or value == "":
-        return None
-    try:
-        day = date.fromisoformat(str(value))
-    except ValueError:
-        raise ValueError("taken_at must be YYYY-MM-DD") from None
-    if len(str(value)) != 10:
-        raise ValueError("taken_at must be YYYY-MM-DD")
-    if day.year < 1800 or day > (datetime.now(UTC) + timedelta(days=1)).date():
-        raise ValueError("taken_at is out of range")
-    return day.isoformat()
+def _item_patch(caption: str | None | _Unset, taken_at: str | None | _Unset) -> dict:
+    """The validated ``caption`` / ``taken_at`` columns an item edit sets —
+    a key only for a field the caller gave (``ValueError`` on a bad one)."""
+    patch: dict = {}
+    if not isinstance(caption, _Unset):
+        text = (caption or "").strip()
+        if len(text) > CAPTION_MAX:
+            raise ValueError(f"Caption must be {CAPTION_MAX} characters or fewer")
+        patch["caption"] = text or None
+    if not isinstance(taken_at, _Unset):
+        patch["taken_at"] = valid_taken_day(taken_at)
+    return patch
 
 
 class GalleryError(Exception):
@@ -1292,11 +1290,13 @@ class GalleryService:
         taken_at: str | None | _Unset = UNSET,
         album_id: str | _Unset = UNSET,
     ) -> GalleryItem:
-        """Change a household photo's caption, its date taken or its album
-        (a photo lives in exactly one album). Whoever may delete it may
-        change it — the uploader or a household admin (D6); a
-        protected account only its own. A space item is not edited here
-        (that needs a federation event — the space-parity PR)."""
+        """Change a photo's caption, its date taken or its album (a photo
+        lives in exactly one album). Whoever may delete it may change it —
+        in the household the uploader or a household admin (D6), in a space
+        the uploader or a space owner / admin / moderator (v_79, the change
+        federates as ``SPACE_GALLERY_ITEM_UPDATED``); a protected account
+        only its own. A space photo moves only between albums of its own
+        space."""
         item = await self._repo.get_item(item_id)
         album = await self._repo.get_album(item.album_id) if item else None
         if (
@@ -1305,24 +1305,21 @@ class GalleryService:
             or not await self._can_see(album, actor_user_id)
         ):
             raise GalleryNotFoundError(f"item {item_id!r} not found")
-        if album.space_id is not None:
-            # TODO(gallery PR 13, space parity, proto v_79): a space photo's
-            # caption, date and album change needs a federation event so
-            # the other member households follow; until then it is refused.
-            raise GalleryPermissionError("A space photo can't be edited here")
         if album.is_system:
             raise GalleryPermissionError(
                 "system album items are managed automatically — edit the post"
             )
+        if album.space_id is not None:
+            return await self._update_space_item(
+                item,
+                album,
+                actor_user_id,
+                caption=caption,
+                taken_at=taken_at,
+                album_id=album_id,
+            )
         await self._require_household_item_manager(item.uploaded_by, actor_user_id)
-        patch: dict = {}
-        if not isinstance(caption, _Unset):
-            text = (caption or "").strip()
-            if len(text) > CAPTION_MAX:
-                raise ValueError(f"Caption must be {CAPTION_MAX} characters or fewer")
-            patch["caption"] = text or None
-        if not isinstance(taken_at, _Unset):
-            patch["taken_at"] = _valid_taken_day(taken_at)
+        patch = _item_patch(caption, taken_at)
         from_album: str | None = None
         if not isinstance(album_id, _Unset) and album_id != item.album_id:
             target = await self._repo.get_album(str(album_id))
@@ -1351,8 +1348,69 @@ class GalleryService:
                     item_id=item_id,
                     album_id=updated.album_id,
                     from_album_id=from_album,
+                    actor_user_id=actor_user_id,
                 )
             )
+        return updated
+
+    async def _update_space_item(
+        self,
+        item: GalleryItem,
+        album: GalleryAlbum,
+        actor_user_id: str,
+        *,
+        caption: str | None | _Unset,
+        taken_at: str | None | _Unset,
+        album_id: str | _Unset,
+    ) -> GalleryItem:
+        """:meth:`update_item` for a space photo (v_79). A change is a write
+        (a follower gets ``SUBSCRIBER_READ_ONLY``); the uploader or content
+        authority (owner / admin / moderator) may make it — the delete rule
+        of :meth:`delete_item`. Only a real change is published, so an
+        unchanged save sends nothing to the member households."""
+        space_id = str(album.space_id)
+        await self._require_gallery_on(album)
+        await self._require_writer(space_id, actor_user_id)
+        if item.uploaded_by != actor_user_id:
+            if await self._is_protected(actor_user_id):
+                raise GalleryPermissionError(
+                    "A protected account may only change its own uploads"
+                )
+            if not await self._has_content_authority(space_id, actor_user_id):
+                raise GalleryPermissionError(
+                    "Only the uploader or a space moderator may change this item"
+                )
+        patch = _item_patch(caption, taken_at)
+        to_album: str | None = None
+        if not isinstance(album_id, _Unset) and album_id != item.album_id:
+            target = await self._repo.get_album(str(album_id))
+            if target is None or target.space_id != space_id:
+                # Another space's album, or the household's: never a move
+                # target — a space photo stays in its space.
+                raise GalleryNotFoundError(f"album {album_id!r} not found")
+            if target.is_system:
+                raise GalleryPermissionError(
+                    "nothing can be moved into the space's Posts album"
+                )
+            to_album = target.id
+        changed = {k: v for k, v in patch.items() if getattr(item, k) != v}
+        if not changed and to_album is None:
+            return item
+        from_album = await self._repo.edit_item_in_space(
+            item.id, space_id=space_id, patch=changed, to_album_id=to_album
+        )
+        updated = await self._repo.get_item(item.id)
+        if from_album is None or updated is None:  # deleted / moved meanwhile
+            raise GalleryNotFoundError(f"item {item.id!r} not found")
+        await self._bus.publish(
+            GalleryItemUpdated(
+                item_id=item.id,
+                album_id=updated.album_id,
+                from_album_id=from_album if updated.album_id != from_album else None,
+                space_id=space_id,
+                actor_user_id=actor_user_id,
+            )
+        )
         return updated
 
     async def apply_to_items(
