@@ -622,8 +622,12 @@ class ReportService:
         if space.owner_instance_id == self._own_instance_id:
             return True
         assert self._space_repo is not None
+        # ``space_members`` on a member household also mirrors the host's
+        # people (the §25.6 ``members`` resource) — the host's owner among
+        # them. Only this household's own people count.
+        ours = set(await self._space_repo.list_local_member_user_ids(space.id))
         return any(
-            m.role in CONTENT_AUTHORITY_ROLES
+            m.role in CONTENT_AUTHORITY_ROLES and m.user_id in ours
             for m in await self._space_repo.list_members(space.id)
         )
 
