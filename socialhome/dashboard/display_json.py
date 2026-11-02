@@ -32,6 +32,7 @@ from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from datetime import tzinfo
 from typing import Final
+from urllib.parse import quote
 
 from ..domain.household_dashboard import (
     SECTION_CALENDAR,
@@ -48,12 +49,13 @@ from ..domain.household_dashboard import (
     DashboardTask,
 )
 from ..domain.theme import HouseholdTheme
-from .boards import BoardBase, HomeBoard, PersonBoard
+from .boards import BoardBase, FrameBoard, HomeBoard, PersonBoard
 from .clock import WallClock, household_clock
 from .contrast import hex_color, ink_on, note_colors, readable_on
 from .emoji import emoji_code
 from .map_view import AWAY_ICON, HOME_ICON, PLACE_ICON, MapView
 from .messages import ChatDay, MentionCard, MessageRow
+from .photo_png import fitted_size
 from .picture import (
     PictureJob,
     PictureTile,
@@ -83,6 +85,7 @@ __all__ = [
     "css_palettes",
     "display_clock",
     "emoji",
+    "frame_payload",
     "home_payload",
     "lock_payload",
     "map_payload",
@@ -254,6 +257,9 @@ def board_header(
             "night_start": settings.night_start,
             "night_end": settings.night_end,
             "pin_set": settings.pin_set,
+            # The photo screensaver starts after this many minutes without
+            # a touch (``GET /frame``); ``null`` while it is off.
+            "photo_frame_minutes": settings.frame_minutes,
         },
         "rail": {"shown": base.show_rail, "many": base.rail_many, "current": current},
         "people": [
@@ -1299,4 +1305,31 @@ def theme_payload(
         },
         "colors": palettes,
         "strings": strings,
+    }
+
+
+def frame_payload(board: FrameBoard, *, width: int, height: int) -> Json:
+    """``GET /api/display/v1/frame`` — the photo screensaver's round.
+    Each photo's ``url`` draws it fitted into ``width`` × ``height`` (the
+    default panel screen; ask ``?w=&h=`` for another) — its ``width`` /
+    ``height`` are that fitted size."""
+    photos: list[Json] = []
+    for slide in board.slides:
+        w, h = fitted_size(slide.width, slide.height, width, height)
+        photos.append(
+            {
+                "id": slide.id,
+                "url": f"{API_PATH}/photo/{quote(slide.id, safe='')}.png",
+                "width": w,
+                "height": h,
+                "date": slide.date,
+                "album": slide.album,
+            }
+        )
+    return {
+        "api_version": API_VERSION,
+        "interval_s": board.interval_s,
+        "fade_ms": board.fade_ms,
+        "image": {"width": width, "height": height},
+        "photos": photos,
     }

@@ -27,6 +27,7 @@ from socialhome.dashboard.auth import (
     PAIR_CODE_WINDOW_S,
     PAIR_MAX,
     PAIR_WINDOW_S,
+    PHOTO_RENDER_MAX,
     PRUNE_INTERVAL_S,
     RENEW_AFTER_S,
     REVOKED_LOCKED,
@@ -1087,6 +1088,18 @@ def test_map_renders_are_budgeted_per_panel(auth, clock):
     assert auth.begin_display_read("d1", image=True) == 0
     clock.advance(DISPLAY_WINDOW_S + 1)
     assert auth.begin_map_render("d1") == 0
+
+
+def test_photo_renders_are_budgeted_per_panel(auth, clock):
+    for _ in range(PHOTO_RENDER_MAX):
+        assert auth.begin_photo_render("d1") == 0
+    wait = auth.begin_photo_render("d1")
+    assert 0 < wait <= DISPLAY_WINDOW_S
+    # Apart from the map's budget and another panel's.
+    assert auth.begin_map_render("d1") == 0
+    assert auth.begin_photo_render("d2") == 0
+    clock.advance(DISPLAY_WINDOW_S + 1)
+    assert auth.begin_photo_render("d1") == 0
 
 
 def test_ha_unlocks_are_budgeted_per_panel(auth, clock):

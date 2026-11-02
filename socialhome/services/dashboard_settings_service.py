@@ -52,9 +52,11 @@ from ..domain.household_dashboard import (
     IDLE_RETURN_CHOICES,
     MAX_ADDRESS_LENGTH,
     MAX_DISPLAYS,
+    MAX_FRAME_ALBUMS,
     MAX_PIN_LENGTH,
     MIN_PASSWORD_LENGTH,
     MIN_PIN_LENGTH,
+    PHOTO_FRAME_MINUTES_CHOICES,
     SETUP_TOKEN_TTL_SECONDS,
     SUPPORTED_DASHBOARD_LOCALES,
     DashboardDisplay,
@@ -103,8 +105,12 @@ _BOOL_FIELDS = frozenset(
         "show_household_messages",
         "mention_sound",
         "panel_unlock_from_ha",
+        "photo_frame",
     }
 )
+#: An album id as the gallery mints it (``uuid4().hex`` / a UUID) — the
+#: screensaver's album list holds nothing else.
+_ALBUM_ID = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _PERSON_KEYS = frozenset({"show", "picture"})
 _HOST_LABEL = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?")
 # Printable ASCII without space, ``\\``, ``?``, ``#`` and ``@`` — no query,
@@ -166,6 +172,18 @@ def _check_address(value: object) -> str | None:
     return f"{scheme}://{netloc}"
 
 
+def _check_albums(value: object) -> tuple[str, ...]:
+    """The screensaver's albums: a list of album ids, at most
+    :data:`MAX_FRAME_ALBUMS`, duplicates dropped (order kept). Whether an
+    id names an album everyone at home sees is decided on every read, so
+    an album made private later simply stops showing."""
+    if not isinstance(value, (list, tuple)) or len(value) > MAX_FRAME_ALBUMS:
+        raise _Invalid
+    if not all(isinstance(v, str) and _ALBUM_ID.fullmatch(v) for v in value):
+        raise _Invalid
+    return tuple(dict.fromkeys(value))
+
+
 def _check_scalar(field: str, value: object) -> object:
     """Validate one non-people setting; raise :class:`_Invalid` if bad.
 
@@ -187,6 +205,11 @@ def _check_scalar(field: str, value: object) -> object:
     elif field in ("night_start", "night_end"):
         if not isinstance(value, str) or _HHMM.fullmatch(value) is None:
             raise _Invalid
+    elif field == "photo_frame_minutes":
+        if not _is_int(value) or value not in PHOTO_FRAME_MINUTES_CHOICES:
+            raise _Invalid
+    elif field == "photo_frame_albums":
+        return _check_albums(value)
     elif field == "address":
         return _check_address(value)
     else:
@@ -207,6 +230,9 @@ _SCALAR_FIELDS = (
     "mention_sound",
     "panel_unlock_from_ha",
     "address",
+    "photo_frame",
+    "photo_frame_minutes",
+    "photo_frame_albums",
 )
 
 
@@ -246,6 +272,7 @@ def _merge_people(
 
 def _settings_to_json(settings: DashboardSettings) -> str:
     data: dict[str, object] = {f: getattr(settings, f) for f in _SCALAR_FIELDS}
+    data["photo_frame_albums"] = list(settings.photo_frame_albums)
     data["people"] = {
         uid: {"show": p.show, "picture": p.picture} for uid, p in settings.people
     }

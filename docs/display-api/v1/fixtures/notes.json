@@ -147,6 +147,7 @@
     "mention_sound": true,
     "night_end": "06:00",
     "night_start": "22:00",
+    "photo_frame_minutes": null,
     "pin_set": false
   },
   "tab": "notes",
@@ -185,5 +186,5 @@
     }
   ],
   "view": "notes",
-  "view_key": "e9300d0ed63b68e8"
+  "view_key": "31dc193287779fb9"
 }

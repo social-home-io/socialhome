@@ -40,6 +40,10 @@ __all__ = [
     "CHAT_SHOWN",
     "CLAIM_TTL_SECONDS",
     "DEFAULT_DASHBOARD_PORT",
+    "FRAME_FADE_MS",
+    "FRAME_INTERVAL_S",
+    "FRAME_PHOTOS_SCANNED",
+    "FRAME_PHOTOS_SHOWN",
     "HERE_SHOWN",
     "IDLE_RETURN_CHOICES",
     "MAP_DROP_AFTER",
@@ -48,6 +52,7 @@ __all__ = [
     "MAX_DISPLAYS",
     "MAX_DISPLAY_INFO_LENGTH",
     "MAX_DISPLAY_NAME_LENGTH",
+    "MAX_FRAME_ALBUMS",
     "MAX_PENDING_CLAIMS",
     "MAX_PENDING_PAIRINGS",
     "MAX_PIN_LENGTH",
@@ -64,6 +69,8 @@ __all__ = [
     "PAIRING_CODE_LENGTH",
     "PAIRING_TTL_SECONDS",
     "PERSON_PALETTE",
+    "PHOTO_FRAME_DEFAULT_MINUTES",
+    "PHOTO_FRAME_MINUTES_CHOICES",
     "SECTION_CALENDAR",
     "SECTION_PRESENCE",
     "SECTION_SHOPPING",
@@ -93,6 +100,7 @@ __all__ = [
     "DashboardPasswordTooShortError",
     "DashboardPerson",
     "DashboardPersonSettings",
+    "DashboardPhoto",
     "DashboardPinInvalidError",
     "DashboardPinRequiredError",
     "DashboardPortFixedError",
@@ -113,6 +121,7 @@ __all__ = [
     "DisplayPanelNotFoundError",
     "DisplayPanelOfflineError",
     "ExternalDisplayPanel",
+    "FrameAlbumChoice",
     "HomeSnapshot",
     "PersonSnapshot",
     "hash_color",
@@ -142,6 +151,24 @@ DEFAULT_DASHBOARD_PORT = 8100
 IDLE_RETURN_CHOICES = frozenset({0, 1, 3, 10})
 
 SUPPORTED_DASHBOARD_LOCALES = frozenset({"en", "de", "es", "fr", "nl"})
+
+#: The photo screensaver (gallery decision D10) starts after this many
+#: minutes without a touch — the admin picks one (default
+#: :data:`PHOTO_FRAME_DEFAULT_MINUTES`); it is off until an admin turns it
+#: on and picks albums.
+PHOTO_FRAME_MINUTES_CHOICES = frozenset({1, 2, 5, 10, 15, 30})
+PHOTO_FRAME_DEFAULT_MINUTES = 5
+#: Albums an admin may pick for the screensaver.
+MAX_FRAME_ALBUMS = 50
+#: One screensaver round: this many photos, drawn from the newest
+#: :data:`FRAME_PHOTOS_SCANNED` of the chosen albums (the same draw all
+#: day, so every wall shows the same round and a panel's ``ETag`` holds).
+FRAME_PHOTOS_SHOWN = 30
+FRAME_PHOTOS_SCANNED = 2000
+#: Each photo stays this long, then crossfades into the next over
+#: :data:`FRAME_FADE_MS` (a plain cut with reduced motion) — both screens.
+FRAME_INTERVAL_S = 20
+FRAME_FADE_MS = 2000
 
 MIN_PASSWORD_LENGTH = 8
 
@@ -265,11 +292,26 @@ class DashboardSettings:
     #: Admin-set base URL tablets use (``http(s)://host[:port]``), shown
     #: in the admin UI and setup links instead of a guessed address.
     address: str | None = None
+    #: The photo screensaver: after ``photo_frame_minutes`` without a
+    #: touch, the wall shows the photos of ``photo_frame_albums`` (only
+    #: household albums everyone at home sees count — a private or space
+    #: album never shows, checked on every read). Off by default.
+    photo_frame: bool = False
+    photo_frame_minutes: int = PHOTO_FRAME_DEFAULT_MINUTES
+    photo_frame_albums: tuple[str, ...] = ()
     people: tuple[tuple[str, DashboardPersonSettings], ...] = ()
     password_set_at: str | None = None
     #: A privacy-lock PIN exists (tablets show the lock button and a
     #: locked tablet asks for it). Never the PIN or its hash.
     pin_set: bool = False
+
+    @property
+    def frame_minutes(self) -> int | None:
+        """Minutes before the screensaver starts — ``None`` while it is off
+        or no album is picked (nothing to show)."""
+        if not self.photo_frame or not self.photo_frame_albums:
+            return None
+        return self.photo_frame_minutes
 
     def person(self, user_id: str) -> DashboardPersonSettings:
         """The stored settings for ``user_id``, or the defaults."""
@@ -1191,3 +1233,33 @@ class DashboardPinInvalidError(CodedError, ValueError):
 
     def __init__(self) -> None:
         super().__init__(params={"min": MIN_PIN_LENGTH, "max": MAX_PIN_LENGTH})
+
+
+@dataclass(slots=True, frozen=True)
+class DashboardPhoto:
+    """One photo of the wall's screensaver (gallery decision D10): a live
+    photo of a household album everyone at home sees, picked by an admin.
+    ``day`` is the day it was taken (else uploaded), ``YYYY-MM-DD``;
+    ``filename`` the stored WebP (≤ 2560 px) under the media directory."""
+
+    id: str
+    album_id: str
+    album_name: str
+    filename: str
+    width: int
+    height: int
+    day: str
+
+
+@dataclass(slots=True, frozen=True)
+class FrameAlbumChoice:
+    """An album an admin may pick for the screensaver: a household album
+    everyone at home sees (never a private or space album). ``is_system``
+    (the feed's "Posts") and ``default_name`` (the default album nobody
+    renamed) are named in the reader's language, not by ``name``."""
+
+    id: str
+    name: str
+    photo_count: int
+    is_system: bool = False
+    default_name: bool = False

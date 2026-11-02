@@ -31,6 +31,7 @@ from socialhome.dashboard.auth import (
     HA_UNLOCK_WINDOW_S,
     MAP_RENDER_MAX,
     PAIR_MAX,
+    PHOTO_RENDER_MAX,
     THROTTLE_MAX_FAILURES,
     DashboardAuth,
 )
@@ -196,7 +197,14 @@ def tiles() -> PictureTiles:
 
 @pytest.fixture
 async def client(
-    aiohttp_client, settings_service, auth, displays, snapshots, theme_box, tiles
+    aiohttp_client,
+    settings_service,
+    auth,
+    displays,
+    snapshots,
+    theme_box,
+    tiles,
+    photos,
 ):
     async def household_theme() -> HouseholdTheme:
         return await theme_box["fn"]()
@@ -213,6 +221,7 @@ async def client(
         household_theme=household_theme,
         snapshots=snapshots,
         tiles=tiles,
+        photos=photos,
     )
     return await aiohttp_client(app, cookie_jar=aiohttp.DummyCookieJar())
 
@@ -1699,3 +1708,193 @@ async def test_locked_panel_gets_no_map_png(
     resp = await _map_png(client, token)
     assert resp.status == 423 and resp.content_type == "application/json"
     assert tiles.calls == [] and snapshots.calls == []
+
+
+# ── The photo screensaver ────────────────────────────────────────────────
+
+FRAME = "/api/display/v1/frame"
+
+
+async def _frame_on(settings_service, **extra) -> None:
+    await settings_service.update(
+        actor_is_admin=True,
+        patch={"photo_frame": True, "photo_frame_albums": ["al-summer"], **extra},
+    )
+
+
+async def test_frame_is_off_by_default(client, displays, settings_service):
+    _, token = await _paired(client, displays)
+    home_body = await (await _get(client, "/api/display/v1/home", token)).json()
+    assert home_body["settings"]["photo_frame_minutes"] is None
+    resp = await _get(client, FRAME, token)
+    assert resp.status == 404
+    assert (await resp.json())["error"]["code"] == "FRAME_OFF"
+    resp = await _get(client, "/api/display/v1/photo/ph-lake.png", token)
+    assert resp.status == 404
+    assert (await resp.json())["error"]["code"] == "FRAME_OFF"
+
+
+async def test_frame_needs_an_album_too(client, displays, settings_service):
+    """Switched on without any album: still nothing to show."""
+    await settings_service.update(actor_is_admin=True, patch={"photo_frame": True})
+    _, token = await _paired(client, displays)
+    home_body = await (await _get(client, "/api/display/v1/home", token)).json()
+    assert home_body["settings"]["photo_frame_minutes"] is None
+    assert (await _get(client, FRAME, token)).status == 404
+
+
+async def test_frame_round_matches_schema_and_fixture(
+    client, displays, settings_service, photos
+):
+    await _frame_on(settings_service, photo_frame_minutes=10)
+    _, token = await _paired(client, displays)
+    home_body = await (await _get(client, "/api/display/v1/home", token)).json()
+    assert home_body["settings"]["photo_frame_minutes"] == 10
+    resp = await _get(client, FRAME, token)
+    assert resp.status == 200, await resp.text()
+    assert resp.headers["Cache-Control"] == "private, no-cache"
+    payload = await resp.json()
+    _validate("frame", payload)
+    _fixture("frame", payload)
+    assert payload["image"] == {"width": 1280, "height": 800}
+    lake, boat, cake = payload["photos"]
+    # Fitted into 1280 × 800, aspect kept; the wall names the feed album.
+    assert (lake["width"], lake["height"]) == (1067, 800)
+    assert (boat["width"], boat["height"]) == (600, 800)
+    assert (cake["width"], cake["height"]) == (1280, 720)
+    assert lake["date"] == "July 12, 2026"
+    assert lake["album"] == "Summer by the lake"
+    assert cake["album"] == "Posts"
+    assert lake["url"] == "/api/display/v1/photo/ph-lake.png"
+    # The household day seeds the round (UTC household, FakeClock 2027-01-15).
+    assert photos.days == ["2027-01-15"]
+    # ETag → 304.
+    again = await _get(
+        client, FRAME, token, headers={"If-None-Match": resp.headers["ETag"]}
+    )
+    assert again.status == 304
+
+
+async def test_frame_round_in_the_wall_language(
+    client, displays, settings_service, photos
+):
+    await _frame_on(settings_service, locale="de")
+    _, token = await _paired(client, displays)
+    payload = await (await _get(client, FRAME, token)).json()
+    assert payload["photos"][0]["date"] == "12. Juli 2026"
+    assert payload["photos"][2]["album"] == "Beiträge"
+
+
+async def test_frame_and_photos_are_409_at_night(client, displays, settings_service):
+    # FakeClock is 08:00 UTC: a night window around it.
+    await _frame_on(settings_service, night_start="07:00", night_end="09:00")
+    _, token = await _paired(client, displays)
+    resp = await _get(client, FRAME, token)
+    assert resp.status == 409
+    assert (await resp.json())["error"]["code"] == "NIGHT"
+    resp = await _get(client, "/api/display/v1/photo/ph-lake.png", token)
+    assert resp.status == 409
+
+
+async def test_frame_and_photos_are_423_while_locked(
+    client, displays, settings_service
+):
+    await _frame_on(settings_service)
+    _, token = await _locked(client, displays, settings_service)
+    assert (await _get(client, FRAME, token)).status == 423
+    resp = await _get(client, "/api/display/v1/photo/ph-lake.png", token)
+    assert resp.status == 423
+
+
+async def test_frame_needs_a_token(client, auth):
+    assert (await client.get(FRAME)).status == 401
+    resp = await client.get(
+        "/api/display/v1/photo/ph-lake.png",
+        headers={"Cookie": f"{COOKIE_NAME}={await auth.issue(True)}"},
+    )
+    assert resp.status == 401
+
+
+def _photo_png_size(body: bytes) -> tuple[int, int]:
+    with Image.open(io.BytesIO(body)) as img:
+        assert img.format == "PNG"
+        assert img.mode == "RGB"
+        return img.size
+
+
+async def test_photo_png_is_fitted_to_the_panel(
+    client, displays, settings_service, photos
+):
+    await _frame_on(settings_service)
+    _, token = await _paired(client, displays)
+    resp = await _get(client, "/api/display/v1/photo/ph-lake.png", token)
+    assert resp.status == 200, await resp.text()
+    assert resp.content_type == "image/png"
+    assert resp.headers["Cache-Control"] == "private, no-cache"
+    body = await resp.read()
+    assert _photo_png_size(body) == (1067, 800)
+    # Unchanged → 304, nothing read or drawn.
+    reads = photos.reads
+    again = await _get(
+        client,
+        "/api/display/v1/photo/ph-lake.png",
+        token,
+        headers={"If-None-Match": resp.headers["ETag"]},
+    )
+    assert again.status == 304
+    assert photos.reads == reads
+    # The panel's own screen; never enlarged past the stored photo.
+    resp = await _get(client, "/api/display/v1/photo/ph-boat.png?w=1024&h=600", token)
+    assert _photo_png_size(await resp.read()) == (450, 600)
+    resp = await _get(client, "/api/display/v1/photo/ph-lake.png?w=1920&h=1200", token)
+    assert _photo_png_size(await resp.read()) == (1600, 1200)
+    assert resp.headers["ETag"] != again.headers["ETag"]
+
+
+async def test_photo_png_is_kept_for_the_next_panel(
+    client, displays, settings_service, photos
+):
+    await _frame_on(settings_service)
+    _, kitchen = await _paired(client, displays, "Kitchen")
+    _, hall = await _paired(client, displays, "Hall")
+    first = await _get(client, "/api/display/v1/photo/ph-lake.png", kitchen)
+    reads = photos.reads
+    second = await _get(client, "/api/display/v1/photo/ph-lake.png", hall)
+    assert await second.read() == await first.read()
+    assert photos.reads == reads
+
+
+async def test_photo_png_rules(client, displays, settings_service, photos):
+    await _frame_on(settings_service)
+    _, token = await _paired(client, displays)
+    # Not in the round (another album, private, deleted…): the same 404.
+    resp = await _get(client, "/api/display/v1/photo/ph-other.png", token)
+    assert resp.status == 404
+    assert (await resp.json())["error"]["code"] == "NOT_FOUND"
+    # Its file is gone.
+    photos.files.pop("ph-cake.webp")
+    assert (
+        await _get(client, "/api/display/v1/photo/ph-cake.png", token)
+    ).status == 404
+    # Not a picture at all.
+    photos.files["ph-boat.webp"] = b"not a picture"
+    assert (
+        await _get(client, "/api/display/v1/photo/ph-boat.png", token)
+    ).status == 404
+    # Bad sizes.
+    resp = await _get(client, "/api/display/v1/photo/ph-lake.png?w=big", token)
+    assert resp.status == 400
+    # An id the route can't hold.
+    assert (await _get(client, "/api/display/v1/photo/a.b.png", token)).status == 404
+
+
+async def test_photo_png_drawing_is_budgeted_per_panel(
+    client, displays, settings_service, auth
+):
+    await _frame_on(settings_service)
+    display_id, token = await _paired(client, displays)
+    for _ in range(PHOTO_RENDER_MAX):
+        assert auth.begin_photo_render(display_id) == 0
+    resp = await _get(client, "/api/display/v1/photo/ph-lake.png", token)
+    assert resp.status == 429
+    assert int(resp.headers["Retry-After"]) > 0

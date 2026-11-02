@@ -292,6 +292,7 @@
     "mention_sound": true,
     "night_end": "06:00",
     "night_start": "22:00",
+    "photo_frame_minutes": null,
     "pin_set": false
   },
   "tab": "map",
@@ -330,5 +331,5 @@
     }
   ],
   "view": "map",
-  "view_key": "20c6063e3c57ee58"
+  "view_key": "05cefe26e39fc647"
 }

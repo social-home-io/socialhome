@@ -19,6 +19,7 @@ from socialhome.domain.household_dashboard import (
     DashboardMention,
     DashboardMessage,
     DashboardPerson,
+    DashboardPhoto,
     DashboardSchoolDay,
     DashboardShoppingItem,
     DashboardSticky,
@@ -507,3 +508,79 @@ class PictureTiles:
             return Tile(body=self._body, content_type="image/png")
         finally:
             self.in_flight -= 1
+
+
+def webp(color: tuple[int, int, int], size: tuple[int, int] = (1600, 1200)) -> bytes:
+    """A one-colour WebP, as the gallery stores a photo."""
+    out = io.BytesIO()
+    Image.new("RGB", size, color).save(out, format="WEBP", quality=82)
+    return out.getvalue()
+
+
+#: The screensaver's seeded round: two photos of "Summer by the lake" and
+#: one of the feed's "Posts" album (named by the wall).
+FRAME_PHOTOS = (
+    DashboardPhoto(
+        id="ph-lake",
+        album_id="al-summer",
+        album_name="Summer by the lake",
+        filename="ph-lake.webp",
+        width=1600,
+        height=1200,
+        day="2026-07-12",
+    ),
+    DashboardPhoto(
+        id="ph-boat",
+        album_id="al-summer",
+        album_name="Summer by the lake",
+        filename="ph-boat.webp",
+        width=1200,
+        height=1600,
+        day="2026-07-13",
+    ),
+    DashboardPhoto(
+        id="ph-cake",
+        album_id="al-posts",
+        album_name="Posts",
+        filename="ph-cake.webp",
+        width=2560,
+        height=1440,
+        day="2026-10-30",
+    ),
+)
+
+
+class FakePhotos:
+    """The screensaver's read model (``DashboardPhotos``): ``shown`` are
+    the photos it shows now; their stored WebPs are in ``files``."""
+
+    def __init__(self) -> None:
+        self.shown: list[DashboardPhoto] = list(FRAME_PHOTOS)
+        self.files: dict[str, bytes] = {
+            "ph-lake.webp": webp((30, 120, 200), (1600, 1200)),
+            "ph-boat.webp": webp((200, 120, 30), (1200, 1600)),
+            "ph-cake.webp": webp((220, 60, 120), (2560, 1440)),
+        }
+        self.days: list[str] = []
+        self.names: list[dict[str, str] | None] = []
+        self.reads = 0
+
+    async def photos(
+        self, day: str, *, album_names: dict[str, str] | None = None
+    ) -> tuple[DashboardPhoto, ...]:
+        self.days.append(day)
+        self.names.append(album_names)
+        names = album_names or {}
+        return tuple(
+            replace(p, album_name=names.get("system", p.album_name))
+            if p.album_id == "al-posts"
+            else p
+            for p in self.shown
+        )
+
+    async def photo(self, item_id: str) -> DashboardPhoto | None:
+        return next((p for p in self.shown if p.id == item_id), None)
+
+    async def read(self, photo: DashboardPhoto) -> bytes | None:
+        self.reads += 1
+        return self.files.get(photo.filename)

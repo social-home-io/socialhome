@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://social-home.io/schemas/display-api/v1/frame.schema.json",
+  "title": "GET /api/display/v1/frame — the photo screensaver's round",
+  "description": "Photos from the household albums an admin picked (only albums everyone at home sees). 404 FRAME_OFF while the screensaver is off, 409 NIGHT in the night window, 423 while locked. The same round all day.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "api_version",
+    "fade_ms",
+    "image",
+    "interval_s",
+    "photos"
+  ],
+  "properties": {
+    "api_version": {
+      "$ref": "common.schema.json#/$defs/api_version"
+    },
+    "interval_s": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "How long each photo stays before the next one."
+    },
+    "fade_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "The crossfade into the next photo (the browser cuts without fading under reduced motion)."
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "height",
+        "width"
+      ],
+      "description": "The screen each photo's url is fitted into (the default 1280 × 800; ask url?w=&h= for another).",
+      "properties": {
+        "width": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "height": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "photos": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "album",
+          "date",
+          "height",
+          "id",
+          "url",
+          "width"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "url": {
+            "type": "string",
+            "pattern": "^/api/display/v1/photo/[A-Za-z0-9_-]{1,64}\\.png$",
+            "description": "The photo as a PNG fitted into image (aspect kept, never enlarged), drawn from the stored WebP; append ?w=&h= (200–1920 × 200–1200) for the panel's own screen. ETag → 304."
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "The PNG's width at the default image size."
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "date": {
+            "type": "string",
+            "description": "The day it was taken (else uploaded), in the wall's language — shown small with the album."
+          },
+          "album": {
+            "type": "string",
+            "description": "Its album's name, in the wall's language for the feed's and the default album."
+          }
+        }
+      }
+    }
+  }
+}

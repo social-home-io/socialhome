@@ -11,7 +11,7 @@ from socialhome.domain.theme import HouseholdTheme
 from socialhome.infrastructure.key_manager import KeyManager
 from socialhome.services.dashboard_settings_service import DashboardSettingsService
 
-from .factories import FakeDashboardService
+from .factories import FakeDashboardService, FakePhotos
 
 MAIN_PORT = 8080
 PASSWORD = "correct horse"
@@ -73,3 +73,8 @@ async def default_theme() -> HouseholdTheme:
 @pytest.fixture
 def snapshots() -> FakeDashboardService:
     return FakeDashboardService()
+
+
+@pytest.fixture
+def photos() -> FakePhotos:
+    return FakePhotos()

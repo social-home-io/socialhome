@@ -389,5 +389,9 @@
   "notification.report.answered_in": "Your report in {space_name} was reviewed",
   "notification.bazaar.question": "{author} asked about {title}",
   "notification.push.bazaar_question_in": "{name} asked about your listing in {space_name}",
-  "notification.push.bazaar_question": "{name} asked about your listing"
+  "notification.push.bazaar_question": "{name} asked about your listing",
+  "dashboard.frame.date": "{month} {day}, {year}",
+  "dashboard.frame.album_posts": "Posts",
+  "dashboard.frame.album_photos": "Photos",
+  "dashboard.frame.wake": "Photo screensaver — tap to show the dashboard"
 }

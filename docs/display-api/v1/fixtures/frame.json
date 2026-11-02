@@ -1,0 +1,35 @@
+{
+  "api_version": 1,
+  "fade_ms": 2000,
+  "image": {
+    "height": 800,
+    "width": 1280
+  },
+  "interval_s": 20,
+  "photos": [
+    {
+      "album": "Summer by the lake",
+      "date": "July 12, 2026",
+      "height": 800,
+      "id": "ph-lake",
+      "url": "/api/display/v1/photo/ph-lake.png",
+      "width": 1067
+    },
+    {
+      "album": "Summer by the lake",
+      "date": "July 13, 2026",
+      "height": 800,
+      "id": "ph-boat",
+      "url": "/api/display/v1/photo/ph-boat.png",
+      "width": 600
+    },
+    {
+      "album": "Posts",
+      "date": "October 30, 2026",
+      "height": 720,
+      "id": "ph-cake",
+      "url": "/api/display/v1/photo/ph-cake.png",
+      "width": 1280
+    }
+  ]
+}

@@ -389,5 +389,9 @@
   "notification.report.answered_in": "Deine Meldung in {space_name} wurde geprüft",
   "notification.bazaar.question": "{author} hat eine Frage zu {title}",
   "notification.push.bazaar_question_in": "{name} hat eine Frage zu deiner Anzeige in {space_name}",
-  "notification.push.bazaar_question": "{name} hat eine Frage zu deiner Anzeige"
+  "notification.push.bazaar_question": "{name} hat eine Frage zu deiner Anzeige",
+  "dashboard.frame.date": "{day}. {month} {year}",
+  "dashboard.frame.album_posts": "Beiträge",
+  "dashboard.frame.album_photos": "Fotos",
+  "dashboard.frame.wake": "Foto-Bildschirmschoner – tippen, um das Dashboard zu zeigen"
 }

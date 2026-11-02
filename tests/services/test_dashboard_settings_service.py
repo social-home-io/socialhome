@@ -8,6 +8,7 @@ import json
 import os
 from unittest.mock import patch
 
+import orjson
 import pytest
 
 from socialhome.domain.household_dashboard import (
@@ -221,6 +222,19 @@ async def test_update_does_not_store_secrets_in_settings(svc, repo):
         ("night_end", "06:60"),
         ("night_end", 600),
         ("night_end", "06:00 "),
+        ("photo_frame", 1),
+        ("photo_frame", None),
+        ("photo_frame_minutes", 3),
+        ("photo_frame_minutes", 0),
+        ("photo_frame_minutes", True),
+        ("photo_frame_minutes", "5"),
+        ("photo_frame_albums", "al-1"),
+        ("photo_frame_albums", [1]),
+        ("photo_frame_albums", [""]),
+        ("photo_frame_albums", ["../x"]),
+        ("photo_frame_albums", ["a" * 65]),
+        ("photo_frame_albums", [f"al-{n}" for n in range(51)]),
+        ("photo_frame_albums", None),
     ],
 )
 async def test_update_rejects_invalid_values(svc, field, value):
@@ -1460,3 +1474,41 @@ async def test_remove_display_takes_its_pending_takeover_along(svc):
     assert [d.id for d in await svc.displays()] == ["d2"]
     with pytest.raises(DashboardDisplayNotFoundError):
         await svc.remove_display("d1")
+
+
+async def test_photo_frame_is_off_by_default(svc):
+    s = await svc.get()
+    assert (s.photo_frame, s.photo_frame_minutes, s.photo_frame_albums) == (
+        False,
+        5,
+        (),
+    )
+    assert s.frame_minutes is None
+
+
+async def test_photo_frame_round_trip(svc, repo):
+    await svc.update(
+        actor_is_admin=True,
+        patch={
+            "photo_frame": True,
+            "photo_frame_minutes": 15,
+            "photo_frame_albums": ["al-1", "al-2", "al-1"],
+        },
+    )
+    s = await svc.get()
+    assert s.photo_frame_albums == ("al-1", "al-2")  # duplicates dropped
+    assert s.frame_minutes == 15
+    # Stored as JSON and read back by a fresh service.
+    fresh = DashboardSettingsService(repo, fixed_port=None, main_port=MAIN_PORT)
+    assert (await fresh.get()).photo_frame_albums == ("al-1", "al-2")
+    # No album → nothing to show, whatever the switch says.
+    await svc.update(actor_is_admin=True, patch={"photo_frame_albums": []})
+    assert (await svc.get()).frame_minutes is None
+
+
+async def test_stored_bad_photo_frame_albums_fall_back(svc, repo):
+    repo.rows["dashboard.settings"] = orjson.dumps(
+        {"photo_frame": True, "photo_frame_albums": "nope"}
+    ).decode()
+    s = await svc.get()
+    assert s.photo_frame and s.photo_frame_albums == ()

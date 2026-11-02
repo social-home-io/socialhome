@@ -389,5 +389,9 @@
   "notification.report.answered_in": "Se revisó tu denuncia en {space_name}",
   "notification.bazaar.question": "{author} preguntó por {title}",
   "notification.push.bazaar_question_in": "{name} preguntó por tu anuncio en {space_name}",
-  "notification.push.bazaar_question": "{name} preguntó por tu anuncio"
+  "notification.push.bazaar_question": "{name} preguntó por tu anuncio",
+  "dashboard.frame.date": "{day} de {month} de {year}",
+  "dashboard.frame.album_posts": "Publicaciones",
+  "dashboard.frame.album_photos": "Fotos",
+  "dashboard.frame.wake": "Salvapantallas de fotos: toca para mostrar el panel"
 }

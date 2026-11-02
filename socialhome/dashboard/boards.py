@@ -19,15 +19,18 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, fields
-from datetime import datetime
+from datetime import date, datetime
 
 from ..domain.household_dashboard import (
+    FRAME_FADE_MS,
+    FRAME_INTERVAL_S,
     HERE_SHOWN,
     SECTION_TIMETABLE,
     DashboardAgendaItem,
     DashboardEvent,
     DashboardLesson,
     DashboardPerson,
+    DashboardPhoto,
     DashboardSticky,
     HomeSnapshot,
     PersonSnapshot,
@@ -75,13 +78,18 @@ from .tabs import (
 __all__ = [
     "TOMORROW_SHOWN",
     "BoardBase",
+    "FrameBoard",
+    "FrameSlide",
     "HomeBoard",
     "Overview",
     "PersonBoard",
     "board_base",
+    "frame_album_names",
+    "frame_board",
     "home_board",
     "model_fields",
     "person_board",
+    "photo_date",
     "tomorrow_list",
 ]
 
@@ -322,3 +330,70 @@ def tomorrow_list(page: PersonSnapshot) -> list[DashboardAgendaItem]:
 
 def _tomorrow_order(item: DashboardAgendaItem) -> tuple[int, datetime]:
     return (0 if isinstance(item, DashboardEvent) and item.standing else 1, item.start)
+
+
+# ─── Photo screensaver ───────────────────────────────────────────────────
+
+
+@dataclass(slots=True, frozen=True)
+class FrameSlide:
+    """One photo of the screensaver as both screens caption it: the day
+    it was taken and its album, small, in the wall's language."""
+
+    id: str
+    date: str
+    album: str
+    width: int
+    height: int
+
+
+@dataclass(slots=True, frozen=True)
+class FrameBoard:
+    """The screensaver's round (gallery decision D10): its photos, how
+    long each stays and how long the crossfade takes."""
+
+    slides: tuple[FrameSlide, ...]
+    interval_s: int = FRAME_INTERVAL_S
+    fade_ms: int = FRAME_FADE_MS
+
+
+def frame_album_names(t: Callable[..., str]) -> dict[str, str]:
+    """The two albums the server can't name in the wall's language: the
+    feed's "Posts" (``system``) and the default album nobody renamed."""
+    return {
+        "system": t("dashboard.frame.album_posts"),
+        "default": t("dashboard.frame.album_photos"),
+    }
+
+
+def photo_date(day: str, t: Callable[..., str]) -> str:
+    """``YYYY-MM-DD`` as the wall says a date with its year ("March 12,
+    2024"); ``""`` when it isn't a date."""
+    try:
+        value = date.fromisoformat(day[:10])
+    except ValueError:
+        return ""
+    return t(
+        "dashboard.frame.date",
+        day=value.day,
+        month=t(f"dashboard.date.month.{value.month}"),
+        year=value.year,
+    )
+
+
+def frame_board(
+    photos: tuple[DashboardPhoto, ...], t: Callable[..., str]
+) -> FrameBoard:
+    """The screensaver's round for both screens."""
+    return FrameBoard(
+        slides=tuple(
+            FrameSlide(
+                id=p.id,
+                date=photo_date(p.day, t),
+                album=p.album_name,
+                width=p.width,
+                height=p.height,
+            )
+            for p in photos
+        )
+    )

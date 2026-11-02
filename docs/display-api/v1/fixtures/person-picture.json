@@ -431,8 +431,9 @@
     "mention_sound": true,
     "night_end": "06:00",
     "night_start": "22:00",
+    "photo_frame_minutes": null,
     "pin_set": false
   },
   "view": "person",
-  "view_key": "76a6be3db04d7c23"
+  "view_key": "33f1a998c9e662f1"
 }

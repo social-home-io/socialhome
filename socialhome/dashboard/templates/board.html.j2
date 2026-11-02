@@ -13,10 +13,13 @@
 {% if tab == "map" %}
 <script src="/static/map.js" defer></script>
 {% endif %}
+{% if frame_minutes %}
+<script src="/static/frame.js" defer></script>
+{% endif %}
 <noscript><meta http-equiv="refresh" content="120"></noscript>
 {% endblock %}
 {% block body_class %}dash-board{% if night %} dash-night{% endif %}{% endblock %}
-{% block body_attrs %} data-dash data-now="{{ clock.unix }}" data-tz="{{ clock.tz }}" data-day="{{ clock.day }}" data-fragment="{{ fragment_url }}" data-view-key="{{ view_key }}" data-idle-minutes="{{ idle_minutes }}" data-keep-awake="{{ 1 if keep_awake else 0 }}"{% endblock %}
+{% block body_attrs %} data-dash data-now="{{ clock.unix }}" data-tz="{{ clock.tz }}" data-day="{{ clock.day }}" data-fragment="{{ fragment_url }}" data-view-key="{{ view_key }}" data-idle-minutes="{{ idle_minutes }}" data-keep-awake="{{ 1 if keep_awake else 0 }}"{% if frame_minutes %} data-frame-minutes="{{ frame_minutes }}"{% endif %}{% endblock %}
 {% block body %}
 <div class="dash-shell{% if show_rail %} dash-with-rail{% endif %}" data-shell>
   {% if show_rail %}
@@ -33,4 +36,14 @@
       <main>, so a refresh never cuts it off. -#}
   <p class="dash-visually-hidden" aria-live="polite" data-say-status></p>
 </div>
+{% if frame_minutes %}
+{#- The photo screensaver (frame.js): over everything after a while
+    without a touch; any tap or key brings the board back. Two pictures
+    crossfade; the caption is the day taken and the album. -#}
+<div class="dash-frame" data-frame hidden role="button" tabindex="-1" aria-label="{{ t('dashboard.frame.wake') }}">
+  <img class="dash-frame-img" alt="" data-frame-img>
+  <img class="dash-frame-img" alt="" data-frame-img>
+  <p class="dash-frame-caption" data-frame-caption hidden></p>
+</div>
+{% endif %}
 {% endblock %}

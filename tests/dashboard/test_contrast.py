@@ -426,4 +426,6 @@ def test_only_pictures_and_disabled_controls_fade():
         ".dash-pv-night .dash-night-hint",
         ".dash-mp-av.dash-mp-stale",
         ".dash-mp-dot.dash-mp-stale",
+        # The screensaver's pictures crossfade (no words on them).
+        ".dash-frame-img",
     }

@@ -4014,3 +4014,67 @@ html:not(.dash-js) .dash-mp-box {
 .w-98 { inline-size: 98%; }
 .w-99 { inline-size: 99%; }
 .w-100 { inline-size: 100%; }
+
+/* ── Photo screensaver (frame.js) ─────────────────────────────────────
+   Over everything, black, the photo whole (never cropped); two pictures
+   crossfade over 2 s (FRAME_FADE_MS) — a plain cut with reduced motion.
+   The caption (day taken · album) sits small in the bottom corner on a
+   dark pill, so it reads on any photo. The wall panel draws the same. */
+.dash-frame {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  background: #000;
+  cursor: pointer;
+  overflow: hidden;
+}
+
+.dash-frame[hidden] {
+  display: none;
+}
+
+/* The board under it isn't drawn (or read out) while it shows. */
+.dash-framed .dash-shell {
+  visibility: hidden;
+}
+
+.dash-frame-img {
+  position: absolute;
+  inset: 0;
+  inline-size: 100%;
+  block-size: 100%;
+  object-fit: contain;
+  opacity: 0;
+  transition: opacity 2s ease-in-out;
+}
+
+.dash-frame-img.dash-frame-on {
+  opacity: 1;
+}
+
+.dash-frame-img:not([src]) {
+  visibility: hidden;
+}
+
+.dash-frame-caption {
+  position: absolute;
+  inset-block-end: 24px;
+  inset-inline-start: 24px;
+  max-inline-size: calc(100% - 48px);
+  margin: 0;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: rgb(0 0 0 / 55%);
+  color: #fff;
+  font-size: 18px;
+  line-height: 24px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dash-frame-img {
+    transition: none;
+  }
+}
