@@ -342,6 +342,7 @@ from .services.friends_service import FriendsService
 from .services.gallery_favourites_service import GalleryFavouritesService
 from .services.gallery_federation_outbound import GalleryFederationOutbound
 from .services.gallery_on_this_day_service import GalleryOnThisDayService
+from .services.gallery_search_service import GallerySearchService
 from .services.gallery_service import GalleryService
 from .services.gallery_share_service import GalleryShareService
 from .services.gallery_upload_batcher import GalleryUploadBatcher
@@ -3213,6 +3214,18 @@ def create_app(config: Config | None = None) -> web.Application:
         bus=bus,
     )
 
+    # Gallery search (D11): captions, album names, who added it, month /
+    # year — under every rule of who may see an album. The global search
+    # shows its count on the "Photos" chip.
+    gallery_search_service = GallerySearchService(
+        gallery_repo,
+        space_repo,
+        user_repo,
+        gallery_service,
+        household_features=preferences_service,
+    )
+    search_service.attach_gallery_search(gallery_search_service)
+
     # ── System chats (household chat on group-DM storage) ───────────────
     # Access is decided live by the policy (DmService defers to it for every
     # conversation with ``system_scope`` set); the service keeps the seats.
@@ -3842,6 +3855,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.gallery_on_this_day_service_key] = gallery_on_this_day_service
     app[K.gallery_favourites_service_key] = gallery_favourites_service
     app[K.gallery_share_service_key] = gallery_share_service
+    app[K.gallery_search_service_key] = gallery_search_service
     app[K.media_transcode_repo_key] = repos.media_transcode
     app[K.media_transcode_service_key] = media_transcode_service
     app[K.child_protection_service_key] = child_protection_service

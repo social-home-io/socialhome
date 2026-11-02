@@ -530,3 +530,39 @@ async def test_a_space_album_can_never_be_private(home):
             "INSERT INTO gallery_albums(id, space_id, owner_user_id, name,"
             " audience) VALUES('x', 'sp-1', 'u', 'n', 'chosen')"
         )
+
+
+# ─── Search (D11, #1285): one rule with every other read ────────────────
+
+
+async def _search(home, who: str, q: str) -> tuple[list[str], list[str]]:
+    r = await home.get(f"/api/gallery/search?q={q}", headers=_h(home, who))
+    assert r.status == 200, await r.text()
+    body = await r.json()
+    return [i["id"] for i in body["items"]], [a["id"] for a in body["albums"]]
+
+
+async def test_search_never_finds_a_private_name_or_caption_for_outsiders(home):
+    r = await home.patch(
+        f"/api/gallery/items/{home.item['id']}",
+        json={"caption": "bicycle surprise"},
+        headers=_h(home, "anna"),
+    )
+    assert r.status == 200
+    for who in ("lena", "admin", "mia"):
+        assert await _search(home, who, "bicycle") == ([], []), who
+        items, albums = await _search(home, who, "Gifts")
+        assert home.album not in albums and home.item["id"] not in items, who
+    items, _ = await _search(home, "tom", "bicycle")
+    assert items == [home.item["id"]]
+    _, albums = await _search(home, "anna", "Gifts")
+    assert home.album in albums
+    # Anna takes Tom out: from now on his search finds nothing either.
+    r = await home.put(
+        f"/api/gallery/albums/{home.album}/audience",
+        json={"audience": "chosen", "user_ids": []},
+        headers=_h(home, "anna"),
+    )
+    assert r.status == 200
+    assert await _search(home, "tom", "bicycle") == ([], [])
+    assert await _search(home, "tom", "Gifts") == ([], [])

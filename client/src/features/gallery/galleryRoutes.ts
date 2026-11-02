@@ -9,6 +9,8 @@
  *   /gallery/favourites[/:itemId]         your own favourites across the
  *                                         albums you see (no space mirror:
  *                                         one list spans them all)
+ *   /gallery/search[/:itemId]?q=          a search across every album you
+ *                                         see (a space's: only its albums)
  *
  * A space gallery mirrors them under its section:
  * ``/spaces/:id/gallery[/albums/:albumId[/:itemId]]``.
@@ -32,6 +34,9 @@ export interface GalleryRoute {
   /** ``/gallery/favourites[/:itemId]`` — the person's own favourites;
    *  ``itemId`` is the photo open in the viewer. */
   favourites?: boolean
+  /** ``/gallery/search[/:itemId]?q=`` (and its space mirror) — a search;
+   *  ``itemId`` is the result open in the viewer. */
+  search?: boolean
 }
 
 /** Read the ``:sub*`` rest after ``/gallery``. */
@@ -43,6 +48,9 @@ export function parseGallerySub(sub: string | undefined | null): GalleryRoute {
   }
   if (parts[0] === 'favourites' && parts.length <= 2) {
     return { albumId: null, itemId: parts[1] ?? null, valid: true, favourites: true }
+  }
+  if (parts[0] === 'search' && parts.length <= 2) {
+    return { albumId: null, itemId: parts[1] ?? null, valid: true, search: true }
   }
   if (parts[0] !== 'albums' || parts.length < 2 || parts.length > 3) {
     return { albumId: null, itemId: null, valid: false }
@@ -79,6 +87,19 @@ export const TRASH_PATH = '/gallery/trash'
 /** The in-app path of your favourites, or of one of them in the viewer. */
 export function favouritesPath(itemId?: string | null): string {
   return itemId ? `/gallery/favourites/${encodeURIComponent(itemId)}` : '/gallery/favourites'
+}
+
+/** The in-app path of a gallery search (the household's, or one space's),
+ *  or of one result in the viewer. The words travel in ``?q=`` so Back,
+ *  a refresh and a shared link keep the search. */
+export function searchPath(
+  spaceId: string | null | undefined,
+  q: string,
+  itemId?: string | null,
+): string {
+  let p = `${galleryPath(spaceId)}/search`
+  if (itemId) p += `/${encodeURIComponent(itemId)}`
+  return q ? `${p}?q=${encodeURIComponent(q)}` : p
 }
 
 /** The in-app path of the gallery, an album or an item in it. */

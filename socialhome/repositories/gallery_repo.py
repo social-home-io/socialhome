@@ -21,6 +21,7 @@ from ..domain.gallery import (
     ItemSort,
     LockedTrashAlbum,
 )
+from ..domain.gallery_search import GallerySearchSpec
 from ..domain.household_dashboard import DashboardPhoto, FrameAlbumChoice
 from ..domain.tombstone import SpaceRowTombstone
 from .base import changed_since_sql, rows_to_dicts, sync_page_cursor
@@ -66,6 +67,18 @@ _ALBUM_VISIBLE_TO_SQL = (
 )
 #: The public name of :data:`_ALBUM_VISIBLE_TO_SQL` for other repos.
 ALBUM_VISIBLE_TO_SQL = _ALBUM_VISIBLE_TO_SQL
+
+#: Ids of the items whose caption, and of the albums whose name or
+#: description, match one FTS5 phrase — the gallery rows of the app's one
+#: full-text index (migration 0141). Each binds the phrase once.
+_CAPTION_MATCH_SQL = (
+    "SELECT ref_id FROM search_index"
+    " WHERE search_index MATCH ? AND scope = 'gallery_item'"
+)
+_ALBUM_MATCH_SQL = (
+    "SELECT ref_id FROM search_index"
+    " WHERE search_index MATCH ? AND scope = 'gallery_album'"
+)
 
 #: The day an album sorts an item by — the day taken, else the upload day.
 #: Spelled exactly as ``idx_gallery_items_album_taken`` (migration 0139)
@@ -385,6 +398,13 @@ class AbstractGalleryRepo(Protocol):
         ...
 
     async def album_visible_to(self, album_id: str, user_id: str) -> bool: ...
+    async def search_items(
+        self, spec: GallerySearchSpec, *, limit: int = 60, offset: int = 0
+    ) -> list[GalleryItem]: ...
+    async def count_search_items(self, spec: GallerySearchSpec) -> int: ...
+    async def search_albums(
+        self, spec: GallerySearchSpec, *, limit: int = 12
+    ) -> list[GalleryAlbum]: ...
     async def add_favourite(self, user_id: str, item_id: str) -> bool: ...
     async def remove_favourite(self, user_id: str, item_id: str) -> None: ...
     async def favourite_ids_among(
@@ -1883,6 +1903,109 @@ class SqliteGalleryRepo:
             (album_id, user_id, user_id),
         )
         return row is not None
+
+    # ─── Search (D11, migration 0141) ─────────────────────────────────────
+
+    @staticmethod
+    def _search_scope_sql(spec: GallerySearchSpec) -> tuple[str, list]:
+        """The albums the viewer may see, for a query aliasing them ``a``:
+        household albums under their audience (``_ALBUM_VISIBLE_TO_SQL`` —
+        the ``album_visible_to`` rule) when ``spec.household``, and the
+        albums of ``spec.space_ids``. Neither → nothing (``0``)."""
+        parts: list[str] = []
+        params: list = []
+        if spec.household:
+            parts.append("(a.space_id IS NULL AND " + _ALBUM_VISIBLE_TO_SQL + ")")
+            params += [spec.viewer_user_id, spec.viewer_user_id]
+        spaces = sorted(spec.space_ids)
+        if spaces:
+            parts.append(f"a.space_id IN ({','.join('?' * len(spaces))})")
+            params += spaces
+        return ("(" + " OR ".join(parts) + ")" if parts else "0"), params
+
+    def _search_items_sql(self, spec: GallerySearchSpec) -> tuple[str, list]:
+        """``FROM … WHERE …`` of a gallery search: live items in live
+        albums the viewer sees, not by someone hidden from them (their
+        blocks and guardian blocks, every album), matching every word and
+        the who / month / year filters."""
+        scope, params = self._search_scope_sql(spec)
+        sql = (
+            " FROM gallery_items i JOIN gallery_albums a ON a.id = i.album_id"
+            " WHERE i.deleted_at IS NULL AND a.deleted_at IS NULL"
+            " AND i.filename <> '' AND " + scope + _VIEWER_MAY_SEE_I_UPLOADER_SQL
+        )
+        params += [spec.viewer_user_id] * 3
+        for word in spec.words:
+            alternatives = [
+                f"i.id IN ({_CAPTION_MATCH_SQL})",
+                f"i.album_id IN ({_ALBUM_MATCH_SQL})",
+            ]
+            params += [word.fts, word.fts]
+            people = sorted(word.uploader_ids)
+            if people:
+                alternatives.append(f"i.uploaded_by IN ({','.join('?' * len(people))})")
+                params += people
+            sql += " AND (" + " OR ".join(alternatives) + ")"
+        if spec.uploader_ids is not None:
+            people = sorted(spec.uploader_ids)
+            if not people:
+                return sql + " AND 0", params
+            sql += f" AND i.uploaded_by IN ({','.join('?' * len(people))})"
+            params += people
+        day = "COALESCE(i.taken_at, substr(i.created_at, 1, 10))"
+        if spec.year is not None and spec.month is not None:
+            sql += f" AND substr({day}, 1, 7) = ?"
+            params.append(f"{spec.year:04d}-{spec.month:02d}")
+        elif spec.year is not None:
+            sql += f" AND substr({day}, 1, 4) = ?"
+            params.append(f"{spec.year:04d}")
+        elif spec.month is not None:
+            sql += f" AND substr({day}, 6, 2) = ?"
+            params.append(f"{spec.month:02d}")
+        return sql, params
+
+    async def search_items(
+        self, spec: GallerySearchSpec, *, limit: int = 60, offset: int = 0
+    ) -> list[GalleryItem]:
+        """One page of a gallery search, newest day first (taken, else
+        uploaded). Every privacy rule is in this SQL, so a page is only
+        what the viewer may see — see :meth:`_search_items_sql`."""
+        where, params = self._search_items_sql(spec)
+        sql = (
+            "SELECT i.*" + where + " ORDER BY COALESCE(i.taken_at,"
+            " substr(i.created_at, 1, 10)) DESC, i.created_at DESC, i.id DESC"
+            " LIMIT ? OFFSET ?"
+        )
+        params += [max(1, min(limit, 500)), max(0, offset)]
+        rows = await self._db.fetchall(sql, tuple(params))
+        return [self._row_to_item(r) for r in rows_to_dicts(rows)]
+
+    async def count_search_items(self, spec: GallerySearchSpec) -> int:
+        where, params = self._search_items_sql(spec)
+        row = await self._db.fetchone("SELECT COUNT(*) AS n" + where, tuple(params))
+        return int(row["n"]) if row is not None else 0
+
+    async def search_albums(
+        self, spec: GallerySearchSpec, *, limit: int = 12
+    ) -> list[GalleryAlbum]:
+        """Live albums the viewer sees whose name or description matches
+        every word, newest activity first. Never the system "Posts" album
+        (its name is shown in the reader's language, not as stored)."""
+        if not spec.words:
+            return []
+        scope, params = self._search_scope_sql(spec)
+        sql = (
+            f"SELECT a.*, {_ALBUM_ACTIVITY_SQL} AS activity_at"
+            " FROM gallery_albums a WHERE a.deleted_at IS NULL"
+            " AND a.is_system = 0 AND " + scope
+        )
+        for word in spec.words:
+            sql += f" AND a.id IN ({_ALBUM_MATCH_SQL})"
+            params.append(word.fts)
+        sql += " ORDER BY activity_at DESC, a.id DESC LIMIT ?"
+        params.append(max(1, min(limit, 50)))
+        rows = await self._db.fetchall(sql, tuple(params))
+        return [self._row_to_album(r) for r in rows_to_dicts(rows)]
 
     async def add_favourite(self, user_id: str, item_id: str) -> bool:
         """Mark a live item a favourite of *user_id*; ``False`` when the
