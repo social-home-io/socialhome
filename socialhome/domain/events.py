@@ -1094,6 +1094,20 @@ class GalleryItemsShared(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class GalleryPrivateAlbumTrashed(DomainEvent):
+    """A household admin put someone's private album (D7) in the trash —
+    its owner is told ("An admin put your private album in the trash"),
+    so a teen knows. ``count`` is how many photos and videos went with it;
+    the owner may bring it back for 30 days. Local only: never federates."""
+
+    album_id: str
+    owner_id: str
+    admin_user_id: str
+    count: int
+    occurred_at: datetime = field(default_factory=_now)
+
+
+@dataclass(slots=True, frozen=True)
 class GalleryItemDeleted(DomainEvent):
     item_id: str
     album_id: str

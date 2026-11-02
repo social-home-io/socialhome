@@ -8,6 +8,14 @@ Endpoints:
 * ``POST   /api/gallery/default-album``                 — find or make it
 * ``GET    /api/spaces/{space_id}/gallery/albums``      — list albums
 * ``POST   /api/spaces/{space_id}/gallery/albums``      — create album
+* ``GET    /api/gallery/albums/{album_id}/audience``    — who sees it (D7)
+* ``PUT    /api/gallery/albums/{album_id}/audience``    — the owner chooses
+  (everyone at home, or "Privat – nur diese Personen")
+* ``GET    /api/gallery/trash/locked``                  — an admin's locked
+  tiles: private albums they aren't in with photos in the trash
+* ``GET    /api/gallery/settings``                      — the gallery's rules
+  (D6) and whether the caller may add photos
+* ``PATCH  /api/gallery/settings``                      — an admin sets them
 * ``GET    /api/gallery/albums/{album_id}``             — album detail
 * ``PATCH  /api/gallery/albums/{album_id}``             — update metadata
 * ``DELETE /api/gallery/albums/{album_id}``             — delete (owner/admin)
@@ -64,14 +72,18 @@ from aiohttp.multipart import BodyPartReader
 from .. import app_keys as K
 from ..domain.errors import PayloadTooLargeError
 from ..domain.gallery import (
+    AUDIENCE_EVERYONE,
     GALLERY_MAX_UPLOAD_BYTES,
     GALLERY_VIDEO_MAX_UPLOAD_BYTES,
     TRASH_RETENTION_DAYS,
+    GalleryAlbumAudience,
     GalleryDownloadFile,
+    GallerySettings,
     GalleryTrashItem,
     GalleryUpload,
     ItemCursor,
     ItemSort,
+    LockedTrashAlbum,
     OnThisDayCard,
     OnThisDaySettings,
     UploadOutcome,
@@ -182,6 +194,11 @@ def _album_dict(a) -> dict:
         "default_name": a.default_name,
         # Someone else added photos since the viewer last opened it (D9).
         "has_new": a.has_new,
+        # ``everyone`` or ``chosen`` (a private album, D7) — household only.
+        "audience": a.audience,
+        # A private album a household admin isn't in: a locked tile they
+        # may delete, never open (no name, description or cover).
+        "locked": a.locked,
     }
 
 
@@ -251,8 +268,100 @@ class HouseholdAlbumCollectionView(BaseView):
             owner_user_id=ctx.user_id,
             name=str(body.get("name", "")),
             description=body.get("description"),
+            audience=str(body.get("audience") or AUDIENCE_EVERYONE),
+            user_ids=_people(body),
         )
         return web.json_response(_album_signed(self.request, album), status=201)
+
+
+def _people(body: dict) -> frozenset[str]:
+    """``user_ids`` of a body: a list of strings, else a 422."""
+    raw = body.get("user_ids") or []
+    if not isinstance(raw, list) or not all(isinstance(u, str) for u in raw):
+        raise ValueError("user_ids must be a list of user ids")
+    return frozenset(raw)
+
+
+def _audience_dict(a: GalleryAlbumAudience, *, viewer_user_id: str) -> dict:
+    return {
+        "album_id": a.album_id,
+        "audience": a.audience,
+        "user_ids": sorted(a.user_ids),
+        "owner_user_id": a.owner_user_id,
+        # A protected owner's guardians: always in, never removable (§CP).
+        "guardian_ids": sorted(a.guardian_ids),
+        "can_edit": a.owner_user_id == viewer_user_id,
+    }
+
+
+class AlbumAudienceView(BaseView):
+    """GET/PUT /api/gallery/albums/{album_id}/audience — who sees a
+    household album (D7). GET: anyone who sees it. PUT ``{audience,
+    user_ids}``: its owner only; a change that would hide a photo from
+    someone who sees it, or show someone's private photo wider, is 409
+    ``ALBUM_AUDIENCE`` (``params.reason``)."""
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        audience = await self.svc(K.gallery_service_key).get_album_audience(
+            self.match("album_id"), actor_user_id=ctx.user_id
+        )
+        return web.json_response(_audience_dict(audience, viewer_user_id=ctx.user_id))
+
+    async def put(self) -> web.Response:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        body = await self.body()
+        audience = await self.svc(K.gallery_service_key).set_album_audience(
+            self.match("album_id"),
+            actor_user_id=ctx.user_id,
+            audience=str(body.get("audience") or ""),
+            user_ids=_people(body),
+        )
+        return web.json_response(_audience_dict(audience, viewer_user_id=ctx.user_id))
+
+
+def _settings_dict(s: GallerySettings, *, may_add: bool, is_admin: bool) -> dict:
+    return {
+        "children_may_upload": s.children_may_upload,
+        # Whether the caller may add photos and albums here right now.
+        "may_add": may_add,
+        "can_edit": is_admin,
+    }
+
+
+class GallerySettingsView(BaseView):
+    """GET/PATCH /api/gallery/settings — the household gallery's rules
+    (D6: "Children may upload"). GET: anyone (the SPA hides the upload
+    buttons when ``may_add`` is false). PATCH: a household admin."""
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        svc = self.svc(K.gallery_service_key)
+        return web.json_response(
+            _settings_dict(
+                await svc.get_settings(),
+                may_add=await svc.may_add(ctx.user_id),
+                is_admin=ctx.is_admin,
+            )
+        )
+
+    async def patch(self) -> web.Response:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        body = await self.body()
+        svc = self.svc(K.gallery_service_key)
+        settings = await svc.set_settings(
+            actor_user_id=ctx.user_id,
+            children_may_upload=_flag(body, "children_may_upload"),
+        )
+        return web.json_response(
+            _settings_dict(
+                settings, may_add=await svc.may_add(ctx.user_id), is_admin=True
+            )
+        )
 
 
 class DefaultAlbumView(BaseView):
@@ -614,6 +723,35 @@ class GalleryTrashCollectionView(BaseView):
             before_id=self.request.query.get("before_id") or None,
         )
         return web.json_response([_trash_signed(self.request, t) for t in rows])
+
+
+class GalleryLockedTrashView(BaseView):
+    """GET /api/gallery/trash/locked — for a household admin, one locked
+    tile per private album they aren't in that has photos in the trash
+    (D7): whose, how many, when — never a name or a preview. Anyone else
+    gets an empty list. The purge removes them after 30 days."""
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        rows = await self.svc(K.gallery_service_key).list_locked_trash(
+            actor_user_id=ctx.user_id
+        )
+        return web.json_response([_locked_trash_dict(r) for r in rows])
+
+
+def _locked_trash_dict(t: LockedTrashAlbum) -> dict:
+    deleted = datetime.fromisoformat(t.deleted_at)
+    if deleted.tzinfo is None:
+        deleted = deleted.replace(tzinfo=UTC)
+    return {
+        "album_id": t.album_id,
+        "owner_user_id": t.owner_user_id,
+        "count": t.count,
+        "deleted_at": deleted.isoformat(),
+        "purge_after": (deleted + timedelta(days=TRASH_RETENTION_DAYS)).isoformat(),
+        "album_in_trash": t.album_in_trash,
+    }
 
 
 class GalleryTrashItemView(BaseView):

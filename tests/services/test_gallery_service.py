@@ -1711,11 +1711,14 @@ async def test_a_space_delete_has_no_trash(env):
 async def test_leaving_the_household_keeps_photos_and_hands_albums_to_an_admin(env):
     """Guard: removing a person never removes their photos; the household
     albums they owned pass to an admin — except a private one, which an
-    admin must not gain a view of."""
+    admin must not gain a view of: it stays Bob's while someone else sees
+    it, and goes to the trash when nobody else does (r3)."""
     env.wire()
     shared = await _household_album(env, owner="b-id", name="Bob's")
     private = await _household_album(env, owner="b-id", name="Bob's secret")
-    await env._repo.set_album_audience(private.id, "chosen")  # type: ignore[attr-defined]
+    await env._repo.set_album_audience(private.id, "chosen", frozenset({"a-id"}))  # type: ignore[attr-defined]
+    alone = await _household_album(env, owner="b-id", name="Only Bob")
+    await env._repo.set_album_audience(alone.id, "chosen")  # type: ignore[attr-defined]
     in_space = await env.create_album(space_id="sp-1", owner_user_id="b-id", name="S")
     up = await _upload(env, shared.id, _jpeg(), who="b-id")
 
@@ -1731,6 +1734,7 @@ async def test_leaving_the_household_keeps_photos_and_hands_albums_to_an_admin(e
     assert (
         await env.get_album(in_space.id, actor_user_id="a-id")
     ).owner_user_id == "b-id"
+    assert await env._repo.get_trashed_album(alone.id) is not None  # type: ignore[attr-defined]
     (kept,) = await env.list_items(shared.id, actor_user_id="a-id")
     assert kept.id == up.item.id and kept.uploaded_by == "b-id"
 

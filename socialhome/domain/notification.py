@@ -197,6 +197,9 @@ class NotificationObject(StrEnum):
     #: One share of someone's household photos (``<share_id>/<uploader>``,
     #: D8) — one row per share action, never grouped with another.
     GALLERY_SHARE = "gallery_share"
+    #: An admin put someone's private album in the trash (``<album_id>``,
+    #: D7) — the owner's row; it outlives the album's "new photos" rows.
+    GALLERY_ALBUM_TRASHED = "gallery_album_trashed"
 
 
 #: The id of the household feed's ``feed:<id>`` key — there is one.

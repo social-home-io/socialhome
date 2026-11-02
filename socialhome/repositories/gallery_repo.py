@@ -19,6 +19,7 @@ from ..domain.gallery import (
     GalleryTrashItem,
     ItemCursor,
     ItemSort,
+    LockedTrashAlbum,
 )
 from ..domain.household_dashboard import DashboardPhoto, FrameAlbumChoice
 from ..domain.tombstone import SpaceRowTombstone
@@ -46,14 +47,25 @@ _ITEM_TOMBSTONE_SET = (
     " caption=NULL, taken_at=NULL"
 )
 
-#: A household album the viewer may see (migration 0139): every album open
-#: to everyone at home, the viewer's own, and the private albums they were
-#: chosen for. Expects the album aliased ``a``; binds the viewer twice.
+#: A household album the viewer may see (migration 0139, D7) — the ONE
+#: rule every read of a household photo goes through (album pages, items,
+#: files, trash, favourites, downloads, share, notifications, duplicates,
+#: search): every album open to everyone at home, the viewer's own, the
+#: private albums they were chosen for — and every private album of a
+#: protected child (§CP) the viewer is a guardian of, whatever the child
+#: chose (read-time, so a guardian added later sees it, and a child can't
+#: take one out). Expects the album aliased ``a``; binds the viewer twice.
 _ALBUM_VISIBLE_TO_SQL = (
     "(a.audience = 'everyone' OR a.owner_user_id = ?"
-    " OR EXISTS (SELECT 1 FROM gallery_album_audience aa"
-    " WHERE aa.album_id = a.id AND aa.user_id = ?))"
+    " OR ? IN (SELECT aa.user_id FROM gallery_album_audience aa"
+    " WHERE aa.album_id = a.id"
+    " UNION ALL SELECT g.guardian_user_id FROM cp_guardians g"
+    " JOIN users m ON m.user_id = g.minor_user_id"
+    " WHERE g.minor_user_id = a.owner_user_id"
+    " AND m.child_protection_enabled = 1))"
 )
+#: The public name of :data:`_ALBUM_VISIBLE_TO_SQL` for other repos.
+ALBUM_VISIBLE_TO_SQL = _ALBUM_VISIBLE_TO_SQL
 
 #: The day an album sorts an item by — the day taken, else the upload day.
 #: Spelled exactly as ``idx_gallery_items_album_taken`` (migration 0139)
@@ -101,10 +113,18 @@ class AbstractGalleryRepo(Protocol):
         before: str | None = None,
         before_id: str | None = None,
         by_activity: bool = False,
+        viewer_user_id: str | None = None,
     ) -> list[GalleryAlbum]: ...
     async def get_album(self, album_id: str) -> GalleryAlbum | None: ...
     async def get_system_album(self, space_id: str | None) -> GalleryAlbum | None: ...
-    async def create_album(self, album: GalleryAlbum) -> GalleryAlbum: ...
+    async def create_album(
+        self, album: GalleryAlbum, *, audience_user_ids: frozenset[str] = frozenset()
+    ) -> GalleryAlbum:
+        """Insert the album — a private one (``album.audience`` ``chosen``)
+        together with its people in one transaction, so it is never
+        listed to everyone for a moment."""
+        ...
+
     async def update_album(self, album_id: str, patch: dict) -> None: ...
     async def delete_album(self, album_id: str, *, deleted_by: str = "") -> None: ...
     async def create_album_in_space(
@@ -314,8 +334,40 @@ class AbstractGalleryRepo(Protocol):
         ...
 
     async def get_album_audience(
-        self, album_id: str
-    ) -> GalleryAlbumAudience | None: ...
+        self, album_id: str, *, include_trashed: bool = False
+    ) -> GalleryAlbumAudience | None:
+        """Who sees a household album: its audience, chosen people, owner
+        and — for a protected owner — guardians. ``None`` for an unknown
+        (or, unless *include_trashed*, a trashed) album."""
+        ...
+
+    async def album_uploaders(self, album_id: str) -> frozenset[str]:
+        """Everyone who has a photo or video in the album — live or in the
+        trash (a restore brings it back to the same audience)."""
+        ...
+
+    async def list_private_albums_of(self, owner_user_id: str) -> list[str]:
+        """The live private (``chosen``) household albums *owner_user_id*
+        owns."""
+        ...
+
+    async def list_locked_trash(self, viewer_user_id: str) -> list[LockedTrashAlbum]:
+        """Per private album *viewer_user_id* can't see: how many of its
+        photos wait in the trash (an admin's locked tiles, D7) — no names,
+        no previews."""
+        ...
+
+    async def guardian_block_counterparts(self, user_id: str) -> frozenset[str]:
+        """Everyone a guardian block separates from *user_id*, either way
+        (§CP.F2) — never chosen for their private album."""
+        ...
+
+    async def media_hidden_from(self, filename: str, viewer_user_id: str) -> bool:
+        """Whether the stored file *filename* belongs to a photo or video of
+        a private album *viewer_user_id* may not see (and didn't upload) —
+        the file route then answers like an unknown file."""
+        ...
+
     async def set_album_audience(
         self, album_id: str, audience: str, user_ids: frozenset[str] = frozenset()
     ) -> bool:
@@ -458,6 +510,7 @@ class SqliteGalleryRepo:
             created_at=r.get("created_at"),
             updated_at=r.get("updated_at"),
             activity_at=r.get("activity_at") or r.get("created_at"),
+            audience=r.get("audience") or AUDIENCE_EVERYONE,
         )
 
     async def list_albums(
@@ -468,6 +521,7 @@ class SqliteGalleryRepo:
         before: str | None = None,
         before_id: str | None = None,
         by_activity: bool = False,
+        viewer_user_id: str | None = None,
     ) -> list[GalleryAlbum]:
         """One page of a scope's albums: the system album pinned first,
         then newest first (``created_at DESC, id DESC`` — ``id`` breaks a
@@ -482,16 +536,25 @@ class SqliteGalleryRepo:
         album's ``created_at`` (``activity_at``) / ``id``; a page after
         the first never carries the system album again. ``before`` alone
         (an older client) keeps its plain ``<`` meaning.
+
+        ``viewer_user_id`` keeps a household page to the albums that person
+        may see (:data:`_ALBUM_VISIBLE_TO_SQL`); without it every album of
+        the scope is listed (a space's seats decide in the service, and a
+        household admin's list shows private albums as locked tiles).
         """
         limit = max(1, min(limit, 200))
         key = _ALBUM_ACTIVITY_SQL if by_activity else "a.created_at"
         # ``space_id IS ?`` matches both NULL (household) and a specific id.
+        visible = ""
+        params: list = [space_id]
+        if viewer_user_id is not None and space_id is None:
+            visible = " AND " + _ALBUM_VISIBLE_TO_SQL
+            params += [viewer_user_id, viewer_user_id]
         sql = (
             f"SELECT * FROM (SELECT a.*, {key} AS activity_at"
             " FROM gallery_albums a"
-            " WHERE a.space_id IS ? AND a.deleted_at IS NULL)"
+            f" WHERE a.space_id IS ? AND a.deleted_at IS NULL{visible})"
         )
-        params: list = [space_id]
         if before:
             sql += " WHERE is_system = 0"
             if before_id:
@@ -529,35 +592,51 @@ class SqliteGalleryRepo:
         )
         return self._row_to_album(dict(row)) if row else None
 
-    async def create_album(self, album: GalleryAlbum) -> GalleryAlbum:
+    async def create_album(
+        self, album: GalleryAlbum, *, audience_user_ids: frozenset[str] = frozenset()
+    ) -> GalleryAlbum:
         now = album.created_at or datetime.now(UTC).isoformat()
         # ``ON CONFLICT DO NOTHING`` is the race guard for the system
         # album path: the partial unique index on (space_id, is_system)
         # prevents two concurrent ``ensure_system_album`` callers from
         # both inserting. User-created albums never collide here (they
         # have ``is_system=0``, which the partial index ignores).
-        await self._db.enqueue(
-            """
-            INSERT INTO gallery_albums(
-                id, space_id, retention_exempt, is_system, owner_user_id,
-                name, description, cover_item_id, item_count, created_at, updated_at
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT DO NOTHING
-            """,
-            (
-                album.id,
-                album.space_id,
-                int(album.retention_exempt),
-                int(album.is_system),
-                album.owner_user_id,
-                album.name,
-                album.description,
-                album.cover_item_id,
-                album.item_count,
-                now,
-                now,
-            ),
+        params = (
+            album.id,
+            album.space_id,
+            int(album.retention_exempt),
+            int(album.is_system),
+            album.owner_user_id,
+            album.name,
+            album.description,
+            album.cover_item_id,
+            album.item_count,
+            now,
+            now,
+            album.audience,
         )
+        people = sorted(audience_user_ids) if album.audience == AUDIENCE_CHOSEN else []
+
+        def _run(conn) -> None:
+            cur = conn.execute(
+                """
+                INSERT INTO gallery_albums(
+                    id, space_id, retention_exempt, is_system, owner_user_id,
+                    name, description, cover_item_id, item_count, created_at,
+                    updated_at, audience
+                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING
+                """,
+                params,
+            )
+            if cur.rowcount and people:
+                conn.executemany(
+                    "INSERT INTO gallery_album_audience(album_id, user_id)"
+                    " VALUES(?, ?)",
+                    [(album.id, uid) for uid in people],
+                )
+
+        await self._db.transact(_run)
         return album
 
     async def update_album(self, album_id: str, patch: dict) -> None:
@@ -1648,9 +1727,12 @@ class SqliteGalleryRepo:
         )
         return [self._row_to_item(r) for r in rows_to_dicts(rows)]
 
-    async def get_album_audience(self, album_id: str) -> GalleryAlbumAudience | None:
+    async def get_album_audience(
+        self, album_id: str, *, include_trashed: bool = False
+    ) -> GalleryAlbumAudience | None:
+        live = "" if include_trashed else " AND deleted_at IS NULL"
         row = await self._db.fetchone(
-            "SELECT audience FROM gallery_albums WHERE id=? AND deleted_at IS NULL",
+            f"SELECT audience, owner_user_id FROM gallery_albums WHERE id=?{live}",
             (album_id,),
         )
         if row is None:
@@ -1659,11 +1741,87 @@ class SqliteGalleryRepo:
             "SELECT user_id FROM gallery_album_audience WHERE album_id=?",
             (album_id,),
         )
+        guardians = await self._db.fetchall(
+            "SELECT g.guardian_user_id FROM cp_guardians g"
+            " JOIN users m ON m.user_id = g.minor_user_id"
+            " WHERE g.minor_user_id = ? AND m.child_protection_enabled = 1",
+            (row[1],),
+        )
         return GalleryAlbumAudience(
             album_id=album_id,
             audience=row[0],
             user_ids=frozenset(r[0] for r in people),
+            owner_user_id=row[1],
+            guardian_ids=frozenset(r[0] for r in guardians),
         )
+
+    async def album_uploaders(self, album_id: str) -> frozenset[str]:
+        rows = await self._db.fetchall(
+            "SELECT DISTINCT uploaded_by FROM gallery_items"
+            " WHERE album_id=? AND filename <> ''",
+            (album_id,),
+        )
+        return frozenset(r[0] for r in rows if r[0])
+
+    async def list_private_albums_of(self, owner_user_id: str) -> list[str]:
+        rows = await self._db.fetchall(
+            "SELECT id FROM gallery_albums WHERE owner_user_id=?"
+            " AND space_id IS NULL AND is_system=0 AND deleted_at IS NULL"
+            " AND audience=? ORDER BY id",
+            (owner_user_id, AUDIENCE_CHOSEN),
+        )
+        return [r[0] for r in rows]
+
+    async def list_locked_trash(self, viewer_user_id: str) -> list[LockedTrashAlbum]:
+        rows = await self._db.fetchall(
+            "SELECT a.id AS album_id, a.owner_user_id AS owner_user_id,"
+            " COUNT(*) AS n, MAX(i.deleted_at) AS deleted_at,"
+            " a.deleted_at IS NOT NULL AS album_in_trash"
+            " FROM gallery_items i JOIN gallery_albums a ON a.id = i.album_id"
+            " WHERE "
+            + _IN_TRASH_SQL
+            + " AND NOT "
+            + _ALBUM_VISIBLE_TO_SQL
+            + " GROUP BY a.id ORDER BY MAX(i.deleted_at) DESC, a.id DESC LIMIT 200",
+            (viewer_user_id, viewer_user_id),
+        )
+        return [
+            LockedTrashAlbum(
+                album_id=r["album_id"],
+                owner_user_id=r["owner_user_id"],
+                count=int(r["n"]),
+                deleted_at=r["deleted_at"],
+                album_in_trash=bool(r["album_in_trash"]),
+            )
+            for r in rows_to_dicts(rows)
+        ]
+
+    async def guardian_block_counterparts(self, user_id: str) -> frozenset[str]:
+        rows = await self._db.fetchall(
+            GUARDIAN_BLOCK_COUNTERPARTS_SQL, (user_id, user_id)
+        )
+        return frozenset(r[0] for r in rows if r[0])
+
+    async def media_hidden_from(self, filename: str, viewer_user_id: str) -> bool:
+        # Private albums are few: the planner walks them (audience) and
+        # their items by ``idx_gallery_items_album``, not every item.
+        row = await self._db.fetchone(
+            "SELECT 1 FROM gallery_albums a"
+            " JOIN gallery_items i ON i.album_id = a.id"
+            " WHERE a.audience = ? AND a.space_id IS NULL"
+            " AND (i.filename = ? OR i.thumbnail_filename = ?)"
+            " AND i.uploaded_by IS NOT ?"
+            " AND NOT " + _ALBUM_VISIBLE_TO_SQL + " LIMIT 1",
+            (
+                AUDIENCE_CHOSEN,
+                filename,
+                filename,
+                viewer_user_id,
+                viewer_user_id,
+                viewer_user_id,
+            ),
+        )
+        return row is not None
 
     async def set_album_audience(
         self, album_id: str, audience: str, user_ids: frozenset[str] = frozenset()
