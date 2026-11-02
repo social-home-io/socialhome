@@ -882,5 +882,8 @@
   "apps.group_sheet.err_too_old": "The server refused: someone picked is in a household with an older Social Home that can't take part in group games.",
   "apps.group_sheet.err_not_supported": "This app can only be played one to one, not as a group game. {name} is the app's name.",
   "gallery.upload.reason_too_long": "Shown on an upload row (the row names the file). {length} is the video's length as m:ss (e.g. 7:12), {max} the limit in minutes (5). The video is refused, never cut.",
-  "gallery.item_ready_in_min": "On a video tile while the household converts it. {n} is a rough estimate in minutes."
+  "gallery.item_ready_in_min": "On a video tile while the household converts it. {n} is a rough estimate in minutes.",
+  "gallery.search.placeholder": "Placeholder of the gallery's search field. The examples must work as typed in your language: the 'added by' word the search understands is by / von / door / par / por (and from), and the month name is your language's full month name. Keep it short enough for a phone (about 45 characters).",
+  "gallery.search.empty_body": "Shown when a gallery search finds nothing. The quoted examples must work as typed in your language (see gallery.search.placeholder). Search never looks at faces, objects or places — say that plainly.",
+  "search.in_gallery": "A link under the global search's filter chips: the gallery's own search found {n} photos and videos for the same words. Opens the gallery's search."
 }

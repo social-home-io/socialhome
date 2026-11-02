@@ -29,6 +29,23 @@ describe('SearchPage', () => {
     expect(getByText('DMs')).toBeTruthy()
   })
 
+  it('photos are a link to the gallery’s own search, never in the All count', async () => {
+    const { render, waitFor } = await import('@testing-library/preact')
+    const { api } = await import('@/api')
+    vi.mocked(api.get).mockResolvedValueOnce({
+      hits: [{ scope: 'post', ref_id: 'p1', space_id: null, title: '', snippet: '<mark>beach</mark>' }],
+      counts: { post: 1, gallery_item: 3 },
+    })
+    window.history.replaceState(null, '', '/search?q=beach')
+    const mod = await import('./SearchPage')
+    const { container, findByRole, getByRole } = render(<mod.default />)
+    const link = await findByRole('link', { name: /3 photos and videos in the gallery/ })
+    expect(link.getAttribute('href')).toBe('/gallery/search?q=beach')
+    await waitFor(() => expect(container.querySelectorAll('.sh-search-hit')).toHaveLength(1))
+    // "All" counts the list below it: 1, not 4.
+    expect(getByRole('tab', { name: /All/ }).textContent).toBe('All1')
+  })
+
   it('names a hit’s space by its name, and never shows a space id', async () => {
     const { render, waitFor } = await import('@testing-library/preact')
     const { api } = await import('@/api')

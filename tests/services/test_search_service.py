@@ -270,3 +270,38 @@ async def test_a_deleted_or_pruned_message_leaves_the_index(env):
     assert [h.ref_id for h in await svc.search("library")] == ["m-2"]
     await svc.remove_messages(["m-2"])
     assert await svc.search("library") == []
+
+
+class _GalleryCount:
+    """Stands in for GallerySearchService: the count a viewer may see."""
+
+    def __init__(self, n: int) -> None:
+        self.n = n
+        self.calls: list[tuple[str, str]] = []
+
+    async def count(self, q: str, *, user_id: str) -> int:
+        self.calls.append((q, user_id))
+        return self.n
+
+
+async def test_gallery_rows_are_counted_through_the_gallery_only(env):
+    svc, _bus, repo = env
+    # A gallery caption in the index (migration 0141's triggers write it).
+    await repo._db.enqueue(
+        "INSERT INTO search_index(scope, ref_id, space_id, title, body)"
+        " VALUES('gallery_item', 'g-1', NULL, '', 'secret beach')"
+    )
+    out = await svc.search_with_counts("beach", caller_user_id="u1")
+    assert out == {"hits": [], "counts": {}}
+    assert await svc.search("beach") == []
+
+    gallery = _GalleryCount(3)
+    svc.attach_gallery_search(gallery)  # type: ignore[arg-type]
+    out = await svc.search_with_counts("beach", caller_user_id="u1")
+    assert out["hits"] == []
+    assert out["counts"] == {"gallery_item": 3}
+    assert gallery.calls == [("beach", "u1")]
+    # Nothing the viewer may see: no chip count at all.
+    gallery.n = 0
+    out = await svc.search_with_counts("beach", caller_user_id="u1")
+    assert out["counts"] == {}

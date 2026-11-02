@@ -712,6 +712,32 @@ await check('gallery-addresses', async () => {
   await at(favPath, 'Esc closes the viewer to the favourites')
   await page.goBack()
   await at(`${PREFIX}/gallery`, 'Back from the favourites')
+  // Search (D11): typing in the albums' field lands on
+  // /gallery/search?q=, the search GET stays under the prefix, a result
+  // opens the viewer at /gallery/search/<photo>?q=, Esc and Back step out.
+  const searchPath = `${PREFIX}/gallery/search`
+  const field = await step('the gallery search field', page.waitForSelector('input.sh-gallery-search__input'))
+  const [found] = await Promise.all([
+    page.waitForResponse(r => /api\/gallery\/search$/.test(new URL(r.url()).pathname)),
+    (async () => { await field.click(); await page.keyboard.type('ingress') })(),
+  ])
+  if (!underPrefix(new URL(found.url()).pathname)) problems.push(`gallery search GET outside the prefix: ${found.url()}`)
+  if (found.status() !== 200) problems.push(`gallery search → ${found.status()}`)
+  await at(searchPath, 'typing a search')
+  const q = await page.evaluate(() => new URLSearchParams(location.search).get('q'))
+  if (q !== 'ingress') problems.push(`search address carries q=${q}, want ingress`)
+  const hit = await step('a search result tile link', page.waitForSelector(`a.sh-gallery-item[data-item-id="${ids.galleryItemId}"]`))
+  const hitHref = await hit.evaluate(a => a.getAttribute('href'))
+  const hitPath = `${searchPath}/${ids.galleryItemId}`
+  if (hitHref !== `${hitPath}?q=ingress`) problems.push(`search result link is ${hitHref}, want ${hitPath}?q=ingress`)
+  await hit.click()
+  await at(hitPath, 'a search result')
+  await step('the viewer on a search result', page.waitForSelector('.sh-gviewer[role="dialog"] img.sh-gviewer-photo'))
+  await page.screenshot({ path: path.join(SHOTS, 'gallery-search-viewer.png') })
+  await page.keyboard.press('Escape')
+  await at(searchPath, 'Esc closes the viewer to the results')
+  await page.goBack()
+  await at(`${PREFIX}/gallery`, 'Back from the search')
   return { problems, albumPath, photoPath, viewerSrc: src }
 })
 

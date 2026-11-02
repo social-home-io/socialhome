@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { TRASH_PATH, backLeadsTo, favouritesPath, galleryPath, markBackTo, parseGallerySub } from './galleryRoutes'
+import { TRASH_PATH, backLeadsTo, favouritesPath, galleryPath, markBackTo, parseGallerySub, searchPath } from './galleryRoutes'
 
 describe('galleryRoutes', () => {
   it('builds the household and the space addresses', () => {
@@ -30,6 +30,15 @@ describe('galleryRoutes', () => {
     expect(parseGallerySub('favourites/i1/x').valid).toBe(false)
     expect(favouritesPath()).toBe('/gallery/favourites')
     expect(favouritesPath('a b')).toBe('/gallery/favourites/a%20b')
+  })
+
+  it('knows a search (/gallery/search[/:itemId]?q=) — under the ingress prefix too, an in-app path', () => {
+    expect(parseGallerySub('search')).toEqual({ albumId: null, itemId: null, valid: true, search: true })
+    expect(parseGallerySub('search/i1')).toEqual({ albumId: null, itemId: 'i1', valid: true, search: true })
+    expect(parseGallerySub('search/i1/x').valid).toBe(false)
+    expect(searchPath(null, 'Juli 2025')).toBe('/gallery/search?q=Juli%202025')
+    expect(searchPath('s1', 'von Lena', 'i 1')).toBe('/spaces/s1/gallery/search/i%201?q=von%20Lena')
+    expect(searchPath(null, '')).toBe('/gallery/search')
   })
 
   it('an address it does not know is not valid', () => {

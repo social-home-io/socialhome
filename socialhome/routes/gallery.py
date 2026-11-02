@@ -38,6 +38,8 @@ Endpoints:
 * ``DELETE /api/gallery/items/{item_id}/favourite``     — unmark it
 * ``GET    /api/gallery/favourites``                    — the caller's own
   favourites across the albums they see (private: nobody else's)
+* ``GET    /api/gallery/search``                        — find photos by
+  caption, album name, who added them, month / year (D11)
 
 A video upload is streamed straight to disk (never held in memory) and
 checked there: a household album keeps videos up to 5 minutes and takes
@@ -77,6 +79,7 @@ from ..domain.gallery import (
     UploadOutcome,
     is_video_upload,
 )
+from ..domain.gallery_search import GALLERY_SEARCH_PAGE
 from ..hardening import (
     STREAM_CHUNK_BYTES,
     iter_part_chunks,
@@ -224,6 +227,97 @@ def _item_signed(request: web.Request, i) -> dict:
     if signer is not None:
         sign_media_urls_in(payload, signer, extra_fields=("url",))
     return payload
+
+
+async def _items_for_viewer(view: BaseView, items: list) -> list[dict]:
+    """*items* as the caller sees them: :func:`_item_signed` + their own ♡
+    and, for a video, its live transcode state."""
+    # Video items transcode in the background — surface a live
+    # ``media_status`` so the SPA shows a "Processing…" placeholder
+    # until the ``.webm`` exists. One batched repo read per request;
+    # photos/other items get no status field.
+    video_fns = [
+        fn
+        for i in items
+        if i.item_type == "video" and (fn := media_filename(i.url)) is not None
+    ]
+    statuses = await view.svc(K.media_transcode_repo_key).status_for(video_fns)
+    waiting = [fn for fn, st in statuses.items() if st == "processing"]
+    etas = await view.svc(K.media_transcode_service_key).estimates(waiting)
+    # The viewer's own ♡ (D12) — computed per request for this person,
+    # never stored on the item and never sent anywhere else.
+    favourites = await view.svc(K.gallery_favourites_service_key).ids_among(
+        view.user.user_id, [i.id for i in items]
+    )
+    out = []
+    for i in items:
+        payload = _item_signed(view.request, i)
+        payload["is_favourite"] = i.id in favourites
+        if i.item_type == "video":
+            fn = media_filename(i.url)
+            payload["media_status"] = statuses.get(fn, READY) if fn else READY
+            if fn in etas:
+                payload["media_eta_s"] = etas[fn]
+        out.append(payload)
+    return out
+
+
+def _album_ref(album) -> dict:
+    """The few album fields a list spanning several albums carries per row
+    (favourites, search)."""
+    return {
+        "id": album.id,
+        "name": album.name,
+        "space_id": album.space_id,
+        "is_system": album.is_system,
+        "default_name": album.default_name,
+    }
+
+
+class GallerySearchView(BaseView):
+    """GET /api/gallery/search — find photos and videos (owner decision
+    D11) by caption, album name, who added them (``von Lena``) and month /
+    year (``Juli 2025``). Never by faces, objects or places.
+
+    ``?q=`` (under 2 characters finds nothing), ``?space_id=`` (one space's
+    albums; absent: every album the caller sees — the household's and
+    their spaces'), ``?limit=`` (default 60, max 200), ``?offset=``.
+
+    Only what the caller may see: household albums under their audience,
+    spaces they hold a seat in with the gallery on, nothing in the trash,
+    nothing added by someone they blocked. Answers ``{items, albums,
+    more}``: each item as in an album, plus its ``album`` and a
+    ``snippet`` of its caption (``<mark>`` around the match — render as
+    text); ``albums`` are the albums whose name matches (first page of a
+    search of words only); ``more`` — another page follows."""
+
+    async def get(self) -> web.Response:
+        ctx = self.user
+        await self.svc(K.preferences_service_key).require_enabled(_GALLERY_SECTION)
+        q = self.request.query
+        try:
+            limit = int(q.get("limit", GALLERY_SEARCH_PAGE))
+            offset = int(q.get("offset", 0))
+        except ValueError:
+            raise ValueError("limit and offset must be numbers") from None
+        result = await self.svc(K.gallery_search_service_key).search(
+            q.get("q", ""),
+            user_id=ctx.user_id,
+            space_id=q.get("space_id") or None,
+            limit=limit,
+            offset=offset,
+        )
+        rows = await _items_for_viewer(self, [h.item for h in result.items])
+        for row, hit in zip(rows, result.items, strict=True):
+            row["album"] = _album_ref(hit.album)
+            row["snippet"] = hit.snippet
+        return web.json_response(
+            {
+                "items": rows,
+                "albums": [_album_signed(self.request, a) for a in result.albums],
+                "more": result.more,
+            }
+        )
 
 
 class HouseholdAlbumCollectionView(BaseView):
@@ -405,34 +499,7 @@ class AlbumItemCollectionView(BaseView):
             sort=sort,
             after=after,
         )
-        # Video items transcode in the background — surface a live
-        # ``media_status`` so the SPA shows a "Processing…" placeholder
-        # until the ``.webm`` exists. One batched repo read per request;
-        # photos/other items get no status field.
-        video_fns = [
-            fn
-            for i in items
-            if i.item_type == "video" and (fn := media_filename(i.url)) is not None
-        ]
-        statuses = await self.svc(K.media_transcode_repo_key).status_for(video_fns)
-        waiting = [fn for fn, st in statuses.items() if st == "processing"]
-        etas = await self.svc(K.media_transcode_service_key).estimates(waiting)
-        # The viewer's own ♡ (D12) — computed per request for this person,
-        # never stored on the item and never sent anywhere else.
-        favourites = await self.svc(K.gallery_favourites_service_key).ids_among(
-            ctx.user_id, [i.id for i in items]
-        )
-        out = []
-        for i in items:
-            payload = _item_signed(self.request, i)
-            payload["is_favourite"] = i.id in favourites
-            if i.item_type == "video":
-                fn = media_filename(i.url)
-                payload["media_status"] = statuses.get(fn, READY) if fn else READY
-                if fn in etas:
-                    payload["media_eta_s"] = etas[fn]
-            out.append(payload)
-        return web.json_response(out)
+        return web.json_response(await _items_for_viewer(self, items))
 
     async def post(self) -> web.Response:
         ctx = self.user
@@ -815,17 +882,7 @@ class GalleryFavouritesView(BaseView):
             payload["is_favourite"] = True
             payload["favourited_at"] = _aware(f.marked_at)
             album = albums.get(f.item.album_id)
-            payload["album"] = (
-                {
-                    "id": album.id,
-                    "name": album.name,
-                    "space_id": album.space_id,
-                    "is_system": album.is_system,
-                    "default_name": album.default_name,
-                }
-                if album is not None
-                else None
-            )
+            payload["album"] = _album_ref(album) if album is not None else None
             out.append(payload)
         return web.json_response(out)
 

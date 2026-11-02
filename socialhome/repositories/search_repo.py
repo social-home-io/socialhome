@@ -25,6 +25,16 @@ SCOPE_MESSAGE = "message"
 SCOPE_PAGE = "page"
 SCOPE_USER = "user"  # §23.2 — "People" filter (local + known remote)
 SCOPE_SPACE = "space"  # §23.2 — "Spaces" filter
+#: Gallery captions and album names (migration 0141). Written only by
+#: triggers on the gallery tables, and read only by the gallery search
+#: (``SqliteGalleryRepo.search_items``), which applies who may see each
+#: album — the generic search below never returns or counts them, since a
+#: household album's row carries no space id to check and a private
+#: album's audience is not in the index. Deliberately NOT in
+#: :data:`ALLOWED_SCOPES`.
+SCOPE_GALLERY_ITEM = "gallery_item"
+SCOPE_GALLERY_ALBUM = "gallery_album"
+GALLERY_SCOPES = frozenset({SCOPE_GALLERY_ITEM, SCOPE_GALLERY_ALBUM})
 ALLOWED_SCOPES = frozenset(
     {
         SCOPE_POST,
