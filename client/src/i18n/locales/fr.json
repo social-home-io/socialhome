@@ -6532,5 +6532,6 @@
   "error.album_audience.blocked": "{name} ne peut pas être ajouté·e à cet album.",
   "error.album_audience.unknown_person": "Une personne choisie ne fait plus partie du foyer.",
   "error.album_audience.too_many": "Un album privé peut compter au plus {max} personnes.",
-  "error.child_upload_off": "L'ajout de photos est désactivé pour les enfants en ce moment. Demandez à un adulte."
+  "error.child_upload_off": "L'ajout de photos est désactivé pour les enfants en ce moment. Demandez à un adulte.",
+  "gallery.locked.delete_confirm": "Mettre à la corbeille"
 }

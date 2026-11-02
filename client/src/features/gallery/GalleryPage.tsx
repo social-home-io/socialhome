@@ -488,8 +488,10 @@ export default function GalleryPage({
   // Counts for the hero — system "Posts" album is folded into the
   // total because it is real content from the household's perspective.
   // While more albums wait to load, the counts are "at least" ("30+").
-  const albumCount = albums.value.length
-  const itemCount = albums.value.reduce((acc, a) => acc + a.item_count, 0)
+  // A household admin's locked tiles (D7) are not theirs to count.
+  const counted = albums.value.filter(a => !a.locked)
+  const albumCount = counted.length
+  const itemCount = counted.reduce((acc, a) => acc + a.item_count, 0)
   const more = albumsMore.value ? '+' : ''
   // First run: a gallery (the household's or a space's) with no photos and
   // no album of its own yet (the auto "Posts" album may exist, empty). One
@@ -626,10 +628,10 @@ export default function GalleryPage({
                         <span aria-hidden="true">🔒</span> {t('gallery.auto')}
                       </span>
                     )}
-                    {a.audience === 'chosen' && <PrivateBadge />}
                   </strong>
                   <span class="sh-muted">
                     {t(isOne(a.item_count) ? 'gallery.items_one' : 'gallery.items', { n: String(a.item_count) })}
+                    {a.audience === 'chosen' && <PrivateBadge />}
                   </span>
                   {a.retention_exempt && !a.is_system && (
                     <span class="sh-badge">{t('gallery.kept')}</span>
@@ -1558,7 +1560,7 @@ function LockedAlbumCard({ album, onDeleted }: { album: Album; onDeleted: () => 
   const remove = async () => {
     const ok = await confirmDialog(t('gallery.locked.delete_body', { name: owner }), {
       title: t('gallery.locked.delete_title', { name: owner }),
-      confirmLabel: t('gallery.manage.album_delete_confirm'),
+      confirmLabel: t('gallery.locked.delete_confirm'),
       destructive: true,
     })
     if (!ok) return

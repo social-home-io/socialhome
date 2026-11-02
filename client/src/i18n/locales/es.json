@@ -6559,5 +6559,6 @@
   "error.album_audience.blocked": "No se puede añadir a {name} a este álbum.",
   "error.album_audience.unknown_person": "Alguien que elegiste ya no forma parte del hogar.",
   "error.album_audience.too_many": "Un álbum privado puede tener como máximo {max} personas.",
-  "error.child_upload_off": "Añadir fotos está desactivado para los niños ahora mismo. Pídeselo a un adulto."
+  "error.child_upload_off": "Añadir fotos está desactivado para los niños ahora mismo. Pídeselo a un adulto.",
+  "gallery.locked.delete_confirm": "Mover a la papelera"
 }

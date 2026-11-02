@@ -6532,5 +6532,6 @@
   "error.album_audience.blocked": "{name} kann nicht zu diesem Album hinzugefügt werden.",
   "error.album_audience.unknown_person": "Jemand, den du ausgewählt hast, gehört nicht mehr zum Haushalt.",
   "error.album_audience.too_many": "Ein privates Album kann höchstens {max} Personen haben.",
-  "error.child_upload_off": "Fotos hinzufügen ist für Kinder gerade aus. Frag eine erwachsene Person."
+  "error.child_upload_off": "Fotos hinzufügen ist für Kinder gerade aus. Frag eine erwachsene Person.",
+  "gallery.locked.delete_confirm": "In den Papierkorb legen"
 }

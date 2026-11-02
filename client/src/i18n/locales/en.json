@@ -6568,5 +6568,6 @@
   "error.album_audience.blocked": "{name} can't be added to this album.",
   "error.album_audience.unknown_person": "Someone you picked isn't part of your home any more.",
   "error.album_audience.too_many": "A private album can have at most {max} people.",
-  "error.child_upload_off": "Adding photos is turned off for children right now. Ask a grown-up."
+  "error.child_upload_off": "Adding photos is turned off for children right now. Ask a grown-up.",
+  "gallery.locked.delete_confirm": "Move to trash"
 }

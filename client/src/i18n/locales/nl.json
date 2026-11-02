@@ -6532,5 +6532,6 @@
   "error.album_audience.blocked": "{name} kan niet aan dit album worden toegevoegd.",
   "error.album_audience.unknown_person": "Iemand die je hebt gekozen, hoort niet meer bij het huishouden.",
   "error.album_audience.too_many": "Een privéalbum kan hoogstens {max} mensen hebben.",
-  "error.child_upload_off": "Foto's toevoegen staat voor kinderen nu uit. Vraag een volwassene."
+  "error.child_upload_off": "Foto's toevoegen staat voor kinderen nu uit. Vraag een volwassene.",
+  "gallery.locked.delete_confirm": "Naar de prullenbak"
 }

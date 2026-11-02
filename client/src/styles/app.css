@@ -30156,6 +30156,8 @@ body:has(.sh-gviewer) .sh-modal-overlay { z-index: calc(var(--sh-z-lightbox) + 1
 /* ── Private albums (gallery D7) and children (D6) ─────────────────── */
 
 .sh-album-private-badge {
+  font-family: var(--sh-font-family);
+  letter-spacing: normal;
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -30171,6 +30173,7 @@ body:has(.sh-gviewer) .sh-modal-overlay { z-index: calc(var(--sh-z-lightbox) + 1
 }
 .sh-album-private-badge--button {
   font: inherit;
+  font-family: var(--sh-font-family);
   font-size: var(--sh-font-size-xs);
   font-weight: 600;
   min-height: 28px;
