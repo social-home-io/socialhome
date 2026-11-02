@@ -79,6 +79,9 @@ export interface GalleryViewerProps {
   isFavourite?: (item: ViewerItem) => boolean
   /** Mark (``on``) or unmark a favourite; rejects when it didn't save. */
   onFavourite?: (item: ViewerItem, on: boolean) => Promise<void>
+  /** Share a copy to the feed, a space or a chat (household photos, D8);
+   *  without it, no Share button. */
+  onShare?: (item: ViewerItem) => void
 }
 
 const HINT_KEY = 'sh_gallery_viewer_hint_seen'
@@ -111,6 +114,7 @@ const ICONS = {
   copy: 'M8.5 8.5h11v11h-11zM15.5 8.5v-4h-11v11h4',
   edit: 'M4.5 19.5h4l10-10-4-4-10 10zM13 7l4 4',
   heart: HEART_PATH,
+  share: 'M12 15V4m0 0L8 8m4-4 4 4M6 11.5H5v8.5h14v-8.5h-1',
 } as const
 
 function Icon({ name }: { name: keyof typeof ICONS }) {
@@ -606,6 +610,16 @@ export function GalleryViewer(props: GalleryViewerProps) {
           >
             <Icon name="heart" />
             <span>{t('gallery.fav.toggle')}</span>
+          </button>
+        )}
+        {item && !item.processing && props.onShare && (
+          <button
+            type="button"
+            class="sh-gviewer-action"
+            onClick={() => props.onShare?.(item)}
+          >
+            <Icon name="share" />
+            <span>{t('gallery.share.action')}</span>
           </button>
         )}
         {item && !item.processing && (props.onDownload ? (

@@ -658,12 +658,34 @@ await check('gallery-addresses', async () => {
   if (!underPrefix(new URL(dl.url()).pathname)) problems.push(`gallery download POSTed outside the prefix: ${dl.url()}`)
   if (dl.status() !== 200) problems.push(`gallery download → ${dl.status()}`)
   if (pathOf(page) !== albumPath) problems.push(`selecting a tile navigated to ${pathOf(page)}`)
+  // Share a copy (D8): the sheet reads its targets and POSTs the share
+  // under the prefix; nothing navigates.
+  const [targets] = await Promise.all([
+    page.waitForResponse(r => /api\/gallery\/share\/targets$/.test(new URL(r.url()).pathname)),
+    page.evaluate(() => [...document.querySelectorAll('.sh-selbar button')].find(b => b.textContent.trim() === 'Share').click()),
+  ])
+  if (!underPrefix(new URL(targets.url()).pathname)) problems.push(`share targets fetched outside the prefix: ${targets.url()}`)
+  if (targets.status() !== 200) problems.push(`share targets → ${targets.status()}`)
+  await step('the household feed target', page.waitForSelector('input[name="sh-share-target"][value="feed"]'))
+  await page.click('input[name="sh-share-target"][value="feed"]')
+  await page.screenshot({ path: path.join(SHOTS, 'gallery-share.png') })
+  const [shared] = await Promise.all([
+    page.waitForResponse(r => r.request().method() === 'POST' && /api\/gallery\/share$/.test(new URL(r.url()).pathname)),
+    page.evaluate(() => [...document.querySelectorAll('.sh-share-sheet button')].find(b => b.textContent.trim() === 'Share a copy').click()),
+  ])
+  if (!underPrefix(new URL(shared.url()).pathname)) problems.push(`share POSTed outside the prefix: ${shared.url()}`)
+  if (shared.status() !== 200) problems.push(`share → ${shared.status()}`)
+  else if ((await shared.json()).shared !== 1) problems.push(`share copied ${(await shared.json()).shared}, want 1`)
+  if (pathOf(page) !== albumPath) problems.push(`sharing navigated to ${pathOf(page)}`)
   await page.keyboard.press('Escape')
   await page.goBack()
   await at(`${PREFIX}/gallery`, 'Back to the albums')
   // The trash: from the albums' ⋯, its own address, Back returns.
   await step('the albums ⋯', page.waitForSelector('button[aria-label="Gallery options"]'))
-  await page.click('button[aria-label="Gallery options"]')
+  // A DOM click: the share's toast may still sit over the ⋯ button.
+  await page.evaluate(() => document.querySelector('button[aria-label="Gallery options"]').click())
+  await step('the Trash menu item', page.waitForFunction(
+    () => [...document.querySelectorAll('[role=menuitem]')].some(b => b.textContent.trim() === 'Trash')))
   await page.evaluate(() => [...document.querySelectorAll('[role=menuitem]')].find(b => b.textContent.trim() === 'Trash').click())
   await at(`${PREFIX}/gallery/trash`, 'the trash from the albums ⋯')
   await step('the trash page', page.waitForSelector('.sh-trash'))

@@ -1067,6 +1067,33 @@ class GalleryItemsAdded(DomainEvent):
 
 
 @dataclass(slots=True, frozen=True)
+class GalleryItemsShared(DomainEvent):
+    """Someone shared a copy of ``photos`` + ``videos`` of *uploader*'s
+    household photos (gallery D8) — one event per share action and
+    uploader, never for the sharer's own photos.
+
+    ``target`` is ``feed`` / ``space`` / ``chat``; ``space_id`` names the
+    space for ``space``. ``album_id`` is the household album of the first
+    shared photo (where the row opens). Local only: it never federates,
+    and it never names a private album (only its uploader shares from
+    one, so it never raises this)."""
+
+    share_id: str
+    sharer: str
+    uploader: str
+    photos: int
+    videos: int
+    target: str
+    album_id: str
+    space_id: str | None = None
+    occurred_at: datetime = field(default_factory=_now)
+
+    @property
+    def count(self) -> int:
+        return self.photos + self.videos
+
+
+@dataclass(slots=True, frozen=True)
 class GalleryItemDeleted(DomainEvent):
     item_id: str
     album_id: str

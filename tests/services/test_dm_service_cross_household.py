@@ -11,6 +11,8 @@ recipient should be seated against).
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
@@ -372,3 +374,23 @@ async def test_send_media_empty_caption_allowed(stack):
     )
     assert msg.content == ""
     assert msg.type == "image"
+
+
+async def test_media_allowed_follows_the_direct_pairing_rule(stack):
+    """``media_allowed`` answers the send rule before anything is sent:
+    a chat with a directly paired household takes photos, a relay-only
+    one does not, an unknown chat neither (the gallery share sheet)."""
+    await stack.provision("anna")
+    bob = await _seed_remote_user(stack, instance_id="peer-b", username="bob")
+    fed = _FakeFederationService()
+    peers = {"peer-b": SimpleNamespace(id="peer-b", status=None)}
+    stack.dm_svc.attach_federation(
+        fed, _FakeFederationRepo(peers), own_instance_id=stack.own_instance_id
+    )
+    dm = await stack.dm_svc.create_dm(
+        creator_username="anna", other_user_id=bob.user_id
+    )
+    assert await stack.dm_svc.media_allowed(dm.id) is False
+    peers["peer-b"] = _confirmed_peer("peer-b")
+    assert await stack.dm_svc.media_allowed(dm.id) is True
+    assert await stack.dm_svc.media_allowed("no-such-chat") is False

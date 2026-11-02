@@ -29861,6 +29861,138 @@ a.sh-spaces-row__main:focus-visible { outline: 2px solid var(--sh-focus-ring); o
 .sh-move-album-new { margin: var(--sh-space-xs) 0 0 var(--sh-space-xl); width: calc(100% - var(--sh-space-xl)); }
 .sh-move-album-hint, .sh-edit-item-hint { margin: var(--sh-space-sm) 0 0; font-size: var(--sh-font-size-sm); }
 
+/* Share a copy (D8): targets, the audience line pinned with the button. */
+.sh-share-sheet { max-width: 560px; }
+.sh-share-form { display: flex; flex-direction: column; gap: var(--sh-space-sm); }
+.sh-share-thumbs { display: flex; flex-wrap: wrap; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.sh-share-thumb {
+  position: relative;
+  width: 56px;
+  height: 56px;
+  border-radius: var(--sh-radius-md);
+  overflow: hidden;
+  background: var(--sh-bg-secondary);
+}
+.sh-share-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.sh-share-thumb--more { display: grid; place-items: center; font-weight: 700; color: var(--sh-text-muted); }
+.sh-share-thumb-len {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  padding: 0 4px;
+  border-radius: var(--sh-radius-sm);
+  background: rgba(0, 0, 0, 0.72);
+  color: #fff;
+  font-size: var(--sh-font-size-xs);
+  font-weight: 700;
+}
+.sh-share-note { margin: 0; font-size: var(--sh-font-size-sm); }
+.sh-share-group { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.sh-share-group-title {
+  padding: var(--sh-space-sm) 0 var(--sh-space-xs);
+  font-size: var(--sh-font-size-xs);
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--sh-text-muted);
+}
+.sh-share-target { border-radius: var(--sh-radius-lg); }
+.sh-share-target--on { background: var(--sh-primary-soft); outline: 2px solid var(--sh-primary); outline-offset: -2px; }
+.sh-share-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sh-space-sm);
+  min-height: 52px;
+  padding: 6px var(--sh-space-sm);
+  border-radius: inherit;
+  cursor: pointer;
+}
+.sh-share-row:hover { background: color-mix(in srgb, var(--sh-primary-soft) 60%, transparent); }
+.sh-share-row:has(input:disabled) { cursor: default; opacity: 0.75; }
+.sh-share-row:has(input:disabled):hover { background: none; }
+.sh-share-row input[type="radio"] { width: 20px; height: 20px; flex: none; margin: 0; accent-color: var(--sh-primary); }
+.sh-share-icon {
+  width: 36px;
+  height: 36px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: var(--sh-radius-md);
+  background: var(--sh-bg-secondary);
+  font-size: 18px;
+}
+.sh-share-initials { font-size: var(--sh-font-size-sm); font-weight: 700; }
+.sh-share-text { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.sh-share-name { font-weight: 700; overflow-wrap: anywhere; }
+.sh-share-sub { font-size: var(--sh-font-size-sm); color: var(--sh-text-muted); }
+.sh-share-why { font-size: var(--sh-font-size-sm); color: var(--sh-text-muted); font-style: italic; margin: 0; }
+.sh-share-sub-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 0 var(--sh-space-sm) var(--sh-space-sm) calc(36px + 2 * var(--sh-space-sm));
+}
+.sh-share-modes { border: 0; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.sh-share-mode { display: flex; align-items: center; gap: var(--sh-space-sm); min-height: 36px; cursor: pointer; }
+.sh-share-mode input { width: 18px; height: 18px; margin: 0; flex: none; accent-color: var(--sh-primary); }
+.sh-share-album { display: flex; flex-wrap: wrap; gap: 6px; }
+.sh-share-album-select, .sh-share-album-new { min-height: 36px; max-width: 100%; flex: 1 1 180px; }
+.sh-share-message { display: flex; flex-direction: column; gap: 4px; margin-top: var(--sh-space-xs); }
+.sh-share-message label { font-size: var(--sh-font-size-sm); font-weight: 600; }
+.sh-share-message textarea { resize: vertical; min-height: 44px; }
+.sh-share-load-failed { display: flex; flex-direction: column; align-items: flex-start; gap: var(--sh-space-sm); }
+/* Pinned to the bottom of the sheet: nobody shares without seeing who
+ * gets the copy. Runs flush to the sheet's edges like the form actions. */
+.sh-share-foot {
+  position: sticky;
+  bottom: 0;
+  margin: var(--sh-space-sm) calc(-1 * var(--sh-space-lg)) calc(-1 * var(--sh-space-lg));
+  padding: var(--sh-space-sm) var(--sh-space-lg) var(--sh-space-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sh-space-sm);
+  background: var(--sh-bg-tertiary);
+  border-top: 1px dashed var(--sh-border);
+  box-shadow: 0 -10px 12px -10px rgba(0, 0, 0, 0.18);
+  z-index: 1;
+}
+.sh-share-foot .sh-form-actions,
+.sh-modal-body .sh-share-foot .sh-form-actions {
+  position: static;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+}
+.sh-share-audience {
+  padding: 10px 12px;
+  border-radius: var(--sh-radius-lg);
+  border: 1px solid color-mix(in srgb, var(--sh-success) 40%, var(--sh-border));
+  background: color-mix(in srgb, var(--sh-success) 12%, var(--sh-bg-tertiary));
+  font-size: var(--sh-font-size-sm);
+}
+.sh-share-audience p { margin: 0; }
+.sh-share-uploaders { margin-top: 4px !important; color: var(--sh-text-muted); }
+.sh-share-pick { margin: 0; font-size: var(--sh-font-size-sm); }
+.sh-share-video {
+  margin: 0;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: var(--sh-radius-lg);
+  background: color-mix(in srgb, var(--sh-warning) 16%, var(--sh-bg-tertiary));
+  font-size: var(--sh-font-size-sm);
+}
+.sh-share-video legend { float: left; width: 100%; padding: 0; margin-bottom: 4px; }
+.sh-share-video-choices { clear: both; display: flex; flex-wrap: wrap; column-gap: var(--sh-space-md); }
+@media (max-width: 640px) {
+  .sh-share-foot {
+    bottom: 0;
+    margin: var(--sh-space-sm) calc(-1 * var(--sh-space-md)) calc(-1 * var(--sh-space-md));
+    padding: var(--sh-space-sm) var(--sh-space-md) calc(var(--sh-space-md) + env(safe-area-inset-bottom, 0px));
+  }
+  .sh-share-foot .sh-form-actions > .sh-btn { min-height: 44px; }
+}
+
 /* Edit caption / date, rename album */
 .sh-edit-item { display: flex; flex-direction: column; gap: var(--sh-space-sm); }
 .sh-edit-item label { display: flex; flex-direction: column; gap: 4px; font-weight: 600; }

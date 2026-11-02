@@ -67,6 +67,8 @@ import { HeartIcon } from './HeartIcon'
 import { SelectionBar, type SelectionAction } from './SelectionBar'
 import { useSelection, type Selection } from './useSelection'
 import { MoveToAlbumDialog } from './MoveToAlbumDialog'
+import { ShareSheet } from './ShareSheet'
+import { SHARE_MAX, type ShareItem } from './gallerySharing'
 import { EditItemDialog } from './EditItemDialog'
 import { AlbumMenu } from './AlbumMenu'
 import {
@@ -992,6 +994,7 @@ function useAlbumViewer(
   const searched = useRef(0)
   const fetching = useRef(false)
   const [editing, setEditing] = useState<Item | null>(null)
+  const [sharing, setSharing] = useState<Item | null>(null)
   const lastItem = useRef<string | null>(null)
   const loaded = items.value.filter(i => !pendingDeletes.value.has(i.id))
   const index = itemId ? loaded.findIndex(i => i.id === itemId) : -1
@@ -1071,6 +1074,14 @@ function useAlbumViewer(
         onSaved={(it) => { items.value = items.value.map(i => i.id === it.id ? { ...i, ...it } : i) }}
       />
     )}
+    {sharing && (
+      <ShareSheet
+        items={[asShareItem(sharing)]}
+        nameOf={(uid) => uploaderName(album.space_id, uid)}
+        onClose={() => setSharing(null)}
+        onShared={(message, result) => showToast(message, result.shared > 0 ? 'success' : 'info')}
+      />
+    )}
     <GalleryViewer
       items={viewerItems}
       index={index}
@@ -1093,6 +1104,10 @@ function useAlbumViewer(
       onEdit={(it) => {
         const row = items.value.find(i => i.id === it.id)
         if (row) setEditing(row)
+      }}
+      onShare={album.space_id ? undefined : (it) => {
+        const row = items.value.find(i => i.id === it.id)
+        if (row) setSharing(row)
       }}
       onDownload={async (it) => {
         try {
@@ -1285,6 +1300,7 @@ function canManageAlbum(album: Album, canModerate: boolean, readOnly: boolean): 
 function useAlbumManage(album: Album, loaded: Item[], canModerate: boolean, readOnly: boolean) {
   const sel = useSelection(loaded.map(i => i.id))
   const [moving, setMoving] = useState(false)
+  const [sharing, setSharing] = useState(false)
   const [busy, setBusy] = useState<'save' | 'delete' | 'favourite' | null>(null)
   const spaceId = album.space_id ?? undefined
   const picked = loaded.filter(i => sel.ids.has(i.id))
@@ -1396,12 +1412,23 @@ function useAlbumManage(album: Album, loaded: Item[], canModerate: boolean, read
   }
 
   const deletable = !readOnly && !album.is_system
+  // D8: a copy of household photos goes to the feed, a space or a chat.
+  // A space's own gallery shares nothing out from here.
+  const shareable = !album.space_id
+  const share = () => {
+    if (picked.length > SHARE_MAX) {
+      showToast(t('gallery.share.too_many', { n: String(SHARE_MAX) }), 'error')
+      return
+    }
+    setSharing(true)
+  }
   const actions: SelectionAction[] = [
     {
       key: 'favourite', icon: 'favourite',
       label: t(allFavourite ? 'gallery.fav.remove' : 'gallery.fav.add'),
       onClick: () => void favourite(), busy: busy === 'favourite',
     },
+    ...(shareable ? [{ key: 'share', icon: 'share', label: t('gallery.share.action'), onClick: share }] : []),
     ...(movable ? [{ key: 'move', icon: 'move', label: t('gallery.manage.move'), onClick: () => setMoving(true) }] : []),
     { key: 'save', icon: 'save', label: t('gallery.manage.save'), onClick: () => void save(), busy: busy === 'save' },
     ...(deletable ? [{
@@ -1415,6 +1442,17 @@ function useAlbumManage(album: Album, loaded: Item[], canModerate: boolean, read
       {sel.active && (
         <SelectionBar count={sel.ids.size} onClose={sel.clear} actions={actions} />
       )}
+      {sharing && (
+        <ShareSheet
+          items={picked.map(asShareItem)}
+          nameOf={nameOf}
+          onClose={() => setSharing(false)}
+          onShared={(message, result) => {
+            showToast(message, result.shared > 0 ? 'success' : 'info')
+            if (result.shared > 0) sel.clear()
+          }}
+        />
+      )}
       {moving && (
         <MoveToAlbumDialog
           count={picked.filter(i => canDeleteItem(album, i, canModerate)).length}
@@ -1426,6 +1464,19 @@ function useAlbumManage(album: Album, loaded: Item[], canModerate: boolean, read
     </>
   )
   return { sel, elements, canManageAlbum: canManageAlbum(album, canModerate, readOnly) }
+}
+
+/** A tile as the share sheet takes it. */
+function asShareItem(i: Item): ShareItem {
+  return {
+    id: i.id,
+    item_type: i.item_type,
+    uploaded_by: i.uploaded_by,
+    thumbnail_url: i.thumbnail_url,
+    caption: i.caption,
+    duration_s: i.duration_s,
+    processing: isProcessing(i),
+  }
 }
 
 /** Spoken name of a gallery item kind, for screen-reader labels. */
