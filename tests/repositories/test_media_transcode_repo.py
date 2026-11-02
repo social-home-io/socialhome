@@ -173,3 +173,44 @@ async def test_active_source_paths_returns_all_source_paths(repo):
         "/tmp/transcode_src/b.bin",
         "/tmp/transcode_src/c.bin",
     }
+
+
+async def test_enqueue_keeps_the_checked_length(repo):
+    await repo.enqueue(
+        output_filename="a.webm",
+        source_path="/s/a.bin",
+        thumbnail_filename="a.webp",
+        owner_user_id="u-1",
+        duration_s=299.5,
+    )
+    await repo.enqueue(
+        output_filename="b.webm",
+        source_path="/s/b.bin",
+        thumbnail_filename="b.webp",
+        owner_user_id="u-1",
+    )
+    by_name = {j.output_filename: j for j in await repo.list_due()}
+    assert by_name["a.webm"].duration_s == 299.5
+    assert by_name["b.webm"].duration_s is None
+
+
+async def test_list_queue_runs_the_converting_one_first_and_skips_failed(repo):
+    for name in ("a", "b", "c", "d"):
+        await repo.enqueue(
+            output_filename=f"{name}.webm",
+            source_path=f"/s/{name}.bin",
+            thumbnail_filename=f"{name}.webp",
+            owner_user_id="u-1",
+        )
+    await repo.mark_processing("c.webm")
+    await repo.mark_failed("d.webm", "broken")
+    await repo.reschedule(
+        "a.webm", attempts=1, next_attempt_at="2999-01-01 00:00:00", last_error="x"
+    )
+
+    queue = [j.output_filename for j in await repo.list_queue()]
+
+    # The running one, then the waiting ones as they'll run (a retry
+    # waiting for its back-off last); the failed one never runs again.
+    assert queue == ["c.webm", "b.webm", "a.webm"]
+    assert await repo.count_queued() == 3

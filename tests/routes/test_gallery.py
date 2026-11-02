@@ -2,6 +2,14 @@
 
 from __future__ import annotations
 
+import pathlib
+
+import aiohttp
+import pytest
+
+from socialhome.app_keys import config_key
+from tests.video_clips import make_clip
+
 from .conftest import _auth
 
 
@@ -288,7 +296,7 @@ async def test_upload_video_item_returns_processing(client):
     aid = (await r.json())["id"]
 
     boundary = "----gallery-boundary"
-    body = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 200
+    body = make_clip(2)
     parts = [
         f"--{boundary}".encode(),
         b'Content-Disposition: form-data; name="file"; filename="clip.mp4"',
@@ -341,7 +349,7 @@ async def _upload_video(client) -> tuple[str, str]:
     )
     aid = (await r.json())["id"]
     boundary = "----gallery-boundary"
-    body = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 200
+    body = make_clip(2)
     parts = [
         f"--{boundary}".encode(),
         b'Content-Disposition: form-data; name="file"; filename="clip.mp4"',
@@ -428,3 +436,99 @@ async def test_gallery_list_photo_has_no_processing_status(client):
     assert photos
     for p in photos:
         assert p.get("media_status") != "processing"
+
+
+# ─── Household videos: 5 minutes, streamed to disk, "ready in" ────────────
+
+
+async def _video_album(client) -> str:
+    from socialhome.app_keys import media_transcode_service_key
+
+    # Keep the queue still so the assertions see it as uploaded.
+    await client.app[media_transcode_service_key].stop()
+    r = await client.post(
+        "/api/gallery/albums", json={"name": "Clips"}, headers=_auth(client._tok)
+    )
+    return (await r.json())["id"]
+
+
+async def _post_video(client, aid: str, clip: bytes, *, raw: bool = False):
+    if raw:
+        return await client.post(
+            f"/api/gallery/albums/{aid}/items",
+            data=clip,
+            headers={**_auth(client._tok), "Content-Type": "video/mp4"},
+        )
+    form = aiohttp.FormData()
+    form.add_field("file", clip, filename="clip.mp4", content_type="video/mp4")
+    return await client.post(
+        f"/api/gallery/albums/{aid}/items", data=form, headers=_auth(client._tok)
+    )
+
+
+async def test_upload_video_over_five_minutes_is_422_with_its_length(client):
+    aid = await _video_album(client)
+    r = await _post_video(client, aid, make_clip(432))
+    assert r.status == 422
+    err = (await r.json())["error"]
+    assert err["code"] == "VIDEO_TOO_LONG"
+    assert err["params"] == {"duration_s": 432, "max_s": 300}
+
+
+async def test_upload_video_of_five_minutes_is_201_with_its_real_length(client):
+    aid = await _video_album(client)
+    r = await _post_video(client, aid, make_clip(300, size=(48, 64)))
+    assert r.status == 201, await r.text()
+    item = await r.json()
+    assert item["duration_s"] == pytest.approx(300.0, abs=0.5)
+    assert (item["width"], item["height"]) == (48, 64)
+    assert item["media_status"] == "processing"
+    # Queued: a rough "ready in" for the processing tile.
+    assert item["media_eta_s"] >= 1
+
+
+async def test_raw_video_body_streams_to_disk(client):
+    aid = await _video_album(client)
+    r = await _post_video(client, aid, make_clip(2), raw=True)
+    assert r.status == 201, await r.text()
+    assert (await r.json())["item_type"] == "video"
+
+
+async def test_unreadable_video_is_422_video_unreadable(client):
+    aid = await _video_album(client)
+    r = await _post_video(client, aid, b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 200)
+    assert r.status == 422
+    assert (await r.json())["error"]["code"] == "VIDEO_UNREADABLE"
+
+
+async def test_video_over_the_household_cap_is_413(client, monkeypatch):
+    monkeypatch.setattr(
+        "socialhome.services.gallery_service.GALLERY_VIDEO_MAX_UPLOAD_BYTES",
+        2 * 1024 * 1024,
+    )
+    aid = await _video_album(client)
+
+    async def gen():
+        # Chunked (no Content-Length): only the streaming cap can refuse it.
+        for _ in range(3):
+            yield b"\x00" * (1024 * 1024)
+
+    r = await client.post(
+        f"/api/gallery/albums/{aid}/items",
+        data=gen(),
+        headers={**_auth(client._tok), "Content-Type": "video/mp4"},
+    )
+    assert r.status == 413
+    err = (await r.json())["error"]
+    assert err["code"] == "PAYLOAD_TOO_LARGE"
+    assert err["params"] == {"max_mb": 2}
+    media = pathlib.Path(client.app[config_key].media_path) / "transcode_src"
+    assert not media.exists() or list(media.iterdir()) == []
+
+
+async def test_list_shows_ready_in_for_a_processing_video(client):
+    aid, _fn = await _upload_video(client)
+    items = await _list_items(client, aid)
+    vid = next(i for i in items if i["item_type"] == "video")
+    assert vid["media_status"] == "processing"
+    assert isinstance(vid["media_eta_s"], int) and vid["media_eta_s"] >= 1

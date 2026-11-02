@@ -19,6 +19,12 @@ from socialhome.crypto import (
     generate_identity_keypair,
 )
 from socialhome.db.database import AsyncDatabase
+from socialhome.domain.errors import (
+    PayloadTooLargeError,
+    TranscodeQueueFullError,
+    VideoTooLongError,
+    VideoUnreadableError,
+)
 from socialhome.domain.events import (
     GalleryAlbumDeleted,
     GalleryAlbumUpdated,
@@ -26,12 +32,18 @@ from socialhome.domain.events import (
     GalleryItemRestored,
     UserDeprovisioned,
 )
-from socialhome.domain.gallery import UploadOutcome
+from socialhome.domain.gallery import (
+    GALLERY_MAX_UPLOAD_BYTES,
+    GALLERY_VIDEO_MAX_SECONDS,
+    GALLERY_VIDEO_MAX_UPLOAD_BYTES,
+    UploadOutcome,
+)
 from socialhome.domain.media_constraints import (
     IMAGE_MAX_DIMENSION,
     IMAGE_WEBP_QUALITY,
     THUMBNAIL_PX,
     VIDEO_MAX_DIMENSION,
+    VIDEO_MAX_DURATION_SECONDS,
 )
 from socialhome.domain.post import Post, PostType
 from socialhome.domain.preferences import FeatureDisabledError
@@ -61,6 +73,7 @@ from socialhome.services.gallery_service import (
     _extract_exif_date_sync,
 )
 from socialhome.services.media_transcode_service import MediaTranscodeService
+from tests.video_clips import make_clip
 
 
 @pytest.fixture
@@ -609,7 +622,9 @@ async def test_delete_item_keeps_files_another_item_uses(env):
 async def test_upload_video_is_async(env):
     """A video upload creates a GalleryItem row immediately (no inline
     transcode), enqueues a transcode job keyed by the item's output
-    ``.webm`` filename, and the .webm/.webp don't exist on disk yet."""
+    ``.webm`` filename, and the .webm/.webp don't exist on disk yet. The
+    item already carries the video's real length, stored size and the
+    day the file says it was recorded."""
     album = await env.create_album(
         space_id=None,
         owner_user_id="a-id",
@@ -618,7 +633,11 @@ async def test_upload_video_is_async(env):
     item = (
         await env.upload_item(
             album.id,
-            data=b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 200,
+            data=make_clip(
+                3,
+                size=(640, 360),
+                metadata={"creation_time": "2026-05-17T16:20:00.000000Z"},
+            ),
             content_type="video/mp4",
             caption="my clip",
             uploader_user_id="a-id",
@@ -627,7 +646,9 @@ async def test_upload_video_is_async(env):
     assert item.item_type == "video"
     assert item.url.endswith(".webm")
     assert item.thumbnail_url.endswith(".webp")
-    assert item.duration_s is None
+    assert item.duration_s == pytest.approx(3.0, abs=0.1)
+    assert (item.width, item.height) == (640, 360)
+    assert item.taken_at == "2026-05-17"
     output_filename = item.url.rsplit("/", 1)[-1]
     thumb_filename = item.thumbnail_url.rsplit("/", 1)[-1]
     # ``.webm`` + ``.webp`` share one UUID stem so the poster is
@@ -643,6 +664,7 @@ async def test_upload_video_is_async(env):
     assert len(due) == 1
     assert due[0].output_filename == output_filename
     assert due[0].owner_user_id == "a-id"
+    assert due[0].duration_s == pytest.approx(3.0, abs=0.1)
 
     # No transcode happened inline — outputs absent.
     media_dir = env._media_dir  # type: ignore[attr-defined]
@@ -650,15 +672,158 @@ async def test_upload_video_is_async(env):
     assert not (media_dir / thumb_filename).exists()
 
 
-async def test_upload_video_flush_writes_files(env, monkeypatch):
-    """Driving the wired transcode service's ``flush_once`` with a stub
-    processor writes the output + poster and clears the job."""
-    album = await env.create_album(
-        space_id=None,
-        owner_user_id="a-id",
-        name="Clips",
-    )
+async def test_upload_video_flush_writes_webm_and_webp_poster(env):
+    """The queued video is converted to the one stored format: a VP9/Opus
+    WebM no bigger than ``VIDEO_MAX_DIMENSION`` on its longest edge, and
+    a WebP poster — whatever the phone recorded."""
+    album = await env.create_album(space_id=None, owner_user_id="a-id", name="Clips")
     item = (
+        await env.upload_item(
+            album.id,
+            data=make_clip(2, size=(2560, 1440), audio=True),
+            content_type="video/mp4",
+            caption=None,
+            uploader_user_id="a-id",
+        )
+    ).item
+    assert (item.width, item.height) == (1920, 1080)
+    output_filename = item.url.rsplit("/", 1)[-1]
+    thumb_filename = item.thumbnail_url.rsplit("/", 1)[-1]
+
+    done = await env._transcode_service.flush_once()  # type: ignore[attr-defined]
+    assert done == 1
+
+    media_dir = env._media_dir  # type: ignore[attr-defined]
+    with av.open(str(media_dir / output_filename)) as c:
+        assert c.format.name.startswith("matroska,webm")
+        video = c.streams.video[0]
+        assert video.codec_context.name == "vp9"
+        assert max(video.codec_context.width, video.codec_context.height) <= (
+            VIDEO_MAX_DIMENSION
+        )
+        assert (video.codec_context.width, video.codec_context.height) == (1920, 1080)
+        assert [a.codec_context.name for a in c.streams.audio] == ["opus"]
+    with Image.open(media_dir / thumb_filename) as poster:
+        assert poster.format == "WEBP"
+    assert await env._transcode_repo.list_due() == []  # type: ignore[attr-defined]
+    # The temp source is gone.
+    assert list((media_dir / "transcode_src").iterdir()) == []
+
+
+async def test_household_video_of_five_minutes_is_kept_whole(env):
+    """The household gallery keeps videos up to 5 minutes (owner D4): a
+    5:00 video is converted whole, not cut at the protocol's 60 s."""
+    album = await env.create_album(space_id=None, owner_user_id="a-id", name="Party")
+    item = (
+        await env.upload_item(
+            album.id,
+            data=make_clip(GALLERY_VIDEO_MAX_SECONDS),
+            content_type="video/mp4",
+            caption=None,
+            uploader_user_id="a-id",
+        )
+    ).item
+    assert item.duration_s == pytest.approx(300.0, abs=0.5)
+
+    assert await env._transcode_service.flush_once() == 1  # type: ignore[attr-defined]
+    out = env._media_dir / item.url.rsplit("/", 1)[-1]  # type: ignore[attr-defined]
+    with av.open(str(out)) as c:
+        assert c.duration / av.time_base == pytest.approx(300.0, abs=1.5)
+
+
+async def test_household_video_over_five_minutes_is_refused_not_cut(env):
+    """Longer than 5 minutes: refused with its length — nothing stored,
+    nothing queued, the uploaded file removed."""
+    album = await env.create_album(space_id=None, owner_user_id="a-id", name="Party")
+    with pytest.raises(VideoTooLongError) as caught:
+        await env.upload_item(
+            album.id,
+            data=make_clip(432),  # 7:12
+            content_type="video/mp4",
+            caption=None,
+            uploader_user_id="a-id",
+        )
+    assert caught.value.code == "VIDEO_TOO_LONG"
+    assert caught.value.params == {"duration_s": 432, "max_s": 300}
+    assert await env.list_items(album.id, actor_user_id="a-id") == []
+    assert await env._transcode_repo.count_queued() == 0  # type: ignore[attr-defined]
+    stash_dir = env._media_dir / "transcode_src"  # type: ignore[attr-defined]
+    assert list(stash_dir.iterdir()) == []
+
+
+async def test_one_second_past_five_minutes_is_refused(env):
+    album = await env.create_album(space_id=None, owner_user_id="a-id", name="Party")
+    with pytest.raises(VideoTooLongError):
+        await env.upload_item(
+            album.id,
+            data=make_clip(GALLERY_VIDEO_MAX_SECONDS + 1),
+            content_type="video/mp4",
+            caption=None,
+            uploader_user_id="a-id",
+        )
+
+
+async def test_space_video_keeps_the_protocol_60s_limit(env):
+    """A space album's videos go to member households: the 60 s protocol
+    limit stays (cut there as before — the share choice is not here)."""
+    album = await env.create_album(space_id="sp-1", owner_user_id="a-id", name="Trip")
+    limits = await env.upload_limits(album.id, uploader_user_id="a-id")
+    assert limits.video_seconds == VIDEO_MAX_DURATION_SECONDS == 60
+    assert limits.video_bytes == GALLERY_MAX_UPLOAD_BYTES
+    item = (
+        await env.upload_item(
+            album.id,
+            data=make_clip(90),
+            content_type="video/mp4",
+            caption=None,
+            uploader_user_id="a-id",
+        )
+    ).item
+    assert item.duration_s == 60.0
+    assert await env._transcode_service.flush_once() == 1  # type: ignore[attr-defined]
+    out = env._media_dir / item.url.rsplit("/", 1)[-1]  # type: ignore[attr-defined]
+    with av.open(str(out)) as c:
+        assert c.duration / av.time_base == pytest.approx(60.0, abs=1.5)
+
+
+async def test_household_upload_limits(env):
+    album = await env.create_album(space_id=None, owner_user_id="a-id", name="Home")
+    limits = await env.upload_limits(album.id, uploader_user_id="b-id")
+    assert limits.video_seconds == GALLERY_VIDEO_MAX_SECONDS == 300
+    assert limits.video_bytes == GALLERY_VIDEO_MAX_UPLOAD_BYTES
+    assert limits.photo_bytes == GALLERY_MAX_UPLOAD_BYTES
+    system = await env.ensure_system_album(space_id=None)
+    with pytest.raises(GalleryPermissionError):
+        await env.upload_limits(system.id, uploader_user_id="a-id")
+
+
+async def test_portrait_phone_video_is_stored_upright(env):
+    """A phone records portrait as landscape + a rotation; the stored
+    size (and the WebM) is the picture as shown."""
+    album = await env.create_album(space_id=None, owner_user_id="a-id", name="Home")
+    item = (
+        await env.upload_item(
+            album.id,
+            data=make_clip(2, size=(64, 32), rotation=90, split_colour=True),
+            content_type="video/quicktime",
+            caption=None,
+            uploader_user_id="a-id",
+        )
+    ).item
+    assert (item.width, item.height) == (32, 64)
+    assert await env._transcode_service.flush_once() == 1  # type: ignore[attr-defined]
+    out = env._media_dir / item.url.rsplit("/", 1)[-1]  # type: ignore[attr-defined]
+    with av.open(str(out)) as c:
+        frame = next(c.decode(video=0)).to_image()
+    assert frame.size == (32, 64)
+    # Turned counter-clockwise: the left (red) half is now at the bottom.
+    assert frame.getpixel((16, 56))[0] > 200
+    assert frame.getpixel((16, 8))[2] > 200
+
+
+async def test_unreadable_video_is_422_and_leaves_nothing(env):
+    album = await env.create_album(space_id=None, owner_user_id="a-id", name="Home")
+    with pytest.raises(VideoUnreadableError):
         await env.upload_item(
             album.id,
             data=b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 200,
@@ -666,28 +831,87 @@ async def test_upload_video_flush_writes_files(env, monkeypatch):
             caption=None,
             uploader_user_id="a-id",
         )
-    ).item
-    output_filename = item.url.rsplit("/", 1)[-1]
-    thumb_filename = item.thumbnail_url.rsplit("/", 1)[-1]
+    stash_dir = env._media_dir / "transcode_src"  # type: ignore[attr-defined]
+    assert list(stash_dir.iterdir()) == []
+    assert await env._transcode_repo.count_queued() == 0  # type: ignore[attr-defined]
 
-    svc = env._transcode_service  # type: ignore[attr-defined]
 
-    class _StubProcessor:
-        async def process(self, src, name):
-            return b"WEBMDATA", "out.webm"
+async def test_same_video_twice_is_already_here(env):
+    album = await env.create_album(space_id=None, owner_user_id="a-id", name="Home")
+    clip = make_clip(2)
+    first = await env.upload_item(
+        album.id,
+        data=clip,
+        content_type="video/mp4",
+        caption=None,
+        uploader_user_id="a-id",
+    )
+    again = await env.upload_item(
+        album.id,
+        data=clip,
+        content_type="video/mp4",
+        caption=None,
+        uploader_user_id="a-id",
+    )
+    assert again.outcome is UploadOutcome.ALREADY_HERE
+    assert again.item.id == first.item.id
+    assert await env._transcode_repo.count_queued() == 1  # type: ignore[attr-defined]
+    # Only the first upload's source waits for its conversion.
+    stash_dir = env._media_dir / "transcode_src"  # type: ignore[attr-defined]
+    assert len(list(stash_dir.iterdir())) == 1
 
-        async def generate_thumbnail(self, src):
-            return b"WEBPDATA"
 
-    monkeypatch.setattr(svc, "_processor", _StubProcessor())
+async def test_a_full_conversion_queue_refuses_more_videos(env, monkeypatch):
+    monkeypatch.setattr(
+        "socialhome.services.gallery_service.GALLERY_VIDEO_MAX_QUEUED", 1
+    )
+    album = await env.create_album(space_id=None, owner_user_id="a-id", name="Home")
+    await env.upload_item(
+        album.id,
+        data=make_clip(2),
+        content_type="video/mp4",
+        caption=None,
+        uploader_user_id="a-id",
+    )
+    with pytest.raises(TranscodeQueueFullError):
+        await env.upload_item(
+            album.id,
+            data=make_clip(3),
+            content_type="video/mp4",
+            caption=None,
+            uploader_user_id="a-id",
+        )
+    stash_dir = env._media_dir / "transcode_src"  # type: ignore[attr-defined]
+    assert len(list(stash_dir.iterdir())) == 1
 
-    done = await svc.flush_once()
-    assert done == 1
 
-    media_dir = env._media_dir  # type: ignore[attr-defined]
-    assert (media_dir / output_filename).read_bytes() == b"WEBMDATA"
-    assert (media_dir / thumb_filename).read_bytes() == b"WEBPDATA"
-    assert await env._transcode_repo.list_due() == []  # type: ignore[attr-defined]
+async def _chunks(*parts: bytes):
+    for part in parts:
+        yield part
+
+
+async def test_stash_upload_streams_to_disk_and_hashes(env):
+    stash = await env.stash_upload(_chunks(b"ab" * 1000, b"cd"), max_bytes=10_000)
+    assert stash.size == 2002
+    assert stash.sha256 == hashlib.sha256(b"ab" * 1000 + b"cd").hexdigest()
+    assert pathlib.Path(stash.path).read_bytes() == b"ab" * 1000 + b"cd"
+    assert pathlib.Path(stash.path).parent.name == "transcode_src"
+
+
+async def test_stash_upload_over_the_cap_is_413_and_removed(env):
+    with pytest.raises(PayloadTooLargeError):
+        await env.stash_upload(_chunks(b"x" * 600, b"y" * 600), max_bytes=1000)
+    stash_dir = env._media_dir / "transcode_src"  # type: ignore[attr-defined]
+    assert list(stash_dir.iterdir()) == []
+
+
+async def test_upload_video_to_a_hidden_album_removes_the_stash(env):
+    stash = await env.stash_upload(_chunks(make_clip(2)), max_bytes=10_000_000)
+    with pytest.raises(GalleryNotFoundError):
+        await env.upload_video(
+            "no-such-album", stash=stash, caption=None, uploader_user_id="a-id"
+        )
+    assert not pathlib.Path(stash.path).exists()
 
 
 async def test_system_album_set_retention_exempt_blocked(env):

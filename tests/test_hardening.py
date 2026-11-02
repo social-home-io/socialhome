@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import aiohttp
 import pytest
 from aiohttp import web
@@ -13,6 +15,7 @@ from socialhome.hardening import (
     build_body_size_middleware,
     build_cors_deny_middleware,
     install_security_headers,
+    iter_part_chunks,
     read_body_capped,
     read_part_capped,
 )
@@ -108,6 +111,43 @@ async def test_body_size_no_content_length_passes(body_client):
     """Chunked / no length → middleware lets it through (aiohttp guards it)."""
     r = await body_client.post("/")
     assert r.status == 200
+
+
+async def test_large_upload_route_has_its_own_declared_cap():
+    """A named upload route (a household gallery video) may declare more
+    than the generic media cap — up to its own; any other route may not."""
+    from aiohttp.test_utils import make_mocked_request
+
+    mw = build_body_size_middleware(
+        json_max_bytes=1024,
+        media_max_bytes=1024,
+        large_uploads=(("POST", re.compile(r"/api/gallery/albums/[^/]+/items"), 4096),),
+    )
+
+    async def _h(_):
+        return web.Response()
+
+    def req(method: str, path: str, length: int):
+        return make_mocked_request(
+            method,
+            path,
+            headers={"Content-Length": str(length), "Content-Type": "video/mp4"},
+        )
+
+    assert (
+        await mw(req("POST", "/api/gallery/albums/a1/items", 3000), _h)
+    ).status == 200
+    assert (
+        await mw(req("POST", "/api/gallery/albums/a1/items", 5000), _h)
+    ).status == 413
+    # Another route, another method, a longer path: the generic cap.
+    assert (await mw(req("POST", "/api/media/upload", 3000), _h)).status == 413
+    assert (
+        await mw(req("PUT", "/api/gallery/albums/a1/items", 3000), _h)
+    ).status == 413
+    assert (
+        await mw(req("POST", "/api/gallery/albums/a1/items/x", 3000), _h)
+    ).status == 413
 
 
 # ─── Capped streaming readers ────────────────────────────────────────────
@@ -504,3 +544,28 @@ async def test_security_headers_reach_streamed_responses(aiohttp_client):
     assert "Permissions-Policy" in r.headers
     # A header the handler set explicitly wins.
     assert r.headers["X-Frame-Options"] == "DENY"
+
+
+async def test_iter_part_chunks_hands_out_the_whole_part(aiohttp_client):
+    """A part is handed out chunk by chunk — past aiohttp's 1 MiB
+    ``client_max_size`` — for a caller that writes it to disk."""
+    got: list[int] = []
+
+    async def handler(request: web.Request) -> web.Response:
+        reader = await request.multipart()
+        field = await reader.next()
+        total = 0
+        async for chunk in iter_part_chunks(field):
+            got.append(len(chunk))
+            total += len(chunk)
+        return web.Response(text=str(total))
+
+    app = web.Application()
+    app.router.add_post("/", handler)
+    client = await aiohttp_client(app)
+    form = aiohttp.FormData()
+    form.add_field("file", b"v" * (3 * 1024 * 1024 + 7), filename="v.mp4")
+    r = await client.post("/", data=form)
+    assert r.status == 200
+    assert int(await r.text()) == 3 * 1024 * 1024 + 7
+    assert len(got) >= 3

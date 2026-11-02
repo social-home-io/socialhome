@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import {
-  ACCEPT, MAX_UPLOAD_BYTES, MAX_DROP_FILES, canPreview, checkFile, dragHasFiles,
-  filesFromDrop, formatSize, withType,
+  ACCEPT, HOUSEHOLD_VIDEO_MAX_BYTES, MAX_UPLOAD_BYTES, MAX_DROP_FILES, canPreview,
+  checkFile, dragHasFiles, filesFromDrop, formatDuration, formatSize, maxBytes,
+  readVideoDuration, videoTooLong, withType,
 } from './uploadFiles'
 
 function file(name: string, type: string, size = 10): File {
@@ -141,5 +142,68 @@ describe('formatSize', () => {
     expect(formatSize(2.4 * 1024 * 1024)).toBe('2.4 MB')
     expect(formatSize(24 * 1024 * 1024)).toBe('24 MB')
     expect(formatSize(300 * 1024)).toBe('300 KB')
+  })
+})
+
+describe('household videos (5 minutes, up to 2 GB)', () => {
+  it('a household video may be 2 GB; a photo or a space video 100 MB', () => {
+    expect(maxBytes('video', true)).toBe(HOUSEHOLD_VIDEO_MAX_BYTES)
+    expect(maxBytes('video', false)).toBe(MAX_UPLOAD_BYTES)
+    expect(maxBytes('photo', true)).toBe(MAX_UPLOAD_BYTES)
+    const big = file('birthday.mov', 'video/quicktime', 1.7 * 1024 ** 3)
+    expect(checkFile(big, true).problem).toBeNull()
+    expect(checkFile(big).problem).toBe('too_large')
+    expect(checkFile(file('a.mp4', 'video/mp4', HOUSEHOLD_VIDEO_MAX_BYTES + 1), true).problem)
+      .toBe('too_large')
+  })
+
+  it('five minutes is what a phone shows as 5:00', () => {
+    expect(videoTooLong(300)).toBe(false)
+    expect(videoTooLong(300.9)).toBe(false)
+    expect(videoTooLong(301)).toBe(true)
+    expect(videoTooLong(432)).toBe(true)
+  })
+
+  it('writes a length the way a phone shows it', () => {
+    expect(formatDuration(432)).toBe('7:12')
+    expect(formatDuration(59.9)).toBe('0:59')
+    expect(formatDuration(3723)).toBe('1:02:03')
+  })
+
+  it('reads the length from the file, and gives up without blocking', async () => {
+    const create = URL.createObjectURL
+    const revoke = URL.revokeObjectURL
+    URL.createObjectURL = vi.fn(() => 'blob:x')
+    URL.revokeObjectURL = vi.fn()
+    const realCreate = document.createElement.bind(document)
+    let fire: 'meta' | 'error' | 'none' = 'meta'
+    const spy = vi.spyOn(document, 'createElement').mockImplementation((tag: string) => {
+      const el = realCreate(tag) as HTMLVideoElement
+      if (tag === 'video') {
+        Object.defineProperty(el, 'duration', { value: 432.4 })
+        Object.defineProperty(el, 'src', {
+          set() {
+            setTimeout(() => {
+              if (fire === 'meta') el.onloadedmetadata?.(new Event('loadedmetadata'))
+              if (fire === 'error') el.onerror?.(new Event('error'))
+            }, 0)
+          },
+          get() { return '' },
+        })
+      }
+      return el
+    })
+    try {
+      expect(await readVideoDuration(file('a.mov', 'video/quicktime'))).toBeCloseTo(432.4)
+      fire = 'error'
+      expect(await readVideoDuration(file('b.mov', 'video/quicktime'))).toBeNull()
+      fire = 'none'
+      expect(await readVideoDuration(file('c.mov', 'video/quicktime'), 20)).toBeNull()
+      expect(URL.revokeObjectURL).toHaveBeenCalledTimes(3)
+    } finally {
+      spy.mockRestore()
+      URL.createObjectURL = create
+      URL.revokeObjectURL = revoke
+    }
   })
 })

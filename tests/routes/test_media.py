@@ -312,10 +312,12 @@ async def test_upload_video_flush_produces_file(client, monkeypatch):
     await svc.stop()
 
     class _StubProcessor:
-        async def process(self, src, name):
-            return b"WEBMDATA", "out.webm"
+        async def transcode_file(self, src, dst, *, max_duration_s, on_progress=None):
+            # A feed upload carries no checked length: the protocol's 60 s.
+            assert max_duration_s == 60.0
+            dst.write_bytes(b"WEBMDATA")
 
-        async def generate_thumbnail(self, src):
+        async def thumbnail_file(self, src):
             return b"WEBPDATA"
 
     monkeypatch.setattr(svc, "_processor", _StubProcessor())

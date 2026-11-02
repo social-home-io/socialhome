@@ -20,6 +20,9 @@ from socialhome.domain.errors import (
     PayloadTooLargeError,
     SpaceNotPublishableError,
     TierChangeRequiredError,
+    TranscodeQueueFullError,
+    VideoTooLongError,
+    VideoUnreadableError,
     WrongTypeError,
 )
 from socialhome.domain.federation import (
@@ -351,3 +354,24 @@ def test_wrong_type_error_is_both_a_type_error_and_a_value_error():
     assert isinstance(exc, TypeError)
     assert isinstance(exc, ValueError)
     assert str(exc) == "x must be a string"
+
+
+# ─── Household videos ────────────────────────────────────────────────────
+
+
+def test_video_too_long_names_its_length_and_the_limit():
+    """The SPA says "7:12 long — the gallery keeps videos up to 5
+    minutes" from the params alone (whole seconds)."""
+    exc = VideoTooLongError(432.7, 300)
+    assert isinstance(exc, ValueError)
+    assert (exc.status, exc.code) == (422, "VIDEO_TOO_LONG")
+    assert exc.params == {"duration_s": 432, "max_s": 300}
+
+
+def test_video_unreadable_and_queue_full():
+    exc = VideoUnreadableError()
+    assert isinstance(exc, ValueError)
+    assert (exc.status, exc.code, exc.params) == (422, "VIDEO_UNREADABLE", {})
+    full = TranscodeQueueFullError()
+    assert (full.status, full.code) == (503, "TRANSCODE_QUEUE_FULL")
+    assert not isinstance(full, ValueError)

@@ -20,6 +20,7 @@
 import { t } from '@/i18n/i18n'
 import { accessNote } from '@/features/spaces/spaceAccess'
 import { formatBazaarAmount } from '@/components/bazaarFormat'
+import { formatDuration } from '@/features/gallery/uploadFiles'
 
 /** The parsed ``error`` object of a canonical error body. */
 export interface ApiErrorBody {
@@ -172,6 +173,15 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   APP_GROUP_OPEN_LIMIT: (_b, p) => t('error.app_group_open_limit', { limit: str(p, 'limit') }),
   APP_GROUP_DAILY_LIMIT: (_b, p) => t('error.app_group_daily_limit', { limit: str(p, 'limit') }),
   IMAGE_UNREADABLE: () => t('error.image_unreadable'),
+  // Household gallery videos (5 minutes, refused — never cut — when longer).
+  VIDEO_TOO_LONG: (_b, p) => p.duration_s === undefined || p.max_s === undefined
+    ? null
+    : t('error.video_too_long', {
+      length: formatDuration(Number(p.duration_s)),
+      max: String(Math.round(Number(p.max_s) / 60)),
+    }),
+  VIDEO_UNREADABLE: () => t('error.video_unreadable'),
+  TRANSCODE_QUEUE_FULL: () => t('error.transcode_queue_full'),
   // Connecting to a GFS (QR / pasted code, or onboarding's open sign-up).
   // Our own words for every refusal, never the GFS's (``routes/gfs.py``).
   GFS_UNREACHABLE: () => t('error.gfs_unavailable'),

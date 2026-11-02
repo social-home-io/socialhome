@@ -1,0 +1,31 @@
+-- 0140 — ``media_transcode_jobs.duration_s``: the source video's length,
+-- read from the file at upload and checked there against its use's limit
+-- (household gallery: 5 minutes, owner decision D4 2026-11-02; spaces,
+-- the feed and DMs keep the protocol's 60 s).
+--
+-- The transcode keeps exactly this much — a household video checked at
+-- 4:50 is converted whole, never cut at 60 s — and the queue's "ready in
+-- about 4 min" estimate sums it over the jobs ahead. NULL (every existing
+-- row, the feed / DM / moment uploads that don't read it) keeps today's
+-- behaviour: the protocol's ``VIDEO_MAX_DURATION_SECONDS``.
+--
+-- CLAUDE.md "audit before a migration":
+--
+-- 1. Audited every path that touches the table: ``SqliteMediaTranscodeRepo``
+--    (enqueue / list_due / reschedule / mark_failed / reclaim / status_for /
+--    active_source_paths), ``MediaTranscodeService.flush_once`` (the only
+--    reader of a job's settings), the upload paths that enqueue
+--    (``GalleryService._upload_video``, ``routes/media.py``) and the orphan
+--    sweep (``active_source_paths``). Nothing else stores a per-job length.
+-- 2. Alternatives rejected: ``kind`` is CHECK-constrained to 'video' (a
+--    new kind needs a table rebuild — a bigger change than one column);
+--    keeping the length in memory would cut a 5-minute household video
+--    to 60 s after a restart (the queue must survive one); reading the
+--    length from ``gallery_items.duration_s`` couples the generic queue
+--    to one of its users and leaves feed jobs unknowable; probing the
+--    source again at transcode time can't tell which limit it was checked
+--    against.
+-- 3. Smallest change: one NULL-defaulted ``ADD COLUMN``; no backfill, no
+--    index, no existing row touched.
+
+ALTER TABLE media_transcode_jobs ADD COLUMN duration_s REAL;

@@ -33,6 +33,9 @@ __all__ = [
     "PayloadTooLargeError",
     "SpaceNotPublishableError",
     "TierChangeRequiredError",
+    "TranscodeQueueFullError",
+    "VideoTooLongError",
+    "VideoUnreadableError",
     "WrongTypeError",
 ]
 
@@ -101,6 +104,40 @@ class ImageUnreadableError(CodedError, ValueError):
     status = 422
     code = "IMAGE_UNREADABLE"
     detail = "This image couldn't be opened."
+
+
+class VideoTooLongError(CodedError, ValueError):
+    """A video is longer than this place keeps (household gallery: 5 min).
+
+    Refused, never cut: ``params`` carry the video's length and the limit
+    (whole seconds) so the SPA can say "7:12 long — the gallery keeps
+    videos up to 5 minutes".
+    """
+
+    status = 422
+    code = "VIDEO_TOO_LONG"
+    detail = "This video is longer than the gallery keeps."
+
+    def __init__(self, duration_s: float, max_s: int) -> None:
+        super().__init__(params={"duration_s": int(duration_s), "max_s": int(max_s)})
+
+
+class VideoUnreadableError(CodedError, ValueError):
+    """The video library could not open an uploaded video (no video
+    stream, or not one frame decodes). Its own error text stays in the
+    server log."""
+
+    status = 422
+    code = "VIDEO_UNREADABLE"
+    detail = "This video couldn't be opened."
+
+
+class TranscodeQueueFullError(CodedError):
+    """Too many videos are waiting to be converted; try again later."""
+
+    status = 503
+    code = "TRANSCODE_QUEUE_FULL"
+    detail = "Too many videos are waiting to be converted. Try again later."
 
 
 class InvalidMediaRefError(CodedError, ValueError):

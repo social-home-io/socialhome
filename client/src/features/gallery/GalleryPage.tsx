@@ -78,6 +78,17 @@ interface Item {
    *  (treated as ready). A processing item can't play yet, so the tile
    *  shows a "Processing…" overlay and doesn't open the lightbox. */
   media_status?: 'processing' | 'failed' | 'ready'
+  /** While ``processing``: rough seconds until the video is ready (the
+   *  household converts one video at a time). */
+  media_eta_s?: number
+}
+
+/** "Ready in about 4 min" for a video tile still converting, or ``null``
+ *  when the server gave no estimate. */
+export function readyInLabel(etaS: number | undefined): string | null {
+  if (typeof etaS !== 'number' || !Number.isFinite(etaS) || etaS <= 0) return null
+  if (etaS < 60) return t('gallery.item_ready_in_soon')
+  return t('gallery.item_ready_in_min', { n: String(Math.ceil(etaS / 60)) })
 }
 
 /** Page sizes — match the server defaults (``routes/gallery.py``). */
@@ -717,17 +728,24 @@ function AlbumDetail({
               // yet, so the tile shows a "Processing…" placeholder (no
               // broken image) and opens nothing.
               if (isProcessing(item)) {
+                const readyIn = readyInLabel(item.media_eta_s)
                 return (
                   <div
                     key={item.id}
                     class="sh-gallery-item sh-gallery-item--processing"
                     role="img"
                     data-item-id={item.id}
-                    aria-label={t('gallery.item_processing_aria', { type: itemTypeLabel(item.item_type) })}
+                    aria-label={
+                      t('gallery.item_processing_aria', { type: itemTypeLabel(item.item_type) })
+                      + (readyIn ? ` · ${readyIn}` : '')
+                    }
                   >
                     <span class="sh-gallery-item-processing" aria-hidden="true">
                       <span class="sh-upload-progress__spinner" />
                       <span class="sh-gallery-item-processing-msg">{t('media.processing')}</span>
+                      {readyIn && (
+                        <span class="sh-gallery-item-processing-eta">{readyIn}</span>
+                      )}
                     </span>
                   </div>
                 )

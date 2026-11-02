@@ -10,11 +10,15 @@ future ``output_filename`` immediately so the SPA renders a
    ``processing`` rows orphaned by a previous crash back to ``pending``
    so they're picked up again.
 2. **Per tick** — :meth:`flush_once` claims each due row
-   (``mark_processing``), reads the source bytes off disk, transcodes
-   them to a VP9/Opus ``.webm`` plus a WebP poster via
-   :class:`VideoProcessor`, writes both under the media root, deletes
+   (``mark_processing``) and converts it — one video at a time, file to
+   file (a 2 GB phone video is never held in memory) — to a VP9/Opus
+   ``.webm`` plus a WebP poster via :class:`VideoProcessor`. The WebM is
+   written next to the source and moved into the media root when
+   complete, so a half-written file is never served. Then it deletes
    the row (readiness == absent row), removes the temp source, and
-   publishes a :class:`MediaTranscodeReady` event.
+   publishes a :class:`MediaTranscodeReady` event. A job keeps the
+   length its upload was checked against (``duration_s``; the
+   protocol's 60 s when it has none).
 3. **On failure** — transient failures reschedule with jittered
    exponential backoff up to :data:`MAX_ATTEMPTS`; at the cap the row
    flips to ``status='failed'`` so the repo's ``status_for`` surfaces
@@ -22,6 +26,14 @@ future ``output_filename`` immediately so the SPA renders a
    :class:`MediaTranscodeFailed` event so the realtime layer can push a
    ``media.failed`` frame to the uploader for an immediate placeholder
    flip (mirrors the success-path :class:`MediaTranscodeReady`).
+
+**Time estimate** — :meth:`estimates` answers "ready in about 4 min" for
+the "processing" tile: the seconds of video still ahead of a job (its
+own included, the running one's progress subtracted) divided by how
+fast this machine converts. That speed is learned from the jobs it has
+finished (and the running one's progress), starting from a cautious
+:data:`DEFAULT_SPEED`. It is never stored: after a restart the first job
+re-learns it.
 
 Mirrors :class:`socialhome.services.dm_media_sync_service.DmMediaSyncService`'s
 scheduler lifecycle: an ``asyncio.Event``-based ``_stop`` / ``_wake``
@@ -33,7 +45,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import pathlib
+import time
+from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -41,6 +56,7 @@ import aiofiles
 import aiofiles.os
 
 from ..domain.events import MediaTranscodeFailed, MediaTranscodeReady
+from ..domain.media_constraints import VIDEO_MAX_DURATION_SECONDS
 from ..media.video_processor import VideoProcessor
 from ..repositories.media_transcode_repo import AbstractMediaTranscodeRepo
 from .backoff import jittered_backoff_seconds
@@ -62,6 +78,19 @@ MAX_ATTEMPTS: int = 3
 BACKOFF_BASE_SECONDS: float = 30.0
 BACKOFF_CAP_SECONDS: float = 30 * 60.0
 
+#: Seconds of video converted per second before this machine has shown
+#: its own speed. Cautious on purpose: measured 1080p → VP9 runs at
+#: ~1 s/s on a desktop and ~8 s per second of video on a Raspberry Pi 4,
+#: so the first estimate says "longer" rather than "sooner".
+DEFAULT_SPEED: float = 0.25
+#: Weight of the newest finished job in the learned speed.
+SPEED_SMOOTHING: float = 0.5
+#: The running job's own pace replaces the learned one once it has run
+#: this long (early seconds are dominated by opening the file).
+LIVE_SPEED_AFTER_S: float = 15.0
+#: Speeds outside this band are a measuring artefact, not a machine.
+_SPEED_BOUNDS: tuple[float, float] = (0.01, 50.0)
+
 
 class MediaTranscodeService(BusPublisherMixin):
     """Drain ``media_transcode_jobs`` — transcode video in the background.
@@ -75,11 +104,15 @@ class MediaTranscodeService(BusPublisherMixin):
     """
 
     __slots__ = (
+        "_active",
+        "_active_done_s",
+        "_active_started",
         "_bus",
         "_interval",
         "_media_dir",
         "_processor",
         "_repo",
+        "_speed",
         "_stop",
         "_task",
         "_wake",
@@ -105,6 +138,13 @@ class MediaTranscodeService(BusPublisherMixin):
         # loop transcodes freshly-queued uploads immediately instead of
         # waiting up to ``interval_seconds`` for the next periodic tick.
         self._wake = asyncio.Event()
+        # The job being converted now, how far it got (seconds of video,
+        # written from the worker thread) and since when.
+        self._active: str | None = None
+        self._active_done_s: float = 0.0
+        self._active_started: float = 0.0
+        # Seconds of video per second of conversion (learned).
+        self._speed: float = DEFAULT_SPEED
 
     def nudge(self) -> None:
         """Wake the loop so a freshly-enqueued job transcodes now.
@@ -186,21 +226,28 @@ class MediaTranscodeService(BusPublisherMixin):
             if not await aiofiles.os.path.isfile(source_path):
                 await self._fail(job, "source file missing")
                 continue
+            # Written beside the source (never served), moved into the
+            # media root only once complete.
+            partial = source_path.with_name(f"{job.output_filename}.part")
+            self._active = job.output_filename
+            self._active_done_s = 0.0
+            self._active_started = time.monotonic()
             try:
-                async with aiofiles.open(source_path, "rb") as f:
-                    src = await f.read()
-                webm_bytes, _ = await self._processor.process(src, "source")
-                # ``generate_thumbnail`` extracts the first frame from the
-                # *source* bytes as a WebP poster.
-                thumb_bytes = await self._processor.generate_thumbnail(src)
-                async with aiofiles.open(
-                    self._media_dir / job.output_filename, "wb"
-                ) as f:
-                    await f.write(webm_bytes)
+                await self._processor.transcode_file(
+                    source_path,
+                    partial,
+                    max_duration_s=keep_seconds(job),
+                    on_progress=self._on_progress,
+                )
+                # The poster is the first frame of the *source*.
+                thumb_bytes = await self._processor.thumbnail_file(source_path)
                 async with aiofiles.open(
                     self._media_dir / job.thumbnail_filename, "wb"
                 ) as f:
                     await f.write(thumb_bytes)
+                await aiofiles.os.replace(
+                    partial, self._media_dir / job.output_filename
+                )
             except Exception as exc:
                 log.warning(
                     "media-transcode: transcode failed for %s: %s",
@@ -208,13 +255,67 @@ class MediaTranscodeService(BusPublisherMixin):
                     exc,
                     exc_info=True,
                 )
+                await self._remove_source(partial)
                 await self._fail(job, str(exc))
                 continue
+            finally:
+                self._active = None
+            self._learn_speed(job, time.monotonic() - self._active_started)
             await self._repo.complete(job.output_filename)
             await self._remove_source(source_path)
             await self._publish_ready(job)
             done += 1
         return done
+
+    # ── Time estimate ──────────────────────────────────────────────────
+
+    async def estimates(self, output_filenames: Iterable[str]) -> dict[str, int]:
+        """Seconds until each of *output_filenames* is ready (rough).
+
+        Only queued jobs get an entry (a finished or failed one has
+        nothing to wait for). Walks the queue in the order it runs: every
+        job ahead adds its length, the running one only what it has left.
+        """
+        wanted = set(output_filenames)
+        if not wanted:
+            return {}
+        queue = await self._repo.list_queue()
+        speed = self._current_speed()
+        out: dict[str, int] = {}
+        ahead_s = 0.0
+        for job in queue:
+            length = keep_seconds(job)
+            if job.output_filename == self._active:
+                length = max(0.0, length - self._active_done_s)
+            ahead_s += length / speed
+            if job.output_filename in wanted:
+                out[job.output_filename] = max(1, math.ceil(ahead_s))
+                if len(out) == len(wanted):
+                    break
+        return out
+
+    def _on_progress(self, done_s: float) -> None:
+        """Worker-thread callback: seconds of the running video done."""
+        self._active_done_s = done_s
+
+    def _current_speed(self) -> float:
+        """The learned speed, or the running job's own once it has run a
+        while (a long video tells us more than the last short one)."""
+        if self._active is not None:
+            elapsed = time.monotonic() - self._active_started
+            if elapsed >= LIVE_SPEED_AFTER_S and self._active_done_s > 0:
+                return _bounded(self._active_done_s / elapsed)
+        return self._speed
+
+    def _learn_speed(self, job: MediaTranscodeJob, elapsed: float) -> None:
+        """Fold a finished job's pace into the learned speed."""
+        converted = self._active_done_s or (job.duration_s or 0.0)
+        if elapsed <= 0 or converted <= 0:
+            return
+        sample = _bounded(converted / elapsed)
+        self._speed = _bounded(
+            SPEED_SMOOTHING * sample + (1 - SPEED_SMOOTHING) * self._speed
+        )
 
     # ── Internals ──────────────────────────────────────────────────────
 
@@ -249,9 +350,11 @@ class MediaTranscodeService(BusPublisherMixin):
         )
 
     async def _remove_source(self, source_path: pathlib.Path) -> None:
-        """Best-effort delete the temp source bytes."""
+        """Best-effort delete a temp file (the source, a partial WebM)."""
         try:
             await aiofiles.os.remove(source_path)
+        except FileNotFoundError:
+            return
         except OSError as exc:  # pragma: no cover — defensive
             log.debug(
                 "media-transcode: could not remove temp source %s: %s",
@@ -303,3 +406,17 @@ class MediaTranscodeService(BusPublisherMixin):
                 exc,
                 exc_info=True,
             )
+
+
+def keep_seconds(job: MediaTranscodeJob) -> float:
+    """How much of a job's video is kept: the length its upload was
+    checked against (``duration_s``, whole seconds rounded up so the last
+    frame stays), else the protocol's ``VIDEO_MAX_DURATION_SECONDS``."""
+    if job.duration_s is not None and job.duration_s > 0:
+        return float(math.ceil(job.duration_s))
+    return float(VIDEO_MAX_DURATION_SECONDS)
+
+
+def _bounded(speed: float) -> float:
+    low, high = _SPEED_BOUNDS
+    return min(high, max(low, speed))

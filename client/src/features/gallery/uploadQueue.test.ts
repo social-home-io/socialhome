@@ -3,6 +3,17 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 const apiPost = vi.fn()
 vi.mock('@/api', () => ({ api: { post: (...a: unknown[]) => apiPost(...a), get: vi.fn() } }))
 
+/** What the browser reads as each video's length (``undefined``: can't). */
+const durations = new Map<string, number | null>()
+let durationGate: Promise<void> = Promise.resolve()
+vi.mock('./uploadFiles', async (orig) => ({
+  ...(await orig<typeof import('./uploadFiles')>()),
+  readVideoDuration: async (f: File) => {
+    await durationGate
+    return durations.get(f.name) ?? null
+  },
+}))
+
 type Reply = { status: number; body?: string; retryAfter?: string; network?: boolean; hold?: boolean }
 let replies: Map<string, Reply[]>
 let live: FakeXhr[]
@@ -56,6 +67,8 @@ async function settle(): Promise<void> {
 
 beforeEach(async () => {
   replies = new Map()
+  durations.clear()
+  durationGate = Promise.resolve()
   live = []
   sent.length = 0
   apiPost.mockReset()
@@ -218,5 +231,70 @@ describe('upload queue', () => {
   it('maps server answers to short, translated reasons', () => {
     expect(q.errorReason(new Error('Network error'))).toBe('Connection lost.')
     expect(q.problemReason('unsupported')).toMatch(/^Not a photo or video/)
+  })
+})
+
+describe('household videos: checked before upload, never cut', () => {
+  const mov = (n: string) => new File(['x'], n, { type: 'video/quicktime' })
+  const space = { spaceId: 'sp-1', albumId: 'al-s', name: 'Trip', isDefault: false }
+
+  it('a video over 5 minutes is blocked with its length and never sent', async () => {
+    durations.set('birthday.mov', 432)
+    durations.set('song.mov', 300)
+    q.addFiles([mov('birthday.mov'), mov('song.mov')], album)
+    await settle()
+    expect(sent.map(s => s.name)).toEqual(['song.mov'])
+    const blocked = q.entries.value.find(e => e.file.name === 'birthday.mov')!
+    expect(blocked.state).toBe('blocked')
+    expect(blocked.problem).toBe('too_long')
+    expect(blocked.reason).toBe('7:12 long — the gallery keeps videos up to 5 minutes.')
+    expect(q.counts.value.needsYou).toBe(1)
+  })
+
+  it('waits for the length before sending', async () => {
+    let open!: () => void
+    durationGate = new Promise(r => { open = r })
+    durations.set('a.mov', 12)
+    q.addFiles([mov('a.mov'), jpg('p.jpg')], album)
+    await tick()
+    // The photo goes; the video waits for its length.
+    expect(sent.map(s => s.name)).toEqual(['p.jpg'])
+    open()
+    await settle()
+    expect(sent.map(s => s.name)).toEqual(['p.jpg', 'a.mov'])
+  })
+
+  it("a length the browser can't read goes up; the server's refusal reads the same", async () => {
+    durations.set('hevc.mov', null)
+    replies.set('hevc.mov', [{
+      status: 422,
+      body: JSON.stringify({ error: { code: 'VIDEO_TOO_LONG', detail: 'x', params: { duration_s: 312, max_s: 300 } } }),
+    }])
+    q.addFiles([mov('hevc.mov')], album)
+    await settle()
+    const e = q.entries.value[0]
+    expect(e.state).toBe('failed')
+    expect(e.reason).toBe('5:12 long — the gallery keeps videos up to 5 minutes.')
+  })
+
+  it("a space gallery's videos keep their own rules (no 5-minute check here)", async () => {
+    durations.set('long.mov', 900)
+    q.addFiles([mov('long.mov')], space)
+    await settle()
+    expect(sent.map(s => s.name)).toEqual(['long.mov'])
+  })
+
+  it('a too-large household video says a video may be 2 GB', () => {
+    const big = new File(['x'], 'big.mov', { type: 'video/quicktime' })
+    Object.defineProperty(big, 'size', { value: 3 * 1024 ** 3 })
+    q.addFiles([big], album)
+    expect(q.entries.value[0].reason).toBe('Too large — a video can be up to 2 GB.')
+  })
+
+  it('a full conversion queue says so', async () => {
+    // The class the freshly imported queue knows (modules reset per test).
+    const { UploadHttpError } = await import('@/utils/uploadErrors')
+    expect(q.errorReason(new UploadHttpError(503, 'TRANSCODE_QUEUE_FULL')))
+      .toBe('Your home is still converting a lot of videos. Try again later.')
   })
 })
