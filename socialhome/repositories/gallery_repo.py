@@ -135,6 +135,7 @@ class AbstractGalleryRepo(Protocol):
     async def get_first_item_thumbnail(
         self, album_id: str, *, viewer_user_id: str | None = None
     ) -> str | None: ...
+    async def count_visible_items(self, album_id: str, viewer_user_id: str) -> int: ...
     async def list_space_item_filenames(self, space_id: str) -> list[str]: ...
     async def set_retention_exempt(
         self,
@@ -852,6 +853,16 @@ class SqliteGalleryRepo:
             (n, album_id),
         )
         return n
+
+    async def count_visible_items(self, album_id: str, viewer_user_id: str) -> int:
+        """How many live items of the album *viewer_user_id* may see — the
+        system album's count, which hides what its listing hides."""
+        row = await self._db.fetchone(
+            "SELECT COUNT(*) AS n FROM gallery_items WHERE album_id=?"
+            " AND deleted_at IS NULL" + _VIEWER_MAY_SEE_UPLOADER_SQL,
+            (album_id, viewer_user_id, viewer_user_id, viewer_user_id),
+        )
+        return int(row["n"]) if row else 0
 
     async def get_first_item_thumbnail(
         self, album_id: str, *, viewer_user_id: str | None = None

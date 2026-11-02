@@ -242,6 +242,9 @@ async def test_list_items_hides_uploaders_the_viewer_blocked(env):
     assert await repo.get_first_item_thumbnail(
         "alb-1", viewer_user_id="k-id"
     ) == await repo.get_first_item_thumbnail("alb-1")
+    assert await repo.count_visible_items("alb-1", "a-id") == 3
+    assert await repo.count_visible_items("alb-1", "k-id") == 3
+    assert await repo.count_visible_items("alb-1", "nobody") == 4
 
 
 async def test_list_albums_pages_without_repeating_the_system_album(env):

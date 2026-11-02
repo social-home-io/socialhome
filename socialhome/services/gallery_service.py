@@ -250,8 +250,7 @@ class GalleryService:
         )
         out: list[GalleryAlbum] = []
         for a in albums:
-            cover_url = await self._resolve_cover(a, viewer_user_id=actor_user_id)
-            out.append(_with_cover(a, cover_url))
+            out.append(await self._for_viewer(a, actor_user_id))
         return out
 
     async def get_album(
@@ -261,8 +260,25 @@ class GalleryService:
         actor_user_id: str,
     ) -> GalleryAlbum:
         album = await self._visible_album(album_id, actor_user_id)
-        cover_url = await self._resolve_cover(album, viewer_user_id=actor_user_id)
-        return _with_cover(album, cover_url)
+        return await self._for_viewer(album, actor_user_id)
+
+    async def _for_viewer(
+        self, album: GalleryAlbum, viewer_user_id: str
+    ) -> GalleryAlbum:
+        """The album as *viewer_user_id* sees it: its cover, and — for the
+        system "Posts" album, which hides the posts of people the viewer
+        blocked — the count of what they actually see, so the card never
+        says 12 while 11 show."""
+        cover_url = await self._resolve_cover(album, viewer_user_id=viewer_user_id)
+        shown = _with_cover(album, cover_url)
+        if album.is_system:
+            shown = replace(
+                shown,
+                item_count=await self._repo.count_visible_items(
+                    album.id, viewer_user_id
+                ),
+            )
+        return shown
 
     async def create_album(
         self,

@@ -1079,6 +1079,16 @@ async def test_the_posts_album_hides_people_the_viewer_blocked(env):
     assert {i.uploaded_by for i in eve} == {"b-id", "e-id"}
     mine = await env.list_items(regular.id, actor_user_id="a-id")
     assert [i.id for i in mine] == [bobs_upload.id]
+    # The album card counts what each viewer sees, not every row.
+    assert (await env.get_album(posts.id, actor_user_id="a-id")).item_count == 1
+    assert (await env.get_album(posts.id, actor_user_id="e-id")).item_count == 2
+    (listed,) = [
+        a
+        for a in await env.list_albums(space_id=None, actor_user_id="a-id")
+        if a.is_system
+    ]
+    assert listed.item_count == 1
+    assert (await env.get_album(regular.id, actor_user_id="a-id")).item_count == 1
 
 
 async def test_a_mirrored_photo_gets_a_real_thumbnail(env):
