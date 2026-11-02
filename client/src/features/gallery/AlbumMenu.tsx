@@ -1,5 +1,6 @@
 /**
  * AlbumMenu — the album's ⋯: rename and describe it, choose its cover,
+ * choose who sees it (its owner, household only — ``AudienceSheet``),
  * delete it.
  *
  * Deleting a household album sends it to the trash with its photos (30
@@ -30,8 +31,10 @@ export interface MenuAlbum {
 
 export interface CoverChoice { id: string; thumbnail_url: string; item_type: string }
 
-export function AlbumMenu({ album, covers, onChanged, onDeleted, onRestored }: {
+export function AlbumMenu({ album, covers, onChanged, onDeleted, onRestored, onAudience }: {
   album: MenuAlbum
+  /** The owner's "Who sees this album?" (household only, D7). */
+  onAudience?: () => void
   /** The album's photos loaded so far — the cover picker shows them. */
   covers: CoverChoice[]
   /** Name / description / cover saved: re-read the album. */
@@ -95,6 +98,9 @@ export function AlbumMenu({ album, covers, onChanged, onDeleted, onRestored }: {
       onSelect: () => setPicking(true),
       disabled: covers.length === 0,
     },
+    ...(onAudience
+      ? [{ key: 'audience', label: t('gallery.audience.menu'), onSelect: onAudience }]
+      : []),
     { key: 'delete', label: t('gallery.manage.album_delete'), onSelect: () => void remove(), danger: true },
   ]
 

@@ -15,6 +15,7 @@ import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import type { User } from '@/types'
 import { t } from '@/i18n/i18n'
+import { ChildrenUploadSetting } from '@/features/gallery/ChildrenUploadSetting'
 
 interface MinorFormState {
   username: string
@@ -135,6 +136,7 @@ export default function CpAdminPanel() {
     <section class="sh-cp-admin sh-admin-section">
       <h2>{t('admin.tab.child_protection')}</h2>
       <p class="sh-muted">{t('cp.intro')}</p>
+      <ChildrenUploadSetting />
 
       <table class="sh-admin-table">
         <thead>
