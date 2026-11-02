@@ -6,6 +6,9 @@
  *   /gallery/albums/:albumId/:itemId      one photo or video in the viewer
  *   /gallery/trash                        the household trash (no space
  *                                         mirror: a space has no trash)
+ *   /gallery/favourites[/:itemId]         your own favourites across the
+ *                                         albums you see (no space mirror:
+ *                                         one list spans them all)
  *
  * A space gallery mirrors them under its section:
  * ``/spaces/:id/gallery[/albums/:albumId[/:itemId]]``.
@@ -26,6 +29,9 @@ export interface GalleryRoute {
   valid: boolean
   /** ``/gallery/trash`` — the household trash. */
   trash?: boolean
+  /** ``/gallery/favourites[/:itemId]`` — the person's own favourites;
+   *  ``itemId`` is the photo open in the viewer. */
+  favourites?: boolean
 }
 
 /** Read the ``:sub*`` rest after ``/gallery``. */
@@ -34,6 +40,9 @@ export function parseGallerySub(sub: string | undefined | null): GalleryRoute {
   if (parts.length === 0) return { albumId: null, itemId: null, valid: true }
   if (parts.length === 1 && parts[0] === 'trash') {
     return { albumId: null, itemId: null, valid: true, trash: true }
+  }
+  if (parts[0] === 'favourites' && parts.length <= 2) {
+    return { albumId: null, itemId: parts[1] ?? null, valid: true, favourites: true }
   }
   if (parts[0] !== 'albums' || parts.length < 2 || parts.length > 3) {
     return { albumId: null, itemId: null, valid: false }
@@ -66,6 +75,11 @@ export function backLeadsTo(path: string): boolean {
 
 /** The household trash's in-app path. */
 export const TRASH_PATH = '/gallery/trash'
+
+/** The in-app path of your favourites, or of one of them in the viewer. */
+export function favouritesPath(itemId?: string | null): string {
+  return itemId ? `/gallery/favourites/${encodeURIComponent(itemId)}` : '/gallery/favourites'
+}
 
 /** The in-app path of the gallery, an album or an item in it. */
 export function galleryPath(

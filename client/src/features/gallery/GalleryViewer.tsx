@@ -19,6 +19,8 @@
  * - Delete asks nothing: the page offers Undo for 8 s (household: from
  *   the trash; space: the delete waits for the Undo to run out).
  * - Save hands out the stored file under a human name (``onDownload``).
+ * - ♡ marks the photo one of your favourites (``onFavourite``, F on a
+ *   keyboard) — private: nobody else learns it (owner decision D12).
  * - Reduced motion: the photo doesn't follow the finger or fade in.
  */
 import { useEffect, useLayoutEffect, useRef, useState } from 'preact/hooks'
@@ -31,6 +33,7 @@ import { Skeleton } from '@/components/Skeleton'
 import { copyReferenceForItem } from '@/components/ImageLightbox'
 import { useViewerGestures } from './useViewerGestures'
 import { isZoomed, type Size } from './zoomPan'
+import { HEART_PATH } from './HeartIcon'
 
 export interface ViewerItem {
   id: string
@@ -71,6 +74,11 @@ export interface GalleryViewerProps {
   onEdit?: (item: ViewerItem) => void
   /** Save the stored file with a human name; without it, a plain link. */
   onDownload?: (item: ViewerItem) => Promise<void> | void
+  /** Is this item one of the viewer's favourites? With ``onFavourite``,
+   *  the ♡ button shows it and toggles it. */
+  isFavourite?: (item: ViewerItem) => boolean
+  /** Mark (``on``) or unmark a favourite; rejects when it didn't save. */
+  onFavourite?: (item: ViewerItem, on: boolean) => Promise<void>
 }
 
 const HINT_KEY = 'sh_gallery_viewer_hint_seen'
@@ -102,6 +110,7 @@ const ICONS = {
   report: 'M5.5 21V4m0 0h11l-2 4 2 4h-11',
   copy: 'M8.5 8.5h11v11h-11zM15.5 8.5v-4h-11v11h4',
   edit: 'M4.5 19.5h4l10-10-4-4-10 10zM13 7l4 4',
+  heart: HEART_PATH,
 } as const
 
 function Icon({ name }: { name: keyof typeof ICONS }) {
@@ -160,6 +169,7 @@ export function GalleryViewer(props: GalleryViewerProps) {
   const [infoOpen, setInfoOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [faving, setFaving] = useState(false)
   const [notice, setNotice] = useState<{ text: string; error: boolean } | null>(null)
   const [loadedId, setLoadedId] = useState<string | null>(null)
   const [failedId, setFailedId] = useState<string | null>(null)
@@ -241,6 +251,19 @@ export function GalleryViewer(props: GalleryViewerProps) {
 
   const say = (text: string, error = false) => setNotice({ text, error })
 
+  const favourite = item && props.onFavourite && props.isFavourite ? props.isFavourite(item) : null
+  const toggleFavourite = async () => {
+    if (!item || favourite === null || faving) return
+    setFaving(true)
+    try {
+      await props.onFavourite?.(item, !favourite)
+    } catch {
+      say(t('gallery.fav.failed'), true)
+    } finally {
+      setFaving(false)
+    }
+  }
+
   const onKeyDown = (e: KeyboardEvent) => {
     const target = e.target as HTMLElement | null
     if (e.key === 'Tab') {
@@ -299,6 +322,13 @@ export function GalleryViewer(props: GalleryViewerProps) {
         break
       case '0':
         if (isPhoto) { e.preventDefault(); gestures.reset() }
+        break
+      case 'f':
+      case 'F':
+        if (favourite !== null && !e.ctrlKey && !e.metaKey && !e.altKey) {
+          e.preventDefault()
+          void toggleFavourite()
+        }
         break
       case 'Home':
         if (index > 0) { e.preventDefault(); props.onGo(0) }
@@ -565,6 +595,19 @@ export function GalleryViewer(props: GalleryViewerProps) {
       )}
 
       <div class="sh-gviewer-bar" role="toolbar" aria-label={t('gallery.viewer_actions')}>
+        {item && favourite !== null && (
+          <button
+            type="button"
+            class={'sh-gviewer-action sh-gviewer-fav' + (favourite ? ' sh-gviewer-fav--on' : '')}
+            aria-pressed={favourite}
+            aria-busy={faving || undefined}
+            title={t('gallery.fav.toggle_title')}
+            onClick={() => void toggleFavourite()}
+          >
+            <Icon name="heart" />
+            <span>{t('gallery.fav.toggle')}</span>
+          </button>
+        )}
         {item && !item.processing && (props.onDownload ? (
           <button
             type="button"

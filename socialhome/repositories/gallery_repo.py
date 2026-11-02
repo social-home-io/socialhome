@@ -13,6 +13,7 @@ from ..domain.gallery import (
     GalleryAlbum,
     GalleryAlbumAudience,
     GalleryDuplicate,
+    GalleryFavourite,
     GalleryItem,
     GalleryTrashItem,
     ItemCursor,
@@ -328,8 +329,21 @@ class AbstractGalleryRepo(Protocol):
         self, user_id: str, item_ids: list[str]
     ) -> frozenset[str]: ...
     async def list_favourite_items(
-        self, user_id: str, *, limit: int = 100
-    ) -> list[GalleryItem]: ...
+        self,
+        user_id: str,
+        *,
+        space_ids: frozenset[str] = frozenset(),
+        limit: int = 100,
+        before: str | None = None,
+        before_id: str | None = None,
+    ) -> list[GalleryFavourite]:
+        """One page of *user_id*'s live favourites they may still see, last
+        marked first: household albums open to them
+        (:data:`_ALBUM_VISIBLE_TO_SQL`) and the albums of *space_ids* (the
+        spaces they hold a seat in — the caller decides). The next page is
+        ``before`` / ``before_id`` = the last row's ``marked_at`` / item id.
+        """
+        ...
 
     # ── Tombstones (migration 0085, §25.6 ``gallery_*_deleted``) ──────
     async def is_album_deleted(self, album_id: str, *, space_id: str) -> bool: ...
@@ -1679,17 +1693,44 @@ class SqliteGalleryRepo:
         return frozenset(r[0] for r in rows)
 
     async def list_favourite_items(
-        self, user_id: str, *, limit: int = 100
-    ) -> list[GalleryItem]:
-        """*user_id*'s live favourites, last marked first."""
-        rows = await self._db.fetchall(
-            "SELECT i.* FROM gallery_favourites f"
-            " JOIN gallery_items i ON i.id = f.item_id"
-            " WHERE f.user_id=? AND i.deleted_at IS NULL"
-            " ORDER BY f.created_at DESC, i.id DESC LIMIT ?",
-            (user_id, max(1, min(limit, 500))),
+        self,
+        user_id: str,
+        *,
+        space_ids: frozenset[str] = frozenset(),
+        limit: int = 100,
+        before: str | None = None,
+        before_id: str | None = None,
+    ) -> list[GalleryFavourite]:
+        # A trashed photo (or one in a trashed album) is hidden until it is
+        # restored; the system "Posts" album hides what the feed hides.
+        spaces = sorted(space_ids)
+        in_spaces = (
+            f" OR a.space_id IN ({','.join('?' * len(spaces))})" if spaces else ""
         )
-        return [self._row_to_item(r) for r in rows_to_dicts(rows)]
+        sql = (
+            "SELECT i.*, f.created_at AS marked_at FROM gallery_favourites f"
+            " JOIN gallery_items i ON i.id = f.item_id"
+            " JOIN gallery_albums a ON a.id = i.album_id"
+            " WHERE f.user_id=? AND i.deleted_at IS NULL AND a.deleted_at IS NULL"
+            " AND ((a.space_id IS NULL AND "
+            + _ALBUM_VISIBLE_TO_SQL
+            + ")"
+            + in_spaces
+            + ") AND (a.is_system = 0 OR (1=1"
+            + _VIEWER_MAY_SEE_UPLOADER_SQL
+            + "))"
+        )
+        params: list = [user_id, user_id, user_id, *spaces, *([user_id] * 3)]
+        if before and before_id:
+            sql += " AND (f.created_at < ? OR (f.created_at = ? AND f.item_id < ?))"
+            params += [before, before, before_id]
+        sql += " ORDER BY f.created_at DESC, f.item_id DESC LIMIT ?"
+        params.append(max(1, min(limit, 500)))
+        rows = await self._db.fetchall(sql, tuple(params))
+        return [
+            GalleryFavourite(item=self._row_to_item(r), marked_at=r["marked_at"])
+            for r in rows_to_dicts(rows)
+        ]
 
     # ─── Tombstones (migration 0085, §25.6 ``gallery_*_deleted``) ─────────
 

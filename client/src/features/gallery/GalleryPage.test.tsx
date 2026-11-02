@@ -5,6 +5,7 @@ const apiGet = vi.fn()
 const apiPost = vi.fn()
 const apiPatch = vi.fn()
 const apiDelete = vi.fn(async () => undefined)
+const apiPut = vi.fn(async () => undefined)
 class FakeApiError extends Error {
   constructor(public status: number) { super(`HTTP ${status}`) }
 }
@@ -13,6 +14,7 @@ vi.mock('@/api', () => ({
     get: (...args: unknown[]) => apiGet(...args),
     post: (...args: unknown[]) => apiPost(...args),
     patch: (...args: unknown[]) => apiPatch(...args),
+    put: (...args: unknown[]) => apiPut(...(args as [])),
     delete: (...args: unknown[]) => apiDelete(...(args as [])),
   },
   ApiError: FakeApiError,
@@ -1099,5 +1101,68 @@ describe('GalleryPage "new" pill (D9)', () => {
     await view.findByRole('heading', { name: /Holiday/ })
     await waitFor(() => expect(showToast).toHaveBeenCalled())
     expect(apiPost).not.toHaveBeenCalledWith('/api/gallery/albums/al-1/seen', {})
+  })
+})
+
+describe('GalleryPage favourites (D12)', () => {
+  it('the household albums show a ♥ Favourites chip — a filter, not an album; a space gallery none', async () => {
+    albumRows = [album('al-1', 'Holiday', { space_id: null, item_count: 3 })]
+    const view = await mount({})
+    const chip = await view.findByRole('link', { name: /Favourites/ })
+    expect(chip.getAttribute('href')).toBe('/gallery/favourites')
+    // Not one of the album cards.
+    expect(chip.classList.contains('sh-album-card')).toBe(false)
+    cleanup()
+    const space = await mount({ spaceId: 'sp-1' })
+    await space.findByRole('link', { name: /Open album/ })
+    expect(space.queryByRole('link', { name: /Favourites/ })).toBeNull()
+  })
+
+  it('/gallery/favourites opens your favourites; a space has no such address', async () => {
+    const base = apiGet.getMockImplementation()!
+    apiGet.mockImplementation(async (url: string) => {
+      if (url.startsWith('/api/gallery/favourites')) return []
+      return base(url)
+    })
+    const view = await mount({}, '/gallery/favourites')
+    expect(await view.findByRole('heading', { name: 'Favourites' })).toBeTruthy()
+    expect(view.getByText('No favourites yet')).toBeTruthy()
+    cleanup()
+    await mount({ spaceId: 'sp-1' }, '/spaces/sp-1/gallery/favourites')
+    await waitFor(() => expect(location.pathname).toBe('/spaces/sp-1/gallery'))
+  })
+
+  it('a favourite wears a ♥ on its tile, and ♡ in the viewer toggles it — for you only', async () => {
+    albumRows = [album('al-1', 'Holiday', { space_id: null, item_count: 2 })]
+    itemRows = [item(1, { is_favourite: true }), item(2, { is_favourite: false })]
+    const view = await mount({}, '/gallery/albums/al-1/it-2')
+    await view.findByRole('dialog')
+    expect(view.container.querySelector('[data-item-id="it-1"] .sh-fav-badge')).toBeTruthy()
+    expect(view.container.querySelector('[data-item-id="it-2"] .sh-fav-badge')).toBeNull()
+    const heart = view.getByRole('button', { name: 'Favourite' })
+    expect(heart.getAttribute('aria-pressed')).toBe('false')
+    fireEvent.click(heart)
+    await waitFor(() => expect(apiPut).toHaveBeenCalledWith('/api/gallery/items/it-2/favourite'))
+    await waitFor(() => expect(view.getByRole('button', { name: 'Favourite' }).getAttribute('aria-pressed')).toBe('true'))
+    await waitFor(() => expect(view.container.querySelector('[data-item-id="it-2"] .sh-fav-badge')).toBeTruthy())
+  })
+
+  it('the selection adds to your favourites; all favourites already → remove', async () => {
+    albumRows = [album('al-1', 'Holiday', { space_id: null, item_count: 2 })]
+    itemRows = [item(1, { is_favourite: true }), item(2, { is_favourite: false })]
+    apiPost.mockResolvedValue({ done: ['it-1', 'it-2'], refused: [] })
+    const view = await mount({}, '/gallery/albums/al-1')
+    await waitFor(() => expect(view.container.querySelectorAll('.sh-gallery-item').length).toBe(2))
+    fireEvent.click(view.getByRole('button', { name: 'Select' }))
+    const boxes = view.getAllByRole('checkbox')
+    fireEvent.click(boxes[0])
+    expect(view.getByRole('button', { name: 'Remove from favourites' })).toBeTruthy()
+    fireEvent.click(boxes[1])
+    fireEvent.click(view.getByRole('button', { name: 'Add to favourites' }))
+    await waitFor(() => expect(apiPost).toHaveBeenCalledWith(
+      '/api/gallery/bulk', { action: 'favourite', item_ids: ['it-1', 'it-2'] }, {},
+    ))
+    await waitFor(() => expect(showToast).toHaveBeenCalledWith('2 photos added to your favourites', 'success'))
+    await waitFor(() => expect(view.container.querySelectorAll('.sh-fav-badge').length).toBe(2))
   })
 })

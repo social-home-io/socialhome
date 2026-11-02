@@ -338,6 +338,7 @@ from .services.federation_inbound import (
 )
 from .services.federation_inbound_service import FederationInboundService
 from .services.friends_service import FriendsService
+from .services.gallery_favourites_service import GalleryFavouritesService
 from .services.gallery_federation_outbound import GalleryFederationOutbound
 from .services.gallery_on_this_day_service import GalleryOnThisDayService
 from .services.gallery_service import GalleryService
@@ -3143,6 +3144,10 @@ def create_app(config: Config | None = None) -> web.Application:
     gallery_on_this_day_service = GalleryOnThisDayService(
         gallery_repo, repos.user, gallery_service
     )
+    # Favourites (D12): each person's own ♡, private, never federated.
+    gallery_favourites_service = GalleryFavouritesService(
+        gallery_repo, space_repo, gallery_service
+    )
 
     # ── System "Posts" album bridge (§Gallery) ──────────────────────────
     # Subscribes to feed-post lifecycle events and mirrors photo/video
@@ -3800,6 +3805,7 @@ def create_app(config: Config | None = None) -> web.Application:
     app[K.gallery_trash_purge_scheduler_key] = gallery_trash_purge_scheduler
     app[K.gallery_repo_key] = gallery_repo
     app[K.gallery_on_this_day_service_key] = gallery_on_this_day_service
+    app[K.gallery_favourites_service_key] = gallery_favourites_service
     app[K.media_transcode_repo_key] = repos.media_transcode
     app[K.media_transcode_service_key] = media_transcode_service
     app[K.child_protection_service_key] = child_protection_service

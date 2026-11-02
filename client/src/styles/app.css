@@ -7651,6 +7651,36 @@ a.sh-btn { text-decoration: none; }
   border-radius: var(--sh-radius-full);
   backdrop-filter: blur(4px);
 }
+/* One of your favourites (♡, private — D12): a small heart on the tile. */
+.sh-fav-badge {
+  position: absolute;
+  left: 6px;
+  bottom: 6px;
+  min-width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--sh-radius-full);
+  background: rgba(0, 0, 0, 0.55);
+  color: #FF8A6B;
+  backdrop-filter: blur(4px);
+  pointer-events: none;
+}
+/* The "♥ Favourites" chip on the albums page — a filter, not an album. */
+.sh-gallery-chips { display: flex; flex-wrap: wrap; gap: var(--sh-space-xs); }
+.sh-gallery-chip {
+  min-height: 40px;
+  gap: 6px;
+  padding: 0 var(--sh-space-md);
+  font-size: var(--sh-font-size-sm);
+  font-weight: 600;
+  text-decoration: none;
+}
+.sh-gallery-chip:hover, .sh-gallery-chip:focus-visible { text-decoration: none; color: var(--sh-text); }
+.sh-gallery-chip__heart { color: var(--sh-primary-text); flex: none; }
+.sh-fav-info-heart { vertical-align: -3px; color: var(--sh-primary-text); }
+.sh-fav-empty-heart { color: var(--sh-primary-text); }
 /* A gallery video still transcoding: no poster exists yet, so the tile is
  * a calm placeholder (spinner + "Processing…") instead of a broken image. */
 .sh-gallery-item--processing {
@@ -8089,6 +8119,8 @@ a.sh-album-card:hover, a.sh-gallery-item:hover {
 .sh-gviewer-action[aria-expanded="true"] { background: rgba(255, 255, 255, 0.16); }
 .sh-gviewer-action--danger { color: #FFB4A8; }
 .sh-gviewer-action--danger:hover { color: #FFB4A8; }
+/* ♡ Favourite: an outline heart, filled while it is one of yours. */
+.sh-gviewer-fav--on .sh-gviewer-icon { color: #FF8A6B; fill: currentColor; }
 
 /* Info — a side panel on a wide screen. */
 .sh-gviewer-info {

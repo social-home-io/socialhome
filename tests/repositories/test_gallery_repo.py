@@ -1129,17 +1129,85 @@ async def test_favourites(env):
     assert await repo.favourite_ids_among("b-id", ["it-1", "it-2"]) == {"it-1"}
     assert await repo.favourite_ids_among("b-id", []) == frozenset()
     assert await repo.favourite_ids_among("a-id", ["it-1"]) == frozenset()
-    assert [i.id for i in await repo.list_favourite_items("b-id")] == ["it-1"]
+    assert [f.item.id for f in await repo.list_favourite_items("b-id")] == ["it-1"]
 
     # A trashed favourite is hidden, and comes back with a restore.
     await repo.trash_item("it-1", deleted_by="a-id")
     assert await repo.list_favourite_items("b-id") == []
     assert not await repo.add_favourite("b-id", "it-1")
     await repo.restore_item("it-1")
-    assert [i.id for i in await repo.list_favourite_items("b-id")] == ["it-1"]
+    assert [f.item.id for f in await repo.list_favourite_items("b-id")] == ["it-1"]
 
     await repo.remove_favourite("b-id", "it-1")
     assert await repo.list_favourite_items("b-id") == []
+
+
+async def test_favourites_page_by_when_they_were_marked(env):
+    db, repo = env
+    await _household(db, repo)
+    for n in range(3):
+        await repo.create_item(_item(f"it-{n}", album_id="h-1"))
+        await repo.add_favourite("b-id", f"it-{n}")
+    # Marked within one second: the item id breaks the tie.
+    await db.enqueue(
+        "UPDATE gallery_favourites SET created_at='2026-01-01 00:00:00'"
+        " WHERE item_id='it-0'"
+    )
+    first = await repo.list_favourite_items("b-id", limit=2)
+    assert [f.item.id for f in first] == ["it-2", "it-1"]
+    last = first[-1]
+    rest = await repo.list_favourite_items(
+        "b-id", limit=2, before=last.marked_at, before_id=last.item.id
+    )
+    assert [f.item.id for f in rest] == ["it-0"]
+    assert rest[0].marked_at == "2026-01-01 00:00:00"
+
+
+async def test_favourites_only_from_albums_the_person_still_sees(env):
+    db, repo = env
+    await _household(db, repo)
+    await _household(db, repo, "private")
+    await repo.create_album(_album("sp-alb"))
+    await repo.create_item(_item("home", album_id="h-1"))
+    await repo.create_item(_item("priv", album_id="private"))
+    await repo.create_item(_item("space", album_id="sp-alb"))
+    for iid in ("home", "priv", "space"):
+        assert await repo.add_favourite("b-id", iid)
+
+    async def ids(**kw) -> list[str]:
+        return sorted(f.item.id for f in await repo.list_favourite_items("b-id", **kw))
+
+    assert await ids() == ["home", "priv"]
+    assert await ids(space_ids=frozenset({"sp-1"})) == ["home", "priv", "space"]
+    # A private album Bob isn't chosen for hides his favourite in it …
+    await repo.set_album_audience("private", "chosen")
+    assert await ids() == ["home"]
+    # … until he is.
+    await repo.set_album_audience("private", "chosen", frozenset({"b-id"}))
+    assert await ids() == ["home", "priv"]
+    # A trashed album takes its photos' favourites out of the list.
+    await db.enqueue(
+        "UPDATE gallery_albums SET deleted_at=datetime('now') WHERE id='h-1'"
+    )
+    assert await ids() == ["priv"]
+
+
+async def test_a_blocked_uploaders_post_photo_leaves_the_favourites(env):
+    db, repo = env
+    await _household(db, repo)
+    await repo.create_album(
+        dataclasses.replace(_album("sys", space_id=None), is_system=True)
+    )
+    await repo.create_item(_item("feed", album_id="sys"))
+    await repo.create_item(_item("own", album_id="h-1"))
+    await repo.add_favourite("b-id", "feed")
+    await repo.add_favourite("b-id", "own")
+    await db.enqueue(
+        "INSERT INTO user_blocks(blocker_user_id, blocked_user_id) VALUES('b-id', 'a-id')"
+    )
+    # The "Posts" album hides what the feed hides; an album of the
+    # household's own keeps showing the photo.
+    assert [f.item.id for f in await repo.list_favourite_items("b-id")] == ["own"]
 
 
 async def test_reassign_moves_shared_household_albums_only(env):

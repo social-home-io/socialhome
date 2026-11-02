@@ -17,7 +17,9 @@
  * fires by itself when it scrolls into view — so every album and every
  * upload can be reached.
  *
- * The household list opens with the "On this day" card (``OnThisDay``),
+ * The household list opens with a "♡ Favourites" chip — your own
+ * favourites across every album (``FavouritesPage``; private, D12) — and
+ * the "On this day" card (``OnThisDay``),
  * a first-run screen when the household has no photos yet, and an
  * honest offline banner that keeps what was loaded on screen.
  *
@@ -60,15 +62,18 @@ import { OverflowMenu } from '@/components/OverflowMenu'
 import { confirmDialog } from '@/components/confirm'
 import { pendingDeletes } from '@/utils/undoableDelete'
 import TrashPage from './TrashPage'
+import FavouritesPage, { openedFavouritesFromList } from './FavouritesPage'
+import { HeartIcon } from './HeartIcon'
 import { SelectionBar, type SelectionAction } from './SelectionBar'
 import { useSelection, type Selection } from './useSelection'
 import { MoveToAlbumDialog } from './MoveToAlbumDialog'
 import { EditItemDialog } from './EditItemDialog'
 import { AlbumMenu } from './AlbumMenu'
 import {
-  bulk, deleteLaterWithUndo, downloadError, downloadItems, itemsWord, othersLine, trashWithUndo,
+  bulk, deleteLaterWithUndo, downloadError, downloadItems, itemsWord, othersLine, setFavourite,
+  trashWithUndo,
 } from './galleryManage'
-import { TRASH_PATH } from './galleryRoutes'
+import { TRASH_PATH, favouritesPath } from './galleryRoutes'
 
 interface Album {
   id: string
@@ -120,6 +125,8 @@ interface Item {
   /** While ``processing``: rough seconds until the video is ready (the
    *  household converts one video at a time). */
   media_eta_s?: number
+  /** One of the viewer's own favourites (♡, D12) — only ever theirs. */
+  is_favourite?: boolean
 }
 
 /** "Ready in about 4 min" for a video tile still converting, or ``null``
@@ -256,8 +263,9 @@ export default function GalleryPage({
   }, [spaceId])
 
   // An address the gallery doesn't know → the albums. A space has no
-  // trash (its deletes go out to the other households).
-  const valid = where.valid && !(where.trash && spaceId)
+  // trash (its deletes go out to the other households), and favourites
+  // are one list across every album, under the household gallery.
+  const valid = where.valid && !((where.trash || where.favourites) && spaceId)
   useEffect(() => {
     if (!valid) locRef.current.route(galleryPath(spaceId), true)
   }, [valid, spaceId])
@@ -398,6 +406,7 @@ export default function GalleryPage({
   )
 
   if (where.trash && !spaceId) return <TrashPage fromList={trashFromList} />
+  if (where.favourites && !spaceId) return <>{sheet}<FavouritesPage itemId={itemId} /></>
 
   if (albumId) {
     // Back to the list: a step back in history when the list opened
@@ -506,6 +515,20 @@ export default function GalleryPage({
             </div>
           )}
         </header>
+      )}
+
+      {!spaceId && !albumsError.value && !firstRun && (
+        // A filter, not an album: a photo lives in exactly one album (D1),
+        // and favourites are each person's own (D12).
+        <nav class="sh-gallery-chips" aria-label={t('gallery.fav.chips_aria')}>
+          <a
+            class="sh-chip sh-gallery-chip"
+            href={addBase(favouritesPath())}
+            onClick={openedFavouritesFromList}
+          >
+            <HeartIcon class="sh-gallery-chip__heart" /> {t('gallery.fav.title')}
+          </a>
+        </nav>
       )}
 
       {!spaceId && !albumsError.value && <OnThisDayCardView />}
@@ -1078,6 +1101,11 @@ function useAlbumViewer(
           showToast(downloadError(err), 'error')
         }
       }}
+      isFavourite={(it) => !!items.value.find(i => i.id === it.id)?.is_favourite}
+      onFavourite={async (it, on) => {
+        await setFavourite(it.id, on)
+        items.value = items.value.map(i => i.id === it.id ? { ...i, is_favourite: on } : i)
+      }}
       onDelete={async (it) => {
         const pos = loaded.findIndex(i => i.id === it.id)
         const rest = loaded.filter(i => i.id !== it.id)
@@ -1156,6 +1184,7 @@ function Tile({ item, albumId, spaceId, scope, selecting, picked, handlers }: {
       {item.item_type === 'video' && (
         <span class="sh-video-badge" aria-hidden="true">▶</span>
       )}
+      {item.is_favourite && <span class="sh-fav-badge" aria-hidden="true"><HeartIcon size={14} /></span>}
     </>
   )
   if (selecting) {
@@ -1256,7 +1285,7 @@ function canManageAlbum(album: Album, canModerate: boolean, readOnly: boolean): 
 function useAlbumManage(album: Album, loaded: Item[], canModerate: boolean, readOnly: boolean) {
   const sel = useSelection(loaded.map(i => i.id))
   const [moving, setMoving] = useState(false)
-  const [busy, setBusy] = useState<'save' | 'delete' | null>(null)
+  const [busy, setBusy] = useState<'save' | 'delete' | 'favourite' | null>(null)
   const spaceId = album.space_id ?? undefined
   const picked = loaded.filter(i => sel.ids.has(i.id))
   const refresh = () => {
@@ -1345,8 +1374,34 @@ function useAlbumManage(album: Album, loaded: Item[], canModerate: boolean, read
     }
   }
 
+  // ♡ the selection — or, when every picked photo is a favourite already,
+  // take them off. Private to this person (D12).
+  const allFavourite = picked.length > 0 && picked.every(i => i.is_favourite)
+  const favourite = async () => {
+    if (!picked.length) return
+    const on = !allFavourite
+    setBusy('favourite')
+    try {
+      const res = await bulk(on ? 'favourite' : 'unfavourite', picked.map(i => i.id))
+      const done = new Set(res.done)
+      items.value = items.value.map(i => done.has(i.id) ? { ...i, is_favourite: on } : i)
+      const what = itemsWord(picked.filter(i => done.has(i.id)))
+      if (done.size) showToast(t(on ? 'gallery.fav.added' : 'gallery.fav.removed', { what }), 'success')
+      sel.clear()
+    } catch {
+      showToast(t('gallery.fav.failed'), 'error')
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const deletable = !readOnly && !album.is_system
   const actions: SelectionAction[] = [
+    {
+      key: 'favourite', icon: 'favourite',
+      label: t(allFavourite ? 'gallery.fav.remove' : 'gallery.fav.add'),
+      onClick: () => void favourite(), busy: busy === 'favourite',
+    },
     ...(movable ? [{ key: 'move', icon: 'move', label: t('gallery.manage.move'), onClick: () => setMoving(true) }] : []),
     { key: 'save', icon: 'save', label: t('gallery.manage.save'), onClick: () => void save(), busy: busy === 'save' },
     ...(deletable ? [{
