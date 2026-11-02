@@ -30176,11 +30176,11 @@ body:has(.sh-gviewer) .sh-modal-overlay { z-index: calc(var(--sh-z-lightbox) + 1
   font-family: var(--sh-font-family);
   font-size: var(--sh-font-size-xs);
   font-weight: 600;
-  min-height: 28px;
+  min-height: 36px;
   cursor: pointer;
 }
 .sh-album-private-badge--button:focus-visible {
-  outline: 2px solid var(--sh-primary);
+  outline: 2px solid var(--sh-focus-ring);
   outline-offset: 2px;
 }
 .sh-album-card--locked {
