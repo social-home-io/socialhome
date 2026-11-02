@@ -138,28 +138,33 @@ export default function CpAdminPanel() {
       <p class="sh-muted">{t('cp.intro')}</p>
       <ChildrenUploadSetting />
 
-      <table class="sh-admin-table">
-        <thead>
-          <tr>
-            <th>{t('admin.members.name')}</th><th>{t('admin.members.username')}</th>
-            <th>{t('cp.col.protected')}</th><th>{t('admin.members.actions')}</th>
+      {/* Phones (CSS): each row becomes a small card — name and @username,
+        * the status, then the buttons on their own line. The explicit roles
+        * keep it a table for screen readers once ``display`` changes. */}
+      <table class="sh-admin-table sh-cp-table" role="table">
+        <thead role="rowgroup">
+          <tr role="row">
+            <th role="columnheader">{t('admin.members.name')}</th>
+            <th role="columnheader">{t('admin.members.username')}</th>
+            <th role="columnheader">{t('cp.col.protected')}</th>
+            <th role="columnheader">{t('admin.members.actions')}</th>
           </tr>
         </thead>
-        <tbody>
+        <tbody role="rowgroup">
           {users.value.map(u => {
             const status = protection.value[u.user_id]
             const protectedUser = Boolean(status?.is_minor)
             return (
               <>
-                <tr key={u.username}>
-                  <td>{u.display_name}</td>
-                  <td>@{u.username}</td>
-                  <td>
+                <tr key={u.username} role="row">
+                  <td role="cell" class="sh-cp-table__name">{u.display_name}</td>
+                  <td role="cell" class="sh-cp-table__user">@{u.username}</td>
+                  <td role="cell" class="sh-cp-table__status">
                     {protectedUser
                       ? `🔒 ${t('cp.protected_age', { age: String(status!.declared_age) })}`
                       : '—'}
                   </td>
-                  <td>
+                  <td role="cell" class="sh-cp-table__actions">
                     {protectedUser ? (
                       <>
                         <Button variant="secondary"
@@ -189,7 +194,7 @@ export default function CpAdminPanel() {
                   </td>
                 </tr>
                 {guardiansFor.value === u.user_id && (
-                  <tr><td colspan={4} class="sh-cp-guardians-row">
+                  <tr role="row"><td role="cell" colspan={4} class="sh-cp-guardians-row">
                     <GuardianList minorUserId={u.user_id} allUsers={users.value} />
                   </td></tr>
                 )}

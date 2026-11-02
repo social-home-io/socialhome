@@ -73,4 +73,31 @@ describe('CpAdminPanel', () => {
     // The endpoint that actually carries protection state was queried.
     expect(apiGet).toHaveBeenCalledWith('/api/cp/protection')
   })
+
+  it('stays a table for screen readers when a phone stacks it into cards', async () => {
+    apiGet.mockImplementation((path: string) => {
+      if (path === '/api/users') {
+        return Promise.resolve([{ user_id: 'u-mia', username: 'mia', display_name: 'Mia' }])
+      }
+      if (path === '/api/cp/protection') {
+        return Promise.resolve({
+          users: [{ user_id: 'u-mia', username: 'mia', is_minor: true, declared_age: 8 }],
+        })
+      }
+      return Promise.resolve([])
+    })
+    const { default: CpAdminPanel } = await import('./CpAdminPanel')
+    const view = render(<CpAdminPanel />)
+    await tick()
+    await tick()
+    // The phone CSS sets ``display: block`` on the rows; the explicit
+    // roles keep the table, its headers and cells announced.
+    const table = view.getByRole('table')
+    expect(table.classList.contains('sh-cp-table')).toBe(true)
+    expect(view.getAllByRole('columnheader')).toHaveLength(4)
+    const cells = view.getAllByRole('cell')
+    expect(cells.map(c => c.className)).toEqual([
+      'sh-cp-table__name', 'sh-cp-table__user', 'sh-cp-table__status', 'sh-cp-table__actions',
+    ])
+  })
 })

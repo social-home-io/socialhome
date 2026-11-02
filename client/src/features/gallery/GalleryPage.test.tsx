@@ -826,7 +826,7 @@ describe('GalleryPage selection (managing photos)', () => {
     expect(view.getByRole('button', { name: 'Move to album' })).toBeTruthy()
     // A space's gallery shares nothing out (D8 is about household photos).
     expect(view.queryByRole('button', { name: 'Share' })).toBeNull()
-    expect(view.getByRole('button', { name: 'Save' })).toBeTruthy()
+    expect(view.getByRole('button', { name: 'Download' })).toBeTruthy()
     fireEvent.click(view.getByRole('button', { name: 'Delete' }))
     // A moderator may delete both; nothing is sent before the Undo runs out.
     await waitFor(() => expect(showToast.mock.calls.some(c => c[0] === '2 photos deleted' && c[2]?.onExpire)).toBe(true))
@@ -951,6 +951,10 @@ describe('GalleryPage albums refresh (PR 4)', () => {
     itemRows = [item(2, { day: '2026-08-02' }), item(1, { day: '2026-07-13' })]
     let view = await renderOpenAlbum()
     const toggle = await view.findByRole('button', { name: 'Newest first — show oldest first' })
+    // A narrow phone shows just ⇅: the words live in a label CSS can hide,
+    // and the tooltip still says which order is on.
+    expect(toggle.getAttribute('title')).toBe('Newest first — show oldest first')
+    expect(toggle.querySelector('.sh-order-toggle__label')?.textContent?.trim()).toBe('Newest first')
     fireEvent.click(toggle)
     await waitFor(() => {
       const [, q] = split(apiGet.mock.calls.at(-1)![0] as string)

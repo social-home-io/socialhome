@@ -653,7 +653,7 @@ await check('gallery-addresses', async () => {
   await page.click(`button.sh-gallery-item[data-item-id="${ids.galleryItemId}"]`)
   const [dl] = await Promise.all([
     page.waitForResponse(r => r.request().method() === 'POST' && /api\/gallery\/download$/.test(new URL(r.url()).pathname)),
-    page.evaluate(() => [...document.querySelectorAll('.sh-selbar button')].find(b => b.textContent.trim() === 'Save').click()),
+    page.evaluate(() => [...document.querySelectorAll('.sh-selbar button')].find(b => b.textContent.trim() === 'Download').click()),
   ])
   if (!underPrefix(new URL(dl.url()).pathname)) problems.push(`gallery download POSTed outside the prefix: ${dl.url()}`)
   if (dl.status() !== 200) problems.push(`gallery download → ${dl.status()}`)

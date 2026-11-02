@@ -1311,13 +1311,15 @@ function OrderToggle({ albumId }: { albumId: string }) {
     writeAlbumOrder(currentUser.value?.user_id, albumId, next)
     void loadItems(albumId)
   }
+  // A narrow phone shows just ⇅ (CSS) so the album's buttons fit on one
+  // line; the aria-label and the tooltip still say which order is on, and
+  // the month headings show it too.
+  const aria = t(order === 'newest' ? 'gallery.order.to_oldest_aria' : 'gallery.order.to_newest_aria')
   return (
-    <Button
-      variant="ghost"
-      onClick={flip}
-      aria-label={t(order === 'newest' ? 'gallery.order.to_oldest_aria' : 'gallery.order.to_newest_aria')}
-    >
-      {t(order === 'newest' ? 'gallery.order.newest' : 'gallery.order.oldest')}{' '}
+    <Button variant="ghost" onClick={flip} aria-label={aria} title={aria}>
+      <span class="sh-order-toggle__label">
+        {t(order === 'newest' ? 'gallery.order.newest' : 'gallery.order.oldest')}{' '}
+      </span>
       <span aria-hidden="true">⇅</span>
     </Button>
   )
@@ -1494,7 +1496,7 @@ function useAlbumManage(album: Album, loaded: Item[], canModerate: boolean, read
     },
     ...(shareable ? [{ key: 'share', icon: 'share', label: t('gallery.share.action'), onClick: share }] : []),
     ...(movable ? [{ key: 'move', icon: 'move', label: t('gallery.manage.move'), onClick: () => setMoving(true) }] : []),
-    { key: 'save', icon: 'save', label: t('gallery.manage.save'), onClick: () => void save(), busy: busy === 'save' },
+    { key: 'download', icon: 'download', label: t('gallery.manage.download'), onClick: () => void save(), busy: busy === 'save' },
     ...(deletable ? [{
       key: 'delete', icon: 'delete', label: t('gallery.viewer_delete'), danger: true,
       onClick: () => void remove(), busy: busy === 'delete',

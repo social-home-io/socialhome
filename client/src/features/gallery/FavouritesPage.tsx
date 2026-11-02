@@ -239,7 +239,7 @@ export default function FavouritesPage({ itemId }: { itemId: string | null }) {
 
   const actions: SelectionAction[] = [
     { key: 'unfavourite', icon: 'favourite', label: t('gallery.fav.remove'), onClick: () => void removePicked(), busy: busy === 'remove', disabled: busy !== null },
-    { key: 'save', icon: 'save', label: t('gallery.manage.save'), onClick: () => void savePicked(), busy: busy === 'save', disabled: busy !== null },
+    { key: 'download', icon: 'download', label: t('gallery.manage.download'), onClick: () => void savePicked(), busy: busy === 'save', disabled: busy !== null },
   ]
 
   const closeViewer = () => {
