@@ -1,20 +1,24 @@
 /**
- * RemoteInviteDialog — unified "Add someone to this space" picker for
+ * RemoteInviteDialog — unified "Invite people to this space" picker for
  * private-space admins. Surfaces both the inviter's own household
  * members AND every confirmed remote household's members in a single
  * typeahead over ``/api/friends``.
  *
- * On submit, the dialog dispatches to the right endpoint based on
- * whether the pick is local or remote:
+ Everyone picked gets an invite they accept or decline — someone in
+ * the inviter's own household exactly like someone in another one; the
+ * dialog says "Send invite" / "Invite sent" for both. Only the endpoint
+ * differs:
  *
  *  - Local household member → ``POST /api/spaces/{id}/members``
- *    with ``{user_id}``. Immediate add — no token round-trip — because
- *    the user is already on this instance and the admin has authority
- *    to seat them.
+ *    with ``{user_id}``: a pending local invite (``invite_local_user``),
+ *    shown on ``GET /api/local_invites``.
  *  - Remote household member → ``POST /api/spaces/{id}/remote-invites``
  *    with ``{invitee_instance_id, invitee_user_id}`` (§D1b). The
  *    target household receives the invite over federation and the
  *    invitee accepts on their own instance.
+ *
+ * People already in the space (``GET /api/spaces/{id}/members``) are
+ * not offered.
  *
  * (Bug repro: prior versions only flattened ``data.households[]`` and
  * silently dropped ``data.instance``, so a household admin literally
@@ -33,7 +37,7 @@ import { Button } from './Button'
 import { showToast } from './Toast'
 import { openSpaceInvite } from './SpaceInviteDialog'
 import type { SpaceRole } from '@/features/spaces/spaceRoles'
-import { t } from '@/i18n/i18n'
+import { formatLocale, t } from '@/i18n/i18n'
 
 interface FriendsHouseholdMember {
   user_id: string
@@ -60,6 +64,13 @@ interface FriendsResponse {
   households: FriendsHousehold[]
 }
 
+/** A row of ``GET /api/spaces/{id}/members`` — ``instance_id`` only on
+ *  a member from another household. */
+interface SpaceMemberRow {
+  user_id: string
+  instance_id?: string | null
+}
+
 interface PickRow {
   user_id: string
   instance_id: string
@@ -67,7 +78,7 @@ interface PickRow {
   household_name: string
   last_seen_at: string | null
   /** ``true`` when the pick lives on the inviter's own instance — drives
-   *  endpoint selection on submit (immediate add vs federated invite). */
+   *  endpoint selection on submit (local vs federated invite). */
   is_local: boolean
 }
 
@@ -99,7 +110,8 @@ function lastSeenLabel(iso: string | null): string {
 export function RemoteInviteDialog() {
   const [rows, setRows] = useState<PickRow[]>([])
   const [query, setQuery] = useState('')
-  const [pickedId, setPickedId] = useState<string | null>(null)
+  /** Rows picked (``rowKey``) — several people get their invites at once. */
+  const [picked, setPicked] = useState<ReadonlySet<string>>(new Set())
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
@@ -108,8 +120,19 @@ export function RemoteInviteDialog() {
     if (!open.value) return
     setLoading(true)
     setError(null)
-    api.get('/api/friends').then((raw) => {
+    const spaceId = open.value
+    Promise.all([
+      api.get('/api/friends'),
+      // Fail-soft: without the member list everyone is offered, and the
+      // server refuses someone who is already in.
+      api.get(`/api/spaces/${spaceId}/members`).catch(() => []),
+    ]).then(([raw, rawMembers]) => {
       const data = raw as FriendsResponse
+      const inSpace = new Set(
+        ((rawMembers as SpaceMemberRow[] | null) ?? []).map(
+          (m) => `${m.instance_id ?? data.instance.instance_id}:${m.user_id}`,
+        ),
+      )
       const meId = currentUser.value?.user_id
       const localRows: PickRow[] = (data.instance?.members || [])
         // Hide the inviter themselves — they're already in the space
@@ -136,7 +159,9 @@ export function RemoteInviteDialog() {
           is_local: false,
         })))
       // Local first — household-mates are the most common pick.
-      setRows([...localRows, ...remoteRows])
+      setRows([...localRows, ...remoteRows].filter(
+        (r) => !inSpace.has(`${r.instance_id}:${r.user_id}`),
+      ))
     }).catch(() => {
       setRows([])
     }).finally(() => setLoading(false))
@@ -160,7 +185,7 @@ export function RemoteInviteDialog() {
   const spaceId = open.value
   const close = () => {
     open.value = null
-    setQuery(''); setPickedId(null); setError(null)
+    setQuery(''); setPicked(new Set()); setError(null)
   }
 
   const shareLink = () => {
@@ -176,31 +201,57 @@ export function RemoteInviteDialog() {
     </p>
   )
 
+  const toggle = (id: string) => {
+    const next = new Set(picked)
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    setPicked(next)
+  }
+
+  /** One invite: a local one for someone in this household, a §D1b one
+   *  for someone in another — both wait for the person to accept. */
+  const invite = (r: PickRow) => (r.is_local
+    ? api.post(`/api/spaces/${spaceId}/members`, { user_id: r.user_id })
+    : api.post(`/api/spaces/${spaceId}/remote-invites`, {
+      invitee_instance_id: r.instance_id,
+      invitee_user_id: r.user_id,
+    }))
+
   const submit = async () => {
-    const picked = rows.find((r) => rowKey(r) === pickedId)
-    if (!picked) {
+    const chosen = rows.filter((r) => picked.has(rowKey(r)))
+    if (chosen.length === 0) {
       setError(t('remote_invite.pick_first'))
       return
     }
     setSubmitting(true); setError(null)
-    try {
-      if (picked.is_local) {
-        await api.post(`/api/spaces/${spaceId}/members`, {
-          user_id: picked.user_id,
-        })
-        showToast(t('remote_invite.added', { name: picked.display_name }), 'success')
-      } else {
-        await api.post(`/api/spaces/${spaceId}/remote-invites`, {
-          invitee_instance_id: picked.instance_id,
-          invitee_user_id: picked.user_id,
-        })
-        showToast(t('remote_invite.sent', { name: picked.display_name }), 'success')
-      }
+    // Every invite at once; each is its own request, so one that fails
+    // (an unreachable household) doesn't hold up the others.
+    const results = await Promise.allSettled(chosen.map(invite))
+    setSubmitting(false)
+    const sent = chosen.filter((_, i) => results[i].status === 'fulfilled')
+    const failed = chosen.filter((_, i) => results[i].status === 'rejected')
+    if (sent.length === 1) {
+      showToast(t('remote_invite.sent', { name: sent[0].display_name }), 'success')
+    } else if (sent.length > 1) {
+      showToast(t('remote_invite.sent_n', { n: String(sent.length) }), 'success')
+    }
+    if (failed.length === 0) {
       close()
-    } catch (exc) {
-      setError((exc as Error).message || t('remote_invite.send_failed'))
-    } finally {
-      setSubmitting(false)
+      return
+    }
+    // Who got theirs leaves the list; who didn't stays picked for "Try
+    // again".
+    const sentKeys = new Set(sent.map(rowKey))
+    setRows(rows.filter((r) => !sentKeys.has(rowKey(r))))
+    setPicked(new Set(failed.map(rowKey)))
+    if (chosen.length === 1) {
+      const exc = (results[0] as PromiseRejectedResult).reason as Error | undefined
+      setError(exc?.message || t('remote_invite.send_failed'))
+    } else {
+      setError(t('remote_invite.send_failed_for', {
+        names: new Intl.ListFormat(formatLocale(), { type: 'conjunction' })
+          .format(failed.map((r) => r.display_name)),
+      }))
     }
   }
 
@@ -230,6 +281,7 @@ export function RemoteInviteDialog() {
             />
           </label>
           <div class="sh-remote-invite-picker" role="listbox"
+               aria-multiselectable="true"
                aria-label={t('remote_invite.list_aria')}>
             {matches.length === 0 ? (
               <p class="sh-muted sh-remote-invite-picker__empty">
@@ -238,20 +290,23 @@ export function RemoteInviteDialog() {
             ) : (
               matches.map((r) => {
                 const id = rowKey(r)
-                const picked = pickedId === id
+                const on = picked.has(id)
                 return (
                   <button
                     key={id}
                     type="button"
                     role="option"
-                    aria-selected={picked}
+                    aria-selected={on}
                     class={[
                       'sh-remote-invite-row',
-                      picked ? 'sh-remote-invite-row--picked' : '',
+                      on ? 'sh-remote-invite-row--picked' : '',
                     ].filter(Boolean).join(' ')}
-                    onClick={() => setPickedId(id)}
+                    onClick={() => toggle(id)}
                     data-testid={`remote-invite-row-${r.user_id}`}
                   >
+                    <span class="sh-remote-invite-row__check" aria-hidden="true">
+                      {on ? '✓' : ''}
+                    </span>
                     <span class="sh-remote-invite-row__name">
                       {r.display_name}
                     </span>
@@ -273,14 +328,11 @@ export function RemoteInviteDialog() {
               variant="primary"
               onClick={submit}
               loading={submitting}
-              disabled={!pickedId}
+              disabled={picked.size === 0}
             >
-              {(() => {
-                const picked = rows.find((r) => rowKey(r) === pickedId)
-                return picked && !picked.is_local
-                  ? t('remote_invite.send')
-                  : t('remote_invite.add')
-              })()}
+              {picked.size > 1
+                ? t('remote_invite.send_n', { n: String(picked.size) })
+                : t('remote_invite.send')}
             </Button>
           </div>
         </>

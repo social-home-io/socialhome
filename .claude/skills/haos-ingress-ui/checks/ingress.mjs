@@ -1057,6 +1057,72 @@ await check('app-play-launch', async () => {
   return { problems, played, waitingAfterOpen: after }
 })
 
+// 6d½. A space invites someone from the inviter's own household exactly
+//      like someone from another household: "Send invite" → a pending
+//      invite they accept (never "Add" / seated without asking). Several
+//      people are picked and invited at once, and people already in the
+//      space are not offered again.
+await check('space-invite-household', async () => {
+  const problems = []
+  const result = {}
+  const openPicker = async (p) => {
+    await p.goto(APP + `spaces/${ids.spaceId}/members`, { waitUntil: 'load' })
+    await settled(p)
+    await step('the members "+ Invite" button', p.waitForFunction(() => [...document.querySelectorAll('.sh-member-list-invite-actions button')].some(b => b.textContent.includes('Invite'))))
+    await p.evaluate(() => document.querySelector('.sh-member-list-invite-actions button').click())
+    await step('the invite picker', p.waitForSelector('.sh-remote-invite-picker'))
+    return p.$$eval('.sh-remote-invite-row__name', ns => ns.map(n => n.textContent.trim().toLowerCase()))
+  }
+  const sendLabel = p => p.$eval('.sh-modal-actions button:last-child', b => b.textContent.trim())
+  for (const vp of ['desktop', 'mobile']) {
+    const { ctx, page: p } = await newPage(vp)
+    try {
+      const names = await openPicker(p)
+      const want = ['bob', 'carol'].map(w => names.findIndex(n => n.includes(w)))
+      if (want.some(i => i < 0)) { problems.push(`${vp}: bob / carol (same household) not offered: ${JSON.stringify(names)}`); continue }
+      await p.evaluate(i => document.querySelectorAll('.sh-remote-invite-row')[i].click(), want[0])
+      if (await sendLabel(p) !== 'Send invite') problems.push(`${vp}: one pick says "${await sendLabel(p)}", want "Send invite"`)
+      await p.evaluate(i => document.querySelectorAll('.sh-remote-invite-row')[i].click(), want[1])
+      if (await sendLabel(p) !== 'Send 2 invites') problems.push(`${vp}: two picks say "${await sendLabel(p)}", want "Send 2 invites"`)
+      await p.screenshot({ path: path.join(SHOTS, `space-invite-household-${vp}.png`) })
+      const posts = []
+      const onResp = r => {
+        if (r.request().method() === 'POST' && new URL(r.url()).pathname.endsWith(`/api/spaces/${ids.spaceId}/members`)) posts.push(r.status())
+      }
+      p.on('response', onResp)
+      await p.evaluate(() => document.querySelector('.sh-modal-actions button:last-child').click())
+      // Re-inviting someone with a pending invite returns that invite.
+      await step('the "2 invites sent" toast', p.waitForFunction(() => document.body.textContent.includes('2 invites sent')))
+      p.off('response', onResp)
+      if (posts.length !== 2 || posts.some(s => s !== 202)) problems.push(`${vp}: invite POSTs ${JSON.stringify(posts)}, want two 202s (pending invites)`)
+      result[vp] = posts
+    } finally {
+      await ctx.close()
+      activePage = page
+    }
+  }
+  const invites = {}
+  for (const who of ['bob', 'carol']) {
+    const inv = ((await asUser(who, 'GET', '/api/local_invites')) || []).find(i => i.space_id === ids.spaceId)
+    if (!inv) problems.push(`${who} has no pending invite to the space`)
+    invites[who] = inv?.id ?? null
+  }
+  // Bob accepts; the picker no longer offers him (already in the space).
+  if (invites.bob) {
+    await asUser('bob', 'POST', `/api/local_invites/${invites.bob}/accept`)
+    const { ctx, page: p } = await newPage('desktop')
+    try {
+      const names = await openPicker(p)
+      if (names.some(n => n.includes('bob'))) problems.push(`bob is in the space but still offered: ${JSON.stringify(names)}`)
+      result.afterAccept = names
+    } finally {
+      await ctx.close()
+      activePage = page
+    }
+  }
+  return { problems, ...result, invites }
+})
+
 // 6e. Invites go through Social Home (D3): the probe app's "Invite" asks
 //     for the invite sheet (people.pick); the host draws it outside the
 //     frame, reads GET …/invitable and on Send POSTs …/sessions — both

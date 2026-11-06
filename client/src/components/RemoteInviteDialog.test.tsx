@@ -96,8 +96,15 @@ afterEach(() => {
   cleanup()
 })
 
-async function renderAndOpen() {
-  api.get.mockResolvedValueOnce(FRIENDS_PAYLOAD)
+/** ``GET /api/friends`` → ``payload``; the space's members → ``members``. */
+function mockGets(payload: unknown, members: unknown = []) {
+  api.get.mockImplementation((url: string) => (
+    url === '/api/friends' ? Promise.resolve(payload) : Promise.resolve(members)
+  ))
+}
+
+async function renderAndOpen(members: unknown = []) {
+  mockGets(FRIENDS_PAYLOAD, members)
   const result = render(<RemoteInviteDialog />)
   await act(async () => { openRemoteInviteDialog('space-uuid-1') })
   await waitFor(() => {
@@ -110,7 +117,7 @@ async function renderAndOpen() {
 describe('RemoteInviteDialog — the one Invite door', () => {
   it('"Share an invite link" hands over to the link dialog with the opener\'s role', async () => {
     openSpaceInvite.mockReset()
-    api.get.mockResolvedValueOnce(FRIENDS_PAYLOAD)
+    mockGets(FRIENDS_PAYLOAD)
     const r = render(<RemoteInviteDialog />)
     await act(async () => { openRemoteInviteDialog('space-uuid-1', 'admin') })
     const link = await waitFor(() => r.getByRole('button', { name: 'Share an invite link' }))
@@ -122,7 +129,7 @@ describe('RemoteInviteDialog — the one Invite door', () => {
 
   it('with nobody to pick, the link is the main action', async () => {
     openSpaceInvite.mockReset()
-    api.get.mockResolvedValueOnce({ instance: { instance_id: 'i', display_name: 'H', members: [] }, households: [] })
+    mockGets({ instance: { instance_id: 'i', display_name: 'H', members: [] }, households: [] })
     const r = render(<RemoteInviteDialog />)
     await act(async () => { openRemoteInviteDialog('space-uuid-1', 'owner') })
     fireEvent.click(await waitFor(() => r.getByRole('button', { name: 'Share an invite link' })))
@@ -190,28 +197,106 @@ describe('RemoteInviteDialog', () => {
     })
   })
 
-  it('LOCAL pick → /members add + "Add" button', async () => {
-    // Regression for Pascal's bug: picking a same-household member
-    // (his wife) must seat her immediately via /members, not queue a
-    // cross-household federated invite.
-    api.post.mockResolvedValueOnce({})
-    const { container, getByText } = await renderAndOpen()
+  it('LOCAL pick → an invite too: /members + "Send invite", "Invite sent"', async () => {
+    // Someone in your own household is invited like everyone else: the
+    // server makes a pending invite they accept (``invite_local_user``),
+    // so the dialog never says "Add" / "Added".
+    api.post.mockResolvedValueOnce({ status: 'pending' })
+    const { container, getByText, queryByText } = await renderAndOpen()
     const annaRow = container.querySelector(
       '[data-testid="remote-invite-row-uid-anna"]',
     ) as HTMLButtonElement
     expect(annaRow).not.toBeNull()
     await act(async () => { fireEvent.click(annaRow) })
-    // Button label flips to "Add" when the pick is local.
-    await act(async () => { fireEvent.click(getByText('Add')) })
+    expect(queryByText('Add')).toBeNull()
+    await act(async () => { fireEvent.click(getByText('Send invite')) })
     await waitFor(() => {
       expect(api.post).toHaveBeenCalledWith(
         '/api/spaces/space-uuid-1/members',
         { user_id: 'uid-anna' },
       )
-      expect(showToast).toHaveBeenCalledWith(
-        expect.stringContaining('Added Anna'), 'success',
-      )
+      expect(showToast).toHaveBeenCalledWith('Invite sent to Anna (Alpha)', 'success')
     })
+  })
+
+  it('picks several people and sends every invite at once', async () => {
+    api.post.mockResolvedValue({})
+    const r = await renderAndOpen()
+    const row = (id: string) => r.container.querySelector(`[data-testid="remote-invite-row-${id}"]`) as HTMLButtonElement
+    await act(async () => { fireEvent.click(row('uid-anna')) })
+    await act(async () => { fireEvent.click(row('uid-bob')) })
+    await act(async () => { fireEvent.click(row('uid-dave')) })
+    // Tapping a picked row again unpicks it.
+    await act(async () => { fireEvent.click(row('uid-dave')) })
+    expect(row('uid-anna').getAttribute('aria-selected')).toBe('true')
+    expect(row('uid-dave').getAttribute('aria-selected')).toBe('false')
+    expect(r.getByRole('listbox').getAttribute('aria-multiselectable')).toBe('true')
+    await act(async () => { fireEvent.click(r.getByText('Send 2 invites')) })
+    await waitFor(() => {
+      expect(api.post).toHaveBeenCalledWith('/api/spaces/space-uuid-1/members', { user_id: 'uid-anna' })
+      expect(api.post).toHaveBeenCalledWith('/api/spaces/space-uuid-1/remote-invites', {
+        invitee_instance_id: 'beta-instance', invitee_user_id: 'uid-bob',
+      })
+      expect(showToast).toHaveBeenCalledWith('2 invites sent', 'success')
+    })
+    expect(api.post).toHaveBeenCalledTimes(2)
+    // All sent: the dialog closes.
+    await waitFor(() => expect(r.queryByRole('listbox')).toBeNull())
+  })
+
+  it('when some invites fail, those people stay picked and are named', async () => {
+    api.post.mockImplementation((url: string) => (
+      url.endsWith('/remote-invites') ? Promise.reject(new Error('unreachable')) : Promise.resolve({})
+    ))
+    const r = await renderAndOpen()
+    const row = (id: string) => r.container.querySelector(`[data-testid="remote-invite-row-${id}"]`) as HTMLButtonElement
+    for (const id of ['uid-anna', 'uid-bob', 'uid-carol']) {
+      await act(async () => { fireEvent.click(row(id)) })
+    }
+    await act(async () => { fireEvent.click(r.getByText('Send 3 invites')) })
+    await waitFor(() => {
+      expect(r.getByText("Couldn't send to Bob (Beta) and Carol (Beta). Try again.")).toBeTruthy()
+    })
+    // Anna's went out: a toast, and she is no longer offered.
+    expect(showToast).toHaveBeenCalledWith('Invite sent to Anna (Alpha)', 'success')
+    expect(row('uid-anna')).toBeNull()
+    expect(row('uid-bob').getAttribute('aria-selected')).toBe('true')
+    expect(row('uid-carol').getAttribute('aria-selected')).toBe('true')
+    expect(r.getByText('Send 2 invites')).toBeTruthy()
+  })
+
+  it('the send button waits for a pick', async () => {
+    const r = await renderAndOpen()
+    expect((r.getByText('Send invite').closest('button') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('people already in the space are not offered, local or remote', async () => {
+    const { container } = await renderAndOpen([
+      // A local member row has no ``instance_id``; a remote one has.
+      { user_id: 'uid-pascal', role: 'owner' },
+      { user_id: 'uid-anna', role: 'member' },
+      { user_id: 'uid-bob', instance_id: 'beta-instance', role: 'member' },
+    ])
+    expect(api.get).toHaveBeenCalledWith('/api/spaces/space-uuid-1/members')
+    const names = [...container.querySelectorAll('.sh-remote-invite-row__name')]
+      .map(n => n.textContent)
+    expect(names).toEqual(['Carol (Beta)', 'Dave (Gamma)'])
+  })
+
+  it('the same user id in another household is still offered', async () => {
+    const { container } = await renderAndOpen([
+      { user_id: 'uid-carol', instance_id: 'other-instance', role: 'member' },
+    ])
+    expect(container.querySelector('[data-testid="remote-invite-row-uid-carol"]')).not.toBeNull()
+  })
+
+  it('when the member list fails to load, everyone is still offered', async () => {
+    api.get.mockImplementation((url: string) => (
+      url === '/api/friends' ? Promise.resolve(FRIENDS_PAYLOAD) : Promise.reject(new Error('offline'))
+    ))
+    const r = render(<RemoteInviteDialog />)
+    await act(async () => { openRemoteInviteDialog('space-uuid-1') })
+    await waitFor(() => expect(r.container.querySelectorAll('.sh-remote-invite-row').length).toBe(4))
   })
 
   it('shows last-seen freshness per row', async () => {
@@ -229,7 +314,7 @@ describe('RemoteInviteDialog', () => {
   })
 
   it('renders the no-people empty state when there is nobody to add', async () => {
-    api.get.mockResolvedValueOnce({
+    mockGets({
       instance: {
         instance_id: 'self-instance',
         display_name: 'Alpha House',
@@ -254,7 +339,7 @@ describe('RemoteInviteDialog in German', () => {
     await setLocale('de')
     try {
       const { container, baseElement } = await renderAndOpen()
-      expect(baseElement.textContent).toContain('Jemanden zu diesem Space hinzufügen')
+      expect(baseElement.textContent).toContain('Leute in diesen Space einladen')
       expect(container.querySelector('[data-testid="remote-invite-search"]')
         ?.getAttribute('placeholder')).toBe('Name oder Haushalt eingeben …')
       const bobMeta = container
