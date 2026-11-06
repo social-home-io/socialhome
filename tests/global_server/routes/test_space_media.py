@@ -9,6 +9,7 @@ the signed body).
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 
@@ -43,6 +44,8 @@ from socialhome.global_server.app_keys import (
 from socialhome.global_server.blob_store import BLOB_OVERHEAD
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
+from socialhome.global_server.routes import space_media as space_media_routes
+from socialhome.global_server.routes.space_media import GfsMediaView
 from socialhome.global_server.server import create_gfs_app
 from socialhome.global_server.space_media_auth import (
     SPACE_MEDIA_MAX_PER_MINUTE_PER_IP,
@@ -293,9 +296,14 @@ async def test_a_body_other_than_the_signed_size_is_422(gfs):
 
 async def test_a_body_past_the_signed_size_is_413_before_buffering(gfs):
     data = os.urandom(SMALL)
-    claim = _claim(data, size=SMALL - 1)
+    # A real (smaller) bucket signed, a larger body sent.
+    claim = _claim(data, size=PAD_BUCKETS[0] + BLOB_OVERHEAD)
     r = await gfs.put(_put_url(data), data=data, headers=_authority_header(claim))
     assert r.status == 413
+    # Its reserved upload slot is given back.
+    store = gfs.app_[gfs_space_media_store_key]
+    bucket = int(time.time()) // 3600
+    assert await store._repo.upload_counts("space", SPACE, bucket=bucket) == (0, 0)
 
 
 @pytest.mark.parametrize("gfs", [{"space_media_max_bytes": SMALL}], indirect=True)
@@ -331,6 +339,75 @@ async def test_the_upload_rate_is_429(gfs):
     assert r.status == 429
     assert (await r.json())["error"] == "space_media_quota"
     assert "Retry-After" in r.headers
+
+
+# ── Security review F7: nothing is read before the cheap checks ──────────
+
+
+@pytest.fixture
+def body_reads(monkeypatch):
+    """Count (and optionally stall) the upload view's body reads."""
+    reads = {"n": 0, "stall": 0.0}
+    real = GfsMediaView.bounded_raw
+
+    async def spy(self, max_bytes):
+        reads["n"] += 1
+        if reads["stall"]:
+            await asyncio.sleep(reads["stall"])
+        return await real(self, max_bytes)
+
+    monkeypatch.setattr(GfsMediaView, "bounded_raw", spy)
+    return reads
+
+
+@pytest.mark.parametrize(
+    "gfs", [{"space_media_space_uploads_per_hour": 1}], indirect=True
+)
+async def test_the_rate_is_checked_before_the_body_is_read(gfs, body_reads):
+    first, second = os.urandom(SMALL), os.urandom(SMALL)
+    await gfs.put(_put_url(first), data=first, headers=_authority_header(_claim(first)))
+    assert body_reads["n"] == 1
+    r = await gfs.put(
+        _put_url(second), data=second, headers=_authority_header(_claim(second))
+    )
+    assert r.status == 429
+    assert body_reads["n"] == 1
+
+
+async def test_a_size_that_is_no_padded_bucket_is_refused_unread(gfs, body_reads):
+    data = os.urandom(SMALL + 1)
+    r = await gfs.put(
+        _put_url(data), data=data, headers=_authority_header(_claim(data))
+    )
+    assert r.status == 422
+    assert (await r.json())["error"] == "not_a_padded_blob"
+    assert body_reads["n"] == 0
+
+
+async def test_a_retry_of_a_held_blob_is_answered_unread(gfs, body_reads):
+    data = os.urandom(SMALL)
+    await gfs.put(_put_url(data), data=data, headers=_authority_header(_claim(data)))
+    r = await gfs.put(
+        _put_url(data), data=data, headers=_authority_header(_claim(data))
+    )
+    assert await r.json() == {"stored": False, "status": "already_stored"}
+    assert body_reads["n"] == 1
+
+
+async def test_a_body_that_stalls_times_out_and_refunds_its_slot(
+    gfs, body_reads, monkeypatch
+):
+    monkeypatch.setattr(space_media_routes, "BODY_READ_TIMEOUT_S", 0.05)
+    body_reads["stall"] = 0.5
+    data = os.urandom(SMALL)
+    r = await gfs.put(
+        _put_url(data), data=data, headers=_authority_header(_claim(data))
+    )
+    assert r.status == 408
+    store = gfs.app_[gfs_space_media_store_key]
+    bucket = int(time.time()) // 3600
+    assert await store._repo.upload_counts("space", SPACE, bucket=bucket) == (0, 0)
+    assert (await gfs.get(_get_url(data))).status == 404
 
 
 # ── Delete ───────────────────────────────────────────────────────────────

@@ -3543,9 +3543,14 @@ timing doesn't tell which spaces are listed or banned, which channels exist,
 which writer keys are pinned or which mode a space or channel is in. Every
 failure is one `403 {"error": "not authorized for this scope"}` (reason at
 DEBUG); a malformed header is `400`. The header is checked **before** the
-body is read; the body is then read up to exactly the signed `size` (`413`
-past it, `422 size_mismatch` short of it), so an unauthorized caller never
-makes the server buffer a byte. A captured upload replayed within the ±300 s
+body is read, and so are the signed `size` (a padded bucket, `422`
+otherwise; within the caps, `413`) and the scope's upload slot (`429`,
+reserved atomically) — a scope that already holds the blob is answered
+`already_stored` without reading anything. Only then is the body read, up
+to exactly the signed `size` (`413` past it, `422 size_mismatch` short of
+it) within 120 s (`408 body_timeout`), the slot given back on any of these —
+so neither an unauthorized caller nor a scope over its rate makes the server
+buffer a byte. A captured upload replayed within the ±300 s
 window is harmless: it is the same content-addressed bytes (a no-op), or
 lands on another GFS serving the same scope, inside that scope's caps there.
 A delete is the scope's seed holder's alone: the space authority over

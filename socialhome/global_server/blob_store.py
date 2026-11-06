@@ -63,7 +63,13 @@ def check_shape(blob_id: str, data: bytes) -> None:
     """A well-formed address and a padded-bucket size, else 422."""
     if not is_blob_id(blob_id):
         raise MediaRefused(422, "bad_blob_id")
-    if len(data) > MAX_BLOB_BYTES or len(data) not in BUCKET_SIZES:
+    check_size(len(data))
+
+
+def check_size(size: int) -> None:
+    """A padded-bucket size, else 422 — checkable from a signed size before
+    any body is read."""
+    if size > MAX_BLOB_BYTES or size not in BUCKET_SIZES:
         raise MediaRefused(422, "not_a_padded_blob")
 
 

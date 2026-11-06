@@ -33,6 +33,7 @@ body — no oracle — with the reason at DEBUG.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from aiohttp import web
@@ -68,6 +69,10 @@ _MAX_DELETE_BYTES = 2048
 
 #: Answer to an upload-rate refusal: the window is an hour.
 _QUOTA_RETRY_AFTER_S = "600"
+
+#: How long an upload's body may take to arrive (≤ 8 MiB; ~67 s at
+#: 1 Mbit/s). A slower one is ``408`` and its reserved slot is given back.
+BODY_READ_TIMEOUT_S: float = 120.0
 
 
 def _refused() -> web.Response:
@@ -122,16 +127,37 @@ class GfsMediaView(GfsBaseView):
             return _refused()
         size = claim.size
         try:
-            store.admit_size(size)
-            data = await self.bounded_raw(size)
-            if len(data) != size:
-                return web.json_response({"error": "size_mismatch"}, status=422)
+            # Size bucket, caps and the scope's rate slot — before any body.
+            reserved = await store.admit_upload(
+                scope_kind=claim.scope,
+                scope_id=claim.scope_id,
+                blob_id=blob_id,
+                size=size,
+            )
+        except MediaRefused as exc:
+            return _media_refused(exc)
+        if reserved is None:
+            # The scope already holds it: answered without reading the body.
+            return web.json_response({"stored": False, "status": "already_stored"})
+        try:
+            data = await asyncio.wait_for(self.bounded_raw(size), BODY_READ_TIMEOUT_S)
+        except TimeoutError:
+            await store.release_upload(claim.scope, claim.scope_id, reserved)
+            return web.json_response({"error": "body_timeout"}, status=408)
+        except BaseException:
+            await store.release_upload(claim.scope, claim.scope_id, reserved)
+            raise
+        if len(data) != size:
+            await store.release_upload(claim.scope, claim.scope_id, reserved)
+            return web.json_response({"error": "size_mismatch"}, status=422)
+        try:
             stored = await store.put(
                 scope_kind=claim.scope,
                 scope_id=claim.scope_id,
                 blob_id=blob_id,
                 data=data,
                 expires_at=claim.expires_at,
+                reserved=reserved,
             )
         except MediaRefused as exc:
             return _media_refused(exc)

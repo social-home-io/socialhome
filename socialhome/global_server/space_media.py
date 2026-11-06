@@ -97,6 +97,7 @@ from .blob_store import (
     MediaRefused,
     check_address,
     check_shape,
+    check_size,
     remove_stale_temps,
 )
 from .domain import GfsSpaceMedia, GfsSpaceMediaClaim
@@ -242,6 +243,48 @@ class GfsSpaceMediaStore:
             self._counters.refused_too_large += 1
             raise MediaRefused(413, "too_large_for_cache")
 
+    async def admit_upload(
+        self,
+        *,
+        scope_kind: str,
+        scope_id: str,
+        blob_id: str,
+        size: int,
+        now: int | None = None,
+    ) -> int | None:
+        """Everything an upload can be refused for BEFORE its body is read
+        (the route calls it with the signed size): the cache is on, the
+        scope is one, the size is a padded bucket this cache takes, and —
+        unless the scope already holds the blob with its file (``None``: a
+        retry, answered without reading anything) — one of the scope's
+        upload slots, reserved atomically. Returns the slot's hour bucket,
+        for :meth:`put` (``reserved=``) or :meth:`release_upload`. Raises
+        :class:`MediaRefused`."""
+        self.require_enabled()
+        if scope_kind not in MEDIA_SCOPES:
+            raise MediaRefused(422, "bad_scope")
+        if not is_blob_id(blob_id):
+            raise MediaRefused(422, "bad_blob_id")
+        check_size(size)
+        self.admit_size(size)
+        now = int(time.time()) if now is None else now
+        if await self._holds(
+            blob_id, scope_kind, scope_id, now
+        ) and await self._files.exists(blob_id):
+            # This scope already holds it: a no-op, and no fresher expiry.
+            # (A row whose file went missing takes the locked path of
+            # :meth:`put`, which checks the bytes' address and puts them
+            # back.)
+            return None
+        bucket = now // _HOUR
+        await self._reserve_slot(scope_kind, scope_id, bucket, now)
+        return bucket
+
+    async def release_upload(self, scope_kind: str, scope_id: str, bucket: int) -> None:
+        """Give back a slot :meth:`admit_upload` reserved for an upload that
+        never reached :meth:`put` (its body was too large, short or slow)."""
+        await self._repo.refund_upload(scope_kind, scope_id, bucket=bucket)
+
     async def put(
         self,
         *,
@@ -251,30 +294,33 @@ class GfsSpaceMediaStore:
         data: bytes,
         expires_at: int,
         now: int | None = None,
+        reserved: int | None = None,
     ) -> bool:
         """Keep one blob for the scope. ``True`` when its bytes were stored
         now, ``False`` when they already were (a retry, another scope's
         upload, another node winning the race) — the scope's claim is in
-        place either way. Raises :class:`MediaRefused`."""
-        self.require_enabled()
-        if scope_kind not in MEDIA_SCOPES:
-            raise MediaRefused(422, "bad_scope")
+        place either way. *reserved* is the slot :meth:`admit_upload` took
+        (refunded here when the upload fails or stores nothing new); without
+        it this call admits the upload itself. Raises :class:`MediaRefused`."""
         now = int(time.time()) if now is None else now
-        check_shape(blob_id, data)
-        self.admit_size(len(data))
-        if expires_at <= now:
-            raise MediaRefused(422, "bad_expiry")
-        expires_at = min(expires_at, now + self._limits.ttl_s)
-        if await self._holds(
-            blob_id, scope_kind, scope_id, now
-        ) and await self._files.exists(blob_id):
-            # This scope already holds it: a no-op, and no fresher expiry.
-            # (A row whose file went missing takes the locked path below,
-            # which checks the bytes' address and puts them back.)
-            return False
-        bucket = now // _HOUR
-        await self._reserve_slot(scope_kind, scope_id, bucket, now)
+        if reserved is None:
+            admitted = await self.admit_upload(
+                scope_kind=scope_kind,
+                scope_id=scope_id,
+                blob_id=blob_id,
+                size=len(data),
+                now=now,
+            )
+            if admitted is None:
+                return False
+            bucket = admitted
+        else:
+            bucket = reserved
         try:
+            check_shape(blob_id, data)
+            if expires_at <= now:
+                raise MediaRefused(422, "bad_expiry")
+            expires_at = min(expires_at, now + self._limits.ttl_s)
             await check_address(blob_id, data)
             async with self._lock:
                 stored, used = await self._store(
