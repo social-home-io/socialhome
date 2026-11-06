@@ -1523,6 +1523,98 @@ async def test_rsvp_publishes_federation_event(space_cal_env):
     assert all(c[2]["space_id"] == "sp-cal" for c in rsvp_calls)
 
 
+class _FakeMediaSync:
+    """Records what the calendar hands the member media outbox."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    async def enqueue_for_blob(self, **kwargs):
+        self.calls.append(kwargs)
+
+
+class _NullFed:
+    _own_instance_id = "self-instance"
+
+    async def broadcast_to_space_members(self, *a, **k):
+        return None
+
+
+async def _with_cover_shipping(env) -> _FakeMediaSync:
+    """Wire federation + the media outbox, and seat two other member
+    households (plus our own row, which never gets a copy)."""
+    for iid in ("self-instance", "peer-b", "peer-c"):
+        await env.db.enqueue(
+            "INSERT INTO space_instances(space_id, instance_id) VALUES(?, ?)",
+            ("sp-cal", iid),
+        )
+    env.space_cal_svc.attach_federation(_NullFed())
+    sync = _FakeMediaSync()
+    env.space_cal_svc.attach_media_sync(sync)
+    return sync
+
+
+async def test_a_new_events_cover_goes_to_every_member_household(space_cal_env):
+    """The cover file itself reaches the other member households — not
+    only its ``api/media/…`` reference, which 404s without the bytes."""
+    env = space_cal_env
+    sync = await _with_cover_shipping(env)
+    event = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Picnic",
+        start=_SEED.isoformat(),
+        end=(_SEED + timedelta(hours=1)).isoformat(),
+        created_by="uid-alice",
+        cover_url="api/media/cover.webp",
+    )
+    assert len(sync.calls) == 1
+    call = sync.calls[0]
+    assert call["space_id"] == "sp-cal"
+    assert call["correlation_id"] == event.id
+    assert call["media_urls"] == ["api/media/cover.webp"]
+    assert sorted(call["target_instance_ids"]) == ["peer-b", "peer-c"]
+
+
+async def test_an_event_without_a_cover_ships_no_file(space_cal_env):
+    env = space_cal_env
+    sync = await _with_cover_shipping(env)
+    await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Picnic",
+        start=_SEED.isoformat(),
+        end=(_SEED + timedelta(hours=1)).isoformat(),
+        created_by="uid-alice",
+    )
+    assert sync.calls == []
+
+
+async def test_only_a_changed_cover_ships_again(space_cal_env):
+    """An edit that keeps the cover sends no bytes (delta-only); a new
+    cover goes out once."""
+    env = space_cal_env
+    sync = await _with_cover_shipping(env)
+    event = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Picnic",
+        start=_SEED.isoformat(),
+        end=(_SEED + timedelta(hours=1)).isoformat(),
+        created_by="uid-alice",
+        cover_url="api/media/cover.webp",
+    )
+    sync.calls.clear()
+    await env.space_cal_svc.update_event(
+        event.id, space_id="sp-cal", actor_user_id="uid-alice", summary="Picnic!"
+    )
+    assert sync.calls == []
+    await env.space_cal_svc.update_event(
+        event.id,
+        space_id="sp-cal",
+        actor_user_id="uid-alice",
+        cover_url="api/media/new-cover.webp",
+    )
+    assert [c["media_urls"] for c in sync.calls] == [["api/media/new-cover.webp"]]
+
+
 async def test_create_event_publishes_federation_event(space_cal_env):
     """create_event broadcasts SPACE_CALENDAR_EVENT_CREATED with full payload.
 

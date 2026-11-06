@@ -391,6 +391,47 @@ async def test_stream_initial_enqueues_bazaar_catchup_media(encoder):
     ]
 
 
+async def test_catchup_media_ships_calendar_covers(encoder):
+    """A household catching up gets each streamed event's cover file
+    too — the record carries only the ``api/media/…`` reference."""
+    from dataclasses import dataclass
+    from unittest.mock import AsyncMock
+
+    @dataclass
+    class _Event:
+        id: str
+        cover_url: str | None = None
+
+    asked: list[dict] = []
+
+    class _CalRepo:
+        async def list_events_sync_page(self, space_id, **kw):
+            asked.append(kw)
+            if kw["cursor"] is None:
+                return [_Event("ev-1", "api/media/c1.webp"), _Event("ev-2")], 3
+            return [_Event("ev-3", "api/media/c3.webp")], None
+
+    media_sync = AsyncMock()
+    media_sync.enqueue_for_blob = AsyncMock()
+    svc = SpaceSyncService(
+        builder=ChunkBuilder(encoder=encoder, crypto=_FakeCrypto()),
+        exporters={},
+        sig_suite="ed25519",
+        media_sync=media_sync,
+        space_calendar_repo=_CalRepo(),
+    )
+    await svc.stream_initial(_FakeSession(requester="peer-cal"))
+    calls = [c.kwargs for c in media_sync.enqueue_for_blob.call_args_list]
+    assert [(c["correlation_id"], list(c["media_urls"])) for c in calls] == [
+        ("ev-1", ["api/media/c1.webp"]),
+        ("ev-3", ["api/media/c3.webp"]),
+    ]
+    assert all(c["target_instance_ids"] == ["peer-cal"] for c in calls)
+    # Every page of the full record set the calendar resource streams.
+    assert [kw["cursor"] for kw in asked] == [None, 3]
+    assert all(kw.get("since") is None for kw in asked)
+
+
 async def test_catchup_media_follows_the_spaces_retention_window(encoder):
     """The catch-up media walks the same window the metadata streamed:
     every page, each asked with the space's retention cutoff."""

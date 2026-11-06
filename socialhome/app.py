@@ -1751,12 +1751,13 @@ def _wire_federation_stack(
         sig_suite=config.federation_sig_suite,
         # Catch-up media: after the metadata chunks stream the
         # requester also gets bytes for every post + gallery item +
-        # bazaar listing in the space via the shared
+        # bazaar listing + calendar cover in the space via the shared
         # SpaceMediaSyncService outbox.
         media_sync=space_media_sync_service,
         space_post_repo=space_post_repo,
         gallery_repo=gallery_repo,
         bazaar_repo=bazaar_repo,
+        space_calendar_repo=space_calendar_repo,
         windows=sync_windows,
         # §25.6 incremental sessions: a periodic sync streams only the rows
         # changed since the household's last confirmed stream (0086).
@@ -4913,6 +4914,9 @@ def create_app(config: Config | None = None) -> web.Application:
         # federation_service is built so the service can broadcast on
         # rsvp() / remove_rsvp() (§Phase A).
         space_cal_service.attach_federation(federation_service)
+        # An event's cover file follows the event to the other member
+        # households over the same media outbox post pictures ride.
+        space_cal_service.attach_media_sync(space_media_sync_service)
         # Late-bind realtime into the federation inbound — the
         # DM_MEDIA_BLOB handler uses it to fan ``dm.media_ready``
         # frames to local participants when the full bytes for a

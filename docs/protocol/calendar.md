@@ -417,6 +417,29 @@ invites) is kept only when it is a local media reference
 (`api/media/<name>`, verbatim); a third-party URL is stored as no cover,
 so it never becomes an `<img src>` that leaks members' IPs.
 
+The reference alone would 404 on every other household, so a space
+event's cover **file** follows it over the space media outbox
+(`SPACE_MEDIA_BLOB`, the path post pictures ride —
+[media](./media.md)), to every member household on the paths that
+outbox serves (paired and mesh):
+
+- **Live** — after `SPACE_CALENDAR_EVENT_CREATED` / `_UPDATED`, only
+  when the cover is new or changed (an edit that keeps it sends no
+  bytes). Cost per cover change: member households × one picture
+  (a WebP ≤ 2560 px); a 200-household space with a 300 KB cover moves
+  ~60 MB once, nothing on later edits.
+- **Held for review** — a moderated create / edit sends its cover to the
+  reviewer households with the submission; once approved, the host's own
+  save sends it on as above.
+- **Catch-up** — a household's first full §25.6 stream also queues the
+  cover of every streamed event (incremental re-syncs ship no media).
+- The receiver accepts the file only when the event it is correlated to
+  lives in that space and names it as its cover.
+
+An event saved before this landed keeps its missing file on other
+households until its cover changes (choosing the picture again is
+enough) or the household's next full stream.
+
 ## Implementation
 
 - `socialhome/services/calendar_service.py`,
