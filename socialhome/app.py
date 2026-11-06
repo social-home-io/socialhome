@@ -5681,8 +5681,12 @@ def create_app(config: Config | None = None) -> web.Application:
         #    c. After an upgrade (OURS increased since last boot), ask peers
         #       to re-advertise theirs — capabilities only, no content
         #       replay; one-shot per upgrade (persisted last-OURS).
+        # The outbound this startup wired, taken now — not looked up when the
+        # background step gets to it, so the announcement always goes to the
+        # same object whatever replaces the app key later.
+        cap_outbound = app.get(K.capabilities_outbound_key)
+
         async def _announce_capabilities() -> None:
-            cap_outbound = app.get(K.capabilities_outbound_key)
             if cap_outbound is not None:
                 await cap_outbound.publish()
 
