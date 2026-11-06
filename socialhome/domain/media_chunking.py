@@ -14,6 +14,11 @@ every tier that may carry it:
 * **HTTPS inbox** — the JSON fallback carries the chunk base64'ed in the
   payload, which is then encrypted and base64'ed again (~1.8x), under the
   inbox's 1 MiB body cap (``hardening.DEFAULT_JSON_MAX_BYTES``).
+* **Mesh route** — a space member that is not a CONFIRMED direct peer
+  gets the JSON chunk sealed inside ``SPACE_ROUTED``: sealed and
+  base64'ed once more before the outer envelope encrypts and base64s it
+  (~2.4x), under the *first hop's* inbox cap. Those targets get
+  :data:`ROUTED_CHUNK_BYTES` (:func:`routed_media_chunk_bytes`).
 
 Within those limits a chunk is as large as possible, so a file takes few
 messages: a photo up to :data:`HTTPS_CHUNK_BYTES` is one message, a
@@ -48,6 +53,13 @@ JSON_EXPANSION: float = 16 / 9
 #: of its 1 MiB cap) — also the size between two upgraded households, so
 #: a chunk built for the channel still fits the inbox on a fallback.
 HTTPS_CHUNK_BYTES: int = 512 * 1024
+
+#: The largest chunk a ``SPACE_ROUTED`` envelope carries under the first
+#: hop's 1 MiB inbox: measured ≈ 934 KB on the wire (512 KiB would be
+#: ≈ 1.24 MB). Used for every target that is not a CONFIRMED direct peer
+#: (:meth:`FederationService.mesh_media_chunk_bytes`). 4096 of them are
+#: 1.5 GiB — above every space / DM media max a receiver accepts.
+ROUTED_CHUNK_BYTES: int = 384 * 1024
 
 #: Upper bound on ``chunk_count`` for one transfer — a receiver refuses a
 #: chunk claiming more (``inbound_media_store``), so a sender never splits
@@ -99,6 +111,15 @@ def media_chunk_bytes(
     if channel_chunk < floor:
         return HTTPS_CHUNK_BYTES
     return channel_chunk
+
+
+def routed_media_chunk_bytes(*, file_size_bytes: int) -> int:
+    """The chunk size for a target reached over the mesh
+    (``SPACE_ROUTED``): :data:`ROUTED_CHUNK_BYTES`, grown only when a
+    ``file_size_bytes`` file would otherwise take more than
+    :data:`MAX_MEDIA_CHUNKS` chunks (above 1.5 GiB — past every media max
+    today, so the receiver refuses such a file anyway)."""
+    return max(ROUTED_CHUNK_BYTES, -(-file_size_bytes // MAX_MEDIA_CHUNKS))
 
 
 def chunk_count(size: int, chunk_bytes: int) -> int:

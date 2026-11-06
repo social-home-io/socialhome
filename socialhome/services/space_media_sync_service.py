@@ -382,8 +382,9 @@ class SpaceMediaSyncService:
         JSON / ``SPACE_ROUTED`` fallback.
 
         Chunks sized for the target household and this file
-        (:meth:`FederationService.media_chunk_bytes`): one chunk when the
-        file fits. Each carries ``chunk_index`` + ``chunk_count`` +
+        (:meth:`FederationService.mesh_media_chunk_bytes`): one chunk when
+        the file fits; smaller for a member reached only over the mesh,
+        whose chunks travel sealed inside ``SPACE_ROUTED``. Each carries ``chunk_index`` + ``chunk_count`` +
         ``final`` so the receiver can assemble. Lazy — each chunk is
         built when the sender pulls it.
         """
@@ -393,7 +394,7 @@ class SpaceMediaSyncService:
         async with aiofiles.open(path, "rb") as f:
             data = await f.read()
         size = len(data)
-        chunk_bytes = fed.media_chunk_bytes(
+        chunk_bytes = await fed.mesh_media_chunk_bytes(
             entry.target_instance_id, file_size_bytes=size
         )
         # Stable transfer id per (blob, peer) so retries assemble into

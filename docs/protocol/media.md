@@ -29,7 +29,9 @@ handshake.
 - **Point-to-point only.** The binary channel exists between two
   **CONFIRMED direct peers**. A non-CONFIRMED or mesh-only space member
   (reachable only via a `SPACE_ROUTED` relay) never uses it — that
-  member keeps receiving the JSON `SPACE_MEDIA_BLOB` over the mesh.
+  member keeps receiving the JSON `SPACE_MEDIA_BLOB` over the mesh,
+  in smaller 384 KiB chunks so the routed envelope fits the first hop's
+  inbox (see [DM media → Chunking](dm-media.md#chunking)).
 - **Capability-gated.** The sender uses the binary channel only when
   the peer advertises `proto_version ≥ 14`
   (`FederationCapability.MIN_FOR_MEDIA_CHANNEL`) **and** is CONFIRMED
