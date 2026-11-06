@@ -524,7 +524,10 @@ class GfsApp:
         # Uploads to the space media cache are authorized by the same checks
         # as ``/gfs/publish`` and the member publishes — no new key.
         space_media_auth = GfsSpaceMediaAuth(
-            federation=federation, member_publish=member_publish, channels=channels
+            federation=federation,
+            member_publish=member_publish,
+            channels=channels,
+            channel_media_per_household=config.space_media_channels_per_household,
         )
         maintenance = GfsMaintenanceScheduler(
             space_media=space_media,

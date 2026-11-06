@@ -1313,8 +1313,9 @@ WS pushes across allocs. The step:
    be ``404`` with ``no-store`` (every write and fetch at the ONE
    scope-free ``/gfs/media/{blob}``, the scope only in what is signed).
    Then (step 3i) the same for a **private space's opaque channel**: a
-   channel registered via node 1 gets the uniform ``403`` until a member
-   household holds a seat (epoch notice, pass, subscribe); then a blob
+   channel registered via node 1 gets the uniform ``403`` until member
+   households of TWO distinct households hold seats (epoch notice, passes,
+   subscribe — one household's seat is still ``403``); then a blob
    uploaded via node 0 under the channel key must be served byte-identical
    by node 1. Every address is bound to its scope
    (``sha256("sm1|" + scope + "|" + scope_id + "|" + ciphertext)``): the

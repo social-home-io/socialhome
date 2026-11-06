@@ -116,9 +116,19 @@ async def gfs(tmp_dir, request):
             now=now,
         )
         await channels.set_epoch(CHANNEL, 3, expected=None, now=now)
-        # The channel is IN USE: a member household holds a seat (a pass
-        # for an open epoch) — media uploads need that (security review F1).
+        # The channel is IN USE: two member households hold a seat (a pass
+        # for an open epoch) — media uploads need that (security review F1,
+        # re-attack N2).
+        await fed.upsert_instance(
+            ClientInstance(
+                instance_id="member2",
+                display_name="M",
+                public_key="cc" * 32,
+                status="active",
+            )
+        )
         await channels.add_subscriber(CHANNEL, "owner", pass_epoch=3, now=now)
+        await channels.add_subscriber(CHANNEL, "member2", pass_epoch=3, now=now)
         tc.app_ = app
         yield tc
 
@@ -909,3 +919,81 @@ async def test_a_ban_hides_the_spaces_blobs(gfs):
     await gfs.put(_put_url(data), data=data, headers=_authority_header(_claim(data)))
     await gfs.app_[gfs_fed_repo_key].set_space_status(SPACE, "banned")
     assert (await gfs.get(_get_url(data))).status == 404
+
+
+# ── Security re-attack N2: cheap channels can't game fair eviction ───────
+
+
+async def _seated_channel(
+    gfs, households: list[str], *, joined: int
+) -> tuple[str, bytes]:
+    """A channel with an epoch and seats for *households* (joined at
+    *joined*) — what one household can set up for itself via the landing
+    page, an anonymous epoch notice and passes under its own channel key."""
+    cid, seed = await _anon_channel(gfs)
+    channels = gfs.app_[gfs_channel_repo_key]
+    await channels.set_epoch(cid, 3, expected=None, now=joined)
+    for h in households:
+        await channels.add_subscriber(cid, h, pass_epoch=3, now=joined)
+    return cid, seed
+
+
+async def _active(gfs, iid: str) -> None:
+    await gfs.app_[gfs_fed_repo_key].upsert_instance(
+        ClientInstance(
+            instance_id=iid,
+            display_name=iid,
+            public_key=os.urandom(32).hex(),
+            status="active",
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "gfs",
+    [{"space_media_max_bytes": 4 * SMALL, "space_media_space_max_bytes": 64 * SMALL}],
+    indirect=True,
+)
+async def test_six_channels_of_one_household_cannot_trim_a_space(gfs):
+    """Probe: one attacker household seats itself in 6 channels of its own
+    and uploads to each — every upload is the uniform 403 (one household is
+    not enough), so the space's blob is never trimmed."""
+    await _active(gfs, "attacker")
+    victim = os.urandom(SMALL)
+    r = await gfs.put(
+        _put_url(victim), data=victim, headers=_authority_header(_claim(victim))
+    )
+    assert r.status == 201
+    now = int(time.time())
+    for i in range(6):
+        cid, seed = await _seated_channel(gfs, ["attacker"], joined=now + i)
+        for _ in range(2):
+            junk = os.urandom(SMALL)
+            claim = _claim(junk, space=cid, scope=SCOPE_CHANNEL)
+            r = await gfs.put(
+                _ch_url(junk, cid), data=junk, headers=_channel_header(claim, seed=seed)
+            )
+            assert r.status == 403
+    assert (await gfs.get(_get_url(victim))).status == 200
+
+
+@pytest.mark.parametrize(
+    "gfs", [{"space_media_channels_per_household": 2}], indirect=True
+)
+async def test_a_household_counts_toward_only_its_first_channels(gfs):
+    """Two attacker households seated together in 3 channels: only their
+    first ``channels_per_household`` (2) seats count, so the third channel
+    gets no media."""
+    await _active(gfs, "a1")
+    await _active(gfs, "a2")
+    now = int(time.time())
+    made = [await _seated_channel(gfs, ["a1", "a2"], joined=now + i) for i in range(3)]
+    statuses = []
+    for cid, seed in made:
+        junk = os.urandom(SMALL)
+        claim = _claim(junk, space=cid, scope=SCOPE_CHANNEL)
+        r = await gfs.put(
+            _ch_url(junk, cid), data=junk, headers=_channel_header(claim, seed=seed)
+        )
+        statuses.append(r.status)
+    assert statuses == [201, 201, 403]

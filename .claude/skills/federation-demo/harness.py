@@ -2178,14 +2178,16 @@ def _gfs_cluster_space_media(
 
 
 def _gfs_cluster_channel_media(
-    urls: list[str], shared: tuple[str, bytes, bytes], member: tuple[str, bytes]
+    urls: list[str],
+    shared: tuple[str, bytes, bytes],
+    members: list[tuple[str, bytes]],
 ) -> None:
     """Step 3i of ``gfs-cluster``: the space media cache for a PRIVATE space's
     opaque channel. A channel is registered via node 1 (anonymous, channel-key
     signed — the GFS learns only its random id). While nobody holds a seat it
-    gets no media (uniform 403 — junk channels can't fill the cache). Then
-    its first epoch notice, a pass for a member household and that
-    household's seat; now one blob uploaded via node 0 under the channel key
+    gets no media (uniform 403 — junk channels can't fill the cache), nor
+    with ONE household's seat (security re-attack N2). Then its first epoch
+    notice, passes for two member households and their seats; now one blob uploaded via node 0 under the channel key
     is fetched byte-identical via node 1 at the scope-free
     ``/gfs/media/{blob}``. Finally the scope-bound address (security review
     v2): the space step's ciphertext uploaded under the channel is ANOTHER
@@ -2277,7 +2279,7 @@ def _gfs_cluster_channel_media(
             f"gfs-cluster: a channel nobody holds a seat in → {code} {resp!r}; "
             "want the uniform 403"
         )
-    # First epoch notice, a pass for the member household, its seat.
+    # First epoch notice, then passes and seats for the member households.
     epoch = 3
     notice = sign_notice(
         channel_seed=channel_seed,
@@ -2292,31 +2294,43 @@ def _gfs_cluster_channel_media(
     )
     if code not in (200, 201):
         raise SystemExit(f"gfs-cluster: channel epoch notice → {code} {resp!r}")
-    member_iid, member_seed = member
-    sub_req = ChannelSubscribeRequest(
-        instance_id=member_iid,
-        gfs_instance_id=gfs_id,
-        channel_id=channel_id,
-        ts=datetime.now(timezone.utc).isoformat(),
-        signature="",
-        channel_pass=issue_channel_pass(
-            channel_seed=channel_seed,
+    def _seat(member: tuple[str, bytes]) -> None:
+        member_iid, member_seed = member
+        sub_req = ChannelSubscribeRequest(
+            instance_id=member_iid,
+            gfs_instance_id=gfs_id,
             channel_id=channel_id,
-            epoch=epoch,
-            instance_pk=ed25519_public_key(member_seed),
-        ),
-    )
-    canonical = json.dumps(
-        sub_req.signing_payload(), separators=(",", ":"), sort_keys=True
-    ).encode()
-    sub_req = replace(
-        sub_req, signature=b64url_encode(sign_ed25519(member_seed, canonical))
-    )
-    code, resp = _request(
-        f"{urls[0]}/gfs/channels/subscribe", method="POST", body=sub_req.to_wire()
-    )
-    if code not in (200, 201):
-        raise SystemExit(f"gfs-cluster: channel subscribe via node 0 → {code} {resp!r}")
+            ts=datetime.now(timezone.utc).isoformat(),
+            signature="",
+            channel_pass=issue_channel_pass(
+                channel_seed=channel_seed,
+                channel_id=channel_id,
+                epoch=epoch,
+                instance_pk=ed25519_public_key(member_seed),
+            ),
+        )
+        canonical = json.dumps(
+            sub_req.signing_payload(), separators=(",", ":"), sort_keys=True
+        ).encode()
+        sub_req = replace(
+            sub_req, signature=b64url_encode(sign_ed25519(member_seed, canonical))
+        )
+        code, resp = _request(
+            f"{urls[0]}/gfs/channels/subscribe", method="POST", body=sub_req.to_wire()
+        )
+        if code not in (200, 201):
+            raise SystemExit(
+                f"gfs-cluster: channel subscribe via node 0 → {code} {resp!r}"
+            )
+
+    _seat(members[0])
+    code, resp = _channel_put(urls[0], blob)
+    if code != 403:
+        raise SystemExit(
+            f"gfs-cluster: a channel ONE household holds seats in → {code} "
+            f"{resp!r}; want the uniform 403 (two households needed)"
+        )
+    _seat(members[1])
 
     code, resp = _channel_put(urls[0], blob)
     if code != 201:
@@ -2327,9 +2341,9 @@ def _gfs_cluster_channel_media(
             f"gfs-cluster: channel media fetch via node 1 → {code}, {len(got)} bytes"
         )
     print(
-        "  a private space's channel gets no media until a member holds a seat "
-        "(403); then its upload via node 0 (channel key, opaque id) is served "
-        "byte-identical by node 1 ✓"
+        "  a private space's channel gets no media until two member households "
+        "hold seats (403 with none, 403 with one); then its upload via node 0 "
+        "(channel key, opaque id) is served byte-identical by node 1 ✓"
     )
 
     # The scope-bound address (security review v2) across nodes.
@@ -2743,7 +2757,7 @@ def cmd_gfs_cluster() -> None:
         # another (shared data dir + DB), and a re-upload coalesces.
         shared_media = _gfs_cluster_space_media(urls, clients[0])
         # 3i. …and for a private space's opaque channel.
-        _gfs_cluster_channel_media(urls, shared_media, clients[0])
+        _gfs_cluster_channel_media(urls, shared_media, clients[:2])
     except BaseException:
         _gfs_cluster_down(preserve_logs=True)
         raise

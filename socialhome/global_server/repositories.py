@@ -3498,6 +3498,10 @@ class AbstractGfsChannelRepo(Protocol):
 
     async def list_targets(self, channel_id: str, epochs: set[int]) -> list[str]: ...
 
+    async def count_media_households(
+        self, channel_id: str, epochs: set[int], *, per_household: int
+    ) -> int: ...
+
     async def list_recently_seen(
         self, channel_id: str, epochs: set[int], *, within_s: int
     ) -> set[str]: ...
@@ -3670,6 +3674,28 @@ class SqliteGfsChannelRepo:
             (channel_id, *sorted(epochs)),
         )
         return [str(_as_dict(r)["instance_id"]) for r in rows]
+
+    async def count_media_households(
+        self, channel_id: str, epochs: set[int], *, per_household: int
+    ) -> int:
+        """Distinct active households holding a seat here whose pass epoch
+        is in ``epochs`` AND for which this seat is among their
+        *per_household* oldest seats (``joined_at``, then the channel id) —
+        so one household counts toward at most that many channels' media."""
+        if not epochs or per_household < 1:
+            return 0
+        marks = ",".join("?" for _ in epochs)
+        row = await self._db.fetchone(
+            "SELECT COUNT(DISTINCT cs.instance_id) AS n"
+            " FROM gfs_channel_subscribers cs"
+            " JOIN client_instances ci USING (instance_id)"
+            f" WHERE cs.channel_id=? AND ci.status='active' AND cs.pass_epoch IN ({marks})"
+            " AND (SELECT COUNT(*) FROM gfs_channel_subscribers o"
+            "  WHERE o.instance_id = cs.instance_id AND (o.joined_at < cs.joined_at"
+            "  OR (o.joined_at = cs.joined_at AND o.channel_id < cs.channel_id))) < ?",
+            (channel_id, *sorted(epochs), per_household),
+        )
+        return int(_as_dict(row)["n"]) if row is not None else 0
 
     async def list_recently_seen(
         self, channel_id: str, epochs: set[int], *, within_s: int

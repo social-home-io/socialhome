@@ -132,6 +132,11 @@ MAX_CHANNEL_SUBSCRIPTIONS_PER_INSTANCE: int = MAX_SUBSCRIPTIONS_PER_INSTANCE
 MAX_FIRST_CHANNEL_EPOCH: int = 2**62
 
 
+#: Distinct member households whose seats a channel needs before it takes
+#: space media (security re-attack N2: one household can seat itself).
+MIN_CHANNEL_MEDIA_HOUSEHOLDS: int = 2
+
+
 #: Live channel rows this server keeps at most — anonymous registration's
 #: server-wide bound (with the per-address limit and the unused-row TTL).
 MAX_CHANNELS: int = 100_000
@@ -268,18 +273,28 @@ class GfsChannelService:
         """:class:`PermissionError` unless *channel_id* is registered here."""
         await self._channel(channel_id)
 
-    async def require_channel_in_use(self, channel_id: str) -> None:
+    async def require_channel_in_use(
+        self,
+        channel_id: str,
+        *,
+        min_households: int = MIN_CHANNEL_MEDIA_HOUSEHOLDS,
+        per_household: int = 5,
+    ) -> None:
         """:class:`PermissionError` unless *channel_id* is registered here AND
-        in use: at least one member household holds a seat whose pass is for
-        an open epoch (the seats a publish fans out to — nothing new is
-        recorded). Registration is anonymous (10 / min / address), so a
-        channel nobody took a seat in gets no media: junk channels can't
-        fill the cache (security review F1)."""
+        in use by at least *min_households* distinct active member
+        households: each holds a seat whose pass is for an open epoch (the
+        seats a publish fans out to — nothing new is recorded), and the seat
+        is among that household's *per_household* oldest. Registration is
+        anonymous and ONE household can seat itself in channels of its own
+        (an epoch notice, a pass under its own channel key, subscribe), so
+        one household's seats never make a channel eligible, and each counts
+        toward a few channels only (security review F1, re-attack N2)."""
         ch = await self._channel(channel_id)
-        if not await self._channels.list_targets(
-            channel_id, _open_epochs(ch, now=self._now())
-        ):
-            raise PermissionError("channel not in use")
+        households = await self._channels.count_media_households(
+            channel_id, _open_epochs(ch, now=self._now()), per_household=per_household
+        )
+        if households < min_households:
+            raise PermissionError("channel not in use by enough households")
 
     async def verify_channel_key(
         self, channel_id: str, *, prefix: bytes, body: dict, signature: str, suite: str

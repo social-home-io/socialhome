@@ -110,8 +110,17 @@ async def env(gfs_db):
         now=NOW,
     )
     await channel_repo.set_epoch(CHANNEL, 3, expected=None, now=NOW)
-    # In use: a member household holds a seat (security review F1).
+    # In use: two member households hold a seat (security review F1, N2).
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="member2",
+            display_name="M",
+            public_key="cc" * 32,
+            status="active",
+        )
+    )
     await channel_repo.add_subscriber(CHANNEL, "owner", pass_epoch=3, now=NOW)
+    await channel_repo.add_subscriber(CHANNEL, "member2", pass_epoch=3, now=NOW)
     federation = GfsFederationService(fed_repo, epoch_repo=epoch_repo)
     clock = _Clock()
     member = GfsMemberPublishService(
@@ -822,8 +831,22 @@ async def test_a_channel_nobody_holds_a_seat_in_gets_no_media(env, seat):
     uploads, and the refusal costs what a success of the kind does."""
     auth, _, channel_repo = env
     await channel_repo.remove_subscriber(CHANNEL, "owner")
+    await channel_repo.remove_subscriber(CHANNEL, "member2")
     if seat == "closed_epoch":
         await channel_repo.add_subscriber(CHANNEL, "owner", pass_epoch=1, now=NOW)
+        await channel_repo.add_subscriber(CHANNEL, "member2", pass_epoch=1, now=NOW)
+    a = _channel_key(_claim(scope=SCOPE_CHANNEL, scope_id=CHANNEL))
+    with counting_ed25519_verifies() as done, pytest.raises(PermissionError):
+        await _upload(auth, a)
+    assert done[0] == 1
+
+
+async def test_one_households_seat_is_not_enough_for_media(env):
+    """Security re-attack N2: a single household can seat itself in its own
+    channel (landing-page registration, anonymous epoch notice, a pass under
+    its own channel key) — so media needs seats of TWO distinct households."""
+    auth, _, channel_repo = env
+    await channel_repo.remove_subscriber(CHANNEL, "member2")
     a = _channel_key(_claim(scope=SCOPE_CHANNEL, scope_id=CHANNEL))
     with counting_ed25519_verifies() as done, pytest.raises(PermissionError):
         await _upload(auth, a)
