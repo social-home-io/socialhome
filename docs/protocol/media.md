@@ -178,9 +178,13 @@ sending household was sent it for. Both blob types share
   assembles — never "on `final`". Each assembly writes its own temp file
   inside the part directory, so two chunks completing at once never mix
   bytes, and only one publishes. The assembled file must be exactly the
-  declared `file_size_bytes`, else the parts are dropped and nothing is
+  declared `file_size_bytes` (a multi-chunk blob without a positive one
+  is dropped with a WARNING), else the parts are dropped and nothing is
   published. A chunk landing after the file exists drops any leftover
-  parts. DM rules (sender household, announced `media_blob_id`) are in
+  parts. A set that never completes is removed by the media orphan
+  sweep once its folder has been untouched for 3 days (far past the
+  senders' retry horizon; every landing chunk refreshes it), at most 200
+  folders per pass. DM rules (sender household, announced `media_blob_id`) are in
   [`dm-media.md`](./dm-media.md#chunking).
 
 Residual, by design: among the households entitled to deliver a space's

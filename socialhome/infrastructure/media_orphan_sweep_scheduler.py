@@ -58,6 +58,8 @@ class MediaOrphanSweepScheduler:
                 # The top-level sweep skips the ``transcode_src/`` subdir; its
                 # leaked source blobs are reaped by a sibling pass each tick.
                 await self._service.sweep_transcode_src_once()
+                # … and chunk sets under ``.partial/`` that never completed.
+                await self._service.sweep_partial_once()
             except Exception as exc:  # pragma: no cover — defensive
                 log.warning("media-sweep failed: %s", exc, exc_info=True)
             try:

@@ -143,6 +143,7 @@ land in any order — the `final` chunk can arrive before chunk 0.
 Whichever chunk completes the set 0…N−1 (one directory listing per
 chunk) assembles: it concatenates the parts in index order into a temp
 file of its own, checks the result is exactly `file_size_bytes` (a
+multiple-chunk blob without a positive `file_size_bytes` is dropped; a
 mismatch discards the parts and publishes nothing), moves it to
 `<msg_id>.<ext>` write-once (see below), deletes the part directory,
 then swaps `media_url` and broadcasts `dm.media_ready` as in the
@@ -150,8 +151,11 @@ single-chunk case — once: when two chunks complete the set at the same
 moment, only the one whose file lands adopts it. A chunk that lands
 after the file exists — any chunk, final or not — drops the transfer's
 leftover parts and re-adopts the file only while the row still awaits
-it (`media_sync_status='pending'` or another `media_url`), so a
-duplicate never pushes `dm.media_ready` twice. Before 2026-11-06 the
+it (`media_sync_status='pending'` or another `media_url`) — one
+conditional `UPDATE`, and only the delivery whose update changed the row
+pushes, so neither a duplicate nor two racing deliveries push
+`dm.media_ready` twice. A single-chunk file takes the same path (its
+temp files in its own `.partial/<key>/` folder). Before 2026-11-06 the
 receiver assembled only when `final=true` arrived, so a final chunk that
 overtook an earlier one left the file unassembled for good.
 
@@ -222,8 +226,17 @@ A handful of paths beyond the happy flow above:
 - **Media-orphan janitor.** `DmGcScheduler._sweep_media_orphans`
   runs on the hourly conversation-GC tick: enumerates
   `<msg_id>.preview.webp` files (and `<msg_id>.part<idx>` parts
-  from builds before 2026-11-06), groups by message id, drops anything without a backing live
-  `conversation_messages` row.
+  from builds before 2026-11-06), groups by message id, drops anything
+  without a backing live `conversation_messages` row.
+- **Abandoned chunk sets.** Parts now live in `.partial/<key>/`, which
+  the media orphan sweep (`MediaOrphanSweepService.sweep_partial_once`,
+  each tick of the media sweep) covers for DMs and spaces alike: a
+  folder nothing in it changed for 3 days is removed (at most 200 per
+  pass) — a retracted DM, a sender that gave up after its 6 attempts,
+  an earlier attempt chunked for another tier, a crash's temp files.
+  3 days is far past the senders' retry horizon (6 attempts, backoff
+  capped at 30 min) and every chunk that lands refreshes the folder, so
+  a transfer in progress is never hit.
 
 ## Server-side validation
 

@@ -12,9 +12,11 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import pathlib
 from datetime import UTC, datetime
 from unittest.mock import patch
 
+import aiofiles
 import pytest
 
 from socialhome.domain.federation import FederationEvent, FederationEventType
@@ -359,6 +361,7 @@ async def test_dm_media_blob_chunked_writes_parts_then_concats(
                     "chunk_index": i,
                     "chunk_count": 3,
                     "final": i == 2,
+                    "file_size_bytes": len(full),
                     "bytes_b64": base64.b64encode(p).decode("ascii"),
                 },
             )
@@ -460,6 +463,7 @@ async def test_dm_media_blob_chunked_missing_chunk_bails(inbound_with_media):
                 "chunk_index": 1,
                 "chunk_count": 2,
                 "final": True,
+                "file_size_bytes": 8,
                 "bytes_b64": base64.b64encode(b"tail").decode("ascii"),
             },
         )
@@ -495,6 +499,7 @@ def _dm_chunk(idx: int) -> FederationEvent:
             "chunk_index": idx,
             "chunk_count": 3,
             "final": idx == 2,
+            "file_size_bytes": sum(map(len, _DM_PARTS)),
             "bytes_b64": base64.b64encode(_DM_PARTS[idx]).decode("ascii"),
         },
     )
@@ -813,6 +818,7 @@ async def test_dm_media_blob_chunked_never_overwrites_existing_file(
                     "chunk_index": i,
                     "chunk_count": 2,
                     "final": i == 1,
+                    "file_size_bytes": 2,
                 },
                 body=part,
             )
@@ -962,3 +968,90 @@ async def test_dm_message_with_unsafe_id_is_refused(inbound_with_media, caplog):
     assert _outside_files(media_dir) == []
     assert list(media_dir.iterdir()) == []
     assert await SqliteConversationRepo(db).list_messages("conv-new", limit=10) == []
+
+
+@pytest.mark.parametrize("size", [None, 0, -5, "x"])
+async def test_dm_multi_chunk_without_a_declared_size_is_refused(
+    inbound_with_media, caplog, size
+):
+    """A multi-chunk blob must declare ``file_size_bytes`` (every sender
+    has since #323) — else the size check could be skipped silently."""
+    svc, media_dir, _db = inbound_with_media
+    with caplog.at_level("WARNING"):
+        for idx in (1, 0):
+            payload = {
+                "media_blob_id": "m-1",
+                "message_id": "m-1",
+                "conversation_id": "conv-1",
+                "chunk_index": idx,
+                "chunk_count": 2,
+                "final": idx == 1,
+            }
+            if size is not None:
+                payload["file_size_bytes"] = size
+            await svc._on_dm_media_blob(_blob_event(payload, body=b"P%d" % idx))
+    assert not (media_dir / "m-1.webp").exists()
+    assert _dm_leftovers(media_dir) == []
+    assert "file_size_bytes" in caplog.text
+
+
+async def test_dm_concurrent_adoption_pushes_once(inbound_with_media):
+    """Two deliveries of one file both reach the row adoption (the second
+    finds the file already there and re-adopts): only the one whose
+    conditional update changed the row pushes ``dm.media_ready``."""
+    svc, _media_dir, db = inbound_with_media
+    spy = _MediaReadySpy()
+    svc.attach_realtime(spy)
+    repo = svc._conversation_repo
+    real = repo.adopt_media_file
+    first_waiting = asyncio.Event()
+    second_arrived = asyncio.Event()
+    calls = 0
+
+    async def held(**kw):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_waiting.set()
+            await asyncio.wait_for(second_arrived.wait(), 5)
+        else:
+            second_arrived.set()
+        return await real(**kw)
+
+    blob = _blob_event({"media_blob_id": "m-1", "message_id": "m-1"})
+    with patch.object(repo, "adopt_media_file", held):
+        first = asyncio.create_task(svc._on_dm_media_blob(blob))
+        await asyncio.wait_for(first_waiting.wait(), 5)
+        await svc._on_dm_media_blob(blob)
+        await first
+    assert calls == 2
+    assert len(spy.calls) == 1
+    row = await _row(db, "m-1")
+    assert row["media_url"] == "api/media/m-1.webp"
+
+
+async def test_dm_single_chunk_temp_file_is_unique_and_never_left(
+    inbound_with_media,
+):
+    """The single-chunk path no longer shares one ``<msg>.assembled<ext>``
+    temp name in the media root between concurrent deliveries."""
+    svc, media_dir, _db = inbound_with_media
+    blob = _blob_event({"media_blob_id": "m-1", "message_id": "m-1"})
+    written: list[pathlib.Path] = []
+    real_open = aiofiles.open
+
+    def spying_open(path, mode="r", *a, **kw):
+        if "w" in mode:
+            written.append(pathlib.Path(path))
+        return real_open(path, mode, *a, **kw)
+
+    with (
+        patch.object(inbound_media_store.aiofiles, "open", spying_open),
+    ):
+        await asyncio.gather(*(svc._on_dm_media_blob(blob) for _ in range(3)))
+    assert (media_dir / "m-1.webp").read_bytes() == _WEBP_HEADER
+    # Every temp file lives in a transfer folder (swept if a crash leaves
+    # it), never under a fixed name in the media root.
+    assert written and all(p.parent != media_dir for p in written)
+    assert len(set(written)) == len(written)
+    assert _dm_leftovers(media_dir) == []

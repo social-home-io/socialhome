@@ -2577,6 +2577,7 @@ async def test_space_media_blob_assembles_chunked_transfer(db, bus, tmp_path):
                     "filename": "big.webm",
                     "chunk_index": idx,
                     "chunk_count": 4,
+                    "file_size_bytes": len(full),
                     "final": idx == 3,
                     "bytes_b64": base64.b64encode(chunk).decode("ascii"),
                 },

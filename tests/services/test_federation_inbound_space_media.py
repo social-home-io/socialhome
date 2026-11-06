@@ -288,6 +288,7 @@ async def test_existing_file_is_not_overwritten_multi_chunk(env):
                     "chunk_index": idx,
                     "chunk_count": 2,
                     "final": idx == 1,
+                    "file_size_bytes": 10,
                 },
                 body=b"PART%d" % idx,
             )
@@ -337,6 +338,7 @@ async def test_multi_chunk_assembles_referenced_file(env):
                     "chunk_index": idx,
                     "chunk_count": 4,
                     "final": idx == 3,
+                    "file_size_bytes": len(full),
                 },
                 body=chunk,
             )
@@ -353,6 +355,7 @@ async def test_chunks_from_another_household_never_mix(env):
         "filename": "a1.webp",
         "transfer_id": "a1.webp:self",
         "chunk_count": 2,
+        "file_size_bytes": 10,
     }
     await svc._on_space_media_blob(
         _blob({**payload, "chunk_index": 0, "final": False}, body=b"GOOD0")
@@ -382,6 +385,7 @@ def _chunk(idx: int) -> FederationEvent:
             "chunk_index": idx,
             "chunk_count": 4,
             "final": idx == 3,
+            "file_size_bytes": 4 * 512,
         },
         body=_FOUR[idx],
     )
@@ -589,3 +593,26 @@ async def test_inbound_post_payload_validates_link_preview(env):
     )
     assert local is not None and local.link_preview is not None
     assert local.link_preview.thumbnail_url == "api/media/ok.webp"
+
+
+@pytest.mark.parametrize("size", [None, 0, -5, "x"])
+async def test_multi_chunk_without_a_declared_size_is_refused(env, caplog, size):
+    """A multi-chunk blob must declare ``file_size_bytes`` (every sender
+    has since #440) — else the size check could be skipped silently."""
+    svc, media = env
+    with caplog.at_level("WARNING"):
+        for idx in (1, 0):
+            payload = {
+                "post_id": "post-a",
+                "filename": "a1.webp",
+                "transfer_id": "a1.webp:self",
+                "chunk_index": idx,
+                "chunk_count": 2,
+                "final": idx == 1,
+            }
+            if size is not None:
+                payload["file_size_bytes"] = size
+            await svc._on_space_media_blob(_blob(payload, body=b"PART%d" % idx))
+    assert not (media / "a1.webp").exists()
+    assert _no_partials(media)
+    assert "file_size_bytes" in caplog.text

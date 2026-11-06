@@ -150,7 +150,6 @@ from .inbound_media_store import (
     note_existing,
     parse_chunk_meta,
     partial_key,
-    publish_once,
     store_chunk,
     verbatim_local_media_ref,
 )
@@ -306,6 +305,23 @@ def _declared_size(payload: dict, raw: bytes, chunk_count: int) -> int:
         return int(payload.get("file_size_bytes") or -1)
     except TypeError, ValueError:
         return -1
+
+
+def _size_declared(total_size: int, chunk_count: int, what: str, name: str) -> bool:
+    """A multi-chunk blob must declare a positive ``file_size_bytes``.
+
+    Every sender has (DM since #323, space since #440); without it the
+    assembled-size check could be skipped silently, so such a chunk is
+    dropped. A single chunk's size is the chunk itself.
+    """
+    if chunk_count == 1 or total_size > 0:
+        return True
+    log.warning(
+        "%s: multi-chunk blob %s declares no positive file_size_bytes — dropping",
+        what,
+        name,
+    )
+    return False
 
 
 #: Magic-byte signatures for the MIME types the upload pipeline
@@ -1455,30 +1471,16 @@ class FederationInboundService(ProtectionGateMixin):
             return
         if not await self._dm_media_in_scope(event, message_id, blob_id):
             return
-        is_final = bool(p.get("final", chunk_index == chunk_count - 1))
         mime_type = str(p.get("mime_type") or "application/octet-stream")
         await self._assemble_dm_chunk(
             raw=raw,
             message_id=message_id,
             chunk_index=chunk_index,
             chunk_count=chunk_count,
-            is_final=is_final,
             mime_type=mime_type,
             conversation_id=str(p.get("conversation_id") or ""),
             from_instance=event.from_instance,
             total_size=_declared_size(p, raw, chunk_count),
-        )
-
-    async def _dm_row_awaits_media(self, message_id: str, dest: pathlib.Path) -> bool:
-        """Whether the message row has yet to adopt ``dest`` (pending, or
-        pointing elsewhere). ``False`` for a row not seen yet — the
-        ``DM_MESSAGE`` adopts the file when it lands."""
-        msg = await self._conversation_repo.get_message(message_id)
-        if msg is None:
-            return False
-        return (
-            msg.media_sync_status == "pending"
-            or msg.media_url != f"api/media/{dest.name}"
         )
 
     async def _dm_media_in_scope(
@@ -1534,7 +1536,6 @@ class FederationInboundService(ProtectionGateMixin):
         message_id: str,
         chunk_index: int,
         chunk_count: int,
-        is_final: bool,
         mime_type: str,
         conversation_id: str,
         from_instance: str,
@@ -1553,16 +1554,18 @@ class FederationInboundService(ProtectionGateMixin):
         Write-once: the final file is moved into place with
         :func:`publish_once`, so an existing ``<message_id><ext>`` is never
         replaced — a re-delivery re-adopts the file already there, but only
-        while the row still awaits it.
+        while the row still awaits it (a conditional update), so
+        ``dm.media_ready`` is pushed once.
         """
         assert self._media_dir is not None
-        data = raw
+        if not _size_declared(total_size, chunk_count, "DM_MEDIA_BLOB", message_id):
+            return
         ext = _mime_to_ext(mime_type)
         dest = self._media_dir / f"{message_id}{ext}"
-        tmp_dest = self._media_dir / f"{message_id}.assembled{ext}"
-        # Parts live in a directory of this transfer's own, bound to the
-        # sending household and the chunk count (a retry chunked for
-        # another tier never mixes with an earlier attempt's parts).
+        # Parts (and every temp file) live in a folder of this transfer's
+        # own, bound to the sending household and the chunk count (a retry
+        # chunked for another tier never mixes with an earlier attempt's
+        # parts); the media sweep removes a folder a crash leaves behind.
         part_dir = (
             self._media_dir
             / ".partial"
@@ -1573,39 +1576,25 @@ class FederationInboundService(ProtectionGateMixin):
             if await aiofiles.os.path.exists(dest):
                 # Already landed (a re-delivery, or a chunk after the set
                 # completed). Don't rewrite; drop any parts a crash left
-                # behind. The row adopts the file only if it hasn't yet,
-                # so a duplicate never pushes ``dm.media_ready`` again.
+                # behind, and let the row adopt the file if it hasn't —
+                # the conditional update below pushes at most once.
                 await drop_parts(part_dir)
-                if not await self._dm_row_awaits_media(message_id, dest):
-                    return
                 await note_existing(
                     dest,
                     incoming_size=total_size,
                     what="DM_MEDIA_BLOB",
                     from_instance=from_instance,
                 )
-            elif chunk_count == 1:
-                # Fast path: no parts to assemble.
-                async with aiofiles.open(tmp_dest, "wb") as out_f:
-                    await out_f.write(data)
-                if not await publish_once(tmp_dest, dest):
-                    await note_existing(
-                        dest,
-                        incoming_size=total_size,
-                        what="DM_MEDIA_BLOB",
-                        from_instance=from_instance,
-                    )
             # The sender pipelines a file's chunks, so the ``final`` one
             # may land before the others: whichever chunk completes the
             # set assembles the file. ``None`` — a chunk is still on its
-            # way (or the bytes didn't add up); ``False`` — another chunk
-            # completed the set first and adopts the file, so this one
-            # stays quiet (``dm.media_ready`` fires once).
+            # way (or the bytes didn't add up); ``False`` — another
+            # delivery published the file first and adopts it.
             elif not await store_chunk(
                 part_dir,
                 chunk_index=chunk_index,
                 chunk_count=chunk_count,
-                data=data,
+                data=raw,
                 target=dest,
                 expected_size=total_size,
             ):
@@ -1653,11 +1642,15 @@ class FederationInboundService(ProtectionGateMixin):
                 mime_type,
             )
             final_status = "failed"
-        await self._conversation_repo.update_media_sync_status(
+        # Conditional: only a row still awaiting this file changes, and
+        # only the delivery that changed it pushes ``dm.media_ready`` — a
+        # duplicate (or a second delivery racing the first) stays quiet.
+        if not await self._conversation_repo.adopt_media_file(
             message_id=message_id,
             status=final_status,
             media_url=new_url,
-        )
+        ):
+            return
         # Push the WS frame so the SPA swaps the bubble's preview for
         # the full media without waiting for a refetch. The realtime
         # layer is responsible for fanning to the conversation's
@@ -2150,6 +2143,8 @@ class FederationInboundService(ProtectionGateMixin):
         replaced.
         """
         assert self._media_dir is not None
+        if not _size_declared(total_size, chunk_count, "SPACE_MEDIA_BLOB", filename):
+            return
         target = self._media_dir / filename
         partial_root = self._media_dir / ".partial" / partial_dir
         if await aiofiles.os.path.exists(target):
