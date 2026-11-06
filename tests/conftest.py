@@ -304,8 +304,9 @@ class _FakePeerConnection:
 class _FakeRTCConfiguration:
     """Stand-in for :class:`aiolibdatachannel.RTCConfiguration`."""
 
-    def __init__(self, *, ice_servers=None, **_kw) -> None:
+    def __init__(self, *, ice_servers=None, max_message_size=0, **_kw) -> None:
         self.ice_servers = list(ice_servers or [])
+        self.max_message_size = max_message_size
 
 
 class _FakeDataChannelOptions:

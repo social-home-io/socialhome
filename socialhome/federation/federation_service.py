@@ -82,6 +82,7 @@ from ..domain.federation import (
 )
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.federation_retention import moment_delete_key, supersede_key
+from ..domain.media_chunking import media_chunk_bytes
 from ..domain.media_validator import validate_inbound_media_meta
 from ..domain.space import parse_have_seq
 from ..infrastructure.event_bus import EventBus
@@ -1174,6 +1175,17 @@ class FederationService:
         ``last_reachable_at`` via :func:`~socialhome.domain.federation.is_relay_only`.
         """
         return self._relay_accepted_at.get(instance_id)
+
+    def media_chunk_bytes(self, instance_id: str) -> int:
+        """How big one media chunk to *instance_id* may be: what its open
+        media channel negotiated, else what the HTTPS inbox takes
+        (:mod:`socialhome.domain.media_chunking`)."""
+        limit = (
+            self._transport.media_max_message_size(instance_id)
+            if self._transport is not None
+            else None
+        )
+        return media_chunk_bytes(limit)
 
     async def peer_supports(self, instance_id: str, *, min_version: int) -> bool:
         """``True`` iff the named peer's advertised ``proto_version`` is

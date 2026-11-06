@@ -5967,3 +5967,24 @@ async def test_a_queued_delete_is_keyed_by_who_signed_it():
         f"{fr.relayed_delete_prefix('inst-mallory')}fake-1",
         f"{fr.OWN_DELETE_KEY_PREFIX}ours-1",
     ]
+
+
+def test_media_chunk_bytes_follows_the_peers_media_channel():
+    """Chunks fit the household's channel (negotiated limit), and the
+    HTTPS inbox when there is no channel."""
+    from types import SimpleNamespace
+
+    from socialhome.domain.media_chunking import (
+        FRAME_OVERHEAD_BYTES,
+        HTTPS_CHUNK_BYTES,
+        media_chunk_bytes,
+    )
+
+    kp = generate_identity_keypair()
+    svc = _svc_with(kp, MagicMock(), MagicMock())
+    assert svc.media_chunk_bytes("peer-x") == HTTPS_CHUNK_BYTES  # no transport
+    limits = {"old": 262144, "new": 1024 * 1024}
+    svc.attach_transport(SimpleNamespace(media_max_message_size=limits.get))
+    assert svc.media_chunk_bytes("none") == HTTPS_CHUNK_BYTES
+    assert svc.media_chunk_bytes("old") == 262144 - FRAME_OVERHEAD_BYTES
+    assert svc.media_chunk_bytes("new") == media_chunk_bytes(1024 * 1024)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -12,12 +12,11 @@ from socialhome.domain.federation import (
     FederationEventType,
     PairingStatus,
 )
+from socialhome.domain.media_chunking import FRAME_OVERHEAD_BYTES, HTTPS_CHUNK_BYTES
 from socialhome.repositories.space_media_outbox_repo import (
     SqliteSpaceMediaOutboxRepo,
 )
 from socialhome.services.space_media_sync_service import (
-    MAX_BLOB_CHUNK_BYTES,
-    SINGLE_CHUNK_BYTES_THRESHOLD,
     SpaceMediaSyncService,
 )
 
@@ -40,6 +39,13 @@ async def _seed_space(db, *, space_id="sp-1"):
             "INSERT INTO space_instances(space_id, instance_id) VALUES(?,?)",
             (space_id, peer),
         )
+
+
+def _fed(chunk_bytes: int = HTTPS_CHUNK_BYTES) -> AsyncMock:
+    """A federation stand-in whose media chunks are ``chunk_bytes``."""
+    fed = AsyncMock()
+    fed.media_chunk_bytes = MagicMock(return_value=chunk_bytes)
+    return fed
 
 
 @pytest.fixture
@@ -94,11 +100,11 @@ async def test_flush_once_ships_small_file_as_single_chunk(
     outbox,
     tmp_path,
 ):
-    """A file ≤ ``SINGLE_CHUNK_BYTES_THRESHOLD`` ships as one chunk."""
+    """A file that fits one chunk ships as one chunk."""
     await _seed_space(db)
     body = b"WEBP-small-bytes-" * 8
     (tmp_path / "small.webp").write_bytes(body)
-    fed = AsyncMock()
+    fed = _fed()
     fed.send_media_chunk = AsyncMock(return_value=_OK)
     svc = SpaceMediaSyncService(
         outbox=outbox,
@@ -134,15 +140,14 @@ async def test_flush_once_ships_small_file_as_single_chunk(
 
 
 async def test_flush_once_chunks_large_file(db, outbox, tmp_path):
-    """Files above ``SINGLE_CHUNK_BYTES_THRESHOLD`` split into
-    ``MAX_BLOB_CHUNK_BYTES`` chunks with strictly increasing index."""
+    """A file larger than the target's chunk size splits into chunks of
+    that size with strictly increasing index."""
     await _seed_space(db)
-    size = MAX_BLOB_CHUNK_BYTES * 5 + 17
-    assert size > SINGLE_CHUNK_BYTES_THRESHOLD
+    size = HTTPS_CHUNK_BYTES * 5 + 17
     body = bytes(range(256)) * (size // 256 + 1)
     body = body[:size]
     (tmp_path / "big.webm").write_bytes(body)
-    fed = AsyncMock()
+    fed = _fed()
     fed.send_media_chunk = AsyncMock(return_value=_OK)
     svc = SpaceMediaSyncService(
         outbox=outbox,
@@ -196,7 +201,7 @@ async def test_flush_once_no_federation_returns_zero(db, outbox, tmp_path):
 async def test_flush_once_missing_file_reschedules(db, outbox, tmp_path):
     """File missing → row reschedules with backoff, not a crash."""
     await _seed_space(db)
-    fed = AsyncMock()
+    fed = _fed()
     fed.send_media_chunk = AsyncMock(return_value=_OK)
     svc = SpaceMediaSyncService(
         outbox=outbox,
@@ -228,7 +233,7 @@ async def test_flush_once_reschedules_on_delivery_failure(
     rather than treat that as a success."""
     await _seed_space(db)
     (tmp_path / "x.webp").write_bytes(b"x")
-    fed = AsyncMock()
+    fed = _fed()
     fed.send_media_chunk = AsyncMock(
         return_value=DeliveryResult(
             instance_id="peer-x",
@@ -324,7 +329,7 @@ async def test_flush_once_drops_rows_for_an_unpair_tombstone(db, outbox, tmp_pat
     other members (paired or mesh-only) still get theirs."""
     await _seed_space(db)
     (tmp_path / "small.webp").write_bytes(b"WEBP" * 8)
-    fed = AsyncMock()
+    fed = _fed()
     fed.send_media_chunk = AsyncMock(return_value=_OK)
     svc = SpaceMediaSyncService(
         outbox=outbox,
@@ -362,3 +367,29 @@ async def test_start_drops_rows_for_households_that_are_gone(db, outbox, tmp_pat
         assert [r.target_instance_id for r in rows] == ["peer-b"]
     finally:
         await svc.stop()
+
+
+async def test_a_700_kb_picture_ships_in_chunks_the_targets_channel_takes(
+    db, outbox, tmp_path
+):
+    """Sized for the target household: an older household's 256 KiB data
+    channel gets chunks that fit it (a 680 KB picture sent whole never
+    arrived — "Message size exceeds limit", then 413 from the inbox)."""
+    await _seed_space(db)
+    body = bytes(range(256)) * (700_000 // 256)
+    (tmp_path / "cover.webp").write_bytes(body)
+    fed = _fed(256 * 1024 - FRAME_OVERHEAD_BYTES)
+    fed.send_media_chunk = AsyncMock(return_value=_OK)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="ev-1",
+        target_instance_ids=["peer-x"],
+        media_urls=["api/media/cover.webp"],
+    )
+    assert await svc.flush_once() == 1
+    chunks = [c.kwargs["raw_chunk"] for c in fed.send_media_chunk.call_args_list]
+    assert len(chunks) > 1
+    assert all(len(c) + FRAME_OVERHEAD_BYTES <= 256 * 1024 for c in chunks)
+    fed.media_chunk_bytes.assert_called_with("peer-x")
+    assert b"".join(chunks) == body

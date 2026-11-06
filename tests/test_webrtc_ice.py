@@ -10,6 +10,7 @@ import logging
 import pytest
 
 from socialhome import webrtc_ice
+from socialhome.domain.media_chunking import ADVERTISED_MAX_MESSAGE_BYTES
 from socialhome.webrtc_ice import (
     build_ice_servers,
     make_turn_credential,
@@ -351,3 +352,10 @@ def test_rtc_configuration_remembers_a_bounded_number_of_warnings(caplog):
         rtc_configuration(many)
     assert len(webrtc_ice._ICE_WARNED) == webrtc_ice._ICE_WARNED_MAX
     assert len(caplog.records) == webrtc_ice._ICE_WARNED_MAX
+
+
+def test_rtc_configuration_advertises_the_bigger_media_message_size():
+    """Two upgraded households negotiate 1 MiB data-channel messages (the
+    smaller side's advertisement wins), so a media chunk can be the size
+    the HTTPS inbox takes — few messages per picture or video."""
+    assert rtc_configuration([]).max_message_size == ADVERTISED_MAX_MESSAGE_BYTES
