@@ -151,9 +151,7 @@ class GfsSpaceMediaStore:
         now = int(time.time()) if now is None else now
         check_shape(blob_id, data)
         size = len(data)
-        if size > self._limits.max_blob_bytes:
-            self._counters.refused_too_large += 1
-            raise MediaRefused(413, "too_large_for_cache")
+        self.admit_size(size)
         if expires_at <= now:
             raise MediaRefused(422, "bad_expiry")
         expires_at = min(expires_at, now + self._limits.ttl_s)
@@ -187,6 +185,14 @@ class GfsSpaceMediaStore:
                 last_fetched_at=now,
             )
         )
+
+    def admit_size(self, size: int) -> None:
+        """Refuse (413 ``too_large_for_cache``, counted) a blob of *size*
+        bytes this cache never takes — the route asks before it reads a
+        body, with the signed size."""
+        if size > self._limits.max_blob_bytes:
+            self._counters.refused_too_large += 1
+            raise MediaRefused(413, "too_large_for_cache")
 
     async def read(self, blob_id: str, *, now: int | None = None) -> bytes | None:
         """The blob, or ``None`` when unknown, expired, of a banned space or

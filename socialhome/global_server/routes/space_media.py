@@ -94,12 +94,11 @@ class GfsSpaceMediaUploadView(GfsBaseView):
             return _refused()
         store = self.svc(K.gfs_space_media_store_key)
         size = auth.claim.size
-        if size > store.limits.max_blob_bytes:
-            return _media_refused(MediaRefused(413, "too_large_for_cache"))
-        data = await self.bounded_raw(size)
-        if len(data) != size:
-            return web.json_response({"error": "size_mismatch"}, status=422)
         try:
+            store.admit_size(size)
+            data = await self.bounded_raw(size)
+            if len(data) != size:
+                return web.json_response({"error": "size_mismatch"}, status=422)
             stored = await store.put(
                 space_id=space_id,
                 blob_id=blob_id,

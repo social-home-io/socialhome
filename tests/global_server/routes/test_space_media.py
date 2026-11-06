@@ -247,6 +247,9 @@ async def test_a_blob_larger_than_the_cache_is_413_unread(gfs):
         _put_url(data), data=data, headers=_authority_header(_claim(data))
     )
     assert r.status == 413
+    assert (await r.json())["error"] == "too_large_for_cache"
+    store = gfs.app_[gfs_space_media_store_key]
+    assert (await store.stats())["refused_too_large"] == 1
 
 
 async def test_a_padded_bucket_and_sha_are_required(gfs):
