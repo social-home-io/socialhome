@@ -1107,8 +1107,11 @@ function CoverPicker() {
 
   return (
     <div class="sh-event-cover-picker">
-      <span class="sh-form-label">{t('event.dialog.cover_label')}</span>
+      {/* No picture: one small button, not a big empty tile — most
+       *  events have none. The heading and the preview come with one. */}
       {coverPreview.value ? (
+        <>
+        <span class="sh-form-label">{t('event.dialog.cover_label')}</span>
         <div class="sh-event-cover-picker-preview-wrap">
           <img
             class="sh-event-cover-preview"
@@ -1122,6 +1125,7 @@ function CoverPicker() {
             onClick={removeCover}
           >×</button>
         </div>
+        </>
       ) : (
         <label class="sh-event-cover-picker-empty">
           <input

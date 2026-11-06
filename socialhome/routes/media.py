@@ -29,7 +29,7 @@ from ..domain.media_constraints import (
     VIDEO_MAX_UPLOAD_BYTES,
 )
 from ..media.audio_processor import AudioProcessor
-from ..media.image_processor import ImageProcessor
+from ..media.image_processor import ImageProcessor, sniff_image_mime
 from ..security import error_response
 from .base import BaseView
 
@@ -51,10 +51,11 @@ _IMAGE_HINT_MIMES: frozenset[str] = frozenset(
         "image/gif",
         "image/webp",
         "image/heic",
+        "image/heif",
     },
 )
 _IMAGE_HINT_EXTS: frozenset[str] = frozenset(
-    {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic"},
+    {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".heif"},
 )
 _VIDEO_HINT_MIMES: frozenset[str] = frozenset(
     {"video/mp4", "video/webm", "video/quicktime"},
@@ -221,8 +222,14 @@ class MediaUploadView(BaseView):
         is_video = not is_audio and (
             content_type in _VIDEO_HINT_MIMES or lower_ext in _VIDEO_HINT_EXTS
         )
+        # A picture whose type and name don't say (a phone picker's
+        # content URI: ``application/octet-stream``, no extension) is
+        # still a picture: its first bytes decide, and it is converted
+        # like any other — never stored as the original.
         is_image = not is_audio and (
-            content_type in _IMAGE_HINT_MIMES or lower_ext in _IMAGE_HINT_EXTS
+            content_type in _IMAGE_HINT_MIMES
+            or lower_ext in _IMAGE_HINT_EXTS
+            or (not is_video and sniff_image_mime(data) is not None)
         )
 
         # ── Async video path ────────────────────────────────────────────

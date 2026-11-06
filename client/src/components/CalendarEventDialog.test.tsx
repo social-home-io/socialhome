@@ -41,6 +41,28 @@ describe('CalendarEventDialog', () => {
     expect(Object.keys(mod).length).toBeGreaterThan(0)
   })
 
+  it('with no cover, the picker is one small button — no heading, no tile', async () => {
+    const { render, fireEvent, cleanup, waitFor } = await import('@testing-library/preact')
+    const { api } = await import('@/api')
+    ;(api.upload as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      url: 'api/media/c.webp', signed_url: 'api/media/c.webp?sig=x',
+    })
+    const mod = await import('./CalendarEventDialog')
+    mod.openSpaceEventDialog('sp-1')
+    const { container } = render(<mod.CalendarEventDialog />)
+    const picker = container.querySelector('.sh-event-cover-picker') as HTMLElement
+    expect(picker.querySelector('.sh-event-cover-picker-empty')?.textContent).toContain('Choose cover image')
+    expect(picker.textContent).not.toContain('Cover image (optional)')
+    // A picked picture brings the heading and the preview.
+    const input = picker.querySelector('input[type=file]') as HTMLInputElement
+    Object.defineProperty(input, 'files', { value: [new File(['x'], 'a.jpg', { type: 'image/jpeg' })], configurable: true })
+    fireEvent.change(input)
+    await waitFor(() => expect(picker.querySelector('.sh-event-cover-preview')).not.toBeNull())
+    expect(picker.textContent).toContain('Cover image (optional)')
+    expect(picker.querySelector('.sh-event-cover-picker-empty')).toBeNull()
+    cleanup()
+  })
+
   it('sends announce_in_feed when announcing a space event (§23.15)', async () => {
     const { render, fireEvent } = await import('@testing-library/preact')
     const { api } = await import('@/api')

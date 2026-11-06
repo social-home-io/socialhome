@@ -84,6 +84,28 @@ MAGIC_BYTES: dict[str, tuple[int, bytes]] = {
 }
 
 
+#: ISO-BMFF ``ftyp`` major brands (bytes 8..12) of HEIF still images.
+#: An MP4 / MOV shares the ``ftyp`` box under other brands (``isom``,
+#: ``mp42``, ``qt  ``…), so the box alone doesn't make a picture.
+HEIF_BRANDS: frozenset[bytes] = frozenset(
+    {b"heic", b"heix", b"heim", b"heis", b"hevc", b"hevx", b"mif1", b"msf1"}
+)
+
+
+def sniff_image_mime(data: bytes) -> str | None:
+    """The picture type ``data`` starts with, or ``None`` — for an upload
+    whose declared type and name don't say (a phone picker's content URI
+    arrives as ``application/octet-stream`` with no extension)."""
+    for mime, (offset, magic) in MAGIC_BYTES.items():
+        end = offset + len(magic)
+        if len(data) < end or data[offset:end] != magic:
+            continue
+        if mime == "image/heic" and data[8:12] not in HEIF_BRANDS:
+            return None
+        return mime
+    return None
+
+
 class ImageProcessor:
     """Normalise uploaded images to WebP.
 

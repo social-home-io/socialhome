@@ -8,7 +8,11 @@ from PIL import Image as _Image
 
 from socialhome.domain.errors import ImageUnreadableError
 from socialhome.media import image_processor
-from socialhome.media.image_processor import MAGIC_BYTES, ImageProcessor
+from socialhome.media.image_processor import (
+    MAGIC_BYTES,
+    ImageProcessor,
+    sniff_image_mime,
+)
 
 
 def test_image_processor_instantiates():
@@ -388,3 +392,23 @@ async def test_generate_thumbnail_does_not_mask_programming_errors():
             _solid("PNG", (10, 10)),
             size="384",  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.parametrize(
+    ("data", "want"),
+    [
+        (b"\xff\xd8\xff\xe0" + b"\x00" * 16, "image/jpeg"),
+        (b"\x89PNG\r\n\x1a\n" + b"\x00" * 16, "image/png"),
+        (b"GIF89a" + b"\x00" * 16, "image/gif"),
+        (b"RIFF\x00\x00\x00\x00WEBPVP8 " + b"\x00" * 8, "image/webp"),
+        (b"\x00\x00\x00\x18ftypheic" + b"\x00" * 16, "image/heic"),
+        (b"\x00\x00\x00\x18ftypmif1" + b"\x00" * 16, "image/heic"),
+        # An MP4 / MOV shares the ``ftyp`` box: not a picture.
+        (b"\x00\x00\x00\x18ftypisom" + b"\x00" * 16, None),
+        (b"\x00\x00\x00\x14ftypqt  " + b"\x00" * 16, None),
+        (b"%PDF-1.7" + b"\x00" * 16, None),
+        (b"", None),
+    ],
+)
+def test_sniff_image_mime(data, want):
+    assert sniff_image_mime(data) == want

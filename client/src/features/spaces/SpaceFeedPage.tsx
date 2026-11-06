@@ -330,10 +330,19 @@ export default function SpaceFeedPage() {
       const d = e.data as { space_id?: string | null }
       if (d.space_id === spaceId) void loadSpaceFeed(spaceId)
     })
+    // A deleted calendar event takes its feed card with it. Every
+    // household's bridge soft-deletes its own card (a reload never shows
+    // it again); this drops it from the open feed at once.
+    const offEventDeleted = ws.on('calendar.deleted', (e) => {
+      const d = e.data as { event_id?: string; calendar_id?: string | null }
+      if (d.calendar_id !== spaceId || !d.event_id) return
+      posts.value = posts.value.filter(p => p.linked_event_id !== d.event_id)
+    })
     return () => {
       off4()
       offComment()
       offModerated()
+      offEventDeleted()
     }
     // ``loc`` (the no-seat redirect) changes with every URL change — every
     // section switch included — so as a dependency it would refetch the
