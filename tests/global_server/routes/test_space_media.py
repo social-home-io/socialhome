@@ -1039,18 +1039,62 @@ async def test_stalled_uploads_of_one_client_do_not_lock_out_another(gfs):
             wr.close()
 
 
-def test_the_body_read_gate_is_per_client_and_bounded_by_bytes():
-    gate = space_media_mod.BodyReadGate(per_client=2, max_bytes=3 * SMALL)
-    assert gate.enter("a", SMALL) and gate.enter("a", SMALL)
-    assert not gate.enter("a", SMALL)  # a's share
-    assert gate.enter("b", SMALL)
-    assert not gate.enter("c", SMALL)  # bytes in flight
-    gate.leave("a", SMALL)
-    assert gate.enter("c", SMALL)
-    gate.leave("a", SMALL)
-    gate.leave("b", SMALL)
-    gate.leave("c", SMALL)
+def test_the_body_read_gate_is_per_client_per_prefix_and_bounded_by_buffered_bytes():
+    """Fourth review A5-residual: bodies in flight are bounded per client
+    bucket (/64), per coarser prefix (/48 or /24), and by the bytes actually
+    BUFFERED — not the signed sizes, which slow 8 MiB uploads inflated."""
+    gate = space_media_mod.BodyReadGate(per_client=2, per_prefix=3, max_bytes=100)
+    assert gate.enter("a", "p") and gate.enter("a", "p")
+    assert not gate.enter("a", "p")  # a's share
+    assert gate.enter("b", "p")
+    assert not gate.enter("c", "p")  # the prefix's share
+    assert gate.enter("d", "q")
+    # Signed sizes don't count: only what has been buffered so far.
+    gate.buffered(60)
+    assert gate.enter("e", "r")
+    gate.buffered(50)
+    assert not gate.enter("f", "s")  # 110 buffered > 100
+    gate.release_buffer(110)
+    for client, prefix in (("a", "p"), ("a", "p"), ("b", "p"), ("d", "q"), ("e", "r")):
+        gate.leave(client, prefix)
     assert gate.in_flight == 0
+    assert gate.enter("f", "s")
+
+
+async def test_one_ipv6_48_cannot_close_the_node(gfs):
+    """A5-residual probe: 12 /64s of ONE /48, 3 stalled uploads each, hold at
+    most the /48's share of body reads — another network's upload still goes
+    through."""
+    stalled = []
+    for n in range(12):
+        for _ in range(3):
+            stalled.append(
+                await _stalled_upload(
+                    gfs, os.urandom(SMALL), xff=f"2001:db8:aa:{n:x}::1"
+                )
+            )
+    try:
+        await asyncio.sleep(0.3)
+        data = os.urandom(SMALL)
+        r = await gfs.put(
+            _put_url(data),
+            data=data,
+            headers={
+                **_authority_header(_claim(data)),
+                "X-Forwarded-For": "2001:db8:bb::9",
+            },
+        )
+        assert r.status == 201
+        busy = 0
+        for rd, _wr in stalled:
+            try:
+                busy += await asyncio.wait_for(_status(rd), 0.5) == 503
+            except TimeoutError:
+                pass
+        assert busy == len(stalled) - space_media_mod.PER_PREFIX_BODY_READS
+    finally:
+        for _rd, wr in stalled:
+            wr.close()
 
 
 # ── Third review A3: fairness and caps are per HOUSEHOLD ─────────────────

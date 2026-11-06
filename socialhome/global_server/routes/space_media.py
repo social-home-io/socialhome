@@ -12,9 +12,10 @@ proxy nor a CDN cache key ever sees a space or channel id next to a blob
   is reserved — all before the body is read, up to exactly the signed
   ``size`` (413 past it), making progress in every window
   (:data:`PROGRESS_WINDOW_S`, ``408`` otherwise), while one client bucket
-  has at most :data:`~..space_media.PER_CLIENT_BODY_READS` bodies and the
-  node :data:`~..space_media.MAX_BODY_BYTES_IN_FLIGHT` bytes in flight
-  (``503 busy`` past either). ``201
+  has at most :data:`~..space_media.PER_CLIENT_BODY_READS` bodies in
+  flight, one network prefix :data:`~..space_media.PER_PREFIX_BODY_READS`,
+  and the node holds at most :data:`~..space_media.MAX_BODY_BYTES_IN_FLIGHT`
+  buffered bytes (``503 busy`` past any). ``201
   {"stored": true}``; the scope's retry is ``200 {"stored": false,
   "status": "already_stored"}`` (never a conflict, and never a fresher
   expiry). ``503 space_media_disabled`` while the operator has the cache off.
@@ -112,8 +113,19 @@ class GfsMediaView(GfsBaseView):
         return web.Response(body=data, headers=_MEDIA_HEADERS)
 
     async def read_body(self, size: int) -> bytes:
-        """The upload body, up to *size* bytes, making progress."""
-        return await _read_with_progress(self.request, size)
+        """The upload body, up to *size* bytes, making progress — its bytes
+        counted in the node's buffered total while the read holds them."""
+        gate = self.svc(K.gfs_space_media_store_key).body_gate
+        held = [0]
+
+        def arrived(n: int) -> None:
+            held[0] += n
+            gate.buffered(n)
+
+        try:
+            return await _read_with_progress(self.request, size, on_bytes=arrived)
+        finally:
+            gate.release_buffer(held[0])
 
     async def put(self) -> web.Response:
         blob_id = self.match("blob_id")
@@ -164,7 +176,8 @@ class GfsMediaView(GfsBaseView):
             # The scope already holds it: answered without reading the body.
             return web.json_response({"stored": False, "status": "already_stored"})
         client_key = store.client_key(self.client_bucket())
-        if not store.body_gate.enter(client_key, size):
+        prefix_key = store.prefix_key(self.client_ip())
+        if not store.body_gate.enter(client_key, prefix_key):
             # This client already has its share of bodies in flight (or the
             # node its bytes): answer now rather than queue another buffer
             # (security re-attack N5, third review A5).
@@ -181,7 +194,7 @@ class GfsMediaView(GfsBaseView):
             await store.release_upload(reserved)
             raise
         finally:
-            store.body_gate.leave(client_key, size)
+            store.body_gate.leave(client_key, prefix_key)
         if len(data) != size:
             await store.release_upload(reserved)
             return web.json_response({"error": "size_mismatch"}, status=422)
@@ -202,7 +215,9 @@ class GfsMediaView(GfsBaseView):
         return web.json_response({"stored": False, "status": "already_stored"})
 
 
-async def _read_with_progress(request: web.Request, size: int) -> bytes:
+async def _read_with_progress(
+    request: web.Request, size: int, *, on_bytes=None
+) -> bytes:
     """Read a body of at most *size* bytes, requiring progress: at least
     :data:`MIN_PROGRESS_BYTES` (or the rest) in every
     :data:`PROGRESS_WINDOW_S` window — :class:`TimeoutError` otherwise; a
@@ -229,6 +244,8 @@ async def _read_with_progress(request: web.Request, size: int) -> bytes:
         if not chunk:
             return bytes(buf)
         buf += chunk
+        if on_bytes is not None:
+            on_bytes(len(chunk))
         if len(buf) > size:
             raise web.HTTPRequestEntityTooLarge(max_size=size, actual_size=len(buf))
         if loop.time() >= window_end:

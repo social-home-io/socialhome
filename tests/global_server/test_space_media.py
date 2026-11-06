@@ -921,3 +921,14 @@ async def test_eviction_is_fair_per_household_not_per_scope(make, repo):
     assert sum(k is not None for k in kept) == 3
     held = await repo.get_blob(_bid(victim[-1]))
     assert (held.owner_kind, held.owner_id) == ("household", "home")
+
+
+def test_the_prefix_key_groups_an_ipv6_48_and_an_ipv4_24(make):
+    """Fourth review A5-residual: the body-read gate's coarser share."""
+    store = make()
+    k = store.prefix_key
+    assert k("2001:db8:aa:1::1") == k("2001:db8:aa:ff::9")
+    assert k("2001:db8:aa:1::1") != k("2001:db8:ab:1::1")
+    assert k("192.0.2.1") == k("192.0.2.200") != k("192.0.3.1")
+    assert k("::ffff:192.0.2.7") == k("192.0.2.1")
+    assert k("unknown") == k("unknown") != k("192.0.2.1")

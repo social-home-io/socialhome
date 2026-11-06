@@ -95,6 +95,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import ipaddress
 import logging
 import math
 import secrets
@@ -155,8 +156,14 @@ _HOUR: int = 3600
 #: the node (third review A5).
 PER_CLIENT_BODY_READS: int = 3
 
-#: Body bytes (signed sizes) one node buffers at once across all clients;
-#: past it an upload is ``503 busy`` rather than another buffer.
+#: Upload bodies one coarser network prefix (an IPv6 /48, an IPv4 /24) may
+#: have in flight on a node at once — so many /64s of one network can't
+#: close the node either (fourth review A5-residual).
+PER_PREFIX_BODY_READS: int = 6
+
+#: Body bytes one node holds BUFFERED at once across all clients (what has
+#: actually arrived, not the signed sizes — slow uploads hold little); past
+#: it a new upload is ``503 busy`` rather than another buffer.
 MAX_BODY_BYTES_IN_FLIGHT: int = 256 * 1024 * 1024
 
 
@@ -225,40 +232,69 @@ class UploadSlot:
 class BodyReadGate:
     """Which upload bodies a node reads right now: at most
     :data:`PER_CLIENT_BODY_READS` per client address bucket, at most
-    :data:`MAX_BODY_BYTES_IN_FLIGHT` signed bytes in all. Non-blocking: a
-    refused :meth:`enter` is answered ``503 busy`` at once, never queued
-    (third review A5)."""
+    :data:`PER_PREFIX_BODY_READS` per coarser network prefix, and new ones
+    only while the bytes actually buffered stay under
+    :data:`MAX_BODY_BYTES_IN_FLIGHT`. Non-blocking: a refused :meth:`enter`
+    is answered ``503 busy`` at once, never queued (third review A5, fourth
+    review A5-residual)."""
 
-    __slots__ = ("_by_client", "_max_bytes", "_per_client", "in_flight")
+    __slots__ = (
+        "_buffered",
+        "_by_client",
+        "_by_prefix",
+        "_max_bytes",
+        "_per_client",
+        "_per_prefix",
+        "in_flight",
+    )
 
     def __init__(
         self,
         *,
         per_client: int = PER_CLIENT_BODY_READS,
+        per_prefix: int = PER_PREFIX_BODY_READS,
         max_bytes: int = MAX_BODY_BYTES_IN_FLIGHT,
     ) -> None:
         self._per_client = per_client
+        self._per_prefix = per_prefix
         self._max_bytes = max_bytes
         self._by_client: dict[str, int] = {}
-        #: Signed bytes of the bodies being read now.
+        self._by_prefix: dict[str, int] = {}
+        self._buffered = 0
+        #: Bodies being read now.
         self.in_flight = 0
 
-    def enter(self, client_key: str, size: int) -> bool:
+    def enter(self, client_key: str, prefix_key: str) -> bool:
         if self._by_client.get(client_key, 0) >= self._per_client:
             return False
-        if self.in_flight + size > self._max_bytes:
+        if self._by_prefix.get(prefix_key, 0) >= self._per_prefix:
+            return False
+        if self._buffered >= self._max_bytes:
             return False
         self._by_client[client_key] = self._by_client.get(client_key, 0) + 1
-        self.in_flight += size
+        self._by_prefix[prefix_key] = self._by_prefix.get(prefix_key, 0) + 1
+        self.in_flight += 1
         return True
 
-    def leave(self, client_key: str, size: int) -> None:
-        left = self._by_client.get(client_key, 0) - 1
-        if left > 0:
-            self._by_client[client_key] = left
-        else:
-            self._by_client.pop(client_key, None)
-        self.in_flight = max(0, self.in_flight - size)
+    def leave(self, client_key: str, prefix_key: str) -> None:
+        for counts, key in (
+            (self._by_client, client_key),
+            (self._by_prefix, prefix_key),
+        ):
+            left = counts.get(key, 0) - 1
+            if left > 0:
+                counts[key] = left
+            else:
+                counts.pop(key, None)
+        self.in_flight = max(0, self.in_flight - 1)
+
+    def buffered(self, n: int) -> None:
+        """*n* more body bytes arrived and are held in memory."""
+        self._buffered += n
+
+    def release_buffer(self, n: int) -> None:
+        """A body's *n* buffered bytes are no longer held by the read."""
+        self._buffered = max(0, self._buffered - n)
 
 
 class _Counters:
@@ -598,6 +634,20 @@ class GfsSpaceMediaStore:
         """The keyed hash of a client address bucket — the per-address
         budget's key, and the body-read gate's."""
         return self._ip_key(client)
+
+    def prefix_key(self, address: str) -> str:
+        """The keyed hash of the coarser network prefix of *address* — an
+        IPv6 /48, an IPv4 /24 — for the body-read gate's per-prefix share."""
+        try:
+            ip = ipaddress.ip_address(address.split("%", 1)[0])
+        except ValueError:
+            return self._ip_key(f"prefix:{address}")
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            ip = ip.ipv4_mapped
+        bits = 48 if ip.version == 6 else 24
+        return self._ip_key(
+            f"prefix:{ipaddress.ip_network(f'{ip}/{bits}', strict=False)}"
+        )
 
     def _ip_key(self, client: str) -> str:
         """The per-address budget's key: a keyed hash of the address bucket
