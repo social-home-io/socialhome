@@ -40,13 +40,34 @@ describe('SpaceBazaarTab', () => {
   it('shows an empty state with a New listing CTA when there are none', async () => {
     apiGet.mockResolvedValue([])
     const { SpaceBazaarTab } = await import('./SpaceBazaarTab')
-    const { getByText, getAllByText } = render(<SpaceBazaarTab spaceId="sp-1" />)
+    const { getByText, getAllByText, container } = render(<SpaceBazaarTab spaceId="sp-1" />)
     await tick()
     expect(getByText('Nothing listed yet')).toBeTruthy()
-    // Both the header and the empty-state render a "+ New listing" CTA;
-    // either opens the create dialog pre-targeted to this space.
-    fireEvent.click(getAllByText('+ New listing')[0])
+    // Exactly one "+ New listing" on an empty tab — the empty-state CTA,
+    // not a second copy in the header row.
+    const buttons = getAllByText('+ New listing')
+    expect(buttons).toHaveLength(1)
+    expect(buttons[0].closest('.sh-empty-state')).toBeTruthy()
+    expect(container.querySelector('.sh-space-bazaar-header button')).toBeNull()
+    fireEvent.click(buttons[0])
     expect(openBazaarCreate).toHaveBeenCalledWith('sp-1')
+  })
+
+  it('puts the one New listing in the header row next to the intro once there are listings', async () => {
+    apiGet.mockResolvedValue([
+      { post_id: 'p1', title: 'Bike', status: 'active', mode: 'fixed',
+        image_urls: [], currency: 'EUR' },
+    ])
+    const { SpaceBazaarTab } = await import('./SpaceBazaarTab')
+    const { getAllByText, getByText } = render(<SpaceBazaarTab spaceId="sp-3" />)
+    await tick()
+    const buttons = getAllByText('+ New listing')
+    expect(buttons).toHaveLength(1)
+    const header = buttons[0].closest('.sh-space-bazaar-header')
+    expect(header).toBeTruthy()
+    expect(header?.contains(getByText('Items members are sharing or selling in this space.'))).toBe(true)
+    fireEvent.click(buttons[0])
+    expect(openBazaarCreate).toHaveBeenCalledWith('sp-3')
   })
 
   it('renders a card per listing in the space', async () => {
@@ -74,6 +95,19 @@ describe('SpaceBazaarTab — ADMIN_ONLY posts (§4.3)', () => {
     expect(queryAllByText('+ New listing')).toHaveLength(0)
     expect(getByText('Only admins can post here.')).toBeTruthy()
   })
+
+  it('a member gets no header New listing with listings either', async () => {
+    apiGet.mockResolvedValue([
+      { post_id: 'p1', title: 'Bike', status: 'active', mode: 'fixed',
+        image_urls: [], currency: 'EUR' },
+    ])
+    const { SpaceBazaarTab } = await import('./SpaceBazaarTab')
+    const { queryAllByText } = render(
+      <SpaceBazaarTab spaceId="sp-1" canSell={false} />,
+    )
+    await tick()
+    expect(queryAllByText('+ New listing')).toHaveLength(0)
+  })
 })
 
 describe('SpaceBazaarTab — a follower', () => {
@@ -86,5 +120,19 @@ describe('SpaceBazaarTab — a follower', () => {
     await tick()
     expect(queryAllByText('+ New listing')).toHaveLength(0)
     expect(queryByText('Only admins can post here.')).toBeNull()
+  })
+
+  it('gets no New listing with listings either', async () => {
+    apiGet.mockResolvedValue([
+      { post_id: 'p1', title: 'Bike', status: 'active', mode: 'fixed',
+        image_urls: [], currency: 'EUR' },
+    ])
+    const { SpaceBazaarTab } = await import('./SpaceBazaarTab')
+    const { queryAllByText, getAllByTestId } = render(
+      <SpaceBazaarTab spaceId="sp-1" follower />,
+    )
+    await tick()
+    expect(getAllByTestId('bazaar-card')).toHaveLength(1)
+    expect(queryAllByText('+ New listing')).toHaveLength(0)
   })
 })
