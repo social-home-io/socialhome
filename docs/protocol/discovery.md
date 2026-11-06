@@ -3593,14 +3593,27 @@ bytes under a channel claim survive the space's delete).
   most (nodes − 1) × the largest blob** (3 × 8 MiB on a 4-node cluster),
   until the next upload's room making brings it back under. Leave that much
   disk headroom.
-- **Delete / evict vs. a concurrent claim:** a blob row is deleted only
-  while no claim holds it (one statement), and its file only when that row
-  went; a claim that lands on a blob another node dropped meanwhile stores
-  the bytes again (they are in the request), so `already_stored` always
-  means the blob is there; a row whose file went missing gets it back from
-  the next upload of the same bytes; rows are dropped before their files, so
-  a crash leaves an orphan file (the sweep's), never a row without its file;
-  a claim left without its blob holds no budget and the sweep removes it.
+- **Delete / evict / expire vs. a concurrent claim:** all three are
+  claim-aware. A delete drops one claim and the blob row only while no claim
+  holds it (one statement). An eviction or expiry sweep notes the newest
+  claim's sequence number (`gfs_space_media_claims.seq`, never reused)
+  before it reads its candidates and drops only claims up to that mark (or
+  expired), then each row only while no claim holds it — so a blob another
+  node coalesced onto meanwhile survives and the eviction takes its next
+  candidate. A file goes only when its row went, rows before files (a crash
+  leaves an orphan file, the sweep's). A claim that lands on a blob whose
+  row another node dropped stores the bytes again (they are in the
+  request), so `already_stored` means the blob is there; a row whose file
+  went missing gets it back from the next upload of the same bytes; a claim
+  left without its blob holds no budget and the sweep removes it.
+- **Residual windows (cross-node, narrow, self-healing):** (1) node A
+  deletes a blob row, node B stores the same blob again (row + file), then
+  A's file removal lands — B answered `201`, but the row has no file until
+  the next identical upload rewrites it (a reader gets `404`; the household
+  side re-uploads on a `404`); (2) the orphan sweep re-checks a file's mtime
+  and row and unlinks it under its node's lock, but an upload on another
+  node could store that blob between the re-check and the unlink — the same
+  row-without-file, healed the same way.
 
 The totals check is a trigger-kept row, a scope's live bytes an index range
 over its claims; a scope's eviction sorts its live claims by their blob's

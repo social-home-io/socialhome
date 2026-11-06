@@ -2290,7 +2290,10 @@ class AbstractGfsSpaceMediaRepo(Protocol):
     async def least_recently_fetched(self, *, limit: int) -> list[GfsSpaceMedia]: ...
     async def touch(self, blob_id: str, *, now: int, min_interval: int) -> bool: ...
     async def expired(self, now: int, *, limit: int) -> list[GfsSpaceMedia]: ...
-    async def delete_blobs(self, blob_ids: list[str]) -> int: ...
+    async def claim_mark(self) -> int: ...
+    async def drop_blobs(
+        self, blob_ids: list[str], *, mark: int, now: int
+    ) -> list[str]: ...
     async def prune_expired_claims(self, now: int) -> int: ...
     async def upload_counts(
         self, scope_kind: str, scope_id: str, *, bucket: int
@@ -2391,18 +2394,40 @@ class SqliteGfsSpaceMediaRepo:
         )
         return [_space_media(r) for r in rows]
 
-    async def delete_blobs(self, blob_ids: list[str]) -> int:
-        """Drop blobs and every claim on them."""
+    async def claim_mark(self) -> int:
+        """The newest claim's sequence number — what an eviction or expiry
+        sweep notes before it reads its candidates."""
+        row = await self._db.fetchone(
+            "SELECT COALESCE(MAX(seq), 0) AS mark FROM gfs_space_media_claims"
+        )
+        return int(row["mark"]) if row is not None else 0
+
+    async def drop_blobs(
+        self, blob_ids: list[str], *, mark: int, now: int
+    ) -> list[str]:
+        """Drop blobs for an eviction or expiry sweep that noted *mark*
+        (:meth:`claim_mark`) before it read them — claim-aware, like a
+        delete: only claims up to the mark (or expired by *now*) go, then
+        each row only while no claim holds it. A blob another node claimed
+        meanwhile keeps its row. Returns the ids whose row went (the caller
+        removes their files, and only theirs)."""
         if not blob_ids:
-            return 0
+            return []
         marks = ",".join("?" for _ in blob_ids)
         args = tuple(blob_ids)
-        await self._db.enqueue_rowcount(
-            f"DELETE FROM gfs_space_media_claims WHERE blob_id IN ({marks})", args
+        await self._db.enqueue(
+            f"DELETE FROM gfs_space_media_claims WHERE blob_id IN ({marks})"
+            " AND (seq <= ? OR expires_at <= ?)",
+            (*args, mark, now),
         )
-        return await self._db.enqueue_rowcount(
-            f"DELETE FROM gfs_space_media WHERE blob_id IN ({marks})", args
+        await self._db.enqueue(
+            f"DELETE FROM gfs_space_media WHERE blob_id IN ({marks})"
+            " AND NOT EXISTS (SELECT 1 FROM gfs_space_media_claims c"
+            "  WHERE c.blob_id = gfs_space_media.blob_id)",
+            args,
         )
+        kept = await self.known_blob_ids(list(blob_ids))
+        return [b for b in blob_ids if b not in kept]
 
     async def known_blob_ids(self, blob_ids: list[str]) -> set[str]:
         if not blob_ids:

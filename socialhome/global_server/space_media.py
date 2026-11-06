@@ -51,12 +51,25 @@ recording run one at a time per node (an :class:`asyncio.Lock`), so on one
 node the byte caps hold exactly; across a cluster the total (or a scope's
 bytes) may exceed its cap by the uploads other nodes have in flight — at
 most (nodes − 1) × the largest blob — until the next upload's room making
-brings it back under. Races with another node's delete or eviction are
-safe: a blob row goes only while no claim holds it, its file only when the
-row went; a claim onto a blob dropped meanwhile stores the bytes again, and
-a row whose file went missing gets it back from the next upload of the same
-bytes. The orphan-file sweep runs on one node at a time (a lease row) and
-walks the shared directory a batch at a time. The bytes go through
+brings it back under. Deletes, eviction and the expiry sweep are
+claim-aware: a delete drops one claim and the row only while no claim holds
+it; an eviction or expiry notes the newest claim's sequence number before it
+reads its candidates and drops only claims up to it (or expired), so a blob
+another node claimed meanwhile survives (and eviction takes the next
+candidate); a file goes only when its row went, rows before files. A claim
+onto a blob whose row was dropped meanwhile stores the bytes again, and a
+row whose file went missing gets it back from the next upload of the same
+bytes.
+
+Two cross-node windows remain, both narrow and self-healing: (1) node A
+drops a row, node B stores the same blob again (row + file), and then A's
+file removal lands — B answered 201, but the row has no file until the next
+identical upload rewrites it (the household side re-uploads on a 404); (2)
+the orphan sweep re-checks a file's mtime and row and unlinks it under its
+node's lock, but an upload on ANOTHER node could store that blob between the
+re-check and the unlink — the same row-without-file, healed the same way.
+The orphan-file sweep runs on one node at a time (a lease row) and walks the
+shared directory a batch at a time. The bytes go through
 :class:`.blob_store.BlobFiles` (files under ``media_dir/spaces`` today), so
 an object store can replace the filesystem without touching this class.
 
@@ -90,6 +103,10 @@ FETCH_TOUCH_INTERVAL_S: int = 3600
 
 #: Rows read per eviction step.
 EVICT_BATCH: int = 64
+
+#: Eviction steps per upload at most (a step whose victims another node
+#: claimed meanwhile takes the next candidates).
+EVICT_MAX_ROUNDS: int = 64
 
 #: Expired blobs removed per prune step, and steps per sweep.
 PRUNE_BATCH: int = 500
@@ -290,19 +307,22 @@ class GfsSpaceMediaStore:
 
     async def prune_expired(self, now: int | None = None) -> int:
         """Drop expired blobs (rows, claims, files), expired claims of blobs
-        another claim keeps, and claims whose blob is gone. Returns the
-        blobs dropped."""
+        another claim keeps, and claims whose blob is gone. The node's lock
+        is taken per batch, so uploads wait for one batch, not the sweep.
+        A blob another node claimed meanwhile survives (its expiry moved).
+        Returns the blobs dropped."""
         now = int(time.time()) if now is None else now
         dropped = 0
-        async with self._lock:
-            for _ in range(PRUNE_MAX_BATCHES):
+        for _ in range(PRUNE_MAX_BATCHES):
+            async with self._lock:
+                mark = await self._repo.claim_mark()
                 ids = [
                     m.blob_id for m in await self._repo.expired(now, limit=PRUNE_BATCH)
                 ]
-                await self._drop(ids)
-                dropped += len(ids)
-                if len(ids) < PRUNE_BATCH:
-                    break
+                dropped += len(await self._drop(ids, mark=mark, now=now))
+            if len(ids) < PRUNE_BATCH:
+                break
+        async with self._lock:
             await self._repo.prune_expired_claims(now)
             await self._repo.prune_orphan_claims()
         return dropped
@@ -329,18 +349,21 @@ class GfsSpaceMediaStore:
             chunk = blobs[i : i + _ORPHAN_LOOKUP_BATCH]
             known = await self._repo.known_blob_ids([n for n, _ in chunk])
             for name, mtime in chunk:
-                if (
-                    name not in known
-                    and await self._unchanged(name, mtime, cutoff)
-                    # …and still no row, right before the unlink.
-                    and not await self._repo.known_blob_ids([name])
-                ):
+                if name in known:
+                    continue
+                # The last check and the unlink under the node's lock, so no
+                # upload on this node stores the blob in between.
+                async with self._lock:
+                    if await self._unchanged(
+                        name, mtime, cutoff
+                    ) and not await self._repo.known_blob_ids([name]):
+                        await self._files.remove(name)
+                        removed += 1
+        for name, mtime in parts:
+            async with self._lock:
+                if await self._unchanged(name, mtime, cutoff):
                     await self._files.remove(name)
                     removed += 1
-        for name, mtime in parts:
-            if await self._unchanged(name, mtime, cutoff):
-                await self._files.remove(name)
-                removed += 1
         if removed:
             log.info("space media: removed %d orphan file(s)", removed)
         return removed
@@ -420,11 +443,15 @@ class GfsSpaceMediaStore:
         """Under the node's lock: make room, then claim (and store, when the
         bytes aren't here). Returns ``(stored, used the rate slot)``."""
         size = len(data)
+        mark = await self._repo.claim_mark()
         held = await self._repo.get_blob(blob_id)
         if held is not None and held.expires_at <= now:
-            # Expired but not swept yet: start over.
-            await self._drop([held.blob_id])
-            held = None
+            # Expired but not swept yet: start over — unless another node
+            # claimed it meanwhile (then it is live again).
+            if await self._drop([held.blob_id], mark=mark, now=now):
+                held = None
+            else:
+                held = await self._repo.get_blob(blob_id)
         if held is not None and any(
             c.scope_kind == scope_kind and c.scope_id == scope_id and c.expires_at > now
             for c in await self._repo.claims_of(blob_id)
@@ -498,24 +525,49 @@ class GfsSpaceMediaStore:
     async def _make_room(self, size: int, now: int) -> None:
         """Free just enough of the whole cache for *size* more bytes under
         ``max_bytes``: expired blobs first, then least recently fetched,
-        then oldest — every claim on them goes too."""
+        then oldest — every claim on them goes too, except a claim another
+        node made since this eviction started: that blob survives and the
+        next candidate is taken instead."""
+        survivors: set[str] = set()
         _, total = await self._repo.totals()
-        while total + size > self._limits.max_bytes:
-            batch = await self._repo.expired(now, limit=EVICT_BATCH)
+        for _ in range(EVICT_MAX_ROUNDS):
+            if total + size <= self._limits.max_bytes:
+                return
+            # Claims made after this mark (another node coalescing onto a
+            # candidate while we pick it) keep their blob.
+            mark = await self._repo.claim_mark()
+            batch = [
+                m
+                for m in await self._repo.expired(now, limit=EVICT_BATCH)
+                if m.blob_id not in survivors
+            ]
             evicting = not batch
             if evicting:
-                batch = await self._repo.least_recently_fetched(limit=EVICT_BATCH)
+                batch = [
+                    m
+                    for m in await self._repo.least_recently_fetched(
+                        limit=EVICT_BATCH + len(survivors)
+                    )
+                    if m.blob_id not in survivors
+                ]
             if not batch:
-                break
-            victims: list[str] = []
+                return
+            victims: list[GfsSpaceMedia] = []
+            freed = 0
             for media in batch:
-                if total + size <= self._limits.max_bytes:
+                if total - freed + size <= self._limits.max_bytes:
                     break
-                victims.append(media.blob_id)
-                total -= media.size
-                if evicting:
+                victims.append(media)
+                freed += media.size
+            dropped = set(
+                await self._drop([m.blob_id for m in victims], mark=mark, now=now)
+            )
+            for media in victims:
+                if media.blob_id not in dropped:
+                    survivors.add(media.blob_id)
+                elif evicting:
                     self._count_eviction(media.size)
-            await self._drop(victims)
+            _, total = await self._repo.totals()
 
     async def _settle(self, blob_id: str) -> None:
         """After a claim went: the blob's expiry follows its other claims, or
@@ -531,10 +583,15 @@ class GfsSpaceMediaStore:
         self._counters.evicted_blobs += 1
         self._counters.evicted_bytes += size
 
-    async def _drop(self, blob_ids: list[str]) -> None:
-        """Rows (and their claims) first, then files: a crash in between
+    async def _drop(self, blob_ids: list[str], *, mark: int, now: int) -> list[str]:
+        """Drop blobs for an eviction or expiry that noted the claim *mark*
+        before it read them, claim-aware
+        (:meth:`~.repositories.SqliteGfsSpaceMediaRepo.drop_blobs`): a blob
+        another node claimed since then keeps its row and its file. Rows
+        first, then the files of the rows that went: a crash in between
         leaves a file with no row — the orphan sweep's — never a row whose
-        file is gone."""
-        await self._repo.delete_blobs(blob_ids)
-        for blob_id in blob_ids:
+        file is gone. Returns the ids dropped."""
+        dropped = await self._repo.drop_blobs(blob_ids, mark=mark, now=now)
+        for blob_id in dropped:
             await self._files.remove(blob_id)
+        return dropped

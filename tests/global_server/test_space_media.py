@@ -792,3 +792,80 @@ async def test_the_orphan_sweep_rechecks_a_file_before_removing_it(repo, tmp_dir
     files.scan_override = stale_scan
     assert await store.sweep_orphans(now=time.time()) == 0
     assert (d / name).exists()
+
+
+# ── Round 3: eviction / expiry are claim-aware across nodes ──────────────
+
+
+def _two_nodes(repo, tmp_dir, **over):
+    a = GfsSpaceMediaStore(
+        repo, FsBlobFiles(tmp_dir / "spaces"), _limits(**over), node_id="a"
+    )
+    b = GfsSpaceMediaStore(
+        repo, FsBlobFiles(tmp_dir / "spaces"), _limits(**over), node_id="b"
+    )
+    return a, b
+
+
+async def test_a_blob_claimed_on_another_node_survives_eviction(repo, tmp_dir):
+    """Node a picks blob x as its eviction victim; before a drops it, node b
+    coalesces onto x for s2 (answering already_stored). x must survive — b
+    told its household the blob is there — and a evicts another blob."""
+    a, b = _two_nodes(repo, tmp_dir, max_bytes=2 * SMALL)
+    x, y, z = _blob(), _blob(), _blob()
+    await _put(a, x, space="s1", now=NOW)
+    await _put(a, y, space="s1", now=NOW + 1)
+    real_lru = repo.least_recently_fetched
+    fired = {"done": False}
+
+    async def lru_then_b_claims(*, limit):
+        batch = await real_lru(limit=limit)
+        if not fired["done"]:
+            fired["done"] = True
+            assert await _put(b, x, space="s2", now=NOW + 10) is False
+        return batch
+
+    repo.least_recently_fetched = lru_then_b_claims  # type: ignore[method-assign]
+    try:
+        assert await _put(a, z, space="s3", now=NOW + 10) is True
+    finally:
+        repo.least_recently_fetched = real_lru  # type: ignore[method-assign]
+    assert await a.read(blob_id_of(x), now=NOW + 11) == x
+    assert {c.scope_id for c in await repo.claims_of(blob_id_of(x))} == {"s2"}
+    assert await a.read(blob_id_of(z), now=NOW + 11) == z
+    assert await a.read(blob_id_of(y), now=NOW + 11) is None
+    _, total = await repo.totals()
+    assert total <= 2 * SMALL
+
+
+async def test_a_blob_claimed_on_another_node_survives_the_expiry_sweep(repo, tmp_dir):
+    a, _ = _two_nodes(repo, tmp_dir)
+    x = _blob()
+    await _put(a, x, space="s1", now=NOW, expires=NOW + 10)
+    real_expired = repo.expired
+    fired = {"done": False}
+
+    async def expired_then_b_claims(now, *, limit):
+        batch = await real_expired(now, limit=limit)
+        if not fired["done"]:
+            fired["done"] = True
+            # b saw x still held (its read was before the expiry) and claims.
+            await repo.put_claim(
+                sm.GfsSpaceMediaClaim(
+                    blob_id=blob_id_of(x),
+                    scope_kind="space",
+                    scope_id="s2",
+                    size=SMALL,
+                    created_at=now,
+                    expires_at=now + 86_400,
+                )
+            )
+        return batch
+
+    repo.expired = expired_then_b_claims  # type: ignore[method-assign]
+    try:
+        await a.prune_expired(NOW + 20)
+    finally:
+        repo.expired = real_expired  # type: ignore[method-assign]
+    assert await a.read(blob_id_of(x), now=NOW + 21) == x
+    assert {c.scope_id for c in await repo.claims_of(blob_id_of(x))} == {"s2"}

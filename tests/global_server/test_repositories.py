@@ -1726,7 +1726,9 @@ async def test_space_media_totals_are_trigger_kept(space_media):
     await space_media.add_blob(_media_blob(1, size=100))
     await space_media.add_blob(_media_blob(2, size=300))
     assert await space_media.totals() == (2, 400)
-    assert await space_media.delete_blobs([f"{1:064x}"]) == 1
+    assert await space_media.drop_blobs([f"{1:064x}"], mark=9_999, now=9_999) == [
+        f"{1:064x}"
+    ]
     assert await space_media.totals() == (1, 300)
 
 
@@ -1826,8 +1828,10 @@ async def test_space_media_expiry_and_delete(space_media):
     await space_media.put_claim(_media_claim(3, space="old", expires=60))
     got = [m.blob_id for m in await space_media.expired(200, limit=10)]
     assert got == [f"{2:064x}", f"{1:064x}"]
-    assert await space_media.delete_blobs([]) == 0
-    assert await space_media.delete_blobs([f"{1:064x}", f"{2:064x}"]) == 2
+    assert await space_media.drop_blobs([], mark=999, now=200) == []
+    assert sorted(
+        await space_media.drop_blobs([f"{1:064x}", f"{2:064x}"], mark=999, now=200)
+    ) == [f"{1:064x}", f"{2:064x}"]
     assert await space_media.claims_of(f"{1:064x}") == []
     assert await space_media.prune_expired_claims(200) == 1
     assert [c.scope_id for c in await space_media.claims_of(f"{3:064x}")] == ["s1"]
@@ -1896,3 +1900,25 @@ async def test_space_media_sweep_lease_and_cursor(space_media):
     assert await space_media.sweep_cursor() == ""
     await space_media.set_sweep_cursor("abc")
     assert await space_media.sweep_cursor() == "abc"
+
+
+async def test_space_media_drop_keeps_a_blob_a_newer_claim_holds(space_media):
+    """An eviction / expiry drop removes only claims made before it noted its
+    mark (or expired); a blob another node claimed meanwhile keeps its row —
+    even a claim made in the same second."""
+    old, fresh = f"{1:064x}", f"{2:064x}"
+    await _held_blob(space_media, 1, created=1_000)
+    await _held_blob(space_media, 2, created=1_000)
+    mark = await space_media.claim_mark()
+    await space_media.put_claim(_media_claim(2, space="s2", created=1_000))
+    dropped = await space_media.drop_blobs([old, fresh], mark=mark, now=2_000)
+    assert dropped == [old]
+    assert await space_media.get_blob(fresh) is not None
+    assert [c.scope_id for c in await space_media.claims_of(fresh)] == ["s2"]
+    # An expired claim goes even when it is newer than the mark.
+    mark = await space_media.claim_mark()
+    await space_media.put_claim(
+        _media_claim(2, space="s3", created=2_500, expires=2_600)
+    )
+    assert await space_media.drop_blobs([fresh], mark=mark, now=3_000) == [fresh]
+    assert await space_media.claims_of(fresh) == []

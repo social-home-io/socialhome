@@ -78,6 +78,11 @@ CREATE INDEX IF NOT EXISTS idx_gfs_space_media_lru
     ON gfs_space_media(last_fetched_at, created_at);
 
 CREATE TABLE IF NOT EXISTS gfs_space_media_claims (
+    -- Strictly increasing per claim made (never reused — AUTOINCREMENT): an
+    -- eviction or expiry sweep notes the highest before it reads its
+    -- candidates and drops only claims up to it, so a claim another node
+    -- makes meanwhile keeps its blob.
+    seq          INTEGER PRIMARY KEY AUTOINCREMENT,
     blob_id      TEXT NOT NULL,
     -- A listed space (``space`` + its id) or a private space's opaque v_51
     -- channel (``channel`` + the random channel id; this server never
@@ -89,7 +94,7 @@ CREATE TABLE IF NOT EXISTS gfs_space_media_claims (
     created_at   INTEGER NOT NULL,
     -- This scope's hold; never beyond created_at + the operator's TTL.
     expires_at   INTEGER NOT NULL,
-    PRIMARY KEY (blob_id, scope_kind, scope_id)
+    UNIQUE (blob_id, scope_kind, scope_id)
 );
 -- A scope's live bytes (covering: SUM(size) WHERE expires_at > now).
 CREATE INDEX IF NOT EXISTS idx_gfs_space_media_claims_scope

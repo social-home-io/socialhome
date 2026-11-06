@@ -112,3 +112,19 @@ def test_one_sweep_lease_row(conn):
     ).fetchall() == [("", 0, "")]
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("INSERT INTO gfs_space_media_sweep(id) VALUES(2)")
+
+
+def test_claim_sequence_never_reuses_a_number(conn):
+    """An eviction's mark must never cover a claim made after it: the claim
+    sequence only grows, even after the newest claim was deleted."""
+    conn.execute(_CLAIM, ("a" * 64, "space", "s1"))
+    conn.execute(_CLAIM, ("b" * 64, "space", "s1"))
+    top = conn.execute("SELECT MAX(seq) FROM gfs_space_media_claims").fetchone()[0]
+    conn.execute("DELETE FROM gfs_space_media_claims WHERE seq=?", (top,))
+    conn.execute(_CLAIM, ("c" * 64, "space", "s1"))
+    assert (
+        conn.execute(
+            "SELECT seq FROM gfs_space_media_claims WHERE blob_id=?", ("c" * 64,)
+        ).fetchone()[0]
+        > top
+    )
