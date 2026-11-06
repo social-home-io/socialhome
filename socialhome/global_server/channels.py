@@ -268,6 +268,19 @@ class GfsChannelService:
         """:class:`PermissionError` unless *channel_id* is registered here."""
         await self._channel(channel_id)
 
+    async def require_channel_in_use(self, channel_id: str) -> None:
+        """:class:`PermissionError` unless *channel_id* is registered here AND
+        in use: at least one member household holds a seat whose pass is for
+        an open epoch (the seats a publish fans out to — nothing new is
+        recorded). Registration is anonymous (10 / min / address), so a
+        channel nobody took a seat in gets no media: junk channels can't
+        fill the cache (security review F1)."""
+        ch = await self._channel(channel_id)
+        if not await self._channels.list_targets(
+            channel_id, _open_epochs(ch, now=self._now())
+        ):
+            raise PermissionError("channel not in use")
+
     async def verify_channel_key(
         self, channel_id: str, *, prefix: bytes, body: dict, signature: str, suite: str
     ) -> None:

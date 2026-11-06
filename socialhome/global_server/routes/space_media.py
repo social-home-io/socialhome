@@ -127,12 +127,14 @@ class GfsMediaView(GfsBaseView):
             return _refused()
         size = claim.size
         try:
-            # Size bucket, caps and the scope's rate slot — before any body.
+            # Size bucket, caps, the scope's rate slot and the address's
+            # byte budget — before any body.
             reserved = await store.admit_upload(
                 scope_kind=claim.scope,
                 scope_id=claim.scope_id,
                 blob_id=blob_id,
                 size=size,
+                client=self.client_bucket(),
             )
         except MediaRefused as exc:
             return _media_refused(exc)
@@ -142,13 +144,13 @@ class GfsMediaView(GfsBaseView):
         try:
             data = await asyncio.wait_for(self.bounded_raw(size), BODY_READ_TIMEOUT_S)
         except TimeoutError:
-            await store.release_upload(claim.scope, claim.scope_id, reserved)
+            await store.release_upload(reserved)
             return web.json_response({"error": "body_timeout"}, status=408)
         except BaseException:
-            await store.release_upload(claim.scope, claim.scope_id, reserved)
+            await store.release_upload(reserved)
             raise
         if len(data) != size:
-            await store.release_upload(claim.scope, claim.scope_id, reserved)
+            await store.release_upload(reserved)
             return web.json_response({"error": "size_mismatch"}, status=422)
         try:
             stored = await store.put(

@@ -202,12 +202,14 @@ class GfsSpaceMediaAuth:
             raise PermissionError("authorization kind not taken for this scope")
         self._require_fresh(claim.ts)
         space: GlobalSpace | None = None
-        if auth.kind != AUTH_AUTHORITY:
-            # The scope first (its refusal is topped up by the caller).
-            if scope_kind == SCOPE_SPACE:
-                space = await self._federation.listed_space(scope_id)
-            else:
-                await self._channels.require_channel(scope_id)
+        if scope_kind == SCOPE_CHANNEL:
+            # The scope first (its refusal is topped up by the caller): a
+            # channel must be IN USE — a member household holds a seat —
+            # for every kind, the channel key's included (registration is
+            # anonymous).
+            await self._channels.require_channel_in_use(scope_id)
+        elif auth.kind != AUTH_AUTHORITY:
+            space = await self._federation.listed_space(scope_id)
         if auth.kind == AUTH_AUTHORITY:
             await self._federation.verify_space_authority(
                 scope_id,

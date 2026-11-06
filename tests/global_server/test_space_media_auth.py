@@ -86,7 +86,12 @@ async def env(gfs_db):
     epoch_repo = SqliteGfsSpaceEpochRepo(gfs_db)
     channel_repo = SqliteGfsChannelRepo(gfs_db)
     await fed_repo.upsert_instance(
-        ClientInstance(instance_id="owner", display_name="O", public_key="aa" * 32)
+        ClientInstance(
+            instance_id="owner",
+            display_name="O",
+            public_key="aa" * 32,
+            status="active",
+        )
     )
     for sid in (SPACE, "sp-banned", "sp-nokey"):
         await fed_repo.upsert_space(
@@ -105,6 +110,8 @@ async def env(gfs_db):
         now=NOW,
     )
     await channel_repo.set_epoch(CHANNEL, 3, expected=None, now=NOW)
+    # In use: a member household holds a seat (security review F1).
+    await channel_repo.add_subscriber(CHANNEL, "owner", pass_epoch=3, now=NOW)
     federation = GfsFederationService(fed_repo, epoch_repo=epoch_repo)
     clock = _Clock()
     member = GfsMemberPublishService(
@@ -805,4 +812,19 @@ async def test_every_outcome_of_a_delete_costs_one_verification(env, scope, case
             await auth.authorize_delete(scope, scope_id, BID, ts=ts, **sig)
         except PermissionError:
             pass
+    assert done[0] == 1
+
+
+@pytest.mark.parametrize("seat", ["none", "closed_epoch"])
+async def test_a_channel_nobody_holds_a_seat_in_gets_no_media(env, seat):
+    """Security review F1: registration is anonymous, so only a channel IN
+    USE — a member household's seat with a pass for an open epoch — takes
+    uploads, and the refusal costs what a success of the kind does."""
+    auth, _, channel_repo = env
+    await channel_repo.remove_subscriber(CHANNEL, "owner")
+    if seat == "closed_epoch":
+        await channel_repo.add_subscriber(CHANNEL, "owner", pass_epoch=1, now=NOW)
+    a = _channel_key(_claim(scope=SCOPE_CHANNEL, scope_id=CHANNEL))
+    with counting_ed25519_verifies() as done, pytest.raises(PermissionError):
+        await _upload(auth, a)
     assert done[0] == 1

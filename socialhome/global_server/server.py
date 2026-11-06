@@ -22,6 +22,7 @@ Console-script entry point: ``socialhome-global-server``. Sub-commands:
 from __future__ import annotations
 
 import getpass
+import hashlib
 import logging
 import os
 import secrets
@@ -361,6 +362,12 @@ class GfsApp:
             FsBlobFiles(Path(config.data_dir) / "space_media"),
             SpaceMediaLimits.from_config(config),
             node_id=config.cluster_node_id or config.instance_id,
+            # Keys the per-address byte budget's hash: the cluster shares the
+            # signing seed, so every node hashes an address alike — and the
+            # database never holds one.
+            ip_key_secret=hashlib.blake2b(
+                self.signing_seed, person=b"gfs-sm-ip-key", digest_size=32
+            ).digest(),
         )
         admin = GfsAdminService(
             fed_repo=repos.federation,

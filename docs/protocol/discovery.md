@@ -3520,6 +3520,13 @@ the capability, the sweep and the admin counts.
 | `GET` | `/gfs/media/{blob_id}` | Anyone, no credentials: the ciphertext, `application/octet-stream`, `nosniff`, `Access-Control-Allow-Origin: *`, `Cache-Control: public, max-age=3600, immutable`; `404` with `no-store` for unknown, expired, evicted or a banned space's blob. |
 | `POST` | `/gfs/media/{blob_id}/delete` | The scope's seed holder withdraws its claim: `{scope, scope_id, ts, sig, sig_suite}` (the signature covers scope, scope id, blob and `ts`); `{deleted}`. |
 
+**A channel takes media only while IN USE.** A v_51 channel registers
+anonymously (10 / min / address), so an upload under a channel scope — any
+kind, the channel key's included — needs at least one member household's
+seat whose pass is for an open epoch (the seats a channel publish fans out
+to; nothing new is recorded). A fresh channel nobody took a seat in gets the
+uniform `403` at the same verification cost (security review F1).
+
 No path names a **scope** — not the fetch, not the upload, not the delete:
 neither an access log, a proxy, a CDN cache key nor a path tells which
 space or channel a blob belongs to — and a channel's blob is never marked
@@ -3574,10 +3581,11 @@ pictures over old ones:
 
 | Setting | Default | Effect |
 |---|---|---|
-| `max_bytes` | 5 GiB | All blobs together. Before a blob is stored, expired blobs go, then the **least recently fetched** (then the oldest) of any scope, with all their claims — just enough to fit; the backlog of expired blobs is the sweep's, never the upload's. `0` turns the cache off: uploads answer `503 space_media_disabled` and the capability is not advertised. |
+| `max_bytes` | 5 GiB | All blobs together. Before a blob is stored, expired blobs go, then — **fair, never one global order** — the least recently fetched (then oldest) blobs of the scope that **owns the most bytes**, until it is down to the next largest, then again, with all their claims — just enough to fit (security review F1: one scope flooding the cache pushes out its own blobs, never another's; per-owner bytes are a trigger-kept table); the backlog of expired blobs is the sweep's, never the upload's. `0` turns the cache off: uploads answer `503 space_media_disabled` and the capability is not advertised. |
 | `space_max_bytes` | 256 MiB | Live bytes one scope's claims (space or channel) hold. Past it, that scope's **own** claims on its least recently fetched (then oldest) blobs are evicted until the new one fits — a blob another scope still claims stays; never a refusal. |
 | `ttl_seconds` | 3 days (600 s – 7 days) | A claim's longest life; the uploader's `expires_at` is clamped to it (an expiry in the past is `422`). |
-| `space_uploads_per_hour` | 300 | Accepted uploads (new blobs and new claims) of one scope in a sliding hour — this hour's count plus the last hour's, weighted by its overlap — kept in `gfs_space_media_uploads`, apart from the blob rows, so neither eviction nor delete can reset it. Past it: `429 space_media_quota` + `Retry-After` — the only refusal by quota. A retry of the scope's own live claim is not counted. |
+| `space_uploads_per_hour` | 300 | Accepted uploads (new blobs and new claims) of one scope in a sliding hour — this hour's count plus the last hour's, weighted by its overlap — kept in `gfs_space_media_uploads`, apart from the blob rows, so neither eviction nor delete can reset it. Past it: `429 space_media_quota` + `Retry-After`. A retry of the scope's own live claim is not counted. |
+| `ip_bytes_per_hour` | 1 GiB | The backstop: bytes one client address (an IPv6 /64) uploads in a sliding hour across every scope, kept in `gfs_space_media_ip_bytes` under a keyed hash of the address (never the address; the key derives from the cluster's shared signing seed) — cluster-wide. Past it: `429 ip_media_quota` + `Retry-After`. A coalesced claim stores no bytes and costs none; a failed upload gives its bytes back. |
 
 A blob larger than the whole cache or one scope's budget is `413
 too_large_for_cache`. The hourly maintenance sweep drops expired blobs,

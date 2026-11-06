@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from datetime import UTC, datetime
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -35,7 +36,13 @@ from socialhome.domain.gfs_space_media import (
     SpaceMediaUploadAuth,
     media_delete_payload,
 )
-from socialhome.gfs_channel import channel_pk_of, issue_channel_cert, signing_bytes
+from socialhome.gfs_channel import (
+    channel_pk_of,
+    issue_channel_cert,
+    new_channel_id,
+    sign_register,
+    signing_bytes,
+)
 from socialhome.global_server.app_keys import (
     gfs_channel_repo_key,
     gfs_fed_repo_key,
@@ -82,7 +89,12 @@ async def gfs(tmp_dir, request):
     async with TestClient(TestServer(app)) as tc:
         fed = app[gfs_fed_repo_key]
         await fed.upsert_instance(
-            ClientInstance(instance_id="owner", display_name="O", public_key="aa" * 32)
+            ClientInstance(
+                instance_id="owner",
+                display_name="O",
+                public_key="aa" * 32,
+                status="active",
+            )
         )
         for sid in (SPACE, "sp-banned"):
             await fed.upsert_space(
@@ -103,6 +115,9 @@ async def gfs(tmp_dir, request):
             now=now,
         )
         await channels.set_epoch(CHANNEL, 3, expected=None, now=now)
+        # The channel is IN USE: a member household holds a seat (a pass
+        # for an open epoch) — media uploads need that (security review F1).
+        await channels.add_subscriber(CHANNEL, "owner", pass_epoch=3, now=now)
         tc.app_ = app
         yield tc
 
@@ -760,3 +775,84 @@ async def test_a_replayed_delete_is_the_uniform_403(gfs):
     r = await gfs.post(_put_url(data) + "/delete", json=body)
     assert r.status == 403
     assert await r.json() == _REFUSED
+
+
+# ── Security review F1: an anonymous channel can't flush the cache ───────
+
+
+async def _anon_channel(gfs) -> tuple[str, bytes]:
+    """Register a fresh channel over HTTP, as anyone can — no seat."""
+    seed = os.urandom(32)
+    cid = new_channel_id()
+    req = sign_register(
+        channel_seed=seed,
+        channel_id=cid,
+        gfs_instance_id="gfs-test",
+        ts=datetime.now(UTC).isoformat(),
+    )
+    r = await gfs.post("/gfs/channels/register", json=req.to_wire())
+    assert r.status in (200, 201)
+    return cid, seed
+
+
+@pytest.mark.parametrize("gfs", [{"space_media_max_bytes": 3 * SMALL}], indirect=True)
+async def test_an_anonymous_unused_channel_cannot_upload_or_flush(gfs):
+    """Probe P1: a channel nobody holds a seat in (registered anonymously,
+    10 / min / address) is refused media — uniformly — so junk channels
+    can't evict a real space's blobs."""
+    victim = os.urandom(SMALL)
+    r = await gfs.put(
+        _put_url(victim), data=victim, headers=_authority_header(_claim(victim))
+    )
+    assert r.status == 201
+    cid, seed = await _anon_channel(gfs)
+    for _ in range(3):
+        junk = os.urandom(SMALL)
+        claim = _claim(junk, space=cid, scope=SCOPE_CHANNEL)
+        r = await gfs.put(
+            _put_url(junk), data=junk, headers=_channel_header(claim, seed=seed)
+        )
+        assert r.status == 403
+        assert await r.json() == _REFUSED
+    assert (await gfs.get(_get_url(victim))).status == 200
+
+
+@pytest.mark.parametrize(
+    "gfs",
+    [{"space_media_max_bytes": 4 * SMALL, "space_media_space_max_bytes": 64 * SMALL}],
+    indirect=True,
+)
+async def test_a_seated_channel_flooding_evicts_its_own(gfs):
+    """Even a channel in use can't flush another scope: eviction is fair."""
+    victim = os.urandom(SMALL)
+    await gfs.put(
+        _put_url(victim), data=victim, headers=_authority_header(_claim(victim))
+    )
+    for _ in range(6):
+        junk = os.urandom(SMALL)
+        r = await gfs.put(
+            _ch_url(junk), data=junk, headers=_channel_header(_ch_claim(junk))
+        )
+        assert r.status == 201
+    assert (await gfs.get(_get_url(victim))).status == 200
+
+
+@pytest.mark.parametrize(
+    "gfs", [{"space_media_ip_bytes_per_hour": SMALL}], indirect=True
+)
+async def test_an_address_over_its_byte_budget_is_429(gfs):
+    first, second = os.urandom(SMALL), os.urandom(SMALL)
+    r = await gfs.put(
+        _put_url(first), data=first, headers=_authority_header(_claim(first))
+    )
+    assert r.status == 201
+    r = await gfs.put(
+        _put_url(second), data=second, headers=_authority_header(_claim(second))
+    )
+    assert r.status == 429
+    assert (await r.json())["error"] == "ip_media_quota"
+    assert "Retry-After" in r.headers
+    # The scope's own slot was given back with it.
+    store = gfs.app_[gfs_space_media_store_key]
+    bucket = int(time.time()) // 3600
+    assert await store._repo.upload_counts("space", SPACE, bucket=bucket) == (1, 0)

@@ -2301,6 +2301,16 @@ class AbstractGfsSpaceMediaRepo(Protocol):
         self, owner_kind: str, owner_id: str, *, until: int
     ) -> list[str]: ...
     async def prune_tombstones(self, now: int) -> int: ...
+    async def largest_owners(self, *, limit: int) -> list[tuple[str, str, int]]: ...
+    async def owner_lru(
+        self, owner_kind: str, owner_id: str, *, limit: int
+    ) -> list[GfsSpaceMedia]: ...
+    async def reserve_ip_bytes(
+        self, ip_key: str, *, bucket: int, size: int, cap: int
+    ) -> bool: ...
+    async def refund_ip_bytes(self, ip_key: str, *, bucket: int, size: int) -> None: ...
+    async def ip_bytes(self, ip_key: str, *, bucket: int) -> tuple[int, int]: ...
+    async def prune_ip_bytes(self, *, before_bucket: int) -> int: ...
     async def upload_counts(
         self, scope_kind: str, scope_id: str, *, bucket: int
     ) -> tuple[int, int]: ...
@@ -2432,6 +2442,74 @@ class SqliteGfsSpaceMediaRepo:
     async def prune_tombstones(self, now: int) -> int:
         return await self._db.enqueue_rowcount(
             "DELETE FROM gfs_space_media_tombstones WHERE until <= ?", (now,)
+        )
+
+    # ── Fair eviction ────────────────────────────────────────────────────
+
+    async def largest_owners(self, *, limit: int) -> list[tuple[str, str, int]]:
+        """``(owner_kind, owner_id, bytes)`` of the scopes holding the most —
+        the trigger-kept per-owner totals, an index read."""
+        rows = await self._db.fetchall(
+            "SELECT owner_kind, owner_id, bytes FROM gfs_space_media_owner_bytes"
+            " ORDER BY bytes DESC LIMIT ?",
+            (limit,),
+        )
+        return [
+            (str(r["owner_kind"]), str(r["owner_id"]), int(r["bytes"])) for r in rows
+        ]
+
+    async def owner_lru(
+        self, owner_kind: str, owner_id: str, *, limit: int
+    ) -> list[GfsSpaceMedia]:
+        """One owner's blobs, least recently fetched first, then oldest."""
+        rows = await self._db.fetchall(
+            f"SELECT {_SPACE_MEDIA_COLS} FROM gfs_space_media"
+            " WHERE owner_kind=? AND owner_id=?"
+            " ORDER BY last_fetched_at, created_at LIMIT ?",
+            (owner_kind, owner_id, limit),
+        )
+        return [_space_media(r) for r in rows]
+
+    # ── Per-address byte budget ──────────────────────────────────────────
+
+    async def reserve_ip_bytes(
+        self, ip_key: str, *, bucket: int, size: int, cap: int
+    ) -> bool:
+        """Add *size* bytes to the address's *bucket* while it stays within
+        *cap* — one upsert-then-check statement on the single writer, so
+        concurrent uploads (on any node) can't all pass."""
+        if size > cap:
+            return False
+        changed = await self._db.enqueue_rowcount(
+            "INSERT INTO gfs_space_media_ip_bytes(ip_key, hour_bucket, bytes)"
+            " VALUES(?,?,?) ON CONFLICT(ip_key, hour_bucket)"
+            " DO UPDATE SET bytes = bytes + excluded.bytes"
+            " WHERE bytes + excluded.bytes <= ?",
+            (ip_key, bucket, size, cap),
+        )
+        return changed > 0
+
+    async def refund_ip_bytes(self, ip_key: str, *, bucket: int, size: int) -> None:
+        await self._db.enqueue(
+            "UPDATE gfs_space_media_ip_bytes SET bytes = MAX(0, bytes - ?)"
+            " WHERE ip_key=? AND hour_bucket=?",
+            (size, ip_key, bucket),
+        )
+
+    async def ip_bytes(self, ip_key: str, *, bucket: int) -> tuple[int, int]:
+        """``(bytes in hour bucket, bytes in the one before)``."""
+        rows = await self._db.fetchall(
+            "SELECT hour_bucket, bytes FROM gfs_space_media_ip_bytes"
+            " WHERE ip_key=? AND hour_bucket IN (?, ?)",
+            (ip_key, bucket, bucket - 1),
+        )
+        by = {int(r["hour_bucket"]): int(r["bytes"]) for r in rows}
+        return by.get(bucket, 0), by.get(bucket - 1, 0)
+
+    async def prune_ip_bytes(self, *, before_bucket: int) -> int:
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM gfs_space_media_ip_bytes WHERE hour_bucket < ?",
+            (before_bucket,),
         )
 
     async def totals(self) -> tuple[int, int]:

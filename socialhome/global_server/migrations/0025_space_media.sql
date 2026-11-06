@@ -46,6 +46,11 @@
 --      bytes uploaded for another scope add a claim, never a copy; the
 --      owner's (first) claim alone extends the blob, its seed holder's
 --      delete withdraws the blob for every scope;
+--    * ``gfs_space_media_owner_bytes`` (trigger-kept) — bytes per owner
+--      scope, so eviction under the global cap is fair (the scope owning
+--      the most loses its own first), and ``gfs_space_media_ip_bytes`` —
+--      the per-address hourly byte budget (keyed hash, never an address)
+--      — security review F1;
 --    * ``gfs_space_media_tombstones`` — a blob its owner deleted, or a
 --      banned owner's: unservable and unclaimable for the TTL (security
 --      review F4 — another scope's re-upload of fetched ciphertext must not
@@ -169,3 +174,45 @@ CREATE TABLE IF NOT EXISTS gfs_space_media_sweep (
     cursor       TEXT NOT NULL DEFAULT ''
 );
 INSERT OR IGNORE INTO gfs_space_media_sweep(id) VALUES(1);
+
+-- Bytes each OWNER scope holds — kept by triggers, so the eviction under
+-- the global cap takes the scope holding the most first (its own least
+-- recently fetched blobs), never one global order: an anonymous flood can
+-- only push out its own (security review F1).
+CREATE TABLE IF NOT EXISTS gfs_space_media_owner_bytes (
+    owner_kind  TEXT NOT NULL,
+    owner_id    TEXT NOT NULL,
+    bytes       INTEGER NOT NULL,
+    PRIMARY KEY (owner_kind, owner_id)
+);
+CREATE INDEX IF NOT EXISTS idx_gfs_space_media_owner_bytes
+    ON gfs_space_media_owner_bytes(bytes);
+CREATE TRIGGER IF NOT EXISTS trg_gfs_space_media_owner_ins
+    AFTER INSERT ON gfs_space_media
+BEGIN
+    INSERT INTO gfs_space_media_owner_bytes(owner_kind, owner_id, bytes)
+        VALUES(NEW.owner_kind, NEW.owner_id, NEW.size)
+        ON CONFLICT(owner_kind, owner_id) DO UPDATE SET bytes = bytes + NEW.size;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_gfs_space_media_owner_del
+    AFTER DELETE ON gfs_space_media
+BEGIN
+    UPDATE gfs_space_media_owner_bytes SET bytes = bytes - OLD.size
+        WHERE owner_kind = OLD.owner_kind AND owner_id = OLD.owner_id;
+    DELETE FROM gfs_space_media_owner_bytes
+        WHERE owner_kind = OLD.owner_kind AND owner_id = OLD.owner_id
+        AND bytes <= 0;
+END;
+
+-- Bytes uploaded per client address per hour — the backstop budget
+-- (``[space_media] ip_bytes_per_hour``), cluster-wide in the shared DB.
+-- ``ip_key`` is a keyed hash of the address bucket (an IPv6 /64), never the
+-- address; two buckets live, the sweep drops older.
+CREATE TABLE IF NOT EXISTS gfs_space_media_ip_bytes (
+    ip_key       TEXT NOT NULL,
+    hour_bucket  INTEGER NOT NULL,
+    bytes        INTEGER NOT NULL CHECK(bytes >= 0),
+    PRIMARY KEY (ip_key, hour_bucket)
+);
+CREATE INDEX IF NOT EXISTS idx_gfs_space_media_ip_bytes_bucket
+    ON gfs_space_media_ip_bytes(hour_bucket);

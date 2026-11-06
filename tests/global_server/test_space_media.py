@@ -48,6 +48,7 @@ def _limits(**over) -> SpaceMediaLimits:
         "ttl_s": 3 * 86_400,
         "space_max_bytes": 100 * SMALL,
         "space_uploads_per_hour": 100,
+        "ip_bytes_per_hour": 1024 * SMALL,
     }
     base.update(over)
     return SpaceMediaLimits(**base)
@@ -848,21 +849,21 @@ async def test_a_blob_claimed_on_another_node_survives_eviction(repo, tmp_dir):
     x, y, z = _blob(), _blob(), _blob()
     await _put(a, x, space="s1", now=NOW)
     await _put(a, y, space="s1", now=NOW + 1)
-    real_lru = repo.least_recently_fetched
+    real_lru = repo.owner_lru
     fired = {"done": False}
 
-    async def lru_then_b_claims(*, limit):
-        batch = await real_lru(limit=limit)
+    async def lru_then_b_claims(owner_kind, owner_id, *, limit):
+        batch = await real_lru(owner_kind, owner_id, limit=limit)
         if not fired["done"]:
             fired["done"] = True
             assert await _put(b, x, space="s2", now=NOW + 10) is False
         return batch
 
-    repo.least_recently_fetched = lru_then_b_claims  # type: ignore[method-assign]
+    repo.owner_lru = lru_then_b_claims  # type: ignore[method-assign]
     try:
         assert await _put(a, z, space="s3", now=NOW + 10) is True
     finally:
-        repo.least_recently_fetched = real_lru  # type: ignore[method-assign]
+        repo.owner_lru = real_lru  # type: ignore[method-assign]
     assert await a.read(blob_id_of(x), now=NOW + 11) == x
     assert {c.scope_id for c in await repo.claims_of(blob_id_of(x))} == {"s2"}
     assert await a.read(blob_id_of(z), now=NOW + 11) == z
@@ -1057,3 +1058,68 @@ async def test_a_tombstone_written_on_another_node_stops_a_store_in_flight(
         repo.put_claim = real_claim  # type: ignore[method-assign]
     assert await repo.get_blob(blob_id_of(x)) is None
     assert await b.read(blob_id_of(x), now=NOW + 2) is None
+
+
+# ── Security review F1: fair eviction, a per-address byte budget ─────────
+
+
+async def test_a_flooding_scope_evicts_its_own_blobs_not_others(make, repo):
+    """Probe P1: one scope uploading past the global cap must not evict
+    another scope's blob in one global LRU order — the scope holding the
+    most bytes loses its own least recently fetched first."""
+    store = make(max_bytes=4 * SMALL)
+    victim = _blob()
+    await _put(store, victim, space="victim", now=NOW)
+    flood = [_blob() for _ in range(8)]
+    for i, d in enumerate(flood):
+        await _put(store, d, space="flood", now=NOW + 1 + i)
+    assert await store.read(blob_id_of(victim), now=NOW + 20) == victim
+    _, total = await repo.totals()
+    assert total <= 4 * SMALL
+    # The flood kept its newest.
+    assert await store.read(blob_id_of(flood[-1]), now=NOW + 20) == flood[-1]
+    assert await store.read(blob_id_of(flood[0]), now=NOW + 20) is None
+
+
+async def test_eviction_takes_from_the_largest_owner_first(make, repo):
+    store = make(max_bytes=4 * SMALL)
+    a1, a2, a3, b1, c1 = (_blob() for _ in range(5))
+    await _put(store, b1, space="b", now=NOW)  # the oldest of all
+    await _put(store, a1, space="a", now=NOW + 1)
+    await _put(store, a2, space="a", now=NOW + 2)
+    await _put(store, a3, space="a", now=NOW + 3)
+    await _put(store, c1, space="c", now=NOW + 4)
+    assert await store.read(blob_id_of(b1), now=NOW + 5) == b1
+    assert await store.read(blob_id_of(a1), now=NOW + 5) is None
+    assert await store.read(blob_id_of(a2), now=NOW + 5) == a2
+
+
+async def test_an_address_has_an_upload_byte_budget(make, repo):
+    """Backstop: an address uploads at most ip_bytes_per_hour bytes an hour,
+    whatever scopes it uses (shared database, cluster-wide); a refusal and a
+    coalesced or failed upload cost nothing."""
+    store = make(ip_bytes_per_hour=2 * SMALL)
+    a, b, c = _blob(), _blob(), _blob()
+
+    async def up(data, *, space, client="198.51.100.7", now=NOW):
+        return await store.put(
+            scope_kind="space",
+            scope_id=space,
+            blob_id=blob_id_of(data),
+            data=data,
+            expires_at=now + 86_400,
+            now=now,
+            client=client,
+        )
+
+    assert await up(a, space="s1") is True
+    assert await up(b, space="s2") is True
+    assert await _refused(up(c, space="s3")) == (429, "ip_media_quota")
+    # Another address is not held back.
+    assert await up(c, space="s3", client="203.0.113.9") is True
+    # A coalesced claim stores no bytes: it costs nothing.
+    assert await up(a, space="s4", client="192.0.2.1") is False
+    assert await up(b, space="s5", client="192.0.2.1") is False
+    assert await up(_blob(), space="s6", client="192.0.2.1") is True
+    # Two hours on, the window has moved.
+    assert await up(_blob(), space="s1", now=NOW + 7200) is True

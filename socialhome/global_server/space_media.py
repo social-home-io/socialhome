@@ -35,9 +35,14 @@ favours new pictures over old ones:
   fetched** (then oldest) blobs are evicted until it fits — a blob another
   scope still claims stays;
 * all blobs together stay under ``max_bytes`` (5 GiB): before a new blob is
-  stored, expired blobs go first, then the least recently fetched (then
-  oldest) of any scope, with all their claims — just enough to fit; the
-  backlog of expired blobs is the sweep's;
+  stored, expired blobs go first, then — fair, never one global order — the
+  least recently fetched (then oldest) blobs of the scope owning the most
+  bytes, with all their claims — just enough to fit, so one scope flooding
+  the cache pushes out its own; the backlog of expired blobs is the sweep's;
+* one client address uploads at most ``ip_bytes_per_hour`` (1 GiB) across
+  every scope (``429 ip_media_quota``), cluster-wide in the shared database
+  under a keyed hash of the address; a channel takes media only while a
+  member household holds a seat in it (the auth's check);
 * a blob larger than either budget is ``413``; a scope accepting more than
   ``space_uploads_per_hour`` uploads (a sliding hour, counted in
   ``gfs_space_media_uploads`` — eviction and delete can't reset it) is
@@ -88,8 +93,10 @@ the shared database.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import math
+import secrets
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -154,6 +161,8 @@ class SpaceMediaLimits:
     ttl_s: int
     space_max_bytes: int
     space_uploads_per_hour: int
+    #: Bytes one client address may upload an hour, across every scope.
+    ip_bytes_per_hour: int = 1024**3
 
     @classmethod
     def from_config(cls, cfg: GfsConfig) -> SpaceMediaLimits:
@@ -162,6 +171,7 @@ class SpaceMediaLimits:
             ttl_s=cfg.space_media_ttl_seconds,
             space_max_bytes=cfg.space_media_space_max_bytes,
             space_uploads_per_hour=cfg.space_media_space_uploads_per_hour,
+            ip_bytes_per_hour=cfg.space_media_ip_bytes_per_hour,
         )
 
     @property
@@ -189,6 +199,21 @@ class SpaceMediaLimits:
         }
 
 
+@dataclass(slots=True, frozen=True)
+class UploadSlot:
+    """What :meth:`GfsSpaceMediaStore.admit_upload` reserved for one upload
+    before its body was read: the scope's rate slot (``bucket``) and, with
+    a client, its address's bytes (``ip_key``, ``ip_bytes``). Store-local:
+    handed back to :meth:`~GfsSpaceMediaStore.put` or
+    :meth:`~GfsSpaceMediaStore.release_upload`, never stored."""
+
+    scope_kind: str
+    scope_id: str
+    bucket: int
+    ip_key: str | None = None
+    ip_bytes: int = 0
+
+
 class _Counters:
     """This node's eviction / refusal counts since it started."""
 
@@ -211,7 +236,15 @@ class GfsSpaceMediaStore:
     the total may exceed them only by the uploads other nodes have in
     flight: at most (nodes − 1) × the largest blob."""
 
-    __slots__ = ("_counters", "_files", "_limits", "_lock", "_node_id", "_repo")
+    __slots__ = (
+        "_counters",
+        "_files",
+        "_ip_key_secret",
+        "_limits",
+        "_lock",
+        "_node_id",
+        "_repo",
+    )
 
     def __init__(
         self,
@@ -220,6 +253,7 @@ class GfsSpaceMediaStore:
         limits: SpaceMediaLimits,
         *,
         node_id: str = "gfs",
+        ip_key_secret: bytes | None = None,
     ) -> None:
         self._repo = repo
         self._files = files
@@ -228,6 +262,10 @@ class GfsSpaceMediaStore:
         self._lock = asyncio.Lock()
         #: Who holds the orphan sweep lease (``[cluster] node_id``).
         self._node_id = node_id
+        #: Keys the per-address byte budget's hash (the cluster shares one,
+        #: derived from the shared signing seed), so the database never
+        #: holds a client address.
+        self._ip_key_secret = ip_key_secret or secrets.token_bytes(32)
 
     @property
     def limits(self) -> SpaceMediaLimits:
@@ -256,14 +294,17 @@ class GfsSpaceMediaStore:
         blob_id: str,
         size: int,
         now: int | None = None,
-    ) -> int | None:
+        client: str | None = None,
+    ) -> UploadSlot | None:
         """Everything an upload can be refused for BEFORE its body is read
         (the route calls it with the signed size): the cache is on, the
-        scope is one, the size is a padded bucket this cache takes, and —
-        unless the scope already holds the blob with its file (``None``: a
-        retry, answered without reading anything) — one of the scope's
-        upload slots, reserved atomically. Returns the slot's hour bucket,
-        for :meth:`put` (``reserved=``) or :meth:`release_upload`. Raises
+        scope is one, the size is a padded bucket this cache takes, the
+        blob is not withdrawn, and — unless the scope already holds the
+        blob with its file (``None``: a retry, answered without reading
+        anything) — one of the scope's upload slots and, for a *client*
+        address, *size* bytes of its hourly budget, both reserved
+        atomically. Returns the :class:`UploadSlot`, for :meth:`put`
+        (``reserved=``) or :meth:`release_upload`. Raises
         :class:`MediaRefused`."""
         self.require_enabled()
         if scope_kind not in MEDIA_SCOPES:
@@ -284,12 +325,30 @@ class GfsSpaceMediaStore:
             return None
         bucket = now // _HOUR
         await self._reserve_slot(scope_kind, scope_id, bucket, now)
-        return bucket
+        slot = UploadSlot(scope_kind=scope_kind, scope_id=scope_id, bucket=bucket)
+        if client is None:
+            return slot
+        ip_key = self._ip_key(client)
+        try:
+            await self._reserve_ip_bytes(ip_key, bucket, size, now)
+        except MediaRefused:
+            await self._repo.refund_upload(scope_kind, scope_id, bucket=bucket)
+            raise
+        return UploadSlot(
+            scope_kind=scope_kind,
+            scope_id=scope_id,
+            bucket=bucket,
+            ip_key=ip_key,
+            ip_bytes=size,
+        )
 
-    async def release_upload(self, scope_kind: str, scope_id: str, bucket: int) -> None:
-        """Give back a slot :meth:`admit_upload` reserved for an upload that
+    async def release_upload(self, slot: UploadSlot) -> None:
+        """Give back what :meth:`admit_upload` reserved for an upload that
         never reached :meth:`put` (its body was too large, short or slow)."""
-        await self._repo.refund_upload(scope_kind, scope_id, bucket=bucket)
+        await self._repo.refund_upload(
+            slot.scope_kind, slot.scope_id, bucket=slot.bucket
+        )
+        await self._refund_ip(slot)
 
     async def put(
         self,
@@ -300,14 +359,16 @@ class GfsSpaceMediaStore:
         data: bytes,
         expires_at: int,
         now: int | None = None,
-        reserved: int | None = None,
+        reserved: UploadSlot | None = None,
+        client: str | None = None,
     ) -> bool:
         """Keep one blob for the scope. ``True`` when its bytes were stored
         now, ``False`` when they already were (a retry, another scope's
         upload, another node winning the race) — the scope's claim is in
         place either way. *reserved* is the slot :meth:`admit_upload` took
         (refunded here when the upload fails or stores nothing new); without
-        it this call admits the upload itself. Raises :class:`MediaRefused`."""
+        it this call admits the upload itself (for *client*'s address).
+        Raises :class:`MediaRefused`."""
         now = int(time.time()) if now is None else now
         if reserved is None:
             admitted = await self.admit_upload(
@@ -316,12 +377,14 @@ class GfsSpaceMediaStore:
                 blob_id=blob_id,
                 size=len(data),
                 now=now,
+                client=client,
             )
             if admitted is None:
                 return False
-            bucket = admitted
+            slot = admitted
         else:
-            bucket = reserved
+            slot = reserved
+        bucket = slot.bucket
         try:
             check_shape(blob_id, data)
             if expires_at <= now:
@@ -333,10 +396,14 @@ class GfsSpaceMediaStore:
                     scope_kind, scope_id, blob_id, data, expires_at, now
                 )
         except BaseException:
-            await self._repo.refund_upload(scope_kind, scope_id, bucket=bucket)
+            await self.release_upload(slot)
             raise
         if not used:
             await self._repo.refund_upload(scope_kind, scope_id, bucket=bucket)
+        if not stored:
+            # A coalesced claim stores no bytes: the address's budget isn't
+            # charged for it.
+            await self._refund_ip(slot)
         return stored
 
     async def read(self, blob_id: str, *, now: int | None = None) -> bytes | None:
@@ -477,6 +544,7 @@ class GfsSpaceMediaStore:
         now = int(time.time()) if now is None else now
         dropped = await self.prune_expired(now)
         await self._repo.prune_upload_counts(before_bucket=now // _HOUR - 1)
+        await self._repo.prune_ip_bytes(before_bucket=now // _HOUR - 1)
         if await self._repo.acquire_sweep_lease(
             self._node_id, now=now, ttl=ORPHAN_LEASE_S
         ):
@@ -513,6 +581,34 @@ class GfsSpaceMediaStore:
             c.scope_kind == scope_kind and c.scope_id == scope_id and c.expires_at > now
             for c in await self._repo.claims_of(blob_id)
         )
+
+    def _ip_key(self, client: str) -> str:
+        """The per-address budget's key: a keyed hash of the address bucket
+        — the database never holds the address."""
+        return hashlib.blake2b(
+            client.encode(), key=self._ip_key_secret, digest_size=16
+        ).hexdigest()
+
+    async def _reserve_ip_bytes(
+        self, ip_key: str, bucket: int, size: int, now: int
+    ) -> None:
+        """Take *size* bytes of the address's ``ip_bytes_per_hour`` in the
+        sliding hour (the last hour weighed by its overlap) — atomically in
+        the shared database, cluster-wide."""
+        _, previous = await self._repo.ip_bytes(ip_key, bucket=bucket)
+        overlap = 1.0 - (now % _HOUR) / _HOUR
+        cap = math.floor(self._limits.ip_bytes_per_hour - previous * overlap)
+        if not await self._repo.reserve_ip_bytes(
+            ip_key, bucket=bucket, size=size, cap=cap
+        ):
+            self._counters.refused_quota += 1
+            raise MediaRefused(429, "ip_media_quota")
+
+    async def _refund_ip(self, slot: UploadSlot) -> None:
+        if slot.ip_key is not None and slot.ip_bytes:
+            await self._repo.refund_ip_bytes(
+                slot.ip_key, bucket=slot.bucket, size=slot.ip_bytes
+            )
 
     async def _reserve_slot(
         self, scope_kind: str, scope_id: str, bucket: int, now: int
@@ -650,11 +746,15 @@ class GfsSpaceMediaStore:
 
     async def _make_room(self, size: int, now: int) -> None:
         """Free just enough of the whole cache for *size* more bytes under
-        ``max_bytes``: expired blobs first, then least recently fetched,
-        then oldest — every claim on them goes too, except a claim another
-        node made since this eviction started: that blob survives and the
-        next candidate is taken instead."""
+        ``max_bytes``: expired blobs first, then — FAIR, never one global
+        order — the least recently fetched (then oldest) blobs of the scope
+        that owns the most bytes, until it is down to the next largest, then
+        again. So a scope flooding the cache pushes out its own blobs, not
+        another's (security review F1). Every claim on a victim goes too,
+        except a claim another node made since this eviction started: that
+        blob survives and the next candidate is taken instead."""
         survivors: set[str] = set()
+        spent: set[tuple[str, str]] = set()
         _, total = await self._repo.totals()
         for _ in range(EVICT_MAX_ROUNDS):
             if total + size <= self._limits.max_bytes:
@@ -668,20 +768,18 @@ class GfsSpaceMediaStore:
                 if m.blob_id not in survivors
             ]
             evicting = not batch
+            owned = floor = 0
             if evicting:
-                batch = [
-                    m
-                    for m in await self._repo.least_recently_fetched(
-                        limit=EVICT_BATCH + len(survivors)
-                    )
-                    if m.blob_id not in survivors
-                ]
+                batch, owned, floor = await self._fair_candidates(survivors, spent)
             if not batch:
                 return
             victims: list[GfsSpaceMedia] = []
             freed = 0
             for media in batch:
                 if total - freed + size <= self._limits.max_bytes:
+                    break
+                if evicting and victims and owned - freed <= floor:
+                    # Down to the next largest scope: re-pick the largest.
                     break
                 victims.append(media)
                 freed += media.size
@@ -694,6 +792,34 @@ class GfsSpaceMediaStore:
                 elif evicting:
                     self._count_eviction(media.size)
             _, total = await self._repo.totals()
+
+    async def _fair_candidates(
+        self, survivors: set[str], spent: set[tuple[str, str]]
+    ) -> tuple[list[GfsSpaceMedia], int, int]:
+        """The least recently fetched blobs of the scope owning the most
+        bytes (skipping one whose candidates all survived), its bytes, and
+        the bytes of the next largest — where this round stops taking from
+        it."""
+        owners = [
+            o
+            for o in await self._repo.largest_owners(limit=len(spent) + 2)
+            if (o[0], o[1]) not in spent
+        ]
+        while owners:
+            kind, owner, owned = owners[0]
+            batch = [
+                m
+                for m in await self._repo.owner_lru(
+                    kind, owner, limit=EVICT_BATCH + len(survivors)
+                )
+                if m.blob_id not in survivors
+            ]
+            if batch:
+                floor = owners[1][2] if len(owners) > 1 else 0
+                return batch, owned, floor
+            spent.add((kind, owner))
+            owners = owners[1:]
+        return [], 0, 0
 
     async def _settle(self, blob_id: str) -> None:
         """After a claim went: the blob's expiry follows its other claims, or

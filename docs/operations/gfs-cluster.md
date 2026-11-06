@@ -99,8 +99,12 @@ keeps encrypted blobs as files under `<data_dir>/space_media/` (not under the pu
 rows in the shared `gfs.db`, so every node must mount the **same** data dir:
 whichever node took an upload, any node serves the fetch. Size
 `max_bytes` (default 5 GiB) to the disk that volume has — it is a cache, so
-the least recently fetched blobs are evicted when it is full (and a space or
-channel past `space_max_bytes` evicts its own least recently fetched), and
+the space or channel owning the most bytes loses its own least recently
+fetched blobs first when it is full — never one global order, so one scope
+can't flush the others (and a space or channel past `space_max_bytes` evicts
+its own least recently fetched). One client address uploads at most
+`ip_bytes_per_hour` (1 GiB) an hour across every scope, counted cluster-wide
+in `gfs.db`. And
 nothing lives past `ttl_seconds` (3 days). Behind Cloudflare a fetch (`GET /gfs/media/{blob}`) is
 `Cache-Control: public, max-age=3600, immutable`, so the edge absorbs
 repeated reads; a miss is `no-store`. Set `max_bytes = 0` (or
