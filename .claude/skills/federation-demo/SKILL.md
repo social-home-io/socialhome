@@ -1304,6 +1304,13 @@ WS pushes across allocs. The step:
    bytes) must all succeed. Before, the offer on a node without the
    author's socket answered 503 and the polls, answers and uploads reached
    nodes that did not hold the session.
+   Then the **space media cache** (step 3h): a space published with an
+   authority key the step holds; one encrypted, padded blob uploaded via
+   node 0 under that authority must be served **byte-identical by node 1**
+   (``Cache-Control: public, max-age=3600, immutable``) — files under the
+   shared ``media/spaces`` dir, rows in the shared DB; the same upload via
+   node 1 must coalesce (``200 already_stored``) and a miss via node 1 must
+   be ``404`` with ``no-store``.
 6. Confirms a client registered via one node is served by the other
    (shared DB → the round-robin LB is safe).
 

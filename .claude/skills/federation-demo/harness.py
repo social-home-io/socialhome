@@ -2048,6 +2048,128 @@ def _gfs_cluster_highlight_link(urls: list[str], tags: list[str]) -> None:
     )
 
 
+def _gfs_cluster_space_media(urls: list[str], owner: tuple[str, bytes]) -> None:
+    """Step 3h of ``gfs-cluster``: the space media cache on a shared data dir.
+
+    The owner publishes a space (pinning an authority key whose seed this
+    step holds), uploads one encrypted, padded blob via node 0 under that
+    authority, and node 1 must serve the SAME bytes (``immutable``, an hour
+    in a CDN) — files and rows live in the shared data dir / DB. The same
+    upload via node 1 then coalesces (``200 already_stored``), and a miss
+    via node 1 is ``404`` with ``no-store``."""
+    from socialhome.crypto import b64url_encode, ed25519_public_key, sign_ed25519
+    from socialhome.domain.gfs_space_media import (
+        AUTH_AUTHORITY,
+        SPACE_MEDIA_AUTH_HEADER,
+        SpaceMediaClaim,
+        SpaceMediaUploadAuth,
+    )
+    from socialhome.moment_public_media import PAD_BUCKETS, blob_id_of
+
+    iid, seed = owner
+    authority_seed = secrets.token_bytes(32)
+    space_id = secrets.token_hex(16)
+    body = {
+        "space_id": space_id,
+        "owning_instance": iid,
+        "name": "Cluster media space",
+        "description": "",
+        "about_markdown": "",
+        "cover_url": "",
+        "icon_url": "",
+        "min_age": 0,
+        "category": "general",
+        "join_mode": "open",
+        "allow_subscribers": True,
+        "accent_color": "#C8902F",
+        "primary_color": "#D2542A",
+        "identity_public_key": ed25519_public_key(authority_seed).hex(),
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
+    body["signature"] = b64url_encode(sign_ed25519(seed, canonical))
+    code, resp = _request(
+        f"{urls[0]}/gfs/spaces/{space_id}/publish", method="POST", body=body
+    )
+    if code not in (200, 201):
+        raise SystemExit(f"gfs-cluster: media space publish → {code} {resp!r}")
+
+    blob = secrets.token_bytes(PAD_BUCKETS[1] + 28)  # a 64 KiB padded bucket
+    blob_id = blob_id_of(blob)
+    now = int(time.time())
+
+    def _put(url: str) -> tuple[int, Any]:
+        claim = SpaceMediaClaim(
+            space_id=space_id,
+            blob_id=blob_id,
+            size=len(blob),
+            expires_at=now + 86_400,
+            ts=int(time.time()),
+        )
+        auth = SpaceMediaUploadAuth(
+            claim=claim,
+            kind=AUTH_AUTHORITY,
+            sig=b64url_encode(
+                sign_ed25519(authority_seed, claim.authority_signing_bytes())
+            ),
+            sig_suite="ed25519",
+        )
+        req = urllib.request.Request(
+            f"{url}/gfs/spaces/{space_id}/media/{blob_id}",
+            data=blob,
+            method="PUT",
+            headers={
+                SPACE_MEDIA_AUTH_HEADER: auth.to_header(),
+                "Content-Type": "application/octet-stream",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return r.status, json.loads(r.read() or b"null")
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read().decode("utf-8", "replace")
+
+    def _get(url: str, bid: str) -> tuple[int, bytes, dict[str, str]]:
+        try:
+            with urllib.request.urlopen(
+                f"{url}/gfs/spaces/media/{bid}", timeout=15
+            ) as r:
+                return r.status, r.read(), dict(r.headers)
+        except urllib.error.HTTPError as exc:
+            return exc.code, b"", dict(exc.headers)
+
+    code, resp = _put(urls[0])
+    if code != 201:
+        raise SystemExit(f"gfs-cluster: space media upload via node 0 → {code} {resp!r}")
+    code, got, headers = _get(urls[1], blob_id)
+    if code != 200 or got != blob:
+        raise SystemExit(
+            f"gfs-cluster: space media fetch via node 1 → HTTP {code}, "
+            f"{len(got)} bytes (want the {len(blob)} uploaded via node 0) — "
+            "the nodes do not share the media dir / DB."
+        )
+    if headers.get("Cache-Control") != "public, max-age=3600, immutable":
+        raise SystemExit(
+            f"gfs-cluster: space media fetch Cache-Control {headers.get('Cache-Control')!r}"
+        )
+    code, resp = _put(urls[1])
+    if code != 200 or (resp or {}).get("status") != "already_stored":
+        raise SystemExit(
+            f"gfs-cluster: the same upload via node 1 → {code} {resp!r}; want "
+            "200 already_stored (one file, one blob, whichever node)."
+        )
+    code, _got, headers = _get(urls[1], "0" * 64)
+    if code != 404 or headers.get("Cache-Control") != "no-store":
+        raise SystemExit(
+            f"gfs-cluster: a space media miss → {code} "
+            f"{headers.get('Cache-Control')!r}; want 404 no-store"
+        )
+    print(
+        "  space media uploaded via node 0 is served byte-identical by node 1 "
+        "(immutable, 1 h); a re-upload via node 1 coalesces; a miss is no-store ✓"
+    )
+
+
 def cmd_gfs_cluster() -> None:
     """Prove a MULTI-PROCESS GFS cluster serves writes without deadlocking.
 
@@ -2382,6 +2504,9 @@ def cmd_gfs_cluster() -> None:
         # 3g. A public-highlight link through a round-robin balancer: every
         # request of a session reaches the node that holds it.
         _gfs_cluster_highlight_link(urls, node_ids)
+        # 3h. The space media cache: an upload via one node is served by
+        # another (shared data dir + DB), and a re-upload coalesces.
+        _gfs_cluster_space_media(urls, clients[0])
     except BaseException:
         _gfs_cluster_down(preserve_logs=True)
         raise
