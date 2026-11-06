@@ -145,8 +145,8 @@ from ...utils.datetime import parse_iso8601_optional
 from ...utils.timezones import coerce_tz
 from ..gallery_service import ALBUMS_PER_SPACE, DESCRIPTION_MAX, NAME_MAX
 from ..inbound_media_store import (
-    local_media_ref,
     local_media_refs,
+    space_media_ref,
     verbatim_local_media_ref,
 )
 from ..page_conflict_service import (
@@ -1447,6 +1447,8 @@ class SpaceContentInboundHandlers:
         # Rendered as ``<img src>`` for every member: only a local media
         # reference — a third-party URL would leak their IPs.
         cover = verbatim_local_media_ref(p.get("cover_url"))
+        if cover is not None and space_media_ref(cover) is None:
+            cover = None  # a reserved (DM / moment) name is never a cover
         location = p.get("location")
         ev = CalendarEvent(
             id=event_id,
@@ -2265,8 +2267,8 @@ class SpaceContentInboundHandlers:
             album_id=album_id,
             uploaded_by=uploaded_by,
             item_type=item_type,
-            url=local_media_ref(p.get("url")) or "",
-            thumbnail_url=local_media_ref(p.get("thumbnail_url")) or "",
+            url=space_media_ref(p.get("url")) or "",
+            thumbnail_url=space_media_ref(p.get("thumbnail_url")) or "",
             width=int(p.get("width") or 0),
             height=int(p.get("height") or 0),
             duration_s=p.get("duration_s"),

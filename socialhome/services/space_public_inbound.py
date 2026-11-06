@@ -122,8 +122,13 @@ from ..infrastructure.event_bus import EventBus
 from ..utils.datetime import parse_iso8601_lenient
 from ..writer_cert import verify_writer_users
 from .gfs_member_publish_service import parse_item_plaintext
-from .inbound_media_store import local_media_ref, local_media_refs
-from .link_preview_service import wire_link_preview
+from .inbound_media_store import (
+    space_media_ref,
+    space_media_refs,
+)
+from .link_preview_service import (
+    space_wire_link_preview,
+)
 from .space_crypto_service import MissingEpochKey
 from .space_item_author import (
     UnsupportedItemAuthorSigSuite,
@@ -1167,7 +1172,7 @@ class SpacePublicInbound:
         # The card counts only under the author's own signature over it; a
         # relayer can strip it but not forge or alter it.
         try:
-            link_preview = wire_link_preview(verified_link_preview(inner))
+            link_preview = space_wire_link_preview(verified_link_preview(inner))
         except UnsupportedLinkPreviewSigSuite as exc:
             log.warning("relayed post %s: link preview dropped (%s)", post_id, exc)
             link_preview = None
@@ -1177,8 +1182,8 @@ class SpacePublicInbound:
             type=post_type,
             content=inner.get("content"),
             link_preview=link_preview,
-            media_url=local_media_ref(inner.get("media_url")),
-            image_urls=local_media_refs(
+            media_url=space_media_ref(inner.get("media_url")),
+            image_urls=space_media_refs(
                 inner.get("image_urls"), limit=FEED_POST_MAX_IMAGES
             ),
             location=location,

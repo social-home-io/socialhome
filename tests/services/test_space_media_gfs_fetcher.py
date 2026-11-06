@@ -440,3 +440,39 @@ async def test_a_channel_blob_without_a_channel_here_is_refused(tmp_path, caplog
     with caplog.at_level(logging.WARNING):
         assert await f.ensure_local("a.webp") is False
     assert gfs.fetches == []
+
+
+async def test_a_descriptor_never_names_a_reserved_file(tmp_path):
+    """#1309 review B: a ``gm-`` (moment media) or ``dm-`` (chat) name is
+    another receiving path's; a descriptor naming one is dropped even when
+    the item lists it, so a GFS blob can never land there."""
+    blob = _blob("gm-x.webp", b"x")
+    f = _fetcher(tmp_path, _Gfs({_addr(blob): blob}))
+    refs = await f.receive(
+        SPACE, _wire("gm-x.webp", blob), ["api/media/gm-x.webp"], prefetch=False
+    )
+    assert refs == []
+    assert await f._refs.get("gm-x.webp") is None
+
+
+async def test_a_stored_row_for_a_reserved_name_is_never_fetched(tmp_path):
+    blob = _blob("dm-x.webp", b"x")
+    gfs = _Gfs({_addr(blob): blob})
+    f = _fetcher(tmp_path, gfs)
+    await f._refs.save_many(
+        [
+            SpaceMediaRef(
+                filename="dm-x.webp",
+                space_id=SPACE,
+                blob_id=_addr(blob),
+                suite=SUITE,
+                epoch=2,
+                size=len(blob),
+                scope="space",
+                addr_suite="sm1",
+            )
+        ]
+    )
+    assert await f.ensure_local("dm-x.webp") is False
+    assert gfs.fetches == []
+    assert not (tmp_path / "dm-x.webp").exists()

@@ -265,6 +265,26 @@ def local_media_refs(values: object, *, limit: int) -> tuple[str, ...]:
     return tuple(out[:limit])
 
 
+def space_media_ref(value: object) -> str | None:
+    """:func:`local_media_ref` for a SPACE item another household sent (a
+    post's media, a calendar cover, a gallery file): also ``None`` for a
+    name another receiving path owns (:func:`is_reserved_media_name` —
+    DM and moment media). Such a reference would show, and through the GFS
+    media cache re-publish, a file that belongs to someone else."""
+    ref = local_media_ref(value)
+    if ref is None or is_reserved_media_name(ref[len(MEDIA_REF_PREFIX) :]):
+        return None
+    return ref
+
+
+def space_media_refs(values: object, *, limit: int) -> tuple[str, ...]:
+    """:func:`space_media_ref` over a peer-supplied list, at most ``limit``."""
+    if not isinstance(values, list):
+        return ()
+    out = [ref for v in values if (ref := space_media_ref(v)) is not None]
+    return tuple(out[:limit])
+
+
 def media_basename(url: str | None) -> str:
     """File name a media URL points at (``api/media/x.webp?sig=…`` → ``x.webp``).
 

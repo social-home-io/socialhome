@@ -5462,3 +5462,34 @@ async def test_a_picture_plus_link_card_post_keeps_its_media_refs(db, bus, inbou
     assert sink.received == [
         ("sp-lc", refs, ["api/media/a.webp", "api/media/card.webp"])
     ]
+
+
+async def test_a_space_post_never_names_a_reserved_media_file(db, bus, inbound):
+    """#1309 review B: a space post from another household naming a ``gm-``
+    (moment media) or ``dm-`` (chat) file would show — and through the GFS
+    cache re-publish — a file another path owns. Such references are
+    dropped on receipt."""
+    await db.enqueue(
+        """INSERT INTO spaces(id, name, owner_instance_id, owner_username,
+                              identity_public_key, space_type, join_mode)
+           VALUES(?,?,?,?,?,?,?)""",
+        ("sp-rs", "S", "peer-a", "owner", "aa" * 32, "global", "open"),
+    )
+    await _seat(db, "sp-rs", "user-remote")
+    await inbound._on_space_post_created(
+        _event(
+            FederationEventType.SPACE_POST_CREATED,
+            {
+                "id": "post-rs",
+                "author": "user-remote",
+                "type": "image",
+                "content": "pic",
+                "media_url": "api/media/dm-chat.webp",
+                "image_urls": ["api/media/gm-moment.webp", "api/media/a.webp"],
+            },
+            space_id="sp-rs",
+        )
+    )
+    _sid, post = await SqliteSpacePostRepo(db).get("post-rs")
+    assert post.media_url is None
+    assert post.image_urls == ("api/media/a.webp",)

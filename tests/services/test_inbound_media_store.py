@@ -506,3 +506,22 @@ async def test_drop_parts_reports_whether_the_folder_went(tmp_path):
     (clean / "000000").write_bytes(b"A")
     assert await store.drop_parts(clean) is True
     assert not clean.exists()
+
+
+# ── Space items never name another receiving path's file (#1309 review B) ─
+
+
+def test_space_media_ref_drops_reserved_names():
+    """A space item (post, cover, gallery item) received from another
+    household never names a file the DM or moment-media paths own: such a
+    reference would show — and, through the GFS cache, re-publish — a file
+    that belongs to someone else."""
+    assert store.space_media_ref("api/media/a.webp") == "api/media/a.webp"
+    assert store.space_media_ref("/api/media/a.webp?sig=x") == "api/media/a.webp"
+    assert store.space_media_ref("api/media/gm-abc.webp") is None
+    assert store.space_media_ref("api/media/dm-abc.webp") is None
+    assert store.space_media_ref("https://evil.example/a.webp") is None
+    assert store.space_media_refs(
+        ["api/media/a.webp", "api/media/gm-x.webp", "api/media/b.webp"], limit=10
+    ) == ("api/media/a.webp", "api/media/b.webp")
+    assert store.space_media_refs("nope", limit=10) == ()

@@ -105,9 +105,13 @@ from ....media.profile_picture import (
 from ....services.inbound_media_store import (
     local_media_ref,
     local_media_refs,
+    space_media_ref,
+    space_media_refs,
     verbatim_local_media_ref,
 )
-from ....services.link_preview_service import wire_link_preview
+from ....services.link_preview_service import (
+    space_wire_link_preview,
+)
 from ....services.page_conflict_service import PageMode, canonical_from_wire
 from ....services.space_service import (
     apply_inviter_reproof,
@@ -3292,8 +3296,8 @@ class SpaceSyncReceiver:
             uploaded_by=str(record.get("uploaded_by") or record.get("uploader") or ""),
             item_type=str(record.get("item_type") or "photo"),
             # Only the canonical local ``api/media/<name>`` shape is stored.
-            url=local_media_ref(record.get("url")) or "",
-            thumbnail_url=local_media_ref(record.get("thumbnail_url")) or "",
+            url=space_media_ref(record.get("url")) or "",
+            thumbnail_url=space_media_ref(record.get("thumbnail_url")) or "",
             width=int(record.get("width") or 0),
             height=int(record.get("height") or 0),
             duration_s=record.get("duration_s"),
@@ -3518,7 +3522,7 @@ def _post_from_record(r: dict[str, Any]) -> Post | None:
         created_at=_parse_iso(r.get("created_at")),
         content=r.get("content"),
         # Media references only in the local-upload shape.
-        media_url=local_media_ref(r.get("media_url")),
+        media_url=space_media_ref(r.get("media_url")),
         comment_count=int(r.get("comment_count") or 0),
         pinned=bool(r.get("pinned", False)),
         deleted=bool(r.get("deleted", False)),
@@ -3530,9 +3534,9 @@ def _post_from_record(r: dict[str, Any]) -> Post | None:
         hidden_from_feed=bool(r.get("hidden_from_feed", False)),
         # The post's image gallery — the media bytes that follow are
         # matched against these names. Local-upload references, feed-capped.
-        image_urls=local_media_refs(r.get("image_urls"), limit=FEED_POST_MAX_IMAGES),
+        image_urls=space_media_refs(r.get("image_urls"), limit=FEED_POST_MAX_IMAGES),
         # The author-built link card (never re-fetched here), re-validated.
-        link_preview=wire_link_preview(r.get("link_preview")),
+        link_preview=space_wire_link_preview(r.get("link_preview")),
         # A joiner sees the reactions the provider holds (a held post keeps
         # its own — see the ``posts`` branch).
         reactions=_reactions_from_record(r.get("reactions")),
@@ -3713,7 +3717,12 @@ def _calendar_from_record(r: dict[str, Any], *, provider: str) -> CalendarEvent 
         capacity=coerce_capacity(r.get("capacity")),
         # Rendered as ``<img src>`` for every member: only a local media
         # reference — a third-party URL would leak their IPs.
-        cover_url=verbatim_local_media_ref(r.get("cover_url")),
+        cover_url=(
+            cover
+            if (cover := verbatim_local_media_ref(r.get("cover_url")))
+            and space_media_ref(cover)
+            else None
+        ),
         location=location if isinstance(location, str) and location else None,
         # IANA wall-clock anchor — validated as on the live event; an older
         # peer omits it and gets ``"UTC"``.

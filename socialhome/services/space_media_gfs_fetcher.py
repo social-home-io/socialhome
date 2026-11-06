@@ -47,7 +47,12 @@ from ..space_media_seal import (
     open_space_media,
     require_space_media_suite,
 )
-from .inbound_media_store import media_file_path, publish_once, remove_quietly
+from .inbound_media_store import (
+    is_reserved_media_name,
+    media_file_path,
+    publish_once,
+    remove_quietly,
+)
 from .space_media_gfs_uploader import media_names
 
 if TYPE_CHECKING:
@@ -141,7 +146,10 @@ class SpaceMediaGfsFetcher:
     ) -> list[SpaceMediaRef]:
         """Keep the descriptor entries of an item of *space_id* that shows
         *media_urls*; prefetch its pictures. Never raises."""
-        allowed = set(media_names(media_urls))
+        # Never a name another receiving path owns (DM / moment media).
+        allowed = {
+            name for name in media_names(media_urls) if not is_reserved_media_name(name)
+        }
         refs = parse_media_refs(raw_refs, space_id=space_id, allowed=allowed)
         if not refs:
             return []
@@ -236,6 +244,9 @@ class SpaceMediaGfsFetcher:
         """One fetch: ``stored`` (the file is here now), ``miss`` (no GFS
         holds the blob — yet) or ``refused`` (anything else: unknown
         suite, no key, wrong hash, failed decrypt — not worth retrying)."""
+        if is_reserved_media_name(filename):
+            log.warning("space media %s: a reserved name — never fetched", filename)
+            return _REFUSED
         ref = await self._refs.get(filename)
         path = media_file_path(self._dir, filename)
         if ref is None or path is None:

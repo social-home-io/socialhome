@@ -150,16 +150,19 @@ from .inbound_media_store import (
     is_reserved_media_name,
     is_safe_media_name,
     local_media_ref,
-    local_media_refs,
     media_basename,
     media_file_path,
     note_existing,
     parse_chunk_meta,
     partial_key,
+    space_media_ref,
+    space_media_refs,
     store_chunk,
     verbatim_local_media_ref,
 )
-from .link_preview_service import wire_link_preview
+from .link_preview_service import (
+    space_wire_link_preview,
+)
 from .protection_gate import ProtectionGateMixin
 from .space_authority_pin import AuthorityCertOutcome, apply_authority_cert
 from .space_crypto_service import (
@@ -5078,8 +5081,9 @@ class FederationInboundService(ProtectionGateMixin):
             type=post_type,
             content=payload.get("content"),
             # Media references only in the local-upload shape
-            # (``api/media/<name>``); anything else is dropped.
-            media_url=local_media_ref(payload.get("media_url")),
+            # (``api/media/<name>``), never a reserved (DM / moment) name;
+            # anything else is dropped.
+            media_url=space_media_ref(payload.get("media_url")),
             file_meta=None,
             location=location,
             created_at=parse_iso8601_lenient(payload.get("occurred_at")),
@@ -5090,13 +5094,13 @@ class FederationInboundService(ProtectionGateMixin):
             # Local-upload references only, capped at the feed maximum; the
             # bytes follow as ``SPACE_MEDIA_BLOB``, which is checked against
             # these names.
-            image_urls=local_media_refs(
+            image_urls=space_media_refs(
                 payload.get("image_urls"), limit=FEED_POST_MAX_IMAGES
             ),
             # The author-built link card — every field re-validated, the
             # image kept only as a local media ref (its bytes follow as
             # SPACE_MEDIA_BLOB). This household never fetches the URL.
-            link_preview=wire_link_preview(payload.get("link_preview")),
+            link_preview=space_wire_link_preview(payload.get("link_preview")),
         )
 
 
