@@ -366,11 +366,15 @@ textarea { min-height: 110px; font-family: inherit; }
   display: grid;
   /* One label width for both lists, so their values line up. */
   grid-template-columns: 11rem minmax(0, 1fr);
+  align-items: baseline;
   gap: 6px 14px;
   margin: 10px 0 0 0;
 }
 .media-cache-facts dt { color: var(--sh-text-muted); font-size: 13px; }
 .media-cache-facts dd { margin: 0; overflow-wrap: anywhere; }
+/* A phrase moves to the next line whole; it wraps inside only when it
+ * is wider than the card on its own. */
+.media-cache-phrase { display: inline-block; }
 .media-cache-off { margin: 4px 0 6px 0; }
 .media-cache p:last-child { margin-bottom: 0; }
 .media-cache code {

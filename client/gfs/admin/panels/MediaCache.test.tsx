@@ -71,6 +71,37 @@ describe('MediaCacheCard', () => {
     expect(getByRole('progressbar').getAttribute('aria-valuenow')).toBe('100')
   })
 
+  it('shows a sliver for a cache in use that rounds to 0 %, none when empty', () => {
+    const fill = (stored_bytes: number) => {
+      const { container, unmount } = render(
+        <MediaCacheCard stats={{ ...STATS, stored_bytes, max_bytes: 5 * 1024 * GIB }} />,
+      )
+      const width = (container.querySelector('.media-cache-bar span') as HTMLElement).style.width
+      const now = container.querySelector('[role="progressbar"]')?.getAttribute('aria-valuenow')
+      unmount()
+      return { width, now }
+    }
+    // 5 MiB of 5 TiB: the value stays honest (0), the fill stays visible.
+    expect(fill(5 * MIB)).toEqual({ width: '1%', now: '0' })
+    expect(fill(0)).toEqual({ width: '0%', now: '0' })
+  })
+
+  it('is a region named by its heading, on and off', () => {
+    for (const stats of [STATS, { ...STATS, enabled: false, max_bytes: 0 }]) {
+      const { getByRole, unmount } = render(<MediaCacheCard stats={stats} />)
+      expect(getByRole('region', { name: 'Media cache' })).toBeTruthy()
+      unmount()
+    }
+  })
+
+  it('keeps each refusal reason on one line', () => {
+    const { container } = render(<MediaCacheCard stats={STATS} />)
+    const parts = [...container.querySelectorAll('.media-cache-phrase')].map(
+      el => el.textContent,
+    )
+    expect(parts).toEqual(["3 over a space's upload rate", '1 too large'])
+  })
+
   it('says so clearly when the operator turned the cache off', () => {
     const { container, queryByRole } = render(
       <MediaCacheCard stats={{ ...STATS, enabled: false, max_bytes: 0 }} />,

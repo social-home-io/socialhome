@@ -45,7 +45,7 @@ const count = (n: number) => n.toLocaleString('en-US')
 export function MediaCacheCard({ stats }: { stats: SpaceMediaStats }) {
   if (!stats.enabled || stats.max_bytes <= 0) {
     return (
-      <div class="card media-cache" aria-labelledby="media-cache-title">
+      <section class="card media-cache" aria-labelledby="media-cache-title">
         <h3 id="media-cache-title">Media cache</h3>
         <p class="media-cache-off">
           <strong>Turned off.</strong> Households don't upload space pictures to this GFS.
@@ -54,15 +54,17 @@ export function MediaCacheCard({ stats }: { stats: SpaceMediaStats }) {
           To turn it on, set <code>[space_media] max_bytes</code> (or{' '}
           <code>GFS_SPACE_MEDIA_MAX_BYTES</code>) above 0.
         </p>
-      </div>
+      </section>
     )
   }
   const used = formatBytes(stats.stored_bytes)
   const max = formatBytes(stats.max_bytes)
   const usedText = `${used} of ${max} used`
   const percent = Math.min(100, Math.round((stats.stored_bytes / stats.max_bytes) * 100))
+  // A cache in use never looks empty: a sliver when it rounds to 0 %.
+  const fill = stats.stored_bytes > 0 ? Math.max(1, percent) : 0
   return (
-    <div class="card media-cache" aria-labelledby="media-cache-title">
+    <section class="card media-cache" aria-labelledby="media-cache-title">
       <h3 id="media-cache-title">Media cache</h3>
       <p class="media-cache-used">{usedText}</p>
       <div
@@ -74,7 +76,7 @@ export function MediaCacheCard({ stats }: { stats: SpaceMediaStats }) {
         aria-valuenow={percent}
         aria-valuetext={usedText}
       >
-        <span style={{ width: `${percent}%` }} />
+        <span style={{ width: `${fill}%` }} />
       </div>
       <dl class="media-cache-facts">
         <dt>Pictures and files</dt>
@@ -90,10 +92,13 @@ export function MediaCacheCard({ stats }: { stats: SpaceMediaStats }) {
         </dd>
         <dt>Refused</dt>
         <dd>
-          {count(stats.refused_quota)} over a space's upload rate ·{' '}
-          {count(stats.refused_too_large)} too large
+          <span class="media-cache-phrase">
+            {count(stats.refused_quota)} over a space's upload rate
+          </span>{' '}
+          ·{' '}
+          <span class="media-cache-phrase">{count(stats.refused_too_large)} too large</span>
         </dd>
       </dl>
-    </div>
+    </section>
   )
 }
