@@ -131,7 +131,7 @@ class GfsMediaView(GfsBaseView):
             ) from exc
         claim = auth.claim
         try:
-            await self.svc(K.gfs_space_media_auth_key).authorize_upload(
+            household = await self.svc(K.gfs_space_media_auth_key).authorize_upload(
                 auth, scope_kind=claim.scope, scope_id=claim.scope_id, blob_id=blob_id
             )
         except PermissionError as exc:
@@ -182,6 +182,7 @@ class GfsMediaView(GfsBaseView):
                 data=data,
                 expires_at=claim.expires_at,
                 reserved=reserved,
+                household=household,
             )
         except MediaRefused as exc:
             return _media_refused(exc)

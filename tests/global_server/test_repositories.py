@@ -1680,6 +1680,7 @@ def _media_blob(
     fetched=None,
     space="s1",
     kind="space",
+    household="h1",
 ):
     return GfsSpaceMedia(
         blob_id=f"{n:064x}",
@@ -1689,6 +1690,7 @@ def _media_blob(
         last_fetched_at=created if fetched is None else fetched,
         scope_kind=kind,
         scope_id=space,
+        household=household,
     )
 
 
@@ -1760,6 +1762,21 @@ async def test_space_media_a_delete_takes_only_the_scopes_blob(space_media):
         is True
     )
     assert await space_media.get_blob(bid) is None
+
+
+async def test_space_media_household_bytes_and_lru(space_media):
+    """Third review A3: fairness reads per-household bytes across scopes."""
+    await space_media.add_blob(_media_blob(1, space="a", household="h1", fetched=300))
+    await space_media.add_blob(_media_blob(2, space="b", household="h1", fetched=100))
+    await space_media.add_blob(_media_blob(3, space="c", household="h2", size=150))
+    assert await space_media.household_bytes("h1") == 200
+    assert await space_media.household_bytes("nobody") == 0
+    assert await space_media.largest_households(limit=5) == [("h1", 200), ("h2", 150)]
+    assert [m.blob_id for m in await space_media.household_lru("h1", limit=5)] == [
+        f"{2:064x}",
+        f"{1:064x}",
+    ]
+    assert (await space_media.get_blob(f"{3:064x}")).household == "h2"
 
 
 async def test_space_media_scope_lru_and_blob_ids(space_media):

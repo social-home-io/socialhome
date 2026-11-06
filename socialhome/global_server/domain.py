@@ -363,6 +363,9 @@ class GfsSpaceMedia:
     #: opaque v_51 channel).
     scope_kind: str = "space"
     scope_id: str = ""
+    #: The household the scope belongs to (a space's owning instance, a
+    #: channel's oldest seated member household): the fairness key.
+    household: str = ""
 
 
 @dataclass(slots=True, frozen=True)

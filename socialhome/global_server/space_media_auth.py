@@ -148,14 +148,15 @@ class GfsSpaceMediaAuth:
         scope_kind: str,
         scope_id: str,
         blob_id: str,
-    ) -> None:
+    ) -> str:
         """Raise :class:`PermissionError` unless *auth* lets its holder put
-        *blob_id* into the scope the path names (the signed claim must name
-        the same). Every refusal costs the verifications a success of that
-        kind makes."""
+        *blob_id* into the scope the claim names. Returns the household the
+        scope belongs to — a space's owning instance, a channel's oldest
+        seated member household — the cache's fairness key. Every refusal
+        costs the verifications a success of that kind makes."""
         with counting_ed25519_verifies() as done:
             try:
-                await self._authorize_upload(
+                return await self._authorize_upload(
                     auth, scope_kind=scope_kind, scope_id=scope_id, blob_id=blob_id
                 )
             except PermissionError:
@@ -192,7 +193,7 @@ class GfsSpaceMediaAuth:
         scope_kind: str,
         scope_id: str,
         blob_id: str,
-    ) -> None:
+    ) -> str:
         claim = auth.claim
         if (claim.scope, claim.scope_id, claim.blob_id) != (
             scope_kind,
@@ -204,23 +205,25 @@ class GfsSpaceMediaAuth:
             raise PermissionError("authorization kind not taken for this scope")
         self._require_fresh(claim.ts)
         space: GlobalSpace | None = None
+        household = ""
         if scope_kind == SCOPE_CHANNEL:
             # The scope first (its refusal is topped up by the caller): a
             # channel must be IN USE — a member household holds a seat —
             # for every kind, the channel key's included (registration is
-            # anonymous).
-            await self._channels.require_channel_in_use(scope_id)
+            # anonymous); that household is its fairness key.
+            household = await self._channels.media_household(scope_id)
         elif auth.kind != AUTH_AUTHORITY:
-            space = await self._federation.listed_space(scope_id)
+            space = _active(await self._federation.listed_space(scope_id))
+            household = space.owning_instance
         if auth.kind == AUTH_AUTHORITY:
-            await self._federation.verify_space_authority(
+            space = await self._federation.verify_space_authority(
                 scope_id,
                 event_type=AUTHORITY_EVENT_SPACE_MEDIA_PUT,
                 payload=claim.signing_body(),
                 authority_sig=auth.sig,
                 authority_sig_suite=auth.sig_suite,
             )
-            return
+            return _active(space).owning_instance
         if auth.kind == AUTH_CHANNEL:
             await self._channels.verify_channel_key(
                 scope_id,
@@ -229,7 +232,7 @@ class GfsSpaceMediaAuth:
                 signature=auth.sig,
                 suite=auth.sig_suite,
             )
-            return
+            return household
         if auth.epoch is None:  # pragma: no cover - the codec requires one
             raise PermissionError("writer upload without an epoch")
         message = claim.writer_signing_bytes(kind=auth.kind, epoch=auth.epoch)
@@ -240,13 +243,13 @@ class GfsSpaceMediaAuth:
             await self._member_publish.verify_writer_cert(
                 space, auth.writer_cert, epoch=auth.epoch, author_pk=author_pk
             )
-            return
+            return household
         if auth.kind == AUTH_CHANNEL_CERT and auth.channel_cert is not None:
             author_pk = self._cert_holder(auth, auth.channel_cert.instance_pk, message)
             await self._channels.verify_cert_holder(
                 scope_id, auth.channel_cert, epoch=auth.epoch, author_pk=author_pk
             )
-            return
+            return household
         if auth.kind == AUTH_WRITER_KEY and scope_kind == SCOPE_SPACE:
             await self._member_publish.verify_writer_key_sig(
                 scope_id,
@@ -256,7 +259,7 @@ class GfsSpaceMediaAuth:
                 suite=auth.sig_suite,
             )
             await self._member_publish.require_writer_key_epoch(scope_id, auth.epoch)
-            return
+            return household
         if auth.kind == AUTH_WRITER_KEY and scope_kind == SCOPE_CHANNEL:
             await self._channels.verify_writer_key(
                 scope_id,
@@ -265,7 +268,7 @@ class GfsSpaceMediaAuth:
                 writer_sig=auth.sig,
                 suite=auth.sig_suite,
             )
-            return
+            return household
         raise PermissionError("unknown upload authorization")  # pragma: no cover
 
     async def _authorize_delete(
@@ -331,6 +334,14 @@ class GfsSpaceMediaAuth:
     def _require_fresh(self, ts: int) -> None:
         if abs(ts - self._clock()) > SPACE_MEDIA_TS_SKEW_S:
             raise PermissionError("stale or future timestamp")
+
+
+def _active(space: GlobalSpace) -> GlobalSpace:
+    """Only an ACTIVE listed space takes media — not a pending one a
+    household published but a moderator hasn't accepted (third review A3)."""
+    if space.status != "active":
+        raise PermissionError("space is not active")
+    return space
 
 
 def _burn_verifies(n: int) -> None:

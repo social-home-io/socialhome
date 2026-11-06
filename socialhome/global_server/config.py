@@ -845,9 +845,10 @@ peers   = []
 # server can't open), so households reached only through this server see a
 # space's pictures. A cache, not storage — size it to your disk:
 # max_bytes is all space media held here (0 turns the cache off and stops
-# advertising it); when an upload would pass it, the space (or channel)
-# holding the most bytes loses its own least recently fetched blobs first —
-# never one global order, so one scope can't flush the others. Blobs expire
+# advertising it); when an upload would pass it, the household holding the
+# most bytes across all its spaces and channels loses its own least
+# recently fetched blobs first — never one global order and never per
+# scope, so one household can't flush the others with many spaces. Blobs expire
 # after ttl_seconds (600 – 604800) whatever the uploader asks. One space (or
 # a private space's opaque channel) holds at most space_max_bytes live —
 # past it, its own least recently fetched blobs are dropped for the new

@@ -268,20 +268,21 @@ class GfsChannelService:
         """:class:`PermissionError` unless *channel_id* is registered here."""
         await self._channel(channel_id)
 
-    async def require_channel_in_use(self, channel_id: str) -> None:
-        """:class:`PermissionError` unless *channel_id* is registered here AND
-        in use: at least one active member household holds a seat whose pass
-        is for an open epoch (the seats a publish fans out to — nothing new
-        is recorded). One seat is enough: the owner household never
-        subscribes to its own channel, so the typical invite-link private
-        space has exactly one (third review A4). A household seating itself
-        in channels of its own gains nothing past its share — the cache's
-        fairness is per household (:mod:`.space_media`)."""
+    async def media_household(self, channel_id: str) -> str:
+        """The household a channel's media counts as — the active member
+        household holding its oldest open-epoch seat (deterministic) — and
+        :class:`PermissionError` when the channel is unknown or nobody holds
+        such a seat (the seats a publish fans out to; nothing new is
+        recorded). One seat is enough: the owner household never subscribes
+        to its own channel (third review A4). Grouping by that household
+        makes channels of its own buy it nothing past its share (A3)."""
         ch = await self._channel(channel_id)
-        if not await self._channels.list_targets(
+        household = await self._channels.oldest_seat(
             channel_id, _open_epochs(ch, now=self._now())
-        ):
+        )
+        if household is None:
             raise PermissionError("channel not in use")
+        return household
 
     async def verify_channel_key(
         self, channel_id: str, *, prefix: bytes, body: dict, signature: str, suite: str

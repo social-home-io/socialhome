@@ -35,7 +35,7 @@ def conn(tmp_path):
 
 _BLOB = (
     "INSERT INTO gfs_space_media(blob_id, scope_kind, scope_id, size, created_at,"
-    " expires_at, last_fetched_at) VALUES(?, ?, ?, ?, 10, 20, 10)"
+    " expires_at, last_fetched_at, household) VALUES(?, ?, ?, ?, 10, 20, 10, 'h1')"
 )
 
 
@@ -88,9 +88,15 @@ def test_totals_and_scope_bytes_follow_inserts_and_deletes(conn):
     conn.execute(_BLOB, ("c" * 64, "channel", "c1", 50))
     assert totals() == (3, 450)
     assert scopes() == {("space", "s1", 400), ("channel", "c1", 50)}
+    assert conn.execute(
+        "SELECT household, bytes FROM gfs_space_media_household_bytes"
+    ).fetchall() == [("h1", 450)]
     conn.execute("DELETE FROM gfs_space_media WHERE blob_id=?", ("a" * 64,))
     conn.execute("DELETE FROM gfs_space_media WHERE blob_id=?", ("c" * 64,))
     assert totals() == (1, 300)
+    assert conn.execute(
+        "SELECT household, bytes FROM gfs_space_media_household_bytes"
+    ).fetchall() == [("h1", 300)]
     # A scope at 0 bytes leaves no row.
     assert scopes() == {("space", "s1", 300)}
 
@@ -124,6 +130,16 @@ def test_the_hot_reads_use_their_indexes(conn):
     assert "idx_gfs_space_media_scope_bytes" in _plan(
         conn,
         "SELECT scope_kind, scope_id, bytes FROM gfs_space_media_scope_bytes"
+        " ORDER BY bytes DESC LIMIT 2",
+    )
+    assert "idx_gfs_space_media_household" in _plan(
+        conn,
+        "SELECT blob_id FROM gfs_space_media WHERE household='h1'"
+        " ORDER BY last_fetched_at, created_at LIMIT 10",
+    )
+    assert "idx_gfs_space_media_household_bytes" in _plan(
+        conn,
+        "SELECT household, bytes FROM gfs_space_media_household_bytes"
         " ORDER BY bytes DESC LIMIT 2",
     )
     assert "idx_gfs_space_media_expires" in _plan(

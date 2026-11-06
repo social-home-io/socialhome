@@ -3541,6 +3541,16 @@ seat in gets the uniform `403` at the same verification cost (security
 review F1). A household that seats itself in channels of its own gains
 nothing past its share: the cache's fairness is per household (below).
 
+**Fairness is per household.** Every blob records the household its scope
+belongs to — a space's `owning_instance` (as listed here), a channel's
+active member household holding its oldest open-epoch seat (deterministic:
+`joined_at`, then the instance id). The eviction under `max_bytes` groups
+by that household, so publishing more spaces or seating itself in more
+channels buys a household nothing beyond its share: with H households
+competing for a full cache, each keeps at least ~1/H of it. Only an
+**active** listed space takes uploads — a pending space a household
+published (not yet accepted) gets the uniform `403` (third review A3).
+
 No path names a **scope** — not the fetch, not the upload, not the delete:
 neither an access log, a proxy, a CDN cache key nor a path tells which
 space or channel a blob belongs to — and a channel's blob is never marked
@@ -3565,8 +3575,8 @@ registration:
 | `channel` | `channel_cert` | Trusted channel: `epoch` + the `channel_cert` a trusted channel publish carries; `sig` by the household key it names; checked as `/gfs/channels/publish` does (`verify_cert_holder`: pinned channel key, epoch open, refused in a strict channel). |
 | `channel` | `writer_key` | Strict channel: the channel writer key pinned for `epoch` (`verify_writer_key`). Names nobody. |
 
-A `space` must be listed, not moderator-banned (the space-level ban
-applies), with a pinned authority key; a `channel` must be registered.
+A `space` must be listed and **active** (not pending, not moderator-banned),
+with a pinned authority key; a `channel` must be registered and in use.
 **Every outcome of a kind costs the same Ed25519 verifications** as a
 success of that kind (authority, channel key and writer key: 1; the two cert
 kinds: 2 — the holder's signature and the cert's; a delete: 1): a refusal at
@@ -3597,7 +3607,7 @@ pictures over old ones:
 
 | Setting | Default | Effect |
 |---|---|---|
-| `max_bytes` | 5 GiB | All blobs together. Before a blob is stored, expired blobs go, then — **fair, never one global order** — the least recently fetched (then oldest) blobs of the scope that **holds the most bytes**, until it is down to the next largest, then again — just enough to fit (security review F1: one scope flooding the cache pushes out its own blobs, never another's; per-scope bytes are a trigger-kept table); the backlog of expired blobs is the sweep's, never the upload's. `0` turns the cache off: uploads answer `503 space_media_disabled` and the capability is not advertised. |
+| `max_bytes` | 5 GiB | All blobs together. Before a blob is stored, expired blobs go, then — **fair per household, never one global order and never per scope** — the least recently fetched (then oldest) blobs of the **household holding the most bytes** across all its scopes (counting the uploader's household with the blob it stores; a tie takes the uploader's own), until it is down to the next largest, then again — just enough to fit (security review F1, third review A3; per-household bytes are a trigger-kept table); the backlog of expired blobs is the sweep's, never the upload's. `0` turns the cache off: uploads answer `503 space_media_disabled` and the capability is not advertised. |
 | `space_max_bytes` | 256 MiB | Bytes one scope (space or channel) holds. Past it, that scope's **own** least recently fetched (then oldest) blobs are evicted until the new one fits; never a refusal. |
 | `ttl_seconds` | 3 days (600 s – 7 days) | A blob's longest life; the uploader's `expires_at` is clamped to it (an expiry in the past is `422`). |
 | `space_uploads_per_hour` | 300 | Accepted uploads (new blobs) of one scope in a sliding hour — this hour's count plus the last hour's, weighted by its overlap — kept in `gfs_space_media_uploads`, apart from the blob rows, so neither eviction nor delete can reset it. Past it: `429 space_media_quota` + `Retry-After`. A retry of a blob the scope holds is not counted. |

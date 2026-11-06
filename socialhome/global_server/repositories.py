@@ -2276,6 +2276,11 @@ class AbstractGfsSpaceMediaRepo(Protocol):
     async def totals(self) -> tuple[int, int]: ...
     async def scope_bytes(self, scope_kind: str, scope_id: str) -> int: ...
     async def largest_scopes(self, *, limit: int) -> list[tuple[str, str, int]]: ...
+    async def household_bytes(self, household: str) -> int: ...
+    async def largest_households(self, *, limit: int) -> list[tuple[str, int]]: ...
+    async def household_lru(
+        self, household: str, *, limit: int
+    ) -> list[GfsSpaceMedia]: ...
     async def scope_lru(
         self, scope_kind: str, scope_id: str, *, limit: int
     ) -> list[GfsSpaceMedia]: ...
@@ -2303,7 +2308,8 @@ class AbstractGfsSpaceMediaRepo(Protocol):
 
 
 _SPACE_MEDIA_COLS = (
-    "blob_id, scope_kind, scope_id, size, created_at, expires_at, last_fetched_at"
+    "blob_id, scope_kind, scope_id, size, created_at, expires_at, last_fetched_at,"
+    " household"
 )
 
 
@@ -2322,7 +2328,7 @@ class SqliteGfsSpaceMediaRepo:
         a retry of the same scope took it first)."""
         changed = await self._db.enqueue_rowcount(
             f"INSERT OR IGNORE INTO gfs_space_media({_SPACE_MEDIA_COLS})"
-            " VALUES(?,?,?,?,?,?,?)",
+            " VALUES(?,?,?,?,?,?,?,?)",
             (
                 media.blob_id,
                 media.scope_kind,
@@ -2331,6 +2337,7 @@ class SqliteGfsSpaceMediaRepo:
                 media.created_at,
                 media.expires_at,
                 media.last_fetched_at,
+                media.household,
             ),
         )
         return changed > 0
@@ -2431,6 +2438,33 @@ class SqliteGfsSpaceMediaRepo:
         return [
             (str(r["scope_kind"]), str(r["scope_id"]), int(r["bytes"])) for r in rows
         ]
+
+    async def household_bytes(self, household: str) -> int:
+        """Bytes the household holds across its scopes (trigger-kept)."""
+        row = await self._db.fetchone(
+            "SELECT bytes FROM gfs_space_media_household_bytes WHERE household=?",
+            (household,),
+        )
+        return int(row["bytes"]) if row is not None else 0
+
+    async def largest_households(self, *, limit: int) -> list[tuple[str, int]]:
+        """``(household, bytes)`` of the households holding the most."""
+        rows = await self._db.fetchall(
+            "SELECT household, bytes FROM gfs_space_media_household_bytes"
+            " ORDER BY bytes DESC LIMIT ?",
+            (limit,),
+        )
+        return [(str(r["household"]), int(r["bytes"])) for r in rows]
+
+    async def household_lru(self, household: str, *, limit: int) -> list[GfsSpaceMedia]:
+        """One household's blobs (all its scopes), least recently fetched
+        first, then oldest."""
+        rows = await self._db.fetchall(
+            f"SELECT {_SPACE_MEDIA_COLS} FROM gfs_space_media WHERE household=?"
+            " ORDER BY last_fetched_at, created_at LIMIT ?",
+            (household, limit),
+        )
+        return [_space_media(r) for r in rows]
 
     async def scope_lru(
         self, scope_kind: str, scope_id: str, *, limit: int
@@ -2584,6 +2618,7 @@ def _space_media(row) -> GfsSpaceMedia:
         last_fetched_at=int(row["last_fetched_at"]),
         scope_kind=str(row["scope_kind"]),
         scope_id=str(row["scope_id"]),
+        household=str(row["household"]),
     )
 
 
@@ -3498,6 +3533,8 @@ class AbstractGfsChannelRepo(Protocol):
 
     async def list_targets(self, channel_id: str, epochs: set[int]) -> list[str]: ...
 
+    async def oldest_seat(self, channel_id: str, epochs: set[int]) -> str | None: ...
+
     async def list_recently_seen(
         self, channel_id: str, epochs: set[int], *, within_s: int
     ) -> set[str]: ...
@@ -3670,6 +3707,22 @@ class SqliteGfsChannelRepo:
             (channel_id, *sorted(epochs)),
         )
         return [str(_as_dict(r)["instance_id"]) for r in rows]
+
+    async def oldest_seat(self, channel_id: str, epochs: set[int]) -> str | None:
+        """The active household holding the channel's oldest seat whose pass
+        epoch is in ``epochs`` (``joined_at``, then the instance id —
+        deterministic), or ``None`` when nobody holds one."""
+        if not epochs:
+            return None
+        marks = ",".join("?" for _ in epochs)
+        row = await self._db.fetchone(
+            "SELECT cs.instance_id FROM gfs_channel_subscribers cs"
+            " JOIN client_instances ci USING (instance_id)"
+            f" WHERE cs.channel_id=? AND ci.status='active' AND cs.pass_epoch IN ({marks})"
+            " ORDER BY cs.joined_at, cs.instance_id LIMIT 1",
+            (channel_id, *sorted(epochs)),
+        )
+        return str(_as_dict(row)["instance_id"]) if row is not None else None
 
     async def list_recently_seen(
         self, channel_id: str, epochs: set[int], *, within_s: int

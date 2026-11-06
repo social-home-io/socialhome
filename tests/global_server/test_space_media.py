@@ -891,3 +891,33 @@ async def test_a_ban_hides_and_drops_the_spaces_own_blobs(make, repo, gfs_db, tm
     assert await store.withdraw_scope("space", "bad") == 2
     assert await repo.totals() == (0, 0)
     assert list((tmp_dir / "spaces").iterdir()) == []
+
+
+# ── Third review A3: fairness per household ──────────────────────────────
+
+
+async def test_eviction_is_fair_per_household_not_per_scope(make, repo):
+    """Many scopes of one household are ONE share: the household holding
+    the most (counting the blob being stored) loses its own first."""
+    store = make(max_bytes=6 * SMALL)
+
+    async def up(data, space, household, now):
+        return await store.put(
+            scope_kind="space",
+            scope_id=space,
+            blob_id=_addr(data, space),
+            data=data,
+            expires_at=now + 86_400,
+            now=now,
+            household=household,
+        )
+
+    victim = [_blob() for _ in range(4)]
+    for i, v in enumerate(victim):
+        await up(v, "real", "home", NOW + i)
+    for i in range(12):
+        await up(_blob(), f"evil-{i % 6}", "evil", NOW + 10 + i)
+    kept = [await store.read(_bid(v), now=NOW + 30) for v in victim]
+    assert sum(k is not None for k in kept) == 3
+    held = await repo.get_blob(_bid(victim[-1]))
+    assert held.household == "home"

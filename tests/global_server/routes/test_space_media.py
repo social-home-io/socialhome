@@ -1017,3 +1017,87 @@ async def test_concurrent_body_reads_are_bounded_per_node(gfs, body_reads):
     assert (await slow).status == 201
     bucket = int(time.time()) // 3600
     assert await store._repo.upload_counts("space", SPACE, bucket=bucket) == (1, 0)
+
+
+# ── Third review A3: fairness and caps are per HOUSEHOLD ─────────────────
+
+
+async def _own_space(gfs, sid: str, *, household: str, status="active") -> bytes:
+    """A space *household* publishes for itself (status as given)."""
+    seed = os.urandom(32)
+    await gfs.app_[gfs_fed_repo_key].upsert_space(
+        GlobalSpace(
+            space_id=sid,
+            owning_instance=household,
+            status=status,
+            identity_public_key=ed25519_public_key(seed).hex(),
+        )
+    )
+    return seed
+
+
+async def _space_put(gfs, data: bytes, sid: str, seed: bytes) -> int:
+    claim = _claim(data, space=sid)
+    r = await gfs.put(
+        _put_url(data, sid), data=data, headers=_authority_header(claim, seed)
+    )
+    return r.status
+
+
+async def test_a_pending_space_gets_no_media(gfs):
+    """Only an ACTIVE listed space takes uploads — a pending one (published,
+    not yet accepted) is the uniform 403."""
+    await _active(gfs, "evil")
+    seed = await _own_space(gfs, "sp-pending", household="evil", status="pending")
+    assert await _space_put(gfs, os.urandom(SMALL), "sp-pending", seed) == 403
+
+
+@pytest.mark.parametrize(
+    "gfs",
+    [{"space_media_max_bytes": 6 * SMALL, "space_media_space_max_bytes": 64 * SMALL}],
+    indirect=True,
+)
+async def test_six_self_published_spaces_buy_one_household_share(gfs):
+    """A3 probe: a household publishes 6 spaces of its own and uploads to
+    each. Fairness groups all of them behind that household, so the real
+    space (another household) keeps its share — half the cache — whatever
+    the attacker does."""
+    await _active(gfs, "evil")
+    victim = [os.urandom(SMALL) for _ in range(4)]
+    for v in victim:
+        assert await _space_put(gfs, v, SPACE, SEED) == 201
+    victim_urls = [f"/gfs/media/{_bid(v)}" for v in victim]
+    for i in range(6):
+        sid = f"sp-evil-{i}"
+        seed = await _own_space(gfs, sid, household="evil")
+        for _ in range(2):
+            assert await _space_put(gfs, os.urandom(SMALL), sid, seed) == 201
+    alive = [(await gfs.get(u)).status for u in victim_urls]
+    assert alive.count(200) >= 3, alive
+
+
+@pytest.mark.parametrize(
+    "gfs",
+    [{"space_media_max_bytes": 6 * SMALL, "space_media_space_max_bytes": 64 * SMALL}],
+    indirect=True,
+)
+async def test_six_self_seated_channels_buy_one_household_share(gfs):
+    """The same with channels: one household seats itself in 6 channels of
+    its own — they all count as that household."""
+    await _active(gfs, "evil")
+    victim = [os.urandom(SMALL) for _ in range(4)]
+    for v in victim:
+        assert await _space_put(gfs, v, SPACE, SEED) == 201
+    victim_urls = [f"/gfs/media/{_bid(v)}" for v in victim]
+    now = int(time.time())
+    for i in range(6):
+        cid, seed = await _seated_channel(gfs, ["evil"], joined=now + i)
+        for _ in range(2):
+            junk = os.urandom(SMALL)
+            claim = _claim(junk, space=cid, scope=SCOPE_CHANNEL)
+            r = await gfs.put(
+                _ch_url(junk, cid), data=junk, headers=_channel_header(claim, seed=seed)
+            )
+            assert r.status == 201
+    alive = [(await gfs.get(u)).status for u in victim_urls]
+    assert alive.count(200) >= 3, alive
