@@ -6134,9 +6134,10 @@ def _picture_via_gfs_media_cache(
         raise SystemExit(f"{step}: {reader} holds no space_media_refs row for {filename}")
     blob_id, suite, _epoch, blob_size = refs[0]
     held = _gfs_rows(
-        "SELECT scope_id, size FROM gfs_space_media"
-        " WHERE blob_id = ? AND scope_kind = 'space'",
-        (blob_id,),
+        "SELECT c.scope_id, m.size FROM gfs_space_media m"
+        " JOIN gfs_space_media_claims c ON c.blob_id = m.blob_id"
+        " WHERE m.blob_id = ? AND c.scope_kind = 'space' AND c.scope_id = ?",
+        (blob_id, space_id),
     )
     if not held or held[0][0] != space_id:
         raise SystemExit(
