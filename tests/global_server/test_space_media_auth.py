@@ -14,6 +14,7 @@ import os
 import time
 
 import pytest
+from aiohttp import web
 
 from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
@@ -53,9 +54,11 @@ from socialhome.global_server.repositories import (
     SqliteGfsSpaceEpochRepo,
 )
 from socialhome.global_server.space_media_auth import (
+    SPACE_MEDIA_MAX_PER_MINUTE_PER_IP,
     SPACE_MEDIA_TS_SKEW_S,
     GfsSpaceMediaAuth,
-    is_space_media_write_path,
+    build_space_media_rate_limit,
+    is_space_media_write,
 )
 from socialhome.writer_cert import sign_writer_cert
 from socialhome.writer_key import derive_writer_seed, sign_with_writer_key
@@ -517,14 +520,53 @@ async def test_delete_refusals(env, case):
         await auth.authorize_delete(scope, scope_id, BID, ts=ts, **sig)
 
 
-def test_only_the_write_paths_are_shed_per_ip():
-    assert is_space_media_write_path(f"/gfs/spaces/s/media/{'a' * 64}")
-    assert is_space_media_write_path(f"/gfs/channels/{CHANNEL}/media/{'a' * 64}")
-    assert is_space_media_write_path(f"/gfs/spaces/s/media/{'a' * 64}/delete")
-    assert not is_space_media_write_path(f"/gfs/media/{'a' * 64}")
-    assert not is_space_media_write_path("/gfs/spaces/s/epoch")
-    assert not is_space_media_write_path("/gfs/channels/publish")
-    assert not is_space_media_write_path(f"/gfs/spaces/s/media/{'a' * 64}/other")
+def test_only_the_routed_writes_are_shed_per_ip():
+    assert is_space_media_write("PUT", "/gfs/media/{blob_id}")
+    assert is_space_media_write("POST", "/gfs/media/{blob_id}/delete")
+    assert not is_space_media_write("GET", "/gfs/media/{blob_id}")
+    assert not is_space_media_write("POST", "/gfs/media/{blob_id}")
+    assert not is_space_media_write("PUT", "/gfs/spaces/{space_id}/epoch")
+    assert not is_space_media_write("PUT", None)
+
+
+async def test_the_write_limiter_takes_a_node_share():
+    """Cluster-wide: on 2 live nodes each allows half the per-IP budget."""
+    limiter = build_space_media_rate_limit(_FixedIp(), nodes=lambda: 2)
+    allowed = 0
+    for _ in range(SPACE_MEDIA_MAX_PER_MINUTE_PER_IP):
+        resp = await limiter(_RoutedRequest("PUT", "/gfs/media/{blob_id}"), _ok)
+        allowed += resp.status == 200
+    assert allowed == SPACE_MEDIA_MAX_PER_MINUTE_PER_IP // 2
+
+
+class _FixedIp:
+    def bucket(self, request) -> str:
+        return "203.0.113.9"
+
+
+class _Resource:
+    def __init__(self, canonical):
+        self.canonical = canonical
+
+
+class _Route:
+    def __init__(self, canonical):
+        self.resource = _Resource(canonical) if canonical is not None else None
+
+
+class _MatchInfo:
+    def __init__(self, canonical):
+        self.route = _Route(canonical)
+
+
+class _RoutedRequest:
+    def __init__(self, method, canonical):
+        self.method = method
+        self.match_info = _MatchInfo(canonical)
+
+
+async def _ok(request):
+    return web.Response(status=200)
 
 
 def test_the_real_clock_is_the_default():

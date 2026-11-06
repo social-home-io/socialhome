@@ -48,6 +48,8 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from aiohttp import web
+
 from ..authority_sig import (
     AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
     AUTHORITY_EVENT_SPACE_MEDIA_PUT,
@@ -70,7 +72,7 @@ from ..domain.gfs_space_media import (
     require_space_media_sig_suite,
 )
 from .federation import TIMING_UNIFORM_DUMMY_KEY_HEX, TIMING_UNIFORM_DUMMY_SIG
-from .public import ClientIpResolver, build_window_limiter
+from .public import ClientIpResolver, SlidingWindowCounter, node_share
 
 if TYPE_CHECKING:
     from .channels import GfsChannelService
@@ -310,21 +312,44 @@ def _burn_verifies(n: int) -> None:
         verify_ed25519(key, _BURN_MESSAGE, TIMING_UNIFORM_DUMMY_SIG)
 
 
-def is_space_media_write_path(path: str) -> bool:
-    """``/gfs/{spaces|channels}/{id}/media/{blob}`` and its ``/delete`` — not
-    the public fetch ``/gfs/media/{blob}`` (a CDN serves most of those)."""
-    parts = path.split("/")
-    return (
-        len(parts) in (6, 7)
-        and parts[1] == "gfs"
-        and parts[2] in ("spaces", "channels")
-        and parts[4] == "media"
-        and (len(parts) == 6 or parts[6] == "delete")
-    )
+#: The routed writes, by aiohttp canonical path → method. One scope-free
+#: path: the scope rides only inside the signed claim / delete body, never
+#: in a URL an access log or a proxy keeps.
+SPACE_MEDIA_WRITE_ROUTES: dict[str, str] = {
+    "/gfs/media/{blob_id}": "PUT",
+    "/gfs/media/{blob_id}/delete": "POST",
+}
 
 
-def build_space_media_rate_limit(resolver: ClientIpResolver):
-    """Per-IP limiter for the space media upload and delete routes."""
-    return build_window_limiter(
-        resolver, SPACE_MEDIA_MAX_PER_MINUTE_PER_IP, is_space_media_write_path
-    )
+def is_space_media_write(method: str, canonical: str | None) -> bool:
+    """An upload or a delete as ROUTED — matched on the route the request
+    resolved to, never on the raw path, so no spelling of the path (an
+    encoded slash, a doubled one) slips past the limiter. Not the public
+    ``GET`` of the same path (a CDN serves most of those)."""
+    return canonical is not None and SPACE_MEDIA_WRITE_ROUTES.get(canonical) == method
+
+
+def build_space_media_rate_limit(
+    resolver: ClientIpResolver, *, nodes: Callable[[], int] | None = None
+):
+    """Per-IP limiter for the space media uploads and deletes. With *nodes*
+    (the cluster's live node count) it is cluster-wide: each node allows
+    its :func:`~.public.node_share` of the budget."""
+    counter = SlidingWindowCounter(SPACE_MEDIA_MAX_PER_MINUTE_PER_IP)
+
+    @web.middleware
+    async def _rate_limit(request: web.Request, handler):
+        route = request.match_info.route
+        resource = route.resource if route is not None else None
+        canonical = resource.canonical if resource is not None else None
+        if not is_space_media_write(request.method, canonical):
+            return await handler(request)
+        limit = SPACE_MEDIA_MAX_PER_MINUTE_PER_IP
+        share = limit if nodes is None else node_share(limit, nodes())
+        if not counter.allow(resolver.bucket(request), limit=share):
+            resp = web.json_response({"error": "rate_limited"}, status=429)
+            resp.headers["Retry-After"] = "60"
+            return resp
+        return await handler(request)
+
+    return _rate_limit

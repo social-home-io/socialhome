@@ -1,14 +1,13 @@
 """Wire shape of the GFS space media cache — upload authorization.
 
-A household uploads one encrypted space file to a GFS under one of two
-**scopes**:
+A household uploads one encrypted space file to a GFS — ``PUT
+/gfs/media/{blob_id}``, the one scope-free path — under one of two
+**scopes**, named only inside the signed claim (never in the URL):
 
-* ``space`` — ``PUT /gfs/spaces/{space_id}/media/{blob_id}``, for a space
-  listed on the GFS (public / global, or private but listed for invite
-  links);
-* ``channel`` — ``PUT /gfs/channels/{channel_id}/media/{blob_id}``, for a
-  PRIVATE space reached through its v_51 opaque channel: the GFS learns only
-  the random channel id, never the space.
+* ``space`` — a space listed on the GFS (public / global, or private but
+  listed for invite links);
+* ``channel`` — a PRIVATE space reached through its v_51 opaque channel: the
+  GFS learns only the random channel id, never the space.
 
 The raw blob is the body, so the authorization rides in ONE header,
 :data:`SPACE_MEDIA_AUTH_HEADER`: the base64url of a canonical JSON object.

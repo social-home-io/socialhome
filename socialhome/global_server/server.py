@@ -576,7 +576,7 @@ class GfsApp:
             build_envelope_rate_limit(self.client_ip),
             build_member_publish_rate_limit(self.client_ip),
             build_channel_rate_limit(self.client_ip),
-            build_space_media_rate_limit(self.client_ip),
+            build_space_media_rate_limit(self.client_ip, nodes=live_nodes),
         ]
         app = web.Application(middlewares=middlewares)
         # ``nosniff``, ``X-Frame-Options: SAMEORIGIN``, ``Referrer-Policy``

@@ -252,7 +252,7 @@ class GfsInfoView(GfsBaseView):
             PROOF_CAPABILITY: _can_prove(cfg, cluster),
         }
         # The encrypted, short-lived space media cache
-        # (``/gfs/spaces/{id}/media/{blob}``, :mod:`..space_media`), with the
+        # (``/gfs/media/{blob}``, :mod:`..space_media`), with the
         # limits a household needs: the largest blob it takes and how long it
         # keeps one. Signed: a household uploads space media only to a server
         # that proved it; an older household ignores the entry. Absent while

@@ -1,35 +1,34 @@
-"""The space media cache routes (:mod:`..space_media`).
+"""The space media cache routes (:mod:`..space_media`) — ONE scope-free
+path. The scope (a listed space, or a PRIVATE space's opaque v_51 channel —
+this server never learns that space) rides only inside what is signed: the
+upload's claim header and the delete's body. So neither an access log, a
+proxy nor a CDN cache key ever sees a space or channel id next to a blob
+(the v_51 rule: a channel id never in a URL path).
 
-Two upload scopes, one public fetch:
-
-* ``PUT /gfs/spaces/{space_id}/media/{blob_id}`` — a listed space;
-* ``PUT /gfs/channels/{channel_id}/media/{blob_id}`` — a PRIVATE space's
-  opaque v_51 channel (this server never learns the space).
-
-  The raw blob is the body; the authorization rides in the
-  ``X-SH-Space-Media-Auth`` header (:mod:`socialhome.domain.gfs_space_media`)
-  and is checked BEFORE the body is read, which is then read up to exactly
-  the signed ``size`` (413 past it). ``201 {"stored": true}``; the same
-  bytes again — a retry, or another scope's upload, which adds that scope's
-  claim — are ``200 {"stored": false, "status": "already_stored"}`` (never a
-  conflict, and never a fresher expiry for the scope that already held it).
-  ``503 space_media_disabled`` while the operator has the cache off.
+* ``PUT /gfs/media/{blob_id}`` — the raw blob is the body; the authorization
+  rides in the ``X-SH-Space-Media-Auth`` header
+  (:mod:`socialhome.domain.gfs_space_media`) and is checked BEFORE the body
+  is read; then the size must be a padded bucket and the scope's upload slot
+  is reserved — all before the body is read, up to exactly the signed
+  ``size`` (413 past it) within :data:`BODY_READ_TIMEOUT_S`. ``201
+  {"stored": true}``; the same bytes again — a retry, or another scope's
+  upload, which adds that scope's claim — are ``200 {"stored": false,
+  "status": "already_stored"}`` (never a conflict, and never a fresher
+  expiry). ``503 space_media_disabled`` while the operator has the cache off.
 * ``GET /gfs/media/{blob_id}`` — anyone fetches a blob by address:
-  ciphertext only, no credentials, readable cross-origin. The path names no
-  scope, so neither an access log nor a CDN cache key tells which space or
-  channel a reader reads (and a channel's blob is never marked "space") —
-  the address is unique on its own. ``200`` is
+  ciphertext only, no credentials, readable cross-origin. ``200`` is
   ``Cache-Control: public, max-age=3600, immutable``: short on purpose, so a
-  deleted post's picture lingers at most an hour in an edge cache (readable
-  only by holders of the space key). A miss is ``404`` with ``no-store``, so
-  a blob uploaded a moment later is not hidden behind a cached miss.
-* ``POST …/media/{blob_id}/delete`` (both scopes) — the scope's seed holder
-  withdraws its claim: ``{ts, sig, sig_suite}`` (space authority / channel
-  key); the blob goes when no other scope still claims it.
+  deleted or banned post's picture lingers at most an hour in an edge cache
+  (readable only by holders of the space key). A miss is ``404`` with
+  ``no-store``, so a blob uploaded a moment later is not hidden behind a
+  cached miss.
+* ``POST /gfs/media/{blob_id}/delete`` — the scope's seed holder withdraws
+  the blob: ``{scope, scope_id, ts, sig, sig_suite}`` (space authority /
+  channel key, over the scope, the blob and ``ts``).
 
-Every authorization failure (unknown / banned space, unknown channel, wrong
-key, stale ts, bad cert…) is ONE ``403`` body — no oracle — with the reason
-at DEBUG.
+Every authorization failure (unknown / banned space, unknown or unused
+channel, wrong key, stale ts, bad cert, a replayed delete…) is ONE ``403``
+body — no oracle — with the reason at DEBUG.
 """
 
 from __future__ import annotations
@@ -39,8 +38,6 @@ import logging
 from aiohttp import web
 
 from ...domain.gfs_space_media import (
-    SCOPE_CHANNEL,
-    SCOPE_SPACE,
     SPACE_MEDIA_AUTH_HEADER,
     InvalidSpaceMediaAuth,
     SpaceMediaUploadAuth,
@@ -84,17 +81,22 @@ def _media_refused(exc: MediaRefused) -> web.Response:
     return resp
 
 
-class _ScopedMediaView(GfsBaseView):
-    """Upload + delete for one scope; subclasses name it."""
+#: The routes (aiohttp patterns, the address constrained).
+SPACE_MEDIA_ROUTE: str = "/gfs/media/{blob_id:[0-9a-f]{64}}"
+SPACE_MEDIA_DELETE_ROUTE: str = "/gfs/media/{blob_id:[0-9a-f]{64}}/delete"
 
-    scope_kind: str = ""
-    id_param: str = ""
 
-    def _scope_id(self) -> str:
-        return self.match(self.id_param)
+class GfsMediaView(GfsBaseView):
+    """``GET`` (public, by address) and ``PUT`` (an authorized upload) of
+    ``/gfs/media/{blob_id}``."""
+
+    async def get(self) -> web.Response:
+        data = await self.svc(K.gfs_space_media_store_key).read(self.match("blob_id"))
+        if data is None:
+            return web.Response(status=404, headers=_MISS_HEADERS)
+        return web.Response(body=data, headers=_MEDIA_HEADERS)
 
     async def put(self) -> web.Response:
-        scope_id = self._scope_id()
         blob_id = self.match("blob_id")
         store = self.svc(K.gfs_space_media_store_key)
         try:
@@ -110,30 +112,26 @@ class _ScopedMediaView(GfsBaseView):
             raise web.HTTPBadRequest(
                 reason=f"Invalid {SPACE_MEDIA_AUTH_HEADER}"
             ) from exc
+        claim = auth.claim
         try:
             await self.svc(K.gfs_space_media_auth_key).authorize_upload(
-                auth, scope_kind=self.scope_kind, scope_id=scope_id, blob_id=blob_id
+                auth, scope_kind=claim.scope, scope_id=claim.scope_id, blob_id=blob_id
             )
         except PermissionError as exc:
-            log.debug(
-                "space media upload refused for %s %s: %s",
-                self.scope_kind,
-                scope_id,
-                exc,
-            )
+            log.debug("space media upload refused: %s", exc)
             return _refused()
-        size = auth.claim.size
+        size = claim.size
         try:
             store.admit_size(size)
             data = await self.bounded_raw(size)
             if len(data) != size:
                 return web.json_response({"error": "size_mismatch"}, status=422)
             stored = await store.put(
-                scope_kind=self.scope_kind,
-                scope_id=scope_id,
+                scope_kind=claim.scope,
+                scope_id=claim.scope_id,
                 blob_id=blob_id,
                 data=data,
-                expires_at=auth.claim.expires_at,
+                expires_at=claim.expires_at,
             )
         except MediaRefused as exc:
             return _media_refused(exc)
@@ -142,20 +140,20 @@ class _ScopedMediaView(GfsBaseView):
         return web.json_response({"stored": False, "status": "already_stored"})
 
 
-class _ScopedMediaDeleteView(GfsBaseView):
-    """``POST …/media/{blob_id}/delete`` — the scope's seed holder withdraws
-    a blob. ``{"deleted": bool}``."""
-
-    scope_kind: str = ""
-    id_param: str = ""
+class GfsMediaDeleteView(GfsBaseView):
+    """``POST /gfs/media/{blob_id}/delete`` — the scope's seed holder
+    withdraws a blob; the scope only in the signed body.
+    ``{"deleted": bool}``."""
 
     async def post(self) -> web.Response:
-        scope_id = self.match(self.id_param)
         blob_id = self.match("blob_id")
         body = await self.bounded_json(_MAX_DELETE_BYTES)
+        scope_kind, scope_id = body.get("scope"), body.get("scope_id")
         try:
+            if not isinstance(scope_kind, str) or not isinstance(scope_id, str):
+                raise PermissionError("delete names no scope")
             await self.svc(K.gfs_space_media_auth_key).authorize_delete(
-                self.scope_kind,
+                scope_kind,
                 scope_id,
                 blob_id,
                 ts=body.get("ts"),
@@ -163,52 +161,9 @@ class _ScopedMediaDeleteView(GfsBaseView):
                 sig_suite=body.get("sig_suite"),
             )
         except PermissionError as exc:
-            log.debug(
-                "space media delete refused for %s %s: %s",
-                self.scope_kind,
-                scope_id,
-                exc,
-            )
+            log.debug("space media delete refused: %s", exc)
             return _refused()
         deleted = await self.svc(K.gfs_space_media_store_key).delete(
-            blob_id, scope_kind=self.scope_kind, scope_id=scope_id
+            blob_id, scope_kind=scope_kind, scope_id=scope_id
         )
         return web.json_response({"deleted": deleted})
-
-
-class GfsSpaceMediaUploadView(_ScopedMediaView):
-    """``PUT /gfs/spaces/{space_id}/media/{blob_id}``."""
-
-    scope_kind = SCOPE_SPACE
-    id_param = "space_id"
-
-
-class GfsChannelMediaUploadView(_ScopedMediaView):
-    """``PUT /gfs/channels/{channel_id}/media/{blob_id}``."""
-
-    scope_kind = SCOPE_CHANNEL
-    id_param = "channel_id"
-
-
-class GfsSpaceMediaDeleteView(_ScopedMediaDeleteView):
-    """``POST /gfs/spaces/{space_id}/media/{blob_id}/delete``."""
-
-    scope_kind = SCOPE_SPACE
-    id_param = "space_id"
-
-
-class GfsChannelMediaDeleteView(_ScopedMediaDeleteView):
-    """``POST /gfs/channels/{channel_id}/media/{blob_id}/delete``."""
-
-    scope_kind = SCOPE_CHANNEL
-    id_param = "channel_id"
-
-
-class GfsMediaView(GfsBaseView):
-    """``GET /gfs/media/{blob_id}`` — public, by address, any scope."""
-
-    async def get(self) -> web.Response:
-        data = await self.svc(K.gfs_space_media_store_key).read(self.match("blob_id"))
-        if data is None:
-            return web.Response(status=404, headers=_MISS_HEADERS)
-        return web.Response(body=data, headers=_MEDIA_HEADERS)

@@ -1,9 +1,10 @@
 """The space media cache over HTTP — real GFS app, real SQLite, real client.
 
-``PUT /gfs/spaces/{space_id}/media/{blob_id}`` and
-``PUT /gfs/channels/{channel_id}/media/{blob_id}`` (header-authorized, identity
-free), ``GET /gfs/media/{blob_id}`` (public, scope-free, CDN-cacheable for an
-hour) and ``POST …/media/{blob_id}/delete`` (the scope's seed holder).
+One scope-free path: ``PUT /gfs/media/{blob_id}`` (header-authorized,
+identity free — the scope only inside the signed claim), ``GET
+/gfs/media/{blob_id}`` (public, CDN-cacheable for an hour) and ``POST
+/gfs/media/{blob_id}/delete`` (the scope's seed holder; the scope only inside
+the signed body).
 """
 
 from __future__ import annotations
@@ -45,7 +46,7 @@ from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.server import create_gfs_app
 from socialhome.global_server.space_media_auth import (
     SPACE_MEDIA_MAX_PER_MINUTE_PER_IP,
-    is_space_media_write_path,
+    is_space_media_write,
 )
 from socialhome.moment_public_media import MAX_BLOB_BYTES, PAD_BUCKETS, blob_id_of
 from socialhome.writer_cert import sign_writer_cert
@@ -151,12 +152,12 @@ def _writer_header(claim: SpaceMediaClaim, *, epoch: int = 3) -> dict:
     return {SPACE_MEDIA_AUTH_HEADER: auth.to_header()}
 
 
-def _put_url(data: bytes, space: str = SPACE) -> str:
-    return f"/gfs/spaces/{space}/media/{blob_id_of(data)}"
+def _put_url(data: bytes) -> str:
+    """Every write names only the blob — never a space or a channel."""
+    return f"/gfs/media/{blob_id_of(data)}"
 
 
-def _ch_url(data: bytes, channel: str = CHANNEL) -> str:
-    return f"/gfs/channels/{channel}/media/{blob_id_of(data)}"
+_ch_url = _put_url
 
 
 def _get_url(data: bytes) -> str:
@@ -254,23 +255,19 @@ async def test_a_non_address_is_not_routed_to_the_cache(gfs):
 )
 async def test_every_auth_failure_is_the_same_403(gfs, case):
     data = os.urandom(SMALL)
-    space = SPACE
     if case == "wrong_key":
         headers = _authority_header(_claim(data), seed=os.urandom(32))
     elif case == "unknown_space":
-        space = "sp-nope"
-        headers = _authority_header(_claim(data, space=space))
+        headers = _authority_header(_claim(data, space="sp-nope"))
     elif case == "banned":
-        space = "sp-banned"
-        headers = _authority_header(_claim(data, space=space))
+        headers = _authority_header(_claim(data, space="sp-banned"))
     elif case == "stale_ts":
         headers = _authority_header(_claim(data, ts=int(time.time()) - 301))
     elif case == "future_ts":
         headers = _authority_header(_claim(data, ts=int(time.time()) + 301))
-    else:  # signed for another space than the path names
-        headers = _authority_header(_claim(data))
-        space = "sp-banned"
-    r = await gfs.put(_put_url(data, space), data=data, headers=headers)
+    else:  # signed for another blob than the path names
+        headers = _authority_header(_claim(os.urandom(SMALL)))
+    r = await gfs.put(_put_url(data), data=data, headers=headers)
     assert r.status == 403
     assert await r.json() == _REFUSED
     assert (await gfs.get(_get_url(data))).status == 404
@@ -348,6 +345,8 @@ def _delete_body(data: bytes, *, seed: bytes = SEED, ts: int | None = None) -> d
         space_seed=seed,
     )
     return {
+        "scope": SCOPE_SPACE,
+        "scope_id": SPACE,
         "ts": ts,
         "sig": sig["authority_sig"],
         "sig_suite": sig["authority_sig_suite"],
@@ -358,7 +357,13 @@ def _channel_delete_body(data: bytes, *, seed: bytes = CHANNEL_SEED) -> dict:
     ts = int(time.time())
     body = media_delete_payload(SCOPE_CHANNEL, CHANNEL, blob_id_of(data), ts)
     sig = sign_ed25519(seed, signing_bytes(CHANNEL_MEDIA_DELETE_PREFIX, body))
-    return {"ts": ts, "sig": b64url_encode(sig), "sig_suite": "ed25519"}
+    return {
+        "scope": SCOPE_CHANNEL,
+        "scope_id": CHANNEL,
+        "ts": ts,
+        "sig": b64url_encode(sig),
+        "sig_suite": "ed25519",
+    }
 
 
 async def test_the_space_authority_deletes_a_blob(gfs):
@@ -408,10 +413,29 @@ async def test_a_turned_off_cache_is_not_advertised(gfs):
     assert "space_media" not in body["capabilities"]
 
 
-def test_the_write_paths_are_shed_per_ip():
+async def test_the_writes_are_shed_per_ip_by_route_not_by_raw_path(gfs):
+    """Security review F6: the limiter matches the routed write (PUT and
+    the delete), so no spelling of the path slips past it; the public GET
+    of the same path is not limited (a CDN serves most of those)."""
     assert SPACE_MEDIA_MAX_PER_MINUTE_PER_IP >= 60
-    assert is_space_media_write_path(f"/gfs/channels/{CHANNEL}/media/{'a' * 64}")
-    assert not is_space_media_write_path(f"/gfs/media/{'a' * 64}")
+    data = os.urandom(SMALL)
+    statuses: dict[int, int] = {}
+    for _ in range(SPACE_MEDIA_MAX_PER_MINUTE_PER_IP + 5):
+        r = await gfs.put(
+            _put_url(data), data=data, headers={SPACE_MEDIA_AUTH_HEADER: "x"}
+        )
+        statuses[r.status] = statuses.get(r.status, 0) + 1
+    assert statuses.get(429, 0) == 5
+    assert (await gfs.post(_put_url(data) + "/delete", json={})).status == 429
+    assert (await gfs.get(_get_url(data))).status == 404
+
+
+def test_the_write_limiter_is_cluster_wide():
+    """Each node allows its share of the per-IP budget over the live nodes."""
+    assert is_space_media_write("PUT", "/gfs/media/{blob_id}")
+    assert is_space_media_write("POST", "/gfs/media/{blob_id}/delete")
+    assert not is_space_media_write("GET", "/gfs/media/{blob_id}")
+    assert not is_space_media_write("PUT", "/gfs/moments/media/{blob_id}")
 
 
 async def test_the_store_is_wired(gfs):
@@ -446,34 +470,57 @@ async def test_a_channel_cert_holder_uploads(gfs):
     assert r.status == 201
 
 
-@pytest.mark.parametrize("case", ["wrong_key", "unknown_channel", "space_kind", "path"])
+@pytest.mark.parametrize("case", ["wrong_key", "unknown_channel"])
 async def test_every_channel_auth_failure_is_the_same_403(gfs, case):
     data = os.urandom(SMALL)
     url = _ch_url(data)
     if case == "wrong_key":
         headers = _channel_header(_ch_claim(data), seed=os.urandom(32))
-    elif case == "unknown_channel":
-        url = _ch_url(data, "1e" * 16)
+    else:
         headers = _channel_header(_claim(data, space="1e" * 16, scope=SCOPE_CHANNEL))
-    elif case == "space_kind":
-        # A space-scope authorization sent to a channel path.
-        headers = _authority_header(_claim(data))
-    else:  # signed for another channel than the path names
-        url = _ch_url(data, "1e" * 16)
-        headers = _channel_header(_ch_claim(data))
     r = await gfs.put(url, data=data, headers=headers)
     assert r.status == 403
     assert await r.json() == _REFUSED
 
 
-async def test_a_channel_id_that_is_not_one_is_not_routed(gfs):
+async def test_the_scoped_write_paths_are_gone(gfs):
+    """Security review F3: a channel id never rides in a URL path (access
+    logs, proxies) — the old scoped upload / delete routes do not exist."""
     data = os.urandom(SMALL)
-    r = await gfs.put(
-        f"/gfs/channels/not-a-channel/media/{blob_id_of(data)}",
-        data=data,
-        headers=_channel_header(_ch_claim(data)),
+    bid = blob_id_of(data)
+    for url, headers in (
+        (f"/gfs/spaces/{SPACE}/media/{bid}", _authority_header(_claim(data))),
+        (f"/gfs/channels/{CHANNEL}/media/{bid}", _channel_header(_ch_claim(data))),
+    ):
+        r = await gfs.put(url, data=data, headers=headers)
+        assert r.status in (404, 405), url
+        r = await gfs.post(url + "/delete", json={})
+        assert r.status in (404, 405), url
+    assert (await gfs.get(_get_url(data))).status == 404
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {},
+        {"scope": SCOPE_SPACE, "scope_id": 5},
+        {"scope": "room", "scope_id": SPACE},
+    ],
+)
+async def test_a_delete_names_its_scope_in_the_signed_body(gfs, body):
+    """The scope rides in the body the signature covers; without a usable
+    one the delete is the uniform 403."""
+    data = os.urandom(SMALL)
+    await gfs.put(_put_url(data), data=data, headers=_authority_header(_claim(data)))
+    signed = _delete_body(data)
+    r = await gfs.post(
+        _put_url(data) + "/delete",
+        json={**signed, **body}
+        if body
+        else {k: v for k, v in signed.items() if k not in ("scope", "scope_id")},
     )
-    assert r.status in (404, 405)
+    assert r.status == 403
+    assert (await gfs.get(_get_url(data))).status == 200
 
 
 @pytest.mark.parametrize("gfs", [{"space_media_space_max_bytes": SMALL}], indirect=True)

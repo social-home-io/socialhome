@@ -3052,7 +3052,7 @@ in [`principles.md`](../principles.md)):
 - in trusted mode, which member household published each item; in strict
   mode, only that some publisher did;
 - for the channel's pictures and files in the space media cache
-  (`PUT /gfs/channels/{channel_id}/media/{blob_id}`, see "Space media cache
+  (`PUT /gfs/media/{blob_id}`, the channel only inside the signed claim, see "Space media cache
   on a GFS"): the opaque channel id each blob was uploaded for, its size
   bucket, the upload time and fetch times at one-hour resolution — the
   ciphertext it can't open; with a `channel_cert` upload which member
@@ -3505,14 +3505,16 @@ the capability, the sweep and the admin counts.
 
 | Method | Path | |
 |---|---|---|
-| `PUT` | `/gfs/spaces/{space_id}/media/{blob_id}` | One encrypted blob for a listed space, the raw body. `blob_id` = SHA-256 of the body (lowercase hex), size = a padded bucket + 28 bytes (`moment_public_media.PAD_BUCKETS`, ≤ 8 MiB + overhead). `201 {stored: true}`; the same bytes again — a retry, or another scope's upload, which adds that scope's claim — are `200 {stored: false, status: "already_stored"}`, never an error. **`already_stored` does not extend the blob's expiry** for a scope that already held it (it keeps the expiry of that scope's first upload): a household must not assume a fresh TTL from it. `503 space_media_disabled` while the operator has the cache off. |
-| `PUT` | `/gfs/channels/{channel_id}/media/{blob_id}` | The same for a private space's opaque channel (`channel_id` = 32 hex). |
+| `PUT` | `/gfs/media/{blob_id}` | One encrypted blob, the raw body, for the scope the signed claim names — a listed space, or a private space's opaque channel (`channel_id` = 32 hex). The scope never rides in the URL (security review F3: a channel id must not land in an access log or a proxy). `blob_id` = SHA-256 of the body (lowercase hex), size = a padded bucket + 28 bytes (`moment_public_media.PAD_BUCKETS`, ≤ 8 MiB + overhead). `201 {stored: true}`; the same bytes again — a retry, or another scope's upload, which adds that scope's claim — are `200 {stored: false, status: "already_stored"}`, never an error. **`already_stored` does not extend the blob's expiry** for a scope that already held it (it keeps the expiry of that scope's first upload): a household must not assume a fresh TTL from it. `503 space_media_disabled` while the operator has the cache off. |
 | `GET` | `/gfs/media/{blob_id}` | Anyone, no credentials: the ciphertext, `application/octet-stream`, `nosniff`, `Access-Control-Allow-Origin: *`, `Cache-Control: public, max-age=3600, immutable`; `404` with `no-store` for unknown, expired, evicted or a banned space's blob. |
-| `POST` | `/gfs/spaces/{space_id}/media/{blob_id}/delete`, `/gfs/channels/{channel_id}/media/{blob_id}/delete` | The scope's seed holder withdraws its claim: `{ts, sig, sig_suite}`; `{deleted}`. The blob goes when no other scope claims it. |
+| `POST` | `/gfs/media/{blob_id}/delete` | The scope's seed holder withdraws its claim: `{scope, scope_id, ts, sig, sig_suite}` (the signature covers scope, scope id, blob and `ts`); `{deleted}`. |
 
-The fetch names **no scope**: neither an access log, a CDN cache key nor a
-path tells which space or channel a reader reads — and a channel's blob is
-never marked "space" — the content address is unique on its own.
+No path names a **scope** — not the fetch, not the upload, not the delete:
+neither an access log, a proxy, a CDN cache key nor a path tells which
+space or channel a blob belongs to — and a channel's blob is never marked
+"space". The writes' per-address limit (120 / min, cluster-wide: each node
+its share over the live nodes) matches the routed request, not the raw
+path, so no spelling of the path slips past it.
 
 **Authorization (identity-free).** The raw blob is the body, so the
 authorization rides in one header, `X-SH-Space-Media-Auth`: base64url of a
@@ -3675,7 +3677,7 @@ sequenceDiagram
     participant C as CDN edge
     participant R as Reader household
     Note over H: encrypts the file once (space key, padded bucket)
-    H->>G: PUT /gfs/spaces/{space}/media/{sha256}<br/>or /gfs/channels/{channel}/media/{sha256}<br/>X-SH-Space-Media-Auth
+    H->>G: PUT /gfs/media/{sha256}<br/>X-SH-Space-Media-Auth (scope inside the signed claim)
     G->>G: verify (pinned space / channel key, cert, writer key), rate,<br/>evict the scope's / the cache's LRU if full
     G-->>H: 201 stored (200 already_stored: same bytes, claim added)
     R->>C: GET /gfs/media/{sha256}
@@ -3683,7 +3685,7 @@ sequenceDiagram
     G-->>C: 200 ciphertext, public max-age=3600 immutable
     C-->>R: ciphertext
     Note over R: checks sha256, decrypts with the space key
-    H->>G: POST …/media/{sha256}/delete (drops this scope's claim)
+    H->>G: POST /gfs/media/{sha256}/delete {scope, scope_id, ts, sig}
     Note over C: an edge copy may linger ≤ 1 h
 ```
 
