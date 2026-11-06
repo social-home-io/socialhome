@@ -64,6 +64,7 @@ from typing import TYPE_CHECKING
 
 from ..domain.gfs_channel import (
     CHANNEL_ROUTES,
+    ChannelCert,
     ChannelEpochNotice,
     ChannelPublishAnonRequest,
     ChannelPublishRequest,
@@ -84,8 +85,10 @@ from ..gfs_channel import (
     verify_notice,
     verify_publish_anon,
     verify_register,
+    verify_signature,
     verify_unregister,
 )
+from ..writer_key import verify_writer_sig
 from .addressee import GfsAddressee
 from .cluster_relay import AUDIENCE_CHANNEL
 from .domain import CHANNEL_EPOCH_GRACE_S, GfsChannel
@@ -248,6 +251,105 @@ class GfsChannelService:
             return channel_pk_bytes(ch.channel_pk)
         except InvalidChannelSignature as exc:
             raise PermissionError("pinned channel key unusable") from exc
+
+    @staticmethod
+    def _writer_pk(ch: GfsChannel, epoch: int) -> bytes:
+        """The channel writer key pinned for *epoch*, else
+        :class:`PermissionError` (an unusable pin raises
+        :class:`InvalidChannelSignature`)."""
+        pinned = ch.writer_pk_for(epoch)
+        if pinned is None:
+            raise PermissionError("no writer key pinned for this epoch")
+        return channel_pk_bytes(pinned)
+
+    # ── Checks shared with the space media cache ─────────────────────────
+
+    async def require_channel(self, channel_id: str) -> None:
+        """:class:`PermissionError` unless *channel_id* is registered here."""
+        await self._channel(channel_id)
+
+    async def require_channel_in_use(self, channel_id: str) -> None:
+        """:class:`PermissionError` unless *channel_id* is registered here AND
+        in use: at least one active member household holds a seat whose pass
+        is for an open epoch (the seats a publish fans out to — nothing new
+        is recorded). One seat is enough: the owner household never
+        subscribes to its own channel (third review A4). A channel's blobs
+        count against their UPLOADER's address bucket for the cache's
+        fairness (fourth review G1), never a seated member."""
+        ch = await self._channel(channel_id)
+        if not await self._channels.list_targets(
+            channel_id, _open_epochs(ch, now=self._now())
+        ):
+            raise PermissionError("channel not in use")
+
+    async def verify_channel_key(
+        self, channel_id: str, *, prefix: bytes, body: dict, signature: str, suite: str
+    ) -> None:
+        """*signature* over ``prefix + canonical(body)`` verifies under the
+        channel key pinned at registration — what registration, notices and
+        unregister prove. :class:`PermissionError` otherwise."""
+        ch = await self._channel(channel_id)
+        try:
+            verify_signature(
+                prefix=prefix,
+                body=body,
+                signature=signature,
+                public_key=self._pinned(ch),
+                suite=suite,
+            )
+        except (InvalidChannelSignature, UnsupportedChannelSuite) as exc:
+            raise PermissionError(f"channel signature refused: {exc}") from exc
+
+    async def verify_cert_holder(
+        self, channel_id: str, cert: ChannelCert, *, epoch: int, author_pk: bytes
+    ) -> None:
+        """Trusted-channel writer check (as :meth:`publish` makes it): the
+        channel is not strict, *cert* — signed by the pinned channel key —
+        names *author_pk* for this channel and *epoch*, scope ``comment`` at
+        least, and *epoch* is open. :class:`PermissionError` otherwise."""
+        ch = await self._channel(channel_id)
+        if ch.strict:
+            raise PermissionError("channel is in strict mode — identified refused")
+        try:
+            verify_channel_cert(
+                cert,
+                channel_pk=self._pinned(ch),
+                channel_id=channel_id,
+                epoch=epoch,
+                author_pk=author_pk,
+                required_scope=WRITER_SCOPE_COMMENT,
+            )
+        except (InvalidChannelSignature, UnsupportedChannelSuite, ValueError) as exc:
+            raise PermissionError(f"channel cert refused: {exc}") from exc
+        if not ch.admits(epoch, now=self._now()):
+            raise PermissionError("cert epoch is not open here")
+
+    async def verify_writer_key(
+        self,
+        channel_id: str,
+        *,
+        epoch: int,
+        message: bytes,
+        writer_sig: str,
+        suite: str,
+    ) -> None:
+        """Strict-channel writer check: *writer_sig* (suite checked, never
+        defaulted) signs *message* under the channel writer key pinned for
+        *epoch*, and *epoch* is open. :class:`PermissionError` otherwise."""
+        ch = await self._channel(channel_id)
+        try:
+            ok = verify_writer_sig(
+                writer_pk=self._writer_pk(ch, epoch),
+                message=message,
+                writer_sig=writer_sig,
+                suite=suite,
+            )
+        except (InvalidChannelSignature, UnsupportedWriterKeySuite, ValueError) as exc:
+            raise PermissionError(f"writer signature refused: {exc}") from exc
+        if not ok:
+            raise PermissionError("writer signature does not verify")
+        if not ch.admits(epoch, now=self._now()):
+            raise PermissionError("writer key epoch is not open here")
 
     # ── Registration ─────────────────────────────────────────────────────
 
@@ -460,23 +562,14 @@ class GfsChannelService:
             raise MemberPublishRateLimited()
         if not self._channel_limiter.allow(req.channel_id):
             raise MemberPublishRateLimited()
-        ch = await self._channel(req.channel_id)
-        if ch.strict:
-            raise PermissionError("channel is in strict mode — identified refused")
         try:
-            verify_channel_cert(
-                req.channel_cert,
-                channel_pk=self._pinned(ch),
-                channel_id=req.channel_id,
-                epoch=req.epoch,
-                author_pk=bytes.fromhex(inst.public_key),
-                required_scope=WRITER_SCOPE_COMMENT,
-            )
-        except (InvalidChannelSignature, UnsupportedChannelSuite, ValueError) as exc:
-            raise PermissionError(f"channel cert refused: {exc}") from exc
+            author_pk = bytes.fromhex(inst.public_key)
+        except ValueError as exc:
+            raise PermissionError("channel cert refused: bad household key") from exc
+        await self.verify_cert_holder(
+            req.channel_id, req.channel_cert, epoch=req.epoch, author_pk=author_pk
+        )
         now = self._now()
-        if not ch.admits(req.epoch, now=now):
-            raise PermissionError("cert epoch is not open here")
         digest = SeenPayloadCache.digest(req.to_wire())
         if self._seen.seen(digest):
             return False
@@ -492,11 +585,8 @@ class GfsChannelService:
         self._addressed(req.gfs_instance_id, req.gfs_key)
         self._fresh(req.ts)
         ch = await self._channel(req.channel_id)
-        pinned = ch.writer_pk_for(req.epoch)
-        if pinned is None:
-            raise PermissionError("no writer key pinned for this epoch")
         try:
-            verify_publish_anon(req, writer_pk=channel_pk_bytes(pinned))
+            verify_publish_anon(req, writer_pk=self._writer_pk(ch, req.epoch))
         except (
             InvalidChannelSignature,
             UnsupportedChannelSuite,

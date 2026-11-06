@@ -19,6 +19,8 @@ from __future__ import annotations
 import pytest
 
 from socialhome.authority_sig import (
+    AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
+    AUTHORITY_EVENT_SPACE_MEDIA_PUT,
     AUTHORITY_EVENT_SPACE_POST_PUBLIC,
     AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY,
     AUTHORITY_RELAY_EVENT_TYPES,
@@ -73,6 +75,17 @@ def test_subscribers_query_event_type_is_not_a_relay_type():
     replayed onto the GFS relay fan-out (and vice-versa)."""
     assert AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY == "space_subscribers_query"
     assert AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY not in AUTHORITY_RELAY_EVENT_TYPES
+
+
+def test_space_media_event_types_are_not_relay_types():
+    """An upload / delete of space media is authorized by a space-authority
+    signature, but is never a relay: a media-signed payload can't be fanned
+    out, and a relay payload can't authorize an upload (the signing bytes
+    bind the event type)."""
+    assert AUTHORITY_EVENT_SPACE_MEDIA_PUT == "space_media_put"
+    assert AUTHORITY_EVENT_SPACE_MEDIA_DELETE == "space_media_delete"
+    assert AUTHORITY_EVENT_SPACE_MEDIA_PUT not in AUTHORITY_RELAY_EVENT_TYPES
+    assert AUTHORITY_EVENT_SPACE_MEDIA_DELETE not in AUTHORITY_RELAY_EVENT_TYPES
 
 
 def test_strip_removes_only_the_two_sig_keys():

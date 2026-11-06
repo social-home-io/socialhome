@@ -729,3 +729,110 @@ def test_landing_space_list_env_overrides_the_file(tmp_dir, monkeypatch):
 def test_the_example_config_documents_the_landing_space_list():
     assert "landing_space_list = true\n" in EXAMPLE_TOML
     assert "GFS_LANDING_SPACE_LIST" in EXAMPLE_TOML
+
+
+# ─── [space_media] the encrypted space media cache ──────────────────────
+
+
+def _space_media_toml(tmp_dir, body: str) -> Path:
+    p = tmp_dir / "global_server.toml"
+    p.write_text(f'[server]\nbase_url = "https://g.example"\n[space_media]\n{body}')
+    return p
+
+
+def test_space_media_defaults():
+    cfg = GfsConfig()
+    assert cfg.space_media_max_bytes == 5 * 1024**3
+    assert cfg.space_media_ttl_seconds == 3 * 86_400
+    assert cfg.space_media_space_max_bytes == 256 * 1024**2
+    assert cfg.space_media_space_uploads_per_hour == 300
+
+
+def test_space_media_loads_from_toml(tmp_dir):
+    p = _space_media_toml(
+        tmp_dir,
+        "max_bytes = 1073741824\nttl_seconds = 86400\n"
+        "space_max_bytes = 10485760\nspace_uploads_per_hour = 50\n",
+    )
+    cfg = GfsConfig.from_toml(p)
+    assert (
+        cfg.space_media_max_bytes,
+        cfg.space_media_ttl_seconds,
+        cfg.space_media_space_max_bytes,
+        cfg.space_media_space_uploads_per_hour,
+    ) == (1024**3, 86_400, 10 * 1024**2, 50)
+
+
+def test_space_media_zero_max_bytes_turns_the_cache_off(tmp_dir):
+    p = _space_media_toml(tmp_dir, "max_bytes = 0\n")
+    assert GfsConfig.from_toml(p).space_media_max_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "max_bytes = -1\n",
+        "ttl_seconds = 599\n",
+        "ttl_seconds = 604801\n",
+        "space_max_bytes = 0\n",
+        "space_uploads_per_hour = 0\n",
+    ],
+)
+def test_space_media_out_of_range_is_a_config_error(tmp_dir, body):
+    p = _space_media_toml(tmp_dir, body)
+    with pytest.raises(ValueError, match="space_media"):
+        GfsConfig.from_toml(p)
+
+
+def test_space_media_env_overrides_the_file(tmp_dir, monkeypatch):
+    p = _space_media_toml(tmp_dir, "max_bytes = 1073741824\n")
+    monkeypatch.setenv("GFS_SPACE_MEDIA_MAX_BYTES", "2147483648")
+    monkeypatch.setenv("GFS_SPACE_MEDIA_TTL_SECONDS", "3600")
+    monkeypatch.setenv("GFS_SPACE_MEDIA_SPACE_MAX_BYTES", "1048576")
+    monkeypatch.setenv("GFS_SPACE_MEDIA_SPACE_UPLOADS_PER_HOUR", "10")
+    cfg = GfsConfig.load(p)
+    assert (
+        cfg.space_media_max_bytes,
+        cfg.space_media_ttl_seconds,
+        cfg.space_media_space_max_bytes,
+        cfg.space_media_space_uploads_per_hour,
+    ) == (2 * 1024**3, 3_600, 1024**2, 10)
+
+
+def test_space_media_env_out_of_range_is_a_config_error(monkeypatch):
+    monkeypatch.setenv("GFS_SPACE_MEDIA_TTL_SECONDS", "5")
+    with pytest.raises(ValueError, match="space_media"):
+        GfsConfig.from_env_fallback()
+
+
+def test_example_toml_documents_space_media(tmp_dir):
+    assert "[space_media]" in EXAMPLE_TOML
+    assert "GFS_SPACE_MEDIA_MAX_BYTES" in EXAMPLE_TOML
+    p = tmp_dir / "example.toml"
+    write_example_config(p)
+    cfg = GfsConfig.from_toml(p)
+    # The example spells out the defaults.
+    assert cfg.space_media_max_bytes == GfsConfig().space_media_max_bytes
+    assert cfg.space_media_ttl_seconds == GfsConfig().space_media_ttl_seconds
+
+
+def test_space_media_ip_bytes_per_hour(tmp_dir, monkeypatch):
+    """Security review F1 backstop: a per-address upload byte budget an
+    hour, 1 GiB by default, from the file or GFS_SPACE_MEDIA_IP_BYTES_PER_HOUR;
+    the example TOML documents it."""
+    assert GfsConfig().space_media_ip_bytes_per_hour == 1024**3
+    p = _space_media_toml(tmp_dir, "ip_bytes_per_hour = 1048576\n")
+    assert GfsConfig.from_toml(p).space_media_ip_bytes_per_hour == 1024**2
+    monkeypatch.setenv("GFS_SPACE_MEDIA_IP_BYTES_PER_HOUR", "2097152")
+    assert GfsConfig.load(p).space_media_ip_bytes_per_hour == 2 * 1024**2
+    with pytest.raises(ValueError, match="space_media"):
+        GfsConfig.from_toml(_space_media_toml(tmp_dir, "ip_bytes_per_hour = 0\n"))
+    assert "ip_bytes_per_hour" in EXAMPLE_TOML
+    assert "GFS_SPACE_MEDIA_IP_BYTES_PER_HOUR" in EXAMPLE_TOML
+
+
+def test_no_per_household_channel_count_any_more():
+    """Third review A4: a count of channels per household refused a legit
+    member's 6th private space — gone (fairness is per household)."""
+    assert not hasattr(GfsConfig(), "space_media_channels_per_household")
+    assert "channels_per_household" not in EXAMPLE_TOML

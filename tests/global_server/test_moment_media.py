@@ -14,11 +14,13 @@ from aiohttp.test_utils import TestClient, TestServer
 from socialhome.crypto import b64url_encode, generate_identity_keypair, sign_ed25519
 from socialhome.global_server import moment_media as gmm
 from socialhome.global_server.app_keys import (
+    gfs_admin_repo_key,
     gfs_fed_repo_key,
     gfs_moment_media_store_key,
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
+from socialhome.global_server.repositories import SqliteGfsMomentMediaRepo
 from socialhome.global_server.server import create_gfs_app
 from socialhome.moment_public_media import MAX_BLOB_BYTES, blob_id_of, seal_media
 
@@ -286,3 +288,66 @@ async def test_a_bad_address_is_a_plain_404(client):
 async def test_info_advertises_encrypted_moment_media(client):
     info = await (await client.get("/gfs/info")).json()
     assert info["capabilities"]["encrypted_moment_media"] is True
+
+
+async def test_the_expiry_sweep_removes_stale_temporary_files(gfs_db, tmp_dir):
+    """A write that died before its rename leaves ``.{blob}.{token}.part``
+    behind; the moment store's sweep removes those older than the grace (the
+    same shared code as the space media cache) and keeps fresh ones."""
+    store = gmm.GfsMomentMediaStore(SqliteGfsMomentMediaRepo(gfs_db), tmp_dir)
+    d = tmp_dir / "moments"
+    d.mkdir()
+    stale = d / ("." + "a" * 64 + ".0011.part")
+    fresh = d / ("." + "b" * 64 + ".0022.part")
+    stale.write_bytes(b"x")
+    fresh.write_bytes(b"x")
+    old = time.time() - gmm.TEMP_GRACE_S - 60
+    os.utime(stale, (old, old))
+    await store.prune_expired()
+    assert not stale.exists()
+    assert fresh.exists()
+
+
+async def test_moment_blobs_are_not_served_by_the_public_media_mount(client, author):
+    """Security review F2: ``/media/`` is the branding mount. A moment blob
+    is served only by ``/gfs/moments/media/{id}`` (its expiry, its headers),
+    never as a static file under ``/media/moments/``."""
+    blob = _blob()
+    bid = blob_id_of(blob)
+    r = await client.put(
+        f"/gfs/moments/media/{bid}", data=blob, headers=_headers(author, bid)
+    )
+    assert r.status == 201
+    assert (await client.get(f"/gfs/moments/media/{bid}")).status == 200
+    assert (await client.get(f"/media/moments/{bid}")).status == 404
+
+
+async def test_the_media_route_serves_only_the_configured_branding_file(
+    client, tmp_dir
+):
+    """Security re-attack N4: ``/media/`` serves exactly the configured
+    header image — a regular file, never a symlink (``link.png ->
+    ../gfs.db`` would hand out the database), nothing else in the dir."""
+    media = tmp_dir / "media"
+    (media / "hero.webp").write_bytes(b"RIFFwebp")
+    (media / "other.webp").write_bytes(b"RIFFother")
+    (media / ".hidden").write_bytes(b"x")
+    (media / "link.png").symlink_to(tmp_dir / "gfs.db")
+    admin = client._app[gfs_admin_repo_key]
+    # Nothing configured: nothing served.
+    assert (await client.get("/media/hero.webp")).status == 404
+    await admin.set_config("header_image_file", "hero.webp")
+    r = await client.get("/media/hero.webp")
+    assert r.status == 200
+    assert await r.read() == b"RIFFwebp"
+    for path in (
+        "/media/other.webp",
+        "/media/link.png",
+        "/media/.hidden",
+        "/media/moments",
+        "/media/%2E%2E/gfs.db",
+    ):
+        assert (await client.get(path)).status == 404, path
+    # A configured name that is a symlink is still refused.
+    await admin.set_config("header_image_file", "link.png")
+    assert (await client.get("/media/link.png")).status == 404

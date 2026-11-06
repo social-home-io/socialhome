@@ -13,22 +13,28 @@ Bounds (every one enforced here, whatever the uploader claims):
 * it expires no later than :data:`MAX_TTL_S` from now;
 * an author holds at most :data:`MAX_AUTHOR_LIVE_BYTES` and uploads at most
   :data:`MAX_UPLOADS_PER_HOUR` blobs an hour;
-* expired blobs (rows and files) go on each maintenance sweep.
+* expired blobs (rows and files) go on each maintenance sweep, and so do
+  temporary files a write left behind (older than :data:`TEMP_GRACE_S`,
+  a page of the directory per sweep — the code the space media cache
+  uses too).
 """
 
 from __future__ import annotations
 
-import asyncio
-import hashlib
 import logging
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-import aiofiles
-import aiofiles.os
-
-from ..moment_public_media import MAX_BLOB_BYTES, PAD_BUCKETS, is_blob_id
+from ..moment_public_media import is_blob_id
+from .blob_store import (
+    TEMP_GRACE_S,
+    FsBlobFiles,
+    MediaRefused,
+    check_address,
+    check_shape,
+    remove_stale_temps,
+)
 from .domain import GfsMomentMedia
 
 if TYPE_CHECKING:
@@ -54,31 +60,26 @@ MAX_UPLOADS_PER_HOUR: int = 60
 #: Expired blobs removed per sweep.
 PRUNE_BATCH: int = 500
 
-_OVERHEAD = 12 + 16  # nonce + tag
-_BUCKET_SIZES = frozenset(b + _OVERHEAD for b in PAD_BUCKETS)
+#: Directory entries the temporary-file sweep looks at per run (it resumes
+#: where the last run on this node stopped, and wraps at the end).
+TEMP_SCAN_BATCH: int = 100_000
 
-
-class MediaRefused(Exception):
-    """An upload this server won't keep. ``status`` is the HTTP answer."""
-
-    def __init__(self, status: int, reason: str) -> None:
-        super().__init__(reason)
-        self.status = status
-        self.reason = reason
+#: Re-exported: the moment routes map it to their HTTP answer.
+__all__ = ["TEMP_GRACE_S", "GfsMomentMediaStore", "MediaRefused"]
 
 
 class GfsMomentMediaStore:
     """Encrypted moment blobs: files under ``media_dir/moments``, metadata
     in ``gfs_moment_media``."""
 
-    __slots__ = ("_dir", "_repo")
+    __slots__ = ("_files", "_repo", "_temp_cursor")
 
     def __init__(self, repo: AbstractGfsMomentMediaRepo, media_dir: str | Path) -> None:
         self._repo = repo
-        self._dir = Path(media_dir) / "moments"
-
-    def _path(self, blob_id: str) -> Path:
-        return self._dir / blob_id
+        self._files = FsBlobFiles(Path(media_dir) / "moments")
+        #: Where this node's temporary-file sweep resumes (in memory: every
+        #: node may sweep, and a restart only starts the walk over).
+        self._temp_cursor = ""
 
     async def put(
         self,
@@ -92,15 +93,10 @@ class GfsMomentMediaStore:
         """Keep one blob. ``True`` when stored, ``False`` when it already was
         (a retry). Raises :class:`MediaRefused`."""
         now = int(time.time()) if now is None else now
-        if not is_blob_id(blob_id):
-            raise MediaRefused(422, "bad_blob_id")
-        if len(data) > MAX_BLOB_BYTES or len(data) not in _BUCKET_SIZES:
-            raise MediaRefused(422, "not_a_padded_blob")
+        check_shape(blob_id, data)
         if not now < expires_at <= now + MAX_TTL_S:
             raise MediaRefused(422, "bad_expiry")
-        digest = await asyncio.to_thread(lambda: hashlib.sha256(data).hexdigest())
-        if digest != blob_id:
-            raise MediaRefused(422, "blob_id_mismatch")
+        await check_address(blob_id, data)
         held = await self._repo.get(blob_id)
         if held is not None:
             if held.author_user_id != author_user_id:
@@ -109,11 +105,7 @@ class GfsMomentMediaStore:
         live, recent = await self._repo.author_usage(author_user_id, since=now - 3600)
         if recent >= MAX_UPLOADS_PER_HOUR or live + len(data) > MAX_AUTHOR_LIVE_BYTES:
             raise MediaRefused(429, "author_media_quota")
-        await aiofiles.os.makedirs(self._dir, exist_ok=True)
-        tmp = self._dir / f".{blob_id}.part"
-        async with aiofiles.open(tmp, "wb") as fh:
-            await fh.write(data)
-        await aiofiles.os.replace(tmp, self._path(blob_id))
+        await self._files.write(blob_id, data)
         await self._repo.add(
             GfsMomentMedia(
                 blob_id=blob_id,
@@ -132,40 +124,39 @@ class GfsMomentMediaStore:
         held = await self._repo.get(blob_id)
         if held is None or held.expires_at <= now:
             return None
-        try:
-            async with aiofiles.open(self._path(blob_id), "rb") as fh:
-                return await fh.read()
-        except OSError:
-            return None
+        return await self._files.read(blob_id)
 
     async def delete(self, blob_id: str, *, author_user_id: str) -> bool:
         if not is_blob_id(blob_id):
             return False
         if not await self._repo.delete(blob_id, author_user_id=author_user_id):
             return False
-        await self._unlink(blob_id)
+        await self._files.remove(blob_id)
         return True
 
     async def prune_expired(self, now: int | None = None) -> int:
+        """Drop expired blobs (files, then rows), and remove the stale
+        temporary files in the next page of the directory. Returns the
+        blobs dropped."""
         now = int(time.time()) if now is None else now
         ids = await self._repo.expired(now, limit=PRUNE_BATCH)
         for blob_id in ids:
-            await self._unlink(blob_id)
+            await self._files.remove(blob_id)
         await self._repo.delete_ids(ids)
+        page, self._temp_cursor = await self._files.scan(
+            after=self._temp_cursor, limit=TEMP_SCAN_BATCH
+        )
+        temps = await remove_stale_temps(
+            self._files, page, cutoff=time.time() - TEMP_GRACE_S
+        )
+        if temps:
+            log.info("moment media: removed %d stale temporary file(s)", temps)
         return len(ids)
 
     async def purge_author(self, author_user_id: str) -> int:
         """Every blob of an author who left the directory."""
         ids = await self._repo.ids_for_author(author_user_id)
         for blob_id in ids:
-            await self._unlink(blob_id)
+            await self._files.remove(blob_id)
         await self._repo.delete_ids(ids)
         return len(ids)
-
-    async def _unlink(self, blob_id: str) -> None:
-        try:
-            await aiofiles.os.remove(self._path(blob_id))
-        except FileNotFoundError:
-            pass
-        except OSError as exc:  # pragma: no cover - defensive
-            log.warning("moment media: could not remove a blob file: %s", exc)

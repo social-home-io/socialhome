@@ -1384,3 +1384,42 @@ async def test_publish_route_rejects_a_non_object_cert(gfs_client):
     )
     resp = await gfs_client.post("/gfs/spaces/sp-x/publish", json=body)
     assert resp.status == 400
+
+
+async def test_a_re_publish_keeps_an_accepted_space_active(gfs_client):
+    """Fourth review G2: on a GFS that doesn't auto-accept, a moderator
+    accepts a pending space; the owner's next routine publish must not
+    demote it to pending again (its media uploads would all be 403). A
+    pending space stays pending, a banned one banned."""
+    app = gfs_client.server.app
+    fed_repo = app[gfs_fed_repo_key]
+    seed, _pk = await _register_owner(app, auto_accept=False)
+
+    async def publish(name: str) -> str:
+        body = _sign_publish_body(
+            {
+                "space_id": "sp-acc",
+                "owning_instance": "owner.home",
+                "name": name,
+                "description": "",
+                "about_markdown": "",
+                "cover_url": "",
+                "min_age": 0,
+                "category": "general",
+                "accent_color": "#D2542A",
+                "icon_url": "",
+                "primary_color": "#D2542A",
+            },
+            seed=seed,
+        )
+        resp = await gfs_client.post("/gfs/spaces/sp-acc/publish", json=body)
+        assert resp.status == 200
+        return (await resp.json())["status"]
+
+    assert await publish("First") == "pending"
+    assert await publish("Still pending") == "pending"
+    await fed_repo.set_space_status("sp-acc", "active")  # the moderator accepts
+    assert await publish("Renamed") == "active"
+    assert (await fed_repo.get_space("sp-acc")).status == "active"
+    await fed_repo.set_space_status("sp-acc", "banned")
+    assert await publish("Again") == "banned"

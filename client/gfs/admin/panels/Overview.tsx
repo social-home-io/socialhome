@@ -1,10 +1,13 @@
 import { useEffect, useState } from 'preact/hooks'
 import { api } from '../api'
+import { MediaCacheCard, type SpaceMediaStats } from './MediaCache'
 
 interface OverviewData {
   clients: { active: number; pending: number; banned: number }
   spaces: { active: number; pending: number; banned: number }
   open_reports: number
+  /** The space media cache; absent (or null) on an older server. */
+  space_media?: SpaceMediaStats | null
 }
 
 export function OverviewPanel() {
@@ -36,6 +39,7 @@ export function OverviewPanel() {
           <div class="val">{data.open_reports}</div>
         </div>
       </div>
+      {data.space_media ? <MediaCacheCard stats={data.space_media} /> : null}
     </>
   )
 }

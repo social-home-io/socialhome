@@ -16,6 +16,7 @@ from socialhome.global_server.domain import (
     GfsFraudReport,
     GfsMomentFollow,
     GfsMomentKeyMail,
+    GfsSpaceMedia,
     GfsSubscriberWithKeys,
     GfsUserRegistration,
     GlobalSpace,
@@ -30,6 +31,7 @@ from socialhome.global_server.repositories import (
     SqliteGfsMomentFollowRepo,
     SqliteGfsMomentKeyMailboxRepo,
     SqliteGfsSpaceEpochRepo,
+    SqliteGfsSpaceMediaRepo,
     SqliteGfsUserRegistrationRepo,
 )
 
@@ -1664,3 +1666,205 @@ async def test_add_subscriber_says_whether_it_created_the_seat(fed):
     assert await fed.add_subscriber(space_id="sp-new", instance_id="s") is True
     assert await fed.add_subscriber(space_id="sp-new", instance_id="s") is False
     assert [s.instance_id for s in await fed.list_subscribers("sp-new")] == ["s"]
+
+
+# ── Space media cache (GFS 0025) ──────────────────────────────────────
+
+
+def _media_blob(
+    n: int,
+    *,
+    size=100,
+    created=1_000,
+    expires=5_000,
+    fetched=None,
+    space="s1",
+    kind="space",
+    household="h1",
+    owner_kind="household",
+):
+    return GfsSpaceMedia(
+        blob_id=f"{n:064x}",
+        size=size,
+        created_at=created,
+        expires_at=expires,
+        last_fetched_at=created if fetched is None else fetched,
+        scope_kind=kind,
+        scope_id=space,
+        owner_kind=owner_kind,
+        owner_id=household,
+    )
+
+
+@pytest.fixture
+async def space_media(gfs_db):
+    return SqliteGfsSpaceMediaRepo(gfs_db)
+
+
+async def test_space_media_add_blob_is_insert_or_ignore(space_media):
+    assert await space_media.add_blob(_media_blob(1)) is True
+    assert await space_media.add_blob(_media_blob(1, space="other")) is False
+    got = await space_media.get_blob(f"{1:064x}")
+    assert (got.scope_kind, got.scope_id, got.size) == ("space", "s1", 100)
+    assert await space_media.get_blob(f"{2:064x}") is None
+
+
+async def test_space_media_totals_and_scope_bytes_are_trigger_kept(space_media):
+    await space_media.add_blob(_media_blob(1, size=100))
+    await space_media.add_blob(_media_blob(2, size=300))
+    await space_media.add_blob(_media_blob(3, size=50, space="c1", kind="channel"))
+    assert await space_media.totals() == (3, 450)
+    assert await space_media.scope_bytes("space", "s1") == 400
+    assert await space_media.scope_bytes("channel", "c1") == 50
+    assert await space_media.largest_scopes(limit=5) == [
+        ("space", "s1", 400),
+        ("channel", "c1", 50),
+    ]
+    assert await space_media.delete_blobs([f"{1:064x}", f"{9:064x}"]) == [f"{1:064x}"]
+    assert await space_media.totals() == (2, 350)
+    assert await space_media.scope_bytes("space", "s1") == 300
+
+
+async def test_space_media_servable_unless_expired_or_banned(space_media, fed):
+    await fed.upsert_instance(
+        ClientInstance(instance_id="o", display_name="O", public_key="aa" * 32)
+    )
+    await fed.upsert_space(
+        GlobalSpace(space_id="ok", owning_instance="o", status="active")
+    )
+    await fed.upsert_space(
+        GlobalSpace(space_id="bad", owning_instance="o", status="banned")
+    )
+    await space_media.add_blob(_media_blob(1, space="ok"))
+    await space_media.add_blob(_media_blob(2, space="bad"))
+    await space_media.add_blob(_media_blob(3, space="ok", expires=1_500))
+    await space_media.add_blob(_media_blob(4, space="gone"))
+    # A channel whose id happens to equal a banned space id is not that space.
+    await space_media.add_blob(_media_blob(5, space="bad", kind="channel"))
+    assert await space_media.get_servable(f"{1:064x}", now=2_000) is not None
+    assert await space_media.get_servable(f"{2:064x}", now=2_000) is None
+    assert await space_media.get_servable(f"{3:064x}", now=2_000) is None
+    assert await space_media.get_servable(f"{4:064x}", now=2_000) is not None
+    assert await space_media.get_servable(f"{5:064x}", now=2_000) is not None
+
+
+async def test_space_media_a_delete_takes_only_the_scopes_blob(space_media):
+    await space_media.add_blob(_media_blob(1, space="s1"))
+    bid = f"{1:064x}"
+    assert (
+        await space_media.delete_scope_blob(bid, scope_kind="space", scope_id="s2")
+        is False
+    )
+    assert (
+        await space_media.delete_scope_blob(bid, scope_kind="channel", scope_id="s1")
+        is False
+    )
+    assert (
+        await space_media.delete_scope_blob(bid, scope_kind="space", scope_id="s1")
+        is True
+    )
+    assert await space_media.get_blob(bid) is None
+
+
+async def test_space_media_owner_bytes_and_lru(space_media):
+    """Fairness reads per-owner bytes across scopes — a household's spaces
+    (third review A3), a client bucket's channel blobs (fourth review G1)."""
+    await space_media.add_blob(_media_blob(1, space="a", household="h1", fetched=300))
+    await space_media.add_blob(_media_blob(2, space="b", household="h1", fetched=100))
+    await space_media.add_blob(
+        _media_blob(3, space="c", household="k9", owner_kind="client", size=150)
+    )
+    assert await space_media.owner_bytes("household", "h1") == 200
+    assert await space_media.owner_bytes("client", "h1") == 0
+    assert await space_media.largest_owners(limit=5) == [
+        ("household", "h1", 200),
+        ("client", "k9", 150),
+    ]
+    assert [
+        m.blob_id for m in await space_media.owner_lru("household", "h1", limit=5)
+    ] == [f"{2:064x}", f"{1:064x}"]
+    got = await space_media.get_blob(f"{3:064x}")
+    assert (got.owner_kind, got.owner_id) == ("client", "k9")
+
+
+async def test_space_media_scope_lru_and_blob_ids(space_media):
+    await space_media.add_blob(_media_blob(1, fetched=300))
+    await space_media.add_blob(_media_blob(2, fetched=100))
+    await space_media.add_blob(_media_blob(3, fetched=200, space="s2"))
+    assert [m.blob_id for m in await space_media.scope_lru("space", "s1", limit=5)] == [
+        f"{2:064x}",
+        f"{1:064x}",
+    ]
+    assert sorted(await space_media.scope_blob_ids("space", "s1")) == [
+        f"{1:064x}",
+        f"{2:064x}",
+    ]
+
+
+async def test_space_media_touch_is_throttled(space_media):
+    await space_media.add_blob(_media_blob(1, created=1_000))
+    assert await space_media.touch(f"{1:064x}", now=1_500, min_interval=3600) is False
+    assert await space_media.touch(f"{1:064x}", now=4_700, min_interval=3600) is True
+    assert (await space_media.get_blob(f"{1:064x}")).last_fetched_at == 4_700
+
+
+async def test_space_media_expired_and_known(space_media):
+    await space_media.add_blob(_media_blob(1, expires=150))
+    await space_media.add_blob(_media_blob(2, expires=100))
+    await space_media.add_blob(_media_blob(3, expires=900))
+    assert [m.blob_id for m in await space_media.expired(200, limit=10)] == [
+        f"{2:064x}",
+        f"{1:064x}",
+    ]
+    assert await space_media.known_blob_ids([]) == set()
+    assert await space_media.known_blob_ids([f"{3:064x}", f"{9:064x}"]) == {f"{3:064x}"}
+    assert await space_media.delete_blobs([]) == []
+
+
+async def test_space_media_upload_counts(space_media):
+    for _ in range(3):
+        await space_media.reserve_upload("space", "s1", bucket=10, cap=99)
+    await space_media.reserve_upload("space", "s1", bucket=9, cap=99)
+    await space_media.reserve_upload("space", "s1", bucket=5, cap=99)
+    await space_media.reserve_upload("channel", "s1", bucket=10, cap=99)
+    assert await space_media.upload_counts("space", "s1", bucket=10) == (3, 1)
+    assert await space_media.upload_counts("channel", "s1", bucket=10) == (1, 0)
+    assert await space_media.prune_upload_counts(before_bucket=9) == 1
+    assert await space_media.upload_counts("space", "s1", bucket=6) == (0, 0)
+
+
+async def test_space_media_reserve_upload_is_atomic_and_refundable(space_media):
+    """Upsert-then-check in one statement: a slot is taken only while the
+    count is under the cap, and a failed upload gives it back."""
+    assert await space_media.reserve_upload("space", "s1", bucket=10, cap=2) is True
+    assert await space_media.reserve_upload("space", "s1", bucket=10, cap=2) is True
+    assert await space_media.reserve_upload("space", "s1", bucket=10, cap=2) is False
+    assert await space_media.reserve_upload("space", "s1", bucket=10, cap=0) is False
+    assert await space_media.upload_counts("space", "s1", bucket=10) == (2, 0)
+    await space_media.refund_upload("space", "s1", bucket=10)
+    assert await space_media.upload_counts("space", "s1", bucket=10) == (1, 0)
+    await space_media.refund_upload("space", "s1", bucket=10)
+    await space_media.refund_upload("space", "s1", bucket=10)
+    assert await space_media.upload_counts("space", "s1", bucket=10) == (0, 0)
+
+
+async def test_space_media_ip_bytes_are_atomic_and_refundable(space_media):
+    assert await space_media.reserve_ip_bytes("k", bucket=10, size=60, cap=100)
+    assert not await space_media.reserve_ip_bytes("k", bucket=10, size=60, cap=100)
+    assert not await space_media.reserve_ip_bytes("k", bucket=10, size=200, cap=100)
+    assert await space_media.reserve_ip_bytes("k", bucket=9, size=5, cap=100)
+    assert await space_media.ip_bytes("k", bucket=10) == (60, 5)
+    await space_media.refund_ip_bytes("k", bucket=10, size=100)
+    assert await space_media.ip_bytes("k", bucket=10) == (0, 5)
+    assert await space_media.prune_ip_bytes(before_bucket=10) == 1
+
+
+async def test_space_media_sweep_lease_and_cursor(space_media):
+    assert await space_media.acquire_sweep_lease("a", now=100, ttl=50) is True
+    assert await space_media.acquire_sweep_lease("b", now=120, ttl=50) is False
+    # The holder renews; another node takes over once the lease ran out.
+    assert await space_media.acquire_sweep_lease("a", now=130, ttl=50) is True
+    assert await space_media.acquire_sweep_lease("b", now=181, ttl=50) is True
+    assert await space_media.sweep_cursor() == ""
+    await space_media.set_sweep_cursor("abc")
+    assert await space_media.sweep_cursor() == "abc"

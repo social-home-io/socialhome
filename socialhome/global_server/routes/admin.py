@@ -10,8 +10,10 @@ authenticated. They still record the client IP for the audit log via
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
+import aiofiles.os
 from aiohttp import BodyPartReader, web
 
 from ...domain.errors import PayloadTooLargeError
@@ -31,6 +33,41 @@ from .base import GfsBaseView
 log = logging.getLogger(__name__)
 
 _ADMIN_UI_DIR = Path(__file__).resolve().parent.parent / "admin_ui"
+
+#: A branding file name as the header-image upload writes it: one path
+#: segment, no dot-file — so nothing but a top-level file of ``media/`` is
+#: ever served from there.
+_BRANDING_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+class BrandingMediaView(GfsBaseView):
+    """``GET /media/{name}`` — the operator's branding image (the landing
+    header image): exactly the configured ``header_image_file`` (admin
+    portal, else ``[branding]``), a regular file directly in ``media/`` —
+    never a symlink (lstat), never anything else in the dir. Never a blob: the space media cache
+    keeps its files outside ``media/`` and the moment blobs in
+    ``media/moments/`` are a subdirectory — each is served only by its own
+    route. (Security review F2: a static mount of the whole dir served
+    them raw; re-attack N4: a symlink in ``media/`` was followed.)"""
+
+    async def get(self) -> web.StreamResponse:
+        name = self.match("name")
+        if not _BRANDING_NAME.fullmatch(name):
+            raise web.HTTPNotFound()
+        cfg: GfsConfig = self.svc(K.gfs_config_key)
+        configured = (
+            await self.svc(K.gfs_admin_repo_key).get_config("header_image_file")
+        ) or cfg.header_image_file
+        if name != configured:
+            raise web.HTTPNotFound()
+        path = Path(cfg.media_dir) / name
+        if await aiofiles.os.path.islink(path) or not await aiofiles.os.path.isfile(
+            path
+        ):
+            raise web.HTTPNotFound()
+        # One segment, no dot-file, not a symlink: the file can't be anywhere
+        # but directly in ``media/``.
+        return web.FileResponse(path)
 
 
 class AdminUiIndexView(GfsBaseView):

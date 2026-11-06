@@ -26,6 +26,7 @@ from socialhome.crypto import (
     b64url_encode,
     build_move_link,
     build_user_identity_assertion,
+    counting_ed25519_verifies,
     derive_instance_id,
     derive_user_id,
     generate_identity_keypair,
@@ -1204,3 +1205,19 @@ def test_is_instance_id_accepts_exactly_the_derived_shape():
         42,
     ):
         assert is_instance_id(bad) is False, bad
+
+
+def test_counting_ed25519_verifies_counts_inside_its_block_only():
+    kp = generate_identity_keypair()
+    sig = sign_ed25519(kp.private_key, b"m")
+    verify_ed25519(kp.public_key, b"m", sig)
+    with counting_ed25519_verifies() as done:
+        assert verify_ed25519(kp.public_key, b"m", sig)
+        assert not verify_ed25519(kp.public_key, b"x", sig)
+        with counting_ed25519_verifies() as inner:
+            verify_ed25519(kp.public_key, b"m", sig)
+        assert inner[0] == 1
+    # Every open block counts, so an outer one sees the inner's calls too.
+    assert done[0] == 3
+    verify_ed25519(kp.public_key, b"m", sig)
+    assert done[0] == 3

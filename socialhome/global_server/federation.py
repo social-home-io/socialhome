@@ -875,6 +875,59 @@ class GfsFederationService:
         if not ok:
             raise PermissionError("invalid authority signature")
 
+    async def listed_space(self, space_id: str) -> GlobalSpace:
+        """The space row when it is listed here, not moderator-banned and
+        carries a pinned authority key — what every space-authority or
+        writer check needs first. :class:`PermissionError` otherwise.
+        Readability (``allow_subscribers``) is NOT required: a listed space
+        whose members joined by invite link reads through this server too."""
+        existing = await self._repo.get_space(space_id)
+        if existing is None:
+            raise PermissionError("space not published")
+        if existing.status == "banned":
+            raise PermissionError("space is banned")
+        if not existing.identity_public_key:
+            raise PermissionError("no pinned authority key for this space")
+        return existing
+
+    async def verify_space_authority(
+        self,
+        space_id: str,
+        *,
+        event_type: str,
+        payload: dict,
+        authority_sig: str,
+        authority_sig_suite: str,
+    ) -> GlobalSpace:
+        """Verify a space-authority signature over *payload* under
+        *event_type* against the space's TOFU-pinned key — the check
+        ``publish_event`` makes for a relay, for a NON-relay request (the
+        space media cache). Fail-closed :class:`PermissionError` on an
+        unlisted / banned / unpinned space or a missing, malformed,
+        unknown-suite or failing signature. An early reject burns one dummy
+        verification, so its cost doesn't tell which spaces exist or are
+        banned. Returns the space row."""
+        try:
+            space = await self.listed_space(space_id)
+        except PermissionError:
+            _burn_dummy_verify(event_type, space_id, payload)
+            raise
+        try:
+            ok = verify_authority_event(
+                event_type=event_type,
+                space_id=space_id,
+                payload=payload,
+                authority_sig=authority_sig,
+                authority_sig_suite=authority_sig_suite,
+                space_public_key=bytes.fromhex(space.identity_public_key),
+            )
+        except (UnsupportedAuthoritySuite, ValueError) as exc:
+            _burn_dummy_verify(event_type, space_id, payload)
+            raise PermissionError(f"authority signature refused: {exc}") from exc
+        if not ok:
+            raise PermissionError("invalid authority signature")
+        return space
+
     @staticmethod
     def _assert_fresh_ts(ts: object) -> None:
         """Raise ``PermissionError`` unless *ts* is a fresh timestamp.
@@ -1823,8 +1876,14 @@ class GfsFederationService:
         # owner's to declare. Only the owner's name / description /
         # cover travel with the publish.
         next_status = "active" if inst.auto_accept else "pending"
-        if existing is not None and existing.status == "banned":
-            next_status = "banned"
+        if existing is not None and existing.status in ("banned", "active"):
+            # A moderator's decision sticks: a ban stays a ban, and an
+            # accepted space stays accepted — a routine re-publish must not
+            # demote it to pending (its media uploads would all be 403; a
+            # GFS that doesn't auto-accept relies on this, fourth review G2).
+            # Only a NEW row (or one still pending) starts from the
+            # household's auto-accept setting.
+            next_status = existing.status
         # Never trust the wire: an unknown / missing value is stored as the
         # fail-closed ``invite_only`` rather than verbatim.
         normalized_join_mode = normalize_join_mode(join_mode)

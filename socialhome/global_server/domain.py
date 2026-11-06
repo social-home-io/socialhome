@@ -345,6 +345,32 @@ class GfsMomentMedia:
 
 
 @dataclass(slots=True, frozen=True)
+class GfsSpaceMedia:
+    """One encrypted blob in the space media cache (GFS migration 0025).
+    The bytes are a file named ``blob_id`` under ``data_dir/space_media``; this
+    server can't open them. A cache entry: it expires, and it may be evicted
+    least-recently-fetched first when a byte cap is reached. Its address is
+    bound to its scope (:func:`socialhome.domain.gfs_space_media.space_media_address`),
+    so it belongs to exactly ONE scope — the quota, delete and ban key."""
+
+    blob_id: str
+    size: int
+    created_at: int
+    expires_at: int
+    #: Last fetch (the upload counts as one), moved at most once an hour.
+    last_fetched_at: int
+    #: ``"space"`` (a listed space) or ``"channel"`` (a private space's
+    #: opaque v_51 channel).
+    scope_kind: str = "space"
+    scope_id: str = ""
+    #: The fairness owner it counts against: ``("household", a space's
+    #: owning instance)`` or ``("client", the uploader's keyed address-bucket
+    #: hash)`` for a channel blob.
+    owner_kind: str = "household"
+    owner_id: str = ""
+
+
+@dataclass(slots=True, frozen=True)
 class GfsPendingDeleteCert:
     """One signed moment delete certificate still owed to a follower
     household (v_66), as the reconnect push reads it.

@@ -2048,6 +2048,373 @@ def _gfs_cluster_highlight_link(urls: list[str], tags: list[str]) -> None:
     )
 
 
+def _gfs_cluster_space_media(
+    urls: list[str], owner: tuple[str, bytes]
+) -> tuple[str, bytes, bytes]:
+    """Step 3h of ``gfs-cluster``: the space media cache on a shared data dir.
+
+    The owner publishes a space (pinning an authority key whose seed this
+    step holds), uploads one encrypted, padded blob via node 0 under that
+    authority, and node 1 must serve the SAME bytes (``immutable``, an hour
+    in a CDN) — files and rows live in the shared data dir / DB. The same
+    upload via node 1 then coalesces (``200 already_stored``), and a miss
+    via node 1 is ``404`` with ``no-store``."""
+    from socialhome.crypto import b64url_encode, ed25519_public_key, sign_ed25519
+    from socialhome.domain.gfs_space_media import (
+        AUTH_AUTHORITY,
+        SPACE_MEDIA_AUTH_HEADER,
+        SpaceMediaClaim,
+        SpaceMediaUploadAuth,
+    )
+    from socialhome.domain.gfs_space_media import space_media_address
+    from socialhome.moment_public_media import PAD_BUCKETS
+
+    iid, seed = owner
+    authority_seed = secrets.token_bytes(32)
+    space_id = secrets.token_hex(16)
+    body = {
+        "space_id": space_id,
+        "owning_instance": iid,
+        "name": "Cluster media space",
+        "description": "",
+        "about_markdown": "",
+        "cover_url": "",
+        "icon_url": "",
+        "min_age": 0,
+        "category": "general",
+        "join_mode": "open",
+        "allow_subscribers": True,
+        "accent_color": "#C8902F",
+        "primary_color": "#D2542A",
+        "identity_public_key": ed25519_public_key(authority_seed).hex(),
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
+    body["signature"] = b64url_encode(sign_ed25519(seed, canonical))
+    code, resp = _request(
+        f"{urls[0]}/gfs/spaces/{space_id}/publish", method="POST", body=body
+    )
+    if code not in (200, 201):
+        raise SystemExit(f"gfs-cluster: media space publish → {code} {resp!r}")
+
+    blob = secrets.token_bytes(PAD_BUCKETS[1] + 28)  # a 64 KiB padded bucket
+    # The address is bound to the scope (address suite sm1).
+    blob_id = space_media_address("space", space_id, blob)
+    now = int(time.time())
+
+    def _put(url: str) -> tuple[int, Any]:
+        claim = SpaceMediaClaim(
+            scope="space",
+            scope_id=space_id,
+            blob_id=blob_id,
+            size=len(blob),
+            expires_at=now + 86_400,
+            ts=int(time.time()),
+        )
+        auth = SpaceMediaUploadAuth(
+            claim=claim,
+            kind=AUTH_AUTHORITY,
+            sig=b64url_encode(
+                sign_ed25519(authority_seed, claim.authority_signing_bytes())
+            ),
+            sig_suite="ed25519",
+        )
+        req = urllib.request.Request(
+            # ONE scope-free path: the scope rides only in the signed claim.
+            f"{url}/gfs/media/{blob_id}",
+            data=blob,
+            method="PUT",
+            headers={
+                SPACE_MEDIA_AUTH_HEADER: auth.to_header(),
+                "Content-Type": "application/octet-stream",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return r.status, json.loads(r.read() or b"null")
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read().decode("utf-8", "replace")
+
+    def _get(url: str, bid: str) -> tuple[int, bytes, dict[str, str]]:
+        try:
+            with urllib.request.urlopen(
+                f"{url}/gfs/media/{bid}", timeout=15
+            ) as r:
+                return r.status, r.read(), dict(r.headers)
+        except urllib.error.HTTPError as exc:
+            return exc.code, b"", dict(exc.headers)
+
+    code, resp = _put(urls[0])
+    if code != 201:
+        raise SystemExit(f"gfs-cluster: space media upload via node 0 → {code} {resp!r}")
+    code, got, headers = _get(urls[1], blob_id)
+    if code != 200 or got != blob:
+        raise SystemExit(
+            f"gfs-cluster: space media fetch via node 1 → HTTP {code}, "
+            f"{len(got)} bytes (want the {len(blob)} uploaded via node 0) — "
+            "the nodes do not share the media dir / DB."
+        )
+    if headers.get("Cache-Control") != "public, max-age=3600, immutable":
+        raise SystemExit(
+            f"gfs-cluster: space media fetch Cache-Control {headers.get('Cache-Control')!r}"
+        )
+    code, resp = _put(urls[1])
+    if code != 200 or (resp or {}).get("status") != "already_stored":
+        raise SystemExit(
+            f"gfs-cluster: the same upload via node 1 → {code} {resp!r}; want "
+            "200 already_stored (one file, one blob, whichever node)."
+        )
+    code, _got, headers = _get(urls[1], "0" * 64)
+    if code != 404 or headers.get("Cache-Control") != "no-store":
+        raise SystemExit(
+            f"gfs-cluster: a space media miss → {code} "
+            f"{headers.get('Cache-Control')!r}; want 404 no-store"
+        )
+    print(
+        "  space media uploaded via node 0 is served byte-identical by node 1 "
+        "(immutable, 1 h); a re-upload via node 1 coalesces; a miss is no-store ✓"
+    )
+    return space_id, authority_seed, blob
+
+
+def _gfs_cluster_channel_media(
+    urls: list[str],
+    shared: tuple[str, bytes, bytes],
+    members: list[tuple[str, bytes]],
+) -> None:
+    """Step 3i of ``gfs-cluster``: the space media cache for a PRIVATE space's
+    opaque channel. A channel is registered via node 1 (anonymous, channel-key
+    signed — the GFS learns only its random id). While nobody holds a seat it
+    gets no media (uniform 403 — junk channels can't fill the cache). Then
+    its first epoch notice, a pass for ONE member household and its seat —
+    enough, the owner household never subscribes to its own channel; now one blob uploaded via node 0 under the channel key
+    is fetched byte-identical via node 1 at the scope-free
+    ``/gfs/media/{blob}``. Finally the scope-bound address (security review
+    v2): the space step's ciphertext uploaded under the channel is ANOTHER
+    blob at another address; the channel can't delete the space's blob; the
+    space's delete removes only its own blob on every node."""
+    from dataclasses import replace
+
+    from socialhome.crypto import b64url_encode, ed25519_public_key, sign_ed25519
+    from socialhome.domain.gfs_channel import ChannelSubscribeRequest
+    from socialhome.domain.gfs_space_media import (
+        AUTH_CHANNEL,
+        CHANNEL_MEDIA_DELETE_PREFIX,
+        SCOPE_CHANNEL,
+        SPACE_MEDIA_AUTH_HEADER,
+        SpaceMediaClaim,
+        SpaceMediaUploadAuth,
+    )
+    from socialhome.gfs_channel import (
+        issue_channel_pass,
+        new_channel_id,
+        sign_notice,
+        sign_register,
+        signing_bytes,
+    )
+    from socialhome.domain.gfs_space_media import space_media_address
+    from socialhome.moment_public_media import PAD_BUCKETS
+
+    _c, info = _request(f"{urls[1]}/gfs/info", timeout=10.0)
+    gfs_id = info["gfs_instance_id"]
+    channel_seed = secrets.token_bytes(32)
+    channel_id = new_channel_id()
+    reg = sign_register(
+        channel_seed=channel_seed,
+        channel_id=channel_id,
+        gfs_instance_id=gfs_id,
+        ts=datetime.now(timezone.utc).isoformat(),
+    )
+    code, resp = _request(
+        f"{urls[1]}/gfs/channels/register", method="POST", body=reg.to_wire()
+    )
+    if code not in (200, 201):
+        raise SystemExit(f"gfs-cluster: channel register via node 1 → {code} {resp!r}")
+
+    def _channel_put(url: str, data: bytes) -> tuple[int, Any]:
+        claim = SpaceMediaClaim(
+            scope=SCOPE_CHANNEL,
+            scope_id=channel_id,
+            blob_id=space_media_address(SCOPE_CHANNEL, channel_id, data),
+            size=len(data),
+            expires_at=int(time.time()) + 86_400,
+            ts=int(time.time()),
+        )
+        auth = SpaceMediaUploadAuth(
+            claim=claim,
+            kind=AUTH_CHANNEL,
+            sig=b64url_encode(
+                sign_ed25519(channel_seed, claim.channel_signing_bytes())
+            ),
+            sig_suite="ed25519",
+        )
+        req = urllib.request.Request(
+            f"{url}/gfs/media/{space_media_address(SCOPE_CHANNEL, channel_id, data)}",
+            data=data,
+            method="PUT",
+            headers={
+                SPACE_MEDIA_AUTH_HEADER: auth.to_header(),
+                "Content-Type": "application/octet-stream",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return r.status, json.loads(r.read() or b"null")
+        except urllib.error.HTTPError as exc:
+            return exc.code, exc.read().decode("utf-8", "replace")
+
+    def _get(url: str, bid: str) -> tuple[int, bytes]:
+        try:
+            with urllib.request.urlopen(f"{url}/gfs/media/{bid}", timeout=15) as r:
+                return r.status, r.read()
+        except urllib.error.HTTPError as exc:
+            return exc.code, b""
+
+    blob = secrets.token_bytes(PAD_BUCKETS[1] + 28)
+    blob_id = space_media_address(SCOPE_CHANNEL, channel_id, blob)
+    # Nobody holds a seat yet: no media (security review F1).
+    code, resp = _channel_put(urls[0], blob)
+    if code != 403:
+        raise SystemExit(
+            f"gfs-cluster: a channel nobody holds a seat in → {code} {resp!r}; "
+            "want the uniform 403"
+        )
+    # First epoch notice, then passes and seats for the member households.
+    epoch = 3
+    notice = sign_notice(
+        channel_seed=channel_seed,
+        channel_id=channel_id,
+        gfs_instance_id=gfs_id,
+        ts=datetime.now(timezone.utc).isoformat(),
+        epoch=epoch,
+        publish_mode="trusted",
+    )
+    code, resp = _request(
+        f"{urls[1]}/gfs/channels/epoch", method="POST", body=notice.to_wire()
+    )
+    if code not in (200, 201):
+        raise SystemExit(f"gfs-cluster: channel epoch notice → {code} {resp!r}")
+    def _seat(member: tuple[str, bytes]) -> None:
+        member_iid, member_seed = member
+        sub_req = ChannelSubscribeRequest(
+            instance_id=member_iid,
+            gfs_instance_id=gfs_id,
+            channel_id=channel_id,
+            ts=datetime.now(timezone.utc).isoformat(),
+            signature="",
+            channel_pass=issue_channel_pass(
+                channel_seed=channel_seed,
+                channel_id=channel_id,
+                epoch=epoch,
+                instance_pk=ed25519_public_key(member_seed),
+            ),
+        )
+        canonical = json.dumps(
+            sub_req.signing_payload(), separators=(",", ":"), sort_keys=True
+        ).encode()
+        sub_req = replace(
+            sub_req, signature=b64url_encode(sign_ed25519(member_seed, canonical))
+        )
+        code, resp = _request(
+            f"{urls[0]}/gfs/channels/subscribe", method="POST", body=sub_req.to_wire()
+        )
+        if code not in (200, 201):
+            raise SystemExit(
+                f"gfs-cluster: channel subscribe via node 0 → {code} {resp!r}"
+            )
+
+    # ONE member household's seat is enough (the owner never subscribes to
+    # its own channel — the typical invite-link private space; third
+    # review A4).
+    _seat(members[0])
+
+    code, resp = _channel_put(urls[0], blob)
+    if code != 201:
+        raise SystemExit(f"gfs-cluster: channel media upload via node 0 → {code} {resp!r}")
+    code, got = _get(urls[1], blob_id)
+    if code != 200 or got != blob:
+        raise SystemExit(
+            f"gfs-cluster: channel media fetch via node 1 → {code}, {len(got)} bytes"
+        )
+    print(
+        "  a private space's channel gets no media until a member household "
+        "holds a seat (403); with ONE seat its upload via node 0 (channel key, "
+        "opaque id) is served byte-identical by node 1 ✓"
+    )
+
+    # The scope-bound address (security review v2) across nodes.
+    from socialhome.authority_sig import (
+        AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
+        sign_authority_event,
+    )
+    from socialhome.domain.gfs_space_media import SCOPE_SPACE, media_delete_payload
+
+    space_id, authority_seed, shared_blob = shared
+    space_addr = space_media_address(SCOPE_SPACE, space_id, shared_blob)
+    channel_addr = space_media_address(SCOPE_CHANNEL, channel_id, shared_blob)
+    code, body = _channel_put(urls[1], shared_blob)
+    if code != 201 or channel_addr == space_addr:
+        raise SystemExit(
+            f"gfs-cluster: the space's ciphertext under a channel via node 1 → "
+            f"{code} {body!r}; want 201 — another blob at another address"
+        )
+    ts = int(time.time())
+    ch_body = media_delete_payload(SCOPE_CHANNEL, channel_id, space_addr, ts)
+    code, resp = _request(
+        f"{urls[0]}/gfs/media/{space_addr}/delete",
+        method="POST",
+        body={
+            "scope": SCOPE_CHANNEL,
+            "scope_id": channel_id,
+            "ts": ts,
+            "sig": b64url_encode(
+                sign_ed25519(
+                    channel_seed, signing_bytes(CHANNEL_MEDIA_DELETE_PREFIX, ch_body)
+                )
+            ),
+            "sig_suite": "ed25519",
+        },
+    )
+    if code != 200 or (resp or {}).get("deleted") is not False:
+        raise SystemExit(
+            f"gfs-cluster: the channel deleting the SPACE's blob → {code} {resp!r}; "
+            "want deleted: false (not its scope's blob)"
+        )
+    code, still = _get(urls[1], space_addr)
+    if code != 200 or still != shared_blob:
+        raise SystemExit(f"gfs-cluster: the space's blob after the channel's try → {code}")
+    signed = sign_authority_event(
+        event_type=AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
+        space_id=space_id,
+        payload=media_delete_payload(SCOPE_SPACE, space_id, space_addr, ts),
+        space_seed=authority_seed,
+    )
+    code, resp = _request(
+        f"{urls[1]}/gfs/media/{space_addr}/delete",
+        method="POST",
+        body={
+            "scope": SCOPE_SPACE,
+            "scope_id": space_id,
+            "ts": ts,
+            "sig": signed["authority_sig"],
+            "sig_suite": signed["authority_sig_suite"],
+        },
+    )
+    if code != 200 or (resp or {}).get("deleted") is not True:
+        raise SystemExit(f"gfs-cluster: the space's delete via node 1 → {code} {resp!r}")
+    code, _gone = _get(urls[0], space_addr)
+    if code != 404:
+        raise SystemExit(f"gfs-cluster: after the space's delete node 0 still serves it ({code})")
+    code, kept = _get(urls[0], channel_addr)
+    if code != 200 or kept != shared_blob:
+        raise SystemExit(f"gfs-cluster: the channel's own blob after the space's delete → {code}")
+    print(
+        "  the same ciphertext under a channel is another blob at another "
+        "address; the channel can't delete the space's; the space's delete via "
+        "node 1 removes only its own on every node ✓"
+    )
+
+
 def cmd_gfs_cluster() -> None:
     """Prove a MULTI-PROCESS GFS cluster serves writes without deadlocking.
 
@@ -2382,6 +2749,11 @@ def cmd_gfs_cluster() -> None:
         # 3g. A public-highlight link through a round-robin balancer: every
         # request of a session reaches the node that holds it.
         _gfs_cluster_highlight_link(urls, node_ids)
+        # 3h. The space media cache: an upload via one node is served by
+        # another (shared data dir + DB), and a re-upload coalesces.
+        shared_media = _gfs_cluster_space_media(urls, clients[0])
+        # 3i. …and for a private space's opaque channel.
+        _gfs_cluster_channel_media(urls, shared_media, clients[:1])
     except BaseException:
         _gfs_cluster_down(preserve_logs=True)
         raise

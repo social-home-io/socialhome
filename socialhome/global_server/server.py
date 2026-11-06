@@ -22,6 +22,7 @@ Console-script entry point: ``socialhome-global-server``. Sub-commands:
 from __future__ import annotations
 
 import getpass
+import hashlib
 import logging
 import os
 import secrets
@@ -44,6 +45,7 @@ from . import app_keys as K
 from .addressee import GfsAddressee
 from .admin import AdminAuth, build_admin_middleware, hash_password
 from .admin_service import GfsAdminService
+from .blob_store import FsBlobFiles
 from .channels import GfsChannelService, build_channel_rate_limit
 from .cluster import ClusterService
 from .cluster_relay import (
@@ -97,11 +99,14 @@ from .repositories import (
     SqliteGfsMomentKeyMailboxRepo,
     SqliteGfsMomentMediaRepo,
     SqliteGfsSpaceEpochRepo,
+    SqliteGfsSpaceMediaRepo,
     SqliteGfsUserPictureRepo,
     SqliteGfsUserRegistrationRepo,
 )
 from .routes import register_routes
 from .rtc_transport import GfsRtcSession
+from .space_media import GfsSpaceMediaStore, SpaceMediaLimits
+from .space_media_auth import GfsSpaceMediaAuth, build_space_media_rate_limit
 from .viewer_cors import install_viewer_cors
 from .ws_registry import GfsWebSocketRegistry
 
@@ -316,6 +321,7 @@ class GfsApp:
             moment_public_follows=SqliteGfsMomentFollowRepo(db),
             moment_key_mailbox=SqliteGfsMomentKeyMailboxRepo(db),
             moment_media=SqliteGfsMomentMediaRepo(db),
+            space_media=SqliteGfsSpaceMediaRepo(db),
             moment_delete_log=SqliteGfsMomentDeleteLogRepo(db),
             moment_public_pictures=SqliteGfsUserPictureRepo(db),
             envelope_queue=SqliteGfsEnvelopeQueueRepo(db),
@@ -347,12 +353,29 @@ class GfsApp:
             invite_repo=repos.invites,
             mint_limiter=SlidingWindowCounter(INVITE_MINT_MAX_PER_MINUTE),
         )
+        # The encrypted, short-lived space media cache: files under the
+        # SHARED data dir (``space_media/`` — beside, never under, the public
+        # ``media/`` branding dir), rows in the shared DB — any node serves
+        # what another took.
+        space_media = GfsSpaceMediaStore(
+            repos.space_media,
+            FsBlobFiles(Path(config.data_dir) / "space_media"),
+            SpaceMediaLimits.from_config(config),
+            node_id=config.cluster_node_id or config.instance_id,
+            # Keys the per-address byte budget's hash: the cluster shares the
+            # signing seed, so every node hashes an address alike — and the
+            # database never holds one.
+            ip_key_secret=hashlib.blake2b(
+                self.signing_seed, person=b"gfs-sm-ip-key", digest_size=32
+            ).digest(),
+        )
         admin = GfsAdminService(
             fed_repo=repos.federation,
             admin_repo=repos.admin,
             federation=federation,
             fraud_threshold=config.fraud_threshold,
             ws_registry=ws_registry,
+            space_media=space_media,
         )
         # This node's Ed25519 identity key (spec §24.10): signs cluster gossip
         # AND the ``/gfs/info`` capability block, and its public half is what
@@ -498,7 +521,15 @@ class GfsApp:
             ws_registry,
             cluster=cluster,
         )
+        # Uploads to the space media cache are authorized by the same checks
+        # as ``/gfs/publish`` and the member publishes — no new key.
+        space_media_auth = GfsSpaceMediaAuth(
+            federation=federation,
+            member_publish=member_publish,
+            channels=channels,
+        )
         maintenance = GfsMaintenanceScheduler(
+            space_media=space_media,
             moment_media=moment_media,
             moment_delete_log=moment_delete_log,
             admin_repo=repos.admin,
@@ -512,6 +543,8 @@ class GfsApp:
             cluster=cluster,
             maintenance=maintenance,
             moment_media=moment_media,
+            space_media=space_media,
+            space_media_auth=space_media_auth,
             moment_delete_log=moment_delete_log,
             admin_auth=AdminAuth(repos.admin),
             admin=admin,
@@ -552,6 +585,7 @@ class GfsApp:
             build_envelope_rate_limit(self.client_ip),
             build_member_publish_rate_limit(self.client_ip),
             build_channel_rate_limit(self.client_ip),
+            build_space_media_rate_limit(self.client_ip, nodes=live_nodes),
         ]
         app = web.Application(middlewares=middlewares)
         # ``nosniff``, ``X-Frame-Options: SAMEORIGIN``, ``Referrer-Policy``
@@ -595,6 +629,8 @@ class GfsApp:
         a[K.gfs_user_picture_repo_key] = self.repos.moment_public_pictures
         a[K.gfs_moment_media_store_key] = self.services.moment_media
         a[K.gfs_moment_delete_log_key] = self.services.moment_delete_log
+        a[K.gfs_space_media_store_key] = self.services.space_media
+        a[K.gfs_space_media_auth_key] = self.services.space_media_auth
         a[K.gfs_envelope_queue_repo_key] = self.repos.envelope_queue
         a[K.gfs_envelope_relay_key] = self.services.envelope_relay
         a[K.gfs_space_epoch_repo_key] = self.repos.space_epochs
@@ -615,7 +651,6 @@ class GfsApp:
         register_routes(
             self.app,
             admin_ui_dir=_ADMIN_UI_DIR,
-            media_dir=self.config.media_dir,
             public_static_dir=_PUBLIC_STATIC_DIR,
         )
 
