@@ -47,7 +47,7 @@ favours new pictures over old ones:
   the cache with however many spaces, or a channel flooded by its uploader,
   pushes out its own (security review F1, third review A3, fourth review
   G1); only an ACTIVE listed space takes uploads;
-* one client address uploads at most ``ip_bytes_per_hour`` (1 GiB) across
+* one client network prefix (IPv6 /48, IPv4 /24) uploads at most ``ip_bytes_per_hour`` (1 GiB) across
   every scope (``429 ip_media_quota``), cluster-wide in the shared database
   under a keyed hash of the address; a channel takes media only while it is
   used by enough member households (the auth's check);
@@ -161,9 +161,15 @@ PER_CLIENT_BODY_READS: int = 3
 #: close the node either (fourth review A5-residual).
 PER_PREFIX_BODY_READS: int = 6
 
-#: Body bytes one node holds BUFFERED at once across all clients (what has
-#: actually arrived, not the signed sizes — slow uploads hold little); past
-#: it a new upload is ``503 busy`` rather than another buffer.
+#: Upload bodies one node admits at once, all clients together (32 × the
+#: largest blob = the byte ceiling below) — stalled bodies hold a slot
+#: whatever they have sent, so they are counted, not their buffers (final
+#: check N2).
+MAX_BODIES_IN_FLIGHT: int = 32
+
+#: Signed bytes of every admitted body together — what they will buffer at
+#: most, counted from admission until ``store.put`` returns (final check
+#: N2); past it a new upload is ``503 busy`` rather than another buffer.
 MAX_BODY_BYTES_IN_FLIGHT: int = 256 * 1024 * 1024
 
 
@@ -230,21 +236,24 @@ class UploadSlot:
 
 
 class BodyReadGate:
-    """Which upload bodies a node reads right now: at most
-    :data:`PER_CLIENT_BODY_READS` per client address bucket, at most
-    :data:`PER_PREFIX_BODY_READS` per coarser network prefix, and new ones
-    only while the bytes actually buffered stay under
-    :data:`MAX_BODY_BYTES_IN_FLIGHT`. Non-blocking: a refused :meth:`enter`
-    is answered ``503 busy`` at once, never queued (third review A5, fourth
-    review A5-residual)."""
+    """Which upload bodies a node takes right now — from admission until
+    the upload is stored: at most :data:`PER_CLIENT_BODY_READS` per client
+    address bucket (/64), at most :data:`PER_PREFIX_BODY_READS` per coarser
+    network prefix (/48, IPv4 /24), at most :data:`MAX_BODIES_IN_FLIGHT` in
+    all, and their signed sizes together at most
+    :data:`MAX_BODY_BYTES_IN_FLIGHT` (what they will buffer — a stalled body
+    holds its slot whatever it has sent so far). Non-blocking: a refused
+    :meth:`enter` is answered ``503 busy`` at once, never queued (third
+    review A5, fourth review A5-residual, final check N2)."""
 
     __slots__ = (
-        "_buffered",
         "_by_client",
         "_by_prefix",
+        "_max_bodies",
         "_max_bytes",
         "_per_client",
         "_per_prefix",
+        "committed",
         "in_flight",
     )
 
@@ -253,30 +262,36 @@ class BodyReadGate:
         *,
         per_client: int = PER_CLIENT_BODY_READS,
         per_prefix: int = PER_PREFIX_BODY_READS,
+        max_bodies: int = MAX_BODIES_IN_FLIGHT,
         max_bytes: int = MAX_BODY_BYTES_IN_FLIGHT,
     ) -> None:
         self._per_client = per_client
         self._per_prefix = per_prefix
+        self._max_bodies = max_bodies
         self._max_bytes = max_bytes
         self._by_client: dict[str, int] = {}
         self._by_prefix: dict[str, int] = {}
-        self._buffered = 0
-        #: Bodies being read now.
+        #: Bodies admitted and not yet stored (or refused).
         self.in_flight = 0
+        #: Their signed sizes together.
+        self.committed = 0
 
-    def enter(self, client_key: str, prefix_key: str) -> bool:
+    def enter(self, client_key: str, prefix_key: str, size: int) -> bool:
         if self._by_client.get(client_key, 0) >= self._per_client:
             return False
         if self._by_prefix.get(prefix_key, 0) >= self._per_prefix:
             return False
-        if self._buffered >= self._max_bytes:
+        if self.in_flight >= self._max_bodies:
+            return False
+        if self.committed + size > self._max_bytes:
             return False
         self._by_client[client_key] = self._by_client.get(client_key, 0) + 1
         self._by_prefix[prefix_key] = self._by_prefix.get(prefix_key, 0) + 1
         self.in_flight += 1
+        self.committed += size
         return True
 
-    def leave(self, client_key: str, prefix_key: str) -> None:
+    def leave(self, client_key: str, prefix_key: str, size: int) -> None:
         for counts, key in (
             (self._by_client, client_key),
             (self._by_prefix, prefix_key),
@@ -287,14 +302,7 @@ class BodyReadGate:
             else:
                 counts.pop(key, None)
         self.in_flight = max(0, self.in_flight - 1)
-
-    def buffered(self, n: int) -> None:
-        """*n* more body bytes arrived and are held in memory."""
-        self._buffered += n
-
-    def release_buffer(self, n: int) -> None:
-        """A body's *n* buffered bytes are no longer held by the read."""
-        self._buffered = max(0, self._buffered - n)
+        self.committed = max(0, self.committed - size)
 
 
 class _Counters:
@@ -416,7 +424,10 @@ class GfsSpaceMediaStore:
         slot = UploadSlot(scope_kind=scope_kind, scope_id=scope_id, bucket=bucket)
         if client is None:
             return slot
-        ip_key = self._ip_key(client)
+        # The budget keys on the client's network PREFIX (/48, IPv4 /24): a
+        # /48 holds 65 536 /64s, each would otherwise get a fresh budget
+        # (final check N4).
+        ip_key = self.prefix_key(client)
         try:
             await self._reserve_ip_bytes(ip_key, bucket, size, now)
         except MediaRefused:
@@ -459,7 +470,7 @@ class GfsSpaceMediaStore:
         stores nothing new); without it this call admits the upload itself
         (for *client*'s address). *owner* is the fairness owner the blob
         counts against — ``("household", a space's owning instance)`` or
-        ``("client", the uploader's keyed address bucket)`` for a channel;
+        ``("client", the uploader's keyed network prefix)`` for a channel;
         without it the scope stands alone. Raises :class:`MediaRefused`."""
         now = int(time.time()) if now is None else now
         if reserved is None:
@@ -773,7 +784,7 @@ class GfsSpaceMediaStore:
         global order and never per scope — the least recently fetched (then
         oldest) blobs of the fairness owner holding the most bytes (a
         space's owning household across all its spaces; a channel blob's
-        uploader address bucket), counting the uploader's owner with the
+        uploader network prefix), counting the uploader's owner with the
         blob it is storing (a tie takes the uploader's own), until it is down
         to the next largest, then again. So a household flooding the cache —
         however many spaces it publishes — or a channel flooded by its

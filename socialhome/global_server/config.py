@@ -86,7 +86,7 @@ MAX_SPACE_MEDIA_TTL_SECONDS: int = 7 * 86_400
 DEFAULT_SPACE_MEDIA_SPACE_MAX_BYTES: int = 256 * 1024**2
 #: Blobs one space (or channel) may upload per hour (429 past it).
 DEFAULT_SPACE_MEDIA_SPACE_UPLOADS_PER_HOUR: int = 300
-#: Bytes one client address (an IPv6 /64) may upload per hour, whatever
+#: Bytes one client network prefix (an IPv6 /48, an IPv4 /24) may upload per hour, whatever
 #: scopes it uses — the backstop behind fair eviction (429 past it).
 DEFAULT_SPACE_MEDIA_IP_BYTES_PER_HOUR: int = 1024**3
 
@@ -847,14 +847,14 @@ peers   = []
 # max_bytes is all space media held here (0 turns the cache off and stops
 # advertising it); when an upload would pass it, the owner holding the most
 # bytes — a household across all its spaces, or for channel blobs the
-# uploader's address — loses its own least recently fetched blobs first —
+# uploader's network prefix — loses its own least recently fetched blobs first —
 # never one global order and never per scope, so one household can't
 # flush the others with many spaces. Blobs expire
 # after ttl_seconds (600 – 604800) whatever the uploader asks. One space (or
 # a private space's opaque channel) holds at most space_max_bytes live —
 # past it, its own least recently fetched blobs are dropped for the new
 # one — and uploads at most space_uploads_per_hour blobs an hour (429 past
-# it). One client address (an IPv6 /64) uploads at most ip_bytes_per_hour
+# it). One client network prefix (IPv6 /48, IPv4 /24) uploads at most ip_bytes_per_hour
 # bytes an hour across every scope (429 past it; counted in the shared
 # database, so cluster-wide). A private space's channel takes media while
 # a member household holds a seat in it. In a cluster every node shares

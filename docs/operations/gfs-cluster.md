@@ -100,7 +100,7 @@ rows in the shared `gfs.db`, so every node must mount the **same** data dir:
 whichever node took an upload, any node serves the fetch. Size
 `max_bytes` (default 5 GiB) to the disk that volume has — it is a cache, so
 the owner holding the most bytes — a household across all its spaces, or
-for channel blobs the uploader's address — loses its own least recently
+for channel blobs the uploader's network prefix (/48, IPv4 /24) — loses its own least recently
 fetched blobs first when it is full — never one global order and never per
 scope, so one household can't flush the others with many spaces (and a space or channel past `space_max_bytes` evicts
 its own least recently fetched). One client address uploads at most
