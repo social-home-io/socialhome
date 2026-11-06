@@ -2450,10 +2450,23 @@ class SqliteGfsSpaceMediaRepo:
         return [_space_media_claim(r) for r in rows]
 
     async def put_claim(self, claim: GfsSpaceMediaClaim) -> bool:
-        """Insert or replace the scope's claim, and raise the blob's expiry
-        to cover it (never lower it — another claim may hold it longer).
-        ``False`` when the blob row is not there (another node dropped it
-        meanwhile): the caller stores the blob again."""
+        """Insert or replace the scope's claim. The blob first: raise its
+        expiry to cover the claim (never lower it — another claim may hold
+        it longer) and mark the claim as a fetch, so a blob a new scope just
+        coalesced onto is not the next eviction victim. Then the claim, then
+        a re-check that the row is still there: an eviction that read its
+        candidates before the mark has a claim mark below this claim's
+        sequence number (it keeps the blob), one after it doesn't see the
+        blob as least recently fetched. ``False`` when the row is gone
+        (another node dropped it meanwhile): the caller stores the blob
+        again."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE gfs_space_media SET expires_at = MAX(expires_at, ?),"
+            " last_fetched_at = MAX(last_fetched_at, ?) WHERE blob_id=?",
+            (claim.expires_at, claim.created_at, claim.blob_id),
+        )
+        if not changed:
+            return False
         await self._db.enqueue(
             f"INSERT OR REPLACE INTO gfs_space_media_claims({_SPACE_MEDIA_CLAIM_COLS})"
             " VALUES(?,?,?,?,?,?)",
@@ -2466,12 +2479,7 @@ class SqliteGfsSpaceMediaRepo:
                 claim.expires_at,
             ),
         )
-        changed = await self._db.enqueue_rowcount(
-            "UPDATE gfs_space_media SET expires_at = MAX(expires_at, ?)"
-            " WHERE blob_id=?",
-            (claim.expires_at, claim.blob_id),
-        )
-        return changed > 0
+        return bool(await self.known_blob_ids([claim.blob_id]))
 
     async def delete_blob_if_unclaimed(self, blob_id: str) -> bool:
         """Drop the blob row only while no claim holds it — one statement,

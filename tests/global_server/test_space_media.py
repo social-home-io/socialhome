@@ -883,3 +883,33 @@ async def test_a_blob_claimed_on_another_node_survives_the_expiry_sweep(repo, tm
         repo.expired = real_expired  # type: ignore[method-assign]
     assert await a.read(blob_id_of(x), now=NOW + 21) == x
     assert {c.scope_id for c in await repo.claims_of(blob_id_of(x))} == {"s2"}
+
+
+# ── Stage B: a coalesced claim counts as a fetch ─────────────────────────
+
+
+async def test_a_coalesced_claim_counts_as_a_fetch_for_eviction(make, repo):
+    """s2 coalesces onto s1's oldest blob X (already_stored); the next upload
+    must not evict X first — s2's readers were just told it is there."""
+    store = make(max_bytes=3 * SMALL)
+    x, y, z, w = _blob(), _blob(), _blob(), _blob()
+    await _put(store, x, space="s1", now=NOW)
+    await _put(store, y, space="s1", now=NOW + 1)
+    await _put(store, z, space="s1", now=NOW + 2)
+    assert await _put(store, x, space="s2", now=NOW + 3) is False
+    assert await _put(store, w, space="s3", now=NOW + 4) is True
+    assert await store.read(blob_id_of(x), now=NOW + 5) == x
+    assert await store.read(blob_id_of(y), now=NOW + 5) is None
+
+
+async def test_a_coalesced_claim_counts_as_a_fetch_in_its_own_scope(make, repo):
+    """In s2's own budget, the blob it just coalesced onto is its newest,
+    not its least recently fetched."""
+    store = make(space_max_bytes=2 * SMALL)
+    x, a, b = _blob(), _blob(), _blob()
+    await _put(store, x, space="s1", now=NOW)
+    await _put(store, a, space="s2", now=NOW + 10)
+    assert await _put(store, x, space="s2", now=NOW + 11) is False
+    await _put(store, b, space="s2", now=NOW + 12)
+    assert "s2" in {c.scope_id for c in await repo.claims_of(blob_id_of(x))}
+    assert await repo.claims_of(blob_id_of(a)) == []

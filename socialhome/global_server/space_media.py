@@ -41,7 +41,8 @@ favours new pictures over old ones:
 
 A fetch marks the blob at most once an hour (:data:`FETCH_TOUCH_INTERVAL_S`)
 — popular blobs cost one write an hour, not one per fetch; the upload counts
-as a fetch, so a new blob is not the first to go.
+as a fetch — a new blob, and a new claim coalescing onto a held one — so
+what a household was just told is there is not the first to go.
 
 Every node of a cluster shares the data dir and the database, so whichever
 node took an upload, any node serves it. The upload rate is reserved

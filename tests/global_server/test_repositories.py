@@ -1869,9 +1869,47 @@ async def test_space_media_reserve_upload_is_atomic_and_refundable(space_media):
 async def test_space_media_put_claim_says_whether_the_blob_row_is_there(space_media):
     await space_media.add_blob(_media_blob(1))
     assert await space_media.put_claim(_media_claim(1)) is True
-    # The row went (another node dropped it): the claim lands, the answer
+    # The row went (another node dropped it): no claim lands, the answer
     # tells the caller to store the blob again.
     assert await space_media.put_claim(_media_claim(2)) is False
+    assert await space_media.claims_of(f"{2:064x}") == []
+
+
+async def test_space_media_a_claim_counts_as_a_fetch(space_media):
+    """A coalesced claim marks the blob as fetched at its time (never
+    backwards), so it is not the next eviction victim."""
+    await space_media.add_blob(_media_blob(1, created=1_000))
+    await space_media.add_blob(_media_blob(2, created=1_100))
+    await space_media.put_claim(_media_claim(1, space="s2", created=1_500))
+    got = await space_media.get_blob(f"{1:064x}")
+    assert got is not None and got.last_fetched_at == 1_500
+    lru = [m.blob_id for m in await space_media.least_recently_fetched(limit=2)]
+    assert lru == [f"{2:064x}", f"{1:064x}"]
+    await space_media.put_claim(_media_claim(1, space="s3", created=1_200))
+    got = await space_media.get_blob(f"{1:064x}")
+    assert got is not None and got.last_fetched_at == 1_500
+
+
+async def test_space_media_put_claim_rechecks_the_row_after_its_insert(
+    space_media,
+):
+    """The row dropped between the blob update and the claim insert (another
+    node's drop) answers False, so the caller stores the bytes again."""
+    await space_media.add_blob(_media_blob(1))
+    real_enqueue = space_media._db.enqueue
+
+    async def drop_then_insert(sql, params=()):
+        if sql.startswith("INSERT OR REPLACE INTO gfs_space_media_claims"):
+            await real_enqueue(
+                "DELETE FROM gfs_space_media WHERE blob_id=?", (f"{1:064x}",)
+            )
+        return await real_enqueue(sql, params)
+
+    space_media._db.enqueue = drop_then_insert
+    try:
+        assert await space_media.put_claim(_media_claim(1)) is False
+    finally:
+        space_media._db.enqueue = real_enqueue
 
 
 async def test_space_media_blob_row_goes_only_without_claims(space_media):
@@ -1884,7 +1922,11 @@ async def test_space_media_blob_row_goes_only_without_claims(space_media):
 
 
 async def test_space_media_a_claim_without_its_blob_holds_no_budget(space_media):
-    await space_media.put_claim(_media_claim(1, size=500))
+    # A claim whose blob row went afterwards (another node's drop race).
+    await _held_blob(space_media, 1, size=500)
+    await space_media._db.enqueue(
+        "DELETE FROM gfs_space_media WHERE blob_id=?", (f"{1:064x}",)
+    )
     await _held_blob(space_media, 2, size=100)
     assert await space_media.scope_usage("space", "s1", now=2_000) == 100
     assert await space_media.prune_orphan_claims() == 1
