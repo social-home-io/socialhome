@@ -1,7 +1,7 @@
 /* Media cache card on the GFS admin Overview — reads the ``space_media``
    block of ``GET /admin/api/overview``: used of max (with a bar), blobs, the
    TTL, this node's evictions and refusals, and a clear turned-off state. */
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest'
 import { render, waitFor } from '@testing-library/preact'
 import { MediaCacheCard, formatBytes, formatTtl, type SpaceMediaStats } from './MediaCache'
 import { OverviewPanel } from './Overview'
@@ -30,6 +30,15 @@ describe('formatBytes', () => {
     expect(formatBytes(256 * MIB)).toBe('256 MiB')
     expect(formatBytes(5 * GIB)).toBe('5 GiB')
     expect(formatBytes(1.25 * GIB)).toBe('1.3 GiB')
+  })
+
+  it('rounds before it picks the unit and the decimals', () => {
+    // 1023.6 KiB rounds to 1024 KiB: that is the next unit.
+    expect(formatBytes(Math.round(1023.6 * 1024))).toBe('1.0 MiB')
+    // 9.96 MiB rounds to 10.0: no decimal at 10 and above.
+    expect(formatBytes(Math.round(9.96 * MIB))).toBe('10 MiB')
+    expect(formatBytes(1023.6)).toBe('1.0 KiB')
+    expect(formatBytes(1023 * 1024)).toBe('1023 KiB')
   })
 })
 
@@ -115,12 +124,15 @@ describe('MediaCacheCard', () => {
 })
 
 function stubFetch(body: unknown) {
-  global.fetch = vi.fn(async () =>
-    new Response(JSON.stringify(body), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    }),
-  ) as typeof fetch
+  vi.stubGlobal(
+    'fetch',
+    vi.fn(async () =>
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ),
+  )
 }
 
 const BASE = {
@@ -131,6 +143,10 @@ const BASE = {
 
 beforeEach(() => {
   vi.restoreAllMocks()
+})
+
+afterEach(() => {
+  vi.unstubAllGlobals()
 })
 
 describe('OverviewPanel media cache', () => {

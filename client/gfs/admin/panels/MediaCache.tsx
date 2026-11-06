@@ -17,8 +17,12 @@ export interface SpaceMediaStats {
 
 const UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
 
-/** Bytes in binary units: whole numbers below 10 of a unit get one
- *  decimal (``1.5 MiB``), larger ones none (``256 MiB``). */
+const oneDecimal = (v: number) => Math.round(v * 10) / 10
+
+/** Bytes in binary units: below 10 of a unit one decimal (``1.5 MiB``)
+ *  unless whole (``5 GiB``), larger ones none (``256 MiB``). Rounded first:
+ *  a value that rounds to 1024 is the next unit (``1.0 MiB``, never
+ *  ``1024 KiB``) and one that rounds to 10 drops its decimal (``10 MiB``). */
 export function formatBytes(bytes: number): string {
   let value = Math.max(0, bytes)
   let unit = 0
@@ -26,9 +30,14 @@ export function formatBytes(bytes: number): string {
     value /= 1024
     unit += 1
   }
+  let shown = value < 10 ? oneDecimal(value) : Math.round(value)
+  if (shown >= 1024 && unit < UNITS.length - 1) {
+    value /= 1024
+    unit += 1
+    shown = oneDecimal(value)
+  }
   if (unit === 0) return `${Math.round(value)} B`
-  const text =
-    value < 10 && !Number.isInteger(value) ? value.toFixed(1) : String(Math.round(value))
+  const text = shown < 10 && !Number.isInteger(value) ? shown.toFixed(1) : String(Math.round(shown))
   return `${text} ${UNITS[unit]}`
 }
 
