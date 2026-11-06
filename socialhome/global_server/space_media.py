@@ -72,7 +72,7 @@ node's lock, but an upload on ANOTHER node could store that blob between the
 re-check and the unlink — the same row-without-file, healed the same way.
 The orphan-file sweep runs on one node at a time (a lease row) and walks the
 shared directory a batch at a time. The bytes go through
-:class:`.blob_store.BlobFiles` (files under ``media_dir/spaces`` today), so
+:class:`.blob_store.BlobFiles` (files under ``data_dir/space_media`` today — never under the public ``media/`` mount), so
 an object store can replace the filesystem without touching this class.
 
 Counters of evictions and refusals (:meth:`GfsSpaceMediaStore.stats`) are

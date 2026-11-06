@@ -347,7 +347,7 @@ class GfsMomentMedia:
 @dataclass(slots=True, frozen=True)
 class GfsSpaceMedia:
     """One encrypted blob in the space media cache (GFS migration 0025).
-    The bytes are a file named ``blob_id`` under ``media_dir/spaces``; this
+    The bytes are a file named ``blob_id`` under ``data_dir/space_media``; this
     server can't open them. A cache entry: it expires, and it may be evicted
     least-recently-fetched first when the operator's byte cap is reached.
     Which scopes hold it is :class:`GfsSpaceMediaClaim`."""

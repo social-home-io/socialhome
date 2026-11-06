@@ -353,11 +353,12 @@ class GfsApp:
             mint_limiter=SlidingWindowCounter(INVITE_MINT_MAX_PER_MINUTE),
         )
         # The encrypted, short-lived space media cache: files under the
-        # SHARED data dir (``media_dir/spaces``), rows in the shared DB — any
-        # node serves what another took.
+        # SHARED data dir (``space_media/`` — beside, never under, the public
+        # ``media/`` branding dir), rows in the shared DB — any node serves
+        # what another took.
         space_media = GfsSpaceMediaStore(
             repos.space_media,
-            FsBlobFiles(Path(config.media_dir) / "spaces"),
+            FsBlobFiles(Path(config.data_dir) / "space_media"),
             SpaceMediaLimits.from_config(config),
             node_id=config.cluster_node_id or config.instance_id,
         )
@@ -641,7 +642,6 @@ class GfsApp:
         register_routes(
             self.app,
             admin_ui_dir=_ADMIN_UI_DIR,
-            media_dir=self.config.media_dir,
             public_static_dir=_PUBLIC_STATIC_DIR,
         )
 

@@ -3498,7 +3498,7 @@ with its latest claim.
 **Scope of this change.** GFS side only: storage (GFS migration `0025`,
 `gfs_space_media` + `gfs_space_media_claims` + the hourly upload counts
 `gfs_space_media_uploads` + the trigger-kept `gfs_space_media_totals`; the
-bytes are files under `media_dir/spaces/`, named by their SHA-256), the routes below,
+bytes are files under `data_dir/space_media/` — never under the public `/media/` branding route, which serves only top-level branding files — named by their SHA-256), the routes below,
 the capability, the sweep and the admin counts.
 
 **Routes.**

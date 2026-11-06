@@ -54,6 +54,7 @@ from .admin import (
     AdminSpaceActionView,
     AdminSpaceCollectionView,
     AdminUiIndexView,
+    BrandingMediaView,
 )
 from .channels import (
     ChannelEpochView,
@@ -154,13 +155,11 @@ def register_routes(
     app: web.Application,
     *,
     admin_ui_dir: Path,
-    media_dir: str,
     public_static_dir: Path | None = None,
 ) -> None:
     """Mount every GFS view onto *app*.
 
-    Accepts ``admin_ui_dir`` for the admin-static mount, ``media_dir``
-    (absolute) for the public ``/media/`` file mount, and the optional
+    Accepts ``admin_ui_dir`` for the admin-static mount and the optional
     ``public_static_dir`` that holds the §highlights_public viewer
     bundle. Tests pass ``None`` for the static dir when they don't
     care about the public landing JS.
@@ -364,8 +363,9 @@ def register_routes(
     app.router.add_view("/admin", AdminUiIndexView)
     if admin_ui_dir.is_dir():
         app.router.add_static("/admin/static/", admin_ui_dir)
-    if Path(media_dir).is_dir():
-        app.router.add_static("/media/", media_dir)
+    # Branding images only — top-level files of ``media/``, one segment, no
+    # dot-file. Never a static mount of the dir: blobs live beside it.
+    app.router.add_view("/media/{name}", BrandingMediaView)
     if public_static_dir is not None and public_static_dir.is_dir():
         # Hosts the vanilla-JS public-viewer bundle for §highlights_public.
         # The landing page references ``/static/highlight_public_viewer.js``.

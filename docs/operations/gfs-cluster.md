@@ -95,7 +95,7 @@ names no node.
 ## Space media cache on a shared data dir
 
 The space media cache (`[space_media]`, [protocol/discovery.md](../protocol/discovery.md#space-media-cache-on-a-gfs-capability-space_media))
-keeps encrypted blobs as files under `<data_dir>/media/spaces/` and their
+keeps encrypted blobs as files under `<data_dir>/space_media/` (not under the public `media/` branding dir) and their
 rows in the shared `gfs.db`, so every node must mount the **same** data dir:
 whichever node took an upload, any node serves the fetch. Size
 `max_bytes` (default 5 GiB) to the disk that volume has — it is a cache, so

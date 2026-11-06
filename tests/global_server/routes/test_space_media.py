@@ -558,3 +558,20 @@ async def test_identical_bytes_from_another_scope_coalesce_and_survive_its_delet
     r = await gfs.post(_ch_url(data) + "/delete", json=_channel_delete_body(data))
     assert await r.json() == {"deleted": True}
     assert (await gfs.get(_get_url(data))).status == 404
+
+
+# ── Security review F2: no blob behind the public static mount ───────────
+
+
+async def test_space_blobs_are_not_served_by_the_public_media_mount(gfs, tmp_dir):
+    """A space blob is served only by ``GET /gfs/media/{id}`` (ban, expiry,
+    tombstone and headers apply) — never as a static file, and it isn't
+    stored under the public ``media/`` dir at all."""
+    data = os.urandom(SMALL)
+    r = await gfs.put(
+        _put_url(data), data=data, headers=_authority_header(_claim(data))
+    )
+    assert r.status == 201
+    assert (await gfs.get(f"/media/spaces/{blob_id_of(data)}")).status == 404
+    assert not (tmp_dir / "media" / "spaces" / blob_id_of(data)).exists()
+    assert (tmp_dir / "space_media" / blob_id_of(data)).exists()

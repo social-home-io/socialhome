@@ -305,3 +305,28 @@ async def test_the_expiry_sweep_removes_stale_temporary_files(gfs_db, tmp_dir):
     await store.prune_expired()
     assert not stale.exists()
     assert fresh.exists()
+
+
+async def test_moment_blobs_are_not_served_by_the_public_media_mount(client, author):
+    """Security review F2: ``/media/`` is the branding mount. A moment blob
+    is served only by ``/gfs/moments/media/{id}`` (its expiry, its headers),
+    never as a static file under ``/media/moments/``."""
+    blob = _blob()
+    bid = blob_id_of(blob)
+    r = await client.put(
+        f"/gfs/moments/media/{bid}", data=blob, headers=_headers(author, bid)
+    )
+    assert r.status == 201
+    assert (await client.get(f"/gfs/moments/media/{bid}")).status == 200
+    assert (await client.get(f"/media/moments/{bid}")).status == 404
+
+
+async def test_the_media_mount_serves_only_top_level_branding_files(client, tmp_dir):
+    media = tmp_dir / "media"
+    (media / "hero.webp").write_bytes(b"RIFFwebp")
+    (media / ".hidden").write_bytes(b"x")
+    r = await client.get("/media/hero.webp")
+    assert r.status == 200
+    assert await r.read() == b"RIFFwebp"
+    for path in ("/media/.hidden", "/media/moments", "/media/%2E%2E/gfs.db"):
+        assert (await client.get(path)).status == 404, path

@@ -41,7 +41,7 @@
 --    it under its own space, then delete it from under the real one).
 -- 3. Smallest change, all new tables, no change to an existing one:
 --    * ``gfs_space_media`` — one row per stored blob (the bytes are files
---      under ``media_dir/spaces/`` named by their SHA-256);
+--      under ``data_dir/space_media/`` (never under the public ``media/`` dir) named by their SHA-256);
 --    * ``gfs_space_media_claims`` — which scopes hold each blob; identical
 --      bytes uploaded for another scope add a claim, never a copy, and a
 --      blob's file goes only when its last claim does;
