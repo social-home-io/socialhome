@@ -48,10 +48,16 @@ from ..domain.gfs_space_media import (
     require_space_media_sig_suite,
     space_media_delete_payload,
 )
+from .public import ClientIpResolver, build_window_limiter
 
 if TYPE_CHECKING:
     from .federation import GfsFederationService
     from .member_publish import GfsMemberPublishService
+
+#: Uploads + deletes per client address per minute, shed BEFORE any
+#: signature work (the per-space quota needs an authorized request first).
+#: A busy household uploads a handful of pictures per post.
+SPACE_MEDIA_MAX_PER_MINUTE_PER_IP: int = 120
 
 #: How far an upload's or delete's ``ts`` may be from this server's clock —
 #: the window of every signed household request.
@@ -151,3 +157,22 @@ class GfsSpaceMediaAuth:
     def _require_fresh(self, ts: int) -> None:
         if abs(ts - self._clock()) > SPACE_MEDIA_TS_SKEW_S:
             raise PermissionError("stale or future timestamp")
+
+
+def is_space_media_write_path(path: str) -> bool:
+    """``/gfs/spaces/{id}/media/{blob}`` and its ``/delete`` — not the
+    public fetch ``/gfs/spaces/media/{blob}`` (a CDN serves most of those)."""
+    parts = path.split("/")
+    return (
+        len(parts) in (6, 7)
+        and parts[1:3] == ["gfs", "spaces"]
+        and parts[4] == "media"
+        and (len(parts) == 6 or parts[6] == "delete")
+    )
+
+
+def build_space_media_rate_limit(resolver: ClientIpResolver):
+    """Per-IP limiter for the space media upload and delete routes."""
+    return build_window_limiter(
+        resolver, SPACE_MEDIA_MAX_PER_MINUTE_PER_IP, is_space_media_write_path
+    )

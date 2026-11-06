@@ -32,6 +32,7 @@ from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.federation import GfsFederationService
 from socialhome.global_server.public import PUBLISH_MAX_PER_MINUTE
+from socialhome.moment_public_media import MAX_BLOB_BYTES
 
 
 @pytest.fixture
@@ -323,6 +324,9 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         "payload_zlib1": True,
         # …and with the preset dictionary (``zlib1+dict1``), the same gate.
         "payload_zlib1_dict1": True,
+        # The encrypted, short-lived space media cache and the limits a
+        # household needs (largest blob, how long one is kept).
+        "space_media": {"max_blob_bytes": MAX_BLOB_BYTES, "ttl_s": 259_200},
         # ``POST /gfs/proof`` needs a real base_url to bind; this fixture's
         # env fallback infers ``http://0.0.0.0:8765`` (a wildcard bind
         # address), so the GFS honestly does not offer it.

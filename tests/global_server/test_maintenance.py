@@ -259,3 +259,28 @@ async def test_a_delete_cert_prune_failure_is_contained():
     )
     await sched._maintain_once()
     assert len(admin.purge_calls) == 1
+
+
+async def test_maintain_once_sweeps_expired_space_media():
+    """The space media cache: blobs past their short TTL go every sweep —
+    the stub stands in for the store, which has the same ``prune_expired``."""
+    media = _StubMomentMedia()
+    sched = GfsMaintenanceScheduler(
+        admin_repo=_StubAdminRepo(),
+        highlight_repo=_StubHighlightRepo(),
+        space_media=media,  # type: ignore[arg-type]
+    )
+    await sched._maintain_once()
+    assert len(media.prune_calls) == 1
+
+
+async def test_a_space_media_sweep_failure_is_contained():
+    log_ = _StubDeleteLog()
+    sched = GfsMaintenanceScheduler(
+        admin_repo=_StubAdminRepo(),
+        highlight_repo=_StubHighlightRepo(),
+        space_media=_StubMomentMedia(boom=True),  # type: ignore[arg-type]
+        moment_delete_log=log_,  # type: ignore[arg-type]
+    )
+    await sched._maintain_once()
+    assert len(log_.prune_calls) == 1

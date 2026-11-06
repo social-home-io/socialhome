@@ -8,6 +8,7 @@ from dataclasses import asdict
 import orjson
 from aiohttp import web
 
+from ...domain.gfs_space_media import SPACE_MEDIA_CAPABILITY
 from ...domain.space_item import (
     PAYLOAD_SUITE_FIELD,
     PAYLOAD_SUITE_UNSUPPORTED_ERROR,
@@ -250,6 +251,15 @@ class GfsInfoView(GfsBaseView):
             "payload_zlib1_dict1": True,
             PROOF_CAPABILITY: _can_prove(cfg, cluster),
         }
+        # The encrypted, short-lived space media cache
+        # (``/gfs/spaces/{id}/media/{blob}``, :mod:`..space_media`), with the
+        # limits a household needs: the largest blob it takes and how long it
+        # keeps one. Signed: a household uploads space media only to a server
+        # that proved it; an older household ignores the entry. Absent while
+        # the operator has the cache off (``[space_media] max_bytes = 0``).
+        space_media = self.svc(K.gfs_space_media_store_key).limits.capability()
+        if space_media is not None:
+            capabilities[SPACE_MEDIA_CAPABILITY] = space_media
         if cfg.instance_id_aliases:
             # The former ids this server answers to (``instance_id_aliases``),
             # SIGNED: a household pinned to one of them adopts

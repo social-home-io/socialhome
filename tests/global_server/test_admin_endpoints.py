@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -12,11 +14,14 @@ from socialhome.global_server.admin import hash_password
 from socialhome.global_server.app_keys import (
     gfs_admin_repo_key,
     gfs_fed_repo_key,
+    gfs_space_media_store_key,
     gfs_ws_registry_key,
 )
+from socialhome.global_server.blob_store import BLOB_OVERHEAD
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.server import create_gfs_app
+from socialhome.moment_public_media import PAD_BUCKETS, blob_id_of
 
 
 def _config(tmp_dir):
@@ -70,6 +75,33 @@ async def test_overview_counts_frames_pushed_to_household_sockets(client):
     assert fanout["total"] == {"frames": 1, "bytes": 5823}
     assert fanout["by_kind"] == {"relay:space_item": {"frames": 1, "bytes": 5823}}
     assert fanout["by_size"] == {"4k": {"frames": 1, "bytes": 5823}}
+
+
+async def test_overview_counts_the_space_media_cache(client, tmp_dir):
+    """Blobs / bytes held (shared database) and this node's refusals."""
+    store = client._app[gfs_space_media_store_key]
+    data = os.urandom(PAD_BUCKETS[1] + BLOB_OVERHEAD)
+    now = int(time.time())
+    await store.put(
+        space_id="s1",
+        blob_id=blob_id_of(data),
+        data=data,
+        expires_at=now + 60,
+        now=now,
+    )
+    resp = await client.get("/admin/api/overview")
+    media = (await resp.json())["space_media"]
+    assert media == {
+        "enabled": True,
+        "stored_blobs": 1,
+        "stored_bytes": len(data),
+        "max_bytes": 5 * 1024**3,
+        "ttl_seconds": 3 * 86_400,
+        "evicted_blobs": 0,
+        "evicted_bytes": 0,
+        "refused_quota": 0,
+        "refused_too_large": 0,
+    }
 
 
 # ── Clients ────────────────────────────────────────────────────────────

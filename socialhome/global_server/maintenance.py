@@ -33,6 +33,7 @@ if TYPE_CHECKING:
         AbstractGfsHighlightPublicationRepo,
         AbstractGfsInviteRepo,
     )
+    from .space_media import GfsSpaceMediaStore
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +50,7 @@ class GfsMaintenanceScheduler:
         "_invite_repo",
         "_moment_delete_log",
         "_moment_media",
+        "_space_media",
         "_stop",
         "_task",
     )
@@ -63,8 +65,11 @@ class GfsMaintenanceScheduler:
         channel_repo: AbstractGfsChannelRepo | None = None,
         moment_media: GfsMomentMediaStore | None = None,
         moment_delete_log: MomentDeleteLog | None = None,
+        space_media: GfsSpaceMediaStore | None = None,
         interval_seconds: float = 3600.0,  # once per hour
     ) -> None:
+        #: The space media cache: blobs past their (short) TTL.
+        self._space_media = space_media
         #: Moment delete certificates (v_66): pruned 30 days after written.
         self._moment_delete_log = moment_delete_log
         #: Encrypted moment media (v_63): blobs past their moment's life.
@@ -184,6 +189,17 @@ class GfsMaintenanceScheduler:
             except Exception as exc:
                 log.warning(
                     "gfs maintenance: prune moment media failed: %s",
+                    exc,
+                    exc_info=True,
+                )
+        if self._space_media is not None:
+            try:
+                spaces = await self._space_media.prune_expired(now)
+                if spaces:
+                    log.debug("gfs maintenance: dropped %d expired space blobs", spaces)
+            except Exception as exc:
+                log.warning(
+                    "gfs maintenance: prune space media failed: %s",
                     exc,
                     exc_info=True,
                 )

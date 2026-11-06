@@ -25,6 +25,7 @@ if TYPE_CHECKING:
         AbstractGfsAdminRepo,
         AbstractGfsFederationRepo,
     )
+    from .space_media import GfsSpaceMediaStore
     from .ws_registry import GfsWebSocketRegistry
 
 
@@ -46,6 +47,7 @@ class GfsAdminService:
         "_fed_repo",
         "_federation",
         "_fraud_threshold",
+        "_space_media",
         "_ws_registry",
     )
 
@@ -57,8 +59,11 @@ class GfsAdminService:
         federation: GfsFederationService,
         fraud_threshold: int = 5,
         ws_registry: GfsWebSocketRegistry | None = None,
+        space_media: GfsSpaceMediaStore | None = None,
     ) -> None:
         self._fed_repo = fed_repo
+        #: The space media cache, for its counts in the overview.
+        self._space_media = space_media
         self._admin_repo = admin_repo
         self._federation = federation
         self._fraud_threshold = fraud_threshold
@@ -103,6 +108,13 @@ class GfsAdminService:
             "fanout": (
                 self._ws_registry.fanout_stats.snapshot()
                 if self._ws_registry is not None
+                else None
+            ),
+            # The space media cache: blobs / bytes held (shared database),
+            # evictions and refusals by quota or size (this node, since start).
+            "space_media": (
+                await self._space_media.stats()
+                if self._space_media is not None
                 else None
             ),
         }
