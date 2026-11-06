@@ -80,7 +80,6 @@ from ..domain.federation import GfsConnection, GfsSpacePublication
 from ..domain.gfs_server import GfsServer
 from ..domain.gfs_space_media import (
     MEDIA_SCOPES,
-    SCOPE_CHANNEL,
     SCOPE_SPACE,
     SPACE_MEDIA_AUTH_HEADER,
     SPACE_MEDIA_CAPABILITY,
@@ -127,10 +126,6 @@ log = logging.getLogger(__name__)
 
 #: How long one space media upload may take (an 8 MiB blob on a home uplink).
 SPACE_MEDIA_PUT_TIMEOUT_S: float = 120.0
-
-
-#: Upload route per scope (``…/{scope_id}/media/{blob_id}``).
-_MEDIA_SCOPE_PATH: dict[str, str] = {SCOPE_SPACE: "spaces", SCOPE_CHANNEL: "channels"}
 
 
 def _space_media_limit(caps: dict) -> tuple[int, frozenset[str]] | None:
@@ -3311,25 +3306,22 @@ class GfsConnectionService:
         self,
         conn: GfsConnection,
         *,
-        scope: str,
-        scope_id: str,
         blob_id: str,
         blob: bytes,
         auth_header: str,
         identified: bool = False,
     ) -> int | None:
-        """``PUT /gfs/spaces/{space_id}/media/{blob_id}`` (scope ``space``)
-        or ``PUT /gfs/channels/{channel_id}/media/{blob_id}`` (scope
-        ``channel``, a private space's opaque channel) — one sealed blob,
+        """``PUT /gfs/media/{blob_id}`` — the one scope-free path; the scope
+        (a listed space, or a private space's opaque channel) rides only
+        inside the signed claim — one sealed blob,
         authorized by *auth_header* (:mod:`socialhome.domain.gfs_space_media`).
         The request names no household: it rides the cookie-less session
         (:meth:`anon_session`). An ``identified`` upload (a writer cert names
         our household key) never goes to a server we are not registered on.
         Returns the HTTP status, or ``None`` when nothing could be sent."""
-        segment = _MEDIA_SCOPE_PATH.get(scope)
-        if segment is None or (identified and not conn.registered):
+        if identified and not conn.registered:
             return None
-        url = f"{conn.inbox_url.rstrip('/')}/gfs/{segment}/{scope_id}/media/{blob_id}"
+        url = f"{conn.inbox_url.rstrip('/')}/gfs/media/{blob_id}"
         headers = {
             SPACE_MEDIA_AUTH_HEADER: auth_header,
             "Content-Type": "application/octet-stream",

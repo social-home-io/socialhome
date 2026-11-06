@@ -126,15 +126,14 @@ async def test_put_sends_the_raw_blob_with_the_auth_header(env):
     conn = await env[1].get("g1")
     status = await svc.put_space_media(
         conn,
-        scope="space",
-        scope_id="sp",
         blob_id=BID,
         blob=b"cipher",
         auth_header="hdr",
     )
     assert status == 200
     url, data, headers = session.puts[0]
-    assert url == f"https://g1.example/gfs/spaces/sp/media/{BID}"
+    # ONE scope-free path: the scope rides only inside the signed claim.
+    assert url == f"https://g1.example/gfs/media/{BID}"
     assert data == b"cipher"
     assert headers[SPACE_MEDIA_AUTH_HEADER] == "hdr"
     assert headers["Content-Type"] == "application/octet-stream"
@@ -147,10 +146,7 @@ async def test_put_transport_error_is_none(env):
     svc = await _svc(env, session)
     conn = await env[1].get("g1")
     assert (
-        await svc.put_space_media(
-            conn, scope="space", scope_id="sp", blob_id=BID, blob=b"x", auth_header="h"
-        )
-        is None
+        await svc.put_space_media(conn, blob_id=BID, blob=b"x", auth_header="h") is None
     )
 
 
@@ -161,8 +157,6 @@ async def test_an_identified_put_never_goes_to_a_listing_target(env):
     assert (
         await svc.put_space_media(
             listing,
-            scope="space",
-            scope_id="sp",
             blob_id=BID,
             blob=b"x",
             auth_header="h",
@@ -258,29 +252,6 @@ async def test_the_capability_says_which_scopes_it_serves(env):
     bad = _info({"max_blob_bytes": 4096, "ttl_s": 600, "scopes": "space"})
     svc = await _svc(env, _MediaSession(info=bad))
     assert await svc.space_media_max_blob(conn) is None
-
-
-async def test_a_channel_upload_goes_to_the_channel_route(env):
-    session = _MediaSession(put_status=201)
-    svc = await _svc(env, session)
-    conn = await env[1].get("g1")
-    await svc.put_space_media(
-        conn,
-        scope="channel",
-        scope_id="c" * 32,
-        blob_id=BID,
-        blob=b"x",
-        auth_header="h",
-    )
-    assert (
-        session.puts[0][0] == f"https://g1.example/gfs/channels/{'c' * 32}/media/{BID}"
-    )
-    assert (
-        await svc.put_space_media(
-            conn, scope="nope", scope_id="x", blob_id=BID, blob=b"x", auth_header="h"
-        )
-        is None
-    )
 
 
 class _ChunkedContent:

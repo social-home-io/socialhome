@@ -39,7 +39,6 @@ Cost per item: one upload per file per GFS (never per reader).
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import pathlib
 import time
@@ -56,6 +55,7 @@ from ..domain.federation import InstanceSource
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.gfs_channel import CHANNEL_SUITE_ED25519
 from ..domain.gfs_space_media import (
+    ADDR_SUITE_SM1,
     AUTH_AUTHORITY,
     AUTH_CHANNEL,
     AUTH_CHANNEL_CERT,
@@ -66,13 +66,13 @@ from ..domain.gfs_space_media import (
     SPACE_MEDIA_SIG_SUITE_ED25519,
     SpaceMediaClaim,
     SpaceMediaUploadAuth,
+    space_media_address,
 )
 from ..domain.space import SpaceType
 from ..domain.space_media_ref import SpaceMediaRef, media_refs_to_wire
 from ..domain.writer_cert import WRITER_SCOPE_WRITE, scope_permits
 from ..domain.writer_key import WRITER_KEY_SUITE_ED25519
 from ..gfs_channel import channel_pk_of, derive_channel_seed
-from ..moment_public_media import blob_id_of
 from ..space_media_seal import (
     MAX_SPACE_MEDIA_BYTES,
     SPACE_MEDIA_SUITE_AESGCM256_PADDED,
@@ -130,6 +130,22 @@ def seal_file_sync(
         filename=filename,
         data=data,
     )
+
+
+def seal_and_address_sync(
+    media_key: bytes,
+    space_id: str,
+    epoch: int,
+    filename: str,
+    data: bytes,
+    scope: str,
+    scope_id: str,
+) -> tuple[bytes, str]:
+    """The sealed blob and its scope-bound GFS address
+    (:func:`~socialhome.domain.gfs_space_media.space_media_address`, suite
+    ``sm1``) — both CPU work, run together in a worker thread."""
+    blob = seal_file_sync(media_key, space_id, epoch, filename, data)
+    return blob, space_media_address(scope, scope_id, blob)
 
 
 def media_names(urls: Iterable[str | None]) -> list[str]:
@@ -346,12 +362,13 @@ class SpaceMediaGfsUploader:
         if current is None:
             return []
         epoch, key = current
+        scope, scope_id = await self.scope_of(space_id)
         refs: list[SpaceMediaRef] = []
         for name in names[:MAX_FILES_PER_ITEM]:
             stamp = await self._stamp(name)
             if stamp is None:
                 continue
-            cache_key = (space_id, epoch, name, *stamp)
+            cache_key = (space_id, epoch, scope, scope_id, name, *stamp)
             cached = self._described.get(cache_key)
             if cached is not None:
                 self._described.move_to_end(cache_key)
@@ -360,16 +377,18 @@ class SpaceMediaGfsUploader:
             data = await self._read(name)
             if data is None:
                 continue
-            blob = await asyncio.to_thread(
-                seal_file_sync, key, space_id, epoch, name, data
+            blob, address = await asyncio.to_thread(
+                seal_and_address_sync, key, space_id, epoch, name, data, scope, scope_id
             )
             ref = SpaceMediaRef(
                 filename=name,
                 space_id=space_id,
-                blob_id=blob_id_of(blob),
+                blob_id=address,
                 suite=SPACE_MEDIA_SUITE_AESGCM256_PADDED,
                 epoch=epoch,
                 size=len(blob),
+                scope=scope,
+                addr_suite=ADDR_SUITE_SM1,
             )
             self._described[cache_key] = ref
             while len(self._described) > MAX_DESCRIBED:
@@ -473,10 +492,10 @@ class SpaceMediaGfsUploader:
         todo = [c for c in job.conns if (c.id, ref.blob_id) not in self._stored]
         if not todo:
             return
-        blob = await self._reseal(ref)
+        scope, scope_id = await self.scope_of(ref.space_id)
+        blob = await self._reseal(ref, scope, scope_id)
         if blob is None:
             return
-        scope, scope_id = await self.scope_of(ref.space_id)
         retry: list[GfsConnection] = []
         for conn in todo:
             limit = await self._gfs.space_media_max_blob(conn, scope=scope)
@@ -543,10 +562,12 @@ class SpaceMediaGfsUploader:
         while len(self._stored) > MAX_REMEMBERED:
             self._stored.popitem(last=False)
 
-    async def _reseal(self, ref: SpaceMediaRef) -> bytes | None:
+    async def _reseal(
+        self, ref: SpaceMediaRef, scope: str, scope_id: str
+    ) -> bytes | None:
         """The blob the descriptor names, sealed again from the local file —
-        ``None`` (WARNING) when the file or the epoch key is gone or the
-        bytes no longer match the descriptor."""
+        ``None`` (WARNING) when the file or the epoch key is gone, or the
+        bytes (or the space's scope) no longer give the described address."""
         current = await self._crypto.media_key(ref.space_id, epoch=ref.epoch)
         data = await self._read(ref.filename)
         if current is None or data is None:
@@ -556,10 +577,17 @@ class SpaceMediaGfsUploader:
                 ref.space_id,
             )
             return None
-        blob = await asyncio.to_thread(
-            seal_file_sync, current[1], ref.space_id, ref.epoch, ref.filename, data
+        blob, address = await asyncio.to_thread(
+            seal_and_address_sync,
+            current[1],
+            ref.space_id,
+            ref.epoch,
+            ref.filename,
+            data,
+            scope,
+            scope_id,
         )
-        if hashlib.sha256(blob).hexdigest() != ref.blob_id:
+        if scope != ref.scope or address != ref.blob_id:
             log.warning(
                 "space media %s changed since it was described — not uploaded",
                 ref.filename,
@@ -599,8 +627,6 @@ class SpaceMediaGfsUploader:
             return 403
         return await self._gfs.put_space_media(
             conn,
-            scope=scope,
-            scope_id=scope_id,
             blob_id=ref.blob_id,
             blob=blob,
             auth_header=auth.to_header(),

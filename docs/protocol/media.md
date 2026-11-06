@@ -245,13 +245,20 @@ Paired and mesh members keep the `SPACE_MEDIA_BLOB` push above, unchanged.
 **Descriptor.** The item carries, INSIDE its encrypted payload:
 
 ```json
-"media_refs": {"<local filename>": {"blob_id": "<sha256 hex>", "suite": "aesgcm-256-pad-det", "epoch": 3, "size": 1048604}}
+"media_refs": {"<local filename>": {"blob_id": "<sm1 address>", "suite": "aesgcm-256-pad-det", "epoch": 3, "size": 1048604, "scope": "space", "addr_suite": "sm1"}}
 ```
 
 one entry per file of the item (never more than the item shows — a
 receiver refuses a larger descriptor whole and ignores an entry for a file
-the item does not reference); `size` is the sealed blob's byte count. No
-GFS URL: every reader fetches from the GFS it reaches the space through.
+the item does not reference); `size` is the sealed blob's byte count.
+`blob_id` is the GFS's **scope-bound address** —
+`sha256("sm1|" + scope + "|" + scope_id + "|" + blob)`
+(`domain/gfs_space_media.space_media_address`, `addr_suite: "sm1"`) — and
+`scope` says which kind (`space` / `channel`); the descriptor never names the
+scope id: a reader re-derives the address with the id it knows itself (the
+space id, or its own channel id). An unknown scope or address suite is
+refused (WARNING), never defaulted. No GFS URL: every reader fetches from the
+GFS it reaches the space through.
 It rides:
 
 | Item | Where |
@@ -278,21 +285,30 @@ followers, the author's household plans the GFSs those readers use — each
 link-joined member's `relay_via` connection, plus every GFS the space is
 relayed to for followers — keeps the ones whose signed block proved
 `space_media` (and whose `max_blob_bytes` the blob fits), seals each file
-once and `PUT`s it once per GFS. Authorization, strongest first: the
+once, computes its scope-bound address and `PUT`s it once per GFS to the one
+scope-free path `PUT /gfs/media/{blob_id}` — the scope rides only inside the
+signed claim header (`scope`, `scope_id`, `addr_suite`), never in a URL. Authorization, strongest first: the
 **space authority** signature (this household holds the space seed — host
 or delegated admin), else the **writer group key** (strict mode), else our
 household's **writer cert** (trusted mode — the one identified kind, never
 sent to a listing target we are not registered on). A **private** space that
 uses an opaque channel (v_51, `private_gfs` on) uploads under the GFS's
-**channel scope** instead — `PUT /gfs/channels/{channel_id}/media/{blob_id}`,
-only to a GFS whose signed `space_media.scopes` lists `channel` — so the GFS
-learns the random channel id, never the space: the **channel key** (a seed
+**channel scope** instead (the claim names the channel), only to a GFS whose
+signed `space_media.scopes` lists `channel` — so the GFS learns the random
+channel id, never the space; a channel takes media once ONE member household
+holds a seat on it (the owner never subscribes): the **channel key** (a seed
 holder whose seed derives the stored channel key), else the member's
 **channel writer key** from its grant, else its **channel cert** (identified),
 always with the grant's shifted channel epoch. The request never names
-`from_instance`. `200 already_stored` is success (coalescing); a refusal
-(403 / 413 / 422) is a WARNING and dropped; a transport error, 408, 429 or
-5xx is retried at most 4 times (backoff 30 s, doubling). The queue is in
+`from_instance`. Only a space the GFS holds `active` (approved) takes media:
+a pending one answers 403 and the item goes without the picture there.
+`200 already_stored` is success (coalescing; it does not refresh the
+blob's expiry); a refusal (403 / 413 / 422) is a WARNING and dropped; a
+transport error, 408 (too slow), 429 (per-scope rate or per-prefix byte
+budget), 503 (busy, or the cache switched off) or another 5xx is retried at
+most 4 times (backoff 30 s, doubling). Because the address binds the scope,
+uploading before the item goes out is not needed for safety; uploads are
+still queued at once. The queue is in
 memory and bounded (2048 uploads): a restart or a full queue loses pending
 uploads (WARNING), and the reader then shows the item without that picture.
 
@@ -306,10 +322,12 @@ picture past the backlog — is fetched when first viewed: `GET
 viewers share one fetch, each waits at most 20 s. A fetch tries the GFS the
 link-joined pair relays through (`relay_via`), then this household's own
 GFS connections (≤ 4 sources): `GET /gfs/media/{blob_id}`
-(anonymous), bounded by the descriptor's `size`, checks SHA-256 = `blob_id`,
+(anonymous), bounded by the descriptor's `size`, checks that the blob sits
+at its scope-bound address for the scope id this household knows,
 decrypts with the epoch's media key and writes the file write-once under
 its local name (the `SPACE_MEDIA_BLOB` rules above). An unknown suite, a
-wrong hash or a failed decrypt is refused with a WARNING and writes nothing.
+blob not at its address (or a channel scope with no channel id known here)
+or a failed decrypt is refused with a WARNING and writes nothing.
 
 **No byte push to them.** `SPACE_MEDIA_BLOB` is no longer queued to a
 link-joined v_80 member (live posts / gallery / covers), nor to any
@@ -322,7 +340,7 @@ sequenceDiagram
     participant E as Link-joined member
     participant F as Follower
     Note over A: seal each file once (space key, deterministic nonce)
-    A->>G: PUT /gfs/spaces/{space}/media/{blob_id}<br/>(or /gfs/channels/{channel}/media/{blob_id})<br/>X-SH-Space-Media-Auth
+    A->>G: PUT /gfs/media/{blob_id}<br/>X-SH-Space-Media-Auth (scope in the signed claim)
     G-->>A: 201 stored (200 already_stored)
     A->>G: POST /gfs/envelope (sealed SPACE_POST_CREATED + media_refs)
     G->>E: relay envelope

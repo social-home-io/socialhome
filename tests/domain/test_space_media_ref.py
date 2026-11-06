@@ -27,6 +27,8 @@ def _ref(name: str = "x.webp", **kw) -> SpaceMediaRef:
         "suite": SUITE,
         "epoch": 2,
         "size": 65_564,
+        "scope": "space",
+        "addr_suite": "sm1",
     }
     args.update(kw)
     return SpaceMediaRef(**args)
@@ -39,9 +41,10 @@ def test_field_name() -> None:
 def test_wire_round_trip() -> None:
     refs = [_ref("x.webp"), _ref("y.webp", blob_id="b" * 64)]
     wire = media_refs_to_wire(refs)
+    common = {"suite": SUITE, "epoch": 2, "size": 65_564, "scope": "space"}
     assert wire == {
-        "x.webp": {"blob_id": BID, "suite": SUITE, "epoch": 2, "size": 65_564},
-        "y.webp": {"blob_id": "b" * 64, "suite": SUITE, "epoch": 2, "size": 65_564},
+        "x.webp": {"blob_id": BID, "addr_suite": "sm1", **common},
+        "y.webp": {"blob_id": "b" * 64, "addr_suite": "sm1", **common},
     }
     parsed = parse_media_refs(wire, space_id="sp", allowed={"x.webp", "y.webp"})
     assert sorted(parsed, key=lambda r: r.filename) == refs
@@ -106,3 +109,30 @@ def test_dataclass_is_frozen() -> None:
     ref = _ref()
     with pytest.raises(AttributeError):
         ref.epoch = 3  # type: ignore[misc]
+
+
+def test_the_scope_rides_and_a_channel_scope_is_kept() -> None:
+    """The address is bound to the scope it was uploaded under: the reader
+    learns the KIND from the descriptor and checks it with the scope id it
+    knows itself (the space id, or its own channel id)."""
+    entry = _ref(scope="channel").to_wire()
+    (ref,) = parse_media_refs({"x.webp": entry}, space_id="sp", allowed={"x.webp"})
+    assert ref.scope == "channel"
+    assert "scope_id" not in entry  # never named on the wire
+
+
+@pytest.mark.parametrize("bad", [{"scope": "galaxy"}, {"scope": None}])
+def test_unknown_scope_skipped(bad: dict) -> None:
+    entry = {**_ref().to_wire(), **bad}
+    assert parse_media_refs({"x.webp": entry}, space_id="sp", allowed={"x.webp"}) == []
+
+
+def test_unknown_address_suite_refused_with_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    entry = {**_ref().to_wire(), "addr_suite": "sm9"}
+    with caplog.at_level(logging.WARNING):
+        assert (
+            parse_media_refs({"x.webp": entry}, space_id="sp", allowed={"x.webp"}) == []
+        )
+    assert "address suite" in caplog.text

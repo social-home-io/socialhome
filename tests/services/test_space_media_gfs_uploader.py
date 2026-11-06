@@ -34,6 +34,7 @@ from socialhome.domain.gfs_space_media import (
     AUTH_WRITER_KEY,
     CHANNEL_MEDIA_PUT_PREFIX,
     SpaceMediaUploadAuth,
+    space_media_address,
 )
 from socialhome.domain.space import SpaceType
 from socialhome.gfs_channel import channel_pk_of, derive_channel_seed
@@ -96,10 +97,23 @@ class _Gfs:
         return self.follower
 
     async def put_space_media(
-        self, conn, *, scope, scope_id, blob_id, blob, auth_header, identified=False
+        self, conn, *, blob_id, blob, auth_header, identified=False
     ):
-        self.put_scopes.append(scope)
-        self.puts.append((conn.id, scope_id, blob_id, blob, auth_header, identified))
+        # The claim as the GFS reads it (decoded here without validating a
+        # stub cert); the address must be the scope-bound one.
+        claim = orjson.loads(
+            base64.urlsafe_b64decode(auth_header + "=" * (-len(auth_header) % 4))
+        )
+        assert (
+            blob_id
+            == claim["blob_id"]
+            == space_media_address(claim["scope"], claim["scope_id"], blob)
+        )
+        assert claim["addr_suite"] == "sm1"
+        self.put_scopes.append(claim["scope"])
+        self.puts.append(
+            (conn.id, claim["scope_id"], blob_id, blob, auth_header, identified)
+        )
         status = self.status
         if isinstance(status, list):
             return status.pop(0)
@@ -273,7 +287,10 @@ async def test_plan_for_a_relay_seat_describes_each_file(tmp_path):
     ref = next(r for r in plan.refs if r.filename == "a.webp")
     # The descriptor's address is the deterministic blob of the file.
     blob = up_mod.seal_file_sync(MEDIA_KEY, SPACE, 4, "a.webp", a)
-    assert entry["blob_id"] == blob_id_of(blob) == ref.blob_id
+    # The address is bound to the space scope (sm1), not the bare hash.
+    assert entry["blob_id"] == space_media_address("space", SPACE, blob) == ref.blob_id
+    assert entry["blob_id"] != blob_id_of(blob)
+    assert (entry["scope"], entry["addr_suite"]) == ("space", "sm1")
     assert entry["size"] == len(blob)
 
 
@@ -368,7 +385,8 @@ async def test_seed_holder_uploads_with_the_space_authority(tmp_path):
     assert len(gfs.puts) == 1
     conn_id, space_id, blob_id, blob, header, identified = gfs.puts[0]
     assert (conn_id, space_id, identified) == ("g1", SPACE, False)
-    assert blob_id == blob_id_of(blob) == plan.refs[0].blob_id
+    assert blob_id == space_media_address("space", SPACE, blob) == plan.refs[0].blob_id
+    assert auth_claim_addr_suite(header) == "sm1"
     assert (
         open_space_media(
             blob=blob, media_key=MEDIA_KEY, space_id=SPACE, epoch=4, filename="a.webp"
@@ -736,3 +754,23 @@ async def test_no_channel_material_uploads_nothing(tmp_path):
     u = _channel_uploader(tmp_path, gfs, grant=_Grant(channel_id="d" * 32))
     await _upload(u, await u.plan(SPACE, ["api/media/a.webp"], followers=False))
     assert gfs.puts == []
+
+
+def auth_claim_addr_suite(header: str) -> str:
+    return SpaceMediaUploadAuth.from_header(header).claim.addr_suite
+
+
+async def test_a_channel_blob_is_addressed_in_the_channel_scope(tmp_path):
+    """The descriptor of a private space's file names the CHANNEL scope; its
+    address binds the channel id (which the descriptor never names)."""
+    _write(tmp_path, "a.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    u = _channel_uploader(tmp_path, _Gfs([g1]), seed=b"\3" * 32)
+    plan = await u.plan(SPACE, ["api/media/a.webp"], followers=False)
+    (ref,) = plan.refs
+    assert ref.scope == "channel"
+    assert CHANNEL_ID not in str(plan.wire())
+    blob = up_mod.seal_file_sync(
+        MEDIA_KEY, SPACE, 4, "a.webp", (tmp_path / "a.webp").read_bytes()
+    )
+    assert ref.blob_id == space_media_address("channel", CHANNEL_ID, blob)

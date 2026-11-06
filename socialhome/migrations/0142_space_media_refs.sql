@@ -35,6 +35,11 @@ CREATE TABLE IF NOT EXISTS space_media_refs (
     suite       TEXT NOT NULL,
     epoch       INTEGER NOT NULL CHECK (epoch >= 0),
     size        INTEGER NOT NULL CHECK (size > 0),
+    -- The GFS scope the blob was uploaded under and how its address binds
+    -- it (``sm1``): the reader re-derives the address with the scope id it
+    -- knows itself — the space id, or its own channel id.
+    scope       TEXT NOT NULL CHECK (scope IN ('space', 'channel')),
+    addr_suite  TEXT NOT NULL,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_space_media_refs_space

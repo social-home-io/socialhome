@@ -16,8 +16,10 @@ This service:
 
 A fetch reads ``GET /gfs/media/{blob_id}`` (anonymous) from the GFS
 this household reaches the space through — the link-joined pair's
-``relay_via`` first, then its own GFS connections — checks the SHA-256
-against ``blob_id``, decrypts with the epoch's media key
+``relay_via`` first, then its own GFS connections — checks that the blob
+sits at its **scope-bound address** (``space_media_address`` with the scope
+id THIS household knows: the space id, or its own channel id for a private
+space; the descriptor names only the scope kind), decrypts with the epoch's media key
 (:mod:`socialhome.space_media_seal`) and writes the file write-once under its
 local name (the ``SPACE_MEDIA_BLOB`` rules, :mod:`.inbound_media_store`). An
 unknown suite, a wrong hash or a failed decrypt is refused with a WARNING and
@@ -27,7 +29,6 @@ writes nothing.
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import pathlib
 import uuid
@@ -39,6 +40,7 @@ import aiofiles.os
 from cryptography.exceptions import InvalidTag
 
 from ..domain.federation import InstanceSource
+from ..domain.gfs_space_media import SCOPE_CHANNEL, SCOPE_SPACE, space_media_address
 from ..domain.space_media_ref import SpaceMediaRef, parse_media_refs
 from ..space_media_seal import (
     UnsupportedSpaceMediaSuite,
@@ -52,6 +54,7 @@ if TYPE_CHECKING:
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
     from ..repositories.space_media_ref_repo import AbstractSpaceMediaRefRepo
+    from ..repositories.space_repo import AbstractSpaceRepo
     from .gfs_connection_service import GfsConnectionService
     from .space_crypto_service import SpaceContentEncryption
 
@@ -97,6 +100,7 @@ class SpaceMediaGfsFetcher:
         "_prefetch_pending",
         "_prefetch_sem",
         "_refs",
+        "_spaces",
         "_tasks",
     )
 
@@ -108,6 +112,7 @@ class SpaceMediaGfsFetcher:
         gfs_service: GfsConnectionService,
         gfs_repo: AbstractGfsConnectionRepo,
         federation_repo: AbstractFederationRepo,
+        space_repo: AbstractSpaceRepo,
         media_dir: pathlib.Path,
     ) -> None:
         self._refs = refs_repo
@@ -115,6 +120,8 @@ class SpaceMediaGfsFetcher:
         self._gfs = gfs_service
         self._gfs_repo = gfs_repo
         self._federation_repo = federation_repo
+        #: Only for this household's own channel id of a private space.
+        self._spaces = space_repo
         self._dir = pathlib.Path(media_dir)
         #: filename → the one fetch running for it (coalescing).
         self._inflight: dict[str, asyncio.Task[str]] = {}
@@ -249,6 +256,15 @@ class SpaceMediaGfsFetcher:
                 ref.epoch,
             )
             return _REFUSED
+        scope_id = await self._scope_id(ref)
+        if scope_id is None:
+            log.warning(
+                "space media %s: no %s id known here for space %s — not fetched",
+                filename,
+                ref.scope,
+                ref.space_id,
+            )
+            return _REFUSED
         outcome = _MISS
         for base_url in await self._sources(ref.space_id):
             blob = await self._gfs.fetch_space_media(
@@ -256,11 +272,22 @@ class SpaceMediaGfsFetcher:
             )
             if blob is None:
                 continue
-            if hashlib.sha256(blob).hexdigest() != ref.blob_id:
+            try:
+                address = await asyncio.to_thread(
+                    space_media_address,
+                    ref.scope,
+                    scope_id,
+                    blob,
+                    suite=ref.addr_suite,
+                )
+            except ValueError:
+                address = ""
+            if address != ref.blob_id:
                 log.warning(
-                    "space media %s from %s: hash does not match — refused",
+                    "space media %s from %s: not at its %s address — refused",
                     filename,
                     base_url,
+                    ref.scope,
                 )
                 outcome = _REFUSED
                 continue
@@ -287,6 +314,17 @@ class SpaceMediaGfsFetcher:
                 "space media %s: no GFS holds blob %s (yet)", filename, ref.blob_id[:12]
             )
         return outcome
+
+    async def _scope_id(self, ref: SpaceMediaRef) -> str | None:
+        """The scope id this household itself knows for *ref*'s scope: the
+        space id, or the opaque channel id of its own grant — never one a
+        descriptor or a GFS supplies."""
+        if ref.scope == SCOPE_SPACE:
+            return ref.space_id
+        if ref.scope == SCOPE_CHANNEL:
+            stored = await self._spaces.get_gfs_channel(ref.space_id)
+            return stored[0] if stored is not None else None
+        return None
 
     async def _sources(self, space_id: str) -> list[str]:
         """The GFS base URLs to ask, in order: the GFS each link-joined pair

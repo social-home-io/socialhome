@@ -3,12 +3,18 @@
 A space item (post, calendar event, gallery item) that reaches a household
 only through a GFS carries, INSIDE its encrypted payload::
 
-    "media_refs": {"<local filename>": {"blob_id", "suite", "epoch", "size"}}
+    "media_refs": {"<local filename>": {"blob_id", "suite", "epoch", "size",
+                                         "scope", "addr_suite"}}
 
 one entry per file of the item: the address of the sealed blob
 (:mod:`socialhome.space_media_seal`), its suite, the content-key epoch it is
-sealed under and the blob's byte size. No GFS URL — every reader fetches from
-the GFS it is connected to. A receiver keeps each entry as a
+sealed under, the blob's byte size, and the GFS scope it was uploaded under
+(``space`` or ``channel``) with the address construction (``addr_suite``,
+:func:`~socialhome.domain.gfs_space_media.space_media_address`). The address
+is bound to the scope: a reader checks it with the scope id it knows ITSELF
+(the space id, or its own channel id for a private space) — the descriptor
+never names a scope id. No GFS URL — every reader fetches from the GFS it is
+connected to. A receiver keeps each entry as a
 ``space_media_refs`` row (:class:`SpaceMediaRef`) so the file can be fetched
 on arrival or when first viewed.
 
@@ -23,13 +29,16 @@ from dataclasses import dataclass
 
 from ..moment_public_media import MAX_BLOB_BYTES, is_blob_id
 from ..space_media_seal import UnsupportedSpaceMediaSuite, require_space_media_suite
+from .gfs_space_media import MEDIA_SCOPES, SUPPORTED_ADDR_SUITES
 
 log = logging.getLogger(__name__)
 
 #: The payload / record field carrying the descriptor.
 MEDIA_REFS_FIELD: str = "media_refs"
 
-_ENTRY_KEYS: frozenset[str] = frozenset({"blob_id", "suite", "epoch", "size"})
+_ENTRY_KEYS: frozenset[str] = frozenset(
+    {"blob_id", "suite", "epoch", "size", "scope", "addr_suite"}
+)
 _MAX_EPOCH: int = 2**53
 
 
@@ -44,6 +53,10 @@ class SpaceMediaRef:
     suite: str
     epoch: int
     size: int
+    #: The GFS scope the blob was uploaded under (``space`` / ``channel``)
+    #: and how its address binds that scope.
+    scope: str
+    addr_suite: str
     created_at: str | None = None
 
     def to_wire(self) -> dict:
@@ -52,6 +65,8 @@ class SpaceMediaRef:
             "suite": self.suite,
             "epoch": self.epoch,
             "size": self.size,
+            "scope": self.scope,
+            "addr_suite": self.addr_suite,
         }
 
 
@@ -91,6 +106,17 @@ def parse_media_refs(
         except UnsupportedSpaceMediaSuite as exc:
             log.warning("space media descriptor for %s refused: %s", name, exc)
             continue
+        addr_suite = entry.get("addr_suite")
+        if addr_suite not in SUPPORTED_ADDR_SUITES:
+            log.warning(
+                "space media descriptor for %s refused: address suite %r",
+                name,
+                addr_suite,
+            )
+            continue
+        scope = entry.get("scope")
+        if scope not in MEDIA_SCOPES:
+            continue
         blob_id = entry.get("blob_id")
         epoch = entry.get("epoch")
         size = entry.get("size")
@@ -106,6 +132,8 @@ def parse_media_refs(
                 suite=suite,
                 epoch=int(epoch),  # type: ignore[arg-type]
                 size=int(size),  # type: ignore[arg-type]
+                scope=str(scope),
+                addr_suite=str(addr_suite),
             )
         )
     return out

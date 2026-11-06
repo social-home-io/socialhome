@@ -9,8 +9,8 @@ import os
 from dataclasses import dataclass
 
 from socialhome.domain.federation import InstanceSource
+from socialhome.domain.gfs_space_media import space_media_address
 from socialhome.domain.space_media_ref import SpaceMediaRef
-from socialhome.moment_public_media import blob_id_of
 from socialhome.services import space_media_gfs_fetcher as fetch_mod
 from socialhome.services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
 from socialhome.space_media_seal import (
@@ -30,13 +30,32 @@ def _blob(name: str, data: bytes, *, epoch: int = 2, key: bytes = KEY) -> bytes:
     )
 
 
-def _wire(name: str, blob: bytes, *, epoch: int = 2, suite: str = SUITE) -> dict:
+CHANNEL_ID = "c" * 32
+
+
+def _addr(blob: bytes, scope: str = "space", scope_id: str = SPACE) -> str:
+    """The blob's scope-bound GFS address (sm1)."""
+    return space_media_address(scope, scope_id, blob)
+
+
+def _wire(
+    name: str,
+    blob: bytes,
+    *,
+    epoch: int = 2,
+    suite: str = SUITE,
+    scope: str = "space",
+    blob_id: str | None = None,
+) -> dict:
+    scope_id = SPACE if scope == "space" else CHANNEL_ID
     return {
         name: {
-            "blob_id": blob_id_of(blob),
+            "blob_id": blob_id or _addr(blob, scope, scope_id),
             "suite": suite,
             "epoch": epoch,
             "size": len(blob),
+            "scope": scope,
+            "addr_suite": "sm1",
         }
     }
 
@@ -114,13 +133,24 @@ class _FedRepo:
 HOST = _Inst("a", InstanceSource.SPACE_SESSION, relay_via="https://g1.example")
 
 
-def _fetcher(tmp_path, gfs, *, conns=(), insts=(HOST,)):
+class _Spaces:
+    """Only the reader's own channel id of a private space."""
+
+    def __init__(self, channel_id: str | None = None):
+        self.channel_id = channel_id
+
+    async def get_gfs_channel(self, space_id):
+        return (self.channel_id, "pk") if self.channel_id else None
+
+
+def _fetcher(tmp_path, gfs, *, conns=(), insts=(HOST,), channel_id=None):
     return SpaceMediaGfsFetcher(
         refs_repo=_Refs(),
         space_crypto=_Crypto(),
         gfs_service=gfs,
         gfs_repo=_GfsRepo(conns),
         federation_repo=_FedRepo(insts),
+        space_repo=_Spaces(channel_id),
         media_dir=tmp_path,
     )
 
@@ -135,7 +165,7 @@ async def test_receive_stores_the_items_own_refs(tmp_path):
         prefetch=False,
     )
     assert {r.filename for r in refs} == {"a.webp", "b.webp"}
-    assert (await f._refs.get("a.webp")).blob_id == blob_id_of(blob)
+    assert (await f._refs.get("a.webp")).blob_id == _addr(blob)
 
 
 async def test_receive_ignores_refs_for_files_the_item_does_not_show(tmp_path):
@@ -151,19 +181,19 @@ async def test_receive_ignores_refs_for_files_the_item_does_not_show(tmp_path):
 async def test_prefetch_writes_the_picture_byte_identical(tmp_path):
     data = os.urandom(70_000)
     blob = _blob("a.webp", data)
-    gfs = _Gfs({blob_id_of(blob): blob})
+    gfs = _Gfs({_addr(blob): blob})
     f = _fetcher(tmp_path, gfs)
     await f.receive(SPACE, _wire("a.webp", blob), ["api/media/a.webp"])
     await asyncio.wait_for(f.drain(), timeout=5)
     assert (tmp_path / "a.webp").read_bytes() == data
     # From the GFS the link-joined pair relays through.
-    assert gfs.fetches[0] == ("https://g1.example", blob_id_of(blob))
+    assert gfs.fetches[0] == ("https://g1.example", _addr(blob))
     assert not any(p.name.startswith(".") for p in tmp_path.iterdir() if p.is_file())
 
 
 async def test_prefetch_skips_videos_and_files(tmp_path):
     blob = _blob("v.mp4", b"x")
-    gfs = _Gfs({blob_id_of(blob): blob})
+    gfs = _Gfs({_addr(blob): blob})
     f = _fetcher(tmp_path, gfs)
     await f.receive(SPACE, _wire("v.mp4", blob), ["api/media/v.mp4"])
     await asyncio.wait_for(f.drain(), timeout=5)
@@ -188,7 +218,7 @@ async def test_ensure_local_without_a_ref_or_with_a_file(tmp_path):
 async def test_concurrent_views_coalesce_into_one_fetch(tmp_path):
     data = b"pic" * 100
     blob = _blob("a.webp", data)
-    gfs = _Gfs({blob_id_of(blob): blob}, delay=0.1)
+    gfs = _Gfs({_addr(blob): blob}, delay=0.1)
     f = _fetcher(tmp_path, gfs)
     await f.receive(SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
     results = await asyncio.gather(*(f.ensure_local("a.webp") for _ in range(5)))
@@ -198,7 +228,7 @@ async def test_concurrent_views_coalesce_into_one_fetch(tmp_path):
 
 async def test_a_slow_gfs_times_out(tmp_path, monkeypatch):
     blob = _blob("a.webp", b"x")
-    gfs = _Gfs({blob_id_of(blob): blob}, delay=1.0)
+    gfs = _Gfs({_addr(blob): blob}, delay=1.0)
     f = _fetcher(tmp_path, gfs)
     await f.receive(SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
     assert await f.ensure_local("a.webp", timeout_s=0.05) is False
@@ -208,19 +238,19 @@ async def test_a_slow_gfs_times_out(tmp_path, monkeypatch):
 async def test_bad_hash_is_refused(tmp_path, caplog):
     blob = _blob("a.webp", b"x")
     other = _blob("a.webp", b"y")
-    gfs = _Gfs({blob_id_of(blob): other})
+    gfs = _Gfs({_addr(blob): other})
     f = _fetcher(tmp_path, gfs)
     await f.receive(SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
     with caplog.at_level(logging.WARNING):
         assert await f.ensure_local("a.webp") is False
-    assert "hash" in caplog.text
+    assert "address" in caplog.text
     assert not (tmp_path / "a.webp").exists()
 
 
 async def test_a_blob_sealed_for_another_file_is_refused(tmp_path, caplog):
     """Right hash, wrong AAD (sealed for another file name): decrypt fails."""
     blob = _blob("other.webp", b"x")
-    gfs = _Gfs({blob_id_of(blob): blob})
+    gfs = _Gfs({_addr(blob): blob})
     f = _fetcher(tmp_path, gfs)
     await f.receive(SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
     with caplog.at_level(logging.WARNING):
@@ -231,17 +261,19 @@ async def test_a_blob_sealed_for_another_file_is_refused(tmp_path, caplog):
 
 async def test_unknown_suite_is_refused(tmp_path, caplog):
     blob = _blob("a.webp", b"x")
-    f = _fetcher(tmp_path, _Gfs({blob_id_of(blob): blob}))
+    f = _fetcher(tmp_path, _Gfs({_addr(blob): blob}))
     # A stored row with a suite this build lacks (written by a newer build).
     await f._refs.save_many(
         [
             SpaceMediaRef(
                 filename="a.webp",
                 space_id=SPACE,
-                blob_id=blob_id_of(blob),
+                blob_id=_addr(blob),
                 suite="future-suite",
                 epoch=2,
                 size=len(blob),
+                scope="space",
+                addr_suite="sm1",
             )
         ]
     )
@@ -252,7 +284,7 @@ async def test_unknown_suite_is_refused(tmp_path, caplog):
 
 async def test_no_epoch_key_is_refused(tmp_path, caplog):
     blob = _blob("a.webp", b"x", epoch=7)
-    f = _fetcher(tmp_path, _Gfs({blob_id_of(blob): blob}))
+    f = _fetcher(tmp_path, _Gfs({_addr(blob): blob}))
     await f.receive(
         SPACE, _wire("a.webp", blob, epoch=7), ["api/media/a.webp"], prefetch=False
     )
@@ -264,7 +296,7 @@ async def test_no_epoch_key_is_refused(tmp_path, caplog):
 async def test_falls_back_to_this_households_own_gfs_connections(tmp_path):
     """A follower reads through the GFS it is connected to."""
     blob = _blob("a.webp", b"x")
-    gfs = _Gfs({"https://g2.example|" + blob_id_of(blob): blob})
+    gfs = _Gfs({"https://g2.example|" + _addr(blob): blob})
     f = _fetcher(tmp_path, gfs, conns=[_Conn("g2", "https://g2.example")], insts=())
     await f.receive(SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
     assert await f.ensure_local("a.webp") is True
@@ -284,7 +316,7 @@ async def test_prefetch_backlog_is_bounded(tmp_path, monkeypatch):
     monkeypatch.setattr(fetch_mod, "MAX_PREFETCH_PENDING", 1)
     blob = _blob("a.webp", b"x")
     blob2 = _blob("b.webp", b"y")
-    gfs = _Gfs({blob_id_of(blob): blob, blob_id_of(blob2): blob2}, delay=0.05)
+    gfs = _Gfs({_addr(blob): blob, _addr(blob2): blob2}, delay=0.05)
     f = _fetcher(tmp_path, gfs)
     await f.receive(
         SPACE,
@@ -300,12 +332,12 @@ async def test_a_fetch_is_logged_with_its_gfs(tmp_path, caplog):
     federation demo) reads to see the cache served it. Names the file, the
     blob address and the GFS; never a key."""
     blob = _blob("a.webp", b"x")
-    f = _fetcher(tmp_path, _Gfs({blob_id_of(blob): blob}))
+    f = _fetcher(tmp_path, _Gfs({_addr(blob): blob}))
     await f.receive(SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
     with caplog.at_level(logging.INFO):
         assert await f.ensure_local("a.webp") is True
     line = next(r.getMessage() for r in caplog.records if "fetched" in r.getMessage())
-    assert "a.webp" in line and blob_id_of(blob)[:12] in line
+    assert "a.webp" in line and _addr(blob)[:12] in line
     assert "https://g1.example" in line
 
 
@@ -328,7 +360,7 @@ async def test_a_prefetch_that_misses_retries_with_backoff(tmp_path, monkeypatch
     monkeypatch.setattr(fetch_mod, "PREFETCH_RETRY_DELAYS_S", (0.0, 0.0))
     data = b"late picture"
     blob = _blob("a.webp", data)
-    gfs = _LateGfs({blob_id_of(blob): blob}, from_call=3)
+    gfs = _LateGfs({_addr(blob): blob}, from_call=3)
     f = _fetcher(tmp_path, gfs, insts=())
     f._gfs_repo.conns = [_Conn("g1", "https://g1.example")]
     await f.receive(SPACE, _wire("a.webp", blob), ["api/media/a.webp"])
@@ -340,7 +372,7 @@ async def test_a_prefetch_that_misses_retries_with_backoff(tmp_path, monkeypatch
 async def test_prefetch_retries_are_bounded(tmp_path, monkeypatch):
     monkeypatch.setattr(fetch_mod, "PREFETCH_RETRY_DELAYS_S", (0.0, 0.0))
     blob = _blob("a.webp", b"x")
-    gfs = _LateGfs({blob_id_of(blob): blob}, from_call=99)
+    gfs = _LateGfs({_addr(blob): blob}, from_call=99)
     f = _fetcher(tmp_path, gfs, insts=())
     f._gfs_repo.conns = [_Conn("g1", "https://g1.example")]
     await f.receive(SPACE, _wire("a.webp", blob), ["api/media/a.webp"])
@@ -352,9 +384,59 @@ async def test_prefetch_retries_are_bounded(tmp_path, monkeypatch):
 async def test_a_refused_blob_is_not_retried(tmp_path, monkeypatch):
     monkeypatch.setattr(fetch_mod, "PREFETCH_RETRY_DELAYS_S", (0.0, 0.0))
     blob = _blob("a.webp", b"x")
-    gfs = _Gfs({blob_id_of(blob): _blob("a.webp", b"other")})
+    gfs = _Gfs({_addr(blob): _blob("a.webp", b"other")})
     f = _fetcher(tmp_path, gfs, insts=())
     f._gfs_repo.conns = [_Conn("g1", "https://g1.example")]
     await f.receive(SPACE, _wire("a.webp", blob), ["api/media/a.webp"])
     await asyncio.wait_for(f.drain(), timeout=5)
     assert len(gfs.fetches) == 1
+
+
+async def test_a_blob_at_another_scopes_address_is_refused(tmp_path, caplog):
+    """The descriptor says ``space``: the reader re-derives the address with
+    its own space id. A blob whose bytes hash right but that sits at an
+    address of another scope (a channel's copy) is refused."""
+    blob = _blob("a.webp", b"x")
+    other = _addr(blob, "channel", CHANNEL_ID)
+    gfs = _Gfs({other: blob})
+    f = _fetcher(tmp_path, gfs)
+    await f.receive(
+        SPACE,
+        _wire("a.webp", blob, blob_id=other),
+        ["api/media/a.webp"],
+        prefetch=False,
+    )
+    with caplog.at_level(logging.WARNING):
+        assert await f.ensure_local("a.webp") is False
+    assert "address" in caplog.text
+    assert not (tmp_path / "a.webp").exists()
+
+
+async def test_a_channel_blob_is_checked_with_the_readers_own_channel_id(tmp_path):
+    data = b"private picture"
+    blob = _blob("a.webp", data)
+    gfs = _Gfs({_addr(blob, "channel", CHANNEL_ID): blob})
+    f = _fetcher(tmp_path, gfs, channel_id=CHANNEL_ID)
+    await f.receive(
+        SPACE,
+        _wire("a.webp", blob, scope="channel"),
+        ["api/media/a.webp"],
+        prefetch=False,
+    )
+    assert await f.ensure_local("a.webp") is True
+    assert (tmp_path / "a.webp").read_bytes() == data
+
+
+async def test_a_channel_blob_without_a_channel_here_is_refused(tmp_path, caplog):
+    blob = _blob("a.webp", b"x")
+    gfs = _Gfs({_addr(blob, "channel", CHANNEL_ID): blob})
+    f = _fetcher(tmp_path, gfs)
+    await f.receive(
+        SPACE,
+        _wire("a.webp", blob, scope="channel"),
+        ["api/media/a.webp"],
+        prefetch=False,
+    )
+    with caplog.at_level(logging.WARNING):
+        assert await f.ensure_local("a.webp") is False
+    assert gfs.fetches == []

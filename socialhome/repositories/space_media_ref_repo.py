@@ -41,14 +41,17 @@ class SqliteSpaceMediaRefRepo:
             await self._db.enqueue(
                 """
                 INSERT INTO space_media_refs(
-                    filename, space_id, blob_id, suite, epoch, size)
-                SELECT ?, ?, ?, ?, ?, ?
+                    filename, space_id, blob_id, suite, epoch, size, scope,
+                    addr_suite)
+                SELECT ?, ?, ?, ?, ?, ?, ?, ?
                 WHERE EXISTS (SELECT 1 FROM spaces WHERE id = ?)
                 ON CONFLICT(filename) DO UPDATE SET
                     blob_id = excluded.blob_id,
                     suite = excluded.suite,
                     epoch = excluded.epoch,
-                    size = excluded.size
+                    size = excluded.size,
+                    scope = excluded.scope,
+                    addr_suite = excluded.addr_suite
                 WHERE space_media_refs.space_id = excluded.space_id
                 """,
                 (
@@ -58,14 +61,16 @@ class SqliteSpaceMediaRefRepo:
                     ref.suite,
                     ref.epoch,
                     ref.size,
+                    ref.scope,
+                    ref.addr_suite,
                     ref.space_id,
                 ),
             )
 
     async def get(self, filename: str) -> SpaceMediaRef | None:
         row = await self._db.fetchone(
-            "SELECT filename, space_id, blob_id, suite, epoch, size, created_at"
-            " FROM space_media_refs WHERE filename = ?",
+            "SELECT filename, space_id, blob_id, suite, epoch, size, scope,"
+            " addr_suite, created_at FROM space_media_refs WHERE filename = ?",
             (filename,),
         )
         if row is None:
@@ -77,6 +82,8 @@ class SqliteSpaceMediaRefRepo:
             suite=row["suite"],
             epoch=int(row["epoch"]),
             size=int(row["size"]),
+            scope=row["scope"],
+            addr_suite=row["addr_suite"],
             created_at=row["created_at"],
         )
 

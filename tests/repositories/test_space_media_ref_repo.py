@@ -29,6 +29,8 @@ def _ref(name: str = "a.webp", space_id: str = "sp-1", **kw) -> SpaceMediaRef:
         "suite": "aesgcm-256-pad-det",
         "epoch": 1,
         "size": 65_564,
+        "scope": "space",
+        "addr_suite": "sm1",
     }
     args.update(kw)
     return SpaceMediaRef(**args)
@@ -52,6 +54,7 @@ async def test_save_and_get(repo) -> None:
     assert got.blob_id == "a" * 64
     assert got.space_id == "sp-1"
     assert got.epoch == 1
+    assert (got.scope, got.addr_suite) == ("space", "sm1")
     assert got.created_at
     assert (await repo.get("b.webp")).blob_id == "b" * 64
     assert await repo.get("missing.webp") is None
@@ -63,9 +66,9 @@ async def test_save_many_empty_is_a_no_op(repo) -> None:
 
 async def test_a_newer_descriptor_of_the_same_space_replaces(repo) -> None:
     await repo.save_many([_ref(epoch=1)])
-    await repo.save_many([_ref(epoch=2, blob_id="c" * 64)])
+    await repo.save_many([_ref(epoch=2, blob_id="c" * 64, scope="channel")])
     got = await repo.get("a.webp")
-    assert (got.epoch, got.blob_id) == (2, "c" * 64)
+    assert (got.epoch, got.blob_id, got.scope) == (2, "c" * 64, "channel")
 
 
 async def test_another_space_cannot_claim_a_file(repo) -> None:

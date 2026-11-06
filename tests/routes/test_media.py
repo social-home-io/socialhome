@@ -17,7 +17,7 @@ from socialhome.app_keys import (
     space_media_gfs_fetcher_key,
 )
 from socialhome.csp import MEDIA_CSP, PLAYABLE_MEDIA_CSP
-from socialhome.moment_public_media import blob_id_of
+from socialhome.domain.gfs_space_media import space_media_address
 from socialhome.services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
 from socialhome.space_media_seal import (
     SPACE_MEDIA_SUITE_AESGCM256_PADDED,
@@ -583,10 +583,12 @@ async def _gfs_held_picture(client, monkeypatch, *, name: str, data: bytes):
         "sp-gfs",
         {
             name: {
-                "blob_id": blob_id_of(blob),
+                "blob_id": space_media_address("space", "sp-gfs", blob),
                 "suite": SPACE_MEDIA_SUITE_AESGCM256_PADDED,
                 "epoch": epoch,
                 "size": len(blob),
+                "scope": "space",
+                "addr_suite": "sm1",
             }
         },
         [f"api/media/{name}"],

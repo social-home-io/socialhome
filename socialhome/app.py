@@ -2243,6 +2243,7 @@ def _build_space_media_gfs(
         gfs_service=gfs_connection_service,
         gfs_repo=repos.gfs_connection,
         federation_repo=repos.federation,
+        space_repo=space_repo,
         media_dir=media_dir,
     )
     app[K.space_media_gfs_uploader_key] = uploader
