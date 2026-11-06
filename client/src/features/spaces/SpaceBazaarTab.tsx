@@ -83,14 +83,18 @@ export function SpaceBazaarTab({ spaceId, canSell = true, follower = false }: {
     )
   }
 
+  // One "New listing" at a time: an empty tab offers it in the empty
+  // state, a tab with listings in the header row next to the intro.
+  const canList = sells && !isRestricted('bazaar')
+  const empty = !loading.value && listings.value.length === 0
   return (
     <div class="sh-space-bazaar">
       {dialog}
       <div class="sh-space-bazaar-header">
-        <p class="sh-muted" style={{ margin: 0 }}>
+        <p class="sh-muted">
           {t('space.bazaar.intro')}
         </p>
-        {sells && !isRestricted('bazaar') && (
+        {canList && !loading.value && listings.value.length > 0 && (
           <Button onClick={() => openBazaarCreate(spaceId)}>+ {t('space.bazaar.new_listing')}</Button>
         )}
       </div>
@@ -98,7 +102,7 @@ export function SpaceBazaarTab({ spaceId, canSell = true, follower = false }: {
       {isRestricted('bazaar') && <ProtectedNotice capability="bazaar" />}
       {loading.value ? (
         <BazaarSkeleton />
-      ) : listings.value.length === 0 ? (
+      ) : empty ? (
         <div class="sh-empty-state">
           <div aria-hidden="true">🛍</div>
           <h3>{t('space.bazaar.empty_title')}</h3>
@@ -107,7 +111,7 @@ export function SpaceBazaarTab({ spaceId, canSell = true, follower = false }: {
               {t('space.bazaar.empty_body')}
             </p>
           )}
-          {sells && !isRestricted('bazaar') && (
+          {canList && (
             <Button onClick={() => openBazaarCreate(spaceId)}>+ {t('space.bazaar.new_listing')}</Button>
           )}
         </div>
