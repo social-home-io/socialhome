@@ -307,3 +307,54 @@ async def test_a_fetch_is_logged_with_its_gfs(tmp_path, caplog):
     line = next(r.getMessage() for r in caplog.records if "fetched" in r.getMessage())
     assert "a.webp" in line and blob_id_of(blob)[:12] in line
     assert "https://g1.example" in line
+
+
+class _LateGfs(_Gfs):
+    """Holds the blob only from the *n*-th fetch on — the upload lands
+    after the item that names it (federation demo, gfs-space-post)."""
+
+    def __init__(self, blobs, *, from_call: int):
+        super().__init__(blobs)
+        self.from_call = from_call
+
+    async def fetch_space_media(self, base_url, blob_id, *, max_bytes, timeout_s):
+        self.fetches.append((base_url, blob_id))
+        if len(self.fetches) < self.from_call:
+            return None
+        return self.blobs.get(blob_id)
+
+
+async def test_a_prefetch_that_misses_retries_with_backoff(tmp_path, monkeypatch):
+    monkeypatch.setattr(fetch_mod, "PREFETCH_RETRY_DELAYS_S", (0.0, 0.0))
+    data = b"late picture"
+    blob = _blob("a.webp", data)
+    gfs = _LateGfs({blob_id_of(blob): blob}, from_call=3)
+    f = _fetcher(tmp_path, gfs, insts=())
+    f._gfs_repo.conns = [_Conn("g1", "https://g1.example")]
+    await f.receive(SPACE, _wire("a.webp", blob), ["api/media/a.webp"])
+    await asyncio.wait_for(f.drain(), timeout=5)
+    assert (tmp_path / "a.webp").read_bytes() == data
+    assert len(gfs.fetches) == 3
+
+
+async def test_prefetch_retries_are_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(fetch_mod, "PREFETCH_RETRY_DELAYS_S", (0.0, 0.0))
+    blob = _blob("a.webp", b"x")
+    gfs = _LateGfs({blob_id_of(blob): blob}, from_call=99)
+    f = _fetcher(tmp_path, gfs, insts=())
+    f._gfs_repo.conns = [_Conn("g1", "https://g1.example")]
+    await f.receive(SPACE, _wire("a.webp", blob), ["api/media/a.webp"])
+    await asyncio.wait_for(f.drain(), timeout=5)
+    assert len(gfs.fetches) == 3  # the first try + two retries
+    assert not (tmp_path / "a.webp").exists()
+
+
+async def test_a_refused_blob_is_not_retried(tmp_path, monkeypatch):
+    monkeypatch.setattr(fetch_mod, "PREFETCH_RETRY_DELAYS_S", (0.0, 0.0))
+    blob = _blob("a.webp", b"x")
+    gfs = _Gfs({blob_id_of(blob): _blob("a.webp", b"other")})
+    f = _fetcher(tmp_path, gfs, insts=())
+    f._gfs_repo.conns = [_Conn("g1", "https://g1.example")]
+    await f.receive(SPACE, _wire("a.webp", blob), ["api/media/a.webp"])
+    await asyncio.wait_for(f.drain(), timeout=5)
+    assert len(gfs.fetches) == 1

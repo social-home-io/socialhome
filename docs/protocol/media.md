@@ -248,7 +248,9 @@ uploads (WARNING), and the reader then shows the item without that picture.
 
 **Reader** (`SpaceMediaGfsFetcher`). Keeps the item's entries as
 `space_media_refs` rows ([`database.md`](../database.md)); prefetches
-pictures on arrival (3 at a time, ≤ 200 waiting); anything else — or a
+pictures on arrival (3 at a time, ≤ 200 waiting; a prefetch that finds the
+blob on no GFS — the item usually outruns the author's upload — tries again
+after 10 s and 60 s); anything else — or a
 picture past the backlog — is fetched when first viewed: `GET
 /api/media/{filename}` for a missing file asks the fetcher, concurrent
 viewers share one fetch, each waits at most 20 s. A fetch tries the GFS the

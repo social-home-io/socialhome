@@ -71,7 +71,17 @@ MAX_SOURCES: int = 4
 #: File extensions fetched on arrival (pictures); anything else on view.
 PREFETCH_EXTENSIONS: frozenset[str] = frozenset({"webp", "jpg", "jpeg", "png", "gif"})
 
+#: A prefetch that found the blob on no GFS tries again after these
+#: delays: the item (and its descriptor) usually travels faster than the
+#: author's upload of the file. Then it waits for a view.
+PREFETCH_RETRY_DELAYS_S: tuple[float, ...] = (10.0, 60.0)
+
 _PARTIAL_DIR = ".partial"
+
+#: What one fetch came to.
+_STORED = "stored"
+_MISS = "miss"
+_REFUSED = "refused"
 
 
 class SpaceMediaGfsFetcher:
@@ -107,7 +117,7 @@ class SpaceMediaGfsFetcher:
         self._federation_repo = federation_repo
         self._dir = pathlib.Path(media_dir)
         #: filename → the one fetch running for it (coalescing).
-        self._inflight: dict[str, asyncio.Task[bool]] = {}
+        self._inflight: dict[str, asyncio.Task[str]] = {}
         self._tasks: set[asyncio.Task] = set()
         self._prefetch_sem = asyncio.Semaphore(PREFETCH_CONCURRENCY)
         self._prefetch_pending = 0
@@ -156,12 +166,13 @@ class SpaceMediaGfsFetcher:
             return True
         task = self._fetch_task(filename)
         try:
-            return await asyncio.wait_for(asyncio.shield(task), timeout=timeout_s)
+            outcome = await asyncio.wait_for(asyncio.shield(task), timeout=timeout_s)
         except TimeoutError:
             log.warning("space media %s: fetch from the GFS timed out", filename)
             return False
+        return outcome == _STORED
 
-    def _fetch_task(self, filename: str) -> asyncio.Task[bool]:
+    def _fetch_task(self, filename: str) -> asyncio.Task[str]:
         task = self._inflight.get(filename)
         if task is None:
             task = asyncio.create_task(self._fetch(filename))
@@ -189,7 +200,13 @@ class SpaceMediaGfsFetcher:
     async def _prefetch_one(self, filename: str) -> None:
         try:
             async with self._prefetch_sem:
-                await self._fetch_task(filename)
+                outcome = await self._fetch_task(filename)
+            for delay in PREFETCH_RETRY_DELAYS_S:
+                if outcome != _MISS:
+                    break
+                await asyncio.sleep(delay)
+                async with self._prefetch_sem:
+                    outcome = await self._fetch_task(filename)
         except Exception:  # pragma: no cover - defensive
             log.warning("space media prefetch of %s failed", filename, exc_info=True)
         finally:
@@ -208,18 +225,21 @@ class SpaceMediaGfsFetcher:
         for task in pending:
             task.cancel()
 
-    async def _fetch(self, filename: str) -> bool:
+    async def _fetch(self, filename: str) -> str:
+        """One fetch: ``stored`` (the file is here now), ``miss`` (no GFS
+        holds the blob — yet) or ``refused`` (anything else: unknown
+        suite, no key, wrong hash, failed decrypt — not worth retrying)."""
         ref = await self._refs.get(filename)
         path = media_file_path(self._dir, filename)
         if ref is None or path is None:
-            return False
+            return _REFUSED
         if await aiofiles.os.path.isfile(path):
-            return True
+            return _STORED
         try:
             require_space_media_suite(ref.suite)
         except UnsupportedSpaceMediaSuite as exc:
             log.warning("space media %s refused: %s", filename, exc)
-            return False
+            return _REFUSED
         current = await self._crypto.media_key(ref.space_id, epoch=ref.epoch)
         if current is None:
             log.warning(
@@ -228,7 +248,8 @@ class SpaceMediaGfsFetcher:
                 ref.space_id,
                 ref.epoch,
             )
-            return False
+            return _REFUSED
+        outcome = _MISS
         for base_url in await self._sources(ref.space_id):
             blob = await self._gfs.fetch_space_media(
                 base_url, ref.blob_id, max_bytes=ref.size, timeout_s=REQUEST_TIMEOUT_S
@@ -241,6 +262,7 @@ class SpaceMediaGfsFetcher:
                     filename,
                     base_url,
                 )
+                outcome = _REFUSED
                 continue
             try:
                 data = await asyncio.to_thread(
@@ -250,7 +272,7 @@ class SpaceMediaGfsFetcher:
                 log.warning(
                     "space media %s: cannot decrypt the blob — refused", filename
                 )
-                return False
+                return _REFUSED
             await self._write(path, data)
             log.info(
                 "space media %s: fetched blob %s (%d bytes) from GFS %s",
@@ -259,9 +281,12 @@ class SpaceMediaGfsFetcher:
                 len(blob),
                 base_url,
             )
-            return True
-        log.info("space media %s: no GFS holds blob %s", filename, ref.blob_id[:12])
-        return False
+            return _STORED
+        if outcome == _MISS:
+            log.info(
+                "space media %s: no GFS holds blob %s (yet)", filename, ref.blob_id[:12]
+            )
+        return outcome
 
     async def _sources(self, space_id: str) -> list[str]:
         """The GFS base URLs to ask, in order: the GFS each link-joined pair
