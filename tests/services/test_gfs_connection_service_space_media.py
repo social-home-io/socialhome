@@ -115,7 +115,7 @@ async def test_a_warm_info_fetch_records_it_and_forgetting_drops_it(env):
     svc._record_capabilities(
         conn, _info({"max_blob_bytes": 4096, "ttl_s": 600, "scopes": ["space"]})
     )
-    assert svc._space_media["g1"] == (4096, frozenset({"space"}))
+    assert svc._space_media["g1"] == (4096, frozenset({"space"}), 600)
     svc._forget_listing("g1")
     assert "g1" not in svc._space_media
 
@@ -330,3 +330,15 @@ async def test_no_session_means_no_fetch(env):
         await svc.fetch_space_media(await repo.get("g1"), BID, max_bytes=9, timeout_s=5)
         is None
     )
+
+
+async def test_the_capability_carries_the_servers_ttl(env):
+    session = _MediaSession(
+        info=_info({"max_blob_bytes": 4096, "ttl_s": 600, "scopes": ["space"]})
+    )
+    svc = await _svc(env, session)
+    conn = await env[1].get("g1")
+    assert await svc.space_media_ttl_s(conn) == 600
+    bad = _info({"max_blob_bytes": 4096, "ttl_s": "x", "scopes": ["space"]})
+    svc = await _svc(env, _MediaSession(info=bad))
+    assert await svc.space_media_ttl_s(conn) is None

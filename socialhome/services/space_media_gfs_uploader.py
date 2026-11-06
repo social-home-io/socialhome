@@ -113,7 +113,9 @@ RETRY_BASE_S: float = 30.0
 #: How long the GFS is asked to keep a blob (it clamps to its own TTL).
 KEEP_S: int = 7 * 86_400
 
-#: (GFS, blob) pairs remembered as stored, so a repeat skips the PUT.
+#: (GFS, blob) pairs remembered as stored, so a repeat skips the PUT — each
+#: until min(KEEP_S, that GFS's TTL), after which the GFS may have dropped
+#: the blob and a repeat sends it again.
 MAX_REMEMBERED: int = 4096
 
 #: Descriptors remembered per (space, epoch, file, size, mtime), so one item
@@ -122,6 +124,10 @@ MAX_REMEMBERED: int = 4096
 MAX_DESCRIBED: int = 2048
 
 _STATUS_STORED = frozenset({200, 201})
+
+#: ``_put``'s answer when this household holds no authorization for the
+#: space (no seed, writer key or cert) — nothing was sent; not a GFS status.
+_NO_AUTHORIZATION = -1
 _STATUS_RETRY = frozenset({408, 429})
 
 
@@ -136,6 +142,10 @@ def seal_file_sync(
         filename=filename,
         data=data,
     )
+
+
+def _monotonic() -> float:
+    return time.monotonic()
 
 
 def seal_and_address_sync(
@@ -210,6 +220,7 @@ class SpaceMediaGfsUploader:
         "_stop",
         "_stored",
         "_task",
+        "_unauthorized",
     )
 
     def __init__(
@@ -237,11 +248,14 @@ class SpaceMediaGfsUploader:
         self._identity_seed: bytes = b""
         self._queue: asyncio.Queue[_Job] = asyncio.Queue()
         self._stop = asyncio.Event()
+        #: Spaces already warned about lacking any upload authorization.
+        self._unauthorized: set[str] = set()
         self._task: asyncio.Task | None = None
         self._retries: set[asyncio.Task] = set()
         #: Jobs queued or being retried — :meth:`drain` waits for zero.
         self._pending = 0
-        self._stored: OrderedDict[tuple[str, str], None] = OrderedDict()
+        #: (GFS, blob) → monotonic time until which the GFS holds it.
+        self._stored: OrderedDict[tuple[str, str], float] = OrderedDict()
         self._described: OrderedDict[tuple, SpaceMediaRef] = OrderedDict()
 
     def attach_federation(self, federation: FederationService) -> None:
@@ -505,7 +519,10 @@ class SpaceMediaGfsUploader:
 
     async def _run(self, job: _Job) -> None:
         ref = job.ref
-        todo = [c for c in job.conns if (c.id, ref.blob_id) not in self._stored]
+        now = _monotonic()
+        todo = [
+            c for c in job.conns if self._stored.get((c.id, ref.blob_id), 0.0) <= now
+        ]
         if not todo:
             return
         scope, scope_id = await self.scope_of(ref.space_id)
@@ -524,8 +541,10 @@ class SpaceMediaGfsUploader:
                 )
                 continue
             status = await self._put(conn, ref, blob, scope, scope_id)
+            if status == _NO_AUTHORIZATION:
+                return  # nothing to send anywhere; warned once per space
             if status in _STATUS_STORED:
-                self._remember(conn.id, ref.blob_id)
+                await self._remember(conn, ref.blob_id)
                 log.info(
                     "space media %s: uploaded blob %s (%d bytes) to GFS %s (HTTP %d)",
                     ref.filename,
@@ -572,9 +591,15 @@ class SpaceMediaGfsUploader:
             raise
         self._queue.put_nowait(job)
 
-    def _remember(self, conn_id: str, blob_id: str) -> None:
-        self._stored[(conn_id, blob_id)] = None
-        self._stored.move_to_end((conn_id, blob_id))
+    async def _remember(self, conn: GfsConnection, blob_id: str) -> None:
+        """Remember *blob_id* as held by *conn* until min(:data:`KEEP_S`,
+        its TTL) — an ``already_stored`` answer does not refresh a blob's
+        expiry, so the upload time is the bound."""
+        ttl = await self._gfs.space_media_ttl_s(conn)
+        keep = min(KEEP_S, ttl) if ttl else KEEP_S
+        key = (conn.id, blob_id)
+        self._stored[key] = _monotonic() + keep
+        self._stored.move_to_end(key)
         while len(self._stored) > MAX_REMEMBERED:
             self._stored.popitem(last=False)
 
@@ -641,13 +666,14 @@ class SpaceMediaGfsUploader:
             else await self._authorize(claim)
         )
         if auth is None:
-            log.warning(
-                "space media %s of space %s: this household holds no seed, "
-                "writer key or writer cert — not uploaded",
-                ref.filename,
-                ref.space_id,
-            )
-            return 403
+            if ref.space_id not in self._unauthorized:
+                self._unauthorized.add(ref.space_id)
+                log.warning(
+                    "space media of space %s: this household holds no seed, "
+                    "writer key or writer cert — its files are not uploaded",
+                    ref.space_id,
+                )
+            return _NO_AUTHORIZATION
         return await self._gfs.put_space_media(
             conn,
             blob_id=ref.blob_id,

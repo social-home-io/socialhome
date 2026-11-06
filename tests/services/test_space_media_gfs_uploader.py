@@ -74,14 +74,19 @@ class _Gfs:
         follower=(),
         status=201,
         scopes=("space", "channel"),
+        ttl_s=259_200,
     ):
         self.conns = {c.inbox_url: c for c in conns}
         self.max_blob = max_blob
         self.follower = list(follower)
         self.status = status
         self.scopes = set(scopes)
+        self.ttl_s = ttl_s
         self.puts: list[tuple[str, str, str, bytes, str, bool]] = []
         self.put_scopes: list[str] = []
+
+    async def space_media_ttl_s(self, conn):
+        return self.ttl_s
 
     async def space_media_max_blob(self, conn, *, scope="space"):
         if scope not in self.scopes:
@@ -851,3 +856,49 @@ async def test_a_file_that_left_the_space_is_not_uploaded(tmp_path, caplog):
 
 async def test_the_uploader_has_no_public_describe():
     assert not hasattr(SpaceMediaGfsUploader, "describe")
+
+
+async def test_a_stored_blob_is_uploaded_again_once_the_gfs_dropped_it(
+    tmp_path, monkeypatch
+):
+    """#1309 review F: the "already stored" memory used to last forever
+    while the GFS keeps a blob at most its TTL (3 days by default) — an
+    expired blob was never sent again. Each entry now expires with
+    min(KEEP_S, the server's TTL)."""
+    clock = [1000.0]
+    monkeypatch.setattr(up_mod, "_monotonic", lambda: clock[0])
+    _write(tmp_path, "a.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1], ttl_s=600)
+    u = _uploader(
+        tmp_path, gfs=gfs, instances=[RELAY], versions={"e": V}, seed=b"\2" * 32
+    )
+    plan = await u.plan(SPACE, ["api/media/a.webp"], followers=False)
+    await _upload(u, plan)
+    await _upload(u, plan)
+    assert len(gfs.puts) == 1  # remembered while the GFS still holds it
+    clock[0] += 600
+    await _upload(u, plan)
+    assert len(gfs.puts) == 2  # the GFS may have dropped it: sent again
+
+
+async def test_no_authorization_is_not_a_gfs_refusal_and_is_logged_once(
+    tmp_path, caplog
+):
+    """#1309 review K: an upload this household can't authorize used to be
+    reported as an HTTP 403 from the GFS (and warned per file). It is its
+    own outcome now, warned once per space, and never sent."""
+    _write(tmp_path, "a.webp", 10)
+    _write(tmp_path, "b.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1])
+    u = _uploader(tmp_path, gfs=gfs, instances=[RELAY], versions={"e": V})
+    plan = await u.plan(
+        SPACE, ["api/media/a.webp", "api/media/b.webp"], followers=False
+    )
+    with caplog.at_level("WARNING"):
+        await _upload(u, plan)
+    assert gfs.puts == []
+    lines = [r.getMessage() for r in caplog.records]
+    assert sum("no seed, writer key or writer cert" in m for m in lines) == 1
+    assert not any("HTTP 403" in m for m in lines)

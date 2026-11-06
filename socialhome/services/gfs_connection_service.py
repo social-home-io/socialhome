@@ -129,9 +129,10 @@ log = logging.getLogger(__name__)
 SPACE_MEDIA_PUT_TIMEOUT_S: float = 120.0
 
 
-def _space_media_limit(caps: dict) -> tuple[int, frozenset[str]] | None:
-    """``(max_blob_bytes, scopes)`` of a verified ``space_media`` capability
-    entry, or ``None`` when absent / malformed."""
+def _space_media_limit(caps: dict) -> tuple[int, frozenset[str], int | None] | None:
+    """``(max_blob_bytes, scopes, ttl_s)`` of a verified ``space_media``
+    capability entry (``ttl_s`` ``None`` when malformed), or ``None`` when
+    the entry is absent / malformed."""
     entry = caps.get(SPACE_MEDIA_CAPABILITY)
     if not isinstance(entry, dict):
         return None
@@ -141,7 +142,11 @@ def _space_media_limit(caps: dict) -> tuple[int, frozenset[str]] | None:
         return None
     if not isinstance(scopes, list) or not all(isinstance(x, str) for x in scopes):
         return None
-    return limit, frozenset(scopes) & MEDIA_SCOPES
+    ttl = entry.get("ttl_s")
+    ttl_s = (
+        ttl if isinstance(ttl, int) and not isinstance(ttl, bool) and ttl > 0 else None
+    )
+    return limit, frozenset(scopes) & MEDIA_SCOPES, ttl_s
 
 
 #: Characters of a *remote-authored* error body that may be interpolated
@@ -528,7 +533,7 @@ class GfsConnectionService:
         # the server proved it takes, by connection. Uploads go only to a
         # server that proved it; absent = not proven (re-probed, never a
         # sticky no).
-        self._space_media: dict[str, tuple[int, frozenset[str]]] = {}
+        self._space_media: dict[str, tuple[int, frozenset[str], int | None]] = {}
         # …and ``moment_reactions`` (v_68): the GFS takes a follower's sealed
         # reaction and pushes it to the author's household only.
         self._moment_reactions: dict[str, bool] = {}
@@ -3282,6 +3287,14 @@ class GfsConnectionService:
             return None
         self._space_media[conn.id] = proven
         return proven[0] if scope in proven[1] else None
+
+    async def space_media_ttl_s(self, conn: GfsConnection) -> int | None:
+        """How long *conn*'s GFS keeps a space media blob (its signed
+        ``space_media.ttl_s``), or ``None`` when unknown."""
+        if conn.id not in self._space_media:
+            await self.space_media_max_blob(conn)  # one probe on a cold miss
+        cached = self._space_media.get(conn.id)
+        return cached[2] if cached is not None else None
 
     async def space_media_follower_targets(self, space_id: str) -> list[GfsConnection]:
         """The GFSs whose followers of *space_id* read its content — where
