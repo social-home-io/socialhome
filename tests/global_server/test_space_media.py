@@ -12,6 +12,7 @@ import time
 
 import pytest
 
+from socialhome.global_server import blob_store as bs_mod
 from socialhome.global_server import space_media as sm
 from socialhome.global_server.blob_store import (
     BLOB_OVERHEAD,
@@ -801,7 +802,7 @@ async def test_the_orphan_sweep_rechecks_a_file_before_removing_it(repo, tmp_dir
     old = time.time() - ORPHAN_GRACE_S - 60
 
     async def stale_scan(*, after, limit):
-        return [(name, old)] if after < name else []
+        return ([(name, old)], "") if after < name else ([], "")
 
     files.scan_override = stale_scan
     assert await store.sweep_orphans(now=time.time()) == 0
@@ -913,3 +914,33 @@ async def test_a_coalesced_claim_counts_as_a_fetch_in_its_own_scope(make, repo):
     await _put(store, b, space="s2", now=NOW + 12)
     assert "s2" in {c.scope_id for c in await repo.claims_of(blob_id_of(x))}
     assert await repo.claims_of(blob_id_of(a)) == []
+
+
+# ── Stage B: the orphan-sweep cursor survives a vanishing file ───────────
+
+
+async def test_the_orphan_sweep_cursor_advances_past_a_vanished_file(
+    make, tmp_dir, monkeypatch
+):
+    """One of the listed files vanishes before its stat (a busy cache):
+    the cursor still moves to the last name listed, not back to the start —
+    else the sweep never gets past its first batch."""
+    monkeypatch.setattr(sm, "ORPHAN_SCAN_BATCH", 3)
+    store = make()
+    d = tmp_dir / "spaces"
+    d.mkdir()
+    names = sorted(f"{i:064x}" for i in range(10))
+    for n in names:
+        (d / n).write_bytes(b"x")  # fresh: nothing is removed
+    real_stat = bs_mod.os.stat
+
+    def flaky_stat(path, *a, **kw):
+        if str(path).endswith(names[2]):
+            raise FileNotFoundError(path)
+        return real_stat(path, *a, **kw)
+
+    monkeypatch.setattr(bs_mod.os, "stat", flaky_stat)
+    await store.sweep_orphans(now=time.time())
+    assert await store._repo.sweep_cursor() == names[2]
+    await store.sweep_orphans(now=time.time())
+    assert await store._repo.sweep_cursor() == names[5]

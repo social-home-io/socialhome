@@ -3566,12 +3566,15 @@ too_large_for_cache`. The hourly maintenance sweep drops expired blobs,
 claims and upload counts on every node (it is all in the shared database);
 on ONE node at a time — the holder of a ~50-minute lease row — it also walks
 the next 100 000 entries of the shared directory in name order (a persisted
-cursor that wraps, so a directory of any size is covered over successive
-runs) and removes files with no row and stale `.part` temporary files older
+cursor — the last name listed, so a file that vanishes mid-walk can't send
+it back to the start — that wraps, so a directory of any size is covered
+over successive runs) and removes files with no row and stale `.part` temporary files older
 than 10 minutes (an upload may still be writing a younger one), each stat'ed
 and looked up again right before the unlink so a file an upload rewrote
 meanwhile is kept. A fetch moves the blob's `last_fetched_at` at most once
-an hour (the upload counts as one, so a new blob is not the first to go): a
+an hour (an upload counts as one — a new blob, and a new scope's claim
+coalescing onto a held one — so what a household was just told is there is
+not the first to go): a
 popular blob costs one DB write an hour, not one per fetch. Uploads and
 deletes are also shed at 120 / min per client address before any signature
 work.

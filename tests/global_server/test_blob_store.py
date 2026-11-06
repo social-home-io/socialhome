@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 
 import pytest
 
@@ -82,19 +83,47 @@ async def test_fs_blob_files_scan_walks_names_in_order_after_a_cursor(tmp_path):
     in order, after the cursor it left off at — whatever the directory's
     size."""
     files = bs.FsBlobFiles(tmp_path / "x")
-    assert await files.scan(after="", limit=10) == []
+    assert await files.scan(after="", limit=10) == ([], "")
     d = tmp_path / "x"
     d.mkdir()
     names = [f"{i:064x}" for i in range(7)] + [".a.part"]
     for n in names:
         (d / n).write_bytes(b"x")
-    first = await files.scan(after="", limit=3)
+    first, more = await files.scan(after="", limit=3)
     assert [n for n, _ in first] == sorted(names)[:3]
+    assert more == sorted(names)[2]
     assert all(isinstance(m, float) for _, m in first)
-    second = await files.scan(after=first[-1][0], limit=3)
+    second, more = await files.scan(after=more, limit=3)
     assert [n for n, _ in second] == sorted(names)[3:6]
-    rest = await files.scan(after=second[-1][0], limit=3)
+    rest, more = await files.scan(after=more, limit=3)
     assert [n for n, _ in rest] == sorted(names)[6:]
+    # The end of the directory: nothing more to list.
+    assert more == ""
+
+
+async def test_fs_blob_files_scan_advances_past_a_file_that_vanished(
+    tmp_path, monkeypatch
+):
+    """A file listed but gone before its stat (a delete, a rename) drops out
+    of the entries — but the cursor is the last name LISTED, so the walk
+    still moves on instead of restarting at the first batch."""
+    d = tmp_path / "x"
+    d.mkdir()
+    names = sorted(f"{i:064x}" for i in range(10))
+    for n in names:
+        (d / n).write_bytes(b"x")
+    real_stat = bs.os.stat
+
+    def flaky_stat(path, *a, **kw):
+        if str(path).endswith(names[2]):
+            raise FileNotFoundError(path)
+        return real_stat(path, *a, **kw)
+
+    monkeypatch.setattr(bs.os, "stat", flaky_stat)
+    files = bs.FsBlobFiles(d)
+    entries, more = await files.scan(after="", limit=3)
+    assert [n for n, _ in entries] == names[:2]
+    assert more == names[2]
 
 
 async def test_fs_blob_files_stat_and_exists(tmp_path):
@@ -110,3 +139,20 @@ async def test_fs_blob_files_stat_and_exists(tmp_path):
     (tmp_path / "x" / ".stale.part").write_bytes(b"x")
     await files.remove(".stale.part")
     assert await files.stat(".stale.part") is None
+
+
+async def test_remove_stale_temps_removes_only_old_temporary_files(tmp_path):
+    """Shared by both blob stores: a temporary file older than the cutoff
+    goes (re-stat'ed right before), a fresh one and a blob stay."""
+    d = tmp_path / "x"
+    d.mkdir()
+    old_part, new_part, blob = ".a.1.part", ".b.2.part", "c" * 64
+    for n in (old_part, new_part, blob):
+        (d / n).write_bytes(b"x")
+    old = time.time() - 3600
+    os.utime(d / old_part, (old, old))
+    os.utime(d / blob, (old, old))
+    files = bs.FsBlobFiles(d)
+    entries, _ = await files.scan(after="", limit=10)
+    assert await bs.remove_stale_temps(files, entries, cutoff=time.time() - 600) == 1
+    assert sorted(p.name for p in d.iterdir()) == sorted([new_part, blob])

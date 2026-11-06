@@ -113,7 +113,9 @@ much disk headroom. The upload rate holds exactly (reserved in the shared
 database). One node at a time (a lease row in `gfs.db`) runs the hourly
 orphan sweep: it walks the next 100 000 entries of the shared directory —
 resuming where the last run stopped — and removes files left without a row
-(a crash mid-upload) and stale `.part` files older than 10 minutes. The admin overview (`GET /admin/api/overview`,
+(a crash mid-upload) and stale `.part` files older than 10 minutes. Every
+node's sweep also removes stale `.part` files under `media/moments/` (a page
+of that directory per run, the same code). The admin overview (`GET /admin/api/overview`,
 `space_media`) shows the blobs and bytes held and this node's evictions and
 quota refusals — in the admin portal, the **Media cache** card on Overview:
 used of `max_bytes` with a bar, the number of pictures and files, the TTL,

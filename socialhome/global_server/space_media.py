@@ -91,7 +91,14 @@ from typing import TYPE_CHECKING
 
 from ..domain.gfs_space_media import MEDIA_SCOPES
 from ..moment_public_media import MAX_BLOB_BYTES, is_blob_id
-from .blob_store import BlobFiles, MediaRefused, check_address, check_shape
+from .blob_store import (
+    TEMP_GRACE_S,
+    BlobFiles,
+    MediaRefused,
+    check_address,
+    check_shape,
+    remove_stale_temps,
+)
 from .domain import GfsSpaceMedia, GfsSpaceMediaClaim
 
 if TYPE_CHECKING:
@@ -116,7 +123,7 @@ PRUNE_MAX_BATCHES: int = 20
 
 #: A file with no row (or a temporary ``.part`` file) is removed by the
 #: sweep only once it is this old — an upload may still be writing it.
-ORPHAN_GRACE_S: int = 600
+ORPHAN_GRACE_S: int = TEMP_GRACE_S
 
 #: Directory entries the orphan sweep looks at per run (it resumes where
 #: the last run stopped, so the whole directory is walked over successive
@@ -343,14 +350,14 @@ class GfsSpaceMediaStore:
         now = time.time() if now is None else now
         cutoff = now - ORPHAN_GRACE_S
         cursor = await self._repo.sweep_cursor()
-        batch = await self._files.scan(after=cursor, limit=ORPHAN_SCAN_BATCH)
-        await self._repo.set_sweep_cursor(
-            batch[-1][0] if len(batch) >= ORPHAN_SCAN_BATCH else ""
+        batch, next_after = await self._files.scan(
+            after=cursor, limit=ORPHAN_SCAN_BATCH
         )
-        old = [(n, m) for n, m in batch if m < cutoff]
-        parts = [(n, m) for n, m in old if n.startswith(".") and n.endswith(".part")]
-        blobs = [(n, m) for n, m in old if is_blob_id(n)]
-        removed = 0
+        # The last name listed, not the last one stat'ed: a file that went
+        # between the two must not send the walk back to the start.
+        await self._repo.set_sweep_cursor(next_after)
+        blobs = [(n, m) for n, m in batch if m < cutoff and is_blob_id(n)]
+        removed = await remove_stale_temps(self._files, batch, cutoff=cutoff)
         for i in range(0, len(blobs), _ORPHAN_LOOKUP_BATCH):
             chunk = blobs[i : i + _ORPHAN_LOOKUP_BATCH]
             known = await self._repo.known_blob_ids([n for n, _ in chunk])
@@ -365,11 +372,6 @@ class GfsSpaceMediaStore:
                     ) and not await self._repo.known_blob_ids([name]):
                         await self._files.remove(name)
                         removed += 1
-        for name, mtime in parts:
-            async with self._lock:
-                if await self._unchanged(name, mtime, cutoff):
-                    await self._files.remove(name)
-                    removed += 1
         if removed:
             log.info("space media: removed %d orphan file(s)", removed)
         return removed

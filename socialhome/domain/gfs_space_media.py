@@ -75,16 +75,11 @@ SPACE_MEDIA_AUTH_HEADER: str = "X-SH-Space-Media-Auth"
 #: object stays well under 1.5 KB).
 SPACE_MEDIA_AUTH_MAX_CHARS: int = 4096
 
-#: Routes (aiohttp patterns). The fetch names no scope: a reader can't be
-#: told apart by path, and a private channel's blob isn't marked "space".
-SPACE_MEDIA_UPLOAD_ROUTE: str = "/gfs/spaces/{space_id}/media/{blob_id}"
-SPACE_MEDIA_DELETE_ROUTE: str = "/gfs/spaces/{space_id}/media/{blob_id}/delete"
-CHANNEL_MEDIA_UPLOAD_ROUTE: str = "/gfs/channels/{channel_id}/media/{blob_id}"
-CHANNEL_MEDIA_DELETE_ROUTE: str = "/gfs/channels/{channel_id}/media/{blob_id}/delete"
-MEDIA_FETCH_ROUTE: str = "/gfs/media/{blob_id}"
-
 #: Key of the cache's entry in the signed ``/gfs/info`` capability block:
-#: ``{"max_blob_bytes": int, "ttl_s": int, "scopes": ["channel", "space"]}``.
+#: ``{"max_blob_bytes": int, "ttl_s": int, "space_max_bytes": int,
+#: "space_uploads_per_hour": int, "scopes": ["channel", "space"]}``.
+#: (The routes are registered in ``global_server/routes/__init__.py``; the
+#: fetch, ``/gfs/media/{blob_id}``, names no scope.)
 SPACE_MEDIA_CAPABILITY: str = "space_media"
 
 SCOPE_SPACE: str = "space"

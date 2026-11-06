@@ -19,6 +19,7 @@ from socialhome.global_server.app_keys import (
 )
 from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance
+from socialhome.global_server.repositories import SqliteGfsMomentMediaRepo
 from socialhome.global_server.server import create_gfs_app
 from socialhome.moment_public_media import MAX_BLOB_BYTES, blob_id_of, seal_media
 
@@ -286,3 +287,21 @@ async def test_a_bad_address_is_a_plain_404(client):
 async def test_info_advertises_encrypted_moment_media(client):
     info = await (await client.get("/gfs/info")).json()
     assert info["capabilities"]["encrypted_moment_media"] is True
+
+
+async def test_the_expiry_sweep_removes_stale_temporary_files(gfs_db, tmp_dir):
+    """A write that died before its rename leaves ``.{blob}.{token}.part``
+    behind; the moment store's sweep removes those older than the grace (the
+    same shared code as the space media cache) and keeps fresh ones."""
+    store = gmm.GfsMomentMediaStore(SqliteGfsMomentMediaRepo(gfs_db), tmp_dir)
+    d = tmp_dir / "moments"
+    d.mkdir()
+    stale = d / ("." + "a" * 64 + ".0011.part")
+    fresh = d / ("." + "b" * 64 + ".0022.part")
+    stale.write_bytes(b"x")
+    fresh.write_bytes(b"x")
+    old = time.time() - gmm.TEMP_GRACE_S - 60
+    os.utime(stale, (old, old))
+    await store.prune_expired()
+    assert not stale.exists()
+    assert fresh.exists()

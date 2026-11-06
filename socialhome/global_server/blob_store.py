@@ -8,6 +8,8 @@ by its SHA-256 — and keep the bytes as files. What they share lives here:
 
 * :func:`check_shape` / :func:`check_address` — the upload checks every blob
   passes, whatever its store (422 :class:`MediaRefused` otherwise);
+* :func:`remove_stale_temps` — the temporary files a write that died
+  before its rename left behind, removed once older than a grace;
 * :class:`BlobFiles` — the small storage interface a store writes through,
   and :class:`FsBlobFiles`, the filesystem one. The data dir is shared by
   every node of a cluster, so a blob one node took is served by any other.
@@ -35,6 +37,14 @@ log = logging.getLogger(__name__)
 
 #: AES-GCM nonce + tag around a padded bucket.
 BLOB_OVERHEAD: int = 12 + 16
+
+#: A temporary file (``.{blob_id}.{token}.part``) older than this is a
+#: write that died before its rename — no upload takes this long.
+TEMP_GRACE_S: int = 600
+
+#: One scan page: ``(name, mtime)`` entries, and the name to continue after
+#: (``""`` once the end of the directory is reached).
+ScanPage = tuple[list[tuple[str, float]], str]
 
 #: Every size a well-formed blob can have.
 BUCKET_SIZES: frozenset[int] = frozenset(b + BLOB_OVERHEAD for b in PAD_BUCKETS)
@@ -77,7 +87,7 @@ class BlobFiles(Protocol):
     async def remove(self, blob_id: str) -> None: ...
     async def stat(self, name: str) -> float | None: ...
     async def exists(self, blob_id: str) -> bool: ...
-    async def scan(self, *, after: str, limit: int) -> list[tuple[str, float]]: ...
+    async def scan(self, *, after: str, limit: int) -> ScanPage: ...
 
 
 class FsBlobFiles:
@@ -128,12 +138,15 @@ class FsBlobFiles:
     async def exists(self, blob_id: str) -> bool:
         return await self.stat(blob_id) is not None
 
-    async def scan(self, *, after: str, limit: int) -> list[tuple[str, float]]:
-        """The next *limit* ``(name, mtime)`` in name order after *after* —
-        blobs and temporary files — so the orphan sweep walks the whole
-        directory over successive calls. The directory is iterated in a
-        worker thread keeping only the *limit* smallest names, so memory is
-        bounded by *limit*, not by the directory."""
+    async def scan(self, *, after: str, limit: int) -> ScanPage:
+        """The next *limit* names in name order after *after* — blobs and
+        temporary files — with their mtimes, and the name to continue after:
+        the last one LISTED (a file gone before its stat drops out of the
+        entries but not out of the walk), or ``""`` at the end. So a sweep
+        walks the whole directory over successive calls however busy it is.
+        The directory is iterated in a worker thread keeping only the
+        *limit* smallest names, so memory is bounded by *limit*, not by the
+        directory."""
         return await asyncio.to_thread(_scan_sync, self._dir, after, limit)
 
     async def _discard(self, path: Path) -> None:
@@ -145,17 +158,42 @@ class FsBlobFiles:
             log.warning("blob store: could not remove a blob file: %s", exc)
 
 
-def _scan_sync(directory: Path, after: str, limit: int) -> list[tuple[str, float]]:
+def is_temp_name(name: str) -> bool:
+    """A write's temporary file (``.{blob_id}.{token}.part``)."""
+    return name.startswith(".") and name.endswith(".part")
+
+
+async def remove_stale_temps(
+    files: BlobFiles, entries: list[tuple[str, float]], *, cutoff: float
+) -> int:
+    """Remove the temporary files among *entries* (a :meth:`BlobFiles.scan`
+    page) last written before *cutoff* — each re-stat'ed right before its
+    unlink, so one written meanwhile stays. Temporary names are random per
+    write, so no other upload (on any node) can take one over. Returns the
+    files removed."""
+    removed = 0
+    for name, mtime in entries:
+        if not is_temp_name(name) or mtime >= cutoff:
+            continue
+        current = await files.stat(name)
+        if current is not None and current == mtime:
+            await files.remove(name)
+            removed += 1
+    return removed
+
+
+def _scan_sync(directory: Path, after: str, limit: int) -> ScanPage:
     """:meth:`FsBlobFiles.scan`'s blocking body (runs in a worker thread)."""
     try:
         with os.scandir(directory) as entries:
             names = heapq.nsmallest(limit, (e.name for e in entries if e.name > after))
     except FileNotFoundError:
-        return []
+        return [], ""
     out: list[tuple[str, float]] = []
     for name in names:
         try:
             out.append((name, os.stat(directory / name).st_mtime))
         except FileNotFoundError:
             continue
-    return out
+    # A full page may have more after it; a short one reached the end.
+    return out, (names[-1] if len(names) >= limit else "")
