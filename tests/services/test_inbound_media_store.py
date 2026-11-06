@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from unittest.mock import patch
 
@@ -223,3 +224,66 @@ def test_require_local_media_ref_refuses_with_field_name(value):
         store.require_local_media_ref(value, field="cover_url")
     assert ei.value.code == "INVALID_MEDIA_URL"
     assert ei.value.detail.startswith("cover_url ")
+
+
+# ── assemble_once: whichever chunk completes the set assembles ─────────
+
+
+def _parts(tmp_path, chunks: list[bytes], *, present: list[int] | None = None):
+    parts = [tmp_path / f"part{i}" for i in range(len(chunks))]
+    for i in present if present is not None else range(len(chunks)):
+        parts[i].write_bytes(chunks[i])
+    return parts
+
+
+async def test_assemble_once_waits_while_a_part_is_missing(tmp_path):
+    parts = _parts(tmp_path, [b"A", b"B", b"C"], present=[0, 2])
+    target = tmp_path / "out.bin"
+    assert await store.assemble_once(parts, target, tmp_dir=tmp_path) is None
+    assert not target.exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["part0", "part2"]
+
+
+async def test_assemble_once_concats_in_index_order_and_drops_parts(tmp_path):
+    parts = _parts(tmp_path, [b"A", b"B", b"C"])
+    target = tmp_path / "out.bin"
+    assert await store.assemble_once(parts, target, tmp_dir=tmp_path) is True
+    assert target.read_bytes() == b"ABC"
+    assert [p.name for p in tmp_path.iterdir()] == ["out.bin"]
+
+
+async def test_assemble_once_never_replaces_an_existing_target(tmp_path):
+    parts = _parts(tmp_path, [b"A", b"B"])
+    target = tmp_path / "out.bin"
+    target.write_bytes(b"ORIGINAL")
+    assert await store.assemble_once(parts, target, tmp_dir=tmp_path) is False
+    assert target.read_bytes() == b"ORIGINAL"
+    assert [p.name for p in tmp_path.iterdir()] == ["out.bin"]
+
+
+async def test_assemble_once_late_duplicate_after_assembly_leaves_no_parts(
+    tmp_path,
+):
+    """A duplicate chunk that lands after the file was assembled must not
+    leave an orphan part behind (nothing would ever complete the set)."""
+    parts = _parts(tmp_path, [b"A", b"B"], present=[1])
+    target = tmp_path / "out.bin"
+    target.write_bytes(b"AB")
+    assert await store.assemble_once(parts, target, tmp_dir=tmp_path) is False
+    assert [p.name for p in tmp_path.iterdir()] == ["out.bin"]
+
+
+async def test_assemble_once_concurrent_completions_publish_exactly_once(
+    tmp_path,
+):
+    """Two chunks completing the set at once each assemble into a temp file
+    of their own; exactly one publishes, the file is never mixed."""
+    chunks = [bytes([i]) * 65536 for i in range(6)]
+    parts = _parts(tmp_path, chunks)
+    target = tmp_path / "out.bin"
+    results = await asyncio.gather(
+        *(store.assemble_once(parts, target, tmp_dir=tmp_path) for _ in range(4))
+    )
+    assert sorted(results) == [False, False, False, True]
+    assert target.read_bytes() == b"".join(chunks)
+    assert [p.name for p in tmp_path.iterdir()] == ["out.bin"]

@@ -13,6 +13,7 @@ enforces (see ``docs/protocol/media.md``):
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from datetime import UTC, datetime
 
@@ -364,6 +365,69 @@ async def test_chunks_from_another_household_never_mix(env):
         _blob({**payload, "chunk_index": 1, "final": True}, body=b"GOOD1")
     )
     assert (media / "a1.webp").read_bytes() == b"GOOD0GOOD1"
+
+
+_FOUR = [bytes([i]) * 512 for i in range(4)]
+
+
+def _chunk(idx: int) -> FederationEvent:
+    return _blob(
+        {
+            "post_id": "post-a",
+            "filename": "a1.webp",
+            "transfer_id": "a1.webp:self",
+            "chunk_index": idx,
+            "chunk_count": 4,
+            "final": idx == 3,
+        },
+        body=_FOUR[idx],
+    )
+
+
+def _no_partials(media) -> bool:
+    partial = media / ".partial"
+    return not partial.exists() or list(partial.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        (3, 0, 1, 2),  # the final chunk first
+        (0, 3, 2, 1),  # a middle chunk last
+        (1, 3, 2, 0),  # chunk 0 last
+        (0, 1, 2, 3),  # in order
+    ],
+)
+async def test_multi_chunk_assembles_whichever_chunk_lands_last(env, order):
+    """Regression (federation demo ``verify``, a 680 KB calendar cover from
+    b never reached a): the sender dispatches a file's chunks concurrently
+    (``PIPELINE_WINDOW``), so the ``final`` chunk can land before the
+    others. Assembly used to run only on the final chunk — the rest then
+    landed into partials nobody assembled, and the sender had already
+    dropped its outbox row. Whichever chunk completes the set assembles."""
+    svc, media = env
+    for n, idx in enumerate(order):
+        await svc._on_space_media_blob(_chunk(idx))
+        if n < len(order) - 1:
+            assert not (media / "a1.webp").exists()
+    assert (media / "a1.webp").read_bytes() == b"".join(_FOUR)
+    assert _no_partials(media)
+
+
+async def test_duplicate_chunks_before_and_after_assembly_are_harmless(env):
+    svc, media = env
+    for idx in (3, 0, 0, 1, 3, 2, 2, 1, 3):
+        await svc._on_space_media_blob(_chunk(idx))
+    assert (media / "a1.webp").read_bytes() == b"".join(_FOUR)
+    assert _no_partials(media)
+
+
+async def test_chunks_landing_concurrently_assemble_once(env):
+    svc, media = env
+    await asyncio.gather(*(svc._on_space_media_blob(_chunk(i)) for i in (3, 1, 0, 2)))
+    assert (media / "a1.webp").read_bytes() == b"".join(_FOUR)
+    assert _no_partials(media)
+    assert [p.name for p in media.iterdir() if p.name != ".partial"] == ["a1.webp"]
 
 
 @pytest.mark.parametrize(

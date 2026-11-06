@@ -9,6 +9,7 @@ without dropping the file.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
 from datetime import UTC, datetime
@@ -451,6 +452,97 @@ async def test_dm_media_blob_chunked_missing_chunk_bails(inbound_with_media):
     # 1 should be there.
     assert (media_dir / "m-1.part00001").is_file()
     assert not (media_dir / "m-1.webp").is_file()
+
+
+class _MediaReadySpy:
+    """Records ``dm.media_ready`` pushes."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def broadcast_dm_media_ready(self, **kwargs) -> None:
+        self.calls.append(kwargs)
+
+
+_DM_PARTS = [_WEBP_HEADER, b"middle-" * 64, b"tail-" * 64]
+
+
+def _dm_chunk(idx: int) -> FederationEvent:
+    return _event(
+        FederationEventType.DM_MEDIA_BLOB,
+        {
+            "media_blob_id": "m-1",
+            "message_id": "m-1",
+            "conversation_id": "conv-1",
+            "mime_type": "image/webp",
+            "chunk_index": idx,
+            "chunk_count": 3,
+            "final": idx == 2,
+            "bytes_b64": base64.b64encode(_DM_PARTS[idx]).decode("ascii"),
+        },
+    )
+
+
+def _dm_leftovers(media_dir) -> list[str]:
+    return sorted(p.name for p in media_dir.iterdir() if p.name != "m-1.webp")
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        (2, 0, 1),  # the final chunk first
+        (0, 2, 1),  # a middle chunk last
+        (1, 2, 0),  # chunk 0 last
+    ],
+)
+async def test_dm_media_blob_assembles_whichever_chunk_lands_last(
+    inbound_with_media, order
+):
+    """Regression: the sender pipelines a file's chunks (``PIPELINE_WINDOW``),
+    so the ``final`` chunk can land before the others. Assembly used to run
+    only on the final chunk — the rest landed into parts nobody assembled,
+    the sender had already dropped its outbox row, and the picture never
+    arrived. Whichever chunk completes the set assembles the file, swaps the
+    row and pushes ``dm.media_ready`` exactly once."""
+    svc, media_dir, db = inbound_with_media
+    spy = _MediaReadySpy()
+    svc.attach_realtime(spy)
+    for idx in order:
+        await svc._on_dm_media_blob(_dm_chunk(idx))
+    assert (media_dir / "m-1.webp").read_bytes() == b"".join(_DM_PARTS)
+    assert _dm_leftovers(media_dir) == []
+    row = await db.fetchone(
+        "SELECT media_url, media_sync_status FROM conversation_messages WHERE id=?",
+        ("m-1",),
+    )
+    assert row["media_url"] == "api/media/m-1.webp"
+    assert row["media_sync_status"] is None
+    assert [c["message_id"] for c in spy.calls] == ["m-1"]
+
+
+async def test_dm_media_blob_duplicate_chunks_are_harmless(inbound_with_media):
+    """Duplicates before assembly and non-final duplicates after it neither
+    corrupt the file, leave parts behind, nor push ``dm.media_ready`` again."""
+    svc, media_dir, _db = inbound_with_media
+    spy = _MediaReadySpy()
+    svc.attach_realtime(spy)
+    for idx in (2, 0, 0, 2, 1, 0, 1):
+        await svc._on_dm_media_blob(_dm_chunk(idx))
+    assert (media_dir / "m-1.webp").read_bytes() == b"".join(_DM_PARTS)
+    assert _dm_leftovers(media_dir) == []
+    assert len(spy.calls) == 1
+
+
+async def test_dm_media_blob_chunks_landing_concurrently_assemble_once(
+    inbound_with_media,
+):
+    svc, media_dir, _db = inbound_with_media
+    spy = _MediaReadySpy()
+    svc.attach_realtime(spy)
+    await asyncio.gather(*(svc._on_dm_media_blob(_dm_chunk(i)) for i in (2, 1, 0)))
+    assert (media_dir / "m-1.webp").read_bytes() == b"".join(_DM_PARTS)
+    assert _dm_leftovers(media_dir) == []
+    assert len(spy.calls) == 1
 
 
 # ── MIME sniff ──────────────────────────────────────────────────────────

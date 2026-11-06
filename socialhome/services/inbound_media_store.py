@@ -24,7 +24,9 @@ remote URL.
 
 Partial chunk files live under ``media_dir/.partial/<key>`` where ``key``
 (:func:`partial_key`) binds the sending household, so two households can
-never contribute chunks to one assembly.
+never contribute chunks to one assembly. Senders pipeline chunks, so they
+land in any order: :func:`assemble_once` runs after every chunk and
+assembles as soon as the set is complete, not when the ``final`` one lands.
 """
 
 from __future__ import annotations
@@ -33,7 +35,10 @@ import hashlib
 import logging
 import pathlib
 import re
+import uuid
+from collections.abc import Sequence
 
+import aiofiles
 import aiofiles.os
 
 from ..domain.errors import InvalidMediaRefError
@@ -206,6 +211,58 @@ async def publish_once(tmp: pathlib.Path, target: pathlib.Path) -> bool:
         return True
     await remove_quietly(tmp)
     return True
+
+
+async def assemble_once(
+    parts: Sequence[pathlib.Path],
+    target: pathlib.Path,
+    *,
+    tmp_dir: pathlib.Path,
+) -> bool | None:
+    """Concatenate ``parts`` into ``target`` once every one has landed.
+
+    Senders pipeline a file's chunks, so they land in any order: every
+    chunk handler calls this after writing its part, and whichever one
+    completes the set assembles. Returns
+
+    * ``None`` — a part is still missing; nothing changes.
+    * ``True`` — this call assembled and published ``target``.
+    * ``False`` — ``target`` already exists (another call completed the
+      set first, or a re-delivery); it is never replaced.
+
+    On ``True`` / ``False`` the parts are removed, so a duplicate chunk
+    landing after assembly never leaves an orphan behind. The parts go
+    into a temp file in ``tmp_dir`` (same filesystem as ``target``) named
+    for this call alone, so two calls completing at once never write into
+    one file; :func:`publish_once` lets exactly one of them win.
+    """
+    for part in parts:
+        if not await aiofiles.os.path.isfile(part):
+            if not await aiofiles.os.path.exists(target):
+                return None
+            await _remove_all(parts)
+            return False
+    tmp = tmp_dir / f"assembling-{uuid.uuid4().hex}"
+    try:
+        async with aiofiles.open(tmp, "wb") as out:
+            for part in parts:
+                async with aiofiles.open(part, "rb") as inp:
+                    await out.write(await inp.read())
+    except FileNotFoundError:
+        # A concurrent call published and removed the parts mid-read.
+        await remove_quietly(tmp)
+        return False if await aiofiles.os.path.exists(target) else None
+    except OSError:
+        await remove_quietly(tmp)
+        raise
+    published = await publish_once(tmp, target)
+    await _remove_all(parts)
+    return published
+
+
+async def _remove_all(paths: Sequence[pathlib.Path]) -> None:
+    for path in paths:
+        await remove_quietly(path)
 
 
 async def note_existing(

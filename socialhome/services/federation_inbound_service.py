@@ -19,7 +19,6 @@ import binascii
 import functools
 import logging
 import pathlib
-import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
@@ -142,6 +141,7 @@ from ..utils.datetime import parse_iso8601_lenient
 from .dm_audience import local_audience
 from .dm_mentions import MENTIONABLE_TYPES, DmMentionResolver
 from .inbound_media_store import (
+    assemble_once,
     is_safe_media_name,
     local_media_ref,
     local_media_refs,
@@ -1399,8 +1399,8 @@ class FederationInboundService(ProtectionGateMixin):
 
         Decodes the bytes from one chunk of the blob, writes them
         under ``media_dir`` as a part file keyed by ``chunk_index``,
-        and — when the ``final`` chunk arrives (or for legacy
-        single-payload sends) — concatenates the parts into the
+        and — once every chunk has landed, in whatever order (or for
+        legacy single-payload sends) — concatenates the parts into the
         final file, swaps the message row's ``media_url`` to point
         at it, clears ``media_sync_status``, and pushes a
         ``dm.media_ready`` WS frame so the SPA can swap the
@@ -1527,13 +1527,14 @@ class FederationInboundService(ProtectionGateMixin):
         from_instance: str,
         total_size: int,
     ) -> None:
-        """Write one DM media chunk to disk and finalise on the last one.
+        """Write one DM media chunk to disk; assemble once all have landed.
 
         Source-agnostic core shared by the JSON ``DM_MEDIA_BLOB`` handler
         and the binary ``fed-media-v1`` path — ``raw`` is the already-
         decoded chunk bytes (base64-decoded or AEAD-decrypted upstream).
-        On the final chunk it concatenates the parts, swaps the message
-        row's ``media_url``, and pushes the ``dm.media_ready`` WS frame.
+        Whichever chunk completes the set (chunks land in any order)
+        concatenates the parts, swaps the message row's ``media_url``, and
+        pushes the ``dm.media_ready`` WS frame.
         ``self._media_dir`` is guaranteed non-None by the caller.
 
         Write-once: the final file is moved into place with
@@ -1573,47 +1574,18 @@ class FederationInboundService(ProtectionGateMixin):
                 part_path = self._media_dir / f"{message_id}.part{chunk_index:05d}"
                 async with aiofiles.open(part_path, "wb") as out_f:
                     await out_f.write(data)
-                if not is_final:
-                    # Wait for the next chunk; the receive-side state
-                    # change happens only after the final chunk lands.
+                # The sender pipelines a file's chunks, so the ``final``
+                # one may land before the others: whichever chunk
+                # completes the set assembles the file. ``None`` — a chunk
+                # is still on its way; ``False`` — another chunk completed
+                # the set first and adopts the file, so this one stays
+                # quiet (``dm.media_ready`` fires once).
+                parts = [
+                    self._media_dir / f"{message_id}.part{i:05d}"
+                    for i in range(chunk_count)
+                ]
+                if not await assemble_once(parts, dest, tmp_dir=self._media_dir):
                     return
-                # Final chunk: concat 0..N-1 in order, write the
-                # result, drop parts. If any earlier chunk failed to
-                # land yet we have a hole — log + bail; the sender's
-                # outbox retry will resend the missing chunk and the
-                # finalisation will rerun.
-                async with aiofiles.open(tmp_dest, "wb") as out_f:
-                    for i in range(chunk_count):
-                        part = self._media_dir / f"{message_id}.part{i:05d}"
-                        if not await aiofiles.os.path.isfile(part):
-                            log.warning(
-                                "DM_MEDIA_BLOB: missing chunk %d for %s; "
-                                "awaiting resend",
-                                i,
-                                message_id,
-                            )
-                            try:
-                                await aiofiles.os.remove(tmp_dest)
-                            except FileNotFoundError:
-                                pass
-                            return
-                        async with aiofiles.open(part, "rb") as in_f:
-                            await out_f.write(await in_f.read())
-                if not await publish_once(tmp_dest, dest):
-                    await note_existing(
-                        dest,
-                        incoming_size=total_size,
-                        what="DM_MEDIA_BLOB",
-                        from_instance=from_instance,
-                    )
-                # Cleanup part files.
-                for i in range(chunk_count):
-                    try:
-                        await aiofiles.os.remove(
-                            self._media_dir / f"{message_id}.part{i:05d}",
-                        )
-                    except FileNotFoundError:
-                        pass
         except OSError as exc:  # pragma: no cover
             log.warning(
                 "DM_MEDIA_BLOB: write failed for %s: %s",
@@ -2142,7 +2114,7 @@ class FederationInboundService(ProtectionGateMixin):
         from_instance: str,
         total_size: int,
     ) -> None:
-        """Write one space-media chunk to disk and finalise on the last.
+        """Write one space-media chunk; assemble once all have landed.
 
         ``raw`` is the already-decoded chunk bytes; ``filename`` has been
         validated and scope-checked by the caller; ``partial_dir`` is the
@@ -2179,37 +2151,24 @@ class FederationInboundService(ProtectionGateMixin):
                 exc,
             )
             return
-        # The sender dispatches a file's chunks concurrently, so the
-        # ``final`` one may land before the others: whichever chunk
-        # completes the set assembles the file. The parts in index order go
-        # into a temp file of this call's own (two chunks completing at once
-        # never share one), then into place write-once.
-        assembled = partial_root / f"assembled-{uuid.uuid4().hex}"
+        # The sender pipelines a file's chunks, so the ``final`` one may
+        # land before the others: whichever chunk completes the set
+        # assembles the file (write-once; two completing at once never
+        # share a temp file).
         try:
-            for i in range(chunk_count):
-                if not await aiofiles.os.path.isfile(partial_root / f"{i:06d}"):
-                    if final:
-                        log.info(
-                            "SPACE_MEDIA_BLOB: final chunk of %s landed before "
-                            "chunk %d/%d — assembling when it arrives",
-                            filename,
-                            i,
-                            chunk_count,
-                        )
-                    return
-            async with aiofiles.open(assembled, "wb") as out:
-                for i in range(chunk_count):
-                    async with aiofiles.open(partial_root / f"{i:06d}", "rb") as inp:
-                        await out.write(await inp.read())
-            await aiofiles.os.makedirs(self._media_dir, exist_ok=True)
-            published = await publish_once(assembled, target)
+            published = await assemble_once(
+                [partial_root / f"{i:06d}" for i in range(chunk_count)],
+                target,
+                tmp_dir=partial_root.parent,
+            )
         except OSError as exc:
             log.warning(
                 "SPACE_MEDIA_BLOB: finalise failed for %s: %s",
                 filename,
                 exc,
             )
-            await remove_quietly(assembled)
+            return
+        if published is None:
             return
         await self._drop_space_partials(partial_root, chunk_count)
         if not published:
