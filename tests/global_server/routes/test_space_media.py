@@ -661,9 +661,9 @@ async def test_a_turned_off_cache_answers_503_before_anything(gfs):
     assert (stats["refused_too_large"], stats["refused_quota"]) == (0, 0)
 
 
-async def test_identical_bytes_from_another_scope_coalesce_and_survive_its_delete(gfs):
-    """No address squatting: a scope that uploaded a blob first can't take
-    it away from another scope that uploads the same bytes."""
+async def test_another_scopes_delete_drops_only_its_claim(gfs):
+    """A scope that coalesced onto a blob (not its owner) can withdraw only
+    its own claim — the owner's blob stays served."""
     data = os.urandom(SMALL)
     r = await gfs.put(
         _put_url(data), data=data, headers=_authority_header(_claim(data))
@@ -672,15 +672,63 @@ async def test_identical_bytes_from_another_scope_coalesce_and_survive_its_delet
     r = await gfs.put(
         _ch_url(data), data=data, headers=_channel_header(_ch_claim(data))
     )
-    assert r.status == 200
     assert await r.json() == {"stored": False, "status": "already_stored"}
-    r = await gfs.post(_put_url(data) + "/delete", json=_delete_body(data))
+    r = await gfs.post(_ch_url(data) + "/delete", json=_channel_delete_body(data))
     assert await r.json() == {"deleted": True}
     g = await gfs.get(_get_url(data))
     assert g.status == 200
     assert await g.read() == data
-    r = await gfs.post(_ch_url(data) + "/delete", json=_channel_delete_body(data))
+
+
+# ── Security review F4: a ban or the owner's delete sticks ───────────────
+
+
+async def test_the_owners_delete_withdraws_the_blob_from_every_scope(gfs):
+    """Probe P3: with per-space keys and deterministic sealing the same
+    file in two spaces never yields the same blob, so another scope's claim
+    is always a re-upload of ciphertext it fetched. The owner's delete (the
+    seed holder of the scope that stored it first) removes the blob for
+    everyone and keeps it out for the TTL — nobody re-claims it back."""
+    data = os.urandom(SMALL)
+    await gfs.put(_put_url(data), data=data, headers=_authority_header(_claim(data)))
+    r = await gfs.put(
+        _ch_url(data), data=data, headers=_channel_header(_ch_claim(data))
+    )
+    assert r.status == 200
+    r = await gfs.post(_put_url(data) + "/delete", json=_delete_body(data))
     assert await r.json() == {"deleted": True}
+    assert (await gfs.get(_get_url(data))).status == 404
+    for headers in (
+        _channel_header(_ch_claim(data)),
+        _authority_header(_claim(data)),
+    ):
+        r = await gfs.put(_put_url(data), data=data, headers=headers)
+        assert r.status == 410
+        assert (await r.json())["error"] == "media_withdrawn"
+    assert (await gfs.get(_get_url(data))).status == 404
+
+
+async def test_a_banned_spaces_blob_stays_withdrawn_whoever_claims_it(gfs):
+    """Probe P2: a ban must not be undone by another scope re-claiming the
+    banned space's blob."""
+    data = os.urandom(SMALL)
+    await gfs.put(_put_url(data), data=data, headers=_authority_header(_claim(data)))
+    await gfs.app_[gfs_fed_repo_key].set_space_status(SPACE, "banned")
+    assert (await gfs.get(_get_url(data))).status == 404
+    r = await gfs.put(
+        _ch_url(data), data=data, headers=_channel_header(_ch_claim(data))
+    )
+    assert r.status == 410
+    assert (await gfs.get(_get_url(data))).status == 404
+
+
+async def test_a_claim_of_a_banned_space_blocks_serving(gfs):
+    """A banned space's claim blocks the blob, not only stops counting."""
+    data = os.urandom(SMALL)
+    await gfs.put(_ch_url(data), data=data, headers=_channel_header(_ch_claim(data)))
+    await gfs.put(_put_url(data), data=data, headers=_authority_header(_claim(data)))
+    assert (await gfs.get(_get_url(data))).status == 200
+    await gfs.app_[gfs_fed_repo_key].set_space_status(SPACE, "banned")
     assert (await gfs.get(_get_url(data))).status == 404
 
 

@@ -33,7 +33,7 @@ def conn(tmp_path):
 
 _BLOB = (
     "INSERT INTO gfs_space_media(blob_id, size, created_at, expires_at,"
-    " last_fetched_at) VALUES(?, ?, 10, 20, 10)"
+    " last_fetched_at, owner_kind, owner_id) VALUES(?, ?, 10, 20, 10, 'space', 's1')"
 )
 _CLAIM = (
     "INSERT INTO gfs_space_media_claims(blob_id, scope_kind, scope_id, size,"
@@ -127,4 +127,29 @@ def test_claim_sequence_never_reuses_a_number(conn):
             "SELECT seq FROM gfs_space_media_claims WHERE blob_id=?", ("c" * 64,)
         ).fetchone()[0]
         > top
+    )
+
+
+def test_a_blob_has_an_owner_scope(conn):
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO gfs_space_media(blob_id, size, created_at, expires_at,"
+            " last_fetched_at, owner_kind, owner_id)"
+            " VALUES(?, 100, 10, 20, 10, 'room', 's1')",
+            ("a" * 64,),
+        )
+
+
+def test_tombstones_are_one_per_blob_and_swept_by_time(conn):
+    conn.execute(
+        "INSERT INTO gfs_space_media_tombstones(blob_id, until) VALUES(?, 5)",
+        ("a" * 64,),
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO gfs_space_media_tombstones(blob_id, until) VALUES(?, 6)",
+            ("a" * 64,),
+        )
+    assert "idx_gfs_space_media_tombstones_until" in _plan(
+        conn, "SELECT blob_id FROM gfs_space_media_tombstones WHERE until <= 10"
     )

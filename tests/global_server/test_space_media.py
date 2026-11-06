@@ -155,27 +155,31 @@ async def test_the_same_bytes_from_another_scope_add_a_claim(make, repo):
     assert await repo.totals() == (1, SMALL)
 
 
-async def test_a_delete_drops_only_the_callers_claim(make, repo, tmp_dir):
+async def test_a_coalescers_delete_drops_only_its_claim(make, repo, tmp_dir):
+    """Another scope that coalesced onto the owner's blob withdraws only its
+    own claim; the owner's delete then removes the blob (and its file)."""
     store = make()
     data = _blob()
     bid = blob_id_of(data)
-    await _put(store, data, space="attacker", now=NOW, expires=NOW + 3600)
-    await _put(store, data, space="victim", now=NOW + 1)
-    assert await store.delete(bid, scope_kind="space", scope_id="attacker") is True
-    # The victim's claim keeps the blob, and its expiry is now the victim's.
+    await _put(store, data, space="owner", now=NOW)
+    await _put(store, data, space="other", now=NOW + 1)
+    assert await store.delete(bid, scope_kind="space", scope_id="other") is True
     assert await store.read(bid, now=NOW + 2) == data
-    assert (await repo.get_blob(bid)).expires_at == NOW + 1 + 86_400
-    assert await store.delete(bid, scope_kind="space", scope_id="victim") is True
+    assert [c.scope_id for c in await repo.claims_of(bid)] == ["owner"]
+    assert await store.delete(bid, scope_kind="space", scope_id="owner") is True
     assert await store.read(bid, now=NOW + 3) is None
     assert not (tmp_dir / "spaces" / bid).exists()
     assert await repo.totals() == (0, 0)
 
 
-async def test_another_scopes_claim_extends_the_blob_expiry(make, repo):
+async def test_the_owners_re_claim_extends_the_blob_expiry(make, repo):
+    """Only the owner's own claim moves the blob's expiry (another scope's
+    is capped — see the security review F4 tests below)."""
     store = make()
     data = _blob()
     await _put(store, data, space="a", expires=NOW + 3600)
-    await _put(store, data, space="b", expires=NOW + 7200)
+    await repo.delete_claim(blob_id_of(data), scope_kind="space", scope_id="a")
+    await _put(store, data, space="a", now=NOW + 1, expires=NOW + 7200)
     assert (await repo.get_blob(blob_id_of(data))).expires_at == NOW + 7200
 
 
@@ -453,7 +457,7 @@ async def test_expired_blobs_go_before_live_ones_are_evicted(make):
 # ── Read ────────────────────────────────────────────────────────────────
 
 
-async def test_read_misses(make, gfs_db):
+async def test_read_misses(make, repo, gfs_db):
     store = make()
     assert await store.read("nope") is None
     assert await store.read("a" * 64, now=NOW) is None
@@ -465,14 +469,27 @@ async def test_read_misses(make, gfs_db):
         ClientInstance(instance_id="o", display_name="O", public_key="aa" * 32)
     )
     await fed.upsert_space(
-        GlobalSpace(space_id="bad", owning_instance="o", status="banned")
+        GlobalSpace(space_id="bad", owning_instance="o", status="active")
     )
     other = _blob()
     await _put(store, other, space="bad")
+    assert await store.read(blob_id_of(other), now=NOW + 1) == other
+    await fed.set_space_status("bad", "banned")
     assert await store.read(blob_id_of(other), now=NOW + 1) is None
-    # Also claimed by a space in good standing: served.
-    await _put(store, other, space="fine", now=NOW + 2)
-    assert await store.read(blob_id_of(other), now=NOW + 3) == other
+    # A banned space's own new upload stores nothing.
+    fresh = _blob()
+    assert await _refused(_put(store, fresh, space="bad", now=NOW + 1)) == (
+        410,
+        "media_withdrawn",
+    )
+    assert await repo.get_blob(blob_id_of(fresh)) is None
+    # A banned owner's blob is withdrawn: no space in good standing can
+    # claim it back into service.
+    assert await _refused(_put(store, other, space="fine", now=NOW + 2)) == (
+        410,
+        "media_withdrawn",
+    )
+    assert await store.read(blob_id_of(other), now=NOW + 3) is None
 
 
 async def test_a_missing_file_reads_as_a_miss(make, tmp_dir):
@@ -520,11 +537,12 @@ async def test_the_sweep_drops_expired_blobs_claims_and_counts(
     for d in olds:
         await _put(store, d, expires=NOW + 10)
     live = _blob()
-    await _put(store, live, space="a", expires=NOW + 20)
-    await _put(store, live, space="b")
+    await _put(store, live, space="a")
+    await _put(store, live, space="b", expires=NOW + 20)
     assert await store.sweep(NOW + 7300) == 5
     assert await repo.totals() == (1, SMALL)
-    assert {c.scope_id for c in await repo.claims_of(blob_id_of(live))} == {"b"}
+    # The coalescer's short claim expired and went; the owner's stays.
+    assert {c.scope_id for c in await repo.claims_of(blob_id_of(live))} == {"a"}
     assert sorted(p.name for p in (tmp_dir / "spaces").iterdir()) == [blob_id_of(live)]
     # Upload counts older than the previous hour are gone.
     assert await repo.upload_counts("space", "s1", bucket=(NOW + 7300) // 3600) == (
@@ -864,12 +882,14 @@ async def test_a_blob_claimed_on_another_node_survives_the_expiry_sweep(repo, tm
         batch = await real_expired(now, limit=limit)
         if not fired["done"]:
             fired["done"] = True
-            # b saw x still held (its read was before the expiry) and claims.
+            # b saw x still held (its read was before the expiry) and the
+            # owner's household re-claims it there (only the owner's claim
+            # may extend the blob — F4).
             await repo.put_claim(
                 sm.GfsSpaceMediaClaim(
                     blob_id=blob_id_of(x),
                     scope_kind="space",
-                    scope_id="s2",
+                    scope_id="s1",
                     size=SMALL,
                     created_at=now,
                     expires_at=now + 86_400,
@@ -883,7 +903,7 @@ async def test_a_blob_claimed_on_another_node_survives_the_expiry_sweep(repo, tm
     finally:
         repo.expired = real_expired  # type: ignore[method-assign]
     assert await a.read(blob_id_of(x), now=NOW + 21) == x
-    assert {c.scope_id for c in await repo.claims_of(blob_id_of(x))} == {"s2"}
+    assert {c.scope_id for c in await repo.claims_of(blob_id_of(x))} == {"s1"}
 
 
 # ── Stage B: a coalesced claim counts as a fetch ─────────────────────────
@@ -944,3 +964,96 @@ async def test_the_orphan_sweep_cursor_advances_past_a_vanished_file(
     assert await store._repo.sweep_cursor() == names[2]
     await store.sweep_orphans(now=time.time())
     assert await store._repo.sweep_cursor() == names[5]
+
+
+# ── Security review F4: owner, tombstones, a coalescer's expiry ──────────
+
+
+async def test_another_scopes_claim_never_extends_the_blob(make, repo):
+    """A claim from a scope other than the blob's owner is capped at the
+    blob's expiry, so a re-upload of fetched ciphertext keeps nothing alive
+    past what its owner asked."""
+    store = make()
+    x = _blob()
+    await _put(store, x, space="s1", now=NOW, expires=NOW + 100)
+    assert await _put(store, x, space="s2", now=NOW + 1, expires=NOW + 86_400) is False
+    held = await repo.get_blob(blob_id_of(x))
+    assert held is not None and held.expires_at == NOW + 100
+    assert (held.owner_kind, held.owner_id) == ("space", "s1")
+    claims = {c.scope_id: c.expires_at for c in await repo.claims_of(blob_id_of(x))}
+    assert claims == {"s1": NOW + 100, "s2": NOW + 100}
+    assert await store.read(blob_id_of(x), now=NOW + 101) is None
+
+
+async def test_the_owners_delete_leaves_a_tombstone_for_the_ttl(make, repo):
+    store = make()
+    x = _blob()
+    await _put(store, x, space="s1", now=NOW)
+    await _put(store, x, space="s2", now=NOW + 1)
+    assert await store.delete(
+        blob_id_of(x), scope_kind="space", scope_id="s1", now=NOW + 2
+    )
+    assert await repo.get_blob(blob_id_of(x)) is None
+    for space in ("s1", "s2", "s3"):
+        assert await _refused(_put(store, x, space=space, now=NOW + 3)) == (
+            410,
+            "media_withdrawn",
+        )
+    # The tombstone lasts the TTL, then the sweep forgets it.
+    await store.sweep(NOW + 2 + store.limits.ttl_s + 1)
+    assert await _put(store, x, space="s1", now=NOW + 2 + store.limits.ttl_s + 2)
+
+
+async def test_withdrawing_a_banned_scope_tombstones_what_it_owns(make, repo):
+    store = make()
+    mine, theirs = _blob(), _blob()
+    await _put(store, mine, space="bad", now=NOW)
+    await _put(store, theirs, space="good", now=NOW)
+    await _put(store, theirs, space="bad", now=NOW + 1)
+    assert await store.withdraw_scope("space", "bad", now=NOW + 2) == 1
+    assert await repo.get_blob(blob_id_of(mine)) is None
+    assert await _refused(_put(store, mine, space="other", now=NOW + 3)) == (
+        410,
+        "media_withdrawn",
+    )
+    # What the banned scope only coalesced onto stays its owner's.
+    assert await store.read(blob_id_of(theirs), now=NOW + 3) == theirs
+
+
+async def test_a_tombstone_written_on_another_node_stops_a_store_in_flight(
+    repo, tmp_dir
+):
+    """Two nodes: node b passed its checks for blob x, then node a's owner
+    delete tombstones x before b inserts — b's insert must not revive it."""
+    a = GfsSpaceMediaStore(
+        repo, FsBlobFiles(tmp_dir / "spaces"), _limits(), node_id="a"
+    )
+    b = GfsSpaceMediaStore(
+        repo, FsBlobFiles(tmp_dir / "spaces"), _limits(), node_id="b"
+    )
+    x = _blob()
+    await _put(a, x, space="s1", now=NOW)
+    # b passed its checks; a's owner delete lands right before b claims, so
+    # b's claim finds no row and b takes the store path — which must see
+    # the tombstone in the same statement as its insert.
+    real_claim = repo.put_claim
+    fired = {"done": False}
+
+    async def claim_after_delete(claim):
+        if not fired["done"]:
+            fired["done"] = True
+            await a.delete(
+                blob_id_of(x), scope_kind="space", scope_id="s1", now=NOW + 1
+            )
+        return await real_claim(claim)
+
+    repo.put_claim = claim_after_delete  # type: ignore[method-assign]
+    try:
+        assert await _refused(_put(b, x, space="s2", now=NOW + 1)) == (
+            410,
+            "media_withdrawn",
+        )
+    finally:
+        repo.put_claim = real_claim  # type: ignore[method-assign]
+    assert await repo.get_blob(blob_id_of(x)) is None
+    assert await b.read(blob_id_of(x), now=NOW + 2) is None

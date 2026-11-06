@@ -3488,12 +3488,23 @@ scope — the key of its caps, its upload rate and its delete:
   channel id and the keys pinned for it — never the space id, name, key or
   owner. Its invite-link members get the space's pictures this way too.
 
-The bytes are stored once. Identical bytes uploaded for another scope add
+The bytes are stored once. The scope that stored a blob first is its
+**owner**. Per-space content keys and deterministic sealing mean the same
+file in two spaces never yields the same blob, so identical bytes uploaded
+for another scope are always a re-upload of ciphertext it fetched: they add
 that scope's claim (a coalesced `200`), never a copy and never a conflict —
-so a party that saw a public blob can't squat its address under its own
-scope and later delete it from under the real one. A delete drops only the
-caller's claim; the blob and its file go with the last claim. A blob expires
-with its latest claim.
+but that claim never extends the blob's expiry past the owner's. The
+**owner's** seed holder's delete withdraws the blob for every scope: claims,
+row and file go, and a **tombstone** keeps it unservable and unclaimable
+(`410 media_withdrawn`) for the TTL — another scope's re-upload can't undo
+a delete. A moderator's **ban** of a space withdraws (tombstones) every blob
+it owns, and a blob whose owner is banned, or that a banned space still
+claims, is never served. (Before security review F4, a party that saw a
+public blob could keep a deleted or banned blob alive by re-claiming it.)
+Another scope's delete drops only its own claim; the blob goes with its
+last claim. The upload must reach every GFS before the item naming it goes
+out (the household side's contract), so nobody learns a blob's address in
+time to store it first and become its owner.
 
 **Scope of this change.** GFS side only: storage (GFS migration `0025`,
 `gfs_space_media` + `gfs_space_media_claims` + the hourly upload counts

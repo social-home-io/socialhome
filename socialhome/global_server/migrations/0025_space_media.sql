@@ -43,8 +43,13 @@
 --    * ``gfs_space_media`` — one row per stored blob (the bytes are files
 --      under ``data_dir/space_media/`` (never under the public ``media/`` dir) named by their SHA-256);
 --    * ``gfs_space_media_claims`` — which scopes hold each blob; identical
---      bytes uploaded for another scope add a claim, never a copy, and a
---      blob's file goes only when its last claim does;
+--      bytes uploaded for another scope add a claim, never a copy; the
+--      owner's (first) claim alone extends the blob, its seed holder's
+--      delete withdraws the blob for every scope;
+--    * ``gfs_space_media_tombstones`` — a blob its owner deleted, or a
+--      banned owner's: unservable and unclaimable for the TTL (security
+--      review F4 — another scope's re-upload of fetched ciphertext must not
+--      undo a delete or a ban);
 --    * ``gfs_space_media_uploads`` — accepted uploads per scope per hour,
 --      the rate limit's own count (two buckets live, the sweep drops older);
 --    * ``gfs_space_media_totals`` — one row kept by triggers, so the total
@@ -70,12 +75,35 @@ CREATE TABLE IF NOT EXISTS gfs_space_media (
     expires_at       INTEGER NOT NULL,
     -- Unix seconds of the last fetch, moved at most once an hour per blob;
     -- the upload counts as one, so a fresh blob is not evicted first.
-    last_fetched_at  INTEGER NOT NULL
+    last_fetched_at  INTEGER NOT NULL,
+    -- The scope that stored the blob — its OWNER. Per-space content keys
+    -- and deterministic sealing mean the same file in two spaces never
+    -- yields the same blob, so another scope's claim is always a re-upload
+    -- of ciphertext it fetched: it never extends the owner's expiry, and
+    -- only the owner's seed holder (or a ban of the owner) withdraws the
+    -- blob for everyone (a tombstone below).
+    owner_kind       TEXT NOT NULL CHECK(owner_kind IN ('space', 'channel')),
+    owner_id         TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_gfs_space_media_expires
     ON gfs_space_media(expires_at);
 CREATE INDEX IF NOT EXISTS idx_gfs_space_media_lru
     ON gfs_space_media(last_fetched_at, created_at);
+-- An owner's blobs, least recently fetched first (a ban's withdrawal; the
+-- fair eviction of the scope holding the most).
+CREATE INDEX IF NOT EXISTS idx_gfs_space_media_owner
+    ON gfs_space_media(owner_kind, owner_id, last_fetched_at, created_at);
+
+-- A blob its owner's seed holder deleted, or whose owner was banned: not
+-- served and not claimable again — by any scope — until ``until`` (now +
+-- the operator's TTL, the longest anyone's copy could have lived). Only an
+-- address and a time; the sweep drops it after.
+CREATE TABLE IF NOT EXISTS gfs_space_media_tombstones (
+    blob_id  TEXT PRIMARY KEY,
+    until    INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_gfs_space_media_tombstones_until
+    ON gfs_space_media_tombstones(until);
 
 CREATE TABLE IF NOT EXISTS gfs_space_media_claims (
     -- Strictly increasing per claim made (never reused — AUTOINCREMENT): an

@@ -1672,13 +1672,24 @@ async def test_add_subscriber_says_whether_it_created_the_seat(fed):
 # ── Space media cache (GFS 0025) ──────────────────────────────────────
 
 
-def _media_blob(n: int, *, size=100, created=1_000, expires=5_000, fetched=None):
+def _media_blob(
+    n: int,
+    *,
+    size=100,
+    created=1_000,
+    expires=5_000,
+    fetched=None,
+    owner="s1",
+    owner_kind="space",
+):
     return GfsSpaceMedia(
         blob_id=f"{n:064x}",
         size=size,
         created_at=created,
         expires_at=expires,
         last_fetched_at=created if fetched is None else fetched,
+        owner_kind=owner_kind,
+        owner_id=owner,
     )
 
 
@@ -1701,7 +1712,7 @@ async def space_media(gfs_db):
 
 
 async def _held_blob(repo, n, *, space="s1", kind="space", **kw):
-    await repo.add_blob(_media_blob(n, **kw))
+    await repo.add_blob(_media_blob(n, owner=space, owner_kind=kind, **kw))
     await repo.put_claim(
         _media_claim(
             n,
@@ -1732,23 +1743,26 @@ async def test_space_media_totals_are_trigger_kept(space_media):
     assert await space_media.totals() == (1, 300)
 
 
-async def test_space_media_claims_raise_never_lower_the_expiry(space_media):
-    await space_media.add_blob(_media_blob(1, expires=5_000))
+async def test_space_media_only_the_owners_claim_raises_the_expiry(space_media):
+    """The owner's claim raises (never lowers) the blob's expiry; another
+    scope's is capped at the blob's (security review F4)."""
+    await space_media.add_blob(_media_blob(1, expires=5_000, owner="a"))
     await space_media.put_claim(_media_claim(1, space="a", expires=5_000))
     await space_media.put_claim(_media_claim(1, space="b", expires=9_000))
     await space_media.put_claim(_media_claim(1, space="c", expires=2_000))
-    assert (await space_media.get_blob(f"{1:064x}")).expires_at == 9_000
+    assert (await space_media.get_blob(f"{1:064x}")).expires_at == 5_000
     assert [c.scope_id for c in await space_media.claims_of(f"{1:064x}")] == [
         "a",
         "b",
         "c",
     ]
-    # Re-putting a scope's claim replaces it.
+    # Re-putting the owner's claim replaces it and raises the blob.
     await space_media.put_claim(_media_claim(1, space="a", expires=7_000))
     claims = {
         c.scope_id: c.expires_at for c in await space_media.claims_of(f"{1:064x}")
     }
-    assert claims == {"a": 7_000, "b": 9_000, "c": 2_000}
+    assert claims == {"a": 7_000, "b": 5_000, "c": 2_000}
+    assert (await space_media.get_blob(f"{1:064x}")).expires_at == 7_000
 
 
 async def test_space_media_settle_follows_the_claims_left(space_media):
@@ -1782,15 +1796,39 @@ async def test_space_media_servable_needs_a_live_claim_of_a_good_scope(
     await _held_blob(space_media, 4, space="gone")
     # A channel whose id happens to equal a banned space id is not that space.
     await _held_blob(space_media, 5, space="bad", kind="channel")
-    # Banned space AND a good one: served.
+    # A banned owner's blob is withdrawn: a good space can't claim it back.
     await _held_blob(space_media, 6, space="bad")
-    await space_media.put_claim(_media_claim(6, space="ok"))
+    assert await space_media.put_claim(_media_claim(6, space="ok")) is False
+    # A good owner's blob that a banned space also claims: a ban blocks.
+    await _held_blob(space_media, 7, space="ok")
+    await space_media.put_claim(_media_claim(7, space="bad"))
     assert await space_media.get_servable(f"{1:064x}", now=2_000) is not None
     assert await space_media.get_servable(f"{2:064x}", now=2_000) is None
     assert await space_media.get_servable(f"{3:064x}", now=2_000) is None
     assert await space_media.get_servable(f"{4:064x}", now=2_000) is not None
     assert await space_media.get_servable(f"{5:064x}", now=2_000) is not None
-    assert await space_media.get_servable(f"{6:064x}", now=2_000) is not None
+    assert await space_media.get_servable(f"{6:064x}", now=2_000) is None
+    assert await space_media.get_servable(f"{7:064x}", now=2_000) is None
+    assert await space_media.withdrawn(f"{6:064x}", now=2_000) is True
+    assert await space_media.withdrawn(f"{1:064x}", now=2_000) is False
+
+
+async def test_space_media_tombstones_withdraw_and_expire(space_media):
+    await _held_blob(space_media, 1, space="s1")
+    await _held_blob(space_media, 2, space="s1")
+    await _held_blob(space_media, 3, space="s2")
+    assert await space_media.withdraw_blob(f"{1:064x}", until=3_000) is True
+    assert await space_media.get_blob(f"{1:064x}") is None
+    assert await space_media.claims_of(f"{1:064x}") == []
+    assert await space_media.withdrawn(f"{1:064x}", now=2_000) is True
+    # A tombstone refuses the insert in the same statement.
+    assert await space_media.add_blob(_media_blob(1, created=2_000)) is False
+    assert sorted(await space_media.withdraw_owned("space", "s1", until=3_000)) == [
+        f"{2:064x}"
+    ]
+    assert await space_media.get_blob(f"{3:064x}") is not None
+    assert await space_media.prune_tombstones(3_000) == 2
+    assert await space_media.withdrawn(f"{1:064x}", now=3_000) is False
 
 
 async def test_space_media_scope_usage_and_lru(space_media):

@@ -10,12 +10,17 @@ server can't open it.
 **Scopes and claims.** A blob is held by one or more **claims**, each by a
 scope — a listed space (``space`` + its id) or a private space's opaque v_51
 channel (``channel`` + the random channel id; this server never learns which
-space that is). The bytes are stored once: identical bytes uploaded for
-another scope add that scope's claim (a coalesced ``False``), never a copy,
-and never a conflict — so nobody who saw a public blob can squat its address
-under their own scope and delete it from under the real one. A delete drops
-only the caller's claim; the blob and its file go with the last claim. A
-blob expires with its latest claim.
+space that is). The scope that stored a blob is its **owner**. Per-space
+content keys and deterministic sealing mean the same file in two spaces
+never yields the same blob, so identical bytes from another scope are always
+a re-upload of ciphertext it fetched: they add that scope's claim (a
+coalesced ``False``), never a copy and never a conflict, but such a claim
+never extends the blob's expiry past the owner's. The owner's seed holder's
+delete withdraws the blob for everyone — every claim, the row, the file —
+and a **tombstone** keeps it unservable and unclaimable by any scope for the
+TTL; another scope's delete drops only its own claim. A moderator's ban of
+a space withdraws (tombstones) every blob it owns; a blob whose owner is
+banned, or which a banned space still claims, is never served.
 
 It is a **cache, not storage** — the operator sizes it to the disk they have
 (``[space_media]`` in the GFS config, :class:`SpaceMediaLimits`), and it
@@ -268,6 +273,7 @@ class GfsSpaceMediaStore:
         check_size(size)
         self.admit_size(size)
         now = int(time.time()) if now is None else now
+        await self._refuse_withdrawn(blob_id, now)
         if await self._holds(
             blob_id, scope_kind, scope_id, now
         ) and await self._files.exists(blob_id):
@@ -351,18 +357,58 @@ class GfsSpaceMediaStore:
             )
         return data
 
-    async def delete(self, blob_id: str, *, scope_kind: str, scope_id: str) -> bool:
-        """Drop the scope's claim (its seed holder asked). The blob and its
-        file go only when no other scope still claims it."""
+    async def delete(
+        self,
+        blob_id: str,
+        *,
+        scope_kind: str,
+        scope_id: str,
+        now: int | None = None,
+    ) -> bool:
+        """The scope's seed holder withdraws the blob. The OWNER's (the
+        scope that stored it) withdraws it for everyone: every claim, the
+        row and the file go, and a tombstone keeps it out — unservable and
+        unclaimable by any scope — for the operator's TTL. Another scope's
+        drops only its own claim (the blob goes with its last claim)."""
         if not is_blob_id(blob_id):
             return False
+        now = int(time.time()) if now is None else now
         async with self._lock:
+            held = await self._repo.get_blob(blob_id)
+            if held is not None and (held.owner_kind, held.owner_id) == (
+                scope_kind,
+                scope_id,
+            ):
+                if await self._repo.withdraw_blob(
+                    blob_id, until=now + self._limits.ttl_s
+                ):
+                    await self._files.remove(blob_id)
+                return True
             if not await self._repo.delete_claim(
                 blob_id, scope_kind=scope_kind, scope_id=scope_id
             ):
                 return False
             await self._settle(blob_id)
         return True
+
+    async def withdraw_scope(
+        self, scope_kind: str, scope_id: str, *, now: int | None = None
+    ) -> int:
+        """A moderator banned the scope: every blob it OWNS is tombstoned
+        for the TTL, unclaimed and dropped (files too), so no other scope
+        re-claims it. What it only coalesced onto stays its owner's (a
+        banned scope's live claim still blocks serving it). Returns the
+        blobs withdrawn."""
+        now = int(time.time()) if now is None else now
+        async with self._lock:
+            ids = await self._repo.withdraw_owned(
+                scope_kind, scope_id, until=now + self._limits.ttl_s
+            )
+            for blob_id in ids:
+                await self._files.remove(blob_id)
+        if ids:
+            log.info("space media: withdrew %d blob(s) of a banned scope", len(ids))
+        return len(ids)
 
     async def prune_expired(self, now: int | None = None) -> int:
         """Drop expired blobs (rows, claims, files), expired claims of blobs
@@ -384,6 +430,7 @@ class GfsSpaceMediaStore:
         async with self._lock:
             await self._repo.prune_expired_claims(now)
             await self._repo.prune_orphan_claims()
+            await self._repo.prune_tombstones(now)
         return dropped
 
     async def sweep_orphans(self, *, now: float | None = None) -> int:
@@ -506,6 +553,8 @@ class GfsSpaceMediaStore:
                 held = None
             else:
                 held = await self._repo.get_blob(blob_id)
+        # Withdrawn meanwhile (an owner's delete or a ban on another node).
+        await self._refuse_withdrawn(blob_id, now)
         if held is not None and any(
             c.scope_kind == scope_kind and c.scope_id == scope_id and c.expires_at > now
             for c in await self._repo.claims_of(blob_id)
@@ -533,7 +582,8 @@ class GfsSpaceMediaStore:
             if await self._repo.put_claim(claim):
                 return False, True
             # The row went between our read and our claim (dropped on another
-            # node): store the bytes we have rather than claim nothing.
+            # node — or withdrawn: then the insert below refuses too): store
+            # the bytes we have rather than claim nothing.
         await self._make_room(size, now)
         await self._files.write(blob_id, data)
         stored = await self._repo.add_blob(
@@ -543,12 +593,30 @@ class GfsSpaceMediaStore:
                 created_at=now,
                 expires_at=expires_at,
                 last_fetched_at=now,
+                owner_kind=scope_kind,
+                owner_id=scope_id,
             )
         )
         # ``False`` when another node inserted it meanwhile: same bytes, so
-        # ours is the coalesced answer and only the claim is new.
-        await self._repo.put_claim(claim)
+        # ours is the coalesced answer and only the claim is new — or when a
+        # tombstone names it (the owner's delete on another node landed
+        # after our checks): then nothing may hold it.
+        if not await self._repo.put_claim(claim) and await self._repo.withdrawn(
+            blob_id, now=now
+        ):
+            # Nothing may hold it: our row (if we inserted one) and file go
+            # again.
+            if not stored or await self._repo.delete_blob_if_unclaimed(blob_id):
+                await self._files.remove(blob_id)
+            raise MediaRefused(410, "media_withdrawn")
         return stored, True
+
+    async def _refuse_withdrawn(self, blob_id: str, now: int) -> None:
+        """``410 media_withdrawn`` while the blob may not be claimed: its
+        owner's seed holder deleted it or its owner was banned (a
+        tombstone, for the TTL)."""
+        if await self._repo.withdrawn(blob_id, now=now):
+            raise MediaRefused(410, "media_withdrawn")
 
     async def _unchanged(self, name: str, mtime: float, cutoff: float) -> bool:
         """The file still has the mtime it was listed with, and it is old."""

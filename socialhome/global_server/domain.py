@@ -359,13 +359,19 @@ class GfsSpaceMedia:
     expires_at: int
     #: Last fetch (the upload counts as one), moved at most once an hour.
     last_fetched_at: int
+    #: The scope that stored it (its owner): only its seed holder or a ban
+    #: of it withdraws the blob for everyone; another scope's claim never
+    #: extends its expiry.
+    owner_kind: str = "space"
+    owner_id: str = ""
 
 
 @dataclass(slots=True, frozen=True)
 class GfsSpaceMediaClaim:
     """One scope's hold on a cached blob. Identical bytes uploaded for
-    another scope add a claim, never a copy; a delete drops only the
-    caller's claim, and the blob goes with its last claim."""
+    another scope add a claim, never a copy (capped at the blob's expiry —
+    only the owner's claim extends it); another scope's delete drops only
+    its claim, the owner's withdraws the blob for everyone (a tombstone)."""
 
     blob_id: str
     #: ``"space"`` (a listed space) or ``"channel"`` (a private space's
