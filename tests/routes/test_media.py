@@ -12,6 +12,7 @@ import socialhome.media.image_processor  # noqa: F401
 from socialhome.app_keys import (
     config_key,
     db_key,
+    gallery_service_key,
     media_signer_key,
     profile_picture_repo_key,
     space_crypto_service_key,
@@ -626,3 +627,20 @@ async def test_a_missing_space_file_is_fetched_from_the_gfs_on_view(
 async def test_a_missing_file_without_a_ref_stays_404(client):
     r = await client.get("/api/media/nobody.webp", headers=_auth(client._tok))
     assert r.status == 404
+
+
+async def test_a_file_the_viewer_may_not_open_is_never_fetched(client, monkeypatch):
+    """#1309 review H: the access check runs before a fetch-on-view — a
+    viewer who may not open the file never makes the household fetch it."""
+    gfs = await _gfs_held_picture(
+        client, monkeypatch, name="gfs-hidden.webp", data=b"hidden picture"
+    )
+    gallery = client.app[gallery_service_key]
+
+    async def _deny(self, filename, *, user_id):
+        return False
+
+    monkeypatch.setattr(type(gallery), "may_open_file", _deny)
+    r = await client.get("/api/media/gfs-hidden.webp", headers=_auth(client._tok))
+    assert r.status == 404
+    assert gfs.fetches == 0

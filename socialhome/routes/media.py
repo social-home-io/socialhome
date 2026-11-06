@@ -116,14 +116,16 @@ class MediaServeView(BaseView):
             return error_response(400, "BAD_REQUEST", "Invalid filename.")
 
         file_path = pathlib.Path(config.media_path) / filename
-        if not await aiofiles.os.path.isfile(file_path):
-            fetcher = self.request.app.get(space_media_gfs_fetcher_key)
-            if fetcher is None or not await fetcher.ensure_local(filename):
-                return error_response(404, "NOT_FOUND", "Media file not found.")
+        # Access first (review H): a viewer who may not open a file never
+        # makes this household fetch it from a GFS either.
         if not await self._may_open(filename):
             # A private album's photo (D7) for someone outside it: exactly
             # the unknown file's answer, so nobody learns it exists.
             return error_response(404, "NOT_FOUND", "Media file not found.")
+        if not await aiofiles.os.path.isfile(file_path):
+            fetcher = self.request.app.get(space_media_gfs_fetcher_key)
+            if fetcher is None or not await fetcher.ensure_local(filename):
+                return error_response(404, "NOT_FOUND", "Media file not found.")
         gallery = self.request.app.get(gallery_service_key)
         # A private album's file is never kept in a browser or proxy cache:
         # someone taken out of the album must not find it there (a signed
