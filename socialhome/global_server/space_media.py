@@ -47,7 +47,7 @@ favours new pictures over old ones:
   the cache with however many spaces, or a channel flooded by its uploader,
   pushes out its own (security review F1, third review A3, fourth review
   G1); only an ACTIVE listed space takes uploads;
-* one client address uploads at most ``ip_bytes_per_hour`` (1 GiB) across
+* one client network prefix (IPv6 /48, IPv4 /24) uploads at most ``ip_bytes_per_hour`` (1 GiB) across
   every scope (``429 ip_media_quota``), cluster-wide in the shared database
   under a keyed hash of the address; a channel takes media only while it is
   used by enough member households (the auth's check);
@@ -416,7 +416,10 @@ class GfsSpaceMediaStore:
         slot = UploadSlot(scope_kind=scope_kind, scope_id=scope_id, bucket=bucket)
         if client is None:
             return slot
-        ip_key = self._ip_key(client)
+        # The budget keys on the client's network PREFIX (/48, IPv4 /24): a
+        # /48 holds 65 536 /64s, each would otherwise get a fresh budget
+        # (final check N4).
+        ip_key = self.prefix_key(client)
         try:
             await self._reserve_ip_bytes(ip_key, bucket, size, now)
         except MediaRefused:
@@ -459,7 +462,7 @@ class GfsSpaceMediaStore:
         stores nothing new); without it this call admits the upload itself
         (for *client*'s address). *owner* is the fairness owner the blob
         counts against — ``("household", a space's owning instance)`` or
-        ``("client", the uploader's keyed address bucket)`` for a channel;
+        ``("client", the uploader's keyed network prefix)`` for a channel;
         without it the scope stands alone. Raises :class:`MediaRefused`."""
         now = int(time.time()) if now is None else now
         if reserved is None:
@@ -773,7 +776,7 @@ class GfsSpaceMediaStore:
         global order and never per scope — the least recently fetched (then
         oldest) blobs of the fairness owner holding the most bytes (a
         space's owning household across all its spaces; a channel blob's
-        uploader address bucket), counting the uploader's owner with the
+        uploader network prefix), counting the uploader's owner with the
         blob it is storing (a tie takes the uploader's own), until it is down
         to the next largest, then again. So a household flooding the cache —
         however many spaces it publishes — or a channel flooded by its

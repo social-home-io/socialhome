@@ -3547,8 +3547,9 @@ fairness owner it counts against:
 - a **space** blob — the space's owning household (`owning_instance` as
   listed here), so publishing more spaces buys a household nothing beyond
   its share (third review A3);
-- a **channel** blob — the **uploader's** client address bucket (IPv6 /64,
-  as a keyed hash: identity-free), never a seated member. A hostile
+- a **channel** blob — the **uploader's network prefix** (IPv6 /48, IPv4
+  /24, as a keyed hash: identity-free), never a seated member and never a
+  /64 (one /48 holds 65 536 of them — final check N4). A hostile
   private-space owner whose only seated member is an invited victim can't
   make the victim's household "the largest" and evict the victim's own
   space's blobs: the channel's flood counts against whoever uploads it
@@ -3629,7 +3630,7 @@ pictures over old ones:
 | `space_max_bytes` | 256 MiB | Bytes one scope (space or channel) holds. Past it, that scope's **own** least recently fetched (then oldest) blobs are evicted until the new one fits; never a refusal. |
 | `ttl_seconds` | 3 days (600 s – 7 days) | A blob's longest life; the uploader's `expires_at` is clamped to it (an expiry in the past is `422`). |
 | `space_uploads_per_hour` | 300 | Accepted uploads (new blobs) of one scope in a sliding hour — this hour's count plus the last hour's, weighted by its overlap — kept in `gfs_space_media_uploads`, apart from the blob rows, so neither eviction nor delete can reset it. Past it: `429 space_media_quota` + `Retry-After`. A retry of a blob the scope holds is not counted. |
-| `ip_bytes_per_hour` | 1 GiB | The backstop: bytes one client address (an IPv6 /64) uploads in a sliding hour across every scope, kept in `gfs_space_media_ip_bytes` under a keyed hash of the address (never the address; the key derives from the cluster's shared signing seed) — cluster-wide. Past it: `429 ip_media_quota` + `Retry-After`. A retry stores no bytes and costs none; a failed upload gives its bytes back. |
+| `ip_bytes_per_hour` | 1 GiB | The backstop: bytes one client **network prefix** (an IPv6 /48, an IPv4 /24 — never a /64, which a /48 has 65 536 of) uploads in a sliding hour across every scope, kept in `gfs_space_media_ip_bytes` under a keyed hash of the address (never the address; the key derives from the cluster's shared signing seed) — cluster-wide. Past it: `429 ip_media_quota` + `Retry-After`. A retry stores no bytes and costs none; a failed upload gives its bytes back. |
 
 A blob larger than the whole cache or one scope's budget is `413
 too_large_for_cache`. The hourly maintenance sweep drops expired blobs,

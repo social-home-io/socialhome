@@ -1230,3 +1230,69 @@ async def test_a_hostile_channel_owner_cannot_evict_its_members_own_blobs(gfs):
         )
         assert r.status == 201
     assert [(await gfs.get(u)).status for u in mine_urls] == [200, 200]
+
+
+# ── Final check N4: one network prefix is one owner and one budget ───────
+
+
+@pytest.mark.parametrize(
+    "gfs",
+    [{"space_media_max_bytes": 6 * SMALL, "space_media_space_max_bytes": 64 * SMALL}],
+    indirect=True,
+)
+async def test_many_64s_of_one_48_are_one_channel_owner(gfs):
+    """N4 probe: channel uploads from 6 different /64s of ONE IPv6 /48 are
+    one fairness owner (the /48), not 6 — the real space keeps its share."""
+    victim = [os.urandom(SMALL) for _ in range(4)]
+    for v in victim:
+        r = await gfs.put(
+            _put_url(v),
+            data=v,
+            headers={**_authority_header(_claim(v)), "X-Forwarded-For": "192.0.2.50"},
+        )
+        assert r.status == 201
+    victim_urls = [f"/gfs/media/{_bid(v)}" for v in victim]
+    await _active(gfs, "member")
+    cid, seed = await _seated_channel(gfs, ["member"], joined=int(time.time()))
+    for n in range(6):
+        junk = os.urandom(SMALL)
+        claim = _claim(junk, space=cid, scope=SCOPE_CHANNEL)
+        r = await gfs.put(
+            _ch_url(junk, cid),
+            data=junk,
+            headers={
+                **_channel_header(claim, seed=seed),
+                "X-Forwarded-For": f"2001:db8:cc:{n:x}::1",
+            },
+        )
+        assert r.status == 201
+    alive = [(await gfs.get(u)).status for u in victim_urls]
+    assert alive.count(200) >= 3, alive
+
+
+@pytest.mark.parametrize(
+    "gfs", [{"space_media_ip_bytes_per_hour": SMALL}], indirect=True
+)
+async def test_the_byte_budget_is_per_network_prefix(gfs):
+    """N4: the per-address byte budget keys on the /48 (IPv4 /24), so
+    hopping /64s of one /48 doesn't reset it."""
+    first, second = os.urandom(SMALL), os.urandom(SMALL)
+    r = await gfs.put(
+        _put_url(first),
+        data=first,
+        headers={
+            **_authority_header(_claim(first)),
+            "X-Forwarded-For": "2001:db8:dd:1::1",
+        },
+    )
+    assert r.status == 201
+    r = await gfs.put(
+        _put_url(second),
+        data=second,
+        headers={
+            **_authority_header(_claim(second)),
+            "X-Forwarded-For": "2001:db8:dd:2::1",
+        },
+    )
+    assert r.status == 429
+    assert (await r.json())["error"] == "ip_media_quota"

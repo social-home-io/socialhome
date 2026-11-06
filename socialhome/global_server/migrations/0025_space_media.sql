@@ -54,7 +54,7 @@
 --      per-scope cap reads it;
 --    * ``gfs_space_media_owner_bytes`` — trigger-kept bytes per FAIRNESS
 --      OWNER (a space's owning household, or for a channel the uploader's
---      client address bucket, a keyed hash): the fair eviction under the
+--      client network prefix, /48 or /24, a keyed hash): the fair eviction under the
 --      global cap takes the owner holding the most first, so many scopes of
 --      one household are one share (third review A3) and a channel's flood
 --      counts against whoever uploads it, never a seated member (fourth
@@ -62,7 +62,7 @@
 --    * ``gfs_space_media_totals`` — one trigger-kept row, so the global cap
 --      is a primary-key read, not a scan;
 --    * ``gfs_space_media_uploads`` — accepted uploads per scope per hour;
---    * ``gfs_space_media_ip_bytes`` — bytes per client address per hour
+--    * ``gfs_space_media_ip_bytes`` — bytes per client network prefix per hour
 --      (a keyed hash, never an address);
 --    * ``gfs_space_media_sweep`` — one row: the orphan-file sweep's lease
 --      and its name cursor.
@@ -173,9 +173,9 @@ CREATE TABLE IF NOT EXISTS gfs_space_media_uploads (
 CREATE INDEX IF NOT EXISTS idx_gfs_space_media_uploads_bucket
     ON gfs_space_media_uploads(hour_bucket);
 
--- Bytes uploaded per client address per hour — the backstop budget
+-- Bytes uploaded per client network prefix per hour — the backstop budget
 -- (``[space_media] ip_bytes_per_hour``), cluster-wide in the shared DB.
--- ``ip_key`` is a keyed hash of the address bucket (an IPv6 /64), never the
+-- ``ip_key`` is a keyed hash of the network prefix (an IPv6 /48, an IPv4 /24), never the
 -- address; two buckets live, the sweep drops older.
 CREATE TABLE IF NOT EXISTS gfs_space_media_ip_bytes (
     ip_key       TEXT NOT NULL,

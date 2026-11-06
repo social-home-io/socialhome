@@ -153,12 +153,14 @@ class GfsMediaView(GfsBaseView):
             return _refused()
         size = claim.size
         # The fairness owner: a space's owning household; a channel's blob
-        # counts against its UPLOADER's address bucket (a keyed hash —
-        # identity-free), never a seated member (fourth review G1).
+        # counts against its UPLOADER's network prefix (an IPv6 /48, an IPv4
+        # /24, as a keyed hash — identity-free), never a seated member
+        # (fourth review G1) and never a /64 one /48 has 65 536 of (final
+        # check N4).
         owner = (
             ("household", household)
             if claim.scope == SCOPE_SPACE
-            else ("client", store.client_key(self.client_bucket()))
+            else ("client", store.prefix_key(self.client_ip()))
         )
         try:
             # Size bucket, caps, the scope's rate slot and the address's
@@ -168,7 +170,7 @@ class GfsMediaView(GfsBaseView):
                 scope_id=claim.scope_id,
                 blob_id=blob_id,
                 size=size,
-                client=self.client_bucket(),
+                client=self.client_ip(),
             )
         except MediaRefused as exc:
             return _media_refused(exc)
