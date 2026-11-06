@@ -560,3 +560,70 @@ async def test_a_relay_via_url_without_a_connection_here_is_never_fetched(tmp_pa
     await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
     assert await f.ensure_local("a.webp") is False
     assert gfs.fetches == []
+
+
+# ── Bounded work for a reader (#1309 review G) ───────────────────────────
+
+
+async def test_a_miss_on_view_is_remembered_for_a_while(tmp_path, monkeypatch):
+    """A file no GFS holds isn't asked for again on every view (up to four
+    GFSs each time) — for MISS_TTL_S."""
+    clock = [1000.0]
+    monkeypatch.setattr(fetch_mod, "_monotonic", lambda: clock[0])
+    blob = _blob("a.webp", b"x")
+    gfs = _Gfs({})
+    f = _fetcher(tmp_path, gfs)
+    await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
+    assert await f.ensure_local("a.webp") is False
+    asked = len(gfs.fetches)
+    assert asked >= 1
+    assert await f.ensure_local("a.webp") is False
+    assert len(gfs.fetches) == asked  # remembered: no GFS asked
+    clock[0] += fetch_mod.MISS_TTL_S
+    gfs.blobs[_addr(blob)] = blob
+    assert await f.ensure_local("a.webp") is True
+
+
+async def test_one_space_cannot_fill_the_prefetch_queue(tmp_path, monkeypatch):
+    monkeypatch.setattr(fetch_mod, "MAX_PREFETCH_PER_SPACE", 1)
+    monkeypatch.setattr(fetch_mod, "PREFETCH_RETRY_DELAYS_S", ())
+    blobs = {name: _blob(name, name.encode()) for name in ("a.webp", "b.webp")}
+    gfs = _Gfs({_addr(b): b for b in blobs.values()}, delay=0.05)
+    f = _fetcher(tmp_path, gfs)
+    wire = {}
+    for name, b in blobs.items():
+        wire.update(_wire(name, b))
+    await _recv(f, SPACE, wire, ["api/media/a.webp", "api/media/b.webp"])
+    await asyncio.wait_for(f.drain(), timeout=5)
+    assert len(gfs.fetches) == 1  # the other waits for a view
+
+
+async def test_fetches_run_under_a_global_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(fetch_mod, "MAX_CONCURRENT_FETCHES", 1)
+    inflight = 0
+    peak = 0
+    blobs = {name: _blob(name, name.encode()) for name in ("a.webp", "b.webp")}
+
+    class _Counting(_Gfs):
+        async def fetch_space_media(self, conn, blob_id, *, max_bytes, timeout_s):
+            nonlocal inflight, peak
+            inflight += 1
+            peak = max(peak, inflight)
+            await asyncio.sleep(0.05)
+            inflight -= 1
+            return await super().fetch_space_media(
+                conn, blob_id, max_bytes=max_bytes, timeout_s=timeout_s
+            )
+
+    f = _fetcher(tmp_path, _Counting({_addr(b): b for b in blobs.values()}))
+    wire = {}
+    for name, b in blobs.items():
+        wire.update(_wire(name, b))
+    await _recv(
+        f, SPACE, wire, ["api/media/a.webp", "api/media/b.webp"], prefetch=False
+    )
+    assert await asyncio.gather(f.ensure_local("a.webp"), f.ensure_local("b.webp")) == [
+        True,
+        True,
+    ]
+    assert peak == 1

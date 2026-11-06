@@ -31,7 +31,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import pathlib
+import time
 import uuid
+from collections import OrderedDict
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
@@ -65,9 +67,19 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: Prefetches running at once, and waiting at most.
+#: Prefetches running at once, waiting at most, and waiting at most for ONE
+#: space (so one member's items can't fill the queue for every space).
 PREFETCH_CONCURRENCY: int = 3
 MAX_PREFETCH_PENDING: int = 200
+MAX_PREFETCH_PER_SPACE: int = 50
+
+#: GFS fetches running at once, views and prefetches together.
+MAX_CONCURRENT_FETCHES: int = 6
+
+#: How long a file no GFS held is not asked for again on a view (each ask
+#: may try up to MAX_SOURCES GFSs).
+MISS_TTL_S: float = 300.0
+MAX_MISSES_REMEMBERED: int = 4096
 
 #: How long a viewer waits for a fetch-on-view; one GFS request's timeout.
 VIEW_TIMEOUT_S: float = 20.0
@@ -92,6 +104,10 @@ _MISS = "miss"
 _REFUSED = "refused"
 
 
+def _monotonic() -> float:
+    return time.monotonic()
+
+
 class SpaceMediaGfsFetcher:
     """Keep ``media_refs`` and turn them into local files."""
 
@@ -99,9 +115,12 @@ class SpaceMediaGfsFetcher:
         "_crypto",
         "_dir",
         "_federation_repo",
+        "_fetch_sem",
         "_gfs",
         "_gfs_repo",
         "_inflight",
+        "_misses",
+        "_prefetch_by_space",
         "_prefetch_pending",
         "_prefetch_sem",
         "_refs",
@@ -133,6 +152,12 @@ class SpaceMediaGfsFetcher:
         self._tasks: set[asyncio.Task] = set()
         self._prefetch_sem = asyncio.Semaphore(PREFETCH_CONCURRENCY)
         self._prefetch_pending = 0
+        #: Prefetches waiting per space (:data:`MAX_PREFETCH_PER_SPACE`).
+        self._prefetch_by_space: dict[str, int] = {}
+        #: Every GFS fetch, views and prefetches alike.
+        self._fetch_sem = asyncio.Semaphore(MAX_CONCURRENT_FETCHES)
+        #: filename → monotonic time until which a view doesn't ask again.
+        self._misses: OrderedDict[str, float] = OrderedDict()
 
     # ── Descriptors ──────────────────────────────────────────────────────
 
@@ -188,7 +213,7 @@ class SpaceMediaGfsFetcher:
         if prefetch:
             for ref in refs:
                 if _is_picture(ref.filename):
-                    self._prefetch(ref.filename)
+                    self._prefetch(ref.filename, space_id)
         return refs
 
     # ── Fetching ─────────────────────────────────────────────────────────
@@ -204,18 +229,25 @@ class SpaceMediaGfsFetcher:
             return False
         if await aiofiles.os.path.isfile(path):
             return True
+        if self._misses.get(filename, 0.0) > _monotonic():
+            return False  # no GFS held it a moment ago: don't ask them all again
         task = self._fetch_task(filename)
         try:
             outcome = await asyncio.wait_for(asyncio.shield(task), timeout=timeout_s)
         except TimeoutError:
             log.warning("space media %s: fetch from the GFS timed out", filename)
             return False
+        if outcome == _MISS:
+            self._misses[filename] = _monotonic() + MISS_TTL_S
+            self._misses.move_to_end(filename)
+            while len(self._misses) > MAX_MISSES_REMEMBERED:
+                self._misses.popitem(last=False)
         return outcome == _STORED
 
     def _fetch_task(self, filename: str) -> asyncio.Task[str]:
         task = self._inflight.get(filename)
         if task is None:
-            task = asyncio.create_task(self._fetch(filename))
+            task = asyncio.create_task(self._fetch_bounded(filename))
             self._inflight[filename] = task
             self._tasks.add(task)
 
@@ -226,18 +258,26 @@ class SpaceMediaGfsFetcher:
             task.add_done_callback(_done)
         return task
 
-    def _prefetch(self, filename: str) -> None:
-        if self._prefetch_pending >= MAX_PREFETCH_PENDING:
+    async def _fetch_bounded(self, filename: str) -> str:
+        async with self._fetch_sem:
+            return await self._fetch(filename)
+
+    def _prefetch(self, filename: str, space_id: str) -> None:
+        if (
+            self._prefetch_pending >= MAX_PREFETCH_PENDING
+            or self._prefetch_by_space.get(space_id, 0) >= MAX_PREFETCH_PER_SPACE
+        ):
             log.info(
                 "space media prefetch backlog full — %s waits for a view", filename
             )
             return
         self._prefetch_pending += 1
-        task = asyncio.create_task(self._prefetch_one(filename))
+        self._prefetch_by_space[space_id] = self._prefetch_by_space.get(space_id, 0) + 1
+        task = asyncio.create_task(self._prefetch_one(filename, space_id))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
 
-    async def _prefetch_one(self, filename: str) -> None:
+    async def _prefetch_one(self, filename: str, space_id: str) -> None:
         try:
             async with self._prefetch_sem:
                 outcome = await self._fetch_task(filename)
@@ -251,6 +291,11 @@ class SpaceMediaGfsFetcher:
             log.warning("space media prefetch of %s failed", filename, exc_info=True)
         finally:
             self._prefetch_pending -= 1
+            left = self._prefetch_by_space.get(space_id, 1) - 1
+            if left > 0:
+                self._prefetch_by_space[space_id] = left
+            else:
+                self._prefetch_by_space.pop(space_id, None)
 
     async def drain(self) -> None:
         """Wait for every prefetch and fetch running now (tests, the demo)."""
