@@ -82,7 +82,11 @@ from ..domain.federation import (
 )
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.federation_retention import moment_delete_key, supersede_key
-from ..domain.media_chunking import fits_channel, media_chunk_bytes
+from ..domain.media_chunking import (
+    fits_channel,
+    media_chunk_bytes,
+    routed_media_chunk_bytes,
+)
 from ..domain.media_validator import validate_inbound_media_meta
 from ..domain.space import parse_have_seq
 from ..infrastructure.event_bus import EventBus
@@ -1192,6 +1196,24 @@ class FederationService:
         return media_chunk_bytes(
             self._media_channel_limit(instance_id), file_size_bytes=file_size_bytes
         )
+
+    async def mesh_media_chunk_bytes(
+        self, instance_id: str, *, file_size_bytes: int
+    ) -> int:
+        """:meth:`media_chunk_bytes` for a chunk sent with
+        ``send_media_chunk(..., mesh_fallback=True)``.
+
+        A target that is not a CONFIRMED direct peer is reached through
+        :meth:`send_with_mesh_fallback` as ``SPACE_ROUTED`` — the chunk
+        sealed and base64'ed once more inside the envelope (~2.4x), under
+        the first hop's inbox cap. Such a target gets the routed size
+        (:func:`~socialhome.domain.media_chunking.routed_media_chunk_bytes`);
+        a CONFIRMED peer keeps the direct size. Same status check as
+        :meth:`send_with_mesh_fallback`, so the size matches the path."""
+        instance = await self._federation_repo.get_instance(instance_id)
+        if instance is None or instance.status is not PairingStatus.CONFIRMED:
+            return routed_media_chunk_bytes(file_size_bytes=file_size_bytes)
+        return self.media_chunk_bytes(instance_id, file_size_bytes=file_size_bytes)
 
     async def peer_supports(self, instance_id: str, *, min_version: int) -> bool:
         """``True`` iff the named peer's advertised ``proto_version`` is

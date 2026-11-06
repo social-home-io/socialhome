@@ -18,9 +18,17 @@ from socialhome.domain.media_chunking import (
     JSON_EXPANSION,
     MAX_MEDIA_CHUNKS,
     MIN_CHANNEL_CHUNK_BYTES,
+    ROUTED_CHUNK_BYTES,
     fits_channel,
     media_chunk_bytes,
+    routed_media_chunk_bytes,
     split_into_chunks,
+)
+from socialhome.domain.media_constraints import (
+    AUDIO_MAX_UPLOAD_BYTES,
+    FILE_MAX_UPLOAD_BYTES,
+    IMAGE_MAX_UPLOAD_BYTES,
+    VIDEO_MAX_UPLOAD_BYTES,
 )
 from socialhome.hardening import DEFAULT_JSON_MAX_BYTES
 from socialhome.services import inbound_media_store
@@ -162,3 +170,50 @@ def test_the_file_size_is_a_required_keyword():
         media_chunk_bytes(ADVERTISED_MAX_MESSAGE_BYTES)  # type: ignore[call-arg]
     with pytest.raises(TypeError):
         media_chunk_bytes(ADVERTISED_MAX_MESSAGE_BYTES, 0)  # type: ignore[misc]
+
+
+def test_a_routed_chunk_is_smaller_than_a_direct_one():
+    """A ``SPACE_ROUTED`` envelope seals the inner JSON (already carrying
+    the chunk as base64) and base64s it again before the outer envelope
+    does the same — ~2.4x the chunk. A 512 KiB chunk is ~1.24 MB on the
+    wire, over the first hop's 1 MiB inbox; the routed size fits it
+    (the real envelope is measured in ``test_federation_service``)."""
+    assert ROUTED_CHUNK_BYTES == 384 * 1024
+    assert ROUTED_CHUNK_BYTES < HTTPS_CHUNK_BYTES
+    assert routed_media_chunk_bytes(file_size_bytes=0) == ROUTED_CHUNK_BYTES
+    assert (
+        routed_media_chunk_bytes(file_size_bytes=200 * 1024 * 1024)
+        == ROUTED_CHUNK_BYTES
+    )
+
+
+def test_the_routed_size_carries_every_file_a_receiver_accepts():
+    """4096 routed chunks are 1.5 GiB — more than any space or DM file a
+    receiver takes. Raising a media max past that would push a mesh-only
+    member's file over :data:`MAX_MEDIA_CHUNKS` (the receiver refuses
+    it): this fails first."""
+    routed_max = ROUTED_CHUNK_BYTES * MAX_MEDIA_CHUNKS
+    assert routed_max == 1536 * 1024 * 1024
+    assert inbound_media_store.SPACE_MEDIA_MAX_BYTES <= routed_max
+    for mime in ("image/webp", "audio/ogg", "video/mp4", "application/pdf"):
+        assert inbound_media_store.dm_media_max_bytes(mime) <= routed_max
+    for cap in (
+        IMAGE_MAX_UPLOAD_BYTES,
+        VIDEO_MAX_UPLOAD_BYTES,
+        AUDIO_MAX_UPLOAD_BYTES,
+        FILE_MAX_UPLOAD_BYTES,
+    ):
+        size = routed_media_chunk_bytes(file_size_bytes=cap)
+        assert size == ROUTED_CHUNK_BYTES
+        assert -(-cap // size) <= MAX_MEDIA_CHUNKS
+
+
+def test_the_routed_size_keeps_the_per_file_floor():
+    """Past 1.5 GiB the chunk grows so the file still fits in
+    :data:`MAX_MEDIA_CHUNKS` — never more chunks than a receiver takes."""
+    file_size = 2 * 1024 * 1024 * 1024
+    size = routed_media_chunk_bytes(file_size_bytes=file_size)
+    assert size > ROUTED_CHUNK_BYTES
+    assert -(-file_size // size) <= MAX_MEDIA_CHUNKS
+    with pytest.raises(TypeError):
+        routed_media_chunk_bytes(0)  # type: ignore[misc]

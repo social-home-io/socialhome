@@ -51,9 +51,10 @@ from socialhome.domain.federation_capabilities import FederationCapability
 from socialhome.domain.media_chunking import (
     FRAME_OVERHEAD_BYTES,
     HTTPS_CHUNK_BYTES,
+    ROUTED_CHUNK_BYTES,
     media_chunk_bytes,
 )
-from socialhome.federation import FederationService
+from socialhome.federation import FederationService, routed_crypto
 from socialhome.federation import federation_service as federation_service_mod
 from socialhome.federation.encoder import FederationEncoder
 from socialhome.federation.federation_service import UNPAIR_SEND_RACE_S
@@ -62,12 +63,15 @@ from socialhome.federation.media_framing import (
     MEDIA_AEAD_SUITE_AESGCM_256,
     UnsupportedMediaAeadSuite,
 )
+from socialhome.federation.routed_envelope import SpaceRoutedHandler
 from socialhome.federation.transport import (
     FederationTransport,
     _TransportSendResult,
 )
+from socialhome.hardening import DEFAULT_JSON_MAX_BYTES
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.infrastructure.key_manager import KeyManager
+from socialhome.json_text import dumps_str
 
 # ─── Shared fixtures & stubs ──────────────────────────────────────────────
 
@@ -2731,6 +2735,96 @@ async def test_send_media_chunk_too_big_for_the_channel_goes_over_https():
     assert result.ok
     assert p.cap.media is None  # the channel was not tried
     assert len(p.cap.json_envelopes) == 1
+
+
+async def _routed_media_envelope_bytes(chunk_len: int) -> int:
+    """Send one ``SPACE_MEDIA_BLOB`` chunk to a mesh-only member through
+    the real ``SpaceRoutedHandler`` (real seal + real outer envelope) and
+    return the size of the ``SPACE_ROUTED`` body the first hop receives."""
+    p = _paired()  # A ↔ B CONFIRMED: B is the first hop.
+    target = derive_instance_id(generate_identity_keypair().public_key)
+    _priv, target_eph_pub = routed_crypto.generate_ephemeral_keypair()
+    route_service, _rh, _d, _s = _make_mesh_pair(
+        route=([p.a_id, p.b_id, target], target_eph_pub)
+    )
+    handler = SpaceRoutedHandler(
+        federation_service=p.svc_a,
+        federation_repo=p.repo_a,
+        event_dispatcher=MagicMock(),
+        target_eph_lookup=MagicMock(),
+    )
+    p.svc_a.attach_mesh(route_service=route_service, routed_handler=handler)
+    blob_id = f"{uuid.uuid4().hex}.webp"
+    result = await p.svc_a.send_media_chunk(
+        to_instance_id=target,
+        event_type=FederationEventType.SPACE_MEDIA_BLOB,
+        payload={
+            "post_id": uuid.uuid4().hex,
+            "correlation_id": uuid.uuid4().hex,
+            "space_id": uuid.uuid4().hex,
+            "blob_id": blob_id,
+            "transfer_id": f"{blob_id}:{target}",
+            "filename": blob_id,
+            "file_size_bytes": 200 * 1024 * 1024,
+            "chunk_index": 533,
+            "chunk_count": 534,
+            "final": False,
+        },
+        raw_chunk=os.urandom(chunk_len),
+        mesh_fallback=True,
+    )
+    assert result.ok
+    assert p.cap.media is None  # a mesh-only member never gets a frame
+    [envelope] = p.cap.json_envelopes
+    assert envelope["event_type"] == FederationEventType.SPACE_ROUTED.value
+    assert envelope["to_instance"] == p.b_id
+    return len(dumps_str(envelope).encode())
+
+
+@pytest.mark.asyncio
+async def test_a_routed_media_chunk_fits_the_first_hops_inbox():
+    """Regression: a mesh-only space member got 512 KiB chunks; sealed
+    inside ``SPACE_ROUTED`` (base64 → seal → base64 → encrypt → base64)
+    the envelope was ~1.24 MB, over the first hop's 1 MiB inbox — on
+    HTTPS and on the data channel — so pictures never arrived."""
+    size = await _routed_media_envelope_bytes(ROUTED_CHUNK_BYTES)
+    assert size <= DEFAULT_JSON_MAX_BYTES
+
+
+@pytest.mark.asyncio
+async def test_a_direct_sized_chunk_does_not_fit_when_routed():
+    size = await _routed_media_envelope_bytes(HTTPS_CHUNK_BYTES)
+    assert size > DEFAULT_JSON_MAX_BYTES
+
+
+@pytest.mark.asyncio
+async def test_mesh_media_chunk_bytes_is_the_routed_size_for_a_mesh_only_member():
+    """A target that isn't a CONFIRMED direct peer is reached through
+    ``SPACE_ROUTED`` (``send_with_mesh_fallback``), so its chunks are
+    routed-sized; a CONFIRMED peer keeps the direct size."""
+    p = _paired()
+    assert (
+        await p.svc_a.mesh_media_chunk_bytes(p.b_id, file_size_bytes=10)
+        == HTTPS_CHUNK_BYTES
+    )
+    p.cap.max_message_size = 262144
+    assert (
+        await p.svc_a.mesh_media_chunk_bytes(p.b_id, file_size_bytes=10)
+        == 262144 - FRAME_OVERHEAD_BYTES
+    )
+    assert (
+        await p.svc_a.mesh_media_chunk_bytes("unknown", file_size_bytes=10)
+        == ROUTED_CHUNK_BYTES
+    )
+    p.repo_a._instances[p.b_id] = dataclasses.replace(
+        p.repo_a._instances[p.b_id], status=PairingStatus.PENDING_SENT
+    )
+    assert (
+        await p.svc_a.mesh_media_chunk_bytes(p.b_id, file_size_bytes=10)
+        == ROUTED_CHUNK_BYTES
+    )
+    with pytest.raises(TypeError):
+        await p.svc_a.mesh_media_chunk_bytes(p.b_id)  # type: ignore[call-arg]
 
 
 @pytest.mark.asyncio
