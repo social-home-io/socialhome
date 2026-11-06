@@ -9,13 +9,21 @@ without dropping the file.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import logging
+import pathlib
 from datetime import UTC, datetime
+from unittest.mock import patch
 
+import aiofiles
 import pytest
 
 from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.media_constraints import (
+    FILE_MAX_UPLOAD_BYTES,
+    VIDEO_MAX_UPLOAD_BYTES,
+)
 from socialhome.domain.user import User
 from socialhome.repositories import (
     SqliteConversationRepo,
@@ -23,13 +31,20 @@ from socialhome.repositories import (
     SqliteSpaceRepo,
     SqliteUserRepo,
 )
+from socialhome.services import inbound_media_store
 from socialhome.services.federation_inbound_service import (
     FederationInboundService,
     _bytes_match_mime,
     _mime_to_ext,
 )
+from socialhome.services.inbound_media_store import dm_media_name, partial_key
 
 _WEBP_HEADER = b"\x52\x49\x46\x46\x00\x00\x00\x00WEBPVP8 " + b"\x00" * 32
+
+
+def _dm_name(message_id: str, ext: str, sender: str = "peer-a") -> str:
+    """Where ``sender``'s attachment for ``message_id`` is stored."""
+    return dm_media_name(sender, message_id, ext)
 
 
 def _event(event_type, payload):
@@ -65,6 +80,21 @@ async def _seed_remote_user(db, user_id: str, instance_id: str) -> None:
         "INSERT INTO remote_users(user_id, instance_id, remote_username,"
         " display_name) VALUES(?,?,?,?)",
         (user_id, instance_id, user_id, user_id),
+    )
+
+
+def _dm_part_dir(media_dir, chunk_count: int, sender: str = "peer-a"):
+    return (
+        media_dir / ".partial" / partial_key(sender, "dm:m-1", chunk_count=chunk_count)
+    )
+
+
+def _dm_leftovers(media_dir) -> list[str]:
+    """Every file under the media dir except the assembled ``m-1.webp``."""
+    return sorted(
+        str(p.relative_to(media_dir))
+        for p in media_dir.rglob("*")
+        if p.is_file() and p.name != _dm_name("m-1", ".webp")
     )
 
 
@@ -109,6 +139,7 @@ async def test_receive_media_preview_non_media_keeps_a_local_ref(inbound_with_me
     local upload shape (normalised to ``api/media/<name>``)."""
     svc, _media_dir, _db = inbound_with_media
     url, status = await svc._receive_media_preview(
+        from_instance="peer-a",
         payload={"media_url": "/api/media/abc123.webp?exp=1&sig=x"},
         message_id="m-1",
         msg_type="text",
@@ -142,6 +173,7 @@ async def test_receive_media_preview_drops_a_non_local_media_url(
     svc, _media_dir, _db = inbound_with_media
     with caplog.at_level(logging.WARNING):
         url, status = await svc._receive_media_preview(
+            from_instance="peer-a",
             payload={"media_url": bad},
             message_id="m-x",
             msg_type=msg_type,
@@ -158,7 +190,10 @@ async def test_receive_media_preview_absent_media_url_is_quiet(
     svc, _media_dir, _db = inbound_with_media
     with caplog.at_level(logging.WARNING):
         url, status = await svc._receive_media_preview(
-            payload={"content": "hi"}, message_id="m-t", msg_type="text"
+            from_instance="peer-a",
+            payload={"content": "hi"},
+            message_id="m-t",
+            msg_type="text",
         )
     assert (url, status) == (None, None)
     assert "media_url" not in caplog.text
@@ -168,9 +203,10 @@ async def test_receive_media_preview_pre_arrived_full_file(inbound_with_media):
     """If the blob landed before the message, the full file is
     adopted directly — no preview write, no pending state."""
     svc, media_dir, _db = inbound_with_media
-    full = media_dir / "m-2.webp"
+    full = media_dir / _dm_name("m-2", ".webp")
     full.write_bytes(_WEBP_HEADER)
     url, status = await svc._receive_media_preview(
+        from_instance="peer-a",
         payload={
             "media_blob_id": "m-2",
             "mime_type": "image/webp",
@@ -180,7 +216,7 @@ async def test_receive_media_preview_pre_arrived_full_file(inbound_with_media):
         message_id="m-2",
         msg_type="image",
     )
-    assert url == "api/media/m-2.webp"
+    assert url == f"api/media/{_dm_name('m-2', '.webp')}"
     assert status is None
     # Preview file was dropped (if it existed from a stale attempt).
     assert not (media_dir / "m-2.preview.webp").exists()
@@ -191,6 +227,7 @@ async def test_receive_media_preview_writes_preview(inbound_with_media):
     ``<msg_id>.preview.webp`` and the row stays ``pending``."""
     svc, media_dir, _db = inbound_with_media
     url, status = await svc._receive_media_preview(
+        from_instance="peer-a",
         payload={
             "media_blob_id": "m-3",
             "mime_type": "image/webp",
@@ -211,6 +248,7 @@ async def test_receive_media_preview_without_preview_field(inbound_with_media):
     placeholder glyph until the blob arrives."""
     svc, _media_dir, _db = inbound_with_media
     url, status = await svc._receive_media_preview(
+        from_instance="peer-a",
         payload={
             "media_blob_id": "m-4",
             "mime_type": "video/webm",
@@ -235,6 +273,7 @@ async def test_receive_media_preview_no_media_dir_returns_pending(db, bus):
         media_dir=None,
     )
     url, status = await svc._receive_media_preview(
+        from_instance="peer-a",
         payload={
             "media_blob_id": "m-5",
             "mime_type": "image/webp",
@@ -268,7 +307,7 @@ async def test_dm_media_blob_single_chunk_writes_and_swaps(inbound_with_media):
             },
         )
     )
-    dest = media_dir / "m-1.webp"
+    dest = media_dir / _dm_name("m-1", ".webp")
     assert dest.is_file()
     assert dest.read_bytes() == _WEBP_HEADER
 
@@ -277,7 +316,7 @@ async def test_dm_media_blob_single_chunk_writes_and_swaps(inbound_with_media):
         ("m-1",),
     )
     assert row is not None
-    assert row["media_url"] == "api/media/m-1.webp"
+    assert row["media_url"] == f"api/media/{_dm_name('m-1', '.webp')}"
     assert row["media_sync_status"] is None  # cleared
 
 
@@ -340,22 +379,22 @@ async def test_dm_media_blob_chunked_writes_parts_then_concats(
                     "chunk_index": i,
                     "chunk_count": 3,
                     "final": i == 2,
+                    "file_size_bytes": len(full),
                     "bytes_b64": base64.b64encode(p).decode("ascii"),
                 },
             )
         )
         if i < 2:
             # Pre-final chunks land as part files, no concat yet.
-            assert (media_dir / f"m-1.part{i:05d}").is_file()
-            assert not (media_dir / "m-1.webp").is_file()
+            assert (_dm_part_dir(media_dir, 3) / f"{i:06d}").is_file()
+            assert not (media_dir / _dm_name("m-1", ".webp")).is_file()
     # Final chunk → concat, part files removed.
-    dest = media_dir / "m-1.webp"
+    dest = media_dir / _dm_name("m-1", ".webp")
     assert dest.is_file()
     # Bytes don't match a real WebP so the sniff flags failed,
     # but the file still lands. The content is the concat though.
     assert dest.read_bytes() == full
-    for i in range(3):
-        assert not (media_dir / f"m-1.part{i:05d}").exists()
+    assert _dm_leftovers(media_dir) == []
 
 
 async def test_dm_media_blob_malformed_chunk_meta_defaults_to_single(
@@ -381,7 +420,7 @@ async def test_dm_media_blob_malformed_chunk_meta_defaults_to_single(
     )
     # Garbage chunk fields → defaults to single chunk → file lands
     # at the final destination.
-    assert (media_dir / "m-1.webp").is_file()
+    assert (media_dir / _dm_name("m-1", ".webp")).is_file()
 
 
 async def test_dm_media_blob_unknown_mime_uses_bin_ext(inbound_with_media):
@@ -400,7 +439,7 @@ async def test_dm_media_blob_unknown_mime_uses_bin_ext(inbound_with_media):
             },
         )
     )
-    assert (media_dir / "m-1.bin").is_file()
+    assert (media_dir / _dm_name("m-1", ".bin")).is_file()
 
 
 async def test_dm_media_blob_malformed_b64_drops(inbound_with_media):
@@ -419,7 +458,7 @@ async def test_dm_media_blob_malformed_b64_drops(inbound_with_media):
         )
     )
     # No file created.
-    assert not (media_dir / "m-1.webp").exists()
+    assert not (media_dir / _dm_name("m-1", ".webp")).exists()
 
 
 async def test_dm_media_blob_chunked_missing_chunk_bails(inbound_with_media):
@@ -442,6 +481,7 @@ async def test_dm_media_blob_chunked_missing_chunk_bails(inbound_with_media):
                 "chunk_index": 1,
                 "chunk_count": 2,
                 "final": True,
+                "file_size_bytes": 8,
                 "bytes_b64": base64.b64encode(b"tail").decode("ascii"),
             },
         )
@@ -449,8 +489,197 @@ async def test_dm_media_blob_chunked_missing_chunk_bails(inbound_with_media):
     # Final wasn't able to finalise (chunk 0 missing) — the
     # ``m-1.webp`` file should NOT exist yet, the part for index
     # 1 should be there.
-    assert (media_dir / "m-1.part00001").is_file()
-    assert not (media_dir / "m-1.webp").is_file()
+    assert (_dm_part_dir(media_dir, 2) / "000001").is_file()
+    assert not (media_dir / _dm_name("m-1", ".webp")).is_file()
+
+
+class _MediaReadySpy:
+    """Records ``dm.media_ready`` pushes."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def broadcast_dm_media_ready(self, **kwargs) -> None:
+        self.calls.append(kwargs)
+
+
+#: Split like a sender does: equal chunks, a shorter last one.
+_DM_PARTS = [_WEBP_HEADER + b"m" * 400, b"middle-" * 64, b"tail-" * 64]
+
+
+def _dm_chunk(idx: int) -> FederationEvent:
+    return _event(
+        FederationEventType.DM_MEDIA_BLOB,
+        {
+            "media_blob_id": "m-1",
+            "message_id": "m-1",
+            "conversation_id": "conv-1",
+            "mime_type": "image/webp",
+            "chunk_index": idx,
+            "chunk_count": 3,
+            "final": idx == 2,
+            "file_size_bytes": sum(map(len, _DM_PARTS)),
+            "bytes_b64": base64.b64encode(_DM_PARTS[idx]).decode("ascii"),
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        (2, 0, 1),  # the final chunk first
+        (0, 2, 1),  # a middle chunk last
+        (1, 2, 0),  # chunk 0 last
+    ],
+)
+async def test_dm_media_blob_assembles_whichever_chunk_lands_last(
+    inbound_with_media, order
+):
+    """Regression: the sender pipelines a file's chunks (``PIPELINE_WINDOW``),
+    so the ``final`` chunk can land before the others. Assembly used to run
+    only on the final chunk — the rest landed into parts nobody assembled,
+    the sender had already dropped its outbox row, and the picture never
+    arrived. Whichever chunk completes the set assembles the file, swaps the
+    row and pushes ``dm.media_ready`` exactly once."""
+    svc, media_dir, db = inbound_with_media
+    spy = _MediaReadySpy()
+    svc.attach_realtime(spy)
+    for idx in order:
+        await svc._on_dm_media_blob(_dm_chunk(idx))
+    assert (media_dir / _dm_name("m-1", ".webp")).read_bytes() == b"".join(_DM_PARTS)
+    assert _dm_leftovers(media_dir) == []
+    row = await db.fetchone(
+        "SELECT media_url, media_sync_status FROM conversation_messages WHERE id=?",
+        ("m-1",),
+    )
+    assert row["media_url"] == f"api/media/{_dm_name('m-1', '.webp')}"
+    assert row["media_sync_status"] is None
+    assert [c["message_id"] for c in spy.calls] == ["m-1"]
+
+
+async def test_dm_media_blob_duplicate_chunks_are_harmless(inbound_with_media):
+    """Duplicates before assembly and non-final duplicates after it neither
+    corrupt the file, leave parts behind, nor push ``dm.media_ready`` again."""
+    svc, media_dir, _db = inbound_with_media
+    spy = _MediaReadySpy()
+    svc.attach_realtime(spy)
+    for idx in (2, 0, 0, 2, 1, 0, 1):
+        await svc._on_dm_media_blob(_dm_chunk(idx))
+    assert (media_dir / _dm_name("m-1", ".webp")).read_bytes() == b"".join(_DM_PARTS)
+    assert _dm_leftovers(media_dir) == []
+    assert len(spy.calls) == 1
+
+
+async def test_dm_media_blob_chunks_completing_together_push_once(
+    inbound_with_media,
+):
+    """Force two chunks to see the complete set at the same moment: both
+    assemble, one publishes, and only that one swaps the row and pushes."""
+    svc, media_dir, _db = inbound_with_media
+    spy = _MediaReadySpy()
+    svc.attach_realtime(spy)
+    await svc._on_dm_media_blob(_dm_chunk(2))
+    barrier = asyncio.Barrier(2)
+    real = inbound_media_store.present_parts
+
+    async def both_complete(d):
+        await asyncio.wait_for(barrier.wait(), 5)
+        return await real(d)
+
+    with patch.object(inbound_media_store, "present_parts", both_complete):
+        await asyncio.gather(
+            svc._on_dm_media_blob(_dm_chunk(0)), svc._on_dm_media_blob(_dm_chunk(1))
+        )
+    assert (media_dir / _dm_name("m-1", ".webp")).read_bytes() == b"".join(_DM_PARTS)
+    assert _dm_leftovers(media_dir) == []
+    assert len(spy.calls) == 1
+
+
+async def test_dm_media_blob_duplicate_final_chunk_after_assembly_is_quiet(
+    inbound_with_media,
+):
+    """A re-sent final chunk after the row adopted the file neither swaps
+    the row again nor pushes another ``dm.media_ready``."""
+    svc, media_dir, _db = inbound_with_media
+    spy = _MediaReadySpy()
+    svc.attach_realtime(spy)
+    for idx in (2, 0, 1, 2, 2):
+        await svc._on_dm_media_blob(_dm_chunk(idx))
+    assert (media_dir / _dm_name("m-1", ".webp")).read_bytes() == b"".join(_DM_PARTS)
+    assert _dm_leftovers(media_dir) == []
+    assert len(spy.calls) == 1
+
+
+def _attempt(idx: int, chunks: list[bytes], size: int) -> FederationEvent:
+    return _event(
+        FederationEventType.DM_MEDIA_BLOB,
+        {
+            "media_blob_id": "m-1",
+            "message_id": "m-1",
+            "conversation_id": "conv-1",
+            "mime_type": "image/webp",
+            "chunk_index": idx,
+            "chunk_count": len(chunks),
+            "final": idx == len(chunks) - 1,
+            "file_size_bytes": size,
+            "bytes_b64": base64.b64encode(chunks[idx]).decode("ascii"),
+        },
+    )
+
+
+async def test_dm_media_blob_retry_chunked_differently_never_mixes(
+    inbound_with_media,
+):
+    """Attempt 1 went out in 240-byte chunks (an older channel) and only
+    parts 0-2 landed; the retry goes out in 512-byte chunks over HTTPS.
+    The retry's chunk 0 must not complete the set with attempt 1's stale
+    part 1 — that wrote a 752-byte corrupt file, kept forever by
+    write-once."""
+    svc, media_dir, db = inbound_with_media
+    full = _WEBP_HEADER + bytes(range(256)) * 4
+    full = full[:1024]
+    small = [full[i : i + 240] for i in range(0, len(full), 240)]
+    big = [full[i : i + 512] for i in range(0, len(full), 512)]
+    assert (len(small), len(big)) == (5, 2)
+    for idx in (0, 1, 2):
+        await svc._on_dm_media_blob(_attempt(idx, small, len(full)))
+    await svc._on_dm_media_blob(_attempt(0, big, len(full)))
+    assert not (media_dir / _dm_name("m-1", ".webp")).exists()
+    await svc._on_dm_media_blob(_attempt(1, big, len(full)))
+    assert (media_dir / _dm_name("m-1", ".webp")).read_bytes() == full
+    row = await db.fetchone(
+        "SELECT media_url FROM conversation_messages WHERE id=?", ("m-1",)
+    )
+    assert row["media_url"] == f"api/media/{_dm_name('m-1', '.webp')}"
+
+
+async def test_dm_media_blob_bytes_short_of_declared_size_never_land(
+    inbound_with_media,
+):
+    svc, media_dir, db = inbound_with_media
+    for idx in (1, 0):
+        await svc._on_dm_media_blob(_attempt(idx, [b"AAAA", b"BB"], 99))
+    assert not (media_dir / _dm_name("m-1", ".webp")).exists()
+    assert _dm_leftovers(media_dir) == []
+    row = await db.fetchone(
+        "SELECT media_sync_status FROM conversation_messages WHERE id=?", ("m-1",)
+    )
+    assert row["media_sync_status"] == "pending"
+
+
+async def test_dm_media_blob_parts_left_by_a_crash_are_dropped_by_any_chunk(
+    inbound_with_media,
+):
+    """Parts a crash left between publish and cleanup go with the next
+    chunk of the transfer, final or not."""
+    svc, media_dir, _db = inbound_with_media
+    (media_dir / _dm_name("m-1", ".webp")).write_bytes(b"".join(_DM_PARTS))
+    stale = _dm_part_dir(media_dir, 3)
+    stale.mkdir(parents=True)
+    (stale / "000001").write_bytes(b"old")
+    (stale / "assembling-dead").write_bytes(b"old")
+    await svc._on_dm_media_blob(_dm_chunk(0))
+    assert not stale.exists()
 
 
 # ── MIME sniff ──────────────────────────────────────────────────────────
@@ -474,7 +703,7 @@ async def test_dm_media_blob_mime_sniff_flags_failed(inbound_with_media):
             },
         )
     )
-    dest = media_dir / "m-1.webp"
+    dest = media_dir / _dm_name("m-1", ".webp")
     assert dest.is_file()
     row = await db.fetchone(
         "SELECT media_sync_status FROM conversation_messages WHERE id=?",
@@ -538,7 +767,7 @@ async def test_dm_media_blob_from_another_household_is_refused(
                 from_instance="peer-b",
             )
         )
-    assert not (media_dir / "m-1.webp").exists()
+    assert not (media_dir / _dm_name("m-1", ".webp")).exists()
     row = await _row(db, "m-1")
     assert row["media_sync_status"] == "pending"
     assert "refusing" in caplog.text
@@ -559,7 +788,7 @@ async def test_dm_media_blob_for_local_members_message_is_refused(inbound_with_m
     await svc._on_dm_media_blob(
         _blob_event({"media_blob_id": "m-local", "message_id": "m-local"})
     )
-    assert not (media_dir / "m-local.webp").exists()
+    assert not (media_dir / _dm_name("m-local", ".webp")).exists()
     assert (await _row(db, "m-local"))["media_url"] == "api/media/x.webp"
 
 
@@ -568,7 +797,7 @@ async def test_dm_media_blob_with_mismatched_blob_id_is_refused(inbound_with_med
     await svc._on_dm_media_blob(
         _blob_event({"media_blob_id": "other-blob", "message_id": "m-1"})
     )
-    assert not (media_dir / "m-1.webp").exists()
+    assert not (media_dir / _dm_name("m-1", ".webp")).exists()
     assert (await _row(db, "m-1"))["media_sync_status"] == "pending"
 
 
@@ -584,13 +813,15 @@ async def test_dm_media_blob_never_overwrites_existing_file(inbound_with_media):
     """Write-once: the sender's own re-delivery re-adopts the file already
     there instead of replacing it."""
     svc, media_dir, db = inbound_with_media
-    (media_dir / "m-1.webp").write_bytes(_WEBP_HEADER + b"ORIGINAL")
+    (media_dir / _dm_name("m-1", ".webp")).write_bytes(_WEBP_HEADER + b"ORIGINAL")
     await svc._on_dm_media_blob(
         _blob_event({"media_blob_id": "m-1", "message_id": "m-1"})
     )
-    assert (media_dir / "m-1.webp").read_bytes() == _WEBP_HEADER + b"ORIGINAL"
+    assert (
+        media_dir / _dm_name("m-1", ".webp")
+    ).read_bytes() == _WEBP_HEADER + b"ORIGINAL"
     row = await _row(db, "m-1")
-    assert row["media_url"] == "api/media/m-1.webp"
+    assert row["media_url"] == f"api/media/{_dm_name('m-1', '.webp')}"
     assert row["media_sync_status"] is None
 
 
@@ -598,7 +829,7 @@ async def test_dm_media_blob_chunked_never_overwrites_existing_file(
     inbound_with_media,
 ):
     svc, media_dir, _db = inbound_with_media
-    (media_dir / "m-1.webp").write_bytes(b"ORIGINAL")
+    (media_dir / _dm_name("m-1", ".webp")).write_bytes(b"ORIGINAL")
     for i, part in enumerate((b"A", b"B")):
         await svc._on_dm_media_blob(
             _blob_event(
@@ -608,30 +839,32 @@ async def test_dm_media_blob_chunked_never_overwrites_existing_file(
                     "chunk_index": i,
                     "chunk_count": 2,
                     "final": i == 1,
+                    "file_size_bytes": 2,
                 },
                 body=part,
             )
         )
-    assert (media_dir / "m-1.webp").read_bytes() == b"ORIGINAL"
-    assert not list(media_dir.glob("m-1.part*"))
+    assert (media_dir / _dm_name("m-1", ".webp")).read_bytes() == b"ORIGINAL"
+    assert _dm_leftovers(media_dir) == []
 
 
 async def test_dm_media_blob_before_message_is_written_once(inbound_with_media):
-    """The blob can overtake its DM_MESSAGE; it lands (write-once) and a
-    second copy under the same name doesn't replace it."""
+    """The blob can overtake its DM_MESSAGE; it lands (write-once) under
+    its sending household's own name — another household's copy for the
+    same message id lands under another name and never replaces it."""
     svc, media_dir, _db = inbound_with_media
     await svc._on_dm_media_blob(
         _blob_event({"media_blob_id": "m-new", "message_id": "m-new"})
     )
-    assert (media_dir / "m-new.webp").read_bytes() == _WEBP_HEADER
+    assert (media_dir / _dm_name("m-new", ".webp")).read_bytes() == _WEBP_HEADER
+    second = {"media_blob_id": "m-new", "message_id": "m-new"}
+    await svc._on_dm_media_blob(_blob_event(second, body=b"SECOND"))
     await svc._on_dm_media_blob(
-        _blob_event(
-            {"media_blob_id": "m-new", "message_id": "m-new"},
-            from_instance="peer-b",
-            body=b"SECOND",
-        )
+        _blob_event(second, from_instance="peer-b", body=b"OTHER")
     )
-    assert (media_dir / "m-new.webp").read_bytes() == _WEBP_HEADER
+    assert (media_dir / _dm_name("m-new", ".webp")).read_bytes() == _WEBP_HEADER
+    other = media_dir / _dm_name("m-new", ".webp", sender="peer-b")
+    assert other.read_bytes() == b"OTHER"
 
 
 @pytest.mark.parametrize(("index", "count"), [(-1, 2), (2, 2), (0, 10**9)])
@@ -677,6 +910,7 @@ async def test_receive_media_preview_refuses_unsafe_message_id(inbound_with_medi
     svc, media_dir, _db = inbound_with_media
     for bad in _unsafe_ids(media_dir):
         url, status = await svc._receive_media_preview(
+            from_instance="peer-a",
             payload={
                 "media_blob_id": "blob",
                 "mime_type": "image/webp",
@@ -700,6 +934,7 @@ async def test_receive_media_preview_unsafe_id_never_deletes_outside(
     victim.write_bytes(b"keep")
     (media_dir.parent / "escape.webp").write_bytes(b"x")
     url, status = await svc._receive_media_preview(
+        from_instance="peer-a",
         payload={"media_blob_id": "b", "mime_type": "image/webp"},
         message_id="../escape",
         msg_type="image",
@@ -757,3 +992,282 @@ async def test_dm_message_with_unsafe_id_is_refused(inbound_with_media, caplog):
     assert _outside_files(media_dir) == []
     assert list(media_dir.iterdir()) == []
     assert await SqliteConversationRepo(db).list_messages("conv-new", limit=10) == []
+
+
+@pytest.mark.parametrize("size", [None, 0, -5, "x"])
+async def test_dm_multi_chunk_without_a_declared_size_is_refused(
+    inbound_with_media, caplog, size
+):
+    """A multi-chunk blob must declare ``file_size_bytes`` (every sender
+    has since #323) — else the size check could be skipped silently."""
+    svc, media_dir, _db = inbound_with_media
+    with caplog.at_level("WARNING"):
+        for idx in (1, 0):
+            payload = {
+                "media_blob_id": "m-1",
+                "message_id": "m-1",
+                "conversation_id": "conv-1",
+                "chunk_index": idx,
+                "chunk_count": 2,
+                "final": idx == 1,
+            }
+            if size is not None:
+                payload["file_size_bytes"] = size
+            await svc._on_dm_media_blob(_blob_event(payload, body=b"P%d" % idx))
+    assert not (media_dir / _dm_name("m-1", ".webp")).exists()
+    assert _dm_leftovers(media_dir) == []
+    assert "file_size_bytes" in caplog.text
+
+
+async def test_dm_concurrent_adoption_pushes_once(inbound_with_media):
+    """Two deliveries of one file both reach the row adoption (the second
+    finds the file already there and re-adopts): only the one whose
+    conditional update changed the row pushes ``dm.media_ready``."""
+    svc, _media_dir, db = inbound_with_media
+    spy = _MediaReadySpy()
+    svc.attach_realtime(spy)
+    repo = svc._conversation_repo
+    real = repo.adopt_media_file
+    first_waiting = asyncio.Event()
+    second_arrived = asyncio.Event()
+    calls = 0
+
+    async def held(**kw):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_waiting.set()
+            await asyncio.wait_for(second_arrived.wait(), 5)
+        else:
+            second_arrived.set()
+        return await real(**kw)
+
+    blob = _blob_event({"media_blob_id": "m-1", "message_id": "m-1"})
+    with patch.object(repo, "adopt_media_file", held):
+        first = asyncio.create_task(svc._on_dm_media_blob(blob))
+        await asyncio.wait_for(first_waiting.wait(), 5)
+        await svc._on_dm_media_blob(blob)
+        await first
+    assert calls == 2
+    assert len(spy.calls) == 1
+    row = await _row(db, "m-1")
+    assert row["media_url"] == f"api/media/{_dm_name('m-1', '.webp')}"
+
+
+async def test_dm_single_chunk_temp_file_is_unique_and_never_left(
+    inbound_with_media,
+):
+    """The single-chunk path no longer shares one ``<msg>.assembled<ext>``
+    temp name in the media root between concurrent deliveries."""
+    svc, media_dir, _db = inbound_with_media
+    blob = _blob_event({"media_blob_id": "m-1", "message_id": "m-1"})
+    written: list[pathlib.Path] = []
+    real_open = aiofiles.open
+
+    def spying_open(path, mode="r", *a, **kw):
+        if "w" in mode:
+            written.append(pathlib.Path(path))
+        return real_open(path, mode, *a, **kw)
+
+    with (
+        patch.object(inbound_media_store.aiofiles, "open", spying_open),
+    ):
+        await asyncio.gather(*(svc._on_dm_media_blob(blob) for _ in range(3)))
+    assert (media_dir / _dm_name("m-1", ".webp")).read_bytes() == _WEBP_HEADER
+    # Every temp file lives in a transfer folder (swept if a crash leaves
+    # it), never under a fixed name in the media root.
+    assert written and all(p.parent != media_dir for p in written)
+    assert len(set(written)) == len(written)
+    assert _dm_leftovers(media_dir) == []
+
+
+# ── Whole-file size cap ─────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("mime", "cap"),
+    [
+        ("image/webp", FILE_MAX_UPLOAD_BYTES),
+        ("audio/ogg", FILE_MAX_UPLOAD_BYTES),
+        ("video/webm", VIDEO_MAX_UPLOAD_BYTES),
+        ("application/octet-stream", VIDEO_MAX_UPLOAD_BYTES),
+    ],
+)
+async def test_dm_media_blob_over_its_cap_writes_nothing(
+    inbound_with_media, caplog, mime, cap
+):
+    """A DM attachment declared over what its type may be is refused on the
+    first chunk that lands: no part, no file, the row still waits."""
+    svc, media_dir, db = inbound_with_media
+    with caplog.at_level("WARNING"):
+        await svc._on_dm_media_blob(
+            _blob_event(
+                {
+                    "media_blob_id": "m-1",
+                    "message_id": "m-1",
+                    "mime_type": mime,
+                    "chunk_index": 0,
+                    "chunk_count": 4096,
+                    "file_size_bytes": cap + 1,
+                },
+                body=b"x" * 1024,
+            )
+        )
+    assert list(media_dir.rglob("*")) == []
+    assert "byte cap" in caplog.text
+    assert (await _row(db, "m-1"))["media_sync_status"] == "pending"
+
+
+async def test_dm_media_blob_picture_at_the_cap_is_accepted(inbound_with_media):
+    """Control: a chunk of a picture right at its cap lands as a part."""
+    svc, media_dir, _db = inbound_with_media
+    await svc._on_dm_media_blob(
+        _blob_event(
+            {
+                "media_blob_id": "m-1",
+                "message_id": "m-1",
+                "chunk_index": 0,
+                "chunk_count": 4096,
+                "file_size_bytes": FILE_MAX_UPLOAD_BYTES,
+            },
+            body=b"x" * 1024,
+        )
+    )
+    assert _dm_part_dir(media_dir, 4096).is_dir()
+
+
+async def test_dm_media_blob_chunk_bigger_than_its_share_writes_nothing(
+    inbound_with_media, caplog
+):
+    svc, media_dir, _db = inbound_with_media
+    with caplog.at_level("WARNING"):
+        await svc._on_dm_media_blob(
+            _blob_event(
+                {
+                    "media_blob_id": "m-1",
+                    "message_id": "m-1",
+                    "chunk_index": 0,
+                    "chunk_count": 3,
+                    "file_size_bytes": 100,
+                },
+                body=b"x" * 50,
+            )
+        )
+    assert list(media_dir.rglob("*")) == []
+    assert "belong to a 100-byte file" in caplog.text
+
+
+# ── Check-then-adopt race: the row lands between scope check and adopt ──
+
+_FIS = "socialhome.services.federation_inbound_service"
+
+
+async def _insert_pending_row(db, message_id: str, mime: str = "image/webp"):
+    """``user-remote`` (on ``peer-a``) sent ``message_id`` — it lands now."""
+    await db.enqueue(
+        "INSERT INTO conversation_messages(id, conversation_id, sender_user_id,"
+        " content, type, media_blob_id, mime_type, media_sync_status, created_at)"
+        " VALUES(?, 'conv-1', 'user-remote', '', 'image', ?, ?, 'pending',"
+        " datetime('now'))",
+        (message_id, message_id, mime),
+    )
+
+
+def _row_lands_during(name: str, db, message_id: str):
+    """Patch ``name`` so the DM row is inserted while it runs — after the
+    blob's scope check saw no row, before the adopt."""
+    real = getattr(inbound_media_store, name)
+
+    async def wrapped(*args, **kwargs):
+        result = await real(*args, **kwargs)
+        if (
+            await db.fetchone(
+                "SELECT 1 FROM conversation_messages WHERE id=?", (message_id,)
+            )
+            is None
+        ):
+            await _insert_pending_row(db, message_id)
+        return result
+
+    return patch(f"{_FIS}.{name}", wrapped)
+
+
+@pytest.mark.parametrize("sender", ["peer-evil", "peer-a"])
+async def test_row_landing_mid_assembly_adopts_only_its_senders_file(
+    inbound_with_media, sender
+):
+    """Probe (adversarial review F1): another household's blob passed the
+    scope check with no row; the real DM row lands while its chunk is
+    assembling. The row must never adopt that household's file — only the
+    message's own sender household's."""
+    svc, media_dir, db = inbound_with_media
+    with _row_lands_during("store_chunk", db, "m-race"):
+        await svc._on_dm_media_blob(
+            _blob_event(
+                {"media_blob_id": "m-race", "message_id": "m-race"},
+                from_instance=sender,
+            )
+        )
+    row = await _row(db, "m-race")
+    if sender == "peer-a":
+        assert row["media_url"] == f"api/media/{_dm_name('m-race', '.webp')}"
+        assert row["media_sync_status"] is None
+    else:
+        assert row["media_url"] is None
+        assert row["media_sync_status"] == "pending"
+        # The bytes stay on disk under the sender's own name, never shown.
+        assert (media_dir / _dm_name("m-race", ".webp", sender=sender)).is_file()
+
+
+async def test_row_landing_mid_redelivery_never_adopts_another_households_file(
+    inbound_with_media,
+):
+    """Probe: the re-delivery branch (file already there → note_existing →
+    adopt) is cheap to flood; the row landing inside it must not adopt."""
+    svc, _media_dir, db = inbound_with_media
+    event = _blob_event(
+        {"media_blob_id": "m-race", "message_id": "m-race"},
+        from_instance="peer-evil",
+    )
+    await svc._on_dm_media_blob(event)
+    with _row_lands_during("note_existing", db, "m-race"):
+        await svc._on_dm_media_blob(event)
+    row = await _row(db, "m-race")
+    assert row["media_url"] is None
+    assert row["media_sync_status"] == "pending"
+
+
+async def test_known_row_takes_its_own_mime_for_cap_and_extension(
+    inbound_with_media, caplog
+):
+    """F2: once the row is here, its own ``mime_type`` decides the cap and
+    the extension — a blob claiming ``video/mp4`` for an image message gets
+    the picture cap and the image's extension."""
+    svc, media_dir, db = inbound_with_media
+    await db.enqueue(
+        "UPDATE conversation_messages SET mime_type='image/webp' WHERE id='m-1'"
+    )
+    with caplog.at_level("WARNING"):
+        await svc._on_dm_media_blob(
+            _blob_event(
+                {
+                    "media_blob_id": "m-1",
+                    "message_id": "m-1",
+                    "mime_type": "video/mp4",
+                    "chunk_index": 0,
+                    "chunk_count": 4096,
+                    "file_size_bytes": FILE_MAX_UPLOAD_BYTES + 1,
+                },
+                body=b"x" * 1024,
+            )
+        )
+    assert list(media_dir.rglob("*")) == []
+    assert "byte cap" in caplog.text
+    await svc._on_dm_media_blob(
+        _blob_event(
+            {"media_blob_id": "m-1", "message_id": "m-1", "mime_type": "video/mp4"}
+        )
+    )
+    assert not (media_dir / _dm_name("m-1", ".mp4")).exists()
+    row = await _row(db, "m-1")
+    assert row["media_url"] == f"api/media/{_dm_name('m-1', '.webp')}"

@@ -5,8 +5,11 @@ import time
 
 import pytest
 
+from socialhome.services import dm_media_sync_service as dm
+from socialhome.services import space_media_sync_service as space
 from socialhome.services.media_orphan_sweep_service import (
     GRACE_SECONDS,
+    PARTIAL_GRACE_SECONDS,
     MediaOrphanSweepService,
 )
 
@@ -145,3 +148,160 @@ async def test_top_level_sweep_ignores_transcode_src_subdir(tmp_path):
     assert not old_top.exists()
     assert src_dir.is_dir()
     assert inside.exists()
+
+
+# ── .partial/ — chunk sets that never complete ─────────────────────────
+
+
+def _key_dir(media, key, *, entries, age_seconds=0):
+    d = media / ".partial" / key
+    d.mkdir(parents=True)
+    old = time.time() - age_seconds
+    for name in entries:
+        f = d / name
+        f.write_bytes(b"z")
+        if age_seconds:
+            os.utime(f, (old, old))
+    if age_seconds:
+        os.utime(d, (old, old))
+    return d
+
+
+async def test_partial_sweep_removes_only_abandoned_sets(tmp_path):
+    """A set nothing has touched past the grace (a retracted DM, a sender
+    that gave up after MAX_ATTEMPTS, an attempt with another chunk count,
+    a crash) goes; a set still receiving chunks stays."""
+    old = _key_dir(
+        tmp_path,
+        "a" * 32,
+        entries=["000000", "000003", "assembling-dead", "part.tmp-dead"],
+        age_seconds=PARTIAL_GRACE_SECONDS + 60,
+    )
+    fresh = _key_dir(tmp_path, "b" * 32, entries=["000000"])
+    # Old parts but one chunk just landed: still in progress.
+    busy = _key_dir(
+        tmp_path, "c" * 32, entries=["000000"], age_seconds=PARTIAL_GRACE_SECONDS * 2
+    )
+    (busy / "000001").write_bytes(b"new")
+    svc = MediaOrphanSweepService(media_dir=tmp_path, reference_repo=_FakeRefRepo([]))
+    assert await svc.sweep_partial_once() == 1
+    assert not old.exists()
+    assert fresh.exists() and busy.exists()
+    assert (tmp_path / ".partial").is_dir()
+
+
+async def test_partial_sweep_is_bounded_per_pass(tmp_path):
+    for i in range(5):
+        _key_dir(
+            tmp_path,
+            f"{i:032d}",
+            entries=["000000"],
+            age_seconds=PARTIAL_GRACE_SECONDS + 60,
+        )
+    svc = MediaOrphanSweepService(media_dir=tmp_path, reference_repo=_FakeRefRepo([]))
+    assert await svc.sweep_partial_once(limit=2) == 2
+    assert len(list((tmp_path / ".partial").iterdir())) == 3
+    assert await svc.sweep_partial_once(limit=10) == 3
+
+
+async def test_partial_sweep_missing_dir_is_noop(tmp_path):
+    svc = MediaOrphanSweepService(media_dir=tmp_path, reference_repo=_FakeRefRepo([]))
+    assert await svc.sweep_partial_once() == 0
+
+
+async def test_partial_grace_outlasts_the_senders_retry_horizon():
+    """A set must never be swept while its sender may still retry: six
+    attempts with backoff capped at 30 min is well under a day."""
+    for mod in (dm, space):
+        horizon = mod.MAX_ATTEMPTS * mod.BACKOFF_CAP_SECONDS * 2
+        assert PARTIAL_GRACE_SECONDS > horizon
+
+
+def _outside(tmp_path, *, age_seconds):
+    """A directory outside the media dir holding a file worth keeping."""
+    out = tmp_path / "outside"
+    out.mkdir()
+    keep = out / "precious.txt"
+    keep.write_bytes(b"not media")
+    old = time.time() - age_seconds
+    os.utime(keep, (old, old))
+    os.utime(out, (old, old))
+    return out, keep
+
+
+async def test_partial_sweep_never_follows_a_symlinked_set(tmp_path):
+    """Regression: a symlink in ``.partial`` pointing outside made the sweep
+    list the target and delete what was there. The link itself goes; its
+    target and everything in it stay."""
+    media = tmp_path / "media"
+    out, keep = _outside(tmp_path, age_seconds=PARTIAL_GRACE_SECONDS * 2)
+    partial = media / ".partial"
+    partial.mkdir(parents=True)
+    link = partial / ("d" * 32)
+    link.symlink_to(out, target_is_directory=True)
+    old = time.time() - PARTIAL_GRACE_SECONDS * 2
+    os.utime(link, (old, old), follow_symlinks=False)
+    svc = MediaOrphanSweepService(media_dir=media, reference_repo=_FakeRefRepo([]))
+    assert await svc.sweep_partial_once() == 1
+    assert not link.is_symlink() and not link.exists()
+    assert keep.read_bytes() == b"not media"
+
+
+async def test_partial_sweep_ages_a_fresh_symlink_by_the_link_itself(tmp_path):
+    """The age is the link's own mtime (``lstat``), never the target's —
+    a fresh link to an old directory is not abandoned yet."""
+    media = tmp_path / "media"
+    out, keep = _outside(tmp_path, age_seconds=PARTIAL_GRACE_SECONDS * 2)
+    partial = media / ".partial"
+    partial.mkdir(parents=True)
+    link = partial / ("e" * 32)
+    link.symlink_to(out, target_is_directory=True)
+    svc = MediaOrphanSweepService(media_dir=media, reference_repo=_FakeRefRepo([]))
+    assert await svc.sweep_partial_once() == 0
+    assert link.is_symlink()
+    assert keep.exists()
+
+
+async def test_partial_sweep_never_descends_into_a_symlink_inside_a_set(tmp_path):
+    """A symlink inside an abandoned set is unlinked, not followed."""
+    media = tmp_path / "media"
+    out, keep = _outside(tmp_path, age_seconds=PARTIAL_GRACE_SECONDS * 2)
+    d = _key_dir(
+        media, "f" * 32, entries=["000000"], age_seconds=PARTIAL_GRACE_SECONDS + 60
+    )
+    inner = d / "000001"
+    inner.symlink_to(out, target_is_directory=True)
+    old = time.time() - PARTIAL_GRACE_SECONDS * 2
+    os.utime(inner, (old, old), follow_symlinks=False)
+    os.utime(d, (old, old))
+    svc = MediaOrphanSweepService(media_dir=media, reference_repo=_FakeRefRepo([]))
+    assert await svc.sweep_partial_once() == 1
+    assert not d.exists()
+    assert keep.read_bytes() == b"not media"
+
+
+async def test_partial_sweep_skips_a_symlinked_partial_root(tmp_path):
+    """``.partial`` itself a symlink: nothing behind it is touched."""
+    media = tmp_path / "media"
+    media.mkdir()
+    out, keep = _outside(tmp_path, age_seconds=PARTIAL_GRACE_SECONDS * 2)
+    (media / ".partial").symlink_to(out, target_is_directory=True)
+    svc = MediaOrphanSweepService(media_dir=media, reference_repo=_FakeRefRepo([]))
+    assert await svc.sweep_partial_once() == 0
+    assert keep.read_bytes() == b"not media"
+
+
+async def test_partial_sweep_does_not_count_a_set_it_could_not_remove(tmp_path):
+    """Review F3: a planted sub-directory keeps its set; the sweep must not
+    report it removed on every pass."""
+    media = tmp_path / "media"
+    d = _key_dir(
+        media, "9" * 32, entries=["000000"], age_seconds=PARTIAL_GRACE_SECONDS + 60
+    )
+    (d / "nested").mkdir()
+    old = time.time() - PARTIAL_GRACE_SECONDS * 2
+    os.utime(d / "nested", (old, old))
+    os.utime(d, (old, old))
+    svc = MediaOrphanSweepService(media_dir=media, reference_repo=_FakeRefRepo([]))
+    assert await svc.sweep_partial_once() == 0
+    assert (d / "nested").is_dir()
