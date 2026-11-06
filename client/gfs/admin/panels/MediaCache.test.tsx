@@ -1,0 +1,125 @@
+/* Media cache card on the GFS admin Overview — reads the ``space_media``
+   block of ``GET /admin/api/overview``: used of max (with a bar), blobs, the
+   TTL, this node's evictions and refusals, and a clear turned-off state. */
+import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { render, waitFor } from '@testing-library/preact'
+import { MediaCacheCard, formatBytes, formatTtl, type SpaceMediaStats } from './MediaCache'
+import { OverviewPanel } from './Overview'
+
+const GIB = 1024 ** 3
+const MIB = 1024 ** 2
+
+const STATS: SpaceMediaStats = {
+  enabled: true,
+  stored_blobs: 1234,
+  stored_bytes: Math.round(1.5 * GIB),
+  max_bytes: 5 * GIB,
+  ttl_seconds: 3 * 86_400,
+  evicted_blobs: 17,
+  evicted_bytes: 40 * MIB,
+  refused_quota: 3,
+  refused_too_large: 1,
+}
+
+describe('formatBytes', () => {
+  it('uses binary units with one decimal where it helps', () => {
+    expect(formatBytes(0)).toBe('0 B')
+    expect(formatBytes(512)).toBe('512 B')
+    expect(formatBytes(64 * 1024)).toBe('64 KiB')
+    expect(formatBytes(1.5 * MIB)).toBe('1.5 MiB')
+    expect(formatBytes(256 * MIB)).toBe('256 MiB')
+    expect(formatBytes(5 * GIB)).toBe('5 GiB')
+    expect(formatBytes(1.25 * GIB)).toBe('1.3 GiB')
+  })
+})
+
+describe('formatTtl', () => {
+  it('names the largest whole unit', () => {
+    expect(formatTtl(3 * 86_400)).toBe('3 days')
+    expect(formatTtl(86_400)).toBe('1 day')
+    expect(formatTtl(7_200)).toBe('2 hours')
+    expect(formatTtl(3_600)).toBe('1 hour')
+    expect(formatTtl(600)).toBe('10 minutes')
+    expect(formatTtl(90 * 60)).toBe('90 minutes')
+  })
+})
+
+describe('MediaCacheCard', () => {
+  it('shows used of max with a bar, blobs, TTL and node counters', () => {
+    const { container, getByRole } = render(<MediaCacheCard stats={STATS} />)
+    const text = container.textContent ?? ''
+    expect(text).toContain('Media cache')
+    expect(text).toContain('1.5 GiB of 5 GiB used')
+    expect(text).toContain('1,234')
+    expect(text).toContain('3 days')
+    expect(text).toMatch(/since this node started/i)
+    expect(text).toContain('17')
+    expect(text).toContain('40 MiB')
+    expect(text).toMatch(/3\b.*over a space's upload rate/)
+    expect(text).toMatch(/1\b.*too large/)
+    const bar = getByRole('progressbar')
+    expect(bar.getAttribute('aria-valuenow')).toBe('30')
+    expect(bar.getAttribute('aria-valuemin')).toBe('0')
+    expect(bar.getAttribute('aria-valuemax')).toBe('100')
+    expect(bar.getAttribute('aria-valuetext')).toBe('1.5 GiB of 5 GiB used')
+  })
+
+  it('caps the bar at 100 % when the cache is briefly over its cap', () => {
+    const { getByRole } = render(
+      <MediaCacheCard stats={{ ...STATS, stored_bytes: 6 * GIB }} />,
+    )
+    expect(getByRole('progressbar').getAttribute('aria-valuenow')).toBe('100')
+  })
+
+  it('says so clearly when the operator turned the cache off', () => {
+    const { container, queryByRole } = render(
+      <MediaCacheCard stats={{ ...STATS, enabled: false, max_bytes: 0 }} />,
+    )
+    const text = container.textContent ?? ''
+    expect(text).toContain('Turned off')
+    expect(text).toContain('[space_media] max_bytes')
+    expect(text).toContain('GFS_SPACE_MEDIA_MAX_BYTES')
+    expect(queryByRole('progressbar')).toBeNull()
+  })
+})
+
+function stubFetch(body: unknown) {
+  global.fetch = vi.fn(async () =>
+    new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }),
+  ) as typeof fetch
+}
+
+const BASE = {
+  clients: { active: 3, pending: 1, banned: 0 },
+  spaces: { active: 2, pending: 5, banned: 1 },
+  open_reports: 7,
+}
+
+beforeEach(() => {
+  vi.restoreAllMocks()
+})
+
+describe('OverviewPanel media cache', () => {
+  it('renders the card from the overview', async () => {
+    stubFetch({ ...BASE, space_media: STATS })
+    const { container } = render(<OverviewPanel />)
+    await waitFor(() => expect(container.textContent).toContain('Media cache'))
+  })
+
+  it('hides the card for an older server without the block', async () => {
+    stubFetch(BASE)
+    const { container } = render(<OverviewPanel />)
+    await waitFor(() => expect(container.textContent).toContain('Open reports'))
+    expect(container.textContent).not.toContain('Media cache')
+  })
+
+  it('hides the card when the block is null', async () => {
+    stubFetch({ ...BASE, space_media: null })
+    const { container } = render(<OverviewPanel />)
+    await waitFor(() => expect(container.textContent).toContain('Open reports'))
+    expect(container.textContent).not.toContain('Media cache')
+  })
+})

@@ -338,3 +338,46 @@ textarea { min-height: 110px; font-family: inherit; }
   max-width: 640px;
 }
 .add-peer .field-error { margin: 4px 0 0 0; font-size: 13px; }
+
+/* Media cache card (Overview) — the existing .card surface, a full-width
+ * row under the stat grid; the bar is a token-coloured track + fill. */
+.media-cache { margin-top: 14px; }
+.media-cache h3 { margin: 0 0 4px 0; font-size: 16px; }
+.media-cache h4 {
+  margin: 14px 0 0 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--sh-text-muted);
+}
+.media-cache-used { margin: 0 0 8px 0; font-weight: 600; }
+.media-cache-bar {
+  height: 10px;
+  border-radius: 999px;
+  background: var(--sh-bg-tertiary);
+  border: 1px solid var(--sh-border);
+  overflow: hidden;
+}
+.media-cache-bar span {
+  display: block;
+  height: 100%;
+  background: var(--sh-primary);
+}
+.media-cache-facts {
+  display: grid;
+  /* One label width for both lists, so their values line up. */
+  grid-template-columns: 11rem minmax(0, 1fr);
+  gap: 6px 14px;
+  margin: 10px 0 0 0;
+}
+.media-cache-facts dt { color: var(--sh-text-muted); font-size: 13px; }
+.media-cache-facts dd { margin: 0; overflow-wrap: anywhere; }
+.media-cache-off { margin: 4px 0 6px 0; }
+.media-cache p:last-child { margin-bottom: 0; }
+.media-cache code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+}
+@media (max-width: 560px) {
+  .media-cache-facts { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .media-cache-facts dd { margin-bottom: 8px; }
+}

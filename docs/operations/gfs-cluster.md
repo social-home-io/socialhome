@@ -115,7 +115,11 @@ orphan sweep: it walks the next 100 000 entries of the shared directory —
 resuming where the last run stopped — and removes files left without a row
 (a crash mid-upload) and stale `.part` files older than 10 minutes. The admin overview (`GET /admin/api/overview`,
 `space_media`) shows the blobs and bytes held and this node's evictions and
-quota refusals.
+quota refusals — in the admin portal, the **Media cache** card on Overview:
+used of `max_bytes` with a bar, the number of pictures and files, the TTL,
+and this node's evictions and refusals since it started (or "Turned off"
+while `max_bytes = 0`). Each node counts its own; reload against another
+node to see its counters.
 
 ## Rate limits across nodes
 
