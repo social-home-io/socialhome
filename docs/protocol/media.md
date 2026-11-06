@@ -210,8 +210,9 @@ sending household was sent it for. Both blob types share
   folders per pass. Neither the sweep nor `drop_parts` follows a
   symlink: a symlinked `.partial` is skipped, an entry is aged by its own
   `lstat` and unlinked without touching its target, a part folder's
-  contents are never descended into, and `store_chunk` refuses a part
-  folder that is a symlink. DM rules (sender household, announced `media_blob_id`) are in
+  contents are never descended into (a folder holding a sub-directory
+  stays and is logged, not counted), and `store_chunk` refuses a
+  `.partial` or part folder that is a symlink. DM rules (sender household, announced `media_blob_id`) are in
   [`dm-media.md`](./dm-media.md#chunking).
 
 Residual, by design: among the households entitled to deliver a space's
@@ -221,8 +222,9 @@ wins. `tests/protocol/test_media_blob_scope.py` pins these rules.
 
 Residual: a household may start many transfers it never completes; each
 is bounded (chunk count, size cap, twice-the-declared-size parts) and
-swept after 3 days, but there is no per-sender limit on how many
-incomplete sets may wait at once.
+swept after 3 days, but there is no per-sender quota on how many message
+ids / transfers a household may open at once (each a part set, or a
+never-adopted `dm-` file swept as an orphan) — candidate follow-up issue.
 
 ## Implementation pointers
 

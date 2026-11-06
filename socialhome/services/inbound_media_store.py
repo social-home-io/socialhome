@@ -358,30 +358,39 @@ async def present_parts(part_dir: pathlib.Path) -> frozenset[str]:
     return frozenset(n for n in names if len(n) == 6 and n.isdigit())
 
 
-async def drop_parts(part_dir: pathlib.Path) -> None:
+async def drop_parts(part_dir: pathlib.Path) -> bool:
     """Remove a transfer's part directory and everything in it; never raises.
 
     Never follows a symlink: a symlinked ``part_dir`` is unlinked itself
     (its target is left alone), entries are unlinked without being
-    followed, and a sub-directory is never descended into.
+    followed, and a sub-directory is never descended into — so a folder
+    holding one stays. Returns whether ``part_dir`` is gone.
     """
     try:
         st = await aiofiles.os.stat(part_dir, follow_symlinks=False)
+    except FileNotFoundError:
+        return True
     except OSError:
-        return
+        return False
     if not stat.S_ISDIR(st.st_mode):
         await remove_quietly(part_dir)
-        return
+        return not (
+            await aiofiles.os.path.islink(part_dir)
+            or await aiofiles.os.path.exists(part_dir)
+        )
     try:
         names = await aiofiles.os.listdir(part_dir)
     except OSError:
-        return
+        return False
     for name in names:
         await remove_quietly(part_dir / name)
     try:
         await aiofiles.os.rmdir(part_dir)
+    except FileNotFoundError:
+        return True
     except OSError:
-        pass
+        return False
+    return True
 
 
 async def store_chunk(
@@ -412,10 +421,13 @@ async def store_chunk(
     file of its own inside ``part_dir`` (removed with it), and
     :func:`publish_once` lets exactly one of two concurrent assemblies win.
     """
+    # Only this function creates ``.partial`` and its part folders; a
+    # symlink at either level would point every write outside it. The
+    # root is checked before ``makedirs`` so nothing is created behind it.
+    if await aiofiles.os.path.islink(part_dir.parent):
+        raise OSError(f"{part_dir.parent.name}: is a symlink — refusing")
     await aiofiles.os.makedirs(part_dir, exist_ok=True)
     if await aiofiles.os.path.islink(part_dir):
-        # Only this function creates part folders; a symlink there would
-        # point every write outside ``.partial``.
         raise OSError(f"{part_dir.name}: part folder is a symlink — refusing")
     tmp_part = part_dir / f"part.tmp-{uuid.uuid4().hex}"
     try:

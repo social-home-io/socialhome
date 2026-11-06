@@ -215,9 +215,13 @@ class MediaOrphanSweepService:
                 continue
             if now - newest < PARTIAL_GRACE_SECONDS:
                 continue
-            # Unlinks a symlink or a stray file without following it.
-            await drop_parts(path)
-            removed += 1
+            # Unlinks a symlink or a stray file without following it. A
+            # folder holding something it won't descend into (a planted
+            # sub-directory) stays — not counted, and said so.
+            if await drop_parts(path):
+                removed += 1
+            else:
+                log.warning("media-sweep: could not remove %s — left in place", path)
         if removed:
             log.info("media-sweep: removed %d abandoned chunk set(s)", removed)
         return removed

@@ -1155,3 +1155,119 @@ async def test_dm_media_blob_chunk_bigger_than_its_share_writes_nothing(
         )
     assert list(media_dir.rglob("*")) == []
     assert "belong to a 100-byte file" in caplog.text
+
+
+# ── Check-then-adopt race: the row lands between scope check and adopt ──
+
+_FIS = "socialhome.services.federation_inbound_service"
+
+
+async def _insert_pending_row(db, message_id: str, mime: str = "image/webp"):
+    """``user-remote`` (on ``peer-a``) sent ``message_id`` — it lands now."""
+    await db.enqueue(
+        "INSERT INTO conversation_messages(id, conversation_id, sender_user_id,"
+        " content, type, media_blob_id, mime_type, media_sync_status, created_at)"
+        " VALUES(?, 'conv-1', 'user-remote', '', 'image', ?, ?, 'pending',"
+        " datetime('now'))",
+        (message_id, message_id, mime),
+    )
+
+
+def _row_lands_during(name: str, db, message_id: str):
+    """Patch ``name`` so the DM row is inserted while it runs — after the
+    blob's scope check saw no row, before the adopt."""
+    real = getattr(inbound_media_store, name)
+
+    async def wrapped(*args, **kwargs):
+        result = await real(*args, **kwargs)
+        if (
+            await db.fetchone(
+                "SELECT 1 FROM conversation_messages WHERE id=?", (message_id,)
+            )
+            is None
+        ):
+            await _insert_pending_row(db, message_id)
+        return result
+
+    return patch(f"{_FIS}.{name}", wrapped)
+
+
+@pytest.mark.parametrize("sender", ["peer-evil", "peer-a"])
+async def test_row_landing_mid_assembly_adopts_only_its_senders_file(
+    inbound_with_media, sender
+):
+    """Probe (adversarial review F1): another household's blob passed the
+    scope check with no row; the real DM row lands while its chunk is
+    assembling. The row must never adopt that household's file — only the
+    message's own sender household's."""
+    svc, media_dir, db = inbound_with_media
+    with _row_lands_during("store_chunk", db, "m-race"):
+        await svc._on_dm_media_blob(
+            _blob_event(
+                {"media_blob_id": "m-race", "message_id": "m-race"},
+                from_instance=sender,
+            )
+        )
+    row = await _row(db, "m-race")
+    if sender == "peer-a":
+        assert row["media_url"] == f"api/media/{_dm_name('m-race', '.webp')}"
+        assert row["media_sync_status"] is None
+    else:
+        assert row["media_url"] is None
+        assert row["media_sync_status"] == "pending"
+        # The bytes stay on disk under the sender's own name, never shown.
+        assert (media_dir / _dm_name("m-race", ".webp", sender=sender)).is_file()
+
+
+async def test_row_landing_mid_redelivery_never_adopts_another_households_file(
+    inbound_with_media,
+):
+    """Probe: the re-delivery branch (file already there → note_existing →
+    adopt) is cheap to flood; the row landing inside it must not adopt."""
+    svc, _media_dir, db = inbound_with_media
+    event = _blob_event(
+        {"media_blob_id": "m-race", "message_id": "m-race"},
+        from_instance="peer-evil",
+    )
+    await svc._on_dm_media_blob(event)
+    with _row_lands_during("note_existing", db, "m-race"):
+        await svc._on_dm_media_blob(event)
+    row = await _row(db, "m-race")
+    assert row["media_url"] is None
+    assert row["media_sync_status"] == "pending"
+
+
+async def test_known_row_takes_its_own_mime_for_cap_and_extension(
+    inbound_with_media, caplog
+):
+    """F2: once the row is here, its own ``mime_type`` decides the cap and
+    the extension — a blob claiming ``video/mp4`` for an image message gets
+    the picture cap and the image's extension."""
+    svc, media_dir, db = inbound_with_media
+    await db.enqueue(
+        "UPDATE conversation_messages SET mime_type='image/webp' WHERE id='m-1'"
+    )
+    with caplog.at_level("WARNING"):
+        await svc._on_dm_media_blob(
+            _blob_event(
+                {
+                    "media_blob_id": "m-1",
+                    "message_id": "m-1",
+                    "mime_type": "video/mp4",
+                    "chunk_index": 0,
+                    "chunk_count": 4096,
+                    "file_size_bytes": FILE_MAX_UPLOAD_BYTES + 1,
+                },
+                body=b"x" * 1024,
+            )
+        )
+    assert list(media_dir.rglob("*")) == []
+    assert "byte cap" in caplog.text
+    await svc._on_dm_media_blob(
+        _blob_event(
+            {"media_blob_id": "m-1", "message_id": "m-1", "mime_type": "video/mp4"}
+        )
+    )
+    assert not (media_dir / _dm_name("m-1", ".mp4")).exists()
+    row = await _row(db, "m-1")
+    assert row["media_url"] == f"api/media/{_dm_name('m-1', '.webp')}"

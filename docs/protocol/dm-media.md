@@ -217,6 +217,17 @@ entitled to send:
   just re-adopts the file on disk — safe because that name only ever
   holds the sender's own assembly. A soft-deleted message never adopts
   media (`adopt_media_file` updates only `deleted=0` rows).
+- **Adoption is bound to the sender in one statement.** The blob's scope
+  check can run before the row exists (an overtaking blob is accepted),
+  so the row could land while another household's chunk is assembling.
+  `adopt_media_file` therefore re-checks atomically, in its `UPDATE`:
+  the row must have announced this `media_blob_id` and its sender must
+  be a user of the delivering household (`remote_users.instance_id =
+  from_instance`). Bytes from anyone else stay on disk under their own
+  `dm-` name, never shown, and the media sweep removes them.
+- **The row decides its type.** Once the message is here, its own
+  `mime_type` — not the blob's — picks the size cap and the file
+  extension, so a picture message can't take a 200 MiB `.mp4`.
 
 **Backwards compatibility**: payloads without the `chunk_*` /
 `final` fields (older builds, or any caller that doesn't emit
@@ -275,7 +286,9 @@ A handful of paths beyond the happy flow above:
   a transfer in progress is never hit. The sweep never follows a
   symlink: a symlinked `.partial` is left alone, an entry is aged by its
   own `lstat` and a link is unlinked without touching its target, and a
-  folder's contents are never descended into (`drop_parts`). Before
+  folder's contents are never descended into (`drop_parts`; a folder
+  holding a planted sub-directory stays and is logged, not counted as
+  removed). Before
   2026-11-06 a symlink in `.partial` pointing outside made the sweep
   delete what was behind it.
 

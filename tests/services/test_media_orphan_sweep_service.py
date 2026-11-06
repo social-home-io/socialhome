@@ -289,3 +289,19 @@ async def test_partial_sweep_skips_a_symlinked_partial_root(tmp_path):
     svc = MediaOrphanSweepService(media_dir=media, reference_repo=_FakeRefRepo([]))
     assert await svc.sweep_partial_once() == 0
     assert keep.read_bytes() == b"not media"
+
+
+async def test_partial_sweep_does_not_count_a_set_it_could_not_remove(tmp_path):
+    """Review F3: a planted sub-directory keeps its set; the sweep must not
+    report it removed on every pass."""
+    media = tmp_path / "media"
+    d = _key_dir(
+        media, "9" * 32, entries=["000000"], age_seconds=PARTIAL_GRACE_SECONDS + 60
+    )
+    (d / "nested").mkdir()
+    old = time.time() - PARTIAL_GRACE_SECONDS * 2
+    os.utime(d / "nested", (old, old))
+    os.utime(d, (old, old))
+    svc = MediaOrphanSweepService(media_dir=media, reference_repo=_FakeRefRepo([]))
+    assert await svc.sweep_partial_once() == 0
+    assert (d / "nested").is_dir()

@@ -480,3 +480,29 @@ async def test_store_chunk_refuses_a_symlinked_part_dir(tmp_path):
     with pytest.raises(OSError):
         await _put(link, tmp_path / "out.bin", 0, [b"A", b"B"])
     assert sorted(p.name for p in out.iterdir()) == ["precious.txt"]
+
+
+async def test_store_chunk_refuses_a_symlinked_partial_root(tmp_path):
+    """Review F3: ``media_dir/.partial`` itself a symlink — no write lands
+    behind it."""
+    out = _outside(tmp_path)
+    root = tmp_path / ".partial"
+    root.symlink_to(out, target_is_directory=True)
+    with pytest.raises(OSError):
+        await _put(root / "k", tmp_path / "out.bin", 0, [b"A", b"B"])
+    assert sorted(p.name for p in out.iterdir()) == ["precious.txt"]
+
+
+async def test_drop_parts_reports_whether_the_folder_went(tmp_path):
+    """A planted sub-directory is never descended into, so the folder
+    stays — and ``drop_parts`` says so instead of claiming it went."""
+    part_dir = tmp_path / ".partial" / "k"
+    (part_dir / "nested").mkdir(parents=True)
+    (part_dir / "000000").write_bytes(b"A")
+    assert await store.drop_parts(part_dir) is False
+    assert (part_dir / "nested").is_dir()
+    clean = tmp_path / ".partial" / "j"
+    clean.mkdir()
+    (clean / "000000").write_bytes(b"A")
+    assert await store.drop_parts(clean) is True
+    assert not clean.exists()

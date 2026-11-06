@@ -1510,10 +1510,18 @@ class FederationInboundService(ProtectionGateMixin):
             return
         if not await self._dm_media_in_scope(event, message_id, blob_id):
             return
-        mime_type = str(p.get("mime_type") or "application/octet-stream")
+        # A message already here decides its own type: the cap and the
+        # extension come from the row, never from the blob's claim.
+        known = await self._conversation_repo.get_message(message_id)
+        mime_type = str(
+            (known.mime_type if known is not None else None)
+            or p.get("mime_type")
+            or "application/octet-stream"
+        )
         await self._assemble_dm_chunk(
             raw=raw,
             message_id=message_id,
+            blob_id=blob_id,
             chunk_index=chunk_index,
             chunk_count=chunk_count,
             mime_type=mime_type,
@@ -1574,6 +1582,7 @@ class FederationInboundService(ProtectionGateMixin):
         *,
         raw: bytes,
         message_id: str,
+        blob_id: str,
         chunk_index: int,
         chunk_count: int,
         mime_type: str,
@@ -1701,10 +1710,15 @@ class FederationInboundService(ProtectionGateMixin):
         # Conditional: only a row still awaiting this file changes, and
         # only the delivery that changed it pushes ``dm.media_ready`` — a
         # duplicate (or a second delivery racing the first) stays quiet.
+        # The scope check may have run before the row existed; the adopt
+        # re-binds the row to this blob and this household atomically, so
+        # a row that landed meanwhile never takes another household's file.
         if not await self._conversation_repo.adopt_media_file(
             message_id=message_id,
             status=final_status,
             media_url=new_url,
+            media_blob_id=blob_id,
+            from_instance=from_instance,
         ):
             return
         # Push the WS frame so the SPA swaps the bubble's preview for
