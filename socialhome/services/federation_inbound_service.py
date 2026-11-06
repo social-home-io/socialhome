@@ -19,6 +19,7 @@ import binascii
 import functools
 import logging
 import pathlib
+import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol
@@ -2178,21 +2179,23 @@ class FederationInboundService(ProtectionGateMixin):
                 exc,
             )
             return
-        if not final:
-            return
-        # Final chunk landed — assemble the parts in index order into a
-        # temp file next to them, then move it into place write-once.
-        assembled = partial_root / "assembled"
+        # The sender dispatches a file's chunks concurrently, so the
+        # ``final`` one may land before the others: whichever chunk
+        # completes the set assembles the file. The parts in index order go
+        # into a temp file of this call's own (two chunks completing at once
+        # never share one), then into place write-once.
+        assembled = partial_root / f"assembled-{uuid.uuid4().hex}"
         try:
             for i in range(chunk_count):
                 if not await aiofiles.os.path.isfile(partial_root / f"{i:06d}"):
-                    log.warning(
-                        "SPACE_MEDIA_BLOB: chunk %d/%d missing at finalise "
-                        "for %s — leaving partials for next attempt",
-                        i,
-                        chunk_count,
-                        filename,
-                    )
+                    if final:
+                        log.info(
+                            "SPACE_MEDIA_BLOB: final chunk of %s landed before "
+                            "chunk %d/%d — assembling when it arrives",
+                            filename,
+                            i,
+                            chunk_count,
+                        )
                     return
             async with aiofiles.open(assembled, "wb") as out:
                 for i in range(chunk_count):
