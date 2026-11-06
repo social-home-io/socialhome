@@ -683,6 +683,20 @@ async def test_coalescing_onto_a_missing_file_rewrites_it(make, tmp_dir):
     assert await store.read(bid, now=NOW + 2) == data
 
 
+async def test_a_retry_of_the_same_scope_rewrites_a_missing_file(make, tmp_dir):
+    """The residual cross-node window leaves a row without its file; the
+    uploading household's own retry (same scope, claim still live) must put
+    the bytes back, not answer already_stored over a 404."""
+    store = make()
+    data = _blob()
+    bid = blob_id_of(data)
+    await _put(store, data, space="s1")
+    (tmp_dir / "spaces" / bid).unlink()
+    assert await store.read(bid, now=NOW + 1) is None
+    assert await _put(store, data, space="s1", now=NOW + 1) is False
+    assert await store.read(bid, now=NOW + 2) == data
+
+
 class _Files:
     """A :class:`FsBlobFiles` stand-in whose calls a test can watch."""
 

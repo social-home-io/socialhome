@@ -64,7 +64,8 @@ bytes.
 Two cross-node windows remain, both narrow and self-healing: (1) node A
 drops a row, node B stores the same blob again (row + file), and then A's
 file removal lands — B answered 201, but the row has no file until the next
-identical upload rewrites it (the household side re-uploads on a 404); (2)
+upload of the same bytes rewrites it (any scope's, the uploader's own retry
+included; the household side re-uploads on a 404); (2)
 the orphan sweep re-checks a file's mtime and row and unlinks it under its
 node's lock, but an upload on ANOTHER node could store that blob between the
 re-check and the unlink — the same row-without-file, healed the same way.
@@ -256,8 +257,12 @@ class GfsSpaceMediaStore:
         if expires_at <= now:
             raise MediaRefused(422, "bad_expiry")
         expires_at = min(expires_at, now + self._limits.ttl_s)
-        if await self._holds(blob_id, scope_kind, scope_id, now):
+        if await self._holds(
+            blob_id, scope_kind, scope_id, now
+        ) and await self._files.exists(blob_id):
             # This scope already holds it: a no-op, and no fresher expiry.
+            # (A row whose file went missing takes the locked path below,
+            # which checks the bytes' address and puts them back.)
             return False
         bucket = now // _HOUR
         await self._reserve_slot(scope_kind, scope_id, bucket, now)
@@ -456,7 +461,11 @@ class GfsSpaceMediaStore:
             c.scope_kind == scope_kind and c.scope_id == scope_id and c.expires_at > now
             for c in await self._repo.claims_of(blob_id)
         ):
-            # A concurrent upload of this scope got here first.
+            # A concurrent upload of this scope got here first (or its
+            # retry). A row that outlived its file — the cross-node window —
+            # gets the bytes back, so already_stored means servable.
+            if not await self._files.exists(blob_id):
+                await self._files.write(blob_id, data)
             return False, False
         await self._make_room_in_scope(scope_kind, scope_id, size, now)
         claim = GfsSpaceMediaClaim(

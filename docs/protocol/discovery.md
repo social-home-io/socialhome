@@ -3609,8 +3609,9 @@ bytes under a channel claim survive the space's delete).
 - **Residual windows (cross-node, narrow, self-healing):** (1) node A
   deletes a blob row, node B stores the same blob again (row + file), then
   A's file removal lands — B answered `201`, but the row has no file until
-  the next identical upload rewrites it (a reader gets `404`; the household
-  side re-uploads on a `404`); (2) the orphan sweep re-checks a file's mtime
+  the next upload of the same bytes rewrites it — any scope's, the
+  uploader's own retry included (a reader gets `404`; the household side
+  re-uploads on a `404`); (2) the orphan sweep re-checks a file's mtime
   and row and unlinks it under its node's lock, but an upload on another
   node could store that blob between the re-check and the unlink — the same
   row-without-file, healed the same way.
