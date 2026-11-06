@@ -5422,3 +5422,43 @@ async def test_space_post_media_refs_are_kept_for_a_gfs_fetch(db, bus, inbound):
         )
     )
     assert sink.received == [("sp-g", refs, ["api/media/a.webp"])]
+
+
+async def test_a_picture_plus_link_card_post_keeps_its_media_refs(db, bus, inbound):
+    """Regression (#1309 review A): the receiver allowed only the post's
+    pictures, the sender described the link card's thumbnail too, and the
+    larger descriptor was refused whole — all pictures lost. The receiver
+    now allows exactly the files the post shows (``post_media_urls``)."""
+    await db.enqueue(
+        """INSERT INTO spaces(id, name, owner_instance_id, owner_username,
+                              identity_public_key, space_type, join_mode)
+           VALUES(?,?,?,?,?,?,?)""",
+        ("sp-lc", "S", "peer-a", "owner", "aa" * 32, "global", "open"),
+    )
+    await _seat(db, "sp-lc", "user-remote")
+    sink = _GfsMediaSink()
+    inbound.attach_gfs_media(sink)
+    entry = {"blob_id": "a" * 64, "suite": "s", "epoch": 0, "size": 9}
+    refs = {"a.webp": entry, "card.webp": entry}
+    await inbound._on_space_post_created(
+        _event(
+            FederationEventType.SPACE_POST_CREATED,
+            {
+                "id": "post-lc",
+                "author": "user-remote",
+                "type": "image",
+                "content": "pic and a link https://example.org",
+                "image_urls": ["api/media/a.webp"],
+                "link_preview": {
+                    "url": "https://example.org",
+                    "title": "Example",
+                    "thumbnail_url": "api/media/card.webp",
+                },
+                "media_refs": refs,
+            },
+            space_id="sp-lc",
+        )
+    )
+    assert sink.received == [
+        ("sp-lc", refs, ["api/media/a.webp", "api/media/card.webp"])
+    ]

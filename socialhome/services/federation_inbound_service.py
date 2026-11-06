@@ -100,7 +100,7 @@ from ..domain.space import (
     role_change_event_type,
 )
 from ..domain.space_item import item_stamp, stamp_to_db
-from ..domain.space_media_ref import MEDIA_REFS_FIELD
+from ..domain.space_media_ref import MEDIA_REFS_FIELD, post_media_urls
 from ..domain.user import (
     RemoteUser,
     UserIdentityAssertion,
@@ -1978,7 +1978,7 @@ class FederationInboundService(ProtectionGateMixin):
             await self._gfs_media.receive(
                 space_id,
                 event.payload.get(MEDIA_REFS_FIELD),
-                [u for u in (post.media_url, *post.image_urls) if u],
+                post_media_urls(post),
             )
         if existing is not None:
             await self._bus.publish(

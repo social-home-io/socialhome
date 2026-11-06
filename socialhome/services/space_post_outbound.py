@@ -52,7 +52,7 @@ from ..domain.space_item import (
     ITEM_TYPE_REACTION_ADD,
     ITEM_TYPE_REACTION_REMOVE,
 )
-from ..domain.space_media_ref import MEDIA_REFS_FIELD
+from ..domain.space_media_ref import MEDIA_REFS_FIELD, post_media_urls
 from ..infrastructure.event_bus import EventBus
 from .moderation_release import current_release, with_release
 from .space_item_author import build_signed_item_inner
@@ -458,7 +458,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin):
         # as a ``media_refs`` descriptor: a link-joined member inside its own
         # copy of the payload (``per_peer``), followers inside the relayed
         # inner (outside the author signature, like the writer cert).
-        media_urls = _post_media_urls(post)
+        media_urls = post_media_urls(post)
         media_plan = await self._plan_media_refs(
             event.space_id, media_urls, followers="public_relay" in payload
         )
@@ -744,17 +744,3 @@ class SpacePostOutbound(SpaceMediaRefsMixin):
                 target=event.comment_id,
                 post_id=event.post_id,
             )
-
-
-def _post_media_urls(post: Post) -> list[str]:
-    """Every local file a post shows: its media, pictures, attached file and
-    link-card thumbnail."""
-    urls: list[str] = []
-    if post.media_url:
-        urls.append(post.media_url)
-    urls.extend(post.image_urls or ())
-    if post.file_meta is not None and post.file_meta.url:
-        urls.append(post.file_meta.url)
-    if post.link_preview is not None and post.link_preview.thumbnail_url:
-        urls.append(post.link_preview.thumbnail_url)
-    return urls

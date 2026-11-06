@@ -82,7 +82,11 @@ from ....domain.space import (
     validate_zone_name,
     validate_zone_radius,
 )
-from ....domain.space_media_ref import MEDIA_REFS_FIELD
+from ....domain.space_media_ref import (
+    MEDIA_REF_RESOURCES,
+    MEDIA_REFS_FIELD,
+    record_media_urls,
+)
 from ....domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ....domain.task import task_from_wire_dict, task_list_from_wire_dict
 from ....domain.timetable import (
@@ -137,7 +141,6 @@ from .exporter import (
     SENTINEL_RESOURCE,
     parse_chunk,
 )
-from .media_refs import MEDIA_REF_RESOURCES, record_media_urls
 
 if TYPE_CHECKING:
     from ....federation.space_authorship import SpaceAuthorship

@@ -110,7 +110,7 @@ from ..domain.space_item import (
     required_scope,
     stamp_to_db,
 )
-from ..domain.space_media_ref import MEDIA_REFS_FIELD
+from ..domain.space_media_ref import MEDIA_REFS_FIELD, post_media_urls
 from ..domain.writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE, WriterCert
 from ..federation.pending_parent_buffer import (
     AwaitingParent,
@@ -556,7 +556,7 @@ class SpacePublicInbound:
             await self._gfs_media.receive(
                 space_id,
                 inner.get(MEDIA_REFS_FIELD),
-                [u for u in (post.media_url, *post.image_urls) if u],
+                post_media_urls(post),
             )
         await self._bus.publish(
             SpacePostCreated(

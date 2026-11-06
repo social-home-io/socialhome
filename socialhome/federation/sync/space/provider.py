@@ -31,7 +31,11 @@ from ....domain.federation import (
     FederationEventType,
 )
 from ....domain.federation_capabilities import FederationCapability
-from ....domain.space_media_ref import MEDIA_REFS_FIELD
+from ....domain.space_media_ref import (
+    MEDIA_REF_RESOURCES,
+    MEDIA_REFS_FIELD,
+    record_media_urls,
+)
 from .exporter import (
     RESOURCE_ORDER,
     BatchedExporter,
@@ -45,7 +49,6 @@ from .exporter import (
 from .exporters.calendar import CalendarExporter
 from .exporters.members import PreModeratorMembersExporter
 from .exporters.posts import iter_post_pages
-from .media_refs import MEDIA_REF_RESOURCES, record_media_urls
 from .watermark import session_shape
 from .window import KEEP_FOREVER, SYNC_PAGE_SIZE, SyncWindow, SyncWindows, iter_pages
 

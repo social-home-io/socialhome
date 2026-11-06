@@ -6,11 +6,17 @@ import logging
 
 import pytest
 
+from socialhome.domain.link_preview import LinkPreview
+from socialhome.domain.post import FileMeta, Post, PostType
 from socialhome.domain.space_media_ref import (
+    MAX_DESCRIPTOR_ENTRIES,
+    MEDIA_REF_RESOURCES,
     MEDIA_REFS_FIELD,
     SpaceMediaRef,
     media_refs_to_wire,
     parse_media_refs,
+    post_media_urls,
+    record_media_urls,
 )
 from socialhome.moment_public_media import MAX_BLOB_BYTES
 from socialhome.space_media_seal import SPACE_MEDIA_SUITE_AESGCM256_PADDED
@@ -136,3 +142,92 @@ def test_unknown_address_suite_refused_with_warning(
             parse_media_refs({"x.webp": entry}, space_id="sp", allowed={"x.webp"}) == []
         )
     assert "address suite" in caplog.text
+
+
+# ── One list of an item's files, for the sender and every receiver ──────
+
+
+def test_record_media_urls_per_resource() -> None:
+    record = {
+        "media_url": "api/media/m.webp",
+        "image_urls": ["api/media/a.webp", "api/media/b.webp", 3],
+        "file_meta": {"url": "api/media/doc.pdf"},
+        "link_preview": {"thumbnail_url": "api/media/card.webp"},
+    }
+    assert record_media_urls("posts", record) == [
+        "api/media/m.webp",
+        "api/media/a.webp",
+        "api/media/b.webp",
+        "api/media/doc.pdf",
+        "api/media/card.webp",
+    ]
+    assert record_media_urls("posts", {"image_urls": "nope", "file_meta": 1}) == []
+    assert record_media_urls("calendar", {"cover_url": "api/media/c.webp"}) == [
+        "api/media/c.webp"
+    ]
+    item = {
+        "kind": "item",
+        "thumbnail_url": "/api/media/t.jpg",
+        "url": "/api/media/f.jpg",
+    }
+    assert record_media_urls("gallery", item) == [
+        "/api/media/t.jpg",
+        "/api/media/f.jpg",
+    ]
+    assert record_media_urls("gallery", {"kind": "album", "cover_url": "x"}) == []
+    assert record_media_urls("tasks", {"media_url": "api/media/x.webp"}) == []
+    assert MEDIA_REF_RESOURCES == frozenset({"posts", "calendar", "gallery"})
+
+
+def test_post_media_urls_is_the_record_rule_for_a_post() -> None:
+    """Regression (#1309 review A): a post with a picture AND a link card
+    used to lose all its pictures for GFS readers — the sender described
+    the card's thumbnail, the receivers allowed only the pictures, and the
+    larger descriptor was refused whole. Sender and receivers now take
+    the item's files from this one function."""
+    post = Post(
+        id="p",
+        author="u",
+        type=PostType.IMAGE,
+        content="look",
+        created_at=None,
+        image_urls=("api/media/a.webp",),
+        link_preview=LinkPreview(
+            url="https://example.org",
+            title="t",
+            thumbnail_url="api/media/card.webp",
+        ),
+        file_meta=FileMeta(
+            url="api/media/doc.pdf",
+            mime_type="application/pdf",
+            original_name="d.pdf",
+            size_bytes=3,
+        ),
+    )
+    assert post_media_urls(post) == [
+        "api/media/a.webp",
+        "api/media/doc.pdf",
+        "api/media/card.webp",
+    ]
+
+
+def test_a_picture_plus_link_card_descriptor_keeps_the_picture() -> None:
+    wire = media_refs_to_wire([_ref("a.webp"), _ref("card.webp")])
+    parsed = parse_media_refs(wire, space_id="sp", allowed={"a.webp", "card.webp"})
+    assert {r.filename for r in parsed} == {"a.webp", "card.webp"}
+
+
+def test_unknown_entries_are_dropped_not_the_whole_list() -> None:
+    """A receiver that shows fewer files than the sender described (an
+    older build, a follower's narrower view) keeps what it does show."""
+    wire = media_refs_to_wire([_ref("a.webp"), _ref("card.webp"), _ref("x.webp")])
+    parsed = parse_media_refs(wire, space_id="sp", allowed={"a.webp"})
+    assert [r.filename for r in parsed] == ["a.webp"]
+
+
+def test_an_oversized_descriptor_is_refused_whole() -> None:
+    wire = {
+        f"f{i}.webp": _ref(f"f{i}.webp").to_wire()
+        for i in range(MAX_DESCRIPTOR_ENTRIES + 1)
+    }
+    assert parse_media_refs(wire, space_id="sp", allowed=set(wire)) == []

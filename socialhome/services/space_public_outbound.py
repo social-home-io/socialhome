@@ -136,7 +136,7 @@ from ..domain.space_item import (
     compressed_item_plaintexts,
     pad_json_object,
 )
-from ..domain.space_media_ref import MEDIA_REFS_FIELD
+from ..domain.space_media_ref import MEDIA_REFS_FIELD, post_media_urls
 from ..domain.writer_cert import (
     WRITER_SCOPE_COMMENT,
     WRITER_SCOPE_WRITE,
@@ -329,9 +329,7 @@ class SpacePublicOutbound(SpaceMediaRefsMixin):
         )
         # v_80 — the pictures, for followers reading through a GFS.
         media_plan = await self._plan_media_refs(
-            event.space_id,
-            [post.media_url, *post.image_urls],
-            followers=True,
+            event.space_id, post_media_urls(post), followers=True
         )
         if media_plan is not None:
             inner[MEDIA_REFS_FIELD] = media_plan.wire()
