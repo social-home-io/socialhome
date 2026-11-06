@@ -130,6 +130,19 @@ that be as large as possible — few messages per file. The size is chosen
   `a=max-message-size:1` got 1-byte chunks: a 200 MiB video became
   ~210 million chunks (the sender ran out of memory) and, past 4096, the
   receiver refused the file.
+- **Mesh route** (`SPACE_MEDIA_BLOB` to a space member that is not a
+  CONFIRMED direct peer) — the JSON chunk travels inside `SPACE_ROUTED`:
+  sealed under the target's ephemeral key and base64'ed once more, then
+  encrypted and base64'ed by the outer envelope (~2.4×), under the
+  *first hop's* 1 MiB inbox. Such a target gets **384 KiB** chunks
+  (`ROUTED_CHUNK_BYTES`, ≈ 934 KB on the wire; 512 KiB would be
+  ≈ 1.24 MB and every hop refused it, so mesh-only members never got a
+  picture bigger than one chunk). The space outbox asks
+  `FederationService.mesh_media_chunk_bytes`, which checks the target's
+  pairing status like `send_with_mesh_fallback` does. 4096 × 384 KiB =
+  1.5 GiB, above every space and DM media max. `DM_MEDIA_BLOB` is never
+  mesh-routed (it goes through `send_event`), so DM chunks keep the
+  direct size.
 
 A file that fits one chunk ships as one event with `chunk_count=1` and
 `final=true` — a typical photo is one message between upgraded

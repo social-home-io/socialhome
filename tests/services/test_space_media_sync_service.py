@@ -3,17 +3,25 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.federation import (
     DeliveryResult,
     FederationEventType,
     PairingStatus,
 )
-from socialhome.domain.media_chunking import FRAME_OVERHEAD_BYTES, HTTPS_CHUNK_BYTES
+from socialhome.domain.media_chunking import (
+    FRAME_OVERHEAD_BYTES,
+    HTTPS_CHUNK_BYTES,
+    ROUTED_CHUNK_BYTES,
+)
+from socialhome.federation.federation_service import FederationService
+from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.space_media_outbox_repo import (
     SqliteSpaceMediaOutboxRepo,
 )
@@ -46,7 +54,7 @@ async def _seed_space(db, *, space_id="sp-1"):
 def _fed(chunk_bytes: int = HTTPS_CHUNK_BYTES) -> AsyncMock:
     """A federation stand-in whose media chunks are ``chunk_bytes``."""
     fed = AsyncMock()
-    fed.media_chunk_bytes = MagicMock(return_value=chunk_bytes)
+    fed.mesh_media_chunk_bytes = AsyncMock(return_value=chunk_bytes)
     return fed
 
 
@@ -393,7 +401,7 @@ async def test_a_700_kb_picture_ships_in_chunks_the_targets_channel_takes(
     chunks = [c.kwargs["raw_chunk"] for c in fed.send_media_chunk.call_args_list]
     assert len(chunks) > 1
     assert all(len(c) + FRAME_OVERHEAD_BYTES <= 256 * 1024 for c in chunks)
-    fed.media_chunk_bytes.assert_called_with("peer-x", file_size_bytes=len(body))
+    fed.mesh_media_chunk_bytes.assert_awaited_with("peer-x", file_size_bytes=len(body))
     assert b"".join(chunks) == body
 
 
@@ -450,3 +458,57 @@ async def test_a_failed_chunk_stops_sending_the_rest(db, outbox, tmp_path):
     assert fed.send_media_chunk.await_count <= PIPELINE_WINDOW
     rows = await outbox.list_for_correlation("ev-1")
     assert len(rows) == 1 and rows[0].attempts == 1
+
+
+class _StatusFedRepo:
+    """``get_instance`` stand-in: ``peer-a`` is a CONFIRMED direct peer,
+    every other id has no row (a member reached over the mesh)."""
+
+    async def get_instance(self, iid, *, include_unpairing=False):
+        if iid == "peer-a":
+            return SimpleNamespace(status=PairingStatus.CONFIRMED)
+        return None
+
+
+async def test_a_mesh_only_member_gets_chunks_that_fit_a_routed_envelope(
+    db, outbox, tmp_path
+):
+    """Regression: a member reached only through another household got
+    512 KiB chunks; inside ``SPACE_ROUTED`` each was ~1.24 MB, over the
+    first hop's 1 MiB inbox, so the picture never arrived. The routed
+    size goes to the mesh-only member; the paired one keeps 512 KiB."""
+    await _seed_space(db)
+    body = bytes(range(256)) * (1_200_000 // 256)
+    (tmp_path / "big.webp").write_bytes(body)
+    kp = generate_identity_keypair()
+    fed = FederationService(
+        db=MagicMock(),
+        federation_repo=_StatusFedRepo(),
+        outbox_repo=MagicMock(),
+        key_manager=MagicMock(),
+        bus=EventBus(),
+        own_instance_id=derive_instance_id(kp.public_key),
+        own_identity_seed=kp.private_key,
+        own_identity_pk=kp.public_key,
+    )
+    send = AsyncMock(return_value=_OK)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="ev-1",
+        target_instance_ids=["peer-a", "peer-mesh"],
+        media_urls=["api/media/big.webp"],
+    )
+    with patch.object(FederationService, "send_media_chunk", send):
+        assert await svc.flush_once() == 2
+    by_target: dict[str, list[bytes]] = {}
+    for call in send.call_args_list:
+        by_target.setdefault(call.kwargs["to_instance_id"], []).append(
+            call.kwargs["raw_chunk"]
+        )
+    assert max(len(c) for c in by_target["peer-a"]) == HTTPS_CHUNK_BYTES
+    assert len(by_target["peer-a"]) == 3
+    assert max(len(c) for c in by_target["peer-mesh"]) == ROUTED_CHUNK_BYTES
+    assert len(by_target["peer-mesh"]) == 4
+    for chunks in by_target.values():
+        assert b"".join(chunks) == body
