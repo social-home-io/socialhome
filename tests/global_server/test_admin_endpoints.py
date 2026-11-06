@@ -83,7 +83,8 @@ async def test_overview_counts_the_space_media_cache(client, tmp_dir):
     data = os.urandom(PAD_BUCKETS[1] + BLOB_OVERHEAD)
     now = int(time.time())
     await store.put(
-        space_id="s1",
+        scope_kind="space",
+        scope_id="s1",
         blob_id=blob_id_of(data),
         data=data,
         expires_at=now + 60,

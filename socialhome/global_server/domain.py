@@ -352,7 +352,10 @@ class GfsSpaceMedia:
     least-recently-fetched first when the operator's byte cap is reached."""
 
     blob_id: str
-    space_id: str
+    #: ``"space"`` (a listed space) or ``"channel"`` (a private space's
+    #: opaque v_51 channel) — with ``scope_id``, the quota and delete key.
+    scope_kind: str
+    scope_id: str
     size: int
     created_at: int
     expires_at: int

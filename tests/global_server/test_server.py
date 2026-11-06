@@ -326,7 +326,11 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         "payload_zlib1_dict1": True,
         # The encrypted, short-lived space media cache and the limits a
         # household needs (largest blob, how long one is kept).
-        "space_media": {"max_blob_bytes": MAX_BLOB_BYTES, "ttl_s": 259_200},
+        "space_media": {
+            "max_blob_bytes": MAX_BLOB_BYTES,
+            "ttl_s": 259_200,
+            "scopes": ["channel", "space"],
+        },
         # ``POST /gfs/proof`` needs a real base_url to bind; this fixture's
         # env fallback infers ``http://0.0.0.0:8765`` (a wildcard bind
         # address), so the GFS honestly does not offer it.

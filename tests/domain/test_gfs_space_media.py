@@ -1,5 +1,6 @@
-"""The space media cache's upload authorization wire shape — one header,
-three kinds (space authority, writer cert, strict-mode writer key)."""
+"""The space media cache's upload authorization wire shape — one header, two
+scopes (a listed space, a private space's opaque channel), the kinds each
+scope takes."""
 
 from __future__ import annotations
 
@@ -14,10 +15,16 @@ from socialhome.authority_sig import (
     authority_signing_bytes,
 )
 from socialhome.canonical_json import canonical_bytes
+from socialhome.domain.gfs_channel import ChannelCert
 from socialhome.domain.gfs_space_media import (
     AUTH_AUTHORITY,
+    AUTH_CHANNEL,
+    AUTH_CHANNEL_CERT,
     AUTH_WRITER_CERT,
     AUTH_WRITER_KEY,
+    CHANNEL_MEDIA_PUT_PREFIX,
+    SCOPE_CHANNEL,
+    SCOPE_SPACE,
     SPACE_MEDIA_AUTH_MAX_CHARS,
     SPACE_MEDIA_SIG_SUITE_ED25519,
     SPACE_MEDIA_WRITER_PREFIX,
@@ -26,16 +33,30 @@ from socialhome.domain.gfs_space_media import (
     SpaceMediaClaim,
     SpaceMediaUploadAuth,
     UnsupportedSpaceMediaSigSuite,
+    media_delete_payload,
     require_space_media_sig_suite,
-    space_media_delete_payload,
 )
 from socialhome.domain.writer_cert import WriterCert
 from socialhome.moment_public_media import MAX_BLOB_BYTES
 
 BID = "ab" * 32
+CHANNEL = "0f" * 16
 
 CLAIM = SpaceMediaClaim(
-    space_id="sp-1", blob_id=BID, size=65_564, expires_at=2_000_000, ts=1_000_000
+    scope=SCOPE_SPACE,
+    scope_id="sp-1",
+    blob_id=BID,
+    size=65_564,
+    expires_at=2_000_000,
+    ts=1_000_000,
+)
+CH_CLAIM = SpaceMediaClaim(
+    scope=SCOPE_CHANNEL,
+    scope_id=CHANNEL,
+    blob_id=BID,
+    size=65_564,
+    expires_at=2_000_000,
+    ts=1_000_000,
 )
 
 CERT = WriterCert(
@@ -47,15 +68,25 @@ CERT = WriterCert(
     issued_at=1,
     cert_sig="S" * 86,
 )
+CH_CERT = ChannelCert(
+    channel_suite="ed25519",
+    channel_id=CHANNEL,
+    epoch=3,
+    instance_pk="A" * 43,
+    scope="comment",
+    issued_at=1,
+    cert_sig="S" * 86,
+)
 
 
 def _b64(obj: dict) -> str:
     return base64.urlsafe_b64encode(orjson.dumps(obj)).rstrip(b"=").decode()
 
 
-def test_claim_signing_body_is_exactly_the_five_fields():
+def test_claim_signing_body_is_exactly_the_six_fields():
     assert CLAIM.signing_body() == {
-        "space_id": "sp-1",
+        "scope": "space",
+        "scope_id": "sp-1",
         "blob_id": BID,
         "size": 65_564,
         "expires_at": 2_000_000,
@@ -64,7 +95,6 @@ def test_claim_signing_body_is_exactly_the_five_fields():
 
 
 def test_authority_kind_signs_the_claim_under_the_put_event_type():
-    """The authority signature covers the same bytes the GFS rebuilds."""
     assert CLAIM.authority_signing_bytes() == authority_signing_bytes(
         event_type=AUTHORITY_EVENT_SPACE_MEDIA_PUT,
         space_id="sp-1",
@@ -72,13 +102,22 @@ def test_authority_kind_signs_the_claim_under_the_put_event_type():
     )
 
 
-def test_writer_bytes_bind_the_kind_and_epoch():
+def test_channel_kind_signs_the_claim_after_its_own_prefix():
+    assert CH_CLAIM.channel_signing_bytes() == CHANNEL_MEDIA_PUT_PREFIX + (
+        canonical_bytes(CH_CLAIM.signing_body())
+    )
+
+
+def test_writer_bytes_bind_the_kind_epoch_and_scope():
     a = CLAIM.writer_signing_bytes(kind=AUTH_WRITER_CERT, epoch=3)
     assert a == SPACE_MEDIA_WRITER_PREFIX + canonical_bytes(
         {**CLAIM.signing_body(), "auth": AUTH_WRITER_CERT, "epoch": 3}
     )
     assert a != CLAIM.writer_signing_bytes(kind=AUTH_WRITER_KEY, epoch=3)
     assert a != CLAIM.writer_signing_bytes(kind=AUTH_WRITER_CERT, epoch=4)
+    assert CLAIM.writer_signing_bytes(
+        kind=AUTH_WRITER_KEY, epoch=3
+    ) != CH_CLAIM.writer_signing_bytes(kind=AUTH_WRITER_KEY, epoch=3)
 
 
 @pytest.mark.parametrize(
@@ -105,8 +144,33 @@ def test_writer_bytes_bind_the_kind_and_epoch():
             sig_suite="ed25519",
             epoch=3,
         ),
+        SpaceMediaUploadAuth(
+            claim=CH_CLAIM, kind=AUTH_CHANNEL, sig="x" * 86, sig_suite="ed25519"
+        ),
+        SpaceMediaUploadAuth(
+            claim=CH_CLAIM,
+            kind=AUTH_CHANNEL_CERT,
+            sig="x" * 86,
+            sig_suite="ed25519",
+            epoch=3,
+            channel_cert=CH_CERT,
+        ),
+        SpaceMediaUploadAuth(
+            claim=CH_CLAIM,
+            kind=AUTH_WRITER_KEY,
+            sig="x" * 86,
+            sig_suite="ed25519",
+            epoch=3,
+        ),
     ],
-    ids=["authority", "writer_cert", "writer_key"],
+    ids=[
+        "authority",
+        "writer_cert",
+        "writer_key",
+        "channel",
+        "channel_cert",
+        "channel_writer_key",
+    ],
 )
 def test_header_round_trips(auth):
     header = auth.to_header()
@@ -115,8 +179,6 @@ def test_header_round_trips(auth):
 
 
 def test_writer_cert_never_carries_the_user_binding():
-    """Only the v1 cert fields travel to a GFS: the v2 binding names the
-    household's users."""
     bound = WriterCert(
         **{
             **{f: getattr(CERT, f) for f in CERT.__slots__},
@@ -139,9 +201,12 @@ def test_writer_cert_never_carries_the_user_binding():
         SpaceMediaUploadAuth.from_header(_b64({**wire, "writer_cert": bound.to_wire()}))
 
 
-def _wire(**over) -> dict:
+def _wire(claim=CLAIM, **over) -> dict:
     base = SpaceMediaUploadAuth(
-        claim=CLAIM, kind=AUTH_AUTHORITY, sig="x" * 86, sig_suite="ed25519"
+        claim=claim,
+        kind=AUTH_AUTHORITY if claim is CLAIM else AUTH_CHANNEL,
+        sig="x" * 86,
+        sig_suite="ed25519",
     ).to_wire()
     base.update(over)
     return {k: v for k, v in base.items() if v is not None}
@@ -154,8 +219,17 @@ def _wire(**over) -> dict:
         _b64({"not": "a claim"}),
         base64.urlsafe_b64encode(b"[1,2]").decode(),
         _b64(_wire(blob_id="nope")),
-        _b64(_wire(space_id="")),
-        _b64(_wire(space_id="x" * 129)),
+        _b64(_wire(scope_id="")),
+        _b64(_wire(scope_id="x" * 129)),
+        _b64(_wire(scope="room")),
+        _b64(_wire(CH_CLAIM, scope_id="not-a-channel-id")),
+        # Each scope takes only its own kinds.
+        _b64(_wire(auth=AUTH_CHANNEL)),
+        _b64(_wire(CH_CLAIM, auth=AUTH_AUTHORITY)),
+        _b64(
+            _wire(CH_CLAIM, auth=AUTH_WRITER_CERT, epoch=3, writer_cert=CERT.to_wire())
+        ),
+        _b64(_wire(auth=AUTH_CHANNEL_CERT, epoch=3, channel_cert=CH_CERT.to_wire())),
         _b64(_wire(size=0)),
         _b64(_wire(size=MAX_BLOB_BYTES + 1)),
         _b64(_wire(size=True)),
@@ -164,12 +238,12 @@ def _wire(**over) -> dict:
         _b64(_wire(auth="owner")),
         _b64(_wire(sig="")),
         _b64(_wire(sig_suite="")),
-        # The authority kind carries neither an epoch nor a cert.
         _b64(_wire(epoch=3)),
-        _b64(_wire(auth=AUTH_WRITER_KEY)),  # writer kinds need an epoch
+        _b64(_wire(auth=AUTH_WRITER_KEY)),
         _b64(_wire(auth=AUTH_WRITER_KEY, epoch=3, writer_cert=CERT.to_wire())),
-        _b64(_wire(auth=AUTH_WRITER_CERT, epoch=3)),  # … and the cert one a cert
+        _b64(_wire(auth=AUTH_WRITER_CERT, epoch=3)),
         _b64(_wire(auth=AUTH_WRITER_CERT, epoch=-1, writer_cert=CERT.to_wire())),
+        _b64(_wire(CH_CLAIM, auth=AUTH_CHANNEL_CERT, epoch=3, channel_cert={"x": 1})),
         _b64(_wire(extra=1)),
         "a" * (SPACE_MEDIA_AUTH_MAX_CHARS + 1),
     ],
@@ -179,16 +253,17 @@ def test_malformed_headers_are_refused(raw):
         SpaceMediaUploadAuth.from_header(raw)
 
 
-def test_writer_cert_suite_is_checked_never_defaulted():
+def test_cert_holder_suite_is_checked_never_defaulted():
     assert SPACE_MEDIA_SIG_SUITE_ED25519 in SUPPORTED_SPACE_MEDIA_SIG_SUITES
     assert require_space_media_sig_suite("ed25519") == "ed25519"
     with pytest.raises(UnsupportedSpaceMediaSigSuite):
         require_space_media_sig_suite("ed25519+mldsa65")
 
 
-def test_delete_payload_binds_space_blob_and_time():
-    assert space_media_delete_payload("sp-1", BID, 5) == {
-        "space_id": "sp-1",
+def test_delete_payload_binds_scope_blob_and_time():
+    assert media_delete_payload("channel", CHANNEL, BID, 5) == {
+        "scope": "channel",
+        "scope_id": CHANNEL,
         "blob_id": BID,
         "ts": 5,
     }

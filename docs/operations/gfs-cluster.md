@@ -99,8 +99,9 @@ keeps encrypted blobs as files under `<data_dir>/media/spaces/` and their
 rows in the shared `gfs.db`, so every node must mount the **same** data dir:
 whichever node took an upload, any node serves the fetch. Size
 `max_bytes` (default 5 GiB) to the disk that volume has — it is a cache, so
-the least recently fetched blobs are evicted when it is full, and nothing
-lives past `ttl_seconds` (3 days). Behind Cloudflare a fetch is
+the least recently fetched blobs are evicted when it is full (and a space or
+channel past `space_max_bytes` evicts its own least recently fetched), and
+nothing lives past `ttl_seconds` (3 days). Behind Cloudflare a fetch (`GET /gfs/media/{blob}`) is
 `Cache-Control: public, max-age=3600, immutable`, so the edge absorbs
 repeated reads; a miss is `no-store`. Set `max_bytes = 0` (or
 `GFS_SPACE_MEDIA_MAX_BYTES=0`) to turn the cache off — it is then no longer

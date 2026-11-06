@@ -8,7 +8,10 @@
 -- padded to a size bucket) and uploads the ciphertext once per GFS; readers
 -- fetch it here by its SHA-256. This server can't open it, and keeps it only
 -- as a CACHE: a short life (``[space_media] ttl_seconds``, 3 days), a total
--- byte cap with least-recently-fetched eviction, a per-space cap.
+-- byte cap and a per-scope cap, both with least-recently-fetched eviction.
+-- A scope is a listed space, or a private space's opaque channel (v_51) —
+-- so invite-link members of a private space get its pictures too, while
+-- this server still knows that space only as a random channel id.
 --
 -- CLAUDE.md "audit before a migration":
 -- 1. Audited every store that holds bytes here: ``gfs_moment_media`` (the
@@ -31,15 +34,22 @@
 --    only (expiry, per-space quota and LRU eviction would need a directory
 --    scan per upload).
 -- 3. Smallest change: one table of metadata, the bytes are files under
---    ``media_dir/spaces/`` named by their SHA-256. No foreign key to
---    ``global_spaces``: a cascade would drop rows and orphan their files;
+--    ``media_dir/spaces/`` named by their SHA-256. One ``(scope_kind,
+--    scope_id)`` pair rather than a table per scope: the cache, its caps and
+--    its eviction are the same for both. No foreign key to
+--    ``global_spaces`` / ``gfs_channels``: a cascade would drop rows and
+--    orphan their files;
 --    rows and files go together through the store (expiry sweep, eviction,
 --    the space authority's delete), and nothing lives past the TTL.
 CREATE TABLE IF NOT EXISTS gfs_space_media (
     -- sha256 of the blob, lowercase hex — the blob's address and file name.
     blob_id          TEXT PRIMARY KEY,
-    -- The space whose authority (or writer) uploaded it; quota + delete key.
-    space_id         TEXT NOT NULL,
+    -- Whose blob it is — the quota and delete key: a listed space
+    -- (``space`` + its id) or a private space's opaque v_51 channel
+    -- (``channel`` + the random channel id; this server never learns that
+    -- channel's space).
+    scope_kind       TEXT NOT NULL CHECK(scope_kind IN ('space', 'channel')),
+    scope_id         TEXT NOT NULL,
     -- Ciphertext bytes (a padded bucket + nonce + tag).
     size             INTEGER NOT NULL CHECK(size > 0),
     -- Unix seconds.
@@ -52,7 +62,7 @@ CREATE TABLE IF NOT EXISTS gfs_space_media (
 );
 CREATE INDEX IF NOT EXISTS idx_gfs_space_media_expires
     ON gfs_space_media(expires_at);
-CREATE INDEX IF NOT EXISTS idx_gfs_space_media_space
-    ON gfs_space_media(space_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_gfs_space_media_scope
+    ON gfs_space_media(scope_kind, scope_id, last_fetched_at, created_at);
 CREATE INDEX IF NOT EXISTS idx_gfs_space_media_lru
     ON gfs_space_media(last_fetched_at, created_at);

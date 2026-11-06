@@ -1672,11 +1672,19 @@ async def test_add_subscriber_says_whether_it_created_the_seat(fed):
 
 
 def _space_blob(
-    n: int, *, space="s1", size=100, created=1_000, expires=5_000, fetched=None
+    n: int,
+    *,
+    space="s1",
+    kind="space",
+    size=100,
+    created=1_000,
+    expires=5_000,
+    fetched=None,
 ):
     return GfsSpaceMedia(
         blob_id=f"{n:064x}",
-        space_id=space,
+        scope_kind=kind,
+        scope_id=space,
         size=size,
         created_at=created,
         expires_at=expires,
@@ -1711,21 +1719,29 @@ async def test_space_media_servable_skips_expired_and_banned_spaces(space_media,
     await space_media.add(_space_blob(2, space="bad"))
     await space_media.add(_space_blob(3, space="ok", expires=1_500))
     await space_media.add(_space_blob(4, space="gone"))
-    assert (await space_media.get_servable(f"{1:064x}", now=2_000)).space_id == "ok"
+    # A channel whose id happens to equal a banned space id is not that space.
+    await space_media.add(_space_blob(5, space="bad", kind="channel"))
+    assert (await space_media.get_servable(f"{1:064x}", now=2_000)).scope_id == "ok"
     assert await space_media.get_servable(f"{2:064x}", now=2_000) is None
     assert await space_media.get_servable(f"{3:064x}", now=2_000) is None
     # A space that is no longer listed: its blobs live out their short TTL.
     assert await space_media.get_servable(f"{4:064x}", now=2_000) is not None
+    assert await space_media.get_servable(f"{5:064x}", now=2_000) is not None
 
 
-async def test_space_media_usage_counts_live_bytes_and_recent_uploads(space_media):
+async def test_space_media_usage_is_per_scope(space_media):
     await space_media.add(_space_blob(1, size=100, created=1_000))
     await space_media.add(_space_blob(2, size=200, created=3_000))
     await space_media.add(_space_blob(3, size=400, created=3_100, expires=3_200))
     await space_media.add(_space_blob(4, space="s2", size=800, created=3_000))
-    live, recent = await space_media.space_usage("s1", now=3_500, since=2_500)
+    await space_media.add(_space_blob(6, kind="channel", size=1600, created=3_000))
+    live, recent = await space_media.scope_usage("space", "s1", now=3_500, since=2_500)
     assert (live, recent) == (300, 2)
-    assert await space_media.totals() == (4, 1_500)
+    assert await space_media.scope_usage("channel", "s1", now=3_500, since=2_500) == (
+        1600,
+        1,
+    )
+    assert await space_media.totals() == (5, 3_100)
 
 
 async def test_space_media_lru_order_is_last_fetch_then_age(space_media):
@@ -1733,8 +1749,11 @@ async def test_space_media_lru_order_is_last_fetch_then_age(space_media):
     await space_media.add(_space_blob(2, created=300, fetched=300))
     await space_media.add(_space_blob(3, created=200, fetched=300))
     await space_media.add(_space_blob(4, created=50, fetched=950))
+    await space_media.add(_space_blob(5, space="s2", created=10, fetched=10))
     got = [m.blob_id for m in await space_media.least_recently_fetched(limit=3)]
-    assert got == [f"{3:064x}", f"{2:064x}", f"{1:064x}"]
+    assert got == [f"{5:064x}", f"{3:064x}", f"{2:064x}"]
+    scoped = await space_media.least_recently_fetched(limit=3, scope=("space", "s1"))
+    assert [m.blob_id for m in scoped] == [f"{3:064x}", f"{2:064x}", f"{1:064x}"]
 
 
 async def test_space_media_touch_is_throttled(space_media):
@@ -1746,11 +1765,13 @@ async def test_space_media_touch_is_throttled(space_media):
     assert (await space_media.get(bid)).last_fetched_at == 4_600
 
 
-async def test_space_media_delete_needs_the_space(space_media):
+async def test_space_media_delete_needs_the_scope(space_media):
     await space_media.add(_space_blob(1, space="s1"))
-    assert await space_media.delete(f"{1:064x}", space_id="s2") == 0
-    assert await space_media.delete(f"{1:064x}", space_id="s1") == 1
-    assert await space_media.get(f"{1:064x}") is None
+    bid = f"{1:064x}"
+    assert await space_media.delete(bid, scope_kind="space", scope_id="s2") == 0
+    assert await space_media.delete(bid, scope_kind="channel", scope_id="s1") == 0
+    assert await space_media.delete(bid, scope_kind="space", scope_id="s1") == 1
+    assert await space_media.get(bid) is None
 
 
 async def test_space_media_expired_and_delete_ids(space_media):

@@ -81,9 +81,10 @@ DEFAULT_SPACE_MEDIA_TTL_SECONDS: int = 3 * 86_400
 #: after a short sleep finds nothing; over a week it is storage, not a cache.
 MIN_SPACE_MEDIA_TTL_SECONDS: int = 600
 MAX_SPACE_MEDIA_TTL_SECONDS: int = 7 * 86_400
-#: Live ciphertext one space may hold (429 ``space_media_quota`` past it).
+#: Live ciphertext one space (or private space's channel) may hold: past
+#: it, that scope's own least recently fetched blobs are evicted.
 DEFAULT_SPACE_MEDIA_SPACE_MAX_BYTES: int = 256 * 1024**2
-#: Blobs one space may upload per hour (429 past it).
+#: Blobs one space (or channel) may upload per hour (429 past it).
 DEFAULT_SPACE_MEDIA_SPACE_UPLOADS_PER_HOUR: int = 300
 
 #: Peer networks whose ``X-Forwarded-For`` header the GFS believes by default:
@@ -829,9 +830,10 @@ peers   = []
 # max_bytes is all space media held here (0 turns the cache off and stops
 # advertising it); when an upload would pass it, the blobs fetched least
 # recently (then the oldest) are dropped first. Blobs expire after
-# ttl_seconds (600 – 604800) whatever the uploader asks. One space holds at
-# most space_max_bytes live and uploads at most space_uploads_per_hour blobs
-# an hour (429 past either). In a cluster every node shares data_dir, so any
+# ttl_seconds (600 – 604800) whatever the uploader asks. One space (or a
+# private space's opaque channel) holds at most space_max_bytes live — past
+# it, its own least recently fetched blobs are dropped for the new one — and
+# uploads at most space_uploads_per_hour blobs an hour (429 past it). In a cluster every node shares data_dir, so any
 # node serves a blob another took. Env overrides: GFS_SPACE_MEDIA_MAX_BYTES,
 # GFS_SPACE_MEDIA_TTL_SECONDS, GFS_SPACE_MEDIA_SPACE_MAX_BYTES,
 # GFS_SPACE_MEDIA_SPACE_UPLOADS_PER_HOUR.

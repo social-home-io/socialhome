@@ -1,8 +1,9 @@
 """The space media cache over HTTP — real GFS app, real SQLite, real client.
 
-``PUT /gfs/spaces/{space_id}/media/{blob_id}`` (header-authorized, identity
-free), ``GET /gfs/spaces/media/{blob_id}`` (public, CDN-cacheable for an hour)
-and ``POST /gfs/spaces/{space_id}/media/{blob_id}/delete`` (space authority).
+``PUT /gfs/spaces/{space_id}/media/{blob_id}`` and
+``PUT /gfs/channels/{channel_id}/media/{blob_id}`` (header-authorized, identity
+free), ``GET /gfs/media/{blob_id}`` (public, scope-free, CDN-cacheable for an
+hour) and ``POST …/media/{blob_id}/delete`` (the scope's seed holder).
 """
 
 from __future__ import annotations
@@ -21,13 +22,20 @@ from socialhome.capabilities_sig import verify_capabilities
 from socialhome.crypto import b64url_encode, ed25519_public_key, sign_ed25519
 from socialhome.domain.gfs_space_media import (
     AUTH_AUTHORITY,
+    AUTH_CHANNEL,
+    AUTH_CHANNEL_CERT,
     AUTH_WRITER_CERT,
+    CHANNEL_MEDIA_DELETE_PREFIX,
+    SCOPE_CHANNEL,
+    SCOPE_SPACE,
     SPACE_MEDIA_AUTH_HEADER,
     SpaceMediaClaim,
     SpaceMediaUploadAuth,
-    space_media_delete_payload,
+    media_delete_payload,
 )
+from socialhome.gfs_channel import channel_pk_of, issue_channel_cert, signing_bytes
 from socialhome.global_server.app_keys import (
+    gfs_channel_repo_key,
     gfs_fed_repo_key,
     gfs_space_media_store_key,
 )
@@ -46,7 +54,9 @@ SPACE = "sp-media"
 SEED = os.urandom(32)
 PK = ed25519_public_key(SEED)
 SMALL = PAD_BUCKETS[1] + BLOB_OVERHEAD
-_REFUSED = {"error": "not authorized for this space"}
+CHANNEL = "0f" * 16
+CHANNEL_SEED = os.urandom(32)
+_REFUSED = {"error": "not authorized for this scope"}
 
 
 async def _app(tmp_dir, **cfg_over):
@@ -80,14 +90,26 @@ async def gfs(tmp_dir, request):
                 )
             )
         await fed.set_space_status("sp-banned", "banned")
+        channels = app[gfs_channel_repo_key]
+        now = int(time.time())
+        await channels.register(
+            CHANNEL,
+            channel_suite="ed25519",
+            channel_pk=channel_pk_of(CHANNEL_SEED),
+            now=now,
+        )
+        await channels.set_epoch(CHANNEL, 3, expected=None, now=now)
         tc.app_ = app
         yield tc
 
 
-def _claim(data: bytes, *, space=SPACE, ts=None, expires=None, size=None):
+def _claim(
+    data: bytes, *, space=SPACE, ts=None, expires=None, size=None, scope=SCOPE_SPACE
+):
     now = int(time.time())
     return SpaceMediaClaim(
-        space_id=space,
+        scope=scope,
+        scope_id=space,
         blob_id=blob_id_of(data),
         size=len(data) if size is None else size,
         expires_at=expires if expires is not None else now + 86_400,
@@ -110,7 +132,7 @@ def _writer_header(claim: SpaceMediaClaim, *, epoch: int = 3) -> dict:
     holder = os.urandom(32)
     cert = sign_writer_cert(
         space_seed=SEED,
-        space_id=claim.space_id,
+        space_id=claim.scope_id,
         epoch=epoch,
         instance_pk=ed25519_public_key(holder),
         scope="comment",
@@ -133,8 +155,47 @@ def _put_url(data: bytes, space: str = SPACE) -> str:
     return f"/gfs/spaces/{space}/media/{blob_id_of(data)}"
 
 
+def _ch_url(data: bytes, channel: str = CHANNEL) -> str:
+    return f"/gfs/channels/{channel}/media/{blob_id_of(data)}"
+
+
 def _get_url(data: bytes) -> str:
-    return f"/gfs/spaces/media/{blob_id_of(data)}"
+    return f"/gfs/media/{blob_id_of(data)}"
+
+
+def _ch_claim(data: bytes, **over) -> SpaceMediaClaim:
+    return _claim(data, space=CHANNEL, scope=SCOPE_CHANNEL, **over)
+
+
+def _channel_header(claim: SpaceMediaClaim, seed: bytes = CHANNEL_SEED) -> dict:
+    sig = sign_ed25519(seed, claim.channel_signing_bytes())
+    auth = SpaceMediaUploadAuth(
+        claim=claim, kind=AUTH_CHANNEL, sig=b64url_encode(sig), sig_suite="ed25519"
+    )
+    return {SPACE_MEDIA_AUTH_HEADER: auth.to_header()}
+
+
+def _channel_cert_header(claim: SpaceMediaClaim, *, epoch: int = 3) -> dict:
+    holder = os.urandom(32)
+    cert = issue_channel_cert(
+        channel_seed=CHANNEL_SEED,
+        channel_id=claim.scope_id,
+        epoch=epoch,
+        instance_pk=ed25519_public_key(holder),
+        scope="comment",
+    )
+    sig = sign_ed25519(
+        holder, claim.writer_signing_bytes(kind=AUTH_CHANNEL_CERT, epoch=epoch)
+    )
+    auth = SpaceMediaUploadAuth(
+        claim=claim,
+        kind=AUTH_CHANNEL_CERT,
+        sig=b64url_encode(sig),
+        sig_suite="ed25519",
+        epoch=epoch,
+        channel_cert=cert,
+    )
+    return {SPACE_MEDIA_AUTH_HEADER: auth.to_header()}
 
 
 # ── Upload + fetch ───────────────────────────────────────────────────────
@@ -174,14 +235,14 @@ async def test_a_writer_cert_holder_uploads(gfs):
 
 
 async def test_a_miss_is_404_no_store(gfs):
-    g = await gfs.get(f"/gfs/spaces/media/{'a' * 64}")
+    g = await gfs.get(f"/gfs/media/{'a' * 64}")
     assert g.status == 404
     assert g.headers["Cache-Control"] == "no-store"
     assert g.headers["Access-Control-Allow-Origin"] == "*"
 
 
 async def test_a_non_address_is_not_routed_to_the_cache(gfs):
-    g = await gfs.get("/gfs/spaces/media/not-a-blob")
+    g = await gfs.get("/gfs/media/not-a-blob")
     assert g.headers.get("Cache-Control") != "public, max-age=3600, immutable"
 
 
@@ -264,7 +325,7 @@ async def test_a_padded_bucket_and_sha_are_required(gfs):
 @pytest.mark.parametrize(
     "gfs", [{"space_media_space_uploads_per_hour": 1}], indirect=True
 )
-async def test_the_space_quota_is_429(gfs):
+async def test_the_upload_rate_is_429(gfs):
     first, second = os.urandom(SMALL), os.urandom(SMALL)
     await gfs.put(_put_url(first), data=first, headers=_authority_header(_claim(first)))
     r = await gfs.put(
@@ -283,10 +344,21 @@ def _delete_body(data: bytes, *, seed: bytes = SEED, ts: int | None = None) -> d
     sig = sign_authority_event(
         event_type=AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
         space_id=SPACE,
-        payload=space_media_delete_payload(SPACE, blob_id_of(data), ts),
+        payload=media_delete_payload(SCOPE_SPACE, SPACE, blob_id_of(data), ts),
         space_seed=seed,
     )
-    return {"ts": ts, **sig}
+    return {
+        "ts": ts,
+        "sig": sig["authority_sig"],
+        "sig_suite": sig["authority_sig_suite"],
+    }
+
+
+def _channel_delete_body(data: bytes, *, seed: bytes = CHANNEL_SEED) -> dict:
+    ts = int(time.time())
+    body = media_delete_payload(SCOPE_CHANNEL, CHANNEL, blob_id_of(data), ts)
+    sig = sign_ed25519(seed, signing_bytes(CHANNEL_MEDIA_DELETE_PREFIX, body))
+    return {"ts": ts, "sig": b64url_encode(sig), "sig_suite": "ed25519"}
 
 
 async def test_the_space_authority_deletes_a_blob(gfs):
@@ -317,6 +389,7 @@ async def test_info_advertises_the_cache_in_the_signed_block(gfs):
     assert body["capabilities"]["space_media"] == {
         "max_blob_bytes": MAX_BLOB_BYTES,
         "ttl_s": 3 * 86_400,
+        "scopes": ["channel", "space"],
     }
     assert verify_capabilities(
         body["public_key"],
@@ -333,15 +406,112 @@ async def test_a_turned_off_cache_is_not_advertised(gfs):
     assert "space_media" not in body["capabilities"]
 
 
-def test_only_the_write_paths_are_rate_limited_per_ip():
+def test_the_write_paths_are_shed_per_ip():
     assert SPACE_MEDIA_MAX_PER_MINUTE_PER_IP >= 60
-    assert is_space_media_write_path(f"/gfs/spaces/s/media/{'a' * 64}")
-    assert is_space_media_write_path(f"/gfs/spaces/s/media/{'a' * 64}/delete")
-    assert not is_space_media_write_path(f"/gfs/spaces/media/{'a' * 64}")
-    assert not is_space_media_write_path("/gfs/spaces/s/epoch")
-    assert not is_space_media_write_path("/gfs/spaces/s/media")
+    assert is_space_media_write_path(f"/gfs/channels/{CHANNEL}/media/{'a' * 64}")
+    assert not is_space_media_write_path(f"/gfs/media/{'a' * 64}")
 
 
 async def test_the_store_is_wired(gfs):
     store = gfs.app_[gfs_space_media_store_key]
     assert store.limits.ttl_s == 3 * 86_400
+
+
+# ── Channel scope: a private space's opaque channel ──────────────────────
+
+
+async def test_a_channel_key_upload_is_fetched_by_address(gfs):
+    """A private space's invite-link members get its pictures too: the
+    channel key uploads under the opaque channel id, anyone fetches by
+    address — the GFS never learns the space."""
+    data = os.urandom(SMALL)
+    r = await gfs.put(
+        _ch_url(data), data=data, headers=_channel_header(_ch_claim(data))
+    )
+    assert r.status == 201
+    g = await gfs.get(_get_url(data))
+    assert g.status == 200
+    assert await g.read() == data
+    row = await gfs.app_[gfs_space_media_store_key]._repo.get(blob_id_of(data))
+    assert (row.scope_kind, row.scope_id) == ("channel", CHANNEL)
+
+
+async def test_a_channel_cert_holder_uploads(gfs):
+    data = os.urandom(SMALL)
+    r = await gfs.put(
+        _ch_url(data), data=data, headers=_channel_cert_header(_ch_claim(data))
+    )
+    assert r.status == 201
+
+
+@pytest.mark.parametrize("case", ["wrong_key", "unknown_channel", "space_kind", "path"])
+async def test_every_channel_auth_failure_is_the_same_403(gfs, case):
+    data = os.urandom(SMALL)
+    url = _ch_url(data)
+    if case == "wrong_key":
+        headers = _channel_header(_ch_claim(data), seed=os.urandom(32))
+    elif case == "unknown_channel":
+        url = _ch_url(data, "1e" * 16)
+        headers = _channel_header(_claim(data, space="1e" * 16, scope=SCOPE_CHANNEL))
+    elif case == "space_kind":
+        # A space-scope authorization sent to a channel path.
+        headers = _authority_header(_claim(data))
+    else:  # signed for another channel than the path names
+        url = _ch_url(data, "1e" * 16)
+        headers = _channel_header(_ch_claim(data))
+    r = await gfs.put(url, data=data, headers=headers)
+    assert r.status == 403
+    assert await r.json() == _REFUSED
+
+
+async def test_a_channel_id_that_is_not_one_is_not_routed(gfs):
+    data = os.urandom(SMALL)
+    r = await gfs.put(
+        f"/gfs/channels/not-a-channel/media/{blob_id_of(data)}",
+        data=data,
+        headers=_channel_header(_ch_claim(data)),
+    )
+    assert r.status in (404, 405)
+
+
+@pytest.mark.parametrize("gfs", [{"space_media_space_max_bytes": SMALL}], indirect=True)
+async def test_a_full_channel_evicts_its_oldest_not_refuses(gfs):
+    first, second = os.urandom(SMALL), os.urandom(SMALL)
+    await gfs.put(_ch_url(first), data=first, headers=_channel_header(_ch_claim(first)))
+    r = await gfs.put(
+        _ch_url(second), data=second, headers=_channel_header(_ch_claim(second))
+    )
+    assert r.status == 201
+    assert (await gfs.get(_get_url(second))).status == 200
+    assert (await gfs.get(_get_url(first))).status == 404
+
+
+@pytest.mark.parametrize(
+    "gfs", [{"space_media_space_uploads_per_hour": 1}], indirect=True
+)
+async def test_the_upload_rate_is_per_channel(gfs):
+    first, second, third = (os.urandom(SMALL) for _ in range(3))
+    await gfs.put(_ch_url(first), data=first, headers=_channel_header(_ch_claim(first)))
+    r = await gfs.put(
+        _ch_url(second), data=second, headers=_channel_header(_ch_claim(second))
+    )
+    assert r.status == 429
+    # A space's budget is its own.
+    r = await gfs.put(
+        _put_url(third), data=third, headers=_authority_header(_claim(third))
+    )
+    assert r.status == 201
+
+
+async def test_the_channel_key_deletes_a_blob(gfs):
+    data = os.urandom(SMALL)
+    await gfs.put(_ch_url(data), data=data, headers=_channel_header(_ch_claim(data)))
+    bad = await gfs.post(
+        _ch_url(data) + "/delete",
+        json=_channel_delete_body(data, seed=os.urandom(32)),
+    )
+    assert bad.status == 403
+    assert await bad.json() == _REFUSED
+    r = await gfs.post(_ch_url(data) + "/delete", json=_channel_delete_body(data))
+    assert await r.json() == {"deleted": True}
+    assert (await gfs.get(_get_url(data))).status == 404

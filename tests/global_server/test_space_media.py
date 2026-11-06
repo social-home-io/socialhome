@@ -62,9 +62,10 @@ def make(repo, tmp_dir):
     return _make
 
 
-async def _put(store, data, *, space="s1", now=NOW, expires=None):
+async def _put(store, data, *, space="s1", kind="space", now=NOW, expires=None):
     return await store.put(
-        space_id=space,
+        scope_kind=kind,
+        scope_id=space,
         blob_id=blob_id_of(data),
         data=data,
         expires_at=expires if expires is not None else now + 86_400,
@@ -89,11 +90,19 @@ def test_limits_from_config_and_capability():
         space_max_bytes=256 * 1024**2,
         space_uploads_per_hour=300,
     )
-    assert limits.capability() == {"max_blob_bytes": MAX_BLOB_BYTES, "ttl_s": 259_200}
+    assert limits.capability() == {
+        "max_blob_bytes": MAX_BLOB_BYTES,
+        "ttl_s": 259_200,
+        "scopes": ["channel", "space"],
+    }
     small = SpaceMediaLimits.from_config(
         GfsConfig(space_media_max_bytes=1_000_000, space_media_ttl_seconds=3_600)
     )
-    assert small.capability() == {"max_blob_bytes": 1_000_000, "ttl_s": 3_600}
+    assert small.capability() == {
+        "max_blob_bytes": 1_000_000,
+        "ttl_s": 3_600,
+        "scopes": ["channel", "space"],
+    }
     assert (
         SpaceMediaLimits.from_config(GfsConfig(space_media_max_bytes=0)).capability()
         is None
@@ -109,12 +118,13 @@ async def test_put_once_read_many(make, repo):
     assert await _put(store, data) is True
     assert await store.read(blob_id_of(data), now=NOW + 10) == data
     row = await repo.get(blob_id_of(data))
-    assert (row.space_id, row.size, row.created_at, row.last_fetched_at) == (
+    assert (row.scope_kind, row.scope_id, row.size, row.created_at) == (
+        "space",
         "s1",
         SMALL,
         NOW,
-        NOW,
     )
+    assert row.last_fetched_at == NOW
 
 
 async def test_a_duplicate_upload_is_a_no_op(make, repo):
@@ -156,7 +166,8 @@ async def test_shape_and_address_are_checked(make, blob_id, data, reason):
     store = make()
     status, got = await _refused(
         store.put(
-            space_id="s1",
+            scope_kind="space",
+            scope_id="s1",
             blob_id=blob_id or blob_id_of(data),
             data=data,
             expires_at=NOW + 60,
@@ -188,19 +199,73 @@ async def test_a_turned_off_cache_refuses_everything(make):
     assert await _refused(_put(store, _blob())) == (413, "too_large_for_cache")
 
 
-# ── Per-space caps ──────────────────────────────────────────────────────
+# ── Per-scope caps ──────────────────────────────────────────────────────
 
 
-async def test_the_per_space_live_bytes_cap_is_429(make):
+async def test_a_full_scope_evicts_its_own_least_recently_fetched(make, repo):
+    """A busy space keeps its newest pictures: past ``space_max_bytes`` its
+    own least recently fetched (then oldest) blobs go — never another
+    scope's, never a 429."""
     store = make(space_max_bytes=2 * SMALL)
-    await _put(store, _blob())
-    await _put(store, _blob())
-    assert await _refused(_put(store, _blob())) == (429, "space_media_quota")
-    # Another space is not affected …
-    await _put(store, _blob(), space="s2")
-    # … and expired bytes don't count.
-    assert await _put(store, _blob(), now=NOW + 86_400) is True
-    assert (await store.stats())["refused_quota"] == 1
+    a, b, c = _blob(), _blob(), _blob()
+    other = _blob()
+    await _put(store, other, space="s2", now=NOW)
+    await _put(store, a, now=NOW + 1)
+    await _put(store, b, now=NOW + 2)
+    # ``a`` is fetched an hour later, so ``b`` is the least recently used.
+    assert await store.read(blob_id_of(a), now=NOW + FETCH_TOUCH_INTERVAL_S + 1) == a
+    assert await _put(store, c, now=NOW + FETCH_TOUCH_INTERVAL_S + 2) is True
+    held = {m.blob_id for m in await repo.least_recently_fetched(limit=10)}
+    assert held == {blob_id_of(other), blob_id_of(a), blob_id_of(c)}
+    stats = await store.stats()
+    assert (stats["evicted_blobs"], stats["refused_quota"]) == (1, 0)
+
+
+async def test_scope_eviction_frees_enough_for_a_big_blob(make, repo):
+    store = make(space_max_bytes=BIG + SMALL, max_bytes=100 * BIG)
+    for i in range(4):
+        await _put(store, _blob(), now=NOW + i)
+    big = _blob(BIG)
+    assert await _put(store, big, now=NOW + 10) is True
+    assert await store.read(blob_id_of(big), now=NOW + 11) == big
+    # Three of the four small blobs went; the newest one still fits.
+    assert await repo.totals() == (2, BIG + SMALL)
+    assert (await store.stats())["evicted_blobs"] == 3
+
+
+async def test_expired_blobs_of_a_scope_go_before_live_ones(make):
+    store = make(space_max_bytes=2 * SMALL)
+    old, live = _blob(), _blob()
+    await _put(store, old, now=NOW, expires=NOW + 10)
+    await _put(store, live, now=NOW + 1)
+    await _put(store, _blob(), now=NOW + 20)
+    assert await store.read(blob_id_of(live), now=NOW + 21) == live
+    assert (await store.stats())["evicted_blobs"] == 0
+
+
+async def test_a_blob_bigger_than_a_scopes_budget_is_413(make):
+    store = make(space_max_bytes=SMALL)
+    assert await _refused(_put(store, _blob(BIG))) == (413, "too_large_for_cache")
+
+
+async def test_a_channel_is_its_own_scope(make, repo):
+    """A private space's channel has its own budget, apart from any space
+    with the same id string."""
+    store = make(space_max_bytes=SMALL)
+    ch = "0f" * 16
+    a, b = _blob(), _blob()
+    await _put(store, a, space=ch, kind="channel", now=NOW)
+    await _put(store, b, space=ch, kind="space", now=NOW + 1)
+    held = {m.blob_id for m in await repo.least_recently_fetched(limit=10)}
+    assert held == {blob_id_of(a), blob_id_of(b)}
+    assert await _refused(_put(store, a, space=ch, kind="space")) == (
+        409,
+        "blob_id_taken",
+    )
+
+
+async def test_an_unknown_scope_is_refused(make):
+    assert await _refused(_put(make(), _blob(), kind="room")) == (422, "bad_scope")
 
 
 async def test_the_per_space_upload_rate_is_429(make):
@@ -306,9 +371,10 @@ async def test_delete_needs_the_owning_space(make, tmp_dir):
     data = _blob()
     bid = blob_id_of(data)
     await _put(store, data)
-    assert await store.delete(bid, space_id="s2") is False
-    assert await store.delete("nope", space_id="s1") is False
-    assert await store.delete(bid, space_id="s1") is True
+    assert await store.delete(bid, scope_kind="space", scope_id="s2") is False
+    assert await store.delete(bid, scope_kind="channel", scope_id="s1") is False
+    assert await store.delete("nope", scope_kind="space", scope_id="s1") is False
+    assert await store.delete(bid, scope_kind="space", scope_id="s1") is True
     assert await store.read(bid, now=NOW + 1) is None
     assert not (tmp_dir / "spaces" / bid).exists()
 

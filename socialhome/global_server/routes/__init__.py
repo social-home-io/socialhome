@@ -135,9 +135,11 @@ from .relay import (
     SubscribeView,
 )
 from .space_media import (
+    GfsChannelMediaDeleteView,
+    GfsChannelMediaUploadView,
+    GfsMediaView,
     GfsSpaceMediaDeleteView,
     GfsSpaceMediaUploadView,
-    GfsSpaceMediaView,
 )
 from .viewer_pages import (
     InvitePageDataView,
@@ -200,9 +202,10 @@ def register_routes(
     app.router.add_view("/gfs/member-publish", MemberPublishView)
     app.router.add_view("/gfs/member-publish-anon", MemberPublishAnonView)
     app.router.add_view("/gfs/spaces/{space_id}/epoch", SpaceEpochNoticeView)
-    # The encrypted, short-lived space media cache. The fetch names no
-    # space; the address pattern keeps it apart from ``/gfs/spaces/{id}/…``.
-    app.router.add_view("/gfs/spaces/media/{blob_id:[0-9a-f]{64}}", GfsSpaceMediaView)
+    # The encrypted, short-lived space media cache: uploads per scope (a
+    # listed space, or a private space's opaque channel), one scope-free
+    # fetch by address.
+    app.router.add_view("/gfs/media/{blob_id:[0-9a-f]{64}}", GfsMediaView)
     app.router.add_view(
         "/gfs/spaces/{space_id}/media/{blob_id:[0-9a-f]{64}}",
         GfsSpaceMediaUploadView,
@@ -210,6 +213,14 @@ def register_routes(
     app.router.add_view(
         "/gfs/spaces/{space_id}/media/{blob_id:[0-9a-f]{64}}/delete",
         GfsSpaceMediaDeleteView,
+    )
+    app.router.add_view(
+        "/gfs/channels/{channel_id:[0-9a-f]{32}}/media/{blob_id:[0-9a-f]{64}}",
+        GfsChannelMediaUploadView,
+    )
+    app.router.add_view(
+        "/gfs/channels/{channel_id:[0-9a-f]{32}}/media/{blob_id:[0-9a-f]{64}}/delete",
+        GfsChannelMediaDeleteView,
     )
     # Opaque channels for private spaces (v_51) — every id in the body.
     app.router.add_view(CHANNEL_REGISTER_ROUTE, ChannelRegisterView)

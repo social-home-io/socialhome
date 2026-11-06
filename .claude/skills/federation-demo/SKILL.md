@@ -1310,7 +1310,11 @@ WS pushes across allocs. The step:
    (``Cache-Control: public, max-age=3600, immutable``) — files under the
    shared ``media/spaces`` dir, rows in the shared DB; the same upload via
    node 1 must coalesce (``200 already_stored``) and a miss via node 1 must
-   be ``404`` with ``no-store``.
+   be ``404`` with ``no-store`` (fetches at the scope-free ``/gfs/media/{blob}``).
+   Then (step 3i) the same for a **private space's opaque channel**: a
+   channel registered via node 1, a blob uploaded via node 0 under the
+   channel key (``/gfs/channels/{id}/media/{blob}``) must be served
+   byte-identical by node 1.
 6. Confirms a client registered via one node is served by the other
    (shared DB → the round-robin LB is safe).
 

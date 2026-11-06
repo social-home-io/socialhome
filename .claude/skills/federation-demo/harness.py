@@ -2100,7 +2100,8 @@ def _gfs_cluster_space_media(urls: list[str], owner: tuple[str, bytes]) -> None:
 
     def _put(url: str) -> tuple[int, Any]:
         claim = SpaceMediaClaim(
-            space_id=space_id,
+            scope="space",
+            scope_id=space_id,
             blob_id=blob_id,
             size=len(blob),
             expires_at=now + 86_400,
@@ -2132,7 +2133,7 @@ def _gfs_cluster_space_media(urls: list[str], owner: tuple[str, bytes]) -> None:
     def _get(url: str, bid: str) -> tuple[int, bytes, dict[str, str]]:
         try:
             with urllib.request.urlopen(
-                f"{url}/gfs/spaces/media/{bid}", timeout=15
+                f"{url}/gfs/media/{bid}", timeout=15
             ) as r:
                 return r.status, r.read(), dict(r.headers)
         except urllib.error.HTTPError as exc:
@@ -2167,6 +2168,85 @@ def _gfs_cluster_space_media(urls: list[str], owner: tuple[str, bytes]) -> None:
     print(
         "  space media uploaded via node 0 is served byte-identical by node 1 "
         "(immutable, 1 h); a re-upload via node 1 coalesces; a miss is no-store ✓"
+    )
+
+
+def _gfs_cluster_channel_media(urls: list[str]) -> None:
+    """Step 3i of ``gfs-cluster``: the space media cache for a PRIVATE space's
+    opaque channel. A channel is registered via node 1 (anonymous, channel-key
+    signed — the GFS learns only its random id); one blob is uploaded via
+    node 0 under the channel key and fetched byte-identical via node 1 at the
+    scope-free ``/gfs/media/{blob}``."""
+    from socialhome.crypto import b64url_encode, sign_ed25519
+    from socialhome.domain.gfs_space_media import (
+        AUTH_CHANNEL,
+        SCOPE_CHANNEL,
+        SPACE_MEDIA_AUTH_HEADER,
+        SpaceMediaClaim,
+        SpaceMediaUploadAuth,
+    )
+    from socialhome.gfs_channel import new_channel_id, sign_register
+    from socialhome.moment_public_media import PAD_BUCKETS, blob_id_of
+
+    _c, info = _request(f"{urls[1]}/gfs/info", timeout=10.0)
+    channel_seed = secrets.token_bytes(32)
+    channel_id = new_channel_id()
+    reg = sign_register(
+        channel_seed=channel_seed,
+        channel_id=channel_id,
+        gfs_instance_id=info["gfs_instance_id"],
+        ts=datetime.now(timezone.utc).isoformat(),
+    )
+    code, resp = _request(
+        f"{urls[1]}/gfs/channels/register", method="POST", body=reg.to_wire()
+    )
+    if code not in (200, 201):
+        raise SystemExit(f"gfs-cluster: channel register via node 1 → {code} {resp!r}")
+
+    blob = secrets.token_bytes(PAD_BUCKETS[1] + 28)
+    blob_id = blob_id_of(blob)
+    claim = SpaceMediaClaim(
+        scope=SCOPE_CHANNEL,
+        scope_id=channel_id,
+        blob_id=blob_id,
+        size=len(blob),
+        expires_at=int(time.time()) + 86_400,
+        ts=int(time.time()),
+    )
+    auth = SpaceMediaUploadAuth(
+        claim=claim,
+        kind=AUTH_CHANNEL,
+        sig=b64url_encode(sign_ed25519(channel_seed, claim.channel_signing_bytes())),
+        sig_suite="ed25519",
+    )
+    req = urllib.request.Request(
+        f"{urls[0]}/gfs/channels/{channel_id}/media/{blob_id}",
+        data=blob,
+        method="PUT",
+        headers={
+            SPACE_MEDIA_AUTH_HEADER: auth.to_header(),
+            "Content-Type": "application/octet-stream",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            code = r.status
+    except urllib.error.HTTPError as exc:
+        code = exc.code
+    if code != 201:
+        raise SystemExit(f"gfs-cluster: channel media upload via node 0 → {code}")
+    try:
+        with urllib.request.urlopen(f"{urls[1]}/gfs/media/{blob_id}", timeout=15) as r:
+            got = r.read()
+    except urllib.error.HTTPError as exc:
+        raise SystemExit(
+            f"gfs-cluster: channel media fetch via node 1 → {exc.code}"
+        ) from exc
+    if got != blob:
+        raise SystemExit("gfs-cluster: channel media fetched via node 1 differs")
+    print(
+        "  a private space's channel media uploaded via node 0 (channel key, "
+        "opaque id) is served byte-identical by node 1 ✓"
     )
 
 
@@ -2507,6 +2587,8 @@ def cmd_gfs_cluster() -> None:
         # 3h. The space media cache: an upload via one node is served by
         # another (shared data dir + DB), and a re-upload coalesces.
         _gfs_cluster_space_media(urls, clients[0])
+        # 3i. …and for a private space's opaque channel.
+        _gfs_cluster_channel_media(urls)
     except BaseException:
         _gfs_cluster_down(preserve_logs=True)
         raise

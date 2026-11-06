@@ -32,8 +32,9 @@ def conn(tmp_path):
 
 
 _INS = (
-    "INSERT INTO gfs_space_media(blob_id, space_id, size, created_at,"
-    " expires_at, last_fetched_at) VALUES(?, 's1', ?, 10, 20, 10)"
+    "INSERT INTO gfs_space_media(blob_id, scope_kind, scope_id, size,"
+    " created_at, expires_at, last_fetched_at)"
+    " VALUES(?, 'space', 's1', ?, 10, 20, 10)"
 )
 
 
@@ -58,7 +59,7 @@ def test_the_sweep_quota_and_eviction_indexes_exist(conn):
     }
     assert {
         "idx_gfs_space_media_expires",
-        "idx_gfs_space_media_space",
+        "idx_gfs_space_media_scope",
         "idx_gfs_space_media_lru",
     } <= names
 
@@ -72,3 +73,31 @@ def test_the_lru_scan_uses_its_index(conn):
         )
     )
     assert "idx_gfs_space_media_lru" in plan
+
+
+def test_the_scope_kind_is_a_space_or_a_channel(conn):
+    conn.execute(
+        "INSERT INTO gfs_space_media(blob_id, scope_kind, scope_id, size,"
+        " created_at, expires_at, last_fetched_at)"
+        " VALUES(?, 'channel', ?, 1, 1, 2, 1)",
+        ("c" * 64, "0f" * 16),
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(
+            "INSERT INTO gfs_space_media(blob_id, scope_kind, scope_id, size,"
+            " created_at, expires_at, last_fetched_at)"
+            " VALUES(?, 'room', 'x', 1, 1, 2, 1)",
+            ("d" * 64,),
+        )
+
+
+def test_the_per_scope_eviction_scan_uses_its_index(conn):
+    plan = " ".join(
+        str(r[-1])
+        for r in conn.execute(
+            "EXPLAIN QUERY PLAN SELECT blob_id FROM gfs_space_media"
+            " WHERE scope_kind='space' AND scope_id='s1'"
+            " ORDER BY last_fetched_at, created_at LIMIT 10"
+        )
+    )
+    assert "idx_gfs_space_media_scope" in plan

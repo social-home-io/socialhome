@@ -2264,18 +2264,22 @@ class AbstractGfsSpaceMediaRepo(Protocol):
     async def add(self, media: GfsSpaceMedia) -> bool: ...
     async def get(self, blob_id: str) -> GfsSpaceMedia | None: ...
     async def get_servable(self, blob_id: str, *, now: int) -> GfsSpaceMedia | None: ...
-    async def space_usage(
-        self, space_id: str, *, now: int, since: int
+    async def scope_usage(
+        self, scope_kind: str, scope_id: str, *, now: int, since: int
     ) -> tuple[int, int]: ...
     async def totals(self) -> tuple[int, int]: ...
-    async def least_recently_fetched(self, *, limit: int) -> list[GfsSpaceMedia]: ...
+    async def least_recently_fetched(
+        self, *, limit: int, scope: tuple[str, str] | None = None
+    ) -> list[GfsSpaceMedia]: ...
     async def touch(self, blob_id: str, *, now: int, min_interval: int) -> bool: ...
-    async def delete(self, blob_id: str, *, space_id: str) -> int: ...
+    async def delete(self, blob_id: str, *, scope_kind: str, scope_id: str) -> int: ...
     async def expired(self, now: int, *, limit: int) -> list[str]: ...
     async def delete_ids(self, blob_ids: list[str]) -> int: ...
 
 
-_SPACE_MEDIA_COLS = "blob_id, space_id, size, created_at, expires_at, last_fetched_at"
+_SPACE_MEDIA_COLS = (
+    "blob_id, scope_kind, scope_id, size, created_at, expires_at, last_fetched_at"
+)
 
 
 class SqliteGfsSpaceMediaRepo:
@@ -2289,10 +2293,11 @@ class SqliteGfsSpaceMediaRepo:
         a retry took it first)."""
         changed = await self._db.enqueue_rowcount(
             f"INSERT OR IGNORE INTO gfs_space_media({_SPACE_MEDIA_COLS})"
-            " VALUES(?,?,?,?,?,?)",
+            " VALUES(?,?,?,?,?,?,?)",
             (
                 media.blob_id,
-                media.space_id,
+                media.scope_kind,
+                media.scope_id,
                 media.size,
                 media.created_at,
                 media.expires_at,
@@ -2309,29 +2314,31 @@ class SqliteGfsSpaceMediaRepo:
         return _space_media(row) if row is not None else None
 
     async def get_servable(self, blob_id: str, *, now: int) -> GfsSpaceMedia | None:
-        """The blob's row while it may be served: not expired, and its space
-        not moderator-banned (one indexed join, no second read). A space
-        that is no longer listed keeps its blobs for their short TTL."""
+        """The blob's row while it may be served: not expired, and — for a
+        space scope — its space not moderator-banned (one indexed join, no
+        second read). A space that is no longer listed, or a channel that is
+        gone, keeps its blobs for their short TTL."""
         row = await self._db.fetchone(
-            "SELECT m.blob_id, m.space_id, m.size, m.created_at, m.expires_at,"
-            " m.last_fetched_at FROM gfs_space_media m"
-            " LEFT JOIN global_spaces s ON s.space_id = m.space_id"
+            "SELECT m.blob_id, m.scope_kind, m.scope_id, m.size, m.created_at,"
+            " m.expires_at, m.last_fetched_at FROM gfs_space_media m"
+            " LEFT JOIN global_spaces s"
+            "  ON m.scope_kind = 'space' AND s.space_id = m.scope_id"
             " WHERE m.blob_id=? AND m.expires_at > ?"
             " AND COALESCE(s.status, '') != 'banned'",
             (blob_id, now),
         )
         return _space_media(row) if row is not None else None
 
-    async def space_usage(
-        self, space_id: str, *, now: int, since: int
+    async def scope_usage(
+        self, scope_kind: str, scope_id: str, *, now: int, since: int
     ) -> tuple[int, int]:
-        """``(live bytes, blobs uploaded since *since*)`` of one space."""
+        """``(live bytes, blobs uploaded since *since*)`` of one scope."""
         row = await self._db.fetchone(
             "SELECT COALESCE(SUM(CASE WHEN expires_at > ? THEN size ELSE 0 END), 0)"
             " AS live,"
             " COALESCE(SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END), 0) AS recent"
-            " FROM gfs_space_media WHERE space_id=?",
-            (now, since, space_id),
+            " FROM gfs_space_media WHERE scope_kind=? AND scope_id=?",
+            (now, since, scope_kind, scope_id),
         )
         if row is None:  # pragma: no cover - an aggregate always has a row
             return 0, 0
@@ -2347,13 +2354,24 @@ class SqliteGfsSpaceMediaRepo:
             return 0, 0
         return int(row["n"]), int(row["bytes"])
 
-    async def least_recently_fetched(self, *, limit: int) -> list[GfsSpaceMedia]:
-        """Eviction candidates: least recently fetched first, then oldest."""
-        rows = await self._db.fetchall(
-            f"SELECT {_SPACE_MEDIA_COLS} FROM gfs_space_media"
-            " ORDER BY last_fetched_at, created_at LIMIT ?",
-            (limit,),
-        )
+    async def least_recently_fetched(
+        self, *, limit: int, scope: tuple[str, str] | None = None
+    ) -> list[GfsSpaceMedia]:
+        """Eviction candidates — of the whole cache, or of one ``(scope_kind,
+        scope_id)``: least recently fetched first, then oldest."""
+        if scope is None:
+            rows = await self._db.fetchall(
+                f"SELECT {_SPACE_MEDIA_COLS} FROM gfs_space_media"
+                " ORDER BY last_fetched_at, created_at LIMIT ?",
+                (limit,),
+            )
+        else:
+            rows = await self._db.fetchall(
+                f"SELECT {_SPACE_MEDIA_COLS} FROM gfs_space_media"
+                " WHERE scope_kind=? AND scope_id=?"
+                " ORDER BY last_fetched_at, created_at LIMIT ?",
+                (scope[0], scope[1], limit),
+            )
         return [_space_media(r) for r in rows]
 
     async def touch(self, blob_id: str, *, now: int, min_interval: int) -> bool:
@@ -2366,10 +2384,11 @@ class SqliteGfsSpaceMediaRepo:
         )
         return changed > 0
 
-    async def delete(self, blob_id: str, *, space_id: str) -> int:
+    async def delete(self, blob_id: str, *, scope_kind: str, scope_id: str) -> int:
         return await self._db.enqueue_rowcount(
-            "DELETE FROM gfs_space_media WHERE blob_id=? AND space_id=?",
-            (blob_id, space_id),
+            "DELETE FROM gfs_space_media WHERE blob_id=? AND scope_kind=?"
+            " AND scope_id=?",
+            (blob_id, scope_kind, scope_id),
         )
 
     async def expired(self, now: int, *, limit: int) -> list[str]:
@@ -2393,7 +2412,8 @@ class SqliteGfsSpaceMediaRepo:
 def _space_media(row) -> GfsSpaceMedia:
     return GfsSpaceMedia(
         blob_id=row["blob_id"],
-        space_id=row["space_id"],
+        scope_kind=row["scope_kind"],
+        scope_id=row["scope_id"],
         size=int(row["size"]),
         created_at=int(row["created_at"]),
         expires_at=int(row["expires_at"]),
