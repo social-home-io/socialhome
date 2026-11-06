@@ -81,7 +81,7 @@ sequenceDiagram
   Bob-->>Bob: Save preview to local cache;<br/>bubble renders immediately with media_sync_status='pending'
   Note over Alice,Bob: ─── background ───
   Alice->>Bob: DM_MEDIA_BLOB chunks (1..N, base64; final flag on last)
-  Bob-->>Bob: Each chunk → part file under media_dir;<br/>on final, concat in order + rename to <msg_id>.<ext>;<br/>update conversation_messages.media_url +<br/>media_sync_status=NULL
+  Bob-->>Bob: Each chunk → part file under media_dir;<br/>once all N landed (any order), concat in order + rename to <msg_id>.<ext>;<br/>update conversation_messages.media_url +<br/>media_sync_status=NULL
   Bob-->>Bob: WS push dm.media_ready → SPA<br/>swaps preview src for full media
 ```
 
@@ -133,13 +133,18 @@ pieces): no binary frame fit a 256 KiB channel, and a 0.7–1 MiB file sent
 whole was refused by the inbox too (413), so it never arrived.
 
 **Receiver side**: each chunk writes to `<msg_id>.part<idx>` under
-the media root. When `final=true` arrives, the receiver
-concatenates parts 0…N−1 in order into a temp file, moves it to
-`<msg_id>.<ext>` write-once (see below), deletes the parts, then swaps
-`media_url` and broadcasts `dm.media_ready` as in the single-chunk
-case. A re-send from a sender restart overwrites the same part
-files idempotently; a missing chunk at finalisation time logs +
-bails (the outbox retry will resend it).
+the media root. The sender sends up to four chunks at once
+(`PIPELINE_WINDOW`), so they land in any order — the `final` chunk can
+arrive before chunk 0. Whichever chunk completes the set 0…N−1
+assembles: it concatenates the parts in index order into a temp file of
+its own, moves it to `<msg_id>.<ext>` write-once (see below), deletes
+the parts, then swaps `media_url` and broadcasts `dm.media_ready` as in
+the single-chunk case — once: when two chunks complete the set at the
+same moment, only the one whose file lands adopts it. A re-send from a
+sender restart overwrites the same part files idempotently; a chunk
+that lands after the file is assembled is dropped. Before 2026-11-06 the
+receiver assembled only when `final=true` arrived, so a final chunk that
+overtook an earlier one left the file unassembled for good.
 
 **Scope + write-once.** The receiver only lands bytes a household was
 entitled to send:

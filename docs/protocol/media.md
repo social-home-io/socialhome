@@ -167,7 +167,12 @@ sending household was sent it for. Both blob types share
   write-once, so accepting it cannot touch an existing file.
 - **Per-sender assembly.** Space part files live under
   `media_dir/.partial/<sha256(from_instance, transfer_id)>/`, so two
-  households' chunks never mix into one file. DM rules (sender
+  households' chunks never mix into one file.
+- **Any order.** Senders pipeline chunks, so the `final` chunk can land
+  before the others. Every chunk handler calls `assemble_once` after
+  writing its part, and whichever chunk completes the set assembles —
+  never "on `final`". Each assembly writes its own temp file, so two
+  chunks completing at once never mix bytes, and only one publishes. DM rules (sender
   household, announced `media_blob_id`) are in
   [`dm-media.md`](./dm-media.md#chunking).
 
