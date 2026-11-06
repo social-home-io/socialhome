@@ -22,6 +22,8 @@ from socialhome.pinned_viewer import (
     viewer_base_url,
     viewer_gfs_base,
     viewer_page_link,
+    viewer_safe_id,
+    viewer_space_link,
 )
 
 _REPO = Path(__file__).resolve().parent.parent
@@ -181,3 +183,34 @@ def test_a_page_link_carries_the_view_and_its_ids_in_the_fragment():
         "g": "https://gfs.example.org",
         "t": "tok&x=1#y",
     }
+
+
+def test_a_space_link_opens_the_viewer_space_page():
+    link = viewer_space_link(
+        "https://viewer.example.org",
+        _VIEWER,
+        gfs_base="https://gfs.example.org",
+        space_id="26f310be962f494f8a951",
+    )
+    assert link is not None
+    page, _, fragment = link.partition("#")
+    assert page == "https://viewer.example.org/v/0123456789abcdef/"
+    assert dict(parse_qsl(fragment)) == {
+        "v": "space",
+        "g": "https://gfs.example.org",
+        "s": "26f310be962f494f8a951",
+    }
+
+
+@pytest.mark.parametrize("space_id", ["", "..", "a/b", "a b", "x" * 129])
+def test_a_space_link_is_never_minted_for_an_id_the_viewer_refuses(space_id):
+    assert not viewer_safe_id(space_id, 128)
+    assert (
+        viewer_space_link(
+            "https://viewer.example.org",
+            _VIEWER,
+            gfs_base="https://gfs.example.org",
+            space_id=space_id,
+        )
+        is None
+    )

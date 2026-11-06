@@ -47,6 +47,7 @@ from socialhome.gfs_server_list_sig import (
     verify_gfs_server_list,
 )
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.pinned_viewer import PinnedViewer
 from socialhome.repositories import (
     SqliteConversationRepo,
     SqliteSpacePostRepo,
@@ -497,6 +498,9 @@ class _FakePublisher:
         if gfs_id in self.fail:
             raise GfsConnectionError("down")
         return await self._env.gfs.publish_space(space_id, gfs_id)
+
+    async def viewer_pages_supported(self, conn):
+        return conn.id not in getattr(self, "no_viewer_pages", set())
 
     async def private_channels_supported(self, conn):
         return conn.id not in getattr(self, "incapable", set())
@@ -1117,6 +1121,7 @@ async def test_owner_view_lists_listings_on_every_connection_state(owner_env):
             "inbox_url": "https://g-act.example",
             "connection_status": "active",
             "listing_status": "active",
+            "public_url": "https://g-act.example/spaces/sp-1",
         },
         {
             "gfs_id": "g-pen",
@@ -1124,6 +1129,7 @@ async def test_owner_view_lists_listings_on_every_connection_state(owner_env):
             "inbox_url": "https://g-pen.example",
             "connection_status": "pending",
             "listing_status": "pending",
+            "public_url": None,
         },
         {
             "gfs_id": "g-sus",
@@ -1131,12 +1137,82 @@ async def test_owner_view_lists_listings_on_every_connection_state(owner_env):
             "inbox_url": "https://g-sus.example",
             "connection_status": "suspended",
             "listing_status": "active",
+            "public_url": None,
         },
     ]
     assert [a["gfs_id"] for a in view["available"]] == ["g-act"]
     # The suspended one can be withdrawn by the owner.
     await env.svc.remove_server("sp-1", actor_username="anna", gfs_id="g-sus")
     assert ("unpublish", "g-sus", False) in env.publisher.calls
+
+
+_VIEWER = PinnedViewer(path="v/0123456789abcdef/", integrity="sha384-" + "A" * 64)
+_SPACE_LINK = (
+    "https://viewer.example.org/v/0123456789abcdef/"
+    "#v=space&g=https%3A%2F%2Fg1.example&s=sp-1"
+)
+
+
+def _public_urls(view: dict) -> dict:
+    return {row["gfs_id"]: row["public_url"] for row in view["listings"]}
+
+
+async def test_a_live_listing_links_to_the_pinned_viewer(owner_env):
+    """Owner report 2026-11-06: the public link is the viewer's space page,
+    not a path on the GFS host."""
+    env = owner_env
+    env.svc.attach_viewer(base_url="https://viewer.example.org/", viewer=_VIEWER)
+    await _owned_space(env)
+    await _connected(env, "g1")
+    await env.gfs.publish_space("sp-1", "g1")
+    view = await env.svc.owner_view("sp-1", actor_username="anna")
+    assert _public_urls(view) == {"g1": _SPACE_LINK}
+
+
+async def test_an_older_gfs_keeps_its_own_space_page(owner_env):
+    """A GFS that can't prove it serves the viewer's page JSON: the link is
+    its own ``/spaces/{id}`` page, never a viewer page that can't load."""
+    env = owner_env
+    env.svc.attach_viewer(base_url="https://viewer.example.org", viewer=_VIEWER)
+    env.publisher.no_viewer_pages = {"g1"}
+    await _owned_space(env)
+    await _connected(env, "g1")
+    await env.gfs.publish_space("sp-1", "g1")
+    view = await env.svc.owner_view("sp-1", actor_username="anna")
+    assert _public_urls(view) == {"g1": "https://g1.example/spaces/sp-1"}
+
+
+@pytest.mark.parametrize(
+    ("base_url", "viewer"),
+    [
+        ("", _VIEWER),  # viewer turned off ([highlights] public_viewer_base_url)
+        ("http://viewer.example.org", _VIEWER),  # not https
+        ("https://viewer.example.org", None),  # no usable manifest
+    ],
+)
+async def test_without_a_usable_viewer_the_link_stays_on_the_gfs(
+    owner_env, base_url, viewer
+):
+    env = owner_env
+    env.svc.attach_viewer(base_url=base_url, viewer=viewer)
+    await _owned_space(env)
+    await _connected(env, "g1")
+    await env.gfs.publish_space("sp-1", "g1")
+    view = await env.svc.owner_view("sp-1", actor_username="anna")
+    assert _public_urls(view) == {"g1": "https://g1.example/spaces/sp-1"}
+
+
+async def test_no_public_link_until_the_listing_is_live(owner_env):
+    env = owner_env
+    env.svc.attach_viewer(base_url="https://viewer.example.org", viewer=_VIEWER)
+    await _owned_space(env)
+    await _connected(env, "g1", "g2")
+    await _connected(env, "g3", status="suspended")
+    await env.gfs.publish_space("sp-1", "g1", "pending")
+    await env.gfs.publish_space("sp-1", "g2", "banned")
+    await env.gfs.publish_space("sp-1", "g3")
+    view = await env.svc.owner_view("sp-1", actor_username="anna")
+    assert _public_urls(view) == {"g1": None, "g2": None, "g3": None}
 
 
 # ── Round 2: reconnect before reconcile, unreadable lists, transfers ──────

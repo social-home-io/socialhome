@@ -34,15 +34,17 @@ can't be used.
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..pinned_viewer import (
+    MAX_SPACE_ID_CHARS,
+    VIEW_SPACE,
     PinnedViewer,
     viewer_base_url,
     viewer_gfs_base,
     viewer_page_link,
+    viewer_safe_id,
 )
 
 if TYPE_CHECKING:
@@ -50,25 +52,27 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-#: The viewer's page names (``v`` in the fragment, ``client/gfs/page_link.ts``).
-VIEW_SPACE: str = "space"
+#: The viewer's page names (``v`` in the fragment, ``client/gfs/page_link.ts``);
+#: the space page's name and id bound live in :mod:`socialhome.pinned_viewer`
+#: (households link a listed space to it too).
 VIEW_JOIN: str = "join"
 VIEW_PERSON: str = "person"
 
-#: What the viewer accepts as an id or token: the URL-safe characters the
-#: households and this server mint (``pinned_link.ts`` ``SAFE_ID``).
-#: Never only dots: ``..`` would climb the viewer's request path.
-_SAFE_ID_RE = re.compile(r"(?!\.+$)[A-Za-z0-9._~-]+")
-
 #: Longest value per fragment field the viewer accepts (``page_link.ts``):
-#: space ids and user ids are wire ids (128), invite tokens 32 chars today.
-MAX_SPACE_ID_CHARS: int = 128
+#: user ids are wire ids (128), invite tokens 32 chars today.
 MAX_INVITE_TOKEN_CHARS: int = 256
 MAX_USER_ID_CHARS: int = 128
 
-
-def _safe(value: str, max_chars: int) -> bool:
-    return 0 < len(value) <= max_chars and _SAFE_ID_RE.fullmatch(value) is not None
+__all__ = [
+    "MAX_INVITE_TOKEN_CHARS",
+    "MAX_SPACE_ID_CHARS",
+    "MAX_USER_ID_CHARS",
+    "VIEW_JOIN",
+    "VIEW_PERSON",
+    "VIEW_SPACE",
+    "PublicViewerLinks",
+    "build_public_viewer_links",
+]
 
 
 @dataclass(slots=True, frozen=True)
@@ -80,7 +84,7 @@ class PublicViewerLinks:
     gfs_base: str
 
     def _link(self, view: str, key: str, value: str, max_chars: int) -> str | None:
-        if not _safe(value, max_chars):
+        if not viewer_safe_id(value, max_chars):
             return None
         return viewer_page_link(
             self.base_url,

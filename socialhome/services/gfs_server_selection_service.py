@@ -75,6 +75,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
+from urllib.parse import quote
 
 from ..domain.errors import (
     GfsSelectionInvalidError,
@@ -103,6 +104,12 @@ from ..domain.space import (
 )
 from ..gfs_server_list_sig import sign_gfs_server_list
 from ..infrastructure.event_bus import EventBus
+from ..pinned_viewer import (
+    PinnedViewer,
+    viewer_base_url,
+    viewer_gfs_base,
+    viewer_space_link,
+)
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.space_repo import AbstractSpaceRepo
 from ..repositories.user_repo import AbstractUserRepo
@@ -129,6 +136,8 @@ class GfsServerSelectionService:
         "_publisher",
         "_spaces",
         "_users",
+        "_viewer",
+        "_viewer_base",
     )
 
     def __init__(
@@ -172,6 +181,18 @@ class GfsServerSelectionService:
         #: list — the channel registers only where ``private_channels`` is
         #: proven, so it never receives anything.
         self._provisional: dict[str, set[str]] = {}
+        #: The pinned public viewer a listed space's public link opens
+        #: (:meth:`attach_viewer`); unset → that GFS's own space page.
+        self._viewer_base: str | None = None
+        self._viewer: PinnedViewer | None = None
+
+    def attach_viewer(self, *, base_url: str, viewer: PinnedViewer | None) -> None:
+        """The pinned viewer the owner's public links open — the same one
+        this household's public highlight and moment links open
+        (``[highlights] public_viewer_base_url`` + the committed manifest).
+        An empty or non-https base, or no manifest: links stay on the GFS."""
+        self._viewer_base = viewer_base_url(base_url)
+        self._viewer = viewer
 
     def attach_channel_hook(self, hook: Callable[[str], Awaitable[set[str]]]) -> None:
         """Wire the private-channel follow-up of a change of the owner's
@@ -969,6 +990,9 @@ class GfsServerSelectionService:
                     "inbox_url": conn.inbox_url,
                     "connection_status": conn.status,
                     "listing_status": listed[gfs_id],
+                    "public_url": await self._public_url(
+                        conn, space_id, listed[gfs_id]
+                    ),
                 }
             )
         return {
@@ -990,6 +1014,40 @@ class GfsServerSelectionService:
                 for c in await self._gfs.list_active()
             ],
         }
+
+    async def _public_url(
+        self, conn: GfsConnection, space_id: str, listing_status: str
+    ) -> str | None:
+        """The link a stranger opens to see the space on *conn*'s GFS, or
+        ``None`` while the listing isn't live there (pending, banned, or the
+        connection isn't active — nothing a stranger could open).
+
+        The pinned viewer's space page
+        (``{viewer}/v/<hash>/#v=space&g=<GFS>&s=<space id>``, everything in
+        the fragment) when this household has a viewer and the GFS serves
+        the page's JSON (:meth:`GfsConnectionService.viewer_pages_supported`);
+        else the GFS's own ``/spaces/{id}`` page, which renders the space
+        (or hands off to that GFS's viewer). Either names only the GFS and
+        the space id the listing already makes public."""
+        if conn.status != "active" or listing_status != "active":
+            return None
+        gfs_root = conn.inbox_url.rstrip("/")
+        if not gfs_root:
+            return None
+        gfs_base = viewer_gfs_base(gfs_root)
+        if (
+            self._viewer_base is not None
+            and self._viewer is not None
+            and gfs_base is not None
+            and self._publisher is not None
+            and await self._publisher.viewer_pages_supported(conn)
+        ):
+            link = viewer_space_link(
+                self._viewer_base, self._viewer, gfs_base=gfs_base, space_id=space_id
+            )
+            if link is not None:
+                return link
+        return f"{gfs_root}/spaces/{quote(space_id, safe='')}"
 
     async def _channel_view(self, space: Space) -> dict:
         """The owner's picker for a private space's channel servers: the

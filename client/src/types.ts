@@ -508,6 +508,11 @@ export interface SpaceGfsServersView {
     inbox_url: string
     connection_status: GfsConnection['status']
     listing_status: GfsSpacePublication['status']
+    /** The link a stranger opens to see the space there: the pinned
+     *  viewer's space page (``{viewer}/v/<hash>/#v=space&g=…&s=…``), else
+     *  the GFS's own ``/spaces/{id}`` page. ``null`` while the listing
+     *  isn't live (pending, banned, or the connection isn't active). */
+    public_url?: string | null
   }[]
   /** Every active connection of this household — what can be added. */
   available: {

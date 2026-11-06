@@ -33,15 +33,6 @@ import type {
 
 type Listing = SpaceGfsServersView['listings'][number]
 
-/**
- * The GFS-side public page of a space. ``inbox_url`` is the GFS root, so
- * stripping a trailing slash is enough (``global_server/public.py`` serves
- * ``/spaces/{space_id}``).
- */
-export function publicSpaceUrl(inboxUrl: string, spaceId: string): string {
-  return `${inboxUrl.replace(/\/+$/, '')}/spaces/${spaceId}`
-}
-
 async function copyToClipboard(text: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(text)
@@ -206,8 +197,9 @@ function OwnerGfsListing({ spaceId }: { spaceId: string }): JSX.Element {
           {listed.map(row => {
             const { label, cls } = statusOf(row)
             const active = row.connection_status === 'active'
-            const isLive = active && row.listing_status === 'active'
-            const publicUrl = publicSpaceUrl(row.inbox_url, spaceId)
+            // The server builds the link (the pinned viewer's space page,
+            // else the GFS's own page) and sends it only for a live listing.
+            const publicUrl = row.public_url ?? null
             return (
               <li key={row.gfs_id} class="sh-federation-row"
                   data-testid={`gfs-row-${row.gfs_id}`}>
@@ -230,8 +222,8 @@ function OwnerGfsListing({ spaceId }: { spaceId: string }): JSX.Element {
                     {t('space.gfs_listing.remove')}
                   </Button>
                 </div>
-                {isLive && (
-                  <div class="sh-federation-public-url">
+                {publicUrl && (
+                  <div class="sh-federation-public-url" data-testid={`gfs-public-link-${row.gfs_id}`}>
                     <span class="sh-muted">🔗 {t('space.gfs.public_link')}</span>
                     <a
                       href={publicUrl}
