@@ -141,7 +141,12 @@ from ..utils.datetime import parse_iso8601_lenient
 from .dm_audience import local_audience
 from .dm_mentions import MENTIONABLE_TYPES, DmMentionResolver
 from .inbound_media_store import (
+    SPACE_MEDIA_MAX_BYTES,
+    dm_media_max_bytes,
+    dm_media_name,
     drop_parts,
+    inbound_size_refusal,
+    is_reserved_media_name,
     is_safe_media_name,
     local_media_ref,
     local_media_refs,
@@ -321,6 +326,34 @@ def _size_declared(total_size: int, chunk_count: int, what: str, name: str) -> b
         what,
         name,
     )
+    return False
+
+
+def _size_allowed(
+    *,
+    total_size: int,
+    chunk_len: int,
+    chunk_count: int,
+    max_bytes: int,
+    what: str,
+    name: str,
+    from_instance: str,
+) -> bool:
+    """Whether one chunk of a media blob fits the receiving path's cap.
+
+    Refused (WARNING, nothing written) when the declared whole file is over
+    ``max_bytes`` or the chunk can't be part of it — see
+    :func:`inbound_size_refusal`.
+    """
+    reason = inbound_size_refusal(
+        total_size=total_size,
+        chunk_len=chunk_len,
+        chunk_count=chunk_count,
+        max_bytes=max_bytes,
+    )
+    if reason is None:
+        return True
+    log.warning("%s from %s: %s %s — dropping", what, from_instance, name, reason)
     return False
 
 
@@ -807,6 +840,7 @@ class FederationInboundService(ProtectionGateMixin):
             payload=p,
             message_id=message_id,
             msg_type=msg_type,
+            from_instance=event.from_instance,
         )
 
         msg = ConversationMessage(
@@ -1280,6 +1314,7 @@ class FederationInboundService(ProtectionGateMixin):
         payload: dict,
         message_id: str,
         msg_type: str,
+        from_instance: str,
     ) -> tuple[str | None, str | None]:
         """Persist any embedded preview + return the local ``media_url``.
 
@@ -1318,9 +1353,12 @@ class FederationInboundService(ProtectionGateMixin):
             return media_url_in, None
         # Reordering guard: ``DM_MEDIA_BLOB`` may have arrived
         # *before* this ``DM_MESSAGE`` (federation transport doesn't
-        # guarantee ordering across event types). If a finalised
-        # full file already sits under ``media_dir/<msg_id>.<ext>``,
-        # adopt it directly — no preview needed, no pending state.
+        # guarantee ordering across event types). If the sending
+        # household's own blob already assembled the full file
+        # (:func:`dm_media_name` binds ``from_instance`` — the household
+        # this message came from — so no other household's bytes, and no
+        # space blob, can sit under that name), adopt it directly — no
+        # preview needed, no pending state.
         # The blob handler's own ``update_media_sync_status`` call
         # no-op'd at the time (row didn't exist yet); the row we're
         # about to create here will pick up the correct URL on its
@@ -1332,7 +1370,8 @@ class FederationInboundService(ProtectionGateMixin):
             # media_dir is ever read, written or removed (the caller
             # already refused an unsafe id; this is defence in depth).
             full_path = media_file_path(
-                self._media_dir, f"{message_id}{_mime_to_ext(mime_in)}"
+                self._media_dir,
+                dm_media_name(from_instance, message_id, _mime_to_ext(mime_in)),
             )
             preview_path = media_file_path(
                 self._media_dir, f"{message_id}.preview.webp"
@@ -1496,8 +1535,9 @@ class FederationInboundService(ProtectionGateMixin):
         sender's home instance must be ``from_instance`` — which also
         rules out a local member's message (home = this instance). A
         message not seen yet (the blob overtook its ``DM_MESSAGE``) is
-        accepted: the write is write-once, and ``_receive_media_preview``
-        adopts the file when the message lands.
+        accepted: the file lands under :func:`dm_media_name` of *this*
+        household, write-once, and ``_receive_media_preview`` adopts it
+        only if the message comes from the same household.
         """
         msg = await self._conversation_repo.get_message(message_id)
         named = str((event.payload or {}).get("conversation_id") or "")
@@ -1551,17 +1591,33 @@ class FederationInboundService(ProtectionGateMixin):
         pushes the ``dm.media_ready`` WS frame.
         ``self._media_dir`` is guaranteed non-None by the caller.
 
+        The file is named :func:`dm_media_name` — bound to
+        ``from_instance`` and the message — so it only ever holds bytes
+        this household's own chunks assembled: a space blob never writes
+        a ``dm-`` name, and another household's chunks assemble under
+        another name. That is what makes adopting an existing file safe.
+
         Write-once: the final file is moved into place with
-        :func:`publish_once`, so an existing ``<message_id><ext>`` is never
-        replaced — a re-delivery re-adopts the file already there, but only
-        while the row still awaits it (a conditional update), so
-        ``dm.media_ready`` is pushed once.
+        :func:`publish_once`, so an existing file is never replaced — a
+        re-delivery re-adopts the file already there, but only while the
+        row still awaits it (a conditional update), so ``dm.media_ready``
+        is pushed once.
         """
         assert self._media_dir is not None
         if not _size_declared(total_size, chunk_count, "DM_MEDIA_BLOB", message_id):
             return
+        if not _size_allowed(
+            total_size=total_size,
+            chunk_len=len(raw),
+            chunk_count=chunk_count,
+            max_bytes=dm_media_max_bytes(mime_type),
+            what="DM_MEDIA_BLOB",
+            name=message_id,
+            from_instance=from_instance,
+        ):
+            return
         ext = _mime_to_ext(mime_type)
-        dest = self._media_dir / f"{message_id}{ext}"
+        dest = self._media_dir / dm_media_name(from_instance, message_id, ext)
         # Parts (and every temp file) live in a folder of this transfer's
         # own, bound to the sending household and the chunk count (a retry
         # chunked for another tier never mixes with an earlier attempt's
@@ -2008,6 +2064,15 @@ class FederationInboundService(ProtectionGateMixin):
                 event.from_instance,
             )
             return
+        if is_reserved_media_name(filename):
+            # A received DM attachment (``dm-``), GFS moment media (``gm-``)
+            # or a DM transient: never a space file, whatever row is named.
+            log.warning(
+                "SPACE_MEDIA_BLOB: rejecting filename %r from %s (reserved name)",
+                filename,
+                event.from_instance,
+            )
+            return
         chunk_meta = parse_chunk_meta(
             p.get("chunk_index") or 0,
             p.get("chunk_count") or 1,
@@ -2144,6 +2209,16 @@ class FederationInboundService(ProtectionGateMixin):
         """
         assert self._media_dir is not None
         if not _size_declared(total_size, chunk_count, "SPACE_MEDIA_BLOB", filename):
+            return
+        if not _size_allowed(
+            total_size=total_size,
+            chunk_len=len(raw),
+            chunk_count=chunk_count,
+            max_bytes=SPACE_MEDIA_MAX_BYTES,
+            what="SPACE_MEDIA_BLOB",
+            name=filename,
+            from_instance=from_instance,
+        ):
             return
         target = self._media_dir / filename
         partial_root = self._media_dir / ".partial" / partial_dir

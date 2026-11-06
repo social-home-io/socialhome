@@ -1570,15 +1570,17 @@ class SqliteConversationRepo:
         """Point a received DM at its full bytes — once.
 
         The receiver's ``DM_MEDIA_BLOB`` adoption: sets ``media_url`` and
-        ``media_sync_status`` only on a row still awaiting this file (sync
-        pending, or ``media_url`` elsewhere). ``True`` when a row changed;
-        a duplicate delivery, or a second one racing the first, gets
-        ``False`` and pushes nothing.
+        ``media_sync_status`` only on a live row still awaiting this file
+        (sync pending, or ``media_url`` elsewhere) — never on a soft-deleted
+        message, whose bytes may land after the delete. ``True`` when a row
+        changed; a duplicate delivery, or a second one racing the first,
+        gets ``False`` and pushes nothing.
         """
         changed = await self._db.enqueue_rowcount(
             "UPDATE conversation_messages "
             "SET media_sync_status=?, media_url=? "
-            "WHERE id=? AND (media_sync_status='pending' OR media_url IS NOT ?)",
+            "WHERE id=? AND deleted=0 "
+            "AND (media_sync_status='pending' OR media_url IS NOT ?)",
             (status, media_url, message_id, media_url),
         )
         return changed > 0

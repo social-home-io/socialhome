@@ -215,3 +215,77 @@ async def test_partial_grace_outlasts_the_senders_retry_horizon():
     for mod in (dm, space):
         horizon = mod.MAX_ATTEMPTS * mod.BACKOFF_CAP_SECONDS * 2
         assert PARTIAL_GRACE_SECONDS > horizon
+
+
+def _outside(tmp_path, *, age_seconds):
+    """A directory outside the media dir holding a file worth keeping."""
+    out = tmp_path / "outside"
+    out.mkdir()
+    keep = out / "precious.txt"
+    keep.write_bytes(b"not media")
+    old = time.time() - age_seconds
+    os.utime(keep, (old, old))
+    os.utime(out, (old, old))
+    return out, keep
+
+
+async def test_partial_sweep_never_follows_a_symlinked_set(tmp_path):
+    """Regression: a symlink in ``.partial`` pointing outside made the sweep
+    list the target and delete what was there. The link itself goes; its
+    target and everything in it stay."""
+    media = tmp_path / "media"
+    out, keep = _outside(tmp_path, age_seconds=PARTIAL_GRACE_SECONDS * 2)
+    partial = media / ".partial"
+    partial.mkdir(parents=True)
+    link = partial / ("d" * 32)
+    link.symlink_to(out, target_is_directory=True)
+    old = time.time() - PARTIAL_GRACE_SECONDS * 2
+    os.utime(link, (old, old), follow_symlinks=False)
+    svc = MediaOrphanSweepService(media_dir=media, reference_repo=_FakeRefRepo([]))
+    assert await svc.sweep_partial_once() == 1
+    assert not link.is_symlink() and not link.exists()
+    assert keep.read_bytes() == b"not media"
+
+
+async def test_partial_sweep_ages_a_fresh_symlink_by_the_link_itself(tmp_path):
+    """The age is the link's own mtime (``lstat``), never the target's —
+    a fresh link to an old directory is not abandoned yet."""
+    media = tmp_path / "media"
+    out, keep = _outside(tmp_path, age_seconds=PARTIAL_GRACE_SECONDS * 2)
+    partial = media / ".partial"
+    partial.mkdir(parents=True)
+    link = partial / ("e" * 32)
+    link.symlink_to(out, target_is_directory=True)
+    svc = MediaOrphanSweepService(media_dir=media, reference_repo=_FakeRefRepo([]))
+    assert await svc.sweep_partial_once() == 0
+    assert link.is_symlink()
+    assert keep.exists()
+
+
+async def test_partial_sweep_never_descends_into_a_symlink_inside_a_set(tmp_path):
+    """A symlink inside an abandoned set is unlinked, not followed."""
+    media = tmp_path / "media"
+    out, keep = _outside(tmp_path, age_seconds=PARTIAL_GRACE_SECONDS * 2)
+    d = _key_dir(
+        media, "f" * 32, entries=["000000"], age_seconds=PARTIAL_GRACE_SECONDS + 60
+    )
+    inner = d / "000001"
+    inner.symlink_to(out, target_is_directory=True)
+    old = time.time() - PARTIAL_GRACE_SECONDS * 2
+    os.utime(inner, (old, old), follow_symlinks=False)
+    os.utime(d, (old, old))
+    svc = MediaOrphanSweepService(media_dir=media, reference_repo=_FakeRefRepo([]))
+    assert await svc.sweep_partial_once() == 1
+    assert not d.exists()
+    assert keep.read_bytes() == b"not media"
+
+
+async def test_partial_sweep_skips_a_symlinked_partial_root(tmp_path):
+    """``.partial`` itself a symlink: nothing behind it is touched."""
+    media = tmp_path / "media"
+    media.mkdir()
+    out, keep = _outside(tmp_path, age_seconds=PARTIAL_GRACE_SECONDS * 2)
+    (media / ".partial").symlink_to(out, target_is_directory=True)
+    svc = MediaOrphanSweepService(media_dir=media, reference_repo=_FakeRefRepo([]))
+    assert await svc.sweep_partial_once() == 0
+    assert keep.read_bytes() == b"not media"

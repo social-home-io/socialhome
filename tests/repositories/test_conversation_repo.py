@@ -1474,3 +1474,22 @@ async def test_adopt_media_file_changes_a_waiting_row_once(env):
     assert not await env.repo.adopt_media_file(
         message_id="nope", status=None, media_url=url
     )
+
+
+async def test_adopt_media_file_never_touches_a_deleted_message(env):
+    """A soft-deleted message never gets media adopted, even one still
+    marked ``pending`` (its bytes may arrive after the delete)."""
+    await env.repo.create(_conv())
+    await env.db.enqueue(
+        "INSERT INTO conversation_messages(id, conversation_id, sender_user_id,"
+        " content, type, media_blob_id, media_url, media_sync_status, deleted,"
+        " created_at) VALUES('m1', 'c1', 'uid-bob', '', 'image', 'm1', NULL,"
+        " 'pending', 1, datetime('now'))",
+    )
+    assert not await env.repo.adopt_media_file(
+        message_id="m1", status=None, media_url="api/media/m1.webp"
+    )
+    row = await env.db.fetchone(
+        "SELECT media_url, media_sync_status FROM conversation_messages WHERE id='m1'"
+    )
+    assert row["media_url"] is None and row["media_sync_status"] == "pending"

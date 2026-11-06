@@ -63,6 +63,7 @@ from socialhome.services.federation_inbound_service import (
     FederationInboundService,
     _moment_expired,
 )
+from socialhome.services.inbound_media_store import dm_media_name
 
 
 @pytest.fixture
@@ -2487,8 +2488,8 @@ async def test_dm_media_blob_prefers_raw_media_bytes(db, bus, tmp_path):
             media_bytes=body,
         )
     )
-    # The single-chunk fast path writes ``<message_id><ext>``.
-    written = tmp_path / "mblob-1.png"
+    # The single-chunk fast path writes the sender-bound DM name.
+    written = tmp_path / dm_media_name("peer-a", "mblob-1", ".png")
     assert written.read_bytes() == body
 
 
