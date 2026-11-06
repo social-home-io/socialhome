@@ -5420,3 +5420,42 @@ async def test_space_post_media_refs_are_kept_for_a_gfs_fetch(db, bus, inbound):
         )
     )
     assert sink.received == [("sp-g", refs, ["api/media/a.webp"])]
+
+
+async def test_space_media_blob_assembles_when_the_final_chunk_lands_first(
+    db, bus, tmp_path
+):
+    """Regression (federation demo ``verify``, a 680 KB calendar cover): the
+    sender dispatches a file's chunks concurrently, so the ``final`` chunk
+    can land before chunk 0. Assembly used to run only on the final chunk —
+    chunk 0 then landed into partials nobody assembled, and the sender had
+    already dropped its outbox row: the picture never arrived. Whichever
+    chunk completes the set assembles the file."""
+    service = FederationInboundService(
+        bus=bus,
+        conversation_repo=SqliteConversationRepo(db),
+        space_post_repo=SqliteSpacePostRepo(db),
+        space_repo=SqliteSpaceRepo(db),
+        user_repo=SqliteUserRepo(db),
+        media_dir=tmp_path,
+    )
+    full = bytes(range(256)) * 8
+    chunks = [full[: len(full) // 2], full[len(full) // 2 :]]
+    for idx in (1, 0):  # the final chunk first
+        await service._on_space_media_blob(
+            _event(
+                FederationEventType.SPACE_MEDIA_BLOB,
+                {
+                    "post_id": "p",
+                    "space_id": "sp-chunked",
+                    "transfer_id": "tx-order",
+                    "filename": "cover.webp",
+                    "chunk_index": idx,
+                    "chunk_count": 2,
+                    "final": idx == 1,
+                    "bytes_b64": base64.b64encode(chunks[idx]).decode("ascii"),
+                },
+            )
+        )
+    assert (tmp_path / "cover.webp").read_bytes() == full
+    assert list((tmp_path / ".partial").iterdir()) == []
