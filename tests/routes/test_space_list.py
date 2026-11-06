@@ -123,7 +123,7 @@ async def test_icon_url_is_signed_when_the_space_has_an_icon(seeded):  # noqa: F
     assert (await _row(client, hdr["member"], sid))["icon_url"] is None
     await client._db.enqueue("UPDATE spaces SET icon_hash='abc123' WHERE id=?", (sid,))
     url = (await _row(client, hdr["member"], sid))["icon_url"]
-    assert url.startswith(f"/api/spaces/{sid}/icon?v=abc123")
+    assert url.startswith(f"api/spaces/{sid}/icon?v=abc123")
     assert "sig=" in url
 
 

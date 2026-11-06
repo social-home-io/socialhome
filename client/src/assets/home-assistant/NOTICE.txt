@@ -1,0 +1,22 @@
+Home Assistant logo (icon.png)
+
+The Home Assistant logo is a trademark and the property of the Open Home
+Foundation. It is not available for commercial use without express written
+permission from the foundation (partner@openhomefoundation.org).
+
+Source (unmodified, 512 x 512 PNG):
+  https://github.com/home-assistant/brands/blob/master/core_integrations/_homeassistant/icon@2x.png
+  (commit 8b9e0c6dd11ceadea8a92ab96a31b07e46298d68)
+
+Terms:
+  https://github.com/home-assistant/assets/blob/master/logo/README.md
+  Home Assistant assets are licensed under Creative Commons
+  Attribution-NonCommercial-ShareAlike 4.0 International
+  (https://creativecommons.org/licenses/by-nc-sa/4.0/).
+  Logo guidelines:
+  https://contributors.home-assistant.io/brand/name-and-logo/#the-logo
+
+Social Home offers the logo, unchanged, as a ready-made picture a household
+may pick for one of its spaces. Its use does not imply endorsement by the
+Open Home Foundation. The MPL-2.0 licence of Social Home does not apply to
+this file.

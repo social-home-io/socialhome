@@ -2420,7 +2420,7 @@ async def test_space_cover_upload_and_fetch(client, tmp_path):
     assert up.status == 200
     body = await up.json()
     assert body["cover_hash"]
-    assert body["cover_url"].startswith(f"/api/spaces/{sid}/cover?v=")
+    assert body["cover_url"].startswith(f"api/spaces/{sid}/cover?v=")
 
     # GET streams WebP bytes.
     fetch = await client.get(
@@ -2475,7 +2475,7 @@ async def test_space_icon_upload_fetch_and_clear(client):
     assert up.status == 200
     body = await up.json()
     assert body["icon_hash"]
-    assert body["icon_url"].startswith(f"/api/spaces/{sid}/icon?v=")
+    assert body["icon_url"].startswith(f"api/spaces/{sid}/icon?v=")
 
     fetch = await client.get(
         f"/api/spaces/{sid}/icon", headers=_auth(client._admin_token)
@@ -2489,6 +2489,11 @@ async def test_space_icon_upload_fetch_and_clear(client):
     dbody = await detail.json()
     assert dbody["icon_hash"] == body["icon_hash"]
     assert "sig=" in dbody["icon_url"]
+    # Ingress-safe: relative to <base href>, so under the HA ingress
+    # prefix the picture resolves inside it (a leading "/" escaped it).
+    assert dbody["icon_url"].startswith(f"api/spaces/{sid}/icon?v=")
+    signed = await client.get("/" + dbody["icon_url"])
+    assert signed.status == 200
 
     rm = await client.delete(
         f"/api/spaces/{sid}/icon", headers=_auth(client._admin_token)
@@ -4267,10 +4272,10 @@ async def test_local_invites_carry_the_space_landing_fields(client):
     assert inv["space_description"] == "Fridays at Tobi's"
     assert inv["member_count"] == 1
     assert inv["invited_by_display_name"] == "Pascal"
-    assert inv["space_icon_url"].startswith(f"/api/spaces/{sid}/icon?v=")
+    assert inv["space_icon_url"].startswith(f"api/spaces/{sid}/icon?v=")
     assert "sig=" in inv["space_icon_url"]
     # The signed icon URL is fetchable by the invitee (not yet a member).
-    icon = await client.get(inv["space_icon_url"])
+    icon = await client.get("/" + inv["space_icon_url"])
     assert icon.status == 200
     # Nothing beyond the landing fields: no roster, no config.
     assert set(inv) == {
