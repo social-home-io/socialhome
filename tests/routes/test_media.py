@@ -2,6 +2,7 @@
 
 import io
 import pathlib
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -558,7 +559,7 @@ class _OneBlobGfs:
         self.blob = blob
         self.fetches = 0
 
-    async def fetch_space_media(self, base_url, blob_id, *, max_bytes, timeout_s):
+    async def fetch_space_media(self, conn, blob_id, *, max_bytes, timeout_s):
         self.fetches += 1
         return self.blob
 
@@ -599,7 +600,7 @@ async def _gfs_held_picture(client, monkeypatch, *, name: str, data: bytes):
     gfs = _OneBlobGfs(blob)
 
     async def _sources(self, space_id):
-        return ["https://gfs.example"]
+        return [SimpleNamespace(id="g", inbox_url="https://gfs.example")]
 
     monkeypatch.setattr(SpaceMediaGfsFetcher, "_sources", _sources)
     monkeypatch.setattr(fetcher, "_gfs", gfs, raising=False)

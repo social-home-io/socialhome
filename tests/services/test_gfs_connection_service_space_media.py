@@ -171,7 +171,7 @@ async def test_fetch_reads_the_blob(env):
     session = _MediaSession(blob=b"sealed-bytes")
     svc = await _svc(env, session)
     got = await svc.fetch_space_media(
-        "https://g1.example", BID, max_bytes=100, timeout_s=5
+        await env[1].get("g1"), BID, max_bytes=100, timeout_s=5
     )
     assert got == b"sealed-bytes"
     # The fetch names no scope: a channel's blob is never marked "space".
@@ -182,28 +182,28 @@ async def test_fetch_bounds_and_misses(env):
     svc = await _svc(env, _MediaSession(blob=b"x" * 101))
     assert (
         await svc.fetch_space_media(
-            "https://g1.example", BID, max_bytes=100, timeout_s=5
+            await env[1].get("g1"), BID, max_bytes=100, timeout_s=5
         )
         is None
     )
     svc = await _svc(env, _MediaSession(get_status=404))
     assert (
         await svc.fetch_space_media(
-            "https://g1.example", BID, max_bytes=100, timeout_s=5
+            await env[1].get("g1"), BID, max_bytes=100, timeout_s=5
         )
         is None
     )
     svc = await _svc(env, _MediaSession(raise_on="GET"))
     assert (
         await svc.fetch_space_media(
-            "https://g1.example", BID, max_bytes=100, timeout_s=5
+            await env[1].get("g1"), BID, max_bytes=100, timeout_s=5
         )
         is None
     )
     svc = await _svc(env, _MediaSession())
     assert (
         await svc.fetch_space_media(
-            "https://g1.example", "nothex", max_bytes=9, timeout_s=5
+            await env[1].get("g1"), "nothex", max_bytes=9, timeout_s=5
         )
         is None
     )
@@ -282,13 +282,13 @@ async def test_fetch_reads_a_body_that_arrives_in_chunks(env):
 
     session.get = _get
     got = await svc.fetch_space_media(
-        "https://g1.example", BID, max_bytes=len(blob), timeout_s=5
+        await env[1].get("g1"), BID, max_bytes=len(blob), timeout_s=5
     )
     assert got == blob
     session.get = lambda url, **kw: _chunked_resp(orig_get(url, **kw), blob + b"x")
     assert (
         await svc.fetch_space_media(
-            "https://g1.example", BID, max_bytes=len(blob), timeout_s=5
+            await env[1].get("g1"), BID, max_bytes=len(blob), timeout_s=5
         )
         is None
     )
@@ -297,3 +297,36 @@ async def test_fetch_reads_a_body_that_arrives_in_chunks(env):
 def _chunked_resp(resp, raw: bytes):
     resp.content = _ChunkedContent(raw)
     return resp
+
+
+async def test_a_fetch_rides_the_cookie_less_session(env):
+    """#1309 review E: a blob fetch is anonymous — it must not ride the
+    shared session that carries this household's GFS cookies, or the GFS
+    could link what a household reads to the household."""
+    _db, repo = env
+    await repo.save(
+        _base._make_conn(
+            "g1",
+            inbox_url="https://g1.example",
+            public_key=_base._GFS_KP.public_key.hex(),
+        )
+    )
+    identified = _MediaSession(blob=b"never")
+    anonymous = _MediaSession(blob=b"sealed")
+    svc = GfsConnectionService(repo, http_client=identified, publish_client=anonymous)
+    got = await svc.fetch_space_media(
+        await repo.get("g1"), BID, max_bytes=100, timeout_s=5
+    )
+    assert got == b"sealed"
+    assert identified.gets == []
+    assert anonymous.gets == [f"https://g1.example/gfs/media/{BID}"]
+
+
+async def test_no_session_means_no_fetch(env):
+    _db, repo = env
+    await repo.save(_base._make_conn("g1", inbox_url="https://g1.example"))
+    svc = GfsConnectionService(repo, http_client=_MediaSession(), publish_client=None)
+    assert (
+        await svc.fetch_space_media(await repo.get("g1"), BID, max_bytes=9, timeout_s=5)
+        is None
+    )

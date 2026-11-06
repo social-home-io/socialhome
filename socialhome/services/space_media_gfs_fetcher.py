@@ -50,12 +50,12 @@ from ..space_media_seal import (
 from .inbound_media_store import (
     is_reserved_media_name,
     media_file_path,
-    publish_once,
-    remove_quietly,
+    write_once,
 )
 from .space_media_gfs_uploader import media_names
 
 if TYPE_CHECKING:
+    from ..domain.federation import GfsConnection
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
     from ..repositories.space_media_ref_repo import AbstractSpaceMediaRefRepo
@@ -302,9 +302,10 @@ class SpaceMediaGfsFetcher:
             )
             return _REFUSED
         outcome = _MISS
-        for base_url in await self._sources(ref.space_id):
+        for conn in await self._sources(ref.space_id):
+            base_url = conn.inbox_url
             blob = await self._gfs.fetch_space_media(
-                base_url, ref.blob_id, max_bytes=ref.size, timeout_s=REQUEST_TIMEOUT_S
+                conn, ref.blob_id, max_bytes=ref.size, timeout_s=REQUEST_TIMEOUT_S
             )
             if blob is None:
                 continue
@@ -362,34 +363,36 @@ class SpaceMediaGfsFetcher:
             return stored[0] if stored is not None else None
         return None
 
-    async def _sources(self, space_id: str) -> list[str]:
-        """The GFS base URLs to ask, in order: the GFS each link-joined pair
-        of this space relays through, then this household's connections."""
-        urls: list[str] = []
+    async def _sources(self, space_id: str) -> list[GfsConnection]:
+        """The GFS connections to ask, in order: this household's connection
+        to the GFS each link-joined pair of this space relays through, then
+        its other connections. Only connections — a fetch rides the
+        cookie-less, address-pinned session of one; a ``relay_via`` URL this
+        household holds no connection to is never fetched (review E)."""
+        conns: list[GfsConnection] = []
+        seen: set[str] = set()
         for iid in await self._federation_repo.list_member_instance_ids(space_id):
             inst = await self._federation_repo.get_instance(iid)
             if (
-                inst is not None
-                and inst.source is InstanceSource.SPACE_SESSION
-                and inst.relay_via
-                and inst.relay_via not in urls
+                inst is None
+                or inst.source is not InstanceSource.SPACE_SESSION
+                or not inst.relay_via
             ):
-                urls.append(inst.relay_via)
+                continue
+            conn = await self._gfs.connection_for_url(inst.relay_via)
+            if conn is not None and conn.id not in seen:
+                seen.add(conn.id)
+                conns.append(conn)
         for conn in await self._gfs_repo.list_active():
-            if conn.inbox_url and conn.inbox_url not in urls:
-                urls.append(conn.inbox_url)
-        return urls[:MAX_SOURCES]
+            if conn.inbox_url and conn.id not in seen:
+                seen.add(conn.id)
+                conns.append(conn)
+        return conns[:MAX_SOURCES]
 
     async def _write(self, path: pathlib.Path, data: bytes) -> None:
-        partial = self._dir / _PARTIAL_DIR
-        await aiofiles.os.makedirs(partial, exist_ok=True)
-        tmp = partial / f"gfs-{uuid.uuid4().hex}"
-        try:
-            async with aiofiles.open(tmp, "wb") as fh:
-                await fh.write(data)
-            await publish_once(tmp, path)
-        finally:
-            await remove_quietly(tmp)
+        await write_once(
+            path, data, self._dir / _PARTIAL_DIR / f"gfs-{uuid.uuid4().hex}"
+        )
 
 
 def _is_picture(filename: str) -> bool:

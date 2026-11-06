@@ -89,12 +89,20 @@ class _Crypto:
 
 
 class _Gfs:
-    def __init__(self, blobs: dict[str, bytes], *, delay: float = 0.0):
+    def __init__(self, blobs: dict[str, bytes], *, delay: float = 0.0, known_urls=None):
         self.blobs = blobs
         self.delay = delay
+        #: Base URLs this household holds a connection to (``None``: any).
+        self.known_urls = known_urls
         self.fetches: list[tuple[str, str]] = []
 
-    async def fetch_space_media(self, base_url, blob_id, *, max_bytes, timeout_s):
+    async def connection_for_url(self, url):
+        if self.known_urls is not None and url not in self.known_urls:
+            return None
+        return _Conn("relay-" + url, url)
+
+    async def fetch_space_media(self, conn, blob_id, *, max_bytes, timeout_s):
+        base_url = conn.inbox_url
         self.fetches.append((base_url, blob_id))
         if self.delay:
             await asyncio.sleep(self.delay)
@@ -357,8 +365,8 @@ class _LateGfs(_Gfs):
         super().__init__(blobs)
         self.from_call = from_call
 
-    async def fetch_space_media(self, base_url, blob_id, *, max_bytes, timeout_s):
-        self.fetches.append((base_url, blob_id))
+    async def fetch_space_media(self, conn, blob_id, *, max_bytes, timeout_s):
+        self.fetches.append((conn.inbox_url, blob_id))
         if len(self.fetches) < self.from_call:
             return None
         return self.blobs.get(blob_id)
@@ -540,3 +548,15 @@ async def test_a_redelivery_of_the_same_item_is_quiet(tmp_path, caplog):
             f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False
         )
     assert "another item" not in caplog.text
+
+
+async def test_a_relay_via_url_without_a_connection_here_is_never_fetched(tmp_path):
+    """#1309 review E: a fetch rides only a connection this household
+    holds (the cookie-less, address-pinned session) — never a raw URL a
+    peer row names."""
+    blob = _blob("a.webp", b"x")
+    gfs = _Gfs({_addr(blob): blob}, known_urls=set())
+    f = _fetcher(tmp_path, gfs)
+    await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
+    assert await f.ensure_local("a.webp") is False
+    assert gfs.fetches == []

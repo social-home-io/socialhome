@@ -120,6 +120,7 @@ from .gfs_publish_retry import (
     is_payload_suite_refusal,
 )
 from .gfs_server_targets import refusal_outcome, resolve_server_targets
+from .inbound_media_store import read_bounded
 from .space_authority_pin import owner_authority_cert
 
 log = logging.getLogger(__name__)
@@ -3346,42 +3347,48 @@ class GfsConnectionService:
             return None
 
     async def fetch_space_media(
-        self, base_url: str, blob_id: str, *, max_bytes: int, timeout_s: float
+        self,
+        conn: GfsConnection,
+        blob_id: str,
+        *,
+        max_bytes: int,
+        timeout_s: float,
     ) -> bytes | None:
-        """``GET /gfs/media/{blob_id}`` from the GFS at *base_url* —
-        anonymous, no credential (the path names no space or channel). ``None`` on a
-        miss, a transport error, or a body past *max_bytes*. The caller
-        checks the hash and decrypts."""
-        if not is_blob_id(blob_id) or not base_url:
+        """``GET /gfs/media/{blob_id}`` from *conn*'s GFS — anonymous: over
+        the COOKIE-LESS session (:meth:`anon_session`: the publish session
+        for a server we are registered on, a session pinned to the vetted
+        address for a listing target), never the shared session that
+        carries this household's cookies, so a fetch can't be linked to the
+        household (the path names no space or channel either). ``None`` on
+        a miss, a refused address, a transport error, or a body past
+        *max_bytes*. The caller checks the address and decrypts."""
+        if not is_blob_id(blob_id) or not conn.inbox_url:
             return None
-        url = f"{base_url.rstrip('/')}/gfs/media/{blob_id}"
+        url = f"{conn.inbox_url.rstrip('/')}/gfs/media/{blob_id}"
         try:
-            async with self._client().get(
-                url,
-                allow_redirects=False,
-                timeout=aiohttp.ClientTimeout(total=timeout_s),
-            ) as resp:
-                if resp.status != 200:
+            async with self.anon_session(conn) as client:
+                if client is None:
                     return None
-                # ``read(n)`` returns at most one chunk: read until EOF, but
-                # never buffer more than one byte past the bound.
-                parts: list[bytes] = []
-                held = 0
-                while held <= max_bytes:
-                    part = await resp.content.read(max_bytes + 1 - held)
-                    if not part:
-                        break
-                    parts.append(part)
-                    held += len(part)
-                data = b"".join(parts)
+                async with client.get(
+                    url,
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=timeout_s),
+                ) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await read_bounded(resp.content, max_bytes)
+        except OutboundFetchRefused as exc:
+            log.warning("space media fetch from %s refused: %s", conn.inbox_url, exc)
+            return None
         except (aiohttp.ClientError, TimeoutError) as exc:
-            log.warning("space media fetch from %s failed: %s", base_url, exc)
+            log.warning("space media fetch from %s failed: %s", conn.inbox_url, exc)
             return None
-        if len(data) > max_bytes:
+        if data is None:
             log.warning(
-                "space media from %s is over %d bytes — refused", base_url, max_bytes
+                "space media from %s is over %d bytes — refused",
+                conn.inbox_url,
+                max_bytes,
             )
-            return None
         return data
 
     async def moment_delete_log_supported(self, gfs_id: str) -> bool:

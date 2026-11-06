@@ -58,6 +58,7 @@ import pathlib
 import re
 import stat
 import uuid
+from typing import Protocol
 
 import aiofiles
 import aiofiles.os
@@ -353,6 +354,42 @@ async def publish_once(tmp: pathlib.Path, target: pathlib.Path) -> bool:
         return True
     await remove_quietly(tmp)
     return True
+
+
+class _ByteStream(Protocol):
+    async def read(self, n: int = -1) -> bytes: ...
+
+
+async def read_bounded(stream: _ByteStream, max_bytes: int) -> bytes | None:
+    """A response body read to its end — ``None`` once it passes
+    *max_bytes* (never buffering more than one byte past it). aiohttp's
+    ``read(n)`` returns at most one chunk, so it is read in a loop: a single
+    read truncates any body larger than a chunk. Shared by the GFS media
+    readers (moments, space media)."""
+    parts: list[bytes] = []
+    held = 0
+    while held <= max_bytes:
+        part = await stream.read(max_bytes + 1 - held)
+        if not part:
+            break
+        parts.append(part)
+        held += len(part)
+    if held > max_bytes:
+        return None
+    return b"".join(parts)
+
+
+async def write_once(target: pathlib.Path, data: bytes, tmp: pathlib.Path) -> bool:
+    """Write *data* to *tmp* (its directory created), then move it to
+    *target* write-once (:func:`publish_once`). ``True`` when stored,
+    ``False`` when *target* already existed. *tmp* never survives."""
+    await aiofiles.os.makedirs(tmp.parent, exist_ok=True)
+    try:
+        async with aiofiles.open(tmp, "wb") as fh:
+            await fh.write(data)
+        return await publish_once(tmp, target)
+    finally:
+        await remove_quietly(tmp)
 
 
 def part_name(index: int) -> str:

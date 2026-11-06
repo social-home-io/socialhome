@@ -40,7 +40,12 @@ from ..moment_public_media import (
     is_blob_id,
     open_media,
 )
-from .inbound_media_store import media_file_path, publish_once, remove_quietly
+from .inbound_media_store import (
+    media_file_path,
+    read_bounded,
+    remove_quietly,
+    write_once,
+)
 
 if TYPE_CHECKING:
     from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
@@ -268,14 +273,7 @@ class MomentPublicMediaInbound:
                 type(exc).__name__,
             )
             return False
-        await aiofiles.os.makedirs(self._dir, exist_ok=True)
-        tmp = self._dir / f".gm-{uuid.uuid4().hex}.part"
-        try:
-            async with aiofiles.open(tmp, "wb") as fh:
-                await fh.write(data)
-            await publish_once(tmp, path)
-        finally:
-            await remove_quietly(tmp)
+        await write_once(path, data, self._dir / f".gm-{uuid.uuid4().hex}.part")
         return True
 
     async def _download(self, gfs_id: str, blob_id: str) -> bytes | None:
@@ -297,14 +295,7 @@ class MomentPublicMediaInbound:
                         resp.status,
                     )
                     return None
-                chunks: list[bytes] = []
-                total = 0
-                while chunk := await resp.content.read(64 * 1024):
-                    total += len(chunk)
-                    if total > MAX_BLOB_BYTES:
-                        return None
-                    chunks.append(chunk)
+                return await read_bounded(resp.content, MAX_BLOB_BYTES)
         except (aiohttp.ClientError, TimeoutError) as exc:
             log.warning("moment_public.media: fetch from %s failed: %s", gfs_id, exc)
             return None
-        return b"".join(chunks)

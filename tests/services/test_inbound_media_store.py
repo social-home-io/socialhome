@@ -525,3 +525,37 @@ def test_space_media_ref_drops_reserved_names():
         ["api/media/a.webp", "api/media/gm-x.webp", "api/media/b.webp"], limit=10
     ) == ("api/media/a.webp", "api/media/b.webp")
     assert store.space_media_refs("nope", limit=10) == ()
+
+
+# ── Shared by the GFS media readers (moments, space media) ──────────────
+
+
+class _Chunks:
+    """aiohttp's StreamReader: ``read(n)`` hands out at most one chunk."""
+
+    def __init__(self, raw: bytes, chunk: int = 7):
+        self._raw = raw
+        self._chunk = chunk
+
+    async def read(self, n: int = -1) -> bytes:
+        size = self._chunk if n < 0 else min(n, self._chunk)
+        out, self._raw = self._raw[:size], self._raw[size:]
+        return out
+
+
+async def test_read_bounded_reads_to_the_end():
+    assert await store.read_bounded(_Chunks(b"x" * 50), 50) == b"x" * 50
+    assert await store.read_bounded(_Chunks(b""), 50) == b""
+
+
+async def test_read_bounded_refuses_a_body_past_the_bound():
+    """Never buffers more than one byte past it."""
+    assert await store.read_bounded(_Chunks(b"x" * 51), 50) is None
+
+
+async def test_write_once_publishes_and_never_replaces(tmp_path):
+    target = tmp_path / "a.webp"
+    assert await store.write_once(target, b"one", tmp_path / ".partial" / "t1")
+    assert not await store.write_once(target, b"two", tmp_path / ".partial" / "t2")
+    assert target.read_bytes() == b"one"
+    assert list((tmp_path / ".partial").iterdir()) == []
