@@ -176,6 +176,128 @@ media (every member household can, which is what lets the §25.6 catch-up
 ship another member's pictures), the first complete copy of a new file
 wins. `tests/protocol/test_media_blob_scope.py` pins these rules.
 
+## Space media via the GFS cache (v_80)
+
+**Who.** Two kinds of household read a space only through a GFS and so
+never get the chunks above:
+
+- a **member seated from an invite link** (`InstanceSource.SPACE_SESSION`,
+  reached only through the GFS envelope relay, whose sealed cap of
+  ~191 KiB refuses media chunks) at `proto_version ≥ 80`
+  (`FederationCapability.MIN_FOR_SPACE_MEDIA_REFS`);
+- a **follower of a global space**, which reads the relayed post inner —
+  gated on the GFS's signed `space_media` capability
+  ([`discovery.md`](./discovery.md#space-media-cache-on-a-gfs-capability-space_media)),
+  not on a household version.
+
+Paired and mesh members keep the `SPACE_MEDIA_BLOB` push above, unchanged.
+
+**Descriptor.** The item carries, INSIDE its encrypted payload:
+
+```json
+"media_refs": {"<local filename>": {"blob_id": "<sha256 hex>", "suite": "aesgcm-256-pad-det", "epoch": 3, "size": 1048604}}
+```
+
+one entry per file of the item (never more than the item shows — a
+receiver refuses a larger descriptor whole and ignores an entry for a file
+the item does not reference); `size` is the sealed blob's byte count. No
+GFS URL: every reader fetches from the GFS it reaches the space through.
+It rides:
+
+| Item | Where |
+|---|---|
+| Space post | `SPACE_POST_CREATED` (per link-joined v_80 member), the `public_relay` inner (followers, through a seed holder's relay) and the v_49 member-publish inner — the last two outside the author signature, like `writer_cert` |
+| Calendar event | `SPACE_CALENDAR_EVENT_CREATED` / `_UPDATED`, only when the cover is new or changed |
+| Gallery item | `SPACE_GALLERY_ITEM_CREATED` (thumbnail + full file) |
+| §25.6 records | `posts` / `calendar` / `gallery` records streamed to a link-joined v_80 requester ([`sync.md`](./sync.md), sync line 80) |
+
+Post edits carry no media, so no descriptor. Toward members the descriptor
+is added per peer (the `per_peer` hook of `broadcast_to_space_members`),
+only for link-joined v_80 members — never on the shared payload a paired
+member gets.
+
+**Sealing** ([`crypto.md`](../crypto.md#space-media-in-a-gfs-cache-aesgcm-256-pad-det)):
+HKDF of the epoch's space content key, a **deterministic** nonce (the same
+file sealed again is the byte-identical blob, so a re-upload matches the
+descriptors readers hold), padded to the moment-media size buckets, at most
+8 MiB of file. Larger files are skipped.
+
+**Upload** (`SpaceMediaGfsUploader`). When an item with local media is
+created in a space that has link-joined v_80 members or (for posts)
+followers, the author's household plans the GFSs those readers use — each
+link-joined member's `relay_via` connection, plus every GFS the space is
+relayed to for followers — keeps the ones whose signed block proved
+`space_media` (and whose `max_blob_bytes` the blob fits), seals each file
+once and `PUT`s it once per GFS. Authorization, strongest first: the
+**space authority** signature (this household holds the space seed — host
+or delegated admin), else the **writer group key** (strict mode), else our
+household's **writer cert** (trusted mode — the one identified kind, never
+sent to a listing target we are not registered on). The request never names
+`from_instance`. `200 already_stored` is success (coalescing); a refusal
+(403 / 413 / 422) is a WARNING and dropped; a transport error, 408, 429 or
+5xx is retried at most 4 times (backoff 30 s, doubling). The queue is in
+memory and bounded (2048 uploads): a restart or a full queue loses pending
+uploads (WARNING), and the reader then shows the item without that picture.
+
+**Reader** (`SpaceMediaGfsFetcher`). Keeps the item's entries as
+`space_media_refs` rows ([`database.md`](../database.md)); prefetches
+pictures on arrival (3 at a time, ≤ 200 waiting); anything else — or a
+picture past the backlog — is fetched when first viewed: `GET
+/api/media/{filename}` for a missing file asks the fetcher, concurrent
+viewers share one fetch, each waits at most 20 s. A fetch tries the GFS the
+link-joined pair relays through (`relay_via`), then this household's own
+GFS connections (≤ 4 sources): `GET /gfs/spaces/media/{blob_id}`
+(anonymous), bounded by the descriptor's `size`, checks SHA-256 = `blob_id`,
+decrypts with the epoch's media key and writes the file write-once under
+its local name (the `SPACE_MEDIA_BLOB` rules above). An unknown suite, a
+wrong hash or a failed decrypt is refused with a WARNING and writes nothing.
+
+**No byte push to them.** `SPACE_MEDIA_BLOB` is no longer queued to a
+link-joined v_80 member (live posts / gallery / covers), nor to any
+link-joined requester of a §25.6 catch-up — the relay refuses those bytes.
+
+```mermaid
+sequenceDiagram
+    participant A as Author household
+    participant G as GFS (+ CDN)
+    participant E as Link-joined member
+    participant F as Follower
+    Note over A: seal each file once (space key, deterministic nonce)
+    A->>G: PUT /gfs/spaces/{space}/media/{blob_id}<br/>X-SH-Space-Media-Auth (authority / writer key / writer cert)
+    G-->>A: 201 stored (200 already_stored)
+    A->>G: POST /gfs/envelope (sealed SPACE_POST_CREATED + media_refs)
+    G->>E: relay envelope
+    A->>G: POST /gfs/publish (encrypted inner + media_refs)
+    G->>F: relay space_post_public
+    E->>G: GET /gfs/spaces/media/{blob_id} (prefetch / on view)
+    G-->>E: ciphertext
+    Note over E: sha256 check, decrypt, write-once
+    F->>G: GET /gfs/spaces/media/{blob_id}
+    G-->>F: ciphertext (CDN-cached)
+```
+
+**Cost.** One upload per file per GFS — never per reader or per member.
+The descriptor is ~150 B per file per item. A 700 KB photo in a space with
+200 link-joined members: one upload (padded to the 1 MiB bucket) per GFS
+those members use, plus 200 × ~150 B descriptors inside envelopes that go
+out anyway; reads are served by the GFS and its CDN. A global space with
+10 000 followers: still one upload per GFS; the CDN absorbs the reads.
+
+**Privacy residuals.** The GFS sees ciphertext, its size bucket, the space
+id on upload, the upload time and the uploader's address, and fetch times
+at one-hour resolution; never who fetched. The `writer_cert` kind tells it
+the uploader household's key (the trusted-mode trade-off of
+`/gfs/member-publish`). The deterministic nonce reveals only "the same file
+was sealed twice under the same key", which the content address shows
+anyway.
+
+**Deferred.** Files over 8 MiB (long videos) and re-uploading a blob the
+cache evicted or expired — an on-demand, coalesced "media wanted" path
+(next PR). Comment media and a seed holder's relay copy of an approved post
+carry no descriptor yet. This covers listed (global) spaces; invite-link
+members of a **private** space (opaque channels, v_51) need the GFS
+channel scope that is being added to the cache, and follow it.
+
 ## Implementation pointers
 
 - Framing: [`socialhome/federation/media_framing.py`](../../socialhome/federation/media_framing.py)
@@ -184,7 +306,8 @@ wins. `tests/protocol/test_media_blob_scope.py` pins these rules.
 - Raw-bytes AEAD: [`socialhome/federation/encoder.py`](../../socialhome/federation/encoder.py) (`encrypt_bytes` / `decrypt_bytes`)
 - Senders: [`dm_media_sync_service.py`](../../socialhome/services/dm_media_sync_service.py), [`space_media_sync_service.py`](../../socialhome/services/space_media_sync_service.py)
 - Receiver assembly: [`federation_inbound_service.py`](../../socialhome/services/federation_inbound_service.py)
-- Capability: [`socialhome/domain/federation_capabilities.py`](../../socialhome/domain/federation_capabilities.py) (`MIN_FOR_MEDIA_CHANNEL`)
+- Capability: [`socialhome/domain/federation_capabilities.py`](../../socialhome/domain/federation_capabilities.py) (`MIN_FOR_MEDIA_CHANNEL`, `MIN_FOR_SPACE_MEDIA_REFS`)
+- GFS media cache (v_80): [`space_media_seal.py`](../../socialhome/space_media_seal.py), [`domain/space_media_ref.py`](../../socialhome/domain/space_media_ref.py), [`space_media_gfs_uploader.py`](../../socialhome/services/space_media_gfs_uploader.py), [`space_media_gfs_fetcher.py`](../../socialhome/services/space_media_gfs_fetcher.py), [`space_media_refs.py`](../../socialhome/services/space_media_refs.py), [`sync/space/media_refs.py`](../../socialhome/federation/sync/space/media_refs.py)
 
 ## Spec refs
 

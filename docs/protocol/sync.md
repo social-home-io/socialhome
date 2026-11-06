@@ -267,6 +267,27 @@ treats `"incremental"` as it always did (a full stream with media).
 Periodic sessions also stream **only what changed** since the last sync
 the household confirmed — see [Incremental sessions](#incremental-sessions-change-stamps--per-household-watermark).
 
+**Members seated from an invite link get descriptors, not bytes (v_80).**
+A link-joined requester (`InstanceSource.SPACE_SESSION`) is reached only
+through the GFS envelope relay, which refuses `SPACE_MEDIA_BLOB` chunks: the
+catch-up media walk queues **nothing** for any link-joined requester (it only
+burned outbox rows and retries). Instead, toward a link-joined requester at
+v_80 (`FederationCapability.MIN_FOR_SPACE_MEDIA_REFS`), every `posts`,
+`calendar` and `gallery` record that shows files carries `media_refs` — the
+files' addresses in a GFS media cache, computed from the provider's own copy
+(the deterministic seal gives the same address every time) — and the blobs
+are queued for upload to that requester's GFS (`_WithMediaRefs` in
+`provider._exporter_for`; at most 500 records per resource per stream,
+newest first, the rest without). The receiver keeps them as
+`space_media_refs` rows and fetches the pictures
+(`SpaceSyncReceiver.attach_gfs_media`; [`media.md`](./media.md#space-media-via-the-gfs-cache-v_80)).
+It is a version gate in `_exporter_for`, so **sync line 80**
+(`SYNC_RECORD_LINES`): a household crossing v_80 gets one full stream, and
+with it the pictures of content it was sent while older. Paired and mesh
+requesters keep the catch-up push unchanged. Cost: ~150 B of descriptor per
+file per record; one upload per file to the requester's GFS (`200
+already_stored` when it is there already).
+
 **Long streams are not reaped mid-way.** A session's `last_activity` is
 stamped on every chunk (the provider on each shipped chunk, the requester
 on each received one); `SyncSessionManager.reap_stale` closes sessions

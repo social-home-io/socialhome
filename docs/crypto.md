@@ -67,6 +67,7 @@ addresses. See the last section of this document.
 | Key agreement (browser, link-bound) | P-256 ECDH + link secret → HKDF-SHA256 → AES-256-GCM | 256-bit | The whole public highlight stream, sealed to the viewer's ephemeral WebCrypto key and the per-link secret in the URL fragment (suite `p256+link-hkdf-sha256-aes256gcm`, info `sh-highlight-public-stream:v1`, salt the link secret, nonce a 96-bit frame counter, AAD the highlight id). The link secret is `HKDF-SHA256(identity seed, info "sh-highlight-link:v1" ‖ highlight ‖ token)` — never sent to a server, so the GFS that minted the token can't open the stream | `socialhome/services/highlight_public_seal.py`, `client/gfs/stream_seal.ts` |
 | Symmetric AEAD | AES-256-GCM | 256-bit | Federation payloads, space content, KEK wrap | `cryptography.hazmat.primitives.ciphers.aead.AESGCM` |
 | Symmetric AEAD (public moment media, v_63) | AES-256-GCM over a padded plaintext | 256-bit | A public moment's photo / video, sealed once under `HKDF(item_key, "sh-moment-media:v1|" + role)`; plaintext `u32 length ‖ file ‖ zeros` up to a 64 KB…8 MB bucket; AAD binds suite, author, moment id and role; the blob is addressed by its SHA-256 (suite `media_suite: "aesgcm-256-pad"`, unknown refused — `UnsupportedMediaSuite`). Role `share` is a moment's **share copy** (text, timestamps, author name, media descriptor; 4 KB bucket) that a per-moment share link opens; the link's fragment carries the moment's item key — never the generation or step key — so it opens that one moment | `socialhome/moment_public_media.py`, `client/gfs/moment_seal.ts` |
+| Symmetric AEAD (space media in a GFS cache, v_80) | AES-256-GCM over a padded plaintext, deterministic nonce | 256-bit | A space file (post picture, calendar cover, gallery item) for households that read the space through a GFS, sealed once under `HKDF(epoch content key, "sh-space-media:v1")`; nonce derived from the file name and the file's SHA-256 (a re-seal is the byte-identical blob); same padding buckets as moment media; AAD binds suite, space id, epoch and file name; addressed by its SHA-256 (suite `aesgcm-256-pad-det`, unknown refused — `UnsupportedSpaceMediaSuite`). See [Space media in a GFS cache](#space-media-in-a-gfs-cache-aesgcm-256-pad-det) | `socialhome/space_media_seal.py` |
 | Symmetric AEAD (public moments, v_62) | AES-256-GCM, 96-bit random nonce; HKDF-SHA256 ratchet + item keys | 256-bit | A public moment sealed before it reaches a GFS under its **item key** `HKDF(step key, "sh-moment-item:v1|" + moment_id)`; the step key ratchets daily `K(g, s+1) = HKDF(K(g, s), "sh-moment-ratchet:v1")` from a random per-author generation root (holders keep only the newest step). Suite `seal_suite: "aesgcm-256"`, AAD `socialhome/moment-public/v2\|suite\|author\|key_gen\|key_step\|moment_id`; the author's household signs the envelope (ciphertext + key id + moment id). The step key reaches each follower household through the static key-wrap seal (`kem_suite: "x25519"`) with `key_suite: "aesgcm-256"` (the space content-key tag). Unknown suites refused (`UnsupportedMomentSealSuite`) | `socialhome/moment_public_seal.py`, `socialhome/services/moment_public_key_outbound.py`, `socialhome/services/moment_public_key_inbound.py` |
 | KDF | HKDF-SHA256 | 32-byte output | Session-key derivation, KEK derivation | `cryptography.hazmat.primitives.kdf.hkdf` |
 | Hash | SHA-256 | 256-bit | Instance/space/user ID derivation, token hashing, space-page version hashes (`sha256:` suite-prefixed over title + content + cover — they recognise versions, never order them; receivers reject any other prefix, v_48) | `hashlib.sha256`, `socialhome/domain/page_version.py` |
@@ -1294,6 +1295,45 @@ ciphertext, sealed to the panel (ECIES):
 and embeds parameters in the stored hash: `scrypt$16384$8$1$<salt
 hex>$<hash hex>`. Parameters can be bumped without a schema change.
 
+### Space media in a GFS cache (`aesgcm-256-pad-det`)
+
+A space member seated from an invite link and a follower of a global space
+read the space only through a GFS, which caches the space's files as
+ciphertext ([`protocol/media.md`](protocol/media.md#space-media-via-the-gfs-cache-v_80),
+v_80). The author's household seals each file once
+(`socialhome/space_media_seal.py`, suite `SPACE_MEDIA_SUITE_AESGCM256_PADDED`
+= `"aesgcm-256-pad-det"`):
+
+- **Key.** `media_key = HKDF-SHA256(content key of epoch E, salt=None,
+  info=b"sh-space-media:v1")`. Whoever holds the space content key for that
+  epoch (a member, a follower that received the key) can open the file;
+  only the derived key leaves `SpaceContentEncryption.media_key` — never the
+  content key itself.
+- **Deterministic nonce.** `nonce = HKDF-SHA256(media_key, salt=None,
+  info=b"sh-space-media:v1|nonce|" ‖ filename ‖ "|" ‖ hex(SHA-256(file)),
+  length=12)`. The same file sealed again under the same key is the
+  byte-identical blob (the same `blob_id`), so a re-upload after the cache
+  dropped it matches the descriptor readers already hold, and the sender
+  keeps no sealed copy. Two different files never share a nonce under one
+  key: the content hash is in the derivation.
+- **AAD.** `b"socialhome/space-media/v1|" ‖ suite ‖ "|" ‖ space_id ‖ "|" ‖
+  epoch ‖ "|" ‖ filename` — a blob can't be moved onto another space, epoch
+  or file.
+- **Padding.** The moment-media buckets (`moment_public_media.PAD_BUCKETS`,
+  4 KB … 8 MiB + 4): plaintext `u32 length ‖ file ‖ zeros`; at most 8 MiB of
+  file. Wire: `nonce ‖ ciphertext+tag`.
+- **Address.** `blob_id = SHA-256(blob)` (lowercase hex). The GFS checks it
+  on upload; a reader checks it before decrypting.
+- **Suite.** Every `media_refs` entry names its suite; receivers refuse any
+  other value (`UnsupportedSpaceMediaSuite`), never a default.
+
+Residual: the deterministic nonce reveals that the same file was sealed
+twice under the same key — which the content address shows anyway. It does
+not reveal anything about the file. Post-quantum: AES-256 is
+Grover-resistant (~128-bit); the key travels over the space content key's
+existing delivery channel (`KEY_SUITE_AESGCM_256`), which is where the PQ
+migration happens.
+
 ## Key storage
 
 ### Database
@@ -1402,6 +1442,9 @@ decryption.
   - `instance_id = base32(SHA256(identity_pk)[:20]).lower()`
   - `space_id    = base32(SHA256(space_pk)[:20]).lower()`
   - `user_id     = base32(SHA256(instance_pk ‖ 0x00 ‖ username)[:20]).lower()`
+- Space media key and nonce (v_80, GFS media cache):
+  - `media_key = HKDF-SHA256(epoch content key, salt=None, info=b"sh-space-media:v1")`
+  - `nonce = HKDF-SHA256(media_key, salt=None, info=b"sh-space-media:v1|nonce|" ‖ filename ‖ "|" ‖ hex(SHA-256(file)))[:12]`
 - Moment return-token key (v_67, never sent, nothing stored):
   - `k = HKDF-SHA256(routing_secret, salt=None, info=b"moment-return:v1")`
 - Public highlight link secret (the `#k=` fragment, never sent to a server):
