@@ -40,21 +40,35 @@ FRAME_OVERHEAD_BYTES: int = 16 * 1024
 #: base64'ed again.
 JSON_EXPANSION: float = 16 / 9
 
+#: A chunk to a household reached ONLY through the GFS relay (an
+#: invite-link seat): its JSON envelope (~1.8x) is padded and sealed into
+#: the relay's top size bucket, 191 KiB of plaintext. Measured with the
+#: real encoder: 104 KiB raw is the largest that fits, 108 KiB is not —
+#: 100 KiB keeps a margin for longer ids (pinned by
+#: ``tests/federation/test_federation_service.py``). Every relay chunk
+#: costs that top bucket on the GFS, ~1.9x the raw bytes.
+RELAY_CHUNK_BYTES: int = 100 * 1024
+
 #: The largest chunk the HTTPS inbox takes as JSON (≈ 930 KB on the wire
 #: of its 1 MiB cap) — also the size between two upgraded households, so
 #: a chunk built for the channel still fits the inbox on a fallback.
 HTTPS_CHUNK_BYTES: int = 512 * 1024
 
 
-def media_chunk_bytes(channel_max_message_bytes: int | None) -> int:
+def media_chunk_bytes(
+    channel_max_message_bytes: int | None, *, relay_only: bool = False
+) -> int:
     """The chunk size for one household.
 
     ``channel_max_message_bytes`` is the negotiated message limit of its
     open media data channel, or ``None`` / ``0`` when there is none (the
     chunks go over the HTTPS inbox). Never more than
     :data:`HTTPS_CHUNK_BYTES`, so a chunk sized for the channel still
-    fits the inbox if the channel drops mid-transfer.
+    fits the inbox if the channel drops mid-transfer. ``relay_only``: a
+    household reached only through the GFS relay — :data:`RELAY_CHUNK_BYTES`.
     """
+    if relay_only:
+        return RELAY_CHUNK_BYTES
     if not channel_max_message_bytes:
         return HTTPS_CHUNK_BYTES
     return max(

@@ -5603,6 +5603,45 @@ def cmd_gfs_invite_link_content() -> None:
             "without being stored.",
         )
 
+    # 1c. A picture reaches the link-joined member too (owner rule: every
+    #     member gets the same content whichever way its household is
+    #     reached). e is reached only through the relay, whose sealed
+    #     envelope tops out at 191 KiB — so the ~680 KB WebP must arrive
+    #     in relay-sized chunks, byte for byte. Before, every chunk was
+    #     refused before the wire (512 KiB / 1 MiB) and e never got it.
+    s, up = _upload_file(
+        f"{a_base}/api/media/upload",
+        token=a["token"],
+        filename="relay-photo.png",
+        content=_make_noisy_png(1200, 800),
+        content_type="image/png",
+    )
+    _must("a uploads a photo", s, up, ok=(200, 201))
+    photo = str(up["url"])
+    s, ppost = _request(
+        f"{a_base}/api/spaces/{space_id}/posts",
+        token=a["token"],
+        method="POST",
+        body={"type": "image", "content": "A photo over the relay", "image_urls": [photo]},
+    )
+    ppost = _must("a posts a photo in the link-joined space", s, ppost, ok=(201,))
+    _await_space_post(state, "e", space_id, ppost["id"])
+    s_a, want = _http_get_bytes(f"{a_base}/{photo}", token=a["token"])
+    got = b""
+    s_e = 0
+    for _ in range(90):
+        s_e, got = _http_get_bytes(f"{e_base}/{photo}", token=e["token"])
+        if s_e == 200:
+            break
+        time.sleep(1)
+    if s_a != 200 or s_e != 200 or got != want:
+        raise SystemExit(
+            f"gfs-invite-link-content: a's photo {photo} did not reach e "
+            f"over the relay (a={s_a}, e={s_e}, {len(got)} of {len(want)} "
+            f"bytes) — SPACE_MEDIA_BLOB in relay-sized chunks"
+        )
+    print(f"  e received a's photo over the relay ({len(got)} bytes, identical) ✓")
+
     # 2. It really went through the relay: the GFS carried envelopes
     #    addressed to e in that window. (The blob is opaque, so this is
     #    the honest form of the claim — a count and a recipient.)

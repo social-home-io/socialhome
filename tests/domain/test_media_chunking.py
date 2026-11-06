@@ -12,6 +12,7 @@ from socialhome.domain.media_chunking import (
     FRAME_OVERHEAD_BYTES,
     HTTPS_CHUNK_BYTES,
     JSON_EXPANSION,
+    RELAY_CHUNK_BYTES,
     media_chunk_bytes,
     split_into_chunks,
 )
@@ -77,3 +78,12 @@ def test_a_file_that_fits_is_one_chunk():
     assert split_into_chunks(b"", 1000) == [
         ({"chunk_index": 0, "chunk_count": 1, "final": True}, b"")
     ]
+
+
+def test_a_relay_only_household_gets_relay_sized_chunks_whatever_else_is_known():
+    assert media_chunk_bytes(None, relay_only=True) == RELAY_CHUNK_BYTES
+    assert (
+        media_chunk_bytes(ADVERTISED_MAX_MESSAGE_BYTES, relay_only=True)
+        == RELAY_CHUNK_BYTES
+    )
+    assert RELAY_CHUNK_BYTES < HTTPS_CHUNK_BYTES

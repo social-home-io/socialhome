@@ -121,6 +121,13 @@ that be as large as possible — few messages per file. The size is chosen
   this on any tier, so a chunk built for the channel still fits the inbox
   if the channel drops mid-transfer.
 
+- **GFS relay only** (a space member seated from an invite link) — the
+  JSON envelope is padded and sealed into the relay's top bucket
+  (191 KiB plaintext): **100 KiB** raw (`RELAY_CHUNK_BYTES`; 104 KiB is
+  the measured maximum). Each such chunk costs the full bucket on the
+  GFS, ~1.9× the raw bytes. (DM media never rides the relay — see
+  below; this applies to `SPACE_MEDIA_BLOB`.)
+
 A file that fits one chunk ships as one event with `chunk_count=1` and
 `final=true` — a typical photo is one message between upgraded
 households. A larger file splits into `ceil(size / chunk)` chunks, each

@@ -423,7 +423,7 @@ class DmMediaSyncService(VisibilityMixin):
                     continue
             try:
                 payloads = await self._build_blob_payloads(
-                    entry, fed.media_chunk_bytes(entry.target_instance_id)
+                    entry, await fed.media_chunk_bytes(entry.target_instance_id)
                 )
             except Exception as exc:
                 log.warning(

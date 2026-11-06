@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -44,7 +44,7 @@ async def _seed_space(db, *, space_id="sp-1"):
 def _fed(chunk_bytes: int = HTTPS_CHUNK_BYTES) -> AsyncMock:
     """A federation stand-in whose media chunks are ``chunk_bytes``."""
     fed = AsyncMock()
-    fed.media_chunk_bytes = MagicMock(return_value=chunk_bytes)
+    fed.media_chunk_bytes = AsyncMock(return_value=chunk_bytes)
     return fed
 
 
@@ -391,5 +391,5 @@ async def test_a_700_kb_picture_ships_in_chunks_the_targets_channel_takes(
     chunks = [c.kwargs["raw_chunk"] for c in fed.send_media_chunk.call_args_list]
     assert len(chunks) > 1
     assert all(len(c) + FRAME_OVERHEAD_BYTES <= 256 * 1024 for c in chunks)
-    fed.media_chunk_bytes.assert_called_with("peer-x")
+    fed.media_chunk_bytes.assert_awaited_with("peer-x")
     assert b"".join(chunks) == body

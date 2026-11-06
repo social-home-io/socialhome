@@ -5969,7 +5969,61 @@ async def test_a_queued_delete_is_keyed_by_who_signed_it():
     ]
 
 
-def test_media_chunk_bytes_follows_the_peers_media_channel():
+async def test_a_relay_sized_media_chunk_fits_the_relays_top_bucket():
+    """A chunk to an invite-link seat travels as JSON through the GFS
+    relay, sealed into at most its top size bucket (191 KiB plaintext). A
+    real ``RELAY_CHUNK_BYTES`` chunk, built by the real JSON fallback with
+    long ids and a four-digit index, fits; the next size up (108 KiB) did
+    not when measured."""
+    import os
+
+    from socialhome.domain.media_chunking import RELAY_CHUNK_BYTES
+    from socialhome.federation.gfs_relay_transport import (
+        RELAY_SIZE_BUCKETS,
+        build_relay_plaintext,
+    )
+
+    p = _paired()
+    p.cap.media_ready = False  # no channel → the JSON envelope
+    payload = {
+        "post_id": "p" * 32,
+        "correlation_id": "p" * 32,
+        "space_id": "s" * 32,
+        "blob_id": "b" * 32 + ".webp",
+        "transfer_id": "t" * 32,
+        "filename": "b" * 32 + ".webp",
+        "file_size_bytes": 99_999_999,
+        "chunk_index": 4094,
+        "chunk_count": 4095,
+        "final": False,
+    }
+    for raw, fits in ((RELAY_CHUNK_BYTES, True), (108 * 1024, False)):
+        await p.svc_a.send_media_chunk(
+            to_instance_id=p.b_id,
+            event_type=FederationEventType.SPACE_MEDIA_BLOB,
+            payload=payload,
+            raw_chunk=os.urandom(raw),
+            space_id="s" * 32,
+        )
+        plaintext = build_relay_plaintext(p.cap.json_envelopes[-1])
+        assert (len(plaintext) <= RELAY_SIZE_BUCKETS[-1]) is fits
+
+
+async def test_media_chunk_bytes_is_relay_sized_for_an_invite_link_seat():
+    import dataclasses
+
+    from socialhome.domain.federation import InstanceSource
+    from socialhome.domain.media_chunking import RELAY_CHUNK_BYTES
+
+    p = _paired()
+    seat = p.repo_a._instances[p.b_id]
+    p.repo_a._instances[p.b_id] = dataclasses.replace(
+        seat, source=InstanceSource.SPACE_SESSION
+    )
+    assert await p.svc_a.media_chunk_bytes(p.b_id) == RELAY_CHUNK_BYTES
+
+
+async def test_media_chunk_bytes_follows_the_peers_media_channel():
     """Chunks fit the household's channel (negotiated limit), and the
     HTTPS inbox when there is no channel."""
     from types import SimpleNamespace
@@ -5982,9 +6036,9 @@ def test_media_chunk_bytes_follows_the_peers_media_channel():
 
     kp = generate_identity_keypair()
     svc = _svc_with(kp, MagicMock(), MagicMock())
-    assert svc.media_chunk_bytes("peer-x") == HTTPS_CHUNK_BYTES  # no transport
+    assert await svc.media_chunk_bytes("peer-x") == HTTPS_CHUNK_BYTES  # no transport
     limits = {"old": 262144, "new": 1024 * 1024}
     svc.attach_transport(SimpleNamespace(media_max_message_size=limits.get))
-    assert svc.media_chunk_bytes("none") == HTTPS_CHUNK_BYTES
-    assert svc.media_chunk_bytes("old") == 262144 - FRAME_OVERHEAD_BYTES
-    assert svc.media_chunk_bytes("new") == media_chunk_bytes(1024 * 1024)
+    assert await svc.media_chunk_bytes("none") == HTTPS_CHUNK_BYTES
+    assert await svc.media_chunk_bytes("old") == 262144 - FRAME_OVERHEAD_BYTES
+    assert await svc.media_chunk_bytes("new") == media_chunk_bytes(1024 * 1024)

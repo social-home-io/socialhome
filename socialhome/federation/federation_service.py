@@ -1176,10 +1176,14 @@ class FederationService:
         """
         return self._relay_accepted_at.get(instance_id)
 
-    def media_chunk_bytes(self, instance_id: str) -> int:
-        """How big one media chunk to *instance_id* may be: what its open
-        media channel negotiated, else what the HTTPS inbox takes
+    async def media_chunk_bytes(self, instance_id: str) -> int:
+        """How big one media chunk to *instance_id* may be: what the GFS
+        relay carries for a household reached only through it (an
+        invite-link seat), else what its open media channel negotiated,
+        else what the HTTPS inbox takes
         (:mod:`socialhome.domain.media_chunking`)."""
+        if await self.is_space_session_peer(instance_id):
+            return media_chunk_bytes(None, relay_only=True)
         limit = (
             self._transport.media_max_message_size(instance_id)
             if self._transport is not None

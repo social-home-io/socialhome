@@ -92,10 +92,12 @@ riding the relay skips a step.
 
 The relay body is capped at :data:`RELAY_MAX_BODY_BYTES` (the GFS's
 ``ENVELOPE_MAX_BODY_BYTES``), and the receiver opens a sealed plaintext of
-at most the top of :data:`RELAY_SIZE_BUCKETS` (~191 KiB). Media chunks
-are 512 KiB — 1 MiB before base64, so a chunk envelope is several times
-the cap and is refused here, loudly, rather than shipped to a 413. See
-the media note in ``docs/protocol/invites.md``.
+at most the top of :data:`RELAY_SIZE_BUCKETS` (~191 KiB). A frame over it
+is refused here, loudly, rather than shipped to a 413. Media to a
+household reached only through the relay is chunked to fit
+(:data:`socialhome.domain.media_chunking.RELAY_CHUNK_BYTES`, 100 KiB raw
+— its JSON envelope fills the top bucket), so a link-joined member gets
+the space's pictures like any other member.
 """
 
 from __future__ import annotations
