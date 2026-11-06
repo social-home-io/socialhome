@@ -1039,26 +1039,83 @@ async def test_stalled_uploads_of_one_client_do_not_lock_out_another(gfs):
             wr.close()
 
 
-def test_the_body_read_gate_is_per_client_per_prefix_and_bounded_by_buffered_bytes():
-    """Fourth review A5-residual: bodies in flight are bounded per client
-    bucket (/64), per coarser prefix (/48 or /24), and by the bytes actually
-    BUFFERED — not the signed sizes, which slow 8 MiB uploads inflated."""
-    gate = space_media_mod.BodyReadGate(per_client=2, per_prefix=3, max_bytes=100)
-    assert gate.enter("a", "p") and gate.enter("a", "p")
-    assert not gate.enter("a", "p")  # a's share
-    assert gate.enter("b", "p")
-    assert not gate.enter("c", "p")  # the prefix's share
-    assert gate.enter("d", "q")
-    # Signed sizes don't count: only what has been buffered so far.
-    gate.buffered(60)
-    assert gate.enter("e", "r")
-    gate.buffered(50)
-    assert not gate.enter("f", "s")  # 110 buffered > 100
-    gate.release_buffer(110)
-    for client, prefix in (("a", "p"), ("a", "p"), ("b", "p"), ("d", "q"), ("e", "r")):
-        gate.leave(client, prefix)
+def test_the_body_read_gate_bounds_bodies_and_committed_bytes():
+    """Bodies in flight are bounded per client (/64), per prefix (/48 or
+    /24), in COUNT per node, and by the signed bytes of every admitted body
+    (what it will buffer — a stalled body holds its slot whatever it has
+    sent so far; final check N2)."""
+    gate = space_media_mod.BodyReadGate(
+        per_client=2, per_prefix=3, max_bodies=4, max_bytes=100
+    )
+    assert gate.enter("a", "p", 10) and gate.enter("a", "p", 10)
+    assert not gate.enter("a", "p", 10)  # a's share
+    assert gate.enter("b", "p", 10)
+    assert not gate.enter("c", "p", 10)  # the prefix's share
+    assert gate.enter("d", "q", 60)
+    assert not gate.enter("e", "r", 1)  # 4 bodies: the node's count
+    gate.leave("a", "p", 10)
+    assert not gate.enter("e", "r", 50)  # 30 + 60 + 50 > 100 committed
+    assert gate.enter("e", "r", 10)
+    for client, prefix, size in (
+        ("a", "p", 10),
+        ("b", "p", 10),
+        ("d", "q", 60),
+        ("e", "r", 10),
+    ):
+        gate.leave(client, prefix, size)
     assert gate.in_flight == 0
-    assert gate.enter("f", "s")
+    assert gate.committed == 0
+
+
+async def test_stalled_bodies_from_many_48s_stay_bounded_per_node(gfs):
+    """N2 probe: 16 /48s × 6 stalled header-only uploads (96 bodies) — the
+    node admits at most MAX_BODIES_IN_FLIGHT of them, the rest are 503 at
+    once."""
+    stalled = []
+    for net in range(16):
+        for sub64 in range(2):
+            for _ in range(3):
+                stalled.append(
+                    await _stalled_upload(
+                        gfs, os.urandom(SMALL), xff=f"2001:db8:{net + 1:x}:{sub64:x}::1"
+                    )
+                )
+    try:
+        await asyncio.sleep(0.5)
+        busy = 0
+        for rd, _wr in stalled:
+            try:
+                busy += await asyncio.wait_for(_status(rd), 0.3) == 503
+            except TimeoutError:
+                pass
+        assert len(stalled) - busy <= space_media_mod.MAX_BODIES_IN_FLIGHT
+        store = gfs.app_[gfs_space_media_store_key]
+        assert store.body_gate.in_flight <= space_media_mod.MAX_BODIES_IN_FLIGHT
+    finally:
+        for _rd, wr in stalled:
+            wr.close()
+
+
+async def test_a_body_stays_counted_until_it_is_stored(gfs, monkeypatch):
+    """N2: a finished body still waits for the node's lock and the hash —
+    it holds its gate slot (and bytes) until ``store.put`` returns."""
+    store = gfs.app_[gfs_space_media_store_key]
+    seen = {}
+    real_put = type(store).put
+
+    async def watching_put(self, **kw):
+        seen["in_flight"] = self.body_gate.in_flight
+        seen["committed"] = self.body_gate.committed
+        return await real_put(self, **kw)
+
+    monkeypatch.setattr(type(store), "put", watching_put)
+    data = os.urandom(SMALL)
+    r = await gfs.put(
+        _put_url(data), data=data, headers=_authority_header(_claim(data))
+    )
+    assert r.status == 201
+    assert seen == {"in_flight": 1, "committed": SMALL}
+    assert store.body_gate.in_flight == 0
 
 
 async def test_one_ipv6_48_cannot_close_the_node(gfs):

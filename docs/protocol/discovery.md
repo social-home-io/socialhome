@@ -3605,12 +3605,18 @@ to exactly the signed `size` (`413` past it, `422 size_mismatch` short of
 it), making **progress**: at least 64 KiB (or the rest) in every 5-second
 window, else `408 body_timeout` — a trickle can't hold a read open. One
 client address bucket (IPv6 /64) has at most 3 bodies in flight per node,
-one coarser network prefix (IPv6 /48, IPv4 /24) at most 6, and a node holds
-at most 256 MiB of body bytes actually **buffered** (not the signed sizes,
-which slow uploads inflated) — `503 busy` + `Retry-After` past any, at once,
-never queued: a client stalling header-only uploads holds its own 3, a
-whole /48 its 6, never the node (third review A5, fourth review
-A5-residual). The slot is given back
+one coarser network prefix (IPv6 /48, IPv4 /24) at most 6, and a node at
+most 32 bodies whose signed sizes together stay within 256 MiB — each body
+counted from admission until its upload is stored (a stalled body holds its
+slot whatever it has sent; a finished one still waits for the node's lock
+and the hash). `503 busy` + `Retry-After` past any, at once, never queued:
+a client stalling header-only uploads holds its own 3, a whole /48 its 6,
+and the node can't be made to hold more than 256 MiB of bodies (third
+review A5, fourth review A5-residual, final check N2). Residual: about six
+/48s each holding six slow 8 MiB bodies (≥ 64 KiB per 5 s keeps them alive,
+so ~11 minutes each) can occupy a node's body slots; others get `503 busy`
++ `Retry-After` meanwhile, and the other nodes of a cluster are not
+affected. The slot is given back
 on any of these —
 so neither an unauthorized caller nor a scope over its rate makes the server
 buffer a byte. A captured upload replayed within the ±300 s
