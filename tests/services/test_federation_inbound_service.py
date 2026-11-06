@@ -5388,9 +5388,13 @@ class _GfsMediaSink:
 
     def __init__(self):
         self.received: list[tuple] = []
+        self.items: list[tuple] = []
 
-    async def receive(self, space_id, raw_refs, media_urls, *, prefetch=True):
+    async def receive(
+        self, space_id, raw_refs, media_urls, *, item_id, origin="", prefetch=True
+    ):
         self.received.append((space_id, raw_refs, list(media_urls)))
+        self.items.append((item_id, origin))
         return []
 
 
@@ -5422,6 +5426,8 @@ async def test_space_post_media_refs_are_kept_for_a_gfs_fetch(db, bus, inbound):
         )
     )
     assert sink.received == [("sp-g", refs, ["api/media/a.webp"])]
+    # Bound to the post and the household that delivered it (review C).
+    assert sink.items == [("post-g", "peer-a")]
 
 
 async def test_a_picture_plus_link_card_post_keeps_its_media_refs(db, bus, inbound):

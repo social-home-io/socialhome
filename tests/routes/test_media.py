@@ -592,6 +592,8 @@ async def _gfs_held_picture(client, monkeypatch, *, name: str, data: bytes):
             }
         },
         [f"api/media/{name}"],
+        item_id="post-gfs",
+        origin="host",
         prefetch=False,
     )
     gfs = _OneBlobGfs(blob)

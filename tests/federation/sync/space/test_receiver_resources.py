@@ -19,6 +19,7 @@ from socialhome.domain.federation import (
     PairingStatus,
     RemoteInstance,
 )
+from socialhome.domain.post import Post, PostType
 from socialhome.domain.task import Task, TaskPriority, TaskStatus
 from socialhome.domain.timetable import (
     Timetable,
@@ -2091,9 +2092,22 @@ class _GfsMediaSink:
     def __init__(self):
         self.received: list[tuple] = []
 
-    async def receive(self, space_id, raw_refs, media_urls, *, prefetch=True):
-        self.received.append((space_id, raw_refs, list(media_urls)))
+    async def receive(
+        self, space_id, raw_refs, media_urls, *, item_id, origin="", prefetch=True
+    ):
+        self.received.append((space_id, raw_refs, list(media_urls), item_id, origin))
         return []
+
+
+class _SavingPostRepo(_PostRepoStub):
+    """Reads back what the receiver stored (the base stub reads only the
+    pre-held posts) — what ``_keep_media_refs`` checks a record against."""
+
+    async def get(self, post_id):
+        for space_id, post in reversed(self._c.posts):
+            if post.id == post_id:
+                return space_id, post
+        return await super().get(post_id)
 
 
 _SYNC_REFS = {"a.webp": {"blob_id": "a" * 64, "suite": "s", "epoch": 0, "size": 9}}
@@ -2101,6 +2115,7 @@ _SYNC_REFS = {"a.webp": {"blob_id": "a" * 64, "suite": "s", "epoch": 0, "size": 
 
 async def test_streamed_post_media_refs_are_kept(setup):
     r, c, kp = setup
+    r._space_post_repo = _SavingPostRepo(c)
     sink = _GfsMediaSink()
     r.attach_gfs_media(sink)
     await _send(
@@ -2127,7 +2142,10 @@ async def test_streamed_post_media_refs_are_kept(setup):
         ],
     )
     assert len(c.posts) == 2
-    assert sink.received == [("sp-1", _SYNC_REFS, ["api/media/a.webp"])]
+    # Bound to the record's item and the household that streamed it.
+    assert sink.received == [
+        ("sp-1", _SYNC_REFS, ["api/media/a.webp"], "p-m", "peer-a")
+    ]
 
 
 async def test_streamed_records_without_a_fetcher_store_nothing(setup):
@@ -2147,3 +2165,63 @@ async def test_streamed_records_without_a_fetcher_store_nothing(setup):
         ],
     )
     assert len(c.posts) == 1
+
+
+async def test_media_refs_of_a_record_persist_refused_are_not_kept(setup):
+    """#1309 review I: only records ``_persist`` accepted keep their
+    descriptor — a post deleted here (never re-saved) keeps none."""
+    r, c, kp = setup
+    r._space_post_repo = _SavingPostRepo(c)
+    c.held_posts["p-gone"] = Post(
+        id="p-gone",
+        author="u-1",
+        type=PostType.TEXT,
+        content="x",
+        created_at=None,
+        deleted=True,
+    )
+    sink = _GfsMediaSink()
+    r.attach_gfs_media(sink)
+    await _send(
+        r,
+        kp,
+        "posts",
+        [
+            {
+                "id": "p-gone",
+                "author": "u-1",
+                "type": "image",
+                "image_urls": ["api/media/a.webp"],
+                "media_refs": _SYNC_REFS,
+            }
+        ],
+    )
+    assert c.posts == []
+    assert sink.received == []
+
+
+async def test_media_refs_are_checked_against_the_stored_row(setup):
+    """The allowed files are the STORED post's (what the household shows),
+    never the record's own claim: a reserved name the record lists is not
+    in the stored post, so it is not offered."""
+    r, c, kp = setup
+    r._space_post_repo = _SavingPostRepo(c)
+    sink = _GfsMediaSink()
+    r.attach_gfs_media(sink)
+    await _send(
+        r,
+        kp,
+        "posts",
+        [
+            {
+                "id": "p-r",
+                "author": "u-1",
+                "type": "image",
+                "image_urls": ["api/media/gm-moment.webp", "api/media/a.webp"],
+                "media_refs": _SYNC_REFS,
+            }
+        ],
+    )
+    assert sink.received == [
+        ("sp-1", _SYNC_REFS, ["api/media/a.webp"], "p-r", "peer-a")
+    ]

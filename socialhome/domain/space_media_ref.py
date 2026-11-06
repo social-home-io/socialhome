@@ -70,6 +70,12 @@ class SpaceMediaRef:
     #: and how its address binds that scope.
     scope: str
     addr_suite: str
+    #: The item that introduced the file here (a post, calendar event or
+    #: gallery item id) and the household that delivered it — the row is
+    #: bound to them: a descriptor of the same file from another item or
+    #: space is refused (write-once). Never on the wire.
+    item_id: str = ""
+    origin: str = ""
     created_at: str | None = None
 
     def to_wire(self) -> dict:
@@ -142,7 +148,12 @@ def post_media_urls(post: Post) -> list[str]:
 
 
 def parse_media_refs(
-    raw: object, *, space_id: str, allowed: Collection[str]
+    raw: object,
+    *,
+    space_id: str,
+    allowed: Collection[str],
+    item_id: str = "",
+    origin: str = "",
 ) -> list[SpaceMediaRef]:
     """The well-formed entries of a received descriptor.
 
@@ -196,6 +207,8 @@ def parse_media_refs(
                 size=int(size),  # type: ignore[arg-type]
                 scope=str(scope),
                 addr_suite=str(addr_suite),
+                item_id=item_id,
+                origin=origin,
             )
         )
     return out

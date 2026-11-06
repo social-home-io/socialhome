@@ -562,6 +562,8 @@ class SpacePublicInbound:
                 space_id,
                 inner.get(MEDIA_REFS_FIELD),
                 post_media_urls(post),
+                item_id=post.id,
+                origin=origin_instance_id,
             )
         await self._bus.publish(
             SpacePostCreated(

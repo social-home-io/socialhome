@@ -31,6 +31,8 @@ def _ref(name: str = "a.webp", space_id: str = "sp-1", **kw) -> SpaceMediaRef:
         "size": 65_564,
         "scope": "space",
         "addr_suite": "sm1",
+        "item_id": "post-1",
+        "origin": "peer-a",
     }
     args.update(kw)
     return SpaceMediaRef(**args)
@@ -64,13 +66,6 @@ async def test_save_many_empty_is_a_no_op(repo) -> None:
     await repo.save_many([])
 
 
-async def test_a_newer_descriptor_of_the_same_space_replaces(repo) -> None:
-    await repo.save_many([_ref(epoch=1)])
-    await repo.save_many([_ref(epoch=2, blob_id="c" * 64, scope="channel")])
-    got = await repo.get("a.webp")
-    assert (got.epoch, got.blob_id, got.scope) == (2, "c" * 64, "channel")
-
-
 async def test_another_space_cannot_claim_a_file(repo) -> None:
     """A filename one space described is never re-pointed by another
     space's descriptor."""
@@ -85,7 +80,21 @@ async def test_unknown_space_is_skipped(repo) -> None:
     assert await repo.get("a.webp") is None
 
 
-async def test_delete(repo) -> None:
-    await repo.save_many([_ref()])
-    await repo.delete("a.webp")
-    assert await repo.get("a.webp") is None
+async def test_a_row_is_write_once(repo) -> None:
+    """#1309 review C: the first descriptor of a file is kept; a later one
+    — even of the same item, even a fresher epoch — never re-points it."""
+    await repo.save_many([_ref(epoch=1)])
+    await repo.save_many([_ref(epoch=2, blob_id="c" * 64, scope="channel")])
+    got = await repo.get("a.webp")
+    assert (got.epoch, got.blob_id, got.scope) == (1, "a" * 64, "space")
+
+
+async def test_the_row_names_the_item_and_household_that_introduced_it(repo) -> None:
+    await repo.save_many([_ref(item_id="ev-9", origin="peer-b")])
+    got = await repo.get("a.webp")
+    assert (got.item_id, got.origin) == ("ev-9", "peer-b")
+
+
+async def test_the_repo_has_no_delete() -> None:
+    """Rows go with their space (ON DELETE CASCADE); nothing else deletes."""
+    assert not hasattr(SqliteSpaceMediaRefRepo, "delete")

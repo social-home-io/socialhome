@@ -85,6 +85,7 @@ from ....domain.space import (
 from ....domain.space_media_ref import (
     MEDIA_REF_RESOURCES,
     MEDIA_REFS_FIELD,
+    post_media_urls,
     record_media_urls,
 )
 from ....domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
@@ -483,6 +484,8 @@ class _GfsMediaSink(Protocol):
         raw_refs: object,
         media_urls: list[str],
         *,
+        item_id: str,
+        origin: str = "",
         prefetch: bool = True,
     ) -> Any: ...
 
@@ -643,15 +646,59 @@ class SpaceSyncReceiver:
         self._gfs_media = fetcher
 
     async def _keep_media_refs(
-        self, resource: str, space_id: str, records: list[dict[str, Any]]
+        self,
+        resource: str,
+        space_id: str,
+        records: list[dict[str, Any]],
+        provider: str,
     ) -> None:
+        """Keep the ``media_refs`` of the records ``_persist`` actually
+        stored here — checked against the STORED row's files (what this
+        household shows), never the record's own claim — bound to the
+        record's item and the household that streamed it."""
         if self._gfs_media is None or resource not in MEDIA_REF_RESOURCES:
             return
         for r in records:
-            if MEDIA_REFS_FIELD in r:
-                await self._gfs_media.receive(
-                    space_id, r[MEDIA_REFS_FIELD], record_media_urls(resource, r)
-                )
+            if MEDIA_REFS_FIELD not in r:
+                continue
+            item_id = str(r.get("id") or "")
+            urls = await self._stored_media_urls(resource, space_id, item_id)
+            if not urls:
+                continue
+            await self._gfs_media.receive(
+                space_id,
+                r[MEDIA_REFS_FIELD],
+                urls,
+                item_id=item_id,
+                origin=provider,
+            )
+
+    async def _stored_media_urls(
+        self, resource: str, space_id: str, item_id: str
+    ) -> list[str]:
+        """The files of item *item_id* as stored here in *space_id* (live,
+        not deleted), or ``[]`` when it isn't stored there."""
+        if not item_id:
+            return []
+        if resource == "posts":
+            held = await self._space_post_repo.get(item_id)
+            if held is None or held[0] != space_id or held[1].deleted:
+                return []
+            return post_media_urls(held[1])
+        if resource == "calendar":
+            held_event = await self._space_calendar_repo.get_event(item_id)
+            if held_event is None or held_event[0] != space_id:
+                return []
+            return record_media_urls("calendar", {"cover_url": held_event[1].cover_url})
+        if resource == "gallery":
+            item = await self._gallery_repo.get_item(item_id)
+            album = await self._gallery_repo.get_album(item.album_id) if item else None
+            if item is None or album is None or album.space_id != space_id:
+                return []
+            return record_media_urls(
+                "gallery", {"thumbnail_url": item.thumbnail_url, "url": item.url}
+            )
+        return []
 
     def attach_chat_sink(self, sink: ChatSyncSink) -> None:
         """Wire where streamed space-chat messages (v_55) are applied."""
@@ -1071,7 +1118,7 @@ class SpaceSyncReceiver:
             await self._persist(
                 resource, space_id, records, provider=provider, held_back=held_back
             )
-            await self._keep_media_refs(resource, space_id, records)
+            await self._keep_media_refs(resource, space_id, records, provider)
         return held_back
 
     async def _apply_picture_resets(

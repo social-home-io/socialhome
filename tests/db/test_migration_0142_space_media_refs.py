@@ -47,6 +47,8 @@ def test_table_shape(tmp_path):
         "size",
         "scope",
         "addr_suite",
+        "item_id",
+        "origin",
         "created_at",
     }
 
@@ -57,8 +59,8 @@ def test_row_round_trip_and_cascade(tmp_path):
     _space(c)
     c.execute(
         "INSERT INTO space_media_refs(filename, space_id, blob_id, suite, epoch,"
-        " size, scope, addr_suite) VALUES('a.webp', 'sp-1', ?,"
-        " 'aesgcm-256-pad-det', 3, 65564, 'space', 'sm1')",
+        " size, scope, addr_suite, item_id) VALUES('a.webp', 'sp-1', ?,"
+        " 'aesgcm-256-pad-det', 3, 65564, 'space', 'sm1', 'post-1')",
         ("a" * 64,),
     )
     row = c.execute("SELECT * FROM space_media_refs").fetchone()
@@ -74,8 +76,8 @@ def test_filename_is_the_key(tmp_path):
     _space(c)
     ins = (
         "INSERT INTO space_media_refs(filename, space_id, blob_id, suite, epoch,"
-        " size, scope, addr_suite) VALUES('a.webp', 'sp-1', ?, 's', 0, 1,"
-        " 'space', 'sm1')"
+        " size, scope, addr_suite, item_id) VALUES('a.webp', 'sp-1', ?, 's', 0, 1,"
+        " 'space', 'sm1', 'post-1')"
     )
     c.execute(ins, ("a" * 64,))
     with pytest.raises(sqlite3.IntegrityError):
@@ -89,15 +91,15 @@ def test_size_and_epoch_checks(tmp_path):
     with pytest.raises(sqlite3.IntegrityError):
         c.execute(
             "INSERT INTO space_media_refs(filename, space_id, blob_id, suite,"
-            " epoch, size, scope, addr_suite) VALUES('a.webp', 'sp-1', ?, 's',"
-            " -1, 1, 'space', 'sm1')",
+            " epoch, size, scope, addr_suite, item_id) VALUES('a.webp', 'sp-1', ?, 's',"
+            " -1, 1, 'space', 'sm1', 'post-1')",
             ("a" * 64,),
         )
     with pytest.raises(sqlite3.IntegrityError):
         c.execute(
             "INSERT INTO space_media_refs(filename, space_id, blob_id, suite,"
-            " epoch, size, scope, addr_suite) VALUES('a.webp', 'sp-1', ?, 's',"
-            " 0, 0, 'space', 'sm1')",
+            " epoch, size, scope, addr_suite, item_id) VALUES('a.webp', 'sp-1', ?, 's',"
+            " 0, 0, 'space', 'sm1', 'post-1')",
             ("a" * 64,),
         )
 
@@ -109,7 +111,7 @@ def test_the_scope_is_space_or_channel(tmp_path):
     with pytest.raises(sqlite3.IntegrityError):
         c.execute(
             "INSERT INTO space_media_refs(filename, space_id, blob_id, suite,"
-            " epoch, size, scope, addr_suite) VALUES('a.webp', 'sp-1', ?, 's',"
-            " 0, 1, 'galaxy', 'sm1')",
+            " epoch, size, scope, addr_suite, item_id) VALUES('a.webp', 'sp-1', ?, 's',"
+            " 0, 1, 'galaxy', 'sm1', 'post-1')",
             ("a" * 64,),
         )

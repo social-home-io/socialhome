@@ -2230,9 +2230,13 @@ async def test_an_early_comment_is_held_and_replayed_with_its_post(item_env):
 class _GfsMediaSink:
     def __init__(self):
         self.received: list[tuple] = []
+        self.items: list[tuple] = []
 
-    async def receive(self, space_id, raw_refs, media_urls, *, prefetch=True):
+    async def receive(
+        self, space_id, raw_refs, media_urls, *, item_id, origin="", prefetch=True
+    ):
         self.received.append((space_id, raw_refs, list(media_urls)))
+        self.items.append((item_id, origin))
         return []
 
 

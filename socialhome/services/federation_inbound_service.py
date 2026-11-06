@@ -1982,6 +1982,8 @@ class FederationInboundService(ProtectionGateMixin):
                 space_id,
                 event.payload.get(MEDIA_REFS_FIELD),
                 post_media_urls(post),
+                item_id=post.id,
+                origin=event.from_instance,
             )
         if existing is not None:
             await self._bus.publish(

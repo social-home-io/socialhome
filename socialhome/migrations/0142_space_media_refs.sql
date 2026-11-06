@@ -40,6 +40,12 @@ CREATE TABLE IF NOT EXISTS space_media_refs (
     -- knows itself — the space id, or its own channel id.
     scope       TEXT NOT NULL CHECK (scope IN ('space', 'channel')),
     addr_suite  TEXT NOT NULL,
+    -- The item that introduced the file here (post / calendar event /
+    -- gallery item id) and the household that delivered it: the row is
+    -- bound to them and written once — a descriptor of the same file from
+    -- another item or space never re-points it.
+    item_id     TEXT NOT NULL,
+    origin      TEXT NOT NULL DEFAULT '',
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_space_media_refs_space

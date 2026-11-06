@@ -21,8 +21,6 @@ class AbstractSpaceMediaRefRepo(Protocol):
 
     async def get(self, filename: str) -> SpaceMediaRef | None: ...
 
-    async def delete(self, filename: str) -> None: ...
-
 
 class SqliteSpaceMediaRefRepo:
     """SQLite-backed :class:`AbstractSpaceMediaRefRepo`."""
@@ -33,26 +31,19 @@ class SqliteSpaceMediaRefRepo:
         self._db = db
 
     async def save_many(self, refs: Sequence[SpaceMediaRef]) -> None:
-        """Keep each descriptor entry. A newer entry for a file of the SAME
-        space replaces the old one (a re-sealed blob, a later epoch); a file
-        another space already described is never re-pointed, and an entry
-        for a space this household does not hold is dropped."""
+        """Keep each descriptor entry, write-once: a file already described
+        (by any item, of any space) is never re-pointed, and an entry for a
+        space this household does not hold is dropped. The caller refuses a
+        conflicting descriptor before it gets here (and logs it)."""
         for ref in refs:
             await self._db.enqueue(
                 """
                 INSERT INTO space_media_refs(
                     filename, space_id, blob_id, suite, epoch, size, scope,
-                    addr_suite)
-                SELECT ?, ?, ?, ?, ?, ?, ?, ?
+                    addr_suite, item_id, origin)
+                SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 WHERE EXISTS (SELECT 1 FROM spaces WHERE id = ?)
-                ON CONFLICT(filename) DO UPDATE SET
-                    blob_id = excluded.blob_id,
-                    suite = excluded.suite,
-                    epoch = excluded.epoch,
-                    size = excluded.size,
-                    scope = excluded.scope,
-                    addr_suite = excluded.addr_suite
-                WHERE space_media_refs.space_id = excluded.space_id
+                ON CONFLICT(filename) DO NOTHING
                 """,
                 (
                     ref.filename,
@@ -63,6 +54,8 @@ class SqliteSpaceMediaRefRepo:
                     ref.size,
                     ref.scope,
                     ref.addr_suite,
+                    ref.item_id,
+                    ref.origin,
                     ref.space_id,
                 ),
             )
@@ -70,7 +63,8 @@ class SqliteSpaceMediaRefRepo:
     async def get(self, filename: str) -> SpaceMediaRef | None:
         row = await self._db.fetchone(
             "SELECT filename, space_id, blob_id, suite, epoch, size, scope,"
-            " addr_suite, created_at FROM space_media_refs WHERE filename = ?",
+            " addr_suite, item_id, origin, created_at FROM space_media_refs"
+            " WHERE filename = ?",
             (filename,),
         )
         if row is None:
@@ -84,10 +78,7 @@ class SqliteSpaceMediaRefRepo:
             size=int(row["size"]),
             scope=row["scope"],
             addr_suite=row["addr_suite"],
+            item_id=row["item_id"],
+            origin=row["origin"],
             created_at=row["created_at"],
-        )
-
-    async def delete(self, filename: str) -> None:
-        await self._db.enqueue(
-            "DELETE FROM space_media_refs WHERE filename = ?", (filename,)
         )

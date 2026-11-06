@@ -142,19 +142,44 @@ class SpaceMediaGfsFetcher:
         raw_refs: object,
         media_urls: Iterable[str | None],
         *,
+        item_id: str,
+        origin: str = "",
         prefetch: bool = True,
     ) -> list[SpaceMediaRef]:
-        """Keep the descriptor entries of an item of *space_id* that shows
-        *media_urls*; prefetch its pictures. Never raises."""
+        """Keep the descriptor entries of item *item_id* of *space_id*
+        (delivered by household *origin*) for the files it shows
+        (*media_urls*); prefetch its pictures. Never raises.
+
+        A file's row is bound to the item that introduced it and written
+        once: a descriptor of an already described file from another item
+        or space is refused with a WARNING (never re-points it), a
+        redelivery of the same item is a no-op."""
         # Never a name another receiving path owns (DM / moment media).
         allowed = {
             name for name in media_names(media_urls) if not is_reserved_media_name(name)
         }
-        refs = parse_media_refs(raw_refs, space_id=space_id, allowed=allowed)
-        if not refs:
-            return []
+        parsed = parse_media_refs(
+            raw_refs,
+            space_id=space_id,
+            allowed=allowed,
+            item_id=item_id,
+            origin=origin,
+        )
+        refs: list[SpaceMediaRef] = []
         try:
-            await self._refs.save_many(refs)
+            for ref in parsed:
+                held = await self._refs.get(ref.filename)
+                if held is None:
+                    refs.append(ref)
+                elif (held.space_id, held.item_id) != (space_id, item_id):
+                    log.warning(
+                        "space media %s: described by another item or space "
+                        "already — descriptor from %s refused",
+                        ref.filename,
+                        origin or "a relay",
+                    )
+            if refs:
+                await self._refs.save_many(refs)
         except Exception:
             log.warning(
                 "space media refs of space %s not stored", space_id, exc_info=True
