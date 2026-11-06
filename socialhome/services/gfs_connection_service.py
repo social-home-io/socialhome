@@ -78,7 +78,13 @@ from ..crypto import b64url_encode, ed25519_public_key, sign_ed25519
 from ..domain.errors import SpaceNotPublishableError, TierChangeRequiredError
 from ..domain.federation import GfsConnection, GfsSpacePublication
 from ..domain.gfs_server import GfsServer
-from ..domain.gfs_space_media import SPACE_MEDIA_AUTH_HEADER, SPACE_MEDIA_CAPABILITY
+from ..domain.gfs_space_media import (
+    MEDIA_SCOPES,
+    SCOPE_CHANNEL,
+    SCOPE_SPACE,
+    SPACE_MEDIA_AUTH_HEADER,
+    SPACE_MEDIA_CAPABILITY,
+)
 from ..domain.media_constraints import (
     SPACE_IMAGE_DATA_URI_PREFIX,
     SPACE_IMAGE_EMBED_MAX_BYTES,
@@ -123,16 +129,23 @@ log = logging.getLogger(__name__)
 SPACE_MEDIA_PUT_TIMEOUT_S: float = 120.0
 
 
-def _space_media_limit(caps: dict) -> int | None:
-    """``max_blob_bytes`` of a verified ``space_media`` capability entry,
-    or ``None`` when absent / malformed."""
+#: Upload route per scope (``…/{scope_id}/media/{blob_id}``).
+_MEDIA_SCOPE_PATH: dict[str, str] = {SCOPE_SPACE: "spaces", SCOPE_CHANNEL: "channels"}
+
+
+def _space_media_limit(caps: dict) -> tuple[int, frozenset[str]] | None:
+    """``(max_blob_bytes, scopes)`` of a verified ``space_media`` capability
+    entry, or ``None`` when absent / malformed."""
     entry = caps.get(SPACE_MEDIA_CAPABILITY)
     if not isinstance(entry, dict):
         return None
     limit = entry.get("max_blob_bytes")
+    scopes = entry.get("scopes")
     if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
         return None
-    return limit
+    if not isinstance(scopes, list) or not all(isinstance(x, str) for x in scopes):
+        return None
+    return limit, frozenset(scopes) & MEDIA_SCOPES
 
 
 #: Characters of a *remote-authored* error body that may be interpolated
@@ -519,7 +532,7 @@ class GfsConnectionService:
         # the server proved it takes, by connection. Uploads go only to a
         # server that proved it; absent = not proven (re-probed, never a
         # sticky no).
-        self._space_media: dict[str, int] = {}
+        self._space_media: dict[str, tuple[int, frozenset[str]]] = {}
         # …and ``moment_reactions`` (v_68): the GFS takes a follower's sealed
         # reaction and pushes it to the author's household only.
         self._moment_reactions: dict[str, bool] = {}
@@ -3241,10 +3254,13 @@ class GfsConnectionService:
 
     # ── Space media cache (``space_media``) ─────────────────────────────
 
-    async def space_media_max_blob(self, conn: GfsConnection) -> int | None:
+    async def space_media_max_blob(
+        self, conn: GfsConnection, *, scope: str = SCOPE_SPACE
+    ) -> int | None:
         """The largest space media blob *conn*'s GFS proved (under a valid
-        signature, the ``space_media`` capability) it keeps, or ``None``
-        when it proved nothing — then no space media is uploaded there.
+        signature, the ``space_media`` capability) it keeps under *scope*
+        (``space`` / ``channel``), or ``None`` when it proved nothing for
+        that scope — then no space media of it is uploaded there.
         Same discipline as :meth:`_signed_capability_supported`: RAM cache
         when warm, one probe on a cold miss, the negative TTL after an
         unreachable probe, never a sticky "no"."""
@@ -3255,7 +3271,7 @@ class GfsConnectionService:
             return None
         cached = self._space_media.get(conn.id)
         if cached is not None:
-            return cached
+            return cached[0] if scope in cached[1] else None
         failed_at = self._info_failed_at.get(conn.id)
         if failed_at is not None and time.monotonic() - failed_at < (
             GFS_INFO_NEGATIVE_TTL_S
@@ -3265,10 +3281,11 @@ class GfsConnectionService:
         if info is None:
             return None
         caps = self._verified_capabilities(conn, info)
-        limit = _space_media_limit(caps) if caps is not None else None
-        if limit is not None:
-            self._space_media[conn.id] = limit
-        return limit
+        proven = _space_media_limit(caps) if caps is not None else None
+        if proven is None:
+            return None
+        self._space_media[conn.id] = proven
+        return proven[0] if scope in proven[1] else None
 
     async def space_media_follower_targets(self, space_id: str) -> list[GfsConnection]:
         """The GFSs whose followers of *space_id* read its content — where
@@ -3294,21 +3311,25 @@ class GfsConnectionService:
         self,
         conn: GfsConnection,
         *,
-        space_id: str,
+        scope: str,
+        scope_id: str,
         blob_id: str,
         blob: bytes,
         auth_header: str,
         identified: bool = False,
     ) -> int | None:
-        """``PUT /gfs/spaces/{space_id}/media/{blob_id}`` — one sealed blob,
+        """``PUT /gfs/spaces/{space_id}/media/{blob_id}`` (scope ``space``)
+        or ``PUT /gfs/channels/{channel_id}/media/{blob_id}`` (scope
+        ``channel``, a private space's opaque channel) — one sealed blob,
         authorized by *auth_header* (:mod:`socialhome.domain.gfs_space_media`).
         The request names no household: it rides the cookie-less session
         (:meth:`anon_session`). An ``identified`` upload (a writer cert names
         our household key) never goes to a server we are not registered on.
         Returns the HTTP status, or ``None`` when nothing could be sent."""
-        if identified and not conn.registered:
+        segment = _MEDIA_SCOPE_PATH.get(scope)
+        if segment is None or (identified and not conn.registered):
             return None
-        url = f"{conn.inbox_url.rstrip('/')}/gfs/spaces/{space_id}/media/{blob_id}"
+        url = f"{conn.inbox_url.rstrip('/')}/gfs/{segment}/{scope_id}/media/{blob_id}"
         headers = {
             SPACE_MEDIA_AUTH_HEADER: auth_header,
             "Content-Type": "application/octet-stream",
@@ -3335,13 +3356,13 @@ class GfsConnectionService:
     async def fetch_space_media(
         self, base_url: str, blob_id: str, *, max_bytes: int, timeout_s: float
     ) -> bytes | None:
-        """``GET /gfs/spaces/media/{blob_id}`` from the GFS at *base_url* —
-        anonymous, no credential (the path names no space). ``None`` on a
+        """``GET /gfs/media/{blob_id}`` from the GFS at *base_url* —
+        anonymous, no credential (the path names no space or channel). ``None`` on a
         miss, a transport error, or a body past *max_bytes*. The caller
         checks the hash and decrypts."""
         if not is_blob_id(blob_id) or not base_url:
             return None
-        url = f"{base_url.rstrip('/')}/gfs/spaces/media/{blob_id}"
+        url = f"{base_url.rstrip('/')}/gfs/media/{blob_id}"
         try:
             async with self._client().get(
                 url,

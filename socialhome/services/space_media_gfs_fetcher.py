@@ -14,7 +14,7 @@ This service:
   ``GET /api/media/{filename}`` for a missing file): concurrent requests for
   one file share one fetch, bounded by a timeout.
 
-A fetch reads ``GET /gfs/spaces/media/{blob_id}`` (anonymous) from the GFS
+A fetch reads ``GET /gfs/media/{blob_id}`` (anonymous) from the GFS
 this household reaches the space through — the link-joined pair's
 ``relay_via`` first, then its own GFS connections — checks the SHA-256
 against ``blob_id``, decrypts with the epoch's media key

@@ -1265,7 +1265,7 @@ from __future__ import annotations
 #:   HKDF of the epoch's content key, deterministic nonce, suite
 #:   ``aesgcm-256-pad-det``) and uploads it once per GFS that proved the
 #:   signed ``space_media`` capability; the reader fetches it from its own
-#:   GFS (``GET /gfs/spaces/media/{blob_id}``), checks the hash, decrypts
+#:   GFS (``GET /gfs/media/{blob_id}``), checks the hash, decrypts
 #:   and stores it under the same file name (``space_media_refs``, migration
 #:   0142). The §25.6 ``posts`` / ``calendar`` / ``gallery`` records streamed
 #:   to such a member carry the same descriptor (sync line 80), and its

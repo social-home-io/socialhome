@@ -79,7 +79,9 @@ def _info(space_media) -> dict:
 
 
 async def test_capability_read_from_the_signed_block(env):
-    session = _MediaSession(info=_info({"max_blob_bytes": 8_388_640, "ttl_s": 259200}))
+    session = _MediaSession(
+        info=_info({"max_blob_bytes": 8_388_640, "ttl_s": 259200, "scopes": ["space"]})
+    )
     svc = await _svc(env, session)
     conn = await env[1].get("g1")
     assert await svc.space_media_max_blob(conn) == 8_388_640
@@ -110,8 +112,10 @@ async def test_a_warm_info_fetch_records_it_and_forgetting_drops_it(env):
     session = _MediaSession()
     svc = await _svc(env, session)
     conn = await env[1].get("g1")
-    svc._record_capabilities(conn, _info({"max_blob_bytes": 4096, "ttl_s": 600}))
-    assert svc._space_media["g1"] == 4096
+    svc._record_capabilities(
+        conn, _info({"max_blob_bytes": 4096, "ttl_s": 600, "scopes": ["space"]})
+    )
+    assert svc._space_media["g1"] == (4096, frozenset({"space"}))
     svc._forget_listing("g1")
     assert "g1" not in svc._space_media
 
@@ -121,7 +125,12 @@ async def test_put_sends_the_raw_blob_with_the_auth_header(env):
     svc = await _svc(env, session)
     conn = await env[1].get("g1")
     status = await svc.put_space_media(
-        conn, space_id="sp", blob_id=BID, blob=b"cipher", auth_header="hdr"
+        conn,
+        scope="space",
+        scope_id="sp",
+        blob_id=BID,
+        blob=b"cipher",
+        auth_header="hdr",
     )
     assert status == 200
     url, data, headers = session.puts[0]
@@ -139,7 +148,7 @@ async def test_put_transport_error_is_none(env):
     conn = await env[1].get("g1")
     assert (
         await svc.put_space_media(
-            conn, space_id="sp", blob_id=BID, blob=b"x", auth_header="h"
+            conn, scope="space", scope_id="sp", blob_id=BID, blob=b"x", auth_header="h"
         )
         is None
     )
@@ -152,7 +161,8 @@ async def test_an_identified_put_never_goes_to_a_listing_target(env):
     assert (
         await svc.put_space_media(
             listing,
-            space_id="sp",
+            scope="space",
+            scope_id="sp",
             blob_id=BID,
             blob=b"x",
             auth_header="h",
@@ -170,7 +180,8 @@ async def test_fetch_reads_the_blob(env):
         "https://g1.example", BID, max_bytes=100, timeout_s=5
     )
     assert got == b"sealed-bytes"
-    assert session.gets[-1] == f"https://g1.example/gfs/spaces/media/{BID}"
+    # The fetch names no scope: a channel's blob is never marked "space".
+    assert session.gets[-1] == f"https://g1.example/gfs/media/{BID}"
 
 
 async def test_fetch_bounds_and_misses(env):
@@ -230,3 +241,43 @@ async def _publishable_follower_svc(env, session, *, space_type: str):
     )
     await env[1].publish_space("sp-f", "g1")
     return svc
+
+
+async def test_the_capability_says_which_scopes_it_serves(env):
+    session = _MediaSession(
+        info=_info({"max_blob_bytes": 4096, "ttl_s": 600, "scopes": ["space"]})
+    )
+    svc = await _svc(env, session)
+    conn = await env[1].get("g1")
+    assert await svc.space_media_max_blob(conn, scope="space") == 4096
+    assert await svc.space_media_max_blob(conn, scope="channel") is None
+    both = _info({"max_blob_bytes": 4096, "ttl_s": 600, "scopes": ["channel", "space"]})
+    svc = await _svc(env, _MediaSession(info=both))
+    assert await svc.space_media_max_blob(conn, scope="channel") == 4096
+    # A malformed scope list proves nothing.
+    bad = _info({"max_blob_bytes": 4096, "ttl_s": 600, "scopes": "space"})
+    svc = await _svc(env, _MediaSession(info=bad))
+    assert await svc.space_media_max_blob(conn) is None
+
+
+async def test_a_channel_upload_goes_to_the_channel_route(env):
+    session = _MediaSession(put_status=201)
+    svc = await _svc(env, session)
+    conn = await env[1].get("g1")
+    await svc.put_space_media(
+        conn,
+        scope="channel",
+        scope_id="c" * 32,
+        blob_id=BID,
+        blob=b"x",
+        auth_header="h",
+    )
+    assert (
+        session.puts[0][0] == f"https://g1.example/gfs/channels/{'c' * 32}/media/{BID}"
+    )
+    assert (
+        await svc.put_space_media(
+            conn, scope="nope", scope_id="x", blob_id=BID, blob=b"x", auth_header="h"
+        )
+        is None
+    )

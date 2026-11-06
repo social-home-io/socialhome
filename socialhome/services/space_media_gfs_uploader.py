@@ -20,7 +20,11 @@ media is created in a space that has such readers, this household:
    this household holds the space seed (host or delegated admin), else the
    writer group key (strict mode), else our household's writer cert
    (trusted mode, the one identified kind — never to a server we are not
-   registered on). Never ``from_instance``.
+   registered on). Never ``from_instance``. A PRIVATE space reached through
+   its v_51 opaque channel uploads under the channel scope instead
+   (``PUT /gfs/channels/{channel_id}/media/{blob_id}``: the channel key for
+   a seed holder, else the member's channel writer key or channel cert from
+   its grant) — the GFS learns the channel id, never the space.
 
 ``200 already_stored`` is success (another uploader or an earlier try got
 there first). A refusal (403 / 413 / 422) is logged and dropped; a transport
@@ -47,20 +51,27 @@ from typing import TYPE_CHECKING
 import aiofiles
 import aiofiles.os
 
-from ..crypto import b64url_encode, sign_ed25519
+from ..crypto import b64url_decode, b64url_encode, sign_ed25519
 from ..domain.federation import InstanceSource
 from ..domain.federation_capabilities import FederationCapability
+from ..domain.gfs_channel import CHANNEL_SUITE_ED25519
 from ..domain.gfs_space_media import (
     AUTH_AUTHORITY,
+    AUTH_CHANNEL,
+    AUTH_CHANNEL_CERT,
     AUTH_WRITER_CERT,
     AUTH_WRITER_KEY,
+    SCOPE_CHANNEL,
+    SCOPE_SPACE,
     SPACE_MEDIA_SIG_SUITE_ED25519,
     SpaceMediaClaim,
     SpaceMediaUploadAuth,
 )
+from ..domain.space import SpaceType
 from ..domain.space_media_ref import SpaceMediaRef, media_refs_to_wire
 from ..domain.writer_cert import WRITER_SCOPE_WRITE, scope_permits
 from ..domain.writer_key import WRITER_KEY_SUITE_ED25519
+from ..gfs_channel import channel_pk_of, derive_channel_seed
 from ..moment_public_media import blob_id_of
 from ..space_media_seal import (
     MAX_SPACE_MEDIA_BYTES,
@@ -76,6 +87,7 @@ if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.space_repo import AbstractSpaceRepo
+    from .gfs_channel_service import GfsChannelService
     from .gfs_connection_service import GfsConnectionService
     from .space_crypto_service import SpaceContentEncryption
     from .space_writer_cert_service import SpaceWriterCertService
@@ -160,6 +172,7 @@ class SpaceMediaGfsUploader:
 
     __slots__ = (
         "_certs",
+        "_channels",
         "_crypto",
         "_described",
         "_dir",
@@ -193,6 +206,8 @@ class SpaceMediaGfsUploader:
         self._dir = pathlib.Path(media_dir)
         self._certs = writer_certs
         self._federation: FederationService | None = None
+        #: v_51 opaque channels — a private space's member grants.
+        self._channels: GfsChannelService | None = None
         self._identity_seed: bytes = b""
         self._queue: asyncio.Queue[_Job] = asyncio.Queue()
         self._stop = asyncio.Event()
@@ -208,6 +223,26 @@ class SpaceMediaGfsUploader:
 
     def attach_writer_certs(self, writer_certs: SpaceWriterCertService) -> None:
         self._certs = writer_certs
+
+    def attach_channels(self, channels: GfsChannelService) -> None:
+        """Wire the v_51 channel service: a private space with an opaque
+        channel uploads under the channel scope."""
+        self._channels = channels
+
+    async def scope_of(self, space_id: str) -> tuple[str, str]:
+        """``(scope, scope_id)`` *space_id*'s blobs are uploaded under: the
+        opaque channel of a PRIVATE space that uses one (``private_gfs``),
+        else the space itself (listed on the GFS)."""
+        space = await self._spaces.get(space_id)
+        if (
+            space is not None
+            and space.space_type is SpaceType.PRIVATE
+            and space.features.private_gfs
+        ):
+            stored = await self._spaces.get_gfs_channel(space_id)
+            if stored is not None:
+                return SCOPE_CHANNEL, stored[0]
+        return SCOPE_SPACE, space_id
 
     def attach_identity(self, *, own_identity_seed: bytes) -> None:
         self._identity_seed = own_identity_seed
@@ -243,14 +278,16 @@ class SpaceMediaGfsUploader:
                 out.append(conn)
         return out
 
-    async def _capable(self, conns: Iterable[GfsConnection]) -> list[GfsConnection]:
+    async def _capable(
+        self, conns: Iterable[GfsConnection], scope: str
+    ) -> list[GfsConnection]:
         out: list[GfsConnection] = []
         seen: set[str] = set()
         for conn in conns:
             if conn.id in seen:
                 continue
             seen.add(conn.id)
-            if await self._gfs.space_media_max_blob(conn) is not None:
+            if await self._gfs.space_media_max_blob(conn, scope=scope) is not None:
                 out.append(conn)
         return out
 
@@ -285,7 +322,8 @@ class SpaceMediaGfsUploader:
     async def _plan(
         self, space_id: str, names: list[str], conns: list[GfsConnection]
     ) -> SpaceMediaPlan | None:
-        targets = await self._capable(conns)
+        scope, _scope_id = await self.scope_of(space_id)
+        targets = await self._capable(conns, scope)
         if not targets:
             return None
         refs = await self._describe_names(space_id, names)
@@ -438,9 +476,10 @@ class SpaceMediaGfsUploader:
         blob = await self._reseal(ref)
         if blob is None:
             return
+        scope, scope_id = await self.scope_of(ref.space_id)
         retry: list[GfsConnection] = []
         for conn in todo:
-            limit = await self._gfs.space_media_max_blob(conn)
+            limit = await self._gfs.space_media_max_blob(conn, scope=scope)
             if limit is None or len(blob) > limit:
                 log.info(
                     "space media %s (%d bytes) is over what GFS %s keeps — not sent",
@@ -449,7 +488,7 @@ class SpaceMediaGfsUploader:
                     conn.id,
                 )
                 continue
-            status = await self._put(conn, ref, blob)
+            status = await self._put(conn, ref, blob, scope, scope_id)
             if status in _STATUS_STORED:
                 self._remember(conn.id, ref.blob_id)
                 log.info(
@@ -529,17 +568,27 @@ class SpaceMediaGfsUploader:
         return blob
 
     async def _put(
-        self, conn: GfsConnection, ref: SpaceMediaRef, blob: bytes
+        self,
+        conn: GfsConnection,
+        ref: SpaceMediaRef,
+        blob: bytes,
+        scope: str,
+        scope_id: str,
     ) -> int | None:
         now = int(time.time())
         claim = SpaceMediaClaim(
-            space_id=ref.space_id,
+            scope=scope,
+            scope_id=scope_id,
             blob_id=ref.blob_id,
             size=len(blob),
             expires_at=now + KEEP_S,
             ts=now,
         )
-        auth = await self._authorize(claim)
+        auth = (
+            await self._authorize_channel(claim, ref.space_id)
+            if scope == SCOPE_CHANNEL
+            else await self._authorize(claim)
+        )
         if auth is None:
             log.warning(
                 "space media %s of space %s: this household holds no seed, "
@@ -550,18 +599,78 @@ class SpaceMediaGfsUploader:
             return 403
         return await self._gfs.put_space_media(
             conn,
-            space_id=ref.space_id,
+            scope=scope,
+            scope_id=scope_id,
             blob_id=ref.blob_id,
             blob=blob,
             auth_header=auth.to_header(),
-            identified=auth.kind == AUTH_WRITER_CERT,
+            identified=auth.kind in (AUTH_WRITER_CERT, AUTH_CHANNEL_CERT),
+        )
+
+    async def _authorize_channel(
+        self, claim: SpaceMediaClaim, space_id: str
+    ) -> SpaceMediaUploadAuth | None:
+        """The channel scope's authorization: the channel key (a seed holder
+        whose seed derives the stored channel key), else the member's grant
+        for the current epoch — its channel writer key (anonymous), else its
+        channel cert (identified). Epochs on the wire are the grant's
+        shifted channel epoch, as on every channel request."""
+        try:
+            seed = await self._spaces.get_space_seed(space_id)
+        except RuntimeError:
+            seed = None
+        stored = await self._spaces.get_gfs_channel(space_id)
+        if seed is not None and stored is not None:
+            channel_id, channel_pk = stored
+            channel_seed = derive_channel_seed(seed, space_id, channel_id)
+            if (
+                channel_id == claim.scope_id
+                and channel_pk_of(channel_seed) == channel_pk
+            ):
+                return SpaceMediaUploadAuth(
+                    claim=claim,
+                    kind=AUTH_CHANNEL,
+                    sig=b64url_encode(
+                        sign_ed25519(channel_seed, claim.channel_signing_bytes())
+                    ),
+                    sig_suite=CHANNEL_SUITE_ED25519,
+                )
+        grant = (
+            await self._channels.current_grant(space_id)
+            if self._channels is not None
+            else None
+        )
+        if grant is None or grant.channel_id != claim.scope_id:
+            return None
+        epoch = grant.channel_epoch
+        if grant.writer_key is not None:
+            msg = claim.writer_signing_bytes(kind=AUTH_WRITER_KEY, epoch=epoch)
+            return SpaceMediaUploadAuth(
+                claim=claim,
+                kind=AUTH_WRITER_KEY,
+                sig=sign_with_writer_key(
+                    b64url_decode(grant.writer_key.writer_seed), msg
+                ),
+                sig_suite=CHANNEL_SUITE_ED25519,
+                epoch=epoch,
+            )
+        if grant.channel_cert is None or not self._identity_seed:
+            return None
+        msg = claim.writer_signing_bytes(kind=AUTH_CHANNEL_CERT, epoch=epoch)
+        return SpaceMediaUploadAuth(
+            claim=claim,
+            kind=AUTH_CHANNEL_CERT,
+            sig=b64url_encode(sign_ed25519(self._identity_seed, msg)),
+            sig_suite=SPACE_MEDIA_SIG_SUITE_ED25519,
+            epoch=epoch,
+            channel_cert=grant.channel_cert,
         )
 
     async def _authorize(self, claim: SpaceMediaClaim) -> SpaceMediaUploadAuth | None:
         """The strongest anonymous authorization this household holds: the
         space authority (seed holder), else the writer group key, else our
         writer cert (identified)."""
-        space_id = claim.space_id
+        space_id = claim.scope_id
         try:
             seed = await self._spaces.get_space_seed(space_id)
         except RuntimeError:

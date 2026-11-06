@@ -4,25 +4,39 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
 import pathlib
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 
+import orjson
 import pytest
 
 from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_MEDIA_PUT,
     verify_authority_event,
 )
-from socialhome.crypto import b64url_decode, generate_identity_keypair, verify_ed25519
+from socialhome.crypto import (
+    b64url_decode,
+    b64url_encode,
+    generate_identity_keypair,
+    verify_ed25519,
+)
 from socialhome.domain.federation import InstanceSource
 from socialhome.domain.federation_capabilities import FederationCapability
+from socialhome.domain.gfs_channel import CHANNEL_SUITE_ED25519
 from socialhome.domain.gfs_space_media import (
     AUTH_AUTHORITY,
+    AUTH_CHANNEL,
+    AUTH_CHANNEL_CERT,
     AUTH_WRITER_CERT,
     AUTH_WRITER_KEY,
+    CHANNEL_MEDIA_PUT_PREFIX,
     SpaceMediaUploadAuth,
 )
+from socialhome.domain.space import SpaceType
+from socialhome.gfs_channel import channel_pk_of, derive_channel_seed
 from socialhome.moment_public_media import blob_id_of
 from socialhome.services import space_media_gfs_uploader as up_mod
 from socialhome.services.space_media_gfs_uploader import SpaceMediaGfsUploader
@@ -51,14 +65,26 @@ class _Instance:
 
 
 class _Gfs:
-    def __init__(self, conns, *, max_blob=9_000_000, follower=(), status=201):
+    def __init__(
+        self,
+        conns,
+        *,
+        max_blob=9_000_000,
+        follower=(),
+        status=201,
+        scopes=("space", "channel"),
+    ):
         self.conns = {c.inbox_url: c for c in conns}
         self.max_blob = max_blob
         self.follower = list(follower)
         self.status = status
+        self.scopes = set(scopes)
         self.puts: list[tuple[str, str, str, bytes, str, bool]] = []
+        self.put_scopes: list[str] = []
 
-    async def space_media_max_blob(self, conn):
+    async def space_media_max_blob(self, conn, *, scope="space"):
+        if scope not in self.scopes:
+            return None
         if isinstance(self.max_blob, dict):
             return self.max_blob.get(conn.id)
         return self.max_blob
@@ -70,9 +96,10 @@ class _Gfs:
         return self.follower
 
     async def put_space_media(
-        self, conn, *, space_id, blob_id, blob, auth_header, identified=False
+        self, conn, *, scope, scope_id, blob_id, blob, auth_header, identified=False
     ):
-        self.puts.append((conn.id, space_id, blob_id, blob, auth_header, identified))
+        self.put_scopes.append(scope)
+        self.puts.append((conn.id, scope_id, blob_id, blob, auth_header, identified))
         status = self.status
         if isinstance(status, list):
             return status.pop(0)
@@ -109,11 +136,26 @@ class _Crypto:
 
 
 class _Spaces:
-    def __init__(self, seed=None):
+    def __init__(self, seed=None, *, channel=None, private_gfs=False):
         self.seed = seed
+        #: ``(channel_id, channel_pk)`` of a private space's opaque channel.
+        self.channel = channel
+        self.private_gfs = private_gfs
 
     async def get_space_seed(self, space_id):
         return self.seed
+
+    async def get(self, space_id):
+        if not self.private_gfs:
+            return SimpleNamespace(
+                space_type=SpaceType.GLOBAL, features=SimpleNamespace(private_gfs=False)
+            )
+        return SimpleNamespace(
+            space_type=SpaceType.PRIVATE, features=SimpleNamespace(private_gfs=True)
+        )
+
+    async def get_gfs_channel(self, space_id):
+        return self.channel
 
 
 @dataclass
@@ -166,9 +208,10 @@ def _uploader(
     seed=None,
     certs=None,
     identity_seed=b"\x01" * 32,
+    spaces=None,
 ):
     u = SpaceMediaGfsUploader(
-        space_repo=_Spaces(seed),
+        space_repo=spaces or _Spaces(seed),
         space_crypto=_Crypto(),
         federation_repo=_FedRepo(instances),
         gfs_service=gfs,
@@ -566,3 +609,130 @@ async def test_a_stored_upload_is_logged(tmp_path, caplog):
         await _upload(u, plan)
     line = next(r.getMessage() for r in caplog.records if "uploaded" in r.getMessage())
     assert "a.webp" in line and plan.refs[0].blob_id[:12] in line and "g1" in line
+
+
+# ── v_51 private spaces: the channel scope ──────────────────────────────
+
+CHANNEL_ID = "c" * 32
+
+
+@dataclass
+class _Grant:
+    channel_id: str = CHANNEL_ID
+    epoch: int = 4
+    epoch_offset: int = 1000
+    writer_key: object | None = None
+    channel_cert: object | None = None
+
+    @property
+    def channel_epoch(self):
+        return self.epoch + self.epoch_offset
+
+
+class _Channels:
+    def __init__(self, grant):
+        self.grant = grant
+
+    async def current_grant(self, space_id):
+        return self.grant
+
+
+def _channel_uploader(
+    tmp_path, gfs, *, seed=None, grant=None, identity_seed=b"\1" * 32
+):
+    channel_pk = (
+        channel_pk_of(derive_channel_seed(seed, SPACE, CHANNEL_ID)) if seed else "pk"
+    )
+    u = _uploader(
+        tmp_path,
+        gfs=gfs,
+        instances=[RELAY],
+        versions={"e": V},
+        identity_seed=identity_seed,
+        spaces=_Spaces(seed, channel=(CHANNEL_ID, channel_pk), private_gfs=True),
+    )
+    u.attach_channels(_Channels(grant))
+    return u
+
+
+async def test_a_private_space_with_a_channel_uses_the_channel_scope(tmp_path):
+    u = _channel_uploader(tmp_path, _Gfs([]))
+    assert await u.scope_of(SPACE) == ("channel", CHANNEL_ID)
+    plain = _uploader(tmp_path, gfs=_Gfs([]))
+    assert await plain.scope_of(SPACE) == ("space", SPACE)
+
+
+async def test_a_gfs_without_the_channel_scope_is_left_out(tmp_path):
+    _write(tmp_path, "a.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    u = _channel_uploader(tmp_path, _Gfs([g1], scopes=("space",)), seed=b"\3" * 32)
+    assert await u.plan(SPACE, ["api/media/a.webp"], followers=False) is None
+
+
+async def test_the_seed_holder_signs_with_the_channel_key(tmp_path):
+    _write(tmp_path, "a.webp", 10)
+    seed = b"\3" * 32
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1])
+    u = _channel_uploader(tmp_path, gfs, seed=seed)
+    await _upload(u, await u.plan(SPACE, ["api/media/a.webp"], followers=False))
+    assert gfs.put_scopes == ["channel"]
+    _c, scope_id, _b, _blob, header, identified = gfs.puts[0]
+    assert scope_id == CHANNEL_ID and identified is False
+    auth = SpaceMediaUploadAuth.from_header(header)
+    assert auth.kind == AUTH_CHANNEL and auth.sig_suite == CHANNEL_SUITE_ED25519
+    assert auth.claim.scope == "channel" and auth.claim.scope_id == CHANNEL_ID
+    channel_seed = derive_channel_seed(seed, SPACE, CHANNEL_ID)
+    assert verify_ed25519(
+        b64url_decode(channel_pk_of(channel_seed)),
+        auth.claim.channel_signing_bytes(),
+        b64url_decode(auth.sig),
+    )
+    assert auth.claim.channel_signing_bytes().startswith(CHANNEL_MEDIA_PUT_PREFIX)
+
+
+async def test_a_member_signs_with_its_channel_writer_key(tmp_path):
+    _write(tmp_path, "a.webp", 10)
+    wk = generate_identity_keypair()
+    grant = _Grant(
+        writer_key=SimpleNamespace(writer_seed=b64url_encode(wk.private_key))
+    )
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1])
+    u = _channel_uploader(tmp_path, gfs, grant=grant)
+    await _upload(u, await u.plan(SPACE, ["api/media/a.webp"], followers=False))
+    auth = SpaceMediaUploadAuth.from_header(gfs.puts[0][4])
+    assert auth.kind == AUTH_WRITER_KEY
+    assert auth.epoch == grant.channel_epoch  # the shifted epoch, never the content one
+    assert verify_ed25519(
+        wk.public_key,
+        auth.claim.writer_signing_bytes(
+            kind=AUTH_WRITER_KEY, epoch=grant.channel_epoch
+        ),
+        b64url_decode(auth.sig),
+    )
+
+
+async def test_a_member_without_the_writer_key_uses_its_channel_cert(tmp_path):
+    _write(tmp_path, "a.webp", 10)
+    ident = generate_identity_keypair()
+    cert = SimpleNamespace(to_wire=lambda: {"cert": "x"})
+    grant = _Grant(channel_cert=cert)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1])
+    u = _channel_uploader(tmp_path, gfs, grant=grant, identity_seed=ident.private_key)
+    await _upload(u, await u.plan(SPACE, ["api/media/a.webp"], followers=False))
+    _c, _s, _b, _blob, header, identified = gfs.puts[0]
+    assert identified is True
+    wire = orjson.loads(base64.urlsafe_b64decode(header + "=" * (-len(header) % 4)))
+    assert wire["auth"] == AUTH_CHANNEL_CERT and wire["channel_cert"] == {"cert": "x"}
+    assert wire["epoch"] == grant.channel_epoch
+
+
+async def test_no_channel_material_uploads_nothing(tmp_path):
+    _write(tmp_path, "a.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1])
+    u = _channel_uploader(tmp_path, gfs, grant=_Grant(channel_id="d" * 32))
+    await _upload(u, await u.plan(SPACE, ["api/media/a.webp"], followers=False))
+    assert gfs.puts == []

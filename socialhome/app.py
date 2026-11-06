@@ -4979,6 +4979,10 @@ def create_app(config: Config | None = None) -> web.Application:
             federation_service=federation_service,
             identity_seed=identity_seed,
         )
+        if gfs_channels is not None:
+            # A private space with an opaque channel uploads under its
+            # channel scope (the GFS never learns the space).
+            space_media_uploader.attach_channels(gfs_channels)
         space_post_outbound.attach_media_gfs(space_media_uploader)
         if space_public_outbound is not None:
             space_public_outbound.attach_media_gfs(space_media_uploader)

@@ -232,7 +232,14 @@ once and `PUT`s it once per GFS. Authorization, strongest first: the
 **space authority** signature (this household holds the space seed — host
 or delegated admin), else the **writer group key** (strict mode), else our
 household's **writer cert** (trusted mode — the one identified kind, never
-sent to a listing target we are not registered on). The request never names
+sent to a listing target we are not registered on). A **private** space that
+uses an opaque channel (v_51, `private_gfs` on) uploads under the GFS's
+**channel scope** instead — `PUT /gfs/channels/{channel_id}/media/{blob_id}`,
+only to a GFS whose signed `space_media.scopes` lists `channel` — so the GFS
+learns the random channel id, never the space: the **channel key** (a seed
+holder whose seed derives the stored channel key), else the member's
+**channel writer key** from its grant, else its **channel cert** (identified),
+always with the grant's shifted channel epoch. The request never names
 `from_instance`. `200 already_stored` is success (coalescing); a refusal
 (403 / 413 / 422) is a WARNING and dropped; a transport error, 408, 429 or
 5xx is retried at most 4 times (backoff 30 s, doubling). The queue is in
@@ -246,7 +253,7 @@ picture past the backlog — is fetched when first viewed: `GET
 /api/media/{filename}` for a missing file asks the fetcher, concurrent
 viewers share one fetch, each waits at most 20 s. A fetch tries the GFS the
 link-joined pair relays through (`relay_via`), then this household's own
-GFS connections (≤ 4 sources): `GET /gfs/spaces/media/{blob_id}`
+GFS connections (≤ 4 sources): `GET /gfs/media/{blob_id}`
 (anonymous), bounded by the descriptor's `size`, checks SHA-256 = `blob_id`,
 decrypts with the epoch's media key and writes the file write-once under
 its local name (the `SPACE_MEDIA_BLOB` rules above). An unknown suite, a
@@ -263,16 +270,16 @@ sequenceDiagram
     participant E as Link-joined member
     participant F as Follower
     Note over A: seal each file once (space key, deterministic nonce)
-    A->>G: PUT /gfs/spaces/{space}/media/{blob_id}<br/>X-SH-Space-Media-Auth (authority / writer key / writer cert)
+    A->>G: PUT /gfs/spaces/{space}/media/{blob_id}<br/>(or /gfs/channels/{channel}/media/{blob_id})<br/>X-SH-Space-Media-Auth
     G-->>A: 201 stored (200 already_stored)
     A->>G: POST /gfs/envelope (sealed SPACE_POST_CREATED + media_refs)
     G->>E: relay envelope
     A->>G: POST /gfs/publish (encrypted inner + media_refs)
     G->>F: relay space_post_public
-    E->>G: GET /gfs/spaces/media/{blob_id} (prefetch / on view)
+    E->>G: GET /gfs/media/{blob_id} (prefetch / on view)
     G-->>E: ciphertext
     Note over E: sha256 check, decrypt, write-once
-    F->>G: GET /gfs/spaces/media/{blob_id}
+    F->>G: GET /gfs/media/{blob_id}
     G-->>F: ciphertext (CDN-cached)
 ```
 
@@ -294,9 +301,9 @@ anyway.
 **Deferred.** Files over 8 MiB (long videos) and re-uploading a blob the
 cache evicted or expired — an on-demand, coalesced "media wanted" path
 (next PR). Comment media and a seed holder's relay copy of an approved post
-carry no descriptor yet. This covers listed (global) spaces; invite-link
-members of a **private** space (opaque channels, v_51) need the GFS
-channel scope that is being added to the cache, and follow it.
+carry no descriptor yet. A private space whose owner left `private_gfs`
+off has no channel: its link-joined members are reached through the space
+scope only while the space is listed on that GFS.
 
 ## Implementation pointers
 

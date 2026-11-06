@@ -925,8 +925,8 @@ once to that member's GFS (`relay_via`), and the member fetches, checks and
 decrypts it there — see [`media.md`](./media.md#space-media-via-the-gfs-cache-v_80).
 A link-joined member below v_80 still gets only what fits the relay (its
 posts' text, not their pictures). Files over 8 MiB are not cached yet.
-This covers listed (global) spaces; a private space's invite-link members
-need the GFS cache's channel scope, which follows.
+A private space with an opaque channel (v_51) uploads under the GFS's
+channel scope, so the GFS learns only the channel id.
 
 **Posting without the host (v_49).** A link-joined member's own posts in a
 PUBLIC/GLOBAL space no longer depend on the host being online: the member

@@ -4,7 +4,7 @@ A household reached only through a GFS — a space member seated from an
 invite link, a follower of a global space — can't fetch a space picture from
 the household that posted it. So the author's household seals each file
 **once** and uploads the same blob to every GFS that needs it; readers fetch
-it by address (``GET /gfs/spaces/media/{blob_id}``) and open it with the
+it by address (``GET /gfs/media/{blob_id}``) and open it with the
 space content key they already hold. The GFS sees ciphertext only.
 
 * **Key.** ``HKDF-SHA256(content key of the epoch, info="sh-space-media:v1")``
