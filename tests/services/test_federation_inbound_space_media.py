@@ -13,8 +13,10 @@ enforces (see ``docs/protocol/media.md``):
 
 from __future__ import annotations
 
+import asyncio
 import base64
 from datetime import UTC, datetime
+from unittest.mock import patch
 
 import pytest
 
@@ -27,9 +29,11 @@ from socialhome.repositories import (
 )
 from socialhome.repositories.bazaar_repo import SqliteBazaarRepo
 from socialhome.repositories.gallery_repo import SqliteGalleryRepo
+from socialhome.services import inbound_media_store
 from socialhome.services.federation_inbound_service import (
     FederationInboundService,
 )
+from socialhome.services.inbound_media_store import partial_key
 
 pytestmark = pytest.mark.asyncio
 
@@ -284,6 +288,7 @@ async def test_existing_file_is_not_overwritten_multi_chunk(env):
                     "chunk_index": idx,
                     "chunk_count": 2,
                     "final": idx == 1,
+                    "file_size_bytes": 10,
                 },
                 body=b"PART%d" % idx,
             )
@@ -333,6 +338,7 @@ async def test_multi_chunk_assembles_referenced_file(env):
                     "chunk_index": idx,
                     "chunk_count": 4,
                     "final": idx == 3,
+                    "file_size_bytes": len(full),
                 },
                 body=chunk,
             )
@@ -349,6 +355,7 @@ async def test_chunks_from_another_household_never_mix(env):
         "filename": "a1.webp",
         "transfer_id": "a1.webp:self",
         "chunk_count": 2,
+        "file_size_bytes": 10,
     }
     await svc._on_space_media_blob(
         _blob({**payload, "chunk_index": 0, "final": False}, body=b"GOOD0")
@@ -364,6 +371,137 @@ async def test_chunks_from_another_household_never_mix(env):
         _blob({**payload, "chunk_index": 1, "final": True}, body=b"GOOD1")
     )
     assert (media / "a1.webp").read_bytes() == b"GOOD0GOOD1"
+
+
+_FOUR = [bytes([i]) * 512 for i in range(4)]
+
+
+def _chunk(idx: int) -> FederationEvent:
+    return _blob(
+        {
+            "post_id": "post-a",
+            "filename": "a1.webp",
+            "transfer_id": "a1.webp:self",
+            "chunk_index": idx,
+            "chunk_count": 4,
+            "final": idx == 3,
+            "file_size_bytes": 4 * 512,
+        },
+        body=_FOUR[idx],
+    )
+
+
+def _no_partials(media) -> bool:
+    partial = media / ".partial"
+    return not partial.exists() or list(partial.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "order",
+    [
+        (3, 0, 1, 2),  # the final chunk first
+        (0, 3, 2, 1),  # a middle chunk last
+        (1, 3, 2, 0),  # chunk 0 last
+        (0, 1, 2, 3),  # in order
+    ],
+)
+async def test_multi_chunk_assembles_whichever_chunk_lands_last(env, order):
+    """Regression (federation demo ``verify``, a 680 KB calendar cover from
+    b never reached a): the sender dispatches a file's chunks concurrently
+    (``PIPELINE_WINDOW``), so the ``final`` chunk can land before the
+    others. Assembly used to run only on the final chunk — the rest then
+    landed into partials nobody assembled, and the sender had already
+    dropped its outbox row. Whichever chunk completes the set assembles."""
+    svc, media = env
+    for n, idx in enumerate(order):
+        await svc._on_space_media_blob(_chunk(idx))
+        if n < len(order) - 1:
+            assert not (media / "a1.webp").exists()
+    assert (media / "a1.webp").read_bytes() == b"".join(_FOUR)
+    assert _no_partials(media)
+
+
+async def test_duplicate_chunks_before_and_after_assembly_are_harmless(env):
+    svc, media = env
+    for idx in (3, 0, 0, 1, 3, 2, 2, 1, 3):
+        await svc._on_space_media_blob(_chunk(idx))
+    assert (media / "a1.webp").read_bytes() == b"".join(_FOUR)
+    assert _no_partials(media)
+
+
+async def test_chunks_completing_together_assemble_once(env):
+    """Force two chunks to see the complete set at the same moment: each
+    assembles into a temp file of its own, one publishes, bytes intact."""
+    svc, media = env
+    for idx in (3, 0):
+        await svc._on_space_media_blob(_chunk(idx))
+    barrier = asyncio.Barrier(2)
+    real = inbound_media_store.present_parts
+
+    async def both_complete(d):
+        await asyncio.wait_for(barrier.wait(), 5)
+        return await real(d)
+
+    with patch.object(inbound_media_store, "present_parts", both_complete):
+        await asyncio.gather(
+            svc._on_space_media_blob(_chunk(1)), svc._on_space_media_blob(_chunk(2))
+        )
+    assert (media / "a1.webp").read_bytes() == b"".join(_FOUR)
+    assert _no_partials(media)
+    assert [p.name for p in media.iterdir() if p.name != ".partial"] == ["a1.webp"]
+
+
+def _attempt(idx: int, chunks: list[bytes], size: int) -> FederationEvent:
+    return _blob(
+        {
+            "post_id": "post-a",
+            "filename": "a1.webp",
+            "transfer_id": "a1.webp:self",
+            "chunk_index": idx,
+            "chunk_count": len(chunks),
+            "final": idx == len(chunks) - 1,
+            "file_size_bytes": size,
+        },
+        body=chunks[idx],
+    )
+
+
+async def test_retry_chunked_differently_never_mixes_attempts(env):
+    """The sender re-chunks each attempt for its tier (240 KiB over an
+    older channel, 512 KiB over HTTPS) under the same ``transfer_id``.
+    Attempt 1 landed parts 0-2 of 5; the retry's chunk 0 (of 2) must not
+    complete the set with attempt 1's stale part 1 — that wrote a
+    752-byte corrupt file, kept forever by write-once."""
+    svc, media = env
+    full = bytes(range(256)) * 4
+    small = [full[i : i + 240] for i in range(0, len(full), 240)]
+    big = [full[i : i + 512] for i in range(0, len(full), 512)]
+    assert (len(small), len(big)) == (5, 2)
+    for idx in (0, 1, 2):
+        await svc._on_space_media_blob(_attempt(idx, small, len(full)))
+    await svc._on_space_media_blob(_attempt(0, big, len(full)))
+    assert not (media / "a1.webp").exists()
+    await svc._on_space_media_blob(_attempt(1, big, len(full)))
+    assert (media / "a1.webp").read_bytes() == full
+
+
+async def test_bytes_short_of_declared_size_never_land(env):
+    svc, media = env
+    for idx in (1, 0):
+        await svc._on_space_media_blob(_attempt(idx, [b"AAAA", b"BB"], 99))
+    assert not (media / "a1.webp").exists()
+    assert _no_partials(media)
+
+
+async def test_parts_left_by_a_crash_are_dropped_by_any_chunk(env):
+    svc, media = env
+    (media / "a1.webp").write_bytes(b"".join(_FOUR))
+    stale = media / ".partial" / partial_key("peer-a", "a1.webp:self", chunk_count=4)
+    stale.mkdir(parents=True)
+    (stale / "000002").write_bytes(b"old")
+    (stale / "assembling-dead").write_bytes(b"old")
+    await svc._on_space_media_blob(_chunk(0))  # not the final chunk
+    assert not stale.exists()
 
 
 @pytest.mark.parametrize(
@@ -455,3 +593,26 @@ async def test_inbound_post_payload_validates_link_preview(env):
     )
     assert local is not None and local.link_preview is not None
     assert local.link_preview.thumbnail_url == "api/media/ok.webp"
+
+
+@pytest.mark.parametrize("size", [None, 0, -5, "x"])
+async def test_multi_chunk_without_a_declared_size_is_refused(env, caplog, size):
+    """A multi-chunk blob must declare ``file_size_bytes`` (every sender
+    has since #440) — else the size check could be skipped silently."""
+    svc, media = env
+    with caplog.at_level("WARNING"):
+        for idx in (1, 0):
+            payload = {
+                "post_id": "post-a",
+                "filename": "a1.webp",
+                "transfer_id": "a1.webp:self",
+                "chunk_index": idx,
+                "chunk_count": 2,
+                "final": idx == 1,
+            }
+            if size is not None:
+                payload["file_size_bytes"] = size
+            await svc._on_space_media_blob(_blob(payload, body=b"PART%d" % idx))
+    assert not (media / "a1.webp").exists()
+    assert _no_partials(media)
+    assert "file_size_bytes" in caplog.text

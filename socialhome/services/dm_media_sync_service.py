@@ -507,8 +507,9 @@ class DmMediaSyncService(VisibilityMixin):
         (:meth:`FederationService.media_chunk_bytes`): a file that fits is
         one chunk with ``chunk_count=1`` (the receiver's single-chunk
         branch); a larger one carries each chunk's 0-based
-        ``chunk_index`` + total ``chunk_count`` + a ``final`` flag that
-        triggers the receiver's concatenate-and-rename finalisation.
+        ``chunk_index`` + total ``chunk_count`` + a ``final`` flag on the
+        last one. Chunks are pipelined and land in any order; the
+        receiver assembles once every chunk is there, whichever is last.
         """
         path = pathlib.Path(entry.bytes_path)
         if not await aiofiles.os.path.isfile(path):

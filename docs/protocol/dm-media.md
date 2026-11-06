@@ -81,7 +81,7 @@ sequenceDiagram
   Bob-->>Bob: Save preview to local cache;<br/>bubble renders immediately with media_sync_status='pending'
   Note over Alice,Bob: ─── background ───
   Alice->>Bob: DM_MEDIA_BLOB chunks (1..N, base64; final flag on last)
-  Bob-->>Bob: Each chunk → part file under media_dir;<br/>on final, concat in order + rename to <msg_id>.<ext>;<br/>update conversation_messages.media_url +<br/>media_sync_status=NULL
+  Bob-->>Bob: Each chunk → part file under media_dir;<br/>once all N landed (any order), concat in order + rename to <msg_id>.<ext>;<br/>update conversation_messages.media_url +<br/>media_sync_status=NULL
   Bob-->>Bob: WS push dm.media_ready → SPA<br/>swaps preview src for full media
 ```
 
@@ -132,14 +132,32 @@ Before 2026-11-06 the sizes were fixed (a 1 MiB single chunk, 512 KiB
 pieces): no binary frame fit a 256 KiB channel, and a 0.7–1 MiB file sent
 whole was refused by the inbox too (413), so it never arrived.
 
-**Receiver side**: each chunk writes to `<msg_id>.part<idx>` under
-the media root. When `final=true` arrives, the receiver
-concatenates parts 0…N−1 in order into a temp file, moves it to
-`<msg_id>.<ext>` write-once (see below), deletes the parts, then swaps
-`media_url` and broadcasts `dm.media_ready` as in the single-chunk
-case. A re-send from a sender restart overwrites the same part
-files idempotently; a missing chunk at finalisation time logs +
-bails (the outbox retry will resend it).
+**Receiver side**: each chunk is written (to a temp name, then renamed
+into place) as part `<idx>` under
+`media_dir/.partial/<sha256(from_instance, "dm:" + msg_id, chunk_count)>/`
+— bound to the sending household and the chunk count, because a retry
+is re-chunked for the tier it goes out on (240 KiB over an older
+channel, 512 KiB over HTTPS) and two attempts' parts must never mix.
+The sender sends up to four chunks at once (`PIPELINE_WINDOW`), so they
+land in any order — the `final` chunk can arrive before chunk 0.
+Whichever chunk completes the set 0…N−1 (one directory listing per
+chunk) assembles: it concatenates the parts in index order into a temp
+file of its own, checks the result is exactly `file_size_bytes` (a
+multiple-chunk blob without a positive `file_size_bytes` is dropped; a
+mismatch discards the parts and publishes nothing), moves it to
+`<msg_id>.<ext>` write-once (see below), deletes the part directory,
+then swaps `media_url` and broadcasts `dm.media_ready` as in the
+single-chunk case — once: when two chunks complete the set at the same
+moment, only the one whose file lands adopts it. A chunk that lands
+after the file exists — any chunk, final or not — drops the transfer's
+leftover parts and re-adopts the file only while the row still awaits
+it (`media_sync_status='pending'` or another `media_url`) — one
+conditional `UPDATE`, and only the delivery whose update changed the row
+pushes, so neither a duplicate nor two racing deliveries push
+`dm.media_ready` twice. A single-chunk file takes the same path (its
+temp files in its own `.partial/<key>/` folder). Before 2026-11-06 the
+receiver assembled only when `final=true` arrived, so a final chunk that
+overtook an earlier one left the file unassembled for good.
 
 **Scope + write-once.** The receiver only lands bytes a household was
 entitled to send:
@@ -207,9 +225,18 @@ A handful of paths beyond the happy flow above:
   recipient sees nothing — there's nothing to act on for them.
 - **Media-orphan janitor.** `DmGcScheduler._sweep_media_orphans`
   runs on the hourly conversation-GC tick: enumerates
-  `<msg_id>.preview.webp` and `<msg_id>.part<idx>` files,
-  groups by message id, drops anything without a backing live
-  `conversation_messages` row.
+  `<msg_id>.preview.webp` files (and `<msg_id>.part<idx>` parts
+  from builds before 2026-11-06), groups by message id, drops anything
+  without a backing live `conversation_messages` row.
+- **Abandoned chunk sets.** Parts now live in `.partial/<key>/`, which
+  the media orphan sweep (`MediaOrphanSweepService.sweep_partial_once`,
+  each tick of the media sweep) covers for DMs and spaces alike: a
+  folder nothing in it changed for 3 days is removed (at most 200 per
+  pass) — a retracted DM, a sender that gave up after its 6 attempts,
+  an earlier attempt chunked for another tier, a crash's temp files.
+  3 days is far past the senders' retry horizon (6 attempts, backoff
+  capped at 30 min) and every chunk that lands refreshes the folder, so
+  a transfer in progress is never hit.
 
 ## Server-side validation
 

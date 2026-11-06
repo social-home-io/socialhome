@@ -5,8 +5,11 @@ import time
 
 import pytest
 
+from socialhome.services import dm_media_sync_service as dm
+from socialhome.services import space_media_sync_service as space
 from socialhome.services.media_orphan_sweep_service import (
     GRACE_SECONDS,
+    PARTIAL_GRACE_SECONDS,
     MediaOrphanSweepService,
 )
 
@@ -145,3 +148,70 @@ async def test_top_level_sweep_ignores_transcode_src_subdir(tmp_path):
     assert not old_top.exists()
     assert src_dir.is_dir()
     assert inside.exists()
+
+
+# ── .partial/ — chunk sets that never complete ─────────────────────────
+
+
+def _key_dir(media, key, *, entries, age_seconds=0):
+    d = media / ".partial" / key
+    d.mkdir(parents=True)
+    old = time.time() - age_seconds
+    for name in entries:
+        f = d / name
+        f.write_bytes(b"z")
+        if age_seconds:
+            os.utime(f, (old, old))
+    if age_seconds:
+        os.utime(d, (old, old))
+    return d
+
+
+async def test_partial_sweep_removes_only_abandoned_sets(tmp_path):
+    """A set nothing has touched past the grace (a retracted DM, a sender
+    that gave up after MAX_ATTEMPTS, an attempt with another chunk count,
+    a crash) goes; a set still receiving chunks stays."""
+    old = _key_dir(
+        tmp_path,
+        "a" * 32,
+        entries=["000000", "000003", "assembling-dead", "part.tmp-dead"],
+        age_seconds=PARTIAL_GRACE_SECONDS + 60,
+    )
+    fresh = _key_dir(tmp_path, "b" * 32, entries=["000000"])
+    # Old parts but one chunk just landed: still in progress.
+    busy = _key_dir(
+        tmp_path, "c" * 32, entries=["000000"], age_seconds=PARTIAL_GRACE_SECONDS * 2
+    )
+    (busy / "000001").write_bytes(b"new")
+    svc = MediaOrphanSweepService(media_dir=tmp_path, reference_repo=_FakeRefRepo([]))
+    assert await svc.sweep_partial_once() == 1
+    assert not old.exists()
+    assert fresh.exists() and busy.exists()
+    assert (tmp_path / ".partial").is_dir()
+
+
+async def test_partial_sweep_is_bounded_per_pass(tmp_path):
+    for i in range(5):
+        _key_dir(
+            tmp_path,
+            f"{i:032d}",
+            entries=["000000"],
+            age_seconds=PARTIAL_GRACE_SECONDS + 60,
+        )
+    svc = MediaOrphanSweepService(media_dir=tmp_path, reference_repo=_FakeRefRepo([]))
+    assert await svc.sweep_partial_once(limit=2) == 2
+    assert len(list((tmp_path / ".partial").iterdir())) == 3
+    assert await svc.sweep_partial_once(limit=10) == 3
+
+
+async def test_partial_sweep_missing_dir_is_noop(tmp_path):
+    svc = MediaOrphanSweepService(media_dir=tmp_path, reference_repo=_FakeRefRepo([]))
+    assert await svc.sweep_partial_once() == 0
+
+
+async def test_partial_grace_outlasts_the_senders_retry_horizon():
+    """A set must never be swept while its sender may still retry: six
+    attempts with backoff capped at 30 min is well under a day."""
+    for mod in (dm, space):
+        horizon = mod.MAX_ATTEMPTS * mod.BACKOFF_CAP_SECONDS * 2
+        assert PARTIAL_GRACE_SECONDS > horizon

@@ -12,11 +12,12 @@ it lists the media dir, and deletes any file that
      / ``*.assembled*``) — those aren't in any ``media_url`` column and are
      owned by ``dm_gc``; sweeping them would clobber in-progress transfers.
 
-Only top-level regular files are considered — sub-directories (the DM
-``.partial/`` staging area, the async-transcode ``transcode_src/`` source
-stash) are skipped entirely by :meth:`sweep_once`. The transcode source
-stash is reaped by its own pass, :meth:`sweep_transcode_src_once`, which the
-scheduler runs alongside the top-level sweep each tick.
+Only top-level regular files are considered — sub-directories (the
+``.partial/`` chunk staging area, the async-transcode ``transcode_src/``
+source stash) are skipped entirely by :meth:`sweep_once`. Each has its own
+pass, run by the scheduler alongside the top-level sweep each tick:
+:meth:`sweep_transcode_src_once` for the transcode stash and
+:meth:`sweep_partial_once` for chunk sets that never completed.
 
 Fail-soft: any per-file error is logged and skipped so one bad file never
 aborts the pass.
@@ -34,6 +35,7 @@ from typing import TYPE_CHECKING
 import aiofiles.os
 
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
+from .inbound_media_store import drop_parts, remove_quietly
 
 if TYPE_CHECKING:
     from ..repositories.media_transcode_repo import AbstractMediaTranscodeRepo
@@ -46,6 +48,19 @@ _TRANSCODE_SRC_DIRNAME = "transcode_src"
 #: Files younger than this (by mtime) are never swept — guards in-flight
 #: uploads and rows whose DB commit races a sweep pass.
 GRACE_SECONDS: int = 24 * 60 * 60
+
+#: Sub-directory of the media root holding in-flight chunk sets.
+_PARTIAL_DIRNAME = ".partial"
+
+#: A ``.partial/<key>/`` chunk set untouched this long is abandoned. Far
+#: past the senders' retry horizon — ``MAX_ATTEMPTS`` (6) tries with
+#: backoff capped at 30 min give up within a few hours — and every chunk
+#: that lands refreshes the folder, so a transfer still in progress (even
+#: a slow 4096-chunk one) is never hit.
+PARTIAL_GRACE_SECONDS: int = 3 * 24 * 60 * 60
+
+#: At most this many abandoned chunk sets are removed per pass.
+PARTIAL_SWEEP_LIMIT: int = 200
 
 #: Transient DM artifacts that aren't referenced by a ``media_url`` column.
 #: ``dm_gc`` owns these; the sweep must leave them alone.
@@ -152,3 +167,66 @@ class MediaOrphanSweepService:
         if removed:
             log.info("media-sweep: removed %d leaked transcode source(s)", removed)
         return removed
+
+    async def sweep_partial_once(
+        self,
+        *,
+        now: float | None = None,
+        limit: int = PARTIAL_SWEEP_LIMIT,
+    ) -> int:
+        """Delete abandoned chunk sets under ``.partial/``; return the count.
+
+        Each ``.partial/<key>/`` folder holds one in-flight transfer's
+        parts (space and DM media, see :mod:`inbound_media_store`). A set
+        that completes is removed by the chunk that assembles it; one that
+        never completes — a retracted DM, a sender that gave up after its
+        retries, an earlier attempt chunked for another tier, a crash —
+        would otherwise stay forever. A folder goes once nothing in it
+        (nor the folder itself) changed for :data:`PARTIAL_GRACE_SECONDS`;
+        at most ``limit`` folders per pass.
+        """
+        now = time.time() if now is None else now
+        root = self._media_dir / _PARTIAL_DIRNAME
+        try:
+            names = await aiofiles.os.listdir(root)
+        except FileNotFoundError:
+            return 0
+        except OSError as exc:  # pragma: no cover — defensive
+            log.warning("media-sweep: .partial listdir failed: %s", exc)
+            return 0
+        removed = 0
+        for name in names:
+            if removed >= limit:
+                break
+            path = root / name
+            try:
+                newest = await _newest_mtime(path)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:  # pragma: no cover — defensive
+                log.debug("media-sweep: could not stat %s: %s", path, exc)
+                continue
+            if now - newest < PARTIAL_GRACE_SECONDS:
+                continue
+            if await aiofiles.os.path.isdir(path):
+                await drop_parts(path)
+            else:
+                await remove_quietly(path)
+            removed += 1
+        if removed:
+            log.info("media-sweep: removed %d abandoned chunk set(s)", removed)
+        return removed
+
+
+async def _newest_mtime(path: pathlib.Path) -> float:
+    """The latest mtime of ``path`` and, for a folder, of what it holds."""
+    st = await aiofiles.os.stat(path)
+    newest = st.st_mtime
+    if not stat.S_ISDIR(st.st_mode):
+        return newest
+    for entry in await aiofiles.os.listdir(path):
+        try:
+            newest = max(newest, (await aiofiles.os.stat(path / entry)).st_mtime)
+        except FileNotFoundError:
+            continue
+    return newest
