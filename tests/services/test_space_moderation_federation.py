@@ -31,6 +31,7 @@ from socialhome.federation.owner_bound_id import SPACE_POST_KIND, mint_owner_bou
 from socialhome.services.space_moderation_federation import (
     SpaceModerationFederation,
     _signed_copy,
+    moderation_media_urls,
     sanitize_remote_payload,
 )
 from socialhome.services.space_public_author import (
@@ -214,7 +215,9 @@ async def test_a_posts_media_goes_to_the_targets_only():
     await out.send_submitted(SPACE, post, ["host"])
     assert media.calls == [
         {
-            "post_id": "p-1",
+            # Correlated by the queue item: a reviewer checks the files
+            # against the item it holds, not the post's current media.
+            "post_id": "item-1",
             "target_instance_ids": ["host"],
             "media_urls": ["api/media/a.webp", "api/media/b.webp"],
             "space_id": "sp",
@@ -248,7 +251,9 @@ async def test_a_held_calendar_events_cover_goes_to_the_reviewers():
         ["api/media/c.webp"],
         ["api/media/d.webp"],
     ]
-    assert [c["post_id"] for c in media.calls] == ["item-1", "ev-1"]
+    # Regression: an edit was correlated by the event id, and a reviewer
+    # household then refused the new cover (not the event's current one).
+    assert [c["post_id"] for c in media.calls] == ["item-1", "item-1"]
     # An event with no cover, and an edit leaving it alone, send no file.
     await out.send_submitted(
         SPACE, _item("calendar", {"entity": "event", "summary": "x"}), ["host"]
@@ -487,3 +492,41 @@ def test_the_host_drops_a_signed_copy_it_cannot_use(case):
     else:
         kwargs["action"] = ContentAction.EDIT
     assert _keep(raw, **kwargs) is None
+
+
+async def test_an_edit_keeping_the_same_cover_sends_no_file():
+    """Regression: re-sending the event's current cover in an edit shipped
+    the file to every reviewer again."""
+    media = _Media()
+    out, _ = _fed(media=media)
+    same = dataclasses.replace(
+        _item(
+            "calendar",
+            {
+                "entity": "event",
+                "target_id": "ev-1",
+                "patch": {"cover_url": "api/media/d.webp", "summary": "y"},
+            },
+        ),
+        action="edit",
+        current_snapshot='{"cover_url": "/api/media/d.webp", "summary": "x"}',
+    )
+    await out.send_submitted(SPACE, same, ["host"])
+    assert media.calls == []
+    changed = dataclasses.replace(
+        same, current_snapshot='{"cover_url": "api/media/old.webp"}'
+    )
+    await out.send_submitted(SPACE, changed, ["host"])
+    assert [c["media_urls"] for c in media.calls] == [["api/media/d.webp"]]
+
+
+def test_moderation_media_urls_lists_what_an_item_proposes():
+    assert moderation_media_urls(
+        _item(
+            "calendar", {"entity": "event", "patch": {"cover_url": "api/media/n.webp"}}
+        )
+    ) == ["api/media/n.webp"]
+    assert moderation_media_urls(
+        _item("posts", {"entity": "post", "image_urls": ["api/media/p.webp"]})
+    ) == ["api/media/p.webp"]
+    assert moderation_media_urls(_item()) == []

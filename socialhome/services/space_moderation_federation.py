@@ -91,7 +91,7 @@ from ..federation.owner_bound_id import (
 from ..federation.space_scope import resolve_space_id
 from ..repositories.base import dump_json
 from ..utils.datetime import parse_iso8601_optional
-from .inbound_media_store import verbatim_local_media_ref
+from .inbound_media_store import media_basename, verbatim_local_media_ref
 from .space_moderation_service import (
     MAX_PAYLOAD_BYTES,
     MAX_PENDING_PER_SPACE,
@@ -99,6 +99,7 @@ from .space_moderation_service import (
     MAX_REJECT_REASON,
     MODERATION_TTL,
     feature_on,
+    item_payload_snapshot,
 )
 from .space_post_moderation import post_from_queue_payload
 from .space_public_author import (
@@ -329,20 +330,17 @@ class SpaceModerationFederation:
     ) -> None:
         if self._media_sync is None or not targets:
             return
-        payload = item.payload or {}
-        if item.feature == "posts":
-            urls = _post_media_urls(payload)
-        elif item.feature == "calendar":
-            urls = _calendar_cover_urls(payload)
-        else:
-            return
+        urls = _changed_media_urls(item)
         if not urls:
             return
         try:
             await self._media_sync.enqueue_for_post(
-                # The correlation id: the target row, or the queue item for
-                # a new event (no event id until it is approved).
-                post_id=str(payload.get("target_id") or item.id),
+                # Correlated by the queue item, never the target row: a
+                # reviewer household checks the files against the item it
+                # holds (``moderation_media_urls``). The target row there
+                # still references its current media, so an edit's new
+                # cover or picture would be refused against it.
+                post_id=item.id,
                 target_instance_ids=list(targets),
                 media_urls=urls,
                 space_id=space.id,
@@ -873,6 +871,35 @@ def _when(value: object) -> datetime | None:
 
 def _aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def moderation_media_urls(item: SpaceModerationItem) -> list[str]:
+    """Every local media file a queued item proposes — a post's (and its
+    listing's) files, or a calendar create's / edit's cover. Both the
+    submitter (what to send) and a reviewer household (what a
+    ``SPACE_MEDIA_BLOB`` correlated by the item may write) use it."""
+    payload = item.payload or {}
+    match item.feature:
+        case "posts":
+            return _post_media_urls(payload)
+        case "calendar":
+            return _calendar_cover_urls(payload)
+        case _:
+            return []
+
+
+def _changed_media_urls(item: SpaceModerationItem) -> list[str]:
+    """:func:`moderation_media_urls` minus a calendar edit's cover that is
+    the event's current one (``current_snapshot``) — every reviewer
+    already has that file."""
+    urls = moderation_media_urls(item)
+    if item.feature != "calendar":
+        return urls
+    snapshot = item_payload_snapshot(item) or {}
+    current = snapshot.get("cover_url")
+    if not isinstance(current, str) or not current:
+        return urls
+    return [u for u in urls if media_basename(u) != media_basename(current)]
 
 
 def _calendar_cover_urls(payload: dict) -> list[str]:

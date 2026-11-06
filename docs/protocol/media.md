@@ -183,7 +183,13 @@ sending household was sent it for. Both blob types share
   event — it must live in that space and reference `filename` (post
   `media_url` / `image_urls` / `file_meta.url`, listing `image_urls`,
   gallery `url` / `thumbnail_url`, event `cover_url`); otherwise the blob
-  is refused with a WARNING.
+  is refused with a WARNING. Files of a submission held for moderation
+  (a new event's cover, an edit's new cover or pictures) are correlated
+  by the **moderation queue item id**, never the target row (whose
+  current media an edit replaces): when the reviewer household holds that
+  item, it must be in that space and propose `filename`
+  (`moderation_media_urls`). An edit that keeps the event's current
+  cover sends no file.
 - **Blob before its row.** The mesh and the §25.6 catch-up can deliver a
   blob before the post, listing or gallery item it belongs to. Such a
   blob is accepted — overwriting is the harm, and the write is

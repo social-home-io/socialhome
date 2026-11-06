@@ -186,7 +186,7 @@ class GalleryFederationOutbound:
                         item.id,
                     )
                     peers = []
-                own = getattr(self._federation, "_own_instance_id", "") or ""
+                own = self._federation.own_instance_id
                 targets = [p for p in peers if p and p != own]
                 if targets:
                     try:

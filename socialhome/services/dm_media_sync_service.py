@@ -40,6 +40,7 @@ import asyncio
 import base64
 import logging
 import pathlib
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -51,6 +52,7 @@ from ..domain.media_chunking import split_into_chunks
 from ..media.image_processor import ImageProcessor
 from ..media.video_processor import VideoProcessor
 from .backoff import jittered_backoff_seconds
+from .media_chunk_pipeline import send_chunks
 from .peer_unpair_service import is_unpair_tombstone
 from .visibility import VisibilityMixin
 
@@ -422,9 +424,7 @@ class DmMediaSyncService(VisibilityMixin):
                     )
                     continue
             try:
-                payloads = await self._build_blob_payloads(
-                    entry, fed.media_chunk_bytes(entry.target_instance_id)
-                )
+                payloads = await self._build_blob_payloads(entry, fed)
             except Exception as exc:
                 log.warning(
                     "dm-media-sync: failed to build blob payload for %s → %s: %s",
@@ -438,47 +438,41 @@ class DmMediaSyncService(VisibilityMixin):
             # Dispatch chunks with a bounded concurrency window. Order is
             # irrelevant — the receiver writes each by ``chunk_index``
             # idempotently — so pipelining cuts per-chunk round-trip latency
-            # (most visibly on the HTTPS fallback). Any chunk failing
-            # reschedules the whole row; the next attempt re-sends all chunks
-            # and the receiver overwrites the parts it already has.
+            # (most visibly on the HTTPS fallback). ``PIPELINE_WINDOW``
+            # workers pull chunks lazily, so a file in many chunks never
+            # becomes a coroutine per chunk. Any chunk failing reschedules
+            # the whole row; the next attempt re-sends all chunks and the
+            # receiver overwrites the parts it already has.
             # ``send_media_chunk`` ships each chunk over the binary
             # ``fed-media-v1`` channel when the peer supports it, else
             # transparently over the JSON ``DM_MEDIA_BLOB`` path.
-            sem = asyncio.Semaphore(PIPELINE_WINDOW)
 
             async def _send(
-                item: tuple[dict, bytes],
+                payload: dict,
+                raw: bytes,
                 *,
                 tgt: str = entry.target_instance_id,
-                sem: asyncio.Semaphore = sem,
             ) -> None:
-                payload, raw = item
-                async with sem:
-                    result = await fed.send_media_chunk(
-                        to_instance_id=tgt,
-                        event_type=FederationEventType.DM_MEDIA_BLOB,
-                        payload=payload,
-                        raw_chunk=raw,
-                    )
-                    if not result.ok:
-                        raise RuntimeError(result.error or "delivery_failed")
+                result = await fed.send_media_chunk(
+                    to_instance_id=tgt,
+                    event_type=FederationEventType.DM_MEDIA_BLOB,
+                    payload=payload,
+                    raw_chunk=raw,
+                )
+                if not result.ok:
+                    raise RuntimeError(result.error or "delivery_failed")
 
-            results = await asyncio.gather(
-                *(_send(item) for item in payloads), return_exceptions=True
-            )
-            send_failed = False
-            for (payload, _raw), result in zip(payloads, results):
-                if isinstance(result, Exception):
-                    log.warning(
-                        "dm-media-sync: send failed for %s chunk %d/%d → %s: %s",
-                        entry.blob_id,
-                        payload.get("chunk_index", 0),
-                        payload.get("chunk_count", 1),
-                        entry.target_instance_id,
-                        result,
-                    )
-                    send_failed = True
-            if send_failed:
+            failure = await send_chunks(payloads, _send, window=PIPELINE_WINDOW)
+            if failure is not None:
+                payload, error = failure
+                log.warning(
+                    "dm-media-sync: send failed for %s chunk %d/%d → %s: %s",
+                    entry.blob_id,
+                    payload.get("chunk_index", 0),
+                    payload.get("chunk_count", 1),
+                    entry.target_instance_id,
+                    error,
+                )
                 await self._reschedule_or_fail(entry, "chunk send failed")
                 continue
             await self._outbox.delete(
@@ -491,19 +485,19 @@ class DmMediaSyncService(VisibilityMixin):
     # ── Internals ─────────────────────────────────────────────────────
 
     async def _build_blob_payloads(
-        self, entry, chunk_bytes: int
-    ) -> list[tuple[dict, bytes]]:
+        self, entry, fed: FederationService
+    ) -> Iterator[tuple[dict, bytes]]:
         """Construct the ``DM_MEDIA_BLOB`` chunk(s) from an outbox row.
 
-        Reads the full file off disk and returns one ``(metadata,
-        raw_chunk)`` pair per chunk. The metadata dict carries the
+        Reads the full file off disk and returns a lazy iterator of one
+        ``(metadata, raw_chunk)`` pair per chunk. The metadata dict carries the
         message + conversation correlation ids and chunk sequencing but
         **not** the bytes — :meth:`FederationService.send_media_chunk`
         ships ``raw_chunk`` as a binary frame on ``fed-media-v1`` (no
         base64) when the peer supports it, or re-attaches it as a base64
         ``bytes_b64`` field on the JSON fallback.
 
-        Chunks of at most ``chunk_bytes`` — sized for the target household
+        Chunks sized for the target household and this file
         (:meth:`FederationService.media_chunk_bytes`): a file that fits is
         one chunk with ``chunk_count=1`` (the receiver's single-chunk
         branch); a larger one carries each chunk's 0-based
@@ -520,6 +514,9 @@ class DmMediaSyncService(VisibilityMixin):
         if msg is None:
             raise LookupError(f"message {entry.message_id} not found")
         size = len(data)
+        chunk_bytes = fed.media_chunk_bytes(
+            entry.target_instance_id, file_size_bytes=size
+        )
         common = {
             "media_blob_id": entry.blob_id,
             "message_id": entry.message_id,
@@ -528,10 +525,10 @@ class DmMediaSyncService(VisibilityMixin):
             "mime_type": msg.mime_type,
             "file_size_bytes": size,
         }
-        return [
+        return (
             ({**common, **seq}, raw)
             for seq, raw in split_into_chunks(data, chunk_bytes)
-        ]
+        )
 
     async def _reschedule_or_fail(
         self,
