@@ -831,16 +831,8 @@ def test_space_media_ip_bytes_per_hour(tmp_dir, monkeypatch):
     assert "GFS_SPACE_MEDIA_IP_BYTES_PER_HOUR" in EXAMPLE_TOML
 
 
-def test_space_media_channels_per_household(tmp_dir, monkeypatch):
-    """Security re-attack N2: how many channels one seated household's seat
-    counts toward for media (its oldest seats) — small by default,
-    configurable, documented in the example TOML."""
-    assert GfsConfig().space_media_channels_per_household == 5
-    p = _space_media_toml(tmp_dir, "channels_per_household = 3\n")
-    assert GfsConfig.from_toml(p).space_media_channels_per_household == 3
-    monkeypatch.setenv("GFS_SPACE_MEDIA_CHANNELS_PER_HOUSEHOLD", "7")
-    assert GfsConfig.load(p).space_media_channels_per_household == 7
-    with pytest.raises(ValueError, match="space_media"):
-        GfsConfig.from_toml(_space_media_toml(tmp_dir, "channels_per_household = 0\n"))
-    assert "channels_per_household" in EXAMPLE_TOML
-    assert "GFS_SPACE_MEDIA_CHANNELS_PER_HOUSEHOLD" in EXAMPLE_TOML
+def test_no_per_household_channel_count_any_more():
+    """Third review A4: a count of channels per household refused a legit
+    member's 6th private space — gone (fairness is per household)."""
+    assert not hasattr(GfsConfig(), "space_media_channels_per_household")
+    assert "channels_per_household" not in EXAMPLE_TOML

@@ -3530,21 +3530,16 @@ the routes below, the capability, the sweep and the admin counts.
 | `GET` | `/gfs/media/{blob_id}` | Anyone, no credentials: the ciphertext, `application/octet-stream`, `nosniff`, `Access-Control-Allow-Origin: *`, `Cache-Control: public, max-age=3600, immutable`; `404` with `no-store` for unknown, expired, evicted or a banned space's blob. |
 | `POST` | `/gfs/media/{blob_id}/delete` | The scope's seed holder deletes one of the scope's blobs: `{scope, scope_id, ts, sig, sig_suite}` (the signature covers scope, scope id, blob and `ts`); `{deleted}` (`false` for another scope's blob). Taken once: an exact replay is the uniform 403. |
 
-**A channel takes media only while used by two households.** A v_51
-channel registers anonymously (10 / min / address), and ONE household can
-seat itself in channels of its own (an anonymous epoch notice, a pass under
-its own channel key, subscribe). So an upload under a channel scope — any
-kind, the channel key's included — needs seats of at least **two distinct
-active member households** whose passes are for an open epoch (the seats a
-channel publish fans out to; nothing new is recorded), and each household's
-seat counts only for its `[space_media] channels_per_household` (5) oldest
-seats. A channel short of that gets the uniform `403` at the same
-verification cost (security review F1, re-attack N2). Fair eviction groups
-by scope, not by owning household: the GFS never learns who owns a channel
-(identity-free by design), so instead the rule bounds what seats can buy —
-H registered households make at most ⌊H × 5 / 2⌋ channels eligible, and
-under the global cap each eligible scope at worst keeps an equal share with
-the largest.
+**A channel takes media only while in use.** A v_51 channel registers
+anonymously (10 / min / address), so an upload under a channel scope — any
+kind, the channel key's included — needs at least one active member
+household's seat whose pass is for an open epoch (the seats a channel
+publish fans out to; nothing new is recorded). One seat is enough: the owner
+household never subscribes to its own channel, so the typical invite-link
+private space has exactly one (third review A4). A channel nobody holds a
+seat in gets the uniform `403` at the same verification cost (security
+review F1). A household that seats itself in channels of its own gains
+nothing past its share: the cache's fairness is per household (below).
 
 No path names a **scope** — not the fetch, not the upload, not the delete:
 neither an access log, a proxy, a CDN cache key nor a path tells which

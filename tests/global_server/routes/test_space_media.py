@@ -950,54 +950,35 @@ async def _active(gfs, iid: str) -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "gfs",
-    [{"space_media_max_bytes": 4 * SMALL, "space_media_space_max_bytes": 64 * SMALL}],
-    indirect=True,
-)
-async def test_six_channels_of_one_household_cannot_trim_a_space(gfs):
-    """Probe: one attacker household seats itself in 6 channels of its own
-    and uploads to each — every upload is the uniform 403 (one household is
-    not enough), so the space's blob is never trimmed."""
-    await _active(gfs, "attacker")
-    victim = os.urandom(SMALL)
+async def test_a_private_space_with_one_seated_member_household_gets_media(gfs):
+    """Third review A4: the typical invite-link private space — the owner
+    household never subscribes to its own channel, one link-joined member
+    household holds the only seat. Its media must work (the owner rule:
+    every member equal however reached)."""
+    await _active(gfs, "member")
+    cid, seed = await _seated_channel(gfs, ["member"], joined=int(time.time()))
+    data = os.urandom(SMALL)
+    claim = _claim(data, space=cid, scope=SCOPE_CHANNEL)
     r = await gfs.put(
-        _put_url(victim), data=victim, headers=_authority_header(_claim(victim))
+        _ch_url(data, cid), data=data, headers=_channel_header(claim, seed=seed)
     )
     assert r.status == 201
-    now = int(time.time())
-    for i in range(6):
-        cid, seed = await _seated_channel(gfs, ["attacker"], joined=now + i)
-        for _ in range(2):
-            junk = os.urandom(SMALL)
-            claim = _claim(junk, space=cid, scope=SCOPE_CHANNEL)
-            r = await gfs.put(
-                _ch_url(junk, cid), data=junk, headers=_channel_header(claim, seed=seed)
-            )
-            assert r.status == 403
-    assert (await gfs.get(_get_url(victim))).status == 200
+    assert (await gfs.get(_get_url(data))).status == 200
 
 
-@pytest.mark.parametrize(
-    "gfs", [{"space_media_channels_per_household": 2}], indirect=True
-)
-async def test_a_household_counts_toward_only_its_first_channels(gfs):
-    """Two attacker households seated together in 3 channels: only their
-    first ``channels_per_household`` (2) seats count, so the third channel
-    gets no media."""
-    await _active(gfs, "a1")
-    await _active(gfs, "a2")
+async def test_a_member_in_many_private_spaces_gets_media_in_each(gfs):
+    """No per-household channel count refuses a legit member's 6th+
+    private space (fairness is per household instead, A3)."""
+    await _active(gfs, "member")
     now = int(time.time())
-    made = [await _seated_channel(gfs, ["a1", "a2"], joined=now + i) for i in range(3)]
-    statuses = []
-    for cid, seed in made:
-        junk = os.urandom(SMALL)
-        claim = _claim(junk, space=cid, scope=SCOPE_CHANNEL)
+    for i in range(7):
+        cid, seed = await _seated_channel(gfs, ["member"], joined=now + i)
+        data = os.urandom(SMALL)
+        claim = _claim(data, space=cid, scope=SCOPE_CHANNEL)
         r = await gfs.put(
-            _ch_url(junk, cid), data=junk, headers=_channel_header(claim, seed=seed)
+            _ch_url(data, cid), data=data, headers=_channel_header(claim, seed=seed)
         )
-        statuses.append(r.status)
-    assert statuses == [201, 201, 403]
+        assert r.status == 201, i
 
 
 # ── Security re-attack N5: slow bodies can't pile up ─────────────────────

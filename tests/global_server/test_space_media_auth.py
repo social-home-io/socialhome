@@ -841,13 +841,10 @@ async def test_a_channel_nobody_holds_a_seat_in_gets_no_media(env, seat):
     assert done[0] == 1
 
 
-async def test_one_households_seat_is_not_enough_for_media(env):
-    """Security re-attack N2: a single household can seat itself in its own
-    channel (landing-page registration, anonymous epoch notice, a pass under
-    its own channel key) — so media needs seats of TWO distinct households."""
+async def test_one_seated_member_household_is_enough_for_media(env):
+    """Third review A4: the owner household never subscribes to its own
+    channel, so a private space with one link-joined member has ONE seat —
+    and its media must work."""
     auth, _, channel_repo = env
     await channel_repo.remove_subscriber(CHANNEL, "member2")
-    a = _channel_key(_claim(scope=SCOPE_CHANNEL, scope_id=CHANNEL))
-    with counting_ed25519_verifies() as done, pytest.raises(PermissionError):
-        await _upload(auth, a)
-    assert done[0] == 1
+    await _upload(auth, _channel_key(_claim(scope=SCOPE_CHANNEL, scope_id=CHANNEL)))

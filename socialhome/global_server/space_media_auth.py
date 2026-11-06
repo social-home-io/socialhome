@@ -118,7 +118,6 @@ class GfsSpaceMediaAuth:
     """Authorize uploads to and deletes from the space media cache."""
 
     __slots__ = (
-        "_channel_media_per_household",
         "_channels",
         "_clock",
         "_deletes_seen",
@@ -133,11 +132,8 @@ class GfsSpaceMediaAuth:
         member_publish: GfsMemberPublishService,
         channels: GfsChannelService,
         clock: Callable[[], float] = time.time,
-        channel_media_per_household: int = 5,
     ) -> None:
         self._federation = federation
-        #: ``[space_media] channels_per_household``.
-        self._channel_media_per_household = channel_media_per_household
         self._member_publish = member_publish
         self._channels = channels
         self._clock = clock
@@ -213,9 +209,7 @@ class GfsSpaceMediaAuth:
             # channel must be IN USE — a member household holds a seat —
             # for every kind, the channel key's included (registration is
             # anonymous).
-            await self._channels.require_channel_in_use(
-                scope_id, per_household=self._channel_media_per_household
-            )
+            await self._channels.require_channel_in_use(scope_id)
         elif auth.kind != AUTH_AUTHORITY:
             space = await self._federation.listed_space(scope_id)
         if auth.kind == AUTH_AUTHORITY:

@@ -2185,9 +2185,9 @@ def _gfs_cluster_channel_media(
     """Step 3i of ``gfs-cluster``: the space media cache for a PRIVATE space's
     opaque channel. A channel is registered via node 1 (anonymous, channel-key
     signed — the GFS learns only its random id). While nobody holds a seat it
-    gets no media (uniform 403 — junk channels can't fill the cache), nor
-    with ONE household's seat (security re-attack N2). Then its first epoch
-    notice, passes for two member households and their seats; now one blob uploaded via node 0 under the channel key
+    gets no media (uniform 403 — junk channels can't fill the cache). Then
+    its first epoch notice, a pass for ONE member household and its seat —
+    enough, the owner household never subscribes to its own channel; now one blob uploaded via node 0 under the channel key
     is fetched byte-identical via node 1 at the scope-free
     ``/gfs/media/{blob}``. Finally the scope-bound address (security review
     v2): the space step's ciphertext uploaded under the channel is ANOTHER
@@ -2323,14 +2323,10 @@ def _gfs_cluster_channel_media(
                 f"gfs-cluster: channel subscribe via node 0 → {code} {resp!r}"
             )
 
+    # ONE member household's seat is enough (the owner never subscribes to
+    # its own channel — the typical invite-link private space; third
+    # review A4).
     _seat(members[0])
-    code, resp = _channel_put(urls[0], blob)
-    if code != 403:
-        raise SystemExit(
-            f"gfs-cluster: a channel ONE household holds seats in → {code} "
-            f"{resp!r}; want the uniform 403 (two households needed)"
-        )
-    _seat(members[1])
 
     code, resp = _channel_put(urls[0], blob)
     if code != 201:
@@ -2341,9 +2337,9 @@ def _gfs_cluster_channel_media(
             f"gfs-cluster: channel media fetch via node 1 → {code}, {len(got)} bytes"
         )
     print(
-        "  a private space's channel gets no media until two member households "
-        "hold seats (403 with none, 403 with one); then its upload via node 0 "
-        "(channel key, opaque id) is served byte-identical by node 1 ✓"
+        "  a private space's channel gets no media until a member household "
+        "holds a seat (403); with ONE seat its upload via node 0 (channel key, "
+        "opaque id) is served byte-identical by node 1 ✓"
     )
 
     # The scope-bound address (security review v2) across nodes.
@@ -2757,7 +2753,7 @@ def cmd_gfs_cluster() -> None:
         # another (shared data dir + DB), and a re-upload coalesces.
         shared_media = _gfs_cluster_space_media(urls, clients[0])
         # 3i. …and for a private space's opaque channel.
-        _gfs_cluster_channel_media(urls, shared_media, clients[:2])
+        _gfs_cluster_channel_media(urls, shared_media, clients[:1])
     except BaseException:
         _gfs_cluster_down(preserve_logs=True)
         raise

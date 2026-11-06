@@ -527,7 +527,6 @@ class GfsApp:
             federation=federation,
             member_publish=member_publish,
             channels=channels,
-            channel_media_per_household=config.space_media_channels_per_household,
         )
         maintenance = GfsMaintenanceScheduler(
             space_media=space_media,

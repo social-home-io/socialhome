@@ -104,9 +104,8 @@ fetched blobs first when it is full — never one global order, so one scope
 can't flush the others (and a space or channel past `space_max_bytes` evicts
 its own least recently fetched). One client address uploads at most
 `ip_bytes_per_hour` (1 GiB) an hour across every scope, counted cluster-wide
-in `gfs.db`. A private space's channel takes media only once two member
-households hold seats in it, each household counting toward at most
-`channels_per_household` (5) channels. And
+in `gfs.db`. A private space's channel takes media while a member household
+holds a seat in it. And
 nothing lives past `ttl_seconds` (3 days). Behind Cloudflare a fetch (`GET /gfs/media/{blob}`) is
 `Cache-Control: public, max-age=3600, immutable`, so the edge absorbs
 repeated reads; a miss is `no-store`. Set `max_bytes = 0` (or

@@ -89,11 +89,6 @@ DEFAULT_SPACE_MEDIA_SPACE_UPLOADS_PER_HOUR: int = 300
 #: Bytes one client address (an IPv6 /64) may upload per hour, whatever
 #: scopes it uses — the backstop behind fair eviction (429 past it).
 DEFAULT_SPACE_MEDIA_IP_BYTES_PER_HOUR: int = 1024**3
-#: How many channels one seated household's seats count toward for media —
-#: its oldest seats (a channel takes media only with seats of two distinct
-#: households so counted): one household can't make cheap channels of its
-#: own eligible, and a few can make only a few.
-DEFAULT_SPACE_MEDIA_CHANNELS_PER_HOUSEHOLD: int = 5
 
 #: Peer networks whose ``X-Forwarded-For`` header the GFS believes by default:
 #: loopback, the RFC1918 private ranges and the IPv6 unique-local block. A GFS
@@ -232,7 +227,6 @@ class GfsConfig:
     space_media_space_max_bytes: int = DEFAULT_SPACE_MEDIA_SPACE_MAX_BYTES
     space_media_space_uploads_per_hour: int = DEFAULT_SPACE_MEDIA_SPACE_UPLOADS_PER_HOUR
     space_media_ip_bytes_per_hour: int = DEFAULT_SPACE_MEDIA_IP_BYTES_PER_HOUR
-    space_media_channels_per_household: int = DEFAULT_SPACE_MEDIA_CHANNELS_PER_HOUSEHOLD
 
     # Loaded-from path, for audit + --set-password write-back.
     source_path: str = ""
@@ -337,13 +331,6 @@ class GfsConfig:
                 "ip_bytes_per_hour",
                 space_media.get(
                     "ip_bytes_per_hour", DEFAULT_SPACE_MEDIA_IP_BYTES_PER_HOUR
-                ),
-            ),
-            space_media_channels_per_household=_space_media_positive(
-                "channels_per_household",
-                space_media.get(
-                    "channels_per_household",
-                    DEFAULT_SPACE_MEDIA_CHANNELS_PER_HOUSEHOLD,
                 ),
             ),
             source_path=str(p),
@@ -554,14 +541,6 @@ class GfsConfig:
                 )
                 if "GFS_SPACE_MEDIA_IP_BYTES_PER_HOUR" in env
                 else self.space_media_ip_bytes_per_hour
-            ),
-            space_media_channels_per_household=(
-                _space_media_positive(
-                    "channels_per_household",
-                    env["GFS_SPACE_MEDIA_CHANNELS_PER_HOUSEHOLD"],
-                )
-                if "GFS_SPACE_MEDIA_CHANNELS_PER_HOUSEHOLD" in env
-                else self.space_media_channels_per_household
             ),
         )._with_clean_aliases()
 
@@ -875,21 +854,17 @@ peers   = []
 # one — and uploads at most space_uploads_per_hour blobs an hour (429 past
 # it). One client address (an IPv6 /64) uploads at most ip_bytes_per_hour
 # bytes an hour across every scope (429 past it; counted in the shared
-# database, so cluster-wide). A private space's channel takes media only
-# while member households of TWO distinct households hold seats in it, each
-# counting toward at most channels_per_household channels (its oldest
-# seats) — so cheap self-made channels can't game the eviction. In a
-# cluster every node shares data_dir, so any node serves a blob another
-# took. Env overrides: GFS_SPACE_MEDIA_MAX_BYTES,
-# GFS_SPACE_MEDIA_TTL_SECONDS, GFS_SPACE_MEDIA_SPACE_MAX_BYTES,
-# GFS_SPACE_MEDIA_SPACE_UPLOADS_PER_HOUR, GFS_SPACE_MEDIA_IP_BYTES_PER_HOUR,
-# GFS_SPACE_MEDIA_CHANNELS_PER_HOUSEHOLD.
+# database, so cluster-wide). A private space's channel takes media while
+# a member household holds a seat in it. In a cluster every node shares
+# data_dir, so any node serves a blob another took. Env overrides:
+# GFS_SPACE_MEDIA_MAX_BYTES, GFS_SPACE_MEDIA_TTL_SECONDS,
+# GFS_SPACE_MEDIA_SPACE_MAX_BYTES, GFS_SPACE_MEDIA_SPACE_UPLOADS_PER_HOUR,
+# GFS_SPACE_MEDIA_IP_BYTES_PER_HOUR.
 max_bytes              = 5368709120   # 5 GiB
 ttl_seconds            = 259200       # 3 days
 space_max_bytes        = 268435456    # 256 MiB
 space_uploads_per_hour = 300
 ip_bytes_per_hour      = 1073741824   # 1 GiB
-channels_per_household = 5
 """
 
 
