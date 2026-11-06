@@ -74,7 +74,7 @@ def fits_channel(chunk_len: int, channel_max_message_bytes: int | None) -> bool:
 
 
 def media_chunk_bytes(
-    channel_max_message_bytes: int | None, file_size_bytes: int = 0
+    channel_max_message_bytes: int | None, *, file_size_bytes: int
 ) -> int:
     """The chunk size for one household.
 

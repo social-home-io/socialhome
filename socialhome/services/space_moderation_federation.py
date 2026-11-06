@@ -878,8 +878,11 @@ def moderation_media_urls(item: SpaceModerationItem) -> list[str]:
     listing's) files, or a calendar create's / edit's cover. Both the
     submitter (what to send) and a reviewer household (what a
     ``SPACE_MEDIA_BLOB`` correlated by the item may write) use it."""
-    payload = item.payload or {}
-    match item.feature:
+    return _media_urls(item.feature, item.payload or {})
+
+
+def _media_urls(feature: str, payload: dict) -> list[str]:
+    match feature:
         case "posts":
             return _post_media_urls(payload)
         case "calendar":
@@ -889,17 +892,15 @@ def moderation_media_urls(item: SpaceModerationItem) -> list[str]:
 
 
 def _changed_media_urls(item: SpaceModerationItem) -> list[str]:
-    """:func:`moderation_media_urls` minus a calendar edit's cover that is
-    the event's current one (``current_snapshot``) — every reviewer
-    already has that file."""
+    """:func:`moderation_media_urls` minus the files the target already
+    has (``current_snapshot``: an edited event's cover, an edited post's
+    pictures) — every reviewer holds those already."""
     urls = moderation_media_urls(item)
-    if item.feature != "calendar":
+    snapshot = item_payload_snapshot(item)
+    if not snapshot:
         return urls
-    snapshot = item_payload_snapshot(item) or {}
-    current = snapshot.get("cover_url")
-    if not isinstance(current, str) or not current:
-        return urls
-    return [u for u in urls if media_basename(u) != media_basename(current)]
+    have = {media_basename(u) for u in _media_urls(item.feature, snapshot)}
+    return [u for u in urls if media_basename(u) not in have]
 
 
 def _calendar_cover_urls(payload: dict) -> list[str]:

@@ -30,7 +30,7 @@ DEFAULT_RTC_LIMIT = 256 * 1024
 
 
 def test_no_channel_uses_the_https_size_which_fits_the_inbox():
-    assert media_chunk_bytes(None) == HTTPS_CHUNK_BYTES
+    assert media_chunk_bytes(None, file_size_bytes=0) == HTTPS_CHUNK_BYTES
     assert (
         HTTPS_CHUNK_BYTES * JSON_EXPANSION + FRAME_OVERHEAD_BYTES
         <= DEFAULT_JSON_MAX_BYTES
@@ -40,7 +40,7 @@ def test_no_channel_uses_the_https_size_which_fits_the_inbox():
 def test_two_upgraded_households_send_the_https_size_over_the_channel():
     """Both advertise 1 MiB: a chunk as big as the inbox allows also fits
     the channel, so a fallback never needs a different size."""
-    size = media_chunk_bytes(ADVERTISED_MAX_MESSAGE_BYTES)
+    size = media_chunk_bytes(ADVERTISED_MAX_MESSAGE_BYTES, file_size_bytes=0)
     assert size == HTTPS_CHUNK_BYTES
     assert size + FRAME_OVERHEAD_BYTES <= ADVERTISED_MAX_MESSAGE_BYTES
 
@@ -48,7 +48,7 @@ def test_two_upgraded_households_send_the_https_size_over_the_channel():
 def test_an_older_household_gets_chunks_its_channel_takes():
     """A 256 KiB channel — the limit a 680 KB picture sent whole broke
     ("Message size exceeds limit")."""
-    size = media_chunk_bytes(DEFAULT_RTC_LIMIT)
+    size = media_chunk_bytes(DEFAULT_RTC_LIMIT, file_size_bytes=0)
     assert size + FRAME_OVERHEAD_BYTES <= DEFAULT_RTC_LIMIT
     # Not needlessly small: within one frame overhead of the limit.
     assert size >= DEFAULT_RTC_LIMIT - 2 * FRAME_OVERHEAD_BYTES
@@ -70,19 +70,19 @@ def test_a_tiny_channel_limit_falls_back_to_the_https_size(limit):
     and more than the receiver's chunk cap (the file never arrived). A
     channel that can't carry :data:`MIN_CHANNEL_CHUNK_BYTES` is not used
     for media: the chunks are sized for the HTTPS inbox and go over it."""
-    size = media_chunk_bytes(limit)
+    size = media_chunk_bytes(limit, file_size_bytes=0)
     assert size == HTTPS_CHUNK_BYTES
     assert not fits_channel(size, limit)  # → the sender takes HTTPS
 
 
 def test_the_floor_itself_is_still_carried_by_the_channel():
     limit = MIN_CHANNEL_CHUNK_BYTES + FRAME_OVERHEAD_BYTES
-    assert media_chunk_bytes(limit) == MIN_CHANNEL_CHUNK_BYTES
+    assert media_chunk_bytes(limit, file_size_bytes=0) == MIN_CHANNEL_CHUNK_BYTES
     assert fits_channel(MIN_CHANNEL_CHUNK_BYTES, limit)
 
 
 def test_unknown_limit_uses_the_https_size():
-    assert media_chunk_bytes(0) == HTTPS_CHUNK_BYTES
+    assert media_chunk_bytes(0, file_size_bytes=0) == HTTPS_CHUNK_BYTES
 
 
 def test_a_200_mib_file_at_a_64_kib_limit_stays_under_the_chunk_cap():
@@ -129,7 +129,7 @@ def test_split_into_chunks_is_lazy():
 
 
 def test_a_700_kb_photo_is_two_messages_between_upgraded_households():
-    size = media_chunk_bytes(ADVERTISED_MAX_MESSAGE_BYTES)
+    size = media_chunk_bytes(ADVERTISED_MAX_MESSAGE_BYTES, file_size_bytes=0)
     assert -(-700_000 // size) == 2
 
 
@@ -153,3 +153,12 @@ def test_a_file_that_fits_is_one_chunk():
     assert list(split_into_chunks(b"", 1000)) == [
         ({"chunk_index": 0, "chunk_count": 1, "final": True}, b"")
     ]
+
+
+def test_the_file_size_is_a_required_keyword():
+    """No silent 0: a caller that forgets the file size would skip the
+    chunk-cap floor."""
+    with pytest.raises(TypeError):
+        media_chunk_bytes(ADVERTISED_MAX_MESSAGE_BYTES)  # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        media_chunk_bytes(ADVERTISED_MAX_MESSAGE_BYTES, 0)  # type: ignore[misc]

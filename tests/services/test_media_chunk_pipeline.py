@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from socialhome.domain.media_chunking import split_into_chunks
 from socialhome.services.media_chunk_pipeline import send_chunks
 
@@ -71,3 +73,44 @@ async def test_an_empty_iterable_sends_nothing():
         raise AssertionError("not called")
 
     assert await send_chunks([], _send, window=4) is None
+
+
+async def test_a_cancelled_send_stops_the_other_workers():
+    """Regression: a ``CancelledError`` (any ``BaseException``) out of one
+    send left the other workers sending with nobody awaiting them."""
+    started: list[int] = []
+    finished: list[int] = []
+
+    async def _send(payload: dict, raw: bytes) -> None:
+        started.append(payload["chunk_index"])
+        if payload["chunk_index"] == 0:
+            await asyncio.sleep(0)
+            raise asyncio.CancelledError
+        await asyncio.sleep(0.05)
+        finished.append(payload["chunk_index"])
+
+    with pytest.raises(asyncio.CancelledError):
+        await send_chunks(split_into_chunks(b"x" * 100, 1), _send, window=4)
+    await asyncio.sleep(0.2)
+    assert finished == []
+    assert len(started) <= 4
+
+
+async def test_cancelling_the_caller_cancels_every_worker():
+    started = asyncio.Event()
+    finished: list[int] = []
+
+    async def _send(payload: dict, raw: bytes) -> None:
+        started.set()
+        await asyncio.sleep(0.05)
+        finished.append(payload["chunk_index"])
+
+    task = asyncio.create_task(
+        send_chunks(split_into_chunks(b"x" * 100, 1), _send, window=4)
+    )
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await asyncio.sleep(0.2)
+    assert finished == []

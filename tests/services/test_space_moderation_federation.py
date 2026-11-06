@@ -530,3 +530,23 @@ def test_moderation_media_urls_lists_what_an_item_proposes():
         _item("posts", {"entity": "post", "image_urls": ["api/media/p.webp"]})
     ) == ["api/media/p.webp"]
     assert moderation_media_urls(_item()) == []
+
+
+async def test_a_held_post_edit_sends_only_the_pictures_it_changes():
+    """Pictures the post already has (``current_snapshot``) are on every
+    reviewer; only the new ones travel."""
+    media = _Media()
+    out, _ = _fed(media=media)
+    item = dataclasses.replace(
+        _item(
+            "posts",
+            {
+                "entity": "post",
+                "image_urls": ["api/media/kept.webp", "api/media/new.webp"],
+            },
+        ),
+        action="edit",
+        current_snapshot='{"image_urls": ["/api/media/kept.webp"]}',
+    )
+    await out.send_submitted(SPACE, item, ["host"])
+    assert [c["media_urls"] for c in media.calls] == [["api/media/new.webp"]]

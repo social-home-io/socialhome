@@ -1183,14 +1183,14 @@ class FederationService:
             else None
         )
 
-    def media_chunk_bytes(self, instance_id: str, file_size_bytes: int = 0) -> int:
+    def media_chunk_bytes(self, instance_id: str, *, file_size_bytes: int) -> int:
         """How big one media chunk of a ``file_size_bytes`` file to
         *instance_id* may be: what its open media channel negotiated, else
         what the HTTPS inbox takes (:mod:`socialhome.domain.media_chunking`).
         A channel below the floor gets the inbox size, which
         :meth:`send_media_chunk` then routes over HTTPS."""
         return media_chunk_bytes(
-            self._media_channel_limit(instance_id), file_size_bytes
+            self._media_channel_limit(instance_id), file_size_bytes=file_size_bytes
         )
 
     async def peer_supports(self, instance_id: str, *, min_version: int) -> bool:

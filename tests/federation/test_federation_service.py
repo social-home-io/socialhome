@@ -6018,19 +6018,27 @@ def test_media_chunk_bytes_follows_the_peers_media_channel():
 
     kp = generate_identity_keypair()
     svc = _svc_with(kp, MagicMock(), MagicMock())
-    assert svc.media_chunk_bytes("peer-x") == HTTPS_CHUNK_BYTES  # no transport
+    assert (
+        svc.media_chunk_bytes("peer-x", file_size_bytes=0) == HTTPS_CHUNK_BYTES
+    )  # no transport
     limits = {"old": 262144, "new": 1024 * 1024}
     svc.attach_transport(SimpleNamespace(media_max_message_size=limits.get))
-    assert svc.media_chunk_bytes("none") == HTTPS_CHUNK_BYTES
-    assert svc.media_chunk_bytes("old") == 262144 - FRAME_OVERHEAD_BYTES
-    assert svc.media_chunk_bytes("new") == media_chunk_bytes(1024 * 1024)
+    assert svc.media_chunk_bytes("none", file_size_bytes=0) == HTTPS_CHUNK_BYTES
+    assert (
+        svc.media_chunk_bytes("old", file_size_bytes=0) == 262144 - FRAME_OVERHEAD_BYTES
+    )
+    assert svc.media_chunk_bytes("new", file_size_bytes=0) == media_chunk_bytes(
+        1024 * 1024, file_size_bytes=0
+    )
     # A tiny channel, or one too small for this file in 4096 chunks →
     # the inbox size (which the sender then routes over HTTPS).
     limits["tiny"] = 1
-    assert svc.media_chunk_bytes("tiny") == HTTPS_CHUNK_BYTES
+    assert svc.media_chunk_bytes("tiny", file_size_bytes=0) == HTTPS_CHUNK_BYTES
     limits["floor"] = 80 * 1024
-    assert svc.media_chunk_bytes("floor") == 64 * 1024
+    assert svc.media_chunk_bytes("floor", file_size_bytes=0) == 64 * 1024
     assert (
         svc.media_chunk_bytes("floor", file_size_bytes=300 * 1024 * 1024)
         == HTTPS_CHUNK_BYTES
     )
+    with pytest.raises(TypeError):
+        svc.media_chunk_bytes("floor")  # type: ignore[call-arg]

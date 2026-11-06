@@ -190,7 +190,7 @@ class FakeFederation:
         self.sent: list[dict] = []
         self.should_fail = False
 
-    def media_chunk_bytes(self, instance_id: str, file_size_bytes: int = 0) -> int:
+    def media_chunk_bytes(self, instance_id: str, *, file_size_bytes: int) -> int:
         return HTTPS_CHUNK_BYTES
 
     async def send_media_chunk(

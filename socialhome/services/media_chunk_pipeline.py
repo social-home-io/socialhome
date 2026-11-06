@@ -10,7 +10,8 @@ the whole file.
 
 A failed chunk stops the rest: the outbox reschedules the whole row and
 the next attempt resends every chunk (the receiver overwrites the parts
-it already has).
+it already has). Anything beyond an ``Exception`` (a cancellation)
+cancels every worker and propagates.
 """
 
 from __future__ import annotations
@@ -49,5 +50,16 @@ async def send_chunks(
             except Exception as exc:  # noqa: BLE001 — reported to the caller
                 failures.append((payload, exc))
 
-    await asyncio.gather(*(_worker() for _ in range(max(1, window))))
+    workers = [asyncio.create_task(_worker()) for _ in range(max(1, window))]
+    try:
+        await asyncio.gather(*workers)
+    except BaseException:
+        # A worker raised past ``Exception`` (a ``CancelledError`` from an
+        # inner future, ...): ``gather`` re-raises but leaves the others
+        # running with nobody awaiting them — stop them before re-raising.
+        # (Cancelling the caller already cancels every worker via gather.)
+        for task in workers:
+            task.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        raise
     return failures[0] if failures else None
