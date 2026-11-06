@@ -141,7 +141,7 @@ from ..utils.datetime import parse_iso8601_lenient
 from .dm_audience import local_audience
 from .dm_mentions import MENTIONABLE_TYPES, DmMentionResolver
 from .inbound_media_store import (
-    assemble_once,
+    drop_parts,
     is_safe_media_name,
     local_media_ref,
     local_media_refs,
@@ -151,7 +151,7 @@ from .inbound_media_store import (
     parse_chunk_meta,
     partial_key,
     publish_once,
-    remove_quietly,
+    store_chunk,
     verbatim_local_media_ref,
 )
 from .link_preview_service import wire_link_preview
@@ -1409,9 +1409,10 @@ class FederationInboundService(ProtectionGateMixin):
         Backwards compat: payloads from older builds (and small
         files from current builds) carry no ``chunk_count``; we
         treat that as a single-chunk transfer. Chunks may arrive
-        out of order; each is written as ``<msg_id>.part<idx>`` so
-        a re-send from a sender restart simply overwrites the part
-        and the finalisation reads them in order.
+        out of order; each is written as a part under
+        ``.partial/<key>/`` (key bound to the sender and chunk count),
+        so a re-send of the same attempt overwrites its part and the
+        assembly reads them in order.
         """
         p = event.payload
         blob_id = str(p.get("media_blob_id") or "")
@@ -1466,6 +1467,18 @@ class FederationInboundService(ProtectionGateMixin):
             conversation_id=str(p.get("conversation_id") or ""),
             from_instance=event.from_instance,
             total_size=_declared_size(p, raw, chunk_count),
+        )
+
+    async def _dm_row_awaits_media(self, message_id: str, dest: pathlib.Path) -> bool:
+        """Whether the message row has yet to adopt ``dest`` (pending, or
+        pointing elsewhere). ``False`` for a row not seen yet — the
+        ``DM_MESSAGE`` adopts the file when it lands."""
+        msg = await self._conversation_repo.get_message(message_id)
+        if msg is None:
+            return False
+        return (
+            msg.media_sync_status == "pending"
+            or msg.media_url != f"api/media/{dest.name}"
         )
 
     async def _dm_media_in_scope(
@@ -1539,19 +1552,31 @@ class FederationInboundService(ProtectionGateMixin):
 
         Write-once: the final file is moved into place with
         :func:`publish_once`, so an existing ``<message_id><ext>`` is never
-        replaced — a re-delivery just re-adopts the file already there.
+        replaced — a re-delivery re-adopts the file already there, but only
+        while the row still awaits it.
         """
         assert self._media_dir is not None
         data = raw
         ext = _mime_to_ext(mime_type)
         dest = self._media_dir / f"{message_id}{ext}"
         tmp_dest = self._media_dir / f"{message_id}.assembled{ext}"
+        # Parts live in a directory of this transfer's own, bound to the
+        # sending household and the chunk count (a retry chunked for
+        # another tier never mixes with an earlier attempt's parts).
+        part_dir = (
+            self._media_dir
+            / ".partial"
+            / partial_key(from_instance, f"dm:{message_id}", chunk_count=chunk_count)
+        )
         try:
             await aiofiles.os.makedirs(self._media_dir, exist_ok=True)
             if await aiofiles.os.path.exists(dest):
-                # Already landed (re-delivery). Don't rewrite; on the
-                # final chunk fall through so the row adopts the file.
-                if not is_final and chunk_count > 1:
+                # Already landed (a re-delivery, or a chunk after the set
+                # completed). Don't rewrite; drop any parts a crash left
+                # behind. The row adopts the file only if it hasn't yet,
+                # so a duplicate never pushes ``dm.media_ready`` again.
+                await drop_parts(part_dir)
+                if not await self._dm_row_awaits_media(message_id, dest):
                     return
                 await note_existing(
                     dest,
@@ -1570,22 +1595,21 @@ class FederationInboundService(ProtectionGateMixin):
                         what="DM_MEDIA_BLOB",
                         from_instance=from_instance,
                     )
-            else:
-                part_path = self._media_dir / f"{message_id}.part{chunk_index:05d}"
-                async with aiofiles.open(part_path, "wb") as out_f:
-                    await out_f.write(data)
-                # The sender pipelines a file's chunks, so the ``final``
-                # one may land before the others: whichever chunk
-                # completes the set assembles the file. ``None`` — a chunk
-                # is still on its way; ``False`` — another chunk completed
-                # the set first and adopts the file, so this one stays
-                # quiet (``dm.media_ready`` fires once).
-                parts = [
-                    self._media_dir / f"{message_id}.part{i:05d}"
-                    for i in range(chunk_count)
-                ]
-                if not await assemble_once(parts, dest, tmp_dir=self._media_dir):
-                    return
+            # The sender pipelines a file's chunks, so the ``final`` one
+            # may land before the others: whichever chunk completes the
+            # set assembles the file. ``None`` — a chunk is still on its
+            # way (or the bytes didn't add up); ``False`` — another chunk
+            # completed the set first and adopts the file, so this one
+            # stays quiet (``dm.media_ready`` fires once).
+            elif not await store_chunk(
+                part_dir,
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
+                data=data,
+                target=dest,
+                expected_size=total_size,
+            ):
+                return
         except OSError as exc:  # pragma: no cover
             log.warning(
                 "DM_MEDIA_BLOB: write failed for %s: %s",
@@ -1946,8 +1970,8 @@ class FederationInboundService(ProtectionGateMixin):
         :class:`SpaceMediaSyncService` ships one or more chunks (each
         carrying ``chunk_index`` / ``chunk_count`` / ``final``); the
         receiver writes each chunk to a part file under
-        ``<media_dir>/.partial/<key>/`` and finalises by moving the
-        assembled bytes into place when the ``final`` chunk arrives.
+        ``<media_dir>/.partial/<key>/``; whichever chunk completes the set
+        (they land in any order) moves the assembled bytes into place.
 
         Without this handler the post lands but the picture is broken
         because the URL points at the receiver's media path with no
@@ -2030,7 +2054,9 @@ class FederationInboundService(ProtectionGateMixin):
         await self._assemble_space_chunk(
             raw=raw,
             filename=filename,
-            partial_dir=partial_key(event.from_instance, transfer_id),
+            partial_dir=partial_key(
+                event.from_instance, transfer_id, chunk_count=chunk_count
+            ),
             chunk_index=chunk_index,
             chunk_count=chunk_count,
             final=bool(p.get("final")) or chunk_count == 1,
@@ -2118,7 +2144,7 @@ class FederationInboundService(ProtectionGateMixin):
 
         ``raw`` is the already-decoded chunk bytes; ``filename`` has been
         validated and scope-checked by the caller; ``partial_dir`` is the
-        sender-bound :func:`partial_key`. ``self._media_dir`` is
+        sender- and chunk-count-bound :func:`partial_key`. ``self._media_dir`` is
         guaranteed non-None by the caller. Every path ends in
         :func:`publish_once`, so an existing ``filename`` is never
         replaced.
@@ -2128,7 +2154,9 @@ class FederationInboundService(ProtectionGateMixin):
         partial_root = self._media_dir / ".partial" / partial_dir
         if await aiofiles.os.path.exists(target):
             # Already have it — a re-delivery, or a name that belongs to
-            # something else. Nothing to write; drop any stale parts.
+            # something else. Nothing to write; drop any parts a crash
+            # between publish and cleanup left behind (any chunk, not
+            # only the final one).
             if final:
                 await note_existing(
                     target,
@@ -2136,41 +2164,30 @@ class FederationInboundService(ProtectionGateMixin):
                     what="SPACE_MEDIA_BLOB",
                     from_instance=from_instance,
                 )
-                await self._drop_space_partials(partial_root, chunk_count)
-            return
-        try:
-            await aiofiles.os.makedirs(partial_root, exist_ok=True)
-            part_path = partial_root / f"{chunk_index:06d}"
-            async with aiofiles.open(part_path, "wb") as fh:
-                await fh.write(raw)
-        except OSError as exc:
-            log.warning(
-                "SPACE_MEDIA_BLOB: part write failed for %s chunk %d: %s",
-                filename,
-                chunk_index,
-                exc,
-            )
+            await drop_parts(partial_root)
             return
         # The sender pipelines a file's chunks, so the ``final`` one may
         # land before the others: whichever chunk completes the set
-        # assembles the file (write-once; two completing at once never
-        # share a temp file).
+        # assembles the file (:func:`store_chunk`, write-once).
         try:
-            published = await assemble_once(
-                [partial_root / f"{i:06d}" for i in range(chunk_count)],
-                target,
-                tmp_dir=partial_root.parent,
+            published = await store_chunk(
+                partial_root,
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
+                data=raw,
+                target=target,
+                expected_size=total_size,
             )
         except OSError as exc:
             log.warning(
-                "SPACE_MEDIA_BLOB: finalise failed for %s: %s",
+                "SPACE_MEDIA_BLOB: chunk %d of %s failed: %s",
+                chunk_index,
                 filename,
                 exc,
             )
             return
         if published is None:
             return
-        await self._drop_space_partials(partial_root, chunk_count)
         if not published:
             await note_existing(
                 target,
@@ -2185,15 +2202,6 @@ class FederationInboundService(ProtectionGateMixin):
             chunk_count,
             post_id,
         )
-
-    @staticmethod
-    async def _drop_space_partials(partial_root: pathlib.Path, count: int) -> None:
-        for i in range(count):
-            await remove_quietly(partial_root / f"{i:06d}")
-        try:
-            await aiofiles.os.rmdir(partial_root)
-        except OSError:
-            pass
 
     async def _on_space_post_updated(self, event: FederationEvent) -> None:
         p = event.payload

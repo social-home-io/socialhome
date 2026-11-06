@@ -132,17 +132,26 @@ Before 2026-11-06 the sizes were fixed (a 1 MiB single chunk, 512 KiB
 pieces): no binary frame fit a 256 KiB channel, and a 0.7–1 MiB file sent
 whole was refused by the inbox too (413), so it never arrived.
 
-**Receiver side**: each chunk writes to `<msg_id>.part<idx>` under
-the media root. The sender sends up to four chunks at once
-(`PIPELINE_WINDOW`), so they land in any order — the `final` chunk can
-arrive before chunk 0. Whichever chunk completes the set 0…N−1
-assembles: it concatenates the parts in index order into a temp file of
-its own, moves it to `<msg_id>.<ext>` write-once (see below), deletes
-the parts, then swaps `media_url` and broadcasts `dm.media_ready` as in
-the single-chunk case — once: when two chunks complete the set at the
-same moment, only the one whose file lands adopts it. A re-send from a
-sender restart overwrites the same part files idempotently; a chunk
-that lands after the file is assembled is dropped. Before 2026-11-06 the
+**Receiver side**: each chunk is written (to a temp name, then renamed
+into place) as part `<idx>` under
+`media_dir/.partial/<sha256(from_instance, "dm:" + msg_id, chunk_count)>/`
+— bound to the sending household and the chunk count, because a retry
+is re-chunked for the tier it goes out on (240 KiB over an older
+channel, 512 KiB over HTTPS) and two attempts' parts must never mix.
+The sender sends up to four chunks at once (`PIPELINE_WINDOW`), so they
+land in any order — the `final` chunk can arrive before chunk 0.
+Whichever chunk completes the set 0…N−1 (one directory listing per
+chunk) assembles: it concatenates the parts in index order into a temp
+file of its own, checks the result is exactly `file_size_bytes` (a
+mismatch discards the parts and publishes nothing), moves it to
+`<msg_id>.<ext>` write-once (see below), deletes the part directory,
+then swaps `media_url` and broadcasts `dm.media_ready` as in the
+single-chunk case — once: when two chunks complete the set at the same
+moment, only the one whose file lands adopts it. A chunk that lands
+after the file exists — any chunk, final or not — drops the transfer's
+leftover parts and re-adopts the file only while the row still awaits
+it (`media_sync_status='pending'` or another `media_url`), so a
+duplicate never pushes `dm.media_ready` twice. Before 2026-11-06 the
 receiver assembled only when `final=true` arrived, so a final chunk that
 overtook an earlier one left the file unassembled for good.
 
@@ -212,8 +221,8 @@ A handful of paths beyond the happy flow above:
   recipient sees nothing — there's nothing to act on for them.
 - **Media-orphan janitor.** `DmGcScheduler._sweep_media_orphans`
   runs on the hourly conversation-GC tick: enumerates
-  `<msg_id>.preview.webp` and `<msg_id>.part<idx>` files,
-  groups by message id, drops anything without a backing live
+  `<msg_id>.preview.webp` files (and `<msg_id>.part<idx>` parts
+  from builds before 2026-11-06), groups by message id, drops anything without a backing live
   `conversation_messages` row.
 
 ## Server-side validation

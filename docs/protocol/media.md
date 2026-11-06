@@ -165,15 +165,22 @@ sending household was sent it for. Both blob types share
   blob before the post, listing or gallery item it belongs to. Such a
   blob is accepted — overwriting is the harm, and the write is
   write-once, so accepting it cannot touch an existing file.
-- **Per-sender assembly.** Space part files live under
-  `media_dir/.partial/<sha256(from_instance, transfer_id)>/`, so two
-  households' chunks never mix into one file.
+- **Per-sender assembly.** Part files live under
+  `media_dir/.partial/<sha256(from_instance, transfer_id, chunk_count)>/`
+  (DM: `transfer_id` = `dm:<message_id>`), so two households' chunks
+  never mix into one file — nor two attempts of one transfer that were
+  chunked differently (a retry is re-chunked for its tier: 240 KiB over
+  an older channel, 512 KiB over HTTPS).
 - **Any order.** Senders pipeline chunks, so the `final` chunk can land
-  before the others. Every chunk handler calls `assemble_once` after
-  writing its part, and whichever chunk completes the set assembles —
-  never "on `final`". Each assembly writes its own temp file, so two
-  chunks completing at once never mix bytes, and only one publishes. DM rules (sender
-  household, announced `media_blob_id`) are in
+  before the others. Every chunk handler calls `store_chunk`: the part is
+  written to a temp name and renamed into place, one directory listing
+  tells whether the set is complete, and whichever chunk completes it
+  assembles — never "on `final`". Each assembly writes its own temp file
+  inside the part directory, so two chunks completing at once never mix
+  bytes, and only one publishes. The assembled file must be exactly the
+  declared `file_size_bytes`, else the parts are dropped and nothing is
+  published. A chunk landing after the file exists drops any leftover
+  parts. DM rules (sender household, announced `media_blob_id`) are in
   [`dm-media.md`](./dm-media.md#chunking).
 
 Residual, by design: among the households entitled to deliver a space's

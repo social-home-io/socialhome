@@ -24,9 +24,10 @@ remote URL.
 
 Partial chunk files live under ``media_dir/.partial/<key>`` where ``key``
 (:func:`partial_key`) binds the sending household, so two households can
-never contribute chunks to one assembly. Senders pipeline chunks, so they
-land in any order: :func:`assemble_once` runs after every chunk and
-assembles as soon as the set is complete, not when the ``final`` one lands.
+never contribute chunks to one assembly (and the chunk count, so two
+attempts chunked differently never mix). Senders pipeline chunks, so they
+land in any order: :func:`store_chunk` runs for every chunk and assembles
+as soon as the set is complete, not when the ``final`` one lands.
 """
 
 from __future__ import annotations
@@ -36,7 +37,6 @@ import logging
 import pathlib
 import re
 import uuid
-from collections.abc import Sequence
 
 import aiofiles
 import aiofiles.os
@@ -162,9 +162,17 @@ def media_basename(url: str | None) -> str:
     return url.rsplit("/", 1)[-1].split("?", 1)[0]
 
 
-def partial_key(from_instance: str, transfer_id: str) -> str:
-    """Directory name for one household's in-flight chunks of a transfer."""
-    digest = hashlib.sha256(f"{from_instance}\0{transfer_id}".encode()).hexdigest()
+def partial_key(from_instance: str, transfer_id: str, *, chunk_count: int) -> str:
+    """Directory name for one household's in-flight chunks of a transfer.
+
+    Binds the sending household, the transfer and its ``chunk_count``: a
+    retry re-chunks the file for the tier it goes out on (240 KiB over an
+    older channel, 512 KiB over HTTPS), so parts of two attempts with
+    different chunk sizes never meet in one directory.
+    """
+    digest = hashlib.sha256(
+        f"{from_instance}\0{transfer_id}\0{chunk_count}".encode()
+    ).hexdigest()
     return digest[:32]
 
 
@@ -213,56 +221,117 @@ async def publish_once(tmp: pathlib.Path, target: pathlib.Path) -> bool:
     return True
 
 
-async def assemble_once(
-    parts: Sequence[pathlib.Path],
-    target: pathlib.Path,
+def part_name(index: int) -> str:
+    """File name of chunk ``index`` inside a transfer's part directory."""
+    return f"{index:06d}"
+
+
+async def present_parts(part_dir: pathlib.Path) -> frozenset[str]:
+    """Names of the chunk parts that have landed in ``part_dir``.
+
+    One directory listing per chunk: linear in the chunk count, where a
+    per-part probe on every chunk would be quadratic. Temp files (a part
+    being written, an assembly in progress) never count.
+    """
+    try:
+        names = await aiofiles.os.listdir(part_dir)
+    except FileNotFoundError:
+        return frozenset()
+    return frozenset(n for n in names if len(n) == 6 and n.isdigit())
+
+
+async def drop_parts(part_dir: pathlib.Path) -> None:
+    """Remove a transfer's part directory and everything in it; never raises."""
+    try:
+        names = await aiofiles.os.listdir(part_dir)
+    except OSError:
+        return
+    for name in names:
+        await remove_quietly(part_dir / name)
+    try:
+        await aiofiles.os.rmdir(part_dir)
+    except OSError:
+        pass
+
+
+async def store_chunk(
+    part_dir: pathlib.Path,
     *,
-    tmp_dir: pathlib.Path,
+    chunk_index: int,
+    chunk_count: int,
+    data: bytes,
+    target: pathlib.Path,
+    expected_size: int,
 ) -> bool | None:
-    """Concatenate ``parts`` into ``target`` once every one has landed.
+    """Land one chunk and assemble ``target`` once every chunk is here.
 
-    Senders pipeline a file's chunks, so they land in any order: every
-    chunk handler calls this after writing its part, and whichever one
-    completes the set assembles. Returns
+    Senders pipeline a file's chunks, so they land in any order: whichever
+    chunk completes the set 0..``chunk_count``-1 assembles — never "on the
+    ``final`` chunk". ``part_dir`` is the transfer's own directory (keyed
+    by :func:`partial_key`, which binds ``chunk_count``). Returns
 
-    * ``None`` — a part is still missing; nothing changes.
+    * ``None`` — still waiting for a chunk, or the assembled bytes did not
+      come to ``expected_size`` (``-1`` = not declared): nothing published,
+      and on a mismatch the parts are dropped (a resend starts clean).
     * ``True`` — this call assembled and published ``target``.
-    * ``False`` — ``target`` already exists (another call completed the
+    * ``False`` — ``target`` already exists (another chunk completed the
       set first, or a re-delivery); it is never replaced.
 
-    On ``True`` / ``False`` the parts are removed, so a duplicate chunk
-    landing after assembly never leaves an orphan behind. The parts go
-    into a temp file in ``tmp_dir`` (same filesystem as ``target``) named
-    for this call alone, so two calls completing at once never write into
-    one file; :func:`publish_once` lets exactly one of them win.
+    A part is written to a temp name and renamed into place, so an
+    assembly never reads a half-written part. Each assembly writes a temp
+    file of its own inside ``part_dir`` (removed with it), and
+    :func:`publish_once` lets exactly one of two concurrent assemblies win.
     """
-    for part in parts:
-        if not await aiofiles.os.path.isfile(part):
-            if not await aiofiles.os.path.exists(target):
-                return None
-            await _remove_all(parts)
+    await aiofiles.os.makedirs(part_dir, exist_ok=True)
+    tmp_part = part_dir / f"part.tmp-{uuid.uuid4().hex}"
+    try:
+        async with aiofiles.open(tmp_part, "wb") as fh:
+            await fh.write(data)
+        await aiofiles.os.replace(tmp_part, part_dir / part_name(chunk_index))
+    except OSError:
+        await remove_quietly(tmp_part)
+        if await aiofiles.os.path.exists(target):
+            # Lost the directory to a completed assembly's cleanup.
+            await drop_parts(part_dir)
             return False
-    tmp = tmp_dir / f"assembling-{uuid.uuid4().hex}"
+        raise
+    names = [part_name(i) for i in range(chunk_count)]
+    present = await present_parts(part_dir)
+    if not present.issuperset(names):
+        if await aiofiles.os.path.exists(target):
+            # A duplicate landing after assembly: leave no orphan part.
+            await drop_parts(part_dir)
+            return False
+        return None
+    tmp = part_dir / f"assembling-{uuid.uuid4().hex}"
+    written = 0
     try:
         async with aiofiles.open(tmp, "wb") as out:
-            for part in parts:
-                async with aiofiles.open(part, "rb") as inp:
-                    await out.write(await inp.read())
+            for name in names:
+                async with aiofiles.open(part_dir / name, "rb") as inp:
+                    chunk = await inp.read()
+                written += len(chunk)
+                await out.write(chunk)
     except FileNotFoundError:
-        # A concurrent call published and removed the parts mid-read.
+        # A concurrent assembly published and removed the parts mid-read.
         await remove_quietly(tmp)
         return False if await aiofiles.os.path.exists(target) else None
     except OSError:
         await remove_quietly(tmp)
         raise
+    if expected_size >= 0 and written != expected_size:
+        log.warning(
+            "%s: assembled %d bytes, sender declared %d — discarding the parts",
+            target.name,
+            written,
+            expected_size,
+        )
+        await remove_quietly(tmp)
+        await drop_parts(part_dir)
+        return None
     published = await publish_once(tmp, target)
-    await _remove_all(parts)
+    await drop_parts(part_dir)
     return published
-
-
-async def _remove_all(paths: Sequence[pathlib.Path]) -> None:
-    for path in paths:
-        await remove_quietly(path)
 
 
 async def note_existing(
