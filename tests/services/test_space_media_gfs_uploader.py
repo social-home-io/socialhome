@@ -213,6 +213,18 @@ def _write(media_dir: pathlib.Path, name: str, size: int) -> bytes:
     return data
 
 
+class _MediaRefs:
+    """Which files are the space's own content (``confined_to_space``)."""
+
+    def __init__(self, foreign=()):
+        self.foreign = set(foreign)
+        self.asked: list[tuple[str, str]] = []
+
+    async def confined_to_space(self, basename, space_id):
+        self.asked.append((basename, space_id))
+        return basename not in self.foreign
+
+
 def _uploader(
     tmp_path,
     *,
@@ -223,12 +235,14 @@ def _uploader(
     certs=None,
     identity_seed=b"\x01" * 32,
     spaces=None,
+    media_refs=None,
 ):
     u = SpaceMediaGfsUploader(
         space_repo=spaces or _Spaces(seed),
         space_crypto=_Crypto(),
         federation_repo=_FedRepo(instances),
         gfs_service=gfs,
+        media_refs=media_refs or _MediaRefs(),
         media_dir=tmp_path,
         writer_certs=certs,
     )
@@ -338,7 +352,7 @@ async def test_too_large_missing_and_no_key_files_are_skipped(tmp_path, monkeypa
     )
     assert set(plan.wire()) == {"ok.webp"}
     # A space we hold no key for: nothing to describe.
-    assert await u.describe("other", ["api/media/ok.webp"]) == []
+    assert await u._describe_names("other", ["ok.webp"]) == []
 
 
 async def test_plan_for_one_reader_targets_only_its_gfs(tmp_path):
@@ -604,13 +618,13 @@ async def test_a_described_file_is_not_sealed_again(tmp_path, monkeypatch):
 
     monkeypatch.setattr(up_mod, "seal_file_sync", _counting)
     u = _uploader(tmp_path, gfs=_Gfs([]))
-    first = await u.describe(SPACE, ["api/media/a.webp"])
-    second = await u.describe(SPACE, ["api/media/a.webp"])
+    first = await u._describe_names(SPACE, ["a.webp"])
+    second = await u._describe_names(SPACE, ["a.webp"])
     assert first == second
     assert calls == ["a.webp"]
     # A changed file is described afresh.
     _write(tmp_path, "a.webp", 1001)
-    third = await u.describe(SPACE, ["api/media/a.webp"])
+    third = await u._describe_names(SPACE, ["a.webp"])
     assert third[0].blob_id != first[0].blob_id
     assert calls == ["a.webp", "a.webp"]
 
@@ -774,3 +788,66 @@ async def test_a_channel_blob_is_addressed_in_the_channel_scope(tmp_path):
         MEDIA_KEY, SPACE, 4, "a.webp", (tmp_path / "a.webp").read_bytes()
     )
     assert ref.blob_id == space_media_address("channel", CHANNEL_ID, blob)
+
+
+# ── Only this space's own files are ever sealed (#1309 review D) ─────────
+
+
+async def test_a_file_not_confined_to_the_space_is_never_described(tmp_path):
+    """A member may name another space's, a private album's or a household
+    file in a post (or record) of S; it is never sealed under S's key."""
+    _write(tmp_path, "mine.webp", 10)
+    _write(tmp_path, "private.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    refs = _MediaRefs(foreign={"private.webp"})
+    u = _uploader(
+        tmp_path, gfs=_Gfs([g1]), instances=[RELAY], versions={"e": V}, media_refs=refs
+    )
+    plan = await u.plan(
+        SPACE, ["api/media/mine.webp", "api/media/private.webp"], followers=False
+    )
+    assert set(plan.wire()) == {"mine.webp"}
+    assert ("private.webp", SPACE) in refs.asked
+    # The catch-up path takes the same check.
+    plan = await u.plan_for_reader(SPACE, ["api/media/private.webp"], "e")
+    assert plan is None
+
+
+async def test_a_reserved_name_is_never_described(tmp_path):
+    _write(tmp_path, "gm-moment.webp", 10)
+    _write(tmp_path, "dm-chat.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    u = _uploader(tmp_path, gfs=_Gfs([g1]), instances=[RELAY], versions={"e": V})
+    assert (
+        await u.plan(
+            SPACE,
+            ["api/media/gm-moment.webp", "api/media/dm-chat.webp"],
+            followers=False,
+        )
+        is None
+    )
+
+
+async def test_a_file_that_left_the_space_is_not_uploaded(tmp_path, caplog):
+    """Checked again at upload time: a file named outside the space since
+    it was described is not sent."""
+    _write(tmp_path, "a.webp", 10)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1])
+    refs = _MediaRefs()
+    u = _uploader(
+        tmp_path,
+        gfs=gfs,
+        instances=[RELAY],
+        versions={"e": V},
+        seed=b"\2" * 32,
+        media_refs=refs,
+    )
+    plan = await u.plan(SPACE, ["api/media/a.webp"], followers=False)
+    refs.foreign.add("a.webp")
+    await _upload(u, plan)
+    assert gfs.puts == []
+
+
+async def test_the_uploader_has_no_public_describe():
+    assert not hasattr(SpaceMediaGfsUploader, "describe")

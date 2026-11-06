@@ -401,3 +401,88 @@ async def test_a_space_photo_only_for_its_seats(db):
     repo = SqliteMediaReferenceRepo(db)
     assert await repo.may_reference("sp.webp", "u2")
     assert not await repo.may_reference("sp.webp", "u3")
+
+
+# ─── confined_to_space: may a space's media be sealed for its GFS readers ─
+
+
+async def _two_spaces(db):
+    await _seed_parents(db)
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username, "
+        "identity_public_key) VALUES('sp2', 'T', 'self', 'u1', 'k')",
+    )
+
+
+async def test_a_file_of_this_spaces_post_is_confined_to_it(db):
+    """#1309 review D: a file is sealed for a space's GFS readers only when
+    every row that references it is that space's content."""
+    await _two_spaces(db)
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, image_urls_json)"
+        " VALUES('p1', 'sp1', 'u1', 'image', ?)",
+        ('["api/media/s1.webp"]',),
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.confined_to_space("s1.webp", "sp1")
+    assert not await repo.confined_to_space("s1.webp", "sp2")
+    # Unreferenced: not a space file at all.
+    assert not await repo.confined_to_space("nobody.webp", "sp1")
+    assert not await repo.confined_to_space("", "sp1")
+
+
+async def test_a_file_also_named_outside_the_space_is_not_confined(db):
+    """A member naming a household post's, another space's or a DM's file
+    in a post of S must not get it sealed under S's key."""
+    await _two_spaces(db)
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, media_url)"
+        " VALUES('p1', 'sp1', 'u1', 'image', 'api/media/shared.webp')"
+    )
+    await db.enqueue(
+        "INSERT INTO feed_posts(id, author, type, media_url)"
+        " VALUES('f1', 'u1', 'image', 'api/media/shared.webp')"
+    )
+    await db.enqueue(
+        "INSERT INTO space_calendar_events(id, space_id, summary, start_dt, end_dt,"
+        " created_by, cover_url) VALUES('e2', 'sp2', 'S', '2026-01-01T00:00:00+00:00',"
+        " '2026-01-02T00:00:00+00:00', 'u1', 'api/media/other.webp')"
+    )
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, media_url)"
+        " VALUES('p2', 'sp1', 'u1', 'image', 'api/media/other.webp')"
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert not await repo.confined_to_space("shared.webp", "sp1")
+    assert not await repo.confined_to_space("other.webp", "sp1")
+
+
+async def test_gallery_files_follow_their_album(db):
+    await _two_spaces(db)
+    await db.enqueue(
+        "INSERT INTO gallery_albums(id, name, owner_user_id, space_id)"
+        " VALUES('sa', 'S', 'u1', 'sp1')"
+    )
+    await db.enqueue(
+        "INSERT INTO gallery_albums(id, name, owner_user_id, audience)"
+        " VALUES('pa', 'Private', 'u1', 'chosen')"
+    )
+    await db.enqueue(
+        "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type, filename,"
+        " thumbnail_filename, width, height)"
+        " VALUES('g1', 'sa', 'u1', 'photo', 'g.webp', 'gt.webp', 1, 1)"
+    )
+    await db.enqueue(
+        "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type, filename,"
+        " thumbnail_filename, width, height)"
+        " VALUES('g2', 'pa', 'u1', 'photo', 'priv.webp', 'privt.webp', 1, 1)"
+    )
+    # A member names the private album's file in a post of the space.
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, media_url)"
+        " VALUES('p3', 'sp1', 'u1', 'image', 'api/media/priv.webp')"
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.confined_to_space("g.webp", "sp1")
+    assert await repo.confined_to_space("gt.webp", "sp1")
+    assert not await repo.confined_to_space("priv.webp", "sp1")

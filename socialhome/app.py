@@ -2232,6 +2232,9 @@ def _build_space_media_gfs(
         space_crypto=space_crypto,
         federation_repo=repos.federation,
         gfs_service=gfs_connection_service,
+        # Only files nothing but the space's own content references are
+        # ever sealed under its key (a member may name any file).
+        media_refs=repos.media_reference,
         media_dir=media_dir,
         writer_certs=writer_certs,
     )

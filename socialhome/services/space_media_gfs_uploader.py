@@ -79,13 +79,19 @@ from ..space_media_seal import (
     seal_space_media,
 )
 from ..writer_key import sign_with_writer_key
-from .inbound_media_store import MEDIA_REF_PREFIX, local_media_ref, media_file_path
+from .inbound_media_store import (
+    MEDIA_REF_PREFIX,
+    is_reserved_media_name,
+    local_media_ref,
+    media_file_path,
+)
 from .space_crypto_service import AUTHORITY_SIG_SUITE_ED25519
 
 if TYPE_CHECKING:
     from ..domain.federation import GfsConnection
     from ..federation.federation_service import FederationService
     from ..repositories.federation_repo import AbstractFederationRepo
+    from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
     from ..repositories.space_repo import AbstractSpaceRepo
     from .gfs_channel_service import GfsChannelService
     from .gfs_connection_service import GfsConnectionService
@@ -196,6 +202,7 @@ class SpaceMediaGfsUploader:
         "_federation_repo",
         "_gfs",
         "_identity_seed",
+        "_media_refs",
         "_pending",
         "_queue",
         "_retries",
@@ -212,6 +219,7 @@ class SpaceMediaGfsUploader:
         space_crypto: SpaceContentEncryption,
         federation_repo: AbstractFederationRepo,
         gfs_service: GfsConnectionService,
+        media_refs: AbstractMediaReferenceRepo,
         media_dir: pathlib.Path,
         writer_certs: SpaceWriterCertService | None = None,
     ) -> None:
@@ -219,6 +227,8 @@ class SpaceMediaGfsUploader:
         self._crypto = space_crypto
         self._federation_repo = federation_repo
         self._gfs = gfs_service
+        #: Which files are only this space's content (``confined_to_space``).
+        self._media_refs = media_refs
         self._dir = pathlib.Path(media_dir)
         self._certs = writer_certs
         self._federation: FederationService | None = None
@@ -349,12 +359,6 @@ class SpaceMediaGfsUploader:
             space_id=space_id, refs=tuple(refs), targets=tuple(targets)
         )
 
-    async def describe(
-        self, space_id: str, media_urls: Iterable[str | None]
-    ) -> list[SpaceMediaRef]:
-        """The descriptor entries of *media_urls*' files (no upload)."""
-        return await self._describe_names(space_id, media_names(media_urls))
-
     async def _describe_names(
         self, space_id: str, names: list[str]
     ) -> list[SpaceMediaRef]:
@@ -365,6 +369,8 @@ class SpaceMediaGfsUploader:
         scope, scope_id = await self.scope_of(space_id)
         refs: list[SpaceMediaRef] = []
         for name in names[:MAX_FILES_PER_ITEM]:
+            if not await self._space_file(space_id, name):
+                continue
             stamp = await self._stamp(name)
             if stamp is None:
                 continue
@@ -395,6 +401,16 @@ class SpaceMediaGfsUploader:
                 self._described.popitem(last=False)
             refs.append(ref)
         return refs
+
+    async def _space_file(self, space_id: str, name: str) -> bool:
+        """Whether *name* may be sealed under *space_id*'s key: never a
+        name another receiving path owns (DM / moment media), and only a
+        file nothing but this space's content references — a member may
+        name another space's, a private album's or a household file in a
+        post or record of this space (review D)."""
+        if is_reserved_media_name(name):
+            return False
+        return await self._media_refs.confined_to_space(name, space_id)
 
     async def _stamp(self, name: str) -> tuple[int, int] | None:
         """``(size, mtime_ns)`` of a local media file, or ``None``."""
@@ -568,6 +584,13 @@ class SpaceMediaGfsUploader:
         """The blob the descriptor names, sealed again from the local file —
         ``None`` (WARNING) when the file or the epoch key is gone, or the
         bytes (or the space's scope) no longer give the described address."""
+        if not await self._space_file(ref.space_id, ref.filename):
+            log.warning(
+                "space media %s is no longer only space %s's — not uploaded",
+                ref.filename,
+                ref.space_id,
+            )
+            return None
         current = await self._crypto.media_key(ref.space_id, epoch=ref.epoch)
         data = await self._read(ref.filename)
         if current is None or data is None:

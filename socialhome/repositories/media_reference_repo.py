@@ -182,6 +182,21 @@ _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
     ),
 )
 
+#: The space each :data:`_ACCESS_SOURCES` table's row belongs to (an SQL
+#: expression over the row ``t``); a table not listed is household-level
+#: (``NULL``) — never a space's content (:meth:`confined_to_space`).
+_SPACE_OF: dict[str, str] = {
+    "space_posts": "t.space_id",
+    "space_post_comments": (
+        "(SELECT p.space_id FROM space_posts p WHERE p.id = t.post_id)"
+    ),
+    "bazaar_listings": "t.space_id",
+    "space_calendar_events": "t.space_id",
+    "space_pages": "t.space_id",
+    "page_edit_history": "t.space_id",
+    "space_moderation_queue": "t.space_id",
+}
+
 #: A gallery item's file (bare basenames): a household album open to
 #: everyone, a seat in a space album's space — and for a private album
 #: (``chosen``) only its uploader (``private`` marks such a row).
@@ -237,6 +252,11 @@ class AbstractMediaReferenceRepo(Protocol):
         references it yet (their own fresh upload), or they can open at
         least one row that does — never a private gallery album's file
         unless they uploaded it (D7)."""
+        ...
+
+    async def confined_to_space(self, basename: str, space_id: str) -> bool:
+        """Whether *basename* is referenced only by content of *space_id*
+        (what the GFS media cache may seal under that space's key)."""
         ...
 
 
@@ -325,6 +345,53 @@ class SqliteMediaReferenceRepo:
             if allowed:
                 return True
         return allowed or not referenced
+
+    async def confined_to_space(self, basename: str, space_id: str) -> bool:
+        """Whether the file *basename* is referenced, and ONLY by content of
+        space *space_id* — what the GFS media cache may seal under that
+        space's key for its readers. A file any household row, DM, moment,
+        private or household album, or another space's row names is not
+        (a member could name such a file in a post of the space)."""
+        if not basename or not space_id:
+            return False
+        referenced = False
+        rows = await self._db.fetchall(
+            "SELECT a.space_id AS s FROM gallery_items i"
+            " JOIN gallery_albums a ON a.id = i.album_id"
+            " WHERE i.filename = ? OR i.thumbnail_filename = ?",
+            (basename, basename),
+        )
+        for r in rows_to_dicts(rows):
+            if r.get("s") != space_id:
+                return False
+            referenced = True
+        pattern = f"%{_like_escape(basename)}%"
+        for table, col, shape, _access in _ACCESS_SOURCES:
+            space_of = _SPACE_OF.get(table, "NULL")
+            if shape.startswith("json:"):
+                value = f"json_extract(t.{col}, '{shape[5:]}')"
+                guard = f" AND json_valid(t.{col})"
+            else:
+                value, guard = f"t.{col}", ""
+            rows = await self._db.fetchall(
+                f"SELECT {value} AS v, {space_of} AS s FROM {table} t"
+                f" WHERE t.{col} LIKE ? ESCAPE '\\'{guard}",
+                (pattern,),
+            )
+            for r in rows_to_dicts(rows):
+                raw = r.get("v")
+                if shape == "list":
+                    hit = basename in _names_in_list(raw)
+                elif shape == "payload":
+                    hit = basename in _names_in_payload(raw)
+                else:
+                    hit = media_basename(raw) == basename
+                if not hit:
+                    continue
+                if r.get("s") != space_id:
+                    return False
+                referenced = True
+        return referenced
 
     async def is_referenced(self, basename: str) -> bool:
         """``True`` when any row still points at the file ``basename``.
