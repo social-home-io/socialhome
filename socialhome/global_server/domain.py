@@ -349,38 +349,20 @@ class GfsSpaceMedia:
     """One encrypted blob in the space media cache (GFS migration 0025).
     The bytes are a file named ``blob_id`` under ``data_dir/space_media``; this
     server can't open them. A cache entry: it expires, and it may be evicted
-    least-recently-fetched first when the operator's byte cap is reached.
-    Which scopes hold it is :class:`GfsSpaceMediaClaim`."""
+    least-recently-fetched first when a byte cap is reached. Its address is
+    bound to its scope (:func:`socialhome.domain.gfs_space_media.space_media_address`),
+    so it belongs to exactly ONE scope — the quota, delete and ban key."""
 
     blob_id: str
     size: int
     created_at: int
-    #: The latest expiry among its claims.
     expires_at: int
     #: Last fetch (the upload counts as one), moved at most once an hour.
     last_fetched_at: int
-    #: The scope that stored it (its owner): only its seed holder or a ban
-    #: of it withdraws the blob for everyone; another scope's claim never
-    #: extends its expiry.
-    owner_kind: str = "space"
-    owner_id: str = ""
-
-
-@dataclass(slots=True, frozen=True)
-class GfsSpaceMediaClaim:
-    """One scope's hold on a cached blob. Identical bytes uploaded for
-    another scope add a claim, never a copy (capped at the blob's expiry —
-    only the owner's claim extends it); another scope's delete drops only
-    its claim, the owner's withdraws the blob for everyone (a tombstone)."""
-
-    blob_id: str
     #: ``"space"`` (a listed space) or ``"channel"`` (a private space's
-    #: opaque v_51 channel) — with ``scope_id``, the quota and delete key.
-    scope_kind: str
-    scope_id: str
-    size: int
-    created_at: int
-    expires_at: int
+    #: opaque v_51 channel).
+    scope_kind: str = "space"
+    scope_id: str = ""
 
 
 @dataclass(slots=True, frozen=True)

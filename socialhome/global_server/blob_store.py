@@ -4,7 +4,9 @@ Two stores keep ciphertext this server can't open: public-moment media
 (:mod:`.moment_media`, v_63) and the space media cache (:mod:`.space_media`).
 Both take the same blob shape — a padded bucket
 (:data:`~socialhome.moment_public_media.PAD_BUCKETS`) + nonce + tag, addressed
-by its SHA-256 — and keep the bytes as files. What they share lives here:
+by a SHA-256 (of the bytes for moments; of the scope and the bytes for the
+space cache, ``space_media_address``) — and keep the bytes as files. What
+they share lives here:
 
 * :func:`check_shape` / :func:`check_address` — the upload checks every blob
   passes, whatever its store (422 :class:`MediaRefused` otherwise);

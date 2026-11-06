@@ -42,7 +42,6 @@ from .domain import (
     GfsQueuedEnvelope,
     GfsSpaceEpoch,
     GfsSpaceMedia,
-    GfsSpaceMediaClaim,
     GfsSpaceStrictState,
     GfsSubscriber,
     GfsSubscriberWithKeys,
@@ -2262,81 +2261,56 @@ class SqliteGfsMomentMediaRepo:
 
 @runtime_checkable
 class AbstractGfsSpaceMediaRepo(Protocol):
+    """The space media cache's metadata (GFS 0025): one row per blob, each
+    in exactly one scope (its address is bound to it)."""
+
     async def add_blob(self, media: GfsSpaceMedia) -> bool: ...
     async def get_blob(self, blob_id: str) -> GfsSpaceMedia | None: ...
     async def get_servable(self, blob_id: str, *, now: int) -> GfsSpaceMedia | None: ...
-    async def claims_of(self, blob_id: str) -> list[GfsSpaceMediaClaim]: ...
-    async def put_claim(self, claim: GfsSpaceMediaClaim) -> bool: ...
-    async def delete_blob_if_unclaimed(self, blob_id: str) -> bool: ...
-    async def prune_orphan_claims(self) -> int: ...
+    async def known_blob_ids(self, blob_ids: list[str]) -> set[str]: ...
+    async def delete_blobs(self, blob_ids: list[str]) -> list[str]: ...
+    async def delete_scope_blob(
+        self, blob_id: str, *, scope_kind: str, scope_id: str
+    ) -> bool: ...
+    async def scope_blob_ids(self, scope_kind: str, scope_id: str) -> list[str]: ...
+    async def totals(self) -> tuple[int, int]: ...
+    async def scope_bytes(self, scope_kind: str, scope_id: str) -> int: ...
+    async def largest_scopes(self, *, limit: int) -> list[tuple[str, str, int]]: ...
+    async def scope_lru(
+        self, scope_kind: str, scope_id: str, *, limit: int
+    ) -> list[GfsSpaceMedia]: ...
+    async def expired(self, now: int, *, limit: int) -> list[GfsSpaceMedia]: ...
+    async def touch(self, blob_id: str, *, now: int, min_interval: int) -> bool: ...
     async def reserve_upload(
         self, scope_kind: str, scope_id: str, *, bucket: int, cap: int
     ) -> bool: ...
     async def refund_upload(
         self, scope_kind: str, scope_id: str, *, bucket: int
     ) -> None: ...
-    async def acquire_sweep_lease(self, holder: str, *, now: int, ttl: int) -> bool: ...
-    async def sweep_cursor(self) -> str: ...
-    async def set_sweep_cursor(self, cursor: str) -> None: ...
-    async def delete_claim(
-        self, blob_id: str, *, scope_kind: str, scope_id: str
-    ) -> int: ...
-    async def settle_blob(self, blob_id: str) -> int | None: ...
-    async def scope_usage(self, scope_kind: str, scope_id: str, *, now: int) -> int: ...
-    async def scope_lru(
-        self, scope_kind: str, scope_id: str, *, now: int, limit: int
-    ) -> list[GfsSpaceMediaClaim]: ...
-    async def totals(self) -> tuple[int, int]: ...
-    async def least_recently_fetched(self, *, limit: int) -> list[GfsSpaceMedia]: ...
-    async def touch(self, blob_id: str, *, now: int, min_interval: int) -> bool: ...
-    async def expired(self, now: int, *, limit: int) -> list[GfsSpaceMedia]: ...
-    async def claim_mark(self) -> int: ...
-    async def drop_blobs(
-        self, blob_ids: list[str], *, mark: int, now: int
-    ) -> list[str]: ...
-    async def prune_expired_claims(self, now: int) -> int: ...
-    async def withdrawn(self, blob_id: str, *, now: int) -> bool: ...
-    async def withdraw_blob(self, blob_id: str, *, until: int) -> bool: ...
-    async def withdraw_owned(
-        self, owner_kind: str, owner_id: str, *, until: int
-    ) -> list[str]: ...
-    async def prune_tombstones(self, now: int) -> int: ...
-    async def largest_owners(self, *, limit: int) -> list[tuple[str, str, int]]: ...
-    async def owner_lru(
-        self, owner_kind: str, owner_id: str, *, limit: int
-    ) -> list[GfsSpaceMedia]: ...
+    async def upload_counts(
+        self, scope_kind: str, scope_id: str, *, bucket: int
+    ) -> tuple[int, int]: ...
+    async def prune_upload_counts(self, *, before_bucket: int) -> int: ...
     async def reserve_ip_bytes(
         self, ip_key: str, *, bucket: int, size: int, cap: int
     ) -> bool: ...
     async def refund_ip_bytes(self, ip_key: str, *, bucket: int, size: int) -> None: ...
     async def ip_bytes(self, ip_key: str, *, bucket: int) -> tuple[int, int]: ...
     async def prune_ip_bytes(self, *, before_bucket: int) -> int: ...
-    async def upload_counts(
-        self, scope_kind: str, scope_id: str, *, bucket: int
-    ) -> tuple[int, int]: ...
-    async def prune_upload_counts(self, *, before_bucket: int) -> int: ...
-    async def known_blob_ids(self, blob_ids: list[str]) -> set[str]: ...
+    async def acquire_sweep_lease(self, holder: str, *, now: int, ttl: int) -> bool: ...
+    async def sweep_cursor(self) -> str: ...
+    async def set_sweep_cursor(self, cursor: str) -> None: ...
 
 
 _SPACE_MEDIA_COLS = (
-    "blob_id, size, created_at, expires_at, last_fetched_at, owner_kind, owner_id"
+    "blob_id, scope_kind, scope_id, size, created_at, expires_at, last_fetched_at"
 )
-
-#: A blob is withdrawn — not served, not claimable — while a live tombstone
-#: names it or its owner is a banned space (params: now).
-_SPACE_MEDIA_WITHDRAWN = (
-    "(EXISTS (SELECT 1 FROM gfs_space_media_tombstones t"
-    "  WHERE t.blob_id = m.blob_id AND t.until > ?)"
-    " OR (m.owner_kind = 'space' AND EXISTS (SELECT 1 FROM global_spaces s"
-    "  WHERE s.space_id = m.owner_id AND s.status = 'banned')))"
-)
-_SPACE_MEDIA_CLAIM_COLS = "blob_id, scope_kind, scope_id, size, created_at, expires_at"
 
 
 class SqliteGfsSpaceMediaRepo:
-    """Space media cache metadata (GFS 0025) — blobs, the scopes that claim
-    them, per-scope hourly upload counts and trigger-kept totals. The bytes
-    are files."""
+    """Space media cache metadata (GFS 0025) — blobs (each in one scope),
+    per-scope hourly upload counts, per-address hourly bytes and
+    trigger-kept totals. The bytes are files."""
 
     def __init__(self, db: AsyncDatabase) -> None:
         self._db = db
@@ -2345,24 +2319,18 @@ class SqliteGfsSpaceMediaRepo:
 
     async def add_blob(self, media: GfsSpaceMedia) -> bool:
         """Insert; ``False`` when the blob is already held (another node or
-        a retry took it first) or a live tombstone names it — checked in the
-        same statement, so an owner's delete on another node can't be
-        undone by an insert already past its checks."""
+        a retry of the same scope took it first)."""
         changed = await self._db.enqueue_rowcount(
             f"INSERT OR IGNORE INTO gfs_space_media({_SPACE_MEDIA_COLS})"
-            " SELECT ?,?,?,?,?,?,? WHERE NOT EXISTS ("
-            "  SELECT 1 FROM gfs_space_media_tombstones"
-            "  WHERE blob_id = ? AND until > ?)",
+            " VALUES(?,?,?,?,?,?,?)",
             (
                 media.blob_id,
+                media.scope_kind,
+                media.scope_id,
                 media.size,
                 media.created_at,
                 media.expires_at,
                 media.last_fetched_at,
-                media.owner_kind,
-                media.owner_id,
-                media.blob_id,
-                media.created_at,
             ),
         )
         return changed > 0
@@ -2375,100 +2343,171 @@ class SqliteGfsSpaceMediaRepo:
         return _space_media(row) if row is not None else None
 
     async def get_servable(self, blob_id: str, *, now: int) -> GfsSpaceMedia | None:
-        """The blob while it may be served: not expired, not withdrawn (no
-        live tombstone, its owner not a banned space), no live claim of a
-        banned space — a ban blocks, it doesn't only stop counting — and at
-        least one live claim. A space that is no longer listed, or a channel
-        that is gone, keeps its blobs for their short TTL."""
+        """The blob while it may be served: not expired, and its scope is
+        not a moderator-banned space. A space that is no longer listed, or a
+        channel that is gone, keeps its blobs for their short TTL."""
         row = await self._db.fetchone(
             f"SELECT {_SPACE_MEDIA_COLS} FROM gfs_space_media m"
-            f" WHERE m.blob_id=? AND m.expires_at > ? AND NOT {_SPACE_MEDIA_WITHDRAWN}"
-            " AND NOT EXISTS (SELECT 1 FROM gfs_space_media_claims c"
-            "  JOIN global_spaces s"
-            "   ON c.scope_kind = 'space' AND s.space_id = c.scope_id"
-            "  WHERE c.blob_id = m.blob_id AND c.expires_at > ?"
-            "  AND s.status = 'banned')"
-            " AND EXISTS (SELECT 1 FROM gfs_space_media_claims c"
-            "  WHERE c.blob_id = m.blob_id AND c.expires_at > ?)",
-            (blob_id, now, now, now, now),
+            " WHERE m.blob_id=? AND m.expires_at > ?"
+            " AND NOT (m.scope_kind = 'space' AND EXISTS ("
+            "  SELECT 1 FROM global_spaces s"
+            "  WHERE s.space_id = m.scope_id AND s.status = 'banned'))",
+            (blob_id, now),
         )
         return _space_media(row) if row is not None else None
 
-    async def withdrawn(self, blob_id: str, *, now: int) -> bool:
-        """Whether *blob_id* may not be claimed (or stored again): a live
-        tombstone names it, or its row's owner is a banned space."""
-        row = await self._db.fetchone(
-            "SELECT 1 AS w FROM gfs_space_media_tombstones"
-            " WHERE blob_id=? AND until > ?"
-            " UNION ALL SELECT 1 FROM gfs_space_media m"
-            f" WHERE m.blob_id=? AND {_SPACE_MEDIA_WITHDRAWN} LIMIT 1",
-            (blob_id, now, blob_id, now),
+    async def known_blob_ids(self, blob_ids: list[str]) -> set[str]:
+        if not blob_ids:
+            return set()
+        marks = ",".join("?" for _ in blob_ids)
+        rows = await self._db.fetchall(
+            f"SELECT blob_id FROM gfs_space_media WHERE blob_id IN ({marks})",
+            tuple(blob_ids),
         )
-        return row is not None
+        return {str(r["blob_id"]) for r in rows}
 
-    async def withdraw_blob(self, blob_id: str, *, until: int) -> bool:
-        """The owner's delete: a tombstone first (so a claim another node
-        makes meanwhile finds it), then every claim and the row. ``True``
-        when the row went (the caller removes the file)."""
+    async def delete_blobs(self, blob_ids: list[str]) -> list[str]:
+        """Drop these rows; returns the ids whose row went (the caller
+        removes their files, and only theirs)."""
+        if not blob_ids:
+            return []
+        held = await self.known_blob_ids(blob_ids)
+        if not held:
+            return []
+        marks = ",".join("?" for _ in held)
         await self._db.enqueue(
-            "INSERT INTO gfs_space_media_tombstones(blob_id, until) VALUES(?,?)"
-            " ON CONFLICT(blob_id) DO UPDATE SET until = MAX(until, excluded.until)",
-            (blob_id, until),
+            f"DELETE FROM gfs_space_media WHERE blob_id IN ({marks})", tuple(held)
         )
-        await self._db.enqueue(
-            "DELETE FROM gfs_space_media_claims WHERE blob_id=?", (blob_id,)
-        )
+        gone = held - await self.known_blob_ids(list(held))
+        return [b for b in blob_ids if b in gone]
+
+    async def delete_scope_blob(
+        self, blob_id: str, *, scope_kind: str, scope_id: str
+    ) -> bool:
+        """The scope's seed holder's delete — only a blob of that scope."""
         return (
             await self._db.enqueue_rowcount(
-                "DELETE FROM gfs_space_media WHERE blob_id=?", (blob_id,)
+                "DELETE FROM gfs_space_media WHERE blob_id=? AND scope_kind=?"
+                " AND scope_id=?",
+                (blob_id, scope_kind, scope_id),
             )
             > 0
         )
 
-    async def withdraw_owned(
-        self, owner_kind: str, owner_id: str, *, until: int
-    ) -> list[str]:
-        """A ban of the owner: tombstone, unclaim and drop every blob it
-        owns. Returns their ids (the caller removes the files)."""
+    async def scope_blob_ids(self, scope_kind: str, scope_id: str) -> list[str]:
         rows = await self._db.fetchall(
-            "SELECT blob_id FROM gfs_space_media WHERE owner_kind=? AND owner_id=?",
-            (owner_kind, owner_id),
+            "SELECT blob_id FROM gfs_space_media WHERE scope_kind=? AND scope_id=?",
+            (scope_kind, scope_id),
         )
-        ids = [str(r["blob_id"]) for r in rows]
-        for blob_id in ids:
-            await self.withdraw_blob(blob_id, until=until)
-        return ids
+        return [str(r["blob_id"]) for r in rows]
 
-    async def prune_tombstones(self, now: int) -> int:
-        return await self._db.enqueue_rowcount(
-            "DELETE FROM gfs_space_media_tombstones WHERE until <= ?", (now,)
+    async def totals(self) -> tuple[int, int]:
+        """``(blobs, bytes)`` held — kept by triggers, one row; expired blobs
+        count until the sweep drops them (their files are still on disk)."""
+        row = await self._db.fetchone(
+            "SELECT blobs, bytes FROM gfs_space_media_totals WHERE id=1"
         )
+        if row is None:  # pragma: no cover - the migration seeds the row
+            return 0, 0
+        return int(row["blobs"]), int(row["bytes"])
 
-    # ── Fair eviction ────────────────────────────────────────────────────
+    async def scope_bytes(self, scope_kind: str, scope_id: str) -> int:
+        """Bytes the scope holds — the trigger-kept row, a primary-key read."""
+        row = await self._db.fetchone(
+            "SELECT bytes FROM gfs_space_media_scope_bytes"
+            " WHERE scope_kind=? AND scope_id=?",
+            (scope_kind, scope_id),
+        )
+        return int(row["bytes"]) if row is not None else 0
 
-    async def largest_owners(self, *, limit: int) -> list[tuple[str, str, int]]:
-        """``(owner_kind, owner_id, bytes)`` of the scopes holding the most —
-        the trigger-kept per-owner totals, an index read."""
+    async def largest_scopes(self, *, limit: int) -> list[tuple[str, str, int]]:
+        """``(scope_kind, scope_id, bytes)`` of the scopes holding the most —
+        an index read of the trigger-kept per-scope totals."""
         rows = await self._db.fetchall(
-            "SELECT owner_kind, owner_id, bytes FROM gfs_space_media_owner_bytes"
+            "SELECT scope_kind, scope_id, bytes FROM gfs_space_media_scope_bytes"
             " ORDER BY bytes DESC LIMIT ?",
             (limit,),
         )
         return [
-            (str(r["owner_kind"]), str(r["owner_id"]), int(r["bytes"])) for r in rows
+            (str(r["scope_kind"]), str(r["scope_id"]), int(r["bytes"])) for r in rows
         ]
 
-    async def owner_lru(
-        self, owner_kind: str, owner_id: str, *, limit: int
+    async def scope_lru(
+        self, scope_kind: str, scope_id: str, *, limit: int
     ) -> list[GfsSpaceMedia]:
-        """One owner's blobs, least recently fetched first, then oldest."""
+        """One scope's blobs, least recently fetched first, then oldest."""
         rows = await self._db.fetchall(
             f"SELECT {_SPACE_MEDIA_COLS} FROM gfs_space_media"
-            " WHERE owner_kind=? AND owner_id=?"
+            " WHERE scope_kind=? AND scope_id=?"
             " ORDER BY last_fetched_at, created_at LIMIT ?",
-            (owner_kind, owner_id, limit),
+            (scope_kind, scope_id, limit),
         )
         return [_space_media(r) for r in rows]
+
+    async def expired(self, now: int, *, limit: int) -> list[GfsSpaceMedia]:
+        rows = await self._db.fetchall(
+            f"SELECT {_SPACE_MEDIA_COLS} FROM gfs_space_media WHERE expires_at <= ?"
+            " ORDER BY expires_at LIMIT ?",
+            (now, limit),
+        )
+        return [_space_media(r) for r in rows]
+
+    async def touch(self, blob_id: str, *, now: int, min_interval: int) -> bool:
+        """Mark a fetch — only when the last mark is *min_interval* old, so a
+        popular blob costs one write an hour, not one per fetch."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE gfs_space_media SET last_fetched_at=?"
+            " WHERE blob_id=? AND last_fetched_at <= ?",
+            (now, blob_id, now - min_interval),
+        )
+        return changed > 0
+
+    # ── Upload counts (the rate limit's own record) ─────────────────────
+
+    async def reserve_upload(
+        self, scope_kind: str, scope_id: str, *, bucket: int, cap: int
+    ) -> bool:
+        """Take one upload slot of *bucket* while its count is under *cap* —
+        one upsert-then-check statement on the single writer, so concurrent
+        uploads (on any node) can't all pass a read-then-write check."""
+        if cap < 1:
+            return False
+        changed = await self._db.enqueue_rowcount(
+            "INSERT INTO gfs_space_media_uploads(scope_kind, scope_id, hour_bucket,"
+            " count) VALUES(?,?,?,1)"
+            " ON CONFLICT(scope_kind, scope_id, hour_bucket)"
+            " DO UPDATE SET count = count + 1 WHERE count < ?",
+            (scope_kind, scope_id, bucket, cap),
+        )
+        return changed > 0
+
+    async def refund_upload(
+        self, scope_kind: str, scope_id: str, *, bucket: int
+    ) -> None:
+        """Give back a slot an upload took but did not use."""
+        await self._db.enqueue(
+            "UPDATE gfs_space_media_uploads SET count = count - 1"
+            " WHERE scope_kind=? AND scope_id=? AND hour_bucket=? AND count > 0",
+            (scope_kind, scope_id, bucket),
+        )
+
+    async def upload_counts(
+        self, scope_kind: str, scope_id: str, *, bucket: int
+    ) -> tuple[int, int]:
+        """``(uploads in hour bucket, uploads in the one before)``."""
+        rows = await self._db.fetchall(
+            "SELECT hour_bucket, count FROM gfs_space_media_uploads"
+            " WHERE scope_kind=? AND scope_id=? AND hour_bucket IN (?, ?)",
+            (scope_kind, scope_id, bucket, bucket - 1),
+        )
+        by = {int(r["hour_bucket"]): int(r["count"]) for r in rows}
+        return by.get(bucket, 0), by.get(bucket - 1, 0)
+
+    async def prune_upload_counts(self, *, before_bucket: int) -> int:
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM gfs_space_media_uploads WHERE hour_bucket < ?",
+            (before_bucket,),
+        )
 
     # ── Per-address byte budget ──────────────────────────────────────────
 
@@ -2512,258 +2551,6 @@ class SqliteGfsSpaceMediaRepo:
             (before_bucket,),
         )
 
-    async def totals(self) -> tuple[int, int]:
-        """``(blobs, bytes)`` held — kept by triggers, one row; expired blobs
-        count until the sweep drops them (their files are still on disk)."""
-        row = await self._db.fetchone(
-            "SELECT blobs, bytes FROM gfs_space_media_totals WHERE id=1"
-        )
-        if row is None:  # pragma: no cover - the migration seeds the row
-            return 0, 0
-        return int(row["blobs"]), int(row["bytes"])
-
-    async def least_recently_fetched(self, *, limit: int) -> list[GfsSpaceMedia]:
-        """Eviction candidates of the whole cache: least recently fetched
-        first, then oldest."""
-        rows = await self._db.fetchall(
-            f"SELECT {_SPACE_MEDIA_COLS} FROM gfs_space_media"
-            " ORDER BY last_fetched_at, created_at LIMIT ?",
-            (limit,),
-        )
-        return [_space_media(r) for r in rows]
-
-    async def touch(self, blob_id: str, *, now: int, min_interval: int) -> bool:
-        """Mark a fetch — only when the last mark is *min_interval* old, so a
-        popular blob costs one write an hour, not one per fetch."""
-        changed = await self._db.enqueue_rowcount(
-            "UPDATE gfs_space_media SET last_fetched_at=?"
-            " WHERE blob_id=? AND last_fetched_at <= ?",
-            (now, blob_id, now - min_interval),
-        )
-        return changed > 0
-
-    async def expired(self, now: int, *, limit: int) -> list[GfsSpaceMedia]:
-        rows = await self._db.fetchall(
-            f"SELECT {_SPACE_MEDIA_COLS} FROM gfs_space_media WHERE expires_at <= ?"
-            " ORDER BY expires_at LIMIT ?",
-            (now, limit),
-        )
-        return [_space_media(r) for r in rows]
-
-    async def claim_mark(self) -> int:
-        """The newest claim's sequence number — what an eviction or expiry
-        sweep notes before it reads its candidates."""
-        row = await self._db.fetchone(
-            "SELECT COALESCE(MAX(seq), 0) AS mark FROM gfs_space_media_claims"
-        )
-        return int(row["mark"]) if row is not None else 0
-
-    async def drop_blobs(
-        self, blob_ids: list[str], *, mark: int, now: int
-    ) -> list[str]:
-        """Drop blobs for an eviction or expiry sweep that noted *mark*
-        (:meth:`claim_mark`) before it read them — claim-aware, like a
-        delete: only claims up to the mark (or expired by *now*) go, then
-        each row only while no claim holds it. A blob another node claimed
-        meanwhile keeps its row. Returns the ids whose row went (the caller
-        removes their files, and only theirs)."""
-        if not blob_ids:
-            return []
-        marks = ",".join("?" for _ in blob_ids)
-        args = tuple(blob_ids)
-        await self._db.enqueue(
-            f"DELETE FROM gfs_space_media_claims WHERE blob_id IN ({marks})"
-            " AND (seq <= ? OR expires_at <= ?)",
-            (*args, mark, now),
-        )
-        await self._db.enqueue(
-            f"DELETE FROM gfs_space_media WHERE blob_id IN ({marks})"
-            " AND NOT EXISTS (SELECT 1 FROM gfs_space_media_claims c"
-            "  WHERE c.blob_id = gfs_space_media.blob_id)",
-            args,
-        )
-        kept = await self.known_blob_ids(list(blob_ids))
-        return [b for b in blob_ids if b not in kept]
-
-    async def known_blob_ids(self, blob_ids: list[str]) -> set[str]:
-        if not blob_ids:
-            return set()
-        marks = ",".join("?" for _ in blob_ids)
-        rows = await self._db.fetchall(
-            f"SELECT blob_id FROM gfs_space_media WHERE blob_id IN ({marks})",
-            tuple(blob_ids),
-        )
-        return {str(r["blob_id"]) for r in rows}
-
-    # ── Claims ───────────────────────────────────────────────────────────
-
-    async def claims_of(self, blob_id: str) -> list[GfsSpaceMediaClaim]:
-        rows = await self._db.fetchall(
-            f"SELECT {_SPACE_MEDIA_CLAIM_COLS} FROM gfs_space_media_claims"
-            " WHERE blob_id=? ORDER BY created_at, scope_kind, scope_id",
-            (blob_id,),
-        )
-        return [_space_media_claim(r) for r in rows]
-
-    async def put_claim(self, claim: GfsSpaceMediaClaim) -> bool:
-        """Insert or replace the scope's claim. The blob first: raise its
-        expiry to cover the claim (never lower it — another claim may hold
-        it longer) and mark the claim as a fetch, so a blob a new scope just
-        coalesced onto is not the next eviction victim. Then the claim, then
-        a re-check that the row is still there: an eviction that read its
-        candidates before the mark has a claim mark below this claim's
-        sequence number (it keeps the blob), one after it doesn't see the
-        blob as least recently fetched. ``False`` when the row is gone
-        (another node dropped it meanwhile): the caller stores the blob
-        again."""
-        changed = await self._db.enqueue_rowcount(
-            "UPDATE gfs_space_media AS m SET"
-            " expires_at = CASE WHEN m.owner_kind = ? AND m.owner_id = ?"
-            "  THEN MAX(m.expires_at, ?) ELSE m.expires_at END,"
-            " last_fetched_at = MAX(m.last_fetched_at, ?)"
-            f" WHERE m.blob_id=? AND NOT {_SPACE_MEDIA_WITHDRAWN}",
-            (
-                claim.scope_kind,
-                claim.scope_id,
-                claim.expires_at,
-                claim.created_at,
-                claim.blob_id,
-                claim.created_at,
-            ),
-        )
-        if not changed:
-            return False
-        # Another scope's claim (not the owner's) lives no longer than the
-        # blob; inserted only while the row is there.
-        await self._db.enqueue(
-            f"INSERT OR REPLACE INTO gfs_space_media_claims({_SPACE_MEDIA_CLAIM_COLS})"
-            " SELECT ?, ?, ?, ?, ?, CASE WHEN m.owner_kind = ? AND m.owner_id = ?"
-            "  THEN ? ELSE MIN(?, m.expires_at) END"
-            " FROM gfs_space_media m WHERE m.blob_id = ?",
-            (
-                claim.blob_id,
-                claim.scope_kind,
-                claim.scope_id,
-                claim.size,
-                claim.created_at,
-                claim.scope_kind,
-                claim.scope_id,
-                claim.expires_at,
-                claim.expires_at,
-                claim.blob_id,
-            ),
-        )
-        return bool(await self.known_blob_ids([claim.blob_id]))
-
-    async def delete_blob_if_unclaimed(self, blob_id: str) -> bool:
-        """Drop the blob row only while no claim holds it — one statement,
-        so a claim another node adds meanwhile keeps it. ``True`` when the
-        row went (the caller removes the file then, and only then)."""
-        changed = await self._db.enqueue_rowcount(
-            "DELETE FROM gfs_space_media WHERE blob_id=? AND NOT EXISTS ("
-            " SELECT 1 FROM gfs_space_media_claims WHERE blob_id=?)",
-            (blob_id, blob_id),
-        )
-        return changed > 0
-
-    async def prune_orphan_claims(self) -> int:
-        """Claims whose blob row is gone (a race with a drop on another
-        node) — they hold no budget, the sweep removes them."""
-        return await self._db.enqueue_rowcount(
-            "DELETE FROM gfs_space_media_claims WHERE NOT EXISTS ("
-            " SELECT 1 FROM gfs_space_media m"
-            " WHERE m.blob_id = gfs_space_media_claims.blob_id)"
-        )
-
-    async def delete_claim(
-        self, blob_id: str, *, scope_kind: str, scope_id: str
-    ) -> int:
-        return await self._db.enqueue_rowcount(
-            "DELETE FROM gfs_space_media_claims WHERE blob_id=? AND scope_kind=?"
-            " AND scope_id=?",
-            (blob_id, scope_kind, scope_id),
-        )
-
-    async def settle_blob(self, blob_id: str) -> int | None:
-        """After a claim went: the latest expiry of the claims left, set as
-        the blob's expiry — or ``None`` when no claim is left (the caller
-        drops the blob)."""
-        row = await self._db.fetchone(
-            "SELECT MAX(expires_at) AS until FROM gfs_space_media_claims"
-            " WHERE blob_id=?",
-            (blob_id,),
-        )
-        until = row["until"] if row is not None else None
-        if until is None:
-            return None
-        await self._db.enqueue(
-            "UPDATE gfs_space_media SET expires_at=? WHERE blob_id=?",
-            (int(until), blob_id),
-        )
-        return int(until)
-
-    async def scope_usage(self, scope_kind: str, scope_id: str, *, now: int) -> int:
-        """Live bytes a scope's claims hold — an index range over the scope's
-        claims plus a primary-key probe each, so a claim whose blob row is
-        gone holds no budget (``scope_lru`` can't evict it either)."""
-        row = await self._db.fetchone(
-            "SELECT COALESCE(SUM(c.size), 0) AS live FROM gfs_space_media_claims c"
-            " WHERE c.scope_kind=? AND c.scope_id=? AND c.expires_at > ?"
-            " AND EXISTS (SELECT 1 FROM gfs_space_media m"
-            "  WHERE m.blob_id = c.blob_id)",
-            (scope_kind, scope_id, now),
-        )
-        return int(row["live"]) if row is not None else 0
-
-    async def scope_lru(
-        self, scope_kind: str, scope_id: str, *, now: int, limit: int
-    ) -> list[GfsSpaceMediaClaim]:
-        """A scope's live claims, its least recently fetched blob first, then
-        the oldest — the scope's own eviction candidates."""
-        rows = await self._db.fetchall(
-            "SELECT c.blob_id, c.scope_kind, c.scope_id, c.size, c.created_at,"
-            " c.expires_at FROM gfs_space_media_claims c"
-            " JOIN gfs_space_media m ON m.blob_id = c.blob_id"
-            " WHERE c.scope_kind=? AND c.scope_id=? AND c.expires_at > ?"
-            " ORDER BY m.last_fetched_at, m.created_at LIMIT ?",
-            (scope_kind, scope_id, now, limit),
-        )
-        return [_space_media_claim(r) for r in rows]
-
-    async def prune_expired_claims(self, now: int) -> int:
-        return await self._db.enqueue_rowcount(
-            "DELETE FROM gfs_space_media_claims WHERE expires_at <= ?", (now,)
-        )
-
-    # ── Upload counts (the rate limit's own record) ─────────────────────
-
-    async def reserve_upload(
-        self, scope_kind: str, scope_id: str, *, bucket: int, cap: int
-    ) -> bool:
-        """Take one upload slot of *bucket* while its count is under *cap* —
-        one upsert-then-check statement on the single writer, so concurrent
-        uploads (on any node) can't all pass a read-then-write check."""
-        if cap < 1:
-            return False
-        changed = await self._db.enqueue_rowcount(
-            "INSERT INTO gfs_space_media_uploads(scope_kind, scope_id, hour_bucket,"
-            " count) VALUES(?,?,?,1)"
-            " ON CONFLICT(scope_kind, scope_id, hour_bucket)"
-            " DO UPDATE SET count = count + 1 WHERE count < ?",
-            (scope_kind, scope_id, bucket, cap),
-        )
-        return changed > 0
-
-    async def refund_upload(
-        self, scope_kind: str, scope_id: str, *, bucket: int
-    ) -> None:
-        """Give back a slot an upload took but did not use."""
-        await self._db.enqueue(
-            "UPDATE gfs_space_media_uploads SET count = count - 1"
-            " WHERE scope_kind=? AND scope_id=? AND hour_bucket=? AND count > 0",
-            (scope_kind, scope_id, bucket),
-        )
-
     # ── Orphan sweep lease + cursor ──────────────────────────────────────
 
     async def acquire_sweep_lease(self, holder: str, *, now: int, ttl: int) -> bool:
@@ -2787,24 +2574,6 @@ class SqliteGfsSpaceMediaRepo:
             "UPDATE gfs_space_media_sweep SET cursor=? WHERE id=1", (cursor,)
         )
 
-    async def upload_counts(
-        self, scope_kind: str, scope_id: str, *, bucket: int
-    ) -> tuple[int, int]:
-        """``(uploads in hour bucket, uploads in the one before)``."""
-        rows = await self._db.fetchall(
-            "SELECT hour_bucket, count FROM gfs_space_media_uploads"
-            " WHERE scope_kind=? AND scope_id=? AND hour_bucket IN (?, ?)",
-            (scope_kind, scope_id, bucket, bucket - 1),
-        )
-        by = {int(r["hour_bucket"]): int(r["count"]) for r in rows}
-        return by.get(bucket, 0), by.get(bucket - 1, 0)
-
-    async def prune_upload_counts(self, *, before_bucket: int) -> int:
-        return await self._db.enqueue_rowcount(
-            "DELETE FROM gfs_space_media_uploads WHERE hour_bucket < ?",
-            (before_bucket,),
-        )
-
 
 def _space_media(row) -> GfsSpaceMedia:
     return GfsSpaceMedia(
@@ -2813,23 +2582,9 @@ def _space_media(row) -> GfsSpaceMedia:
         created_at=int(row["created_at"]),
         expires_at=int(row["expires_at"]),
         last_fetched_at=int(row["last_fetched_at"]),
-        owner_kind=str(row["owner_kind"]),
-        owner_id=str(row["owner_id"]),
+        scope_kind=str(row["scope_kind"]),
+        scope_id=str(row["scope_id"]),
     )
-
-
-def _space_media_claim(row) -> GfsSpaceMediaClaim:
-    return GfsSpaceMediaClaim(
-        blob_id=row["blob_id"],
-        scope_kind=row["scope_kind"],
-        scope_id=row["scope_id"],
-        size=int(row["size"]),
-        created_at=int(row["created_at"]),
-        expires_at=int(row["expires_at"]),
-    )
-
-
-# ─── Moment delete certificates (v_66) ───────────────────────────────────
 
 
 @runtime_checkable

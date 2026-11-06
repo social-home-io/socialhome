@@ -1,6 +1,8 @@
-"""GFS migration 0025 — the space media cache: one row per stored blob, the
-scopes that claim it, an hourly upload count per scope, and running totals
-kept by triggers (the global cap check is a primary-key read)."""
+"""GFS migration 0025 — the space media cache: one row per stored blob in
+exactly one scope (its address is bound to it), per-scope bytes and running
+totals kept by triggers (the caps are primary-key / index reads), an hourly
+upload count per scope, an hourly byte budget per address, and the orphan
+sweep's lease."""
 
 from __future__ import annotations
 
@@ -32,12 +34,8 @@ def conn(tmp_path):
 
 
 _BLOB = (
-    "INSERT INTO gfs_space_media(blob_id, size, created_at, expires_at,"
-    " last_fetched_at, owner_kind, owner_id) VALUES(?, ?, 10, 20, 10, 'space', 's1')"
-)
-_CLAIM = (
-    "INSERT INTO gfs_space_media_claims(blob_id, scope_kind, scope_id, size,"
-    " created_at, expires_at) VALUES(?, ?, ?, 100, 10, 20)"
+    "INSERT INTO gfs_space_media(blob_id, scope_kind, scope_id, size, created_at,"
+    " expires_at, last_fetched_at) VALUES(?, ?, ?, ?, 10, 20, 10)"
 )
 
 
@@ -45,36 +43,56 @@ def _plan(conn, sql: str) -> str:
     return " ".join(str(r[-1]) for r in conn.execute("EXPLAIN QUERY PLAN " + sql))
 
 
-def test_one_row_per_blob_with_a_positive_size(conn):
-    conn.execute(_BLOB, ("a" * 64, 65_564))
+def test_one_row_per_blob_in_one_scope_with_a_positive_size(conn):
+    conn.execute(_BLOB, ("a" * 64, "space", "s1", 65_564))
     with pytest.raises(sqlite3.IntegrityError):
-        conn.execute(_BLOB, ("a" * 64, 65_564))
+        conn.execute(_BLOB, ("a" * 64, "channel", "c1", 65_564))
     with pytest.raises(sqlite3.IntegrityError):
-        conn.execute(_BLOB, ("b" * 64, 0))
+        conn.execute(_BLOB, ("b" * 64, "space", "s1", 0))
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(_BLOB, ("c" * 64, "room", "s1", 100))
 
 
-def test_a_blob_may_be_claimed_by_several_scopes_once_each(conn):
-    conn.execute(_CLAIM, ("a" * 64, "space", "s1"))
-    conn.execute(_CLAIM, ("a" * 64, "space", "s2"))
-    conn.execute(_CLAIM, ("a" * 64, "channel", "s1"))
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute(_CLAIM, ("a" * 64, "space", "s1"))
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute(_CLAIM, ("b" * 64, "room", "x"))
+def test_no_claims_owners_or_tombstones_any_more(conn):
+    """Security review v2 (N1): the address binds the scope, so the
+    cross-scope claim, owner and tombstone shapes are gone."""
+    tables = {
+        r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    assert (
+        not {
+            "gfs_space_media_claims",
+            "gfs_space_media_tombstones",
+            "gfs_space_media_owner_bytes",
+        }
+        & tables
+    )
 
 
-def test_totals_follow_inserts_and_deletes(conn):
+def test_totals_and_scope_bytes_follow_inserts_and_deletes(conn):
     def totals():
         return conn.execute(
             "SELECT blobs, bytes FROM gfs_space_media_totals WHERE id=1"
         ).fetchone()
 
+    def scopes():
+        return set(
+            conn.execute(
+                "SELECT scope_kind, scope_id, bytes FROM gfs_space_media_scope_bytes"
+            ).fetchall()
+        )
+
     assert totals() == (0, 0)
-    conn.execute(_BLOB, ("a" * 64, 100))
-    conn.execute(_BLOB, ("b" * 64, 300))
-    assert totals() == (2, 400)
+    conn.execute(_BLOB, ("a" * 64, "space", "s1", 100))
+    conn.execute(_BLOB, ("b" * 64, "space", "s1", 300))
+    conn.execute(_BLOB, ("c" * 64, "channel", "c1", 50))
+    assert totals() == (3, 450)
+    assert scopes() == {("space", "s1", 400), ("channel", "c1", 50)}
     conn.execute("DELETE FROM gfs_space_media WHERE blob_id=?", ("a" * 64,))
+    conn.execute("DELETE FROM gfs_space_media WHERE blob_id=?", ("c" * 64,))
     assert totals() == (1, 300)
+    # A scope at 0 bytes leaves no row.
+    assert scopes() == {("space", "s1", 300)}
 
 
 def test_upload_counts_are_one_row_per_scope_and_hour(conn):
@@ -87,22 +105,35 @@ def test_upload_counts_are_one_row_per_scope_and_hour(conn):
         conn.execute(ins)
 
 
-def test_the_hot_reads_use_their_indexes(conn):
-    assert "idx_gfs_space_media_claims_scope" in _plan(
-        conn,
-        "SELECT SUM(size) FROM gfs_space_media_claims"
-        " WHERE scope_kind='space' AND scope_id='s1' AND expires_at > 5",
+def test_ip_bytes_are_one_row_per_address_and_hour(conn):
+    ins = (
+        "INSERT INTO gfs_space_media_ip_bytes(ip_key, hour_bucket, bytes)"
+        " VALUES('k', 7, 10)"
     )
-    assert "idx_gfs_space_media_lru" in _plan(
+    conn.execute(ins)
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute(ins)
+
+
+def test_the_hot_reads_use_their_indexes(conn):
+    assert "idx_gfs_space_media_scope" in _plan(
         conn,
-        "SELECT blob_id FROM gfs_space_media"
-        " ORDER BY last_fetched_at, created_at LIMIT 10",
+        "SELECT blob_id FROM gfs_space_media WHERE scope_kind='space'"
+        " AND scope_id='s1' ORDER BY last_fetched_at, created_at LIMIT 10",
+    )
+    assert "idx_gfs_space_media_scope_bytes" in _plan(
+        conn,
+        "SELECT scope_kind, scope_id, bytes FROM gfs_space_media_scope_bytes"
+        " ORDER BY bytes DESC LIMIT 2",
     )
     assert "idx_gfs_space_media_expires" in _plan(
         conn, "SELECT blob_id FROM gfs_space_media WHERE expires_at <= 5"
     )
     assert "idx_gfs_space_media_uploads_bucket" in _plan(
         conn, "DELETE FROM gfs_space_media_uploads WHERE hour_bucket < 5"
+    )
+    assert "idx_gfs_space_media_ip_bytes_bucket" in _plan(
+        conn, "DELETE FROM gfs_space_media_ip_bytes WHERE hour_bucket < 5"
     )
 
 
@@ -112,44 +143,3 @@ def test_one_sweep_lease_row(conn):
     ).fetchall() == [("", 0, "")]
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("INSERT INTO gfs_space_media_sweep(id) VALUES(2)")
-
-
-def test_claim_sequence_never_reuses_a_number(conn):
-    """An eviction's mark must never cover a claim made after it: the claim
-    sequence only grows, even after the newest claim was deleted."""
-    conn.execute(_CLAIM, ("a" * 64, "space", "s1"))
-    conn.execute(_CLAIM, ("b" * 64, "space", "s1"))
-    top = conn.execute("SELECT MAX(seq) FROM gfs_space_media_claims").fetchone()[0]
-    conn.execute("DELETE FROM gfs_space_media_claims WHERE seq=?", (top,))
-    conn.execute(_CLAIM, ("c" * 64, "space", "s1"))
-    assert (
-        conn.execute(
-            "SELECT seq FROM gfs_space_media_claims WHERE blob_id=?", ("c" * 64,)
-        ).fetchone()[0]
-        > top
-    )
-
-
-def test_a_blob_has_an_owner_scope(conn):
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute(
-            "INSERT INTO gfs_space_media(blob_id, size, created_at, expires_at,"
-            " last_fetched_at, owner_kind, owner_id)"
-            " VALUES(?, 100, 10, 20, 10, 'room', 's1')",
-            ("a" * 64,),
-        )
-
-
-def test_tombstones_are_one_per_blob_and_swept_by_time(conn):
-    conn.execute(
-        "INSERT INTO gfs_space_media_tombstones(blob_id, until) VALUES(?, 5)",
-        ("a" * 64,),
-    )
-    with pytest.raises(sqlite3.IntegrityError):
-        conn.execute(
-            "INSERT INTO gfs_space_media_tombstones(blob_id, until) VALUES(?, 6)",
-            ("a" * 64,),
-        )
-    assert "idx_gfs_space_media_tombstones_until" in _plan(
-        conn, "SELECT blob_id FROM gfs_space_media_tombstones WHERE until <= 10"
-    )

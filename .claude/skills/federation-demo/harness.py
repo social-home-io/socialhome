@@ -2066,7 +2066,8 @@ def _gfs_cluster_space_media(
         SpaceMediaClaim,
         SpaceMediaUploadAuth,
     )
-    from socialhome.moment_public_media import PAD_BUCKETS, blob_id_of
+    from socialhome.domain.gfs_space_media import space_media_address
+    from socialhome.moment_public_media import PAD_BUCKETS
 
     iid, seed = owner
     authority_seed = secrets.token_bytes(32)
@@ -2097,7 +2098,8 @@ def _gfs_cluster_space_media(
         raise SystemExit(f"gfs-cluster: media space publish → {code} {resp!r}")
 
     blob = secrets.token_bytes(PAD_BUCKETS[1] + 28)  # a 64 KiB padded bucket
-    blob_id = blob_id_of(blob)
+    # The address is bound to the scope (address suite sm1).
+    blob_id = space_media_address("space", space_id, blob)
     now = int(time.time())
 
     def _put(url: str) -> tuple[int, Any]:
@@ -2185,10 +2187,10 @@ def _gfs_cluster_channel_media(
     its first epoch notice, a pass for a member household and that
     household's seat; now one blob uploaded via node 0 under the channel key
     is fetched byte-identical via node 1 at the scope-free
-    ``/gfs/media/{blob}``. Finally the owner rules: the space step's blob
-    uploaded again under the channel coalesces; the channel's delete drops
-    only its claim; the space owner's delete withdraws the blob for every
-    scope and a re-upload is ``410 media_withdrawn``."""
+    ``/gfs/media/{blob}``. Finally the scope-bound address (security review
+    v2): the space step's ciphertext uploaded under the channel is ANOTHER
+    blob at another address; the channel can't delete the space's blob; the
+    space's delete removes only its own blob on every node."""
     from dataclasses import replace
 
     from socialhome.crypto import b64url_encode, ed25519_public_key, sign_ed25519
@@ -2208,7 +2210,8 @@ def _gfs_cluster_channel_media(
         sign_register,
         signing_bytes,
     )
-    from socialhome.moment_public_media import PAD_BUCKETS, blob_id_of
+    from socialhome.domain.gfs_space_media import space_media_address
+    from socialhome.moment_public_media import PAD_BUCKETS
 
     _c, info = _request(f"{urls[1]}/gfs/info", timeout=10.0)
     gfs_id = info["gfs_instance_id"]
@@ -2230,7 +2233,7 @@ def _gfs_cluster_channel_media(
         claim = SpaceMediaClaim(
             scope=SCOPE_CHANNEL,
             scope_id=channel_id,
-            blob_id=blob_id_of(data),
+            blob_id=space_media_address(SCOPE_CHANNEL, channel_id, data),
             size=len(data),
             expires_at=int(time.time()) + 86_400,
             ts=int(time.time()),
@@ -2244,7 +2247,7 @@ def _gfs_cluster_channel_media(
             sig_suite="ed25519",
         )
         req = urllib.request.Request(
-            f"{url}/gfs/media/{blob_id_of(data)}",
+            f"{url}/gfs/media/{space_media_address(SCOPE_CHANNEL, channel_id, data)}",
             data=data,
             method="PUT",
             headers={
@@ -2266,7 +2269,7 @@ def _gfs_cluster_channel_media(
             return exc.code, b""
 
     blob = secrets.token_bytes(PAD_BUCKETS[1] + 28)
-    blob_id = blob_id_of(blob)
+    blob_id = space_media_address(SCOPE_CHANNEL, channel_id, blob)
     # Nobody holds a seat yet: no media (security review F1).
     code, resp = _channel_put(urls[0], blob)
     if code != 403:
@@ -2329,7 +2332,7 @@ def _gfs_cluster_channel_media(
         "byte-identical by node 1 ✓"
     )
 
-    # The owner rules (security review F4) across nodes.
+    # The scope-bound address (security review v2) across nodes.
     from socialhome.authority_sig import (
         AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
         sign_authority_event,
@@ -2337,17 +2340,18 @@ def _gfs_cluster_channel_media(
     from socialhome.domain.gfs_space_media import SCOPE_SPACE, media_delete_payload
 
     space_id, authority_seed, shared_blob = shared
-    shared_id = blob_id_of(shared_blob)
+    space_addr = space_media_address(SCOPE_SPACE, space_id, shared_blob)
+    channel_addr = space_media_address(SCOPE_CHANNEL, channel_id, shared_blob)
     code, body = _channel_put(urls[1], shared_blob)
-    if code != 200 or (body or {}).get("status") != "already_stored":
+    if code != 201 or channel_addr == space_addr:
         raise SystemExit(
-            f"gfs-cluster: the space's blob under a channel via node 1 → {code} "
-            f"{body!r}; want 200 already_stored (a second claim, not a conflict)"
+            f"gfs-cluster: the space's ciphertext under a channel via node 1 → "
+            f"{code} {body!r}; want 201 — another blob at another address"
         )
     ts = int(time.time())
-    ch_body = media_delete_payload(SCOPE_CHANNEL, channel_id, shared_id, ts)
+    ch_body = media_delete_payload(SCOPE_CHANNEL, channel_id, space_addr, ts)
     code, resp = _request(
-        f"{urls[0]}/gfs/media/{shared_id}/delete",
+        f"{urls[0]}/gfs/media/{space_addr}/delete",
         method="POST",
         body={
             "scope": SCOPE_CHANNEL,
@@ -2361,22 +2365,22 @@ def _gfs_cluster_channel_media(
             "sig_suite": "ed25519",
         },
     )
-    if code != 200 or (resp or {}).get("deleted") is not True:
-        raise SystemExit(f"gfs-cluster: channel media delete via node 0 → {code} {resp!r}")
-    code, still = _get(urls[1], shared_id)
-    if code != 200 or still != shared_blob:
+    if code != 200 or (resp or {}).get("deleted") is not False:
         raise SystemExit(
-            f"gfs-cluster: the space's blob after the CHANNEL's delete → {code}; "
-            "want 200 (another scope's delete drops only its own claim)"
+            f"gfs-cluster: the channel deleting the SPACE's blob → {code} {resp!r}; "
+            "want deleted: false (not its scope's blob)"
         )
+    code, still = _get(urls[1], space_addr)
+    if code != 200 or still != shared_blob:
+        raise SystemExit(f"gfs-cluster: the space's blob after the channel's try → {code}")
     signed = sign_authority_event(
         event_type=AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
         space_id=space_id,
-        payload=media_delete_payload(SCOPE_SPACE, space_id, shared_id, ts),
+        payload=media_delete_payload(SCOPE_SPACE, space_id, space_addr, ts),
         space_seed=authority_seed,
     )
     code, resp = _request(
-        f"{urls[1]}/gfs/media/{shared_id}/delete",
+        f"{urls[1]}/gfs/media/{space_addr}/delete",
         method="POST",
         body={
             "scope": SCOPE_SPACE,
@@ -2387,22 +2391,17 @@ def _gfs_cluster_channel_media(
         },
     )
     if code != 200 or (resp or {}).get("deleted") is not True:
-        raise SystemExit(f"gfs-cluster: space owner delete via node 1 → {code} {resp!r}")
-    code, _gone = _get(urls[0], shared_id)
+        raise SystemExit(f"gfs-cluster: the space's delete via node 1 → {code} {resp!r}")
+    code, _gone = _get(urls[0], space_addr)
     if code != 404:
-        raise SystemExit(
-            f"gfs-cluster: the owner's delete → node 0 still serves it ({code})"
-        )
-    code, resp = _channel_put(urls[0], shared_blob)
-    if code != 410:
-        raise SystemExit(
-            f"gfs-cluster: re-claiming a withdrawn blob via node 0 → {code} "
-            f"{resp!r}; want 410 media_withdrawn (a tombstone)"
-        )
+        raise SystemExit(f"gfs-cluster: after the space's delete node 0 still serves it ({code})")
+    code, kept = _get(urls[0], channel_addr)
+    if code != 200 or kept != shared_blob:
+        raise SystemExit(f"gfs-cluster: the channel's own blob after the space's delete → {code}")
     print(
-        "  the same bytes under a channel coalesce; the channel's delete drops "
-        "only its claim; the owner's delete via node 1 withdraws it on every "
-        "node (404) and a re-upload is 410 media_withdrawn ✓"
+        "  the same ciphertext under a channel is another blob at another "
+        "address; the channel can't delete the space's; the space's delete via "
+        "node 1 removes only its own on every node ✓"
     )
 
 

@@ -35,6 +35,7 @@ from socialhome.domain.gfs_space_media import (
     SpaceMediaClaim,
     SpaceMediaUploadAuth,
     media_delete_payload,
+    space_media_address,
 )
 from socialhome.gfs_channel import (
     channel_pk_of,
@@ -58,7 +59,7 @@ from socialhome.global_server.space_media_auth import (
     SPACE_MEDIA_MAX_PER_MINUTE_PER_IP,
     is_space_media_write,
 )
-from socialhome.moment_public_media import MAX_BLOB_BYTES, PAD_BUCKETS, blob_id_of
+from socialhome.moment_public_media import MAX_BLOB_BYTES, PAD_BUCKETS
 from socialhome.writer_cert import sign_writer_cert
 
 SPACE = "sp-media"
@@ -122,6 +123,20 @@ async def gfs(tmp_dir, request):
         yield tc
 
 
+#: The scope-bound address each test blob was last named under.
+_ADDR: dict[bytes, str] = {}
+
+
+def _addr(data: bytes, space: str = SPACE, scope: str = SCOPE_SPACE) -> str:
+    """The blob's scope-bound address (security review v2, N1)."""
+    _ADDR[data] = space_media_address(scope, space, data)
+    return _ADDR[data]
+
+
+def _bid(data: bytes) -> str:
+    return _ADDR.get(data) or space_media_address(SCOPE_SPACE, SPACE, data)
+
+
 def _claim(
     data: bytes, *, space=SPACE, ts=None, expires=None, size=None, scope=SCOPE_SPACE
 ):
@@ -129,7 +144,7 @@ def _claim(
     return SpaceMediaClaim(
         scope=scope,
         scope_id=space,
-        blob_id=blob_id_of(data),
+        blob_id=_addr(data, space, scope),
         size=len(data) if size is None else size,
         expires_at=expires if expires is not None else now + 86_400,
         ts=now if ts is None else ts,
@@ -170,16 +185,18 @@ def _writer_header(claim: SpaceMediaClaim, *, epoch: int = 3) -> dict:
     return {SPACE_MEDIA_AUTH_HEADER: auth.to_header()}
 
 
-def _put_url(data: bytes) -> str:
-    """Every write names only the blob — never a space or a channel."""
-    return f"/gfs/media/{blob_id_of(data)}"
+def _put_url(data: bytes, space: str = SPACE) -> str:
+    """Every write names only the blob — never a space or a channel (the
+    scope is bound into the address and named in the signed claim)."""
+    return f"/gfs/media/{_addr(data, space)}"
 
 
-_ch_url = _put_url
+def _ch_url(data: bytes, channel: str = CHANNEL) -> str:
+    return f"/gfs/media/{_addr(data, channel, SCOPE_CHANNEL)}"
 
 
 def _get_url(data: bytes) -> str:
-    return f"/gfs/media/{blob_id_of(data)}"
+    return f"/gfs/media/{_bid(data)}"
 
 
 def _ch_claim(data: bytes, **over) -> SpaceMediaClaim:
@@ -433,7 +450,7 @@ def _delete_body(data: bytes, *, seed: bytes = SEED, ts: int | None = None) -> d
     sig = sign_authority_event(
         event_type=AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
         space_id=SPACE,
-        payload=media_delete_payload(SCOPE_SPACE, SPACE, blob_id_of(data), ts),
+        payload=media_delete_payload(SCOPE_SPACE, SPACE, _bid(data), ts),
         space_seed=seed,
     )
     return {
@@ -447,7 +464,7 @@ def _delete_body(data: bytes, *, seed: bytes = SEED, ts: int | None = None) -> d
 
 def _channel_delete_body(data: bytes, *, seed: bytes = CHANNEL_SEED) -> dict:
     ts = int(time.time())
-    body = media_delete_payload(SCOPE_CHANNEL, CHANNEL, blob_id_of(data), ts)
+    body = media_delete_payload(SCOPE_CHANNEL, CHANNEL, _bid(data), ts)
     sig = sign_ed25519(seed, signing_bytes(CHANNEL_MEDIA_DELETE_PREFIX, body))
     return {
         "scope": SCOPE_CHANNEL,
@@ -550,8 +567,8 @@ async def test_a_channel_key_upload_is_fetched_by_address(gfs):
     g = await gfs.get(_get_url(data))
     assert g.status == 200
     assert await g.read() == data
-    claims = await gfs.app_[gfs_space_media_store_key]._repo.claims_of(blob_id_of(data))
-    assert [(c.scope_kind, c.scope_id) for c in claims] == [("channel", CHANNEL)]
+    held = await gfs.app_[gfs_space_media_store_key]._repo.get_blob(_bid(data))
+    assert (held.scope_kind, held.scope_id) == ("channel", CHANNEL)
 
 
 async def test_a_channel_cert_holder_uploads(gfs):
@@ -579,7 +596,7 @@ async def test_the_scoped_write_paths_are_gone(gfs):
     """Security review F3: a channel id never rides in a URL path (access
     logs, proxies) — the old scoped upload / delete routes do not exist."""
     data = os.urandom(SMALL)
-    bid = blob_id_of(data)
+    bid = _bid(data)
     for url, headers in (
         (f"/gfs/spaces/{SPACE}/media/{bid}", _authority_header(_claim(data))),
         (f"/gfs/channels/{CHANNEL}/media/{bid}", _channel_header(_ch_claim(data))),
@@ -658,7 +675,7 @@ async def test_the_channel_key_deletes_a_blob(gfs):
     assert (await gfs.get(_get_url(data))).status == 404
 
 
-# ── Review fixes: disabled cache, claims across scopes ───────────────────
+# ── Review fixes: disabled cache ─────────────────────────────────────────
 
 
 @pytest.mark.parametrize("gfs", [{"space_media_max_bytes": 0}], indirect=True)
@@ -676,77 +693,6 @@ async def test_a_turned_off_cache_answers_503_before_anything(gfs):
     assert (stats["refused_too_large"], stats["refused_quota"]) == (0, 0)
 
 
-async def test_another_scopes_delete_drops_only_its_claim(gfs):
-    """A scope that coalesced onto a blob (not its owner) can withdraw only
-    its own claim — the owner's blob stays served."""
-    data = os.urandom(SMALL)
-    r = await gfs.put(
-        _put_url(data), data=data, headers=_authority_header(_claim(data))
-    )
-    assert r.status == 201
-    r = await gfs.put(
-        _ch_url(data), data=data, headers=_channel_header(_ch_claim(data))
-    )
-    assert await r.json() == {"stored": False, "status": "already_stored"}
-    r = await gfs.post(_ch_url(data) + "/delete", json=_channel_delete_body(data))
-    assert await r.json() == {"deleted": True}
-    g = await gfs.get(_get_url(data))
-    assert g.status == 200
-    assert await g.read() == data
-
-
-# ── Security review F4: a ban or the owner's delete sticks ───────────────
-
-
-async def test_the_owners_delete_withdraws_the_blob_from_every_scope(gfs):
-    """Probe P3: with per-space keys and deterministic sealing the same
-    file in two spaces never yields the same blob, so another scope's claim
-    is always a re-upload of ciphertext it fetched. The owner's delete (the
-    seed holder of the scope that stored it first) removes the blob for
-    everyone and keeps it out for the TTL — nobody re-claims it back."""
-    data = os.urandom(SMALL)
-    await gfs.put(_put_url(data), data=data, headers=_authority_header(_claim(data)))
-    r = await gfs.put(
-        _ch_url(data), data=data, headers=_channel_header(_ch_claim(data))
-    )
-    assert r.status == 200
-    r = await gfs.post(_put_url(data) + "/delete", json=_delete_body(data))
-    assert await r.json() == {"deleted": True}
-    assert (await gfs.get(_get_url(data))).status == 404
-    for headers in (
-        _channel_header(_ch_claim(data)),
-        _authority_header(_claim(data)),
-    ):
-        r = await gfs.put(_put_url(data), data=data, headers=headers)
-        assert r.status == 410
-        assert (await r.json())["error"] == "media_withdrawn"
-    assert (await gfs.get(_get_url(data))).status == 404
-
-
-async def test_a_banned_spaces_blob_stays_withdrawn_whoever_claims_it(gfs):
-    """Probe P2: a ban must not be undone by another scope re-claiming the
-    banned space's blob."""
-    data = os.urandom(SMALL)
-    await gfs.put(_put_url(data), data=data, headers=_authority_header(_claim(data)))
-    await gfs.app_[gfs_fed_repo_key].set_space_status(SPACE, "banned")
-    assert (await gfs.get(_get_url(data))).status == 404
-    r = await gfs.put(
-        _ch_url(data), data=data, headers=_channel_header(_ch_claim(data))
-    )
-    assert r.status == 410
-    assert (await gfs.get(_get_url(data))).status == 404
-
-
-async def test_a_claim_of_a_banned_space_blocks_serving(gfs):
-    """A banned space's claim blocks the blob, not only stops counting."""
-    data = os.urandom(SMALL)
-    await gfs.put(_ch_url(data), data=data, headers=_channel_header(_ch_claim(data)))
-    await gfs.put(_put_url(data), data=data, headers=_authority_header(_claim(data)))
-    assert (await gfs.get(_get_url(data))).status == 200
-    await gfs.app_[gfs_fed_repo_key].set_space_status(SPACE, "banned")
-    assert (await gfs.get(_get_url(data))).status == 404
-
-
 # ── Security review F2: no blob behind the public static mount ───────────
 
 
@@ -759,9 +705,9 @@ async def test_space_blobs_are_not_served_by_the_public_media_mount(gfs, tmp_dir
         _put_url(data), data=data, headers=_authority_header(_claim(data))
     )
     assert r.status == 201
-    assert (await gfs.get(f"/media/spaces/{blob_id_of(data)}")).status == 404
-    assert not (tmp_dir / "media" / "spaces" / blob_id_of(data)).exists()
-    assert (tmp_dir / "space_media" / blob_id_of(data)).exists()
+    assert (await gfs.get(f"/media/spaces/{_bid(data)}")).status == 404
+    assert not (tmp_dir / "media" / "spaces" / _bid(data)).exists()
+    assert (tmp_dir / "space_media" / _bid(data)).exists()
 
 
 # ── Security review F5: a captured delete can't be replayed ──────────────
@@ -810,7 +756,7 @@ async def test_an_anonymous_unused_channel_cannot_upload_or_flush(gfs):
         junk = os.urandom(SMALL)
         claim = _claim(junk, space=cid, scope=SCOPE_CHANNEL)
         r = await gfs.put(
-            _put_url(junk), data=junk, headers=_channel_header(claim, seed=seed)
+            _ch_url(junk, cid), data=junk, headers=_channel_header(claim, seed=seed)
         )
         assert r.status == 403
         assert await r.json() == _REFUSED
@@ -856,3 +802,110 @@ async def test_an_address_over_its_byte_budget_is_429(gfs):
     store = gfs.app_[gfs_space_media_store_key]
     bucket = int(time.time()) // 3600
     assert await store._repo.upload_counts("space", SPACE, bucket=bucket) == (1, 0)
+
+
+# ── Security review v2, N1: the address is bound to the scope ────────────
+
+
+async def test_another_scope_cannot_squat_or_touch_a_spaces_blob(gfs):
+    """R8: a follower fetched the space's ciphertext and stores it first,
+    under its own channel. With the scope-bound address it can't use the
+    space's address (422), its own upload is a separate blob, and nothing
+    it does — its delete included — changes the space's blob: the
+    household's upload is 201, keeps its full expiry, and stays served."""
+    data = os.urandom(SMALL)
+    space_addr = space_media_address(SCOPE_SPACE, SPACE, data)
+    # At the space's address under the channel's scope: a mismatch.
+    claim = SpaceMediaClaim(
+        scope=SCOPE_CHANNEL,
+        scope_id=CHANNEL,
+        blob_id=space_addr,
+        size=len(data),
+        expires_at=int(time.time()) + 2,
+        ts=int(time.time()),
+    )
+    r = await gfs.put(
+        f"/gfs/media/{space_addr}", data=data, headers=_channel_header(claim)
+    )
+    assert r.status == 422
+    assert (await r.json())["error"] == "blob_id_mismatch"
+    # Under its own address: its own blob.
+    r = await gfs.put(
+        _ch_url(data), data=data, headers=_channel_header(_ch_claim(data))
+    )
+    assert r.status == 201
+    channel_addr = _bid(data)
+    assert channel_addr != space_addr
+    # The household's upload is a new blob with its own full expiry.
+    r = await gfs.put(
+        _put_url(data), data=data, headers=_authority_header(_claim(data))
+    )
+    assert r.status == 201
+    store = gfs.app_[gfs_space_media_store_key]
+    held = await store._repo.get_blob(space_addr)
+    assert (held.scope_kind, held.scope_id) == (SCOPE_SPACE, SPACE)
+    assert held.expires_at >= int(time.time()) + 86_000
+    # The channel deletes "its" blob — the space's is not its to delete.
+    _ADDR[data] = channel_addr
+    r = await gfs.post(
+        f"/gfs/media/{channel_addr}/delete", json=_channel_delete_body(data)
+    )
+    assert await r.json() == {"deleted": True}
+    ts = int(time.time()) + 1
+    body = media_delete_payload(SCOPE_CHANNEL, CHANNEL, space_addr, ts)
+    sig = sign_ed25519(CHANNEL_SEED, signing_bytes(CHANNEL_MEDIA_DELETE_PREFIX, body))
+    r = await gfs.post(
+        f"/gfs/media/{space_addr}/delete",
+        json={
+            "scope": SCOPE_CHANNEL,
+            "scope_id": CHANNEL,
+            "ts": ts,
+            "sig": b64url_encode(sig),
+            "sig_suite": "ed25519",
+        },
+    )
+    assert await r.json() == {"deleted": False}
+    g = await gfs.get(f"/gfs/media/{space_addr}")
+    assert g.status == 200
+    assert await g.read() == data
+
+
+async def test_a_banned_other_space_cannot_touch_the_blob(gfs):
+    """R9: another listed space uploads the same ciphertext (its own address)
+    and is banned — the space's blob is untouched and stays served."""
+    fed = gfs.app_[gfs_fed_repo_key]
+    evil_seed = os.urandom(32)
+    await fed.upsert_space(
+        GlobalSpace(
+            space_id="sp-evil",
+            owning_instance="owner",
+            status="active",
+            identity_public_key=ed25519_public_key(evil_seed).hex(),
+        )
+    )
+    data = os.urandom(SMALL)
+    r = await gfs.put(
+        _put_url(data), data=data, headers=_authority_header(_claim(data))
+    )
+    assert r.status == 201
+    space_addr = _bid(data)
+    r = await gfs.put(
+        _put_url(data, "sp-evil"),
+        data=data,
+        headers=_authority_header(_claim(data, space="sp-evil"), seed=evil_seed),
+    )
+    assert r.status == 201
+    evil_addr = _bid(data)
+    assert evil_addr != space_addr
+    await fed.set_space_status("sp-evil", "banned")
+    assert (await gfs.get(f"/gfs/media/{evil_addr}")).status == 404
+    g = await gfs.get(f"/gfs/media/{space_addr}")
+    assert g.status == 200
+    assert await g.read() == data
+
+
+async def test_a_ban_hides_the_spaces_blobs(gfs):
+    data = os.urandom(SMALL)
+    await gfs.put(_put_url(data), data=data, headers=_authority_header(_claim(data)))
+    await gfs.app_[gfs_fed_repo_key].set_space_status(SPACE, "banned")
+    assert (await gfs.get(_get_url(data))).status == 404

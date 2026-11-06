@@ -34,13 +34,15 @@ knows only the random channel id and the keys pinned for it):
 
 The claim's ``ts`` must be within :data:`SPACE_MEDIA_TS_SKEW_S` of this
 server's clock. A captured upload replayed inside that window is harmless:
-the blob is content-addressed, so it is the same bytes again (a no-op), or
+the blob's address binds its bytes and scope, so it is the same blob again (a no-op), or
 lands on another GFS serving the same scope, inside that scope's caps there.
 
 A delete is the scope's seed holder's alone: the space authority
 (``space_media_delete``) or the channel key. A delete is taken ONCE: an
 exact replay inside the ±300 s window is refused (a seen-digest cache, per
-node — the store's tombstone makes a replay to another node a no-op).
+node; a replay to another node can only delete that scope's own blob,
+which its seed holder deleted already — the household does not upload a
+deleted item's file again).
 Every refusal is a :class:`PermissionError`; the route answers all of them
 with one uniform 403.
 """

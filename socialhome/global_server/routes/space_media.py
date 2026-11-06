@@ -11,8 +11,7 @@ proxy nor a CDN cache key ever sees a space or channel id next to a blob
   is read; then the size must be a padded bucket and the scope's upload slot
   is reserved — all before the body is read, up to exactly the signed
   ``size`` (413 past it) within :data:`BODY_READ_TIMEOUT_S`. ``201
-  {"stored": true}``; the same bytes again — a retry, or another scope's
-  upload, which adds that scope's claim — are ``200 {"stored": false,
+  {"stored": true}``; the scope's retry is ``200 {"stored": false,
   "status": "already_stored"}`` (never a conflict, and never a fresher
   expiry). ``503 space_media_disabled`` while the operator has the cache off.
 * ``GET /gfs/media/{blob_id}`` — anyone fetches a blob by address:

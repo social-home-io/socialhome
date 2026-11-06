@@ -166,8 +166,9 @@ class GfsAdminService:
 
     async def _ban_space(self, space_id: str) -> None:
         """Ban a space — every path a moderator bans through. Its blobs in
-        the space media cache are withdrawn too (tombstoned for the TTL),
-        so no other scope re-claims and serves them."""
+        the space media cache are hidden at once (the read checks the
+        status) and dropped here; their addresses are bound to this space,
+        so no other scope can store or serve them."""
         await self._fed_repo.set_space_status(space_id, "banned")
         if self._space_media is not None:
             await self._space_media.withdraw_scope("space", space_id)

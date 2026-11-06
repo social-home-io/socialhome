@@ -3478,8 +3478,8 @@ recently fetched, an upload rate per scope. A reader that misses it
 (evicted, expired) falls back to whatever the household side does without
 it — the GFS never promises to keep a file.
 
-**Scopes and claims.** A blob is held by one or more **claims**, each by a
-scope — the key of its caps, its upload rate and its delete:
+**One blob, one scope.** A blob is uploaded for one scope — the key of its
+caps, its upload rate, its delete and its ban:
 
 - `space` — a space listed on this GFS (public / global, or private but
   listed for invite links);
@@ -3488,37 +3488,47 @@ scope — the key of its caps, its upload rate and its delete:
   channel id and the keys pinned for it — never the space id, name, key or
   owner. Its invite-link members get the space's pictures this way too.
 
-The bytes are stored once. The scope that stored a blob first is its
-**owner**. Per-space content keys and deterministic sealing mean the same
-file in two spaces never yields the same blob, so identical bytes uploaded
-for another scope are always a re-upload of ciphertext it fetched: they add
-that scope's claim (a coalesced `200`), never a copy and never a conflict —
-but that claim never extends the blob's expiry past the owner's. The
-**owner's** seed holder's delete withdraws the blob for every scope: claims,
-row and file go, and a **tombstone** keeps it unservable and unclaimable
-(`410 media_withdrawn`) for the TTL — another scope's re-upload can't undo
-a delete. A moderator's **ban** of a space withdraws (tombstones) every blob
-it owns, and a blob whose owner is banned, or that a banned space still
-claims, is never served. (Before security review F4, a party that saw a
-public blob could keep a deleted or banned blob alive by re-claiming it.)
-Another scope's delete drops only its own claim; the blob goes with its
-last claim. The upload must reach every GFS before the item naming it goes
-out (the household side's contract), so nobody learns a blob's address in
-time to store it first and become its owner.
+**The address is bound to the scope** (address suite `sm1`, the claim's
+`addr_suite`):
 
-**Scope of this change.** GFS side only: storage (GFS migration `0025`,
-`gfs_space_media` + `gfs_space_media_claims` + the hourly upload counts
-`gfs_space_media_uploads` + the trigger-kept `gfs_space_media_totals`; the
-bytes are files under `data_dir/space_media/` — never under the public `/media/` branding route, which serves only top-level branding files — named by their SHA-256), the routes below,
-the capability, the sweep and the admin counts.
+```
+blob_id = lowercase hex of SHA-256( b"sm1|" + scope_kind + b"|" + scope_id + b"|" + ciphertext )
+```
+
+(`domain/gfs_space_media.space_media_address`; a scope id never contains
+`|`, so the input parses one way only; test vectors in
+`tests/domain/test_gfs_space_media.py`). The GFS recomputes it on upload from
+the claim's scope and refuses a mismatch (`422 blob_id_mismatch`); a reader
+checks it with the scope id it knows. **Why:** with a bare content hash, a
+follower who saw a blob's address (it rides in the item, before the
+household's uploads reach every GFS) could fetch the ciphertext from one GFS
+and store it first on another under its own channel — owning it there,
+capping the space's copy, deleting it and blocking the space's re-upload
+(security review v2, N1). With the scope bound in, the same ciphertext has
+another address in every scope: nothing another scope uploads, deletes or
+gets banned for reaches a space's blob, so the cache needs no cross-scope
+claims, owners or tombstones. The scope's own retries coalesce (`200
+already_stored`, never a fresher expiry); its seed holder deletes it; a
+moderator's ban of a space hides its blobs at once and drops them. A deleted
+blob needs no tombstone: only the scope's own upload authorization can store
+it again — the same parties who may upload any of its content.
+
+**Scope of this change.** GFS side only: storage (GFS migration `0025`:
+`gfs_space_media` — one row per blob with its scope — the trigger-kept
+`gfs_space_media_scope_bytes` and `gfs_space_media_totals`, the hourly upload
+counts `gfs_space_media_uploads`, the per-address byte budget
+`gfs_space_media_ip_bytes` and the sweep lease; the bytes are files under
+`data_dir/space_media/` — never under the public `/media/` branding route,
+which serves only the configured branding file — named by their address),
+the routes below, the capability, the sweep and the admin counts.
 
 **Routes.**
 
 | Method | Path | |
 |---|---|---|
-| `PUT` | `/gfs/media/{blob_id}` | One encrypted blob, the raw body, for the scope the signed claim names — a listed space, or a private space's opaque channel (`channel_id` = 32 hex). The scope never rides in the URL (security review F3: a channel id must not land in an access log or a proxy). `blob_id` = SHA-256 of the body (lowercase hex), size = a padded bucket + 28 bytes (`moment_public_media.PAD_BUCKETS`, ≤ 8 MiB + overhead). `201 {stored: true}`; the same bytes again — a retry, or another scope's upload, which adds that scope's claim — are `200 {stored: false, status: "already_stored"}`, never an error. **`already_stored` does not extend the blob's expiry** for a scope that already held it (it keeps the expiry of that scope's first upload): a household must not assume a fresh TTL from it. `503 space_media_disabled` while the operator has the cache off. |
+| `PUT` | `/gfs/media/{blob_id}` | One encrypted blob, the raw body, for the scope the signed claim names — a listed space, or a private space's opaque channel (`channel_id` = 32 hex). The scope never rides in the URL (security review F3: a channel id must not land in an access log or a proxy). `blob_id` = the scope-bound address of the body (above; `422 blob_id_mismatch` otherwise), size = a padded bucket + 28 bytes (`moment_public_media.PAD_BUCKETS`, ≤ 8 MiB + overhead). `201 {stored: true}`; the scope's retry is `200 {stored: false, status: "already_stored"}`, never an error. **`already_stored` does not extend the blob's expiry** (it keeps the expiry of the scope's first upload): a household must not assume a fresh TTL from it. `503 space_media_disabled` while the operator has the cache off. |
 | `GET` | `/gfs/media/{blob_id}` | Anyone, no credentials: the ciphertext, `application/octet-stream`, `nosniff`, `Access-Control-Allow-Origin: *`, `Cache-Control: public, max-age=3600, immutable`; `404` with `no-store` for unknown, expired, evicted or a banned space's blob. |
-| `POST` | `/gfs/media/{blob_id}/delete` | The scope's seed holder withdraws its claim: `{scope, scope_id, ts, sig, sig_suite}` (the signature covers scope, scope id, blob and `ts`); `{deleted}`. |
+| `POST` | `/gfs/media/{blob_id}/delete` | The scope's seed holder deletes one of the scope's blobs: `{scope, scope_id, ts, sig, sig_suite}` (the signature covers scope, scope id, blob and `ts`); `{deleted}` (`false` for another scope's blob). Taken once: an exact replay is the uniform 403. |
 
 **A channel takes media only while IN USE.** A v_51 channel registers
 anonymously (10 / min / address), so an upload under a channel scope — any
@@ -3536,8 +3546,8 @@ path, so no spelling of the path slips past it.
 
 **Authorization (identity-free).** The raw blob is the body, so the
 authorization rides in one header, `X-SH-Space-Media-Auth`: base64url of a
-canonical JSON object carrying the claim `{scope, scope_id, blob_id, size,
-expires_at, ts}` (unix seconds; `ts` within ±300 s), `auth`, `sig`,
+canonical JSON object carrying the claim `{scope, scope_id, blob_id,
+addr_suite, size, expires_at, ts}` (unix seconds; `ts` within ±300 s), `auth`, `sig`,
 `sig_suite` (`domain/gfs_space_media.py`). Each scope takes only its own
 kinds, each reusing a check the GFS already makes — no new key, roster or
 registration:
@@ -3569,7 +3579,7 @@ to exactly the signed `size` (`413` past it, `422 size_mismatch` short of
 it) within 120 s (`408 body_timeout`), the slot given back on any of these —
 so neither an unauthorized caller nor a scope over its rate makes the server
 buffer a byte. A captured upload replayed within the ±300 s
-window is harmless: it is the same content-addressed bytes (a no-op), or
+window is harmless: it is the same blob of the same scope (a no-op), or
 lands on another GFS serving the same scope, inside that scope's caps there.
 A delete is the scope's seed holder's alone: the space authority over
 `{scope, scope_id, blob_id, ts}` under `space_media_delete`, or the channel
@@ -3581,15 +3591,15 @@ pictures over old ones:
 
 | Setting | Default | Effect |
 |---|---|---|
-| `max_bytes` | 5 GiB | All blobs together. Before a blob is stored, expired blobs go, then — **fair, never one global order** — the least recently fetched (then oldest) blobs of the scope that **owns the most bytes**, until it is down to the next largest, then again, with all their claims — just enough to fit (security review F1: one scope flooding the cache pushes out its own blobs, never another's; per-owner bytes are a trigger-kept table); the backlog of expired blobs is the sweep's, never the upload's. `0` turns the cache off: uploads answer `503 space_media_disabled` and the capability is not advertised. |
-| `space_max_bytes` | 256 MiB | Live bytes one scope's claims (space or channel) hold. Past it, that scope's **own** claims on its least recently fetched (then oldest) blobs are evicted until the new one fits — a blob another scope still claims stays; never a refusal. |
-| `ttl_seconds` | 3 days (600 s – 7 days) | A claim's longest life; the uploader's `expires_at` is clamped to it (an expiry in the past is `422`). |
-| `space_uploads_per_hour` | 300 | Accepted uploads (new blobs and new claims) of one scope in a sliding hour — this hour's count plus the last hour's, weighted by its overlap — kept in `gfs_space_media_uploads`, apart from the blob rows, so neither eviction nor delete can reset it. Past it: `429 space_media_quota` + `Retry-After`. A retry of the scope's own live claim is not counted. |
-| `ip_bytes_per_hour` | 1 GiB | The backstop: bytes one client address (an IPv6 /64) uploads in a sliding hour across every scope, kept in `gfs_space_media_ip_bytes` under a keyed hash of the address (never the address; the key derives from the cluster's shared signing seed) — cluster-wide. Past it: `429 ip_media_quota` + `Retry-After`. A coalesced claim stores no bytes and costs none; a failed upload gives its bytes back. |
+| `max_bytes` | 5 GiB | All blobs together. Before a blob is stored, expired blobs go, then — **fair, never one global order** — the least recently fetched (then oldest) blobs of the scope that **holds the most bytes**, until it is down to the next largest, then again — just enough to fit (security review F1: one scope flooding the cache pushes out its own blobs, never another's; per-scope bytes are a trigger-kept table); the backlog of expired blobs is the sweep's, never the upload's. `0` turns the cache off: uploads answer `503 space_media_disabled` and the capability is not advertised. |
+| `space_max_bytes` | 256 MiB | Bytes one scope (space or channel) holds. Past it, that scope's **own** least recently fetched (then oldest) blobs are evicted until the new one fits; never a refusal. |
+| `ttl_seconds` | 3 days (600 s – 7 days) | A blob's longest life; the uploader's `expires_at` is clamped to it (an expiry in the past is `422`). |
+| `space_uploads_per_hour` | 300 | Accepted uploads (new blobs) of one scope in a sliding hour — this hour's count plus the last hour's, weighted by its overlap — kept in `gfs_space_media_uploads`, apart from the blob rows, so neither eviction nor delete can reset it. Past it: `429 space_media_quota` + `Retry-After`. A retry of a blob the scope holds is not counted. |
+| `ip_bytes_per_hour` | 1 GiB | The backstop: bytes one client address (an IPv6 /64) uploads in a sliding hour across every scope, kept in `gfs_space_media_ip_bytes` under a keyed hash of the address (never the address; the key derives from the cluster's shared signing seed) — cluster-wide. Past it: `429 ip_media_quota` + `Retry-After`. A retry stores no bytes and costs none; a failed upload gives its bytes back. |
 
 A blob larger than the whole cache or one scope's budget is `413
 too_large_for_cache`. The hourly maintenance sweep drops expired blobs,
-claims and upload counts on every node (it is all in the shared database);
+upload counts and address budgets on every node (it is all in the shared database);
 on ONE node at a time — the holder of a ~50-minute lease row — it also walks
 the next 100 000 entries of the shared directory in name order (a persisted
 cursor — the last name listed, so a file that vanishes mid-walk can't send
@@ -3598,9 +3608,7 @@ over successive runs) and removes files with no row and stale `.part` temporary 
 than 10 minutes (an upload may still be writing a younger one), each stat'ed
 and looked up again right before the unlink so a file an upload rewrote
 meanwhile is kept. A fetch moves the blob's `last_fetched_at` at most once
-an hour (an upload counts as one — a new blob, and a new scope's claim
-coalescing onto a held one — so what a household was just told is there is
-not the first to go): a
+an hour (an upload counts as one, so a new blob is not the first to go): a
 popular blob costs one DB write an hour, not one per fetch. Uploads and
 deletes are also shed at 120 / min per client address before any signature
 work.
@@ -3609,7 +3617,8 @@ work.
 node took an upload, any node serves it (pinned by the federation-demo
 `gfs-cluster` step: a space blob and a channel blob uploaded via node 0 are
 fetched byte-identical via node 1; a re-upload via node 1 coalesces; the same
-bytes under a channel claim survive the space's delete).
+ciphertext under the channel is another blob at another address, and the
+space's delete or a ban touches only its own).
 
 - **Upload rate:** a slot is reserved atomically in the shared database
   before any work (an upsert that only counts while under the cap) and
@@ -3622,39 +3631,29 @@ bytes under a channel claim survive the space's delete).
   most (nodes − 1) × the largest blob** (3 × 8 MiB on a 4-node cluster),
   until the next upload's room making brings it back under. Leave that much
   disk headroom.
-- **Delete / evict / expire vs. a concurrent claim:** all three are
-  claim-aware. A delete drops one claim and the blob row only while no claim
-  holds it (one statement). An eviction or expiry sweep notes the newest
-  claim's sequence number (`gfs_space_media_claims.seq`, never reused)
-  before it reads its candidates and drops only claims up to that mark (or
-  expired), then each row only while no claim holds it — so a blob another
-  node coalesced onto meanwhile survives and the eviction takes its next
-  candidate. A file goes only when its row went, rows before files (a crash
-  leaves an orphan file, the sweep's). A claim that lands on a blob whose
-  row another node dropped stores the bytes again (they are in the
-  request), so `already_stored` means the blob is there; a row whose file
-  went missing gets it back from the next upload of the same bytes; a claim
-  left without its blob holds no budget and the sweep removes it.
-- **Residual windows (cross-node, narrow, self-healing):** (1) node A
-  deletes a blob row, node B stores the same blob again (row + file), then
-  A's file removal lands — B answered `201`, but the row has no file until
-  the next upload of the same bytes rewrites it — any scope's, the
-  uploader's own retry included (a reader gets `404`; the household side
-  re-uploads on a `404`); (2) the orphan sweep re-checks a file's mtime
-  and row and unlinks it under its node's lock, but an upload on another
-  node could store that blob between the re-check and the unlink — the same
-  row-without-file, healed the same way.
+- **Rows before files:** a delete, an eviction or the expiry sweep drops
+  rows first, then the files of the rows that went (a crash leaves an orphan
+  file, the sweep's); a row whose file went missing gets it back from the
+  scope's next upload of it.
+- **Residual windows (cross-node, narrow, self-healing — the household side
+  re-uploads on a `404`):** (1) node A drops a row, node B stores the same
+  blob again (row + file), then A's file removal lands — B answered `201`,
+  the row has no file until the scope's next upload of it; (2) node B
+  answers a retry `already_stored` while node A evicts or expires that blob;
+  (3) the orphan sweep re-checks a file's mtime and row and unlinks it under
+  its node's lock, but an upload on another node could store that blob
+  between the re-check and the unlink.
 
-The totals check is a trigger-kept row, a scope's live bytes an index range
-over its claims; a scope's eviction sorts its live claims by their blob's
-last fetch (`scope_lru`, at most `space_max_bytes` ÷ the smallest bucket ≈
-65 000 rows, and only on an upload that is over the scope's budget). The bytes go through a
+The totals check and a scope's bytes are trigger-kept rows (primary-key
+reads); a scope's eviction reads its blobs in last-fetch order off the
+`(scope_kind, scope_id, last_fetched_at, created_at)` index, at most what it
+drops. The bytes go through a
 small storage interface (`blob_store.BlobFiles`), so an object store can
 replace the filesystem later.
 
 **CDN caching.** A `200` may sit in a CDN edge (Cloudflare) for up to an
-hour, `immutable` because the address is the content's hash. That is short
-on purpose: a deleted post's picture, or an evicted / expired blob, can stay
+hour, `immutable` because the address is a hash of the scope and the content. That is short
+on purpose: a deleted or banned post's picture, or an evicted / expired blob, can stay
 fetchable from an edge for **at most an hour** after the GFS dropped it —
 ciphertext, readable only by holders of the space content key. A `404` is
 `no-store`, so a blob uploaded a moment later is never hidden behind a cached
@@ -3679,9 +3678,9 @@ authors posting 10 pictures a day, ~300 KiB padded each: 2 000 uploads
 pictures for each new one, so it always serves its newest ~10 hours of
 pictures plus whatever readers keep fetching; it never pushes other scopes
 out of the 5 GiB cache, and no upload is refused for bytes. Per upload
-the database does a primary-key read of the totals row, an index range over
-the scope's claims, two primary-key reads of the upload counts and a handful
-of writes; eviction reads at most what it drops.
+the database does primary-key reads of the totals and the scope's bytes, two
+of the upload counts and two of the address budget, and a handful of writes;
+eviction reads at most what it drops.
 
 **What the GFS learns.** The ciphertext (it can't open it), the scope a blob
 was uploaded for — a listed `space_id`, or for a private space only an
@@ -3701,15 +3700,16 @@ sequenceDiagram
     participant C as CDN edge
     participant R as Reader household
     Note over H: encrypts the file once (space key, padded bucket)
-    H->>G: PUT /gfs/media/{sha256}<br/>X-SH-Space-Media-Auth (scope inside the signed claim)
-    G->>G: verify (pinned space / channel key, cert, writer key), rate,<br/>evict the scope's / the cache's LRU if full
-    G-->>H: 201 stored (200 already_stored: same bytes, claim added)
-    R->>C: GET /gfs/media/{sha256}
+    Note over H: blob_id = sha256("sm1|" + scope + "|" + scope_id + "|" + ciphertext)
+    H->>G: PUT /gfs/media/{blob_id}<br/>X-SH-Space-Media-Auth (scope inside the signed claim)
+    G->>G: verify (pinned space / channel key, cert, writer key), rate,<br/>recompute the scope-bound address, evict the scope's / the largest scope's LRU if full
+    G-->>H: 201 stored (200 already_stored: the scope's retry)
+    R->>C: GET /gfs/media/{blob_id}
     C->>G: (miss) GET
     G-->>C: 200 ciphertext, public max-age=3600 immutable
     C-->>R: ciphertext
-    Note over R: checks sha256, decrypts with the space key
-    H->>G: POST /gfs/media/{sha256}/delete {scope, scope_id, ts, sig}
+    Note over R: recomputes the address with its scope id, decrypts with the space key
+    H->>G: POST /gfs/media/{blob_id}/delete {scope, scope_id, ts, sig}
     Note over C: an edge copy may linger ≤ 1 h
 ```
 

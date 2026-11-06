@@ -1316,11 +1316,13 @@ WS pushes across allocs. The step:
    channel registered via node 1 gets the uniform ``403`` until a member
    household holds a seat (epoch notice, pass, subscribe); then a blob
    uploaded via node 0 under the channel key must be served byte-identical
-   by node 1. The space step's blob uploaded again under that channel via
-   node 1 must coalesce (``200 already_stored``); the channel's delete
-   drops only its claim (still ``200``); the space owner's delete via node 1
-   withdraws it on every node (``404``) and a re-upload via node 0 is
-   ``410 media_withdrawn`` (a tombstone).
+   by node 1. Every address is bound to its scope
+   (``sha256("sm1|" + scope + "|" + scope_id + "|" + ciphertext)``): the
+   space step's ciphertext uploaded under that channel via node 1 is a NEW
+   blob (``201``) at another address; the channel's delete of the space's
+   address answers ``deleted: false`` (still ``200`` to fetch); the space's
+   own delete via node 1 removes it on every node (``404``) while the
+   channel's copy stays.
 6. Confirms a client registered via one node is served by the other
    (shared DB → the round-robin LB is safe).
 
