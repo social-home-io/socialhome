@@ -134,7 +134,11 @@ from ..domain.gfs_member_publish import (
     owner_epoch_notice_signing_payload,
 )
 from ..domain.space_item import PAYLOAD_SUITE_FIELD, PAYLOAD_SUITE_JSON
-from ..domain.writer_cert import MAX_WRITER_CERT_EPOCH, WRITER_SCOPE_COMMENT
+from ..domain.writer_cert import (
+    MAX_WRITER_CERT_EPOCH,
+    WRITER_SCOPE_COMMENT,
+    WriterCert,
+)
 from ..domain.writer_key import UnsupportedWriterKeySuite, WriterKeyCert
 from ..writer_cert import (
     InvalidWriterCert,
@@ -494,29 +498,13 @@ class GfsMemberPublishService:
         if not self._space_limiter.allow(req.target):
             raise MemberPublishRateLimited()
         space = await self._readable_space(req.target)
-        strict = await self._epoch_repo.get_strict(req.target)
-        if strict is not None and strict.strict:
-            # The owner chose strict mode: nothing identified is relayed for
-            # this space — an older or misconfigured household's post takes
-            # the host path instead.
-            raise PermissionError("space is in strict mode — identified refused")
         try:
-            space_pk = bytes.fromhex(space.identity_public_key)
             author_pk = bytes.fromhex(inst.public_key)
-            verify_writer_cert(
-                req.writer_cert,
-                space_pubkey=space_pk,
-                space_id=req.target,
-                epoch=req.epoch,
-                author_pk=author_pk,
-                # The real item type is hidden inside the ciphertext, so the
-                # weakest scope is all this server can require; receivers
-                # enforce the scope the real type needs.
-                required_scope=WRITER_SCOPE_COMMENT,
-            )
-        except (InvalidWriterCert, UnsupportedWriterCertSuite, ValueError) as exc:
-            raise PermissionError(f"writer cert refused: {exc}") from exc
-        await self._check_cert_epoch(req.target, req.epoch)
+        except ValueError as exc:
+            raise PermissionError("writer cert refused: bad household key") from exc
+        await self.verify_writer_cert(
+            space, req.writer_cert, epoch=req.epoch, author_pk=author_pk
+        )
         # A compressed item only while every follower reads it (409 else).
         await self._federation.require_payload_suite_readers(
             req.target, req.payload_suite
@@ -552,21 +540,13 @@ class GfsMemberPublishService:
             raise PermissionError("request is addressed to another server")
         self._check_anon_ts(req.ts)
         await self._readable_space(req.target)
-        strict = await self._epoch_repo.get_strict(req.target)
-        pinned = strict.writer_pk_for(req.epoch) if strict is not None else None
-        if pinned is None:
-            raise PermissionError("no writer key pinned for this epoch")
-        try:
-            ok = verify_writer_sig(
-                writer_pk=b64url_decode(pinned),
-                message=req.signing_bytes(),
-                writer_sig=req.writer_sig,
-                suite=req.writer_sig_suite,
-            )
-        except (UnsupportedWriterKeySuite, ValueError) as exc:
-            raise PermissionError(f"writer signature refused: {exc}") from exc
-        if not ok:
-            raise PermissionError("writer signature does not verify")
+        await self.verify_writer_key_sig(
+            req.target,
+            epoch=req.epoch,
+            message=req.signing_bytes(),
+            writer_sig=req.writer_sig,
+            suite=req.writer_sig_suite,
+        )
         # The per-address bound first: an abusive key holder is stopped here
         # and never reaches the space-wide budget the other writers share.
         if not self._anon_ip_limiter.allow(f"{req.target}\x00{client_ip}"):
@@ -575,11 +555,7 @@ class GfsMemberPublishService:
             raise MemberPublishRateLimited()
         if not self._writer_key_limiter.allow(f"{req.target}\x00{req.epoch}"):
             raise MemberPublishRateLimited()
-        state = await self._epoch_repo.get(req.target)
-        if state is None or not state.admits(
-            req.epoch, now=int(self._clock()), grace_s=MEMBER_PUBLISH_EPOCH_GRACE_S
-        ):
-            raise PermissionError("writer key epoch is not open here")
+        await self.require_writer_key_epoch(req.target, req.epoch)
         await self._federation.require_payload_suite_readers(
             req.target, req.payload_suite
         )
@@ -594,6 +570,79 @@ class GfsMemberPublishService:
         if not self._submit(job):
             raise MemberPublishBusy()
         self._anon_seen.record(digest)
+
+    # ── Writer checks (shared with the space media cache) ────────────────
+
+    async def verify_writer_cert(
+        self,
+        space: GlobalSpace,
+        cert: WriterCert,
+        *,
+        epoch: int,
+        author_pk: bytes,
+    ) -> None:
+        """Trusted-mode writer authorization: *cert*, signed by the space's
+        PINNED authority key, authorizes the household key *author_pk* in
+        *space* at *epoch*, that epoch is open here, and the space is not in
+        strict mode (nothing identified goes into a strict space — an older
+        or misconfigured household's post takes the host path instead).
+        :class:`PermissionError` otherwise."""
+        strict = await self._epoch_repo.get_strict(space.space_id)
+        if strict is not None and strict.strict:
+            raise PermissionError("space is in strict mode — identified refused")
+        try:
+            verify_writer_cert(
+                cert,
+                space_pubkey=bytes.fromhex(space.identity_public_key),
+                space_id=space.space_id,
+                epoch=epoch,
+                author_pk=author_pk,
+                # The real item type is hidden inside the ciphertext, so the
+                # weakest scope is all this server can require; receivers
+                # enforce the scope the real type needs.
+                required_scope=WRITER_SCOPE_COMMENT,
+            )
+        except (InvalidWriterCert, UnsupportedWriterCertSuite, ValueError) as exc:
+            raise PermissionError(f"writer cert refused: {exc}") from exc
+        await self._check_cert_epoch(space.space_id, epoch)
+
+    async def verify_writer_key_sig(
+        self,
+        space_id: str,
+        *,
+        epoch: int,
+        message: bytes,
+        writer_sig: str,
+        suite: str,
+    ) -> None:
+        """Strict-mode writer authorization: *writer_sig* (suite checked,
+        never defaulted) signs *message* under the writer group key pinned
+        for *epoch*. :class:`PermissionError` otherwise. The epoch's
+        freshness is :meth:`require_writer_key_epoch`."""
+        strict = await self._epoch_repo.get_strict(space_id)
+        pinned = strict.writer_pk_for(epoch) if strict is not None else None
+        if pinned is None:
+            raise PermissionError("no writer key pinned for this epoch")
+        try:
+            ok = verify_writer_sig(
+                writer_pk=b64url_decode(pinned),
+                message=message,
+                writer_sig=writer_sig,
+                suite=suite,
+            )
+        except (UnsupportedWriterKeySuite, ValueError) as exc:
+            raise PermissionError(f"writer signature refused: {exc}") from exc
+        if not ok:
+            raise PermissionError("writer signature does not verify")
+
+    async def require_writer_key_epoch(self, space_id: str, epoch: int) -> None:
+        """A writer key's *epoch* is open here (the current one, or the
+        previous one within the grace), else :class:`PermissionError`."""
+        state = await self._epoch_repo.get(space_id)
+        if state is None or not state.admits(
+            epoch, now=int(self._clock()), grace_s=MEMBER_PUBLISH_EPOCH_GRACE_S
+        ):
+            raise PermissionError("writer key epoch is not open here")
 
     def _check_anon_ts(self, ts: str) -> None:
         try:

@@ -96,6 +96,17 @@ AUTHORITY_EVENT_SPACE_SUBSCRIBERS_QUERY: str = "space_subscribers_query"
 AUTHORITY_EVENT_SPACE_EPOCH_NOTICE: str = "space_epoch_notice"
 
 
+#: Authority event-types for the space media cache on a GFS: a seed-holder
+#: signs ``{space_id, blob_id, size, expires_at, ts}`` to upload one encrypted
+#: blob (``PUT /gfs/spaces/{id}/media/{blob_id}``) and ``{space_id, blob_id,
+#: ts}`` to withdraw it (``POST …/delete``). The GFS verifies both against the
+#: space's TOFU-pinned key. Like the subscribers query these are NOT relays —
+#: kept out of ``AUTHORITY_RELAY_EVENT_TYPES``, so a media signature can never
+#: be fanned out and a relay payload can never authorize an upload.
+AUTHORITY_EVENT_SPACE_MEDIA_PUT: str = "space_media_put"
+AUTHORITY_EVENT_SPACE_MEDIA_DELETE: str = "space_media_delete"
+
+
 #: The set of event types the GFS will authorize on the space-authority relay
 #: path (a NON-owner seed-holder relaying content the GFS stays blind to). Both
 #: are space-authority-signed and content-blind to the GFS; anything else is

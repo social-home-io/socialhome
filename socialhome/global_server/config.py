@@ -15,7 +15,9 @@ Loaded with layered precedence:
    switch; ``GFS_PUBLIC_VIEWER_BASE_URL`` — the pinned viewer the public
    pages redirect to, empty for the pages this server renders itself;
    ``GFS_LANDING_SPACE_LIST`` — ``true``/``false``, whether ``GET /``
-   lists the active spaces)
+   lists the active spaces; ``GFS_SPACE_MEDIA_MAX_BYTES`` /
+   ``_TTL_SECONDS`` / ``_SPACE_MAX_BYTES`` / ``_SPACE_UPLOADS_PER_HOUR`` —
+   the ``[space_media]`` cache bounds)
    — override the matching ``[server]`` key when set, so an orchestrator can retarget a
    single value (e.g. a per-instance port) without rewriting the file.
    This mirrors :class:`socialhome.config.Config` (env > file > defaults).
@@ -67,6 +69,22 @@ DEFAULT_TURN_TTL_SECONDS: int = 600
 MIN_TURN_TTL_SECONDS: int = 60
 MAX_TURN_TTL_SECONDS: int = 86_400
 DEFAULT_CONFIG_FILENAME = "global_server.toml"
+
+#: ``[space_media]`` — the encrypted space media cache
+#: (:mod:`.space_media`). A cache, not storage: the operator sizes it to the
+#: disk they have. All ciphertext this server holds for spaces, in bytes;
+#: ``0`` turns the cache off (it is then not advertised).
+DEFAULT_SPACE_MEDIA_MAX_BYTES: int = 5 * 1024**3
+#: How long a blob is kept; an uploader's longer expiry is clamped to it.
+DEFAULT_SPACE_MEDIA_TTL_SECONDS: int = 3 * 86_400
+#: Bounds on ``ttl_seconds``: under 10 minutes a reader that comes back
+#: after a short sleep finds nothing; over a week it is storage, not a cache.
+MIN_SPACE_MEDIA_TTL_SECONDS: int = 600
+MAX_SPACE_MEDIA_TTL_SECONDS: int = 7 * 86_400
+#: Live ciphertext one space may hold (429 ``space_media_quota`` past it).
+DEFAULT_SPACE_MEDIA_SPACE_MAX_BYTES: int = 256 * 1024**2
+#: Blobs one space may upload per hour (429 past it).
+DEFAULT_SPACE_MEDIA_SPACE_UPLOADS_PER_HOUR: int = 300
 
 #: Peer networks whose ``X-Forwarded-For`` header the GFS believes by default:
 #: loopback, the RFC1918 private ranges and the IPv6 unique-local block. A GFS
@@ -199,6 +217,12 @@ class GfsConfig:
     #: node, or a balancer that cannot route by tag). 1-64 of ``A-Za-z0-9-``.
     cluster_route_tag: str = ""
 
+    # [space_media] — the encrypted space media cache (``GFS_SPACE_MEDIA_*``).
+    space_media_max_bytes: int = DEFAULT_SPACE_MEDIA_MAX_BYTES
+    space_media_ttl_seconds: int = DEFAULT_SPACE_MEDIA_TTL_SECONDS
+    space_media_space_max_bytes: int = DEFAULT_SPACE_MEDIA_SPACE_MAX_BYTES
+    space_media_space_uploads_per_hour: int = DEFAULT_SPACE_MEDIA_SPACE_UPLOADS_PER_HOUR
+
     # Loaded-from path, for audit + --set-password write-back.
     source_path: str = ""
 
@@ -230,6 +254,7 @@ class GfsConfig:
         admin = data.get("admin", {})
         webrtc = data.get("webrtc", {})
         cluster = data.get("cluster", {})
+        space_media = data.get("space_media", {})
         default_stun = ("stun:stun.l.google.com:19302",)
         cfg = cls(
             host=str(server.get("host") or "0.0.0.0"),
@@ -280,6 +305,23 @@ class GfsConfig:
                 server.get("public_viewer_base_url", PROJECT_PINNED_VIEWER_URL)
             ).strip(),
             landing_space_list=bool(server.get("landing_space_list", True)),
+            space_media_max_bytes=_space_media_max_bytes(
+                space_media.get("max_bytes", DEFAULT_SPACE_MEDIA_MAX_BYTES)
+            ),
+            space_media_ttl_seconds=_space_media_ttl(
+                space_media.get("ttl_seconds", DEFAULT_SPACE_MEDIA_TTL_SECONDS)
+            ),
+            space_media_space_max_bytes=_space_media_positive(
+                "space_max_bytes",
+                space_media.get("space_max_bytes", DEFAULT_SPACE_MEDIA_SPACE_MAX_BYTES),
+            ),
+            space_media_space_uploads_per_hour=_space_media_positive(
+                "space_uploads_per_hour",
+                space_media.get(
+                    "space_uploads_per_hour",
+                    DEFAULT_SPACE_MEDIA_SPACE_UPLOADS_PER_HOUR,
+                ),
+            ),
             source_path=str(p),
         )
         if not cfg.base_url:
@@ -456,6 +498,32 @@ class GfsConfig:
                 if "GFS_TURN_TTL_SECONDS" in env
                 else self.turn_ttl_seconds
             ),
+            # The cache is sized to the disk an orchestrator gives the alloc.
+            space_media_max_bytes=(
+                _space_media_max_bytes(env["GFS_SPACE_MEDIA_MAX_BYTES"])
+                if "GFS_SPACE_MEDIA_MAX_BYTES" in env
+                else self.space_media_max_bytes
+            ),
+            space_media_ttl_seconds=(
+                _space_media_ttl(env["GFS_SPACE_MEDIA_TTL_SECONDS"])
+                if "GFS_SPACE_MEDIA_TTL_SECONDS" in env
+                else self.space_media_ttl_seconds
+            ),
+            space_media_space_max_bytes=(
+                _space_media_positive(
+                    "space_max_bytes", env["GFS_SPACE_MEDIA_SPACE_MAX_BYTES"]
+                )
+                if "GFS_SPACE_MEDIA_SPACE_MAX_BYTES" in env
+                else self.space_media_space_max_bytes
+            ),
+            space_media_space_uploads_per_hour=(
+                _space_media_positive(
+                    "space_uploads_per_hour",
+                    env["GFS_SPACE_MEDIA_SPACE_UPLOADS_PER_HOUR"],
+                )
+                if "GFS_SPACE_MEDIA_SPACE_UPLOADS_PER_HOUR" in env
+                else self.space_media_space_uploads_per_hour
+            ),
         )._with_clean_aliases()
 
     @classmethod
@@ -570,6 +638,32 @@ def _window_ms(raw: int | str) -> int:
     value = int(raw)
     if value < 0:
         raise ValueError(f"write_batch_window_ms must be >= 0, got {value}")
+    return value
+
+
+def _space_media_max_bytes(raw: int | str) -> int:
+    """Parse ``[space_media] max_bytes``; ``0`` is off, negative an error."""
+    value = int(raw)
+    if value < 0:
+        raise ValueError(f"[space_media] max_bytes must be >= 0, got {value}")
+    return value
+
+
+def _space_media_ttl(raw: int | str) -> int:
+    """Parse ``[space_media] ttl_seconds`` (10 minutes – 7 days)."""
+    value = int(raw)
+    if not MIN_SPACE_MEDIA_TTL_SECONDS <= value <= MAX_SPACE_MEDIA_TTL_SECONDS:
+        raise ValueError(
+            f"[space_media] ttl_seconds must be {MIN_SPACE_MEDIA_TTL_SECONDS}.."
+            f"{MAX_SPACE_MEDIA_TTL_SECONDS}, got {value}"
+        )
+    return value
+
+
+def _space_media_positive(key: str, raw: int | str) -> int:
+    value = int(raw)
+    if value < 1:
+        raise ValueError(f"[space_media] {key} must be >= 1, got {value}")
     return value
 
 
@@ -727,6 +821,24 @@ advertise_url = ""
 # single node.
 route_tag = ""
 peers   = []
+
+[space_media]
+# A short-lived cache of encrypted space pictures and files (ciphertext this
+# server can't open), so households reached only through this server see a
+# space's pictures. A cache, not storage — size it to your disk:
+# max_bytes is all space media held here (0 turns the cache off and stops
+# advertising it); when an upload would pass it, the blobs fetched least
+# recently (then the oldest) are dropped first. Blobs expire after
+# ttl_seconds (600 – 604800) whatever the uploader asks. One space holds at
+# most space_max_bytes live and uploads at most space_uploads_per_hour blobs
+# an hour (429 past either). In a cluster every node shares data_dir, so any
+# node serves a blob another took. Env overrides: GFS_SPACE_MEDIA_MAX_BYTES,
+# GFS_SPACE_MEDIA_TTL_SECONDS, GFS_SPACE_MEDIA_SPACE_MAX_BYTES,
+# GFS_SPACE_MEDIA_SPACE_UPLOADS_PER_HOUR.
+max_bytes              = 5368709120   # 5 GiB
+ttl_seconds            = 259200       # 3 days
+space_max_bytes        = 268435456    # 256 MiB
+space_uploads_per_hour = 300
 """
 
 

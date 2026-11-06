@@ -41,6 +41,7 @@ from .domain import (
     GfsPendingDeleteCert,
     GfsQueuedEnvelope,
     GfsSpaceEpoch,
+    GfsSpaceMedia,
     GfsSpaceStrictState,
     GfsSubscriber,
     GfsSubscriberWithKeys,
@@ -2253,6 +2254,151 @@ class SqliteGfsMomentMediaRepo:
             (author_user_id,),
         )
         return [str(r["blob_id"]) for r in rows]
+
+
+# ─── Space media cache (GFS 0025) ──────────────────────────────────────
+
+
+@runtime_checkable
+class AbstractGfsSpaceMediaRepo(Protocol):
+    async def add(self, media: GfsSpaceMedia) -> bool: ...
+    async def get(self, blob_id: str) -> GfsSpaceMedia | None: ...
+    async def get_servable(self, blob_id: str, *, now: int) -> GfsSpaceMedia | None: ...
+    async def space_usage(
+        self, space_id: str, *, now: int, since: int
+    ) -> tuple[int, int]: ...
+    async def totals(self) -> tuple[int, int]: ...
+    async def least_recently_fetched(self, *, limit: int) -> list[GfsSpaceMedia]: ...
+    async def touch(self, blob_id: str, *, now: int, min_interval: int) -> bool: ...
+    async def delete(self, blob_id: str, *, space_id: str) -> int: ...
+    async def expired(self, now: int, *, limit: int) -> list[str]: ...
+    async def delete_ids(self, blob_ids: list[str]) -> int: ...
+
+
+_SPACE_MEDIA_COLS = "blob_id, space_id, size, created_at, expires_at, last_fetched_at"
+
+
+class SqliteGfsSpaceMediaRepo:
+    """Space media cache metadata (GFS 0025) — the bytes are files."""
+
+    def __init__(self, db: AsyncDatabase) -> None:
+        self._db = db
+
+    async def add(self, media: GfsSpaceMedia) -> bool:
+        """Insert; ``False`` when the blob is already held (another node or
+        a retry took it first)."""
+        changed = await self._db.enqueue_rowcount(
+            f"INSERT OR IGNORE INTO gfs_space_media({_SPACE_MEDIA_COLS})"
+            " VALUES(?,?,?,?,?,?)",
+            (
+                media.blob_id,
+                media.space_id,
+                media.size,
+                media.created_at,
+                media.expires_at,
+                media.last_fetched_at,
+            ),
+        )
+        return changed > 0
+
+    async def get(self, blob_id: str) -> GfsSpaceMedia | None:
+        row = await self._db.fetchone(
+            f"SELECT {_SPACE_MEDIA_COLS} FROM gfs_space_media WHERE blob_id=?",
+            (blob_id,),
+        )
+        return _space_media(row) if row is not None else None
+
+    async def get_servable(self, blob_id: str, *, now: int) -> GfsSpaceMedia | None:
+        """The blob's row while it may be served: not expired, and its space
+        not moderator-banned (one indexed join, no second read). A space
+        that is no longer listed keeps its blobs for their short TTL."""
+        row = await self._db.fetchone(
+            "SELECT m.blob_id, m.space_id, m.size, m.created_at, m.expires_at,"
+            " m.last_fetched_at FROM gfs_space_media m"
+            " LEFT JOIN global_spaces s ON s.space_id = m.space_id"
+            " WHERE m.blob_id=? AND m.expires_at > ?"
+            " AND COALESCE(s.status, '') != 'banned'",
+            (blob_id, now),
+        )
+        return _space_media(row) if row is not None else None
+
+    async def space_usage(
+        self, space_id: str, *, now: int, since: int
+    ) -> tuple[int, int]:
+        """``(live bytes, blobs uploaded since *since*)`` of one space."""
+        row = await self._db.fetchone(
+            "SELECT COALESCE(SUM(CASE WHEN expires_at > ? THEN size ELSE 0 END), 0)"
+            " AS live,"
+            " COALESCE(SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END), 0) AS recent"
+            " FROM gfs_space_media WHERE space_id=?",
+            (now, since, space_id),
+        )
+        if row is None:  # pragma: no cover - an aggregate always has a row
+            return 0, 0
+        return int(row["live"]), int(row["recent"])
+
+    async def totals(self) -> tuple[int, int]:
+        """``(blobs, bytes)`` held — expired ones until the sweep drops them
+        (their files are still on disk)."""
+        row = await self._db.fetchone(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(size), 0) AS bytes FROM gfs_space_media"
+        )
+        if row is None:  # pragma: no cover - an aggregate always has a row
+            return 0, 0
+        return int(row["n"]), int(row["bytes"])
+
+    async def least_recently_fetched(self, *, limit: int) -> list[GfsSpaceMedia]:
+        """Eviction candidates: least recently fetched first, then oldest."""
+        rows = await self._db.fetchall(
+            f"SELECT {_SPACE_MEDIA_COLS} FROM gfs_space_media"
+            " ORDER BY last_fetched_at, created_at LIMIT ?",
+            (limit,),
+        )
+        return [_space_media(r) for r in rows]
+
+    async def touch(self, blob_id: str, *, now: int, min_interval: int) -> bool:
+        """Mark a fetch — only when the last mark is *min_interval* old, so a
+        popular blob costs one write an hour, not one per fetch."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE gfs_space_media SET last_fetched_at=?"
+            " WHERE blob_id=? AND last_fetched_at <= ?",
+            (now, blob_id, now - min_interval),
+        )
+        return changed > 0
+
+    async def delete(self, blob_id: str, *, space_id: str) -> int:
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM gfs_space_media WHERE blob_id=? AND space_id=?",
+            (blob_id, space_id),
+        )
+
+    async def expired(self, now: int, *, limit: int) -> list[str]:
+        rows = await self._db.fetchall(
+            "SELECT blob_id FROM gfs_space_media WHERE expires_at <= ?"
+            " ORDER BY expires_at LIMIT ?",
+            (now, limit),
+        )
+        return [str(r["blob_id"]) for r in rows]
+
+    async def delete_ids(self, blob_ids: list[str]) -> int:
+        if not blob_ids:
+            return 0
+        marks = ",".join("?" for _ in blob_ids)
+        return await self._db.enqueue_rowcount(
+            f"DELETE FROM gfs_space_media WHERE blob_id IN ({marks})",
+            tuple(blob_ids),
+        )
+
+
+def _space_media(row) -> GfsSpaceMedia:
+    return GfsSpaceMedia(
+        blob_id=row["blob_id"],
+        space_id=row["space_id"],
+        size=int(row["size"]),
+        created_at=int(row["created_at"]),
+        expires_at=int(row["expires_at"]),
+        last_fetched_at=int(row["last_fetched_at"]),
+    )
 
 
 # ─── Moment delete certificates (v_66) ───────────────────────────────────

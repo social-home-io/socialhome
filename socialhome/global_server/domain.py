@@ -345,6 +345,22 @@ class GfsMomentMedia:
 
 
 @dataclass(slots=True, frozen=True)
+class GfsSpaceMedia:
+    """One encrypted blob in the space media cache (GFS migration 0025).
+    The bytes are a file named ``blob_id`` under ``media_dir/spaces``; this
+    server can't open them. A cache entry: it expires, and it may be evicted
+    least-recently-fetched first when the operator's byte cap is reached."""
+
+    blob_id: str
+    space_id: str
+    size: int
+    created_at: int
+    expires_at: int
+    #: Last fetch (the upload counts as one), moved at most once an hour.
+    last_fetched_at: int
+
+
+@dataclass(slots=True, frozen=True)
 class GfsPendingDeleteCert:
     """One signed moment delete certificate still owed to a follower
     household (v_66), as the reconnect push reads it.
