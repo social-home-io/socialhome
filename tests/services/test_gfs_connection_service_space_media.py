@@ -281,3 +281,48 @@ async def test_a_channel_upload_goes_to_the_channel_route(env):
         )
         is None
     )
+
+
+class _ChunkedContent:
+    """Like aiohttp's StreamReader: ``read(n)`` returns at most one chunk."""
+
+    def __init__(self, raw: bytes, chunk: int = 1000):
+        self._raw = raw
+        self._chunk = chunk
+
+    async def read(self, n: int = -1) -> bytes:
+        size = self._chunk if n < 0 else min(n, self._chunk)
+        out, self._raw = self._raw[:size], self._raw[size:]
+        return out
+
+
+async def test_fetch_reads_a_body_that_arrives_in_chunks(env):
+    """Regression (federation demo): a 1 MiB blob arrives in many chunks;
+    one ``read(n)`` returned only the first, the hash check refused it."""
+    blob = bytes(range(256)) * 40  # 10 240 bytes, 11 chunks of 1000
+    session = _MediaSession(blob=blob)
+    svc = await _svc(env, session)
+    orig_get = session.get
+
+    def _get(url, **kw):
+        resp = orig_get(url, **kw)
+        resp.content = _ChunkedContent(blob)
+        return resp
+
+    session.get = _get
+    got = await svc.fetch_space_media(
+        "https://g1.example", BID, max_bytes=len(blob), timeout_s=5
+    )
+    assert got == blob
+    session.get = lambda url, **kw: _chunked_resp(orig_get(url, **kw), blob + b"x")
+    assert (
+        await svc.fetch_space_media(
+            "https://g1.example", BID, max_bytes=len(blob), timeout_s=5
+        )
+        is None
+    )
+
+
+def _chunked_resp(resp, raw: bytes):
+    resp.content = _ChunkedContent(raw)
+    return resp

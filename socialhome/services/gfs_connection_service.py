@@ -3371,7 +3371,17 @@ class GfsConnectionService:
             ) as resp:
                 if resp.status != 200:
                     return None
-                data = await resp.content.read(max_bytes + 1)
+                # ``read(n)`` returns at most one chunk: read until EOF, but
+                # never buffer more than one byte past the bound.
+                parts: list[bytes] = []
+                held = 0
+                while held <= max_bytes:
+                    part = await resp.content.read(max_bytes + 1 - held)
+                    if not part:
+                        break
+                    parts.append(part)
+                    held += len(part)
+                data = b"".join(parts)
         except (aiohttp.ClientError, TimeoutError) as exc:
             log.warning("space media fetch from %s failed: %s", base_url, exc)
             return None
