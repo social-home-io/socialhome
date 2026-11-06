@@ -699,3 +699,16 @@ async def test_space_blobs_are_not_served_by_the_public_media_mount(gfs, tmp_dir
     assert (await gfs.get(f"/media/spaces/{blob_id_of(data)}")).status == 404
     assert not (tmp_dir / "media" / "spaces" / blob_id_of(data)).exists()
     assert (tmp_dir / "space_media" / blob_id_of(data)).exists()
+
+
+# ── Security review F5: a captured delete can't be replayed ──────────────
+
+
+async def test_a_replayed_delete_is_the_uniform_403(gfs):
+    data = os.urandom(SMALL)
+    await gfs.put(_put_url(data), data=data, headers=_authority_header(_claim(data)))
+    body = _delete_body(data)
+    assert (await gfs.post(_put_url(data) + "/delete", json=body)).status == 200
+    r = await gfs.post(_put_url(data) + "/delete", json=body)
+    assert r.status == 403
+    assert await r.json() == _REFUSED

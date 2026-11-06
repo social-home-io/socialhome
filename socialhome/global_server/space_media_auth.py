@@ -38,8 +38,11 @@ the blob is content-addressed, so it is the same bytes again (a no-op), or
 lands on another GFS serving the same scope, inside that scope's caps there.
 
 A delete is the scope's seed holder's alone: the space authority
-(``space_media_delete``) or the channel key. Every refusal is a
-:class:`PermissionError`; the route answers all of them with one uniform 403.
+(``space_media_delete``) or the channel key. A delete is taken ONCE: an
+exact replay inside the ±300 s window is refused (a seen-digest cache, per
+node — the store's tombstone makes a replay to another node a no-op).
+Every refusal is a :class:`PermissionError`; the route answers all of them
+with one uniform 403.
 """
 
 from __future__ import annotations
@@ -71,7 +74,11 @@ from ..domain.gfs_space_media import (
     media_delete_payload,
     require_space_media_sig_suite,
 )
-from .federation import TIMING_UNIFORM_DUMMY_KEY_HEX, TIMING_UNIFORM_DUMMY_SIG
+from .federation import (
+    TIMING_UNIFORM_DUMMY_KEY_HEX,
+    TIMING_UNIFORM_DUMMY_SIG,
+    SeenPayloadCache,
+)
 from .public import ClientIpResolver, SlidingWindowCounter, node_share
 
 if TYPE_CHECKING:
@@ -108,7 +115,13 @@ SPACE_MEDIA_TS_SKEW_S: int = 300
 class GfsSpaceMediaAuth:
     """Authorize uploads to and deletes from the space media cache."""
 
-    __slots__ = ("_channels", "_clock", "_federation", "_member_publish")
+    __slots__ = (
+        "_channels",
+        "_clock",
+        "_deletes_seen",
+        "_federation",
+        "_member_publish",
+    )
 
     def __init__(
         self,
@@ -122,6 +135,9 @@ class GfsSpaceMediaAuth:
         self._member_publish = member_publish
         self._channels = channels
         self._clock = clock
+        #: Deletes already taken (their signed bytes' digest), for the
+        #: skew window on both sides.
+        self._deletes_seen = SeenPayloadCache(ttl_s=float(2 * SPACE_MEDIA_TS_SKEW_S))
 
     async def authorize_upload(
         self,
@@ -282,6 +298,15 @@ class GfsSpaceMediaAuth:
             )
         else:
             raise PermissionError("unknown scope")
+        # Checked after the signature verified, so a replay costs what a
+        # success does (one verification) and an unverified body can't
+        # poison the cache. Keyed on the signed payload alone (scope, blob,
+        # ts) — never on the signature's text, which another encoding of
+        # the same bytes could vary.
+        seen = self._deletes_seen.digest(payload)
+        if self._deletes_seen.seen(seen):
+            raise PermissionError("replayed delete")
+        self._deletes_seen.record(seen)
 
     @staticmethod
     def _cert_holder(

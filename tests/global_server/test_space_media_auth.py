@@ -492,6 +492,22 @@ async def test_the_scope_seed_holder_may_delete(env):
     )
 
 
+async def test_a_replayed_delete_is_refused_at_one_verification(env):
+    """Security review F5: a captured delete replayed inside the ±300 s
+    window is refused (it could otherwise drop a claim the scope made again
+    since) — after its signature verified, so it costs what a success does."""
+    auth, _, _ = env
+    sig = _space_delete_sig(NOW)
+    await auth.authorize_delete(SCOPE_SPACE, SPACE, BID, ts=NOW, **sig)
+    with counting_ed25519_verifies() as done, pytest.raises(PermissionError):
+        await auth.authorize_delete(SCOPE_SPACE, SPACE, BID, ts=NOW, **sig)
+    assert done[0] == 1
+    # A fresh one (another ts) still goes through.
+    await auth.authorize_delete(
+        SCOPE_SPACE, SPACE, BID, ts=NOW + 1, **_space_delete_sig(NOW + 1)
+    )
+
+
 @pytest.mark.parametrize(
     "case",
     ["stale", "wrong_key", "other_blob", "bad_ts", "bad_sig", "channel_key", "scope"],
