@@ -17,7 +17,6 @@ from socialhome.global_server.domain import (
     GfsMomentFollow,
     GfsMomentKeyMail,
     GfsSpaceMedia,
-    GfsSpaceMediaClaim,
     GfsSubscriberWithKeys,
     GfsUserRegistration,
     GlobalSpace,
@@ -1672,26 +1671,28 @@ async def test_add_subscriber_says_whether_it_created_the_seat(fed):
 # ── Space media cache (GFS 0025) ──────────────────────────────────────
 
 
-def _media_blob(n: int, *, size=100, created=1_000, expires=5_000, fetched=None):
+def _media_blob(
+    n: int,
+    *,
+    size=100,
+    created=1_000,
+    expires=5_000,
+    fetched=None,
+    space="s1",
+    kind="space",
+    household="h1",
+    owner_kind="household",
+):
     return GfsSpaceMedia(
         blob_id=f"{n:064x}",
         size=size,
         created_at=created,
         expires_at=expires,
         last_fetched_at=created if fetched is None else fetched,
-    )
-
-
-def _media_claim(
-    n: int, *, space="s1", kind="space", size=100, created=1_000, expires=5_000
-):
-    return GfsSpaceMediaClaim(
-        blob_id=f"{n:064x}",
         scope_kind=kind,
         scope_id=space,
-        size=size,
-        created_at=created,
-        expires_at=expires,
+        owner_kind=owner_kind,
+        owner_id=household,
     )
 
 
@@ -1700,71 +1701,31 @@ async def space_media(gfs_db):
     return SqliteGfsSpaceMediaRepo(gfs_db)
 
 
-async def _held_blob(repo, n, *, space="s1", kind="space", **kw):
-    await repo.add_blob(_media_blob(n, **kw))
-    await repo.put_claim(
-        _media_claim(
-            n,
-            space=space,
-            kind=kind,
-            size=kw.get("size", 100),
-            created=kw.get("created", 1_000),
-            expires=kw.get("expires", 5_000),
-        )
-    )
-
-
 async def test_space_media_add_blob_is_insert_or_ignore(space_media):
     assert await space_media.add_blob(_media_blob(1)) is True
-    assert await space_media.add_blob(_media_blob(1, size=999)) is False
-    assert await space_media.get_blob(f"{1:064x}") == _media_blob(1)
+    assert await space_media.add_blob(_media_blob(1, space="other")) is False
+    got = await space_media.get_blob(f"{1:064x}")
+    assert (got.scope_kind, got.scope_id, got.size) == ("space", "s1", 100)
     assert await space_media.get_blob(f"{2:064x}") is None
 
 
-async def test_space_media_totals_are_trigger_kept(space_media):
-    assert await space_media.totals() == (0, 0)
+async def test_space_media_totals_and_scope_bytes_are_trigger_kept(space_media):
     await space_media.add_blob(_media_blob(1, size=100))
     await space_media.add_blob(_media_blob(2, size=300))
-    assert await space_media.totals() == (2, 400)
-    assert await space_media.delete_blobs([f"{1:064x}"]) == 1
-    assert await space_media.totals() == (1, 300)
-
-
-async def test_space_media_claims_raise_never_lower_the_expiry(space_media):
-    await space_media.add_blob(_media_blob(1, expires=5_000))
-    await space_media.put_claim(_media_claim(1, space="a", expires=5_000))
-    await space_media.put_claim(_media_claim(1, space="b", expires=9_000))
-    await space_media.put_claim(_media_claim(1, space="c", expires=2_000))
-    assert (await space_media.get_blob(f"{1:064x}")).expires_at == 9_000
-    assert [c.scope_id for c in await space_media.claims_of(f"{1:064x}")] == [
-        "a",
-        "b",
-        "c",
+    await space_media.add_blob(_media_blob(3, size=50, space="c1", kind="channel"))
+    assert await space_media.totals() == (3, 450)
+    assert await space_media.scope_bytes("space", "s1") == 400
+    assert await space_media.scope_bytes("channel", "c1") == 50
+    assert await space_media.largest_scopes(limit=5) == [
+        ("space", "s1", 400),
+        ("channel", "c1", 50),
     ]
-    # Re-putting a scope's claim replaces it.
-    await space_media.put_claim(_media_claim(1, space="a", expires=7_000))
-    claims = {
-        c.scope_id: c.expires_at for c in await space_media.claims_of(f"{1:064x}")
-    }
-    assert claims == {"a": 7_000, "b": 9_000, "c": 2_000}
+    assert await space_media.delete_blobs([f"{1:064x}", f"{9:064x}"]) == [f"{1:064x}"]
+    assert await space_media.totals() == (2, 350)
+    assert await space_media.scope_bytes("space", "s1") == 300
 
 
-async def test_space_media_settle_follows_the_claims_left(space_media):
-    bid = f"{1:064x}"
-    await space_media.add_blob(_media_blob(1, expires=9_000))
-    await space_media.put_claim(_media_claim(1, space="a", expires=4_000))
-    await space_media.put_claim(_media_claim(1, space="b", expires=9_000))
-    assert await space_media.delete_claim(bid, scope_kind="space", scope_id="b") == 1
-    assert await space_media.settle_blob(bid) == 4_000
-    assert (await space_media.get_blob(bid)).expires_at == 4_000
-    assert await space_media.delete_claim(bid, scope_kind="channel", scope_id="a") == 0
-    await space_media.delete_claim(bid, scope_kind="space", scope_id="a")
-    assert await space_media.settle_blob(bid) is None
-
-
-async def test_space_media_servable_needs_a_live_claim_of_a_good_scope(
-    space_media, fed
-):
+async def test_space_media_servable_unless_expired_or_banned(space_media, fed):
     await fed.upsert_instance(
         ClientInstance(instance_id="o", display_name="O", public_key="aa" * 32)
     )
@@ -1774,65 +1735,90 @@ async def test_space_media_servable_needs_a_live_claim_of_a_good_scope(
     await fed.upsert_space(
         GlobalSpace(space_id="bad", owning_instance="o", status="banned")
     )
-    await _held_blob(space_media, 1, space="ok")
-    await _held_blob(space_media, 2, space="bad")
-    await _held_blob(space_media, 3, space="ok", expires=1_500)
-    await _held_blob(space_media, 4, space="gone")
+    await space_media.add_blob(_media_blob(1, space="ok"))
+    await space_media.add_blob(_media_blob(2, space="bad"))
+    await space_media.add_blob(_media_blob(3, space="ok", expires=1_500))
+    await space_media.add_blob(_media_blob(4, space="gone"))
     # A channel whose id happens to equal a banned space id is not that space.
-    await _held_blob(space_media, 5, space="bad", kind="channel")
-    # Banned space AND a good one: served.
-    await _held_blob(space_media, 6, space="bad")
-    await space_media.put_claim(_media_claim(6, space="ok"))
+    await space_media.add_blob(_media_blob(5, space="bad", kind="channel"))
     assert await space_media.get_servable(f"{1:064x}", now=2_000) is not None
     assert await space_media.get_servable(f"{2:064x}", now=2_000) is None
     assert await space_media.get_servable(f"{3:064x}", now=2_000) is None
     assert await space_media.get_servable(f"{4:064x}", now=2_000) is not None
     assert await space_media.get_servable(f"{5:064x}", now=2_000) is not None
-    assert await space_media.get_servable(f"{6:064x}", now=2_000) is not None
 
 
-async def test_space_media_scope_usage_and_lru(space_media):
-    await _held_blob(space_media, 1, size=100, created=100, fetched=900)
-    await _held_blob(space_media, 2, size=200, created=300, fetched=300)
-    await _held_blob(space_media, 3, size=400, created=200, fetched=300)
-    await _held_blob(space_media, 4, size=800, expires=1_000)  # expired claim
-    await _held_blob(space_media, 5, size=1600, kind="channel")
-    assert await space_media.scope_usage("space", "s1", now=2_000) == 700
-    assert await space_media.scope_usage("channel", "s1", now=2_000) == 1600
-    lru = await space_media.scope_lru("space", "s1", now=2_000, limit=10)
-    assert [c.blob_id for c in lru] == [f"{3:064x}", f"{2:064x}", f"{1:064x}"]
+async def test_space_media_a_delete_takes_only_the_scopes_blob(space_media):
+    await space_media.add_blob(_media_blob(1, space="s1"))
+    bid = f"{1:064x}"
+    assert (
+        await space_media.delete_scope_blob(bid, scope_kind="space", scope_id="s2")
+        is False
+    )
+    assert (
+        await space_media.delete_scope_blob(bid, scope_kind="channel", scope_id="s1")
+        is False
+    )
+    assert (
+        await space_media.delete_scope_blob(bid, scope_kind="space", scope_id="s1")
+        is True
+    )
+    assert await space_media.get_blob(bid) is None
 
 
-async def test_space_media_global_lru_order(space_media):
-    await space_media.add_blob(_media_blob(1, created=100, fetched=900))
-    await space_media.add_blob(_media_blob(2, created=300, fetched=300))
-    await space_media.add_blob(_media_blob(3, created=200, fetched=300))
-    got = [m.blob_id for m in await space_media.least_recently_fetched(limit=2)]
-    assert got == [f"{3:064x}", f"{2:064x}"]
+async def test_space_media_owner_bytes_and_lru(space_media):
+    """Fairness reads per-owner bytes across scopes — a household's spaces
+    (third review A3), a client bucket's channel blobs (fourth review G1)."""
+    await space_media.add_blob(_media_blob(1, space="a", household="h1", fetched=300))
+    await space_media.add_blob(_media_blob(2, space="b", household="h1", fetched=100))
+    await space_media.add_blob(
+        _media_blob(3, space="c", household="k9", owner_kind="client", size=150)
+    )
+    assert await space_media.owner_bytes("household", "h1") == 200
+    assert await space_media.owner_bytes("client", "h1") == 0
+    assert await space_media.largest_owners(limit=5) == [
+        ("household", "h1", 200),
+        ("client", "k9", 150),
+    ]
+    assert [
+        m.blob_id for m in await space_media.owner_lru("household", "h1", limit=5)
+    ] == [f"{2:064x}", f"{1:064x}"]
+    got = await space_media.get_blob(f"{3:064x}")
+    assert (got.owner_kind, got.owner_id) == ("client", "k9")
+
+
+async def test_space_media_scope_lru_and_blob_ids(space_media):
+    await space_media.add_blob(_media_blob(1, fetched=300))
+    await space_media.add_blob(_media_blob(2, fetched=100))
+    await space_media.add_blob(_media_blob(3, fetched=200, space="s2"))
+    assert [m.blob_id for m in await space_media.scope_lru("space", "s1", limit=5)] == [
+        f"{2:064x}",
+        f"{1:064x}",
+    ]
+    assert sorted(await space_media.scope_blob_ids("space", "s1")) == [
+        f"{1:064x}",
+        f"{2:064x}",
+    ]
 
 
 async def test_space_media_touch_is_throttled(space_media):
     await space_media.add_blob(_media_blob(1, created=1_000))
-    bid = f"{1:064x}"
-    assert await space_media.touch(bid, now=1_500, min_interval=3_600) is False
-    assert await space_media.touch(bid, now=4_600, min_interval=3_600) is True
-    assert (await space_media.get_blob(bid)).last_fetched_at == 4_600
+    assert await space_media.touch(f"{1:064x}", now=1_500, min_interval=3600) is False
+    assert await space_media.touch(f"{1:064x}", now=4_700, min_interval=3600) is True
+    assert (await space_media.get_blob(f"{1:064x}")).last_fetched_at == 4_700
 
 
-async def test_space_media_expiry_and_delete(space_media):
-    await _held_blob(space_media, 1, expires=100)
-    await _held_blob(space_media, 2, expires=50)
-    await _held_blob(space_media, 3, expires=9_000)
-    await space_media.put_claim(_media_claim(3, space="old", expires=60))
-    got = [m.blob_id for m in await space_media.expired(200, limit=10)]
-    assert got == [f"{2:064x}", f"{1:064x}"]
-    assert await space_media.delete_blobs([]) == 0
-    assert await space_media.delete_blobs([f"{1:064x}", f"{2:064x}"]) == 2
-    assert await space_media.claims_of(f"{1:064x}") == []
-    assert await space_media.prune_expired_claims(200) == 1
-    assert [c.scope_id for c in await space_media.claims_of(f"{3:064x}")] == ["s1"]
-    assert await space_media.known_blob_ids([f"{3:064x}", f"{1:064x}"]) == {f"{3:064x}"}
+async def test_space_media_expired_and_known(space_media):
+    await space_media.add_blob(_media_blob(1, expires=150))
+    await space_media.add_blob(_media_blob(2, expires=100))
+    await space_media.add_blob(_media_blob(3, expires=900))
+    assert [m.blob_id for m in await space_media.expired(200, limit=10)] == [
+        f"{2:064x}",
+        f"{1:064x}",
+    ]
     assert await space_media.known_blob_ids([]) == set()
+    assert await space_media.known_blob_ids([f"{3:064x}", f"{9:064x}"]) == {f"{3:064x}"}
+    assert await space_media.delete_blobs([]) == []
 
 
 async def test_space_media_upload_counts(space_media):
@@ -1862,29 +1848,15 @@ async def test_space_media_reserve_upload_is_atomic_and_refundable(space_media):
     assert await space_media.upload_counts("space", "s1", bucket=10) == (0, 0)
 
 
-async def test_space_media_put_claim_says_whether_the_blob_row_is_there(space_media):
-    await space_media.add_blob(_media_blob(1))
-    assert await space_media.put_claim(_media_claim(1)) is True
-    # The row went (another node dropped it): the claim lands, the answer
-    # tells the caller to store the blob again.
-    assert await space_media.put_claim(_media_claim(2)) is False
-
-
-async def test_space_media_blob_row_goes_only_without_claims(space_media):
-    bid = f"{1:064x}"
-    await _held_blob(space_media, 1)
-    assert await space_media.delete_blob_if_unclaimed(bid) is False
-    await space_media.delete_claim(bid, scope_kind="space", scope_id="s1")
-    assert await space_media.delete_blob_if_unclaimed(bid) is True
-    assert await space_media.delete_blob_if_unclaimed(bid) is False
-
-
-async def test_space_media_a_claim_without_its_blob_holds_no_budget(space_media):
-    await space_media.put_claim(_media_claim(1, size=500))
-    await _held_blob(space_media, 2, size=100)
-    assert await space_media.scope_usage("space", "s1", now=2_000) == 100
-    assert await space_media.prune_orphan_claims() == 1
-    assert await space_media.claims_of(f"{1:064x}") == []
+async def test_space_media_ip_bytes_are_atomic_and_refundable(space_media):
+    assert await space_media.reserve_ip_bytes("k", bucket=10, size=60, cap=100)
+    assert not await space_media.reserve_ip_bytes("k", bucket=10, size=60, cap=100)
+    assert not await space_media.reserve_ip_bytes("k", bucket=10, size=200, cap=100)
+    assert await space_media.reserve_ip_bytes("k", bucket=9, size=5, cap=100)
+    assert await space_media.ip_bytes("k", bucket=10) == (60, 5)
+    await space_media.refund_ip_bytes("k", bucket=10, size=100)
+    assert await space_media.ip_bytes("k", bucket=10) == (0, 5)
+    assert await space_media.prune_ip_bytes(before_bucket=10) == 1
 
 
 async def test_space_media_sweep_lease_and_cursor(space_media):

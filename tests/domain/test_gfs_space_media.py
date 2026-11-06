@@ -17,6 +17,7 @@ from socialhome.authority_sig import (
 from socialhome.canonical_json import canonical_bytes
 from socialhome.domain.gfs_channel import ChannelCert
 from socialhome.domain.gfs_space_media import (
+    ADDR_SUITE_SM1,
     AUTH_AUTHORITY,
     AUTH_CHANNEL,
     AUTH_CHANNEL_CERT,
@@ -28,13 +29,16 @@ from socialhome.domain.gfs_space_media import (
     SPACE_MEDIA_AUTH_MAX_CHARS,
     SPACE_MEDIA_SIG_SUITE_ED25519,
     SPACE_MEDIA_WRITER_PREFIX,
+    SUPPORTED_ADDR_SUITES,
     SUPPORTED_SPACE_MEDIA_SIG_SUITES,
     InvalidSpaceMediaAuth,
     SpaceMediaClaim,
     SpaceMediaUploadAuth,
+    UnsupportedSpaceMediaAddrSuite,
     UnsupportedSpaceMediaSigSuite,
     media_delete_payload,
     require_space_media_sig_suite,
+    space_media_address,
 )
 from socialhome.domain.writer_cert import WriterCert
 from socialhome.moment_public_media import MAX_BLOB_BYTES
@@ -83,15 +87,65 @@ def _b64(obj: dict) -> str:
     return base64.urlsafe_b64encode(orjson.dumps(obj)).rstrip(b"=").decode()
 
 
-def test_claim_signing_body_is_exactly_the_six_fields():
+def test_claim_signing_body_is_exactly_the_seven_fields():
     assert CLAIM.signing_body() == {
         "scope": "space",
         "scope_id": "sp-1",
         "blob_id": BID,
+        "addr_suite": "sm1",
         "size": 65_564,
         "expires_at": 2_000_000,
         "ts": 1_000_000,
     }
+
+
+# ── The scope-bound address (security review v2, N1) ─────────────────────
+
+_VECTOR_DATA = bytes(range(256)) * 4
+
+
+def test_the_address_binds_the_scope_test_vector():
+    """``sm1``: sha256(b"sm1|" + scope_kind + b"|" + scope_id + b"|" +
+    ciphertext), lowercase hex — fixed vectors so the household side and
+    every GFS compute the same address."""
+    assert ADDR_SUITE_SM1 in SUPPORTED_ADDR_SUITES
+    assert (
+        space_media_address(SCOPE_SPACE, "sp-1", _VECTOR_DATA)
+        == "fe35c777105b74f679173afe164a669ef5695c2e52429f0800ba17e68ed008ef"
+    )
+    assert (
+        space_media_address(SCOPE_CHANNEL, CHANNEL, _VECTOR_DATA)
+        == "c6a7b3c167834828c3723e3cbc13baee245cc6cc558ae369e0f274fe3621e2bf"
+    )
+
+
+def test_the_same_ciphertext_has_another_address_in_another_scope():
+    a = space_media_address(SCOPE_SPACE, "sp-1", _VECTOR_DATA)
+    assert a != space_media_address(SCOPE_SPACE, "sp-2", _VECTOR_DATA)
+    assert a != space_media_address(SCOPE_CHANNEL, CHANNEL, _VECTOR_DATA)
+
+
+@pytest.mark.parametrize(
+    ("kind", "sid", "suite"),
+    [
+        ("room", "sp-1", "sm1"),
+        ("space", "a|b", "sm1"),
+        ("space", "", "sm1"),
+        ("space", "sp-1", "sm2"),
+    ],
+)
+def test_an_address_needs_a_known_suite_and_an_unambiguous_scope(kind, sid, suite):
+    with pytest.raises((ValueError, UnsupportedSpaceMediaAddrSuite)):
+        space_media_address(kind, sid, b"x", suite=suite)
+
+
+def test_an_unknown_address_suite_in_a_header_is_refused():
+    with pytest.raises(InvalidSpaceMediaAuth):
+        SpaceMediaUploadAuth.from_header(_b64(_wire(addr_suite="sm2")))
+    with pytest.raises(InvalidSpaceMediaAuth):
+        SpaceMediaUploadAuth.from_header(
+            _b64({k: v for k, v in _wire().items() if k != "addr_suite"})
+        )
 
 
 def test_authority_kind_signs_the_claim_under_the_put_event_type():

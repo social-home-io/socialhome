@@ -1876,8 +1876,14 @@ class GfsFederationService:
         # owner's to declare. Only the owner's name / description /
         # cover travel with the publish.
         next_status = "active" if inst.auto_accept else "pending"
-        if existing is not None and existing.status == "banned":
-            next_status = "banned"
+        if existing is not None and existing.status in ("banned", "active"):
+            # A moderator's decision sticks: a ban stays a ban, and an
+            # accepted space stays accepted — a routine re-publish must not
+            # demote it to pending (its media uploads would all be 403; a
+            # GFS that doesn't auto-accept relies on this, fourth review G2).
+            # Only a NEW row (or one still pending) starts from the
+            # household's auto-accept setting.
+            next_status = existing.status
         # Never trust the wire: an unknown / missing value is stored as the
         # fail-closed ``invite_only`` rather than verbatim.
         normalized_join_mode = normalize_join_mode(join_mode)

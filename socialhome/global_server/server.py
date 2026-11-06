@@ -22,6 +22,7 @@ Console-script entry point: ``socialhome-global-server``. Sub-commands:
 from __future__ import annotations
 
 import getpass
+import hashlib
 import logging
 import os
 import secrets
@@ -353,13 +354,20 @@ class GfsApp:
             mint_limiter=SlidingWindowCounter(INVITE_MINT_MAX_PER_MINUTE),
         )
         # The encrypted, short-lived space media cache: files under the
-        # SHARED data dir (``media_dir/spaces``), rows in the shared DB — any
-        # node serves what another took.
+        # SHARED data dir (``space_media/`` — beside, never under, the public
+        # ``media/`` branding dir), rows in the shared DB — any node serves
+        # what another took.
         space_media = GfsSpaceMediaStore(
             repos.space_media,
-            FsBlobFiles(Path(config.media_dir) / "spaces"),
+            FsBlobFiles(Path(config.data_dir) / "space_media"),
             SpaceMediaLimits.from_config(config),
             node_id=config.cluster_node_id or config.instance_id,
+            # Keys the per-address byte budget's hash: the cluster shares the
+            # signing seed, so every node hashes an address alike — and the
+            # database never holds one.
+            ip_key_secret=hashlib.blake2b(
+                self.signing_seed, person=b"gfs-sm-ip-key", digest_size=32
+            ).digest(),
         )
         admin = GfsAdminService(
             fed_repo=repos.federation,
@@ -516,7 +524,9 @@ class GfsApp:
         # Uploads to the space media cache are authorized by the same checks
         # as ``/gfs/publish`` and the member publishes — no new key.
         space_media_auth = GfsSpaceMediaAuth(
-            federation=federation, member_publish=member_publish, channels=channels
+            federation=federation,
+            member_publish=member_publish,
+            channels=channels,
         )
         maintenance = GfsMaintenanceScheduler(
             space_media=space_media,
@@ -575,7 +585,7 @@ class GfsApp:
             build_envelope_rate_limit(self.client_ip),
             build_member_publish_rate_limit(self.client_ip),
             build_channel_rate_limit(self.client_ip),
-            build_space_media_rate_limit(self.client_ip),
+            build_space_media_rate_limit(self.client_ip, nodes=live_nodes),
         ]
         app = web.Application(middlewares=middlewares)
         # ``nosniff``, ``X-Frame-Options: SAMEORIGIN``, ``Referrer-Policy``
@@ -641,7 +651,6 @@ class GfsApp:
         register_routes(
             self.app,
             admin_ui_dir=_ADMIN_UI_DIR,
-            media_dir=self.config.media_dir,
             public_static_dir=_PUBLIC_STATIC_DIR,
         )
 

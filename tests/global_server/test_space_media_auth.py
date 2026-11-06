@@ -14,6 +14,7 @@ import os
 import time
 
 import pytest
+from aiohttp import web
 
 from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
@@ -53,9 +54,11 @@ from socialhome.global_server.repositories import (
     SqliteGfsSpaceEpochRepo,
 )
 from socialhome.global_server.space_media_auth import (
+    SPACE_MEDIA_MAX_PER_MINUTE_PER_IP,
     SPACE_MEDIA_TS_SKEW_S,
     GfsSpaceMediaAuth,
-    is_space_media_write_path,
+    build_space_media_rate_limit,
+    is_space_media_write,
 )
 from socialhome.writer_cert import sign_writer_cert
 from socialhome.writer_key import derive_writer_seed, sign_with_writer_key
@@ -83,7 +86,12 @@ async def env(gfs_db):
     epoch_repo = SqliteGfsSpaceEpochRepo(gfs_db)
     channel_repo = SqliteGfsChannelRepo(gfs_db)
     await fed_repo.upsert_instance(
-        ClientInstance(instance_id="owner", display_name="O", public_key="aa" * 32)
+        ClientInstance(
+            instance_id="owner",
+            display_name="O",
+            public_key="aa" * 32,
+            status="active",
+        )
     )
     for sid in (SPACE, "sp-banned", "sp-nokey"):
         await fed_repo.upsert_space(
@@ -102,6 +110,17 @@ async def env(gfs_db):
         now=NOW,
     )
     await channel_repo.set_epoch(CHANNEL, 3, expected=None, now=NOW)
+    # In use: two member households hold a seat (security review F1, N2).
+    await fed_repo.upsert_instance(
+        ClientInstance(
+            instance_id="member2",
+            display_name="M",
+            public_key="cc" * 32,
+            status="active",
+        )
+    )
+    await channel_repo.add_subscriber(CHANNEL, "owner", pass_epoch=3, now=NOW)
+    await channel_repo.add_subscriber(CHANNEL, "member2", pass_epoch=3, now=NOW)
     federation = GfsFederationService(fed_repo, epoch_repo=epoch_repo)
     clock = _Clock()
     member = GfsMemberPublishService(
@@ -489,6 +508,22 @@ async def test_the_scope_seed_holder_may_delete(env):
     )
 
 
+async def test_a_replayed_delete_is_refused_at_one_verification(env):
+    """Security review F5: a captured delete replayed inside the ±300 s
+    window is refused (it could otherwise drop a claim the scope made again
+    since) — after its signature verified, so it costs what a success does."""
+    auth, _, _ = env
+    sig = _space_delete_sig(NOW)
+    await auth.authorize_delete(SCOPE_SPACE, SPACE, BID, ts=NOW, **sig)
+    with counting_ed25519_verifies() as done, pytest.raises(PermissionError):
+        await auth.authorize_delete(SCOPE_SPACE, SPACE, BID, ts=NOW, **sig)
+    assert done[0] == 1
+    # A fresh one (another ts) still goes through.
+    await auth.authorize_delete(
+        SCOPE_SPACE, SPACE, BID, ts=NOW + 1, **_space_delete_sig(NOW + 1)
+    )
+
+
 @pytest.mark.parametrize(
     "case",
     ["stale", "wrong_key", "other_blob", "bad_ts", "bad_sig", "channel_key", "scope"],
@@ -517,14 +552,53 @@ async def test_delete_refusals(env, case):
         await auth.authorize_delete(scope, scope_id, BID, ts=ts, **sig)
 
 
-def test_only_the_write_paths_are_shed_per_ip():
-    assert is_space_media_write_path(f"/gfs/spaces/s/media/{'a' * 64}")
-    assert is_space_media_write_path(f"/gfs/channels/{CHANNEL}/media/{'a' * 64}")
-    assert is_space_media_write_path(f"/gfs/spaces/s/media/{'a' * 64}/delete")
-    assert not is_space_media_write_path(f"/gfs/media/{'a' * 64}")
-    assert not is_space_media_write_path("/gfs/spaces/s/epoch")
-    assert not is_space_media_write_path("/gfs/channels/publish")
-    assert not is_space_media_write_path(f"/gfs/spaces/s/media/{'a' * 64}/other")
+def test_only_the_routed_writes_are_shed_per_ip():
+    assert is_space_media_write("PUT", "/gfs/media/{blob_id}")
+    assert is_space_media_write("POST", "/gfs/media/{blob_id}/delete")
+    assert not is_space_media_write("GET", "/gfs/media/{blob_id}")
+    assert not is_space_media_write("POST", "/gfs/media/{blob_id}")
+    assert not is_space_media_write("PUT", "/gfs/spaces/{space_id}/epoch")
+    assert not is_space_media_write("PUT", None)
+
+
+async def test_the_write_limiter_takes_a_node_share():
+    """Cluster-wide: on 2 live nodes each allows half the per-IP budget."""
+    limiter = build_space_media_rate_limit(_FixedIp(), nodes=lambda: 2)
+    allowed = 0
+    for _ in range(SPACE_MEDIA_MAX_PER_MINUTE_PER_IP):
+        resp = await limiter(_RoutedRequest("PUT", "/gfs/media/{blob_id}"), _ok)
+        allowed += resp.status == 200
+    assert allowed == SPACE_MEDIA_MAX_PER_MINUTE_PER_IP // 2
+
+
+class _FixedIp:
+    def bucket(self, request) -> str:
+        return "203.0.113.9"
+
+
+class _Resource:
+    def __init__(self, canonical):
+        self.canonical = canonical
+
+
+class _Route:
+    def __init__(self, canonical):
+        self.resource = _Resource(canonical) if canonical is not None else None
+
+
+class _MatchInfo:
+    def __init__(self, canonical):
+        self.route = _Route(canonical)
+
+
+class _RoutedRequest:
+    def __init__(self, method, canonical):
+        self.method = method
+        self.match_info = _MatchInfo(canonical)
+
+
+async def _ok(request):
+    return web.Response(status=200)
 
 
 def test_the_real_clock_is_the_default():
@@ -748,3 +822,29 @@ async def test_every_outcome_of_a_delete_costs_one_verification(env, scope, case
         except PermissionError:
             pass
     assert done[0] == 1
+
+
+@pytest.mark.parametrize("seat", ["none", "closed_epoch"])
+async def test_a_channel_nobody_holds_a_seat_in_gets_no_media(env, seat):
+    """Security review F1: registration is anonymous, so only a channel IN
+    USE — a member household's seat with a pass for an open epoch — takes
+    uploads, and the refusal costs what a success of the kind does."""
+    auth, _, channel_repo = env
+    await channel_repo.remove_subscriber(CHANNEL, "owner")
+    await channel_repo.remove_subscriber(CHANNEL, "member2")
+    if seat == "closed_epoch":
+        await channel_repo.add_subscriber(CHANNEL, "owner", pass_epoch=1, now=NOW)
+        await channel_repo.add_subscriber(CHANNEL, "member2", pass_epoch=1, now=NOW)
+    a = _channel_key(_claim(scope=SCOPE_CHANNEL, scope_id=CHANNEL))
+    with counting_ed25519_verifies() as done, pytest.raises(PermissionError):
+        await _upload(auth, a)
+    assert done[0] == 1
+
+
+async def test_one_seated_member_household_is_enough_for_media(env):
+    """Third review A4: the owner household never subscribes to its own
+    channel, so a private space with one link-joined member has ONE seat —
+    and its media must work."""
+    auth, _, channel_repo = env
+    await channel_repo.remove_subscriber(CHANNEL, "member2")
+    await _upload(auth, _channel_key(_claim(scope=SCOPE_CHANNEL, scope_id=CHANNEL)))

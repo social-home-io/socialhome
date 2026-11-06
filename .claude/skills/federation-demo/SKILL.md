@@ -1308,16 +1308,22 @@ WS pushes across allocs. The step:
    authority key the step holds; one encrypted, padded blob uploaded via
    node 0 under that authority must be served **byte-identical by node 1**
    (``Cache-Control: public, max-age=3600, immutable``) — files under the
-   shared ``media/spaces`` dir, rows in the shared DB; the same upload via
+   shared ``space_media`` dir, rows in the shared DB; the same upload via
    node 1 must coalesce (``200 already_stored``) and a miss via node 1 must
-   be ``404`` with ``no-store`` (fetches at the scope-free ``/gfs/media/{blob}``).
+   be ``404`` with ``no-store`` (every write and fetch at the ONE
+   scope-free ``/gfs/media/{blob}``, the scope only in what is signed).
    Then (step 3i) the same for a **private space's opaque channel**: a
-   channel registered via node 1, a blob uploaded via node 0 under the
-   channel key (``/gfs/channels/{id}/media/{blob}``) must be served
-   byte-identical by node 1; the space step's blob uploaded again under
-   that channel via node 1 must coalesce (``200 already_stored``, a second
-   claim) and still be served after the space authority deletes its own
-   claim.
+   channel registered via node 1 gets the uniform ``403`` until a member
+   household holds a seat (epoch notice, pass, subscribe — ONE seat is
+   enough: the owner never subscribes to its own channel); then a blob
+   uploaded via node 0 under the channel key must be served byte-identical
+   by node 1. Every address is bound to its scope
+   (``sha256("sm1|" + scope + "|" + scope_id + "|" + ciphertext)``): the
+   space step's ciphertext uploaded under that channel via node 1 is a NEW
+   blob (``201``) at another address; the channel's delete of the space's
+   address answers ``deleted: false`` (still ``200`` to fetch); the space's
+   own delete via node 1 removes it on every node (``404``) while the
+   channel's copy stays.
 6. Confirms a client registered via one node is served by the other
    (shared DB → the round-robin LB is safe).
 

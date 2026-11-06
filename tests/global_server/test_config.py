@@ -814,3 +814,25 @@ def test_example_toml_documents_space_media(tmp_dir):
     # The example spells out the defaults.
     assert cfg.space_media_max_bytes == GfsConfig().space_media_max_bytes
     assert cfg.space_media_ttl_seconds == GfsConfig().space_media_ttl_seconds
+
+
+def test_space_media_ip_bytes_per_hour(tmp_dir, monkeypatch):
+    """Security review F1 backstop: a per-address upload byte budget an
+    hour, 1 GiB by default, from the file or GFS_SPACE_MEDIA_IP_BYTES_PER_HOUR;
+    the example TOML documents it."""
+    assert GfsConfig().space_media_ip_bytes_per_hour == 1024**3
+    p = _space_media_toml(tmp_dir, "ip_bytes_per_hour = 1048576\n")
+    assert GfsConfig.from_toml(p).space_media_ip_bytes_per_hour == 1024**2
+    monkeypatch.setenv("GFS_SPACE_MEDIA_IP_BYTES_PER_HOUR", "2097152")
+    assert GfsConfig.load(p).space_media_ip_bytes_per_hour == 2 * 1024**2
+    with pytest.raises(ValueError, match="space_media"):
+        GfsConfig.from_toml(_space_media_toml(tmp_dir, "ip_bytes_per_hour = 0\n"))
+    assert "ip_bytes_per_hour" in EXAMPLE_TOML
+    assert "GFS_SPACE_MEDIA_IP_BYTES_PER_HOUR" in EXAMPLE_TOML
+
+
+def test_no_per_household_channel_count_any_more():
+    """Third review A4: a count of channels per household refused a legit
+    member's 6th private space — gone (fairness is per household)."""
+    assert not hasattr(GfsConfig(), "space_media_channels_per_household")
+    assert "channels_per_household" not in EXAMPLE_TOML

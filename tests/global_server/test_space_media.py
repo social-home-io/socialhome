@@ -7,11 +7,14 @@ hour, and a sweep that also clears orphan files."""
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import time
 
 import pytest
 
+from socialhome.domain.gfs_space_media import space_media_address
+from socialhome.global_server import blob_store as bs_mod
 from socialhome.global_server import space_media as sm
 from socialhome.global_server.blob_store import (
     BLOB_OVERHEAD,
@@ -30,7 +33,7 @@ from socialhome.global_server.space_media import (
     GfsSpaceMediaStore,
     SpaceMediaLimits,
 )
-from socialhome.moment_public_media import MAX_BLOB_BYTES, PAD_BUCKETS, blob_id_of
+from socialhome.moment_public_media import MAX_BLOB_BYTES, PAD_BUCKETS
 
 NOW = 1_800_000_000  # an hour boundary: NOW % 3600 == 0
 SMALL = PAD_BUCKETS[1] + BLOB_OVERHEAD  # 64 KiB bucket
@@ -47,6 +50,7 @@ def _limits(**over) -> SpaceMediaLimits:
         "ttl_s": 3 * 86_400,
         "space_max_bytes": 100 * SMALL,
         "space_uploads_per_hour": 100,
+        "ip_bytes_per_hour": 1024 * SMALL,
     }
     base.update(over)
     return SpaceMediaLimits(**base)
@@ -67,11 +71,26 @@ def make(repo, tmp_dir):
     return _make
 
 
+#: The scope-bound address each test blob was put under (its last scope).
+_ADDR: dict[bytes, str] = {}
+
+
+def _addr(data: bytes, space: str = "s1", kind: str = "space") -> str:
+    """The blob's scope-bound address (security review v2, N1)."""
+    _ADDR[data] = space_media_address(kind, space, data)
+    return _ADDR[data]
+
+
+def _bid(data: bytes) -> str:
+    """The address *data* was last put under (else its address in s1)."""
+    return _ADDR.get(data) or space_media_address("space", "s1", data)
+
+
 async def _put(store, data, *, space="s1", kind="space", now=NOW, expires=None):
     return await store.put(
         scope_kind=kind,
         scope_id=space,
-        blob_id=blob_id_of(data),
+        blob_id=_addr(data, space, kind),
         data=data,
         expires_at=expires if expires is not None else now + 86_400,
         now=now,
@@ -85,7 +104,7 @@ async def _refused(coro) -> tuple[int, str]:
 
 
 async def _held(repo) -> set[str]:
-    return {m.blob_id for m in await repo.least_recently_fetched(limit=1000)}
+    return await repo.known_blob_ids(list(_ADDR.values()))
 
 
 # ── Limits ───────────────────────────────────────────────────────────────
@@ -121,11 +140,10 @@ async def test_put_once_read_many(make, repo):
     store = make()
     data = _blob()
     assert await _put(store, data) is True
-    assert await store.read(blob_id_of(data), now=NOW + 10) == data
-    row = await repo.get_blob(blob_id_of(data))
+    assert await store.read(_bid(data), now=NOW + 10) == data
+    row = await repo.get_blob(_bid(data))
     assert (row.size, row.created_at, row.last_fetched_at) == (SMALL, NOW, NOW)
-    claims = await repo.claims_of(blob_id_of(data))
-    assert [(c.scope_kind, c.scope_id) for c in claims] == [("space", "s1")]
+    assert (row.scope_kind, row.scope_id) == ("space", "s1")
 
 
 async def test_a_duplicate_upload_is_a_no_op_and_keeps_the_expiry(make, repo):
@@ -135,55 +153,16 @@ async def test_a_duplicate_upload_is_a_no_op_and_keeps_the_expiry(make, repo):
     data = _blob()
     assert await _put(store, data) is True
     assert await _put(store, data, now=NOW + 60, expires=NOW + 2 * 86_400) is False
-    assert (await repo.get_blob(blob_id_of(data))).expires_at == NOW + 86_400
+    assert (await repo.get_blob(_bid(data))).expires_at == NOW + 86_400
     assert await repo.totals() == (1, SMALL)
-
-
-async def test_the_same_bytes_from_another_scope_add_a_claim(make, repo):
-    """No squatting: whoever uploads a blob first doesn't own it. Identical
-    bytes from another scope coalesce (one file) and add that scope's claim."""
-    store = make()
-    data = _blob()
-    await _put(store, data, space="attacker")
-    assert await _put(store, data, space="s1", kind="channel") is False
-    claims = await repo.claims_of(blob_id_of(data))
-    assert {(c.scope_kind, c.scope_id) for c in claims} == {
-        ("space", "attacker"),
-        ("channel", "s1"),
-    }
-    assert await repo.totals() == (1, SMALL)
-
-
-async def test_a_delete_drops_only_the_callers_claim(make, repo, tmp_dir):
-    store = make()
-    data = _blob()
-    bid = blob_id_of(data)
-    await _put(store, data, space="attacker", now=NOW, expires=NOW + 3600)
-    await _put(store, data, space="victim", now=NOW + 1)
-    assert await store.delete(bid, scope_kind="space", scope_id="attacker") is True
-    # The victim's claim keeps the blob, and its expiry is now the victim's.
-    assert await store.read(bid, now=NOW + 2) == data
-    assert (await repo.get_blob(bid)).expires_at == NOW + 1 + 86_400
-    assert await store.delete(bid, scope_kind="space", scope_id="victim") is True
-    assert await store.read(bid, now=NOW + 3) is None
-    assert not (tmp_dir / "spaces" / bid).exists()
-    assert await repo.totals() == (0, 0)
-
-
-async def test_another_scopes_claim_extends_the_blob_expiry(make, repo):
-    store = make()
-    data = _blob()
-    await _put(store, data, space="a", expires=NOW + 3600)
-    await _put(store, data, space="b", expires=NOW + 7200)
-    assert (await repo.get_blob(blob_id_of(data))).expires_at == NOW + 7200
 
 
 async def test_losing_the_insert_race_is_a_coalesced_answer(make, repo):
-    """Another node stored the blob between our check and our insert: we
-    answer as a coalesced re-upload and still add our claim."""
+    """Another node stored the blob (the same scope's upload) between our
+    check and our insert: we answer as a coalesced re-upload."""
     store = make()
     data = _blob()
-    bid = blob_id_of(data)
+    bid = _bid(data)
     real_get = repo.get_blob
     calls = {"n": 0}
 
@@ -191,7 +170,7 @@ async def test_losing_the_insert_race_is_a_coalesced_answer(make, repo):
         calls["n"] += 1
         if calls["n"] == 1:
             other = make()
-            await _put(other, data, space="other")
+            await _put(other, data, space="s1")
             return None
         return await real_get(blob_id)
 
@@ -200,8 +179,8 @@ async def test_losing_the_insert_race_is_a_coalesced_answer(make, repo):
         assert await _put(store, data, space="s1") is False
     finally:
         repo.get_blob = real_get  # type: ignore[method-assign]
-    claims = await repo.claims_of(bid)
-    assert {c.scope_id for c in claims} == {"other", "s1"}
+    assert await repo.totals() == (1, SMALL)
+    assert (await repo.get_blob(bid)).scope_id == "s1"
 
 
 async def test_an_expired_blob_is_replaced_by_a_fresh_upload(make, repo):
@@ -209,7 +188,7 @@ async def test_an_expired_blob_is_replaced_by_a_fresh_upload(make, repo):
     data = _blob()
     await _put(store, data, expires=NOW + 10)
     assert await _put(store, data, now=NOW + 20, expires=NOW + 3600) is True
-    assert (await repo.get_blob(blob_id_of(data))).expires_at == NOW + 3600
+    assert (await repo.get_blob(_bid(data))).expires_at == NOW + 3600
 
 
 @pytest.mark.parametrize(
@@ -218,8 +197,9 @@ async def test_an_expired_blob_is_replaced_by_a_fresh_upload(make, repo):
         ("nope", _blob(), "bad_blob_id"),
         (None, os.urandom(1000), "not_a_padded_blob"),
         ("a" * 64, _blob(), "blob_id_mismatch"),
+        ("plain", _blob(), "blob_id_mismatch"),
     ],
-    ids=["id", "bucket", "sha"],
+    ids=["id", "bucket", "sha", "unscoped_sha"],
 )
 async def test_shape_and_address_are_checked(make, blob_id, data, reason):
     store = make()
@@ -227,7 +207,11 @@ async def test_shape_and_address_are_checked(make, blob_id, data, reason):
         store.put(
             scope_kind="space",
             scope_id="s1",
-            blob_id=blob_id or blob_id_of(data),
+            blob_id=(
+                hashlib.sha256(data).hexdigest()
+                if blob_id == "plain"
+                else blob_id or _bid(data)
+            ),
             data=data,
             expires_at=NOW + 60,
             now=NOW,
@@ -244,7 +228,7 @@ async def test_a_longer_expiry_is_clamped_to_the_ttl(make, repo):
     store = make(ttl_s=3_600)
     data = _blob()
     await _put(store, data, expires=NOW + 30 * 86_400)
-    assert (await repo.get_blob(blob_id_of(data))).expires_at == NOW + 3_600
+    assert (await repo.get_blob(_bid(data))).expires_at == NOW + 3_600
 
 
 async def test_a_blob_bigger_than_the_whole_cache_is_413(make):
@@ -264,7 +248,18 @@ async def test_a_turned_off_cache_answers_503_uncounted(make):
 
 
 async def test_an_unknown_scope_is_refused(make):
-    assert await _refused(_put(make(), _blob(), kind="room")) == (422, "bad_scope")
+    data = _blob()
+    status = await _refused(
+        make().put(
+            scope_kind="room",
+            scope_id="s1",
+            blob_id=space_media_address("space", "s1", data),
+            data=data,
+            expires_at=NOW + 60,
+            now=NOW,
+        )
+    )
+    assert status == (422, "bad_scope")
 
 
 # ── Upload rate: counted apart from the rows ────────────────────────────
@@ -306,7 +301,7 @@ async def test_upload_and_delete_does_not_reset_the_upload_rate(make):
         try:
             await _put(store, data, now=NOW + i)
             answers.append(201)
-            await store.delete(blob_id_of(data), scope_kind="space", scope_id="s1")
+            await store.delete(_bid(data), scope_kind="space", scope_id="s1")
         except MediaRefused as exc:
             answers.append(exc.status)
     assert answers[:5] == [201] * 5
@@ -353,23 +348,11 @@ async def test_a_full_scope_evicts_its_own_least_recently_fetched(make, repo):
     await _put(store, other, space="s2", now=NOW)
     await _put(store, a, now=NOW + 1)
     await _put(store, b, now=NOW + 2)
-    assert await store.read(blob_id_of(a), now=NOW + FETCH_TOUCH_INTERVAL_S + 1) == a
+    assert await store.read(_bid(a), now=NOW + FETCH_TOUCH_INTERVAL_S + 1) == a
     assert await _put(store, c, now=NOW + FETCH_TOUCH_INTERVAL_S + 2) is True
-    assert await _held(repo) == {blob_id_of(other), blob_id_of(a), blob_id_of(c)}
+    assert await _held(repo) == {_bid(other), _bid(a), _bid(c)}
     stats = await store.stats()
     assert (stats["evicted_blobs"], stats["refused_quota"]) == (1, 0)
-
-
-async def test_scope_eviction_keeps_a_blob_another_scope_claims(make, repo):
-    """Evicting a scope's claim frees that scope's budget, but a blob another
-    scope still claims stays."""
-    store = make(space_max_bytes=SMALL)
-    shared, newer = _blob(), _blob()
-    await _put(store, shared, space="s1", now=NOW)
-    await _put(store, shared, space="s2", now=NOW + 1)
-    assert await _put(store, newer, space="s1", now=NOW + 2) is True
-    assert await store.read(blob_id_of(shared), now=NOW + 3) == shared
-    assert {c.scope_id for c in await repo.claims_of(blob_id_of(shared))} == {"s2"}
 
 
 async def test_scope_eviction_frees_enough_for_a_big_blob(make, repo):
@@ -378,18 +361,18 @@ async def test_scope_eviction_frees_enough_for_a_big_blob(make, repo):
         await _put(store, _blob(), now=NOW + i)
     big = _blob(BIG)
     assert await _put(store, big, now=NOW + 10) is True
-    assert await store.read(blob_id_of(big), now=NOW + 11) == big
+    assert await store.read(_bid(big), now=NOW + 11) == big
     assert await repo.totals() == (2, BIG + SMALL)
     assert (await store.stats())["evicted_blobs"] == 3
 
 
-async def test_expired_claims_of_a_scope_count_for_nothing(make):
+async def test_expired_blobs_of_a_scope_go_without_counting_as_evictions(make):
     store = make(space_max_bytes=2 * SMALL)
     old, live = _blob(), _blob()
     await _put(store, old, now=NOW, expires=NOW + 10)
     await _put(store, live, now=NOW + 1)
     await _put(store, _blob(), now=NOW + 20)
-    assert await store.read(blob_id_of(live), now=NOW + 21) == live
+    assert await store.read(_bid(live), now=NOW + 21) == live
     assert (await store.stats())["evicted_blobs"] == 0
 
 
@@ -407,22 +390,13 @@ async def test_eviction_drops_the_least_recently_fetched_first(make, repo, tmp_d
     await _put(store, a, now=NOW)
     await _put(store, b, now=NOW + 1)
     await _put(store, c, now=NOW + 2)
-    assert await store.read(blob_id_of(a), now=NOW + FETCH_TOUCH_INTERVAL_S) == a
+    assert await store.read(_bid(a), now=NOW + FETCH_TOUCH_INTERVAL_S) == a
     d = _blob()
     await _put(store, d, now=NOW + FETCH_TOUCH_INTERVAL_S + 1)
-    assert await _held(repo) == {blob_id_of(a), blob_id_of(c), blob_id_of(d)}
-    assert not (tmp_dir / "spaces" / blob_id_of(b)).exists()
+    assert await _held(repo) == {_bid(a), _bid(c), _bid(d)}
+    assert not (tmp_dir / "spaces" / _bid(b)).exists()
     stats = await store.stats()
     assert (stats["evicted_blobs"], stats["evicted_bytes"]) == (1, SMALL)
-
-
-async def test_global_eviction_drops_every_claim_of_a_blob(make, repo):
-    store = make(max_bytes=SMALL)
-    shared = _blob()
-    await _put(store, shared, space="s1", now=NOW)
-    await _put(store, shared, space="s2", now=NOW + 1)
-    await _put(store, _blob(), space="s3", now=NOW + 2)
-    assert await repo.claims_of(blob_id_of(shared)) == []
 
 
 async def test_upload_drops_only_what_it_needs_not_every_expired_blob(make, repo):
@@ -446,46 +420,46 @@ async def test_expired_blobs_go_before_live_ones_are_evicted(make):
     await _put(store, old, space="x", now=NOW, expires=NOW + 10)
     await _put(store, live, now=NOW + 1)
     await _put(store, _blob(), space="y", now=NOW + 20)
-    assert await store.read(blob_id_of(live), now=NOW + 21) == live
+    assert await store.read(_bid(live), now=NOW + 21) == live
 
 
 # ── Read ────────────────────────────────────────────────────────────────
 
 
-async def test_read_misses(make, gfs_db):
+async def test_read_misses(make, repo, gfs_db):
     store = make()
     assert await store.read("nope") is None
     assert await store.read("a" * 64, now=NOW) is None
     data = _blob()
     await _put(store, data, expires=NOW + 10)
-    assert await store.read(blob_id_of(data), now=NOW + 10) is None
+    assert await store.read(_bid(data), now=NOW + 10) is None
     fed = SqliteGfsFederationRepo(gfs_db)
     await fed.upsert_instance(
         ClientInstance(instance_id="o", display_name="O", public_key="aa" * 32)
     )
     await fed.upsert_space(
-        GlobalSpace(space_id="bad", owning_instance="o", status="banned")
+        GlobalSpace(space_id="bad", owning_instance="o", status="active")
     )
     other = _blob()
     await _put(store, other, space="bad")
-    assert await store.read(blob_id_of(other), now=NOW + 1) is None
-    # Also claimed by a space in good standing: served.
-    await _put(store, other, space="fine", now=NOW + 2)
-    assert await store.read(blob_id_of(other), now=NOW + 3) == other
+    assert await store.read(_bid(other), now=NOW + 1) == other
+    await fed.set_space_status("bad", "banned")
+    # A ban hides the space's blobs at once (the auth refuses its uploads).
+    assert await store.read(_bid(other), now=NOW + 1) is None
 
 
 async def test_a_missing_file_reads_as_a_miss(make, tmp_dir):
     store = make()
     data = _blob()
     await _put(store, data)
-    (tmp_dir / "spaces" / blob_id_of(data)).unlink()
-    assert await store.read(blob_id_of(data), now=NOW + 1) is None
+    (tmp_dir / "spaces" / _bid(data)).unlink()
+    assert await store.read(_bid(data), now=NOW + 1) is None
 
 
 async def test_the_fetch_mark_moves_at_most_once_an_hour(make, repo):
     store = make()
     data = _blob()
-    bid = blob_id_of(data)
+    bid = _bid(data)
     await _put(store, data)
     for t in (1, 60, FETCH_TOUCH_INTERVAL_S - 1):
         await store.read(bid, now=NOW + t)
@@ -500,7 +474,7 @@ async def test_the_fetch_mark_moves_at_most_once_an_hour(make, repo):
 async def test_delete_needs_the_claiming_scope(make, tmp_dir):
     store = make()
     data = _blob()
-    bid = blob_id_of(data)
+    bid = _bid(data)
     await _put(store, data)
     assert await store.delete(bid, scope_kind="space", scope_id="s2") is False
     assert await store.delete(bid, scope_kind="channel", scope_id="s1") is False
@@ -519,12 +493,10 @@ async def test_the_sweep_drops_expired_blobs_claims_and_counts(
     for d in olds:
         await _put(store, d, expires=NOW + 10)
     live = _blob()
-    await _put(store, live, space="a", expires=NOW + 20)
-    await _put(store, live, space="b")
+    await _put(store, live, space="a")
     assert await store.sweep(NOW + 7300) == 5
     assert await repo.totals() == (1, SMALL)
-    assert {c.scope_id for c in await repo.claims_of(blob_id_of(live))} == {"b"}
-    assert sorted(p.name for p in (tmp_dir / "spaces").iterdir()) == [blob_id_of(live)]
+    assert sorted(p.name for p in (tmp_dir / "spaces").iterdir()) == [_bid(live)]
     # Upload counts older than the previous hour are gone.
     assert await repo.upload_counts("space", "s1", bucket=(NOW + 7300) // 3600) == (
         0,
@@ -551,7 +523,7 @@ async def test_the_sweep_removes_orphan_files_after_a_grace(make, repo, tmp_dir)
     os.utime(part, (old, old))
     removed = await store.sweep_orphans(now=time.time())
     assert removed == 2
-    assert sorted(p.name for p in d.iterdir()) == sorted([blob_id_of(kept), "9" * 64])
+    assert sorted(p.name for p in d.iterdir()) == sorted([_bid(kept), "9" * 64])
 
 
 async def test_stats(make):
@@ -597,7 +569,7 @@ async def test_concurrent_uploads_cannot_pass_the_byte_caps(make, repo):
     _, total = await repo.totals()
     assert total <= 3 * SMALL
     for scope in ("s0", "s1"):
-        assert await repo.scope_usage("space", scope, now=NOW) <= 2 * SMALL
+        assert await repo.scope_bytes("space", scope) <= 2 * SMALL
 
 
 async def test_a_failed_upload_gives_its_rate_slot_back(make, repo):
@@ -607,7 +579,7 @@ async def test_a_failed_upload_gives_its_rate_slot_back(make, repo):
         store.put(
             scope_kind="space",
             scope_id="s1",
-            blob_id=blob_id_of(b"other"),
+            blob_id=space_media_address("space", "s1", b"other"),
             data=data,
             expires_at=NOW + 60,
             now=NOW,
@@ -618,68 +590,17 @@ async def test_a_failed_upload_gives_its_rate_slot_back(make, repo):
     assert await _put(store, data) is True
 
 
-async def test_coalescing_onto_a_blob_dropped_meanwhile_stores_it_again(make, repo):
-    """s2 saw the blob held by s1; s1's delete dropped row and file before
-    s2's claim landed. s2 must not answer already_stored for nothing: it
-    stores the bytes it has."""
+async def test_a_retry_of_the_same_scope_rewrites_a_missing_file(make, tmp_dir):
+    """The residual cross-node window leaves a row without its file; the
+    uploading household's own retry (same scope, blob still live) must put
+    the bytes back, not answer already_stored over a 404."""
     store = make()
     data = _blob()
-    bid = blob_id_of(data)
-    await _put(store, data, space="s1")
-    real_get = repo.get_blob
-    stale = await real_get(bid)
-    calls = {"n": 0}
-
-    async def racing_get(blob_id):
-        calls["n"] += 1
-        if calls["n"] == 2:  # inside the locked store step
-            await repo.delete_claim(bid, scope_kind="space", scope_id="s1")
-            await repo.delete_blob_if_unclaimed(bid)
-            await store._files.remove(bid)
-            return stale
-        return await real_get(blob_id)
-
-    repo.get_blob = racing_get  # type: ignore[method-assign]
-    try:
-        await _put(store, data, space="s2", now=NOW + 1)
-    finally:
-        repo.get_blob = real_get  # type: ignore[method-assign]
-    assert await store.read(bid, now=NOW + 2) == data
-    assert await repo.totals() == (1, SMALL)
-    assert {c.scope_id for c in await repo.claims_of(bid)} == {"s2"}
-
-
-async def test_a_blob_another_scope_claims_meanwhile_is_not_dropped(
-    make, repo, tmp_dir
-):
-    store = make()
-    data = _blob()
-    bid = blob_id_of(data)
-    await _put(store, data, space="s1")
-    # s2's claim lands between s1's claim delete and the row drop.
-    await repo.delete_claim(bid, scope_kind="space", scope_id="s1")
-    await repo.put_claim(
-        sm.GfsSpaceMediaClaim(
-            blob_id=bid,
-            scope_kind="space",
-            scope_id="s2",
-            size=SMALL,
-            created_at=NOW,
-            expires_at=NOW + 86_400,
-        )
-    )
-    await store._settle(bid)
-    assert (tmp_dir / "spaces" / bid).exists()
-    assert await store.read(bid, now=NOW + 1) == data
-
-
-async def test_coalescing_onto_a_missing_file_rewrites_it(make, tmp_dir):
-    store = make()
-    data = _blob()
-    bid = blob_id_of(data)
+    bid = _bid(data)
     await _put(store, data, space="s1")
     (tmp_dir / "spaces" / bid).unlink()
-    assert await _put(store, data, space="s2", now=NOW + 1) is False
+    assert await store.read(bid, now=NOW + 1) is None
+    assert await _put(store, data, space="s1", now=NOW + 1) is False
     assert await store.read(bid, now=NOW + 2) == data
 
 
@@ -728,7 +649,7 @@ async def test_a_drop_removes_rows_before_files(repo, tmp_dir):
 
     files.on_remove = note
     await _put(store, _blob(), space="b", now=NOW + 1)
-    assert removed_with_row == {blob_id_of(first): False}
+    assert removed_with_row == {_bid(first): False}
 
 
 async def test_the_orphan_sweep_walks_past_its_batch_and_wraps(
@@ -787,8 +708,227 @@ async def test_the_orphan_sweep_rechecks_a_file_before_removing_it(repo, tmp_dir
     old = time.time() - ORPHAN_GRACE_S - 60
 
     async def stale_scan(*, after, limit):
-        return [(name, old)] if after < name else []
+        return ([(name, old)], "") if after < name else ([], "")
 
     files.scan_override = stale_scan
     assert await store.sweep_orphans(now=time.time()) == 0
     assert (d / name).exists()
+
+
+# ── Stage B: the orphan-sweep cursor survives a vanishing file ───────────
+
+
+async def test_the_orphan_sweep_cursor_advances_past_a_vanished_file(
+    make, tmp_dir, monkeypatch
+):
+    """One of the listed files vanishes before its stat (a busy cache):
+    the cursor still moves to the last name listed, not back to the start —
+    else the sweep never gets past its first batch."""
+    monkeypatch.setattr(sm, "ORPHAN_SCAN_BATCH", 3)
+    store = make()
+    d = tmp_dir / "spaces"
+    d.mkdir()
+    names = sorted(f"{i:064x}" for i in range(10))
+    for n in names:
+        (d / n).write_bytes(b"x")  # fresh: nothing is removed
+    real_stat = bs_mod.os.stat
+
+    def flaky_stat(path, *a, **kw):
+        if str(path).endswith(names[2]):
+            raise FileNotFoundError(path)
+        return real_stat(path, *a, **kw)
+
+    monkeypatch.setattr(bs_mod.os, "stat", flaky_stat)
+    await store.sweep_orphans(now=time.time())
+    assert await store._repo.sweep_cursor() == names[2]
+    await store.sweep_orphans(now=time.time())
+    assert await store._repo.sweep_cursor() == names[5]
+
+
+# ── Security review F1: fair eviction, a per-address byte budget ─────────
+
+
+async def test_a_flooding_scope_evicts_its_own_blobs_not_others(make, repo):
+    """Probe P1: one scope uploading past the global cap must not evict
+    another scope's blob in one global LRU order — the scope holding the
+    most bytes loses its own least recently fetched first."""
+    store = make(max_bytes=4 * SMALL)
+    victim = _blob()
+    await _put(store, victim, space="victim", now=NOW)
+    flood = [_blob() for _ in range(8)]
+    for i, d in enumerate(flood):
+        await _put(store, d, space="flood", now=NOW + 1 + i)
+    assert await store.read(_bid(victim), now=NOW + 20) == victim
+    _, total = await repo.totals()
+    assert total <= 4 * SMALL
+    # The flood kept its newest.
+    assert await store.read(_bid(flood[-1]), now=NOW + 20) == flood[-1]
+    assert await store.read(_bid(flood[0]), now=NOW + 20) is None
+
+
+async def test_eviction_takes_from_the_largest_owner_first(make, repo):
+    store = make(max_bytes=4 * SMALL)
+    a1, a2, a3, b1, c1 = (_blob() for _ in range(5))
+    await _put(store, b1, space="b", now=NOW)  # the oldest of all
+    await _put(store, a1, space="a", now=NOW + 1)
+    await _put(store, a2, space="a", now=NOW + 2)
+    await _put(store, a3, space="a", now=NOW + 3)
+    await _put(store, c1, space="c", now=NOW + 4)
+    assert await store.read(_bid(b1), now=NOW + 5) == b1
+    assert await store.read(_bid(a1), now=NOW + 5) is None
+    assert await store.read(_bid(a2), now=NOW + 5) == a2
+
+
+async def test_an_address_has_an_upload_byte_budget(make, repo):
+    """Backstop: an address uploads at most ip_bytes_per_hour bytes an hour,
+    whatever scopes it uses (shared database, cluster-wide); a refusal and a
+    coalesced or failed upload cost nothing."""
+    store = make(ip_bytes_per_hour=2 * SMALL)
+    a, b, c = _blob(), _blob(), _blob()
+
+    async def up(data, *, space, client="198.51.100.7", now=NOW):
+        return await store.put(
+            scope_kind="space",
+            scope_id=space,
+            blob_id=_addr(data, space),
+            data=data,
+            expires_at=now + 86_400,
+            now=now,
+            client=client,
+        )
+
+    assert await up(a, space="s1") is True
+    assert await up(b, space="s2") is True
+    assert await _refused(up(c, space="s3")) == (429, "ip_media_quota")
+    # Another address is not held back.
+    assert await up(c, space="s3", client="203.0.113.9") is True
+    # The scope's retry stores no bytes: it costs nothing.
+    assert await up(a, space="s1", client="192.0.2.1") is False
+    assert await up(b, space="s2", client="192.0.2.1") is False
+    assert await up(_blob(), space="s6", client="192.0.2.1") is True
+    # Two hours on, the window has moved.
+    assert await up(_blob(), space="s1", now=NOW + 7200) is True
+
+
+# ── Security review v2, N1: the address is bound to the scope ────────────
+
+
+async def test_another_scopes_identical_ciphertext_gets_another_address(make, repo):
+    """R8: a follower who fetched a space's ciphertext and uploads it under
+    its own scope gets ANOTHER blob — the space's blob is untouched by
+    anything that scope does (its upload, its delete, its eviction)."""
+    store = make(max_bytes=4 * SMALL)
+    data = _blob()
+    await _put(store, data, space="victim")
+    victim_id = space_media_address("space", "victim", data)
+    # Under the victim's address but the attacker's scope: refused.
+    assert await _refused(
+        store.put(
+            scope_kind="channel",
+            scope_id="0f" * 16,
+            blob_id=victim_id,
+            data=data,
+            expires_at=NOW + 60,
+            now=NOW + 1,
+        )
+    ) == (422, "blob_id_mismatch")
+    # Under its own address: a separate blob, in its own scope.
+    assert await _put(store, data, space="0f" * 16, kind="channel", now=NOW + 1)
+    attacker_id = space_media_address("channel", "0f" * 16, data)
+    assert attacker_id != victim_id
+    assert (
+        await store.delete(victim_id, scope_kind="channel", scope_id="0f" * 16) is False
+    )
+    assert await store.delete(attacker_id, scope_kind="channel", scope_id="0f" * 16)
+    held = await repo.get_blob(victim_id)
+    assert held is not None
+    assert (held.scope_kind, held.scope_id, held.expires_at) == (
+        "space",
+        "victim",
+        NOW + 86_400,
+    )
+    assert await store.read(victim_id, now=NOW + 2) == data
+
+
+async def test_a_banned_other_space_cannot_touch_the_blob(make, repo, gfs_db):
+    """R9: banning another space that uploaded the same ciphertext hides and
+    drops only that space's blob."""
+    store = make()
+    fed = SqliteGfsFederationRepo(gfs_db)
+    await fed.upsert_instance(
+        ClientInstance(instance_id="o", display_name="O", public_key="aa" * 32)
+    )
+    for sid in ("victim", "bad"):
+        await fed.upsert_space(
+            GlobalSpace(space_id=sid, owning_instance="o", status="active")
+        )
+    data = _blob()
+    await _put(store, data, space="victim")
+    await _put(store, data, space="bad")
+    victim_id = space_media_address("space", "victim", data)
+    bad_id = space_media_address("space", "bad", data)
+    await fed.set_space_status("bad", "banned")
+    assert await store.read(bad_id, now=NOW + 1) is None
+    assert await store.withdraw_scope("space", "bad") == 1
+    assert await repo.get_blob(bad_id) is None
+    assert await store.read(victim_id, now=NOW + 1) == data
+
+
+async def test_a_ban_hides_and_drops_the_spaces_own_blobs(make, repo, gfs_db, tmp_dir):
+    store = make()
+    fed = SqliteGfsFederationRepo(gfs_db)
+    await fed.upsert_instance(
+        ClientInstance(instance_id="o", display_name="O", public_key="aa" * 32)
+    )
+    await fed.upsert_space(
+        GlobalSpace(space_id="bad", owning_instance="o", status="active")
+    )
+    a, b = _blob(), _blob()
+    await _put(store, a, space="bad")
+    await _put(store, b, space="bad")
+    await fed.set_space_status("bad", "banned")
+    assert await store.read(_bid(a), now=NOW + 1) is None
+    assert await store.withdraw_scope("space", "bad") == 2
+    assert await repo.totals() == (0, 0)
+    assert list((tmp_dir / "spaces").iterdir()) == []
+
+
+# ── Third review A3: fairness per household ──────────────────────────────
+
+
+async def test_eviction_is_fair_per_household_not_per_scope(make, repo):
+    """Many scopes of one household are ONE share: the household holding
+    the most (counting the blob being stored) loses its own first."""
+    store = make(max_bytes=6 * SMALL)
+
+    async def up(data, space, household, now):
+        return await store.put(
+            scope_kind="space",
+            scope_id=space,
+            blob_id=_addr(data, space),
+            data=data,
+            expires_at=now + 86_400,
+            now=now,
+            owner=("household", household),
+        )
+
+    victim = [_blob() for _ in range(4)]
+    for i, v in enumerate(victim):
+        await up(v, "real", "home", NOW + i)
+    for i in range(12):
+        await up(_blob(), f"evil-{i % 6}", "evil", NOW + 10 + i)
+    kept = [await store.read(_bid(v), now=NOW + 30) for v in victim]
+    assert sum(k is not None for k in kept) == 3
+    held = await repo.get_blob(_bid(victim[-1]))
+    assert (held.owner_kind, held.owner_id) == ("household", "home")
+
+
+def test_the_prefix_key_groups_an_ipv6_48_and_an_ipv4_24(make):
+    """Fourth review A5-residual: the body-read gate's coarser share."""
+    store = make()
+    k = store.prefix_key
+    assert k("2001:db8:aa:1::1") == k("2001:db8:aa:ff::9")
+    assert k("2001:db8:aa:1::1") != k("2001:db8:ab:1::1")
+    assert k("192.0.2.1") == k("192.0.2.200") != k("192.0.3.1")
+    assert k("::ffff:192.0.2.7") == k("192.0.2.1")
+    assert k("unknown") == k("unknown") != k("192.0.2.1")

@@ -98,7 +98,7 @@ AUTHORITY_EVENT_SPACE_EPOCH_NOTICE: str = "space_epoch_notice"
 
 #: Authority event-types for the space media cache on a GFS: a seed-holder
 #: signs the claim ``{scope: "space", scope_id, blob_id, size, expires_at,
-#: ts}`` to upload one encrypted blob (``PUT /gfs/spaces/{id}/media/{blob_id}``)
+#: ts}`` to upload one encrypted blob (``PUT /gfs/media/{blob_id}``)
 #: and ``{scope, scope_id, blob_id, ts}`` to withdraw it (``POST …/delete``;
 #: :mod:`socialhome.domain.gfs_space_media`). The GFS verifies both against the
 #: space's TOFU-pinned key. Like the subscribers query these are NOT relays —

@@ -13,7 +13,10 @@ Bounds (every one enforced here, whatever the uploader claims):
 * it expires no later than :data:`MAX_TTL_S` from now;
 * an author holds at most :data:`MAX_AUTHOR_LIVE_BYTES` and uploads at most
   :data:`MAX_UPLOADS_PER_HOUR` blobs an hour;
-* expired blobs (rows and files) go on each maintenance sweep.
+* expired blobs (rows and files) go on each maintenance sweep, and so do
+  temporary files a write left behind (older than :data:`TEMP_GRACE_S`,
+  a page of the directory per sweep — the code the space media cache
+  uses too).
 """
 
 from __future__ import annotations
@@ -24,7 +27,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..moment_public_media import is_blob_id
-from .blob_store import FsBlobFiles, MediaRefused, check_address, check_shape
+from .blob_store import (
+    TEMP_GRACE_S,
+    FsBlobFiles,
+    MediaRefused,
+    check_address,
+    check_shape,
+    remove_stale_temps,
+)
 from .domain import GfsMomentMedia
 
 if TYPE_CHECKING:
@@ -50,19 +60,26 @@ MAX_UPLOADS_PER_HOUR: int = 60
 #: Expired blobs removed per sweep.
 PRUNE_BATCH: int = 500
 
+#: Directory entries the temporary-file sweep looks at per run (it resumes
+#: where the last run on this node stopped, and wraps at the end).
+TEMP_SCAN_BATCH: int = 100_000
+
 #: Re-exported: the moment routes map it to their HTTP answer.
-__all__ = ["GfsMomentMediaStore", "MediaRefused"]
+__all__ = ["TEMP_GRACE_S", "GfsMomentMediaStore", "MediaRefused"]
 
 
 class GfsMomentMediaStore:
     """Encrypted moment blobs: files under ``media_dir/moments``, metadata
     in ``gfs_moment_media``."""
 
-    __slots__ = ("_files", "_repo")
+    __slots__ = ("_files", "_repo", "_temp_cursor")
 
     def __init__(self, repo: AbstractGfsMomentMediaRepo, media_dir: str | Path) -> None:
         self._repo = repo
         self._files = FsBlobFiles(Path(media_dir) / "moments")
+        #: Where this node's temporary-file sweep resumes (in memory: every
+        #: node may sweep, and a restart only starts the walk over).
+        self._temp_cursor = ""
 
     async def put(
         self,
@@ -118,11 +135,22 @@ class GfsMomentMediaStore:
         return True
 
     async def prune_expired(self, now: int | None = None) -> int:
+        """Drop expired blobs (files, then rows), and remove the stale
+        temporary files in the next page of the directory. Returns the
+        blobs dropped."""
         now = int(time.time()) if now is None else now
         ids = await self._repo.expired(now, limit=PRUNE_BATCH)
         for blob_id in ids:
             await self._files.remove(blob_id)
         await self._repo.delete_ids(ids)
+        page, self._temp_cursor = await self._files.scan(
+            after=self._temp_cursor, limit=TEMP_SCAN_BATCH
+        )
+        temps = await remove_stale_temps(
+            self._files, page, cutoff=time.time() - TEMP_GRACE_S
+        )
+        if temps:
+            log.info("moment media: removed %d stale temporary file(s)", temps)
         return len(ids)
 
     async def purge_author(self, author_user_id: str) -> int:

@@ -95,12 +95,18 @@ names no node.
 ## Space media cache on a shared data dir
 
 The space media cache (`[space_media]`, [protocol/discovery.md](../protocol/discovery.md#space-media-cache-on-a-gfs-capability-space_media))
-keeps encrypted blobs as files under `<data_dir>/media/spaces/` and their
+keeps encrypted blobs as files under `<data_dir>/space_media/` (not under the public `media/` branding dir) and their
 rows in the shared `gfs.db`, so every node must mount the **same** data dir:
 whichever node took an upload, any node serves the fetch. Size
 `max_bytes` (default 5 GiB) to the disk that volume has — it is a cache, so
-the least recently fetched blobs are evicted when it is full (and a space or
-channel past `space_max_bytes` evicts its own least recently fetched), and
+the owner holding the most bytes — a household across all its spaces, or
+for channel blobs the uploader's address — loses its own least recently
+fetched blobs first when it is full — never one global order and never per
+scope, so one household can't flush the others with many spaces (and a space or channel past `space_max_bytes` evicts
+its own least recently fetched). One client address uploads at most
+`ip_bytes_per_hour` (1 GiB) an hour across every scope, counted cluster-wide
+in `gfs.db`. A private space's channel takes media while a member household
+holds a seat in it. And
 nothing lives past `ttl_seconds` (3 days). Behind Cloudflare a fetch (`GET /gfs/media/{blob}`) is
 `Cache-Control: public, max-age=3600, immutable`, so the edge absorbs
 repeated reads; a miss is `no-store`. Set `max_bytes = 0` (or
@@ -113,9 +119,15 @@ much disk headroom. The upload rate holds exactly (reserved in the shared
 database). One node at a time (a lease row in `gfs.db`) runs the hourly
 orphan sweep: it walks the next 100 000 entries of the shared directory —
 resuming where the last run stopped — and removes files left without a row
-(a crash mid-upload) and stale `.part` files older than 10 minutes. The admin overview (`GET /admin/api/overview`,
+(a crash mid-upload) and stale `.part` files older than 10 minutes. Every
+node's sweep also removes stale `.part` files under `media/moments/` (a page
+of that directory per run, the same code). The admin overview (`GET /admin/api/overview`,
 `space_media`) shows the blobs and bytes held and this node's evictions and
-quota refusals.
+quota refusals — in the admin portal, the **Media cache** card on Overview:
+used of `max_bytes` with a bar, the number of pictures and files, the TTL,
+and this node's evictions and refusals since it started (or "Turned off"
+while `max_bytes = 0`). Each node counts its own; reload against another
+node to see its counters.
 
 ## Rate limits across nodes
 

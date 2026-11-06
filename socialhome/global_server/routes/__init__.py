@@ -54,6 +54,7 @@ from .admin import (
     AdminSpaceActionView,
     AdminSpaceCollectionView,
     AdminUiIndexView,
+    BrandingMediaView,
 )
 from .channels import (
     ChannelEpochView,
@@ -135,11 +136,10 @@ from .relay import (
     SubscribeView,
 )
 from .space_media import (
-    GfsChannelMediaDeleteView,
-    GfsChannelMediaUploadView,
+    SPACE_MEDIA_DELETE_ROUTE,
+    SPACE_MEDIA_ROUTE,
+    GfsMediaDeleteView,
     GfsMediaView,
-    GfsSpaceMediaDeleteView,
-    GfsSpaceMediaUploadView,
 )
 from .viewer_pages import (
     InvitePageDataView,
@@ -154,13 +154,11 @@ def register_routes(
     app: web.Application,
     *,
     admin_ui_dir: Path,
-    media_dir: str,
     public_static_dir: Path | None = None,
 ) -> None:
     """Mount every GFS view onto *app*.
 
-    Accepts ``admin_ui_dir`` for the admin-static mount, ``media_dir``
-    (absolute) for the public ``/media/`` file mount, and the optional
+    Accepts ``admin_ui_dir`` for the admin-static mount and the optional
     ``public_static_dir`` that holds the §highlights_public viewer
     bundle. Tests pass ``None`` for the static dir when they don't
     care about the public landing JS.
@@ -202,26 +200,12 @@ def register_routes(
     app.router.add_view("/gfs/member-publish", MemberPublishView)
     app.router.add_view("/gfs/member-publish-anon", MemberPublishAnonView)
     app.router.add_view("/gfs/spaces/{space_id}/epoch", SpaceEpochNoticeView)
-    # The encrypted, short-lived space media cache: uploads per scope (a
-    # listed space, or a private space's opaque channel), one scope-free
-    # fetch by address.
-    app.router.add_view("/gfs/media/{blob_id:[0-9a-f]{64}}", GfsMediaView)
-    app.router.add_view(
-        "/gfs/spaces/{space_id}/media/{blob_id:[0-9a-f]{64}}",
-        GfsSpaceMediaUploadView,
-    )
-    app.router.add_view(
-        "/gfs/spaces/{space_id}/media/{blob_id:[0-9a-f]{64}}/delete",
-        GfsSpaceMediaDeleteView,
-    )
-    app.router.add_view(
-        "/gfs/channels/{channel_id:[0-9a-f]{32}}/media/{blob_id:[0-9a-f]{64}}",
-        GfsChannelMediaUploadView,
-    )
-    app.router.add_view(
-        "/gfs/channels/{channel_id:[0-9a-f]{32}}/media/{blob_id:[0-9a-f]{64}}/delete",
-        GfsChannelMediaDeleteView,
-    )
+    # The encrypted, short-lived space media cache: ONE scope-free path —
+    # upload (PUT) and fetch (GET) by address, and a delete. The scope (a
+    # listed space, or a private space's opaque channel) rides only inside
+    # the signed claim / delete body, never in the URL.
+    app.router.add_view(SPACE_MEDIA_ROUTE, GfsMediaView)
+    app.router.add_view(SPACE_MEDIA_DELETE_ROUTE, GfsMediaDeleteView)
     # Opaque channels for private spaces (v_51) — every id in the body.
     app.router.add_view(CHANNEL_REGISTER_ROUTE, ChannelRegisterView)
     app.router.add_view(CHANNEL_EPOCH_ROUTE, ChannelEpochView)
@@ -364,8 +348,9 @@ def register_routes(
     app.router.add_view("/admin", AdminUiIndexView)
     if admin_ui_dir.is_dir():
         app.router.add_static("/admin/static/", admin_ui_dir)
-    if Path(media_dir).is_dir():
-        app.router.add_static("/media/", media_dir)
+    # Branding images only — top-level files of ``media/``, one segment, no
+    # dot-file. Never a static mount of the dir: blobs live beside it.
+    app.router.add_view("/media/{name}", BrandingMediaView)
     if public_static_dir is not None and public_static_dir.is_dir():
         # Hosts the vanilla-JS public-viewer bundle for §highlights_public.
         # The landing page references ``/static/highlight_public_viewer.js``.

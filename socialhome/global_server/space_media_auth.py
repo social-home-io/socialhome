@@ -34,12 +34,17 @@ knows only the random channel id and the keys pinned for it):
 
 The claim's ``ts`` must be within :data:`SPACE_MEDIA_TS_SKEW_S` of this
 server's clock. A captured upload replayed inside that window is harmless:
-the blob is content-addressed, so it is the same bytes again (a no-op), or
+the blob's address binds its bytes and scope, so it is the same blob again (a no-op), or
 lands on another GFS serving the same scope, inside that scope's caps there.
 
 A delete is the scope's seed holder's alone: the space authority
-(``space_media_delete``) or the channel key. Every refusal is a
-:class:`PermissionError`; the route answers all of them with one uniform 403.
+(``space_media_delete``) or the channel key. A delete is taken ONCE: an
+exact replay inside the ±300 s window is refused (a seen-digest cache, per
+node; a replay to another node can only delete that scope's own blob,
+which its seed holder deleted already — the household does not upload a
+deleted item's file again).
+Every refusal is a :class:`PermissionError`; the route answers all of them
+with one uniform 403.
 """
 
 from __future__ import annotations
@@ -47,6 +52,8 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
+
+from aiohttp import web
 
 from ..authority_sig import (
     AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
@@ -69,8 +76,12 @@ from ..domain.gfs_space_media import (
     media_delete_payload,
     require_space_media_sig_suite,
 )
-from .federation import TIMING_UNIFORM_DUMMY_KEY_HEX, TIMING_UNIFORM_DUMMY_SIG
-from .public import ClientIpResolver, build_window_limiter
+from .federation import (
+    TIMING_UNIFORM_DUMMY_KEY_HEX,
+    TIMING_UNIFORM_DUMMY_SIG,
+    SeenPayloadCache,
+)
+from .public import ClientIpResolver, SlidingWindowCounter, node_share
 
 if TYPE_CHECKING:
     from .channels import GfsChannelService
@@ -106,7 +117,13 @@ SPACE_MEDIA_TS_SKEW_S: int = 300
 class GfsSpaceMediaAuth:
     """Authorize uploads to and deletes from the space media cache."""
 
-    __slots__ = ("_channels", "_clock", "_federation", "_member_publish")
+    __slots__ = (
+        "_channels",
+        "_clock",
+        "_deletes_seen",
+        "_federation",
+        "_member_publish",
+    )
 
     def __init__(
         self,
@@ -120,6 +137,9 @@ class GfsSpaceMediaAuth:
         self._member_publish = member_publish
         self._channels = channels
         self._clock = clock
+        #: Deletes already taken (their signed bytes' digest), for the
+        #: skew window on both sides.
+        self._deletes_seen = SeenPayloadCache(ttl_s=float(2 * SPACE_MEDIA_TS_SKEW_S))
 
     async def authorize_upload(
         self,
@@ -128,14 +148,16 @@ class GfsSpaceMediaAuth:
         scope_kind: str,
         scope_id: str,
         blob_id: str,
-    ) -> None:
+    ) -> str:
         """Raise :class:`PermissionError` unless *auth* lets its holder put
-        *blob_id* into the scope the path names (the signed claim must name
-        the same). Every refusal costs the verifications a success of that
-        kind makes."""
+        *blob_id* into the scope the claim names. Returns the space's owning
+        household — the cache's fairness key — or ``""`` for a channel (its
+        blobs count against their uploader's address bucket, which the route
+        knows). Every refusal
+        costs the verifications a success of that kind makes."""
         with counting_ed25519_verifies() as done:
             try:
-                await self._authorize_upload(
+                return await self._authorize_upload(
                     auth, scope_kind=scope_kind, scope_id=scope_id, blob_id=blob_id
                 )
             except PermissionError:
@@ -172,7 +194,7 @@ class GfsSpaceMediaAuth:
         scope_kind: str,
         scope_id: str,
         blob_id: str,
-    ) -> None:
+    ) -> str:
         claim = auth.claim
         if (claim.scope, claim.scope_id, claim.blob_id) != (
             scope_kind,
@@ -184,21 +206,25 @@ class GfsSpaceMediaAuth:
             raise PermissionError("authorization kind not taken for this scope")
         self._require_fresh(claim.ts)
         space: GlobalSpace | None = None
-        if auth.kind != AUTH_AUTHORITY:
-            # The scope first (its refusal is topped up by the caller).
-            if scope_kind == SCOPE_SPACE:
-                space = await self._federation.listed_space(scope_id)
-            else:
-                await self._channels.require_channel(scope_id)
+        household = ""
+        if scope_kind == SCOPE_CHANNEL:
+            # The scope first (its refusal is topped up by the caller): a
+            # channel must be IN USE — a member household holds a seat —
+            # for every kind, the channel key's included (registration is
+            # anonymous).
+            await self._channels.require_channel_in_use(scope_id)
+        elif auth.kind != AUTH_AUTHORITY:
+            space = _active(await self._federation.listed_space(scope_id))
+            household = space.owning_instance
         if auth.kind == AUTH_AUTHORITY:
-            await self._federation.verify_space_authority(
+            space = await self._federation.verify_space_authority(
                 scope_id,
                 event_type=AUTHORITY_EVENT_SPACE_MEDIA_PUT,
                 payload=claim.signing_body(),
                 authority_sig=auth.sig,
                 authority_sig_suite=auth.sig_suite,
             )
-            return
+            return _active(space).owning_instance
         if auth.kind == AUTH_CHANNEL:
             await self._channels.verify_channel_key(
                 scope_id,
@@ -207,7 +233,7 @@ class GfsSpaceMediaAuth:
                 signature=auth.sig,
                 suite=auth.sig_suite,
             )
-            return
+            return household
         if auth.epoch is None:  # pragma: no cover - the codec requires one
             raise PermissionError("writer upload without an epoch")
         message = claim.writer_signing_bytes(kind=auth.kind, epoch=auth.epoch)
@@ -218,13 +244,13 @@ class GfsSpaceMediaAuth:
             await self._member_publish.verify_writer_cert(
                 space, auth.writer_cert, epoch=auth.epoch, author_pk=author_pk
             )
-            return
+            return household
         if auth.kind == AUTH_CHANNEL_CERT and auth.channel_cert is not None:
             author_pk = self._cert_holder(auth, auth.channel_cert.instance_pk, message)
             await self._channels.verify_cert_holder(
                 scope_id, auth.channel_cert, epoch=auth.epoch, author_pk=author_pk
             )
-            return
+            return household
         if auth.kind == AUTH_WRITER_KEY and scope_kind == SCOPE_SPACE:
             await self._member_publish.verify_writer_key_sig(
                 scope_id,
@@ -234,7 +260,7 @@ class GfsSpaceMediaAuth:
                 suite=auth.sig_suite,
             )
             await self._member_publish.require_writer_key_epoch(scope_id, auth.epoch)
-            return
+            return household
         if auth.kind == AUTH_WRITER_KEY and scope_kind == SCOPE_CHANNEL:
             await self._channels.verify_writer_key(
                 scope_id,
@@ -243,7 +269,7 @@ class GfsSpaceMediaAuth:
                 writer_sig=auth.sig,
                 suite=auth.sig_suite,
             )
-            return
+            return household
         raise PermissionError("unknown upload authorization")  # pragma: no cover
 
     async def _authorize_delete(
@@ -280,6 +306,15 @@ class GfsSpaceMediaAuth:
             )
         else:
             raise PermissionError("unknown scope")
+        # Checked after the signature verified, so a replay costs what a
+        # success does (one verification) and an unverified body can't
+        # poison the cache. Keyed on the signed payload alone (scope, blob,
+        # ts) — never on the signature's text, which another encoding of
+        # the same bytes could vary.
+        seen = self._deletes_seen.digest(payload)
+        if self._deletes_seen.seen(seen):
+            raise PermissionError("replayed delete")
+        self._deletes_seen.record(seen)
 
     @staticmethod
     def _cert_holder(
@@ -302,6 +337,14 @@ class GfsSpaceMediaAuth:
             raise PermissionError("stale or future timestamp")
 
 
+def _active(space: GlobalSpace) -> GlobalSpace:
+    """Only an ACTIVE listed space takes media — not a pending one a
+    household published but a moderator hasn't accepted (third review A3)."""
+    if space.status != "active":
+        raise PermissionError("space is not active")
+    return space
+
+
 def _burn_verifies(n: int) -> None:
     """Make *n* throw-away Ed25519 verifications against the fixed dummy key
     the other early-refusal paths use; the result is discarded."""
@@ -310,21 +353,44 @@ def _burn_verifies(n: int) -> None:
         verify_ed25519(key, _BURN_MESSAGE, TIMING_UNIFORM_DUMMY_SIG)
 
 
-def is_space_media_write_path(path: str) -> bool:
-    """``/gfs/{spaces|channels}/{id}/media/{blob}`` and its ``/delete`` — not
-    the public fetch ``/gfs/media/{blob}`` (a CDN serves most of those)."""
-    parts = path.split("/")
-    return (
-        len(parts) in (6, 7)
-        and parts[1] == "gfs"
-        and parts[2] in ("spaces", "channels")
-        and parts[4] == "media"
-        and (len(parts) == 6 or parts[6] == "delete")
-    )
+#: The routed writes, by aiohttp canonical path → method. One scope-free
+#: path: the scope rides only inside the signed claim / delete body, never
+#: in a URL an access log or a proxy keeps.
+SPACE_MEDIA_WRITE_ROUTES: dict[str, str] = {
+    "/gfs/media/{blob_id}": "PUT",
+    "/gfs/media/{blob_id}/delete": "POST",
+}
 
 
-def build_space_media_rate_limit(resolver: ClientIpResolver):
-    """Per-IP limiter for the space media upload and delete routes."""
-    return build_window_limiter(
-        resolver, SPACE_MEDIA_MAX_PER_MINUTE_PER_IP, is_space_media_write_path
-    )
+def is_space_media_write(method: str, canonical: str | None) -> bool:
+    """An upload or a delete as ROUTED — matched on the route the request
+    resolved to, never on the raw path, so no spelling of the path (an
+    encoded slash, a doubled one) slips past the limiter. Not the public
+    ``GET`` of the same path (a CDN serves most of those)."""
+    return canonical is not None and SPACE_MEDIA_WRITE_ROUTES.get(canonical) == method
+
+
+def build_space_media_rate_limit(
+    resolver: ClientIpResolver, *, nodes: Callable[[], int] | None = None
+):
+    """Per-IP limiter for the space media uploads and deletes. With *nodes*
+    (the cluster's live node count) it is cluster-wide: each node allows
+    its :func:`~.public.node_share` of the budget."""
+    counter = SlidingWindowCounter(SPACE_MEDIA_MAX_PER_MINUTE_PER_IP)
+
+    @web.middleware
+    async def _rate_limit(request: web.Request, handler):
+        route = request.match_info.route
+        resource = route.resource if route is not None else None
+        canonical = resource.canonical if resource is not None else None
+        if not is_space_media_write(request.method, canonical):
+            return await handler(request)
+        limit = SPACE_MEDIA_MAX_PER_MINUTE_PER_IP
+        share = limit if nodes is None else node_share(limit, nodes())
+        if not counter.allow(resolver.bucket(request), limit=share):
+            resp = web.json_response({"error": "rate_limited"}, status=429)
+            resp.headers["Retry-After"] = "60"
+            return resp
+        return await handler(request)
+
+    return _rate_limit

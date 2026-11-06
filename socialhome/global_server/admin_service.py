@@ -149,7 +149,7 @@ class GfsAdminService:
         # Side effects (spec §24.9): remove all the instance's spaces.
         owned = await self._fed_repo.list_spaces_for_instance(instance_id)
         for sp in owned:
-            await self._fed_repo.set_space_status(sp.space_id, "banned")
+            await self._ban_space(sp.space_id)
         await self._log(
             "ban_client",
             "instance",
@@ -163,6 +163,15 @@ class GfsAdminService:
         await self._log("unban_client", "instance", instance_id, admin_ip)
 
     # ── Spaces ────────────────────────────────────────────────────────
+
+    async def _ban_space(self, space_id: str) -> None:
+        """Ban a space — every path a moderator bans through. Its blobs in
+        the space media cache are hidden at once (the read checks the
+        status) and dropped here; their addresses are bound to this space,
+        so no other scope can store or serve them."""
+        await self._fed_repo.set_space_status(space_id, "banned")
+        if self._space_media is not None:
+            await self._space_media.withdraw_scope("space", space_id)
 
     async def list_spaces(
         self,
@@ -193,7 +202,7 @@ class GfsAdminService:
         reason: str | None,
         admin_ip: str,
     ) -> None:
-        await self._fed_repo.set_space_status(space_id, "banned")
+        await self._ban_space(space_id)
         await self._log(
             "ban_space",
             "space",
@@ -363,7 +372,7 @@ class GfsAdminService:
         auto_banned = False
         if distinct >= self._fraud_threshold:
             if target_type == "space":
-                await self._fed_repo.set_space_status(target_id, "banned")
+                await self._ban_space(target_id)
             elif target_type == "instance":
                 await self._fed_repo.set_instance_status(target_id, "banned")
             await self._admin_repo.mark_pending_reports_acted(
@@ -417,7 +426,7 @@ class GfsAdminService:
             )
         elif action == "ban_target":
             if report.target_type == "space":
-                await self._fed_repo.set_space_status(report.target_id, "banned")
+                await self._ban_space(report.target_id)
             else:
                 await self._fed_repo.set_instance_status(report.target_id, "banned")
             await self._admin_repo.mark_pending_reports_acted(
