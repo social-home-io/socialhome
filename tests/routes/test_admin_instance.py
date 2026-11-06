@@ -6,11 +6,16 @@ re-broadcasts it to confirmed peers via INSTANCE_CAPABILITIES_UPDATED.
 
 from __future__ import annotations
 
+import asyncio
+
+import pytest
+
 from socialhome.app_keys import (
     capabilities_outbound_key,
     federation_repo_key,
     gfs_connection_service_key,
 )
+from socialhome.services import recovery_reconnect_service
 
 from .conftest import _auth
 
@@ -130,3 +135,38 @@ async def test_rejects_too_long(client):
         json={"display_name": "x" * 81},
     )
     assert resp.status == 422
+
+
+@pytest.fixture
+def slow_first_startup_step(monkeypatch):
+    """Make the startup announcer's first step outlast the app's startup,
+    as on a busy CI runner — its capabilities announcement then runs after
+    the test doubles were swapped in."""
+    original = recovery_reconnect_service.RecoveryReconnectService.maybe_reconnect
+
+    async def slow(self, *args, **kwargs):
+        await asyncio.sleep(0.3)
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(
+        recovery_reconnect_service.RecoveryReconnectService, "maybe_reconnect", slow
+    )
+
+
+async def test_the_startup_announcement_keeps_the_outbound_it_was_wired_with(
+    make_client, slow_first_startup_step
+):
+    """The background startup announcement publishes through the outbound
+    the startup wired — never one that replaced the app key later — so a
+    rename is still counted exactly once however late the announcement
+    runs (it made ``test_triggers_broadcast`` read 2 on a slow runner)."""
+    stub = _RecordingOutbound()
+    client = await make_client({capabilities_outbound_key: stub})
+    await asyncio.sleep(0.6)  # the announcer has finished
+    resp = await client.patch(
+        "/api/admin/instance",
+        headers=_auth(client._tok),
+        json={"display_name": "Casa Vizeli"},
+    )
+    assert resp.status == 200
+    assert stub.calls == 1
