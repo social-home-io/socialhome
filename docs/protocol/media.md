@@ -254,9 +254,17 @@ Paired and mesh members keep the `SPACE_MEDIA_BLOB` push above, unchanged.
 "media_refs": {"<local filename>": {"blob_id": "<sm1 address>", "suite": "aesgcm-256-pad-det", "epoch": 3, "size": 1048604, "scope": "space", "addr_suite": "sm1"}}
 ```
 
-one entry per file of the item (never more than the item shows — a
-receiver refuses a larger descriptor whole and ignores an entry for a file
-the item does not reference); `size` is the sealed blob's byte count.
+one entry per file of the item. Which files an item has is ONE rule,
+`record_media_urls` / `post_media_urls` (`domain/space_media_ref`): a post's
+media, pictures, attached file and link-card thumbnail; an event's cover; a
+gallery item's thumbnail and full file — the sender describes exactly these
+and every receiver (live, follower, §25.6) allows exactly the files ITS
+stored copy of the item shows. A receiver drops an entry for a file it
+doesn't show and keeps the rest; a descriptor of more than 16 entries is
+refused whole. A reserved name (`gm-` moment media, `dm-` chat files —
+`is_reserved_media_name`) is never described, never kept and never fetched,
+and a received space item drops such references altogether. `size` is the
+sealed blob's byte count.
 `blob_id` is the GFS's **scope-bound address** —
 `sha256("sm1|" + scope + "|" + scope_id + "|" + blob)`
 (`domain/gfs_space_media.space_media_address`, `addr_suite: "sm1"`) — and
@@ -269,7 +277,7 @@ It rides:
 
 | Item | Where |
 |---|---|
-| Space post | `SPACE_POST_CREATED` (per link-joined v_80 member), the `public_relay` inner (followers, through a seed holder's relay) and the v_49 member-publish inner — the last two outside the author signature, like `writer_cert` |
+| Space post | `SPACE_POST_CREATED` (per link-joined v_80 member), the `public_relay` inner (followers, through a seed holder's relay) and the v_49 member-publish inner — the last two **outside the author signature**, like `writer_cert`: a follower trusts the seed-holding relay (which re-encrypts and authority-signs the inner) for the descriptor; the blob it names is still checked at its scope-bound address and must decrypt under the space key with the file name in its AAD |
 | Calendar event | `SPACE_CALENDAR_EVENT_CREATED` / `_UPDATED`, only when the cover is new or changed |
 | Gallery item | `SPACE_GALLERY_ITEM_CREATED` (thumbnail + full file) |
 | §25.6 records | `posts` / `calendar` / `gallery` records streamed to a link-joined v_80 requester ([`sync.md`](./sync.md), sync line 80) |
@@ -284,6 +292,15 @@ HKDF of the epoch's space content key, a **deterministic** nonce (the same
 file sealed again is the byte-identical blob, so a re-upload matches the
 descriptors readers hold), padded to the moment-media size buckets, at most
 8 MiB of file. Larger files are skipped.
+
+**Only the space's own files.** A member can name any local file in an
+item (a private album's photo, another space's picture, a household post's
+file). The sender describes — and, re-checked, uploads — a file only when
+it is no reserved name and every row that references it is content of this
+space (`MediaReferenceRepo.confined_to_space`: gallery items by their
+album's space, every other source by its own space; household rows, DMs,
+moments and household / private albums never count). So nothing outside
+the space is ever sealed under its key, live or in a catch-up.
 
 **Upload** (`SpaceMediaGfsUploader`). When an item with local media is
 created in a space that has link-joined v_80 members or (for posts)
@@ -309,7 +326,10 @@ always with the grant's shifted channel epoch. The request never names
 `from_instance`. Only a space the GFS holds `active` (approved) takes media:
 a pending one answers 403 and the item goes without the picture there.
 `200 already_stored` is success (coalescing; it does not refresh the
-blob's expiry); a refusal (403 / 413 / 422) is a WARNING and dropped; a
+blob's expiry) and is remembered per (GFS, blob) until min(7 days, that
+GFS's signed `ttl_s`) — after that the GFS may have dropped it, so a repeat
+sends it again; a space this household holds no authorization for is warned
+about once and nothing is sent; a refusal (403 / 413 / 422) is a WARNING and dropped; a
 transport error, 408 (too slow), 429 (per-scope rate or per-prefix byte
 budget), 503 (busy, or the cache switched off) or another 5xx is retried at
 most 4 times (backoff 30 s, doubling). Because the address binds the scope,
@@ -319,16 +339,25 @@ memory and bounded (2048 uploads): a restart or a full queue loses pending
 uploads (WARNING), and the reader then shows the item without that picture.
 
 **Reader** (`SpaceMediaGfsFetcher`). Keeps the item's entries as
-`space_media_refs` rows ([`database.md`](../database.md)); prefetches
-pictures on arrival (3 at a time, ≤ 200 waiting; a prefetch that finds the
-blob on no GFS — the item usually outruns the author's upload — tries again
-after 10 s and 60 s); anything else — or a
-picture past the backlog — is fetched when first viewed: `GET
-/api/media/{filename}` for a missing file asks the fetcher, concurrent
-viewers share one fetch, each waits at most 20 s. A fetch tries the GFS the
-link-joined pair relays through (`relay_via`), then this household's own
-GFS connections (≤ 4 sources): `GET /gfs/media/{blob_id}`
-(anonymous), bounded by the descriptor's `size`, checks that the blob sits
+`space_media_refs` rows ([`database.md`](../database.md)), **bound to the
+item that introduced the file** (and the household that delivered it) and
+written once: a descriptor of an already described file from another item
+or space is refused with a WARNING, never re-points it. Residual: the first
+item to describe a file wins — the same rule as the first complete
+`SPACE_MEDIA_BLOB` copy above. It prefetches pictures on arrival (3 at a
+time, ≤ 200 waiting and ≤ 50 per space; a prefetch that finds the blob on
+no GFS — the item usually outruns the author's upload — tries again after
+10 s and 60 s); anything else — or a picture past the backlog — is fetched
+when first viewed: `GET /api/media/{filename}` checks who may open the file
+first, then asks the fetcher; concurrent viewers share one fetch, each waits
+at most 20 s, and a file no GFS held is not asked for again on a view for
+5 minutes. At most 6 fetches run at once. A fetch tries this household's
+connection to the GFS the link-joined pair relays through (`relay_via`),
+then its other GFS connections (≤ 4 sources) — connections only, over the
+**cookie-less, address-pinned session** (`anon_session`), so a fetch is not
+linkable to the household and a URL it holds no connection to is never
+fetched: `GET /gfs/media/{blob_id}` (anonymous), bounded by the
+descriptor's `size`, checks that the blob sits
 at its scope-bound address for the scope id this household knows,
 decrypts with the epoch's media key and writes the file write-once under
 its local name (the `SPACE_MEDIA_BLOB` rules above). An unknown suite, a
@@ -354,7 +383,7 @@ sequenceDiagram
     G->>F: relay space_post_public
     E->>G: GET /gfs/media/{blob_id} (prefetch / on view)
     G-->>E: ciphertext
-    Note over E: sha256 check, decrypt, write-once
+    Note over E: scope-bound address check, decrypt, write-once
     F->>G: GET /gfs/media/{blob_id}
     G-->>F: ciphertext (CDN-cached)
 ```
@@ -376,8 +405,8 @@ anyway.
 
 **Deferred.** Files over 8 MiB (long videos) and re-uploading a blob the
 cache evicted or expired — an on-demand, coalesced "media wanted" path
-(next PR). Comment media and a seed holder's relay copy of an approved post
-carry no descriptor yet. A private space whose owner left `private_gfs`
+(next PR). Tracked follow-ups: **comment media** and **a seed holder's
+relayed copy of an approved post** carry no descriptor yet. A private space whose owner left `private_gfs`
 off has no channel: its link-joined members are reached through the space
 scope only while the space is listed on that GFS.
 

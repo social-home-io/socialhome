@@ -5,33 +5,44 @@ and a follower of a global space read the space through a GFS, whose
 envelope relay is far too small for pictures. So when content with local
 media is created in a space that has such readers, this household:
 
-1. **plans** (:meth:`SpaceMediaGfsUploader.plan`): finds the GFSs those
-   readers use — each link-joined v_80 member's ``relay_via`` connection,
-   and (for followers) every GFS the space is relayed to — keeps the ones
-   that proved the signed ``space_media`` capability, and describes each file
-   (≤ 8 MiB): its deterministic sealed blob's address, suite, epoch and size
-   (:mod:`socialhome.space_media_seal`). The caller puts that ``media_refs``
-   descriptor inside the item's encrypted payload. No reader → no plan, no
-   sealing.
+1. **plans** (:meth:`SpaceMediaGfsUploader.plan`, or
+   :meth:`~SpaceMediaGfsUploader.plan_for_reader` for one §25.6 catch-up
+   requester): finds the GFSs those readers use — each link-joined v_80
+   member's ``relay_via`` connection, and (for followers) every GFS the space
+   is relayed to — keeps the ones whose signed ``space_media`` capability
+   lists the space's scope, and describes each file of the item
+   (:func:`~socialhome.domain.space_media_ref.record_media_urls`, ≤ 8 MiB):
+   its deterministic sealed blob's scope-bound address (``sm1``), suite,
+   epoch, size, scope and ``addr_suite``. Only a file that is no reserved
+   (DM / moment) name and that nothing but this space's content references
+   (``MediaReferenceRepo.confined_to_space``) is ever described. The caller
+   puts that ``media_refs`` descriptor inside the item's encrypted payload.
+   No reader → no plan, no sealing.
 2. **uploads** (:meth:`SpaceMediaGfsUploader.upload`) in the background: seals
    each file once more (deterministic: the same bytes, so no sealed copy is
-   kept in memory meanwhile) and PUTs it once per target GFS, authorized
-   exactly as PR 1's cache requires — the space-authority signature when
+   kept in memory meanwhile; the file is re-checked as the space's own) and
+   PUTs it once per target GFS to the one scope-free path
+   ``PUT /gfs/media/{blob_id}`` — the scope rides only inside the signed
+   claim — authorized as the GFS requires: the space-authority signature when
    this household holds the space seed (host or delegated admin), else the
-   writer group key (strict mode), else our household's writer cert
-   (trusted mode, the one identified kind — never to a server we are not
-   registered on). Never ``from_instance``. A PRIVATE space reached through
-   its v_51 opaque channel uploads under the channel scope instead
-   (``PUT /gfs/channels/{channel_id}/media/{blob_id}``: the channel key for
-   a seed holder, else the member's channel writer key or channel cert from
-   its grant) — the GFS learns the channel id, never the space.
+   writer group key (strict mode), else our household's writer cert (trusted
+   mode, the one identified kind — never to a server we are not registered
+   on). Never ``from_instance``. A PRIVATE space reached through its v_51
+   opaque channel uploads under the channel scope instead (the claim names
+   the channel; the channel key for a seed holder, else the member's channel
+   writer key or channel cert from its grant) — the GFS learns the channel
+   id, never the space.
 
 ``200 already_stored`` is success (another uploader or an earlier try got
-there first). A refusal (403 / 413 / 422) is logged and dropped; a transport
-error, 429 or 5xx is retried at most :data:`MAX_ATTEMPTS` times with backoff.
-The queue is in memory and bounded: a restart or a full queue loses pending
-uploads (logged) — a reader then has a descriptor for a blob that is not
-cached and shows the item without that picture until it is re-uploaded.
+there first) and is remembered per (GFS, blob) until min(:data:`KEEP_S`, that
+GFS's TTL) — after that the GFS may have dropped it and a repeat sends it
+again. A refusal (403 / 413 / 422) is logged and dropped; a transport error,
+408, 429 or 5xx (503 busy included) is retried at most :data:`MAX_ATTEMPTS`
+times with backoff. A space this household can't authorize for is warned
+about once and nothing is sent. The queue is in memory and bounded: a
+restart or a full queue loses pending uploads (logged) — a reader then has a
+descriptor for a blob that is not cached and shows the item without that
+picture until it is re-uploaded.
 
 Cost per item: one upload per file per GFS (never per reader).
 """

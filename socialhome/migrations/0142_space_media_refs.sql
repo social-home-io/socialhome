@@ -4,7 +4,8 @@
 -- A household reached only through a GFS (a member seated from an invite
 -- link, a follower of a global space) gets a space item's pictures as a
 -- ``media_refs`` descriptor inside the item's encrypted payload, not as
--- bytes: ``{"<local filename>": {blob_id, suite, epoch, size}}``. The file
+-- bytes: ``{"<local filename>": {blob_id, suite, epoch, size, scope,
+-- addr_suite}}`` (``blob_id`` the GFS's scope-bound address). The file
 -- is fetched from the household's GFS on arrival (prefetch) or when first
 -- viewed (``GET /api/media/{filename}``), decrypted with the epoch's space
 -- key and written under the same local filename — so this row is what the

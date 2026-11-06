@@ -1255,28 +1255,36 @@ from __future__ import annotations
 #:   household below v_79 is sent nothing; the edit reaches it with the
 #:   host's sync once it upgrades. Labelled "Edit photos in a space".
 #: * **v_80** (2026-11-06) — **Space pictures through the GFS media cache**.
-#:   A space post, calendar event (its cover) or gallery item sent to a
-#:   member household seated from an invite link
+#:   A space post, calendar event (its new / changed cover) or gallery item
+#:   sent to a member household seated from an invite link
 #:   (``InstanceSource.SPACE_SESSION`` — reached only through a GFS relay,
 #:   too small for the bytes) carries a ``media_refs`` descriptor INSIDE its
-#:   encrypted payload: ``{"<local filename>": {blob_id, suite, epoch,
-#:   size}}``, one entry per file of the item (≤ its own media count). The
-#:   author's household seals each file once (``space_media_seal``:
-#:   HKDF of the epoch's content key, deterministic nonce, suite
-#:   ``aesgcm-256-pad-det``) and uploads it once per GFS that proved the
-#:   signed ``space_media`` capability; the reader fetches it from its own
-#:   GFS (``GET /gfs/media/{blob_id}``), checks the scope-bound address, decrypts
-#:   and stores it under the same file name (``space_media_refs``, migration
-#:   0142). The §25.6 ``posts`` / ``calendar`` / ``gallery`` records streamed
-#:   to such a member carry the same descriptor (sync line 80), and its
-#:   catch-up gets no ``SPACE_MEDIA_BLOB`` push (the relay refuses those
-#:   bytes). Followers of a global space get the descriptor in the relayed
-#:   post's inner — gated on the GFS's signed ``space_media`` capability,
-#:   not this version. **Fallback**: a link-joined member household below
-#:   v_80 gets no descriptor (and keeps the old ``SPACE_MEDIA_BLOB`` push,
-#:   which the relay carries only for small files) — its people see the
-#:   post without the pictures that did not fit. Labelled "Pictures in a
-#:   space for members who joined by link".
+#:   encrypted payload: ``{"<local filename>": {blob_id, suite, epoch, size,
+#:   scope, addr_suite}}`` — ``blob_id`` the GFS's scope-bound ``sm1``
+#:   address — one entry per file of the item (``record_media_urls``, ≤ 16;
+#:   a receiver drops entries for files it doesn't show). The author's
+#:   household seals each file once (``space_media_seal``: HKDF of the
+#:   epoch's content key, deterministic nonce, suite ``aesgcm-256-pad-det``;
+#:   only files that are the space's own content) and uploads it once per GFS
+#:   whose signed ``space_media`` capability lists the scope
+#:   (``PUT /gfs/media/{blob_id}``, the scope only in the signed claim); the
+#:   reader fetches ``GET /gfs/media/{blob_id}`` over its cookie-less GFS
+#:   session, checks the address with the scope id it knows, decrypts and
+#:   stores the file write-once (``space_media_refs``, migration 0142, each
+#:   row bound to the item that introduced the file). The §25.6 ``posts`` /
+#:   ``calendar`` / ``gallery`` records streamed to such a member carry the
+#:   same descriptor (sync line 80). No ``SPACE_MEDIA_BLOB`` push is queued
+#:   to a v_80 link-joined member (live), nor to ANY link-joined requester of
+#:   a §25.6 catch-up (the relay refuses those bytes whatever the version).
+#:   Followers of a global space get the descriptor in the relayed post's
+#:   inner, outside the author signature (the seed-holding relay is
+#:   trusted for it) — gated on the GFS's signed ``space_media``
+#:   capability, not this version. **Fallback**: a link-joined member
+#:   household below v_80 gets no descriptor; live it keeps the old
+#:   ``SPACE_MEDIA_BLOB`` push, which the relay carries only for small
+#:   files, and its catch-up gets no pictures — its people see posts without
+#:   the pictures that did not fit. Labelled "Pictures in a space for members
+#:   who joined by link".
 OURS: int = 80
 
 
@@ -1888,7 +1896,8 @@ class FederationCapability:
     #: media cache) on space posts / calendar events / gallery items and
     #: their §25.6 records, toward a member household seated from an invite
     #: link at or above it (:meth:`FederationService.peer_supports`). Below
-    #: it: no descriptor (and the old ``SPACE_MEDIA_BLOB`` push).
+    #: it: no descriptor (live, the old ``SPACE_MEDIA_BLOB`` push; a catch-up
+    #: never pushes bytes to any link-joined requester).
     MIN_FOR_SPACE_MEDIA_REFS = 80
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
