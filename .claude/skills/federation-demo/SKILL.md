@@ -1488,6 +1488,13 @@ Failure modes this catches:
 
 ### ``gfs-space-post`` — public space content actually crosses the GFS
 
+**Pictures through the GFS media cache (v_80).** The step ends with a
+~0.5 MB photo post (``_picture_via_gfs_media_cache``): the reader holds
+the file byte-identical, the GFS's own ``gfs_space_media`` holds the blob
+for the space (scope ``space``), the reader's ``space_media_refs`` names
+it, the author logged ``uploaded blob <id>`` and the reader ``fetched blob
+<id> … from GFS``.
+
 Prereqs: ``gfs-space-subscribe``. Alpha posts in the global space via
 ``POST /api/spaces/{id}/posts`` (the space endpoint — the household feed
 endpoint ignores ``space_id`` and lands a non-federating household post),
@@ -1741,6 +1748,13 @@ seated to read); and a moderator link that degrades or stalls in a
 pending elevation.
 
 ### ``gfs-invite-link-content`` — the relay carries ordinary space traffic
+
+**Pictures through the GFS media cache (v_80).** The step ends with a
+~0.5 MB photo post (``_picture_via_gfs_media_cache``): the reader holds
+the file byte-identical, the GFS's own ``gfs_space_media`` holds the blob
+for the space (scope ``space``), the reader's ``space_media_refs`` names
+it, the author logged ``uploaded blob <id>`` and the reader ``fetched blob
+<id> … from GFS``.
 
 Prereqs: ``gfs-invite-link``.
 
