@@ -150,10 +150,14 @@ ORPHAN_LEASE_S: int = 3000
 #: The upload rate window (a sliding hour over hourly buckets).
 _HOUR: int = 3600
 
-#: Upload bodies one node reads at once (≤ 8 MiB each: 128 MiB buffered at
-#: most); past it an upload is ``503 busy`` — slow senders can't pile up
-#: (security re-attack N5).
-MAX_CONCURRENT_BODY_READS: int = 16
+#: Upload bodies one client address bucket may have in flight on a node at
+#: once — so one client stalling header-only uploads holds this many, never
+#: the node (third review A5).
+PER_CLIENT_BODY_READS: int = 3
+
+#: Body bytes (signed sizes) one node buffers at once across all clients;
+#: past it an upload is ``503 busy`` rather than another buffer.
+MAX_BODY_BYTES_IN_FLIGHT: int = 256 * 1024 * 1024
 
 
 @dataclass(slots=True, frozen=True)
@@ -218,6 +222,45 @@ class UploadSlot:
     ip_bytes: int = 0
 
 
+class BodyReadGate:
+    """Which upload bodies a node reads right now: at most
+    :data:`PER_CLIENT_BODY_READS` per client address bucket, at most
+    :data:`MAX_BODY_BYTES_IN_FLIGHT` signed bytes in all. Non-blocking: a
+    refused :meth:`enter` is answered ``503 busy`` at once, never queued
+    (third review A5)."""
+
+    __slots__ = ("_by_client", "_max_bytes", "_per_client", "in_flight")
+
+    def __init__(
+        self,
+        *,
+        per_client: int = PER_CLIENT_BODY_READS,
+        max_bytes: int = MAX_BODY_BYTES_IN_FLIGHT,
+    ) -> None:
+        self._per_client = per_client
+        self._max_bytes = max_bytes
+        self._by_client: dict[str, int] = {}
+        #: Signed bytes of the bodies being read now.
+        self.in_flight = 0
+
+    def enter(self, client_key: str, size: int) -> bool:
+        if self._by_client.get(client_key, 0) >= self._per_client:
+            return False
+        if self.in_flight + size > self._max_bytes:
+            return False
+        self._by_client[client_key] = self._by_client.get(client_key, 0) + 1
+        self.in_flight += size
+        return True
+
+    def leave(self, client_key: str, size: int) -> None:
+        left = self._by_client.get(client_key, 0) - 1
+        if left > 0:
+            self._by_client[client_key] = left
+        else:
+            self._by_client.pop(client_key, None)
+        self.in_flight = max(0, self.in_flight - size)
+
+
 class _Counters:
     """This node's eviction / refusal counts since it started."""
 
@@ -248,7 +291,7 @@ class GfsSpaceMediaStore:
         "_lock",
         "_node_id",
         "_repo",
-        "body_reads",
+        "body_gate",
     )
 
     def __init__(
@@ -272,7 +315,7 @@ class GfsSpaceMediaStore:
         #: holds a client address.
         self._ip_key_secret = ip_key_secret or secrets.token_bytes(32)
         #: Bounds the upload bodies this node reads at once (the route).
-        self.body_reads = asyncio.Semaphore(MAX_CONCURRENT_BODY_READS)
+        self.body_gate = BodyReadGate()
 
     @property
     def limits(self) -> SpaceMediaLimits:
@@ -549,6 +592,11 @@ class GfsSpaceMediaStore:
         }
 
     # ── Internals ─────────────────────────────────────────────────────────
+
+    def client_key(self, client: str) -> str:
+        """The keyed hash of a client address bucket — the per-address
+        budget's key, and the body-read gate's."""
+        return self._ip_key(client)
 
     def _ip_key(self, client: str) -> str:
         """The per-address budget's key: a keyed hash of the address bucket

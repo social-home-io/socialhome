@@ -3590,9 +3590,13 @@ otherwise; within the caps, `413`) and the scope's upload slot (`429`,
 reserved atomically) — a scope that already holds the blob is answered
 `already_stored` without reading anything. Only then is the body read, up
 to exactly the signed `size` (`413` past it, `422 size_mismatch` short of
-it) at 64 KiB/s at least, never under 10 s (`408 body_timeout`), with at
-most 16 bodies read at once per node (`503 busy` + `Retry-After` past it —
-slow senders can't pile up buffers), the slot given back on any of these —
+it), making **progress**: at least 64 KiB (or the rest) in every 5-second
+window, else `408 body_timeout` — a trickle can't hold a read open. One
+client address bucket has at most 3 bodies in flight per node, and a node
+at most 256 MiB of signed body bytes (`503 busy` + `Retry-After` past
+either, at once — never queued): a client stalling header-only uploads
+holds its own 3, never the node (third review A5). The slot is given back
+on any of these —
 so neither an unauthorized caller nor a scope over its rate makes the server
 buffer a byte. A captured upload replayed within the ±300 s
 window is harmless: it is the same blob of the same scope (a no-op), or

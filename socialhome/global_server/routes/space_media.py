@@ -10,9 +10,11 @@ proxy nor a CDN cache key ever sees a space or channel id next to a blob
   (:mod:`socialhome.domain.gfs_space_media`) and is checked BEFORE the body
   is read; then the size must be a padded bucket and the scope's upload slot
   is reserved — all before the body is read, up to exactly the signed
-  ``size`` (413 past it) at :data:`MIN_BODY_RATE` at least, while at most
-  :data:`~..space_media.MAX_CONCURRENT_BODY_READS` bodies are read at once
-  on a node (``503 busy`` past it). ``201
+  ``size`` (413 past it), making progress in every window
+  (:data:`PROGRESS_WINDOW_S`, ``408`` otherwise), while one client bucket
+  has at most :data:`~..space_media.PER_CLIENT_BODY_READS` bodies and the
+  node :data:`~..space_media.MAX_BODY_BYTES_IN_FLIGHT` bytes in flight
+  (``503 busy`` past either). ``201
   {"stored": true}``; the scope's retry is ``200 {"stored": false,
   "status": "already_stored"}`` (never a conflict, and never a fresher
   expiry). ``503 space_media_disabled`` while the operator has the cache off.
@@ -71,20 +73,15 @@ _MAX_DELETE_BYTES = 2048
 #: Answer to an upload-rate refusal: the window is an hour.
 _QUOTA_RETRY_AFTER_S = "600"
 
-#: Answer while this node reads as many bodies as it takes at once.
+#: Answer while this client (or the node) reads as many bodies as it may.
 _BUSY_RETRY_AFTER_S = "5"
 
-#: An upload's body must arrive at least this fast (bytes / s) — so a
-#: client can't hold a read open for minutes per blob — but never in less
-#: than :data:`MIN_BODY_TIMEOUT_S` (8 MiB at 64 KiB/s: ~2 min). A slower one
-#: is ``408`` and its reserved slot is given back (security re-attack N5).
-MIN_BODY_RATE: int = 64 * 1024
-MIN_BODY_TIMEOUT_S: float = 10.0
-
-
-def body_read_timeout(size: int) -> float:
-    """How long a body of *size* bytes may take to arrive."""
-    return max(MIN_BODY_TIMEOUT_S, size / MIN_BODY_RATE)
+#: Progress, not one long deadline: an upload body must deliver at least
+#: :data:`MIN_PROGRESS_BYTES` (or the rest of it) in every window of
+#: :data:`PROGRESS_WINDOW_S` — a client trickling or stalling is ``408`` and
+#: its slot given back (third review A5).
+PROGRESS_WINDOW_S: float = 5.0
+MIN_PROGRESS_BYTES: int = 64 * 1024
 
 
 def _refused() -> web.Response:
@@ -112,6 +109,10 @@ class GfsMediaView(GfsBaseView):
         if data is None:
             return web.Response(status=404, headers=_MISS_HEADERS)
         return web.Response(body=data, headers=_MEDIA_HEADERS)
+
+    async def read_body(self, size: int) -> bytes:
+        """The upload body, up to *size* bytes, making progress."""
+        return await _read_with_progress(self.request, size)
 
     async def put(self) -> web.Response:
         blob_id = self.match("blob_id")
@@ -153,24 +154,25 @@ class GfsMediaView(GfsBaseView):
         if reserved is None:
             # The scope already holds it: answered without reading the body.
             return web.json_response({"stored": False, "status": "already_stored"})
-        if store.body_reads.locked():
-            # This node is reading as many bodies as it takes at once: answer
-            # now rather than queue another buffer (security re-attack N5).
+        client_key = store.client_key(self.client_bucket())
+        if not store.body_gate.enter(client_key, size):
+            # This client already has its share of bodies in flight (or the
+            # node its bytes): answer now rather than queue another buffer
+            # (security re-attack N5, third review A5).
             await store.release_upload(reserved)
             resp = web.json_response({"error": "busy"}, status=503)
             resp.headers["Retry-After"] = _BUSY_RETRY_AFTER_S
             return resp
         try:
-            async with store.body_reads:
-                data = await asyncio.wait_for(
-                    self.bounded_raw(size), body_read_timeout(size)
-                )
+            data = await self.read_body(size)
         except TimeoutError:
             await store.release_upload(reserved)
             return web.json_response({"error": "body_timeout"}, status=408)
         except BaseException:
             await store.release_upload(reserved)
             raise
+        finally:
+            store.body_gate.leave(client_key, size)
         if len(data) != size:
             await store.release_upload(reserved)
             return web.json_response({"error": "size_mismatch"}, status=422)
@@ -189,6 +191,42 @@ class GfsMediaView(GfsBaseView):
         if stored:
             return web.json_response({"stored": True}, status=201)
         return web.json_response({"stored": False, "status": "already_stored"})
+
+
+async def _read_with_progress(request: web.Request, size: int) -> bytes:
+    """Read a body of at most *size* bytes, requiring progress: at least
+    :data:`MIN_PROGRESS_BYTES` (or the rest) in every
+    :data:`PROGRESS_WINDOW_S` window — :class:`TimeoutError` otherwise; a
+    body past *size* is ``413``."""
+    declared = request.content_length
+    if declared is not None and declared > size:
+        raise web.HTTPRequestEntityTooLarge(max_size=size, actual_size=declared)
+    loop = asyncio.get_running_loop()
+    buf = bytearray()
+    window_end = loop.time() + PROGRESS_WINDOW_S
+    window_start_len = 0
+    while True:
+        need = min(MIN_PROGRESS_BYTES, size - window_start_len)
+        try:
+            chunk = await asyncio.wait_for(
+                request.content.readany(), max(window_end - loop.time(), 0.001)
+            )
+        except TimeoutError:
+            if len(buf) - window_start_len < need:
+                raise
+            window_end = loop.time() + PROGRESS_WINDOW_S
+            window_start_len = len(buf)
+            continue
+        if not chunk:
+            return bytes(buf)
+        buf += chunk
+        if len(buf) > size:
+            raise web.HTTPRequestEntityTooLarge(max_size=size, actual_size=len(buf))
+        if loop.time() >= window_end:
+            if len(buf) - window_start_len < need:
+                raise TimeoutError
+            window_end = loop.time() + PROGRESS_WINDOW_S
+            window_start_len = len(buf)
 
 
 class GfsMediaDeleteView(GfsBaseView):

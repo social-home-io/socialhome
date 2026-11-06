@@ -44,6 +44,7 @@ from socialhome.gfs_channel import (
     sign_register,
     signing_bytes,
 )
+from socialhome.global_server import space_media as space_media_mod
 from socialhome.global_server.app_keys import (
     gfs_channel_repo_key,
     gfs_fed_repo_key,
@@ -390,15 +391,15 @@ async def test_the_upload_rate_is_429(gfs):
 def body_reads(monkeypatch):
     """Count (and optionally stall) the upload view's body reads."""
     reads = {"n": 0, "stall": 0.0}
-    real = GfsMediaView.bounded_raw
+    real = GfsMediaView.read_body
 
-    async def spy(self, max_bytes):
+    async def spy(self, size):
         reads["n"] += 1
         if reads["stall"]:
             await asyncio.sleep(reads["stall"])
-        return await real(self, max_bytes)
+        return await real(self, size)
 
-    monkeypatch.setattr(GfsMediaView, "bounded_raw", spy)
+    monkeypatch.setattr(GfsMediaView, "read_body", spy)
     return reads
 
 
@@ -436,17 +437,38 @@ async def test_a_retry_of_a_held_blob_is_answered_unread(gfs, body_reads):
     assert body_reads["n"] == 1
 
 
-async def test_a_body_that_stalls_times_out_and_refunds_its_slot(
-    gfs, body_reads, monkeypatch
-):
-    monkeypatch.setattr(space_media_routes, "MIN_BODY_TIMEOUT_S", 0.05)
-    monkeypatch.setattr(space_media_routes, "MIN_BODY_RATE", 10**12)
-    body_reads["stall"] = 0.5
-    data = os.urandom(SMALL)
-    r = await gfs.put(
-        _put_url(data), data=data, headers=_authority_header(_claim(data))
+async def _stalled_upload(gfs, data: bytes, *, xff: str):
+    """An upload whose headers arrive and whose body never does."""
+    headers = _authority_header(_claim(data))
+    rd, wr = await asyncio.open_connection(gfs.server.host, gfs.server.port)
+    wr.write(
+        (
+            f"PUT {_put_url(data)} HTTP/1.1\r\nHost: gfs.test\r\n"
+            f"Content-Length: {len(data)}\r\nX-Forwarded-For: {xff}\r\n"
+            f"{SPACE_MEDIA_AUTH_HEADER}: {headers[SPACE_MEDIA_AUTH_HEADER]}\r\n\r\n"
+        ).encode()
     )
-    assert r.status == 408
+    await wr.drain()
+    return rd, wr
+
+
+async def _status(rd) -> int:
+    line = await asyncio.wait_for(rd.readline(), 5)
+    return int(line.split()[1])
+
+
+async def test_a_body_that_makes_no_progress_is_cut_and_refunds_its_slot(
+    gfs, monkeypatch
+):
+    """Third review A5: progress, not one long deadline — a body that sends
+    nothing for a progress window is 408 and its slot given back."""
+    monkeypatch.setattr(space_media_routes, "PROGRESS_WINDOW_S", 0.2)
+    data = os.urandom(SMALL)
+    rd, wr = await _stalled_upload(gfs, data, xff="203.0.113.5")
+    try:
+        assert await _status(rd) == 408
+    finally:
+        wr.close()
     store = gfs.app_[gfs_space_media_store_key]
     bucket = int(time.time()) // 3600
     assert await store._repo.upload_counts("space", SPACE, bucket=bucket) == (0, 0)
@@ -984,39 +1006,51 @@ async def test_a_member_in_many_private_spaces_gets_media_in_each(gfs):
 # ── Security re-attack N5: slow bodies can't pile up ─────────────────────
 
 
-def test_the_body_timeout_follows_the_size():
-    """A minimum rate, not one flat 120 s: a small blob gets the floor, an
-    8 MiB one ~2 min (64 KiB/s)."""
-    floor = space_media_routes.MIN_BODY_TIMEOUT_S
-    assert space_media_routes.body_read_timeout(SMALL) == floor
-    big = PAD_BUCKETS[-1] + BLOB_OVERHEAD
-    assert space_media_routes.body_read_timeout(big) == pytest.approx(
-        big / space_media_routes.MIN_BODY_RATE
-    )
-    assert floor <= 15
+async def test_stalled_uploads_of_one_client_do_not_lock_out_another(gfs):
+    """Third review A5 probe: 16 header-only uploads from ONE client bucket
+    hold at most its per-client share of body reads (the rest are 503 busy
+    at once) — another client's upload still goes through."""
+    stalled = [
+        await _stalled_upload(gfs, os.urandom(SMALL), xff="203.0.113.5")
+        for _ in range(16)
+    ]
+    try:
+        await asyncio.sleep(0.3)
+        data = os.urandom(SMALL)
+        r = await gfs.put(
+            _put_url(data),
+            data=data,
+            headers={
+                **_authority_header(_claim(data)),
+                "X-Forwarded-For": "198.51.100.9",
+            },
+        )
+        assert r.status == 201
+        # Past its share, the stalling client's uploads were answered at once.
+        busy = 0
+        for rd, _wr in stalled:
+            try:
+                busy += await asyncio.wait_for(_status(rd), 0.5) == 503
+            except TimeoutError:
+                pass
+        assert busy == 16 - space_media_mod.PER_CLIENT_BODY_READS
+    finally:
+        for _rd, wr in stalled:
+            wr.close()
 
 
-async def test_concurrent_body_reads_are_bounded_per_node(gfs, body_reads):
-    """Only so many bodies are read at once on a node: past it an upload is
-    answered 503 at once (Retry-After) with its reserved slot given back —
-    slow senders can't hold every connection's buffer."""
-    store = gfs.app_[gfs_space_media_store_key]
-    store.body_reads = asyncio.Semaphore(1)
-    body_reads["stall"] = 0.3
-    first, second = os.urandom(SMALL), os.urandom(SMALL)
-    slow = asyncio.ensure_future(
-        gfs.put(_put_url(first), data=first, headers=_authority_header(_claim(first)))
-    )
-    await asyncio.sleep(0.1)
-    r = await gfs.put(
-        _put_url(second), data=second, headers=_authority_header(_claim(second))
-    )
-    assert r.status == 503
-    assert (await r.json())["error"] == "busy"
-    assert "Retry-After" in r.headers
-    assert (await slow).status == 201
-    bucket = int(time.time()) // 3600
-    assert await store._repo.upload_counts("space", SPACE, bucket=bucket) == (1, 0)
+def test_the_body_read_gate_is_per_client_and_bounded_by_bytes():
+    gate = space_media_mod.BodyReadGate(per_client=2, max_bytes=3 * SMALL)
+    assert gate.enter("a", SMALL) and gate.enter("a", SMALL)
+    assert not gate.enter("a", SMALL)  # a's share
+    assert gate.enter("b", SMALL)
+    assert not gate.enter("c", SMALL)  # bytes in flight
+    gate.leave("a", SMALL)
+    assert gate.enter("c", SMALL)
+    gate.leave("a", SMALL)
+    gate.leave("b", SMALL)
+    gate.leave("c", SMALL)
+    assert gate.in_flight == 0
 
 
 # ── Third review A3: fairness and caps are per HOUSEHOLD ─────────────────
