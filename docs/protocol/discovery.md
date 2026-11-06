@@ -13,7 +13,8 @@ metadata, not content.
   with.
 - **GFS**: maintains the global registry of published spaces,
   serves `GET /gfs/spaces`, and forwards opaque `_VIA` envelopes
-  between unpaired instances.
+  between unpaired instances. It also keeps a short-lived, bounded cache
+  of encrypted space media (see "Space media cache on a GFS").
 
 ## Event types
 
@@ -3454,6 +3455,155 @@ What a server the member never connected to learns, and why the owner
 accepted it: [principles.md](../principles.md#sign-off-a-member-publishes-to-gfss-it-never-connected-to-v_57).
 Pinned by `tests/protocol/test_gfs_multi_listing_blind.py`.
 
+### Space media cache on a GFS (capability `space_media`)
+
+**Purpose.** A household reached only through a GFS — a space member seated
+from an invite link (envelope relay only, 191 KiB sealed cap) or a follower
+of a public / global space — can't fetch a picture from the household that
+posted it. So a household encrypts each space file **once** (under the space
+content key, padded to a size bucket — the household side is a separate
+change) and uploads the same ciphertext **once per GFS**; every reader fetches
+it from its GFS by address. The GFS keeps it as a **cache, not storage**: a
+short life, a total byte cap with eviction, per-space caps. A reader that
+misses it (evicted, expired) falls back to whatever the household side does
+without it — the GFS never promises to keep a file.
+
+**Scope.** GFS side only: storage (GFS migration `0025`, `gfs_space_media`;
+the bytes are files under `media_dir/spaces/`, named by their SHA-256), the
+three routes below, the capability, the sweep and the admin counts. Listed
+spaces only (the routes name the `space_id`); a private space on an opaque
+channel (v_51) is not covered — naming it would undo the channel.
+
+**Routes.**
+
+| Method | Path | |
+|---|---|---|
+| `PUT` | `/gfs/spaces/{space_id}/media/{blob_id}` | One encrypted blob, the raw body. `blob_id` = SHA-256 of the body (lowercase hex), size = a padded bucket + 28 bytes (`moment_public_media.PAD_BUCKETS`, ≤ 8 MiB + overhead). `201 {stored: true}`; a re-upload of a held blob is `200 {stored: false, status: "already_stored"}` — never an error, so retries and a second uploader coalesce. |
+| `GET` | `/gfs/spaces/media/{blob_id}` | Anyone, no credentials: the ciphertext, `application/octet-stream`, `nosniff`, `Access-Control-Allow-Origin: *`, `Cache-Control: public, max-age=3600, immutable`; `404` with `no-store` for unknown, expired, evicted or a banned space's blob. |
+| `POST` | `/gfs/spaces/{space_id}/media/{blob_id}/delete` | The space authority withdraws a blob: `{ts, authority_sig, authority_sig_suite}`; `{deleted}`. |
+
+The fetch names **no space**: neither an access log, a CDN cache key nor a
+path tells which space a reader reads, and the content address is unique on
+its own.
+
+**Authorization (identity-free).** The raw blob is the body, so the
+authorization rides in one header, `X-SH-Space-Media-Auth`: base64url of a
+canonical JSON object carrying the claim `{space_id, blob_id, size,
+expires_at, ts}` (unix seconds; `ts` within ±300 s), `auth`, `sig`,
+`sig_suite` (`domain/gfs_space_media.py`). Three kinds, each reusing a check
+the GFS already makes — no new key, roster or registration:
+
+- `authority` — a space-authority signature over the claim under the event
+  type `space_media_put` (kept out of the relay set, so it can never be fanned
+  out, and a relay payload can never authorize an upload), verified against
+  the space's TOFU-pinned key exactly like `/gfs/publish`
+  (`GfsFederationService.verify_space_authority`). Names nobody.
+- `writer_cert` (trusted mode, v_49) — `epoch` + the v1 `writer_cert`, and
+  `sig` by the household key the cert names over `b"space-media-put:v1:" +
+  canonical(claim ∪ {auth, epoch})`; the cert is checked as
+  `/gfs/member-publish` checks it (pinned key, epoch open, refused in a
+  strict space — `GfsMemberPublishService.verify_writer_cert`). No instance
+  id is sent, but the cert names the writer's household key: the trusted-mode
+  trade-off `/gfs/member-publish` already makes.
+- `writer_key` (strict mode, v_50) — `epoch` + `sig` by the space's writer
+  group key over the same bytes, checked against the pinned key as
+  `/gfs/member-publish-anon` does (`verify_writer_key_sig`,
+  `require_writer_key_epoch`). Names nobody.
+
+The space must be listed, not moderator-banned (the space-level ban applies),
+with a pinned authority key. Every failure is one `403 {"error": "not
+authorized for this space"}` (reason at DEBUG); a malformed header is `400`.
+The header is checked **before** the body is read; the body is then read up
+to exactly the signed `size` (`413` past it, `422 size_mismatch` short of it),
+so an unauthorized caller never makes the server buffer a byte. A captured
+upload replayed within the ±300 s window is harmless: it is the same
+content-addressed bytes (a no-op), or lands on another GFS listing the same
+space, inside that space's quota there. A delete is the space authority's
+alone (`{space_id, blob_id, ts}` under `space_media_delete`).
+
+**Caps, eviction, TTL** (`[space_media]` in the GFS config, env
+`GFS_SPACE_MEDIA_*`, `global_server/space_media.py`):
+
+| Setting | Default | Effect |
+|---|---|---|
+| `max_bytes` | 5 GiB | All space blobs together. Before a blob is stored, expired ones go, then the **least recently fetched** (then the oldest) are evicted until it fits. A blob larger than the cache: `413 too_large_for_cache`. `0` turns the cache off and stops advertising it. |
+| `ttl_seconds` | 3 days (600 s – 7 days) | A blob's longest life; the uploader's `expires_at` is clamped to it (an expiry in the past is `422`). The hourly maintenance sweep drops expired rows and files. |
+| `space_max_bytes` | 256 MiB | Live bytes one space holds: `429 space_media_quota` past it. |
+| `space_uploads_per_hour` | 300 | Blobs one space uploads an hour: `429 space_media_quota` (`Retry-After`). |
+
+A fetch moves the blob's `last_fetched_at` at most once an hour (the upload
+counts as one, so a new blob is not the first to go): a popular blob costs one
+DB write an hour, not one per fetch. Uploads and deletes are also shed at
+120 / min per client address before any signature work.
+
+**Cluster.** Every node shares the data dir and the database, so whichever
+node took an upload, any node serves it (pinned by the federation-demo
+`gfs-cluster` step: upload via node 0, fetch the same bytes via node 1). The
+caps are checked per upload against the shared rows; two nodes evicting at
+once may free a little more than needed, never less. The bytes go through
+a small storage interface (`blob_store.BlobFiles`), so an object store can
+replace the filesystem later.
+
+**CDN caching.** A `200` may sit in a CDN edge (Cloudflare) for up to an
+hour, `immutable` because the address is the content's hash. That is short
+on purpose: a deleted post's picture, or an evicted / expired blob, can stay
+fetchable from an edge for **at most an hour** after the GFS dropped it —
+ciphertext, readable only by holders of the space content key. A `404` is
+`no-store`, so a blob uploaded a moment later is never hidden behind a cached
+miss. The CDN, not the GFS, absorbs repeated reads.
+
+**Capability.** The signed `/gfs/info` block carries `space_media:
+{max_blob_bytes, ttl_s}` (largest blob it takes, how long it keeps one) while
+the cache is on. A household uploads space media only to a server whose
+signed block proves it; an older household ignores the entry.
+
+**Cost.** One upload per file per GFS (one household encrypts once — not one
+per reader, not one per member). Storage is bounded by `max_bytes`, the TTL
+and eviction, whatever the traffic; reads are served by the CDN after the
+first fetch per edge (10 000 followers fetching one picture cost the GFS one
+read per edge, not 10 000). Worst realistic case — a global space with 200
+authors posting 10 pictures a day, ~300 KiB padded each: 2 000 uploads
+(~83 / hour, under the 300 / hour cap) and ~600 MiB a day per GFS. Over the
+3-day TTL that is ~1.8 GiB, past the 256 MiB per-space cap after ~10 hours:
+from then on that space's new uploads get `429 space_media_quota` until its
+older blobs expire. That is the cap doing its job — one busy space cannot push
+every other space out of a 5 GiB cache — and the operator raises
+`space_max_bytes` (or lowers `ttl_seconds`) if they want such a space served
+in full.
+
+**What the GFS learns.** The ciphertext (it can't open it), the `space_id` a
+blob was uploaded for, its size **bucket** (not its size), the upload time,
+and fetch times at one-hour resolution (`last_fetched_at`) — plus, at the
+network level, the source address of each upload and fetch. With the
+`writer_cert` kind it also learns which household key uploaded (as with
+`/gfs/member-publish`); the `authority` and `writer_key` kinds name nobody.
+It does not learn who fetched: a fetch carries no credential and no space.
+
+```mermaid
+sequenceDiagram
+    participant H as Household (uploader)
+    participant G as GFS (any node)
+    participant C as CDN edge
+    participant R as Reader household
+    Note over H: encrypts the file once (space key, padded bucket)
+    H->>G: PUT /gfs/spaces/{space}/media/{sha256}<br/>X-SH-Space-Media-Auth (authority / writer)
+    G->>G: verify (pinned key / cert / writer key), quota, evict LRU if full
+    G-->>H: 201 stored (200 already_stored on a retry)
+    R->>C: GET /gfs/spaces/media/{sha256}
+    C->>G: (miss) GET
+    G-->>C: 200 ciphertext, public max-age=3600 immutable
+    C-->>R: ciphertext
+    Note over R: checks sha256, decrypts with the space key
+    H->>G: POST …/media/{sha256}/delete (authority)
+    Note over C: an edge copy may linger ≤ 1 h
+```
+
+Implementation: `socialhome/global_server/space_media.py` (store, limits,
+eviction), `space_media_auth.py` (who may write), `blob_store.py` (shared with
+the moment media store), `routes/space_media.py`,
+`socialhome/domain/gfs_space_media.py` (wire shape),
+`repositories.SqliteGfsSpaceMediaRepo`, GFS migration `0025`.
+
 ## Flow — publish + browse + join
 
 Only a **global** space is listed, and only on the GFSs its **owner** picks
@@ -3626,6 +3776,11 @@ contest a ban.
   generic author-signed inner; `socialhome/services/space_item_inbound.py`
   — applying comments, deletes and reactions (authorship, tombstones,
   last writer wins).
+- `socialhome/global_server/space_media.py`,
+  `socialhome/global_server/space_media_auth.py`,
+  `socialhome/global_server/routes/space_media.py`,
+  `socialhome/domain/gfs_space_media.py` — the space media cache (store,
+  eviction, upload authorization, routes, wire shape); GFS migration `0025`.
 - `socialhome/global_server/member_publish.py`,
   `socialhome/global_server/routes/member_publish.py` — GFS side of
   `/gfs/member-publish`, `/gfs/member-publish-anon` (v_50) and the epoch

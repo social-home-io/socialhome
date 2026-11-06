@@ -92,6 +92,22 @@ Other balancers need the same two things: route by the text before the first
 `.` of the id in those five places, and fall back to normal balancing when it
 names no node.
 
+## Space media cache on a shared data dir
+
+The space media cache (`[space_media]`, [protocol/discovery.md](../protocol/discovery.md#space-media-cache-on-a-gfs-capability-space_media))
+keeps encrypted blobs as files under `<data_dir>/media/spaces/` and their
+rows in the shared `gfs.db`, so every node must mount the **same** data dir:
+whichever node took an upload, any node serves the fetch. Size
+`max_bytes` (default 5 GiB) to the disk that volume has — it is a cache, so
+the least recently fetched blobs are evicted when it is full, and nothing
+lives past `ttl_seconds` (3 days). Behind Cloudflare a fetch is
+`Cache-Control: public, max-age=3600, immutable`, so the edge absorbs
+repeated reads; a miss is `no-store`. Set `max_bytes = 0` (or
+`GFS_SPACE_MEDIA_MAX_BYTES=0`) to turn the cache off — it is then no longer
+advertised in `/gfs/info`. The admin overview (`GET /admin/api/overview`,
+`space_media`) shows the blobs and bytes held and this node's evictions and
+quota refusals.
+
 ## Rate limits across nodes
 
 The anonymous per-IP limits on the public pages, the highlight offer /
