@@ -146,6 +146,11 @@ ORPHAN_LEASE_S: int = 3000
 #: The upload rate window (a sliding hour over hourly buckets).
 _HOUR: int = 3600
 
+#: Upload bodies one node reads at once (≤ 8 MiB each: 128 MiB buffered at
+#: most); past it an upload is ``503 busy`` — slow senders can't pile up
+#: (security re-attack N5).
+MAX_CONCURRENT_BODY_READS: int = 16
+
 
 @dataclass(slots=True, frozen=True)
 class SpaceMediaLimits:
@@ -239,6 +244,7 @@ class GfsSpaceMediaStore:
         "_lock",
         "_node_id",
         "_repo",
+        "body_reads",
     )
 
     def __init__(
@@ -261,6 +267,8 @@ class GfsSpaceMediaStore:
         #: derived from the shared signing seed), so the database never
         #: holds a client address.
         self._ip_key_secret = ip_key_secret or secrets.token_bytes(32)
+        #: Bounds the upload bodies this node reads at once (the route).
+        self.body_reads = asyncio.Semaphore(MAX_CONCURRENT_BODY_READS)
 
     @property
     def limits(self) -> SpaceMediaLimits:

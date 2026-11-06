@@ -439,7 +439,8 @@ async def test_a_retry_of_a_held_blob_is_answered_unread(gfs, body_reads):
 async def test_a_body_that_stalls_times_out_and_refunds_its_slot(
     gfs, body_reads, monkeypatch
 ):
-    monkeypatch.setattr(space_media_routes, "BODY_READ_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(space_media_routes, "MIN_BODY_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(space_media_routes, "MIN_BODY_RATE", 10**12)
     body_reads["stall"] = 0.5
     data = os.urandom(SMALL)
     r = await gfs.put(
@@ -997,3 +998,41 @@ async def test_a_household_counts_toward_only_its_first_channels(gfs):
         )
         statuses.append(r.status)
     assert statuses == [201, 201, 403]
+
+
+# ── Security re-attack N5: slow bodies can't pile up ─────────────────────
+
+
+def test_the_body_timeout_follows_the_size():
+    """A minimum rate, not one flat 120 s: a small blob gets the floor, an
+    8 MiB one ~2 min (64 KiB/s)."""
+    floor = space_media_routes.MIN_BODY_TIMEOUT_S
+    assert space_media_routes.body_read_timeout(SMALL) == floor
+    big = PAD_BUCKETS[-1] + BLOB_OVERHEAD
+    assert space_media_routes.body_read_timeout(big) == pytest.approx(
+        big / space_media_routes.MIN_BODY_RATE
+    )
+    assert floor <= 15
+
+
+async def test_concurrent_body_reads_are_bounded_per_node(gfs, body_reads):
+    """Only so many bodies are read at once on a node: past it an upload is
+    answered 503 at once (Retry-After) with its reserved slot given back —
+    slow senders can't hold every connection's buffer."""
+    store = gfs.app_[gfs_space_media_store_key]
+    store.body_reads = asyncio.Semaphore(1)
+    body_reads["stall"] = 0.3
+    first, second = os.urandom(SMALL), os.urandom(SMALL)
+    slow = asyncio.ensure_future(
+        gfs.put(_put_url(first), data=first, headers=_authority_header(_claim(first)))
+    )
+    await asyncio.sleep(0.1)
+    r = await gfs.put(
+        _put_url(second), data=second, headers=_authority_header(_claim(second))
+    )
+    assert r.status == 503
+    assert (await r.json())["error"] == "busy"
+    assert "Retry-After" in r.headers
+    assert (await slow).status == 201
+    bucket = int(time.time()) // 3600
+    assert await store._repo.upload_counts("space", SPACE, bucket=bucket) == (1, 0)

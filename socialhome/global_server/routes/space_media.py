@@ -10,7 +10,9 @@ proxy nor a CDN cache key ever sees a space or channel id next to a blob
   (:mod:`socialhome.domain.gfs_space_media`) and is checked BEFORE the body
   is read; then the size must be a padded bucket and the scope's upload slot
   is reserved — all before the body is read, up to exactly the signed
-  ``size`` (413 past it) within :data:`BODY_READ_TIMEOUT_S`. ``201
+  ``size`` (413 past it) at :data:`MIN_BODY_RATE` at least, while at most
+  :data:`~..space_media.MAX_CONCURRENT_BODY_READS` bodies are read at once
+  on a node (``503 busy`` past it). ``201
   {"stored": true}``; the scope's retry is ``200 {"stored": false,
   "status": "already_stored"}`` (never a conflict, and never a fresher
   expiry). ``503 space_media_disabled`` while the operator has the cache off.
@@ -69,9 +71,20 @@ _MAX_DELETE_BYTES = 2048
 #: Answer to an upload-rate refusal: the window is an hour.
 _QUOTA_RETRY_AFTER_S = "600"
 
-#: How long an upload's body may take to arrive (≤ 8 MiB; ~67 s at
-#: 1 Mbit/s). A slower one is ``408`` and its reserved slot is given back.
-BODY_READ_TIMEOUT_S: float = 120.0
+#: Answer while this node reads as many bodies as it takes at once.
+_BUSY_RETRY_AFTER_S = "5"
+
+#: An upload's body must arrive at least this fast (bytes / s) — so a
+#: client can't hold a read open for minutes per blob — but never in less
+#: than :data:`MIN_BODY_TIMEOUT_S` (8 MiB at 64 KiB/s: ~2 min). A slower one
+#: is ``408`` and its reserved slot is given back (security re-attack N5).
+MIN_BODY_RATE: int = 64 * 1024
+MIN_BODY_TIMEOUT_S: float = 10.0
+
+
+def body_read_timeout(size: int) -> float:
+    """How long a body of *size* bytes may take to arrive."""
+    return max(MIN_BODY_TIMEOUT_S, size / MIN_BODY_RATE)
 
 
 def _refused() -> web.Response:
@@ -140,8 +153,18 @@ class GfsMediaView(GfsBaseView):
         if reserved is None:
             # The scope already holds it: answered without reading the body.
             return web.json_response({"stored": False, "status": "already_stored"})
+        if store.body_reads.locked():
+            # This node is reading as many bodies as it takes at once: answer
+            # now rather than queue another buffer (security re-attack N5).
+            await store.release_upload(reserved)
+            resp = web.json_response({"error": "busy"}, status=503)
+            resp.headers["Retry-After"] = _BUSY_RETRY_AFTER_S
+            return resp
         try:
-            data = await asyncio.wait_for(self.bounded_raw(size), BODY_READ_TIMEOUT_S)
+            async with store.body_reads:
+                data = await asyncio.wait_for(
+                    self.bounded_raw(size), body_read_timeout(size)
+                )
         except TimeoutError:
             await store.release_upload(reserved)
             return web.json_response({"error": "body_timeout"}, status=408)
