@@ -168,6 +168,7 @@ from .space_crypto_service import (
     verify_authority_event,
 )
 from .space_mentions import SpaceMentionResolver
+from .space_moderation_federation import moderation_media_urls
 from .space_service import (
     apply_gfs_servers_from_metadata,
     apply_owner_statement_from_metadata,
@@ -2164,7 +2165,8 @@ class FederationInboundService(ProtectionGateMixin):
     ) -> bool:
         """Whether a blob for ``correlation_id`` may land in ``space_id``.
 
-        ``False`` only on positive evidence: the correlated row is known
+        ``False`` only on positive evidence: the correlated row (a post,
+        gallery item, calendar event, or held moderation item) is known
         and lives in another space, or is known and does not reference
         ``filename``. An unknown row is ``True`` — the write is
         write-once, so accepting it can't replace anything.
@@ -2215,6 +2217,13 @@ class FederationInboundService(ProtectionGateMixin):
                 return event_space == space_id and filename == media_basename(
                     event.cover_url
                 )
+        # A held submission's files (a new event's cover, an edit's new
+        # cover or picture) — correlated by its moderation queue item.
+        held = await self._space_repo.get_moderation_item(correlation_id)
+        if held is not None:
+            return held.space_id == space_id and filename in {
+                media_basename(u) for u in moderation_media_urls(held)
+            }
         return True
 
     async def _assemble_space_chunk(

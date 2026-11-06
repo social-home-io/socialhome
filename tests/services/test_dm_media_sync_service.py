@@ -190,7 +190,7 @@ class FakeFederation:
         self.sent: list[dict] = []
         self.should_fail = False
 
-    def media_chunk_bytes(self, instance_id: str) -> int:
+    def media_chunk_bytes(self, instance_id: str, *, file_size_bytes: int) -> int:
         return HTTPS_CHUNK_BYTES
 
     async def send_media_chunk(
@@ -780,6 +780,8 @@ async def test_chunks_pipeline_bounded_by_window(stack):
             super().__init__()
             self.inflight = 0
             self.max_inflight = 0
+            self.max_tasks = 0
+            self.baseline_tasks = len(asyncio.all_tasks())
 
         async def send_media_chunk(
             self,
@@ -793,6 +795,7 @@ async def test_chunks_pipeline_bounded_by_window(stack):
         ):
             self.inflight += 1
             self.max_inflight = max(self.max_inflight, self.inflight)
+            self.max_tasks = max(self.max_tasks, len(asyncio.all_tasks()))
             await asyncio.sleep(0.01)  # hold the slot so overlap is observable
             self.inflight -= 1
             return await super().send_media_chunk(
@@ -817,6 +820,8 @@ async def test_chunks_pipeline_bounded_by_window(stack):
     assert shipped == 1
     assert len(fed.sent) == 8  # all chunks delivered
     assert 1 < fed.max_inflight <= PIPELINE_WINDOW  # pipelined, but bounded
+    # Regression: no task per chunk up front — only the window's workers.
+    assert fed.max_tasks <= fed.baseline_tasks + PIPELINE_WINDOW
 
 
 async def test_one_failed_chunk_reschedules_whole_row(stack):

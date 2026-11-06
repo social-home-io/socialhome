@@ -19,13 +19,17 @@ Within those limits a chunk is as large as possible, so a file takes few
 messages: a photo up to :data:`HTTPS_CHUNK_BYTES` is one message, a
 100 MB video ~200. The old fixed sizes (a 1 MiB single chunk, 512 KiB
 pieces) fit no channel and, for a 0.7–1 MiB file, not the inbox either —
-such a file never arrived. Receivers accept up to 4096 chunks per file
-(``inbound_media_store.MAX_MEDIA_CHUNKS``).
+such a file never arrived. Receivers accept up to
+:data:`MAX_MEDIA_CHUNKS` chunks per file; a channel too small to stay
+under that (or under :data:`MIN_CHANNEL_CHUNK_BYTES`) is skipped for
+the HTTPS inbox.
 
 Pure module — no I/O.
 """
 
 from __future__ import annotations
+
+from collections.abc import Iterator
 
 #: The message size this household advertises on its data channels
 #: (``RTCConfiguration.max_message_size``). The negotiated limit is the
@@ -45,8 +49,33 @@ JSON_EXPANSION: float = 16 / 9
 #: a chunk built for the channel still fits the inbox on a fallback.
 HTTPS_CHUNK_BYTES: int = 512 * 1024
 
+#: Upper bound on ``chunk_count`` for one transfer — a receiver refuses a
+#: chunk claiming more (``inbound_media_store``), so a sender never splits
+#: a file into more.
+MAX_MEDIA_CHUNKS: int = 4096
 
-def media_chunk_bytes(channel_max_message_bytes: int | None) -> int:
+#: The smallest chunk a data channel is used for. A household whose
+#: channel can't carry this (an ``a=max-message-size`` under
+#: ``MIN_CHANNEL_CHUNK_BYTES + FRAME_OVERHEAD_BYTES``, ~80 KiB) gets its
+#: media over the HTTPS inbox instead: tiny chunks would turn one video
+#: into hundreds of thousands of messages (sender memory) and past
+#: :data:`MAX_MEDIA_CHUNKS` (the receiver refuses the file).
+MIN_CHANNEL_CHUNK_BYTES: int = 64 * 1024
+
+
+def fits_channel(chunk_len: int, channel_max_message_bytes: int | None) -> bool:
+    """Whether a chunk of ``chunk_len`` bytes plus its frame fits one
+    message on a channel with that negotiated limit. ``None`` / ``0``
+    (unknown) is not a limit we can check, so it fits — the transport
+    falls back on a send error."""
+    if not channel_max_message_bytes:
+        return True
+    return chunk_len + FRAME_OVERHEAD_BYTES <= channel_max_message_bytes
+
+
+def media_chunk_bytes(
+    channel_max_message_bytes: int | None, *, file_size_bytes: int
+) -> int:
     """The chunk size for one household.
 
     ``channel_max_message_bytes`` is the negotiated message limit of its
@@ -54,26 +83,41 @@ def media_chunk_bytes(channel_max_message_bytes: int | None) -> int:
     chunks go over the HTTPS inbox). Never more than
     :data:`HTTPS_CHUNK_BYTES`, so a chunk sized for the channel still
     fits the inbox if the channel drops mid-transfer.
+
+    The channel size is used only when it is at least
+    :data:`MIN_CHANNEL_CHUNK_BYTES` and big enough to send a
+    ``file_size_bytes`` file in at most :data:`MAX_MEDIA_CHUNKS` chunks;
+    otherwise the HTTPS size is returned, which does not fit the channel
+    (:func:`fits_channel`), so the sender routes those chunks over HTTPS.
     """
     if not channel_max_message_bytes:
         return HTTPS_CHUNK_BYTES
-    return max(
-        1,
-        min(HTTPS_CHUNK_BYTES, channel_max_message_bytes - FRAME_OVERHEAD_BYTES),
+    channel_chunk = min(
+        HTTPS_CHUNK_BYTES, channel_max_message_bytes - FRAME_OVERHEAD_BYTES
     )
+    floor = max(MIN_CHANNEL_CHUNK_BYTES, -(-file_size_bytes // MAX_MEDIA_CHUNKS))
+    if channel_chunk < floor:
+        return HTTPS_CHUNK_BYTES
+    return channel_chunk
 
 
-def split_into_chunks(data: bytes, chunk_bytes: int) -> list[tuple[dict, bytes]]:
+def chunk_count(size: int, chunk_bytes: int) -> int:
+    """How many chunks of ``chunk_bytes`` a ``size``-byte file takes —
+    at least one (an empty file is one empty chunk)."""
+    return max(1, -(-size // chunk_bytes))
+
+
+def split_into_chunks(data: bytes, chunk_bytes: int) -> Iterator[tuple[dict, bytes]]:
     """``data`` as ``(sequencing, raw_chunk)`` pairs of at most
     ``chunk_bytes`` each — one pair when it fits (the receiver's
     single-chunk branch). ``sequencing`` is ``chunk_index`` /
-    ``chunk_count`` / ``final``; the caller adds its correlation ids."""
-    size = len(data)
-    total = max(1, -(-size // chunk_bytes))
-    return [
-        (
+    ``chunk_count`` / ``final``; the caller adds its correlation ids.
+
+    Lazy: each chunk is sliced when it is pulled, so a sender holds only
+    the chunks it has in flight."""
+    total = chunk_count(len(data), chunk_bytes)
+    for i in range(total):
+        yield (
             {"chunk_index": i, "chunk_count": total, "final": i == total - 1},
             data[i * chunk_bytes : (i + 1) * chunk_bytes],
         )
-        for i in range(total)
-    ]

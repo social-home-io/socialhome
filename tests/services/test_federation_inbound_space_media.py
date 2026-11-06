@@ -15,12 +15,13 @@ from __future__ import annotations
 
 import asyncio
 import base64
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import patch
 
 import pytest
 
 from socialhome.domain.federation import FederationEvent, FederationEventType
+from socialhome.domain.space import SpaceModerationItem
 from socialhome.repositories import (
     SqliteConversationRepo,
     SqliteSpacePostRepo,
@@ -692,3 +693,60 @@ async def test_reserved_name_is_refused_even_for_an_unknown_row(env, caplog, nam
         )
     assert not (media / name).exists()
     assert "reserved name" in caplog.text
+
+
+# ── A held edit's new media, correlated by its moderation item ──────────
+
+
+async def _held_cover_edit(svc, *, item_id: str = "item-ev", space_id: str = "sp-a"):
+    await svc._space_repo.insert_moderation_item(
+        SpaceModerationItem(
+            id=item_id,
+            space_id=space_id,
+            feature="calendar",
+            action="edit",
+            submitted_by="u-a",
+            payload={
+                "entity": "event",
+                "target_id": "ev-1",
+                "patch": {"cover_url": "/api/media/new-cover.webp"},
+            },
+            current_snapshot='{"cover_url": "/api/media/old-cover.webp"}',
+            submitted_at=datetime.now(UTC),
+            expires_at=datetime.now(UTC) + timedelta(days=7),
+        )
+    )
+
+
+async def test_a_held_edits_new_cover_reaches_a_reviewer(env):
+    """Regression: a moderated edit proposing a new calendar cover was
+    correlated by the event, whose current cover is another file — every
+    reviewer household refused it. Correlated by the queue item, the file
+    the item proposes is accepted."""
+    svc, media = env
+    await _held_cover_edit(svc)
+    await svc._on_space_media_blob(
+        _blob({"correlation_id": "item-ev", "filename": "new-cover.webp"})
+    )
+    assert (media / "new-cover.webp").read_bytes() == b"NEW-BYTES"
+
+
+@pytest.mark.parametrize(
+    ("space_id", "filename"),
+    [
+        ("sp-a", "a1.webp"),  # a file the item doesn't propose
+        ("sp-a", "old-cover.webp"),  # the snapshot is not a proposal
+        ("sp-b", "new-cover.webp"),  # the item is in another space
+    ],
+)
+async def test_a_held_items_scope_stays_tight(env, caplog, space_id, filename):
+    svc, media = env
+    await _held_cover_edit(svc)
+    with caplog.at_level("WARNING"):
+        await svc._on_space_media_blob(
+            _blob(
+                {"correlation_id": "item-ev", "filename": filename},
+                space_id=space_id,
+            )
+        )
+    assert not (media / filename).exists()

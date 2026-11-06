@@ -120,13 +120,28 @@ that be as large as possible — few messages per file. The size is chosen
   1 MiB body cap: **512 KiB** (≈ 930 KB on the wire). Never more than
   this on any tier, so a chunk built for the channel still fits the inbox
   if the channel drops mid-transfer.
+- **Floor** — a channel is used for media only when its chunk is at
+  least **64 KiB** (`MIN_CHANNEL_CHUNK_BYTES`, i.e. a negotiated limit
+  of ≥ 80 KiB) *and* large enough to send the file in at most 4096
+  chunks (`ceil(size / MAX_MEDIA_CHUNKS)`). Otherwise the household gets
+  512 KiB HTTPS-sized chunks, and `send_media_chunk` sends a chunk its
+  channel can't carry (`fits_channel`) over the JSON path, never as a
+  frame. Without the floor a household advertising
+  `a=max-message-size:1` got 1-byte chunks: a 200 MiB video became
+  ~210 million chunks (the sender ran out of memory) and, past 4096, the
+  receiver refused the file.
 
 A file that fits one chunk ships as one event with `chunk_count=1` and
 `final=true` — a typical photo is one message between upgraded
 households. A larger file splits into `ceil(size / chunk)` chunks, each
 with its `chunk_index`, the shared `chunk_count`, and `final` on the
 last; a 100 MB video is ~200. Receivers accept up to 4096 chunks
-(`MAX_MEDIA_CHUNKS`).
+(`MAX_MEDIA_CHUNKS`); with the floor no sender splits past that (a
+200 MiB video is at most 3200 chunks, at the 64 KiB floor). Chunks are
+built lazily and sent by at most 4 workers (`PIPELINE_WINDOW`,
+`services/media_chunk_pipeline.py`), so a sender holds only the chunks
+in flight; the first failed chunk stops the rest, and the outbox resends
+the whole file later.
 
 **Size cap.** The receiver refuses a file bigger than the sender's own
 upload limits allow (`inbound_media_store.dm_media_max_bytes`, from

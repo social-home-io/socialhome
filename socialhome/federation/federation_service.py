@@ -82,7 +82,7 @@ from ..domain.federation import (
 )
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.federation_retention import moment_delete_key, supersede_key
-from ..domain.media_chunking import media_chunk_bytes
+from ..domain.media_chunking import fits_channel, media_chunk_bytes
 from ..domain.media_validator import validate_inbound_media_meta
 from ..domain.space import parse_have_seq
 from ..infrastructure.event_bus import EventBus
@@ -1176,16 +1176,22 @@ class FederationService:
         """
         return self._relay_accepted_at.get(instance_id)
 
-    def media_chunk_bytes(self, instance_id: str) -> int:
-        """How big one media chunk to *instance_id* may be: what its open
-        media channel negotiated, else what the HTTPS inbox takes
-        (:mod:`socialhome.domain.media_chunking`)."""
-        limit = (
+    def _media_channel_limit(self, instance_id: str) -> int | None:
+        return (
             self._transport.media_max_message_size(instance_id)
             if self._transport is not None
             else None
         )
-        return media_chunk_bytes(limit)
+
+    def media_chunk_bytes(self, instance_id: str, *, file_size_bytes: int) -> int:
+        """How big one media chunk of a ``file_size_bytes`` file to
+        *instance_id* may be: what its open media channel negotiated, else
+        what the HTTPS inbox takes (:mod:`socialhome.domain.media_chunking`).
+        A channel below the floor gets the inbox size, which
+        :meth:`send_media_chunk` then routes over HTTPS."""
+        return media_chunk_bytes(
+            self._media_channel_limit(instance_id), file_size_bytes=file_size_bytes
+        )
 
     async def peer_supports(self, instance_id: str, *, min_version: int) -> bool:
         """``True`` iff the named peer's advertised ``proto_version`` is
@@ -2276,8 +2282,9 @@ class FederationService:
 
         The binary channel is used iff **all** hold: the peer is a
         CONFIRMED direct peer, advertises
-        :data:`FederationCapability.MIN_FOR_MEDIA_CHANNEL`, and its media
-        channel is currently open. Then ``raw_chunk`` ships encrypted as
+        :data:`FederationCapability.MIN_FOR_MEDIA_CHANNEL`, its media
+        channel is currently open, and the chunk fits that channel's
+        negotiated message size. Then ``raw_chunk`` ships encrypted as
         binary (no base64) alongside a signed envelope whose encrypted
         metadata carries a ``chunk_sha256`` binding.
 
@@ -2300,6 +2307,10 @@ class FederationService:
             and instance is not None
             and instance.status is PairingStatus.CONFIRMED
             and self._transport.is_media_ready(to_instance_id)
+            # A chunk sized for the inbox (the channel is below the floor,
+            # see ``media_chunking``) is never tried as a frame it can't
+            # carry — it goes straight over HTTPS.
+            and fits_channel(len(raw_chunk), self._media_channel_limit(to_instance_id))
             and await self.peer_supports(
                 to_instance_id,
                 min_version=FederationCapability.MIN_FOR_MEDIA_CHANNEL,

@@ -48,6 +48,11 @@ from socialhome.domain.federation import (
     RemoteInstance,
 )
 from socialhome.domain.federation_capabilities import FederationCapability
+from socialhome.domain.media_chunking import (
+    FRAME_OVERHEAD_BYTES,
+    HTTPS_CHUNK_BYTES,
+    media_chunk_bytes,
+)
 from socialhome.federation import FederationService
 from socialhome.federation import federation_service as federation_service_mod
 from socialhome.federation.encoder import FederationEncoder
@@ -2402,9 +2407,13 @@ class _CaptureMediaTransport:
         self.json_envelopes: list[dict] = []
         self.media_ready = True
         self.media_returns = True
+        self.max_message_size: int | None = None
 
     def is_media_ready(self, instance_id: str) -> bool:
         return self.media_ready
+
+    def media_max_message_size(self, instance_id: str) -> int | None:
+        return self.max_message_size
 
     async def send_media(self, *, instance, header_dict, payload_bytes) -> bool:
         self.media = (header_dict, payload_bytes)
@@ -2704,6 +2713,39 @@ async def test_send_media_chunk_space_non_confirmed_uses_mesh_fallback():
     assert p.cap.media is None  # binary channel never used for non-CONFIRMED
     assert not result.ok
     assert result.error == "not_confirmed"
+
+
+@pytest.mark.asyncio
+async def test_send_media_chunk_too_big_for_the_channel_goes_over_https():
+    """Regression: a household advertising a tiny ``a=max-message-size``
+    gets inbox-sized chunks (``media_chunk_bytes`` floor); those must go
+    over the JSON path, never be attempted as a channel frame."""
+    p = _paired()
+    p.cap.max_message_size = 16384
+    result = await p.svc_a.send_media_chunk(
+        to_instance_id=p.b_id,
+        event_type=FederationEventType.DM_MEDIA_BLOB,
+        payload={"media_blob_id": "m1", "message_id": "m1"},
+        raw_chunk=b"x" * HTTPS_CHUNK_BYTES,
+    )
+    assert result.ok
+    assert p.cap.media is None  # the channel was not tried
+    assert len(p.cap.json_envelopes) == 1
+
+
+@pytest.mark.asyncio
+async def test_send_media_chunk_that_fits_the_channel_still_uses_it():
+    p = _paired()
+    p.cap.max_message_size = 262144
+    result = await p.svc_a.send_media_chunk(
+        to_instance_id=p.b_id,
+        event_type=FederationEventType.DM_MEDIA_BLOB,
+        payload={"media_blob_id": "m1", "message_id": "m1"},
+        raw_chunk=b"x" * (262144 - FRAME_OVERHEAD_BYTES),
+    )
+    assert result.ok
+    assert p.cap.media is not None
+    assert p.cap.json_envelopes == []
 
 
 @pytest.mark.asyncio
@@ -5974,17 +6016,29 @@ def test_media_chunk_bytes_follows_the_peers_media_channel():
     HTTPS inbox when there is no channel."""
     from types import SimpleNamespace
 
-    from socialhome.domain.media_chunking import (
-        FRAME_OVERHEAD_BYTES,
-        HTTPS_CHUNK_BYTES,
-        media_chunk_bytes,
-    )
-
     kp = generate_identity_keypair()
     svc = _svc_with(kp, MagicMock(), MagicMock())
-    assert svc.media_chunk_bytes("peer-x") == HTTPS_CHUNK_BYTES  # no transport
+    assert (
+        svc.media_chunk_bytes("peer-x", file_size_bytes=0) == HTTPS_CHUNK_BYTES
+    )  # no transport
     limits = {"old": 262144, "new": 1024 * 1024}
     svc.attach_transport(SimpleNamespace(media_max_message_size=limits.get))
-    assert svc.media_chunk_bytes("none") == HTTPS_CHUNK_BYTES
-    assert svc.media_chunk_bytes("old") == 262144 - FRAME_OVERHEAD_BYTES
-    assert svc.media_chunk_bytes("new") == media_chunk_bytes(1024 * 1024)
+    assert svc.media_chunk_bytes("none", file_size_bytes=0) == HTTPS_CHUNK_BYTES
+    assert (
+        svc.media_chunk_bytes("old", file_size_bytes=0) == 262144 - FRAME_OVERHEAD_BYTES
+    )
+    assert svc.media_chunk_bytes("new", file_size_bytes=0) == media_chunk_bytes(
+        1024 * 1024, file_size_bytes=0
+    )
+    # A tiny channel, or one too small for this file in 4096 chunks →
+    # the inbox size (which the sender then routes over HTTPS).
+    limits["tiny"] = 1
+    assert svc.media_chunk_bytes("tiny", file_size_bytes=0) == HTTPS_CHUNK_BYTES
+    limits["floor"] = 80 * 1024
+    assert svc.media_chunk_bytes("floor", file_size_bytes=0) == 64 * 1024
+    assert (
+        svc.media_chunk_bytes("floor", file_size_bytes=300 * 1024 * 1024)
+        == HTTPS_CHUNK_BYTES
+    )
+    with pytest.raises(TypeError):
+        svc.media_chunk_bytes("floor")  # type: ignore[call-arg]

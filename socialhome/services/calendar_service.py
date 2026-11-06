@@ -2613,7 +2613,7 @@ class SpaceCalendarService(
             or cover == previous_cover
         ):
             return
-        own = getattr(self._federation, "_own_instance_id", "") or ""
+        own = self._federation.own_instance_id if self._federation is not None else ""
         try:
             members = await self._space_repo.list_member_instances(space_id)
             targets = [iid for iid in members if iid and iid != own]
