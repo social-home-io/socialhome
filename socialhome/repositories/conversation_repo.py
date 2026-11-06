@@ -234,6 +234,8 @@ class AbstractConversationRepo(Protocol):
         message_id: str,
         status: str | None,
         media_url: str,
+        media_blob_id: str,
+        from_instance: str,
     ) -> bool: ...
     async def count_unread(self, conversation_id: str, username: str) -> int: ...
     async def list_unread_contents(
@@ -1566,20 +1568,32 @@ class SqliteConversationRepo:
         message_id: str,
         status: str | None,
         media_url: str,
+        media_blob_id: str,
+        from_instance: str,
     ) -> bool:
         """Point a received DM at its full bytes — once.
 
         The receiver's ``DM_MEDIA_BLOB`` adoption: sets ``media_url`` and
-        ``media_sync_status`` only on a row still awaiting this file (sync
-        pending, or ``media_url`` elsewhere). ``True`` when a row changed;
-        a duplicate delivery, or a second one racing the first, gets
-        ``False`` and pushes nothing.
+        ``media_sync_status`` only on a live row still awaiting this file
+        (sync pending, or ``media_url`` elsewhere) — never on a soft-deleted
+        message, whose bytes may land after the delete. ``True`` when a row
+        changed; a duplicate delivery, or a second one racing the first,
+        gets ``False`` and pushes nothing.
+
+        Bound to the delivering household in the same statement: the row
+        must have announced ``media_blob_id`` and its sender must be a user
+        of ``from_instance`` (``remote_users``). The caller's scope check
+        may have run before the row existed — a blob from another household
+        that passed it then can never be adopted by the row landing later.
         """
         changed = await self._db.enqueue_rowcount(
             "UPDATE conversation_messages "
             "SET media_sync_status=?, media_url=? "
-            "WHERE id=? AND (media_sync_status='pending' OR media_url IS NOT ?)",
-            (status, media_url, message_id, media_url),
+            "WHERE id=? AND deleted=0 AND media_blob_id=? "
+            "AND sender_user_id IN "
+            "(SELECT user_id FROM remote_users WHERE instance_id=?) "
+            "AND (media_sync_status='pending' OR media_url IS NOT ?)",
+            (status, media_url, message_id, media_blob_id, from_instance, media_url),
         )
         return changed > 0
 

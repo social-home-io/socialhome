@@ -152,6 +152,29 @@ sending household was sent it for. Both blob types share
   another space's picture, a DM attachment, the household's own upload,
   or an earlier copy of the same blob — is never replaced; a same-size
   re-delivery is a quiet no-op, anything else logs a WARNING.
+- **One media directory, two namespaces.** Space files and DM
+  attachments share `media_dir`. A received DM attachment is stored as
+  `dm-<sha256("dm-media", from_instance, message_id)[:40]>.<ext>`
+  (`dm_media_name`) — bound to the household that sent its chunks — and
+  a `SPACE_MEDIA_BLOB` never writes a reserved name
+  (`is_reserved_media_name`: the `dm-` / `gm-` prefixes, owned by DM
+  attachments and GFS moment media, and the DM transients
+  `*.preview.webp` / `*.part<N>` / `*.assembled`). So a space blob for a
+  row not seen yet can never plant a DM's file, whichever arrives first,
+  and only the DM sender's own household can fill its name. Before
+  2026-11-06 the DM file was `<message_id>.<ext>` and a household that
+  knew the id could plant it through a space blob for the DM to adopt.
+- **Size caps.** A file must fit what the receiving path accepts, from
+  the upload limits in `domain/media_constraints.py`: a space file at
+  most `SPACE_MEDIA_MAX_BYTES` (`VIDEO_MAX_UPLOAD_BYTES`, 200 MiB — a
+  space video is the biggest thing a space ships), a DM attachment per
+  its declared type (`dm_media_max_bytes`, see
+  [`dm-media.md`](./dm-media.md#chunking)). Every chunk checks the
+  declared `file_size_bytes`, so the first one to land refuses an
+  oversized file, and a chunk must fit its share of it (`(chunk_count −
+  1) × len(chunk) < file_size_bytes`, true of every sender's equal split)
+  — the parts on disk stay under twice the declared size. A refused
+  chunk is dropped with a WARNING and nothing is written.
 - **Space scope (`SPACE_MEDIA_BLOB`).** The envelope must name one space
   (`resolve_space_id`: routing `space_id`, payload copy as fallback, a
   mismatch is a refusal) and a `correlation_id` (`post_id` on older
@@ -184,13 +207,24 @@ sending household was sent it for. Both blob types share
   parts. A set that never completes is removed by the media orphan
   sweep once its folder has been untouched for 3 days (far past the
   senders' retry horizon; every landing chunk refreshes it), at most 200
-  folders per pass. DM rules (sender household, announced `media_blob_id`) are in
+  folders per pass. Neither the sweep nor `drop_parts` follows a
+  symlink: a symlinked `.partial` is skipped, an entry is aged by its own
+  `lstat` and unlinked without touching its target, a part folder's
+  contents are never descended into (a folder holding a sub-directory
+  stays and is logged, not counted), and `store_chunk` refuses a
+  `.partial` or part folder that is a symlink. DM rules (sender household, announced `media_blob_id`) are in
   [`dm-media.md`](./dm-media.md#chunking).
 
 Residual, by design: among the households entitled to deliver a space's
 media (every member household can, which is what lets the §25.6 catch-up
 ship another member's pictures), the first complete copy of a new file
 wins. `tests/protocol/test_media_blob_scope.py` pins these rules.
+
+Residual: a household may start many transfers it never completes; each
+is bounded (chunk count, size cap, twice-the-declared-size parts) and
+swept after 3 days, but there is no per-sender quota on how many message
+ids / transfers a household may open at once (each a part set, or a
+never-adopted `dm-` file swept as an orphan) — candidate follow-up issue.
 
 ## Implementation pointers
 

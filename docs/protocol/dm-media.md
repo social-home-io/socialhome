@@ -81,7 +81,7 @@ sequenceDiagram
   Bob-->>Bob: Save preview to local cache;<br/>bubble renders immediately with media_sync_status='pending'
   Note over Alice,Bob: ─── background ───
   Alice->>Bob: DM_MEDIA_BLOB chunks (1..N, base64; final flag on last)
-  Bob-->>Bob: Each chunk → part file under media_dir;<br/>once all N landed (any order), concat in order + rename to <msg_id>.<ext>;<br/>update conversation_messages.media_url +<br/>media_sync_status=NULL
+  Bob-->>Bob: Each chunk → part file under media_dir;<br/>once all N landed (any order), concat in order + rename to dm-<sha256(from_instance, msg_id)>.<ext>;<br/>update conversation_messages.media_url +<br/>media_sync_status=NULL
   Bob-->>Bob: WS push dm.media_ready → SPA<br/>swaps preview src for full media
 ```
 
@@ -128,6 +128,21 @@ with its `chunk_index`, the shared `chunk_count`, and `final` on the
 last; a 100 MB video is ~200. Receivers accept up to 4096 chunks
 (`MAX_MEDIA_CHUNKS`).
 
+**Size cap.** The receiver refuses a file bigger than the sender's own
+upload limits allow (`inbound_media_store.dm_media_max_bytes`, from
+`domain/media_constraints.py`): a declared `image/*` or `audio/*`
+attachment at most 25 MiB (the largest of the picture, voice-note and
+plain-file caps — a picker can label a plain file `image/*`), anything
+else (video, `application/octet-stream` from a picker that names no
+type) at most `VIDEO_MAX_UPLOAD_BYTES` (200 MiB). Every chunk checks the
+declared `file_size_bytes`, so the first one to land already refuses an
+oversized file, and a chunk must fit its share of that size (senders
+split into equal chunks with a shorter last one, so `(chunk_count − 1) ×
+len(chunk) < file_size_bytes`) — the parts on disk stay under twice the
+declared size, and the assembly must come to it exactly. A refused chunk
+is dropped with a WARNING; nothing is written. Before 2026-11-06 only
+the chunk count was bounded (4096 × 512 KiB ≈ 2 GiB).
+
 Before 2026-11-06 the sizes were fixed (a 1 MiB single chunk, 512 KiB
 pieces): no binary frame fit a 256 KiB channel, and a 0.7–1 MiB file sent
 whole was refused by the inbox too (413), so it never arrived.
@@ -145,7 +160,7 @@ chunk) assembles: it concatenates the parts in index order into a temp
 file of its own, checks the result is exactly `file_size_bytes` (a
 multiple-chunk blob without a positive `file_size_bytes` is dropped; a
 mismatch discards the parts and publishes nothing), moves it to
-`<msg_id>.<ext>` write-once (see below), deletes the part directory,
+its sender-bound name (see below) write-once, deletes the part directory,
 then swaps `media_url` and broadcasts `dm.media_ready` as in the
 single-chunk case — once: when two chunks complete the set at the same
 moment, only the one whose file lands adopts it. A chunk that lands
@@ -165,8 +180,8 @@ entitled to send:
 - `message_id` must be a single safe file-name component and
   `chunk_index` / `chunk_count` must be in range, else the chunk is
   dropped. The same rule applies to the `DM_MESSAGE` itself: its
-  `message_id` names the `<msg_id>.preview.webp` and `<msg_id>.<ext>`
-  files, so a `DM_MESSAGE` whose id is absolute, contains a separator or
+  `message_id` names the `<msg_id>.preview.webp` file, so a
+  `DM_MESSAGE` whose id is absolute, contains a separator or
   starts with `.` is dropped with a WARNING before anything is stored.
   Every media path built from a peer id is also checked to sit directly
   in the media root (`inbound_media_store.media_file_path`).
@@ -177,11 +192,42 @@ entitled to send:
   member's message, or from another household in the same group DM, is
   refused with a WARNING.
 - If the row isn't here yet (the blob overtook its `DM_MESSAGE`), the
-  bytes are accepted — safe because the final file is **write-once**: it
-  is moved into place with a hard link that fails on an existing name
-  (`services/inbound_media_store.py:publish_once`), so an existing
-  `<msg_id>.<ext>` is never replaced. A re-delivery of an attachment
-  that already landed just re-adopts the file on disk.
+  bytes are accepted — under the sending household's **own name**: the
+  received attachment is stored as
+  `dm-<first 40 hex of sha256("dm-media", from_instance, msg_id)>.<ext>`
+  (`inbound_media_store.dm_media_name`). Only that household's chunks
+  can assemble that name, and the `DM_MESSAGE` adopts only the name of
+  the household it came from, so bytes another household sent for the
+  same id land under another name and are never shown (the media sweep
+  removes them).
+- **One media directory, two namespaces.** Space files and DM
+  attachments share `media_dir`, and a `SPACE_MEDIA_BLOB` for a row not
+  seen yet is accepted by name. A space blob never writes a reserved
+  name (`inbound_media_store.is_reserved_media_name`: the `dm-` and
+  `gm-` prefixes and the DM transients `*.preview.webp` / `*.part<N>` /
+  `*.assembled`), so no household can plant a DM's file through a space
+  — before the DM arrives or while it waits for its bytes. Before
+  2026-11-06 the DM file was `<msg_id>.<ext>`: anyone who knew a message
+  id (a group-DM member) could plant it as a space file, and the DM then
+  adopted the planted file.
+- The final file is **write-once**: it is moved into place with a hard
+  link that fails on an existing name
+  (`services/inbound_media_store.py:publish_once`), so an existing file
+  is never replaced. A re-delivery of an attachment that already landed
+  just re-adopts the file on disk — safe because that name only ever
+  holds the sender's own assembly. A soft-deleted message never adopts
+  media (`adopt_media_file` updates only `deleted=0` rows).
+- **Adoption is bound to the sender in one statement.** The blob's scope
+  check can run before the row exists (an overtaking blob is accepted),
+  so the row could land while another household's chunk is assembling.
+  `adopt_media_file` therefore re-checks atomically, in its `UPDATE`:
+  the row must have announced this `media_blob_id` and its sender must
+  be a user of the delivering household (`remote_users.instance_id =
+  from_instance`). Bytes from anyone else stay on disk under their own
+  `dm-` name, never shown, and the media sweep removes them.
+- **The row decides its type.** Once the message is here, its own
+  `mime_type` — not the blob's — picks the size cap and the file
+  extension, so a picture message can't take a 200 MiB `.mp4`.
 
 **Backwards compatibility**: payloads without the `chunk_*` /
 `final` fields (older builds, or any caller that doesn't emit
@@ -204,10 +250,11 @@ A handful of paths beyond the happy flow above:
 - **DM_MEDIA_BLOB-before-DM_MESSAGE reordering.** Federation
   envelopes can race. If the full file lands before the
   `conversation_messages` row exists, the blob handler still writes
-  the bytes to `<msg_id>.<ext>`; when the matching `DM_MESSAGE`
-  arrives later, `_receive_media_preview` adopts the pre-arrived
-  file directly (clearing `media_sync_status`) instead of
-  overwriting it with a preview.
+  the bytes to the sender-bound `dm-…<ext>` name; when the matching
+  `DM_MESSAGE` arrives later from the same household,
+  `_receive_media_preview` adopts the pre-arrived file directly
+  (clearing `media_sync_status`) instead of overwriting it with a
+  preview.
 - **MIME magic-byte sniff.** `_on_dm_media_blob` checks the leading
   bytes of the assembled file against the declared `mime_type`.
   Only `image/webp` and `video/webm` have signatures we'd ever
@@ -236,7 +283,14 @@ A handful of paths beyond the happy flow above:
   an earlier attempt chunked for another tier, a crash's temp files.
   3 days is far past the senders' retry horizon (6 attempts, backoff
   capped at 30 min) and every chunk that lands refreshes the folder, so
-  a transfer in progress is never hit.
+  a transfer in progress is never hit. The sweep never follows a
+  symlink: a symlinked `.partial` is left alone, an entry is aged by its
+  own `lstat` and a link is unlinked without touching its target, and a
+  folder's contents are never descended into (`drop_parts`; a folder
+  holding a planted sub-directory stays and is logged, not counted as
+  removed). Before
+  2026-11-06 a symlink in `.partial` pointing outside made the sweep
+  delete what was behind it.
 
 ## Server-side validation
 

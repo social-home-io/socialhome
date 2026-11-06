@@ -36,6 +36,7 @@ from socialhome.app_keys import db_key, federation_service_key
 from socialhome.config import Config
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.gallery import GalleryItem
+from socialhome.services.inbound_media_store import dm_media_name
 
 pytestmark = pytest.mark.security
 
@@ -52,7 +53,7 @@ EXISTING = {
     "b1.webp": b"space B picture",
     "a1.webp": b"space A picture",
     "local-dm.webp": b"local member's DM attachment",
-    "m-remote.webp": WEBP + b"remote DM attachment",
+    dm_media_name(SENDER, "m-remote", ".webp"): WEBP + b"remote DM attachment",
 }
 
 
@@ -164,7 +165,13 @@ _SEED = [
         )
         for mid, sender, blob, url, status in (
             ("local-dm", "u-anna", None, "api/media/local-dm.webp", None),
-            ("m-remote", "u-rem", "m-remote", "api/media/m-remote.webp", None),
+            (
+                "m-remote",
+                "u-rem",
+                "m-remote",
+                f"api/media/{dm_media_name(SENDER, 'm-remote', '.webp')}",
+                None,
+            ),
             ("m-pending", "u-rem", "m-pending", None, "pending"),
         )
     ],
@@ -242,6 +249,13 @@ _SPACE_ATTACKS = [
         _space("post-a", "a1.webp", transfer_id="t", chunk_index=0, chunk_count=1),
         id="chunked, file already present",
     ),
+    pytest.param(
+        _space("post-unseen", dm_media_name(SENDER, "m-pending", ".webp")),
+        id="unseen row, a pending DM's name",
+    ),
+    pytest.param(_space("post-a", "DM-anything.webp"), id="reserved dm- prefix"),
+    pytest.param(_space("post-unseen", "gm-" + "a" * 40 + ".webp"), id="GFS moment"),
+    pytest.param(_space("post-unseen", "m-new.preview.webp"), id="DM preview"),
     pytest.param(_space("post-a", "../escape.webp"), id="path traversal"),
     pytest.param(_space("post-a", ".partial"), id="dot name"),
     pytest.param(_space("post-b", "b1.webp", space_id=VICTIM), id="payload space"),
@@ -297,13 +311,14 @@ async def test_legitimate_blobs_still_land(env):
     await _send(app, FET.DM_MEDIA_BLOB, _dm("m-pending"))
     assert (media / "a-new.webp").read_bytes() == WEBP
     assert (media / "later.webp").read_bytes() == WEBP
-    assert (media / "m-pending.webp").read_bytes() == WEBP
+    pending = dm_media_name(SENDER, "m-pending", ".webp")
+    assert (media / pending).read_bytes() == WEBP
     row = await db.fetchone(
         "SELECT media_url, media_sync_status FROM conversation_messages"
         " WHERE id='m-pending'",
         (),
     )
-    assert row["media_url"] == "api/media/m-pending.webp"
+    assert row["media_url"] == f"api/media/{pending}"
     assert row["media_sync_status"] is None
 
 
@@ -362,3 +377,115 @@ async def test_a_federated_gallery_items_full_file_and_thumbnail_both_land(env):
     media = root / "media"
     assert (media / "ga-thumb.webp").read_bytes() == WEBP
     assert (media / "ga-full.webp").read_bytes() == WEBP
+
+
+# ── One media namespace: a space blob must never become a DM's file ────
+
+EVIL = WEBP + b"planted by another household"
+GOOD = WEBP + b"the sender's own attachment"
+
+
+def _b64(body: bytes) -> str:
+    return base64.b64encode(body).decode("ascii")
+
+
+async def _dm_message(app, message_id: str) -> None:
+    """``SENDER``'s ``u-rem`` opens a 1:1 with local ``anna`` carrying an
+    image whose full bytes follow as ``DM_MEDIA_BLOB``."""
+    await _send(
+        app,
+        FET.DM_MESSAGE,
+        {
+            "conversation_id": f"conv-{message_id}",
+            "message_id": message_id,
+            "sender_user_id": "u-rem",
+            "recipient_user_ids": ["u-anna"],
+            "content": "",
+            "type": "image",
+            "media_blob_id": message_id,
+            "mime_type": "image/webp",
+        },
+    )
+
+
+async def _dm_file(db, root, message_id: str) -> bytes | None:
+    """The bytes the DM row's ``media_url`` serves, or ``None``."""
+    row = await db.fetchone(
+        "SELECT media_url FROM conversation_messages WHERE id=?", (message_id,)
+    )
+    assert row is not None
+    url = row["media_url"]
+    if not url:
+        return None
+    path = root / "media" / url.removeprefix("api/media/")
+    return path.read_bytes() if path.is_file() else None
+
+
+def _planted_names(message_id: str) -> list[str]:
+    """Every name a DM attachment for ``message_id`` from ``SENDER`` could
+    be stored under: the legacy ``<message_id><ext>`` and the current
+    sender-bound DM name."""
+    return [f"{message_id}.webp", dm_media_name(SENDER, message_id, ".webp")]
+
+
+async def _plant(app, name: str) -> None:
+    await _send(
+        app,
+        FET.SPACE_MEDIA_BLOB,
+        {**_space("post-unseen", name), "bytes_b64": _b64(EVIL)},
+        from_instance=OTHER,
+        space_id=GATED,
+    )
+
+
+def _dm_blob(message_id: str, body: bytes) -> dict:
+    return {
+        **_dm(message_id),
+        "conversation_id": f"conv-{message_id}",
+        "bytes_b64": _b64(body),
+    }
+
+
+async def test_space_blob_planted_before_the_dm_is_never_adopted(env):
+    """Probe: another household plants the DM's file name through an
+    unknown space row, then the DM arrives — the DM must not show it."""
+    app, db, root = env
+    for name in _planted_names("m-new"):
+        await _plant(app, name)
+    await _dm_message(app, "m-new")
+    assert await _dm_file(db, root, "m-new") != EVIL
+    await _send(app, FET.DM_MEDIA_BLOB, _dm_blob("m-new", GOOD))
+    assert await _dm_file(db, root, "m-new") == GOOD
+
+
+async def test_space_blob_planted_while_the_dm_is_pending_is_never_adopted(env):
+    """Probe: the DM row waits for its bytes; another household plants the
+    name, then the sender's own blob lands — the row gets the sender's
+    bytes, never the planted file."""
+    app, db, root = env
+    for name in _planted_names("m-pending"):
+        await _plant(app, name)
+    assert await _dm_file(db, root, "m-pending") is None
+    await _send(app, FET.DM_MEDIA_BLOB, {**_dm("m-pending"), "bytes_b64": _b64(GOOD)})
+    assert await _dm_file(db, root, "m-pending") == GOOD
+
+
+async def test_another_households_dm_blob_before_the_dm_is_never_adopted(env):
+    """Probe: before the DM row exists any household's ``DM_MEDIA_BLOB`` is
+    accepted (it may have overtaken its message) — but only the sender's
+    own household's bytes may ever become the DM's file."""
+    app, db, root = env
+    await _send(app, FET.DM_MEDIA_BLOB, _dm_blob("m-new", EVIL), from_instance=OTHER)
+    await _dm_message(app, "m-new")
+    assert await _dm_file(db, root, "m-new") != EVIL
+    await _send(app, FET.DM_MEDIA_BLOB, _dm_blob("m-new", GOOD))
+    assert await _dm_file(db, root, "m-new") == GOOD
+
+
+async def test_dm_blob_overtaking_its_message_is_adopted(env):
+    """Control: the sender's own blob that overtook its DM_MESSAGE is the
+    DM's file once the message lands."""
+    app, db, root = env
+    await _send(app, FET.DM_MEDIA_BLOB, _dm_blob("m-new", GOOD))
+    await _dm_message(app, "m-new")
+    assert await _dm_file(db, root, "m-new") == GOOD

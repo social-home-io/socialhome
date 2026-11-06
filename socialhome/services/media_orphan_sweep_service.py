@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import logging
 import pathlib
-import re
 import stat
 import time
 from typing import TYPE_CHECKING
@@ -35,7 +34,7 @@ from typing import TYPE_CHECKING
 import aiofiles.os
 
 from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
-from .inbound_media_store import drop_parts, remove_quietly
+from .inbound_media_store import TRANSIENT_DM_MEDIA_RE, drop_parts
 
 if TYPE_CHECKING:
     from ..repositories.media_transcode_repo import AbstractMediaTranscodeRepo
@@ -64,7 +63,7 @@ PARTIAL_SWEEP_LIMIT: int = 200
 
 #: Transient DM artifacts that aren't referenced by a ``media_url`` column.
 #: ``dm_gc`` owns these; the sweep must leave them alone.
-_SKIP_RE = re.compile(r"(\.preview\.webp|\.part\d+|\.assembled)", re.IGNORECASE)
+_SKIP_RE = TRANSIENT_DM_MEDIA_RE
 
 
 class MediaOrphanSweepService:
@@ -184,10 +183,18 @@ class MediaOrphanSweepService:
         would otherwise stay forever. A folder goes once nothing in it
         (nor the folder itself) changed for :data:`PARTIAL_GRACE_SECONDS`;
         at most ``limit`` folders per pass.
+
+        Symlinks are never followed: a ``.partial`` that is itself a link
+        is left alone, a link inside it is aged by its own ``lstat`` and
+        unlinked (its target untouched), and a folder's entries are never
+        descended into (:func:`drop_parts`).
         """
         now = time.time() if now is None else now
         root = self._media_dir / _PARTIAL_DIRNAME
         try:
+            if await aiofiles.os.path.islink(root):
+                log.warning("media-sweep: %s is a symlink — not sweeping it", root)
+                return 0
             names = await aiofiles.os.listdir(root)
         except FileNotFoundError:
             return 0
@@ -208,25 +215,32 @@ class MediaOrphanSweepService:
                 continue
             if now - newest < PARTIAL_GRACE_SECONDS:
                 continue
-            if await aiofiles.os.path.isdir(path):
-                await drop_parts(path)
+            # Unlinks a symlink or a stray file without following it. A
+            # folder holding something it won't descend into (a planted
+            # sub-directory) stays — not counted, and said so.
+            if await drop_parts(path):
+                removed += 1
             else:
-                await remove_quietly(path)
-            removed += 1
+                log.warning("media-sweep: could not remove %s — left in place", path)
         if removed:
             log.info("media-sweep: removed %d abandoned chunk set(s)", removed)
         return removed
 
 
 async def _newest_mtime(path: pathlib.Path) -> float:
-    """The latest mtime of ``path`` and, for a folder, of what it holds."""
-    st = await aiofiles.os.stat(path)
+    """The latest mtime of ``path`` and, for a real folder, of what it holds.
+
+    ``lstat`` throughout: a symlink is aged by the link itself and never
+    listed through, so nothing outside ``.partial`` is ever looked at.
+    """
+    st = await aiofiles.os.stat(path, follow_symlinks=False)
     newest = st.st_mtime
     if not stat.S_ISDIR(st.st_mode):
         return newest
     for entry in await aiofiles.os.listdir(path):
         try:
-            newest = max(newest, (await aiofiles.os.stat(path / entry)).st_mtime)
+            entry_st = await aiofiles.os.stat(path / entry, follow_symlinks=False)
         except FileNotFoundError:
             continue
+        newest = max(newest, entry_st.st_mtime)
     return newest

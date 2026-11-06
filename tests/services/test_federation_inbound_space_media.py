@@ -33,7 +33,11 @@ from socialhome.services import inbound_media_store
 from socialhome.services.federation_inbound_service import (
     FederationInboundService,
 )
-from socialhome.services.inbound_media_store import partial_key
+from socialhome.services.inbound_media_store import (
+    MAX_MEDIA_CHUNKS,
+    SPACE_MEDIA_MAX_BYTES,
+    partial_key,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -616,3 +620,75 @@ async def test_multi_chunk_without_a_declared_size_is_refused(env, caplog, size)
     assert not (media / "a1.webp").exists()
     assert _no_partials(media)
     assert "file_size_bytes" in caplog.text
+
+
+# ── Whole-file size cap ─────────────────────────────────────────────────
+
+
+def _first_chunk(*, count: int, size: int, body: bytes) -> FederationEvent:
+    return _blob(
+        {
+            "post_id": "post-a",
+            "filename": "a1.webp",
+            "transfer_id": "a1.webp:self",
+            "chunk_index": 0,
+            "chunk_count": count,
+            "final": False,
+            "file_size_bytes": size,
+        },
+        body=body,
+    )
+
+
+async def test_chunk_of_a_file_over_the_space_cap_writes_nothing(env, caplog):
+    """A space file declared over ``SPACE_MEDIA_MAX_BYTES`` is refused on
+    the first chunk that lands: no part, no file."""
+    svc, media = env
+    with caplog.at_level("WARNING"):
+        await svc._on_space_media_blob(
+            _first_chunk(
+                count=MAX_MEDIA_CHUNKS,
+                size=SPACE_MEDIA_MAX_BYTES + 1,
+                body=b"x" * 512,
+            )
+        )
+    assert not (media / "a1.webp").exists()
+    assert _no_partials(media)
+    assert "byte cap" in caplog.text
+
+
+async def test_chunk_bigger_than_its_share_writes_nothing(env, caplog):
+    """A chunk can't be bigger than its share of the declared file: with
+    it refused, the parts on disk stay under twice the declared size."""
+    svc, media = env
+    with caplog.at_level("WARNING"):
+        await svc._on_space_media_blob(
+            _first_chunk(count=4, size=1024, body=b"x" * 512)
+        )
+    assert _no_partials(media)
+    assert "belong to a 1024-byte file" in caplog.text
+
+
+async def test_space_file_at_the_cap_is_accepted(env):
+    """Control: a chunk of a file exactly at the cap lands as a part."""
+    svc, media = env
+    await svc._on_space_media_blob(
+        _first_chunk(count=MAX_MEDIA_CHUNKS, size=SPACE_MEDIA_MAX_BYTES, body=b"x")
+    )
+    assert not _no_partials(media)
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["dm-" + "0" * 40 + ".webp", "gm-" + "a" * 40 + ".webp", "m-1.preview.webp"],
+)
+async def test_reserved_name_is_refused_even_for_an_unknown_row(env, caplog, name):
+    """``dm-`` (received DM attachments), ``gm-`` (GFS moment media) and DM
+    transients belong to other paths: never written as a space file."""
+    svc, media = env
+    with caplog.at_level("WARNING"):
+        await svc._on_space_media_blob(
+            _blob({"post_id": "post-unseen", "filename": name})
+        )
+    assert not (media / name).exists()
+    assert "reserved name" in caplog.text

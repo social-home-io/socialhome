@@ -1454,23 +1454,88 @@ async def test_count_messages_since_counts_one_sender_in_one_window(env):
     assert await env.repo.count_messages_since("c-none", "uid-alice", since) == 0
 
 
+async def _remote_sender(env, user_id: str = "ru-bob", instance: str = "peer-bob"):
+    await env.db.enqueue(
+        "INSERT OR IGNORE INTO remote_instances(id, display_name,"
+        " remote_identity_pk, key_self_to_remote, key_remote_to_self,"
+        " remote_inbox_url, local_inbox_id, status, source)"
+        " VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            instance,
+            instance,
+            "00" * 32,
+            "k1",
+            "k2",
+            f"https://{instance}/wh",
+            f"wh-{instance}",
+            "confirmed",
+            "manual",
+        ),
+    )
+    await env.db.enqueue(
+        "INSERT INTO remote_users(user_id, instance_id, remote_username,"
+        " display_name) VALUES(?,?,?,?)",
+        (user_id, instance, user_id, user_id),
+    )
+
+
+async def _pending_media_row(env, *, deleted: int = 0) -> None:
+    await env.repo.create(_conv())
+    await _remote_sender(env)
+    await env.db.enqueue(
+        "INSERT INTO conversation_messages(id, conversation_id, sender_user_id,"
+        " content, type, media_blob_id, media_url, media_sync_status, deleted,"
+        " created_at) VALUES('m1', 'c1', 'ru-bob', '', 'image', 'm1',"
+        " 'api/media/m1.preview.webp', 'pending', ?, datetime('now'))",
+        (deleted,),
+    )
+
+
+def _adopt(env, *, message_id="m1", blob="m1", instance="peer-bob"):
+    return env.repo.adopt_media_file(
+        message_id=message_id,
+        status=None,
+        media_url="api/media/m1.webp",
+        media_blob_id=blob,
+        from_instance=instance,
+    )
+
+
 async def test_adopt_media_file_changes_a_waiting_row_once(env):
     """The receiver's adoption is conditional: a row still awaiting the
     file changes (``True``); doing it again changes nothing (``False``)."""
-    await env.repo.create(_conv())
-    await env.db.enqueue(
-        "INSERT INTO conversation_messages(id, conversation_id, sender_user_id,"
-        " content, type, media_blob_id, media_url, media_sync_status, created_at)"
-        " VALUES('m1', 'c1', 'uid-bob', '', 'image', 'm1',"
-        " 'api/media/m1.preview.webp', 'pending', datetime('now'))",
-    )
-    url = "api/media/m1.webp"
-    assert await env.repo.adopt_media_file(message_id="m1", status=None, media_url=url)
+    await _pending_media_row(env)
+    assert await _adopt(env)
     msg = await env.repo.get_message("m1")
-    assert msg.media_url == url and msg.media_sync_status is None
-    assert not await env.repo.adopt_media_file(
-        message_id="m1", status=None, media_url=url
+    assert msg.media_url == "api/media/m1.webp" and msg.media_sync_status is None
+    assert not await _adopt(env)
+    assert not await _adopt(env, message_id="nope")
+
+
+async def test_adopt_media_file_never_touches_a_deleted_message(env):
+    """A soft-deleted message never gets media adopted, even one still
+    marked ``pending`` (its bytes may arrive after the delete)."""
+    await _pending_media_row(env, deleted=1)
+    assert not await _adopt(env)
+    msg = await env.db.fetchone(
+        "SELECT media_url, media_sync_status FROM conversation_messages WHERE id='m1'"
     )
-    assert not await env.repo.adopt_media_file(
-        message_id="nope", status=None, media_url=url
-    )
+    assert msg["media_url"] == "api/media/m1.preview.webp"
+    assert msg["media_sync_status"] == "pending"
+
+
+@pytest.mark.parametrize(
+    ("blob", "instance"),
+    [("m1", "peer-evil"), ("other-blob", "peer-bob"), ("m1", "")],
+)
+async def test_adopt_media_file_is_bound_to_the_rows_sender_and_blob(
+    env, blob, instance
+):
+    """Atomic sender binding (adversarial review F1): the row only adopts a
+    file its own sender's household delivered under the blob id it
+    announced — whatever a scope check saw before the row existed."""
+    await _pending_media_row(env)
+    await _remote_sender(env, "ru-evil", "peer-evil")
+    assert not await _adopt(env, blob=blob, instance=instance)
+    msg = await env.repo.get_message("m1")
+    assert msg.media_sync_status == "pending"

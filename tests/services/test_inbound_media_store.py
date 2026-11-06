@@ -9,6 +9,12 @@ from unittest.mock import patch
 import pytest
 
 from socialhome.domain.errors import InvalidMediaRefError
+from socialhome.domain.media_constraints import (
+    AUDIO_MAX_UPLOAD_BYTES,
+    FILE_MAX_UPLOAD_BYTES,
+    IMAGE_MAX_UPLOAD_BYTES,
+    VIDEO_MAX_UPLOAD_BYTES,
+)
 from socialhome.services import inbound_media_store as store
 
 
@@ -369,3 +375,134 @@ async def test_store_chunk_readiness_check_is_linear(tmp_path):
             await _put(part_dir, target, idx, chunks)
     assert target.read_bytes() == b"".join(chunks)
     assert calls["probe"] <= 3 * n
+
+
+# ── One namespace: DM names, reserved names ─────────────────────────────
+
+
+def test_dm_media_name_binds_the_sending_household_and_message():
+    name = store.dm_media_name("peer-a", "m-1", ".webp")
+    assert name.startswith(store.DM_MEDIA_PREFIX) and name.endswith(".webp")
+    assert store.is_safe_media_name(name)
+    assert name == store.dm_media_name("peer-a", "m-1", ".webp")
+    assert name != store.dm_media_name("peer-b", "m-1", ".webp")
+    assert name != store.dm_media_name("peer-a", "m-2", ".webp")
+    # Fixed length whatever the id: always one safe component.
+    long_id = "m" * 200
+    assert store.is_safe_media_name(store.dm_media_name("p", long_id, ".webp"))
+
+
+@pytest.mark.parametrize(
+    ("name", "reserved"),
+    [
+        ("dm-" + "0" * 40 + ".webp", True),
+        ("DM-x.webp", True),
+        ("gm-" + "a" * 40 + ".webm", True),
+        ("m-1.preview.webp", True),
+        ("m-1.part0003", True),
+        ("x.assembled", True),
+        ("0123abcd" * 4 + ".webp", False),
+        ("a1.webp", False),
+        ("admin.webp", False),
+    ],
+)
+def test_is_reserved_media_name(name, reserved):
+    assert store.is_reserved_media_name(name) is reserved
+
+
+# ── Size caps ──────────────────────────────────────────────────────────
+
+
+def test_caps_come_from_the_upload_limits():
+    assert store.SPACE_MEDIA_MAX_BYTES == VIDEO_MAX_UPLOAD_BYTES
+    assert store.dm_media_max_bytes("video/webm") == VIDEO_MAX_UPLOAD_BYTES
+    assert store.dm_media_max_bytes("") == VIDEO_MAX_UPLOAD_BYTES
+    small = max(IMAGE_MAX_UPLOAD_BYTES, AUDIO_MAX_UPLOAD_BYTES, FILE_MAX_UPLOAD_BYTES)
+    assert store.dm_media_max_bytes("image/webp") == small
+    assert store.dm_media_max_bytes("Audio/OGG; codecs=opus") == small
+
+
+@pytest.mark.parametrize(
+    ("total", "chunk", "count", "refused"),
+    [
+        (100, 100, 1, False),  # one chunk = the file
+        (1000, 400, 3, False),  # 400 + 400 + 200
+        (1000, 200, 3, False),  # the short last chunk
+        (1000, 500, 3, True),  # 2 x 500 already the whole file
+        (100, 101, 1, True),  # chunk over the file
+        (5000, 1, 4096, False),
+        (5001, 1, 1, True),  # over the cap
+    ],
+)
+def test_inbound_size_refusal(total, chunk, count, refused):
+    reason = store.inbound_size_refusal(
+        total_size=total, chunk_len=chunk, chunk_count=count, max_bytes=5000
+    )
+    assert (reason is not None) is refused
+
+
+# ── Symlinks are never followed ────────────────────────────────────────
+
+
+def _outside(tmp_path):
+    out = tmp_path / "outside"
+    out.mkdir()
+    (out / "precious.txt").write_bytes(b"keep")
+    return out
+
+
+async def test_drop_parts_unlinks_a_symlinked_part_dir_without_following(tmp_path):
+    out = _outside(tmp_path)
+    link = tmp_path / ".partial" / "k"
+    link.parent.mkdir()
+    link.symlink_to(out, target_is_directory=True)
+    await store.drop_parts(link)
+    assert not link.is_symlink()
+    assert (out / "precious.txt").read_bytes() == b"keep"
+
+
+async def test_drop_parts_never_descends_into_a_symlink_inside(tmp_path):
+    out = _outside(tmp_path)
+    part_dir = tmp_path / ".partial" / "k"
+    part_dir.mkdir(parents=True)
+    (part_dir / "000000").write_bytes(b"A")
+    (part_dir / "000001").symlink_to(out, target_is_directory=True)
+    await store.drop_parts(part_dir)
+    assert not part_dir.exists()
+    assert (out / "precious.txt").read_bytes() == b"keep"
+
+
+async def test_store_chunk_refuses_a_symlinked_part_dir(tmp_path):
+    out = _outside(tmp_path)
+    link = tmp_path / ".partial" / "k"
+    link.parent.mkdir()
+    link.symlink_to(out, target_is_directory=True)
+    with pytest.raises(OSError):
+        await _put(link, tmp_path / "out.bin", 0, [b"A", b"B"])
+    assert sorted(p.name for p in out.iterdir()) == ["precious.txt"]
+
+
+async def test_store_chunk_refuses_a_symlinked_partial_root(tmp_path):
+    """Review F3: ``media_dir/.partial`` itself a symlink — no write lands
+    behind it."""
+    out = _outside(tmp_path)
+    root = tmp_path / ".partial"
+    root.symlink_to(out, target_is_directory=True)
+    with pytest.raises(OSError):
+        await _put(root / "k", tmp_path / "out.bin", 0, [b"A", b"B"])
+    assert sorted(p.name for p in out.iterdir()) == ["precious.txt"]
+
+
+async def test_drop_parts_reports_whether_the_folder_went(tmp_path):
+    """A planted sub-directory is never descended into, so the folder
+    stays — and ``drop_parts`` says so instead of claiming it went."""
+    part_dir = tmp_path / ".partial" / "k"
+    (part_dir / "nested").mkdir(parents=True)
+    (part_dir / "000000").write_bytes(b"A")
+    assert await store.drop_parts(part_dir) is False
+    assert (part_dir / "nested").is_dir()
+    clean = tmp_path / ".partial" / "j"
+    clean.mkdir()
+    (clean / "000000").write_bytes(b"A")
+    assert await store.drop_parts(clean) is True
+    assert not clean.exists()
