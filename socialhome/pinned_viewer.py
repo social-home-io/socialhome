@@ -156,6 +156,41 @@ def viewer_page_link(
     return f"{base_url.rstrip('/')}/{viewer.path}#{fragment}"
 
 
+#: The viewer's space page (``v`` in the fragment, ``client/gfs/page_link.ts``).
+VIEW_SPACE: str = "space"
+
+#: Longest space id the viewer accepts (``page_link.ts``): a wire id.
+MAX_SPACE_ID_CHARS: int = 128
+
+#: What the viewer accepts as an id or token: the URL-safe characters the
+#: households and the GFS mint (``pinned_link.ts`` ``SAFE_ID``). Never only
+#: dots: ``..`` would climb the viewer's request path.
+_SAFE_ID_RE = re.compile(r"(?!\.+$)[A-Za-z0-9._~-]+")
+
+
+def viewer_safe_id(value: str, max_chars: int) -> bool:
+    """Whether the viewer accepts ``value`` as an id of at most
+    ``max_chars`` characters — a link it would refuse is never minted."""
+    return 0 < len(value) <= max_chars and _SAFE_ID_RE.fullmatch(value) is not None
+
+
+def viewer_space_link(
+    base_url: str, viewer: PinnedViewer, *, gfs_base: str, space_id: str
+) -> str | None:
+    """The viewer link of a global space listed on the GFS at ``gfs_base``
+    (the page the GFS's own ``/spaces/{id}`` hands off to), or ``None`` for
+    an id the viewer would refuse."""
+    if not viewer_safe_id(space_id, MAX_SPACE_ID_CHARS):
+        return None
+    return viewer_page_link(
+        base_url,
+        viewer,
+        gfs_base=gfs_base,
+        view=VIEW_SPACE,
+        params=[("s", space_id)],
+    )
+
+
 def pinned_link(
     base_url: str,
     viewer: PinnedViewer,

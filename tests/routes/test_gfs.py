@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from dataclasses import replace
 
 import aiohttp
@@ -18,11 +19,12 @@ from socialhome.app_keys import (
 )
 from socialhome.auth import sha256_token_hash
 from socialhome.capabilities_sig import sign_capabilities
-from socialhome.config import Config
+from socialhome.config import PROJECT_PINNED_VIEWER_URL, Config
 from socialhome.crypto import derive_user_id, generate_identity_keypair
 from socialhome.domain.federation import GfsConnection
 from socialhome.gfs_proof import PROOF_CAPABILITY
 from socialhome.infrastructure import gfs_reconcile_retry as reconcile_retry_mod
+from socialhome.pinned_viewer import load_pinned_viewer
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from tests.app_overrides import REMOVE
 
@@ -901,6 +903,34 @@ async def test_gfs_servers_get_shows_the_owner_picker(client):
     assert {a["gfs_id"]: a["listed"] for a in body["available"]} == {
         "gfs-1": True,
         "gfs-2": False,
+    }
+
+
+async def test_gfs_servers_get_links_a_live_listing_to_the_pinned_viewer(client):
+    """The owner's public link is the pinned viewer's space page (the
+    household's ``[highlights] public_viewer_base_url`` + the committed
+    manifest), naming only the GFS and the space id — for a GFS that proved
+    it serves the page's JSON; any other keeps its own ``/spaces/{id}``."""
+    repo = SqliteGfsConnectionRepo(client._db)
+    await _seed_gfs(client, "gfs-1")
+    await repo.save(_make_conn("gfs-2", inbox_url="https://gfs-two.example.com"))
+    await _seed_space(client, "sp-1")
+    await repo.publish_space("sp-1", "gfs-1")
+    await repo.publish_space("sp-1", "gfs-2")
+    svc = client.app[gfs_connection_service_key]
+    svc._space_key_pull["gfs-1"] = True  # gfs-1 proved it; gfs-2 can't be read
+    svc._info_failed_at["gfs-2"] = time.monotonic()
+    r = await client.get("/api/spaces/sp-1/gfs-servers", headers=_auth(client._tok))
+    assert r.status == 200
+    urls = {row["gfs_id"]: row["public_url"] for row in (await r.json())["listings"]}
+    viewer = load_pinned_viewer()
+    assert viewer is not None
+    assert urls == {
+        "gfs-1": (
+            f"{PROJECT_PINNED_VIEWER_URL}/{viewer.path}"
+            "#v=space&g=https%3A%2F%2Fgfs.example.com&s=sp-1"
+        ),
+        "gfs-2": "https://gfs-two.example.com/spaces/sp-1",
     }
 
 

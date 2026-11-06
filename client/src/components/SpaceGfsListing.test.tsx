@@ -11,7 +11,7 @@ vi.mock('@/api', async (importOriginal) => ({
 vi.mock('./Toast', () => ({ showToast: vi.fn() }))
 
 import {
-  SpaceGfsListing, hasChannelServersToShow, hasGfsServersToShow, publicSpaceUrl,
+  SpaceGfsListing, hasChannelServersToShow, hasGfsServersToShow,
 } from './SpaceGfsListing'
 import { api, ApiError as RealApiError } from '@/api'
 import { showToast } from './Toast'
@@ -36,6 +36,12 @@ function space(over: Partial<Space> = {}): Space {
 const TOWN = { gfs_id: 'g-town', display_name: 'Town GFS', inbox_url: 'https://town.example' }
 const CLUB = { gfs_id: 'g-club', display_name: 'Club GFS', inbox_url: 'https://club.example/' }
 
+/** The server's ``public_url`` for a live listing: the pinned viewer's
+ *  space page, the GFS and the space id in the fragment. */
+const viewerLink = (inboxUrl: string) =>
+  'https://viewer.social-home.io/v/0123456789abcdef/#v=space&g='
+  + encodeURIComponent(inboxUrl.replace(/\/+$/, '')) + '&s=s-1'
+
 /** The owner's view as the server builds it: unless a test spells out
  *  ``listings``, they are the listed ``available`` rows (active
  *  connections). */
@@ -56,6 +62,7 @@ function ownerView(over: Partial<SpaceGfsServersView> = {}): SpaceGfsServersView
       inbox_url: a.inbox_url,
       connection_status: 'active' as const,
       listing_status: a.listing_status ?? 'active',
+      public_url: (a.listing_status ?? 'active') === 'active' ? viewerLink(a.inbox_url) : null,
     })),
     ...over,
     available,
@@ -112,7 +119,13 @@ describe('SpaceGfsListing — the owner edits the list', () => {
     const row = getByTestId('gfs-row-g-town')
     expect(row.textContent).toContain('Town GFS')
     expect(row.textContent).toContain('space.gfs_listing.listed')
-    expect(row.querySelector('a')!.getAttribute('href')).toBe('https://town.example/spaces/s-1')
+    // The pinned viewer's space page, as the server built it — never a
+    // path on the GFS host.
+    const link = row.querySelector('a')!
+    expect(link.getAttribute('href')).toBe(viewerLink('https://town.example'))
+    expect(link.textContent).toBe(viewerLink('https://town.example'))
+    expect(link.getAttribute('target')).toBe('_blank')
+    expect(link.getAttribute('rel')).toBe('noopener noreferrer')
     expect(row.querySelector('button[aria-label]')!.getAttribute('aria-label'))
       .toBe('space.gfs_listing.remove_aria:{"name":"Town GFS"}')
     // The not-listed connection is offered in the Add picker, not as a row.
@@ -120,6 +133,28 @@ describe('SpaceGfsListing — the owner edits the list', () => {
     const select = getByTestId('gfs-add-select') as HTMLSelectElement
     expect([...select.options].map(o => o.value)).toEqual(['g-club'])
     expect(queryByTestId('gfs-unlisted-banner')).toBeNull()
+  })
+
+  it('copies the viewer link', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    apiMock.get.mockResolvedValue(ownerView())
+    const { getByTestId } = renderOwner()
+    await flush()
+    const box = getByTestId('gfs-public-link-g-town')
+    fireEvent.click(box.querySelector('button')!)
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(viewerLink('https://town.example')))
+    expect(showToast).toHaveBeenCalledWith('space.gfs.public_link_copied', 'success')
+  })
+
+  it('a live listing without a link from the server shows no public link row', async () => {
+    const view = ownerView()
+    view.listings = view.listings.map(l => ({ ...l, public_url: null }))
+    apiMock.get.mockResolvedValue(view)
+    const { getByTestId, queryByTestId } = renderOwner()
+    await flush()
+    expect(getByTestId('gfs-row-g-town').textContent).toContain('space.gfs_listing.listed')
+    expect(queryByTestId('gfs-public-link-g-town')).toBeNull()
   })
 
   it('a pending listing shows the review hint and no public link', async () => {
@@ -390,13 +425,6 @@ describe('SpaceGfsListing — everyone else sees the list read-only', () => {
   })
 })
 
-describe('publicSpaceUrl', () => {
-  it('joins the GFS root and the space page without a double slash', () => {
-    expect(publicSpaceUrl('https://g.example/', 's')).toBe('https://g.example/spaces/s')
-    expect(publicSpaceUrl('https://g.example', 's')).toBe('https://g.example/spaces/s')
-  })
-})
-
 describe('SpaceGfsListing — links under the HA ingress prefix', () => {
   // ``baseUrl.ts`` reads ``document.baseURI`` once at module load, so set
   // the ingress ``<base href>`` first and re-import the component.
@@ -429,6 +457,18 @@ describe('SpaceGfsListing — links under the HA ingress prefix', () => {
     )
     expect(getByTestId('gfs-connect-hint').querySelector('a')!.getAttribute('href'))
       .toBe('/api/hassio_ingress/tok/connections')
+  })
+
+  it('the viewer link is an external https link, untouched by the ingress prefix', async () => {
+    const mod = await import('./SpaceGfsListing')
+    const apiMod = await import('@/api')
+    vi.mocked(apiMod.api.get).mockResolvedValue(ownerView())
+    const { getByTestId } = render(
+      <mod.SpaceGfsListing space={space()} isOwner isRemoteSpace={false} />,
+    )
+    await flush()
+    expect(getByTestId('gfs-public-link-g-town').querySelector('a')!.getAttribute('href'))
+      .toBe(viewerLink('https://town.example'))
   })
 })
 

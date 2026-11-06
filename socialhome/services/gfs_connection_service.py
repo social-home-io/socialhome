@@ -3343,6 +3343,19 @@ class GfsConnectionService:
             conn, "space_key_pull", self._space_key_pull
         )
 
+    async def viewer_pages_supported(self, conn: GfsConnection) -> bool:
+        """Whether *conn*'s GFS serves the JSON the pinned viewer renders a
+        global space's page from (``GET /gfs/pages/spaces/{id}``, #1109).
+
+        No flag of its own: ``space_key_pull`` (#1137) shipped after those
+        routes, so a valid signature over it proves them too (no new key
+        when an existing one already proves it). An older GFS, or one this
+        household can't read the capabilities of: the space's link stays
+        that GFS's own ``/spaces/{id}`` page."""
+        return await self._signed_capability_supported(
+            conn, "space_key_pull", self._space_key_pull
+        )
+
     async def request_space_key(self, space_id: str, gfs_id: str) -> bool:
         """Ask the GFS *gfs_id* to have *space_id*'s owner seal its content
         key to us again (#5b: we got a frame under an epoch we hold no key

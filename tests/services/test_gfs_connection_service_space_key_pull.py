@@ -63,3 +63,18 @@ async def test_forgetting_a_listing_drops_the_proof(env):
     svc._space_key_pull["g1"] = True
     svc._forget_listing("g1")
     assert "g1" not in svc._space_key_pull
+
+
+async def test_viewer_pages_ride_on_the_space_key_pull_proof(env):
+    """``space_key_pull`` (#1137) shipped after ``/gfs/pages`` (#1109): a
+    GFS that proved it serves the viewer's space page JSON too."""
+    svc, _kp, _session = await _svc(env)
+    svc._space_key_pull["g1"] = True
+    conn = await svc._repo.get("g1")
+    assert await svc.viewer_pages_supported(conn) is True
+
+
+async def test_an_unproven_server_gets_no_viewer_link(env):
+    svc, _kp, _session = await _svc(env)
+    conn = await svc._repo.get("g2")
+    assert await svc.viewer_pages_supported(conn) is False

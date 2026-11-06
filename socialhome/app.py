@@ -3075,6 +3075,12 @@ def create_app(config: Config | None = None) -> web.Application:
     gfs_server_selection = _build_gfs_server_selection(
         repos=repos, bus=bus, gfs_connection_service=gfs_connection_service
     )
+    # A listed space's public link opens the same pinned viewer as this
+    # household's public highlight and moment links.
+    gfs_server_selection.attach_viewer(
+        base_url=config.highlights_public_viewer_base_url,
+        viewer=load_pinned_viewer(),
+    )
     # Hook space_service so a space entering the global tier is listed on
     # the GFSs its owner chose, and one leaving it is withdrawn from the
     # GFSs that list it (§D1). Never "every active GFS".

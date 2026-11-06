@@ -3598,6 +3598,14 @@ contest a ban.
   (`global_server/public_viewer.py`, `page_models.py`,
   `routes/viewer_pages.py`; see
   [the public pages](highlights_public.md#the-public-pages-one-viewer-for-the-outside-world)).
+  The owner's GFS listing (space settings, `GET /api/spaces/{id}/gfs-servers`
+  `listings[].public_url`) links straight to that viewer page —
+  `{viewer}/v/<hash>/#v=space&g=<GFS>&s=<space id>`, built by the household
+  from its own `[highlights] public_viewer_base_url` like its public
+  highlight and moment links (`pinned_viewer.viewer_space_link`,
+  `GfsServerSelectionService._public_url`) — for a GFS whose signed
+  `space_key_pull` proves it serves `/gfs/pages`; an older GFS, or no
+  usable viewer, keeps the GFS's own `/spaces/{id}`.
 - `socialhome/federation/peer_directory_handler.py` — peer
   directory sync on HFS.
 - `socialhome/services/space_public_outbound.py`,
