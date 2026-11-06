@@ -19366,9 +19366,12 @@ ul.sh-ha-users { list-style: none; margin: 0; padding: 0; }
   margin-top: var(--sh-space-sm);
 }
 .sh-remote-invite-row {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
+  /* A tick box, then the name over the meta line. The box is there
+   * unpicked too: it says several people can be picked. */
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: var(--sh-space-sm);
+  align-items: center;
   text-align: left;
   padding: var(--sh-space-sm) var(--sh-space-md);
   min-height: 44px;
@@ -19383,6 +19386,24 @@ ul.sh-ha-users { list-style: none; margin: 0; padding: 0; }
 .sh-remote-invite-row--picked {
   border-color: var(--sh-accent, var(--sh-primary));
   background: var(--sh-bg-secondary);
+}
+.sh-remote-invite-row__check {
+  grid-row: span 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--sh-border);
+  border-radius: 50%;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--sh-on-primary-fill);
+}
+.sh-remote-invite-row--picked .sh-remote-invite-row__check {
+  background: var(--sh-primary);
+  border-color: var(--sh-primary);
 }
 .sh-remote-invite-row__name {
   font-weight: 600;
