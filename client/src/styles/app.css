@@ -19845,18 +19845,20 @@ ul.sh-ha-users { list-style: none; margin: 0; padding: 0; }
   overflow: hidden;
 }
 
-/* Cover image — full-width photo at the top of an event card.
+/* Cover image — full-width picture at the top of an event card.
  * Bleeds to the card's edges (negates the parent's padding so the
- * rounded top corners stay clean) and locks to a 16:9 strip so
- * portrait or square uploads don't make the card wobble. */
+ * rounded top corners stay clean). The whole picture shows, in its own
+ * shape — a flyer or a portrait photo is never cut to a strip; a tall
+ * one is capped in height and sits on the card's quiet tint. */
 .sh-event-card-cover {
   display: block;
   width: calc(100% + 2 * var(--sh-space-md));
+  height: auto;
+  max-height: min(480px, 70vh);
   margin: calc(-1 * var(--sh-space-md))
           calc(-1 * var(--sh-space-md))
           0;
-  aspect-ratio: 16 / 9;
-  object-fit: cover;
+  object-fit: contain;
   border-start-start-radius: calc(var(--sh-radius-md) - 1px);
   border-start-end-radius: calc(var(--sh-radius-md) - 1px);
   background: var(--sh-bg-tertiary);
@@ -19872,22 +19874,24 @@ ul.sh-ha-users { list-style: none; margin: 0; padding: 0; }
   flex-shrink: 0;
 }
 
-/* Dialog cover-picker — empty state is a dashed cream tile that's
- * obviously a "tap me to add an image" affordance; once a file is
- * picked we render the preview in a 16:9 strip with a small ×
- * remove button overlaid in the corner. */
+/* Dialog cover-picker — with no picture, one small dashed pill
+ * ("📷 Choose cover image"): most events have none, so it takes one
+ * line, not a tile. Once a file is picked the preview shows the whole
+ * picture as the card will (capped in height) with a small × remove
+ * button overlaid in the corner. */
 .sh-event-cover-picker {
   display: flex;
   flex-direction: column;
   gap: var(--sh-space-xs);
 }
 .sh-event-cover-picker-empty {
-  display: flex;
+  display: inline-flex;
+  align-self: flex-start;
   align-items: center;
-  justify-content: center;
-  aspect-ratio: 16 / 9;
+  min-height: 40px;
+  padding: var(--sh-space-xs) var(--sh-space-md);
   border: 1px dashed var(--sh-border);
-  border-radius: var(--sh-radius-md);
+  border-radius: 999px;
   background: var(--sh-bg-tertiary);
   color: var(--sh-text-muted);
   cursor: pointer;
@@ -19898,14 +19902,20 @@ ul.sh-ha-users { list-style: none; margin: 0; padding: 0; }
   background: color-mix(in srgb, var(--sh-primary) 8%, var(--sh-bg-tertiary));
   color: var(--sh-text);
 }
+.sh-event-cover-picker-empty:focus-within {
+  outline: 2px solid var(--sh-focus-ring);
+  outline-offset: 2px;
+}
 .sh-event-cover-picker-preview-wrap {
   position: relative;
 }
 .sh-event-cover-preview {
   display: block;
   width: 100%;
-  aspect-ratio: 16 / 9;
-  object-fit: cover;
+  height: auto;
+  max-height: min(320px, 50vh);
+  object-fit: contain;
+  background: var(--sh-bg-tertiary);
   border-radius: var(--sh-radius-md);
   border: 1px solid var(--sh-border);
 }

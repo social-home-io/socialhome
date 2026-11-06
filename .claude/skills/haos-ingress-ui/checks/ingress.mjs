@@ -9,6 +9,7 @@
 // retries. A check that times out fails with the condition it waited for.
 import fs from 'node:fs'
 import path from 'node:path'
+import zlib from 'node:zlib'
 import puppeteer from 'puppeteer-core'
 
 const env = name => {
@@ -653,6 +654,138 @@ await check('ha-android-app-picker', async () => {
       await ctx.close()
       activePage = page
     }
+  }
+  return { problems, ...result }
+})
+
+// 5c. A calendar cover: a phone picker's upload (no type, no name) is a
+//     picture and is converted to WebP, and the event's feed card shows
+//     the whole portrait picture in its own shape — never cut to a strip.
+function portraitPng(w, h) {
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length)
+    const body = Buffer.concat([Buffer.from(type), data])
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(zlib.crc32(body))
+    return Buffer.concat([len, body, crc])
+  }
+  const ihdr = Buffer.alloc(13)
+  ihdr.writeUInt32BE(w, 0); ihdr.writeUInt32BE(h, 4); ihdr[8] = 8; ihdr[9] = 2
+  // A top half and a bottom half in different colours: a crop shows.
+  const rows = []
+  for (let y = 0; y < h; y++) {
+    const row = Buffer.alloc(1 + w * 3)
+    for (let x = 0; x < w; x++) row.set(y < h / 2 ? [200, 90, 40] : [40, 90, 200], 1 + x * 3)
+    rows.push(row)
+  }
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(Buffer.concat(rows))), chunk('IEND', Buffer.alloc(0)),
+  ])
+}
+
+await check('event-cover-whole-picture', async () => {
+  const problems = []
+  const boundary = '----ingress-cover'
+  const mp = Buffer.concat([
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="1000012345"\r\nContent-Type: application/octet-stream\r\n\r\n`),
+    portraitPng(300, 600), Buffer.from(`\r\n--${boundary}--\r\n`),
+  ])
+  const up = await asUser('alice', 'POST', '/api/media/upload', { raw: { type: `multipart/form-data; boundary=${boundary}`, data: mp } })
+  if (!String(up.filename).endsWith('.webp')) problems.push(`a picture sent without type or name was stored as ${up.filename}, want a converted .webp`)
+  const start = new Date(Date.now() + 2 * 86400_000)
+  start.setUTCHours(18, 0, 0, 0)
+  const ev = await asUser('alice', 'POST', `/api/spaces/${ids.spaceId}/calendar/events`, { json: {
+    summary: 'Cover event', start: start.toISOString(), end: new Date(start.getTime() + 3600_000).toISOString(),
+    cover_url: up.url, announce_in_feed: true,
+  } })
+  const result = { upload: up.filename, event: ev.id ?? ev.event?.id ?? null }
+  for (const vp of ['desktop', 'mobile']) {
+    const { ctx, page: p } = await newPage(vp)
+    try {
+      await p.goto(APP + `spaces/${ids.spaceId}`, { waitUntil: 'load' })
+      await settled(p)
+      await step('the event card cover to load', p.waitForFunction(() => {
+        const i = document.querySelector('.sh-event-card-cover')
+        return i && i.complete && i.naturalWidth > 0
+      }))
+      const m = await p.$eval('.sh-event-card-cover', i => {
+        const r = i.getBoundingClientRect()
+        const fit = getComputedStyle(i).objectFit
+        // The painted picture's box inside the element (``contain``).
+        const scale = fit === 'cover'
+          ? Math.max(r.width / i.naturalWidth, r.height / i.naturalHeight)
+          : Math.min(r.width / i.naturalWidth, r.height / i.naturalHeight)
+        return { w: r.width, h: r.height, nw: i.naturalWidth, nh: i.naturalHeight, fit,
+          paintedW: i.naturalWidth * scale, paintedH: i.naturalHeight * scale,
+          docW: document.documentElement.scrollWidth, vw: innerWidth }
+      })
+      // Whole picture: nothing painted outside the element's box.
+      if (m.paintedW > m.w + 1 || m.paintedH > m.h + 1) problems.push(`${vp}: the cover is cropped (${JSON.stringify(m)})`)
+      if (m.nh <= m.nw) problems.push(`${vp}: the stored cover isn't portrait any more (${m.nw}×${m.nh})`)
+      if (m.docW > m.vw + 1) problems.push(`${vp}: the page scrolls sideways (${m.docW} > ${m.vw})`)
+      await (await p.$('.sh-event-card')).screenshot({ path: path.join(SHOTS, `event-cover-${vp}.png`) })
+      result[vp] = m
+      // A new event's form: with no picture the cover picker is one
+      // small button, not a big empty tile.
+      await p.goto(APP + `spaces/${ids.spaceId}/calendar`, { waitUntil: 'load' })
+      await settled(p)
+      await step('the "+ New event" button', p.waitForFunction(() => [...document.querySelectorAll('button')].some(b => /^\+\s*New event$/.test(b.textContent.trim()))))
+      await p.evaluate(() => [...document.querySelectorAll('button')].find(b => /^\+\s*New event$/.test(b.textContent.trim())).click())
+      const pill = await step('the cover picker button', p.waitForSelector('.sh-event-cover-picker-empty'))
+      // Measured in layout px (offsetHeight), not the box the dialog's
+      // open animation may still be scaling.
+      const box = { width: await pill.evaluate(e => e.offsetWidth), height: await pill.evaluate(e => e.offsetHeight) }
+      if (box.height > 52 || box.height < 36) problems.push(`${vp}: the empty cover picker is ${box.height} px tall, want 36–52`)
+      await pill.evaluate(e => e.scrollIntoView({ block: 'center' }))
+      // Let the dialog's open animation finish before the picture.
+      await p.waitForFunction(() => document.getAnimations().every(a => a.playState !== 'running'))
+      await p.screenshot({ path: path.join(SHOTS, `event-dialog-cover-picker-${vp}.png`) })
+      result[`${vp}Picker`] = { w: Math.round(box.width), h: Math.round(box.height) }
+    } finally {
+      await ctx.close()
+      activePage = page
+    }
+  }
+  return { problems, ...result }
+})
+
+// 5d. Deleting a calendar event takes its feed card with it — in the
+//     open feed at once (no reload), and after a reload too.
+await check('event-delete-removes-card', async () => {
+  const problems = []
+  const start = new Date(Date.now() + 3 * 86400_000)
+  start.setUTCHours(17, 0, 0, 0)
+  const ev = await asUser('alice', 'POST', `/api/spaces/${ids.spaceId}/calendar/events`, { json: {
+    summary: 'Event to cancel', start: start.toISOString(), end: new Date(start.getTime() + 3600_000).toISOString(),
+    announce_in_feed: true,
+  } })
+  const eventId = ev.id ?? ev.event?.id
+  const result = { eventId }
+  const cardSel = `.sh-event-card[data-event-id="${eventId}"]`
+  const pages = []
+  try {
+    // Both viewports have the feed open with the card on screen…
+    for (const vp of ['desktop', 'mobile']) {
+      const np = await newPage(vp)
+      pages.push([vp, np])
+      await np.page.goto(APP + `spaces/${ids.spaceId}`, { waitUntil: 'load' })
+      await settled(np.page)
+      await step(`${vp}: the event card in the feed`, np.page.waitForSelector(cardSel))
+    }
+    // …then the event is deleted: the card leaves both, live.
+    await asUser('alice', 'DELETE', `/api/spaces/${ids.spaceId}/calendar/events/${eventId}`)
+    for (const [vp, { page: p }] of pages) {
+      const gone = await p.waitForFunction(sel => !document.querySelector(sel), { timeout: 8000 }, cardSel).then(() => true, () => false)
+      if (!gone) problems.push(`${vp}: the deleted event's card stays in the open feed (no reload)`)
+      result[`${vp}LiveRemoved`] = gone
+      await p.reload({ waitUntil: 'load' })
+      await settled(p)
+      if (await p.$(cardSel)) problems.push(`${vp}: the deleted event's card is still in the feed after a reload`)
+      await p.screenshot({ path: path.join(SHOTS, `event-delete-feed-${vp}.png`) })
+    }
+  } finally {
+    for (const [, { ctx }] of pages) await ctx.close()
+    activePage = page
   }
   return { problems, ...result }
 })

@@ -1,9 +1,13 @@
 """Tests for socialhome.routes.media — including signed-URL auth."""
 
+import io
 import pathlib
 
 import pytest
+from PIL import Image
 
+# Registers the HEIF opener, so ``_picture("HEIF")`` can write one.
+import socialhome.media.image_processor  # noqa: F401
 from socialhome.app_keys import (
     config_key,
     media_signer_key,
@@ -181,6 +185,55 @@ async def test_upload_image_still_transcodes(client):
     assert r.status == 201
     body = await r.json()
     assert body["filename"].endswith(".webp")
+
+
+def _picture(fmt: str, size: tuple[int, int] = (40, 80)) -> bytes:
+    """A real ``fmt`` picture (portrait), as a phone would send it."""
+    buf = io.BytesIO()
+    Image.new("RGB", size, color=(200, 120, 40)).save(buf, format=fmt)
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("filename", "content_type", "fmt"),
+    [
+        # A phone picker hands over a content URI: no extension, a
+        # generic type. The picture is still a picture.
+        ("1000012345", "application/octet-stream", "JPEG"),
+        ("IMG_0001", "", "PNG"),
+        # HEIF under its other name (Android saves ``.heif``).
+        ("photo.heif", "image/heif", "HEIF"),
+        ("photo.heif", "application/octet-stream", "HEIF"),
+        ("photo", "application/octet-stream", "HEIF"),
+    ],
+)
+async def test_upload_picture_with_unknown_type_is_converted(
+    client, filename, content_type, fmt
+):
+    """A picture is converted to WebP whatever type or name the browser
+    gave it — never stored as the original (full size, a format such as
+    HEIF a browser can't show). Found on calendar covers, which upload
+    through this route."""
+    r = await _upload_file(
+        client, filename=filename, body=_picture(fmt), content_type=content_type
+    )
+    assert r.status == 201
+    body = await r.json()
+    assert body["filename"].endswith(".webp")
+    stored = pathlib.Path(client.app[config_key].media_path) / body["filename"]
+    with Image.open(stored) as img:
+        assert img.format == "WEBP"
+        assert img.size == (40, 80)
+
+
+async def test_upload_unknown_iso_media_file_is_not_taken_for_a_picture(client):
+    """An MP4-style ``ftyp`` box that isn't a HEIF brand stays a file."""
+    body = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2" + b"\x00" * 64
+    r = await _upload_file(
+        client, filename="clip", body=body, content_type="application/octet-stream"
+    )
+    assert r.status == 201
+    assert not (await r.json())["filename"].endswith(".webp")
 
 
 async def test_upload_file_extension_sanitised(client):
