@@ -515,7 +515,7 @@ class _PerPeerFederation(_FakeFederationService):
     ):
         self.broadcasts.append((space_id, event_type))
         for iid in self.members.get(space_id, []):
-            if iid == self._own_instance_id:
+            if iid == self.own_instance_id:
                 continue
             copy = await per_peer(iid, payload) if per_peer is not None else payload
             self.sent.append((iid, event_type, copy, space_id))
