@@ -110,6 +110,7 @@ from ..domain.space_item import (
     required_scope,
     stamp_to_db,
 )
+from ..domain.space_media_ref import MEDIA_REFS_FIELD
 from ..domain.writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE, WriterCert
 from ..federation.pending_parent_buffer import (
     AwaitingParent,
@@ -148,6 +149,7 @@ if TYPE_CHECKING:
     from .pending_decrypts_cache import PendingDecryptsCache
     from .space_authority_pin import AuthorityPinRefresher
     from .space_crypto_service import SpaceContentEncryption
+    from .space_media_gfs_fetcher import SpaceMediaGfsFetcher
     from .space_mentions import SpaceMentionResolver
 
 log = logging.getLogger(__name__)
@@ -165,6 +167,7 @@ class SpacePublicInbound:
         "_authorship",
         "_bus",
         "_crypto",
+        "_gfs_media",
         "_items",
         "_key_pull",
         "_mentions",
@@ -216,6 +219,13 @@ class SpacePublicInbound:
         #: holds the frame until that key lands. ``None``: dropped.
         self._key_pull: Callable[[str], Awaitable[bool]] | None = None
         self._pending_decrypts: PendingDecryptsCache | None = None
+        #: v_80 — keeps a relayed post's ``media_refs`` (its pictures in the
+        #: GFS media cache, sealed under the space key) and fetches them.
+        self._gfs_media: SpaceMediaGfsFetcher | None = None
+
+    def attach_gfs_media(self, fetcher: SpaceMediaGfsFetcher) -> None:
+        """Wire the v_80 GFS media fetcher."""
+        self._gfs_media = fetcher
 
     def attach_key_pull(
         self,
@@ -540,6 +550,14 @@ class SpacePublicInbound:
                 post_id,
             )
             return
+        if self._gfs_media is not None and MEDIA_REFS_FIELD in inner:
+            # v_80 — the pictures live in the GFS media cache; keep where
+            # (the post's own files only) and prefetch them.
+            await self._gfs_media.receive(
+                space_id,
+                inner.get(MEDIA_REFS_FIELD),
+                [u for u in (post.media_url, *post.image_urls) if u],
+            )
         await self._bus.publish(
             SpacePostCreated(
                 post=post,

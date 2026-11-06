@@ -105,6 +105,7 @@ from ...domain.space import (
     validate_zone_name,
     validate_zone_radius,
 )
+from ...domain.space_media_ref import MEDIA_REFS_FIELD
 from ...domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ...domain.task import Task, TaskList, task_from_wire_dict, task_list_from_wire_dict
 from ...domain.timetable import (
@@ -173,6 +174,7 @@ if TYPE_CHECKING:
     from ...repositories.timetable_repo import AbstractSpaceTimetableRepo
     from ..legacy_album_deletes import LegacyAlbumDeletes
     from ..page_conflict_service import PageConflictService
+    from ..space_media_gfs_fetcher import SpaceMediaGfsFetcher
 
 log = logging.getLogger(__name__)
 
@@ -224,6 +226,7 @@ class SpaceContentInboundHandlers:
         "_bus",
         "_calendar_repo",
         "_gallery_repo",
+        "_gfs_media",
         "_legacy_album_deletes",
         "_media_dir",
         "_media_refs",
@@ -279,6 +282,24 @@ class SpaceContentInboundHandlers:
         #: Overtaking album deletes no tombstone row can prove (a legacy id,
         #: an owner-less v_33 delete) — restart-scoped, bounded.
         self._legacy_album_deletes = legacy_album_deletes
+        #: v_80 — keeps a calendar cover's / gallery item's ``media_refs``
+        #: (its files in a GFS media cache) and fetches them.
+        self._gfs_media: SpaceMediaGfsFetcher | None = None
+
+    def attach_gfs_media(self, fetcher: SpaceMediaGfsFetcher) -> None:
+        """Wire the v_80 GFS media fetcher."""
+        self._gfs_media = fetcher
+
+    async def _keep_media_refs(
+        self, event: FederationEvent, space_id: str, urls: list[str | None]
+    ) -> None:
+        """v_80 — an item that reached a link-joined member without its
+        bytes: keep where its files live (the item's own files only)."""
+        if self._gfs_media is None or MEDIA_REFS_FIELD not in event.payload:
+            return
+        await self._gfs_media.receive(
+            space_id, event.payload.get(MEDIA_REFS_FIELD), [u for u in urls if u]
+        )
 
     def attach_to(self, federation_service: FederationService) -> None:
         registry = federation_service._event_registry
@@ -1502,6 +1523,7 @@ class SpaceContentInboundHandlers:
                 event, space_id=space_id, what="calendar event", row_id=event_id
             )
             return
+        await self._keep_media_refs(event, space_id, [ev.cover_url])
         # Publish on the local bus so the calendar→feed bridge (Phase B)
         # can mirror the event into space_posts on inbound federation
         # arrivals too. The bridge guards against duplicates by linked_event_id.
@@ -2296,6 +2318,7 @@ class SpaceContentInboundHandlers:
                 exc_info=True,
             )
             return
+        await self._keep_media_refs(event, space_id, [item.thumbnail_url, item.url])
         if is_new:
             await self._bus.publish(
                 GalleryItemUploaded(

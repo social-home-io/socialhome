@@ -1254,7 +1254,30 @@ from __future__ import annotations
 #:   one full stream for a household crossing it). **Fallback**: a member
 #:   household below v_79 is sent nothing; the edit reaches it with the
 #:   host's sync once it upgrades. Labelled "Edit photos in a space".
-OURS: int = 79
+#: * **v_80** (2026-11-06) — **Space pictures through the GFS media cache**.
+#:   A space post, calendar event (its cover) or gallery item sent to a
+#:   member household seated from an invite link
+#:   (``InstanceSource.SPACE_SESSION`` — reached only through a GFS relay,
+#:   too small for the bytes) carries a ``media_refs`` descriptor INSIDE its
+#:   encrypted payload: ``{"<local filename>": {blob_id, suite, epoch,
+#:   size}}``, one entry per file of the item (≤ its own media count). The
+#:   author's household seals each file once (``space_media_seal``:
+#:   HKDF of the epoch's content key, deterministic nonce, suite
+#:   ``aesgcm-256-pad-det``) and uploads it once per GFS that proved the
+#:   signed ``space_media`` capability; the reader fetches it from its own
+#:   GFS (``GET /gfs/spaces/media/{blob_id}``), checks the hash, decrypts
+#:   and stores it under the same file name (``space_media_refs``, migration
+#:   0142). The §25.6 ``posts`` / ``calendar`` / ``gallery`` records streamed
+#:   to such a member carry the same descriptor (sync line 80), and its
+#:   catch-up gets no ``SPACE_MEDIA_BLOB`` push (the relay refuses those
+#:   bytes). Followers of a global space get the descriptor in the relayed
+#:   post's inner — gated on the GFS's signed ``space_media`` capability,
+#:   not this version. **Fallback**: a link-joined member household below
+#:   v_80 gets no descriptor (and keeps the old ``SPACE_MEDIA_BLOB`` push,
+#:   which the relay carries only for small files) — its people see the
+#:   post without the pictures that did not fit. Labelled "Pictures in a
+#:   space for members who joined by link".
+OURS: int = 80
 
 
 class FederationCapability:
@@ -1861,6 +1884,12 @@ class FederationCapability:
     #: copy keeps the old caption / day / album until it upgrades and the
     #: host's next sync stream brings the values (sync line 79).
     MIN_FOR_SPACE_GALLERY_ITEM_EDIT = 79
+    #: v_80 — a ``media_refs`` descriptor (the item's pictures in a GFS
+    #: media cache) on space posts / calendar events / gallery items and
+    #: their §25.6 records, toward a member household seated from an invite
+    #: link at or above it (:meth:`FederationService.peer_supports`). Below
+    #: it: no descriptor (and the old ``SPACE_MEDIA_BLOB`` push).
+    MIN_FOR_SPACE_MEDIA_REFS = 80
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2163,6 +2192,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_SPACE_GALLERY_ITEM_EDIT,
         "Edit photos in a space",
     ),
+    (
+        FederationCapability.MIN_FOR_SPACE_MEDIA_REFS,
+        "Pictures in a space for members who joined by link",
+    ),
 ]
 
 
@@ -2253,6 +2286,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_SPACE_APP_TABLES: "space_app_tables",
     FederationCapability.MIN_FOR_APP_ENGINES: "app_engines",
     FederationCapability.MIN_FOR_SPACE_GALLERY_ITEM_EDIT: "space_gallery_item_edits",
+    FederationCapability.MIN_FOR_SPACE_MEDIA_REFS: "space_media_refs",
 }
 
 
@@ -2358,6 +2392,9 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         # A behind member household keeps the old caption, day and album of
         # a space photo edited elsewhere until it upgrades.
         FederationCapability.MIN_FOR_SPACE_GALLERY_ITEM_EDIT,
+        # A behind link-joined member household gets no pictures through
+        # the GFS media cache.
+        FederationCapability.MIN_FOR_SPACE_MEDIA_REFS,
     }
 )
 

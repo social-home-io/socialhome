@@ -5379,3 +5379,44 @@ async def test_a_failing_placement_never_costs_the_upsert(db, bus):
     )
     assert row["display_name"] == "Bob"
     assert cp.placed == [derive_user_id(_PK_AB, "bob")]
+
+
+class _GfsMediaSink:
+    """Stand-in for :class:`SpaceMediaGfsFetcher` — records descriptors."""
+
+    def __init__(self):
+        self.received: list[tuple] = []
+
+    async def receive(self, space_id, raw_refs, media_urls, *, prefetch=True):
+        self.received.append((space_id, raw_refs, list(media_urls)))
+        return []
+
+
+async def test_space_post_media_refs_are_kept_for_a_gfs_fetch(db, bus, inbound):
+    """v_80 — a post that reached a link-joined member carries ``media_refs``;
+    the receiver keeps them (and prefetches) for the post's own files."""
+    await db.enqueue(
+        """INSERT INTO spaces(id, name, owner_instance_id, owner_username,
+                              identity_public_key, space_type, join_mode)
+           VALUES(?,?,?,?,?,?,?)""",
+        ("sp-g", "S", "peer-a", "owner", "aa" * 32, "global", "open"),
+    )
+    await _seat(db, "sp-g", "user-remote")
+    sink = _GfsMediaSink()
+    inbound.attach_gfs_media(sink)
+    refs = {"a.webp": {"blob_id": "a" * 64, "suite": "s", "epoch": 0, "size": 9}}
+    await inbound._on_space_post_created(
+        _event(
+            FederationEventType.SPACE_POST_CREATED,
+            {
+                "id": "post-g",
+                "author": "user-remote",
+                "type": "image",
+                "content": "pic",
+                "image_urls": ["api/media/a.webp"],
+                "media_refs": refs,
+            },
+            space_id="sp-g",
+        )
+    )
+    assert sink.received == [("sp-g", refs, ["api/media/a.webp"])]

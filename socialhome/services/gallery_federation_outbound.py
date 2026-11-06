@@ -35,6 +35,7 @@ household rebuilds its own from the posts.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from ..domain.events import (
@@ -48,6 +49,7 @@ from ..domain.events import (
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..infrastructure.event_bus import EventBus
+from .space_media_refs import SpaceMediaRefsMixin
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
@@ -58,13 +60,14 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-class GalleryFederationOutbound:
+class GalleryFederationOutbound(SpaceMediaRefsMixin):
     """Publish space-scoped gallery item mutations to paired peers."""
 
     __slots__ = (
         "_bus",
         "_federation",
         "_gallery_repo",
+        "_media_gfs",
         "_media_sync",
         "_space_repo",
     )
@@ -89,6 +92,9 @@ class GalleryFederationOutbound:
         #: this the SPA renders a broken thumbnail (spec §S-9 promises
         #: an on-demand fetch endpoint that doesn't exist yet).
         self._media_sync = media_sync
+        #: v_80 — the item's files for link-joined members (``media_refs``
+        #: + one upload per GFS).
+        self._media_gfs = None
 
     def wire(self) -> None:
         """Subscribe handlers on the bus. Idempotent."""
@@ -158,11 +164,18 @@ class GalleryFederationOutbound:
         # pushed below, and the receiver's row must name the full one (its
         # SPACE_MEDIA_BLOB scope check and the zoom view both read it).
         payload = item.to_federation_dict()
+        # v_80 — a link-joined member gets the files as ``media_refs``.
+        files = [item.thumbnail_url]
+        if item.url and item.url != item.thumbnail_url:
+            files.append(item.url)
+        media_plan = await self._plan_media_refs(space_id, files, followers=False)
         await self._fan_out(
             space_id,
             FederationEventType.SPACE_GALLERY_ITEM_CREATED,
             payload,
+            per_peer=self._media_refs_per_peer(media_plan),
         )
+        self._upload_media(media_plan)
         # Ship the actual bytes via the shared media outbox so
         # remote members can render the thumbnail + full image. The
         # gallery item carries TWO URLs (thumbnail + full); both get
@@ -261,6 +274,7 @@ class GalleryFederationOutbound:
         payload: dict,
         *,
         min_proto_version: int | None = None,
+        per_peer: Callable[[str, dict], Awaitable[dict]] | None = None,
     ) -> None:
         # The space rides the payload as well as the routing field. A
         # mesh-relayed envelope (SPACE_ROUTED) carries no plaintext
@@ -272,7 +286,11 @@ class GalleryFederationOutbound:
         # Member households only, each via ``send_with_mesh_fallback`` so a
         # mesh-only member gets the event over ``SPACE_ROUTED``.
         try:
-            if min_proto_version is None:
+            if per_peer is not None:
+                await self._federation.broadcast_to_space_members(
+                    space_id, event_type, payload, per_peer=per_peer
+                )
+            elif min_proto_version is None:
                 await self._federation.broadcast_to_space_members(
                     space_id, event_type, payload
                 )

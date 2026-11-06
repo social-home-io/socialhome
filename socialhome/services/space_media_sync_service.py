@@ -31,7 +31,7 @@ import logging
 import pathlib
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 import aiofiles
 import aiofiles.os
@@ -50,6 +50,10 @@ if TYPE_CHECKING:
     from ..repositories.federation_repo import AbstractFederationRepo
 
 log = logging.getLogger(__name__)
+
+
+class _RelayReaders(Protocol):
+    async def is_relay_reader(self, instance_id: str) -> bool: ...
 
 
 #: Max chunks of one blob in flight at once (see DmMediaSyncService). Small
@@ -71,6 +75,7 @@ class SpaceMediaSyncService:
         "_interval",
         "_media_dir",
         "_outbox",
+        "_relay_readers",
         "_stop",
         "_task",
         "_wake",
@@ -97,6 +102,16 @@ class SpaceMediaSyncService:
         # immediately instead of waiting up to ``interval_seconds`` for
         # the next poll. ``_interval`` remains a fallback poll.
         self._wake = asyncio.Event()
+        #: v_80 — who reads the space's pictures from a GFS media cache
+        #: instead (:meth:`SpaceMediaGfsUploader.is_relay_reader`).
+        self._relay_readers: _RelayReaders | None = None
+
+    def attach_relay_readers(self, readers: _RelayReaders) -> None:
+        """Wire the v_80 reader check: a member household seated from an
+        invite link at v_80 gets no ``SPACE_MEDIA_BLOB`` push — the GFS
+        relay refuses those bytes, and it fetches the file from its GFS's
+        media cache instead."""
+        self._relay_readers = readers
 
     def attach_federation(self, federation: FederationService) -> None:
         """Wire federation after construction (breaks the boot cycle).
@@ -129,6 +144,12 @@ class SpaceMediaSyncService:
         ``(blob_id, target_instance_id)`` primary key — a re-shared
         image doesn't ship twice.
         """
+        if self._relay_readers is not None:
+            target_instance_ids = [
+                t
+                for t in target_instance_ids
+                if not await self._relay_readers.is_relay_reader(t)
+            ]
         for url in media_urls:
             filename = url.rsplit("/", 1)[-1].split("?", 1)[0]
             if not filename:

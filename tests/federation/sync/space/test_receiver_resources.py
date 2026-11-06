@@ -2082,3 +2082,68 @@ async def test_a_chat_record_held_for_its_seat_keeps_the_chunk_unsettled(setup):
 async def test_chat_records_are_dropped_without_a_sink(setup):
     r, _collector, kp = setup
     await _send(r, kp, "chat_messages", [_chat_record()])  # no raise
+
+
+# ── v_80 — a link-joined member keeps the records' media_refs ───────────
+
+
+class _GfsMediaSink:
+    def __init__(self):
+        self.received: list[tuple] = []
+
+    async def receive(self, space_id, raw_refs, media_urls, *, prefetch=True):
+        self.received.append((space_id, raw_refs, list(media_urls)))
+        return []
+
+
+_SYNC_REFS = {"a.webp": {"blob_id": "a" * 64, "suite": "s", "epoch": 0, "size": 9}}
+
+
+async def test_streamed_post_media_refs_are_kept(setup):
+    r, c, kp = setup
+    sink = _GfsMediaSink()
+    r.attach_gfs_media(sink)
+    await _send(
+        r,
+        kp,
+        "posts",
+        [
+            {
+                "id": "p-m",
+                "author": "u-1",
+                "type": "image",
+                "content": "pic",
+                "image_urls": ["api/media/a.webp"],
+                "created_at": "2026-04-18T00:00:00+00:00",
+                "media_refs": _SYNC_REFS,
+            },
+            {
+                "id": "p-n",
+                "author": "u-1",
+                "type": "text",
+                "content": "no pictures",
+                "created_at": "2026-04-18T00:00:00+00:00",
+            },
+        ],
+    )
+    assert len(c.posts) == 2
+    assert sink.received == [("sp-1", _SYNC_REFS, ["api/media/a.webp"])]
+
+
+async def test_streamed_records_without_a_fetcher_store_nothing(setup):
+    r, c, kp = setup
+    await _send(
+        r,
+        kp,
+        "posts",
+        [
+            {
+                "id": "p-m",
+                "author": "u-1",
+                "type": "image",
+                "image_urls": ["api/media/a.webp"],
+                "media_refs": _SYNC_REFS,
+            }
+        ],
+    )
+    assert len(c.posts) == 1

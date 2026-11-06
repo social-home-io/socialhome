@@ -52,9 +52,11 @@ from ..domain.space_item import (
     ITEM_TYPE_REACTION_ADD,
     ITEM_TYPE_REACTION_REMOVE,
 )
+from ..domain.space_media_ref import MEDIA_REFS_FIELD
 from ..infrastructure.event_bus import EventBus
 from .moderation_release import current_release, with_release
 from .space_item_author import build_signed_item_inner
+from .space_media_refs import SpaceMediaRefsMixin
 from .space_public_author import build_signed_author_inner
 
 if TYPE_CHECKING:
@@ -69,13 +71,14 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-class SpacePostOutbound:
+class SpacePostOutbound(SpaceMediaRefsMixin):
     """Bus-event → federation broadcaster for space posts."""
 
     __slots__ = (
         "_bus",
         "_federation",
         "_federation_repo",
+        "_media_gfs",
         "_media_sync",
         "_member_gfs",
         "_own_identity_seed",
@@ -121,6 +124,10 @@ class SpacePostOutbound:
         #: exponential backoff. Without it the receiver's
         #: ``<img src>`` 404s because only the URL string federates.
         self._media_sync = media_sync
+        #: v_80 — when wired, the post's pictures reach households that read
+        #: the space through a GFS (link-joined members, followers) as a
+        #: ``media_refs`` descriptor + one upload per GFS.
+        self._media_gfs = None
         #: Needed to enumerate the broadcast set (every member
         #: household) for the media outbox. Optional — when ``None``
         #: the media fan-out is a no-op.
@@ -161,9 +168,13 @@ class SpacePostOutbound:
         self._own_instance_pk = own_instance_public_key
         self._own_identity_seed = own_identity_seed
 
-    async def _schedule_gfs_publish(self, space_id: str, post: Post) -> None:
+    async def _schedule_gfs_publish(
+        self, space_id: str, post: Post, *, media_refs: dict | None = None
+    ) -> None:
         """Build the GFS inner of our own post and hand it to the member
-        publisher's background queue (v_49 trusted mode). Never raises."""
+        publisher's background queue (v_49 trusted mode). ``media_refs``
+        (v_80) rides the inner outside the author signature, so followers
+        find the pictures in their GFS's media cache. Never raises."""
         assert self._member_gfs is not None
         try:
             author = await self._users.get_by_user_id(post.author)
@@ -180,6 +191,8 @@ class SpacePostOutbound:
                 item_type=ITEM_TYPE_POST,
                 item_target=post.id,
             )
+            if media_refs:
+                inner[MEDIA_REFS_FIELD] = media_refs
             self._member_gfs.schedule_post(space_id, post.author, inner)
         except Exception:
             log.exception(
@@ -441,11 +454,22 @@ class SpacePostOutbound:
                     if cert is not None:
                         payload["public_relay"]["writer_cert"] = cert
         with_release(payload)
+        # v_80 — households reading the space through a GFS get the pictures
+        # as a ``media_refs`` descriptor: a link-joined member inside its own
+        # copy of the payload (``per_peer``), followers inside the relayed
+        # inner (outside the author signature, like the writer cert).
+        media_urls = _post_media_urls(post)
+        media_plan = await self._plan_media_refs(
+            event.space_id, media_urls, followers="public_relay" in payload
+        )
+        if media_plan is not None and "public_relay" in payload:
+            payload["public_relay"][MEDIA_REFS_FIELD] = media_plan.wire()
         try:
             await self._federation.broadcast_to_space_members(
                 event.space_id,
                 FederationEventType.SPACE_POST_CREATED,
                 payload,
+                per_peer=self._media_refs_per_peer(media_plan),
             )
         except Exception:
             log.exception(
@@ -465,51 +489,50 @@ class SpacePostOutbound:
             # v_51 — a private space's member publishes through its channel.
             or await self._member_gfs.channel_space(event.space_id)
         ):
-            await self._schedule_gfs_publish(event.space_id, post)
+            await self._schedule_gfs_publish(
+                event.space_id,
+                post,
+                media_refs=media_plan.wire() if media_plan is not None else None,
+            )
+        self._upload_media(media_plan)
         # Hand off the bytes-federation to SpaceMediaSyncService.
         # SPACE_POST_CREATED carries only the URL strings; without
         # the outbox-driven SPACE_MEDIA_BLOB stream the receiver's
         # ``<img src>`` 404s because the file only lives on the
         # sender's media path. Outbox enqueues happen post-broadcast
         # so the receiver always gets the post metadata first.
-        if self._media_sync is not None and self._federation_repo is not None:
-            media_urls: list[str] = []
-            if post.media_url:
-                media_urls.append(post.media_url)
-            media_urls.extend(post.image_urls or ())
-            if post.file_meta is not None and post.file_meta.url:
-                media_urls.append(post.file_meta.url)
-            if post.link_preview is not None and post.link_preview.thumbnail_url:
-                media_urls.append(post.link_preview.thumbnail_url)
-            if media_urls:
+        if (
+            self._media_sync is not None
+            and self._federation_repo is not None
+            and media_urls
+        ):
+            try:
+                targets = await self._federation_repo.list_member_instance_ids(
+                    event.space_id,
+                )
+            except Exception:
+                log.exception(
+                    "SPACE_MEDIA_BLOB enqueue: list peers failed for space=%s post=%s",
+                    event.space_id,
+                    post.id,
+                )
+                return
+            own = getattr(self._federation, "_own_instance_id", "") or ""
+            targets = [t for t in targets if t and t != own]
+            if targets:
                 try:
-                    targets = await self._federation_repo.list_member_instance_ids(
-                        event.space_id,
+                    await self._media_sync.enqueue_for_post(
+                        post_id=post.id,
+                        target_instance_ids=targets,
+                        media_urls=media_urls,
+                        space_id=event.space_id,
                     )
                 except Exception:
                     log.exception(
-                        "SPACE_MEDIA_BLOB enqueue: list peers failed for "
-                        "space=%s post=%s",
+                        "SPACE_MEDIA_BLOB enqueue failed for space=%s post=%s",
                         event.space_id,
                         post.id,
                     )
-                    return
-                own = getattr(self._federation, "_own_instance_id", "") or ""
-                targets = [t for t in targets if t and t != own]
-                if targets:
-                    try:
-                        await self._media_sync.enqueue_for_post(
-                            post_id=post.id,
-                            target_instance_ids=targets,
-                            media_urls=media_urls,
-                            space_id=event.space_id,
-                        )
-                    except Exception:
-                        log.exception(
-                            "SPACE_MEDIA_BLOB enqueue failed for space=%s post=%s",
-                            event.space_id,
-                            post.id,
-                        )
 
     async def _on_post_edited(self, event: PostEdited) -> None:
         # ``space_id`` is set by the space-edit path in space_service;
@@ -721,3 +744,17 @@ class SpacePostOutbound:
                 target=event.comment_id,
                 post_id=event.post_id,
             )
+
+
+def _post_media_urls(post: Post) -> list[str]:
+    """Every local file a post shows: its media, pictures, attached file and
+    link-card thumbnail."""
+    urls: list[str] = []
+    if post.media_url:
+        urls.append(post.media_url)
+    urls.extend(post.image_urls or ())
+    if post.file_meta is not None and post.file_meta.url:
+        urls.append(post.file_meta.url)
+    if post.link_preview is not None and post.link_preview.thumbnail_url:
+        urls.append(post.link_preview.thumbnail_url)
+    return urls

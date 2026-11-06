@@ -10,10 +10,19 @@ from PIL import Image
 import socialhome.media.image_processor  # noqa: F401
 from socialhome.app_keys import (
     config_key,
+    db_key,
     media_signer_key,
     profile_picture_repo_key,
+    space_crypto_service_key,
+    space_media_gfs_fetcher_key,
 )
 from socialhome.csp import MEDIA_CSP, PLAYABLE_MEDIA_CSP
+from socialhome.moment_public_media import blob_id_of
+from socialhome.services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
+from socialhome.space_media_seal import (
+    SPACE_MEDIA_SUITE_AESGCM256_PADDED,
+    seal_space_media,
+)
 
 from .conftest import _auth
 
@@ -537,3 +546,78 @@ async def test_user_picture_carries_sandbox_csp(client):
     assert r.status == 200
     assert r.headers["Content-Type"] == "image/webp"
     assert r.headers["Content-Security-Policy"] == MEDIA_CSP
+
+
+# ── v_80 — a space file held only in a GFS media cache ──────────────────
+
+
+class _OneBlobGfs:
+    """Serves one sealed blob for any GFS (the fetch is anonymous)."""
+
+    def __init__(self, blob: bytes):
+        self.blob = blob
+        self.fetches = 0
+
+    async def fetch_space_media(self, base_url, blob_id, *, max_bytes, timeout_s):
+        self.fetches += 1
+        return self.blob
+
+
+async def _gfs_held_picture(client, monkeypatch, *, name: str, data: bytes):
+    app = client.app
+    db = app[db_key]
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key, space_type) VALUES('sp-gfs', 'S', 'host', 'h',"
+        " ?, 'global')",
+        ("ab" * 32,),
+    )
+    crypto = app[space_crypto_service_key]
+    await crypto.initialise_for_space("sp-gfs")
+    epoch, key = await crypto.media_key("sp-gfs")
+    blob = seal_space_media(
+        media_key=key, space_id="sp-gfs", epoch=epoch, filename=name, data=data
+    )
+    fetcher = app[space_media_gfs_fetcher_key]
+    await fetcher.receive(
+        "sp-gfs",
+        {
+            name: {
+                "blob_id": blob_id_of(blob),
+                "suite": SPACE_MEDIA_SUITE_AESGCM256_PADDED,
+                "epoch": epoch,
+                "size": len(blob),
+            }
+        },
+        [f"api/media/{name}"],
+        prefetch=False,
+    )
+    gfs = _OneBlobGfs(blob)
+
+    async def _sources(self, space_id):
+        return ["https://gfs.example"]
+
+    monkeypatch.setattr(SpaceMediaGfsFetcher, "_sources", _sources)
+    monkeypatch.setattr(fetcher, "_gfs", gfs, raising=False)
+    return gfs
+
+
+async def test_a_missing_space_file_is_fetched_from_the_gfs_on_view(
+    client, monkeypatch
+):
+    data = b"a picture only the GFS cache holds" * 10
+    gfs = await _gfs_held_picture(client, monkeypatch, name="gfs1.webp", data=data)
+    r = await client.get("/api/media/gfs1.webp", headers=_auth(client._tok))
+    assert r.status == 200
+    assert await r.read() == data
+    media_dir = pathlib.Path(client.app[config_key].media_path)
+    assert (media_dir / "gfs1.webp").read_bytes() == data
+    # Served from disk from now on.
+    r = await client.get("/api/media/gfs1.webp", headers=_auth(client._tok))
+    assert r.status == 200
+    assert gfs.fetches == 1
+
+
+async def test_a_missing_file_without_a_ref_stays_404(client):
+    r = await client.get("/api/media/nobody.webp", headers=_auth(client._tok))
+    assert r.status == 404

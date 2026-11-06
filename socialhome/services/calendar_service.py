@@ -74,6 +74,7 @@ from .inbound_media_store import require_local_media_ref
 from .media_ref_guard import MediaRefGuardedMixin
 from .moderation_release import with_release
 from .protection_gate import ProtectionGateMixin
+from .space_media_refs import SpaceMediaRefsMixin
 from .space_moderation_service import ApplyResult, item_payload_snapshot
 from .space_service import SpaceService
 
@@ -1241,7 +1242,11 @@ def _personal_event_payload(event: CalendarEvent, calendar: Calendar) -> dict:
 
 
 class SpaceCalendarService(
-    _CoverGuard, BusPublisherMixin, ProtectionGateMixin, ContentAccessMixin
+    _CoverGuard,
+    BusPublisherMixin,
+    ProtectionGateMixin,
+    ContentAccessMixin,
+    SpaceMediaRefsMixin,
 ):
     """Space calendar event operations.
 
@@ -1258,6 +1263,7 @@ class SpaceCalendarService(
         "_child_protection",
         "_federation",
         "_household",
+        "_media_gfs",
         "_media_guard",
         "_media_sync",
         "_moderation",
@@ -1280,6 +1286,8 @@ class SpaceCalendarService(
         self._child_protection = None
         self._moderation: ModerationSubmitter | None = None
         self._media_sync: SpaceMediaSyncService | None = None
+        #: v_80 — a new cover's ``media_refs`` for link-joined members.
+        self._media_gfs = None
 
     # ── Subscription feed tokens (Phase F) ───────────────────────────────
 
@@ -1574,6 +1582,7 @@ class SpaceCalendarService(
             event=saved,
             evt_type=FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
             actor_user_id=created_by,
+            previous_cover=None,
         )
         await self._ship_cover(space_id, saved, previous_cover=None)
         # Phase C: auto-RSVP the creator as going for the first
@@ -2001,6 +2010,7 @@ class SpaceCalendarService(
             event=updated,
             evt_type=FederationEventType.SPACE_CALENDAR_EVENT_UPDATED,
             actor_user_id=actor_user_id,
+            previous_cover=existing.cover_url,
         )
         await self._ship_cover(space_id, updated, previous_cover=existing.cover_url)
         # Phase D: only *material* changes (start / end / summary /
@@ -2509,11 +2519,23 @@ class SpaceCalendarService(
         event: CalendarEvent,
         evt_type: FederationEventType,
         actor_user_id: str,
+        previous_cover: str | None = None,
     ) -> None:
         """Broadcast a SPACE_CALENDAR_EVENT_CREATED / _UPDATED to peers
-        co-hosting this space. No-op when federation isn't wired."""
+        co-hosting this space. No-op when federation isn't wired.
+
+        v_80: a new or changed cover (not *previous_cover*) reaches a member
+        household seated from an invite link as a ``media_refs`` descriptor
+        in its own copy of the payload, and is uploaded once per GFS."""
         if self._federation is None:
             return
+        media_plan = (
+            await self._plan_media_refs(space_id, [event.cover_url], followers=False)
+            if event.cover_url and event.cover_url != previous_cover
+            else None
+        )
+        per_peer = self._media_refs_per_peer(media_plan)
+        extra: dict = {"per_peer": per_peer} if per_peer is not None else {}
         payload: dict = {
             # The space this write belongs to, in the payload as well as
             # the routing field. A mesh-relayed envelope (SPACE_ROUTED)
@@ -2554,8 +2576,9 @@ class SpaceCalendarService(
         payload = with_release(payload)
         if MODERATION_BLOCK_KEY not in payload:
             await self._federation.broadcast_to_space_members(
-                space_id, evt_type, payload
+                space_id, evt_type, payload, **extra
             )
+            self._upload_media(media_plan)
             return
         # A release is checked field by field and fails closed on a key it
         # does not classify: a household below v_56 (which never knew the
@@ -2566,7 +2589,9 @@ class SpaceCalendarService(
             payload,
             legacy_payload={k: v for k, v in payload.items() if k != "capacity"},
             legacy_below=FederationCapability.MIN_FOR_SYNC_SERIES_ROWS,
+            **extra,
         )
+        self._upload_media(media_plan)
 
     async def _ship_cover(
         self,

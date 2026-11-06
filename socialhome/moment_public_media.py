@@ -140,9 +140,42 @@ def _aad(author_user_id: str, moment_id: str, role: str) -> bytes:
     )
 
 
+def pad_media(data: bytes) -> bytes:
+    """``u32 length ‖ data ‖ zeros`` up to the bucket :func:`padded_size`
+    picks — shared with :mod:`socialhome.space_media_seal`."""
+    bucket = padded_size(len(data))
+    plaintext = len(data).to_bytes(_LEN, "big") + data
+    return plaintext + b"\0" * (bucket - len(plaintext))
+
+
 def _seal_padded(*, key: bytes, aad: bytes, plaintext: bytes) -> bytes:
+    """Seal an already padded *plaintext* under a fresh random nonce."""
     nonce = os.urandom(_NONCE)
     return nonce + AESGCM(key).encrypt(nonce, plaintext, aad)
+
+
+def seal_padded(*, key: bytes, nonce: bytes, aad: bytes, data: bytes) -> bytes:
+    """``nonce ‖ AES-256-GCM(key, pad(data), aad)`` — the blob shape every
+    padded media seal shares. The caller picks the nonce (random for a
+    moment, derived for space media)."""
+    if len(nonce) != _NONCE:
+        raise ValueError("nonce must be 96 bits")
+    return nonce + AESGCM(key).encrypt(nonce, pad_media(data), aad)
+
+
+def open_padded(*, blob: bytes, key: bytes, aad: bytes) -> bytes:
+    """The file inside a :func:`seal_padded` blob. Raises
+    :class:`ValueError` for a malformed blob and
+    :class:`cryptography.exceptions.InvalidTag` on a wrong key or AAD."""
+    if not _NONCE + _TAG + PAD_BUCKETS[0] <= len(blob) <= MAX_BLOB_BYTES:
+        raise ValueError("media blob size out of bounds")
+    if len(blob) - _NONCE - _TAG not in PAD_BUCKETS:
+        raise ValueError("media blob is not a padded bucket")
+    plaintext = AESGCM(key).decrypt(blob[:_NONCE], blob[_NONCE:], aad)
+    size = int.from_bytes(plaintext[:_LEN], "big")
+    if size > min(MAX_MEDIA_BYTES, len(plaintext) - _LEN):
+        raise ValueError("media length prefix out of bounds")
+    return plaintext[_LEN : _LEN + size]
 
 
 def seal_media(
@@ -150,13 +183,11 @@ def seal_media(
 ) -> bytes:
     """The blob for one file of one moment. CPU-bound for large files —
     callers run it in a worker thread."""
-    bucket = padded_size(len(data))
-    plaintext = len(data).to_bytes(_LEN, "big") + data
-    plaintext += b"\0" * (bucket - len(plaintext))
-    return _seal_padded(
+    return seal_padded(
         key=_media_key(item_key, role),
+        nonce=os.urandom(_NONCE),
         aad=_aad(author_user_id, moment_id, role),
-        plaintext=plaintext,
+        data=data,
     )
 
 
@@ -166,17 +197,11 @@ def open_media(
     """The file inside a blob. Raises :class:`ValueError` for a malformed
     blob and :class:`cryptography.exceptions.InvalidTag` when the key,
     author, moment or role don't match."""
-    if not _NONCE + _TAG + PAD_BUCKETS[0] <= len(blob) <= MAX_BLOB_BYTES:
-        raise ValueError("media blob size out of bounds")
-    if len(blob) - _NONCE - _TAG not in PAD_BUCKETS:
-        raise ValueError("media blob is not a padded bucket")
-    plaintext = AESGCM(_media_key(item_key, role)).decrypt(
-        blob[:_NONCE], blob[_NONCE:], _aad(author_user_id, moment_id, role)
+    return open_padded(
+        blob=blob,
+        key=_media_key(item_key, role),
+        aad=_aad(author_user_id, moment_id, role),
     )
-    size = int.from_bytes(plaintext[:_LEN], "big")
-    if size > min(MAX_MEDIA_BYTES, len(plaintext) - _LEN):
-        raise ValueError("media length prefix out of bounds")
-    return plaintext[_LEN : _LEN + size]
 
 
 def seal_share(
@@ -227,9 +252,12 @@ __all__ = [
     "blob_id_of",
     "is_blob_id",
     "open_media",
+    "open_padded",
     "open_share",
+    "pad_media",
     "padded_size",
     "require_known_media_suite",
     "seal_media",
+    "seal_padded",
     "seal_share",
 ]

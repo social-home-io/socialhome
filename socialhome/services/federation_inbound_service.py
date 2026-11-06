@@ -100,6 +100,7 @@ from ..domain.space import (
     role_change_event_type,
 )
 from ..domain.space_item import item_stamp, stamp_to_db
+from ..domain.space_media_ref import MEDIA_REFS_FIELD
 from ..domain.user import (
     RemoteUser,
     UserIdentityAssertion,
@@ -189,6 +190,7 @@ if TYPE_CHECKING:
     from .moment_federation_outbound import MomentFederationOutbound
     from .moment_reaction_router import MomentReactionRouter
     from .relay_policy import RelayPolicy
+    from .space_media_gfs_fetcher import SpaceMediaGfsFetcher
 
 log = logging.getLogger(__name__)
 
@@ -381,6 +383,7 @@ class FederationInboundService(ProtectionGateMixin):
         "_dm_scope",
         "_federation_service",
         "_gallery_repo",
+        "_gfs_media",
         "_groups",
         "_highlight_audience",
         "_highlight_repo",
@@ -518,10 +521,17 @@ class FederationInboundService(ProtectionGateMixin):
         #: cross-household group leaves it instead of taking it down.
         self._groups: DmGroupService | None = None
         self._child_protection = None
+        #: v_80 — keeps a space post's ``media_refs`` (its pictures in a GFS
+        #: media cache) and fetches them; ``None`` ignores the descriptor.
+        self._gfs_media: SpaceMediaGfsFetcher | None = None
 
     def attach_moment_reaction_router(self, router: MomentReactionRouter) -> None:
         """v_67: keep the reaction route a relayed ``MOMENT_CREATED`` carries."""
         self._moment_reaction_router = router
+
+    def attach_gfs_media(self, fetcher: SpaceMediaGfsFetcher) -> None:
+        """Wire the v_80 GFS media fetcher (``media_refs`` on space posts)."""
+        self._gfs_media = fetcher
 
     def attach_groups(self, groups: DmGroupService) -> None:
         """Wire the group-membership authority (built with the DM stack)."""
@@ -1901,6 +1911,14 @@ class FederationInboundService(ProtectionGateMixin):
                 row_id=post.id,
             )
             return
+        if self._gfs_media is not None and MEDIA_REFS_FIELD in event.payload:
+            # v_80 — the post reached us through a GFS relay without its
+            # bytes: keep where its pictures live (only the post's own files).
+            await self._gfs_media.receive(
+                space_id,
+                event.payload.get(MEDIA_REFS_FIELD),
+                [u for u in (post.media_url, *post.image_urls) if u],
+            )
         if existing is not None:
             await self._bus.publish(
                 PostEdited(

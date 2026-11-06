@@ -136,6 +136,7 @@ from ..domain.space_item import (
     compressed_item_plaintexts,
     pad_json_object,
 )
+from ..domain.space_media_ref import MEDIA_REFS_FIELD
 from ..domain.writer_cert import (
     WRITER_SCOPE_COMMENT,
     WRITER_SCOPE_WRITE,
@@ -143,6 +144,7 @@ from ..domain.writer_cert import (
 )
 from ..federation.space_scope import archive_refusal
 from ..infrastructure.event_bus import EventBus
+from .space_media_refs import SpaceMediaRefsMixin
 from .space_public_author import (
     build_signed_author_inner,
     verify_signed_author_inner,
@@ -162,13 +164,14 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-class SpacePublicOutbound:
+class SpacePublicOutbound(SpaceMediaRefsMixin):
     """Bus-event → GFS-relay producer for public/global space posts."""
 
     __slots__ = (
         "_bus",
         "_crypto",
         "_gfs",
+        "_media_gfs",
         "_own_identity_seed",
         "_own_instance_id",
         "_own_instance_pk",
@@ -211,6 +214,9 @@ class SpacePublicOutbound:
         #: The space post store — only read to skip the removal of a
         #: calendar-derived post (never relayed, so nothing to remove).
         self._posts: AbstractSpacePostRepo | None = None
+        #: v_80 — the post's pictures for followers (``media_refs`` in the
+        #: inner, outside the author signature; one upload per GFS).
+        self._media_gfs = None
 
     def attach_relay_coverage(self, coverage: SpaceRelayCoverage) -> None:
         """Wire step 12: a remote member's post skips the GFSs where every
@@ -321,6 +327,14 @@ class SpacePublicOutbound:
             # its signed bytes stay v_25-compatible.
             author_identity_anchor=author.identity_anchor,
         )
+        # v_80 — the pictures, for followers reading through a GFS.
+        media_plan = await self._plan_media_refs(
+            event.space_id,
+            [post.media_url, *post.image_urls],
+            followers=True,
+        )
+        if media_plan is not None:
+            inner[MEDIA_REFS_FIELD] = media_plan.wire()
         # Encrypt under the existing per-space epoch key. Raises if no key —
         # we never relay plaintext (Encryption-First Rule). v_49: our own
         # writer cert for exactly the epoch we encrypt under rides inside.
@@ -337,6 +351,7 @@ class SpacePublicOutbound:
             )
             return
         await self._publish(event.space_id, seed, sealed, what=f"post {post.id}")
+        self._upload_media(media_plan)
 
     async def _relay_remote_authored(self, event: SpacePostCreated) -> None:
         """Relay another member household's public/global post to the GFS

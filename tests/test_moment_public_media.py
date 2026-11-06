@@ -211,3 +211,12 @@ def test_the_shared_golden_vector_opens_here_too():
         moment_id="m-golden",
         role="media",
     ) == base64.b64decode(vec["media_plain_b64"])
+
+
+def test_shared_padded_seal_takes_only_a_96_bit_nonce():
+    """``seal_padded`` is shared with space media; a wrong nonce length is a
+    caller bug, refused before any encryption."""
+    with pytest.raises(ValueError):
+        mpm.seal_padded(key=bytes(32), nonce=b"short", aad=b"", data=b"x")
+    blob = mpm.seal_padded(key=bytes(32), nonce=bytes(12), aad=b"a", data=b"xyz")
+    assert mpm.open_padded(blob=blob, key=bytes(32), aad=b"a") == b"xyz"

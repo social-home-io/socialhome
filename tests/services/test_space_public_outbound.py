@@ -1499,3 +1499,66 @@ async def test_a_removal_in_an_archived_space_is_not_relayed(env):
     await env["space_repo"].save(dataclasses.replace(space, archived=True))
     await env["bus"].publish(PostDeleted(post_id="post-1", space_id="sp-pub"))
     assert env["gfs"].calls == []
+
+
+# ── v_80 — the relayed post's pictures for followers ────────────────────
+
+
+class _MediaPlan:
+    def wire(self):
+        return {"a.webp": {"blob_id": "c" * 64, "suite": "s", "epoch": 0, "size": 9}}
+
+
+class _MediaGfs:
+    def __init__(self):
+        self.planned = []
+        self.uploaded = []
+
+    async def plan(self, space_id, urls, *, followers):
+        self.planned.append((space_id, list(urls), followers))
+        return _MediaPlan()
+
+    async def is_relay_reader(self, iid):  # pragma: no cover - unused here
+        return False
+
+    def upload(self, plan):
+        self.uploaded.append(plan)
+
+
+async def test_a_seed_holders_picture_post_carries_media_refs_for_followers(env):
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
+    media = _MediaGfs()
+    env["sub"].attach_media_gfs(media)
+    post = dataclasses.replace(
+        _post(env["author_user_id"]),
+        type=PostType.IMAGE,
+        image_urls=("api/media/a.webp",),
+    )
+    await env["bus"].publish(SpacePostCreated(post=post, space_id="sp-pub"))
+    envelope = env["gfs"].calls[0]["payload"]
+    inner = json.loads(
+        await env["crypto"].decrypt(
+            "sp-pub", envelope["epoch"], envelope["encrypted_payload"]
+        )
+    )
+    assert inner["media_refs"] == _MediaPlan().wire()
+    assert verify_signed_author_inner(_unpadded(inner))
+    assert media.planned == [("sp-pub", ["api/media/a.webp"], True)]
+    assert len(media.uploaded) == 1
+
+
+async def test_a_text_post_carries_no_media_refs(env):
+    await env["make_space"]("sp-pub", SpaceType.GLOBAL, with_seed=True)
+    media = _MediaGfs()
+    env["sub"].attach_media_gfs(media)
+    await env["bus"].publish(
+        SpacePostCreated(post=_post(env["author_user_id"]), space_id="sp-pub")
+    )
+    envelope = env["gfs"].calls[0]["payload"]
+    inner = json.loads(
+        await env["crypto"].decrypt(
+            "sp-pub", envelope["epoch"], envelope["encrypted_payload"]
+        )
+    )
+    assert "media_refs" not in inner
+    assert media.planned == []

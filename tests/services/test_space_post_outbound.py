@@ -1422,3 +1422,135 @@ async def test_a_comment_edit_carries_its_stamp():
     call = federation.broadcast_to_space_members.call_args
     assert call.args[1] is FederationEventType.SPACE_COMMENT_UPDATED
     assert datetime.fromisoformat(call.args[2]["edited_at"]).tzinfo is not None
+
+
+# ── v_80 — pictures for link-joined members and followers via a GFS ──────
+
+
+@dataclass
+class _FakePlan:
+    refs_wire: dict
+
+    def wire(self) -> dict:
+        return dict(self.refs_wire)
+
+
+class _FakeMediaGfs:
+    """Stand-in for :class:`SpaceMediaGfsUploader`."""
+
+    def __init__(self, *, plan: _FakePlan | None, readers=()) -> None:
+        self._plan = plan
+        self.readers = set(readers)
+        self.planned: list[tuple[str, list, bool]] = []
+        self.uploaded: list = []
+
+    async def plan(self, space_id, media_urls, *, followers):
+        self.planned.append((space_id, list(media_urls), followers))
+        return self._plan
+
+    async def is_relay_reader(self, instance_id):
+        return instance_id in self.readers
+
+    def upload(self, plan):
+        self.uploaded.append(plan)
+
+
+_REFS = {"a.webp": {"blob_id": "a" * 64, "suite": "s", "epoch": 1, "size": 9}}
+
+
+def _picture_post(author: str = "uid-alice") -> Post:
+    return Post(
+        id="post-pic",
+        author=author,
+        type=PostType.IMAGE,
+        content="look",
+        image_urls=("api/media/a.webp",),
+        created_at=datetime(2026, 11, 6, 12, 0, 0, tzinfo=UTC),
+    )
+
+
+async def test_media_refs_go_only_to_link_joined_readers():
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    media_gfs = _FakeMediaGfs(plan=_FakePlan(_REFS), readers={"inst-e"})
+    outbound = _make_outbound(bus=bus, federation=federation)
+    outbound.attach_media_gfs(media_gfs)
+
+    await bus.publish(SpacePostCreated(post=_picture_post(), space_id="sp-1"))
+
+    assert media_gfs.planned == [("sp-1", ["api/media/a.webp"], False)]
+    call = federation.broadcast_to_space_members.call_args
+    payload = call.args[2]
+    assert "media_refs" not in payload  # never on the shared payload
+    per_peer = call.kwargs["per_peer"]
+    to_e = await per_peer("inst-e", payload)
+    assert to_e["media_refs"] == _REFS
+    to_b = await per_peer("inst-b", payload)
+    assert "media_refs" not in to_b
+    assert "media_refs" not in payload  # a new dict, never mutated
+    assert len(media_gfs.uploaded) == 1
+
+
+async def test_no_plan_means_no_per_peer_and_no_upload():
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    media_gfs = _FakeMediaGfs(plan=None, readers={"inst-e"})
+    outbound = _make_outbound(bus=bus, federation=federation)
+    outbound.attach_media_gfs(media_gfs)
+    await bus.publish(SpacePostCreated(post=_picture_post(), space_id="sp-1"))
+    call = federation.broadcast_to_space_members.call_args
+    assert call.kwargs.get("per_peer") is None
+    assert media_gfs.uploaded == []
+
+
+async def test_a_text_post_plans_nothing():
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    media_gfs = _FakeMediaGfs(plan=_FakePlan(_REFS))
+    outbound = _make_outbound(bus=bus, federation=federation)
+    outbound.attach_media_gfs(media_gfs)
+    post = Post(id="p", author="u", type=PostType.TEXT, content="hi", created_at=None)
+    await bus.publish(SpacePostCreated(post=post, space_id="sp-1"))
+    assert media_gfs.planned == []
+
+
+async def test_followers_get_the_refs_in_the_public_relay():
+    """A follower reads the post's inner relayed through a GFS: the
+    descriptor rides there, outside the author signature."""
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    keypair = generate_identity_keypair()
+    uid = derive_user_id(keypair.public_key, "alice")
+    media_gfs = _FakeMediaGfs(plan=_FakePlan(_REFS))
+    outbound = _make_outbound(
+        bus=bus,
+        federation=federation,
+        space_repo=_FakeSpaceRepo({"sp-1": _FakeSpace(space_type=SpaceType.GLOBAL)}),
+        user_repo=_FakeUserRepo({uid: _FakeUser(username="alice")}),
+        identity=(keypair, "inst-self"),
+    )
+    outbound.attach_media_gfs(media_gfs)
+    await bus.publish(SpacePostCreated(post=_picture_post(uid), space_id="sp-1"))
+    assert media_gfs.planned[0][2] is True  # followers wanted
+    relay = federation.broadcast_to_space_members.call_args.args[2]["public_relay"]
+    assert relay["media_refs"] == _REFS
+    assert verify_signed_author_inner(relay)  # the signature still holds
+
+
+async def test_a_planning_failure_never_blocks_the_post(caplog):
+    class _Boom(_FakeMediaGfs):
+        async def plan(self, *a, **k):
+            raise RuntimeError("disk gone")
+
+    bus = EventBus()
+    federation = AsyncMock()
+    federation.broadcast_to_space_members = AsyncMock()
+    outbound = _make_outbound(bus=bus, federation=federation)
+    outbound.attach_media_gfs(_Boom(plan=None))
+    await bus.publish(SpacePostCreated(post=_picture_post(), space_id="sp-1"))
+    federation.broadcast_to_space_members.assert_awaited_once()
+    assert "media" in caplog.text

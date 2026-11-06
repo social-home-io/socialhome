@@ -17,6 +17,7 @@ from ..app_keys import (
     media_signer_key,
     media_transcode_repo_key,
     media_transcode_service_key,
+    space_media_gfs_fetcher_key,
     storage_quota_service_key,
 )
 from ..auth import SIGNED_URL_PRINCIPAL
@@ -98,6 +99,12 @@ class MediaServeView(BaseView):
     links carrying ``?exp=&sig=``) or :class:`BearerTokenStrategy` (any
     ``fetch()`` carrying ``Authorization: Bearer …``). Either populates
     ``request['user']`` by the time the handler runs.
+
+    A space file this household holds only as a ``media_refs`` descriptor
+    (v_80 — it reached us through a GFS without its bytes) is fetched from
+    the GFS media cache first (:meth:`SpaceMediaGfsFetcher.ensure_local`:
+    one fetch per file however many viewers wait, bounded by a timeout);
+    404 when that fails.
     """
 
     async def get(self) -> web.StreamResponse:
@@ -110,7 +117,9 @@ class MediaServeView(BaseView):
 
         file_path = pathlib.Path(config.media_path) / filename
         if not await aiofiles.os.path.isfile(file_path):
-            return error_response(404, "NOT_FOUND", "Media file not found.")
+            fetcher = self.request.app.get(space_media_gfs_fetcher_key)
+            if fetcher is None or not await fetcher.ensure_local(filename):
+                return error_response(404, "NOT_FOUND", "Media file not found.")
         if not await self._may_open(filename):
             # A private album's photo (D7) for someone outside it: exactly
             # the unknown file's answer, so nobody learns it exists.

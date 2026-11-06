@@ -504,3 +504,70 @@ async def test_a_household_or_echoed_item_edit_is_not_federated(env):
         GalleryItemUpdated(item_id="gone", album_id="alb-space-A", space_id="sp-A")
     )
     assert fed.sent == []
+
+
+# ── v_80 — a space photo for members who read the space through a GFS ───
+
+
+class _PerPeerFederation(_FakeFederationService):
+    async def broadcast_to_space_members(
+        self, space_id, event_type, payload, *, min_proto_version=None, per_peer=None
+    ):
+        self.broadcasts.append((space_id, event_type))
+        for iid in self.members.get(space_id, []):
+            if iid == self._own_instance_id:
+                continue
+            copy = await per_peer(iid, payload) if per_peer is not None else payload
+            self.sent.append((iid, event_type, copy, space_id))
+
+
+class _GalleryPlan:
+    def wire(self):
+        return {"it-1.jpg": {"blob_id": "e" * 64, "suite": "s", "epoch": 0, "size": 9}}
+
+
+class _GalleryMediaGfs:
+    def __init__(self):
+        self.planned: list = []
+        self.uploaded: list = []
+
+    async def plan(self, space_id, urls, *, followers):
+        self.planned.append((space_id, list(urls), followers))
+        return _GalleryPlan()
+
+    async def is_relay_reader(self, iid):
+        return iid == "peer-2"
+
+    def upload(self, plan):
+        self.uploaded.append(plan)
+
+
+async def test_a_space_photo_carries_media_refs_for_link_joined_members():
+    bus = EventBus()
+    fed = _PerPeerFederation()
+    fed.members = {"sp-A": ["own-inst", "peer-1", "peer-2"]}
+    gallery = _FakeGalleryRepo(
+        albums={"alb-space-A": _album("alb-space-A", space_id="sp-A")},
+        items={"it-1": _item("it-1", "alb-space-A")},
+    )
+    out = GalleryFederationOutbound(
+        bus=bus,
+        federation_service=fed,
+        gallery_repo=gallery,
+        space_repo=_FakeSpaceRepo(fed.members),
+    )
+    media = _GalleryMediaGfs()
+    out.attach_media_gfs(media)
+    out.wire()
+    await bus.publish(
+        GalleryItemUploaded(
+            item_id="it-1", album_id="alb-space-A", item_type="photo", uploader="alice"
+        )
+    )
+    assert media.planned == [
+        ("sp-A", ["/api/media/it-1-thumb.jpg", "/api/media/it-1.jpg"], False)
+    ]
+    by_target = {t: p for t, _e, p, _s in fed.sent}
+    assert by_target["peer-2"]["media_refs"] == _GalleryPlan().wire()
+    assert "media_refs" not in by_target["peer-1"]
+    assert len(media.uploaded) == 1

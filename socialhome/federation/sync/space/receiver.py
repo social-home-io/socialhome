@@ -82,6 +82,7 @@ from ....domain.space import (
     validate_zone_name,
     validate_zone_radius,
 )
+from ....domain.space_media_ref import MEDIA_REFS_FIELD
 from ....domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ....domain.task import task_from_wire_dict, task_list_from_wire_dict
 from ....domain.timetable import (
@@ -136,6 +137,7 @@ from .exporter import (
     SENTINEL_RESOURCE,
     parse_chunk,
 )
+from .media_refs import MEDIA_REF_RESOURCES, record_media_urls
 
 if TYPE_CHECKING:
     from ....federation.space_authorship import SpaceAuthorship
@@ -464,6 +466,20 @@ class ChatSyncSink(Protocol):
     ) -> None: ...
 
 
+class _GfsMediaSink(Protocol):
+    """Where a streamed record's ``media_refs`` go (v_80) — the GFS media
+    fetcher, which keeps them for the record's own files."""
+
+    async def receive(
+        self,
+        space_id: str,
+        raw_refs: object,
+        media_urls: list[str],
+        *,
+        prefetch: bool = True,
+    ) -> Any: ...
+
+
 def _parse_iso(value: Any) -> datetime:
     if isinstance(value, str) and value:
         try:
@@ -502,6 +518,7 @@ class SpaceSyncReceiver:
         "_federation_repo",
         "_foreign_system_albums",
         "_gallery_repo",
+        "_gfs_media",
         "_health",
         "_legacy_album_deletes",
         "_media_dir",
@@ -583,6 +600,9 @@ class SpaceSyncReceiver:
         #: Overtaking album deletes no tombstone row proves (a legacy id, an
         #: owner-less v_33 delete): a streamed album must not undo them.
         self._legacy_album_deletes = legacy_album_deletes
+        #: v_80 — keeps the ``media_refs`` a record streamed to a link-joined
+        #: member carries (``None``: ignored).
+        self._gfs_media: _GfsMediaSink | None = None
         #: §24.11 authorship for a chunk streamed by a household that is NOT
         #: the space's host (see :meth:`_admit`). ``None`` refuses such
         #: chunks outright rather than trusting them.
@@ -607,6 +627,24 @@ class SpaceSyncReceiver:
         #: ``(space_id, epoch)`` (#122). Without it, missing-key
         #: chunks log + drop (legacy behaviour).
         self._pending_decrypts = pending_decrypts
+
+    def attach_gfs_media(self, fetcher: _GfsMediaSink) -> None:
+        """Wire the v_80 GFS media fetcher: a record streamed to a member
+        seated from an invite link carries ``media_refs`` (its files in a
+        GFS media cache, sync line 80); the fetcher keeps them and fetches
+        the pictures."""
+        self._gfs_media = fetcher
+
+    async def _keep_media_refs(
+        self, resource: str, space_id: str, records: list[dict[str, Any]]
+    ) -> None:
+        if self._gfs_media is None or resource not in MEDIA_REF_RESOURCES:
+            return
+        for r in records:
+            if MEDIA_REFS_FIELD in r:
+                await self._gfs_media.receive(
+                    space_id, r[MEDIA_REFS_FIELD], record_media_urls(resource, r)
+                )
 
     def attach_chat_sink(self, sink: ChatSyncSink) -> None:
         """Wire where streamed space-chat messages (v_55) are applied."""
@@ -1026,6 +1064,7 @@ class SpaceSyncReceiver:
             await self._persist(
                 resource, space_id, records, provider=provider, held_back=held_back
             )
+            await self._keep_media_refs(resource, space_id, records)
         return held_back
 
     async def _apply_picture_resets(

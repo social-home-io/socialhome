@@ -6770,3 +6770,88 @@ async def test_a_lost_race_on_a_bid_withdrawal_publishes_nothing(bus, open_aucti
         _event(FederationEventType.BAZAAR_OFFER_UPDATED, _withdrawal())
     )
     assert seen == []
+
+
+# ─── v_80 — media_refs for link-joined members ──────────────────────────
+
+
+class _GfsMediaSink:
+    def __init__(self):
+        self.received: list[tuple] = []
+
+    async def receive(self, space_id, raw_refs, media_urls, *, prefetch=True):
+        self.received.append((space_id, raw_refs, list(media_urls)))
+        return []
+
+
+_V80_REFS = {"c.webp": {"blob_id": "c" * 64, "suite": "s", "epoch": 0, "size": 9}}
+
+
+async def test_calendar_cover_media_refs_are_kept(repos, handlers):
+    sink = _GfsMediaSink()
+    handlers.attach_gfs_media(sink)
+    await handlers._on_calendar_saved(
+        _event(
+            FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
+            {
+                "id": "e-c",
+                "calendar_id": "cal-1",
+                "summary": "Picnic",
+                "created_by": "u-1",
+                "start": "2026-04-18T10:00:00+00:00",
+                "end": "2026-04-18T11:00:00+00:00",
+                "cover_url": "api/media/c.webp",
+                "media_refs": _V80_REFS,
+            },
+            space_id="sp-1",
+        )
+    )
+    assert sink.received == [("sp-1", _V80_REFS, ["api/media/c.webp"])]
+
+
+async def test_calendar_without_media_refs_keeps_nothing(repos, handlers):
+    sink = _GfsMediaSink()
+    handlers.attach_gfs_media(sink)
+    await handlers._on_calendar_saved(
+        _event(
+            FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
+            {
+                "id": "e-n",
+                "calendar_id": "cal-1",
+                "summary": "Picnic",
+                "created_by": "u-1",
+                "start": "2026-04-18T10:00:00+00:00",
+                "end": "2026-04-18T11:00:00+00:00",
+                "cover_url": "api/media/c.webp",
+            },
+            space_id="sp-1",
+        )
+    )
+    assert sink.received == []
+
+
+async def test_gallery_item_media_refs_are_kept(gallery_handlers):
+    handlers, _gallery = gallery_handlers
+    sink = _GfsMediaSink()
+    handlers.attach_gfs_media(sink)
+    await handlers._on_gallery_item_saved(
+        _event(
+            FederationEventType.SPACE_GALLERY_ITEM_CREATED,
+            {
+                "id": "gi-m",
+                "album_id": "alb-1",
+                "uploaded_by": "alice",
+                "item_type": "photo",
+                "url": "/api/media/f.jpg",
+                "thumbnail_url": "/api/media/t.jpg",
+                "width": 800,
+                "height": 600,
+                "occurred_at": "2026-04-10T12:00:00+00:00",
+                "media_refs": _V80_REFS,
+            },
+            space_id="sp-1",
+        ),
+    )
+    assert sink.received == [
+        ("sp-1", _V80_REFS, ["api/media/t.jpg", "api/media/f.jpg"])
+    ]

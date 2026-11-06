@@ -169,8 +169,13 @@ async def _make_envelope(
     writer_cert: dict | None = None,
     payload_suite: str | None = None,
     plaintext: bytes | None = None,
+    signed_extra: dict | None = None,
+    unsigned_extra: dict | None = None,
 ):
     """Build a relayed envelope.
+
+    ``signed_extra`` joins the inner before the author signs it,
+    ``unsigned_extra`` after (like the writer cert or ``media_refs``).
 
     ``payload_suite`` labels it (signed) and, for ``zlib1``, compresses the
     inner; ``plaintext`` replaces the encrypted bytes outright.
@@ -201,6 +206,7 @@ async def _make_envelope(
     }
     if identity_anchor is not None:
         inner["identity_anchor"] = identity_anchor
+    inner.update(signed_extra or {})
     if not omit_author_sig:
         inner["author_sig"] = b64url_encode(
             sign_ed25519(sign_seed, author_signing_bytes(inner))
@@ -215,6 +221,7 @@ async def _make_envelope(
             inner["link_preview"] = tamper_preview
     if writer_cert is not None:
         inner["writer_cert"] = writer_cert
+    inner.update(unsigned_extra or {})
     if plaintext is None:
         plaintext = (
             zlib_item_plaintext(inner, suite=payload_suite)
@@ -2215,3 +2222,37 @@ async def test_an_early_comment_is_held_and_replayed_with_its_post(item_env):
     await item_env["inbound"].handle(await _item_frame(item_env))  # post-1
     assert await item_env["post_repo"].get_comment(inner["item_target"]) is not None
     assert len(buffer) == 0
+
+
+# ── v_80 — a follower keeps a relayed post's media_refs ─────────────────
+
+
+class _GfsMediaSink:
+    def __init__(self):
+        self.received: list[tuple] = []
+
+    async def receive(self, space_id, raw_refs, media_urls, *, prefetch=True):
+        self.received.append((space_id, raw_refs, list(media_urls)))
+        return []
+
+
+async def test_a_followers_relayed_post_keeps_its_media_refs(env):
+    sink = _GfsMediaSink()
+    env["inbound"].attach_gfs_media(sink)
+    refs = {"p.webp": {"blob_id": "f" * 64, "suite": "s", "epoch": 0, "size": 9}}
+    envelope = await _make_envelope(
+        env,
+        signed_extra={"type": "image", "image_urls": ["api/media/p.webp"]},
+        unsigned_extra={"media_refs": refs},
+    )
+    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    assert await env["post_repo"].get("post-1") is not None
+    assert sink.received == [("sp-1", refs, ["api/media/p.webp"])]
+
+
+async def test_a_relayed_post_without_media_refs_keeps_nothing(env):
+    sink = _GfsMediaSink()
+    env["inbound"].attach_gfs_media(sink)
+    envelope = await _make_envelope(env)
+    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    assert sink.received == []
