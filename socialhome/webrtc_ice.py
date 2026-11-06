@@ -23,6 +23,8 @@ import time
 
 import aiolibdatachannel as rtc
 
+from .domain.media_chunking import ADVERTISED_MAX_MESSAGE_BYTES
+
 log = logging.getLogger(__name__)
 
 #: ``(entry index, reason)`` pairs :func:`rtc_configuration` already warned
@@ -221,4 +223,9 @@ def rtc_configuration(ice_servers: list[dict]) -> rtc.RTCConfiguration:
                 index,
                 f"{len(bad)} URL(s) not a non-empty string ({', '.join(bad)})",
             )
-    return rtc.RTCConfiguration(ice_servers=servers)
+    # Media chunks size themselves to the negotiated limit (the smaller
+    # side's), so advertising more lets two upgraded households send a
+    # picture in one message (``domain/media_chunking.py``).
+    return rtc.RTCConfiguration(
+        ice_servers=servers, max_message_size=ADVERTISED_MAX_MESSAGE_BYTES
+    )

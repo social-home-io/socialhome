@@ -156,10 +156,11 @@ sending household was sent it for. Both blob types share
   (`resolve_space_id`: routing `space_id`, payload copy as fallback, a
   mismatch is a refusal) and a `correlation_id` (`post_id` on older
   senders). When that row is already known — a space post, the bazaar
-  listing behind a bazaar post, or a gallery item — it must live in that
-  space and reference `filename` (post `media_url` / `image_urls` /
-  `file_meta.url`, listing `image_urls`, gallery `url` /
-  `thumbnail_url`); otherwise the blob is refused with a WARNING.
+  listing behind a bazaar post, a gallery item, or a space calendar
+  event — it must live in that space and reference `filename` (post
+  `media_url` / `image_urls` / `file_meta.url`, listing `image_urls`,
+  gallery `url` / `thumbnail_url`, event `cover_url`); otherwise the blob
+  is refused with a WARNING.
 - **Blob before its row.** The mesh and the §25.6 catch-up can deliver a
   blob before the post, listing or gallery item it belongs to. Such a
   blob is accepted — overwriting is the harm, and the write is

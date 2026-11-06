@@ -2123,6 +2123,17 @@ class FederationTransport:
         peer = self._peers.get(instance_id)
         return peer is not None and peer.is_media_ready
 
+    def media_max_message_size(self, instance_id: str) -> int | None:
+        """The negotiated message limit of *instance_id*'s open media
+        channel — the smaller of both households' ``a=max-message-size``
+        — or ``None`` when no media channel is open. Media chunks are sized
+        to it (:mod:`socialhome.domain.media_chunking`)."""
+        peer = self._peers.get(instance_id)
+        if peer is None or not peer.is_media_ready or peer._media_channel is None:
+            return None
+        size = getattr(peer._media_channel, "max_message_size", None)
+        return size if isinstance(size, int) and size > 0 else None
+
     async def send_app(
         self,
         *,

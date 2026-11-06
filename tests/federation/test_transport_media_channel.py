@@ -298,3 +298,22 @@ async def test_facade_send_media_false_when_peer_raises():
         payload_bytes=b"p",
     )
     assert ok is False
+
+
+async def test_facade_reports_the_negotiated_media_message_limit():
+    """The media sender sizes chunks to the channel's negotiated limit
+    (the smaller side's ``a=max-message-size``); no open channel → None."""
+    t = FederationTransport(
+        own_instance_id="self",
+        https_inbox=object(),
+        signaling_send=_noop_signaling,
+    )
+    assert t.media_max_message_size("peer-1") is None
+    peer = _peer()
+    ch = _ScriptedChannel()
+    ch.max_message_size = 262144
+    peer._media_channel = ch
+    t._peers["peer-1"] = peer
+    assert t.media_max_message_size("peer-1") is None  # not open yet
+    peer._media_open.set()
+    assert t.media_max_message_size("peer-1") == 262144

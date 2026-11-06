@@ -327,14 +327,22 @@ class SpaceModerationFederation:
     async def _send_media(
         self, space: Space, item: SpaceModerationItem, targets: list[str]
     ) -> None:
-        if self._media_sync is None or item.feature != "posts" or not targets:
+        if self._media_sync is None or not targets:
             return
-        urls = _post_media_urls(item.payload or {})
+        payload = item.payload or {}
+        if item.feature == "posts":
+            urls = _post_media_urls(payload)
+        elif item.feature == "calendar":
+            urls = _calendar_cover_urls(payload)
+        else:
+            return
         if not urls:
             return
         try:
             await self._media_sync.enqueue_for_post(
-                post_id=str((item.payload or {}).get("target_id") or ""),
+                # The correlation id: the target row, or the queue item for
+                # a new event (no event id until it is approved).
+                post_id=str(payload.get("target_id") or item.id),
                 target_instance_ids=list(targets),
                 media_urls=urls,
                 space_id=space.id,
@@ -865,6 +873,16 @@ def _when(value: object) -> datetime | None:
 
 def _aware(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _calendar_cover_urls(payload: dict) -> list[str]:
+    """The cover a queued calendar create (``cover_url``) or edit
+    (``patch.cover_url``) sets — a cleared or unchanged cover sends none."""
+    patch = payload.get("patch")
+    url = (
+        patch.get("cover_url") if isinstance(patch, dict) else payload.get("cover_url")
+    )
+    return [url] if isinstance(url, str) and url else []
 
 
 def _post_media_urls(payload: dict) -> list[str]:

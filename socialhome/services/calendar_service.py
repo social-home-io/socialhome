@@ -80,6 +80,7 @@ from .space_service import SpaceService
 if TYPE_CHECKING:
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.user_repo import AbstractUserRepo
+    from .space_media_sync_service import SpaceMediaSyncService
     from .space_moderation_service import ModerationSubmitter
 
 log = logging.getLogger(__name__)
@@ -1258,6 +1259,7 @@ class SpaceCalendarService(
         "_federation",
         "_household",
         "_media_guard",
+        "_media_sync",
         "_moderation",
         "_repo",
         "_space_repo",
@@ -1277,6 +1279,7 @@ class SpaceCalendarService(
         self._household = None
         self._child_protection = None
         self._moderation: ModerationSubmitter | None = None
+        self._media_sync: SpaceMediaSyncService | None = None
 
     # ── Subscription feed tokens (Phase F) ───────────────────────────────
 
@@ -1324,6 +1327,13 @@ class SpaceCalendarService(
         space events fall back to the household tz when neither the
         request nor the space row carries one."""
         self._household = svc
+
+    def attach_media_sync(self, media_sync: SpaceMediaSyncService) -> None:
+        """Wire the space media outbox, so an event's cover FILE reaches
+        the other member households — the event carries only its
+        ``api/media/…`` reference, which 404s on a household without the
+        bytes. The same ``SPACE_MEDIA_BLOB`` path post pictures ride."""
+        self._media_sync = media_sync
 
     def attach_space_repo(self, space_repo: AbstractSpaceRepo) -> None:
         """Wire the space repo so event creation can read ``space.tz``
@@ -1565,6 +1575,7 @@ class SpaceCalendarService(
             evt_type=FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
             actor_user_id=created_by,
         )
+        await self._ship_cover(space_id, saved, previous_cover=None)
         # Phase C: auto-RSVP the creator as going for the first
         # occurrence — they're implicitly going, even on a capped event
         # (skips the approval flow for self). Publish SpaceRsvpChanged
@@ -1991,6 +2002,7 @@ class SpaceCalendarService(
             evt_type=FederationEventType.SPACE_CALENDAR_EVENT_UPDATED,
             actor_user_id=actor_user_id,
         )
+        await self._ship_cover(space_id, updated, previous_cover=existing.cover_url)
         # Phase D: only *material* changes (start / end / summary /
         # capacity-down) tell the people coming; cosmetic ones are silent.
         await self._emit(
@@ -2555,6 +2567,45 @@ class SpaceCalendarService(
             legacy_payload={k: v for k, v in payload.items() if k != "capacity"},
             legacy_below=FederationCapability.MIN_FOR_SYNC_SERIES_ROWS,
         )
+
+    async def _ship_cover(
+        self,
+        space_id: str,
+        event: CalendarEvent,
+        *,
+        previous_cover: str | None,
+    ) -> None:
+        """Queue ``event``'s cover file for every other member household —
+        only when it is new or changed (an edit that keeps the cover sends
+        no bytes). One outbox row per household: N members × one picture
+        (≤ the WebP cap) per cover change. Fail-soft: the event itself has
+        already gone out."""
+        cover = event.cover_url
+        if (
+            self._media_sync is None
+            or self._space_repo is None
+            or not cover
+            or cover == previous_cover
+        ):
+            return
+        own = getattr(self._federation, "_own_instance_id", "") or ""
+        try:
+            members = await self._space_repo.list_member_instances(space_id)
+            targets = [iid for iid in members if iid and iid != own]
+            if not targets:
+                return
+            await self._media_sync.enqueue_for_blob(
+                space_id=space_id,
+                correlation_id=event.id,
+                target_instance_ids=targets,
+                media_urls=[cover],
+            )
+        except Exception:
+            log.exception(
+                "space calendar: cover of event %s in space %s not queued",
+                event.id,
+                space_id,
+            )
 
     async def _publish_federation_event_deleted(
         self,

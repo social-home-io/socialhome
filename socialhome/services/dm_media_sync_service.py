@@ -47,6 +47,7 @@ import aiofiles
 import aiofiles.os
 
 from ..domain.federation import FederationEventType
+from ..domain.media_chunking import split_into_chunks
 from ..media.image_processor import ImageProcessor
 from ..media.video_processor import VideoProcessor
 from .backoff import jittered_backoff_seconds
@@ -88,30 +89,11 @@ MAX_ATTEMPTS: int = 6
 BACKOFF_BASE_SECONDS: float = 30.0
 BACKOFF_CAP_SECONDS: float = 30 * 60.0
 
-#: Per-chunk raw byte cap for the ``DM_MEDIA_BLOB`` payload. The
-#: federation transport (HTTPS inbox or RTC DataChannel) drops a frame
-#: to the slow HTTPS fallback once a single serialised event exceeds
-#: the ~1 MiB send budget (``transport.SEND_HWM_BYTES``). Base64 inflates
-#: the raw bytes by ~37%, so 512 KiB lands at ~700 KB encoded — still
-#: comfortably under the cap, while halving the chunk count (and the
-#: per-chunk encrypt+sign passes) versus the old 256 KiB. 1 MiB raw would
-#: inflate to ~1.37 MiB and blow the budget — the binary-framing follow-up
-#: is what unlocks larger chunks. Files at or under
-#: :data:`SINGLE_CHUNK_BYTES_THRESHOLD` still ride a single chunk; above
-#: it the sender splits into N sequenced chunks and the receiver buffers
-#: them on disk until ``final=true`` lands.
-MAX_BLOB_CHUNK_BYTES: int = 512 * 1024
 #: Max chunks of a single blob in flight at once. Pipelining cuts the
 #: per-chunk round-trip latency (esp. on the HTTPS fallback). Kept small:
 #: the RTC transport drops to HTTPS once its ~1 MiB send buffer fills, so a
 #: large window can't overrun the DataChannel — it just backpressures.
 PIPELINE_WINDOW: int = 4
-#: Files at or below this size go through the single-chunk fast
-#: path. Picked so typical phone photos / short clips (≤ ~1 MB)
-#: never chunk — they're below the federation transport's
-#: per-event budget already, and chunking just adds latency. A 200
-#: MiB video, on the other hand, ships as ~410 chunks.
-SINGLE_CHUNK_BYTES_THRESHOLD: int = 1024 * 1024
 
 
 class DmMediaSyncService(VisibilityMixin):
@@ -440,7 +422,9 @@ class DmMediaSyncService(VisibilityMixin):
                     )
                     continue
             try:
-                payloads = await self._build_blob_payloads(entry)
+                payloads = await self._build_blob_payloads(
+                    entry, fed.media_chunk_bytes(entry.target_instance_id)
+                )
             except Exception as exc:
                 log.warning(
                     "dm-media-sync: failed to build blob payload for %s → %s: %s",
@@ -506,7 +490,9 @@ class DmMediaSyncService(VisibilityMixin):
 
     # ── Internals ─────────────────────────────────────────────────────
 
-    async def _build_blob_payloads(self, entry) -> list[tuple[dict, bytes]]:
+    async def _build_blob_payloads(
+        self, entry, chunk_bytes: int
+    ) -> list[tuple[dict, bytes]]:
         """Construct the ``DM_MEDIA_BLOB`` chunk(s) from an outbox row.
 
         Reads the full file off disk and returns one ``(metadata,
@@ -517,12 +503,12 @@ class DmMediaSyncService(VisibilityMixin):
         base64) when the peer supports it, or re-attaches it as a base64
         ``bytes_b64`` field on the JSON fallback.
 
-        Files at or below :data:`SINGLE_CHUNK_BYTES_THRESHOLD` ship as
+        Chunks of at most ``chunk_bytes`` — sized for the target household
+        (:meth:`FederationService.media_chunk_bytes`): a file that fits is
         one chunk with ``chunk_count=1`` (the receiver's single-chunk
-        branch). Larger files split into ``ceil(len/MAX_BLOB_CHUNK_BYTES)``
-        chunks, each carrying its 0-based ``chunk_index`` + total
-        ``chunk_count`` + a ``final`` flag that triggers the receiver's
-        concatenate-and-rename finalisation.
+        branch); a larger one carries each chunk's 0-based
+        ``chunk_index`` + total ``chunk_count`` + a ``final`` flag that
+        triggers the receiver's concatenate-and-rename finalisation.
         """
         path = pathlib.Path(entry.bytes_path)
         if not await aiofiles.os.path.isfile(path):
@@ -541,30 +527,10 @@ class DmMediaSyncService(VisibilityMixin):
             "mime_type": msg.mime_type,
             "file_size_bytes": size,
         }
-        if size <= SINGLE_CHUNK_BYTES_THRESHOLD:
-            return [
-                (
-                    {**common, "chunk_index": 0, "chunk_count": 1, "final": True},
-                    data,
-                )
-            ]
-        chunks: list[tuple[dict, bytes]] = []
-        total = (size + MAX_BLOB_CHUNK_BYTES - 1) // MAX_BLOB_CHUNK_BYTES
-        for i in range(total):
-            start = i * MAX_BLOB_CHUNK_BYTES
-            end = min(start + MAX_BLOB_CHUNK_BYTES, size)
-            chunks.append(
-                (
-                    {
-                        **common,
-                        "chunk_index": i,
-                        "chunk_count": total,
-                        "final": i == total - 1,
-                    },
-                    data[start:end],
-                )
-            )
-        return chunks
+        return [
+            ({**common, **seq}, raw)
+            for seq, raw in split_into_chunks(data, chunk_bytes)
+        ]
 
     async def _reschedule_or_fail(
         self,

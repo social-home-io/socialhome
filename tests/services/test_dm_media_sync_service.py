@@ -32,6 +32,7 @@ from socialhome.domain.federation import (
     FederationEventType,
     PairingStatus,
 )
+from socialhome.domain.media_chunking import HTTPS_CHUNK_BYTES
 from socialhome.repositories.dm_media_outbox_repo import DmMediaOutboxEntry
 from socialhome.services.dm_media_sync_service import DmMediaSyncService
 
@@ -188,6 +189,9 @@ class FakeFederation:
     def __init__(self) -> None:
         self.sent: list[dict] = []
         self.should_fail = False
+
+    def media_chunk_bytes(self, instance_id: str) -> int:
+        return HTTPS_CHUNK_BYTES
 
     async def send_media_chunk(
         self,
@@ -647,20 +651,14 @@ async def test_flush_once_reschedules_on_failure(stack, monkeypatch):
 
 
 async def test_flush_once_chunks_large_files(stack):
-    """A file above ``SINGLE_CHUNK_BYTES_THRESHOLD`` ships as N chunks.
+    """A file larger than the target's chunk size ships as N chunks.
 
     Every chunk lands as its own ``DM_MEDIA_BLOB`` envelope with a
     monotonic ``chunk_index`` and the same ``chunk_count``. Only
     the last chunk carries ``final=true``.
     """
-    from socialhome.services.dm_media_sync_service import (
-        MAX_BLOB_CHUNK_BYTES,
-        SINGLE_CHUNK_BYTES_THRESHOLD,
-    )
-
-    # Write a file just over the single-chunk threshold so the
-    # split lands at 5 chunks (4 full + 1 short).
-    target_size = SINGLE_CHUNK_BYTES_THRESHOLD + 4 * MAX_BLOB_CHUNK_BYTES
+    # Five chunks at the target's chunk size.
+    target_size = 5 * HTTPS_CHUNK_BYTES
     big = stack["media_dir"] / "big.bin"
     big.write_bytes(b"x" * target_size)
     # Seed a matching message row so flush_once can read metadata.
@@ -808,8 +806,8 @@ async def test_chunks_pipeline_bounded_by_window(stack):
 
     fed = _TrackingFed()
     stack["svc"].attach_federation(fed)
-    # 4 MiB file with a 512 KiB chunk size → 8 chunks (well over the window).
-    (stack["media_dir"] / "big.bin").write_bytes(b"\0" * (4 * 1024 * 1024))
+    # A file of 8 chunks — well over the window.
+    (stack["media_dir"] / "big.bin").write_bytes(b"\0" * (8 * HTTPS_CHUNK_BYTES))
     await stack["svc"].enqueue_for_message(
         message_id="m1",
         media_url="api/media/big.bin",

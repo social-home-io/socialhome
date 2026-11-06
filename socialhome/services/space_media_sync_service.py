@@ -37,6 +37,7 @@ import aiofiles
 import aiofiles.os
 
 from ..domain.federation import FederationEventType
+from ..domain.media_chunking import split_into_chunks
 from ..repositories.space_media_outbox_repo import (
     AbstractSpaceMediaOutboxRepo,
     SpaceMediaOutboxEntry,
@@ -51,16 +52,6 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-#: Files ≤ this threshold ship as one chunk; above this they're
-#: split into :data:`MAX_BLOB_CHUNK_BYTES` chunks. Same value as
-#: :data:`socialhome.services.dm_media_sync_service.SINGLE_CHUNK_BYTES_THRESHOLD`
-#: — keeps the wire shape comparable.
-SINGLE_CHUNK_BYTES_THRESHOLD: int = 1024 * 1024
-#: 512 KiB chunks keep the federation envelope under the ~1 MiB
-#: per-event send budget (~700 KB after sig + base64 expansion) while
-#: halving the chunk count vs the old 256 KiB. Matches
-#: :data:`socialhome.services.dm_media_sync_service.MAX_BLOB_CHUNK_BYTES`.
-MAX_BLOB_CHUNK_BYTES: int = 512 * 1024
 #: Max chunks of one blob in flight at once (see DmMediaSyncService). Small
 #: so the RTC ~1 MiB send buffer can't be overrun — it just backpressures.
 PIPELINE_WINDOW: int = 4
@@ -275,7 +266,9 @@ class SpaceMediaSyncService:
                 target_instance_id=entry.target_instance_id,
             )
             try:
-                payloads = await self._build_blob_payloads(entry)
+                payloads = await self._build_blob_payloads(
+                    entry, fed.media_chunk_bytes(entry.target_instance_id)
+                )
             except Exception as exc:
                 log.warning(
                     "space-media-sync: build failed for %s → %s: %s",
@@ -366,6 +359,7 @@ class SpaceMediaSyncService:
     async def _build_blob_payloads(
         self,
         entry: SpaceMediaOutboxEntry,
+        chunk_bytes: int,
     ) -> list[tuple[dict, bytes]]:
         """Build ``SPACE_MEDIA_BLOB`` chunk(s) from a row.
 
@@ -376,9 +370,10 @@ class SpaceMediaSyncService:
         v_14+ peer, else re-attaches it as base64 ``bytes_b64`` on the
         JSON / ``SPACE_ROUTED`` fallback.
 
-        Single-chunk for files ≤ :data:`SINGLE_CHUNK_BYTES_THRESHOLD`;
-        multi-chunk otherwise. Each chunk carries ``chunk_index`` +
-        ``chunk_count`` + ``final`` so the receiver can assemble.
+        Chunks of at most ``chunk_bytes`` — sized for the target household
+        (:meth:`FederationService.media_chunk_bytes`): one chunk when the
+        file fits. Each carries ``chunk_index`` + ``chunk_count`` +
+        ``final`` so the receiver can assemble.
         """
         path = pathlib.Path(entry.bytes_path)
         if not await aiofiles.os.path.isfile(path):
@@ -401,30 +396,10 @@ class SpaceMediaSyncService:
             "filename": entry.blob_id,
             "file_size_bytes": size,
         }
-        if size <= SINGLE_CHUNK_BYTES_THRESHOLD:
-            return [
-                (
-                    {**common, "chunk_index": 0, "chunk_count": 1, "final": True},
-                    data,
-                )
-            ]
-        chunks: list[tuple[dict, bytes]] = []
-        total = (size + MAX_BLOB_CHUNK_BYTES - 1) // MAX_BLOB_CHUNK_BYTES
-        for i in range(total):
-            start = i * MAX_BLOB_CHUNK_BYTES
-            end = min(start + MAX_BLOB_CHUNK_BYTES, size)
-            chunks.append(
-                (
-                    {
-                        **common,
-                        "chunk_index": i,
-                        "chunk_count": total,
-                        "final": i == total - 1,
-                    },
-                    data[start:end],
-                )
-            )
-        return chunks
+        return [
+            ({**common, **seq}, raw)
+            for seq, raw in split_into_chunks(data, chunk_bytes)
+        ]
 
     async def _reschedule_or_fail(
         self,

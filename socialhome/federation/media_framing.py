@@ -68,7 +68,7 @@ SUPPORTED_MEDIA_AEAD_SUITES: frozenset[str] = frozenset(
 
 #: Upper bounds to cap allocation from a malicious/garbled peer. A
 #: federation envelope is a few KiB; a media chunk is bounded by the
-#: sender's ``MAX_BLOB_CHUNK_BYTES`` (512 KiB) plus GCM overhead. Keep
+#: sender's ``domain.media_chunking.HTTPS_CHUNK_BYTES`` (512 KiB) plus GCM overhead. Keep
 #: generous headroom but reject absurd declared lengths before
 #: allocating.
 MAX_HEADER_BYTES: int = 1 << 20  # 1 MiB

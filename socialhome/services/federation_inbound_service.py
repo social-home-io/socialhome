@@ -2118,6 +2118,14 @@ class FederationInboundService(ProtectionGateMixin):
                     media_basename(item.url),
                     media_basename(item.thumbnail_url),
                 }
+        if self._space_calendar_repo is not None:
+            # A space calendar event's cover.
+            found_event = await self._space_calendar_repo.get_event(correlation_id)
+            if found_event is not None:
+                event_space, event = found_event
+                return event_space == space_id and filename == media_basename(
+                    event.cover_url
+                )
         return True
 
     async def _assemble_space_chunk(

@@ -102,20 +102,35 @@ sequenceDiagram
 
 ## Chunking
 
-The federation transport (HTTPS inbox / RTC DataChannel) has a
-soft ~1 MiB per-event ceiling on the serialised JSON. A 200 MiB
-video would exceed that as a single base64-encoded payload, so
-``DM_MEDIA_BLOB`` is split:
+Every chunk must fit every transport tier that may carry it, and within
+that be as large as possible — few messages per file. The size is chosen
+**per receiving household** (`domain/media_chunking.py`,
+`FederationService.media_chunk_bytes`), for `DM_MEDIA_BLOB` and
+`SPACE_MEDIA_BLOB` alike:
 
-- Files **≤ `SINGLE_CHUNK_BYTES_THRESHOLD` (1 MiB raw)** ship as
-  one event with `chunk_count=1` and `final=true`. Typical phone
-  photos and short clips take this fast path — no chunking
-  overhead.
-- **Larger files** split into `ceil(size / MAX_BLOB_CHUNK_BYTES)`
-  chunks, where each chunk carries up to 256 KiB raw (≈ 360 KB
-  after base64 inflation, well under the per-event budget). Each
-  chunk carries its `chunk_index`, the shared `chunk_count`, and a
-  `final` flag set only on the last.
+- **WebRTC data channel** — a binary frame is limited by the channel's
+  negotiated message size: the *smaller* of both households'
+  `a=max-message-size`. A household advertises **1 MiB**
+  (`ADVERTISED_MAX_MESSAGE_BYTES`); libdatachannel's default, which an
+  older one keeps, is 256 KiB. Chunk = negotiated limit − 16 KiB frame
+  overhead, at most 512 KiB: **512 KiB** between two upgraded
+  households, **240 KiB** with an older one.
+- **HTTPS inbox** (no open channel) — the chunk is base64'ed into the
+  payload, then encrypted and base64'ed again (~1.8×), under the inbox's
+  1 MiB body cap: **512 KiB** (≈ 930 KB on the wire). Never more than
+  this on any tier, so a chunk built for the channel still fits the inbox
+  if the channel drops mid-transfer.
+
+A file that fits one chunk ships as one event with `chunk_count=1` and
+`final=true` — a typical photo is one message between upgraded
+households. A larger file splits into `ceil(size / chunk)` chunks, each
+with its `chunk_index`, the shared `chunk_count`, and `final` on the
+last; a 100 MB video is ~200. Receivers accept up to 4096 chunks
+(`MAX_MEDIA_CHUNKS`).
+
+Before 2026-11-06 the sizes were fixed (a 1 MiB single chunk, 512 KiB
+pieces): no binary frame fit a 256 KiB channel, and a 0.7–1 MiB file sent
+whole was refused by the inbox too (413), so it never arrived.
 
 **Receiver side**: each chunk writes to `<msg_id>.part<idx>` under
 the media root. When `final=true` arrives, the receiver

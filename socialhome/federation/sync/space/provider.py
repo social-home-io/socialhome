@@ -319,6 +319,7 @@ class SpaceSyncService:
         "_roster_authority",
         "_roster_sent",
         "_sig_suite",
+        "_space_calendar_repo",
         "_space_post_repo",
         "_watermarks",
         "_windows",
@@ -352,6 +353,7 @@ class SpaceSyncService:
         space_post_repo=None,
         gallery_repo=None,
         bazaar_repo=None,
+        space_calendar_repo=None,
         windows: SyncWindows | None = None,
         watermarks: SyncWatermarks | None = None,
         owner_statement_for: Callable[[str], Awaitable[dict | None]] | None = None,
@@ -384,6 +386,9 @@ class SpaceSyncService:
         self._space_post_repo = space_post_repo
         self._gallery_repo = gallery_repo
         self._bazaar_repo = bazaar_repo
+        #: Space calendar events — their cover files ride the catch-up
+        #: media too (the record carries only the reference).
+        self._space_calendar_repo = space_calendar_repo
         #: Set by :meth:`attach_federation` after the federation
         #: service is constructed (resolves the chicken/egg between
         #: ``FederationService`` and ``SpaceSyncService``). Required
@@ -876,7 +881,8 @@ class SpaceSyncService:
         space_id: str,
         target_instance_id: str,
     ) -> None:
-        """Enqueue media bytes for every post + gallery item in ``space_id``.
+        """Enqueue media bytes for every post, gallery item, bazaar listing
+        and calendar cover in ``space_id``.
 
         Repo reads catch :class:`sqlite3.Error` only — a renamed /
         missing repo method raises ``AttributeError`` (a logic bug),
@@ -961,6 +967,35 @@ class SpaceSyncService:
                     "sync-catchup-media: list bazaar listings failed for space=%s",
                     space_id,
                 )
+
+        # Calendar covers — every event the ``calendar`` resource streamed
+        # (the full record set; nothing prunes events).
+        if self._space_calendar_repo is not None:
+            try:
+                async for events in self._calendar_pages(space_id):
+                    for event in events:
+                        if event.cover_url:
+                            await self._enqueue_media(
+                                space_id,
+                                target_instance_id,
+                                event.id,
+                                [event.cover_url],
+                            )
+            except sqlite3.Error:
+                log.exception(
+                    "sync-catchup-media: list calendar events failed for space=%s",
+                    space_id,
+                )
+
+    def _calendar_pages(self, space_id: str):
+        repo = self._space_calendar_repo
+
+        async def fetch(cursor: int | None):
+            return await repo.list_events_sync_page(
+                space_id, cursor=cursor, limit=SYNC_PAGE_SIZE
+            )
+
+        return iter_pages(fetch)
 
     def _gallery_item_pages(self, space_id: str):
         repo = self._gallery_repo

@@ -9096,6 +9096,19 @@ def cmd_calendar() -> None:
     #    through ``SPACE_CALENDAR_EVENT_CREATED`` to Alpha and Carol.
     start = "2027-01-15T18:00:00+00:00"
     end = "2027-01-15T20:00:00+00:00"
+    # A cover picture: only its ``api/media/…`` reference rides the event,
+    # the FILE follows over the space media outbox (SPACE_MEDIA_BLOB) —
+    # ``verify`` fetches it on Alpha and Carol. A noisy 1200x800 PNG
+    # (~500 KiB as WebP) so the bytes are a real picture's size.
+    s, up = _upload_file(
+        f"http://127.0.0.1:{b['port']}/api/media/upload",
+        token=b["token"],
+        filename="cover.png",
+        content=_make_noisy_png(1200, 800),
+        content_type="image/png",
+    )
+    _must("calendar cover upload(b)", s, up, ok=(200, 201))
+    state["calendar_cover_url"] = str(up["url"])
     s, ev = _request(
         f"http://127.0.0.1:{b['port']}/api/spaces/{space_id}/calendar/events",
         token=b["token"],
@@ -9106,6 +9119,7 @@ def cmd_calendar() -> None:
             "end": end,
             "description": "Bring snacks.",
             "tz": "Europe/Berlin",
+            "cover_url": state["calendar_cover_url"],
         },
     )
     _must("calendar create(b)", s, ev, ok=(201,))
@@ -10582,6 +10596,36 @@ def cmd_verify() -> None:
                     f"SPACE_CALENDAR_EVENT_CREATED did not land",
                 )
                 continue
+            # The cover FILE reached this household — not only the event's
+            # reference to it (which 404s without the bytes).
+            want_cover = state.get("calendar_cover_url")
+            if want_cover:
+                s_b, cover_b = _http_get_bytes(
+                    f"http://127.0.0.1:{state['instances']['b']['port']}/{want_cover}",
+                    token=state["instances"]["b"]["token"],
+                )
+                got_cover = b""
+                s_g = 0
+                for _ in range(20):
+                    s_g, got_cover = _http_get_bytes(
+                        f"http://127.0.0.1:{guest['port']}/{want_cover}",
+                        token=guest["token"],
+                    )
+                    if s_g == 200:
+                        break
+                    time.sleep(1)
+                if s_b != 200 or s_g != 200 or got_cover != cover_b:
+                    failures.append(
+                        f"{guest_label}: the event's cover {want_cover} did not "
+                        f"arrive (b={s_b}, {guest_label}={s_g}, "
+                        f"{len(got_cover)} of {len(cover_b)} bytes) — "
+                        f"SPACE_MEDIA_BLOB for the calendar cover"
+                    )
+                else:
+                    print(
+                        f"  {guest_label} has the event's cover "
+                        f"({len(got_cover)} bytes, identical) ✓"
+                    )
             tz = mirror.get("tz")
             if tz != "Europe/Berlin":
                 failures.append(

@@ -224,6 +224,46 @@ async def test_a_posts_media_goes_to_the_targets_only():
     assert len(media.calls) == 1  # a sticky has no media
 
 
+async def test_a_held_calendar_events_cover_goes_to_the_reviewers():
+    """A held event (or an edit setting a new cover) brings its cover file
+    to the reviewer households — the host shows it in the queue, and once
+    approved its own calendar save sends it on to every member."""
+    media = _Media()
+    out, _ = _fed(media=media)
+    create = _item(
+        "calendar",
+        {"entity": "event", "target_id": None, "cover_url": "api/media/c.webp"},
+    )
+    await out.send_submitted(SPACE, create, ["host"])
+    edit = _item(
+        "calendar",
+        {
+            "entity": "event",
+            "target_id": "ev-1",
+            "patch": {"cover_url": "api/media/d.webp"},
+        },
+    )
+    await out.send_submitted(SPACE, edit, ["host"])
+    assert [c["media_urls"] for c in media.calls] == [
+        ["api/media/c.webp"],
+        ["api/media/d.webp"],
+    ]
+    assert [c["post_id"] for c in media.calls] == ["item-1", "ev-1"]
+    # An event with no cover, and an edit leaving it alone, send no file.
+    await out.send_submitted(
+        SPACE, _item("calendar", {"entity": "event", "summary": "x"}), ["host"]
+    )
+    await out.send_submitted(
+        SPACE,
+        _item(
+            "calendar",
+            {"entity": "event", "target_id": "ev-1", "patch": {"summary": "y"}},
+        ),
+        ["host"],
+    )
+    assert len(media.calls) == 2
+
+
 async def test_a_decision_reaches_the_reviewers_and_the_submitters_household():
     out, fed = _fed(
         own="house-mod", versions={"host": 43, "house-a": 43, "house-adm": 43}

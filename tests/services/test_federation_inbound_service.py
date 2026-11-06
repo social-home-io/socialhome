@@ -18,6 +18,7 @@ from socialhome.crypto import (
     ed25519_public_key,
     generate_space_keypair,
 )
+from socialhome.domain.calendar import CalendarEvent
 from socialhome.domain.events import (
     CommentAdded,
     CommentUpdated,
@@ -51,6 +52,7 @@ from socialhome.repositories import (
     SqliteSpaceRepo,
     SqliteUserRepo,
 )
+from socialhome.repositories.calendar_repo import SqliteSpaceCalendarRepo
 from socialhome.repositories.dm_routing_repo import SqliteDmRoutingRepo
 from socialhome.repositories.space_cover_repo import SqliteSpaceCoverRepo
 from socialhome.repositories.space_icon_repo import SqliteSpaceIconRepo
@@ -2387,6 +2389,45 @@ async def test_space_media_blob_writes_bytes_to_local_media_dir(
         )
     )
     assert (tmp_path / "abc123.webp").read_bytes() == body
+
+
+async def test_a_calendar_cover_blob_is_checked_against_its_event(db, bus, tmp_path):
+    """A blob correlated to a space calendar event lands only when the
+    event lives in that space and names that file as its cover."""
+    cal = SqliteSpaceCalendarRepo(db)
+    start = datetime(2026, 12, 1, 18, tzinfo=UTC)
+    await cal.save_event(
+        CalendarEvent(
+            id="ev-cover",
+            calendar_id="sp-a",
+            summary="Picnic",
+            start=start,
+            end=start + timedelta(hours=1),
+            created_by="uid-a",
+            cover_url="api/media/cover123.webp",
+        ),
+        space_id="sp-a",
+    )
+    service = FederationInboundService(
+        bus=bus,
+        conversation_repo=SqliteConversationRepo(db),
+        space_post_repo=SqliteSpacePostRepo(db),
+        space_repo=SqliteSpaceRepo(db),
+        user_repo=SqliteUserRepo(db),
+        media_dir=tmp_path,
+        space_calendar_repo=cal,
+    )
+
+    async def ok(space_id: str, filename: str) -> bool:
+        return await service._space_media_in_scope(
+            space_id=space_id, correlation_id="ev-cover", filename=filename
+        )
+
+    assert await ok("sp-a", "cover123.webp")
+    # Another file under the event's id, or the event's file pushed into
+    # another space, is refused.
+    assert not await ok("sp-a", "other.webp")
+    assert not await ok("sp-b", "cover123.webp")
 
 
 async def test_space_media_blob_prefers_raw_media_bytes(db, bus, tmp_path):
