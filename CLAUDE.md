@@ -225,6 +225,16 @@ Rules that keep this working:
   guards the "Session expired" toast on `token.value !== null` — never toast
   for an ingress probe that 401'd. The App shell renders `IngressAuthFailed`
   instead (a reload-the-sidebar CTA, not a password form).
+- **File inputs never hard-code `multiple`** — use
+  `multiple={fileInputMultiple()}` (`client/src/utils/filePicker.ts`).
+  The HA Android app before 2026.11.1 drops a multi-pick (on Samsung
+  even a single photo) — "pick photos → nothing happens", no `change`,
+  no error (home-assistant/android#7548). It shipped twice (#467, then
+  the gallery in #1275). Guards: `utils/filePicker.test.ts` (source
+  scan) and the `ha-android-app-picker` harness check, which taps the
+  real button through the file chooser. A new upload surface also gets
+  a harness check that goes through the button + chooser, not
+  `uploadFile()` on the input, which skips the path phones take.
 - **Tests cover the ingress shape:** `client/src/baseUrl.test.ts` (path
   helpers) and `IngressLocationProvider.test.tsx` (router). New URL surfaces
   (redirect, fetch target, icon/manifest ref) extend these — the test names

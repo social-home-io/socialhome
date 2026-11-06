@@ -19,6 +19,7 @@ import { isOne, t } from '@/i18n/i18n'
 import { showToast } from './Toast'
 import { uploadWithProgress, UploadProgressBar } from './UploadProgress'
 import { describeUploadError } from '@/utils/uploadErrors'
+import { fileInputMultiple } from '@/utils/filePicker'
 import type { BazaarMode, Space } from '@/types'
 
 const ZERO_DECIMAL_CURRENCIES: ReadonlySet<string> =
@@ -269,7 +270,7 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
                   <span>{t('composer.add_photo')}</span>
                 </button>
               )}
-              <input ref={fileRef} type="file" accept="image/*" multiple
+              <input ref={fileRef} type="file" accept="image/*" multiple={fileInputMultiple()}
                      class="sr-only"
                      onChange={onFilesPicked} />
             </div>

@@ -607,6 +607,56 @@ await check('media-load-and-upload', async () => {
   }
 })
 
+// 5a. The HA Android app before 2026.11.1 drops a multi-file pick
+//     (home-assistant/android#7548): with ``multiple`` on the input the
+//     photos never reach the page — "pick photos → nothing happens"
+//     (#467, again after #1275). Posing as that app, the real "+ Upload"
+//     tap opens a single-file chooser and the photo goes up; as the fixed
+//     app, the chooser takes many. No file input anywhere is multi-pick.
+await check('ha-android-app-picker', async () => {
+  const problems = []
+  const base = 'Mozilla/5.0 (Linux; Android 16; SM-S931B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36'
+  const result = {}
+  for (const [version, wantMultiple] of [['2026.10.1-full', false], ['2026.11.1-full', true]]) {
+    const { ctx, page: m } = await newPage('mobile')
+    try {
+      await m.setUserAgent(`${base} Home Assistant/${version} (Android 16; SM-S931B)`)
+      await m.goto(APP + 'gallery', { waitUntil: 'load' })
+      await settled(m)
+      await step('the gallery "+ Upload" button', m.waitForFunction(() => [...document.querySelectorAll('button')].some(b => b.textContent.trim() === '+ Upload')))
+      const [chooser] = await Promise.all([
+        m.waitForFileChooser(),
+        m.evaluate(() => [...document.querySelectorAll('button')].find(b => b.textContent.trim() === '+ Upload').click()),
+      ])
+      if (chooser.isMultiple() !== wantMultiple) problems.push(`HA app ${version}: gallery chooser multiple=${chooser.isMultiple()}, want ${wantMultiple}`)
+      const file = path.join(OUT, `upload-ha-${version}.png`)
+      fs.writeFileSync(file, PNG)
+      const [resp] = await Promise.all([
+        m.waitForResponse(r => r.request().method() === 'POST' && /api\/gallery\/albums\/[^/]+\/items$/.test(new URL(r.url()).pathname)),
+        chooser.accept([file]),
+      ])
+      if (resp.status() >= 300) problems.push(`HA app ${version}: gallery upload → ${resp.status()}`)
+      await step('the upload sheet to open', m.waitForSelector('#sh-upload-sheet-title'))
+      if (!wantMultiple) {
+        await m.screenshot({ path: path.join(SHOTS, 'ha-android-app-gallery-upload.png') })
+        // The Highlights composer's pickers (the drop zone and the "+"
+        // tile) are single-pick too. (Bazaar's sits in a closed dialog;
+        // the vitest guard in utils/filePicker.test.ts covers the source.)
+        await m.goto(APP + 'highlights/new', { waitUntil: 'load' })
+        await settled(m)
+        await step('a Highlights composer file input', m.waitForSelector('input[type=file]'))
+        const multi = await m.$$eval('input[type=file]', is => is.filter(i => i.multiple).length)
+        if (multi > 0) problems.push(`HA app ${version}: /highlights/new has ${multi} multi-pick file input(s)`)
+      }
+      result[version] = { chooserMultiple: chooser.isMultiple(), upload: resp.status() }
+    } finally {
+      await ctx.close()
+      activePage = page
+    }
+  }
+  return { problems, ...result }
+})
+
 // 5b. Every album and photo has its own address: the album card and a
 //     tile are links under the prefix, the viewer's address survives a
 //     reload, Esc / Back step out again — never outside the prefix.

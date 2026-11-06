@@ -10,6 +10,7 @@ import { Button } from '@/components/Button'
 import { showToast } from '@/components/Toast'
 import { addFiles, type UploadTarget } from './uploadQueue'
 import { ACCEPT, dragHasFiles, filesFromDrop } from './uploadFiles'
+import { fileInputMultiple } from '@/utils/filePicker'
 
 export interface UploadControls {
   /** Open the file picker. */
@@ -87,6 +88,12 @@ export function useUploadControls(into: UploadTarget | null, enabled: boolean): 
     const files = Array.from(input.files ?? [])
     // Reset so picking the same file again still fires ``change``.
     input.value = ''
+    // A picker that closes with no file (a WebView that dropped the
+    // result) says so: silence reads as "upload is broken".
+    if (files.length === 0) {
+      showToast(t('composer.drop.picker_empty'), 'error')
+      return
+    }
     take(files, camera)
   }
 
@@ -104,7 +111,7 @@ export function useUploadControls(into: UploadTarget | null, enabled: boolean): 
           ref={pickRef}
           type="file"
           accept={ACCEPT}
-          multiple
+          multiple={fileInputMultiple()}
           class="sr-only"
           tabIndex={-1}
           aria-hidden="true"

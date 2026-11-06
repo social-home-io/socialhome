@@ -63,6 +63,30 @@ describe('useUploadControls', () => {
     expect(view.getByTestId('cam').textContent).toBe('false')
   })
 
+  it('a picker that returns nothing says so instead of staying silent', () => {
+    const view = render(<Harness />)
+    const pick = view.container.querySelector('[data-testid=gallery-upload-input]') as HTMLInputElement
+    Object.defineProperty(pick, 'files', { value: [], configurable: true })
+    fireEvent.change(pick)
+    expect(addFiles).not.toHaveBeenCalled()
+    expect(showToast).toHaveBeenCalledWith(
+      "The file picker didn't return anything. Try again, or drag the file in.", 'error',
+    )
+  })
+
+  it('the picker picks one photo at a time in the HA Android app before 2026.11.1', () => {
+    const ua = vi.spyOn(navigator, 'userAgent', 'get').mockReturnValue(
+      'Mozilla/5.0 (Linux; Android 16; SM-S931B) Chrome/141.0 Mobile Safari/537.36 Home Assistant/2026.10.1-full (Android 16; SM-S931B)',
+    )
+    try {
+      const view = render(<Harness />)
+      const pick = view.container.querySelector('[data-testid=gallery-upload-input]') as HTMLInputElement
+      expect(pick.multiple).toBe(false)
+    } finally {
+      ua.mockRestore()
+    }
+  })
+
   it('a camera shot is remembered ("Take another")', () => {
     const view = render(<Harness />)
     const cam = view.container.querySelector('[data-testid=gallery-camera-input]') as HTMLInputElement
