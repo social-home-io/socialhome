@@ -77,16 +77,36 @@ async def test_fs_blob_files_concurrent_writes_of_one_blob_stay_whole(tmp_path):
     assert [p.name for p in tmp_path.iterdir()] == [bid]
 
 
-async def test_fs_blob_files_scan_lists_names_and_mtimes(tmp_path):
+async def test_fs_blob_files_scan_walks_names_in_order_after_a_cursor(tmp_path):
+    """The orphan sweep walks the whole directory a batch at a time: names
+    in order, after the cursor it left off at — whatever the directory's
+    size."""
     files = bs.FsBlobFiles(tmp_path / "x")
-    assert await files.scan(limit=10) == []
+    assert await files.scan(after="", limit=10) == []
+    d = tmp_path / "x"
+    d.mkdir()
+    names = [f"{i:064x}" for i in range(7)] + [".a.part"]
+    for n in names:
+        (d / n).write_bytes(b"x")
+    first = await files.scan(after="", limit=3)
+    assert [n for n, _ in first] == sorted(names)[:3]
+    assert all(isinstance(m, float) for _, m in first)
+    second = await files.scan(after=first[-1][0], limit=3)
+    assert [n for n, _ in second] == sorted(names)[3:6]
+    rest = await files.scan(after=second[-1][0], limit=3)
+    assert [n for n, _ in rest] == sorted(names)[6:]
+
+
+async def test_fs_blob_files_stat_and_exists(tmp_path):
+    files = bs.FsBlobFiles(tmp_path / "x")
     data = _padded()
-    await files.write(blob_id_of(data), data)
-    (tmp_path / "x" / ".stale.part").write_bytes(b"x")
-    got = await files.scan(limit=10)
-    assert sorted(name for name, _ in got) == [".stale.part", blob_id_of(data)]
-    assert all(isinstance(mtime, float) for _, mtime in got)
-    assert len(await files.scan(limit=1)) == 1
+    bid = blob_id_of(data)
+    assert await files.stat(bid) is None
+    assert await files.exists(bid) is False
+    await files.write(bid, data)
+    assert isinstance(await files.stat(bid), float)
+    assert await files.exists(bid) is True
     # A temporary file is removed by name like a blob.
+    (tmp_path / "x" / ".stale.part").write_bytes(b"x")
     await files.remove(".stale.part")
-    assert [n for n, _ in await files.scan(limit=10)] == [blob_id_of(data)]
+    assert await files.stat(".stale.part") is None

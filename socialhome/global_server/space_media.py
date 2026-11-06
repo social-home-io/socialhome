@@ -44,11 +44,19 @@ A fetch marks the blob at most once an hour (:data:`FETCH_TOUCH_INTERVAL_S`)
 as a fetch, so a new blob is not the first to go.
 
 Every node of a cluster shares the data dir and the database, so whichever
-node took an upload, any node serves it. The caps are checked per upload
-against the shared rows (the total is a trigger-kept row, not a scan), so
-concurrent uploads on several nodes may briefly hold the total above
-``max_bytes`` by up to a few in-flight blobs (each ≤ the largest blob); the
-next upload or eviction brings it back under. The bytes go through
+node took an upload, any node serves it. The upload rate is reserved
+atomically in the shared database before any work (and refunded when the
+upload fails), so it holds exactly across nodes. Making room, writing and
+recording run one at a time per node (an :class:`asyncio.Lock`), so on one
+node the byte caps hold exactly; across a cluster the total (or a scope's
+bytes) may exceed its cap by the uploads other nodes have in flight — at
+most (nodes − 1) × the largest blob — until the next upload's room making
+brings it back under. Races with another node's delete or eviction are
+safe: a blob row goes only while no claim holds it, its file only when the
+row went; a claim onto a blob dropped meanwhile stores the bytes again, and
+a row whose file went missing gets it back from the next upload of the same
+bytes. The orphan-file sweep runs on one node at a time (a lease row) and
+walks the shared directory a batch at a time. The bytes go through
 :class:`.blob_store.BlobFiles` (files under ``media_dir/spaces`` today), so
 an object store can replace the filesystem without touching this class.
 
@@ -59,7 +67,9 @@ the shared database.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import math
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -89,9 +99,15 @@ PRUNE_MAX_BATCHES: int = 20
 #: sweep only once it is this old — an upload may still be writing it.
 ORPHAN_GRACE_S: int = 600
 
-#: Files looked at per sweep, and blob ids per row lookup.
-ORPHAN_SCAN_MAX: int = 200_000
+#: Directory entries the orphan sweep looks at per run (it resumes where
+#: the last run stopped, so the whole directory is walked over successive
+#: runs), and blob ids per row lookup.
+ORPHAN_SCAN_BATCH: int = 100_000
 _ORPHAN_LOOKUP_BATCH: int = 500
+
+#: The orphan sweep's lease: one node of a cluster scans the shared data
+#: dir, renewing each hourly run; another takes over when it lapses.
+ORPHAN_LEASE_S: int = 3000
 
 #: The upload rate window (a sliding hour over hourly buckets).
 _HOUR: int = 3600
@@ -155,20 +171,31 @@ class _Counters:
 
 class GfsSpaceMediaStore:
     """Encrypted space blobs: bytes through :class:`BlobFiles`, metadata in
-    ``gfs_space_media`` + ``gfs_space_media_claims``."""
+    ``gfs_space_media`` + ``gfs_space_media_claims``.
 
-    __slots__ = ("_counters", "_files", "_limits", "_repo")
+    One upload at a time per node makes room, writes and records (an
+    :class:`asyncio.Lock`), after an atomic rate slot is reserved in the
+    shared database — so on one node the caps hold exactly, and on a cluster
+    the total may exceed them only by the uploads other nodes have in
+    flight: at most (nodes − 1) × the largest blob."""
+
+    __slots__ = ("_counters", "_files", "_limits", "_lock", "_node_id", "_repo")
 
     def __init__(
         self,
         repo: AbstractGfsSpaceMediaRepo,
         files: BlobFiles,
         limits: SpaceMediaLimits,
+        *,
+        node_id: str = "gfs",
     ) -> None:
         self._repo = repo
         self._files = files
         self._limits = limits
         self._counters = _Counters()
+        self._lock = asyncio.Lock()
+        #: Who holds the orphan sweep lease (``[cluster] node_id``).
+        self._node_id = node_id
 
     @property
     def limits(self) -> SpaceMediaLimits:
@@ -208,51 +235,26 @@ class GfsSpaceMediaStore:
             raise MediaRefused(422, "bad_scope")
         now = int(time.time()) if now is None else now
         check_shape(blob_id, data)
-        size = len(data)
-        self.admit_size(size)
+        self.admit_size(len(data))
         if expires_at <= now:
             raise MediaRefused(422, "bad_expiry")
         expires_at = min(expires_at, now + self._limits.ttl_s)
-        await check_address(blob_id, data)
-        held = await self._repo.get_blob(blob_id)
-        if held is not None and held.expires_at <= now:
-            # Expired but not swept yet: start over.
-            await self._drop([held.blob_id])
-            held = None
-        if held is not None and any(
-            c.scope_kind == scope_kind and c.scope_id == scope_id and c.expires_at > now
-            for c in await self._repo.claims_of(blob_id)
-        ):
+        if await self._holds(blob_id, scope_kind, scope_id, now):
             # This scope already holds it: a no-op, and no fresher expiry.
             return False
-        await self._require_rate(scope_kind, scope_id, now)
-        await self._make_room_in_scope(scope_kind, scope_id, size, now)
-        stored = False
-        if held is None:
-            await self._make_room(size, now)
-            await self._files.write(blob_id, data)
-            # ``False`` when another node inserted it meanwhile: same bytes,
-            # so ours is the coalesced answer and only the claim is new.
-            stored = await self._repo.add_blob(
-                GfsSpaceMedia(
-                    blob_id=blob_id,
-                    size=size,
-                    created_at=now,
-                    expires_at=expires_at,
-                    last_fetched_at=now,
+        bucket = now // _HOUR
+        await self._reserve_slot(scope_kind, scope_id, bucket, now)
+        try:
+            await check_address(blob_id, data)
+            async with self._lock:
+                stored, used = await self._store(
+                    scope_kind, scope_id, blob_id, data, expires_at, now
                 )
-            )
-        await self._repo.put_claim(
-            GfsSpaceMediaClaim(
-                blob_id=blob_id,
-                scope_kind=scope_kind,
-                scope_id=scope_id,
-                size=size,
-                created_at=now,
-                expires_at=expires_at,
-            )
-        )
-        await self._repo.count_upload(scope_kind, scope_id, bucket=now // _HOUR)
+        except BaseException:
+            await self._repo.refund_upload(scope_kind, scope_id, bucket=bucket)
+            raise
+        if not used:
+            await self._repo.refund_upload(scope_kind, scope_id, bucket=bucket)
         return stored
 
     async def read(self, blob_id: str, *, now: int | None = None) -> bytes | None:
@@ -278,58 +280,83 @@ class GfsSpaceMediaStore:
         file go only when no other scope still claims it."""
         if not is_blob_id(blob_id):
             return False
-        if not await self._repo.delete_claim(
-            blob_id, scope_kind=scope_kind, scope_id=scope_id
-        ):
-            return False
-        await self._settle(blob_id)
+        async with self._lock:
+            if not await self._repo.delete_claim(
+                blob_id, scope_kind=scope_kind, scope_id=scope_id
+            ):
+                return False
+            await self._settle(blob_id)
         return True
 
     async def prune_expired(self, now: int | None = None) -> int:
-        """Drop expired blobs (rows, claims, files) and expired claims of
-        blobs another claim keeps. Returns the blobs dropped."""
+        """Drop expired blobs (rows, claims, files), expired claims of blobs
+        another claim keeps, and claims whose blob is gone. Returns the
+        blobs dropped."""
         now = int(time.time()) if now is None else now
         dropped = 0
-        for _ in range(PRUNE_MAX_BATCHES):
-            ids = [m.blob_id for m in await self._repo.expired(now, limit=PRUNE_BATCH)]
-            await self._drop(ids)
-            dropped += len(ids)
-            if len(ids) < PRUNE_BATCH:
-                break
-        await self._repo.prune_expired_claims(now)
+        async with self._lock:
+            for _ in range(PRUNE_MAX_BATCHES):
+                ids = [
+                    m.blob_id for m in await self._repo.expired(now, limit=PRUNE_BATCH)
+                ]
+                await self._drop(ids)
+                dropped += len(ids)
+                if len(ids) < PRUNE_BATCH:
+                    break
+            await self._repo.prune_expired_claims(now)
+            await self._repo.prune_orphan_claims()
         return dropped
 
     async def sweep_orphans(self, *, now: float | None = None) -> int:
-        """Remove files with no row, and stale temporary files, older than
-        :data:`ORPHAN_GRACE_S` (an upload may still be writing a younger
-        one). Returns the files removed."""
+        """Remove, from the next batch of the directory in name order (the
+        cursor persists, and wraps at the end — so successive sweeps walk
+        the whole directory however large), files with no row and stale
+        temporary files older than :data:`ORPHAN_GRACE_S`. Each is stat'ed
+        and looked up again right before it goes, so a file an upload
+        rewrote meanwhile is kept. Returns the files removed."""
         now = time.time() if now is None else now
         cutoff = now - ORPHAN_GRACE_S
-        old = [
-            (n, m)
-            for n, m in await self._files.scan(limit=ORPHAN_SCAN_MAX)
-            if m < cutoff
-        ]
-        doomed = [n for n, _ in old if n.startswith(".") and n.endswith(".part")]
-        blobs = [n for n, _ in old if is_blob_id(n)]
+        cursor = await self._repo.sweep_cursor()
+        batch = await self._files.scan(after=cursor, limit=ORPHAN_SCAN_BATCH)
+        await self._repo.set_sweep_cursor(
+            batch[-1][0] if len(batch) >= ORPHAN_SCAN_BATCH else ""
+        )
+        old = [(n, m) for n, m in batch if m < cutoff]
+        parts = [(n, m) for n, m in old if n.startswith(".") and n.endswith(".part")]
+        blobs = [(n, m) for n, m in old if is_blob_id(n)]
+        removed = 0
         for i in range(0, len(blobs), _ORPHAN_LOOKUP_BATCH):
             chunk = blobs[i : i + _ORPHAN_LOOKUP_BATCH]
-            known = await self._repo.known_blob_ids(chunk)
-            doomed.extend(n for n in chunk if n not in known)
-        for name in doomed:
-            await self._files.remove(name)
-        if doomed:
-            log.info("space media: removed %d orphan file(s)", len(doomed))
-        return len(doomed)
+            known = await self._repo.known_blob_ids([n for n, _ in chunk])
+            for name, mtime in chunk:
+                if (
+                    name not in known
+                    and await self._unchanged(name, mtime, cutoff)
+                    # …and still no row, right before the unlink.
+                    and not await self._repo.known_blob_ids([name])
+                ):
+                    await self._files.remove(name)
+                    removed += 1
+        for name, mtime in parts:
+            if await self._unchanged(name, mtime, cutoff):
+                await self._files.remove(name)
+                removed += 1
+        if removed:
+            log.info("space media: removed %d orphan file(s)", removed)
+        return removed
 
     async def sweep(self, now: int | None = None) -> int:
         """The maintenance sweep: expired blobs and claims, upload counts
-        older than the rate window, orphan files. Returns the expired blobs
-        dropped."""
+        older than the rate window — on every node, it is all in the shared
+        database — and, on the ONE node holding the sweep lease, a batch of
+        the orphan-file scan. Returns the expired blobs dropped."""
         now = int(time.time()) if now is None else now
         dropped = await self.prune_expired(now)
         await self._repo.prune_upload_counts(before_bucket=now // _HOUR - 1)
-        await self.sweep_orphans()
+        if await self._repo.acquire_sweep_lease(
+            self._node_id, now=now, ttl=ORPHAN_LEASE_S
+        ):
+            await self.sweep_orphans()
         return dropped
 
     async def stats(self) -> dict[str, int | bool]:
@@ -349,18 +376,99 @@ class GfsSpaceMediaStore:
             "refused_too_large": c.refused_too_large,
         }
 
-    async def _require_rate(self, scope_kind: str, scope_id: str, now: int) -> None:
-        """At most ``space_uploads_per_hour`` accepted uploads in the sliding
-        hour: this hour's count plus the last hour's, weighted by how much of
-        it still overlaps the window."""
-        bucket = now // _HOUR
-        current, previous = await self._repo.upload_counts(
+    # ── Internals ─────────────────────────────────────────────────────────
+
+    async def _holds(
+        self, blob_id: str, scope_kind: str, scope_id: str, now: int
+    ) -> bool:
+        """Whether the scope already holds a live claim on a live blob."""
+        held = await self._repo.get_blob(blob_id)
+        if held is None or held.expires_at <= now:
+            return False
+        return any(
+            c.scope_kind == scope_kind and c.scope_id == scope_id and c.expires_at > now
+            for c in await self._repo.claims_of(blob_id)
+        )
+
+    async def _reserve_slot(
+        self, scope_kind: str, scope_id: str, bucket: int, now: int
+    ) -> None:
+        """Take one of ``space_uploads_per_hour`` in the sliding hour —
+        atomically in the shared database (an upsert that only counts while
+        under the cap), so concurrent uploads on any node can't all pass.
+        The last hour weighs by how much of it still overlaps the window."""
+        _, previous = await self._repo.upload_counts(
             scope_kind, scope_id, bucket=bucket
         )
         overlap = 1.0 - (now % _HOUR) / _HOUR
-        if current + previous * overlap + 1 > self._limits.space_uploads_per_hour:
+        cap = math.floor(self._limits.space_uploads_per_hour - previous * overlap)
+        if not await self._repo.reserve_upload(
+            scope_kind, scope_id, bucket=bucket, cap=cap
+        ):
             self._counters.refused_quota += 1
             raise MediaRefused(429, "space_media_quota")
+
+    async def _store(
+        self,
+        scope_kind: str,
+        scope_id: str,
+        blob_id: str,
+        data: bytes,
+        expires_at: int,
+        now: int,
+    ) -> tuple[bool, bool]:
+        """Under the node's lock: make room, then claim (and store, when the
+        bytes aren't here). Returns ``(stored, used the rate slot)``."""
+        size = len(data)
+        held = await self._repo.get_blob(blob_id)
+        if held is not None and held.expires_at <= now:
+            # Expired but not swept yet: start over.
+            await self._drop([held.blob_id])
+            held = None
+        if held is not None and any(
+            c.scope_kind == scope_kind and c.scope_id == scope_id and c.expires_at > now
+            for c in await self._repo.claims_of(blob_id)
+        ):
+            # A concurrent upload of this scope got here first.
+            return False, False
+        await self._make_room_in_scope(scope_kind, scope_id, size, now)
+        claim = GfsSpaceMediaClaim(
+            blob_id=blob_id,
+            scope_kind=scope_kind,
+            scope_id=scope_id,
+            size=size,
+            created_at=now,
+            expires_at=expires_at,
+        )
+        if held is not None:
+            if not await self._files.exists(blob_id):
+                # The row outlived its file (a crash or a race mid-drop): the
+                # bytes are here, put them back.
+                await self._files.write(blob_id, data)
+            if await self._repo.put_claim(claim):
+                return False, True
+            # The row went between our read and our claim (dropped on another
+            # node): store the bytes we have rather than claim nothing.
+        await self._make_room(size, now)
+        await self._files.write(blob_id, data)
+        stored = await self._repo.add_blob(
+            GfsSpaceMedia(
+                blob_id=blob_id,
+                size=size,
+                created_at=now,
+                expires_at=expires_at,
+                last_fetched_at=now,
+            )
+        )
+        # ``False`` when another node inserted it meanwhile: same bytes, so
+        # ours is the coalesced answer and only the claim is new.
+        await self._repo.put_claim(claim)
+        return stored, True
+
+    async def _unchanged(self, name: str, mtime: float, cutoff: float) -> bool:
+        """The file still has the mtime it was listed with, and it is old."""
+        current = await self._files.stat(name)
+        return current is not None and current == mtime and current < cutoff
 
     async def _make_room_in_scope(
         self, scope_kind: str, scope_id: str, size: int, now: int
@@ -410,19 +518,23 @@ class GfsSpaceMediaStore:
             await self._drop(victims)
 
     async def _settle(self, blob_id: str) -> None:
-        """After a claim went: the blob's expiry follows its other claims,
-        or the blob goes with its last one."""
-        if await self._repo.settle_blob(blob_id) is None:
-            await self._drop([blob_id])
+        """After a claim went: the blob's expiry follows its other claims, or
+        the blob goes — the row only while no claim holds it (one statement,
+        so a claim another node adds meanwhile keeps it), the file only when
+        that row went."""
+        if await self._repo.settle_blob(blob_id) is not None:
+            return
+        if await self._repo.delete_blob_if_unclaimed(blob_id):
+            await self._files.remove(blob_id)
 
     def _count_eviction(self, size: int) -> None:
         self._counters.evicted_blobs += 1
         self._counters.evicted_bytes += size
 
     async def _drop(self, blob_ids: list[str]) -> None:
-        """Files first, then rows: a crash in between leaves a row whose
-        file is gone (a miss, swept at expiry); a file whose row is gone is
-        the orphan sweep's."""
+        """Rows (and their claims) first, then files: a crash in between
+        leaves a file with no row — the orphan sweep's — never a row whose
+        file is gone."""
+        await self._repo.delete_blobs(blob_ids)
         for blob_id in blob_ids:
             await self._files.remove(blob_id)
-        await self._repo.delete_blobs(blob_ids)

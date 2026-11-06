@@ -104,3 +104,11 @@ def test_the_hot_reads_use_their_indexes(conn):
     assert "idx_gfs_space_media_uploads_bucket" in _plan(
         conn, "DELETE FROM gfs_space_media_uploads WHERE hour_bucket < 5"
     )
+
+
+def test_one_sweep_lease_row(conn):
+    assert conn.execute(
+        "SELECT holder, lease_until, cursor FROM gfs_space_media_sweep"
+    ).fetchall() == [("", 0, "")]
+    with pytest.raises(sqlite3.IntegrityError):
+        conn.execute("INSERT INTO gfs_space_media_sweep(id) VALUES(2)")

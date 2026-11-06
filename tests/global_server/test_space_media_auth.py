@@ -19,7 +19,12 @@ from socialhome.authority_sig import (
     AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
     sign_authority_event,
 )
-from socialhome.crypto import b64url_encode, ed25519_public_key, sign_ed25519
+from socialhome.crypto import (
+    b64url_encode,
+    counting_ed25519_verifies,
+    ed25519_public_key,
+    sign_ed25519,
+)
 from socialhome.domain.gfs_space_media import (
     AUTH_AUTHORITY,
     AUTH_CHANNEL,
@@ -38,7 +43,6 @@ from socialhome.gfs_channel import (
     issue_channel_cert,
     signing_bytes,
 )
-from socialhome.global_server import space_media_auth as sma
 from socialhome.global_server.channels import GfsChannelService
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.federation import GfsFederationService
@@ -527,48 +531,220 @@ def test_the_real_clock_is_the_default():
     assert GfsSpaceMediaAuth.__init__.__kwdefaults__["clock"] is time.time
 
 
-# ── Timing: an early refusal costs what a verification does ──────────────
+# ── Timing: every outcome of a kind costs the same verifications ─────────
+
+#: Ed25519 verifications a successful upload of each kind makes.
+_VERIFIES = {
+    "authority": 1,
+    "writer_cert": 2,
+    "writer_key": 1,
+    "channel": 1,
+    "channel_cert": 2,
+    "channel_writer_key": 1,
+}
+
+
+async def _case(env, kind: str, case: str) -> SpaceMediaUploadAuth:
+    """Build the upload for (*kind*, *case*), setting up state as needed."""
+    _, epoch_repo, channel_repo = env
+    other = "1e" * 16
+    if kind == "authority":
+        return {
+            "ok": lambda: _authority(_claim()),
+            "wrong_key": lambda: _authority(_claim(), seed=os.urandom(32)),
+            "unlisted": lambda: _authority(_claim("sp-nope")),
+            "banned": lambda: _authority(_claim("sp-banned")),
+            "no_pinned_key": lambda: _authority(_claim("sp-nokey")),
+            "suite": lambda: SpaceMediaUploadAuth(
+                claim=_claim(), kind=AUTH_AUTHORITY, sig="x" * 86, sig_suite="pq"
+            ),
+        }[case]()
+    if kind == "writer_cert":
+        if case == "strict":
+            await _pin_writer_key(epoch_repo)
+        if case == "closed_epoch":
+            await epoch_repo.confirm(SPACE, 9, now=NOW)
+        if case == "suite":
+            good = _writer_cert(_claim())
+            return SpaceMediaUploadAuth(
+                claim=good.claim,
+                kind=good.kind,
+                sig=good.sig,
+                sig_suite="pq",
+                epoch=good.epoch,
+                writer_cert=good.writer_cert,
+            )
+        if case == "bad_sig_encoding":
+            good = _writer_cert(_claim())
+            return SpaceMediaUploadAuth(
+                claim=good.claim,
+                kind=good.kind,
+                sig="!!!",
+                sig_suite=good.sig_suite,
+                epoch=good.epoch,
+                writer_cert=good.writer_cert,
+            )
+        return {
+            "ok": lambda: _writer_cert(_claim()),
+            "other_signer": lambda: _writer_cert(_claim(), signer=os.urandom(32)),
+            "foreign_cert": lambda: _writer_cert(_claim(), cert_seed=os.urandom(32)),
+            "strict": lambda: _writer_cert(_claim()),
+            "closed_epoch": lambda: _writer_cert(_claim(), epoch=3),
+            "unlisted": lambda: _writer_cert(_claim("sp-nope")),
+            "banned": lambda: _writer_cert(_claim("sp-banned")),
+        }[case]()
+    if kind == "writer_key":
+        seed = os.urandom(32)
+        if case in ("ok", "wrong_key", "wrong_epoch", "suite", "bad_sig_encoding"):
+            seed = await _pin_writer_key(epoch_repo)
+        if case == "bad_sig_encoding":
+            good = _writer_key(_claim(), seed)
+            return SpaceMediaUploadAuth(
+                claim=good.claim,
+                kind=good.kind,
+                sig="!!!",
+                sig_suite="ed25519",
+                epoch=3,
+            )
+        return {
+            "ok": lambda: _writer_key(_claim(), seed),
+            "no_pin": lambda: _writer_key(_claim(), seed),
+            "wrong_key": lambda: _writer_key(_claim(), os.urandom(32)),
+            "wrong_epoch": lambda: _writer_key(_claim(), seed, epoch=4),
+            "suite": lambda: _writer_key(_claim(), seed, suite="pq"),
+            "unlisted": lambda: _writer_key(_claim("sp-nope"), seed),
+            "banned": lambda: _writer_key(_claim("sp-banned"), seed),
+        }[case]()
+    if kind == "channel":
+        return {
+            "ok": lambda: _channel_key(_ch_claim()),
+            "wrong_key": lambda: _channel_key(_ch_claim(), seed=os.urandom(32)),
+            "unknown": lambda: _channel_key(_claim(other, scope=SCOPE_CHANNEL)),
+            "suite": lambda: _channel_key(_ch_claim(), suite="pq"),
+        }[case]()
+    if kind == "channel_cert":
+        if case == "strict":
+            await _pin_channel_writer_key(channel_repo)
+        return {
+            "ok": lambda: _channel_cert(_ch_claim()),
+            "other_signer": lambda: _channel_cert(_ch_claim(), signer=os.urandom(32)),
+            "foreign_cert": lambda: _channel_cert(
+                _ch_claim(), cert_seed=os.urandom(32)
+            ),
+            "closed_epoch": lambda: _channel_cert(_ch_claim(), epoch=9),
+            "strict": lambda: _channel_cert(_ch_claim()),
+            "unknown": lambda: _channel_cert(_claim(other, scope=SCOPE_CHANNEL)),
+        }[case]()
+    # channel_writer_key
+    seed = os.urandom(32)
+    if case in ("ok", "wrong_key", "wrong_epoch", "suite"):
+        seed = await _pin_channel_writer_key(channel_repo)
+    return {
+        "ok": lambda: _writer_key(_ch_claim(), seed),
+        "no_pin": lambda: _writer_key(_ch_claim(), seed),
+        "wrong_key": lambda: _writer_key(_ch_claim(), os.urandom(32)),
+        "wrong_epoch": lambda: _writer_key(_ch_claim(), seed, epoch=4),
+        "suite": lambda: _writer_key(_ch_claim(), seed, suite="pq"),
+        "unknown": lambda: _writer_key(_claim(other, scope=SCOPE_CHANNEL), seed),
+    }[case]()
+
+
+_CASES = (
+    [
+        ("authority", c)
+        for c in ("ok", "wrong_key", "unlisted", "banned", "no_pinned_key", "suite")
+    ]
+    + [
+        ("writer_cert", c)
+        for c in (
+            "ok",
+            "other_signer",
+            "foreign_cert",
+            "suite",
+            "bad_sig_encoding",
+            "strict",
+            "closed_epoch",
+            "unlisted",
+            "banned",
+        )
+    ]
+    + [
+        ("writer_key", c)
+        for c in (
+            "ok",
+            "no_pin",
+            "wrong_key",
+            "wrong_epoch",
+            "suite",
+            "bad_sig_encoding",
+            "unlisted",
+            "banned",
+        )
+    ]
+    + [("channel", c) for c in ("ok", "wrong_key", "unknown", "suite")]
+    + [
+        ("channel_cert", c)
+        for c in (
+            "ok",
+            "other_signer",
+            "foreign_cert",
+            "closed_epoch",
+            "strict",
+            "unknown",
+        )
+    ]
+    + [
+        ("channel_writer_key", c)
+        for c in ("ok", "no_pin", "wrong_key", "wrong_epoch", "suite", "unknown")
+    ]
+)
+
+
+@pytest.mark.parametrize(("kind", "case"), _CASES, ids=[f"{k}-{c}" for k, c in _CASES])
+async def test_every_outcome_of_a_kind_costs_the_same_verifications(env, kind, case):
+    """Timing must not tell which spaces are listed or banned, which channels
+    exist, which keys are pinned or which mode a space is in: a refusal at
+    any step costs the Ed25519 verifications a success does."""
+    auth, _, _ = env
+    a = await _case(env, kind, case)
+    with counting_ed25519_verifies() as done:
+        try:
+            await _upload(auth, a)
+            outcome = "ok"
+        except PermissionError:
+            outcome = "refused"
+    assert outcome == ("ok" if case == "ok" else "refused")
+    assert done[0] == _VERIFIES[kind]
 
 
 @pytest.mark.parametrize(
-    ("case", "verifies"),
+    ("scope", "case"),
     [
-        ("writer_cert_unlisted", 2),
-        ("writer_cert_banned", 2),
-        ("writer_key_unlisted", 1),
-        ("channel_unknown", 1),
-        ("channel_cert_unknown", 2),
-        ("channel_writer_key_unknown", 1),
+        ("space", "ok"),
+        ("space", "wrong_key"),
+        ("space", "unlisted"),
+        ("channel", "ok"),
+        ("channel", "wrong_key"),
+        ("channel", "unknown"),
+        ("space", "stale"),
     ],
 )
-async def test_an_early_refusal_burns_the_verifications_it_skipped(
-    env, monkeypatch, case, verifies
-):
-    """Whether a space is listed, banned, or a channel exists must not show in
-    how long a refusal takes: the lookup's refusal burns as many Ed25519
-    verifications as the path it skips would have made."""
+async def test_every_outcome_of_a_delete_costs_one_verification(env, scope, case):
     auth, _, _ = env
-    other = "1e" * 16
-    if case == "writer_cert_unlisted":
-        a = _writer_cert(_claim("sp-nope"))
-    elif case == "writer_cert_banned":
-        a = _writer_cert(_claim("sp-banned"))
-    elif case == "writer_key_unlisted":
-        a = _writer_key(_claim("sp-nope"), os.urandom(32))
-    elif case == "channel_unknown":
-        a = _channel_key(_claim(other, scope=SCOPE_CHANNEL))
-    elif case == "channel_cert_unknown":
-        a = _channel_cert(_claim(other, scope=SCOPE_CHANNEL))
+    ts = NOW - SPACE_MEDIA_TS_SKEW_S - 1 if case == "stale" else NOW
+    if scope == "space":
+        scope_id = "sp-nope" if case == "unlisted" else SPACE
+        sig = _space_delete_sig(
+            ts, seed=os.urandom(32) if case == "wrong_key" else SEED
+        )
     else:
-        a = _writer_key(_claim(other, scope=SCOPE_CHANNEL), os.urandom(32))
-    calls = {"n": 0}
-    real = sma.verify_ed25519
-
-    def counting(*args):
-        calls["n"] += 1
-        return real(*args)
-
-    monkeypatch.setattr(sma, "verify_ed25519", counting)
-    with pytest.raises(PermissionError):
-        await _upload(auth, a)
-    assert calls["n"] == verifies
+        scope_id = "1e" * 16 if case == "unknown" else CHANNEL
+        sig = _channel_delete_sig(
+            ts, seed=os.urandom(32) if case == "wrong_key" else CHANNEL_SEED
+        )
+    with counting_ed25519_verifies() as done:
+        try:
+            await auth.authorize_delete(scope, scope_id, BID, ts=ts, **sig)
+        except PermissionError:
+            pass
+    assert done[0] == 1

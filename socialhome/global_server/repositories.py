@@ -2266,7 +2266,18 @@ class AbstractGfsSpaceMediaRepo(Protocol):
     async def get_blob(self, blob_id: str) -> GfsSpaceMedia | None: ...
     async def get_servable(self, blob_id: str, *, now: int) -> GfsSpaceMedia | None: ...
     async def claims_of(self, blob_id: str) -> list[GfsSpaceMediaClaim]: ...
-    async def put_claim(self, claim: GfsSpaceMediaClaim) -> None: ...
+    async def put_claim(self, claim: GfsSpaceMediaClaim) -> bool: ...
+    async def delete_blob_if_unclaimed(self, blob_id: str) -> bool: ...
+    async def prune_orphan_claims(self) -> int: ...
+    async def reserve_upload(
+        self, scope_kind: str, scope_id: str, *, bucket: int, cap: int
+    ) -> bool: ...
+    async def refund_upload(
+        self, scope_kind: str, scope_id: str, *, bucket: int
+    ) -> None: ...
+    async def acquire_sweep_lease(self, holder: str, *, now: int, ttl: int) -> bool: ...
+    async def sweep_cursor(self) -> str: ...
+    async def set_sweep_cursor(self, cursor: str) -> None: ...
     async def delete_claim(
         self, blob_id: str, *, scope_kind: str, scope_id: str
     ) -> int: ...
@@ -2281,9 +2292,6 @@ class AbstractGfsSpaceMediaRepo(Protocol):
     async def expired(self, now: int, *, limit: int) -> list[GfsSpaceMedia]: ...
     async def delete_blobs(self, blob_ids: list[str]) -> int: ...
     async def prune_expired_claims(self, now: int) -> int: ...
-    async def count_upload(
-        self, scope_kind: str, scope_id: str, *, bucket: int
-    ) -> None: ...
     async def upload_counts(
         self, scope_kind: str, scope_id: str, *, bucket: int
     ) -> tuple[int, int]: ...
@@ -2416,9 +2424,11 @@ class SqliteGfsSpaceMediaRepo:
         )
         return [_space_media_claim(r) for r in rows]
 
-    async def put_claim(self, claim: GfsSpaceMediaClaim) -> None:
+    async def put_claim(self, claim: GfsSpaceMediaClaim) -> bool:
         """Insert or replace the scope's claim, and raise the blob's expiry
-        to cover it (never lower it — another claim may hold it longer)."""
+        to cover it (never lower it — another claim may hold it longer).
+        ``False`` when the blob row is not there (another node dropped it
+        meanwhile): the caller stores the blob again."""
         await self._db.enqueue(
             f"INSERT OR REPLACE INTO gfs_space_media_claims({_SPACE_MEDIA_CLAIM_COLS})"
             " VALUES(?,?,?,?,?,?)",
@@ -2431,10 +2441,31 @@ class SqliteGfsSpaceMediaRepo:
                 claim.expires_at,
             ),
         )
-        await self._db.enqueue(
+        changed = await self._db.enqueue_rowcount(
             "UPDATE gfs_space_media SET expires_at = MAX(expires_at, ?)"
             " WHERE blob_id=?",
             (claim.expires_at, claim.blob_id),
+        )
+        return changed > 0
+
+    async def delete_blob_if_unclaimed(self, blob_id: str) -> bool:
+        """Drop the blob row only while no claim holds it — one statement,
+        so a claim another node adds meanwhile keeps it. ``True`` when the
+        row went (the caller removes the file then, and only then)."""
+        changed = await self._db.enqueue_rowcount(
+            "DELETE FROM gfs_space_media WHERE blob_id=? AND NOT EXISTS ("
+            " SELECT 1 FROM gfs_space_media_claims WHERE blob_id=?)",
+            (blob_id, blob_id),
+        )
+        return changed > 0
+
+    async def prune_orphan_claims(self) -> int:
+        """Claims whose blob row is gone (a race with a drop on another
+        node) — they hold no budget, the sweep removes them."""
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM gfs_space_media_claims WHERE NOT EXISTS ("
+            " SELECT 1 FROM gfs_space_media m"
+            " WHERE m.blob_id = gfs_space_media_claims.blob_id)"
         )
 
     async def delete_claim(
@@ -2465,10 +2496,14 @@ class SqliteGfsSpaceMediaRepo:
         return int(until)
 
     async def scope_usage(self, scope_kind: str, scope_id: str, *, now: int) -> int:
-        """Live bytes a scope's claims hold (an index range read)."""
+        """Live bytes a scope's claims hold — an index range over the scope's
+        claims plus a primary-key probe each, so a claim whose blob row is
+        gone holds no budget (``scope_lru`` can't evict it either)."""
         row = await self._db.fetchone(
-            "SELECT COALESCE(SUM(size), 0) AS live FROM gfs_space_media_claims"
-            " WHERE scope_kind=? AND scope_id=? AND expires_at > ?",
+            "SELECT COALESCE(SUM(c.size), 0) AS live FROM gfs_space_media_claims c"
+            " WHERE c.scope_kind=? AND c.scope_id=? AND c.expires_at > ?"
+            " AND EXISTS (SELECT 1 FROM gfs_space_media m"
+            "  WHERE m.blob_id = c.blob_id)",
             (scope_kind, scope_id, now),
         )
         return int(row["live"]) if row is not None else 0
@@ -2495,15 +2530,54 @@ class SqliteGfsSpaceMediaRepo:
 
     # ── Upload counts (the rate limit's own record) ─────────────────────
 
-    async def count_upload(
-        self, scope_kind: str, scope_id: str, *, bucket: int
-    ) -> None:
-        await self._db.enqueue(
+    async def reserve_upload(
+        self, scope_kind: str, scope_id: str, *, bucket: int, cap: int
+    ) -> bool:
+        """Take one upload slot of *bucket* while its count is under *cap* —
+        one upsert-then-check statement on the single writer, so concurrent
+        uploads (on any node) can't all pass a read-then-write check."""
+        if cap < 1:
+            return False
+        changed = await self._db.enqueue_rowcount(
             "INSERT INTO gfs_space_media_uploads(scope_kind, scope_id, hour_bucket,"
             " count) VALUES(?,?,?,1)"
             " ON CONFLICT(scope_kind, scope_id, hour_bucket)"
-            " DO UPDATE SET count = count + 1",
+            " DO UPDATE SET count = count + 1 WHERE count < ?",
+            (scope_kind, scope_id, bucket, cap),
+        )
+        return changed > 0
+
+    async def refund_upload(
+        self, scope_kind: str, scope_id: str, *, bucket: int
+    ) -> None:
+        """Give back a slot an upload took but did not use."""
+        await self._db.enqueue(
+            "UPDATE gfs_space_media_uploads SET count = count - 1"
+            " WHERE scope_kind=? AND scope_id=? AND hour_bucket=? AND count > 0",
             (scope_kind, scope_id, bucket),
+        )
+
+    # ── Orphan sweep lease + cursor ──────────────────────────────────────
+
+    async def acquire_sweep_lease(self, holder: str, *, now: int, ttl: int) -> bool:
+        """Take (or renew) the orphan sweep for *ttl* seconds unless another
+        node holds a live lease."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE gfs_space_media_sweep SET holder=?, lease_until=?"
+            " WHERE id=1 AND (lease_until <= ? OR holder = ?)",
+            (holder, now + ttl, now, holder),
+        )
+        return changed > 0
+
+    async def sweep_cursor(self) -> str:
+        row = await self._db.fetchone(
+            "SELECT cursor FROM gfs_space_media_sweep WHERE id=1"
+        )
+        return str(row["cursor"]) if row is not None else ""
+
+    async def set_sweep_cursor(self, cursor: str) -> None:
+        await self._db.enqueue(
+            "UPDATE gfs_space_media_sweep SET cursor=? WHERE id=1", (cursor,)
         )
 
     async def upload_counts(

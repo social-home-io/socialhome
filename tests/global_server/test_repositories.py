@@ -1837,11 +1837,62 @@ async def test_space_media_expiry_and_delete(space_media):
 
 async def test_space_media_upload_counts(space_media):
     for _ in range(3):
-        await space_media.count_upload("space", "s1", bucket=10)
-    await space_media.count_upload("space", "s1", bucket=9)
-    await space_media.count_upload("space", "s1", bucket=5)
-    await space_media.count_upload("channel", "s1", bucket=10)
+        await space_media.reserve_upload("space", "s1", bucket=10, cap=99)
+    await space_media.reserve_upload("space", "s1", bucket=9, cap=99)
+    await space_media.reserve_upload("space", "s1", bucket=5, cap=99)
+    await space_media.reserve_upload("channel", "s1", bucket=10, cap=99)
     assert await space_media.upload_counts("space", "s1", bucket=10) == (3, 1)
     assert await space_media.upload_counts("channel", "s1", bucket=10) == (1, 0)
     assert await space_media.prune_upload_counts(before_bucket=9) == 1
     assert await space_media.upload_counts("space", "s1", bucket=6) == (0, 0)
+
+
+async def test_space_media_reserve_upload_is_atomic_and_refundable(space_media):
+    """Upsert-then-check in one statement: a slot is taken only while the
+    count is under the cap, and a failed upload gives it back."""
+    assert await space_media.reserve_upload("space", "s1", bucket=10, cap=2) is True
+    assert await space_media.reserve_upload("space", "s1", bucket=10, cap=2) is True
+    assert await space_media.reserve_upload("space", "s1", bucket=10, cap=2) is False
+    assert await space_media.reserve_upload("space", "s1", bucket=10, cap=0) is False
+    assert await space_media.upload_counts("space", "s1", bucket=10) == (2, 0)
+    await space_media.refund_upload("space", "s1", bucket=10)
+    assert await space_media.upload_counts("space", "s1", bucket=10) == (1, 0)
+    await space_media.refund_upload("space", "s1", bucket=10)
+    await space_media.refund_upload("space", "s1", bucket=10)
+    assert await space_media.upload_counts("space", "s1", bucket=10) == (0, 0)
+
+
+async def test_space_media_put_claim_says_whether_the_blob_row_is_there(space_media):
+    await space_media.add_blob(_media_blob(1))
+    assert await space_media.put_claim(_media_claim(1)) is True
+    # The row went (another node dropped it): the claim lands, the answer
+    # tells the caller to store the blob again.
+    assert await space_media.put_claim(_media_claim(2)) is False
+
+
+async def test_space_media_blob_row_goes_only_without_claims(space_media):
+    bid = f"{1:064x}"
+    await _held_blob(space_media, 1)
+    assert await space_media.delete_blob_if_unclaimed(bid) is False
+    await space_media.delete_claim(bid, scope_kind="space", scope_id="s1")
+    assert await space_media.delete_blob_if_unclaimed(bid) is True
+    assert await space_media.delete_blob_if_unclaimed(bid) is False
+
+
+async def test_space_media_a_claim_without_its_blob_holds_no_budget(space_media):
+    await space_media.put_claim(_media_claim(1, size=500))
+    await _held_blob(space_media, 2, size=100)
+    assert await space_media.scope_usage("space", "s1", now=2_000) == 100
+    assert await space_media.prune_orphan_claims() == 1
+    assert await space_media.claims_of(f"{1:064x}") == []
+
+
+async def test_space_media_sweep_lease_and_cursor(space_media):
+    assert await space_media.acquire_sweep_lease("a", now=100, ttl=50) is True
+    assert await space_media.acquire_sweep_lease("b", now=120, ttl=50) is False
+    # The holder renews; another node takes over once the lease ran out.
+    assert await space_media.acquire_sweep_lease("a", now=130, ttl=50) is True
+    assert await space_media.acquire_sweep_lease("b", now=181, ttl=50) is True
+    assert await space_media.sweep_cursor() == ""
+    await space_media.set_sweep_cursor("abc")
+    assert await space_media.sweep_cursor() == "abc"

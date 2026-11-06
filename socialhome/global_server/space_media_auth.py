@@ -52,7 +52,7 @@ from ..authority_sig import (
     AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
     AUTHORITY_EVENT_SPACE_MEDIA_PUT,
 )
-from ..crypto import b64url_decode, verify_ed25519
+from ..crypto import b64url_decode, counting_ed25519_verifies, verify_ed25519
 from ..domain.gfs_space_media import (
     AUTH_AUTHORITY,
     AUTH_CHANNEL,
@@ -83,9 +83,13 @@ if TYPE_CHECKING:
 #: A busy household uploads a handful of pictures per post.
 SPACE_MEDIA_MAX_PER_MINUTE_PER_IP: int = 120
 
-#: Ed25519 verifications each lookup-gated kind makes once its scope is
-#: found — what an early refusal burns instead.
+#: Ed25519 verifications a successful upload of each kind makes. Every
+#: refusal of that kind is topped up to the same count (dummy verifications
+#: against a fixed key), so a refusal's timing tells nothing about which
+#: spaces are listed or banned, which channels exist, which writer keys are
+#: pinned or which mode a space is in. A delete makes one.
 _VERIFIES_BY_KIND: dict[str, int] = {
+    AUTH_AUTHORITY: 1,
     AUTH_CHANNEL: 1,
     AUTH_CHANNEL_CERT: 2,
     AUTH_WRITER_CERT: 2,
@@ -127,7 +131,48 @@ class GfsSpaceMediaAuth:
     ) -> None:
         """Raise :class:`PermissionError` unless *auth* lets its holder put
         *blob_id* into the scope the path names (the signed claim must name
-        the same)."""
+        the same). Every refusal costs the verifications a success of that
+        kind makes."""
+        with counting_ed25519_verifies() as done:
+            try:
+                await self._authorize_upload(
+                    auth, scope_kind=scope_kind, scope_id=scope_id, blob_id=blob_id
+                )
+            except PermissionError:
+                _burn_verifies(_VERIFIES_BY_KIND.get(auth.kind, 1) - done[0])
+                raise
+
+    async def authorize_delete(
+        self,
+        scope_kind: str,
+        scope_id: str,
+        blob_id: str,
+        *,
+        ts: object,
+        sig: object,
+        sig_suite: object,
+    ) -> None:
+        """Raise :class:`PermissionError` unless the scope's seed holder (the
+        space authority, or the channel key) signed this delete of *blob_id*
+        within the skew window. Every refusal costs one verification, like
+        a success."""
+        with counting_ed25519_verifies() as done:
+            try:
+                await self._authorize_delete(
+                    scope_kind, scope_id, blob_id, ts=ts, sig=sig, sig_suite=sig_suite
+                )
+            except PermissionError:
+                _burn_verifies(1 - done[0])
+                raise
+
+    async def _authorize_upload(
+        self,
+        auth: SpaceMediaUploadAuth,
+        *,
+        scope_kind: str,
+        scope_id: str,
+        blob_id: str,
+    ) -> None:
         claim = auth.claim
         if (claim.scope, claim.scope_id, claim.blob_id) != (
             scope_kind,
@@ -140,18 +185,11 @@ class GfsSpaceMediaAuth:
         self._require_fresh(claim.ts)
         space: GlobalSpace | None = None
         if auth.kind != AUTH_AUTHORITY:
-            # The scope lookup first, and a refusal costs what the skipped
-            # verifications would have, so timing doesn't tell which spaces
-            # are listed or banned, or which channels exist (the authority
-            # path burns its own in ``verify_space_authority``).
-            try:
-                if scope_kind == SCOPE_SPACE:
-                    space = await self._federation.listed_space(scope_id)
-                else:
-                    await self._channels.require_channel(scope_id)
-            except PermissionError:
-                _burn_verifies(_VERIFIES_BY_KIND[auth.kind])
-                raise
+            # The scope first (its refusal is topped up by the caller).
+            if scope_kind == SCOPE_SPACE:
+                space = await self._federation.listed_space(scope_id)
+            else:
+                await self._channels.require_channel(scope_id)
         if auth.kind == AUTH_AUTHORITY:
             await self._federation.verify_space_authority(
                 scope_id,
@@ -208,7 +246,7 @@ class GfsSpaceMediaAuth:
             return
         raise PermissionError("unknown upload authorization")  # pragma: no cover
 
-    async def authorize_delete(
+    async def _authorize_delete(
         self,
         scope_kind: str,
         scope_id: str,
@@ -218,9 +256,6 @@ class GfsSpaceMediaAuth:
         sig: object,
         sig_suite: object,
     ) -> None:
-        """Raise :class:`PermissionError` unless the scope's seed holder (the
-        space authority, or the channel key) signed this delete of *blob_id*
-        within the skew window."""
         if not isinstance(ts, int) or isinstance(ts, bool):
             raise PermissionError("bad ts")
         self._require_fresh(ts)

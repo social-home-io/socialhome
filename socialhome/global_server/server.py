@@ -359,6 +359,7 @@ class GfsApp:
             repos.space_media,
             FsBlobFiles(Path(config.media_dir) / "spaces"),
             SpaceMediaLimits.from_config(config),
+            node_id=config.cluster_node_id or config.instance_id,
         )
         admin = GfsAdminService(
             fed_repo=repos.federation,

@@ -3532,11 +3532,13 @@ registration:
 | `channel` | `writer_key` | Strict channel: the channel writer key pinned for `epoch` (`verify_writer_key`). Names nobody. |
 
 A `space` must be listed, not moderator-banned (the space-level ban
-applies), with a pinned authority key; a `channel` must be registered. That
-lookup comes first for the writer and channel kinds, and its refusal burns
-as many Ed25519 verifications as the path would have made (the authority
-path does the same), so a refusal's timing doesn't tell which spaces are
-listed or banned, or which channels exist. Every
+applies), with a pinned authority key; a `channel` must be registered.
+**Every outcome of a kind costs the same Ed25519 verifications** as a
+success of that kind (authority, channel key and writer key: 1; the two cert
+kinds: 2 — the holder's signature and the cert's; a delete: 1): a refusal at
+any step is topped up with verifications against a fixed dummy key, so its
+timing doesn't tell which spaces are listed or banned, which channels exist,
+which writer keys are pinned or which mode a space or channel is in. Every
 failure is one `403 {"error": "not authorized for this scope"}` (reason at
 DEBUG); a malformed header is `400`. The header is checked **before** the
 body is read; the body is then read up to exactly the signed `size` (`413`
@@ -3561,9 +3563,14 @@ pictures over old ones:
 
 A blob larger than the whole cache or one scope's budget is `413
 too_large_for_cache`. The hourly maintenance sweep drops expired blobs,
-claims and upload counts, and removes files with no row and stale `.part`
-temporary files older than 10 minutes (an upload may still be writing a
-younger one). A fetch moves the blob's `last_fetched_at` at most once
+claims and upload counts on every node (it is all in the shared database);
+on ONE node at a time — the holder of a ~50-minute lease row — it also walks
+the next 100 000 entries of the shared directory in name order (a persisted
+cursor that wraps, so a directory of any size is covered over successive
+runs) and removes files with no row and stale `.part` temporary files older
+than 10 minutes (an upload may still be writing a younger one), each stat'ed
+and looked up again right before the unlink so a file an upload rewrote
+meanwhile is kept. A fetch moves the blob's `last_fetched_at` at most once
 an hour (the upload counts as one, so a new blob is not the first to go): a
 popular blob costs one DB write an hour, not one per fetch. Uploads and
 deletes are also shed at 120 / min per client address before any signature
@@ -3573,12 +3580,32 @@ work.
 node took an upload, any node serves it (pinned by the federation-demo
 `gfs-cluster` step: a space blob and a channel blob uploaded via node 0 are
 fetched byte-identical via node 1; a re-upload via node 1 coalesces; the same
-bytes under a channel claim survive the space's delete). The
-caps are checked per upload against the shared rows (the total is a
-trigger-kept row, a scope's live bytes an index range), so concurrent uploads
-on several nodes may briefly hold the total above `max_bytes` by the blobs in
-flight (a few × the largest blob); the next upload or eviction brings it back
-under, and two nodes evicting at once may free a little more than needed. The bytes go through a
+bytes under a channel claim survive the space's delete).
+
+- **Upload rate:** a slot is reserved atomically in the shared database
+  before any work (an upsert that only counts while under the cap) and
+  refunded if the upload fails, so it holds exactly across nodes and
+  concurrent uploads.
+- **Byte caps:** making room, writing and recording run one upload at a
+  time per node (an `asyncio.Lock`), so on one node `max_bytes` and
+  `space_max_bytes` hold exactly; across a cluster the total — or a scope's
+  bytes — may exceed its cap by the uploads other nodes have in flight, **at
+  most (nodes − 1) × the largest blob** (3 × 8 MiB on a 4-node cluster),
+  until the next upload's room making brings it back under. Leave that much
+  disk headroom.
+- **Delete / evict vs. a concurrent claim:** a blob row is deleted only
+  while no claim holds it (one statement), and its file only when that row
+  went; a claim that lands on a blob another node dropped meanwhile stores
+  the bytes again (they are in the request), so `already_stored` always
+  means the blob is there; a row whose file went missing gets it back from
+  the next upload of the same bytes; rows are dropped before their files, so
+  a crash leaves an orphan file (the sweep's), never a row without its file;
+  a claim left without its blob holds no budget and the sweep removes it.
+
+The totals check is a trigger-kept row, a scope's live bytes an index range
+over its claims; a scope's eviction sorts its live claims by their blob's
+last fetch (`scope_lru`, at most `space_max_bytes` ÷ the smallest bucket ≈
+65 000 rows, and only on an upload that is over the scope's budget). The bytes go through a
 small storage interface (`blob_store.BlobFiles`), so an object store can
 replace the filesystem later.
 

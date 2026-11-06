@@ -6,6 +6,7 @@ hour, and a sweep that also clears orphan files."""
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 
@@ -567,3 +568,227 @@ async def test_stats(make):
         "refused_quota": 0,
         "refused_too_large": 0,
     }
+
+
+# ── Round 2: concurrency, races, the sweep at scale ─────────────────────
+
+
+async def _attempt(store, data, **kw) -> int:
+    try:
+        return 201 if await _put(store, data, **kw) else 200
+    except MediaRefused as exc:
+        return exc.status
+
+
+async def test_concurrent_uploads_cannot_pass_the_upload_rate(make):
+    """The slot is reserved atomically before the work, so 20 uploads at
+    once can't all pass a read-then-write check."""
+    store = make(space_uploads_per_hour=2)
+    answers = await asyncio.gather(*(_attempt(store, _blob()) for _ in range(20)))
+    assert sorted(answers).count(201) == 2
+    assert set(answers) == {201, 429}
+
+
+async def test_concurrent_uploads_cannot_pass_the_byte_caps(make, repo):
+    store = make(max_bytes=3 * SMALL, space_max_bytes=2 * SMALL)
+    await asyncio.gather(
+        *(_attempt(store, _blob(), space=f"s{i % 2}") for i in range(20))
+    )
+    _, total = await repo.totals()
+    assert total <= 3 * SMALL
+    for scope in ("s0", "s1"):
+        assert await repo.scope_usage("space", scope, now=NOW) <= 2 * SMALL
+
+
+async def test_a_failed_upload_gives_its_rate_slot_back(make, repo):
+    store = make(space_uploads_per_hour=1)
+    data = _blob()
+    status, reason = await _refused(
+        store.put(
+            scope_kind="space",
+            scope_id="s1",
+            blob_id=blob_id_of(b"other"),
+            data=data,
+            expires_at=NOW + 60,
+            now=NOW,
+        )
+    )
+    assert (status, reason) == (422, "blob_id_mismatch")
+    assert await repo.upload_counts("space", "s1", bucket=NOW // 3600) == (0, 0)
+    assert await _put(store, data) is True
+
+
+async def test_coalescing_onto_a_blob_dropped_meanwhile_stores_it_again(make, repo):
+    """s2 saw the blob held by s1; s1's delete dropped row and file before
+    s2's claim landed. s2 must not answer already_stored for nothing: it
+    stores the bytes it has."""
+    store = make()
+    data = _blob()
+    bid = blob_id_of(data)
+    await _put(store, data, space="s1")
+    real_get = repo.get_blob
+    stale = await real_get(bid)
+    calls = {"n": 0}
+
+    async def racing_get(blob_id):
+        calls["n"] += 1
+        if calls["n"] == 2:  # inside the locked store step
+            await repo.delete_claim(bid, scope_kind="space", scope_id="s1")
+            await repo.delete_blob_if_unclaimed(bid)
+            await store._files.remove(bid)
+            return stale
+        return await real_get(blob_id)
+
+    repo.get_blob = racing_get  # type: ignore[method-assign]
+    try:
+        await _put(store, data, space="s2", now=NOW + 1)
+    finally:
+        repo.get_blob = real_get  # type: ignore[method-assign]
+    assert await store.read(bid, now=NOW + 2) == data
+    assert await repo.totals() == (1, SMALL)
+    assert {c.scope_id for c in await repo.claims_of(bid)} == {"s2"}
+
+
+async def test_a_blob_another_scope_claims_meanwhile_is_not_dropped(
+    make, repo, tmp_dir
+):
+    store = make()
+    data = _blob()
+    bid = blob_id_of(data)
+    await _put(store, data, space="s1")
+    # s2's claim lands between s1's claim delete and the row drop.
+    await repo.delete_claim(bid, scope_kind="space", scope_id="s1")
+    await repo.put_claim(
+        sm.GfsSpaceMediaClaim(
+            blob_id=bid,
+            scope_kind="space",
+            scope_id="s2",
+            size=SMALL,
+            created_at=NOW,
+            expires_at=NOW + 86_400,
+        )
+    )
+    await store._settle(bid)
+    assert (tmp_dir / "spaces" / bid).exists()
+    assert await store.read(bid, now=NOW + 1) == data
+
+
+async def test_coalescing_onto_a_missing_file_rewrites_it(make, tmp_dir):
+    store = make()
+    data = _blob()
+    bid = blob_id_of(data)
+    await _put(store, data, space="s1")
+    (tmp_dir / "spaces" / bid).unlink()
+    assert await _put(store, data, space="s2", now=NOW + 1) is False
+    assert await store.read(bid, now=NOW + 2) == data
+
+
+class _Files:
+    """A :class:`FsBlobFiles` stand-in whose calls a test can watch."""
+
+    def __init__(self, inner: FsBlobFiles) -> None:
+        self.inner = inner
+        self.on_remove = None
+        self.scan_override = None
+
+    async def write(self, blob_id, data):
+        await self.inner.write(blob_id, data)
+
+    async def read(self, blob_id):
+        return await self.inner.read(blob_id)
+
+    async def remove(self, name):
+        if self.on_remove is not None:
+            await self.on_remove(name)
+        await self.inner.remove(name)
+
+    async def stat(self, name):
+        return await self.inner.stat(name)
+
+    async def exists(self, blob_id):
+        return await self.inner.exists(blob_id)
+
+    async def scan(self, *, after, limit):
+        if self.scan_override is not None:
+            return await self.scan_override(after=after, limit=limit)
+        return await self.inner.scan(after=after, limit=limit)
+
+
+async def test_a_drop_removes_rows_before_files(repo, tmp_dir):
+    """A crash between the two leaves an orphan file (the sweep's), never a
+    row whose file is gone."""
+    files = _Files(FsBlobFiles(tmp_dir / "spaces"))
+    store = GfsSpaceMediaStore(repo, files, _limits(max_bytes=SMALL))
+    first = _blob()
+    await _put(store, first, space="a")
+    removed_with_row = {}
+
+    async def note(name):
+        removed_with_row[name] = await repo.get_blob(name) is not None
+
+    files.on_remove = note
+    await _put(store, _blob(), space="b", now=NOW + 1)
+    assert removed_with_row == {blob_id_of(first): False}
+
+
+async def test_the_orphan_sweep_walks_past_its_batch_and_wraps(
+    make, tmp_dir, monkeypatch
+):
+    monkeypatch.setattr(sm, "ORPHAN_SCAN_BATCH", 2)
+    store = make()
+    d = tmp_dir / "spaces"
+    d.mkdir()
+    old = time.time() - ORPHAN_GRACE_S - 60
+    names = [f"{i:064x}" for i in range(5)]
+    for n in names:
+        (d / n).write_bytes(b"x")
+        os.utime(d / n, (old, old))
+    removed = 0
+    for _ in range(3):
+        removed += await store.sweep_orphans(now=time.time())
+    assert removed == 5
+    assert list(d.iterdir()) == []
+    # Past the end the cursor wraps to the start.
+    assert await store._repo.sweep_cursor() == ""
+
+
+async def test_only_the_lease_holder_sweeps_orphans(repo, tmp_dir):
+    a = GfsSpaceMediaStore(
+        repo, FsBlobFiles(tmp_dir / "spaces"), _limits(), node_id="a"
+    )
+    b = GfsSpaceMediaStore(
+        repo, FsBlobFiles(tmp_dir / "spaces"), _limits(), node_id="b"
+    )
+    d = tmp_dir / "spaces"
+    d.mkdir()
+    orphan = d / ("e" * 64)
+    orphan.write_bytes(b"x")
+    old = time.time() - ORPHAN_GRACE_S - 60
+    os.utime(orphan, (old, old))
+    await a.sweep(NOW)
+    assert not orphan.exists()
+    orphan.write_bytes(b"x")
+    os.utime(orphan, (old, old))
+    await b.sweep(NOW + 60)  # a still holds the lease
+    assert orphan.exists()
+    await b.sweep(NOW + sm.ORPHAN_LEASE_S + 1)  # a's lease ran out
+    assert not orphan.exists()
+
+
+async def test_the_orphan_sweep_rechecks_a_file_before_removing_it(repo, tmp_dir):
+    """A file listed as an old orphan, then replaced by a re-upload before
+    the unlink, is kept."""
+    files = _Files(FsBlobFiles(tmp_dir / "spaces"))
+    store = GfsSpaceMediaStore(repo, files, _limits())
+    d = tmp_dir / "spaces"
+    d.mkdir()
+    name = "e" * 64
+    (d / name).write_bytes(b"new")  # fresh mtime: just rewritten
+    old = time.time() - ORPHAN_GRACE_S - 60
+
+    async def stale_scan(*, after, limit):
+        return [(name, old)] if after < name else []
+
+    files.scan_override = stale_scan
+    assert await store.sweep_orphans(now=time.time()) == 0
+    assert (d / name).exists()

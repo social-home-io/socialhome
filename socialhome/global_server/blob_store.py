@@ -19,7 +19,9 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import heapq
 import logging
+import os
 import secrets
 from pathlib import Path
 from typing import Protocol
@@ -73,7 +75,9 @@ class BlobFiles(Protocol):
     async def write(self, blob_id: str, data: bytes) -> None: ...
     async def read(self, blob_id: str) -> bytes | None: ...
     async def remove(self, blob_id: str) -> None: ...
-    async def scan(self, *, limit: int) -> list[tuple[str, float]]: ...
+    async def stat(self, name: str) -> float | None: ...
+    async def exists(self, blob_id: str) -> bool: ...
+    async def scan(self, *, after: str, limit: int) -> list[tuple[str, float]]: ...
 
 
 class FsBlobFiles:
@@ -113,21 +117,24 @@ class FsBlobFiles:
     async def remove(self, blob_id: str) -> None:
         await self._discard(self._path(blob_id))
 
-    async def scan(self, *, limit: int) -> list[tuple[str, float]]:
-        """Up to *limit* ``(name, mtime)`` of what the directory holds —
-        blobs and temporary files — for the orphan sweep."""
+    async def stat(self, name: str) -> float | None:
+        """The mtime of *name* (a blob or a temporary file), or ``None``."""
         try:
-            names = await aiofiles.os.listdir(self._dir)
+            st = await aiofiles.os.stat(self._dir / name)
         except FileNotFoundError:
-            return []
-        out: list[tuple[str, float]] = []
-        for name in names[:limit]:
-            try:
-                st = await aiofiles.os.stat(self._dir / name)
-            except FileNotFoundError:
-                continue
-            out.append((name, float(st.st_mtime)))
-        return out
+            return None
+        return float(st.st_mtime)
+
+    async def exists(self, blob_id: str) -> bool:
+        return await self.stat(blob_id) is not None
+
+    async def scan(self, *, after: str, limit: int) -> list[tuple[str, float]]:
+        """The next *limit* ``(name, mtime)`` in name order after *after* —
+        blobs and temporary files — so the orphan sweep walks the whole
+        directory over successive calls. The directory is iterated in a
+        worker thread keeping only the *limit* smallest names, so memory is
+        bounded by *limit*, not by the directory."""
+        return await asyncio.to_thread(_scan_sync, self._dir, after, limit)
 
     async def _discard(self, path: Path) -> None:
         try:
@@ -136,3 +143,19 @@ class FsBlobFiles:
             pass
         except OSError as exc:  # pragma: no cover - defensive
             log.warning("blob store: could not remove a blob file: %s", exc)
+
+
+def _scan_sync(directory: Path, after: str, limit: int) -> list[tuple[str, float]]:
+    """:meth:`FsBlobFiles.scan`'s blocking body (runs in a worker thread)."""
+    try:
+        with os.scandir(directory) as entries:
+            names = heapq.nsmallest(limit, (e.name for e in entries if e.name > after))
+    except FileNotFoundError:
+        return []
+    out: list[tuple[str, float]] = []
+    for name in names:
+        try:
+            out.append((name, os.stat(directory / name).st_mtime))
+        except FileNotFoundError:
+            continue
+    return out

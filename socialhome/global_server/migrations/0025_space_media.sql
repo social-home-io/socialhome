@@ -49,7 +49,9 @@
 --      the rate limit's own count (two buckets live, the sweep drops older);
 --    * ``gfs_space_media_totals`` — one row kept by triggers, so the total
 --      the global cap checks on every upload is a primary-key read, not a
---      scan.
+--      scan;
+--    * ``gfs_space_media_sweep`` — one row: the orphan-file sweep's lease
+--      (one node of a cluster scans the shared dir) and its name cursor.
 --    One ``(scope_kind, scope_id)`` pair rather than a table per scope: the
 --    cache, its caps and its eviction are the same for both. No foreign key
 --    to ``global_spaces`` / ``gfs_channels``: a cascade would drop rows and
@@ -122,3 +124,15 @@ BEGIN
     UPDATE gfs_space_media_totals
        SET blobs = blobs - 1, bytes = bytes - OLD.size WHERE id = 1;
 END;
+
+-- One row: which cluster node runs the orphan-file sweep right now (a short
+-- lease — the nodes share one data dir, one scanner is enough) and where in
+-- the directory's name order the last sweep stopped, so successive sweeps
+-- walk the whole directory a bounded batch at a time.
+CREATE TABLE IF NOT EXISTS gfs_space_media_sweep (
+    id           INTEGER PRIMARY KEY CHECK(id = 1),
+    holder       TEXT NOT NULL DEFAULT '',
+    lease_until  INTEGER NOT NULL DEFAULT 0,
+    cursor       TEXT NOT NULL DEFAULT ''
+);
+INSERT OR IGNORE INTO gfs_space_media_sweep(id) VALUES(1);

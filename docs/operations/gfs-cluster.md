@@ -107,9 +107,13 @@ repeated reads; a miss is `no-store`. Set `max_bytes = 0` (or
 `GFS_SPACE_MEDIA_MAX_BYTES=0`) to turn the cache off — uploads then answer
 `503 space_media_disabled` and it is no longer advertised in `/gfs/info`.
 Concurrent uploads on several nodes may briefly hold the total above
-`max_bytes` by the blobs in flight (a few × 8 MiB); leave that much disk
-headroom. The hourly sweep also removes files left without a row (a crash
-mid-upload) and stale `.part` files older than 10 minutes. The admin overview (`GET /admin/api/overview`,
+`max_bytes` by the uploads other nodes have in flight — at most
+(nodes − 1) × 8 MiB, each node making room one upload at a time; leave that
+much disk headroom. The upload rate holds exactly (reserved in the shared
+database). One node at a time (a lease row in `gfs.db`) runs the hourly
+orphan sweep: it walks the next 100 000 entries of the shared directory —
+resuming where the last run stopped — and removes files left without a row
+(a crash mid-upload) and stale `.part` files older than 10 minutes. The admin overview (`GET /admin/api/overview`,
 `space_media`) shows the blobs and bytes held and this node's evictions and
 quota refusals.
 

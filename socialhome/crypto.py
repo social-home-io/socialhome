@@ -22,6 +22,9 @@ import hmac
 import os
 import re
 import secrets
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -241,6 +244,28 @@ def is_valid_ed25519_public_key(public_key: bytes) -> bool:
     return True
 
 
+#: Calls of :func:`verify_ed25519` in the current context, while a
+#: :func:`counting_ed25519_verifies` block is open.
+_VERIFY_COUNT: ContextVar[tuple[list[int], ...]] = ContextVar(
+    "ed25519_verify_count", default=()
+)
+
+
+@contextmanager
+def counting_ed25519_verifies() -> Iterator[list[int]]:
+    """Count :func:`verify_ed25519` calls made in this context (a task and
+    what it awaits) — ``box[0]``. Lets a caller that must answer every
+    refusal in the same time (the GFS space media cache) top a short path
+    up to the verifications a full one makes. Blocks nest; every open block
+    counts."""
+    box = [0]
+    token = _VERIFY_COUNT.set((*_VERIFY_COUNT.get(), box))
+    try:
+        yield box
+    finally:
+        _VERIFY_COUNT.reset(token)
+
+
 def verify_ed25519(public_key: bytes, message: bytes, signature: bytes) -> bool:
     """Return ``True`` iff ``signature`` is a valid Ed25519 signature.
 
@@ -248,6 +273,8 @@ def verify_ed25519(public_key: bytes, message: bytes, signature: bytes) -> bool:
     would accept forged signatures under one (see
     :func:`is_small_order_ed25519_key`).
     """
+    for box in _VERIFY_COUNT.get():
+        box[0] += 1
     if not is_valid_ed25519_public_key(public_key):
         return False
     try:
