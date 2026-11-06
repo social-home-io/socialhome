@@ -14,6 +14,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from socialhome.crypto import b64url_encode, generate_identity_keypair, sign_ed25519
 from socialhome.global_server import moment_media as gmm
 from socialhome.global_server.app_keys import (
+    gfs_admin_repo_key,
     gfs_fed_repo_key,
     gfs_moment_media_store_key,
 )
@@ -321,12 +322,32 @@ async def test_moment_blobs_are_not_served_by_the_public_media_mount(client, aut
     assert (await client.get(f"/media/moments/{bid}")).status == 404
 
 
-async def test_the_media_mount_serves_only_top_level_branding_files(client, tmp_dir):
+async def test_the_media_route_serves_only_the_configured_branding_file(
+    client, tmp_dir
+):
+    """Security re-attack N4: ``/media/`` serves exactly the configured
+    header image — a regular file, never a symlink (``link.png ->
+    ../gfs.db`` would hand out the database), nothing else in the dir."""
     media = tmp_dir / "media"
     (media / "hero.webp").write_bytes(b"RIFFwebp")
+    (media / "other.webp").write_bytes(b"RIFFother")
     (media / ".hidden").write_bytes(b"x")
+    (media / "link.png").symlink_to(tmp_dir / "gfs.db")
+    admin = client._app[gfs_admin_repo_key]
+    # Nothing configured: nothing served.
+    assert (await client.get("/media/hero.webp")).status == 404
+    await admin.set_config("header_image_file", "hero.webp")
     r = await client.get("/media/hero.webp")
     assert r.status == 200
     assert await r.read() == b"RIFFwebp"
-    for path in ("/media/.hidden", "/media/moments", "/media/%2E%2E/gfs.db"):
+    for path in (
+        "/media/other.webp",
+        "/media/link.png",
+        "/media/.hidden",
+        "/media/moments",
+        "/media/%2E%2E/gfs.db",
+    ):
         assert (await client.get(path)).status == 404, path
+    # A configured name that is a symlink is still refused.
+    await admin.set_config("header_image_file", "link.png")
+    assert (await client.get("/media/link.png")).status == 404

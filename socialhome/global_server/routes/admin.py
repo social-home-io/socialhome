@@ -41,22 +41,32 @@ _BRANDING_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 
 
 class BrandingMediaView(GfsBaseView):
-    """``GET /media/{name}`` — the operator's branding images (the landing
-    header image): a top-level regular file of ``media/`` only. Never a
-    blob: the space media cache keeps its files outside ``media/``
-    (``space_media/``) and the moment blobs in ``media/moments/`` are a
-    subdirectory this route can't reach — each is served only by its own
-    route, with its expiry, ban, tombstone and headers applied.
-    (Security review F2: a static mount of the whole dir served them raw.)"""
+    """``GET /media/{name}`` — the operator's branding image (the landing
+    header image): exactly the configured ``header_image_file`` (admin
+    portal, else ``[branding]``), a regular file directly in ``media/`` —
+    never a symlink (lstat), never anything else in the dir. Never a blob: the space media cache
+    keeps its files outside ``media/`` and the moment blobs in
+    ``media/moments/`` are a subdirectory — each is served only by its own
+    route. (Security review F2: a static mount of the whole dir served
+    them raw; re-attack N4: a symlink in ``media/`` was followed.)"""
 
     async def get(self) -> web.StreamResponse:
         name = self.match("name")
         if not _BRANDING_NAME.fullmatch(name):
             raise web.HTTPNotFound()
         cfg: GfsConfig = self.svc(K.gfs_config_key)
-        path = Path(cfg.media_dir) / name
-        if not await aiofiles.os.path.isfile(path):
+        configured = (
+            await self.svc(K.gfs_admin_repo_key).get_config("header_image_file")
+        ) or cfg.header_image_file
+        if name != configured:
             raise web.HTTPNotFound()
+        path = Path(cfg.media_dir) / name
+        if await aiofiles.os.path.islink(path) or not await aiofiles.os.path.isfile(
+            path
+        ):
+            raise web.HTTPNotFound()
+        # One segment, no dot-file, not a symlink: the file can't be anywhere
+        # but directly in ``media/``.
         return web.FileResponse(path)
 
 
