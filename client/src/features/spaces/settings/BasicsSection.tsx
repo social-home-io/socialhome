@@ -8,7 +8,9 @@
  * picked — the section says so.
  *
  * The picture preview shows the uploaded icon when there is one (that is
- * what the space shows everywhere), the emoji otherwise.
+ * what the space shows everywhere), the emoji otherwise. The Home
+ * Assistant logo is offered as a ready-made picture: it uploads like a
+ * picked file (``haLogo.ts``).
  */
 import { useState } from 'preact/hooks'
 import { api } from '@/api'
@@ -22,6 +24,7 @@ import { t } from '@/i18n/i18n'
 import { cssUrl } from '@/utils/cssUrl'
 import { SpaceLinksTab, type LinksDraftHandle } from '@/features/spaces/SpaceLinksTab'
 import { spaceGlyph } from '@/features/spaces/spaceGlyph'
+import { haLogoFile, haLogoUrl } from '@/features/spaces/haLogo'
 import type { BasicsForm } from './useBasicsForm'
 
 interface Props {
@@ -52,14 +55,11 @@ export function BasicsSection({ space, form, isRemoteSpace, onUpdate, onThemeDra
   const [busy, setBusy] = useState<ImageKind | null>(null)
   const [preview, setPreview] = useState(false)
 
-  const upload = async (kind: ImageKind, e: Event) => {
-    const input = e.target as HTMLInputElement
-    const file = input.files?.[0]
-    if (!file) return
+  const send = async (kind: ImageKind, file: () => Promise<File> | File) => {
     setBusy(kind)
     try {
       const fd = new FormData()
-      fd.append('file', file)
+      fd.append('file', await file())
       await api.upload(`/api/spaces/${space.id}/${kind}`, fd)
       showToast(t(kind === 'cover' ? 'space.about.cover_updated' : 'space.about.icon_updated'), 'success')
       onUpdate()
@@ -67,8 +67,15 @@ export function BasicsSection({ space, form, isRemoteSpace, onUpdate, onThemeDra
       showToast(t('space.about.upload_failed', { error: String((err as Error)?.message ?? err) }), 'error')
     } finally {
       setBusy(null)
-      input.value = ''
     }
+  }
+
+  const upload = async (kind: ImageKind, e: Event) => {
+    const input = e.target as HTMLInputElement
+    const file = input.files?.[0]
+    if (!file) return
+    await send(kind, () => file)
+    input.value = ''
   }
 
   const remove = async (kind: ImageKind) => {
@@ -119,6 +126,11 @@ export function BasicsSection({ space, form, isRemoteSpace, onUpdate, onThemeDra
             <input type="file" accept="image/*" class="sr-only"
                    onChange={(e) => void upload('icon', e)} />
           </label>
+          <button type="button" class="sh-btn sh-btn--secondary sh-ha-logo-btn"
+                  disabled={busy !== null} onClick={() => void send('icon', haLogoFile)}>
+            <img src={haLogoUrl} alt="" width={20} height={20} />
+            {t('space.icon.ha_logo')}
+          </button>
           {space.icon_url && (
             <Button variant="ghost" onClick={() => void remove('icon')}>
               {t('space.about.remove')}

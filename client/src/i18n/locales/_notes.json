@@ -203,6 +203,8 @@
 
   "remote_invite.minutes_ago": "Very short relative time after 'last seen'. {n} = minutes.",
 
+  "space.icon.ha_logo": "Button / checkbox: makes the Home Assistant logo the space's picture. 'Home Assistant' is a product name — never translate it. Keep short (button).",
+  "space.icon.ha_logo_sub": "Hint under the checkbox: the logo picture is shown instead of the space's emoji.",
   "space.about.upload_failed": "Toast. {error} = technical error text.",
   "space.about.remove_failed": "Toast. {error} = technical error text.",
   "space.about.text_hint": "'Markdown' is a text-formatting syntax name — keep it as is.",

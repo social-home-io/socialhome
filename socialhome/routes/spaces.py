@@ -208,7 +208,7 @@ class SpaceCollectionView(BaseView):
                 # The uploaded icon (signed below), else the SPA draws the
                 # emoji or the name's initial.
                 "icon_url": (
-                    f"/api/spaces/{s.id}/icon?v={s.icon_hash}" if s.icon_hash else None
+                    f"api/spaces/{s.id}/icon?v={s.icon_hash}" if s.icon_hash else None
                 ),
                 # "Needs you" — the total the space's More badge shows;
                 # null unless the caller has content authority here.
@@ -336,12 +336,12 @@ class SpaceDetailView(BaseView):
             return web.json_response(_public_space_view(space, count))
         gfs_servers, gfs_unlisted = await self._gfs_listing(space)
         cover_url = (
-            f"/api/spaces/{space.id}/cover?v={space.cover_hash}"
+            f"api/spaces/{space.id}/cover?v={space.cover_hash}"
             if space.cover_hash
             else None
         )
         icon_url = (
-            f"/api/spaces/{space.id}/icon?v={space.icon_hash}"
+            f"api/spaces/{space.id}/icon?v={space.icon_hash}"
             if space.icon_hash
             else None
         )
@@ -1409,7 +1409,7 @@ class SpaceCoverView(BaseView):
             return error_response(403, "FORBIDDEN", str(exc))
         payload = {
             "cover_hash": updated.cover_hash,
-            "cover_url": f"/api/spaces/{space_id}/cover?v={updated.cover_hash}",
+            "cover_url": f"api/spaces/{space_id}/cover?v={updated.cover_hash}",
         }
         signer = self.request.app.get(media_signer_key)
         if signer is not None:
@@ -1473,7 +1473,7 @@ class SpaceIconView(BaseView):
             return error_response(403, "FORBIDDEN", str(exc))
         payload = {
             "icon_hash": updated.icon_hash,
-            "icon_url": f"/api/spaces/{space_id}/icon?v={updated.icon_hash}",
+            "icon_url": f"api/spaces/{space_id}/icon?v={updated.icon_hash}",
         }
         signer = self.request.app.get(media_signer_key)
         if signer is not None:

@@ -8,7 +8,18 @@ let gfsConns: { status: string; id?: string; display_name?: string; inbox_url?: 
 const get = vi.fn(async (u: string) =>
   u === '/api/gfs/connections' ? gfsConns : [],
 )
-vi.mock('@/api', () => ({ api: { get: (...a: unknown[]) => get(...a as [string]), post: (...a: unknown[]) => post(...a) } }))
+const upload = vi.fn()
+vi.mock('@/api', () => ({ api: {
+  get: (...a: unknown[]) => get(...a as [string]),
+  post: (...a: unknown[]) => post(...a),
+  upload: (...a: unknown[]) => upload(...a),
+} }))
+// The bundled Home Assistant logo, as the File a picked picture would be.
+const haFile = new File(['png'], 'home-assistant.png', { type: 'image/png' })
+vi.mock('@/features/spaces/haLogo', () => ({
+  haLogoUrl: '/assets/ha-logo.png',
+  haLogoFile: async () => haFile,
+}))
 vi.mock('@/store/spaces', () => ({ loadSpaces: vi.fn() }))
 vi.mock('./Toast', () => ({ showToast: vi.fn() }))
 vi.mock('@/i18n/i18n', () => ({
@@ -180,6 +191,70 @@ describe('SpaceCreateDialog — after create', () => {
     await act(async () => { fireEvent.input(nameInput(container), { target: { value: 'X' } }) })
     await act(async () => { fireEvent.click(createBtn(container)) })
     await waitFor(() => expect(route).toHaveBeenCalledWith('/spaces/new-2'))
+  })
+})
+
+describe('SpaceCreateDialog — the Home Assistant logo as the picture', () => {
+  beforeEach(() => { post.mockReset(); upload.mockReset(); route.mockReset(); cleanup() })
+
+  const haToggle = (c: Element) =>
+    c.querySelector('.sh-ha-logo-toggle input[type="checkbox"]') as HTMLInputElement
+
+  it('is offered unticked, labelled, with the bundled logo', async () => {
+    const { container } = await open()
+    expect(haToggle(container).checked).toBe(false)
+    const row = container.querySelector('.sh-ha-logo-toggle') as HTMLElement
+    expect(row.textContent).toContain('space.icon.ha_logo')
+    expect(row.querySelector('img')?.getAttribute('src')).toBe('/assets/ha-logo.png')
+  })
+
+  it('ticked: uploads the logo through the ordinary icon upload once the space exists', async () => {
+    post.mockResolvedValue({ id: 'new-ha' })
+    upload.mockResolvedValue({ icon_url: 'x' })
+    const { container } = await open()
+    await act(async () => { fireEvent.input(nameInput(container), { target: { value: 'Smart home' } }) })
+    await act(async () => { fireEvent.click(haToggle(container)) })
+    await act(async () => { fireEvent.click(createBtn(container)) })
+    await waitFor(() => expect(route).toHaveBeenCalledWith('/spaces/new-ha'))
+    expect(upload).toHaveBeenCalledTimes(1)
+    const [path, fd] = upload.mock.calls[0] as [string, FormData]
+    expect(path).toBe('/api/spaces/new-ha/icon')
+    expect(fd.get('file')).toBe(haFile)
+    // No new wire value: the create body is the same as without the logo.
+    expect(post.mock.calls[0][1]).toEqual({
+      name: 'Smart home', space_type: 'private', join_mode: 'invite_only',
+    })
+  })
+
+  it('unticked: no upload', async () => {
+    post.mockResolvedValue({ id: 'new-plain' })
+    const { container } = await open()
+    await act(async () => { fireEvent.input(nameInput(container), { target: { value: 'Plain' } }) })
+    await act(async () => { fireEvent.click(createBtn(container)) })
+    await waitFor(() => expect(route).toHaveBeenCalledWith('/spaces/new-plain'))
+    expect(upload).not.toHaveBeenCalled()
+  })
+
+  it('a failed logo upload is said, and the new space still opens', async () => {
+    post.mockResolvedValue({ id: 'new-fail' })
+    upload.mockRejectedValue(new Error('offline'))
+    const { showToast } = await import('./Toast')
+    ;(showToast as ReturnType<typeof vi.fn>).mockClear()
+    const { container } = await open()
+    await act(async () => { fireEvent.input(nameInput(container), { target: { value: 'X' } }) })
+    await act(async () => { fireEvent.click(haToggle(container)) })
+    await act(async () => { fireEvent.click(createBtn(container)) })
+    await waitFor(() => expect(route).toHaveBeenCalledWith('/spaces/new-fail'))
+    expect(showToast).toHaveBeenCalledWith(expect.stringContaining('space.about.upload_failed'), 'error')
+  })
+
+  it('opening the dialog again starts unticked', async () => {
+    const first = await open()
+    await act(async () => { fireEvent.click(haToggle(first.container)) })
+    expect(haToggle(first.container).checked).toBe(true)
+    first.unmount()
+    const again = await open()
+    expect(haToggle(again.container).checked).toBe(false)
   })
 })
 

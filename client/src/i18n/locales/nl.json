@@ -2059,6 +2059,8 @@
   "space.about.icon_updated": "Pictogram bijgewerkt",
   "space.about.icon_removed": "Pictogram verwijderd",
   "space.about.icon_remove_confirm": "Pictogram verwijderen?",
+  "space.icon.ha_logo": "Logo van Home Assistant gebruiken",
+  "space.icon.ha_logo_sub": "Wordt getoond in plaats van de emoji.",
   "space.about.uploading": "Uploaden…",
   "space.about.remove": "Verwijderen",
   "space.about.upload_failed": "Uploaden mislukt: {error}",

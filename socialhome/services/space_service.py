@@ -3655,7 +3655,7 @@ class SpaceService(
                         space.description if space is not None else None
                     ),
                     "space_icon_url": (
-                        f"/api/spaces/{space.id}/icon?v={space.icon_hash}"
+                        f"api/spaces/{space.id}/icon?v={space.icon_hash}"
                         if space is not None and space.icon_hash
                         else None
                     ),
