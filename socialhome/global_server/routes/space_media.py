@@ -42,6 +42,7 @@ import logging
 from aiohttp import web
 
 from ...domain.gfs_space_media import (
+    SCOPE_SPACE,
     SPACE_MEDIA_AUTH_HEADER,
     InvalidSpaceMediaAuth,
     SpaceMediaUploadAuth,
@@ -139,6 +140,14 @@ class GfsMediaView(GfsBaseView):
             log.debug("space media upload refused: %s", exc)
             return _refused()
         size = claim.size
+        # The fairness owner: a space's owning household; a channel's blob
+        # counts against its UPLOADER's address bucket (a keyed hash —
+        # identity-free), never a seated member (fourth review G1).
+        owner = (
+            ("household", household)
+            if claim.scope == SCOPE_SPACE
+            else ("client", store.client_key(self.client_bucket()))
+        )
         try:
             # Size bucket, caps, the scope's rate slot and the address's
             # byte budget — before any body.
@@ -184,7 +193,7 @@ class GfsMediaView(GfsBaseView):
                 data=data,
                 expires_at=claim.expires_at,
                 reserved=reserved,
-                household=household,
+                owner=owner,
             )
         except MediaRefused as exc:
             return _media_refused(exc)

@@ -52,11 +52,13 @@
 --      public ``media/`` dir);
 --    * ``gfs_space_media_scope_bytes`` — trigger-kept bytes per scope: the
 --      per-scope cap reads it;
---    * ``gfs_space_media_household_bytes`` — trigger-kept bytes per
---      household (a space's owning instance, a channel's oldest seated
---      member household): the fair eviction under the global cap takes the
---      household holding the most first, so many scopes of one household
---      are one share (third review A3);
+--    * ``gfs_space_media_owner_bytes`` — trigger-kept bytes per FAIRNESS
+--      OWNER (a space's owning household, or for a channel the uploader's
+--      client address bucket, a keyed hash): the fair eviction under the
+--      global cap takes the owner holding the most first, so many scopes of
+--      one household are one share (third review A3) and a channel's flood
+--      counts against whoever uploads it, never a seated member (fourth
+--      review G1);
 --    * ``gfs_space_media_totals`` — one trigger-kept row, so the global cap
 --      is a primary-key read, not a scan;
 --    * ``gfs_space_media_uploads`` — accepted uploads per scope per hour;
@@ -86,11 +88,13 @@ CREATE TABLE IF NOT EXISTS gfs_space_media (
     -- Unix seconds of the last fetch, moved at most once an hour per blob;
     -- the upload counts as one, so a fresh blob is not evicted first.
     last_fetched_at  INTEGER NOT NULL,
-    -- The household the scope belongs to — a space's owning instance, a
-    -- channel's oldest seated member household — the key of the cache's
-    -- FAIRNESS: every scope of one household is one share (third review
-    -- A3: publishing more spaces buys a household nothing).
-    household        TEXT NOT NULL
+    -- The FAIRNESS owner the blob counts against: ``household`` + a
+    -- space's owning instance (every space of one household is one share —
+    -- third review A3), or ``client`` + the uploader's keyed address-bucket
+    -- hash for a channel blob (identity-free; a channel's flood counts
+    -- against its uploader, never a seated member — fourth review G1).
+    owner_kind       TEXT NOT NULL CHECK(owner_kind IN ('household', 'client')),
+    owner_id         TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_gfs_space_media_expires
     ON gfs_space_media(expires_at);
@@ -98,18 +102,20 @@ CREATE INDEX IF NOT EXISTS idx_gfs_space_media_expires
 -- fair eviction, a ban's withdrawal).
 CREATE INDEX IF NOT EXISTS idx_gfs_space_media_scope
     ON gfs_space_media(scope_kind, scope_id, last_fetched_at, created_at);
--- A household's blobs, least recently fetched first (the fair eviction).
-CREATE INDEX IF NOT EXISTS idx_gfs_space_media_household
-    ON gfs_space_media(household, last_fetched_at, created_at);
+-- An owner's blobs, least recently fetched first (the fair eviction).
+CREATE INDEX IF NOT EXISTS idx_gfs_space_media_owner
+    ON gfs_space_media(owner_kind, owner_id, last_fetched_at, created_at);
 
--- Bytes each household holds across all its scopes — the fair eviction
--- takes the household holding the most first.
-CREATE TABLE IF NOT EXISTS gfs_space_media_household_bytes (
-    household  TEXT PRIMARY KEY,
-    bytes      INTEGER NOT NULL
+-- Bytes each fairness owner holds across all its blobs — the fair eviction
+-- takes the owner holding the most first.
+CREATE TABLE IF NOT EXISTS gfs_space_media_owner_bytes (
+    owner_kind  TEXT NOT NULL,
+    owner_id    TEXT NOT NULL,
+    bytes       INTEGER NOT NULL,
+    PRIMARY KEY (owner_kind, owner_id)
 );
-CREATE INDEX IF NOT EXISTS idx_gfs_space_media_household_bytes
-    ON gfs_space_media_household_bytes(bytes);
+CREATE INDEX IF NOT EXISTS idx_gfs_space_media_owner_bytes
+    ON gfs_space_media_owner_bytes(bytes);
 
 -- Bytes each scope holds (expired ones count until the sweep drops them).
 CREATE TABLE IF NOT EXISTS gfs_space_media_scope_bytes (
@@ -135,9 +141,9 @@ BEGIN
     INSERT INTO gfs_space_media_scope_bytes(scope_kind, scope_id, bytes)
         VALUES(NEW.scope_kind, NEW.scope_id, NEW.size)
         ON CONFLICT(scope_kind, scope_id) DO UPDATE SET bytes = bytes + NEW.size;
-    INSERT INTO gfs_space_media_household_bytes(household, bytes)
-        VALUES(NEW.household, NEW.size)
-        ON CONFLICT(household) DO UPDATE SET bytes = bytes + NEW.size;
+    INSERT INTO gfs_space_media_owner_bytes(owner_kind, owner_id, bytes)
+        VALUES(NEW.owner_kind, NEW.owner_id, NEW.size)
+        ON CONFLICT(owner_kind, owner_id) DO UPDATE SET bytes = bytes + NEW.size;
 END;
 CREATE TRIGGER IF NOT EXISTS trg_gfs_space_media_del
     AFTER DELETE ON gfs_space_media
@@ -149,10 +155,11 @@ BEGIN
     DELETE FROM gfs_space_media_scope_bytes
         WHERE scope_kind = OLD.scope_kind AND scope_id = OLD.scope_id
         AND bytes <= 0;
-    UPDATE gfs_space_media_household_bytes SET bytes = bytes - OLD.size
-        WHERE household = OLD.household;
-    DELETE FROM gfs_space_media_household_bytes
-        WHERE household = OLD.household AND bytes <= 0;
+    UPDATE gfs_space_media_owner_bytes SET bytes = bytes - OLD.size
+        WHERE owner_kind = OLD.owner_kind AND owner_id = OLD.owner_id;
+    DELETE FROM gfs_space_media_owner_bytes
+        WHERE owner_kind = OLD.owner_kind AND owner_id = OLD.owner_id
+        AND bytes <= 0;
 END;
 
 CREATE TABLE IF NOT EXISTS gfs_space_media_uploads (

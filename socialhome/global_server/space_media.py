@@ -39,14 +39,14 @@ favours new pictures over old ones:
   would pass it, that scope's own **least recently fetched** (then oldest)
   blobs are evicted until it fits;
 * all blobs together stay under ``max_bytes`` (5 GiB): before a new blob is
-  stored, expired blobs go first, then — fair PER HOUSEHOLD, never one
-  global order and never per scope — the least recently fetched (then
-  oldest) blobs of the household holding the most bytes across all its
-  scopes (a space's owning instance, a channel's oldest seated member
-  household), down to the next largest, then again — so a household
-  flooding the cache, with however many spaces or channels, pushes out its
-  own (security review F1, third review A3); only an ACTIVE listed space
-  takes uploads;
+  stored, expired blobs go first, then — fair PER OWNER, never one global
+  order and never per scope — the least recently fetched (then oldest)
+  blobs of the fairness owner holding the most bytes (a space's owning
+  household across all its spaces; a channel blob's uploader address
+  bucket), down to the next largest, then again — so a household flooding
+  the cache with however many spaces, or a channel flooded by its uploader,
+  pushes out its own (security review F1, third review A3, fourth review
+  G1); only an ACTIVE listed space takes uploads;
 * one client address uploads at most ``ip_bytes_per_hour`` (1 GiB) across
   every scope (``429 ip_media_quota``), cluster-wide in the shared database
   under a keyed hash of the address; a channel takes media only while it is
@@ -413,7 +413,7 @@ class GfsSpaceMediaStore:
         now: int | None = None,
         reserved: UploadSlot | None = None,
         client: str | None = None,
-        household: str | None = None,
+        owner: tuple[str, str] | None = None,
     ) -> bool:
         """Keep one blob for the scope. ``True`` when its bytes were stored
         now, ``False`` when they already were (the scope's retry, another
@@ -421,9 +421,10 @@ class GfsSpaceMediaStore:
         *data* (``422 blob_id_mismatch``). *reserved* is the slot
         :meth:`admit_upload` took (given back here when the upload fails or
         stores nothing new); without it this call admits the upload itself
-        (for *client*'s address). *household* is the household the scope
-        belongs to (the auth says which) — the fairness key; without it the
-        scope stands alone. Raises :class:`MediaRefused`."""
+        (for *client*'s address). *owner* is the fairness owner the blob
+        counts against — ``("household", a space's owning instance)`` or
+        ``("client", the uploader's keyed address bucket)`` for a channel;
+        without it the scope stands alone. Raises :class:`MediaRefused`."""
         now = int(time.time()) if now is None else now
         if reserved is None:
             admitted = await self.admit_upload(
@@ -453,7 +454,7 @@ class GfsSpaceMediaStore:
                     data,
                     expires_at,
                     now,
-                    household or f"{scope_kind}:{scope_id}",
+                    owner or ("household", f"{scope_kind}:{scope_id}"),
                 )
         except BaseException:
             await self.release_upload(slot)
@@ -652,7 +653,7 @@ class GfsSpaceMediaStore:
         data: bytes,
         expires_at: int,
         now: int,
-        household: str,
+        owner: tuple[str, str],
     ) -> bool:
         """Under the node's lock: make room, then store — unless the scope
         already holds it (its retry, or another node's concurrent upload of
@@ -671,7 +672,7 @@ class GfsSpaceMediaStore:
                 await self._files.write(blob_id, data)
             return False
         await self._make_room_in_scope(scope_kind, scope_id, size, now)
-        await self._make_room(size, now, household)
+        await self._make_room(size, now, owner)
         await self._files.write(blob_id, data)
         # ``False`` when another node inserted it meanwhile: same scope, same
         # bytes — ours is the coalesced answer.
@@ -684,7 +685,8 @@ class GfsSpaceMediaStore:
                 last_fetched_at=now,
                 scope_kind=scope_kind,
                 scope_id=scope_id,
-                household=household,
+                owner_kind=owner[0],
+                owner_id=owner[1],
             )
         )
 
@@ -715,17 +717,18 @@ class GfsSpaceMediaStore:
                 used -= media.size
             await self._evict(victims, now)
 
-    async def _make_room(self, size: int, now: int, household: str) -> None:
+    async def _make_room(self, size: int, now: int, owner: tuple[str, str]) -> None:
         """Free just enough of the whole cache for *size* more bytes under
-        ``max_bytes``: expired blobs first, then — FAIR PER HOUSEHOLD, never
-        one global order and never per scope — the least recently fetched
-        (then oldest) blobs of the household holding the most bytes across
-        all its scopes, counting the uploader's household with the blob it
-        is storing (a tie takes the uploader's own), until it is down to the
-        next largest, then again. So a household flooding the cache — however
-        many spaces or channels it uses — pushes out its own blobs, and every
-        other household keeps its share (security review F1, third review
-        A3)."""
+        ``max_bytes``: expired blobs first, then — FAIR PER OWNER, never one
+        global order and never per scope — the least recently fetched (then
+        oldest) blobs of the fairness owner holding the most bytes (a
+        space's owning household across all its spaces; a channel blob's
+        uploader address bucket), counting the uploader's owner with the
+        blob it is storing (a tie takes the uploader's own), until it is down
+        to the next largest, then again. So a household flooding the cache —
+        however many spaces it publishes — or a channel flooded by its
+        uploader pushes out its own blobs, and every other owner keeps its
+        share (security review F1, third review A3, fourth review G1)."""
         for _ in range(EVICT_MAX_ROUNDS):
             _, total = await self._repo.totals()
             if total + size <= self._limits.max_bytes:
@@ -735,13 +738,16 @@ class GfsSpaceMediaStore:
                 picked = self._just_enough(expired, total, size, floor=None)
                 await self._drop([m.blob_id for m in picked])
                 continue
-            held = {h: b for h, b in await self._repo.largest_households(limit=2)}
-            held[household] = await self._repo.household_bytes(household) + size
-            # The largest first; on a tie, the uploader's own household.
-            ranked = sorted(held.items(), key=lambda hb: (-hb[1], hb[0] != household))
+            held = {
+                (kind, oid): b
+                for kind, oid, b in await self._repo.largest_owners(limit=2)
+            }
+            held[owner] = await self._repo.owner_bytes(*owner) + size
+            # The largest first; on a tie, the uploader's own owner.
+            ranked = sorted(held.items(), key=lambda ob: (-ob[1], ob[0] != owner))
             victims: list[GfsSpaceMedia] = []
-            for i, (victim, victim_bytes) in enumerate(ranked):
-                batch = await self._repo.household_lru(victim, limit=EVICT_BATCH)
+            for i, ((kind, oid), victim_bytes) in enumerate(ranked):
+                batch = await self._repo.owner_lru(kind, oid, limit=EVICT_BATCH)
                 if not batch:
                     continue  # the uploader's first blob: nothing of its own
                 floor = ranked[i + 1][1] if i + 1 < len(ranked) else 0
@@ -749,7 +755,7 @@ class GfsSpaceMediaStore:
                     batch, total, size, floor=(victim_bytes, floor)
                 )
                 break
-            if not victims:  # pragma: no cover - some household holds bytes
+            if not victims:  # pragma: no cover - some owner holds bytes
                 return
             await self._evict(victims, now)
 
@@ -762,8 +768,8 @@ class GfsSpaceMediaStore:
         floor: tuple[int, int] | None,
     ) -> list[GfsSpaceMedia]:
         """The first blobs of *batch* that bring the total under the cap —
-        at least one; with *floor* ``(household bytes, next largest)``, stop
-        once the household is down to the next largest."""
+        at least one; with *floor* ``(owner bytes, next largest)``, stop
+        once the owner is down to the next largest."""
         picked: list[GfsSpaceMedia] = []
         freed = 0
         for media in batch:

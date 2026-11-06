@@ -1135,3 +1135,54 @@ async def test_six_self_seated_channels_buy_one_household_share(gfs):
             assert r.status == 201
     alive = [(await gfs.get(u)).status for u in victim_urls]
     assert alive.count(200) >= 3, alive
+
+
+# ── Fourth review G1: channel blobs count against the uploader ───────────
+
+
+@pytest.mark.parametrize(
+    "gfs",
+    [{"space_media_max_bytes": 6 * SMALL, "space_media_space_max_bytes": 64 * SMALL}],
+    indirect=True,
+)
+async def test_a_hostile_channel_owner_cannot_evict_its_members_own_blobs(gfs):
+    """G1 probe: a hostile private-space owner invites the victim household
+    (its only seat — the owner never takes one) and fills the channel. The
+    channel's blobs count against the UPLOADER's address bucket, not the
+    seated victim, so the owner's flood evicts its own blobs and the
+    victim's own space keeps its pictures."""
+    await _active(gfs, "victim")
+    victim_seed = await _own_space(gfs, "sp-victim", household="victim")
+    victim_xff = {"X-Forwarded-For": "198.51.100.20"}
+    mine = [os.urandom(SMALL) for _ in range(2)]
+    for v in mine:
+        r = await gfs.put(
+            _put_url(v, "sp-victim"),
+            data=v,
+            headers={
+                **_authority_header(_claim(v, space="sp-victim"), victim_seed),
+                **victim_xff,
+            },
+        )
+        assert r.status == 201
+    mine_urls = [f"/gfs/media/{_bid(v)}" for v in mine]
+    for v in [os.urandom(SMALL) for _ in range(2)]:
+        await gfs.put(
+            _put_url(v),
+            data=v,
+            headers={**_authority_header(_claim(v)), "X-Forwarded-For": "192.0.2.30"},
+        )
+    cid, seed = await _seated_channel(gfs, ["victim"], joined=int(time.time()))
+    for _ in range(4):
+        junk = os.urandom(SMALL)
+        claim = _claim(junk, space=cid, scope=SCOPE_CHANNEL)
+        r = await gfs.put(
+            _ch_url(junk, cid),
+            data=junk,
+            headers={
+                **_channel_header(claim, seed=seed),
+                "X-Forwarded-For": "203.0.113.40",
+            },
+        )
+        assert r.status == 201
+    assert [(await gfs.get(u)).status for u in mine_urls] == [200, 200]

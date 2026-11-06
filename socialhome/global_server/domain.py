@@ -363,9 +363,11 @@ class GfsSpaceMedia:
     #: opaque v_51 channel).
     scope_kind: str = "space"
     scope_id: str = ""
-    #: The household the scope belongs to (a space's owning instance, a
-    #: channel's oldest seated member household): the fairness key.
-    household: str = ""
+    #: The fairness owner it counts against: ``("household", a space's
+    #: owning instance)`` or ``("client", the uploader's keyed address-bucket
+    #: hash)`` for a channel blob.
+    owner_kind: str = "household"
+    owner_id: str = ""
 
 
 @dataclass(slots=True, frozen=True)

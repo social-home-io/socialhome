@@ -909,7 +909,7 @@ async def test_eviction_is_fair_per_household_not_per_scope(make, repo):
             data=data,
             expires_at=now + 86_400,
             now=now,
-            household=household,
+            owner=("household", household),
         )
 
     victim = [_blob() for _ in range(4)]
@@ -920,4 +920,4 @@ async def test_eviction_is_fair_per_household_not_per_scope(make, repo):
     kept = [await store.read(_bid(v), now=NOW + 30) for v in victim]
     assert sum(k is not None for k in kept) == 3
     held = await repo.get_blob(_bid(victim[-1]))
-    assert held.household == "home"
+    assert (held.owner_kind, held.owner_id) == ("household", "home")

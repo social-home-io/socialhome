@@ -150,9 +150,10 @@ class GfsSpaceMediaAuth:
         blob_id: str,
     ) -> str:
         """Raise :class:`PermissionError` unless *auth* lets its holder put
-        *blob_id* into the scope the claim names. Returns the household the
-        scope belongs to — a space's owning instance, a channel's oldest
-        seated member household — the cache's fairness key. Every refusal
+        *blob_id* into the scope the claim names. Returns the space's owning
+        household — the cache's fairness key — or ``""`` for a channel (its
+        blobs count against their uploader's address bucket, which the route
+        knows). Every refusal
         costs the verifications a success of that kind makes."""
         with counting_ed25519_verifies() as done:
             try:
@@ -210,8 +211,8 @@ class GfsSpaceMediaAuth:
             # The scope first (its refusal is topped up by the caller): a
             # channel must be IN USE — a member household holds a seat —
             # for every kind, the channel key's included (registration is
-            # anonymous); that household is its fairness key.
-            household = await self._channels.media_household(scope_id)
+            # anonymous).
+            await self._channels.require_channel_in_use(scope_id)
         elif auth.kind != AUTH_AUTHORITY:
             space = _active(await self._federation.listed_space(scope_id))
             household = space.owning_instance

@@ -99,10 +99,10 @@ keeps encrypted blobs as files under `<data_dir>/space_media/` (not under the pu
 rows in the shared `gfs.db`, so every node must mount the **same** data dir:
 whichever node took an upload, any node serves the fetch. Size
 `max_bytes` (default 5 GiB) to the disk that volume has — it is a cache, so
-the household holding the most bytes — across all its spaces and channels —
-loses its own least recently fetched blobs first when it is full — never
-one global order and never per scope, so one household can't flush the
-others with many spaces (and a space or channel past `space_max_bytes` evicts
+the owner holding the most bytes — a household across all its spaces, or
+for channel blobs the uploader's address — loses its own least recently
+fetched blobs first when it is full — never one global order and never per
+scope, so one household can't flush the others with many spaces (and a space or channel past `space_max_bytes` evicts
 its own least recently fetched). One client address uploads at most
 `ip_bytes_per_hour` (1 GiB) an hour across every scope, counted cluster-wide
 in `gfs.db`. A private space's channel takes media while a member household
