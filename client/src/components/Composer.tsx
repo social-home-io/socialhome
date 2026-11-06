@@ -640,27 +640,16 @@ export function Composer({ onSubmit, context, tier, placeholder, spaceId, allowe
           ))}
           {images.length < MAX_IMAGES && (
             /*
-             * ``<label>`` wraps the file input so the user-gesture
-             * flows straight into the chooser via the platform's
-             * native label semantics — see ``MediaDropzone`` for the
-             * full rationale. The synthetic ``inputRef.current.click()``
-             * pattern opened the picker but, on the HA Android
-             * Companion App's WebView, the resulting
-             * ``onShowFileChooser`` URI didn't always propagate back
-             * to ``input.files`` — the picker closed and "nothing
-             * happened". The wrap pattern matches every other working
-             * file-picker surface in the SPA.
+             * ``<label>`` wraps the file input so the tap flows straight
+             * into the chooser (native label semantics).
              */
             <label class="sh-composer-image-add">
               <span aria-hidden="true">＋</span>
               <span>{t('composer.add_photo')}</span>
               {/*
-               * Single-pick + specific MIME list for the same
-               * HA-Android-WebView reason documented on the
-               * MediaDropzone usage above. The user picks one
-               * photo per "+ Add photo" tap; the tile stays
-               * available until ``MAX_IMAGES`` so multiple
-               * additions still work, just one chooser at a time.
+               * One photo per "+ Add photo" tap; the tile stays until
+               * ``MAX_IMAGES``. (The HA Android "pick → nothing" bug
+               * was ``multiple`` — see ``utils/filePicker.ts``.)
                */}
               <input
                 type="file"
@@ -697,20 +686,10 @@ export function Composer({ onSubmit, context, tier, placeholder, spaceId, allowe
         && uploadProgress.value === null
         && (postType.value === 'image' ? images.length === 0 : !mediaUrl) && (
         /*
-         * Picker is single-pick + specific image MIME list (not
-         * ``multiple`` + ``image/*``) on the picker path because the
-         * HA Android Companion App's WebView ``WebChromeClient`` was
-         * suppressing the chooser's result callback in
-         * multi-select / ``image/*`` mode (Google Photos picker) —
-         * the user picked a photo, the picker closed, and the
-         * input's ``change`` event never fired, so the diagnostic
-         * toast for empty files didn't even surface. The DM
-         * thread's paperclip (no ``accept``, no ``multiple``)
-         * works on the same device, which is the structural
-         * difference this aligns with. Drag-and-drop still
-         * accepts multiple files via ``DataTransfer.files`` — only
-         * the chooser path is single-pick. The "+ Add photo" tile
-         * lets the user stack multiple images one at a time.
+         * Single-pick on the chooser path; drag-and-drop still takes
+         * several files. A multi-pick input must use
+         * ``fileInputMultiple()`` (``utils/filePicker.ts``): the HA
+         * Android app before 2026.11.1 drops multi-picks.
          */
         <MediaDropzone
           multiple={false}

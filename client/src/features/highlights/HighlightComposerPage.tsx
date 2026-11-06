@@ -29,6 +29,7 @@ import { api } from '@/api'
 import { Button } from '@/components/Button'
 import { EmojiPickButton } from '@/components/EmojiPickButton'
 import { MediaDropzone } from '@/components/MediaDropzone'
+import { fileInputMultiple } from '@/utils/filePicker'
 import { showToast } from '@/components/Toast'
 import { UploadProgressBar, uploadWithProgress } from '@/components/UploadProgress'
 import { describeUploadError } from '@/utils/uploadErrors'
@@ -322,7 +323,7 @@ export default function HighlightComposerPage() {
       <span>{t('highlight.composer.add_tile')}</span>
       <input
         type="file"
-        multiple
+        multiple={fileInputMultiple()}
         accept="image/*,video/*"
         class="sr-only"
         disabled={framesLeft <= 0}
@@ -345,7 +346,7 @@ export default function HighlightComposerPage() {
         <div class="sh-hlc__preview">
           {current === null ? (
             <MediaDropzone
-              multiple
+              multiple={fileInputMultiple()}
               accept="image/*,video/*"
               disabled={framesLeft <= 0}
               hint={t('highlight.composer.drop_hint')}

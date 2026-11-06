@@ -101,25 +101,12 @@ export function MediaDropzone({
     >
       <span>{dragActive ? draggingHint : hint}</span>
       {/*
-        ``<label>`` wraps the file input so the user's tap on the
-        affordance flows directly into the chooser via the
-        platform's native label semantics — no synthetic JS
-        ``.click()`` indirection. This is the pattern every other
-        working file-input site in the SPA uses already
-        (``SpaceSettingsPage``, ``SettingsPage``,
-        ``SpaceProfileDialog``, ``BazaarCreateDialog``,
-        ``CalendarEventDialog``). The previous shape — a separate
-        ``<button onClick={() => inputRef.current?.click()}>`` —
-        opened the picker on the HA Android Companion App's
-        WebView but the chooser result didn't always make it back
-        into ``input.files``: picker closed, nothing happened.
-        DM thread's paperclip uses the same synthetic-click pattern
-        and DOES work, which weakens the "synthetic click is the
-        bug" theory; the empty-files diagnostic toast in
-        ``onPicked`` is what tells us which failure mode this
-        actually is (URI dropped vs. ``change`` never firing).
-        ``.sr-only`` keeps the input 1×1 px offscreen so the
-        chooser callback still fires reliably.
+        ``<label>`` wraps the file input so the user's tap flows
+        straight into the chooser (native label semantics).
+        ``multiple`` comes from the caller via ``fileInputMultiple()``
+        (``utils/filePicker.ts``): the HA Android app before 2026.11.1
+        drops a multi-pick — "picker closed, nothing happened".
+        ``.sr-only`` keeps the input 1×1 px offscreen.
 
         Disabled visual feedback comes from the parent
         ``.sh-mediadrop--disabled`` class (opacity 0.5, cursor
