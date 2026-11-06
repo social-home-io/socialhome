@@ -73,6 +73,7 @@ class BlobFiles(Protocol):
     async def write(self, blob_id: str, data: bytes) -> None: ...
     async def read(self, blob_id: str) -> bytes | None: ...
     async def remove(self, blob_id: str) -> None: ...
+    async def scan(self, *, limit: int) -> list[tuple[str, float]]: ...
 
 
 class FsBlobFiles:
@@ -111,6 +112,22 @@ class FsBlobFiles:
 
     async def remove(self, blob_id: str) -> None:
         await self._discard(self._path(blob_id))
+
+    async def scan(self, *, limit: int) -> list[tuple[str, float]]:
+        """Up to *limit* ``(name, mtime)`` of what the directory holds —
+        blobs and temporary files — for the orphan sweep."""
+        try:
+            names = await aiofiles.os.listdir(self._dir)
+        except FileNotFoundError:
+            return []
+        out: list[tuple[str, float]] = []
+        for name in names[:limit]:
+            try:
+                st = await aiofiles.os.stat(self._dir / name)
+            except FileNotFoundError:
+                continue
+            out.append((name, float(st.st_mtime)))
+        return out
 
     async def _discard(self, path: Path) -> None:
         try:

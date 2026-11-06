@@ -9,8 +9,11 @@ Two upload scopes, one public fetch:
   The raw blob is the body; the authorization rides in the
   ``X-SH-Space-Media-Auth`` header (:mod:`socialhome.domain.gfs_space_media`)
   and is checked BEFORE the body is read, which is then read up to exactly
-  the signed ``size`` (413 past it). ``201 {"stored": true}``; a re-upload of
-  a held blob is ``200 {"stored": false, "status": "already_stored"}``.
+  the signed ``size`` (413 past it). ``201 {"stored": true}``; the same
+  bytes again — a retry, or another scope's upload, which adds that scope's
+  claim — are ``200 {"stored": false, "status": "already_stored"}`` (never a
+  conflict, and never a fresher expiry for the scope that already held it).
+  ``503 space_media_disabled`` while the operator has the cache off.
 * ``GET /gfs/media/{blob_id}`` — anyone fetches a blob by address:
   ciphertext only, no credentials, readable cross-origin. The path names no
   scope, so neither an access log nor a CDN cache key tells which space or
@@ -21,7 +24,8 @@ Two upload scopes, one public fetch:
   only by holders of the space key). A miss is ``404`` with ``no-store``, so
   a blob uploaded a moment later is not hidden behind a cached miss.
 * ``POST …/media/{blob_id}/delete`` (both scopes) — the scope's seed holder
-  withdraws a blob: ``{ts, sig, sig_suite}`` (space authority / channel key).
+  withdraws its claim: ``{ts, sig, sig_suite}`` (space authority / channel
+  key); the blob goes when no other scope still claims it.
 
 Every authorization failure (unknown / banned space, unknown channel, wrong
 key, stale ts, bad cert…) is ONE ``403`` body — no oracle — with the reason
@@ -92,6 +96,12 @@ class _ScopedMediaView(GfsBaseView):
     async def put(self) -> web.Response:
         scope_id = self._scope_id()
         blob_id = self.match("blob_id")
+        store = self.svc(K.gfs_space_media_store_key)
+        try:
+            # The operator turned the cache off: a clear 503 before any work.
+            store.require_enabled()
+        except MediaRefused as exc:
+            return _media_refused(exc)
         try:
             auth = SpaceMediaUploadAuth.from_header(
                 self.request.headers.get(SPACE_MEDIA_AUTH_HEADER, "")
@@ -112,7 +122,6 @@ class _ScopedMediaView(GfsBaseView):
                 exc,
             )
             return _refused()
-        store = self.svc(K.gfs_space_media_store_key)
         size = auth.claim.size
         try:
             store.admit_size(size)

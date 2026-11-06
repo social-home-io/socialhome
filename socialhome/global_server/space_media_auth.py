@@ -69,10 +69,12 @@ from ..domain.gfs_space_media import (
     media_delete_payload,
     require_space_media_sig_suite,
 )
+from .federation import TIMING_UNIFORM_DUMMY_KEY_HEX, TIMING_UNIFORM_DUMMY_SIG
 from .public import ClientIpResolver, build_window_limiter
 
 if TYPE_CHECKING:
     from .channels import GfsChannelService
+    from .domain import GlobalSpace
     from .federation import GfsFederationService
     from .member_publish import GfsMemberPublishService
 
@@ -80,6 +82,17 @@ if TYPE_CHECKING:
 #: signature work (the per-scope caps need an authorized request first).
 #: A busy household uploads a handful of pictures per post.
 SPACE_MEDIA_MAX_PER_MINUTE_PER_IP: int = 120
+
+#: Ed25519 verifications each lookup-gated kind makes once its scope is
+#: found — what an early refusal burns instead.
+_VERIFIES_BY_KIND: dict[str, int] = {
+    AUTH_CHANNEL: 1,
+    AUTH_CHANNEL_CERT: 2,
+    AUTH_WRITER_CERT: 2,
+    AUTH_WRITER_KEY: 1,
+}
+
+_BURN_MESSAGE: bytes = b"space-media-timing-burn"
 
 #: How far an upload's or delete's ``ts`` may be from this server's clock —
 #: the window of every signed household request.
@@ -125,6 +138,20 @@ class GfsSpaceMediaAuth:
         if auth.kind not in AUTH_KINDS_BY_SCOPE.get(scope_kind, frozenset()):
             raise PermissionError("authorization kind not taken for this scope")
         self._require_fresh(claim.ts)
+        space: GlobalSpace | None = None
+        if auth.kind != AUTH_AUTHORITY:
+            # The scope lookup first, and a refusal costs what the skipped
+            # verifications would have, so timing doesn't tell which spaces
+            # are listed or banned, or which channels exist (the authority
+            # path burns its own in ``verify_space_authority``).
+            try:
+                if scope_kind == SCOPE_SPACE:
+                    space = await self._federation.listed_space(scope_id)
+                else:
+                    await self._channels.require_channel(scope_id)
+            except PermissionError:
+                _burn_verifies(_VERIFIES_BY_KIND[auth.kind])
+                raise
         if auth.kind == AUTH_AUTHORITY:
             await self._federation.verify_space_authority(
                 scope_id,
@@ -147,7 +174,8 @@ class GfsSpaceMediaAuth:
             raise PermissionError("writer upload without an epoch")
         message = claim.writer_signing_bytes(kind=auth.kind, epoch=auth.epoch)
         if auth.kind == AUTH_WRITER_CERT and auth.writer_cert is not None:
-            space = await self._federation.listed_space(scope_id)
+            if space is None:  # pragma: no cover - looked up above
+                raise PermissionError("space not looked up")
             author_pk = self._cert_holder(auth, auth.writer_cert.instance_pk, message)
             await self._member_publish.verify_writer_cert(
                 space, auth.writer_cert, epoch=auth.epoch, author_pk=author_pk
@@ -160,7 +188,6 @@ class GfsSpaceMediaAuth:
             )
             return
         if auth.kind == AUTH_WRITER_KEY and scope_kind == SCOPE_SPACE:
-            await self._federation.listed_space(scope_id)
             await self._member_publish.verify_writer_key_sig(
                 scope_id,
                 epoch=auth.epoch,
@@ -238,6 +265,14 @@ class GfsSpaceMediaAuth:
     def _require_fresh(self, ts: int) -> None:
         if abs(ts - self._clock()) > SPACE_MEDIA_TS_SKEW_S:
             raise PermissionError("stale or future timestamp")
+
+
+def _burn_verifies(n: int) -> None:
+    """Make *n* throw-away Ed25519 verifications against the fixed dummy key
+    the other early-refusal paths use; the result is discarded."""
+    key = bytes.fromhex(TIMING_UNIFORM_DUMMY_KEY_HEX)
+    for _ in range(n):
+        verify_ed25519(key, _BURN_MESSAGE, TIMING_UNIFORM_DUMMY_SIG)
 
 
 def is_space_media_write_path(path: str) -> bool:

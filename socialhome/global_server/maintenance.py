@@ -194,12 +194,12 @@ class GfsMaintenanceScheduler:
                 )
         if self._space_media is not None:
             try:
-                spaces = await self._space_media.prune_expired(now)
+                spaces = await self._space_media.sweep(now)
                 if spaces:
                     log.debug("gfs maintenance: dropped %d expired space blobs", spaces)
             except Exception as exc:
                 log.warning(
-                    "gfs maintenance: prune space media failed: %s",
+                    "gfs maintenance: sweep space media failed: %s",
                     exc,
                     exc_info=True,
                 )

@@ -75,3 +75,18 @@ async def test_fs_blob_files_concurrent_writes_of_one_blob_stay_whole(tmp_path):
     await asyncio.gather(*(files.write(bid, data) for _ in range(4)))
     assert await files.read(bid) == data
     assert [p.name for p in tmp_path.iterdir()] == [bid]
+
+
+async def test_fs_blob_files_scan_lists_names_and_mtimes(tmp_path):
+    files = bs.FsBlobFiles(tmp_path / "x")
+    assert await files.scan(limit=10) == []
+    data = _padded()
+    await files.write(blob_id_of(data), data)
+    (tmp_path / "x" / ".stale.part").write_bytes(b"x")
+    got = await files.scan(limit=10)
+    assert sorted(name for name, _ in got) == [".stale.part", blob_id_of(data)]
+    assert all(isinstance(mtime, float) for _, mtime in got)
+    assert len(await files.scan(limit=1)) == 1
+    # A temporary file is removed by name like a blob.
+    await files.remove(".stale.part")
+    assert [n for n, _ in await files.scan(limit=10)] == [blob_id_of(data)]

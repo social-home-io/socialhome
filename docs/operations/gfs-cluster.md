@@ -104,8 +104,12 @@ channel past `space_max_bytes` evicts its own least recently fetched), and
 nothing lives past `ttl_seconds` (3 days). Behind Cloudflare a fetch (`GET /gfs/media/{blob}`) is
 `Cache-Control: public, max-age=3600, immutable`, so the edge absorbs
 repeated reads; a miss is `no-store`. Set `max_bytes = 0` (or
-`GFS_SPACE_MEDIA_MAX_BYTES=0`) to turn the cache off — it is then no longer
-advertised in `/gfs/info`. The admin overview (`GET /admin/api/overview`,
+`GFS_SPACE_MEDIA_MAX_BYTES=0`) to turn the cache off — uploads then answer
+`503 space_media_disabled` and it is no longer advertised in `/gfs/info`.
+Concurrent uploads on several nodes may briefly hold the total above
+`max_bytes` by the blobs in flight (a few × 8 MiB); leave that much disk
+headroom. The hourly sweep also removes files left without a row (a crash
+mid-upload) and stale `.part` files older than 10 minutes. The admin overview (`GET /admin/api/overview`,
 `space_media`) shows the blobs and bytes held and this node's evictions and
 quota refusals.
 

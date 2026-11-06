@@ -8,7 +8,8 @@
 -- padded to a size bucket) and uploads the ciphertext once per GFS; readers
 -- fetch it here by its SHA-256. This server can't open it, and keeps it only
 -- as a CACHE: a short life (``[space_media] ttl_seconds``, 3 days), a total
--- byte cap and a per-scope cap, both with least-recently-fetched eviction.
+-- byte cap and a per-scope cap, both with least-recently-fetched eviction,
+-- and an upload rate per scope.
 -- A scope is a listed space, or a private space's opaque channel (v_51) —
 -- so invite-link members of a private space get its pictures too, while
 -- this server still knows that space only as a random channel id.
@@ -28,33 +29,42 @@
 --    quota, lifetime and delete rules are the author's; bending them would
 --    change moments); carrying the bytes in the space item (every item would
 --    carry up to 8 MB through each follower's socket and queue, and the
---    envelope relay caps a sealed frame at 191 KiB); keeping the index in
---    memory (four nodes share one data dir — each must serve what another
---    took, and a restart must not orphan files); no metadata at all, files
---    only (expiry, per-space quota and LRU eviction would need a directory
---    scan per upload).
--- 3. Smallest change: one table of metadata, the bytes are files under
---    ``media_dir/spaces/`` named by their SHA-256. One ``(scope_kind,
---    scope_id)`` pair rather than a table per scope: the cache, its caps and
---    its eviction are the same for both. No foreign key to
---    ``global_spaces`` / ``gfs_channels``: a cascade would drop rows and
---    orphan their files;
---    rows and files go together through the store (expiry sweep, eviction,
---    the space authority's delete), and nothing lives past the TTL.
+--    envelope relay caps a sealed frame at 191 KiB); keeping the index or the
+--    upload counts in memory (four nodes share one data dir — each must serve
+--    what another took and count what another accepted, and a restart must
+--    not orphan files or reset a rate); no metadata at all, files only
+--    (expiry, per-scope caps and LRU eviction would need a directory scan per
+--    upload); counting the upload rate from the blob rows (eviction and
+--    delete remove rows, so a scope could upload without bound by evicting
+--    or deleting its own blobs); one owner scope per blob (whoever uploaded a
+--    blob first would own it — a party that saw a public blob could pre-claim
+--    it under its own space, then delete it from under the real one).
+-- 3. Smallest change, all new tables, no change to an existing one:
+--    * ``gfs_space_media`` — one row per stored blob (the bytes are files
+--      under ``media_dir/spaces/`` named by their SHA-256);
+--    * ``gfs_space_media_claims`` — which scopes hold each blob; identical
+--      bytes uploaded for another scope add a claim, never a copy, and a
+--      blob's file goes only when its last claim does;
+--    * ``gfs_space_media_uploads`` — accepted uploads per scope per hour,
+--      the rate limit's own count (two buckets live, the sweep drops older);
+--    * ``gfs_space_media_totals`` — one row kept by triggers, so the total
+--      the global cap checks on every upload is a primary-key read, not a
+--      scan.
+--    One ``(scope_kind, scope_id)`` pair rather than a table per scope: the
+--    cache, its caps and its eviction are the same for both. No foreign key
+--    to ``global_spaces`` / ``gfs_channels``: a cascade would drop rows and
+--    orphan their files; rows and files go together through the store
+--    (expiry sweep, eviction, a seed holder's delete), the sweep removes any
+--    file left without a row, and nothing lives past the TTL.
 CREATE TABLE IF NOT EXISTS gfs_space_media (
     -- sha256 of the blob, lowercase hex — the blob's address and file name.
     blob_id          TEXT PRIMARY KEY,
-    -- Whose blob it is — the quota and delete key: a listed space
-    -- (``space`` + its id) or a private space's opaque v_51 channel
-    -- (``channel`` + the random channel id; this server never learns that
-    -- channel's space).
-    scope_kind       TEXT NOT NULL CHECK(scope_kind IN ('space', 'channel')),
-    scope_id         TEXT NOT NULL,
     -- Ciphertext bytes (a padded bucket + nonce + tag).
     size             INTEGER NOT NULL CHECK(size > 0),
     -- Unix seconds.
     created_at       INTEGER NOT NULL,
-    -- Unix seconds; never beyond created_at + the operator's TTL.
+    -- Unix seconds: the latest expiry of its claims, never beyond the
+    -- operator's TTL from when that claim was made.
     expires_at       INTEGER NOT NULL,
     -- Unix seconds of the last fetch, moved at most once an hour per blob;
     -- the upload counts as one, so a fresh blob is not evicted first.
@@ -62,7 +72,53 @@ CREATE TABLE IF NOT EXISTS gfs_space_media (
 );
 CREATE INDEX IF NOT EXISTS idx_gfs_space_media_expires
     ON gfs_space_media(expires_at);
-CREATE INDEX IF NOT EXISTS idx_gfs_space_media_scope
-    ON gfs_space_media(scope_kind, scope_id, last_fetched_at, created_at);
 CREATE INDEX IF NOT EXISTS idx_gfs_space_media_lru
     ON gfs_space_media(last_fetched_at, created_at);
+
+CREATE TABLE IF NOT EXISTS gfs_space_media_claims (
+    blob_id      TEXT NOT NULL,
+    -- A listed space (``space`` + its id) or a private space's opaque v_51
+    -- channel (``channel`` + the random channel id; this server never
+    -- learns that channel's space). The quota and delete key.
+    scope_kind   TEXT NOT NULL CHECK(scope_kind IN ('space', 'channel')),
+    scope_id     TEXT NOT NULL,
+    -- The blob's size, kept here so a scope's live bytes are an index read.
+    size         INTEGER NOT NULL CHECK(size > 0),
+    created_at   INTEGER NOT NULL,
+    -- This scope's hold; never beyond created_at + the operator's TTL.
+    expires_at   INTEGER NOT NULL,
+    PRIMARY KEY (blob_id, scope_kind, scope_id)
+);
+-- A scope's live bytes (covering: SUM(size) WHERE expires_at > now).
+CREATE INDEX IF NOT EXISTS idx_gfs_space_media_claims_scope
+    ON gfs_space_media_claims(scope_kind, scope_id, expires_at, size);
+
+CREATE TABLE IF NOT EXISTS gfs_space_media_uploads (
+    scope_kind   TEXT NOT NULL CHECK(scope_kind IN ('space', 'channel')),
+    scope_id     TEXT NOT NULL,
+    -- unix seconds // 3600
+    hour_bucket  INTEGER NOT NULL,
+    count        INTEGER NOT NULL CHECK(count >= 0),
+    PRIMARY KEY (scope_kind, scope_id, hour_bucket)
+);
+CREATE INDEX IF NOT EXISTS idx_gfs_space_media_uploads_bucket
+    ON gfs_space_media_uploads(hour_bucket);
+
+CREATE TABLE IF NOT EXISTS gfs_space_media_totals (
+    id      INTEGER PRIMARY KEY CHECK(id = 1),
+    blobs   INTEGER NOT NULL,
+    bytes   INTEGER NOT NULL
+);
+INSERT OR IGNORE INTO gfs_space_media_totals(id, blobs, bytes) VALUES(1, 0, 0);
+CREATE TRIGGER IF NOT EXISTS trg_gfs_space_media_totals_ins
+    AFTER INSERT ON gfs_space_media
+BEGIN
+    UPDATE gfs_space_media_totals
+       SET blobs = blobs + 1, bytes = bytes + NEW.size WHERE id = 1;
+END;
+CREATE TRIGGER IF NOT EXISTS trg_gfs_space_media_totals_del
+    AFTER DELETE ON gfs_space_media
+BEGIN
+    UPDATE gfs_space_media_totals
+       SET blobs = blobs - 1, bytes = bytes - OLD.size WHERE id = 1;
+END;

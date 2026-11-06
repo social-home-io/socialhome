@@ -389,6 +389,8 @@ async def test_info_advertises_the_cache_in_the_signed_block(gfs):
     assert body["capabilities"]["space_media"] == {
         "max_blob_bytes": MAX_BLOB_BYTES,
         "ttl_s": 3 * 86_400,
+        "space_max_bytes": 256 * 1024**2,
+        "space_uploads_per_hour": 300,
         "scopes": ["channel", "space"],
     }
     assert verify_capabilities(
@@ -432,8 +434,8 @@ async def test_a_channel_key_upload_is_fetched_by_address(gfs):
     g = await gfs.get(_get_url(data))
     assert g.status == 200
     assert await g.read() == data
-    row = await gfs.app_[gfs_space_media_store_key]._repo.get(blob_id_of(data))
-    assert (row.scope_kind, row.scope_id) == ("channel", CHANNEL)
+    claims = await gfs.app_[gfs_space_media_store_key]._repo.claims_of(blob_id_of(data))
+    assert [(c.scope_kind, c.scope_id) for c in claims] == [("channel", CHANNEL)]
 
 
 async def test_a_channel_cert_holder_uploads(gfs):
@@ -512,6 +514,47 @@ async def test_the_channel_key_deletes_a_blob(gfs):
     )
     assert bad.status == 403
     assert await bad.json() == _REFUSED
+    r = await gfs.post(_ch_url(data) + "/delete", json=_channel_delete_body(data))
+    assert await r.json() == {"deleted": True}
+    assert (await gfs.get(_get_url(data))).status == 404
+
+
+# ── Review fixes: disabled cache, claims across scopes ───────────────────
+
+
+@pytest.mark.parametrize("gfs", [{"space_media_max_bytes": 0}], indirect=True)
+async def test_a_turned_off_cache_answers_503_before_anything(gfs):
+    data = os.urandom(SMALL)
+    # Even an unauthenticated upload gets the clear answer — not a 403/413.
+    r = await gfs.put(_put_url(data), data=data, headers={})
+    assert r.status == 503
+    assert await r.json() == {"error": "space_media_disabled"}
+    r = await gfs.put(
+        _ch_url(data), data=data, headers=_channel_header(_ch_claim(data))
+    )
+    assert r.status == 503
+    stats = await gfs.app_[gfs_space_media_store_key].stats()
+    assert (stats["refused_too_large"], stats["refused_quota"]) == (0, 0)
+
+
+async def test_identical_bytes_from_another_scope_coalesce_and_survive_its_delete(gfs):
+    """No address squatting: a scope that uploaded a blob first can't take
+    it away from another scope that uploads the same bytes."""
+    data = os.urandom(SMALL)
+    r = await gfs.put(
+        _put_url(data), data=data, headers=_authority_header(_claim(data))
+    )
+    assert r.status == 201
+    r = await gfs.put(
+        _ch_url(data), data=data, headers=_channel_header(_ch_claim(data))
+    )
+    assert r.status == 200
+    assert await r.json() == {"stored": False, "status": "already_stored"}
+    r = await gfs.post(_put_url(data) + "/delete", json=_delete_body(data))
+    assert await r.json() == {"deleted": True}
+    g = await gfs.get(_get_url(data))
+    assert g.status == 200
+    assert await g.read() == data
     r = await gfs.post(_ch_url(data) + "/delete", json=_channel_delete_body(data))
     assert await r.json() == {"deleted": True}
     assert (await gfs.get(_get_url(data))).status == 404

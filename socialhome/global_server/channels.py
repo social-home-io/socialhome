@@ -264,6 +264,10 @@ class GfsChannelService:
 
     # ── Checks shared with the space media cache ─────────────────────────
 
+    async def require_channel(self, channel_id: str) -> None:
+        """:class:`PermissionError` unless *channel_id* is registered here."""
+        await self._channel(channel_id)
+
     async def verify_channel_key(
         self, channel_id: str, *, prefix: bytes, body: dict, signature: str, suite: str
     ) -> None:

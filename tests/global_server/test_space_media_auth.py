@@ -38,6 +38,7 @@ from socialhome.gfs_channel import (
     issue_channel_cert,
     signing_bytes,
 )
+from socialhome.global_server import space_media_auth as sma
 from socialhome.global_server.channels import GfsChannelService
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.federation import GfsFederationService
@@ -524,3 +525,50 @@ def test_only_the_write_paths_are_shed_per_ip():
 
 def test_the_real_clock_is_the_default():
     assert GfsSpaceMediaAuth.__init__.__kwdefaults__["clock"] is time.time
+
+
+# ── Timing: an early refusal costs what a verification does ──────────────
+
+
+@pytest.mark.parametrize(
+    ("case", "verifies"),
+    [
+        ("writer_cert_unlisted", 2),
+        ("writer_cert_banned", 2),
+        ("writer_key_unlisted", 1),
+        ("channel_unknown", 1),
+        ("channel_cert_unknown", 2),
+        ("channel_writer_key_unknown", 1),
+    ],
+)
+async def test_an_early_refusal_burns_the_verifications_it_skipped(
+    env, monkeypatch, case, verifies
+):
+    """Whether a space is listed, banned, or a channel exists must not show in
+    how long a refusal takes: the lookup's refusal burns as many Ed25519
+    verifications as the path it skips would have made."""
+    auth, _, _ = env
+    other = "1e" * 16
+    if case == "writer_cert_unlisted":
+        a = _writer_cert(_claim("sp-nope"))
+    elif case == "writer_cert_banned":
+        a = _writer_cert(_claim("sp-banned"))
+    elif case == "writer_key_unlisted":
+        a = _writer_key(_claim("sp-nope"), os.urandom(32))
+    elif case == "channel_unknown":
+        a = _channel_key(_claim(other, scope=SCOPE_CHANNEL))
+    elif case == "channel_cert_unknown":
+        a = _channel_cert(_claim(other, scope=SCOPE_CHANNEL))
+    else:
+        a = _writer_key(_claim(other, scope=SCOPE_CHANNEL), os.urandom(32))
+    calls = {"n": 0}
+    real = sma.verify_ed25519
+
+    def counting(*args):
+        calls["n"] += 1
+        return real(*args)
+
+    monkeypatch.setattr(sma, "verify_ed25519", counting)
+    with pytest.raises(PermissionError):
+        await _upload(auth, a)
+    assert calls["n"] == verifies

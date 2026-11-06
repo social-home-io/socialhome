@@ -7,40 +7,50 @@ under the space content key, padded to a size bucket — and uploads the same
 ciphertext ONCE per GFS; every reader fetches it here by its SHA-256. This
 server can't open it.
 
-Each blob belongs to a **scope**, the key of its caps and of its delete: a
-listed space (``space`` + its id) or a private space's opaque v_51 channel
-(``channel`` + the random channel id — this server never learns which space
-that is).
+**Scopes and claims.** A blob is held by one or more **claims**, each by a
+scope — a listed space (``space`` + its id) or a private space's opaque v_51
+channel (``channel`` + the random channel id; this server never learns which
+space that is). The bytes are stored once: identical bytes uploaded for
+another scope add that scope's claim (a coalesced ``False``), never a copy,
+and never a conflict — so nobody who saw a public blob can squat its address
+under their own scope and delete it from under the real one. A delete drops
+only the caller's claim; the blob and its file go with the last claim. A
+blob expires with its latest claim.
 
 It is a **cache, not storage** — the operator sizes it to the disk they have
 (``[space_media]`` in the GFS config, :class:`SpaceMediaLimits`), and it
 favours new pictures over old ones:
 
-* a blob lives at most ``ttl_seconds`` (3 days by default), whatever expiry
-  the uploader asks; the maintenance sweep drops expired rows and files;
-* one scope holds at most ``space_max_bytes`` live (256 MiB): when a new blob
-  would pass it, that scope's own **least recently fetched** (then oldest)
-  blobs are evicted until it fits — a busy space keeps its newest pictures
-  instead of being refused;
-* all blobs together stay under ``max_bytes`` (5 GiB): expired ones go
-  first, then the least recently fetched (then oldest) of any scope;
-* a blob larger than either budget is ``413``; a scope uploading more than
-  ``space_uploads_per_hour`` (300) blobs an hour is ``429
-  space_media_quota`` — the only refusal by quota.
+* a claim lives at most ``ttl_seconds`` (3 days by default), whatever expiry
+  the uploader asks; a re-upload by a scope that already holds the blob does
+  NOT extend it. The maintenance sweep (:meth:`GfsSpaceMediaStore.sweep`)
+  drops expired blobs, claims and upload counts, and files with no row;
+* one scope's live claims hold at most ``space_max_bytes`` (256 MiB): when a
+  new one would pass it, that scope's own claims on its **least recently
+  fetched** (then oldest) blobs are evicted until it fits — a blob another
+  scope still claims stays;
+* all blobs together stay under ``max_bytes`` (5 GiB): before a new blob is
+  stored, expired blobs go first, then the least recently fetched (then
+  oldest) of any scope, with all their claims — just enough to fit; the
+  backlog of expired blobs is the sweep's;
+* a blob larger than either budget is ``413``; a scope accepting more than
+  ``space_uploads_per_hour`` uploads (a sliding hour, counted in
+  ``gfs_space_media_uploads`` — eviction and delete can't reset it) is
+  ``429 space_media_quota``; a cache the operator turned off is ``503
+  space_media_disabled``.
 
 A fetch marks the blob at most once an hour (:data:`FETCH_TOUCH_INTERVAL_S`)
 — popular blobs cost one write an hour, not one per fetch; the upload counts
 as a fetch, so a new blob is not the first to go.
 
-A re-upload of a held blob is a no-op (``False``), never an error: one file,
-one blob, however often it is retried.
-
 Every node of a cluster shares the data dir and the database, so whichever
 node took an upload, any node serves it. The caps are checked per upload
-against the shared rows; two nodes evicting at once may free a little more
-than needed, never less. The bytes go through :class:`.blob_store.BlobFiles`
-(files under ``media_dir/spaces`` today), so an object store can replace the
-filesystem without touching this class.
+against the shared rows (the total is a trigger-kept row, not a scan), so
+concurrent uploads on several nodes may briefly hold the total above
+``max_bytes`` by up to a few in-flight blobs (each ≤ the largest blob); the
+next upload or eviction brings it back under. The bytes go through
+:class:`.blob_store.BlobFiles` (files under ``media_dir/spaces`` today), so
+an object store can replace the filesystem without touching this class.
 
 Counters of evictions and refusals (:meth:`GfsSpaceMediaStore.stats`) are
 per node and in memory, like the fan-out stats; the stored totals come from
@@ -57,7 +67,7 @@ from typing import TYPE_CHECKING
 from ..domain.gfs_space_media import MEDIA_SCOPES
 from ..moment_public_media import MAX_BLOB_BYTES, is_blob_id
 from .blob_store import BlobFiles, MediaRefused, check_address, check_shape
-from .domain import GfsSpaceMedia
+from .domain import GfsSpaceMedia, GfsSpaceMediaClaim
 
 if TYPE_CHECKING:
     from .config import GfsConfig
@@ -75,8 +85,16 @@ EVICT_BATCH: int = 64
 PRUNE_BATCH: int = 500
 PRUNE_MAX_BATCHES: int = 20
 
-#: The upload rate window.
-_RATE_WINDOW_S: int = 3600
+#: A file with no row (or a temporary ``.part`` file) is removed by the
+#: sweep only once it is this old — an upload may still be writing it.
+ORPHAN_GRACE_S: int = 600
+
+#: Files looked at per sweep, and blob ids per row lookup.
+ORPHAN_SCAN_MAX: int = 200_000
+_ORPHAN_LOOKUP_BATCH: int = 500
+
+#: The upload rate window (a sliding hour over hourly buckets).
+_HOUR: int = 3600
 
 
 @dataclass(slots=True, frozen=True)
@@ -109,14 +127,16 @@ class SpaceMediaLimits:
 
     def capability(self) -> dict[str, object] | None:
         """The ``space_media`` entry of the signed ``/gfs/info`` capability
-        block — what a household needs to decide whether, how long and for
-        which scopes to rely on this cache. ``None`` (not advertised) when
-        it is off."""
+        block — what a household needs to decide whether, how long, how much
+        and for which scopes to rely on this cache. ``None`` (not
+        advertised) when it is off."""
         if not self.enabled:
             return None
         return {
             "max_blob_bytes": self.max_blob_bytes,
             "ttl_s": self.ttl_s,
+            "space_max_bytes": self.space_max_bytes,
+            "space_uploads_per_hour": self.space_uploads_per_hour,
             "scopes": sorted(MEDIA_SCOPES),
         }
 
@@ -135,7 +155,7 @@ class _Counters:
 
 class GfsSpaceMediaStore:
     """Encrypted space blobs: bytes through :class:`BlobFiles`, metadata in
-    ``gfs_space_media``."""
+    ``gfs_space_media`` + ``gfs_space_media_claims``."""
 
     __slots__ = ("_counters", "_files", "_limits", "_repo")
 
@@ -154,10 +174,17 @@ class GfsSpaceMediaStore:
     def limits(self) -> SpaceMediaLimits:
         return self._limits
 
+    def require_enabled(self) -> None:
+        """``503 space_media_disabled`` while the operator has the cache off
+        — not a refusal of this upload, so it is not counted."""
+        if not self._limits.enabled:
+            raise MediaRefused(503, "space_media_disabled")
+
     def admit_size(self, size: int) -> None:
-        """Refuse (413 ``too_large_for_cache``, counted) a blob of *size*
-        bytes this cache never takes — the route asks before it reads a
-        body, with the signed size."""
+        """Refuse a blob of *size* bytes this cache never takes (413
+        ``too_large_for_cache``, counted) — the route asks before it reads
+        a body, with the signed size."""
+        self.require_enabled()
         if size > self._limits.max_blob_bytes:
             self._counters.refused_too_large += 1
             raise MediaRefused(413, "too_large_for_cache")
@@ -172,8 +199,11 @@ class GfsSpaceMediaStore:
         expires_at: int,
         now: int | None = None,
     ) -> bool:
-        """Keep one blob for the scope. ``True`` when stored, ``False`` when
-        it already was (a retry). Raises :class:`MediaRefused`."""
+        """Keep one blob for the scope. ``True`` when its bytes were stored
+        now, ``False`` when they already were (a retry, another scope's
+        upload, another node winning the race) — the scope's claim is in
+        place either way. Raises :class:`MediaRefused`."""
+        self.require_enabled()
         if scope_kind not in MEDIA_SCOPES:
             raise MediaRefused(422, "bad_scope")
         now = int(time.time()) if now is None else now
@@ -184,38 +214,50 @@ class GfsSpaceMediaStore:
             raise MediaRefused(422, "bad_expiry")
         expires_at = min(expires_at, now + self._limits.ttl_s)
         await check_address(blob_id, data)
-        held = await self._repo.get(blob_id)
-        if held is not None:
-            if held.expires_at > now:
-                if (held.scope_kind, held.scope_id) != (scope_kind, scope_id):
-                    raise MediaRefused(409, "blob_id_taken")
-                return False
-            # Expired but not swept yet: replace it.
+        held = await self._repo.get_blob(blob_id)
+        if held is not None and held.expires_at <= now:
+            # Expired but not swept yet: start over.
             await self._drop([held.blob_id])
-        _, recent = await self._repo.scope_usage(
-            scope_kind, scope_id, now=now, since=now - _RATE_WINDOW_S
-        )
-        if recent >= self._limits.space_uploads_per_hour:
-            self._counters.refused_quota += 1
-            raise MediaRefused(429, "space_media_quota")
+            held = None
+        if held is not None and any(
+            c.scope_kind == scope_kind and c.scope_id == scope_id and c.expires_at > now
+            for c in await self._repo.claims_of(blob_id)
+        ):
+            # This scope already holds it: a no-op, and no fresher expiry.
+            return False
+        await self._require_rate(scope_kind, scope_id, now)
         await self._make_room_in_scope(scope_kind, scope_id, size, now)
-        await self._make_room(size, now)
-        await self._files.write(blob_id, data)
-        return await self._repo.add(
-            GfsSpaceMedia(
+        stored = False
+        if held is None:
+            await self._make_room(size, now)
+            await self._files.write(blob_id, data)
+            # ``False`` when another node inserted it meanwhile: same bytes,
+            # so ours is the coalesced answer and only the claim is new.
+            stored = await self._repo.add_blob(
+                GfsSpaceMedia(
+                    blob_id=blob_id,
+                    size=size,
+                    created_at=now,
+                    expires_at=expires_at,
+                    last_fetched_at=now,
+                )
+            )
+        await self._repo.put_claim(
+            GfsSpaceMediaClaim(
                 blob_id=blob_id,
                 scope_kind=scope_kind,
                 scope_id=scope_id,
                 size=size,
                 created_at=now,
                 expires_at=expires_at,
-                last_fetched_at=now,
             )
         )
+        await self._repo.count_upload(scope_kind, scope_id, bucket=now // _HOUR)
+        return stored
 
     async def read(self, blob_id: str, *, now: int | None = None) -> bytes | None:
-        """The blob, or ``None`` when unknown, expired, of a banned space or
-        evicted. Marks the fetch at most once an hour."""
+        """The blob, or ``None`` when unknown, expired, evicted, or held only
+        by banned spaces. Marks the fetch at most once an hour."""
         if not is_blob_id(blob_id):
             return None
         now = int(time.time()) if now is None else now
@@ -232,26 +274,62 @@ class GfsSpaceMediaStore:
         return data
 
     async def delete(self, blob_id: str, *, scope_kind: str, scope_id: str) -> bool:
-        """Withdraw a blob of the scope (its authority / channel key asked)."""
+        """Drop the scope's claim (its seed holder asked). The blob and its
+        file go only when no other scope still claims it."""
         if not is_blob_id(blob_id):
             return False
-        if not await self._repo.delete(
+        if not await self._repo.delete_claim(
             blob_id, scope_kind=scope_kind, scope_id=scope_id
         ):
             return False
-        await self._files.remove(blob_id)
+        await self._settle(blob_id)
         return True
 
     async def prune_expired(self, now: int | None = None) -> int:
-        """Drop expired blobs (rows and files); the maintenance sweep."""
+        """Drop expired blobs (rows, claims, files) and expired claims of
+        blobs another claim keeps. Returns the blobs dropped."""
         now = int(time.time()) if now is None else now
         dropped = 0
         for _ in range(PRUNE_MAX_BATCHES):
-            ids = await self._repo.expired(now, limit=PRUNE_BATCH)
+            ids = [m.blob_id for m in await self._repo.expired(now, limit=PRUNE_BATCH)]
             await self._drop(ids)
             dropped += len(ids)
             if len(ids) < PRUNE_BATCH:
                 break
+        await self._repo.prune_expired_claims(now)
+        return dropped
+
+    async def sweep_orphans(self, *, now: float | None = None) -> int:
+        """Remove files with no row, and stale temporary files, older than
+        :data:`ORPHAN_GRACE_S` (an upload may still be writing a younger
+        one). Returns the files removed."""
+        now = time.time() if now is None else now
+        cutoff = now - ORPHAN_GRACE_S
+        old = [
+            (n, m)
+            for n, m in await self._files.scan(limit=ORPHAN_SCAN_MAX)
+            if m < cutoff
+        ]
+        doomed = [n for n, _ in old if n.startswith(".") and n.endswith(".part")]
+        blobs = [n for n, _ in old if is_blob_id(n)]
+        for i in range(0, len(blobs), _ORPHAN_LOOKUP_BATCH):
+            chunk = blobs[i : i + _ORPHAN_LOOKUP_BATCH]
+            known = await self._repo.known_blob_ids(chunk)
+            doomed.extend(n for n in chunk if n not in known)
+        for name in doomed:
+            await self._files.remove(name)
+        if doomed:
+            log.info("space media: removed %d orphan file(s)", len(doomed))
+        return len(doomed)
+
+    async def sweep(self, now: int | None = None) -> int:
+        """The maintenance sweep: expired blobs and claims, upload counts
+        older than the rate window, orphan files. Returns the expired blobs
+        dropped."""
+        now = int(time.time()) if now is None else now
+        dropped = await self.prune_expired(now)
+        await self._repo.prune_upload_counts(before_bucket=now // _HOUR - 1)
+        await self.sweep_orphans()
         return dropped
 
     async def stats(self) -> dict[str, int | bool]:
@@ -271,42 +349,54 @@ class GfsSpaceMediaStore:
             "refused_too_large": c.refused_too_large,
         }
 
+    async def _require_rate(self, scope_kind: str, scope_id: str, now: int) -> None:
+        """At most ``space_uploads_per_hour`` accepted uploads in the sliding
+        hour: this hour's count plus the last hour's, weighted by how much of
+        it still overlaps the window."""
+        bucket = now // _HOUR
+        current, previous = await self._repo.upload_counts(
+            scope_kind, scope_id, bucket=bucket
+        )
+        overlap = 1.0 - (now % _HOUR) / _HOUR
+        if current + previous * overlap + 1 > self._limits.space_uploads_per_hour:
+            self._counters.refused_quota += 1
+            raise MediaRefused(429, "space_media_quota")
+
     async def _make_room_in_scope(
         self, scope_kind: str, scope_id: str, size: int, now: int
     ) -> None:
-        """Free the scope's own space until *size* more live bytes fit under
-        ``space_max_bytes``: expired blobs go first (they count for
-        nothing), then its least recently fetched, then oldest, blobs."""
+        """Free the scope's own budget until *size* more live bytes fit under
+        ``space_max_bytes``: drop its claims on its least recently fetched,
+        then oldest, blobs (expired claims count for nothing). A blob goes
+        only when no other scope still claims it."""
         cap = self._limits.space_max_bytes
-        live, _ = await self._repo.scope_usage(scope_kind, scope_id, now=now, since=now)
-        if live + size <= cap:
-            return
-        await self.prune_expired(now)
+        live = await self._repo.scope_usage(scope_kind, scope_id, now=now)
         while live + size > cap:
-            batch = await self._repo.least_recently_fetched(
-                limit=EVICT_BATCH, scope=(scope_kind, scope_id)
+            batch = await self._repo.scope_lru(
+                scope_kind, scope_id, now=now, limit=EVICT_BATCH
             )
             if not batch:
                 break
-            victims: list[str] = []
-            for media in batch:
+            for claim in batch:
                 if live + size <= cap:
                     break
-                victims.append(media.blob_id)
-                live -= media.size
-                self._count_eviction(media.size)
-            await self._drop(victims)
+                await self._repo.delete_claim(
+                    claim.blob_id, scope_kind=scope_kind, scope_id=scope_id
+                )
+                await self._settle(claim.blob_id)
+                live -= claim.size
+                self._count_eviction(claim.size)
 
     async def _make_room(self, size: int, now: int) -> None:
-        """Free space until *size* more bytes fit under ``max_bytes``:
-        expired blobs first, then least recently fetched, then oldest."""
-        _, total = await self._repo.totals()
-        if total + size <= self._limits.max_bytes:
-            return
-        await self.prune_expired(now)
+        """Free just enough of the whole cache for *size* more bytes under
+        ``max_bytes``: expired blobs first, then least recently fetched,
+        then oldest — every claim on them goes too."""
         _, total = await self._repo.totals()
         while total + size > self._limits.max_bytes:
-            batch = await self._repo.least_recently_fetched(limit=EVICT_BATCH)
+            batch = await self._repo.expired(now, limit=EVICT_BATCH)
+            evicting = not batch
+            if evicting:
+                batch = await self._repo.least_recently_fetched(limit=EVICT_BATCH)
             if not batch:
                 break
             victims: list[str] = []
@@ -315,9 +405,15 @@ class GfsSpaceMediaStore:
                     break
                 victims.append(media.blob_id)
                 total -= media.size
-                self._count_eviction(media.size)
+                if evicting:
+                    self._count_eviction(media.size)
             await self._drop(victims)
-        log.debug("space media: evicted down to %d bytes held", total)
+
+    async def _settle(self, blob_id: str) -> None:
+        """After a claim went: the blob's expiry follows its other claims,
+        or the blob goes with its last one."""
+        if await self._repo.settle_blob(blob_id) is None:
+            await self._drop([blob_id])
 
     def _count_eviction(self, size: int) -> None:
         self._counters.evicted_blobs += 1
@@ -325,7 +421,8 @@ class GfsSpaceMediaStore:
 
     async def _drop(self, blob_ids: list[str]) -> None:
         """Files first, then rows: a crash in between leaves a row whose
-        file is gone (a miss, swept at expiry), never an unlisted file."""
+        file is gone (a miss, swept at expiry); a file whose row is gone is
+        the orphan sweep's."""
         for blob_id in blob_ids:
             await self._files.remove(blob_id)
-        await self._repo.delete_ids(blob_ids)
+        await self._repo.delete_blobs(blob_ids)

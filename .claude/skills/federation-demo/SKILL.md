@@ -1314,7 +1314,10 @@ WS pushes across allocs. The step:
    Then (step 3i) the same for a **private space's opaque channel**: a
    channel registered via node 1, a blob uploaded via node 0 under the
    channel key (``/gfs/channels/{id}/media/{blob}``) must be served
-   byte-identical by node 1.
+   byte-identical by node 1; the space step's blob uploaded again under
+   that channel via node 1 must coalesce (``200 already_stored``, a second
+   claim) and still be served after the space authority deletes its own
+   claim.
 6. Confirms a client registered via one node is served by the other
    (shared DB → the round-robin LB is safe).
 

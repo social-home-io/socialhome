@@ -349,7 +349,23 @@ class GfsSpaceMedia:
     """One encrypted blob in the space media cache (GFS migration 0025).
     The bytes are a file named ``blob_id`` under ``media_dir/spaces``; this
     server can't open them. A cache entry: it expires, and it may be evicted
-    least-recently-fetched first when the operator's byte cap is reached."""
+    least-recently-fetched first when the operator's byte cap is reached.
+    Which scopes hold it is :class:`GfsSpaceMediaClaim`."""
+
+    blob_id: str
+    size: int
+    created_at: int
+    #: The latest expiry among its claims.
+    expires_at: int
+    #: Last fetch (the upload counts as one), moved at most once an hour.
+    last_fetched_at: int
+
+
+@dataclass(slots=True, frozen=True)
+class GfsSpaceMediaClaim:
+    """One scope's hold on a cached blob. Identical bytes uploaded for
+    another scope add a claim, never a copy; a delete drops only the
+    caller's claim, and the blob goes with its last claim."""
 
     blob_id: str
     #: ``"space"`` (a listed space) or ``"channel"`` (a private space's
@@ -359,8 +375,6 @@ class GfsSpaceMedia:
     size: int
     created_at: int
     expires_at: int
-    #: Last fetch (the upload counts as one), moved at most once an hour.
-    last_fetched_at: int
 
 
 @dataclass(slots=True, frozen=True)

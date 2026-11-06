@@ -329,6 +329,8 @@ async def test_gfs_info_capability_block_is_signed_by_the_pinned_key(gfs_client)
         "space_media": {
             "max_blob_bytes": MAX_BLOB_BYTES,
             "ttl_s": 259_200,
+            "space_max_bytes": 256 * 1024**2,
+            "space_uploads_per_hour": 300,
             "scopes": ["channel", "space"],
         },
         # ``POST /gfs/proof`` needs a real base_url to bind; this fixture's

@@ -2048,7 +2048,9 @@ def _gfs_cluster_highlight_link(urls: list[str], tags: list[str]) -> None:
     )
 
 
-def _gfs_cluster_space_media(urls: list[str], owner: tuple[str, bytes]) -> None:
+def _gfs_cluster_space_media(
+    urls: list[str], owner: tuple[str, bytes]
+) -> tuple[str, bytes, bytes]:
     """Step 3h of ``gfs-cluster``: the space media cache on a shared data dir.
 
     The owner publishes a space (pinning an authority key whose seed this
@@ -2169,9 +2171,12 @@ def _gfs_cluster_space_media(urls: list[str], owner: tuple[str, bytes]) -> None:
         "  space media uploaded via node 0 is served byte-identical by node 1 "
         "(immutable, 1 h); a re-upload via node 1 coalesces; a miss is no-store ✓"
     )
+    return space_id, authority_seed, blob
 
 
-def _gfs_cluster_channel_media(urls: list[str]) -> None:
+def _gfs_cluster_channel_media(
+    urls: list[str], shared: tuple[str, bytes, bytes]
+) -> None:
     """Step 3i of ``gfs-cluster``: the space media cache for a PRIVATE space's
     opaque channel. A channel is registered via node 1 (anonymous, channel-key
     signed — the GFS learns only its random id); one blob is uploaded via
@@ -2247,6 +2252,82 @@ def _gfs_cluster_channel_media(urls: list[str]) -> None:
     print(
         "  a private space's channel media uploaded via node 0 (channel key, "
         "opaque id) is served byte-identical by node 1 ✓"
+    )
+
+    # Cross-scope: the space step's blob, uploaded again under this channel,
+    # coalesces (one file, a second claim) — and survives the space's delete.
+    from socialhome.authority_sig import (
+        AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
+        sign_authority_event,
+    )
+    from socialhome.domain.gfs_space_media import SCOPE_SPACE, media_delete_payload
+
+    space_id, authority_seed, shared_blob = shared
+    shared_id = blob_id_of(shared_blob)
+    claim = SpaceMediaClaim(
+        scope=SCOPE_CHANNEL,
+        scope_id=channel_id,
+        blob_id=shared_id,
+        size=len(shared_blob),
+        expires_at=int(time.time()) + 86_400,
+        ts=int(time.time()),
+    )
+    auth = SpaceMediaUploadAuth(
+        claim=claim,
+        kind=AUTH_CHANNEL,
+        sig=b64url_encode(sign_ed25519(channel_seed, claim.channel_signing_bytes())),
+        sig_suite="ed25519",
+    )
+    req = urllib.request.Request(
+        f"{urls[1]}/gfs/channels/{channel_id}/media/{shared_id}",
+        data=shared_blob,
+        method="PUT",
+        headers={
+            SPACE_MEDIA_AUTH_HEADER: auth.to_header(),
+            "Content-Type": "application/octet-stream",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            code, body = r.status, json.loads(r.read() or b"null")
+    except urllib.error.HTTPError as exc:
+        code, body = exc.code, exc.read().decode("utf-8", "replace")
+    if code != 200 or (body or {}).get("status") != "already_stored":
+        raise SystemExit(
+            f"gfs-cluster: the space's blob under a channel via node 1 → {code} "
+            f"{body!r}; want 200 already_stored (a second claim, not a conflict)"
+        )
+    ts = int(time.time())
+    signed = sign_authority_event(
+        event_type=AUTHORITY_EVENT_SPACE_MEDIA_DELETE,
+        space_id=space_id,
+        payload=media_delete_payload(SCOPE_SPACE, space_id, shared_id, ts),
+        space_seed=authority_seed,
+    )
+    code, resp = _request(
+        f"{urls[0]}/gfs/spaces/{space_id}/media/{shared_id}/delete",
+        method="POST",
+        body={
+            "ts": ts,
+            "sig": signed["authority_sig"],
+            "sig_suite": signed["authority_sig_suite"],
+        },
+    )
+    if code != 200 or (resp or {}).get("deleted") is not True:
+        raise SystemExit(f"gfs-cluster: space media delete via node 0 → {code} {resp!r}")
+    try:
+        with urllib.request.urlopen(f"{urls[1]}/gfs/media/{shared_id}", timeout=15) as r:
+            still = r.read()
+    except urllib.error.HTTPError as exc:
+        raise SystemExit(
+            f"gfs-cluster: a blob the channel still claims → {exc.code} after the "
+            "space's delete; want 200 (a delete drops only the caller's claim)"
+        ) from exc
+    if still != shared_blob:
+        raise SystemExit("gfs-cluster: the still-claimed blob changed")
+    print(
+        "  the same bytes under a channel coalesce (200 already_stored) and "
+        "survive the space's delete — only the caller's claim goes ✓"
     )
 
 
@@ -2586,9 +2667,9 @@ def cmd_gfs_cluster() -> None:
         _gfs_cluster_highlight_link(urls, node_ids)
         # 3h. The space media cache: an upload via one node is served by
         # another (shared data dir + DB), and a re-upload coalesces.
-        _gfs_cluster_space_media(urls, clients[0])
+        shared_media = _gfs_cluster_space_media(urls, clients[0])
         # 3i. …and for a private space's opaque channel.
-        _gfs_cluster_channel_media(urls)
+        _gfs_cluster_channel_media(urls, shared_media)
     except BaseException:
         _gfs_cluster_down(preserve_logs=True)
         raise
