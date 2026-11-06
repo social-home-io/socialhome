@@ -1534,7 +1534,7 @@ class _FakeMediaSync:
 
 
 class _NullFed:
-    _own_instance_id = "self-instance"
+    own_instance_id = "self-instance"
 
     async def broadcast_to_space_members(self, *a, **k):
         return None

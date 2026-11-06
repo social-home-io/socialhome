@@ -26,7 +26,7 @@ from socialhome.services.gallery_federation_outbound import (
 
 class _FakeFederationService:
     def __init__(self, own_instance_id: str = "own-inst") -> None:
-        self._own_instance_id = own_instance_id
+        self.own_instance_id = own_instance_id
         self.sent: list[tuple] = []
         self.broadcasts: list[tuple] = []
         self.members: dict[str, list[str]] = {}
@@ -46,7 +46,7 @@ class _FakeFederationService:
         here per target."""
         self.broadcasts.append((space_id, event_type))
         for iid in self.members.get(space_id, []):
-            if iid == self._own_instance_id:
+            if iid == self.own_instance_id:
                 continue
             if (
                 min_proto_version is not None

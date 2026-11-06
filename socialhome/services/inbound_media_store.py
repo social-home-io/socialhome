@@ -63,6 +63,7 @@ import aiofiles
 import aiofiles.os
 
 from ..domain.errors import InvalidMediaRefError
+from ..domain.media_chunking import MAX_MEDIA_CHUNKS
 from ..domain.media_constraints import (
     AUDIO_MAX_UPLOAD_BYTES,
     FILE_MAX_UPLOAD_BYTES,
@@ -77,11 +78,6 @@ SAFE_MEDIA_NAME: re.Pattern[str] = re.compile(r"[A-Za-z0-9_-][A-Za-z0-9._:-]{0,1
 
 #: The path prefix every stored local media reference carries.
 MEDIA_REF_PREFIX: str = "api/media/"
-
-#: Upper bound on ``chunk_count`` for one transfer. The bytes are capped
-#: separately per path (:data:`SPACE_MEDIA_MAX_BYTES`,
-#: :func:`dm_media_max_bytes`).
-MAX_MEDIA_CHUNKS: int = 4096
 
 #: Prefix of a received DM attachment's file name (:func:`dm_media_name`).
 DM_MEDIA_PREFIX: str = "dm-"

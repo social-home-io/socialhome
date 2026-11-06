@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -17,6 +18,7 @@ from socialhome.repositories.space_media_outbox_repo import (
     SqliteSpaceMediaOutboxRepo,
 )
 from socialhome.services.space_media_sync_service import (
+    PIPELINE_WINDOW,
     SpaceMediaSyncService,
 )
 
@@ -391,5 +393,60 @@ async def test_a_700_kb_picture_ships_in_chunks_the_targets_channel_takes(
     chunks = [c.kwargs["raw_chunk"] for c in fed.send_media_chunk.call_args_list]
     assert len(chunks) > 1
     assert all(len(c) + FRAME_OVERHEAD_BYTES <= 256 * 1024 for c in chunks)
-    fed.media_chunk_bytes.assert_called_with("peer-x")
+    fed.media_chunk_bytes.assert_called_with("peer-x", file_size_bytes=len(body))
     assert b"".join(chunks) == body
+
+
+async def _enqueue_many_chunks(db, outbox, tmp_path, fed, *, chunks: int):
+    await _seed_space(db)
+    (tmp_path / "big.webp").write_bytes(b"\0" * (chunks * 1024))
+    svc = SpaceMediaSyncService(outbox=outbox, federation=fed, media_dir=tmp_path)
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="ev-1",
+        target_instance_ids=["peer-x"],
+        media_urls=["api/media/big.webp"],
+    )
+    return svc
+
+
+async def test_chunk_sends_never_exceed_the_pipeline_window(db, outbox, tmp_path):
+    """Regression: every chunk became a coroutine (and a gather task) up
+    front — a file in a million chunks meant a million objects at once.
+    Only ``PIPELINE_WINDOW`` chunks are ever in flight, and no more tasks
+    than that exist."""
+    fed = _fed(1024)
+    inflight = 0
+    peak_inflight = 0
+    peak_tasks = 0
+
+    async def _send(**kwargs):
+        nonlocal inflight, peak_inflight, peak_tasks
+        inflight += 1
+        peak_inflight = max(peak_inflight, inflight)
+        peak_tasks = max(peak_tasks, len(asyncio.all_tasks()))
+        await asyncio.sleep(0)
+        inflight -= 1
+        return _OK
+
+    fed.send_media_chunk = AsyncMock(side_effect=_send)
+    svc = await _enqueue_many_chunks(db, outbox, tmp_path, fed, chunks=64)
+    baseline = len(asyncio.all_tasks())
+    assert await svc.flush_once() == 1
+    assert fed.send_media_chunk.await_count == 64
+    assert 1 < peak_inflight <= PIPELINE_WINDOW
+    assert peak_tasks <= baseline + PIPELINE_WINDOW
+
+
+async def test_a_failed_chunk_stops_sending_the_rest(db, outbox, tmp_path):
+    """The whole row is resent on a failure, so the remaining chunks of
+    this attempt are not sent."""
+    fed = _fed(1024)
+    fed.send_media_chunk = AsyncMock(
+        return_value=DeliveryResult(instance_id="peer-x", ok=False, error="boom")
+    )
+    svc = await _enqueue_many_chunks(db, outbox, tmp_path, fed, chunks=64)
+    assert await svc.flush_once() == 0
+    assert fed.send_media_chunk.await_count <= PIPELINE_WINDOW
+    rows = await outbox.list_for_correlation("ev-1")
+    assert len(rows) == 1 and rows[0].attempts == 1
