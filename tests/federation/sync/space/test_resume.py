@@ -1187,6 +1187,11 @@ async def test_a_replayed_rows_files_ship_from_the_replaying_household():
     ]
 
 
+class _AllSpaceFiles:
+    async def confined_to_space(self, name, space_id):
+        return name != "elsewhere.webp"
+
+
 class _HostSpaceRepo(_FakeSpaceRepo):
     async def get(self, space_id: str):
         return SimpleNamespace(id=space_id, owner_instance_id="us")
@@ -1204,7 +1209,7 @@ async def test_the_hosts_page_replay_ships_its_files_to_v81(host, version, shipp
     at = (base + timedelta(minutes=1)).isoformat()
     page = replace(
         _page(0, at),
-        content="![a](api/media/a.webp)",
+        content="![a](api/media/a.webp) ![e](api/media/elsewhere.webp)",
         cover_image_url="api/media/c.webp",
         seq=2,
     )
@@ -1219,6 +1224,7 @@ async def test_the_hosts_page_replay_ships_its_files_to_v81(host, version, shipp
         space_post_repo=_FakePostRepo(),
         page_repo=_FakeListSinceRepo([page]),
         media_sync=outbox,
+        media_refs=_AllSpaceFiles(),
     )
     await provider.handle_request(
         _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),

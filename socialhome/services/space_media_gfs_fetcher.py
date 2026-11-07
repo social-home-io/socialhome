@@ -87,6 +87,7 @@ if TYPE_CHECKING:
     from ..domain.federation import GfsConnection
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
+    from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
     from ..repositories.page_repo import AbstractPageRepo
     from ..repositories.space_media_ref_repo import AbstractSpaceMediaRefRepo
     from ..repositories.space_repo import AbstractSpaceRepo
@@ -154,6 +155,7 @@ class SpaceMediaGfsFetcher:
         "_gfs_repo",
         "_inflight",
         "_misses",
+        "_page_media_refs",
         "_pages",
         "_prefetch_by_space",
         "_prefetch_pending",
@@ -198,11 +200,16 @@ class SpaceMediaGfsFetcher:
         self._space_misses: OrderedDict[str, int] = OrderedDict()
         #: v_81 — a page file kept under the name its page shows.
         self._pages: AbstractPageRepo | None = None
+        self._page_media_refs: AbstractMediaReferenceRepo | None = None
 
-    def attach_pages(self, page_repo: AbstractPageRepo) -> None:
+    def attach_pages(
+        self, page_repo: AbstractPageRepo, *, media_refs: AbstractMediaReferenceRepo
+    ) -> None:
         """Wire the space pages (v_81): a page's file keeps the name the
-        page shows, and is fetched only while that page shows it."""
+        page shows, and is fetched only while that page shows it and no row
+        outside its space names it (the host chooses a page's names)."""
         self._pages = page_repo
+        self._page_media_refs = media_refs
 
     # ── Descriptors ──────────────────────────────────────────────────────
 
@@ -325,15 +332,22 @@ class SpaceMediaGfsFetcher:
 
     async def _shown_by_its_page(self, ref: SpaceMediaRef) -> bool:
         """Whether *ref* (a row kept under its own file name) belongs to a
-        live page of its space that shows that file."""
-        if self._pages is None or ref.local_name != ref.filename:
+        live page of its space that shows that file — and no row outside
+        that space names it here (another space's file, a household one)."""
+        if (
+            self._pages is None
+            or self._page_media_refs is None
+            or ref.local_name != ref.filename
+        ):
             return False
         page = await self._pages.get_space_page(ref.item_id, space_id=ref.space_id)
         if page is None:
             return False
-        return ref.filename in media_names(
+        if ref.filename not in media_names(
             page_media_urls(page.cover_image_url, page.content)
-        )
+        ):
+            return False
+        return await self._page_media_refs.confined_to_space(ref.filename, ref.space_id)
 
     async def has_item_refs(self, space_id: str, item_id: str) -> bool:
         """Whether item *item_id* of *space_id* has any ``space_media_refs``

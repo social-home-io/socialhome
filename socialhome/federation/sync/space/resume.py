@@ -71,6 +71,7 @@ from ....domain.task import (
 )
 from ....services.inbound_media_store import media_basename, media_file_path
 from ....services.page_conflict_service import side_to_wire
+from ....services.space_media_names import space_own_files
 
 if TYPE_CHECKING:
     from ....domain.calendar import CalendarEvent
@@ -81,6 +82,7 @@ if TYPE_CHECKING:
     from ....domain.sticky import Sticky
     from ....repositories.calendar_repo import AbstractSpaceCalendarRepo
     from ....repositories.gallery_repo import AbstractGalleryRepo
+    from ....repositories.media_reference_repo import AbstractMediaReferenceRepo
     from ....repositories.page_repo import AbstractPageRepo
     from ....repositories.space_post_repo import AbstractSpacePostRepo
     from ....repositories.space_repo import AbstractSpaceRepo
@@ -146,6 +148,7 @@ class SpaceSyncResumeProvider:
         "_gallery_repo",
         "_last_resume",
         "_media_dir",
+        "_media_refs",
         "_media_sync",
         "_page_repo",
         "_space_calendar_repo",
@@ -169,8 +172,11 @@ class SpaceSyncResumeProvider:
         media_sync: _MediaOutbox | None = None,
         media_dir: pathlib.Path | None = None,
         clock: Callable[[], float] = time.monotonic,
+        media_refs: AbstractMediaReferenceRepo | None = None,
     ) -> None:
         self._federation = federation_service
+        #: v_81: only a page's files that are the space's own ship.
+        self._media_refs = media_refs
         #: Where the replayed files live — their sizes bound a request.
         self._media_dir = media_dir
         self._clock = clock
@@ -640,19 +646,23 @@ class SpaceSyncResumeProvider:
                 to, min_version=FederationCapability.MIN_FOR_PAGE_MEDIA
             )
         )
-        return await self._send_each(
+        sent = await self._send_each(
             pages,
             FederationEventType.SPACE_PAGE_CREATED,
             lambda page: payloads[page.id],
             space_id=space_id,
             to=to,
-            media_of=(
-                (lambda page: page_media_urls(page.cover_image_url, page.content))
-                if ships_files
-                else None
-            ),
-            media=media,
         )
+        if ships_files and media is not None:
+            for page in pages:
+                urls = await space_own_files(
+                    self._media_refs,
+                    space_id,
+                    page_media_urls(page.cover_image_url, page.content),
+                )
+                if urls:
+                    media.append((page.id, urls))
+        return sent
 
     async def _replay_stickies(
         self,

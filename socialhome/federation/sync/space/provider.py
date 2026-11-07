@@ -37,6 +37,7 @@ from ....domain.space_media_ref import (
     page_media_urls,
     record_media_urls,
 )
+from ....services.space_media_names import space_own_files
 from .exporter import (
     RESOURCE_ORDER,
     BatchedExporter,
@@ -412,6 +413,7 @@ class SpaceSyncService:
         "_member_gate",
         "_own_members",
         "_owner_statement_for",
+        "_page_media_refs",
         "_page_repo",
         "_pages_hosted",
         "_roster_authority",
@@ -490,6 +492,7 @@ class SpaceSyncService:
         #: v_81 — space pages, whose files (cover, body pictures) ride the
         #: catch-up media of the space's host (:meth:`attach_pages`).
         self._page_repo = None
+        self._page_media_refs = None
         self._pages_hosted: Callable[[str], Awaitable[bool]] | None = None
         #: Set by :meth:`attach_federation` after the federation
         #: service is constructed (resolves the chicken/egg between
@@ -523,15 +526,18 @@ class SpaceSyncService:
         self._media_gfs = media_gfs
 
     def attach_pages(
-        self, page_repo, *, hosts: Callable[[str], Awaitable[bool]]
+        self, page_repo, *, hosts: Callable[[str], Awaitable[bool]], media_refs
     ) -> None:
         """Wire the space pages (v_81): the host's catch-up ships each
         page's files to a requester at v_81 — a page keeps the names the
         host's version shows, which only the host fills on a receiver — and
         a link-joined one gets them as the ``pages`` records' descriptor.
-        ``hosts(space_id)``: whether this household is the space's host."""
+        ``hosts(space_id)``: whether this household is the space's host.
+        Only the space's own files ship (``media_refs.confined_to_space``):
+        a page stored before v_81 may name a household file."""
         self._page_repo = page_repo
         self._pages_hosted = hosts
+        self._page_media_refs = media_refs
 
     async def _takes_page_media(self, space_id: str, requester: str) -> bool:
         """Whether *requester* gets the files of *space_id*'s pages from us:
@@ -1168,7 +1174,11 @@ class SpaceSyncService:
                 space_id,
                 target_instance_id,
                 page.id,
-                page_media_urls(page.cover_image_url, page.content),
+                await space_own_files(
+                    self._page_media_refs,
+                    space_id,
+                    page_media_urls(page.cover_image_url, page.content),
+                ),
             )
 
     def _calendar_pages(self, space_id: str):

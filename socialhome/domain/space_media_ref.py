@@ -192,7 +192,7 @@ def page_media_urls(cover: object, content: object) -> list[str]:
     return urls
 
 
-def _distinct_files(urls: list[str], limit: int) -> list[str]:
+def distinct_media_files(urls: list[str], limit: int) -> list[str]:
     """The first *limit* files of *urls*, each once however it is spelled."""
     out: list[str] = []
     seen: set[str] = set()
@@ -231,7 +231,7 @@ def record_media_urls(resource: str, record: dict[str, Any]) -> list[str]:
     if resource == "pages":
         # A page may show more pictures than one descriptor carries: its
         # first ones are described (a receiver refuses a longer one whole).
-        return _distinct_files(
+        return distinct_media_files(
             page_media_urls(record.get("cover_image_url"), record.get("content")),
             MAX_DESCRIPTOR_ENTRIES,
         )

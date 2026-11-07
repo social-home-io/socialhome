@@ -1573,6 +1573,8 @@ def _wire_federation_stack(
         space_calendar_repo=space_calendar_repo,
         # SPACE_MEDIA_BLOB scope: a space page's cover and body pictures.
         page_repo=page_repo,
+        # …and a page name the host fills is this space's file only.
+        media_reference_repo=media_reference_repo,
     )
     inbound_service.attach_to(federation_service)
     inbound_service.attach_groups(dm_service.groups)
@@ -1840,7 +1842,9 @@ def _wire_federation_stack(
         )
 
     # v_81: the host's catch-up ships its pages' files.
-    space_sync_service.attach_pages(page_repo, hosts=_hosts_space)
+    space_sync_service.attach_pages(
+        page_repo, hosts=_hosts_space, media_refs=media_reference_repo
+    )
     app[K.space_sync_service_key] = space_sync_service
     app[K.space_sync_receiver_key] = space_sync_receiver
 
@@ -1886,7 +1890,9 @@ def _wire_federation_stack(
     # v_81: a host version's new files (cover, body pictures) follow it to
     # the other member households over the space media outbox.
     page_federation_outbound.attach_media(
-        media_sync=space_media_sync_service, space_repo=space_repo
+        media_sync=space_media_sync_service,
+        space_repo=space_repo,
+        media_refs=media_reference_repo,
     )
     page_federation_outbound.wire()
     # v_48 host-sequenced pages: the conflict service sequences pages this
@@ -2162,6 +2168,8 @@ def _wire_federation_stack(
         # bounded per request by the files' sizes here.
         media_sync=space_media_sync_service,
         media_dir=pathlib.Path(config.media_path),
+        # v_81: only a replayed page's own files ship.
+        media_refs=media_reference_repo,
     )
 
     async def _space_sync_resume(event) -> None:
@@ -5031,7 +5039,7 @@ def create_app(config: Config | None = None) -> web.Application:
         space_media_sync_service.attach_relay_readers(space_media_uploader)
         fed.inbound_service.attach_gfs_media(space_media_fetcher)
         # v_81: a page's files keep the names the host's page shows.
-        space_media_fetcher.attach_pages(page_repo)
+        space_media_fetcher.attach_pages(page_repo, media_refs=repos.media_reference)
         fed.content_inbound.attach_gfs_media(space_media_fetcher)
         if space_public_inbound is not None:
             space_public_inbound.attach_gfs_media(space_media_fetcher)

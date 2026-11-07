@@ -345,6 +345,14 @@ on arrival the way a post's are.
   name the page shows be filled only by the space's host (`_host_fills`) or
   by the household the name is bound to; a proposer's file that overtakes
   the version that will show it lands under the proposer's own name.
+- **Only the space's own files.** Because the host chooses a page's names,
+  a receiver lets the host fill (or a link-joined reader fetch) a page name
+  only while no row outside the space names that file there
+  (`confined_to_space`): `sd-` names are computable, so a host must not be
+  able to plant another space's (or a household) file through a page. The
+  host likewise ships only files no row outside the space names
+  (`space_own_files`) — a page stored before v_81 may name a household
+  file a member learned.
 - **Catch-up.** The host's §25.6 stream ships every live page's files to a
   v_81 requester and the `pages` records carry the descriptor for a
   link-joined one (sync line 81).
@@ -359,10 +367,23 @@ readers. A page edit that adds no file ships nothing. A page with more than
 16 pictures describes its first 16 to a link-joined member (the descriptor
 cap); paired and mesh members get all of them.
 
-Known limit: a member that keeps editing while a proposal that added a file
-is in flight bases its next draft on what it sent; the host never held that
-exact version (it renamed the file), so that next draft may land as a
-conflict side instead of merging.
+Known limits (follow-ups):
+
+- A member that keeps editing while a proposal that added a file is in
+  flight bases its next draft on what it sent; the host never held that
+  exact version (it renamed the file), so that next draft may land as a
+  conflict side instead of merging. A lost answer also can't be settled by
+  content (the renamed version never equals the draft): the next resend
+  settles it.
+- A *reviewed* conflict resolution or revert takes its held names from the
+  target's current body only, so a side's or history version's picture it
+  keeps is renamed and shows broken after approval (page proposals already
+  count sides and history as held).
+- The proposer re-queues its new files on every resend of the same draft
+  (write-once on the host makes it harmless, not free).
+- The rename regex (`page_body_media_refs`) skips a path inside another URL
+  or path (`./api/media/x`, `https://h/api/media/x`); the read-time signer
+  still signs such links.
 
 ## Mixed fleets
 

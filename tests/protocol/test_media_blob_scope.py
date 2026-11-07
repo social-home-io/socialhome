@@ -732,6 +732,25 @@ async def test_the_host_fills_a_pages_cover_and_body_pictures_by_their_names(env
         assert _bytes(root, name) == GOOD, name
 
 
+async def test_the_host_never_fills_another_spaces_file_through_a_page(env):
+    """Review finding: ``sd-`` names are computable, and a page keeps the
+    names its host chooses. A host that names another space's file (Q's
+    post picture, its bytes still on their way) in a page of its own space
+    and pushes bytes for it must fill nothing — the name is not this
+    space's file here."""
+    app, db, root = env
+    await _members(db)
+    theirs = space_direct_media_name(VICTIM, OTHER, "q.webp")
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, media_url)"
+        " VALUES('post-q', ?, 'u-q', 'image', ?)",
+        (VICTIM, f"api/media/{theirs}"),
+    )
+    await _page(db, "pg-1", GATED, "c.webp", f"![x](api/media/{theirs})")
+    await _push(app, "pg-1", theirs, EVIL, sender=HOST)
+    assert _bytes(root, theirs) is None
+
+
 async def test_the_submitters_household_delivers_its_own_page_files(env):
     """A's own push for its file lands under A's name — the one the page
     shows (names are bound to the delivering household, not the item)."""

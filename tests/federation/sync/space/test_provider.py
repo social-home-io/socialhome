@@ -2195,6 +2195,13 @@ class _VersionFed:
         return self.versions.get(iid, 0) >= min_version
 
 
+class _PageRefs:
+    elsewhere: frozenset[str] = frozenset()
+
+    async def confined_to_space(self, name, space_id):
+        return name not in self.elsewhere
+
+
 _PAGES = [
     _Page("pg-1", "![a](api/media/a.webp) ![b](/api/media/b.webp)", "api/media/c.webp"),
     _Page("pg-2", "no pictures"),
@@ -2215,7 +2222,7 @@ def _page_provider(encoder, *, hosting=True, versions=None, exporters=None):
     async def _hosts(space_id):
         return hosting
 
-    svc.attach_pages(_PageRepo(_PAGES), hosts=_hosts)
+    svc.attach_pages(_PageRepo(_PAGES), hosts=_hosts, media_refs=_PageRefs())
     return svc, media_sync
 
 
@@ -2269,3 +2276,15 @@ async def test_a_link_joined_v81_requesters_page_records_carry_media_refs(encode
     old = _FakeSession(requester="peer-e80")
     await svc.stream_initial(old)
     assert all("media_refs" not in r for r in _streamed_records(old, "pages"))
+
+
+async def test_a_page_file_named_outside_the_space_is_not_in_the_catchup(
+    encoder, monkeypatch
+):
+    monkeypatch.setattr(_PageRefs, "elsewhere", frozenset({"c.webp"}))
+    svc, media_sync = _page_provider(encoder)
+    await svc.stream_initial(_FakeSession(requester="peer-new"))
+    calls = [c.kwargs for c in media_sync.enqueue_for_blob.call_args_list]
+    assert [c["media_urls"] for c in calls] == [
+        ["api/media/a.webp", "/api/media/b.webp"]
+    ]

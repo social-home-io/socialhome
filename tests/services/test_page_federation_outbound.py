@@ -323,6 +323,15 @@ class _Gfs:
 BODY = "![a](api/media/a.webp) ![b](/api/media/b.webp?exp=1)"
 
 
+class _Refs:
+    """Which files a row outside their space names here."""
+
+    elsewhere: frozenset[str] = frozenset()
+
+    async def confined_to_space(self, name, space_id):
+        return name not in self.elsewhere
+
+
 @pytest.fixture
 def media_env():
     bus = EventBus()
@@ -330,7 +339,7 @@ def media_env():
     media = _Media()
     gfs = _Gfs()
     out = PageFederationOutbound(bus=bus, federation_service=fed)
-    out.attach_media(media_sync=media, space_repo=_Spaces())
+    out.attach_media(media_sync=media, space_repo=_Spaces(), media_refs=_Refs())
     out.attach_media_gfs(gfs)
     out.wire()
     return bus, fed, media, gfs
@@ -445,3 +454,38 @@ async def test_a_failed_file_queue_never_stops_the_page(media_env):
         )
     )
     assert len(fed.broadcasts) == 1
+
+
+async def test_a_file_named_outside_the_space_never_ships(media_env, monkeypatch):
+    """A page stored before v_81 may name a household file (a member that
+    learned its name): the host never ships, nor seals, a file some row
+    outside the space names."""
+    bus, _fed, media, gfs = media_env
+    monkeypatch.setattr(_Refs, "elsewhere", frozenset({"a.webp"}))
+    await bus.publish(
+        PageCreated(
+            page_id="p1",
+            space_id="sp-A",
+            title="N",
+            content=BODY,
+            canonical={**_CANON, "seq": 1},
+        )
+    )
+    assert [c["media_urls"] for c in media.calls] == [["/api/media/b.webp"]]
+    assert [p[1] for p in gfs.plans] == [["/api/media/b.webp"]]
+
+
+async def test_a_live_descriptor_carries_at_most_its_entry_cap(media_env):
+    _bus, _fed, media, gfs = media_env
+    body = " ".join(f"![p](api/media/p{i}.webp)" for i in range(20))
+    await _bus.publish(
+        PageCreated(
+            page_id="p1",
+            space_id="sp-A",
+            title="N",
+            content=body,
+            canonical={**_CANON, "seq": 1},
+        )
+    )
+    assert len(media.calls[0]["media_urls"]) == 20
+    assert len(gfs.plans[0][1]) == 16

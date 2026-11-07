@@ -15,6 +15,7 @@ from socialhome.services.space_media_names import (
     feature_media_urls,
     renamed_media,
     same_file,
+    space_own_files,
 )
 
 SP = "sp-1"
@@ -202,3 +203,19 @@ def test_same_file_matches_a_sent_name_to_the_one_held_here():
     assert not same_file(held, None, space_id=SP, origin="hh-a")
     assert not same_file(None, "api/media/f.webp", space_id=SP, origin="hh-a")
     assert not same_file(held, 7, space_id=SP, origin="hh-a")
+
+
+async def test_only_the_spaces_own_files_ship():
+    """What a host ships for a page: files no row outside the space names
+    here; without the repo, nothing (fail closed)."""
+
+    class _Refs:
+        async def confined_to_space(self, name, space_id):
+            return space_id == SP and name != "home.webp"
+
+    urls = ["api/media/a.webp", "/api/media/home.webp?x=1", "api/media/b.webp"]
+    assert await space_own_files(_Refs(), SP, urls) == [
+        "api/media/a.webp",
+        "api/media/b.webp",
+    ]
+    assert await space_own_files(None, SP, urls) == []

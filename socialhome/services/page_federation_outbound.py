@@ -49,14 +49,21 @@ from typing import TYPE_CHECKING
 from ..domain.events import PageCreated, PageDeleted, PageUpdated
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
-from ..domain.space_media_ref import MEDIA_REFS_FIELD, page_media_urls
+from ..domain.space_media_ref import (
+    MAX_DESCRIPTOR_ENTRIES,
+    MEDIA_REFS_FIELD,
+    distinct_media_files,
+    page_media_urls,
+)
 from ..infrastructure.event_bus import EventBus
 from .inbound_media_store import media_basename
 from .moderation_release import with_release
+from .space_media_names import space_own_files
 from .space_media_refs import SpaceMediaRefsMixin
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
+    from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
     from ..repositories.space_repo import AbstractSpaceRepo
     from .space_media_gfs_uploader import SpaceMediaPlan
     from .space_media_sync_service import SpaceMediaSyncService
@@ -67,7 +74,14 @@ log = logging.getLogger(__name__)
 class PageFederationOutbound(SpaceMediaRefsMixin):
     """Publish space-scoped page mutations to paired peer instances."""
 
-    __slots__ = ("_bus", "_federation", "_media_gfs", "_media_sync", "_spaces")
+    __slots__ = (
+        "_bus",
+        "_federation",
+        "_media_gfs",
+        "_media_refs",
+        "_media_sync",
+        "_spaces",
+    )
 
     def __init__(
         self,
@@ -79,14 +93,22 @@ class PageFederationOutbound(SpaceMediaRefsMixin):
         self._federation = federation_service
         self._media_sync: SpaceMediaSyncService | None = None
         self._spaces: AbstractSpaceRepo | None = None
+        self._media_refs: AbstractMediaReferenceRepo | None = None
         self._media_gfs = None
 
     def attach_media(
-        self, *, media_sync: SpaceMediaSyncService, space_repo: AbstractSpaceRepo
+        self,
+        *,
+        media_sync: SpaceMediaSyncService,
+        space_repo: AbstractSpaceRepo,
+        media_refs: AbstractMediaReferenceRepo,
     ) -> None:
-        """Wire the space media outbox (v_81: a version's new files)."""
+        """Wire the space media outbox (v_81: a version's new files — only
+        the space's own: a row stored before v_81 may name a household
+        file)."""
         self._media_sync = media_sync
         self._spaces = space_repo
+        self._media_refs = media_refs
 
     def wire(self) -> None:
         self._bus.subscribe(PageCreated, self._on_created)
@@ -171,14 +193,22 @@ class PageFederationOutbound(SpaceMediaRefsMixin):
         if canonical is None:
             await self._fan_out(space_id, event_type, payload())
             return
-        new_files = _new_files(
-            page_media_urls(canonical.get("cover_image_url"), content), shown_before
+        new_files = await space_own_files(
+            self._media_refs,
+            space_id,
+            _new_files(
+                page_media_urls(canonical.get("cover_image_url"), content),
+                shown_before,
+            ),
         )
+        # One descriptor carries at most MAX_DESCRIPTOR_ENTRIES files (a
+        # receiver refuses a longer one whole): the first ones are described.
+        described = distinct_media_files(new_files, MAX_DESCRIPTOR_ENTRIES)
         plan = (
             await self._plan_media_refs(
-                space_id, new_files, item_id=page_id, followers=False
+                space_id, described, item_id=page_id, followers=False
             )
-            if new_files
+            if described
             else None
         )
         base = payload()

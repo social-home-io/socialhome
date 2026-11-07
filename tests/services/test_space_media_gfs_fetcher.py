@@ -918,10 +918,20 @@ class _Pages:
         return self.pages.get((space_id, page_id))
 
 
+class _MediaRefs:
+    """Which files some row outside their space names here."""
+
+    def __init__(self) -> None:
+        self.elsewhere: set[str] = set()
+
+    async def confined_to_space(self, name, space_id):
+        return name not in self.elsewhere
+
+
 def _page_fetcher(tmp_path, gfs):
     f = _fetcher(tmp_path, gfs)
     pages = _Pages()
-    f.attach_pages(pages)
+    f.attach_pages(pages, media_refs=_MediaRefs())
     return f, pages
 
 
@@ -988,3 +998,16 @@ async def test_without_pages_attached_a_page_row_is_never_kept(tmp_path):
         SPACE, _wire(SHOWN, blob), [f"api/media/{SHOWN}"], item_id=PAGE, origin=ORIGIN
     )
     assert loc.refs == ()
+
+
+async def test_a_page_file_another_space_names_is_never_fetched(tmp_path):
+    """The host chooses a page's names: one some row outside the space shows
+    here (another space's file) is never filled from the host's blob."""
+    blob = _blob(SHOWN, b"planted", item_id=PAGE)
+    gfs = _Gfs({_addr(blob): blob})
+    f, pages = _page_fetcher(tmp_path, gfs)
+    pages.pages[(SPACE, PAGE)] = _Page(content=f"![x](api/media/{SHOWN})")
+    f._page_media_refs.elsewhere.add(SHOWN)
+    await _keep_page(f, _wire(SHOWN, blob), [f"api/media/{SHOWN}"])
+    assert await f.ensure_local(SHOWN) is False
+    assert not (tmp_path / SHOWN).exists()

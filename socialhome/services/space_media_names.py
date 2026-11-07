@@ -27,6 +27,7 @@ link-joined reader fetches from a GFS instead; they take precedence
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from typing import Protocol
 
 from ..domain.space_media_ref import (
     SpaceMediaLocalization,
@@ -38,6 +39,10 @@ from .inbound_media_store import (
     media_basename,
     space_direct_media_name,
 )
+
+
+class _ConfinedFiles(Protocol):
+    async def confined_to_space(self, basename: str, space_id: str) -> bool: ...
 
 
 class SpaceMediaNamer:
@@ -109,6 +114,23 @@ def same_file(held: object, sent: object, *, space_id: str, origin: str) -> bool
     return bool(name) and media_basename(held) == space_direct_media_name(
         space_id, origin, name
     )
+
+
+async def space_own_files(
+    media_refs: _ConfinedFiles | None, space_id: str, urls: Iterable[str]
+) -> list[str]:
+    """The files of *urls* that are *space_id*'s own content here — no row
+    outside the space names them (``confined_to_space``). A space page's
+    names are its host's (v_81): what the host ships must never be a
+    household file, a DM's or another space's. No repo: none (fail
+    closed)."""
+    if media_refs is None:
+        return []
+    return [
+        u
+        for u in urls
+        if await media_refs.confined_to_space(media_basename(u), space_id)
+    ]
 
 
 def feature_media_urls(feature: str, payload: dict) -> list[str]:

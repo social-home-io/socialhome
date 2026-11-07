@@ -822,7 +822,7 @@ class PageConflictService(BusPublisherMixin):
             await self.refuse(
                 space_id=space_id,
                 page_id=page_id,
-                proposal_hash=proposal.hash,
+                proposal_hash=proposal.answers or proposal.hash,
                 proposer_instance=proposer_instance,
                 reason="rate_limited",
             )
