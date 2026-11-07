@@ -142,20 +142,24 @@ def dm_media_name(from_instance: str, message_id: str, ext: str) -> str:
     return f"{DM_MEDIA_PREFIX}{digest[:40]}{ext}"
 
 
-def gfs_space_media_name(space_id: str, origin: str, filename: str) -> str:
-    """Local name of the space file *filename* fetched from a GFS media
-    cache, as described by household *origin* — the household this one
-    AUTHENTICATED as delivering the item (its envelope, its signed inner,
-    the §25.6 stream it rode), never a field of the descriptor.
+def gfs_space_media_name(
+    space_id: str, origin: str, item_id: str, filename: str
+) -> str:
+    """Local name of the space file *filename* of item *item_id*, fetched
+    from a GFS media cache as described by household *origin* — the
+    household this one AUTHENTICATED as delivering the item (its envelope,
+    its signed inner, the §25.6 stream it rode), never a field of the
+    descriptor.
 
     The item's reference is rewritten to this name on arrival, so a member
     naming another item's file in its own item only ever gets ITS file:
-    the name is the reader's, and two households describing one ``filename``
-    land on two names (the ``dm_media_name`` rule). Fixed length, keeps the
-    extension, always :func:`is_safe_media_name`.
+    the name is the reader's, and two households (or two items) describing
+    one ``filename`` land on two names (the ``dm_media_name`` rule) — each
+    item owns its row and can move it to a newer epoch. Fixed length, keeps
+    the extension, always :func:`is_safe_media_name`.
     """
     digest = hashlib.sha256(
-        f"space-media\0{space_id}\0{origin}\0{filename}".encode()
+        f"space-media\0{space_id}\0{origin}\0{item_id}\0{filename}".encode()
     ).hexdigest()
     dot = filename.rfind(".")
     ext = filename[dot:] if 0 < dot and len(filename) - dot <= 10 else ""

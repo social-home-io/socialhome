@@ -613,7 +613,7 @@ async def _gfs_held_picture(client, monkeypatch, *, name: str, data: bytes):
     monkeypatch.setattr(SpaceMediaGfsFetcher, "_sources", _sources)
     monkeypatch.setattr(fetcher, "_gfs", gfs, raising=False)
     # This household's own name for the file (what the stored item shows).
-    return gfs, gfs_space_media_name("sp-gfs", "host", name)
+    return gfs, gfs_space_media_name("sp-gfs", "host", "post-gfs", name)
 
 
 async def test_a_missing_space_file_is_fetched_from_the_gfs_on_view(

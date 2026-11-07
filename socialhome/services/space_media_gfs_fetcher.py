@@ -236,7 +236,7 @@ class SpaceMediaGfsFetcher:
                 item_id=item_id,
                 origin=origin,
             ):
-                local = gfs_space_media_name(space_id, origin, ref.filename)
+                local = gfs_space_media_name(space_id, origin, item_id, ref.filename)
                 first = held.get(ref.filename)
                 if first is not None and first.local_name != local:
                     log.info(

@@ -565,24 +565,27 @@ async def test_write_once_publishes_and_never_replaces(tmp_path):
 
 
 def test_gfs_space_media_name_is_bound_to_space_household_and_file():
-    name = store.gfs_space_media_name("sp-1", "inst-a", "abc.webp")
-    assert name == store.gfs_space_media_name("sp-1", "inst-a", "abc.webp")
+    name = store.gfs_space_media_name("sp-1", "inst-a", "post-1", "abc.webp")
+    assert name == store.gfs_space_media_name("sp-1", "inst-a", "post-1", "abc.webp")
     assert name.startswith(store.GFS_SPACE_MEDIA_PREFIX)
     assert name.endswith(".webp")
     assert store.is_safe_media_name(name)
     assert store.is_gfs_space_media_name(name)
     others = {
-        store.gfs_space_media_name("sp-2", "inst-a", "abc.webp"),
-        store.gfs_space_media_name("sp-1", "inst-m", "abc.webp"),
-        store.gfs_space_media_name("sp-1", "inst-a", "abd.webp"),
+        store.gfs_space_media_name("sp-2", "inst-a", "post-1", "abc.webp"),
+        store.gfs_space_media_name("sp-1", "inst-m", "post-1", "abc.webp"),
+        store.gfs_space_media_name("sp-1", "inst-a", "post-1", "abd.webp"),
+        # #1309 round 3: the item too — two items of one household naming
+        # one file each own their row (and can each follow a key rotation).
+        store.gfs_space_media_name("sp-1", "inst-a", "post-2", "abc.webp"),
     }
-    assert name not in others and len(others) == 3
+    assert name not in others and len(others) == 4
 
 
 def test_a_gfs_space_media_name_is_reserved():
     """Only the GFS fetcher writes these: a space item naming one, or a
     SPACE_MEDIA_BLOB for one, is refused like a DM or moment name."""
-    name = store.gfs_space_media_name("sp-1", "inst-a", "abc.webp")
+    name = store.gfs_space_media_name("sp-1", "inst-a", "post-1", "abc.webp")
     assert store.is_reserved_media_name(name)
     assert store.space_media_ref("api/media/" + name) is None
     assert not store.is_gfs_space_media_name("abc.webp")

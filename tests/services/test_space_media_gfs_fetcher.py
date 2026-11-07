@@ -47,9 +47,11 @@ def _blob(
     )
 
 
-def _L(name: str, origin: str = ORIGIN, space_id: str = SPACE) -> str:
-    """This household's name for *name* as delivered by *origin*."""
-    return gfs_space_media_name(space_id, origin, name)
+def _L(
+    name: str, origin: str = ORIGIN, space_id: str = SPACE, item_id: str = ITEM
+) -> str:
+    """This household's name for *name* of *item_id* as delivered by *origin*."""
+    return gfs_space_media_name(space_id, origin, item_id, name)
 
 
 CHANNEL_ID = "c" * 32
@@ -665,11 +667,15 @@ async def test_a_member_naming_another_items_file_only_gets_its_own_copy(tmp_pat
     )
     await f.keep(a_loc, prefetch=False)
     assert a_loc.url("api/media/a.webp") == "api/media/" + _L("a.webp")
-    assert m_loc.url("api/media/a.webp") == "api/media/" + _L("a.webp", "peer-m")
+    assert m_loc.url("api/media/a.webp") == "api/media/" + _L(
+        "a.webp", "peer-m", item_id="post-m"
+    )
     assert await f.ensure_local(_L("a.webp")) is True
-    assert await f.ensure_local(_L("a.webp", "peer-m")) is True
+    assert await f.ensure_local(_L("a.webp", "peer-m", item_id="post-m")) is True
     assert (tmp_path / _L("a.webp")).read_bytes() == b"A's picture"
-    assert (tmp_path / _L("a.webp", "peer-m")).read_bytes() == b"M's picture"
+    assert (
+        tmp_path / _L("a.webp", "peer-m", item_id="post-m")
+    ).read_bytes() == b"M's picture"
     assert not (tmp_path / "a.webp").exists()
 
 
@@ -728,9 +734,9 @@ async def test_a_blob_sealed_for_another_item_or_household_is_refused(tmp_path, 
         prefetch=False,
     )
     with caplog.at_level(logging.WARNING):
-        assert await f.ensure_local(_L("a.webp", "peer-m")) is False
+        assert await f.ensure_local(_L("a.webp", "peer-m", item_id="post-m")) is False
     assert "decrypt" in caplog.text
-    assert not (tmp_path / _L("a.webp", "peer-m")).exists()
+    assert not (tmp_path / _L("a.webp", "peer-m", item_id="post-m")).exists()
 
 
 async def test_only_a_gfs_space_media_name_is_ever_fetched(tmp_path):
@@ -838,3 +844,33 @@ async def test_a_space_that_keeps_missing_stops_retrying(tmp_path, monkeypatch):
     await _recv(f, SPACE, _wire("ok.webp", ok), ["api/media/ok.webp"], item_id="p10")
     await asyncio.wait_for(f.drain(), timeout=5)
     assert f._space_misses.get(SPACE, 0) == 0
+
+
+async def test_two_items_of_one_household_each_follow_a_rotation(tmp_path):
+    """#1309 round 3 (item 3): two items X and Y from the same household
+    naming one file F shared one row bound to X, so Y's re-description at a
+    newer epoch could not move it. The item is in the reader's name: each
+    item owns its row."""
+    f = _fetcher(tmp_path, _Gfs({}))
+    f._crypto = _Crypto(epochs=(2, 3))
+    x_old = _blob("a.webp", b"pic", epoch=2, item_id="post-x")
+    y_old = _blob("a.webp", b"pic", epoch=2, item_id="post-y")
+    y_new = _blob("a.webp", b"pic", epoch=3, item_id="post-y")
+    for item, blob, epoch in (
+        ("post-x", x_old, 2),
+        ("post-y", y_old, 2),
+        ("post-y", y_new, 3),
+    ):
+        await _recv(
+            f,
+            SPACE,
+            _wire("a.webp", blob, epoch=epoch),
+            ["api/media/a.webp"],
+            item_id=item,
+            prefetch=False,
+        )
+    x = await f._refs.get(_L("a.webp", item_id="post-x"))
+    y = await f._refs.get(_L("a.webp", item_id="post-y"))
+    assert x.local_name != y.local_name
+    assert (x.item_id, x.epoch) == ("post-x", 2)
+    assert (y.item_id, y.epoch) == ("post-y", 3)
