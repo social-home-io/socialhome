@@ -20,7 +20,7 @@ import hashlib
 import logging
 import sqlite3
 from collections.abc import AsyncIterator, Awaitable, Callable
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 import orjson
 
@@ -31,6 +31,11 @@ from ....domain.federation import (
     FederationEventType,
 )
 from ....domain.federation_capabilities import FederationCapability
+from ....domain.space_media_ref import (
+    MEDIA_REF_RESOURCES,
+    MEDIA_REFS_FIELD,
+    record_media_urls,
+)
 from .exporter import (
     RESOURCE_ORDER,
     BatchedExporter,
@@ -180,6 +185,95 @@ _OWN_CONTENT_OWNERS: dict[str, Callable[[dict[str, Any]], str | None]] = {
 }
 
 
+#: v_80 — records of one resource a stream to a link-joined member describes
+#: (newest first): each costs a seal (cached) and, once per GFS, an upload.
+MAX_CATCHUP_MEDIA_RECORDS: int = 500
+
+
+class _MediaPlanner(Protocol):
+    async def is_relay_reader(self, instance_id: str) -> bool: ...
+
+    async def plan_for_reader(
+        self, space_id: str, media_urls: list[str], instance_id: str, *, item_id: str
+    ) -> Any: ...
+
+    def upload(self, plan: Any) -> None: ...
+
+
+class _WithMediaRefs:
+    """v_80 — a resource streamed to a member household seated from an
+    invite link (reached only through a GFS relay, which refuses the
+    ``SPACE_MEDIA_BLOB`` bytes): each record that shows files carries their
+    ``media_refs`` descriptor (computed from our copy of the file — the
+    deterministic seal gives the same address every time) and the blobs are
+    queued for upload to that member's GFS. At most
+    :data:`MAX_CATCHUP_MEDIA_RECORDS` records per resource per stream."""
+
+    __slots__ = ("_budget", "_inner", "_media", "_requester", "resource")
+
+    def __init__(
+        self, inner: ResourceExporter, media: _MediaPlanner, requester: str
+    ) -> None:
+        self._inner = inner
+        self._media = media
+        self._requester = requester
+        self._budget = MAX_CATCHUP_MEDIA_RECORDS
+        self.resource = inner.resource
+
+    async def _add(
+        self, space_id: str, rows: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            urls = record_media_urls(self.resource, row)
+            if urls and self._budget > 0:
+                self._budget -= 1
+                try:
+                    # Sealed for the record's own item — the id the
+                    # reader keeps the descriptor (and opens the blob) under.
+                    plan = await self._media.plan_for_reader(
+                        space_id,
+                        urls,
+                        self._requester,
+                        item_id=str(row.get("id") or ""),
+                    )
+                except Exception:
+                    log.warning(
+                        "sync: media of a %s record not described for %s",
+                        self.resource,
+                        self._requester,
+                        exc_info=True,
+                    )
+                    plan = None
+                if plan is not None:
+                    row = {**row, MEDIA_REFS_FIELD: plan.wire()}
+                    self._media.upload(plan)
+            out.append(row)
+        return out
+
+    async def list_records(self, space_id: str) -> list[dict[str, Any]]:
+        return await self._add(space_id, await self._inner.list_records(space_id))
+
+    async def iter_batches(self, space_id: str) -> AsyncIterator[list[dict[str, Any]]]:
+        inner = self._inner
+        if not isinstance(inner, BatchedExporter):
+            yield await self.list_records(space_id)
+            return
+        async for batch in inner.iter_batches(space_id):
+            yield await self._add(space_id, batch)
+
+    async def iter_changed(
+        self, space_id: str, since: int
+    ) -> AsyncIterator[list[dict[str, Any]]]:
+        inner = self._inner
+        if not isinstance(inner, IncrementalExporter):
+            async for batch in self.iter_batches(space_id):
+                yield batch
+            return
+        async for batch in inner.iter_changed(space_id, since):
+            yield await self._add(space_id, batch)
+
+
 class _OwnPeopleOnly:
     """A resource narrowed to this household's own people: a record is kept
     when its owner (``owner_of``, by default its ``user_id``) is one of them,
@@ -312,6 +406,7 @@ class SpaceSyncService:
         "_federation",
         "_gallery_repo",
         "_inviter_proof_for",
+        "_media_gfs",
         "_media_sync",
         "_member_gate",
         "_own_members",
@@ -409,6 +504,16 @@ class SpaceSyncService:
         #: ``space_id -> this household's own people`` — the only pictures
         #: a plain member household's ``member_pictures`` carries.
         self._own_members: Callable[[str], Awaitable[set[str]]] | None = None
+        #: v_80 — describes the files of a stream to a link-joined member
+        #: and uploads them to its GFS (``None``: no descriptors).
+        self._media_gfs: _MediaPlanner | None = None
+
+    def attach_media_gfs(self, media_gfs: _MediaPlanner) -> None:
+        """Wire the v_80 GFS media uploader: posts / calendar / gallery
+        records streamed to a member seated from an invite link at
+        ``FederationCapability.MIN_FOR_SPACE_MEDIA_REFS`` (sync line 80)
+        carry ``media_refs``."""
+        self._media_gfs = media_gfs
 
     def attach_roster_authority(
         self,
@@ -434,18 +539,28 @@ class SpaceSyncService:
     ) -> ResourceExporter | None:
         """The exporter for ``resource``, shaped for this requester and —
         on a plain member household — narrowed to its own people's content
-        (:data:`_OWN_CONTENT_OWNERS`, step 16)."""
+        (:data:`_OWN_CONTENT_OWNERS`, step 16). v_80: toward a link-joined
+        member, records that show files carry ``media_refs``."""
         exporter = await self._shaped_exporter(resource, session)
         owner_of = _OWN_CONTENT_OWNERS.get(resource)
-        if (
+        if not (
             exporter is None
             or owner_of is None
             or self._own_members is None
             or self._roster_authority is None
             or await self._roster_authority(session.space_id)
         ):
-            return exporter
-        return _OwnPeopleOnly(exporter, self._own_members, owner_of)
+            exporter = _OwnPeopleOnly(exporter, self._own_members, owner_of)
+        if (
+            exporter is not None
+            and resource in MEDIA_REF_RESOURCES
+            and self._media_gfs is not None
+            and await self._media_gfs.is_relay_reader(session.requester_instance_id)
+        ):
+            exporter = _WithMediaRefs(
+                exporter, self._media_gfs, session.requester_instance_id
+            )
+        return exporter
 
     async def _shaped_exporter(
         self, resource: str, session: SyncSessionRecord
@@ -896,6 +1011,15 @@ class SpaceSyncService:
         target_instance_id)`` primary key drops duplicates.
         """
         if self._media_sync is None or target_instance_id == "":
+            return
+        if (
+            self._federation is not None
+            and await self._federation.is_space_session_peer(target_instance_id)
+        ):
+            # A member seated from an invite link is reached only through
+            # the GFS relay, which refuses these bytes: queuing them would
+            # only burn outbox rows and retries. A v_80 one gets the
+            # records' ``media_refs`` instead (its GFS's media cache).
             return
         window = (
             await self._windows.for_space(space_id)

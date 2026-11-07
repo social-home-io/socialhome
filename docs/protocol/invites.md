@@ -289,8 +289,8 @@ A later cover or icon change reaches a link-joined member too: the
 `SPACE_CONFIG_CHANGED` for it carries the new image, bounded for this member
 to the same `SPACE_*_BOOTSTRAP_MAX_BYTES` so it fits the relay (see "A cover /
 icon change carries the image" in [spaces.md](./spaces.md)). Other space media
-(post attachments, gallery) still does not flow to a link-joined member (see
-"Media does NOT flow" below).
+(post pictures, calendar covers, gallery items) reaches a link-joined v_80
+member through the GFS media cache (see "Media through the GFS cache" below).
 
 The routing envelope is **identity-free** — the #677 lesson. The
 sender's identity, the token, the space, the users, the nonce and the
@@ -912,18 +912,21 @@ only as a local, in-memory relay-acceptance time (`relay_only` on
 `/api/connections`) — never as reachability, and nothing about it goes
 back to the connection server.
 
-**Media does NOT flow to a link-joined member yet.** `space_media_outbox`
-ships blobs as one chunk up to `SINGLE_CHUNK_BYTES_THRESHOLD` (1 MiB) and
-in `MAX_BLOB_CHUNK_BYTES` (512 KiB) chunks above that; base64 in the JSON
-fallback path inflates that to ~683 KiB – 1.4 MiB, against a relay body
-cap of `ENVELOPE_MAX_BODY_BYTES` = 320 KiB. Nothing fits. `GfsRelayTransport`
-therefore refuses an oversize envelope **locally**, at WARNING, naming the
-peer, the event type and the size — it never ships one to earn a 413, and
-it never drops one silently. Posts, comments, reactions, roster events,
-config changes and key rotations all fit comfortably and flow normally;
-a post's *text* reaches the member, its *image* does not. Closing this
-needs either a chunker that respects a per-transport maximum or a larger
-relay cap, and is deliberately out of scope here.
+**Media through the GFS cache (v_80).** `SPACE_MEDIA_BLOB` chunks do not fit
+the relay: its envelope cap (`RELAY_MAX_ENVELOPE_BYTES`, ~191 KiB) is far below
+a media chunk, and `GfsRelayTransport` refuses an oversize envelope
+**locally**, at WARNING, never shipping one to earn a 413. So no
+`SPACE_MEDIA_BLOB` is queued to a link-joined member any more — live (v_80)
+or in a §25.6 catch-up (any version). Instead a post, calendar cover or
+gallery item to a link-joined v_80 member carries a `media_refs` descriptor
+inside its encrypted payload (and the §25.6 records streamed to it do too,
+sync line 80); the author's household seals each file once and uploads it
+once to that member's GFS (`relay_via`), and the member fetches, checks and
+decrypts it there — see [`media.md`](./media.md#space-media-via-the-gfs-cache-v_80).
+A link-joined member below v_80 still gets only what fits the relay (its
+posts' text, not their pictures). Files over 8 MiB are not cached yet.
+A private space with an opaque channel (v_51) uploads under the GFS's
+channel scope, so the GFS learns only the channel id.
 
 **Posting without the host (v_49).** A link-joined member's own posts in a
 PUBLIC/GLOBAL space no longer depend on the host being online: the member

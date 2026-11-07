@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import logging
+from dataclasses import dataclass
 from datetime import UTC
 from types import SimpleNamespace
 from typing import Any
@@ -1998,3 +1999,162 @@ async def test_a_member_household_streams_only_its_own_peoples_content(
         "bazaar": ["p-1"],
         "posts_deleted": ["p-9"],
     }
+
+
+# ── v_80 — link-joined members: descriptors in the records, no byte push ─
+
+
+class _ReaderPlan:
+    def __init__(self, urls):
+        self.urls = list(urls)
+
+    def wire(self):
+        return {
+            u.rsplit("/", 1)[-1]: {
+                "blob_id": "a" * 64,
+                "suite": "s",
+                "epoch": 0,
+                "size": 9,
+            }
+            for u in self.urls
+        }
+
+
+class _ReaderUploader:
+    def __init__(self, readers=("peer-e",)):
+        self.readers = set(readers)
+        self.planned: list = []
+        self.items: list = []
+        self.uploaded: list = []
+
+    async def is_relay_reader(self, iid):
+        return iid in self.readers
+
+    async def plan_for_reader(self, space_id, urls, iid, *, item_id):
+        urls = list(urls)
+        self.planned.append((space_id, urls, iid))
+        self.items.append(item_id)
+        return _ReaderPlan(urls) if urls else None
+
+    def upload(self, plan):
+        self.uploaded.append(plan)
+
+
+def _streamed_records(session, resource):
+    out = []
+    for raw in session.rtc.sent:
+        env = orjson.loads(raw)
+        if env["resource"] != resource:
+            continue
+        out.extend(
+            orjson.loads(base64.urlsafe_b64decode(env["encrypted_payload"]))["records"]
+        )
+    return out
+
+
+def _media_provider(encoder, uploader):
+    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
+    exporters = {
+        "posts": _FakeExporter(
+            "posts",
+            [
+                {"id": "p-1", "author": "u-1", "image_urls": ["api/media/a.webp"]},
+                {"id": "p-2", "author": "u-1"},
+            ],
+        ),
+        "calendar": _FakeExporter(
+            "calendar", [{"id": "e-1", "cover_url": "api/media/c.webp"}]
+        ),
+        "members": _FakeExporter("members", [{"user_id": "u-1", "role": "member"}]),
+    }
+    svc = SpaceSyncService(builder=builder, exporters=exporters, sig_suite="ed25519")
+    svc.attach_media_gfs(uploader)
+    return svc
+
+
+async def test_a_link_joined_v80_requesters_records_carry_media_refs(encoder):
+    uploader = _ReaderUploader()
+    svc = _media_provider(encoder, uploader)
+    session = _FakeSession(requester="peer-e")
+    await svc.stream_initial(session)
+    posts = {r["id"]: r for r in _streamed_records(session, "posts")}
+    assert posts["p-1"]["media_refs"] == {
+        "a.webp": {"blob_id": "a" * 64, "suite": "s", "epoch": 0, "size": 9}
+    }
+    assert "media_refs" not in posts["p-2"]
+    (event,) = _streamed_records(session, "calendar")
+    assert set(event["media_refs"]) == {"c.webp"}
+    # Each blob is sealed for the record's own item (in its AAD).
+    assert sorted(uploader.items) == ["e-1", "p-1"]
+    assert all("media_refs" not in r for r in _streamed_records(session, "members"))
+    # The blobs go to the requester's GFS (once per file).
+    assert len(uploader.uploaded) == 2
+
+
+async def test_another_requesters_records_carry_no_media_refs(encoder):
+    uploader = _ReaderUploader()
+    svc = _media_provider(encoder, uploader)
+    session = _FakeSession(requester="peer-paired")
+    await svc.stream_initial(session)
+    assert all("media_refs" not in r for r in _streamed_records(session, "posts"))
+    assert uploader.planned == []
+
+
+async def test_catch_up_files_per_stream_are_bounded(encoder, monkeypatch):
+    """At most ``MAX_CATCHUP_MEDIA_RECORDS`` records of each resource are
+    described per stream (newest first) — the rest go without."""
+    monkeypatch.setattr(provider_mod, "MAX_CATCHUP_MEDIA_RECORDS", 1)
+    uploader = _ReaderUploader()
+    builder = ChunkBuilder(encoder=encoder, crypto=_FakeCrypto())
+    pictures = [
+        {"id": f"p-{i}", "author": "u-1", "image_urls": [f"api/media/{i}.webp"]}
+        for i in range(3)
+    ]
+    svc = SpaceSyncService(
+        builder=builder,
+        exporters={"posts": _FakeExporter("posts", pictures)},
+        sig_suite="ed25519",
+    )
+    svc.attach_media_gfs(uploader)
+    session = _FakeSession(requester="peer-e")
+    await svc.stream_initial(session)
+    described = [r for r in _streamed_records(session, "posts") if "media_refs" in r]
+    assert [r["id"] for r in described] == ["p-0"]
+    assert len(_streamed_records(session, "posts")) == 3
+
+
+async def test_no_catchup_byte_push_to_a_link_joined_requester(encoder):
+    """The GFS relay refuses ``SPACE_MEDIA_BLOB`` chunks to a member seated
+    from an invite link — queuing them only burns outbox rows and retries.
+    A paired / mesh requester keeps the push."""
+
+    @dataclass
+    class _Post:
+        id: str
+        media_url: str | None = None
+        image_urls: tuple = ()
+        file_meta: object = None
+        link_preview: object = None
+
+    class _PostRepo:
+        async def list_sync_page(self, space_id, **kw):
+            return [_Post(id="post-1", image_urls=("api/media/a.webp",))], None
+
+    fed = SimpleNamespace(
+        is_space_session_peer=AsyncMock(side_effect=lambda iid: iid == "peer-e"),
+        peer_supports=AsyncMock(return_value=True),
+        space_member_version=AsyncMock(return_value=80),
+    )
+    for requester, pushed in (("peer-e", False), ("peer-b", True)):
+        media_sync = AsyncMock()
+        media_sync.enqueue_for_blob = AsyncMock()
+        svc = SpaceSyncService(
+            builder=ChunkBuilder(encoder=encoder, crypto=_FakeCrypto()),
+            exporters={},
+            sig_suite="ed25519",
+            media_sync=media_sync,
+            space_post_repo=_PostRepo(),
+        )
+        svc._federation = fed
+        await svc.stream_initial(_FakeSession(requester=requester))
+        assert media_sync.enqueue_for_blob.await_count == (1 if pushed else 0)

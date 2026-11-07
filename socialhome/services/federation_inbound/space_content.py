@@ -105,6 +105,7 @@ from ...domain.space import (
     validate_zone_name,
     validate_zone_radius,
 )
+from ...domain.space_media_ref import MEDIA_REFS_FIELD, SpaceMediaLocalization
 from ...domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ...domain.task import Task, TaskList, task_from_wire_dict, task_list_from_wire_dict
 from ...domain.timetable import (
@@ -144,8 +145,8 @@ from ...utils.datetime import parse_iso8601_optional
 from ...utils.timezones import coerce_tz
 from ..gallery_service import ALBUMS_PER_SPACE, DESCRIPTION_MAX, NAME_MAX
 from ..inbound_media_store import (
-    local_media_ref,
     local_media_refs,
+    space_media_ref,
     verbatim_local_media_ref,
 )
 from ..page_conflict_service import (
@@ -173,6 +174,7 @@ if TYPE_CHECKING:
     from ...repositories.timetable_repo import AbstractSpaceTimetableRepo
     from ..legacy_album_deletes import LegacyAlbumDeletes
     from ..page_conflict_service import PageConflictService
+    from ..space_media_gfs_fetcher import SpaceMediaGfsFetcher
 
 log = logging.getLogger(__name__)
 
@@ -224,6 +226,7 @@ class SpaceContentInboundHandlers:
         "_bus",
         "_calendar_repo",
         "_gallery_repo",
+        "_gfs_media",
         "_legacy_album_deletes",
         "_media_dir",
         "_media_refs",
@@ -279,6 +282,38 @@ class SpaceContentInboundHandlers:
         #: Overtaking album deletes no tombstone row can prove (a legacy id,
         #: an owner-less v_33 delete) — restart-scoped, bounded.
         self._legacy_album_deletes = legacy_album_deletes
+        #: v_80 — keeps a calendar cover's / gallery item's ``media_refs``
+        #: (its files in a GFS media cache) and fetches them.
+        self._gfs_media: SpaceMediaGfsFetcher | None = None
+
+    def attach_gfs_media(self, fetcher: SpaceMediaGfsFetcher) -> None:
+        """Wire the v_80 GFS media fetcher."""
+        self._gfs_media = fetcher
+
+    async def _localize_media(
+        self,
+        event: FederationEvent,
+        space_id: str,
+        item_id: str,
+        urls: list[str | None],
+    ) -> SpaceMediaLocalization:
+        """v_80 — this household's names for an item's files kept in a GFS
+        media cache (it reached a link-joined member without its bytes), as
+        delivered by the envelope's authenticated sender. Apply it before
+        the item is saved; :meth:`_keep_media` once it is."""
+        if self._gfs_media is None:
+            return SpaceMediaLocalization()
+        return await self._gfs_media.localize(
+            space_id,
+            event.payload.get(MEDIA_REFS_FIELD),
+            [u for u in urls if u],
+            item_id=item_id,
+            origin=event.from_instance,
+        )
+
+    async def _keep_media(self, media: SpaceMediaLocalization) -> None:
+        if self._gfs_media is not None:
+            await self._gfs_media.keep(media)
 
     def attach_to(self, federation_service: FederationService) -> None:
         registry = federation_service._event_registry
@@ -1426,6 +1461,8 @@ class SpaceContentInboundHandlers:
         # Rendered as ``<img src>`` for every member: only a local media
         # reference — a third-party URL would leak their IPs.
         cover = verbatim_local_media_ref(p.get("cover_url"))
+        if cover is not None and space_media_ref(cover) is None:
+            cover = None  # a reserved (DM / moment) name is never a cover
         location = p.get("location")
         ev = CalendarEvent(
             id=event_id,
@@ -1497,11 +1534,14 @@ class SpaceContentInboundHandlers:
             row_owner=created_by if existing is None else existing[1].created_by,
         ):
             return
+        media = await self._localize_media(event, space_id, ev.id, [ev.cover_url])
+        ev = replace(ev, cover_url=media.url(ev.cover_url))
         if not await self._calendar_repo.save_event(ev, space_id=space_id):
             log_cross_space_refusal(
                 event, space_id=space_id, what="calendar event", row_id=event_id
             )
             return
+        await self._keep_media(media)
         # Publish on the local bus so the calendar→feed bridge (Phase B)
         # can mirror the event into space_posts on inbound federation
         # arrivals too. The bridge guards against duplicates by linked_event_id.
@@ -2243,8 +2283,8 @@ class SpaceContentInboundHandlers:
             album_id=album_id,
             uploaded_by=uploaded_by,
             item_type=item_type,
-            url=local_media_ref(p.get("url")) or "",
-            thumbnail_url=local_media_ref(p.get("thumbnail_url")) or "",
+            url=space_media_ref(p.get("url")) or "",
+            thumbnail_url=space_media_ref(p.get("thumbnail_url")) or "",
             width=int(p.get("width") or 0),
             height=int(p.get("height") or 0),
             duration_s=p.get("duration_s"),
@@ -2277,6 +2317,14 @@ class SpaceContentInboundHandlers:
             )
             return
         is_new = await self._gallery_repo.get_item(item_id) is None
+        media = await self._localize_media(
+            event, space_id, item.id, [item.thumbnail_url, item.url]
+        )
+        item = replace(
+            item,
+            url=media.url(item.url) or "",
+            thumbnail_url=media.url(item.thumbnail_url) or "",
+        )
         try:
             if not await self._gallery_repo.create_item_in_space(
                 item, space_id=space_id
@@ -2296,6 +2344,7 @@ class SpaceContentInboundHandlers:
                 exc_info=True,
             )
             return
+        await self._keep_media(media)
         if is_new:
             await self._bus.publish(
                 GalleryItemUploaded(

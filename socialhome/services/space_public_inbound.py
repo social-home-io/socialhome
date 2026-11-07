@@ -110,6 +110,7 @@ from ..domain.space_item import (
     required_scope,
     stamp_to_db,
 )
+from ..domain.space_media_ref import SpaceMediaLocalization, post_media_urls
 from ..domain.writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE, WriterCert
 from ..federation.pending_parent_buffer import (
     AwaitingParent,
@@ -121,8 +122,13 @@ from ..infrastructure.event_bus import EventBus
 from ..utils.datetime import parse_iso8601_lenient
 from ..writer_cert import verify_writer_users
 from .gfs_member_publish_service import parse_item_plaintext
-from .inbound_media_store import local_media_ref, local_media_refs
-from .link_preview_service import wire_link_preview
+from .inbound_media_store import (
+    space_media_ref,
+    space_media_refs,
+)
+from .link_preview_service import (
+    space_wire_link_preview,
+)
 from .space_crypto_service import MissingEpochKey
 from .space_item_author import (
     UnsupportedItemAuthorSigSuite,
@@ -131,6 +137,8 @@ from .space_item_author import (
 from .space_item_inbound import SpaceItemInbound
 from .space_public_author import (
     UnsupportedLinkPreviewSigSuite,
+    UnsupportedMediaRefsSigSuite,
+    signed_media_refs,
     verified_link_preview,
     verify_signed_author_inner,
 )
@@ -148,6 +156,7 @@ if TYPE_CHECKING:
     from .pending_decrypts_cache import PendingDecryptsCache
     from .space_authority_pin import AuthorityPinRefresher
     from .space_crypto_service import SpaceContentEncryption
+    from .space_media_gfs_fetcher import SpaceMediaGfsFetcher
     from .space_mentions import SpaceMentionResolver
 
 log = logging.getLogger(__name__)
@@ -165,6 +174,7 @@ class SpacePublicInbound:
         "_authorship",
         "_bus",
         "_crypto",
+        "_gfs_media",
         "_items",
         "_key_pull",
         "_mentions",
@@ -216,6 +226,13 @@ class SpacePublicInbound:
         #: holds the frame until that key lands. ``None``: dropped.
         self._key_pull: Callable[[str], Awaitable[bool]] | None = None
         self._pending_decrypts: PendingDecryptsCache | None = None
+        #: v_80 — keeps a relayed post's ``media_refs`` (its pictures in the
+        #: GFS media cache, sealed under the space key) and fetches them.
+        self._gfs_media: SpaceMediaGfsFetcher | None = None
+
+    def attach_gfs_media(self, fetcher: SpaceMediaGfsFetcher) -> None:
+        """Wire the v_80 GFS media fetcher."""
+        self._gfs_media = fetcher
 
     def attach_key_pull(
         self,
@@ -528,11 +545,17 @@ class SpacePublicInbound:
         """Dedupe by post id, save, publish — shared by both relay paths."""
         # Dedupe by post id — the GFS relay is at-least-once, and a
         # member-published item usually also arrives over federation.
-        if await self._posts.get(post_id) is not None:
+        held = await self._posts.get(post_id)
+        if held is not None:
             log.debug("space_public.inbound: duplicate post %s — dropped", post_id)
+            await self._heal_media(
+                space_id, held, author_user_id, origin_instance_id, inner
+            )
             return
 
         post = self._post_from_inner(post_id, author_user_id, inner)
+        media = await self._localize_media(space_id, post, origin_instance_id, inner)
+        post = media.post(post)
         if await self._posts.save(space_id, post) is None:
             log.warning(
                 "space_public.inbound: post %s already exists in another space "
@@ -540,6 +563,7 @@ class SpacePublicInbound:
                 post_id,
             )
             return
+        await self._keep_media(media)
         await self._bus.publish(
             SpacePostCreated(
                 post=post,
@@ -938,6 +962,86 @@ class SpacePublicInbound:
                 )
         return stored
 
+    async def _localize_media(
+        self, space_id: str, post: Post, origin_instance_id: str, inner: dict
+    ) -> SpaceMediaLocalization:
+        """v_80 — the post's files in the GFS media cache, under THIS
+        household's names, bound to the author household the signed inner
+        proves (``origin_instance_id``). Only a descriptor the author SIGNED
+        is taken (:func:`signed_media_refs`): one a re-publisher swapped, or
+        added unsigned, is dropped and the post shows without those
+        pictures."""
+        if self._gfs_media is None:
+            return SpaceMediaLocalization()
+        try:
+            refs = signed_media_refs(inner)
+        except UnsupportedMediaRefsSigSuite as exc:
+            log.warning(
+                "space_public.inbound: post %s media_refs signature suite %s "
+                "unsupported — dropped",
+                post.id,
+                exc,
+            )
+            refs = None
+        if refs is None and inner.get("media_refs") is not None:
+            log.warning(
+                "space_public.inbound: post %s carries media_refs its author did "
+                "not sign — dropped",
+                post.id,
+            )
+        return await self._gfs_media.localize(
+            space_id,
+            refs,
+            post_media_urls(post),
+            item_id=post.id,
+            origin=origin_instance_id,
+        )
+
+    async def _heal_media(
+        self,
+        space_id: str,
+        held: tuple[str, Post],
+        author_user_id: str,
+        origin_instance_id: str,
+        inner: dict,
+    ) -> None:
+        """Add-only heal of a post already stored here WITHOUT its GFS
+        pictures (#1309 round 4).
+
+        A member can re-publish the author's inner WITHOUT its signed
+        ``media_refs`` (the author signature still verifies) and win the race
+        to a GFS: this household stores the post pictureless and would drop
+        the author's real copy as a duplicate. A later copy — or edit — of
+        the SAME author's post in the same space that carries a descriptor
+        the author signed heals it: the stored post's files take this
+        household's names and the rows are kept. Never for an item that has
+        rows already, so it never replaces refs or names."""
+        held_space, post = held
+        if (
+            self._gfs_media is None
+            or inner.get("media_refs") is None
+            or held_space != space_id
+            or post.author != author_user_id
+            or post.deleted
+            or await self._gfs_media.has_item_refs(space_id, post.id)
+        ):
+            return
+        media = await self._localize_media(space_id, post, origin_instance_id, inner)
+        if not media.refs:
+            return
+        if not await self._posts.set_media(media.post(post), space_id=space_id):
+            return
+        await self._keep_media(media)
+        log.info(
+            "space_public.inbound: post %s stored without its pictures — healed "
+            "from a copy its author signed",
+            post.id,
+        )
+
+    async def _keep_media(self, media: SpaceMediaLocalization) -> None:
+        if self._gfs_media is not None:
+            await self._gfs_media.keep(media)
+
     async def _apply_post_edit(
         self,
         space_id: str,
@@ -968,6 +1072,12 @@ class SpacePublicInbound:
         got = await self._posts.get(post_id)
         if got is None:
             post = self._post_from_inner(post_id, author_user_id, inner)
+            # The edit IS the post (the later create is a duplicate): its
+            # signed descriptor is the only one this post will get.
+            media = await self._localize_media(
+                space_id, post, origin_instance_id, inner
+            )
+            post = media.post(post)
             if await self._posts.save(space_id, post) is None:
                 log.warning(
                     "space_public.inbound: post %s already exists in another space "
@@ -975,6 +1085,7 @@ class SpacePublicInbound:
                     post_id,
                 )
                 return
+            await self._keep_media(media)
             await self._posts.edit(
                 post_id, content, space_id=space_id, edited_at=stamp_to_db(stamp)
             )
@@ -1009,6 +1120,7 @@ class SpacePublicInbound:
                 "space_public.inbound: post %s is deleted — edit dropped", post_id
             )
             return
+        await self._heal_media(space_id, got, author_user_id, origin_instance_id, inner)
         if not await self._posts.edit(
             post_id,
             content,
@@ -1149,7 +1261,7 @@ class SpacePublicInbound:
         # The card counts only under the author's own signature over it; a
         # relayer can strip it but not forge or alter it.
         try:
-            link_preview = wire_link_preview(verified_link_preview(inner))
+            link_preview = space_wire_link_preview(verified_link_preview(inner))
         except UnsupportedLinkPreviewSigSuite as exc:
             log.warning("relayed post %s: link preview dropped (%s)", post_id, exc)
             link_preview = None
@@ -1159,8 +1271,8 @@ class SpacePublicInbound:
             type=post_type,
             content=inner.get("content"),
             link_preview=link_preview,
-            media_url=local_media_ref(inner.get("media_url")),
-            image_urls=local_media_refs(
+            media_url=space_media_ref(inner.get("media_url")),
+            image_urls=space_media_refs(
                 inner.get("image_urls"), limit=FEED_POST_MAX_IMAGES
             ),
             location=location,

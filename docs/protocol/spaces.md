@@ -49,6 +49,16 @@ them on every roster mutation and broadcasts to every member household so
 each household's roster converges (not just the host's). See "Roster gossip"
 below.
 
+**Pictures for members seated from an invite link (v_80).** The relay
+in front of a link-joined member is too small for `SPACE_MEDIA_BLOB`
+chunks. A post, a calendar event's new cover or a gallery item sent to a
+link-joined v_80 member carries a `media_refs` descriptor in its own copy of
+the encrypted payload instead; the author's household seals each file once
+and uploads it once to that member's GFS media cache, and the member
+fetches, checks and decrypts it there (followers of a global space get the
+same descriptor in the relayed post inner). No `SPACE_MEDIA_BLOB` is queued
+to such a member. See [`media.md`](./media.md#space-media-via-the-gfs-cache-v_80).
+
 **A cover / icon change carries the image.** `SPACE_CONFIG_CHANGED` for a
 `cover_updated` / `icon_updated` edit ships the new WebP bytes in `space_meta`
 (`cover_webp_base64` / `icon_webp_base64`, the same keys the join snapshot
@@ -174,6 +184,8 @@ An item carries its full `url` as well as the thumbnail
 outbox, and the `SPACE_MEDIA_BLOB` scope check accepts only files the
 receiver's row names — without the `url` it refused the full-size picture
 of every federated item.
+A link-joined v_80 member gets both files as a `media_refs` descriptor and
+fetches them from its GFS media cache instead ([`media.md`](./media.md#space-media-via-the-gfs-cache-v_80)).
 A new upload's id is owner-bound to its uploader and space (v_36, below):
 an item claimed for anybody else is refused, like an album (v_34).
 Sent ungated — see the v_33, v_34 and v_36 rows in [`capabilities.md`](./capabilities.md).

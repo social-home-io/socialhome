@@ -268,6 +268,7 @@ from .repositories.space_cover_repo import SqliteSpaceCoverRepo
 from .repositories.space_icon_repo import SqliteSpaceIconRepo
 from .repositories.space_key_repo import SqliteSpaceKeyRepo
 from .repositories.space_media_outbox_repo import SqliteSpaceMediaOutboxRepo
+from .repositories.space_media_ref_repo import SqliteSpaceMediaRefRepo
 from .repositories.space_poll_repo import SqliteSpacePollRepo
 from .repositories.space_proposal_repo import SqliteSpaceProposalRepo
 from .repositories.space_remote_location_repo import (
@@ -439,6 +440,8 @@ from .services.space_crypto_service import (
     SpaceContentEncryption,
 )
 from .services.space_location_outbound import SpaceLocationOutbound
+from .services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
+from .services.space_media_gfs_uploader import SpaceMediaGfsUploader
 from .services.space_media_sync_service import SpaceMediaSyncService
 from .services.space_member_profile_federation_outbound import (
     SpaceMemberProfileFederationOutbound,
@@ -1247,6 +1250,7 @@ def _build_repos(db: AsyncDatabase):
         space_zone=SqliteSpaceZoneRepo(db),
         household_zone=SqliteHouseholdZoneRepo(db),
         space_sync_watermark=SqliteSpaceSyncWatermarkRepo(db),
+        space_media_ref=SqliteSpaceMediaRefRepo(db),
         password_reset=SqlitePasswordResetRepo(db),
         local_area_attempt=SqliteLocalAreaAttemptRepo(db),
         auth_audit_log=SqliteAuthAuditLogRepo(db),
@@ -1670,7 +1674,7 @@ def _wire_federation_stack(
     # Overtaking album deletes no tombstone row can prove (legacy ids,
     # owner-less v_33 deletes) — restart-scoped; see legacy_album_deletes.
     legacy_album_deletes = LegacyAlbumDeletes()
-    SpaceContentInboundHandlers(
+    content_inbound = SpaceContentInboundHandlers(
         bus=bus,
         # §24.11 authorship — the users a content payload names must be
         # seated on the household that signed it.
@@ -1692,7 +1696,8 @@ def _wire_federation_stack(
         # v_48: another household's version of a held page — fast-forward,
         # merge or conflict instead of last write wins.
         page_conflicts=page_conflict_service,
-    ).attach_to(federation_service)
+    )
+    content_inbound.attach_to(federation_service)
     PersonalCalendarInboundHandlers(
         bus=bus,
         calendar_repo=calendar_repo,
@@ -2199,7 +2204,54 @@ def _wire_federation_stack(
         relay_policy=relay_policy,
         moment_reaction_router=moment_reaction_router,
         moment_reaction_counts=moment_reaction_counts,
+        content_inbound=content_inbound,
+        gallery_federation_outbound=gallery_federation_outbound,
     )
+
+
+def _build_space_media_gfs(
+    *,
+    app: web.Application,
+    config: Config,
+    repos: SimpleNamespace,
+    space_repo,
+    space_crypto: SpaceContentEncryption,
+    gfs_connection_service: GfsConnectionService,
+    writer_certs: SpaceWriterCertService,
+    federation_service,
+    identity_seed: bytes,
+) -> tuple[SpaceMediaGfsUploader, SpaceMediaGfsFetcher]:
+    """v_80 — the GFS space media cache, household side. The uploader seals
+    a space item's files once and uploads them once per GFS its link-joined
+    members / followers read through; the fetcher keeps the ``media_refs``
+    an item arrives with and turns them into local files (prefetch on
+    arrival, fetch on view)."""
+    media_dir = pathlib.Path(config.media_path)
+    uploader = SpaceMediaGfsUploader(
+        space_repo=space_repo,
+        space_crypto=space_crypto,
+        federation_repo=repos.federation,
+        gfs_service=gfs_connection_service,
+        # Only files nothing but the space's own content references are
+        # ever sealed under its key (a member may name any file).
+        media_refs=repos.media_reference,
+        media_dir=media_dir,
+        writer_certs=writer_certs,
+    )
+    uploader.attach_federation(federation_service)
+    uploader.attach_identity(own_identity_seed=identity_seed)
+    fetcher = SpaceMediaGfsFetcher(
+        refs_repo=repos.space_media_ref,
+        space_crypto=space_crypto,
+        gfs_service=gfs_connection_service,
+        gfs_repo=repos.gfs_connection,
+        federation_repo=repos.federation,
+        space_repo=space_repo,
+        media_dir=media_dir,
+    )
+    app[K.space_media_gfs_uploader_key] = uploader
+    app[K.space_media_gfs_fetcher_key] = fetcher
+    return uploader, fetcher
 
 
 def _build_timetables(repos: SimpleNamespace, bus: EventBus) -> TimetableService:
@@ -4917,6 +4969,40 @@ def create_app(config: Config | None = None) -> web.Application:
         # An event's cover file follows the event to the other member
         # households over the same media outbox post pictures ride.
         space_cal_service.attach_media_sync(space_media_sync_service)
+        # v_80 — space pictures for households that read a space through a
+        # GFS (link-joined members, followers): sealed once, uploaded once
+        # per GFS, described by ``media_refs`` inside the encrypted item.
+        space_media_uploader, space_media_fetcher = _build_space_media_gfs(
+            app=app,
+            config=config,
+            repos=repos,
+            space_repo=space_repo,
+            space_crypto=space_crypto,
+            gfs_connection_service=gfs_connection_service,
+            writer_certs=writer_certs,
+            federation_service=federation_service,
+            identity_seed=identity_seed,
+        )
+        if gfs_channels is not None:
+            # A private space with an opaque channel uploads under its
+            # channel scope (the GFS never learns the space).
+            space_media_uploader.attach_channels(gfs_channels)
+        space_post_outbound.attach_media_gfs(space_media_uploader)
+        if space_public_outbound is not None:
+            space_public_outbound.attach_media_gfs(space_media_uploader)
+        space_cal_service.attach_media_gfs(space_media_uploader)
+        fed.gallery_federation_outbound.attach_media_gfs(space_media_uploader)
+        # …and no SPACE_MEDIA_BLOB push to them: the relay refuses the bytes.
+        space_media_sync_service.attach_relay_readers(space_media_uploader)
+        fed.inbound_service.attach_gfs_media(space_media_fetcher)
+        fed.content_inbound.attach_gfs_media(space_media_fetcher)
+        if space_public_inbound is not None:
+            space_public_inbound.attach_gfs_media(space_media_fetcher)
+        # §25.6: a stream to a link-joined member carries the records'
+        # ``media_refs`` (sync line 80); the receiving side keeps them.
+        app[K.space_sync_service_key].attach_media_gfs(space_media_uploader)
+        app[K.space_sync_receiver_key].attach_gfs_media(space_media_fetcher)
+        await space_media_uploader.start()
         # Late-bind realtime into the federation inbound — the
         # DM_MEDIA_BLOB handler uses it to fan ``dm.media_ready``
         # frames to local participants when the full bytes for a
@@ -5812,6 +5898,10 @@ def create_app(config: Config | None = None) -> web.Application:
         # restart (the next boot would see it stuck and never retry).
         await dm_media_sync_service.stop()
         await space_media_sync_service.stop()
+        if (uploader := app.get(K.space_media_gfs_uploader_key)) is not None:
+            await uploader.stop()
+        if (fetcher := app.get(K.space_media_gfs_fetcher_key)) is not None:
+            await fetcher.stop()
         await media_transcode_service.stop()
         if password_reset_cleanup_scheduler is not None:
             await password_reset_cleanup_scheduler.stop()

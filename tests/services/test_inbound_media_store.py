@@ -506,3 +506,87 @@ async def test_drop_parts_reports_whether_the_folder_went(tmp_path):
     (clean / "000000").write_bytes(b"A")
     assert await store.drop_parts(clean) is True
     assert not clean.exists()
+
+
+# ── Space items never name another receiving path's file (#1309 review B) ─
+
+
+def test_space_media_ref_drops_reserved_names():
+    """A space item (post, cover, gallery item) received from another
+    household never names a file the DM or moment-media paths own: such a
+    reference would show — and, through the GFS cache, re-publish — a file
+    that belongs to someone else."""
+    assert store.space_media_ref("api/media/a.webp") == "api/media/a.webp"
+    assert store.space_media_ref("/api/media/a.webp?sig=x") == "api/media/a.webp"
+    assert store.space_media_ref("api/media/gm-abc.webp") is None
+    assert store.space_media_ref("api/media/dm-abc.webp") is None
+    assert store.space_media_ref("https://evil.example/a.webp") is None
+    assert store.space_media_refs(
+        ["api/media/a.webp", "api/media/gm-x.webp", "api/media/b.webp"], limit=10
+    ) == ("api/media/a.webp", "api/media/b.webp")
+    assert store.space_media_refs("nope", limit=10) == ()
+
+
+# ── Shared by the GFS media readers (moments, space media) ──────────────
+
+
+class _Chunks:
+    """aiohttp's StreamReader: ``read(n)`` hands out at most one chunk."""
+
+    def __init__(self, raw: bytes, chunk: int = 7):
+        self._raw = raw
+        self._chunk = chunk
+
+    async def read(self, n: int = -1) -> bytes:
+        size = self._chunk if n < 0 else min(n, self._chunk)
+        out, self._raw = self._raw[:size], self._raw[size:]
+        return out
+
+
+async def test_read_bounded_reads_to_the_end():
+    assert await store.read_bounded(_Chunks(b"x" * 50), 50) == b"x" * 50
+    assert await store.read_bounded(_Chunks(b""), 50) == b""
+
+
+async def test_read_bounded_refuses_a_body_past_the_bound():
+    """Never buffers more than one byte past it."""
+    assert await store.read_bounded(_Chunks(b"x" * 51), 50) is None
+
+
+async def test_write_once_publishes_and_never_replaces(tmp_path):
+    target = tmp_path / "a.webp"
+    assert await store.write_once(target, b"one", tmp_path / ".partial" / "t1")
+    assert not await store.write_once(target, b"two", tmp_path / ".partial" / "t2")
+    assert target.read_bytes() == b"one"
+    assert list((tmp_path / ".partial").iterdir()) == []
+
+
+# ── #1309 re-review: a GFS-fetched space file's name is the reader's ─────
+
+
+def test_gfs_space_media_name_is_bound_to_space_household_and_file():
+    name = store.gfs_space_media_name("sp-1", "inst-a", "post-1", "abc.webp")
+    assert name == store.gfs_space_media_name("sp-1", "inst-a", "post-1", "abc.webp")
+    assert name.startswith(store.GFS_SPACE_MEDIA_PREFIX)
+    assert name.endswith(".webp")
+    assert store.is_safe_media_name(name)
+    assert store.is_gfs_space_media_name(name)
+    others = {
+        store.gfs_space_media_name("sp-2", "inst-a", "post-1", "abc.webp"),
+        store.gfs_space_media_name("sp-1", "inst-m", "post-1", "abc.webp"),
+        store.gfs_space_media_name("sp-1", "inst-a", "post-1", "abd.webp"),
+        # #1309 round 3: the item too — two items of one household naming
+        # one file each own their row (and can each follow a key rotation).
+        store.gfs_space_media_name("sp-1", "inst-a", "post-2", "abc.webp"),
+    }
+    assert name not in others and len(others) == 4
+
+
+def test_a_gfs_space_media_name_is_reserved():
+    """Only the GFS fetcher writes these: a space item naming one, or a
+    SPACE_MEDIA_BLOB for one, is refused like a DM or moment name."""
+    name = store.gfs_space_media_name("sp-1", "inst-a", "post-1", "abc.webp")
+    assert store.is_reserved_media_name(name)
+    assert store.space_media_ref("api/media/" + name) is None
+    assert not store.is_gfs_space_media_name("abc.webp")
+    assert not store.is_gfs_space_media_name("dm-" + "0" * 40 + ".webp")

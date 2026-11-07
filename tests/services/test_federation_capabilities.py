@@ -22,7 +22,8 @@ def test_ours_is_v31_with_routed_origin_signature_capability():
     v_23 peer-replicated space roster gossip, v_22 the delegated-admin
     signing-seed share, v_21 authenticated mesh route discovery, v_20
     SPACE_SYNC_REJECTED)."""
-    assert OURS == 79
+    assert OURS == 80
+    assert FederationCapability.MIN_FOR_SPACE_MEDIA_REFS == 80
     assert FederationCapability.MIN_FOR_SPACE_GALLERY_ITEM_EDIT == 79
     assert FederationCapability.MIN_FOR_APP_ENGINES == 78
     assert FederationCapability.MIN_FOR_SPACE_APP_TABLES == 77
@@ -187,6 +188,7 @@ def test_space_features_missing_below_v13():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
 
 
@@ -223,6 +225,7 @@ def test_space_features_missing_below_v16():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
 
 
@@ -256,6 +259,7 @@ def test_space_features_missing_below_v22():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
 
 
@@ -287,6 +291,7 @@ def test_space_features_missing_below_v23():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
 
 
@@ -319,6 +324,7 @@ def test_space_features_missing_below_v24():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
     assert space_features_missing_below(27) == [
         "Noticing when a path through other households breaks",
@@ -345,6 +351,7 @@ def test_space_features_missing_below_v24():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
 
 
@@ -379,6 +386,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
     assert space_features_missing_below(29) == [
         "Followers from other households",
@@ -403,6 +411,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
     assert space_features_missing_below(30) == [
         "Checking who sent a passed-on message",
@@ -426,6 +435,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
     assert space_features_missing_below(31) == [
         "Up-to-date member lists for every household",
@@ -448,6 +458,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
     assert space_features_missing_below(32) == [
         "Shared gallery albums",
@@ -469,6 +480,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
     assert space_features_missing_below(33) == [
         "Albums tied to their creator",
@@ -489,6 +501,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
     assert space_features_missing_below(34) == [
         "Posts tied to their creator",
@@ -508,6 +521,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
     assert space_features_missing_below(35) == [
         "Posts tied to their creator",
@@ -527,6 +541,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
     assert space_features_missing_below(36) == [
         "Space timetables",
@@ -545,6 +560,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
     assert space_features_missing_below(38) == [
         "Space timetables",
@@ -563,6 +579,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
     assert space_features_missing_below(39) == [
         "Task priority and labels",
@@ -580,6 +597,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
     assert space_features_missing_below(40) == [
         "Space moderators",
@@ -596,6 +614,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
     assert space_features_missing_below(41) == [
         "Admin-only space features",
@@ -611,6 +630,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
     assert space_features_missing_below(42) == [
         "Reviewing posts from other households",
@@ -625,6 +645,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
     assert space_features_missing_below(43) == [
         "Locking out removed admins",
@@ -638,6 +659,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
     assert space_features_missing_below(44) == [
         "Space reports for moderators",
@@ -650,6 +672,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
     assert space_features_missing_below(45) == [
         "Catching up on missed security updates",
@@ -661,6 +684,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
     assert space_features_missing_below(46) == [
         "Role changes from member households",
@@ -671,6 +695,7 @@ def test_space_features_missing_below_v32_is_empty():
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     ]
 
 

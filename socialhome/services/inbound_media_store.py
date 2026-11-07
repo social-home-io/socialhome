@@ -58,6 +58,7 @@ import pathlib
 import re
 import stat
 import uuid
+from typing import Protocol
 
 import aiofiles
 import aiofiles.os
@@ -82,10 +83,20 @@ MEDIA_REF_PREFIX: str = "api/media/"
 #: Prefix of a received DM attachment's file name (:func:`dm_media_name`).
 DM_MEDIA_PREFIX: str = "dm-"
 
+#: Prefix of a space file fetched from a GFS media cache
+#: (:func:`gfs_space_media_name`).
+GFS_SPACE_MEDIA_PREFIX: str = "sg-"
+
 #: Name prefixes owned by one receiving path each — a ``SPACE_MEDIA_BLOB``
-#: never writes them: ``dm-`` received DM attachments, ``gm-`` moment media
-#: fetched from a GFS (``moment_public_media_inbound``).
-RESERVED_MEDIA_PREFIXES: tuple[str, ...] = (DM_MEDIA_PREFIX, "gm-")
+#: never writes them, and a received space item never names them: ``dm-``
+#: received DM attachments, ``gm-`` moment media fetched from a GFS
+#: (``moment_public_media_inbound``), ``sg-`` space files fetched from a GFS
+#: (``space_media_gfs_fetcher``).
+RESERVED_MEDIA_PREFIXES: tuple[str, ...] = (
+    DM_MEDIA_PREFIX,
+    "gm-",
+    GFS_SPACE_MEDIA_PREFIX,
+)
 
 #: DM transients (``<msg>.preview.webp`` and the legacy ``.part<N>`` /
 #: ``.assembled`` names). No ``media_url`` column holds them, so the media
@@ -129,6 +140,36 @@ def dm_media_name(from_instance: str, message_id: str, ext: str) -> str:
         f"dm-media\0{from_instance}\0{message_id}".encode()
     ).hexdigest()
     return f"{DM_MEDIA_PREFIX}{digest[:40]}{ext}"
+
+
+def gfs_space_media_name(
+    space_id: str, origin: str, item_id: str, filename: str
+) -> str:
+    """Local name of the space file *filename* of item *item_id*, fetched
+    from a GFS media cache as described by household *origin* — the
+    household this one AUTHENTICATED as delivering the item (its envelope,
+    its signed inner, the §25.6 stream it rode), never a field of the
+    descriptor.
+
+    The item's reference is rewritten to this name on arrival, so a member
+    naming another item's file in its own item only ever gets ITS file:
+    the name is the reader's, and two households (or two items) describing
+    one ``filename`` land on two names (the ``dm_media_name`` rule) — each
+    item owns its row and can move it to a newer epoch. Fixed length, keeps
+    the extension, always :func:`is_safe_media_name`.
+    """
+    digest = hashlib.sha256(
+        f"space-media\0{space_id}\0{origin}\0{item_id}\0{filename}".encode()
+    ).hexdigest()
+    dot = filename.rfind(".")
+    ext = filename[dot:] if 0 < dot and len(filename) - dot <= 10 else ""
+    return f"{GFS_SPACE_MEDIA_PREFIX}{digest[:40]}{ext}"
+
+
+def is_gfs_space_media_name(name: str) -> bool:
+    """``True`` for a :func:`gfs_space_media_name` (the only names the GFS
+    space media fetcher writes)."""
+    return name.startswith(GFS_SPACE_MEDIA_PREFIX) and is_safe_media_name(name)
 
 
 def dm_media_max_bytes(mime_type: str) -> int:
@@ -265,6 +306,26 @@ def local_media_refs(values: object, *, limit: int) -> tuple[str, ...]:
     return tuple(out[:limit])
 
 
+def space_media_ref(value: object) -> str | None:
+    """:func:`local_media_ref` for a SPACE item another household sent (a
+    post's media, a calendar cover, a gallery file): also ``None`` for a
+    name another receiving path owns (:func:`is_reserved_media_name` —
+    DM and moment media). Such a reference would show, and through the GFS
+    media cache re-publish, a file that belongs to someone else."""
+    ref = local_media_ref(value)
+    if ref is None or is_reserved_media_name(ref[len(MEDIA_REF_PREFIX) :]):
+        return None
+    return ref
+
+
+def space_media_refs(values: object, *, limit: int) -> tuple[str, ...]:
+    """:func:`space_media_ref` over a peer-supplied list, at most ``limit``."""
+    if not isinstance(values, list):
+        return ()
+    out = [ref for v in values if (ref := space_media_ref(v)) is not None]
+    return tuple(out[:limit])
+
+
 def media_basename(url: str | None) -> str:
     """File name a media URL points at (``api/media/x.webp?sig=…`` → ``x.webp``).
 
@@ -333,6 +394,42 @@ async def publish_once(tmp: pathlib.Path, target: pathlib.Path) -> bool:
         return True
     await remove_quietly(tmp)
     return True
+
+
+class _ByteStream(Protocol):
+    async def read(self, n: int = -1) -> bytes: ...
+
+
+async def read_bounded(stream: _ByteStream, max_bytes: int) -> bytes | None:
+    """A response body read to its end — ``None`` once it passes
+    *max_bytes* (never buffering more than one byte past it). aiohttp's
+    ``read(n)`` returns at most one chunk, so it is read in a loop: a single
+    read truncates any body larger than a chunk. Shared by the GFS media
+    readers (moments, space media)."""
+    parts: list[bytes] = []
+    held = 0
+    while held <= max_bytes:
+        part = await stream.read(max_bytes + 1 - held)
+        if not part:
+            break
+        parts.append(part)
+        held += len(part)
+    if held > max_bytes:
+        return None
+    return b"".join(parts)
+
+
+async def write_once(target: pathlib.Path, data: bytes, tmp: pathlib.Path) -> bool:
+    """Write *data* to *tmp* (its directory created), then move it to
+    *target* write-once (:func:`publish_once`). ``True`` when stored,
+    ``False`` when *target* already existed. *tmp* never survives."""
+    await aiofiles.os.makedirs(tmp.parent, exist_ok=True)
+    try:
+        async with aiofiles.open(tmp, "wb") as fh:
+            await fh.write(data)
+        return await publish_once(tmp, target)
+    finally:
+        await remove_quietly(tmp)
 
 
 def part_name(index: int) -> str:

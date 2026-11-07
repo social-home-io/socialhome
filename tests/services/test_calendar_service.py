@@ -3474,3 +3474,95 @@ async def test_update_event_names_its_actor_and_material_changes(space_cal_env):
     (updated,) = [e for e in seen if isinstance(e, CalendarEventUpdated)]
     assert updated.actor_user_id == "uid-alice"
     assert updated.material_changes == ("start", "end")
+
+
+# ── v_80 — a cover for members who read the space through a GFS ─────────
+
+
+class _CoverPlan:
+    def wire(self):
+        return {
+            "cover.webp": {"blob_id": "d" * 64, "suite": "s", "epoch": 0, "size": 9}
+        }
+
+
+class _CoverMediaGfs:
+    def __init__(self, readers=("peer-e",)):
+        self.readers = set(readers)
+        self.planned: list = []
+        self.items: list = []
+        self.uploaded: list = []
+
+    async def plan(self, space_id, urls, *, item_id, followers):
+        self.planned.append((space_id, list(urls), followers))
+        self.items.append(item_id)
+        return _CoverPlan()
+
+    async def is_relay_reader(self, iid):
+        return iid in self.readers
+
+    def upload(self, plan):
+        self.uploaded.append(plan)
+
+
+class _PerPeerFed:
+    _own_instance_id = "self-instance"
+
+    def __init__(self):
+        self.calls: list = []
+
+    async def broadcast_to_space_members(self, space_id, event_type, payload, **kw):
+        self.calls.append((event_type, payload, kw))
+
+
+async def test_a_new_cover_carries_media_refs_for_link_joined_members(space_cal_env):
+    env = space_cal_env
+    fed = _PerPeerFed()
+    env.space_cal_svc.attach_federation(fed)
+    media = _CoverMediaGfs()
+    env.space_cal_svc.attach_media_gfs(media)
+    created_event = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Picnic",
+        start=_SEED.isoformat(),
+        end=(_SEED + timedelta(hours=1)).isoformat(),
+        created_by="uid-alice",
+        cover_url="api/media/cover.webp",
+    )
+    assert media.planned == [("sp-cal", ["api/media/cover.webp"], False)]
+    assert media.items == [created_event.id]  # sealed for the event itself
+    created = [c for c in fed.calls if c[0].value == "space_calendar_event_created"]
+    _evt, payload, kw = created[0]
+    assert "media_refs" not in payload
+    to_e = await kw["per_peer"]("peer-e", payload)
+    assert to_e["media_refs"] == _CoverPlan().wire()
+    assert "media_refs" not in await kw["per_peer"]("peer-b", payload)
+    assert len(media.uploaded) == 1
+
+
+async def test_an_unchanged_cover_plans_nothing_on_edit(space_cal_env):
+    env = space_cal_env
+    fed = _PerPeerFed()
+    env.space_cal_svc.attach_federation(fed)
+    media = _CoverMediaGfs()
+    env.space_cal_svc.attach_media_gfs(media)
+    event = await env.space_cal_svc.create_event(
+        space_id="sp-cal",
+        summary="Picnic",
+        start=_SEED.isoformat(),
+        end=(_SEED + timedelta(hours=1)).isoformat(),
+        created_by="uid-alice",
+        cover_url="api/media/cover.webp",
+    )
+    media.planned.clear()
+    await env.space_cal_svc.update_event(
+        event.id, space_id="sp-cal", actor_user_id="uid-alice", summary="Picnic!"
+    )
+    assert media.planned == []
+    await env.space_cal_svc.update_event(
+        event.id,
+        space_id="sp-cal",
+        actor_user_id="uid-alice",
+        cover_url="api/media/new-cover.webp",
+    )
+    assert media.planned == [("sp-cal", ["api/media/new-cover.webp"], False)]

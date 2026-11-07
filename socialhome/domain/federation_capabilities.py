@@ -1254,7 +1254,40 @@ from __future__ import annotations
 #:   one full stream for a household crossing it). **Fallback**: a member
 #:   household below v_79 is sent nothing; the edit reaches it with the
 #:   host's sync once it upgrades. Labelled "Edit photos in a space".
-OURS: int = 79
+#: * **v_80** (2026-11-06) — **Space pictures through the GFS media cache**.
+#:   A space post, calendar event (its new / changed cover) or gallery item
+#:   sent to a member household seated from an invite link
+#:   (``InstanceSource.SPACE_SESSION`` — reached only through a GFS relay,
+#:   too small for the bytes) carries a ``media_refs`` descriptor INSIDE its
+#:   encrypted payload: ``{"<local filename>": {blob_id, suite, epoch, size,
+#:   scope, addr_suite}}`` — ``blob_id`` the GFS's scope-bound ``sm1``
+#:   address — one entry per file of the item (``record_media_urls``, ≤ 16;
+#:   a receiver drops entries for files it doesn't show). The author's
+#:   household seals each file once (``space_media_seal``: HKDF of the
+#:   epoch's content key, deterministic nonce, suite ``aesgcm-256-pad-det``;
+#:   only files that are the space's own content) and uploads it once per GFS
+#:   whose signed ``space_media`` capability lists the scope
+#:   (``PUT /gfs/media/{blob_id}``, the scope only in the signed claim); the
+#:   reader fetches ``GET /gfs/media/{blob_id}`` over its cookie-less GFS
+#:   session, checks the address with the scope id it knows, decrypts and
+#:   stores the file write-once under ITS OWN name for it (``sg-`` hash of
+#:   space, delivering household, item and file name; the item's reference is
+#:   rewritten) (``space_media_refs``, migration 0142, each
+#:   row bound to the item that introduced the file). The §25.6 ``posts`` /
+#:   ``calendar`` / ``gallery`` records streamed to such a member carry the
+#:   same descriptor (sync line 80). No ``SPACE_MEDIA_BLOB`` push is queued
+#:   to a v_80 link-joined member (live), nor to ANY link-joined requester of
+#:   a §25.6 catch-up (the relay refuses those bytes whatever the version).
+#:   Followers of a global space get the descriptor in the relayed post's
+#:   inner under the author's own separate signature (``media_refs_sig``,
+#:   suite ``ed25519``; taken only when it verifies) — gated on the GFS's
+#:   signed ``space_media`` capability, not this version. **Fallback**: a link-joined member
+#:   household below v_80 gets no descriptor; live it keeps the old
+#:   ``SPACE_MEDIA_BLOB`` push, which the relay carries only for small
+#:   files, and its catch-up gets no pictures — its people see posts without
+#:   the pictures that did not fit. Labelled "Pictures in a space for members
+#:   who joined by link".
+OURS: int = 80
 
 
 class FederationCapability:
@@ -1861,6 +1894,13 @@ class FederationCapability:
     #: copy keeps the old caption / day / album until it upgrades and the
     #: host's next sync stream brings the values (sync line 79).
     MIN_FOR_SPACE_GALLERY_ITEM_EDIT = 79
+    #: v_80 — a ``media_refs`` descriptor (the item's pictures in a GFS
+    #: media cache) on space posts / calendar events / gallery items and
+    #: their §25.6 records, toward a member household seated from an invite
+    #: link at or above it (:meth:`FederationService.peer_supports`). Below
+    #: it: no descriptor (live, the old ``SPACE_MEDIA_BLOB`` push; a catch-up
+    #: never pushes bytes to any link-joined requester).
+    MIN_FOR_SPACE_MEDIA_REFS = 80
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2163,6 +2203,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_SPACE_GALLERY_ITEM_EDIT,
         "Edit photos in a space",
     ),
+    (
+        FederationCapability.MIN_FOR_SPACE_MEDIA_REFS,
+        "Pictures in a space for members who joined by link",
+    ),
 ]
 
 
@@ -2253,6 +2297,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_SPACE_APP_TABLES: "space_app_tables",
     FederationCapability.MIN_FOR_APP_ENGINES: "app_engines",
     FederationCapability.MIN_FOR_SPACE_GALLERY_ITEM_EDIT: "space_gallery_item_edits",
+    FederationCapability.MIN_FOR_SPACE_MEDIA_REFS: "space_media_refs",
 }
 
 
@@ -2358,6 +2403,9 @@ SPACE_SCOPED_MIN_VERSIONS: frozenset[int] = frozenset(
         # A behind member household keeps the old caption, day and album of
         # a space photo edited elsewhere until it upgrades.
         FederationCapability.MIN_FOR_SPACE_GALLERY_ITEM_EDIT,
+        # A behind link-joined member household gets no pictures through
+        # the GFS media cache.
+        FederationCapability.MIN_FOR_SPACE_MEDIA_REFS,
     }
 )
 

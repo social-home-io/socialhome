@@ -44,6 +44,7 @@ from socialhome.domain.post import (
     PostType,
 )
 from socialhome.domain.space import JoinMode, SpaceMember, SpaceType
+from socialhome.domain.space_media_ref import SpaceMediaLocalization
 from socialhome.domain.user import UserStatus
 from socialhome.gfs_server_list_sig import sign_gfs_server_list
 from socialhome.repositories import (
@@ -5381,3 +5382,143 @@ async def test_a_failing_placement_never_costs_the_upsert(db, bus):
     )
     assert row["display_name"] == "Bob"
     assert cp.placed == [derive_user_id(_PK_AB, "bob")]
+
+
+class _GfsMediaSink:
+    """Stand-in for :class:`SpaceMediaGfsFetcher`: each described file is
+    renamed ``sg-<name>`` (the reader's name); records what was localized
+    and what was kept (only after the item was stored)."""
+
+    def __init__(self):
+        self.received: list[tuple] = []
+        self.items: list[tuple] = []
+        self.kept: list[dict] = []
+
+    async def localize(self, space_id, raw_refs, media_urls, *, item_id, origin):
+        urls = [u for u in media_urls if u]
+        if isinstance(raw_refs, dict):
+            self.received.append((space_id, raw_refs, urls))
+        self.items.append((item_id, origin))
+        described = raw_refs if isinstance(raw_refs, dict) else {}
+        names = {
+            u.rsplit("/", 1)[-1]: "sg-" + u.rsplit("/", 1)[-1]
+            for u in urls
+            if u.rsplit("/", 1)[-1] in described
+        }
+        return SpaceMediaLocalization(names=names, refs=(object(),) if names else ())
+
+    async def keep(self, loc, *, prefetch=True):
+        self.kept.append(dict(loc.names))
+        return []
+
+
+async def test_space_post_media_refs_are_kept_for_a_gfs_fetch(db, bus, inbound):
+    """v_80 — a post that reached a link-joined member carries ``media_refs``;
+    the receiver keeps them (and prefetches) for the post's own files."""
+    await db.enqueue(
+        """INSERT INTO spaces(id, name, owner_instance_id, owner_username,
+                              identity_public_key, space_type, join_mode)
+           VALUES(?,?,?,?,?,?,?)""",
+        ("sp-g", "S", "peer-a", "owner", "aa" * 32, "global", "open"),
+    )
+    await _seat(db, "sp-g", "user-remote")
+    sink = _GfsMediaSink()
+    inbound.attach_gfs_media(sink)
+    refs = {"a.webp": {"blob_id": "a" * 64, "suite": "s", "epoch": 0, "size": 9}}
+    await inbound._on_space_post_created(
+        _event(
+            FederationEventType.SPACE_POST_CREATED,
+            {
+                "id": "post-g",
+                "author": "user-remote",
+                "type": "image",
+                "content": "pic",
+                "image_urls": ["api/media/a.webp"],
+                "media_refs": refs,
+            },
+            space_id="sp-g",
+        )
+    )
+    assert sink.received == [("sp-g", refs, ["api/media/a.webp"])]
+    # Named for the post and the household that delivered it (the
+    # envelope's authenticated sender), and kept once the post is stored.
+    assert sink.items == [("post-g", "peer-a")]
+    assert sink.kept == [{"a.webp": "sg-a.webp"}]
+    # #1309 re-review 1: the stored post shows the READER's name for the
+    # file, so another member's item naming a.webp can never swap it.
+    row = await db.fetchone(
+        "SELECT image_urls_json FROM space_posts WHERE id = 'post-g'"
+    )
+    assert "api/media/sg-a.webp" in row["image_urls_json"]
+    assert "api/media/a.webp" not in row["image_urls_json"]
+
+
+async def test_a_picture_plus_link_card_post_keeps_its_media_refs(db, bus, inbound):
+    """Regression (#1309 review A): the receiver allowed only the post's
+    pictures, the sender described the link card's thumbnail too, and the
+    larger descriptor was refused whole — all pictures lost. The receiver
+    now allows exactly the files the post shows (``post_media_urls``)."""
+    await db.enqueue(
+        """INSERT INTO spaces(id, name, owner_instance_id, owner_username,
+                              identity_public_key, space_type, join_mode)
+           VALUES(?,?,?,?,?,?,?)""",
+        ("sp-lc", "S", "peer-a", "owner", "aa" * 32, "global", "open"),
+    )
+    await _seat(db, "sp-lc", "user-remote")
+    sink = _GfsMediaSink()
+    inbound.attach_gfs_media(sink)
+    entry = {"blob_id": "a" * 64, "suite": "s", "epoch": 0, "size": 9}
+    refs = {"a.webp": entry, "card.webp": entry}
+    await inbound._on_space_post_created(
+        _event(
+            FederationEventType.SPACE_POST_CREATED,
+            {
+                "id": "post-lc",
+                "author": "user-remote",
+                "type": "image",
+                "content": "pic and a link https://example.org",
+                "image_urls": ["api/media/a.webp"],
+                "link_preview": {
+                    "url": "https://example.org",
+                    "title": "Example",
+                    "thumbnail_url": "api/media/card.webp",
+                },
+                "media_refs": refs,
+            },
+            space_id="sp-lc",
+        )
+    )
+    assert sink.received == [
+        ("sp-lc", refs, ["api/media/a.webp", "api/media/card.webp"])
+    ]
+
+
+async def test_a_space_post_never_names_a_reserved_media_file(db, bus, inbound):
+    """#1309 review B: a space post from another household naming a ``gm-``
+    (moment media) or ``dm-`` (chat) file would show — and through the GFS
+    cache re-publish — a file another path owns. Such references are
+    dropped on receipt."""
+    await db.enqueue(
+        """INSERT INTO spaces(id, name, owner_instance_id, owner_username,
+                              identity_public_key, space_type, join_mode)
+           VALUES(?,?,?,?,?,?,?)""",
+        ("sp-rs", "S", "peer-a", "owner", "aa" * 32, "global", "open"),
+    )
+    await _seat(db, "sp-rs", "user-remote")
+    await inbound._on_space_post_created(
+        _event(
+            FederationEventType.SPACE_POST_CREATED,
+            {
+                "id": "post-rs",
+                "author": "user-remote",
+                "type": "image",
+                "content": "pic",
+                "media_url": "api/media/dm-chat.webp",
+                "image_urls": ["api/media/gm-moment.webp", "api/media/a.webp"],
+            },
+            space_id="sp-rs",
+        )
+    )
+    _sid, post = await SqliteSpacePostRepo(db).get("post-rs")
+    assert post.media_url is None
+    assert post.image_urls == ("api/media/a.webp",)

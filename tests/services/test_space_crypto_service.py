@@ -25,6 +25,7 @@ from socialhome.services.space_crypto_service import (
     verify_authority_event,
     verify_space_config,
 )
+from socialhome.space_media_seal import derive_space_media_key
 
 # ─── Crypto helpers ──────────────────────────────────────────────────────
 
@@ -700,3 +701,24 @@ async def test_seal_at_rest_round_trips_only_under_its_context(crypto_env):
         crypto.open_at_rest(sealed, context="invite:sp-1:t-2")
     with pytest.raises(ValueError):
         crypto.seal_at_rest(b"short", context="invite:sp-1:t-1")
+
+
+# ─── Space media key (GFS media cache) ───────────────────────────────────
+
+
+async def test_media_key_is_derived_per_epoch_never_the_raw_key(crypto_env):
+    """``media_key`` hands out only the HKDF-derived media key of an epoch
+    (:func:`derive_space_media_key`), never the content key itself."""
+    crypto, _ = crypto_env
+    assert await crypto.media_key("sp-1") is None
+    assert await crypto.media_key("sp-1", epoch=0) is None
+    first = await crypto.initialise_for_space("sp-1")
+    _epoch, raw = await crypto.export_current_key("sp-1")
+    current = await crypto.media_key("sp-1")
+    assert current == (first, derive_space_media_key(raw))
+    assert current[1] != raw
+    second = await crypto.rotate_epoch("sp-1")
+    assert (await crypto.media_key("sp-1"))[0] == second
+    # An older epoch's key stays reachable — a descriptor names its epoch.
+    assert await crypto.media_key("sp-1", epoch=first) == current
+    assert await crypto.media_key("sp-1", epoch=999) is None

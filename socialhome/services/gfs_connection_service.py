@@ -78,6 +78,12 @@ from ..crypto import b64url_encode, ed25519_public_key, sign_ed25519
 from ..domain.errors import SpaceNotPublishableError, TierChangeRequiredError
 from ..domain.federation import GfsConnection, GfsSpacePublication
 from ..domain.gfs_server import GfsServer
+from ..domain.gfs_space_media import (
+    MEDIA_SCOPES,
+    SCOPE_SPACE,
+    SPACE_MEDIA_AUTH_HEADER,
+    SPACE_MEDIA_CAPABILITY,
+)
 from ..domain.media_constraints import (
     SPACE_IMAGE_DATA_URI_PREFIX,
     SPACE_IMAGE_EMBED_MAX_BYTES,
@@ -100,6 +106,7 @@ from ..gfs_proof import (
     normalize_gfs_base_url,
     verify_possession_proof,
 )
+from ..moment_public_media import is_blob_id
 from ..outbound_fetch import OutboundFetchRefused, open_pinned_session
 from ..peer_url import InvalidPeerUrlError, validate_peer_url
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
@@ -113,9 +120,34 @@ from .gfs_publish_retry import (
     is_payload_suite_refusal,
 )
 from .gfs_server_targets import refusal_outcome, resolve_server_targets
+from .inbound_media_store import read_bounded
 from .space_authority_pin import owner_authority_cert
 
 log = logging.getLogger(__name__)
+
+#: How long one space media upload may take (an 8 MiB blob on a home uplink).
+SPACE_MEDIA_PUT_TIMEOUT_S: float = 120.0
+
+
+def _space_media_limit(caps: dict) -> tuple[int, frozenset[str], int | None] | None:
+    """``(max_blob_bytes, scopes, ttl_s)`` of a verified ``space_media``
+    capability entry (``ttl_s`` ``None`` when malformed), or ``None`` when
+    the entry is absent / malformed."""
+    entry = caps.get(SPACE_MEDIA_CAPABILITY)
+    if not isinstance(entry, dict):
+        return None
+    limit = entry.get("max_blob_bytes")
+    scopes = entry.get("scopes")
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+        return None
+    if not isinstance(scopes, list) or not all(isinstance(x, str) for x in scopes):
+        return None
+    ttl = entry.get("ttl_s")
+    ttl_s = (
+        ttl if isinstance(ttl, int) and not isinstance(ttl, bool) and ttl > 0 else None
+    )
+    return limit, frozenset(scopes) & MEDIA_SCOPES, ttl_s
+
 
 #: Characters of a *remote-authored* error body that may be interpolated
 #: into a :class:`GfsConnectionError`. That message travels to the SPA as
@@ -400,6 +432,7 @@ class GfsConnectionService:
         "_sealed_highlight_stream",
         "_space_item_followers",
         "_space_key_pull",
+        "_space_media",
         "_space_repo",
         "_suite_refused_at",
         "_target_warned",
@@ -496,6 +529,11 @@ class GfsConnectionService:
         # …and ``moment_media_30d`` (v_66): the GFS keeps a moment blob as
         # long as its moment lives, up to 30 days (an older one: 8).
         self._moment_media_30d: dict[str, bool] = {}
+        # …and ``space_media`` (the GFS space media cache): the largest blob
+        # the server proved it takes, by connection. Uploads go only to a
+        # server that proved it; absent = not proven (re-probed, never a
+        # sticky no).
+        self._space_media: dict[str, tuple[int, frozenset[str], int | None]] = {}
         # …and ``moment_reactions`` (v_68): the GFS takes a follower's sealed
         # reaction and pushes it to the author's household only.
         self._moment_reactions: dict[str, bool] = {}
@@ -742,6 +780,7 @@ class GfsConnectionService:
             self._encrypted_moment_media,
             self._moment_delete_log,
             self._moment_media_30d,
+            self._space_media,
             self._moment_reactions,
             self._moment_counts,
             self._space_key_pull,
@@ -1865,6 +1904,9 @@ class GfsConnectionService:
             self._addressee_key[conn.id] = True
         if caps is not None:
             self._proof_offered[conn.id] = caps.get(PROOF_CAPABILITY) is True
+            limit = _space_media_limit(caps)
+            if limit is not None:
+                self._space_media[conn.id] = limit
 
     def addressee_key_for(self, conn: GfsConnection) -> str | None:
         """The server key to bind into a request to *conn* (``gfs_key``,
@@ -3210,6 +3252,157 @@ class GfsConnectionService:
         return await self._signed_capability_supported(
             conn, "encrypted_moment_media", self._encrypted_moment_media
         )
+
+    # ── Space media cache (``space_media``) ─────────────────────────────
+
+    async def space_media_max_blob(
+        self, conn: GfsConnection, *, scope: str = SCOPE_SPACE
+    ) -> int | None:
+        """The largest space media blob *conn*'s GFS proved (under a valid
+        signature, the ``space_media`` capability) it keeps under *scope*
+        (``space`` / ``channel``), or ``None`` when it proved nothing for
+        that scope — then no space media of it is uploaded there.
+        Same discipline as :meth:`_signed_capability_supported`: RAM cache
+        when warm, one probe on a cold miss, the negative TTL after an
+        unreachable probe, never a sticky "no"."""
+        if self._listing_failed(conn):
+            return None
+        await self._listing_recheck(conn)
+        if self._listing_failed(conn):
+            return None
+        cached = self._space_media.get(conn.id)
+        if cached is not None:
+            return cached[0] if scope in cached[1] else None
+        failed_at = self._info_failed_at.get(conn.id)
+        if failed_at is not None and time.monotonic() - failed_at < (
+            GFS_INFO_NEGATIVE_TTL_S
+        ):
+            return None
+        info = await self._fetch_gfs_info(conn)
+        if info is None:
+            return None
+        caps = self._verified_capabilities(conn, info)
+        proven = _space_media_limit(caps) if caps is not None else None
+        if proven is None:
+            return None
+        self._space_media[conn.id] = proven
+        return proven[0] if scope in proven[1] else None
+
+    async def space_media_ttl_s(self, conn: GfsConnection) -> int | None:
+        """How long *conn*'s GFS keeps a space media blob (its signed
+        ``space_media.ttl_s``), or ``None`` when unknown."""
+        if conn.id not in self._space_media:
+            await self.space_media_max_blob(conn)  # one probe on a cold miss
+        cached = self._space_media.get(conn.id)
+        return cached[2] if cached is not None else None
+
+    async def space_media_follower_targets(self, space_id: str) -> list[GfsConnection]:
+        """The GFSs whose followers of *space_id* read its content — where
+        its media is uploaded for them: every server a relay of the space
+        goes to (:meth:`_relay_targets`), only for a GLOBAL space (nothing
+        else is on a GFS)."""
+        if not await self._relayable(space_id):
+            return []
+        return await self._relay_targets(space_id)
+
+    async def connection_for_url(self, base_url: str) -> GfsConnection | None:
+        """This household's active connection whose base URL is *base_url*
+        (a link-joined member's ``relay_via``), or ``None``."""
+        want = (base_url or "").rstrip("/")
+        if not want:
+            return None
+        for conn in await self._repo.list_active():
+            if conn.inbox_url.rstrip("/") == want:
+                return conn
+        return None
+
+    async def put_space_media(
+        self,
+        conn: GfsConnection,
+        *,
+        blob_id: str,
+        blob: bytes,
+        auth_header: str,
+        identified: bool = False,
+    ) -> int | None:
+        """``PUT /gfs/media/{blob_id}`` — the one scope-free path; the scope
+        (a listed space, or a private space's opaque channel) rides only
+        inside the signed claim — one sealed blob,
+        authorized by *auth_header* (:mod:`socialhome.domain.gfs_space_media`).
+        The request names no household: it rides the cookie-less session
+        (:meth:`anon_session`). An ``identified`` upload (a writer cert names
+        our household key) never goes to a server we are not registered on.
+        Returns the HTTP status, or ``None`` when nothing could be sent."""
+        if identified and not conn.registered:
+            return None
+        url = f"{conn.inbox_url.rstrip('/')}/gfs/media/{blob_id}"
+        headers = {
+            SPACE_MEDIA_AUTH_HEADER: auth_header,
+            "Content-Type": "application/octet-stream",
+        }
+        try:
+            async with self.anon_session(conn) as client:
+                if client is None:
+                    return None
+                async with client.put(
+                    url,
+                    data=blob,
+                    headers=headers,
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=SPACE_MEDIA_PUT_TIMEOUT_S),
+                ) as resp:
+                    return int(resp.status)
+        except OutboundFetchRefused as exc:
+            log.warning("space media upload to %s refused: %s", conn.inbox_url, exc)
+            return None
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            log.warning("space media upload to %s failed: %s", conn.inbox_url, exc)
+            return None
+
+    async def fetch_space_media(
+        self,
+        conn: GfsConnection,
+        blob_id: str,
+        *,
+        max_bytes: int,
+        timeout_s: float,
+    ) -> bytes | None:
+        """``GET /gfs/media/{blob_id}`` from *conn*'s GFS — anonymous: over
+        the COOKIE-LESS session (:meth:`anon_session`: the publish session
+        for a server we are registered on, a session pinned to the vetted
+        address for a listing target), never the shared session that
+        carries this household's cookies, so a fetch can't be linked to the
+        household (the path names no space or channel either). ``None`` on
+        a miss, a refused address, a transport error, or a body past
+        *max_bytes*. The caller checks the address and decrypts."""
+        if not is_blob_id(blob_id) or not conn.inbox_url:
+            return None
+        url = f"{conn.inbox_url.rstrip('/')}/gfs/media/{blob_id}"
+        try:
+            async with self.anon_session(conn) as client:
+                if client is None:
+                    return None
+                async with client.get(
+                    url,
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=timeout_s),
+                ) as resp:
+                    if resp.status != 200:
+                        return None
+                    data = await read_bounded(resp.content, max_bytes)
+        except OutboundFetchRefused as exc:
+            log.warning("space media fetch from %s refused: %s", conn.inbox_url, exc)
+            return None
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            log.warning("space media fetch from %s failed: %s", conn.inbox_url, exc)
+            return None
+        if data is None:
+            log.warning(
+                "space media from %s is over %d bytes — refused",
+                conn.inbox_url,
+                max_bytes,
+            )
+        return data
 
     async def moment_delete_log_supported(self, gfs_id: str) -> bool:
         """Whether the GFS *gfs_id* proved ``moment_delete_log`` (v_66) under

@@ -4222,6 +4222,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     )
     assert len(c.behind_members) == 1
     bm = c.behind_members[0]
@@ -4260,6 +4261,7 @@ async def test_space_version_compat_flags_behind_member(stack):
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     )
 
 
@@ -4327,6 +4329,7 @@ async def test_space_version_compat_excludes_mid_handshake_member(stack):
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     )
     assert len(c.behind_members) == 1
     assert c.behind_members[0].instance_id == "peer-up"
@@ -4392,6 +4395,7 @@ async def test_space_version_compat_omits_nonspace_features(stack):
         "Questions and answers on listings",
         "Games in a space",
         "Edit photos in a space",
+        "Pictures in a space for members who joined by link",
     )
     assert "Apps that work across households" not in c.lagging_features
     assert "Apps that reach the right person" not in c.lagging_features

@@ -100,6 +100,11 @@ from ..domain.space import (
     role_change_event_type,
 )
 from ..domain.space_item import item_stamp, stamp_to_db
+from ..domain.space_media_ref import (
+    MEDIA_REFS_FIELD,
+    SpaceMediaLocalization,
+    post_media_urls,
+)
 from ..domain.user import (
     RemoteUser,
     UserIdentityAssertion,
@@ -149,16 +154,19 @@ from .inbound_media_store import (
     is_reserved_media_name,
     is_safe_media_name,
     local_media_ref,
-    local_media_refs,
     media_basename,
     media_file_path,
     note_existing,
     parse_chunk_meta,
     partial_key,
+    space_media_ref,
+    space_media_refs,
     store_chunk,
     verbatim_local_media_ref,
 )
-from .link_preview_service import wire_link_preview
+from .link_preview_service import (
+    space_wire_link_preview,
+)
 from .protection_gate import ProtectionGateMixin
 from .space_authority_pin import AuthorityCertOutcome, apply_authority_cert
 from .space_crypto_service import (
@@ -195,6 +203,7 @@ if TYPE_CHECKING:
     from .moment_federation_outbound import MomentFederationOutbound
     from .moment_reaction_router import MomentReactionRouter
     from .relay_policy import RelayPolicy
+    from .space_media_gfs_fetcher import SpaceMediaGfsFetcher
 
 log = logging.getLogger(__name__)
 
@@ -432,6 +441,7 @@ class FederationInboundService(ProtectionGateMixin):
         "_dm_scope",
         "_federation_service",
         "_gallery_repo",
+        "_gfs_media",
         "_groups",
         "_highlight_audience",
         "_highlight_repo",
@@ -569,10 +579,37 @@ class FederationInboundService(ProtectionGateMixin):
         #: cross-household group leaves it instead of taking it down.
         self._groups: DmGroupService | None = None
         self._child_protection = None
+        #: v_80 — keeps a space post's ``media_refs`` (its pictures in a GFS
+        #: media cache) and fetches them; ``None`` ignores the descriptor.
+        self._gfs_media: SpaceMediaGfsFetcher | None = None
 
     def attach_moment_reaction_router(self, router: MomentReactionRouter) -> None:
         """v_67: keep the reaction route a relayed ``MOMENT_CREATED`` carries."""
         self._moment_reaction_router = router
+
+    async def _localize_space_media(
+        self,
+        event: FederationEvent,
+        space_id: str,
+        item_id: str,
+        urls: list[str],
+    ) -> SpaceMediaLocalization:
+        """v_80 — this household's names for item *item_id*'s files kept
+        in a GFS media cache, as delivered by the envelope's (authenticated)
+        sender. Empty when no fetcher is wired."""
+        if self._gfs_media is None:
+            return SpaceMediaLocalization()
+        return await self._gfs_media.localize(
+            space_id,
+            event.payload.get(MEDIA_REFS_FIELD),
+            urls,
+            item_id=item_id,
+            origin=event.from_instance,
+        )
+
+    def attach_gfs_media(self, fetcher: SpaceMediaGfsFetcher) -> None:
+        """Wire the v_80 GFS media fetcher (``media_refs`` on space posts)."""
+        self._gfs_media = fetcher
 
     def attach_groups(self, groups: DmGroupService) -> None:
         """Wire the group-membership authority (built with the DM stack)."""
@@ -1952,6 +1989,14 @@ class FederationInboundService(ProtectionGateMixin):
             return
         raw_relay = event.payload.get("public_relay")
         public_relay = raw_relay if isinstance(raw_relay, dict) else None
+        # v_80 — a post that reached us through a GFS relay without its
+        # bytes: its files take THIS household's names for the copies in
+        # the GFS media cache (bound to the envelope's sender), so another
+        # member's item naming the same file can never swap them.
+        media = await self._localize_space_media(
+            event, space_id, post.id, post_media_urls(post)
+        )
+        post = media.post(post)
         if await self._space_post_repo.save(space_id, post) is None:
             # The id already exists in another space — the sender was
             # gated for this one, so refuse rather than hijack the row.
@@ -1962,6 +2007,8 @@ class FederationInboundService(ProtectionGateMixin):
                 row_id=post.id,
             )
             return
+        if self._gfs_media is not None:
+            await self._gfs_media.keep(media)
         if existing is not None:
             await self._bus.publish(
                 PostEdited(
@@ -5060,8 +5107,9 @@ class FederationInboundService(ProtectionGateMixin):
             type=post_type,
             content=payload.get("content"),
             # Media references only in the local-upload shape
-            # (``api/media/<name>``); anything else is dropped.
-            media_url=local_media_ref(payload.get("media_url")),
+            # (``api/media/<name>``), never a reserved (DM / moment) name;
+            # anything else is dropped.
+            media_url=space_media_ref(payload.get("media_url")),
             file_meta=None,
             location=location,
             created_at=parse_iso8601_lenient(payload.get("occurred_at")),
@@ -5072,13 +5120,13 @@ class FederationInboundService(ProtectionGateMixin):
             # Local-upload references only, capped at the feed maximum; the
             # bytes follow as ``SPACE_MEDIA_BLOB``, which is checked against
             # these names.
-            image_urls=local_media_refs(
+            image_urls=space_media_refs(
                 payload.get("image_urls"), limit=FEED_POST_MAX_IMAGES
             ),
             # The author-built link card — every field re-validated, the
             # image kept only as a local media ref (its bytes follow as
             # SPACE_MEDIA_BLOB). This household never fetches the URL.
-            link_preview=wire_link_preview(payload.get("link_preview")),
+            link_preview=space_wire_link_preview(payload.get("link_preview")),
         )
 
 

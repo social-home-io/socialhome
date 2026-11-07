@@ -3907,6 +3907,17 @@ def cmd_gfs_space_post() -> None:
         )
     print("  a never fell back to the legacy identified publish ✓")
 
+    # 7. v_80 — a follower gets a public post's picture: the relayed inner
+    #    carries ``media_refs``; d fetches the blob from its GFS's cache.
+    state["gfs_space_photo"] = _picture_via_gfs_media_cache(
+        state,
+        author="a",
+        author_token=author_token,
+        reader="d",
+        space_id=space_id,
+        step="gfs-space-post",
+    )
+
     state["gfs_space_post_id"] = post_id
     state["gfs_space_post_content"] = content
     state["gfs_space_admin_post_id"] = admin_post_id
@@ -6118,6 +6129,18 @@ def cmd_gfs_invite_link_content() -> None:
         f"({len(e_bytes) // 1024} KiB rendition, served by e's /cover) ✓"
     )
 
+    # 7. v_80 — a photo post reaches e through the GFS media cache: the
+    #    relay can't carry the bytes, so a seals the file once, uploads it
+    #    once to the GFS and e's copy of the post carries ``media_refs``.
+    state["gfs_invite_photo"] = _picture_via_gfs_media_cache(
+        state,
+        author="a",
+        author_token=a["token"],
+        reader="e",
+        space_id=space_id,
+        step="gfs-invite-link-content",
+    )
+
     state["gfs_invite_post_id"] = post_id
     state["gfs_invite_post_content"] = content
     state["gfs_invite_rotated_post_id"] = post2["id"]
@@ -6126,6 +6149,124 @@ def cmd_gfs_invite_link_content() -> None:
         "gfs-invite-link-content: ok (space content both ways over the relay, "
         "survives a key rotation)"
     )
+
+
+def _picture_via_gfs_media_cache(
+    state: dict,
+    *,
+    author: str,
+    author_token: str,
+    reader: str,
+    space_id: str,
+    step: str,
+    timeout: float = 90.0,
+) -> str:
+    """v_80 — *author* posts a ~0.7 MB photo in *space_id*; *reader*, which
+    reads the space only through the GFS (a link-joined member or a
+    follower), must hold the file BYTE-IDENTICAL, fetched from the GFS media
+    cache:
+
+    * *author*'s log: ``uploaded blob <id>`` to the GFS;
+    * the GFS's own ``gfs_space_media`` table holds that blob for the space
+      (ciphertext; its size is a padded bucket, not the file's);
+    * *reader*'s ``space_media_refs`` row names the same blob;
+    * *reader*'s log: ``fetched blob <id> … from GFS`` — it came from the
+      cache, not from any other transport.
+
+    Returns the file name."""
+    a = state["instances"][author]
+    base = f"http://127.0.0.1:{a['port']}"
+    author_off = _log_size(author)
+    reader_off = _log_size(reader)
+    s, up = _upload_file(
+        f"{base}/api/media/upload",
+        token=author_token,
+        filename="photo.png",
+        content=_make_noisy_png(1000, 700),
+        content_type="image/png",
+        timeout=60.0,
+    )
+    up = _must(f"{step}: {author} uploads a photo", s, up, ok=(200, 201))
+    media_url, filename = up["url"], up["filename"]
+    s, post = _request(
+        f"{base}/api/spaces/{space_id}/posts",
+        token=author_token,
+        method="POST",
+        body={"type": "image", "image_urls": [media_url]},
+    )
+    post = _must(f"{step}: {author} posts the photo", s, post, ok=(201,))
+    _await_space_post(state, reader, space_id, post["id"])
+    src = _instance_dir(author) / "media" / filename
+    # The reader keeps the file under ITS OWN name (``sg-…``, bound to the
+    # household that delivered the post) and the stored post names that —
+    # a member naming the same file in another item gets another name.
+    deadline = time.time() + timeout
+    refs: list = []
+    while time.time() < deadline and not refs:
+        refs = _rows(
+            reader,
+            "SELECT blob_id, suite, epoch, size, local_name FROM space_media_refs"
+            " WHERE filename = ? AND item_id = ?",
+            (filename, post["id"]),
+        )
+        if not refs:
+            time.sleep(0.5)
+    if not refs:
+        raise SystemExit(f"{step}: {reader} holds no space_media_refs row for {filename}")
+    blob_id, suite, _epoch, blob_size, local_name = refs[0]
+    if not local_name.startswith("sg-"):
+        raise SystemExit(f"{step}: {reader} keeps {filename} as {local_name!r}, not its own sg- name")
+    shown = _rows(
+        reader,
+        "SELECT 1 FROM space_posts WHERE id = ? AND image_urls_json LIKE ?",
+        (post["id"], f"%{local_name}%"),
+    )
+    if not shown:
+        raise SystemExit(f"{step}: {reader}'s post {post['id']} does not show {local_name}")
+    dst = _instance_dir(reader) / "media" / local_name
+    while time.time() < deadline and not dst.is_file():
+        time.sleep(0.5)
+    if not dst.is_file():
+        raise SystemExit(
+            f"{step}: {filename} never reached {reader}'s media dir (as {local_name}) "
+            f"within {timeout:.0f} s — no picture through the GFS media cache.",
+        )
+    if dst.read_bytes() != src.read_bytes():
+        raise SystemExit(f"{step}: {reader}'s copy of {filename} differs from {author}'s")
+    size = len(src.read_bytes())
+    held = _gfs_rows(
+        # The address is scope-bound: one blob, one owning scope.
+        "SELECT scope_id, size FROM gfs_space_media"
+        " WHERE blob_id = ? AND scope_kind = 'space' AND scope_id = ?",
+        (blob_id, space_id),
+    )
+    if not held or held[0][0] != space_id:
+        raise SystemExit(
+            f"{step}: the GFS holds no blob {blob_id[:12]} for space {space_id} "
+            f"(rows: {held!r})",
+        )
+    uploaded = _log_lines_matching(author, f"uploaded blob {blob_id[:12]}", offset=author_off)
+    fetched = [
+        line
+        for line in _log_lines_matching(reader, f"fetched blob {blob_id[:12]}", offset=reader_off)
+        if "from GFS" in line
+    ]
+    if not uploaded or not fetched:
+        raise SystemExit(
+            f"{step}: no upload ({len(uploaded)}) / GFS fetch ({len(fetched)}) "
+            f"logged for blob {blob_id[:12]}",
+        )
+    print(
+        f"  {author} uploaded {filename} ({size // 1024} KiB) once as blob "
+        f"{blob_id[:12]}… ({suite}, {blob_size // 1024} KiB padded) — the GFS "
+        f"holds it for the space ✓"
+    )
+    print(
+        f"  {reader} fetched it from the GFS media cache as its own "
+        f"{local_name[:15]}…, byte-identical ({size} bytes) ✓"
+    )
+    return filename
+
 
 
 @_offline_step

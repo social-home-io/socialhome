@@ -405,6 +405,33 @@ async def test_a_700_kb_picture_ships_in_chunks_the_targets_channel_takes(
     assert b"".join(chunks) == body
 
 
+class _Readers:
+    """Stand-in for the GFS media uploader's reader check (v_80)."""
+
+    def __init__(self, readers):
+        self.readers = set(readers)
+
+    async def is_relay_reader(self, iid):
+        return iid in self.readers
+
+
+async def test_a_link_joined_v80_reader_gets_no_byte_push(db, outbox, tmp_path):
+    """A member seated from an invite link at v_80 reads the space's
+    pictures from its GFS's media cache; the relay refuses these bytes, so
+    no outbox row is ever queued for it."""
+    await _seed_space(db)
+    svc = SpaceMediaSyncService(outbox=outbox, federation=None, media_dir=tmp_path)
+    svc.attach_relay_readers(_Readers({"peer-e"}))
+    await svc.enqueue_for_blob(
+        space_id="sp-1",
+        correlation_id="p-1",
+        target_instance_ids=["peer-a", "peer-e"],
+        media_urls=["api/media/img-1.webp"],
+    )
+    rows = await outbox.list_for_correlation("p-1")
+    assert {r.target_instance_id for r in rows} == {"peer-a"}
+
+
 async def _enqueue_many_chunks(db, outbox, tmp_path, fed, *, chunks: int):
     await _seed_space(db)
     (tmp_path / "big.webp").write_bytes(b"\0" * (chunks * 1024))

@@ -421,7 +421,10 @@ The reference alone would 404 on every other household, so a space
 event's cover **file** follows it over the space media outbox
 (`SPACE_MEDIA_BLOB`, the path post pictures ride —
 [media](./media.md)), to every member household on the paths that
-outbox serves (paired and mesh):
+outbox serves (paired and mesh). A member seated from an invite link
+(v_80) gets a new or changed cover as a `media_refs` descriptor in its copy
+of `SPACE_CALENDAR_EVENT_CREATED` / `_UPDATED` instead and fetches it from
+its GFS media cache ([media](./media.md#space-media-via-the-gfs-cache-v_80)):
 
 - **Live** — after `SPACE_CALENDAR_EVENT_CREATED` / `_UPDATED`, only
   when the cover is new or changed (an edit that keeps it sends no

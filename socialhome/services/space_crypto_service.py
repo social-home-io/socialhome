@@ -60,6 +60,7 @@ from ..repositories.space_key_repo import (
     AbstractSpaceKeyRepo,
     SpaceKey,
 )
+from ..space_media_seal import derive_space_media_key
 from .bus_publisher import BusPublisherMixin
 
 log = logging.getLogger(__name__)
@@ -226,6 +227,27 @@ class SpaceContentEncryption(BusPublisherMixin):
             associated_data=space_id.encode("utf-8"),
         )
         return latest.epoch, raw
+
+    async def media_key(
+        self, space_id: str, *, epoch: int | None = None
+    ) -> tuple[int, bytes] | None:
+        """``(epoch, media key)`` for the GFS media cache: the key
+        :func:`~socialhome.space_media_seal.derive_space_media_key` derives
+        from *epoch*'s content key (the current epoch when ``None``), or
+        ``None`` when that epoch's key is not held. Only the derived key
+        leaves — never the content key. Never log it."""
+        key = (
+            await self._repo.get_latest(space_id)
+            if epoch is None
+            else await self._repo.get(space_id, epoch)
+        )
+        if key is None:
+            return None
+        raw = self._kek.decrypt(
+            key.content_key_hex,
+            associated_data=space_id.encode("utf-8"),
+        )
+        return key.epoch, derive_space_media_key(raw)
 
     async def import_key(
         self,

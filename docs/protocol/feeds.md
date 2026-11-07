@@ -54,6 +54,12 @@ A `text` post's optional `link_preview` card is built only by the
 author's household and never re-fetched by a receiver — see
 [spaces.md § Link previews](./spaces.md#link-previews-author-built-receiver-never-fetches).
 
+A post's pictures reach paired and mesh members as `SPACE_MEDIA_BLOB`
+chunks. A member seated from an invite link (v_80) and a follower of a
+global space instead get a `media_refs` descriptor inside the encrypted
+post (the follower: in the relayed inner) and fetch the files from their
+GFS media cache — see [`media.md`](./media.md#space-media-via-the-gfs-cache-v_80).
+
 ## Flow — reaction
 
 ```mermaid

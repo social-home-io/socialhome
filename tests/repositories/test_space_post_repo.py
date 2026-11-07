@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
 
-from socialhome.domain.post import Comment, CommentType, Post, PostType
+from socialhome.domain.link_preview import LinkPreview
+from socialhome.domain.post import Comment, CommentType, FileMeta, Post, PostType
 from socialhome.repositories.space_post_repo import SqliteSpacePostRepo
 
 
@@ -916,3 +918,43 @@ async def test_list_comment_author_ids_names_live_commenters_once(env):
     await env.repo.soft_delete_comment("c3", space_id=env.space_id)
     assert await env.repo.list_comment_author_ids("sp-who") == {"uid-bob"}
     assert await env.repo.list_comment_author_ids("nope") == set()
+
+
+async def test_set_media_rewrites_only_the_files_of_a_live_post(env):
+    """#1309 round 4: the GFS-media heal renames a stored post's files; the
+    rest of the row (content, reactions, edit stamp) is untouched."""
+    post = replace(
+        _post("sp-m1"),
+        type=PostType.IMAGE,
+        media_url="api/media/m.webp",
+        image_urls=("api/media/a.webp",),
+        file_meta=FileMeta(
+            url="api/media/d.pdf",
+            mime_type="application/pdf",
+            original_name="d.pdf",
+            size_bytes=3,
+        ),
+        link_preview=LinkPreview(
+            url="https://example.org", title="t", thumbnail_url="api/media/c.webp"
+        ),
+    )
+    await env.repo.save(env.space_id, post)
+    renamed = replace(
+        post,
+        content="NOT WRITTEN",
+        media_url="api/media/sg-m.webp",
+        image_urls=("api/media/sg-a.webp",),
+        file_meta=replace(post.file_meta, url="api/media/sg-d.pdf"),
+        link_preview=replace(post.link_preview, thumbnail_url="api/media/sg-c.webp"),
+    )
+    assert await env.repo.set_media(renamed, space_id=env.space_id) is True
+    _sid, got = await env.repo.get("sp-m1")
+    assert got.content == "Hello space!"
+    assert got.media_url == "api/media/sg-m.webp"
+    assert got.image_urls == ("api/media/sg-a.webp",)
+    assert got.file_meta.url == "api/media/sg-d.pdf"
+    assert got.link_preview.thumbnail_url == "api/media/sg-c.webp"
+    # Another space, or a deleted post: nothing written.
+    assert await env.repo.set_media(renamed, space_id="sp-other") is False
+    await env.repo.soft_delete("sp-m1", space_id=env.space_id)
+    assert await env.repo.set_media(renamed, space_id=env.space_id) is False

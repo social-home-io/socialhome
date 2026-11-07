@@ -196,6 +196,15 @@ sending household was sent it for. Both blob types share
   blob before the post, listing or gallery item it belongs to. Such a
   blob is accepted — overwriting is the harm, and the write is
   write-once, so accepting it cannot touch an existing file.
+  **Known residual (tracked follow-up, next PR):** the sending household
+  is not bound to the correlated row's author, so a member household that
+  learned a file name (from the post itself) and completes its own copy
+  first — the author's push queued for an offline household, a catch-up —
+  keeps that name for every row that shows it. That reaches GFS readers
+  too: a household that holds a poisoned F (the host included) seals ITS
+  copy of F for the link-joined readers its §25.6 catch-up serves, so they
+  get the poisoned picture under the host's descriptor. The fix binds the
+  sender to the row's author household or the host.
 - **Per-sender assembly.** Part files live under
   `media_dir/.partial/<sha256(from_instance, transfer_id, chunk_count)>/`
   (DM: `transfer_id` = `dm:<message_id>`), so two households' chunks
@@ -234,6 +243,202 @@ swept after 3 days, but there is no per-sender quota on how many message
 ids / transfers a household may open at once (each a part set, or a
 never-adopted `dm-` file swept as an orphan) — candidate follow-up issue.
 
+## Space media via the GFS cache (v_80)
+
+**Who.** Two kinds of household read a space only through a GFS and so
+never get the chunks above:
+
+- a **member seated from an invite link** (`InstanceSource.SPACE_SESSION`,
+  reached only through the GFS envelope relay, whose sealed cap of
+  ~191 KiB refuses media chunks) at `proto_version ≥ 80`
+  (`FederationCapability.MIN_FOR_SPACE_MEDIA_REFS`);
+- a **follower of a global space**, which reads the relayed post inner —
+  gated on the GFS's signed `space_media` capability
+  ([`discovery.md`](./discovery.md#space-media-cache-on-a-gfs-capability-space_media)),
+  not on a household version.
+
+Paired and mesh members keep the `SPACE_MEDIA_BLOB` push above, unchanged.
+
+**Descriptor.** The item carries, INSIDE its encrypted payload:
+
+```json
+"media_refs": {"<local filename>": {"blob_id": "<sm1 address>", "suite": "aesgcm-256-pad-det", "epoch": 3, "size": 1048604, "scope": "space", "addr_suite": "sm1"}}
+```
+
+one entry per file of the item. Which files an item has is ONE rule,
+`record_media_urls` / `post_media_urls` (`domain/space_media_ref`): a post's
+media, pictures, attached file and link-card thumbnail; an event's cover; a
+gallery item's thumbnail and full file — the sender describes exactly these
+and every receiver (live, follower, §25.6) allows exactly the files ITS
+stored copy of the item shows. A receiver drops an entry for a file it
+doesn't show and keeps the rest; a descriptor of more than 16 entries is
+refused whole. A reserved name (`gm-` moment media, `dm-` chat files —
+`is_reserved_media_name`) is never described, never kept and never fetched,
+and a received space item drops such references altogether. `size` is the
+sealed blob's byte count.
+`blob_id` is the GFS's **scope-bound address** —
+`sha256("sm1|" + scope + "|" + scope_id + "|" + blob)`
+(`domain/gfs_space_media.space_media_address`, `addr_suite: "sm1"`) — and
+`scope` says which kind (`space` / `channel`); the descriptor never names the
+scope id: a reader re-derives the address with the id it knows itself (the
+space id, or its own channel id). An unknown scope or address suite is
+refused (WARNING), never defaulted. No GFS URL: every reader fetches from the
+GFS it reaches the space through.
+It rides:
+
+| Item | Where |
+|---|---|
+| Space post | `SPACE_POST_CREATED` (per link-joined v_80 member), the `public_relay` inner (followers, through a seed holder's relay) and the v_49 member-publish inner — the last two **under the author's own signature** (`media_refs_sig`, suite `media_refs_sig_suite: "ed25519"`, domain `space-post-media-refs:v1:`, bound to the post, space and author; `services/space_public_author.py`). It is a separate signature, like the link card's, so a follower on an older build still verifies the post and shows it without GFS pictures. The signature also binds `item_type` and `edited_at`, so an older descriptor can't ride a newer edit. A follower takes the descriptor ONLY when that signature verifies: an unsigned one, or one a re-publisher swapped, is dropped. A copy stripped of its descriptor that wins the race heals add-only: a later copy or edit of the same author's post carrying a signed descriptor renames the stored post's files, but only while the post has no rows. Anyone holding the content key (a member with the writer group key) can re-wrap the author's inner, and the AAD's household proves nothing to a key holder. The post stands without those pictures; an unknown suite is refused. A post edit that can overtake its create carries the signed descriptor too |
+| Calendar event | `SPACE_CALENDAR_EVENT_CREATED` / `_UPDATED`, only when the cover is new or changed |
+| Gallery item | `SPACE_GALLERY_ITEM_CREATED` (thumbnail + full file) |
+| §25.6 records | `posts` / `calendar` / `gallery` records streamed to a link-joined v_80 requester ([`sync.md`](./sync.md), sync line 80) |
+
+Post edits carry no media, so no descriptor. Toward members the descriptor
+is added per peer (the `per_peer` hook of `broadcast_to_space_members`),
+only for link-joined v_80 members — never on the shared payload a paired
+member gets.
+
+**Sealing** ([`crypto.md`](../crypto.md#space-media-in-a-gfs-cache-aesgcm-256-pad-det)):
+HKDF of the epoch's space content key, a **deterministic** nonce (the same
+file sealed again is the byte-identical blob, so a re-upload matches the
+descriptors readers hold), padded to the moment-media size buckets, at most
+8 MiB of file. Larger files are skipped.
+
+**Only the space's own files.** A member can name any local file in an
+item (a private album's photo, another space's picture, a household post's
+file). The sender describes — and, re-checked, uploads — a file only when
+it is no reserved name and every row that references it is content of this
+space (`MediaReferenceRepo.confined_to_space`: gallery items by their
+album's space, every other source by its own space; household rows, DMs,
+moments and household / private albums never count). So nothing outside
+the space is ever sealed under its key, live or in a catch-up.
+
+**Upload** (`SpaceMediaGfsUploader`). When an item with local media is
+created in a space that has link-joined v_80 members or (for posts)
+followers, the author's household plans the GFSs those readers use — each
+link-joined member's `relay_via` connection, plus every GFS the space is
+relayed to for followers — keeps the ones whose signed block proved
+`space_media` (and whose `max_blob_bytes` the blob fits), seals each file
+once, computes its scope-bound address and `PUT`s it once per GFS to the one
+scope-free path `PUT /gfs/media/{blob_id}` — the scope rides only inside the
+signed claim header (`scope`, `scope_id`, `addr_suite`), never in a URL. Authorization, strongest first: the
+**space authority** signature (this household holds the space seed — host
+or delegated admin), else the **writer group key** (strict mode), else our
+household's **writer cert** (trusted mode — the one identified kind, never
+sent to a listing target we are not registered on). A **private** space that
+uses an opaque channel (v_51, `private_gfs` on) uploads under the GFS's
+**channel scope** instead (the claim names the channel), only to a GFS whose
+signed `space_media.scopes` lists `channel` — so the GFS learns the random
+channel id, never the space; a channel takes media once ONE member household
+holds a seat on it (the owner never subscribes): the **channel key** (a seed
+holder whose seed derives the stored channel key), else the member's
+**channel writer key** from its grant, else its **channel cert** (identified),
+always with the grant's shifted channel epoch. The request never names
+`from_instance`. Only a space the GFS holds `active` (approved) takes media:
+a pending one answers 403 and the item goes without the picture there.
+`200 already_stored` is success (coalescing; it does not refresh the
+blob's expiry) and is remembered per (GFS, blob) until min(7 days, that
+GFS's signed `ttl_s`) — after that the GFS may have dropped it, so a repeat
+sends it again; a space this household holds no authorization for is warned
+about once and nothing is sent; a refusal (403 / 413 / 422) is a WARNING and dropped; a
+transport error, 408 (too slow), 429 (per-scope rate or per-prefix byte
+budget), 503 (busy, or the cache switched off) or another 5xx is retried at
+most 4 times (backoff 30 s, doubling). Because the address binds the scope,
+uploading before the item goes out is not needed for safety; uploads are
+still queued at once. The queue is in
+memory and bounded (2048 uploads): a restart or a full queue loses pending
+uploads (WARNING), and the reader then shows the item without that picture.
+
+**Reader** (`SpaceMediaGfsFetcher`). **The file's name is the
+reader's.** Any member can name any file name it has seen, and every member
+holds the space key, so a bare file name proves nothing. Before the item is
+saved, each file it shows and describes is renamed to this household's own
+name for it, `gfs_space_media_name(space, delivering household, item, filename)`
+(`sg-` + a hash), and the item's reference is rewritten to it — the
+delivering household being the one the receiver authenticated (the
+envelope's sender; for followers, the author household the signed inner
+proves; for §25.6, the provider), never a descriptor field. A member naming
+another item's file in its own item therefore only ever gets its own copy,
+in either order; it can never take over the picture another item shows.
+`sg-` is a reserved prefix: no received item and no `SPACE_MEDIA_BLOB` may
+name it. The blob's AAD names the item and the delivering household, and
+the fetch opens it with the row's values. A file the same item already has
+here keeps the name it has (an update that re-sends the URL without a
+descriptor, a second household re-describing it). The entries are kept as
+`space_media_refs` rows ([`database.md`](../database.md)) once the item is
+stored, written once — only the same item moves its row to a newer epoch
+(its file sealed again after a key rotation). A §25.6 record's descriptor
+counts only when the record creates the item here or comes from the host's
+stream: a member household streaming an item held here can't attach its
+blobs to it. A link card's thumbnail is cached per URL and backs posts in
+other spaces and the feed; those references don't keep it from a space's
+readers (`confined_to_space`). It prefetches pictures on arrival (3 at a
+time, ≤ 200 waiting and ≤ 20 per space; a prefetch that finds the blob on
+no GFS — the item usually outruns the author's upload — tries again after
+10 s and 60 s, unless the space's last 5 prefetches all found nothing:
+then it tries once until one lands); anything else — or a picture past the
+backlog — is fetched when first viewed: `GET /api/media/{local_name}` checks who may open the file
+first, then asks the fetcher; concurrent viewers share one fetch, each waits
+at most 20 s, and a file no GFS held is not asked for again on a view for
+5 minutes. At most 6 fetches run at once. A fetch tries this household's
+connection to the GFS the link-joined pair relays through (`relay_via`),
+then its other GFS connections (≤ 4 sources) — connections only, over the
+**cookie-less, address-pinned session** (`anon_session`), so a fetch is not
+linkable to the household and a URL it holds no connection to is never
+fetched: `GET /gfs/media/{blob_id}` (anonymous), bounded by the
+descriptor's `size`, checks that the blob sits
+at its scope-bound address for the scope id this household knows,
+decrypts with the epoch's media key and writes the file write-once under
+its `sg-` name. An unknown suite, a
+blob not at its address (or a channel scope with no channel id known here)
+or a failed decrypt is refused with a WARNING and writes nothing.
+
+**No byte push to them.** `SPACE_MEDIA_BLOB` is no longer queued to a
+link-joined v_80 member (live posts / gallery / covers), nor to any
+link-joined requester of a §25.6 catch-up — the relay refuses those bytes.
+
+```mermaid
+sequenceDiagram
+    participant A as Author household
+    participant G as GFS (+ CDN)
+    participant E as Link-joined member
+    participant F as Follower
+    Note over A: seal each file once (space key, deterministic nonce)
+    A->>G: PUT /gfs/media/{blob_id}<br/>X-SH-Space-Media-Auth (scope in the signed claim)
+    G-->>A: 201 stored (200 already_stored)
+    A->>G: POST /gfs/envelope (sealed SPACE_POST_CREATED + media_refs)
+    G->>E: relay envelope
+    A->>G: POST /gfs/publish (encrypted inner + media_refs)
+    G->>F: relay space_post_public
+    E->>G: GET /gfs/media/{blob_id} (prefetch / on view)
+    G-->>E: ciphertext
+    Note over E: scope-bound address check, decrypt, write-once
+    F->>G: GET /gfs/media/{blob_id}
+    G-->>F: ciphertext (CDN-cached)
+```
+
+**Cost.** One upload per file per GFS — never per reader or per member.
+The descriptor is ~150 B per file per item. A 700 KB photo in a space with
+200 link-joined members: one upload (padded to the 1 MiB bucket) per GFS
+those members use, plus 200 × ~150 B descriptors inside envelopes that go
+out anyway; reads are served by the GFS and its CDN. A global space with
+10 000 followers: still one upload per GFS; the CDN absorbs the reads.
+
+**Privacy residuals.** The GFS sees ciphertext, its size bucket, the space
+id on upload, the upload time and the uploader's address, and fetch times
+at one-hour resolution; never who fetched. The `writer_cert` kind tells it
+the uploader household's key (the trusted-mode trade-off of
+`/gfs/member-publish`). The deterministic nonce reveals only "the same file
+was sealed twice under the same key", which the content address shows
+anyway.
+
+**Deferred.** Files over 8 MiB (long videos) and re-uploading a blob the
+cache evicted or expired — an on-demand, coalesced "media wanted" path
+(next PR). Tracked follow-ups: **comment media** and **a seed holder's
+relayed copy of an approved post** carry no descriptor yet. A private space whose owner left `private_gfs`
+off has no channel: its link-joined members are reached through the space
+scope only while the space is listed on that GFS.
+
 ## Implementation pointers
 
 - Framing: [`socialhome/federation/media_framing.py`](../../socialhome/federation/media_framing.py)
@@ -242,7 +447,8 @@ never-adopted `dm-` file swept as an orphan) — candidate follow-up issue.
 - Raw-bytes AEAD: [`socialhome/federation/encoder.py`](../../socialhome/federation/encoder.py) (`encrypt_bytes` / `decrypt_bytes`)
 - Senders: [`dm_media_sync_service.py`](../../socialhome/services/dm_media_sync_service.py), [`space_media_sync_service.py`](../../socialhome/services/space_media_sync_service.py)
 - Receiver assembly: [`federation_inbound_service.py`](../../socialhome/services/federation_inbound_service.py)
-- Capability: [`socialhome/domain/federation_capabilities.py`](../../socialhome/domain/federation_capabilities.py) (`MIN_FOR_MEDIA_CHANNEL`)
+- Capability: [`socialhome/domain/federation_capabilities.py`](../../socialhome/domain/federation_capabilities.py) (`MIN_FOR_MEDIA_CHANNEL`, `MIN_FOR_SPACE_MEDIA_REFS`)
+- GFS media cache (v_80): [`space_media_seal.py`](../../socialhome/space_media_seal.py), [`domain/space_media_ref.py`](../../socialhome/domain/space_media_ref.py), [`space_media_gfs_uploader.py`](../../socialhome/services/space_media_gfs_uploader.py), [`space_media_gfs_fetcher.py`](../../socialhome/services/space_media_gfs_fetcher.py), [`space_media_refs.py`](../../socialhome/services/space_media_refs.py), [`sync/space/media_refs.py`](../../socialhome/federation/sync/space/media_refs.py)
 
 ## Spec refs
 

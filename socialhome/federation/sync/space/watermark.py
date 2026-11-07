@@ -108,7 +108,12 @@ SYNC_VERSION_HISTORY_THROUGH: int = 64
 #:   takes the host's values (a space photo is edited in place from v_79).
 #:   A household crossing it gets one full stream, so edits it was not sent
 #:   while older (``SPACE_GALLERY_ITEM_UPDATED`` skips it) reach it.
-SYNC_RECORD_LINES: tuple[int, ...] = (75, 79)
+#: * 80 — a ``posts`` / ``calendar`` / ``gallery`` record streamed to a
+#:   member household seated from an invite link carries ``media_refs``
+#:   (where its pictures live in a GFS media cache), which a v_80 receiver
+#:   stores and fetches. A household crossing it gets one full stream, so
+#:   the pictures of content it was sent while older reach it.
+SYNC_RECORD_LINES: tuple[int, ...] = (75, 79, 80)
 
 
 def sync_version_bucket(peer_version: int) -> int:
