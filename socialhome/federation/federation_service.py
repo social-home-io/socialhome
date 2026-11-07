@@ -512,13 +512,27 @@ class FederationService:
         self._bus.subscribe(PeerUnpaired, self._on_peer_unpaired)
 
     async def _on_peer_unpaired(self, event: PeerUnpaired) -> None:
+        self.note_unpaired(event.instance_id)
+
+    def note_unpaired(self, instance_id: str) -> None:
+        """Remember that the pairing with *instance_id* just ended.
+
+        For :data:`UNPAIR_SEND_RACE_S` afterwards, a send of ours that
+        finds no row (``send_event``) and a frame of theirs that finds no
+        row (the DataChannel pipeline's lookup) are the expected tail of
+        the unpair, not an unknown household. Called by
+        :meth:`~socialhome.services.peer_unpair_service.PeerUnpairService.purge`
+        BEFORE the row goes — a frame the DataChannel delivers between the
+        delete and the :class:`PeerUnpaired` event must already count —
+        and again from that event.
+        """
         now = time.monotonic()
         self._unpaired_at = {
             iid: at
             for iid, at in self._unpaired_at.items()
             if now - at < UNPAIR_SEND_RACE_S
         }
-        self._unpaired_at[event.instance_id] = now
+        self._unpaired_at[instance_id] = now
 
     def _unpaired_recently(self, instance_id: str) -> bool:
         at = self._unpaired_at.get(instance_id)
@@ -551,6 +565,7 @@ class FederationService:
             self._common_pipeline_steps(
                 lookup_step=make_lookup_instance_by_id(
                     repo=self._federation_repo,
+                    unpaired_recently=self._unpaired_recently,
                 ),
             )
         )

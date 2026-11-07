@@ -295,7 +295,13 @@ class PeerUnpairService:
         nobody, which the outbox sweep
         (:meth:`~socialhome.repositories.outbox_repo.SqliteOutboxRepo.purge_orphaned`)
         drops.
+
+        Frames the household sealed before it learned of the unpair can
+        still arrive after the row is gone; the federation service is told
+        first (:meth:`FederationService.note_unpaired`) so it refuses them
+        as an unpaired peer, not as a stranger.
         """
+        self._federation.note_unpaired(instance_id)
         await self._federation_repo.delete_instance(instance_id)
         await self._outbox_repo.delete_for_instance(instance_id)
         await self._dm_media_outbox_repo.delete_for_instance(instance_id)

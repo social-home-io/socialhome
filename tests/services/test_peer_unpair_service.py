@@ -119,6 +119,9 @@ class _FakeFederation:
         #: interleave another coroutine at the worst possible point.
         self.before_queue = None
 
+    def note_unpaired(self, instance_id):
+        self._log.append(("note_unpaired", instance_id))
+
     async def queue_event(self, *, to_instance_id, event_type, payload, expires_at):
         inst = await self._repo.get_instance(to_instance_id, include_unpairing=True)
         self._log.append(("queue_event", to_instance_id))
@@ -213,9 +216,12 @@ async def test_unpair_sends_unpair_before_forgetting(env):
     ]
     # The row goes before the outbox purge: the outbox refuses to queue for
     # a household with no row, so a send still in flight cannot strand an
-    # envelope behind the purge.
+    # envelope behind the purge. The federation service hears of the
+    # unpair BEFORE the row goes, so a frame the peer sealed while still
+    # paired, landing mid-purge, is refused as unpaired (not unknown).
     assert [c for c, _ in env["log"]] == [
         "send_event",
+        "note_unpaired",
         "delete_instance",
         "outbox_purge",
         "dm_media_purge",
@@ -395,7 +401,9 @@ async def test_forget_cleans_up_without_notifying(env):
 async def test_purge_drops_row_first_then_every_outbox_and_hint(env):
     """The shared teardown other paths (space-session cleanup,
     ``PAIRING_ABORT``) use: row first, then the federation + both media
-    outboxes, then mesh hints — and no :class:`PeerUnpaired` event."""
+    outboxes, then mesh hints — and no :class:`PeerUnpaired` event. The
+    federation service is told first, so the household's late frames read
+    as unpaired, not unknown."""
     env["repo"].instances["peer-p"] = _inst("peer-p")
     env["outbox"].rows["peer-p"] = ["m1"]
     env["dm_media"].targets.add("peer-p")
@@ -405,6 +413,7 @@ async def test_purge_drops_row_first_then_every_outbox_and_hint(env):
     await env["svc"].purge("peer-p")
 
     assert [c for c, _ in env["log"]] == [
+        "note_unpaired",
         "delete_instance",
         "outbox_purge",
         "dm_media_purge",
