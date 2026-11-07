@@ -105,7 +105,14 @@ from ...domain.space import (
     validate_zone_name,
     validate_zone_radius,
 )
-from ...domain.space_media_ref import MEDIA_REFS_FIELD, SpaceMediaLocalization
+from ...domain.space_media_ref import (
+    MAX_PAGE_FILES,
+    MEDIA_REFS_FIELD,
+    SpaceMediaLocalization,
+    page_file_count,
+    page_media_urls,
+    rewrite_page_body_media,
+)
 from ...domain.sticky import MAX_STICKY_CONTENT_LENGTH, Sticky, coerce_peer_sticky
 from ...domain.task import Task, TaskList, task_from_wire_dict, task_list_from_wire_dict
 from ...domain.timetable import (
@@ -150,7 +157,9 @@ from ..inbound_media_store import (
     verbatim_local_media_ref,
 )
 from ..page_conflict_service import (
+    CanonicalVersion,
     PageMode,
+    Proposal,
     canonical_from_wire,
     proposal_from_wire,
 )
@@ -198,6 +207,14 @@ def _payload_hash(p: dict) -> str:
         str(p.get("content") or ""),
         cover if isinstance(cover, str) else None,
     )
+
+
+def _version_files(version: CanonicalVersion) -> list[str]:
+    """The files a host version shows: its own and its open sides'."""
+    urls = page_media_urls(version.cover_image_url, version.content)
+    for side in version.conflict:
+        urls.extend(page_media_urls(side.cover_image_url, side.content))
+    return urls
 
 
 def _page_from_payload(p: dict, page_id: str, space_id: str) -> Page:
@@ -1140,11 +1157,118 @@ class SpaceContentInboundHandlers:
                 reason="access",
             )
             return
+        if page_file_count(proposal.cover_image_url, proposal.content) > MAX_PAGE_FILES:
+            # Every household ships and describes a whole version: a version
+            # over the page cap is refused (a v_82 editor never sends one).
+            log.warning(
+                "%s from %s: page %s in space %s shows more than %d files; refused",
+                event.event_type,
+                event.from_instance,
+                page_id,
+                space_id,
+                MAX_PAGE_FILES,
+            )
+            await engine.refuse(
+                space_id=space_id,
+                page_id=page_id,
+                proposal_hash=proposal.hash,
+                proposer_instance=event.from_instance,
+                reason="access",
+            )
+            return
         await engine.sequence(
             space_id=space_id,
             page_id=page_id,
-            proposal=proposal,
+            proposal=await self._localized_proposal(
+                event, space_id, page_id, proposal, existing
+            ),
             proposer_instance=event.from_instance,
+        )
+
+    async def _localized_proposal(
+        self,
+        event: FederationEvent,
+        space_id: str,
+        page_id: str,
+        proposal: Proposal,
+        existing: Page | None,
+    ) -> Proposal:
+        """The host: *proposal* with each file it adds renamed to the name
+        it takes here as the proposer delivers it (:class:`SpaceMediaNamer`
+        — the proposer ships the bytes, and nobody else can fill that
+        name), the page's own files kept as they are (v_82). A file is the
+        page's own when its current version, an open side or a version in
+        its history shows it — a resolution or a revert repeats those. The
+        answer names the proposal as SENT (``answers``), so the proposer
+        settles its draft. A file another receiving path owns (a DM
+        attachment, GFS moment media, a GFS reader copy) is dropped."""
+        sent = proposal
+        cover = proposal.cover_image_url
+        if cover and space_media_ref(cover) is None:
+            cover = None
+        proposal = replace(
+            proposal,
+            content=rewrite_page_body_media(
+                proposal.content, lambda ref: ref if space_media_ref(ref) else ""
+            ),
+            cover_image_url=cover,
+        )
+        urls = page_media_urls(proposal.cover_image_url, proposal.content)
+        if not urls:
+            return (
+                proposal if proposal == sent else replace(proposal, answers=sent.hash)
+            )
+        held: list[str] = []
+        if existing is not None:
+            held.extend(page_media_urls(existing.cover_image_url, existing.content))
+            engine = self._page_conflicts
+            assert engine is not None
+            for side in await engine.sides(space_id, page_id):
+                held.extend(page_media_urls(side.cover_image_url, side.content))
+            for version in await self._page_repo.list_versions(
+                page_id, space_id=space_id
+            ):
+                held.extend(page_media_urls(version.cover_image_url, version.content))
+        names = self._media_names.localize(
+            space_id, event.from_instance, urls, held=held
+        )
+        proposal = replace(
+            proposal,
+            content=rewrite_page_body_media(
+                proposal.content, lambda ref: names.url(ref) or ref
+            ),
+            cover_image_url=names.url(proposal.cover_image_url),
+        )
+        await self._fetch_proposed_files(
+            event, space_id, page_id, sent, dict(names.names)
+        )
+        return proposal if proposal == sent else replace(proposal, answers=sent.hash)
+
+    async def _fetch_proposed_files(
+        self,
+        event: FederationEvent,
+        space_id: str,
+        page_id: str,
+        sent: Proposal,
+        added: dict[str, str],
+    ) -> None:
+        """The host, v_82: a proposer reached only through a GFS relay (a
+        member seated from an invite link) can't push its new files; its
+        proposal describes them (``media_refs``) inside the envelope its
+        household signed — the §24.11 pipeline verified that signature and
+        made ``event.from_instance`` the proposer before this runs (the GFS
+        relays the envelope unchanged). Each file the proposal ADDS is
+        fetched from its GFS media cache under the proposer's own ``sd-``
+        name — the one the renamed page shows — and ships on to the other
+        members like any proposer's file; the blob's AAD names the page and
+        the proposer. At most :data:`MAX_PAGE_FILES` entries."""
+        refs = event.payload.get(MEDIA_REFS_FIELD)
+        if not added or self._gfs_media is None or refs is None:
+            return
+        await self._keep_media(
+            self._gfs_media.localize_proposal(
+                space_id, refs, added, item_id=page_id, origin=event.from_instance
+            )
         )
 
     async def _on_host_page_version(
@@ -1215,6 +1339,31 @@ class SpaceContentInboundHandlers:
             ):
                 return
         await engine.mirror(space_id=space_id, page_id=page_id, version=version)
+        if version.has_state and not refusal:
+            await self._keep_page_media(event, space_id, page_id, version)
+
+    async def _keep_page_media(
+        self,
+        event: FederationEvent,
+        space_id: str,
+        page_id: str,
+        version: CanonicalVersion,
+    ) -> None:
+        """v_82 — a link-joined household: the host's version describes the
+        files it shows (``media_refs``); they are kept under the names the
+        page shows (never rewritten: the page is the host's byte for byte).
+        Only the host's version reaches here (the caller checked)."""
+        if self._gfs_media is None or MEDIA_REFS_FIELD not in event.payload:
+            return
+        await self._keep_media(
+            self._gfs_media.localize_as_shown(
+                space_id,
+                event.payload.get(MEDIA_REFS_FIELD),
+                _version_files(version),
+                item_id=page_id,
+                origin=event.from_instance,
+            )
+        )
 
     async def _on_page_deleted(self, event: FederationEvent) -> None:
         """A space page delete (migration 0073: tombstoned, not removed).

@@ -99,6 +99,7 @@ from ..domain.space import (
     SpaceFeatureAccess,
     SpaceRole,
 )
+from ..domain.space_media_ref import MEDIA_REFS_FIELD
 from ..domain.user import SYSTEM_AUTHOR
 from ..services.inbound_media_store import media_basename
 from ..services.space_media_names import (
@@ -723,8 +724,10 @@ class SpaceAuthorship:
         the item (or the held target row) shows here renamed to that name:
         the same name, the host's name for it, or our own file as the host
         calls it. Received files are named per delivering household, so
-        the host and this household rarely spell one file the same."""
-        payload = dict(event.payload)
+        the host and this household rarely spell one file the same. A
+        ``media_refs`` descriptor (a link-joined household's own copy, v_80)
+        describes where those files live, never content: it is left out."""
+        payload = {k: v for k, v in event.payload.items() if k != MEDIA_REFS_FIELD}
         expected = [
             *feature_media_urls(item.feature, item.payload or {}),
             *(feature_media_urls(item.feature, dict(held)) if held else ()),

@@ -157,6 +157,22 @@ class TranscodeQueueFullError(CodedError):
     detail = "Too many videos are waiting to be converted. Try again later."
 
 
+class PageFilesNotShareableError(CodedError, ValueError):
+    """A page edit adds pictures this household can't hand to the space's
+    host (422 ``PAGE_FILES_NOT_SHAREABLE``): the host reaches us only through
+    a GFS relay (we were seated from an invite link), and we hold no upload
+    authorization for the space's GFS media cache (no writer key, writer
+    cert or channel grant). The words would land and the pictures would
+    stay broken for every member — the edit is refused instead (v_82)."""
+
+    status = 422
+    code = "PAGE_FILES_NOT_SHAREABLE"
+    detail = "this household can't share pictures in this space yet"
+
+    def __init__(self) -> None:
+        super().__init__(self.detail)
+
+
 class InvalidMediaRefError(CodedError, ValueError):
     """A media field that is not a local upload (422 ``INVALID_MEDIA_URL``).
 

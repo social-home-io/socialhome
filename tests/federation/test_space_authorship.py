@@ -1313,6 +1313,20 @@ def test_a_releases_files_align_to_the_names_held_here(held_cover, released_cove
     assert aligned["summary"] == "s"
 
 
+def test_a_releases_media_descriptor_is_not_compared_as_content():
+    """A link-joined household holding the item gets the release with its
+    files' ``media_refs`` descriptor (its own copy, checked by the GFS
+    fetcher) — never content the held item has, so never a mismatch."""
+    a = _mod_auth()
+    a.attach_media_names(SpaceMediaNamer(own_instance_id="us"))
+    event = _cover_release(_sd(AUTHOR_HOUSE, "c.webp"))
+    event.payload["media_refs"] = {"x.webp": {"blob_id": "b" * 64}}
+    aligned = a._aligned_media(
+        event, SPACE, _cover_item(_sd(AUTHOR_HOUSE, "c.webp")), None
+    )
+    assert "media_refs" not in aligned
+
+
 def test_a_release_naming_another_file_is_not_aligned():
     a = _mod_auth()
     a.attach_media_names(SpaceMediaNamer(own_instance_id="us"))

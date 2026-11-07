@@ -41,6 +41,7 @@ from socialhome.app_keys import db_key, federation_service_key
 from socialhome.config import Config
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.gallery import GalleryItem
+from socialhome.domain.space_media_ref import space_page_media_name
 from socialhome.services.inbound_media_store import (
     dm_media_name,
     space_direct_media_name,
@@ -689,3 +690,120 @@ async def test_the_hosts_catch_up_fills_a_file_the_authors_push_never_delivered(
     # Write-once: a later host push never replaces it.
     await _push(app, "post-f", shown, EVIL, sender=HOST)
     assert await _shown(db, root, "post-f") == GOOD
+
+
+# ── Page files: page-scoped on a member household (v_82) ────────────────
+#
+# Pages are host-sequenced: every household keeps the host's version byte
+# for byte (its hash is the version's identity), so a page keeps the names
+# the host chose. On a member household those names never address the
+# shared store: a page's file is kept as ``space_page_media_name(space,
+# name)`` (``sp-``), and only the space's host ships it. A host naming
+# another space's file in a page only ever fills its page-scoped copy.
+
+
+async def _page(db, page_id: str, space_id: str, cover: str, body: str) -> None:
+    await db.enqueue(
+        "INSERT INTO space_pages(id, space_id, title, content, cover_image_url,"
+        " created_by) VALUES(?, ?, 'Rules', ?, ?, 'u-rem')",
+        (page_id, space_id, body, f"api/media/{cover}"),
+    )
+
+
+def _bytes(root, name: str) -> bytes | None:
+    path = root / "media" / name
+    return path.read_bytes() if path.is_file() else None
+
+
+def _sp(name: str, space: str = GATED) -> str:
+    return space_page_media_name(space, name)
+
+
+async def test_the_hosts_page_files_land_page_scoped_once(env):
+    """The host ships a page's cover and body pictures under the names the
+    page shows; a member keeps each under its page-scoped name — never the
+    shared name — once (write-once)."""
+    app, db, root = env
+    await _members(db)
+    cover = space_direct_media_name(GATED, SENDER, "c.webp")
+    body = f"![p](api/media/{cover}) and ![h](/api/media/h.webp)"
+    await _page(db, "pg-1", GATED, cover, body)
+    for name in (cover, "h.webp"):
+        await _push(app, "pg-1", name, GOOD, sender=HOST)
+        assert _bytes(root, _sp(name)) == GOOD, name
+        assert _bytes(root, name) is None, name
+        await _push(app, "pg-1", name, EVIL, sender=HOST)
+        assert _bytes(root, _sp(name)) == GOOD, name
+
+
+@pytest.mark.parametrize("post_first", [True, False])
+async def test_a_host_can_never_plant_another_spaces_file_through_a_page(
+    env, post_first
+):
+    """Review finding (HIGH): ``sd-`` names are computable. A host naming
+    another space's file N in one of its pages, and pushing its own bytes
+    for it — before or after N's row lands here — fills only its page-scoped
+    copy; N, the other space's file, stays for its own household to fill."""
+    app, db, root = env
+    await _members(db)
+    theirs = space_direct_media_name(VICTIM, OTHER, "q.webp")
+
+    async def _post_q() -> None:
+        await db.enqueue(
+            "INSERT INTO space_posts(id, space_id, author, type, media_url)"
+            " VALUES('post-q', ?, 'u-q', 'image', ?)",
+            (VICTIM, f"api/media/{theirs}"),
+        )
+
+    if post_first:
+        await _post_q()
+    await _page(db, "pg-1", GATED, "c.webp", f"![x](api/media/{theirs})")
+    await _push(app, "pg-1", theirs, EVIL, sender=HOST)
+    if not post_first:
+        await _post_q()
+    assert _bytes(root, theirs) is None
+    assert _bytes(root, _sp(theirs)) == EVIL  # the page's own copy only
+
+
+@pytest.mark.parametrize("sender", [SENDER, MALLORY])
+async def test_only_the_host_ships_a_pages_files_to_a_member(env, sender):
+    """Review finding (MEDIUM): a member pushing its own (unreviewed) bytes
+    for a page's file straight to other households is refused — whether the
+    name is bound to it or not. The proposer ships to the host alone."""
+    app, db, root = env
+    await _members(db)
+    mine = space_direct_media_name(GATED, sender, "c.webp")
+    await _page(db, "pg-1", GATED, mine, f"![c](api/media/{mine})")
+    before = _tree(root)
+    await _push(app, "pg-1", "c.webp", EVIL, sender=sender)
+    await _push(app, "pg-1", mine, EVIL, sender=sender)
+    assert _tree(root) == before
+
+
+async def test_a_page_of_another_space_takes_no_file(env):
+    """The host's push correlated to a page of another space fills nothing."""
+    app, db, root = env
+    await _members(db)
+    await _page(db, "pg-b", VICTIM, "vb.webp", "![x](api/media/vbody.webp)")
+    before = _tree(root)
+    await _push(app, "pg-b", "vb.webp", GOOD, sender=HOST)
+    await _push(app, "pg-b", "vbody.webp", GOOD, sender=HOST)
+    assert _tree(root) == before
+
+
+async def test_on_the_host_a_proposers_file_lands_under_its_own_name(env):
+    """On the host, a page proposal's new file (which can overtake the
+    version that shows it) lands under the proposer's own name — which
+    nobody else can fill — never a shared or page-scoped one."""
+    app, db, root = env
+    await _members(db)
+    row = await db.fetchone("SELECT instance_id FROM instance_identity")
+    await db.enqueue(
+        "UPDATE spaces SET owner_instance_id=? WHERE id=?",
+        (row["instance_id"], GATED),
+    )
+    await _page(db, "pg-1", GATED, "c.webp", "")
+    await _push(app, "pg-1", "n.webp", GOOD)
+    assert _bytes(root, space_direct_media_name(GATED, SENDER, "n.webp")) == GOOD
+    assert _bytes(root, "n.webp") is None
+    assert _bytes(root, _sp("n.webp")) is None

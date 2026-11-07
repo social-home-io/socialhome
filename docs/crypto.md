@@ -662,6 +662,18 @@ author's post that carries a signed descriptor heals it, add-only: only
 while the post has no `space_media_refs` rows, never replacing names or
 rows it already has.
 
+**Page proposal `media_refs` (v_82) — no extra signature.** A member
+household seated from an invite link describes its page proposal's new files
+(blobs sealed `aesgcm-256-pad-det` for the page and the proposing household)
+in `media_refs` **inside the proposal's encrypted payload**. The GFS relays
+the proposer's §24.11 envelope unchanged; the host's pipeline verifies its
+Ed25519 signature under the key pinned for that household before the handler
+runs, so `from_instance` is the proposer and the descriptor is the
+proposer's. The host takes only entries for the files the proposal adds, each
+stored under `sd(space, proposer, file)`; the blob's AAD names the page and
+the proposer, so a blob sealed by anyone else never decrypts. No new key or
+signature: the envelope signature already proves it (CLAUDE.md).
+
 **Link-preview author signature (GFS public relay)**
 (`services/space_public_author.py`) — a public/global space post's
 author-built link card rides inside the encrypted relay inner, but outside

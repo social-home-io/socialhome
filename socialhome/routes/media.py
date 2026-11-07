@@ -14,6 +14,7 @@ from aiohttp.multipart import BodyPartReader
 from ..app_keys import (
     config_key,
     gallery_service_key,
+    media_ref_guard_key,
     media_signer_key,
     media_transcode_repo_key,
     media_transcode_service_key,
@@ -32,6 +33,7 @@ from ..domain.media_constraints import (
 from ..media.audio_processor import AudioProcessor
 from ..media.image_processor import ImageProcessor, sniff_image_mime
 from ..security import error_response
+from ..services.inbound_media_store import DM_MEDIA_PREFIX, is_safe_media_name
 from .base import BaseView
 
 log = logging.getLogger(__name__)
@@ -114,6 +116,13 @@ class MediaServeView(BaseView):
         # Prevent path traversal
         if "/" in filename or "\\" in filename or filename.startswith("."):
             return error_response(400, "BAD_REQUEST", "Invalid filename.")
+        # A name must be plain in the raw path: ``%64m-x`` would decode to
+        # ``dm-x`` here while no link in a body matched it (it was neither
+        # renamed nor signed). Any escape, or a name no upload ever gets,
+        # answers like the unknown file.
+        raw_name = self.request.raw_path.split("?", 1)[0].rsplit("/", 1)[-1]
+        if raw_name != filename or not is_safe_media_name(filename):
+            return error_response(404, "NOT_FOUND", "Media file not found.")
 
         file_path = pathlib.Path(config.media_path) / filename
         # Access first (review H): a viewer who may not open a file never
@@ -166,6 +175,13 @@ class MediaServeView(BaseView):
         user_id = self.user.user_id
         if user_id == SIGNED_URL_PRINCIPAL:
             return True
+        if filename.startswith(DM_MEDIA_PREFIX):
+            # A received DM attachment opens only through a conversation the
+            # viewer is in (``MediaReferenceRepo.may_reference``) — never
+            # because some page or post names it.
+            guard = self.request.app.get(media_ref_guard_key)
+            if guard is None or not await guard.may_open(filename, user_id):
+                return False
         gallery = self.request.app.get(gallery_service_key)
         if gallery is None:
             return True

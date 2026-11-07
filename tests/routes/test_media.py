@@ -5,6 +5,7 @@ import pathlib
 from types import SimpleNamespace
 
 import pytest
+import yarl
 from PIL import Image
 
 # Registers the HEIF opener, so ``_picture("HEIF")`` can write one.
@@ -658,3 +659,41 @@ async def test_a_file_the_viewer_may_not_open_is_never_fetched(client, monkeypat
     r = await client.get(f"/api/media/{local}", headers=_auth(client._tok))
     assert r.status == 404
     assert gfs.fetches == 0
+
+
+async def test_a_percent_encoded_media_name_is_never_served(client):
+    """Final review finding 4 (security, haos): ``api/media/%64m-x.webp``
+    is no link the server matches (it is neither renamed nor signed), but
+    the router decodes it to ``dm-x.webp`` — a name must be plain in the raw
+    path, or it is the unknown file's 404."""
+    media_dir = pathlib.Path(client.app[config_key].media_path)
+    media_dir.mkdir(parents=True, exist_ok=True)
+    (media_dir / "dm-x.webp").write_bytes(b"RIFF\x00\x00\x00\x00WEBPVP8 ")
+    (media_dir / "abc.webp").write_bytes(b"RIFF\x00\x00\x00\x00WEBPVP8 ")
+    for raw in ("/api/media/%64m-x.webp", "/api/media/ab%63.webp"):
+        # Sent exactly as written (a browser keeps the escape too).
+        url = client.make_url("/").join(yarl.URL(raw, encoded=True))
+        r = await client.session.get(url, headers=_auth(client._tok))
+        assert r.status == 404, raw
+    # The plain name still works.
+    r = await client.get("/api/media/abc.webp", headers=_auth(client._tok))
+    assert r.status == 200
+
+
+async def test_a_dm_attachment_opens_only_for_someone_in_the_conversation(client):
+    """A bearer / ingress viewer (no signed URL) opens a received DM
+    attachment only through a conversation they are in — never because a
+    page or a post names it."""
+    media_dir = pathlib.Path(client.app[config_key].media_path)
+    media_dir.mkdir(parents=True, exist_ok=True)
+    name = "dm-" + "0" * 40 + ".webp"
+    (media_dir / name).write_bytes(b"RIFF\x00\x00\x00\x00WEBPVP8 ")
+    db = client.app[db_key]
+    await db.enqueue("INSERT INTO conversations(id, type) VALUES('c-x', 'dm')")
+    await db.enqueue(
+        "INSERT INTO conversation_messages(id, conversation_id, sender_user_id,"
+        " content, media_url) VALUES('m-x', 'c-x', 'u-other', '', ?)",
+        (f"api/media/{name}",),
+    )
+    r = await client.get(f"/api/media/{name}", headers=_auth(client._tok))
+    assert r.status == 404

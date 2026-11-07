@@ -10,14 +10,22 @@ from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import FileMeta, Post, PostType
 from socialhome.domain.space_media_ref import (
     MAX_DESCRIPTOR_ENTRIES,
+    MAX_PAGE_DESCRIPTOR_ENTRIES,
+    MAX_PAGE_FILES,
     MEDIA_REF_RESOURCES,
     MEDIA_REFS_FIELD,
     SpaceMediaLocalization,
     SpaceMediaRef,
     media_refs_to_wire,
+    page_body_media_refs,
+    page_file_count,
+    page_media_urls,
     parse_media_refs,
     post_media_urls,
+    recent_history_files,
     record_media_urls,
+    rewrite_page_body_media,
+    space_page_media_name,
 )
 from socialhome.moment_public_media import MAX_BLOB_BYTES
 from socialhome.space_media_seal import SPACE_MEDIA_SUITE_AESGCM256_PADDED
@@ -177,7 +185,63 @@ def test_record_media_urls_per_resource() -> None:
     ]
     assert record_media_urls("gallery", {"kind": "album", "cover_url": "x"}) == []
     assert record_media_urls("tasks", {"media_url": "api/media/x.webp"}) == []
-    assert MEDIA_REF_RESOURCES == frozenset({"posts", "calendar", "gallery"})
+    assert MEDIA_REF_RESOURCES == frozenset({"posts", "calendar", "gallery", "pages"})
+
+
+# ── A page's files: its cover and the pictures its body shows ───────────
+
+BODY = (
+    "Intro ![a](api/media/a.webp) and ![b](/api/media/b.webp?exp=1&sig=x)\n"
+    "a [link](https://example.org/api/media/x.webp) stays text, "
+    "so does path/api/media/y.webp; again ![a2](api/media/a.webp)"
+)
+
+
+def test_a_page_body_lists_only_its_own_local_pictures() -> None:
+    """``api/media/<file>`` (leading ``/`` and query kept) — never the same
+    path inside another URL or path."""
+    assert page_body_media_refs(BODY) == [
+        "api/media/a.webp",
+        "/api/media/b.webp?exp=1&sig=x",
+        "api/media/a.webp",
+    ]
+    assert page_body_media_refs(None) == []
+    assert page_body_media_refs(3) == []
+
+
+def test_a_page_body_rewrite_touches_only_its_pictures() -> None:
+    out = rewrite_page_body_media(BODY, lambda u: u.replace("media/", "M/"))
+    assert out == (
+        "Intro ![a](api/M/a.webp) and ![b](/api/M/b.webp?exp=1&sig=x)\n"
+        "a [link](https://example.org/api/media/x.webp) stays text, "
+        "so does path/api/media/y.webp; again ![a2](api/M/a.webp)"
+    )
+    assert rewrite_page_body_media("![r](api/media/r.webp)", lambda u: "") == "![r]()"
+
+
+def test_a_pages_files_are_its_cover_then_body_pictures_once_each() -> None:
+    assert page_media_urls("api/media/c.webp", BODY) == [
+        "api/media/c.webp",
+        "api/media/a.webp",
+        "/api/media/b.webp",
+    ]
+    assert page_media_urls(None, "") == []
+    record = {"cover_image_url": "api/media/c.webp", "content": BODY}
+    assert record_media_urls("pages", record) == page_media_urls(
+        "api/media/c.webp", BODY
+    )
+
+
+def test_a_pages_descriptor_never_exceeds_its_entry_cap() -> None:
+    """A receiver refuses a descriptor past the cap whole: a page with
+    more pictures describes its first ones only (one file once, however
+    it is spelled)."""
+    body = " ".join(f"![p](api/media/p{i}.webp)" for i in range(30))
+    body = "![dup](/api/media/p0.webp) " + body
+    urls = record_media_urls("pages", {"cover_image_url": None, "content": body})
+    assert len(urls) == MAX_DESCRIPTOR_ENTRIES
+    assert urls[0] == "/api/media/p0.webp"
+    assert "api/media/p0.webp" not in urls
 
 
 def test_post_media_urls_is_the_record_rule_for_a_post() -> None:
@@ -285,3 +349,36 @@ def test_localization_rewrites_every_file_of_a_post() -> None:
     assert out.file_meta.original_name == "d.pdf"
     # Nothing to rename: the very same object.
     assert SpaceMediaLocalization(names={}).post(post) is post
+
+
+def test_a_page_scoped_name_binds_space_and_file() -> None:
+    """v_82: where a member keeps a page's file — fixed length, the
+    extension kept, a different name per space and per file, never the
+    name the page shows."""
+    a = space_page_media_name("sp-1", "sd-" + "1" * 40 + ".webp")
+    assert a.startswith("sp-") and a.endswith(".webp") and len(a) == 48
+    assert a != space_page_media_name("sp-2", "sd-" + "1" * 40 + ".webp")
+    assert a != space_page_media_name("sp-1", "other.webp")
+    assert space_page_media_name("sp-1", "noext").startswith("sp-")
+
+
+def test_a_pages_file_count_counts_each_file_once() -> None:
+    body = "![a](api/media/a.webp) ![a2](/api/media/a.webp?x=1) ![b](api/media/b.webp)"
+    assert page_file_count("api/media/c.webp", body) == 3
+    assert page_file_count("api/media/a.webp", body) == 2
+    assert page_file_count(None, None) == 0
+    assert MAX_PAGE_DESCRIPTOR_ENTRIES == MAX_PAGE_FILES * 4
+
+
+def test_a_pages_recent_history_files_are_the_newest_distinct_ones() -> None:
+    versions = [
+        ("api/media/c2.webp", "![a](api/media/a.webp) ![n](api/media/n2.webp)"),
+        (None, "![n](api/media/n1.webp) ![a](/api/media/a.webp)"),
+        (None, "![o](api/media/o.webp)"),
+    ]
+    assert recent_history_files(versions, shown=["api/media/a.webp"], limit=3) == [
+        "api/media/c2.webp",
+        "api/media/n2.webp",
+        "api/media/n1.webp",
+    ]
+    assert recent_history_files([], limit=3) == []

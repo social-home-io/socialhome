@@ -44,6 +44,8 @@ import time
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.hkdf import HKDFExpand
 
+from .domain.space_media_ref import LOCAL_MEDIA_REF_RE
+
 #: Domain-separation tag for HKDF — bumping the version invalidates
 #: all signed URLs in flight without rotating the identity seed.
 _HKDF_INFO: bytes = b"sh-media-url-v1"
@@ -243,13 +245,12 @@ def sign_media_urls_in(
 #: extension, so the conservative character set is sufficient. Any
 #: ``?exp=&sig=…`` (or other query) attached to the URL is captured
 #: too so the rewriter can replace it cleanly.
-_BODY_MEDIA_RE = re.compile(
-    # Match both leading-slash (legacy + user-pasted) and bare
-    # (new — relative for ingress-safe ``<base href>`` resolution)
-    # forms. The leading ``/`` is optional so authoring tools that
-    # paste a canonical URL still sign correctly.
-    r"/?api/media/[A-Za-z0-9._-]+(?:\?[^)\s\"'<>]*)?",
-)
+#: Both leading-slash (legacy + user-pasted) and bare (relative, for
+#: ingress-safe ``<base href>`` resolution) forms — never the same path
+#: inside another URL or path. The ONE pattern the page renames and the
+#: write-time guard use too (``domain.space_media_ref``): a link this signs
+#: is always one those saw.
+_BODY_MEDIA_RE = LOCAL_MEDIA_REF_RE
 
 
 def sign_media_urls_in_markdown(text: str | None, signer: MediaUrlSigner) -> str | None:

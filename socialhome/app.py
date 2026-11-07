@@ -390,7 +390,7 @@ from .services.moment_service import MomentService
 from .services.notification_delivery_worker import NotificationDeliveryWorker
 from .services.notification_settings_service import NotificationSettingsService
 from .services.online_status_service import OnlineStatusService
-from .services.page_conflict_service import PageConflictService
+from .services.page_conflict_service import PageConflictService, PageMode
 from .services.page_federation_outbound import PageFederationOutbound
 from .services.page_proposal_forwarder import PageProposalForwarder
 from .services.pairing_cancel_service import PairingCancelService
@@ -1571,6 +1571,8 @@ def _wire_federation_stack(
         space_icon_repo=space_icon_repo,
         # An approved announce card must link an event of its own space.
         space_calendar_repo=space_calendar_repo,
+        # SPACE_MEDIA_BLOB scope: a space page's cover and body pictures.
+        page_repo=page_repo,
     )
     inbound_service.attach_to(federation_service)
     inbound_service.attach_groups(dm_service.groups)
@@ -1829,6 +1831,18 @@ def _wire_federation_stack(
     space_sync_service.attach_roster_authority(
         _roster_authority, own_members=_own_members
     )
+
+    async def _hosts_space(space_id: str) -> bool:
+        space = await space_repo.get(space_id)
+        return (
+            space is not None
+            and space.owner_instance_id == federation_service.own_instance_id
+        )
+
+    # v_82: the host's catch-up ships its pages' files.
+    space_sync_service.attach_pages(
+        page_repo, hosts=_hosts_space, media_refs=media_reference_repo
+    )
     app[K.space_sync_service_key] = space_sync_service
     app[K.space_sync_receiver_key] = space_sync_receiver
 
@@ -1871,6 +1885,13 @@ def _wire_federation_stack(
         bus=bus,
         federation_service=federation_service,
     )
+    # v_82: a host version's new files (cover, body pictures) follow it to
+    # the other member households over the space media outbox.
+    page_federation_outbound.attach_media(
+        media_sync=space_media_sync_service,
+        space_repo=space_repo,
+        media_refs=media_reference_repo,
+    )
     page_federation_outbound.wire()
     # v_48 host-sequenced pages: the conflict service sequences pages this
     # household hosts and mirrors the host's versions of the others; the
@@ -1887,6 +1908,8 @@ def _wire_federation_stack(
         federation_repo=federation_repo,
         bus=bus,
     )
+    # v_82: a draft's new files go to the host with it.
+    page_proposal_forwarder.attach_media_sync(space_media_sync_service)
     page_proposal_forwarder.wire()
     app[K.page_proposal_forwarder_key] = page_proposal_forwarder
 
@@ -2143,6 +2166,8 @@ def _wire_federation_stack(
         # bounded per request by the files' sizes here.
         media_sync=space_media_sync_service,
         media_dir=pathlib.Path(config.media_path),
+        # v_82: only a replayed page's own files ship.
+        media_refs=media_reference_repo,
     )
 
     async def _space_sync_resume(event) -> None:
@@ -2212,7 +2237,27 @@ def _wire_federation_stack(
         moment_reaction_counts=moment_reaction_counts,
         content_inbound=content_inbound,
         gallery_federation_outbound=gallery_federation_outbound,
+        page_federation_outbound=page_federation_outbound,
     )
+
+
+def _build_page_files_reach_host(
+    page_conflicts: PageConflictService, uploader: SpaceMediaGfsUploader
+) -> Callable[[str], Awaitable[bool]]:
+    """``check(space_id)``: whether a page's new files can reach the space's
+    host from here (v_82). A household seated from an invite link hands
+    them over only through its GFS media cache, which it needs an upload
+    authorization for; any other member uses the outbox."""
+
+    async def _reach(space_id: str) -> bool:
+        mode, host = await page_conflicts.mode(space_id)
+        if mode is not PageMode.MEMBER or not host:
+            return True
+        if not await uploader.is_relay_reader(host):
+            return True
+        return await uploader.can_upload(space_id)
+
+    return _reach
 
 
 def _build_space_media_gfs(
@@ -3439,6 +3484,8 @@ def create_app(config: Config | None = None) -> web.Application:
         space_repo=space_repo,
         bus=bus,
         conflict_service=page_conflict_service,
+        # v_82: a member's own draft file vs. its page-scoped copy.
+        media_dir=pathlib.Path(config.media_path),
     )
 
     # ── Household zones (local-only; GPS→zone match for presence) ──────
@@ -4628,6 +4675,8 @@ def create_app(config: Config | None = None) -> web.Application:
         # delivered them; one namer, knowing who "we" are, for every path.
         media_names = SpaceMediaNamer(own_instance_id=real_instance_id)
         moderation_federation.attach_media_names(media_names)
+        # v_82: a reviewed page edit keeps the names its page already shows.
+        moderation_federation.attach_page_media(space_page_service.held_media)
         fed.space_authorship.attach_media_names(media_names)
         fed.inbound_service.attach_media_names(media_names)
         fed.content_inbound.attach_media_names(media_names)
@@ -5006,10 +5055,21 @@ def create_app(config: Config | None = None) -> web.Application:
             space_public_outbound.attach_media_gfs(space_media_uploader)
         space_cal_service.attach_media_gfs(space_media_uploader)
         fed.gallery_federation_outbound.attach_media_gfs(space_media_uploader)
+        fed.page_federation_outbound.attach_media_gfs(space_media_uploader)
         # …and no SPACE_MEDIA_BLOB push to them: the relay refuses the bytes.
         space_media_sync_service.attach_relay_readers(space_media_uploader)
         fed.inbound_service.attach_gfs_media(space_media_fetcher)
+        # v_82: a page's files keep the names the host's page shows.
+        space_media_fetcher.attach_pages(page_repo)
         fed.content_inbound.attach_gfs_media(space_media_fetcher)
+
+        # v_82: a link-joined proposer's page files ride its GFS media
+        # cache, described inside its (envelope-signed) proposal.
+        app[K.page_proposal_forwarder_key].attach_media_gfs(space_media_uploader)
+
+        space_page_service.attach_files_reach_host(
+            _build_page_files_reach_host(page_conflict_service, space_media_uploader)
+        )
         if space_public_inbound is not None:
             space_public_inbound.attach_gfs_media(space_media_fetcher)
         # §25.6: a stream to a link-joined member carries the records'

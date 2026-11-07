@@ -29,6 +29,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from ..domain.errors import InvalidMediaRefError
+from ..domain.media_constraints import SPACE_PAGE_MEDIA_PREFIX
 from ..media.cleanup import media_basename
 
 if TYPE_CHECKING:
@@ -53,8 +54,20 @@ class MediaRefGuard:
             if not ref:
                 continue
             name = media_basename(ref)
-            if not name or not await self._refs.may_reference(name, user_id):
+            if (
+                not name
+                # A space page's page-scoped copy (v_82) is never named by a
+                # write: a page names its host's file, mapped on read.
+                or name.startswith(SPACE_PAGE_MEDIA_PREFIX)
+                or not await self._refs.may_reference(name, user_id)
+            ):
                 raise InvalidMediaRefError(field)
+
+    async def may_open(self, name: str, user_id: str) -> bool:
+        """Whether *user_id* may open the stored file *name* (a bearer or
+        ingress viewer, not a signed URL): the same rule as naming it — a
+        row they can see references it, or nothing does."""
+        return await self._refs.may_reference(name, user_id)
 
 
 class MediaRefGuardedMixin:

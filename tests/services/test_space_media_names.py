@@ -15,6 +15,7 @@ from socialhome.services.space_media_names import (
     feature_media_urls,
     renamed_media,
     same_file,
+    space_own_files,
 )
 
 SP = "sp-1"
@@ -132,8 +133,64 @@ def test_moderation_payload_files_are_listed_and_renamed_in_place():
         "cover_url": "API/MEDIA/E.WEBP",
         "summary": "s",
     }
-    assert feature_media_urls("pages", post) == []
-    assert renamed_media("pages", post, str.upper) == post
+    assert feature_media_urls("stickies", post) == []
+    assert renamed_media("stickies", post, str.upper) == post
+
+
+def test_a_pages_cover_and_body_pictures_are_listed_and_renamed():
+    """A page's files are its cover and every ``api/media/`` picture in its
+    body: a create, an edit's patch, a merged conflict resolution and the
+    wire event of a release all list them, and a rename rewrites the body
+    references in place (prefix and query kept, other text untouched)."""
+    body = (
+        "Intro ![a](api/media/a.webp) and ![b](/api/media/b.webp?exp=1&sig=x)\n"
+        "a [link](https://example.org/api/media/x) stays text"
+    )
+    create = {"title": "T", "content": body, "cover_image_url": "api/media/c.webp"}
+    assert feature_media_urls("pages", create) == [
+        "api/media/c.webp",
+        "api/media/a.webp",
+        "/api/media/b.webp",
+    ]
+    out = renamed_media("pages", create, lambda u: (u or "").replace("media/", "M/"))
+    assert out["cover_image_url"] == "api/M/c.webp"
+    assert out["content"] == (
+        "Intro ![a](api/M/a.webp) and ![b](/api/M/b.webp?exp=1&sig=x)\n"
+        "a [link](https://example.org/api/media/x) stays text"
+    )
+    assert create["content"] == body  # a new dict
+    edit = {"patch": {"content": "![n](api/media/n.webp)", "title": "T2"}}
+    assert feature_media_urls("pages", edit) == ["api/media/n.webp"]
+    assert renamed_media("pages", edit, str.upper)["patch"] == {
+        "content": "![n](API/MEDIA/N.WEBP)",
+        "title": "T2",
+    }
+    cover_only = {"patch": {"cover_image_url": "api/media/e.webp"}}
+    assert feature_media_urls("pages", cover_only) == ["api/media/e.webp"]
+    resolve = {"op": "resolve_conflict", "merged_content": "![m](api/media/m.webp)"}
+    assert feature_media_urls("pages", resolve) == ["api/media/m.webp"]
+    assert renamed_media("pages", resolve, str.upper)["merged_content"] == (
+        "![m](API/MEDIA/M.WEBP)"
+    )
+    assert feature_media_urls("pages", {"title": "T", "content": None}) == []
+    # A rename to nothing empties the reference (the sanitizer's drop).
+    gone = renamed_media("pages", create, lambda u: None)
+    assert gone["cover_image_url"] is None
+    assert gone["content"].startswith("Intro ![a]() and ![b]()")
+
+
+def test_a_page_namer_keeps_the_names_its_stored_page_shows():
+    """An edit of a page carries the pictures the page already shows under
+    the names it shows them by (the host's): those stay, only a new file
+    takes the submitting household's name."""
+    namer = SpaceMediaNamer("us")
+    shown = f"api/media/{sd('hh-a', 'a.webp')}"
+    patch = {"patch": {"content": f"![a]({shown}) ![n](api/media/n.webp)"}}
+    names = namer.localize(SP, "hh-a", feature_media_urls("pages", patch), held=[shown])
+    out = renamed_media("pages", patch, names.url)
+    assert out["patch"]["content"] == (
+        f"![a]({shown}) ![n](api/media/{sd('hh-a', 'n.webp')})"
+    )
 
 
 def test_same_file_matches_a_sent_name_to_the_one_held_here():
@@ -146,3 +203,19 @@ def test_same_file_matches_a_sent_name_to_the_one_held_here():
     assert not same_file(held, None, space_id=SP, origin="hh-a")
     assert not same_file(None, "api/media/f.webp", space_id=SP, origin="hh-a")
     assert not same_file(held, 7, space_id=SP, origin="hh-a")
+
+
+async def test_only_the_spaces_own_files_ship():
+    """What a host ships for a page: files no row outside the space names
+    here; without the repo, nothing (fail closed)."""
+
+    class _Refs:
+        async def confined_to_space(self, name, space_id):
+            return space_id == SP and name != "home.webp"
+
+    urls = ["api/media/a.webp", "/api/media/home.webp?x=1", "api/media/b.webp"]
+    assert await space_own_files(_Refs(), SP, urls) == [
+        "api/media/a.webp",
+        "api/media/b.webp",
+    ]
+    assert await space_own_files(None, SP, urls) == []

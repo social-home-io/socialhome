@@ -15,6 +15,7 @@ from socialhome.domain.events import (
     PageUpdated,
 )
 from socialhome.domain.federation import DeliveryResult, FederationEventType
+from socialhome.domain.page_version import DraftBase
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.page_conflict_service import PageMode, Proposal
 from socialhome.services.page_proposal_forwarder import PageProposalForwarder
@@ -46,15 +47,24 @@ class _Conflicts:
 class _Pages:
     def __init__(self, conflicts: _Conflicts) -> None:
         self._c = conflicts
+        self.bases: dict[str, DraftBase] = {}
 
     async def list_pending_drafts(self, *, space_id=None):
         return [(SID, pid) for pid in self._c.drafts]
+
+    async def get_draft_base(self, page_id, *, space_id):
+        return self.bases.get(page_id)
 
 
 class _Fed:
     def __init__(self) -> None:
         self.sent: list[tuple[str, FederationEventType, dict]] = []
         self.result = DeliveryResult(instance_id=HOST, ok=True)
+        self.version = 82
+
+    async def space_member_supports(self, instance_id, *, min_version):
+        # Paired or reached only over the mesh: the member's own claim.
+        return instance_id == HOST and self.version >= min_version
 
     async def send_with_mesh_fallback(
         self, *, to_instance_id, event_type, payload, space_id=None
@@ -77,8 +87,9 @@ def env():
     conflicts = _Conflicts()
     fed = _Fed()
     repo = _FedRepo()
+    pages = _Pages(conflicts)
     fwd = PageProposalForwarder(
-        page_repo=_Pages(conflicts),
+        page_repo=pages,
         conflicts=conflicts,
         federation_service=fed,
         federation_repo=repo,
@@ -86,7 +97,14 @@ def env():
         interval_seconds=3600,
     )
     fwd.wire()
-    return SimpleNamespace(bus=bus, conflicts=conflicts, fed=fed, repo=repo, fwd=fwd)
+    return SimpleNamespace(
+        bus=bus,
+        conflicts=conflicts,
+        fed=fed,
+        repo=repo,
+        fwd=fwd,
+        pages_bases=pages.bases,
+    )
 
 
 def _draft(content: str, *, base_seq: int = 3, **kw) -> Proposal:
@@ -263,3 +281,178 @@ async def test_a_draft_on_the_host_is_only_warned_about(env, caplog):
         assert not await env.fwd.kick(SID, "pg")
     assert "pending draft on the space's host" in caplog.text
     assert env.fed.sent == []
+
+
+# ── v_82: a draft's new files go to the host ────────────────────────────
+
+
+class _Media:
+    def __init__(self, *, boom: bool = False) -> None:
+        self.calls: list[dict] = []
+        self.boom = boom
+
+    async def enqueue_for_blob(self, **kw) -> None:
+        if self.boom:
+            raise OSError("disk")
+        self.calls.append(kw)
+
+
+@pytest.fixture
+def media(env):
+    media = _Media()
+    env.fwd.attach_media_sync(media)
+    return media
+
+
+async def test_a_drafts_new_files_go_to_the_host(env, media):
+    """Only the files the draft adds to the version it was made from: the
+    host renames them to our names and lets only us (or itself) fill
+    them; the page's own pictures are on the host already."""
+    env.pages_bases["pg"] = DraftBase(
+        title="T", content="![k](api/media/k.webp)", seq=3, by="u1"
+    )
+    env.conflicts.drafts["pg"] = _draft(
+        "![k](api/media/k.webp) ![n](/api/media/n.webp?exp=1)",
+        cover_image_url="api/media/c.webp",
+    )
+    assert await env.fwd.kick(SID, "pg")
+    assert media.calls == [
+        {
+            "space_id": SID,
+            "correlation_id": "pg",
+            "target_instance_ids": [HOST],
+            "media_urls": ["api/media/c.webp", "/api/media/n.webp"],
+        }
+    ]
+
+
+async def test_a_proposed_create_ships_all_its_files(env, media):
+    env.conflicts.drafts["pg"] = _draft("![a](api/media/a.webp)", base_seq=0)
+    assert await env.fwd.kick(SID, "pg")
+    assert [c["media_urls"] for c in media.calls] == [["api/media/a.webp"]]
+
+
+async def test_no_files_for_a_host_below_v81_or_a_draft_without_new_ones(env, media):
+    env.fed.version = 80
+    env.conflicts.drafts["pg"] = _draft("![a](api/media/a.webp)", base_seq=0)
+    assert await env.fwd.kick(SID, "pg")
+    env.fed.version = 82
+    env.pages_bases["pg2"] = DraftBase(
+        title="T", content="![a](api/media/a.webp)", seq=3, by="u1"
+    )
+    env.conflicts.drafts["pg2"] = _draft("words ![a](api/media/a.webp)")
+    assert await env.fwd.kick(SID, "pg2")
+    assert media.calls == []
+
+
+async def test_a_failed_file_queue_never_holds_the_draft_back(env, media):
+    media.boom = True
+    env.conflicts.drafts["pg"] = _draft("![a](api/media/a.webp)", base_seq=0)
+    assert await env.fwd.kick(SID, "pg")
+    assert len(env.fed.sent) == 1
+
+
+async def test_a_resend_never_requeues_a_file_already_queued(env, media):
+    """Review finding 5: the 30-minute tick, a reconnect and a retry resend
+    the same draft — its files were queued for the host already."""
+    env.conflicts.drafts["pg"] = _draft("![a](api/media/a.webp)", base_seq=0)
+    assert await env.fwd.kick(SID, "pg")
+    assert await env.fwd.flush(resend=True)
+    assert [c["media_urls"] for c in media.calls] == [["api/media/a.webp"]]
+
+
+class _Plan:
+    def __init__(self, urls):
+        self.urls = urls
+
+    def wire(self):
+        return {u.rsplit("/", 1)[-1]: {"blob_id": "a" * 64} for u in self.urls}
+
+
+class _GfsUploader:
+    def __init__(self, *, reader: bool, authorized: bool = True) -> None:
+        self.reader = reader
+        self.authorized = authorized
+        self.planned: list[tuple] = []
+        self.uploaded: list = []
+
+    async def is_relay_reader(self, iid):
+        return self.reader and iid == HOST
+
+    async def can_upload(self, space_id):
+        return self.authorized
+
+    async def plan_for_reader(self, space_id, urls, iid, *, item_id):
+        self.planned.append((space_id, list(urls), iid, item_id))
+        return _Plan(list(urls))
+
+    def upload(self, plan):
+        self.uploaded.append(plan)
+
+
+async def test_a_link_joined_proposer_describes_its_new_files(env, media):
+    """Members equal (v_82): a household seated from an invite link reaches
+    the host only through the GFS relay, which refuses bytes. Its proposal
+    describes its new files (sealed for this page and household, uploaded to
+    its GFS media cache) inside its envelope-signed payload; nothing goes to
+    the outbox."""
+    env.fed.own_instance_id = "me"
+    gfs = _GfsUploader(reader=True)
+    env.fwd.attach_media_gfs(gfs)
+    env.pages_bases["pg"] = DraftBase(
+        title="T", content="![k](api/media/k.webp)", seq=3, by="u1"
+    )
+    draft = _draft(
+        "![k](api/media/k.webp) ![a](api/media/a.webp) ![b](api/media/b.webp)"
+    )
+    env.conflicts.drafts["pg"] = draft
+    assert await env.fwd.kick(SID, "pg")
+    (_to, _et, payload) = env.fed.sent[0]
+    assert gfs.planned == [(SID, ["api/media/a.webp", "api/media/b.webp"], HOST, "pg")]
+    assert set(payload["media_refs"]) == {"a.webp", "b.webp"}
+    assert len(gfs.uploaded) == 1
+    assert media.calls == []
+
+
+async def test_a_paired_proposer_still_ships_through_the_outbox(env, media):
+    env.fed.own_instance_id = "me"
+    gfs = _GfsUploader(reader=False)
+    env.fwd.attach_media_gfs(gfs)
+    env.conflicts.drafts["pg"] = _draft("![a](api/media/a.webp)", base_seq=0)
+    assert await env.fwd.kick(SID, "pg")
+    assert "media_refs" not in env.fed.sent[0][2]
+    assert gfs.planned == [] and gfs.uploaded == []
+    assert [c["media_urls"] for c in media.calls] == [["api/media/a.webp"]]
+
+
+async def test_a_link_joined_proposer_without_upload_rights_describes_nothing(
+    env, media, caplog
+):
+    """Review finding 7: no writer key, cert or channel grant — nothing would
+    land on the GFS, so no descriptor goes out (the page service refuses
+    such an edit up front)."""
+    env.fed.own_instance_id = "me"
+    gfs = _GfsUploader(reader=True, authorized=False)
+    env.fwd.attach_media_gfs(gfs)
+    env.conflicts.drafts["pg"] = _draft("![a](api/media/a.webp)", base_seq=0)
+    with caplog.at_level("WARNING"):
+        assert await env.fwd.kick(SID, "pg")
+    assert "media_refs" not in env.fed.sent[0][2]
+    assert gfs.planned == [] and gfs.uploaded == []
+    assert "no upload authorization" in caplog.text
+
+
+async def test_the_queued_files_memory_is_bounded_and_cleared(env, media, monkeypatch):
+    """Review finding 8: the forwarder remembers queued files for at most
+    MAX_QUEUED_PAGES pages, and forgets a page whose draft settled or is gone."""
+    from socialhome.services import page_proposal_forwarder as fwd_mod
+
+    monkeypatch.setattr(fwd_mod, "MAX_QUEUED_PAGES", 1)
+    env.conflicts.drafts["p1"] = _draft("![a](api/media/a.webp)", base_seq=0)
+    env.conflicts.drafts["p2"] = _draft("![b](api/media/b.webp)", base_seq=0)
+    assert await env.fwd.kick(SID, "p1")
+    assert await env.fwd.kick(SID, "p2")
+    assert list(env.fwd._queued) == [(SID, "p2")]
+    del env.conflicts.drafts["p2"]
+    assert not await env.fwd.kick(SID, "p2")
+    assert env.fwd._queued == {}

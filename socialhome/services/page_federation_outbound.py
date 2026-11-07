@@ -27,6 +27,14 @@ household's own drafts are ``proposal`` events this bridge never sends —
 :class:`~.page_proposal_forwarder.PageProposalForwarder` proposes them to
 the host alone.
 
+A page's files (v_82) — its cover and the pictures its body shows — ride
+the host's versions: each version's NEW files (``shown_before`` names the
+ones the replaced version showed) are queued on the space media outbox for
+every other member household at v_82 (paired or mesh; correlated by the
+page), and a link-joined v_82 member gets them as a ``media_refs``
+descriptor in its own copy (:class:`SpaceMediaRefsMixin`). The page keeps
+the names the host's page shows: a receiver lets only the host fill them.
+
 Sibling of :class:`TaskFederationOutbound` /
 :class:`StickyFederationOutbound`; identical shape, different
 event types.
@@ -35,25 +43,45 @@ event types.
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Sequence
 from typing import TYPE_CHECKING
 
 from ..domain.events import PageCreated, PageDeleted, PageUpdated
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
+from ..domain.space_media_ref import (
+    MAX_PAGE_DESCRIPTOR_ENTRIES,
+    MEDIA_REFS_FIELD,
+    distinct_media_files,
+    page_media_urls,
+)
 from ..infrastructure.event_bus import EventBus
+from .inbound_media_store import media_basename
 from .moderation_release import with_release
+from .space_media_names import space_own_files
+from .space_media_refs import SpaceMediaRefsMixin
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
+    from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
+    from ..repositories.space_repo import AbstractSpaceRepo
+    from .space_media_gfs_uploader import SpaceMediaPlan
+    from .space_media_sync_service import SpaceMediaSyncService
 
 log = logging.getLogger(__name__)
 
 
-class PageFederationOutbound:
+class PageFederationOutbound(SpaceMediaRefsMixin):
     """Publish space-scoped page mutations to paired peer instances."""
 
-    __slots__ = ("_bus", "_federation")
+    __slots__ = (
+        "_bus",
+        "_federation",
+        "_media_gfs",
+        "_media_refs",
+        "_media_sync",
+        "_spaces",
+    )
 
     def __init__(
         self,
@@ -63,6 +91,24 @@ class PageFederationOutbound:
     ) -> None:
         self._bus = bus
         self._federation = federation_service
+        self._media_sync: SpaceMediaSyncService | None = None
+        self._spaces: AbstractSpaceRepo | None = None
+        self._media_refs: AbstractMediaReferenceRepo | None = None
+        self._media_gfs = None
+
+    def attach_media(
+        self,
+        *,
+        media_sync: SpaceMediaSyncService,
+        space_repo: AbstractSpaceRepo,
+        media_refs: AbstractMediaReferenceRepo,
+    ) -> None:
+        """Wire the space media outbox (v_82: a version's new files — only
+        the space's own: a row stored before v_82 may name a household
+        file)."""
+        self._media_sync = media_sync
+        self._spaces = space_repo
+        self._media_refs = media_refs
 
     def wire(self) -> None:
         self._bus.subscribe(PageCreated, self._on_created)
@@ -94,6 +140,9 @@ class PageFederationOutbound:
             FederationEventType.SPACE_PAGE_CREATED,
             _with_base if event.canonical is None else _payload,
             event.canonical,
+            page_id=event.page_id,
+            content=event.content,
+            shown_before=event.shown_before,
         )
 
     async def _on_updated(self, event: PageUpdated) -> None:
@@ -120,6 +169,9 @@ class PageFederationOutbound:
             FederationEventType.SPACE_PAGE_UPDATED,
             _with_base if event.canonical is None else _payload,
             event.canonical,
+            page_id=event.page_id,
+            content=event.content,
+            shown_before=event.shown_before,
         )
 
     async def _fan_out_versioned(
@@ -128,14 +180,41 @@ class PageFederationOutbound:
         event_type: FederationEventType,
         payload: Callable[[], dict],
         canonical: dict | None,
+        *,
+        page_id: str,
+        content: str,
+        shown_before: Sequence[str],
     ) -> None:
         """A host's canonical version (v_48) carries its ``seq``, hash and
         conflict list to v_48 members, and the plain fields to older ones
         (``legacy_payload``: their release check refuses unknown keys).
-        Anything else — a write under a pre-v_48 host — goes out as before."""
+        Anything else — a write under a pre-v_48 host — goes out as before.
+        A canonical version's new files follow it (v_82)."""
         if canonical is None:
             await self._fan_out(space_id, event_type, payload())
             return
+        # The version's files and its open sides' (each side is a version a
+        # member proposed): only the space's own ever ship.
+        shown = page_media_urls(canonical.get("cover_image_url"), content)
+        for side in canonical.get("conflict") or ():
+            if isinstance(side, dict):
+                shown.extend(page_media_urls(side.get("cover"), side.get("content")))
+        shown = await space_own_files(self._media_refs, space_id, shown)
+        # Paired / mesh members hold what an earlier version (or its
+        # history) showed: only the new files travel to them.
+        new_files = _new_files(shown, shown_before)
+        # A link-joined member is described the whole version each time
+        # (one descriptor, bounded by the page cap): a revert brings back
+        # a file the outbox never re-ships, and the GFS upload of a blob it
+        # already holds is a no-op.
+        described = distinct_media_files(shown, MAX_PAGE_DESCRIPTOR_ENTRIES)
+        plan = (
+            await self._plan_media_refs(
+                space_id, described, item_id=page_id, followers=False
+            )
+            if described
+            else None
+        )
         base = payload()
         await self._fan_out(
             space_id,
@@ -143,7 +222,66 @@ class PageFederationOutbound:
             {**base, **canonical},
             legacy_payload=payload(),
             legacy_below=FederationCapability.MIN_FOR_HOST_SEQUENCED_PAGES,
+            per_peer=self._page_refs_per_peer(plan),
         )
+        self._upload_media(plan)
+        await self._ship_files(space_id, page_id, new_files)
+
+    def _page_refs_per_peer(
+        self, plan: SpaceMediaPlan | None
+    ) -> Callable[[str, dict], Awaitable[dict]] | None:
+        """The descriptor for a link-joined member at v_82 only — an older
+        one would keep it under a reader name the page never shows."""
+        if plan is None or self._media_gfs is None:
+            return None
+        media_gfs = self._media_gfs
+        fed = self._federation
+        wire = plan.wire()
+
+        async def _per_peer(instance_id: str, payload: dict) -> dict:
+            if await media_gfs.is_relay_reader(
+                instance_id
+            ) and await fed.space_member_supports(
+                instance_id, min_version=FederationCapability.MIN_FOR_PAGE_MEDIA
+            ):
+                return {**payload, MEDIA_REFS_FIELD: wire}
+            return payload
+
+        return _per_peer
+
+    async def _ship_files(
+        self, space_id: str, page_id: str, media_urls: list[str]
+    ) -> None:
+        """Queue a version's new files for every other member household at
+        v_82 — paired or mesh-only (the outbox reaches both; a link-joined
+        member is left out by the outbox itself). One outbox row per (file,
+        household). Fail-soft: the version has gone out already."""
+        if not media_urls or self._media_sync is None or self._spaces is None:
+            return
+        own = str(self._federation.own_instance_id or "")
+        try:
+            targets = [
+                iid
+                for iid in await self._spaces.list_member_instances(space_id)
+                if iid
+                and iid != own
+                and await self._federation.space_member_supports(
+                    iid, min_version=FederationCapability.MIN_FOR_PAGE_MEDIA
+                )
+            ]
+            if targets:
+                await self._media_sync.enqueue_for_blob(
+                    space_id=space_id,
+                    correlation_id=page_id,
+                    target_instance_ids=targets,
+                    media_urls=media_urls,
+                )
+        except Exception:
+            log.exception(
+                "page-outbound: files of page %s in space %s not queued",
+                page_id,
+                space_id,
+            )
 
     async def _on_deleted(self, event: PageDeleted) -> None:
         if event.space_id is None:
@@ -169,7 +307,9 @@ class PageFederationOutbound:
         *,
         legacy_payload: dict | None = None,
         legacy_below: int | None = None,
+        per_peer: Callable[[str, dict], Awaitable[dict]] | None = None,
     ) -> None:
+        extra: dict = {"per_peer": per_peer} if per_peer is not None else {}
         try:
             if legacy_payload is None:
                 await self._federation.broadcast_to_space_members(
@@ -182,6 +322,7 @@ class PageFederationOutbound:
                     payload,
                     legacy_payload=legacy_payload,
                     legacy_below=legacy_below,
+                    **extra,
                 )
         except Exception as exc:  # pragma: no cover — defensive
             log.debug(
@@ -190,6 +331,12 @@ class PageFederationOutbound:
                 exc,
                 exc_info=True,
             )
+
+
+def _new_files(urls: list[str], shown_before: Sequence[str]) -> list[str]:
+    """*urls* minus the files *shown_before* names (however spelled)."""
+    had = {media_basename(u) for u in shown_before}
+    return [u for u in urls if media_basename(u) not in had]
 
 
 def _with_actor(payload: dict, actor_user_id: str, *, creates: bool = False) -> dict:

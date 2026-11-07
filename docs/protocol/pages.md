@@ -313,6 +313,120 @@ plain link, so opening a page never fetches from a host its author picked
 (`client/src/utils/markdown.ts`, `docs/principles.md` → "No third-party
 fetches from user content").
 
+## Files (v_82)
+
+A page's files are its cover and every `api/media/<file>` picture its body
+shows (`page_media_urls`; never the same path inside another URL). Every
+household keeps the host's version byte for byte, so a page keeps the names
+the **host** chose. Those names are the host's store; on a **member**
+household they never address the shared store.
+
+- **Page-scoped on members.** A member household keeps a page's file `N` as
+  `space_page_media_name(space, N)` = `sp-<sha256("space-page", space, N)>`
+  (a reserved prefix, like `sd-` / `sg-`). The page body stays byte for byte
+  (hash and sequence intact). Reads map each name to its `sp-` copy
+  (`SpacePageService.media_view`, used by every space page route, conflict
+  sides included); writes map them back (`_as_stored`), so what a member
+  edits and proposes always carries the host's names. One pattern
+  (`LOCAL_MEDIA_REF_RE`) decides what a body's media links are — for the
+  read-time signer, the write-time guard and these renames alike — so every
+  link the signer would sign in a page is one the page maps; a path inside
+  another URL or path (`./api/media/x`, `x/api/media/x`, `%2Fapi/media/x`)
+  is never signed, and a reserved name (`dm-` / `gm-` / `sg-` / `sp-`) is
+  stripped. The only name kept as is: a plain-named file **our own draft**
+  of the page adds (decided from local state only — `pending_base_seq` and
+  the draft's base are written by this household's own edit; the host's
+  creator / editor fields never count), while no page-scoped copy exists.
+  A page from before v_82 shows its files page-scoped like any other: no
+  local record says which of its files this household uploaded, and those
+  pictures never reached the other households either — re-adding them in
+  an edit ships them to everyone.
+  The media guard refuses any write naming an `sp-` file, and a page grants
+  a seat access to a shared file only on the space's host
+  (`MediaReferenceRepo`, review finding 6). So a host that names another
+  space's file `N` in a page only ever fills `sp-(S, N)` — never `N`.
+- **Naming, once, on the host.** A file a member adds takes that member
+  household's `sd-` name on the host (`SpaceMediaNamer`): a page proposal
+  (`_localized_proposal`) or a reviewed create / edit / resolution at
+  admission. A file the page already shows — its version, its history, its
+  open sides (`SpacePageService.held_media`) — keeps its name, so a revert
+  or a resolution never renames it. A reserved name (`dm-` / `gm-` / `sg-` /
+  `sp-`) is dropped. A renamed proposal's answer names it **as sent**
+  (`Proposal.answers`).
+- **Who ships.** The proposer ships its new files **to the host alone**
+  (`PageProposalForwarder._ship_files`, paired or mesh-only host, each file
+  queued once per draft). A member **seated from an invite link** reaches
+  the host only through the GFS relay, which refuses bytes: its proposal
+  carries its new files (≤ `MAX_PAGE_FILES`) as a `media_refs` descriptor
+  instead — each file sealed once for this page and household and uploaded
+  to its GFS media cache by the same uploader as every space picture
+  (`plan_for_reader`, authorized as a space writer: writer key or writer
+  cert, space or channel scope; only files that are the space's own) —
+  inside its envelope-signed proposal (the GFS relays the envelope
+  unchanged; the host's §24.11 pipeline verifies the proposer's signature).
+  The host takes only entries for the files the proposal
+  ADDS, and fetches each (`SpaceMediaGfsFetcher.localize_proposal`: scope-
+  bound address, AAD naming the page and the proposer) under the
+  proposer's own name `sd(space, proposer, F)` — the name the renamed page
+  shows. From there it ships on like any proposer's file. The host ships each version's new files — new
+  against the replaced version **and its whole history** (`shown_before`) —
+  plus its open sides' files, to every other v_82 member household
+  (`PageFederationOutbound._ship_files`, correlated by the page), and only
+  files that are the space's own (`space_own_files`). A member household
+  takes a page's file **from the host only** (a member's direct push is
+  refused, review finding 4) and keeps it page-scoped. A link-joined v_82
+  member gets one `media_refs` descriptor per version describing the
+  version and its sides (≤ `MAX_PAGE_DESCRIPTOR_ENTRIES` = 16 × 4), kept
+  page-scoped too.
+- **Catch-up.** The host's §25.6 stream ships every live page's files —
+  its version and open sides, and its newest history files (at most
+  `PAGE_HISTORY_FILES` = 32 per page and `STREAM_HISTORY_FILES` = 200 per
+  stream, the catch-up bound's spirit) — to a v_82 requester. The host's
+  "already shipped" for a new version is the replaced version only: a
+  household that joined later got just the history its catch-up had room
+  for, and no per-household record says which, so a file a version brings
+  back from history ships again (≤ 16 per version; receivers keep the
+  first copy, write-once); the `pages` records
+  carry the descriptor for a link-joined one (sync line 82); a resume replay
+  ships the replayed pages' files.
+- **Cap.** A page version shows at most `MAX_PAGE_FILES` = **16** files (its
+  cover and distinct body pictures), for everyone: enforced on local create /
+  edit / resolution (422), on a queued item, and on the host for a proposal
+  (refused). 16 keeps one descriptor per version and bounds every fan-out
+  (16 × the WebP picture cap per version); a wiki page needing more
+  pictures is better split.
+- **References.** A page's body, its history and open sides count as media
+  references: their `sp-` copies everywhere, their raw names only on the
+  space's host or for our own draft row (local state; a host can't keep a
+  shared file alive on a member). A page grants a seat access
+  to a shared file only on the host. An edit's media check covers only the
+  files it adds (the page, its history and sides are its own).
+- **No upload rights, no new pictures.** A household seated from an invite
+  link without an upload authorization (no writer key, cert or channel
+  grant) can't hand the host a page's new files: such an edit is refused
+  (422 `PAGE_FILES_NOT_SHAREABLE`, translated in the SPA) instead of
+  landing with pictures broken for everyone; words alone still save.
+
+Cost per version: new files (≤ 16, plus its sides') × other v_82 member
+households, each file once; one GFS upload per file per GFS with
+link-joined readers (an already-held blob is a no-op). An edit that adds no
+file ships nothing; bringing a file back from history ships it again. Worst
+realistic case: a 200-member space and an edit adding 2 pictures is 2 × 199
+outbox rows plus 2 GFS uploads. **Catch-up / upgrade burst** (v_82, sync
+line 82): each member household crossing v_82 takes one full §25.6 stream,
+and the host queues, per page, its ≤ 16 version files and ≤ 3 × 16 side
+files, plus at most 32 history files per page and 200 per stream — e.g. a
+space with 40 pages: ≤ 40 × 64 + 200 pictures per household, once (each ≤
+the WebP picture cap; the outbox retries with backoff).
+
+Known limits (follow-ups):
+
+- A member that keeps editing while a proposal that added a file is in
+  flight bases its next draft on what it sent; the host never held that
+  exact version (it renamed the file), so that next draft may land as a
+  conflict side. A lost answer can't be settled by content either; the next
+  resend settles it.
+
 ## Mixed fleets
 
 - **Host below v_48**: last write wins everywhere, exactly as before.
@@ -326,6 +440,10 @@ fetches from user content").
   taken by the host as a proposal based on the current version (last
   write wins at the host) and then sequenced. v_48 members ignore the old
   member's direct copy and receive the host's version instead.
+- **Page files below v_82**: a member household below v_82 is sent no
+  page file (its people see the page without the pictures it doesn't
+  hold); a host below v_82 is shipped no proposal file and renames
+  nothing, as before.
 
 ## Edge cases
 

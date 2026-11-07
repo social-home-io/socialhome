@@ -2158,3 +2158,179 @@ async def test_no_catchup_byte_push_to_a_link_joined_requester(encoder):
         svc._federation = fed
         await svc.stream_initial(_FakeSession(requester=requester))
         assert media_sync.enqueue_for_blob.await_count == (1 if pushed else 0)
+
+
+# ── v_82 — a space page's files in the catch-up ─────────────────────────
+
+
+@dataclass
+class _Page:
+    id: str
+    content: str = ""
+    cover_image_url: str | None = None
+
+
+class _PageRepo:
+    def __init__(self, pages):
+        self.pages = pages
+        self.history: dict[str, list] = {}
+        self.sides: dict[str, list] = {}
+
+    async def list(self, *, space_id=None, since_seq=None):
+        return list(self.pages) if space_id == "sp-1" else []
+
+    async def list_versions(self, page_id, *, space_id):
+        return list(self.history.get(page_id, ()))
+
+    async def list_conflict_sides(self, page_id, *, space_id):
+        return list(self.sides.get(page_id, ()))
+
+
+class _VersionFed:
+    def __init__(self, versions):
+        self.versions = versions
+
+    async def is_space_session_peer(self, iid):
+        return False
+
+    async def space_member_supports(self, iid, *, min_version):
+        return self.versions.get(iid, 0) >= min_version
+
+    async def space_member_version(self, iid):
+        return self.versions.get(iid, 0)
+
+    async def peer_supports(self, iid, *, min_version):
+        return self.versions.get(iid, 0) >= min_version
+
+
+class _PageRefs:
+    elsewhere: frozenset[str] = frozenset()
+
+    async def confined_to_space(self, name, space_id):
+        return name not in self.elsewhere
+
+
+_PAGES = [
+    _Page("pg-1", "![a](api/media/a.webp) ![b](/api/media/b.webp)", "api/media/c.webp"),
+    _Page("pg-2", "no pictures"),
+]
+
+
+def _page_provider(encoder, *, hosting=True, versions=None, exporters=None):
+    media_sync = AsyncMock()
+    media_sync.enqueue_for_blob = AsyncMock()
+    svc = SpaceSyncService(
+        builder=ChunkBuilder(encoder=encoder, crypto=_FakeCrypto()),
+        exporters=exporters or {},
+        sig_suite="ed25519",
+        media_sync=media_sync,
+    )
+    svc._federation = _VersionFed(versions or {"peer-new": 82, "peer-old": 80})
+
+    async def _hosts(space_id):
+        return hosting
+
+    svc.attach_pages(_PageRepo(_PAGES), hosts=_hosts, media_refs=_PageRefs())
+    return svc, media_sync
+
+
+async def test_the_hosts_catchup_ships_every_pages_files(encoder):
+    """A newcomer catching up from the host gets each page's cover and body
+    pictures — the page records carry only their references."""
+    svc, media_sync = _page_provider(encoder)
+    await svc.stream_initial(_FakeSession(requester="peer-new"))
+    calls = [c.kwargs for c in media_sync.enqueue_for_blob.call_args_list]
+    assert [(c["correlation_id"], c["media_urls"]) for c in calls] == [
+        ("pg-1", ["api/media/c.webp", "api/media/a.webp", "/api/media/b.webp"])
+    ]
+    assert calls[0]["target_instance_ids"] == ["peer-new"]
+
+
+@pytest.mark.parametrize(
+    ("hosting", "requester"), [(False, "peer-new"), (True, "peer-old")]
+)
+async def test_page_files_come_only_from_the_host_to_v81(encoder, hosting, requester):
+    """Only the host fills a page's names on the receiver; a household below
+    v_82 would keep them under names its page never shows."""
+    svc, media_sync = _page_provider(encoder, hosting=hosting)
+    await svc.stream_initial(_FakeSession(requester=requester))
+    assert media_sync.enqueue_for_blob.call_args_list == []
+
+
+async def test_a_link_joined_v81_requesters_page_records_carry_media_refs(encoder):
+    uploader = _ReaderUploader(readers=("peer-e", "peer-e80"))
+    exporters = {
+        "pages": _FakeExporter(
+            "pages",
+            [
+                {
+                    "id": "pg-1",
+                    "title": "T",
+                    "content": "![a](api/media/a.webp)",
+                    "cover_image_url": "api/media/c.webp",
+                }
+            ],
+        )
+    }
+    svc, _media = _page_provider(
+        encoder, versions={"peer-e": 82, "peer-e80": 80}, exporters=exporters
+    )
+    svc.attach_media_gfs(uploader)
+    session = _FakeSession(requester="peer-e")
+    await svc.stream_initial(session)
+    (page,) = _streamed_records(session, "pages")
+    assert set(page["media_refs"]) == {"c.webp", "a.webp"}
+    assert uploader.items == ["pg-1"]
+    old = _FakeSession(requester="peer-e80")
+    await svc.stream_initial(old)
+    assert all("media_refs" not in r for r in _streamed_records(old, "pages"))
+
+
+async def test_a_page_file_named_outside_the_space_is_not_in_the_catchup(
+    encoder, monkeypatch
+):
+    monkeypatch.setattr(_PageRefs, "elsewhere", frozenset({"c.webp"}))
+    svc, media_sync = _page_provider(encoder)
+    await svc.stream_initial(_FakeSession(requester="peer-new"))
+    calls = [c.kwargs for c in media_sync.enqueue_for_blob.call_args_list]
+    assert [c["media_urls"] for c in calls] == [
+        ["api/media/a.webp", "/api/media/b.webp"]
+    ]
+
+
+async def test_the_catchup_ships_a_pages_history_and_side_files(encoder):
+    """Review finding 7: a newcomer gets a page's history versions' files
+    (a revert brings one back) and its open sides' files too."""
+    svc, media_sync = _page_provider(encoder)
+    repo = svc._page_repo
+    repo.history["pg-2"] = [_Page("v1", "![o](api/media/old.webp)")]
+    repo.sides["pg-2"] = [_Page("s1", "![s](api/media/side.webp)")]
+    await svc.stream_initial(_FakeSession(requester="peer-new"))
+    calls = {
+        c.kwargs["correlation_id"]: c.kwargs["media_urls"]
+        for c in media_sync.enqueue_for_blob.call_args_list
+    }
+    assert calls["pg-2"] == ["api/media/side.webp", "api/media/old.webp"]
+
+
+async def test_a_pages_history_in_the_catchup_is_bounded(encoder, monkeypatch):
+    """Review finding 4: a page's history ships its newest files only — at
+    most PAGE_HISTORY_FILES per page and STREAM_HISTORY_FILES per stream; an
+    older one comes back with the version that shows it again."""
+    monkeypatch.setattr(provider_mod, "PAGE_HISTORY_FILES", 3)
+    monkeypatch.setattr(provider_mod, "STREAM_HISTORY_FILES", 4)
+    svc, media_sync = _page_provider(encoder)
+    repo = svc._page_repo
+    repo.pages = [_Page("pg-1"), _Page("pg-2")]
+    for pid in ("pg-1", "pg-2"):
+        # list_versions is oldest first; the newest history wins.
+        repo.history[pid] = [
+            _Page(f"v{i}", f"![h](api/media/{pid}-h{i}.webp)") for i in range(10)
+        ]
+    await svc.stream_initial(_FakeSession(requester="peer-new"))
+    calls = {
+        c.kwargs["correlation_id"]: c.kwargs["media_urls"]
+        for c in media_sync.enqueue_for_blob.call_args_list
+    }
+    assert calls["pg-1"] == [f"api/media/pg-1-h{i}.webp" for i in (9, 8, 7)]
+    assert calls["pg-2"] == ["api/media/pg-2-h9.webp"]  # the stream budget

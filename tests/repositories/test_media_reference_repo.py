@@ -2,6 +2,7 @@
 
 import pytest
 
+from socialhome.domain.space_media_ref import space_page_media_name
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 
 pytestmark = pytest.mark.asyncio
@@ -92,6 +93,7 @@ async def test_collects_the_remaining_media_sources(db):
     """Comments, bazaar listings, calendar / page covers, task attachments
     and drafts reference media too — none of them may be swept."""
     await _seed_parents(db)
+    await _host_here(db)  # a space page's own names count on its host
     stmts = [
         (
             "INSERT INTO post_comments(id, post_id, author, media_url) "
@@ -154,7 +156,9 @@ async def test_collects_the_remaining_media_sources(db):
         "attach.pdf",
         "draft.webp",
     }
-    assert await repo.referenced_basenames() == expected
+    referenced = await repo.referenced_basenames()
+    # v_82: a space page's files also count under their page-scoped names.
+    assert {n for n in referenced if not n.startswith("sp-")} == expected
     for name in expected:
         assert await repo.is_referenced(name), name
 
@@ -693,3 +697,172 @@ async def test_a_file_only_other_spaces_cards_name_is_not_this_spaces(db):
     )
     repo = SqliteMediaReferenceRepo(db)
     assert not await repo.confined_to_space("card.webp", "sp1")
+
+
+# ─── A page's body pictures (v_82) ──────────────────────────────────────
+
+_BODY = (
+    "![a](api/media/body.webp) ![b](/api/media/body2.webp?exp=1&sig=x) "
+    "[link](https://elsewhere.example/api/media/notours.webp)"
+)
+
+
+async def _page_rows(db) -> None:
+    await _seed_parents(db)
+    await db.enqueue(
+        "INSERT INTO space_pages(id, space_id, title, content, created_by)"
+        " VALUES('pg', 'sp1', 'P', ?, 'u1')",
+        (_BODY,),
+    )
+    await db.enqueue(
+        "INSERT INTO pages(id, title, content, created_by)"
+        " VALUES('hp', 'H', '![h](api/media/house.webp)', 'u1')"
+    )
+    await db.enqueue(
+        "INSERT INTO page_edit_history(id, page_id, space_id, title, content,"
+        " edited_by, version) VALUES('h1', 'pg', 'sp1', 'P',"
+        " '![o](api/media/older.webp)', 'u1', 1)"
+    )
+    await db.enqueue(
+        "INSERT INTO space_page_snapshots(page_id, space_id, snapshot_at, body,"
+        " snapshot_by, side, conflict) VALUES('pg', 'sp1', '2026-01-01', ?,"
+        " 'u1', 'theirs', 1)",
+        ('{"content": "![s](api/media/side.webp)"}',),
+    )
+
+
+async def test_a_pages_body_pictures_are_never_swept(db):
+    """Regression: only a page's cover counted as a reference, so the sweep
+    deleted every picture a page body showed a day after it was posted —
+    a space page, a household page, a version in its history, an open
+    conflict side (on the space's host, where they are its own files). A
+    path inside another URL is not a file here."""
+    await _page_rows(db)
+    await _host_here(db)
+    repo = SqliteMediaReferenceRepo(db)
+    names = await repo.referenced_basenames()
+    for name in ("body.webp", "body2.webp", "house.webp", "older.webp", "side.webp"):
+        assert name in names, name
+        assert await repo.is_referenced(name), name
+    assert "notours.webp" not in names
+    assert not await repo.is_referenced("notours.webp")
+
+
+async def _host_here(db, space_id: str = "sp1") -> None:
+    """This household hosts *space_id* (its ``instance_identity``)."""
+    await db.enqueue(
+        "INSERT INTO instance_identity(instance_id, identity_private_key,"
+        " identity_public_key, routing_secret) VALUES('self', 'k', 'p', ?)",
+        ("aa" * 32,),
+    )
+    await db.enqueue(
+        "UPDATE spaces SET owner_instance_id='self' WHERE id=?", (space_id,)
+    )
+
+
+async def test_a_page_grants_a_shared_file_only_on_the_spaces_host(db):
+    """Review finding 6 (v_82): a space page's names are its host's choice.
+    On a member household they never grant a seat a shared file — the
+    page's files live under page-scoped ``sp-`` names there."""
+    await _page_rows(db)
+    await db.enqueue(
+        "INSERT INTO instance_identity(instance_id, identity_private_key,"
+        " identity_public_key, routing_secret) VALUES('me', 'k', 'p', ?)",
+        ("aa" * 32,),
+    )
+    await db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role)"
+        " VALUES('sp1', 'u-seat', 'member')"
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert not await repo.may_reference("body.webp", "u-seat")
+    assert not await repo.may_reference("older.webp", "u-seat")
+
+
+async def test_a_member_keeps_a_pages_files_under_page_scoped_names(db):
+    """The sweep keeps every page-scoped file a page, a version in its
+    history or an open side shows — and nothing else under ``sp-``."""
+    await _page_rows(db)
+    repo = SqliteMediaReferenceRepo(db)
+    names = await repo.referenced_basenames()
+    for name in ("body.webp", "body2.webp", "older.webp", "side.webp"):
+        sp = space_page_media_name("sp1", name)
+        assert sp in names, name
+        assert await repo.is_referenced(sp), name
+    assert space_page_media_name("sp1", "house.webp") not in names
+    assert not await repo.is_referenced(space_page_media_name("sp2", "body.webp"))
+
+
+async def test_a_space_pages_picture_is_its_seats_and_confined_to_it(db):
+    await _page_rows(db)
+    await _host_here(db)
+    await db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role)"
+        " VALUES('sp1', 'u-seat', 'member')"
+    )
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username, "
+        "identity_public_key) VALUES('sp2', 'T', 'self', 'u1', 'k')",
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.may_reference("body.webp", "u-seat")
+    assert not await repo.may_reference("body.webp", "u-stranger")
+    assert await repo.may_reference("house.webp", "u1")
+    assert not await repo.may_reference("house.webp", "u-seat")
+    assert await repo.confined_to_space("body2.webp", "sp1")
+    assert await repo.confined_to_space("older.webp", "sp1")
+    assert not await repo.confined_to_space("body.webp", "sp2")
+    assert not await repo.confined_to_space("house.webp", "sp1")
+    # A file another space's row names too is no longer this space's.
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, media_url)"
+        " VALUES('p2', 'sp2', 'u1', 'image', 'api/media/body.webp')"
+    )
+    assert not await repo.confined_to_space("body.webp", "sp1")
+
+
+async def test_a_host_written_page_keeps_no_shared_file_alive_on_a_member(db):
+    """Review finding 6: on a member household a page the host wrote names
+    files of the host's choosing — they keep only their page-scoped copies
+    alive, never a shared file of that name (a DM's, another space's). A
+    page of a space we host, or one our own people wrote, still counts."""
+    await _seed_parents(db)
+    await db.enqueue(
+        "INSERT INTO instance_identity(instance_id, identity_private_key,"
+        " identity_public_key, routing_secret) VALUES('me', 'k', 'p', ?)",
+        ("aa" * 32,),
+    )
+    await db.enqueue(
+        "INSERT INTO space_pages(id, space_id, title, content, cover_image_url,"
+        " created_by, last_editor_user_id) VALUES('pg-h', 'sp1', 'P',"
+        " '![d](api/media/dm-x.webp)', 'api/media/hostcover.webp', 'u-host',"
+        " 'u-host')"
+    )
+    await db.enqueue(
+        "INSERT INTO page_edit_history(id, page_id, space_id, title, content,"
+        " edited_by, version) VALUES('h1', 'pg-h', 'sp1', 'P',"
+        " '![o](api/media/oldhost.webp)', 'u-host', 1)"
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    names = await repo.referenced_basenames()
+    for raw in ("dm-x.webp", "hostcover.webp", "oldhost.webp"):
+        assert raw not in names, raw
+        assert not await repo.is_referenced(raw), raw
+        assert space_page_media_name("sp1", raw) in names, raw
+    # A row naming one of our users as its writer is still the host's copy.
+    await db.enqueue(
+        "INSERT INTO space_pages(id, space_id, title, content, created_by,"
+        " last_editor_user_id) VALUES('pg-f', 'sp1', 'P',"
+        " '![f](api/media/forged.webp)', 'u1', 'u1')"
+    )
+    assert not await repo.is_referenced("forged.webp")
+    # Our own draft (local state only) counts its own files.
+    await db.enqueue(
+        "INSERT INTO space_pages(id, space_id, title, content, created_by,"
+        " pending_base_seq) VALUES('pg-o', 'sp1', 'P',"
+        " '![m](api/media/mine.webp)', 'u1', 0)"
+    )
+    assert await repo.is_referenced("mine.webp")
+    # A space we host: its pages' names are our files.
+    await db.enqueue("UPDATE spaces SET owner_instance_id='me' WHERE id='sp1'")
+    assert await repo.is_referenced("hostcover.webp")

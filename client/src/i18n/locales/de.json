@@ -3523,6 +3523,7 @@
   "error.group_too_small": "Eine Gruppe braucht mindestens {min} Personen, dich eingeschlossen. Füg weitere Personen hinzu.",
   "error.dm_too_long": "Diese Nachricht ist zu lang. Halte dich an höchstens {max} Zeichen.",
   "error.invalid_media_url": "Diese Datei kann nicht gesendet werden. Häng sie noch einmal an und sende erneut.",
+  "error.page_files_not_shareable": "Dein Zuhause kann in diesem Space noch keine Bilder teilen, deshalb lassen sie sich dieser Seite nicht hinzufügen. Speichere sie ohne die neuen Bilder oder frag einen Admin des Space.",
   "error.dm_blocked": "Diese Person hat dich blockiert, du kannst ihr keine Nachricht schicken.",
   "error.dm_you_blocked": "Du hast diese Person blockiert. Heb die Blockierung in den Einstellungen auf, um weiterzuschreiben.",
   "error.dm_not_allowed": "Du kannst dieser Person keine Nachricht schicken.",

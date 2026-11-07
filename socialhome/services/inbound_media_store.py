@@ -70,6 +70,7 @@ from ..domain.media_constraints import (
     FILE_MAX_UPLOAD_BYTES,
     IMAGE_MAX_UPLOAD_BYTES,
     SPACE_DIRECT_MEDIA_PREFIX,
+    SPACE_PAGE_MEDIA_PREFIX,
     VIDEO_MAX_UPLOAD_BYTES,
 )
 
@@ -97,6 +98,7 @@ RESERVED_MEDIA_PREFIXES: tuple[str, ...] = (
     DM_MEDIA_PREFIX,
     "gm-",
     GFS_SPACE_MEDIA_PREFIX,
+    SPACE_PAGE_MEDIA_PREFIX,
 )
 
 #: DM transients (``<msg>.preview.webp`` and the legacy ``.part<N>`` /
@@ -195,6 +197,12 @@ def is_space_direct_media_name(name: str) -> bool:
     """``True`` for a :func:`space_direct_media_name` prefix — a file this
     household received over federation, bound to its sender."""
     return name.startswith(SPACE_DIRECT_MEDIA_PREFIX)
+
+
+def is_space_page_media_name(name: str) -> bool:
+    """``True`` for a ``space_page_media_name`` — a space page's file as a
+    member household keeps it (v_82)."""
+    return name.startswith(SPACE_PAGE_MEDIA_PREFIX)
 
 
 def is_gfs_space_media_name(name: str) -> bool:

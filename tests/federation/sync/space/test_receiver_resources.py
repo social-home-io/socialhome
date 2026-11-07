@@ -2141,6 +2141,7 @@ class _GfsMediaSink:
     def __init__(self):
         self.received: list[tuple] = []
         self.kept: list[dict] = []
+        self.as_shown: list[tuple] = []
 
     async def localize(self, space_id, raw_refs, media_urls, *, item_id, origin):
         urls = [u for u in media_urls if u]
@@ -2153,6 +2154,10 @@ class _GfsMediaSink:
             if u.rsplit("/", 1)[-1] in described
         }
         return SpaceMediaLocalization(names=names, refs=(object(),) if names else ())
+
+    def localize_as_shown(self, space_id, raw_refs, media_urls, *, item_id, origin):
+        self.as_shown.append((space_id, raw_refs, list(media_urls), item_id, origin))
+        return SpaceMediaLocalization(refs=(object(),))
 
     async def keep(self, loc, *, prefetch=True):
         if loc.refs:
@@ -2172,6 +2177,88 @@ class _SavingPostRepo(_PostRepoStub):
 
 
 _SYNC_REFS = {"a.webp": {"blob_id": "a" * 64, "suite": "s", "epoch": 0, "size": 9}}
+
+
+async def test_the_hosts_page_record_keeps_its_files_under_the_pages_names(setup):
+    """v_82 (sync line 82): a page record from the host is its version
+    byte for byte — the descriptor is kept under the names the page shows."""
+    r, _c, kp = setup
+    conflicts = _FakeConflicts()
+    r._page_conflicts = conflicts
+    sink = _GfsMediaSink()
+    r.attach_gfs_media(sink)
+    body = "![a](api/media/a.webp)"
+    await _send(
+        r,
+        kp,
+        "pages",
+        [
+            {
+                **_PAGE_RECORD,
+                "content": body,
+                "cover_image_url": "api/media/c.webp",
+                "seq": 7,
+                "conflict": [],
+                "media_refs": _SYNC_REFS,
+            }
+        ],
+    )
+    assert sink.as_shown == [
+        ("sp-1", _SYNC_REFS, ["api/media/c.webp", "api/media/a.webp"], "pg-1", "peer-a")
+    ]
+    assert sink.kept == [{}]
+    assert conflicts.mirrored[0]["version"].content == body
+
+
+async def test_the_hosts_page_record_keeps_its_sides_files_too(setup):
+    """Review finding 2 (sync): a record's open sides' files are kept too."""
+    r, _c, kp = setup
+    r._page_conflicts = _FakeConflicts()
+    sink = _GfsMediaSink()
+    r.attach_gfs_media(sink)
+    await _send(
+        r,
+        kp,
+        "pages",
+        [
+            {
+                **_PAGE_RECORD,
+                "content": "no pictures",
+                "seq": 7,
+                "conflict": [
+                    {
+                        "title": "T",
+                        "content": "![s](api/media/s.webp)",
+                        "cover": "api/media/sc.webp",
+                        "by": "u-x",
+                        "at": "2026-01-01T00:00:00+00:00",
+                    }
+                ],
+                "media_refs": _SYNC_REFS,
+            }
+        ],
+    )
+    assert sink.as_shown[0][2] == ["api/media/sc.webp", "api/media/s.webp"]
+
+
+async def test_another_households_page_record_keeps_no_descriptor(setup):
+    r, _c, kp = setup
+    r._page_conflicts = _FakeConflicts(host="someone-else")
+    sink = _GfsMediaSink()
+    r.attach_gfs_media(sink)
+    await _send(
+        r,
+        kp,
+        "pages",
+        [
+            {
+                **_PAGE_RECORD,
+                "content": "![a](api/media/a.webp)",
+                "media_refs": _SYNC_REFS,
+            }
+        ],
+    )
+    assert sink.as_shown == [] and sink.kept == []
 
 
 async def test_streamed_post_media_refs_are_kept(setup):
