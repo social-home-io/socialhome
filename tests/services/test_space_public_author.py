@@ -781,3 +781,38 @@ def test_an_unknown_media_refs_suite_is_refused():
     inner = dict(_signed_with_refs(kp), media_refs_sig_suite="mldsa-x")
     with pytest.raises(UnsupportedMediaRefsSigSuite):
         signed_media_refs(inner)
+
+
+def test_an_older_descriptor_cannot_ride_a_newer_edit():
+    """#1309 round 4: the descriptor's signature binds the edit time and the
+    item type, so a re-publisher can't attach an older (still validly
+    signed) descriptor to a newer edit of the same post."""
+    kp = generate_identity_keypair()
+
+    def _edit(at: str, refs):
+        return build_signed_author_inner(
+            post=_post(),
+            space_id="sp",
+            author_username="bob",
+            author_pk=kp.public_key,
+            author_identity_seed=kp.private_key,
+            origin_instance_id="origin.home",
+            item_type="post_edit",
+            edited_at=at,
+            media_refs=refs,
+        )
+
+    old = _edit("2026-10-03T12:00:00+00:00", _REFS)
+    newer_refs = {"a.webp": dict(_REFS["a.webp"], epoch=2)}
+    new = _edit("2026-10-04T12:00:00+00:00", newer_refs)
+    assert signed_media_refs(old) == _REFS
+    assert signed_media_refs(new) == newer_refs
+    # The old descriptor and its signature moved onto the newer edit.
+    ridden = dict(
+        new,
+        media_refs=old["media_refs"],
+        media_refs_sig=old["media_refs_sig"],
+    )
+    assert signed_media_refs(ridden) is None
+    # Nor onto the same post under another item type.
+    assert signed_media_refs(dict(old, item_type="post")) is None

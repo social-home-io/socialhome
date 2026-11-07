@@ -2244,6 +2244,8 @@ class _GfsMediaSink:
         self.received: list[tuple] = []
         self.items: list[tuple] = []
         self.kept: list[dict] = []
+        self.kept_items: set[tuple[str, str]] = set()
+        self._pending: dict[int, tuple[str, str]] = {}
 
     async def localize(self, space_id, raw_refs, media_urls, *, item_id, origin):
         urls = [u for u in media_urls if u]
@@ -2256,12 +2258,18 @@ class _GfsMediaSink:
             for u in urls
             if u.rsplit("/", 1)[-1] in described
         }
-        return SpaceMediaLocalization(names=names, refs=(object(),) if names else ())
+        loc = SpaceMediaLocalization(names=names, refs=(object(),) if names else ())
+        self._pending[id(loc)] = (space_id, item_id)
+        return loc
 
     async def keep(self, loc, *, prefetch=True):
         if loc.refs:
             self.kept.append(dict(loc.names))
+            self.kept_items.add(self._pending[id(loc)])
         return []
+
+    async def has_item_refs(self, space_id, item_id):
+        return (space_id, item_id) in self.kept_items
 
 
 async def test_a_followers_relayed_post_keeps_its_media_refs(env):
@@ -2357,5 +2365,109 @@ async def test_an_edit_before_its_create_keeps_the_signed_media_refs(item_env):
     )
     _sid, post = await item_env["post_repo"].get("post-1")
     assert post.content == "edited"
+    assert post.image_urls == ("api/media/sg-p.webp",)
+    assert sink.kept == [{"p.webp": "sg-p.webp"}]
+
+
+# ── #1309 round 4: a stripped copy that won the race heals, add-only ────
+
+
+async def _decrypted_inner(env, envelope: dict) -> dict:
+    pt = await env["crypto"].decrypt(
+        envelope["space_id"], envelope["epoch"], envelope["encrypted_payload"]
+    )
+    return json.loads(pt)
+
+
+async def test_a_stripped_copy_first_then_the_real_one_brings_the_pictures(env):
+    """A member re-published A's inner WITHOUT its media_refs (A's author
+    signature still verifies) and won the race: followers stored the post
+    without pictures and dropped A's real copy as a duplicate. The real
+    copy now heals the stored post — add-only."""
+    sink = _GfsMediaSink()
+    env["inbound"].attach_gfs_media(sink)
+    picture = {"type": "image", "image_urls": ["api/media/p.webp"]}
+    stripped = await _make_envelope(env, signed_extra=picture)
+    real = await _make_envelope(env, signed_extra=picture, media_refs=_REFS_A)
+    await env["inbound"].handle(_frame(stripped), gfs_id="g1")
+    _sid, post = await env["post_repo"].get("post-1")
+    assert post.image_urls == ("api/media/p.webp",)
+    await env["inbound"].handle(_frame(real), gfs_id="g2")
+    _sid, post = await env["post_repo"].get("post-1")
+    assert post.image_urls == ("api/media/sg-p.webp",)
+    assert sink.kept == [{"p.webp": "sg-p.webp"}]
+
+
+async def test_a_stripped_copy_after_the_real_one_changes_nothing(env):
+    sink = _GfsMediaSink()
+    env["inbound"].attach_gfs_media(sink)
+    picture = {"type": "image", "image_urls": ["api/media/p.webp"]}
+    real = await _make_envelope(env, signed_extra=picture, media_refs=_REFS_A)
+    stripped = await _make_envelope(env, signed_extra=picture)
+    await env["inbound"].handle(_frame(real), gfs_id="g1")
+    await env["inbound"].handle(_frame(stripped), gfs_id="g2")
+    # And a second signed copy never replaces what the post has.
+    await env["inbound"].handle(_frame(real), gfs_id="g2")
+    _sid, post = await env["post_repo"].get("post-1")
+    assert post.image_urls == ("api/media/sg-p.webp",)
+    assert sink.kept == [{"p.webp": "sg-p.webp"}]
+
+
+async def test_a_duplicate_from_another_author_never_heals(env):
+    """The heal applies only to a duplicate of the SAME author's post in the
+    same space."""
+    sink = _GfsMediaSink()
+    env["inbound"].attach_gfs_media(sink)
+    picture = {"type": "image", "image_urls": ["api/media/p.webp"]}
+    await env["inbound"].handle(
+        _frame(await _make_envelope(env, signed_extra=picture)), gfs_id="g1"
+    )
+    real = await _make_envelope(env, signed_extra=picture, media_refs=_REFS_A)
+    inner = await _decrypted_inner(env, real)
+    await env["inbound"]._persist(
+        "sp-1", "post-1", "someone-else", env["author_origin"], inner
+    )
+    _sid, post = await env["post_repo"].get("post-1")
+    assert post.image_urls == ("api/media/p.webp",)
+    assert sink.kept == []
+
+
+async def test_a_real_edit_heals_a_post_a_stripped_copy_created(item_env):
+    """The edit-first path: the stored post came from a copy without its
+    descriptor; the author's signed edit heals it, add-only."""
+    sink = _GfsMediaSink()
+    item_env["inbound"].attach_gfs_media(sink)
+    seed = item_env["author_kp"].private_key
+
+    def _edit(at: str, *, with_refs: bool) -> dict:
+        inner = _signed_inner(item_env, item_type="post_edit")
+        inner = {k: v for k, v in inner.items() if k != "author_sig"}
+        inner.update(
+            content="edited " + at,
+            edited_at=at,
+            type="image",
+            image_urls=["api/media/p.webp"],
+        )
+        inner["author_sig"] = b64url_encode(
+            sign_ed25519(seed, author_signing_bytes(inner))
+        )
+        if with_refs:
+            inner.update(media_refs=_REFS_A, media_refs_sig_suite="ed25519")
+            inner["media_refs_sig"] = b64url_encode(
+                sign_ed25519(seed, media_refs_signing_bytes(inner))
+            )
+        return inner
+
+    first = _edit(_now_iso(-10), with_refs=False)
+    await item_env["inbound"].handle(
+        await _item_frame(item_env, inner=first, item_type="post_edit")
+    )
+    _sid, post = await item_env["post_repo"].get("post-1")
+    assert post.image_urls == ("api/media/p.webp",)
+    second = _edit(_now_iso(-5), with_refs=True)
+    await item_env["inbound"].handle(
+        await _item_frame(item_env, inner=second, item_type="post_edit")
+    )
+    _sid, post = await item_env["post_repo"].get("post-1")
     assert post.image_urls == ("api/media/sg-p.webp",)
     assert sink.kept == [{"p.webp": "sg-p.webp"}]

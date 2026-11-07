@@ -156,7 +156,9 @@ class UnsupportedMediaRefsSigSuite(ValueError):
 
 def media_refs_signing_bytes(inner: dict) -> bytes:
     """Canonical bytes of the ``media_refs`` author signature: the
-    descriptor plus the fields that pin it to this one post and author.
+    descriptor plus the fields that pin it to this one post, author and
+    version — ``item_type`` and ``edited_at`` too, so an older (still
+    validly signed) descriptor can't ride a newer edit of the post.
 
     A SEPARATE signature, like the link preview's, not a field of the main
     author bytes: a follower household on an older build recomputes those
@@ -168,6 +170,8 @@ def media_refs_signing_bytes(inner: dict) -> bytes:
         "space_id": inner.get("space_id"),
         "author_user_id": inner.get("author_user_id"),
         "author_pk": inner.get("author_pk"),
+        "item_type": inner.get("item_type"),
+        "edited_at": inner.get("edited_at"),
         "media_refs": inner.get("media_refs"),
         "media_refs_sig_suite": inner.get("media_refs_sig_suite"),
     }

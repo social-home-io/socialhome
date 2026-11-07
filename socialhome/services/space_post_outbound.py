@@ -173,9 +173,10 @@ class SpacePostOutbound(SpaceMediaRefsMixin):
     ) -> None:
         """Build the GFS inner of our own post and hand it to the member
         publisher's background queue (v_49 trusted mode). ``media_refs``
-        (v_80) rides the inner with its digest signed by the author, so
-        followers find the pictures in their GFS's media cache and nobody
-        re-publishing the inner can swap them. Never raises."""
+        (v_80) rides the inner under the author's separate signature over
+        the descriptor (``media_refs_sig`` — not part of the main author
+        bytes), so followers find the pictures in their GFS's media cache and
+        nobody re-publishing the inner can swap them. Never raises."""
         assert self._member_gfs is not None
         try:
             author = await self._users.get_by_user_id(post.author)
@@ -431,7 +432,8 @@ class SpacePostOutbound(SpaceMediaRefsMixin):
         # v_80 — households reading the space through a GFS get the pictures
         # as a ``media_refs`` descriptor: a link-joined member inside its own
         # copy of the payload (``per_peer``), followers inside the relayed
-        # inner — planned first, because the author signs its digest there.
+        # inner — planned first, because the author signs the descriptor
+        # there (a separate ``media_refs_sig``, not in the main author bytes).
         media_urls = post_media_urls(post)
         media_plan = await self._plan_media_refs(
             event.space_id,

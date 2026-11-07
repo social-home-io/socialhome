@@ -641,9 +641,13 @@ media_refs_sig_suite : "ed25519"    # unknown value → descriptor rejected
 
 b"space-post-media-refs:v1:" + canonical_json({
   post_id, space_id, author_user_id, author_pk,
+  item_type, edited_at,          # null when absent
   media_refs, media_refs_sig_suite
 })
 ```
+
+`item_type` and `edited_at` bind the descriptor to one version of the post,
+so an older (still validly signed) descriptor can't ride a newer edit.
 
 A follower takes the descriptor only when this verifies against the
 already-verified `author_pk`. Anyone holding the space content key — a
@@ -651,6 +655,12 @@ member with the writer group key — can re-wrap the author's inner and seal
 blobs with any AAD, so neither the outer authority signature nor the seal's
 AAD tells the follower the descriptor is the author's. An unsigned or
 swapped descriptor is dropped, and the post stands without those pictures.
+A member can also re-publish the author's inner with no descriptor at all
+(the main signature still verifies) and win the race. The follower then
+stores the post without pictures, but a later copy or edit of the same
+author's post that carries a signed descriptor heals it, add-only: only
+while the post has no `space_media_refs` rows, never replacing names or
+rows it already has.
 
 **Link-preview author signature (GFS public relay)**
 (`services/space_public_author.py`) — a public/global space post's

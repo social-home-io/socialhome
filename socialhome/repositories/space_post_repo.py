@@ -174,6 +174,7 @@ class AbstractSpacePostRepo(Protocol):
     ) -> bool: ...
 
     async def list_space_media_urls(self, space_id: str) -> list[str]: ...
+    async def set_media(self, post: Post, *, space_id: str) -> bool: ...
     async def add_comment(self, comment: Comment, *, space_id: str) -> bool: ...
     async def get_comment(self, comment_id: str) -> Comment | None: ...
     async def list_comments(self, post_id: str) -> list[Comment]: ...
@@ -526,6 +527,29 @@ class SqliteSpacePostRepo:
                     post_id,
                     space_id,
                     edited_at,
+                ),
+            )
+            > 0
+        )
+
+    async def set_media(self, post: Post, *, space_id: str) -> bool:
+        """Write only *post*'s file references (``media_url``, pictures, the
+        attached file, the link card's thumbnail) onto the live stored row of
+        ``space_id``. ``False`` = no such live post there. The GFS-media heal
+        renames a post's files to this household's names for its copies;
+        nothing else of the row changes."""
+        return (
+            await self._db.enqueue_rowcount(
+                "UPDATE space_posts SET media_url=?, image_urls_json=?,"
+                " file_meta_json=?, link_preview_json=?"
+                " WHERE id=? AND space_id=? AND deleted=0",
+                (
+                    post.media_url,
+                    _encode_image_urls(post.image_urls),
+                    _encode_file_meta(post.file_meta),
+                    _encode_link_preview(post.link_preview),
+                    post.id,
+                    space_id,
                 ),
             )
             > 0

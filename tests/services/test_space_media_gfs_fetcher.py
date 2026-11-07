@@ -874,3 +874,14 @@ async def test_two_items_of_one_household_each_follow_a_rotation(tmp_path):
     assert x.local_name != y.local_name
     assert (x.item_id, x.epoch) == ("post-x", 2)
     assert (y.item_id, y.epoch) == ("post-y", 3)
+
+
+async def test_has_item_refs(tmp_path):
+    """#1309 round 4: the follower heal runs only for an item with no rows
+    yet — it never replaces refs or names an item already has."""
+    f = _fetcher(tmp_path, _Gfs({}))
+    assert await f.has_item_refs(SPACE, ITEM) is False
+    blob = _blob("a.webp", b"x")
+    await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
+    assert await f.has_item_refs(SPACE, ITEM) is True
+    assert await f.has_item_refs(SPACE, "post-9") is False

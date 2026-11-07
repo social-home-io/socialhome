@@ -263,6 +263,16 @@ class SpaceMediaGfsFetcher:
             return empty
         return SpaceMediaLocalization(names=names, refs=tuple(refs))
 
+    async def has_item_refs(self, space_id: str, item_id: str) -> bool:
+        """Whether item *item_id* of *space_id* has any ``space_media_refs``
+        row here (the follower heal is add-only: it never touches an item
+        that has). ``True`` on a read failure — never heal blind."""
+        try:
+            return bool(await self._refs.list_for_item(space_id, item_id))
+        except Exception:
+            log.warning("space media refs of item %s not read", item_id, exc_info=True)
+            return True
+
     async def keep(
         self, loc: SpaceMediaLocalization, *, prefetch: bool = True
     ) -> list[SpaceMediaRef]:

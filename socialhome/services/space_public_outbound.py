@@ -313,8 +313,9 @@ class SpacePublicOutbound(SpaceMediaRefsMixin):
         # ``author_pk`` so a relaying seed-holder can't forge authorship.
         # Centralised in build_signed_author_inner so the member-broadcast
         # relay-hint produces a byte-identical signed inner.
-        # v_80 — the pictures, for followers reading through a GFS; the
-        # author signs the descriptor's digest with the rest of the inner.
+        # v_80 — the pictures, for followers reading through a GFS, under
+        # the author's separate signature over the descriptor
+        # (``media_refs_sig``; the main author bytes don't change).
         media_plan = await self._plan_media_refs(
             event.space_id, post_media_urls(post), item_id=post.id, followers=True
         )

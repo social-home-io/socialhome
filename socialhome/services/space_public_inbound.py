@@ -545,8 +545,12 @@ class SpacePublicInbound:
         """Dedupe by post id, save, publish — shared by both relay paths."""
         # Dedupe by post id — the GFS relay is at-least-once, and a
         # member-published item usually also arrives over federation.
-        if await self._posts.get(post_id) is not None:
+        held = await self._posts.get(post_id)
+        if held is not None:
             log.debug("space_public.inbound: duplicate post %s — dropped", post_id)
+            await self._heal_media(
+                space_id, held, author_user_id, origin_instance_id, inner
+            )
             return
 
         post = self._post_from_inner(post_id, author_user_id, inner)
@@ -993,6 +997,47 @@ class SpacePublicInbound:
             origin=origin_instance_id,
         )
 
+    async def _heal_media(
+        self,
+        space_id: str,
+        held: tuple[str, Post],
+        author_user_id: str,
+        origin_instance_id: str,
+        inner: dict,
+    ) -> None:
+        """Add-only heal of a post already stored here WITHOUT its GFS
+        pictures (#1309 round 4).
+
+        A member can re-publish the author's inner WITHOUT its signed
+        ``media_refs`` (the author signature still verifies) and win the race
+        to a GFS: this household stores the post pictureless and would drop
+        the author's real copy as a duplicate. A later copy — or edit — of
+        the SAME author's post in the same space that carries a descriptor
+        the author signed heals it: the stored post's files take this
+        household's names and the rows are kept. Never for an item that has
+        rows already, so it never replaces refs or names."""
+        held_space, post = held
+        if (
+            self._gfs_media is None
+            or inner.get("media_refs") is None
+            or held_space != space_id
+            or post.author != author_user_id
+            or post.deleted
+            or await self._gfs_media.has_item_refs(space_id, post.id)
+        ):
+            return
+        media = await self._localize_media(space_id, post, origin_instance_id, inner)
+        if not media.refs:
+            return
+        if not await self._posts.set_media(media.post(post), space_id=space_id):
+            return
+        await self._keep_media(media)
+        log.info(
+            "space_public.inbound: post %s stored without its pictures — healed "
+            "from a copy its author signed",
+            post.id,
+        )
+
     async def _keep_media(self, media: SpaceMediaLocalization) -> None:
         if self._gfs_media is not None:
             await self._gfs_media.keep(media)
@@ -1075,6 +1120,7 @@ class SpacePublicInbound:
                 "space_public.inbound: post %s is deleted — edit dropped", post_id
             )
             return
+        await self._heal_media(space_id, got, author_user_id, origin_instance_id, inner)
         if not await self._posts.edit(
             post_id,
             content,
