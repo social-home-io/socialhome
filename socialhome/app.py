@@ -2139,8 +2139,10 @@ def _wire_federation_stack(
         space_calendar_repo=space_calendar_repo,
         gallery_repo=gallery_repo,
         # A replayed row's files ship from us: the receiver names them by
-        # the household that delivered the row (``SpaceMediaNamer``).
+        # the household that delivered the row (``SpaceMediaNamer``) —
+        # bounded per request by the files' sizes here.
         media_sync=space_media_sync_service,
+        media_dir=pathlib.Path(config.media_path),
     )
 
     async def _space_sync_resume(event) -> None:

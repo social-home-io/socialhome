@@ -2890,6 +2890,34 @@ def bazaar_handlers(bus, repos):
     return h, bazaar
 
 
+async def test_a_listing_never_names_a_reserved_media_file(bazaar_handlers):
+    """A DM / moment / GFS file (``dm-`` / ``gm-`` / ``sg-``) is never a
+    listing photo, like any received space item (``space_media_refs``)."""
+    handlers, bazaar = bazaar_handlers
+    await handlers._on_bazaar_listing_created(
+        _event(
+            FederationEventType.BAZAAR_LISTING_CREATED,
+            {
+                "post_id": "bzr-1",
+                "space_id": "sp-1",
+                "seller_user_id": "u-seller",
+                "mode": "fixed",
+                "title": "Vintage chair",
+                "image_urls": [
+                    "api/media/dm-chat.webp",
+                    "api/media/sg-cache.webp",
+                    "api/media/chair-1.webp",
+                ],
+                "end_time": "2026-06-01T00:00:00+00:00",
+                "currency": "USD",
+                "status": "active",
+                "price": 4500,
+            },
+        ),
+    )
+    assert bazaar.saved[0].image_urls == (_here("chair-1.webp"),)
+
+
 async def test_bazaar_listing_created_happy_path(bazaar_handlers):
     handlers, bazaar = bazaar_handlers
     await handlers._on_bazaar_listing_created(

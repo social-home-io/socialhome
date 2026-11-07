@@ -92,6 +92,21 @@ class SpaceMediaNamer:
         )
 
 
+def same_file(held: object, sent: object, *, space_id: str, origin: str) -> bool:
+    """Whether the reference this household holds (*held*) is the file
+    household *origin* names *sent*: the same reference, or *sent* under
+    the name it takes here as *origin* delivers it. Both empty is the same
+    (no file)."""
+    if held == sent or (not held and not sent):
+        return True
+    if not isinstance(held, str) or not isinstance(sent, str) or not held or not sent:
+        return False
+    name = media_basename(sent)
+    return bool(name) and media_basename(held) == space_direct_media_name(
+        space_id, origin, name
+    )
+
+
 def feature_media_urls(feature: str, payload: dict) -> list[str]:
     """Every local media file a moderation queue payload of *feature* (or
     the matching wire event / held row) references."""

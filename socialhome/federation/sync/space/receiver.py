@@ -104,7 +104,6 @@ from ....media.profile_picture import (
 )
 from ....services.inbound_media_store import (
     local_media_ref,
-    local_media_refs,
     space_media_ref,
     space_media_refs,
     verbatim_local_media_ref,
@@ -3928,7 +3927,7 @@ def _bazaar_listing_from_record(
         status=status,
         created_at=str(r.get("created_at") or ""),
         description=r.get("description"),
-        image_urls=local_media_refs(r.get("image_urls"), limit=BAZAAR_MAX_IMAGES),
+        image_urls=space_media_refs(r.get("image_urls"), limit=BAZAAR_MAX_IMAGES),
         price=r.get("price"),
         start_price=r.get("start_price"),
         step_price=r.get("step_price"),

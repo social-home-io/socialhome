@@ -47,10 +47,15 @@ re-emitted event with no special-case logic and dedups by primary key.
 from __future__ import annotations
 
 import logging
+import pathlib
+import time
+from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Protocol
+
+import aiofiles.os
 
 from ....domain.federation import FederationEventType
 from ....domain.federation_capabilities import FederationCapability
@@ -64,6 +69,7 @@ from ....domain.task import (
     task_to_wire_dict,
     task_tombstone_to_wire_dict,
 )
+from ....services.inbound_media_store import media_basename, media_file_path
 from ....services.page_conflict_service import side_to_wire
 
 if TYPE_CHECKING:
@@ -108,6 +114,21 @@ MAX_ALBUMS_REPLAYED: int = 200
 #: small HA instance.
 MAX_PER_RESOURCE: int = 500
 
+#: At most this many files of the replayed rows are pushed per request
+#: (posts, covers, gallery items newer than ``since``, newest first in the
+#: order replayed) …
+RESUME_MEDIA_MAX_FILES: int = 50
+#: … and at most this many bytes. A file that would pass it is skipped (it
+#: reaches the household through its author's push, the §25.6 catch-up, or
+#: the host's fill-in), so one request costs at most this much upload.
+RESUME_MEDIA_MAX_BYTES: int = 32 * 1024 * 1024
+#: One ``SPACE_SYNC_RESUME`` per (household, space) per this many seconds;
+#: a sooner one is dropped (the replay is idempotent — the first one already
+#: sent what was missed).
+RESUME_COOLDOWN_S: float = 30 * 60.0
+#: How many (household, space) cooldowns are remembered (oldest dropped).
+RESUME_COOLDOWN_TRACKED: int = 4096
+
 
 class SpaceSyncResumeProvider:
     """Receiver- and provider-side helper for ``SPACE_SYNC_RESUME``.
@@ -120,8 +141,11 @@ class SpaceSyncResumeProvider:
     """
 
     __slots__ = (
+        "_clock",
         "_federation",
         "_gallery_repo",
+        "_last_resume",
+        "_media_dir",
         "_media_sync",
         "_page_repo",
         "_space_calendar_repo",
@@ -143,8 +167,15 @@ class SpaceSyncResumeProvider:
         space_calendar_repo: AbstractSpaceCalendarRepo | None = None,
         gallery_repo: AbstractGalleryRepo | None = None,
         media_sync: _MediaOutbox | None = None,
+        media_dir: pathlib.Path | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._federation = federation_service
+        #: Where the replayed files live — their sizes bound a request.
+        self._media_dir = media_dir
+        self._clock = clock
+        #: ``(household, space) -> when its last resume was served``.
+        self._last_resume: OrderedDict[tuple[str, str], float] = OrderedDict()
         #: Ships the files of the replayed posts / covers / gallery items:
         #: the receiver names a file by the household that delivered its
         #: row, so a replayed row's pictures come from us, not its author.
@@ -211,11 +242,28 @@ class SpaceSyncResumeProvider:
                 since,
             )
             return 0
-        return await self.replay_space_to(
+        key = (str(event.from_instance or ""), space_id)
+        now = self._clock()
+        last = self._last_resume.get(key)
+        if last is not None and now - last < RESUME_COOLDOWN_S:
+            log.info(
+                "SPACE_SYNC_RESUME from %s for %s: served %.0f s ago — dropped",
+                event.from_instance,
+                space_id,
+                now - last,
+            )
+            return 0
+        sent = await self.replay_space_to(
             space_id=space_id,
             instance_id=event.from_instance,
             since=since,
         )
+        if sent:
+            self._last_resume[key] = now
+            self._last_resume.move_to_end(key)
+            while len(self._last_resume) > RESUME_COOLDOWN_TRACKED:
+                self._last_resume.popitem(last=False)
+        return sent
 
     async def _is_member(self, space_id: str, instance_id: str) -> bool:
         """Membership gate — the §S-1 security boundary.
@@ -247,8 +295,9 @@ class SpaceSyncResumeProvider:
         """
         if not await self._is_member(space_id, instance_id):
             return 0
+        media: list[tuple[str, list[str]]] = []
         sent = 0
-        sent += await self._replay_posts(space_id, since, to=instance_id)
+        sent += await self._replay_posts(space_id, since, to=instance_id, media=media)
         sent += await self._replay_comments(space_id, since, to=instance_id)
         # Lists before tasks: a task is only filed under a list held here.
         sent += await self._replay_task_list_deletes(space_id, since, to=instance_id)
@@ -258,8 +307,13 @@ class SpaceSyncResumeProvider:
         sent += await self._replay_page_deletes(space_id, since, to=instance_id)
         sent += await self._replay_pages(space_id, since, to=instance_id)
         sent += await self._replay_stickies(space_id, since, to=instance_id)
-        sent += await self._replay_calendar(space_id, since, to=instance_id)
-        sent += await self._replay_gallery_items(space_id, since, to=instance_id)
+        sent += await self._replay_calendar(
+            space_id, since, to=instance_id, media=media
+        )
+        sent += await self._replay_gallery_items(
+            space_id, since, to=instance_id, media=media
+        )
+        await self._ship_media(space_id, instance_id, media)
         return sent
 
     async def replay_calendar_to(
@@ -277,11 +331,76 @@ class SpaceSyncResumeProvider:
         """
         if not await self._is_member(space_id, instance_id):
             return 0
-        return await self._replay_calendar(space_id, since, to=instance_id)
+        media: list[tuple[str, list[str]]] = []
+        sent = await self._replay_calendar(space_id, since, to=instance_id, media=media)
+        await self._ship_media(space_id, instance_id, media)
+        return sent
+
+    async def _ship_media(
+        self, space_id: str, to: str, media: list[tuple[str, list[str]]]
+    ) -> None:
+        """Queue the replayed rows' files for ``to``: a receiver binds a
+        file to the household that delivered its row, so the bytes must
+        come from us. Bounded per request (:data:`RESUME_MEDIA_MAX_FILES`,
+        :data:`RESUME_MEDIA_MAX_BYTES`); a file over the budget is skipped."""
+        if self._media_sync is None or not media:
+            return
+        files = 0
+        used = 0
+        skipped = 0
+        for correlation_id, urls in media:
+            kept: list[str] = []
+            for url in urls:
+                size = await self._size(url)
+                if (
+                    size is None
+                    or files >= RESUME_MEDIA_MAX_FILES
+                    or used + size > RESUME_MEDIA_MAX_BYTES
+                ):
+                    skipped += 1
+                    continue
+                files += 1
+                used += size
+                kept.append(url)
+            if kept:
+                await self._media_sync.enqueue_for_blob(
+                    space_id=space_id,
+                    correlation_id=correlation_id,
+                    target_instance_ids=[to],
+                    media_urls=kept,
+                )
+        if skipped:
+            log.info(
+                "SPACE_SYNC_RESUME to %s for %s: %d file(s) over the per-request "
+                "budget or missing — not pushed",
+                to,
+                space_id,
+                skipped,
+            )
+
+    async def _size(self, url: str) -> int | None:
+        """The local file's size; ``None`` when it is not here. Without a
+        media dir (a test stack) every file counts as empty."""
+        if self._media_dir is None:
+            return 0
+        path = media_file_path(self._media_dir, media_basename(url))
+        if path is None:
+            return None
+        try:
+            return (await aiofiles.os.stat(path)).st_size
+        except OSError:
+            return None
 
     # ── Per-resource replay ───────────────────────────────────────────
 
-    async def _replay_posts(self, space_id: str, since: str, *, to: str) -> int:
+    async def _replay_posts(
+        self,
+        space_id: str,
+        since: str,
+        *,
+        to: str,
+        media: list[tuple[str, list[str]]] | None = None,
+    ) -> int:
         posts = await self._space_post_repo.list_since(
             space_id,
             since,
@@ -294,6 +413,7 @@ class SpaceSyncResumeProvider:
             space_id=space_id,
             to=to,
             media_of=post_media_urls,
+            media=media,
         )
 
     async def _replay_comments(
@@ -534,6 +654,7 @@ class SpaceSyncResumeProvider:
         since: str,
         *,
         to: str,
+        media: list[tuple[str, list[str]]] | None = None,
     ) -> int:
         if self._space_calendar_repo is None:
             return 0
@@ -549,6 +670,7 @@ class SpaceSyncResumeProvider:
             space_id=space_id,
             to=to,
             media_of=lambda ev: [ev.cover_url] if ev.cover_url else [],
+            media=media,
         )
 
     async def _replay_gallery_items(
@@ -557,6 +679,7 @@ class SpaceSyncResumeProvider:
         since: str,
         *,
         to: str,
+        media: list[tuple[str, list[str]]] | None = None,
     ) -> int:
         """Replay the space's gallery: albums first, then missed items.
 
@@ -627,6 +750,7 @@ class SpaceSyncResumeProvider:
             space_id=space_id,
             to=to,
             media_of=lambda item: [u for u in (item.thumbnail_url, item.url) if u],
+            media=media,
         )
 
     async def _send_each(
@@ -638,6 +762,7 @@ class SpaceSyncResumeProvider:
         space_id: str,
         to: str,
         media_of: Callable[[Any], list[str]] | None = None,
+        media: list[tuple[str, list[str]]] | None = None,
     ) -> int:
         sent = 0
         for row in rows:
@@ -649,15 +774,10 @@ class SpaceSyncResumeProvider:
                     space_id=space_id,
                 )
                 sent += 1
-                if media_of is not None and self._media_sync is not None:
+                if media_of is not None and media is not None:
                     urls = media_of(row)
                     if urls:
-                        await self._media_sync.enqueue_for_blob(
-                            space_id=space_id,
-                            correlation_id=row.id,
-                            target_instance_ids=[to],
-                            media_urls=urls,
-                        )
+                        media.append((row.id, list(urls)))
             except Exception as exc:  # pragma: no cover — defensive
                 log.debug(
                     "SPACE_SYNC_RESUME %s replay to %s failed: %s",

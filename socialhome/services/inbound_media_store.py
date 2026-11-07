@@ -196,6 +196,12 @@ def space_direct_media_name(space_id: str, origin: str, filename: str) -> str:
     return f"{SPACE_DIRECT_MEDIA_PREFIX}{digest[:40]}{ext}"
 
 
+def is_space_direct_media_name(name: str) -> bool:
+    """``True`` for a :func:`space_direct_media_name` prefix — a file this
+    household received over federation, bound to its sender."""
+    return name.startswith(SPACE_DIRECT_MEDIA_PREFIX)
+
+
 def is_gfs_space_media_name(name: str) -> bool:
     """``True`` for a :func:`gfs_space_media_name` (the only names the GFS
     space media fetcher writes)."""

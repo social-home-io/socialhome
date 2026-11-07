@@ -218,10 +218,50 @@ sending household was sent it for. Both blob types share
   Every household that relays a row ships the bytes under the name its
   own row holds. The paths that do this are: the author's live push, the
   §25.6 catch-up (`_enqueue_catchup_media`), the §4.4 resume / §319.6
-  resync replay (`SpaceSyncResumeProvider`, which now enqueues the
-  replayed rows' files for the one household that asked), the
-  moderation submission (`_send_media`), and a released post or cover
-  from the host. The wire is unchanged, so there is no protocol version.
+  resync replay (`SpaceSyncResumeProvider`), the moderation submission
+  (`_send_media`), and a released post or cover from the host. The wire
+  is unchanged, so there is no protocol version.
+
+  The resume / resync replay enqueues the replayed rows' files for the
+  one household that asked, with these bounds:
+  - at most `RESUME_MEDIA_MAX_FILES` (50) files and
+    `RESUME_MEDIA_MAX_BYTES` (32 MiB) per request; a file past the budget,
+    or one that isn't here, is skipped;
+  - one `SPACE_SYNC_RESUME` per (household, space) per
+    `RESUME_COOLDOWN_S` (30 min); a sooner request is dropped.
+
+  The cost is at most 32 MiB to one household per space per 30 minutes,
+  which is 64 MiB an hour even when a member asks with an old `since`. The
+  rows themselves were already capped at `MAX_PER_RESOURCE`.
+
+  A file whose sends ran out of attempts (`status='failed'` in
+  `space_media_outbox`) is re-armed by the next enqueue of the same file
+  for the same household, for example a catch-up or a replay. A row still
+  queued or in flight is left to the scheduler.
+- **The host fills a missing file.** Sometimes a known row shows a file
+  under exactly the name `filename` and that file is not here, for
+  example:
+  - the author's push failed for good (the host holds the file as
+    `sd(space, author, F)`, the same name the row shows, because names
+    don't depend on the receiver);
+  - a row stored before files were bound to their sender;
+  - a GFS-first row without a descriptor.
+
+  A household with content authority (the host, an admin or moderator
+  household) may then store its bytes under that name (`_host_fills`). It
+  writes once and never replaces a file. Content authority can rewrite
+  the row anyway, so this widens nothing. A plain member never fills a
+  name its own household doesn't own.
+- **Moderation release to GFS followers.** The host holds a remote
+  submitter's files under that household's names, while the author's
+  signed inner names them as the author does. `approved_relay_for`
+  compares the two through `same_file`: the identical name, or the
+  author's name mapped for the inner's verified origin. The relay keeps
+  the author's signed names and `media_refs`.
+- **GFS relay path.** A post relayed through a GFS
+  (`space_public_inbound`) never shows an `sd-` file that no descriptor
+  renamed (`_without_direct_files`). Such a name is a file this household
+  received from some other household, never the relayed author's.
 - **Space scope (`SPACE_MEDIA_BLOB`).** The envelope must name one space
   (`resolve_space_id`: routing `space_id`, payload copy as fallback, a
   mismatch is a refusal) and a `correlation_id` (`post_id` on older
@@ -279,11 +319,9 @@ sending household was sent it for. Both blob types share
 
 Residuals, by design:
 
-- Bytes for a row come from the household that delivered that row here.
-  Suppose the author's push for a row never arrives (it failed past its
-  retries). A later delivery of the same row by another household, such
-  as the host's catch-up, does not rename it, so it does not fill the
-  file either.
+- Bytes for a row come from the household that delivered that row
+  here. The exception is content authority filling a missing file
+  (above). A plain member's copy never fills it.
 - A household reaching a member's post first through the GFS relay
   (`space_public_inbound`) keeps the post's own names. Described files
   take the reader names of the GFS cache. A file without a descriptor
@@ -293,9 +331,13 @@ Residuals, by design:
 - One file relayed through several households is stored once per
   delivering household. That costs bytes, not correctness.
 
-`tests/protocol/test_media_blob_scope.py` pins these rules: the decoy
-post, the bazaar decoy, a cover race by another writer, a push before its
-row, the host's catch-up round trip and the mesh.
+`tests/protocol/test_media_blob_scope.py` pins these rules:
+- the decoy post and the bazaar decoy;
+- a cover race by another writer;
+- a push before its row;
+- the host's catch-up round trip;
+- the host filling an author's failed push;
+- the mesh.
 `test_space_moderation_federated.py` covers a reviewed picture released
 everywhere.
 

@@ -73,6 +73,7 @@ import functools
 import hashlib
 import logging
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 import orjson
@@ -123,6 +124,8 @@ from ..utils.datetime import parse_iso8601_lenient
 from ..writer_cert import verify_writer_users
 from .gfs_member_publish_service import parse_item_plaintext
 from .inbound_media_store import (
+    is_space_direct_media_name,
+    media_basename,
     space_media_ref,
     space_media_refs,
 )
@@ -555,7 +558,7 @@ class SpacePublicInbound:
 
         post = self._post_from_inner(post_id, author_user_id, inner)
         media = await self._localize_media(space_id, post, origin_instance_id, inner)
-        post = media.post(post)
+        post = _without_direct_files(media.post(post))
         if await self._posts.save(space_id, post) is None:
             log.warning(
                 "space_public.inbound: post %s already exists in another space "
@@ -1029,7 +1032,9 @@ class SpacePublicInbound:
         media = await self._localize_media(space_id, post, origin_instance_id, inner)
         if not media.refs:
             return
-        if not await self._posts.set_media(media.post(post), space_id=space_id):
+        if not await self._posts.set_media(
+            _without_direct_files(media.post(post)), space_id=space_id
+        ):
             return
         await self._keep_media(media)
         log.info(
@@ -1077,7 +1082,7 @@ class SpacePublicInbound:
             media = await self._localize_media(
                 space_id, post, origin_instance_id, inner
             )
-            post = media.post(post)
+            post = _without_direct_files(media.post(post))
             if await self._posts.save(space_id, post) is None:
                 log.warning(
                     "space_public.inbound: post %s already exists in another space "
@@ -1279,6 +1284,30 @@ class SpacePublicInbound:
             created_at=parse_iso8601_lenient(inner.get("created_at")),
             hidden_from_feed=bool(inner.get("hidden_from_feed", False)),
         )
+
+
+def _without_direct_files(post: Post) -> Post:
+    """``post`` without a reference to a file received over federation
+    (``sd-``, :class:`SpaceMediaNamer`) that no GFS descriptor renamed: such
+    a name is another household's copy here, never the relayed author's.
+    Apply after the localization (a described file has its ``sg-`` name)."""
+
+    def keep(url: str | None) -> bool:
+        return not (url and is_space_direct_media_name(media_basename(url)))
+
+    preview = post.link_preview
+    file_meta = post.file_meta
+    return replace(
+        post,
+        media_url=post.media_url if keep(post.media_url) else None,
+        image_urls=tuple(u for u in post.image_urls or () if keep(u)),
+        link_preview=(
+            replace(preview, thumbnail_url=None)
+            if preview is not None and not keep(preview.thumbnail_url)
+            else preview
+        ),
+        file_meta=file_meta if file_meta is None or keep(file_meta.url) else None,
+    )
 
 
 def _retained_bytes(frame: dict) -> int:

@@ -672,3 +672,20 @@ async def test_a_mesh_routed_authors_push_lands(env):
             )
         )
     assert await _shown(db, root, "post-f") == GOOD
+
+
+async def test_the_hosts_catch_up_fills_a_file_the_authors_push_never_delivered(env):
+    """Members-equal: A's post landed but its push failed for good. The host
+    holds A's file under the very name the row shows (names don't depend on
+    the receiver) and its catch-up fills it — another member can't."""
+    app, db, root = env
+    await _members(db)
+    await _post(app, "post-f", "f.webp")
+    shown = space_direct_media_name(GATED, SENDER, "f.webp")
+    await _push(app, "post-f", shown, EVIL, sender=MALLORY)
+    assert await _shown(db, root, "post-f") is None
+    await _push(app, "post-f", shown, GOOD, sender=HOST)
+    assert await _shown(db, root, "post-f") == GOOD
+    # Write-once: a later host push never replaces it.
+    await _push(app, "post-f", shown, EVIL, sender=HOST)
+    assert await _shown(db, root, "post-f") == GOOD

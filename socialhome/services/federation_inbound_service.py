@@ -2204,6 +2204,10 @@ class FederationInboundService(ProtectionGateMixin):
             correlation_id=correlation_id,
             filename=local,
         )
+        if scope == _NOT_ITS_FILE and await self._host_fills(
+            event, space_id=space_id, correlation_id=correlation_id, filename=filename
+        ):
+            local, scope = filename, None
         if scope is not None:
             # A row of another space: an attempt. A row of this space that
             # shows another name: it reached us from another household (the
@@ -2235,12 +2239,58 @@ class FederationInboundService(ProtectionGateMixin):
             total_size=_declared_size(p, raw, chunk_count),
         )
 
+    async def _host_fills(
+        self,
+        event: FederationEvent,
+        *,
+        space_id: str,
+        correlation_id: str,
+        filename: str,
+    ) -> bool:
+        """Whether the sender may fill ``filename`` itself — the name the
+        known row shows here — when that file is missing.
+
+        Only content authority (the host, an admin / moderator household),
+        which can rewrite the row anyway: it holds a member's file under
+        the very name the row shows (names don't depend on the receiver),
+        so its §25.6 catch-up fills a file the author's push never
+        delivered — and a row stored before names were bound to their
+        sender, or one that reached us through the GFS relay without a
+        descriptor. Write-once: an existing file is never replaced."""
+        assert self._media_dir is not None
+        if await aiofiles.os.path.exists(self._media_dir / filename):
+            return False
+        if (
+            await self._space_media_in_scope(
+                space_id=space_id,
+                correlation_id=correlation_id,
+                filename=filename,
+                known_only=True,
+            )
+            is not None
+        ):
+            return False
+        authorship = self._authorship
+        if authorship is None or not await authorship.has_content_authority(
+            event, space_id
+        ):
+            return False
+        log.info(
+            "SPACE_MEDIA_BLOB from %s: filling %s of %s (missing here) as the "
+            "space's content authority",
+            event.from_instance,
+            filename,
+            correlation_id,
+        )
+        return True
+
     async def _space_media_in_scope(
         self,
         *,
         space_id: str,
         correlation_id: str,
         filename: str,
+        known_only: bool = False,
     ) -> str | None:
         """Why a blob stored as ``filename`` (this household's name for it)
         for ``correlation_id`` may not land in ``space_id``, or ``None``.
@@ -2250,7 +2300,8 @@ class FederationInboundService(ProtectionGateMixin):
         and lives in another space (:data:`_ROW_ELSEWHERE`), or is known
         and does not show ``filename`` (:data:`_NOT_ITS_FILE`). An unknown
         row is ``None`` — the name is bound to the sender and the write is
-        write-once, so accepting it can't replace anything.
+        write-once, so accepting it can't replace anything — unless
+        ``known_only`` (the row must show ``filename``).
         """
         found = await self._space_post_repo.get(correlation_id)
         if found is not None:
@@ -2275,8 +2326,8 @@ class FederationInboundService(ProtectionGateMixin):
                 if self._bazaar_repo is not None
                 else None
             )
-            if listing is None:
-                return None  # listing not here yet
+            if listing is None:  # listing not here yet
+                return _NOT_ITS_FILE if known_only else None
             if listing.space_id != space_id:
                 return _ROW_ELSEWHERE
             return _scoped(filename in {media_basename(u) for u in listing.image_urls})
@@ -2307,7 +2358,7 @@ class FederationInboundService(ProtectionGateMixin):
             return _scoped(
                 filename in {media_basename(u) for u in moderation_media_urls(held)}
             )
-        return None
+        return _NOT_ITS_FILE if known_only else None
 
     async def _assemble_space_chunk(
         self,

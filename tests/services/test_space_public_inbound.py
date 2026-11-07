@@ -2398,6 +2398,37 @@ async def test_a_stripped_copy_first_then_the_real_one_brings_the_pictures(env):
     assert sink.kept == [{"p.webp": "sg-p.webp"}]
 
 
+_SD = "sd-" + "c" * 40 + ".webp"
+
+
+async def test_a_relayed_post_never_shows_an_undescribed_direct_file(env):
+    """``sd-`` names are files this household received from a household
+    over federation (``SpaceMediaNamer``). A post relayed through a GFS that
+    names one without a descriptor would show another household's copy —
+    dropped; a described one takes its GFS reader name as usual."""
+    sink = _GfsMediaSink()
+    env["inbound"].attach_gfs_media(sink)
+    picture = {"type": "image", "image_urls": [f"api/media/{_SD}", "api/media/p.webp"]}
+    await env["inbound"].handle(
+        _frame(await _make_envelope(env, signed_extra=picture)), gfs_id="g1"
+    )
+    _sid, post = await env["post_repo"].get("post-1")
+    assert post.image_urls == ("api/media/p.webp",)
+
+
+async def test_a_relayed_post_keeps_a_described_direct_file_under_its_gfs_name(env):
+    sink = _GfsMediaSink()
+    env["inbound"].attach_gfs_media(sink)
+    picture = {"type": "image", "image_urls": [f"api/media/{_SD}"]}
+    refs = {_SD: _REFS_A["p.webp"]}
+    await env["inbound"].handle(
+        _frame(await _make_envelope(env, signed_extra=picture, media_refs=refs)),
+        gfs_id="g1",
+    )
+    _sid, post = await env["post_repo"].get("post-1")
+    assert post.image_urls == (f"api/media/sg-{_SD}",)
+
+
 async def test_a_stripped_copy_after_the_real_one_changes_nothing(env):
     sink = _GfsMediaSink()
     env["inbound"].attach_gfs_media(sink)

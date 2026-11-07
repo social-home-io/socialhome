@@ -145,8 +145,8 @@ from ...utils.datetime import parse_iso8601_optional
 from ...utils.timezones import coerce_tz
 from ..gallery_service import ALBUMS_PER_SPACE, DESCRIPTION_MAX, NAME_MAX
 from ..inbound_media_store import (
-    local_media_refs,
     space_media_ref,
+    space_media_refs,
     verbatim_local_media_ref,
 )
 from ..page_conflict_service import (
@@ -2993,7 +2993,7 @@ class SpaceContentInboundHandlers:
                 p.get("created_at") or p.get("occurred_at") or "",
             ),
             description=p.get("description"),
-            image_urls=local_media_refs(p.get("image_urls"), limit=BAZAAR_MAX_IMAGES),
+            image_urls=space_media_refs(p.get("image_urls"), limit=BAZAAR_MAX_IMAGES),
             price=p.get("price"),
             start_price=p.get("start_price"),
             step_price=p.get("step_price"),

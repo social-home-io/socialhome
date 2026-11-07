@@ -7,12 +7,14 @@ from socialhome.services.inbound_media_store import (
     SPACE_DIRECT_MEDIA_PREFIX,
     is_reserved_media_name,
     is_safe_media_name,
+    is_space_direct_media_name,
     space_direct_media_name,
 )
 from socialhome.services.space_media_names import (
     SpaceMediaNamer,
     feature_media_urls,
     renamed_media,
+    same_file,
 )
 
 SP = "sp-1"
@@ -26,6 +28,7 @@ def test_the_name_binds_space_household_and_file_never_the_receiver():
     a = sd("hh-a", "f.webp")
     assert a.startswith(SPACE_DIRECT_MEDIA_PREFIX) and a.endswith(".webp")
     assert is_safe_media_name(a) and not is_reserved_media_name(a)
+    assert is_space_direct_media_name(a) and not is_space_direct_media_name("f.webp")
     assert a != sd("hh-m", "f.webp")
     assert a != sd("hh-a", "g.webp")
     assert a != space_direct_media_name("sp-2", "hh-a", "f.webp")
@@ -131,3 +134,15 @@ def test_moderation_payload_files_are_listed_and_renamed_in_place():
     }
     assert feature_media_urls("pages", post) == []
     assert renamed_media("pages", post, str.upper) == post
+
+
+def test_same_file_matches_a_sent_name_to_the_one_held_here():
+    held = f"api/media/{sd('hh-a', 'f.webp')}"
+    assert same_file(held, "api/media/f.webp", space_id=SP, origin="hh-a")
+    assert same_file(held, held, space_id=SP, origin="hh-x")
+    assert same_file(None, None, space_id=SP, origin="hh-a")
+    assert not same_file(held, "api/media/f.webp", space_id=SP, origin="hh-m")
+    assert not same_file(held, "api/media/g.webp", space_id=SP, origin="hh-a")
+    assert not same_file(held, None, space_id=SP, origin="hh-a")
+    assert not same_file(None, "api/media/f.webp", space_id=SP, origin="hh-a")
+    assert not same_file(held, 7, space_id=SP, origin="hh-a")

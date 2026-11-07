@@ -1402,6 +1402,38 @@ def c_zones_count(collector) -> int:
     return len(collector.zones)
 
 
+async def test_a_synced_listing_never_names_a_reserved_media_file(setup):
+    """A streamed bazaar listing naming a DM / moment / GFS file (``dm-`` /
+    ``gm-`` / ``sg-``) would show a file another path owns: dropped, like
+    every other received space item (``space_media_refs``)."""
+    r, c, kp = setup
+    await _send(
+        r,
+        kp,
+        "bazaar",
+        [
+            {
+                "post_id": "bzr-r",
+                "space_id": "sp-1",
+                "seller_user_id": "u-seller",
+                "mode": "fixed",
+                "title": "Chair",
+                "image_urls": [
+                    "api/media/dm-chat.webp",
+                    "api/media/gm-moment.webp",
+                    "api/media/sg-cache.webp",
+                    "api/media/chair.webp",
+                ],
+                "end_time": "2026-06-01T00:00:00+00:00",
+                "currency": "USD",
+                "status": "active",
+                "price": 1,
+            },
+        ],
+    )
+    assert c.bazaar_listings[0].image_urls == (_here("chair.webp"),)
+
+
 async def test_bazaar_listings(setup):
     """F4: bazaar listings ride the chunked sync so a new joiner sees
     the full listing card (mode / price / photos / status) — not just

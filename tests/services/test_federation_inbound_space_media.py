@@ -30,6 +30,9 @@ from socialhome.repositories import (
 )
 from socialhome.repositories.bazaar_repo import SqliteBazaarRepo
 from socialhome.repositories.gallery_repo import SqliteGalleryRepo
+from socialhome.repositories.space_remote_member_repo import (
+    SqliteSpaceRemoteMemberRepo,
+)
 from socialhome.services import inbound_media_store
 from socialhome.services.federation_inbound_service import (
     FederationInboundService,
@@ -85,6 +88,7 @@ async def env(db, bus, tmp_path):
         user_repo=SqliteUserRepo(db),
         gallery_repo=SqliteGalleryRepo(db),
         bazaar_repo=SqliteBazaarRepo(db),
+        space_remote_member_repo=SqliteSpaceRemoteMemberRepo(db),
         media_dir=media,
     )
     for sid in ("sp-a", "sp-b"):
@@ -768,3 +772,62 @@ async def test_a_held_items_scope_stays_tight(env, caplog, space_id, filename):
             )
         )
     assert not (media / L(filename)).exists()
+
+
+# ── The host fills a file its author's push never delivered ─────────────
+
+
+async def test_the_host_fills_a_file_the_authors_push_never_delivered(env):
+    """Members-equal: A's push failed for good, the row shows A's file as
+    ``sd(S, A, F)`` — the very name the host holds it under. The host's
+    catch-up push of that name fills it here."""
+    svc, media = env
+    await svc._on_space_media_blob(
+        _blob(
+            {"post_id": "post-a", "filename": L("a1.webp")},
+            from_instance="host",
+        )
+    )
+    assert (media / L("a1.webp")).read_bytes() == b"NEW-BYTES"
+
+
+async def test_the_host_fills_a_legacy_rows_file(env, db):
+    """A row stored before files were bound to their sender names the file
+    verbatim; only the host may fill it."""
+    svc, media = env
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content, media_url)"
+        " VALUES('post-old', 'sp-a', 'u-a', 'image', '', 'api/media/old.webp')",
+        (),
+    )
+    await svc._on_space_media_blob(
+        _blob({"post_id": "post-old", "filename": "old.webp"})  # peer-a
+    )
+    assert not (media / "old.webp").exists()
+    await svc._on_space_media_blob(
+        _blob({"post_id": "post-old", "filename": "old.webp"}, from_instance="host")
+    )
+    assert (media / "old.webp").read_bytes() == b"NEW-BYTES"
+
+
+async def test_the_hosts_bytes_never_replace_a_file_that_is_here(env):
+    svc, media = env
+    (media / L("a1.webp")).write_bytes(b"FROM-THE-AUTHOR")
+    await svc._on_space_media_blob(
+        _blob(
+            {"post_id": "post-a", "filename": L("a1.webp")},
+            from_instance="host",
+        )
+    )
+    assert (media / L("a1.webp")).read_bytes() == b"FROM-THE-AUTHOR"
+
+
+@pytest.mark.parametrize("sender", ["peer-z", "peer-a"])
+async def test_no_one_but_the_host_fills_another_households_name(env, sender):
+    """A plain member (or the author's household re-sending another's name)
+    never writes a name the row binds to someone else."""
+    svc, media = env
+    await svc._on_space_media_blob(
+        _blob({"post_id": "post-a", "filename": L("a1.webp")}, from_instance=sender)
+    )
+    assert not (media / L("a1.webp")).exists()

@@ -24,6 +24,7 @@ from socialhome.domain.task import (
     TaskTombstone,
 )
 from socialhome.domain.tombstone import SpaceRowTombstone
+from socialhome.federation.sync.space import resume as resume_mod
 from socialhome.federation.sync.space.resume import (
     MAX_PER_RESOURCE,
     SpaceSyncResumeProvider,
@@ -1183,3 +1184,74 @@ async def test_a_replayed_rows_files_ship_from_the_replaying_household():
         ("sp-1", "p-0", ("peer-a",), ("api/media/sd-a.webp", "api/media/sd-b.webp")),
         ("sp-1", "ev-0", ("peer-a",), ("api/media/cover.webp",)),
     ]
+
+
+def _image_post(i: int, at: datetime, *names: str) -> Post:
+    return replace(
+        _post(i, at),
+        type=PostType.IMAGE,
+        image_urls=tuple(f"api/media/{n}" for n in names),
+    )
+
+
+def _bounded_provider(tmp_path, posts, outbox, clock=lambda: 0.0):
+    return SpaceSyncResumeProvider(
+        federation_service=_FakeFederation(),
+        space_repo=_FakeSpaceRepo(["peer-a"]),
+        space_post_repo=_FakePostRepo(posts=posts),
+        media_sync=outbox,
+        media_dir=tmp_path,
+        clock=clock,
+    )
+
+
+async def test_a_resumes_files_are_bounded_in_bytes_and_count(tmp_path, monkeypatch):
+    """The requester picks ``since``: one request pushes at most
+    RESUME_MEDIA_MAX_FILES files and RESUME_MEDIA_MAX_BYTES bytes of what
+    is here — a file past the budget, or not here, is skipped."""
+    monkeypatch.setattr(resume_mod, "RESUME_MEDIA_MAX_BYTES", 100)
+    monkeypatch.setattr(resume_mod, "RESUME_MEDIA_MAX_FILES", 3)
+    for name, size in (("a", 40), ("big", 500), ("b", 40), ("c", 10), ("d", 1)):
+        (tmp_path / f"{name}.webp").write_bytes(b"x" * size)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    at = base + timedelta(minutes=1)
+    posts = [
+        _image_post(0, at, "a.webp", "big.webp", "gone.webp"),
+        _image_post(1, at, "b.webp", "c.webp", "d.webp"),
+    ]
+    outbox = _FakeMediaOutbox()
+    provider = _bounded_provider(tmp_path, posts, outbox)
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
+    )
+    shipped = [u for row in outbox.rows for u in row[3]]
+    # 40 + 40 + 10 bytes, three files: "big" is over the bytes, "gone" is
+    # missing, "d" is over the count.
+    assert shipped == ["api/media/a.webp", "api/media/b.webp", "api/media/c.webp"]
+
+
+async def test_a_resume_is_served_once_per_household_and_space_per_cooldown(
+    tmp_path,
+):
+    now = [1000.0]
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    posts = [_post(0, base + timedelta(minutes=1))]
+    outbox = _FakeMediaOutbox()
+    provider = _bounded_provider(tmp_path, posts, outbox, clock=lambda: now[0])
+    request = _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
+    assert await provider.handle_request(request) == 1
+    now[0] += resume_mod.RESUME_COOLDOWN_S - 1
+    assert await provider.handle_request(request) == 0
+    now[0] += 2
+    assert await provider.handle_request(request) == 1
+    # Another space or household keeps its own window.
+    assert (
+        await provider.handle_request(
+            _event(
+                "peer-a",
+                {"space_id": "sp-2", "since": base.isoformat()},
+                space_id="sp-2",
+            )
+        )
+        == 1
+    )
