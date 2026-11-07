@@ -167,16 +167,18 @@ with an env override `GFS_SPACE_MEDIA_<KEY>` (upper case):
 | `fresh_seconds` | `604800` (7 days) | Content stored here at most this long ago goes back into the cache. |
 | `cache_after_requests` | `3` | Requests within `request_window_seconds` that earn a re-upload, however full the cache. |
 | `request_window_seconds` | `3600` | The window for that count. |
-| `coalesce_seconds` | `60` | One re-upload per blob per window; a delivered stream stays joinable this long; a failed one is not asked again on that node this long. |
+| `coalesce_seconds` | `60` | One re-upload per blob per window; a delivered stream stays joinable this long; one the holder could not serve (not an unusable hint) is not asked again on that node this long. |
 | `full_percent` | `95` | Above this share of `max_bytes`, only repeatedly asked content is cached. |
 | `stream_wait_seconds` | `25` | The longest a reader waits for a holder (1–60). |
 | `max_streams` | `16` | Holder sessions per node (each ≤ 8 MiB in memory). |
 | `scope_max_streams` | `4` | Holder sessions per space or channel per node. |
-| `scope_stream_bytes_per_hour` | `536870912` (512 MiB) | Bytes one space or channel may stream an hour, cluster-wide. |
+| `scope_stream_bytes_per_hour` | `536870912` (512 MiB) | Bytes one space or channel may stream an hour, cluster-wide; one reader network prefix may use at most 1/8 of it (64 MiB by default). |
 | `prefix_wanted_per_hour` | `240` | Holder requests one reader network prefix (/48, IPv4 /24) may trigger an hour, cluster-wide. |
 
 Memory: at most `max_streams` × 8 MiB (128 MiB by default) per node for
-sessions in flight. The **Media cache** card on Overview adds this node's
+sessions in flight — a session a slow reader is still being written from
+counts too, and a reader that stops reading is cut off; a holder must
+deliver within 120 s. The **Media cache** card on Overview adds this node's
 holder requests, streams served (and bytes), re-uploads, declines and
 requests nobody could serve ("Not found"), or says the feature is off.
 

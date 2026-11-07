@@ -3797,9 +3797,9 @@ household side, both flow diagrams and the cost are in
 
 | Method | Path | |
 |---|---|---|
-| `POST` | `/gfs/media/{blob_id}/wanted` | Anonymous (the reader's cookie-less session). Body ≤ 4 KiB: `{scope, scope_id, hint}` — the scope the reader knows the blob under and a locator sealed for space key holders (`socialhome/space_media_hint.py`: suite `smh1-aesgcm-256`, a key derived from the epoch's space media key, random nonce, AAD binding suite, scope, scope id, blob and epoch; an unknown suite is refused). The scope never rides in the URL. Every answer is `no-store`: `200` the blob (from the cache, or piped from a holder — `Content-Length` is the blob's; the connection is cut short if the bytes don't end at the asked address), `404` a clean miss (no holder, nobody answered within the wait, a repeat right after a failed session, a scope not listed or not in use, `on_demand` off), `422 bad_request`, `429 rate_limited` (the prefix budget, `Retry-After: 600`; the per-IP limiter, `Retry-After: 60`), `503 busy` (`Retry-After: 5`). |
-| `PUT` | `/gfs/media/serve/{ticket}` | The holder household the GFS asked sends the blob as the raw body. Signed by its household key: `X-SH-Instance`, `X-SH-Timestamp` (±300 s), `X-SH-Signature` over canonical `{instance_id, media_ticket, ts}` (the relay-stream scheme, its own field name). `Content-Length` must be a padded bucket (`422 bad_size`); the body must make progress (64 KiB per 5 s, else `408 body_timeout`). With a `cache` ticket and the normal upload authorization (`X-SH-Space-Media-Auth`, as on `PUT /gfs/media/{blob_id}`) the blob is also stored, under the cache's usual caps. `200 {stored}`; `401` bad signature or stale `ts`; `403` not the household asked; `404 unknown_ticket` (or another node's ticket); `409 already_streaming`; `422 blob_id_mismatch` (not at the asked address — nothing released, nothing stored); `429 scope_stream_quota`. |
-| `POST` | `/gfs/media/serve/{ticket}/decline` | The asked holder can't serve it (no such file, its own budget). Same headers and refusals; `{declined: true}`; the GFS asks the next holder at once. |
+| `POST` | `/gfs/media/{blob_id}/wanted` | Anonymous (the reader's cookie-less session). Body ≤ 4 KiB: `{scope, scope_id, hint}` — the scope the reader knows the blob under and a locator sealed for space key holders (`socialhome/space_media_hint.py`: suite `smh1-aesgcm-256`, a key derived from the epoch's space media key, random nonce, AAD binding suite, scope, scope id, blob and epoch; it also seals when the reader sealed it, and a holder refuses a hint older than 600 s; an unknown suite is refused). The scope never rides in the URL. Every answer is `no-store`: `200` the blob (from the cache, or piped from a holder — `Content-Length` is the blob's; the connection is cut short if the bytes don't end at the asked address), `404` a clean miss (no holder, nobody answered within the wait, a repeat right after a failed session, a scope not listed or not in use, `on_demand` off), `422 bad_request`, `429 rate_limited` (the prefix budget, `Retry-After: 600`; the per-IP limiter, `Retry-After: 60`), `503 busy` (`Retry-After: 5`). |
+| `PUT` | `/gfs/media/serve/{ticket}` | The holder household the GFS asked sends the blob as the raw body. Signed by its household key: `X-SH-Instance`, `X-SH-Timestamp` (±300 s), `X-SH-Signature` over canonical `{instance_id, media_ticket, op, ts}` with `op: "serve"` (the relay-stream scheme, its own field names; `op` keeps a serve signature from being replayed as a decline, or back). `Content-Length` must be a padded bucket (`422 bad_size`); the body must make progress (64 KiB per 5 s, else `408 body_timeout`) and arrive whole within 120 s. With a `cache` ticket and the normal upload authorization (`X-SH-Space-Media-Auth`, as on `PUT /gfs/media/{blob_id}`) the blob is also stored, under the cache's usual caps. `200 {stored}`; `401` bad signature or stale `ts`; `403` not the household asked; `404 unknown_ticket` (or another node's ticket); `409 already_streaming`; `422 blob_id_mismatch` (not at the asked address — nothing released, nothing stored); `429 scope_stream_quota`. |
+| `POST` | `/gfs/media/serve/{ticket}/decline` | The asked holder can't serve it. Same headers (signed with `op: "decline"`) and refusals; body `{"reason": "bad_hint" \| "not_held"}` (anything else reads as `not_held`); `{declined: true}`. `bad_hint` — the hint did not open, was stale, or named no file at this address: the GFS asks the same holder again with the next waiting reader's hint. `not_held` — no such file, not a household that may be asked, its budget: the GFS moves to the next holder. |
 
 **The frame.** `{type: "space_media_request", ticket, scope, scope_id,
 blob_id, mode, hint}` — `mode` is `stream` or `cache`; the hint is the
@@ -3818,13 +3818,29 @@ node that took the `wanted` request, exactly like a highlight relay stream
 ([`gfs-cluster.md`](../operations/gfs-cluster.md#haproxy)). The `wanted`
 request itself may land on any node.
 
-**Who is asked.** A listed space: its host — the owning household this GFS
-already knows. A private space's channel: its seated member households (key
-holders the GFS already knows as seats), those connected to this node first.
-At most 3, one after another; each gets 10 s to start sending (a decline
-moves on at once), all within `stream_wait_seconds`. Other members of a
-listed space are never asked: the GFS does not know them, and asking would
-tell it who they are.
+**Who is asked.** A listed space: its owner household — the owning
+household this GFS already knows. A private space's channel: its seated
+member households (key holders the GFS already knows as seats), those
+connected to this node first. At most 3, one after another; each gets 10 s
+to start sending (a decline moves on at once), all within
+`stream_wait_seconds`. Other members of a listed space are never asked: the
+GFS does not know them, and asking would tell it who they are.
+
+**Who answers.** The holder side mirrors that: a household answers only for
+a listed space it **owns**, or a private channel it holds. Any other
+household declines `not_held` on the same path before it opens anything, so
+a GFS replaying a reader's hint to other households can't learn who is a
+member; and a hint sealed more than 600 s ago is refused (`bad_hint`), which
+bounds replay. It sends only a file that a **live** row of the space shows
+(`MediaReferenceRepo.live_in_space`: a post, comment, listing, event, page
+or album item not deleted — never one only a moderation queue or an edit history
+still names), so a deleted item's picture never comes back.
+
+**Hints.** A session keeps up to 4 distinct reader hints (the opener's
+first, then those of readers who joined). On `bad_hint` the GFS retries the
+same holder with the next hint, so a reader without the key can't make a
+blob go dark for the others. A session that failed only on bad hints does
+not mark the blob missing on the node and gives the re-upload claim back.
 
 **Cache or stream** (`GfsSpaceMediaOnDemand.decide`):
 
@@ -3837,12 +3853,16 @@ tell it who they are.
   full — streams, and nothing is stored.
 
 **Coalescing.** One live session per (blob, scope) per node: every reader of
-that blob joins it, and a session that delivered stays joinable in memory
-for `coalesce_seconds`. A session nobody served blocks repeats on that node
-for `coalesce_seconds` (a clean miss, nobody asked). A re-upload is
-**claimed cluster-wide** in the shared database — one per blob per
-`coalesce_seconds`; a node that loses the claim waits for the blob to land
-in the shared cache. The holder attaches its upload authorization at most
+that blob joins it, and readers arriving while the first one's request is
+still being decided share that ONE decision (no duplicate sessions). A
+session that delivered stays joinable in memory for `coalesce_seconds`
+(giving way early when the node is short of room and nobody is reading it).
+A session where a holder said `not_held` or nobody answered blocks repeats
+on that node for `coalesce_seconds` (a clean miss, nobody asked). A
+re-upload is **claimed cluster-wide** in the shared database — one per blob
+per `coalesce_seconds`, taken only after the node found room for the
+session; a node that loses the claim waits for the blob to land in the
+shared cache. The holder attaches its upload authorization at most
 once per (GFS, blob) per 10 minutes, so a burst of `cache` tickets stores
 the blob once.
 
@@ -3852,25 +3872,35 @@ scope-bound address the readers asked for; otherwise their connections are
 cut short and nothing is stored. A forged hint can only make the holder
 decline: it re-seals the file and sends it only when that gives exactly the
 asked address, and only a file referenced by this space's content alone
-(`confined_to_space`).
+(`confined_to_space`) and shown by a live row of it (`live_in_space`).
 
 **Bounds.**
 
 - Per node: `max_streams` sessions (16), `scope_max_streams` per scope (4),
-  each holding at most one blob (≤ 8 MiB) in memory, never on disk.
+  each holding at most one blob (≤ 8 MiB) in memory, never on disk. A
+  closed session a reader is still being written from counts too.
 - Cluster-wide, in the shared database (the keyed hourly table
   `gfs_space_media_ip_bytes`, under their own key prefixes):
-  `scope_stream_bytes_per_hour` (512 MiB) one scope may stream, and
-  `prefix_wanted_per_hour` (240) holder requests one reader network prefix
-  (IPv6 /48, IPv4 /24) may trigger.
+  `scope_stream_bytes_per_hour` (512 MiB) one scope may stream; the reader
+  network prefix (IPv6 /48, IPv4 /24) that opened a session may spend at
+  most 1/8 of that (64 MiB an hour per scope at the defaults), so one
+  prefix can't use up a scope's budget for everyone; and
+  `prefix_wanted_per_hour` (240) holder requests one reader prefix may
+  trigger.
+- A holder must deliver the whole body within 120 s. A reader whose copy is
+  not written within the wait left + 10 s + size at 64 KiB/s is cut off, so
+  a reader that stops reading can't pin a blob in memory.
 - Per IP: 60 `wanted` / min (each node its share over the live nodes), shed
   before any work.
 - Waiting readers: 4 per client address bucket, 8 per network prefix, 512
   per node (`503 busy`).
 - A reader waits at most `stream_wait_seconds`, then `404` (its own 5-minute
   miss cache applies).
-- A holder household answers at most 2 at once and sends at most 1 GiB an
-  hour across every GFS (past either: decline); it keeps a sealed blob 30 s
+- A holder household answers at most 2 at once per GFS and 4 in all (past
+  either the frame is dropped before any work, and the GFS moves on after
+  10 s), and sends at most 512 MiB an hour per GFS and 1 GiB in all (past
+  either: decline `not_held`) — one GFS, or a reader flooding one, can't
+  spend the household's budget for the others. It keeps a sealed blob 30 s
   so tickets for it from several nodes seal it once.
 
 **Settings** (`[space_media]`, env `GFS_SPACE_MEDIA_<KEY>`,
@@ -3893,16 +3923,19 @@ asked address, and only a file referenced by this space's content alone
 **State.** GFS migration `0026`: `gfs_space_media_demand` — per (blob,
 scope): when the cache stored the copy that left (noted on expiry or
 eviction, never on a delete or a ban), the request window and count, and
-the re-upload claim. No reader.
+the re-upload claim. No reader. The hourly sweep drops rows untouched for
+30 days.
 
 **Admin.** The overview's `space_media` block gains this node's
 `on_demand`, `holder_requests`, `streams_served`, `streamed_bytes`,
 `reuploads`, `declined`, `on_demand_misses` and `live_sessions`.
 
 **What anyone learns.** The GFS already knew the blob, its scope and the
-space's host or the channel's seats; it learns that someone wanted the blob
-(by address, as for any fetch) and which household answered — one it asked
-by name over its own socket. The holder learns that some reader wanted the
+space's owner or the channel's seats; it learns that someone wanted the
+blob (by address, as for any fetch) and which household answered — one it
+asked by name over its own socket. Asking anyone else teaches it nothing:
+a non-owner declines the same way whether or not it is a member, and a
+replayed hint goes stale after 600 s. The holder learns that some reader wanted the
 file, never who. Readers never learn which household answered. The bytes
 stay ciphertext under the space content key.
 

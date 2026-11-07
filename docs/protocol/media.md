@@ -635,31 +635,57 @@ capability carries `on_demand: {wait_s}`:
 same cookie-less, address-pinned session as the fetch. The **hint**
 (`space_media_hint.py`, suite `smh1-aesgcm-256`) seals what the descriptor
 says about the file — the item, the household that sealed it, the author's
-file name — under a key derived from the epoch's space media key, with a
-random nonce and the scope, scope id, blob and epoch in the AAD. The GFS
-can't open it; it names nothing about the reader. The answer is checked and
+file name, and when it was sealed (`t`) — under a key derived from the
+epoch's space media key, with a random nonce and the scope, scope id, blob
+and epoch in the AAD. The GFS can't open it; it names nothing about the
+reader; a holder refuses one sealed more than 600 s ago
+(`HINT_MAX_AGE_S`), so a GFS can't keep it and replay it later. The answer is checked and
 stored exactly like a fetched blob (scope-bound address, decrypt,
 write-once); a miss there is a miss, and the view's 5-minute miss cache
 applies.
 
 **Holder** (`SpaceMediaGfsResponder`). A household lists
 `space_media_serve` in its GFS hello and answers the GFS's
-`space_media_request {ticket, scope, scope_id, blob_id, mode, hint}`: it
-opens the hint, finds the file under its own name for it (the author's
-name, or the `sd-` / `sg-` name it got the file under — never a reserved
-`dm-` / `gm-` name), requires that only this space's content references it
-(`confined_to_space`), seals it again (deterministic, so byte-identical)
-and checks that it sits at exactly the asked address. Then it sends
-`PUT /gfs/media/serve/{ticket}`, signed by its household key — with its
-normal upload authorization for a `cache` request, at most once per (GFS,
-blob) per 10 minutes — or `POST …/decline`. At most 2 answers at once and
-1 GiB sent an hour (past either: decline).
+`space_media_request {ticket, scope, scope_id, blob_id, mode, hint}` — but
+only where the GFS may ask it: for a listed space only the **owner**
+household (`owner_instance_id` is its own), for a private channel a
+household holding that channel. Any other household declines `not_held`
+before it opens anything, so a GFS replaying a hint to other households
+can't learn who is a member. Otherwise it opens the hint (a stale or
+unopenable one: `bad_hint`), finds the file under its own name for it (the
+author's name, or the `sd-` / `sg-` name it got the file under — never a
+reserved `dm-` / `gm-` name), requires that only this space's content
+references it (`confined_to_space`) and that a **live** row of the space
+shows it (`live_in_space`: not a deleted post, comment, listing, event, page
+or album item, never only a moderation queue or an edit history — a deleted
+item's picture never comes back), seals it again (deterministic, so
+byte-identical) and checks that it sits at exactly the asked address (a
+file held but at another address: `bad_hint`). Then it sends
+`PUT /gfs/media/serve/{ticket}`, signed by its household key over
+`{instance_id, media_ticket, op: "serve", ts}` — with its normal upload
+authorization for a `cache` request, at most once per (GFS, blob) per
+10 minutes — or `POST …/decline` (`op: "decline"`, body
+`{"reason": "bad_hint" | "not_held"}`). On `bad_hint` the GFS asks it again
+with another waiting reader's hint; on `not_held` it moves on. Budgets are
+per GFS **and** in all: at most 2 answers at once per GFS and 4 in all
+(past either the frame is dropped before any work), at most 512 MiB an hour
+per GFS and 1 GiB in all (past either: `not_held`).
 
 **Large videos are lazy.** A video whose blob is at least 1 MiB is
-described but no longer uploaded at once to a GFS that proves `on_demand`,
-while every link-joined reader of the space is at v_83 or above (an older
-one keeps the eager upload): it goes only when someone plays it. Pictures
-go at once, as before.
+described but no longer uploaded at once — only when the uploading
+household **owns** the listed space (the one household the GFS would ask
+for it), to a GFS that proves `on_demand`, while every link-joined reader of
+the space is at v_83 or above (an older one keeps the eager upload). It goes
+only when someone plays it. A member's large video, and any large video of a
+private space's channel, still goes at once, as before; so do pictures.
+
+**Follower subset (written down per the "members equal" rule).** Followers
+are not told apart by version, so a follower household below v_83 gets no
+lazy video: it never asks, and the video is not in the cache until a v_83
+reader plays it (after that, while it stays cached, it gets it like any
+blob). Members are never in this subset: a link-joined member below v_83
+keeps the eager upload, and paired / mesh members get the bytes from the
+household.
 
 **Cache or stream.** The GFS decides per request: content asked
 `cache_after_requests` (3) times within the hour, or content it stored
@@ -667,11 +693,12 @@ within `fresh_seconds` (7 days) while the cache is below 95 % full, is
 re-uploaded into the cache; anything else — old content, a one-off view, a
 full cache — is streamed to the waiting reader(s) and not stored
 (`Cache-Control: no-store`). Only one household is asked at a time: the
-space's host for a listed space, a seated member household for a private
-space's channel (at most 3 in turn).
+space's owner household for a listed space, a seated member household for a
+private space's channel (at most 3 in turn). Readers of one blob arriving
+together share one decision and one session.
 
 **Wanted → one re-upload** (a cluster: the reader's request lands on node B,
-the host's socket is on node A):
+the owner's socket is on node A):
 
 ```mermaid
 sequenceDiagram
@@ -680,16 +707,17 @@ sequenceDiagram
     participant B as GFS node B
     participant DB as Shared gfs.db + data dir
     participant A as GFS node A
-    participant H as Holder (space host)
+    participant H as Holder (space owner)
     R->>LB: POST /gfs/media/{blob_id}/wanted {scope, scope_id, hint}
     LB->>B: (any node)
     B->>DB: not cached, count the request — stored lately or asked often?
+    Note over B: room for a session on this node
     B->>DB: claim the one re-upload of this blob (cluster-wide)
     Note over B: session, ticket = route_tag(B).random
     B->>A: NODE_DRAIN_HINT typed instance frame
     A->>H: WS space_media_request {ticket, mode: cache, hint}
-    Note over H: open hint, find the file, confined_to_space,<br/>re-seal, check the address
-    H->>LB: PUT /gfs/media/serve/{tag}.{rand}<br/>X-SH-Instance / Timestamp / Signature + X-SH-Space-Media-Auth
+    Note over H: owner of the space? fresh hint? find the file,<br/>confined_to_space + live_in_space, re-seal, check the address
+    H->>LB: PUT /gfs/media/serve/{tag}.{rand}<br/>signed op serve + X-SH-Space-Media-Auth
     LB->>B: routed by the ticket's tag
     B-->>R: chunks as they arrive (last byte held back)
     Note over B: whole body at the asked address
@@ -715,8 +743,11 @@ sequenceDiagram
         G-->>R: 200 piped blob, Cache-Control: no-store
         Note over G: verified at its address, kept in memory<br/>coalesce_seconds for joiners, never on disk
         G-->>H: 200 {stored: false}
-    else no file / over its budget
-        H->>G: POST /gfs/media/serve/{ticket}/decline
+    else hint stale or unusable
+        H->>G: POST /gfs/media/serve/{ticket}/decline {reason: bad_hint}
+        G->>H: same request with the next waiting reader's hint (≤ 4 kept)
+    else not the owner, no live file, over its budget
+        H->>G: POST /gfs/media/serve/{ticket}/decline {reason: not_held}
         G-->>R: 404 no-store (after the next holder, if any)
     end
 ```
@@ -732,23 +763,30 @@ unchanged (an immutable `GET`, served by the CDN).
   is cached — stream, stream, re-upload — and on a cluster at most one
   stream per node per `coalesce_seconds` plus ONE re-upload cluster-wide:
   ≤ 200 × (3 + nodes − 1) × 300 KiB ≈ 200 × 6 × 300 KiB ≈ **360 MB from the
-  host, once**. The 10 000 × 200 = 2 M reads (≈ 600 GB) are then served by
-  the cache and the CDN — the same as if the pictures had never expired.
-  Prefetch never asks, so only views cost. The host's 1 GiB / h and the
-  scope's 512 MiB / h stream budget cap any burst: past them, clean misses.
+  owner household, once**. The 10 000 × 200 = 2 M reads (≈ 600 GB) are
+  then served by the cache and the CDN — the same as if the pictures had
+  never expired. Prefetch never asks, so only views cost. The owner's
+  512 MiB / h per GFS (1 GiB / h in all) and the scope's 512 MiB / h stream
+  budget cap any burst: past them, clean misses.
 - **One hostile reader asking for every blob id it can see.** ≤ 60 `wanted`
   / min per IP and ≤ 240 holder requests an hour per /48 or /24
-  (cluster-wide) → ≤ 240 × 8 MiB ≈ 1.9 GiB / h of holder bytes per prefix
-  at most, further capped by the scope's 512 MiB / h and the holder's
-  1 GiB / h. A repeat of a failed blob within `coalesce_seconds` asks
-  nobody; a forged hint only makes the holder decline (the address must
-  match a real descriptor); waiting connections are ≤ 4 per client and ≤ 8
-  per prefix.
+  (cluster-wide). The bytes those requests make holders send are capped
+  per prefix at 1/8 of the scope's stream budget — **≤ 64 MiB / h per
+  scope** at the defaults — and per scope at 512 MiB / h, and the holder
+  sends at most 512 MiB / h to that GFS, so honest readers keep at least
+  7/8 of the scope's budget. A repeat of a blob a holder said it doesn't
+  hold asks nobody within `coalesce_seconds`; a junk or forged hint only
+  makes the holder decline `bad_hint` — the GFS then tries an honest
+  reader's hint, and the blob is not marked missing (the address must match
+  a real descriptor); a replayed hint goes stale after 600 s. Waiting
+  connections are ≤ 4 per client and ≤ 8 per prefix, and a reader that
+  stops reading is cut off.
 
 **Fallback.** A reader below v_83 never asks (a blob that left the cache
 stays missing for it, as before). A holder below v_83 never listed
 `space_media_serve` and is never asked. A link-joined reader below v_83
-keeps eager video uploads. A GFS without `on_demand` is never asked.
+keeps eager video uploads; a follower below v_83 gets no lazy video (the
+follower subset above). A GFS without `on_demand` is never asked.
 
 ## Implementation pointers
 
