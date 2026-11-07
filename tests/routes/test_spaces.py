@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import io
 from datetime import UTC, datetime, timedelta
 
 import aiohttp
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
+from PIL import Image
 
 from socialhome.app import create_app
 from socialhome.app_keys import db_key as _db_key
@@ -23,6 +25,10 @@ from socialhome.domain.federation import GfsConnection
 from socialhome.domain.space import SpaceFeatureAccess, SpaceFeatures
 from socialhome.repositories.gfs_connection_repo import SqliteGfsConnectionRepo
 from socialhome.routes.spaces import _features_from_body
+
+#: The space icon "Home Assistant" as the SPA stores it in ``emoji``
+#: (client/src/features/spaces/spaceGlyph.ts ``HA_SPACE_SYMBOL``).
+HA_SPACE_SYMBOL = "\U0001f3e0\ufe0e"
 
 
 def _auth(token: str) -> dict:
@@ -2502,6 +2508,67 @@ async def test_space_icon_upload_fetch_and_clear(client):
     assert (
         await client.get(f"/api/spaces/{sid}/icon", headers=_auth(client._admin_token))
     ).status == 404
+
+
+async def test_space_icon_webp_upload_is_reencoded_to_a_256px_webp(client):
+    """A WebP picked as the space's own picture uploads like any other
+    image: re-encoded to a square WebP of at most 256 px and shown."""
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "WebpIcon"},
+        headers=_auth(client._admin_token),
+    )
+    sid = (await r.json())["id"]
+    buf = io.BytesIO()
+    Image.new("RGB", (640, 400), (3, 169, 244)).save(buf, format="WEBP")
+    form = aiohttp.FormData()
+    form.add_field(
+        "file", buf.getvalue(), filename="ha.webp", content_type="image/webp"
+    )
+    up = await client.post(
+        f"/api/spaces/{sid}/icon", data=form, headers=_auth(client._admin_token)
+    )
+    assert up.status == 200
+    assert (await up.json())["icon_url"].startswith(f"api/spaces/{sid}/icon?v=")
+
+    fetch = await client.get(
+        f"/api/spaces/{sid}/icon", headers=_auth(client._admin_token)
+    )
+    assert fetch.status == 200
+    assert fetch.headers["Content-Type"] == "image/webp"
+    with Image.open(io.BytesIO(await fetch.read())) as img:
+        assert img.format == "WEBP"
+        assert max(img.size) <= 256
+
+
+async def test_space_emoji_keeps_the_home_assistant_symbol_unchanged(client):
+    """The Home Assistant symbol (house + VS15) is stored and returned
+    byte for byte on create and PATCH — the SPA tells it from a picked
+    house by the selector, so nothing on the way may strip it."""
+    r = await client.post(
+        "/api/spaces",
+        json={"name": "Smart home", "emoji": HA_SPACE_SYMBOL},
+        headers=_auth(client._admin_token),
+    )
+    assert r.status == 201, await r.text()
+    sid = (await r.json())["id"]
+    detail = await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
+    assert (await detail.json())["emoji"] == "\U0001f3e0︎"
+
+    p = await client.patch(
+        f"/api/spaces/{sid}", json={"emoji": "🥕"}, headers=_auth(client._admin_token)
+    )
+    assert p.status == 200
+    p = await client.patch(
+        f"/api/spaces/{sid}",
+        json={"emoji": HA_SPACE_SYMBOL},
+        headers=_auth(client._admin_token),
+    )
+    assert p.status == 200
+    rows = await (
+        await client.get("/api/spaces", headers=_auth(client._admin_token))
+    ).json()
+    assert next(s for s in rows if s["id"] == sid)["emoji"] == HA_SPACE_SYMBOL
 
 
 async def test_space_cover_non_admin_forbidden(client):

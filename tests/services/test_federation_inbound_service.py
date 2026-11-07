@@ -2697,6 +2697,18 @@ async def test_space_config_changed_applies_when_sequence_advances(
     assert row["config_sequence"] == 6
 
 
+async def test_space_config_changed_keeps_the_home_assistant_symbol(db, bus, inbound):
+    """The host's Home Assistant icon (🏠 + VS15) lands byte for byte on
+    a member household, so its SPA draws the logo, not a house."""
+    await _seed_space(db, space_id="sp-ha", from_instance="peer-a", seq=5)
+    ev = _cfg_event(space_id="sp-ha", from_instance="peer-a", sequence=6, name="Home")
+    ev.payload["emoji"] = "\U0001f3e0︎"
+    ev.payload["space_meta"]["emoji"] = "\U0001f3e0︎"
+    await inbound._on_space_config_changed(ev)
+    row = await db.fetchone("SELECT emoji FROM spaces WHERE id='sp-ha'")
+    assert row["emoji"] == "\U0001f3e0︎"
+
+
 async def test_an_ownership_transfer_forgets_the_stubs_owner_seat(db, bus, inbound):
     """Migration 0070: ``owner_user_id`` names the OLD owner after a
     transfer — the host's config with a new ``owner_username`` clears it
