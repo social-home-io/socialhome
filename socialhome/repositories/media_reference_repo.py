@@ -351,7 +351,9 @@ class SqliteMediaReferenceRepo:
         space *space_id* — what the GFS media cache may seal under that
         space's key for its readers. A file any household row, DM, moment,
         private or household album, or another space's row names is not
-        (a member could name such a file in a post of the space)."""
+        (a member could name such a file in a post of the space) — except a
+        link card's thumbnail: one cached file backs every post that linked
+        the page, and those references outside the space are ignored."""
         if not basename or not space_id:
             return False
         referenced = False
@@ -389,6 +391,14 @@ class SqliteMediaReferenceRepo:
                 if not hit:
                     continue
                 if r.get("s") != space_id:
+                    if col == "link_preview_json":
+                        # A link card's thumbnail is cached per URL and backs
+                        # every post that linked the page (feed, other
+                        # spaces): public web content the household fetched
+                        # itself, so it never keeps the file from this
+                        # space's readers (#1309 re-review 3) — nor makes it
+                        # this space's.
+                        continue
                     return False
                 referenced = True
         return referenced
