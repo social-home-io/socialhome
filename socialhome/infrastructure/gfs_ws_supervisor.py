@@ -49,6 +49,7 @@ class GfsWebSocketSupervisor:
         "_on_new_subscriber",
         "_on_relay",
         "_on_relay_seen",
+        "_on_space_media_request",
         "_repo",
         "_session_factory",
         "_signing_key",
@@ -87,6 +88,8 @@ class GfsWebSocketSupervisor:
         self._on_new_subscriber = on_new_subscriber
         self._on_envelope = on_envelope
         self._on_connected = on_connected
+        #: v_83 — ``(frame, *, gfs_id)``: a GFS asks for a space blob.
+        self._on_space_media_request: Callable[..., Awaitable[None]] | None = None
         self._interval = reconcile_interval_seconds
         self._clients: dict[str, GfsWebSocketClient] = {}
         #: ``gfs_id`` → that client's base URL, so a late-bound handler can
@@ -120,6 +123,15 @@ class GfsWebSocketSupervisor:
         self._on_moment_public = handler
         for gfs_id, client in list(self._clients.items()):
             client.attach_moment_public_handler(_bind_gfs_id(handler, gfs_id))
+
+    def attach_space_media_request_handler(
+        self, handler: Callable[..., Awaitable[None]]
+    ) -> None:
+        """Late-bound — the v_83 holder side, told which connection asked
+        (``gfs_id``): the answer goes back to that GFS."""
+        self._on_space_media_request = handler
+        for gfs_id, client in list(self._clients.items()):
+            client.attach_space_media_request_handler(_bind_gfs_id(handler, gfs_id))
 
     def attach_follow_changed_handler(
         self,
@@ -301,6 +313,11 @@ class GfsWebSocketSupervisor:
                 else None
             ),
             on_connected=wrapped_on_connected,
+            on_space_media_request=(
+                _bind_gfs_id(self._on_space_media_request, conn.id)
+                if self._on_space_media_request is not None
+                else None
+            ),
         )
         async with self._lock:
             existing = self._clients.get(conn.id)

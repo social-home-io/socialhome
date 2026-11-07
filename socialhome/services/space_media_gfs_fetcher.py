@@ -36,6 +36,17 @@ delivering household (:mod:`socialhome.space_media_seal`) — and writes the
 file write-once under its local name (:mod:`.inbound_media_store`). An
 unknown suite, a wrong hash or a failed decrypt is refused with a WARNING and
 writes nothing.
+
+**On demand (v_83).** A VIEW whose fetch found the blob on no GFS asks for
+it once: ``POST /gfs/media/{blob_id}/wanted`` to the first source whose
+signed ``space_media`` capability proves ``on_demand``, with the scope id
+this household knows and a hint sealed for space key holders
+(:mod:`socialhome.space_media_hint`: the item, the sealing household and
+the file name — nothing about this household). The GFS has a holder
+re-upload or stream the same ciphertext, which is checked and stored exactly
+like a fetched blob; a miss there is a miss (the view's miss cache applies).
+A prefetch never asks — only a person looking at the item makes a holder
+send anything.
 """
 
 from __future__ import annotations
@@ -61,6 +72,7 @@ from ..domain.space_media_ref import (
     SpaceMediaRef,
     parse_media_refs,
 )
+from ..space_media_hint import SpaceMediaLocator, seal_space_media_hint
 from ..space_media_seal import (
     UnsupportedSpaceMediaSuite,
     open_space_media,
@@ -173,8 +185,8 @@ class SpaceMediaGfsFetcher:
         #: Only for this household's own channel id of a private space.
         self._spaces = space_repo
         self._dir = pathlib.Path(media_dir)
-        #: filename → the one fetch running for it (coalescing).
-        self._inflight: dict[str, asyncio.Task[str]] = {}
+        #: (filename, asks on a miss) → the one fetch running for it.
+        self._inflight: dict[tuple[str, bool], asyncio.Task[str]] = {}
         self._tasks: set[asyncio.Task] = set()
         self._prefetch_sem = asyncio.Semaphore(PREFETCH_CONCURRENCY)
         self._prefetch_pending = 0
@@ -311,7 +323,7 @@ class SpaceMediaGfsFetcher:
             return False
         if self._misses.get(filename, 0.0) > _monotonic():
             return False  # no GFS held it a moment ago: don't ask them all again
-        task = self._fetch_task(filename)
+        task = self._fetch_task(filename, want=True)
         try:
             outcome = await asyncio.wait_for(asyncio.shield(task), timeout=timeout_s)
         except TimeoutError:
@@ -324,23 +336,24 @@ class SpaceMediaGfsFetcher:
                 self._misses.popitem(last=False)
         return outcome == _STORED
 
-    def _fetch_task(self, filename: str) -> asyncio.Task[str]:
-        task = self._inflight.get(filename)
+    def _fetch_task(self, filename: str, *, want: bool = False) -> asyncio.Task[str]:
+        key = (filename, want)
+        task = self._inflight.get(key)
         if task is None:
-            task = asyncio.create_task(self._fetch_bounded(filename))
-            self._inflight[filename] = task
+            task = asyncio.create_task(self._fetch_bounded(filename, want=want))
+            self._inflight[key] = task
             self._tasks.add(task)
 
-            def _done(t: asyncio.Task, name: str = filename) -> None:
-                self._inflight.pop(name, None)
+            def _done(t: asyncio.Task, k: tuple[str, bool] = key) -> None:
+                self._inflight.pop(k, None)
                 self._tasks.discard(t)
 
             task.add_done_callback(_done)
         return task
 
-    async def _fetch_bounded(self, filename: str) -> str:
+    async def _fetch_bounded(self, filename: str, *, want: bool = False) -> str:
         async with self._fetch_sem:
-            return await self._fetch(filename)
+            return await self._fetch(filename, want=want)
 
     def _prefetch(self, filename: str, space_id: str) -> None:
         if (
@@ -401,10 +414,11 @@ class SpaceMediaGfsFetcher:
         for task in pending:
             task.cancel()
 
-    async def _fetch(self, filename: str) -> str:
+    async def _fetch(self, filename: str, *, want: bool = False) -> str:
         """One fetch: ``stored`` (the file is here now), ``miss`` (no GFS
         holds the blob — yet) or ``refused`` (anything else: unknown
-        suite, no key, wrong hash, failed decrypt — not worth retrying)."""
+        suite, no key, wrong hash, failed decrypt — not worth retrying).
+        With *want* (a view), a miss everywhere asks one GFS for it (v_83)."""
         if not is_gfs_space_media_name(filename):
             log.warning(
                 "space media %s: not a GFS space media name — never fetched", filename
@@ -440,55 +454,118 @@ class SpaceMediaGfsFetcher:
             )
             return _REFUSED
         outcome = _MISS
-        for conn in await self._sources(ref.space_id):
-            base_url = conn.inbox_url
+        sources = await self._sources(ref.space_id)
+        for conn in sources:
             blob = await self._gfs.fetch_space_media(
                 conn, ref.blob_id, max_bytes=ref.size, timeout_s=REQUEST_TIMEOUT_S
             )
             if blob is None:
                 continue
-            try:
-                address = await asyncio.to_thread(
-                    space_media_address,
-                    ref.scope,
-                    scope_id,
-                    blob,
-                    suite=ref.addr_suite,
-                )
-            except ValueError:
-                address = ""
-            if address != ref.blob_id:
-                log.warning(
-                    "space media %s from %s: not at its %s address — refused",
-                    filename,
-                    base_url,
-                    ref.scope,
-                )
-                outcome = _REFUSED
-                continue
-            try:
-                data = await asyncio.to_thread(_open_sync, blob, current[1], ref)
-            except ValueError, InvalidTag:
-                log.warning(
-                    "space media %s: cannot decrypt the blob — refused", filename
-                )
-                return _REFUSED
-            await self._write(path, data)
-            log.info(
-                "space media %s (%s of %s): fetched blob %s (%d bytes) from GFS %s",
-                filename,
-                ref.filename,
-                ref.item_id,
-                ref.blob_id[:12],
-                len(blob),
-                base_url,
-            )
-            return _STORED
+            got = await self._accept(blob, ref, scope_id, current[1], path, conn)
+            if got != _MISS:
+                return got
+            outcome = _REFUSED
+        if outcome == _MISS and want:
+            return await self._want(ref, scope_id, current[1], path, sources)
         if outcome == _MISS:
             log.info(
                 "space media %s: no GFS holds blob %s (yet)", filename, ref.blob_id[:12]
             )
         return outcome
+
+    async def _want(
+        self,
+        ref: SpaceMediaRef,
+        scope_id: str,
+        key: bytes,
+        path: pathlib.Path,
+        sources: list[GfsConnection],
+    ) -> str:
+        """Ask the first source that proves ``on_demand`` for the blob (a
+        holder re-uploads or streams it); checked like a fetch."""
+        for conn in sources:
+            wait = await self._gfs.space_media_on_demand_wait(conn)
+            if wait is None:
+                continue
+            hint = seal_space_media_hint(
+                media_key=key,
+                scope=ref.scope,
+                scope_id=scope_id,
+                blob_id=ref.blob_id,
+                epoch=ref.epoch,
+                locator=SpaceMediaLocator(
+                    item_id=ref.item_id, origin=ref.origin, filename=ref.filename
+                ),
+            )
+            blob = await self._gfs.want_space_media(
+                conn,
+                ref.blob_id,
+                {"scope": ref.scope, "scope_id": scope_id, "hint": hint},
+                max_bytes=ref.size,
+                timeout_s=wait + REQUEST_TIMEOUT_S,
+            )
+            if blob is None:
+                log.info(
+                    "space media %s: GFS %s found no holder for blob %s",
+                    ref.local_name,
+                    conn.inbox_url,
+                    ref.blob_id[:12],
+                )
+                return _MISS
+            got = await self._accept(blob, ref, scope_id, key, path, conn)
+            return _REFUSED if got == _MISS else got
+        log.info(
+            "space media %s: no GFS holds blob %s (yet)",
+            ref.local_name,
+            ref.blob_id[:12],
+        )
+        return _MISS
+
+    async def _accept(
+        self,
+        blob: bytes,
+        ref: SpaceMediaRef,
+        scope_id: str,
+        key: bytes,
+        path: pathlib.Path,
+        conn: GfsConnection,
+    ) -> str:
+        """Check *blob* (its scope-bound address, then the decrypt) and
+        write the file: ``stored``, ``refused`` (it can't open), or ``miss``
+        (not at its address — another source may hold the right one)."""
+        base_url = conn.inbox_url
+        try:
+            address = await asyncio.to_thread(
+                space_media_address, ref.scope, scope_id, blob, suite=ref.addr_suite
+            )
+        except ValueError:
+            address = ""
+        if address != ref.blob_id:
+            log.warning(
+                "space media %s from %s: not at its %s address — refused",
+                ref.local_name,
+                base_url,
+                ref.scope,
+            )
+            return _MISS
+        try:
+            data = await asyncio.to_thread(_open_sync, blob, key, ref)
+        except ValueError, InvalidTag:
+            log.warning(
+                "space media %s: cannot decrypt the blob — refused", ref.local_name
+            )
+            return _REFUSED
+        await self._write(path, data)
+        log.info(
+            "space media %s (%s of %s): fetched blob %s (%d bytes) from GFS %s",
+            ref.local_name,
+            ref.filename,
+            ref.item_id,
+            ref.blob_id[:12],
+            len(blob),
+            base_url,
+        )
+        return _STORED
 
     async def _scope_id(self, ref: SpaceMediaRef) -> str | None:
         """The scope id this household itself knows for *ref*'s scope: the

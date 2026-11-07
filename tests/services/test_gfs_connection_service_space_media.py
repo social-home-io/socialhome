@@ -8,7 +8,10 @@ from dataclasses import replace
 
 import aiohttp
 
+from socialhome.canonical_json import canonical_bytes
+from socialhome.crypto import b64url_decode, ed25519_public_key, verify_ed25519
 from socialhome.domain.gfs_space_media import SPACE_MEDIA_AUTH_HEADER
+from socialhome.domain.gfs_space_media_on_demand import serve_signing_body
 from socialhome.services.gfs_connection_service import GfsConnectionService
 
 from . import test_gfs_connection_service as _base
@@ -37,6 +40,8 @@ class _MediaSession:
         self.raise_on = raise_on
         self.gets: list[str] = []
         self.puts: list[tuple[str, bytes, dict]] = []
+        self.posts: list[tuple[str, object, dict]] = []
+        self.post_status = get_status
 
     def get(self, url, **_kw):
         self.gets.append(url)
@@ -54,8 +59,15 @@ class _MediaSession:
         self.puts.append((url, data, dict(headers or {})))
         return _base._StubResp(self.put_status, {"stored": True})
 
-    def post(self, url, **_kw):  # pragma: no cover - unused
-        return _base._StubResp(200, {})
+    def post(self, url, *, json=None, data=None, headers=None, **_kw):
+        if self.raise_on == "POST":
+            raise aiohttp.ClientError("down")
+        self.posts.append(
+            (url, json if json is not None else data, dict(headers or {}))
+        )
+        resp = _base._StubResp(self.post_status, {"declined": True})
+        resp.content = _base._Content(self.blob or b"")
+        return resp
 
 
 async def _svc(env, session, *, gfs_ids=("g1",)) -> GfsConnectionService:
@@ -115,7 +127,7 @@ async def test_a_warm_info_fetch_records_it_and_forgetting_drops_it(env):
     svc._record_capabilities(
         conn, _info({"max_blob_bytes": 4096, "ttl_s": 600, "scopes": ["space"]})
     )
-    assert svc._space_media["g1"] == (4096, frozenset({"space"}), 600)
+    assert svc._space_media["g1"] == (4096, frozenset({"space"}), 600, None)
     svc._forget_listing("g1")
     assert "g1" not in svc._space_media
 
@@ -342,3 +354,89 @@ async def test_the_capability_carries_the_servers_ttl(env):
     bad = _info({"max_blob_bytes": 4096, "ttl_s": "x", "scopes": ["space"]})
     svc = await _svc(env, _MediaSession(info=bad))
     assert await svc.space_media_ttl_s(conn) is None
+
+
+# ── On demand (v_83) ─────────────────────────────────────────────────────
+
+
+async def test_the_on_demand_wait_comes_from_the_signed_capability(env):
+    session = _MediaSession(
+        info=_info(
+            {
+                "max_blob_bytes": 4096,
+                "ttl_s": 600,
+                "scopes": ["space"],
+                "on_demand": {"wait_s": 25},
+            }
+        )
+    )
+    svc = await _svc(env, session)
+    conn = await env[1].get("g1")
+    assert await svc.space_media_on_demand_wait(conn) == 25
+    for bad in (None, {"wait_s": 0}, {"wait_s": "x"}, {"wait_s": 999}, True):
+        entry = {"max_blob_bytes": 4096, "ttl_s": 600, "scopes": ["space"]}
+        if bad is not None:
+            entry["on_demand"] = bad
+        session = _MediaSession(info=_info(entry))
+        svc = await _svc(env, session)
+        assert await svc.space_media_on_demand_wait(await env[1].get("g1")) is None
+
+
+async def test_wanted_posts_the_body_anonymously_and_reads_the_blob(env):
+    session = _MediaSession(blob=b"cipher", get_status=200)
+    svc = await _svc(env, session)
+    conn = await env[1].get("g1")
+    body = {"scope": "space", "scope_id": "sp", "hint": {"suite": "x"}}
+    got = await svc.want_space_media(conn, BID, body, max_bytes=64, timeout_s=5)
+    assert got == b"cipher"
+    url, sent, headers = session.posts[0]
+    assert url == f"https://g1.example/gfs/media/{BID}/wanted"
+    assert sent == body
+    # Identity-free: nothing names this household.
+    assert not any(h.lower().startswith("x-sh") for h in headers)
+
+
+async def test_wanted_misses(env):
+    for kw in ({"get_status": 404}, {"raise_on": "POST"}, {"blob": b"x" * 100}):
+        session = _MediaSession(**({"blob": b"c"} | kw))
+        svc = await _svc(env, session)
+        conn = await env[1].get("g1")
+        assert (
+            await svc.want_space_media(conn, BID, {}, max_bytes=64, timeout_s=5) is None
+        )
+    svc = await _svc(env, _MediaSession())
+    assert (
+        await svc.want_space_media(
+            await env[1].get("g1"), "nope", {}, max_bytes=64, timeout_s=5
+        )
+        is None
+    )
+
+
+async def test_serve_and_decline_are_signed_by_the_household(env):
+    seed = b"s" * 32
+    session = _MediaSession(put_status=200, get_status=200)
+    svc = await _svc(env, session)
+    svc._own_instance_id = "me"
+    svc._own_signing_key = seed
+    conn = await env[1].get("g1")
+    ticket = "node-1." + "a" * 32
+    status = await svc.serve_space_media(conn, ticket, b"cipher", upload_auth="auth")
+    assert status == 200
+    url, data, headers = session.puts[0]
+    assert url == f"https://g1.example/gfs/media/serve/{ticket}"
+    assert data == b"cipher"
+    assert headers[SPACE_MEDIA_AUTH_HEADER] == "auth"
+    assert headers["X-SH-Instance"] == "me"
+    signed = serve_signing_body("me", ticket, int(headers["X-SH-Timestamp"]))
+    assert verify_ed25519(
+        ed25519_public_key(seed),
+        canonical_bytes(signed),
+        b64url_decode(headers["X-SH-Signature"]),
+    )
+    assert await svc.serve_space_media(conn, ticket, None) == 200
+    url, _, headers = session.posts[-1]
+    assert url == f"https://g1.example/gfs/media/serve/{ticket}/decline"
+    assert SPACE_MEDIA_AUTH_HEADER not in headers
+    session.raise_on = "PUT"
+    assert await svc.serve_space_media(conn, ticket, b"c") is None

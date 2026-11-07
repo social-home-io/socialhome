@@ -441,6 +441,7 @@ from .services.space_crypto_service import (
 )
 from .services.space_location_outbound import SpaceLocationOutbound
 from .services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
+from .services.space_media_gfs_responder import SpaceMediaGfsResponder
 from .services.space_media_gfs_uploader import SpaceMediaGfsUploader
 from .services.space_media_names import SpaceMediaNamer
 from .services.space_media_sync_service import SpaceMediaSyncService
@@ -2255,8 +2256,21 @@ def _build_space_media_gfs(
         space_repo=space_repo,
         media_dir=media_dir,
     )
+    # v_83 — the holder side of on demand: a GFS asks this household for a
+    # blob a reader missed; it re-seals the file and re-uploads or streams.
+    responder = SpaceMediaGfsResponder(
+        gfs_repo=repos.gfs_connection,
+        gfs_service=gfs_connection_service,
+        space_repo=space_repo,
+        space_crypto=space_crypto,
+        media_refs=repos.media_reference,
+        uploader=uploader,
+        media_dir=media_dir,
+    )
+    responder.attach_federation(federation_service)
     app[K.space_media_gfs_uploader_key] = uploader
     app[K.space_media_gfs_fetcher_key] = fetcher
+    app[K.space_media_gfs_responder_key] = responder
     return uploader, fetcher
 
 
@@ -5432,6 +5446,9 @@ def create_app(config: Config | None = None) -> web.Application:
             on_envelope=_on_gfs_envelope,
             on_connected=_on_gfs_connected,
         )
+        # v_83 — a GFS asks this household for a space blob a reader missed.
+        if (responder := app.get(K.space_media_gfs_responder_key)) is not None:
+            gfs_ws_supervisor.attach_space_media_request_handler(responder.handle)
         await gfs_ws_supervisor.start()
         app[K.gfs_ws_supervisor_key] = gfs_ws_supervisor
         # A removed connection's push socket closes at once: nothing that
@@ -5916,6 +5933,8 @@ def create_app(config: Config | None = None) -> web.Application:
             await uploader.stop()
         if (fetcher := app.get(K.space_media_gfs_fetcher_key)) is not None:
             await fetcher.stop()
+        if (responder := app.get(K.space_media_gfs_responder_key)) is not None:
+            await responder.stop()
         await media_transcode_service.stop()
         if password_reset_cleanup_scheduler is not None:
             await password_reset_cleanup_scheduler.stop()

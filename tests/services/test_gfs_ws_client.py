@@ -1319,3 +1319,31 @@ async def test_stop_cancels_a_loop_task_that_ends_cancelled():
 
     assert client._task is None
     assert stuck.cancelled()
+
+
+async def test_a_space_media_request_goes_to_its_handler():
+    """v_83 — a GFS asks for a space blob a reader missed; no handler (an
+    older wiring) drops it, a raising handler is logged, not propagated."""
+    seed, _pub = _gen_keypair()
+    got: list[dict] = []
+
+    async def _h(frame: dict) -> None:
+        got.append(frame)
+
+    async def _boom(_frame: dict) -> None:
+        raise RuntimeError("boom")
+
+    client = GfsWebSocketClient(
+        gfs_url="https://gfs.test",
+        instance_id="sh-od",
+        signing_key=seed,
+        session_factory=lambda: None,
+        on_relay=_sink_noop,
+    )
+    frame = {"type": "space_media_request", "ticket": "t"}
+    await client._on_text(json.dumps(frame))
+    client.attach_space_media_request_handler(_h)
+    await client._on_text(json.dumps(frame))
+    assert got == [frame]
+    client.attach_space_media_request_handler(_boom)
+    await client._on_text(json.dumps(frame))
