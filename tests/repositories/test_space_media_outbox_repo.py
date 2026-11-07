@@ -134,3 +134,44 @@ async def test_purge_orphaned_keeps_paired_and_member_households(repo):
     # A mesh member that leaves the space is an orphan too.
     await db.enqueue("DELETE FROM space_instances WHERE instance_id='inst-mesh'")
     assert await repo.purge_orphaned() == 1
+
+
+async def test_a_failed_row_is_rearmed_by_a_fresh_enqueue(repo):
+    """A file whose sends ran out of attempts is ``failed`` — not forever:
+    a later enqueue (a §25.6 catch-up, a resume replay) re-arms it, or the
+    household would never get the bytes. A row still queued or in flight
+    is left alone (the scheduler owns it)."""
+    for blob in ("b-failed", "b-pending", "b-flight"):
+        await repo.enqueue(
+            blob_id=blob,
+            space_id="sp-1",
+            correlation_id="p-r",
+            target_instance_id="inst-kept",
+            bytes_path=f"/m/{blob}",
+        )
+    await repo.reschedule(
+        blob_id="b-pending",
+        target_instance_id="inst-kept",
+        attempts=3,
+        next_attempt_at="2099-01-01 00:00:00",
+        last_error="later",
+    )
+    await repo.mark_in_flight(blob_id="b-flight", target_instance_id="inst-kept")
+    await repo.mark_failed(
+        blob_id="b-failed", target_instance_id="inst-kept", last_error="gave up"
+    )
+    for blob in ("b-failed", "b-pending", "b-flight"):
+        await repo.enqueue(
+            blob_id=blob,
+            space_id="sp-1",
+            correlation_id="p-r",
+            target_instance_id="inst-kept",
+            bytes_path=f"/m/{blob}",
+        )
+    rows = {r.blob_id: r for r in await repo.list_for_correlation("p-r")}
+    assert (rows["b-failed"].status, rows["b-failed"].attempts) == ("pending", 0)
+    assert rows["b-failed"].last_error is None
+    assert (rows["b-pending"].status, rows["b-pending"].attempts) == ("pending", 3)
+    assert rows["b-flight"].status == "in_flight"
+    due = {e.blob_id for e in await repo.list_due()}
+    assert "b-failed" in due and "b-pending" not in due

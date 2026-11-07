@@ -74,6 +74,7 @@ from socialhome.federation.owner_bound_id import (
     mint_owner_bound_id,
 )
 from socialhome.federation.sync.space.exporter import ALLOWED_RESOURCES
+from socialhome.services.inbound_media_store import space_direct_media_name
 from socialhome.services.space_crypto_service import (
     sign_authority_event,
     strip_authority_sig_fields,
@@ -1773,9 +1774,13 @@ async def test_federated_gallery_deletes_remove_the_files(env, tmp_dir):
         {"id": "album-files", "owner_user_id": "u-g", "name": "Files"},
         sender=AUTHOR,
     )
+
+    def here(name: str) -> str:  # the author's file, by its name here
+        return space_direct_media_name(SP, AUTHOR, name)
+
     for n in (1, 2):
         for kind in ("full", "thumb"):
-            (media / f"{kind}{n}.webp").write_bytes(b"x")
+            (media / here(f"{kind}{n}.webp")).write_bytes(b"x")
         await _deliver(
             app,
             FET.SPACE_GALLERY_ITEM_CREATED,
@@ -1792,14 +1797,14 @@ async def test_federated_gallery_deletes_remove_the_files(env, tmp_dir):
     await _deliver(
         app, FET.SPACE_GALLERY_ITEM_DELETED, {"id": "gi-files-1"}, sender=AUTHOR
     )
-    assert not (media / "full1.webp").exists()
-    assert not (media / "thumb1.webp").exists()
-    assert (media / "full2.webp").exists()
+    assert not (media / here("full1.webp")).exists()
+    assert not (media / here("thumb1.webp")).exists()
+    assert (media / here("full2.webp")).exists()
     await _deliver(
         app, FET.SPACE_GALLERY_ALBUM_DELETED, {"id": "album-files"}, sender=AUTHOR
     )
-    assert not (media / "full2.webp").exists()
-    assert not (media / "thumb2.webp").exists()
+    assert not (media / here("full2.webp")).exists()
+    assert not (media / here("thumb2.webp")).exists()
     assert (media / "f.webp").exists()
 
 

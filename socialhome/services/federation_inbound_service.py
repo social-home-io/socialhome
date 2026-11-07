@@ -159,6 +159,7 @@ from .inbound_media_store import (
     note_existing,
     parse_chunk_meta,
     partial_key,
+    space_direct_media_name,
     space_media_ref,
     space_media_refs,
     store_chunk,
@@ -174,6 +175,7 @@ from .space_crypto_service import (
     strip_authority_sig_fields,
     verify_authority_event,
 )
+from .space_media_names import SpaceMediaNamer
 from .space_mentions import SpaceMentionResolver
 from .space_moderation_federation import moderation_media_urls
 from .space_service import (
@@ -218,6 +220,16 @@ class HighlightAudienceCheck(Protocol):
 
 #: Hold-buffer scope for DMs waiting on their sender's user sync.
 _DM_HOLD_SCOPE = DM_HOLD_SCOPE
+
+#: Why a ``SPACE_MEDIA_BLOB`` is refused (:meth:`FederationInboundService
+#: ._space_media_in_scope`): its row lives in another space…
+_ROW_ELSEWHERE = "row of another space"
+#: …or its row here does not show the sender's file.
+_NOT_ITS_FILE = "not a file of the row as held here"
+
+
+def _scoped(shows_file: bool) -> str | None:
+    return None if shows_file else _NOT_ITS_FILE
 
 
 def _moment_expired(expires_at: object) -> bool:
@@ -446,6 +458,7 @@ class FederationInboundService(ProtectionGateMixin):
         "_highlight_audience",
         "_highlight_repo",
         "_media_dir",
+        "_media_names",
         "_mentions",
         "_moment_outbound",
         "_moment_reaction_router",
@@ -582,6 +595,8 @@ class FederationInboundService(ProtectionGateMixin):
         #: v_80 — keeps a space post's ``media_refs`` (its pictures in a GFS
         #: media cache) and fetches them; ``None`` ignores the descriptor.
         self._gfs_media: SpaceMediaGfsFetcher | None = None
+        #: Received space files take this household's names (sender-bound).
+        self._media_names = SpaceMediaNamer()
 
     def attach_moment_reaction_router(self, router: MomentReactionRouter) -> None:
         """v_67: keep the reaction route a relayed ``MOMENT_CREATED`` carries."""
@@ -593,19 +608,36 @@ class FederationInboundService(ProtectionGateMixin):
         space_id: str,
         item_id: str,
         urls: list[str],
+        *,
+        held: list[str] | None = None,
     ) -> SpaceMediaLocalization:
-        """v_80 — this household's names for item *item_id*'s files kept
-        in a GFS media cache, as delivered by the envelope's (authenticated)
-        sender. Empty when no fetcher is wired."""
-        if self._gfs_media is None:
-            return SpaceMediaLocalization()
-        return await self._gfs_media.localize(
-            space_id,
-            event.payload.get(MEDIA_REFS_FIELD),
-            urls,
-            item_id=item_id,
-            origin=event.from_instance,
+        """This household's names for item *item_id*'s files, as delivered
+        by the envelope's (authenticated) sender: its direct names
+        (:class:`SpaceMediaNamer`; *held* — the files the stored row shows
+        already) under the v_80 GFS reader names (empty without a
+        fetcher)."""
+        direct = self._media_names.localize(
+            space_id, event.from_instance, urls, held=held or ()
         )
+        if self._gfs_media is None:
+            return direct
+        return SpaceMediaNamer.combine(
+            direct,
+            await self._gfs_media.localize(
+                space_id,
+                event.payload.get(MEDIA_REFS_FIELD),
+                urls,
+                item_id=item_id,
+                origin=event.from_instance,
+            ),
+        )
+
+    def attach_media_names(self, namer: SpaceMediaNamer) -> None:
+        """Wire the shared namer (it knows this household's instance id) —
+        here and in this service's authorship binder (release checks)."""
+        self._media_names = namer
+        if self._authorship is not None:
+            self._authorship.attach_media_names(namer)
 
     def attach_gfs_media(self, fetcher: SpaceMediaGfsFetcher) -> None:
         """Wire the v_80 GFS media fetcher (``media_refs`` on space posts)."""
@@ -1994,7 +2026,11 @@ class FederationInboundService(ProtectionGateMixin):
         # the GFS media cache (bound to the envelope's sender), so another
         # member's item naming the same file can never swap them.
         media = await self._localize_space_media(
-            event, space_id, post.id, post_media_urls(post)
+            event,
+            space_id,
+            post.id,
+            post_media_urls(post),
+            held=post_media_urls(existing[1]) if existing is not None else None,
         )
         post = media.post(post)
         if await self._space_post_repo.save(space_id, post) is None:
@@ -2091,16 +2127,23 @@ class FederationInboundService(ProtectionGateMixin):
         Scope (``docs/protocol/media.md``):
 
         * The envelope must name one space (:func:`resolve_space_id`).
+        * **Sender-bound name:** the bytes are stored under
+          :func:`space_direct_media_name` ``(space, from_instance,
+          filename)`` — never ``filename`` itself. A row this household
+          receives from the same household names the file that way
+          (:class:`SpaceMediaNamer`), so only that household's bytes can
+          ever back it: a member that learned a file name from someone
+          else's row and pushes bytes for it (or names it in a decoy row of
+          its own) only ever fills its own name.
         * The correlated row — ``correlation_id`` (``post_id`` on older
-          senders): a post, a bazaar listing or a gallery item — must,
-          when already known here, live in that space and reference
-          ``filename``. Otherwise the blob is refused with a WARNING.
-        * Not yet known (the blob overtook its row on the mesh / §25.6
-          drain) → accepted, because the write below is write-once.
-        * **Write-once:** an existing file under ``filename`` is never
-          replaced (:mod:`inbound_media_store`). Media names are random,
-          so this is what keeps a blob from swapping another space's, a
-          DM's or the household's own file.
+          senders): a post, a bazaar listing, a gallery item, a calendar
+          event or a held moderation item — when already known here, must
+          live in that space (WARNING otherwise) and show that name (else
+          skipped: another household delivered the row here).
+        * Not yet known (the blob overtook its row) → stored; the row will
+          point at it if the same household delivers it.
+        * **Write-once:** an existing file is never replaced
+          (:mod:`inbound_media_store`).
 
         Safety:
 
@@ -2155,25 +2198,36 @@ class FederationInboundService(ProtectionGateMixin):
                 filename,
             )
             return
-        if not await self._space_media_in_scope(
+        local = space_direct_media_name(space_id, event.from_instance, filename)
+        scope = await self._space_media_in_scope(
             space_id=space_id,
             correlation_id=correlation_id,
-            filename=filename,
+            filename=local,
+        )
+        if scope == _NOT_ITS_FILE and await self._host_fills(
+            event, space_id=space_id, correlation_id=correlation_id, filename=filename
         ):
-            log.warning(
+            local, scope = filename, None
+        if scope is not None:
+            # A row of another space: an attempt. A row of this space that
+            # shows another name: it reached us from another household (the
+            # host's catch-up of a row its author delivered) — routine.
+            log.log(
+                logging.WARNING if scope == _ROW_ELSEWHERE else logging.INFO,
                 "SPACE_MEDIA_BLOB from %s: %s is not media of %s in space %s "
-                "— refusing",
+                "as held here (%s) — refusing",
                 event.from_instance,
                 filename,
                 correlation_id,
                 space_id,
+                scope,
             )
             return
         transfer_id = str(p.get("transfer_id") or "") or filename
         chunk_index, chunk_count = chunk_meta
         await self._assemble_space_chunk(
             raw=raw,
-            filename=filename,
+            filename=local,
             partial_dir=partial_key(
                 event.from_instance, transfer_id, chunk_count=chunk_count
             ),
@@ -2185,26 +2239,78 @@ class FederationInboundService(ProtectionGateMixin):
             total_size=_declared_size(p, raw, chunk_count),
         )
 
+    async def _host_fills(
+        self,
+        event: FederationEvent,
+        *,
+        space_id: str,
+        correlation_id: str,
+        filename: str,
+    ) -> bool:
+        """Whether the sender may fill ``filename`` itself — the name the
+        known row shows here — when that file is missing.
+
+        Only the space's OWNER household (``owner_instance_id``) — the
+        roster authority whose §25.6 catch-up every member syncs from: it
+        holds a member's file under the very name the row shows (names
+        don't depend on the receiver), so its catch-up fills a file the
+        author's push never delivered — and a row stored before names were
+        bound to their sender. Never an admin / moderator household,
+        nor a delegated admin acting for an offline owner: any of them
+        could plant its own bytes under a member's name while that
+        member's push to us is still queued, and write-once would then
+        refuse the real copy. A delegated admin's own catch-up still
+        delivers its rows and files under its own (matching) names.
+        Write-once: an existing file is never replaced."""
+        assert self._media_dir is not None
+        if await aiofiles.os.path.exists(self._media_dir / filename):
+            return False
+        if (
+            await self._space_media_in_scope(
+                space_id=space_id,
+                correlation_id=correlation_id,
+                filename=filename,
+                known_only=True,
+            )
+            is not None
+        ):
+            return False
+        space = await self._space_repo.get(space_id)
+        if space is None or space.owner_instance_id != event.from_instance:
+            return False
+        log.info(
+            "SPACE_MEDIA_BLOB from %s: filling %s of %s (missing here) as the "
+            "space's host",
+            event.from_instance,
+            filename,
+            correlation_id,
+        )
+        return True
+
     async def _space_media_in_scope(
         self,
         *,
         space_id: str,
         correlation_id: str,
         filename: str,
-    ) -> bool:
-        """Whether a blob for ``correlation_id`` may land in ``space_id``.
+        known_only: bool = False,
+    ) -> str | None:
+        """Why a blob stored as ``filename`` (this household's name for it)
+        for ``correlation_id`` may not land in ``space_id``, or ``None``.
 
-        ``False`` only on positive evidence: the correlated row (a post,
+        Refused only on positive evidence: the correlated row (a post,
         gallery item, calendar event, or held moderation item) is known
-        and lives in another space, or is known and does not reference
-        ``filename``. An unknown row is ``True`` — the write is
-        write-once, so accepting it can't replace anything.
+        and lives in another space (:data:`_ROW_ELSEWHERE`), or is known
+        and does not show ``filename`` (:data:`_NOT_ITS_FILE`). An unknown
+        row is ``None`` — the name is bound to the sender and the write is
+        write-once, so accepting it can't replace anything — unless
+        ``known_only`` (the row must show ``filename``).
         """
         found = await self._space_post_repo.get(correlation_id)
         if found is not None:
             post_space, post = found
             if post_space != space_id:
-                return False
+                return _ROW_ELSEWHERE
             names = {
                 media_basename(post.media_url),
                 *(media_basename(u) for u in post.image_urls or ()),
@@ -2214,46 +2320,48 @@ class FederationInboundService(ProtectionGateMixin):
                 ),
             }
             if filename in names:
-                return True
+                return None
             if post.type != PostType.BAZAAR:
-                return False
+                return _NOT_ITS_FILE
             # A bazaar wrapper post carries its photos on the listing row.
             listing = (
                 await self._bazaar_repo.get_listing(correlation_id)
                 if self._bazaar_repo is not None
                 else None
             )
-            if listing is None:
-                return True  # listing not here yet
-            return listing.space_id == space_id and filename in {
-                media_basename(u) for u in listing.image_urls
-            }
+            if listing is None:  # listing not here yet
+                return _NOT_ITS_FILE if known_only else None
+            if listing.space_id != space_id:
+                return _ROW_ELSEWHERE
+            return _scoped(filename in {media_basename(u) for u in listing.image_urls})
         if self._gallery_repo is not None:
             item = await self._gallery_repo.get_item(correlation_id)
             if item is not None:
                 album = await self._gallery_repo.get_album(item.album_id)
                 if album is None or album.space_id != space_id:
-                    return False
-                return filename in {
-                    media_basename(item.url),
-                    media_basename(item.thumbnail_url),
-                }
+                    return _ROW_ELSEWHERE
+                return _scoped(
+                    filename
+                    in {media_basename(item.url), media_basename(item.thumbnail_url)}
+                )
         if self._space_calendar_repo is not None:
             # A space calendar event's cover.
             found_event = await self._space_calendar_repo.get_event(correlation_id)
             if found_event is not None:
                 event_space, event = found_event
-                return event_space == space_id and filename == media_basename(
-                    event.cover_url
-                )
+                if event_space != space_id:
+                    return _ROW_ELSEWHERE
+                return _scoped(filename == media_basename(event.cover_url))
         # A held submission's files (a new event's cover, an edit's new
         # cover or picture) — correlated by its moderation queue item.
         held = await self._space_repo.get_moderation_item(correlation_id)
         if held is not None:
-            return held.space_id == space_id and filename in {
-                media_basename(u) for u in moderation_media_urls(held)
-            }
-        return True
+            if held.space_id != space_id:
+                return _ROW_ELSEWHERE
+            return _scoped(
+                filename in {media_basename(u) for u in moderation_media_urls(held)}
+            )
+        return _NOT_ITS_FILE if known_only else None
 
     async def _assemble_space_chunk(
         self,

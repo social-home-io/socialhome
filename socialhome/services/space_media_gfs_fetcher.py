@@ -305,6 +305,10 @@ class SpaceMediaGfsFetcher:
             return False
         if await aiofiles.os.path.isfile(path):
             return True
+        if not is_gfs_space_media_name(filename):
+            # A file another household pushes (or a local one) that is not
+            # here yet: routine for a viewer, never a GFS fetch.
+            return False
         if self._misses.get(filename, 0.0) > _monotonic():
             return False  # no GFS held it a moment ago: don't ask them all again
         task = self._fetch_task(filename)

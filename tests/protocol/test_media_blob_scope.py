@@ -8,6 +8,11 @@ against the real application registry, SQLite and media directory:
 
 * **Write-once** — a file that already exists is never replaced, whoever
   sends the blob and whatever row it claims to be for.
+* **Sender-bound names** — a space blob from household H for file F is
+  stored as ``space_direct_media_name(space, H, F)``, and a row H delivers
+  names its files that way. A household that learned another's file name
+  (and even names it in a decoy row of its own) only ever fills its own
+  copy: the first-claim attack.
 * **Space scope** — a space blob gated for space A whose post / gallery
   item / listing is known here must belong to space A and reference the
   filename.
@@ -36,7 +41,10 @@ from socialhome.app_keys import db_key, federation_service_key
 from socialhome.config import Config
 from socialhome.domain.federation import FederationEvent, FederationEventType
 from socialhome.domain.gallery import GalleryItem
-from socialhome.services.inbound_media_store import dm_media_name
+from socialhome.services.inbound_media_store import (
+    dm_media_name,
+    space_direct_media_name,
+)
 
 pytestmark = pytest.mark.security
 
@@ -264,10 +272,16 @@ _SPACE_ATTACKS = [
 
 @pytest.mark.parametrize("payload", _SPACE_ATTACKS)
 async def test_space_media_blob_outside_its_scope_writes_nothing(env, payload):
+    """Nothing that exists changes; the only file that may appear is the
+    sender's own name for a row not seen yet (it fills nothing else)."""
     app, db, root = env
-    before = await _snapshot(db, root)
+    before_tree, before_rows = await _snapshot(db, root)
     await _send(app, FET.SPACE_MEDIA_BLOB, dict(payload), space_id=GATED)
-    assert await _snapshot(db, root) == before
+    after_tree, after_rows = await _snapshot(db, root)
+    assert after_rows == before_rows
+    assert {k: v for k, v in after_tree.items() if k in before_tree} == before_tree
+    own = f"media/{space_direct_media_name(GATED, SENDER, payload['filename'])}"
+    assert set(after_tree) - set(before_tree) <= {own}
 
 
 def _dm(message_id: str, blob_id: str | None = None) -> dict:
@@ -298,10 +312,16 @@ async def test_dm_media_blob_outside_its_scope_writes_nothing(env, payload, send
 
 
 async def test_legitimate_blobs_still_land(env):
-    """Control: the post's own file in its own space, a blob that overtook
-    its post, and the DM sender's own pending attachment all land."""
+    """Control: the post's own file in its own space (the row names it as
+    delivered by the sender), a blob that overtook its post, and the DM
+    sender's own pending attachment all land."""
     app, db, root = env
     media = root / "media"
+    a_new = space_direct_media_name(GATED, SENDER, "a-new.webp")
+    await db.enqueue(
+        "UPDATE space_posts SET media_url=? WHERE id='post-a-new'",
+        (f"api/media/{a_new}",),
+    )
     await _send(
         app, FET.SPACE_MEDIA_BLOB, _space("post-a-new", "a-new.webp"), space_id=GATED
     )
@@ -309,8 +329,9 @@ async def test_legitimate_blobs_still_land(env):
         app, FET.SPACE_MEDIA_BLOB, _space("post-later", "later.webp"), space_id=GATED
     )
     await _send(app, FET.DM_MEDIA_BLOB, _dm("m-pending"))
-    assert (media / "a-new.webp").read_bytes() == WEBP
-    assert (media / "later.webp").read_bytes() == WEBP
+    assert (media / a_new).read_bytes() == WEBP
+    later = space_direct_media_name(GATED, SENDER, "later.webp")
+    assert (media / later).read_bytes() == WEBP
     pending = dm_media_name(SENDER, "m-pending", ".webp")
     assert (media / pending).read_bytes() == WEBP
     row = await db.fetchone(
@@ -368,15 +389,14 @@ async def test_a_federated_gallery_items_full_file_and_thumbnail_both_land(env):
         "SELECT filename, thumbnail_filename FROM gallery_items WHERE id='gi-a'", ()
     )
     assert row is not None
-    assert (row["filename"], row["thumbnail_filename"]) == (
-        "ga-full.webp",
-        "ga-thumb.webp",
-    )
+    full = space_direct_media_name(GATED, SENDER, "ga-full.webp")
+    thumb = space_direct_media_name(GATED, SENDER, "ga-thumb.webp")
+    assert (row["filename"], row["thumbnail_filename"]) == (full, thumb)
     for name in ("ga-thumb.webp", "ga-full.webp"):
         await _send(app, FET.SPACE_MEDIA_BLOB, _space("gi-a", name), space_id=GATED)
     media = root / "media"
-    assert (media / "ga-thumb.webp").read_bytes() == WEBP
-    assert (media / "ga-full.webp").read_bytes() == WEBP
+    assert (media / thumb).read_bytes() == WEBP
+    assert (media / full).read_bytes() == WEBP
 
 
 # ── One media namespace: a space blob must never become a DM's file ────
@@ -489,3 +509,183 @@ async def test_dm_blob_overtaking_its_message_is_adopted(env):
     await _send(app, FET.DM_MEDIA_BLOB, _dm_blob("m-new", GOOD))
     await _dm_message(app, "m-new")
     assert await _dm_file(db, root, "m-new") == GOOD
+
+
+# ── The first-claim attack and the paths that must keep working ──────────
+#
+# A member household M that learned A's file name F used to push its own
+# bytes as F (correlated to A's row, or to a decoy row of its own naming F)
+# before A's push landed; write-once then kept M's bytes for every row
+# naming F. Now each household's copy of F has its own name.
+
+HOST = "the-host"
+MALLORY = OTHER
+
+
+async def _members(db) -> None:
+    for household, user in ((SENDER, "u-rem"), (MALLORY, "u-other")):
+        await db.enqueue(
+            "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+            " VALUES(?, ?, ?, 'member')",
+            (GATED, household, user),
+        )
+
+
+async def _post(app, post_id, filename, *, sender=SENDER, author="u-rem", **extra):
+    """A live SPACE_POST_CREATED naming ``filename`` from ``sender``."""
+    await _send(
+        app,
+        FET.SPACE_POST_CREATED,
+        {
+            "id": post_id,
+            "space_id": GATED,
+            "author": author,
+            "type": extra.pop("type", "image"),
+            "content": "",
+            "media_url": f"api/media/{filename}",
+            "created_at": datetime.now(UTC).isoformat(),
+            **extra,
+        },
+        from_instance=sender,
+        space_id=GATED,
+    )
+
+
+async def _push(app, correlation, filename, body, *, sender=SENDER, **extra):
+    await _send(
+        app,
+        FET.SPACE_MEDIA_BLOB,
+        {**_space(correlation, filename), "bytes_b64": _b64(body), **extra},
+        from_instance=sender,
+        space_id=GATED,
+    )
+
+
+async def _shown(db, root, post_id: str) -> bytes | None:
+    """The bytes post ``post_id``'s picture shows here."""
+    row = await db.fetchone("SELECT media_url FROM space_posts WHERE id=?", (post_id,))
+    assert row is not None, f"{post_id} never landed"
+    path = root / "media" / str(row["media_url"]).removeprefix("api/media/")
+    return path.read_bytes() if path.is_file() else None
+
+
+async def test_a_decoy_post_cannot_claim_another_households_file(env):
+    """M posts a decoy naming A's ``f.webp`` and pushes EVIL for it first;
+    A's post still shows A's bytes, and the decoy shows only M's own."""
+    app, db, root = env
+    await _members(db)
+    await _post(app, "post-f", "f.webp")
+    await _post(app, "post-decoy", "f.webp", sender=MALLORY, author="u-other")
+    await _push(app, "post-decoy", "f.webp", EVIL, sender=MALLORY)
+    await _push(app, "post-f", "f.webp", EVIL, sender=MALLORY)
+    await _push(app, "post-f", "f.webp", GOOD)
+    assert await _shown(db, root, "post-f") == GOOD
+    assert await _shown(db, root, "post-decoy") == EVIL
+
+
+async def test_a_bazaar_decoy_cannot_claim_another_households_file(env):
+    """The bazaar wrapper whose listing never comes accepts any name for its
+    correlation — still only under the decoy household's own name."""
+    app, db, root = env
+    await _members(db)
+    await _post(app, "post-f", "f.webp")
+    await _post(
+        app, "post-bz", "x.webp", sender=MALLORY, author="u-other", type="bazaar"
+    )
+    await _push(app, "post-bz", "f.webp", EVIL, sender=MALLORY)
+    await _push(app, "post-f", "f.webp", GOOD)
+    assert await _shown(db, root, "post-f") == GOOD
+
+
+async def test_an_authors_blob_before_its_post_shows_once_the_post_lands(env):
+    app, db, root = env
+    await _members(db)
+    await _push(app, "post-early", "early.webp", EVIL, sender=MALLORY)
+    await _push(app, "post-early", "early.webp", GOOD)
+    await _post(app, "post-early", "early.webp")
+    assert await _shown(db, root, "post-early") == GOOD
+
+
+async def test_a_calendar_cover_race_by_another_writer_keeps_the_setters_bytes(env):
+    """Any writer may change an event's cover; the cover a household's update
+    set is bound to that household — another writer's push of the same name
+    fills nothing."""
+    app, db, root = env
+    await _members(db)
+    cover = space_direct_media_name(GATED, SENDER, "cover.webp")
+    await db.enqueue(
+        "INSERT INTO space_calendar_events(id, space_id, summary, start_dt,"
+        " end_dt, created_by, cover_url) VALUES('ev-1', ?, 'Party',"
+        " '2099-01-01T10:00:00+00:00', '2099-01-01T11:00:00+00:00', 'u-rem', ?)",
+        (GATED, f"api/media/{cover}"),
+    )
+    await _push(app, "ev-1", "cover.webp", EVIL, sender=MALLORY)
+    assert not (root / "media" / cover).exists()
+    await _push(app, "ev-1", "cover.webp", GOOD)
+    assert (root / "media" / cover).read_bytes() == GOOD
+
+
+async def test_the_hosts_catch_up_round_trips_a_members_post(env):
+    """The host relays A's post under ITS name for A's file and ships the
+    bytes under that same name: the newcomer's row and file agree."""
+    app, db, root = env
+    await _members(db)
+    host_name = space_direct_media_name(GATED, SENDER, "f.webp")
+    await _post(app, "post-f", host_name, sender=HOST)
+    await _push(app, "post-f", host_name, GOOD, sender=HOST)
+    assert await _shown(db, root, "post-f") == GOOD
+
+
+async def test_the_hosts_own_post_round_trips(env):
+    app, db, root = env
+    await _members(db)
+    await db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+        " VALUES(?, ?, 'u-host', 'member')",
+        (GATED, HOST),
+    )
+    await _post(app, "post-h", "h.webp", sender=HOST, author="u-host")
+    await _push(app, "post-h", "h.webp", GOOD, sender=HOST)
+    assert await _shown(db, root, "post-h") == GOOD
+
+
+async def test_a_mesh_routed_authors_push_lands(env):
+    """Over the mesh the inner ``from_instance`` is the authenticated origin
+    (``SpaceRoutedHandler``, path[0]) — the author's household."""
+    app, db, root = env
+    await _members(db)
+    await _post(app, "post-f", "f.webp")
+    for handler in app[federation_service_key]._event_registry.handlers_for(
+        FET.SPACE_MEDIA_BLOB
+    ):
+        await handler(
+            FederationEvent(
+                msg_id="m-routed",
+                event_type=FET.SPACE_MEDIA_BLOB,
+                from_instance=SENDER,
+                to_instance="us",
+                timestamp=datetime.now(UTC).isoformat(),
+                payload={**_space("post-f", "f.webp"), "bytes_b64": _b64(GOOD)},
+                space_id=GATED,
+                routed_path=[SENDER, MALLORY, "us"],
+                routed_route_id="r-1",
+            )
+        )
+    assert await _shown(db, root, "post-f") == GOOD
+
+
+async def test_the_hosts_catch_up_fills_a_file_the_authors_push_never_delivered(env):
+    """Members-equal: A's post landed but its push failed for good. The host
+    holds A's file under the very name the row shows (names don't depend on
+    the receiver) and its catch-up fills it — another member can't."""
+    app, db, root = env
+    await _members(db)
+    await _post(app, "post-f", "f.webp")
+    shown = space_direct_media_name(GATED, SENDER, "f.webp")
+    await _push(app, "post-f", shown, EVIL, sender=MALLORY)
+    assert await _shown(db, root, "post-f") is None
+    await _push(app, "post-f", shown, GOOD, sender=HOST)
+    assert await _shown(db, root, "post-f") == GOOD
+    # Write-once: a later host push never replaces it.
+    await _push(app, "post-f", shown, EVIL, sender=HOST)
+    assert await _shown(db, root, "post-f") == GOOD

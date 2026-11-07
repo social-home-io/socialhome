@@ -37,6 +37,7 @@ from ..domain.space_item import (
     AUTHORITY_KIND_FIELD,
     PAD_FIELD,
 )
+from .space_media_names import same_file
 from .space_public_author import verify_signed_author_inner
 from .space_writer_cert_service import WRITER_CERT_FIELD
 
@@ -116,7 +117,26 @@ def approved_relay_for(relay: object, *, post: Post, space_id: str) -> dict | No
         return None
     if origin != relay.get("origin_instance_id"):
         return None
-    if any(relay.get(k) != v for k, v in _post_fields(post).items()):
+    held = _post_fields(post)
+    # The files: the host holds a remote submitter's under that household's
+    # names (``SpaceMediaNamer``), the author signed its own — the same file.
+    if not same_file(
+        post.media_url, relay.get("media_url"), space_id=space_id, origin=origin
+    ):
+        return None
+    sent_images = relay.get("image_urls")
+    if not isinstance(sent_images, list) or len(sent_images) != len(post.image_urls):
+        return None
+    if not all(
+        same_file(h, s, space_id=space_id, origin=origin)
+        for h, s in zip(post.image_urls, sent_images, strict=True)
+    ):
+        return None
+    if any(
+        relay.get(k) != v
+        for k, v in held.items()
+        if k not in ("media_url", "image_urls")
+    ):
         return None
     out = {k: v for k, v in relay.items() if k not in _DROPPED_FIELDS}
     out[AUTHORITY_KIND_FIELD] = AUTHORITY_KIND_APPROVED_POST

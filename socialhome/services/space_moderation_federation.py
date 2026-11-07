@@ -92,6 +92,7 @@ from ..federation.space_scope import resolve_space_id
 from ..repositories.base import dump_json
 from ..utils.datetime import parse_iso8601_optional
 from .inbound_media_store import media_basename, verbatim_local_media_ref
+from .space_media_names import SpaceMediaNamer, feature_media_urls, renamed_media
 from .space_moderation_service import (
     MAX_PAYLOAD_BYTES,
     MAX_PENDING_PER_SPACE,
@@ -157,6 +158,7 @@ class SpaceModerationFederation:
     __slots__ = (
         "_authorship",
         "_federation",
+        "_media_names",
         "_media_sync",
         "_moderation",
         "_own_pk",
@@ -180,6 +182,9 @@ class SpaceModerationFederation:
         self._seats = remote_member_repo
         self._authorship = authorship
         self._media_sync = media_sync
+        #: The files a held submission proposes take this household's
+        #: names, bound to the submitting household (which ships them).
+        self._media_names = SpaceMediaNamer()
         self._moderation: SpaceModerationService | None = None
         #: Our household identity + local users — to author-sign a queued
         #: public post's inner for the GFS followers (see
@@ -199,6 +204,10 @@ class SpaceModerationFederation:
         self._own_pk = own_instance_pk
         self._own_seed = own_identity_seed
         self._users = user_repo
+
+    def attach_media_names(self, namer: SpaceMediaNamer) -> None:
+        """Wire the shared namer (it knows this household's instance id)."""
+        self._media_names = namer
 
     def bind(self, moderation: SpaceModerationService) -> None:
         """Wire both directions: the queue sends through us, and what we
@@ -560,6 +569,13 @@ class SpaceModerationFederation:
             target_id=target_id,
             submitted_by=submitted_by,
         )
+        # The submitter's household ships the files the item proposes
+        # (``_send_media``): they take its names here, like any received
+        # space file - so another household can't fill them first.
+        names = self._media_names.localize(
+            space_id, str(event.from_instance or ""), feature_media_urls(feature, clean)
+        )
+        clean = renamed_media(feature, clean, names.url)
         if relay is not None:
             clean[PUBLIC_RELAY_KEY] = relay
         # The "before" values a reviewer compares against come from OUR copy
@@ -878,17 +894,7 @@ def moderation_media_urls(item: SpaceModerationItem) -> list[str]:
     listing's) files, or a calendar create's / edit's cover. Both the
     submitter (what to send) and a reviewer household (what a
     ``SPACE_MEDIA_BLOB`` correlated by the item may write) use it."""
-    return _media_urls(item.feature, item.payload or {})
-
-
-def _media_urls(feature: str, payload: dict) -> list[str]:
-    match feature:
-        case "posts":
-            return _post_media_urls(payload)
-        case "calendar":
-            return _calendar_cover_urls(payload)
-        case _:
-            return []
+    return feature_media_urls(item.feature, item.payload or {})
 
 
 def _changed_media_urls(item: SpaceModerationItem) -> list[str]:
@@ -899,39 +905,5 @@ def _changed_media_urls(item: SpaceModerationItem) -> list[str]:
     snapshot = item_payload_snapshot(item)
     if not snapshot:
         return urls
-    have = {media_basename(u) for u in _media_urls(item.feature, snapshot)}
+    have = {media_basename(u) for u in feature_media_urls(item.feature, snapshot)}
     return [u for u in urls if media_basename(u) not in have]
-
-
-def _calendar_cover_urls(payload: dict) -> list[str]:
-    """The cover a queued calendar create (``cover_url``) or edit
-    (``patch.cover_url``) sets — a cleared or unchanged cover sends none."""
-    patch = payload.get("patch")
-    url = (
-        patch.get("cover_url") if isinstance(patch, dict) else payload.get("cover_url")
-    )
-    return [url] if isinstance(url, str) and url else []
-
-
-def _post_media_urls(payload: dict) -> list[str]:
-    """Every local media file a queued post (and its listing) references."""
-    urls: list[str] = []
-    for url in (payload.get("media_url"), *(payload.get("image_urls") or ())):
-        if isinstance(url, str) and url:
-            urls.append(url)
-    fm = payload.get("file_meta")
-    if isinstance(fm, dict) and isinstance(fm.get("url"), str) and fm["url"]:
-        urls.append(fm["url"])
-    lp = payload.get("link_preview")
-    if (
-        isinstance(lp, dict)
-        and isinstance(lp.get("thumbnail_url"), str)
-        and lp["thumbnail_url"]
-    ):
-        urls.append(lp["thumbnail_url"])
-    bazaar = (payload.get("attachments") or {}).get("bazaar")
-    if isinstance(bazaar, dict):
-        for url in bazaar.get("image_urls") or ():
-            if isinstance(url, str) and url:
-                urls.append(url)
-    return urls

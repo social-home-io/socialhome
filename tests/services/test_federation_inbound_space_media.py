@@ -30,6 +30,9 @@ from socialhome.repositories import (
 )
 from socialhome.repositories.bazaar_repo import SqliteBazaarRepo
 from socialhome.repositories.gallery_repo import SqliteGalleryRepo
+from socialhome.repositories.space_remote_member_repo import (
+    SqliteSpaceRemoteMemberRepo,
+)
 from socialhome.services import inbound_media_store
 from socialhome.services.federation_inbound_service import (
     FederationInboundService,
@@ -38,9 +41,16 @@ from socialhome.services.inbound_media_store import (
     MAX_MEDIA_CHUNKS,
     SPACE_MEDIA_MAX_BYTES,
     partial_key,
+    space_direct_media_name,
 )
 
 pytestmark = pytest.mark.asyncio
+
+
+def L(name: str, space_id: str = "sp-a", sender: str = "peer-a") -> str:
+    """The name a file ``sender`` delivers takes here (bytes and rows alike)."""
+    return space_direct_media_name(space_id, sender, name)
+
 
 FET = FederationEventType
 
@@ -78,6 +88,7 @@ async def env(db, bus, tmp_path):
         user_repo=SqliteUserRepo(db),
         gallery_repo=SqliteGalleryRepo(db),
         bazaar_repo=SqliteBazaarRepo(db),
+        space_remote_member_repo=SqliteSpaceRemoteMemberRepo(db),
         media_dir=media,
     )
     for sid in ("sp-a", "sp-b"):
@@ -95,8 +106,8 @@ async def env(db, bus, tmp_path):
             "u-a",
             "image",
             "",
-            "api/media/a1.webp",
-            '["api/media/a2.webp"]',
+            f"api/media/{L('a1.webp')}",
+            f'["api/media/{L("a2.webp")}"]',
         ),
     )
     await db.enqueue(
@@ -113,7 +124,7 @@ async def env(db, bus, tmp_path):
     await db.enqueue(
         "INSERT INTO bazaar_listings(post_id, space_id, seller_user_id, mode,"
         " title, image_urls_json, end_time, currency) VALUES('post-bz', 'sp-a',"
-        " 'u-a', 'offer', 'Bike', '[\"api/media/bz1.webp\"]',"
+        f" 'u-a', 'offer', 'Bike', '[\"api/media/{L('bz1.webp')}\"]',"
         " '2099-01-01T00:00:00', 'EUR')",
         (),
     )
@@ -134,7 +145,7 @@ async def env(db, bus, tmp_path):
             "INSERT INTO gallery_items(id, album_id, uploaded_by, item_type,"
             " filename, thumbnail_filename, width, height)"
             " VALUES(?, ?, 'u-x', 'photo', ?, ?, 1, 1)",
-            (iid, aid, f"{fn}.webp", f"{fn}-t.webp"),
+            (iid, aid, L(f"{fn}.webp"), L(f"{fn}-t.webp")),
         )
     return svc, media
 
@@ -163,13 +174,13 @@ async def test_referenced_media_in_gated_space_is_written(env, correlation, file
             }
         )
     )
-    assert (media / filename).read_bytes() == b"NEW-BYTES"
+    assert (media / L(filename)).read_bytes() == b"NEW-BYTES"
 
 
 async def test_legacy_post_id_only_payload_is_written(env):
     svc, media = env
     await svc._on_space_media_blob(_blob({"post_id": "post-a", "filename": "a1.webp"}))
-    assert (media / "a1.webp").read_bytes() == b"NEW-BYTES"
+    assert (media / L("a1.webp")).read_bytes() == b"NEW-BYTES"
 
 
 async def test_payload_space_id_fallback_when_routing_absent(env):
@@ -180,25 +191,29 @@ async def test_payload_space_id_fallback_when_routing_absent(env):
             space_id=None,
         )
     )
-    assert (media / "a1.webp").read_bytes() == b"NEW-BYTES"
+    assert (media / L("a1.webp")).read_bytes() == b"NEW-BYTES"
 
 
 # ── Not the envelope's space / not referenced → refused ─────────────────
 
 
 @pytest.mark.parametrize(
-    ("correlation", "filename"),
+    ("correlation", "filename", "level"),
     [
-        ("post-b", "b1.webp"),  # post of another space
-        ("gi-b", "gb.webp"),  # gallery item of another space
-        ("post-a", "b1.webp"),  # gated post, but not its file
-        ("post-bz", "a1.webp"),  # listing known, file not on it
-        ("gi-a", "a1.webp"),  # gallery item known, file not on it
+        ("post-b", "b1.webp", "WARNING"),  # post of another space
+        ("gi-b", "gb.webp", "WARNING"),  # gallery item of another space
+        # Known here, not its file: routine when another household delivered
+        # the row (the host's catch-up of an author's post) — INFO.
+        ("post-a", "b1.webp", "INFO"),  # gated post, but not its file
+        ("post-bz", "a1.webp", "INFO"),  # listing known, file not on it
+        ("gi-a", "a1.webp", "INFO"),  # gallery item known, file not on it
     ],
 )
-async def test_media_outside_gated_scope_is_refused(env, caplog, correlation, filename):
+async def test_media_outside_gated_scope_is_refused(
+    env, caplog, correlation, filename, level
+):
     svc, media = env
-    with caplog.at_level("WARNING"):
+    with caplog.at_level(level):
         await svc._on_space_media_blob(
             _blob(
                 {
@@ -208,7 +223,7 @@ async def test_media_outside_gated_scope_is_refused(env, caplog, correlation, fi
                 }
             )
         )
-    assert not (media / filename).exists()
+    assert not (media / L(filename)).exists()
     assert "refusing" in caplog.text
 
 
@@ -249,23 +264,23 @@ async def test_unsafe_filename_is_refused(env, bad):
 
 async def test_existing_file_is_not_overwritten_single_chunk(env, caplog):
     svc, media = env
-    (media / "a1.webp").write_bytes(b"ORIGINAL")
+    (media / L("a1.webp")).write_bytes(b"ORIGINAL")
     with caplog.at_level("WARNING"):
         await svc._on_space_media_blob(
             _blob({"post_id": "post-a", "filename": "a1.webp"})
         )
-    assert (media / "a1.webp").read_bytes() == b"ORIGINAL"
+    assert (media / L("a1.webp")).read_bytes() == b"ORIGINAL"
     assert "not replacing" in caplog.text
 
 
 async def test_identical_redelivery_is_a_quiet_noop(env, caplog):
     svc, media = env
-    (media / "a1.webp").write_bytes(b"NEW-BYTES")
+    (media / L("a1.webp")).write_bytes(b"NEW-BYTES")
     with caplog.at_level("WARNING"):
         await svc._on_space_media_blob(
             _blob({"post_id": "post-a", "filename": "a1.webp"})
         )
-    assert (media / "a1.webp").read_bytes() == b"NEW-BYTES"
+    assert (media / L("a1.webp")).read_bytes() == b"NEW-BYTES"
     assert "not replacing" not in caplog.text
 
 
@@ -282,7 +297,7 @@ async def test_existing_file_is_not_overwritten_for_unknown_row(env):
 
 async def test_existing_file_is_not_overwritten_multi_chunk(env):
     svc, media = env
-    (media / "a1.webp").write_bytes(b"ORIGINAL")
+    (media / L("a1.webp")).write_bytes(b"ORIGINAL")
     for idx in range(2):
         await svc._on_space_media_blob(
             _blob(
@@ -298,7 +313,7 @@ async def test_existing_file_is_not_overwritten_multi_chunk(env):
                 body=b"PART%d" % idx,
             )
         )
-    assert (media / "a1.webp").read_bytes() == b"ORIGINAL"
+    assert (media / L("a1.webp")).read_bytes() == b"ORIGINAL"
     partial = media / ".partial"
     assert not partial.exists() or list(partial.iterdir()) == []
 
@@ -311,11 +326,11 @@ async def test_blob_before_post_is_written_once(env):
     await svc._on_space_media_blob(
         _blob({"post_id": "post-later", "filename": "later.webp"})
     )
-    assert (media / "later.webp").read_bytes() == b"NEW-BYTES"
+    assert (media / L("later.webp")).read_bytes() == b"NEW-BYTES"
     await svc._on_space_media_blob(
         _blob({"post_id": "post-later", "filename": "later.webp"}, body=b"SECOND")
     )
-    assert (media / "later.webp").read_bytes() == b"NEW-BYTES"
+    assert (media / L("later.webp")).read_bytes() == b"NEW-BYTES"
 
 
 async def test_blob_for_bazaar_post_before_listing_is_written(env):
@@ -323,7 +338,7 @@ async def test_blob_for_bazaar_post_before_listing_is_written(env):
     await svc._on_space_media_blob(
         _blob({"post_id": "post-bz-pending", "filename": "bzp.webp"})
     )
-    assert (media / "bzp.webp").read_bytes() == b"NEW-BYTES"
+    assert (media / L("bzp.webp")).read_bytes() == b"NEW-BYTES"
 
 
 # ── Chunk assembly ──────────────────────────────────────────────────────
@@ -348,7 +363,7 @@ async def test_multi_chunk_assembles_referenced_file(env):
                 body=chunk,
             )
         )
-    assert (media / "a1.webp").read_bytes() == full
+    assert (media / L("a1.webp")).read_bytes() == full
     assert list((media / ".partial").iterdir()) == []
 
 
@@ -375,7 +390,7 @@ async def test_chunks_from_another_household_never_mix(env):
     await svc._on_space_media_blob(
         _blob({**payload, "chunk_index": 1, "final": True}, body=b"GOOD1")
     )
-    assert (media / "a1.webp").read_bytes() == b"GOOD0GOOD1"
+    assert (media / L("a1.webp")).read_bytes() == b"GOOD0GOOD1"
 
 
 _FOUR = [bytes([i]) * 512 for i in range(4)]
@@ -421,8 +436,8 @@ async def test_multi_chunk_assembles_whichever_chunk_lands_last(env, order):
     for n, idx in enumerate(order):
         await svc._on_space_media_blob(_chunk(idx))
         if n < len(order) - 1:
-            assert not (media / "a1.webp").exists()
-    assert (media / "a1.webp").read_bytes() == b"".join(_FOUR)
+            assert not (media / L("a1.webp")).exists()
+    assert (media / L("a1.webp")).read_bytes() == b"".join(_FOUR)
     assert _no_partials(media)
 
 
@@ -430,7 +445,7 @@ async def test_duplicate_chunks_before_and_after_assembly_are_harmless(env):
     svc, media = env
     for idx in (3, 0, 0, 1, 3, 2, 2, 1, 3):
         await svc._on_space_media_blob(_chunk(idx))
-    assert (media / "a1.webp").read_bytes() == b"".join(_FOUR)
+    assert (media / L("a1.webp")).read_bytes() == b"".join(_FOUR)
     assert _no_partials(media)
 
 
@@ -451,9 +466,9 @@ async def test_chunks_completing_together_assemble_once(env):
         await asyncio.gather(
             svc._on_space_media_blob(_chunk(1)), svc._on_space_media_blob(_chunk(2))
         )
-    assert (media / "a1.webp").read_bytes() == b"".join(_FOUR)
+    assert (media / L("a1.webp")).read_bytes() == b"".join(_FOUR)
     assert _no_partials(media)
-    assert [p.name for p in media.iterdir() if p.name != ".partial"] == ["a1.webp"]
+    assert [p.name for p in media.iterdir() if p.name != ".partial"] == [L("a1.webp")]
 
 
 def _attempt(idx: int, chunks: list[bytes], size: int) -> FederationEvent:
@@ -485,22 +500,22 @@ async def test_retry_chunked_differently_never_mixes_attempts(env):
     for idx in (0, 1, 2):
         await svc._on_space_media_blob(_attempt(idx, small, len(full)))
     await svc._on_space_media_blob(_attempt(0, big, len(full)))
-    assert not (media / "a1.webp").exists()
+    assert not (media / L("a1.webp")).exists()
     await svc._on_space_media_blob(_attempt(1, big, len(full)))
-    assert (media / "a1.webp").read_bytes() == full
+    assert (media / L("a1.webp")).read_bytes() == full
 
 
 async def test_bytes_short_of_declared_size_never_land(env):
     svc, media = env
     for idx in (1, 0):
         await svc._on_space_media_blob(_attempt(idx, [b"AAAA", b"BB"], 99))
-    assert not (media / "a1.webp").exists()
+    assert not (media / L("a1.webp")).exists()
     assert _no_partials(media)
 
 
 async def test_parts_left_by_a_crash_are_dropped_by_any_chunk(env):
     svc, media = env
-    (media / "a1.webp").write_bytes(b"".join(_FOUR))
+    (media / L("a1.webp")).write_bytes(b"".join(_FOUR))
     stale = media / ".partial" / partial_key("peer-a", "a1.webp:self", chunk_count=4)
     stale.mkdir(parents=True)
     (stale / "000002").write_bytes(b"old")
@@ -527,7 +542,7 @@ async def test_out_of_range_chunk_metadata_is_refused(env, index, count):
             }
         )
     )
-    assert not (media / "a1.webp").exists()
+    assert not (media / L("a1.webp")).exists()
 
 
 async def test_link_preview_image_of_the_post_is_written(env, db):
@@ -545,7 +560,7 @@ async def test_link_preview_image_of_the_post_is_written(env, db):
             "https://example.com/",
             (
                 '{"url": "https://example.com/", "title": "T",'
-                ' "thumbnail_url": "api/media/lp1.webp"}'
+                f' "thumbnail_url": "api/media/{L("lp1.webp")}"}}'
             ),
         ),
     )
@@ -554,13 +569,13 @@ async def test_link_preview_image_of_the_post_is_written(env, db):
             {"post_id": "post-lp", "correlation_id": "post-lp", "filename": "lp1.webp"}
         )
     )
-    assert (media / "lp1.webp").read_bytes() == b"NEW-BYTES"
+    assert (media / L("lp1.webp")).read_bytes() == b"NEW-BYTES"
     await svc._on_space_media_blob(
         _blob(
             {"post_id": "post-lp", "correlation_id": "post-lp", "filename": "zz.webp"}
         )
     )
-    assert not (media / "zz.webp").exists()
+    assert not (media / L("zz.webp")).exists()
 
 
 async def test_inbound_post_payload_validates_link_preview(env):
@@ -618,7 +633,7 @@ async def test_multi_chunk_without_a_declared_size_is_refused(env, caplog, size)
             if size is not None:
                 payload["file_size_bytes"] = size
             await svc._on_space_media_blob(_blob(payload, body=b"PART%d" % idx))
-    assert not (media / "a1.webp").exists()
+    assert not (media / L("a1.webp")).exists()
     assert _no_partials(media)
     assert "file_size_bytes" in caplog.text
 
@@ -653,7 +668,7 @@ async def test_chunk_of_a_file_over_the_space_cap_writes_nothing(env, caplog):
                 body=b"x" * 512,
             )
         )
-    assert not (media / "a1.webp").exists()
+    assert not (media / L("a1.webp")).exists()
     assert _no_partials(media)
     assert "byte cap" in caplog.text
 
@@ -716,7 +731,7 @@ async def _held_cover_edit(svc, *, item_id: str = "item-ev", space_id: str = "sp
             payload={
                 "entity": "event",
                 "target_id": "ev-1",
-                "patch": {"cover_url": "/api/media/new-cover.webp"},
+                "patch": {"cover_url": f"/api/media/{L('new-cover.webp')}"},
             },
             current_snapshot='{"cover_url": "/api/media/old-cover.webp"}',
             submitted_at=datetime.now(UTC),
@@ -735,7 +750,7 @@ async def test_a_held_edits_new_cover_reaches_a_reviewer(env):
     await svc._on_space_media_blob(
         _blob({"correlation_id": "item-ev", "filename": "new-cover.webp"})
     )
-    assert (media / "new-cover.webp").read_bytes() == b"NEW-BYTES"
+    assert (media / L("new-cover.webp")).read_bytes() == b"NEW-BYTES"
 
 
 @pytest.mark.parametrize(
@@ -756,4 +771,88 @@ async def test_a_held_items_scope_stays_tight(env, caplog, space_id, filename):
                 space_id=space_id,
             )
         )
-    assert not (media / filename).exists()
+    assert not (media / L(filename)).exists()
+
+
+# ── The host fills a file its author's push never delivered ─────────────
+
+
+async def test_the_host_fills_a_file_the_authors_push_never_delivered(env):
+    """Members-equal: A's push failed for good, the row shows A's file as
+    ``sd(S, A, F)`` — the very name the host holds it under. The host's
+    catch-up push of that name fills it here."""
+    svc, media = env
+    await svc._on_space_media_blob(
+        _blob(
+            {"post_id": "post-a", "filename": L("a1.webp")},
+            from_instance="host",
+        )
+    )
+    assert (media / L("a1.webp")).read_bytes() == b"NEW-BYTES"
+
+
+async def test_the_host_fills_a_legacy_rows_file(env, db):
+    """A row stored before files were bound to their sender names the file
+    verbatim; only the host may fill it."""
+    svc, media = env
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content, media_url)"
+        " VALUES('post-old', 'sp-a', 'u-a', 'image', '', 'api/media/old.webp')",
+        (),
+    )
+    await svc._on_space_media_blob(
+        _blob({"post_id": "post-old", "filename": "old.webp"})  # peer-a
+    )
+    assert not (media / "old.webp").exists()
+    await svc._on_space_media_blob(
+        _blob({"post_id": "post-old", "filename": "old.webp"}, from_instance="host")
+    )
+    assert (media / "old.webp").read_bytes() == b"NEW-BYTES"
+
+
+async def test_the_hosts_bytes_never_replace_a_file_that_is_here(env):
+    svc, media = env
+    (media / L("a1.webp")).write_bytes(b"FROM-THE-AUTHOR")
+    await svc._on_space_media_blob(
+        _blob(
+            {"post_id": "post-a", "filename": L("a1.webp")},
+            from_instance="host",
+        )
+    )
+    assert (media / L("a1.webp")).read_bytes() == b"FROM-THE-AUTHOR"
+
+
+@pytest.mark.parametrize("sender", ["peer-z", "peer-a"])
+async def test_no_one_but_the_host_fills_another_households_name(env, sender):
+    """A plain member (or the author's household re-sending another's name)
+    never writes a name the row binds to someone else."""
+    svc, media = env
+    await svc._on_space_media_blob(
+        _blob({"post_id": "post-a", "filename": L("a1.webp")}, from_instance=sender)
+    )
+    assert not (media / L("a1.webp")).exists()
+
+
+@pytest.mark.parametrize("role", ["moderator", "admin"])
+async def test_a_moderator_or_admin_household_never_fills(env, db, role):
+    """Only the host fills: a moderator / admin household that learned A's
+    file name would otherwise plant its bytes while A's own push to us is
+    still queued — write-once would then refuse A's real copy."""
+    svc, media = env
+    await db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+        " VALUES('sp-a', 'peer-mod', 'u-mod', ?)",
+        (role,),
+    )
+    await svc._on_space_media_blob(
+        _blob(
+            {"post_id": "post-a", "filename": L("a1.webp")},
+            from_instance="peer-mod",
+            body=b"MODERATORS-BYTES",
+        )
+    )
+    assert not (media / L("a1.webp")).exists()
+    await svc._on_space_media_blob(
+        _blob({"post_id": "post-a", "filename": "a1.webp"})  # A's own push
+    )
+    assert (media / L("a1.webp")).read_bytes() == b"NEW-BYTES"

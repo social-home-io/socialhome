@@ -20,8 +20,10 @@ from socialhome.domain.space_item import (
     AUTHORITY_KIND_REMOVAL,
 )
 from socialhome.federation.owner_bound_id import SPACE_POST_KIND, mint_owner_bound_id
+from socialhome.services.inbound_media_store import space_direct_media_name
 from socialhome.services.space_public_author import (
     build_signed_author_inner,
+    signed_media_refs,
     verify_signed_author_inner,
 )
 from socialhome.services.space_public_authority import (
@@ -138,3 +140,86 @@ def test_a_signed_copy_that_is_not_exactly_the_approved_post_is_refused(case):
 def test_an_unsigned_inner_is_an_authority_inner():
     assert is_authority_inner({AUTHORITY_KIND_FIELD: AUTHORITY_KIND_REMOVAL})
     assert not is_approved({AUTHORITY_KIND_FIELD: AUTHORITY_KIND_REMOVAL})
+
+
+# ── A remote submitter's pictures, by the host's names for them ──────────
+
+
+def _pictured(**over) -> Post:
+    return _post(
+        type=PostType.IMAGE,
+        media_url="api/media/m.webp",
+        image_urls=("api/media/a.webp", "api/media/b.webp"),
+        **over,
+    )
+
+
+def _as_host_holds(post: Post, origin: str = _ORIGIN) -> Post:
+    """``post`` as the host stored it: each file under the submitter
+    household's name (``SpaceMediaNamer``)."""
+
+    def here(url: str | None) -> str | None:
+        if not url:
+            return url
+        return (
+            f"api/media/{space_direct_media_name('sp', origin, url.rsplit('/', 1)[-1])}"
+        )
+
+    return dataclasses.replace(
+        post,
+        media_url=here(post.media_url),
+        image_urls=tuple(here(u) or u for u in post.image_urls),
+    )
+
+
+def test_an_approved_remote_picture_post_is_relayed_with_its_signed_names():
+    """Regression (#1311 review): the host stores a remote submitter's files
+    under the submitter household's names, while the author's signed copy
+    names them as the author does — the same files. The relay still goes
+    out, signature and names intact."""
+    signed = _pictured()
+    refs = {
+        "a.webp": {
+            "blob_id": "a" * 64,
+            "suite": "aesgcm-256-pad-det",
+            "epoch": 1,
+            "size": 9,
+            "scope": "space",
+            "addr_suite": "sm1",
+        }
+    }
+    relay = build_signed_author_inner(
+        post=signed,
+        space_id="sp",
+        author_username="bob",
+        author_pk=_KP.public_key,
+        author_identity_seed=_KP.private_key,
+        origin_instance_id=_ORIGIN,
+        media_refs=refs,
+    )
+    out = approved_relay_for(relay, post=_as_host_holds(signed), space_id="sp")
+    assert out is not None
+    assert out["image_urls"] == ["api/media/a.webp", "api/media/b.webp"]
+    assert out["media_url"] == "api/media/m.webp"
+    assert verify_signed_author_inner(out)
+    # The author-signed descriptor the followers fetch by rides on intact.
+    assert signed_media_refs(out) == refs
+
+
+@pytest.mark.parametrize("swap", ["other_household", "other_file", "dropped"])
+def test_an_approved_relay_naming_other_files_is_refused(swap):
+    signed = _pictured()
+    held = _as_host_holds(signed)
+    if swap == "other_household":
+        held = _as_host_holds(signed, origin="someone.else")
+    elif swap == "other_file":
+        held = dataclasses.replace(
+            held,
+            image_urls=(
+                held.image_urls[0],
+                f"api/media/{space_direct_media_name('sp', _ORIGIN, 'zz.webp')}",
+            ),
+        )
+    else:
+        held = dataclasses.replace(held, image_urls=held.image_urls[:1])
+    assert approved_relay_for(_signed(signed), post=held, space_id="sp") is None

@@ -61,6 +61,7 @@ from socialhome.federation.sync.space.exporter import (
     ROSTER_RESOURCES,
 )
 from socialhome.repositories.space_repo import SqliteSpaceRepo
+from socialhome.services.inbound_media_store import space_direct_media_name
 from socialhome.services.space_crypto_service import (
     sign_authority_event,
     strip_authority_sig_fields,
@@ -264,12 +265,13 @@ async def test_media_bytes_do_not_land_in_an_archived_space(env, tmp_dir):
     await _through_the_gates(
         app, FET.SPACE_MEDIA_BLOB, _blob("live.webp"), sender=AUTHOR
     )
-    assert (media / "live.webp").exists()
+    # Stored under the sender's name for it (``SpaceMediaNamer``).
+    assert (media / space_direct_media_name(SP, AUTHOR, "live.webp")).exists()
     await _archive(db)
     await _through_the_gates(
         app, FET.SPACE_MEDIA_BLOB, _blob("frozen.webp"), sender=AUTHOR
     )
-    assert not (media / "frozen.webp").exists()
+    assert not (media / space_direct_media_name(SP, AUTHOR, "frozen.webp")).exists()
 
 
 async def test_the_host_can_unarchive_the_space(env):

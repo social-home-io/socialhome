@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -24,6 +25,7 @@ from socialhome.domain.task import (
     TaskTombstone,
 )
 from socialhome.domain.tombstone import SpaceRowTombstone
+from socialhome.federation.sync.space import resume as resume_mod
 from socialhome.federation.sync.space.resume import (
     MAX_PER_RESOURCE,
     SpaceSyncResumeProvider,
@@ -1141,3 +1143,165 @@ def test_post_to_payload_carries_link_preview_only_when_set():
     payload = _post_to_payload(Post(**base, link_preview=card))
     assert payload["link_preview"]["title"] == "T"
     assert payload["link_preview"]["url"] == "https://example.com/"
+
+
+class _FakeMediaOutbox:
+    def __init__(self) -> None:
+        self.rows: list[tuple[str, str, tuple[str, ...], tuple[str, ...]]] = []
+
+    async def enqueue_for_blob(
+        self, *, space_id, correlation_id, target_instance_ids, media_urls
+    ):
+        self.rows.append(
+            (space_id, correlation_id, tuple(target_instance_ids), tuple(media_urls))
+        )
+
+
+async def test_a_replayed_rows_files_ship_from_the_replaying_household():
+    """A receiver names a file by the household that delivered its row, so
+    the files of every replayed post / cover / gallery item ship from us —
+    to the one household that asked, under the names our rows hold."""
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    at = base + timedelta(minutes=1)
+    post = replace(
+        _post(0, at),
+        type=PostType.IMAGE,
+        media_url="api/media/sd-a.webp",
+        image_urls=("api/media/sd-b.webp",),
+    )
+    event = replace(_cal_event(0, at), cover_url="api/media/cover.webp")
+    outbox = _FakeMediaOutbox()
+    provider = SpaceSyncResumeProvider(
+        federation_service=_FakeFederation(),
+        space_repo=_FakeSpaceRepo(["peer-a"]),
+        space_post_repo=_FakePostRepo(posts=[post, _post(1, at)]),
+        space_calendar_repo=_FakeListSinceRepo([event]),
+        media_sync=outbox,
+    )
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()}),
+    )
+    assert outbox.rows == [
+        ("sp-1", "p-0", ("peer-a",), ("api/media/sd-a.webp", "api/media/sd-b.webp")),
+        ("sp-1", "ev-0", ("peer-a",), ("api/media/cover.webp",)),
+    ]
+
+
+def _image_post(i: int, at: datetime, *names: str) -> Post:
+    return replace(
+        _post(i, at),
+        type=PostType.IMAGE,
+        image_urls=tuple(f"api/media/{n}" for n in names),
+    )
+
+
+def _bounded_provider(tmp_path, posts, outbox, clock=lambda: 0.0):
+    return SpaceSyncResumeProvider(
+        federation_service=_FakeFederation(),
+        space_repo=_FakeSpaceRepo(["peer-a"]),
+        space_post_repo=_FakePostRepo(posts=posts),
+        media_sync=outbox,
+        media_dir=tmp_path,
+        clock=clock,
+    )
+
+
+async def test_a_resumes_files_are_bounded_in_bytes_and_count(tmp_path, monkeypatch):
+    """The requester picks ``since``: one request pushes at most
+    RESUME_MEDIA_MAX_FILES files and RESUME_MEDIA_MAX_BYTES bytes of what
+    is here — a file past the budget, or not here, is skipped."""
+    monkeypatch.setattr(resume_mod, "RESUME_MEDIA_MAX_BYTES", 100)
+    monkeypatch.setattr(resume_mod, "RESUME_MEDIA_MAX_FILES", 3)
+    for name, size in (("a", 40), ("big", 500), ("b", 40), ("c", 10), ("d", 1)):
+        (tmp_path / f"{name}.webp").write_bytes(b"x" * size)
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    at = base + timedelta(minutes=1)
+    posts = [
+        _image_post(0, at, "a.webp", "big.webp", "gone.webp"),
+        _image_post(1, at, "b.webp", "c.webp", "d.webp"),
+    ]
+    outbox = _FakeMediaOutbox()
+    provider = _bounded_provider(tmp_path, posts, outbox)
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
+    )
+    shipped = [u for row in outbox.rows for u in row[3]]
+    # 40 + 40 + 10 bytes, three files: "big" is over the bytes, "gone" is
+    # missing, "d" is over the count.
+    assert shipped == ["api/media/a.webp", "api/media/b.webp", "api/media/c.webp"]
+
+
+async def test_a_resume_is_served_once_per_household_and_space_per_cooldown(
+    tmp_path,
+):
+    now = [1000.0]
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    posts = [_post(0, base + timedelta(minutes=1))]
+    outbox = _FakeMediaOutbox()
+    provider = _bounded_provider(tmp_path, posts, outbox, clock=lambda: now[0])
+    request = _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
+    assert await provider.handle_request(request) == 1
+    now[0] += resume_mod.RESUME_COOLDOWN_S - 1
+    assert await provider.handle_request(request) == 0
+    now[0] += 2
+    assert await provider.handle_request(request) == 1
+    # Another space or household keeps its own window.
+    assert (
+        await provider.handle_request(
+            _event(
+                "peer-a",
+                {"space_id": "sp-2", "since": base.isoformat()},
+                space_id="sp-2",
+            )
+        )
+        == 1
+    )
+
+
+async def test_a_resync_replay_shares_the_resume_cooldown(tmp_path):
+    """§319.6 ``INSTANCE_RESYNC_REQUEST`` calls the replay directly with
+    ``since`` = epoch: the cooldown lives in the replay itself, keyed on the
+    requesting household and the space, so repeated resyncs ship the files
+    once per window — whichever entry point asked."""
+    now = [1000.0]
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    (tmp_path / "a.webp").write_bytes(b"x")
+    posts = [_image_post(0, base + timedelta(minutes=1), "a.webp")]
+    outbox = _FakeMediaOutbox()
+    provider = _bounded_provider(tmp_path, posts, outbox, clock=lambda: now[0])
+    epoch = "1970-01-01T00:00:00+00:00"
+    for _ in range(3):
+        await provider.replay_space_to(
+            space_id="sp-1", instance_id="peer-a", since=epoch
+        )
+    await provider.replay_calendar_to(
+        space_id="sp-1", instance_id="peer-a", since=epoch
+    )
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
+    )
+    assert len(outbox.rows) == 1
+    now[0] += resume_mod.RESUME_COOLDOWN_S + 1
+    await provider.replay_space_to(space_id="sp-1", instance_id="peer-a", since=epoch)
+    assert len(outbox.rows) == 2
+
+
+async def test_concurrent_resumes_are_served_once(tmp_path):
+    """The window starts before the replay awaits anything, so requests
+    racing each other cannot all slip through."""
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    (tmp_path / "a.webp").write_bytes(b"x")
+    posts = [_image_post(0, base + timedelta(minutes=1), "a.webp")]
+    outbox = _FakeMediaOutbox()
+    provider = _bounded_provider(tmp_path, posts, outbox)
+
+    class _SlowFederation(_FakeFederation):
+        async def send_event(self, **kw):
+            await asyncio.sleep(0)  # a real send yields: requests interleave
+            await super().send_event(**kw)
+
+    provider._federation = _SlowFederation()
+    request = _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
+    sent = await asyncio.gather(*(provider.handle_request(request) for _ in range(5)))
+    assert sorted(sent) == [0, 0, 0, 0, 1]
+    assert len(outbox.rows) == 1

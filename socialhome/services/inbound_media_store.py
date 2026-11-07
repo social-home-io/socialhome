@@ -87,6 +87,12 @@ DM_MEDIA_PREFIX: str = "dm-"
 #: (:func:`gfs_space_media_name`).
 GFS_SPACE_MEDIA_PREFIX: str = "sg-"
 
+#: Prefix of a space file received over federation
+#: (:func:`space_direct_media_name`). Not reserved: a household relays the
+#: names it stores (the host's §25.6 catch-up), and a receiver maps every
+#: name it is sent — so a received ``sd-`` name only ever becomes another.
+SPACE_DIRECT_MEDIA_PREFIX: str = "sd-"
+
 #: Name prefixes owned by one receiving path each — a ``SPACE_MEDIA_BLOB``
 #: never writes them, and a received space item never names them: ``dm-``
 #: received DM attachments, ``gm-`` moment media fetched from a GFS
@@ -164,6 +170,36 @@ def gfs_space_media_name(
     dot = filename.rfind(".")
     ext = filename[dot:] if 0 < dot and len(filename) - dot <= 10 else ""
     return f"{GFS_SPACE_MEDIA_PREFIX}{digest[:40]}{ext}"
+
+
+def space_direct_media_name(space_id: str, origin: str, filename: str) -> str:
+    """Local name of space file *filename* as household *origin* delivers it
+    — the household this one AUTHENTICATED as sending the bytes or the row
+    (the envelope's sender, a ``SPACE_ROUTED`` inner's origin, the §25.6
+    provider), never a payload field.
+
+    Both sides of a direct delivery use it: a ``SPACE_MEDIA_BLOB`` from *H*
+    for *filename* is stored under this name, and a row *H* delivers has its
+    reference to *filename* rewritten to it. So a file name is never first
+    come, first served: another household naming the same file in its own
+    row (or pushing bytes for it) only ever reaches ITS copy. The name does
+    not depend on the receiver — every household that got a file from *H*
+    calls it the same — nor on the item, so bytes that overtake their row
+    land where the row will point. Fixed length, keeps the extension,
+    always :func:`is_safe_media_name`.
+    """
+    digest = hashlib.sha256(
+        f"space-direct\0{space_id}\0{origin}\0{filename}".encode()
+    ).hexdigest()
+    dot = filename.rfind(".")
+    ext = filename[dot:] if 0 < dot and len(filename) - dot <= 10 else ""
+    return f"{SPACE_DIRECT_MEDIA_PREFIX}{digest[:40]}{ext}"
+
+
+def is_space_direct_media_name(name: str) -> bool:
+    """``True`` for a :func:`space_direct_media_name` prefix — a file this
+    household received over federation, bound to its sender."""
+    return name.startswith(SPACE_DIRECT_MEDIA_PREFIX)
 
 
 def is_gfs_space_media_name(name: str) -> bool:

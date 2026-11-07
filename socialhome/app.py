@@ -442,6 +442,7 @@ from .services.space_crypto_service import (
 from .services.space_location_outbound import SpaceLocationOutbound
 from .services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
 from .services.space_media_gfs_uploader import SpaceMediaGfsUploader
+from .services.space_media_names import SpaceMediaNamer
 from .services.space_media_sync_service import SpaceMediaSyncService
 from .services.space_member_profile_federation_outbound import (
     SpaceMemberProfileFederationOutbound,
@@ -2137,6 +2138,11 @@ def _wire_federation_stack(
         sticky_repo=sticky_repo,
         space_calendar_repo=space_calendar_repo,
         gallery_repo=gallery_repo,
+        # A replayed row's files ship from us: the receiver names them by
+        # the household that delivered the row (``SpaceMediaNamer``) —
+        # bounded per request by the files' sizes here.
+        media_sync=space_media_sync_service,
+        media_dir=pathlib.Path(config.media_path),
     )
 
     async def _space_sync_resume(event) -> None:
@@ -4618,6 +4624,14 @@ def create_app(config: Config | None = None) -> web.Application:
             media_sync=space_media_sync_service,
         )
         moderation_federation.attach_to(federation_service)
+        # Received space files take names bound to the household that
+        # delivered them; one namer, knowing who "we" are, for every path.
+        media_names = SpaceMediaNamer(own_instance_id=real_instance_id)
+        moderation_federation.attach_media_names(media_names)
+        fed.space_authorship.attach_media_names(media_names)
+        fed.inbound_service.attach_media_names(media_names)
+        fed.content_inbound.attach_media_names(media_names)
+        app[K.space_sync_receiver_key].attach_media_names(media_names)
         moderation_federation.attach_identity(
             own_instance_pk=identity_pk,
             own_identity_seed=identity_seed,

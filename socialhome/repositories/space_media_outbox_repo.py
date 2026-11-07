@@ -63,7 +63,13 @@ class AbstractSpaceMediaOutboxRepo(Protocol):
         correlation_id: str,
         target_instance_id: str,
         bytes_path: str,
-    ) -> None: ...
+    ) -> None:
+        """Queue one file for one household. A row already queued or in
+        flight is left to the scheduler; a ``failed`` one (out of attempts)
+        is re-armed — a later catch-up / replay is a fresh chance, and a
+        receiver binds a file to the household that delivered its row, so
+        nobody else can fill it."""
+        ...
 
     async def list_due(self, *, limit: int = 25) -> list[SpaceMediaOutboxEntry]: ...
 
@@ -140,7 +146,15 @@ class SqliteSpaceMediaOutboxRepo:
                      WHERE space_id=? AND instance_id=?
                 )
              )
-            ON CONFLICT(blob_id, target_instance_id) DO NOTHING
+            ON CONFLICT(blob_id, target_instance_id) DO UPDATE SET
+                status='pending',
+                attempts=0,
+                next_attempt_at=datetime('now'),
+                last_error=NULL,
+                space_id=excluded.space_id,
+                correlation_id=excluded.correlation_id,
+                bytes_path=excluded.bytes_path
+             WHERE space_media_outbox.status='failed'
             """,
             (
                 blob_id,

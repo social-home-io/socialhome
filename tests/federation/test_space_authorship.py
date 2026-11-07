@@ -25,6 +25,8 @@ from socialhome.domain.space import (
 from socialhome.domain.user import SYSTEM_AUTHOR
 from socialhome.federation.space_authorship import SpaceAuthorship
 from socialhome.repositories.space_remote_member_repo import SpaceRemoteMember
+from socialhome.services.inbound_media_store import space_direct_media_name
+from socialhome.services.space_media_names import SpaceMediaNamer
 
 SPACE = "sp-1"
 HOST = "inst-host"
@@ -1259,3 +1261,65 @@ async def test_writer_create_never_for_a_follower_local_bot_banned_or_blank() ->
     for user in ("u-follower", "u-banned", "u-local", SYSTEM_AUTHOR, ""):
         assert not await a.may_author_writer(_ev(AUTHOR_HOUSE), SPACE, user), user
     assert not await a.may_author_writer(_ev(AUTHOR_HOUSE), "", "u-follower")
+
+
+# ── A release names the item's files as the host holds them ──────────────
+
+
+def _cover_item(cover: str) -> SpaceModerationItem:
+    return _queued(
+        feature="calendar",
+        payload={"entity": "event", "target_id": "ev-1", "cover_url": cover},
+    )
+
+
+def _cover_release(cover: str) -> FederationEvent:
+    return FederationEvent(
+        msg_id="m",
+        event_type=FederationEventType.SPACE_CALENDAR_EVENT_CREATED,
+        from_instance=HOST,
+        to_instance="us",
+        timestamp="2026-01-01T00:00:00+00:00",
+        payload={"id": "ev-1", "cover_url": cover, "summary": "s"},
+        space_id=SPACE,
+    )
+
+
+def _sd(origin: str, name: str) -> str:
+    return f"api/media/{space_direct_media_name(SPACE, origin, name)}"
+
+
+@pytest.mark.parametrize(
+    ("held_cover", "released_cover"),
+    [
+        # A reviewer: both it and the host got the file from the submitter.
+        (_sd(AUTHOR_HOUSE, "c.webp"), _sd(AUTHOR_HOUSE, "c.webp")),
+        # The submitter's own household: the host calls our file by our name.
+        ("api/media/c.webp", _sd("us", "c.webp")),
+        # The host's own user submitted: the release names the host's raw file.
+        (_sd(HOST, "h.webp"), "api/media/h.webp"),
+    ],
+)
+def test_a_releases_files_align_to_the_names_held_here(held_cover, released_cover):
+    """Received files are named per delivering household, so the host and
+    this household rarely spell one file the same: the comparison with the
+    held item sees the name held here."""
+    a = _mod_auth()
+    a.attach_media_names(SpaceMediaNamer(own_instance_id="us"))
+    aligned = a._aligned_media(
+        _cover_release(released_cover), SPACE, _cover_item(held_cover), None
+    )
+    assert aligned["cover_url"] == held_cover
+    assert aligned["summary"] == "s"
+
+
+def test_a_release_naming_another_file_is_not_aligned():
+    a = _mod_auth()
+    a.attach_media_names(SpaceMediaNamer(own_instance_id="us"))
+    aligned = a._aligned_media(
+        _cover_release("api/media/swap.webp"),
+        SPACE,
+        _cover_item("api/media/c.webp"),
+        None,
+    )
+    assert aligned["cover_url"] == "api/media/swap.webp"

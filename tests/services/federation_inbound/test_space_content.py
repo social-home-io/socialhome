@@ -64,6 +64,7 @@ from socialhome.services.gallery_service import (
     DESCRIPTION_MAX,
     NAME_MAX,
 )
+from socialhome.services.inbound_media_store import space_direct_media_name
 from socialhome.services.legacy_album_deletes import LegacyAlbumDeletes
 
 
@@ -561,6 +562,12 @@ class _FakePollRepo:
         self.finalized.append((post_id, slot_id))
         self.schedule_meta[post_id] = {"finalized_slot_id": slot_id, "closed": True}
         return True
+
+
+def _here(name: str, space_id: str = "sp-1", sender: str = "peer-a") -> str:
+    """The reference a file ``sender`` delivers takes here
+    (``SpaceMediaNamer``): bound to that household."""
+    return f"api/media/{space_direct_media_name(space_id, sender, name)}"
 
 
 def _event(event_type, payload, *, from_instance="peer-a", space_id=None):
@@ -2883,6 +2890,34 @@ def bazaar_handlers(bus, repos):
     return h, bazaar
 
 
+async def test_a_listing_never_names_a_reserved_media_file(bazaar_handlers):
+    """A DM / moment / GFS file (``dm-`` / ``gm-`` / ``sg-``) is never a
+    listing photo, like any received space item (``space_media_refs``)."""
+    handlers, bazaar = bazaar_handlers
+    await handlers._on_bazaar_listing_created(
+        _event(
+            FederationEventType.BAZAAR_LISTING_CREATED,
+            {
+                "post_id": "bzr-1",
+                "space_id": "sp-1",
+                "seller_user_id": "u-seller",
+                "mode": "fixed",
+                "title": "Vintage chair",
+                "image_urls": [
+                    "api/media/dm-chat.webp",
+                    "api/media/sg-cache.webp",
+                    "api/media/chair-1.webp",
+                ],
+                "end_time": "2026-06-01T00:00:00+00:00",
+                "currency": "USD",
+                "status": "active",
+                "price": 4500,
+            },
+        ),
+    )
+    assert bazaar.saved[0].image_urls == (_here("chair-1.webp"),)
+
+
 async def test_bazaar_listing_created_happy_path(bazaar_handlers):
     handlers, bazaar = bazaar_handlers
     await handlers._on_bazaar_listing_created(
@@ -2911,7 +2946,8 @@ async def test_bazaar_listing_created_happy_path(bazaar_handlers):
     assert listing.mode.value == "fixed"
     assert listing.status.value == "active"
     assert listing.price == 4500
-    assert listing.image_urls == ("api/media/chair-1.webp",)
+    # The seller's household ships the photos: its name for them here.
+    assert listing.image_urls == (_here("chair-1.webp"),)
 
 
 async def test_bazaar_listing_created_missing_required_drops(bazaar_handlers):
@@ -5832,12 +5868,15 @@ async def test_item_media_references_are_normalised(gallery_env):
         )
     )
     item = gallery.created[-1]
-    assert (item.url, item.thumbnail_url) == ("", "api/media/t.webp")
+    assert (item.url, item.thumbnail_url) == ("", _here("t.webp"))
 
 
 async def test_a_federated_item_delete_removes_its_files(gallery_env):
     handlers, _gallery, media, _seen = gallery_env
-    for name in ("full.webp", "thumb.webp"):
+    local = {
+        n: _here(n).removeprefix("api/media/") for n in ("full.webp", "thumb.webp")
+    }
+    for name in local.values():
         (media / name).write_bytes(b"x")
     await handlers._on_gallery_item_saved(
         _event(
@@ -5859,8 +5898,8 @@ async def test_a_federated_item_delete_removes_its_files(gallery_env):
             space_id="sp-1",
         )
     )
-    assert not (media / "full.webp").exists()
-    assert not (media / "thumb.webp").exists()
+    assert not (media / local["full.webp"]).exists()
+    assert not (media / local["thumb.webp"]).exists()
 
 
 async def test_a_federated_album_delete_removes_its_items_files(gallery_env):
@@ -6380,7 +6419,7 @@ async def test_the_archived_listener_answers_writers_only(bus, repos):
         ("https://tracker.example/pixel.png", None),
         ("//tracker.example/p.png", None),
         ("javascript:alert(1)", None),
-        ("api/media/cover.webp", "api/media/cover.webp"),
+        ("api/media/cover.webp", "LOCAL"),
     ],
 )
 async def test_calendar_event_keeps_only_a_local_cover(
@@ -6404,6 +6443,8 @@ async def test_calendar_event_keeps_only_a_local_cover(
         )
     )
     assert len(repos["calendar"].saved) == 1
+    if expected == "LOCAL":  # the sender's file, by its name here
+        expected = _here("cover.webp")
     assert repos["calendar"].saved[0][1].cover_url == expected
 
 

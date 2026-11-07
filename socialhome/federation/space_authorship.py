@@ -83,7 +83,7 @@ which is no member at all: any writer household may create such a row
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import TYPE_CHECKING
 
 from ..domain.federation import FederationEvent, FederationEventType
@@ -100,6 +100,12 @@ from ..domain.space import (
     SpaceRole,
 )
 from ..domain.user import SYSTEM_AUTHOR
+from ..services.inbound_media_store import media_basename
+from ..services.space_media_names import (
+    SpaceMediaNamer,
+    feature_media_urls,
+    renamed_media,
+)
 from ..services.space_writer_households import holds_member_seat
 from .host_equivalence import acts_as_host
 from .moderation_approval import (
@@ -166,6 +172,7 @@ class SpaceAuthorship:
     __slots__ = (
         "_held_rows",
         "_instances",
+        "_media_names",
         "_on_release",
         "_pending",
         "_seats",
@@ -199,6 +206,14 @@ class SpaceAuthorship:
         #: Told when a release of an item we hold is accepted (the row moves
         #: to approved before its decision arrives).
         self._on_release: ReleaseSeen | None = None
+        #: A release names the item's files as the HOST holds them; this
+        #: household may hold the same file under another name
+        #: (:class:`SpaceMediaNamer`) — aligned before the comparison.
+        self._media_names = SpaceMediaNamer()
+
+    def attach_media_names(self, namer: SpaceMediaNamer) -> None:
+        """Wire the shared namer (it knows this household's instance id)."""
+        self._media_names = namer
 
     def attach_moderation(
         self, *, held_rows: HeldRows, on_release: ReleaseSeen
@@ -687,10 +702,47 @@ class SpaceAuthorship:
             item.space_id != space_id
             or item.submitted_by != author
             or item.status not in _RELEASABLE
-            or not item_matches_event(item, event.event_type, event.payload, held=held)
+            or not item_matches_event(
+                item,
+                event.event_type,
+                self._aligned_media(event, space_id, item, held),
+                held=held,
+            )
         ):
             return "it does not match the item held here", None
         return None, item
+
+    def _aligned_media(
+        self,
+        event: FederationEvent,
+        space_id: str,
+        item: SpaceModerationItem,
+        held: Mapping | None,
+    ) -> dict:
+        """The release's payload with each file it names that is a file
+        the item (or the held target row) shows here renamed to that name:
+        the same name, the host's name for it, or our own file as the host
+        calls it. Received files are named per delivering household, so
+        the host and this household rarely spell one file the same."""
+        payload = dict(event.payload)
+        expected = [
+            *feature_media_urls(item.feature, item.payload or {}),
+            *(feature_media_urls(item.feature, dict(held)) if held else ()),
+        ]
+        names = self._media_names.localize(
+            space_id,
+            str(event.from_instance or ""),
+            feature_media_urls(item.feature, payload),
+            held=expected,
+        )
+        expected_names = {media_basename(u) for u in expected}
+        return renamed_media(
+            item.feature,
+            payload,
+            lambda u: (
+                names.url(u) if media_basename(names.url(u)) in expected_names else u
+            ),
+        )
 
     async def may_mutate(
         self,
