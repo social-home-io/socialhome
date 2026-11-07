@@ -771,8 +771,8 @@ unchanged (an immutable `GET`, served by the CDN).
 - **One hostile reader asking for every blob id it can see.** ≤ 60 `wanted`
   / min per IP and ≤ 240 holder requests an hour per /48 or /24
   (cluster-wide). The bytes those requests make holders send are capped
-  per prefix at 1/8 of the scope's stream budget — **≤ 64 MiB / h per
-  scope** at the defaults — and per scope at 512 MiB / h, and the holder
+  per prefix at 1/8 of a scope's stream budget — **≤ 64 MiB / h per
+  prefix, every scope together** at the defaults — and per scope at 512 MiB / h, and the holder
   sends at most 512 MiB / h to that GFS, so honest readers keep at least
   7/8 of the scope's budget. A repeat of a blob a holder said it doesn't
   hold asks nobody within `coalesce_seconds`; a junk or forged hint only

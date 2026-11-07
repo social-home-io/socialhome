@@ -3883,13 +3883,21 @@ asked address, and only a file referenced by this space's content alone
   `gfs_space_media_ip_bytes`, under their own key prefixes):
   `scope_stream_bytes_per_hour` (512 MiB) one scope may stream; the reader
   network prefix (IPv6 /48, IPv4 /24) that opened a session may spend at
-  most 1/8 of that (64 MiB an hour per scope at the defaults), so one
-  prefix can't use up a scope's budget for everyone; and
+  most 1/8 of that (64 MiB an hour at the defaults, every scope
+  together), so one prefix can't
+  use up a scope's budget for everyone — both are checked BEFORE any holder
+  is asked (past either, `429`: no holder seals or sends bytes that would be
+  refused, nothing is marked missing; a refusal that still races in at the
+  serve ends the session at once); and
   `prefix_wanted_per_hour` (240) holder requests one reader prefix may
   trigger.
-- A holder must deliver the whole body within 120 s. A reader whose copy is
-  not written within the wait left + 10 s + size at 64 KiB/s is cut off, so
-  a reader that stops reading can't pin a blob in memory.
+- A holder must deliver the whole body within 120 s, and a session never
+  outlives its wait + that deadline. A reader whose copy is not written
+  within the wait left + 10 s + size at 64 KiB/s is cut off, and one reader
+  network prefix may hold at most 2 sessions open by reading slowly
+  (`503 busy` past it), so slow readers pin neither memory nor every slot.
+- A session keeps at most one reader hint per reader network prefix (4 in
+  all), so one prefix's junk can't crowd out another reader's hint.
 - Per IP: 60 `wanted` / min (each node its share over the live nodes), shed
   before any work.
 - Waiting readers: 4 per client address bucket, 8 per network prefix, 512
