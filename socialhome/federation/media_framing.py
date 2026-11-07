@@ -269,17 +269,23 @@ def decode_body(buf: bytes) -> tuple[str, MediaFrame]:
         raise UnsupportedMediaFrameSuite(
             f"unknown media frame suite id: {buf[len(MEDIA_BODY_MAGIC)]}"
         )
-    frame_buf = bytes(buf[_BODY_PREFIX_LEN:])
-    span = _frame_span(frame_buf, 0)
+    # Parse in place at the prefix offset: the header and the sealed chunk
+    # are each copied out once, the body itself never (it is up to 528 KiB).
+    span = _frame_span(buf, _BODY_PREFIX_LEN)
     if span is None:
         raise MediaFramingError("body too short for a complete frame")
-    _header_off, _header_len, payload_off, payload_len = span
-    if payload_off + payload_len != len(frame_buf):
+    header_off, header_len, payload_off, payload_len = span
+    if payload_off + payload_len != len(buf):
         raise MediaFramingError("trailing bytes after the frame")
-    frame = decode(frame_buf)
-    if frame.frame_type != FRAME_TYPE_MEDIA_CHUNK:
-        raise MediaFramingError(f"unexpected frame_type: {frame.frame_type}")
-    return suite, frame
+    frame_type = buf[_BODY_PREFIX_LEN]
+    if frame_type != FRAME_TYPE_MEDIA_CHUNK:
+        raise MediaFramingError(f"unexpected frame_type: {frame_type}")
+    view = memoryview(buf)
+    return suite, MediaFrame(
+        frame_type=frame_type,
+        header=bytes(view[header_off : header_off + header_len]),
+        payload=bytes(view[payload_off : payload_off + payload_len]),
+    )
 
 
 def iter_complete_frames(buf: bytes) -> tuple[list[MediaFrame], bytes]:

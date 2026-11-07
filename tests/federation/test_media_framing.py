@@ -194,3 +194,12 @@ def test_decode_body_refuses_an_unknown_frame_type():
     body = mf.MEDIA_BODY_MAGIC + bytes([1]) + mf.encode(b"hdr", b"p", frame_type=9)
     with pytest.raises(mf.MediaFramingError, match="frame_type"):
         mf.decode_body(body)
+
+
+@pytest.mark.parametrize("wrap", [bytes, bytearray, memoryview])
+def test_decode_body_parses_in_place(wrap):
+    """One pass at the prefix offset — any buffer, same frame."""
+    suite, frame = mf.decode_body(wrap(mf.encode_body(b"hdr", b"sealed")))
+    assert suite == mf.MEDIA_FRAME_SUITE_V1
+    assert (frame.frame_type, frame.header, frame.payload) == (1, b"hdr", b"sealed")
+    assert type(frame.header) is bytes and type(frame.payload) is bytes

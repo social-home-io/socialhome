@@ -138,6 +138,7 @@ from .media_framing import (
     UnsupportedMediaFrameSuite,
     decode_body,
 )
+from .media_https_backoff import MediaHttpsBackoff
 from .mesh_member_claim import (
     MESH_CLAIM_IDENTITY_PK_FIELD,
     MESH_CLAIM_VERSION_FIELD,
@@ -156,6 +157,20 @@ def _dumps(obj: dict) -> str:
 
 def _loads(s: str | bytes) -> dict:
     return _orjson.loads(s)
+
+
+def _digest_matches(expected: object, actual: str) -> bool:
+    """Constant-time check of a peer-supplied b64url digest against ours.
+
+    Anything but a non-empty string is a mismatch, and the comparison is on
+    UTF-8 bytes: ``hmac.compare_digest`` raises ``TypeError`` on a
+    non-ASCII ``str``, which would surface as a 500 instead of a refusal.
+    """
+    return (
+        isinstance(expected, str)
+        and bool(expected)
+        and hmac.compare_digest(expected.encode("utf-8"), actual.encode("ascii"))
+    )
 
 
 log = logging.getLogger(__name__)
@@ -332,6 +347,7 @@ class FederationService:
         "_inbound_pipeline",
         "_key_manager",
         "_last_mesh_begin_at",
+        "_media_https_backoff",
         "_media_https_inbound_pipeline",
         "_online_status_service",
         "_outbox_repo",
@@ -502,6 +518,9 @@ class FederationService:
         # §24.11 inbound validation pipeline (middleware chain).
         self._inbound_pipeline = None  # lazy-built on first use
         self._media_https_inbound_pipeline = None  # lazy-built on first frame
+        # Per-peer memory of the binary HTTPS media leg: a peer whose inbox
+        # keeps refusing binary bodies gets JSON only for a while.
+        self._media_https_backoff = MediaHttpsBackoff()
         self._rtc_inbound_pipeline = None  # lazy-built on first RTC frame
         # Event dispatch registry for federation event handlers.
         # Handlers register themselves via attach_* methods.
@@ -1128,9 +1147,8 @@ class FederationService:
         # Verify payload integrity: sha256(plaintext) must match the hash inside
         # the signed+encrypted metadata — same constant-time check as the media
         # handler's chunk_sha256, preventing payload-splice attacks by a relay.
-        expected_sha = str(meta.get("payload_sha256") or "")
         actual_sha = b64url_encode(hashlib.sha256(raw).digest())
-        if not expected_sha or not hmac.compare_digest(expected_sha, actual_sha):
+        if not _digest_matches(meta.get("payload_sha256"), actual_sha):
             log.warning(
                 "app frame payload_sha256 mismatch from %s — dropping",
                 instance_id,
@@ -2448,6 +2466,9 @@ class FederationService:
             # A peer already known to be away gets the JSON leg straight
             # away (relay / outbox) — never two timed-out POSTs per chunk.
             and instance.unreachable_since is None
+            # …nor a wasted POST per chunk to an inbox that keeps refusing
+            # binary bodies (proxy, bug, the shared bucket behind HA's relay).
+            and self._media_https_backoff.allows(instance.id)
             and len(raw_chunk) <= HTTPS_CHUNK_BYTES
             and await self.peer_supports(
                 instance.id,
@@ -2507,8 +2528,17 @@ class FederationService:
             raw_chunk=raw_chunk,
             space_id=space_id,
         )
-        send = transport.send_media_https if via_https else transport.send_media
-        if not await send(instance=instance, header_dict=header, payload_bytes=sealed):
+        if via_https:
+            answer = await transport.send_media_https(
+                instance=instance, header_dict=header, payload_bytes=sealed
+            )
+            self._media_https_backoff.record(instance.id, answer)
+            sent = answer.ok
+        else:
+            sent = await transport.send_media(
+                instance=instance, header_dict=header, payload_bytes=sealed
+            )
+        if not sent:
             return None
         # Same reachability edge as :meth:`send_event`: a chunk can be the
         # first thing that reaches a household that was away.
@@ -3454,6 +3484,13 @@ class FederationService:
         pipeline: InboundPipeline = self._media_https_inbound_pipeline  # type: ignore[assignment]
         ctx = InboundContext(raw_body=frame.header, inbox_id=inbox_id)
         await pipeline.run(ctx)
+        # The pipeline has persisted this msg_id in the replay cache BEFORE
+        # the chunk is checked against ``chunk_sha256`` below, so a body
+        # whose chunk then fails burns its msg_id. That is acceptable: the
+        # sender's fallback for a refused body is a NEW envelope (the JSON
+        # chunk, fresh msg_id), whose part lands under the same transfer key
+        # and index (a re-send overwrites its part, the assembled file is
+        # write-once), so nothing legitimate is lost or applied twice.
         return await self._finish_media_frame(
             ctx, frame.payload, wire_frame_suite=wire_suite
         )
@@ -3509,9 +3546,8 @@ class FederationService:
             raw = self._encoder.decrypt_bytes(payload_bytes, session_key)
         except Exception as exc:
             raise ValueError(f"Failed to decrypt media chunk: {exc}") from exc
-        expected = str(meta.get("chunk_sha256") or "")
         actual = b64url_encode(hashlib.sha256(raw).digest())
-        if not expected or not hmac.compare_digest(expected, actual):
+        if not _digest_matches(meta.get("chunk_sha256"), actual):
             raise ValueError("media chunk sha256 mismatch")
         await self._dispatch_event(replace(event, media_bytes=raw))
         return {"status": "ok"}

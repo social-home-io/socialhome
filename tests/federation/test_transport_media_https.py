@@ -19,6 +19,7 @@ from socialhome.domain.federation import (
     RemoteInstance,
 )
 from socialhome.federation import media_framing as mf
+from socialhome.federation.media_https_backoff import MediaPostResult
 from socialhome.federation.transport import FederationTransport, HttpsInboxTransport
 
 
@@ -39,13 +40,15 @@ def _instance(url: str) -> RemoteInstance:
 @pytest.fixture
 async def media_server():
     hits: list[tuple[str, str, bytes]] = []
-    status = {"code": 200}
+    status: dict = {"code": 200, "headers": {}}
 
     async def media(request: web.Request) -> web.Response:
         hits.append(
             (request.path, request.content_type, await request.read()),
         )
-        return web.json_response({"status": "ok"}, status=status["code"])
+        return web.json_response(
+            {"status": "ok"}, status=status["code"], headers=status["headers"]
+        )
 
     app = web.Application()
     app.router.add_post("/federation/inbox/{inbox_id}", media)
@@ -68,8 +71,8 @@ async def test_send_media_posts_raw_bytes_to_the_inbox_url_itself(media_server):
     srv, wt, hits, _ = media_server
     inst = _instance(f"http://127.0.0.1:{srv.port}/federation/inbox/abc")
     body = mf.encode_body(b'{"h":1}', bytes(range(20)))
-    ok, status = await wt.send_media(instance=inst, body=body)
-    assert ok is True and status == 200
+    res = await wt.send_media(instance=inst, body=body)
+    assert res == MediaPostResult(ok=True, status_code=200)
     assert hits == [
         ("/federation/inbox/abc", "application/octet-stream", body),
     ]
@@ -79,8 +82,27 @@ async def test_send_media_non_2xx_is_a_failure(media_server):
     srv, wt, _hits, status = media_server
     status["code"] = 404
     inst = _instance(f"http://127.0.0.1:{srv.port}/federation/inbox/abc")
-    ok, code = await wt.send_media(instance=inst, body=b"x")
-    assert ok is False and code == 404
+    res = await wt.send_media(instance=inst, body=b"x")
+    assert res == MediaPostResult(ok=False, status_code=404)
+
+
+async def test_send_media_reports_a_429s_retry_after(media_server):
+    srv, wt, _hits, status = media_server
+    status["code"] = 429
+    status["headers"] = {"Retry-After": "17"}
+    inst = _instance(f"http://127.0.0.1:{srv.port}/federation/inbox/abc")
+    res = await wt.send_media(instance=inst, body=b"x")
+    assert res == MediaPostResult(ok=False, status_code=429, retry_after_s=17.0)
+
+
+@pytest.mark.parametrize("value", ["soon", "-5", ""])
+async def test_send_media_ignores_a_retry_after_it_cannot_read(media_server, value):
+    srv, wt, _hits, status = media_server
+    status["code"] = 429
+    status["headers"] = {"Retry-After": value}
+    inst = _instance(f"http://127.0.0.1:{srv.port}/federation/inbox/abc")
+    res = await wt.send_media(instance=inst, body=b"x")
+    assert res == MediaPostResult(ok=False, status_code=429, retry_after_s=None)
 
 
 async def test_send_media_unreachable_peer_is_a_failure():
@@ -92,8 +114,8 @@ async def test_send_media_unreachable_peer_is_a_failure():
         return _Raising()
 
     wt = HttpsInboxTransport(client_factory=_factory)
-    ok, code = await wt.send_media(instance=_instance("https://p/wh"), body=b"x")
-    assert ok is False and code is None
+    res = await wt.send_media(instance=_instance("https://p/wh"), body=b"x")
+    assert res == MediaPostResult(ok=False, status_code=None)
 
 
 @pytest.fixture(autouse=True)
@@ -115,9 +137,10 @@ async def test_facade_frames_the_header_and_sealed_chunk(media_server):
     )
     inst = _instance(f"http://127.0.0.1:{srv.port}/federation/inbox/abc")
     header = {"msg_id": "m1", "signatures": {"ed25519": "s"}}
-    assert await t.send_media_https(
+    res = await t.send_media_https(
         instance=inst, header_dict=header, payload_bytes=b"sealed"
     )
+    assert res.ok
     [(_path, _ctype, body)] = hits
     suite, frame = mf.decode_body(body)
     assert suite == mf.MEDIA_FRAME_SUITE_V1
@@ -128,15 +151,17 @@ async def test_facade_frames_the_header_and_sealed_chunk(media_server):
 async def test_facade_reports_a_refused_frame(media_server):
     srv, wt, _hits, status = media_server
     status["code"] = 429
+    status["headers"] = {"Retry-After": "3"}
     t = FederationTransport(
         own_instance_id="self",
         https_inbox=wt,
         signaling_send=_signal,
     )
     inst = _instance(f"http://127.0.0.1:{srv.port}/federation/inbox/abc")
-    assert not await t.send_media_https(
+    res = await t.send_media_https(
         instance=inst, header_dict={"msg_id": "m"}, payload_bytes=b"x"
     )
+    assert res == MediaPostResult(ok=False, status_code=429, retry_after_s=3.0)
 
 
 async def test_facade_kicks_the_handshake_for_a_peer_without_a_connection(
@@ -171,9 +196,12 @@ async def test_facade_never_posts_a_body_over_the_receivers_cap(media_server):
         own_instance_id="self", https_inbox=wt, signaling_send=_signal
     )
     inst = _instance(f"http://127.0.0.1:{srv.port}/federation/inbox/abc")
-    assert not await t.send_media_https(
+    res = await t.send_media_https(
         instance=inst,
         header_dict={"m": 1},
         payload_bytes=bytes(mf.HTTPS_MEDIA_MAX_BODY_BYTES),
     )
+    # Reported as the 413 the receiver would answer, so the sender's
+    # backoff turns the leg off for this peer instead of retrying it.
+    assert res == MediaPostResult(ok=False, status_code=413)
     assert hits == []

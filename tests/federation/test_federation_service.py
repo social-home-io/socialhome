@@ -70,6 +70,12 @@ from socialhome.federation.media_framing import (
     MEDIA_AEAD_SUITE_AESGCM_256,
     UnsupportedMediaAeadSuite,
 )
+from socialhome.federation.media_https_backoff import (
+    MEDIA_HTTPS_DISABLE_S,
+    MEDIA_HTTPS_STRIKES,
+    MediaHttpsBackoff,
+    MediaPostResult,
+)
 from socialhome.federation.routed_envelope import SpaceRoutedHandler
 from socialhome.federation.transport import (
     FederationTransport,
@@ -6160,11 +6166,11 @@ class _CaptureHttpsMediaTransport(_CaptureMediaTransport):
         super().__init__()
         self.media_ready = False
         self.https_media: list[tuple[dict, bytes]] = []
-        self.https_returns = True
+        self.https_result = MediaPostResult(ok=True, status_code=200)
 
     async def send_media_https(self, *, instance, header_dict, payload_bytes):
         self.https_media.append((header_dict, payload_bytes))
-        return self.https_returns
+        return self.https_result
 
 
 def _paired_https(*, peer_proto_version: int | None = None):
@@ -6287,7 +6293,7 @@ async def test_open_media_channel_still_wins_over_https():
 @pytest.mark.asyncio
 async def test_failed_https_frame_falls_back_to_json():
     p = _paired_https()
-    p.cap.https_returns = False
+    p.cap.https_result = MediaPostResult(ok=False, status_code=503)
     result = await p.svc_a.send_media_chunk(
         to_instance_id=p.b_id,
         event_type=FederationEventType.DM_MEDIA_BLOB,
@@ -6670,3 +6676,127 @@ async def test_a_binary_chunk_to_a_reachable_peer_fires_no_edge():
     )
     assert len(p.cap.https_media) == 1
     assert seen == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["é" * 43, "ü", 12345, None, ""])
+async def test_a_malformed_chunk_sha256_is_a_clean_refusal_over_https(bad):
+    """A non-ASCII (or non-string) ``chunk_sha256`` is refused like any
+    mismatch — never a ``TypeError`` out of ``hmac.compare_digest`` (a 500)."""
+    p = _paired_https()
+    header, sealed = _frame_from(p, meta_extra={"chunk_sha256": bad})
+    with pytest.raises(ValueError, match="sha256 mismatch"):
+        await p.svc_b.handle_inbound_media_https(
+            p.inbox_id, _encode_media_body(header, sealed)
+        )
+    assert p.received == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad", ["é" * 43, 12345])
+async def test_a_malformed_chunk_sha256_is_a_clean_refusal_on_the_channel(bad):
+    p = _paired_https()
+    header, sealed = _frame_from(p, meta_extra={"chunk_sha256": bad})
+    with pytest.raises(ValueError, match="sha256 mismatch"):
+        await p.svc_b.handle_inbound_media_frame(p.a_id, orjson.dumps(header), sealed)
+    assert p.received == []
+
+
+@pytest.mark.asyncio
+async def test_app_frame_with_a_non_ascii_payload_sha256_is_dropped_cleanly():
+    """Same hardening as ``chunk_sha256``: a non-ASCII ``payload_sha256``
+    is a mismatch (dropped), never a ``TypeError`` out of ``compare_digest``."""
+    p = _paired_app()
+    inbound_calls: list = []
+
+    class _FakeAppFed:
+        async def on_inbound_message(
+            self, instance_id, app_id, session_id, payload, **routing
+        ):
+            inbound_calls.append(payload)
+
+    p.svc_b.attach_apps(_FakeAppFed())
+    await p.svc_a.send_app_message(
+        to_instance_id=p.b_id, app_id="chess", session_id="s1", payload={"m": 1}
+    )
+    header, payload_bytes = p.cap.app
+    enc_a = FederationEncoder(p.a_kp.private_key)
+    meta = orjson.loads(enc_a.decrypt_payload(header["encrypted_payload"], p.session))
+    meta["payload_sha256"] = "é" * 43
+    header.pop("signatures")
+    header["encrypted_payload"] = enc_a.encrypt_payload(
+        orjson.dumps(meta).decode(), p.session
+    )
+    header["signatures"] = enc_a.sign_envelope_all(
+        orjson.dumps(header), suite=header["sig_suite"]
+    )
+    await p.svc_b._app_inbound_handler(p.a_id, orjson.dumps(header), payload_bytes)
+    assert inbound_calls == []
+
+
+# ─── Per-peer memory of the binary HTTPS leg ──────────────────────────────
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.now = 5000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+async def _send_dm_chunk(p) -> None:
+    await p.svc_a.send_media_chunk(
+        to_instance_id=p.b_id,
+        event_type=FederationEventType.DM_MEDIA_BLOB,
+        payload={"media_blob_id": "m1", "message_id": "m1"},
+        raw_chunk=b"bytes",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_peer_that_keeps_refusing_binary_bodies_gets_json_only():
+    """A proxy that blocks binary bodies (or a bug) must not cost a wasted
+    binary POST before every JSON chunk forever: after N strikes the leg
+    is skipped, and probed again once the window has passed."""
+    p = _paired_https()
+    clock = _Clock()
+    p.svc_a._media_https_backoff = MediaHttpsBackoff(clock=clock)
+    p.cap.https_result = MediaPostResult(ok=False, status_code=502)
+    for _ in range(MEDIA_HTTPS_STRIKES):
+        await _send_dm_chunk(p)
+    assert len(p.cap.https_media) == MEDIA_HTTPS_STRIKES
+    await _send_dm_chunk(p)
+    await _send_dm_chunk(p)
+    assert len(p.cap.https_media) == MEDIA_HTTPS_STRIKES  # leg skipped
+    assert len(p.cap.json_envelopes) == MEDIA_HTTPS_STRIKES + 2  # still delivered
+    clock.now += MEDIA_HTTPS_DISABLE_S
+    p.cap.https_result = MediaPostResult(ok=True, status_code=200)
+    await _send_dm_chunk(p)
+    assert len(p.cap.https_media) == MEDIA_HTTPS_STRIKES + 1  # probed again
+
+
+@pytest.mark.asyncio
+async def test_a_413_turns_the_binary_leg_off_at_once():
+    p = _paired_https()
+    p.svc_a._media_https_backoff = MediaHttpsBackoff(clock=_Clock())
+    p.cap.https_result = MediaPostResult(ok=False, status_code=413)
+    await _send_dm_chunk(p)
+    await _send_dm_chunk(p)
+    assert len(p.cap.https_media) == 1
+    assert len(p.cap.json_envelopes) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_429_backs_the_binary_leg_off_for_its_retry_after():
+    p = _paired_https()
+    clock = _Clock()
+    p.svc_a._media_https_backoff = MediaHttpsBackoff(clock=clock)
+    p.cap.https_result = MediaPostResult(ok=False, status_code=429, retry_after_s=20)
+    await _send_dm_chunk(p)
+    await _send_dm_chunk(p)
+    assert len(p.cap.https_media) == 1  # backing off
+    clock.now += 20
+    p.cap.https_result = MediaPostResult(ok=True, status_code=200)
+    await _send_dm_chunk(p)
+    assert len(p.cap.https_media) == 2  # binary again after Retry-After

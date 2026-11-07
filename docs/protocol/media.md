@@ -117,7 +117,10 @@ channel's tail (suites, decrypt, `chunk_sha256`). The body cap is one
 512 KiB chunk + 16 KiB (`HTTPS_MEDIA_MAX_BODY_BYTES`), checked against
 `Content-Length` once the magic is read and while streaming; binary
 bodies have their own per-IP bucket (600 / min). Any non-2xx answer
-sends the JSON chunk instead.
+sends the JSON chunk instead, and the sender remembers it per peer
+(`MediaHttpsBackoff`): a 429 skips the leg for its `Retry-After`, another
+4xx for 10 min at once, 5xx / no answer for 10 min after 3 in a row, then
+one chunk probes again — see [DM media](dm-media.md#binary-media-on-the-https-inbox-v_81).
 
 Wire cost for a 512 KiB chunk: **525 323 B** binary vs **932 911 B**
 JSON (−44 %); a 200 MiB video (400 chunks) 210.1 MB vs 373.2 MB per

@@ -182,6 +182,15 @@ async def test_a_swapped_chunk_is_refused(client, env):
     dispatch.assert_not_awaited()
 
 
+async def test_a_non_ascii_chunk_sha256_is_a_400_not_a_500(client, env):
+    header, sealed = _frame(env, meta={"chunk_sha256": "é" * 43})
+    with _dispatch() as dispatch:
+        r = await _post(client, encode_media_body(header, sealed))
+    assert r.status == 400
+    assert (await r.json()) == {"error": "bad_envelope"}
+    dispatch.assert_not_awaited()
+
+
 async def test_a_tampered_header_is_refused(client, env):
     header, sealed = _frame(env, header_patch={"space_id": "sp-x"}, resign=False)
     with _dispatch() as dispatch:

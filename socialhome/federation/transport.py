@@ -70,6 +70,7 @@ from .media_envelope import (
     MEDIA_HTTPS_CONTENT_TYPE,
     encode_media_body,
 )
+from .media_https_backoff import MediaPostResult
 
 if TYPE_CHECKING:
     from ..infrastructure.event_bus import EventBus
@@ -152,30 +153,39 @@ class HttpsInboxTransport:
         ``(False, None)`` so the caller can record a failure and
         enqueue for retry.
         """
-        return await self._post(instance, json=envelope_dict)
+        ok, status, _retry_after = await self._post(instance, json=envelope_dict)
+        return ok, status
 
     async def send_media(
         self,
         *,
         instance: RemoteInstance,
         body: bytes,
-    ) -> tuple[bool, int | None]:
+    ) -> MediaPostResult:
         """POST one binary media body (proto v_81) to the peer's inbox URL —
         the same URL as :meth:`send`, whatever sits in front of it (Home
         Assistant's inbox relay forwards the bytes as they are). Raw bytes,
         no JSON, no base64; the receiver recognises the body by its magic.
-        Same result contract as :meth:`send`."""
-        return await self._post(
+        Never raises; the status (``None`` without an answer) and a 429's
+        ``Retry-After`` feed the sender's per-peer backoff."""
+        ok, status, retry_after = await self._post(
             instance,
             data=body,
             headers={"Content-Type": MEDIA_HTTPS_CONTENT_TYPE},
+        )
+        return MediaPostResult(
+            ok=ok,
+            status_code=status,
+            retry_after_s=_retry_after_s(retry_after) if status == 429 else None,
         )
 
     async def _post(
         self,
         instance: RemoteInstance,
         **kwargs: Any,
-    ) -> tuple[bool, int | None]:
+    ) -> tuple[bool, int | None, str | None]:
+        """``(ok, status, Retry-After header)``; ``(False, None, None)`` on
+        any error."""
         try:
             client = await self._client_once()
             async with post_to_peer(
@@ -185,7 +195,8 @@ class HttpsInboxTransport:
                 **kwargs,
             ) as resp:
                 status = resp.status
-                return 200 <= status < 300, status
+                retry_after = resp.headers.get("Retry-After") if status == 429 else None
+                return 200 <= status < 300, status, retry_after
         except _PEER_UNREACHABLE_ERRORS as exc:
             # The peer is down, unreachable or slow — ordinary operation
             # for a household that is offline: the caller marks it
@@ -201,7 +212,7 @@ class HttpsInboxTransport:
                 instance.id,
                 describe_exception(exc),
             )
-            return False, None
+            return False, None, None
         except Exception as exc:
             # Anything else is a fault on OUR side (a bad envelope, a
             # client-factory bug) — keep the traceback for it.
@@ -211,7 +222,17 @@ class HttpsInboxTransport:
                 describe_exception(exc),
                 exc_info=True,
             )
-            return False, None
+            return False, None, None
+
+
+def _retry_after_s(value: str | None) -> float | None:
+    """A ``Retry-After`` in delta-seconds (what our inbox sends), or
+    ``None`` when it is missing or not a non-negative number."""
+    try:
+        seconds = float(value) if value else None
+    except ValueError:
+        return None
+    return seconds if seconds is not None and seconds >= 0 else None
 
 
 # ─── RTC peer ──────────────────────────────────────────────────────────────
@@ -2153,16 +2174,17 @@ class FederationTransport:
         instance: RemoteInstance,
         header_dict: dict,
         payload_bytes: bytes,
-    ) -> bool:
+    ) -> MediaPostResult:
         """Deliver one binary media body to the peer's inbox URL over HTTPS
         (proto v_81) — the frame :meth:`send_media` puts on the channel (the
         signed header JSON verbatim + the sealed chunk) behind the body
         magic and suite byte.
 
-        ``True`` only on a 2xx. Anything else (peer away, 429, refused, a
-        body over the receiver's cap) is ``False`` and
-        :meth:`FederationService.send_media_chunk` sends the JSON chunk
-        instead, which the outbox redelivers.
+        ``ok`` only on a 2xx. Anything else (peer away, 429, refused) is not
+        ok and :meth:`FederationService.send_media_chunk` sends the JSON
+        chunk instead, which the outbox redelivers; the status feeds its
+        per-peer backoff. A body over the receiver's cap is never sent and
+        reads as the 413 it would get.
 
         Like :meth:`send`, a peer with no PeerConnection gets the lazy
         handshake kicked (within its backoff), so media-only traffic still
@@ -2173,9 +2195,8 @@ class FederationTransport:
             await self._ensure_handshake(instance)
         body = encode_media_body(header_dict, payload_bytes)
         if len(body) > media_framing.HTTPS_MEDIA_MAX_BODY_BYTES:
-            return False
-        ok, _status = await self._https_inbox.send_media(instance=instance, body=body)
-        return ok
+            return MediaPostResult(ok=False, status_code=413)
+        return await self._https_inbox.send_media(instance=instance, body=body)
 
     def is_media_ready(self, instance_id: str) -> bool:
         peer = self._peers.get(instance_id)

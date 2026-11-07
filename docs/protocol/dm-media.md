@@ -225,10 +225,22 @@ there is no frame to send.
   `Content-Length` once the 4 magic bytes are read, else while streaming;
   its own per-IP bucket (600 / min) → 429. A sender that gets anything
   but 2xx sends the JSON chunk instead, which the outbox redelivers.
+- **Per-peer backoff** (`federation/media_https_backoff.py`, in memory,
+  ≤ 1024 peers) — so an inbox that keeps refusing binary bodies (a proxy
+  that blocks them, a bug, the shared bucket behind Home Assistant's relay)
+  doesn't cost a wasted POST before every JSON chunk: a 429 skips the leg
+  for its `Retry-After` (else 30 s, at most 5 min); any other 4xx (413,
+  415, …) for 10 min at once; 5xx / no answer for 10 min after 3 in a
+  row. Then one chunk probes again; a failed probe means another 10 min.
+  A 2xx clears it. A peer already marked unreachable skips the leg too.
 - **Cost** — per chunk, per receiving household: 932 911 B → 525 323 B
   for 512 KiB (−44 %). A 200 MiB video is 400 chunks: 373.2 MB →
   210.1 MB per receiving household; the recipient set and chunk count
-  are unchanged (still one send per member household).
+  are unchanged (still one send per member household). **Worst case** —
+  an inbox that refuses every binary body: at most 3 wasted bodies
+  (≤ 1.58 MB) and then one probe per 10 minutes on top of the JSON
+  chunks, ≈ 374.7 MB for the 200 MiB video (+0.4 % over JSON alone),
+  instead of ~1.55× (583.3 MB) without the backoff.
 
 **Size cap.** The receiver refuses a file bigger than the sender's own
 upload limits allow (`inbound_media_store.dm_media_max_bytes`, from
