@@ -343,7 +343,23 @@ household they never address the shared store.
   (`Proposal.answers`).
 - **Who ships.** The proposer ships its new files **to the host alone**
   (`PageProposalForwarder._ship_files`, paired or mesh-only host, each file
-  queued once per draft). The host ships each version's new files — new
+  queued once per draft). A member **seated from an invite link** reaches
+  the host only through the GFS relay, which refuses bytes: its proposal
+  carries its new files (≤ `MAX_PAGE_FILES`) as a `media_refs` descriptor
+  instead — each file sealed once for this page and household and uploaded
+  to its GFS media cache by the same uploader as every space picture
+  (`plan_for_reader`, authorized as a space writer: writer key or writer
+  cert, space or channel scope; only files that are the space's own) —
+  signed by its household for exactly this proposal (`media_refs_sig`,
+  suite `ed25519`, domain `space-page-media-refs:v1:`, bound to space,
+  page, household and the proposal's hash as sent;
+  `services/page_media_refs.py`). The host verifies the signature against
+  the key it pinned for that household (unsigned, forged or another
+  proposal's: dropped), takes only entries for the files the proposal
+  ADDS, and fetches each (`SpaceMediaGfsFetcher.localize_proposal`: scope-
+  bound address, AAD naming the page and the proposer) under the
+  proposer's own name `sd(space, proposer, F)` — the name the renamed page
+  shows. From there it ships on like any proposer's file. The host ships each version's new files — new
   against the replaced version **and its whole history** (`shown_before`) —
   plus its open sides' files, to every other v_82 member household
   (`PageFederationOutbound._ship_files`, correlated by the page), and only
@@ -379,12 +395,6 @@ and sides' files) pictures per household, once.
 
 Known limits (follow-ups):
 
-- **A link-joined proposer's files.** The space media outbox never sends
-  to a household reached only through the GFS relay, so a member seated
-  from an invite link cannot ship its page files to the host: its new
-  files show broken everywhere (its words land). Bounded alternative for a
-  follow-up: the proposer uploads them to its GFS media cache and the
-  proposal carries a descriptor the host fetches.
 - A member that keeps editing while a proposal that added a file is in
   flight bases its next draft on what it sent; the host never held that
   exact version (it renamed the file), so that next draft may land as a

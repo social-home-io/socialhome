@@ -662,6 +662,31 @@ author's post that carries a signed descriptor heals it, add-only: only
 while the post has no `space_media_refs` rows, never replacing names or
 rows it already has.
 
+**Page proposal `media_refs` signature (v_82)**
+(`services/page_media_refs.py`) — a member household seated from an
+invite link reaches the space's host only through the GFS relay, so its
+page proposal carries its new files as a `media_refs` descriptor (blobs
+sealed `aesgcm-256-pad-det` for the page and the proposing household). The
+proposing household's identity seed signs it for exactly that proposal:
+
+```
+media_refs           : {"<file>": {blob_id, suite, epoch, size, scope, addr_suite}}
+media_refs_sig       : "<b64url>"   # Ed25519 over the bytes below
+media_refs_sig_suite : "ed25519"    # unknown value → descriptor rejected
+
+b"space-page-media-refs:v1:" + canonical_json({
+  space_id, page_id, origin, proposal_hash, media_refs, suite
+})
+```
+
+`proposal_hash` is the proposal's version hash as sent, so a descriptor
+can't ride another proposal, page or household. The host verifies it with
+the identity key it pinned for that household; unsigned or not verifying →
+no file is fetched (the proposal's words still land). Only entries for the
+files the proposal adds are taken, each stored under
+`sd(space, proposer, file)`; the blob's AAD names the page and the
+proposer, so a blob sealed by anyone else never decrypts.
+
 **Link-preview author signature (GFS public relay)**
 (`services/space_public_author.py`) — a public/global space post's
 author-built link card rides inside the encrypted relay inner, but outside

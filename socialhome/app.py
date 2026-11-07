@@ -5043,6 +5043,23 @@ def create_app(config: Config | None = None) -> web.Application:
         # v_82: a page's files keep the names the host's page shows.
         space_media_fetcher.attach_pages(page_repo)
         fed.content_inbound.attach_gfs_media(space_media_fetcher)
+
+        async def _pinned_key(instance_id: str) -> bytes | None:
+            # The identity key pinned for a household at pairing / seating.
+            inst = await federation_repo.get_instance(instance_id)
+            if inst is None or not inst.remote_identity_pk:
+                return None
+            try:
+                return bytes.fromhex(inst.remote_identity_pk)
+            except ValueError:
+                return None
+
+        # v_82: a link-joined proposer's page files ride its GFS media
+        # cache; the host checks the descriptor's household signature.
+        fed.content_inbound.attach_peer_keys(_pinned_key)
+        app[K.page_proposal_forwarder_key].attach_media_gfs(
+            space_media_uploader, identity_seed=identity_seed
+        )
         if space_public_inbound is not None:
             space_public_inbound.attach_gfs_media(space_media_fetcher)
         # §25.6: a stream to a link-joined member carries the records'

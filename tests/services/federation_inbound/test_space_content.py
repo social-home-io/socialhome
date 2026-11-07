@@ -1207,6 +1207,150 @@ async def test_the_host_names_a_proposals_new_files_after_its_household(bus, rep
     assert proposal.answers == as_sent.hash
 
 
+class _ProposalSink:
+    """The GFS fetcher as the host uses it for a proposal's files."""
+
+    def __init__(self) -> None:
+        self.proposed: list[tuple] = []
+        self.kept = 0
+
+    def localize_proposal(self, space_id, raw_refs, added, *, item_id, origin):
+        self.proposed.append((space_id, raw_refs, dict(added), item_id, origin))
+        return SpaceMediaLocalization(refs=(object(),))
+
+    async def keep(self, loc, *, prefetch=True):
+        self.kept += 1
+        return []
+
+
+def _link_joined_host(bus, repos):
+    from socialhome.crypto import generate_identity_keypair
+
+    engine = _FakeConflicts("host", host="self")
+    h = _page_handlers(bus, repos, engine)
+    sink = _ProposalSink()
+    h.attach_gfs_media(sink)  # type: ignore[arg-type]
+    kp = generate_identity_keypair()
+    keys = {"peer-a": kp.public_key}
+
+    async def _key(iid):
+        return keys.get(iid)
+
+    h.attach_peer_keys(_key)
+    _held(repos)
+    held_row = repos["page"].rows.row("p-1")
+    held_row.content = "![k](api/media/k.webp)"
+    held_row.cover_image_url = None
+    repos["page"].get = _async_value(held_row)
+    return h, engine, sink, kp
+
+
+_PROPOSED = "![k](api/media/k.webp) ![a](api/media/a.webp) ![b](api/media/b.webp)"
+_DESCRIBED = {
+    name: {"blob_id": c * 64, "suite": "s", "epoch": 1, "size": 9}
+    for name, c in (("a.webp", "a"), ("b.webp", "b"), ("k.webp", "c"))
+}
+
+
+def _proposal_payload(kp, *, sign_as=None, refs=None, **over):
+    from socialhome.services.page_conflict_service import Proposal
+    from socialhome.services.page_media_refs import signed_page_media_refs
+
+    payload = {
+        "id": "p-1",
+        "title": "T",
+        "content": _PROPOSED,
+        "actor_user_id": "u-ed",
+        "base_seq": 2,
+        **over,
+    }
+    sent = Proposal(
+        title="T", content=payload["content"], actor_user_id="u-ed", base_seq=2
+    )
+    payload.update(
+        signed_page_media_refs(
+            space_id="sp-1",
+            page_id="p-1",
+            origin="peer-a",
+            proposal_hash=sent.hash,
+            media_refs=refs or _DESCRIBED,
+            identity_seed=(sign_as or kp).private_key,
+        )
+    )
+    return payload
+
+
+async def test_a_link_joined_proposers_new_files_are_fetched_by_the_host(bus, repos):
+    """v_82 (members equal): a proposer reached only through a GFS can't
+    push bytes; its signed descriptor makes the host fetch each file it
+    ADDS under the proposer's own name — the name the renamed page shows.
+    The page's own file (k) is not fetched."""
+    from socialhome.services.inbound_media_store import space_direct_media_name
+
+    h, engine, sink, kp = _link_joined_host(bus, repos)
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            _proposal_payload(kp),
+            space_id="sp-1",
+        )
+    )
+    (call,) = engine.sequenced
+    a = space_direct_media_name("sp-1", "peer-a", "a.webp")
+    b = space_direct_media_name("sp-1", "peer-a", "b.webp")
+    assert f"api/media/{a}" in call["proposal"].content
+    assert sink.proposed == [
+        ("sp-1", _DESCRIBED, {"a.webp": a, "b.webp": b}, "p-1", "peer-a")
+    ]
+    assert sink.kept == 1
+
+
+@pytest.mark.parametrize("how", ["unsigned", "forged", "other_proposal"])
+async def test_an_unsigned_or_forged_proposal_descriptor_is_refused(bus, repos, how):
+    from socialhome.crypto import generate_identity_keypair
+
+    h, engine, sink, kp = _link_joined_host(bus, repos)
+    payload = _proposal_payload(kp)
+    if how == "unsigned":
+        payload = {
+            k: v
+            for k, v in payload.items()
+            if k not in ("media_refs_sig", "media_refs_sig_suite")
+        }
+    elif how == "forged":
+        payload = _proposal_payload(kp, sign_as=generate_identity_keypair())
+    else:  # a descriptor signed for another proposal, replayed here
+        signed = _proposal_payload(kp, content="other words")
+        payload = {**payload, "media_refs_sig": signed["media_refs_sig"]}
+    await h._on_page_saved(
+        _event(FederationEventType.SPACE_PAGE_UPDATED, payload, space_id="sp-1")
+    )
+    assert len(engine.sequenced) == 1  # the words land; no file is fetched
+    assert sink.proposed == [] and sink.kept == 0
+
+
+async def test_a_descriptor_naming_another_households_file_fetches_nothing(bus, repos):
+    """A proposal repeating a file the page shows (another household's
+    ``sd-`` file) and describing it: that file is the page's own — never
+    fetched, never refilled from the proposer's blob."""
+    from socialhome.services.inbound_media_store import space_direct_media_name
+
+    h, _engine, sink, kp = _link_joined_host(bus, repos)
+    theirs = space_direct_media_name("sp-1", "peer-b", "f.webp")
+    held_row = await repos["page"].get("p-1")
+    held_row.content = f"![f](api/media/{theirs})"
+    content = f"![f](api/media/{theirs})"
+    refs = {theirs: {"blob_id": "e" * 64, "suite": "s", "epoch": 1, "size": 9}}
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            _proposal_payload(kp, content=content, refs=refs),
+            space_id="sp-1",
+        )
+    )
+    assert sink.proposed == []
+
+
 async def test_the_host_refuses_a_proposal_over_the_page_file_cap(bus, repos):
     """Every household ships and describes a whole version: a proposal
     showing more than MAX_PAGE_FILES files (only a pre-v_82 editor sends

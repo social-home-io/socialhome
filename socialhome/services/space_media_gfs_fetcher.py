@@ -53,7 +53,7 @@ import pathlib
 import time
 import uuid
 from collections import OrderedDict
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
@@ -65,6 +65,7 @@ from ..domain.federation import InstanceSource
 from ..domain.gfs_space_media import SCOPE_CHANNEL, SCOPE_SPACE, space_media_address
 from ..domain.space_media_ref import (
     MAX_PAGE_DESCRIPTOR_ENTRIES,
+    MAX_PAGE_FILES,
     SpaceMediaLocalization,
     SpaceMediaRef,
     page_media_urls,
@@ -80,8 +81,10 @@ from .inbound_media_store import (
     gfs_space_media_name,
     is_gfs_space_media_name,
     is_reserved_media_name,
+    is_space_direct_media_name,
     is_space_page_media_name,
     media_file_path,
+    space_direct_media_name,
     write_once,
 )
 from .space_media_gfs_uploader import media_names
@@ -329,6 +332,53 @@ class SpaceMediaGfsFetcher:
             return SpaceMediaLocalization()
         return SpaceMediaLocalization(refs=refs)
 
+    def localize_proposal(
+        self,
+        space_id: str,
+        raw_refs: object,
+        added: Mapping[str, str],
+        *,
+        item_id: str,
+        origin: str,
+    ) -> SpaceMediaLocalization:
+        """v_82, the host — the rows for the files a page proposal from
+        household *origin* (reached only through a GFS) ADDS: *added* maps
+        each file name it sent to the name it takes here, which must be
+        ``space_direct_media_name(space, origin, file)`` — bound to the
+        proposer, filled by nobody else. Anything else is dropped; the CALLER
+        authenticated *origin* and verified the descriptor's signature.
+        Never raises."""
+        if not item_id or not origin:
+            return SpaceMediaLocalization()
+        allowed = {
+            name: local
+            for name, local in added.items()
+            if not is_reserved_media_name(name)
+            and local == space_direct_media_name(space_id, origin, name)
+        }
+        if not allowed:
+            return SpaceMediaLocalization()
+        try:
+            refs = tuple(
+                replace(ref, local_name=allowed[ref.filename])
+                for ref in parse_media_refs(
+                    raw_refs,
+                    space_id=space_id,
+                    allowed=set(allowed),
+                    item_id=item_id,
+                    origin=origin,
+                    max_entries=MAX_PAGE_FILES,
+                )
+            )
+        except Exception:
+            log.warning(
+                "space media refs of a proposal for page %s not read",
+                item_id,
+                exc_info=True,
+            )
+            return SpaceMediaLocalization()
+        return SpaceMediaLocalization(refs=refs)
+
     async def _shown_by_its_page(self, ref: SpaceMediaRef) -> bool:
         """Whether *ref* (a page-scoped row) belongs to a live page of its
         space that — in its version or an open side — shows that file."""
@@ -391,6 +441,10 @@ class SpaceMediaGfsFetcher:
         if not (
             is_gfs_space_media_name(filename)
             or (self._pages is not None and is_space_page_media_name(filename))
+            or (
+                is_space_direct_media_name(filename)
+                and await self._refs.get(filename) is not None
+            )
         ):
             # A file another household pushes (or a local one) that is not
             # here yet: routine for a viewer, never a GFS fetch.
@@ -495,8 +549,13 @@ class SpaceMediaGfsFetcher:
         path = media_file_path(self._dir, filename)
         if ref is None or path is None:
             return _REFUSED
-        if not is_gfs_space_media_name(filename) and not (
-            is_space_page_media_name(filename) and await self._shown_by_its_page(ref)
+        if not (
+            is_gfs_space_media_name(filename)
+            or (
+                is_space_page_media_name(filename)
+                and await self._shown_by_its_page(ref)
+            )
+            or _bound_to_its_origin(ref)
         ):
             log.warning(
                 "space media %s: neither a GFS space media name nor a file its "
@@ -621,6 +680,15 @@ class SpaceMediaGfsFetcher:
         await write_once(
             path, data, self._dir / _PARTIAL_DIR / f"gfs-{uuid.uuid4().hex}"
         )
+
+
+def _bound_to_its_origin(ref: SpaceMediaRef) -> bool:
+    """A proposer's file the host fetches (v_82): kept under the name bound
+    to the household that sealed it, ``space_direct_media_name(space,
+    origin, file)`` — the AAD's household — and nothing else."""
+    return bool(ref.origin) and ref.local_name == space_direct_media_name(
+        ref.space_id, ref.origin, ref.filename
+    )
 
 
 def _is_picture(filename: str) -> bool:

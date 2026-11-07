@@ -38,6 +38,7 @@ for a listing already settled) is DEBUG — see :func:`log_not_applied`.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
@@ -163,6 +164,10 @@ from ..page_conflict_service import (
     canonical_from_wire,
     proposal_from_wire,
 )
+from ..page_media_refs import (
+    UnsupportedPageMediaRefsSigSuite,
+    verified_page_media_refs,
+)
 from ..space_media_names import SpaceMediaNamer
 
 if TYPE_CHECKING:
@@ -243,6 +248,7 @@ class SpaceContentInboundHandlers:
         "_media_refs",
         "_page_conflicts",
         "_page_repo",
+        "_peer_key",
         "_poll_repo",
         "_post_repo",
         "_sticky_repo",
@@ -296,12 +302,22 @@ class SpaceContentInboundHandlers:
         #: v_80 — keeps a calendar cover's / gallery item's ``media_refs``
         #: (its files in a GFS media cache) and fetches them.
         self._gfs_media: SpaceMediaGfsFetcher | None = None
+        #: v_82 — the identity key pinned for a household (a page proposal's
+        #: signed descriptor).
+        self._peer_key: Callable[[str], Awaitable[bytes | None]] | None = None
         #: Received space files take this household's names (sender-bound).
         self._media_names = SpaceMediaNamer()
 
     def attach_gfs_media(self, fetcher: SpaceMediaGfsFetcher) -> None:
         """Wire the v_80 GFS media fetcher."""
         self._gfs_media = fetcher
+
+    def attach_peer_keys(
+        self, peer_key: Callable[[str], Awaitable[bytes | None]]
+    ) -> None:
+        """Wire ``peer_key(instance_id)`` — the identity key this household
+        pinned for a household (v_82: a page proposal's signed descriptor)."""
+        self._peer_key = peer_key
 
     async def _localize_media(
         self,
@@ -1231,7 +1247,65 @@ class SpaceContentInboundHandlers:
             ),
             cover_image_url=names.url(proposal.cover_image_url),
         )
+        await self._fetch_proposed_files(
+            event, space_id, page_id, sent, dict(names.names)
+        )
         return proposal if proposal == sent else replace(proposal, answers=sent.hash)
+
+    async def _fetch_proposed_files(
+        self,
+        event: FederationEvent,
+        space_id: str,
+        page_id: str,
+        sent: Proposal,
+        added: dict[str, str],
+    ) -> None:
+        """The host, v_82: a proposer reached only through a GFS relay (a
+        member seated from an invite link) can't push its new files; its
+        proposal describes them (``media_refs``, signed by its household for
+        exactly this proposal). Each file it ADDS is fetched from its GFS
+        media cache under the proposer's own ``sd-`` name — the one the
+        renamed page shows — and ships on to the other members like any
+        proposer's file. Unsigned, forged or for another proposal: dropped
+        (WARNING). At most :data:`MAX_PAGE_FILES` entries."""
+        p = event.payload
+        if (
+            not added
+            or self._gfs_media is None
+            or self._peer_key is None
+            or MEDIA_REFS_FIELD not in p
+        ):
+            return
+        try:
+            refs = verified_page_media_refs(
+                p,
+                space_id=space_id,
+                page_id=page_id,
+                origin=event.from_instance,
+                proposal_hash=sent.hash,
+                origin_pk=await self._peer_key(event.from_instance),
+            )
+        except UnsupportedPageMediaRefsSigSuite as exc:
+            log.warning(
+                "page %s proposal from %s: descriptor refused — %s",
+                page_id,
+                event.from_instance,
+                exc,
+            )
+            return
+        if refs is None:
+            log.warning(
+                "page %s proposal from %s: descriptor unsigned or not its own "
+                "— its files are not fetched",
+                page_id,
+                event.from_instance,
+            )
+            return
+        await self._keep_media(
+            self._gfs_media.localize_proposal(
+                space_id, refs, added, item_id=page_id, origin=event.from_instance
+            )
+        )
 
     async def _on_host_page_version(
         self,

@@ -12,7 +12,10 @@ from socialhome.domain.federation import InstanceSource
 from socialhome.domain.gfs_space_media import space_media_address
 from socialhome.domain.space_media_ref import SpaceMediaRef, space_page_media_name
 from socialhome.services import space_media_gfs_fetcher as fetch_mod
-from socialhome.services.inbound_media_store import gfs_space_media_name
+from socialhome.services.inbound_media_store import (
+    gfs_space_media_name,
+    space_direct_media_name,
+)
 from socialhome.services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
 from socialhome.space_media_seal import (
     SPACE_MEDIA_SUITE_AESGCM256_PADDED,
@@ -995,3 +998,77 @@ async def test_without_pages_attached_nothing_page_scoped_is_kept(tmp_path):
     )
     assert loc.refs == ()
     assert await f.ensure_local(_sp(SHOWN)) is False
+
+
+# ── v_82: a link-joined proposer's page files, fetched by the host ───────
+
+PROPOSER = "hh-e"
+
+
+def _sd(name: str, origin: str = PROPOSER) -> str:
+    return space_direct_media_name(SPACE, origin, name)
+
+
+async def test_the_host_fetches_a_proposers_file_under_its_sender_bound_name(
+    tmp_path,
+):
+    """A link-joined proposer can't push bytes to the host: it describes
+    its new files, and the host fetches each under the proposer's own
+    ``sd-`` name — the one the renamed page shows, which nobody else can
+    fill. The blob's AAD names the page and the proposer."""
+    data = b"new picture"
+    blob = _blob("n.webp", data, item_id=PAGE, origin=PROPOSER)
+    gfs = _Gfs({_addr(blob): blob})
+    f = _fetcher(tmp_path, gfs)
+    loc = f.localize_proposal(
+        SPACE,
+        _wire("n.webp", blob),
+        {"n.webp": _sd("n.webp")},
+        item_id=PAGE,
+        origin=PROPOSER,
+    )
+    rows = await f.keep(loc, prefetch=False)
+    assert [(r.local_name, r.filename, r.origin) for r in rows] == [
+        (_sd("n.webp"), "n.webp", PROPOSER)
+    ]
+    assert await f.ensure_local(_sd("n.webp")) is True
+    assert (tmp_path / _sd("n.webp")).read_bytes() == data
+
+
+async def test_a_proposal_descriptor_never_names_another_households_file(tmp_path):
+    """Only the files the proposal ADDS are described — each under the
+    name bound to the proposer. A descriptor entry for a file the page
+    already shows (another household's ``sd-`` file) or for a name not
+    bound to the proposer is dropped, never fetched."""
+    theirs = space_direct_media_name(SPACE, "hh-b", "f.webp")
+    blob = _blob(theirs, b"planted", item_id=PAGE, origin=PROPOSER)
+    f = _fetcher(tmp_path, _Gfs({_addr(blob): blob}))
+    loc = f.localize_proposal(
+        SPACE,
+        {**_wire(theirs, blob), **_wire("n.webp", blob)},
+        {"n.webp": theirs},  # a local name not bound to the proposer
+        item_id=PAGE,
+        origin=PROPOSER,
+    )
+    assert loc.refs == ()
+    assert await f.ensure_local(theirs) is False
+    assert not (tmp_path / theirs).exists()
+
+
+async def test_a_blob_sealed_by_another_household_is_refused(tmp_path, caplog):
+    """A forged descriptor: the blob at the address was sealed for another
+    household (or page) — the AAD fails, nothing is written."""
+    blob = _blob("n.webp", b"x", item_id=PAGE, origin="hh-mallory")
+    f = _fetcher(tmp_path, _Gfs({_addr(blob): blob}))
+    loc = f.localize_proposal(
+        SPACE,
+        _wire("n.webp", blob),
+        {"n.webp": _sd("n.webp")},
+        item_id=PAGE,
+        origin=PROPOSER,
+    )
+    await f.keep(loc, prefetch=False)
+    with caplog.at_level("WARNING"):
+        assert await f.ensure_local(_sd("n.webp")) is False
+    assert not (tmp_path / _sd("n.webp")).exists()
+    assert "cannot decrypt" in caplog.text

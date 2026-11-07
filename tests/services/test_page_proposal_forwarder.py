@@ -359,3 +359,77 @@ async def test_a_resend_never_requeues_a_file_already_queued(env, media):
     assert await env.fwd.kick(SID, "pg")
     assert await env.fwd.flush(resend=True)
     assert [c["media_urls"] for c in media.calls] == [["api/media/a.webp"]]
+
+
+class _Plan:
+    def __init__(self, urls):
+        self.urls = urls
+
+    def wire(self):
+        return {u.rsplit("/", 1)[-1]: {"blob_id": "a" * 64} for u in self.urls}
+
+
+class _GfsUploader:
+    def __init__(self, *, reader: bool) -> None:
+        self.reader = reader
+        self.planned: list[tuple] = []
+        self.uploaded: list = []
+
+    async def is_relay_reader(self, iid):
+        return self.reader and iid == HOST
+
+    async def plan_for_reader(self, space_id, urls, iid, *, item_id):
+        self.planned.append((space_id, list(urls), iid, item_id))
+        return _Plan(list(urls))
+
+    def upload(self, plan):
+        self.uploaded.append(plan)
+
+
+async def test_a_link_joined_proposer_describes_its_new_files_signed(env, media):
+    """Members equal (v_82): a household seated from an invite link reaches
+    the host only through the GFS relay, which refuses bytes. Its proposal
+    describes its new files (sealed for this page and household, uploaded to
+    its GFS media cache), signed by its household for exactly this proposal;
+    nothing goes to the outbox."""
+    from socialhome.crypto import generate_identity_keypair
+    from socialhome.services.page_media_refs import verified_page_media_refs
+
+    kp = generate_identity_keypair()
+    env.fed.own_instance_id = "me"
+    gfs = _GfsUploader(reader=True)
+    env.fwd.attach_media_gfs(gfs, identity_seed=kp.private_key)
+    env.pages_bases["pg"] = DraftBase(
+        title="T", content="![k](api/media/k.webp)", seq=3, by="u1"
+    )
+    draft = _draft(
+        "![k](api/media/k.webp) ![a](api/media/a.webp) ![b](api/media/b.webp)"
+    )
+    env.conflicts.drafts["pg"] = draft
+    assert await env.fwd.kick(SID, "pg")
+    (_to, _et, payload) = env.fed.sent[0]
+    assert gfs.planned == [(SID, ["api/media/a.webp", "api/media/b.webp"], HOST, "pg")]
+    refs = verified_page_media_refs(
+        payload,
+        space_id=SID,
+        page_id="pg",
+        origin="me",
+        proposal_hash=draft.hash,
+        origin_pk=kp.public_key,
+    )
+    assert set(refs) == {"a.webp", "b.webp"}
+    assert len(gfs.uploaded) == 1
+    assert media.calls == []
+
+
+async def test_a_paired_proposer_still_ships_through_the_outbox(env, media):
+    from socialhome.crypto import generate_identity_keypair
+
+    env.fed.own_instance_id = "me"
+    gfs = _GfsUploader(reader=False)
+    env.fwd.attach_media_gfs(gfs, identity_seed=generate_identity_keypair().private_key)
+    env.conflicts.drafts["pg"] = _draft("![a](api/media/a.webp)", base_seq=0)
+    assert await env.fwd.kick(SID, "pg")
+    assert "media_refs" not in env.fed.sent[0][2]
+    assert gfs.planned == [] and gfs.uploaded == []
+    assert [c["media_urls"] for c in media.calls] == [["api/media/a.webp"]]
