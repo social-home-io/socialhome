@@ -1287,7 +1287,27 @@ from __future__ import annotations
 #:   files, and its catch-up gets no pictures — its people see posts without
 #:   the pictures that did not fit. Labelled "Pictures in a space for members
 #:   who joined by link".
-OURS: int = 80
+#: * **v_83** (2026-11-07) — **Older space pictures come back on view**
+#:   (space media on demand). A GFS keeps space blobs only as a cache (TTL,
+#:   LRU). A reader that misses one on view asks that GFS
+#:   (``POST /gfs/media/{blob_id}/wanted`` with the scope and a locator
+#:   sealed for space key holders, :mod:`socialhome.space_media_hint`); the
+#:   GFS asks ONE holder household over its socket (``space_media_request``:
+#:   the space host first, else a connected key holder that listed
+#:   ``space_media_serve`` in its hello) to send the same deterministic
+#:   ciphertext to ``PUT /gfs/media/serve/{ticket}``. The GFS pipes it to
+#:   every waiting reader without storing it, or — fresh or repeatedly asked
+#:   content — also keeps it in the cache (the holder's normal upload
+#:   authorization). Neither side learns the other: the request names no
+#:   reader, readers never see the holder. Large videos (≥ 1 MiB blob) are no
+#:   longer uploaded eagerly toward link-joined readers at or above v_83
+#:   (and followers on a GFS that proves ``on_demand``) — only on the first
+#:   play. **Fallback**: a reader below v_83 never asks (a blob that left the
+#:   cache stays missing for it, as before); a holder below v_83 never
+#:   listed the label and is never asked; a link-joined reader below v_83
+#:   keeps eager video uploads. No household-to-household event, no sync
+#:   stream change. Labelled "Older space pictures come back on view".
+OURS: int = 83
 
 
 class FederationCapability:
@@ -1901,6 +1921,12 @@ class FederationCapability:
     #: it: no descriptor (live, the old ``SPACE_MEDIA_BLOB`` push; a catch-up
     #: never pushes bytes to any link-joined requester).
     MIN_FOR_SPACE_MEDIA_REFS = 80
+    #: v_83 — space media on demand: a reader asks a GFS for a blob it
+    #: missed and a holder re-uploads or streams it on request. The
+    #: household-side gate: a large video is uploaded lazily (only when
+    #: wanted) toward link-joined readers at or above it; any reader below
+    #: it on that GFS keeps the eager upload.
+    MIN_FOR_SPACE_MEDIA_ON_DEMAND = 83
 
     # v_4 (§11 pairing-via-inbox) intentionally has no named constant
     # here. Capability exchange happens *after* pairing completes, so
@@ -2207,6 +2233,10 @@ CAPABILITY_FEATURES: list[tuple[int, str]] = [
         FederationCapability.MIN_FOR_SPACE_MEDIA_REFS,
         "Pictures in a space for members who joined by link",
     ),
+    (
+        FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND,
+        "Older space pictures come back on view",
+    ),
 ]
 
 
@@ -2298,6 +2328,7 @@ CAPABILITY_FEATURE_KEYS: dict[int, str] = {
     FederationCapability.MIN_FOR_APP_ENGINES: "app_engines",
     FederationCapability.MIN_FOR_SPACE_GALLERY_ITEM_EDIT: "space_gallery_item_edits",
     FederationCapability.MIN_FOR_SPACE_MEDIA_REFS: "space_media_refs",
+    FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND: "space_media_on_demand",
 }
 
 

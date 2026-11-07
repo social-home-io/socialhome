@@ -8,9 +8,11 @@ from socialhome.domain.subscriber_accepts import (
     ACCEPTS_AUTHOR_PROFILES_BUNDLE,
     ACCEPTS_PAYLOAD_ZLIB1,
     ACCEPTS_PAYLOAD_ZLIB1_DICT1,
+    ACCEPTS_SPACE_MEDIA_SERVE,
     MAX_ACCEPTS_LABEL_CHARS,
     MAX_ACCEPTS_LABELS,
     OUR_ACCEPTS,
+    OUR_HELLO_ACCEPTS,
     SEAT_BIT_FOR_SUITE,
     parse_accepts,
     seat_bits,
@@ -61,3 +63,11 @@ def test_malformed_labels_are_dropped_and_the_rest_kept():
 def test_at_most_the_max_labels_are_kept():
     raw = [f"l{i}" for i in range(MAX_ACCEPTS_LABELS + 5)]
     assert parse_accepts(raw) == tuple(raw[:MAX_ACCEPTS_LABELS])
+
+
+def test_hello_lists_space_media_serve_but_a_subscribe_never_does():
+    """v_83 — the GFS asks only sockets that listed ``space_media_serve``;
+    it is per connection, never a seat label."""
+    assert ACCEPTS_SPACE_MEDIA_SERVE in OUR_HELLO_ACCEPTS
+    assert ACCEPTS_SPACE_MEDIA_SERVE not in OUR_ACCEPTS
+    assert parse_accepts(list(OUR_HELLO_ACCEPTS)) == OUR_HELLO_ACCEPTS
