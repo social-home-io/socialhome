@@ -3554,6 +3554,7 @@
   "error.space_archived": "This space is archived and read-only. An admin can unarchive it to make changes.",
   "error.invalid_link": "Use a full web address that starts with https://.",
   "error.not_paired": "Your household isn't connected to this space's host household yet. Connect the two households first.",
+  "error.host_not_reachable": "Couldn't reach this space's household through the GFS. Try again later.",
   "error.age_restricted": "This space is for people aged {min_age} and up.",
   "error.dm_self": "You can't start a conversation with yourself. Pick someone else.",
   "error.group_too_small": "A group needs at least {min} people, you included. Add more people.",

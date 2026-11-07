@@ -231,6 +231,12 @@ class GfsInfoView(GfsBaseView):
             # gets no key repair on every reconnect. A household asks only
             # a server that proved this.
             "space_key_pull": True,
+            # ``POST /gfs/spaces/{id}/contact``: a household registered here
+            # gets a listed space's owner keys (signed request) so it can
+            # seal a join request to that owner over ``/gfs/envelope`` — a
+            # household that never paired with the owner can ask to join. A
+            # household asks only a server that proved this.
+            "space_contact": True,
             # Step 12 — keeps each seat's ``space_item`` label and answers
             # ``GET /gfs/spaces/{id}/subscribers?summary=1`` (counts, under the
             # authority signature). A seed holder skips its relay copy of a
@@ -665,6 +671,38 @@ class SpaceKeyRequestView(GfsBaseView):
         except PermissionError as exc:
             return web.json_response({"error": str(exc)}, status=403)
         return web.json_response({"queued": True}, status=202)
+
+
+class SpaceContactView(GfsBaseView):
+    """``POST /gfs/spaces/{space_id}/contact`` — the owner household's
+    sealing keys, for a household registered here that wants to ask to join
+    (capability ``space_contact``).
+
+    Body: ``{instance_id, ts, signature}``, signed by the asking household
+    over ``{action: "space_contact", instance_id, space_id, ts}``. ``200
+    {instance_id, identity_public_key, keywrap_public_key, kem_suite,
+    keywrap_sig}``; one ``404`` for a space that is not listed, takes no
+    requests or whose owner has no key-wrap key; ``403`` for a bad
+    signature or an inactive caller; ``400`` for a missing field."""
+
+    async def post(self) -> web.Response:
+        svc = self.svc(K.gfs_federation_key)
+        body = await self.body_or_400()
+        try:
+            instance_id = _require_short_str(body["instance_id"], "instance_id")
+            ts = _require_short_str(body["ts"], "ts")
+            signature = _require_short_str(body["signature"], "signature")
+        except KeyError as exc:
+            raise web.HTTPBadRequest(reason=f"Missing field: {exc}") from exc
+        try:
+            contact = await svc.space_contact(
+                instance_id, self.request.match_info["space_id"], ts, signature
+            )
+        except PermissionError as exc:
+            return web.json_response({"error": str(exc)}, status=403)
+        if contact is None:
+            return web.json_response({"error": "not found"}, status=404)
+        return web.json_response(contact)
 
 
 class SpacesListView(GfsBaseView):

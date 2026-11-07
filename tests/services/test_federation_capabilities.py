@@ -22,10 +22,10 @@ def test_ours_is_v31_with_routed_origin_signature_capability():
     v_23 peer-replicated space roster gossip, v_22 the delegated-admin
     signing-seed share, v_21 authenticated mesh route discovery, v_20
     SPACE_SYNC_REJECTED)."""
+    assert OURS == 84
+    assert FederationCapability.MIN_FOR_GFS_JOIN_REQUEST == 84
     assert FederationCapability.MIN_FOR_MEDIA_HTTPS == 81
     assert FederationCapability.MIN_FOR_PAGE_MEDIA == 82
-    assert FederationCapability.MIN_FOR_MEDIA_HTTPS == 81
-    assert OURS == 83
     assert FederationCapability.MIN_FOR_SPACE_MEDIA_REFS == 80
     assert FederationCapability.MIN_FOR_SPACE_GALLERY_ITEM_EDIT == 79
     assert FederationCapability.MIN_FOR_APP_ENGINES == 78

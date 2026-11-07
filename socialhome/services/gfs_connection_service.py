@@ -455,6 +455,7 @@ class GfsConnectionService:
         "_repo",
         "_rotation_warned",
         "_sealed_highlight_stream",
+        "_space_contact",
         "_space_item_followers",
         "_space_key_pull",
         "_space_media",
@@ -571,6 +572,10 @@ class GfsConnectionService:
         # …and ``space_key_pull`` (#5b): the GFS takes a follower's
         # ``/gfs/spaces/{id}/key_request``. Asked only once proved.
         self._space_key_pull: dict[str, bool] = {}
+        # …and ``space_contact``: the GFS hands a listed space owner's keys to
+        # a household registered there that asks to join. Asked only once
+        # proved.
+        self._space_contact: dict[str, bool] = {}
         # …and ``space_item_followers`` (step 12): the GFS counts the
         # followers that cannot read a member's own item.
         self._space_item_followers: dict[str, bool] = {}
@@ -811,6 +816,7 @@ class GfsConnectionService:
             self._moment_reactions,
             self._moment_counts,
             self._space_key_pull,
+            self._space_contact,
             self._space_item_followers,
             self._payload_zlib1,
             self._payload_zlib1_dict1,
@@ -3739,6 +3745,85 @@ class GfsConnectionService:
             return False
         log.info("gfs: asked %s for the content key of space %s", gfs_id, space_id)
         return True
+
+    async def fetch_space_contact(
+        self, space_id: str, owner_instance_id: str
+    ) -> tuple[dict[str, str], str] | None:
+        """The owner household's sealing keys for the listed space
+        *space_id*, from the first active GFS that proved ``space_contact``
+        and answers — with that GFS's base URL (the relay that reaches the
+        owner). ``None`` when no GFS has them.
+
+        Signed over ``{action: "space_contact", instance_id, space_id, ts}``.
+        The answer is NOT trusted here: the caller binds the keys to
+        *owner_instance_id* end to end before it seals anything. An answer
+        naming another instance is dropped. Never raises."""
+        if not self._own_instance_id or not self._own_signing_key:
+            return None
+        if not is_path_safe_id(space_id):
+            return None
+        for conn in await self._repo.list_active():
+            if not conn.inbox_url or not await self._signed_capability_supported(
+                conn, "space_contact", self._space_contact
+            ):
+                continue
+            ts = datetime.now(UTC).isoformat()
+            canonical = canonical_bytes(
+                {
+                    "action": "space_contact",
+                    "instance_id": self._own_instance_id,
+                    "space_id": space_id,
+                    "ts": ts,
+                }
+            )
+            body = {
+                "instance_id": self._own_instance_id,
+                "ts": ts,
+                "signature": b64url_encode(
+                    sign_ed25519(self._own_signing_key, canonical)
+                ),
+            }
+            url = f"{conn.inbox_url.rstrip('/')}/gfs/spaces/{space_id}/contact"
+            try:
+                async with self._client().post(
+                    url,
+                    allow_redirects=False,
+                    json=body,
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status != 200:
+                        log.warning(
+                            "gfs: %s has no contact for space %s — HTTP %d",
+                            conn.id,
+                            space_id,
+                            resp.status,
+                        )
+                        continue
+                    answer = await resp.json()
+            except (TimeoutError, aiohttp.ClientError, ValueError) as exc:
+                log.warning("gfs: contact request to %s failed: %s", conn.id, exc)
+                continue
+            if not isinstance(answer, dict):
+                continue
+            contact = {
+                k: str(answer.get(k) or "")
+                for k in (
+                    "instance_id",
+                    "identity_public_key",
+                    "keywrap_public_key",
+                    "kem_suite",
+                    "keywrap_sig",
+                )
+            }
+            if contact["instance_id"] != owner_instance_id:
+                log.warning(
+                    "gfs: %s named another owner for space %s — ignored",
+                    conn.id,
+                    space_id,
+                )
+                continue
+            return contact, conn.inbox_url.rstrip("/")
+        return None
 
     async def publish_space_event_to(
         self,

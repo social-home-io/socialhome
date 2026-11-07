@@ -3518,6 +3518,7 @@
   "error.space_archived": "Dieser Space ist archiviert und schreibgeschützt. Ein Admin kann ihn wiederherstellen, damit Änderungen möglich sind.",
   "error.invalid_link": "Nutze eine vollständige Webadresse, die mit https:// beginnt.",
   "error.not_paired": "Dein Haushalt ist noch nicht mit dem Host-Haushalt dieses Space gekoppelt. Kopple die beiden Haushalte zuerst.",
+  "error.host_not_reachable": "Der Haushalt dieses Space ist über den GFS gerade nicht erreichbar. Versuch es später noch einmal.",
   "error.age_restricted": "Dieser Space ist für Personen ab {min_age} Jahren.",
   "error.dm_self": "Du kannst keine Unterhaltung mit dir selbst beginnen. Wähl jemand anderen aus.",
   "error.group_too_small": "Eine Gruppe braucht mindestens {min} Personen, dich eingeschlossen. Füg weitere Personen hinzu.",

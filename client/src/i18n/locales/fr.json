@@ -3518,6 +3518,7 @@
   "error.space_archived": "Cet espace est archivé et en lecture seule. Un admin peut le désarchiver pour permettre les modifications.",
   "error.invalid_link": "Utilisez une adresse web complète qui commence par https://.",
   "error.not_paired": "Votre foyer n'est pas encore connecté au foyer hôte de cet espace. Connectez d'abord les deux foyers.",
+  "error.host_not_reachable": "Impossible de joindre le foyer de cet espace via le GFS. Réessayez plus tard.",
   "error.age_restricted": "Cet espace est réservé aux personnes de {min_age} ans et plus.",
   "error.dm_self": "Vous ne pouvez pas démarrer une conversation avec vous-même. Choisissez quelqu'un d'autre.",
   "error.group_too_small": "Un groupe doit compter au moins {min} personnes, vous compris. Ajoutez d'autres personnes.",

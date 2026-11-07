@@ -72,6 +72,7 @@ from .domain.space import ContentAction
 from .exception_text import describe_exception
 from .federation.auto_pair_coordinator import AutoPairCoordinator
 from .federation.federation_service import FederationService
+from .federation.gfs_join_request import GfsJoinRequestCoordinator
 from .federation.gfs_relay_transport import GfsRelayTransport
 from .federation.invite_link_forward import InviteLinkForwardCoordinator
 from .federation.invite_token_redeem import SpaceInviteTokenRedeemCoordinator
@@ -956,6 +957,34 @@ def _build_gfs_relay_inbound(
         keywrap_private_key=keywrap_private_key,
         invite_coordinator=invite_coordinator,
         gfs_connection_repo=gfs_connection_repo,
+        rate_limiter=rate_limiter,
+    )
+
+
+def _build_gfs_join_requests(
+    *,
+    federation_service: FederationService,
+    repos: SimpleNamespace,
+    bus: EventBus,
+    relay_sender: GfsEnvelopeSender,
+    gfs_connection_service: GfsConnectionService,
+    identity,
+    rate_limiter: RateLimiter,
+) -> GfsJoinRequestCoordinator:
+    """ "Ask to join" through the GFS (v_84): our own published key-wrap
+    key + binding signature (never a fresh key), the relay sender, and the
+    signed GFS lookup of a listed host's keys."""
+    return GfsJoinRequestCoordinator(
+        federation=federation_service,
+        federation_repo=repos.federation,
+        space_repo=repos.space,
+        public_space_repo=repos.public_space,
+        user_repo=repos.user,
+        bus=bus,
+        relay_sender=relay_sender,
+        lookup_contact=gfs_connection_service.fetch_space_contact,
+        keywrap_public_key=identity.keywrap_public_key,
+        keywrap_sig=identity.keywrap_sig,
         rate_limiter=rate_limiter,
     )
 
@@ -4947,6 +4976,20 @@ def create_app(config: Config | None = None) -> web.Application:
             gfs_connection_repo=repos.gfs_connection,
             rate_limiter=limiter,
         )
+        # v_84 — "Ask to join" a global space found in a GFS directory from
+        # a household its host never paired with: sealed both ways over the
+        # same relay, keys from the GFS that listed it.
+        gfs_join_requests = _build_gfs_join_requests(
+            federation_service=federation_service,
+            repos=repos,
+            bus=bus,
+            relay_sender=gfs_envelope_sender,
+            gfs_connection_service=gfs_connection_service,
+            identity=identity,
+            rate_limiter=limiter,
+        )
+        gfs_relay_inbound.attach_join_requests(gfs_join_requests)
+        real_space_service.attach_gfs_join_requests(gfs_join_requests)
         # v_53 — which connection servers we share with each opted-in
         # paired peer, found by probing through each of our own servers
         # (``docs/protocol/gfs-relay.md``). Started with the other

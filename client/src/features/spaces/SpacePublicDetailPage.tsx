@@ -36,7 +36,7 @@ import { JoinRequestModal } from './JoinRequestModal'
 import { SpaceGlyph } from './SpaceGlyph'
 import { askLocationConsent, isApiCode, locationConsentText, noHomeText } from '@/components/localConsent'
 import {
-  contentIsGated, discoverAction, entryAreaVerdict, entryRadiusKm, GATED_CHIP, hostLabel, requestSentToast,
+  approvalSeatsUs, contentIsGated, discoverAction, entryAreaVerdict, entryRadiusKm, GATED_CHIP, hostLabel, requestSentToast,
   joinCarriesLocation, joinModeChip,
   sourceOf, type DiscoverAction,
 } from './discover'
@@ -447,7 +447,7 @@ export default function SpacePublicDetailPage() {
           onClose={() => setActiveModal(null)}
           spaceName={activeModal.name}
           hostDisplayName={hostLabel(activeModal)}
-          hostIsPaired={activeModal.host_is_paired}
+          hostIsPaired={approvalSeatsUs(activeModal)}
           locationNote={joinCarriesLocation(activeModal)
             ? locationConsentText(hostLabel(activeModal)) : null}
           locationBlocked={joinCarriesLocation(activeModal) && householdHome.value === null

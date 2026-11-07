@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import type { DirectoryEntry } from '@/types'
 import {
-  buildHouseholdEntries, canFollow, contentIsGated, discoverAction, discoverable, entryAreaVerdict,
+  approvalSeatsUs, buildHouseholdEntries, canFollow, contentIsGated, discoverAction, discoverable, entryAreaVerdict,
   entryRadiusKm, joinCarriesLocation, joinModeChip, joinModeWord,
   hostLabel, matchesTerm, parseDiscoverSource, sourceOf, withMembership,
 } from './discover'
@@ -81,10 +81,20 @@ describe('discoverAction', () => {
     expect(discoverAction(entry({ join_mode: 'request' }))).toBe('request')
     expect(discoverAction(entry({ request_pending: true }))).toBe('pending')
   })
-  it('a global space from an unpaired host: Follow when it takes followers, else nothing', () => {
+  it('an open global space from an unpaired host: Follow when it takes followers, else nothing', () => {
     const far = entry({ scope: 'global', host_is_paired: false })
     expect(discoverAction({ ...far, allow_subscribers: true })).toBe('follow')
     expect(discoverAction({ ...far, allow_subscribers: false })).toBeNull()
+  })
+  it('an "ask to join" global space from an unpaired host is asked through the GFS (v_84)', () => {
+    const far = entry({ scope: 'global', host_is_paired: false, join_mode: 'request' })
+    expect(discoverAction({ ...far, allow_subscribers: false })).toBe('request')
+    expect(discoverAction({ ...far, allow_subscribers: true })).toBe('request')
+    expect(approvalSeatsUs(far)).toBe(true)
+    // A paired household's public space still needs the pairing.
+    const peer = entry({ scope: 'public', host_is_paired: false, join_mode: 'request' })
+    expect(discoverAction(peer)).toBeNull()
+    expect(approvalSeatsUs(peer)).toBe(false)
   })
   it('never suggests pairing: an unpaired host is Follow or nothing', () => {
     expect(discoverAction(entry({ host_is_paired: false }))).toBeNull()

@@ -217,15 +217,32 @@ describe('SpacePublicDetailPage onPrimary', () => {
 
 describe('SpacePublicDetailPage — a GFS-listed space whose household we never paired with', () => {
   // Households met through a GFS never talk directly: never suggest
-  // pairing. Follow when the space takes followers, otherwise a neutral
-  // line and no action — for admins and members alike.
-  const far = (allow: boolean) => entry({
+  // pairing. "Ask to join" goes through the GFS (v_84); an open space is
+  // followed when it takes followers, otherwise a neutral line and no
+  // action — for admins and members alike.
+  const far = (allow: boolean, join_mode: 'open' | 'request' = 'open') => entry({
     host_instance_id:  'remote-9',
     host_display_name: 'Far Household',
     host_is_paired:    false,
     scope:             'global',
-    join_mode:         'request',
+    join_mode,
     allow_subscribers: allow,
+  })
+
+  it('asks to join an "ask to join" space through the GFS, unpaired', async () => {
+    cacheDirectoryEntries([far(false, 'request')])
+    api.post.mockResolvedValue({ request_id: 'r-1' })
+    const { container, getByText, findByText } = await renderPage()
+    await waitFor(() => getByText('Request to join'))
+    fireEvent.click(getByText('Request to join'))
+    // An approval seats us on its own — no "pair first".
+    await findByText(/added automatically once they approve/)
+    fireEvent.click(getByText('Send request'))
+    await waitFor(() => expect(api.post).toHaveBeenCalledWith(
+      '/api/public_spaces/sp-1/join-request',
+      { host_instance_id: 'remote-9', message: '' },
+    ))
+    expect(container.textContent).not.toMatch(/Connect|Connections|pair/i)
   })
 
   it('offers Follow when the space takes followers', async () => {

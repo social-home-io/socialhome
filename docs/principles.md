@@ -1050,6 +1050,30 @@ Anything that sends who reacted, sends totals per reaction rather than at
 checkpoints, or lets the GFS read a count is a §2-principle change requiring
 a new sign-off.
 
+### Sign-off needed: a GFS hands a listed space owner's public keys to its households (v_84)
+
+A global space in "ask to join" (or open) mode can now be asked through
+the GFS that lists it, by a household that never paired with its host
+([discovery](protocol/discovery.md#ask-to-join-through-the-gfs-v_84)). To
+seal the request, that household needs the host's identity key and key-wrap
+key. The GFS gives them out — `POST /gfs/spaces/{id}/contact` — but only to
+a household **registered with it**, on a request that household signed, and
+never on a public page (the unauthenticated directory still carries the
+owner's instance id only).
+
+What this relaxes: the owner household's **public** identity and key-wrap
+keys reach the GFS's other households (until now they reached a stranger
+only through an invite link that owner minted). They are public keys: they
+name no address, reveal no person and let nobody read anything; the owner's
+instance id, which they derive, was already in the listing. What it does
+not relax: the GFS reads nothing it relays (the request is sealed to the
+host, the outer shape names only the recipient), the applicant binds the
+keys to the listed host end to end before sealing (a GFS that substitutes a
+key it holds gets nothing sealed), the host still decides every request, and
+households met through a GFS still never learn each other's address. The GFS
+learns that household B asked for space X's contact — the same it could
+infer from the sealed envelope it then relays.
+
 ## No third-party fetches from user content
 
 Viewing content never makes the viewer's browser contact a host the

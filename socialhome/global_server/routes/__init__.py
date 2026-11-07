@@ -127,6 +127,7 @@ from .relay import (
     RegisterView,
     ReportView,
     SignupTokenView,
+    SpaceContactView,
     SpaceDetailView,
     SpaceKeyRequestView,
     SpacePublishView,
@@ -235,6 +236,7 @@ def register_routes(
     app.router.add_view("/gfs/spaces/{space_id}/subscribers", SpaceSubscribersView)
     # #5b — a follower that missed a space's content key asks for it.
     app.router.add_view("/gfs/spaces/{space_id}/key_request", SpaceKeyRequestView)
+    app.router.add_view("/gfs/spaces/{space_id}/contact", SpaceContactView)
     app.router.add_view("/gfs/spaces/{space_id}/publish", SpacePublishView)
     app.router.add_view("/gfs/spaces/{space_id}/unpublish", SpaceUnpublishView)
     # Owner-minted invite links (§24.8.5). The mint/revoke pair is signed by

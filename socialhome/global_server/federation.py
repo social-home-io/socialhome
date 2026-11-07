@@ -1202,6 +1202,68 @@ class GfsFederationService:
             reason=NEW_SUBSCRIBER_REASON_RECONNECT,
         )
 
+    async def space_contact(
+        self,
+        instance_id: str,
+        space_id: str,
+        ts: str,
+        signature: str,
+    ) -> dict[str, str] | None:
+        """The owner household's sealing keys for *space_id*, for a household
+        registered here that wants to ask to join it (``space_contact``).
+
+        A global space in ``request`` / ``open`` mode lists its owner's
+        instance id but never its keys (the directory is unauthenticated).
+        A household registered on this server — the audience the listing is
+        for — asks with a request signed over ``{action: "space_contact",
+        instance_id, space_id, ts}`` (:meth:`_verify_signed_request`) and gets
+        the owner's REGISTERED identity key, key-wrap key and its
+        self-signature, which it binds to the listed ``owning_instance`` end
+        to end before sealing anything (``verify_keywrap_binding``). The join
+        request itself then rides ``POST /gfs/envelope`` sealed: this server
+        never reads it and the relay leg names only the recipient.
+
+        ``None`` (one answer for every case) when the space is not actively
+        listed, takes no requests, is the caller's own, or its owner has no
+        key-wrap key here. Raises :class:`PermissionError` on a bad signature
+        or a caller that is not an active household here."""
+        inst = await self._verify_signed_request(
+            instance_id,
+            {
+                "action": "space_contact",
+                "instance_id": instance_id,
+                "space_id": space_id,
+                "ts": ts,
+            },
+            signature=signature,
+        )
+        if inst.status != "active":
+            raise PermissionError("instance is not active on this server")
+        space = await self._repo.get_space(space_id)
+        if (
+            space is None
+            or space.status != "active"
+            or space.withdrawn
+            or space.join_mode not in ("request", "open")
+            or space.owning_instance == instance_id
+        ):
+            return None
+        owner = await self._repo.get_instance(space.owning_instance)
+        if (
+            owner is None
+            or owner.status != "active"
+            or not owner.keywrap_public_key
+            or not owner.keywrap_sig
+        ):
+            return None
+        return {
+            "instance_id": owner.instance_id,
+            "identity_public_key": owner.public_key,
+            "keywrap_public_key": owner.keywrap_public_key,
+            "kem_suite": owner.kem_suite or "x25519",
+            "keywrap_sig": owner.keywrap_sig,
+        }
+
     async def _notify_owner_new_subscriber(
         self,
         owning_instance: str,

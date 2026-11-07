@@ -9,7 +9,7 @@ from __future__ import annotations
 from aiohttp import web
 
 from .. import app_keys as K
-from ..domain.federation import PairingStatus
+from ..domain.federation import InstanceSource, PairingStatus
 from ..domain.space import normalize_category, normalize_join_mode
 from .base import BaseView
 
@@ -54,7 +54,10 @@ class PublicSpaceCollectionView(BaseView):
         host_info: dict[str, tuple[str | None, bool]] = {}
         for iid in unique_instances:
             inst = await federation_repo.get_instance(iid)
-            if inst is None:
+            if inst is None or inst.source is InstanceSource.SPACE_SESSION:
+                # A space-session seat (a space of this host joined by link
+                # or through the GFS) is no pairing, and its name is a
+                # stand-in, not one a pairing told us.
                 host_info[iid] = (None, False)
             else:
                 host_info[iid] = (

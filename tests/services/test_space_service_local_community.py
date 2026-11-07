@@ -18,7 +18,7 @@ import pytest
 from socialhome.crypto import derive_instance_id, generate_identity_keypair
 from socialhome.db.database import AsyncDatabase
 from socialhome.domain.events import SpaceLocalAreaChanged
-from socialhome.domain.federation import PairingStatus
+from socialhome.domain.federation import InstanceSource, PairingStatus
 from socialhome.domain.local_community import LocalArea
 from socialhome.domain.space import (
     HomeNotSetError,
@@ -502,7 +502,12 @@ async def test_an_invitation_snapshot_names_the_radius_never_the_centre(stack):
 
 
 def _peer_confirmed():
-    return SimpleNamespace(status=PairingStatus.CONFIRMED, home_lat=None, home_lon=None)
+    return SimpleNamespace(
+        status=PairingStatus.CONFIRMED,
+        source=InstanceSource.MANUAL,
+        home_lat=None,
+        home_lon=None,
+    )
 
 
 async def test_a_remote_request_carries_the_coarse_home_only_with_consent(stack):

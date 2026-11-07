@@ -1325,6 +1325,16 @@ class HostNotPairedError(CodedError, SpacePermissionError):
     detail = "host household is not a CONFIRMED peer — pair first"
 
 
+class HostNotReachableError(CodedError, SpacePermissionError):
+    """An "Ask to join" through the GFS could not reach the space's host:
+    no GFS of ours has its keys, they don't belong to the listed host, or
+    the relay refused the request."""
+
+    status = 503
+    code = "HOST_NOT_REACHABLE"
+    detail = "couldn't reach this space's household through the GFS — try again later"
+
+
 class AgeRestrictedError(CodedError, SpacePermissionError):
     """§CP.F1: a protected account below the space's minimum age."""
 

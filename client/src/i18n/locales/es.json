@@ -3545,6 +3545,7 @@
   "error.space_archived": "Este espacio está archivado y es de solo lectura. Un administrador puede desarchivarlo para permitir cambios.",
   "error.invalid_link": "Usa una dirección web completa que empiece por https://.",
   "error.not_paired": "Tu hogar aún no está vinculado con el hogar anfitrión de este espacio. Vincula primero los dos hogares.",
+  "error.host_not_reachable": "No se pudo contactar con el hogar de este espacio a través del GFS. Inténtalo más tarde.",
   "error.age_restricted": "Este espacio es para personas de {min_age} años o más.",
   "error.dm_self": "No puedes empezar una conversación contigo mismo. Elige a otra persona.",
   "error.group_too_small": "Un grupo necesita al menos {min} personas, tú incluido. Añade a más gente.",

@@ -410,6 +410,7 @@ class AbstractSpaceRepo(Protocol):
         request_id: str | None = None,
         requested_role: str | None = None,
         area_verdict: str | None = None,
+        applicant_relay: str | None = None,
     ) -> str: ...
     async def get_join_request(self, request_id: str) -> dict | None: ...
     async def list_pending_join_requests(self, space_id: str) -> list[dict]: ...
@@ -2899,6 +2900,7 @@ class SqliteSpaceRepo:
         request_id: str | None = None,
         requested_role: str | None = None,
         area_verdict: str | None = None,
+        applicant_relay: str | None = None,
     ) -> str:
         """Persist a pending join request. For cross-household (§D2)
         requests pass ``remote_applicant_instance_id`` and optionally
@@ -2909,6 +2911,9 @@ class SqliteSpaceRepo:
         ``area_verdict`` (``inside`` / ``edge``) — a local community's
         verdict on the location the join carried (migration 0111), so the
         admins see "near the edge"; the location itself is never stored.
+
+        ``applicant_relay`` — JSON relay contact of a household that asked
+        through a GFS (migration 0143): where the answer goes back sealed.
         """
         rid = request_id or uuid.uuid4().hex
         expires = (datetime.now(UTC) + timedelta(days=ttl_days)).isoformat()
@@ -2917,8 +2922,8 @@ class SqliteSpaceRepo:
             INSERT INTO space_join_requests(
                 id, space_id, user_id, message, expires_at,
                 remote_applicant_instance_id, remote_applicant_pk,
-                requested_role, area_verdict
-            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                requested_role, area_verdict, applicant_relay
+            ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO NOTHING
             """,
             (
@@ -2931,6 +2936,7 @@ class SqliteSpaceRepo:
                 remote_applicant_pk,
                 requested_role,
                 area_verdict,
+                applicant_relay,
             ),
         )
         return rid

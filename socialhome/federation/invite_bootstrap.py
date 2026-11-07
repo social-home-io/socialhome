@@ -170,9 +170,18 @@ TIMESTAMP_SKEW_SECONDS: int = 300
 KIND_REDEEM: str = FederationEventType.SPACE_INVITE_BOOTSTRAP_REDEEM.value
 KIND_REDEEM_ACK: str = FederationEventType.SPACE_INVITE_BOOTSTRAP_REDEEM_ACK.value
 KIND_REDEEM_DENY: str = FederationEventType.SPACE_INVITE_BOOTSTRAP_REDEEM_DENY.value
+#: "Ask to join" a GFS-listed space and the host's answer
+#: (``socialhome.federation.gfs_join_request``).
+KIND_JOIN_REQUEST: str = FederationEventType.SPACE_JOIN_REQUEST_BOOTSTRAP.value
+KIND_JOIN_REQUEST_ANSWER: str = (
+    FederationEventType.SPACE_JOIN_REQUEST_BOOTSTRAP_ANSWER.value
+)
+JOIN_REQUEST_KINDS: frozenset[str] = frozenset(
+    {KIND_JOIN_REQUEST, KIND_JOIN_REQUEST_ANSWER}
+)
 
 _KNOWN_KINDS: frozenset[str] = frozenset(
-    {KIND_REDEEM, KIND_REDEEM_ACK, KIND_REDEEM_DENY}
+    {KIND_REDEEM, KIND_REDEEM_ACK, KIND_REDEEM_DENY} | JOIN_REQUEST_KINDS
 )
 
 #: HKDF domain-separation for the space-scoped session keys derived from
@@ -579,6 +588,9 @@ def verify_peer_keywrap(
 
 __all__ = [
     "BOOTSTRAP_SIG_SUITE_ED25519",
+    "JOIN_REQUEST_KINDS",
+    "KIND_JOIN_REQUEST",
+    "KIND_JOIN_REQUEST_ANSWER",
     "KIND_REDEEM",
     "KIND_REDEEM_ACK",
     "KIND_REDEEM_DENY",

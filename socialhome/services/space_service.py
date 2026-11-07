@@ -83,6 +83,7 @@ from ..space_owner_statement import (
 if TYPE_CHECKING:
     import pathlib
 
+    from ..federation.gfs_join_request import GfsJoinRequestCoordinator
     from ..federation.invite_bootstrap import InviteBootstrapHint
     from ..federation.route_discovery import RouteDiscoveryService
     from ..federation.routed_envelope import SpaceRoutedHandler
@@ -356,6 +357,11 @@ class UnsupportedSeedSuite(ValueError):
 #: (spec §13). Enforced at ``create_space`` time for PUBLIC spaces.
 MAX_PUBLIC_SPACES = 5
 
+#: Life of the single-use token an approval sends to a household that asked
+#: through the GFS (v_84): the sealed answer may wait in the GFS queue while
+#: that household is offline.
+GFS_JOIN_TOKEN_TTL_DAYS: int = 3
+
 #: ``SPACE_CATEGORIES`` + ``normalize_category`` (§23.50) live in the pure
 #: ``domain.space`` module so the GFS server can import them without pulling in
 #: this service; they are imported above and re-exported for the existing
@@ -450,6 +456,7 @@ class SpaceService(
         "_federation_repo",
         "_gallery",
         "_gfs",
+        "_gfs_join",
         "_gfs_mirror",
         "_gfs_selection",
         "_icons",
@@ -542,6 +549,9 @@ class SpaceService(
         self._federation = None
         self._remote_members = None
         self._redeem_coordinator = None
+        #: "Ask to join" through the GFS (v_84) — both ends; unwired, an
+        #: unpaired host answers ``NOT_PAIRED`` as before.
+        self._gfs_join: GfsJoinRequestCoordinator | None = None
         self._invite_forwarder = None
         self._space_crypto = None
         # Optional: lets ``dissolve_space`` unlink native gallery uploads
@@ -759,6 +769,12 @@ class SpaceService(
         .InviteLinkForwardCoordinator`). Without it a member household's
         admin cannot mint links for a space hosted elsewhere."""
         self._invite_forwarder = forwarder
+
+    def attach_gfs_join_requests(self, coordinator: GfsJoinRequestCoordinator) -> None:
+        """Wire "Ask to join" through the GFS (v_84): a request to a global
+        space whose host we never paired with rides the GFS relay sealed,
+        and our answer to such a request goes back the same way."""
+        self._gfs_join = coordinator
 
     def attach_redeem_coordinator(self, coordinator) -> None:
         """Wire the §D2 cross-instance invite-token redeem driver.
@@ -7551,26 +7567,40 @@ class SpaceService(
             # federate it back; the applicant's household consumes via
             # the existing POST /api/spaces/join path.
             assert self._federation is not None
-            expires = (datetime.now(UTC) + timedelta(minutes=5)).isoformat()
+            ttl = (
+                timedelta(days=GFS_JOIN_TOKEN_TTL_DAYS)
+                if row.get("applicant_relay")
+                else timedelta(minutes=5)
+            )
+            expires = (datetime.now(UTC) + ttl).isoformat()
             token = await self._spaces.create_invite_token(
                 row["space_id"],
                 created_by=actor.user_id,
                 uses=1,
                 expires_at=expires,
             )
-            # Direct when paired, else over the mesh (sealed end to end): an
-            # applicant whose request came from a link redeem or an invite
-            # accept may not be paired with us.
-            await self._federation.send_with_mesh_fallback(
-                to_instance_id=remote_instance,
-                event_type=FederationEventType.SPACE_JOIN_REQUEST_APPROVED,
-                payload={
-                    "request_id": request_id,
-                    "space_id": row["space_id"],
-                    "invite_token": token,
-                    "reviewed_by": actor.user_id,
-                },
-            )
+            if row.get("applicant_relay") and self._gfs_join is not None:
+                # Asked through the GFS by a household we never paired with
+                # (v_84): the answer goes back sealed the same way. It may
+                # wait in the GFS queue while that household is offline, so
+                # its single-use token lives longer than a direct one (above).
+                await self._gfs_join.send_answer(
+                    row, answer="approved", invite_token=token
+                )
+            else:
+                # Direct when paired, else over the mesh (sealed end to end):
+                # an applicant whose request came from a link redeem or an
+                # invite accept may not be paired with us.
+                await self._federation.send_with_mesh_fallback(
+                    to_instance_id=remote_instance,
+                    event_type=FederationEventType.SPACE_JOIN_REQUEST_APPROVED,
+                    payload={
+                        "request_id": request_id,
+                        "space_id": row["space_id"],
+                        "invite_token": token,
+                        "reviewed_by": actor.user_id,
+                    },
+                )
             await self._bus.publish(
                 SpaceJoinApproved(
                     space_id=row["space_id"],
@@ -7621,7 +7651,10 @@ class SpaceService(
         )
         await self._answer_join_request(request_id, "denied", reviewed_by=actor.user_id)
         remote_instance = r.get("remote_applicant_instance_id")
-        if remote_instance and self._federation is not None:
+        if remote_instance and r.get("applicant_relay") and self._gfs_join is not None:
+            # Asked through the GFS (v_84): answered the same way.
+            await self._gfs_join.send_answer(r, answer="denied")
+        elif remote_instance and self._federation is not None:
             await self._federation.send_with_mesh_fallback(
                 to_instance_id=remote_instance,
                 event_type=FederationEventType.SPACE_JOIN_REQUEST_DENIED,
@@ -7663,7 +7696,27 @@ class SpaceService(
         if self._federation is None or self._federation_repo is None:
             raise RuntimeError("federation not attached")
         peer = await self._federation_repo.get_instance(host_instance_id)
-        if peer is None or peer.status is not PairingStatus.CONFIRMED:
+        if (
+            peer is None
+            or peer.status is not PairingStatus.CONFIRMED
+            # A space-session seat (another space of this host, joined by
+            # link or through the GFS) is no pairing: the host refuses a
+            # SPACE_JOIN_REQUEST from it.
+            or peer.source is InstanceSource.SPACE_SESSION
+        ):
+            # Not paired: a global space a GFS of ours lists under this very
+            # host is asked through that GFS, sealed (v_84). Anything else
+            # still needs a pairing.
+            if (
+                self._gfs_join is not None
+                and await self._gfs_join.host_of_listing(space_id) == host_instance_id
+            ):
+                return await self._gfs_join.request_join(
+                    space_id,
+                    applicant_user_id=applicant_user_id,
+                    host_instance_id=host_instance_id,
+                    message=message,
+                )
             raise HostNotPairedError()
         location = await join_location_for(
             self._federation_repo, share_location=share_location
@@ -7717,11 +7770,18 @@ class SpaceService(
         # seats locally). For a LOCAL approval (host None/self),
         # redeem_invite_token falls back to accept_invite_token.
         host = r.get("remote_applicant_instance_id")
+        # Asked through the GFS (v_84): the approval left the host's keys
+        # and the relay that reaches it, so the redeem can take the sealed
+        # §D2b leg to a host we are not paired with.
+        bootstrap = (
+            self._gfs_join.take_hint(request_id) if self._gfs_join is not None else None
+        )
         try:
             await self.redeem_invite_token(
                 invite_token,
                 user_id=user_id,
                 issuer_instance_id=host,
+                bootstrap=bootstrap,
             )
         except KeyError:
             # Token already consumed/replayed — expected on a duplicate

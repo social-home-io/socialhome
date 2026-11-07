@@ -44,7 +44,7 @@ import {
 import type { DirectoryEntry, GfsConnection, HouseholdSpaceRow } from '@/types'
 import { JoinRequestModal } from './JoinRequestModal'
 import {
-  buildHouseholdEntries, discoverAction, discoverable, entryAreaVerdict, entryRadiusKm, hostLabel, requestSentToast,
+  approvalSeatsUs, buildHouseholdEntries, discoverAction, discoverable, entryAreaVerdict, entryRadiusKm, hostLabel, requestSentToast,
   joinCarriesLocation, joinModeWord, matchesTerm, withMembership, DISCOVER_SOURCES, type DiscoverAction,
   type DiscoverSource,
 } from './discover'
@@ -401,7 +401,7 @@ export function SpaceDiscover({ seatedIds, source, term, onChanged }: Props) {
           onClose={() => setAsking(null)}
           spaceName={asking.name}
           hostDisplayName={hostLabel(asking)}
-          hostIsPaired={asking.host_is_paired}
+          hostIsPaired={approvalSeatsUs(asking)}
           locationNote={joinCarriesLocation(asking) && !isLocal(asking)
             ? locationConsentText(hostLabel(asking)) : null}
           locationBlocked={joinCarriesLocation(asking) && !isLocal(asking) && home === null
