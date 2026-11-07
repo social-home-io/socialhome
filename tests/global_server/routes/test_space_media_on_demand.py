@@ -685,3 +685,61 @@ async def test_one_reader_prefix_has_one_hint_in_a_session(gfs):
     assert len(session.hints) == 1
     for r in readers:
         r.cancel()
+
+
+# ── #1317 independent review ──────────────────────────────────────────────
+
+
+async def test_a_cached_answer_is_bounded_by_a_reader_deadline(gfs, monkeypatch):
+    """#1317 review 7: a cached blob is written under a deadline too — a
+    reader that stops reading can't hold it."""
+    data, bid = _blob()
+    await gfs.app_[gfs_space_media_store_key].put(
+        scope_kind=SCOPE_SPACE,
+        scope_id=SPACE,
+        blob_id=bid,
+        data=data,
+        expires_at=int(time.time()) + 3600,
+    )
+    monkeypatch.setattr(
+        od_mod.GfsSpaceMediaOnDemand, "cached_deadline", lambda _self, _size: 0.0
+    )
+    resp = await _want(gfs, bid)
+    with pytest.raises(aiohttp.ClientPayloadError):
+        await resp.read()
+
+
+@pytest.mark.parametrize("gfs", [{"od": {"stream_wait_seconds": 8}}], indirect=True)
+async def test_readers_on_a_node_without_the_claim_poll_once_and_stop_with_it(
+    gfs, monkeypatch
+):
+    """#1317 review 8: readers waiting for another node's re-upload share
+    ONE poll of the shared cache, which stops as soon as that claim ends
+    (the other node streamed, or nobody answered) — not 0.5 s per reader
+    for the whole wait."""
+    _data, bid = _blob()
+    await _mark_stored(gfs, bid, ago=60)
+    svc = gfs.app_[gfs_space_media_on_demand_key]
+    now = int(time.time())
+    await svc._demand.note_request(bid, SCOPE_SPACE, SPACE, now=now, window_s=3600)
+    # Another node holds the one re-upload.
+    assert await svc._demand.claim(bid, SCOPE_SPACE, SPACE, now=now, hold_s=60)
+    reads = {"n": 0}
+    store_cls = type(gfs.app_[gfs_space_media_store_key])
+    real_read = store_cls.read
+
+    async def counting_read(self, blob_id, **kw):
+        if blob_id == bid:
+            reads["n"] += 1
+        return await real_read(self, blob_id, **kw)
+
+    monkeypatch.setattr(store_cls, "read", counting_read)
+    started = time.monotonic()
+    readers = [asyncio.create_task(_want(gfs, bid, reader=n)) for n in range(3)]
+    await asyncio.sleep(2.0)
+    await svc._demand.release_claim(bid, SCOPE_SPACE, SPACE, until=now + 60)
+    statuses = [(await r).status for r in readers]
+    assert statuses == [404, 404, 404]
+    assert time.monotonic() - started < 4.5
+    # One poller (≈ every 0.5 s) plus each reader's first look.
+    assert reads["n"] <= 10

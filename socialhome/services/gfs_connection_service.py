@@ -3386,9 +3386,14 @@ class GfsConnectionService:
         ``POST …/decline`` with *decline_reason* (``bad_hint`` /
         ``not_held``). Signed by this household's key over the ticket and
         the operation (the GFS asked this household by name over its own
-        socket). Returns the HTTP status, or ``None`` when nothing could be
-        sent."""
+        socket), so it rides the AUTHENTICATED session — never the
+        cookie-less publish session anonymous ``wanted`` requests and
+        publishes share (#1317 review 1). Returns the HTTP status; ``0`` when
+        the request failed after it may have left (the bytes count as sent);
+        ``None`` only when nothing left (no identity, no connection made)."""
         if not self._own_instance_id or not self._own_signing_key:
+            return None
+        if self._http_client is None:
             return None
         base = f"{conn.inbox_url.rstrip('/')}/gfs/media/serve/{ticket}"
         ts = int(time.time())
@@ -3402,36 +3407,36 @@ class GfsConnectionService:
             SERVE_TS_HEADER: str(ts),
             SERVE_SIG_HEADER: b64url_encode(sig),
         }
+        client = self._http_client
         try:
-            async with self.anon_session(conn) as client:
-                if client is None:
-                    return None
-                if blob is None:
-                    async with client.post(
-                        f"{base}/decline",
-                        json={"reason": decline_reason},
-                        headers=headers,
-                        allow_redirects=False,
-                        timeout=aiohttp.ClientTimeout(total=15),
-                    ) as resp:
-                        return int(resp.status)
-                headers["Content-Type"] = "application/octet-stream"
-                if upload_auth:
-                    headers[SPACE_MEDIA_AUTH_HEADER] = upload_auth
-                async with client.put(
-                    base,
-                    data=blob,
+            if blob is None:
+                async with client.post(
+                    f"{base}/decline",
+                    json={"reason": decline_reason},
                     headers=headers,
                     allow_redirects=False,
-                    timeout=aiohttp.ClientTimeout(total=SPACE_MEDIA_PUT_TIMEOUT_S),
+                    timeout=aiohttp.ClientTimeout(total=15),
                 ) as resp:
                     return int(resp.status)
-        except OutboundFetchRefused as exc:
-            log.warning("space media serve to %s refused: %s", conn.inbox_url, exc)
+            headers["Content-Type"] = "application/octet-stream"
+            if upload_auth:
+                headers[SPACE_MEDIA_AUTH_HEADER] = upload_auth
+            async with client.put(
+                base,
+                data=blob,
+                headers=headers,
+                allow_redirects=False,
+                timeout=aiohttp.ClientTimeout(total=SPACE_MEDIA_PUT_TIMEOUT_S),
+            ) as resp:
+                return int(resp.status)
+        except aiohttp.ClientConnectorError as exc:
+            log.warning(
+                "space media serve to %s: no connection: %s", conn.inbox_url, exc
+            )
             return None
         except (aiohttp.ClientError, TimeoutError) as exc:
             log.warning("space media serve to %s failed: %s", conn.inbox_url, exc)
-            return None
+            return 0
 
     async def space_media_follower_targets(self, space_id: str) -> list[GfsConnection]:
         """The GFSs whose followers of *space_id* read its content — where

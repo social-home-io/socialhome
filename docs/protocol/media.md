@@ -648,10 +648,13 @@ applies.
 `space_media_serve` in its GFS hello and answers the GFS's
 `space_media_request {ticket, scope, scope_id, blob_id, mode, hint}` — but
 only where the GFS may ask it: for a listed space only the **owner**
-household (`owner_instance_id` is its own), for a private channel a
-household holding that channel. Any other household declines `not_held`
-before it opens anything, so a GFS replaying a hint to other households
-can't learn who is a member. Otherwise it opens the hint (a stale or
+household (`owner_instance_id` is its own) and only for a space it LISTED on
+that GFS; for a private channel a household holding a seat on that GFS.
+Every other request — a space it doesn't own, didn't list there, or a
+private space — is declined `not_held` before any key or crypto is touched,
+so a GFS can't probe who is a member or which spaces a household owns.
+(Member fallback for listed spaces is planned as a follow-up; it needs a
+design that doesn't tell the GFS who the members are.) Otherwise it opens the hint (a stale or
 unopenable one: `bad_hint`), finds the file under its own name for it (the
 author's name, or the `sd-` / `sg-` name it got the file under — never a
 reserved `dm-` / `gm-` name), requires that only this space's content
@@ -660,8 +663,12 @@ shows it (`live_in_space`: not a deleted post, comment, listing, event, page
 or album item, never only a moderation queue or an edit history — a deleted
 item's picture never comes back), seals it again (deterministic, so
 byte-identical) and checks that it sits at exactly the asked address (a
-file held but at another address: `bad_hint`). Then it sends
-`PUT /gfs/media/serve/{ticket}`, signed by its household key over
+file held but at another address: `bad_hint`). A locator's
+addresses are remembered for 10 minutes, so the same locator sent with
+other blob ids is declined without a new reseal. Then it sends
+`PUT /gfs/media/serve/{ticket}` over its AUTHENTICATED GFS session (never
+the cookie-less one anonymous `wanted` requests and publishes ride, so the
+GFS can't link them), signed by its household key over
 `{instance_id, media_ticket, op: "serve", ts}` — with its normal upload
 authorization for a `cache` request, at most once per (GFS, blob) per
 10 minutes — or `POST …/decline` (`op: "decline"`, body
@@ -669,7 +676,9 @@ authorization for a `cache` request, at most once per (GFS, blob) per
 with another waiting reader's hint; on `not_held` it moves on. Budgets are
 per GFS **and** in all: at most 2 answers at once per GFS and 4 in all
 (past either the frame is dropped before any work), at most 512 MiB an hour
-per GFS and 1 GiB in all (past either: `not_held`).
+per GFS and 1 GiB in all (past either: `not_held`) — charged BEFORE the
+bytes go (a GFS that reads them and answers an error still spent the
+budget), refunded only when no connection was made.
 
 **Large videos are lazy.** A video whose blob is at least 1 MiB is
 described but no longer uploaded at once — only when the uploading

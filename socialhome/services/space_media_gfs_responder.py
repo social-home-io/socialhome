@@ -29,13 +29,19 @@ kept in its cache again. This service answers that:
    asked; later requests in the window stream only.
 
 **Who answers.** Only a household the GFS may ask: for a listed space its
-OWNER household (the GFS knows it already), for a private space's channel a
-member household holding the channel. Any other household declines on the
-same path before it opens anything — so a GFS replaying a reader's hint to
-other households learns nothing about who is a member; and a hint older than
+OWNER household, and only for a space it listed on THAT GFS (the GFS knows
+both already); for a private space's channel a member household holding a
+seat on that GFS. Any other request — a space this household doesn't own,
+didn't list there, or a private space — is declined ``not_held`` on the same
+path, before any key or crypto is touched, so a GFS can't probe who is a
+member or which spaces a household owns. Member fallback for listed spaces
+is planned (a follow-up); a hint older than
 :data:`~socialhome.space_media_hint.HINT_MAX_AGE_S` is refused. Only a file a
 LIVE row of the space shows is sent (``live_in_space``): a deleted item's
 picture never comes back.
+
+A locator's addresses are remembered for :data:`MISMATCH_KEEP_S`: the same
+locator sent again with another blob id is declined without a reseal.
 
 Bounded per GFS AND in all (one GFS, or a reader flooding one, can't spend
 this household's budget for the others): :data:`MAX_SERVES_PER_GFS` /
@@ -86,6 +92,7 @@ if TYPE_CHECKING:
     from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
     from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
     from ..repositories.space_repo import AbstractSpaceRepo
+    from .gfs_channel_service import GfsChannelService
     from .gfs_connection_service import GfsConnectionService
     from .space_crypto_service import SpaceContentEncryption
     from .space_media_gfs_uploader import SpaceMediaGfsUploader
@@ -130,6 +137,7 @@ class SpaceMediaGfsResponder:
     """Answer a GFS's ``space_media_request`` (module docstring)."""
 
     __slots__ = (
+        "_channels",
         "_crypto",
         "_dir",
         "_federation",
@@ -138,7 +146,7 @@ class SpaceMediaGfsResponder:
         "_in_flight",
         "_in_flight_by_gfs",
         "_media_refs",
-        "_mismatch",
+        "_resealed",
         "_reuploaded",
         "_sealed",
         "_sent",
@@ -174,9 +182,12 @@ class SpaceMediaGfsResponder:
         self._sent: list[tuple[float, str, int]] = []
         #: (GFS, blob) → monotonic time until which no re-upload is attached.
         self._reuploaded: OrderedDict[tuple[str, str], float] = OrderedDict()
-        #: Locators that resealed to another address (a key holder's
-        #: crafted hint): not resealed again for :data:`MISMATCH_KEEP_S`.
-        self._mismatch: OrderedDict[tuple, float] = OrderedDict()
+        #: Locator (scope, scope id, epoch, item, origin, file name) → (expiry,
+        #: the addresses its files resealed to): the same locator asked for
+        #: another blob id is declined without a reseal.
+        self._resealed: OrderedDict[tuple, tuple[float, frozenset[str]]] = OrderedDict()
+        #: v_51 channels: which channel seats this household holds, where.
+        self._channels: GfsChannelService | None = None
         #: (scope, scope id, blob) → (monotonic expiry, sealed bytes).
         self._sealed: OrderedDict[tuple[str, str, str], tuple[float, bytes]] = (
             OrderedDict()
@@ -184,6 +195,9 @@ class SpaceMediaGfsResponder:
 
     def attach_federation(self, federation: FederationService) -> None:
         self._federation = federation
+
+    def attach_channels(self, channels: GfsChannelService) -> None:
+        self._channels = channels
 
     async def handle(self, frame: dict, *, gfs_id: str) -> None:
         """One ``space_media_request`` from GFS *gfs_id* (the WS client's
@@ -226,7 +240,7 @@ class SpaceMediaGfsResponder:
             conn = await self._gfs_repo.get(gfs_id)
             if conn is None or conn.status != "active" or not conn.inbox_url:
                 return
-            blob, space_id, reason = await self._find(req)
+            blob, space_id, reason = await self._find(req, conn)
             if blob is not None and not self._budget_allows(conn.id, len(blob)):
                 blob, reason = None, DECLINE_NOT_HELD
             if blob is None:
@@ -235,13 +249,15 @@ class SpaceMediaGfsResponder:
                 )
                 return
             upload_auth = await self._upload_auth(req, conn, blob, space_id)
+            # Charged BEFORE the bytes go: a GFS that reads the body and then
+            # answers 409 / 422 / 429 still spent this household's budget.
+            charge = self._charge(conn.id, len(blob))
             status = await self._gfs.serve_space_media(
                 conn, req.ticket, blob, upload_auth=upload_auth
             )
-            if status == 200:
-                # Charged only for bytes the GFS took — a refused serve (a
-                # quota, a ticket gone) costs this household's budget nothing.
-                self._charge(conn.id, len(blob))
+            if status is None:
+                # Nothing left this household (no connection): refunded.
+                self._refund(charge)
             log.info(
                 "space media %s: %s on demand to GFS %s (%d bytes, HTTP %s)",
                 req.blob_id[:12],
@@ -264,13 +280,15 @@ class SpaceMediaGfsResponder:
             else:
                 self._in_flight_by_gfs.pop(gfs_id, None)
 
-    async def _find(self, req: MediaRequestFrame) -> tuple[bytes | None, str, str]:
+    async def _find(
+        self, req: MediaRequestFrame, conn: GfsConnection
+    ) -> tuple[bytes | None, str, str]:
         """``(blob, space id, decline reason)``: the blob the request names,
         re-sealed from a file of this household that a live row of the space
         shows — or ``None`` and why (:data:`DECLINE_BAD_HINT`: the hint
         doesn't open or names nothing at this address; else
         :data:`DECLINE_NOT_HELD`)."""
-        space_id = await self._space_of(req.scope, req.scope_id)
+        space_id = await self._space_of(req.scope, req.scope_id, conn)
         if space_id is None:
             # Not a household this GFS may ask: the same answer as a miss,
             # before anything is opened.
@@ -297,18 +315,25 @@ class SpaceMediaGfsResponder:
         cached = self._sealed_get(sealed_key)
         if cached is not None:
             return cached, space_id, ""
-        tried = (
+        locator = (
             req.scope,
             req.scope_id,
-            req.blob_id,
             req.hint.epoch,
             loc.item_id,
             loc.origin,
             loc.filename,
         )
-        if self._mismatch.get(tried, 0.0) > _monotonic():
+        known = self._resealed.get(locator)
+        if (
+            known is not None
+            and known[0] > _monotonic()
+            and req.blob_id not in known[1]
+        ):
+            # This locator's files reseal to other addresses: no new reseal
+            # for a made-up blob id.
             return None, space_id, DECLINE_BAD_HINT
         held_any = False
+        addresses: set[str] = set()
         for name in self._candidates(space_id, loc):
             if not await self._media_refs.confined_to_space(
                 name, space_id
@@ -330,16 +355,24 @@ class SpaceMediaGfsResponder:
                 req.scope,
                 req.scope_id,
             )
+            addresses.add(address)
             if address == req.blob_id:
+                self._remember_locator(locator, addresses)
                 self._sealed_put(sealed_key, blob)
                 return blob, space_id, ""
         if held_any:
-            self._mismatch[tried] = _monotonic() + MISMATCH_KEEP_S
-            self._mismatch.move_to_end(tried)
-            while len(self._mismatch) > 4096:
-                self._mismatch.popitem(last=False)
+            self._remember_locator(locator, addresses)
             return None, space_id, DECLINE_BAD_HINT
         return None, space_id, DECLINE_NOT_HELD
+
+    def _remember_locator(self, locator: tuple, addresses: set[str]) -> None:
+        self._resealed[locator] = (
+            _monotonic() + MISMATCH_KEEP_S,
+            frozenset(addresses),
+        )
+        self._resealed.move_to_end(locator)
+        while len(self._resealed) > 4096:
+            self._resealed.popitem(last=False)
 
     def _candidates(self, space_id: str, loc: SpaceMediaLocator) -> list[str]:
         """The local names this household may hold the file under — computed
@@ -360,17 +393,40 @@ class SpaceMediaGfsResponder:
         )
         return names
 
-    async def _space_of(self, scope: str, scope_id: str) -> str | None:
-        """The space this household may be asked for under the scope: a
-        listed space it OWNS (the only household the GFS asks for it — a
-        member that answered would tell the GFS it is one), or the space of
-        a private channel it holds."""
+    async def _space_of(
+        self, scope: str, scope_id: str, conn: GfsConnection
+    ) -> str | None:
+        """The space this household may be asked for under the scope by
+        *conn*'s GFS: a space it OWNS and LISTED on that GFS (the only
+        household that GFS asks for it), or the space of a private channel it
+        holds a seat for on that GFS. ``None`` otherwise — every such case
+        the same way, before any crypto."""
         if scope == SCOPE_CHANNEL:
             spaces = await self._spaces.spaces_for_gfs_channel(scope_id)
-            return spaces[0] if len(spaces) == 1 else None
+            space_id = spaces[0] if len(spaces) == 1 else ""
+            grant = (
+                await self._channels.current_grant(space_id)
+                if self._channels is not None and space_id
+                else None
+            )
+            if (
+                grant is None
+                or grant.channel_id != scope_id
+                or not self._gfs.known_instance_ids(conn) & set(grant.gfs_ids)
+            ):
+                return None
+            return space_id
         own = self._federation.own_instance_id if self._federation else ""
         space = await self._spaces.get(scope_id)
-        if space is None or not own or space.owner_instance_id != own:
+        listed = await self._gfs_repo.list_publications_for_space(scope_id)
+        if (
+            space is None
+            or not own
+            or space.owner_instance_id != own
+            or not any(
+                p.gfs_connection_id == conn.id and p.status == "active" for p in listed
+            )
+        ):
             return None
         return scope_id
 
@@ -422,8 +478,16 @@ class SpaceMediaGfsResponder:
             and mine + size <= HOLDER_BYTES_PER_HOUR_PER_GFS
         )
 
-    def _charge(self, gfs_id: str, size: int) -> None:
-        self._sent.append((_monotonic(), gfs_id, size))
+    def _charge(self, gfs_id: str, size: int) -> tuple[float, str, int]:
+        entry = (_monotonic(), gfs_id, size)
+        self._sent.append(entry)
+        return entry
+
+    def _refund(self, entry: tuple[float, str, int]) -> None:
+        try:
+            self._sent.remove(entry)
+        except ValueError:  # pragma: no cover - already aged out
+            pass
 
     def _sealed_get(self, key: tuple[str, str, str]) -> bytes | None:
         now = _monotonic()

@@ -5,6 +5,7 @@ and where a space's follower copies go."""
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 
 import aiohttp
 
@@ -448,5 +449,63 @@ async def test_serve_and_decline_are_signed_by_the_household(env):
         b64url_decode(headers["X-SH-Signature"]),
     )
     assert SPACE_MEDIA_AUTH_HEADER not in headers
+    # A failure after the request may have left: "sent, outcome unknown"
+    # (0) — the holder keeps it charged; ``None`` is only "nothing left".
     session.raise_on = "PUT"
-    assert await svc.serve_space_media(conn, ticket, b"c") is None
+    assert await svc.serve_space_media(conn, ticket, b"c") == 0
+
+
+async def test_serve_and_decline_ride_the_authenticated_session_only(env):
+    """#1317 review 1: a signed serve names this household — it must never
+    share the cookie-less publish session (and its keep-alive connections)
+    with anonymous ``wanted`` requests and publishes, or the GFS could link
+    them."""
+    _db, repo = env
+    await repo.save(
+        _base._make_conn(
+            "g1",
+            inbox_url="https://g1.example",
+            public_key=_base._GFS_KP.public_key.hex(),
+        )
+    )
+    authed, anon = _MediaSession(put_status=200), _MediaSession(put_status=200)
+    svc = GfsConnectionService(repo, http_client=authed, publish_client=anon)
+    svc._own_instance_id = "me"
+    svc._own_signing_key = b"s" * 32
+    conn = await repo.get("g1")
+    ticket = "a" * 32
+    assert await svc.serve_space_media(conn, ticket, b"cipher") == 200
+    assert await svc.serve_space_media(conn, ticket, None) == 200
+    assert len(authed.puts) == 1 and len(authed.posts) == 1
+    assert anon.puts == [] and anon.posts == []
+    # …while the reader's wanted stays on the anonymous one.
+    await svc.want_space_media(conn, BID, {}, max_bytes=64, timeout_s=5)
+    assert len(anon.posts) == 1 and len(authed.posts) == 1
+
+
+async def test_a_serve_that_never_left_is_none(env):
+    """No connection (the request never left): ``None``, so the holder
+    refunds its budget."""
+    _db, repo = env
+    await repo.save(
+        _base._make_conn(
+            "g1",
+            inbox_url="https://g1.example",
+            public_key=_base._GFS_KP.public_key.hex(),
+        )
+    )
+
+    class _Refusing(_MediaSession):
+        def put(self, url, **_kw):
+            raise aiohttp.ClientConnectorError(
+                SimpleNamespace(ssl=None, host="g1.example", port=443),
+                OSError("connect refused"),
+            )
+
+    svc = GfsConnectionService(
+        repo, http_client=_Refusing(), publish_client=_MediaSession()
+    )
+    svc._own_instance_id = "me"
+    svc._own_signing_key = b"s" * 32
+    conn = await repo.get("g1")
+    assert await svc.serve_space_media(conn, "a" * 32, b"cipher") is None

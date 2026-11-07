@@ -2324,6 +2324,9 @@ class AbstractGfsSpaceMediaDemandRepo(Protocol):
     async def release_claim(
         self, blob_id: str, scope_kind: str, scope_id: str, *, until: int
     ) -> None: ...
+    async def claim_live(
+        self, blob_id: str, scope_kind: str, scope_id: str, *, now: int
+    ) -> bool: ...
     async def prune(self, *, before: int) -> int: ...
 
 
@@ -2408,6 +2411,17 @@ class SqliteGfsSpaceMediaDemandRepo:
             " WHERE blob_id=? AND scope_kind=? AND scope_id=? AND claimed_until=?",
             (blob_id, scope_kind, scope_id, until),
         )
+
+    async def claim_live(
+        self, blob_id: str, scope_kind: str, scope_id: str, *, now: int
+    ) -> bool:
+        """Whether a node still holds the blob's re-upload claim."""
+        row = await self._db.fetchone(
+            "SELECT claimed_until FROM gfs_space_media_demand"
+            " WHERE blob_id=? AND scope_kind=? AND scope_id=?",
+            (blob_id, scope_kind, scope_id),
+        )
+        return row is not None and int(row["claimed_until"]) > now
 
     async def prune(self, *, before: int) -> int:
         return await self._db.enqueue_rowcount(

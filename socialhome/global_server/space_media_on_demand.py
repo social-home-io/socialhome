@@ -31,7 +31,8 @@ At most :data:`MAX_HOLDERS_ASKED` per request, one after another, each
 given :data:`HOLDER_START_TIMEOUT_S` to start (a decline moves on at once),
 all within ``stream_wait_seconds``. Other member households of a listed
 space are NOT asked: this server does not know them, and asking would tell
-it who they are (the GFS-must-not-see-data rule).
+it who they are (the GFS-must-not-see-data rule). A privacy-safe member
+fallback is planned as a follow-up.
 
 **Coalescing.** One live session per (blob, scope) per node: every reader
 of that blob joins it, and a session that delivered stays joinable in memory
@@ -170,6 +171,8 @@ class MediaSession:
     hint_prefixes: list[str] = field(default_factory=list)
     #: Until when this node holds the blob's re-upload claim (0: none).
     claimed_until: int = 0
+    #: The cache kept the holder's bytes (a re-upload that landed).
+    stored: bool = False
     #: The network prefix (keyed hash) of the reader that opened it.
     opener_prefix: str = ""
     #: Every refusal so far was an unusable hint (nobody said "not held"):
@@ -278,6 +281,7 @@ class GfsSpaceMediaOnDemand:
         "_federation",
         "_pending",
         "_pinned",
+        "_polls",
         "_recent",
         "_route_tag",
         "_sessions",
@@ -321,6 +325,9 @@ class GfsSpaceMediaOnDemand:
         #: Sessions a reader is still being written from (they hold memory
         #: after the session closed): counted in the room check.
         self._pinned: dict[tuple[str, str], int] = {}
+        #: blob → the one poll of the shared cache readers of a re-upload
+        #: another node claimed are waiting on.
+        self._polls: dict[str, asyncio.Future] = {}
         #: Readers waiting at once (per client, per prefix, per node).
         self.wait_gate = BodyReadGate(
             per_client=WAIT_PER_CLIENT,
@@ -426,7 +433,7 @@ class GfsSpaceMediaOnDemand:
         ):
             # Another node (or an earlier request) holds the one re-upload:
             # wait for it to land in the shared cache.
-            return await self._await_stored(blob_id)
+            return await self._await_stored(key)
         session = self._open(blob_id, req, mode)
         session.opener_prefix = prefix_key
         session.hint_prefixes = [prefix_key]
@@ -478,6 +485,10 @@ class GfsSpaceMediaOnDemand:
         session.decline_reason = reason
         session.declined.set()
 
+    def cached_deadline(self, size: int) -> float:
+        """Seconds a reader may take to receive a cached blob of *size*."""
+        return 10.0 + size / MIN_READER_BYTES_PER_S
+
     def reader_deadline(self, session: MediaSession) -> float:
         """Seconds a reader may take to receive *session*'s blob."""
         return self.remaining(session) + 10.0 + session.size / MIN_READER_BYTES_PER_S
@@ -524,6 +535,7 @@ class GfsSpaceMediaOnDemand:
         return address == session.blob_id
 
     def note_served(self, session: MediaSession, *, stored: bool) -> None:
+        session.stored = stored
         self._counters.streams += 1
         self._counters.streamed_bytes += session.size
         if stored:
@@ -545,7 +557,7 @@ class GfsSpaceMediaOnDemand:
     async def close(self) -> None:
         for session in list(self._sessions.values()):
             session.finish(ok=False)
-        for task in list(self._drivers):
+        for task in list(self._drivers) + list(self._polls.values()):
             task.cancel()
         if self._drivers:
             await asyncio.gather(*self._drivers, return_exceptions=True)
@@ -683,13 +695,10 @@ class GfsSpaceMediaOnDemand:
                 )
             except TimeoutError:
                 session.finish(ok=False)
-            if (
-                not session.verified
-                and session.claimed_until
-                and session.only_bad_hints
-            ):
-                # Only junk hints (or a quota): the one re-upload is still
-                # to come — give this node's claim back.
+            if session.claimed_until and not session.stored:
+                # Nothing was re-uploaded (streamed only, nobody served, junk
+                # hints, a quota): give this node's claim back, so the readers
+                # another node keeps waiting stop now (they poll the claim).
                 await self._demand.release_claim(
                     *session.key, until=session.claimed_until
                 )
@@ -770,14 +779,34 @@ class GfsSpaceMediaOnDemand:
         session.target = ""
         return False
 
-    async def _await_stored(self, blob_id: str) -> Cached | str:
+    async def _await_stored(self, key: tuple[str, str, str]) -> Cached | str:
+        """Wait for the re-upload another node claimed to land in the shared
+        cache — ONE poll per blob on this node, however many readers wait,
+        ending as soon as that claim ends (nothing came) or the wait does."""
+        blob_id = key[0]
+        poll = self._polls.get(blob_id)
+        if poll is None:
+            poll = asyncio.ensure_future(self._poll_stored(key))
+            self._polls[blob_id] = poll
+
+            def _done(_f: asyncio.Future, b: str = blob_id) -> None:
+                self._polls.pop(b, None)
+
+            poll.add_done_callback(_done)
+        outcome = await asyncio.shield(poll)
+        if outcome == MISS:
+            self._counters.misses += 1
+        return outcome
+
+    async def _poll_stored(self, key: tuple[str, str, str]) -> Cached | str:
         deadline = self._clock() + self._cfg.stream_wait_seconds
         while self._clock() < deadline:
             await asyncio.sleep(CLAIM_POLL_S)
-            data = await self._store.read(blob_id)
+            data = await self._store.read(key[0])
             if data is not None:
                 return Cached(data)
-        self._counters.misses += 1
+            if not await self._demand.claim_live(*key, now=int(time.time())):
+                return MISS
         return MISS
 
 

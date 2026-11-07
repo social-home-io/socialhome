@@ -53,11 +53,19 @@ class _Conn:
 
 
 class _GfsRepo:
-    def __init__(self, conns):
+    def __init__(self, conns, *, listed=None):
         self.conns = {c.id: c for c in conns}
+        #: space → the connections it is listed on (published).
+        self.listed = {SPACE: {"g1", "g2"}} if listed is None else listed
 
     async def get(self, gfs_id):
         return self.conns.get(gfs_id)
+
+    async def list_publications_for_space(self, space_id):
+        return [
+            SimpleNamespace(space_id=space_id, gfs_connection_id=g, status="active")
+            for g in self.listed.get(space_id, ())
+        ]
 
 
 class _Gfs:
@@ -65,6 +73,9 @@ class _Gfs:
         self.status = status
         self.serves: list[tuple[str, str, bytes | None, str | None]] = []
         self.reasons: list[str] = []
+
+    def known_instance_ids(self, conn):
+        return frozenset({"inst-" + conn.id})
 
     async def serve_space_media(
         self, conn, ticket, blob, *, upload_auth=None, decline_reason="not_held"
@@ -127,9 +138,23 @@ class _Uploader:
         self.remembered.append((conn.id, blob_id))
 
 
-def _responder(tmp_path, *, gfs=None, spaces=None, refs=None, uploader=None):
+class _Channels:
+    """This household's channel grant: seated on GFS g1 only."""
+
+    def __init__(self, gfs_ids=("inst-g1",)):
+        self.gfs_ids = gfs_ids
+
+    async def current_grant(self, space_id):
+        if space_id != SPACE:
+            return None
+        return SimpleNamespace(channel_id=CHANNEL, gfs_ids=self.gfs_ids)
+
+
+def _responder(
+    tmp_path, *, gfs=None, spaces=None, refs=None, uploader=None, gfs_repo=None
+):
     r = SpaceMediaGfsResponder(
-        gfs_repo=_GfsRepo([_Conn("g1")]),
+        gfs_repo=gfs_repo or _GfsRepo([_Conn("g1")]),
         gfs_service=gfs or _Gfs(),
         space_repo=spaces or _Spaces(),
         space_crypto=_Crypto(),
@@ -138,6 +163,7 @@ def _responder(tmp_path, *, gfs=None, spaces=None, refs=None, uploader=None):
         media_dir=tmp_path,
     )
     r.attach_federation(SimpleNamespace(own_instance_id=OWN))
+    r.attach_channels(_Channels())
     return r
 
 
@@ -399,17 +425,26 @@ async def test_one_gfs_cannot_spend_the_budget_of_another(tmp_path, monkeypatch)
     ]
 
 
-async def test_a_refused_serve_costs_the_holder_budget_nothing(tmp_path, monkeypatch):
-    """Review N2: the holder charges only bytes the GFS took (a 429 / 404
-    serve is free), so a reader can't drain the owner's budget."""
+async def test_bytes_sent_count_whatever_the_gfs_answers(tmp_path, monkeypatch):
+    """#1317 review 3: the budget is charged BEFORE the bytes go — a GFS
+    answering 409 / 422 / 429 after reading the body gets no more uploads
+    than the budget; only a send that never left (no connection) is
+    refunded."""
     data = _file(tmp_path, "a.webp", 70_000)
     blob, bid = _blob(data)
-    monkeypatch.setattr(mod, "HOLDER_BYTES_PER_HOUR_PER_GFS", len(blob) + 1)
-    gfs = _Gfs(status=429)
+    monkeypatch.setattr(mod, "HOLDER_BYTES_PER_HOUR_PER_GFS", 2 * len(blob) + 1)
+    for status in (409, 422, 429):
+        gfs = _Gfs(status=status)
+        r = _responder(tmp_path, gfs=gfs)
+        for _ in range(3):
+            await _ask(r, _frame(bid))
+        assert [x[2] is not None for x in gfs.serves] == [True, True, False]
+    # Nothing left this household (the connection failed): refunded.
+    gfs = _Gfs(status=None)
     r = _responder(tmp_path, gfs=gfs)
-    await _ask(r, _frame(bid))
-    await _ask(r, _frame(bid))
-    assert [s[2] is not None for s in gfs.serves] == [True, True]
+    for _ in range(3):
+        await _ask(r, _frame(bid))
+    assert [x[2] is not None for x in gfs.serves] == [True, True, True]
 
 
 class _CountingRefs(_MediaRefs):
@@ -433,4 +468,61 @@ async def test_a_locator_naming_another_address_reseals_once(tmp_path):
     asked = refs.asked
     await _ask(r, _frame("c" * 64))
     assert gfs.reasons == ["bad_hint", "bad_hint"]
+    assert refs.asked == asked
+
+
+# ── #1317 independent review ──────────────────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "case", ["unlisted", "listed_elsewhere", "private_unlisted", "no_seat_here"]
+)
+async def test_only_a_space_listed_on_that_gfs_is_answered(tmp_path, case):
+    """#1317 review 5: a household answers for a listed space only when it
+    owns it AND it is listed on the asking GFS (a channel: it holds a seat
+    there). Everything else is ``not_held``, before any crypto — so a GFS
+    can't probe which spaces (private ones included) a household owns."""
+    data = _file(tmp_path, "a.webp")
+    crypto = _SpyCrypto()
+    gfs = _Gfs()
+    listed = {
+        "unlisted": {},
+        "listed_elsewhere": {SPACE: {"g9"}},
+        "private_unlisted": {},
+        "no_seat_here": None,
+    }[case]
+    r = SpaceMediaGfsResponder(
+        gfs_repo=_GfsRepo([_Conn("g1")], listed=listed),
+        gfs_service=gfs,
+        space_repo=_Spaces(channel=CHANNEL),
+        space_crypto=crypto,
+        media_refs=_MediaRefs(),
+        uploader=_Uploader(),
+        media_dir=tmp_path,
+    )
+    r.attach_federation(SimpleNamespace(own_instance_id=OWN))
+    r.attach_channels(_Channels(gfs_ids=("inst-g9",)))
+    if case == "no_seat_here":
+        _b, bid = _blob(data, scope="channel", scope_id=CHANNEL)
+        frame = _frame(bid, scope="channel", scope_id=CHANNEL)
+    else:
+        _b, bid = _blob(data)
+        frame = _frame(bid)
+    await _ask(r, frame)
+    assert gfs.reasons == ["not_held"]
+    assert crypto.asked == 0
+
+
+async def test_one_locator_reseals_once_whatever_blob_ids_it_is_asked_for(tmp_path):
+    """#1317 review 4: one valid locator sent with many made-up blob ids
+    costs the holder ONE reseal, not one per id."""
+    _file(tmp_path, "a.webp")
+    refs = _CountingRefs()
+    gfs = _Gfs()
+    r = _responder(tmp_path, gfs=gfs, refs=refs)
+    await _ask(r, _frame("c" * 64))
+    asked = refs.asked
+    for n in range(5):
+        await _ask(r, _frame(f"{n}" * 64))
+    assert gfs.reasons == ["bad_hint"] * 6
     assert refs.asked == asked

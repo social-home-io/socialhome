@@ -76,6 +76,9 @@ SPACE_MEDIA_DECLINE_ROUTE: str = "/gfs/media/serve/{ticket}/decline"
 #: How far a holder's ``ts`` may be from this server's clock.
 SERVE_MAX_SKEW_S: int = 300
 
+#: A cached blob is written to a reader in pieces this size.
+_CACHED_CHUNK_BYTES: int = 64 * 1024
+
 _NO_STORE = {
     "Cache-Control": "no-store",
     "Access-Control-Allow-Origin": "*",
@@ -118,7 +121,7 @@ class GfsMediaWantedView(GfsBaseView):
         try:
             outcome = await svc.want(self.match("blob_id"), req, prefix_key=prefix_key)
             if isinstance(outcome, Cached):
-                return web.Response(body=outcome.data, headers=_BLOB_HEADERS)
+                return await self._send_cached(svc, outcome.data)
             if isinstance(outcome, MediaSession):
                 return await self._pipe(svc, outcome, prefix_key)
             if outcome == LIMITED:
@@ -132,6 +135,26 @@ class GfsMediaWantedView(GfsBaseView):
             return _status(404)
         finally:
             svc.wait_gate.leave(client_key, prefix_key, 0)
+
+    async def _send_cached(self, svc, data: bytes) -> web.StreamResponse:
+        """A cached blob, written under a deadline (a reader that stops
+        reading can't hold it)."""
+        resp = web.StreamResponse(status=200, headers=_BLOB_HEADERS)
+        resp.content_length = len(data)
+        await resp.prepare(self.request)
+        view = memoryview(data)
+        try:
+            async with asyncio.timeout(svc.cached_deadline(len(data))):
+                for start in range(0, len(data), _CACHED_CHUNK_BYTES):
+                    await resp.write(bytes(view[start : start + _CACHED_CHUNK_BYTES]))
+                    # Let other requests run between pieces of up to 8 MiB.
+                    await asyncio.sleep(0)
+        except TimeoutError:
+            if self.request.transport is not None:
+                self.request.transport.close()
+            return resp
+        await resp.write_eof()
+        return resp
 
     async def _pipe(
         self, svc, session: MediaSession, prefix: str

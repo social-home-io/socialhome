@@ -3827,10 +3827,17 @@ to start sending (a decline moves on at once), all within
 GFS does not know them, and asking would tell it who they are.
 
 **Who answers.** The holder side mirrors that: a household answers only for
-a listed space it **owns**, or a private channel it holds. Any other
-household declines `not_held` on the same path before it opens anything, so
-a GFS replaying a reader's hint to other households can't learn who is a
-member; and a hint sealed more than 600 s ago is refused (`bad_hint`), which
+a space it **owns** AND listed on the asking GFS, or a private channel it
+holds a seat for on that GFS. Every other request (a space it doesn't own or
+didn't list there, a private space) is declined `not_held` on the same path,
+before any key or crypto is touched, so a GFS can't probe who is a member or
+which spaces a household owns. (Member fallback for listed spaces is
+planned as a follow-up.) Serves and declines ride the household's
+AUTHENTICATED session, never the cookie-less one its anonymous requests
+use; its budget is charged before the bytes go. A cached answer is written
+under a reader deadline too (10 s + size at 64 KiB/s), and readers waiting
+for another node's re-upload share one poll of the shared cache, which ends
+as soon as that node's claim ends. And a hint sealed more than 600 s ago is refused (`bad_hint`), which
 bounds replay. It sends only a file that a **live** row of the space shows
 (`MediaReferenceRepo.live_in_space`: a post, comment, listing, event, page
 or album item not deleted — never one only a moderation queue or an edit history

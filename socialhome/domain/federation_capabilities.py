@@ -1309,9 +1309,11 @@ from __future__ import annotations
 #:   LRU). A reader that misses one on view asks that GFS
 #:   (``POST /gfs/media/{blob_id}/wanted`` with the scope and a locator
 #:   sealed for space key holders, :mod:`socialhome.space_media_hint`); the
-#:   GFS asks ONE holder household over its socket (``space_media_request``:
-#:   the space host first, else a connected key holder that listed
-#:   ``space_media_serve`` in its hello) to send the same deterministic
+#:   GFS asks ONE holder household over its socket (``space_media_request``,
+#:   only a socket that listed ``space_media_serve`` in its hello): for a
+#:   listed space its OWNER household only (member fallback is planned as a
+#:   follow-up), for a private space's channel a seated household — to send
+#:   the same deterministic
 #:   ciphertext to ``PUT /gfs/media/serve/{ticket}``. The GFS pipes it to
 #:   every waiting reader without storing it, or — fresh or repeatedly asked
 #:   content — also keeps it in the cache (the holder's normal upload
