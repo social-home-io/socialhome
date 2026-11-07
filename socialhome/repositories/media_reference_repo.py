@@ -214,9 +214,6 @@ _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
 #: not posted yet).
 _HELD_SOURCE = "space_moderation_queue"
 
-#: The space each :data:`_ACCESS_SOURCES` table's row belongs to (an SQL
-#: expression over the row ``t``); a table not listed is household-level
-#: (``NULL``) — never a space's content (:meth:`confined_to_space`).
 #: The LIVE rows of a space that show a file (v_83, :meth:`live_in_space`):
 #: table, column, shape, and the condition (first ``?`` = the space id).
 _LIVE_SPACE_SOURCES: tuple[tuple[str, str, str, str], ...] = (
@@ -237,7 +234,15 @@ _LIVE_SPACE_SOURCES: tuple[tuple[str, str, str, str], ...] = (
             " WHERE p.id = t.post_id AND p.deleted = 0) = ?"
         ),
     ),
-    ("bazaar_listings", "image_urls_json", "list", "t.space_id = ?"),
+    (
+        "bazaar_listings",
+        "image_urls_json",
+        "list",
+        (
+            "t.space_id = ? AND EXISTS (SELECT 1 FROM space_posts p"
+            " WHERE p.id = t.post_id AND p.deleted = 0)"
+        ),
+    ),
     (
         "space_calendar_events",
         "cover_url",
@@ -252,6 +257,9 @@ _LIVE_SPACE_SOURCES: tuple[tuple[str, str, str, str], ...] = (
     ),
 )
 
+#: The space each :data:`_ACCESS_SOURCES` table's row belongs to (an SQL
+#: expression over the row ``t``); a table not listed is household-level
+#: (``NULL``) — never a space's content (:meth:`confined_to_space`).
 _SPACE_OF: dict[str, str] = {
     "space_posts": "t.space_id",
     "space_post_comments": (

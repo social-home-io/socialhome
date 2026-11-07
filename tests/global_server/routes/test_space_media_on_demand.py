@@ -618,3 +618,70 @@ async def test_a_second_serve_of_one_ticket_is_refused(gfs):
     )
     assert sorted(p.status for p in puts) == [200, 409]
     assert await (await reader).read() == data
+
+
+# ── Review regressions (adversarial round 2) ─────────────────────────────
+
+
+@pytest.mark.parametrize(
+    "gfs", [{"od": {"scope_stream_bytes_per_hour": SMALL * 8}}], indirect=True
+)
+async def test_a_reader_past_its_stream_share_never_makes_a_holder_send(gfs):
+    """Review N2: the opener's prefix share (1/8 of the scope's budget) is
+    checked BEFORE any holder is asked — no holder seals and sends bytes
+    that would be refused, and the blob is not marked missing."""
+    ws = await _connect(gfs, HOST)
+    data, bid = _blob()
+    reader = asyncio.create_task(_want(gfs, bid, reader=7))
+    await _answer(gfs, ws, HOST, HOST_SEED, data)
+    assert await (await reader).read() == data
+    _, other = _blob()
+    resp = await _want(gfs, other, reader=7)
+    assert resp.status == 429
+    assert ws.count == 1
+    # Another reader is not limited by that one's share, and the blob was
+    # not marked missing.
+    other_reader = asyncio.create_task(_want(gfs, other, reader=8))
+    await asyncio.wait_for(ws.frames.get(), 5)
+    other_reader.cancel()
+
+
+async def test_a_quota_refusal_ends_the_session_at_once(gfs, monkeypatch):
+    """Review N1: a holder's bytes refused by a budget race end the session
+    (never a session hanging forever, its slot leaked)."""
+    svc = gfs.app_[gfs_space_media_on_demand_key]
+
+    async def refuse(_self, _session, _size):
+        return False
+
+    monkeypatch.setattr(od_mod.GfsSpaceMediaOnDemand, "charge_stream", refuse)
+    data, bid = _blob()
+    ws = await _connect(gfs, HOST)
+    reader = asyncio.create_task(_want(gfs, bid))
+    frame = await asyncio.wait_for(ws.frames.get(), 5)
+    resp = await gfs.put(
+        f"/gfs/media/serve/{frame['ticket']}",
+        data=data,
+        headers=_serve_headers(HOST, HOST_SEED, frame["ticket"]),
+    )
+    assert resp.status == 429
+    assert (await reader).status == 404
+    for _ in range(50):
+        if not svc._sessions:
+            break
+        await asyncio.sleep(0.05)
+    assert svc._sessions == {}
+    assert svc._recent == {}
+
+
+async def test_one_reader_prefix_has_one_hint_in_a_session(gfs):
+    """Review N3: joiners from one prefix can't fill the hint slots."""
+    ws = await _connect(gfs, HOST)
+    _, bid = _blob()
+    readers = [asyncio.create_task(_want(gfs, bid, reader=3)) for _ in range(4)]
+    await asyncio.wait_for(ws.frames.get(), 5)
+    svc = gfs.app_[gfs_space_media_on_demand_key]
+    (session,) = svc._sessions.values()
+    assert len(session.hints) == 1
+    for r in readers:
+        r.cancel()

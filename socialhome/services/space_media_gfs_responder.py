@@ -113,6 +113,10 @@ REUPLOAD_COALESCE_S: float = 600.0
 #: Sealed blobs kept for tickets that arrive together (several cluster
 #: nodes asking for one blob): how long and how many bytes at most.
 SEALED_KEEP_S: float = 30.0
+
+#: A locator that resealed to another address is not resealed again for
+#: this long (a key holder crafting hints costs one reseal each).
+MISMATCH_KEEP_S: float = 600.0
 SEALED_KEEP_BYTES: int = 32 * 1024 * 1024
 
 _HOUR = 3600.0
@@ -134,6 +138,7 @@ class SpaceMediaGfsResponder:
         "_in_flight",
         "_in_flight_by_gfs",
         "_media_refs",
+        "_mismatch",
         "_reuploaded",
         "_sealed",
         "_sent",
@@ -169,6 +174,9 @@ class SpaceMediaGfsResponder:
         self._sent: list[tuple[float, str, int]] = []
         #: (GFS, blob) → monotonic time until which no re-upload is attached.
         self._reuploaded: OrderedDict[tuple[str, str], float] = OrderedDict()
+        #: Locators that resealed to another address (a key holder's
+        #: crafted hint): not resealed again for :data:`MISMATCH_KEEP_S`.
+        self._mismatch: OrderedDict[tuple, float] = OrderedDict()
         #: (scope, scope id, blob) → (monotonic expiry, sealed bytes).
         self._sealed: OrderedDict[tuple[str, str, str], tuple[float, bytes]] = (
             OrderedDict()
@@ -227,10 +235,13 @@ class SpaceMediaGfsResponder:
                 )
                 return
             upload_auth = await self._upload_auth(req, conn, blob, space_id)
-            self._charge(conn.id, len(blob))
             status = await self._gfs.serve_space_media(
                 conn, req.ticket, blob, upload_auth=upload_auth
             )
+            if status == 200:
+                # Charged only for bytes the GFS took — a refused serve (a
+                # quota, a ticket gone) costs this household's budget nothing.
+                self._charge(conn.id, len(blob))
             log.info(
                 "space media %s: %s on demand to GFS %s (%d bytes, HTTP %s)",
                 req.blob_id[:12],
@@ -286,6 +297,17 @@ class SpaceMediaGfsResponder:
         cached = self._sealed_get(sealed_key)
         if cached is not None:
             return cached, space_id, ""
+        tried = (
+            req.scope,
+            req.scope_id,
+            req.blob_id,
+            req.hint.epoch,
+            loc.item_id,
+            loc.origin,
+            loc.filename,
+        )
+        if self._mismatch.get(tried, 0.0) > _monotonic():
+            return None, space_id, DECLINE_BAD_HINT
         held_any = False
         for name in self._candidates(space_id, loc):
             if not await self._media_refs.confined_to_space(
@@ -311,7 +333,13 @@ class SpaceMediaGfsResponder:
             if address == req.blob_id:
                 self._sealed_put(sealed_key, blob)
                 return blob, space_id, ""
-        return None, space_id, DECLINE_BAD_HINT if held_any else DECLINE_NOT_HELD
+        if held_any:
+            self._mismatch[tried] = _monotonic() + MISMATCH_KEEP_S
+            self._mismatch.move_to_end(tried)
+            while len(self._mismatch) > 4096:
+                self._mismatch.popitem(last=False)
+            return None, space_id, DECLINE_BAD_HINT
+        return None, space_id, DECLINE_NOT_HELD
 
     def _candidates(self, space_id: str, loc: SpaceMediaLocator) -> list[str]:
         """The local names this household may hold the file under — computed

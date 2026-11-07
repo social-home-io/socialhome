@@ -182,3 +182,16 @@ async def test_one_reader_prefix_gets_only_its_share_of_a_scopes_stream_bytes():
     assert await svc.charge_stream(mine, 100)
     assert not await svc.charge_stream(mine, 1)  # its 1/8 share is used up
     assert await svc.charge_stream(other, 100)
+
+
+def test_one_reader_prefix_pins_at_most_two_sessions():
+    """Review round 2 (M4): slow readers of one prefix can't hold every
+    session slot of a node."""
+    svc = _svc(_Store())
+    a, b, c = _session(0), _session(0), _session(0)
+    a.ticket, b.ticket, c.ticket = "a", "b", "c"
+    assert svc.pin(a, "p1") and svc.pin(a, "p1") and svc.pin(b, "p1")
+    assert not svc.pin(c, "p1")
+    assert svc.pin(c, "p2")
+    svc.unpin(b, "p1")
+    assert svc.pin(c, "p1")

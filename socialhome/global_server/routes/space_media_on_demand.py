@@ -59,6 +59,7 @@ from ..space_media_on_demand import (
     DECLINE_BAD_HINT,
     DECLINE_NOT_HELD,
     LIMITED,
+    SERVE_BODY_DEADLINE_S,
     Cached,
     MediaSession,
     StreamFailed,
@@ -74,10 +75,6 @@ SPACE_MEDIA_DECLINE_ROUTE: str = "/gfs/media/serve/{ticket}/decline"
 
 #: How far a holder's ``ts`` may be from this server's clock.
 SERVE_MAX_SKEW_S: int = 300
-
-#: The longest a holder may take to send a whole blob (its progress is
-#: checked every window too).
-SERVE_BODY_DEADLINE_S: float = 120.0
 
 _NO_STORE = {
     "Cache-Control": "no-store",
@@ -123,7 +120,7 @@ class GfsMediaWantedView(GfsBaseView):
             if isinstance(outcome, Cached):
                 return web.Response(body=outcome.data, headers=_BLOB_HEADERS)
             if isinstance(outcome, MediaSession):
-                return await self._pipe(svc, outcome)
+                return await self._pipe(svc, outcome, prefix_key)
             if outcome == LIMITED:
                 resp = _status(429, "rate_limited")
                 resp.headers["Retry-After"] = "600"
@@ -136,10 +133,16 @@ class GfsMediaWantedView(GfsBaseView):
         finally:
             svc.wait_gate.leave(client_key, prefix_key, 0)
 
-    async def _pipe(self, svc, session: MediaSession) -> web.StreamResponse:
+    async def _pipe(
+        self, svc, session: MediaSession, prefix: str
+    ) -> web.StreamResponse:
         """Wait (bounded) for the holder to start, then pipe the blob."""
+        if not svc.pin(session, prefix):
+            # This reader prefix already holds its share of sessions open.
+            busy = _status(503, "busy")
+            busy.headers["Retry-After"] = "5"
+            return busy
         session.readers += 1
-        svc.pin(session)
         try:
             try:
                 await asyncio.wait_for(
@@ -167,7 +170,7 @@ class GfsMediaWantedView(GfsBaseView):
             return resp
         finally:
             session.readers -= 1
-            svc.unpin(session)
+            svc.unpin(session, prefix)
 
 
 async def _holder(view: GfsBaseView, ticket: str, op: str) -> str | web.Response:
@@ -227,8 +230,9 @@ class GfsMediaServeView(GfsBaseView):
         # target) can never feed the same buffer.
         session.claimed = True
         if not await svc.charge_stream(session, size):
-            session.claimed = False
-            svc.decline(session, DECLINE_NOT_HELD)
+            # A race past the check made before asking: end the session at
+            # once (never left hanging), without marking the blob missing.
+            svc.quota_refused(session)
             return web.json_response({"error": "scope_stream_quota"}, status=429)
         session.size = size
         session.started.set()

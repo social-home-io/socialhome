@@ -397,3 +397,40 @@ async def test_one_gfs_cannot_spend_the_budget_of_another(tmp_path, monkeypatch)
         ("g1", False),
         ("g2", True),
     ]
+
+
+async def test_a_refused_serve_costs_the_holder_budget_nothing(tmp_path, monkeypatch):
+    """Review N2: the holder charges only bytes the GFS took (a 429 / 404
+    serve is free), so a reader can't drain the owner's budget."""
+    data = _file(tmp_path, "a.webp", 70_000)
+    blob, bid = _blob(data)
+    monkeypatch.setattr(mod, "HOLDER_BYTES_PER_HOUR_PER_GFS", len(blob) + 1)
+    gfs = _Gfs(status=429)
+    r = _responder(tmp_path, gfs=gfs)
+    await _ask(r, _frame(bid))
+    await _ask(r, _frame(bid))
+    assert [s[2] is not None for s in gfs.serves] == [True, True]
+
+
+class _CountingRefs(_MediaRefs):
+    def __init__(self):
+        super().__init__()
+        self.asked = 0
+
+    async def confined_to_space(self, basename, space_id):
+        self.asked += 1
+        return await super().confined_to_space(basename, space_id)
+
+
+async def test_a_locator_naming_another_address_reseals_once(tmp_path):
+    """Review N4: a key holder crafting hints that name a real file at the
+    wrong address costs the holder one reseal, not one per request."""
+    _file(tmp_path, "a.webp")
+    refs = _CountingRefs()
+    gfs = _Gfs()
+    r = _responder(tmp_path, gfs=gfs, refs=refs)
+    await _ask(r, _frame("c" * 64))
+    asked = refs.asked
+    await _ask(r, _frame("c" * 64))
+    assert gfs.reasons == ["bad_hint", "bad_hint"]
+    assert refs.asked == asked

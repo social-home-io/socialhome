@@ -723,3 +723,23 @@ async def test_a_file_only_a_deleted_or_held_row_names_is_not_live(db):
     assert not await repo.live_in_space("nobody.webp", "sp1")
     # Still the space's content for the eager path (unchanged).
     assert await repo.confined_to_space("gone.webp", "sp1")
+
+
+async def test_a_deleted_listings_photo_is_not_live(db):
+    """Review round 2 (M6): a listing whose post was deleted keeps its row;
+    its photos are not live."""
+    await _two_spaces(db)
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, deleted)"
+        " VALUES('lp', 'sp1', 'u1', 'listing', 1)"
+    )
+    await db.enqueue(
+        "INSERT INTO bazaar_listings(post_id, space_id, seller_user_id, mode, title,"
+        " image_urls_json, end_time, currency)"
+        " VALUES('lp', 'sp1', 'u1', 'fixed', 'T', ?, '2030-01-01', 'EUR')",
+        ('["api/media/sold.webp"]',),
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert not await repo.live_in_space("sold.webp", "sp1")
+    await db.enqueue("UPDATE space_posts SET deleted = 0 WHERE id = 'lp'")
+    assert await repo.live_in_space("sold.webp", "sp1")

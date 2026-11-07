@@ -1959,5 +1959,8 @@ async def test_demand_claim_can_be_given_back(gfs_db):
     b = "9" * 64
     await repo.note_request(b, "space", "s1", now=100, window_s=60)
     assert await repo.claim(b, "space", "s1", now=100, hold_s=60)
-    await repo.release_claim(b, "space", "s1")
+    # Another claim's value never releases it.
+    await repo.release_claim(b, "space", "s1", until=999)
+    assert not await repo.claim(b, "space", "s1", now=101, hold_s=60)
+    await repo.release_claim(b, "space", "s1", until=160)
     assert await repo.claim(b, "space", "s1", now=101, hold_s=60)

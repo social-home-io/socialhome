@@ -675,6 +675,17 @@ class GfsSpaceMediaStore:
             key, bucket=bucket, size=size, cap=room
         )
 
+    async def hourly_left(self, label: str, cap: int, *, now: int | None = None) -> int:
+        """What is left of the keyed hourly budget *label* (as
+        :meth:`reserve_hourly` counts it) — a check that reserves nothing."""
+        now = int(time.time()) if now is None else now
+        bucket = now // _HOUR
+        current, previous = await self._repo.ip_bytes(
+            self._ip_key(label), bucket=bucket
+        )
+        overlap = 1.0 - (now % _HOUR) / _HOUR
+        return max(0, math.floor(cap - previous * overlap) - current)
+
     # ── Internals ─────────────────────────────────────────────────────────
 
     def client_key(self, client: str) -> str:
