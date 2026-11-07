@@ -12,15 +12,16 @@ import type { ComponentChildren } from 'preact'
 import { addBase } from '@/baseUrl'
 import { isOne, t } from '@/i18n/i18n'
 import { relativeDocsTime } from '@/utils/relativeTime'
-import { spaceGlyph } from './spaceGlyph'
+import { SpaceGlyph } from './SpaceGlyph'
 
-/** The space's picture: the uploaded icon, else emoji, else initial. */
+/** The space's picture: the uploaded icon, else the Home Assistant logo /
+ *  emoji, else initial. */
 export function SpaceIcon({ iconUrl, emoji, name }: {
   iconUrl?: string | null; emoji?: string | null; name: string
 }) {
   return (
     <span class="sh-spaces-row__ic" aria-hidden="true">
-      {iconUrl ? <img src={iconUrl} alt="" loading="lazy" /> : spaceGlyph(emoji, name)}
+      <SpaceGlyph iconUrl={iconUrl} emoji={emoji} name={name} />
     </span>
   )
 }

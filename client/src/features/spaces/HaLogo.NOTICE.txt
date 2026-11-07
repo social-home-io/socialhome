@@ -1,0 +1,21 @@
+Home Assistant logomark (HaLogo.tsx)
+
+The Home Assistant logo is a trademark and the property of the Open Home
+Foundation. It is not available for commercial use without express written
+permission from the foundation (partner@openhomefoundation.org).
+
+Source (path unmodified, monochrome logomark):
+  https://github.com/home-assistant/assets/blob/master/logo/home-assistant-logo.zip
+  (home-assistant-logomark-monochrome-on-light.svg; the fill is drawn in
+  the theme's text colour instead of #1D2126 / #F2F4F9)
+
+Terms:
+  https://github.com/home-assistant/assets/blob/master/logo/README.md
+  Logo guidelines:
+  https://contributors.home-assistant.io/brand/name-and-logo/#the-logo
+
+Social Home, a non-commercial open-source project, offers the logomark as
+one choice in the space icon picker, so a household can mark a space that
+is about its Home Assistant. Its use does not imply endorsement by the Open
+Home Foundation. The MPL-2.0 licence of Social Home does not apply to the
+logo.

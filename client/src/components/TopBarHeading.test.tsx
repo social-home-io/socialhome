@@ -7,7 +7,8 @@ vi.mock('@/components/PersonSheet', () => ({
 }))
 
 const { TopBarHeading } = await import('./TopBarHeading')
-const { pageTitle, pageTitleAvatar } = await import('@/store/pageTitle')
+const { pageTitle, pageTitleAvatar, pageTitleGlyph } = await import('@/store/pageTitle')
+const { HA_SPACE_SYMBOL } = await import('@/features/spaces/spaceGlyph')
 
 describe('TopBarHeading', () => {
   beforeEach(() => { openPersonSpy.mockReset() })
@@ -15,6 +16,7 @@ describe('TopBarHeading', () => {
     cleanup()
     pageTitle.value = ''
     pageTitleAvatar.value = null
+    pageTitleGlyph.value = null
   })
 
   it('renders nothing without a title', () => {
@@ -55,5 +57,39 @@ describe('TopBarHeading', () => {
     const { container } = render(<TopBarHeading />)
     expect(container.querySelector('.sh-avatar')).not.toBeNull()
     expect(container.querySelector('button')).toBeNull()
+  })
+
+  it("a space's picture shows before its name, not its emoji", () => {
+    pageTitle.value = 'Book club'
+    pageTitleGlyph.value = { iconUrl: '/api/media/ic.webp?sig=x', emoji: '📚', name: 'Book club' }
+    const { container, getByTestId } = render(<TopBarHeading />)
+    const tile = getByTestId('topbar-glyph')
+    expect(tile.querySelector('img')?.getAttribute('src')).toBe('/api/media/ic.webp?sig=x')
+    expect(tile.getAttribute('aria-hidden')).toBe('true')
+    expect(container.textContent).not.toContain('📚')
+    expect(container.querySelector('h1')?.textContent).toBe('Book club')
+  })
+
+  it('the Home Assistant symbol shows the logo, never the text house', () => {
+    pageTitle.value = 'Smart home'
+    pageTitleGlyph.value = { iconUrl: null, emoji: HA_SPACE_SYMBOL, name: 'Smart home' }
+    const { container, getByTestId } = render(<TopBarHeading />)
+    expect(getByTestId('topbar-glyph').querySelector('svg.sh-ha-logo')).not.toBeNull()
+    expect(container.textContent).not.toContain('\uFE0E')
+    expect(container.textContent).not.toContain('\u{1F3E0}')
+  })
+
+  it('an emoji-only space shows its emoji in the tile', () => {
+    pageTitle.value = 'Garden'
+    pageTitleGlyph.value = { iconUrl: null, emoji: '🌻', name: 'Garden' }
+    const { getByTestId, container } = render(<TopBarHeading />)
+    expect(getByTestId('topbar-glyph').textContent).toBe('🌻')
+    expect(container.querySelector('h1')?.textContent).toBe('Garden')
+  })
+
+  it('a page without a glyph shows no tile', () => {
+    pageTitle.value = 'Calendar'
+    const { container } = render(<TopBarHeading />)
+    expect(container.querySelector('.sh-topbar-glyph')).toBeNull()
   })
 })

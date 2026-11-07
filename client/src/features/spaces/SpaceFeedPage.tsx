@@ -7,7 +7,7 @@ import { ws } from '@/ws'
 import { currentUser } from '@/store/auth'
 import { loadHouseholdUsers } from '@/store/householdUsers'
 import { loadSpaceMembers, setSpaceHereAllowed } from '@/store/spaceMembers'
-import { useTitle } from '@/store/pageTitle'
+import { useTitle, useTitleGlyph } from '@/store/pageTitle'
 import { t } from '@/i18n/i18n'
 import type { FeedPost } from '@/types'
 import { LoadErrorState } from '@/components/LoadErrorState'
@@ -74,6 +74,7 @@ import { isMuteActive } from '@/utils/mute'
 import { resolveAvatar } from '@/utils/avatar'
 import { emptyFeedBodyKey } from './spaceFeedEmpty'
 import { personLabel } from '@/utils/names'
+import { titleEmoji } from './spaceGlyph'
 
 interface SpaceDetail {
   id: string
@@ -267,12 +268,17 @@ export default function SpaceFeedPage() {
   const detail = spaceDetail.value
   // The Gallery says whose it is: "Gallery · <space>" (its page passes
   // the same title, so neither replaces the other).
+  // The top bar draws the space's symbol as a tile before the name (its
+  // picture first); the browser tab is plain text — the name, after a
+  // real emoji only (never the Home Assistant symbol).
   const topTitle = detail
-    ? (section === 'gallery'
-      ? `${t('nav.gallery')} · ${detail.name}`
-      : (detail.emoji ? `${detail.emoji} ${detail.name}` : detail.name))
+    ? (section === 'gallery' ? `${t('nav.gallery')} · ${detail.name}` : detail.name)
     : t('spaces.space_title')
-  useTitle(topTitle)
+  const tabEmoji = detail && section !== 'gallery' ? titleEmoji(detail.emoji) : null
+  useTitle(topTitle, tabEmoji ? `${tabEmoji} ${topTitle}` : topTitle)
+  useTitleGlyph(detail
+    ? { iconUrl: detail.icon_url ?? null, emoji: detail.emoji ?? null, name: detail.name }
+    : null)
 
   useEffect(() => {
     loading.value = true

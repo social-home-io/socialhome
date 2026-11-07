@@ -67,6 +67,20 @@ async function renderPage() {
   return render(<SpacePublicDetailPage />)
 }
 
+describe('SpacePublicDetailPage — the title bar', () => {
+  it("draws the space's symbol before its name, and clears it on leaving", async () => {
+    const { pageTitleGlyph } = await import('@/store/pageTitle')
+    const { HA_SPACE_SYMBOL } = await import('./spaceGlyph')
+    cacheDirectoryEntries([entry({ name: 'Smart home', emoji: HA_SPACE_SYMBOL })])
+    const { unmount, getByText } = await renderPage()
+    await waitFor(() => getByText('Join space'))
+    expect(pageTitleGlyph.value).toEqual({ iconUrl: null, emoji: HA_SPACE_SYMBOL, name: 'Smart home' })
+    unmount()
+    // Preact runs the effect cleanups after the unmount commit.
+    await waitFor(() => expect(pageTitleGlyph.value).toBeNull())
+  })
+})
+
 describe('SpacePublicDetailPage onPrimary', () => {
   it('local OPEN space joins immediately without a modal', async () => {
     cacheDirectoryEntries([

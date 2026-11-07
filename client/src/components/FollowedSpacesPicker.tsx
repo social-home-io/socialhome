@@ -11,6 +11,7 @@ import { useEffect, useState } from 'preact/hooks'
 import { api } from '@/api'
 import { Button } from './Button'
 import { Modal } from './Modal'
+import { SpaceGlyph } from '@/features/spaces/SpaceGlyph'
 import { showToast } from './Toast'
 import { getPreferences, setPreference } from '@/utils/preferences'
 import { isOne, t } from '@/i18n/i18n'
@@ -19,6 +20,8 @@ interface SpaceRow {
   id: string
   name: string
   emoji: string | null
+  /** The uploaded picture (signed), ``null`` without one. */
+  icon_url?: string | null
 }
 
 interface Props {
@@ -128,7 +131,7 @@ export function FollowedSpacesPicker({ open, onClose, onChanged }: Props) {
                          checked={selected.has(s.id)}
                          onChange={() => toggle(s.id)} />
                   <span class="sh-followed-picker-emoji" aria-hidden="true">
-                    {s.emoji || '🪐'}
+                    <SpaceGlyph iconUrl={s.icon_url} emoji={s.emoji || '🪐'} name={s.name} />
                   </span>
                   <span class="sh-followed-picker-name">{s.name}</span>
                 </label>

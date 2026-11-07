@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { render, fireEvent } from '@testing-library/preact'
 import { signal } from '@preact/signals'
 import { EmojiField } from './EmojiField'
+import { HA_SPACE_SYMBOL } from '@/features/spaces/spaceGlyph'
 
 describe('EmojiField', () => {
   it('shows an empty dashed tile with a + when no icon is set', () => {
@@ -53,6 +54,62 @@ describe('EmojiField', () => {
     expect(container.querySelector('.sh-reaction-picker')).toBeTruthy()
     fireEvent.click(tile)
     expect(container.querySelector('.sh-reaction-picker')).toBeNull()
+  })
+})
+
+describe('EmojiField — the Home Assistant logo as a choice', () => {
+  const haChip = (c: Element) => c.querySelector('.sh-emoji-field-symbol') as HTMLButtonElement | null
+
+  it('a space field offers it above the emoji grid; other fields do not', () => {
+    const value = signal('')
+    const { container } = render(<EmojiField value={value} openKey="ha1" offerHaSymbol />)
+    expect(haChip(container)).toBeNull() // closed picker: nothing extra
+    fireEvent.click(container.querySelector('.sh-emoji-field-tile')!)
+    const chip = haChip(container)!
+    expect(chip.textContent).toContain('Home Assistant')
+    expect(chip.querySelector('svg.sh-ha-logo')).toBeTruthy()
+    expect(chip.getAttribute('aria-pressed')).toBe('false')
+    expect(container.querySelector('.sh-reaction-picker')).toBeTruthy()
+
+    const plain = render(<EmojiField value={signal('')} openKey="ha2" />)
+    fireEvent.click(plain.container.querySelector('.sh-emoji-field-tile')!)
+    expect(haChip(plain.container)).toBeNull()
+  })
+
+  it('choosing it stores the symbol, closes the picker and shows the logo', () => {
+    const value = signal('🥕')
+    const { container } = render(<EmojiField value={value} openKey="ha3" offerHaSymbol />)
+    fireEvent.click(container.querySelector('.sh-emoji-field-tile')!)
+    fireEvent.click(haChip(container)!)
+    expect(value.value).toBe(HA_SPACE_SYMBOL)
+    expect(container.querySelector('.sh-reaction-picker')).toBeNull()
+    const tile = container.querySelector('.sh-emoji-field-tile')!
+    expect(tile.querySelector('svg.sh-ha-logo')).toBeTruthy()
+    expect(tile.textContent).not.toContain('🏠')
+    expect(tile.getAttribute('aria-label')).toContain('Home Assistant')
+  })
+
+  it('a real press (mousedown, then click) picks it — the picker does not close first', async () => {
+    const value = signal('')
+    const { container } = render(<EmojiField value={value} openKey="ha5" offerHaSymbol />)
+    fireEvent.click(container.querySelector('.sh-emoji-field-tile')!)
+    const chip = haChip(container)!
+    // Inside the picker panel, so its outside-press guard leaves it open.
+    expect(chip.closest('.sh-reaction-picker')).toBeTruthy()
+    fireEvent.mouseDown(chip)
+    await new Promise(r => setTimeout(r, 0))
+    expect(haChip(container)).toBe(chip)
+    fireEvent.click(chip)
+    expect(value.value).toBe(HA_SPACE_SYMBOL)
+  })
+
+  it('shows as chosen when re-opened, and Remove clears it', () => {
+    const value = signal(HA_SPACE_SYMBOL)
+    const { container } = render(<EmojiField value={value} openKey="ha4" offerHaSymbol />)
+    fireEvent.click(container.querySelector('.sh-emoji-field-tile')!)
+    expect(haChip(container)!.getAttribute('aria-pressed')).toBe('true')
+    fireEvent.click(container.querySelector('.sh-emoji-field-clear')!)
+    expect(value.value).toBe('')
   })
 })
 

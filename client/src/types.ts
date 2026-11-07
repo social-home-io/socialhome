@@ -1056,6 +1056,10 @@ export interface DirectoryEntry {
   name: string
   description: string | null
   emoji: string | null
+  /** The space's uploaded picture (signed). Only a space of this
+   *  household carries it (the About page builds the entry from
+   *  ``GET /api/spaces/{id}``); a directory row has none. */
+  icon_url?: string | null
   member_count: number
   /** Local/household spaces use the same shape — scope tells us which
    *  browser tab / chip to surface the card in. ``'private'`` never comes

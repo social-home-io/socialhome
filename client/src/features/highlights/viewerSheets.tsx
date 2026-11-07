@@ -26,6 +26,7 @@ import { householdUsers, namedPersonLabel, namedPersonPicture, type NamedPerson 
 import { loadSpaces, spaces } from '@/store/spaces'
 import { t } from '@/i18n/i18n'
 import type { Highlight, Space, SpaceMemberProfile } from '@/types'
+import { SpaceGlyph } from '@/features/spaces/SpaceGlyph'
 import { VIEWER_ICON } from './icons'
 import { widensAudience, type ReachMember, type ShareTarget } from './shareReach'
 
@@ -215,7 +216,13 @@ export function ShareSheet({ highlight, me, onClose }: {
         {list.map(s => (
           <SheetRow
             key={s.id}
-            icon={s.emoji ? <span class="sh-hlv-row__emoji" aria-hidden="true">{s.emoji}</span> : VIEWER_ICON.space}
+            icon={s.icon_url || s.emoji
+              ? (
+                <span class="sh-hlv-row__emoji" aria-hidden="true">
+                  <SpaceGlyph iconUrl={s.icon_url} emoji={s.emoji} name={s.name} />
+                </span>
+              )
+              : VIEWER_ICON.space}
             title={<bdi dir="auto">{s.name}</bdi>}
             disabled={busy !== null}
             onClick={() => void share(s.id, 'space', s)}
