@@ -2,6 +2,7 @@
 
 import pytest
 
+from socialhome.domain.space_media_ref import space_page_media_name
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 
 pytestmark = pytest.mark.asyncio
@@ -154,7 +155,9 @@ async def test_collects_the_remaining_media_sources(db):
         "attach.pdf",
         "draft.webp",
     }
-    assert await repo.referenced_basenames() == expected
+    referenced = await repo.referenced_basenames()
+    # v_82: a space page's files also count under their page-scoped names.
+    assert {n for n in referenced if not n.startswith("sp-")} == expected
     for name in expected:
         assert await repo.is_referenced(name), name
 
@@ -742,8 +745,54 @@ async def test_a_pages_body_pictures_are_never_swept(db):
     assert not await repo.is_referenced("notours.webp")
 
 
+async def _host_here(db, space_id: str = "sp1") -> None:
+    """This household hosts *space_id* (its ``instance_identity``)."""
+    await db.enqueue(
+        "INSERT INTO instance_identity(instance_id, identity_private_key,"
+        " identity_public_key, routing_secret) VALUES('self', 'k', 'p', ?)",
+        ("aa" * 32,),
+    )
+    await db.enqueue(
+        "UPDATE spaces SET owner_instance_id='self' WHERE id=?", (space_id,)
+    )
+
+
+async def test_a_page_grants_a_shared_file_only_on_the_spaces_host(db):
+    """Review finding 6 (v_82): a space page's names are its host's choice.
+    On a member household they never grant a seat a shared file — the
+    page's files live under page-scoped ``sp-`` names there."""
+    await _page_rows(db)
+    await db.enqueue(
+        "INSERT INTO instance_identity(instance_id, identity_private_key,"
+        " identity_public_key, routing_secret) VALUES('me', 'k', 'p', ?)",
+        ("aa" * 32,),
+    )
+    await db.enqueue(
+        "INSERT INTO space_members(space_id, user_id, role)"
+        " VALUES('sp1', 'u-seat', 'member')"
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert not await repo.may_reference("body.webp", "u-seat")
+    assert not await repo.may_reference("older.webp", "u-seat")
+
+
+async def test_a_member_keeps_a_pages_files_under_page_scoped_names(db):
+    """The sweep keeps every page-scoped file a page, a version in its
+    history or an open side shows — and nothing else under ``sp-``."""
+    await _page_rows(db)
+    repo = SqliteMediaReferenceRepo(db)
+    names = await repo.referenced_basenames()
+    for name in ("body.webp", "body2.webp", "older.webp", "side.webp"):
+        sp = space_page_media_name("sp1", name)
+        assert sp in names, name
+        assert await repo.is_referenced(sp), name
+    assert space_page_media_name("sp1", "house.webp") not in names
+    assert not await repo.is_referenced(space_page_media_name("sp2", "body.webp"))
+
+
 async def test_a_space_pages_picture_is_its_seats_and_confined_to_it(db):
     await _page_rows(db)
+    await _host_here(db)
     await db.enqueue(
         "INSERT INTO space_members(space_id, user_id, role)"
         " VALUES('sp1', 'u-seat', 'member')"

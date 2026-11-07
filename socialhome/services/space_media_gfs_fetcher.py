@@ -64,10 +64,12 @@ from cryptography.exceptions import InvalidTag
 from ..domain.federation import InstanceSource
 from ..domain.gfs_space_media import SCOPE_CHANNEL, SCOPE_SPACE, space_media_address
 from ..domain.space_media_ref import (
+    MAX_PAGE_DESCRIPTOR_ENTRIES,
     SpaceMediaLocalization,
     SpaceMediaRef,
     page_media_urls,
     parse_media_refs,
+    space_page_media_name,
 )
 from ..space_media_seal import (
     UnsupportedSpaceMediaSuite,
@@ -78,6 +80,7 @@ from .inbound_media_store import (
     gfs_space_media_name,
     is_gfs_space_media_name,
     is_reserved_media_name,
+    is_space_page_media_name,
     media_file_path,
     write_once,
 )
@@ -87,7 +90,6 @@ if TYPE_CHECKING:
     from ..domain.federation import GfsConnection
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
-    from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
     from ..repositories.page_repo import AbstractPageRepo
     from ..repositories.space_media_ref_repo import AbstractSpaceMediaRefRepo
     from ..repositories.space_repo import AbstractSpaceRepo
@@ -155,7 +157,6 @@ class SpaceMediaGfsFetcher:
         "_gfs_repo",
         "_inflight",
         "_misses",
-        "_page_media_refs",
         "_pages",
         "_prefetch_by_space",
         "_prefetch_pending",
@@ -198,18 +199,14 @@ class SpaceMediaGfsFetcher:
         self._misses: OrderedDict[str, float] = OrderedDict()
         #: space → prefetches in a row that found their blob nowhere.
         self._space_misses: OrderedDict[str, int] = OrderedDict()
-        #: v_82 — a page file kept under the name its page shows.
+        #: v_82 — a page's files, kept under page-scoped ``sp-`` names.
         self._pages: AbstractPageRepo | None = None
-        self._page_media_refs: AbstractMediaReferenceRepo | None = None
 
-    def attach_pages(
-        self, page_repo: AbstractPageRepo, *, media_refs: AbstractMediaReferenceRepo
-    ) -> None:
-        """Wire the space pages (v_82): a page's file keeps the name the
-        page shows, and is fetched only while that page shows it and no row
-        outside its space names it (the host chooses a page's names)."""
+    def attach_pages(self, page_repo: AbstractPageRepo) -> None:
+        """Wire the space pages (v_82): a page's file is kept under its
+        page-scoped name (``space_page_media_name``) and fetched only while
+        that page (or an open side of it) shows it."""
         self._pages = page_repo
-        self._page_media_refs = media_refs
 
     # ── Descriptors ──────────────────────────────────────────────────────
 
@@ -296,12 +293,13 @@ class SpaceMediaGfsFetcher:
         item_id: str,
         origin: str,
     ) -> SpaceMediaLocalization:
-        """v_82 — the rows for a space page's files, each kept under the
-        name the page shows (``local_name`` = the file name; the page is
-        never rewritten). Only for the host's version of page *item_id*:
-        the CALLER authenticated *origin* as the space's host. A reserved
-        name is never kept; a row is bound to the page (write-once, like
-        any row). Never raises."""
+        """v_82 — the rows for a space page's files (its version's and its
+        open sides'), each kept under the page-scoped name
+        ``space_page_media_name(space, file)`` — the page itself is never
+        rewritten, and its names never address the shared store here. Only
+        for the host's version of page *item_id*: the CALLER authenticated
+        *origin* as the space's host. A reserved name is never kept; a row
+        is bound to the page (write-once, like any row). Never raises."""
         if not item_id or not origin or self._pages is None:
             return SpaceMediaLocalization()
         allowed = {
@@ -311,13 +309,14 @@ class SpaceMediaGfsFetcher:
             return SpaceMediaLocalization()
         try:
             refs = tuple(
-                replace(ref, local_name=ref.filename)
+                replace(ref, local_name=space_page_media_name(space_id, ref.filename))
                 for ref in parse_media_refs(
                     raw_refs,
                     space_id=space_id,
                     allowed=allowed,
                     item_id=item_id,
                     origin=origin,
+                    max_entries=MAX_PAGE_DESCRIPTOR_ENTRIES,
                 )
             )
         except Exception:
@@ -331,23 +330,21 @@ class SpaceMediaGfsFetcher:
         return SpaceMediaLocalization(refs=refs)
 
     async def _shown_by_its_page(self, ref: SpaceMediaRef) -> bool:
-        """Whether *ref* (a row kept under its own file name) belongs to a
-        live page of its space that shows that file — and no row outside
-        that space names it here (another space's file, a household one)."""
-        if (
-            self._pages is None
-            or self._page_media_refs is None
-            or ref.local_name != ref.filename
+        """Whether *ref* (a page-scoped row) belongs to a live page of its
+        space that — in its version or an open side — shows that file."""
+        if self._pages is None or ref.local_name != space_page_media_name(
+            ref.space_id, ref.filename
         ):
             return False
         page = await self._pages.get_space_page(ref.item_id, space_id=ref.space_id)
         if page is None:
             return False
-        if ref.filename not in media_names(
-            page_media_urls(page.cover_image_url, page.content)
+        urls = page_media_urls(page.cover_image_url, page.content)
+        for side in await self._pages.list_conflict_sides(
+            ref.item_id, space_id=ref.space_id
         ):
-            return False
-        return await self._page_media_refs.confined_to_space(ref.filename, ref.space_id)
+            urls.extend(page_media_urls(side.cover_image_url, side.content))
+        return ref.filename in media_names(urls)
 
     async def has_item_refs(self, space_id: str, item_id: str) -> bool:
         """Whether item *item_id* of *space_id* has any ``space_media_refs``
@@ -391,14 +388,12 @@ class SpaceMediaGfsFetcher:
             return False
         if await aiofiles.os.path.isfile(path):
             return True
-        if not is_gfs_space_media_name(filename) and (
-            self._pages is None
-            or is_reserved_media_name(filename)
-            or await self._refs.get(filename) is None
+        if not (
+            is_gfs_space_media_name(filename)
+            or (self._pages is not None and is_space_page_media_name(filename))
         ):
             # A file another household pushes (or a local one) that is not
-            # here yet: routine for a viewer, never a GFS fetch — unless a
-            # page's row names it (v_82, checked in :meth:`_fetch`).
+            # here yet: routine for a viewer, never a GFS fetch.
             return False
         if self._misses.get(filename, 0.0) > _monotonic():
             return False  # no GFS held it a moment ago: don't ask them all again
@@ -500,8 +495,8 @@ class SpaceMediaGfsFetcher:
         path = media_file_path(self._dir, filename)
         if ref is None or path is None:
             return _REFUSED
-        if not is_gfs_space_media_name(filename) and (
-            is_reserved_media_name(filename) or not await self._shown_by_its_page(ref)
+        if not is_gfs_space_media_name(filename) and not (
+            is_space_page_media_name(filename) and await self._shown_by_its_page(ref)
         ):
             log.warning(
                 "space media %s: neither a GFS space media name nor a file its "

@@ -1207,6 +1207,34 @@ async def test_the_host_names_a_proposals_new_files_after_its_household(bus, rep
     assert proposal.answers == as_sent.hash
 
 
+async def test_the_host_refuses_a_proposal_over_the_page_file_cap(bus, repos):
+    """Every household ships and describes a whole version: a proposal
+    showing more than MAX_PAGE_FILES files (only a pre-v_82 editor sends
+    one) is refused, never sequenced."""
+    from socialhome.domain.space_media_ref import MAX_PAGE_FILES
+
+    engine = _FakeConflicts("host", host="self")
+    h = _page_handlers(bus, repos, engine)
+    _held(repos)
+    many = " ".join(f"![p](api/media/p{i}.webp)" for i in range(MAX_PAGE_FILES + 1))
+    await h._on_page_saved(
+        _event(
+            FederationEventType.SPACE_PAGE_UPDATED,
+            {
+                "id": "p-1",
+                "title": "T",
+                "content": many,
+                "actor_user_id": "u-ed",
+                "base_seq": 2,
+            },
+            space_id="sp-1",
+        )
+    )
+    assert engine.sequenced == []
+    (refusal,) = engine.refused
+    assert refusal["reason"] == "access"
+
+
 async def test_a_proposal_without_new_files_is_sequenced_as_sent(bus, repos):
     engine = _FakeConflicts("host", host="self")
     h = _page_handlers(bus, repos, engine)

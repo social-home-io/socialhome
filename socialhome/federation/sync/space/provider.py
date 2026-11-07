@@ -1170,14 +1170,26 @@ class SpaceSyncService:
             )
             return
         for page in pages:
+            # The version, every version in its history (a revert brings
+            # one back) and its open sides — each bounded by the page cap.
+            urls = page_media_urls(page.cover_image_url, page.content)
+            try:
+                for v in await self._page_repo.list_versions(
+                    page.id, space_id=space_id
+                ):
+                    urls.extend(page_media_urls(v.cover_image_url, v.content))
+                for side in await self._page_repo.list_conflict_sides(
+                    page.id, space_id=space_id
+                ):
+                    urls.extend(page_media_urls(side.cover_image_url, side.content))
+            except sqlite3.Error:
+                log.exception("sync-catchup-media: history of page %s failed", page.id)
             await self._enqueue_media(
                 space_id,
                 target_instance_id,
                 page.id,
                 await space_own_files(
-                    self._page_media_refs,
-                    space_id,
-                    page_media_urls(page.cover_image_url, page.content),
+                    self._page_media_refs, space_id, list(dict.fromkeys(urls))
                 ),
             )
 

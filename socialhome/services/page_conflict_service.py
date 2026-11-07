@@ -1337,11 +1337,14 @@ class PageConflictService(BusPublisherMixin):
         ``sides`` are the ones committed with it."""
         extras = canonical_extras(page, sides, sequenced)
         # The files the replaced version showed went out with it already.
-        shown_before = (
-            tuple(page_media_urls(previous.cover_image_url, previous.content))
-            if previous is not None
-            else ()
-        )
+        # Every version in its history went out already (toggling a file
+        # off and on never re-ships it).
+        before: list[str] = []
+        if previous is not None:
+            before.extend(page_media_urls(previous.cover_image_url, previous.content))
+            for v in await self._pages.list_versions(page.id, space_id=space_id):
+                before.extend(page_media_urls(v.cover_image_url, v.content))
+        shown_before = tuple(dict.fromkeys(before))
         if created:
             await self._emit(
                 PageCreated(

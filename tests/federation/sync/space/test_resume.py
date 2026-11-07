@@ -42,6 +42,9 @@ class _FakeFederation:
     async def peer_supports(self, instance_id, *, min_version):
         return self.versions.get(instance_id, 48) >= min_version
 
+    async def space_member_supports(self, instance_id, *, min_version):
+        return self.versions.get(instance_id, 48) >= min_version
+
     async def send_event(self, *, to_instance_id, event_type, payload, space_id=None):
         self.sent.append(
             {

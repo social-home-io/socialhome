@@ -11,6 +11,7 @@ import pytest
 
 from socialhome.domain.events import PageCreated, PageDeleted, PageUpdated
 from socialhome.domain.federation import FederationEventType
+from socialhome.domain.space_media_ref import MAX_PAGE_DESCRIPTOR_ENTRIES
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.services.moderation_release import release_scope
 from socialhome.services.page_federation_outbound import (
@@ -388,7 +389,11 @@ async def test_a_host_edit_ships_only_the_files_it_adds(media_env):
         )
     )
     assert [c["media_urls"] for c in media.calls] == [["api/media/n.webp"]]
-    assert [p[1] for p in gfs.plans] == [["api/media/n.webp"]]
+    # A link-joined member is described the whole version (a revert can
+    # bring back a file the outbox never re-ships).
+    assert [p[1] for p in gfs.plans] == [
+        ["api/media/a.webp", "/api/media/b.webp", "api/media/n.webp"]
+    ]
     media.calls.clear()
     await bus.publish(
         PageUpdated(
@@ -475,9 +480,33 @@ async def test_a_file_named_outside_the_space_never_ships(media_env, monkeypatch
     assert [p[1] for p in gfs.plans] == [["/api/media/b.webp"]]
 
 
-async def test_a_live_descriptor_carries_at_most_its_entry_cap(media_env):
+async def test_an_open_sides_files_ship_and_are_described(media_env):
+    """Review finding 7: a conflict side is a member's version the page
+    shows — its files reach every member household and link-joined
+    members' descriptor alike (one descriptor: the version and its sides)."""
     _bus, _fed, media, gfs = media_env
-    body = " ".join(f"![p](api/media/p{i}.webp)" for i in range(20))
+    side = {"content": "![s](api/media/s.webp)", "cover": "api/media/sc.webp"}
+    await _bus.publish(
+        PageUpdated(
+            page_id="p1",
+            space_id="sp-A",
+            title="N",
+            content="![a](api/media/a.webp)",
+            canonical={**_CANON, "conflict": [side]},
+            shown_before=("api/media/a.webp",),
+        )
+    )
+    assert media.calls[0]["media_urls"] == ["api/media/sc.webp", "api/media/s.webp"]
+    assert gfs.plans[0][1] == [
+        "api/media/a.webp",
+        "api/media/sc.webp",
+        "api/media/s.webp",
+    ]
+
+
+async def test_a_live_descriptor_carries_at_most_a_version_and_its_sides(media_env):
+    _bus, _fed, _media, gfs = media_env
+    body = " ".join(f"![p](api/media/p{i}.webp)" for i in range(80))
     await _bus.publish(
         PageCreated(
             page_id="p1",
@@ -487,5 +516,4 @@ async def test_a_live_descriptor_carries_at_most_its_entry_cap(media_env):
             canonical={**_CANON, "seq": 1},
         )
     )
-    assert len(media.calls[0]["media_urls"]) == 20
-    assert len(gfs.plans[0][1]) == 16
+    assert len(gfs.plans[0][1]) == MAX_PAGE_DESCRIPTOR_ENTRIES

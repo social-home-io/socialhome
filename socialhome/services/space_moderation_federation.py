@@ -59,6 +59,7 @@ never stored as pending.
 from __future__ import annotations
 
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -164,6 +165,7 @@ class SpaceModerationFederation:
         "_moderation",
         "_own_pk",
         "_own_seed",
+        "_page_media",
         "_seats",
         "_spaces",
         "_users",
@@ -186,6 +188,8 @@ class SpaceModerationFederation:
         #: The files a held submission proposes take this household's
         #: names, bound to the submitting household (which ships them).
         self._media_names = SpaceMediaNamer()
+        #: v_82 — every file a page shows here (version, history, sides).
+        self._page_media: Callable[[str, str], Awaitable[list[str]]] | None = None
         self._moderation: SpaceModerationService | None = None
         #: Our household identity + local users — to author-sign a queued
         #: public post's inner for the GFS followers (see
@@ -205,6 +209,13 @@ class SpaceModerationFederation:
         self._own_pk = own_instance_pk
         self._own_seed = own_identity_seed
         self._users = user_repo
+
+    def attach_page_media(
+        self, held: Callable[[str, str], Awaitable[list[str]]]
+    ) -> None:
+        """Wire ``held(space_id, page_id)`` — every file a page shows here,
+        its history and open sides included (v_82)."""
+        self._page_media = held
 
     def attach_media_names(self, namer: SpaceMediaNamer) -> None:
         """Wire the shared namer (it knows this household's instance id)."""
@@ -582,11 +593,20 @@ class SpaceModerationFederation:
         # the target already shows here (an edited page's pictures, which
         # its patch repeats) keeps the name it has.
         held = load_json(snapshot, {}) if snapshot else {}
+        held_urls = feature_media_urls(feature, held) if isinstance(held, dict) else []
+        if (
+            feature == "pages"
+            and action is ContentAction.EDIT
+            and self._page_media is not None
+        ):
+            # A reviewed resolution or revert repeats a side's or a history
+            # version's files: they keep the names the page shows.
+            held_urls = [*held_urls, *await self._page_media(space_id, target_id)]
         names = self._media_names.localize(
             space_id,
             str(event.from_instance or ""),
             feature_media_urls(feature, clean),
-            held=feature_media_urls(feature, held) if isinstance(held, dict) else (),
+            held=held_urls,
         )
         clean = renamed_media(feature, clean, names.url)
         if relay is not None:

@@ -38,6 +38,17 @@ async def test_a_refusal_is_the_malformed_reference_answer():
     assert err.value.params["field"] == "cover_url"
 
 
+async def test_a_page_scoped_copy_is_never_named_by_a_write():
+    """v_82: a space page's page-scoped copy (``sp-``) belongs to that page
+    alone — no write may name it, whatever the reference rows say."""
+    sp = "sp-" + "a" * 40 + ".webp"
+    refs = _Refs({(sp, "u1")})
+    guard = MediaRefGuard(refs)  # type: ignore[arg-type]
+    with pytest.raises(InvalidMediaRefError):
+        await guard.require_openable([f"api/media/{sp}"], user_id="u1")
+    assert refs.asked == []
+
+
 class _Svc(MediaRefGuardedMixin):
     __slots__ = ("_media_guard",)
 

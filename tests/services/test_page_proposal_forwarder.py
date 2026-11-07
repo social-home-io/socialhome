@@ -62,7 +62,8 @@ class _Fed:
         self.result = DeliveryResult(instance_id=HOST, ok=True)
         self.version = 82
 
-    async def peer_supports(self, instance_id, *, min_version):
+    async def space_member_supports(self, instance_id, *, min_version):
+        # Paired or reached only over the mesh: the member's own claim.
         return instance_id == HOST and self.version >= min_version
 
     async def send_with_mesh_fallback(
@@ -349,3 +350,12 @@ async def test_a_failed_file_queue_never_holds_the_draft_back(env, media):
     env.conflicts.drafts["pg"] = _draft("![a](api/media/a.webp)", base_seq=0)
     assert await env.fwd.kick(SID, "pg")
     assert len(env.fed.sent) == 1
+
+
+async def test_a_resend_never_requeues_a_file_already_queued(env, media):
+    """Review finding 5: the 30-minute tick, a reconnect and a retry resend
+    the same draft — its files were queued for the host already."""
+    env.conflicts.drafts["pg"] = _draft("![a](api/media/a.webp)", base_seq=0)
+    assert await env.fwd.kick(SID, "pg")
+    assert await env.fwd.flush(resend=True)
+    assert [c["media_urls"] for c in media.calls] == [["api/media/a.webp"]]

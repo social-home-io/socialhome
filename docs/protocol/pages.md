@@ -317,70 +317,79 @@ fetches from user content").
 
 A page's files are its cover and every `api/media/<file>` picture its body
 shows (`page_media_urls`; never the same path inside another URL). Every
-household keeps the host's version byte for byte, so a page's files keep the
-names the **host's** page shows, on every household — they are never renamed
-on arrival the way a post's are.
+household keeps the host's version byte for byte, so a page keeps the names
+the **host** chose. Those names are the host's store; on a **member**
+household they never address the shared store.
 
-- **A member adds a file.** Its own upload `F` would collide with names
-  other households use, so the host renames it to the proposer household's
-  name, `sd-<sha256(space, proposer, F)>` (`SpaceMediaNamer`), before it
-  sequences the version: a page proposal in `_on_page_proposal`
-  (`_localized_proposal`), a reviewed create / edit / resolution at
-  admission (`SpaceModerationFederation._admit_submission`). The body
-  references are rewritten in place. A file the page already shows (its
-  current version, an open side, a version in its history) keeps its name;
-  a reserved name (`dm-` / `gm-` / `sg-`) is dropped. A renamed proposal's
-  answer names it **as sent** (`Proposal.answers`), so the proposer settles
-  its draft and then mirrors the host's version.
-- **The proposer ships `F`** to the host (`SPACE_MEDIA_BLOB`, correlated by
-  the page id, or by the queue item for a reviewed one —
-  `PageProposalForwarder._ship_files` / `_send_media`) — only the files
-  the draft adds to its base, only to a v_82 host. The host stores it under
-  the proposer's name, the one the page shows.
-- **The host ships each version's new files** (`shown_before` names what
-  the replaced version showed) to every other member household at v_82,
-  paired or mesh (`PageFederationOutbound._ship_files`, correlated by the
-  page), and describes them in `media_refs` to a link-joined v_82 member
-  (kept there under the page's names, not `sg-` names). A receiver lets a
-  name the page shows be filled only by the space's host (`_host_fills`) or
-  by the household the name is bound to; a proposer's file that overtakes
-  the version that will show it lands under the proposer's own name.
-- **Only the space's own files.** Because the host chooses a page's names,
-  a receiver lets the host fill (or a link-joined reader fetch) a page name
-  only while no row outside the space names that file there
-  (`confined_to_space`): `sd-` names are computable, so a host must not be
-  able to plant another space's (or a household) file through a page. The
-  host likewise ships only files no row outside the space names
-  (`space_own_files`) — a page stored before v_82 may name a household
-  file a member learned.
-- **Catch-up.** The host's §25.6 stream ships every live page's files to a
-  v_82 requester and the `pages` records carry the descriptor for a
-  link-joined one (sync line 82).
-- **References.** A page body's pictures (and its history's, and an open
-  side's) count as references, so the media sweep keeps them and the GFS
-  uploader may seal them for the space (`MediaReferenceRepo`). An edit's
-  media check covers only the files it adds (`SpacePageService.update`).
+- **Page-scoped on members.** A member household keeps a page's file `N` as
+  `space_page_media_name(space, N)` = `sp-<sha256("space-page", space, N)>`
+  (a reserved prefix, like `sd-` / `sg-`). The page body stays byte for byte
+  (hash and sequence intact). Reads map each name to its `sp-` copy
+  (`SpacePageService.media_view`, used by every space page route, conflict
+  sides included); writes map them back (`_as_stored`), so what a member
+  edits and proposes always carries the host's names. A member's own
+  draft keeps its fresh upload's own name until the host's version lands.
+  The media guard refuses any write naming an `sp-` file, and a page grants
+  a seat access to a shared file only on the space's host
+  (`MediaReferenceRepo`, review finding 6). So a host that names another
+  space's file `N` in a page only ever fills `sp-(S, N)` — never `N`.
+- **Naming, once, on the host.** A file a member adds takes that member
+  household's `sd-` name on the host (`SpaceMediaNamer`): a page proposal
+  (`_localized_proposal`) or a reviewed create / edit / resolution at
+  admission. A file the page already shows — its version, its history, its
+  open sides (`SpacePageService.held_media`) — keeps its name, so a revert
+  or a resolution never renames it. A reserved name (`dm-` / `gm-` / `sg-` /
+  `sp-`) is dropped. A renamed proposal's answer names it **as sent**
+  (`Proposal.answers`).
+- **Who ships.** The proposer ships its new files **to the host alone**
+  (`PageProposalForwarder._ship_files`, paired or mesh-only host, each file
+  queued once per draft). The host ships each version's new files — new
+  against the replaced version **and its whole history** (`shown_before`) —
+  plus its open sides' files, to every other v_82 member household
+  (`PageFederationOutbound._ship_files`, correlated by the page), and only
+  files that are the space's own (`space_own_files`). A member household
+  takes a page's file **from the host only** (a member's direct push is
+  refused, review finding 4) and keeps it page-scoped. A link-joined v_82
+  member gets one `media_refs` descriptor per version describing the
+  version and its sides (≤ `MAX_PAGE_DESCRIPTOR_ENTRIES` = 16 × 4), kept
+  page-scoped too.
+- **Catch-up.** The host's §25.6 stream ships every live page's files —
+  version, history, open sides — to a v_82 requester; the `pages` records
+  carry the descriptor for a link-joined one (sync line 82); a resume replay
+  ships the replayed pages' files.
+- **Cap.** A page version shows at most `MAX_PAGE_FILES` = **16** files (its
+  cover and distinct body pictures), for everyone: enforced on local create /
+  edit / resolution (422), on a queued item, and on the host for a proposal
+  (refused). 16 keeps one descriptor per version and bounds every fan-out
+  (16 × the WebP picture cap per version); a wiki page needing more
+  pictures is better split.
+- **References.** A page's body, its history and open sides count as media
+  references (the sweep keeps their `sp-` copies and the host's files); an
+  edit's media check covers only the files it adds.
 
-Cost per version: new files × other v_82 member households, each file once
-(≤ the picture cap), plus one GFS upload per file per GFS with link-joined
-readers. A page edit that adds no file ships nothing. A page with more than
-16 pictures describes its first 16 to a link-joined member (the descriptor
-cap); paired and mesh members get all of them.
+Cost per version: new files (≤ 16, plus its sides') × other v_82 member
+households, each file once; one GFS upload per file per GFS with
+link-joined readers (an already-held blob is a no-op). An edit that adds no
+file ships nothing; toggling a file off and on ships nothing. Worst
+realistic case: a 200-member space and an edit adding 2 pictures is 2 × 199
+outbox rows plus 2 GFS uploads. **Upgrade burst** (v_82, sync line 82):
+each member household crossing v_82 takes one full §25.6 stream, and the
+host queues every live page's files for it — at most pages × (16 + history
+and sides' files) pictures per household, once.
 
 Known limits (follow-ups):
 
+- **A link-joined proposer's files.** The space media outbox never sends
+  to a household reached only through the GFS relay, so a member seated
+  from an invite link cannot ship its page files to the host: its new
+  files show broken everywhere (its words land). Bounded alternative for a
+  follow-up: the proposer uploads them to its GFS media cache and the
+  proposal carries a descriptor the host fetches.
 - A member that keeps editing while a proposal that added a file is in
   flight bases its next draft on what it sent; the host never held that
   exact version (it renamed the file), so that next draft may land as a
-  conflict side instead of merging. A lost answer also can't be settled by
-  content (the renamed version never equals the draft): the next resend
-  settles it.
-- A *reviewed* conflict resolution or revert takes its held names from the
-  target's current body only, so a side's or history version's picture it
-  keeps is renamed and shows broken after approval (page proposals already
-  count sides and history as held).
-- The proposer re-queues its new files on every resend of the same draft
-  (write-once on the host makes it harmless, not free).
+  conflict side. A lost answer can't be settled by content either; the next
+  resend settles it.
 - The rename regex (`page_body_media_refs`) skips a path inside another URL
   or path (`./api/media/x`, `https://h/api/media/x`); the read-time signer
   still signs such links.

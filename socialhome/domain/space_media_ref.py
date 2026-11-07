@@ -23,6 +23,7 @@ Pure: no I/O.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from collections.abc import Callable, Collection, Iterable, Mapping
@@ -32,6 +33,7 @@ from typing import TYPE_CHECKING, Any
 from ..moment_public_media import MAX_BLOB_BYTES, is_blob_id
 from ..space_media_seal import UnsupportedSpaceMediaSuite, require_space_media_suite
 from .gfs_space_media import MEDIA_SCOPES, SUPPORTED_ADDR_SUITES
+from .media_constraints import SPACE_PAGE_MEDIA_PREFIX
 
 if TYPE_CHECKING:
     from .post import Post
@@ -52,6 +54,17 @@ MAX_DESCRIPTOR_ENTRIES: int = 16
 MEDIA_REF_RESOURCES: frozenset[str] = frozenset(
     {"posts", "calendar", "gallery", "pages"}
 )
+
+#: The most files one page version shows (its cover and its distinct body
+#: pictures, v_82): every household ships, describes and accepts at most
+#: this many, so one descriptor always carries a whole version.
+MAX_PAGE_FILES: int = 16
+
+#: Open conflict sides a page carries at most (``page_conflict_service``).
+MAX_PAGE_SIDES: int = 3
+
+#: A page version's descriptor: its own files and its open sides' files.
+MAX_PAGE_DESCRIPTOR_ENTRIES: int = MAX_PAGE_FILES * (1 + MAX_PAGE_SIDES)
 
 #: A local file a page's markdown body shows: ``api/media/<file>`` — an
 #: optional leading ``/`` and a ``?query`` belong to the match — never the
@@ -192,6 +205,26 @@ def page_media_urls(cover: object, content: object) -> list[str]:
     return urls
 
 
+def space_page_media_name(space_id: str, filename: str) -> str:
+    """Where a member household stores the file *filename* a page of space
+    *space_id* shows (v_82): ``sp-<sha256("space-page", space, filename)>``.
+    A page keeps its host's names byte for byte, and the host chooses
+    them, so they never address this household's shared store: another
+    space's file, a household file or a DM can never be filled — or shown
+    — through a page. Fixed length, keeps the extension."""
+    digest = hashlib.sha256(f"space-page\0{space_id}\0{filename}".encode()).hexdigest()
+    dot = filename.rfind(".")
+    ext = filename[dot:] if 0 < dot and len(filename) - dot <= 10 else ""
+    return f"{SPACE_PAGE_MEDIA_PREFIX}{digest[:40]}{ext}"
+
+
+def page_file_count(cover: object, content: object) -> int:
+    """How many distinct files a page version shows."""
+    return len(
+        {u.rsplit("/", 1)[-1].split("?", 1)[0] for u in page_media_urls(cover, content)}
+    )
+
+
 def distinct_media_files(urls: list[str], limit: int) -> list[str]:
     """The first *limit* files of *urls*, each once however it is spelled."""
     out: list[str] = []
@@ -233,7 +266,7 @@ def record_media_urls(resource: str, record: dict[str, Any]) -> list[str]:
         # first ones are described (a receiver refuses a longer one whole).
         return distinct_media_files(
             page_media_urls(record.get("cover_image_url"), record.get("content")),
-            MAX_DESCRIPTOR_ENTRIES,
+            MAX_PAGE_FILES,
         )
     return []
 
@@ -264,6 +297,7 @@ def parse_media_refs(
     allowed: Collection[str],
     item_id: str = "",
     origin: str = "",
+    max_entries: int = MAX_DESCRIPTOR_ENTRIES,
 ) -> list[SpaceMediaRef]:
     """The well-formed entries of a received descriptor.
 
@@ -276,7 +310,7 @@ def parse_media_refs(
     an unknown suite is refused with a WARNING (never a default); any other
     malformed entry is skipped.
     """
-    if not isinstance(raw, dict) or not allowed or len(raw) > MAX_DESCRIPTOR_ENTRIES:
+    if not isinstance(raw, dict) or not allowed or len(raw) > max_entries:
         return []
     out: list[SpaceMediaRef] = []
     for name, entry in raw.items():

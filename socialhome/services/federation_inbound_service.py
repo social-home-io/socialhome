@@ -105,6 +105,7 @@ from ..domain.space_media_ref import (
     SpaceMediaLocalization,
     page_media_urls,
     post_media_urls,
+    space_page_media_name,
 )
 from ..domain.user import (
     RemoteUser,
@@ -197,7 +198,6 @@ if TYPE_CHECKING:
     from ..repositories.federation_repo import AbstractFederationRepo
     from ..repositories.gallery_repo import AbstractGalleryRepo
     from ..repositories.highlight_repo import AbstractHighlightRepo
-    from ..repositories.media_reference_repo import AbstractMediaReferenceRepo
     from ..repositories.moment_repo import AbstractMomentRepo
     from ..repositories.page_repo import AbstractPageRepo
     from ..repositories.space_cover_repo import AbstractSpaceCoverRepo
@@ -485,7 +485,6 @@ class FederationInboundService(ProtectionGateMixin):
         "_highlight_repo",
         "_media_dir",
         "_media_names",
-        "_media_refs",
         "_mentions",
         "_moment_outbound",
         "_moment_reaction_router",
@@ -533,7 +532,6 @@ class FederationInboundService(ProtectionGateMixin):
         space_icon_repo: AbstractSpaceIconRepo | None = None,
         space_calendar_repo: AbstractSpaceCalendarRepo | None = None,
         page_repo: AbstractPageRepo | None = None,
-        media_reference_repo: AbstractMediaReferenceRepo | None = None,
     ) -> None:
         self._bus = bus
         self._conversation_repo = conversation_repo
@@ -621,9 +619,6 @@ class FederationInboundService(ProtectionGateMixin):
         #: SPACE_MEDIA_BLOB scope (v_82): a space page's cover and body
         #: pictures.
         self._page_repo = page_repo
-        #: v_82: a page name the host fills must be this space's file only
-        #: (no row of another space or of the household names it).
-        self._media_refs = media_reference_repo
         #: Group-conversation authority (v_37) — a deprovisioned member of a
         #: cross-household group leaves it instead of taking it down.
         self._groups: DmGroupService | None = None
@@ -2234,17 +2229,28 @@ class FederationInboundService(ProtectionGateMixin):
                 filename,
             )
             return
-        local = space_direct_media_name(space_id, event.from_instance, filename)
-        scope = await self._space_media_in_scope(
-            space_id=space_id,
-            correlation_id=correlation_id,
-            filename=local,
-            sent=filename,
-        )
-        if scope == _NOT_ITS_FILE and await self._host_fills(
+        page_local = await self._page_file_name(
             event, space_id=space_id, correlation_id=correlation_id, filename=filename
-        ):
-            local, scope = filename, None
+        )
+        if page_local == "":
+            return  # a page file from anyone but the host (logged)
+        if page_local is not None:
+            local, scope = page_local, None
+        else:
+            local = space_direct_media_name(space_id, event.from_instance, filename)
+            scope = await self._space_media_in_scope(
+                space_id=space_id,
+                correlation_id=correlation_id,
+                filename=local,
+                sent=filename,
+            )
+            if scope == _NOT_ITS_FILE and await self._host_fills(
+                event,
+                space_id=space_id,
+                correlation_id=correlation_id,
+                filename=filename,
+            ):
+                local, scope = filename, None
         if scope is not None:
             # A row of another space: an attempt. A row of this space that
             # shows another name: it reached us from another household (the
@@ -2315,16 +2321,6 @@ class FederationInboundService(ProtectionGateMixin):
         space = await self._space_repo.get(space_id)
         if space is None or space.owner_instance_id != event.from_instance:
             return False
-        if not await self._page_fill_confined(correlation_id, filename, space_id):
-            log.warning(
-                "SPACE_MEDIA_BLOB from %s: %s of page %s is named outside space "
-                "%s here — the host fills only the space's own files",
-                event.from_instance,
-                filename,
-                correlation_id,
-                space_id,
-            )
-            return False
         log.info(
             "SPACE_MEDIA_BLOB from %s: filling %s of %s (missing here) as the "
             "space's host",
@@ -2334,18 +2330,48 @@ class FederationInboundService(ProtectionGateMixin):
         )
         return True
 
-    async def _page_fill_confined(
-        self, correlation_id: str, filename: str, space_id: str
-    ) -> bool:
-        """For a page's file (v_82): a page keeps the names its host's
-        version shows, so the host chooses them — it must never fill a
-        name some row outside this space shows here (another space's
-        ``sd-`` file, a household file). Any other row: ``True``."""
-        if self._page_repo is None or await self._page_repo.get(correlation_id) is None:
-            return True
-        if self._media_refs is None:
-            return False
-        return await self._media_refs.confined_to_space(filename, space_id)
+    async def _page_file_name(
+        self,
+        event: FederationEvent,
+        *,
+        space_id: str,
+        correlation_id: str,
+        filename: str,
+    ) -> str | None:
+        """v_82 — where a MEMBER household keeps a file of one of its
+        space's pages: ``space_page_media_name(space, filename)``, a
+        page-scoped name. A page keeps its host's names byte for byte and
+        the host chooses them, so they never address the shared store here
+        (another space's file, a household one). Only the space's host
+        ships a page's files: anyone else's push is refused (``""``), so no
+        member can show other households bytes the moderators never saw.
+        ``None``: not a page of this space held here, or this household is
+        the host (sender-bound names, :meth:`_space_media_in_scope`)."""
+        if self._page_repo is None:
+            return None
+        page = await self._page_repo.get(correlation_id)
+        if page is None or page.space_id != space_id:
+            return None
+        space = await self._space_repo.get(space_id)
+        own = (
+            str(self._federation_service.own_instance_id or "")
+            if self._federation_service is not None
+            else ""
+        )
+        host = space.owner_instance_id if space is not None else ""
+        if not host or host == own:
+            return None
+        if event.from_instance != host:
+            log.warning(
+                "SPACE_MEDIA_BLOB from %s: %s of page %s in space %s — only the "
+                "space's host ships a page's files; refusing",
+                event.from_instance,
+                filename,
+                correlation_id,
+                space_id,
+            )
+            return ""
+        return space_page_media_name(space_id, filename)
 
     async def _space_media_in_scope(
         self,

@@ -251,18 +251,15 @@ sending household was sent it for. Both blob types share
     of the same kinds.
   - **Space pages are the exception (v_82).** Every household keeps the
     host's version of a page byte for byte (its hash is the version's
-    identity), so a page's files — its cover and every `api/media/`
-    picture its body shows — keep the names the **host's** page shows. The
-    renaming happens once, on the host: a file a member household adds (a
-    page proposal, a reviewed create / edit) takes that household's
-    `sd-` name there, the body rewritten to it, and the member ships the
-    bytes to the host. The host ships each version's new files to every
-    other v_82 member household (correlated by the page); a receiver lets a
-    name the page shows be filled only by the space's host
-    (`_host_fills`) or by the household the name is bound to, and takes a
-    sender-bound file the page does not show yet (a proposer's file can
-    overtake the version that shows it). See
-    [`pages.md`](./pages.md#files-v_82).
+    identity), so a page keeps the names the **host** chose. On a member
+    household those names never address the shared store: a page's file
+    `N` is kept page-scoped as `sp-<sha256("space-page", space, N)>`
+    (`space_page_media_name`, a reserved prefix) and the page routes map
+    each name to that copy on read. Only the space's host ships a page's
+    files to a member (correlated by the page); anyone else's push is
+    refused. On the host, a file a member adds takes that household's
+    `sd-` name (the body rewritten to it), and the member ships the bytes
+    to the host alone. See [`pages.md`](./pages.md#files-v_82).
 
   So a file name is never first come, first served. A member household
   that learned `F` from someone else's post and pushes bytes for it,
@@ -481,7 +478,7 @@ It rides:
 | Space post | `SPACE_POST_CREATED` (per link-joined v_80 member), the `public_relay` inner (followers, through a seed holder's relay) and the v_49 member-publish inner — the last two **under the author's own signature** (`media_refs_sig`, suite `media_refs_sig_suite: "ed25519"`, domain `space-post-media-refs:v1:`, bound to the post, space and author; `services/space_public_author.py`). It is a separate signature, like the link card's, so a follower on an older build still verifies the post and shows it without GFS pictures. The signature also binds `item_type` and `edited_at`, so an older descriptor can't ride a newer edit. A follower takes the descriptor ONLY when that signature verifies: an unsigned one, or one a re-publisher swapped, is dropped. A copy stripped of its descriptor that wins the race heals add-only: a later copy or edit of the same author's post carrying a signed descriptor renames the stored post's files, but only while the post has no rows. Anyone holding the content key (a member with the writer group key) can re-wrap the author's inner, and the AAD's household proves nothing to a key holder. The post stands without those pictures; an unknown suite is refused. A post edit that can overtake its create carries the signed descriptor too |
 | Calendar event | `SPACE_CALENDAR_EVENT_CREATED` / `_UPDATED`, only when the cover is new or changed |
 | Gallery item | `SPACE_GALLERY_ITEM_CREATED` (thumbnail + full file) |
-| Space page (v_82) | the host's `SPACE_PAGE_CREATED` / `_UPDATED`, only the files the version adds (cover, body pictures; ≤ 16), to a link-joined **v_82** member. Kept under the names the page shows (never an `sg-` name: the page is the host's version byte for byte), and fetched only while a page of that space, the row's item, still shows the file (`localize_as_shown`) |
+| Space page (v_82) | the host's `SPACE_PAGE_CREATED` / `_UPDATED`, to a link-joined **v_82** member: one descriptor for the whole version and its open sides (≤ `MAX_PAGE_DESCRIPTOR_ENTRIES`, 16 × 4). Kept page-scoped (`space_page_media_name`, never the name the page shows, the page itself unchanged), fetched only while that page or an open side shows the file (`localize_as_shown`) |
 | §25.6 records | `posts` / `calendar` / `gallery` records streamed to a link-joined v_80 requester ([`sync.md`](./sync.md), sync line 80); `pages` records from the host to a link-joined v_82 one (sync line 82) |
 
 Post edits carry no media, so no descriptor. Toward members the descriptor

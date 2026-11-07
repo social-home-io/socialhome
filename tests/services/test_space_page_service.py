@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from socialhome.db.database import AsyncDatabase
@@ -17,6 +19,7 @@ from socialhome.domain.space import (
     ModerationTargetGoneError,
     SpacePermissionError,
 )
+from socialhome.domain.space_media_ref import MAX_PAGE_FILES, space_page_media_name
 from socialhome.infrastructure.event_bus import EventBus
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.page_repo import SqlitePageRepo
@@ -26,6 +29,7 @@ from socialhome.services.media_ref_guard import MediaRefGuard
 from socialhome.services.page_conflict_service import (
     NoActiveConflictError,
     PageConflictService,
+    PageMode,
 )
 from socialhome.services.space_moderation_service import SpaceModerationService
 from socialhome.services.space_page_service import (
@@ -683,3 +687,140 @@ async def test_page_cover_must_be_local_media(env):
         "sp-a", page.id, actor_user_id="u-member", cover_image_url=None
     )
     assert cleared.cover_image_url is None
+
+
+# ── v_82: a page's files on a member household ──────────────────────────
+
+
+def _as_member(env, monkeypatch) -> None:
+    async def _mode(space_id):
+        return PageMode.MEMBER, "host-x"
+
+    monkeypatch.setattr(PageConflictService, "mode", lambda self, sid: _mode(sid))
+
+
+async def test_a_member_shows_a_pages_files_as_its_page_scoped_copies(
+    env, monkeypatch, tmp_path
+):
+    """A page keeps its host's names byte for byte; a member shows each as
+    its page-scoped copy — never the shared file of that name (which may be
+    another space's, or a household file). Our own draft's fresh upload,
+    with no copy yet, keeps its name. The host shows its names as they are."""
+    page = await env.svc.create(
+        "sp-a",
+        actor_user_id="u-owner",
+        title="T",
+        content="![a](api/media/a.webp) ![b](/api/media/b.webp?exp=1)",
+        cover_image_url="api/media/c.webp",
+    )
+    assert await env.svc.media_view(page) == page  # the host
+    _as_member(env, monkeypatch)
+    shown = await env.svc.media_view(page)
+    sp = {n: space_page_media_name("sp-a", n) for n in ("a.webp", "b.webp", "c.webp")}
+    assert shown.content == (
+        f"![a](api/media/{sp['a.webp']}) ![b](/api/media/{sp['b.webp']})"
+    )
+    assert shown.cover_image_url == f"api/media/{sp['c.webp']}"
+    # A draft: our own upload with no page-scoped copy keeps its name.
+    env.svc._media_dir = tmp_path
+    (tmp_path / sp["a.webp"]).write_bytes(b"x")
+    draft = replace(page, pending_base_seq=page.seq)
+    shown = await env.svc.media_view(draft)
+    assert shown.content.startswith(
+        f"![a](api/media/{sp['a.webp']}) ![b](/api/media/b.webp"
+    )
+
+
+async def test_what_a_member_edits_carries_the_hosts_names(env, monkeypatch):
+    """A member's editor sends back what it was shown: the page-scoped names
+    map back to the names the page stores, so the proposal carries the
+    host's names (and a file it adds keeps its own)."""
+    page = await env.svc.create(
+        "sp-a",
+        actor_user_id="u-owner",
+        title="T",
+        content="![a](api/media/a.webp)",
+        cover_image_url="api/media/c.webp",
+    )
+    _as_member(env, monkeypatch)
+    sp_a = space_page_media_name("sp-a", "a.webp")
+    sp_c = space_page_media_name("sp-a", "c.webp")
+    content, cover = await env.svc._as_stored(
+        "sp-a",
+        page.id,
+        f"![a](api/media/{sp_a}?sig=1) ![n](api/media/n.webp)",
+        f"api/media/{sp_c}",
+    )
+    assert content == "![a](api/media/a.webp?sig=1) ![n](api/media/n.webp)"
+    assert cover == "api/media/c.webp"
+    # Another space's page-scoped name maps to nothing (and the guard
+    # refuses a write naming it).
+    other = space_page_media_name("sp-b", "a.webp")
+    content, _ = await env.svc._as_stored(
+        "sp-a", page.id, f"![x](api/media/{other})", None
+    )
+    assert content == f"![x](api/media/{other})"
+
+
+async def test_a_page_shows_at_most_its_file_cap(env):
+    """Review finding 5: every household ships and describes a whole
+    version, so a page version shows at most MAX_PAGE_FILES files — enforced
+    on create, edit and resolution with a clear error."""
+    many = " ".join(f"![p](api/media/p{i}.webp)" for i in range(MAX_PAGE_FILES))
+    with pytest.raises(ValueError, match="at most"):
+        await env.svc.create(
+            "sp-a",
+            actor_user_id="u-owner",
+            title="T",
+            content=many,
+            cover_image_url="api/media/cover.webp",
+        )
+    page = await env.svc.create(
+        "sp-a", actor_user_id="u-owner", title="T", content=many
+    )
+    with pytest.raises(ValueError, match="at most"):
+        await env.svc.update(
+            "sp-a", page.id, actor_user_id="u-owner", cover_image_url="api/media/c.webp"
+        )
+    # The same file twice counts once.
+    await env.svc.update(
+        "sp-a",
+        page.id,
+        actor_user_id="u-owner",
+        content=many + " ![p](api/media/p0.webp)",
+    )
+
+
+async def test_a_file_toggled_off_and_on_again_is_not_shipped_twice(env):
+    """Review finding 5: what the host already shipped is everything the
+    page's history showed, not only the replaced version — a picture
+    removed and put back is never re-queued for every member."""
+    page = await env.svc.create(
+        "sp-a", actor_user_id="u-owner", title="T", content="![a](api/media/a.webp)"
+    )
+    await env.svc.update("sp-a", page.id, actor_user_id="u-owner", content="gone")
+    await env.svc.update(
+        "sp-a", page.id, actor_user_id="u-owner", content="![a](api/media/a.webp) back"
+    )
+    last = [e for e in env.events if isinstance(e, PageUpdated)][-1]
+    assert "api/media/a.webp" in last.shown_before
+
+
+def test_a_queued_page_item_over_the_file_cap_is_refused():
+    """A queued create / edit / resolution (local or from another
+    household) over MAX_PAGE_FILES is refused like any invalid payload."""
+    handler = PageModerationHandler.__new__(PageModerationHandler)
+    many = " ".join(f"![p](api/media/p{i}.webp)" for i in range(MAX_PAGE_FILES + 1))
+    for payload in (
+        {"entity": "page", "target_id": "pg", "title": "T", "content": many},
+        {"entity": "page", "target_id": "pg", "patch": {"content": many}},
+        {
+            "entity": "page",
+            "target_id": "pg",
+            "op": "resolve_conflict",
+            "resolution": "merged_content",
+            "merged_content": many,
+        },
+    ):
+        with pytest.raises(ValueError, match="at most"):
+            handler.validate(None, payload)  # type: ignore[arg-type]

@@ -227,3 +227,8 @@ SPACE_IMAGE_DATA_URI_MAX_CHARS: int = len(SPACE_IMAGE_DATA_URI_PREFIX) + 4 * -(
 #: catch-up), and a receiver maps every name it is sent — so a received
 #: ``sd-`` name only ever becomes another.
 SPACE_DIRECT_MEDIA_PREFIX: str = "sd-"
+
+#: Prefix of a space page's file as a member household stores it (v_82,
+#: ``space_page_media_name``): page-scoped, never the shared name the page
+#: body shows.
+SPACE_PAGE_MEDIA_PREFIX: str = "sp-"

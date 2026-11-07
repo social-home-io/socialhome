@@ -1573,8 +1573,6 @@ def _wire_federation_stack(
         space_calendar_repo=space_calendar_repo,
         # SPACE_MEDIA_BLOB scope: a space page's cover and body pictures.
         page_repo=page_repo,
-        # …and a page name the host fills is this space's file only.
-        media_reference_repo=media_reference_repo,
     )
     inbound_service.attach_to(federation_service)
     inbound_service.attach_groups(dm_service.groups)
@@ -3467,6 +3465,8 @@ def create_app(config: Config | None = None) -> web.Application:
         space_repo=space_repo,
         bus=bus,
         conflict_service=page_conflict_service,
+        # v_82: a member's own draft file vs. its page-scoped copy.
+        media_dir=pathlib.Path(config.media_path),
     )
 
     # ── Household zones (local-only; GPS→zone match for presence) ──────
@@ -4656,6 +4656,8 @@ def create_app(config: Config | None = None) -> web.Application:
         # delivered them; one namer, knowing who "we" are, for every path.
         media_names = SpaceMediaNamer(own_instance_id=real_instance_id)
         moderation_federation.attach_media_names(media_names)
+        # v_82: a reviewed page edit keeps the names its page already shows.
+        moderation_federation.attach_page_media(space_page_service.held_media)
         fed.space_authorship.attach_media_names(media_names)
         fed.inbound_service.attach_media_names(media_names)
         fed.content_inbound.attach_media_names(media_names)
@@ -5039,7 +5041,7 @@ def create_app(config: Config | None = None) -> web.Application:
         space_media_sync_service.attach_relay_readers(space_media_uploader)
         fed.inbound_service.attach_gfs_media(space_media_fetcher)
         # v_82: a page's files keep the names the host's page shows.
-        space_media_fetcher.attach_pages(page_repo, media_refs=repos.media_reference)
+        space_media_fetcher.attach_pages(page_repo)
         fed.content_inbound.attach_gfs_media(space_media_fetcher)
         if space_public_inbound is not None:
             space_public_inbound.attach_gfs_media(space_media_fetcher)

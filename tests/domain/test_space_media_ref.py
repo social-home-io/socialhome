@@ -10,17 +10,21 @@ from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import FileMeta, Post, PostType
 from socialhome.domain.space_media_ref import (
     MAX_DESCRIPTOR_ENTRIES,
+    MAX_PAGE_DESCRIPTOR_ENTRIES,
+    MAX_PAGE_FILES,
     MEDIA_REF_RESOURCES,
     MEDIA_REFS_FIELD,
     SpaceMediaLocalization,
     SpaceMediaRef,
     media_refs_to_wire,
     page_body_media_refs,
+    page_file_count,
     page_media_urls,
     parse_media_refs,
     post_media_urls,
     record_media_urls,
     rewrite_page_body_media,
+    space_page_media_name,
 )
 from socialhome.moment_public_media import MAX_BLOB_BYTES
 from socialhome.space_media_seal import SPACE_MEDIA_SUITE_AESGCM256_PADDED
@@ -344,3 +348,22 @@ def test_localization_rewrites_every_file_of_a_post() -> None:
     assert out.file_meta.original_name == "d.pdf"
     # Nothing to rename: the very same object.
     assert SpaceMediaLocalization(names={}).post(post) is post
+
+
+def test_a_page_scoped_name_binds_space_and_file() -> None:
+    """v_82: where a member keeps a page's file — fixed length, the
+    extension kept, a different name per space and per file, never the
+    name the page shows."""
+    a = space_page_media_name("sp-1", "sd-" + "1" * 40 + ".webp")
+    assert a.startswith("sp-") and a.endswith(".webp") and len(a) == 48
+    assert a != space_page_media_name("sp-2", "sd-" + "1" * 40 + ".webp")
+    assert a != space_page_media_name("sp-1", "other.webp")
+    assert space_page_media_name("sp-1", "noext").startswith("sp-")
+
+
+def test_a_pages_file_count_counts_each_file_once() -> None:
+    body = "![a](api/media/a.webp) ![a2](/api/media/a.webp?x=1) ![b](api/media/b.webp)"
+    assert page_file_count("api/media/c.webp", body) == 3
+    assert page_file_count("api/media/a.webp", body) == 2
+    assert page_file_count(None, None) == 0
+    assert MAX_PAGE_DESCRIPTOR_ENTRIES == MAX_PAGE_FILES * 4

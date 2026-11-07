@@ -1306,24 +1306,26 @@ from __future__ import annotations
 #:   no sync stream change. Labelled "Lighter photo and file transfers".
 #: * **v_82** (2026-11-07) — **Pictures in a space's pages reach every
 #:   member**. A page's files are its cover and the ``api/media/`` pictures
-#:   its body shows (``page_media_urls``). Pages are host-sequenced (v_48)
-#:   and every household keeps the host's version byte for byte (its hash is
-#:   the version's identity), so a page's files keep the names the host's
-#:   page shows: a file a member household proposes — in a reviewed item or
-#:   a page proposal — takes that household's ``sd-`` name on the host (the
-#:   body rewritten to it), and the proposer ships it to the host
-#:   (``SPACE_MEDIA_BLOB`` correlated to the page or the queue item). The
-#:   host ships each canonical version's NEW files to every other member
-#:   household at or above v_82 (``SPACE_MEDIA_BLOB`` correlated to the
-#:   page; a receiver lets only the space's host fill a name the page shows,
-#:   or the household the name is bound to) and describes them to a
-#:   link-joined v_82 member in ``media_refs`` (kept under the name the page
-#:   shows, not an ``sg-`` name). The §25.6 ``pages`` records carry the same
-#:   descriptor to a link-joined requester and the host's catch-up ships the
-#:   page files (sync line 82). **Fallback**: a member household below v_82
-#:   is sent no page file (as before: its people see the page without the
-#:   pictures it does not hold); a host below v_82 is shipped no proposal
-#:   files. Labelled "Pictures in a space's pages".
+#:   its body shows (``page_media_urls``; at most ``MAX_PAGE_FILES`` = 16 per
+#:   version, for everyone). Pages are host-sequenced (v_48) and every
+#:   household keeps the host's version byte for byte, so a page keeps the
+#:   names the host chose — and on a MEMBER household those names never
+#:   address the shared store: a page's file ``N`` is kept page-scoped as
+#:   ``space_page_media_name(space, N)`` (``sp-``), mapped on read. A file a
+#:   member household adds (a page proposal or a reviewed item) takes that
+#:   household's ``sd-`` name on the host (the body rewritten to it; a file
+#:   the page, its history or an open side shows keeps its name); the
+#:   proposer ships it to the host alone. The host ships each version's new
+#:   files (new against its whole history) and its open sides' files to
+#:   every other v_82 member household (``SPACE_MEDIA_BLOB`` correlated by the
+#:   page — a member takes a page's file from the host only), and describes
+#:   the version and its sides to a link-joined v_82 member in one
+#:   ``media_refs`` (kept page-scoped). The §25.6 ``pages`` records carry the
+#:   descriptor and the host's catch-up ships every live page's files
+#:   (version, history, sides) — sync line 82. **Fallback**: a member
+#:   household below v_82 is sent no page file (its people see the page
+#:   without the pictures it does not hold); a host below v_82 is shipped
+#:   no proposal files. Labelled "Pictures in a space's pages".
 OURS: int = 82
 
 

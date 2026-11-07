@@ -642,7 +642,7 @@ class SpaceSyncResumeProvider:
             and self._media_sync is not None
             and space is not None
             and space.owner_instance_id == self._federation.own_instance_id
-            and await self._federation.peer_supports(
+            and await self._federation.space_member_supports(
                 to, min_version=FederationCapability.MIN_FOR_PAGE_MEDIA
             )
         )

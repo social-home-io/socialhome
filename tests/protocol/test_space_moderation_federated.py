@@ -63,6 +63,7 @@ from socialhome.domain.federation import (
 from socialhome.domain.federation_capabilities import OURS
 from socialhome.domain.outbox import OutboxEntry
 from socialhome.domain.space import ContentQueuedForReview
+from socialhome.domain.space_media_ref import space_page_media_name
 from socialhome.federation.federation_service import FederationService
 from socialhome.federation.inbound_validator import (
     InboundContext,
@@ -679,6 +680,17 @@ async def _ship_files(mesh, house: House) -> list[tuple[str, str]]:
     return sorted((r["blob_id"], r["target_instance_id"]) for r in rows)
 
 
+def _kept_as(mesh, house: House, name: str) -> str:
+    """Where *house* keeps the file a page shows as *name*: the host under
+    the name itself, a member household page-scoped (v_82)."""
+    return name if house is mesh["H"] else space_page_media_name(SID, name)
+
+
+def _file(mesh, house: House, name: str) -> bytes | None:
+    path = _media_dir(house) / _kept_as(mesh, house, name)
+    return path.read_bytes() if path.is_file() else None
+
+
 async def _pages(house: House) -> list[tuple[str | None, str]]:
     rows = await house.db.fetchall(
         "SELECT cover_image_url, content FROM space_pages WHERE space_id=?", (SID,)
@@ -759,7 +771,7 @@ async def test_a_reviewed_page_with_pictures_from_another_household_reaches_all(
     )
     for house in (a, h, c, d):
         for name, local in from_a.items():
-            path = _media_dir(house) / local
+            path = _media_dir(house) / _kept_as(mesh, house, local)
             assert path.read_bytes() == PAGE_FILES[name], (house.name, name)
 
 
@@ -818,8 +830,54 @@ async def test_an_edit_of_a_reviewed_page_keeps_its_pictures_and_ships_new_ones(
     shipped = await _ship_files(mesh, h)
     assert {f for f, _to in shipped} == {new}
     for house in (a, h, c, d):
-        assert (_media_dir(house) / new).read_bytes() == b"new", house.name
-        assert (_media_dir(house) / from_a["p1.webp"]).read_bytes() == b"one"
+        assert _file(mesh, house, new) == b"new", house.name
+        assert _file(mesh, house, from_a["p1.webp"]) == b"one", house.name
+
+
+async def test_a_reviewed_edit_restoring_a_history_picture_keeps_its_name(page_mesh):
+    """Review finding 7: a reviewed edit that brings back a picture from the
+    page's history repeats the name the page showed — it is never renamed
+    to the editor's household, so every household still shows it."""
+    mesh = page_mesh
+    a, h, c, d = mesh["A"], mesh["H"], mesh["C"], mesh["D"]
+    item_id, _body = await _submit_page(mesh)
+    await _pump(mesh)
+    await _ship_files(mesh, a)
+    await _approve(c, item_id)
+    await _pump(mesh)
+    await _ship_files(mesh, h)
+    (page_id,) = [
+        r["id"] for r in await a.db.fetchall("SELECT id FROM space_pages", ())
+    ]
+    from_a = {n: space_direct_media_name(SID, a.iid, n) for n in PAGE_FILES}
+    # The host drops the second picture; it stays in the page's history.
+    r = await h.tc.patch(
+        f"/api/spaces/{SID}/pages/{page_id}",
+        json={"content": f"Rules ![one](api/media/{from_a['p1.webp']})"},
+        headers=h.headers,
+    )
+    assert r.status == 200, await r.text()
+    await _pump(mesh)
+    # D (another member, reviewed) brings it back as the page showed it.
+    restored = (
+        f"Rules ![one](api/media/{from_a['p1.webp']}) "
+        f"![two](api/media/{from_a['p2.webp']})"
+    )
+    r = await d.tc.patch(
+        f"/api/spaces/{SID}/pages/{page_id}",
+        json={"content": restored},
+        headers=d.headers,
+    )
+    assert r.status == 202, await r.text()
+    edit_id = (await r.json())["item_id"]
+    await _pump(mesh)
+    await _approve(c, edit_id)
+    await _pump(mesh)
+    for house in (a, h, c, d):
+        assert await _pages(house) == [(f"api/media/{from_a['c.webp']}", restored)], (
+            house.name
+        )
+        assert _file(mesh, house, from_a["p2.webp"]) == b"two", house.name
 
 
 async def test_a_reviewed_page_naming_a_reserved_file_never_shows_it(page_mesh):

@@ -66,6 +66,7 @@ class PageProposalForwarder:
         "_media_sync",
         "_outstanding",
         "_pages",
+        "_queued",
         "_stop",
         "_task",
     )
@@ -89,6 +90,8 @@ class PageProposalForwarder:
         self._outstanding: dict[tuple[str, str], Proposal] = {}
         self._interval = interval_seconds
         self._media_sync: SpaceMediaSyncService | None = None
+        #: ``(space_id, page_id)`` → the files queued for the host already.
+        self._queued: dict[tuple[str, str], set[str]] = {}
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
 
@@ -146,6 +149,8 @@ class PageProposalForwarder:
         sent = self._outstanding.get(key)
         if sent is not None and sent.hash == event.proposal_hash:
             del self._outstanding[key]
+            if event.outcome == "applied":
+                self._queued.pop(key, None)
             if event.outcome == "applied" and event.seq:
                 # We kept editing: the newer draft builds on what we sent.
                 await self._conflicts.rebase_draft(
@@ -274,10 +279,15 @@ class PageProposalForwarder:
                     for u in page_media_urls(base.cover_image_url, base.content)
                 }
                 urls = [u for u in urls if media_basename(u) not in had]
-            if not urls or not await self._federation.peer_supports(
+            # A file queued for this page already (an earlier send of the
+            # same draft) is not queued again on a resend.
+            queued = self._queued.setdefault((space_id, page_id), set())
+            urls = [u for u in urls if media_basename(u) not in queued]
+            if not urls or not await self._federation.space_member_supports(
                 host, min_version=FederationCapability.MIN_FOR_PAGE_MEDIA
             ):
                 return
+            queued.update(media_basename(u) for u in urls)
             await self._media_sync.enqueue_for_blob(
                 space_id=space_id,
                 correlation_id=page_id,

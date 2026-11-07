@@ -50,7 +50,7 @@ from ..domain.events import PageCreated, PageDeleted, PageUpdated
 from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.space_media_ref import (
-    MAX_DESCRIPTOR_ENTRIES,
+    MAX_PAGE_DESCRIPTOR_ENTRIES,
     MEDIA_REFS_FIELD,
     distinct_media_files,
     page_media_urls,
@@ -193,17 +193,21 @@ class PageFederationOutbound(SpaceMediaRefsMixin):
         if canonical is None:
             await self._fan_out(space_id, event_type, payload())
             return
-        new_files = await space_own_files(
-            self._media_refs,
-            space_id,
-            _new_files(
-                page_media_urls(canonical.get("cover_image_url"), content),
-                shown_before,
-            ),
-        )
-        # One descriptor carries at most MAX_DESCRIPTOR_ENTRIES files (a
-        # receiver refuses a longer one whole): the first ones are described.
-        described = distinct_media_files(new_files, MAX_DESCRIPTOR_ENTRIES)
+        # The version's files and its open sides' (each side is a version a
+        # member proposed): only the space's own ever ship.
+        shown = page_media_urls(canonical.get("cover_image_url"), content)
+        for side in canonical.get("conflict") or ():
+            if isinstance(side, dict):
+                shown.extend(page_media_urls(side.get("cover"), side.get("content")))
+        shown = await space_own_files(self._media_refs, space_id, shown)
+        # Paired / mesh members hold what an earlier version (or its
+        # history) showed: only the new files travel to them.
+        new_files = _new_files(shown, shown_before)
+        # A link-joined member is described the whole version each time
+        # (one descriptor, bounded by the page cap): a revert brings back
+        # a file the outbox never re-ships, and the GFS upload of a blob it
+        # already holds is a no-op.
+        described = distinct_media_files(shown, MAX_PAGE_DESCRIPTOR_ENTRIES)
         plan = (
             await self._plan_media_refs(
                 space_id, described, item_id=page_id, followers=False

@@ -106,8 +106,10 @@ from ...domain.space import (
     validate_zone_radius,
 )
 from ...domain.space_media_ref import (
+    MAX_PAGE_FILES,
     MEDIA_REFS_FIELD,
     SpaceMediaLocalization,
+    page_file_count,
     page_media_urls,
     rewrite_page_body_media,
 )
@@ -1139,6 +1141,25 @@ class SpaceContentInboundHandlers:
             actor=actor,
             row_owner=proposal.created_by if existing is None else existing.created_by,
         ):
+            await engine.refuse(
+                space_id=space_id,
+                page_id=page_id,
+                proposal_hash=proposal.hash,
+                proposer_instance=event.from_instance,
+                reason="access",
+            )
+            return
+        if page_file_count(proposal.cover_image_url, proposal.content) > MAX_PAGE_FILES:
+            # Every household ships and describes a whole version: a version
+            # over the page cap is refused (a v_82 editor never sends one).
+            log.warning(
+                "%s from %s: page %s in space %s shows more than %d files; refused",
+                event.event_type,
+                event.from_instance,
+                page_id,
+                space_id,
+                MAX_PAGE_FILES,
+            )
             await engine.refuse(
                 space_id=space_id,
                 page_id=page_id,

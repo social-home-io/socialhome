@@ -553,6 +553,18 @@ class _SpacePagesBase(BaseView):
             await self.svc(space_page_service_key).require_writer(space_id, user_id)
         return True
 
+    async def _shown(self, page):
+        """*page* as this household shows it (v_82: a member household's
+        page-scoped copies of its files)."""
+        return await self.svc(space_page_service_key).media_view(page)
+
+    async def _shown_sides(self, space_id: str, sides):
+        svc = self.svc(space_page_service_key)
+        return [
+            replace(s, content=await svc.media_view_text(space_id, s.content))
+            for s in sides
+        ]
+
 
 class SpacePageCollectionView(_SpacePagesBase):
     """GET/POST /api/spaces/{id}/pages — list or create space pages."""
@@ -568,7 +580,7 @@ class SpacePageCollectionView(_SpacePagesBase):
         return web.json_response(
             [
                 {
-                    **_signed_page_dict(self.request, p),
+                    **_signed_page_dict(self.request, await self._shown(p)),
                     "in_conflict": p.id in conflicted,
                 }
                 for p in pages
@@ -592,7 +604,9 @@ class SpacePageCollectionView(_SpacePagesBase):
             title=body.get("title"),
             content=body.get("content", ""),
         )
-        return web.json_response(_signed_page_dict(self.request, p), status=201)
+        return web.json_response(
+            _signed_page_dict(self.request, await self._shown(p)), status=201
+        )
 
 
 class SpacePageDetailView(_SpacePagesBase):
@@ -608,9 +622,11 @@ class SpacePageDetailView(_SpacePagesBase):
         sides = await svc.conflict_sides(space_id, p.id)
         return web.json_response(
             {
-                **_signed_page_dict(self.request, p),
+                **_signed_page_dict(self.request, await self._shown(p)),
                 "in_conflict": bool(sides),
-                "conflict": _conflict_dict(self.request, p, sides),
+                "conflict": _conflict_dict(
+                    self.request, p, await self._shown_sides(space_id, sides)
+                ),
             }
         )
 
@@ -651,11 +667,13 @@ class SpacePageDetailView(_SpacePagesBase):
             return web.json_response(
                 {
                     "error": "stale_update",
-                    "current": _signed_page_dict(self.request, p),
+                    "current": _signed_page_dict(self.request, await self._shown(p)),
                 },
                 status=409,
             )
-        return web.json_response(_signed_page_dict(self.request, updated))
+        return web.json_response(
+            _signed_page_dict(self.request, await self._shown(updated))
+        )
 
     async def delete(self) -> web.Response:
         ctx = self.user
@@ -740,7 +758,7 @@ class PageConflictView(_SpacePagesBase):
             side=side if resolution == "side" else None,
             sides=sides,
         )
-        signed = _signed_page_dict(self.request, page)
+        signed = _signed_page_dict(self.request, await self._shown(page))
         return web.json_response(
             {"ok": True, "content": signed["content"], "page": signed}
         )

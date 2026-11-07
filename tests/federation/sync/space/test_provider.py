@@ -2173,9 +2173,17 @@ class _Page:
 class _PageRepo:
     def __init__(self, pages):
         self.pages = pages
+        self.history: dict[str, list] = {}
+        self.sides: dict[str, list] = {}
 
     async def list(self, *, space_id=None, since_seq=None):
         return list(self.pages) if space_id == "sp-1" else []
+
+    async def list_versions(self, page_id, *, space_id):
+        return list(self.history.get(page_id, ()))
+
+    async def list_conflict_sides(self, page_id, *, space_id):
+        return list(self.sides.get(page_id, ()))
 
 
 class _VersionFed:
@@ -2288,3 +2296,18 @@ async def test_a_page_file_named_outside_the_space_is_not_in_the_catchup(
     assert [c["media_urls"] for c in calls] == [
         ["api/media/a.webp", "/api/media/b.webp"]
     ]
+
+
+async def test_the_catchup_ships_a_pages_history_and_side_files(encoder):
+    """Review finding 7: a newcomer gets a page's history versions' files
+    (a revert brings one back) and its open sides' files too."""
+    svc, media_sync = _page_provider(encoder)
+    repo = svc._page_repo
+    repo.history["pg-2"] = [_Page("v1", "![o](api/media/old.webp)")]
+    repo.sides["pg-2"] = [_Page("s1", "![s](api/media/side.webp)")]
+    await svc.stream_initial(_FakeSession(requester="peer-new"))
+    calls = {
+        c.kwargs["correlation_id"]: c.kwargs["media_urls"]
+        for c in media_sync.enqueue_for_blob.call_args_list
+    }
+    assert calls["pg-2"] == ["api/media/old.webp", "api/media/side.webp"]
