@@ -3550,6 +3550,7 @@
   "error.group_too_small": "Un grupo necesita al menos {min} personas, tú incluido. Añade a más gente.",
   "error.dm_too_long": "El mensaje es demasiado largo. Usa como máximo {max} caracteres.",
   "error.invalid_media_url": "No se puede enviar este archivo. Adjúntalo de nuevo y vuelve a enviarlo.",
+  "error.page_files_not_shareable": "Tu hogar aún no puede compartir imágenes en este espacio, así que no se pueden añadir a esta página. Guárdala sin las imágenes nuevas o pregunta a un administrador del espacio.",
   "error.dm_blocked": "Esta persona te ha bloqueado, así que no puedes enviarle mensajes.",
   "error.dm_you_blocked": "Has bloqueado a esta persona. Desbloquéala en Ajustes para seguir hablando.",
   "error.dm_not_allowed": "No puedes enviar mensajes a esta persona.",

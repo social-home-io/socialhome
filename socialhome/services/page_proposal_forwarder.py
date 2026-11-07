@@ -35,12 +35,12 @@ from ..domain.federation import FederationEventType
 from ..domain.federation_capabilities import FederationCapability
 from ..domain.space_media_ref import (
     MAX_PAGE_FILES,
+    MEDIA_REFS_FIELD,
     distinct_media_files,
     page_media_urls,
 )
 from .inbound_media_store import media_basename
 from .page_conflict_service import PageMode, Proposal
-from .page_media_refs import signed_page_media_refs
 
 if TYPE_CHECKING:
     from ..federation.federation_service import FederationService
@@ -56,6 +56,9 @@ log = logging.getLogger(__name__)
 #: How often every pending draft is offered to its host again.
 FLUSH_INTERVAL_S = 30 * 60
 
+#: Pages whose queued files the forwarder remembers at most.
+MAX_QUEUED_PAGES = 256
+
 #: ``DeliveryResult.error`` values of a send that was not queued for retry.
 _NOT_QUEUED = frozenset({"not_confirmed", "no_route"})
 
@@ -68,7 +71,6 @@ class PageProposalForwarder:
         "_conflicts",
         "_federation",
         "_federation_repo",
-        "_identity_seed",
         "_interval",
         "_media_gfs",
         "_media_sync",
@@ -99,19 +101,15 @@ class PageProposalForwarder:
         self._interval = interval_seconds
         self._media_sync: SpaceMediaSyncService | None = None
         self._media_gfs: SpaceMediaGfsUploader | None = None
-        self._identity_seed: bytes = b""
         #: ``(space_id, page_id)`` → the files queued for the host already.
         self._queued: dict[tuple[str, str], set[str]] = {}
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
 
-    def attach_media_gfs(
-        self, media_gfs: SpaceMediaGfsUploader, *, identity_seed: bytes
-    ) -> None:
-        """Wire the GFS media uploader and our household identity seed
-        (v_82: a link-joined proposer's new files, described and signed)."""
+    def attach_media_gfs(self, media_gfs: SpaceMediaGfsUploader) -> None:
+        """Wire the GFS media uploader (v_82: a link-joined proposer's new
+        files, described in its proposal)."""
         self._media_gfs = media_gfs
-        self._identity_seed = identity_seed
 
     def attach_media_sync(self, media_sync: SpaceMediaSyncService) -> None:
         """Wire the space media outbox (v_82: a draft's new files)."""
@@ -167,8 +165,8 @@ class PageProposalForwarder:
         sent = self._outstanding.get(key)
         if sent is not None and sent.hash == event.proposal_hash:
             del self._outstanding[key]
-            if event.outcome == "applied":
-                self._queued.pop(key, None)
+            # Settled either way: a later draft queues what it adds afresh.
+            self._queued.pop(key, None)
             if event.outcome == "applied" and event.seq:
                 # We kept editing: the newer draft builds on what we sent.
                 await self._conflicts.rebase_draft(
@@ -206,6 +204,7 @@ class PageProposalForwarder:
         if proposal is None:
             # Nothing pending (settled, refused or deleted): nothing waits.
             self._outstanding.pop(key, None)
+            self._queued.pop(key, None)
             return False
         if key in self._outstanding:
             return False
@@ -248,16 +247,9 @@ class PageProposalForwarder:
         # GFS media cache, described in the proposal (v_82).
         plan = await self._describe_files(space_id, page_id, proposal, host)
         if plan is not None:
-            payload.update(
-                signed_page_media_refs(
-                    space_id=space_id,
-                    page_id=page_id,
-                    origin=str(self._federation.own_instance_id or ""),
-                    proposal_hash=proposal.hash,
-                    media_refs=plan.wire(),
-                    identity_seed=self._identity_seed,
-                )
-            )
+            # Inside the proposal's encrypted payload, under the envelope's
+            # signature by our household — the host attributes it to us.
+            payload[MEDIA_REFS_FIELD] = plan.wire()
         self._outstanding[key] = proposal
         try:
             result = await self._federation.send_with_mesh_fallback(
@@ -324,7 +316,6 @@ class PageProposalForwarder:
         failure (the draft goes out without them; logged)."""
         if (
             self._media_gfs is None
-            or not self._identity_seed
             or not await self._media_gfs.is_relay_reader(host)
             or not await self._federation.space_member_supports(
                 host, min_version=FederationCapability.MIN_FOR_PAGE_MEDIA
@@ -334,6 +325,17 @@ class PageProposalForwarder:
         try:
             urls = await self._added_files(space_id, page_id, proposal)
             if not urls:
+                return None
+            if not await self._media_gfs.can_upload(space_id):
+                # No writer key, cert or channel grant: nothing would land
+                # on the GFS — describe nothing (the page service refuses
+                # such an edit up front: PAGE_FILES_NOT_SHAREABLE).
+                log.warning(
+                    "page proposal: page %s in space %s adds files, but this "
+                    "household holds no upload authorization for the space",
+                    page_id,
+                    space_id,
+                )
                 return None
             return await self._media_gfs.plan_for_reader(
                 space_id, urls, host, item_id=page_id
@@ -358,8 +360,13 @@ class PageProposalForwarder:
         try:
             urls = await self._added_files(space_id, page_id, proposal)
             # A file queued for this page already (an earlier send of the
-            # same draft) is not queued again on a resend.
-            queued = self._queued.setdefault((space_id, page_id), set())
+            # same draft) is not queued again on a resend. Bounded: the
+            # oldest page's memory goes first (a re-queue is harmless —
+            # write-once on the host).
+            queued = self._queued.pop((space_id, page_id), set())
+            self._queued[(space_id, page_id)] = queued
+            while len(self._queued) > MAX_QUEUED_PAGES:
+                self._queued.pop(next(iter(self._queued)))
             urls = [u for u in urls if media_basename(u) not in queued]
             if not urls or not await self._federation.space_member_supports(
                 host, min_version=FederationCapability.MIN_FOR_PAGE_MEDIA

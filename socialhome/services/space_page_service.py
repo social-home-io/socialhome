@@ -36,12 +36,14 @@ import builtins
 import contextlib
 import pathlib
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import aiofiles.os
 
+from ..domain.errors import PageFilesNotShareableError
 from ..domain.events import PageCreated, PageDeleted, PageUpdated
 from ..domain.page import MAX_PAGE_TITLE_LENGTH, Page, PageVersion
 from ..domain.page_version import PageConflictSide, is_version_hash, version_hash
@@ -72,6 +74,7 @@ from .bus_publisher import BusPublisherMixin
 from .content_access import ContentAccessMixin
 from .inbound_media_store import (
     is_reserved_media_name,
+    is_space_direct_media_name,
     is_space_page_media_name,
     media_basename,
     optional_local_media_ref,
@@ -152,6 +155,7 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
     __slots__ = (
         "_bus",
         "_conflicts",
+        "_files_reach_host",
         "_media_dir",
         "_media_guard",
         "_moderation",
@@ -174,6 +178,29 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         self._conflicts = conflict_service
         #: Where a page-scoped file is looked for (a member's draft, v_82).
         self._media_dir = media_dir
+        #: v_82 — whether this household can hand a page's new files to the
+        #: space's host (``None``: always).
+        self._files_reach_host: Callable[[str], Awaitable[bool]] | None = None
+
+    def attach_files_reach_host(self, check: Callable[[str], Awaitable[bool]]) -> None:
+        """Wire ``check(space_id)``: whether a page's new files can reach
+        the space's host from here (v_82; a link-joined household needs a
+        GFS upload authorization)."""
+        self._files_reach_host = check
+
+    async def _require_files_reach_host(
+        self, space_id: str, page_id: str | None, cover: object, content: object
+    ) -> None:
+        """Refuse an edit that adds files the host could never get."""
+        if self._files_reach_host is None:
+            return
+        added = {media_basename(u) for u in page_media_urls(cover, content)}
+        if page_id is not None:
+            added -= {
+                media_basename(u) for u in await self.held_media(space_id, page_id)
+            }
+        if added and not await self._files_reach_host(space_id):
+            raise PageFilesNotShareableError()
         self._moderation: ModerationSubmitter | None = None
 
     # ── A page's files on a member household (v_82) ──────────────────────
@@ -193,48 +220,84 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         return mode is not PageMode.HOST
 
     async def media_view(self, page: Page) -> Page:
-        """*page* as this household shows it: on a member household, each
-        file the page names as its page-scoped copy. A file of our own draft
-        that has no such copy (our own fresh upload, not yet sequenced)
-        keeps its name."""
+        """*page* as this household shows it. On a member household every
+        file the page names is shown as its page-scoped copy — the host
+        chose the names, so none may resolve to the shared store here —
+        except a file this household uploaded itself into a page one of its
+        own people wrote (a draft not yet sequenced, a page from before
+        v_82): that keeps its name while no page-scoped copy exists. A
+        reserved name (DM / moment / GFS / page-scoped) is never shown."""
         if page.space_id is None or not await self._page_scoped(page.space_id):
             return page
         view = await self._viewer(
             page.space_id,
             page_media_urls(page.cover_image_url, page.content),
-            draft=page.pending_base_seq is not None,
+            own=await self._written_here(page),
         )
         return replace(
             page,
-            content=rewrite_page_body_media(page.content, view)
-            if page.content
-            else page.content,
-            cover_image_url=view(page.cover_image_url)
-            if page.cover_image_url
-            else page.cover_image_url,
+            content=(
+                rewrite_page_body_media(page.content, view)
+                if page.content
+                else page.content
+            ),
+            cover_image_url=(
+                view(page.cover_image_url) or None
+                if page.cover_image_url
+                else page.cover_image_url
+            ),
         )
 
     async def media_view_text(self, space_id: str, content: str) -> str:
-        """A conflict side's body as this household shows it."""
+        """A conflict side's or a history version's body as shown here."""
         if not content or not await self._page_scoped(space_id):
             return content
-        view = await self._viewer(space_id, page_media_urls(None, content), draft=False)
+        view = await self._viewer(space_id, page_media_urls(None, content), own=False)
         return rewrite_page_body_media(content, view)
 
-    async def _viewer(self, space_id: str, urls: builtins.list[str], *, draft: bool):
-        held: set[str] = set()
-        if draft and self._media_dir is not None:
+    async def media_view_cover(self, space_id: str, cover: str | None) -> str | None:
+        """A conflict side's or a history version's cover as shown here."""
+        if not cover or not await self._page_scoped(space_id):
+            return cover
+        view = await self._viewer(space_id, [cover], own=False)
+        return view(cover) or None
+
+    async def _written_here(self, page: Page) -> bool:
+        """Whether one of this household's own people wrote *page* (its
+        creator or its last editor) — only then may a plain-named file of
+        ours keep its name in it."""
+        if page.space_id is None:
+            return False
+        local = set(await self._spaces.list_local_member_user_ids(page.space_id))
+        return bool(local & {page.created_by, page.last_editor_user_id or ""})
+
+    async def _viewer(self, space_id: str, urls: builtins.list[str], *, own: bool):
+        """``ref → shown ref`` for a member household's page view."""
+        scoped: set[str] = set()
+        mine: set[str] = set()
+        if self._media_dir is not None:
             for url in urls:
-                local = space_page_media_name(space_id, media_basename(url))
+                name = media_basename(url)
+                if not name or is_reserved_media_name(name):
+                    continue
+                local = space_page_media_name(space_id, name)
                 if await aiofiles.os.path.isfile(self._media_dir / local):
-                    held.add(local)
+                    scoped.add(local)
+                elif (
+                    own
+                    and _plain_media_name(name)
+                    and await aiofiles.os.path.isfile(self._media_dir / name)
+                ):
+                    mine.add(name)
 
         def view(ref: str) -> str:
             name = media_basename(ref)
-            if not name or is_reserved_media_name(name):
+            if not name:
                 return ref
+            if is_reserved_media_name(name):
+                return ""  # never shown, never signed
             local = space_page_media_name(space_id, name)
-            if draft and local not in held:
+            if local not in scoped and name in mine:
                 return ref
             path, sep, query = ref.partition("?")
             head = path[: len(path) - len(name)]
@@ -362,6 +425,7 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         mapped_body, cover = await self._as_stored(space_id, None, body, cover)
         body = mapped_body or ""
         _require_page_file_cap(cover, body)
+        await self._require_files_reach_host(space_id, None, cover, body)
         await self._require_openable_media(
             (cover, *media_refs_in_markdown(body)),
             user_id=actor_user_id,
@@ -469,6 +533,9 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         _require_page_file_cap(
             patch.get("cover_image_url", page.cover_image_url),
             patch.get("content", page.content),
+        )
+        await self._require_files_reach_host(
+            space_id, page_id, patch.get("cover_image_url"), patch.get("content")
         )
         # The files the page shows already are the page's own, re-published
         # to the same space (a body patch repeats them all): only a file the
@@ -703,6 +770,7 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         merged, _cover = await self._as_stored(space_id, page_id, merged, None)
         if merged is not None:
             _require_page_file_cap(page.cover_image_url, merged)
+            await self._require_files_reach_host(space_id, page_id, None, merged)
         await self._require_openable_media(
             media_refs_in_markdown(merged), user_id=actor_user_id, field="content"
         )
@@ -746,6 +814,13 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
             resolves=hashes,
             sides_seen=hashes,
         )
+
+
+def _plain_media_name(name: str) -> bool:
+    """A name this household's upload pipeline gives (no prefix another
+    receiving path owns: received space files, DM / moment / GFS / page
+    copies)."""
+    return not (is_space_direct_media_name(name) or is_reserved_media_name(name))
 
 
 def _require_page_file_cap(cover: object, content: object) -> None:

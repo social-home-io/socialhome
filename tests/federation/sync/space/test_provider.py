@@ -2310,4 +2310,27 @@ async def test_the_catchup_ships_a_pages_history_and_side_files(encoder):
         c.kwargs["correlation_id"]: c.kwargs["media_urls"]
         for c in media_sync.enqueue_for_blob.call_args_list
     }
-    assert calls["pg-2"] == ["api/media/old.webp", "api/media/side.webp"]
+    assert calls["pg-2"] == ["api/media/side.webp", "api/media/old.webp"]
+
+
+async def test_a_pages_history_in_the_catchup_is_bounded(encoder, monkeypatch):
+    """Review finding 4: a page's history ships its newest files only — at
+    most PAGE_HISTORY_FILES per page and STREAM_HISTORY_FILES per stream; an
+    older one comes back with the version that shows it again."""
+    monkeypatch.setattr(provider_mod, "PAGE_HISTORY_FILES", 3)
+    monkeypatch.setattr(provider_mod, "STREAM_HISTORY_FILES", 4)
+    svc, media_sync = _page_provider(encoder)
+    repo = svc._page_repo
+    repo.pages = [_Page("pg-1"), _Page("pg-2")]
+    for pid in ("pg-1", "pg-2"):
+        # list_versions is oldest first; the newest history wins.
+        repo.history[pid] = [
+            _Page(f"v{i}", f"![h](api/media/{pid}-h{i}.webp)") for i in range(10)
+        ]
+    await svc.stream_initial(_FakeSession(requester="peer-new"))
+    calls = {
+        c.kwargs["correlation_id"]: c.kwargs["media_urls"]
+        for c in media_sync.enqueue_for_blob.call_args_list
+    }
+    assert calls["pg-1"] == [f"api/media/pg-1-h{i}.webp" for i in (9, 8, 7)]
+    assert calls["pg-2"] == ["api/media/pg-2-h9.webp"]  # the stream budget

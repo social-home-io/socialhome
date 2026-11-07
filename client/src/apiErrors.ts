@@ -103,6 +103,7 @@ const MESSAGES: Record<string, (body: ApiErrorBody, params: Params) => string | 
   GROUP_TOO_SMALL: (_b, p) => t('error.group_too_small', { min: str(p, 'min') }),
   DM_TOO_LONG: (_b, p) => t('error.dm_too_long', { max: str(p, 'max') }),
   INVALID_MEDIA_URL: () => t('error.invalid_media_url'),
+  PAGE_FILES_NOT_SHAREABLE: () => t('error.page_files_not_shareable'),
   DM_BLOCKED: () => t('error.dm_blocked'),
   DM_YOU_BLOCKED: () => t('error.dm_you_blocked'),
   DM_NOT_ALLOWED: () => t('error.dm_not_allowed'),

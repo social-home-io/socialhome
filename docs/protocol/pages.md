@@ -327,8 +327,16 @@ household they never address the shared store.
   (hash and sequence intact). Reads map each name to its `sp-` copy
   (`SpacePageService.media_view`, used by every space page route, conflict
   sides included); writes map them back (`_as_stored`), so what a member
-  edits and proposes always carries the host's names. A member's own
-  draft keeps its fresh upload's own name until the host's version lands.
+  edits and proposes always carries the host's names. One pattern
+  (`LOCAL_MEDIA_REF_RE`) decides what a body's media links are — for the
+  read-time signer, the write-time guard and these renames alike — so every
+  link the signer would sign in a page is one the page maps; a path inside
+  another URL or path (`./api/media/x`, `x/api/media/x`, `%2Fapi/media/x`)
+  is never signed, and a reserved name (`dm-` / `gm-` / `sg-` / `sp-`) is
+  stripped. The only name kept as is: a plain-named file this household
+  uploaded itself, in a page one of its own people wrote (its draft, a page
+  from before v_82), while no page-scoped copy exists — never a received
+  (`sd-`) or host-chosen name.
   The media guard refuses any write naming an `sp-` file, and a page grants
   a seat access to a shared file only on the space's host
   (`MediaReferenceRepo`, review finding 6). So a host that names another
@@ -350,12 +358,9 @@ household they never address the shared store.
   to its GFS media cache by the same uploader as every space picture
   (`plan_for_reader`, authorized as a space writer: writer key or writer
   cert, space or channel scope; only files that are the space's own) —
-  signed by its household for exactly this proposal (`media_refs_sig`,
-  suite `ed25519`, domain `space-page-media-refs:v1:`, bound to space,
-  page, household and the proposal's hash as sent;
-  `services/page_media_refs.py`). The host verifies the signature against
-  the key it pinned for that household (unsigned, forged or another
-  proposal's: dropped), takes only entries for the files the proposal
+  inside its envelope-signed proposal (the GFS relays the envelope
+  unchanged; the host's §24.11 pipeline verifies the proposer's signature).
+  The host takes only entries for the files the proposal
   ADDS, and fetches each (`SpaceMediaGfsFetcher.localize_proposal`: scope-
   bound address, AAD naming the page and the proposer) under the
   proposer's own name `sd(space, proposer, F)` — the name the renamed page
@@ -370,7 +375,12 @@ household they never address the shared store.
   version and its sides (≤ `MAX_PAGE_DESCRIPTOR_ENTRIES` = 16 × 4), kept
   page-scoped too.
 - **Catch-up.** The host's §25.6 stream ships every live page's files —
-  version, history, open sides — to a v_82 requester; the `pages` records
+  its version and open sides, and its newest history files (at most
+  `PAGE_HISTORY_FILES` = 32 per page and `STREAM_HISTORY_FILES` = 200 per
+  stream, the catch-up bound's spirit) — to a v_82 requester. The host's
+  "already shipped" for a new version is the replaced version plus that
+  same bounded history, so an older file a revert brings back ships again
+  with that version; the `pages` records
   carry the descriptor for a link-joined one (sync line 82); a resume replay
   ships the replayed pages' files.
 - **Cap.** A page version shows at most `MAX_PAGE_FILES` = **16** files (its
@@ -380,18 +390,28 @@ household they never address the shared store.
   (16 × the WebP picture cap per version); a wiki page needing more
   pictures is better split.
 - **References.** A page's body, its history and open sides count as media
-  references (the sweep keeps their `sp-` copies and the host's files); an
-  edit's media check covers only the files it adds.
+  references: their `sp-` copies everywhere, their raw names only on the
+  space's host or for a row one of this household's people wrote (a host
+  can't keep a shared file alive on a member). A page grants a seat access
+  to a shared file only on the host. An edit's media check covers only the
+  files it adds (the page, its history and sides are its own).
+- **No upload rights, no new pictures.** A household seated from an invite
+  link without an upload authorization (no writer key, cert or channel
+  grant) can't hand the host a page's new files: such an edit is refused
+  (422 `PAGE_FILES_NOT_SHAREABLE`, translated in the SPA) instead of
+  landing with pictures broken for everyone; words alone still save.
 
 Cost per version: new files (≤ 16, plus its sides') × other v_82 member
 households, each file once; one GFS upload per file per GFS with
 link-joined readers (an already-held blob is a no-op). An edit that adds no
 file ships nothing; toggling a file off and on ships nothing. Worst
 realistic case: a 200-member space and an edit adding 2 pictures is 2 × 199
-outbox rows plus 2 GFS uploads. **Upgrade burst** (v_82, sync line 82):
-each member household crossing v_82 takes one full §25.6 stream, and the
-host queues every live page's files for it — at most pages × (16 + history
-and sides' files) pictures per household, once.
+outbox rows plus 2 GFS uploads. **Catch-up / upgrade burst** (v_82, sync
+line 82): each member household crossing v_82 takes one full §25.6 stream,
+and the host queues, per page, its ≤ 16 version files and ≤ 3 × 16 side
+files, plus at most 32 history files per page and 200 per stream — e.g. a
+space with 40 pages: ≤ 40 × 64 + 200 pictures per household, once (each ≤
+the WebP picture cap; the outbox retries with backoff).
 
 Known limits (follow-ups):
 
@@ -400,9 +420,6 @@ Known limits (follow-ups):
   exact version (it renamed the file), so that next draft may land as a
   conflict side. A lost answer can't be settled by content either; the next
   resend settles it.
-- The rename regex (`page_body_media_refs`) skips a path inside another URL
-  or path (`./api/media/x`, `https://h/api/media/x`); the read-time signer
-  still signs such links.
 
 ## Mixed fleets
 

@@ -69,6 +69,29 @@ from .base import rows_to_dicts
 
 log = logging.getLogger(__name__)
 
+#: A space page row whose raw names count here (v_82): its space is hosted
+#: here (the names are our own files), or one of our own people wrote it (a
+#: draft, a page from before v_82). On a member household a host-written
+#: page's names are the host's choice — they keep only the page-scoped
+#: ``sp-`` copies alive (:meth:`SqliteMediaReferenceRepo._page_scoped_names`),
+#: never a shared file.
+_HOSTED_SPACE = (
+    "space_id IN (SELECT hs.id FROM spaces hs, instance_identity ii"
+    " WHERE hs.owner_instance_id = ii.instance_id)"
+)
+_SPACE_PAGE_HERE = (
+    f"({_HOSTED_SPACE} OR EXISTS (SELECT 1 FROM users lu WHERE lu.user_id IN"
+    " (space_pages.created_by, space_pages.last_editor_user_id)))"
+)
+_HISTORY_HERE = (
+    f"(space_id IS NULL OR {_HOSTED_SPACE} OR EXISTS (SELECT 1 FROM users lu"
+    " WHERE lu.user_id = page_edit_history.edited_by))"
+)
+_SNAPSHOT_HERE = (
+    f"({_HOSTED_SPACE} OR EXISTS (SELECT 1 FROM users lu"
+    " WHERE lu.user_id = space_page_snapshots.snapshot_by))"
+)
+
 #: ``(table, column, live-row filter)`` for single-reference columns.
 _SINGLE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("conversation_messages", "media_url", ""),
@@ -83,8 +106,8 @@ _SINGLE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("calendar_events", "cover_url", ""),
     ("space_calendar_events", "cover_url", ""),
     ("pages", "cover_image_url", ""),
-    ("space_pages", "cover_image_url", ""),
-    ("page_edit_history", "cover_image_url", ""),
+    ("space_pages", "cover_image_url", _SPACE_PAGE_HERE),
+    ("page_edit_history", "cover_image_url", _HISTORY_HERE),
     ("task_attachments", "url", ""),
     ("post_drafts", "media_url", ""),
 )
@@ -119,15 +142,15 @@ _HELD_LIVE = (
 _PAYLOAD_SCANS: tuple[tuple[str, str, str], ...] = (
     ("space_moderation_queue", "payload_json", _HELD_LIVE),
     # An open conflict side of a space page (its body, JSON-encoded).
-    ("space_page_snapshots", "body", ""),
+    ("space_page_snapshots", "body", _SNAPSHOT_HERE),
 )
 
 #: ``(table, markdown column)`` whose pictures (:func:`page_body_media_refs`)
 #: are references: a page's body, and each version in its history.
-_MARKDOWN_COLUMNS: tuple[tuple[str, str], ...] = (
-    ("pages", "content"),
-    ("space_pages", "content"),
-    ("page_edit_history", "content"),
+_MARKDOWN_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("pages", "content", ""),
+    ("space_pages", "content", _SPACE_PAGE_HERE),
+    ("page_edit_history", "content", _HISTORY_HERE),
 )
 _MEDIA_REF_RE = re.compile(r"api/media/([A-Za-z0-9._-]+)")
 
@@ -391,9 +414,10 @@ class SqliteMediaReferenceRepo:
             )
             for r in rows_to_dicts(rows):
                 out.update(_names_in_payload(r.get("v")))
-        for table, col in _MARKDOWN_COLUMNS:
+        for table, col, live in _MARKDOWN_COLUMNS:
+            where = f"{col} LIKE '%api/media/%'" + (f" AND {live}" if live else "")
             rows = await self._db.fetchall(
-                f"SELECT {col} AS v FROM {table} WHERE {col} LIKE '%api/media/%'"
+                f"SELECT {col} AS v FROM {table} WHERE {where}"
             )
             for r in rows_to_dicts(rows):
                 out.update(_names_in_markdown(r.get("v")))
@@ -588,10 +612,10 @@ class SqliteMediaReferenceRepo:
             )
             if any(basename in _names_in_payload(r["v"]) for r in rows):
                 return True
-        for table, col in _MARKDOWN_COLUMNS:
+        for table, col, live in _MARKDOWN_COLUMNS:
+            where = f"{col} LIKE ? ESCAPE '\\'" + (f" AND {live}" if live else "")
             rows = await self._db.fetchall(
-                f"SELECT {col} AS v FROM {table} WHERE {col} LIKE ? ESCAPE '\\'",
-                (pattern,),
+                f"SELECT {col} AS v FROM {table} WHERE {where}", (pattern,)
             )
             if any(basename in _names_in_markdown(r["v"]) for r in rows):
                 return True

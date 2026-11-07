@@ -390,7 +390,7 @@ from .services.moment_service import MomentService
 from .services.notification_delivery_worker import NotificationDeliveryWorker
 from .services.notification_settings_service import NotificationSettingsService
 from .services.online_status_service import OnlineStatusService
-from .services.page_conflict_service import PageConflictService
+from .services.page_conflict_service import PageConflictService, PageMode
 from .services.page_federation_outbound import PageFederationOutbound
 from .services.page_proposal_forwarder import PageProposalForwarder
 from .services.pairing_cancel_service import PairingCancelService
@@ -5044,22 +5044,22 @@ def create_app(config: Config | None = None) -> web.Application:
         space_media_fetcher.attach_pages(page_repo)
         fed.content_inbound.attach_gfs_media(space_media_fetcher)
 
-        async def _pinned_key(instance_id: str) -> bytes | None:
-            # The identity key pinned for a household at pairing / seating.
-            inst = await federation_repo.get_instance(instance_id)
-            if inst is None or not inst.remote_identity_pk:
-                return None
-            try:
-                return bytes.fromhex(inst.remote_identity_pk)
-            except ValueError:
-                return None
-
         # v_82: a link-joined proposer's page files ride its GFS media
-        # cache; the host checks the descriptor's household signature.
-        fed.content_inbound.attach_peer_keys(_pinned_key)
-        app[K.page_proposal_forwarder_key].attach_media_gfs(
-            space_media_uploader, identity_seed=identity_seed
-        )
+        # cache, described inside its (envelope-signed) proposal.
+        app[K.page_proposal_forwarder_key].attach_media_gfs(space_media_uploader)
+
+        async def _page_files_reach_host(space_id: str) -> bool:
+            # A household seated from an invite link hands a page's new
+            # files to the host only through its GFS media cache — which it
+            # needs an upload authorization for (v_82).
+            mode, host = await page_conflict_service.mode(space_id)
+            if mode is not PageMode.MEMBER or not host:
+                return True
+            if not await space_media_uploader.is_relay_reader(host):
+                return True
+            return await space_media_uploader.can_upload(space_id)
+
+        space_page_service.attach_files_reach_host(_page_files_reach_host)
         if space_public_inbound is not None:
             space_public_inbound.attach_gfs_media(space_media_fetcher)
         # §25.6: a stream to a link-joined member carries the records'

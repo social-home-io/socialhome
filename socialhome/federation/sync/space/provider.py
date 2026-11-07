@@ -34,7 +34,10 @@ from ....domain.federation_capabilities import FederationCapability
 from ....domain.space_media_ref import (
     MEDIA_REF_RESOURCES,
     MEDIA_REFS_FIELD,
+    PAGE_HISTORY_FILES,
+    STREAM_HISTORY_FILES,
     page_media_urls,
+    recent_history_files,
     record_media_urls,
 )
 from ....services.space_media_names import space_own_files
@@ -1169,19 +1172,29 @@ class SpaceSyncService:
                 "sync-catchup-media: list pages failed for space=%s", space_id
             )
             return
+        history_budget = STREAM_HISTORY_FILES
         for page in pages:
-            # The version, every version in its history (a revert brings
-            # one back) and its open sides — each bounded by the page cap.
+            # The version and its open sides (each bounded by the page cap),
+            # and its newest history files — at most PAGE_HISTORY_FILES per
+            # page and STREAM_HISTORY_FILES per stream. An older one comes
+            # back with the version that shows it again.
             urls = page_media_urls(page.cover_image_url, page.content)
             try:
-                for v in await self._page_repo.list_versions(
-                    page.id, space_id=space_id
-                ):
-                    urls.extend(page_media_urls(v.cover_image_url, v.content))
                 for side in await self._page_repo.list_conflict_sides(
                     page.id, space_id=space_id
                 ):
                     urls.extend(page_media_urls(side.cover_image_url, side.content))
+                if history_budget > 0:
+                    versions = await self._page_repo.list_versions(
+                        page.id, space_id=space_id
+                    )
+                    history = recent_history_files(
+                        ((v.cover_image_url, v.content) for v in reversed(versions)),
+                        shown=urls,
+                        limit=min(PAGE_HISTORY_FILES, history_budget),
+                    )
+                    history_budget -= len(history)
+                    urls.extend(history)
             except sqlite3.Error:
                 log.exception("sync-catchup-media: history of page %s failed", page.id)
             await self._enqueue_media(

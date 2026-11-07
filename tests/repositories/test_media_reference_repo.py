@@ -816,3 +816,42 @@ async def test_a_space_pages_picture_is_its_seats_and_confined_to_it(db):
         " VALUES('p2', 'sp2', 'u1', 'image', 'api/media/body.webp')"
     )
     assert not await repo.confined_to_space("body.webp", "sp1")
+
+
+async def test_a_host_written_page_keeps_no_shared_file_alive_on_a_member(db):
+    """Review finding 6: on a member household a page the host wrote names
+    files of the host's choosing — they keep only their page-scoped copies
+    alive, never a shared file of that name (a DM's, another space's). A
+    page of a space we host, or one our own people wrote, still counts."""
+    await _seed_parents(db)
+    await db.enqueue(
+        "INSERT INTO instance_identity(instance_id, identity_private_key,"
+        " identity_public_key, routing_secret) VALUES('me', 'k', 'p', ?)",
+        ("aa" * 32,),
+    )
+    await db.enqueue(
+        "INSERT INTO space_pages(id, space_id, title, content, cover_image_url,"
+        " created_by, last_editor_user_id) VALUES('pg-h', 'sp1', 'P',"
+        " '![d](api/media/dm-x.webp)', 'api/media/hostcover.webp', 'u-host',"
+        " 'u-host')"
+    )
+    await db.enqueue(
+        "INSERT INTO page_edit_history(id, page_id, space_id, title, content,"
+        " edited_by, version) VALUES('h1', 'pg-h', 'sp1', 'P',"
+        " '![o](api/media/oldhost.webp)', 'u-host', 1)"
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    names = await repo.referenced_basenames()
+    for raw in ("dm-x.webp", "hostcover.webp", "oldhost.webp"):
+        assert raw not in names, raw
+        assert not await repo.is_referenced(raw), raw
+        assert space_page_media_name("sp1", raw) in names, raw
+    # Our own person's page counts its own files.
+    await db.enqueue(
+        "INSERT INTO space_pages(id, space_id, title, content, created_by)"
+        " VALUES('pg-o', 'sp1', 'P', '![m](api/media/mine.webp)', 'u1')"
+    )
+    assert await repo.is_referenced("mine.webp")
+    # A space we host: its pages' names are our files.
+    await db.enqueue("UPDATE spaces SET owner_instance_id='me' WHERE id='sp1'")
+    assert await repo.is_referenced("hostcover.webp")

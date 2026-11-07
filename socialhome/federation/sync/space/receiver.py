@@ -2730,7 +2730,16 @@ class SpaceSyncReceiver:
                     self._gfs_media.localize_as_shown(
                         space_id,
                         r.get(MEDIA_REFS_FIELD),
-                        page_media_urls(version.cover_image_url, version.content),
+                        [
+                            *page_media_urls(version.cover_image_url, version.content),
+                            *(
+                                u
+                                for side in version.conflict
+                                for u in page_media_urls(
+                                    side.cover_image_url, side.content
+                                )
+                            ),
+                        ],
                         item_id=page.id,
                         origin=provider,
                     )

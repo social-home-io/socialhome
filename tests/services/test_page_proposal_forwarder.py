@@ -370,13 +370,17 @@ class _Plan:
 
 
 class _GfsUploader:
-    def __init__(self, *, reader: bool) -> None:
+    def __init__(self, *, reader: bool, authorized: bool = True) -> None:
         self.reader = reader
+        self.authorized = authorized
         self.planned: list[tuple] = []
         self.uploaded: list = []
 
     async def is_relay_reader(self, iid):
         return self.reader and iid == HOST
+
+    async def can_upload(self, space_id):
+        return self.authorized
 
     async def plan_for_reader(self, space_id, urls, iid, *, item_id):
         self.planned.append((space_id, list(urls), iid, item_id))
@@ -386,19 +390,15 @@ class _GfsUploader:
         self.uploaded.append(plan)
 
 
-async def test_a_link_joined_proposer_describes_its_new_files_signed(env, media):
+async def test_a_link_joined_proposer_describes_its_new_files(env, media):
     """Members equal (v_82): a household seated from an invite link reaches
     the host only through the GFS relay, which refuses bytes. Its proposal
     describes its new files (sealed for this page and household, uploaded to
-    its GFS media cache), signed by its household for exactly this proposal;
-    nothing goes to the outbox."""
-    from socialhome.crypto import generate_identity_keypair
-    from socialhome.services.page_media_refs import verified_page_media_refs
-
-    kp = generate_identity_keypair()
+    its GFS media cache) inside its envelope-signed payload; nothing goes to
+    the outbox."""
     env.fed.own_instance_id = "me"
     gfs = _GfsUploader(reader=True)
-    env.fwd.attach_media_gfs(gfs, identity_seed=kp.private_key)
+    env.fwd.attach_media_gfs(gfs)
     env.pages_bases["pg"] = DraftBase(
         title="T", content="![k](api/media/k.webp)", seq=3, by="u1"
     )
@@ -409,27 +409,50 @@ async def test_a_link_joined_proposer_describes_its_new_files_signed(env, media)
     assert await env.fwd.kick(SID, "pg")
     (_to, _et, payload) = env.fed.sent[0]
     assert gfs.planned == [(SID, ["api/media/a.webp", "api/media/b.webp"], HOST, "pg")]
-    refs = verified_page_media_refs(
-        payload,
-        space_id=SID,
-        page_id="pg",
-        origin="me",
-        proposal_hash=draft.hash,
-        origin_pk=kp.public_key,
-    )
-    assert set(refs) == {"a.webp", "b.webp"}
+    assert set(payload["media_refs"]) == {"a.webp", "b.webp"}
     assert len(gfs.uploaded) == 1
     assert media.calls == []
 
 
 async def test_a_paired_proposer_still_ships_through_the_outbox(env, media):
-    from socialhome.crypto import generate_identity_keypair
-
     env.fed.own_instance_id = "me"
     gfs = _GfsUploader(reader=False)
-    env.fwd.attach_media_gfs(gfs, identity_seed=generate_identity_keypair().private_key)
+    env.fwd.attach_media_gfs(gfs)
     env.conflicts.drafts["pg"] = _draft("![a](api/media/a.webp)", base_seq=0)
     assert await env.fwd.kick(SID, "pg")
     assert "media_refs" not in env.fed.sent[0][2]
     assert gfs.planned == [] and gfs.uploaded == []
     assert [c["media_urls"] for c in media.calls] == [["api/media/a.webp"]]
+
+
+async def test_a_link_joined_proposer_without_upload_rights_describes_nothing(
+    env, media, caplog
+):
+    """Review finding 7: no writer key, cert or channel grant — nothing would
+    land on the GFS, so no descriptor goes out (the page service refuses
+    such an edit up front)."""
+    env.fed.own_instance_id = "me"
+    gfs = _GfsUploader(reader=True, authorized=False)
+    env.fwd.attach_media_gfs(gfs)
+    env.conflicts.drafts["pg"] = _draft("![a](api/media/a.webp)", base_seq=0)
+    with caplog.at_level("WARNING"):
+        assert await env.fwd.kick(SID, "pg")
+    assert "media_refs" not in env.fed.sent[0][2]
+    assert gfs.planned == [] and gfs.uploaded == []
+    assert "no upload authorization" in caplog.text
+
+
+async def test_the_queued_files_memory_is_bounded_and_cleared(env, media, monkeypatch):
+    """Review finding 8: the forwarder remembers queued files for at most
+    MAX_QUEUED_PAGES pages, and forgets a page whose draft settled or is gone."""
+    from socialhome.services import page_proposal_forwarder as fwd_mod
+
+    monkeypatch.setattr(fwd_mod, "MAX_QUEUED_PAGES", 1)
+    env.conflicts.drafts["p1"] = _draft("![a](api/media/a.webp)", base_seq=0)
+    env.conflicts.drafts["p2"] = _draft("![b](api/media/b.webp)", base_seq=0)
+    assert await env.fwd.kick(SID, "p1")
+    assert await env.fwd.kick(SID, "p2")
+    assert list(env.fwd._queued) == [(SID, "p2")]
+    del env.conflicts.drafts["p2"]
+    assert not await env.fwd.kick(SID, "p2")
+    assert env.fwd._queued == {}

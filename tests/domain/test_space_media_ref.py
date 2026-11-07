@@ -22,6 +22,7 @@ from socialhome.domain.space_media_ref import (
     page_media_urls,
     parse_media_refs,
     post_media_urls,
+    recent_history_files,
     record_media_urls,
     rewrite_page_body_media,
     space_page_media_name,
@@ -367,3 +368,17 @@ def test_a_pages_file_count_counts_each_file_once() -> None:
     assert page_file_count("api/media/a.webp", body) == 2
     assert page_file_count(None, None) == 0
     assert MAX_PAGE_DESCRIPTOR_ENTRIES == MAX_PAGE_FILES * 4
+
+
+def test_a_pages_recent_history_files_are_the_newest_distinct_ones() -> None:
+    versions = [
+        ("api/media/c2.webp", "![a](api/media/a.webp) ![n](api/media/n2.webp)"),
+        (None, "![n](api/media/n1.webp) ![a](/api/media/a.webp)"),
+        (None, "![o](api/media/o.webp)"),
+    ]
+    assert recent_history_files(versions, shown=["api/media/a.webp"], limit=3) == [
+        "api/media/c2.webp",
+        "api/media/n2.webp",
+        "api/media/n1.webp",
+    ]
+    assert recent_history_files([], limit=3) == []

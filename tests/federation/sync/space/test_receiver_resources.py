@@ -2210,6 +2210,37 @@ async def test_the_hosts_page_record_keeps_its_files_under_the_pages_names(setup
     assert conflicts.mirrored[0]["version"].content == body
 
 
+async def test_the_hosts_page_record_keeps_its_sides_files_too(setup):
+    """Review finding 2 (sync): a record's open sides' files are kept too."""
+    r, _c, kp = setup
+    r._page_conflicts = _FakeConflicts()
+    sink = _GfsMediaSink()
+    r.attach_gfs_media(sink)
+    await _send(
+        r,
+        kp,
+        "pages",
+        [
+            {
+                **_PAGE_RECORD,
+                "content": "no pictures",
+                "seq": 7,
+                "conflict": [
+                    {
+                        "title": "T",
+                        "content": "![s](api/media/s.webp)",
+                        "cover": "api/media/sc.webp",
+                        "by": "u-x",
+                        "at": "2026-01-01T00:00:00+00:00",
+                    }
+                ],
+                "media_refs": _SYNC_REFS,
+            }
+        ],
+    )
+    assert sink.as_shown[0][2] == ["api/media/sc.webp", "api/media/s.webp"]
+
+
 async def test_another_households_page_record_keeps_no_descriptor(setup):
     r, _c, kp = setup
     r._page_conflicts = _FakeConflicts(host="someone-else")

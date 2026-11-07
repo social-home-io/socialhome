@@ -59,7 +59,7 @@ from ..domain.page_version import (
     merge_scalar,
     version_hash,
 )
-from ..domain.space_media_ref import page_media_urls
+from ..domain.space_media_ref import page_media_urls, recent_history_files
 from ..rate_limiter import RateLimiter
 from ..repositories.page_repo import AbstractPageRepo, PageNotFoundError
 from .bus_publisher import BusPublisherMixin
@@ -1337,13 +1337,20 @@ class PageConflictService(BusPublisherMixin):
         ``sides`` are the ones committed with it."""
         extras = canonical_extras(page, sides, sequenced)
         # The files the replaced version showed went out with it already.
-        # Every version in its history went out already (toggling a file
-        # off and on never re-ships it).
+        # The replaced version and its recent history went out already —
+        # every household holds them (the catch-up ships the same bounded
+        # history) — so toggling a file off and on never re-ships it; an
+        # older file a revert brings back is new again.
         before: list[str] = []
         if previous is not None:
             before.extend(page_media_urls(previous.cover_image_url, previous.content))
-            for v in await self._pages.list_versions(page.id, space_id=space_id):
-                before.extend(page_media_urls(v.cover_image_url, v.content))
+            versions = await self._pages.list_versions(page.id, space_id=space_id)
+            before.extend(
+                recent_history_files(
+                    ((v.cover_image_url, v.content) for v in reversed(versions)),
+                    shown=before,
+                )
+            )
         shown_before = tuple(dict.fromkeys(before))
         if created:
             await self._emit(

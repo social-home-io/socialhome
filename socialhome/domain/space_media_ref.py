@@ -60,17 +60,33 @@ MEDIA_REF_RESOURCES: frozenset[str] = frozenset(
 #: this many, so one descriptor always carries a whole version.
 MAX_PAGE_FILES: int = 16
 
+#: A page's history files a household is shipped up front (its catch-up)
+#: — the newest ones, distinct and not shown by the page itself — and the
+#: history the host counts as "already shipped" when a version reuses one
+#: (``shown_before``). An older history file that a revert brings back is
+#: new again, so it ships with that version.
+PAGE_HISTORY_FILES: int = 32
+
+#: History files one §25.6 catch-up stream ships at most across every page
+#: (the owner-approved catch-up bound: the newest 200 files).
+STREAM_HISTORY_FILES: int = 200
+
 #: Open conflict sides a page carries at most (``page_conflict_service``).
 MAX_PAGE_SIDES: int = 3
 
 #: A page version's descriptor: its own files and its open sides' files.
 MAX_PAGE_DESCRIPTOR_ENTRIES: int = MAX_PAGE_FILES * (1 + MAX_PAGE_SIDES)
 
-#: A local file a page's markdown body shows: ``api/media/<file>`` — an
+#: THE local media reference in a markdown body: ``api/media/<file>`` — an
 #: optional leading ``/`` and a ``?query`` belong to the match — never the
-#: same path inside another URL or path (``https://host/api/media/x`` links
-#: to someone else's server; the SPA never loads it as a picture here).
-_PAGE_BODY_MEDIA_RE = re.compile(
+#: same path inside another URL or path (``https://host/api/media/x``,
+#: ``./api/media/x``, ``x/api/media/x``, ``%2Fapi/media/x``). One pattern for
+#: everything that reads a body: the read-time signer
+#: (``media_signer.sign_media_urls_in_markdown``), the write-time guard
+#: (``media_refs_in_markdown``) and a page's renames (v_82) — a link the
+#: signer would sign is always one the page maps, never a shared-store name
+#: it missed.
+LOCAL_MEDIA_REF_RE = re.compile(
     r"(?<![\w.~:/%-])/?api/media/[A-Za-z0-9._-]+(?:\?[^)\s\"'<>]*)?"
 )
 
@@ -185,13 +201,13 @@ def page_body_media_refs(text: object) -> list[str]:
     (query included), in order — repeats included."""
     if not isinstance(text, str) or not text:
         return []
-    return [m.group(0) for m in _PAGE_BODY_MEDIA_RE.finditer(text)]
+    return [m.group(0) for m in LOCAL_MEDIA_REF_RE.finditer(text)]
 
 
 def rewrite_page_body_media(text: str, rename: Callable[[str], str]) -> str:
     """*text* with every :func:`page_body_media_refs` reference replaced by
     ``rename(reference)``; nothing else is touched."""
-    return _PAGE_BODY_MEDIA_RE.sub(lambda m: rename(m.group(0)), text)
+    return LOCAL_MEDIA_REF_RE.sub(lambda m: rename(m.group(0)), text)
 
 
 def page_media_urls(cover: object, content: object) -> list[str]:
@@ -216,6 +232,29 @@ def space_page_media_name(space_id: str, filename: str) -> str:
     dot = filename.rfind(".")
     ext = filename[dot:] if 0 < dot and len(filename) - dot <= 10 else ""
     return f"{SPACE_PAGE_MEDIA_PREFIX}{digest[:40]}{ext}"
+
+
+def recent_history_files(
+    versions_newest_first: Iterable[tuple[object, object]],
+    *,
+    shown: Collection[str] = (),
+    limit: int = PAGE_HISTORY_FILES,
+) -> list[str]:
+    """The newest *limit* distinct files of a page's history versions
+    (``(cover, content)`` pairs, newest first) that the page does not show
+    (*shown*, by file name)."""
+    seen = {u.rsplit("/", 1)[-1].split("?", 1)[0] for u in shown}
+    out: list[str] = []
+    for cover, content in versions_newest_first:
+        for url in page_media_urls(cover, content):
+            name = url.rsplit("/", 1)[-1]
+            if name in seen:
+                continue
+            if len(out) >= limit:
+                return out
+            seen.add(name)
+            out.append(url)
+    return out
 
 
 def page_file_count(cover: object, content: object) -> int:

@@ -3523,6 +3523,7 @@
   "error.group_too_small": "Een groep heeft minstens {min} mensen nodig, jij meegeteld. Voeg meer mensen toe.",
   "error.dm_too_long": "Dit bericht is te lang. Houd het bij maximaal {max} tekens.",
   "error.invalid_media_url": "Dit bestand kan niet worden verstuurd. Voeg het opnieuw toe en verstuur het nog een keer.",
+  "error.page_files_not_shareable": "Je huishouden kan in deze space nog geen afbeeldingen delen, dus ze kunnen niet aan deze pagina worden toegevoegd. Sla hem op zonder de nieuwe afbeeldingen of vraag een beheerder van de space.",
   "error.dm_blocked": "Deze persoon heeft je geblokkeerd, dus je kunt diegene geen bericht sturen.",
   "error.dm_you_blocked": "Je hebt deze persoon geblokkeerd. Deblokkeer diegene in Instellingen om verder te praten.",
   "error.dm_not_allowed": "Je kunt deze persoon geen bericht sturen.",

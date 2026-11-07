@@ -157,6 +157,15 @@ describe('apiErrorMessage — known codes', () => {
     })).toBe("That file can't be sent. Attach it again and resend.")
   })
 
+  it('says a page edit with pictures this household cannot share yet is refused', () => {
+    expect(apiErrorMessage(422, '/api/spaces/s1/pages/p1', {
+      code: 'PAGE_FILES_NOT_SHAREABLE',
+      detail: "this household can't share pictures in this space yet",
+    })).toBe(
+      "Your household can't share pictures in this space yet, so they can't be added to this page. Save it without the new pictures, or ask an admin of the space.",
+    )
+  })
+
   it('says in plain words that a listing thread hit its rate cap, not the generic 429', () => {
     expect(apiErrorMessage(429, '/api/conversations/bzt-1/messages', {
       code: 'LISTING_THREAD_RATE_LIMITED',
