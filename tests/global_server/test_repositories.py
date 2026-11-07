@@ -1952,3 +1952,12 @@ async def test_demand_prune(gfs_db):
     assert (
         await repo.note_request("0" * 64, "space", "s1", now=901, window_s=60)
     ).requests == 2
+
+
+async def test_demand_claim_can_be_given_back(gfs_db):
+    repo = SqliteGfsSpaceMediaDemandRepo(gfs_db)
+    b = "9" * 64
+    await repo.note_request(b, "space", "s1", now=100, window_s=60)
+    assert await repo.claim(b, "space", "s1", now=100, hold_s=60)
+    await repo.release_claim(b, "space", "s1")
+    assert await repo.claim(b, "space", "s1", now=101, hold_s=60)

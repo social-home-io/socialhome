@@ -160,9 +160,9 @@ async def _want(tc, blob_id: str, scope=SCOPE_SPACE, scope_id=SPACE, *, reader=0
     )
 
 
-def _serve_headers(iid: str, seed: bytes, ticket: str) -> dict:
+def _serve_headers(iid: str, seed: bytes, ticket: str, op: str = "serve") -> dict:
     ts = int(time.time())
-    sig = sign_ed25519(seed, canonical_bytes(serve_signing_body(iid, ticket, ts)))
+    sig = sign_ed25519(seed, canonical_bytes(serve_signing_body(iid, ticket, ts, op)))
     return {
         "X-SH-Instance": iid,
         "X-SH-Timestamp": str(ts),
@@ -417,7 +417,7 @@ async def test_a_decline_is_a_miss_at_once(gfs):
     started = time.monotonic()
     resp = await gfs.post(
         f"/gfs/media/serve/{frame['ticket']}/decline",
-        headers=_serve_headers(HOST, HOST_SEED, frame["ticket"]),
+        headers=_serve_headers(HOST, HOST_SEED, frame["ticket"], "decline"),
     )
     assert resp.status == 200
     assert (await reader).status == 404
@@ -518,3 +518,103 @@ async def test_off_is_a_miss_and_not_advertised(gfs):
     assert (await _want(gfs, bid)).status == 404
     info = await (await gfs.get("/gfs/info")).json()
     assert "on_demand" not in info["capabilities"]["space_media"]
+
+
+# ── Review regressions (adversarial round 1) ─────────────────────────────
+
+
+async def test_concurrent_readers_never_open_a_second_session(gfs):
+    """Review H1: readers arriving while the first one is being decided
+    share its session — one holder request, everybody served (repeated:
+    the race was intermittent)."""
+    ws = await _connect(gfs, HOST)
+    for round_ in range(5):
+        data, bid = _blob()
+        readers = [
+            asyncio.create_task(_want(gfs, bid, reader=n + 10 * round_))
+            for n in range(10)
+        ]
+        _, status, _ = await _answer(gfs, ws, HOST, HOST_SEED, data)
+        assert status == 200
+        assert all([await (await r).read() == data for r in readers])
+        assert ws.frames.empty()
+    assert ws.count == 5
+
+
+async def test_a_junk_hint_never_makes_a_blob_dark(gfs):
+    """Review M1: a reader without the key sends a junk hint first; the
+    holder declines it as ``bad_hint`` and the GFS asks again with the next
+    reader's hint — the real reader is served, nothing is marked missing."""
+    data, bid = _blob()
+    ws = await _connect(gfs, HOST)
+    junk = asyncio.create_task(_want(gfs, bid, reader=1))
+    first = await asyncio.wait_for(ws.frames.get(), 5)
+    real = asyncio.create_task(_want(gfs, bid, reader=2))
+    await asyncio.sleep(0.2)
+    resp = await gfs.post(
+        f"/gfs/media/serve/{first['ticket']}/decline",
+        json={"reason": "bad_hint"},
+        headers=_serve_headers(HOST, HOST_SEED, first["ticket"], "decline"),
+    )
+    assert resp.status == 200
+    second = await asyncio.wait_for(ws.frames.get(), 5)
+    assert second["ticket"] == first["ticket"]
+    assert second["hint"] != first["hint"]
+    ok = await gfs.put(
+        f"/gfs/media/serve/{second['ticket']}",
+        data=data,
+        headers=_serve_headers(HOST, HOST_SEED, second["ticket"]),
+    )
+    assert ok.status == 200
+    assert await (await real).read() == data
+    assert await (await junk).read() == data
+
+
+async def test_only_junk_hints_leave_the_blob_askable(gfs):
+    _, bid = _blob()
+    ws = await _connect(gfs, HOST)
+    reader = asyncio.create_task(_want(gfs, bid))
+    frame = await asyncio.wait_for(ws.frames.get(), 5)
+    await gfs.post(
+        f"/gfs/media/serve/{frame['ticket']}/decline",
+        json={"reason": "bad_hint"},
+        headers=_serve_headers(HOST, HOST_SEED, frame["ticket"], "decline"),
+    )
+    assert (await reader).status == 404
+    # Not marked missing: the next reader asks the holder again.
+    again = asyncio.create_task(_want(gfs, bid))
+    await asyncio.wait_for(ws.frames.get(), 5)
+    again.cancel()
+
+
+async def test_a_serve_signature_is_not_a_decline(gfs):
+    """Review L4: the signed body names the operation."""
+    _, bid = _blob()
+    ws = await _connect(gfs, HOST)
+    reader = asyncio.create_task(_want(gfs, bid))
+    frame = await asyncio.wait_for(ws.frames.get(), 5)
+    resp = await gfs.post(
+        f"/gfs/media/serve/{frame['ticket']}/decline",
+        headers=_serve_headers(HOST, HOST_SEED, frame["ticket"], "serve"),
+    )
+    assert resp.status == 401
+    reader.cancel()
+
+
+async def test_a_second_serve_of_one_ticket_is_refused(gfs):
+    """Review L1: the first PUT claims the ticket before any await."""
+    data, bid = _blob()
+    ws = await _connect(gfs, HOST)
+    reader = asyncio.create_task(_want(gfs, bid))
+    frame = await asyncio.wait_for(ws.frames.get(), 5)
+    url = f"/gfs/media/serve/{frame['ticket']}"
+    puts = await asyncio.gather(
+        gfs.put(
+            url, data=data, headers=_serve_headers(HOST, HOST_SEED, frame["ticket"])
+        ),
+        gfs.put(
+            url, data=data, headers=_serve_headers(HOST, HOST_SEED, frame["ticket"])
+        ),
+    )
+    assert sorted(p.status for p in puts) == [200, 409]
+    assert await (await reader).read() == data

@@ -50,7 +50,10 @@ Cost per item: one upload per file per GFS (never per reader).
 :data:`LAZY_VIDEO_MIN_BYTES` is described but NOT uploaded eagerly to a GFS
 that proved ``on_demand`` while every link-joined reader of the space is at
 v_83 or above (followers can't be told apart; an older link-joined reader
-keeps the eager upload): it goes only when a reader plays it and the GFS
+keeps the eager upload) — and only by the household the GFS would ask for
+it: the OWNER of a listed space (a member's or a private channel's large
+video goes eagerly, as before, or nobody could ever be asked for it). It
+goes only when a reader plays it and the GFS
 asks a holder (:mod:`.space_media_gfs_responder`), which re-uses
 :meth:`SpaceMediaGfsUploader.authorize` and
 :meth:`~SpaceMediaGfsUploader.remember_stored`. Pictures go at once, as before.
@@ -449,6 +452,8 @@ class SpaceMediaGfsUploader:
         targets = await self._capable(conns, scope)
         if not targets:
             return None
+        # Lazy only where the GFS asks THIS household for it on demand.
+        lazy_ok = lazy_ok and scope == SCOPE_SPACE and await self._owns(space_id)
         refs = await self._describe_names(space_id, names, item_id)
         if not refs:
             return None
@@ -516,6 +521,12 @@ class SpaceMediaGfsUploader:
                 self._described.popitem(last=False)
             refs.append(ref)
         return refs
+
+    async def _owns(self, space_id: str) -> bool:
+        """Whether this household owns *space_id* (the holder a GFS asks)."""
+        own = self._federation.own_instance_id if self._federation else ""
+        space = await self._spaces.get(space_id)
+        return bool(own) and space is not None and space.owner_instance_id == own
 
     async def _space_file(self, space_id: str, name: str) -> bool:
         """Whether *name* may be sealed under *space_id*'s key: never a

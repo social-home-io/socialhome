@@ -42,6 +42,8 @@ from ...domain.gfs_space_media_on_demand import (
     MAX_WANTED_BODY_BYTES,
     MODE_CACHE,
     SERVE_INSTANCE_HEADER,
+    SERVE_OP_DECLINE,
+    SERVE_OP_SERVE,
     SERVE_SIG_HEADER,
     SERVE_TS_HEADER,
     InvalidOnDemandWire,
@@ -52,7 +54,15 @@ from ...moment_public_media import MAX_BLOB_BYTES
 from .. import app_keys as K
 from ..admin_service import verify_report_signature
 from ..blob_store import MediaRefused, check_size
-from ..space_media_on_demand import BUSY, LIMITED, Cached, MediaSession, StreamFailed
+from ..space_media_on_demand import (
+    BUSY,
+    DECLINE_BAD_HINT,
+    DECLINE_NOT_HELD,
+    LIMITED,
+    Cached,
+    MediaSession,
+    StreamFailed,
+)
 from .base import GfsBaseView
 from .space_media import MIN_PROGRESS_BYTES, PROGRESS_WINDOW_S
 
@@ -64,6 +74,10 @@ SPACE_MEDIA_DECLINE_ROUTE: str = "/gfs/media/serve/{ticket}/decline"
 
 #: How far a holder's ``ts`` may be from this server's clock.
 SERVE_MAX_SKEW_S: int = 300
+
+#: The longest a holder may take to send a whole blob (its progress is
+#: checked every window too).
+SERVE_BODY_DEADLINE_S: float = 120.0
 
 _NO_STORE = {
     "Cache-Control": "no-store",
@@ -125,6 +139,7 @@ class GfsMediaWantedView(GfsBaseView):
     async def _pipe(self, svc, session: MediaSession) -> web.StreamResponse:
         """Wait (bounded) for the holder to start, then pipe the blob."""
         session.readers += 1
+        svc.pin(session)
         try:
             try:
                 await asyncio.wait_for(
@@ -138,11 +153,13 @@ class GfsMediaWantedView(GfsBaseView):
             resp.content_length = session.size
             await resp.prepare(self.request)
             try:
-                async for chunk in session.chunks():
-                    await resp.write(chunk)
-            except StreamFailed:
-                # Never a whole blob that is not at its address: cut the
-                # connection short of Content-Length.
+                # A reader that stops reading can't hold the blob's memory.
+                async with asyncio.timeout(svc.reader_deadline(session)):
+                    async for chunk in session.chunks():
+                        await resp.write(chunk)
+            except StreamFailed, TimeoutError:
+                # Never a whole blob that is not at its address (nor a stalled
+                # reader kept): cut the connection short of Content-Length.
                 if self.request.transport is not None:
                     self.request.transport.close()
                 return resp
@@ -150,9 +167,10 @@ class GfsMediaWantedView(GfsBaseView):
             return resp
         finally:
             session.readers -= 1
+            svc.unpin(session)
 
 
-async def _holder(view: GfsBaseView, ticket: str) -> str | web.Response:
+async def _holder(view: GfsBaseView, ticket: str, op: str) -> str | web.Response:
     """The household that signed this serve / decline, or the refusal."""
     instance_id = view.request.headers.get(SERVE_INSTANCE_HEADER, "")
     signature = view.request.headers.get(SERVE_SIG_HEADER, "")
@@ -169,7 +187,7 @@ async def _holder(view: GfsBaseView, ticket: str) -> str | web.Response:
     if sender is None or sender.status != "active":
         return web.json_response({"error": "forbidden"}, status=403)
     if not verify_report_signature(
-        serve_signing_body(instance_id, ticket, ts), signature, sender.public_key
+        serve_signing_body(instance_id, ticket, ts, op), signature, sender.public_key
     ):
         return web.json_response({"error": "invalid_signature"}, status=401)
     return instance_id
@@ -189,7 +207,7 @@ class GfsMediaServeView(GfsBaseView):
 
     async def put(self) -> web.Response:
         ticket = self.match("ticket")
-        who = await _holder(self, ticket)
+        who = await _holder(self, ticket, SERVE_OP_SERVE)
         if isinstance(who, web.Response):
             return who
         svc = self.svc(K.gfs_space_media_on_demand_key)
@@ -205,13 +223,18 @@ class GfsMediaServeView(GfsBaseView):
             check_size(size)
         except MediaRefused:
             return web.json_response({"error": "bad_size"}, status=422)
-        if not await svc.charge_stream(session, size):
-            return web.json_response({"error": "scope_stream_quota"}, status=429)
+        # Claimed before any await: a second PUT (a retry, the previous
+        # target) can never feed the same buffer.
         session.claimed = True
+        if not await svc.charge_stream(session, size):
+            session.claimed = False
+            svc.decline(session, DECLINE_NOT_HELD)
+            return web.json_response({"error": "scope_stream_quota"}, status=429)
         session.size = size
         session.started.set()
         try:
-            await _feed_with_progress(self.request, session)
+            async with asyncio.timeout(SERVE_BODY_DEADLINE_S):
+                await _feed_with_progress(self.request, session)
         except TimeoutError:
             session.finish(ok=False)
             return web.json_response({"error": "body_timeout"}, status=408)
@@ -272,13 +295,19 @@ class GfsMediaDeclineView(GfsBaseView):
 
     async def post(self) -> web.Response:
         ticket = self.match("ticket")
-        who = await _holder(self, ticket)
+        who = await _holder(self, ticket, SERVE_OP_DECLINE)
         if isinstance(who, web.Response):
             return who
-        session = _asked(self.svc(K.gfs_space_media_on_demand_key), ticket, who)
+        svc = self.svc(K.gfs_space_media_on_demand_key)
+        session = _asked(svc, ticket, who)
         if isinstance(session, web.Response):
             return session
-        session.declined.set()
+        body = await self.bounded_json(256) if self.request.can_read_body else {}
+        reason = body.get("reason")
+        svc.decline(
+            session,
+            DECLINE_BAD_HINT if reason == DECLINE_BAD_HINT else DECLINE_NOT_HELD,
+        )
         return web.json_response({"declined": True})
 
 

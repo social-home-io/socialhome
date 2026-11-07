@@ -108,8 +108,13 @@ def test_ticket_shapes() -> None:
 
 
 def test_serve_signing_body() -> None:
-    assert serve_signing_body("i", "t", 5) == {
+    # The operation is signed: a serve signature is never a decline's.
+    assert serve_signing_body("i", "t", 5, "serve") == {
         "instance_id": "i",
         "media_ticket": "t",
+        "op": "serve",
         "ts": 5,
     }
+    assert serve_signing_body("i", "t", 5, "decline") != serve_signing_body(
+        "i", "t", 5, "serve"
+    )

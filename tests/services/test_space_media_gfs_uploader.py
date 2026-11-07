@@ -160,8 +160,9 @@ class _Crypto:
 
 
 class _Spaces:
-    def __init__(self, seed=None, *, channel=None, private_gfs=False):
+    def __init__(self, seed=None, *, channel=None, private_gfs=False, owner=OWN):
         self.seed = seed
+        self.owner = owner
         #: ``(channel_id, channel_pk)`` of a private space's opaque channel.
         self.channel = channel
         self.private_gfs = private_gfs
@@ -172,7 +173,9 @@ class _Spaces:
     async def get(self, space_id):
         if not self.private_gfs:
             return SimpleNamespace(
-                space_type=SpaceType.GLOBAL, features=SimpleNamespace(private_gfs=False)
+                space_type=SpaceType.GLOBAL,
+                features=SimpleNamespace(private_gfs=False),
+                owner_instance_id=self.owner,
             )
         return SimpleNamespace(
             space_type=SpaceType.PRIVATE, features=SimpleNamespace(private_gfs=True)
@@ -1103,3 +1106,24 @@ async def test_remember_stored_skips_a_later_eager_upload(tmp_path):
     await u.remember_stored(g1, plan.refs[0].blob_id)
     await _upload(u, plan)
     assert gfs.puts == []
+
+
+async def test_a_members_large_video_still_goes_eagerly(tmp_path):
+    """Review H3: the GFS asks only a listed space's OWNER on demand — a
+    member's (or a private channel's) large video skipped eagerly could
+    never be fetched by anyone, so it is uploaded at once."""
+    _write(tmp_path, "clip.mp4", up_mod.LAZY_VIDEO_MIN_BYTES)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _OnDemandGfs([g1])
+    u = _uploader(
+        tmp_path,
+        gfs=gfs,
+        instances=[RELAY],
+        versions={"e": V83},
+        seed=generate_identity_keypair().private_key,
+        spaces=_Spaces(generate_identity_keypair().private_key, owner="host-inst"),
+    )
+    await _upload(
+        u, await u.plan(SPACE, ["api/media/clip.mp4"], item_id=ITEM, followers=False)
+    )
+    assert len(gfs.puts) == 1

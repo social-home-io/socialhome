@@ -217,6 +217,41 @@ _HELD_SOURCE = "space_moderation_queue"
 #: The space each :data:`_ACCESS_SOURCES` table's row belongs to (an SQL
 #: expression over the row ``t``); a table not listed is household-level
 #: (``NULL``) — never a space's content (:meth:`confined_to_space`).
+#: The LIVE rows of a space that show a file (v_83, :meth:`live_in_space`):
+#: table, column, shape, and the condition (first ``?`` = the space id).
+_LIVE_SPACE_SOURCES: tuple[tuple[str, str, str, str], ...] = (
+    ("space_posts", "media_url", "one", "t.space_id = ? AND t.deleted = 0"),
+    ("space_posts", "image_urls_json", "list", "t.space_id = ? AND t.deleted = 0"),
+    (
+        "space_posts",
+        "link_preview_json",
+        "json:$.thumbnail_url",
+        "t.space_id = ? AND t.deleted = 0",
+    ),
+    (
+        "space_post_comments",
+        "media_url",
+        "one",
+        (
+            "t.deleted = 0 AND (SELECT p.space_id FROM space_posts p"
+            " WHERE p.id = t.post_id AND p.deleted = 0) = ?"
+        ),
+    ),
+    ("bazaar_listings", "image_urls_json", "list", "t.space_id = ?"),
+    (
+        "space_calendar_events",
+        "cover_url",
+        "one",
+        "t.space_id = ? AND t.deleted_at IS NULL",
+    ),
+    (
+        "space_pages",
+        "cover_image_url",
+        "one",
+        "t.space_id = ? AND t.deleted_at IS NULL",
+    ),
+)
+
 _SPACE_OF: dict[str, str] = {
     "space_posts": "t.space_id",
     "space_post_comments": (
@@ -290,6 +325,12 @@ class AbstractMediaReferenceRepo(Protocol):
     async def confined_to_space(self, basename: str, space_id: str) -> bool:
         """Whether *basename* is referenced only by content of *space_id*
         (what the GFS media cache may seal under that space's key)."""
+        ...
+
+    async def live_in_space(self, basename: str, space_id: str) -> bool:
+        """Whether a LIVE row of *space_id* shows *basename* now (not
+        deleted, not only held for review) — what a household sends on
+        demand (v_83)."""
         ...
 
 
@@ -465,6 +506,45 @@ class SqliteMediaReferenceRepo:
                     return False
                 referenced = True
         return referenced
+
+    async def live_in_space(self, basename: str, space_id: str) -> bool:
+        """Whether a LIVE row of space *space_id* shows *basename* right now
+        — a post or comment not deleted, a listing, a calendar event, page
+        or space-album item not deleted — never only a moderation queue
+        entry or a page's edit history. On demand (v_83) a household sends
+        a file only when this holds as well as :meth:`confined_to_space`,
+        so a deleted item's picture is never sent again."""
+        if not basename or not space_id:
+            return False
+        rows = await self._db.fetchall(
+            "SELECT 1 FROM gallery_items i JOIN gallery_albums a ON a.id = i.album_id"
+            " WHERE a.space_id = ? AND i.deleted_at IS NULL"
+            " AND (i.filename = ? OR i.thumbnail_filename = ?) LIMIT 1",
+            (space_id, basename, basename),
+        )
+        if rows:
+            return True
+        pattern = f"%{_like_escape(basename)}%"
+        for table, col, shape, live in _LIVE_SPACE_SOURCES:
+            if shape.startswith("json:"):
+                value = f"json_extract(t.{col}, '{shape[5:]}')"
+                guard = f" AND json_valid(t.{col})"
+            else:
+                value, guard = f"t.{col}", ""
+            rows = await self._db.fetchall(
+                f"SELECT {value} AS v FROM {table} t WHERE {live}"
+                f" AND t.{col} LIKE ? ESCAPE '\\'{guard}",
+                (space_id, pattern),
+            )
+            for r in rows_to_dicts(rows):
+                raw = r.get("v")
+                if shape == "list":
+                    hit = basename in _names_in_list(raw)
+                else:
+                    hit = media_basename(raw) == basename
+                if hit:
+                    return True
+        return False
 
     async def is_referenced(self, basename: str) -> bool:
         """``True`` when any row still points at the file ``basename``.

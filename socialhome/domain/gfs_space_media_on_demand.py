@@ -68,10 +68,16 @@ def valid_ticket(value: object) -> bool:
     return isinstance(value, str) and _TICKET_RE.fullmatch(value) is not None
 
 
-def serve_signing_body(instance_id: str, ticket: str, ts: int) -> dict:
+#: What a signed holder request does (bound into its signature, so a serve
+#: signature can never be replayed as a decline, or back).
+SERVE_OP_SERVE: str = "serve"
+SERVE_OP_DECLINE: str = "decline"
+
+
+def serve_signing_body(instance_id: str, ticket: str, ts: int, op: str) -> dict:
     """What a holder signs (canonical JSON, household key) to serve or
-    decline *ticket* — the relay-stream scheme, its own field name."""
-    return {"instance_id": instance_id, "media_ticket": ticket, "ts": ts}
+    decline *ticket* — the relay-stream scheme, its own field names."""
+    return {"instance_id": instance_id, "media_ticket": ticket, "op": op, "ts": ts}
 
 
 @dataclass(slots=True, frozen=True)

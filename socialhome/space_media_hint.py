@@ -18,6 +18,10 @@ holders derive. The GFS forwards the hint verbatim and can't read it.
   moved onto another blob or scope.
 * **Suite.** :data:`HINT_SUITE_AESGCM256` rides every hint; an unknown one is
   refused (:class:`UnsupportedSpaceMediaHintSuite`), never defaulted.
+* **When.** The sealed locator carries when the reader sealed it
+  (``issued_at``); a holder refuses one older than
+  :data:`HINT_MAX_AGE_S`, so a GFS that kept a hint can't replay it later
+  to see which households answer.
 
 A hint proves nothing: any key holder can seal one naming any file. The
 holder therefore acts only when the file it finds is the space's own content
@@ -33,6 +37,7 @@ from __future__ import annotations
 import base64
 import binascii
 import os
+import time
 from dataclasses import dataclass
 
 import orjson
@@ -50,6 +55,9 @@ MAX_HINT_CHARS: int = 1400
 
 #: Longest locator field (the descriptor's own bounds are tighter).
 MAX_LOCATOR_FIELD_CHARS: int = 200
+
+#: How old (or how far ahead) a hint may be when a holder opens it.
+HINT_MAX_AGE_S: int = 600
 
 _KEY_INFO = b"sh-space-media-hint:v1"
 _AAD_PREFIX = b"socialhome/space-media-hint/v1|"
@@ -74,6 +82,13 @@ class SpaceMediaLocator:
     item_id: str
     origin: str
     filename: str
+    #: Unix seconds the reader sealed it (set by :func:`seal_space_media_hint`).
+    issued_at: int = 0
+
+    def fresh(self, now: float | None = None) -> bool:
+        """Whether it was sealed within :data:`HINT_MAX_AGE_S` of *now*."""
+        now = time.time() if now is None else now
+        return abs(now - self.issued_at) <= HINT_MAX_AGE_S
 
 
 @dataclass(slots=True, frozen=True)
@@ -144,7 +159,12 @@ def seal_space_media_hint(
     """The wire hint ``{suite, epoch, ct}`` for *locator*, under the media
     key of *epoch*, bound to the blob and its scope."""
     plaintext = orjson.dumps(
-        {"i": locator.item_id, "o": locator.origin, "f": locator.filename}
+        {
+            "i": locator.item_id,
+            "o": locator.origin,
+            "f": locator.filename,
+            "t": locator.issued_at or int(time.time()),
+        }
     )
     return _seal_raw(
         media_key,
@@ -210,7 +230,12 @@ def open_space_media_hint(
         if not isinstance(value, str) or not 0 < len(value) <= MAX_LOCATOR_FIELD_CHARS:
             raise InvalidSpaceMediaHint("hint names no locator")
         fields.append(value)
-    return SpaceMediaLocator(item_id=fields[0], origin=fields[1], filename=fields[2])
+    issued = body.get("t")
+    if not isinstance(issued, int) or isinstance(issued, bool) or issued < 0:
+        raise InvalidSpaceMediaHint("hint carries no time")
+    return SpaceMediaLocator(
+        item_id=fields[0], origin=fields[1], filename=fields[2], issued_at=issued
+    )
 
 
 __all__ = [

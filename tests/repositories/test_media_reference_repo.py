@@ -693,3 +693,33 @@ async def test_a_file_only_other_spaces_cards_name_is_not_this_spaces(db):
     )
     repo = SqliteMediaReferenceRepo(db)
     assert not await repo.confined_to_space("card.webp", "sp1")
+
+
+async def test_a_file_only_a_deleted_or_held_row_names_is_not_live(db):
+    """v_83 review M6 — on demand a household sends only a file the space
+    shows NOW: a deleted post's picture, or one only a moderation queue
+    names, is never re-sent (that would undo the delete for GFS readers)."""
+    await _two_spaces(db)
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, image_urls_json)"
+        " VALUES('p1', 'sp1', 'u1', 'image', ?)",
+        ('["api/media/live.webp"]',),
+    )
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, media_url, deleted)"
+        " VALUES('p2', 'sp1', 'u1', 'image', 'api/media/gone.webp', 1)"
+    )
+    await db.enqueue(
+        "INSERT INTO space_calendar_events(id, space_id, summary, start_dt, end_dt,"
+        " created_by, cover_url, deleted_at) VALUES('e1', 'sp1', 'S',"
+        " '2026-01-01T00:00:00+00:00', '2026-01-02T00:00:00+00:00', 'u1',"
+        " 'api/media/cover.webp', '2026-01-03')"
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.live_in_space("live.webp", "sp1")
+    assert not await repo.live_in_space("live.webp", "sp2")
+    assert not await repo.live_in_space("gone.webp", "sp1")
+    assert not await repo.live_in_space("cover.webp", "sp1")
+    assert not await repo.live_in_space("nobody.webp", "sp1")
+    # Still the space's content for the eager path (unchanged).
+    assert await repo.confined_to_space("gone.webp", "sp1")

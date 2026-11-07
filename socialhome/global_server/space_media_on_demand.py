@@ -79,6 +79,7 @@ from ..domain.gfs_space_media_on_demand import (
     WantedRequest,
 )
 from ..moment_public_media import is_blob_id
+from ..space_media_hint import SpaceMediaHint
 from .node_route import scoped_id
 from .public import ClientIpResolver, SlidingWindowCounter, node_share
 from .space_media import BodyReadGate
@@ -112,8 +113,25 @@ WAIT_PER_NODE: int = 512
 #: (cluster-wide: each node allows its share).
 WANTED_MAX_PER_MINUTE_PER_IP: int = 60
 
+#: Distinct reader hints a session keeps to retry with when the holder
+#: finds one unusable (a reader without the key can't make a blob dark).
+MAX_HINTS_PER_SESSION: int = 4
+
+#: One reader prefix may have this share of a scope's hourly stream bytes
+#: (``scope_stream_bytes_per_hour // PREFIX_STREAM_SHARE``).
+PREFIX_STREAM_SHARE: int = 8
+
+#: A reader is cut off when its copy is not written within the time left
+#: plus the blob at this rate (a reader that stops reading can't pin it).
+MIN_READER_BYTES_PER_S: int = 64 * 1024
+
+#: Why a holder declined (``POST …/decline`` body ``{"reason": …}``).
+DECLINE_BAD_HINT = "bad_hint"
+DECLINE_NOT_HELD = "not_held"
+
 #: The keyed hourly budgets' labels (the cache's ``ip_bytes`` table).
 _STREAM_BUDGET = "od-stream:"
+_PREFIX_STREAM_BUDGET = "od-prefix-stream:"
 _WANTED_BUDGET = "od-wanted:"
 
 #: Outcomes of :meth:`GfsSpaceMediaOnDemand.want` that are not a session.
@@ -138,6 +156,14 @@ class MediaSession:
     scope_id: str
     mode: str
     deadline: float
+    #: The reader hints to try, the opener's first (others joined later).
+    hints: list[SpaceMediaHint] = field(default_factory=list)
+    #: The network prefix (keyed hash) of the reader that opened it.
+    opener_prefix: str = ""
+    #: Every refusal so far was an unusable hint (nobody said "not held"):
+    #: the blob is not marked missing on this node.
+    only_bad_hints: bool = True
+    decline_reason: str = ""
     #: The household asked right now; only it may serve or decline.
     target: str = ""
     size: int = 0
@@ -238,6 +264,8 @@ class GfsSpaceMediaOnDemand:
         "_drivers",
         "_fan_out",
         "_federation",
+        "_pending",
+        "_pinned",
         "_recent",
         "_route_tag",
         "_sessions",
@@ -275,6 +303,12 @@ class GfsSpaceMediaOnDemand:
         #: (blob, scope) → monotonic time until which a repeat does nothing.
         self._recent: dict[tuple[str, str, str], float] = {}
         self._drivers: set[asyncio.Task] = set()
+        #: (blob, scope) → the decision being made for its first reader;
+        #: readers arriving meanwhile wait on it instead of deciding again.
+        self._pending: dict[tuple[str, str, str], asyncio.Future] = {}
+        #: Sessions a reader is still being written from (they hold memory
+        #: after the session closed): counted in the room check.
+        self._pinned: set[str] = set()
         #: Readers waiting at once (per client, per prefix, per node).
         self.wait_gate = BodyReadGate(
             per_client=WAIT_PER_CLIENT,
@@ -313,7 +347,35 @@ class GfsSpaceMediaOnDemand:
         key = (blob_id, req.scope, req.scope_id)
         live = self._live(key)
         if live is not None:
+            self._add_hint(live, req.hint)
             return live
+        pending = self._pending.get(key)
+        if pending is not None:
+            # Another reader of this blob is being decided right now: share
+            # its outcome (never its own prefix's limit).
+            shared = await asyncio.shield(pending)
+            if isinstance(shared, MediaSession):
+                self._add_hint(shared, req.hint)
+                return shared
+            return shared if isinstance(shared, Cached) else MISS
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._pending[key] = fut
+        outcome: Cached | MediaSession | str = MISS
+        try:
+            outcome = await self._decide_and_open(blob_id, key, req, prefix_key)
+        finally:
+            self._pending.pop(key, None)
+            fut.set_result(outcome)
+        return outcome
+
+    async def _decide_and_open(
+        self,
+        blob_id: str,
+        key: tuple[str, str, str],
+        req: WantedRequest,
+        prefix_key: str,
+    ) -> Cached | MediaSession | str:
+        """The first reader's path: count it, decide, claim, open."""
         if not await self._scope_active(req.scope, req.scope_id):
             return MISS
         if not await self._store.reserve_hourly(
@@ -335,6 +397,8 @@ class GfsSpaceMediaOnDemand:
             self._counters.misses += 1
             return MISS
         mode = await self.decide(demand.requests, demand.stored_at, now=now)
+        if not self._room_for(req.scope, req.scope_id):
+            return BUSY
         if mode == MODE_CACHE and not await self._demand.claim(
             blob_id,
             req.scope,
@@ -345,10 +409,9 @@ class GfsSpaceMediaOnDemand:
             # Another node (or an earlier request) holds the one re-upload:
             # wait for it to land in the shared cache.
             return await self._await_stored(blob_id)
-        if not self._room_for(req.scope, req.scope_id):
-            return BUSY
         session = self._open(blob_id, req, mode)
-        task = asyncio.create_task(self._drive(session, req))
+        session.opener_prefix = prefix_key
+        task = asyncio.create_task(self._drive(session))
         self._drivers.add(task)
         task.add_done_callback(self._drivers.discard)
         return session
@@ -373,12 +436,37 @@ class GfsSpaceMediaOnDemand:
     # ── Holders ──────────────────────────────────────────────────────────
 
     async def charge_stream(self, session: MediaSession, size: int) -> bool:
-        """Charge *size* bytes to the scope's hourly stream budget."""
+        """Charge *size* bytes to the scope's hourly stream budget and to the
+        opening reader prefix's share of it (one prefix can't use up a
+        scope's budget for everyone)."""
+        share = max(1, self._cfg.scope_stream_bytes_per_hour // PREFIX_STREAM_SHARE)
+        if not await self._store.reserve_hourly(
+            f"{_PREFIX_STREAM_BUDGET}{session.opener_prefix}", size, share
+        ):
+            return False
         return await self._store.reserve_hourly(
             f"{_STREAM_BUDGET}{session.scope_kind}:{session.scope_id}",
             size,
             self._cfg.scope_stream_bytes_per_hour,
         )
+
+    def decline(self, session: MediaSession, reason: str) -> None:
+        """The asked holder can't serve: :data:`DECLINE_BAD_HINT` (the hint
+        did not open, or named nothing at this address) or anything else
+        (it doesn't hold the file, its budget)."""
+        session.decline_reason = reason
+        session.declined.set()
+
+    def reader_deadline(self, session: MediaSession) -> float:
+        """Seconds a reader may take to receive *session*'s blob."""
+        return self.remaining(session) + 10.0 + session.size / MIN_READER_BYTES_PER_S
+
+    def pin(self, session: MediaSession) -> None:
+        self._pinned.add(session.ticket)
+
+    def unpin(self, session: MediaSession) -> None:
+        if session.readers <= 0:
+            self._pinned.discard(session.ticket)
 
     async def verify(self, session: MediaSession) -> bool:
         """Whether the whole body sits at the address the readers asked for."""
@@ -436,7 +524,17 @@ class GfsSpaceMediaOnDemand:
             self._recent = {k: t for k, t in self._recent.items() if t > now}
 
     def _room_for(self, scope_kind: str, scope_id: str) -> bool:
-        if len(self._sessions) >= self._cfg.max_streams:
+        """Room for one more session: live ones and closed ones a reader is
+        still being written from count alike — a delivered session merely
+        lingering (nobody reading it) gives way first."""
+        if not self._has_room(scope_kind, scope_id):
+            for session in list(self._sessions.values()):
+                if session.verified and session.readers <= 0:
+                    self._close(session)
+        return self._has_room(scope_kind, scope_id)
+
+    def _has_room(self, scope_kind: str, scope_id: str) -> bool:
+        if len(self._sessions.keys() | self._pinned) >= self._cfg.max_streams:
             return False
         same = sum(
             1
@@ -444,6 +542,13 @@ class GfsSpaceMediaOnDemand:
             if (s.scope_kind, s.scope_id) == (scope_kind, scope_id)
         )
         return same < self._cfg.scope_max_streams
+
+    @staticmethod
+    def _add_hint(session: MediaSession, hint: SpaceMediaHint) -> None:
+        if len(session.hints) < MAX_HINTS_PER_SESSION and all(
+            h.ct != hint.ct for h in session.hints
+        ):
+            session.hints.append(hint)
 
     def _open(self, blob_id: str, req: WantedRequest, mode: str) -> MediaSession:
         session = MediaSession(
@@ -453,6 +558,7 @@ class GfsSpaceMediaOnDemand:
             scope_id=req.scope_id,
             mode=mode,
             deadline=self._clock() + self._cfg.stream_wait_seconds,
+            hints=[req.hint],
         )
         self._sessions[session.ticket] = session
         self._by_key[session.key] = session.ticket
@@ -462,7 +568,9 @@ class GfsSpaceMediaOnDemand:
         self._sessions.pop(session.ticket, None)
         if self._by_key.get(session.key) == session.ticket:
             self._by_key.pop(session.key, None)
-        if not session.verified:
+        if not session.verified and not session.only_bad_hints:
+            # A holder answered "not held" (or nobody answered): this node
+            # asks nobody for it for a while.
             self._recent[session.key] = self._clock() + self._cfg.coalesce_seconds
 
     async def _scope_active(self, scope_kind: str, scope_id: str) -> bool:
@@ -492,18 +600,17 @@ class GfsSpaceMediaOnDemand:
             seats.sort(key=lambda iid: not ws.takes(iid, SPACE_MEDIA_REQUEST_FRAME))
         return seats[:MAX_HOLDERS_ASKED]
 
-    async def _drive(self, session: MediaSession, req: WantedRequest) -> None:
+    async def _drive(self, session: MediaSession) -> None:
         """Ask the holders one after another until one serves, within the
         session's deadline; a session nobody serves fails (a clean miss)."""
         try:
-            for target in await self._holders(session.scope_kind, session.scope_id):
-                if session.claimed or self.remaining(session) <= 0:
-                    break
-                if await self._ask(session, req, target):
-                    break
+            await self._ask_holders(session)
             if not session.claimed:
                 self._counters.misses += 1
                 session.finish(ok=False)
+                if session.mode == MODE_CACHE and session.only_bad_hints:
+                    # Only junk hints: the one re-upload is still to come.
+                    await self._demand.release_claim(*session.key)
             await session.done.wait()
             if session.verified:
                 # Joinable a little longer: a reader arriving now gets the
@@ -519,27 +626,45 @@ class GfsSpaceMediaOnDemand:
         finally:
             self._close(session)
 
+    async def _ask_holders(self, session: MediaSession) -> None:
+        """Each holder in turn, each with the session's hints in turn (a
+        hint the holder can't use is no reason to give up on the blob)."""
+        for target in await self._holders(session.scope_kind, session.scope_id):
+            tried = 0
+            while tried < len(session.hints):
+                if session.claimed or self.remaining(session) <= 0:
+                    return
+                hint = session.hints[tried]
+                tried += 1
+                if await self._ask(session, hint, target):
+                    return
+                if session.decline_reason != DECLINE_BAD_HINT:
+                    session.only_bad_hints = False
+                    break
+
     async def _ask(
-        self, session: MediaSession, req: WantedRequest, target: str
+        self, session: MediaSession, hint: SpaceMediaHint, target: str
     ) -> bool:
-        """Ask *target*; ``True`` once it started sending."""
+        """Ask *target* with *hint*; ``True`` once it started sending."""
         if self._fan_out is None:
             return False
         session.target = target
         session.declined.clear()
+        session.decline_reason = ""
         frame = MediaRequestFrame(
             ticket=session.ticket,
             scope=session.scope_kind,
             scope_id=session.scope_id,
             blob_id=session.blob_id,
             mode=session.mode,
-            hint=req.hint,
+            hint=hint,
         )
         self._counters.holder_requests += 1
         delivered = await self._fan_out.deliver_to_household(
             target, frame.to_push(), timeout=min(8.0, self.remaining(session))
         )
         if not delivered:
+            session.decline_reason = DECLINE_NOT_HELD
             return False
         waits = [
             asyncio.ensure_future(session.started.wait()),
@@ -558,6 +683,8 @@ class GfsSpaceMediaOnDemand:
             return True
         if session.declined.is_set():
             self._counters.declined += 1
+        else:
+            session.decline_reason = DECLINE_NOT_HELD  # no answer in time
         # Late bytes from this household are refused from now on.
         session.target = ""
         return False

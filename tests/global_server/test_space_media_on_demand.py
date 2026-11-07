@@ -157,3 +157,28 @@ def test_waiting_readers_are_bounded_per_client_and_prefix():
     )
     assert not gate.enter("c3", "p1", 0)
     assert gate.enter("c3", "p2", 0)
+
+
+class _BudgetStore(_Store):
+    def __init__(self) -> None:
+        super().__init__()
+        self.used: dict[str, int] = {}
+
+    async def reserve_hourly(self, label: str, size: int, cap: int) -> bool:
+        if self.used.get(label, 0) + size > cap:
+            return False
+        self.used[label] = self.used.get(label, 0) + size
+        return True
+
+
+async def test_one_reader_prefix_gets_only_its_share_of_a_scopes_stream_bytes():
+    """Review M3: one network prefix can't use up a scope's stream budget."""
+    store = _BudgetStore()
+    svc = _svc(store, scope_stream_bytes_per_hour=800)  # type: ignore[arg-type]
+    mine = _session(0)
+    mine.opener_prefix = "p1"
+    other = _session(0)
+    other.opener_prefix = "p2"
+    assert await svc.charge_stream(mine, 100)
+    assert not await svc.charge_stream(mine, 1)  # its 1/8 share is used up
+    assert await svc.charge_stream(other, 100)

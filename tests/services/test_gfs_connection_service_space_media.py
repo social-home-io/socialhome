@@ -428,15 +428,25 @@ async def test_serve_and_decline_are_signed_by_the_household(env):
     assert data == b"cipher"
     assert headers[SPACE_MEDIA_AUTH_HEADER] == "auth"
     assert headers["X-SH-Instance"] == "me"
-    signed = serve_signing_body("me", ticket, int(headers["X-SH-Timestamp"]))
+    signed = serve_signing_body("me", ticket, int(headers["X-SH-Timestamp"]), "serve")
     assert verify_ed25519(
         ed25519_public_key(seed),
         canonical_bytes(signed),
         b64url_decode(headers["X-SH-Signature"]),
     )
-    assert await svc.serve_space_media(conn, ticket, None) == 200
-    url, _, headers = session.posts[-1]
+    assert (
+        await svc.serve_space_media(conn, ticket, None, decline_reason="bad_hint")
+        == 200
+    )
+    url, body, headers = session.posts[-1]
     assert url == f"https://g1.example/gfs/media/serve/{ticket}/decline"
+    assert body == {"reason": "bad_hint"}
+    signed = serve_signing_body("me", ticket, int(headers["X-SH-Timestamp"]), "decline")
+    assert verify_ed25519(
+        ed25519_public_key(seed),
+        canonical_bytes(signed),
+        b64url_decode(headers["X-SH-Signature"]),
+    )
     assert SPACE_MEDIA_AUTH_HEADER not in headers
     session.raise_on = "PUT"
     assert await svc.serve_space_media(conn, ticket, b"c") is None

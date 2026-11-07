@@ -43,7 +43,10 @@ def test_round_trip() -> None:
     got = open_space_media_hint(
         hint, media_key=KEY, scope="space", scope_id="sp-1", blob_id=BLOB
     )
-    assert got == LOC
+    assert (got.item_id, got.origin, got.filename) == ("post-1", "inst-a", "p.webp")
+    # It carries when it was sealed: fresh now, refused by a holder later.
+    assert got.fresh()
+    assert not got.fresh(got.issued_at + mod.HINT_MAX_AGE_S + 1)
 
 
 def test_names_nothing_in_the_clear() -> None:

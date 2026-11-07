@@ -87,6 +87,8 @@ from ..domain.gfs_space_media import (
 from ..domain.gfs_space_media_on_demand import (
     ON_DEMAND_CAPABILITY_KEY,
     SERVE_INSTANCE_HEADER,
+    SERVE_OP_DECLINE,
+    SERVE_OP_SERVE,
     SERVE_SIG_HEADER,
     SERVE_TS_HEADER,
     serve_signing_body,
@@ -3376,20 +3378,24 @@ class GfsConnectionService:
         blob: bytes | None,
         *,
         upload_auth: str | None = None,
+        decline_reason: str = "not_held",
     ) -> int | None:
         """Answer a GFS's ``space_media_request`` (v_83): ``PUT
         /gfs/media/serve/{ticket}`` with *blob* (and, for a re-upload, the
         normal upload authorization *upload_auth*), or — *blob* ``None`` —
-        ``POST …/decline``. Signed by this household's key (the GFS asked
-        this household by name over its own socket). Returns the HTTP
-        status, or ``None`` when nothing could be sent."""
+        ``POST …/decline`` with *decline_reason* (``bad_hint`` /
+        ``not_held``). Signed by this household's key over the ticket and
+        the operation (the GFS asked this household by name over its own
+        socket). Returns the HTTP status, or ``None`` when nothing could be
+        sent."""
         if not self._own_instance_id or not self._own_signing_key:
             return None
         base = f"{conn.inbox_url.rstrip('/')}/gfs/media/serve/{ticket}"
         ts = int(time.time())
+        op = SERVE_OP_DECLINE if blob is None else SERVE_OP_SERVE
         sig = sign_ed25519(
             self._own_signing_key,
-            canonical_bytes(serve_signing_body(self._own_instance_id, ticket, ts)),
+            canonical_bytes(serve_signing_body(self._own_instance_id, ticket, ts, op)),
         )
         headers = {
             SERVE_INSTANCE_HEADER: self._own_instance_id,
@@ -3403,6 +3409,7 @@ class GfsConnectionService:
                 if blob is None:
                     async with client.post(
                         f"{base}/decline",
+                        json={"reason": decline_reason},
                         headers=headers,
                         allow_redirects=False,
                         timeout=aiohttp.ClientTimeout(total=15),

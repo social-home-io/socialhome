@@ -2321,6 +2321,9 @@ class AbstractGfsSpaceMediaDemandRepo(Protocol):
     async def claim(
         self, blob_id: str, scope_kind: str, scope_id: str, *, now: int, hold_s: int
     ) -> bool: ...
+    async def release_claim(
+        self, blob_id: str, scope_kind: str, scope_id: str
+    ) -> None: ...
     async def prune(self, *, before: int) -> int: ...
 
 
@@ -2393,6 +2396,15 @@ class SqliteGfsSpaceMediaDemandRepo:
             (now + hold_s, now, blob_id, scope_kind, scope_id, now),
         )
         return changed > 0
+
+    async def release_claim(self, blob_id: str, scope_kind: str, scope_id: str) -> None:
+        """Give the re-upload claim back (the session asked nobody usable —
+        only unusable hints — or had no room)."""
+        await self._db.enqueue(
+            "UPDATE gfs_space_media_demand SET claimed_until = 0"
+            " WHERE blob_id=? AND scope_kind=? AND scope_id=?",
+            (blob_id, scope_kind, scope_id),
+        )
 
     async def prune(self, *, before: int) -> int:
         return await self._db.enqueue_rowcount(
