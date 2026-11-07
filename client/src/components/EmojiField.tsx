@@ -91,18 +91,18 @@ export function EmojiField({ value, openKey, label, hint, offerHaSymbol }: Emoji
           )}
         </div>
       </div>
-      {isOpen && offerHaSymbol && (
-        <div class="sh-emoji-field-symbols" role="group" aria-label={t('emoji_field.symbols')}>
-          <button type="button" class={`sh-emoji-field-symbol${isHa ? ' is-on' : ''}`}
-                  aria-pressed={isHa} onClick={() => choose(HA_SPACE_SYMBOL)}>
-            <HaLogo />
-            <span>{t('emoji_field.home_assistant')}</span>
-          </button>
-        </div>
-      )}
       {isOpen && (
         <ReactionPicker
           inline
+          header={offerHaSymbol && (
+            <div class="sh-emoji-field-symbols" role="group" aria-label={t('emoji_field.symbols')}>
+              <button type="button" class={`sh-emoji-field-symbol${isHa ? ' is-on' : ''}`}
+                      aria-pressed={isHa} onClick={() => choose(HA_SPACE_SYMBOL)}>
+                <HaLogo />
+                <span>{t('emoji_field.home_assistant')}</span>
+              </button>
+            </div>
+          )}
           onSelect={choose}
           onClose={() => { openFor.value = null }}
         />

@@ -147,7 +147,7 @@ describe('the top bar', () => {
     await tl.waitFor(() => expect(pageTitle.value).toBe('Neighbourhood Garden'))
     expect(pageTitleGlyph.value?.emoji).toBe(HA_SPACE_SYMBOL)
     expect(document.title).toBe('Neighbourhood Garden · Social Home')
-    expect(document.title).not.toContain('︎')
+    expect(document.title).not.toContain('\uFE0E')
     r.unmount()
     await tl.waitFor(() => expect(pageTitleGlyph.value).toBeNull())
   }, 20000)

@@ -16483,7 +16483,7 @@ a.sh-link-preview-link:focus-visible {
 .sh-emoji-field-clear:hover { color: var(--sh-primary-hover, var(--sh-primary)); }
 /* Ready-made symbols above the emoji grid (a space's field: the Home
  * Assistant logo). One chip each, the logo beside its name. */
-.sh-emoji-field-symbols { display: flex; flex-wrap: wrap; gap: var(--sh-space-xs); }
+.sh-emoji-field-symbols { display: flex; flex-wrap: wrap; gap: var(--sh-space-xs); margin-bottom: var(--sh-space-sm); }
 .sh-emoji-field-symbol {
   display: inline-flex;
   align-items: center;

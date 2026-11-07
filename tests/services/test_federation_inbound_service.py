@@ -2702,11 +2702,11 @@ async def test_space_config_changed_keeps_the_home_assistant_symbol(db, bus, inb
     a member household, so its SPA draws the logo, not a house."""
     await _seed_space(db, space_id="sp-ha", from_instance="peer-a", seq=5)
     ev = _cfg_event(space_id="sp-ha", from_instance="peer-a", sequence=6, name="Home")
-    ev.payload["emoji"] = "\U0001f3e0︎"
-    ev.payload["space_meta"]["emoji"] = "\U0001f3e0︎"
+    ev.payload["emoji"] = "\U0001f3e0\ufe0e"
+    ev.payload["space_meta"]["emoji"] = "\U0001f3e0\ufe0e"
     await inbound._on_space_config_changed(ev)
     row = await db.fetchone("SELECT emoji FROM spaces WHERE id='sp-ha'")
-    assert row["emoji"] == "\U0001f3e0︎"
+    assert row["emoji"] == "\U0001f3e0\ufe0e"
 
 
 async def test_an_ownership_transfer_forgets_the_stubs_owner_seat(db, bus, inbound):

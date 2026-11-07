@@ -15,6 +15,7 @@ import { contentWrite } from '@/utils/contentWrite'
 import { Modal } from './Modal'
 import { Button } from './Button'
 import { SpaceInlineGlyph } from '@/features/spaces/SpaceGlyph'
+import { titleEmoji } from '@/features/spaces/spaceGlyph'
 import { ProtectedNotice, isRestricted } from './ProtectedNotice'
 import { isOne, t } from '@/i18n/i18n'
 import { showToast } from './Toast'
@@ -234,7 +235,7 @@ export function BazaarCreateDialog({ onCreated }: { onCreated?: () => void }) {
                 >
                   {availableSpaces.value.map((s) => (
                     <option key={s.id} value={s.id}>
-                      {s.emoji ? `${s.emoji} ` : ''}{s.name}
+                      {titleEmoji(s.emoji) ? `${titleEmoji(s.emoji)} ` : ''}{s.name}
                     </option>
                   ))}
                 </select>

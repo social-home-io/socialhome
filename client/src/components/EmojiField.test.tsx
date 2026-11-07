@@ -89,6 +89,20 @@ describe('EmojiField — the Home Assistant logo as a choice', () => {
     expect(tile.getAttribute('aria-label')).toContain('Home Assistant')
   })
 
+  it('a real press (mousedown, then click) picks it — the picker does not close first', async () => {
+    const value = signal('')
+    const { container } = render(<EmojiField value={value} openKey="ha5" offerHaSymbol />)
+    fireEvent.click(container.querySelector('.sh-emoji-field-tile')!)
+    const chip = haChip(container)!
+    // Inside the picker panel, so its outside-press guard leaves it open.
+    expect(chip.closest('.sh-reaction-picker')).toBeTruthy()
+    fireEvent.mouseDown(chip)
+    await new Promise(r => setTimeout(r, 0))
+    expect(haChip(container)).toBe(chip)
+    fireEvent.click(chip)
+    expect(value.value).toBe(HA_SPACE_SYMBOL)
+  })
+
   it('shows as chosen when re-opened, and Remove clears it', () => {
     const value = signal(HA_SPACE_SYMBOL)
     const { container } = render(<EmojiField value={value} openKey="ha4" offerHaSymbol />)

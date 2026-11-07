@@ -16,12 +16,10 @@ interface Props {
   iconUrl?: string | null
   emoji?: string | null
   name?: string | null
-  /** Class for the ``<img>`` when the picture shows. */
-  imgClass?: string
 }
 
-export function SpaceGlyph({ iconUrl, emoji, name, imgClass }: Props) {
-  if (iconUrl) return <img class={imgClass} src={iconUrl} alt="" loading="lazy" />
+export function SpaceGlyph({ iconUrl, emoji, name }: Props) {
+  if (iconUrl) return <img src={iconUrl} alt="" loading="lazy" />
   if (isHaSymbol(emoji)) return <HaLogo />
   return <>{spaceGlyph(emoji, name)}</>
 }
@@ -30,7 +28,7 @@ export function SpaceGlyph({ iconUrl, emoji, name, imgClass }: Props) {
  *  toggle's label): nothing when the space has neither a picture nor an
  *  emoji — the name alone, as before — else ``SpaceGlyph`` at text size
  *  (``.sh-space-inline-glyph``), hidden from assistive tech. */
-export function SpaceInlineGlyph({ iconUrl, emoji, name }: Omit<Props, 'imgClass'>) {
+export function SpaceInlineGlyph({ iconUrl, emoji, name }: Props) {
   if (!iconUrl && !emoji) return null
   return (
     <span class="sh-space-inline-glyph" aria-hidden="true">

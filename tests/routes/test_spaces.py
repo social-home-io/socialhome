@@ -2553,7 +2553,7 @@ async def test_space_emoji_keeps_the_home_assistant_symbol_unchanged(client):
     assert r.status == 201, await r.text()
     sid = (await r.json())["id"]
     detail = await client.get(f"/api/spaces/{sid}", headers=_auth(client._admin_token))
-    assert (await detail.json())["emoji"] == "\U0001f3e0︎"
+    assert (await detail.json())["emoji"] == "\U0001f3e0\ufe0e"
 
     p = await client.patch(
         f"/api/spaces/{sid}", json={"emoji": "🥕"}, headers=_auth(client._admin_token)

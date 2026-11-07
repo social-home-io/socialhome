@@ -28,7 +28,7 @@ import { LocalAreaMap } from '@/components/LocalAreaMap'
 import { Spinner } from '@/components/Spinner'
 import { showToast } from '@/components/Toast'
 import { isOne, t } from '@/i18n/i18n'
-import { useTitle } from '@/store/pageTitle'
+import { useTitle, useTitleGlyph } from '@/store/pageTitle'
 import { ensureHouseholdHome, householdHome } from '@/store/householdHome'
 import { directoryCache, getCachedEntry } from '@/store/spaceDirectory'
 import type { DirectoryEntry, Space } from '@/types'
@@ -153,6 +153,9 @@ export default function SpacePublicDetailPage() {
   const [activeModal, setActiveModal] = useState<DirectoryEntry | null>(null)
 
   useTitle(detail.value?.name ?? t('spaces.space_title'))
+  useTitleGlyph(detail.value
+    ? { iconUrl: detail.value.icon_url ?? null, emoji: detail.value.emoji, name: detail.value.name }
+    : null)
   useEffect(() => { void ensureHouseholdHome() }, [])
 
   useEffect(() => {

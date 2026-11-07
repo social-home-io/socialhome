@@ -306,7 +306,7 @@ export function ShareSheet({ items: picked, nameOf, onClose, onShared }: {
                     })
                   // The space's picture: the target's own, else the one the
                   // spaces list already holds (no extra fetch).
-                  const iconUrl = space.icon_url ?? spaceIconUrl(space.id)
+                  const iconUrl = spaceIconUrl(space.id)
                   return row(
                     `space:${space.id}`,
                     <SpaceGlyph iconUrl={iconUrl} emoji={space.emoji} name={space.name} />,

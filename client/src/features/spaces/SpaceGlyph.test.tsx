@@ -11,12 +11,10 @@ const tile = (el: JSX.Element) =>
 
 describe('SpaceGlyph — picture, then Home Assistant / emoji, then initial', () => {
   it('the uploaded picture wins over everything', () => {
-    const el = tile(<SpaceGlyph iconUrl="api/spaces/s1/icon?v=1" emoji={HA_SPACE_SYMBOL}
-                                name="Home" imgClass="x" />)
+    const el = tile(<SpaceGlyph iconUrl="api/spaces/s1/icon?v=1" emoji={HA_SPACE_SYMBOL} name="Home" />)
     const img = el.querySelector('img')!
     expect(img.getAttribute('src')).toBe('api/spaces/s1/icon?v=1')
     expect(img.getAttribute('alt')).toBe('')
-    expect(img.classList.contains('x')).toBe(true)
     expect(el.querySelector('svg')).toBeNull()
   })
 

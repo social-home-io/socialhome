@@ -9,11 +9,9 @@ from socialhome.domain.emoji import MAX_EMOJI_CODEPOINTS, is_single_emoji
 
 @pytest.mark.parametrize(
     "value",
-    ["🔢", "✏️", "👩‍🔬", "👍🏽", "🇬🇧", "⚽", "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "1️⃣", "#️⃣", "*⃣", "★", "🏠", "🏠\ufe0e"],
+    ["🔢", "✏️", "👩‍🔬", "👍🏽", "🇬🇧", "⚽", "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "1️⃣", "#️⃣", "*⃣", "★", "🏠"],
 )
 def test_single_emoji_accepted(value):
-    """``🏠\ufe0e`` is the Social Home space icon "Home Assistant" (the
-    SPA draws the logo); it must stay an ordinary single emoji."""
     assert is_single_emoji(value) is True
 
 
