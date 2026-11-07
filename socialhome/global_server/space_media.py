@@ -151,6 +151,10 @@ _ORPHAN_LOOKUP_BATCH: int = 500
 #: dir, renewing each hourly run; another takes over when it lapses.
 ORPHAN_LEASE_S: int = 3000
 
+#: How long the on-demand state of a blob (v_83: when it was stored, its
+#: recent requests) is kept after it was last touched.
+DEMAND_KEEP_S: int = 30 * 86_400
+
 #: The upload rate window (a sliding hour over hourly buckets).
 _HOUR: int = 3600
 
@@ -625,6 +629,8 @@ class GfsSpaceMediaStore:
         dropped = await self.prune_expired(now)
         await self._repo.prune_upload_counts(before_bucket=now // _HOUR - 1)
         await self._repo.prune_ip_bytes(before_bucket=now // _HOUR - 1)
+        if self._demand is not None:
+            await self._demand.prune(before=now - DEMAND_KEEP_S)
         if await self._repo.acquire_sweep_lease(
             self._node_id, now=now, ttl=ORPHAN_LEASE_S
         ):

@@ -608,12 +608,147 @@ the uploader household's key (the trusted-mode trade-off of
 was sealed twice under the same key", which the content address shows
 anyway.
 
-**Deferred.** Files over 8 MiB (long videos) and re-uploading a blob the
-cache evicted or expired — an on-demand, coalesced "media wanted" path
-(next PR). Tracked follow-ups: **comment media** and **a seed holder's
+**Deferred.** Files over 8 MiB (long videos). A blob the cache evicted or
+expired comes back on view since v_83 (below). Tracked follow-ups: **comment media** and **a seed holder's
 relayed copy of an approved post** carry no descriptor yet. A private space whose owner left `private_gfs`
 off has no channel: its link-joined members are reached through the space
 scope only while the space is listed on that GFS.
+
+## Space media on demand (v_83)
+
+**Why.** The GFS keeps a space blob only as a cache: a few days at most,
+and the least recently fetched go first when it is full. Before v_83 a
+reader that missed a blob — an older picture, one evicted from a busy
+cache — never got it. Now a view asks for it, and a household that holds
+the file sends it again. GFS side, routes, settings and bounds:
+[`discovery.md`](./discovery.md#space-media-on-demand-v_83).
+
+**Who.** The same readers as v_80 — link-joined members and followers of a
+global space. Both ask the same way. Paired and mesh members never use it.
+
+**Reader** (`SpaceMediaGfsFetcher`). Only a **view**
+(`GET /api/media/{local_name}`) whose fetch found the blob on no GFS asks —
+never a prefetch, so only a person looking at the item makes a household
+send anything. It asks the first source whose signed `space_media`
+capability carries `on_demand: {wait_s}`:
+`POST /gfs/media/{blob_id}/wanted` with `{scope, scope_id, hint}` over the
+same cookie-less, address-pinned session as the fetch. The **hint**
+(`space_media_hint.py`, suite `smh1-aesgcm-256`) seals what the descriptor
+says about the file — the item, the household that sealed it, the author's
+file name — under a key derived from the epoch's space media key, with a
+random nonce and the scope, scope id, blob and epoch in the AAD. The GFS
+can't open it; it names nothing about the reader. The answer is checked and
+stored exactly like a fetched blob (scope-bound address, decrypt,
+write-once); a miss there is a miss, and the view's 5-minute miss cache
+applies.
+
+**Holder** (`SpaceMediaGfsResponder`). A household lists
+`space_media_serve` in its GFS hello and answers the GFS's
+`space_media_request {ticket, scope, scope_id, blob_id, mode, hint}`: it
+opens the hint, finds the file under its own name for it (the author's
+name, or the `sd-` / `sg-` name it got the file under — never a reserved
+`dm-` / `gm-` name), requires that only this space's content references it
+(`confined_to_space`), seals it again (deterministic, so byte-identical)
+and checks that it sits at exactly the asked address. Then it sends
+`PUT /gfs/media/serve/{ticket}`, signed by its household key — with its
+normal upload authorization for a `cache` request, at most once per (GFS,
+blob) per 10 minutes — or `POST …/decline`. At most 2 answers at once and
+1 GiB sent an hour (past either: decline).
+
+**Large videos are lazy.** A video whose blob is at least 1 MiB is
+described but no longer uploaded at once to a GFS that proves `on_demand`,
+while every link-joined reader of the space is at v_83 or above (an older
+one keeps the eager upload): it goes only when someone plays it. Pictures
+go at once, as before.
+
+**Cache or stream.** The GFS decides per request: content asked
+`cache_after_requests` (3) times within the hour, or content it stored
+within `fresh_seconds` (7 days) while the cache is below 95 % full, is
+re-uploaded into the cache; anything else — old content, a one-off view, a
+full cache — is streamed to the waiting reader(s) and not stored
+(`Cache-Control: no-store`). Only one household is asked at a time: the
+space's host for a listed space, a seated member household for a private
+space's channel (at most 3 in turn).
+
+**Wanted → one re-upload** (a cluster: the reader's request lands on node B,
+the host's socket is on node A):
+
+```mermaid
+sequenceDiagram
+    participant R as Reader household
+    participant LB as Load balancer
+    participant B as GFS node B
+    participant DB as Shared gfs.db + data dir
+    participant A as GFS node A
+    participant H as Holder (space host)
+    R->>LB: POST /gfs/media/{blob_id}/wanted {scope, scope_id, hint}
+    LB->>B: (any node)
+    B->>DB: not cached, count the request — stored lately or asked often?
+    B->>DB: claim the one re-upload of this blob (cluster-wide)
+    Note over B: session, ticket = route_tag(B).random
+    B->>A: NODE_DRAIN_HINT typed instance frame
+    A->>H: WS space_media_request {ticket, mode: cache, hint}
+    Note over H: open hint, find the file, confined_to_space,<br/>re-seal, check the address
+    H->>LB: PUT /gfs/media/serve/{tag}.{rand}<br/>X-SH-Instance / Timestamp / Signature + X-SH-Space-Media-Auth
+    LB->>B: routed by the ticket's tag
+    B-->>R: chunks as they arrive (last byte held back)
+    Note over B: whole body at the asked address
+    B-->>R: last byte (no-store)
+    B->>DB: store (normal caps, the holder's upload authorization)
+    B-->>H: 200 {stored: true}
+    Note over R: address check, decrypt, write-once
+    Note over B,DB: later readers get the cached blob<br/>(GET /gfs/media/{blob_id}, CDN-cacheable)
+```
+
+**Miss → stream** (old content or a full cache: nothing stored):
+
+```mermaid
+sequenceDiagram
+    participant R as Reader household
+    participant G as GFS node
+    participant H as Holder
+    R->>G: POST /gfs/media/{blob_id}/wanted {scope, scope_id, hint}
+    G->>G: not cached, old content or cache ≥ full_percent → stream
+    G->>H: WS space_media_request {ticket, mode: stream, hint}
+    alt holder has the file
+        H->>G: PUT /gfs/media/serve/{ticket} (signed, no upload auth)
+        G-->>R: 200 piped blob, Cache-Control: no-store
+        Note over G: verified at its address, kept in memory<br/>coalesce_seconds for joiners, never on disk
+        G-->>H: 200 {stored: false}
+    else no file / over its budget
+        H->>G: POST /gfs/media/serve/{ticket}/decline
+        G-->>R: 404 no-store (after the next holder, if any)
+    end
+```
+
+**Cost.** Per trigger: the holder sends one blob (≤ 8 MiB; a typical
+picture is a 64 KiB–1 MiB bucket) to the GFS; the GFS sends each waiting
+reader one copy; in stream mode nothing is stored. The fully cached path is
+unchanged (an immutable `GET`, served by the CDN).
+
+- **A global space with 10 000 followers viewing 200 expired pictures**
+  (~300 KiB each). Without on-demand they all miss for good. With it, each
+  picture costs at most `cache_after_requests` (3) holder uploads before it
+  is cached — stream, stream, re-upload — and on a cluster at most one
+  stream per node per `coalesce_seconds` plus ONE re-upload cluster-wide:
+  ≤ 200 × (3 + nodes − 1) × 300 KiB ≈ 200 × 6 × 300 KiB ≈ **360 MB from the
+  host, once**. The 10 000 × 200 = 2 M reads (≈ 600 GB) are then served by
+  the cache and the CDN — the same as if the pictures had never expired.
+  Prefetch never asks, so only views cost. The host's 1 GiB / h and the
+  scope's 512 MiB / h stream budget cap any burst: past them, clean misses.
+- **One hostile reader asking for every blob id it can see.** ≤ 60 `wanted`
+  / min per IP and ≤ 240 holder requests an hour per /48 or /24
+  (cluster-wide) → ≤ 240 × 8 MiB ≈ 1.9 GiB / h of holder bytes per prefix
+  at most, further capped by the scope's 512 MiB / h and the holder's
+  1 GiB / h. A repeat of a failed blob within `coalesce_seconds` asks
+  nobody; a forged hint only makes the holder decline (the address must
+  match a real descriptor); waiting connections are ≤ 4 per client and ≤ 8
+  per prefix.
+
+**Fallback.** A reader below v_83 never asks (a blob that left the cache
+stays missing for it, as before). A holder below v_83 never listed
+`space_media_serve` and is never asked. A link-joined reader below v_83
+keeps eager video uploads. A GFS without `on_demand` is never asked.
 
 ## Implementation pointers
 
@@ -625,8 +760,9 @@ scope only while the space is listed on that GFS.
 - Raw-bytes AEAD: [`socialhome/federation/encoder.py`](../../socialhome/federation/encoder.py) (`encrypt_bytes` / `decrypt_bytes`)
 - Senders: [`dm_media_sync_service.py`](../../socialhome/services/dm_media_sync_service.py), [`space_media_sync_service.py`](../../socialhome/services/space_media_sync_service.py)
 - Receiver assembly: [`federation_inbound_service.py`](../../socialhome/services/federation_inbound_service.py)
-- Capability: [`socialhome/domain/federation_capabilities.py`](../../socialhome/domain/federation_capabilities.py) (`MIN_FOR_MEDIA_CHANNEL`, `MIN_FOR_SPACE_MEDIA_REFS`)
+- Capability: [`socialhome/domain/federation_capabilities.py`](../../socialhome/domain/federation_capabilities.py) (`MIN_FOR_MEDIA_CHANNEL`, `MIN_FOR_SPACE_MEDIA_REFS`, `MIN_FOR_SPACE_MEDIA_ON_DEMAND`)
 - GFS media cache (v_80): [`space_media_seal.py`](../../socialhome/space_media_seal.py), [`domain/space_media_ref.py`](../../socialhome/domain/space_media_ref.py), [`space_media_gfs_uploader.py`](../../socialhome/services/space_media_gfs_uploader.py), [`space_media_gfs_fetcher.py`](../../socialhome/services/space_media_gfs_fetcher.py), [`space_media_refs.py`](../../socialhome/services/space_media_refs.py), [`sync/space/media_refs.py`](../../socialhome/federation/sync/space/media_refs.py)
+- Space media on demand (v_83): [`space_media_hint.py`](../../socialhome/space_media_hint.py), [`domain/gfs_space_media_on_demand.py`](../../socialhome/domain/gfs_space_media_on_demand.py), [`space_media_gfs_responder.py`](../../socialhome/services/space_media_gfs_responder.py), [`space_media_gfs_fetcher.py`](../../socialhome/services/space_media_gfs_fetcher.py) (`_want`), [`gfs_connection_service.py`](../../socialhome/services/gfs_connection_service.py) (`want_space_media`, `serve_space_media`, `space_media_on_demand_wait`), GFS [`space_media_on_demand.py`](../../socialhome/global_server/space_media_on_demand.py) + [`routes/space_media_on_demand.py`](../../socialhome/global_server/routes/space_media_on_demand.py)
 
 ## Spec refs
 

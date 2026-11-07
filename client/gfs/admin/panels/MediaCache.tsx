@@ -1,7 +1,10 @@
 /* Media cache card — the GFS's encrypted, short-lived space media cache,
    from the ``space_media`` block of ``GET /admin/api/overview``. Totals come
    from the shared database (the whole cluster); evictions and refusals are
-   this node's since it started. The admin portal is English-only. */
+   this node's since it started, and so are the on-demand counts (v_83: a
+   reader missed a picture and the GFS asked a household that holds it) —
+   absent on an older server, so that part is optional. The admin portal is
+   English-only. */
 
 export interface SpaceMediaStats {
   enabled: boolean
@@ -13,6 +16,16 @@ export interface SpaceMediaStats {
   evicted_bytes: number
   refused_quota: number
   refused_too_large: number
+  /* v_83 — space media on demand (this node since it started). Missing on
+     an older server: the card then leaves the section out. */
+  on_demand?: boolean
+  holder_requests?: number
+  streams_served?: number
+  streamed_bytes?: number
+  reuploads?: number
+  declined?: number
+  on_demand_misses?: number
+  live_sessions?: number
 }
 
 const UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
@@ -50,6 +63,38 @@ export function formatTtl(seconds: number): string {
 }
 
 const count = (n: number) => n.toLocaleString('en-US')
+
+/** The on-demand facts, or nothing for an older server without them. */
+function OnDemandFacts({ stats }: { stats: SpaceMediaStats }) {
+  if (typeof stats.on_demand !== 'boolean') return null
+  if (!stats.on_demand) {
+    return (
+      <p class="muted media-cache-on-demand-off">
+        Missed pictures on request: turned off (<code>[space_media] on_demand</code>).
+      </p>
+    )
+  }
+  const n = (v: number | undefined) => count(v ?? 0)
+  return (
+    <>
+      <h4 class="media-cache-node">Missed pictures on request, this node</h4>
+      <dl class="media-cache-facts">
+        <dt>Holder requests</dt>
+        <dd>{n(stats.holder_requests)}</dd>
+        <dt>Streams served</dt>
+        <dd>
+          {n(stats.streams_served)} ({formatBytes(stats.streamed_bytes ?? 0)})
+        </dd>
+        <dt>Re-uploads</dt>
+        <dd>{n(stats.reuploads)}</dd>
+        <dt>Declined</dt>
+        <dd>{n(stats.declined)}</dd>
+        <dt>Not found</dt>
+        <dd>{n(stats.on_demand_misses)}</dd>
+      </dl>
+    </>
+  )
+}
 
 export function MediaCacheCard({ stats }: { stats: SpaceMediaStats }) {
   if (!stats.enabled || stats.max_bytes <= 0) {
@@ -108,6 +153,7 @@ export function MediaCacheCard({ stats }: { stats: SpaceMediaStats }) {
           <span class="media-cache-phrase">{count(stats.refused_too_large)} too large</span>
         </dd>
       </dl>
+      <OnDemandFacts stats={stats} />
     </section>
   )
 }

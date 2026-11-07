@@ -43,7 +43,9 @@ GFS fan-out event types (connection-server wire, not
 `space_author_profiles_bundle` (v_61, authority-relayed via `/gfs/publish`
 and **only** with a `to` target — never fanned out), and `space_item` (v_49,
 a member-published item via `/gfs/member-publish` — the real item type is
-inside the ciphertext).
+inside the ciphertext). GFS → one household socket: `space_media_request`
+(v_83, [space media on demand](#space-media-on-demand-v_83) — only to a
+socket whose hello listed `space_media_serve`).
 
 **Targeted delivery (v_61, `targeted_publish`).** `POST /gfs/publish` takes
 an optional `to`: a subscriber of the space, by the instance id the GFS
@@ -3718,7 +3720,12 @@ miss. The CDN, not the GFS, absorbs repeated reads.
 scope's byte budget and upload rate, which upload scopes it serves) while the
 cache is on. A household uploads space media only to a server whose signed block
 proves it, and channel media only where `scopes` lists `channel`; an older
-household ignores the entry.
+household ignores the entry. A server that answers missed blobs on request
+(v_83, below) adds `on_demand: {wait_s}` inside the same signed entry —
+`wait_s` is how long a `wanted` request may wait (`[space_media]
+stream_wait_seconds`, 25 s); absent while `on_demand = false`. A household
+asks only a server whose signed entry carries it (a `wait_s` outside
+1–60 reads as absent).
 
 **Cost.** One upload per file per GFS (one household encrypts once — not one
 per reader, not one per member). Storage is bounded by `max_bytes`, the TTL
@@ -3772,6 +3779,138 @@ the moment media store), `routes/space_media.py`, the reused checks in
 `federation.py`, `member_publish.py` and `channels.py`,
 `socialhome/domain/gfs_space_media.py` (wire shape),
 `repositories.SqliteGfsSpaceMediaRepo`, GFS migration `0025`.
+
+### Space media on demand (v_83)
+
+**Purpose.** The cache keeps a blob for its TTL at most and evicts the least
+recently fetched first; after that every reader missed it for good. Now a
+reader that misses a blob **when a person views it** asks the GFS, and the
+GFS asks one household that holds the file to send the same deterministic
+ciphertext again — **streamed** straight to the waiting reader(s) with
+nothing stored, or **re-uploaded** into the cache. A prefetch never asks.
+Paired and mesh members never use this (they get the bytes from the
+household); link-joined members and followers ask the same way. The
+household side, both flow diagrams and the cost are in
+[`media.md`](./media.md#space-media-on-demand-v_83).
+
+**Routes** (`global_server/routes/space_media_on_demand.py`).
+
+| Method | Path | |
+|---|---|---|
+| `POST` | `/gfs/media/{blob_id}/wanted` | Anonymous (the reader's cookie-less session). Body ≤ 4 KiB: `{scope, scope_id, hint}` — the scope the reader knows the blob under and a locator sealed for space key holders (`socialhome/space_media_hint.py`: suite `smh1-aesgcm-256`, a key derived from the epoch's space media key, random nonce, AAD binding suite, scope, scope id, blob and epoch; an unknown suite is refused). The scope never rides in the URL. Every answer is `no-store`: `200` the blob (from the cache, or piped from a holder — `Content-Length` is the blob's; the connection is cut short if the bytes don't end at the asked address), `404` a clean miss (no holder, nobody answered within the wait, a repeat right after a failed session, a scope not listed or not in use, `on_demand` off), `422 bad_request`, `429 rate_limited` (the prefix budget, `Retry-After: 600`; the per-IP limiter, `Retry-After: 60`), `503 busy` (`Retry-After: 5`). |
+| `PUT` | `/gfs/media/serve/{ticket}` | The holder household the GFS asked sends the blob as the raw body. Signed by its household key: `X-SH-Instance`, `X-SH-Timestamp` (±300 s), `X-SH-Signature` over canonical `{instance_id, media_ticket, ts}` (the relay-stream scheme, its own field name). `Content-Length` must be a padded bucket (`422 bad_size`); the body must make progress (64 KiB per 5 s, else `408 body_timeout`). With a `cache` ticket and the normal upload authorization (`X-SH-Space-Media-Auth`, as on `PUT /gfs/media/{blob_id}`) the blob is also stored, under the cache's usual caps. `200 {stored}`; `401` bad signature or stale `ts`; `403` not the household asked; `404 unknown_ticket` (or another node's ticket); `409 already_streaming`; `422 blob_id_mismatch` (not at the asked address — nothing released, nothing stored); `429 scope_stream_quota`. |
+| `POST` | `/gfs/media/serve/{ticket}/decline` | The asked holder can't serve it (no such file, its own budget). Same headers and refusals; `{declined: true}`; the GFS asks the next holder at once. |
+
+**The frame.** `{type: "space_media_request", ticket, scope, scope_id,
+blob_id, mode, hint}` — `mode` is `stream` or `cache`; the hint is the
+reader's, verbatim. It names no reader. A household that answers lists
+**`space_media_serve`** in its WS hello `accepts` (a hello-only label, per
+socket — `GfsWebSocketRegistry`); a socket without it is never sent one (an
+older household would drop the unknown frame and leave the reader waiting).
+On a cluster the frame reaches the node holding the household's socket as
+the typed `instance` frame of `NODE_DRAIN_HINT`
+(`ClusterRelayFanOut.deliver_to_household`); it is ephemeral — never queued
+for an offline household.
+
+**Ticket.** `<route_tag>.<32 hex>` (`node_route.scoped_id`): the load
+balancer sends `PUT /gfs/media/serve/<tag>.<rand>` and its `/decline` to the
+node that took the `wanted` request, exactly like a highlight relay stream
+([`gfs-cluster.md`](../operations/gfs-cluster.md#haproxy)). The `wanted`
+request itself may land on any node.
+
+**Who is asked.** A listed space: its host — the owning household this GFS
+already knows. A private space's channel: its seated member households (key
+holders the GFS already knows as seats), those connected to this node first.
+At most 3, one after another; each gets 10 s to start sending (a decline
+moves on at once), all within `stream_wait_seconds`. Other members of a
+listed space are never asked: the GFS does not know them, and asking would
+tell it who they are.
+
+**Cache or stream** (`GfsSpaceMediaOnDemand.decide`):
+
+- asked `cache_after_requests` times within `request_window_seconds` →
+  cache (popular content earns its room even in a full cache — the LRU then
+  evicts something fetched less recently);
+- stored here at most `fresh_seconds` ago, while the cache is below
+  `full_percent` of `max_bytes` → cache;
+- anything else — old or never-seen content, a one-off view, a cache that
+  full — streams, and nothing is stored.
+
+**Coalescing.** One live session per (blob, scope) per node: every reader of
+that blob joins it, and a session that delivered stays joinable in memory
+for `coalesce_seconds`. A session nobody served blocks repeats on that node
+for `coalesce_seconds` (a clean miss, nobody asked). A re-upload is
+**claimed cluster-wide** in the shared database — one per blob per
+`coalesce_seconds`; a node that loses the claim waits for the blob to land
+in the shared cache. The holder attaches its upload authorization at most
+once per (GFS, blob) per 10 minutes, so a burst of `cache` tickets stores
+the blob once.
+
+**Released only at the address.** Chunks go to every waiting reader as they
+arrive, holding back the last byte until the whole body hashes to the
+scope-bound address the readers asked for; otherwise their connections are
+cut short and nothing is stored. A forged hint can only make the holder
+decline: it re-seals the file and sends it only when that gives exactly the
+asked address, and only a file referenced by this space's content alone
+(`confined_to_space`).
+
+**Bounds.**
+
+- Per node: `max_streams` sessions (16), `scope_max_streams` per scope (4),
+  each holding at most one blob (≤ 8 MiB) in memory, never on disk.
+- Cluster-wide, in the shared database (the keyed hourly table
+  `gfs_space_media_ip_bytes`, under their own key prefixes):
+  `scope_stream_bytes_per_hour` (512 MiB) one scope may stream, and
+  `prefix_wanted_per_hour` (240) holder requests one reader network prefix
+  (IPv6 /48, IPv4 /24) may trigger.
+- Per IP: 60 `wanted` / min (each node its share over the live nodes), shed
+  before any work.
+- Waiting readers: 4 per client address bucket, 8 per network prefix, 512
+  per node (`503 busy`).
+- A reader waits at most `stream_wait_seconds`, then `404` (its own 5-minute
+  miss cache applies).
+- A holder household answers at most 2 at once and sends at most 1 GiB an
+  hour across every GFS (past either: decline); it keeps a sealed blob 30 s
+  so tickets for it from several nodes seal it once.
+
+**Settings** (`[space_media]`, env `GFS_SPACE_MEDIA_<KEY>`,
+`config.SpaceMediaOnDemandConfig`):
+
+| Setting | Default | Effect |
+|---|---|---|
+| `on_demand` | `true` | Answer `wanted` requests at all (and advertise `on_demand`). Off: every `wanted` is a `404`. |
+| `fresh_seconds` | 7 days | Content this cache stored at most this long ago goes back into the cache (while below `full_percent`). |
+| `cache_after_requests` | 3 | Requests within `request_window_seconds` that earn a re-upload. |
+| `request_window_seconds` | 3600 | The request-count window. |
+| `coalesce_seconds` | 60 | One re-upload per blob per window, cluster-wide; a delivered session stays joinable, and a failed one blocks repeats on its node, this long. |
+| `full_percent` | 95 | Above it only repeatedly asked content is cached. |
+| `stream_wait_seconds` | 25 | The longest a reader waits (advertised as `wait_s`). |
+| `max_streams` | 16 | Sessions open at once per node. |
+| `scope_max_streams` | 4 | Sessions open at once per scope per node. |
+| `scope_stream_bytes_per_hour` | 512 MiB | Bytes one scope streams an hour, cluster-wide. |
+| `prefix_wanted_per_hour` | 240 | Holder requests one reader prefix triggers an hour, cluster-wide. |
+
+**State.** GFS migration `0026`: `gfs_space_media_demand` — per (blob,
+scope): when the cache stored the copy that left (noted on expiry or
+eviction, never on a delete or a ban), the request window and count, and
+the re-upload claim. No reader.
+
+**Admin.** The overview's `space_media` block gains this node's
+`on_demand`, `holder_requests`, `streams_served`, `streamed_bytes`,
+`reuploads`, `declined`, `on_demand_misses` and `live_sessions`.
+
+**What anyone learns.** The GFS already knew the blob, its scope and the
+space's host or the channel's seats; it learns that someone wanted the blob
+(by address, as for any fetch) and which household answered — one it asked
+by name over its own socket. The holder learns that some reader wanted the
+file, never who. Readers never learn which household answered. The bytes
+stay ciphertext under the space content key.
+
+Implementation: `socialhome/global_server/space_media_on_demand.py`,
+`routes/space_media_on_demand.py`, `config.SpaceMediaOnDemandConfig`,
+`repositories.SqliteGfsSpaceMediaDemandRepo`, GFS migration `0026`,
+`socialhome/domain/gfs_space_media_on_demand.py` (wire shapes),
+`socialhome/space_media_hint.py`.
 
 ## Flow — publish + browse + join
 

@@ -539,6 +539,8 @@ async def test_info_advertises_the_cache_in_the_signed_block(gfs):
         "space_max_bytes": 256 * 1024**2,
         "space_uploads_per_hour": 300,
         "scopes": ["channel", "space"],
+        # v_83 — a reader may ask for a blob it missed, waiting this long.
+        "on_demand": {"wait_s": 25},
     }
     assert verify_capabilities(
         body["public_key"],

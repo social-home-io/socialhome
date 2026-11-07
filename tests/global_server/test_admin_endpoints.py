@@ -103,6 +103,15 @@ async def test_overview_counts_the_space_media_cache(client, tmp_dir):
         "evicted_bytes": 0,
         "refused_quota": 0,
         "refused_too_large": 0,
+        # v_83 — on demand, this node since it started.
+        "on_demand": True,
+        "holder_requests": 0,
+        "streams_served": 0,
+        "streamed_bytes": 0,
+        "reuploads": 0,
+        "declined": 0,
+        "on_demand_misses": 0,
+        "live_sessions": 0,
     }
 
 

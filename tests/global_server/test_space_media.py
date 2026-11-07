@@ -972,3 +972,26 @@ async def test_a_blob_that_expires_or_is_evicted_leaves_its_age_behind(
     assert await store.delete(_bid(e), scope_kind="space", scope_id="s9")
     got_e = await demand.note_request(_bid(e), "space", "s9", now=NOW + 50, window_s=60)
     assert got_e.stored_at is None
+
+
+async def test_the_sweep_prunes_old_demand(repo, gfs_db, tmp_dir):
+    """v_83 — on-demand state goes 30 days after it was last touched."""
+    demand = SqliteGfsSpaceMediaDemandRepo(gfs_db)
+    store = GfsSpaceMediaStore(
+        repo, FsBlobFiles(tmp_dir / "spaces"), _limits(), demand=demand
+    )
+    await demand.note_request("a" * 64, "space", "s1", now=NOW, window_s=60)
+    await demand.note_request(
+        "b" * 64, "space", "s1", now=NOW + 20 * 86_400, window_s=60
+    )
+    await store.sweep(NOW + sm.DEMAND_KEEP_S + 1)
+    assert (
+        await demand.note_request(
+            "a" * 64, "space", "s1", now=NOW + 40 * 86_400, window_s=10**9
+        )
+    ).requests == 1
+    assert (
+        await demand.note_request(
+            "b" * 64, "space", "s1", now=NOW + 40 * 86_400, window_s=10**9
+        )
+    ).requests == 2
