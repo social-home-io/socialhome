@@ -4618,6 +4618,10 @@ def create_app(config: Config | None = None) -> web.Application:
             media_sync=space_media_sync_service,
         )
         moderation_federation.attach_to(federation_service)
+        # Space files that overtook their row are re-judged after every
+        # handler that stores such a row — so registered after the last one
+        # (the moderation queue's, just above).
+        fed.inbound_service.attach_held_media_adoption(federation_service)
         moderation_federation.attach_identity(
             own_instance_pk=identity_pk,
             own_identity_seed=identity_seed,

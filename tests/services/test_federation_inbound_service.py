@@ -2358,6 +2358,25 @@ async def test_users_sync_binding_roundtrip_outbound_to_inbound(db, bus):
 # ─── SPACE_MEDIA_BLOB — write the bytes the sender shipped ─────────
 
 
+async def _media_host(db, bus, media_dir, space_id: str) -> FederationInboundService:
+    """A receiver with the roster mirror, for a space ``peer-a`` hosts —
+    the host may deliver the files of any row of its space."""
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES(?, ?, 'peer-a', 'anna', ?)",
+        (space_id, space_id, "00" * 32),
+    )
+    return FederationInboundService(
+        bus=bus,
+        conversation_repo=SqliteConversationRepo(db),
+        space_post_repo=SqliteSpacePostRepo(db),
+        space_repo=SqliteSpaceRepo(db),
+        user_repo=SqliteUserRepo(db),
+        space_remote_member_repo=SqliteSpaceRemoteMemberRepo(db),
+        media_dir=media_dir,
+    )
+
+
 async def test_space_media_blob_writes_bytes_to_local_media_dir(
     db,
     bus,
@@ -2369,14 +2388,7 @@ async def test_space_media_blob_writes_bytes_to_local_media_dir(
     but the picture is broken."""
     import base64
 
-    service = FederationInboundService(
-        bus=bus,
-        conversation_repo=SqliteConversationRepo(db),
-        space_post_repo=SqliteSpacePostRepo(db),
-        space_repo=SqliteSpaceRepo(db),
-        user_repo=SqliteUserRepo(db),
-        media_dir=tmp_path,
-    )
+    service = await _media_host(db, bus, tmp_path, "sp-mediated")
     body = b"WEBP-bytes-from-the-sender"
     await service._on_space_media_blob(
         _event(
@@ -2421,9 +2433,11 @@ async def test_a_calendar_cover_blob_is_checked_against_its_event(db, bus, tmp_p
     )
 
     async def ok(space_id: str, filename: str) -> bool:
-        return await service._space_media_in_scope(
+        owner = await service._space_media_owner(
             space_id=space_id, correlation_id="ev-cover", filename=filename
         )
+        assert owner is not None and owner.collaborative
+        return owner.in_scope
 
     assert await ok("sp-a", "cover123.webp")
     # Another file under the event's id, or the event's file pushed into
@@ -2435,14 +2449,7 @@ async def test_a_calendar_cover_blob_is_checked_against_its_event(db, bus, tmp_p
 async def test_space_media_blob_prefers_raw_media_bytes(db, bus, tmp_path):
     """Binary ``fed-media-v1`` path: ``event.media_bytes`` is used and
     written verbatim, with NO base64 field in the payload."""
-    service = FederationInboundService(
-        bus=bus,
-        conversation_repo=SqliteConversationRepo(db),
-        space_post_repo=SqliteSpacePostRepo(db),
-        space_repo=SqliteSpaceRepo(db),
-        user_repo=SqliteUserRepo(db),
-        media_dir=tmp_path,
-    )
+    service = await _media_host(db, bus, tmp_path, "sp-bin")
     body = b"\x00\x01raw-binary-no-base64\xff"
     await service._on_space_media_blob(
         _event(
@@ -2557,14 +2564,7 @@ async def test_space_media_blob_assembles_chunked_transfer(db, bus, tmp_path):
     filename. Mirrors :class:`SpaceMediaSyncService`'s sender shape."""
     import base64
 
-    service = FederationInboundService(
-        bus=bus,
-        conversation_repo=SqliteConversationRepo(db),
-        space_post_repo=SqliteSpacePostRepo(db),
-        space_repo=SqliteSpaceRepo(db),
-        user_repo=SqliteUserRepo(db),
-        media_dir=tmp_path,
-    )
+    service = await _media_host(db, bus, tmp_path, "sp-chunked")
     full = b"".join(bytes([i]) * 256 for i in range(8))  # 2 KiB
     # Split into 4 chunks of 512 bytes each.
     chunks = [full[i * 512 : (i + 1) * 512] for i in range(4)]

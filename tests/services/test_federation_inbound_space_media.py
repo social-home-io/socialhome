@@ -30,6 +30,9 @@ from socialhome.repositories import (
 )
 from socialhome.repositories.bazaar_repo import SqliteBazaarRepo
 from socialhome.repositories.gallery_repo import SqliteGalleryRepo
+from socialhome.repositories.space_remote_member_repo import (
+    SqliteSpaceRemoteMemberRepo,
+)
 from socialhome.services import inbound_media_store
 from socialhome.services.federation_inbound_service import (
     FederationInboundService,
@@ -78,6 +81,7 @@ async def env(db, bus, tmp_path):
         user_repo=SqliteUserRepo(db),
         gallery_repo=SqliteGalleryRepo(db),
         bazaar_repo=SqliteBazaarRepo(db),
+        space_remote_member_repo=SqliteSpaceRemoteMemberRepo(db),
         media_dir=media,
     )
     for sid in ("sp-a", "sp-b"):
@@ -85,6 +89,14 @@ async def env(db, bus, tmp_path):
             "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
             " identity_public_key) VALUES(?,?,?,?,?)",
             (sid, sid, "host", "anna", "00" * 32),
+        )
+    # The sending household ``peer-a`` holds the seats of the rows' authors
+    # (``u-a`` posts, ``u-x`` uploads) — the sender binding's evidence.
+    for uid in ("u-a", "u-x"):
+        await db.enqueue(
+            "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+            " VALUES('sp-a', 'peer-a', ?, 'member')",
+            (uid,),
         )
     await db.enqueue(
         "INSERT INTO space_posts(id, space_id, author, type, content, media_url,"
@@ -306,16 +318,166 @@ async def test_existing_file_is_not_overwritten_multi_chunk(env):
 # ── Blob before its row: write-once, so the legit order still works ────
 
 
-async def test_blob_before_post_is_written_once(env):
+async def test_hosts_blob_before_post_is_written_once(env):
+    """The host may name any row of its space: written at once, once."""
+    svc, media = env
+    await svc._on_space_media_blob(
+        _blob({"post_id": "post-later", "filename": "later.webp"}, from_instance="host")
+    )
+    assert (media / "later.webp").read_bytes() == b"NEW-BYTES"
+    await svc._on_space_media_blob(
+        _blob(
+            {"post_id": "post-later", "filename": "later.webp"},
+            from_instance="host",
+            body=b"SECOND",
+        )
+    )
+    assert (media / "later.webp").read_bytes() == b"NEW-BYTES"
+
+
+async def _later_post(db, author: str = "u-a") -> None:
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content, media_url)"
+        " VALUES('post-later', 'sp-a', ?, 'image', '', 'api/media/later.webp')",
+        (author,),
+    )
+
+
+def _row_landed(space_id: str = "sp-a") -> FederationEvent:
+    return FederationEvent(
+        msg_id="m-row",
+        event_type=FET.SPACE_POST_CREATED,
+        from_instance="peer-a",
+        to_instance="self",
+        timestamp=datetime.now(UTC).isoformat(),
+        payload={},
+        space_id=space_id,
+    )
+
+
+async def test_members_blob_before_post_is_held_then_adopted(env, db):
     svc, media = env
     await svc._on_space_media_blob(
         _blob({"post_id": "post-later", "filename": "later.webp"})
     )
+    assert not (media / "later.webp").exists()
+    # A row event before the row is here keeps it waiting.
+    await svc.adopt_held_space_media(_row_landed())
+    assert not (media / "later.webp").exists()
+    await _later_post(db)
+    await svc.adopt_held_space_media(_row_landed("sp-b"))  # another space
+    assert not (media / "later.webp").exists()
+    await svc.adopt_held_space_media(_row_landed())
     assert (media / "later.webp").read_bytes() == b"NEW-BYTES"
+    assert _no_partials(media)
+
+
+async def test_held_blob_of_a_household_the_row_does_not_bind_is_dropped(env, db):
+    svc, media = env
     await svc._on_space_media_blob(
-        _blob({"post_id": "post-later", "filename": "later.webp"}, body=b"SECOND")
+        _blob({"post_id": "post-later", "filename": "later.webp"})
     )
+    await _later_post(db, author="u-someone-else")
+    await svc.adopt_held_space_media(_row_landed())
+    assert not (media / "later.webp").exists()
+    assert _no_partials(media)
+
+
+async def test_held_blob_is_not_adopted_over_an_existing_file(env, db):
+    svc, media = env
+    await svc._on_space_media_blob(
+        _blob({"post_id": "post-later", "filename": "later.webp"})
+    )
+    await _later_post(db)
+    (media / "later.webp").write_bytes(b"FIRST")
+    await svc.adopt_held_space_media(_row_landed())
+    assert (media / "later.webp").read_bytes() == b"FIRST"
+    assert _no_partials(media)
+
+
+async def test_held_blob_survives_a_restart(env, db, bus):
+    """The held index is rebuilt from disk by a fresh service."""
+    svc, media = env
+    await svc._on_space_media_blob(
+        _blob({"post_id": "post-later", "filename": "later.webp"})
+    )
+    await _later_post(db)
+    fresh = FederationInboundService(
+        bus=bus,
+        conversation_repo=SqliteConversationRepo(db),
+        space_post_repo=SqliteSpacePostRepo(db),
+        space_repo=SqliteSpaceRepo(db),
+        user_repo=SqliteUserRepo(db),
+        space_remote_member_repo=SqliteSpaceRemoteMemberRepo(db),
+        media_dir=media,
+    )
+    await fresh.adopt_held_space_media(_row_landed())
     assert (media / "later.webp").read_bytes() == b"NEW-BYTES"
+
+
+async def test_a_chunked_blob_is_held_whole(env, db):
+    svc, media = env
+    for idx in (1, 0):
+        await svc._on_space_media_blob(
+            _blob(
+                {
+                    "post_id": "post-later",
+                    "filename": "later.webp",
+                    "transfer_id": "t",
+                    "chunk_index": idx,
+                    "chunk_count": 2,
+                    "file_size_bytes": 10,
+                },
+                body=b"PART%d" % idx,
+            )
+        )
+    assert not (media / "later.webp").exists()
+    await _later_post(db)
+    await svc.adopt_held_space_media(_row_landed())
+    assert (media / "later.webp").read_bytes() == b"PART0PART1"
+
+
+async def test_a_blob_for_a_row_of_a_stranger_household_is_refused(env, caplog):
+    """A household with no seat for the row's author is refused outright."""
+    svc, media = env
+    with caplog.at_level("WARNING"):
+        await svc._on_space_media_blob(
+            _blob({"post_id": "post-a", "filename": "a1.webp"}, from_instance="peer-z")
+        )
+    assert not (media / "a1.webp").exists()
+    assert "may deliver" in caplog.text
+
+
+async def test_a_moderator_household_delivers_any_rows_file(env, db):
+    """Content authority (an approver releasing a post) delivers files of
+    rows its people did not write."""
+    svc, media = env
+    await db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+        " VALUES('sp-a', 'peer-mod', 'u-mod', 'moderator')",
+        (),
+    )
+    await svc._on_space_media_blob(
+        _blob({"post_id": "post-a", "filename": "a1.webp"}, from_instance="peer-mod")
+    )
+    assert (media / "a1.webp").read_bytes() == b"NEW-BYTES"
+
+
+async def test_no_roster_mirror_refuses_every_blob(db, bus, tmp_path):
+    """Fail closed: without the roster mirror no sender can be bound."""
+    svc = FederationInboundService(
+        bus=bus,
+        conversation_repo=SqliteConversationRepo(db),
+        space_post_repo=SqliteSpacePostRepo(db),
+        space_repo=SqliteSpaceRepo(db),
+        user_repo=SqliteUserRepo(db),
+        media_dir=tmp_path,
+    )
+    await svc._on_space_media_blob(
+        _blob({"post_id": "post-x", "filename": "x.webp"}, from_instance="host")
+    )
+    assert not (tmp_path / "x.webp").exists()
+    await svc.adopt_held_space_media(_row_landed())  # nothing held: a no-op
 
 
 async def test_blob_for_bazaar_post_before_listing_is_written(env):

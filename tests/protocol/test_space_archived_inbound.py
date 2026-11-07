@@ -258,9 +258,16 @@ def _blob(name: str) -> dict:
 
 async def test_media_bytes_do_not_land_in_an_archived_space(env, tmp_dir):
     """``SPACE_MEDIA_BLOB`` writes files, not rows: checked on the media
-    store. Positive control first — a blob that overtook its post lands."""
+    store. Positive control first — the author's household delivers its
+    post's file."""
     app, db = env
     media = tmp_dir / "media"
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, content, media_url,"
+        " image_urls_json) VALUES('post-later', ?, 'u-a', 'image', '',"
+        " 'api/media/live.webp', '[\"api/media/frozen.webp\"]')",
+        (SP,),
+    )
     await _through_the_gates(
         app, FET.SPACE_MEDIA_BLOB, _blob("live.webp"), sender=AUTHOR
     )
