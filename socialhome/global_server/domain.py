@@ -371,6 +371,20 @@ class GfsSpaceMedia:
 
 
 @dataclass(slots=True, frozen=True)
+class GfsSpaceMediaDemand:
+    """Demand for one space blob that left (or never reached) the cache, as
+    a scope named it (GFS migration 0026, v_83): when this cache stored it
+    (``None``: never here), and how often it was asked in the current
+    window. No reader is ever named."""
+
+    blob_id: str
+    scope_kind: str
+    scope_id: str
+    stored_at: int | None
+    requests: int
+
+
+@dataclass(slots=True, frozen=True)
 class GfsPendingDeleteCert:
     """One signed moment delete certificate still owed to a follower
     household (v_66), as the reconnect push reads it.

@@ -71,6 +71,7 @@ from ... import crypto
 from ...domain.subscriber_accepts import (
     ACCEPTS_SPACE_ITEM_NO_CERT,
     ACCEPTS_SPACE_KEY_PULL,
+    ACCEPTS_SPACE_MEDIA_SERVE,
     ACCEPTS_WS_BINARY1,
     parse_accepts,
 )
@@ -145,6 +146,9 @@ class GfsWebSocketView(web.View):
             ws,
             binary=ACCEPTS_WS_BINARY1 in accepts,
             no_frame_cert=ACCEPTS_SPACE_ITEM_NO_CERT in accepts,
+            # v_83 — it answers ``space_media_request`` (re-upload / stream
+            # a space blob a reader missed).
+            media_serve=ACCEPTS_SPACE_MEDIA_SERVE in accepts,
         )
         await fed_repo.upsert_rtc_connection(instance_id, transport="websocket")
 

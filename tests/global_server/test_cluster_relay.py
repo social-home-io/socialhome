@@ -36,12 +36,19 @@ _FRAME = {"space_id": "sp", "event_type": "space_post_public", "payload": {"x": 
 class _Registry:
     """``GfsWebSocketRegistry`` stand-in: who is connected, what was sent."""
 
-    def __init__(self, online=(), *, failing=()) -> None:
+    def __init__(self, online=(), *, failing=(), media_serve=None) -> None:
         self.online = set(online)
         self.failing = set(failing)
+        #: Sockets that listed ``space_media_serve`` (default: all online).
+        self.media_serve = set(online) if media_serve is None else set(media_serve)
         self.sent: list[tuple[str, dict]] = []
 
     def is_connected(self, instance_id: str) -> bool:
+        return instance_id in self.online
+
+    def takes(self, instance_id: str, frame_type) -> bool:
+        if frame_type == "space_media_request":
+            return instance_id in self.online and instance_id in self.media_serve
         return instance_id in self.online
 
     def connected_instances(self) -> set[str]:
@@ -743,3 +750,22 @@ def test_a_totals_frame_is_never_queued():
     assert mod.ForwardedRelay.from_wire(item.to_wire()) == item
     bad = {**item.to_wire(), "frame": {"event_type": "incoming_public_moment"}}
     assert mod.ForwardedRelay.from_wire(bad) is None
+
+
+async def test_a_media_request_is_held_only_by_a_socket_that_serves_media():
+    """v_83 — a forwarded ``space_media_request`` counts as reached only on
+    a socket that listed ``space_media_serve``; an older household's socket
+    is reported unreached, so the origin asks someone else."""
+    reg = _Registry(online={_A, _B}, media_serve={_B})
+    fan = _fan_out(reg)
+    frame = {"event_type": "space_media_request", "ticket": "0" * 32}
+    held = await fan.apply(
+        [
+            ForwardedRelay(kind="instance", key=_A, skip="", queue=True, frame=frame),
+            ForwardedRelay(kind="instance", key=_B, skip="", queue=True, frame=frame),
+        ]
+    )
+    assert held == {f"instance:{_B}": [_B]}
+    await _settle(fan)
+    assert [iid for iid, _ in reg.sent] == [_B]
+    assert reg.sent[0][1]["type"] == "space_media_request"

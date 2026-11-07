@@ -50,6 +50,7 @@ import orjson
 from aiohttp import web
 
 from ..domain.gfs_member_publish import SPACE_ITEM_EVENT_TYPE
+from ..domain.gfs_space_media_on_demand import SPACE_MEDIA_REQUEST_FRAME
 from ..domain.ws_binary_frame import encode_binary_frame
 from .fanout_stats import FanoutStats, frame_kind
 
@@ -84,6 +85,7 @@ class GfsWebSocketRegistry:
         "_by_instance",
         "_closing",
         "_lock",
+        "_media_serve",
         "_no_frame_cert",
         "fanout_stats",
     )
@@ -97,6 +99,9 @@ class GfsWebSocketRegistry:
         #: The instances whose CURRENT socket takes member items without
         #: the plaintext ``writer_cert`` (``space_item_no_cert``).
         self._no_frame_cert: set[str] = set()
+        #: The instances whose CURRENT socket answers ``space_media_request``
+        #: (``space_media_serve`` in its hello, v_83).
+        self._media_serve: set[str] = set()
         #: What this node pushed, by frame kind and size class (admin
         #: overview) — counted only for frames that reached a socket.
         self.fanout_stats = FanoutStats()
@@ -113,17 +118,20 @@ class GfsWebSocketRegistry:
         *,
         binary: bool = False,
         no_frame_cert: bool = False,
+        media_serve: bool = False,
     ) -> None:
         """Register *ws* for *instance_id*, evicting any prior socket.
         ``binary``: this socket reads ``ws_binary1`` frames.
         ``no_frame_cert``: it takes member items without the plaintext
-        ``writer_cert`` (``space_item_no_cert``)."""
+        ``writer_cert`` (``space_item_no_cert``).
+        ``media_serve``: it answers ``space_media_request`` (v_83)."""
         async with self._lock:
             previous = self._by_instance.get(instance_id)
             self._by_instance[instance_id] = ws
             for labels, on in (
                 (self._binary, binary),
                 (self._no_frame_cert, no_frame_cert),
+                (self._media_serve, media_serve),
             ):
                 if on:
                     labels.add(instance_id)
@@ -158,6 +166,7 @@ class GfsWebSocketRegistry:
                 self._by_instance.pop(instance_id, None)
                 self._binary.discard(instance_id)
                 self._no_frame_cert.discard(instance_id)
+                self._media_serve.discard(instance_id)
         log.info(
             "gfs.ws.unregister: instance=%s total=%d",
             instance_id,
@@ -171,6 +180,7 @@ class GfsWebSocketRegistry:
             self._by_instance.clear()
             self._binary.clear()
             self._no_frame_cert.clear()
+            self._media_serve.clear()
         for ws in sockets:
             if ws.closed:
                 continue
@@ -195,6 +205,16 @@ class GfsWebSocketRegistry:
     def connected_instances(self) -> set[str]:
         return set(self._by_instance.keys())
 
+    def takes(self, instance_id: str, frame_type: object) -> bool:
+        """Whether *instance_id*'s socket is here and takes a frame of
+        *frame_type*: a label-gated type (``space_media_request``) only
+        when its hello listed the label."""
+        if not self.is_connected(instance_id):
+            return False
+        if frame_type == SPACE_MEDIA_REQUEST_FRAME:
+            return instance_id in self._media_serve
+        return True
+
     # ─── Push ─────────────────────────────────────────────────────────────
 
     async def send(self, instance_id: str, payload: dict[str, Any]) -> bool:
@@ -208,6 +228,10 @@ class GfsWebSocketRegistry:
         """
         ws = self._by_instance.get(instance_id)
         if ws is None or ws.closed:
+            return False
+        if not self.takes(instance_id, payload.get("type")):
+            # A label-gated frame to a socket that never listed the label:
+            # undelivered, so the caller tries another household.
             return False
         payload = self._for_socket(instance_id, payload)
         binary = self._binary_frame(instance_id, payload)

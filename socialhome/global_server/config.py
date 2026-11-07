@@ -90,6 +90,107 @@ DEFAULT_SPACE_MEDIA_SPACE_UPLOADS_PER_HOUR: int = 300
 #: scopes it uses — the backstop behind fair eviction (429 past it).
 DEFAULT_SPACE_MEDIA_IP_BYTES_PER_HOUR: int = 1024**3
 
+
+@dataclass(slots=True, frozen=True)
+class SpaceMediaOnDemandConfig:
+    """``[space_media]`` on-demand keys (v_83,
+    :mod:`.space_media_on_demand`): when a reader misses a blob, whether this
+    server asks a holder household to re-upload it into the cache or to
+    stream it straight through, and what bounds that.
+
+    * ``enabled`` (``on_demand``) — answer ``wanted`` requests at all.
+    * Cache, via re-upload: a blob asked ``cache_after_requests`` times
+      within ``request_window_seconds``; or one this server stored no
+      longer than ``fresh_seconds`` ago, while the cache is under
+      ``full_percent`` of ``max_bytes``. Everything else — old content, a
+      one-off view, anything while the cache is that full — streams.
+    * ``coalesce_seconds`` — after a blob was asked of a holder, a repeat
+      on the same node within it joins or does nothing; one re-upload per
+      blob per window cluster-wide.
+    * ``stream_wait_seconds`` — the longest a reader waits for a holder.
+    * ``max_streams`` / ``scope_max_streams`` — holder sessions open at once
+      per node, and per scope per node (each buffers ≤ one 8 MiB blob).
+    * ``scope_stream_bytes_per_hour`` — bytes one scope may stream an hour
+      (cluster-wide, shared DB).
+    * ``prefix_wanted_per_hour`` — holder requests one reader network
+      prefix (IPv6 /48, IPv4 /24) may trigger an hour (cluster-wide)."""
+
+    enabled: bool = True
+    fresh_seconds: int = 7 * 86_400
+    cache_after_requests: int = 3
+    request_window_seconds: int = 3600
+    coalesce_seconds: int = 60
+    full_percent: int = 95
+    stream_wait_seconds: int = 25
+    max_streams: int = 16
+    scope_max_streams: int = 4
+    scope_stream_bytes_per_hour: int = 512 * 1024**2
+    prefix_wanted_per_hour: int = 240
+
+    @classmethod
+    def parse(
+        cls, table: dict, env: dict[str, str] | None = None, *, base=None
+    ) -> SpaceMediaOnDemandConfig:
+        """From a ``[space_media]`` table (keys absent keep *base*'s values,
+        else the defaults), then the ``GFS_SPACE_MEDIA_<KEY>`` env vars.
+        :class:`ValueError` names the bad key."""
+        out = base if base is not None else cls()
+        values: dict[str, object] = {}
+        for key, (lo, hi) in _ON_DEMAND_BOUNDS.items():
+            env_key = f"GFS_SPACE_MEDIA_{key.upper()}"
+            if env is not None and env_key in env:
+                raw: object = env[env_key]
+            elif env is None and key in table:
+                raw = table[key]
+            else:
+                continue
+            values[key] = _on_demand_int(key, raw, lo, hi)
+        enabled = out.enabled
+        if env is not None and "GFS_SPACE_MEDIA_ON_DEMAND" in env:
+            enabled = _on_demand_bool(env["GFS_SPACE_MEDIA_ON_DEMAND"])
+        elif env is None and "on_demand" in table:
+            enabled = _on_demand_bool(table["on_demand"])
+        return replace(out, enabled=enabled, **values)
+
+
+#: The integer on-demand keys and their inclusive bounds.
+_ON_DEMAND_BOUNDS: dict[str, tuple[int, int]] = {
+    "fresh_seconds": (0, 365 * 86_400),
+    "cache_after_requests": (1, 1000),
+    "request_window_seconds": (60, 7 * 86_400),
+    "coalesce_seconds": (1, 3600),
+    "full_percent": (1, 100),
+    "stream_wait_seconds": (1, 60),
+    "max_streams": (1, 256),
+    "scope_max_streams": (1, 64),
+    "scope_stream_bytes_per_hour": (1, 1 << 40),
+    "prefix_wanted_per_hour": (1, 1_000_000),
+}
+
+
+def _on_demand_int(key: str, raw: object, lo: int, hi: int) -> int:
+    value: int | None = None
+    if isinstance(raw, int) and not isinstance(raw, bool):
+        value = raw
+    elif isinstance(raw, str) and raw.strip().lstrip("-").isdigit():
+        value = int(raw)
+    if value is None:
+        raise ValueError(f"[space_media] {key} must be an integer")
+    if not lo <= value <= hi:
+        raise ValueError(f"[space_media] {key} must be {lo}..{hi}, got {value}")
+    return value
+
+
+def _on_demand_bool(raw: object) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, str) and raw.strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    if isinstance(raw, str) and raw.strip().lower() in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"[space_media] on_demand must be true or false, got {raw!r}")
+
+
 #: Peer networks whose ``X-Forwarded-For`` header the GFS believes by default:
 #: loopback, the RFC1918 private ranges and the IPv6 unique-local block. A GFS
 #: is almost always reached through a reverse proxy / ingress container that
@@ -227,6 +328,7 @@ class GfsConfig:
     space_media_space_max_bytes: int = DEFAULT_SPACE_MEDIA_SPACE_MAX_BYTES
     space_media_space_uploads_per_hour: int = DEFAULT_SPACE_MEDIA_SPACE_UPLOADS_PER_HOUR
     space_media_ip_bytes_per_hour: int = DEFAULT_SPACE_MEDIA_IP_BYTES_PER_HOUR
+    space_media_on_demand: SpaceMediaOnDemandConfig = SpaceMediaOnDemandConfig()
 
     # Loaded-from path, for audit + --set-password write-back.
     source_path: str = ""
@@ -333,6 +435,7 @@ class GfsConfig:
                     "ip_bytes_per_hour", DEFAULT_SPACE_MEDIA_IP_BYTES_PER_HOUR
                 ),
             ),
+            space_media_on_demand=SpaceMediaOnDemandConfig.parse(space_media),
             source_path=str(p),
         )
         if not cfg.base_url:
@@ -541,6 +644,9 @@ class GfsConfig:
                 )
                 if "GFS_SPACE_MEDIA_IP_BYTES_PER_HOUR" in env
                 else self.space_media_ip_bytes_per_hour
+            ),
+            space_media_on_demand=SpaceMediaOnDemandConfig.parse(
+                {}, dict(env), base=self.space_media_on_demand
             ),
         )._with_clean_aliases()
 
@@ -867,6 +973,33 @@ ttl_seconds            = 259200       # 3 days
 space_max_bytes        = 268435456    # 256 MiB
 space_uploads_per_hour = 300
 ip_bytes_per_hour      = 1073741824   # 1 GiB
+# On demand (v_83): when a reader misses a blob that expired or was
+# evicted, this server asks ONE household that holds the file (the space
+# host first, else a connected key holder) to send the same ciphertext
+# again — kept in the cache (a re-upload) when the blob was asked
+# cache_after_requests times within request_window_seconds, or was stored
+# here at most fresh_seconds ago while the cache is under full_percent of
+# max_bytes; otherwise streamed straight to the waiting reader(s) and NOT
+# kept (old content, one-off views, a cache that full). Concurrent readers
+# of one blob share one request; a repeat within coalesce_seconds does
+# nothing new. A reader waits at most stream_wait_seconds (1 – 60). Each node
+# pipes at most max_streams at once (scope_max_streams per scope; each holds
+# at most one 8 MiB blob in memory, never on disk); a scope streams at most
+# scope_stream_bytes_per_hour and one reader network prefix triggers at most
+# prefix_wanted_per_hour holder requests (both cluster-wide). Env overrides:
+# GFS_SPACE_MEDIA_ON_DEMAND, GFS_SPACE_MEDIA_FRESH_SECONDS, … (the key in
+# upper case after GFS_SPACE_MEDIA_).
+on_demand                   = true
+fresh_seconds               = 604800      # 7 days
+cache_after_requests        = 3
+request_window_seconds      = 3600
+coalesce_seconds            = 60
+full_percent                = 95
+stream_wait_seconds         = 25
+max_streams                 = 16
+scope_max_streams           = 4
+scope_stream_bytes_per_hour = 536870912   # 512 MiB
+prefix_wanted_per_hour      = 240
 """
 
 

@@ -42,6 +42,7 @@ from .domain import (
     GfsQueuedEnvelope,
     GfsSpaceEpoch,
     GfsSpaceMedia,
+    GfsSpaceMediaDemand,
     GfsSpaceStrictState,
     GfsSubscriber,
     GfsSubscriberWithKeys,
@@ -2305,6 +2306,98 @@ class AbstractGfsSpaceMediaRepo(Protocol):
     async def acquire_sweep_lease(self, holder: str, *, now: int, ttl: int) -> bool: ...
     async def sweep_cursor(self) -> str: ...
     async def set_sweep_cursor(self, cursor: str) -> None: ...
+
+
+@runtime_checkable
+class AbstractGfsSpaceMediaDemandRepo(Protocol):
+    """Demand for space blobs that left the cache (GFS 0026, v_83): one row
+    per (blob, scope) — when the cache stored it, requests in a window, and
+    the cluster-wide re-upload claim."""
+
+    async def note_dropped(self, blobs: list[GfsSpaceMedia], *, now: int) -> None: ...
+    async def note_request(
+        self, blob_id: str, scope_kind: str, scope_id: str, *, now: int, window_s: int
+    ) -> GfsSpaceMediaDemand: ...
+    async def claim(
+        self, blob_id: str, scope_kind: str, scope_id: str, *, now: int, hold_s: int
+    ) -> bool: ...
+    async def prune(self, *, before: int) -> int: ...
+
+
+class SqliteGfsSpaceMediaDemandRepo:
+    """Space media demand (GFS 0026) in the shared database, so every node
+    of a cluster counts the same requests and one claim holds cluster-wide."""
+
+    def __init__(self, db: AsyncDatabase) -> None:
+        self._db = db
+
+    async def note_dropped(self, blobs: list[GfsSpaceMedia], *, now: int) -> None:
+        """Remember when the cache stored each blob that is leaving it (its
+        TTL ran out, or it was evicted) — so a later request knows its age."""
+        for media in blobs:
+            await self._db.enqueue(
+                "INSERT INTO gfs_space_media_demand(blob_id, scope_kind, scope_id,"
+                " stored_at, touched_at) VALUES(?,?,?,?,?)"
+                " ON CONFLICT(blob_id, scope_kind, scope_id) DO UPDATE SET"
+                " stored_at = excluded.stored_at, touched_at = excluded.touched_at",
+                (
+                    media.blob_id,
+                    media.scope_kind,
+                    media.scope_id,
+                    media.created_at,
+                    now,
+                ),
+            )
+
+    async def note_request(
+        self, blob_id: str, scope_kind: str, scope_id: str, *, now: int, window_s: int
+    ) -> GfsSpaceMediaDemand:
+        """Count one request for the blob in its window (a new window once
+        the last is *window_s* old) and return the row."""
+        await self._db.enqueue(
+            "INSERT INTO gfs_space_media_demand(blob_id, scope_kind, scope_id,"
+            " window_start, requests, touched_at) VALUES(?,?,?,?,1,?)"
+            " ON CONFLICT(blob_id, scope_kind, scope_id) DO UPDATE SET"
+            " requests = CASE WHEN window_start <= excluded.window_start - ?"
+            "  THEN 1 ELSE requests + 1 END,"
+            " window_start = CASE WHEN window_start <= excluded.window_start - ?"
+            "  THEN excluded.window_start ELSE window_start END,"
+            " touched_at = excluded.touched_at",
+            (blob_id, scope_kind, scope_id, now, now, window_s, window_s),
+        )
+        row = await self._db.fetchone(
+            "SELECT stored_at, requests FROM gfs_space_media_demand"
+            " WHERE blob_id=? AND scope_kind=? AND scope_id=?",
+            (blob_id, scope_kind, scope_id),
+        )
+        return GfsSpaceMediaDemand(
+            blob_id=blob_id,
+            scope_kind=scope_kind,
+            scope_id=scope_id,
+            stored_at=(
+                int(row["stored_at"])
+                if row is not None and row["stored_at"] is not None
+                else None
+            ),
+            requests=int(row["requests"]) if row is not None else 1,
+        )
+
+    async def claim(
+        self, blob_id: str, scope_kind: str, scope_id: str, *, now: int, hold_s: int
+    ) -> bool:
+        """Take the blob's re-upload for *hold_s* seconds unless another node
+        holds it — one conditional update on the single writer."""
+        changed = await self._db.enqueue_rowcount(
+            "UPDATE gfs_space_media_demand SET claimed_until = ?, touched_at = ?"
+            " WHERE blob_id=? AND scope_kind=? AND scope_id=? AND claimed_until <= ?",
+            (now + hold_s, now, blob_id, scope_kind, scope_id, now),
+        )
+        return changed > 0
+
+    async def prune(self, *, before: int) -> int:
+        return await self._db.enqueue_rowcount(
+            "DELETE FROM gfs_space_media_demand WHERE touched_at < ?", (before,)
+        )
 
 
 _SPACE_MEDIA_COLS = (

@@ -17,6 +17,7 @@ from socialhome.global_server.domain import (
     GfsMomentFollow,
     GfsMomentKeyMail,
     GfsSpaceMedia,
+    GfsSpaceMediaDemand,
     GfsSubscriberWithKeys,
     GfsUserRegistration,
     GlobalSpace,
@@ -31,6 +32,7 @@ from socialhome.global_server.repositories import (
     SqliteGfsMomentFollowRepo,
     SqliteGfsMomentKeyMailboxRepo,
     SqliteGfsSpaceEpochRepo,
+    SqliteGfsSpaceMediaDemandRepo,
     SqliteGfsSpaceMediaRepo,
     SqliteGfsUserRegistrationRepo,
 )
@@ -1868,3 +1870,85 @@ async def test_space_media_sweep_lease_and_cursor(space_media):
     assert await space_media.sweep_cursor() == ""
     await space_media.set_sweep_cursor("abc")
     assert await space_media.sweep_cursor() == "abc"
+
+
+# ─── Space media demand (GFS 0026, v_83) ───────────────────────────────
+
+
+async def test_demand_counts_requests_in_a_window(gfs_db):
+    repo = SqliteGfsSpaceMediaDemandRepo(gfs_db)
+    b = "a" * 64
+    got = await repo.note_request(b, "space", "s1", now=1000, window_s=60)
+    assert got == GfsSpaceMediaDemand(
+        blob_id=b, scope_kind="space", scope_id="s1", stored_at=None, requests=1
+    )
+    got = await repo.note_request(b, "space", "s1", now=1030, window_s=60)
+    assert got.requests == 2
+    # Past the window: a new one starts.
+    got = await repo.note_request(b, "space", "s1", now=1061, window_s=60)
+    assert got.requests == 1
+    # Another scope naming the same id is its own row.
+    other = await repo.note_request(b, "channel", "c1", now=1061, window_s=60)
+    assert other.requests == 1
+
+
+async def test_demand_remembers_when_a_blob_was_stored(gfs_db):
+    repo = SqliteGfsSpaceMediaDemandRepo(gfs_db)
+    b = "b" * 64
+    await repo.note_dropped(
+        [
+            GfsSpaceMedia(
+                blob_id=b,
+                size=10,
+                created_at=500,
+                expires_at=600,
+                last_fetched_at=500,
+                scope_kind="space",
+                scope_id="s1",
+            )
+        ],
+        now=700,
+    )
+    got = await repo.note_request(b, "space", "s1", now=800, window_s=60)
+    assert (got.stored_at, got.requests) == (500, 1)
+    # A request first, a drop later (a re-upload that left again) keeps the
+    # count and learns the age.
+    c = "c" * 64
+    await repo.note_request(c, "space", "s1", now=800, window_s=600)
+    await repo.note_dropped(
+        [
+            GfsSpaceMedia(
+                blob_id=c,
+                size=10,
+                created_at=750,
+                expires_at=790,
+                last_fetched_at=750,
+                scope_kind="space",
+                scope_id="s1",
+            )
+        ],
+        now=810,
+    )
+    got = await repo.note_request(c, "space", "s1", now=820, window_s=600)
+    assert (got.stored_at, got.requests) == (750, 2)
+
+
+async def test_demand_claim_is_one_per_window(gfs_db):
+    repo = SqliteGfsSpaceMediaDemandRepo(gfs_db)
+    b = "d" * 64
+    await repo.note_request(b, "space", "s1", now=100, window_s=60)
+    assert await repo.claim(b, "space", "s1", now=100, hold_s=60)
+    assert not await repo.claim(b, "space", "s1", now=150, hold_s=60)
+    assert await repo.claim(b, "space", "s1", now=160, hold_s=60)
+    # No row, no claim (a claim follows a noted request).
+    assert not await repo.claim("e" * 64, "space", "s1", now=160, hold_s=60)
+
+
+async def test_demand_prune(gfs_db):
+    repo = SqliteGfsSpaceMediaDemandRepo(gfs_db)
+    await repo.note_request("f" * 64, "space", "s1", now=100, window_s=60)
+    await repo.note_request("0" * 64, "space", "s1", now=900, window_s=60)
+    assert await repo.prune(before=500) == 1
+    assert (
+        await repo.note_request("0" * 64, "space", "s1", now=901, window_s=60)
+    ).requests == 2

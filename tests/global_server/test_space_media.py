@@ -25,6 +25,7 @@ from socialhome.global_server.config import GfsConfig
 from socialhome.global_server.domain import ClientInstance, GlobalSpace
 from socialhome.global_server.repositories import (
     SqliteGfsFederationRepo,
+    SqliteGfsSpaceMediaDemandRepo,
     SqliteGfsSpaceMediaRepo,
 )
 from socialhome.global_server.space_media import (
@@ -932,3 +933,42 @@ def test_the_prefix_key_groups_an_ipv6_48_and_an_ipv4_24(make):
     assert k("192.0.2.1") == k("192.0.2.200") != k("192.0.3.1")
     assert k("::ffff:192.0.2.7") == k("192.0.2.1")
     assert k("unknown") == k("unknown") != k("192.0.2.1")
+
+
+# ── On demand (v_83): what left the cache is remembered ─────────────────
+
+
+async def test_a_blob_that_expires_or_is_evicted_leaves_its_age_behind(
+    repo, gfs_db, tmp_dir
+):
+    """v_83 — when a blob leaves the cache (TTL or eviction), the store
+    remembers when it had stored it, so a later request knows the content
+    is fresh (cache it again) or old (stream it)."""
+    demand = SqliteGfsSpaceMediaDemandRepo(gfs_db)
+    store = GfsSpaceMediaStore(
+        repo,
+        FsBlobFiles(tmp_dir / "spaces"),
+        _limits(space_max_bytes=2 * SMALL),
+        demand=demand,
+    )
+    a, b, c, d = _blob(), _blob(), _blob(), _blob()
+    await _put(store, a, now=NOW, expires=NOW + 10)
+    await _put(store, b, now=NOW + 1)
+    # c evicts the expired a first, then (scope full) the LRU b.
+    await _put(store, c, now=NOW + 20)
+    await _put(store, d, now=NOW + 21)
+    got_a = await demand.note_request(_bid(a), "space", "s1", now=NOW + 30, window_s=60)
+    got_b = await demand.note_request(_bid(b), "space", "s1", now=NOW + 30, window_s=60)
+    assert got_a.stored_at == NOW
+    assert got_b.stored_at == NOW + 1
+    # The sweep's expiry is remembered too.
+    await store.prune_expired(NOW + 10 * 86_400)
+    got_c = await demand.note_request(_bid(c), "space", "s1", now=NOW + 30, window_s=60)
+    assert got_c.stored_at == NOW + 20
+    # A seed holder's delete is NOT remembered: deleted content must not be
+    # asked of a holder as if it were merely old.
+    e = _blob()
+    await _put(store, e, space="s9", now=NOW + 40)
+    assert await store.delete(_bid(e), scope_kind="space", scope_id="s9")
+    got_e = await demand.note_request(_bid(e), "space", "s9", now=NOW + 50, window_s=60)
+    assert got_e.stored_at is None
