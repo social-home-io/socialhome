@@ -213,6 +213,12 @@ _ORJSON_SIGNING_ALLOWED = frozenset(
         ("federation/sync/space/provider.py", "_records_digest"),
         ("dashboard/display_api.py", "json_answer"),
         ("dashboard/map_scene.py", "scene_key"),
+        # The federation envelope header of a binary media frame (v_14
+        # channel, v_81 HTTPS body): the envelope's signed bytes are orjson
+        # by protocol — ``inbound_validator.make_verify_signature``
+        # rebuilds them with ``orjson.dumps`` — and the builder signs it
+        # in place. Its ``chunk_sha256`` hashes the raw chunk, not JSON.
+        ("federation/media_envelope.py", "build_media_envelope"),
     }
 )
 
