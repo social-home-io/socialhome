@@ -71,6 +71,16 @@ if str(REPO_ROOT) not in sys.path:
 
 ROOT = Path("/tmp/sh-demo")
 
+
+def _received_name(space_id: str, sender: dict, filename: str) -> str:
+    """The name space file ``filename`` takes on a household that got it
+    from ``sender`` (an ``state["instances"]`` entry): received space files
+    are named by the household that delivered them (``SpaceMediaNamer``),
+    never by the name the sender uses."""
+    from socialhome.services.inbound_media_store import space_direct_media_name
+
+    return space_direct_media_name(space_id, sender["instance_id"], filename)
+
 #: Upper bound for :func:`cmd_replay`'s poll. The outbox schedule is
 #: ``(5, 10, 20, 40, …)`` s with ±30 % jitter and nothing flushes early on a
 #: peer's return, so the first retry that finds Carol alive lands within
@@ -11119,9 +11129,12 @@ def cmd_verify() -> None:
                 )
                 got_cover = b""
                 s_g = 0
+                # The guest names the file by the household that delivered
+                # it (``SpaceMediaNamer``): fetch what ITS event row shows.
+                guest_cover = str(mirror.get("cover_url") or want_cover).lstrip("/")
                 for _ in range(20):
                     s_g, got_cover = _http_get_bytes(
-                        f"http://127.0.0.1:{guest['port']}/{want_cover}",
+                        f"http://127.0.0.1:{guest['port']}/{guest_cover}",
                         token=guest["token"],
                     )
                     if s_g == 200:
@@ -14267,7 +14280,9 @@ def cmd_space_media_blob() -> None:
 
     # 5. Bytes should now exist on d's media path with the same
     #    filename + same content.
-    d_media_path = _instance_dir("d") / "media" / filename
+    d_media_path = (
+        _instance_dir("d") / "media" / _received_name(space_id, c, filename)
+    )
     if not d_media_path.is_file():
         raise SystemExit(
             f"space-media-blob: {filename} missing from d's media path "
@@ -14409,7 +14424,7 @@ def cmd_space_gallery_media_blob() -> None:
         if not url:
             continue
         filename = url.rsplit("/", 1)[-1].split("?", 1)[0]
-        d_path = _instance_dir("d") / "media" / filename
+        d_path = _instance_dir("d") / "media" / _received_name(space_id, c, filename)
         if not d_path.is_file():
             raise SystemExit(
                 f"space-gallery-media-blob: {filename} missing from d "
@@ -14567,7 +14582,7 @@ def cmd_space_gallery_media_blob() -> None:
             continue
         filename = url.rsplit("/", 1)[-1].split("?", 1)[0]
         deadline = time.monotonic() + 30
-        c_path = _instance_dir("c") / "media" / filename
+        c_path = _instance_dir("c") / "media" / _received_name(space_id, d, filename)
         while not c_path.is_file() and time.monotonic() < deadline:
             time.sleep(2)
         if not c_path.is_file():
@@ -14968,7 +14983,9 @@ def cmd_space_sync_catchup_media() -> None:
     print("  d GET /feed surfaces the pre-invite post ✓")
 
     # 8. Bytes for the pre-invite post image MUST land on d.
-    d_post_path = _instance_dir("d") / "media" / post_filename
+    d_post_path = (
+        _instance_dir("d") / "media" / _received_name(space_id, c, post_filename)
+    )
     if not d_post_path.is_file():
         raise SystemExit(
             f"space-sync-catchup-media: post image {post_filename} "
@@ -14987,7 +15004,7 @@ def cmd_space_sync_catchup_media() -> None:
         if not url:
             continue
         filename = url.rsplit("/", 1)[-1].split("?", 1)[0]
-        d_path = _instance_dir("d") / "media" / filename
+        d_path = _instance_dir("d") / "media" / _received_name(space_id, c, filename)
         if not d_path.is_file():
             raise SystemExit(
                 f"space-sync-catchup-media: gallery file {filename} "

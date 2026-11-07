@@ -281,6 +281,17 @@ async def test_ensure_local_without_a_ref_or_with_a_file(tmp_path):
     assert await f.ensure_local("../etc") is False
 
 
+async def test_a_view_of_a_direct_file_still_on_its_way_is_quiet(tmp_path, caplog):
+    """A file another household pushes (``sd-`` / a local name) and that has
+    not arrived yet is routine for a viewer — never a GFS fetch, never a
+    WARNING (the media route asks on every 404)."""
+    f = _fetcher(tmp_path, _Gfs({}))
+    with caplog.at_level("WARNING"):
+        assert await f.ensure_local("sd-" + "a" * 40 + ".webp") is False
+        assert await f.ensure_local("nope.webp") is False
+    assert caplog.text == ""
+
+
 async def test_concurrent_views_coalesce_into_one_fetch(tmp_path):
     data = b"pic" * 100
     blob = _blob("a.webp", data)
