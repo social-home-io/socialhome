@@ -2060,8 +2060,6 @@
   "space.about.icon_updated": "Icône mise à jour",
   "space.about.icon_removed": "Icône supprimée",
   "space.about.icon_remove_confirm": "Supprimer l'icône ?",
-  "space.icon.ha_logo": "Utiliser le logo Home Assistant",
-  "space.icon.ha_logo_sub": "Affiché à la place de l'emoji.",
   "space.about.uploading": "Importation…",
   "space.about.remove": "Supprimer",
   "space.about.upload_failed": "L'importation a échoué : {error}",

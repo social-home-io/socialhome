@@ -2065,8 +2065,6 @@
   "space.about.icon_updated": "Symbol aktualisiert",
   "space.about.icon_removed": "Symbol entfernt",
   "space.about.icon_remove_confirm": "Symbol entfernen?",
-  "space.icon.ha_logo": "Logo von Home Assistant verwenden",
-  "space.icon.ha_logo_sub": "Wird statt des Emojis gezeigt.",
   "space.about.uploading": "Wird hochgeladen…",
   "space.about.remove": "Entfernen",
   "space.about.upload_failed": "Hochladen fehlgeschlagen: {error}",

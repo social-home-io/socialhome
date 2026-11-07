@@ -10,10 +10,6 @@
  * household's home — and a radius; households join only while their home
  * lies inside. Never this device's position, and no place search (that
  * would be a third-party fetch).
- *
- * The Home Assistant logo can be ticked as the space's picture: once the
- * space exists it uploads through the ordinary icon upload, like a picture
- * picked in Settings (``haLogo.ts``).
  */
 import { signal } from '@preact/signals'
 import { useRef } from 'preact/hooks'
@@ -45,14 +41,11 @@ import { LocalAreaMap } from './LocalAreaMap'
 import { LocalAreaPicker, PIN_DOT_KM } from './LocalAreaPicker'
 import { t } from '@/i18n/i18n'
 import { markSetupPending } from '@/features/spaces/spaceSetup'
-import { haLogoFile, haLogoUrl } from '@/features/spaces/haLogo'
 
 const open = signal(false)
 const name = signal('')
 const description = signal('')
 const emoji = signal('')
-// Use the bundled Home Assistant logo as the space's picture.
-const haLogo = signal(false)
 const spaceType = signal('private')
 const joinMode = signal('invite_only')
 // A public space may be a local community: households join only while
@@ -84,7 +77,6 @@ export function openSpaceCreate() {
   name.value = ''
   description.value = ''
   emoji.value = ''
-  haLogo.value = false
   spaceType.value = 'private'
   joinMode.value = 'invite_only'
   minAge.value = 0
@@ -156,17 +148,6 @@ export function SpaceCreateDialog() {
           }
           : {}),
       })
-      // The logo is the space's picture: uploaded like any picked picture.
-      // The space exists either way — a failed upload is said, not fatal.
-      if (haLogo.value) {
-        try {
-          const fd = new FormData()
-          fd.append('file', await haLogoFile())
-          await api.upload(`/api/spaces/${created.id}/icon`, fd)
-        } catch (err: unknown) {
-          showToast(t('space.about.upload_failed', { error: String((err as Error)?.message ?? err) }), 'error')
-        }
-      }
       // The owner is asked "What is it for?" on the first visit — a hint:
       // if it can't be stored, the space simply opens without the card.
       try { await markSetupPending(created.id) } catch { /* no card */ }
@@ -231,15 +212,6 @@ export function SpaceCreateDialog() {
             placeholder={t('space.create.description_placeholder')} rows={2} />
         </label>
         <EmojiField value={emoji} openKey="space-create-icon" />
-        <label class="sh-toggle-row sh-ha-logo-toggle">
-          <input type="checkbox" checked={haLogo.value}
-                 onChange={(e) => { haLogo.value = (e.target as HTMLInputElement).checked }} />
-          <img src={haLogoUrl} alt="" width={28} height={28} />
-          <span class="sh-toggle-row__text">
-            <span>{t('space.icon.ha_logo')}</span>
-            <span class="sh-toggle-row__sub">{t('space.icon.ha_logo_sub')}</span>
-          </span>
-        </label>
         <RadioCardGroup
           legend={t('space.create.visibility')}
           name="space-create-visibility"

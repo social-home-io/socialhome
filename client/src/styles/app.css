@@ -14272,11 +14272,6 @@ a.sh-space-hero-members:focus-visible,
   font-size: 2rem;
 }
 .sh-ss-basics__icon-actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--sh-space-xs); }
-/* The ready-made Home Assistant logo (Settings button, create-dialog
- * toggle): the bundled logo beside its label. */
-.sh-ha-logo-btn { display: inline-flex; align-items: center; gap: var(--sh-space-xs); }
-.sh-ha-logo-btn img, .sh-ha-logo-toggle img { flex: 0 0 auto; object-fit: contain; }
-.sh-ha-logo-toggle { border-bottom: none; }
 .sh-ss-basics__form { gap: var(--sh-space-md); }
 .sh-ss-basics__form label { margin-bottom: 0; }
 .sh-ss-basics__form input { font-weight: 400; }

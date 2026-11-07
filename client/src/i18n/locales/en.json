@@ -2369,8 +2369,6 @@
   "space.about.icon_updated": "Icon updated",
   "space.about.icon_removed": "Icon removed",
   "space.about.icon_remove_confirm": "Remove the icon?",
-  "space.icon.ha_logo": "Use the Home Assistant logo",
-  "space.icon.ha_logo_sub": "Shown instead of the emoji.",
   "space.about.uploading": "Uploading…",
   "space.about.remove": "Remove",
   "space.about.upload_failed": "Upload didn't work: {error}",
