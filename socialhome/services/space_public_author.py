@@ -138,6 +138,73 @@ _OPTIONAL_OMITTED_WHEN_ABSENT: frozenset[str] = frozenset(
     {"identity_anchor", "item_type", "item_target", "edited_at"}
 )
 
+#: v_80 — suite of the separate author signature over a post's
+#: ``media_refs`` descriptor (see :func:`signed_media_refs`). Receivers refuse
+#: any other value — the descriptor is dropped, never a fallback.
+MEDIA_REFS_SIG_SUITE_ED25519: str = "ed25519"
+SUPPORTED_MEDIA_REFS_SIG_SUITES: frozenset[str] = frozenset(
+    {MEDIA_REFS_SIG_SUITE_ED25519}
+)
+
+#: Domain-separation prefix for the ``media_refs`` author signature.
+_MEDIA_REFS_SIG_DOMAIN: bytes = b"space-post-media-refs:v1:"
+
+
+class UnsupportedMediaRefsSigSuite(ValueError):
+    """A relayed ``media_refs`` names a signature suite we don't support."""
+
+
+def media_refs_signing_bytes(inner: dict) -> bytes:
+    """Canonical bytes of the ``media_refs`` author signature: the
+    descriptor plus the fields that pin it to this one post and author.
+
+    A SEPARATE signature, like the link preview's, not a field of the main
+    author bytes: a follower household on an older build recomputes those
+    with its own field list, and a widened list would make it drop every
+    picture post. It ignores these keys instead and shows the post without
+    GFS pictures."""
+    body = {
+        "post_id": inner.get("post_id"),
+        "space_id": inner.get("space_id"),
+        "author_user_id": inner.get("author_user_id"),
+        "author_pk": inner.get("author_pk"),
+        "media_refs": inner.get("media_refs"),
+        "media_refs_sig_suite": inner.get("media_refs_sig_suite"),
+    }
+    return _MEDIA_REFS_SIG_DOMAIN + canonical_bytes(body)
+
+
+def signed_media_refs(inner: dict) -> object | None:
+    """The inner's ``media_refs`` iff its author signed it, else ``None``.
+
+    Call only on an inner that already passed
+    :func:`verify_signed_author_inner` (so ``author_pk`` is the author's).
+    A descriptor without a signature, or one a re-publisher swapped (anyone
+    holding the content key — a member with the writer group key — can
+    re-wrap the author's inner), is dropped: the post stands, without GFS
+    pictures. An unknown ``media_refs_sig_suite`` raises
+    :class:`UnsupportedMediaRefsSigSuite` — never a fallback."""
+    refs = inner.get("media_refs")
+    if refs is None:
+        return None
+    suite = inner.get("media_refs_sig_suite")
+    if suite is None:
+        return None  # unsigned: never taken
+    if suite not in SUPPORTED_MEDIA_REFS_SIG_SUITES:
+        raise UnsupportedMediaRefsSigSuite(str(suite))
+    sig_text = inner.get("media_refs_sig")
+    if not isinstance(sig_text, str) or not sig_text:
+        return None
+    try:
+        author_pk = bytes.fromhex(str(inner.get("author_pk") or ""))
+        sig = b64url_decode(sig_text)
+        signing_bytes = media_refs_signing_bytes(inner)
+    except TypeError, ValueError:
+        return None
+    if not verify_ed25519(author_pk, signing_bytes, sig):
+        return None
+    return refs
+
 
 def author_signing_bytes(inner: dict) -> bytes:
     """Return the canonical, domain-separated bytes the author signs / the
@@ -177,6 +244,7 @@ def build_signed_author_inner(
     item_type: str | None = None,
     item_target: str | None = None,
     edited_at: str | None = None,
+    media_refs: dict | None = None,
 ) -> dict:
     """Build the per-author-signed inner payload for a public/global space
     post (the object the GFS relay encrypts + a subscriber verifies).
@@ -253,6 +321,14 @@ def build_signed_author_inner(
     inner["author_sig"] = b64url_encode(
         sign_ed25519(author_identity_seed, author_signing_bytes(inner))
     )
+    # v_80: where the post's files live in the GFS media cache, under the
+    # author's own separate signature (see :func:`signed_media_refs`).
+    if media_refs:
+        inner["media_refs"] = media_refs
+        inner["media_refs_sig_suite"] = MEDIA_REFS_SIG_SUITE_ED25519
+        inner["media_refs_sig"] = b64url_encode(
+            sign_ed25519(author_identity_seed, media_refs_signing_bytes(inner))
+        )
     preview = link_preview_to_dict(post.link_preview)
     if preview is not None:
         inner["link_preview"] = preview

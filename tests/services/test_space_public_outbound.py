@@ -63,6 +63,7 @@ from socialhome.services.space_crypto_service import SpaceContentEncryption
 from socialhome.services.space_public_author import (
     author_signing_bytes,
     build_signed_author_inner,
+    signed_media_refs,
     verify_signed_author_inner,
 )
 from socialhome.services.space_public_authority import is_approved
@@ -1545,6 +1546,8 @@ async def test_a_seed_holders_picture_post_carries_media_refs_for_followers(env)
     )
     assert inner["media_refs"] == _MediaPlan().wire()
     assert verify_signed_author_inner(_unpadded(inner))
+    # Signed by the author (#1309 round 3): a re-publisher can't swap it.
+    assert signed_media_refs(_unpadded(inner)) == _MediaPlan().wire()
     assert media.planned == [("sp-pub", ["api/media/a.webp"], True)]
     assert media.items == [post.id]  # sealed for the post
     assert len(media.uploaded) == 1

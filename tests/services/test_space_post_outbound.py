@@ -29,6 +29,7 @@ from socialhome.services.moderation_release import release_scope
 from socialhome.services.space_post_outbound import SpacePostOutbound
 from socialhome.services.space_public_author import (
     author_signing_bytes,
+    signed_media_refs,
     verify_signed_author_inner,
 )
 from tests.services.test_space_public_author import _v25_author_signing_bytes
@@ -1085,7 +1086,7 @@ class _MemberGfs:
         return True
 
 
-def _member_setup(member_gfs):
+def _member_setup(member_gfs, *, media_gfs=None):
     bus = EventBus()
     federation = AsyncMock()
     keypair = generate_identity_keypair()
@@ -1103,6 +1104,8 @@ def _member_setup(member_gfs):
         identity=(keypair, "inst-self"),
     )
     outbound.attach_member_gfs(member_gfs)
+    if media_gfs is not None:
+        outbound.attach_media_gfs(media_gfs)
     post = Post(
         id="post-m",
         author=uid,
@@ -1183,7 +1186,9 @@ class _ItemGfs(_MemberGfs):
         return True
 
 
-def _items_setup(*, space_type=SpaceType.PUBLIC, readable=True, channel=False):
+def _items_setup(
+    *, space_type=SpaceType.PUBLIC, readable=True, channel=False, media_gfs=None
+):
     member = _ItemGfs(channel=channel)
     bus = EventBus()
     federation = AsyncMock()
@@ -1204,6 +1209,8 @@ def _items_setup(*, space_type=SpaceType.PUBLIC, readable=True, channel=False):
         identity=(keypair, "inst-self"),
     )
     outbound.attach_member_gfs(member)
+    if media_gfs is not None:
+        outbound.attach_media_gfs(media_gfs)
     return bus, member, uid
 
 
@@ -1522,7 +1529,7 @@ async def test_a_text_post_plans_nothing():
 
 async def test_followers_get_the_refs_in_the_public_relay():
     """A follower reads the post's inner relayed through a GFS: the
-    descriptor rides there, outside the author signature."""
+    descriptor rides there, signed by the author (#1309 round 3)."""
     bus = EventBus()
     federation = AsyncMock()
     federation.broadcast_to_space_members = AsyncMock()
@@ -1541,7 +1548,8 @@ async def test_followers_get_the_refs_in_the_public_relay():
     assert media_gfs.planned[0][2] is True  # followers wanted
     relay = federation.broadcast_to_space_members.call_args.args[2]["public_relay"]
     assert relay["media_refs"] == _REFS
-    assert verify_signed_author_inner(relay)  # the signature still holds
+    assert verify_signed_author_inner(relay)
+    assert signed_media_refs(relay) == _REFS
 
 
 async def test_a_planning_failure_never_blocks_the_post(caplog):
@@ -1557,3 +1565,44 @@ async def test_a_planning_failure_never_blocks_the_post(caplog):
     await bus.publish(SpacePostCreated(post=_picture_post(), space_id="sp-1"))
     federation.broadcast_to_space_members.assert_awaited_once()
     assert "media" in caplog.text
+
+
+# ── #1309 round 3: every follower inner signs its media_refs ────────────
+
+
+async def test_the_member_published_inner_signs_its_media_refs():
+    member = _MemberGfs()
+    media = _FakeMediaGfs(plan=_FakePlan(_REFS))
+    bus, _federation, post = _member_setup(member, media_gfs=media)
+    picture = Post(
+        id=post.id,
+        author=post.author,
+        type=PostType.IMAGE,
+        content="pic",
+        created_at=post.created_at,
+        image_urls=("api/media/a.webp",),
+    )
+    await bus.publish(SpacePostCreated(post=picture, space_id="sp-1"))
+    _space, _author, inner = member.scheduled[0]
+    assert verify_signed_author_inner(inner)
+    assert signed_media_refs(inner) == _REFS
+
+
+async def test_an_own_post_edit_carries_its_signed_media_refs():
+    """#1309 round 3 (item 4): an edit can overtake its create at a follower
+    and then IS the post — so the snapshot carries the signed descriptor."""
+    media = _FakeMediaGfs(plan=_FakePlan(_REFS))
+    bus, member, uid = _items_setup(media_gfs=media)
+    picture = Post(
+        id="post-1",
+        author=uid,
+        type=PostType.IMAGE,
+        content="edited",
+        created_at=datetime(2026, 10, 3, tzinfo=UTC),
+        image_urls=("api/media/a.webp",),
+    )
+    await bus.publish(PostEdited(post=picture, space_id="sp-1", actor_user_id=uid))
+    (edit,) = [s[3] for s in member.scheduled if s[2] == "post_edit"]
+    assert verify_signed_author_inner(edit)
+    assert signed_media_refs(edit) == _REFS
+    assert media.planned[0][2] is True  # for followers

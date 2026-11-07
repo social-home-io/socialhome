@@ -627,6 +627,31 @@ mesh `rev` more than 25 h old or not newer than the one kept before any rate
 budget is charged (a replayed genuine signature spends nothing). The PQ path: an `"ed25519+mldsa65"` sibling constant with
 both signatures in parallel, the wire shape unchanged.
 
+**`media_refs` author signature (GFS public relay, v_80)**
+(`services/space_public_author.py`) — where a public/global space post's
+files live in the GFS media cache rides the encrypted relay inner under its
+own author signature, built like the link preview's and for the same reason
+(a follower on an older build recomputes the main author bytes with its own
+field list, so it must not change):
+
+```
+media_refs           : {"<file>": {blob_id, suite, epoch, size, scope, addr_suite}}
+media_refs_sig       : "<b64url>"   # Ed25519 over the bytes below
+media_refs_sig_suite : "ed25519"    # unknown value → descriptor rejected
+
+b"space-post-media-refs:v1:" + canonical_json({
+  post_id, space_id, author_user_id, author_pk,
+  media_refs, media_refs_sig_suite
+})
+```
+
+A follower takes the descriptor only when this verifies against the
+already-verified `author_pk`. Anyone holding the space content key — a
+member with the writer group key — can re-wrap the author's inner and seal
+blobs with any AAD, so neither the outer authority signature nor the seal's
+AAD tells the follower the descriptor is the author's. An unsigned or
+swapped descriptor is dropped, and the post stands without those pictures.
+
 **Link-preview author signature (GFS public relay)**
 (`services/space_public_author.py`) — a public/global space post's
 author-built link card rides inside the encrypted relay inner, but outside
@@ -1325,7 +1350,7 @@ v_80). The author's household seals each file once
   another space, epoch, item, household or file. Every member holds the key,
   so the AAD does not stop a member sealing its own bytes: what stops it
   taking over another item's picture is the reader's naming — a fetched file
-  lands under `gfs_space_media_name(space, delivering household, filename)`
+  lands under `gfs_space_media_name(space, delivering household, item, filename)`
   (`sg-…`), never under the bare file name
   ([`protocol/media.md`](protocol/media.md#space-media-via-the-gfs-cache-v_80)).
 - **Padding.** The moment-media buckets (`moment_public_media.PAD_BUCKETS`,

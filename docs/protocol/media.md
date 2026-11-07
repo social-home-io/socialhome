@@ -196,13 +196,15 @@ sending household was sent it for. Both blob types share
   blob before the post, listing or gallery item it belongs to. Such a
   blob is accepted — overwriting is the harm, and the write is
   write-once, so accepting it cannot touch an existing file.
-  **Known residual (tracked follow-up):** the sending household is not
-  bound to the correlated row's author, so a member household that learned
-  a file name (from the post itself) and completes its own copy first — the
-  author's push queued for an offline household, a catch-up — keeps that
-  name for every row that shows it. The GFS cache path doesn't have this
-  (a reader names fetched files itself, below); this path needs the sender
-  bound to the row's author household or the host.
+  **Known residual (tracked follow-up, next PR):** the sending household
+  is not bound to the correlated row's author, so a member household that
+  learned a file name (from the post itself) and completes its own copy
+  first — the author's push queued for an offline household, a catch-up —
+  keeps that name for every row that shows it. That reaches GFS readers
+  too: a household that holds a poisoned F (the host included) seals ITS
+  copy of F for the link-joined readers its §25.6 catch-up serves, so they
+  get the poisoned picture under the host's descriptor. The fix binds the
+  sender to the row's author household or the host.
 - **Per-sender assembly.** Part files live under
   `media_dir/.partial/<sha256(from_instance, transfer_id, chunk_count)>/`
   (DM: `transfer_id` = `dm:<message_id>`), so two households' chunks
@@ -286,7 +288,7 @@ It rides:
 
 | Item | Where |
 |---|---|
-| Space post | `SPACE_POST_CREATED` (per link-joined v_80 member), the `public_relay` inner (followers, through a seed holder's relay) and the v_49 member-publish inner — the last two **outside the author signature**, like `writer_cert`: a follower trusts the seed-holding relay (which re-encrypts and authority-signs the inner) for the descriptor; the blob it names is still checked at its scope-bound address and must decrypt under the space key with the file name in its AAD |
+| Space post | `SPACE_POST_CREATED` (per link-joined v_80 member), the `public_relay` inner (followers, through a seed holder's relay) and the v_49 member-publish inner — the last two **under the author's own signature** (`media_refs_sig`, suite `media_refs_sig_suite: "ed25519"`, domain `space-post-media-refs:v1:`, bound to the post, space and author; `services/space_public_author.py`). It is a separate signature, like the link card's, so a follower on an older build still verifies the post and shows it without GFS pictures. A follower takes the descriptor ONLY when that signature verifies: an unsigned one, or one a re-publisher swapped, is dropped. Anyone holding the content key (a member with the writer group key) can re-wrap the author's inner, and the AAD's household proves nothing to a key holder. The post stands without those pictures; an unknown suite is refused. A post edit that can overtake its create carries the signed descriptor too |
 | Calendar event | `SPACE_CALENDAR_EVENT_CREATED` / `_UPDATED`, only when the cover is new or changed |
 | Gallery item | `SPACE_GALLERY_ITEM_CREATED` (thumbnail + full file) |
 | §25.6 records | `posts` / `calendar` / `gallery` records streamed to a link-joined v_80 requester ([`sync.md`](./sync.md), sync line 80) |
@@ -351,7 +353,7 @@ uploads (WARNING), and the reader then shows the item without that picture.
 reader's.** Any member can name any file name it has seen, and every member
 holds the space key, so a bare file name proves nothing. Before the item is
 saved, each file it shows and describes is renamed to this household's own
-name for it, `gfs_space_media_name(space, delivering household, filename)`
+name for it, `gfs_space_media_name(space, delivering household, item, filename)`
 (`sg-` + a hash), and the item's reference is rewritten to it — the
 delivering household being the one the receiver authenticated (the
 envelope's sender; for followers, the author household the signed inner

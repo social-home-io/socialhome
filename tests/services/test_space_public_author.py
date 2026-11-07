@@ -19,8 +19,11 @@ from socialhome.domain.link_preview import LinkPreview
 from socialhome.domain.post import LocationData, Post, PostType
 from socialhome.services.space_public_author import (
     UnsupportedLinkPreviewSigSuite,
+    UnsupportedMediaRefsSigSuite,
     author_signing_bytes,
     build_signed_author_inner,
+    media_refs_signing_bytes,
+    signed_media_refs,
     verified_link_preview,
     verify_signed_author_inner,
 )
@@ -679,3 +682,102 @@ def test_edited_at_is_signed_when_present():
     assert not verify_ed25519(kp.public_key, author_signing_bytes(moved), sig)
     stripped = {k: v for k, v in inner.items() if k != "edited_at"}
     assert not verify_ed25519(kp.public_key, author_signing_bytes(stripped), sig)
+
+
+# ── #1309 round 3: followers' media_refs are signed by the author ────────
+
+_REFS = {
+    "a.webp": {
+        "blob_id": "a" * 64,
+        "suite": "aesgcm-256-pad-det",
+        "epoch": 1,
+        "size": 9,
+        "scope": "space",
+        "addr_suite": "sm1",
+    }
+}
+
+
+def _signed_with_refs(kp, refs=_REFS):
+    return build_signed_author_inner(
+        post=_post(),
+        space_id="sp",
+        author_username="bob",
+        author_pk=kp.public_key,
+        author_identity_seed=kp.private_key,
+        origin_instance_id="origin.home",
+        media_refs=refs,
+    )
+
+
+def test_media_refs_are_bound_to_the_author_signature():
+    """Regression (#1309 round 3): the descriptor rode outside every author
+    signature, so anyone holding the content key (a member with the writer
+    group key) could re-publish A's inner with blobs of its own. The author
+    signs it now — separately, bound to the post."""
+    kp = generate_identity_keypair()
+    inner = _signed_with_refs(kp)
+    assert inner["media_refs"] == _REFS
+    assert inner["media_refs_sig_suite"] == "ed25519"
+    assert verify_ed25519(
+        kp.public_key, author_signing_bytes(inner), b64url_decode(inner["author_sig"])
+    )
+    assert signed_media_refs(inner) == _REFS
+    # A swapped descriptor no longer verifies.
+    evil = {"a.webp": dict(_REFS["a.webp"], blob_id="e" * 64)}
+    assert signed_media_refs(dict(inner, media_refs=evil)) is None
+    # Nor does A's descriptor moved onto another post.
+    assert signed_media_refs(dict(inner, post_id="p-other")) is None
+    # Nor one signed by another key.
+    other = generate_identity_keypair()
+    forged = dict(
+        inner,
+        media_refs=evil,
+        media_refs_sig=b64url_encode(
+            sign_ed25519(
+                other.private_key,
+                media_refs_signing_bytes(dict(inner, media_refs=evil)),
+            )
+        ),
+    )
+    assert signed_media_refs(forged) is None
+
+
+def test_media_refs_never_change_the_main_author_bytes():
+    """A separate signature, like the link card's: a follower on an older
+    build recomputes the main bytes without any media key and still
+    verifies the post (it shows it without GFS pictures)."""
+    kp = generate_identity_keypair()
+    inner = _signed_with_refs(kp)
+    assert b"media_refs" not in author_signing_bytes(inner)
+    assert verify_ed25519(
+        kp.public_key,
+        _v25_author_signing_bytes(inner),
+        b64url_decode(inner["author_sig"]),
+    )
+
+
+def test_an_unsigned_media_refs_is_never_taken():
+    kp = generate_identity_keypair()
+    inner = build_signed_author_inner(
+        post=_post(),
+        space_id="sp",
+        author_username="bob",
+        author_pk=kp.public_key,
+        author_identity_seed=kp.private_key,
+        origin_instance_id="origin.home",
+    )
+    assert "media_refs_sig" not in inner
+    assert signed_media_refs(inner) is None
+    assert signed_media_refs(dict(inner, media_refs=_REFS)) is None
+    assert (
+        signed_media_refs(dict(inner, media_refs=_REFS, media_refs_sig_suite="ed25519"))
+        is None
+    )
+
+
+def test_an_unknown_media_refs_suite_is_refused():
+    kp = generate_identity_keypair()
+    inner = dict(_signed_with_refs(kp), media_refs_sig_suite="mldsa-x")
+    with pytest.raises(UnsupportedMediaRefsSigSuite):
+        signed_media_refs(inner)

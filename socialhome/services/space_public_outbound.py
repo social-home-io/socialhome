@@ -136,7 +136,7 @@ from ..domain.space_item import (
     compressed_item_plaintexts,
     pad_json_object,
 )
-from ..domain.space_media_ref import MEDIA_REFS_FIELD, post_media_urls
+from ..domain.space_media_ref import post_media_urls
 from ..domain.writer_cert import (
     WRITER_SCOPE_COMMENT,
     WRITER_SCOPE_WRITE,
@@ -215,7 +215,7 @@ class SpacePublicOutbound(SpaceMediaRefsMixin):
         #: calendar-derived post (never relayed, so nothing to remove).
         self._posts: AbstractSpacePostRepo | None = None
         #: v_80 — the post's pictures for followers (``media_refs`` in the
-        #: inner, outside the author signature; one upload per GFS).
+        #: inner, under the author's ``media_refs_sig``; one upload per GFS).
         self._media_gfs = None
 
     def attach_relay_coverage(self, coverage: SpaceRelayCoverage) -> None:
@@ -313,6 +313,11 @@ class SpacePublicOutbound(SpaceMediaRefsMixin):
         # ``author_pk`` so a relaying seed-holder can't forge authorship.
         # Centralised in build_signed_author_inner so the member-broadcast
         # relay-hint produces a byte-identical signed inner.
+        # v_80 — the pictures, for followers reading through a GFS; the
+        # author signs the descriptor's digest with the rest of the inner.
+        media_plan = await self._plan_media_refs(
+            event.space_id, post_media_urls(post), item_id=post.id, followers=True
+        )
         inner = build_signed_author_inner(
             post=post,
             space_id=event.space_id,
@@ -326,13 +331,8 @@ class SpacePublicOutbound(SpaceMediaRefsMixin):
             # row (``anchor == username``, the 0041 backfill) to "absent" so
             # its signed bytes stay v_25-compatible.
             author_identity_anchor=author.identity_anchor,
+            media_refs=media_plan.wire() if media_plan is not None else None,
         )
-        # v_80 — the pictures, for followers reading through a GFS.
-        media_plan = await self._plan_media_refs(
-            event.space_id, post_media_urls(post), item_id=post.id, followers=True
-        )
-        if media_plan is not None:
-            inner[MEDIA_REFS_FIELD] = media_plan.wire()
         # Encrypt under the existing per-space epoch key. Raises if no key —
         # we never relay plaintext (Encryption-First Rule). v_49: our own
         # writer cert for exactly the epoch we encrypt under rides inside.

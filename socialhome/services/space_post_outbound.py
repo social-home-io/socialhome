@@ -52,7 +52,7 @@ from ..domain.space_item import (
     ITEM_TYPE_REACTION_ADD,
     ITEM_TYPE_REACTION_REMOVE,
 )
-from ..domain.space_media_ref import MEDIA_REFS_FIELD, post_media_urls
+from ..domain.space_media_ref import post_media_urls
 from ..infrastructure.event_bus import EventBus
 from .moderation_release import current_release, with_release
 from .space_item_author import build_signed_item_inner
@@ -173,8 +173,9 @@ class SpacePostOutbound(SpaceMediaRefsMixin):
     ) -> None:
         """Build the GFS inner of our own post and hand it to the member
         publisher's background queue (v_49 trusted mode). ``media_refs``
-        (v_80) rides the inner outside the author signature, so followers
-        find the pictures in their GFS's media cache. Never raises."""
+        (v_80) rides the inner with its digest signed by the author, so
+        followers find the pictures in their GFS's media cache and nobody
+        re-publishing the inner can swap them. Never raises."""
         assert self._member_gfs is not None
         try:
             author = await self._users.get_by_user_id(post.author)
@@ -190,9 +191,8 @@ class SpacePostOutbound(SpaceMediaRefsMixin):
                 author_identity_anchor=author.identity_anchor,
                 item_type=ITEM_TYPE_POST,
                 item_target=post.id,
+                media_refs=media_refs,
             )
-            if media_refs:
-                inner[MEDIA_REFS_FIELD] = media_refs
             self._member_gfs.schedule_post(space_id, post.author, inner)
         except Exception:
             log.exception(
@@ -278,6 +278,12 @@ class SpacePostOutbound(SpaceMediaRefsMixin):
             author = await self._users.get_by_user_id(post.author)
             if author is None:
                 return
+            # v_80 — an edit can overtake its create at a follower and then
+            # IS the post: it carries the signed descriptor too (uploads
+            # already stored are not repeated).
+            media_plan = await self._plan_media_refs(
+                space_id, post_media_urls(post), item_id=post.id, followers=True
+            )
             inner = build_signed_author_inner(
                 post=post,
                 space_id=space_id,
@@ -289,7 +295,9 @@ class SpacePostOutbound(SpaceMediaRefsMixin):
                 item_type=ITEM_TYPE_POST_EDIT,
                 item_target=post.id,
                 edited_at=edited_at or datetime.now(UTC).isoformat(),
+                media_refs=media_plan.wire() if media_plan is not None else None,
             )
+            self._upload_media(media_plan)
             self._member_gfs.schedule_item(
                 space_id, post.author, ITEM_TYPE_POST_EDIT, inner
             )
@@ -412,14 +420,27 @@ class SpacePostOutbound(SpaceMediaRefsMixin):
         # ``space_instances`` by ``broadcast_to_space_members``, which never
         # consults the hint.
         space = await self._spaces.get(event.space_id)
-        if (
+        relayable = bool(
             space is not None
             and space.space_type in PUBLIC_SPACE_TIERS
             and space.features.allow_subscribers
             and self._own_instance_id
             and self._own_instance_pk
             and self._own_identity_seed
-        ):
+        )
+        # v_80 — households reading the space through a GFS get the pictures
+        # as a ``media_refs`` descriptor: a link-joined member inside its own
+        # copy of the payload (``per_peer``), followers inside the relayed
+        # inner — planned first, because the author signs its digest there.
+        media_urls = post_media_urls(post)
+        media_plan = await self._plan_media_refs(
+            event.space_id,
+            media_urls,
+            item_id=post.id,
+            followers=relayable,
+        )
+        media_refs = media_plan.wire() if media_plan is not None else None
+        if relayable:
             author = await self._users.get_by_user_id(post.author)
             if author is not None:
                 payload["public_relay"] = build_signed_author_inner(
@@ -435,6 +456,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin):
                     # (``anchor == username``, the 0041 backfill) to "absent"
                     # so its signed bytes stay v_25-compatible.
                     author_identity_anchor=author.identity_anchor,
+                    media_refs=media_refs,
                 )
                 # v_49 — our household's writer cert, outside the author
                 # signature (it authenticates itself against the space key).
@@ -454,19 +476,6 @@ class SpacePostOutbound(SpaceMediaRefsMixin):
                     if cert is not None:
                         payload["public_relay"]["writer_cert"] = cert
         with_release(payload)
-        # v_80 — households reading the space through a GFS get the pictures
-        # as a ``media_refs`` descriptor: a link-joined member inside its own
-        # copy of the payload (``per_peer``), followers inside the relayed
-        # inner (outside the author signature, like the writer cert).
-        media_urls = post_media_urls(post)
-        media_plan = await self._plan_media_refs(
-            event.space_id,
-            media_urls,
-            item_id=post.id,
-            followers="public_relay" in payload,
-        )
-        if media_plan is not None and "public_relay" in payload:
-            payload["public_relay"][MEDIA_REFS_FIELD] = media_plan.wire()
         try:
             await self._federation.broadcast_to_space_members(
                 event.space_id,
@@ -493,9 +502,7 @@ class SpacePostOutbound(SpaceMediaRefsMixin):
             or await self._member_gfs.channel_space(event.space_id)
         ):
             await self._schedule_gfs_publish(
-                event.space_id,
-                post,
-                media_refs=media_plan.wire() if media_plan is not None else None,
+                event.space_id, post, media_refs=media_refs
             )
         self._upload_media(media_plan)
         # Hand off the bytes-federation to SpaceMediaSyncService.

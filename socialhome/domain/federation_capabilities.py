@@ -1271,7 +1271,7 @@ from __future__ import annotations
 #:   reader fetches ``GET /gfs/media/{blob_id}`` over its cookie-less GFS
 #:   session, checks the address with the scope id it knows, decrypts and
 #:   stores the file write-once under ITS OWN name for it (``sg-`` hash of
-#:   space, delivering household and file name; the item's reference is
+#:   space, delivering household, item and file name; the item's reference is
 #:   rewritten) (``space_media_refs``, migration 0142, each
 #:   row bound to the item that introduced the file). The §25.6 ``posts`` /
 #:   ``calendar`` / ``gallery`` records streamed to such a member carry the
@@ -1279,9 +1279,9 @@ from __future__ import annotations
 #:   to a v_80 link-joined member (live), nor to ANY link-joined requester of
 #:   a §25.6 catch-up (the relay refuses those bytes whatever the version).
 #:   Followers of a global space get the descriptor in the relayed post's
-#:   inner, outside the author signature (the seed-holding relay is
-#:   trusted for it) — gated on the GFS's signed ``space_media``
-#:   capability, not this version. **Fallback**: a link-joined member
+#:   inner under the author's own separate signature (``media_refs_sig``,
+#:   suite ``ed25519``; taken only when it verifies) — gated on the GFS's
+#:   signed ``space_media`` capability, not this version. **Fallback**: a link-joined member
 #:   household below v_80 gets no descriptor; live it keeps the old
 #:   ``SPACE_MEDIA_BLOB`` push, which the relay carries only for small
 #:   files, and its catch-up gets no pictures — its people see posts without

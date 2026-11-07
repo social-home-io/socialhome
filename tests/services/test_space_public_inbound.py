@@ -78,6 +78,7 @@ from socialhome.services.space_public_author import (
     author_signing_bytes,
     build_signed_author_inner,
     link_preview_signing_bytes,
+    media_refs_signing_bytes,
 )
 from socialhome.services.space_public_inbound import SpacePublicInbound
 from socialhome.services.space_writer_cert_service import SpaceWriterCertService
@@ -172,6 +173,7 @@ async def _make_envelope(
     plaintext: bytes | None = None,
     signed_extra: dict | None = None,
     unsigned_extra: dict | None = None,
+    media_refs: dict | None = None,
 ):
     """Build a relayed envelope.
 
@@ -220,6 +222,13 @@ async def _make_envelope(
         )
         if tamper_preview is not None:
             inner["link_preview"] = tamper_preview
+    if media_refs is not None:
+        # The author's separate signature over the descriptor (v_80).
+        inner["media_refs"] = media_refs
+        inner["media_refs_sig_suite"] = "ed25519"
+        inner["media_refs_sig"] = b64url_encode(
+            sign_ed25519(sign_seed, media_refs_signing_bytes(inner))
+        )
     if writer_cert is not None:
         inner["writer_cert"] = writer_cert
     inner.update(unsigned_extra or {})
@@ -2262,7 +2271,8 @@ async def test_a_followers_relayed_post_keeps_its_media_refs(env):
     envelope = await _make_envelope(
         env,
         signed_extra={"type": "image", "image_urls": ["api/media/p.webp"]},
-        unsigned_extra={"media_refs": refs},
+        # Signed by the author (#1309 round 3).
+        media_refs=refs,
     )
     await env["inbound"].handle(_frame(envelope), gfs_id="g1")
     held = await env["post_repo"].get("post-1")
@@ -2283,3 +2293,69 @@ async def test_a_relayed_post_without_media_refs_keeps_nothing(env):
     await env["inbound"].handle(_frame(envelope), gfs_id="g1")
     assert sink.received == []
     assert sink.kept == []
+
+
+_REFS_A = {"p.webp": {"blob_id": "a" * 64, "suite": "s", "epoch": 0, "size": 9}}
+_REFS_M = {"p.webp": {"blob_id": "e" * 64, "suite": "s", "epoch": 0, "size": 9}}
+
+
+async def test_a_republished_inner_with_swapped_media_refs_is_refused(env):
+    """Regression (#1309 round 3): a member holding the writer group key
+    re-published A's signed inner with a descriptor of its own blobs; the
+    author signature still verified (the descriptor sat outside it) and
+    followers fetched M's bytes for A's post. The signed digest no longer
+    matches: the post lands, the swapped descriptor does not."""
+    sink = _GfsMediaSink()
+    env["inbound"].attach_gfs_media(sink)
+    envelope = await _make_envelope(
+        env,
+        signed_extra={"type": "image", "image_urls": ["api/media/p.webp"]},
+        media_refs=_REFS_A,
+        unsigned_extra={"media_refs": _REFS_M},
+    )
+    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    assert await env["post_repo"].get("post-1") is not None
+    assert sink.received == []
+    assert sink.kept == []
+
+
+async def test_an_unsigned_media_refs_is_never_taken(env):
+    sink = _GfsMediaSink()
+    env["inbound"].attach_gfs_media(sink)
+    envelope = await _make_envelope(
+        env,
+        signed_extra={"type": "image", "image_urls": ["api/media/p.webp"]},
+        unsigned_extra={"media_refs": _REFS_M},
+    )
+    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    assert await env["post_repo"].get("post-1") is not None
+    assert sink.kept == []
+
+
+async def test_an_edit_before_its_create_keeps_the_signed_media_refs(item_env):
+    """#1309 round 3: a follower's post edit that overtakes its create IS
+    the post (the later create is a duplicate), so it localizes its signed
+    descriptor too — else the follower never gets the pictures."""
+    sink = _GfsMediaSink()
+    item_env["inbound"].attach_gfs_media(sink)
+    inner = _signed_inner(item_env, item_type="post_edit")
+    inner = {k: v for k, v in inner.items() if k != "author_sig"}
+    inner.update(
+        content="edited",
+        edited_at=_now_iso(-5),
+        type="image",
+        image_urls=["api/media/p.webp"],
+    )
+    seed = item_env["author_kp"].private_key
+    inner["author_sig"] = b64url_encode(sign_ed25519(seed, author_signing_bytes(inner)))
+    inner.update(media_refs=_REFS_A, media_refs_sig_suite="ed25519")
+    inner["media_refs_sig"] = b64url_encode(
+        sign_ed25519(seed, media_refs_signing_bytes(inner))
+    )
+    await item_env["inbound"].handle(
+        await _item_frame(item_env, inner=inner, item_type="post_edit")
+    )
+    _sid, post = await item_env["post_repo"].get("post-1")
+    assert post.content == "edited"
+    assert post.image_urls == ("api/media/sg-p.webp",)
+    assert sink.kept == [{"p.webp": "sg-p.webp"}]

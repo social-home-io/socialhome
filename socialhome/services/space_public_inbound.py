@@ -110,7 +110,7 @@ from ..domain.space_item import (
     required_scope,
     stamp_to_db,
 )
-from ..domain.space_media_ref import MEDIA_REFS_FIELD, post_media_urls
+from ..domain.space_media_ref import SpaceMediaLocalization, post_media_urls
 from ..domain.writer_cert import WRITER_SCOPE_COMMENT, WRITER_SCOPE_WRITE, WriterCert
 from ..federation.pending_parent_buffer import (
     AwaitingParent,
@@ -137,6 +137,8 @@ from .space_item_author import (
 from .space_item_inbound import SpaceItemInbound
 from .space_public_author import (
     UnsupportedLinkPreviewSigSuite,
+    UnsupportedMediaRefsSigSuite,
+    signed_media_refs,
     verified_link_preview,
     verify_signed_author_inner,
 )
@@ -548,23 +550,8 @@ class SpacePublicInbound:
             return
 
         post = self._post_from_inner(post_id, author_user_id, inner)
-        # v_80 — the pictures live in the GFS media cache: the post shows
-        # THIS household's names for them, bound to the author household the
-        # signed inner proves (``origin_instance_id``) — never a name another
-        # member's item could claim first.
-        media = (
-            await self._gfs_media.localize(
-                space_id,
-                inner.get(MEDIA_REFS_FIELD),
-                post_media_urls(post),
-                item_id=post.id,
-                origin=origin_instance_id,
-            )
-            if self._gfs_media is not None
-            else None
-        )
-        if media is not None:
-            post = media.post(post)
+        media = await self._localize_media(space_id, post, origin_instance_id, inner)
+        post = media.post(post)
         if await self._posts.save(space_id, post) is None:
             log.warning(
                 "space_public.inbound: post %s already exists in another space "
@@ -572,8 +559,7 @@ class SpacePublicInbound:
                 post_id,
             )
             return
-        if self._gfs_media is not None and media is not None:
-            await self._gfs_media.keep(media)
+        await self._keep_media(media)
         await self._bus.publish(
             SpacePostCreated(
                 post=post,
@@ -972,6 +958,45 @@ class SpacePublicInbound:
                 )
         return stored
 
+    async def _localize_media(
+        self, space_id: str, post: Post, origin_instance_id: str, inner: dict
+    ) -> SpaceMediaLocalization:
+        """v_80 — the post's files in the GFS media cache, under THIS
+        household's names, bound to the author household the signed inner
+        proves (``origin_instance_id``). Only a descriptor the author SIGNED
+        is taken (:func:`signed_media_refs`): one a re-publisher swapped, or
+        added unsigned, is dropped and the post shows without those
+        pictures."""
+        if self._gfs_media is None:
+            return SpaceMediaLocalization()
+        try:
+            refs = signed_media_refs(inner)
+        except UnsupportedMediaRefsSigSuite as exc:
+            log.warning(
+                "space_public.inbound: post %s media_refs signature suite %s "
+                "unsupported — dropped",
+                post.id,
+                exc,
+            )
+            refs = None
+        if refs is None and inner.get("media_refs") is not None:
+            log.warning(
+                "space_public.inbound: post %s carries media_refs its author did "
+                "not sign — dropped",
+                post.id,
+            )
+        return await self._gfs_media.localize(
+            space_id,
+            refs,
+            post_media_urls(post),
+            item_id=post.id,
+            origin=origin_instance_id,
+        )
+
+    async def _keep_media(self, media: SpaceMediaLocalization) -> None:
+        if self._gfs_media is not None:
+            await self._gfs_media.keep(media)
+
     async def _apply_post_edit(
         self,
         space_id: str,
@@ -1002,6 +1027,12 @@ class SpacePublicInbound:
         got = await self._posts.get(post_id)
         if got is None:
             post = self._post_from_inner(post_id, author_user_id, inner)
+            # The edit IS the post (the later create is a duplicate): its
+            # signed descriptor is the only one this post will get.
+            media = await self._localize_media(
+                space_id, post, origin_instance_id, inner
+            )
+            post = media.post(post)
             if await self._posts.save(space_id, post) is None:
                 log.warning(
                     "space_public.inbound: post %s already exists in another space "
@@ -1009,6 +1040,7 @@ class SpacePublicInbound:
                     post_id,
                 )
                 return
+            await self._keep_media(media)
             await self._posts.edit(
                 post_id, content, space_id=space_id, edited_at=stamp_to_db(stamp)
             )
