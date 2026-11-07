@@ -41,6 +41,7 @@ from .repositories import (
 from .rtc_transport import GfsRtcSession
 from .space_media import GfsSpaceMediaStore
 from .space_media_auth import GfsSpaceMediaAuth
+from .space_media_on_demand import GfsSpaceMediaOnDemand
 from .ws_registry import GfsWebSocketRegistry
 
 if TYPE_CHECKING:
@@ -100,6 +101,9 @@ gfs_moment_delete_log_key: AppKey[MomentDeleteLog] = AppKey("gfs_moment_delete_l
 #: The encrypted, short-lived space media cache and who may write to it.
 gfs_space_media_store_key: AppKey[GfsSpaceMediaStore] = AppKey("gfs_space_media_store")
 gfs_space_media_auth_key: AppKey[GfsSpaceMediaAuth] = AppKey("gfs_space_media_auth")
+gfs_space_media_on_demand_key: AppKey[GfsSpaceMediaOnDemand] = AppKey(
+    "gfs_space_media_on_demand"
+)
 
 #: Store-and-forward queue backing ``POST /gfs/envelope`` (§D2b).
 gfs_envelope_queue_repo_key: AppKey[AbstractGfsEnvelopeQueueRepo] = AppKey(

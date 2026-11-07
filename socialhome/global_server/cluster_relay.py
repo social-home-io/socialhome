@@ -80,6 +80,7 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from ..canonical_json import canonical_str
+from ..domain.gfs_space_media_on_demand import SPACE_MEDIA_REQUEST_FRAME
 from ..moment_public_seal import (
     FRAME_MOMENT_COUNTS,
     FRAME_MOMENT_REACTION,
@@ -151,6 +152,9 @@ TYPED_FRAME_TYPES: dict[str, frozenset[str]] = {
             HIGHLIGHT_SIGNAL_FRAME_TYPE,
             # v_68 — a follower's sealed reaction for the author's household.
             FRAME_MOMENT_REACTION,
+            # v_83 — a reader missed a space blob: ask a holder household
+            # (only a socket that listed ``space_media_serve`` takes it).
+            SPACE_MEDIA_REQUEST_FRAME,
         }
     ),
     AUDIENCE_ALL: frozenset({"server_info_updated"}),
@@ -166,6 +170,8 @@ EPHEMERAL_FRAME_TYPES: frozenset[str] = frozenset(
         # v_69 — reaction totals are for followers connected now; a missed
         # one is superseded by the next checkpoint (or never needed).
         FRAME_MOMENT_COUNTS,
+        # v_83 — a holder request belongs to readers waiting right now.
+        SPACE_MEDIA_REQUEST_FRAME,
     }
 )
 
@@ -669,7 +675,10 @@ class ClusterRelayFanOut:
             targets = resolved[audience]
             if targets is None:
                 continue
-            local = [t for t in targets if self._ws_registry.is_connected(t)]
+            # A label-gated frame counts only sockets that take it, so a
+            # household that never listed the label is reported unreached.
+            frame_type = item.push_frame().get("type")
+            local = [t for t in targets if self._ws_registry.takes(t, frame_type)]
             if item.queue:
                 held.setdefault(audience, set()).update(local)
             if item.deduped:

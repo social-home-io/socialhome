@@ -735,3 +735,56 @@ async def test_supervisor_tells_follow_notices_which_connection(http_session):
             assert seen == [("follow_changed", "g1"), ("moment_key_request", "g2")]
         finally:
             await supervisor.stop()
+
+
+async def test_supervisor_tells_space_media_requests_which_connection(http_session):
+    """v_83: a ``space_media_request`` is answered on the connection it came
+    on. Bound at start and on a late attach alike."""
+    repo = _FakeRepo(
+        [_make_conn("g1", "http://gfs1.test"), _make_conn("g2", "http://gfs2.test")]
+    )
+    seen: list[str] = []
+
+    async def on_request(frame: dict, *, gfs_id: str | None = None) -> None:
+        seen.append(gfs_id or "")
+
+    captured: dict[str, object] = {}
+
+    class _StubClient:
+        def __init__(self, *, gfs_url, on_space_media_request=None, **_kwargs):
+            self.url = gfs_url
+            captured[gfs_url] = on_space_media_request
+
+        def attach_space_media_request_handler(self, handler):
+            captured[self.url] = handler
+
+        def is_alive(self) -> bool:
+            return True
+
+        async def start(self):
+            return None
+
+        async def stop(self):
+            return None
+
+    with patch(
+        "socialhome.infrastructure.gfs_ws_supervisor.GfsWebSocketClient",
+        _StubClient,
+    ):
+        supervisor = GfsWebSocketSupervisor(
+            repo=repo,
+            instance_id="sh-1",
+            signing_key=b"\x00" * 32,
+            session_factory=lambda: http_session,
+            on_relay=AsyncMock(),
+            reconcile_interval_seconds=0.05,
+        )
+        supervisor.attach_space_media_request_handler(on_request)
+        await supervisor.start()
+        try:
+            await captured["http://gfs1.test"]({"type": "space_media_request"})
+            supervisor.attach_space_media_request_handler(on_request)
+            await captured["http://gfs2.test"]({"type": "space_media_request"})
+            assert seen == ["g1", "g2"]
+        finally:
+            await supervisor.stop()

@@ -117,7 +117,10 @@ from .domain import GfsSpaceMedia
 
 if TYPE_CHECKING:
     from .config import GfsConfig
-    from .repositories import AbstractGfsSpaceMediaRepo
+    from .repositories import (
+        AbstractGfsSpaceMediaDemandRepo,
+        AbstractGfsSpaceMediaRepo,
+    )
 
 log = logging.getLogger(__name__)
 
@@ -147,6 +150,10 @@ _ORPHAN_LOOKUP_BATCH: int = 500
 #: The orphan sweep's lease: one node of a cluster scans the shared data
 #: dir, renewing each hourly run; another takes over when it lapses.
 ORPHAN_LEASE_S: int = 3000
+
+#: How long the on-demand state of a blob (v_83: when it was stored, its
+#: recent requests) is kept after it was last touched.
+DEMAND_KEEP_S: int = 30 * 86_400
 
 #: The upload rate window (a sliding hour over hourly buckets).
 _HOUR: int = 3600
@@ -329,6 +336,7 @@ class GfsSpaceMediaStore:
 
     __slots__ = (
         "_counters",
+        "_demand",
         "_files",
         "_ip_key_secret",
         "_limits",
@@ -346,8 +354,12 @@ class GfsSpaceMediaStore:
         *,
         node_id: str = "gfs",
         ip_key_secret: bytes | None = None,
+        demand: AbstractGfsSpaceMediaDemandRepo | None = None,
     ) -> None:
         self._repo = repo
+        #: v_83 — when a blob leaves (TTL, eviction), when it was stored is
+        #: remembered here, so a later request knows fresh from old.
+        self._demand = demand
         self._files = files
         self._limits = limits
         self._counters = _Counters()
@@ -563,10 +575,11 @@ class GfsSpaceMediaStore:
         dropped = 0
         for _ in range(PRUNE_MAX_BATCHES):
             async with self._lock:
-                ids = [
-                    m.blob_id for m in await self._repo.expired(now, limit=PRUNE_BATCH)
-                ]
-                dropped += len(await self._drop(ids))
+                batch = await self._repo.expired(now, limit=PRUNE_BATCH)
+                ids = [m.blob_id for m in batch]
+                gone = await self._drop(ids)
+                dropped += len(gone)
+                await self._remember_left(batch, gone, now)
             if len(ids) < PRUNE_BATCH:
                 break
         return dropped
@@ -616,6 +629,8 @@ class GfsSpaceMediaStore:
         dropped = await self.prune_expired(now)
         await self._repo.prune_upload_counts(before_bucket=now // _HOUR - 1)
         await self._repo.prune_ip_bytes(before_bucket=now // _HOUR - 1)
+        if self._demand is not None:
+            await self._demand.prune(before=now - DEMAND_KEEP_S)
         if await self._repo.acquire_sweep_lease(
             self._node_id, now=now, ttl=ORPHAN_LEASE_S
         ):
@@ -638,6 +653,38 @@ class GfsSpaceMediaStore:
             "refused_quota": c.refused_quota,
             "refused_too_large": c.refused_too_large,
         }
+
+    async def totals(self) -> tuple[int, int]:
+        """``(blobs, bytes)`` held now (the shared database)."""
+        return await self._repo.totals()
+
+    async def reserve_hourly(
+        self, label: str, size: int, cap: int, *, now: int | None = None
+    ) -> bool:
+        """Take *size* of a keyed hourly budget *cap* in the sliding hour —
+        the same atomic, cluster-wide table as the per-address upload bytes,
+        under a keyed hash of *label* (on-demand stream bytes per scope,
+        ``wanted`` requests per reader prefix)."""
+        now = int(time.time()) if now is None else now
+        key = self._ip_key(label)
+        bucket = now // _HOUR
+        _, previous = await self._repo.ip_bytes(key, bucket=bucket)
+        overlap = 1.0 - (now % _HOUR) / _HOUR
+        room = math.floor(cap - previous * overlap)
+        return await self._repo.reserve_ip_bytes(
+            key, bucket=bucket, size=size, cap=room
+        )
+
+    async def hourly_left(self, label: str, cap: int, *, now: int | None = None) -> int:
+        """What is left of the keyed hourly budget *label* (as
+        :meth:`reserve_hourly` counts it) — a check that reserves nothing."""
+        now = int(time.time()) if now is None else now
+        bucket = now // _HOUR
+        current, previous = await self._repo.ip_bytes(
+            self._ip_key(label), bucket=bucket
+        )
+        overlap = 1.0 - (now % _HOUR) / _HOUR
+        return max(0, math.floor(cap - previous * overlap) - current)
 
     # ── Internals ─────────────────────────────────────────────────────────
 
@@ -797,7 +844,8 @@ class GfsSpaceMediaStore:
             expired = await self._repo.expired(now, limit=EVICT_BATCH)
             if expired:
                 picked = self._just_enough(expired, total, size, floor=None)
-                await self._drop([m.blob_id for m in picked])
+                gone = await self._drop([m.blob_id for m in picked])
+                await self._remember_left(picked, gone, now)
                 continue
             held = {
                 (kind, oid): b
@@ -843,11 +891,30 @@ class GfsSpaceMediaStore:
         return picked
 
     async def _evict(self, victims: list[GfsSpaceMedia], now: int) -> None:
-        dropped = set(await self._drop([m.blob_id for m in victims]))
+        gone = await self._drop([m.blob_id for m in victims])
+        await self._remember_left(victims, gone, now)
+        dropped = set(gone)
         for media in victims:
             if media.blob_id in dropped and media.expires_at > now:
                 self._counters.evicted_blobs += 1
                 self._counters.evicted_bytes += media.size
+
+    async def _remember_left(
+        self, candidates: list[GfsSpaceMedia], gone: list[str], now: int
+    ) -> None:
+        """Note when the cache had stored each blob of *candidates* that just
+        left it (expiry or eviction — never a seed holder's delete or a ban),
+        for the on-demand policy. Fail-soft: a lost note only makes the blob
+        read as old."""
+        if self._demand is None or not gone:
+            return
+        left = set(gone)
+        try:
+            await self._demand.note_dropped(
+                [m for m in candidates if m.blob_id in left], now=now
+            )
+        except Exception:  # pragma: no cover - defensive, fail-soft
+            log.warning("space media: demand note failed", exc_info=True)
 
     async def _drop(self, blob_ids: list[str]) -> list[str]:
         """Rows first, then the files of the rows that went: a crash in

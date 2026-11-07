@@ -23,6 +23,7 @@ from socialhome.app_keys import (
     federation_repo_key,
     federation_service_key,
     pairing_cancel_service_key,
+    startup_announcer_key,
 )
 from socialhome.auth import (
     _DEFAULT_PUBLIC_PATH_PATTERNS,
@@ -203,6 +204,17 @@ async def test_every_trust_mutation_refuses_anonymous_and_non_admin(
     anon_client, monkeypatch
 ):
     app = anon_client.server.app
+    # The startup announcement (``StartupAnnouncer``, a background task
+    # started by ``on_startup``) sends our ``proto_version`` to every
+    # CONFIRMED peer it lists. Under load it could run after the peer below
+    # was seeded and land in the spy as if a refused call had reached the
+    # federation layer. Let it finish first (root cause of the intermittent
+    # failure; it never came from a refused call).
+    announcer = app.get(startup_announcer_key)
+    # Must be there: a rewiring must fail loudly here, never turn this wait
+    # into a silent no-op.
+    assert announcer is not None, "the startup announcer is not wired"
+    await announcer.wait()
     repo = app[federation_repo_key]
     await repo.save_instance(_seeded_peer())
     fed = app[federation_service_key]

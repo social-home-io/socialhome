@@ -111,6 +111,49 @@ describe('MediaCacheCard', () => {
     expect(parts).toEqual(["3 over a space's upload rate", '1 too large'])
   })
 
+  it('shows the on-demand counts of this node (v_83)', () => {
+    const { container } = render(
+      <MediaCacheCard
+        stats={{
+          ...STATS,
+          on_demand: true,
+          holder_requests: 42,
+          streams_served: 30,
+          streamed_bytes: 12 * MIB,
+          reuploads: 9,
+          declined: 2,
+          on_demand_misses: 5,
+          live_sessions: 1,
+        }}
+      />,
+    )
+    const text = container.textContent ?? ''
+    expect(text).toMatch(/missed pictures on request/i)
+    expect(text).toMatch(/Holder requests\s*42/)
+    expect(text).toMatch(/Streams served\s*30 \(12 MiB\)/)
+    expect(text).toMatch(/Re-uploads\s*9/)
+    expect(text).toMatch(/Declined\s*2/)
+    expect(text).toMatch(/Not found\s*5/)
+  })
+
+  it('leaves the on-demand part out for an older server without the keys', () => {
+    const { container } = render(<MediaCacheCard stats={STATS} />)
+    const text = container.textContent ?? ''
+    expect(text).not.toMatch(/on request/i)
+    expect(text).not.toContain('Streams served')
+    expect(text).not.toContain('Re-uploads')
+  })
+
+  it('says the on-demand part is off when the operator turned it off', () => {
+    const { container } = render(
+      <MediaCacheCard stats={{ ...STATS, on_demand: false, streams_served: 0 }} />,
+    )
+    const text = container.textContent ?? ''
+    expect(text).toContain('turned off')
+    expect(text).toContain('[space_media] on_demand')
+    expect(text).not.toContain('Streams served')
+  })
+
   it('says so clearly when the operator turned the cache off', () => {
     const { container, queryByRole } = render(
       <MediaCacheCard stats={{ ...STATS, enabled: false, max_bytes: 0 }} />,

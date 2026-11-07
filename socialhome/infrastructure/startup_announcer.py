@@ -50,6 +50,13 @@ class StartupAnnouncer:
         self._stop.clear()
         self._task = asyncio.create_task(self._run(), name="startup-announcer")
 
+    async def wait(self) -> None:
+        """Return once the steps finished (at once when not started, or
+        already done) — without stopping them."""
+        task = self._task
+        if task is not None and not task.done():
+            await asyncio.shield(task)
+
     async def stop(self) -> None:
         """Skip the steps not started yet and wait for the one in flight."""
         self._stop.set()

@@ -17,6 +17,7 @@ from socialhome.services.inbound_media_store import (
     space_direct_media_name,
 )
 from socialhome.services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
+from socialhome.space_media_hint import open_space_media_hint, parse_hint_wire
 from socialhome.space_media_seal import (
     SPACE_MEDIA_SUITE_AESGCM256_PADDED,
     derive_space_media_key,
@@ -153,6 +154,9 @@ class _Gfs:
         if self.known_urls is not None and url not in self.known_urls:
             return None
         return _Conn("relay-" + url, url)
+
+    async def space_media_on_demand_wait(self, conn):
+        return None  # a GFS before v_83: proves no on-demand
 
     async def fetch_space_media(self, conn, blob_id, *, max_bytes, timeout_s):
         base_url = conn.inbox_url
@@ -1072,3 +1076,121 @@ async def test_a_blob_sealed_by_another_household_is_refused(tmp_path, caplog):
         assert await f.ensure_local(_sd("n.webp")) is False
     assert not (tmp_path / _sd("n.webp")).exists()
     assert "cannot decrypt" in caplog.text
+
+
+# ── On demand (v_83): a view that misses asks the GFS ────────────────────
+
+
+class _OnDemandGfs(_Gfs):
+    """A GFS that proves ``on_demand``: a ``wanted`` gets the blob from a
+    holder (``served``), or nothing."""
+
+    def __init__(self, blobs, *, served=None, wait=25, **kw):
+        super().__init__(blobs, **kw)
+        self.served = served or {}
+        self.wait = wait
+        self.wanted: list[tuple[str, str, dict]] = []
+
+    async def space_media_on_demand_wait(self, conn):
+        return self.wait
+
+    async def want_space_media(self, conn, blob_id, body, *, max_bytes, timeout_s):
+        self.wanted.append((conn.inbox_url, blob_id, body))
+        blob = self.served.get(blob_id)
+        if blob is None or len(blob) > max_bytes:
+            return None
+        return blob
+
+
+async def test_a_view_that_misses_asks_once_and_gets_the_bytes(tmp_path):
+    """The blob left the cache: one ``wanted`` (to the first GFS that can
+    take it), and the reader gets byte-identical bytes."""
+    data = os.urandom(5000)
+    blob = _blob("a.webp", data)
+    gfs = _OnDemandGfs({}, served={_addr(blob): blob})
+    f = _fetcher(tmp_path, gfs)
+    await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
+    assert await f.ensure_local(_L("a.webp")) is True
+    assert (tmp_path / _L("a.webp")).read_bytes() == data
+    assert len(gfs.wanted) == 1
+    url, bid, body = gfs.wanted[0]
+    assert (url, bid) == ("https://g1.example", _addr(blob))
+    # The body names the scope and a sealed hint — nothing about the reader.
+    assert set(body) == {"scope", "scope_id", "hint"}
+    assert (body["scope"], body["scope_id"]) == ("space", SPACE)
+    hint = parse_hint_wire(body["hint"])
+    loc = open_space_media_hint(
+        hint, media_key=KEY, scope="space", scope_id=SPACE, blob_id=_addr(blob)
+    )
+    assert (loc.item_id, loc.origin, loc.filename) == (ITEM, ORIGIN, "a.webp")
+
+
+async def test_a_wanted_answer_is_checked_like_a_fetch(tmp_path, caplog):
+    blob = _blob("a.webp", b"x")
+    other = _blob("a.webp", b"y")
+    gfs = _OnDemandGfs({}, served={_addr(blob): other})
+    f = _fetcher(tmp_path, gfs)
+    await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
+    assert await f.ensure_local(_L("a.webp")) is False
+    assert not (tmp_path / _L("a.webp")).exists()
+
+
+async def test_a_prefetch_never_asks(tmp_path, monkeypatch):
+    """Only a view asks: a prefetch storm of many followers never makes a
+    holder upload anything."""
+    monkeypatch.setattr(fetch_mod, "PREFETCH_RETRY_DELAYS_S", ())
+    blob = _blob("a.webp", b"x")
+    gfs = _OnDemandGfs({}, served={_addr(blob): blob})
+    f = _fetcher(tmp_path, gfs)
+    await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"])
+    await asyncio.wait_for(f.drain(), timeout=5)
+    assert gfs.wanted == []
+
+
+async def test_a_wanted_miss_is_remembered_by_the_miss_cache(tmp_path):
+    blob = _blob("a.webp", b"x")
+    gfs = _OnDemandGfs({})
+    f = _fetcher(tmp_path, gfs)
+    await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
+    assert await f.ensure_local(_L("a.webp")) is False
+    assert await f.ensure_local(_L("a.webp")) is False
+    assert len(gfs.wanted) == 1
+
+
+async def test_a_gfs_without_on_demand_is_never_asked(tmp_path):
+    blob = _blob("a.webp", b"x")
+    gfs = _OnDemandGfs({}, served={_addr(blob): blob}, wait=None)
+    f = _fetcher(tmp_path, gfs)
+    await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
+    assert await f.ensure_local(_L("a.webp")) is False
+    assert gfs.wanted == []
+
+
+async def test_a_channel_blob_is_asked_under_the_readers_channel(tmp_path):
+    data = os.urandom(100)
+    blob = _blob("a.webp", data)
+    bid = _addr(blob, "channel", CHANNEL_ID)
+    gfs = _OnDemandGfs({}, served={bid: blob})
+    f = _fetcher(tmp_path, gfs, channel_id=CHANNEL_ID)
+    await _recv(
+        f,
+        SPACE,
+        _wire("a.webp", blob, scope="channel"),
+        ["api/media/a.webp"],
+        prefetch=False,
+    )
+    assert await f.ensure_local(_L("a.webp")) is True
+    assert gfs.wanted[0][2]["scope_id"] == CHANNEL_ID
+
+
+async def test_a_follower_asks_through_its_own_gfs_connection(tmp_path):
+    """Members-equal and followers alike: a follower (no link-joined pair)
+    asks the GFS it holds a connection to and gets the same bytes."""
+    data = os.urandom(300)
+    blob = _blob("a.webp", data)
+    gfs = _OnDemandGfs({}, served={_addr(blob): blob})
+    f = _fetcher(tmp_path, gfs, conns=[_Conn("g9", "https://g9.example")], insts=())
+    await _recv(f, SPACE, _wire("a.webp", blob), ["api/media/a.webp"], prefetch=False)
+    assert await f.ensure_local(_L("a.webp")) is True
+    assert (tmp_path / _L("a.webp")).read_bytes() == data
+    assert gfs.wanted[0][0] == "https://g9.example"

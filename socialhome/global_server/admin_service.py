@@ -26,6 +26,7 @@ if TYPE_CHECKING:
         AbstractGfsFederationRepo,
     )
     from .space_media import GfsSpaceMediaStore
+    from .space_media_on_demand import GfsSpaceMediaOnDemand
     from .ws_registry import GfsWebSocketRegistry
 
 
@@ -48,6 +49,7 @@ class GfsAdminService:
         "_federation",
         "_fraud_threshold",
         "_space_media",
+        "_space_media_on_demand",
         "_ws_registry",
     )
 
@@ -64,12 +66,29 @@ class GfsAdminService:
         self._fed_repo = fed_repo
         #: The space media cache, for its counts in the overview.
         self._space_media = space_media
+        #: v_83 — its on-demand counts (streams served, re-uploads).
+        self._space_media_on_demand: GfsSpaceMediaOnDemand | None = None
         self._admin_repo = admin_repo
         self._federation = federation
         self._fraud_threshold = fraud_threshold
         self._ws_registry = ws_registry
         self._cluster = None  # attached in GfsApp
         self._fan_out: ClusterRelayFanOut | None = None
+
+    def attach_space_media_on_demand(self, on_demand: GfsSpaceMediaOnDemand) -> None:
+        """Show the on-demand counts (v_83) beside the cache's."""
+        self._space_media_on_demand = on_demand
+
+    async def _space_media_stats(self) -> dict | None:
+        """The space media cache: blobs / bytes held (shared database),
+        evictions and refusals by quota or size, and (v_83) holder requests,
+        streams served and re-uploads — the counts of this node since start."""
+        if self._space_media is None:
+            return None
+        stats: dict = dict(await self._space_media.stats())
+        if self._space_media_on_demand is not None:
+            stats.update(await self._space_media_on_demand.stats())
+        return stats
 
     def attach_fan_out(self, fan_out: ClusterRelayFanOut) -> None:
         """Wire the cluster fan-out, so a rename reaches the households
@@ -112,11 +131,7 @@ class GfsAdminService:
             ),
             # The space media cache: blobs / bytes held (shared database),
             # evictions and refusals by quota or size (this node, since start).
-            "space_media": (
-                await self._space_media.stats()
-                if self._space_media is not None
-                else None
-            ),
+            "space_media": await self._space_media_stats(),
         }
 
     # ── Clients ───────────────────────────────────────────────────────

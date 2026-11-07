@@ -1725,6 +1725,10 @@ _HL_ID_IN_BODY = (
     "/gfs/highlight_rtc/ice/viewer",
     "/gfs/highlight_rtc/ice/author",
 )
+#: v_83 — a holder's serve / decline of a space-media-on-demand ticket goes to
+#: the node the ticket's route tag names (``<tag>.<32hex>``): only that node
+#: holds the session its waiting readers read from.
+_SM_TICKET_RE = re.compile(r"^/gfs/media/serve/([^/]+)(?:/decline)?$")
 
 
 def _haproxy_demo_config(urls: list[str], tags: list[str]) -> str:
@@ -1750,7 +1754,9 @@ frontend gfs_http
   bind 127.0.0.1:{GFS_CLUSTER_LB_PORT}
   acl hl_id_in_path path_reg ^/gfs/highlight_rtc/(session|relay-stream)/[^/]+$
   acl hl_id_in_body path /gfs/highlight_rtc/answer /gfs/highlight_rtc/ice/viewer /gfs/highlight_rtc/ice/author
+  acl sm_ticket_in_path path_reg ^/gfs/media/serve/[^/]+(/decline)?$
   http-request set-var(txn.gfs_node) path,field(5,/),field(1,.) if hl_id_in_path
+  http-request set-var(txn.gfs_node) path,field(5,/),field(1,.) if sm_ticket_in_path
   http-request wait-for-body time 2s if hl_id_in_body METH_POST
   http-request set-var(txn.gfs_node) req.body,json_query('$.session_id'),field(1,.) if hl_id_in_body METH_POST
   use_backend gfs_node_%[var(txn.gfs_node)] if {{ var(txn.gfs_node) -m found }}
@@ -1764,8 +1770,8 @@ backend gfs_app
 
 def _python_balancer(urls: list[str], tags: list[str]):
     """An aiohttp stand-in for the HAProxy rules (round-robin, plus the
-    route tag in a session or relay id). Returns ``start`` / ``stop``
-    coroutines."""
+    route tag in a session, relay id or space-media serve ticket). Returns
+    ``start`` / ``stop`` coroutines."""
     import itertools
 
     import aiohttp
@@ -1785,6 +1791,8 @@ def _python_balancer(urls: list[str], tags: list[str]):
         target = None
         if path.startswith(_HL_ID_IN_PATH):
             target = _tagged(path.rsplit("/", 1)[-1])
+        elif (ticket := _SM_TICKET_RE.match(path)) is not None:
+            target = _tagged(ticket.group(1))
         elif path in _HL_ID_IN_BODY and request.method == "POST":
             try:
                 target = _tagged(json.loads(body or b"{}").get("session_id"))
@@ -2058,26 +2066,12 @@ def _gfs_cluster_highlight_link(urls: list[str], tags: list[str]) -> None:
     )
 
 
-def _gfs_cluster_space_media(
-    urls: list[str], owner: tuple[str, bytes]
-) -> tuple[str, bytes, bytes]:
-    """Step 3h of ``gfs-cluster``: the space media cache on a shared data dir.
-
-    The owner publishes a space (pinning an authority key whose seed this
-    step holds), uploads one encrypted, padded blob via node 0 under that
-    authority, and node 1 must serve the SAME bytes (``immutable``, an hour
-    in a CDN) — files and rows live in the shared data dir / DB. The same
-    upload via node 1 then coalesces (``200 already_stored``), and a miss
-    via node 1 is ``404`` with ``no-store``."""
+def _gfs_cluster_publish_media_space(
+    url: str, owner: tuple[str, bytes]
+) -> tuple[str, bytes]:
+    """*owner* lists a fresh space via the node at *url*, pinning an
+    authority key whose seed this returns: ``(space_id, authority seed)``."""
     from socialhome.crypto import b64url_encode, ed25519_public_key, sign_ed25519
-    from socialhome.domain.gfs_space_media import (
-        AUTH_AUTHORITY,
-        SPACE_MEDIA_AUTH_HEADER,
-        SpaceMediaClaim,
-        SpaceMediaUploadAuth,
-    )
-    from socialhome.domain.gfs_space_media import space_media_address
-    from socialhome.moment_public_media import PAD_BUCKETS
 
     iid, seed = owner
     authority_seed = secrets.token_bytes(32)
@@ -2101,11 +2095,34 @@ def _gfs_cluster_space_media(
     }
     canonical = json.dumps(body, separators=(",", ":"), sort_keys=True).encode()
     body["signature"] = b64url_encode(sign_ed25519(seed, canonical))
-    code, resp = _request(
-        f"{urls[0]}/gfs/spaces/{space_id}/publish", method="POST", body=body
-    )
+    code, resp = _request(f"{url}/gfs/spaces/{space_id}/publish", method="POST", body=body)
     if code not in (200, 201):
         raise SystemExit(f"gfs-cluster: media space publish → {code} {resp!r}")
+    return space_id, authority_seed
+
+
+def _gfs_cluster_space_media(
+    urls: list[str], owner: tuple[str, bytes]
+) -> tuple[str, bytes, bytes]:
+    """Step 3h of ``gfs-cluster``: the space media cache on a shared data dir.
+
+    The owner publishes a space (pinning an authority key whose seed this
+    step holds), uploads one encrypted, padded blob via node 0 under that
+    authority, and node 1 must serve the SAME bytes (``immutable``, an hour
+    in a CDN) — files and rows live in the shared data dir / DB. The same
+    upload via node 1 then coalesces (``200 already_stored``), and a miss
+    via node 1 is ``404`` with ``no-store``."""
+    from socialhome.crypto import b64url_encode, sign_ed25519
+    from socialhome.domain.gfs_space_media import (
+        AUTH_AUTHORITY,
+        SPACE_MEDIA_AUTH_HEADER,
+        SpaceMediaClaim,
+        SpaceMediaUploadAuth,
+    )
+    from socialhome.domain.gfs_space_media import space_media_address
+    from socialhome.moment_public_media import PAD_BUCKETS
+
+    space_id, authority_seed = _gfs_cluster_publish_media_space(urls[0], owner)
 
     blob = secrets.token_bytes(PAD_BUCKETS[1] + 28)  # a 64 KiB padded bucket
     # The address is bound to the scope (address suite sm1).
@@ -2422,6 +2439,364 @@ def _gfs_cluster_channel_media(
         "  the same ciphertext under a channel is another blob at another "
         "address; the channel can't delete the space's; the space's delete via "
         "node 1 removes only its own on every node ✓"
+    )
+
+
+#: One admin session per GFS base URL (the login is throttled per address).
+_GFS_ADMIN_COOKIES: dict[str, str] = {}
+
+
+def _gfs_admin_space_media(base_url: str) -> dict:
+    """The ``space_media`` card of a GFS node's admin overview
+    (``GET /admin/api/overview`` after ``POST /admin/login`` with the demo's
+    admin password). Its on-demand counts (v_83: ``holder_requests``,
+    ``streams_served``, ``reuploads``, …) are THIS node's since start."""
+    cookie = _GFS_ADMIN_COOKIES.get(base_url)
+    for _attempt in range(2):
+        if cookie is None:
+            req = urllib.request.Request(
+                f"{base_url}/admin/login",
+                data=json.dumps({"password": "gfs-admin-pw"}).encode(),
+                method="POST",
+                headers={"Content-Type": "application/json"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as r:
+                cookie = r.headers.get("Set-Cookie", "").split(";", 1)[0]
+            _GFS_ADMIN_COOKIES[base_url] = cookie
+        req = urllib.request.Request(
+            f"{base_url}/admin/api/overview", headers={"Cookie": cookie}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as r:
+                overview = json.loads(r.read())
+        except urllib.error.HTTPError as exc:
+            if exc.code != 401:
+                raise
+            cookie = None
+            _GFS_ADMIN_COOKIES.pop(base_url, None)
+            continue
+        return overview.get("space_media") or {}
+    raise SystemExit(f"GFS admin login at {base_url} failed")
+
+
+def _gfs_cluster_media_on_demand(urls: list[str], tags: list[str]) -> None:
+    """Step 3j of ``gfs-cluster``: space media on demand (v_83) across nodes.
+
+    A fake holder household (a real Ed25519 key, registered via node 0)
+    owns a listed space and holds its socket on node 0 with ``accepts:
+    ["space_media_serve"]``. Ten readers (distinct client prefixes) POST
+    ``/gfs/media/{blob}/wanted`` at once, DIRECTLY to node 1, for a blob the
+    cache never held: node 1 asks the holder through the cluster (the
+    ``space_media_request`` frame crosses to node 0) — exactly ONE frame
+    however many readers wait — and the holder PUTs the blob to the
+    BALANCER's ``/gfs/media/serve/{ticket}``, which routes it by the
+    ticket's tag to node 1. Every reader gets it byte-identical with
+    ``Cache-Control: no-store``; node 1's admin overview counts one holder
+    request and one stream, no re-upload; node 2 does not serve it (nothing
+    stored). Then cache mode: a second blob the cache stored a minute ago
+    (its ``gfs_space_media_demand`` row, as an expiry leaves it) is asked
+    via node 1; the holder answers the ``cache`` frame with its upload
+    authorization through the balancer, and node 2 serves the blob from the
+    shared cache."""
+    import asyncio
+
+    import aiohttp
+
+    from socialhome.canonical_json import canonical_bytes
+    from socialhome.crypto import b64url_encode, sign_ed25519
+    from socialhome.domain.gfs_space_media import (
+        AUTH_AUTHORITY,
+        SPACE_MEDIA_AUTH_HEADER,
+        SpaceMediaClaim,
+        SpaceMediaUploadAuth,
+        space_media_address,
+    )
+    from socialhome.domain.gfs_space_media_on_demand import (
+        SERVE_OP_SERVE,
+        serve_signing_body,
+    )
+    from socialhome.moment_public_media import PAD_BUCKETS
+    from socialhome.space_media_hint import SpaceMediaLocator, seal_space_media_hint
+
+    lb = f"http://127.0.0.1:{GFS_CLUSTER_LB_PORT}"
+    node_b = urls[1]
+    holder_id, holder_seed = _gfs_cluster_register(urls[0], "media-holder")
+    space_id, authority_seed = _gfs_cluster_publish_media_space(
+        urls[0], (holder_id, holder_seed)
+    )
+    stream_blob = secrets.token_bytes(PAD_BUCKETS[1] + 28)
+    stream_id = space_media_address("space", space_id, stream_blob)
+    cache_blob = secrets.token_bytes(PAD_BUCKETS[1] + 28)
+    cache_id = space_media_address("space", space_id, cache_blob)
+    # The cache stored ``cache_blob`` a minute ago and it left — the row the
+    # store's ``_remember_left`` writes on expiry / eviction: fresh → cache.
+    now = int(time.time())
+    db = sqlite3.connect(GFS_CLUSTER_DIR / "gfs.db")
+    try:
+        db.execute(
+            "INSERT INTO gfs_space_media_demand(blob_id, scope_kind, scope_id,"
+            " stored_at, touched_at) VALUES(?, 'space', ?, ?, ?)",
+            (cache_id, space_id, now - 60, now),
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    def _hint(blob_id: str) -> dict:
+        # Any key: the GFS can't open it, it only hands it to the holder.
+        return seal_space_media_hint(
+            media_key=secrets.token_bytes(32),
+            scope="space",
+            scope_id=space_id,
+            blob_id=blob_id,
+            epoch=0,
+            locator=SpaceMediaLocator(
+                item_id="post-1", origin=holder_id, filename="photo.webp"
+            ),
+        )
+
+    def _serve_headers(ticket: str) -> dict[str, str]:
+        ts = int(time.time())
+        sig = sign_ed25519(
+            holder_seed,
+            canonical_bytes(serve_signing_body(holder_id, ticket, ts, SERVE_OP_SERVE)),
+        )
+        return {
+            "X-SH-Instance": holder_id,
+            "X-SH-Timestamp": str(ts),
+            "X-SH-Signature": b64url_encode(sig),
+            "Content-Type": "application/octet-stream",
+        }
+
+    def _upload_auth(blob: bytes, blob_id: str) -> str:
+        wall = int(time.time())
+        claim = SpaceMediaClaim(
+            scope="space",
+            scope_id=space_id,
+            blob_id=blob_id,
+            size=len(blob),
+            expires_at=wall + 86_400,
+            ts=wall,
+        )
+        return SpaceMediaUploadAuth(
+            claim=claim,
+            kind=AUTH_AUTHORITY,
+            sig=b64url_encode(
+                sign_ed25519(authority_seed, claim.authority_signing_bytes())
+            ),
+            sig_suite="ed25519",
+        ).to_header()
+
+    async def _frames(ws, timeout: float) -> list[dict]:
+        """Every ``space_media_request`` until *timeout*, or 1.5 s after the
+        first (a duplicate from a missed coalesce lands within that)."""
+        got: list[dict] = []
+        until = time.monotonic() + timeout
+        while (left := until - time.monotonic()) > 0:
+            try:
+                msg = await ws.receive(timeout=left)
+            except TimeoutError:
+                break
+            if msg.type != aiohttp.WSMsgType.TEXT:
+                break
+            frame = json.loads(msg.data)
+            if frame.get("type") == "space_media_request":
+                got.append(frame)
+                if len(got) == 1:
+                    until = min(until, time.monotonic() + 1.5)
+        return got
+
+    async def _want(http, blob_id: str, n: int) -> tuple[int, bytes, str]:
+        # A distinct client prefix per reader: the node trusts the loopback
+        # proxy's X-Forwarded-For, and allows 4 waiting readers per client.
+        async with http.post(
+            f"{node_b}/gfs/media/{blob_id}/wanted",
+            json={"scope": "space", "scope_id": space_id, "hint": _hint(blob_id)},
+            headers={"X-Forwarded-For": f"10.{40 + n}.{secrets.randbelow(250)}.7"},
+        ) as r:
+            return r.status, await r.read(), r.headers.get("Cache-Control", "")
+
+    readers_n = 10
+    before = _gfs_admin_space_media(node_b)
+
+    async def _run() -> dict:
+        out: dict = {}
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60)) as http:
+            ws = await http.ws_connect(f"{urls[0]}/gfs/ws")
+            ts = int(time.time())
+            await ws.send_json(
+                {
+                    "type": "hello",
+                    "instance_id": holder_id,
+                    "ts": ts,
+                    "sig": b64url_encode(
+                        sign_ed25519(holder_seed, f"{holder_id}|{ts}".encode())
+                    ),
+                    "accepts": ["space_media_serve"],
+                }
+            )
+            await asyncio.sleep(1.0)  # registered before the first request
+            # 1. Stream: ten readers on node 1, one holder request.
+            readers = [
+                asyncio.create_task(_want(http, stream_id, n)) for n in range(readers_n)
+            ]
+            frames = await _frames(ws, 20.0)
+            out["stream_frames"] = frames
+            if frames:
+                ticket = str(frames[0]["ticket"])
+                async with http.put(
+                    f"{lb}/gfs/media/serve/{ticket}",
+                    data=stream_blob,
+                    headers=_serve_headers(ticket),
+                ) as r:
+                    out["stream_put"] = (r.status, await r.json(content_type=None))
+            out["stream_readers"] = await asyncio.gather(*readers)
+            if not frames:
+                return out
+            # 2. Cache: a fresh blob comes back into the shared cache.
+            reader = asyncio.create_task(_want(http, cache_id, readers_n))
+            frames = await _frames(ws, 20.0)
+            out["cache_frames"] = frames
+            if frames:
+                ticket = str(frames[0]["ticket"])
+                headers = _serve_headers(ticket)
+                headers[SPACE_MEDIA_AUTH_HEADER] = _upload_auth(cache_blob, cache_id)
+                async with http.put(
+                    f"{lb}/gfs/media/serve/{ticket}", data=cache_blob, headers=headers
+                ) as r:
+                    out["cache_put"] = (r.status, await r.json(content_type=None))
+            out["cache_reader"] = await reader
+            await ws.close()
+        return out
+
+    haproxy_bin = os.environ.get("GFS_DEMO_HAPROXY", "")
+    haproxy = None
+    if haproxy_bin:
+        cfg = GFS_CLUSTER_DIR / "haproxy.cfg"
+        cfg.write_text(_haproxy_demo_config(urls, tags), encoding="utf-8")
+        haproxy = subprocess.Popen(
+            [haproxy_bin, "-f", str(cfg), "-db"],
+            stdout=open(GFS_CLUSTER_DIR / "log-haproxy.txt", "ab"),
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+    start_lb, stop_lb = _python_balancer(urls, tags)
+
+    async def _with_lb() -> dict:
+        if haproxy is None:
+            await start_lb()
+        else:
+            await asyncio.sleep(1.5)  # haproxy up, health checks green
+        try:
+            return await _run()
+        finally:
+            if haproxy is None:
+                await stop_lb()
+
+    try:
+        out = asyncio.run(_with_lb())
+    finally:
+        if haproxy is not None:
+            os.killpg(haproxy.pid, signal.SIGKILL)
+
+    frames = out["stream_frames"]
+    if not frames:
+        raise SystemExit(
+            "gfs-cluster: the holder's socket on node 0 got no space_media_request "
+            f"for {readers_n} wanted requests on node 1 (readers: "
+            f"{[c for c, _, _ in out['stream_readers']]}) — the frame did not "
+            "cross nodes"
+        )
+    if len(frames) != 1:
+        raise SystemExit(
+            f"gfs-cluster: {readers_n} readers of one blob on node 1 made the "
+            f"holder get {len(frames)} space_media_request frames — want ONE "
+            "(they share one holder session)"
+        )
+    frame = frames[0]
+    if (
+        frame.get("blob_id") != stream_id
+        or frame.get("mode") != "stream"
+        or str(frame.get("ticket")).partition(".")[0] != tags[1]
+    ):
+        raise SystemExit(
+            f"gfs-cluster: wrong media request {frame!r}; want blob "
+            f"{stream_id[:12]}…, mode stream, a ticket tagged {tags[1]}"
+        )
+    status, body = out["stream_put"]
+    if status != 200 or body != {"stored": False}:
+        raise SystemExit(
+            f"gfs-cluster: the holder's serve via the balancer → {status} {body!r}; "
+            "want 200 stored=false (routed by the ticket's tag to node 1)"
+        )
+    bad = [
+        (code, len(data), cc)
+        for code, data, cc in out["stream_readers"]
+        if code != 200 or data != stream_blob or cc != "no-store"
+    ]
+    if bad:
+        raise SystemExit(
+            f"gfs-cluster: {len(bad)} of {readers_n} readers did not get the "
+            f"streamed blob byte-identical with no-store: {bad[:3]!r}"
+        )
+    after = _gfs_admin_space_media(node_b)
+    keys = ("holder_requests", "streams_served", "reuploads")
+    delta = {k: int(after.get(k, 0)) - int(before.get(k, 0)) for k in keys}
+    code, _ = _request(f"{urls[2]}/gfs/media/{stream_id}", timeout=10.0)
+    if code != 404:
+        raise SystemExit(
+            f"gfs-cluster: node 2 serves the STREAMED blob ({code}) — a stream "
+            "must store nothing"
+        )
+    print(
+        f"  {readers_n} readers on node 1 → ONE space_media_request on the "
+        "holder's socket on node 0; its serve via the balancer reached node 1 "
+        "by the ticket's tag; every reader got the blob byte-identical "
+        "(no-store); nothing stored ✓"
+    )
+
+    frames = out.get("cache_frames") or []
+    status, body = out.get("cache_put") or (None, None)
+    code, data, _cc = out["cache_reader"]
+    if (
+        len(frames) != 1
+        or frames[0].get("mode") != "cache"
+        or status != 200
+        or body != {"stored": True}
+        or code != 200
+        or data != cache_blob
+    ):
+        raise SystemExit(
+            f"gfs-cluster: cache mode → {len(frames)} frame(s) "
+            f"mode={frames[0].get('mode') if frames else None!r}, serve {status} "
+            f"{body!r}, reader {code} {len(data)} bytes; want one 'cache' frame, "
+            "stored=true, the blob"
+        )
+    try:
+        with urllib.request.urlopen(f"{urls[2]}/gfs/media/{cache_id}", timeout=10) as r:
+            got, cc2 = r.read(), r.headers.get("Cache-Control", "")
+    except urllib.error.HTTPError as exc:
+        raise SystemExit(
+            f"gfs-cluster: node 2 after the re-upload → {exc.code}; the "
+            "re-uploaded blob is not in the shared cache"
+        ) from exc
+    if got != cache_blob or "immutable" not in cc2:
+        raise SystemExit(
+            f"gfs-cluster: node 2 serves {len(got)} bytes / {cc2!r} after the "
+            "re-upload; want the blob, immutable"
+        )
+    # Both legs ran on node 1: one holder request + one stream each, one
+    # re-upload (the cache leg's) — however many readers waited.
+    if delta != {"holder_requests": 2, "streams_served": 2, "reuploads": 1}:
+        raise SystemExit(
+            f"gfs-cluster: node 1's on-demand counts moved by {delta!r} "
+            "over both legs; want 2 holder requests, 2 streams served, 1 re-upload"
+        )
+    print(
+        "  a blob the cache stored a minute ago: one 'cache' request, the "
+        "holder's re-upload via the balancer is stored, node 2 serves it from "
+        "the shared cache (immutable); node 1 counts 2 holder requests / "
+        "2 streams / 1 re-upload for both legs ✓"
     )
 
 
@@ -2764,6 +3139,9 @@ def cmd_gfs_cluster() -> None:
         shared_media = _gfs_cluster_space_media(urls, clients[0])
         # 3i. …and for a private space's opaque channel.
         _gfs_cluster_channel_media(urls, shared_media, clients[:1])
+        # 3j. Space media on demand (v_83): readers on one node, the holder's
+        # socket on another, its serve routed by the ticket's tag.
+        _gfs_cluster_media_on_demand(urls, node_ids)
     except BaseException:
         _gfs_cluster_down(preserve_logs=True)
         raise
@@ -2783,7 +3161,8 @@ def cmd_gfs_cluster() -> None:
         "registrations + space publishes serialise on the lock; owner "
         "notices + targeted relays reach a socket on another node; a "
         "broadcast and a public moment + its delete reach every node's "
-        "followers exactly once)"
+        "followers exactly once; space media on demand: one holder request "
+        "for many readers, served across nodes by the ticket's tag)"
     )
 
 
@@ -6404,6 +6783,245 @@ def _picture_via_gfs_media_cache(
         f"{local_name[:15]}…, byte-identical ({size} bytes) ✓"
     )
     return filename
+
+
+# ─── Step: gfs-media-on-demand ─────────────────────────────────────────────
+
+
+def cmd_gfs_media_on_demand() -> None:
+    """v_83 — a space picture that left the GFS cache comes back on a view.
+
+    Prereqs: the gfs chain through ``gfs-invite-link-content``: a's photo in
+    a's global space reached **d** (a follower) through the GFS media cache
+    (``gfs-space-post``), and a's photo in the link-joined space reached
+    **e** (a member reached only through the GFS relay) the same way.
+
+    Expiry is simulated exactly as the GFS store does it
+    (``GfsSpaceMediaStore._drop`` + ``_remember_left``): the
+    ``gfs_space_media`` row and the file ``data_dir/space_media/<blob>`` go,
+    and ``gfs_space_media_demand`` remembers when the cache had stored it.
+    The reader's own copy (``sg-…``) is deleted too, so a VIEW
+    (``GET /api/media/<sg-name>``) misses, finds no GFS holding the blob and
+    asks ``POST /gfs/media/{blob}/wanted``; the GFS asks the host a over its
+    socket (``space_media_request``), a re-seals the file deterministically
+    and serves the ticket.
+
+    1. **Fresh → ONE re-upload.** ``stored_at`` = the row's ``created_at``
+       (well within ``fresh_seconds``): the reader gets the bytes
+       byte-identical, the GFS row and file are back (cache mode, under a's
+       upload authorization), a logged exactly one ``re-uploaded on demand``
+       for that blob, and the admin overview counts +1 holder request /
+       +1 re-upload. The OTHER reader kind (follower ↔ link-joined member),
+       when it holds the same blob, then views it too: straight from the
+       cache (``fetched blob … from GFS``), no new holder request. Run for
+       e (invite photo) and d (space photo).
+    2. **Old → stream, nothing stored.** ``stored_at`` 30 days ago: the
+       reader still gets the bytes byte-identical, but the GFS has NO row
+       and no file afterwards; ``streams_served`` +1, ``reuploads`` +0;
+       a logged ``streamed on demand``. Run for e and d.
+
+    Not re-runnable within ~10 min: a attaches its upload authorization to
+    a cache request at most once per (GFS, blob) per ``REUPLOAD_COALESCE_S``.
+    """
+    state = _load()
+    if not state or not _gfs_alive(state):
+        raise SystemExit("run the gfs chain through 'gfs-invite-link-content' first")
+    invite_photo = state.get("gfs_invite_photo")
+    space_photo = state.get("gfs_space_photo")
+    if not invite_photo or not space_photo:
+        raise SystemExit(
+            "run 'gfs-space-post' and 'gfs-invite-link-content' first — this step "
+            "needs the photos they proved through the GFS media cache"
+        )
+    gfs = f"http://127.0.0.1:{GFS_PORT}"
+    step = "gfs-media-on-demand"
+    keys = ("holder_requests", "streams_served", "reuploads", "live_sessions")
+
+    def _counts() -> dict[str, int]:
+        card = _gfs_admin_space_media(gfs)
+        if not card.get("on_demand"):
+            raise SystemExit(f"{step}: the GFS admin card says on_demand is off: {card!r}")
+        return {k: int(card.get(k, 0)) for k in keys}
+
+    def _ref(reader: str, filename: str) -> tuple[str, str] | None:
+        rows = _rows(
+            reader,
+            "SELECT blob_id, local_name FROM space_media_refs WHERE filename = ?",
+            (filename,),
+        )
+        return (rows[0][0], rows[0][1]) if rows else None
+
+    def _gfs_file(blob_id: str) -> Path:
+        return GFS_DIR / "space_media" / blob_id
+
+    def _expire(blob_id: str, *, old: bool) -> None:
+        held = _gfs_rows(
+            "SELECT scope_kind, scope_id, created_at FROM gfs_space_media"
+            " WHERE blob_id = ?",
+            (blob_id,),
+        )
+        if not held:
+            raise SystemExit(f"{step}: the GFS holds no blob {blob_id[:12]} to expire")
+        scope_kind, scope_id, created_at = held[0]
+        now = int(time.time())
+        stored_at = now - 30 * 86_400 if old else int(created_at)
+        _gfs_write("DELETE FROM gfs_space_media WHERE blob_id = ?", (blob_id,))
+        _gfs_file(blob_id).unlink(missing_ok=True)
+        # ``note_dropped``'s upsert. A stream leg also clears the request
+        # window: the cache leg's request must not count toward
+        # ``cache_after_requests`` here.
+        _gfs_write(
+            "INSERT INTO gfs_space_media_demand(blob_id, scope_kind, scope_id,"
+            " stored_at, touched_at) VALUES(?,?,?,?,?)"
+            " ON CONFLICT(blob_id, scope_kind, scope_id) DO UPDATE SET"
+            " stored_at = excluded.stored_at, touched_at = excluded.touched_at"
+            + (", requests = 0, window_start = 0" if old else ""),
+            (blob_id, scope_kind, scope_id, stored_at, now),
+        )
+
+    def _view(reader: str, local_name: str, original: bytes) -> None:
+        r = state["instances"][reader]
+        local = _instance_dir(reader) / "media" / local_name
+        local.unlink(missing_ok=True)
+        s, body = _http_get_bytes(
+            f"http://127.0.0.1:{r['port']}/api/media/{local_name}",
+            token=r["token"],
+            timeout=60.0,
+        )
+        if s != 200 or body != original:
+            raise SystemExit(
+                f"{step}: {reader}'s view of {local_name[:15]}… → HTTP {s}, "
+                f"{len(body or b'')} bytes (want the {len(original)}-byte original). "
+                f"Check {_log_path(reader)} and {GFS_DIR / 'log.txt'}."
+            )
+        if local.read_bytes() != original:
+            raise SystemExit(f"{step}: {reader} kept another file than the original")
+
+    def _wait(pred, what: str, timeout: float = 15.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            got = pred()
+            if got:
+                return got
+            time.sleep(0.5)
+        raise SystemExit(f"{step}: {what} within {timeout:.0f} s")
+
+    cases = [
+        ("e", invite_photo, "d", "the link-joined member"),
+        ("d", space_photo, "e", "the follower"),
+    ]
+    blobs: dict[str, tuple[str, str, bytes]] = {}
+    for reader, photo, _other, _kind in cases:
+        ref = _ref(reader, photo)
+        if ref is None:
+            raise SystemExit(f"{step}: {reader} holds no space_media_refs row for {photo}")
+        blobs[reader] = (ref[0], ref[1], (_instance_dir("a") / "media" / photo).read_bytes())
+
+    # 1. Fresh content: one re-upload into the cache.
+    for reader, photo, other, kind in cases:
+        blob_id, local_name, original = blobs[reader]
+        a_off = _log_size("a")
+        _expire(blob_id, old=False)
+        before = _counts()
+        _view(reader, local_name, original)
+        _wait(
+            lambda b=blob_id: _gfs_rows(
+                "SELECT 1 FROM gfs_space_media WHERE blob_id = ?", (b,)
+            )
+            and _gfs_file(b).is_file(),
+            f"the GFS did not hold blob {blob_id[:12]} again (no re-upload)",
+        )
+        reup = _wait(
+            lambda b=blob_id, o=a_off: _log_lines_matching(
+                "a", f"space media {b[:12]}: re-uploaded on demand", offset=o
+            ),
+            f"a logged no 're-uploaded on demand' for blob {blob_id[:12]}",
+        )
+        after = _counts()
+        if len(reup) != 1 or after["holder_requests"] - before["holder_requests"] != 1 or (
+            after["reuploads"] - before["reuploads"] != 1
+        ):
+            raise SystemExit(
+                f"{step}: {reader}'s view of a fresh blob → {len(reup)} re-upload "
+                f"line(s) on a, counts {before!r} → {after!r}; want exactly one "
+                "holder request and one re-upload"
+            )
+        print(
+            f"  {kind} {reader}: blob {blob_id[:12]}… left the cache (fresh) → its "
+            "view got the photo byte-identical; a re-uploaded it ONCE, the GFS "
+            "holds it again ✓"
+        )
+        # The other reader kind, if it holds the same blob, reads the cache.
+        theirs = _ref(other, photo)
+        if theirs is None or theirs[0] != blob_id:
+            print(f"  ({other} holds no ref to this photo — cache re-read not shown)")
+            continue
+        other_off = _log_size(other)
+        _view(other, theirs[1], original)
+        again = _counts()
+        fetched = [
+            line
+            for line in _log_lines_matching(
+                other, f"fetched blob {blob_id[:12]}", offset=other_off
+            )
+            if "from GFS" in line
+        ]
+        if again["holder_requests"] != after["holder_requests"] or not fetched:
+            raise SystemExit(
+                f"{step}: {other}'s view after the re-upload → holder requests "
+                f"{after['holder_requests']} → {again['holder_requests']}, "
+                f"{len(fetched)} cache fetch line(s); want a plain cache fetch"
+            )
+        print(
+            f"  {other} viewed the same photo: straight from the GFS cache, no "
+            "new holder request ✓"
+        )
+
+    # 2. Old content: streamed through, nothing stored. Wait out the cache
+    #    leg's sessions first (joinable ``coalesce_seconds`` after they
+    #    delivered — a reader then would join them instead of a new stream).
+    _wait(
+        lambda: _counts()["live_sessions"] == 0,
+        "the GFS still holds live on-demand sessions",
+        timeout=120.0,
+    )
+    for reader, _photo, _other, kind in cases:
+        blob_id, local_name, original = blobs[reader]
+        a_off = _log_size("a")
+        _expire(blob_id, old=True)
+        before = _counts()
+        _view(reader, local_name, original)
+        streamed = _wait(
+            lambda b=blob_id, o=a_off: _log_lines_matching(
+                "a", f"space media {b[:12]}: streamed on demand", offset=o
+            ),
+            f"a logged no 'streamed on demand' for blob {blob_id[:12]}",
+        )
+        time.sleep(1.0)
+        after = _counts()
+        held = _gfs_rows("SELECT 1 FROM gfs_space_media WHERE blob_id = ?", (blob_id,))
+        if (
+            held
+            or _gfs_file(blob_id).exists()
+            or len(streamed) != 1
+            or after["streams_served"] - before["streams_served"] != 1
+            or after["reuploads"] != before["reuploads"]
+        ):
+            raise SystemExit(
+                f"{step}: {reader}'s view of OLD blob {blob_id[:12]} → row "
+                f"{bool(held)}, file {_gfs_file(blob_id).exists()}, "
+                f"{len(streamed)} stream line(s) on a, counts {before!r} → "
+                f"{after!r}; want one stream, nothing stored"
+            )
+        print(
+            f"  {kind} {reader}: OLD blob {blob_id[:12]}… → streamed through the "
+            "GFS, byte-identical; nothing stored ✓"
+        )
+
+    print(
+        f"{step}: ok (fresh → one re-upload, then a plain cache read; old → "
+        "streamed, nothing stored; link-joined member e and follower d alike)"
+    )
 
 
 
@@ -10351,6 +10969,18 @@ def cmd_verify() -> None:
         )
     else:
         print("  v_82 page files gate in place ✓")
+    # v_83 — space media on demand: a reader's view of a blob that left the
+    # GFS cache asks the GFS, which asks the host (``space_media_serve`` in
+    # its hello) to re-upload or stream it. Nothing is gated between
+    # households; the OURS round-trip above proves every pair is at >= v_83,
+    # and ``gfs-media-on-demand`` drives both legs end to end.
+    if int(_Cap.MIN_FOR_SPACE_MEDIA_ON_DEMAND) != 83 or _OURS < 83:
+        failures.append(
+            "MIN_FOR_SPACE_MEDIA_ON_DEMAND moved off v_83 (or OURS fell below "
+            "it) — a missed space picture would never come back"
+        )
+    else:
+        print("  v_83 space media on demand in place ✓")
     gedit = state.get("space_gallery_edit")
     if gedit:
         cap = _rows(

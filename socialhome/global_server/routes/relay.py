@@ -9,6 +9,7 @@ import orjson
 from aiohttp import web
 
 from ...domain.gfs_space_media import SPACE_MEDIA_CAPABILITY
+from ...domain.gfs_space_media_on_demand import ON_DEMAND_CAPABILITY_KEY
 from ...domain.space_item import (
     PAYLOAD_SUITE_FIELD,
     PAYLOAD_SUITE_UNSUPPORTED_ERROR,
@@ -259,6 +260,10 @@ class GfsInfoView(GfsBaseView):
         # the operator has the cache off (``[space_media] max_bytes = 0``).
         space_media = self.svc(K.gfs_space_media_store_key).limits.capability()
         if space_media is not None:
+            # v_83 — a reader may ask for a blob it missed, and wait this long.
+            on_demand = self.svc(K.gfs_space_media_on_demand_key).capability()
+            if on_demand is not None:
+                space_media[ON_DEMAND_CAPABILITY_KEY] = on_demand
             capabilities[SPACE_MEDIA_CAPABILITY] = space_media
         if cfg.instance_id_aliases:
             # The former ids this server answers to (``instance_id_aliases``),

@@ -866,3 +866,126 @@ async def test_a_host_written_page_keeps_no_shared_file_alive_on_a_member(db):
     # A space we host: its pages' names are our files.
     await db.enqueue("UPDATE spaces SET owner_instance_id='me' WHERE id='sp1'")
     assert await repo.is_referenced("hostcover.webp")
+
+
+async def test_a_file_only_a_deleted_or_held_row_names_is_not_live(db):
+    """v_83 review M6 — on demand a household sends only a file the space
+    shows NOW: a deleted post's picture, or one only a moderation queue
+    names, is never re-sent (that would undo the delete for GFS readers)."""
+    await _two_spaces(db)
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, image_urls_json)"
+        " VALUES('p1', 'sp1', 'u1', 'image', ?)",
+        ('["api/media/live.webp"]',),
+    )
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, media_url, deleted)"
+        " VALUES('p2', 'sp1', 'u1', 'image', 'api/media/gone.webp', 1)"
+    )
+    await db.enqueue(
+        "INSERT INTO space_calendar_events(id, space_id, summary, start_dt, end_dt,"
+        " created_by, cover_url, deleted_at) VALUES('e1', 'sp1', 'S',"
+        " '2026-01-01T00:00:00+00:00', '2026-01-02T00:00:00+00:00', 'u1',"
+        " 'api/media/cover.webp', '2026-01-03')"
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.live_in_space("live.webp", "sp1")
+    assert not await repo.live_in_space("live.webp", "sp2")
+    assert not await repo.live_in_space("gone.webp", "sp1")
+    assert not await repo.live_in_space("cover.webp", "sp1")
+    assert not await repo.live_in_space("nobody.webp", "sp1")
+    # Still the space's content for the eager path (unchanged).
+    assert await repo.confined_to_space("gone.webp", "sp1")
+
+
+async def test_a_deleted_listings_photo_is_not_live(db):
+    """Review round 2 (M6): a listing whose post was deleted keeps its row;
+    its photos are not live."""
+    await _two_spaces(db)
+    await db.enqueue(
+        "INSERT INTO space_posts(id, space_id, author, type, deleted)"
+        " VALUES('lp', 'sp1', 'u1', 'listing', 1)"
+    )
+    await db.enqueue(
+        "INSERT INTO bazaar_listings(post_id, space_id, seller_user_id, mode, title,"
+        " image_urls_json, end_time, currency)"
+        " VALUES('lp', 'sp1', 'u1', 'fixed', 'T', ?, '2030-01-01', 'EUR')",
+        ('["api/media/sold.webp"]',),
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert not await repo.live_in_space("sold.webp", "sp1")
+    await db.enqueue("UPDATE space_posts SET deleted = 0 WHERE id = 'lp'")
+    assert await repo.live_in_space("sold.webp", "sp1")
+
+
+async def test_a_live_pages_files_are_live_and_its_history_is_not(db):
+    """v_83 × v_82 — on demand a household sends a page's files as the page
+    is NOW (its cover and every picture its body shows), under the host's
+    own name or a member's page-scoped ``sp-`` copy; never a file only an
+    edit history or an open conflict side names, never another space's."""
+    await _page_rows(db)
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username, "
+        "identity_public_key) VALUES('sp2', 'T', 'self', 'u1', 'k')",
+    )
+    await db.enqueue(
+        "UPDATE space_pages SET cover_image_url = 'api/media/pcover.webp' WHERE id = 'pg'"
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    # A MEMBER household (sp1 is not hosted here): a page's raw names are the
+    # host's — they never make a file of our shared store confined or live
+    # (#1317 review: a hostile host naming one of our own files in a page
+    # body would otherwise have us re-seal and send it). Only our
+    # page-scoped sp- copies count.
+    for name in ("body.webp", "body2.webp", "pcover.webp"):
+        assert not await repo.live_in_space(name, "sp1"), name
+        assert not await repo.confined_to_space(name, "sp1"), name
+    await _host_here(db)
+    for name in ("body.webp", "body2.webp", "pcover.webp"):
+        assert await repo.live_in_space(name, "sp1"), name
+        assert await repo.confined_to_space(name, "sp1"), name
+        page_copy = space_page_media_name("sp1", name)
+        assert await repo.confined_to_space(page_copy, "sp1"), name
+        assert await repo.live_in_space(page_copy, "sp1"), name
+        assert not await repo.confined_to_space(page_copy, "sp2"), name
+        assert not await repo.live_in_space(page_copy, "sp2"), name
+    for name in ("older.webp", "side.webp"):
+        assert not await repo.live_in_space(name, "sp1"), name
+        assert not await repo.live_in_space(space_page_media_name("sp1", name), "sp1")
+    # An sp- name no page of the space shows is nobody's.
+    stray = space_page_media_name("sp1", "nothing.webp")
+    assert not await repo.confined_to_space(stray, "sp1")
+    assert not await repo.live_in_space(stray, "sp1")
+    # A deleted page's files are not live.
+    await db.enqueue("UPDATE space_pages SET deleted_at = '2026-01-02' WHERE id = 'pg'")
+    assert not await repo.live_in_space("body.webp", "sp1")
+    assert not await repo.live_in_space(
+        space_page_media_name("sp1", "body.webp"), "sp1"
+    )
+
+
+_SIDE = (
+    '{"content": "![s](api/media/side.webp) '
+    '[x](https://evil.example/api/media/notours.webp)",'
+    ' "cover_image_url": "api/media/sidecover.webp"}'
+)
+
+
+async def test_a_conflict_sides_names_are_read_with_the_strict_pattern(db):
+    """#1317 review 2: an open conflict side's body is decoded and read like
+    a page body (the shared strict pattern) — a path inside another URL is
+    no reference."""
+    await _seed_parents(db)
+    await _host_here(db)
+    await db.enqueue(
+        "INSERT INTO space_page_snapshots(page_id, space_id, snapshot_at, body,"
+        " snapshot_by, side, conflict) VALUES('pg', 'sp1', '2026-01-01', ?,"
+        " 'u1', 'theirs', 1)",
+        (_SIDE,),
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.is_referenced("side.webp")
+    assert await repo.is_referenced("sidecover.webp")
+    assert not await repo.is_referenced("notours.webp")
+    names = await repo.referenced_basenames()
+    assert "side.webp" in names and "notours.webp" not in names

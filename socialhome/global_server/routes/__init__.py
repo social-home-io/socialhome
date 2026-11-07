@@ -141,6 +141,14 @@ from .space_media import (
     GfsMediaDeleteView,
     GfsMediaView,
 )
+from .space_media_on_demand import (
+    SPACE_MEDIA_DECLINE_ROUTE,
+    SPACE_MEDIA_SERVE_ROUTE,
+    SPACE_MEDIA_WANTED_ROUTE,
+    GfsMediaDeclineView,
+    GfsMediaServeView,
+    GfsMediaWantedView,
+)
 from .viewer_pages import (
     InvitePageDataView,
     PersonPageDataView,
@@ -206,6 +214,12 @@ def register_routes(
     # the signed claim / delete body, never in the URL.
     app.router.add_view(SPACE_MEDIA_ROUTE, GfsMediaView)
     app.router.add_view(SPACE_MEDIA_DELETE_ROUTE, GfsMediaDeleteView)
+    # v_83 — on demand: a reader asks for a blob it missed (scope in the
+    # body); the asked holder serves it to a ticket naming this node (the
+    # balancer routes it here, like a highlight relay) or declines.
+    app.router.add_view(SPACE_MEDIA_WANTED_ROUTE, GfsMediaWantedView)
+    app.router.add_view(SPACE_MEDIA_SERVE_ROUTE, GfsMediaServeView)
+    app.router.add_view(SPACE_MEDIA_DECLINE_ROUTE, GfsMediaDeclineView)
     # Opaque channels for private spaces (v_51) — every id in the body.
     app.router.add_view(CHANNEL_REGISTER_ROUTE, ChannelRegisterView)
     app.router.add_view(CHANNEL_EPOCH_ROUTE, ChannelEpochView)

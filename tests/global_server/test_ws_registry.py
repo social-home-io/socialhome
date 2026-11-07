@@ -410,3 +410,27 @@ async def test_the_cert_choice_follows_the_current_socket(registry):
     await registry.register("all", _FakeWS(), no_frame_cert=True)
     await registry.close_all()
     assert registry._no_frame_cert == set()
+
+
+async def test_a_media_request_reaches_only_a_socket_that_serves_media(registry):
+    """v_83 — ``space_media_request`` goes only to a socket whose hello
+    listed ``space_media_serve``: an older household would drop it and leave
+    the reader waiting, so ``send`` reports it undelivered instead. Per
+    connection: a reconnect without the label drops it."""
+    frame = {"type": "space_media_request", "ticket": "0" * 32}
+    new, old = _FakeWS(), _FakeWS()
+    await registry.register("new", new, media_serve=True)
+    await registry.register("old", old)
+    assert registry.takes("new", "space_media_request")
+    assert not registry.takes("old", "space_media_request")
+    assert registry.takes("old", "relay")
+    assert not registry.takes("gone", "relay")
+    assert await registry.send("new", frame)
+    assert not await registry.send("old", frame)
+    assert len(new.sent) == 1 and old.sent == []
+    again = _FakeWS()
+    await registry.register("new", again)
+    assert not await registry.send("new", frame)
+    await registry.register("new", again, media_serve=True)
+    await registry.unregister("new", again)
+    assert "new" not in registry._media_serve

@@ -160,8 +160,9 @@ class _Crypto:
 
 
 class _Spaces:
-    def __init__(self, seed=None, *, channel=None, private_gfs=False):
+    def __init__(self, seed=None, *, channel=None, private_gfs=False, owner=OWN):
         self.seed = seed
+        self.owner = owner
         #: ``(channel_id, channel_pk)`` of a private space's opaque channel.
         self.channel = channel
         self.private_gfs = private_gfs
@@ -172,7 +173,9 @@ class _Spaces:
     async def get(self, space_id):
         if not self.private_gfs:
             return SimpleNamespace(
-                space_type=SpaceType.GLOBAL, features=SimpleNamespace(private_gfs=False)
+                space_type=SpaceType.GLOBAL,
+                features=SimpleNamespace(private_gfs=False),
+                owner_instance_id=self.owner,
             )
         return SimpleNamespace(
             space_type=SpaceType.PRIVATE, features=SimpleNamespace(private_gfs=True)
@@ -1001,3 +1004,143 @@ async def test_can_upload_answers_with_the_authorization_a_put_would_use(tmp_pat
         _uploader(tmp_path, gfs=gfs, certs=_Certs(cert=_Cert(scope="comment"))),
     ):
         assert not await nothing.can_upload(SPACE)
+
+
+# ── On demand (v_83): large videos are uploaded lazily ───────────────────
+
+
+V83 = FederationCapability.MIN_FOR_SPACE_MEDIA_ON_DEMAND
+
+
+class _OnDemandGfs(_Gfs):
+    def __init__(self, conns, *, wait=25, **kw):
+        super().__init__(conns, **kw)
+        self.wait = wait
+
+    async def space_media_on_demand_wait(self, conn):
+        return self.wait
+
+
+async def test_a_large_video_is_described_but_not_uploaded_eagerly(tmp_path):
+    """v_83 — a video whose blob is ≥ 1 MiB goes to a GFS only when a
+    reader plays it (the GFS asks for it); a picture still goes at once."""
+    _write(tmp_path, "clip.mp4", up_mod.LAZY_VIDEO_MIN_BYTES)
+    _write(tmp_path, "a.webp", 5000)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _OnDemandGfs([g1])
+    u = _uploader(
+        tmp_path,
+        gfs=gfs,
+        instances=[RELAY],
+        versions={"e": V83},
+        seed=generate_identity_keypair().private_key,
+    )
+    plan = await u.plan(
+        SPACE, ["api/media/clip.mp4", "api/media/a.webp"], item_id=ITEM, followers=False
+    )
+    assert set(plan.wire()) == {"clip.mp4", "a.webp"}
+    await _upload(u, plan)
+    assert [p[2] for p in gfs.puts] == [plan.wire()["a.webp"]["blob_id"]]
+
+
+async def test_a_video_over_8_mib_is_never_uploaded_eagerly(tmp_path):
+    """Past the 8 MiB blob ceiling a video is not even described — so never
+    uploaded, eagerly or not."""
+    _write(tmp_path, "long.mp4", 8 * 1024 * 1024 + 1)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _OnDemandGfs([g1])
+    u = _uploader(tmp_path, gfs=gfs, instances=[RELAY], versions={"e": V83})
+    assert (
+        await u.plan(SPACE, ["api/media/long.mp4"], item_id=ITEM, followers=False)
+        is None
+    )
+    assert gfs.puts == []
+
+
+async def test_a_reader_below_v83_keeps_the_eager_video_upload(tmp_path):
+    """A link-joined reader that can't ask for a missed blob gets the video
+    uploaded at once, as before; so does a GFS that proved no on-demand."""
+    _write(tmp_path, "clip.mp4", up_mod.LAZY_VIDEO_MIN_BYTES)
+    g1 = _Conn("g1", "https://g1.example")
+    seed = generate_identity_keypair().private_key
+    old = _OnDemandGfs([g1])
+    u = _uploader(tmp_path, gfs=old, instances=[RELAY], versions={"e": V}, seed=seed)
+    await _upload(
+        u, await u.plan(SPACE, ["api/media/clip.mp4"], item_id=ITEM, followers=False)
+    )
+    assert len(old.puts) == 1
+    no_od = _OnDemandGfs([g1], wait=None)
+    u = _uploader(
+        tmp_path, gfs=no_od, instances=[RELAY], versions={"e": V83}, seed=seed
+    )
+    await _upload(
+        u, await u.plan(SPACE, ["api/media/clip.mp4"], item_id=ITEM, followers=False)
+    )
+    assert len(no_od.puts) == 1
+
+
+async def test_a_small_clip_is_still_uploaded_eagerly(tmp_path):
+    _write(tmp_path, "tiny.mp4", 10_000)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _OnDemandGfs([g1])
+    u = _uploader(
+        tmp_path,
+        gfs=gfs,
+        instances=[RELAY],
+        versions={"e": V83},
+        seed=generate_identity_keypair().private_key,
+    )
+    await _upload(
+        u, await u.plan(SPACE, ["api/media/tiny.mp4"], item_id=ITEM, followers=False)
+    )
+    assert len(gfs.puts) == 1
+
+
+async def test_authorize_is_the_upload_authorization_for_either_scope(tmp_path):
+    """The holder side re-uses it for a re-upload on demand."""
+    kp = generate_identity_keypair()
+    u = _uploader(tmp_path, gfs=_Gfs([]), seed=kp.private_key)
+    claim = up_mod.SpaceMediaClaim(
+        scope="space", scope_id=SPACE, blob_id="a" * 64, size=10, expires_at=9, ts=1
+    )
+    auth = await u.authorize(claim, SPACE)
+    assert auth is not None and auth.kind == AUTH_AUTHORITY
+    assert await _uploader(tmp_path, gfs=_Gfs([])).authorize(claim, SPACE) is None
+
+
+async def test_remember_stored_skips_a_later_eager_upload(tmp_path):
+    _write(tmp_path, "a.webp", 5000)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _Gfs([g1])
+    u = _uploader(
+        tmp_path,
+        gfs=gfs,
+        instances=[RELAY],
+        versions={"e": V},
+        seed=generate_identity_keypair().private_key,
+    )
+    plan = await u.plan(SPACE, ["api/media/a.webp"], item_id=ITEM, followers=False)
+    await u.remember_stored(g1, plan.refs[0].blob_id)
+    await _upload(u, plan)
+    assert gfs.puts == []
+
+
+async def test_a_members_large_video_still_goes_eagerly(tmp_path):
+    """Review H3: the GFS asks only a listed space's OWNER on demand — a
+    member's (or a private channel's) large video skipped eagerly could
+    never be fetched by anyone, so it is uploaded at once."""
+    _write(tmp_path, "clip.mp4", up_mod.LAZY_VIDEO_MIN_BYTES)
+    g1 = _Conn("g1", "https://g1.example")
+    gfs = _OnDemandGfs([g1])
+    u = _uploader(
+        tmp_path,
+        gfs=gfs,
+        instances=[RELAY],
+        versions={"e": V83},
+        seed=generate_identity_keypair().private_key,
+        spaces=_Spaces(generate_identity_keypair().private_key, owner="host-inst"),
+    )
+    await _upload(
+        u, await u.plan(SPACE, ["api/media/clip.mp4"], item_id=ITEM, followers=False)
+    )
+    assert len(gfs.puts) == 1

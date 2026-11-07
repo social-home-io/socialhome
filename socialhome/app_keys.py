@@ -65,6 +65,7 @@ gallery_service_key: AppKey = AppKey("gallery_service")
 #: and the fetcher (reader; ``GET /api/media/{name}`` fetch-on-view).
 space_media_gfs_uploader_key: AppKey = AppKey("space_media_gfs_uploader")
 space_media_gfs_fetcher_key: AppKey = AppKey("space_media_gfs_fetcher")
+space_media_gfs_responder_key: AppKey = AppKey("space_media_gfs_responder")
 gallery_repo_key: AppKey = AppKey("gallery_repo")
 gallery_on_this_day_service_key: AppKey = AppKey("gallery_on_this_day_service")
 gallery_favourites_service_key: AppKey = AppKey("gallery_favourites_service")
@@ -164,6 +165,7 @@ gfs_connection_repo_key: AppKey = AppKey("gfs_connection_repo")
 #: The owner's choice of GFSs for a global space + the members' signed list.
 gfs_server_selection_service_key: AppKey = AppKey("gfs_server_selection_service")
 gfs_ws_supervisor_key: AppKey = AppKey("gfs_ws_supervisor")
+startup_announcer_key: AppKey = AppKey("startup_announcer")
 #: v_53 shared-GFS route discovery — ``probe_peer`` after a pairing confirm.
 gfs_route_discovery_key: AppKey = AppKey("gfs_route_discovery")
 gfs_route_discovery_scheduler_key: AppKey = AppKey("gfs_route_discovery_scheduler")
