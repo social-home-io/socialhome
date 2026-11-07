@@ -43,6 +43,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(59) == [
@@ -67,6 +68,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(60) == [
@@ -90,6 +92,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(61) == [
@@ -112,6 +115,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(62) == [
@@ -133,6 +137,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(63) == [
@@ -153,6 +158,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(64) == [
@@ -172,6 +178,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(65) == [
@@ -190,6 +197,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(66) == [
@@ -207,6 +215,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(67) == [
@@ -223,6 +232,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(68) == [
@@ -238,6 +248,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(69) == [
@@ -252,6 +263,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(70) == [
@@ -265,6 +277,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(71) == [
@@ -277,6 +290,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(72) == [
@@ -288,6 +302,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(73) == [
@@ -298,6 +313,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(74) == [
@@ -307,6 +323,7 @@ def test_local_community_area_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[59] == "local_communities"
@@ -346,6 +363,7 @@ def test_member_picture_reset_sync_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(58) == [
@@ -371,6 +389,7 @@ def test_member_picture_reset_sync_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[58] == "synced_picture_resets"
@@ -410,6 +429,7 @@ def test_multi_gfs_publish_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert "Posting to every GFS a space is listed on" not in (
@@ -453,6 +473,7 @@ def test_sync_series_rows_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[56] == "synced_recurring_events"
@@ -491,6 +512,7 @@ def test_space_chat_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(55) == [
@@ -519,6 +541,7 @@ def test_space_chat_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.space_features_missing_below(54) == [
@@ -578,6 +601,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(54) == [
@@ -607,6 +631,7 @@ def test_gfs_relay_key_exchange_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
 
@@ -648,6 +673,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(53) == [
@@ -678,6 +704,7 @@ def test_gfs_relay_routes_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
 
@@ -718,6 +745,7 @@ def test_forwarded_invite_link_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
 
@@ -782,6 +810,7 @@ def test_space_authority_rotation_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(46) == [
@@ -819,6 +848,7 @@ def test_space_authority_rotation_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
 
@@ -879,6 +909,7 @@ def test_authority_epoch_echo_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
 
@@ -1460,6 +1491,7 @@ def test_forwarded_role_change_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
 
@@ -1515,6 +1547,7 @@ def test_host_sequenced_pages_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
 
@@ -1559,6 +1592,7 @@ def test_member_gfs_publish_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
 
@@ -1602,6 +1636,7 @@ def test_strict_member_publish_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
 
@@ -1645,6 +1680,7 @@ def test_private_channels_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
 
@@ -1731,6 +1767,7 @@ _PINNED_FEATURE_KEYS = {
     78: "app_engines",
     79: "space_gallery_item_edits",
     80: "space_media_refs",
+    81: "lighter_media_transfers",
     83: "space_media_on_demand",
 }
 
@@ -1798,6 +1835,7 @@ def test_space_author_profile_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.space_feature_keys_missing_below(59) == [
@@ -1841,6 +1879,7 @@ def test_follower_profile_bundle_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[61] == "follower_names_on_join"
@@ -1875,6 +1914,7 @@ def test_encrypted_public_moments_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[62] == "encrypted_public_moments"
@@ -1907,6 +1947,7 @@ def test_encrypted_moment_media_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[63] == "public_moment_media"
@@ -1949,6 +1990,7 @@ def test_long_lived_moments_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[65] == "follower_moment_retention"
@@ -2018,6 +2060,7 @@ def test_moment_reaction_counts_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[69] == "moment_reaction_counts"
@@ -2045,6 +2088,7 @@ def test_highlight_audience_change_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[70] == "highlight_audience_change"
@@ -2070,6 +2114,7 @@ def test_remote_report_answer_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(71) == [
@@ -2082,6 +2127,7 @@ def test_remote_report_answer_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(72) == [
@@ -2093,6 +2139,7 @@ def test_remote_report_answer_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(73) == [
@@ -2103,6 +2150,7 @@ def test_remote_report_answer_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(74) == [
@@ -2112,6 +2160,7 @@ def test_remote_report_answer_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[71] == "remote_report_answers"
@@ -2131,6 +2180,7 @@ def test_app_session_ended_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[72] == "app_games_end_on_uninstall"
@@ -2152,6 +2202,7 @@ def test_bazaar_offers_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[73] == "bazaar_offers"
@@ -2179,6 +2230,7 @@ def test_bazaar_thread_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(74) == [
@@ -2188,6 +2240,7 @@ def test_bazaar_thread_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[74] == "bazaar_ask_the_seller"
@@ -2207,6 +2260,7 @@ def test_bazaar_faq_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(75) == [
@@ -2215,6 +2269,7 @@ def test_bazaar_faq_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[75] == "bazaar_listing_faq"
@@ -2239,6 +2294,7 @@ def test_app_groups_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(76) == [
@@ -2246,6 +2302,7 @@ def test_app_groups_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[76] == "app_groups"
@@ -2263,12 +2320,14 @@ def test_space_app_tables_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(77) == [
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.FederationCapability.MIN_FOR_SPACE_APP_TABLES in (
@@ -2291,11 +2350,13 @@ def test_app_draw_capability_threshold():
         "Gift draws",
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.features_missing_below(78) == [
         "Edit photos in a space",
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[78] == "app_engines"
@@ -2315,6 +2376,7 @@ def test_space_gallery_item_edit_capability_threshold():
     assert fc.OURS >= fc.FederationCapability.MIN_FOR_SPACE_GALLERY_ITEM_EDIT
     assert fc.features_missing_below(79) == [
         "Pictures in a space for members who joined by link",
+        "Lighter photo and file transfers",
         "Older space pictures come back on view",
     ]
     assert fc.CAPABILITY_FEATURE_KEYS[79] == "space_gallery_item_edits"
@@ -2342,6 +2404,24 @@ def test_space_media_refs_capability_threshold():
     assert label in fc.features_missing_below(79)
     assert label not in fc.features_missing_below(80)
     assert fc.CAPABILITY_FEATURE_KEYS[80] == "space_media_refs"
+
+
+def test_media_https_capability_threshold():
+    """v_81 — a media chunk to a CONFIRMED direct peer with no open media
+    channel rides ``POST {inbox}/media`` as one binary ``fed-media-v1``
+    frame instead of the base64 JSON chunk. An older peer keeps the JSON
+    chunk, so it is not space-scoped."""
+    assert fc.FederationCapability.MIN_FOR_MEDIA_HTTPS == 81
+    assert fc.FederationCapability.MIN_FOR_MEDIA_HTTPS <= fc.OURS
+    assert fc.FederationCapability.MIN_FOR_MEDIA_HTTPS not in (
+        fc.SPACE_SCOPED_MIN_VERSIONS
+    )
+    assert fc.features_missing_below(80) == [
+        "Lighter photo and file transfers",
+        "Older space pictures come back on view",
+    ]
+    assert fc.features_missing_below(81) == ["Older space pictures come back on view"]
+    assert fc.CAPABILITY_FEATURE_KEYS[81] == "lighter_media_transfers"
 
 
 def test_space_media_on_demand_capability_threshold():
