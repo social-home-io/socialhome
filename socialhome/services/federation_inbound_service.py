@@ -2250,13 +2250,18 @@ class FederationInboundService(ProtectionGateMixin):
         """Whether the sender may fill ``filename`` itself — the name the
         known row shows here — when that file is missing.
 
-        Only content authority (the host, an admin / moderator household),
-        which can rewrite the row anyway: it holds a member's file under
-        the very name the row shows (names don't depend on the receiver),
-        so its §25.6 catch-up fills a file the author's push never
-        delivered — and a row stored before names were bound to their
-        sender, or one that reached us through the GFS relay without a
-        descriptor. Write-once: an existing file is never replaced."""
+        Only the space's OWNER household (``owner_instance_id``) — the
+        roster authority whose §25.6 catch-up every member syncs from: it
+        holds a member's file under the very name the row shows (names
+        don't depend on the receiver), so its catch-up fills a file the
+        author's push never delivered — and a row stored before names were
+        bound to their sender. Never an admin / moderator household,
+        nor a delegated admin acting for an offline owner: any of them
+        could plant its own bytes under a member's name while that
+        member's push to us is still queued, and write-once would then
+        refuse the real copy. A delegated admin's own catch-up still
+        delivers its rows and files under its own (matching) names.
+        Write-once: an existing file is never replaced."""
         assert self._media_dir is not None
         if await aiofiles.os.path.exists(self._media_dir / filename):
             return False
@@ -2270,14 +2275,12 @@ class FederationInboundService(ProtectionGateMixin):
             is not None
         ):
             return False
-        authorship = self._authorship
-        if authorship is None or not await authorship.has_content_authority(
-            event, space_id
-        ):
+        space = await self._space_repo.get(space_id)
+        if space is None or space.owner_instance_id != event.from_instance:
             return False
         log.info(
             "SPACE_MEDIA_BLOB from %s: filling %s of %s (missing here) as the "
-            "space's content authority",
+            "space's host",
             event.from_instance,
             filename,
             correlation_id,

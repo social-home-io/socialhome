@@ -227,8 +227,11 @@ sending household was sent it for. Both blob types share
   - at most `RESUME_MEDIA_MAX_FILES` (50) files and
     `RESUME_MEDIA_MAX_BYTES` (32 MiB) per request; a file past the budget,
     or one that isn't here, is skipped;
-  - one `SPACE_SYNC_RESUME` per (household, space) per
-    `RESUME_COOLDOWN_S` (30 min); a sooner request is dropped.
+  - one replay per (household, space) per `RESUME_COOLDOWN_S` (30 min);
+    a sooner request is dropped. The window sits in the replay itself
+    (`replay_space_to` / `replay_calendar_to`), so `SPACE_SYNC_RESUME`
+    and a §319.6 `INSTANCE_RESYNC_REQUEST` share it. It is taken before
+    the replay awaits anything, so concurrent requests can't all pass.
 
   The cost is at most 32 MiB to one household per space per 30 minutes,
   which is 64 MiB an hour even when a member asks with an old `since`. The
@@ -237,21 +240,29 @@ sending household was sent it for. Both blob types share
   A file whose sends ran out of attempts (`status='failed'` in
   `space_media_outbox`) is re-armed by the next enqueue of the same file
   for the same household, for example a catch-up or a replay. A row still
-  queued or in flight is left to the scheduler.
+  queued or in flight is left to the scheduler. The re-arms are bounded
+  by what enqueues them: a live post once, a §25.6 initial catch-up by
+  the sync scheduler's session limits, and a replay by the window above.
 - **The host fills a missing file.** Sometimes a known row shows a file
   under exactly the name `filename` and that file is not here, for
   example:
   - the author's push failed for good (the host holds the file as
     `sd(space, author, F)`, the same name the row shows, because names
     don't depend on the receiver);
-  - a row stored before files were bound to their sender;
-  - a GFS-first row without a descriptor.
+  - a row stored before files were bound to their sender.
 
-  A household with content authority (the host, an admin or moderator
-  household) may then store its bytes under that name (`_host_fills`). It
-  writes once and never replaces a file. Content authority can rewrite
-  the row anyway, so this widens nothing. A plain member never fills a
-  name its own household doesn't own.
+  The space's **owner household** (`owner_instance_id`, the roster
+  authority every member's §25.6 catch-up comes from) may then store its
+  bytes under that name (`_host_fills`). It writes once and never
+  replaces a file.
+
+  No other household may fill a name, not even one with content
+  authority. An admin or moderator household, or a delegated admin
+  acting for an offline owner, that learned a member's name could
+  otherwise plant its bytes while that member's push to us is still
+  queued, and write-once would then refuse the real copy. A delegated
+  admin's own catch-up still ships its rows and files under its own,
+  matching names.
 - **Moderation release to GFS followers.** The host holds a remote
   submitter's files under that household's names, while the author's
   signed inner names them as the author does. `approved_relay_for`
@@ -259,9 +270,14 @@ sending household was sent it for. Both blob types share
   author's name mapped for the inner's verified origin. The relay keeps
   the author's signed names and `media_refs`.
 - **GFS relay path.** A post relayed through a GFS
-  (`space_public_inbound`) never shows an `sd-` file that no descriptor
-  renamed (`_without_direct_files`). Such a name is a file this household
-  received from some other household, never the relayed author's.
+  (`space_public_inbound`) keeps only the file references its signed
+  descriptor renamed to a reader name (`sg-`, `_only_described_files`).
+  That is the only way the author's bytes reach a household on this path.
+
+  Any other name is dropped: an `sd-` file received from some household,
+  or a plain name that may be one of this household's own uploads, from
+  another space even. A link card stays, with its picture only when
+  described. A heal takes the files from the copy that carries them.
 - **Space scope (`SPACE_MEDIA_BLOB`).** The envelope must name one space
   (`resolve_space_id`: routing `space_id`, payload copy as fallback, a
   mismatch is a refusal) and a `correlation_id` (`post_id` on older
@@ -323,9 +339,8 @@ Residuals, by design:
   here. The exception is content authority filling a missing file
   (above). A plain member's copy never fills it.
 - A household reaching a member's post first through the GFS relay
-  (`space_public_inbound`) keeps the post's own names. Described files
-  take the reader names of the GFS cache. A file without a descriptor
-  (over 8 MiB) then has no direct push to match.
+  shows only its described files. A file without a descriptor (over
+  8 MiB) is not shown there; the row's reference to it is dropped.
 - Rows stored before this change keep their names. A push for one of
   them still in flight lands under the new name and goes unreferenced.
 - One file relayed through several households is stored once per

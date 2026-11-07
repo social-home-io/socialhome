@@ -242,28 +242,34 @@ class SpaceSyncResumeProvider:
                 since,
             )
             return 0
-        key = (str(event.from_instance or ""), space_id)
-        now = self._clock()
-        last = self._last_resume.get(key)
-        if last is not None and now - last < RESUME_COOLDOWN_S:
-            log.info(
-                "SPACE_SYNC_RESUME from %s for %s: served %.0f s ago — dropped",
-                event.from_instance,
-                space_id,
-                now - last,
-            )
-            return 0
-        sent = await self.replay_space_to(
+        return await self.replay_space_to(
             space_id=space_id,
             instance_id=event.from_instance,
             since=since,
         )
-        if sent:
-            self._last_resume[key] = now
-            self._last_resume.move_to_end(key)
-            while len(self._last_resume) > RESUME_COOLDOWN_TRACKED:
-                self._last_resume.popitem(last=False)
-        return sent
+
+    def _claim_window(self, instance_id: str, space_id: str) -> bool:
+        """Start the (household, space) replay window, or ``False`` (logged)
+        when one is still open. Synchronous — taken before the replay awaits
+        anything, so concurrent requests can't all pass. Shared by every
+        entry point (``SPACE_SYNC_RESUME`` and the §319.6 resync scopes), so
+        a household can't route around it."""
+        key = (str(instance_id or ""), space_id)
+        now = self._clock()
+        last = self._last_resume.get(key)
+        if last is not None and now - last < RESUME_COOLDOWN_S:
+            log.info(
+                "space replay to %s for %s: served %.0f s ago — dropped",
+                instance_id,
+                space_id,
+                now - last,
+            )
+            return False
+        self._last_resume[key] = now
+        self._last_resume.move_to_end(key)
+        while len(self._last_resume) > RESUME_COOLDOWN_TRACKED:
+            self._last_resume.popitem(last=False)
+        return True
 
     async def _is_member(self, space_id: str, instance_id: str) -> bool:
         """Membership gate — the §S-1 security boundary.
@@ -294,6 +300,8 @@ class SpaceSyncResumeProvider:
         non-member household.
         """
         if not await self._is_member(space_id, instance_id):
+            return 0
+        if not self._claim_window(instance_id, space_id):
             return 0
         media: list[tuple[str, list[str]]] = []
         sent = 0
@@ -330,6 +338,8 @@ class SpaceSyncResumeProvider:
         non-member receives nothing (returns 0).
         """
         if not await self._is_member(space_id, instance_id):
+            return 0
+        if not self._claim_window(instance_id, space_id):
             return 0
         media: list[tuple[str, list[str]]] = []
         sent = await self._replay_calendar(space_id, since, to=instance_id, media=media)

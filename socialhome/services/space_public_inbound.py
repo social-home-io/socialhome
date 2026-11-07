@@ -124,7 +124,7 @@ from ..utils.datetime import parse_iso8601_lenient
 from ..writer_cert import verify_writer_users
 from .gfs_member_publish_service import parse_item_plaintext
 from .inbound_media_store import (
-    is_space_direct_media_name,
+    is_gfs_space_media_name,
     media_basename,
     space_media_ref,
     space_media_refs,
@@ -558,7 +558,7 @@ class SpacePublicInbound:
 
         post = self._post_from_inner(post_id, author_user_id, inner)
         media = await self._localize_media(space_id, post, origin_instance_id, inner)
-        post = _without_direct_files(media.post(post))
+        post = _only_described_files(media.post(post))
         if await self._posts.save(space_id, post) is None:
             log.warning(
                 "space_public.inbound: post %s already exists in another space "
@@ -1029,12 +1029,35 @@ class SpacePublicInbound:
             or await self._gfs_media.has_item_refs(space_id, post.id)
         ):
             return
-        media = await self._localize_media(space_id, post, origin_instance_id, inner)
+        # The files come from the copy that carries them: the stored post kept
+        # only described files (none, for a stripped copy).
+        incoming = self._post_from_inner(post.id, author_user_id, inner)
+        media = await self._localize_media(
+            space_id, incoming, origin_instance_id, inner
+        )
         if not media.refs:
             return
-        if not await self._posts.set_media(
-            _without_direct_files(media.post(post)), space_id=space_id
-        ):
+        files = _only_described_files(media.post(incoming))
+        preview = post.link_preview
+        healed = replace(
+            post,
+            media_url=files.media_url,
+            image_urls=files.image_urls,
+            file_meta=files.file_meta,
+            link_preview=(
+                replace(
+                    preview,
+                    thumbnail_url=(
+                        files.link_preview.thumbnail_url
+                        if files.link_preview is not None
+                        else None
+                    ),
+                )
+                if preview is not None
+                else None
+            ),
+        )
+        if not await self._posts.set_media(healed, space_id=space_id):
             return
         await self._keep_media(media)
         log.info(
@@ -1082,7 +1105,7 @@ class SpacePublicInbound:
             media = await self._localize_media(
                 space_id, post, origin_instance_id, inner
             )
-            post = _without_direct_files(media.post(post))
+            post = _only_described_files(media.post(post))
             if await self._posts.save(space_id, post) is None:
                 log.warning(
                     "space_public.inbound: post %s already exists in another space "
@@ -1286,14 +1309,18 @@ class SpacePublicInbound:
         )
 
 
-def _without_direct_files(post: Post) -> Post:
-    """``post`` without a reference to a file received over federation
-    (``sd-``, :class:`SpaceMediaNamer`) that no GFS descriptor renamed: such
-    a name is another household's copy here, never the relayed author's.
-    Apply after the localization (a described file has its ``sg-`` name)."""
+def _only_described_files(post: Post) -> Post:
+    """``post`` with only the file references a signed GFS descriptor
+    renamed to this household's reader name (``sg-``,
+    :func:`is_gfs_space_media_name`). On the relay path that is the only
+    way the author's bytes reach this household; any other name — an
+    ``sd-`` file received from some household over federation, or a plain
+    name that may be one of this household's own uploads, from another
+    space even — would show a file the relayed author never sent. Apply
+    after the localization. The link card stays; only its picture goes."""
 
     def keep(url: str | None) -> bool:
-        return not (url and is_space_direct_media_name(media_basename(url)))
+        return bool(url) and is_gfs_space_media_name(media_basename(url))
 
     preview = post.link_preview
     file_meta = post.file_meta

@@ -831,3 +831,28 @@ async def test_no_one_but_the_host_fills_another_households_name(env, sender):
         _blob({"post_id": "post-a", "filename": L("a1.webp")}, from_instance=sender)
     )
     assert not (media / L("a1.webp")).exists()
+
+
+@pytest.mark.parametrize("role", ["moderator", "admin"])
+async def test_a_moderator_or_admin_household_never_fills(env, db, role):
+    """Only the host fills: a moderator / admin household that learned A's
+    file name would otherwise plant its bytes while A's own push to us is
+    still queued — write-once would then refuse A's real copy."""
+    svc, media = env
+    await db.enqueue(
+        "INSERT INTO space_remote_members(space_id, instance_id, user_id, role)"
+        " VALUES('sp-a', 'peer-mod', 'u-mod', ?)",
+        (role,),
+    )
+    await svc._on_space_media_blob(
+        _blob(
+            {"post_id": "post-a", "filename": L("a1.webp")},
+            from_instance="peer-mod",
+            body=b"MODERATORS-BYTES",
+        )
+    )
+    assert not (media / L("a1.webp")).exists()
+    await svc._on_space_media_blob(
+        _blob({"post_id": "post-a", "filename": "a1.webp"})  # A's own push
+    )
+    assert (media / L("a1.webp")).read_bytes() == b"NEW-BYTES"

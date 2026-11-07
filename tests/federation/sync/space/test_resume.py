@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
@@ -1255,3 +1256,52 @@ async def test_a_resume_is_served_once_per_household_and_space_per_cooldown(
         )
         == 1
     )
+
+
+async def test_a_resync_replay_shares_the_resume_cooldown(tmp_path):
+    """§319.6 ``INSTANCE_RESYNC_REQUEST`` calls the replay directly with
+    ``since`` = epoch: the cooldown lives in the replay itself, keyed on the
+    requesting household and the space, so repeated resyncs ship the files
+    once per window — whichever entry point asked."""
+    now = [1000.0]
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    (tmp_path / "a.webp").write_bytes(b"x")
+    posts = [_image_post(0, base + timedelta(minutes=1), "a.webp")]
+    outbox = _FakeMediaOutbox()
+    provider = _bounded_provider(tmp_path, posts, outbox, clock=lambda: now[0])
+    epoch = "1970-01-01T00:00:00+00:00"
+    for _ in range(3):
+        await provider.replay_space_to(
+            space_id="sp-1", instance_id="peer-a", since=epoch
+        )
+    await provider.replay_calendar_to(
+        space_id="sp-1", instance_id="peer-a", since=epoch
+    )
+    await provider.handle_request(
+        _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
+    )
+    assert len(outbox.rows) == 1
+    now[0] += resume_mod.RESUME_COOLDOWN_S + 1
+    await provider.replay_space_to(space_id="sp-1", instance_id="peer-a", since=epoch)
+    assert len(outbox.rows) == 2
+
+
+async def test_concurrent_resumes_are_served_once(tmp_path):
+    """The window starts before the replay awaits anything, so requests
+    racing each other cannot all slip through."""
+    base = datetime(2026, 4, 1, tzinfo=UTC)
+    (tmp_path / "a.webp").write_bytes(b"x")
+    posts = [_image_post(0, base + timedelta(minutes=1), "a.webp")]
+    outbox = _FakeMediaOutbox()
+    provider = _bounded_provider(tmp_path, posts, outbox)
+
+    class _SlowFederation(_FakeFederation):
+        async def send_event(self, **kw):
+            await asyncio.sleep(0)  # a real send yields: requests interleave
+            await super().send_event(**kw)
+
+    provider._federation = _SlowFederation()
+    request = _event("peer-a", {"space_id": "sp-1", "since": base.isoformat()})
+    sent = await asyncio.gather(*(provider.handle_request(request) for _ in range(5)))
+    assert sorted(sent) == [0, 0, 0, 0, 1]
+    assert len(outbox.rows) == 1

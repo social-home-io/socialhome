@@ -813,12 +813,27 @@ _CARD = {
 
 
 async def test_relayed_link_preview_kept_when_author_signed(env):
+    """The card counts under the author's signature; its picture reaches a
+    GFS reader only through a signed descriptor — without one the card
+    shows without its picture (never a same-named file of ours)."""
     envelope = await _make_envelope(env, link_preview=_CARD)
     await env["inbound"].handle(_frame(envelope), gfs_id="g1")
     _, post = await env["post_repo"].get("post-1")
     assert post.link_preview is not None
     assert post.link_preview.title == "Card"
-    assert post.link_preview.thumbnail_url == "api/media/lp.webp"
+    assert post.link_preview.thumbnail_url is None
+
+
+async def test_a_relayed_cards_described_picture_takes_its_gfs_name(env):
+    sink = _GfsMediaSink()
+    env["inbound"].attach_gfs_media(sink)
+    envelope = await _make_envelope(
+        env, link_preview=_CARD, media_refs={"lp.webp": _REFS_A["p.webp"]}
+    )
+    await env["inbound"].handle(_frame(envelope), gfs_id="g1")
+    _, post = await env["post_repo"].get("post-1")
+    assert post.link_preview is not None
+    assert post.link_preview.thumbnail_url == "api/media/sg-lp.webp"
 
 
 async def test_relayed_link_preview_altered_by_relayer_dropped(env):
@@ -2391,7 +2406,7 @@ async def test_a_stripped_copy_first_then_the_real_one_brings_the_pictures(env):
     real = await _make_envelope(env, signed_extra=picture, media_refs=_REFS_A)
     await env["inbound"].handle(_frame(stripped), gfs_id="g1")
     _sid, post = await env["post_repo"].get("post-1")
-    assert post.image_urls == ("api/media/p.webp",)
+    assert post.image_urls == ()  # undescribed: never shown on this path
     await env["inbound"].handle(_frame(real), gfs_id="g2")
     _sid, post = await env["post_repo"].get("post-1")
     assert post.image_urls == ("api/media/sg-p.webp",)
@@ -2401,11 +2416,13 @@ async def test_a_stripped_copy_first_then_the_real_one_brings_the_pictures(env):
 _SD = "sd-" + "c" * 40 + ".webp"
 
 
-async def test_a_relayed_post_never_shows_an_undescribed_direct_file(env):
-    """``sd-`` names are files this household received from a household
-    over federation (``SpaceMediaNamer``). A post relayed through a GFS that
-    names one without a descriptor would show another household's copy —
-    dropped; a described one takes its GFS reader name as usual."""
+async def test_a_relayed_post_never_shows_an_undescribed_file(env):
+    """On the GFS relay path a file reaches this household only through its
+    signed descriptor (renamed to an ``sg-`` reader name). Any other name —
+    an ``sd-`` file received from some household over federation, or a
+    plain name that may be one of this household's own uploads (from
+    another space, even) — would show a file the relayed author never sent:
+    dropped."""
     sink = _GfsMediaSink()
     env["inbound"].attach_gfs_media(sink)
     picture = {"type": "image", "image_urls": [f"api/media/{_SD}", "api/media/p.webp"]}
@@ -2413,7 +2430,7 @@ async def test_a_relayed_post_never_shows_an_undescribed_direct_file(env):
         _frame(await _make_envelope(env, signed_extra=picture)), gfs_id="g1"
     )
     _sid, post = await env["post_repo"].get("post-1")
-    assert post.image_urls == ("api/media/p.webp",)
+    assert post.image_urls == ()
 
 
 async def test_a_relayed_post_keeps_a_described_direct_file_under_its_gfs_name(env):
@@ -2459,7 +2476,7 @@ async def test_a_duplicate_from_another_author_never_heals(env):
         "sp-1", "post-1", "someone-else", env["author_origin"], inner
     )
     _sid, post = await env["post_repo"].get("post-1")
-    assert post.image_urls == ("api/media/p.webp",)
+    assert post.image_urls == ()
     assert sink.kept == []
 
 
@@ -2494,7 +2511,7 @@ async def test_a_real_edit_heals_a_post_a_stripped_copy_created(item_env):
         await _item_frame(item_env, inner=first, item_type="post_edit")
     )
     _sid, post = await item_env["post_repo"].get("post-1")
-    assert post.image_urls == ("api/media/p.webp",)
+    assert post.image_urls == ()
     second = _edit(_now_iso(-5), with_refs=True)
     await item_env["inbound"].handle(
         await _item_frame(item_env, inner=second, item_type="post_edit")
