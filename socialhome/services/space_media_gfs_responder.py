@@ -37,8 +37,15 @@ both already); for a private space's channel a member household holding a
 seat on that GFS. Any other request — a space this household doesn't own,
 didn't list there, or a private space — is declined ``not_held`` on the same
 path, before any key or crypto is touched, so a GFS can't probe who is a
-member or which spaces a household owns. Member fallback for listed spaces
-is planned (a follow-up); a hint older than
+member or which spaces a household owns. Over its hourly budget the owner
+declines ``busy`` (the GFS may then ask the members).
+
+**Member fallback** (:meth:`SpaceMediaGfsResponder.answer_member_want`):
+a member household that PULLED a want anonymously
+(:mod:`.space_media_gfs_member_puller`) answers it with the same file rules,
+caps, budgets, sealed cache and re-upload window, signed by the space's
+writer group key — never this household's key; a re-upload only under an
+anonymous authorization (authority or writer key). A hint older than
 :data:`~socialhome.space_media_hint.HINT_MAX_AGE_S` is refused. Only a file a
 LIVE row of the space shows is sent (``live_in_space``): a deleted item's
 picture never comes back.
@@ -68,15 +75,25 @@ import aiofiles
 import aiofiles.os
 from cryptography.exceptions import InvalidTag
 
-from ..domain.gfs_space_media import SCOPE_CHANNEL, SpaceMediaClaim
+from ..domain.gfs_space_media import (
+    SCOPE_CHANNEL,
+    SCOPE_SPACE,
+    SpaceMediaClaim,
+    SpaceMediaUploadAuth,
+)
 from ..domain.gfs_space_media_on_demand import (
+    DECLINE_BAD_HINT,
+    DECLINE_BUSY,
+    DECLINE_NOT_HELD,
     MODE_CACHE,
     InvalidOnDemandWire,
     MediaRequestFrame,
+    MemberWant,
 )
 from ..domain.space_media_ref import space_page_media_name
 from ..space_media_hint import (
     InvalidSpaceMediaHint,
+    SpaceMediaHint,
     SpaceMediaLocator,
     open_space_media_hint,
 )
@@ -91,6 +108,8 @@ from .inbound_media_store import (
 from .space_media_gfs_uploader import KEEP_S, seal_and_address_sync
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from ..domain.federation import GfsConnection
     from ..federation.federation_service import FederationService
     from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
@@ -113,9 +132,9 @@ MAX_CONCURRENT_SERVES: int = 4
 HOLDER_BYTES_PER_HOUR_PER_GFS: int = 512 * 1024**2
 HOLDER_BYTES_PER_HOUR: int = 1024**3
 
-#: Decline reasons (the GFS retries another reader's hint on ``bad_hint``).
-DECLINE_BAD_HINT = "bad_hint"
-DECLINE_NOT_HELD = "not_held"
+#: What :meth:`SpaceMediaGfsResponder.answer_member_want` did.
+MEMBER_SERVED = "served"
+MEMBER_DECLINED = "declined"
 
 #: A cache request for one (GFS, blob) attaches the upload authorization at
 #: most once in this window (one re-upload per blob).
@@ -211,16 +230,12 @@ class SpaceMediaGfsResponder:
         except InvalidOnDemandWire as exc:
             log.debug("space media request from %s dropped: %s", gfs_id, exc)
             return
-        if (
-            self._in_flight >= MAX_CONCURRENT_SERVES
-            or self._in_flight_by_gfs.get(gfs_id, 0) >= MAX_SERVES_PER_GFS
-        ):
+        if not self._has_room(gfs_id):
             # Dropped before any work (no task, no signature, no request):
             # a GFS flooding requests costs nothing; it asks someone else.
             log.info("space media request from %s: answers in flight — dropped", gfs_id)
             return
-        self._in_flight += 1
-        self._in_flight_by_gfs[gfs_id] = self._in_flight_by_gfs.get(gfs_id, 0) + 1
+        self._enter(gfs_id)
         task = asyncio.create_task(self._answer(req, gfs_id))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
@@ -237,6 +252,124 @@ class SpaceMediaGfsResponder:
         for task in pending:
             task.cancel()
 
+    # ── Member fallback ──────────────────────────────────────────────────
+
+    async def answer_member_want(
+        self,
+        want: MemberWant,
+        conn: GfsConnection,
+        *,
+        space_id: str,
+        epoch: int,
+        writer_seed: bytes,
+    ) -> str:
+        """Answer a want this household PULLED from *conn*'s GFS for listed
+        space *space_id* (the member fallback): serve it anonymously — the
+        writer group key of *epoch* signs, never this household's key — or
+        decline. The same file rules as the owner path (:meth:`_find_in`:
+        names computed here, never a reserved one, confined to the space,
+        live in it, exact address; on a member only a page's ``sp-`` copy
+        counts), the same in-flight caps, hourly budgets, sealed cache and
+        re-upload window; a re-upload only under an anonymous authorization
+        (space authority or writer key, never the writer cert). Only a
+        member that is not the space's owner answers here. Returns
+        :data:`MEMBER_SERVED` or :data:`MEMBER_DECLINED`; never raises."""
+        gfs_id = conn.id
+        if not self._has_room(gfs_id):
+            await self._member_reply(
+                conn, want, space_id, epoch, writer_seed, None, None, DECLINE_BUSY
+            )
+            return MEMBER_DECLINED
+        self._enter(gfs_id)
+        try:
+            blob, reason = await self._member_find(want, space_id)
+            if blob is not None and not self._budget_allows(gfs_id, len(blob)):
+                blob, reason = None, DECLINE_BUSY
+            if blob is None:
+                await self._member_reply(
+                    conn, want, space_id, epoch, writer_seed, None, None, reason
+                )
+                return MEMBER_DECLINED
+            upload_auth = await self._upload_auth(
+                want.mode,
+                SCOPE_SPACE,
+                space_id,
+                want.blob_id,
+                conn,
+                blob,
+                self._uploader.authorize_anonymous,
+            )
+            charge = self._charge(gfs_id, len(blob))
+            status = await self._member_reply(
+                conn, want, space_id, epoch, writer_seed, blob, upload_auth, ""
+            )
+            if status is None:
+                self._refund(charge)
+            log.info(
+                "space media %s: %s on demand as a member to GFS %s"
+                " (%d bytes, HTTP %s)",
+                want.blob_id[:12],
+                "re-uploaded" if upload_auth else "streamed",
+                gfs_id,
+                len(blob),
+                status,
+            )
+            if upload_auth and status == 200:
+                await self._uploader.remember_stored(conn, want.blob_id)
+            return MEMBER_SERVED
+        except Exception:  # pragma: no cover - defensive
+            log.warning(
+                "space media member want %s failed", want.blob_id[:12], exc_info=True
+            )
+            return MEMBER_DECLINED
+        finally:
+            self._leave(gfs_id)
+
+    async def _member_find(
+        self, want: MemberWant, space_id: str
+    ) -> tuple[bytes | None, str]:
+        """The blob from the first of the want's hints that names a file of
+        ours, or ``None`` and why. Nothing is opened unless this household
+        is a member of the (local) space and not its owner."""
+        own = self._federation.own_instance_id if self._federation else ""
+        space = await self._spaces.get(space_id)
+        if space is None or not own or space.owner_instance_id == own:
+            return None, DECLINE_NOT_HELD
+        reasons: set[str] = set()
+        for hint in want.hints:
+            blob, reason = await self._find_in(
+                space_id, SCOPE_SPACE, space_id, want.blob_id, hint
+            )
+            if blob is not None:
+                return blob, ""
+            reasons.add(reason)
+        return None, (
+            DECLINE_NOT_HELD if DECLINE_NOT_HELD in reasons else DECLINE_BAD_HINT
+        )
+
+    async def _member_reply(
+        self,
+        conn: GfsConnection,
+        want: MemberWant,
+        space_id: str,
+        epoch: int,
+        writer_seed: bytes,
+        blob: bytes | None,
+        upload_auth: str | None,
+        reason: str,
+    ) -> int | None:
+        return await self._gfs.serve_space_media_as_member(
+            conn,
+            want.ticket,
+            blob,
+            space_id=space_id,
+            epoch=epoch,
+            writer_seed=writer_seed,
+            claim=want.claim,
+            upload_auth=upload_auth,
+            decline_reason=reason or DECLINE_NOT_HELD,
+        )
+
     # ── Internals ────────────────────────────────────────────────────────
 
     async def _answer(self, req: MediaRequestFrame, gfs_id: str) -> None:
@@ -246,13 +379,22 @@ class SpaceMediaGfsResponder:
                 return
             blob, space_id, reason = await self._find(req, conn)
             if blob is not None and not self._budget_allows(conn.id, len(blob)):
-                blob, reason = None, DECLINE_NOT_HELD
+                # Busy, not "not held": the GFS may ask the space's members.
+                blob, reason = None, DECLINE_BUSY
             if blob is None:
                 await self._gfs.serve_space_media(
                     conn, req.ticket, None, decline_reason=reason
                 )
                 return
-            upload_auth = await self._upload_auth(req, conn, blob, space_id)
+            upload_auth = await self._upload_auth(
+                req.mode,
+                req.scope,
+                req.scope_id,
+                req.blob_id,
+                conn,
+                blob,
+                lambda claim: self._uploader.authorize(claim, space_id),
+            )
             # Charged BEFORE the bytes go: a GFS that reads the body and then
             # answers 409 / 422 / 429 still spent this household's budget.
             charge = self._charge(conn.id, len(blob))
@@ -277,12 +419,25 @@ class SpaceMediaGfsResponder:
                 "space media request for %s failed", req.blob_id[:12], exc_info=True
             )
         finally:
-            self._in_flight -= 1
-            left = self._in_flight_by_gfs.get(gfs_id, 1) - 1
-            if left > 0:
-                self._in_flight_by_gfs[gfs_id] = left
-            else:
-                self._in_flight_by_gfs.pop(gfs_id, None)
+            self._leave(gfs_id)
+
+    def _has_room(self, gfs_id: str) -> bool:
+        return (
+            self._in_flight < MAX_CONCURRENT_SERVES
+            and self._in_flight_by_gfs.get(gfs_id, 0) < MAX_SERVES_PER_GFS
+        )
+
+    def _enter(self, gfs_id: str) -> None:
+        self._in_flight += 1
+        self._in_flight_by_gfs[gfs_id] = self._in_flight_by_gfs.get(gfs_id, 0) + 1
+
+    def _leave(self, gfs_id: str) -> None:
+        self._in_flight -= 1
+        left = self._in_flight_by_gfs.get(gfs_id, 1) - 1
+        if left > 0:
+            self._in_flight_by_gfs[gfs_id] = left
+        else:
+            self._in_flight_by_gfs.pop(gfs_id, None)
 
     async def _find(
         self, req: MediaRequestFrame, conn: GfsConnection
@@ -297,45 +452,59 @@ class SpaceMediaGfsResponder:
             # Not a household this GFS may ask: the same answer as a miss,
             # before anything is opened.
             return None, "", DECLINE_NOT_HELD
-        current = await self._crypto.media_key(space_id, epoch=req.hint.epoch)
+        blob, reason = await self._find_in(
+            space_id, req.scope, req.scope_id, req.blob_id, req.hint
+        )
+        return blob, space_id, reason
+
+    async def _find_in(
+        self,
+        space_id: str,
+        scope: str,
+        scope_id: str,
+        blob_id: str,
+        hint: SpaceMediaHint,
+    ) -> tuple[bytes | None, str]:
+        """The file-finding rules every answer shares (owner, seat holder,
+        member): open *hint* with the space media key of its epoch, look
+        only at the names this household computes (:meth:`_candidates`),
+        each confined to the space and live in it, reseal, and keep it only
+        at exactly *blob_id*."""
+        current = await self._crypto.media_key(space_id, epoch=hint.epoch)
         if current is None:
-            return None, space_id, DECLINE_BAD_HINT
+            return None, DECLINE_BAD_HINT
         key = current[1]
         try:
             loc = open_space_media_hint(
-                req.hint,
+                hint,
                 media_key=key,
-                scope=req.scope,
-                scope_id=req.scope_id,
-                blob_id=req.blob_id,
+                scope=scope,
+                scope_id=scope_id,
+                blob_id=blob_id,
             )
         except InvalidTag, InvalidSpaceMediaHint:
             log.info("space media request: hint not for this space — declined")
-            return None, space_id, DECLINE_BAD_HINT
+            return None, DECLINE_BAD_HINT
         if not loc.fresh():
             log.info("space media request: a stale hint — declined")
-            return None, space_id, DECLINE_BAD_HINT
-        sealed_key = (req.scope, req.scope_id, req.blob_id)
+            return None, DECLINE_BAD_HINT
+        sealed_key = (scope, scope_id, blob_id)
         cached = self._sealed_get(sealed_key)
         if cached is not None:
-            return cached, space_id, ""
+            return cached, ""
         locator = (
-            req.scope,
-            req.scope_id,
-            req.hint.epoch,
+            scope,
+            scope_id,
+            hint.epoch,
             loc.item_id,
             loc.origin,
             loc.filename,
         )
         known = self._resealed.get(locator)
-        if (
-            known is not None
-            and known[0] > _monotonic()
-            and req.blob_id not in known[1]
-        ):
+        if known is not None and known[0] > _monotonic() and blob_id not in known[1]:
             # This locator's files reseal to other addresses: no new reseal
             # for a made-up blob id.
-            return None, space_id, DECLINE_BAD_HINT
+            return None, DECLINE_BAD_HINT
         held_any = False
         addresses: set[str] = set()
         for name in self._candidates(space_id, loc):
@@ -351,23 +520,23 @@ class SpaceMediaGfsResponder:
                 seal_and_address_sync,
                 key,
                 space_id,
-                req.hint.epoch,
+                hint.epoch,
                 loc.item_id,
                 loc.origin,
                 loc.filename,
                 data,
-                req.scope,
-                req.scope_id,
+                scope,
+                scope_id,
             )
             addresses.add(address)
-            if address == req.blob_id:
+            if address == blob_id:
                 self._remember_locator(locator, addresses)
                 self._sealed_put(sealed_key, blob)
-                return blob, space_id, ""
+                return blob, ""
         if held_any:
             self._remember_locator(locator, addresses)
-            return None, space_id, DECLINE_BAD_HINT
-        return None, space_id, DECLINE_NOT_HELD
+            return None, DECLINE_BAD_HINT
+        return None, DECLINE_NOT_HELD
 
     def _remember_locator(self, locator: tuple, addresses: set[str]) -> None:
         self._resealed[locator] = (
@@ -447,26 +616,34 @@ class SpaceMediaGfsResponder:
             return await fh.read()
 
     async def _upload_auth(
-        self, req: MediaRequestFrame, conn: GfsConnection, blob: bytes, space_id: str
+        self,
+        mode: str,
+        scope: str,
+        scope_id: str,
+        blob_id: str,
+        conn: GfsConnection,
+        blob: bytes,
+        authorize: Callable[[SpaceMediaClaim], Awaitable[SpaceMediaUploadAuth | None]],
     ) -> str | None:
-        """The upload authorization for a cache request — once per (GFS,
-        blob) per :data:`REUPLOAD_COALESCE_S`; ``None`` streams only."""
-        if req.mode != MODE_CACHE:
+        """The upload authorization (from *authorize*) for a cache request —
+        once per (GFS, blob) per :data:`REUPLOAD_COALESCE_S`, whoever asked
+        (owner and member paths share the window); ``None`` streams only."""
+        if mode != MODE_CACHE:
             return None
         now = _monotonic()
-        key = (conn.id, req.blob_id)
+        key = (conn.id, blob_id)
         if self._reuploaded.get(key, 0.0) > now:
             return None
         wall = int(time.time())
         claim = SpaceMediaClaim(
-            scope=req.scope,
-            scope_id=req.scope_id,
-            blob_id=req.blob_id,
+            scope=scope,
+            scope_id=scope_id,
+            blob_id=blob_id,
             size=len(blob),
             expires_at=wall + KEEP_S,
             ts=wall,
         )
-        auth = await self._uploader.authorize(claim, space_id)
+        auth = await authorize(claim)
         if auth is None:
             return None
         self._reuploaded[key] = now + REUPLOAD_COALESCE_S

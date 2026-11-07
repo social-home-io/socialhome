@@ -80,9 +80,11 @@ only once the whole blob sits at the address the reader asked for.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import math
 import random
+import secrets
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -108,6 +110,7 @@ from ..domain.gfs_space_media_on_demand import (
     MemberWant,
     WantedRequest,
     member_serve_signing_bytes,
+    valid_claim,
 )
 from ..moment_public_media import is_blob_id
 from ..space_media_hint import SpaceMediaHint
@@ -626,17 +629,25 @@ class GfsSpaceMediaOnDemand:
         ts: str,
         sig: str,
         suite: str,
+        claim: str,
     ) -> bool:
         """Whether a writer-key holder may serve or decline *session* now:
         the session is with the members, the signature (writer group key of
-        *epoch*, pinned here, epoch open) binds the ticket, *op*, the scope
-        and a fresh *ts*, and the want's claim is live in the shared table
-        (only a puller that claimed it can feed it). Every refusal costs the
-        one verification a success makes."""
+        *epoch*, pinned here, epoch open) binds the ticket, *op*, the scope,
+        a fresh *ts* and *claim*, and *claim* is the secret of the want's
+        live claim in the shared table (only the puller that claimed it can
+        feed it — and the GFS still can't tell who that is). Every refusal
+        costs the one verification a success makes."""
         with counting_ed25519_verifies() as done:
             try:
                 await self._check_member(
-                    session, op=op, epoch=epoch, ts=ts, sig=sig, suite=suite
+                    session,
+                    op=op,
+                    epoch=epoch,
+                    ts=ts,
+                    sig=sig,
+                    suite=suite,
+                    claim=claim,
                 )
                 return True
             except PermissionError as exc:
@@ -653,7 +664,10 @@ class GfsSpaceMediaOnDemand:
         ts: str,
         sig: str,
         suite: str,
+        claim: str,
     ) -> None:
+        if not valid_claim(claim):
+            raise PermissionError("malformed claim")
         if (
             self._member_publish is None
             or self._member_wants is None
@@ -678,12 +692,15 @@ class GfsSpaceMediaOnDemand:
                 session.scope_id,
                 epoch_int,
                 ts_int,
+                claim,
             ),
             writer_sig=sig,
             suite=suite,
         )
         await self._member_publish.require_writer_key_epoch(session.scope_id, epoch_int)
-        if not await self._member_wants.claimed(session.ticket, now=int(time.time())):
+        if not await self._member_wants.claimed(
+            session.ticket, now=int(time.time()), claim_hash=claim_digest(claim)
+        ):
             raise PermissionError("no live claim on this want")
 
     def cached_deadline(self, size: int) -> float:
@@ -878,12 +895,16 @@ class GfsSpaceMediaOnDemand:
     async def _claim(self, scope: tuple[str, str]) -> MemberWant | None:
         if self._member_wants is None:  # pragma: no cover - checked by callers
             return None
+        # A fresh secret per claim: only its hash is kept, so the serve can
+        # prove "I am the puller that claimed this" without saying who.
+        claim = secrets.token_hex(16)
         row = await self._member_wants.claim_next(
             scope[0],
             scope[1],
             now=int(time.time()),
             hold_s=MEMBER_START_TIMEOUT_S,
             max_attempts=MAX_MEMBER_ATTEMPTS,
+            claim_hash=claim_digest(claim),
         )
         if row is None:
             return None
@@ -894,6 +915,7 @@ class GfsSpaceMediaOnDemand:
                     "blob_id": row.blob_id,
                     "mode": row.mode,
                     "hints": orjson.loads(row.hints),
+                    "claim": claim,
                 }
             )
         except InvalidOnDemandWire, orjson.JSONDecodeError:  # pragma: no cover
@@ -1303,6 +1325,11 @@ def build_space_media_wanted_rate_limit(
 
 #: The reader route as aiohttp names it (for the limiter).
 SPACE_MEDIA_WANTED_ROUTE_CANONICAL: str = "/gfs/media/{blob_id}/wanted"
+
+
+def claim_digest(claim: str) -> str:
+    """What the shared table keeps of a member claim's secret."""
+    return hashlib.sha256(b"space-media-member-claim:" + claim.encode()).hexdigest()
 
 
 def build_space_media_member_pull_rate_limit(

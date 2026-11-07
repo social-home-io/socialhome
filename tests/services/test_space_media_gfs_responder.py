@@ -21,6 +21,7 @@ from socialhome.domain.gfs_space_media_on_demand import (
     MODE_CACHE,
     MODE_STREAM,
     MediaRequestFrame,
+    MemberWant,
 )
 from socialhome.domain.space_media_ref import space_page_media_name
 from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
@@ -616,3 +617,276 @@ async def test_a_member_never_serves_its_own_file_a_hostile_page_names(db, tmp_p
     )
     assert [x[2] for x in gfs.serves] == [None]
     assert gfs.reasons == ["not_held"]
+
+
+# ── Member fallback (a member household serves a want it pulled) ─────────
+
+WRITER_SEED = bytes(range(1, 33))
+
+
+class _MemberGfs(_Gfs):
+    """Records member serves apart from the owner's household-signed ones."""
+
+    def __init__(self, status=200):
+        super().__init__(status)
+        self.member: list[dict] = []
+
+    async def serve_space_media_as_member(
+        self,
+        conn,
+        ticket,
+        blob,
+        *,
+        space_id,
+        epoch,
+        writer_seed,
+        claim,
+        upload_auth=None,
+        decline_reason="not_held",
+    ):
+        self.member.append(
+            {
+                "claim": claim,
+                "conn": conn.id,
+                "ticket": ticket,
+                "blob": blob,
+                "space": space_id,
+                "epoch": epoch,
+                "seed": writer_seed,
+                "auth": upload_auth,
+                "reason": None if blob is not None else decline_reason,
+            }
+        )
+        return self.status
+
+
+class _AnonUploader(_Uploader):
+    def __init__(self, *, authorized=True):
+        super().__init__(authorized=authorized)
+        self.anonymous: list = []
+
+    async def authorize(self, claim, space_id):  # pragma: no cover - must not run
+        raise AssertionError("a member serve never uses the identified path")
+
+    async def authorize_anonymous(self, claim):
+        self.anonymous.append(claim)
+        if not self.authorized:
+            return None
+        return SpaceMediaUploadAuth(
+            claim=claim, kind=AUTH_AUTHORITY, sig="c2ln", sig_suite="ed25519"
+        )
+
+
+def _want(bid, *hints, mode=MODE_STREAM, ticket=None):
+    """A pulled want naming *bid*, with the readers' hints (default: one
+    naming AUTHOR's ``a.webp``)."""
+    if not hints:
+        hints = (_hint(bid),)
+    return MemberWant(
+        ticket=ticket or os.urandom(16).hex(),
+        blob_id=bid,
+        mode=mode,
+        hints=tuple(parse_hint_wire(h) for h in hints),
+        claim="c" * 32,
+    )
+
+
+def _hint(bid, *, origin=AUTHOR, filename="a.webp", key=KEY, item=ITEM):
+    return seal_space_media_hint(
+        media_key=key,
+        scope="space",
+        scope_id=SPACE,
+        blob_id=bid,
+        epoch=4,
+        locator=SpaceMediaLocator(item_id=item, origin=origin, filename=filename),
+    )
+
+
+def _member(tmp_path, *, gfs=None, refs=None, uploader=None, owner="the-host"):
+    return _responder(
+        tmp_path,
+        gfs=gfs or _MemberGfs(),
+        spaces=_Spaces(owner=owner),
+        refs=refs,
+        uploader=uploader or _AnonUploader(),
+    )
+
+
+async def _answer(r, want, *, conn=None):
+    return await r.answer_member_want(
+        want, conn or _Conn("g1"), space_id=SPACE, epoch=7, writer_seed=WRITER_SEED
+    )
+
+
+async def test_a_member_serves_a_file_it_got_from_the_author_byte_identical(
+    tmp_path,
+):
+    data = _file(tmp_path, space_direct_media_name(SPACE, AUTHOR, "a.webp"))
+    blob, bid = _blob(data, origin=AUTHOR)
+    gfs = _MemberGfs()
+    r = _member(tmp_path, gfs=gfs)
+    assert await _answer(r, _want(bid)) == "served"
+    assert gfs.serves == []  # never the household-signed owner path
+    assert len(gfs.member) == 1
+    m = gfs.member[0]
+    assert (m["blob"], m["space"], m["epoch"], m["seed"]) == (
+        blob,
+        SPACE,
+        7,
+        WRITER_SEED,
+    )
+    assert m["auth"] is None
+    assert m["claim"] == "c" * 32  # the pull's claim secret goes back
+
+
+async def test_a_member_also_finds_a_gfs_delivered_copy(tmp_path):
+    data = _file(tmp_path, gfs_space_media_name(SPACE, AUTHOR, ITEM, "a.webp"))
+    blob, bid = _blob(data, origin=AUTHOR)
+    gfs = _MemberGfs()
+    assert await _answer(_member(tmp_path, gfs=gfs), _want(bid)) == "served"
+    assert gfs.member[0]["blob"] == blob
+
+
+async def test_a_member_tries_every_hint(tmp_path):
+    data = _file(tmp_path, space_direct_media_name(SPACE, AUTHOR, "a.webp"))
+    blob, bid = _blob(data, origin=AUTHOR)
+    foreign = derive_space_media_key(bytes(32))
+    gfs = _MemberGfs()
+    want = _want(bid, _hint(bid, key=foreign), _hint(bid))
+    assert await _answer(_member(tmp_path, gfs=gfs), want) == "served"
+    assert gfs.member[0]["blob"] == blob
+
+
+async def test_a_cache_want_reuploads_only_under_an_anonymous_authorization(
+    tmp_path,
+):
+    data = _file(tmp_path, space_direct_media_name(SPACE, AUTHOR, "a.webp"))
+    _b, bid = _blob(data, origin=AUTHOR)
+    gfs, up = _MemberGfs(), _AnonUploader()
+    r = _member(tmp_path, gfs=gfs, uploader=up)
+    assert await _answer(r, _want(bid, mode=MODE_CACHE)) == "served"
+    assert await _answer(r, _want(bid, mode=MODE_CACHE)) == "served"
+    # Once per (GFS, blob) — the owner path's coalescing window, shared.
+    assert [m["auth"] is not None for m in gfs.member] == [True, False]
+    assert len(up.anonymous) == 1
+    assert up.anonymous[0].blob_id == bid
+    assert up.remembered == [("g1", bid)]
+
+
+async def test_no_anonymous_authorization_streams_only(tmp_path):
+    data = _file(tmp_path, space_direct_media_name(SPACE, AUTHOR, "a.webp"))
+    blob, bid = _blob(data, origin=AUTHOR)
+    gfs = _MemberGfs()
+    r = _member(tmp_path, gfs=gfs, uploader=_AnonUploader(authorized=False))
+    assert await _answer(r, _want(bid, mode=MODE_CACHE)) == "served"
+    assert gfs.member[0]["blob"] == blob and gfs.member[0]["auth"] is None
+
+
+@pytest.mark.parametrize("case", ["foreign", "gone"])
+async def test_a_member_never_serves_an_unconfined_or_deleted_file(tmp_path, case):
+    name = space_direct_media_name(SPACE, AUTHOR, "a.webp")
+    data = _file(tmp_path, name)
+    _b, bid = _blob(data, origin=AUTHOR)
+    refs = _MediaRefs(foreign={name}) if case == "foreign" else _MediaRefs(gone={name})
+    gfs = _MemberGfs()
+    assert await _answer(_member(tmp_path, gfs=gfs, refs=refs), _want(bid)) == (
+        "declined"
+    )
+    assert [(m["blob"], m["reason"]) for m in gfs.member] == [(None, "not_held")]
+
+
+async def test_a_member_never_serves_a_reserved_name(tmp_path):
+    """Its own sealed name counts only when it is no reserved name (a DM /
+    moment file is never a space's)."""
+    reserved = "dm-" + "ab" * 16 + ".webp"
+    data = _file(tmp_path, reserved)
+    _b, bid = _blob(data, origin=OWN, filename=reserved)
+    gfs = _MemberGfs()
+    want = _want(bid, _hint(bid, origin=OWN, filename=reserved))
+    assert await _answer(_member(tmp_path, gfs=gfs), want) == "declined"
+    assert gfs.member[0]["blob"] is None
+
+
+async def test_a_member_never_serves_a_raw_page_file(db, tmp_path):
+    """#1317 member-side page rule, on the member path: a page body naming
+    one of our own raw files makes it neither confined nor live — only a
+    ``sp-`` copy of a page's file counts on a member."""
+    await db.enqueue(
+        "INSERT INTO users(user_id, username, display_name) VALUES('u1', 'u1', 'U1')"
+    )
+    await db.enqueue(
+        "INSERT INTO spaces(id, name, owner_instance_id, owner_username,"
+        " identity_public_key) VALUES(?, 'S', 'the-host', 'u1', 'k')",
+        (SPACE,),
+    )
+    await db.enqueue(
+        "INSERT INTO space_pages(id, space_id, title, content, created_by)"
+        " VALUES('pg', ?, 'P', '![x](api/media/orphan.webp)', 'u1')",
+        (SPACE,),
+    )
+    data = _file(tmp_path, "orphan.webp")
+    _b, bid = _blob(data, origin=OWN, filename="orphan.webp")
+    gfs = _MemberGfs()
+    r = _member(tmp_path, gfs=gfs, refs=SqliteMediaReferenceRepo(db))
+    want = _want(bid, _hint(bid, origin=OWN, filename="orphan.webp"))
+    assert await _answer(r, want) == "declined"
+    assert [m["blob"] for m in gfs.member] == [None]
+
+
+async def test_a_members_page_copy_is_served(tmp_path):
+    name = space_page_media_name(SPACE, "pagepic.webp")
+    data = _file(tmp_path, name)
+    blob, bid = _blob(data, origin=AUTHOR, filename="pagepic.webp")
+    gfs = _MemberGfs()
+    want = _want(bid, _hint(bid, origin=AUTHOR, filename="pagepic.webp"))
+    assert await _answer(_member(tmp_path, gfs=gfs), want) == "served"
+    assert gfs.member[0]["blob"] == blob
+
+
+@pytest.mark.parametrize("case", ["owner", "unknown_space"])
+async def test_the_owner_or_a_stranger_never_answers_as_a_member(tmp_path, case):
+    data = _file(tmp_path, space_direct_media_name(SPACE, AUTHOR, "a.webp"))
+    _b, bid = _blob(data, origin=AUTHOR)
+    gfs = _MemberGfs()
+    r = _member(tmp_path, gfs=gfs, owner=OWN if case == "owner" else "the-host")
+    want = _want(bid)
+    if case == "unknown_space":
+        out = await r.answer_member_want(
+            want, _Conn("g1"), space_id="sp-other", epoch=7, writer_seed=WRITER_SEED
+        )
+    else:
+        out = await _answer(r, want)
+    assert out == "declined"
+    assert [m["blob"] for m in gfs.member] == [None]
+
+
+async def test_a_member_over_its_budget_declines_busy(tmp_path, monkeypatch):
+    data = _file(tmp_path, space_direct_media_name(SPACE, AUTHOR, "a.webp"), 70_000)
+    blob, bid = _blob(data, origin=AUTHOR)
+    monkeypatch.setattr(mod, "HOLDER_BYTES_PER_HOUR_PER_GFS", len(blob) + 1)
+    gfs = _MemberGfs()
+    r = _member(tmp_path, gfs=gfs)
+    assert await _answer(r, _want(bid)) == "served"
+    assert await _answer(r, _want(bid)) == "declined"
+    assert gfs.member[1]["reason"] == "busy"
+
+
+async def test_a_member_past_the_in_flight_cap_declines_busy(tmp_path, monkeypatch):
+    monkeypatch.setattr(mod, "MAX_SERVES_PER_GFS", 0)
+    data = _file(tmp_path, space_direct_media_name(SPACE, AUTHOR, "a.webp"))
+    _b, bid = _blob(data, origin=AUTHOR)
+    gfs = _MemberGfs()
+    assert await _answer(_member(tmp_path, gfs=gfs), _want(bid)) == "declined"
+    assert gfs.member[0]["reason"] == "busy"
+
+
+async def test_the_owner_over_its_budget_declines_busy(tmp_path, monkeypatch):
+    """Busy (not "not held"): the GFS may then ask the space's members."""
+    data = _file(tmp_path, "a.webp", 70_000)
+    blob, bid = _blob(data)
+    monkeypatch.setattr(mod, "HOLDER_BYTES_PER_HOUR_PER_GFS", len(blob) + 1)
+    gfs = _Gfs()
+    r = _responder(tmp_path, gfs=gfs)
+    await _ask(r, _frame(bid))
+    await _ask(r, _frame(bid))
+    assert gfs.reasons == ["busy"]

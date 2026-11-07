@@ -441,6 +441,7 @@ from .services.space_crypto_service import (
 )
 from .services.space_location_outbound import SpaceLocationOutbound
 from .services.space_media_gfs_fetcher import SpaceMediaGfsFetcher
+from .services.space_media_gfs_member_puller import SpaceMediaGfsMemberPuller
 from .services.space_media_gfs_responder import SpaceMediaGfsResponder
 from .services.space_media_gfs_uploader import SpaceMediaGfsUploader
 from .services.space_media_names import SpaceMediaNamer
@@ -2313,9 +2314,21 @@ def _build_space_media_gfs(
         media_dir=media_dir,
     )
     responder.attach_federation(federation_service)
+    # The member fallback: when a listed space's owner is offline, slow or
+    # busy, its members pull the want anonymously (writer group key) and
+    # answer it with the responder's rules.
+    member_puller = SpaceMediaGfsMemberPuller(
+        space_repo=space_repo,
+        gfs_service=gfs_connection_service,
+        writer_certs=writer_certs,
+        space_crypto=space_crypto,
+        responder=responder,
+    )
+    member_puller.attach_federation(federation_service)
     app[K.space_media_gfs_uploader_key] = uploader
     app[K.space_media_gfs_fetcher_key] = fetcher
     app[K.space_media_gfs_responder_key] = responder
+    app[K.space_media_gfs_member_puller_key] = member_puller
     return uploader, fetcher
 
 
@@ -5094,6 +5107,7 @@ def create_app(config: Config | None = None) -> web.Application:
         app[K.space_sync_service_key].attach_media_gfs(space_media_uploader)
         app[K.space_sync_receiver_key].attach_gfs_media(space_media_fetcher)
         await space_media_uploader.start()
+        await app[K.space_media_gfs_member_puller_key].start()
         # Late-bind realtime into the federation inbound — the
         # DM_MEDIA_BLOB handler uses it to fan ``dm.media_ready``
         # frames to local participants when the full bytes for a
@@ -5997,6 +6011,8 @@ def create_app(config: Config | None = None) -> web.Application:
             await uploader.stop()
         if (fetcher := app.get(K.space_media_gfs_fetcher_key)) is not None:
             await fetcher.stop()
+        if (puller := app.get(K.space_media_gfs_member_puller_key)) is not None:
+            await puller.stop()
         if (responder := app.get(K.space_media_gfs_responder_key)) is not None:
             await responder.stop()
         await media_transcode_service.stop()

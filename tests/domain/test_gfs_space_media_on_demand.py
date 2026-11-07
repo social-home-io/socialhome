@@ -228,11 +228,12 @@ def test_member_want_round_trip() -> None:
             "blob_id": BLOB,
             "mode": MODE_STREAM,
             "hints": [_hint(), _hint()],
+            "claim": "c" * 32,
         }
     )
     assert len(want.hints) == 2
     assert MemberWant.from_wire(want.to_wire()) == want
-    assert set(want.to_wire()) == {"ticket", "blob_id", "mode", "hints"}
+    assert set(want.to_wire()) == {"ticket", "blob_id", "mode", "hints", "claim"}
 
 
 @pytest.mark.parametrize(
@@ -246,10 +247,19 @@ def test_member_want_round_trip() -> None:
         {"hints": [{"suite": "nope"}]},
         {"hints": [None]},
         {"hints": [_hint() for _ in range(MAX_MEMBER_WANT_HINTS + 1)]},
+        {"claim": None},
+        {"claim": "C" * 32},
+        {"claim": "c" * 31},
     ],
 )
 def test_member_want_refused(patch) -> None:
-    raw = {"ticket": "1" * 32, "blob_id": BLOB, "mode": MODE_CACHE, "hints": [_hint()]}
+    raw = {
+        "ticket": "1" * 32,
+        "blob_id": BLOB,
+        "mode": MODE_CACHE,
+        "hints": [_hint()],
+        "claim": "c" * 32,
+    }
     raw.update(patch)
     with pytest.raises(InvalidOnDemandWire):
         MemberWant.from_wire(raw)
@@ -260,11 +270,13 @@ def test_member_want_refuses_non_objects() -> None:
         MemberWant.from_wire(None)
 
 
-def test_member_serve_signing_bytes_bind_op_scope_and_epoch() -> None:
-    base = member_serve_signing_bytes("t", "serve", "space", "sp-1", 7, 5)
+def test_member_serve_signing_bytes_bind_op_scope_epoch_and_claim() -> None:
+    c = "c" * 32
+    base = member_serve_signing_bytes("t", "serve", "space", "sp-1", 7, 5, c)
     assert base == MEMBER_SERVE_PREFIX + canonical_bytes(
         {
             "media_ticket": "t",
+            "claim": c,
             "op": "serve",
             "scope": "space",
             "scope_id": "sp-1",
@@ -272,9 +284,12 @@ def test_member_serve_signing_bytes_bind_op_scope_and_epoch() -> None:
             "ts": 5,
         }
     )
-    assert base != member_serve_signing_bytes("t", "decline", "space", "sp-1", 7, 5)
-    assert base != member_serve_signing_bytes("t", "serve", "space", "sp-2", 7, 5)
-    assert base != member_serve_signing_bytes("t", "serve", "space", "sp-1", 8, 5)
+    assert base != member_serve_signing_bytes("t", "decline", "space", "sp-1", 7, 5, c)
+    assert base != member_serve_signing_bytes("t", "serve", "space", "sp-2", 7, 5, c)
+    assert base != member_serve_signing_bytes("t", "serve", "space", "sp-1", 8, 5, c)
+    assert base != member_serve_signing_bytes(
+        "t", "serve", "space", "sp-1", 7, 5, "d" * 32
+    )
     # Never a pull's bytes.
     assert not base.startswith(MEMBER_PULL_PREFIX)
 

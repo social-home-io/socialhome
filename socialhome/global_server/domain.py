@@ -401,6 +401,8 @@ class GfsSpaceMediaMemberWant:
     created_at: int
     claimed_until: int = 0
     attempts: int = 0
+    #: sha256 hex of the current claim's secret ("" when unclaimed).
+    claim_hash: str = ""
 
 
 @dataclass(slots=True, frozen=True)

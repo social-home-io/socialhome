@@ -17,6 +17,7 @@ business logic.
 
 from __future__ import annotations
 
+import hmac
 import time
 from typing import Any, Protocol, runtime_checkable
 
@@ -2445,9 +2446,10 @@ class AbstractGfsSpaceMediaMemberWantRepo(Protocol):
         now: int,
         hold_s: int,
         max_attempts: int,
+        claim_hash: str,
     ) -> GfsSpaceMediaMemberWant | None: ...
     async def release(self, ticket: str) -> None: ...
-    async def claimed(self, ticket: str, *, now: int) -> bool: ...
+    async def claimed(self, ticket: str, *, now: int, claim_hash: str) -> bool: ...
     async def remove(self, ticket: str) -> None: ...
     async def open_scopes(self, *, now: int) -> set[tuple[str, str]]: ...
     async def prune(self, *, now: int) -> int: ...
@@ -2455,7 +2457,7 @@ class AbstractGfsSpaceMediaMemberWantRepo(Protocol):
 
 _MEMBER_WANT_COLS = (
     "ticket, scope_kind, scope_id, blob_id, mode, hints, expires_at,"
-    " created_at, claimed_until, attempts"
+    " created_at, claimed_until, attempts, claim_hash"
 )
 
 
@@ -2471,6 +2473,7 @@ def _member_want(row: Any) -> GfsSpaceMediaMemberWant:
         created_at=int(row[7]),
         claimed_until=int(row[8]),
         attempts=int(row[9]),
+        claim_hash=str(row[10]),
     )
 
 
@@ -2487,7 +2490,7 @@ class SqliteGfsSpaceMediaMemberWantRepo:
     async def post(self, want: GfsSpaceMediaMemberWant) -> None:
         await self._db.enqueue(
             f"INSERT INTO gfs_space_media_member_wants({_MEMBER_WANT_COLS})"
-            " VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(ticket) DO NOTHING",
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(ticket) DO NOTHING",
             (
                 want.ticket,
                 want.scope_kind,
@@ -2499,6 +2502,7 @@ class SqliteGfsSpaceMediaMemberWantRepo:
                 want.created_at,
                 want.claimed_until,
                 want.attempts,
+                want.claim_hash,
             ),
         )
 
@@ -2510,21 +2514,32 @@ class SqliteGfsSpaceMediaMemberWantRepo:
         now: int,
         hold_s: int,
         max_attempts: int,
+        claim_hash: str,
     ) -> GfsSpaceMediaMemberWant | None:
         """Claim the oldest want of the scope that is still offered (not
         expired, not claimed or its claim ran out, fewer than *max_attempts*
         declines) for *hold_s* seconds — one statement on the single writer,
-        so two pulls never get the same want."""
+        so two pulls never get the same want. *claim_hash* (the hash of the
+        claiming pull's secret) replaces any earlier claim's."""
 
         def _run(conn: Any) -> GfsSpaceMediaMemberWant | None:
             row = conn.execute(
-                "UPDATE gfs_space_media_member_wants SET claimed_until = ?"
+                "UPDATE gfs_space_media_member_wants"
+                " SET claimed_until = ?, claim_hash = ?"
                 " WHERE ticket = (SELECT ticket FROM gfs_space_media_member_wants"
                 "  WHERE scope_kind = ? AND scope_id = ? AND expires_at > ?"
                 "  AND claimed_until <= ? AND attempts < ?"
                 "  ORDER BY created_at, ticket LIMIT 1)"
                 f" RETURNING {_MEMBER_WANT_COLS}",
-                (now + hold_s, scope_kind, scope_id, now, now, max_attempts),
+                (
+                    now + hold_s,
+                    claim_hash,
+                    scope_kind,
+                    scope_id,
+                    now,
+                    now,
+                    max_attempts,
+                ),
             ).fetchone()
             return _member_want(row) if row is not None else None
 
@@ -2535,17 +2550,26 @@ class SqliteGfsSpaceMediaMemberWantRepo:
         more)."""
         await self._db.enqueue(
             "UPDATE gfs_space_media_member_wants"
-            " SET claimed_until = 0, attempts = attempts + 1 WHERE ticket = ?",
+            " SET claimed_until = 0, claim_hash = '', attempts = attempts + 1"
+            " WHERE ticket = ?",
             (ticket,),
         )
 
-    async def claimed(self, ticket: str, *, now: int) -> bool:
-        """Whether a member holds a live claim on *ticket*."""
+    async def claimed(self, ticket: str, *, now: int, claim_hash: str) -> bool:
+        """Whether the claim whose secret hashes to *claim_hash* is the live
+        claim on *ticket*."""
+        if not claim_hash:
+            return False
         row = await self._db.fetchone(
-            "SELECT claimed_until FROM gfs_space_media_member_wants WHERE ticket = ?",
+            "SELECT claimed_until, claim_hash FROM gfs_space_media_member_wants"
+            " WHERE ticket = ?",
             (ticket,),
         )
-        return row is not None and int(row["claimed_until"]) > now
+        return (
+            row is not None
+            and int(row["claimed_until"]) > now
+            and hmac.compare_digest(str(row["claim_hash"]), claim_hash)
+        )
 
     async def remove(self, ticket: str) -> None:
         await self._db.enqueue(

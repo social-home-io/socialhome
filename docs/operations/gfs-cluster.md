@@ -174,6 +174,22 @@ with an env override `GFS_SPACE_MEDIA_<KEY>` (upper case):
 | `scope_max_streams` | `4` | Holder sessions per space or channel per node. |
 | `scope_stream_bytes_per_hour` | `536870912` (512 MiB) | Bytes one space or channel may stream an hour, cluster-wide; one reader network prefix may use at most 1/8 of it (64 MiB by default). |
 | `prefix_wanted_per_hour` | `240` | Holder requests one reader network prefix (/48, IPv4 /24) may trigger an hour, cluster-wide. |
+| `member_fallback` | `true` | For a listed space whose owner household is offline, silent for 5 s or busy, offer the want to its members, who pull it anonymously (writer group key). `false`: owner only, and `/gfs/info` drops `member_pull`. |
+| `member_pull_hold_seconds` | `25` | How long one member pull is held open (5–55). |
+| `member_pullers_per_scope` | `2` | Member pulls one space may hold open per node (1–16). |
+| `member_pullers_max` | `256` | Member pulls held open per node in all (1–4096). |
+
+**Member fallback across nodes.** A member's pull
+(`POST /gfs/media/member-pull`) lands on any node; the want lives in
+`gfs.db` (`gfs_space_media_member_wants`, GFS migration 0027) and is claimed
+with one conditional update, so exactly one member serves it whichever node
+took the pull. A node wakes its held pulls at once for a want it posted and,
+for another node's, within about a second (one indexed query a second while
+anyone pulls on that node). The member's serve / decline goes to
+`/gfs/media/serve/<ticket>` like the owner's, so **no new HAProxy rule is
+needed**: the existing ticket rule routes it to the node holding the
+session, and the pull itself is round-robin. Held pulls are idle sockets:
+at most `member_pullers_max` per node.
 
 Memory: at most `max_streams` × 8 MiB (128 MiB by default) per node for
 sessions in flight — a session a slow reader is still being written from
@@ -185,8 +201,8 @@ requests nobody could serve ("Not found"), or says the feature is off.
 ## Rate limits across nodes
 
 The anonymous per-IP limits on the public pages, the highlight offer /
-relay entry points, `/gfs/highlights/ice-servers` and the space media
-`wanted` requests (60 / min) count in each node's
+relay entry points, `/gfs/highlights/ice-servers`, the space media
+`wanted` requests (60 / min) and the member pulls (12 / min) count in each node's
 memory, so each node allows its share — the limit divided by the live
 nodes, rounded up (`public.node_share`). Behind round-robin, a client gets
 about one budget across the cluster. When a node goes away its peers mark

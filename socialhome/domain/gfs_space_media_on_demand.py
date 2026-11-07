@@ -114,6 +114,12 @@ MEMBER_WRITER_EPOCH_HEADER: str = "X-SH-Writer-Epoch"
 MEMBER_WRITER_SIG_HEADER: str = "X-SH-Writer-Sig"
 MEMBER_WRITER_SIG_SUITE_HEADER: str = "X-SH-Writer-Sig-Suite"
 
+#: The random per-claim secret a pull hands the member that claimed a want
+#: (:attr:`MemberWant.claim`), returned on its serve / decline — so only the
+#: puller that claimed a want can feed it, without naming who that is (the
+#: GFS keeps only its hash with the want).
+MEMBER_CLAIM_HEADER: str = "X-SH-Member-Claim"
+
 _MEMBER_PULL_KEYS: frozenset[str] = frozenset(
     {
         "scope",
@@ -235,14 +241,22 @@ class MediaRequestFrame:
 
 
 def member_serve_signing_bytes(
-    ticket: str, op: str, scope: str, scope_id: str, epoch: int, ts: int
+    ticket: str,
+    op: str,
+    scope: str,
+    scope_id: str,
+    epoch: int,
+    ts: int,
+    claim: str,
 ) -> bytes:
     """What a member signs with the writer group key of *epoch* to serve or
-    decline *ticket* — the operation, the scope and the epoch are bound, so
-    a serve is never a decline, nor valid for another space or epoch."""
+    decline *ticket* under its *claim* — the operation, the scope, the epoch
+    and the claim are bound, so a serve is never a decline, nor valid for
+    another space, epoch or claim."""
     return MEMBER_SERVE_PREFIX + canonical_bytes(
         {
             "media_ticket": ticket,
+            "claim": claim,
             "op": op,
             "scope": scope,
             "scope_id": scope_id,
@@ -354,10 +368,13 @@ class MemberWant:
     blob_id: str
     mode: str
     hints: tuple[SpaceMediaHint, ...]
+    #: The per-claim secret (32 hex) the serve / decline must carry.
+    claim: str
 
     def to_wire(self) -> dict[str, object]:
         return {
             "ticket": self.ticket,
+            "claim": self.claim,
             "blob_id": self.blob_id,
             "mode": self.mode,
             "hints": [h.to_wire() for h in self.hints],
@@ -376,6 +393,9 @@ class MemberWant:
         mode = raw.get("mode")
         if mode not in MODES:
             raise InvalidOnDemandWire("bad mode")
+        claim = raw.get("claim")
+        if not valid_claim(claim):
+            raise InvalidOnDemandWire("bad claim")
         hints = raw.get("hints")
         if not isinstance(hints, list) or not 1 <= len(hints) <= MAX_MEMBER_WANT_HINTS:
             raise InvalidOnDemandWire("bad hints")
@@ -384,8 +404,17 @@ class MemberWant:
         except ValueError as exc:
             raise InvalidOnDemandWire(f"bad hint: {exc}") from exc
         return cls(
-            ticket=str(ticket), blob_id=str(blob_id), mode=str(mode), hints=parsed
+            ticket=str(ticket),
+            blob_id=str(blob_id),
+            mode=str(mode),
+            hints=parsed,
+            claim=str(claim),
         )
+
+
+def valid_claim(value: object) -> bool:
+    """Whether *value* is a member claim secret's shape (32 hex)."""
+    return isinstance(value, str) and _NONCE_RE.fullmatch(value) is not None
 
 
 __all__ = [
@@ -396,6 +425,7 @@ __all__ = [
     "MAX_MEMBER_PULL_BODY_BYTES",
     "MAX_MEMBER_WANT_HINTS",
     "MAX_WANTED_BODY_BYTES",
+    "MEMBER_CLAIM_HEADER",
     "MEMBER_PULL_CAPABILITY_KEY",
     "MEMBER_PULL_PREFIX",
     "MEMBER_PULL_ROUTE",
@@ -418,5 +448,6 @@ __all__ = [
     "WantedRequest",
     "member_serve_signing_bytes",
     "serve_signing_body",
+    "valid_claim",
     "valid_ticket",
 ]

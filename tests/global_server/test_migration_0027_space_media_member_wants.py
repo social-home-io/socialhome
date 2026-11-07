@@ -52,6 +52,8 @@ def test_table_shape_names_no_puller(conn):
         "claimed_until",
         "attempts",
         "created_at",
+        # The hash of a claim's random secret — names no one.
+        "claim_hash",
     }
     # By design: nothing that could name the member that pulls or serves.
     assert not cols & {"instance_id", "public_key", "client", "ip", "puller"}

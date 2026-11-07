@@ -1333,8 +1333,9 @@ from __future__ import annotations
 #:   sealed for space key holders, :mod:`socialhome.space_media_hint`); the
 #:   GFS asks ONE holder household over its socket (``space_media_request``,
 #:   only a socket that listed ``space_media_serve`` in its hello): for a
-#:   listed space its OWNER household only (member fallback is planned as a
-#:   follow-up), for a private space's channel a seated household — to send
+#:   listed space its OWNER household (then, offline / slow / busy, an
+#:   anonymous member that pulled the want — the GFS's signed
+#:   ``on_demand.member_pull``, no bump of its own), for a private space's channel a seated household — to send
 #:   the same deterministic
 #:   ciphertext to ``PUT /gfs/media/serve/{ticket}``. The GFS pipes it to
 #:   every waiting reader without storing it, or — fresh or repeatedly asked

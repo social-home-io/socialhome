@@ -3725,7 +3725,10 @@ household ignores the entry. A server that answers missed blobs on request
 `wait_s` is how long a `wanted` request may wait (`[space_media]
 stream_wait_seconds`, 25 s); absent while `on_demand = false`. A household
 asks only a server whose signed entry carries it (a `wait_s` outside
-1–60 reads as absent).
+1–60 reads as absent). A server with the member fallback on adds
+`member_pull: {hold_s}` inside `on_demand` (`[space_media]
+member_pull_hold_seconds`, 25 s; a `hold_s` outside 1–60 reads as absent):
+members of a listed space pull wants there anonymously (below).
 
 **Cost.** One upload per file per GFS (one household encrypts once — not one
 per reader, not one per member). Storage is bounded by `max_bytes`, the TTL
@@ -3799,7 +3802,9 @@ household side, both flow diagrams and the cost are in
 |---|---|---|
 | `POST` | `/gfs/media/{blob_id}/wanted` | Anonymous (the reader's cookie-less session). Body ≤ 4 KiB: `{scope, scope_id, hint}` — the scope the reader knows the blob under and a locator sealed for space key holders (`socialhome/space_media_hint.py`: suite `smh1-aesgcm-256`, a key derived from the epoch's space media key, random nonce, AAD binding suite, scope, scope id, blob and epoch; it also seals when the reader sealed it, and a holder refuses a hint older than 600 s; an unknown suite is refused). The scope never rides in the URL. Every answer is `no-store`: `200` the blob (from the cache, or piped from a holder — `Content-Length` is the blob's; the connection is cut short if the bytes don't end at the asked address), `404` a clean miss (no holder, nobody answered within the wait, a repeat right after a failed session, a scope not listed or not in use, `on_demand` off), `422 bad_request`, `429 rate_limited` (the prefix budget, `Retry-After: 600`; the per-IP limiter, `Retry-After: 60`), `503 busy` (`Retry-After: 5`). |
 | `PUT` | `/gfs/media/serve/{ticket}` | The holder household the GFS asked sends the blob as the raw body. Signed by its household key: `X-SH-Instance`, `X-SH-Timestamp` (±300 s), `X-SH-Signature` over canonical `{instance_id, media_ticket, op, ts}` with `op: "serve"` (the relay-stream scheme, its own field names; `op` keeps a serve signature from being replayed as a decline, or back). `Content-Length` must be a padded bucket (`422 bad_size`); the body must make progress (64 KiB per 5 s, else `408 body_timeout`) and arrive whole within 120 s. With a `cache` ticket and the normal upload authorization (`X-SH-Space-Media-Auth`, as on `PUT /gfs/media/{blob_id}`) the blob is also stored, under the cache's usual caps. `200 {stored}`; `401` bad signature or stale `ts`; `403` not the household asked; `404 unknown_ticket` (or another node's ticket); `409 already_streaming`; `422 blob_id_mismatch` (not at the asked address — nothing released, nothing stored); `429 scope_stream_quota`. |
-| `POST` | `/gfs/media/serve/{ticket}/decline` | The asked holder can't serve it. Same headers (signed with `op: "decline"`) and refusals; body `{"reason": "bad_hint" \| "not_held"}` (anything else reads as `not_held`); `{declined: true}`. `bad_hint` — the hint did not open, was stale, or named no file at this address: the GFS asks the same holder again with the next waiting reader's hint. `not_held` — no such file, not a household that may be asked, its budget: the GFS moves to the next holder. |
+| `POST` | `/gfs/media/serve/{ticket}/decline` | The asked holder can't serve it. Same headers (signed with `op: "decline"`) and refusals; body `{"reason": "bad_hint" \| "not_held" \| "busy"}` (anything else reads as `not_held`); `{declined: true}`. `bad_hint` — the hint did not open, was stale, or named no file at this address: the GFS asks the same holder again with the next waiting reader's hint. `not_held` — no such file, not a household that may be asked: the GFS moves to the next holder (a listed space's owner: final). `busy` — over its hourly budget: the next holder, or for a listed space the member fallback. |
+| `POST` | `/gfs/media/member-pull` | The member fallback (listed spaces; `404` while off). Anonymous, cookie-less. Body ≤ 2 KiB `{scope: "space", scope_id, epoch, gfs_instance_id, gfs_key?, ts, nonce, sig, sig_suite}`, signed by the space's writer GROUP key of `epoch` over `space-media-member-pull:v1:` + canonical body without `sig` / `sig_suite` (the key pinned here, epoch open; ts ±300 s; each signed body once). `200 {wants: [{ticket, blob_id, mode, hints, claim}]}` — at most one, claimed for this pull (`claim`: a random secret, only its hash kept); `204` nothing within `hold_s`; `403` one uniform refusal (same verification cost whatever failed); `422 bad_request`; `429 rate_limited` (12 / min per IP, cluster-wide); `503 busy` (no slot: 2 per space and 256 per node held, 4 per network prefix; `Retry-After: 600`). |
+| `PUT` / `POST` | `/gfs/media/serve/{ticket}` / `…/decline` (member) | A member's serve / decline of a want it claimed: the same routes WITHOUT `X-SH-Instance`. `X-SH-Writer-Epoch`, `X-SH-Timestamp` (±300 s), `X-SH-Writer-Sig`, `X-SH-Writer-Sig-Suite`, `X-SH-Member-Claim`: the writer group key signs `space-media-member-serve:v1:` + canonical `{media_ticket, claim, op, scope, scope_id, epoch, ts}`. `403` unless the session is with the members and the claim is the want's live one; `422 missing_auth_headers`. A re-upload is stored only under an `authority` or `writer_key` upload authorization (a `writer_cert` would identify the household: streamed only). A member decline offers the want again (≤ 3). |
 
 **The frame.** `{type: "space_media_request", ticket, scope, scope_id,
 blob_id, mode, hint}` — `mode` is `stream` or `cache`; the hint is the
@@ -3823,17 +3828,42 @@ household this GFS already knows. A private space's channel: its seated
 member households (key holders the GFS already knows as seats), those
 connected to this node first. At most 3, one after another; each gets 10 s
 to start sending (a decline moves on at once), all within
-`stream_wait_seconds`. Other members of a listed space are never asked: the
-GFS does not know them, and asking would tell it who they are.
+`stream_wait_seconds`. Other members of a listed space are never asked by
+name: the GFS does not know them, and asking would tell it who they are.
+
+**Member fallback (listed spaces).** With the space's writer group key
+pinned for an open epoch, the owner gets 5 s; connected nowhere, silent or
+`busy`, the want goes to the shared table `gfs_space_media_member_wants`
+(migration 0027 — no puller column) and the space's members, long-polling
+`/gfs/media/member-pull` anonymously, claim it atomically (one member per
+want, cluster-wide; each node wakes its pulls at once for a local want and
+within ~1 s for another node's via one ticker query). An owner `not_held` is
+final. The flow, privacy analysis and cost are in
+[`media.md`](./media.md#member-fallback-listed-spaces).
+
+```mermaid
+sequenceDiagram
+    participant R as Reader
+    participant G as GFS
+    participant O as Owner household
+    participant M as Member household
+    R->>G: POST /gfs/media/{blob}/wanted
+    G-xO: space_media_request (offline / 5 s / busy)
+    G->>G: post the want (shared table)
+    M->>G: POST /gfs/media/member-pull (writer-key sig)
+    G-->>M: 200 want + claim secret
+    M->>G: PUT /gfs/media/serve/{ticket} (writer-key sig + claim)
+    G-->>R: the blob (verified at its address)
+```
 
 **Who answers.** The holder side mirrors that: a household answers only for
 a space it **owns** AND listed on the asking GFS, or a private channel it
 holds a seat for on that GFS. Every other request (a space it doesn't own or
 didn't list there, a private space) is declined `not_held` on the same path,
 before any key or crypto is touched, so a GFS can't probe who is a member or
-which spaces a household owns. (Member fallback for listed spaces is
-planned as a follow-up.) Serves and declines ride the household's
-AUTHENTICATED session, never the cookie-less one its anonymous requests
+which spaces a household owns. A member answers a want only after it
+pulled it anonymously (member fallback above), never by name. Owner serves
+and declines ride the household's AUTHENTICATED session, never the cookie-less one its anonymous requests
 use; its budget is charged before the bytes go. A cached answer is written
 under a reader deadline too (10 s + size at 64 KiB/s), and readers waiting
 for another node's re-upload share one poll of the shared cache, which ends

@@ -968,6 +968,7 @@ python .claude/skills/federation-demo/harness.py gfs-invite-link-content
 python .claude/skills/federation-demo/harness.py gfs-media-on-demand
 python .claude/skills/federation-demo/harness.py gfs-member-publish
 python .claude/skills/federation-demo/harness.py gfs-member-publish-strict
+python .claude/skills/federation-demo/harness.py gfs-media-member-fallback
 python .claude/skills/federation-demo/harness.py gfs-private-channel
 python .claude/skills/federation-demo/harness.py gfs-b-up
 python .claude/skills/federation-demo/harness.py gfs-multi-listing
@@ -1825,6 +1826,21 @@ relayed posts still present on e, the revoked ``/join`` page still a
 token-free 404, and e's link-admin seat still without a signing seed.
 ``verify``'s capability block additionally asserts **v_29** round-trips
 on the one wire that cannot fall back to a peer row — see below.
+
+### ``gfs-media-member-fallback`` — the host is offline, a member serves the picture
+
+Runs after ``gfs-member-publish-strict`` (e holds the writer group key). a
+posts a fresh photo that e (link-joined member) and d (follower) both get
+through the GFS cache; e is respawned so its member puller picks its pull
+loops now (30–120 s after boot); a is stopped; the blob is expired as old
+content and d views it: the GFS finds the owner connected nowhere, posts the
+want to the shared table, e's anonymous pull (writer-key signed, no
+household id) claims it, e re-seals its own ``sg-`` copy and serves it. d
+gets the photo byte-identical; e logs ``streamed on demand as a member``;
+the GFS counts one member want and one member serve, keeps no want and logs
+nothing naming e. a is respawned at the end. ``gfs-cluster`` step 3k proves
+the cross-node claim: two pulls on nodes 0 and 2 race for a want posted on
+node 1, exactly one claims it and its serve via the balancer reaches node 1.
 
 ### ``gfs-media-on-demand`` — a picture that left the GFS cache comes back on a view (v_83)
 

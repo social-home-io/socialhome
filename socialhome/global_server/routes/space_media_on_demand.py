@@ -33,9 +33,10 @@
   (``Retry-After``). A member then serves / declines the want's ticket on
   the two routes above WITHOUT ``X-SH-Instance``: signed by the writer group
   key in ``X-SH-Writer-Epoch`` / ``X-SH-Timestamp`` / ``X-SH-Writer-Sig`` /
-  ``X-SH-Writer-Sig-Suite`` over :func:`~socialhome.domain
+  ``X-SH-Writer-Sig-Suite`` + the want's claim secret in
+  ``X-SH-Member-Claim`` over :func:`~socialhome.domain
   .gfs_space_media_on_demand.member_serve_signing_bytes`; refused with one
-  uniform ``403`` unless it holds the want's live claim. Its re-upload is
+  uniform ``403`` unless the claim secret is the want's live claim's. Its re-upload is
   kept only under an anonymous upload authorization (space authority or
   writer key), never an identified writer cert.
 """
@@ -61,6 +62,7 @@ from ...domain.gfs_space_media_on_demand import (
     DECLINE_NOT_HELD,
     MAX_MEMBER_PULL_BODY_BYTES,
     MAX_WANTED_BODY_BYTES,
+    MEMBER_CLAIM_HEADER,
     MEMBER_PULL_ROUTE,
     MEMBER_WRITER_EPOCH_HEADER,
     MEMBER_WRITER_SIG_HEADER,
@@ -414,13 +416,14 @@ async def _serving_session(
     ts = headers.get(SERVE_TS_HEADER, "")
     sig = headers.get(MEMBER_WRITER_SIG_HEADER, "")
     suite = headers.get(MEMBER_WRITER_SIG_SUITE_HEADER, "")
-    if not epoch or not ts or not sig or not suite:
+    claim = headers.get(MEMBER_CLAIM_HEADER, "")
+    if not epoch or not ts or not sig or not suite or not claim:
         return web.json_response({"error": "missing_auth_headers"}, status=422)
     session = svc.session(ticket)
     if session is None:
         return web.json_response({"error": "unknown_ticket"}, status=404)
     if not await svc.authorize_member(
-        session, op=op, epoch=epoch, ts=ts, sig=sig, suite=suite
+        session, op=op, epoch=epoch, ts=ts, sig=sig, suite=suite, claim=claim
     ):
         return web.json_response({"error": "forbidden"}, status=403)
     return session

@@ -33,7 +33,8 @@
 --    any left by a crashed node pruned by the maintenance sweep once
 --    expired) and, by design, hold NO puller: no instance id, key or
 --    address — a ticket, the blob, the scope, the readers' sealed hints
---    verbatim, timestamps and an attempt count.
+--    verbatim, timestamps, an attempt count and the hash of the current
+--    claim's random secret (not linkable to any household).
 CREATE TABLE IF NOT EXISTS gfs_space_media_member_wants (
     -- The session's ticket (names the node that holds the session).
     ticket         TEXT PRIMARY KEY,
@@ -48,6 +49,9 @@ CREATE TABLE IF NOT EXISTS gfs_space_media_member_wants (
     expires_at     INTEGER NOT NULL,
     -- Until when one member holds the want (one serve per blob).
     claimed_until  INTEGER NOT NULL DEFAULT 0,
+    -- sha256 (hex) of the random secret the claiming pull got: only that
+    -- puller can serve or decline — it names no one ('' = not claimed).
+    claim_hash     TEXT NOT NULL DEFAULT '',
     -- Members that declined it so far (bounded by the session).
     attempts       INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
     created_at     INTEGER NOT NULL

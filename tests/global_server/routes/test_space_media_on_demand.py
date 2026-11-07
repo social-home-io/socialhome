@@ -814,13 +814,19 @@ async def _pull(tc, body: dict | None = None, *, net: int = MEMBER_NET):
 
 
 def _member_headers(
-    ticket: str, op: str = "serve", *, seed: bytes = WRITER_SEED, epoch: int = EPOCH
+    ticket: str,
+    op: str = "serve",
+    *,
+    claim: str = "0" * 32,
+    seed: bytes = WRITER_SEED,
+    epoch: int = EPOCH,
 ) -> dict:
     ts = int(time.time())
     sig = sign_with_writer_key(
-        seed, member_serve_signing_bytes(ticket, op, "space", SPACE, epoch, ts)
+        seed, member_serve_signing_bytes(ticket, op, "space", SPACE, epoch, ts, claim)
     )
     return {
+        "X-SH-Member-Claim": claim,
         "X-SH-Writer-Epoch": str(epoch),
         "X-SH-Timestamp": str(ts),
         "X-SH-Writer-Sig": sig,
@@ -904,11 +910,12 @@ async def test_owner_offline_a_member_pulls_serves_and_the_reader_gets_it(gfs):
     assert want["blob_id"] == bid and want["mode"] == "stream"
     assert len(want["hints"]) == 1
     # Nothing in it names a reader, the owner or a household.
-    assert set(want) == {"ticket", "blob_id", "mode", "hints"}
+    # The claim is a random secret of this pull's claim — no identity.
+    assert set(want) == {"ticket", "blob_id", "mode", "hints", "claim"}
     served = await gfs.put(
         f"/gfs/media/serve/{want['ticket']}",
         data=data,
-        headers=_member_headers(want["ticket"]),
+        headers=_member_headers(want["ticket"], claim=want["claim"]),
     )
     assert served.status == 200 and await served.json() == {"stored": False}
     got = await reader
@@ -932,7 +939,7 @@ async def test_nothing_about_the_member_is_stored(gfs):
     reader = asyncio.create_task(_want(gfs, bid))
     _, body = await _pull(gfs)
     ticket = body["wants"][0]["ticket"]
-    headers = _member_headers(ticket)
+    headers = _member_headers(ticket, claim=body["wants"][0]["claim"])
     headers[SPACE_MEDIA_AUTH_HEADER] = _writer_key_auth(data, bid)
     served = await gfs.put(f"/gfs/media/serve/{ticket}", data=data, headers=headers)
     assert await served.json() == {"stored": True}
@@ -1006,7 +1013,9 @@ async def test_owner_busy_hands_over_to_the_members(gfs):
     ticket = body["wants"][0]["ticket"]
     assert ticket == frame["ticket"]
     ok = await gfs.put(
-        f"/gfs/media/serve/{ticket}", data=data, headers=_member_headers(ticket)
+        f"/gfs/media/serve/{ticket}",
+        data=data,
+        headers=_member_headers(ticket, claim=body["wants"][0]["claim"]),
     )
     assert ok.status == 200
     assert await (await reader).read() == data
@@ -1100,8 +1109,17 @@ async def test_an_expired_claim_is_offered_again(gfs, monkeypatch):
     await asyncio.sleep(1.1)
     _, second = await _pull(gfs, net=MEMBER_NET + 1)
     assert second["wants"][0]["ticket"] == ticket
+    # The first puller's claim is over: its secret no longer feeds it.
+    late = await gfs.put(
+        f"/gfs/media/serve/{ticket}",
+        data=data,
+        headers=_member_headers(ticket, claim=first["wants"][0]["claim"]),
+    )
+    assert late.status == 403
     ok = await gfs.put(
-        f"/gfs/media/serve/{ticket}", data=data, headers=_member_headers(ticket)
+        f"/gfs/media/serve/{ticket}",
+        data=data,
+        headers=_member_headers(ticket, claim=second["wants"][0]["claim"]),
     )
     assert ok.status == 200
     assert await (await reader).read() == data
@@ -1118,7 +1136,7 @@ async def test_at_most_three_members_are_asked(gfs):
         declined = await gfs.post(
             f"/gfs/media/serve/{ticket}/decline",
             json={"reason": "not_held"},
-            headers=_member_headers(ticket, "decline"),
+            headers=_member_headers(ticket, "decline", claim=body["wants"][0]["claim"]),
         )
         assert declined.status == 200
     assert (await reader).status == 404
@@ -1202,15 +1220,28 @@ async def test_a_member_serve_with_a_bad_signature_is_refused(gfs):
     reader = asyncio.create_task(_want(gfs, bid))
     _, body = await _pull(gfs)
     ticket = body["wants"][0]["ticket"]
+    claim = body["wants"][0]["claim"]
+    wrong = _member_headers(ticket, claim=claim)
+    wrong["X-SH-Member-Claim"] = "f" * 32  # signed over one claim, sent another
     for headers in (
-        _member_headers(ticket, seed=os.urandom(32)),
-        _member_headers(ticket, "decline"),  # a decline's signature
-        _member_headers(ticket, epoch=EPOCH + 1),
+        _member_headers(ticket, claim=claim, seed=os.urandom(32)),
+        _member_headers(ticket, "decline", claim=claim),  # a decline's signature
+        _member_headers(ticket, claim=claim, epoch=EPOCH + 1),
+        # Another writer-key holder who learnt the ticket, not the claim.
+        _member_headers(ticket, claim="1" * 32),
+        wrong,
+        {**_member_headers(ticket, claim=claim), "X-SH-Member-Claim": "nope"},
     ):
         resp = await gfs.put(f"/gfs/media/serve/{ticket}", data=data, headers=headers)
         assert resp.status == 403
+    no_claim = _member_headers(ticket, claim=claim)
+    del no_claim["X-SH-Member-Claim"]
+    resp = await gfs.put(f"/gfs/media/serve/{ticket}", data=data, headers=no_claim)
+    assert resp.status == 422
     ok = await gfs.put(
-        f"/gfs/media/serve/{ticket}", data=data, headers=_member_headers(ticket)
+        f"/gfs/media/serve/{ticket}",
+        data=data,
+        headers=_member_headers(ticket, claim=claim),
     )
     assert ok.status == 200
     assert await (await reader).read() == data
@@ -1240,7 +1271,7 @@ async def test_a_member_serve_with_an_identified_auth_streams_but_is_not_stored(
     _, body = await _pull(gfs)
     want = body["wants"][0]
     assert want["mode"] == "cache"
-    headers = _member_headers(want["ticket"])
+    headers = _member_headers(want["ticket"], claim=want["claim"])
     headers[SPACE_MEDIA_AUTH_HEADER] = _writer_cert_auth(data, bid)
     resp = await gfs.put(
         f"/gfs/media/serve/{want['ticket']}", data=data, headers=headers

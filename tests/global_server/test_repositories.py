@@ -1989,14 +1989,24 @@ async def test_member_wants_claim_the_oldest_once(gfs_db):
     await repo.post(_mwant("t2", created=101))
     await repo.post(_mwant("t1", created=100))
     await repo.post(_mwant("tx", scope_id="s2"))
-    got = await repo.claim_next("space", "s1", now=150, hold_s=10, max_attempts=3)
+    got = await repo.claim_next(
+        "space", "s1", now=150, hold_s=10, max_attempts=3, claim_hash="h"
+    )
     assert got is not None and got.ticket == "t1" and got.claimed_until == 160
-    assert await repo.claimed("t1", now=150)
-    got = await repo.claim_next("space", "s1", now=150, hold_s=10, max_attempts=3)
+    assert await repo.claimed("t1", now=150, claim_hash="h")
+    # Only the claim's own secret hash counts.
+    assert not await repo.claimed("t1", now=150, claim_hash="other")
+    assert not await repo.claimed("t1", now=150, claim_hash="")
+    assert got.claim_hash == "h"
+    got = await repo.claim_next(
+        "space", "s1", now=150, hold_s=10, max_attempts=3, claim_hash="h"
+    )
     assert got is not None and got.ticket == "t2"
     # Every want of s1 is claimed: nothing more for s1 (s2 is its own).
     assert (
-        await repo.claim_next("space", "s1", now=151, hold_s=10, max_attempts=3)
+        await repo.claim_next(
+            "space", "s1", now=151, hold_s=10, max_attempts=3, claim_hash="h"
+        )
     ) is None
 
 
@@ -2005,7 +2015,9 @@ async def test_member_wants_concurrent_pulls_claim_once(gfs_db):
     await repo.post(_mwant("t1"))
     got = await asyncio.gather(
         *[
-            repo.claim_next("space", "s1", now=150, hold_s=10, max_attempts=3)
+            repo.claim_next(
+                "space", "s1", now=150, hold_s=10, max_attempts=3, claim_hash="h"
+            )
             for _ in range(8)
         ]
     )
@@ -2015,9 +2027,13 @@ async def test_member_wants_concurrent_pulls_claim_once(gfs_db):
 async def test_member_wants_an_expired_claim_is_offered_again(gfs_db):
     repo = SqliteGfsSpaceMediaMemberWantRepo(gfs_db)
     await repo.post(_mwant("t1"))
-    assert await repo.claim_next("space", "s1", now=150, hold_s=10, max_attempts=3)
-    assert not await repo.claimed("t1", now=160)
-    again = await repo.claim_next("space", "s1", now=160, hold_s=10, max_attempts=3)
+    assert await repo.claim_next(
+        "space", "s1", now=150, hold_s=10, max_attempts=3, claim_hash="h"
+    )
+    assert not await repo.claimed("t1", now=160, claim_hash="h")
+    again = await repo.claim_next(
+        "space", "s1", now=160, hold_s=10, max_attempts=3, claim_hash="h"
+    )
     assert again is not None and again.ticket == "t1"
 
 
@@ -2025,13 +2041,17 @@ async def test_member_wants_release_counts_an_attempt(gfs_db):
     repo = SqliteGfsSpaceMediaMemberWantRepo(gfs_db)
     await repo.post(_mwant("t1"))
     for n in range(2):
-        got = await repo.claim_next("space", "s1", now=150, hold_s=10, max_attempts=2)
+        got = await repo.claim_next(
+            "space", "s1", now=150, hold_s=10, max_attempts=2, claim_hash="h"
+        )
         assert got is not None and got.attempts == n
         await repo.release("t1")
-        assert not await repo.claimed("t1", now=150)
+        assert not await repo.claimed("t1", now=150, claim_hash="h")
     # Two declines: never offered again.
     assert (
-        await repo.claim_next("space", "s1", now=150, hold_s=10, max_attempts=2)
+        await repo.claim_next(
+            "space", "s1", now=150, hold_s=10, max_attempts=2, claim_hash="h"
+        )
     ) is None
 
 
@@ -2042,14 +2062,18 @@ async def test_member_wants_expire_open_scopes_and_prune(gfs_db):
     assert await repo.open_scopes(now=150) == {("space", "s1"), ("space", "s2")}
     assert await repo.open_scopes(now=250) == {("space", "s2")}
     # A claimed want is not open until its claim runs out.
-    await repo.claim_next("space", "s2", now=250, hold_s=10, max_attempts=3)
+    await repo.claim_next(
+        "space", "s2", now=250, hold_s=10, max_attempts=3, claim_hash="h"
+    )
     assert await repo.open_scopes(now=255) == set()
     assert await repo.open_scopes(now=260) == {("space", "s2")}
     # Past its session: never offered, then pruned.
     assert (
-        await repo.claim_next("space", "s1", now=250, hold_s=10, max_attempts=3)
+        await repo.claim_next(
+            "space", "s1", now=250, hold_s=10, max_attempts=3, claim_hash="h"
+        )
     ) is None
     assert await repo.prune(now=250) == 1
     await repo.remove("t2")
     assert await repo.open_scopes(now=0) == set()
-    assert not await repo.claimed("t2", now=0)
+    assert not await repo.claimed("t2", now=0, claim_hash="h")

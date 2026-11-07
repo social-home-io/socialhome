@@ -85,12 +85,19 @@ from ..domain.gfs_space_media import (
     SPACE_MEDIA_CAPABILITY,
 )
 from ..domain.gfs_space_media_on_demand import (
+    MEMBER_CLAIM_HEADER,
+    MEMBER_PULL_CAPABILITY_KEY,
+    MEMBER_PULL_ROUTE,
+    MEMBER_WRITER_EPOCH_HEADER,
+    MEMBER_WRITER_SIG_HEADER,
+    MEMBER_WRITER_SIG_SUITE_HEADER,
     ON_DEMAND_CAPABILITY_KEY,
     SERVE_INSTANCE_HEADER,
     SERVE_OP_DECLINE,
     SERVE_OP_SERVE,
     SERVE_SIG_HEADER,
     SERVE_TS_HEADER,
+    member_serve_signing_bytes,
     serve_signing_body,
 )
 from ..domain.media_constraints import (
@@ -106,6 +113,7 @@ from ..domain.space import (
 from ..domain.space_item import COMPRESSED_PAYLOAD_SUITES, PAYLOAD_SUITE_ZLIB_DICT1
 from ..domain.space_place import place_pin_of, place_pin_wire
 from ..domain.subscriber_accepts import OUR_ACCEPTS
+from ..domain.writer_key import WRITER_KEY_SUITE_ED25519
 from ..federation.keywrap_seal import KEM_SUITE_X25519
 from ..gfs_proof import (
     PROOF_CAPABILITY,
@@ -120,6 +128,7 @@ from ..outbound_fetch import OutboundFetchRefused, open_pinned_session
 from ..peer_url import InvalidPeerUrlError, validate_peer_url
 from ..repositories.gfs_connection_repo import AbstractGfsConnectionRepo
 from ..repositories.space_repo import AbstractSpaceRepo
+from ..writer_key import sign_with_writer_key
 from .gfs_http import gfs_server_address
 from .gfs_publish_retry import (
     GfsPublish,
@@ -141,14 +150,26 @@ SPACE_MEDIA_PUT_TIMEOUT_S: float = 120.0
 #: larger (or malformed) value reads as "no on-demand support".
 MAX_ON_DEMAND_WAIT_S: int = 60
 
+#: Longest member pull hold a GFS may advertise (its ``on_demand
+#: .member_pull.hold_s``); a larger (or malformed) value reads as "no member
+#: fallback".
+MAX_MEMBER_PULL_HOLD_S: int = 60
 
-def _space_media_limit(
-    caps: dict,
-) -> tuple[int, frozenset[str], int | None, int | None] | None:
-    """``(max_blob_bytes, scopes, ttl_s, on_demand_wait_s)`` of a verified
-    ``space_media`` capability entry (``ttl_s`` / ``on_demand_wait_s``
-    ``None`` when absent or malformed), or ``None`` when the entry is
-    absent / malformed."""
+#: ``(max_blob_bytes, scopes, ttl_s, on_demand_wait_s, member_pull_hold_s)``.
+_SpaceMediaCap = tuple[int, frozenset[str], int | None, int | None, int | None]
+
+
+def _bounded_int(value: object, hi: int) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= hi:
+        return value
+    return None
+
+
+def _space_media_limit(caps: dict) -> _SpaceMediaCap | None:
+    """``(max_blob_bytes, scopes, ttl_s, on_demand_wait_s,
+    member_pull_hold_s)`` of a verified ``space_media`` capability entry
+    (the last three ``None`` when absent or malformed; the member pull only
+    with on demand), or ``None`` when the entry is absent / malformed."""
     entry = caps.get(SPACE_MEDIA_CAPABILITY)
     if not isinstance(entry, dict):
         return None
@@ -163,15 +184,19 @@ def _space_media_limit(
         ttl if isinstance(ttl, int) and not isinstance(ttl, bool) and ttl > 0 else None
     )
     od = entry.get(ON_DEMAND_CAPABILITY_KEY)
-    wait = od.get("wait_s") if isinstance(od, dict) else None
-    wait_s = (
-        wait
-        if isinstance(wait, int)
-        and not isinstance(wait, bool)
-        and 0 < wait <= MAX_ON_DEMAND_WAIT_S
+    wait_s = _bounded_int(
+        od.get("wait_s") if isinstance(od, dict) else None, MAX_ON_DEMAND_WAIT_S
+    )
+    member = od.get(MEMBER_PULL_CAPABILITY_KEY) if isinstance(od, dict) else None
+    hold_s = (
+        _bounded_int(
+            member.get("hold_s") if isinstance(member, dict) else None,
+            MAX_MEMBER_PULL_HOLD_S,
+        )
+        if wait_s is not None
         else None
     )
-    return limit, frozenset(scopes) & MEDIA_SCOPES, ttl_s, wait_s
+    return limit, frozenset(scopes) & MEDIA_SCOPES, ttl_s, wait_s, hold_s
 
 
 #: Characters of a *remote-authored* error body that may be interpolated
@@ -558,9 +583,7 @@ class GfsConnectionService:
         # the server proved it takes, by connection. Uploads go only to a
         # server that proved it; absent = not proven (re-probed, never a
         # sticky no).
-        self._space_media: dict[
-            str, tuple[int, frozenset[str], int | None, int | None]
-        ] = {}
+        self._space_media: dict[str, _SpaceMediaCap] = {}
         # …and ``moment_reactions`` (v_68): the GFS takes a follower's sealed
         # reaction and pushes it to the author's household only.
         self._moment_reactions: dict[str, bool] = {}
@@ -3331,6 +3354,131 @@ class GfsConnectionService:
             await self.space_media_max_blob(conn)  # one probe on a cold miss
         cached = self._space_media.get(conn.id)
         return cached[3] if cached is not None else None
+
+    async def space_media_member_pull_hold(self, conn: GfsConnection) -> int | None:
+        """How long *conn*'s GFS holds a member pull open (its signed
+        ``space_media.on_demand.member_pull.hold_s``), or ``None`` when it
+        proved no member fallback — then this household never pulls there."""
+        if conn.id not in self._space_media:
+            await self.space_media_max_blob(conn)  # one probe on a cold miss
+        cached = self._space_media.get(conn.id)
+        return cached[4] if cached is not None else None
+
+    async def pull_space_media_wants(
+        self, conn: GfsConnection, body: dict, *, timeout_s: float
+    ) -> tuple[int, list]:
+        """``POST /gfs/media/member-pull`` — a member's anonymous pull for a
+        want of a listed space (*body*: the writer-key-signed
+        :class:`~socialhome.domain.gfs_space_media_on_demand
+        .MemberPullRequest` wire). Over the cookie-less session, nothing
+        names this household. ``(status, raw wants)`` — ``0`` on a refused
+        target or a transport error; the wants (unparsed, the caller
+        validates) only on a 200."""
+        if not conn.inbox_url:
+            return 0, []
+        url = f"{conn.inbox_url.rstrip('/')}{MEMBER_PULL_ROUTE}"
+        try:
+            async with self.anon_session(conn) as client:
+                if client is None:
+                    return 0, []
+                async with client.post(
+                    url,
+                    json=body,
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=timeout_s),
+                ) as resp:
+                    status = int(resp.status)
+                    if status != 200:
+                        return status, []
+                    data = await resp.json()
+        except OutboundFetchRefused as exc:
+            log.warning(
+                "space media member pull to %s refused: %s", conn.inbox_url, exc
+            )
+            return 0, []
+        except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+            log.info("space media member pull from %s failed: %s", conn.inbox_url, exc)
+            return 0, []
+        wants = data.get("wants") if isinstance(data, dict) else None
+        return 200, wants if isinstance(wants, list) else []
+
+    async def serve_space_media_as_member(
+        self,
+        conn: GfsConnection,
+        ticket: str,
+        blob: bytes | None,
+        *,
+        space_id: str,
+        epoch: int,
+        writer_seed: bytes,
+        claim: str,
+        upload_auth: str | None = None,
+        decline_reason: str = "not_held",
+    ) -> int | None:
+        """Serve (``PUT /gfs/media/serve/{ticket}``) or decline (*blob*
+        ``None``) a want this household PULLED as a member of listed space
+        *space_id* — anonymously: signed by the space's writer group key of
+        *epoch* over the ticket, the operation, the scope and the pull's
+        *claim* secret, never by this household's key and never with
+        ``X-SH-Instance``; over the cookie-less session like the pull. The
+        same return contract as :meth:`serve_space_media`."""
+        if not conn.inbox_url:
+            return None
+        base = f"{conn.inbox_url.rstrip('/')}/gfs/media/serve/{ticket}"
+        ts = int(time.time())
+        op = SERVE_OP_DECLINE if blob is None else SERVE_OP_SERVE
+        sig = sign_with_writer_key(
+            writer_seed,
+            member_serve_signing_bytes(
+                ticket, op, SCOPE_SPACE, space_id, epoch, ts, claim
+            ),
+        )
+        headers = {
+            MEMBER_WRITER_EPOCH_HEADER: str(epoch),
+            SERVE_TS_HEADER: str(ts),
+            MEMBER_WRITER_SIG_HEADER: sig,
+            MEMBER_WRITER_SIG_SUITE_HEADER: WRITER_KEY_SUITE_ED25519,
+            MEMBER_CLAIM_HEADER: claim,
+        }
+        try:
+            async with self.anon_session(conn) as client:
+                if client is None:
+                    return None
+                if blob is None:
+                    async with client.post(
+                        f"{base}/decline",
+                        json={"reason": decline_reason},
+                        headers=headers,
+                        allow_redirects=False,
+                        timeout=aiohttp.ClientTimeout(total=15),
+                    ) as resp:
+                        return int(resp.status)
+                headers["Content-Type"] = "application/octet-stream"
+                if upload_auth:
+                    headers[SPACE_MEDIA_AUTH_HEADER] = upload_auth
+                async with client.put(
+                    base,
+                    data=blob,
+                    headers=headers,
+                    allow_redirects=False,
+                    timeout=aiohttp.ClientTimeout(total=SPACE_MEDIA_PUT_TIMEOUT_S),
+                ) as resp:
+                    return int(resp.status)
+        except OutboundFetchRefused as exc:
+            log.warning(
+                "space media member serve to %s refused: %s", conn.inbox_url, exc
+            )
+            return None
+        except aiohttp.ClientConnectorError as exc:
+            log.warning(
+                "space media member serve to %s: no connection: %s", conn.inbox_url, exc
+            )
+            return None
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            log.warning(
+                "space media member serve to %s failed: %s", conn.inbox_url, exc
+            )
+            return 0
 
     async def want_space_media(
         self,
