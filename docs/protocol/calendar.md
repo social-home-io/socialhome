@@ -432,8 +432,13 @@ its GFS media cache ([media](./media.md#space-media-via-the-gfs-cache-v_80)):
   (a WebP ≤ 2560 px); a 200-household space with a 300 KB cover moves
   ~60 MB once, nothing on later edits.
 - **Held for review** — a moderated create / edit sends its cover to the
-  reviewer households with the submission; once approved, the host's own
-  save sends it on as above.
+  reviewer households with the submission, where it takes the submitter
+  household's name (`sd-…`). Once approved, the host's own save sends it
+  on as above. That save re-checks that the submitter may name the file
+  (`services/media_ref_guard.py`): the held item counts as theirs while it
+  is pending and while it is being released, but only when no other row
+  names the file — a submission naming another space's file, a household
+  photo or an album picture is still refused.
 - **Catch-up** — a household's first full §25.6 stream also queues the
   cover of every streamed event (incremental re-syncs ship no media).
 - The receiver accepts the file only when the event it is correlated to

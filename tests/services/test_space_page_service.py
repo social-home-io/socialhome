@@ -18,9 +18,11 @@ from socialhome.domain.space import (
     SpacePermissionError,
 )
 from socialhome.infrastructure.event_bus import EventBus
+from socialhome.repositories.media_reference_repo import SqliteMediaReferenceRepo
 from socialhome.repositories.page_repo import SqlitePageRepo
 from socialhome.repositories.space_repo import SqliteSpaceRepo
 from socialhome.repositories.user_repo import SqliteUserRepo
+from socialhome.services.media_ref_guard import MediaRefGuard
 from socialhome.services.page_conflict_service import (
     NoActiveConflictError,
     PageConflictService,
@@ -290,6 +292,27 @@ async def test_moderated_member_create_queues_then_approve_keeps_author(env):
         "b",
     )
     assert [type(e) for e in env.events] == [PageCreated]
+
+
+async def test_a_reviewed_pages_cover_and_pictures_are_released(env):
+    """Regression (same gap as a reviewed calendar cover): the release
+    re-checks the page's files for the submitter after the approve has
+    claimed the item, and the held item — the only row naming them — no
+    longer counted as theirs."""
+    mod = await _moderated(env)
+    env.svc.attach_media_guard(MediaRefGuard(SqliteMediaReferenceRepo(env.db)))
+    with pytest.raises(ContentQueuedForReview) as exc:
+        await env.svc.create(
+            "sp-a",
+            actor_user_id="u-member",
+            title="T",
+            content="![p](api/media/in-page.webp)",
+            cover_image_url="api/media/page-cover.webp",
+        )
+    await mod.approve("sp-a", exc.value.item.id, actor_user_id="u-mod")
+    [page] = await env.svc.list("sp-a")
+    assert page.cover_image_url == "api/media/page-cover.webp"
+    assert "api/media/in-page.webp" in page.content
 
 
 async def test_moderated_own_edit_proceeds_others_queues(env):

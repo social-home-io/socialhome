@@ -116,6 +116,12 @@ _MEDIA_REF_RE = re.compile(r"api/media/([A-Za-z0-9._-]+)")
 # field of a JSON object); ``access`` is an SQL boolean over the row ``t``
 # and the writer ``me`` (``me.uid`` / ``me.uname``).
 
+#: The writer is one of this household's own people (a ``users`` row): a
+#: household-level row (the feed, a personal calendar, a household page or
+#: album) is open to them — never to a remote space member, whose user id
+#: reaches this check only through a reviewed item it submitted.
+_HOUSEHOLD = "me.uname IS NOT NULL"
+
 #: The writer holds a seat in the space ``{col}`` names.
 _SEAT = (
     "EXISTS (SELECT 1 FROM space_members sm WHERE sm.space_id = {col}"
@@ -131,10 +137,10 @@ _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
             " WHERE cm.conversation_id = t.conversation_id AND cm.username = me.uname)"
         ),
     ),
-    ("feed_posts", "media_url", "one", "1"),
-    ("feed_posts", "image_urls_json", "list", "1"),
-    ("feed_posts", "link_preview_json", "json:$.thumbnail_url", "1"),
-    ("post_comments", "media_url", "one", "1"),
+    ("feed_posts", "media_url", "one", _HOUSEHOLD),
+    ("feed_posts", "image_urls_json", "list", _HOUSEHOLD),
+    ("feed_posts", "link_preview_json", "json:$.thumbnail_url", _HOUSEHOLD),
+    ("post_comments", "media_url", "one", _HOUSEHOLD),
     ("space_posts", "media_url", "one", _SEAT.format(col="t.space_id")),
     ("space_posts", "image_urls_json", "list", _SEAT.format(col="t.space_id")),
     (
@@ -162,25 +168,38 @@ _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
         ),
     ),
     ("moments", "media_url", "one", "t.author_user_id = me.uid"),
-    ("calendar_events", "cover_url", "one", "1"),
+    ("calendar_events", "cover_url", "one", _HOUSEHOLD),
     ("space_calendar_events", "cover_url", "one", _SEAT.format(col="t.space_id")),
-    ("pages", "cover_image_url", "one", "1"),
+    ("pages", "cover_image_url", "one", _HOUSEHOLD),
     ("space_pages", "cover_image_url", "one", _SEAT.format(col="t.space_id")),
     (
         "page_edit_history",
         "cover_image_url",
         "one",
-        "(t.space_id IS NULL OR " + _SEAT.format(col="t.space_id") + ")",
+        f"((t.space_id IS NULL AND {_HOUSEHOLD}) OR "
+        + _SEAT.format(col="t.space_id")
+        + ")",
     ),
     ("task_attachments", "url", "one", "t.uploaded_by = me.uid"),
     ("post_drafts", "media_url", "one", "t.username = me.uname"),
+    # The submitter's own held item — pending, or ``approved``: the approve
+    # claims the item BEFORE its apply re-checks the files for the
+    # submitter. A fallback only (:data:`_HELD_SOURCE`).
     (
         "space_moderation_queue",
         "payload_json",
         "payload",
-        "t.status = 'pending' AND t.submitted_by = me.uid",
+        "t.status IN ('pending', 'approved') AND t.submitted_by = me.uid",
     ),
 )
+
+#: The :data:`_ACCESS_SOURCES` table that counts only when no other row
+#: references the file: a held item is the submitter's own proposal, never
+#: a key to a file some other row shows — a remote submission is not
+#: checked on its way in (its files take the submitter household's names,
+#: ``SpaceMediaNamer``), so its item alone must not open a file another
+#: space's row, a DM or a household album holds.
+_HELD_SOURCE = "space_moderation_queue"
 
 #: The space each :data:`_ACCESS_SOURCES` table's row belongs to (an SQL
 #: expression over the row ``t``); a table not listed is household-level
@@ -204,7 +223,8 @@ _GALLERY_ACCESS_SQL = (
     "SELECT i.filename AS f, i.thumbnail_filename AS th,"
     " CASE WHEN a.space_id IS NOT NULL THEN "
     + _SEAT.format(col="a.space_id")
-    + " WHEN a.audience = 'chosen' THEN i.uploaded_by = me.uid ELSE 1 END AS ok,"
+    + " WHEN a.audience = 'chosen' THEN i.uploaded_by = me.uid"
+    + f" ELSE {_HOUSEHOLD} END AS ok,"
     " (a.space_id IS NULL AND a.audience = 'chosen'"
     " AND i.uploaded_by IS NOT me.uid) AS private"
     " FROM gallery_items i JOIN gallery_albums a ON a.id = i.album_id, me"
@@ -314,6 +334,7 @@ class SqliteMediaReferenceRepo:
             _ME_CTE + _GALLERY_ACCESS_SQL, (*me, basename, basename)
         )
         referenced = allowed = False
+        held = held_ok = False
         for r in rows_to_dicts(rows):
             if r.get("private"):
                 return False  # a private album's file: its uploader only
@@ -321,6 +342,11 @@ class SqliteMediaReferenceRepo:
             allowed = allowed or bool(r.get("ok"))
         pattern = f"%{_like_escape(basename)}%"
         for table, col, shape, access in _ACCESS_SOURCES:
+            if table == _HELD_SOURCE:
+                held, held_ok = await self._held_access(
+                    basename, me, pattern, col, access
+                )
+                continue
             if shape.startswith("json:"):
                 value = f"json_extract(t.{col}, '{shape[5:]}')"
                 guard = f" AND json_valid(t.{col})"
@@ -344,7 +370,26 @@ class SqliteMediaReferenceRepo:
                     allowed = allowed or bool(r.get("ok"))
             if allowed:
                 return True
-        return allowed or not referenced
+        if referenced:
+            return False
+        # Only held items name it: their submitter's — or nobody's yet.
+        return held_ok or not held
+
+    async def _held_access(
+        self, basename: str, me: tuple[str, str], pattern: str, col: str, access: str
+    ) -> tuple[bool, bool]:
+        """``(referenced, allowed)`` over the moderation queue's payloads."""
+        rows = await self._db.fetchall(
+            _ME_CTE + f"SELECT t.{col} AS v, ({access}) AS ok"
+            f" FROM {_HELD_SOURCE} t, me WHERE t.{col} LIKE ? ESCAPE '\\'",
+            (*me, pattern),
+        )
+        referenced = allowed = False
+        for r in rows_to_dicts(rows):
+            if basename in _names_in_payload(r.get("v")):
+                referenced = True
+                allowed = allowed or bool(r.get("ok"))
+        return referenced, allowed
 
     async def confined_to_space(self, basename: str, space_id: str) -> bool:
         """Whether the file *basename* is referenced, and ONLY by content of
