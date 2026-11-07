@@ -181,6 +181,7 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
         #: v_82 — whether this household can hand a page's new files to the
         #: space's host (``None``: always).
         self._files_reach_host: Callable[[str], Awaitable[bool]] | None = None
+        self._moderation: ModerationSubmitter | None = None
 
     def attach_files_reach_host(self, check: Callable[[str], Awaitable[bool]]) -> None:
         """Wire ``check(space_id)``: whether a page's new files can reach
@@ -201,7 +202,6 @@ class SpacePageService(MediaRefGuardedMixin, BusPublisherMixin, ContentAccessMix
             }
         if added and not await self._files_reach_host(space_id):
             raise PageFilesNotShareableError()
-        self._moderation: ModerationSubmitter | None = None
 
     # ── A page's files on a member household (v_82) ──────────────────────
     #
