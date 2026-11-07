@@ -56,6 +56,7 @@ from typing import Protocol, runtime_checkable
 import orjson
 
 from ..db import AsyncDatabase
+from ..domain.media_constraints import SPACE_DIRECT_MEDIA_PREFIX
 from ..media.cleanup import media_basename
 from .base import rows_to_dicts
 
@@ -97,10 +98,19 @@ _JSON_FIELD_COLUMNS: tuple[tuple[str, str, str], ...] = (
 )
 
 
+#: A moderation queue item still to publish its files: pending, or
+#: approved inside its review window — the approve claims the item before
+#: its apply, and an apply that stopped part-way resumes only while the
+#: window is open (``SpaceModerationService._approve``).
+_HELD_LIVE = (
+    "(status = 'pending' OR (status = 'approved'"
+    " AND datetime(expires_at) > datetime('now')))"
+)
+
 #: ``(table, text column, live-row filter)`` scanned for every
 #: ``api/media/<file>`` inside a free-form JSON payload.
 _PAYLOAD_SCANS: tuple[tuple[str, str, str], ...] = (
-    ("space_moderation_queue", "payload_json", "status='pending'"),
+    ("space_moderation_queue", "payload_json", _HELD_LIVE),
 )
 _MEDIA_REF_RE = re.compile(r"api/media/([A-Za-z0-9._-]+)")
 
@@ -182,23 +192,26 @@ _ACCESS_SOURCES: tuple[tuple[str, str, str, str], ...] = (
     ),
     ("task_attachments", "url", "one", "t.uploaded_by = me.uid"),
     ("post_drafts", "media_url", "one", "t.username = me.uname"),
-    # The submitter's own held item — pending, or ``approved``: the approve
+    # The submitter's own held item (:data:`_HELD_LIVE` — the approve
     # claims the item BEFORE its apply re-checks the files for the
-    # submitter. A fallback only (:data:`_HELD_SOURCE`).
+    # submitter). A fallback with its own rules: :data:`_HELD_SOURCE`.
     (
         "space_moderation_queue",
         "payload_json",
         "payload",
-        "t.status IN ('pending', 'approved') AND t.submitted_by = me.uid",
+        f"t.submitted_by = me.uid AND {_HELD_LIVE}",
     ),
 )
 
 #: The :data:`_ACCESS_SOURCES` table that counts only when no other row
-#: references the file: a held item is the submitter's own proposal, never
-#: a key to a file some other row shows — a remote submission is not
-#: checked on its way in (its files take the submitter household's names,
-#: ``SpaceMediaNamer``), so its item alone must not open a file another
-#: space's row, a DM or a household album holds.
+#: references the file, and only when EVERY held item naming it is the
+#: writer's own (one of them live). A held item is its submitter's
+#: proposal, never a key: not to a file some other row shows, not to a
+#: file another submitter's item names. A remote submission is not checked
+#: on its way in — its files take the submitter household's ``sd-`` names
+#: (``SpaceMediaNamer``) — so a remote submitter's item opens only such a
+#: name, never an unreferenced file of ours (an orphan, or a fresh upload
+#: not posted yet).
 _HELD_SOURCE = "space_moderation_queue"
 
 #: The space each :data:`_ACCESS_SOURCES` table's row belongs to (an SQL
@@ -380,16 +393,21 @@ class SqliteMediaReferenceRepo:
     ) -> tuple[bool, bool]:
         """``(referenced, allowed)`` over the moderation queue's payloads."""
         rows = await self._db.fetchall(
-            _ME_CTE + f"SELECT t.{col} AS v, ({access}) AS ok"
+            _ME_CTE + f"SELECT t.{col} AS v, ({access}) AS ok,"
+            " t.submitted_by = me.uid AS mine, me.uname IS NOT NULL AS local"
             f" FROM {_HELD_SOURCE} t, me WHERE t.{col} LIKE ? ESCAPE '\\'",
             (*me, pattern),
         )
         referenced = allowed = False
+        everyone_mine = local = True
         for r in rows_to_dicts(rows):
             if basename in _names_in_payload(r.get("v")):
                 referenced = True
                 allowed = allowed or bool(r.get("ok"))
-        return referenced, allowed
+                everyone_mine = everyone_mine and bool(r.get("mine"))
+                local = bool(r.get("local"))
+        own_copy = local or basename.startswith(SPACE_DIRECT_MEDIA_PREFIX)
+        return referenced, allowed and everyone_mine and own_copy
 
     async def confined_to_space(self, basename: str, space_id: str) -> bool:
         """Whether the file *basename* is referenced, and ONLY by content of

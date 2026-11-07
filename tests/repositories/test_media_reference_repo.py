@@ -384,7 +384,14 @@ async def test_own_moment_highlight_draft_and_pending_item(db):
         assert not await repo.may_reference(name, "u3")
 
 
-async def _queue_item(db, item_id: str, status: str, name: str, by: str = "u1"):
+async def _queue_item(
+    db,
+    item_id: str,
+    status: str,
+    name: str,
+    by: str = "u1",
+    expires: str = "2099-01-01T00:00:00+00:00",
+):
     await db.enqueue(
         "INSERT OR IGNORE INTO spaces(id, name, owner_instance_id, owner_username,"
         " identity_public_key) VALUES('sp', 'S', 'i', 'ann', ?)",
@@ -393,8 +400,8 @@ async def _queue_item(db, item_id: str, status: str, name: str, by: str = "u1"):
     await db.enqueue(
         "INSERT INTO space_moderation_queue(id, space_id, feature, action,"
         " submitted_by, payload_json, expires_at, status)"
-        " VALUES(?, 'sp', 'calendar', 'create', ?, ?, '2099-01-01', ?)",
-        (item_id, by, f'{{"cover_url": "api/media/{name}"}}', status),
+        " VALUES(?, 'sp', 'calendar', 'create', ?, ?, ?, ?)",
+        (item_id, by, f'{{"cover_url": "api/media/{name}"}}', expires, status),
     )
 
 
@@ -441,6 +448,60 @@ async def test_an_own_item_never_opens_a_file_another_row_closes(db, status):
     repo = SqliteMediaReferenceRepo(db)
     assert not await repo.may_reference("other.webp", "u1")
     assert await repo.may_reference("other.webp", "u2")
+
+
+_SD = "sd-" + "a" * 40 + ".webp"  # a space file as a household delivered it
+
+
+@pytest.mark.parametrize("status", ["pending", "approved"])
+async def test_a_remote_submitter_never_opens_an_orphan_file(db, status):
+    """A remote submission's files always take the submitter household's
+    ``sd-`` names here (``SpaceMediaNamer``). A remote item naming any other
+    file nothing references — an orphan, or a fresh upload of ours not
+    posted yet — must not hand it over; its own delivered copy still
+    releases. A local submitter's own fresh upload is theirs."""
+    await _people(db)
+    await _queue_item(db, "q1", status, "orphan.webp", by="u-remote")
+    await _queue_item(db, "q2", status, _SD, by="u-remote")
+    await _queue_item(db, "q3", status, "fresh.webp", by="u1")
+    repo = SqliteMediaReferenceRepo(db)
+    assert not await repo.may_reference("orphan.webp", "u-remote")
+    assert await repo.may_reference(_SD, "u-remote")
+    assert await repo.may_reference("fresh.webp", "u1")
+
+
+@pytest.mark.parametrize("theirs", ["pending", "approved", "rejected"])
+async def test_an_own_item_never_piggybacks_on_someone_elses(db, theirs):
+    """Naming a file in one's own item does not open it while another
+    submitter's item names it too."""
+    await _people(db)
+    await _queue_item(db, "q-victim", theirs, "victim.webp", by="u1")
+    await _queue_item(db, "q-attacker", "pending", "victim.webp", by="u3")
+    repo = SqliteMediaReferenceRepo(db)
+    assert not await repo.may_reference("victim.webp", "u3")
+
+
+async def test_an_approved_item_past_its_window_is_settled(db):
+    """An approved item can resume only inside its review window; after it
+    the item no longer counts — for its submitter or the sweep."""
+    await _people(db)
+    await _queue_item(
+        db, "q1", "approved", "late.webp", expires="2000-01-01T00:00:00+00:00"
+    )
+    repo = SqliteMediaReferenceRepo(db)
+    assert not await repo.is_referenced("late.webp")
+    assert "late.webp" not in await repo.referenced_basenames()
+
+
+async def test_an_approved_items_files_survive_the_sweep_until_it_lands(db):
+    """The approve claims the item before its apply: an apply that stopped
+    part-way (resumable while the window is open) keeps its cover through
+    an orphan sweep — the queue item is still its only reference."""
+    await _people(db)
+    await _queue_item(db, "q1", "approved", "resume.webp")
+    repo = SqliteMediaReferenceRepo(db)
+    assert await repo.is_referenced("resume.webp")
+    assert "resume.webp" in await repo.referenced_basenames()
 
 
 async def test_household_files_are_never_a_remote_members(db):

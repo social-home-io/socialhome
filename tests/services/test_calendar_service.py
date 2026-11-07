@@ -2898,6 +2898,11 @@ async def test_a_reviewed_events_cover_is_released_with_the_real_guard(env):
     no longer counted as theirs. Create and edit both release."""
     svc, mod, _ev, now = await _moderated_calendar(env)
     svc.attach_media_guard(MediaRefGuard(SqliteMediaReferenceRepo(env.db)))
+    # A local submitter: one of this household's people (a ``users`` row).
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?, ?, ?)",
+        ("mia", "u-member", "Mia"),
+    )
     with pytest.raises(ContentQueuedForReview) as exc:
         await svc.create_event(
             space_id="cal-ao",
@@ -3588,6 +3593,11 @@ async def test_a_released_cover_reaches_every_kind_of_member_household(env):
     descriptor to a member that joined by link and reads through the GFS."""
     svc, mod, _ev, now = await _moderated_calendar(env)
     svc.attach_media_guard(MediaRefGuard(SqliteMediaReferenceRepo(env.db)))
+    # A local submitter: one of this household's people (a ``users`` row).
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?, ?, ?)",
+        ("mia", "u-member", "Mia"),
+    )
     for iid in ("self-instance", "peer-b", "peer-c"):
         await env.db.enqueue(
             "INSERT INTO space_instances(space_id, instance_id) VALUES(?, ?)",

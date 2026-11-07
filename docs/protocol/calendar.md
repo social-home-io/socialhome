@@ -436,9 +436,13 @@ its GFS media cache ([media](./media.md#space-media-via-the-gfs-cache-v_80)):
   household's name (`sd-…`). Once approved, the host's own save sends it
   on as above. That save re-checks that the submitter may name the file
   (`services/media_ref_guard.py`): the held item counts as theirs while it
-  is pending and while it is being released, but only when no other row
-  names the file — a submission naming another space's file, a household
-  photo or an album picture is still refused.
+  is pending and while it is being released (approved, inside its review
+  window), but only when no other row and no other person's item names the
+  file, and for a submitter from another household only for the `sd-` copy
+  their household delivered — a submission naming another space's file, a
+  household photo, an album picture or an unreferenced file of the host's
+  is still refused. Until then the held item keeps the file out of the
+  orphan sweep.
 - **Catch-up** — a household's first full §25.6 stream also queues the
   cover of every streamed event (incremental re-syncs ship no media).
 - The receiver accepts the file only when the event it is correlated to

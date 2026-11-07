@@ -301,6 +301,11 @@ async def test_a_reviewed_pages_cover_and_pictures_are_released(env):
     longer counted as theirs."""
     mod = await _moderated(env)
     env.svc.attach_media_guard(MediaRefGuard(SqliteMediaReferenceRepo(env.db)))
+    # A local submitter: one of this household's people (a ``users`` row).
+    await env.db.enqueue(
+        "INSERT INTO users(username, user_id, display_name) VALUES(?, ?, ?)",
+        ("mia", "u-member", "Mia"),
+    )
     with pytest.raises(ContentQueuedForReview) as exc:
         await env.svc.create(
             "sp-a",

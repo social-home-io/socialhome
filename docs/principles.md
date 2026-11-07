@@ -1110,9 +1110,12 @@ one row that does is theirs to see. A private gallery album's file only
 its uploader may name (privacy follows the upload, gallery D7). A
 household's own rows (its feed, personal calendar, pages and albums) open
 a file to its own people only, never to a remote space member. A reviewed
-item names files for its submitter alone, and only files no other row
-references (their own upload, or the copy their household delivered),
-so the item also counts while its approval publishes it. One guard
+item opens a file for its submitter alone, and only when no other row and
+no other person's item names it: their own fresh upload, or — for someone
+from another household — the copy their household delivered (an `sd-`
+name), never an unreferenced file of ours. It counts while pending and
+while its approval publishes it (approved, inside its review window).
+One guard
 checks it at every local write sink (`services/media_ref_guard.py`); a
 refusal answers like a malformed reference, so it tells nobody that a
 file exists.
