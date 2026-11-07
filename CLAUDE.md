@@ -180,10 +180,12 @@ PR-only and verify-before-claiming gates still hold for anything that lands.
   container). Every upload, received file and bundled asset is converted
   — `media/image_processor.py`, `media/video_processor.py`,
   `media/audio_processor.py` are the converters; never store, ship or
-  bundle a PNG / JPEG / HEIC / MP4 as-is. The one standing exception is
-  the app install icons (`client/public/assets/icon-*.png` — iOS and the
-  install prompt need PNG). Any other format needs the owner's sign-off,
-  stated in the PR.
+  bundle a PNG / JPEG / HEIC / MP4 as-is. Icons follow the same rule; the
+  one exception is purely for compatibility: where a platform only takes
+  PNG (the app install icons `client/public/assets/icon-*.png` for iOS and
+  the install prompt) a PNG copy is kept for that use alone, and every
+  other use of the icon is WebP. Any other format needs the owner's
+  sign-off, stated in the PR.
 
 ### Frontend (SPA) & ingress
 
