@@ -569,7 +569,9 @@ async def test_a_member_pull_is_anonymous_and_returns_the_wants(env):
             public_key=_base._GFS_KP.public_key.hex(),
         )
     )
-    svc = GfsConnectionService(repo, http_client=authed, publish_client=anon)
+    pub = _PullSession()
+    svc = GfsConnectionService(repo, http_client=authed, publish_client=pub)
+    svc.attach_member_session(anon)
     svc._own_instance_id = "me"
     svc._own_signing_key = b"s" * 32
     conn = await repo.get("g1")
@@ -581,8 +583,9 @@ async def test_a_member_pull_is_anonymous_and_returns_the_wants(env):
     url, sent, headers = anon.posts[0]
     assert url == "https://g1.example/gfs/media/member-pull"
     assert sent == body
-    # The cookie-less session only, and nothing names this household.
-    assert authed.posts == []
+    # The member session only (no keep-alive, no cookies — never shared with
+    # the publish or the authenticated session), and nothing names us.
+    assert authed.posts == [] and pub.posts == []
     assert not any(h.lower().startswith("x-sh") for h in headers)
 
 
@@ -595,19 +598,30 @@ async def test_member_pull_outcomes(env):
         ({"status": 200, "body": {}}, (200, [])),
         ({"raise_on": "POST"}, (0, [])),
     ):
-        svc = await _svc(env, _PullSession(**kw))
+        session = _PullSession(**kw)
+        svc = await _svc(env, session)
+        svc.attach_member_session(session)
         got = await svc.pull_space_media_wants(await env[1].get("g1"), {}, timeout_s=5)
         assert got == want, kw
+    # No member session, or a server this household is not registered on:
+    # nothing is sent.
     svc = GfsConnectionService(env[1], http_client=None, publish_client=None)
-    assert await svc.pull_space_media_wants(
-        await env[1].get("g1"), {}, timeout_s=5
-    ) == (0, [])
+    conn = await env[1].get("g1")
+    assert await svc.pull_space_media_wants(conn, {}, timeout_s=5) == (0, [])
+    session = _PullSession(status=200, body={"wants": []})
+    svc.attach_member_session(session)
+    unregistered = replace(conn, registered=False)
+    assert await svc.pull_space_media_wants(unregistered, {}, timeout_s=5) == (0, [])
+    kw = {"space_id": "s", "epoch": 1, "writer_seed": b"w" * 32, "claim": "c" * 32}
+    assert await svc.serve_space_media_as_member(unregistered, "t", b"x", **kw) is None
+    assert session.posts == [] and session.puts == []
 
 
 async def test_a_member_serve_is_signed_by_the_writer_key_never_the_household(env):
     writer = b"w" * 32
     claim = "c" * 32
     authed, anon = _MediaSession(put_status=200), _MediaSession(put_status=200)
+    pub = _MediaSession(put_status=200)
     _db, repo = env
     await repo.save(
         _base._make_conn(
@@ -616,7 +630,8 @@ async def test_a_member_serve_is_signed_by_the_writer_key_never_the_household(en
             public_key=_base._GFS_KP.public_key.hex(),
         )
     )
-    svc = GfsConnectionService(repo, http_client=authed, publish_client=anon)
+    svc = GfsConnectionService(repo, http_client=authed, publish_client=pub)
+    svc.attach_member_session(anon)
     svc._own_instance_id = "me"
     svc._own_signing_key = b"s" * 32
     conn = await repo.get("g1")
@@ -660,7 +675,8 @@ async def test_a_member_serve_is_signed_by_the_writer_key_never_the_household(en
         writer_sig=headers["X-SH-Writer-Sig"],
         suite="ed25519",
     )
-    # Never the authenticated (identified) session.
+    # Never the authenticated (identified) session, nor the publish one.
     assert authed.puts == [] and authed.posts == []
+    assert pub.puts == [] and pub.posts == []
     anon.raise_on = "PUT"
     assert await svc.serve_space_media_as_member(conn, ticket, b"c", **kw) == 0

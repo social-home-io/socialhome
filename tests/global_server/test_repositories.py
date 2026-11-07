@@ -2045,7 +2045,10 @@ async def test_member_wants_release_counts_an_attempt(gfs_db):
             "space", "s1", now=150, hold_s=10, max_attempts=2, claim_hash="h"
         )
         assert got is not None and got.attempts == n
-        await repo.release("t1")
+        # A stale or foreign claim never releases it.
+        assert not await repo.release("t1", claim_hash="other")
+        assert not await repo.release("t1", claim_hash="")
+        assert await repo.release("t1", claim_hash="h")
         assert not await repo.claimed("t1", now=150, claim_hash="h")
     # Two declines: never offered again.
     assert (
@@ -2059,14 +2062,17 @@ async def test_member_wants_expire_open_scopes_and_prune(gfs_db):
     repo = SqliteGfsSpaceMediaMemberWantRepo(gfs_db)
     await repo.post(_mwant("t1", expires=200))
     await repo.post(_mwant("t2", scope_id="s2", expires=300))
-    assert await repo.open_scopes(now=150) == {("space", "s1"), ("space", "s2")}
-    assert await repo.open_scopes(now=250) == {("space", "s2")}
+    assert await repo.open_scopes(now=150, max_attempts=3) == {
+        ("space", "s1"),
+        ("space", "s2"),
+    }
+    assert await repo.open_scopes(now=250, max_attempts=3) == {("space", "s2")}
     # A claimed want is not open until its claim runs out.
     await repo.claim_next(
         "space", "s2", now=250, hold_s=10, max_attempts=3, claim_hash="h"
     )
-    assert await repo.open_scopes(now=255) == set()
-    assert await repo.open_scopes(now=260) == {("space", "s2")}
+    assert await repo.open_scopes(now=255, max_attempts=3) == set()
+    assert await repo.open_scopes(now=260, max_attempts=3) == {("space", "s2")}
     # Past its session: never offered, then pruned.
     assert (
         await repo.claim_next(
@@ -2075,5 +2081,17 @@ async def test_member_wants_expire_open_scopes_and_prune(gfs_db):
     ) is None
     assert await repo.prune(now=250) == 1
     await repo.remove("t2")
-    assert await repo.open_scopes(now=0) == set()
+    assert await repo.open_scopes(now=0, max_attempts=3) == set()
     assert not await repo.claimed("t2", now=0, claim_hash="h")
+
+
+async def test_member_wants_out_of_attempts_are_not_open(gfs_db):
+    """Review L1: a want past its declines wakes no pull."""
+    repo = SqliteGfsSpaceMediaMemberWantRepo(gfs_db)
+    await repo.post(_mwant("t1"))
+    await repo.claim_next(
+        "space", "s1", now=150, hold_s=10, max_attempts=1, claim_hash="h"
+    )
+    assert await repo.release("t1", claim_hash="h")
+    assert await repo.open_scopes(now=150, max_attempts=2) == {("space", "s1")}
+    assert await repo.open_scopes(now=150, max_attempts=1) == set()

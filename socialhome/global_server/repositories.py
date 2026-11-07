@@ -2448,10 +2448,12 @@ class AbstractGfsSpaceMediaMemberWantRepo(Protocol):
         max_attempts: int,
         claim_hash: str,
     ) -> GfsSpaceMediaMemberWant | None: ...
-    async def release(self, ticket: str) -> None: ...
+    async def release(self, ticket: str, *, claim_hash: str) -> bool: ...
     async def claimed(self, ticket: str, *, now: int, claim_hash: str) -> bool: ...
     async def remove(self, ticket: str) -> None: ...
-    async def open_scopes(self, *, now: int) -> set[tuple[str, str]]: ...
+    async def open_scopes(
+        self, *, now: int, max_attempts: int
+    ) -> set[tuple[str, str]]: ...
     async def prune(self, *, now: int) -> int: ...
 
 
@@ -2545,15 +2547,20 @@ class SqliteGfsSpaceMediaMemberWantRepo:
 
         return await self._db.transact(_run)
 
-    async def release(self, ticket: str) -> None:
-        """The member that claimed it declined: offer it again (one attempt
-        more)."""
-        await self._db.enqueue(
+    async def release(self, ticket: str, *, claim_hash: str) -> bool:
+        """The member holding the claim whose secret hashes to *claim_hash*
+        declined: offer it again (one attempt more). Only that claim — a
+        stale claimer's decline never wipes a newer member's claim. Returns
+        whether it was released."""
+        if not claim_hash:
+            return False
+        changed = await self._db.enqueue_rowcount(
             "UPDATE gfs_space_media_member_wants"
             " SET claimed_until = 0, claim_hash = '', attempts = attempts + 1"
-            " WHERE ticket = ?",
-            (ticket,),
+            " WHERE ticket = ? AND claim_hash = ?",
+            (ticket, claim_hash),
         )
+        return changed > 0
 
     async def claimed(self, ticket: str, *, now: int, claim_hash: str) -> bool:
         """Whether the claim whose secret hashes to *claim_hash* is the live
@@ -2576,12 +2583,13 @@ class SqliteGfsSpaceMediaMemberWantRepo:
             "DELETE FROM gfs_space_media_member_wants WHERE ticket = ?", (ticket,)
         )
 
-    async def open_scopes(self, *, now: int) -> set[tuple[str, str]]:
-        """The scopes with a want a pull could claim right now."""
+    async def open_scopes(self, *, now: int, max_attempts: int) -> set[tuple[str, str]]:
+        """The scopes with a want a pull could claim right now (not expired,
+        not claimed, fewer than *max_attempts* declines)."""
         rows = await self._db.fetchall(
             "SELECT DISTINCT scope_kind, scope_id FROM gfs_space_media_member_wants"
-            " WHERE expires_at > ? AND claimed_until <= ?",
-            (now, now),
+            " WHERE expires_at > ? AND claimed_until <= ? AND attempts < ?",
+            (now, now, max_attempts),
         )
         return {(str(r["scope_kind"]), str(r["scope_id"])) for r in rows}
 

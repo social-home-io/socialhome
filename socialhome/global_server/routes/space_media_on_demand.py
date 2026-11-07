@@ -365,7 +365,10 @@ class GfsMediaDeclineView(GfsBaseView):
         raw = body.get("reason")
         reason = raw if raw in (DECLINE_BAD_HINT, DECLINE_BUSY) else DECLINE_NOT_HELD
         if session.member:
-            await svc.member_decline(session, reason)
+            claim = self.request.headers.get(MEMBER_CLAIM_HEADER, "")
+            if not await svc.member_decline(session, reason, claim):
+                # Its claim ran out and another member holds the want now.
+                return web.json_response({"error": "forbidden"}, status=403)
         else:
             svc.decline(session, reason)
         return web.json_response({"declined": True})

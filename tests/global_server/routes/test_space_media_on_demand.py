@@ -1116,6 +1116,13 @@ async def test_an_expired_claim_is_offered_again(gfs, monkeypatch):
         headers=_member_headers(ticket, claim=first["wants"][0]["claim"]),
     )
     assert late.status == 403
+    # …nor does its decline undo the newer member's claim (review M2).
+    late = await gfs.post(
+        f"/gfs/media/serve/{ticket}/decline",
+        json={"reason": "not_held"},
+        headers=_member_headers(ticket, "decline", claim=first["wants"][0]["claim"]),
+    )
+    assert late.status == 403
     ok = await gfs.put(
         f"/gfs/media/serve/{ticket}",
         data=data,
@@ -1153,6 +1160,10 @@ async def test_pullers_per_scope_per_node_are_capped(gfs):
     await asyncio.sleep(0.2)
     resp, _ = await _pull(gfs, net=MEMBER_NET + 1)
     assert resp.status == 503 and resp.headers["Retry-After"]
+    # Review M3: whether a SPACE has pullers here is told only to a
+    # writer-key holder of it — anyone else gets the uniform refusal.
+    resp, _ = await _pull(gfs, _pull_body(seed=os.urandom(32)), net=MEMBER_NET + 2)
+    assert resp.status == 403
     assert (await held)[0].status == 204
 
 

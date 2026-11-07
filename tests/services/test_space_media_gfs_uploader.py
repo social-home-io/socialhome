@@ -1163,6 +1163,15 @@ async def test_authorize_anonymous_is_authority_or_writer_key_never_the_cert(
     u = _uploader(tmp_path, gfs=_Gfs([]), certs=_Certs(writer_key=wk.private_key))
     auth = await u.authorize_anonymous(claim)
     assert auth is not None and auth.kind == AUTH_WRITER_KEY
+    # Seed holder AND writer: the writer key (the larger anonymity set).
+    u = _uploader(
+        tmp_path,
+        gfs=_Gfs([]),
+        seed=kp.private_key,
+        certs=_Certs(writer_key=wk.private_key),
+    )
+    auth = await u.authorize_anonymous(claim)
+    assert auth is not None and auth.kind == AUTH_WRITER_KEY
     ident = generate_identity_keypair()
     u = _uploader(
         tmp_path,

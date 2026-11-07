@@ -828,7 +828,11 @@ to the space's members **anonymously**:
   space's): members are not asked. At most 3 member declines per want.
 
 A space without a writer key pinned for an open epoch (a trusted space
-nobody may follow) has no member fallback: owner only, as before.
+nobody may follow) has no member fallback: owner only, as before. A removed
+member keeps pulling only while its writer key's epoch is still open (the
+same grace as anonymous member publish); hints of later epochs don't open
+for it. A member's re-upload uses the writer key before the space authority
+(the larger anonymity set).
 
 ```mermaid
 sequenceDiagram
@@ -855,9 +859,16 @@ sequenceDiagram
 **What the GFS learns.** "A writer-key holder of space S pulled at this
 time from this address" and "a writer-key holder served blob B". No
 household id, no key, nothing stored about pullers (the claim hash is a
-random value). Residual: IP and timing correlation with the household's
-authenticated socket — the puller starts 30–120 s after boot and uses the
-cookie-less session, but the source address is the same. Members learn
+random value). Pulls and serves ride a session of their own — no
+cookies, no keep-alive (a fresh connection per request) — so the GFS can't
+group one household's pulls for different spaces by connection, nor link
+them to its publishes. **Residual (open, needs an owner decision):** the
+pulls are standing (≤ 4 per household, ~2 a minute each) and name the space
+in clear; from the same source address as the household's authenticated
+socket, a GFS that joins addresses can learn "the household at this address
+is a writer member of these spaces" over time — including members who never
+post. The 30–120 s start jitter does not hide the address. Anonymous member
+publish has the same address link, but only when someone posts. Members learn
 which blob is wanted right now and its locator (they hold the descriptors
 anyway) — never who reads it.
 

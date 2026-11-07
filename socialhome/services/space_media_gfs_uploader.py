@@ -752,13 +752,38 @@ class SpaceMediaGfsUploader:
         self, claim: SpaceMediaClaim
     ) -> SpaceMediaUploadAuth | None:
         """An ANONYMOUS upload authorization for *claim* of a listed space
-        (the member fallback's re-upload): the space authority, else the
-        writer group key — never the writer cert, which names this
+        (the member fallback's re-upload): the writer group key, else the
+        space authority — never the writer cert, which names this
         household's key. ``None`` for a channel scope or when this household
         holds neither (the serve then streams only)."""
         if claim.scope == SCOPE_CHANNEL:
             return None
+        # The writer key first: every writer member holds it, while the
+        # space authority would narrow the set to its seed holders.
+        writer = await self._writer_key_auth(claim)
+        if writer is not None:
+            return writer
         return await self._authorize(claim, identified=False)
+
+    async def _writer_key_auth(
+        self, claim: SpaceMediaClaim
+    ) -> SpaceMediaUploadAuth | None:
+        if self._certs is None:
+            return None
+        epoch = await self._crypto.get_current_epoch(claim.scope_id)
+        if epoch is None:
+            return None
+        writer_seed = await self._certs.own_writer_key(claim.scope_id, epoch)
+        if writer_seed is None:
+            return None
+        msg = claim.writer_signing_bytes(kind=AUTH_WRITER_KEY, epoch=epoch)
+        return SpaceMediaUploadAuth(
+            claim=claim,
+            kind=AUTH_WRITER_KEY,
+            sig=sign_with_writer_key(writer_seed, msg),
+            sig_suite=WRITER_KEY_SUITE_ED25519,
+            epoch=epoch,
+        )
 
     async def _remember(self, conn: GfsConnection, blob_id: str) -> None:
         """Remember *blob_id* as held by *conn* until min(:data:`KEEP_S`,

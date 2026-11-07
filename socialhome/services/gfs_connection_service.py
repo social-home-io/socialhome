@@ -451,6 +451,7 @@ class GfsConnectionService:
         "_listing_proven_at",
         "_listing_seen",
         "_listing_sessions",
+        "_member_client",
         "_member_publish_strict",
         "_member_publish_trusted",
         "_member_servers",
@@ -509,6 +510,11 @@ class GfsConnectionService:
         # anonymous publish and link it back. No fallback to the shared
         # session: without it, nothing is published.
         self._publish_client = publish_client
+        # The member fallback's pulls and serves ride a session of their own
+        # with keep-alive OFF and no cookies: a fresh connection per request,
+        # so the GFS can't group one household's pulls for different spaces
+        # by connection, nor link them to other traffic of this household.
+        self._member_client: aiohttp.ClientSession | None = None
         # Attached lazily after construction (the space repo + identity
         # aren't available at the same wiring step as the GFS-connection
         # repo). When unset, ``publish_space`` falls back to a metadata-
@@ -1025,6 +1031,16 @@ class GfsConnectionService:
         """Provide the cookie-less publish session (``app._on_startup``)."""
         if self._publish_client is None:
             self._publish_client = session
+
+    def attach_member_session(self, session: aiohttp.ClientSession) -> None:
+        """Provide the member fallback's no-keep-alive, cookie-less session
+        (``app._on_startup``)."""
+        if self._member_client is None:
+            self._member_client = session
+
+    def member_client(self) -> aiohttp.ClientSession | None:
+        """The member fallback's session (app cleanup closes it)."""
+        return self._member_client
 
     def publish_client(self) -> aiohttp.ClientSession | None:
         """The cookie-less session ``/gfs/publish`` rides (app cleanup closes it)."""
@@ -3370,32 +3386,27 @@ class GfsConnectionService:
         """``POST /gfs/media/member-pull`` — a member's anonymous pull for a
         want of a listed space (*body*: the writer-key-signed
         :class:`~socialhome.domain.gfs_space_media_on_demand
-        .MemberPullRequest` wire). Over the cookie-less session, nothing
-        names this household. ``(status, raw wants)`` — ``0`` on a refused
-        target or a transport error; the wants (unparsed, the caller
+        .MemberPullRequest` wire). Over the member session (no cookies, no
+        keep-alive: a fresh connection each time), only to a server this
+        household is registered on; nothing names this household.
+        ``(status, raw wants)`` — ``0`` when nothing was sent or on a
+        transport error; the wants (unparsed, the caller
         validates) only on a 200."""
-        if not conn.inbox_url:
+        client = self._member_client
+        if client is None or not conn.inbox_url or not conn.registered:
             return 0, []
         url = f"{conn.inbox_url.rstrip('/')}{MEMBER_PULL_ROUTE}"
         try:
-            async with self.anon_session(conn) as client:
-                if client is None:
-                    return 0, []
-                async with client.post(
-                    url,
-                    json=body,
-                    allow_redirects=False,
-                    timeout=aiohttp.ClientTimeout(total=timeout_s),
-                ) as resp:
-                    status = int(resp.status)
-                    if status != 200:
-                        return status, []
-                    data = await resp.json()
-        except OutboundFetchRefused as exc:
-            log.warning(
-                "space media member pull to %s refused: %s", conn.inbox_url, exc
-            )
-            return 0, []
+            async with client.post(
+                url,
+                json=body,
+                allow_redirects=False,
+                timeout=aiohttp.ClientTimeout(total=timeout_s),
+            ) as resp:
+                status = int(resp.status)
+                if status != 200:
+                    return status, []
+                data = await resp.json()
         except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
             log.info("space media member pull from %s failed: %s", conn.inbox_url, exc)
             return 0, []
@@ -3420,9 +3431,10 @@ class GfsConnectionService:
         *space_id* — anonymously: signed by the space's writer group key of
         *epoch* over the ticket, the operation, the scope and the pull's
         *claim* secret, never by this household's key and never with
-        ``X-SH-Instance``; over the cookie-less session like the pull. The
+        ``X-SH-Instance``; over the member session like the pull. The
         same return contract as :meth:`serve_space_media`."""
-        if not conn.inbox_url:
+        client = self._member_client
+        if client is None or not conn.inbox_url or not conn.registered:
             return None
         base = f"{conn.inbox_url.rstrip('/')}/gfs/media/serve/{ticket}"
         ts = int(time.time())
@@ -3441,34 +3453,26 @@ class GfsConnectionService:
             MEMBER_CLAIM_HEADER: claim,
         }
         try:
-            async with self.anon_session(conn) as client:
-                if client is None:
-                    return None
-                if blob is None:
-                    async with client.post(
-                        f"{base}/decline",
-                        json={"reason": decline_reason},
-                        headers=headers,
-                        allow_redirects=False,
-                        timeout=aiohttp.ClientTimeout(total=15),
-                    ) as resp:
-                        return int(resp.status)
-                headers["Content-Type"] = "application/octet-stream"
-                if upload_auth:
-                    headers[SPACE_MEDIA_AUTH_HEADER] = upload_auth
-                async with client.put(
-                    base,
-                    data=blob,
+            if blob is None:
+                async with client.post(
+                    f"{base}/decline",
+                    json={"reason": decline_reason},
                     headers=headers,
                     allow_redirects=False,
-                    timeout=aiohttp.ClientTimeout(total=SPACE_MEDIA_PUT_TIMEOUT_S),
+                    timeout=aiohttp.ClientTimeout(total=15),
                 ) as resp:
                     return int(resp.status)
-        except OutboundFetchRefused as exc:
-            log.warning(
-                "space media member serve to %s refused: %s", conn.inbox_url, exc
-            )
-            return None
+            headers["Content-Type"] = "application/octet-stream"
+            if upload_auth:
+                headers[SPACE_MEDIA_AUTH_HEADER] = upload_auth
+            async with client.put(
+                base,
+                data=blob,
+                headers=headers,
+                allow_redirects=False,
+                timeout=aiohttp.ClientTimeout(total=SPACE_MEDIA_PUT_TIMEOUT_S),
+            ) as resp:
+                return int(resp.status)
         except aiohttp.ClientConnectorError as exc:
             log.warning(
                 "space media member serve to %s: no connection: %s", conn.inbox_url, exc

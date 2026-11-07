@@ -4170,6 +4170,17 @@ def create_app(config: Config | None = None) -> web.Application:
                 cookie_jar=aiohttp.DummyCookieJar(),
             )
         )
+        # The space media member fallback's anonymous pulls and serves: no
+        # cookies AND no keep-alive — a fresh connection per request, so the
+        # GFS can't group one household's pulls (or link them to its other
+        # anonymous traffic) by connection. Closed in _on_cleanup.
+        gfs_connection_service.attach_member_session(
+            aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=60),
+                cookie_jar=aiohttp.DummyCookieJar(),
+                connector=aiohttp.TCPConnector(force_close=True),
+            )
+        )
         gfs_space_mirror.attach_session(http_session)
         # Seats on a server never re-paired are dropped after 90 days of
         # matching no connection (local only, no request).
@@ -5973,6 +5984,9 @@ def create_app(config: Config | None = None) -> web.Application:
         gfs_publish_session = gfs_connection_service.publish_client()
         if gfs_publish_session is not None:
             await gfs_publish_session.close()
+        gfs_member_session = gfs_connection_service.member_client()
+        if gfs_member_session is not None:
+            await gfs_member_session.close()
         # Wind down any in-flight public-viewer sessions before
         # closing the shared aiohttp client below.
         await highlight_signaling_handler.stop()

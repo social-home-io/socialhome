@@ -613,12 +613,19 @@ class GfsSpaceMediaOnDemand:
         session.decline_reason = reason
         session.declined.set()
 
-    async def member_decline(self, session: MediaSession, reason: str) -> None:
-        """The member that claimed *session*'s want can't serve: the want is
-        offered again (one attempt more) and the session counts it."""
-        if self._member_wants is not None:
-            await self._member_wants.release(session.ticket)
+    async def member_decline(
+        self, session: MediaSession, reason: str, claim: str
+    ) -> bool:
+        """The member holding *claim* on *session*'s want can't serve: the
+        want is offered again (one attempt more) and the session counts it.
+        ``False`` (nothing changes) when *claim* is no longer the want's
+        claim — a stale claimer can't undo a newer member's claim."""
+        if self._member_wants is None or not await self._member_wants.release(
+            session.ticket, claim_hash=claim_digest(claim)
+        ):
+            return False
         self.decline(session, reason)
+        return True
 
     async def authorize_member(
         self,
@@ -802,8 +809,10 @@ class GfsSpaceMediaOnDemand:
         or :data:`PULL_NONE` (nothing within the hold), :data:`PULL_FULL`
         (no slot) or :data:`PULL_FORBIDDEN` (any refusal, uniform)."""
         scope = (req.scope, req.scope_id)
-        if not self._pull_room(scope, prefix_key):
-            # A cheap shed before any signature work.
+        if not self._node_room(prefix_key):
+            # A cheap shed before any signature work — node and prefix only:
+            # whether a SPACE has pullers here is told only to a writer-key
+            # holder of it.
             return PULL_FULL
         if not await self._authorize_pull(req):
             return PULL_FORBIDDEN
@@ -833,12 +842,16 @@ class GfsSpaceMediaOnDemand:
         finally:
             self._leave_pull(scope, prefix_key)
 
-    def _pull_room(self, scope: tuple[str, str], prefix_key: str) -> bool:
-        cfg = self._cfg
+    def _node_room(self, prefix_key: str) -> bool:
         return (
-            self._pullers_total < cfg.member_pullers_max
-            and self._pullers.get(scope, 0) < cfg.member_pullers_per_scope
+            self._pullers_total < self._cfg.member_pullers_max
             and self._prefix_pulls.get(prefix_key, 0) < MAX_PULLS_PER_PREFIX
+        )
+
+    def _pull_room(self, scope: tuple[str, str], prefix_key: str) -> bool:
+        return (
+            self._node_room(prefix_key)
+            and self._pullers.get(scope, 0) < self._cfg.member_pullers_per_scope
         )
 
     def _leave_pull(self, scope: tuple[str, str], prefix_key: str) -> None:
@@ -945,7 +958,9 @@ class GfsSpaceMediaOnDemand:
             if self._member_wants is None:  # pragma: no cover - never started
                 return
             try:
-                scopes = await self._member_wants.open_scopes(now=int(time.time()))
+                scopes = await self._member_wants.open_scopes(
+                    now=int(time.time()), max_attempts=MAX_MEMBER_ATTEMPTS
+                )
             except Exception:  # pragma: no cover - defensive
                 log.warning("space media member wants: lookup failed", exc_info=True)
                 continue
