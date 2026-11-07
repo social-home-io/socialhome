@@ -1270,7 +1270,9 @@ from __future__ import annotations
 #:   (``PUT /gfs/media/{blob_id}``, the scope only in the signed claim); the
 #:   reader fetches ``GET /gfs/media/{blob_id}`` over its cookie-less GFS
 #:   session, checks the address with the scope id it knows, decrypts and
-#:   stores the file write-once (``space_media_refs``, migration 0142, each
+#:   stores the file write-once under ITS OWN name for it (``sg-`` hash of
+#:   space, delivering household and file name; the item's reference is
+#:   rewritten) (``space_media_refs``, migration 0142, each
 #:   row bound to the item that introduced the file). The §25.6 ``posts`` /
 #:   ``calendar`` / ``gallery`` records streamed to such a member carry the
 #:   same descriptor (sync line 80). No ``SPACE_MEDIA_BLOB`` push is queued

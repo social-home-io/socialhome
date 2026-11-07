@@ -1311,15 +1311,23 @@ v_80). The author's household seals each file once
   only the derived key leaves `SpaceContentEncryption.media_key` — never the
   content key itself.
 - **Deterministic nonce.** `nonce = HKDF-SHA256(media_key, salt=None,
-  info=b"sh-space-media:v1|nonce|" ‖ filename ‖ "|" ‖ hex(SHA-256(file)),
-  length=12)`. The same file sealed again under the same key is the
-  byte-identical blob (the same `blob_id`), so a re-upload after the cache
-  dropped it matches the descriptor readers already hold, and the sender
-  keeps no sealed copy. Two different files never share a nonce under one
-  key: the content hash is in the derivation.
+  info=b"sh-space-media:v1|nonce|" ‖ item_id ‖ "|" ‖ origin ‖ "|" ‖
+  filename ‖ "|" ‖ hex(SHA-256(file)), length=12)`. The same file sealed
+  again for the same item by the same household is the byte-identical blob
+  (the same `blob_id`), so a re-upload after the cache dropped it matches
+  the descriptor readers already hold, and the sender keeps no sealed copy.
+  Every AAD input is in the derivation, so one nonce never meets two AADs
+  (or two files) under one key — no GCM nonce reuse.
 - **AAD.** `b"socialhome/space-media/v1|" ‖ suite ‖ "|" ‖ space_id ‖ "|" ‖
-  epoch ‖ "|" ‖ filename` — a blob can't be moved onto another space, epoch
-  or file.
+  epoch ‖ "|" ‖ item_id ‖ "|" ‖ origin ‖ "|" ‖ filename` — `item_id` the item
+  that shows the file, `origin` the household that sealed it (the one a
+  reader authenticates as delivering the item). A blob can't be moved onto
+  another space, epoch, item, household or file. Every member holds the key,
+  so the AAD does not stop a member sealing its own bytes: what stops it
+  taking over another item's picture is the reader's naming — a fetched file
+  lands under `gfs_space_media_name(space, delivering household, filename)`
+  (`sg-…`), never under the bare file name
+  ([`protocol/media.md`](protocol/media.md#space-media-via-the-gfs-cache-v_80)).
 - **Padding.** The moment-media buckets (`moment_public_media.PAD_BUCKETS`,
   4 KB … 8 MiB + 4): plaintext `u32 length ‖ file ‖ zeros`; at most 8 MiB of
   file. Wire: `nonce ‖ ciphertext+tag`.

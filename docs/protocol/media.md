@@ -196,6 +196,13 @@ sending household was sent it for. Both blob types share
   blob before the post, listing or gallery item it belongs to. Such a
   blob is accepted — overwriting is the harm, and the write is
   write-once, so accepting it cannot touch an existing file.
+  **Known residual (tracked follow-up):** the sending household is not
+  bound to the correlated row's author, so a member household that learned
+  a file name (from the post itself) and completes its own copy first — the
+  author's push queued for an offline household, a catch-up — keeps that
+  name for every row that shows it. The GFS cache path doesn't have this
+  (a reader names fetched files itself, below); this path needs the sender
+  bound to the row's author household or the host.
 - **Per-sender assembly.** Part files live under
   `media_dir/.partial/<sha256(from_instance, transfer_id, chunk_count)>/`
   (DM: `transfer_id` = `dm:<message_id>`), so two households' chunks
@@ -340,17 +347,35 @@ still queued at once. The queue is in
 memory and bounded (2048 uploads): a restart or a full queue loses pending
 uploads (WARNING), and the reader then shows the item without that picture.
 
-**Reader** (`SpaceMediaGfsFetcher`). Keeps the item's entries as
-`space_media_refs` rows ([`database.md`](../database.md)), **bound to the
-item that introduced the file** (and the household that delivered it) and
-written once: a descriptor of an already described file from another item
-or space is refused with a WARNING, never re-points it. Residual: the first
-item to describe a file wins — the same rule as the first complete
-`SPACE_MEDIA_BLOB` copy above. It prefetches pictures on arrival (3 at a
-time, ≤ 200 waiting and ≤ 50 per space; a prefetch that finds the blob on
+**Reader** (`SpaceMediaGfsFetcher`). **The file's name is the
+reader's.** Any member can name any file name it has seen, and every member
+holds the space key, so a bare file name proves nothing. Before the item is
+saved, each file it shows and describes is renamed to this household's own
+name for it, `gfs_space_media_name(space, delivering household, filename)`
+(`sg-` + a hash), and the item's reference is rewritten to it — the
+delivering household being the one the receiver authenticated (the
+envelope's sender; for followers, the author household the signed inner
+proves; for §25.6, the provider), never a descriptor field. A member naming
+another item's file in its own item therefore only ever gets its own copy,
+in either order; it can never take over the picture another item shows.
+`sg-` is a reserved prefix: no received item and no `SPACE_MEDIA_BLOB` may
+name it. The blob's AAD names the item and the delivering household, and
+the fetch opens it with the row's values. A file the same item already has
+here keeps the name it has (an update that re-sends the URL without a
+descriptor, a second household re-describing it). The entries are kept as
+`space_media_refs` rows ([`database.md`](../database.md)) once the item is
+stored, written once — only the same item moves its row to a newer epoch
+(its file sealed again after a key rotation). A §25.6 record's descriptor
+counts only when the record creates the item here or comes from the host's
+stream: a member household streaming an item held here can't attach its
+blobs to it. A link card's thumbnail is cached per URL and backs posts in
+other spaces and the feed; those references don't keep it from a space's
+readers (`confined_to_space`). It prefetches pictures on arrival (3 at a
+time, ≤ 200 waiting and ≤ 20 per space; a prefetch that finds the blob on
 no GFS — the item usually outruns the author's upload — tries again after
-10 s and 60 s); anything else — or a picture past the backlog — is fetched
-when first viewed: `GET /api/media/{filename}` checks who may open the file
+10 s and 60 s, unless the space's last 5 prefetches all found nothing:
+then it tries once until one lands); anything else — or a picture past the
+backlog — is fetched when first viewed: `GET /api/media/{local_name}` checks who may open the file
 first, then asks the fetcher; concurrent viewers share one fetch, each waits
 at most 20 s, and a file no GFS held is not asked for again on a view for
 5 minutes. At most 6 fetches run at once. A fetch tries this household's
@@ -362,7 +387,7 @@ fetched: `GET /gfs/media/{blob_id}` (anonymous), bounded by the
 descriptor's `size`, checks that the blob sits
 at its scope-bound address for the scope id this household knows,
 decrypts with the epoch's media key and writes the file write-once under
-its local name (the `SPACE_MEDIA_BLOB` rules above). An unknown suite, a
+its `sg-` name. An unknown suite, a
 blob not at its address (or a channel scope with no channel id known here)
 or a failed decrypt is refused with a WARNING and writes nothing.
 
